@@ -1,0 +1,763 @@
+/**
+ * Vast.ai GPU Provider Client
+ *
+ * Supports two Vast.ai resource types:
+ *   1. **On-demand instances** — raw GPU rentals via /instances/
+ *   2. **Serverless endpoints** — vLLM endptjobs via /endptjobs/
+ *
+ * listInstances() returns both, so the cost monitor catches any
+ * running/rented resource that isn't tracked by the autoscaler.
+ *
+ * Optimizations over naive usage:
+ *   - **stop** pauses (preserves data/GPU priority) instead of destroying
+ *   - **reboot** uses dedicated API to restart without losing GPU priority
+ *   - **GET /instances/{id}/** for single-instance lookup (fallback to list)
+ *   - **template_hash_id** for pre-configured fast boot
+ *   - **cancel_unavail** for fail-fast when GPU unavailable
+ *   - **Exponential backoff** on endpoint polling
+ *   - **takeSnapshot** to capture container state for near-instant future boots
+ */
+
+import type { GpuInstance, InstanceSpec, ProviderCredentials } from './types';
+import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
+import type { AbstractGpuProviderOptions } from './abstract-provider';
+
+const VAST_API_BASE = 'https://console.vast.ai/api/v0';
+
+// ── Polling constants ─────────────────────────────────────────────────────────
+const POLL_BASE_MS = 3_000;
+const POLL_GROWTH = 1.5;
+const POLL_MAX_MS = 30_000;
+const POLL_TOTAL_MAX_MS = 120_000;
+
+// ── Rate limiting ────────────────────────────────────────────────────────────
+// Vast.ai limits to ~4.5 req/s. We use a token bucket at 3 req/s to stay safe.
+const RATE_LIMIT_INTERVAL_MS = 334; // ~3 req/s
+const RATE_LIMIT_429_RETRY_MS = 2_000;
+const RATE_LIMIT_429_MAX_RETRIES = 3;
+
+/** Check if an IP address is RFC1918 private / loopback / link-local (unreachable from internet). */
+function isPrivateIp(ip: string): boolean {
+  if (!ip) return true;
+  if (ip.startsWith('10.')) return true;
+  if (ip.startsWith('192.168.')) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
+  if (ip.startsWith('127.')) return true;
+  if (ip.startsWith('169.254.')) return true;
+  return false;
+}
+
+/** Normalize short GPU type names (e.g. 'RTX3090') to Vast.ai search names (e.g. 'RTX 3090') */
+function normalizeGpuNames(gpuTypes: string[]): string[] {
+  return gpuTypes.map((t) => {
+    // Add space before digits if missing (e.g. 'RTX3090' → 'RTX 3090', 'RTXA5000' → 'RTX A5000')
+    return t.replace(/^(RTX)(\d)/, '$1 $2').replace(/^(RTX)(A)/, '$1 $2');
+  });
+}
+
+/** Strip inst- / endpt- prefix to get the raw Vast.ai numeric ID */
+function stripPrefix(id: string): { rawId: string; type: 'instance' | 'endpoint' } {
+  if (id.startsWith('inst-')) return { rawId: id.slice(5), type: 'instance' };
+  if (id.startsWith('endpt-')) return { rawId: id.slice(6), type: 'endpoint' };
+  return { rawId: id, type: 'instance' };
+}
+
+export interface VastClientOptions extends AbstractGpuProviderOptions {}
+
+export class VastClient extends AbstractGpuProvider {
+  readonly providerId = 'vast';
+  readonly bootTimeSecs = 300;
+  private _lastRequestMs = 0;
+  /** IPs of hosts where we recently created instances (cross-call dedup). */
+  private _recentlyUsedIps = new Set<string>();
+
+  constructor(opts?: VastClientOptions) {
+    super(opts);
+  }
+
+  /**
+   * Rate-limited fetch for Vast.ai API.
+   * Enforces minimum interval between requests and retries on 429.
+   */
+  private async _vastFetch(url: string, init?: RequestInit, timeout = TIMEOUTS.read): Promise<Response> {
+    // Enforce minimum interval between requests (~3 req/s)
+    const now = Date.now();
+    const elapsed = now - this._lastRequestMs;
+    if (elapsed < RATE_LIMIT_INTERVAL_MS) {
+      await new Promise((r) => setTimeout(r, RATE_LIMIT_INTERVAL_MS - elapsed));
+    }
+    this._lastRequestMs = Date.now();
+
+    // Fetch with 429 retry
+    for (let attempt = 0; attempt <= RATE_LIMIT_429_MAX_RETRIES; attempt++) {
+      const res = await this.fetchRaw(url, init, timeout);
+      if (res.status !== 429) return res;
+
+      if (attempt < RATE_LIMIT_429_MAX_RETRIES) {
+        const backoff = RATE_LIMIT_429_RETRY_MS * (attempt + 1);
+        this.log.warn(`[vast] 429 rate limited on ${url.replace(VAST_API_BASE, '')}, retry in ${backoff}ms (${attempt + 1}/${RATE_LIMIT_429_MAX_RETRIES})`);
+        await new Promise((r) => setTimeout(r, backoff));
+        this._lastRequestMs = Date.now();
+      }
+    }
+
+    // All retries exhausted — return last 429 response
+    return this.fetchRaw(url, init, timeout);
+  }
+
+  async discoverInstance(
+    credentials: ProviderCredentials,
+    _gpuTypes: string[],
+  ): Promise<GpuInstance | null> {
+    const instances = await this.listInstances(credentials);
+    const running = instances.find(
+      (i) => i.status === 'running' || i.status === 'active',
+    );
+    return running ?? null;
+  }
+
+  async createInstance(
+    spec: InstanceSpec,
+    credentials: ProviderCredentials,
+    userId?: string,
+  ): Promise<GpuInstance> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+
+    // ── 1. Search for cheapest available offer ─────────────────────────────
+    const searchBody: Record<string, unknown> = {
+      limit: 50,
+      type: 'on-demand',
+      rentable: { eq: true },
+      rented: { eq: false },
+      num_gpus: { eq: spec.gpuCount ?? 1 },
+      disk_space: { gte: spec.storageGb ?? 10 },
+      direct_port_count: { gte: 3 },   // Hosts with 3+ open ports have better networking
+      static_ip: { eq: true },          // Stable IP (no NAT, no IP rotation)
+      // Host quality filters — avoid broken hosts (CDI failures, outdated drivers, NAT issues)
+      verified: { eq: true },           // Only hosts that passed Vast.ai health checks
+      reliability2: { gte: 0.9 },       // >90% reliability score
+      inet_down: { gte: 100 },          // Minimum 100 Mb/s download
+      inet_up: { gte: 100 },            // Minimum 100 Mb/s upload
+      order: [['dph_total', 'asc']],
+    };
+
+    // Filter by GPU type if specified
+    if (spec.gpuTypes?.length) {
+      searchBody.gpu_name = { in: normalizeGpuNames(spec.gpuTypes) };
+    }
+
+    let offers = await this._searchOffers(searchBody, headers);
+    let hasDirectPortOffers = offers.length > 0;
+
+    // Fallback: if no machines with direct ports, retry without the filter
+    if (!offers.length) {
+      this.log.warn('[vast] No offers with direct_port_count >= 1 — retrying without direct port filter (SSH fallback will be used)');
+      delete searchBody.direct_port_count;
+      try {
+        offers = await this._searchOffers(searchBody, headers);
+      } catch {
+        // Retry also failed — will throw below
+      }
+      hasDirectPortOffers = false;
+    }
+
+    if (!offers.length) {
+      throw new Error('Nenhum GPU disponível no Vast.ai (todos esgotados)');
+    }
+
+    // ── 2. Build env vars ──────────────────────────────────────────────────
+    const envVars: Record<string, string> = {};
+    if (credentials.hfToken || spec.hfToken) {
+      envVars.HF_TOKEN = (credentials.hfToken || spec.hfToken)!;
+    }
+    // Auto-inject GROQ_API_KEY for ultralight/API-based images
+    if (process.env.GROQ_API_KEY) envVars.GROQ_API_KEY = process.env.GROQ_API_KEY;
+    // Merge explicit env overrides from tier config
+    if (spec.env) Object.assign(envVars, spec.env);
+
+    // ── 3. Try cheapest offers (up to 10 unique hosts) ─────────────────────
+    for (const offer of offers.slice(0, 10)) {
+      const offerId = offer.id;
+      const gpuName = (offer.gpu_name || 'unknown') as string;
+      const pricePerHr = (offer.dph_total || 0) as number;
+
+      const hasDirectPorts = hasDirectPortOffers || (offer.direct_port_count as number ?? 0) >= 1;
+      const createBody: Record<string, unknown> = {
+        client_id: 'me',
+        image: spec.dockerImage || 'marcosremar/parle-s2s:latest',
+        disk: spec.storageGb ?? 10,
+        runtype: 'args',        // preserve Docker ENTRYPOINT/CMD (don't inject SSH)
+        // Vast.ai env dict: env vars as key-value + port mappings as "-p X:X": "1"
+        // Port exposure MUST be in env dict — the separate 'ports' field is ignored
+        env: {
+          TZ: 'UTC',
+          ...envVars,
+          '-p 8000:8000': '1',       // TCP (HTTP app port)
+          '-p 8001:8001/udp': '1',   // UDP (WebRTC media)
+        },
+        ...(hasDirectPorts ? { direct_port_count: 1 } : {}),
+        // Template support: use pre-configured template for faster boot
+        ...(spec.templateHashId ? { template_hash_id: spec.templateHashId } : {}),
+        // Fail-fast: cancel creation immediately if GPU unavailable
+        ...(spec.cancelUnavail !== false ? { cancel_unavail: true } : {}),
+      };
+
+      try {
+        const createRes = await this._vastFetch(`${VAST_API_BASE}/asks/${offerId}/`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify(createBody),
+        }, TIMEOUTS.create);
+
+        if (!createRes.ok) {
+          const errText = await createRes.text().catch(() => '');
+          const unavailable = errText.includes('not available') || errText.includes('already rented');
+          if (unavailable) {
+            this.log.log(`[vast] Offer ${offerId} (${gpuName}) unavailable, trying next...`);
+            continue;
+          }
+          this.log.warn(`[vast] Create on offer ${offerId} failed: HTTP ${createRes.status} ${errText.substring(0, 300)}`);
+          continue;
+        }
+
+        const createData = (await createRes.json()) as Record<string, unknown>;
+        if (!createData.success) {
+          this.log.warn(`[vast] Create on offer ${offerId} returned: ${JSON.stringify(createData).substring(0, 300)}`);
+          continue;
+        }
+
+        const contractId = String(createData.new_contract);
+        const instanceId = `inst-${contractId}`;
+        const instanceName = `parle-autoscale-${Date.now()}`;
+
+        // Poll for IP assignment with exponential backoff
+        const { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers);
+
+        // Track host IP to avoid placing multiple instances on the same host
+        if (ip) this._recentlyUsedIps.add(ip);
+
+        // Persist to settings
+        await this.persistInstance(userId, spec.machineKey || 'vastInstance', {
+          instanceId,
+          instanceName,
+          endpoint,
+          ipAddress: ip,
+          gpuType: gpuName,
+          status: 'creating',
+          pricePerHr,
+        });
+
+        this.log.log(`[vast] Created ${instanceName} (${contractId}) with ${gpuName} @ $${pricePerHr}/h → ${endpoint || '(pending)'}${sshHost ? ` (ssh: ${sshHost}:${sshPort})` : ''}`);
+        return {
+          instanceId,
+          instanceName,
+          endpoint,
+          status: 'creating',
+          gpuType: gpuName,
+          ipAddress: ip,
+          sshHost,
+          sshPort,
+        };
+      } catch (e) {
+        this.log.warn(`[vast] Create on offer ${offerId} error: ${this.errMsg(e)}`);
+      }
+    }
+
+    throw new Error('Nenhum GPU disponível no Vast.ai (criação falhou em todos os offers)');
+  }
+
+  async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    // Vast.ai on-demand instances auto-start on creation.
+    // For stopped instances, restart via PUT with state: 'running'.
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId } = stripPrefix(instanceId);
+
+    const res = await this._vastFetch(`${VAST_API_BASE}/instances/${rawId}/`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ state: 'running' }),
+    }, TIMEOUTS.write);
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      if (body.includes('already') || body.includes('running')) {
+        this.log.log(`[vast] startInstance(${instanceId}): already running`);
+        return;
+      }
+      this.log.warn(`[vast] startInstance(${instanceId}) failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      throw new Error(`Vast start failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
+    }
+  }
+
+  /**
+   * Stop (pause) an instance — preserves data, stops GPU billing.
+   * The instance can be restarted later with startInstance().
+   * For permanent deletion, use deleteInstance().
+   */
+  async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId, type } = stripPrefix(instanceId);
+
+    if (type === 'endpoint') {
+      // Serverless endpoints can only be deleted, not stopped
+      const deleteRes = await this._vastFetch(`${VAST_API_BASE}/endptjobs/${rawId}/`, {
+        method: 'DELETE',
+        headers,
+      }, TIMEOUTS.write);
+      if (!deleteRes.ok) {
+        const body = await deleteRes.text().catch(() => '');
+        this.log.warn(`[vast] stopInstance(${instanceId}) endpoint delete failed: HTTP ${deleteRes.status} ${body.substring(0, 300)}`);
+        throw new Error(`Vast endpoint delete failed for ${instanceId}: HTTP ${deleteRes.status} ${body.substring(0, 300)}`);
+      }
+      return;
+    }
+
+    // On-demand instance — STOP (pause, preserves data, allows restart)
+    const res = await this._vastFetch(`${VAST_API_BASE}/instances/${rawId}/`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ state: 'stopped' }),
+    }, TIMEOUTS.write);
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      // If stop fails (e.g. instance already stopped/destroyed), log but don't throw for idempotency
+      if (body.includes('already') || body.includes('stopped') || body.includes('not found')) {
+        this.log.log(`[vast] stopInstance(${instanceId}): already stopped or not found`);
+        return;
+      }
+      this.log.warn(`[vast] stopInstance(${instanceId}) failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      throw new Error(`Vast stop failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
+    }
+    this.log.log(`[vast] stopInstance(${instanceId}): paused (data preserved, restartable)`);
+  }
+
+  /**
+   * Permanently destroy an instance and all its data.
+   * This is irreversible — use stopInstance() to pause instead.
+   */
+  async deleteInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId, type } = stripPrefix(instanceId);
+
+    const endpoint = type === 'endpoint'
+      ? `${VAST_API_BASE}/endptjobs/${rawId}/`
+      : `${VAST_API_BASE}/instances/${rawId}/`;
+
+    const res = await this._vastFetch(endpoint, {
+      method: 'DELETE',
+      headers,
+    }, TIMEOUTS.write);
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      // 404 = already destroyed (idempotent)
+      if (res.status === 404) {
+        this.log.log(`[vast] deleteInstance(${instanceId}): already gone (404)`);
+        return;
+      }
+      this.log.warn(`[vast] deleteInstance(${instanceId}) failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      throw new Error(`Vast delete failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
+    }
+    this.log.log(`[vast] deleteInstance(${instanceId}): permanently destroyed`);
+  }
+
+  /**
+   * Reboot instance — stops and starts container without losing GPU priority.
+   * Faster than stop+start because the GPU allocation is preserved.
+   */
+  async rebootInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId, type } = stripPrefix(instanceId);
+
+    if (type === 'endpoint') {
+      this.log.warn(`[vast] rebootInstance(${instanceId}): endpoints don't support reboot, skipping`);
+      return;
+    }
+
+    const res = await this._vastFetch(`${VAST_API_BASE}/instances/reboot/${rawId}/`, {
+      method: 'PUT',
+      headers,
+    }, TIMEOUTS.write);
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      this.log.warn(`[vast] rebootInstance(${instanceId}) failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      throw new Error(`Vast reboot failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
+    }
+    this.log.log(`[vast] rebootInstance(${instanceId}): rebooting (GPU priority preserved)`);
+  }
+
+  /**
+   * Take a snapshot of a running container and push it to a registry.
+   * Returns the snapshot/image reference, or null if the API doesn't return one.
+   * Future instances using this snapshot skip Docker image download = near-instant boot.
+   */
+  async takeSnapshot(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId, type } = stripPrefix(instanceId);
+
+    if (type === 'endpoint') {
+      this.log.warn(`[vast] takeSnapshot(${instanceId}): endpoints don't support snapshots`);
+      return null;
+    }
+
+    const res = await this._vastFetch(`${VAST_API_BASE}/instances/command/${rawId}/`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ command: 'take_snapshot' }),
+    }, TIMEOUTS.create);
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      this.log.warn(`[vast] takeSnapshot(${instanceId}) failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      throw new Error(`Vast snapshot failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
+    }
+
+    const data = (await res.json()) as Record<string, unknown>;
+    const resultUrl = (data.result_url as string) ?? null;
+    this.log.log(`[vast] takeSnapshot(${instanceId}): snapshot scheduled${resultUrl ? ` → ${resultUrl}` : ''}`);
+    return resultUrl;
+  }
+
+  async getInstanceStatus(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId, type } = stripPrefix(instanceId);
+
+    if (type === 'endpoint') {
+      // Serverless endpoints
+      try {
+        const res = await this._vastFetch(`${VAST_API_BASE}/endptjobs/${rawId}/`, {
+          headers,
+        }, 8_000);
+        if (!res.ok) {
+          this.log.warn(`[vast] getInstanceStatus(${instanceId}): HTTP ${res.status}`);
+          return null;
+        }
+        const data = (await res.json()) as Record<string, unknown>;
+        const workers = (data.current_workers ?? data.cold_workers ?? 0) as number;
+        return workers > 0 ? 'running' : 'idle';
+      } catch (err) {
+        this.log.warn(`[vast] getInstanceStatus(${instanceId}) failed: ${this.errMsg(err)}`);
+        return null;
+      }
+    }
+
+    // On-demand instance — try GET /instances/{id}/ first, fallback to list
+    try {
+      const detail = await this._fetchInstanceDetail(rawId, headers);
+      return detail?.status ?? null;
+    } catch (err) {
+      this.log.warn(`[vast] getInstanceStatus(${instanceId}) failed: ${this.errMsg(err)}`);
+      return null;
+    }
+  }
+
+  /** Returns the hourly cost for an instance ($/hr), or null if unavailable. */
+  async getInstanceCost(instanceId: string, credentials: ProviderCredentials): Promise<number | null> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId, type } = stripPrefix(instanceId);
+
+    try {
+      if (type === 'endpoint') {
+        const res = await this._vastFetch(`${VAST_API_BASE}/endptjobs/${rawId}/`, { headers }, TIMEOUTS.read);
+        if (!res.ok) return null;
+        const data = (await res.json()) as Record<string, unknown>;
+        return (data.dph_total as number) ?? null;
+      }
+
+      const res = await this._vastFetch(`${VAST_API_BASE}/instances/${rawId}/`, { headers }, TIMEOUTS.read);
+      if (!res.ok) return null;
+      const data = (await res.json()) as Record<string, unknown>;
+      const inst = (data.instances ?? data) as Record<string, unknown>;
+      return (inst.dph_total as number) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Re-resolve endpoint for an existing instance (e.g. to get direct IP after boot). */
+  async resolveInstanceEndpoint(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId } = stripPrefix(instanceId);
+
+    try {
+      const detail = await this._fetchInstanceDetail(rawId, headers);
+      if (detail && !detail.endpoint) {
+        this.log.log(`[vast] resolveEndpoint ${instanceId}: status=${detail.status}, ip=${detail.ip || 'none'}`);
+      }
+      return detail?.endpoint || null;
+    } catch (err) {
+      this.log.warn(`[vast] resolveInstanceEndpoint(${instanceId}) failed: ${this.errMsg(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Lists ALL resources on the Vast.ai account:
+   *   - On-demand GPU instances (/instances/)
+   *   - Serverless endpoints (/endptjobs/)
+   */
+  async listInstances(credentials: ProviderCredentials): Promise<GpuInstance[]> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const results: GpuInstance[] = [];
+
+    // ── 1. On-demand instances ─────────────────────────────────────────────
+    try {
+      const res = await this._vastFetch(`${VAST_API_BASE}/instances/`, {
+        headers,
+      }, TIMEOUTS.read);
+      if (res.ok) {
+        const data = (await res.json()) as Record<string, unknown>;
+        const instances = (data.instances || data) as Array<Record<string, unknown>>;
+        if (Array.isArray(instances)) {
+          for (const inst of instances) {
+            const id = String(inst.id ?? inst.machine_id ?? '');
+            if (!id) continue;
+            const parsed = this._parseInstance(inst);
+            results.push({
+              instanceId: `inst-${id}`,
+              instanceName: inst.label as string | undefined,
+              endpoint: parsed.endpoint,
+              status: parsed.status,
+              gpuType: inst.gpu_name as string | undefined,
+              ipAddress: parsed.ip,
+              sshHost: parsed.sshHost,
+              sshPort: parsed.sshPort,
+            });
+          }
+        }
+      } else {
+        const body = await res.text().catch(() => '');
+        this.log.warn(`[vast] listInstances /instances/ failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      }
+    } catch (err) {
+      this.log.warn(`[vast] listInstances /instances/ error: ${this.errMsg(err)}`);
+    }
+
+    // ── 2. Serverless endpoints ────────────────────────────────────────────
+    try {
+      const res = await this._vastFetch(`${VAST_API_BASE}/endptjobs/`, {
+        headers,
+      }, TIMEOUTS.read);
+      if (res.ok) {
+        const raw = (await res.json()) as unknown;
+        const endpoints = Array.isArray(raw)
+          ? raw
+          : ((raw as Record<string, unknown>).results as unknown[] ??
+             (raw as Record<string, unknown>).endpoints as unknown[] ??
+             []);
+        if (Array.isArray(endpoints)) {
+          for (const ep of endpoints as Array<Record<string, unknown>>) {
+            const id = String(ep.id ?? '');
+            if (!id) continue;
+            // Serverless endpoints that have workers are "running"
+            const workers = (ep.current_workers ?? ep.cold_workers ?? 0) as number;
+            const status = workers > 0 ? 'running' : 'idle';
+            results.push({
+              instanceId: `endpt-${id}`,
+              instanceName: ep.endpoint_name as string | undefined,
+              endpoint: (ep.endpoint_url as string) ?? '',
+              status,
+              gpuType: ep.gpu_name as string | undefined,
+            });
+          }
+        }
+      } else {
+        const body = await res.text().catch(() => '');
+        this.log.warn(`[vast] listInstances /endptjobs/ failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      }
+    } catch (err) {
+      this.log.warn(`[vast] listInstances /endptjobs/ error: ${this.errMsg(err)}`);
+    }
+
+    return results;
+  }
+
+  // ── Private helpers ────────────────────────────────────────────────────────
+
+  /** Poll for endpoint assignment with exponential backoff. */
+  private async _pollForEndpoint(
+    contractId: string,
+    headers: Record<string, string>,
+  ): Promise<{ endpoint: string; ip: string; sshHost?: string; sshPort?: number }> {
+    let endpoint = '';
+    let ip = '';
+    let sshHost: string | undefined;
+    let sshPort: number | undefined;
+    let elapsed = 0;
+    let attempt = 0;
+
+    while (elapsed < POLL_TOTAL_MAX_MS) {
+      const delay = Math.min(POLL_BASE_MS * Math.pow(POLL_GROWTH, attempt), POLL_MAX_MS);
+      await new Promise((r) => setTimeout(r, delay));
+      elapsed += delay;
+      attempt++;
+
+      try {
+        const detail = await this._fetchInstanceDetail(contractId, headers);
+        if (detail) {
+          ip = detail.ip;
+          endpoint = detail.endpoint;
+          sshHost = detail.sshHost;
+          sshPort = detail.sshPort;
+          if (endpoint) {
+            this.log.log(`[vast] Instance ${contractId} got endpoint after ${Math.round(elapsed / 1000)}s: ${endpoint}`);
+            break;
+          }
+        }
+      } catch (err) {
+        this.log.warn(`[vast] Polling instance ${contractId} attempt ${attempt} failed: ${this.errMsg(err)}`);
+      }
+    }
+
+    if (!endpoint) {
+      this.log.warn(`[vast] Instance ${contractId} has no endpoint after ${Math.round(elapsed / 1000)}s of polling (ip=${ip || 'none'})`);
+    }
+
+    return { endpoint, ip, sshHost, sshPort };
+  }
+
+  /**
+   * Search Vast.ai offers with the given body, returning the offers array.
+   * Deduplicates by machine_id so we spread across different physical hosts
+   * (avoids funneling all instances onto the same broken host).
+   */
+  private async _searchOffers(
+    searchBody: Record<string, unknown>,
+    headers: Record<string, string>,
+  ): Promise<Array<Record<string, unknown>>> {
+    const searchRes = await this._vastFetch(`${VAST_API_BASE}/bundles/`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(searchBody),
+    }, TIMEOUTS.write);
+
+    if (!searchRes.ok) {
+      const errText = await searchRes.text().catch(() => '');
+      throw new Error(`[vast] Search offers failed: HTTP ${searchRes.status} ${errText.substring(0, 300)}`);
+    }
+
+    const searchData = (await searchRes.json()) as Record<string, unknown>;
+    const allOffers = (searchData.offers || []) as Array<Record<string, unknown>>;
+
+    // Deduplicate by public_ipaddr — keep cheapest offer per physical host.
+    // A single host can have many machine_ids/host_ids (one per GPU), but
+    // they all share the same public_ipaddr. Spreading across IPs avoids
+    // funneling all instances onto the same broken host.
+    // Also skip hosts where we recently created instances (cross-call dedup).
+    const seenIps = new Set<string>(this._recentlyUsedIps);
+    const deduplicated: Array<Record<string, unknown>> = [];
+    for (const offer of allOffers) {
+      const ip = String(offer.public_ipaddr ?? '');
+      if (ip && seenIps.has(ip)) continue;
+      if (ip) seenIps.add(ip);
+      deduplicated.push(offer);
+    }
+
+    this.log.log(`[vast] Search: ${allOffers.length} offers → ${deduplicated.length} unique hosts (${this._recentlyUsedIps.size} recently used)`);
+    return deduplicated;
+  }
+
+  /** Parse instance data into ip/endpoint/status/ssh info */
+  private _parseInstance(inst: Record<string, unknown>): {
+    ip: string; endpoint: string; status: string;
+    sshHost?: string; sshPort?: number;
+  } {
+    const ip = (inst.public_ipaddr || inst.ssh_host || '') as string;
+    const status = String(inst.actual_status ?? inst.status_msg ?? inst.cur_state ?? 'unknown');
+    const sshHost = (inst.ssh_host ?? inst.public_ipaddr) as string | undefined;
+    const sshPort = inst.ssh_port as number | undefined;
+
+    if (!ip) return { ip: '', endpoint: '', status, sshHost, sshPort };
+
+    // Reject private/unreachable IPs (NAT-only hosts reporting RFC1918 as public)
+    if (isPrivateIp(ip)) {
+      this.log.warn(`[vast] Instance has private IP ${ip} as public_ipaddr — unreachable`);
+      return { ip, endpoint: '', status, sshHost, sshPort };
+    }
+
+    // Parse ports — Vast.ai format: { "8000/tcp": [{ "HostIp": "...", "HostPort": "..." }] }
+    const ports = inst.ports as Record<string, unknown> | undefined;
+    if (ports) {
+      const p8000 = ports['8000/tcp'] as Array<{ HostPort?: string }> | undefined;
+      const hostPort = p8000?.[0]?.HostPort;
+      if (hostPort && Number(hostPort) > 0) {
+        return { ip, endpoint: `http://${ip}:${hostPort}`, status, sshHost, sshPort };
+      }
+    }
+
+    // Fallback: direct port mapping (skip invalid ports like -1 during loading)
+    const directPort = inst.direct_port_start as number | undefined;
+    if (directPort && directPort > 0) {
+      return { ip, endpoint: `http://${ip}:${directPort}`, status, sshHost, sshPort };
+    }
+
+    // No valid port yet — return empty endpoint (instance still loading)
+    if (!ports && (!directPort || directPort <= 0)) {
+      return { ip, endpoint: '', status, sshHost, sshPort };
+    }
+
+    return { ip, endpoint: `http://${ip}:8000`, status, sshHost, sshPort };
+  }
+
+  /**
+   * Fetch detail for a single on-demand instance by raw Vast.ai ID.
+   * Tries GET /instances/{id}/ first (efficient), falls back to list API.
+   */
+  private async _fetchInstanceDetail(
+    rawId: string,
+    headers: Record<string, string>,
+  ): Promise<{ ip: string; endpoint: string; status: string; sshHost?: string; sshPort?: number } | null> {
+    // Try individual instance endpoint first (most efficient)
+    try {
+      const res = await this._vastFetch(`${VAST_API_BASE}/instances/${rawId}/`, {
+        headers,
+      }, 8_000);
+      if (res.ok) {
+        const data = (await res.json()) as Record<string, unknown>;
+        // API returns { instances: {...} } for single instance
+        const inst = (data.instances ?? data) as Record<string, unknown>;
+        if (inst && typeof inst === 'object' && (inst.id || inst.public_ipaddr || inst.actual_status)) {
+          return this._parseInstance(inst);
+        }
+      }
+      // If response is 200 but data is null/empty, fall through to list API
+    } catch {
+      // Individual endpoint failed, fall through to list API
+    }
+
+    // Fallback: list all instances and find the one we need
+    try {
+      const res = await this._vastFetch(`${VAST_API_BASE}/instances/`, {
+        headers,
+      }, 8_000);
+      if (!res.ok) {
+        this.log.warn(`[vast] _fetchInstanceDetail(${rawId}): list fallback HTTP ${res.status}`);
+        return null;
+      }
+
+      const data = (await res.json()) as Record<string, unknown>;
+      const instances = data.instances as Array<Record<string, unknown>> | null;
+      if (!Array.isArray(instances)) return null;
+
+      const inst = instances.find(i => String(i.id) === rawId);
+      if (!inst) return null;
+
+      return this._parseInstance(inst);
+    } catch (err) {
+      this.log.warn(`[vast] _fetchInstanceDetail(${rawId}) failed: ${this.errMsg(err)}`);
+      return null;
+    }
+  }
+}

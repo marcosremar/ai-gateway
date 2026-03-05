@@ -1,0 +1,232 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                      TEST COVERAGE QUICK REFERENCE                           ║
+║                            AI Gateway Package                                 ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+CURRENT STATUS (as of 2025-03-05)
+═══════════════════════════════════════════════════════════════════════════════
+  Total Source Files:      107
+  Test Files:              58
+  Overall Coverage:        ~54%
+  Files Without Tests:     49
+
+CRITICAL GAPS TO FIX (Priority Order)
+═══════════════════════════════════════════════════════════════════════════════
+
+1️⃣  src/autoscaler/engine.ts ★★★
+    Status: NO TESTS (CRITICAL)
+    Impact: Core autoscaler orchestration logic
+    Test File: autoscaler-engine.test.ts (NEEDED)
+    Effort: HIGH (500+ LOC)
+
+2️⃣  src/autoscaler/config-loader.ts ★★★
+    Status: NO TESTS (CRITICAL)
+    Impact: Configuration validation & loading
+    Test File: autoscaler-config-loader.test.ts (NEEDED)
+    Effort: MEDIUM (200+ LOC)
+
+3️⃣  src/autoscaler/state-persistence.ts ★★★
+    Status: NO TESTS (CRITICAL)
+    Impact: State save/restore (data integrity)
+    Test File: autoscaler-state-persistence.test.ts (NEEDED)
+    Effort: HIGH (300+ LOC)
+
+4️⃣  src/benchmarking/bench.ts ★★
+    Status: NO TESTS (CRITICAL)
+    Impact: Health checks & benchmarking
+    Test File: benchmarking-bench.test.ts (NEEDED)
+    Effort: MEDIUM
+
+5️⃣  src/infra/gpu-backend.ts ★★
+    Status: NO TESTS (CRITICAL)
+    Impact: SkyPilot/SSH/SCP utilities
+    Test File: infra-gpu-backend.test.ts (NEEDED)
+    Effort: MEDIUM
+
+COVERAGE BY MODULE
+═══════════════════════════════════════════════════════════════════════════════
+
+  GPU Providers       111% ████████████▌ EXCELLENT (10/9 files)
+  Autoscaler          50% ██████░░░░░░░ GOOD (9/18 files)
+  Client              50% ██████░░░░░░░ GOOD (3/6 files)
+  Handlers            50% ██████░░░░░░░ GOOD (3/6 files)
+  Auth                50% ██████░░░░░░░ GOOD (1/2 files)
+  Root Level          40% █████░░░░░░░░ FAIR (4/10 files)
+  Tracking            40% █████░░░░░░░░ FAIR (2/5 files)
+  Providers           39% █████░░░░░░░░ WEAK (12/31 files)
+  Browser             36% █████░░░░░░░░ WEAK (4/11 files)
+  Adapters            33% ████░░░░░░░░░ WEAK (1/3 files)
+  Benchmarking         0% ░░░░░░░░░░░░░ CRITICAL GAP (0/4 files)
+  Infra                0% ░░░░░░░░░░░░░ CRITICAL GAP (0/2 files)
+
+FILES WITHOUT TESTS (49 files)
+═══════════════════════════════════════════════════════════════════════════════
+
+AUTOSCALER (9 files):
+  □ config-loader.ts           (Zod config validation)
+  □ engine.ts                  (★★★ CRITICAL - core orchestration)
+  □ health-checker.ts          (Multi-tier health probing)
+  □ lifecycle-logger.ts        (GPU lifecycle event logging)
+  □ predictive-warmup.ts       (ML-based warmup prediction)
+  □ reconcile.ts               (Periodic state reconciliation)
+  □ session-tracker.ts         (Active session counting)
+  □ state-persistence.ts       (★★★ CRITICAL - Redis/memory persistence)
+  □ index.ts                   (Module exports)
+
+PROVIDERS (19 files):
+  □ chain-builder.ts           (Chain resolution from user settings)
+  □ classification.ts          (Classification provider wrapper)
+  □ declarative-chain.ts       (Config-driven fallback chains)
+  □ errors.ts                  (Error classes)
+  □ types.ts                   (Type definitions)
+  □ index.ts                   (Module exports)
+  □ openai/openai-realtime.ts  (★★★ NEW - Realtime Audio API)
+  □ openai/openai-omni.ts      (★★★ NEW - Text + audio output)
+  □ openai/openai-image.ts     (★★ DALL-E image generation)
+  □ openai-compat/audio-utils.ts    (Audio processing utilities)
+  □ openai-compat/openai-compat-stt.ts (STT base class)
+  □ openai-compat/openai-compat-tts.ts (TTS base class)
+  □ openai-compat/index.ts     (Module exports)
+  □ fireworks/fireworks-image.ts     (Flux image generation)
+  □ fireworks/models.ts        (Model definitions)
+  □ groq/models.ts             (Model definitions)
+  □ openrouter/models.ts       (Model definitions)
+  □ openrouter/openrouter-image.ts (Image generation)
+  □ self-hosted/self-hosted-provider.ts (Generic HTTP backend)
+
+BROWSER (6 files):
+  □ audio.ts                   (Audio utility functions)
+  □ index.ts                   (Module exports)
+  □ logger.ts                  (Browser-side logging)
+  □ streaming-audio.ts         (Streaming audio processing)
+  □ transport-webrtc.ts        (★★★ NEW SDK - WebRTC transport)
+  □ types.ts                   (Type definitions)
+
+CLIENT (3 files):
+  □ gpu-transport.ts           (GPU backend transport)
+  □ index.ts                   (Module exports)
+  □ pipeline-events.ts         (Pipeline event orchestration)
+
+HANDLERS (3 files):
+  □ autoscaler-schemas.ts      (Schema validation - needs more coverage)
+  □ credential-resolver.ts     (Credential resolution logic)
+  □ index.ts                   (Module exports)
+
+TRACKING (3 files):
+  □ index.ts                   (Module exports)
+  □ pricing.ts                 (Pricing calculations)
+  □ spend-tracker.ts           (Spend tracking logic)
+
+BENCHMARKING (4 files) ← CRITICAL GAP:
+  □ bench.ts                   (Health checks, SSE/WS benchmarking)
+  □ cli-bench.ts               (CLI benchmarking)
+  □ index.ts                   (Module exports)
+  □ ws-bench-client.ts         (WebSocket bench client)
+
+INFRA (2 files) ← CRITICAL GAP:
+  □ gpu-backend.ts             (SkyPilot/SSH/SCP utilities)
+  □ index.ts                   (Module exports)
+
+ADAPTERS (2 files):
+  □ index.ts                   (Module exports)
+
+ROOT-LEVEL (6 files):
+  □ deps.ts                    (DI interfaces)
+  □ factory.ts                 (Advanced autoscaler factory)
+  □ gateway-api.ts             (Gateway API types)
+  □ logger.ts                  (Logging utilities)
+  □ storage.ts                 (GatewayStorage interface)
+  □ types.ts                   (Core type definitions)
+
+MODULES WITH GOOD COVERAGE
+═══════════════════════════════════════════════════════════════════════════════
+
+✓ GPU PROVIDERS (111%)
+  RunPod, TensorDock, Vast.ai, Modal — all fully tested with real API tests
+  Status: Production-ready
+
+✓ LOAD BALANCER (3 test files)
+  load-balancer.test.ts
+  load-balancer-integration.test.ts
+  load-balancer-real.test.ts
+  Status: Well-tested
+
+✓ OPENAI PROVIDERS (Partial)
+  openai-stt.ts, openai-tts.ts, openai-realtime.ts (needs test)
+  Status: Good but incomplete
+
+✓ AUTOSCALER LIFECYCLE
+  boot-timeout, cleanup, watchdog, tier-lifecycle all tested
+  Status: Good but missing core engine
+
+IMMEDIATE ACTION ITEMS (Next 2 Weeks)
+═══════════════════════════════════════════════════════════════════════════════
+
+Week 1:
+  [ ] Create autoscaler-engine.test.ts
+  [ ] Create autoscaler-config-loader.test.ts
+  [ ] Create benchmarking-bench.test.ts
+  [ ] Create infra-gpu-backend.test.ts
+
+Week 2:
+  [ ] Create autoscaler-state-persistence.test.ts
+  [ ] Create autoscaler-health-checker.test.ts
+  [ ] Begin autoscaler-session-tracker.test.ts
+
+Expected Impact: 54% → 65% overall coverage (+11%)
+
+TIMELINE TO 95%+ COVERAGE
+═══════════════════════════════════════════════════════════════════════════════
+
+Phase 1: Quick Wins (1-2 weeks) ........ 54% → 65% (4 critical files)
+Phase 2: Core Logic (4-6 weeks) ....... 65% → 72% (remaining autoscaler)
+Phase 3: Feature Coverage (8-10 weeks) . 72% → 85% (providers, browser, client)
+Phase 4: Polish (10-12 weeks) ......... 85% → 95%+ (edge cases & E2E)
+
+WITH 2-3 DEVELOPERS: 6-8 weeks total
+WITH 1-2 DEVELOPERS: 10-12 weeks total
+
+TESTING COMMANDS
+═══════════════════════════════════════════════════════════════════════════════
+
+# Run all tests
+bun run test
+
+# Run specific test file
+bun run test -- __tests__/autoscaler-engine.test.ts
+
+# Watch mode for development
+bun run test:watch
+
+# Coverage report
+bun run test -- --coverage
+
+# Provider-specific tests
+bun run test:openai      # OpenAI integration tests
+bun run test:groq        # Groq integration tests
+bun run test:fireworks   # Fireworks integration tests
+bun run test:openrouter  # OpenRouter integration tests
+bun run test:modal       # Modal TTS integration tests
+bun run test:auth        # Auth integration tests
+bun run test:adapters    # Adapters integration tests
+
+REFERENCE DOCUMENTS
+═══════════════════════════════════════════════════════════════════════════════
+
+1. COVERAGE_SUMMARY.md         — Executive summary (quick overview)
+2. COVERAGE_REPORT.md          — Detailed module breakdown
+3. PRIORITY_ACTION_PLAN.md     — Phased implementation roadmap
+4. COVERAGE_QUICK_REFERENCE.txt — This file (quick lookup)
+
+CONTACTS & QUESTIONS
+═══════════════════════════════════════════════════════════════════════════════
+
+For questions about:
+  - Test coverage strategy: Review PRIORITY_ACTION_PLAN.md
+  - Specific module status: Check COVERAGE_REPORT.md
+  - Which tests to write first: See COVERAGE_SUMMARY.md (Critical Path)
+  - Test execution: Run 'bun run test --help' or check vitest docs
+
+═══════════════════════════════════════════════════════════════════════════════
+Generated: 2025-03-05
+Status: Ready for team action

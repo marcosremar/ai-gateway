@@ -1,0 +1,37 @@
+{
+  "name": "@parle/ai-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "build": "NODE_OPTIONS='--max-old-space-size=4096' tsup",
+    "test": "vitest run --config vitest.config.ts",
+    "test:watch": "vitest --config vitest.config.ts",
+    "test:groq": "vitest run --config vitest.config.ts __tests__/groq-integration.test.ts",
+    "test:openai": "vitest run --config vitest.config.ts __tests__/openai-integration.test.ts",
+    "test:fireworks": "vitest run --config vitest.config.ts __tests__/fireworks-integration.test.ts",
+    "test:openrouter": "vitest run --config vitest.config.ts __tests__/openrouter-integration.test.ts",
+    "test:modal": "vitest run --config vitest.config.ts __tests__/modal-tts-integration.test.ts",
+    "test:fallback": "vitest run --config vitest.config.ts __tests__/fallback-integration.test.ts",
+    "test:cross": "vitest run --config vitest.config.ts __tests__/cross-provider-integration.test.ts",
+    "test:auth": "vitest run --config vitest.config.ts __tests__/auth-integration.test.ts",
+    "test:adapters": "vitest run --config vitest.config.ts __tests__/adapters-integration.test.ts",
+    "test:runpod": "vitest run --config vitest.config.ts __tests__/runpod-real-api.test.ts",
+    "test:vast": "vitest run --config vitest.config.ts __tests__/vast-real-api.test.ts",
+    "test:runpod-lifecycle": "vitest run --config vitest.config.ts __tests__/runpod-lifecycle.test.ts",
+    "test:vast-lifecycle": "vitest run --config vitest.config.ts __tests__/vast-lifecycle.test.ts"
+  },
+  "peerDependencies": {
+    "openai": ">=4.0.0",
+    "zod": ">=3.20.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0"
+  }
+}

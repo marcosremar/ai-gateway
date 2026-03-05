@@ -1,0 +1,208 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║              ANÁLISE DE COBERTURA DE TESTES — @ai-gateway                    ║
+║                    Taxa: ~59% (51/87 arquivos com testes)                    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+GRUPO 1: TIPOS PUROS (25 arquivos — NÃO precisam testes)
+════════════════════════════════════════════════════════════════════════════════
+└─ 25 arquivos: tipos, interfaces, índices, catálogos
+
+  ├─ TIPOS PUROS (8 arquivos)
+  │  ├─ src/types.ts (116 linhas)
+  │  ├─ src/deps.ts (139 linhas)
+  │  ├─ src/storage.ts (61 linhas)
+  │  ├─ src/gateway-api.ts (120 linhas)
+  │  ├─ src/browser/types.ts (269 linhas)
+  │  ├─ src/handlers/types.ts
+  │  ├─ src/gpu-providers/types.ts
+  │  └─ src/providers/types.ts
+  │
+  ├─ ÍNDICES/EXPORTS (13 arquivos)
+  │  ├─ src/index.ts (re-exports ~115 símbolos)
+  │  ├─ src/autoscaler/index.ts
+  │  ├─ src/benchmarking/index.ts
+  │  ├─ src/browser/index.ts
+  │  ├─ src/client/index.ts
+  │  ├─ src/gpu-providers/index.ts
+  │  ├─ src/handlers/index.ts
+  │  ├─ src/infra/index.ts
+  │  ├─ src/providers/index.ts
+  │  ├─ src/tracking/index.ts
+  │  ├─ src/adapters/index.ts
+  │  ├─ src/auth/index.ts
+  │  └─ src/providers/openai-compat/index.ts
+  │
+  ├─ CATÁLOGOS DE MODELOS (4 arquivos)
+  │  ├─ src/providers/openai/models.ts (227 linhas)
+  │  ├─ src/providers/groq/models.ts (70 linhas)
+  │  ├─ src/providers/fireworks/models.ts (31 linhas)
+  │  └─ src/providers/openrouter/models.ts (45 linhas)
+  │
+  └─ TRIVIAL (1 arquivo)
+     └─ src/logger.ts (7 linhas — apenas console delegate)
+
+
+GRUPO 2: PODE TESTAR SEM API REAL (16 arquivos)
+════════════════════════════════════════════════════════════════════════════════
+*Lógica pura — mocks suficientes. Podem ser testados localmente.*
+
+PRIORIDADE 1 (Impacto Alto, Esforço Baixo) — 5 arquivos
+
+  1. ✓ src/browser/emitter.ts (57 linhas)
+     Exports: TypedEmitter<EventMap>
+     Testes: on(), off(), emit(), removeAllListeners(), error isolation
+     Esforço: 1-2 horas
+
+  2. ✓ src/browser/logger.ts (90 linhas)
+     Exports: createLogger(), setLogLevel(), setLogHandler()
+     Testes: log levels, global control, namespaced loggers
+     Esforço: 1-2 horas
+
+  3. ✓ src/browser/errors.ts (58 linhas)
+     Exports: SpeechSDKError, isRecoverableByDefault()
+     Testes: constructor, recoverable flag, context, cause
+     Esforço: 1 hora
+
+  4. ✓ src/providers/errors.ts (127 linhas)
+     Exports: buildProviderError(), CreditExhaustedError, extractError*()
+     Testes: status codes mapping (429, 401, 402, 403, 404, 502, 503, 408)
+     Testes: timeout detection, network error detection
+     Esforço: 2-3 horas
+
+  5. ✓ src/hooks.ts (129 linhas)
+     Exports: emitHook() function
+     Testes: disparo correto, isolamento de eventos, async handling, error safety
+     Esforço: 2 horas
+
+
+PRIORIDADE 2 (Impacto Médio, Esforço Baixo) — 9 arquivos
+
+  6. ✓ src/providers/openai-compat/openai-compat-llm.ts (85 linhas)
+     Exports: OpenAICompatLLMProvider
+     Testes: getClient(), withApiKey(), chat(), temperature, maxTokens
+     Esforço: 2 horas
+
+  7. ✓ src/providers/openai-compat/openai-compat-stt.ts (83 linhas)
+     Exports: OpenAICompatSTTProvider
+     Testes: transcribe(), language, response format, word timing
+     Esforço: 2 horas
+
+  8. ✓ src/providers/openai-compat/openai-compat-tts.ts (109 linhas)
+     Exports: OpenAICompatTTSProvider
+     Testes: synthesize(), voice resolution, speed, format detection
+     Esforço: 2-3 horas
+
+  9. ✓ src/providers/openai/openai-image.ts (106 linhas)
+     Exports: OpenAIImageProvider
+     Testes: resolveSize() ratio detection, model detection, fetch builder
+     Esforço: 2 horas
+
+  10. ✓ src/providers/openai/openai-omni.ts (152 linhas)
+      Exports: OpenAIOmniProvider
+      Testes: getApiKey(), message building, audio encoding, voice selection
+      Esforço: 3 horas
+
+  11. ✓ src/providers/openai/openai-realtime.ts (112 linhas)
+      Exports: OpenAIRealtimeProvider
+      Testes: createSession(), payload builder, turn_detection, client_secret
+      Esforço: 3 horas
+
+  12. ✓ src/browser/streaming-audio.ts (318 linhas)
+      Exports: StreamingAudioPlayer
+      Testes: init(), feedChunk(), WAV parsing, scheduling, volume, destroy()
+      Mocks: AudioContext, GainNode, MediaStreamAudioDestinationNode
+      Esforço: 4-5 horas
+
+  13. ✓ src/factory.ts (300 linhas)
+      Exports: createAutoscaler()
+      Testes: DI wiring, registry setup, tracker initialization
+      Testes: onInstancePersist callback, wrapped logger for boot_ok events
+      Esforço: 3-4 horas
+
+
+GRUPO 3: PRECISA DE API REAL (2 arquivos)
+════════════════════════════════════════════════════════════════════════════════
+*Requer integração com backends reais ou mock servers específicos.*
+
+  1. ✗ src/autoscaler/engine.ts (796 linhas)
+     Exports: AutoscalerEngine
+     Complexidade: MUITO COMPLEXO
+     Testes: boot decision, health polling, state transitions, cooling,
+             latency scaling, session scaling, concurrent requests, hooks
+     Requer: Mock GPU providers, mock health check endpoints
+     Esforço: 15-20 horas (requer arquitetura de testes de integração)
+
+  2. ✗ src/browser/speech-client.ts (670 linhas)
+     Exports: SpeechClient
+     Complexidade: COMPLEXO
+     Testes: fallback chain (webrtc → ws → sse), discovery endpoint,
+             reconnect logic, circuit breaker, auth error + token refresh,
+             streaming chunks, metrics, service status polling
+     Requer: Mock servidor com SSE/WS endpoints
+     Esforço: 12-15 horas (requer setup de servidor mock)
+
+
+TABELA RESUMIDA
+════════════════════════════════════════════════════════════════════════════════
+
+┌─────┬──────────────────────────────────────────┬──────────────┬─────────────┐
+│ Nº  │ Arquivo                                  │ Linhas │ Prioridade  │
+├─────┼──────────────────────────────────────────┼────────┼─────────────┤
+│ P1  │ src/browser/emitter.ts                   │    57  │ ALTA-FÁCIL  │
+│ P1  │ src/browser/logger.ts                    │    90  │ ALTA-FÁCIL  │
+│ P1  │ src/browser/errors.ts                    │    58  │ ALTA-FÁCIL  │
+│ P1  │ src/providers/errors.ts                  │   127  │ ALTA-FÁCIL  │
+│ P1  │ src/hooks.ts                             │   129  │ ALTA-FÁCIL  │
+├─────┼──────────────────────────────────────────┼────────┼─────────────┤
+│ P2  │ src/providers/openai-compat/*-llm.ts     │    85  │ MED-FÁCIL   │
+│ P2  │ src/providers/openai-compat/*-stt.ts     │    83  │ MED-FÁCIL   │
+│ P2  │ src/providers/openai-compat/*-tts.ts     │   109  │ MED-FÁCIL   │
+│ P2  │ src/providers/openai/openai-image.ts     │   106  │ MED-FÁCIL   │
+│ P2  │ src/providers/openai/openai-omni.ts      │   152  │ MED-NORMAL  │
+│ P2  │ src/providers/openai/openai-realtime.ts  │   112  │ MED-NORMAL  │
+│ P2  │ src/browser/streaming-audio.ts           │   318  │ MED-NORMAL  │
+│ P2  │ src/factory.ts                           │   300  │ MED-NORMAL  │
+├─────┼──────────────────────────────────────────┼────────┼─────────────┤
+│ P3  │ src/autoscaler/engine.ts                 │   796  │ ALTA-DIFÍCIL│
+│ P3  │ src/browser/speech-client.ts             │   670  │ ALTA-DIFÍCIL│
+└─────┴──────────────────────────────────────────┴────────┴─────────────┘
+
+
+ROADMAP SUGERIDO
+════════════════════════════════════════════════════════════════════════════════
+
+SPRINT 1 (Semana 1 — 10-15 horas): Prioridade 1
+   ✓ src/browser/emitter.ts         (1-2 horas)
+   ✓ src/browser/logger.ts          (1-2 horas)
+   ✓ src/browser/errors.ts          (1 hora)
+   ✓ src/providers/errors.ts        (2-3 horas)
+   ✓ src/hooks.ts                   (2 horas)
+
+SPRINT 2 (Semana 2-3 — 15-20 horas): Prioridade 2 (parte 1)
+   ✓ src/providers/openai-compat/*  (6-8 horas: 3 classes)
+   ✓ src/providers/openai/*         (5-6 horas: 3 classes)
+
+SPRINT 3 (Semana 4 — 8-10 horas): Prioridade 2 (parte 2)
+   ✓ src/browser/streaming-audio.ts (4-5 horas)
+   ✓ src/factory.ts                 (3-4 horas)
+
+SPRINT 4-5 (Semanas 5-7): Prioridade 3 (Integração)
+   ✗ src/browser/speech-client.ts   (12-15 horas, requer servidor mock)
+   ✗ src/autoscaler/engine.ts       (15-20 horas, requer mock providers)
+
+
+TOTAL ESTIMADO
+════════════════════════════════════════════════════════════════════════════════
+Prioridade 1 + 2:     ~35-40 horas de desenvolvimento
+Prioridade 3:         ~30-35 horas (integração complexa)
+────────────────────
+TOTAL:               ~65-75 horas para cobertura completa
+
+
+BENEFÍCIOS
+════════════════════════════════════════════════════════════════════════════════
+• Prioridade 1 + 2 reduz bugs em componentes críticos do Browser SDK
+• Cobertura de providers OpenAI-compat aumenta confiabilidade de fallbacks
+• Testes de factory garantem DI wiring correto
+• Com Prioridade 3, garante toda a pipeline de autoscaling
+

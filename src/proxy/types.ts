@@ -1,0 +1,50 @@
+/**
+ * Proxy server types.
+ */
+
+import type { GatewayHooks } from '../hooks';
+import type { ResponseCache } from '../caching/response-cache';
+import type { LLMProvider, STTProvider, TTSProvider } from '../providers/types';
+import type { EmbeddingProvider } from '../providers/openai-compat/openai-compat-embedding';
+
+export interface ProviderMapping {
+  /** model name → LLM provider instance */
+  chat?: Record<string, LLMProvider>;
+  /** model name → Embedding provider instance */
+  embedding?: Record<string, EmbeddingProvider>;
+  /** model name → STT provider instance */
+  stt?: Record<string, STTProvider>;
+  /** model name → TTS provider instance */
+  tts?: Record<string, TTSProvider>;
+}
+
+export interface ProxyConfig {
+  port?: number;               // default 4000
+  apiKeys?: string[];          // valid Bearer tokens
+  providers: ProviderMapping;
+  cache?: ResponseCache;
+  hooks?: GatewayHooks;
+  rateLimit?: { rpm: number };
+  hostname?: string;           // default '0.0.0.0'
+}
+
+export interface ProxyRoute {
+  method: string;
+  pattern: RegExp;
+  handler: (req: ProxyRequest) => Promise<ProxyResponse>;
+}
+
+export interface ProxyRequest {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body: unknown;
+  rawBody: Buffer;
+}
+
+export interface ProxyResponse {
+  status: number;
+  headers?: Record<string, string>;
+  body: unknown;
+  stream?: ReadableStream<Uint8Array>;
+}
