@@ -1,8 +1,7 @@
 /**
- * PipelineEvent — SSE events emitted by `pipelineStream()`.
- *
- * Each variant maps 1:1 to a Server-Sent Event type so the API route
- * can forward them as `event: <type>\ndata: <json>\n\n`.
+ * @deprecated PipelineEvent is part of the legacy streaming API (pipelineStream).
+ * Use `pipeline()` instead, which returns a single `PipelineResult` JSON object.
+ * Streaming transports (SSE/WS/WebRTC) are blocked at the proxy level.
  */
 
 export type PipelineStage = 'stt' | 'llm' | 'tts';

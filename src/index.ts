@@ -289,12 +289,17 @@ export type {
   GpuTransport,
   GpuPipelineResponse,
   GpuHealthResponse,
+  /** @deprecated Use pipeline() instead of pipelineStream(). */
   PipelineEvent,
+  /** @deprecated Use pipeline() instead of pipelineStream(). */
   PipelineStage,
 } from './client';
 
 // ── Browser SDK (SpeechClient) ──────────────────────────────────────────
+// NOTE: SpeechClient and streaming transports are legacy. Server-side code
+// should use AIClient.pipeline() or POST /api/pipeline (JSON, transport-transparent).
 export { SpeechClient } from './browser';
+/** @deprecated Streaming transports removed from proxy. Use POST /api/pipeline. */
 export { WebSocketTransport, SSETransport, WebRTCTransport, TypedEmitter } from './browser';
 export { SpeechSDKError, createLogger as createSDKLogger, setLogLevel, setLogHandler } from './browser';
 export type {

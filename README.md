@@ -4,13 +4,12 @@ A comprehensive, modular TypeScript library for AI provider orchestration, GPU a
 
 ## Features
 
+- **Transparent Pipeline API** — Single `POST /api/pipeline` endpoint handles STT → LLM → TTS. Transport (GPU vs cloud) is hidden from the caller. No SSE/WebSocket/WebRTC in client code.
 - **Multi-tier GPU Autoscaler** — Cascade through GPU providers (RunPod, TensorDock, Modal) with automatic failover, health checking, idle watchdog, and cost monitoring
 - **AI Provider Abstraction** — Unified interface for 8+ providers (OpenAI, Groq, Fireworks, OpenRouter, Modal, self-hosted) across STT, TTS, LLM, Image, and Realtime modalities
-- **Browser SDK** — Framework-agnostic `SpeechClient` with automatic transport negotiation (WebRTC → WebSocket → SSE)
 - **Provider Fallback Chains** — Declarative, config-driven fallback with cooldown and credit exhaustion tracking
 - **Predictive Warmup** — ML-based usage prediction to pre-boot GPUs before demand spikes
 - **Spend Tracking** — Per-request cost estimation, budget alerts, and provider spend monitoring
-- **Benchmarking** — Health checks, SSE/WebSocket/WebRTC latency benchmarks
 - **Infrastructure Utilities** — SkyPilot CLI integration, SSH/SCP helpers
 
 ## Installation
@@ -22,7 +21,51 @@ bun add @parle/ai-gateway@workspace:*
 
 ## Quick Start
 
-### Gateway (Recommended)
+### Pipeline API (Recommended)
+
+Send audio, get back transcription + translation + TTS audio in one JSON response. The gateway handles GPU vs cloud routing transparently.
+
+```bash
+# Full pipeline: audio in → JSON out
+curl -X POST "http://localhost:4000/api/pipeline?source=fr&target=en&speaker=Ryan" \
+  --data-binary @audio.wav -H "Content-Type: audio/wav"
+
+# Response:
+# {
+#   "transcription": "Bonjour le monde",
+#   "response": "Hello world",
+#   "audio_base64": "UklGR...",
+#   "content_type": "audio/wav",
+#   "timing": { "total_ms": 1234, "used_gpu": true }
+# }
+```
+
+### AIClient (TypeScript)
+
+```typescript
+import { createAIClient } from '@ai-gateway/client';
+
+const client = createAIClient({ registry, defaultProfile });
+
+// Full pipeline — tries GPU first, falls back to cloud automatically
+const result = await client.pipeline(audioBuffer, systemPrompt);
+// result.stt.text       → "Bonjour le monde"
+// result.chat.content   → "Hello world"
+// result.tts.audio      → Buffer (WAV)
+// result.usedGpu        → true/false
+// result.totalLatencyMs → 1234
+
+// Individual stages (also transport-transparent)
+const stt  = await client.transcribe(audioBuffer);   // { text, latencyMs }
+const chat = await client.chat(messages);             // { content, latencyMs }
+const tts  = await client.synthesize(text);           // { audio, contentType }
+```
+
+### Transport Policy
+
+**SSE, WebSocket, and WebRTC are blocked at the proxy level** (return `410 Gone`). All client code uses the JSON pipeline endpoint or the AIClient API. This keeps transport concerns inside the gateway — callers never parse SSE events, manage WebSocket frames, or negotiate WebRTC.
+
+### Gateway Factory (Autoscaler)
 
 ```typescript
 import { createGateway } from '@ai-gateway';
@@ -36,32 +79,8 @@ const gateway = createGateway({
   },
 });
 
-// GET autoscaler status
 const status = await gateway.handleGet(userId);
-
-// Trigger action (boot, stop, etc.)
 const result = await gateway.handleAction(userId, 'boot', { tier: 0 });
-
-// Get routing decision (returns endpoint + metrics)
-const decision = await gateway.getDecision(userId);
-```
-
-### Browser SDK
-
-```typescript
-import { SpeechClient } from '@ai-gateway/browser';
-
-const client = new SpeechClient({
-  discoveryEndpoint: '/api/speech/health',
-  // Auto-negotiates: WebRTC → WebSocket → SSE
-});
-
-client.on('transcript', (text) => console.log('STT:', text));
-client.on('audio', (chunk) => playAudio(chunk));
-client.on('metrics', (m) => console.log('Latency:', m.latencyMs));
-
-await client.connect();
-client.sendAudio(audioBlob);
 ```
 
 ### AI Providers
@@ -112,7 +131,7 @@ await runpod.terminate(pod.id);
 | Import Path            | Description                                    |
 |------------------------|------------------------------------------------|
 | `@ai-gateway`         | Full API (all modules re-exported)             |
-| `@ai-gateway/browser` | Browser SDK — SpeechClient, transports         |
+| `@ai-gateway/browser` | Browser SDK — SpeechClient (legacy, see transport policy) |
 | `@ai-gateway/providers` | AI providers — OpenAI, Groq, Fireworks, etc. |
 | `@ai-gateway/autoscaler` | GPU autoscaling engine                      |
 | `@ai-gateway/gpu-providers` | Cloud GPU clients — RunPod, TensorDock, Modal |

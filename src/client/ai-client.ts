@@ -357,13 +357,11 @@ export class AIClient {
   }
 
   /**
-   * Streaming pipeline: STT -> LLM -> TTS with per-stage SSE events.
+   * @deprecated Use `pipeline()` instead. Streaming transports (SSE/WS/WebRTC) are
+   * removed from the proxy server. The `pipeline()` method returns a single JSON
+   * result with transparent GPU-vs-cloud routing — no event parsing needed.
    *
-   * Same logic as `pipeline()` but yields `PipelineEvent`s as each stage
-   * starts/completes so the caller can stream them to the client.
-   *
-   * If a `gpuTransport` is provided, it tries the GPU first. On failure,
-   * falls back to cloud per-stage (same as `pipeline()`).
+   * This method is kept for backward compatibility but will be removed in a future version.
    */
   async *pipelineStream(
     audio: Buffer | Blob,

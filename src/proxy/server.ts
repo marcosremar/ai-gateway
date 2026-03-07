@@ -44,6 +44,58 @@ function sendError(res: ServerResponse, status: number, message: string): void {
   res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
 }
 
+interface MultipartPart {
+  name?: string;
+  filename?: string;
+  data: Buffer;
+}
+
+function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
+  const parts: MultipartPart[] = [];
+  const boundaryBuf = Buffer.from(`--${boundary}`);
+  const endBuf = Buffer.from(`--${boundary}--`);
+
+  let start = body.indexOf(boundaryBuf);
+  if (start === -1) return parts;
+
+  while (true) {
+    start += boundaryBuf.length;
+    // Skip \r\n after boundary
+    if (body[start] === 0x0d && body[start + 1] === 0x0a) start += 2;
+
+    const nextBoundary = body.indexOf(boundaryBuf, start);
+    if (nextBoundary === -1) break;
+
+    const partBuf = body.subarray(start, nextBoundary);
+
+    // Split headers from body at \r\n\r\n
+    const headerEnd = partBuf.indexOf('\r\n\r\n');
+    if (headerEnd === -1) { start = nextBoundary; continue; }
+
+    const headerStr = partBuf.subarray(0, headerEnd).toString();
+    let partData = partBuf.subarray(headerEnd + 4);
+    // Trim trailing \r\n before boundary
+    if (partData.length >= 2 && partData[partData.length - 2] === 0x0d && partData[partData.length - 1] === 0x0a) {
+      partData = partData.subarray(0, partData.length - 2);
+    }
+
+    const nameMatch = headerStr.match(/name="([^"]+)"/);
+    const filenameMatch = headerStr.match(/filename="([^"]+)"/);
+
+    parts.push({
+      name: nameMatch?.[1],
+      filename: filenameMatch?.[1],
+      data: Buffer.from(partData),
+    });
+
+    // Check if next boundary is the end marker
+    if (body.indexOf(endBuf, nextBoundary) === nextBoundary) break;
+    start = nextBoundary;
+  }
+
+  return parts;
+}
+
 export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
@@ -79,13 +131,53 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
     }
 
+    // Block direct streaming transport routes — clients must use /api/pipeline
+    const path = url.split('?')[0];
+    if (path === '/api/stream-audio' || path === '/ws/stream' || path === '/api/offer') {
+      sendError(res, 410, `Streaming transport ${path} is removed. Use POST /api/pipeline instead.`);
+      return;
+    }
+
+    // Block WebSocket upgrades to streaming paths
+    if (req.headers.upgrade?.toLowerCase() === 'websocket') {
+      sendError(res, 410, 'WebSocket transport is removed. Use POST /api/pipeline instead.');
+      return;
+    }
+
+    // Custom routes (bypass body parsing — handler owns the request)
+    if (config.customRoutes) {
+      for (const route of config.customRoutes) {
+        if (method === route.method.toUpperCase() && path === route.path) {
+          await route.handler(req, res);
+          return;
+        }
+      }
+    }
+
     try {
-      const rawBody = method === 'POST' ? await readBody(req) : Buffer.alloc(0);
+      let rawBody = method === 'POST' ? await readBody(req) : Buffer.alloc(0);
       let body: unknown = {};
       if (rawBody.length > 0) {
         const contentType = req.headers['content-type'] || '';
         if (contentType.includes('application/json')) {
           try { body = JSON.parse(rawBody.toString()); } catch { body = {}; }
+        } else if (contentType.includes('multipart/form-data')) {
+          // Extract text fields from multipart body so route handlers can read body.model etc.
+          const boundaryMatch = contentType.match(/boundary=([^\s;]+)/);
+          if (boundaryMatch) {
+            const boundary = boundaryMatch[1];
+            const parts = parseMultipart(rawBody, boundary);
+            const fields: Record<string, string> = {};
+            for (const part of parts) {
+              if (part.filename) {
+                // File part — use its content as rawBody for the route handler
+                rawBody = part.data;
+              } else if (part.name) {
+                fields[part.name] = part.data.toString();
+              }
+            }
+            body = fields;
+          }
         }
       }
 

@@ -28,6 +28,7 @@ export type {
   PipelineResult,
 } from './types';
 export type { GpuTransport, GpuPipelineResponse, GpuHealthResponse } from './gpu-transport';
+/** @deprecated Streaming transports removed. Use pipeline() which returns PipelineResult. */
 export type { PipelineEvent, PipelineStage } from './pipeline-events';
 
 // ── Factory ─────────────────────────────────────────────────────────────────
