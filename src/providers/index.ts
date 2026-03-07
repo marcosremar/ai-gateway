@@ -74,6 +74,10 @@ export { detectAudioFormat, prepareAudioFile } from './openai-compat';
 export { groqSTT, groqTTS, groqLLM } from './groq';
 export { GROQ_STT_MODELS, GROQ_TTS_MODELS, GROQ_TTS_VOICES, GROQ_LLM_MODELS } from './groq';
 
+// ── Ollama (Local) ───────────────────────────────────────────────────────
+export { ollamaLLM, ollamaSTT, OllamaLLMProvider, OllamaSTTProvider } from './ollama';
+export { OLLAMA_STT_MODELS, OLLAMA_LLM_MODELS } from './ollama';
+
 // ── OpenRouter ────────────────────────────────────────────────────────────
 export { openrouterLLM, openrouterImage, OpenRouterImageProvider } from './openrouter';
 export { OPENROUTER_LLM_MODELS, OPENROUTER_IMAGE_MODELS } from './openrouter';

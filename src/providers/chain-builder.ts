@@ -90,7 +90,7 @@ export function buildFallbackChain(
   const seen = new Set<string>();
 
   const addEntry = (provider: string, model?: string) => {
-    if (!ProviderClassification.isCloud(provider) && provider !== 'vast-serverless') return;
+    if (!ProviderClassification.isCloud(provider) && !ProviderClassification.isLocal(provider) && provider !== 'vast-serverless') return;
     const key = `${provider}::${model ?? ''}`;
     if (!seen.has(key)) {
       seen.add(key);
