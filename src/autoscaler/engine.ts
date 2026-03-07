@@ -9,6 +9,7 @@ import type {
   AutoScaleDecision,
   ScaleTrigger,
 } from '../types';
+import { resolveStageTimeouts } from '../types';
 import type { GpuProviderRegistry } from '../gpu-providers/registry';
 import type { SessionTracker } from './session-tracker';
 import type { LatencyTracker } from './latency-tracker';
@@ -23,6 +24,36 @@ import { defaultLogger } from '../logger';
 import { handleBootTimeout } from './boot-timeout';
 import { probeAllTiers, processHealthResults } from './health-checker';
 import { buildDecision } from './decision-builder';
+
+/** Error thrown when a boot pipeline stage exceeds its timeout */
+export class StageTimeoutError extends Error {
+  readonly stage: string;
+  readonly timeoutMs: number;
+  constructor(stage: string, timeoutMs: number) {
+    super(`Stage "${stage}" timed out after ${Math.round(timeoutMs / 1000)}s`);
+    this.name = 'StageTimeoutError';
+    this.stage = stage;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/** Wrap a promise with a hard timeout. Rejects with StageTimeoutError on expiry. */
+function withStageTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  stage: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new StageTimeoutError(stage, timeoutMs));
+    }, timeoutMs);
+    if (timer.unref) timer.unref();
+    promise.then(
+      (val) => { clearTimeout(timer); resolve(val); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
 
 export const MAX_BOOT_FAILURES = 3;
 export const BOOT_COOLDOWN_BASE_MS = 2 * 60_000;  // 2 min base, exponential backoff
@@ -70,6 +101,15 @@ export class AutoscalerEngine {
     this.onInstancePersist = opts.onInstancePersist;
     this.lifecycleLogger = opts.lifecycleLogger ?? noopLifecycleLogger;
     this.logger = opts.logger ?? defaultLogger;
+  }
+
+  /** Emit an error event via hooks. Fire-and-forget. */
+  private emitError(fields: Omit<import('../hooks').ErrorEvent, 'source' | 'timestamp'>): void {
+    emitHook(this.hooks, 'onError', {
+      source: 'autoscaler',
+      ...fields,
+      timestamp: Date.now(),
+    });
   }
 
   /**
@@ -151,11 +191,31 @@ export class AutoscalerEngine {
           return booting.endpoint;
         }).catch((err) => {
           this.logger.warn(`[boot-poller] Endpoint resolution failed for tier ${tierIndex} (${provider}): ${err instanceof Error ? err.message : String(err)}`);
+          this.emitError({
+            operation: 'resolveEndpoint', provider, tierIndex, userId,
+            instanceId: booting.discoveredInstanceId,
+            message: err instanceof Error ? err.message : String(err),
+            retryable: true,
+          });
           return booting.endpoint;
         });
       };
 
-      void resolveEndpoint().then((endpoint) => this.probeHealth(endpoint)).then(async (httpHealthy) => {
+      void resolveEndpoint().then(async (endpoint): Promise<boolean | 'skip'> => {
+        // If endpoint is still empty, skip the HTTP probe — no point hitting an empty URL.
+        // The resolve loop will retry on the next poll cycle.
+        if (!endpoint) {
+          this.logger.log(`[boot-poller] Tier ${tierIndex} (${provider}) endpoint not yet available (${Math.round(elapsed / 1000)}s elapsed) — skipping probe`);
+          pollCount++;
+          const nextInterval = Math.min(POLL_INTERVAL_BASE_MS * Math.pow(1.5, pollCount - 1), POLL_INTERVAL_MAX_MS);
+          const timer = setTimeout(poll, nextInterval);
+          if (timer.unref) timer.unref();
+          this.bootPollers.set(key, timer);
+          return 'skip'; // signal: already scheduled next poll, skip further processing
+        }
+        return this.probeHealth(endpoint);
+      }).then(async (httpHealthy): Promise<boolean | 'skip'> => {
+        if (httpHealthy === 'skip') return 'skip'; // already scheduled next poll above
         // If HTTP failed and we have SSH info, try SSH fallback (Vast.ai without direct ports)
         if (!httpHealthy && booting.sshHost && booting.sshPort) {
           const { probeGpuHealthSsh } = await import('./health');
@@ -163,6 +223,7 @@ export class AutoscalerEngine {
         }
         return httpHealthy;
       }).then(async (healthy) => {
+        if (healthy === 'skip') return; // already handled
         // Re-check state — might have changed during the probe
         const currentStates = this.stateMap.get(userId);
         const current = currentStates?.[tierIndex];
@@ -190,9 +251,14 @@ export class AutoscalerEngine {
           };
           currentStates[tierIndex] = newReady;
           this.stateMap.set(userId, currentStates);
-          void this.persistence.persistTierStates(userId, currentStates).catch((err) =>
-            this.logger.warn('[boot-poller] Background persist failed:', err),
-          );
+          void this.persistence.persistTierStates(userId, currentStates).catch((err) => {
+            this.logger.warn('[boot-poller] Background persist failed:', err);
+            this.emitError({
+              operation: 'persistTierStates', userId,
+              message: err instanceof Error ? err.message : String(err),
+              errorCode: 'PERSIST_FAILED', retryable: true,
+            });
+          });
 
           emitHook(this.hooks, 'onHealthChange', {
             userId, tierIndex, provider,
@@ -221,6 +287,12 @@ export class AutoscalerEngine {
         this.bootPollers.set(key, timer);
       }).catch((err) => {
         this.logger.warn(`[boot-poller] Probe failed for tier ${tierIndex} (${provider}, instanceId=${booting.discoveredInstanceId || 'none'}): ${err instanceof Error ? err.message : String(err)}`);
+        this.emitError({
+          operation: 'bootProbe', provider, tierIndex, userId,
+          instanceId: booting.discoveredInstanceId,
+          message: err instanceof Error ? err.message : String(err),
+          retryable: true,
+        });
         pollCount++;
         const nextInterval = Math.min(POLL_INTERVAL_BASE_MS * Math.pow(1.5, pollCount - 1), POLL_INTERVAL_MAX_MS);
         const timer = setTimeout(poll, nextInterval);
@@ -229,12 +301,17 @@ export class AutoscalerEngine {
       });
     };
 
-    // Start first poll after a short delay (instance needs time to boot)
-    const initialDelay = 30_000; // 30s — skip initial boot period
+    // Start first poll after a provider-appropriate delay.
+    // Vast.ai needs up to 5 min just for IP assignment + container start.
+    // RunPod proxy URLs are available immediately, but container takes 10-20 min.
+    // Use half of bootTimeSecs as the initial wait (avoids wasted probe calls during early boot).
+    const bootTimeSecs = this.registry.get(provider)?.bootTimeSecs ?? 120;
+    // Initial delay: 20% of expected boot time (fast feedback), min 30s, max 3 min
+    const initialDelay = Math.min(Math.max(bootTimeSecs * 0.2 * 1000, 30_000), 180_000);
     const timer = setTimeout(poll, initialDelay);
     if (timer.unref) timer.unref();
     this.bootPollers.set(key, timer);
-    this.logger.log(`[boot-poller] Started polling tier ${tierIndex} (${provider}) with backoff (first in ${initialDelay / 1000}s)`);
+    this.logger.log(`[boot-poller] Started polling tier ${tierIndex} (${provider}) with backoff (first in ${Math.round(initialDelay / 1000)}s, bootTimeSecs=${bootTimeSecs})`);
   }
 
   /** Expose stateMap for watchdog/external iteration */
@@ -326,9 +403,14 @@ export class AutoscalerEngine {
         this.logger.log(`[autoscaler] Restored ${activeCount} active tier(s) from DB for user ${userId}`);
       }
       // Persist cleaned-up states
-      void this.persistence.persistTierStates(userId, states).catch((err) =>
-        this.logger.warn('[autoscaler] Failed to persist restored states:', err),
-      );
+      void this.persistence.persistTierStates(userId, states).catch((err) => {
+        this.logger.warn('[autoscaler] Failed to persist restored states:', err);
+        this.emitError({
+          operation: 'persistTierStates', userId,
+          message: err instanceof Error ? err.message : String(err),
+          errorCode: 'PERSIST_FAILED', retryable: true,
+        });
+      });
       return states;
     }
 
@@ -344,9 +426,14 @@ export class AutoscalerEngine {
     if (prevSnapshot) {
       const changed = states.some((s, i) => s.state !== prevSnapshot[i]);
       if (changed) {
-        void this.persistence.persistTierStates(userId, states).catch((err) =>
-          this.logger.warn('[autoscaler] Background persist failed:', err),
-        );
+        void this.persistence.persistTierStates(userId, states).catch((err) => {
+          this.logger.warn('[autoscaler] Background persist failed:', err);
+          this.emitError({
+            operation: 'persistTierStates', userId,
+            message: err instanceof Error ? err.message : String(err),
+            errorCode: 'PERSIST_FAILED', retryable: true,
+          });
+        });
       }
     }
   }
@@ -366,15 +453,36 @@ export class AutoscalerEngine {
     let sshPort: number | undefined;
     let monitorUrl: string | undefined;
 
+    // Resolve per-stage timeouts: tier config > provider defaults > fallback
+    const timeouts = resolveStageTimeouts(cfg.provider, cfg.stageTimeouts);
+
     try {
       let justCreated = false;
       if (!cfg.instanceId) {
         const client = this.registry.get(cfg.provider);
         if (client) {
-          let discovered = await client.discoverInstance(
-            { apiKey: cfg.apiKey!, authId: cfg.authId },
-            cfg.gpuTypes ?? [],
-          );
+          let discovered = await withStageTimeout(
+            client.discoverInstance(
+              { apiKey: cfg.apiKey!, authId: cfg.authId },
+              cfg.gpuTypes ?? [],
+            ),
+            timeouts.discoverMs,
+            'discover',
+          ).catch((err) => {
+            // On timeout, treat as "no instance discovered" — proceed to create
+            if (err instanceof StageTimeoutError) {
+              this.logger.warn(`[autoscaler] Tier ${tierIndex} (${cfg.provider}) discover timed out (${Math.round(timeouts.discoverMs / 1000)}s) — proceeding to create`);
+              this.emitError({
+                operation: 'discoverInstance', provider: cfg.provider,
+                tierIndex, userId,
+                message: err.message,
+                errorCode: 'STAGE_TIMEOUT', retryable: true,
+                metadata: { stage: 'discover', timeoutMs: timeouts.discoverMs },
+              });
+              return null;
+            }
+            throw err;
+          });
           if (discovered) {
             const isUsable = discovered.status?.toLowerCase() === 'running' && !!discovered.endpoint;
             if (isUsable) {
@@ -392,7 +500,14 @@ export class AutoscalerEngine {
                     : { instanceId: discovered.instanceId, endpoint: discovered.endpoint }),
                   ipAddress: discovered.ipAddress,
                   provider: cfg.provider,
-                }).catch((err) => this.logger.warn('[autoscaler] Failed to persist discovered instance:', err));
+                }).catch((err) => {
+                  this.logger.warn('[autoscaler] Failed to persist discovered instance:', err);
+                  this.emitError({
+                    operation: 'persistDiscoveredInstance', provider: cfg.provider,
+                    tierIndex, userId, message: err instanceof Error ? err.message : String(err),
+                    errorCode: 'PERSIST_FAILED', retryable: true,
+                  });
+                });
               }
             } else {
               this.logger.log(`[autoscaler] Discovered ${cfg.provider}: ${discovered.instanceId} unusable (status=${discovered.status}, endpoint=${discovered.endpoint || 'none'}) — creating new`);
@@ -401,16 +516,20 @@ export class AutoscalerEngine {
           }
           if (!discovered) {
             try {
-              const created = await client.createInstance(
-                {
-                  gpuTypes: cfg.gpuTypes ?? [],
-                  dockerImage: cfg.dockerImage,
-                  hfToken: cfg.hfToken,
-                  env: cfg.env,
-                  storageGb: cfg.storageGb,
-                },
-                { apiKey: cfg.apiKey!, authId: cfg.authId, hfToken: cfg.hfToken },
-                userId,
+              const created = await withStageTimeout(
+                client.createInstance(
+                  {
+                    gpuTypes: cfg.gpuTypes ?? [],
+                    dockerImage: cfg.dockerImage,
+                    hfToken: cfg.hfToken,
+                    env: cfg.env,
+                    storageGb: cfg.storageGb,
+                  },
+                  { apiKey: cfg.apiKey!, authId: cfg.authId, hfToken: cfg.hfToken },
+                  userId,
+                ),
+                timeouts.createMs,
+                'create',
               );
               cfg.instanceId = created.instanceId;
               if (created.endpoint) cfg.endpoint = created.endpoint;
@@ -421,7 +540,15 @@ export class AutoscalerEngine {
               justCreated = true;
               this.logger.log(`[autoscaler] Auto-created ${cfg.provider} machine: ${created.instanceId}`);
             } catch (createErr) {
+              const isTimeout = createErr instanceof StageTimeoutError;
               const msg = createErr instanceof Error ? createErr.message : 'auto-create failed';
+              this.emitError({
+                operation: 'triggerGpuBoot:createInstance', provider: cfg.provider,
+                tierIndex, userId, message: msg,
+                errorCode: isTimeout ? 'STAGE_TIMEOUT' : 'CREATE_FAILED',
+                retryable: isTimeout,
+                metadata: isTimeout ? { stage: 'create', timeoutMs: timeouts.createMs } : undefined,
+              });
               return { ok: false, reason: `${cfg.provider}: ${msg}` };
             }
           }
@@ -448,11 +575,26 @@ export class AutoscalerEngine {
       }
 
       try {
-        await client.startInstance(cfg.instanceId, {
-          apiKey: cfg.apiKey!,
-          authId: cfg.authId,
-        });
+        await withStageTimeout(
+          client.startInstance(cfg.instanceId, {
+            apiKey: cfg.apiKey!,
+            authId: cfg.authId,
+          }),
+          timeouts.startMs,
+          'start',
+        );
       } catch (startErr) {
+        // Stage timeout — don't retry, just fail fast
+        if (startErr instanceof StageTimeoutError) {
+          this.emitError({
+            operation: 'triggerGpuBoot:startInstance', provider: cfg.provider,
+            tierIndex, userId, instanceId: cfg.instanceId,
+            message: startErr.message,
+            errorCode: 'STAGE_TIMEOUT', retryable: true,
+            metadata: { stage: 'start', timeoutMs: timeouts.startMs },
+          });
+          return { ok: false, reason: `${cfg.provider}: ${startErr.message}` };
+        }
         const startMsg = startErr instanceof Error ? startErr.message : '';
         const isGone = startMsg.includes('não encontrada') || startMsg.includes('not found');
         const isExpired = startMsg.includes('não pode ser iniciada') || startMsg.includes('slot');
@@ -486,6 +628,11 @@ export class AutoscalerEngine {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'erro desconhecido';
       this.logger.warn(`[autoscaler] triggerGpuBoot tier ${tierIndex} (${cfg.provider}) failed:`, err);
+      this.emitError({
+        operation: 'triggerGpuBoot', provider: cfg.provider,
+        tierIndex, userId, instanceId: cfg.instanceId,
+        message: msg, retryable: false,
+      });
       return { ok: false, reason: msg };
     }
   }
@@ -563,6 +710,12 @@ export class AutoscalerEngine {
       const maxBootMs = bootTimeSecs * 2 * 1000;
       if (now - ts.bootTriggeredAt > maxBootMs) {
         this.logger.warn(`[autoscaler] Tier ${i} (${tierProvider}) boot timed out (pre-probe) — reverting to idle`);
+        this.emitError({
+          operation: 'bootTimeout', provider: tierProvider,
+          tierIndex: i, userId, instanceId: ts.discoveredInstanceId,
+          message: `Boot timed out after ${Math.round((now - ts.bootTriggeredAt) / 1000)}s (pre-probe)`,
+          errorCode: 'BOOT_TIMEOUT', retryable: true,
+        });
         const { newState, logEntry, cleanupConfig } = handleBootTimeout(i, ts, tiers[i], maxBootMs, now, 'pre-probe');
         tierStates[i] = newState;
         void this.lifecycleLogger.log({ userId, ...logEntry });
@@ -594,6 +747,8 @@ export class AutoscalerEngine {
         const ts = tierStates[i];
         const tierConfig = tiers[i];
         if (!ts || !tierConfig) continue;
+        // Skip manually stopped (user explicitly stopped this tier)
+        if ((ts as IdleTierState).manualStop) continue;
         // Skip unhealthy (too many boot failures) or in cooldown
         if ((ts as IdleTierState).unhealthy) continue;
         if ((ts as IdleTierState).cooldownUntil && Date.now() < (ts as IdleTierState).cooldownUntil!) continue;
@@ -641,6 +796,12 @@ export class AutoscalerEngine {
                   createdAt: bootTimestamp, orphanedBecause: 'state_reset_during_boot',
                 }).catch((err) => {
                   this.logger.warn(`[autoscaler] Failed to persist orphaned instance ${instanceId}: ${err instanceof Error ? err.message : String(err)}`);
+                  this.emitError({
+                    operation: 'persistOrphanedInstance', provider: tierConfig.provider,
+                    tierIndex: i, userId, instanceId,
+                    message: err instanceof Error ? err.message : String(err),
+                    errorCode: 'PERSIST_FAILED', retryable: false,
+                  });
                 });
               }
               void this.lifecycleLogger.log({
@@ -657,6 +818,11 @@ export class AutoscalerEngine {
 
             if (!ok) {
               this.logger.warn(`[autoscaler] Boot tier ${i} (${tierConfig.provider}) failed: ${reason ?? 'unknown'}`);
+              this.emitError({
+                operation: 'boot', provider: tierConfig.provider,
+                tierIndex: i, userId, message: reason ?? 'unknown',
+                errorCode: 'BOOT_FAILED', retryable: true,
+              });
               const failCount = (current.prevBootFailCount ?? 0) + 1;
               const durationMs = Date.now() - (current as BootingTierState).bootTriggeredAt;
               const newIdle: IdleTierState = {

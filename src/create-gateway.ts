@@ -80,6 +80,14 @@ export function createGateway(config: GatewayConfig): Gateway {
     ? { create: storage.createBenchmark.bind(storage), query: storage.queryBenchmarks.bind(storage) }
     : undefined;
 
+  const deploySessionStore = storage.createDeploySession && storage.updateDeploySession && storage.queryDeploySessions
+    ? {
+        create: storage.createDeploySession.bind(storage),
+        update: storage.updateDeploySession.bind(storage),
+        query: storage.queryDeploySessions.bind(storage),
+      }
+    : undefined;
+
   // ── Config loader ────────────────────────────────────────────────────────
 
   const loadConfig = config.loadConfig ?? ((userId: string) => loadAutoscalerConfig(userId, settingsStore));
@@ -104,6 +112,7 @@ export function createGateway(config: GatewayConfig): Gateway {
     lifecycleLogStore,
     userRoleResolver,
     benchmarkStore,
+    deploySessionStore,
     signGpuToken: (userId: string) => {
       try {
         return signGpuToken(userId);

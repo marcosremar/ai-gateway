@@ -5,6 +5,42 @@ export type GpuBootState = 'idle' | 'booting' | 'ready';
 export type ScaleTrigger = 'sessions' | 'latency' | 'manual' | 'predictive';
 export type GpuProvider = 'tensordock' | 'runpod' | 'vast' | 'modal' | 'skypilot';
 
+/**
+ * Per-stage timeout config (ms). Each stage of the boot pipeline has a hard
+ * deadline — if the stage doesn't complete in time it's aborted and the
+ * engine moves to the next tier in the fallback chain.
+ */
+export interface StageTimeouts {
+  /** Max time for discoverInstance (default: 30s) */
+  discoverMs?: number;
+  /** Max time for createInstance — includes offer search + API call + endpoint polling (default: 120s) */
+  createMs?: number;
+  /** Max time for startInstance on an existing stopped instance (default: 30s) */
+  startMs?: number;
+}
+
+/** Default stage timeouts per provider (ms) */
+export const DEFAULT_STAGE_TIMEOUTS: Record<string, Required<StageTimeouts>> = {
+  vast:       { discoverMs: 30_000, createMs: 120_000, startMs: 30_000 },
+  runpod:     { discoverMs: 30_000, createMs: 90_000,  startMs: 30_000 },
+  tensordock: { discoverMs: 30_000, createMs: 120_000, startMs: 30_000 },
+  modal:      { discoverMs: 15_000, createMs: 60_000,  startMs: 15_000 },
+};
+
+const FALLBACK_STAGE_TIMEOUTS: Required<StageTimeouts> = {
+  discoverMs: 30_000, createMs: 120_000, startMs: 30_000,
+};
+
+/** Resolve effective stage timeouts: tier config > provider defaults > fallback */
+export function resolveStageTimeouts(provider: string, overrides?: StageTimeouts): Required<StageTimeouts> {
+  const defaults = DEFAULT_STAGE_TIMEOUTS[provider] ?? FALLBACK_STAGE_TIMEOUTS;
+  return {
+    discoverMs: overrides?.discoverMs ?? defaults.discoverMs,
+    createMs: overrides?.createMs ?? defaults.createMs,
+    startMs: overrides?.startMs ?? defaults.startMs,
+  };
+}
+
 /** One GPU tier in the cascade: llm → tier[0] → tier[1] → tier[2] */
 export interface GpuTierConfig {
   provider: GpuProvider;
@@ -23,6 +59,10 @@ export interface GpuTierConfig {
   env?: Record<string, string>;
   /** Disk/volume storage in GB. 0 = no volume (for lightweight images with own CMD). */
   storageGb?: number;
+  /** Per-stage timeouts (ms). Overrides provider defaults. */
+  stageTimeouts?: StageTimeouts;
+  /** Optional region filter (e.g. 'US', 'EU', 'CA' for Vast; 'US-TX-3' for RunPod; city for TensorDock) */
+  region?: string;
 }
 
 export interface AutoScalerConfig {
@@ -56,6 +96,8 @@ export interface IdleTierState {
   bootFailCount?: number;
   /** Timestamp until which this tier is in cooldown (no re-boot) */
   cooldownUntil?: number;
+  /** True when user explicitly stopped this tier — prevents auto-boot until manual start */
+  manualStop?: boolean;
 }
 
 /** Tier boot has been triggered; waiting for health probe to pass */
@@ -94,6 +136,27 @@ export interface ReadyTierState {
 
 /** Discriminated union of all possible tier runtime states */
 export type GpuTierState = IdleTierState | BootingTierState | ReadyTierState;
+
+/** A persisted GPU deploy session record. */
+export interface DeploySessionRecord {
+  id: string;
+  provider: string;
+  gpuModel: string;
+  dockerImage?: string;
+  region?: string;
+  status: string; // 'deploying' | 'ready' | 'failed' | 'stopped' | 'deleted'
+  startedAt: string; // ISO
+  serverReadyAt?: string;
+  stoppedAt?: string;
+  provisionTimeS?: number;
+  errorMessage?: string;
+  providerInstanceId?: string;
+  endpoint?: string;
+  /** Health check latency in ms when deploy became ready */
+  healthMs?: number;
+  /** First inference latency in ms */
+  firstInferenceMs?: number;
+}
 
 export interface AutoScaleDecision {
   route: AutoScaleRoute;

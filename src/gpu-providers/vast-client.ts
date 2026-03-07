@@ -25,9 +25,12 @@ import type { AbstractGpuProviderOptions } from './abstract-provider';
 const VAST_API_BASE = 'https://console.vast.ai/api/v0';
 
 // ── Polling constants ─────────────────────────────────────────────────────────
-const POLL_BASE_MS = 3_000;
-const POLL_GROWTH = 1.5;
+const POLL_BASE_MS = 5_000;
+const POLL_GROWTH = 1.4;
 const POLL_MAX_MS = 30_000;
+// Vast.ai on-demand instances typically get an IP within 2 min.
+// bootTimeSecs=120 → we poll for up to 2 min here (IP assignment phase only).
+// The boot health poller (engine.ts) handles the subsequent "app ready" phase.
 const POLL_TOTAL_MAX_MS = 120_000;
 
 // ── Rate limiting ────────────────────────────────────────────────────────────
@@ -39,6 +42,7 @@ const RATE_LIMIT_429_MAX_RETRIES = 3;
 /** Check if an IP address is RFC1918 private / loopback / link-local (unreachable from internet). */
 function isPrivateIp(ip: string): boolean {
   if (!ip) return true;
+  if (ip === '0.0.0.0' || ip === '::') return true;
   if (ip.startsWith('10.')) return true;
   if (ip.startsWith('192.168.')) return true;
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
@@ -50,8 +54,11 @@ function isPrivateIp(ip: string): boolean {
 /** Normalize short GPU type names (e.g. 'RTX3090') to Vast.ai search names (e.g. 'RTX 3090') */
 function normalizeGpuNames(gpuTypes: string[]): string[] {
   return gpuTypes.map((t) => {
+    // Replace underscores with spaces (e.g. 'RTX_3090' → 'RTX 3090')
+    let name = t.replace(/_/g, ' ');
     // Add space before digits if missing (e.g. 'RTX3090' → 'RTX 3090', 'RTXA5000' → 'RTX A5000')
-    return t.replace(/^(RTX)(\d)/, '$1 $2').replace(/^(RTX)(A)/, '$1 $2');
+    name = name.replace(/^(RTX)(\d)/, '$1 $2').replace(/^(RTX)(A)/, '$1 $2');
+    return name;
   });
 }
 
@@ -66,7 +73,7 @@ export interface VastClientOptions extends AbstractGpuProviderOptions {}
 
 export class VastClient extends AbstractGpuProvider {
   readonly providerId = 'vast';
-  readonly bootTimeSecs = 300;
+  readonly bootTimeSecs = 120;
   private _lastRequestMs = 0;
   /** IPs of hosts where we recently created instances (cross-call dedup). */
   private _recentlyUsedIps = new Set<string>();
@@ -101,7 +108,14 @@ export class VastClient extends AbstractGpuProvider {
       }
     }
 
-    // All retries exhausted — return last 429 response
+    // All retries exhausted — emit error and return last 429 response
+    this.emitError({
+      operation: '_vastFetch',
+      message: `Rate limit exhausted after ${RATE_LIMIT_429_MAX_RETRIES} retries: ${url.replace(VAST_API_BASE, '')}`,
+      errorCode: 'HTTP_429',
+      httpStatus: 429,
+      retryable: true,
+    });
     return this.fetchRaw(url, init, timeout);
   }
 
@@ -110,10 +124,17 @@ export class VastClient extends AbstractGpuProvider {
     _gpuTypes: string[],
   ): Promise<GpuInstance | null> {
     const instances = await this.listInstances(credentials);
-    const running = instances.find(
-      (i) => i.status === 'running' || i.status === 'active',
+    // Prefer instances that are fully running with a reachable endpoint.
+    // Fall back to any non-terminal running instance (may still be booting).
+    const USABLE_STATUSES = new Set(['running', 'active', 'loading']);
+    const withEndpoint = instances.find(
+      (i) => USABLE_STATUSES.has(i.status?.toLowerCase() ?? '') && !!i.endpoint,
     );
-    return running ?? null;
+    if (withEndpoint) return withEndpoint;
+    const anyRunning = instances.find(
+      (i) => USABLE_STATUSES.has(i.status?.toLowerCase() ?? ''),
+    );
+    return anyRunning ?? null;
   }
 
   async createInstance(
@@ -124,14 +145,22 @@ export class VastClient extends AbstractGpuProvider {
     const { apiKey } = credentials;
     const headers = this.jsonHeaders(apiKey);
 
-    // ── 1. Search for cheapest available offer ─────────────────────────────
+    // ── 1. Auto-detect disk from Docker image if not specified ─────────────
+    const imageName = spec.dockerImage || 'marcosremar/parle-s2s-ultralight:latest';
+    let diskGb = spec.storageGb ?? 0;
+    if (diskGb <= 0) {
+      diskGb = await AbstractGpuProvider.estimateImageDiskGb(imageName, 20);
+      this.log.log(`[vast] Auto-detected disk size for ${imageName}: ${diskGb}GB`);
+    }
+
+    // ── 2. Search for cheapest available offer ─────────────────────────────
     const searchBody: Record<string, unknown> = {
       limit: 50,
       type: 'on-demand',
       rentable: { eq: true },
       rented: { eq: false },
       num_gpus: { eq: spec.gpuCount ?? 1 },
-      disk_space: { gte: spec.storageGb ?? 10 },
+      disk_space: { gte: diskGb },
       direct_port_count: { gte: 3 },   // Hosts with 3+ open ports have better networking
       static_ip: { eq: true },          // Stable IP (no NAT, no IP rotation)
       // Host quality filters — avoid broken hosts (CDI failures, outdated drivers, NAT issues)
@@ -145,6 +174,11 @@ export class VastClient extends AbstractGpuProvider {
     // Filter by GPU type if specified
     if (spec.gpuTypes?.length) {
       searchBody.gpu_name = { in: normalizeGpuNames(spec.gpuTypes) };
+    }
+
+    // Filter by region/geolocation if specified (e.g. 'US', 'EU', 'CA')
+    if (spec.region) {
+      searchBody.geolocation = { eq: spec.region };
     }
 
     let offers = await this._searchOffers(searchBody, headers);
@@ -185,8 +219,8 @@ export class VastClient extends AbstractGpuProvider {
       const hasDirectPorts = hasDirectPortOffers || (offer.direct_port_count as number ?? 0) >= 1;
       const createBody: Record<string, unknown> = {
         client_id: 'me',
-        image: spec.dockerImage || 'marcosremar/parle-s2s:latest',
-        disk: spec.storageGb ?? 10,
+        image: imageName,
+        disk: diskGb,
         runtype: 'args',        // preserve Docker ENTRYPOINT/CMD (don't inject SSH)
         // Vast.ai env dict: env vars as key-value + port mappings as "-p X:X": "1"
         // Port exposure MUST be in env dict — the separate 'ports' field is ignored
@@ -264,6 +298,12 @@ export class VastClient extends AbstractGpuProvider {
       }
     }
 
+    this.emitError({
+      operation: 'createInstance',
+      message: 'All offers exhausted on Vast.ai',
+      errorCode: 'NO_GPU_AVAILABLE',
+      retryable: false,
+    });
     throw new Error('Nenhum GPU disponível no Vast.ai (criação falhou em todos os offers)');
   }
 
@@ -310,6 +350,10 @@ export class VastClient extends AbstractGpuProvider {
       if (!deleteRes.ok) {
         const body = await deleteRes.text().catch(() => '');
         this.log.warn(`[vast] stopInstance(${instanceId}) endpoint delete failed: HTTP ${deleteRes.status} ${body.substring(0, 300)}`);
+        this.emitError({
+          operation: 'stopInstance', instanceId, message: `Endpoint delete failed: HTTP ${deleteRes.status}`,
+          httpStatus: deleteRes.status, retryable: deleteRes.status >= 500,
+        });
         throw new Error(`Vast endpoint delete failed for ${instanceId}: HTTP ${deleteRes.status} ${body.substring(0, 300)}`);
       }
       return;
@@ -330,6 +374,10 @@ export class VastClient extends AbstractGpuProvider {
         return;
       }
       this.log.warn(`[vast] stopInstance(${instanceId}) failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      this.emitError({
+        operation: 'stopInstance', instanceId, message: `Stop failed: HTTP ${res.status}`,
+        httpStatus: res.status, retryable: res.status >= 500,
+      });
       throw new Error(`Vast stop failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
     }
     this.log.log(`[vast] stopInstance(${instanceId}): paused (data preserved, restartable)`);
@@ -361,6 +409,10 @@ export class VastClient extends AbstractGpuProvider {
         return;
       }
       this.log.warn(`[vast] deleteInstance(${instanceId}) failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      this.emitError({
+        operation: 'deleteInstance', instanceId, message: `Delete failed: HTTP ${res.status}`,
+        httpStatus: res.status, retryable: res.status >= 500,
+      });
       throw new Error(`Vast delete failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
     }
     this.log.log(`[vast] deleteInstance(${instanceId}): permanently destroyed`);
@@ -598,6 +650,9 @@ export class VastClient extends AbstractGpuProvider {
     let elapsed = 0;
     let attempt = 0;
 
+    // Terminal statuses that mean the instance will never recover
+    const TERMINAL_STATUSES = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted']);
+
     while (elapsed < POLL_TOTAL_MAX_MS) {
       const delay = Math.min(POLL_BASE_MS * Math.pow(POLL_GROWTH, attempt), POLL_MAX_MS);
       await new Promise((r) => setTimeout(r, delay));
@@ -611,10 +666,30 @@ export class VastClient extends AbstractGpuProvider {
           endpoint = detail.endpoint;
           sshHost = detail.sshHost;
           sshPort = detail.sshPort;
-          if (endpoint) {
-            this.log.log(`[vast] Instance ${contractId} got endpoint after ${Math.round(elapsed / 1000)}s: ${endpoint}`);
+
+          // Bail early on terminal statuses — instance won't recover
+          if (TERMINAL_STATUSES.has(detail.status?.toLowerCase())) {
+            this.log.warn(`[vast] Instance ${contractId} in terminal status '${detail.status}' after ${Math.round(elapsed / 1000)}s — aborting poll`);
+            this.emitError({
+              operation: '_pollForEndpoint', instanceId: `inst-${contractId}`,
+              message: `Instance reached terminal status '${detail.status}' after ${Math.round(elapsed / 1000)}s`,
+              errorCode: 'TERMINAL_STATUS', retryable: false,
+              metadata: { status: detail.status, elapsedSecs: Math.round(elapsed / 1000) },
+            });
             break;
           }
+
+          if (endpoint) {
+            this.log.log(`[vast] Instance ${contractId} got endpoint after ${Math.round(elapsed / 1000)}s: ${endpoint} (status=${detail.status})`);
+            break;
+          }
+
+          // Log progress on every ~30s boundary to aid debugging
+          if (attempt % 3 === 0) {
+            this.log.log(`[vast] Instance ${contractId} still loading (${Math.round(elapsed / 1000)}s, status=${detail.status ?? 'unknown'}, ip=${ip || 'none'}, ssh=${sshHost ? `${sshHost}:${sshPort}` : 'none'})`);
+          }
+        } else {
+          this.log.log(`[vast] Instance ${contractId} not found in API yet (${Math.round(elapsed / 1000)}s)`);
         }
       } catch (err) {
         this.log.warn(`[vast] Polling instance ${contractId} attempt ${attempt} failed: ${this.errMsg(err)}`);
@@ -622,7 +697,13 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     if (!endpoint) {
-      this.log.warn(`[vast] Instance ${contractId} has no endpoint after ${Math.round(elapsed / 1000)}s of polling (ip=${ip || 'none'})`);
+      this.log.warn(`[vast] Instance ${contractId} has no endpoint after ${Math.round(elapsed / 1000)}s of polling (ip=${ip || 'none'}, ssh=${sshHost ? `${sshHost}:${sshPort}` : 'none'})`);
+      this.emitError({
+        operation: '_pollForEndpoint', instanceId: `inst-${contractId}`,
+        message: `No endpoint after ${Math.round(elapsed / 1000)}s of polling`,
+        errorCode: 'TIMEOUT', retryable: false,
+        metadata: { ip, sshHost, sshPort, elapsedSecs: Math.round(elapsed / 1000) },
+      });
     }
 
     return { endpoint, ip, sshHost, sshPort };
@@ -683,32 +764,36 @@ export class VastClient extends AbstractGpuProvider {
 
     // Reject private/unreachable IPs (NAT-only hosts reporting RFC1918 as public)
     if (isPrivateIp(ip)) {
-      this.log.warn(`[vast] Instance has private IP ${ip} as public_ipaddr — unreachable`);
+      this.log.warn(`[vast] Instance has private IP ${ip} as public_ipaddr — unreachable (will use SSH health check)`);
+      this.emitError({
+        operation: '_parseInstance', message: `Private IP ${ip} as public_ipaddr — unreachable`,
+        errorCode: 'PRIVATE_IP', retryable: false, metadata: { ip },
+      });
+      // Still return SSH info so the boot poller can use SSH health checks
       return { ip, endpoint: '', status, sshHost, sshPort };
     }
 
     // Parse ports — Vast.ai format: { "8000/tcp": [{ "HostIp": "...", "HostPort": "..." }] }
     const ports = inst.ports as Record<string, unknown> | undefined;
     if (ports) {
-      const p8000 = ports['8000/tcp'] as Array<{ HostPort?: string }> | undefined;
-      const hostPort = p8000?.[0]?.HostPort;
-      if (hostPort && Number(hostPort) > 0) {
-        return { ip, endpoint: `http://${ip}:${hostPort}`, status, sshHost, sshPort };
+      // Check both '8000/tcp' and '8000' keys (API inconsistency)
+      const p8000 = (ports['8000/tcp'] ?? ports['8000']) as Array<{ HostPort?: string; HostIp?: string }> | undefined;
+      const entry = p8000?.find((e) => Number(e.HostPort) > 0);
+      if (entry?.HostPort) {
+        // Use HostIp if it's a public routable IP, otherwise fall back to instance ip
+        const hostIp = entry.HostIp && !isPrivateIp(entry.HostIp) ? entry.HostIp : ip;
+        return { ip, endpoint: `http://${hostIp}:${entry.HostPort}`, status, sshHost, sshPort };
       }
     }
 
-    // Fallback: direct port mapping (skip invalid ports like -1 during loading)
+    // Fallback: direct port mapping (skip invalid ports like -1 or 0 during loading)
     const directPort = inst.direct_port_start as number | undefined;
     if (directPort && directPort > 0) {
       return { ip, endpoint: `http://${ip}:${directPort}`, status, sshHost, sshPort };
     }
 
-    // No valid port yet — return empty endpoint (instance still loading)
-    if (!ports && (!directPort || directPort <= 0)) {
-      return { ip, endpoint: '', status, sshHost, sshPort };
-    }
-
-    return { ip, endpoint: `http://${ip}:8000`, status, sshHost, sshPort };
+    // No valid port mapping yet — instance still loading or using SSH-only access
+    return { ip, endpoint: '', status, sshHost, sshPort };
   }
 
   /**

@@ -157,12 +157,12 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
     });
   };
 
-  // Registry
+  // Registry — pass hooks to providers for error emission
   const registry = new GpuProviderRegistry();
-  registry.register(new RunpodClient({ onInstancePersist }));
-  registry.register(new TensordockClient({ onInstancePersist }));
-  registry.register(new ModalClient());
-  registry.register(new VastClient({ onInstancePersist }));
+  registry.register(new RunpodClient({ onInstancePersist, hooks }));
+  registry.register(new TensordockClient({ onInstancePersist, hooks }));
+  registry.register(new ModalClient({ hooks }));
+  registry.register(new VastClient({ onInstancePersist, hooks }));
 
   // Core modules
   const latencyTracker = new LatencyTracker(stateStore);
@@ -176,7 +176,7 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
   });
 
   // Reconcile deps
-  const reconcileDeps = { settingsStore, registry };
+  const reconcileDeps = { settingsStore, registry, hooks };
 
   // Benchmark tracker
   const benchmarkTracker = new BenchmarkTracker(stateStore);

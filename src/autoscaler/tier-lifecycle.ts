@@ -37,6 +37,8 @@ export interface TierDetail {
   unhealthy?: boolean;
   bootFailCount?: number;
   cooldownUntil?: number;
+  /** True when user explicitly stopped this tier — auto-boot is suppressed */
+  manualStop?: boolean;
   gpuTypes?: string[];
 }
 
@@ -78,15 +80,18 @@ export async function stopTier(deps: TierLifecycleDeps, userId: string, tierInde
     const tierState = tierStates[tierIndex] ?? { state: 'idle', tierIndex } as IdleTierState;
     const previousState = tierState.state;
 
-    // If idle, nothing to do — return success
+    // If idle, ensure manualStop is set (idempotent) and return success
     if (tierState.state === 'idle') {
+      if (!(tierState as IdleTierState).manualStop) {
+        deps.engine.setTierState(userId, tierIndex, { ...tierState, manualStop: true } as IdleTierState);
+      }
       return { ok: true, previousState: 'idle', newState: 'idle', provider: tierConfig.provider };
     }
 
     const instanceId = resolveInstanceId(tierConfig, tierState);
     if (!instanceId || !tierConfig.apiKey) {
-      // No instance to stop — just update state
-      deps.engine.setTierState(userId, tierIndex, { state: 'idle', tierIndex } as IdleTierState);
+      // No instance to stop — just update state (manualStop prevents auto-reboot)
+      deps.engine.setTierState(userId, tierIndex, { state: 'idle', tierIndex, manualStop: true } as IdleTierState);
       return { ok: true, previousState, newState: 'idle', provider: tierConfig.provider };
     }
 
@@ -106,7 +111,8 @@ export async function stopTier(deps: TierLifecycleDeps, userId: string, tierInde
       deps.engine.cancelBootPoller(userId, tierIndex);
     }
 
-    deps.engine.setTierState(userId, tierIndex, { state: 'idle', tierIndex } as IdleTierState);
+    // manualStop prevents the autoscaler from immediately re-booting this tier
+    deps.engine.setTierState(userId, tierIndex, { state: 'idle', tierIndex, manualStop: true } as IdleTierState);
 
     void deps.lifecycleLogger.log({
       userId, tierIndex, provider: tierConfig.provider,
@@ -137,6 +143,11 @@ export async function startTier(deps: TierLifecycleDeps, userId: string, tierInd
     // Already booting/ready — nothing to do
     if (tierState.state === 'booting' || tierState.state === 'ready') {
       return { ok: true, previousState, newState: tierState.state, provider: tierConfig.provider };
+    }
+
+    // Clear manualStop flag — user explicitly wants this tier running
+    if (tierState.state === 'idle' && (tierState as IdleTierState).manualStop) {
+      deps.engine.setTierState(userId, tierIndex, { ...tierState, manualStop: undefined } as IdleTierState);
     }
 
     const instanceId = tierConfig.instanceId;
@@ -208,7 +219,7 @@ export async function deleteTier(deps: TierLifecycleDeps, userId: string, tierIn
       }
     }
 
-    deps.engine.setTierState(userId, tierIndex, { state: 'idle', tierIndex } as IdleTierState);
+    deps.engine.setTierState(userId, tierIndex, { state: 'idle', tierIndex, manualStop: true } as IdleTierState);
 
     void deps.lifecycleLogger.log({
       userId, tierIndex, provider: tierConfig.provider,
@@ -284,6 +295,7 @@ export async function deployTier(deps: TierLifecycleDeps, userId: string, tierIn
         hfToken: tierConfig.hfToken,
         env: tierConfig.env,
         storageGb: tierConfig.storageGb,
+        region: tierConfig.region,
       },
       { apiKey: tierConfig.apiKey, authId: tierConfig.authId, hfToken: tierConfig.hfToken },
       userId,
@@ -367,6 +379,7 @@ export async function getTierDetail(deps: TierLifecycleDeps, userId: string, tie
     detail.unhealthy = (tierState as IdleTierState).unhealthy;
     detail.bootFailCount = (tierState as IdleTierState).bootFailCount;
     detail.cooldownUntil = (tierState as IdleTierState).cooldownUntil;
+    detail.manualStop = (tierState as IdleTierState).manualStop;
   }
 
   return detail;

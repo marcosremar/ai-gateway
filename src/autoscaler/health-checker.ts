@@ -63,8 +63,10 @@ export async function probeAllTiers(
               if (monitorHealthy) {
                 healthy = true;
               }
-            } catch {
-              // Monitor unreachable — no-op
+            } catch (monErr) {
+              // Monitor unreachable — log for visibility but don't fail the check
+              const { defaultLogger: defLog } = await import('../logger');
+              defLog.warn(`[health-checker] Monitor checkHealth(${ts.discoveredInstanceId}) failed: ${monErr instanceof Error ? monErr.message : String(monErr)}`);
             }
           }
         }
@@ -138,6 +140,13 @@ export function processHealthResults(
 
       if (elapsed > maxBootMs) {
         logger.warn(`[autoscaler] Tier ${tierIndex} (${tierProvider}) boot timed out after ${Math.round(elapsed / 1000)}s — reverting to idle`);
+        emitHook(hooks, 'onError', {
+          source: 'health-checker', provider: tierProvider,
+          tierIndex, instanceId: ts.discoveredInstanceId,
+          operation: 'bootTimeout',
+          message: `Boot timed out after ${Math.round(elapsed / 1000)}s`,
+          errorCode: 'BOOT_TIMEOUT', retryable: true, timestamp: Date.now(),
+        });
         const { newState, logEntry, cleanupConfig } = handleBootTimeout(
           tierIndex, ts, tiers[tierIndex], maxBootMs, now, 'health-probe',
         );
@@ -155,6 +164,12 @@ export function processHealthResults(
       // Ready tier went unhealthy — fallback
       const tierProvider = tiers[tierIndex]?.provider ?? '';
       logger.warn(`[autoscaler] Tier ${tierIndex} (${tierProvider}) unhealthy — marking for fallback`);
+      emitHook(hooks, 'onError', {
+        source: 'health-checker', provider: tierProvider,
+        tierIndex, operation: 'healthProbe',
+        message: `Ready tier went unhealthy — marking for fallback`,
+        errorCode: 'HEALTH_LOST', retryable: true, timestamp: Date.now(),
+      });
       const newIdle: IdleTierState = { state: 'idle', tierIndex, unhealthy: true };
       tierStates[tierIndex] = newIdle;
       emitHook(hooks, 'onHealthChange', {

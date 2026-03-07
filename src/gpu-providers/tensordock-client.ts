@@ -256,7 +256,12 @@ export class TensordockClient extends AbstractGpuProvider {
 
     for (const gpuShort of gpuTypesToTry) {
       const gpuId = GPU_ID_MAP[gpuShort] || gpuShort;
-      const candidates = await findCheapestLocations(gpuId, headers, 3);
+      let candidates = await findCheapestLocations(gpuId, headers, 3);
+      // Filter by region (city name) if specified
+      if (spec.region && candidates.length > 0) {
+        const regionLower = spec.region.toLowerCase();
+        candidates = candidates.filter(c => c.city.toLowerCase().includes(regionLower));
+      }
       if (candidates.length === 0) {
         this.log.log(`[tensordock] ${gpuShort} unavailable, trying next...`);
         continue;
@@ -306,11 +311,19 @@ export class TensordockClient extends AbstractGpuProvider {
           }, TIMEOUTS.create);
           if (!res.ok) {
             this.log.warn(`[tensordock] create at ${candidate.city} failed HTTP ${res.status}`);
+            this.emitError({
+              operation: 'createInstance', message: `Create at ${candidate.city} failed: HTTP ${res.status}`,
+              httpStatus: res.status, retryable: res.status >= 500,
+            });
             continue;
           }
           const data = await res.json();
           if (data.error || (data.status && data.status >= 400)) {
             this.log.warn(`[tensordock] create at ${candidate.city} body error: ${JSON.stringify(data.error).substring(0, 300)}`);
+            this.emitError({
+              operation: 'createInstance', message: `Create at ${candidate.city} body error: ${JSON.stringify(data.error).substring(0, 200)}`,
+              retryable: true,
+            });
             continue;
           }
 
@@ -356,10 +369,18 @@ export class TensordockClient extends AbstractGpuProvider {
           return { instanceId, instanceName, endpoint, monitorUrl, ipAddress: ip, status: attrs.status || 'creating', gpuType: gpuShort, portForwards: pfs };
         } catch (e) {
           this.log.warn(`[tensordock] create at ${candidate.city} error: ${this.errMsg(e)}`);
+          this.emitError({
+            operation: 'createInstance', message: `Create at ${candidate.city}: ${this.errMsg(e)}`,
+            retryable: true,
+          });
         }
       }
     }
 
+    this.emitError({
+      operation: 'createInstance', message: 'All GPU types exhausted on TensorDock',
+      errorCode: 'NO_GPU_AVAILABLE', retryable: false,
+    });
     throw new Error('Nenhum GPU disponível no TensorDock (todos os tipos esgotados)');
   }
 
@@ -440,6 +461,10 @@ export class TensordockClient extends AbstractGpuProvider {
     }, TIMEOUTS.write);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
+      this.emitError({
+        operation: 'stopInstance', instanceId, message: `Stop failed: HTTP ${res.status}`,
+        httpStatus: res.status, retryable: res.status >= 500,
+      });
       throw new Error(`TensorDock stop failed: HTTP ${res.status} ${body.substring(0, 300)}`);
     }
   }
@@ -452,6 +477,10 @@ export class TensordockClient extends AbstractGpuProvider {
     }, TIMEOUTS.write);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
+      this.emitError({
+        operation: 'deleteInstance', instanceId, message: `Delete failed: HTTP ${res.status}`,
+        httpStatus: res.status, retryable: res.status >= 500,
+      });
       throw new Error(`TensorDock delete failed: HTTP ${res.status} ${body.substring(0, 300)}`);
     }
   }
@@ -471,6 +500,10 @@ export class TensordockClient extends AbstractGpuProvider {
         });
         if (!res.ok) {
           this.log.warn(`[tensordock] v0 list failed: HTTP ${res.status} (credentials may be invalid)`);
+          this.emitError({
+            operation: 'listInstances', message: `v0 list failed: HTTP ${res.status}`,
+            httpStatus: res.status, retryable: res.status >= 500,
+          });
         } else {
           const data = (await res.json()) as Record<string, unknown>;
           const vms = (data.virtualmachines ?? data.servers ?? {}) as Record<string, Record<string, unknown>>;
@@ -502,6 +535,10 @@ export class TensordockClient extends AbstractGpuProvider {
       }, TIMEOUTS.read);
       if (!res.ok) {
         this.log.warn(`[tensordock] v2 /instances returned HTTP ${res.status} (credentials may be invalid)`);
+        this.emitError({
+          operation: 'listInstances', message: `v2 /instances failed: HTTP ${res.status}`,
+          httpStatus: res.status, retryable: res.status >= 500,
+        });
         return [];
       }
       const data = (await res.json()) as Record<string, unknown>;
@@ -524,6 +561,9 @@ export class TensordockClient extends AbstractGpuProvider {
       }
     } catch (err) {
       this.log.warn(`[tensordock] listInstances error: ${this.errMsg(err)}`);
+      this.emitError({
+        operation: 'listInstances', message: this.errMsg(err), retryable: true,
+      });
     }
     return instances;
   }

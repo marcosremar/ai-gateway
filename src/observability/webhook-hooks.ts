@@ -55,7 +55,7 @@ export function createWebhookHooks(config: WebhookConfig): Partial<GatewayHooks>
   const hooks: Partial<GatewayHooks> = {};
   const hookNames: HookName[] = [
     'onRequestStart', 'onRequestEnd', 'onFallback',
-    'onScaleUp', 'onScaleDown', 'onCostAlert', 'onHealthChange',
+    'onScaleUp', 'onScaleDown', 'onCostAlert', 'onHealthChange', 'onError',
   ];
 
   for (const name of hookNames) {

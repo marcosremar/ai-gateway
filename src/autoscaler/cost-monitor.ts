@@ -204,7 +204,7 @@ export async function runCostMonitorCycle(deps: CostMonitorDeps): Promise<CostMo
     registry, loadAllAccounts, onOrphanDetected,
     autoStop, autoDelete,
     probeHealth: shouldProbe = true,
-    staleGraceMinutes = 20,
+    staleGraceMinutes = 10,
   } = deps;
 
   const healthProbe = deps._probeHealth ?? probeGpuHealth;
@@ -277,6 +277,11 @@ export async function runCostMonitorCycle(deps: CostMonitorDeps): Promise<CostMo
         userId: account.userId,
         provider: account.provider,
         error: `listInstances failed: ${String(err)}`,
+      });
+      emitHook(deps.hooks, 'onError', {
+        source: 'cost-monitor', userId: account.userId, provider: account.provider,
+        operation: 'listInstances', message: String(err),
+        retryable: true, timestamp: Date.now(),
       });
       continue;
     }
@@ -394,6 +399,11 @@ export async function runCostMonitorCycle(deps: CostMonitorDeps): Promise<CostMo
             provider: account.provider,
             error: `Auto-stop ${instance.instanceId} failed: ${String(err)}`,
           });
+          emitHook(deps.hooks, 'onError', {
+            source: 'cost-monitor', userId: account.userId, provider: account.provider,
+            instanceId: instance.instanceId, operation: 'autoStop',
+            message: String(err), retryable: true, timestamp: Date.now(),
+          });
         }
       }
     }
@@ -475,6 +485,11 @@ export async function runCostMonitorCycle(deps: CostMonitorDeps): Promise<CostMo
             provider: account.provider,
             error: `Auto-delete ${instance.instanceId} failed: ${String(err)}`,
           });
+          emitHook(deps.hooks, 'onError', {
+            source: 'cost-monitor', userId: account.userId, provider: account.provider,
+            instanceId: instance.instanceId, operation: 'autoDelete',
+            message: String(err), retryable: true, timestamp: Date.now(),
+          });
         }
       }
     }
@@ -512,7 +527,7 @@ export function _resetStaleTracking(): void {
  */
 export function startCostMonitorTicker(
   deps: CostMonitorDeps,
-  intervalMs: number = 10 * 60 * 1000,
+  intervalMs: number = 5 * 60 * 1000,
 ): () => void {
   const log = deps.logger ?? defaultLogger;
   // Run immediately on start

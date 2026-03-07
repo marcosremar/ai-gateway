@@ -9,6 +9,7 @@
 import type { ProviderCredentials } from './gpu-providers/types';
 import type { GpuLifecycleLogEntry } from './autoscaler/lifecycle-logger';
 import type { ProviderAccount } from './autoscaler/cost-monitor';
+import type { DeploySessionRecord } from './types';
 
 export interface GatewayStorage {
   // ── Required (minimum for autoscaler to work) ──────────────────────────────
@@ -58,4 +59,35 @@ export interface GatewayStorage {
 
   /** Load all provider accounts across all users (for cost monitor sweeps). */
   loadAllAccounts?(): Promise<ProviderAccount[]>;
+
+  // ── Deploy Sessions (optional) ──────────────────────────────────────────────
+
+  /** Create a new deploy session record. Returns the session ID. */
+  createDeploySession?(data: {
+    userId: string;
+    provider: string;
+    gpuModel: string;
+    dockerImage?: string;
+    region?: string;
+  }): Promise<string>;
+
+  /** Update an existing deploy session record. */
+  updateDeploySession?(id: string, data: Partial<{
+    status: string;
+    serverReadyAt: Date;
+    stoppedAt: Date;
+    provisionTimeS: number;
+    errorMessage: string;
+    providerInstanceId: string;
+    endpoint: string;
+    /** Merge into metadata JSON (e.g. healthMs, firstInferenceMs) */
+    metadata: Record<string, unknown>;
+  }>): Promise<void>;
+
+  /** Query deploy session records for given users. */
+  queryDeploySessions?(params: {
+    userIds: string[];
+    limit: number;
+    sortOrder: 'asc' | 'desc';
+  }): Promise<DeploySessionRecord[]>;
 }

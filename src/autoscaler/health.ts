@@ -1,32 +1,66 @@
+import { defaultLogger } from '../logger';
+
 /** Probe a GPU endpoint's /health to check if it's serving. */
 export async function probeGpuHealth(endpoint: string): Promise<boolean> {
+  if (!endpoint) return false;
   try {
-    const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(5000) });
+    const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return false;
     const data = await res.json();
-    return data.status === 'healthy';
+    // Accept both { status: 'healthy' } and { status: 'ok' } for flexibility
+    return data.status === 'healthy' || data.status === 'ok';
   } catch {
     return false;
   }
 }
 
-/** Probe health via SSH — for providers where HTTP is unreachable (Vast.ai without direct ports). */
+/**
+ * Probe health via SSH — for providers where HTTP is unreachable (Vast.ai without direct ports).
+ * Retries up to SSH_MAX_RETRIES times with a short delay between attempts to handle
+ * transient SSH connection failures (host key issues, connection resets during boot).
+ */
 export async function probeGpuHealthSsh(sshHost: string, sshPort: number): Promise<boolean> {
-  try {
-    const { execFile } = await import('child_process');
-    const { promisify } = await import('util');
-    const execFileAsync = promisify(execFile);
-    const { stdout } = await execFileAsync('ssh', [
-      '-o', 'StrictHostKeyChecking=no',
-      '-o', 'ConnectTimeout=5',
-      '-o', 'BatchMode=yes',
-      '-p', String(sshPort),
-      `root@${sshHost}`,
-      'curl -s http://localhost:8000/health',
-    ], { timeout: 10_000 });
-    const data = JSON.parse(stdout);
-    return data.status === 'healthy';
-  } catch {
-    return false;
+  const SSH_MAX_RETRIES = 3;
+  const SSH_RETRY_DELAY_MS = 3_000;
+
+  for (let attempt = 1; attempt <= SSH_MAX_RETRIES; attempt++) {
+    try {
+      const { execFile } = await import('child_process');
+      const { promisify } = await import('util');
+      const execFileAsync = promisify(execFile);
+      const { stdout } = await execFileAsync('ssh', [
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=/dev/null',  // avoid stale host key errors
+        '-o', 'ConnectTimeout=8',
+        '-o', 'ServerAliveInterval=5',
+        '-o', 'ServerAliveCountMax=2',
+        '-o', 'BatchMode=yes',
+        '-p', String(sshPort),
+        `root@${sshHost}`,
+        'curl -s --max-time 5 http://localhost:8000/health 2>/dev/null || echo "{}"',
+      ], { timeout: 15_000 });
+      const trimmed = stdout.trim();
+      if (!trimmed || trimmed === '{}') {
+        // curl returned empty or default — app not ready yet (not an SSH failure)
+        return false;
+      }
+      const data = JSON.parse(trimmed);
+      return data.status === 'healthy' || data.status === 'ok';
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt < SSH_MAX_RETRIES) {
+        // Transient SSH error — wait and retry
+        await new Promise((r) => setTimeout(r, SSH_RETRY_DELAY_MS));
+        continue;
+      }
+      // All retries exhausted — SSH unreachable or app not up
+      const isSshRefused = msg.includes('Connection refused') || msg.includes('Connection reset') || msg.includes('No route');
+      if (!isSshRefused) {
+        // Unexpected error (e.g. JSON parse) — log it for debugging
+        defaultLogger.warn(`[ssh-health] ${sshHost}:${sshPort} attempt ${attempt} failed: ${msg}`);
+      }
+      return false;
+    }
   }
+  return false;
 }

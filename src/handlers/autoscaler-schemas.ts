@@ -11,6 +11,11 @@ export const AutoscalerTierSchema = z.object({
   authId: z.string().optional(),
   endpoint: z.string().optional(),
   gpuTypes: z.array(z.string()).optional(),
+  hfToken: z.string().optional(),
+  dockerImage: z.string().optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  storageGb: z.number().optional(),
+  region: z.string().optional(),
 });
 
 export const AutoscalerSettingsSchema = z.object({

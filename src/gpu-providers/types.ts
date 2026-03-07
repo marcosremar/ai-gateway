@@ -37,6 +37,8 @@ export interface InstanceSpec {
   templateHashId?: string;
   /** Cancel creation immediately if GPU unavailable (Vast.ai fail-fast) */
   cancelUnavail?: boolean;
+  /** Region filter (e.g. 'US', 'EU' for Vast; 'US-TX-3' for RunPod; city name for TensorDock) */
+  region?: string;
 }
 
 /** Callback to persist instance data to the host app's settings store. */

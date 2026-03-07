@@ -1,5 +1,6 @@
 import type { Autoscaler } from '../factory';
 import type { SettingsStore, CredentialStore, LifecycleLogStore, UserRoleResolver, BenchmarkStore } from '../deps';
+import type { DeploySessionRecord } from '../types';
 
 /** Generic handler result — handlers return this instead of framework-specific responses. */
 export interface HandlerResult<T = unknown> {
@@ -15,6 +16,11 @@ export interface HandlerDeps {
   lifecycleLogStore?: LifecycleLogStore;
   userRoleResolver?: UserRoleResolver;
   benchmarkStore?: BenchmarkStore;
+  deploySessionStore?: {
+    create(data: { userId: string; provider: string; gpuModel: string; dockerImage?: string; region?: string }): Promise<string>;
+    update(id: string, data: Partial<{ status: string; serverReadyAt: Date; stoppedAt: Date; provisionTimeS: number; errorMessage: string; providerInstanceId: string; endpoint: string; metadata: Record<string, unknown> }>): Promise<void>;
+    query(params: { userIds: string[]; limit: number; sortOrder: 'asc' | 'desc' }): Promise<DeploySessionRecord[]>;
+  };
   signGpuToken?: (userId: string) => string | undefined;
 }
 

@@ -78,6 +78,10 @@ export class RunpodClient extends AbstractGpuProvider {
       }, TIMEOUTS.read);
       if (!res.ok) {
         this.log.warn(`[runpod] discoverInstance: HTTP ${res.status}`);
+        this.emitError({
+          operation: 'discoverInstance', message: `HTTP ${res.status}`,
+          httpStatus: res.status, retryable: res.status >= 500,
+        });
         return null;
       }
       const pods = (await res.json()) as Array<Record<string, unknown>>;
@@ -96,6 +100,9 @@ export class RunpodClient extends AbstractGpuProvider {
       };
     } catch (err) {
       this.log.warn(`[runpod] discoverInstance failed: ${this.errMsg(err)}`);
+      this.emitError({
+        operation: 'discoverInstance', message: this.errMsg(err), retryable: true,
+      });
       return null;
     }
   }
@@ -126,59 +133,99 @@ export class RunpodClient extends AbstractGpuProvider {
     if (needsVolume) {
       envVars.HF_HOME = '/workspace/huggingface';
     }
+
+    // Auto-detect container disk size from Docker image when not explicitly configured
+    const imageName = spec.dockerImage || 'marcosremar/parle-s2s-ultralight:latest';
+    let diskGb = spec.storageGb ?? 0;
+    if (diskGb <= 0) {
+      diskGb = await AbstractGpuProvider.estimateImageDiskGb(imageName, 20);
+      this.log.log(`[runpod] Auto-detected disk size for ${imageName}: ${diskGb}GB`);
+    }
+
     const basePodConfig: Record<string, unknown> = {
       name: podName,
-      imageName: spec.dockerImage || 'marcosremar/parle-s2s:latest',
+      imageName,
       gpuCount: spec.gpuCount ?? 1,
       supportPublicIp: true,
-      // Container disk: minimum 10GB even for lightweight (RunPod requires it).
+      // Container disk: auto-sized from image, minimum 10GB (RunPod requirement).
       // Volume: only for full pipeline images that need model cache persistence.
-      containerDiskInGb: Math.max(spec.storageGb ?? 50, 10),
-      volumeInGb: needsVolume ? (spec.storageGb ?? 50) : 0,
+      containerDiskInGb: Math.max(diskGb, 10),
+      volumeInGb: needsVolume ? Math.max(diskGb, 10) : 0,
       ...(needsVolume ? { volumeMountPath: '/workspace' } : {}),
       // IMPORTANT: Do NOT expose the same port on both HTTP and TCP — RunPod's proxy
       // will permanently return 404 if you do. Use HTTP for proxy access, TCP for SSH.
       ports: ['8000/http', '22/tcp'],
       env: envVars,
+      // Region filter: e.g. 'US-TX-3', 'EU-RO-1', 'CA-MTL-1'
+      ...(spec.region ? { dataCenterId: spec.region } : {}),
     };
 
     const rawGpuTypes = spec.gpuTypes?.length ? spec.gpuTypes : RUNPOD_GPU_FALLBACK;
     // Map short names (e.g. "RTX 3090") to RunPod API names (e.g. "NVIDIA GeForce RTX 3090")
     const gpuTypesToTry = [...new Set(rawGpuTypes.map((t) => RUNPOD_GPU_TYPE_MAP[t] ?? t))];
 
+    const TRANSIENT_RETRY_MAX = 2;
+    const TRANSIENT_RETRY_DELAY_MS = 3_000;
+
     for (const gpuType of gpuTypesToTry) {
-      const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods`, {
-        method: 'POST',
-        headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...basePodConfig, gpuTypeIds: [gpuType] }),
-      }, TIMEOUTS.create);
+      let lastErrText = '';
+      let success = false;
 
-      if (res.ok) {
-        const data = (await res.json()) as Record<string, unknown>;
-        const podId = data.id as string;
-        const endpoint = this.resolveEndpoint(data);
+      for (let attempt = 0; attempt <= TRANSIENT_RETRY_MAX; attempt++) {
+        if (attempt > 0) {
+          this.log.log(`[runpod] Retrying create pod with ${gpuType} (attempt ${attempt + 1}/${TRANSIENT_RETRY_MAX + 1})`);
+          await new Promise((r) => setTimeout(r, TRANSIENT_RETRY_DELAY_MS * attempt));
+        }
 
-        // Use the proxy URL as-is — it's the reliable way to reach the pod.
-        // Direct IPs (from publicIp/portMappings) may not be reachable from
-        // all networks. The proxy URL always works once the pod is running.
+        const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods`, {
+          method: 'POST',
+          headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...basePodConfig, gpuTypeIds: [gpuType] }),
+        }, TIMEOUTS.create);
 
-        await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
-          podId, endpoint, status: 'CREATING', podName,
-        });
+        if (res.ok) {
+          const data = (await res.json()) as Record<string, unknown>;
+          const podId = data.id as string;
+          const endpoint = this.resolveEndpoint(data);
 
-        this.log.log(`[runpod] Created pod ${podName} (${podId}) with ${gpuType} → ${endpoint}`);
-        return { instanceId: podId, instanceName: podName, endpoint, status: 'CREATING', gpuType };
+          // Use the proxy URL as-is — it's the reliable way to reach the pod.
+          // Direct IPs (from publicIp/portMappings) may not be reachable from
+          // all networks. The proxy URL always works once the pod is running.
+
+          await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
+            podId, endpoint, status: 'CREATING', podName,
+          });
+
+          this.log.log(`[runpod] Created pod ${podName} (${podId}) with ${gpuType} → ${endpoint}`);
+          return { instanceId: podId, instanceName: podName, endpoint, status: 'CREATING', gpuType };
+        }
+
+        lastErrText = await res.text().catch(() => '');
+        const unavailable = lastErrText.includes('no instances') || lastErrText.includes('unavailable');
+        if (unavailable) {
+          this.log.log(`[runpod] ${gpuType} unavailable, trying next GPU type...`);
+          success = false;
+          break; // Don't retry unavailable — no point, move to next GPU type
+        }
+
+        // Transient errors (5xx, timeout) — retry
+        const isTransient = res.status >= 500 || res.status === 429 || res.status === 0;
+        if (isTransient && attempt < TRANSIENT_RETRY_MAX) {
+          this.log.warn(`[runpod] Create pod transient error HTTP ${res.status} — will retry`);
+          continue;
+        }
+
+        this.log.warn(`[runpod] Create pod failed for ${gpuType}: HTTP ${res.status} ${lastErrText.substring(0, 300)}`);
+        break;
       }
 
-      const errText = await res.text().catch(() => '');
-      const unavailable = errText.includes('no instances') || errText.includes('unavailable');
-      if (unavailable) {
-        this.log.log(`[runpod] ${gpuType} unavailable, trying next...`);
-        continue;
-      }
-      this.log.warn(`[runpod] Create pod failed: HTTP ${res.status} ${errText.substring(0, 300)}`);
+      if (success) break; // shouldn't reach here (returns inside loop), but safety
     }
 
+    this.emitError({
+      operation: 'createInstance', message: 'All GPU types exhausted on RunPod',
+      errorCode: 'NO_GPU_AVAILABLE', retryable: false,
+    });
     throw new Error('Nenhum GPU type disponível no RunPod (todos esgotados)');
   }
 
@@ -227,6 +274,10 @@ export class RunpodClient extends AbstractGpuProvider {
       if (!res.ok) {
         const body = await res.text().catch(() => '');
         this.log.warn(`[runpod] listInstances failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+        this.emitError({
+          operation: 'listInstances', message: `HTTP ${res.status}`,
+          httpStatus: res.status, retryable: res.status >= 500,
+        });
         return [];
       }
       const pods = (await res.json()) as Array<Record<string, unknown>>;
@@ -243,6 +294,9 @@ export class RunpodClient extends AbstractGpuProvider {
       });
     } catch (err) {
       this.log.warn(`[runpod] listInstances failed: ${this.errMsg(err)}`);
+      this.emitError({
+        operation: 'listInstances', message: this.errMsg(err), retryable: true,
+      });
       return [];
     }
   }
@@ -256,6 +310,10 @@ export class RunpodClient extends AbstractGpuProvider {
       if (res.status === 404) return null;
       if (!res.ok) {
         this.log.warn(`[runpod] getInstanceStatus(${instanceId}): HTTP ${res.status}`);
+        this.emitError({
+          operation: 'getInstanceStatus', instanceId, message: `HTTP ${res.status}`,
+          httpStatus: res.status, retryable: res.status >= 500,
+        });
         return null;
       }
       const data = (await res.json()) as Record<string, unknown>;
@@ -265,6 +323,9 @@ export class RunpodClient extends AbstractGpuProvider {
       return (data.desiredStatus as string) ?? null;
     } catch (err) {
       this.log.warn(`[runpod] getInstanceStatus(${instanceId}) failed: ${this.errMsg(err)}`);
+      this.emitError({
+        operation: 'getInstanceStatus', instanceId, message: this.errMsg(err), retryable: true,
+      });
       return null;
     }
   }

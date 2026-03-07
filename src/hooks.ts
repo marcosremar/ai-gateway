@@ -77,6 +77,21 @@ export interface HealthChangeEvent {
   timestamp: number;
 }
 
+export interface ErrorEvent {
+  userId?: string;
+  source: 'gpu-provider' | 'autoscaler' | 'health-checker' | 'cost-monitor' | 'watchdog' | 'cleanup' | 'request';
+  provider?: string;
+  instanceId?: string;
+  tierIndex?: number;
+  operation: string;
+  message: string;
+  errorCode?: string;
+  httpStatus?: number;
+  retryable: boolean;
+  metadata?: Record<string, unknown>;
+  timestamp: number;
+}
+
 // ── Hook interface ────────────────────────────────────────────────────────────
 
 export interface GatewayHooks {
@@ -87,6 +102,7 @@ export interface GatewayHooks {
   onScaleDown?: (event: ScaleDownEvent) => void | Promise<void>;
   onCostAlert?: (event: CostAlertEvent) => void | Promise<void>;
   onHealthChange?: (event: HealthChangeEvent) => void | Promise<void>;
+  onError?: (event: ErrorEvent) => void | Promise<void>;
 }
 
 // ── Emitter ───────────────────────────────────────────────────────────────────
@@ -100,6 +116,7 @@ type HookPayloadMap = {
   onScaleDown: ScaleDownEvent;
   onCostAlert: CostAlertEvent;
   onHealthChange: HealthChangeEvent;
+  onError: ErrorEvent;
 };
 
 /**

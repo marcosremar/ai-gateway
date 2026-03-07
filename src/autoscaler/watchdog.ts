@@ -62,6 +62,11 @@ export async function runWatchdogCycle(deps: WatchdogDeps): Promise<void> {
       await runWatchdogForUser(deps, userId, config);
     } catch (err) {
       log.warn('[watchdog] failed for user', userId, err);
+      emitHook(deps.hooks, 'onError', {
+        source: 'watchdog', userId, operation: 'runWatchdogForUser',
+        message: err instanceof Error ? err.message : String(err),
+        retryable: true, timestamp: Date.now(),
+      });
     }
   }
 }
@@ -124,7 +129,7 @@ async function runWatchdogForUser(
       ? Math.min(1 + Math.floor((activeSessions - th) / th), totalTiers)
       : 0;
 
-  const idleGraceMs = (config.idleGraceMinutes ?? 15) * 60_000;
+  const idleGraceMs = (config.idleGraceMinutes ?? 8) * 60_000;
   const now = Date.now();
 
   for (let i = totalTiers - 1; i >= neededTiers; i--) {
@@ -168,6 +173,12 @@ async function runWatchdogForUser(
       });
     } catch (err) {
       log.warn(`[watchdog] Failed to stop tier ${i}:`, err);
+      emitHook(hooks, 'onError', {
+        source: 'watchdog', userId, tierIndex: i, provider: tierConfig.provider,
+        instanceId: tierConfig.instanceId,
+        operation: 'stopTier', message: err instanceof Error ? err.message : String(err),
+        retryable: true, timestamp: Date.now(),
+      });
     }
   }
 
@@ -214,8 +225,13 @@ async function runWatchdogForUser(
 
   const changed = tierStates.some((ts, i) => ts.state !== prevStates[i]);
   if (changed) {
-    void persistence.persistTierStates(userId, tierStates).catch((err) =>
-      log.warn('[watchdog] Background persist failed:', err),
-    );
+    void persistence.persistTierStates(userId, tierStates).catch((err) => {
+      log.warn('[watchdog] Background persist failed:', err);
+      emitHook(hooks, 'onError', {
+        source: 'watchdog', userId, operation: 'persistTierStates',
+        message: err instanceof Error ? err.message : String(err),
+        errorCode: 'PERSIST_FAILED', retryable: true, timestamp: Date.now(),
+      });
+    });
   }
 }

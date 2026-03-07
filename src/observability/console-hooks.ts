@@ -21,5 +21,6 @@ export function createConsoleHooks(logger?: Logger): Partial<GatewayHooks> {
     onScaleDown: (data) => emit('onScaleDown', data),
     onCostAlert: (data) => emit('onCostAlert', data),
     onHealthChange: (data) => emit('onHealthChange', data),
+    onError: (data) => log.warn(JSON.stringify({ event: 'onError', ...data as object })),
   };
 }

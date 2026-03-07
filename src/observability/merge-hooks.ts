@@ -8,7 +8,7 @@ type HookName = keyof GatewayHooks;
 
 const HOOK_NAMES: HookName[] = [
   'onRequestStart', 'onRequestEnd', 'onFallback',
-  'onScaleUp', 'onScaleDown', 'onCostAlert', 'onHealthChange',
+  'onScaleUp', 'onScaleDown', 'onCostAlert', 'onHealthChange', 'onError',
 ];
 
 /**

@@ -142,7 +142,7 @@ type GpuTierState = IdleTierState | BootingTierState | ReadyTierState; // discri
 
 ## Known Issues
 
-- **Vast.ai**: HTTP access not viable (SSH proxy blocks external access). Not recommended for autoscaler.
+- **Vast.ai**: Use `VastClient` with `runtype: 'args'` and port mapping via env dict (`'-p 8000:8000': '1'`). Tested & working (commit 6e656ee3). Do NOT use SkyPilot for Vast.ai — its static catalog is incompatible with the dynamic marketplace.
 - **RunPod ports**: Never expose same port as both HTTP and TCP (`ports: ['8000/http', '8000/tcp']` → 404). Use `['8000/http', '22/tcp']`.
 - **RunPod storage**: `storageGb: 0` = no volume/no dockerStartCmd override; `containerDiskInGb` minimum 10GB.
 

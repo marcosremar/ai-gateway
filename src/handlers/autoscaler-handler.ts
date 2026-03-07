@@ -232,6 +232,20 @@ export async function handleAutoscalerAction(
       return ok(result);
     }
 
+    case 'stop-all-tiers': {
+      // Mark ALL tiers as manually stopped — prevents auto-reboot.
+      // Used by frontend after SkyPilot stop or any external cluster shutdown.
+      const config = await loadConfig(userId);
+      const results: Array<{ tier: number; ok: boolean; error?: string }> = [];
+      if (config?.tiers) {
+        for (let i = 0; i < config.tiers.length; i++) {
+          const result = await autoscaler.stopTier(userId, i);
+          results.push({ tier: i, ok: result.ok, error: result.error });
+        }
+      }
+      return ok({ success: true, results });
+    }
+
     case 'start-tier': {
       const { tierIndex } = body;
       if (typeof tierIndex !== 'number') return err('tierIndex is required');
@@ -664,6 +678,51 @@ export async function handleAutoscalerAction(
       });
 
       return ok({ benchmarks });
+    }
+
+    // ── Deploy Sessions ──────────────────────────────────────────────────
+
+    case 'create-deploy-session': {
+      if (!deps.deploySessionStore) return err('Deploy session store not configured', 500);
+      const { provider: p, gpuModel: gm, dockerImage: di, region: rg } = body;
+      const sessionId = await deps.deploySessionStore.create({
+        userId,
+        provider: String(p ?? 'unknown'),
+        gpuModel: String(gm ?? 'unknown'),
+        dockerImage: di ? String(di) : undefined,
+        region: rg ? String(rg) : undefined,
+      });
+      return ok({ sessionId });
+    }
+
+    case 'update-deploy-session': {
+      if (!deps.deploySessionStore) return err('Deploy session store not configured', 500);
+      const { id: sessionId, ...updateData } = body;
+      if (!sessionId) return err('id is required');
+      const mapped: Record<string, unknown> = {};
+      if (updateData.status) mapped.status = String(updateData.status);
+      if (updateData.serverReadyAt) mapped.serverReadyAt = new Date(String(updateData.serverReadyAt));
+      if (updateData.stoppedAt) mapped.stoppedAt = new Date(String(updateData.stoppedAt));
+      if (updateData.provisionTimeS != null) mapped.provisionTimeS = Number(updateData.provisionTimeS);
+      if (updateData.errorMessage) mapped.errorMessage = String(updateData.errorMessage);
+      if (updateData.providerInstanceId) mapped.providerInstanceId = String(updateData.providerInstanceId);
+      if (updateData.endpoint) mapped.endpoint = String(updateData.endpoint);
+      if (updateData.metadata && typeof updateData.metadata === 'object') mapped.metadata = updateData.metadata as Record<string, unknown>;
+      await deps.deploySessionStore.update(String(sessionId), mapped);
+      return ok({ success: true });
+    }
+
+    case 'deploy-sessions': {
+      if (!deps.deploySessionStore) return err('Deploy session store not configured', 500);
+      const userIds = deps.userRoleResolver
+        ? await deps.userRoleResolver.resolveVisibleUserIds(userId)
+        : [userId];
+      const sessions = await deps.deploySessionStore.query({
+        userIds,
+        limit: Math.min(Number(body.limit) || 10, 100),
+        sortOrder: 'desc',
+      });
+      return ok({ sessions });
     }
 
     default:

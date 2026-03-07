@@ -1,6 +1,8 @@
 import type { GpuTierConfig } from '../types';
 import type { GpuProviderRegistry } from '../gpu-providers/registry';
+import type { GatewayHooks } from '../hooks';
 import type { Logger } from '../deps';
+import { emitHook } from '../hooks';
 import { defaultLogger } from '../logger';
 
 /**
@@ -11,6 +13,7 @@ export async function cleanupProviderInstance(
   registry: GpuProviderRegistry,
   reason: string,
   logger?: Logger,
+  hooks?: GatewayHooks,
 ): Promise<void> {
   const log = logger ?? defaultLogger;
   if (!tierConfig.instanceId || !tierConfig.apiKey) return;
@@ -24,5 +27,11 @@ export async function cleanupProviderInstance(
     log.log(`[Autoscaler] Stopped instance ${tierConfig.instanceId}: ${reason}`);
   } catch (err) {
     log.warn(`[Autoscaler] Failed to stop ${tierConfig.instanceId} (${reason}):`, err);
+    emitHook(hooks, 'onError', {
+      source: 'cleanup', provider: tierConfig.provider,
+      instanceId: tierConfig.instanceId,
+      operation: 'cleanupStop', message: err instanceof Error ? err.message : String(err),
+      retryable: true, timestamp: Date.now(),
+    });
   }
 }

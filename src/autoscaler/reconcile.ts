@@ -1,5 +1,7 @@
 import type { SettingsStore, Logger } from '../deps';
 import type { GpuProviderRegistry } from '../gpu-providers/registry';
+import type { GatewayHooks } from '../hooks';
+import { emitHook } from '../hooks';
 import { defaultLogger } from '../logger';
 
 /** Rate-limit reconcile to once per 10 min per user */
@@ -16,6 +18,7 @@ const PERSIST_GRACE_MS = 25 * 60 * 1000;
 export interface ReconcileDeps {
   settingsStore: SettingsStore;
   registry: GpuProviderRegistry;
+  hooks?: GatewayHooks;
   logger?: Logger;
 }
 
@@ -35,6 +38,11 @@ export function scheduleReconcile(
   const log = deps.logger ?? defaultLogger;
   void reconcileStaleConfigs(deps, userId).catch((err) => {
     log.warn('[autoscaler] Auto-reconcile failed:', err);
+    emitHook(deps.hooks, 'onError', {
+      source: 'autoscaler', userId, operation: 'reconcile',
+      message: err instanceof Error ? err.message : String(err),
+      retryable: true, timestamp: Date.now(),
+    });
   });
 }
 

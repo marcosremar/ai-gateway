@@ -25,6 +25,7 @@ export type {
   GpuBootState,
   ScaleTrigger,
   GpuProvider,
+  StageTimeouts,
   GpuTierConfig,
   AutoScalerConfig,
   GpuTierState,
@@ -32,7 +33,9 @@ export type {
   BootingTierState,
   ReadyTierState,
   AutoScaleDecision,
+  DeploySessionRecord,
 } from './types';
+export { DEFAULT_STAGE_TIMEOUTS, resolveStageTimeouts } from './types';
 
 // ── DI Interfaces ────────────────────────────────────────────────────────────
 export type {
@@ -87,7 +90,7 @@ export { loadAutoscalerConfig } from './autoscaler/config-loader';
 // ── Autoscaler core (advanced use) ──────────────────────────────────────────
 export { probeGpuHealth, probeGpuHealthSsh } from './autoscaler/health';
 export { PROVIDER_BOOT_SECS } from './factory';
-export { MAX_BOOT_FAILURES, BOOT_COOLDOWN_BASE_MS, BOOT_COOLDOWN_MAX_MS } from './autoscaler/engine';
+export { MAX_BOOT_FAILURES, BOOT_COOLDOWN_BASE_MS, BOOT_COOLDOWN_MAX_MS, StageTimeoutError } from './autoscaler/engine';
 export type { AutoscalerEngineOptions } from './autoscaler/engine';
 export { handleBootTimeout } from './autoscaler/boot-timeout';
 export { probeAllTiers, processHealthResults } from './autoscaler/health-checker';
@@ -133,6 +136,7 @@ export type {
   ScaleDownEvent,
   CostAlertEvent,
   HealthChangeEvent,
+  ErrorEvent,
 } from './hooks';
 
 // ── Health-Aware Load Balancing (F10) ─────────────────────────────────────
