@@ -16,15 +16,16 @@ import { AbstractGpuProvider } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 
 // Lazy-load child_process to avoid breaking browser bundles (Next.js client-side).
-let _execAsync: ((cmd: string, opts?: { env?: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number }) => Promise<{ stdout: string; stderr: string }>) | null = null;
-async function getExecAsync() {
-  if (!_execAsync) {
+// Uses execFile (no shell) to prevent command injection.
+let _execFileAsync: ((file: string, args: string[], opts?: { env?: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number }) => Promise<{ stdout: string; stderr: string }>) | null = null;
+async function getExecFileAsync() {
+  if (!_execFileAsync) {
     if (typeof window !== 'undefined') throw new Error('ModalClient is server-side only');
-    const { exec } = await import('child_process');
+    const { execFile } = await import('child_process');
     const { promisify } = await import('util');
-    _execAsync = promisify(exec);
+    _execFileAsync = promisify(execFile);
   }
-  return _execAsync!;
+  return _execFileAsync!;
 }
 
 function splitModalKey(apiKey: string): { tokenId: string; tokenSecret: string } {
@@ -81,8 +82,8 @@ export class ModalClient extends AbstractGpuProvider {
     this.workspacePromise = (async () => {
       try {
         const env = buildModalEnv(credentials.apiKey);
-        const { stdout } = await (await getExecAsync())(
-          'python3 -m modal profile current',
+        const { stdout } = await (await getExecFileAsync())(
+          'python3', ['-m', 'modal', 'profile', 'current'],
           { env, timeout: 10_000 },
         );
         this.workspace = stdout.trim();
@@ -149,8 +150,8 @@ export class ModalClient extends AbstractGpuProvider {
     const env = buildModalEnv(credentials.apiKey);
 
     try {
-      const { stdout, stderr } = await (await getExecAsync())(
-        `python3 -m modal deploy ${deployFile}`,
+      const { stdout, stderr } = await (await getExecFileAsync())(
+        'python3', ['-m', 'modal', 'deploy', deployFile],
         { env, timeout: 180_000, maxBuffer: 10 * 1024 * 1024 },
       );
 
@@ -199,8 +200,8 @@ export class ModalClient extends AbstractGpuProvider {
   async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const env = buildModalEnv(credentials.apiKey);
     try {
-      await (await getExecAsync())(
-        `python3 -m modal app stop ${instanceId}`,
+      await (await getExecFileAsync())(
+        'python3', ['-m', 'modal', 'app', 'stop', instanceId],
         { env, timeout: 30_000 },
       );
     } catch (err) {
@@ -236,8 +237,8 @@ export class ModalClient extends AbstractGpuProvider {
     try {
       // Try JSON output first (newer modal CLI versions)
       try {
-        const { stdout: jsonOut } = await (await getExecAsync())(
-          'python3 -m modal app list --json',
+        const { stdout: jsonOut } = await (await getExecFileAsync())(
+          'python3', ['-m', 'modal', 'app', 'list', '--json'],
           { env, timeout: 30_000 },
         );
         const apps = JSON.parse(jsonOut) as Array<Record<string, unknown>>;
@@ -248,8 +249,8 @@ export class ModalClient extends AbstractGpuProvider {
         // --json not supported, fall through to table parsing
       }
 
-      const { stdout } = await (await getExecAsync())(
-        'python3 -m modal app list',
+      const { stdout } = await (await getExecFileAsync())(
+        'python3', ['-m', 'modal', 'app', 'list'],
         { env, timeout: 30_000 },
       );
 

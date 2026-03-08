@@ -18,8 +18,24 @@ export async function handleAudioSpeech(
     speed?: number;
   };
 
-  if (!body.model || !body.input || !body.voice) {
-    return { status: 400, body: { error: { message: 'model, input, and voice are required', type: 'invalid_request_error' } } };
+  if (!body.model || typeof body.model !== 'string') {
+    return { status: 400, body: { error: { message: 'model is required', type: 'invalid_request_error' } } };
+  }
+  if (!body.input || typeof body.input !== 'string') {
+    return { status: 400, body: { error: { message: 'input text is required', type: 'invalid_request_error' } } };
+  }
+  if (!body.voice || typeof body.voice !== 'string') {
+    return { status: 400, body: { error: { message: 'voice is required', type: 'invalid_request_error' } } };
+  }
+  if (body.input.length > 4096) {
+    return { status: 400, body: { error: { message: 'input text exceeds 4096 characters', type: 'invalid_request_error' } } };
+  }
+  if (body.speed !== undefined && (typeof body.speed !== 'number' || body.speed < 0.25 || body.speed > 4.0)) {
+    return { status: 400, body: { error: { message: 'speed must be between 0.25 and 4.0', type: 'invalid_request_error' } } };
+  }
+  const validFormats = ['mp3', 'opus', 'aac', 'flac', 'wav', 'pcm'];
+  if (body.response_format && !validFormats.includes(body.response_format)) {
+    return { status: 400, body: { error: { message: `response_format must be one of: ${validFormats.join(', ')}`, type: 'invalid_request_error' } } };
   }
 
   const provider = ttsProviders[body.model];
@@ -47,9 +63,10 @@ export async function handleAudioSpeech(
       body: result.audio,
     };
   } catch (err) {
+    console.error(`[audio-speech] TTS error for model ${body.model}:`, err);
     return {
       status: 500,
-      body: { error: { message: String(err), type: 'server_error' } },
+      body: { error: { message: 'Speech synthesis failed', type: 'server_error' } },
     };
   }
 }

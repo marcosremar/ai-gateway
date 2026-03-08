@@ -24,8 +24,17 @@ export async function handleChatCompletions(
     response_format?: { type: 'json_object' | 'text' };
   };
 
-  if (!body.model) {
+  if (!body.model || typeof body.model !== 'string') {
     return { status: 400, body: { error: { message: 'model is required', type: 'invalid_request_error' } } };
+  }
+  if (!Array.isArray(body.messages) || body.messages.length === 0) {
+    return { status: 400, body: { error: { message: 'messages array is required', type: 'invalid_request_error' } } };
+  }
+  if (body.temperature !== undefined && (typeof body.temperature !== 'number' || body.temperature < 0 || body.temperature > 2)) {
+    return { status: 400, body: { error: { message: 'temperature must be between 0 and 2', type: 'invalid_request_error' } } };
+  }
+  if (body.max_tokens !== undefined && (typeof body.max_tokens !== 'number' || body.max_tokens < 1 || body.max_tokens > 128000)) {
+    return { status: 400, body: { error: { message: 'max_tokens must be between 1 and 128000', type: 'invalid_request_error' } } };
   }
 
   const provider = chatProviders[body.model];
@@ -110,9 +119,10 @@ export async function handleChatCompletions(
       timestamp: Date.now(),
     });
 
+    console.error(`[chat-completions] Error for model ${body.model}:`, err);
     return {
       status: 500,
-      body: { error: { message: String(err), type: 'server_error' } },
+      body: { error: { message: 'Chat completion failed', type: 'server_error' } },
     };
   }
 }

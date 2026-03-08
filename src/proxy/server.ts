@@ -4,6 +4,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'http';
+import { randomUUID } from 'crypto';
 import { validateAuth } from './middleware/auth';
 import { RateLimiter } from './middleware/rate-limit';
 import { handleChatCompletions } from './routes/chat-completions';
@@ -13,18 +14,39 @@ import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModels } from './routes/models';
 import type { ProxyConfig, ProxyRequest, ProxyResponse } from './types';
 
-function readBody(req: IncomingMessage): Promise<Buffer> {
+/** Max request body size: 100MB (audio files can be large) */
+const MAX_BODY_SIZE = 100 * 1024 * 1024;
+
+function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    let totalSize = 0;
+    req.on('data', (chunk: Buffer) => {
+      totalSize += chunk.length;
+      if (totalSize > maxSize) {
+        req.destroy();
+        reject(new Error('Request body too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
 
-function sendResponse(res: ServerResponse, proxyRes: ProxyResponse): void {
+/** Security headers applied to all responses */
+const SECURITY_HEADERS: Record<string, string> = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+};
+
+function sendResponse(res: ServerResponse, proxyRes: ProxyResponse, requestId: string): void {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Request-Id': requestId,
+    ...SECURITY_HEADERS,
     ...proxyRes.headers,
   };
 
@@ -39,8 +61,13 @@ function sendResponse(res: ServerResponse, proxyRes: ProxyResponse): void {
   }
 }
 
-function sendError(res: ServerResponse, status: number, message: string): void {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+function sendError(res: ServerResponse, status: number, message: string, requestId?: string): void {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...SECURITY_HEADERS,
+    ...(requestId ? { 'X-Request-Id': requestId } : {}),
+  };
+  res.writeHead(status, headers);
   res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
 }
 
@@ -49,6 +76,11 @@ interface MultipartPart {
   filename?: string;
   data: Buffer;
 }
+
+/** Max size for a single text field in multipart (1MB) */
+const MAX_FIELD_SIZE = 1 * 1024 * 1024;
+/** Max number of parts in multipart request */
+const MAX_PARTS = 20;
 
 function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
   const parts: MultipartPart[] = [];
@@ -59,6 +91,8 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
   if (start === -1) return parts;
 
   while (true) {
+    if (parts.length >= MAX_PARTS) break;
+
     start += boundaryBuf.length;
     // Skip \r\n after boundary
     if (body[start] === 0x0d && body[start + 1] === 0x0a) start += 2;
@@ -82,6 +116,13 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
     const nameMatch = headerStr.match(/name="([^"]+)"/);
     const filenameMatch = headerStr.match(/filename="([^"]+)"/);
 
+    // Enforce size limit on non-file text fields
+    if (!filenameMatch && partData.length > MAX_FIELD_SIZE) {
+      console.warn(`[multipart] Field "${nameMatch?.[1]}" exceeds ${MAX_FIELD_SIZE} byte limit, skipping`);
+      start = nextBoundary;
+      continue;
+    }
+
     parts.push({
       name: nameMatch?.[1],
       filename: filenameMatch?.[1],
@@ -103,6 +144,7 @@ export function createProxyServer(config: ProxyConfig): Server {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const method = req.method?.toUpperCase() || 'GET';
     const url = req.url || '/';
+    const requestId = (req.headers['x-request-id'] as string) || randomUUID();
 
     // CORS preflight
     if (method === 'OPTIONS') {
@@ -110,6 +152,8 @@ export function createProxyServer(config: ProxyConfig): Server {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'X-Request-Id': requestId,
+        ...SECURITY_HEADERS,
       });
       res.end();
       return;
@@ -118,15 +162,15 @@ export function createProxyServer(config: ProxyConfig): Server {
     // Auth
     const authHeader = req.headers.authorization;
     if (!validateAuth(authHeader, apiKeys)) {
-      sendError(res, 401, 'Invalid or missing API key');
+      sendError(res, 401, 'Invalid or missing API key', requestId);
       return;
     }
 
     // Rate limit
     if (rateLimiter) {
-      const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
-      if (!rateLimiter.check(ip)) {
-        sendError(res, 429, 'Rate limit exceeded');
+      const clientId = RateLimiter.clientId(req);
+      if (!rateLimiter.check(clientId)) {
+        sendError(res, 429, 'Rate limit exceeded', requestId);
         return;
       }
     }
@@ -134,13 +178,13 @@ export function createProxyServer(config: ProxyConfig): Server {
     // Block direct streaming transport routes — clients must use POST /v1/speech
     const path = url.split('?')[0];
     if (path === '/api/stream-audio' || path === '/ws/stream' || path === '/api/offer') {
-      sendError(res, 410, `Streaming transport ${path} is removed. Use POST /v1/speech instead.`);
+      sendError(res, 410, `Streaming transport ${path} is removed. Use POST /v1/speech instead.`, requestId);
       return;
     }
 
     // Block WebSocket upgrades to streaming paths
     if (req.headers.upgrade?.toLowerCase() === 'websocket') {
-      sendError(res, 410, 'WebSocket transport is removed. Use POST /v1/speech instead.');
+      sendError(res, 410, 'WebSocket transport is removed. Use POST /v1/speech instead.', requestId);
       return;
     }
 
@@ -159,6 +203,10 @@ export function createProxyServer(config: ProxyConfig): Server {
       let body: unknown = {};
       if (rawBody.length > 0) {
         const contentType = req.headers['content-type'] || '';
+        if (!contentType) {
+          sendError(res, 400, 'Content-Type header is required for POST requests', requestId);
+          return;
+        }
         if (contentType.includes('application/json')) {
           try { body = JSON.parse(rawBody.toString()); } catch { body = {}; }
         } else if (contentType.includes('multipart/form-data')) {
@@ -224,9 +272,10 @@ export function createProxyServer(config: ProxyConfig): Server {
         proxyRes = { status: 404, body: { error: { message: `Route not found: ${method} ${url}`, type: 'invalid_request_error' } } };
       }
 
-      sendResponse(res, proxyRes);
+      sendResponse(res, proxyRes, requestId);
     } catch (err) {
-      sendError(res, 500, String(err));
+      console.error(`[ai-gateway] Internal error (${requestId}):`, err);
+      sendError(res, 500, 'Internal server error', requestId);
     }
   });
 

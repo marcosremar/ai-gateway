@@ -19,8 +19,18 @@ export async function handleAudioTranscriptions(
     response_format?: string;
   };
 
-  if (!body.model) {
+  if (!body.model || typeof body.model !== 'string') {
     return { status: 400, body: { error: { message: 'model is required', type: 'invalid_request_error' } } };
+  }
+  if (req.rawBody.length === 0) {
+    return { status: 400, body: { error: { message: 'audio data is required', type: 'invalid_request_error' } } };
+  }
+  if (req.rawBody.length > 25 * 1024 * 1024) {
+    return { status: 400, body: { error: { message: 'audio file exceeds 25MB limit', type: 'invalid_request_error' } } };
+  }
+  const validResponseFormats = ['json', 'text', 'srt', 'verbose_json', 'vtt'];
+  if (body.response_format && !validResponseFormats.includes(body.response_format)) {
+    return { status: 400, body: { error: { message: `response_format must be one of: ${validResponseFormats.join(', ')}`, type: 'invalid_request_error' } } };
   }
 
   const provider = sttProviders[body.model];
@@ -47,9 +57,10 @@ export async function handleAudioTranscriptions(
       body: { text: result.text },
     };
   } catch (err) {
+    console.error(`[audio-transcriptions] STT error for model ${body.model}:`, err);
     return {
       status: 500,
-      body: { error: { message: String(err), type: 'server_error' } },
+      body: { error: { message: 'Transcription failed', type: 'server_error' } },
     };
   }
 }

@@ -1,5 +1,25 @@
 // @parle/ai-gateway — Unified AI Gateway + GPU autoscaler
 
+// ── HTTP Client SDK ─────────────────────────────────────────────────────────
+export { GatewayHttpClient, GatewayHttpError, CircuitOpenError as HttpCircuitOpenError } from '../sdk/node';
+export { CircuitBreaker as HttpCircuitBreaker } from '../sdk/node';
+export type {
+  GatewayHttpClientConfig,
+  RetryConfig,
+  CircuitBreakerConfig as HttpCircuitBreakerConfig,
+  TimeoutConfig,
+  HealthStatus,
+  ComponentHealth,
+  GatewayMetrics,
+  TranscribeResult as HttpTranscribeResult,
+  TranslateResult as HttpTranslateResult,
+  PipelineResult as HttpPipelineResult,
+  PipelineOptions as HttpPipelineOptions,
+  PipelineTiming as HttpPipelineTiming,
+  DeployOptions as HttpDeployOptions,
+  GpuStatus as HttpGpuStatus,
+} from '../sdk/node';
+
 // ── Unified Gateway API ──────────────────────────────────────────────────────
 export { createGateway } from './create-gateway';
 export type { GatewayConfig } from './create-gateway';

@@ -2,15 +2,15 @@ import type { GpuInstance, InstanceSpec, ProviderCredentials } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 
-/** GPU types to try in order of preference (cheapest first).
+/** GPU types to try in order of preference.
  *  Must match RunPod's REST API enum values exactly.
- *  Pricing (approx): A5000 $0.16/h → 3090 $0.22/h → A6000 $0.33/h → 4090 $0.34/h → A40 $0.35/h */
+ *  RTX 5090 first (fastest), then fallback to cheaper/available alternatives. */
 export const RUNPOD_GPU_FALLBACK = [
   'NVIDIA GeForce RTX 5090',
   'NVIDIA GeForce RTX 4090',
-  'NVIDIA RTX A5000',
-  'NVIDIA GeForce RTX 3090',
   'NVIDIA RTX A6000',
+  'NVIDIA GeForce RTX 3090',
+  'NVIDIA RTX A5000',
   'NVIDIA A40',
 ];
 
@@ -157,6 +157,9 @@ export class RunpodClient extends AbstractGpuProvider {
       // will permanently return 404 if you do. Use HTTP for proxy access, TCP for SSH.
       ports: ['8000/http', '22/tcp'],
       env: envVars,
+      // Spot instance: Community Cloud + interruptible for lower cost
+      cloudType: 'COMMUNITY',
+      interruptible: true,
       // Region filter: e.g. 'US-TX-3', 'EU-RO-1', 'CA-MTL-1'
       ...(spec.region ? { dataCenterId: spec.region } : {}),
     };
@@ -378,7 +381,8 @@ export class RunpodClient extends AbstractGpuProvider {
         costPerHr: (data.costPerHr as number) ?? null,
         uptimeSecs,
       };
-    } catch {
+    } catch (err) {
+      this.log.warn(`[runpod] getInstanceDetail(${instanceId}) failed: ${this.errMsg(err)}`);
       return null;
     }
   }
