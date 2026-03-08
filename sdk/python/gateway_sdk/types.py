@@ -87,11 +87,14 @@ class GpuStatus:
     elapsed_sec: int
     started_at: int
     retry_count: int
+    provider: str = ""   # 'runpod' | 'vast' | ''
+    alert: str = ""      # e.g. "RunPod blocked, using Vast.ai fallback"
 
 
 @dataclass
 class DeployOptions:
     api_key: str
+    vast_api_key: str = ""
     docker_image: str = ""
     gpu_types: Optional[list[str]] = None
 

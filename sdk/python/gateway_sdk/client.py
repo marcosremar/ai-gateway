@@ -176,6 +176,8 @@ class GatewaySDK:
         """Deploy a GPU pod (non-blocking — returns immediately, poll gpu_status())."""
         http = self._get_http()
         body: dict = {"apiKey": options.api_key}
+        if options.vast_api_key:
+            body["vastApiKey"] = options.vast_api_key
         if options.docker_image:
             body["dockerImage"] = options.docker_image
         if options.gpu_types:
@@ -216,6 +218,8 @@ class GatewaySDK:
             elapsed_sec=d.get("elapsedSec", 0),
             started_at=d.get("startedAt", 0),
             retry_count=d.get("retryCount", 0),
+            provider=d.get("provider", ""),
+            alert=d.get("alert", ""),
         )
 
     async def terminate_gpu(self, api_key: str) -> None:
