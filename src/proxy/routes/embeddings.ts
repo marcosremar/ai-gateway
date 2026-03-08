@@ -4,6 +4,7 @@
 
 import type { EmbeddingProvider } from '../../providers/openai-compat/openai-compat-embedding';
 import type { ProxyRequest, ProxyResponse } from '../types';
+import { withProxyRetry } from './retry';
 
 export async function handleEmbeddings(
   req: ProxyRequest,
@@ -25,10 +26,15 @@ export async function handleEmbeddings(
   }
 
   try {
-    const result = await provider.embed(body.input, {
-      model: body.model,
-      dimensions: body.dimensions,
-    });
+    const result = await withProxyRetry(
+      provider.providerId,
+      body.model,
+      () => provider.embed(body.input, {
+        model: body.model,
+        dimensions: body.dimensions,
+      }),
+      'Embedding',
+    );
 
     return {
       status: 200,

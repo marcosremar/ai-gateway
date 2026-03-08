@@ -4,6 +4,7 @@
 
 import type { STTProvider } from '../../providers/types';
 import type { ProxyRequest, ProxyResponse } from '../types';
+import { withProxyRetry } from './retry';
 
 export async function handleAudioTranscriptions(
   req: ProxyRequest,
@@ -28,13 +29,18 @@ export async function handleAudioTranscriptions(
   }
 
   try {
-    const result = await provider.transcribe({
-      audio: req.rawBody,
-      model: body.model,
-      language: body.language,
-      prompt: body.prompt,
-      responseFormat: body.response_format as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt',
-    });
+    const result = await withProxyRetry(
+      provider.providerId,
+      body.model,
+      () => provider.transcribe({
+        audio: req.rawBody,
+        model: body.model,
+        language: body.language,
+        prompt: body.prompt,
+        responseFormat: body.response_format as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt',
+      }),
+      'STT',
+    );
 
     return {
       status: 200,

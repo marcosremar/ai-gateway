@@ -7,6 +7,7 @@ import type { ResponseCache } from '../../caching/response-cache';
 import type { GatewayHooks } from '../../hooks';
 import { emitHook } from '../../hooks';
 import type { ProxyRequest, ProxyResponse } from '../types';
+import { withProxyRetry } from './retry';
 
 export async function handleChatCompletions(
   req: ProxyRequest,
@@ -59,13 +60,18 @@ export async function handleChatCompletions(
       }
     }
 
-    const result = await provider.chat({
-      model: body.model,
-      messages: body.messages,
-      temperature: body.temperature,
-      maxTokens: body.max_tokens,
-      responseFormat: body.response_format,
-    });
+    const result = await withProxyRetry(
+      provider.providerId,
+      body.model,
+      () => provider.chat({
+        model: body.model,
+        messages: body.messages,
+        temperature: body.temperature,
+        maxTokens: body.max_tokens,
+        responseFormat: body.response_format,
+      }),
+      'LLM',
+    );
 
     // Store in cache
     if (cache && (body.temperature === undefined || body.temperature === 0)) {

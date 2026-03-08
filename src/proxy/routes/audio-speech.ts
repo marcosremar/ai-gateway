@@ -4,6 +4,7 @@
 
 import type { TTSProvider } from '../../providers/types';
 import type { ProxyRequest, ProxyResponse } from '../types';
+import { withProxyRetry } from './retry';
 
 export async function handleAudioSpeech(
   req: ProxyRequest,
@@ -27,13 +28,18 @@ export async function handleAudioSpeech(
   }
 
   try {
-    const result = await provider.synthesize({
-      model: body.model,
-      input: body.input,
-      voice: body.voice,
-      responseFormat: (body.response_format as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm') || 'mp3',
-      speed: body.speed,
-    });
+    const result = await withProxyRetry(
+      provider.providerId,
+      body.model,
+      () => provider.synthesize({
+        model: body.model,
+        input: body.input,
+        voice: body.voice,
+        responseFormat: (body.response_format as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm') || 'mp3',
+        speed: body.speed,
+      }),
+      'TTS',
+    );
 
     return {
       status: 200,

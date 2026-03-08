@@ -2,6 +2,7 @@
  * Proxy server types.
  */
 
+import type { IncomingMessage, ServerResponse } from 'http';
 import type { GatewayHooks } from '../hooks';
 import type { ResponseCache } from '../caching/response-cache';
 import type { LLMProvider, STTProvider, TTSProvider } from '../providers/types';
@@ -18,6 +19,12 @@ export interface ProviderMapping {
   tts?: Record<string, TTSProvider>;
 }
 
+export interface CustomRoute {
+  method: string;
+  path: string;
+  handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+}
+
 export interface ProxyConfig {
   port?: number;               // default 4000
   apiKeys?: string[];          // valid Bearer tokens
@@ -26,6 +33,7 @@ export interface ProxyConfig {
   hooks?: GatewayHooks;
   rateLimit?: { rpm: number };
   hostname?: string;           // default '0.0.0.0'
+  customRoutes?: CustomRoute[];
 }
 
 export interface ProxyRoute {

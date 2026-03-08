@@ -685,7 +685,7 @@ export class AIClient {
     history: ChatMessage[],
     profile: AIProfile,
   ): Promise<Omit<PipelineResult, 'totalLatencyMs' | 'usedGpu'>> {
-    const timeoutMs = profile.fallbackOptions?.timeoutMs ?? 15_000;
+    const timeoutMs = profile.fallbackOptions?.timeoutMs ?? 30_000;
     const url = `${endpoint.replace(/\/$/, '')}/v1/speech`;
 
     const formData = new FormData();
