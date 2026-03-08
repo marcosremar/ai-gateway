@@ -47,6 +47,9 @@ class TranslateResponse:
 class PipelineTiming:
     total_ms: int
     used_gpu: bool
+    stt_ms: int = 0
+    llm_ms: int = 0
+    tts_ms: int = 0
 
 
 @dataclass

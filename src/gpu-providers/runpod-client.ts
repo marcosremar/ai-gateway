@@ -4,14 +4,10 @@ import type { AbstractGpuProviderOptions } from './abstract-provider';
 
 /** GPU types to try in order of preference.
  *  Must match RunPod's REST API enum values exactly.
- *  RTX 5090 first (fastest), then fallback to cheaper/available alternatives. */
+ *  RTX 5090 only — fastest for real-time STT/LLM/TTS pipeline.
+ *  If unavailable, the gateway falls back to cloud providers (Groq). */
 export const RUNPOD_GPU_FALLBACK = [
   'NVIDIA GeForce RTX 5090',
-  'NVIDIA GeForce RTX 4090',
-  'NVIDIA RTX A6000',
-  'NVIDIA GeForce RTX 3090',
-  'NVIDIA RTX A5000',
-  'NVIDIA A40',
 ];
 
 /** Full RunPod GPU type names keyed by short display name */

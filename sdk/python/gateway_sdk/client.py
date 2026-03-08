@@ -164,6 +164,9 @@ class GatewaySDK:
             timing=PipelineTiming(
                 total_ms=timing.get("total_ms", 0),
                 used_gpu=timing.get("used_gpu", False),
+                stt_ms=timing.get("stt_ms", 0),
+                llm_ms=timing.get("llm_ms", 0),
+                tts_ms=timing.get("tts_ms", 0),
             ),
         )
 
