@@ -66,23 +66,17 @@ export type {
 } from './gpu-providers/types';
 
 // ── GPU Provider base class ─────────────────────────────────────────────────
+/** @internal Base class for GPU providers — use AIClient.deploy()/destroyInstance() instead. */
 export { AbstractGpuProvider, FetchError, TIMEOUTS } from './gpu-providers/abstract-provider';
 export type { AbstractGpuProviderOptions } from './gpu-providers/abstract-provider';
 
-// ── GPU Provider classes ────────────────────────────────────────────────────
+// ── GPU Provider Registry (used internally by AIClient + Autoscaler) ────────
 export { GpuProviderRegistry } from './gpu-providers/registry';
-export { RunpodClient } from './gpu-providers/runpod-client';
-export { TensordockClient } from './gpu-providers/tensordock-client';
-export { VastClient } from './gpu-providers/vast-client';
-export { ModalClient } from './gpu-providers/modal-client';
-export { RUNPOD_GPU_FALLBACK, RUNPOD_GPU_TYPE_MAP } from './gpu-providers/runpod-client';
-export {
-  TENSORDOCK_V2_BASE,
-  GPU_ID_MAP,
-  findSshKey,
-  findCheapestLocations,
-  buildCloudInit,
-} from './gpu-providers/tensordock-client';
+
+// NOTE: Individual GPU provider classes (RunpodClient, TensordockClient, VastClient, ModalClient)
+// are intentionally NOT exported from the public API. They are implementation details.
+// Use AIClient.deploy() / destroyInstance() / waitForHealth() for GPU lifecycle management.
+// For advanced use (autoscaler factory), import from '@ai-gateway/gpu-providers' directly.
 
 // ── Autoscaler Config Loader ─────────────────────────────────────────────────
 export { loadAutoscalerConfig } from './autoscaler/config-loader';
@@ -286,6 +280,7 @@ export type {
   OmniResult,
   RealtimeResult,
   PipelineResult,
+  DeployResult,
   GpuTransport,
   GpuPipelineResponse,
   GpuHealthResponse,
@@ -297,9 +292,9 @@ export type {
 
 // ── Browser SDK (SpeechClient) ──────────────────────────────────────────
 // NOTE: SpeechClient and streaming transports are legacy. Server-side code
-// should use AIClient.pipeline() or POST /api/pipeline (JSON, transport-transparent).
+// should use AIClient.pipeline() or POST /v1/speech (JSON, transport-transparent).
 export { SpeechClient } from './browser';
-/** @deprecated Streaming transports removed from proxy. Use POST /api/pipeline. */
+/** @deprecated Streaming transports removed from proxy. Use POST /v1/speech. */
 export { WebSocketTransport, SSETransport, WebRTCTransport, TypedEmitter } from './browser';
 export { SpeechSDKError, createLogger as createSDKLogger, setLogLevel, setLogHandler } from './browser';
 export type {

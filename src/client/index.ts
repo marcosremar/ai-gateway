@@ -26,6 +26,7 @@ export type {
   OmniResult,
   RealtimeResult,
   PipelineResult,
+  DeployResult,
 } from './types';
 export type { GpuTransport, GpuPipelineResponse, GpuHealthResponse } from './gpu-transport';
 /** @deprecated Streaming transports removed. Use pipeline() which returns PipelineResult. */

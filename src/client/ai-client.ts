@@ -17,6 +17,7 @@ import type {
   OmniResult,
   RealtimeResult,
   PipelineResult,
+  DeployResult,
 } from './types';
 import type { ChatMessage, ProviderId, RealtimeSessionConfig } from '../providers/types';
 import type { FallbackEntry, FallbackOptions } from '../providers/fallback';
@@ -25,6 +26,8 @@ import type { Autoscaler } from '../factory';
 import type { Logger } from '../deps';
 import type { GpuTransport } from './gpu-transport';
 import type { PipelineEvent } from './pipeline-events';
+import type { GpuProviderRegistry } from '../gpu-providers/registry';
+import type { InstanceSpec, ProviderCredentials } from '../gpu-providers/types';
 
 import { withProviderFallback } from '../providers/fallback';
 import { resolveApiKey } from '../providers/chain-builder';
@@ -40,15 +43,19 @@ import { defaultLogger } from '../logger';
 
 export class AIClient {
   private readonly registry: AIProviderRegistry;
+  private readonly gpuRegistry?: GpuProviderRegistry;
   private readonly autoscaler?: Autoscaler;
   private readonly userId?: string;
   private readonly defaultProfile: AIProfile;
   private readonly loadAutoscalerConfig?: () => Promise<import('../types').AutoScalerConfig | null>;
   private readonly log: Logger;
   private readonly spendTracker?: SpendTracker;
+  /** Tracks deployed instances for cleanup. */
+  private readonly deployedInstances = new Map<string, { provider: string; credentials: ProviderCredentials }>();
 
   constructor(options: AIClientOptions) {
     this.registry = options.registry;
+    this.gpuRegistry = options.gpuRegistry;
     this.autoscaler = options.autoscaler;
     this.userId = options.userId;
     this.loadAutoscalerConfig = options.loadAutoscalerConfig;
@@ -490,6 +497,98 @@ export class AIClient {
     }
   }
 
+  // ── GPU Lifecycle ────────────────────────────────────────────────────────
+
+  /**
+   * Deploy a GPU instance using the internal provider registry.
+   * Returns a DeployResult with instanceId, endpoint, and GPU info.
+   * The deployed endpoint is automatically used by subsequent pipeline() calls.
+   */
+  async deploy(
+    provider: string,
+    spec: InstanceSpec,
+    credentials: ProviderCredentials,
+  ): Promise<DeployResult> {
+    if (!this.gpuRegistry) {
+      throw new Error('[AIClient] No gpuRegistry configured. Pass gpuRegistry in AIClientOptions.');
+    }
+    const client = this.gpuRegistry.getOrThrow(provider);
+    this.log.info(`[AIClient] Deploying GPU instance via ${provider}...`);
+
+    const instance = await client.createInstance(spec, credentials, this.userId);
+    this.deployedInstances.set(instance.instanceId, { provider, credentials });
+
+    this.log.info(`[AIClient] Deployed ${instance.instanceId} → ${instance.endpoint} (${instance.gpuType || 'unknown GPU'})`);
+    return {
+      instanceId: instance.instanceId,
+      endpoint: instance.endpoint,
+      gpuType: instance.gpuType,
+      status: instance.status,
+      provider,
+    };
+  }
+
+  /**
+   * Wait for a GPU endpoint to become healthy.
+   * Polls GET /health until status is "ok" or maxWaitMs is exceeded.
+   */
+  async waitForHealth(
+    endpoint: string,
+    maxWaitMs = 15 * 60 * 1000,
+    pollIntervalMs = 15_000,
+  ): Promise<{ healthy: boolean; elapsedMs: number; services?: Record<string, string> }> {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      try {
+        const resp = await fetch(`${endpoint.replace(/\/$/, '')}/health`, {
+          signal: AbortSignal.timeout(8000),
+        });
+        if (resp.ok) {
+          const data = await resp.json() as { status?: string; services?: Record<string, string> };
+          this.log.info(`[AIClient] Health [${elapsed}s]: ${data.status} | ${JSON.stringify(data.services || {})}`);
+          if (data.status === 'ok') {
+            return { healthy: true, elapsedMs: Date.now() - start, services: data.services };
+          }
+        } else {
+          this.log.info(`[AIClient] Health [${elapsed}s]: HTTP ${resp.status}`);
+        }
+      } catch (e: any) {
+        const msg = e.message?.includes('fetch failed') ? 'not reachable yet' : e.message;
+        this.log.info(`[AIClient] Health [${elapsed}s]: ${msg}`);
+      }
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+    }
+    return { healthy: false, elapsedMs: Date.now() - start };
+  }
+
+  /**
+   * Destroy a previously deployed GPU instance.
+   */
+  async destroyInstance(
+    instanceId: string,
+    provider?: string,
+    credentials?: ProviderCredentials,
+  ): Promise<void> {
+    if (!this.gpuRegistry) {
+      throw new Error('[AIClient] No gpuRegistry configured.');
+    }
+
+    // Use stored deployment info if available
+    const stored = this.deployedInstances.get(instanceId);
+    const prov = provider ?? stored?.provider;
+    const creds = credentials ?? stored?.credentials;
+    if (!prov || !creds) {
+      throw new Error(`[AIClient] Unknown instance ${instanceId}. Provide provider and credentials.`);
+    }
+
+    const client = this.gpuRegistry.getOrThrow(prov);
+    this.log.info(`[AIClient] Destroying instance ${instanceId} via ${prov}...`);
+    await client.deleteInstance(instanceId, creds);
+    this.deployedInstances.delete(instanceId);
+    this.log.info(`[AIClient] Instance ${instanceId} destroyed.`);
+  }
+
   // ── Private helpers ───────────────────────────────────────────────────────
 
   private resolveEffectiveProfile(override?: AIProfile | PresetName): AIProfile {
@@ -587,7 +686,7 @@ export class AIClient {
     profile: AIProfile,
   ): Promise<Omit<PipelineResult, 'totalLatencyMs' | 'usedGpu'>> {
     const timeoutMs = profile.fallbackOptions?.timeoutMs ?? 15_000;
-    const url = `${endpoint.replace(/\/$/, '')}/api/pipeline`;
+    const url = `${endpoint.replace(/\/$/, '')}/v1/speech`;
 
     const formData = new FormData();
     const audioBlob = audio instanceof Blob ? audio : new Blob([audio as BlobPart]);

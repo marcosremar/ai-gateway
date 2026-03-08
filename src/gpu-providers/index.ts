@@ -1,4 +1,14 @@
-// Barrel file for @parle/ai-gateway/gpu-providers
+/**
+ * @internal GPU Provider implementations — NOT part of the public API.
+ *
+ * These classes are implementation details used by the Autoscaler and AIClient internally.
+ * External consumers should use:
+ *   - `AIClient.deploy()` / `destroyInstance()` / `waitForHealth()` for GPU lifecycle
+ *   - `AIClient.pipeline()` for transparent GPU-vs-cloud routing
+ *
+ * If you need direct access (e.g. for a custom autoscaler), import from this subpath,
+ * but be aware these are internal and may change without notice.
+ */
 
 // ── Types ─────────────────────────────────────────────────────────────────
 export type {

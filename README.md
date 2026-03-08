@@ -4,7 +4,7 @@ A comprehensive, modular TypeScript library for AI provider orchestration, GPU a
 
 ## Features
 
-- **Transparent Pipeline API** — Single `POST /api/pipeline` endpoint handles STT → LLM → TTS. Transport (GPU vs cloud) is hidden from the caller. No SSE/WebSocket/WebRTC in client code.
+- **Transparent Speech API** — Single `POST /v1/speech` endpoint handles STT → LLM → TTS. Transport (GPU vs cloud) is hidden from the caller. No SSE/WebSocket/WebRTC in client code.
 - **Multi-tier GPU Autoscaler** — Cascade through GPU providers (RunPod, TensorDock, Modal) with automatic failover, health checking, idle watchdog, and cost monitoring
 - **AI Provider Abstraction** — Unified interface for 8+ providers (OpenAI, Groq, Fireworks, OpenRouter, Modal, self-hosted) across STT, TTS, LLM, Image, and Realtime modalities
 - **Provider Fallback Chains** — Declarative, config-driven fallback with cooldown and credit exhaustion tracking
@@ -27,7 +27,7 @@ Send audio, get back transcription + translation + TTS audio in one JSON respons
 
 ```bash
 # Full pipeline: audio in → JSON out
-curl -X POST "http://localhost:4000/api/pipeline?source=fr&target=en&speaker=Ryan" \
+curl -X POST "http://localhost:4000/v1/speech?source=fr&target=en&speaker=Ryan" \
   --data-binary @audio.wav -H "Content-Type: audio/wav"
 
 # Response:

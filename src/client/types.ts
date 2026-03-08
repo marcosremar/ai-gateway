@@ -79,6 +79,17 @@ export interface AIClientOptions {
   loadAutoscalerConfig?: () => Promise<AutoScalerConfig | null>;
   logger?: Logger;
   spendTracker?: import('../tracking/spend-tracker').SpendTracker;
+  /** GPU infrastructure registry for deploy/destroy operations. */
+  gpuRegistry?: import('../gpu-providers/registry').GpuProviderRegistry;
+}
+
+/** Result of deploying a GPU instance via AIClient.deploy(). */
+export interface DeployResult {
+  instanceId: string;
+  endpoint: string;
+  gpuType?: string;
+  status: string;
+  provider: string;
 }
 
 // ---------------------------------------------------------------------------

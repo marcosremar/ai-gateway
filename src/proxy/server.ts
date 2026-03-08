@@ -131,16 +131,16 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
     }
 
-    // Block direct streaming transport routes — clients must use /api/pipeline
+    // Block direct streaming transport routes — clients must use POST /v1/speech
     const path = url.split('?')[0];
     if (path === '/api/stream-audio' || path === '/ws/stream' || path === '/api/offer') {
-      sendError(res, 410, `Streaming transport ${path} is removed. Use POST /api/pipeline instead.`);
+      sendError(res, 410, `Streaming transport ${path} is removed. Use POST /v1/speech instead.`);
       return;
     }
 
     // Block WebSocket upgrades to streaming paths
     if (req.headers.upgrade?.toLowerCase() === 'websocket') {
-      sendError(res, 410, 'WebSocket transport is removed. Use POST /api/pipeline instead.');
+      sendError(res, 410, 'WebSocket transport is removed. Use POST /v1/speech instead.');
       return;
     }
 

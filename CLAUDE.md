@@ -12,7 +12,7 @@
 
 **All audio/pipeline calls go through a single JSON endpoint. Transport is transparent.**
 
-- `POST /api/pipeline` — the ONLY way to run the full STT → LLM → TTS pipeline
+- `POST /v1/speech` — the ONLY way to run the full STT → LLM → TTS pipeline
 - SSE (`/api/stream-audio`), WebSocket (`/ws/stream`), and WebRTC (`/api/offer`) are **blocked** at the proxy level (return 410 Gone)
 - Never write SSE parsing, WebSocket framing, or WebRTC signaling in client code — the gateway hides all of that
 
@@ -22,20 +22,20 @@ The proxy server (`src/proxy/server.ts`) exposes these endpoints:
 
 | Method | Path                          | Purpose                     | Content-Type          |
 |--------|-------------------------------|-----------------------------|-----------------------|
-| POST   | `/api/pipeline`               | Full pipeline: audio → STT → LLM → TTS → JSON | `audio/wav` in, `application/json` out |
+| POST   | `/v1/speech`               | Full pipeline: audio → STT → LLM → TTS → JSON | `audio/wav` in, `application/json` out |
 | POST   | `/v1/audio/transcriptions`    | STT only (OpenAI-compatible)| `multipart/form-data` |
 | POST   | `/v1/chat/completions`        | LLM only (OpenAI-compatible)| `application/json`    |
 | POST   | `/v1/audio/speech`            | TTS only (OpenAI-compatible)| `application/json`    |
 | GET    | `/v1/models`                  | List available models       | —                     |
 | GET    | `/health`                     | Health check                | —                     |
 
-### Pipeline endpoint (`POST /api/pipeline`)
+### Speech endpoint (`POST /v1/speech`)
 
 This is a custom route registered via `customRoutes` in the host app's gateway server (e.g. `gateway-server.ts`). It calls `AIClient.pipeline()` internally.
 
 **Request:**
 ```bash
-curl -X POST "http://localhost:4000/api/pipeline?source=fr&target=en&speaker=Ryan" \
+curl -X POST "http://localhost:4000/v1/speech?source=fr&target=en&speaker=Ryan" \
   --data-binary @audio.wav -H "Content-Type: audio/wav"
 ```
 
@@ -59,8 +59,9 @@ For server-side TypeScript code that needs to call AI services directly (not thr
 ```typescript
 import { createAIClient } from '@ai-gateway/client';
 import { AIProviderRegistry } from '@ai-gateway/providers';
+import { GpuProviderRegistry } from '@ai-gateway/gpu-providers';
 
-const client = createAIClient({ registry, defaultProfile: myProfile });
+const client = createAIClient({ registry, gpuRegistry, defaultProfile: myProfile });
 
 // Full pipeline (transport-transparent — tries GPU, falls back to cloud)
 const result = await client.pipeline(audioBuffer, systemPrompt);
@@ -70,6 +71,11 @@ const result = await client.pipeline(audioBuffer, systemPrompt);
 const stt = await client.transcribe(audioBuffer);       // { text, language, latencyMs }
 const chat = await client.chat(messages);                // { content, usage, latencyMs }
 const tts = await client.synthesize(text);               // { audio: Buffer, contentType }
+
+// GPU lifecycle (deploy/destroy — wraps internal provider clients)
+const deployment = await client.deploy('runpod', spec, credentials);
+await client.waitForHealth(deployment.endpoint);         // polls /health
+await client.destroyInstance(deployment.instanceId);     // cleanup
 ```
 
 **Key types:**
@@ -120,10 +126,10 @@ import { createAIClient } from './ai-gateway/src/client';
 
 const client = createAIClient({ registry, defaultProfile });
 
-// Register /api/pipeline as a custom route
+// Register /v1/speech as a custom route
 const customRoutes = [{
   method: 'POST',
-  path: '/api/pipeline',
+  path: '/v1/speech',
   handler: async (req, res) => {
     const audio = await readBody(req);
     const result = await client.pipeline(audio, systemPrompt, [], profile);
