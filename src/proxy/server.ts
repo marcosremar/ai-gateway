@@ -288,7 +288,14 @@ export function startProxy(config: ProxyConfig): Promise<Server> {
   const port = config.port || 4000;
   const hostname = config.hostname || '0.0.0.0';
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        reject(new Error(`Port ${port} is already in use — another gateway instance may be running`));
+      } else {
+        reject(err);
+      }
+    });
     server.listen(port, hostname, () => {
       console.log(`[ai-gateway proxy] Listening on ${hostname}:${port}`);
       resolve(server);
