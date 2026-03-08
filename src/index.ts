@@ -370,3 +370,17 @@ export type { WithCacheOptions, CacheConfig, CacheStats } from './caching';
 export { createProxyServer, startProxy } from './proxy';
 export { RateLimiter } from './proxy';
 export type { ProxyConfig, ProviderMapping, ProxyRequest, ProxyResponse } from './proxy';
+
+// ── HTTP SDK (typed client for consuming the REST API) ────────────────
+export { GatewaySDK } from './sdk';
+export {
+  GatewayError as SDKGatewayError,
+  type GatewayConfig as SDKGatewayConfig,
+  type TranscribeResponse as SDKTranscribeResponse,
+  type TranslateResponse as SDKTranslateResponse,
+  type PipelineResponse as SDKPipelineResponse,
+  type PipelineOptions as SDKPipelineOptions,
+  type GpuStatus as SDKGpuStatus,
+  type DeployOptions as SDKDeployOptions,
+  type DeployResponse as SDKDeployResponse,
+} from './sdk';

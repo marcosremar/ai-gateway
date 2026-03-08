@@ -36,7 +36,7 @@ import {
   getCooldownState,
 } from '@ai-gateway';
 import { buildSilentWav } from '@ai-gateway/browser/audio';
-import { OPENAI_STT_MODELS, OPENAI_TTS_MODELS, OPENAI_VOICES } from '../../packages/ai-gateway/src/providers/openai/models';
+import { OPENAI_STT_MODELS, OPENAI_TTS_MODELS, OPENAI_VOICES } from '@ai-gateway/providers/openai/models';
 import type { AIClient, AIProfile } from '@ai-gateway';
 import * as fs from 'fs';
 import * as path from 'path';

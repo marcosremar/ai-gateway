@@ -8,13 +8,13 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { openrouterLLM } from '../src/providers/openrouter';
 import { OpenRouterImageProvider } from '../src/providers/openrouter/openrouter-image';
-import { loadEnv, requireEnv, timed } from './helpers';
+import { loadEnv, timed } from './helpers';
 
 beforeAll(() => loadEnv());
 
-describe('OpenRouter LLM (Real API)', () => {
+describe.skipIf(!process.env.OPENROUTER_API_KEY)('OpenRouter LLM (Real API)', () => {
   it('completes chat via gpt-4o-mini', async () => {
-    requireEnv('OPENROUTER_API_KEY');
+
 
     const { result, ms } = await timed(() =>
       openrouterLLM.chat({
@@ -34,7 +34,7 @@ describe('OpenRouter LLM (Real API)', () => {
   });
 
   it('completes chat via claude-3.5-haiku', async () => {
-    requireEnv('OPENROUTER_API_KEY');
+
 
     const { result, ms } = await timed(() =>
       openrouterLLM.chat({
@@ -53,7 +53,7 @@ describe('OpenRouter LLM (Real API)', () => {
   });
 
   it('completes chat via llama-3.3-70b (free)', async () => {
-    requireEnv('OPENROUTER_API_KEY');
+
 
     const result = await openrouterLLM.chat({
       messages: [
@@ -67,11 +67,11 @@ describe('OpenRouter LLM (Real API)', () => {
   });
 });
 
-describe('OpenRouter Image (Real API)', () => {
+describe.skipIf(!process.env.OPENROUTER_API_KEY)('OpenRouter Image (Real API)', () => {
   const image = new OpenRouterImageProvider();
 
   it('generates an image via Gemini Flash', async () => {
-    requireEnv('OPENROUTER_API_KEY');
+
 
     const { result, ms } = await timed(() =>
       image.generate({

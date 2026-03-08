@@ -85,47 +85,47 @@ import {
   isRetryableError,
   isContextWindowError,
   getCooldownState,
-} from '../../packages/ai-gateway/src/providers/fallback';
+} from '@ai-gateway/providers/fallback';
 
 // Declarative chains
 import {
   resolveDeclarativeChain,
   findChainForStage,
-} from '../../packages/ai-gateway/src/providers/declarative-chain';
-import type { FallbackChainConfig } from '../../packages/ai-gateway/src/providers/declarative-chain';
+} from '@ai-gateway/providers/declarative-chain';
+import type { FallbackChainConfig } from '@ai-gateway/providers/declarative-chain';
 
 // AIClient
-import { AIClient } from '../../packages/ai-gateway/src/client/ai-client';
-import { resolveProfile, mergeProfiles, VOICE_PROFILE, CHAT_PROFILE, STT_PROFILE, TTS_PROFILE, LLM_PROFILE, IMAGE_PROFILE, SYSTEM_PROFILE } from '../../packages/ai-gateway/src/client/presets';
-import type { AIProfile } from '../../packages/ai-gateway/src/client/types';
+import { AIClient } from '@ai-gateway/client/ai-client';
+import { resolveProfile, mergeProfiles, VOICE_PROFILE, CHAT_PROFILE, STT_PROFILE, TTS_PROFILE, LLM_PROFILE, IMAGE_PROFILE, SYSTEM_PROFILE } from '@ai-gateway/client/presets';
+import type { AIProfile } from '@ai-gateway/client/types';
 
 // Registry
-import { AIProviderRegistry } from '../../packages/ai-gateway/src/providers/registry';
+import { AIProviderRegistry } from '@ai-gateway/providers/registry';
 
 // Browser SDK
-import { SpeechClient } from '../../packages/ai-gateway/src/browser/speech-client';
-import { SpeechSDKError } from '../../packages/ai-gateway/src/browser/errors';
-import { TypedEmitter } from '../../packages/ai-gateway/src/browser/emitter';
-import { setLogLevel } from '../../packages/ai-gateway/src/browser/logger';
+import { SpeechClient } from '@ai-gateway/browser/speech-client';
+import { SpeechSDKError } from '@ai-gateway/browser/errors';
+import { TypedEmitter } from '@ai-gateway/browser/emitter';
+import { setLogLevel } from '@ai-gateway/browser/logger';
 import {
   float32ToWavBuffer,
   combineWavChunksToBase64,
   buildSilentWav,
   uint8ToBase64,
-} from '../../packages/ai-gateway/src/browser/audio';
+} from '@ai-gateway/browser/audio';
 
 // Autoscaler
-import { createAutoscaler } from '../../packages/ai-gateway/src/factory';
-import type { AutoScalerConfig, GpuTierConfig } from '../../packages/ai-gateway/src/types';
-import type { StateStore, SessionResolver, SettingsStore } from '../../packages/ai-gateway/src/deps';
+import { createAutoscaler } from '@ai-gateway/factory';
+import type { AutoScalerConfig, GpuTierConfig } from '@ai-gateway/types';
+import type { StateStore, SessionResolver, SettingsStore } from '@ai-gateway/deps';
 
 // Spend Tracker
-import { SpendTracker } from '../../packages/ai-gateway/src/tracking/spend-tracker';
-import { lookupPricing, estimateRequestCost, DEFAULT_PRICING_TABLE } from '../../packages/ai-gateway/src/tracking/pricing';
+import { SpendTracker } from '@ai-gateway/tracking/spend-tracker';
+import { lookupPricing, estimateRequestCost, DEFAULT_PRICING_TABLE } from '@ai-gateway/tracking/pricing';
 
 // Load Balancer
-import { LoadBalancer } from '../../packages/ai-gateway/src/autoscaler/load-balancer';
-import type { GpuTierState } from '../../packages/ai-gateway/src/types';
+import { LoadBalancer } from '@ai-gateway/autoscaler/load-balancer';
+import type { GpuTierState } from '@ai-gateway/types';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Shared Helpers
@@ -1805,7 +1805,7 @@ describe('14. Tier Lifecycle Management', () => {
     };
   }
 
-  function makeConfig(overrides?: Partial<import('../../packages/ai-gateway/src/types').AutoScalerConfig>): import('../../packages/ai-gateway/src/types').AutoScalerConfig {
+  function makeConfig(overrides?: Partial<import('@ai-gateway/types').AutoScalerConfig>): import('@ai-gateway/types').AutoScalerConfig {
     return {
       enabled: true,
       threshold: 1,
@@ -2016,7 +2016,7 @@ describe('14. Tier Lifecycle Management', () => {
 // 15. Benchmark Tracker
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import { BenchmarkTracker } from '../../packages/ai-gateway/src/tracking/benchmark-tracker';
+import { BenchmarkTracker } from '@ai-gateway/tracking/benchmark-tracker';
 
 describe('15. Benchmark Tracker', () => {
   const USER = 'user-bench-test';
@@ -2093,7 +2093,7 @@ describe('15. Benchmark Tracker', () => {
     const stateStore = new MemoryStateStore();
     const sessionResolver = new MockSessionResolver();
     const healthyEndpoints = new Set<string>();
-    const config: import('../../packages/ai-gateway/src/types').AutoScalerConfig = {
+    const config: import('@ai-gateway/types').AutoScalerConfig = {
       enabled: true, threshold: 1, windowMinutes: 10, maxLatencyMs: 1500,
       tiers: [{
         provider: 'runpod', instanceId: 'inst-rp-0',

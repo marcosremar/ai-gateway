@@ -38,7 +38,7 @@ const sttProviders: STTTestCase[] = [
 describe('Cross-Provider STT', () => {
   for (const { name, provider, model, envKey } of sttProviders) {
     it(`${name}: transcribe returns STTResponse contract`, async () => {
-      if (!process.env[envKey]) throw new Error(`SKIP: ${envKey} not set`);
+      if (!process.env[envKey]) return;
       const audio = makeTestWav(1.0);
 
       const { result, ms } = await timed(() =>
@@ -77,7 +77,7 @@ const ttsProviders: TTSTestCase[] = [
 describe('Cross-Provider TTS', () => {
   for (const { name, provider, model, voice, envKey } of ttsProviders) {
     it(`${name}: synthesize returns TTSResponse contract`, async () => {
-      if (!process.env[envKey]) throw new Error(`SKIP: ${envKey} not set`);
+      if (!process.env[envKey]) return;
 
       const { result, ms } = await timed(() =>
         provider.synthesize({
@@ -119,7 +119,7 @@ const llmProviders: LLMTestCase[] = [
 describe('Cross-Provider LLM', () => {
   for (const { name, provider, model, envKey } of llmProviders) {
     it(`${name}: chat returns ChatResponse contract`, async () => {
-      if (!process.env[envKey]) throw new Error(`SKIP: ${envKey} not set`);
+      if (!process.env[envKey]) return;
 
       const { result, ms } = await timed(() =>
         provider.chat({
@@ -168,7 +168,7 @@ describe('Cross-Provider LLM', () => {
       }
     }
 
-    if (results.length < 2) throw new Error('SKIP: Need at least 2 providers');
+    if (results.length < 2) return;
 
     // All should have the same shape
     for (const { name, response } of results) {

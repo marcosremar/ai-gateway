@@ -11,12 +11,12 @@ import 'dotenv/config';
 import { File as NodeFile } from 'node:buffer';
 if (!globalThis.File) (globalThis as any).File = NodeFile;
 
-import { describe, it, expect, beforeAll } from 'vitest';
-import { AIProviderRegistry } from '../../packages/ai-gateway/src/providers/registry';
-import { OpenAISTTProvider } from '../../packages/ai-gateway/src/providers/openai/openai-stt';
-import { OpenAITTSProvider } from '../../packages/ai-gateway/src/providers/openai/openai-tts';
-import { AIClient } from '../../packages/ai-gateway/src/client/ai-client';
-import type { LLMProvider, ChatRequest, ChatResponse } from '../../packages/ai-gateway/src/providers/types';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { AIProviderRegistry } from '@ai-gateway/providers/registry';
+import { OpenAISTTProvider } from '@ai-gateway/providers/openai/openai-stt';
+import { OpenAITTSProvider } from '@ai-gateway/providers/openai/openai-tts';
+import { AIClient } from '@ai-gateway/client/ai-client';
+import type { LLMProvider, ChatRequest, ChatResponse } from '@ai-gateway/providers/types';
 import OpenAI from 'openai';
 
 // ─── Minimal LLM Providers (no LLMProvider impl in the package yet) ─────────
@@ -98,8 +98,7 @@ class GroqLLMProvider implements LLMProvider {
 let registry: AIProviderRegistry;
 
 beforeAll(() => {
-  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY required');
-  if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY required');
+  if (!process.env.OPENAI_API_KEY || !process.env.GROQ_API_KEY) return;
 
   registry = new AIProviderRegistry();
 
@@ -126,7 +125,9 @@ beforeAll(() => {
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
-describe('AIClient — real API calls', () => {
+const hasKeys = !!process.env.OPENAI_API_KEY && !!process.env.GROQ_API_KEY;
+
+describe.skipIf(!hasKeys)('AIClient — real API calls', () => {
 
   it('chat() with OpenAI gpt-4o-mini', async () => {
     const client = new AIClient({

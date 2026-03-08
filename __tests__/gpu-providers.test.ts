@@ -15,18 +15,18 @@
 
 import 'dotenv/config';
 import { describe, it, expect, beforeAll } from 'vitest';
-import { TensordockClient, findCheapestLocations } from '../../packages/ai-gateway/src/gpu-providers/tensordock-client';
-import { RunpodClient } from '../../packages/ai-gateway/src/gpu-providers/runpod-client';
-import { GpuProviderRegistry } from '../../packages/ai-gateway/src/gpu-providers/registry';
-import { probeGpuHealth } from '../../packages/ai-gateway/src/autoscaler/health';
-import { emitHook } from '../../packages/ai-gateway/src/hooks';
-import { resolveDeclarativeChain, findChainForStage } from '../../packages/ai-gateway/src/providers/declarative-chain';
-import { LoadBalancer } from '../../packages/ai-gateway/src/autoscaler/load-balancer';
-import { SpendTracker } from '../../packages/ai-gateway/src/tracking/spend-tracker';
-import { estimateRequestCost } from '../../packages/ai-gateway/src/tracking/pricing';
-import type { ProviderCredentials } from '../../packages/ai-gateway/src/gpu-providers/types';
-import type { GatewayHooks } from '../../packages/ai-gateway/src/hooks';
-import type { StateStore } from '../../packages/ai-gateway/src/deps';
+import { TensordockClient, findCheapestLocations } from '@ai-gateway/gpu-providers/tensordock-client';
+import { RunpodClient } from '@ai-gateway/gpu-providers/runpod-client';
+import { GpuProviderRegistry } from '@ai-gateway/gpu-providers/registry';
+import { probeGpuHealth } from '@ai-gateway/autoscaler/health';
+import { emitHook } from '@ai-gateway/hooks';
+import { resolveDeclarativeChain, findChainForStage } from '@ai-gateway/providers/declarative-chain';
+import { LoadBalancer } from '@ai-gateway/autoscaler/load-balancer';
+import { SpendTracker } from '@ai-gateway/tracking/spend-tracker';
+import { estimateRequestCost } from '@ai-gateway/tracking/pricing';
+import type { ProviderCredentials } from '@ai-gateway/gpu-providers/types';
+import type { GatewayHooks } from '@ai-gateway/hooks';
+import type { StateStore } from '@ai-gateway/deps';
 
 // ─── In-memory StateStore ─────────────────────────────────────────────────────
 
@@ -95,15 +95,13 @@ async function discoverRunpodEndpoint(creds: ProviderCredentials): Promise<strin
 // 1. GPU PROVIDER API TESTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('TensorDock — real API', () => {
+describe.skipIf(!process.env.TENSORDOCK_API_TOKEN)('TensorDock — real API', () => {
   let client: TensordockClient;
   let creds: ProviderCredentials;
 
   beforeAll(() => {
-    const apiKey = process.env.TENSORDOCK_API_TOKEN;
-    if (!apiKey) throw new Error('TENSORDOCK_API_TOKEN required');
     client = new TensordockClient();
-    creds = { apiKey, authId: process.env.TENSORDOCK_AUTH_ID };
+    creds = { apiKey: process.env.TENSORDOCK_API_TOKEN!, authId: process.env.TENSORDOCK_AUTH_ID };
   });
 
   it('lists instances and gets status', async () => {
@@ -130,15 +128,13 @@ describe('TensorDock — real API', () => {
   }, 20_000);
 });
 
-describe('RunPod — real API', () => {
+describe.skipIf(!process.env.RUNPOD_API_KEY)('RunPod — real API', () => {
   let client: RunpodClient;
   let creds: ProviderCredentials;
 
   beforeAll(() => {
-    const apiKey = process.env.RUNPOD_API_KEY;
-    if (!apiKey) throw new Error('RUNPOD_API_KEY required');
     client = new RunpodClient();
-    creds = { apiKey };
+    creds = { apiKey: process.env.RUNPOD_API_KEY! };
   });
 
   it('lists pods with GPU info', async () => {
@@ -175,13 +171,11 @@ describe('RunPod — real API', () => {
   }, 15_000);
 });
 
-describe('Vast.ai — real API', () => {
+describe.skipIf(!process.env.VAST_API_KEY)('Vast.ai — real API', () => {
   let headers: Record<string, string>;
 
   beforeAll(() => {
-    const apiKey = process.env.VAST_API_KEY;
-    if (!apiKey) throw new Error('VAST_API_KEY required');
-    headers = { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` };
+    headers = { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.VAST_API_KEY}` };
   });
 
   it('lists serverless endpoints', async () => {
@@ -221,14 +215,11 @@ describe('Vast.ai — real API', () => {
   }, 15_000);
 });
 
-describe('Modal — real API', () => {
+describe.skipIf(!process.env.MODAL_TOKEN_ID || !process.env.MODAL_TOKEN_SECRET)('Modal — real API', () => {
   let credentials: string;
 
   beforeAll(() => {
-    const tid = process.env.MODAL_TOKEN_ID;
-    const tsec = process.env.MODAL_TOKEN_SECRET;
-    if (!tid || !tsec) throw new Error('MODAL_TOKEN_ID/SECRET required');
-    credentials = Buffer.from(`${tid}:${tsec}`).toString('base64');
+    credentials = Buffer.from(`${process.env.MODAL_TOKEN_ID}:${process.env.MODAL_TOKEN_SECRET}`).toString('base64');
   });
 
   it('authenticates and lists apps', async () => {
@@ -252,13 +243,11 @@ describe('Modal — real API', () => {
 // 2. GPU INFERENCE TESTS (real speech pipeline on RunPod)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('GPU Inference — RunPod live pod', () => {
+describe.skipIf(!process.env.RUNPOD_API_KEY)('GPU Inference — RunPod live pod', () => {
   let endpoint: string;
-  const runpodKey = process.env.RUNPOD_API_KEY;
 
   beforeAll(async () => {
-    if (!runpodKey) throw new Error('RUNPOD_API_KEY required');
-    const ep = await discoverRunpodEndpoint({ apiKey: runpodKey });
+    const ep = await discoverRunpodEndpoint({ apiKey: process.env.RUNPOD_API_KEY! });
     if (!ep) throw new Error('No running RunPod pod found — cannot test inference');
     endpoint = ep;
     console.log(`[gpu] Using endpoint: ${endpoint}`);
@@ -418,7 +407,7 @@ describe('Observability Hooks — lifecycle tracking', () => {
   });
 });
 
-describe('Spend Tracking — real OpenAI usage', () => {
+describe.skipIf(!process.env.OPENAI_API_KEY)('Spend Tracking — real OpenAI usage', () => {
   it('records real API call cost and checks budget', async () => {
     const OpenAI = (await import('openai')).default;
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -719,17 +708,15 @@ describe('E2E: Gateway decision flow', () => {
 // 5. FULL BOOT CYCLE: Stop → Boot → Wait → Inference
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('E2E: GPU Boot Cycle — stop, boot, wait, inference', () => {
-  const runpodKey = process.env.RUNPOD_API_KEY!;
+describe.skipIf(!process.env.RUNPOD_API_KEY)('E2E: GPU Boot Cycle — stop, boot, wait, inference', () => {
   let client: RunpodClient;
   let creds: ProviderCredentials;
   let bootedEndpoint: string;
   let bootedPodId: string;
 
   beforeAll(() => {
-    if (!runpodKey) throw new Error('RUNPOD_API_KEY required');
     client = new RunpodClient();
-    creds = { apiKey: runpodKey };
+    creds = { apiKey: process.env.RUNPOD_API_KEY! };
   });
 
   it('stops all existing RunPod pods', async () => {
@@ -786,7 +773,7 @@ describe('E2E: GPU Boot Cycle — stop, boot, wait, inference', () => {
 
     const tierConfig = {
       provider: 'runpod' as const,
-      apiKey: runpodKey,
+      apiKey: process.env.RUNPOD_API_KEY!,
       gpuTypes: ['NVIDIA GeForce RTX 4090', 'NVIDIA GeForce RTX 3090', 'NVIDIA RTX A5000'],
       dockerImage: 'marcosremar/parle-s2s:latest',
       hfToken: process.env.HF_TOKEN,
@@ -809,7 +796,7 @@ describe('E2E: GPU Boot Cycle — stop, boot, wait, inference', () => {
 
     // Get the direct endpoint
     const res = await fetch(`https://rest.runpod.io/v1/pods/${bootedPodId}`, {
-      headers: { Authorization: `Bearer ${runpodKey}`, Accept: 'application/json' },
+      headers: { Authorization: `Bearer ${process.env.RUNPOD_API_KEY!}`, Accept: 'application/json' },
       signal: AbortSignal.timeout(10_000),
     });
 
@@ -841,7 +828,7 @@ describe('E2E: GPU Boot Cycle — stop, boot, wait, inference', () => {
       try {
         // Re-discover endpoint (IP/port may change as pod starts)
         const podRes = await fetch(`https://rest.runpod.io/v1/pods/${bootedPodId}`, {
-          headers: { Authorization: `Bearer ${runpodKey}`, Accept: 'application/json' },
+          headers: { Authorization: `Bearer ${process.env.RUNPOD_API_KEY!}`, Accept: 'application/json' },
           signal: AbortSignal.timeout(5_000),
         }).catch(() => null);
 

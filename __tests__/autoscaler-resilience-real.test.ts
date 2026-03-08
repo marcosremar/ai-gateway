@@ -46,6 +46,8 @@ import { loadEnv, requireEnv, timed, waitFor } from './helpers';
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 
+const hasKeys = !!process.env.RUNPOD_API_KEY && !!process.env.VAST_API_KEY;
+
 let runpodCreds: ProviderCredentials;
 let vastCreds: ProviderCredentials;
 let runpodClient: RunpodClient;
@@ -55,6 +57,7 @@ let vastClient: VastClient;
 const cleanup: Array<{ provider: string; instanceId: string }> = [];
 
 beforeAll(() => {
+  if (!hasKeys) return;
   loadEnv();
   const runpodKey = requireEnv('RUNPOD_API_KEY');
   const vastKey = requireEnv('VAST_API_KEY');
@@ -65,6 +68,7 @@ beforeAll(() => {
 });
 
 afterAll(async () => {
+  if (!hasKeys) return;
   console.log(`\n  [cleanup] Cleaning up ${cleanup.length} instance(s)...`);
   for (const { provider, instanceId } of cleanup) {
     try {
@@ -179,7 +183,7 @@ async function buildLocalEngine(userId: string, sessionCount: number) {
 // 1. Engine Decision Logic (10 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('1. Engine Decision Logic', () => {
+describe.skipIf(!hasKeys)('1. Engine Decision Logic', () => {
   it('1.1 below threshold → no boot, route=llm', async () => {
     const { engine } = await buildLocalEngine('decision-below', 0);
     const d = await engine.getAutoScaleDecision('decision-below', makeConfig({ threshold: 5 }));
@@ -262,7 +266,7 @@ describe('1. Engine Decision Logic', () => {
 // 2. Tier State Transitions (8 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('2. Tier State Transitions', () => {
+describe.skipIf(!hasKeys)('2. Tier State Transitions', () => {
   it('2.1 idle→booting on session trigger', async () => {
     const { engine } = await buildLocalEngine('transition-boot', 5);
     const pool0 = engine.getPoolStatus('transition-boot');
@@ -378,7 +382,7 @@ describe('2. Tier State Transitions', () => {
 // 3. Health & Recovery (10 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('3. Health & Recovery', () => {
+describe.skipIf(!hasKeys)('3. Health & Recovery', () => {
   it('3.1 healthy→unhealthy→routes to LLM', async () => {
     const { engine } = await buildLocalEngine('health-cycle', 5);
     const ep = 'http://health-cycle:8000';
@@ -542,7 +546,7 @@ describe('3. Health & Recovery', () => {
 // 4. Fallback & Cascading Failures (8 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('4. Fallback & Cascading Failures', () => {
+describe.skipIf(!hasKeys)('4. Fallback & Cascading Failures', () => {
   it('4.1 invalid key fallback (RunPod) — tier 0 bad key → tier 1 boots', async () => {
     const registry = new GpuProviderRegistry();
     registry.register(runpodClient);
@@ -741,7 +745,7 @@ describe('4. Fallback & Cascading Failures', () => {
 // 5. Manual Stop & Lifecycle (8 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('5. Manual Stop & Lifecycle', () => {
+describe.skipIf(!hasKeys)('5. Manual Stop & Lifecycle', () => {
   it('5.1 manualStop suppresses auto-boot', async () => {
     const { engine } = await buildLocalEngine('manual-suppress', 10);
     engine.setTierState('manual-suppress', 0, {
@@ -847,7 +851,7 @@ describe('5. Manual Stop & Lifecycle', () => {
 // 6. Concurrent & Race Conditions (8 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('6. Concurrent & Race Conditions', () => {
+describe.skipIf(!hasKeys)('6. Concurrent & Race Conditions', () => {
   it('6.1 5 concurrent decisions → only 1 boot', async () => {
     const { engine } = await buildLocalEngine('concurrent-5', 10);
     const config = makeConfig();
@@ -994,7 +998,7 @@ describe('6. Concurrent & Race Conditions', () => {
 // 7. State Persistence (8 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('7. State Persistence', () => {
+describe.skipIf(!hasKeys)('7. State Persistence', () => {
   it('7.1 persist ready → restore on new engine', async () => {
     const sharedStore = new InMemoryStateAdapter();
     const registry = new GpuProviderRegistry();
@@ -1165,7 +1169,7 @@ describe('7. State Persistence', () => {
 // 8. Session Tracking (8 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('8. Session Tracking', () => {
+describe.skipIf(!hasKeys)('8. Session Tracking', () => {
   it('8.1 report + count heartbeats', async () => {
     const store = new InMemoryStateAdapter();
     const tracker = new SessionTracker(store, mockSessionResolver);
@@ -1265,7 +1269,7 @@ describe('8. Session Tracking', () => {
 // 9. Latency Tracking (8 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('9. Latency Tracking', () => {
+describe.skipIf(!hasKeys)('9. Latency Tracking', () => {
   it('9.1 report + P95', async () => {
     const store = new InMemoryStateAdapter();
     const tracker = new LatencyTracker(store);
@@ -1362,7 +1366,7 @@ describe('9. Latency Tracking', () => {
 // 10. Load Balancer (8 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('10. Load Balancer', () => {
+describe.skipIf(!hasKeys)('10. Load Balancer', () => {
   function makeReadyTiers(count: number): ReadyTierState[] {
     return Array.from({ length: count }, (_, i) => ({
       state: 'ready' as const,
@@ -1476,7 +1480,7 @@ describe('10. Load Balancer', () => {
 // 11. Watchdog (4 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('11. Watchdog', () => {
+describe.skipIf(!hasKeys)('11. Watchdog', () => {
   async function buildWatchdogDeps(userId: string): Promise<{
     deps: WatchdogDeps;
     engine: AutoscalerEngine;
@@ -1577,7 +1581,7 @@ describe('11. Watchdog', () => {
 // 12. Provider API Operations (6 tests — real API)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('12. Provider API Operations', () => {
+describe.skipIf(!hasKeys)('12. Provider API Operations', () => {
   it('12.1 RunPod listInstances succeeds', async () => {
     const { result: instances, ms } = await timed(() =>
       runpodClient.listInstances(runpodCreds),
@@ -1637,7 +1641,7 @@ describe('12. Provider API Operations', () => {
 // 13. Cost Monitor (4 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('13. Cost Monitor', () => {
+describe.skipIf(!hasKeys)('13. Cost Monitor', () => {
   function makeCostMonitorDeps(accounts: ProviderAccount[], overrides?: Partial<CostMonitorDeps>): CostMonitorDeps {
     const registry = new GpuProviderRegistry();
     registry.register(runpodClient);
@@ -1717,7 +1721,7 @@ describe('13. Cost Monitor', () => {
 // 14. Full Integration (4 tests)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('14. Full Integration', () => {
+describe.skipIf(!hasKeys)('14. Full Integration', () => {
   it('14.1 happy path: idle → boot → force ready → s2s route', async () => {
     const { engine } = await buildLocalEngine('integration-happy', 5);
     const config = makeConfig();

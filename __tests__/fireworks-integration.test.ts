@@ -9,13 +9,13 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { fireworksSTT, fireworksLLM } from '../src/providers/fireworks';
 import { FireworksImageProvider } from '../src/providers/fireworks/fireworks-image';
-import { loadEnv, requireEnv, makeTestWav, timed } from './helpers';
+import { loadEnv, makeTestWav, timed } from './helpers';
 
 beforeAll(() => loadEnv());
 
-describe('Fireworks STT (Real API)', () => {
+describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks STT (Real API)', () => {
   it('transcribes audio with whisper-v3-turbo', async () => {
-    requireEnv('FIREWORKS_API_KEY');
+
     const audio = makeTestWav(1.0);
 
     const { result, ms } = await timed(() =>
@@ -28,14 +28,14 @@ describe('Fireworks STT (Real API)', () => {
   });
 
   it('isConfigured returns true', () => {
-    requireEnv('FIREWORKS_API_KEY');
+
     expect(fireworksSTT.isConfigured()).toBe(true);
   });
 });
 
-describe('Fireworks LLM (Real API)', () => {
+describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks LLM (Real API)', () => {
   it('completes a chat with llama', async () => {
-    requireEnv('FIREWORKS_API_KEY');
+
 
     const { result, ms } = await timed(() =>
       fireworksLLM.chat({
@@ -55,7 +55,7 @@ describe('Fireworks LLM (Real API)', () => {
   });
 
   it('respects maxTokens', async () => {
-    requireEnv('FIREWORKS_API_KEY');
+
 
     const result = await fireworksLLM.chat({
       messages: [{ role: 'user', content: 'Write a long story.' }],
@@ -67,11 +67,11 @@ describe('Fireworks LLM (Real API)', () => {
   });
 });
 
-describe('Fireworks Image (Real API)', () => {
+describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks Image (Real API)', () => {
   const image = new FireworksImageProvider();
 
   it('generates an image with Flux', async () => {
-    requireEnv('FIREWORKS_API_KEY');
+
 
     const { result, ms } = await timed(() =>
       image.generate({

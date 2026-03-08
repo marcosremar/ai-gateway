@@ -136,10 +136,13 @@ async function runWatchdogForUser(
     const ts = tierStates[i];
     if (!ts || ts.state !== 'ready') continue;
 
+    // Never shut down tiers marked as alwaysActive
+    const tierConfig = config.tiers[i];
+    if (tierConfig?.alwaysActive) continue;
+
     const idleMs = now - ts.lastHealthyAt;
     if (idleMs < idleGraceMs) continue;
 
-    const tierConfig = config.tiers[i];
     if (!tierConfig?.apiKey || !tierConfig?.instanceId) {
       tierStates[i] = { state: 'idle', tierIndex: i } satisfies IdleTierState;
       continue;

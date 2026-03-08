@@ -11,9 +11,23 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcess } from 'child_process';
-import { RTCPeerConnection, RTCSessionDescription, useOPUS, MediaStreamTrack } from 'werift';
-import OpusScript from 'opusscript';
-import WebSocket from 'ws';
+let WebSocket: any;
+let RTCPeerConnection: any, RTCSessionDescription: any, useOPUS: any, MediaStreamTrack: any;
+let OpusScript: any;
+let hasNativeDeps = false;
+
+try {
+  WebSocket = (await import('ws')).default;
+  const werift = await import('werift');
+  RTCPeerConnection = werift.RTCPeerConnection;
+  RTCSessionDescription = werift.RTCSessionDescription;
+  useOPUS = werift.useOPUS;
+  MediaStreamTrack = werift.MediaStreamTrack;
+  OpusScript = (await import('opusscript')).default;
+  hasNativeDeps = true;
+} catch {
+  hasNativeDeps = false;
+}
 import path from 'path';
 import fs from 'fs';
 
@@ -92,19 +106,14 @@ async function waitForHealth(url: string, timeoutMs = 15_000): Promise<boolean> 
   return false;
 }
 
+// ── Key check ────────────────────────────────────────────────────────────────
+
+const hasKeys = !!process.env.GROQ_API_KEY || !!process.env.OPENAI_API_KEY;
+
 // ── Setup / Teardown ────────────────────────────────────────────────────────
 
 beforeAll(async () => {
-  // Verify API keys exist
-  const dotenvPath = path.resolve(process.cwd(), '.env');
-  if (fs.existsSync(dotenvPath)) {
-    const content = fs.readFileSync(dotenvPath, 'utf-8');
-    const hasGroq = content.includes('GROQ_API_KEY=') && !content.includes('GROQ_API_KEY=\n');
-    const hasOpenAI = content.includes('OPENAI_API_KEY=') && !content.includes('OPENAI_API_KEY=\n');
-    if (!hasGroq && !hasOpenAI) {
-      throw new Error('Need at least GROQ_API_KEY or OPENAI_API_KEY in .env to run E2E tests');
-    }
-  }
+  if (!hasKeys) return;
 
   const cwd = process.cwd();
 
@@ -130,6 +139,7 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(() => {
+  if (!hasKeys) return;
   wsProc?.kill('SIGTERM');
   rtcProc?.kill('SIGTERM');
 });
@@ -138,7 +148,7 @@ afterAll(() => {
 // WebSocket E2E Pipeline
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe('WebSocket E2E pipeline', () => {
+describe.skipIf(!hasKeys || !hasNativeDeps)('WebSocket E2E pipeline', () => {
   it('completes full STT → LLM → TTS pipeline with audio response', async () => {
     const ws = await connectWS(`ws://127.0.0.1:${WS_PORT}/ws/stream`);
 
@@ -303,7 +313,7 @@ describe('WebSocket E2E pipeline', () => {
 // WebRTC E2E SDP + DataChannel
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe('WebRTC E2E pipeline', () => {
+describe.skipIf(!hasKeys || !hasNativeDeps)('WebRTC E2E pipeline', () => {
   it('establishes peer connection and receives DataChannel messages', async () => {
     // Create client-side PeerConnection (simulates browser)
     const clientPc = new RTCPeerConnection({
@@ -433,7 +443,7 @@ describe('WebRTC E2E pipeline', () => {
 // Comparative Latency Summary
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe('Transport latency comparison', () => {
+describe.skipIf(!hasKeys || !hasNativeDeps)('Transport latency comparison', () => {
   it('measures WS connection + ping round-trip', async () => {
     const runs = 5;
     const connectTimes: number[] = [];

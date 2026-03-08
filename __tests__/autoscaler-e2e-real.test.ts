@@ -31,6 +31,8 @@ import { loadEnv, requireEnv, timed, waitFor } from './helpers';
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 
+const hasKeys = !!process.env.RUNPOD_API_KEY && !!process.env.VAST_API_KEY;
+
 let runpodCreds: ProviderCredentials;
 let vastCreds: ProviderCredentials;
 let runpodClient: RunpodClient;
@@ -40,6 +42,7 @@ let vastClient: VastClient;
 const cleanup: Array<{ provider: string; instanceId: string }> = [];
 
 beforeAll(() => {
+  if (!hasKeys) return;
   loadEnv();
   const runpodKey = requireEnv('RUNPOD_API_KEY');
   const vastKey = requireEnv('VAST_API_KEY');
@@ -50,6 +53,7 @@ beforeAll(() => {
 });
 
 afterAll(async () => {
+  if (!hasKeys) return;
   // Aggressive cleanup: delete ALL instances created during tests
   console.log(`\n  [cleanup] Cleaning up ${cleanup.length} instance(s)...`);
   for (const { provider, instanceId } of cleanup) {
@@ -113,7 +117,7 @@ async function buildEngineWithSessions(
 // TEST 1: RunPod Lifecycle (Real API)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('Test 1: RunPod Lifecycle', () => {
+describe.skipIf(!hasKeys)('Test 1: RunPod Lifecycle', () => {
   let pod: GpuInstance;
 
   it('creates an ultralight pod', async () => {
@@ -191,7 +195,7 @@ describe('Test 1: RunPod Lifecycle', () => {
 // TEST 2: Vast.ai Lifecycle (Real API)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('Test 2: Vast.ai Lifecycle', () => {
+describe.skipIf(!hasKeys)('Test 2: Vast.ai Lifecycle', () => {
   let instance: GpuInstance | null = null;
 
   it('creates an instance', async () => {
@@ -279,7 +283,7 @@ describe('Test 2: Vast.ai Lifecycle', () => {
 // TEST 3: Autoscaler Engine — RunPod Tier
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('Test 3: Autoscaler Engine with RunPod', () => {
+describe.skipIf(!hasKeys)('Test 3: Autoscaler Engine with RunPod', () => {
   const userId = 'e2e-test-user';
   let registry: GpuProviderRegistry;
   let engine: AutoscalerEngine;
@@ -406,7 +410,7 @@ describe('Test 3: Autoscaler Engine with RunPod', () => {
 // TEST 4: Autoscaler Engine — Vast.ai Tier
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('Test 4: Autoscaler Engine with Vast.ai', () => {
+describe.skipIf(!hasKeys)('Test 4: Autoscaler Engine with Vast.ai', () => {
   const userId = 'e2e-vast-user';
   let registry: GpuProviderRegistry;
   let engine: AutoscalerEngine;
@@ -501,7 +505,7 @@ describe('Test 4: Autoscaler Engine with Vast.ai', () => {
 // TEST 5: Fallback Chain — Tier 0 fails → Tier 1 succeeds
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('Test 5: Fallback — Tier 0 (bad) → Tier 1 (RunPod)', () => {
+describe.skipIf(!hasKeys)('Test 5: Fallback — Tier 0 (bad) → Tier 1 (RunPod)', () => {
   const userId = 'e2e-fallback-user';
   let registry: GpuProviderRegistry;
   let engine: AutoscalerEngine;
@@ -640,7 +644,7 @@ describe('Test 5: Fallback — Tier 0 (bad) → Tier 1 (RunPod)', () => {
 // TEST 6: Both Providers Registered — Discovery
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('Test 6: Dual Provider Discovery', () => {
+describe.skipIf(!hasKeys)('Test 6: Dual Provider Discovery', () => {
   it('discovers instances across both RunPod and Vast.ai', async () => {
     const { result: runpodInstances, ms: runpodMs } = await timed(() =>
       runpodClient.listInstances(runpodCreds),

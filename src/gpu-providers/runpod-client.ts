@@ -6,10 +6,11 @@ import type { AbstractGpuProviderOptions } from './abstract-provider';
  *  Must match RunPod's REST API enum values exactly.
  *  Pricing (approx): A5000 $0.16/h → 3090 $0.22/h → A6000 $0.33/h → 4090 $0.34/h → A40 $0.35/h */
 export const RUNPOD_GPU_FALLBACK = [
+  'NVIDIA GeForce RTX 5090',
+  'NVIDIA GeForce RTX 4090',
   'NVIDIA RTX A5000',
   'NVIDIA GeForce RTX 3090',
   'NVIDIA RTX A6000',
-  'NVIDIA GeForce RTX 4090',
   'NVIDIA A40',
 ];
 
@@ -341,6 +342,42 @@ export class RunpodClient extends AbstractGpuProvider {
       const data = (await res.json()) as Record<string, unknown>;
       const costPerHr = data.costPerHr as number | undefined;
       return costPerHr ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Returns rich pod detail including runtime status.
+   * The `runtime` field is null while the container is still starting (image pull / init).
+   * Once the container is up, `runtime` contains ports, uptime, and GPU info.
+   */
+  async getInstanceDetail(instanceId: string, credentials: ProviderCredentials): Promise<{
+    desiredStatus: string | null;
+    runtime: Record<string, unknown> | null;
+    imageName: string | null;
+    gpuType: string | null;
+    costPerHr: number | null;
+    uptimeSecs: number | null;
+  } | null> {
+    try {
+      const { apiKey } = credentials;
+      const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods/${instanceId}`, {
+        headers: this.authHeaders(apiKey),
+      }, TIMEOUTS.read);
+      if (res.status === 404) return null;
+      if (!res.ok) return null;
+      const data = (await res.json()) as Record<string, unknown>;
+      const runtime = (data.runtime as Record<string, unknown>) ?? null;
+      const uptimeSecs = runtime?.uptimeInSeconds as number | null ?? null;
+      return {
+        desiredStatus: (data.desiredStatus as string) ?? null,
+        runtime,
+        imageName: (data.imageName as string) ?? null,
+        gpuType: (data.machine as Record<string, unknown>)?.gpuDisplayName as string ?? data.gpuType as string ?? null,
+        costPerHr: (data.costPerHr as number) ?? null,
+        uptimeSecs,
+      };
     } catch {
       return null;
     }

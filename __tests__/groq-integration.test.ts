@@ -7,13 +7,12 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { groqSTT, groqTTS, groqLLM } from '../src/providers/groq';
-import { loadEnv, requireEnv, makeTestWav, timed } from './helpers';
+import { loadEnv, makeTestWav, timed } from './helpers';
 
 beforeAll(() => loadEnv());
 
-describe('Groq STT (Real API)', () => {
+describe.skipIf(!process.env.GROQ_API_KEY)('Groq STT (Real API)', () => {
   it('transcribes audio with whisper-large-v3-turbo', async () => {
-    requireEnv('GROQ_API_KEY');
     const audio = makeTestWav(1.0);
 
     const { result, ms } = await timed(() =>
@@ -26,7 +25,6 @@ describe('Groq STT (Real API)', () => {
   });
 
   it('returns language detection', async () => {
-    requireEnv('GROQ_API_KEY');
     const audio = makeTestWav(0.5);
 
     const result = await groqSTT.transcribe({
@@ -40,14 +38,12 @@ describe('Groq STT (Real API)', () => {
   });
 
   it('isConfigured returns true when key is set', () => {
-    requireEnv('GROQ_API_KEY');
     expect(groqSTT.isConfigured()).toBe(true);
   });
 });
 
-describe('Groq TTS (Real API)', () => {
+describe.skipIf(!process.env.GROQ_API_KEY)('Groq TTS (Real API)', () => {
   it('synthesizes speech with Orpheus', async () => {
-    requireEnv('GROQ_API_KEY');
 
     const { result, ms } = await timed(() =>
       groqTTS.synthesize({
@@ -65,7 +61,6 @@ describe('Groq TTS (Real API)', () => {
   });
 
   it('returns available models and voices', () => {
-    requireEnv('GROQ_API_KEY');
     const models = groqTTS.getModels();
     const voices = groqTTS.getVoices();
 
@@ -76,9 +71,8 @@ describe('Groq TTS (Real API)', () => {
   });
 });
 
-describe('Groq LLM (Real API)', () => {
+describe.skipIf(!process.env.GROQ_API_KEY)('Groq LLM (Real API)', () => {
   it('completes a chat with llama-3.3-70b', async () => {
-    requireEnv('GROQ_API_KEY');
 
     const { result, ms } = await timed(() =>
       groqLLM.chat({
@@ -100,8 +94,6 @@ describe('Groq LLM (Real API)', () => {
   });
 
   it('respects maxTokens limit', async () => {
-    requireEnv('GROQ_API_KEY');
-
     const result = await groqLLM.chat({
       messages: [{ role: 'user', content: 'Write a long story about a cat.' }],
       model: 'llama-3.3-70b-versatile',
@@ -113,8 +105,6 @@ describe('Groq LLM (Real API)', () => {
   });
 
   it('returns JSON when responseFormat is json_object', async () => {
-    requireEnv('GROQ_API_KEY');
-
     const result = await groqLLM.chat({
       messages: [
         { role: 'system', content: 'Return valid JSON only.' },

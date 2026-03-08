@@ -36,11 +36,13 @@ let groqKey: string;
 // Shared state across sequential tests
 let createdInstance: GpuInstance | null = null;
 
+const hasVastKeys = !!process.env.VAST_API_KEY;
+
 beforeAll(() => {
+  if (!hasVastKeys) return;
   loadEnv();
-  const apiKey = requireEnv('VAST_API_KEY');
-  groqKey = requireEnv('GROQ_API_KEY');
-  creds = { apiKey };
+  creds = { apiKey: process.env.VAST_API_KEY! };
+  groqKey = process.env.GROQ_API_KEY || '';
   client = new VastClient();
 });
 
@@ -57,7 +59,7 @@ afterAll(async () => {
 
 // ─── Offer Search (Read-Only) ───────────────────────────────────────────────
 
-describe('Vast.ai Offers — Real API', () => {
+describe.skipIf(!hasVastKeys)('Vast.ai Offers — Real API', () => {
   it('Step 1a: search RTX 3090 offers (cheapest first)', async () => {
     const searchBody = {
       limit: 5,
@@ -131,7 +133,7 @@ describe('Vast.ai Offers — Real API', () => {
 
 // ─── Full Lifecycle (Creates Real Machine) ──────────────────────────────────
 
-describe('Vast.ai Lifecycle — Ultralight Inference', () => {
+describe.skipIf(!hasVastKeys)('Vast.ai Lifecycle — Ultralight Inference', () => {
   it('Step 2: createInstance — ultralight image with GROQ_API_KEY', async () => {
     const { result: instance, ms } = await timed(() =>
       client.createInstance(
@@ -313,7 +315,7 @@ describe('Vast.ai Lifecycle — Ultralight Inference', () => {
 
 // ─── Edge Cases ─────────────────────────────────────────────────────────────
 
-describe('Vast.ai — Edge Cases', () => {
+describe.skipIf(!hasVastKeys)('Vast.ai — Edge Cases', () => {
   it('getInstanceStatus returns null for non-existent instance', async () => {
     const status = await client.getInstanceStatus('inst-9999999', creds);
     expect(status).toBeNull();

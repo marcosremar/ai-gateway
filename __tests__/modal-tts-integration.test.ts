@@ -9,9 +9,23 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { ModalTTSProvider } from '../src/providers/modal';
 import { loadEnv, timed } from './helpers';
 
-beforeAll(() => loadEnv());
+let modalReachable = false;
 
-describe('Modal TTS / MOSS-TTS-Realtime (Real API)', () => {
+beforeAll(async () => {
+  loadEnv();
+  try {
+    const tts = new ModalTTSProvider();
+    const res = await fetch((tts as any).baseUrl || 'https://marcosremar--moss-tts-realtime-web.modal.run', {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(5_000),
+    });
+    modalReachable = res.ok || res.status < 500;
+  } catch {
+    modalReachable = false;
+  }
+});
+
+describe.skipIf(!modalReachable)('Modal TTS / MOSS-TTS-Realtime (Real API)', () => {
   const tts = new ModalTTSProvider();
 
   it('synthesizes Portuguese speech', async () => {

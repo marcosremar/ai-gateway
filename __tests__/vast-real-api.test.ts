@@ -12,17 +12,20 @@ import { VastClient } from '../src/gpu-providers/vast-client';
 import type { ProviderCredentials } from '../src/gpu-providers/types';
 import { loadEnv, requireEnv, timed } from './helpers';
 
+const hasKeys = !!process.env.VAST_API_KEY;
+
 let creds: ProviderCredentials;
 let client: VastClient;
 
 beforeAll(() => {
+  if (!hasKeys) return;
   loadEnv();
   const apiKey = requireEnv('VAST_API_KEY');
   creds = { apiKey };
   client = new VastClient();
 });
 
-describe('VastClient — Read-Only (Real API)', () => {
+describe.skipIf(!hasKeys)('VastClient — Read-Only (Real API)', () => {
   it('lists all instances on account (on-demand + serverless)', async () => {
     const { result: instances, ms } = await timed(() => client.listInstances(creds));
 
@@ -61,7 +64,7 @@ describe('VastClient — Read-Only (Real API)', () => {
   });
 });
 
-describe('VastClient — Offer Search (Real API)', () => {
+describe.skipIf(!hasKeys)('VastClient — Offer Search (Real API)', () => {
   it('searches for RTX 4090 GPU offers', async () => {
     // Use the private _searchOffers via a small wrapper to test the API
     const searchBody = {
@@ -179,7 +182,7 @@ describe('VastClient — Offer Search (Real API)', () => {
   });
 });
 
-describe('VastClient — API Authentication', () => {
+describe.skipIf(!hasKeys)('VastClient — API Authentication', () => {
   it('rejects invalid API key', async () => {
     const badClient = new VastClient();
     const badCreds: ProviderCredentials = { apiKey: 'invalid-vast-key-12345' };

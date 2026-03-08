@@ -17,6 +17,43 @@ import type { Logger } from '../deps';
 export interface StageConfig {
   provider: string;
   model?: string;
+
+  // ── Self-hosted options ─────────────────────────────────────────────────
+  // These fields only apply to self-hosted providers (Ollama, faster-whisper,
+  // llama.cpp, RunPod GPU, etc.) that need to be running before they can
+  // serve requests. Cloud API providers (Groq, OpenAI, Fireworks) are always
+  // available and ignore these fields.
+
+  /**
+   * Mark this entry as a self-hosted provider.
+   * When true, the gateway will health-check the endpoint on startup
+   * and manage its lifecycle (warmup, replicas, keep-alive).
+   */
+  selfHosted?: boolean;
+
+  /**
+   * Base URL for the self-hosted service (e.g. "http://localhost:8000").
+   * Used for health checks and to configure the provider's endpoint.
+   * Required when selfHosted is true.
+   */
+  endpoint?: string;
+
+  /**
+   * Keep this self-hosted provider always active — health-check on startup
+   * and prevent idle shutdown by the autoscaler watchdog.
+   * Only effective when selfHosted is true. Cloud APIs ignore this.
+   * Default: false (on-demand)
+   */
+  alwaysActive?: boolean;
+
+  /**
+   * Number of active instances to maintain for redundancy.
+   * When > 1, the provider appears multiple times in the fallback chain —
+   * if instance 1 fails, instance 2 handles the request automatically.
+   * Only effective when selfHosted is true and alwaysActive is true.
+   * Default: 1
+   */
+  replicas?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,4 +184,23 @@ export interface PipelineResult {
   tts: SynthesizeResult;
   totalLatencyMs: number;
   usedGpu: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Warmup Types
+// ---------------------------------------------------------------------------
+
+export interface WarmupEntry {
+  id: string;
+  stage: string;
+  provider: string;
+  model?: string;
+  status: 'ok' | 'error';
+  latencyMs: number;
+  error?: string;
+}
+
+export interface WarmupResult {
+  entries: WarmupEntry[];
+  totalMs: number;
 }

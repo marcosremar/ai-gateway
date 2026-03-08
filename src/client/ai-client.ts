@@ -18,6 +18,8 @@ import type {
   RealtimeResult,
   PipelineResult,
   DeployResult,
+  WarmupResult,
+  WarmupEntry,
 } from './types';
 import type { ChatMessage, ProviderId, RealtimeSessionConfig } from '../providers/types';
 import type { FallbackEntry, FallbackOptions } from '../providers/fallback';
@@ -68,6 +70,66 @@ export class AIClient {
   }
 
   // ── Public API ────────────────────────────────────────────────────────────
+
+  /**
+   * Warm up all providers marked with `alwaysActive: true` in the default profile.
+   *
+   * - GPU providers: triggers a boot via the autoscaler or deploy API
+   * - Cloud APIs: sends a lightweight request to warm connections/model caches
+   *
+   * Call this once after creating the client to pre-warm active providers.
+   * Returns a summary of what was warmed and any errors encountered.
+   */
+  async warmup(): Promise<WarmupResult> {
+    const profile = this.defaultProfile;
+    const results: WarmupEntry[] = [];
+
+    const stages: Array<{ name: string; configs: StageConfig[] | undefined }> = [
+      { name: 'stt', configs: profile.stt },
+      { name: 'llm', configs: profile.llm },
+      { name: 'tts', configs: profile.tts },
+      { name: 'image', configs: profile.image },
+      { name: 'omni', configs: profile.omni },
+    ];
+
+    const warmupTasks: Promise<void>[] = [];
+
+    for (const { name, configs } of stages) {
+      if (!configs) continue;
+      for (const config of configs) {
+        // Only warm up self-hosted providers — cloud APIs are always available
+        if (!config.selfHosted || !config.alwaysActive) continue;
+        if (!config.endpoint) {
+          this.log.warn(`[AIClient] Warmup skipped ${name}:${config.provider} — selfHosted requires endpoint`);
+          continue;
+        }
+        const replicaCount = Math.max(config.replicas ?? 1, 1);
+        for (let r = 0; r < replicaCount; r++) {
+          const replicaLabel = replicaCount > 1 ? `#${r + 1}` : '';
+          warmupTasks.push(
+            this.warmupSelfHosted(name, config, replicaLabel)
+              .then((entry) => { results.push(entry); })
+          );
+        }
+      }
+    }
+
+    // Warm GPU endpoint if profile has gpuEndpoint
+    if (profile.gpuEndpoint) {
+      warmupTasks.push(
+        this.warmupSelfHostedEndpoint(profile.gpuEndpoint, 'gpu')
+          .then((entry) => { results.push(entry); })
+      );
+    }
+
+    await Promise.allSettled(warmupTasks);
+
+    const ok = results.filter((r) => r.status === 'ok').length;
+    const failed = results.filter((r) => r.status === 'error').length;
+    this.log.log(`[AIClient] Warmup complete: ${ok} ok, ${failed} failed`);
+
+    return { entries: results, totalMs: 0 };
+  }
 
   /**
    * Transcribe audio to text using the STT fallback chain.
@@ -352,7 +414,20 @@ export class AIClient {
     ];
     const chat = await this.chat(allMessages, profile);
 
-    const tts = await this.synthesize(chat.content, profile);
+    // TTS is optional — if no TTS providers are configured, return empty audio
+    let tts: SynthesizeResult;
+    try {
+      tts = await this.synthesize(chat.content, profile);
+    } catch (err) {
+      this.log.warn('[AIClient] TTS unavailable in cloud fallback, returning text-only:', err);
+      tts = {
+        audio: Buffer.alloc(0),
+        contentType: '',
+        provider: 'none',
+        fallbackUsed: false,
+        latencyMs: 0,
+      };
+    }
 
     return {
       stt,
@@ -615,7 +690,19 @@ export class AIClient {
     if (!configs || configs.length === 0) {
       throw new Error(`[AIClient] No ${stage.toUpperCase()} providers configured in profile`);
     }
-    return { entries: configs.map((c) => ({ provider: c.provider, model: c.model })) };
+
+    // Expand replicas for self-hosted providers: each config with replicas > 1
+    // is duplicated in the chain. This gives automatic redundancy via the existing
+    // fallback mechanism — if replica 1 fails, replica 2 (same provider) is tried
+    // before moving to the next provider. Cloud APIs ignore replicas.
+    const entries: FallbackEntry[] = [];
+    for (const c of configs) {
+      const count = (c.selfHosted && c.alwaysActive) ? Math.max(c.replicas ?? 1, 1) : 1;
+      for (let r = 0; r < count; r++) {
+        entries.push({ provider: c.provider, model: c.model });
+      }
+    }
+    return { entries };
   }
 
   private buildFallbackOptions(
@@ -654,6 +741,56 @@ export class AIClient {
 
   private resolveKey(providerId: ProviderId, profile: AIProfile): string | null {
     return resolveApiKey(providerId, profile.keys as Record<string, string> | undefined);
+  }
+
+  /**
+   * Health-check a self-hosted provider endpoint.
+   * Probes GET /health (or /v1/models as fallback) to verify the service is running.
+   */
+  private async warmupSelfHosted(
+    stage: string,
+    config: StageConfig,
+    replicaLabel = '',
+  ): Promise<WarmupEntry> {
+    const endpoint = config.endpoint!;
+    const id = `${stage}:${config.provider}/${config.model ?? 'default'}${replicaLabel}`;
+    return this.warmupSelfHostedEndpoint(endpoint, id, stage, config.provider, config.model);
+  }
+
+  /**
+   * Probe a self-hosted endpoint for health.
+   * Tries /health first, then /v1/models as fallback.
+   */
+  private async warmupSelfHostedEndpoint(
+    endpoint: string,
+    id: string,
+    stage = 'gpu',
+    provider = 'self-hosted',
+    model?: string,
+  ): Promise<WarmupEntry> {
+    const t0 = Date.now();
+    const base = endpoint.replace(/\/+$/, '');
+
+    // Try /health first, then /v1/models
+    const probes = [`${base}/health`, `${base}/v1/models`];
+
+    for (const url of probes) {
+      try {
+        const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+        if (resp.ok) {
+          const ms = Date.now() - t0;
+          this.log.log(`[AIClient] Warmup self-hosted ${id}: ok (${ms}ms)`);
+          return { id, stage, provider, model, status: 'ok', latencyMs: ms };
+        }
+      } catch {
+        // try next probe
+      }
+    }
+
+    const ms = Date.now() - t0;
+    const error = `self-hosted endpoint ${base} not reachable`;
+    this.log.warn(`[AIClient] Warmup self-hosted ${id}: ${error} (${ms}ms)`);
+    return { id, stage, provider, model, status: 'error', latencyMs: ms, error };
   }
 
   private async resolveGpuEndpoint(profile: AIProfile): Promise<string | null> {
@@ -714,28 +851,29 @@ export class AIClient {
         response?: string;
         audio_base64?: string;
         content_type?: string;
+        timing?: { stt_ms?: number; llm_ms?: number; tts_ms?: number; total_ms?: number };
       };
 
-      const now = Date.now();
+      const timing = data.timing || {};
       return {
         stt: {
           text: data.transcription ?? '',
           provider: 's2s-gpu',
           fallbackUsed: false,
-          latencyMs: 0,
+          latencyMs: timing.stt_ms ?? 0,
         },
         chat: {
           content: data.response ?? '',
           provider: 's2s-gpu',
           fallbackUsed: false,
-          latencyMs: 0,
+          latencyMs: timing.llm_ms ?? 0,
         },
         tts: {
           audio: data.audio_base64 ? Buffer.from(data.audio_base64, 'base64') : Buffer.alloc(0),
           contentType: data.content_type ?? 'audio/mp3',
           provider: 's2s-gpu',
           fallbackUsed: false,
-          latencyMs: 0,
+          latencyMs: timing.tts_ms ?? 0,
         },
       };
     } finally {

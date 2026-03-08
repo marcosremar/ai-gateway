@@ -47,6 +47,19 @@ export interface GpuTierConfig {
   instanceId?: string;
   endpoint?: string;
   apiKey?: string;
+  /**
+   * When true, this tier boots immediately on startup and the idle watchdog
+   * will never shut it down. Use for GPU instances that must always be ready.
+   * Default: false (on-demand, subject to idle shutdown)
+   */
+  alwaysActive?: boolean;
+  /**
+   * Number of GPU instances to keep active for this tier.
+   * When > 1, multiple instances are provisioned for redundancy/load balancing.
+   * Only effective when alwaysActive is true.
+   * Default: 1
+   */
+  replicas?: number;
   /** TensorDock Authorization ID (api_key param) */
   authId?: string;
   /** Ordered GPU type preferences */

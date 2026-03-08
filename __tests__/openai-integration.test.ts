@@ -12,7 +12,7 @@ import { OpenAIRealtimeProvider } from '../src/providers/openai/openai-realtime'
 import { OpenAIOmniProvider } from '../src/providers/openai/openai-omni';
 import { OpenAIImageProvider } from '../src/providers/openai/openai-image';
 import { OpenAICompatLLMProvider } from '../src/providers/openai-compat/openai-compat-llm';
-import { loadEnv, requireEnv, makeTestWav, timed } from './helpers';
+import { loadEnv, makeTestWav, timed } from './helpers';
 
 beforeAll(() => loadEnv());
 
@@ -23,11 +23,11 @@ const openaiLLM = new OpenAICompatLLMProvider({
   defaultModel: 'gpt-4o-mini',
 });
 
-describe('OpenAI STT (Real API)', () => {
+describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI STT (Real API)', () => {
   const stt = new OpenAISTTProvider();
 
   it('transcribes with whisper-1', async () => {
-    requireEnv('OPENAI_API_KEY');
+
     const audio = makeTestWav(1.0);
 
     const { result, ms } = await timed(() =>
@@ -40,7 +40,7 @@ describe('OpenAI STT (Real API)', () => {
   });
 
   it('transcribes with gpt-4o-transcribe', async () => {
-    requireEnv('OPENAI_API_KEY');
+
     const audio = makeTestWav(1.0);
 
     const { result, ms } = await timed(() =>
@@ -52,18 +52,18 @@ describe('OpenAI STT (Real API)', () => {
   });
 
   it('withApiKey creates a new isolated instance', () => {
-    requireEnv('OPENAI_API_KEY');
+
     const custom = stt.withApiKey(process.env.OPENAI_API_KEY!);
     expect(custom).toBeInstanceOf(OpenAISTTProvider);
     expect(custom).not.toBe(stt);
   });
 });
 
-describe('OpenAI TTS (Real API)', () => {
+describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI TTS (Real API)', () => {
   const tts = new OpenAITTSProvider();
 
   it('synthesizes speech with gpt-4o-mini-tts', async () => {
-    requireEnv('OPENAI_API_KEY');
+
 
     const { result, ms } = await timed(() =>
       tts.synthesize({
@@ -81,7 +81,7 @@ describe('OpenAI TTS (Real API)', () => {
   });
 
   it('synthesizes with instructions', async () => {
-    requireEnv('OPENAI_API_KEY');
+
 
     const result = await tts.synthesize({
       input: 'Good morning!',
@@ -94,7 +94,7 @@ describe('OpenAI TTS (Real API)', () => {
   });
 
   it('synthesizeStream returns a ReadableStream', async () => {
-    requireEnv('OPENAI_API_KEY');
+
 
     const stream = await tts.synthesizeStream({
       input: 'Test stream.',
@@ -118,9 +118,9 @@ describe('OpenAI TTS (Real API)', () => {
   });
 });
 
-describe('OpenAI LLM (Real API)', () => {
+describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI LLM (Real API)', () => {
   it('completes chat with gpt-4o-mini', async () => {
-    requireEnv('OPENAI_API_KEY');
+
 
     const { result, ms } = await timed(() =>
       openaiLLM.chat({
@@ -140,7 +140,7 @@ describe('OpenAI LLM (Real API)', () => {
   });
 
   it('returns JSON format', async () => {
-    requireEnv('OPENAI_API_KEY');
+
 
     const result = await openaiLLM.chat({
       messages: [
@@ -157,11 +157,11 @@ describe('OpenAI LLM (Real API)', () => {
   });
 });
 
-describe('OpenAI Realtime (Real API)', () => {
+describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI Realtime (Real API)', () => {
   const realtime = new OpenAIRealtimeProvider();
 
   it('creates an ephemeral session', async () => {
-    requireEnv('OPENAI_API_KEY');
+
 
     const { result: session, ms } = await timed(() =>
       realtime.createSession({
@@ -178,7 +178,7 @@ describe('OpenAI Realtime (Real API)', () => {
   });
 
   it('supports noise reduction config', async () => {
-    requireEnv('OPENAI_API_KEY');
+
 
     const session = await realtime.createSession({
       model: 'gpt-4o-mini-realtime-preview',
@@ -192,11 +192,11 @@ describe('OpenAI Realtime (Real API)', () => {
   });
 });
 
-describe('OpenAI Omni (Real API)', () => {
+describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI Omni (Real API)', () => {
   const omni = new OpenAIOmniProvider();
 
   it('generates text+audio from text input', async () => {
-    requireEnv('OPENAI_API_KEY');
+
 
     const { result, ms } = await timed(() =>
       omni.omniChat({
@@ -216,11 +216,11 @@ describe('OpenAI Omni (Real API)', () => {
   });
 });
 
-describe('OpenAI Image (Real API)', () => {
+describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI Image (Real API)', () => {
   const image = new OpenAIImageProvider();
 
   it('generates an image with dall-e-2', async () => {
-    requireEnv('OPENAI_API_KEY');
+
 
     const { result, ms } = await timed(() =>
       image.generate({

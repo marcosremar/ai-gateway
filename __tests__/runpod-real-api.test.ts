@@ -12,6 +12,8 @@ import { RunpodClient, RUNPOD_GPU_TYPE_MAP, RUNPOD_GPU_FALLBACK } from '../src/g
 import type { ProviderCredentials } from '../src/gpu-providers/types';
 import { loadEnv, requireEnv, timed } from './helpers';
 
+const hasKeys = !!process.env.RUNPOD_API_KEY;
+
 let creds: ProviderCredentials;
 let client: RunpodClient;
 
@@ -19,6 +21,7 @@ let client: RunpodClient;
 let createdPodId: string | null = null;
 
 beforeAll(() => {
+  if (!hasKeys) return;
   loadEnv();
   const apiKey = requireEnv('RUNPOD_API_KEY');
   creds = { apiKey };
@@ -26,6 +29,7 @@ beforeAll(() => {
 });
 
 afterAll(async () => {
+  if (!hasKeys) return;
   // Cleanup: delete any pod created during tests
   if (createdPodId) {
     try {
@@ -37,7 +41,7 @@ afterAll(async () => {
   }
 });
 
-describe('RunpodClient — Read-Only (Real API)', () => {
+describe.skipIf(!hasKeys)('RunpodClient — Read-Only (Real API)', () => {
   it('lists all pods on account', async () => {
     const { result: pods, ms } = await timed(() => client.listInstances(creds));
 
@@ -92,7 +96,7 @@ describe('RunpodClient — Read-Only (Real API)', () => {
   });
 });
 
-describe('RunpodClient — Create & Lifecycle (Real API)', () => {
+describe.skipIf(!hasKeys)('RunpodClient — Create & Lifecycle (Real API)', () => {
   it('creates an ultralight pod, checks status, then deletes it', async () => {
     // Use the smallest possible pod: ultralight image, no volume, cheapest GPU
     const { result: instance, ms: createMs } = await timed(() =>

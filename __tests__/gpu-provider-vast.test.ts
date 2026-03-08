@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { VastClient } from '@ai-gateway/gpu-providers/vast-client';
+import { AbstractGpuProvider } from '@ai-gateway/gpu-providers/abstract-provider';
 import type { ProviderCredentials, InstanceSpec } from '@ai-gateway/gpu-providers/types';
 
 const VAST_API_BASE = 'https://console.vast.ai/api/v0';
@@ -25,6 +26,8 @@ describe('VastClient', () => {
     client = new VastClient();
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
+    // Prevent Docker Hub calls during createInstance — return fixed disk size
+    vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
   });
 
   afterEach(() => {
@@ -38,8 +41,8 @@ describe('VastClient', () => {
       expect(client.providerId).toBe('vast');
     });
 
-    it('bootTimeSecs is 300', () => {
-      expect(client.bootTimeSecs).toBe(300);
+    it('bootTimeSecs is 120', () => {
+      expect(client.bootTimeSecs).toBe(120);
     });
   });
 

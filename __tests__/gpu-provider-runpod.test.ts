@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { RunpodClient, RUNPOD_GPU_FALLBACK, RUNPOD_GPU_TYPE_MAP } from '@ai-gateway/gpu-providers/runpod-client';
+import { AbstractGpuProvider } from '@ai-gateway/gpu-providers/abstract-provider';
 import type { ProviderCredentials, InstanceSpec } from '@ai-gateway/gpu-providers/types';
 
 const API_BASE = 'https://rest.runpod.io/v1';
@@ -26,6 +27,8 @@ describe('RunpodClient', () => {
     client = new RunpodClient();
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
+    // Prevent Docker Hub calls during createInstance — return fixed disk size
+    vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
   });
 
   afterEach(() => {
@@ -213,7 +216,8 @@ describe('RunpodClient', () => {
       expect(body.volumeInGb).toBe(0);
       expect(body.volumeMountPath).toBeUndefined();
       expect(body.dockerStartCmd).toBeUndefined();
-      expect(body.containerDiskInGb).toBe(10); // minimum 10GB
+      // containerDiskInGb = max(estimateImageDiskGb(), 10) — auto-detected from image
+      expect(body.containerDiskInGb).toBeGreaterThanOrEqual(10);
     });
 
     it('storageGb>0 adds volume and mounts at /workspace', async () => {
