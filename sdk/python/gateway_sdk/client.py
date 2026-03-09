@@ -176,8 +176,6 @@ class GatewaySDK:
         """Deploy a GPU pod (non-blocking — returns immediately, poll gpu_status())."""
         http = self._get_http()
         body: dict = {"apiKey": options.api_key}
-        if options.vast_api_key:
-            body["vastApiKey"] = options.vast_api_key
         if options.docker_image:
             body["dockerImage"] = options.docker_image
         if options.gpu_types:

@@ -94,7 +94,6 @@ class GpuStatus:
 @dataclass
 class DeployOptions:
     api_key: str
-    vast_api_key: str = ""
     docker_image: str = ""
     gpu_types: Optional[list[str]] = None
 
