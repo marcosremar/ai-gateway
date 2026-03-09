@@ -31,6 +31,8 @@ export interface HostnodeCandidate {
   city: string;
   maxVcpu: number;
   maxRam: number;
+  tier: number;         // location tier (0=residential, 3-4=data center)
+  uptimePct: number;    // historical uptime percentage
 }
 
 export interface SshKeyInfo {
@@ -73,7 +75,9 @@ export async function findSshKey(headers: Record<string, string>): Promise<SshKe
 }
 
 /**
- * Finds cheapest hostnodes for a given GPU model — single implementation.
+ * Finds best hostnodes for a given GPU model.
+ * Sorts by tier (highest first), then uptime, then price.
+ * This avoids tier-0 residential hosts that frequently reclaim GPUs (stoppeddisassociated).
  */
 export async function findCheapestLocations(
   gpuId: string,
@@ -99,6 +103,8 @@ export async function findCheapestLocations(
       const ports = node.available_resources?.available_ports || [];
       if (ports.length < minPorts) continue;
       const locId = node.location_id || node.location?.uuid || node.id;
+      const tier = node.location?.tier ?? 0;
+      const uptimePct = node.uptime_percentage ?? 0;
       candidates.push({
         id: locId,
         price: gpu.price_per_hr,
@@ -106,9 +112,16 @@ export async function findCheapestLocations(
         city: node.location?.city || 'unknown',
         maxVcpu: node.available_resources?.max_vcpus_per_gpu || node.available_resources?.max_vcpus || 4,
         maxRam: node.available_resources?.max_ram_per_gpu || node.available_resources?.max_ram_gb || 16,
+        tier,
+        uptimePct,
       });
     }
-    candidates.sort((a, b) => a.price - b.price);
+    // Sort: highest tier first, then best uptime, then lowest price
+    candidates.sort((a, b) => {
+      if (b.tier !== a.tier) return b.tier - a.tier;           // higher tier first
+      if (b.uptimePct !== a.uptimePct) return b.uptimePct - a.uptimePct; // better uptime first
+      return a.price - b.price;                                 // cheaper first
+    });
   } catch {
     // ignore
   }
@@ -265,6 +278,12 @@ export class TensordockClient extends AbstractGpuProvider {
       if (candidates.length === 0) {
         this.log.log(`[tensordock] ${gpuShort} unavailable, trying next...`);
         continue;
+      }
+
+      // Log top candidates with quality info
+      this.log.log(`[tensordock] ${gpuShort}: ${candidates.length} candidates (top 3):`);
+      for (const c of candidates.slice(0, 3)) {
+        this.log.log(`  ${c.city} tier=${c.tier} uptime=${c.uptimePct.toFixed(1)}% $${c.price}/hr ports=${c.ports.length}`);
       }
 
       const instanceName = `parle-autoscale-${Date.now()}`;
