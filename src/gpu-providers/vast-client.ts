@@ -146,7 +146,10 @@ export class VastClient extends AbstractGpuProvider {
     const headers = this.jsonHeaders(apiKey);
 
     // ── 1. Auto-detect disk from Docker image if not specified ─────────────
-    const imageName = spec.dockerImage || 'marcosremar/parle-s2s-ultralight:latest';
+    if (!spec.dockerImage) {
+      throw new Error('[vast] spec.dockerImage is required — no default image');
+    }
+    const imageName = spec.dockerImage;
     let diskGb = spec.storageGb ?? 0;
     if (diskGb <= 0) {
       diskGb = await AbstractGpuProvider.estimateImageDiskGb(imageName, 20);

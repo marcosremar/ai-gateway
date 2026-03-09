@@ -132,7 +132,10 @@ export class RunpodClient extends AbstractGpuProvider {
     }
 
     // Auto-detect container disk size from Docker image when not explicitly configured
-    const imageName = spec.dockerImage || 'marcosremar/parle-s2s-ultralight:latest';
+    if (!spec.dockerImage) {
+      throw new Error('[runpod] spec.dockerImage is required — no default image');
+    }
+    const imageName = spec.dockerImage;
     let diskGb = spec.storageGb ?? 0;
     if (diskGb <= 0) {
       diskGb = await AbstractGpuProvider.estimateImageDiskGb(imageName, 20);
