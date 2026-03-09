@@ -34,13 +34,51 @@ export interface CooldownInfo {
   failCount: number;
 }
 
+export interface CooldownEntry {
+  failedAt: number;
+  cooldownUntilMs: number;
+  failCount: number;
+}
+
 export class ProviderCooldownTracker {
-  private cooldowns = new Map<string, { failedAt: number; cooldownUntilMs: number; failCount: number }>();
+  private cooldowns = new Map<string, CooldownEntry>();
+  private persistPath: string | null = null;
 
   constructor(
     private baseCooldownMs = 5 * 60_000,
     private maxCooldownMs = 15 * 60_000,
   ) {}
+
+  /** Load persisted cooldowns from a JSON file. Ignores expired entries. */
+  loadFromFile(filePath: string): void {
+    this.persistPath = filePath;
+    try {
+      const fs = require('fs');
+      if (!fs.existsSync(filePath)) return;
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, CooldownEntry>;
+      const now = Date.now();
+      for (const [name, cd] of Object.entries(data)) {
+        if (cd.cooldownUntilMs > now) {
+          this.cooldowns.set(name, cd);
+        }
+      }
+    } catch { /* ignore corrupt/missing file */ }
+  }
+
+  /** Persist current cooldowns to the configured file. */
+  private persist(): void {
+    if (!this.persistPath) return;
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
+      const obj: Record<string, CooldownEntry> = {};
+      for (const [name, cd] of this.cooldowns) {
+        obj[name] = cd;
+      }
+      fs.writeFileSync(this.persistPath, JSON.stringify(obj, null, 2));
+    } catch { /* best-effort */ }
+  }
 
   isCoolingDown(name: string): boolean {
     const cd = this.cooldowns.get(name);
@@ -71,11 +109,13 @@ export class ProviderCooldownTracker {
       cooldownUntilMs: Date.now() + cooldownMs,
       failCount,
     });
+    this.persist();
   }
 
   recordSuccess(name: string): boolean {
     const had = this.cooldowns.has(name);
     this.cooldowns.delete(name);
+    if (had) this.persist();
     return had;
   }
 
@@ -144,6 +184,26 @@ export async function cleanupProviderInstances(
   } catch (err) {
     warn(`[gpu] Failed to list ${label} instances for cleanup: ${err}`);
   }
+}
+
+// ── Tier Filtering ──────────────────────────────────────────────────────────
+
+/**
+ * Filter tiers to a specific provider (optional).
+ * If `forceProvider` is set, returns only that tier.
+ * If the forced provider isn't in the list, returns `{ error: '...' }`.
+ * Otherwise returns the full tier list unchanged.
+ */
+export function filterTiers(
+  tiers: GpuTier[],
+  forceProvider?: ProviderName,
+): { tiers: GpuTier[] } | { error: string } {
+  if (!forceProvider) return { tiers };
+  const forced = tiers.find(t => t.name === forceProvider);
+  if (!forced) {
+    return { error: `Provider '${forceProvider}' not available. Available: ${tiers.map(t => t.name).join(', ')}` };
+  }
+  return { tiers: [forced] };
 }
 
 // ── Default Storage per Provider ────────────────────────────────────────────

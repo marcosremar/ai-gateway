@@ -57,6 +57,7 @@ export { ModalClient } from './modal-client';
 export {
   ProviderCooldownTracker,
   cleanupProviderInstances,
+  filterTiers,
   PROVIDER_LABELS,
   DEFAULT_STORAGE_GB,
 } from './deploy-orchestrator';
