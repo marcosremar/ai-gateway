@@ -1,4 +1,4 @@
-import type { GpuInstance, InstanceSpec, ProviderCredentials } from './types';
+import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 
@@ -145,7 +145,6 @@ export class RunpodClient extends AbstractGpuProvider {
     const basePodConfig: Record<string, unknown> = {
       name: podName,
       imageName,
-      gpuCount: spec.gpuCount ?? 1,
       supportPublicIp: true,
       // Container disk: auto-sized from image, minimum 10GB (RunPod requirement).
       // Volume: only for full pipeline images that need model cache persistence.
@@ -154,14 +153,60 @@ export class RunpodClient extends AbstractGpuProvider {
       ...(needsVolume ? { volumeMountPath: '/workspace' } : {}),
       // IMPORTANT: Do NOT expose the same port on both HTTP and TCP — RunPod's proxy
       // will permanently return 404 if you do. Use HTTP for proxy access, TCP for SSH.
-      ports: ['8000/http', '22/tcp'],
+      ports: spec.ports ?? ['8000/http', '22/tcp'],
       env: envVars,
-      // Spot instance: Community Cloud + interruptible for lower cost
-      cloudType: 'COMMUNITY',
-      interruptible: true,
+      // Cloud type + spot: defaults to COMMUNITY + interruptible for cost; override for reliability
+      cloudType: spec.cloudType ?? 'COMMUNITY',
+      interruptible: spec.interruptible ?? true,
       // Region filter: e.g. 'US-TX-3', 'EU-RO-1', 'CA-MTL-1'
       ...(spec.region ? { dataCenterId: spec.region } : {}),
     };
+
+    // ── CPU-only pods ──────────────────────────────────────────────────
+    if (spec.computeType === 'CPU') {
+      const cpuFlavors = spec.cpuFlavorIds?.length ? spec.cpuFlavorIds : ['cpu3c'];
+      const cpuBody = {
+        ...basePodConfig,
+        computeType: 'CPU',
+        cpuFlavorIds: cpuFlavors,
+        // vcpuCount controls the number of vCPUs for CPU pods (default 2)
+        ...(spec.vcpus ? { vcpuCount: spec.vcpus } : {}),
+      };
+      // Remove GPU-specific fields that aren't applicable
+      delete cpuBody.gpuCount;
+
+      this.log.log(`[runpod] Creating CPU pod (flavors: ${cpuFlavors.join(', ')})...`);
+
+      const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods`, {
+        method: 'POST',
+        headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
+        body: JSON.stringify(cpuBody),
+      }, TIMEOUTS.create);
+
+      if (res.ok) {
+        const data = (await res.json()) as Record<string, unknown>;
+        const podId = data.id as string;
+        const endpoint = this.resolveEndpoint(data);
+
+        await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
+          podId, endpoint, status: 'CREATING', podName,
+        });
+
+        this.log.log(`[runpod] Created CPU pod ${podName} (${podId}) → ${endpoint}`);
+        return { instanceId: podId, instanceName: podName, endpoint, status: 'CREATING', gpuType: 'CPU' };
+      }
+
+      const errText = await res.text().catch(() => '');
+      this.log.warn(`[runpod] CPU pod creation failed: HTTP ${res.status} ${errText.substring(0, 300)}`);
+      this.emitError({
+        operation: 'createInstance', message: `CPU pod creation failed: HTTP ${res.status}`,
+        httpStatus: res.status, retryable: res.status >= 500,
+      });
+      throw new Error(`RunPod CPU pod creation failed: HTTP ${res.status} — ${errText.substring(0, 200)}`);
+    }
+
+    // ── GPU pods ───────────────────────────────────────────────────────
+    basePodConfig.gpuCount = spec.gpuCount ?? 1;
 
     const rawGpuTypes = spec.gpuTypes?.length ? spec.gpuTypes : RUNPOD_GPU_FALLBACK;
     // Map short names (e.g. "RTX 3090") to RunPod API names (e.g. "NVIDIA GeForce RTX 3090")
@@ -191,10 +236,6 @@ export class RunpodClient extends AbstractGpuProvider {
           const podId = data.id as string;
           const endpoint = this.resolveEndpoint(data);
 
-          // Use the proxy URL as-is — it's the reliable way to reach the pod.
-          // Direct IPs (from publicIp/portMappings) may not be reachable from
-          // all networks. The proxy URL always works once the pod is running.
-
           await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
             podId, endpoint, status: 'CREATING', podName,
           });
@@ -204,7 +245,8 @@ export class RunpodClient extends AbstractGpuProvider {
         }
 
         lastErrText = await res.text().catch(() => '');
-        const unavailable = lastErrText.includes('no instances') || lastErrText.includes('unavailable');
+        const unavailable = lastErrText.includes('no instances') || lastErrText.includes('unavailable')
+          || lastErrText.includes('no longer any instances') || lastErrText.includes('instances available');
         if (unavailable) {
           this.log.log(`[runpod] ${gpuType} unavailable, trying next GPU type...`);
           success = false;
@@ -403,5 +445,83 @@ export class RunpodClient extends AbstractGpuProvider {
       this.log.warn(`[runpod] resolveInstanceEndpoint(${instanceId}) failed: ${this.errMsg(err)}`);
       return null;
     }
+  }
+
+  /** List available GPU types with real-time pricing from RunPod GraphQL API. */
+  async listOffers(options: ListOffersOptions, credentials: ProviderCredentials): Promise<GpuOffer[]> {
+    const { apiKey } = credentials;
+    try {
+      const query = `{ gpuTypes { id displayName memoryInGb communityPrice securePrice stockStatus communitySpotPrice secureSpotPrice } }`;
+      const res = await this.fetchRaw('https://api.runpod.io/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ query }),
+      }, TIMEOUTS.read);
+
+      if (!res.ok) {
+        this.log.warn(`[runpod] listOffers GraphQL failed: HTTP ${res.status}`);
+        return this._staticOffers(options);
+      }
+
+      const data = (await res.json()) as { data?: { gpuTypes?: Array<Record<string, unknown>> } };
+      const gpuTypes = data?.data?.gpuTypes;
+      if (!Array.isArray(gpuTypes)) return this._staticOffers(options);
+
+      const filterSet = options.gpuTypes?.length
+        ? new Set(options.gpuTypes.map(t => (RUNPOD_GPU_TYPE_MAP[t] ?? t).toLowerCase()))
+        : null;
+
+      const offers: GpuOffer[] = [];
+      for (const gpu of gpuTypes) {
+        const displayName = (gpu.displayName || gpu.id || '') as string;
+        const fullId = (gpu.id || '') as string;
+        const vram = (gpu.memoryInGb || 0) as number;
+        const communityPrice = (gpu.communityPrice || 0) as number;
+        const stockStatus = (gpu.stockStatus || '') as string;
+        const available = stockStatus === 'High' ? 10 : stockStatus === 'Medium' ? 5 : stockStatus === 'Low' ? 1 : 0;
+
+        if (available === 0 && communityPrice === 0) continue;
+        if (filterSet && !filterSet.has(fullId.toLowerCase()) && !filterSet.has(displayName.toLowerCase())) continue;
+
+        offers.push({
+          provider: 'runpod',
+          gpuType: displayName.replace(/\s+/g, '').replace(/^NVIDIA/i, ''),
+          gpuName: displayName,
+          available,
+          pricePerHr: communityPrice,
+          region: '',
+          vram,
+          offerId: fullId,
+        });
+      }
+
+      return offers
+        .sort((a, b) => a.pricePerHr - b.pricePerHr)
+        .slice(0, options.limit ?? 100);
+    } catch (err) {
+      this.log.warn(`[runpod] listOffers failed: ${this.errMsg(err)}`);
+      return this._staticOffers(options);
+    }
+  }
+
+  /** Fallback static offers from RUNPOD_GPU_TYPE_MAP when GraphQL is unreachable. */
+  private _staticOffers(options: ListOffersOptions): GpuOffer[] {
+    const seen = new Set<string>();
+    const offers: GpuOffer[] = [];
+    for (const [short, full] of Object.entries(RUNPOD_GPU_TYPE_MAP)) {
+      if (seen.has(full)) continue;
+      seen.add(full);
+      if (options.gpuTypes?.length && !options.gpuTypes.some(t => (RUNPOD_GPU_TYPE_MAP[t] ?? t) === full)) continue;
+      offers.push({
+        provider: 'runpod',
+        gpuType: short,
+        gpuName: full,
+        available: -1, // unknown
+        pricePerHr: 0, // unknown
+        region: '',
+        vram: 0,
+      });
+    }
+    return offers;
   }
 }

@@ -21,8 +21,12 @@ export interface GpuInstance {
 }
 
 export interface InstanceSpec {
-  gpuTypes: string[];
+  gpuTypes?: string[];
   gpuCount?: number;
+  /** Create a CPU-only pod (no GPU). When set to 'CPU', gpuTypes is ignored. */
+  computeType?: 'GPU' | 'CPU';
+  /** RunPod CPU flavor IDs for CPU-only pods (e.g. ['cpu3c', 'cpu5c']). Tried in order. */
+  cpuFlavorIds?: string[];
   vcpus?: number;
   ramGb?: number;
   storageGb?: number;
@@ -39,6 +43,35 @@ export interface InstanceSpec {
   cancelUnavail?: boolean;
   /** Region filter (e.g. 'US', 'EU' for Vast; 'US-TX-3' for RunPod; city name for TensorDock) */
   region?: string;
+  /** Startup script to run on boot (Vast.ai onstart). Defaults to '/app/start.sh'. */
+  onstart?: string;
+  /** Install deps directly on VM instead of Docker (faster boot, no Docker overhead) */
+  bareMetal?: boolean;
+  /** Ports to expose on the instance (RunPod format, e.g. ['8000/http', '22/tcp']). Defaults to provider-specific defaults. */
+  ports?: string[];
+  /** RunPod cloud type: 'COMMUNITY' (cheap, default) or 'SECURE' (reliable). */
+  cloudType?: 'COMMUNITY' | 'SECURE';
+  /** RunPod interruptible (spot) instance. Default true. Set false for critical workloads. */
+  interruptible?: boolean;
+}
+
+// ── GPU Offer Discovery ───────────────────────────────────────────────────
+
+export interface GpuOffer {
+  provider: string;
+  gpuType: string;
+  gpuName: string;
+  available: number;
+  pricePerHr: number;
+  region: string;
+  vram: number;
+  offerId?: string;
+}
+
+export interface ListOffersOptions {
+  gpuTypes?: string[];
+  region?: string;
+  limit?: number;
 }
 
 /** Callback to persist instance data to the host app's settings store. */
@@ -68,6 +101,8 @@ export interface GpuProviderClient {
   getInstanceCost?(instanceId: string, credentials: ProviderCredentials): Promise<number | null>;
   /** Retrieve recent container logs, or null if not supported. */
   getInstanceLogs?(instanceId: string, credentials: ProviderCredentials, lines?: number): Promise<string | null>;
+  /** List available GPU offers with real-time pricing and availability. */
+  listOffers?(options: ListOffersOptions, credentials: ProviderCredentials): Promise<GpuOffer[]>;
 }
 
 /**
