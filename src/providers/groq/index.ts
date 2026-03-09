@@ -27,6 +27,7 @@ export const groqTTS = new OpenAICompatTTSProvider({
   voices: GROQ_TTS_VOICES,
   defaultModel: 'canopylabs/orpheus-v1-english',
   defaultVoice: 'autumn',
+  defaultFormat: 'wav',
 });
 
 export const groqLLM = new OpenAICompatLLMProvider({

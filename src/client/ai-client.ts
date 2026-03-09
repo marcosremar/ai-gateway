@@ -239,7 +239,7 @@ export class AIClient {
         const provider = this.resolveProvider(id => this.registry.getTTSProvider(id), entry.provider as ProviderId, profile);
         return provider.synthesize({
           input: text,
-          model: entry.model ?? 'gpt-4o-mini-tts',
+          model: entry.model,  // provider uses its own defaultModel if undefined
           voice: profile.voice ?? 'coral',
           responseFormat: profile.audioFormat,
           instructions: profile.voiceInstructions,

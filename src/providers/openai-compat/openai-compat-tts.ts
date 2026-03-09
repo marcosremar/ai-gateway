@@ -24,6 +24,7 @@ export interface OpenAICompatTTSConfig {
   voices: VoiceInfo[];
   defaultModel?: string;
   defaultVoice?: string;
+  defaultFormat?: TTSAudioFormat;
 }
 
 export class OpenAICompatTTSProvider implements TTSProvider {
@@ -65,7 +66,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
 
   async synthesize(request: TTSRequest): Promise<TTSResponse> {
     const client = this.getClient();
-    const format = request.responseFormat || 'mp3';
+    const format = request.responseFormat || this.config.defaultFormat || 'mp3';
 
     const params: OpenAI.Audio.SpeechCreateParams = {
       model: request.model || this.config.defaultModel || this.config.models[0]?.id,
@@ -83,7 +84,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
 
   async synthesizeStream(request: TTSRequest): Promise<ReadableStream<Uint8Array>> {
     const client = this.getClient();
-    const format = request.responseFormat || 'mp3';
+    const format = request.responseFormat || this.config.defaultFormat || 'mp3';
 
     const params: OpenAI.Audio.SpeechCreateParams = {
       model: request.model || this.config.defaultModel || this.config.models[0]?.id,
