@@ -41,6 +41,7 @@ class DeployOptions:
     region: str = ""
     storage_gb: int = 0
     hf_token: str = ""
+    llm_model: str = ""  # "translategemma" or "mistral"
 
 
 @dataclass

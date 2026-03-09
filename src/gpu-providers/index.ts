@@ -44,7 +44,7 @@ export {
   buildMonitorScript,
   getDefaultSshPubKey,
 } from './tensordock-client';
-export type { CloudInitSpec, DockerSetupPhase, GitCloneSetupPhase } from './tensordock-client';
+export type { CloudInitSpec, DockerSetupPhase, GitCloneSetupPhase, TensordockBalance } from './tensordock-client';
 
 // ── Vast.ai ───────────────────────────────────────────────────────────────
 export { VastClient } from './vast-client';

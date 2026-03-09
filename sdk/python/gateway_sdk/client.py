@@ -192,6 +192,8 @@ class GatewaySDK:
             body["tensordockApiKey"] = options.tensordock_api_key
         if options.tensordock_auth_id:
             body["tensordockAuthId"] = options.tensordock_auth_id
+        if options.llm_model:
+            body["llmModel"] = options.llm_model
 
         r = await http.post(
             "/v1/gpu/deploy",

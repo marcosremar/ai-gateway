@@ -102,6 +102,7 @@ class DeployOptions:
     hf_token: str = ""
     tensordock_api_key: str = ""
     tensordock_auth_id: str = ""
+    llm_model: str = ""  # "translategemma" or "mistral"
 
 
 @dataclass

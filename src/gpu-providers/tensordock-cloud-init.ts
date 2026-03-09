@@ -1,15 +1,11 @@
 /**
  * Cloud-init builder for TensorDock VMs.
  *
- * IMPORTANT: TensorDock's cloud-init has a critical bug where ANY command
- * execution — `runcmd`, `bootcmd`, AND `scripts-per-instance` — causes the
- * VM to crash (~150-180s after boot, GPU disassociated/stopped).
+ * IMPORTANT: TensorDock's v2 API `write_files` does NOT support `encoding`.
+ * Content must be passed as plain text (not base64).
  *
- * Workaround: use ONLY `write_files` to place scripts on disk. Execution is
- * triggered by cron @reboot, which runs independently of cloud-init.
- *
- * All write_files use base64 encoding to avoid character corruption during
- * the JSON→YAML cloud-init conversion (special chars: $, {{}}, quotes, etc).
+ * Execution is triggered via /etc/rc.local (systemd rc-local-generator
+ * auto-detects it) and cron @reboot as backup.
  */
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -162,8 +158,11 @@ export function buildMonitorScript(logFiles: Record<string, string>): string {
 /**
  * Builds cloud-init config for a TensorDock VM.
  *
- * Uses ONLY `write_files` (no runcmd/bootcmd/packages/scripts-per-instance).
- * Scripts are placed in /opt/ and triggered via cron @reboot.
+ * Scripts are placed in /opt/ via write_files and triggered via:
+ * 1. systemd oneshot service (most reliable — survives stop/resume)
+ * 2. runcmd (v2 API supports it — first boot only)
+ * 3. /etc/rc.local (systemd auto-detects)
+ * 4. cron @reboot (backup)
  */
 export function buildCloudInit(spec: CloudInitSpec): Record<string, unknown> {
   const { hfRepoUrl = 'marcosremar2/parle-speech-to-speech', hfToken, dockerImage, sshPubKey, env } = spec;
@@ -183,6 +182,15 @@ export function buildCloudInit(spec: CloudInitSpec): Record<string, unknown> {
   config.password = 'parle2024gpu';
   config.chpasswd = { expire: false };
 
+  // runcmd triggers: enable systemd service + run launcher directly
+  // runcmd only runs on FIRST boot; systemd service survives stop/resume
+  config.runcmd = [
+    'chmod +x /opt/start-all.sh /opt/setup.sh /opt/monitor.py /etc/rc.local 2>/dev/null || true',
+    'systemctl daemon-reload',
+    'systemctl enable parle-setup.service',
+    'nohup /opt/start-all.sh > /var/log/parle-launcher-runcmd.log 2>&1 &',
+  ];
+
   if (effectiveSshKey) {
     // SSH key injection — appended to TensorDock's base config for `user` account:
     // 1. ssh_authorized_keys: cloud-init injects for the default 'user' account
@@ -193,10 +201,10 @@ export function buildCloudInit(spec: CloudInitSpec): Record<string, unknown> {
     const files = config.write_files as Array<Record<string, string>>;
     // Write to ALL possible SSH key locations (Ubuntu 24.04 cloud-init bug #6175)
     files.push(
-      { path: '/root/.ssh/authorized_keys', permissions: '0600', content: b64(effectiveSshKey + '\n'), encoding: 'b64' },
-      { path: '/home/user/.ssh/authorized_keys', permissions: '0600', content: b64(effectiveSshKey + '\n'), encoding: 'b64' },
-      { path: '/etc/ssh/authorized_keys/root', permissions: '0644', content: b64(effectiveSshKey + '\n'), encoding: 'b64' },
-      { path: '/etc/ssh/authorized_keys/user', permissions: '0644', content: b64(effectiveSshKey + '\n'), encoding: 'b64' },
+      { path: '/root/.ssh/authorized_keys', permissions: '0600', content: effectiveSshKey + '\n' },
+      { path: '/home/user/.ssh/authorized_keys', permissions: '0600', content: effectiveSshKey + '\n' },
+      { path: '/etc/ssh/authorized_keys/root', permissions: '0644', content: effectiveSshKey + '\n' },
+      { path: '/etc/ssh/authorized_keys/user', permissions: '0644', content: effectiveSshKey + '\n' },
     );
 
     // Safety net: cron @reboot script to fix SSH dirs/ownership after all users exist
@@ -223,7 +231,7 @@ export function buildCloudInit(spec: CloudInitSpec): Record<string, unknown> {
     ].join('\n');
 
     files.push(
-      { path: '/opt/fix-ssh.sh', permissions: '0755', content: b64(sshFixScript), encoding: 'b64' },
+      { path: '/opt/fix-ssh.sh', permissions: '0755', content: sshFixScript },
     );
 
     // Update cron to also run SSH fix before setup
@@ -231,10 +239,23 @@ export function buildCloudInit(spec: CloudInitSpec): Record<string, unknown> {
     if (existingCronIdx >= 0) {
       const cronContent = [
         '@reboot root /opt/fix-ssh.sh > /var/log/parle-ssh-fix.log 2>&1',
-        '@reboot root sleep 2 && /opt/setup.sh > /var/log/parle-cron.log 2>&1',
+        '@reboot root sleep 2 && /opt/start-all.sh > /var/log/parle-launcher-cron.log 2>&1',
         '',
       ].join('\n');
-      files[existingCronIdx] = { path: '/etc/cron.d/parle-setup', permissions: '0644', content: b64(cronContent), encoding: 'b64' };
+      files[existingCronIdx] = { path: '/etc/cron.d/parle-setup', permissions: '0644', content: cronContent };
+    }
+
+    // Update rc.local to also run SSH fix
+    const rcLocalIdx = files.findIndex(f => f.path === '/etc/rc.local');
+    if (rcLocalIdx >= 0) {
+      const rcLocalWithSsh = [
+        '#!/bin/bash',
+        '# Auto-generated by cloud-init for parle setup',
+        '/opt/fix-ssh.sh > /var/log/parle-ssh-fix.log 2>&1',
+        '/opt/start-all.sh > /var/log/parle-launcher-rclocal.log 2>&1 &',
+        'exit 0',
+      ].join('\n');
+      files[rcLocalIdx] = { path: '/etc/rc.local', permissions: '0755', content: rcLocalWithSsh };
     }
   }
 
@@ -262,6 +283,30 @@ function buildDockerCloudInit(
     dockerImage,
   ].filter(Boolean).join(' ');
 
+  // Launcher script: starts monitor first (for visibility), then setup
+  // Uses lock file to prevent double execution from multiple triggers
+  const launcherScript = [
+    '#!/bin/bash',
+    'LOCK=/tmp/parle-launcher.lock',
+    'exec 200>"$LOCK"',
+    'flock -n 200 || { echo "Launcher already running, exiting"; exit 0; }',
+    '',
+    '# Start monitor FIRST so port 9090 is visible even if setup fails',
+    'if ! pgrep -f "python3 /opt/monitor.py" >/dev/null 2>&1; then',
+    '  nohup python3 /opt/monitor.py > /var/log/monitor.log 2>&1 &',
+    '  echo "Monitor started (PID $!)"',
+    'fi',
+    '',
+    '# Wait a moment for monitor to bind',
+    'sleep 1',
+    '',
+    '# Run setup if not already completed',
+    'if [ ! -f /tmp/parle-setup-done ]; then',
+    '  /opt/setup.sh > /var/log/parle-cron.log 2>&1',
+    '  touch /tmp/parle-setup-done',
+    'fi',
+  ].join('\n');
+
   const setupScript = [
     '#!/bin/bash',
     'LOG=/var/log/parle-setup.log',
@@ -282,19 +327,52 @@ function buildDockerCloudInit(
     'log "Docker: $(docker --version 2>/dev/null || echo NOT FOUND)"',
     'log "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo none)"',
     '',
-    '# Start monitor',
-    'nohup python3 /opt/monitor.py > /var/log/monitor.log 2>&1 &',
+    '# Ensure monitor is running (backup start in case launcher didn\'t start it)',
+    'if ! pgrep -f "python3 /opt/monitor.py" >/dev/null 2>&1; then',
+    '  nohup python3 /opt/monitor.py > /var/log/monitor.log 2>&1 &',
+    '  log "Monitor started (PID $!)"',
+    'fi',
+    '',
+    '# Helper: wait for apt lock (cloud-init holds it for minutes)',
+    'wait_apt() {',
+    '  local tries=0',
+    '  while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock 2>/dev/null; do',
+    '    tries=$((tries+1))',
+    '    [ $((tries % 12)) -eq 0 ] && log "Still waiting for apt lock (${tries}x5s=$((tries*5))s)..."',
+    '    sleep 5',
+    '  done',
+    '  [ "$tries" -gt 0 ] && log "Apt lock released after $((tries*5))s"',
+    '}',
+    '',
+    '# Step 0: Install Docker if not present',
+    'if ! command -v docker &>/dev/null; then',
+    '  write_phase "installing_docker" 5',
+    '  log "Docker not found, installing..."',
+    '  wait_apt',
+    '  curl -fsSL https://get.docker.com | sh',
+    '  if ! command -v docker &>/dev/null; then',
+    '    log "Docker install script failed, retrying after apt lock release..."',
+    '    wait_apt',
+    '    curl -fsSL https://get.docker.com | sh',
+    '  fi',
+    '  systemctl enable docker && systemctl start docker',
+    '  sleep 3',
+    '  log "Docker installed: $(docker --version 2>/dev/null || echo FAILED)"',
+    'else',
+    '  log "Docker already installed: $(docker --version)"',
+    'fi',
     '',
     '# Step 1: Check nvidia-container-toolkit',
     'write_phase "installing_toolkit" 10',
     'log "Testing GPU access in Docker..."',
     'if ! docker run --gpus all --rm nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then',
     '  log "nvidia-container-toolkit not working, installing..."',
+    '  wait_apt',
     '  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null',
     '  curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \\',
     '    sed "s#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" | \\',
     '    tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null',
-    '  apt-get update -qq && apt-get install -y -qq nvidia-container-toolkit',
+    '  apt-get -o DPkg::Lock::Timeout=300 update -qq && apt-get -o DPkg::Lock::Timeout=300 install -y -qq nvidia-container-toolkit',
     '  nvidia-ctk runtime configure --runtime=docker',
     '  systemctl restart docker',
     '  sleep 3',
@@ -385,13 +463,40 @@ function buildDockerCloudInit(
     '                    "docker": r(["docker", "ps", "--no-trunc"]),\n                    "docker_logs": r(["docker", "logs", "--tail", "50", "parle"]),',
   );
 
-  const cronEntry = '@reboot root /opt/setup.sh > /var/log/parle-cron.log 2>&1\n';
+  // systemd oneshot service — most reliable trigger, survives stop/resume
+  const systemdService = [
+    '[Unit]',
+    'Description=Parle GPU Setup',
+    'After=network-online.target docker.service',
+    'Wants=network-online.target',
+    '',
+    '[Service]',
+    'Type=oneshot',
+    'RemainAfterExit=yes',
+    'ExecStart=/opt/start-all.sh',
+    'StandardOutput=journal+console',
+    'StandardError=journal+console',
+    '',
+    '[Install]',
+    'WantedBy=multi-user.target',
+  ].join('\n');
+
+  const cronEntry = '@reboot root /opt/start-all.sh > /var/log/parle-launcher-cron.log 2>&1\n';
+
+  const rcLocal = [
+    '#!/bin/bash',
+    '/opt/start-all.sh > /var/log/parle-launcher-rclocal.log 2>&1 &',
+    'exit 0',
+  ].join('\n');
 
   return {
     write_files: [
-      { path: '/opt/monitor.py', permissions: '0755', content: b64(patchedMonitor), encoding: 'b64' },
-      { path: '/opt/setup.sh', permissions: '0755', content: b64(setupScript), encoding: 'b64' },
-      { path: '/etc/cron.d/parle-setup', permissions: '0644', content: b64(cronEntry), encoding: 'b64' },
+      { path: '/opt/monitor.py', permissions: '0755', content: patchedMonitor },
+      { path: '/opt/setup.sh', permissions: '0755', content: setupScript },
+      { path: '/opt/start-all.sh', permissions: '0755', content: launcherScript },
+      { path: '/etc/systemd/system/parle-setup.service', permissions: '0644', content: systemdService },
+      { path: '/etc/rc.local', permissions: '0755', content: rcLocal },
+      { path: '/etc/cron.d/parle-setup', permissions: '0644', content: cronEntry },
     ],
   };
 }
@@ -417,6 +522,27 @@ function buildGitCloneCloudInit(
     app: '/var/log/parle.log',
   });
 
+  // Launcher script (same pattern as Docker mode)
+  const launcherScript = [
+    '#!/bin/bash',
+    'LOCK=/tmp/parle-launcher.lock',
+    'exec 200>"$LOCK"',
+    'flock -n 200 || { echo "Launcher already running, exiting"; exit 0; }',
+    '',
+    '# Start monitor FIRST so port 9090 is visible even if setup fails',
+    'if ! pgrep -f "python3 /opt/monitor.py" >/dev/null 2>&1; then',
+    '  nohup python3 /opt/monitor.py > /var/log/monitor.log 2>&1 &',
+    '  echo "Monitor started (PID $!)"',
+    'fi',
+    '',
+    'sleep 1',
+    '',
+    'if [ ! -f /tmp/parle-setup-done ]; then',
+    '  /opt/setup.sh > /var/log/parle-cron.log 2>&1',
+    '  touch /tmp/parle-setup-done',
+    'fi',
+  ].join('\n');
+
   const setupScript = [
     '#!/bin/bash',
     'LOG=/var/log/parle-setup.log',
@@ -434,7 +560,11 @@ function buildGitCloneCloudInit(
     'write_phase "initializing" 0',
     'log "=== START SETUP ==="',
     '',
-    'nohup python3 /opt/monitor.py > /var/log/monitor.log 2>&1 &',
+    '# Ensure monitor is running (backup start)',
+    'if ! pgrep -f "python3 /opt/monitor.py" >/dev/null 2>&1; then',
+    '  nohup python3 /opt/monitor.py > /var/log/monitor.log 2>&1 &',
+    '  log "Monitor started (PID $!)"',
+    'fi',
     '',
     '# Step 1: Install system deps',
     'write_phase "installing_deps" 10',
@@ -534,13 +664,41 @@ function buildGitCloneCloudInit(
     'fi',
   ].join('\n');
 
-  const cronEntry = '@reboot root /opt/setup.sh > /var/log/parle-cron.log 2>&1\n';
+  const cronEntry = '@reboot root /opt/start-all.sh > /var/log/parle-launcher-cron.log 2>&1\n';
+
+  const rcLocal = [
+    '#!/bin/bash',
+    '# Auto-generated by cloud-init for parle setup',
+    '/opt/start-all.sh > /var/log/parle-launcher-rclocal.log 2>&1 &',
+    'exit 0',
+  ].join('\n');
+
+  // systemd oneshot service — most reliable trigger, survives stop/resume
+  const systemdService = [
+    '[Unit]',
+    'Description=Parle GPU Setup',
+    'After=network-online.target',
+    'Wants=network-online.target',
+    '',
+    '[Service]',
+    'Type=oneshot',
+    'RemainAfterExit=yes',
+    'ExecStart=/opt/start-all.sh',
+    'StandardOutput=journal+console',
+    'StandardError=journal+console',
+    '',
+    '[Install]',
+    'WantedBy=multi-user.target',
+  ].join('\n');
 
   return {
     write_files: [
-      { path: '/opt/monitor.py', permissions: '0755', content: b64(monitorScript), encoding: 'b64' },
-      { path: '/opt/setup.sh', permissions: '0755', content: b64(setupScript), encoding: 'b64' },
-      { path: '/etc/cron.d/parle-setup', permissions: '0644', content: b64(cronEntry), encoding: 'b64' },
+      { path: '/opt/monitor.py', permissions: '0755', content: monitorScript },
+      { path: '/opt/setup.sh', permissions: '0755', content: setupScript },
+      { path: '/opt/start-all.sh', permissions: '0755', content: launcherScript },
+      { path: '/etc/systemd/system/parle-setup.service', permissions: '0644', content: systemdService },
+      { path: '/etc/rc.local', permissions: '0755', content: rcLocal },
+      { path: '/etc/cron.d/parle-setup', permissions: '0644', content: cronEntry },
     ],
   };
 }

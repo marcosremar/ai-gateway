@@ -384,6 +384,8 @@ class GatewaySDK:
             body["storageGb"] = options.storage_gb
         if options.hf_token:
             body["hfToken"] = options.hf_token
+        if options.llm_model:
+            body["llmModel"] = options.llm_model
         r = await self._request(
             "POST", "/v1/gpu/deploy",
             json=body,

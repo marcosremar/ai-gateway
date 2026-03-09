@@ -670,4 +670,32 @@ export class TensordockClient extends AbstractGpuProvider {
       return null;
     }
   }
+
+  /**
+   * Check account balance via TensorDock v0 billing API.
+   * Returns { balance, hourlyCost } or null if credentials are invalid / API fails.
+   */
+  async checkBalance(credentials: ProviderCredentials): Promise<TensordockBalance | null> {
+    const { apiKey, authId } = credentials;
+    if (!authId) return null;  // v0 requires both api_key (authId) and api_token (apiKey)
+    try {
+      const form = new URLSearchParams({ api_token: apiKey, api_key: authId });
+      const res = await fetch('https://marketplace.tensordock.com/api/v0/billing/balance', {
+        method: 'POST',
+        body: form,
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) return null;
+      const data = await res.json() as { success?: boolean; balance?: number; hourly_cost?: number };
+      if (!data.success) return null;
+      return { balance: data.balance ?? 0, hourlyCost: data.hourly_cost ?? 0 };
+    } catch {
+      return null;
+    }
+  }
+}
+
+export interface TensordockBalance {
+  balance: number;
+  hourlyCost: number;
 }
