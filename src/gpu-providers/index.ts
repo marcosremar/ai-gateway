@@ -52,3 +52,12 @@ export type { VastClientOptions } from './vast-client';
 
 // ── Modal ─────────────────────────────────────────────────────────────────
 export { ModalClient } from './modal-client';
+
+// ── Deploy Orchestrator ──────────────────────────────────────────────────
+export {
+  ProviderCooldownTracker,
+  cleanupProviderInstances,
+  PROVIDER_LABELS,
+  DEFAULT_STORAGE_GB,
+} from './deploy-orchestrator';
+export type { ProviderName, GpuTier, CooldownInfo } from './deploy-orchestrator';

@@ -96,6 +96,10 @@ class DeployOptions:
     api_key: str
     docker_image: str = ""
     gpu_types: Optional[list[str]] = None
+    vast_api_key: str = ""
+    region: str = ""
+    storage_gb: int = 0
+    hf_token: str = ""
 
 
 @dataclass

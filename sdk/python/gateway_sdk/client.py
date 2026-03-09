@@ -180,6 +180,14 @@ class GatewaySDK:
             body["dockerImage"] = options.docker_image
         if options.gpu_types:
             body["gpuTypes"] = options.gpu_types
+        if options.vast_api_key:
+            body["vastApiKey"] = options.vast_api_key
+        if options.region:
+            body["region"] = options.region
+        if options.storage_gb:
+            body["storageGb"] = options.storage_gb
+        if options.hf_token:
+            body["hfToken"] = options.hf_token
 
         r = await http.post(
             "/v1/gpu/deploy",
