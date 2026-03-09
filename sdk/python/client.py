@@ -372,6 +372,18 @@ class GatewaySDK:
         body = {"apiKey": options.api_key, "dockerImage": options.docker_image}
         if options.gpu_types:
             body["gpuTypes"] = options.gpu_types
+        if options.vast_api_key:
+            body["vastApiKey"] = options.vast_api_key
+        if options.tensordock_api_key:
+            body["tensordockApiKey"] = options.tensordock_api_key
+        if options.tensordock_auth_id:
+            body["tensordockAuthId"] = options.tensordock_auth_id
+        if options.region:
+            body["region"] = options.region
+        if options.storage_gb:
+            body["storageGb"] = options.storage_gb
+        if options.hf_token:
+            body["hfToken"] = options.hf_token
         r = await self._request(
             "POST", "/v1/gpu/deploy",
             json=body,

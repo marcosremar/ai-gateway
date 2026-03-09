@@ -35,6 +35,12 @@ class DeployOptions:
     api_key: str = ""
     docker_image: str = "marcosremar/babelcast:latest"
     gpu_types: list = field(default_factory=list)
+    vast_api_key: str = ""
+    tensordock_api_key: str = ""
+    tensordock_auth_id: str = ""
+    region: str = ""
+    storage_gb: int = 0
+    hf_token: str = ""
 
 
 @dataclass

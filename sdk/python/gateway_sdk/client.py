@@ -188,6 +188,10 @@ class GatewaySDK:
             body["storageGb"] = options.storage_gb
         if options.hf_token:
             body["hfToken"] = options.hf_token
+        if options.tensordock_api_key:
+            body["tensordockApiKey"] = options.tensordock_api_key
+        if options.tensordock_auth_id:
+            body["tensordockAuthId"] = options.tensordock_auth_id
 
         r = await http.post(
             "/v1/gpu/deploy",

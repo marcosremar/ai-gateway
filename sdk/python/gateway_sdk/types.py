@@ -100,6 +100,8 @@ class DeployOptions:
     region: str = ""
     storage_gb: int = 0
     hf_token: str = ""
+    tensordock_api_key: str = ""
+    tensordock_auth_id: str = ""
 
 
 @dataclass
