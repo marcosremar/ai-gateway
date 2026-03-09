@@ -33,7 +33,7 @@ class CircuitBreakerConfig:
 class DeployOptions:
     """Options for GPU pod deployment."""
     api_key: str = ""
-    docker_image: str = "marcosremar/babelcast:latest"
+    docker_image: str = ""
     gpu_types: list = field(default_factory=list)
     vast_api_key: str = ""
     tensordock_api_key: str = ""
