@@ -236,7 +236,7 @@ export async function loadAutoscalerConfig(
           tiers.push(buildTier('modal', {
             instanceId: modalInst.instanceId,
             endpoint: modalInst.directUrl ?? modalInst.endpoint,
-          }, { ...creds, configGpuTypes: creds.configGpuTypes ?? ['parle-ultralight'] }));
+          }, { ...creds, configGpuTypes: creds.configGpuTypes ?? [] }));
         }
 
         if (tiers.length >= 10) break;
@@ -287,7 +287,7 @@ export async function loadAutoscalerConfig(
           tiers.push(buildTier('modal', {
             instanceId: modalInst.instanceId,
             endpoint: modalInst.directUrl ?? modalInst.endpoint,
-          }, { ...creds, configGpuTypes: creds.configGpuTypes ?? ['parle-ultralight'] }));
+          }, { ...creds, configGpuTypes: creds.configGpuTypes ?? [] }));
         }
       }
     }

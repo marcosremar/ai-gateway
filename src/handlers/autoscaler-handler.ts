@@ -321,16 +321,17 @@ export async function handleAutoscalerAction(
     // ── Modal GPU Management ──────────────────────────────────────────────
 
     case 'modal-deploy': {
-      const { deployFile, apiKey: bodyApiKey } = body;
+      const { deployFile, gpuTypes: bodyGpuTypes, apiKey: bodyApiKey } = body;
       const creds = bodyApiKey
         ? { apiKey: bodyApiKey as string }
         : await credentialStore.resolve(userId, 'modal');
       if (!creds) return err('Modal API key not configured');
 
+      if (!deployFile) return err('deployFile is required — no default deploy path allowed');
       const modalClient = new ModalClient();
-      const file = (deployFile as string) || 'spaces/parle-s2s-ultralight/modal_ultralight.py';
+      const file = deployFile as string;
       const instance = await modalClient.createInstance(
-        { gpuTypes: ['parle-ultralight'], dockerImage: file },
+        { gpuTypes: Array.isArray(bodyGpuTypes) ? bodyGpuTypes as string[] : [], dockerImage: file },
         creds,
       );
 
