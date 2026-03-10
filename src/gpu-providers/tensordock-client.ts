@@ -1,4 +1,4 @@
-import type { GpuInstance, InstanceSpec, ProviderCredentials } from './types';
+import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 
@@ -293,6 +293,7 @@ export class TensordockClient extends AbstractGpuProvider {
         dockerImage: spec.dockerImage,
         sshPubKey: localSshPubKey,
         env: spec.env,
+        bareMetal: spec.bareMetal,
       });
 
       for (const candidate of candidates.slice(0, 3)) {
@@ -329,9 +330,10 @@ export class TensordockClient extends AbstractGpuProvider {
             body: JSON.stringify(v2Body),
           }, TIMEOUTS.create);
           if (!res.ok) {
-            this.log.warn(`[tensordock] create at ${candidate.city} failed HTTP ${res.status}`);
+            const errBody = await res.text().catch(() => '');
+            this.log.warn(`[tensordock] create at ${candidate.city} failed HTTP ${res.status}: ${errBody.substring(0, 500)}`);
             this.emitError({
-              operation: 'createInstance', message: `Create at ${candidate.city} failed: HTTP ${res.status}`,
+              operation: 'createInstance', message: `Create at ${candidate.city} failed: HTTP ${res.status} — ${errBody.substring(0, 300)}`,
               httpStatus: res.status, retryable: res.status >= 500,
             });
             continue;
@@ -400,7 +402,7 @@ export class TensordockClient extends AbstractGpuProvider {
       operation: 'createInstance', message: 'All GPU types exhausted on TensorDock',
       errorCode: 'NO_GPU_AVAILABLE', retryable: false,
     });
-    throw new Error('Nenhum GPU disponível no TensorDock (todos os tipos esgotados)');
+    throw new Error('No GPUs available on TensorDock (all types exhausted)');
   }
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
@@ -711,6 +713,63 @@ export class TensordockClient extends AbstractGpuProvider {
     } catch {
       return null;
     }
+  }
+
+  /** List available GPU offers from TensorDock hostnodes. */
+  async listOffers(options: ListOffersOptions, credentials: ProviderCredentials): Promise<GpuOffer[]> {
+    const { apiKey } = credentials;
+    const headers = this.headers(apiKey);
+    const limit = options.limit ?? 100;
+
+    // Map of canonical GPU IDs we know about
+    const gpuIds: Array<{ short: string; id: string }> = [];
+    if (options.gpuTypes?.length) {
+      for (const t of options.gpuTypes) {
+        const id = GPU_ID_MAP[t] || t;
+        gpuIds.push({ short: t, id });
+      }
+    } else {
+      // Query all known GPU types
+      const seen = new Set<string>();
+      for (const [short, id] of Object.entries(GPU_ID_MAP)) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        gpuIds.push({ short, id });
+      }
+    }
+
+    // Query all GPU types in parallel
+    const results = await Promise.all(
+      gpuIds.map(async ({ short, id }) => {
+        try {
+          const candidates = await findCheapestLocations(id, headers, 2);
+          // Filter by region if specified
+          let filtered = candidates;
+          if (options.region) {
+            const regionLower = options.region.toLowerCase();
+            filtered = candidates.filter(c => c.city.toLowerCase().includes(regionLower));
+          }
+          return filtered.map(c => ({
+            provider: 'tensordock' as const,
+            gpuType: short,
+            gpuName: short.includes('RTX') ? `NVIDIA GeForce ${short}` : short,
+            available: 1,
+            pricePerHr: c.price,
+            region: c.city,
+            vram: short.includes('3090') ? 24 : short.includes('4090') ? 24 : 0,
+            offerId: c.id,
+          }));
+        } catch {
+          return [];
+        }
+      }),
+    );
+
+    const offers: GpuOffer[] = results.flat();
+    // Sort by tier desc (higher quality first), then price asc
+    return offers
+      .sort((a, b) => a.pricePerHr - b.pricePerHr)
+      .slice(0, limit);
   }
 }
 

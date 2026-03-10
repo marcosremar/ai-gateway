@@ -84,7 +84,7 @@ export class ProviderCooldownTracker {
     const cd = this.cooldowns.get(name);
     if (!cd) return false;
     if (Date.now() >= cd.cooldownUntilMs) {
-      this.cooldowns.delete(name);
+      // Keep failCount so next failure escalates, just mark as no longer cooling
       return false;
     }
     return true;

@@ -25,6 +25,8 @@ export interface CloudInitSpec {
   sshPubKey?: string;
   /** Extra environment variables to inject into the container or app process */
   env?: Record<string, string>;
+  /** Install deps directly on VM instead of Docker (faster boot, no Docker overhead) */
+  bareMetal?: boolean;
 }
 
 /** Setup phases for Docker mode */
@@ -165,13 +167,15 @@ export function buildMonitorScript(logFiles: Record<string, string>): string {
  * 4. cron @reboot (backup)
  */
 export function buildCloudInit(spec: CloudInitSpec): Record<string, unknown> {
-  const { hfRepoUrl = 'marcosremar2/parle-speech-to-speech', hfToken, dockerImage, sshPubKey, env } = spec;
+  const { hfRepoUrl = 'marcosremar2/parle-speech-to-speech', hfToken, dockerImage, sshPubKey, env, bareMetal } = spec;
 
   // Use provided key or fall back to env var TENSORDOCK_SSH_PUBKEY
   const effectiveSshKey = sshPubKey || getDefaultSshPubKey();
 
   const config = dockerImage
-    ? buildDockerCloudInit(dockerImage, hfToken, env)
+    ? (bareMetal
+        ? buildBareMetalCloudInit(dockerImage, hfToken, env)
+        : buildDockerCloudInit(dockerImage, hfToken, env))
     : buildGitCloneCloudInit(hfRepoUrl, hfToken, env);
 
   // TensorDock base config sets `user: user` with `ssh_pwauth: True`.
@@ -260,6 +264,346 @@ export function buildCloudInit(spec: CloudInitSpec): Record<string, unknown> {
   }
 
   return config;
+}
+
+// ── Bare metal mode ─────────────────────────────────────────────────────────
+// Installs all deps directly on VM via uv (no Docker). Mirrors Dockerfile + start.sh exactly.
+
+function buildBareMetalCloudInit(
+  dockerImage: string,
+  hfToken: string | undefined,
+  env?: Record<string, string>,
+): Record<string, unknown> {
+  const allEnv: Record<string, string> = { ...(env || {}) };
+  if (hfToken) allEnv.HF_TOKEN = hfToken;
+  const envExportLines = buildExportLines(allEnv);
+  // Determine LLM mode from env (affects which packages to install)
+  const llmModel = allEnv.CONF_LLM_MODEL || 'groq';
+  const isGroq = llmModel === 'groq';
+
+  const launcherScript = [
+    '#!/bin/bash',
+    'LOCK=/tmp/parle-launcher.lock',
+    'exec 200>"$LOCK"',
+    'flock -n 200 || { echo "Launcher already running, exiting"; exit 0; }',
+    '',
+    '# Start monitor FIRST so port 9090 is visible even if setup fails',
+    'if ! pgrep -f "python3 /opt/monitor.py" >/dev/null 2>&1; then',
+    '  nohup python3 /opt/monitor.py > /var/log/monitor.log 2>&1 &',
+    '  echo "Monitor started (PID $!)"',
+    'fi',
+    '',
+    'sleep 1',
+    '',
+    '# Run setup if not already completed',
+    'if [ ! -f /tmp/parle-setup-done ]; then',
+    '  /opt/setup.sh > /var/log/parle-cron.log 2>&1',
+    '  touch /tmp/parle-setup-done',
+    'fi',
+  ].join('\n');
+
+  // Build setup script lines
+  const setupLines: string[] = [
+    '#!/bin/bash',
+    'LOG=/var/log/parle-setup.log',
+    'exec > >(tee -a "$LOG") 2>&1',
+    'STATE=/tmp/parle-setup-state.json',
+    'UV=/root/.local/bin/uv',
+    '',
+    'log() { echo "[$(date +%T)] $*"; }',
+    'write_phase() {',
+    '  local phase="$1" pct="$2" err="${3:-}"',
+    '  printf \'{"phase":"%s","progress_pct":%d,"error":%s}\\n\' \\',
+    '    "$phase" "$pct" "${err:+\\"$err\\"}" > "$STATE"',
+    '  sed -i \'s/"error":}/"error":null}/\' "$STATE" 2>/dev/null || true',
+    '}',
+    '',
+    'write_phase "initializing" 0',
+    'log "=== Bare metal setup start ==="',
+    'log "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo none)"',
+    '',
+    '# Ensure monitor is running (backup start)',
+    'if ! pgrep -f "python3 /opt/monitor.py" >/dev/null 2>&1; then',
+    '  nohup python3 /opt/monitor.py > /var/log/monitor.log 2>&1 &',
+    '  log "Monitor started (PID $!)"',
+    'fi',
+    '',
+    '# ── FAST RESUME: skip install if venv + API code already exist ──',
+    '# On stop/resume, disk persists but /tmp is cleared. Detect previous install',
+    '# and jump straight to service start (~30s instead of ~7min).',
+    'if [ -f /opt/babelcast-env/bin/python3 ] && [ -f /app/api/server.py ]; then',
+    '  log "=== FAST RESUME: previous install detected, skipping to service start ==="',
+    '  write_phase "starting_container" 90',
+    '  source /opt/babelcast-env/bin/activate',
+    '  export HF_HOME=/root/.cache/huggingface',
+    '  export HF_HUB_ENABLE_HF_TRANSFER=1',
+    '  export PYTHONUNBUFFERED=1',
+    envExportLines || '  # (no extra env vars)',
+    '',
+    // Start llama.cpp on resume (non-Groq only)
+    ...(isGroq ? [
+      '  GGUF_PATH=""',
+    ] : [
+      '  # Find cached GGUF model',
+      '  LLM_MODEL="${CONF_LLM_MODEL:-translategemma}"',
+      '  GGUF_PATH=""',
+      '  if [ "$LLM_MODEL" = "mistral" ]; then',
+      '      GGUF_PATH=$(find /root/.cache/huggingface -name "Mistral-7B-Instruct-v0.3-Q5_K_M.gguf" 2>/dev/null | head -1)',
+      '  elif [ "$LLM_MODEL" != "groq" ]; then',
+      '      GGUF_PATH=$(find /root/.cache/huggingface -name "translategemma-12b-it-Q5_K_M.gguf" 2>/dev/null | head -1)',
+      '  fi',
+      '  if [ -n "$GGUF_PATH" ] && [ -f "$GGUF_PATH" ]; then',
+      '      log "Starting llama.cpp on port 8002..."',
+      '      python3 -m llama_cpp.server --host 127.0.0.1 --port 8002 \\',
+      '          --model "$GGUF_PATH" --n_gpu_layers 99 --n_ctx 2048 \\',
+      '          > /tmp/llama.log 2>&1 &',
+      '      for i in $(seq 1 36); do',
+      '          curl -sf http://127.0.0.1:8002/v1/models >/dev/null && { log "llama.cpp ready"; break; }',
+      '          sleep 5',
+      '      done',
+      '  fi',
+    ]),
+    '',
+    '  log "Starting API on port 8000..."',
+    '  cd /app/api',
+    '  exec python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info',
+    'fi',
+    '',
+    'log "No previous install found, running full setup..."',
+    '',
+    '# Helper: wait for apt lock (cloud-init holds it for minutes)',
+    'wait_apt() {',
+    '  local tries=0',
+    '  while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock 2>/dev/null; do',
+    '    tries=$((tries+1))',
+    '    [ $((tries % 12)) -eq 0 ] && log "Still waiting for apt lock (${tries}x5s=$((tries*5))s)..."',
+    '    sleep 5',
+    '  done',
+    '  [ "$tries" -gt 0 ] && log "Apt lock released after $((tries*5))s"',
+    '}',
+    '',
+    '# ── Step 0: System deps ─────────────────────────',
+    'write_phase "installing_deps" 5',
+    'log "Installing system dependencies..."',
+    'wait_apt',
+    'apt-get update -qq',
+    'apt-get install -y -qq python3-venv python3-dev ffmpeg libsndfile1 \\',
+    '  sox libsox-dev curl git build-essential',
+    '',
+    '# ── Step 1: uv (fast pip) ───────────────────────',
+    'write_phase "installing_deps" 10',
+    'log "Installing uv..."',
+    'curl -LsSf https://astral.sh/uv/install.sh | sh',
+    'log "uv: $($UV --version 2>/dev/null || echo NOT FOUND)"',
+    '',
+    '# ── Step 2: Python venv ─────────────────────────',
+    '$UV venv /opt/babelcast-env',
+    'source /opt/babelcast-env/bin/activate',
+    '',
+    '# ── Step 3: CPU-only deps first (pyannote, TTS) ──',
+    '# Install pyannote.audio + TTS deps BEFORE CUDA torch to avoid double-download.',
+    '# pyannote pulls CPU-only torch from PyPI; we overwrite with CUDA at the end.',
+    'write_phase "installing_deps" 15',
+    'log "Installing ML deps (CPU-first pass)..."',
+    '$UV pip install "faster-whisper>=1.1.0" \\',
+    '  "fastapi>=0.115.0" "uvicorn[standard]>=0.32.0" \\',
+    '  python-multipart httpx soundfile numpy \\',
+    '  "huggingface-hub>=0.26.0" hf_transfer \\',
+    '  "pydantic-settings>=2.0" websockets',
+    '',
+    '$UV pip install "transformers==4.57.3" "accelerate>=1.12.0" \\',
+    '  librosa einops onnxruntime sox',
+    '$UV pip install --no-deps "qwen-tts>=0.1.1" "faster-qwen3-tts>=0.2.1"',
+    '',
+    'write_phase "installing_deps" 25',
+    'log "Installing pyannote.audio (speaker verification)..."',
+    '$UV pip install pyannote.audio',
+  ];
+
+  // Only install llama-cpp-python if NOT Groq mode
+  if (!isGroq) {
+    setupLines.push(
+      '',
+      '# llama-cpp-python with CUDA',
+      '$UV pip install llama-cpp-python \\',
+      '  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124',
+      '$UV pip install "llama-cpp-python[server]"',
+    );
+  }
+
+  setupLines.push(
+    '',
+    '# ── Step 4: PyTorch CUDA 12.4 (final overwrite) ─',
+    '# Single CUDA torch install — overwrites CPU-only version from pyannote.',
+    'write_phase "installing_deps" 35',
+    'log "Installing PyTorch CUDA 12.4 (overwriting CPU-only)..."',
+    '$UV pip install --upgrade torch torchvision torchaudio \\',
+    '  --index-url https://download.pytorch.org/whl/cu124',
+    '',
+    '# ── Step 5: Download API code from HuggingFace ──',
+    'write_phase "pulling_image" 50',
+    'log "Downloading API code from HuggingFace..."',
+    'mkdir -p /app',
+    '',
+    '# Download pre-packaged API tarball (45K, fast even on slow connections)',
+    'EXTRACT_OK=0',
+    'for i in 1 2 3; do',
+    '  TARBALL=$(python3 -c "from huggingface_hub import hf_hub_download; print(hf_hub_download(\'marcosremar2/babelcast-api\', \'babelcast-api.tar.gz\'))" 2>&1 | tail -1)',
+    '  if [ -f "$TARBALL" ]; then',
+    '    tar -xzf "$TARBALL" -C /app/',
+    '    if [ -d "/app/api" ]; then',
+    '      EXTRACT_OK=1',
+    '      break',
+    '    fi',
+    '  fi',
+    '  WAIT=$((5 * i))',
+    '  log "Download attempt $i failed, retrying in ${WAIT}s..."',
+    '  sleep $WAIT',
+    'done',
+    '',
+    'if [ "$EXTRACT_OK" -eq 0 ]; then',
+    '  log "FATAL: Failed to download API code"',
+    '  write_phase "failed" 50 "failed to download API code from HuggingFace"',
+    '  exit 1',
+    'fi',
+    'chmod +x /app/start.sh /app/start-groq.sh 2>/dev/null || true',
+    'log "API code downloaded"',
+    '',
+    '# ── Step 6: Download models ─────────────────────',
+    'write_phase "downloading_models" 60',
+    'export HF_HOME=/root/.cache/huggingface',
+    'export HF_HUB_ENABLE_HF_TRANSFER=1',
+    'export PYTHONUNBUFFERED=1',
+    envExportLines || '# (no extra env vars)',
+    '',
+    '# Whisper',
+    'log "Downloading Whisper large-v3-turbo..."',
+    'python3 -c "',
+    'from faster_whisper import WhisperModel',
+    "WhisperModel('large-v3-turbo', device='cpu')",
+    "print('Whisper OK')",
+    '" || log "WARNING: Whisper download failed"',
+    '',
+    'write_phase "downloading_models" 75',
+  );
+
+  // LLM model download — only for non-Groq modes
+  if (isGroq) {
+    setupLines.push(
+      '# Groq Cloud API — no local LLM needed',
+      'log "Using Groq Cloud API (no local model needed)"',
+      'GGUF_PATH=""',
+    );
+  } else {
+    setupLines.push(
+      '# LLM GGUF',
+      'LLM_MODEL="${CONF_LLM_MODEL:-translategemma}"',
+      'log "Downloading LLM ($LLM_MODEL)..."',
+      'GGUF_PATH=""',
+      'if [ "$LLM_MODEL" = "mistral" ]; then',
+      '    GGUF_PATH=$(python3 -c "from huggingface_hub import hf_hub_download; print(hf_hub_download(\'bartowski/Mistral-7B-Instruct-v0.3-GGUF\',\'Mistral-7B-Instruct-v0.3-Q5_K_M.gguf\'))" 2>&1 | tail -1)',
+      'else',
+      '    GGUF_PATH=$(python3 -c "from huggingface_hub import hf_hub_download; print(hf_hub_download(\'bullerwins/translategemma-12b-it-GGUF\',\'translategemma-12b-it-Q5_K_M.gguf\'))" 2>&1 | tail -1)',
+      'fi',
+      '[ -n "$GGUF_PATH" ] && log "GGUF: $GGUF_PATH"',
+    );
+  }
+
+  setupLines.push(
+    '',
+    'write_phase "downloading_models" 85',
+    '# TTS + Speaker embedding',
+    'log "Downloading TTS model..."',
+    'python3 -c "from huggingface_hub import snapshot_download; snapshot_download(\'Qwen/Qwen3-TTS-12Hz-0.6B-Base\')" || true',
+    'log "Downloading speaker embedding model..."',
+    'python3 -c "',
+    'from pyannote.audio import Model; import os',
+    "Model.from_pretrained('pyannote/embedding', use_auth_token=os.environ.get('HF_TOKEN') or os.environ.get('CONF_HF_TOKEN') or None)",
+    '" || true',
+    '',
+    '# ── Step 7: Start services ──────────────────────',
+    'write_phase "starting_container" 90',
+  );
+
+  // Start llama.cpp only for non-Groq modes
+  if (!isGroq) {
+    setupLines.push(
+      '',
+      '# Start llama.cpp',
+      'if [ -n "$GGUF_PATH" ] && [ -f "$GGUF_PATH" ]; then',
+      '    log "Starting llama.cpp on port 8002..."',
+      '    source /opt/babelcast-env/bin/activate',
+      '    python3 -m llama_cpp.server --host 127.0.0.1 --port 8002 \\',
+      '        --model "$GGUF_PATH" --n_gpu_layers 99 --n_ctx 2048 \\',
+      '        > /tmp/llama.log 2>&1 &',
+      '    # Wait for llama.cpp',
+      '    LLAMA_READY=0',
+      '    for i in $(seq 1 36); do',
+      '        curl -sf http://127.0.0.1:8002/v1/models >/dev/null && { LLAMA_READY=1; break; }',
+      '        sleep 5',
+      '    done',
+      '    if [ "$LLAMA_READY" -eq 1 ]; then',
+      '        log "llama.cpp ready"',
+      '    else',
+      '        log "WARNING: llama.cpp failed to start after 180s"',
+      '        tail -20 /tmp/llama.log 2>/dev/null || true',
+      '    fi',
+      'fi',
+    );
+  }
+
+  setupLines.push(
+    '',
+    '# Start API',
+    'log "Starting API on port 8000..."',
+    'cd /app/api',
+    'source /opt/babelcast-env/bin/activate',
+    'exec python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info',
+  );
+
+  const setupScript = setupLines.join('\n');
+
+  const monitorScript = buildMonitorScript({
+    setup: '/var/log/parle-setup.log',
+    app: '/var/log/parle-cron.log',
+  });
+
+  // systemd service — NO docker.service dependency
+  const systemdService = [
+    '[Unit]',
+    'Description=BabelCast GPU Setup (Bare Metal)',
+    'After=network-online.target',
+    'Wants=network-online.target',
+    '',
+    '[Service]',
+    'Type=oneshot',
+    'RemainAfterExit=yes',
+    'ExecStart=/opt/start-all.sh',
+    'StandardOutput=journal+console',
+    'StandardError=journal+console',
+    '',
+    '[Install]',
+    'WantedBy=multi-user.target',
+  ].join('\n');
+
+  const cronEntry = '@reboot root /opt/start-all.sh > /var/log/parle-launcher-cron.log 2>&1\n';
+
+  const rcLocal = [
+    '#!/bin/bash',
+    '/opt/start-all.sh > /var/log/parle-launcher-rclocal.log 2>&1 &',
+    'exit 0',
+  ].join('\n');
+
+  return {
+    write_files: [
+      { path: '/opt/monitor.py', permissions: '0755', content: monitorScript },
+      { path: '/opt/setup.sh', permissions: '0755', content: setupScript },
+      { path: '/opt/start-all.sh', permissions: '0755', content: launcherScript },
+      { path: '/etc/systemd/system/parle-setup.service', permissions: '0644', content: systemdService },
+      { path: '/etc/rc.local', permissions: '0755', content: rcLocal },
+      { path: '/etc/cron.d/parle-setup', permissions: '0644', content: cronEntry },
+    ],
+  };
 }
 
 // ── Docker mode ─────────────────────────────────────────────────────────────

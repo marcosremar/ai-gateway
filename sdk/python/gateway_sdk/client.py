@@ -23,6 +23,8 @@ import httpx
 from gateway_sdk.types import (
     GatewayConfig,
     GatewayError,
+    GpuOffer,
+    GpuOffersResponse,
     Timeouts,
     TranscribeResponse,
     TranslateResponse,
@@ -243,6 +245,49 @@ class GatewaySDK:
             timeout=self._timeouts.deploy,
         )
         self._check_response(r, "/v1/gpu/terminate")
+
+    async def gpu_offers(
+        self,
+        gpu_types: Optional[list[str]] = None,
+        region: Optional[str] = None,
+        provider: Optional[str] = None,
+        limit: int = 100,
+    ) -> GpuOffersResponse:
+        """List available GPU offers across providers."""
+        http = self._get_http()
+        params: dict[str, str] = {}
+        if gpu_types:
+            params["gpuTypes"] = ",".join(gpu_types)
+        if region:
+            params["region"] = region
+        if provider:
+            params["provider"] = provider
+        if limit != 100:
+            params["limit"] = str(limit)
+        r = await http.get(
+            "/v1/gpu/offers",
+            params=params,
+            timeout=30.0,
+        )
+        self._check_response(r, "/v1/gpu/offers")
+        data = self._parse_json(r, "/v1/gpu/offers")
+        offers = [
+            GpuOffer(
+                provider=o.get("provider", ""),
+                gpu_type=o.get("gpuType", ""),
+                gpu_name=o.get("gpuName", ""),
+                available=o.get("available", 0),
+                price_per_hr=o.get("pricePerHr", 0.0),
+                region=o.get("region", ""),
+                vram=o.get("vram", 0),
+                offer_id=o.get("offerId", ""),
+            )
+            for o in data.get("offers", [])
+        ]
+        return GpuOffersResponse(
+            offers=offers,
+            providers=data.get("providers", []),
+        )
 
     async def wait_for_gpu(
         self, poll_interval_s: float = 5.0, timeout_s: float = 20 * 60

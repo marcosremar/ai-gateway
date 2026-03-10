@@ -117,8 +117,9 @@ export class RunpodClient extends AbstractGpuProvider {
       TORCHINDUCTOR_CUDAGRAPH_TREES: '0',
       ...(hfToken || spec.hfToken ? { HF_TOKEN: hfToken || spec.hfToken! } : {}),
     };
-    // Auto-inject GROQ_API_KEY for ultralight/API-based images
-    if (process.env.GROQ_API_KEY) envVars.GROQ_API_KEY = process.env.GROQ_API_KEY;
+    // Auto-inject CONF_GROQ_API_KEY for ultralight/API-based images
+    // (container expects CONF_ prefix via Pydantic Settings env_prefix)
+    if (process.env.GROQ_API_KEY) envVars.CONF_GROQ_API_KEY = process.env.GROQ_API_KEY;
     // Merge explicit env overrides from tier config
     if (spec.env) Object.assign(envVars, spec.env);
 
@@ -271,7 +272,7 @@ export class RunpodClient extends AbstractGpuProvider {
       operation: 'createInstance', message: 'All GPU types exhausted on RunPod',
       errorCode: 'NO_GPU_AVAILABLE', retryable: false,
     });
-    throw new Error('Nenhum GPU type disponível no RunPod (todos esgotados)');
+    throw new Error('No GPU types available on RunPod (all exhausted)');
   }
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {

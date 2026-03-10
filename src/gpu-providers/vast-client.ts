@@ -18,7 +18,7 @@
  *   - **takeSnapshot** to capture container state for near-instant future boots
  */
 
-import type { GpuInstance, InstanceSpec, ProviderCredentials } from './types';
+import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 
@@ -200,7 +200,7 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     if (!offers.length) {
-      throw new Error('Nenhum GPU disponível no Vast.ai (todos esgotados)');
+      throw new Error('No GPUs available on Vast.ai (all exhausted)');
     }
 
     // ── 2. Build env vars ──────────────────────────────────────────────────
@@ -208,8 +208,9 @@ export class VastClient extends AbstractGpuProvider {
     if (credentials.hfToken || spec.hfToken) {
       envVars.HF_TOKEN = (credentials.hfToken || spec.hfToken)!;
     }
-    // Auto-inject GROQ_API_KEY for ultralight/API-based images
-    if (process.env.GROQ_API_KEY) envVars.GROQ_API_KEY = process.env.GROQ_API_KEY;
+    // Auto-inject CONF_GROQ_API_KEY for ultralight/API-based images
+    // (container expects CONF_ prefix via Pydantic Settings env_prefix)
+    if (process.env.GROQ_API_KEY) envVars.CONF_GROQ_API_KEY = process.env.GROQ_API_KEY;
     // Merge explicit env overrides from tier config
     if (spec.env) Object.assign(envVars, spec.env);
 
@@ -224,7 +225,9 @@ export class VastClient extends AbstractGpuProvider {
         client_id: 'me',
         image: imageName,
         disk: diskGb,
-        runtype: 'args',        // preserve Docker ENTRYPOINT/CMD (don't inject SSH)
+        // SSH mode required for direct port mapping; onstart runs /app/start.sh
+        // (in SSH mode, Docker ENTRYPOINT/CMD is not called — onstart replaces it)
+        onstart: spec.onstart || '/app/start.sh',
         // Vast.ai env dict: env vars as key-value + port mappings as "-p X:X": "1"
         // Port exposure MUST be in env dict — the separate 'ports' field is ignored
         env: {
@@ -307,7 +310,7 @@ export class VastClient extends AbstractGpuProvider {
       errorCode: 'NO_GPU_AVAILABLE',
       retryable: false,
     });
-    throw new Error('Nenhum GPU disponível no Vast.ai (criação falhou em todos os offers)');
+    throw new Error('No GPUs available on Vast.ai (creation failed on all offers)');
   }
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
@@ -637,6 +640,66 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     return results;
+  }
+
+  /** List available GPU offers with real-time pricing from Vast.ai marketplace. */
+  async listOffers(options: ListOffersOptions, credentials: ProviderCredentials): Promise<GpuOffer[]> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const limit = options.limit ?? 100;
+
+    const searchBody: Record<string, unknown> = {
+      limit,
+      type: 'on-demand',
+      rentable: { eq: true },
+      rented: { eq: false },
+      num_gpus: { eq: 1 },
+      verified: { eq: true },
+      reliability2: { gte: 0.9 },
+      order: [['dph_total', 'asc']],
+    };
+
+    if (options.gpuTypes?.length) {
+      searchBody.gpu_name = { in: normalizeGpuNames(options.gpuTypes) };
+    }
+    if (options.region) {
+      searchBody.geolocation = { eq: options.region };
+    }
+
+    try {
+      const offers = await this._searchOffers(searchBody, headers);
+
+      // Group by gpu_name — aggregate availability, keep cheapest price
+      const grouped = new Map<string, { count: number; cheapest: Record<string, unknown> }>();
+      for (const offer of offers) {
+        const name = (offer.gpu_name || 'unknown') as string;
+        const existing = grouped.get(name);
+        if (existing) {
+          existing.count++;
+        } else {
+          grouped.set(name, { count: 1, cheapest: offer });
+        }
+      }
+
+      const result: GpuOffer[] = [];
+      for (const [gpuName, { count, cheapest }] of grouped) {
+        result.push({
+          provider: 'vast',
+          gpuType: gpuName.replace(/\s+/g, ''),
+          gpuName,
+          available: count,
+          pricePerHr: (cheapest.dph_total || 0) as number,
+          region: (cheapest.geolocation || '') as string,
+          vram: ((cheapest.gpu_ram || 0) as number) / 1024, // MB → GB
+          offerId: String(cheapest.id ?? ''),
+        });
+      }
+
+      return result.sort((a, b) => a.pricePerHr - b.pricePerHr);
+    } catch (err) {
+      this.log.warn(`[vast] listOffers failed: ${this.errMsg(err)}`);
+      return [];
+    }
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────

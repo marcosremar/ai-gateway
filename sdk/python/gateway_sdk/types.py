@@ -111,6 +111,27 @@ class DeployResponse:
     message: str
 
 
+# ── GPU Offer Discovery ────────────────────────────────────────────────────
+
+
+@dataclass
+class GpuOffer:
+    provider: str
+    gpu_type: str
+    gpu_name: str
+    available: int
+    price_per_hr: float
+    region: str
+    vram: float
+    offer_id: str = ""
+
+
+@dataclass
+class GpuOffersResponse:
+    offers: list[GpuOffer]
+    providers: list[dict]
+
+
 # ── Errors ───────────────────────────────────────────────────────────────────
 
 

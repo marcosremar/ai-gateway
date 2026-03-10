@@ -34,50 +34,50 @@ export function buildProviderError(
     case 429:
       return {
         message: billing
-          ? `${label}: Limite de uso atingido (quota excedida). Verifique seu plano e faturamento em ${billing}.`
-          : `${label}: Limite de uso atingido (quota excedida). Verifique seu plano.`,
+          ? `${label}: Rate limit exceeded (quota exceeded). Check your plan and billing at ${billing}.`
+          : `${label}: Rate limit exceeded (quota exceeded). Check your plan.`,
         status: 429,
       };
     case 401:
       return {
-        message: `${label}: Chave de API inválida ou expirada. Verifique sua chave em Configurações > Provedor de IA.`,
+        message: `${label}: Invalid or expired API key. Check your key in Settings > AI Provider.`,
         status: 401,
       };
     case 402:
       return {
         message: billing
-          ? `${label}: Pagamento necessário — sem créditos suficientes. Acesse ${billing}.`
-          : `${label}: Pagamento necessário — sem créditos suficientes.`,
+          ? `${label}: Payment required — insufficient credits. Visit ${billing}.`
+          : `${label}: Payment required — insufficient credits.`,
         status: 402,
       };
     case 403:
       return {
-        message: `${label}: Acesso negado. Sua chave de API não tem permissão para usar este recurso.`,
+        message: `${label}: Access denied. Your API key does not have permission for this resource.`,
         status: 403,
       };
     case 404:
       return {
-        message: `${label}: Modelo não encontrado. Verifique se o modelo selecionado está disponível no seu plano.`,
+        message: `${label}: Model not found. Verify that the selected model is available on your plan.`,
         status: 404,
       };
     case 502:
     case 503:
       return {
-        message: `${label}: Serviço temporariamente indisponível. Tente novamente em alguns instantes.`,
+        message: `${label}: Service temporarily unavailable. Try again in a few moments.`,
         status,
       };
   }
 
   if (status === 408 || rawMessage.includes('timeout') || rawMessage.includes('ETIMEDOUT')) {
     return {
-      message: `${label}: Tempo de resposta esgotado. O servidor demorou demais para responder.`,
+      message: `${label}: Request timed out. The server took too long to respond.`,
       status: 408,
     };
   }
 
   if (rawMessage.includes('fetch failed') || rawMessage.includes('ECONNREFUSED')) {
     return {
-      message: `${label}: Não foi possível conectar ao serviço. Verifique sua conexão.`,
+      message: `${label}: Could not connect to the service. Check your connection.`,
       status: 502,
     };
   }
@@ -104,8 +104,8 @@ export class CreditExhaustedError extends Error {
       .map((p) => `  ${PROVIDER_LABELS[p] ?? p}: ${BILLING_URLS[p]}`);
 
     const msg = urls.length > 0
-      ? `Créditos esgotados em ${labels.join(', ')}. Recarregue em:\n${urls.join('\n')}`
-      : `Créditos esgotados em ${labels.join(', ')}.`;
+      ? `Credits exhausted for ${labels.join(', ')}. Top up at:\n${urls.join('\n')}`
+      : `Credits exhausted for ${labels.join(', ')}.`;
 
     super(msg);
     this.name = 'CreditExhaustedError';

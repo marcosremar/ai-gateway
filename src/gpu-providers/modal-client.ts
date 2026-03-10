@@ -11,7 +11,7 @@
  * The Modal API uses protobuf, so we use the CLI as the primary interface.
  */
 
-import type { GpuInstance, InstanceSpec, ProviderCredentials } from './types';
+import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 
@@ -313,5 +313,41 @@ export class ModalClient extends AbstractGpuProvider {
     }
 
     return results;
+  }
+
+  /** List available GPU tiers with published Modal pricing (static). */
+  async listOffers(options: ListOffersOptions, _credentials: ProviderCredentials): Promise<GpuOffer[]> {
+    const staticGpus: Array<{ name: string; vram: number; price: number }> = [
+      { name: 'NVIDIA T4', vram: 16, price: 0.59 },
+      { name: 'NVIDIA L4', vram: 24, price: 0.80 },
+      { name: 'NVIDIA A10G', vram: 24, price: 1.10 },
+      { name: 'NVIDIA A100 40GB', vram: 40, price: 3.73 },
+      { name: 'NVIDIA A100 80GB', vram: 80, price: 4.58 },
+      { name: 'NVIDIA H100', vram: 80, price: 4.89 },
+    ];
+
+    const filterSet = options.gpuTypes?.length
+      ? new Set(options.gpuTypes.map(t => t.toLowerCase()))
+      : null;
+
+    const offers: GpuOffer[] = [];
+    for (const gpu of staticGpus) {
+      if (filterSet) {
+        const nameKey = gpu.name.toLowerCase().replace(/\s+/g, '');
+        const matches = [...filterSet].some(f => nameKey.includes(f.toLowerCase().replace(/\s+/g, '')));
+        if (!matches) continue;
+      }
+      offers.push({
+        provider: 'modal',
+        gpuType: gpu.name.replace('NVIDIA ', ''),
+        gpuName: gpu.name,
+        available: -1, // serverless = always available
+        pricePerHr: gpu.price,
+        region: 'us',
+        vram: gpu.vram,
+      });
+    }
+
+    return offers.slice(0, options.limit ?? 100);
   }
 }

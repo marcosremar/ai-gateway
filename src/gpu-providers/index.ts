@@ -18,6 +18,8 @@ export type {
   GpuProviderClient,
   MonitorableProvider,
   OnInstancePersist,
+  GpuOffer,
+  ListOffersOptions,
 } from './types';
 
 // ── Abstract Base Class ──────────────────────────────────────────────────
