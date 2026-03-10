@@ -25,6 +25,12 @@ from gateway_sdk.types import (
     GatewayError,
     GpuOffer,
     GpuOffersResponse,
+    GpuLogsResponse,
+    HealthResponse,
+    MetricsResponse,
+    RequestLogEntry,
+    RequestLogResponse,
+    RequestLogStats,
     Timeouts,
     TranscribeResponse,
     TranslateResponse,
@@ -292,6 +298,26 @@ class GatewaySDK:
             providers=data.get("providers", []),
         )
 
+    async def cancel_deploy(self, api_key: str) -> None:
+        """Cancel an in-progress GPU deploy (alias for terminate_gpu)."""
+        await self.terminate_gpu(api_key)
+
+    async def gpu_logs(self) -> GpuLogsResponse:
+        """Fetch recent GPU pod logs via SSH proxy."""
+        http = self._get_http()
+        r = await http.get("/v1/gpu/logs", timeout=self._timeouts.deploy)
+        self._check_response(r, "/v1/gpu/logs")
+        d = self._parse_json(r, "/v1/gpu/logs")
+        return GpuLogsResponse(
+            logs=d.get("logs", ""),
+            ssh_host=d.get("sshHost", ""),
+            ssh_port=d.get("sshPort", 0),
+            endpoint=d.get("endpoint", ""),
+            pod_id=d.get("podId", ""),
+            provider=d.get("provider", ""),
+            status=d.get("status", ""),
+        )
+
     async def wait_for_gpu(
         self, poll_interval_s: float = 5.0, timeout_s: float = 20 * 60
     ) -> GpuStatus:
@@ -312,6 +338,72 @@ class GatewaySDK:
             0, "/v1/gpu/status",
         )
 
+    # ── Observability ────────────────────────────────────────────────────
+
+    async def request_log(
+        self, since_id: int = 0, limit: int = 50
+    ) -> RequestLogResponse:
+        """Fetch request log entries and aggregate stats."""
+        http = self._get_http()
+        params: dict[str, str] = {}
+        if since_id > 0:
+            params["since_id"] = str(since_id)
+        if limit != 50:
+            params["limit"] = str(limit)
+        r = await http.get(
+            "/v1/requests/log",
+            params=params,
+            timeout=self._timeouts.health,
+        )
+        self._check_response(r, "/v1/requests/log")
+        data = self._parse_json(r, "/v1/requests/log")
+        entries = [
+            RequestLogEntry(
+                id=e.get("id", 0),
+                timestamp=e.get("timestamp", 0),
+                stage=e.get("stage", ""),
+                provider=e.get("provider", ""),
+                model=e.get("model", ""),
+                latency_ms=e.get("latencyMs", 0),
+                success=e.get("success", True),
+                error=e.get("error", ""),
+                input_size=e.get("inputSize", 0),
+                output_preview=e.get("outputPreview", ""),
+            )
+            for e in data.get("entries", [])
+        ]
+        s = data.get("stats", {})
+        stats = RequestLogStats(
+            total_requests=s.get("totalRequests", 0),
+            gpu_requests=s.get("gpuRequests", 0),
+            cloud_requests=s.get("cloudRequests", 0),
+            total_latency_ms=s.get("totalLatencyMs", 0),
+            avg_latency_ms=s.get("avgLatencyMs", 0),
+            gpu_percent=s.get("gpuPercent", 0),
+            errors=s.get("errors", 0),
+            by_stage=s.get("byStage", {}),
+        )
+        return RequestLogResponse(entries=entries, stats=stats)
+
+    async def metrics(self) -> MetricsResponse:
+        """Fetch gateway metrics (request counts, latency percentiles, etc.)."""
+        http = self._get_http()
+        r = await http.get("/metrics", timeout=self._timeouts.health)
+        self._check_response(r, "/metrics")
+        d = self._parse_json(r, "/metrics")
+        return MetricsResponse(
+            requests_total=d.get("requestsTotal", 0),
+            requests_by_stage=d.get("requestsByStage", {}),
+            requests_by_provider=d.get("requestsByProvider", {}),
+            errors_total=d.get("errorsTotal", 0),
+            db_log_failures=d.get("dbLogFailures", 0),
+            latency_p50_ms=d.get("latencyP50Ms", 0),
+            latency_p95_ms=d.get("latencyP95Ms", 0),
+            latency_p99_ms=d.get("latencyP99Ms", 0),
+            gpu_status=d.get("gpuStatus", "idle"),
+            uptime_sec=d.get("uptimeSec", 0),
+        )
+
     # ── Health ────────────────────────────────────────────────────────────
 
     async def health(self) -> bool:
@@ -322,6 +414,21 @@ class GatewaySDK:
             return r.status_code == 200
         except Exception:
             return False
+
+    async def health_detail(self) -> HealthResponse:
+        """Fetch detailed health info (components, providers, GPU state)."""
+        http = self._get_http()
+        r = await http.get("/health", timeout=self._timeouts.health)
+        self._check_response(r, "/health")
+        d = self._parse_json(r, "/health")
+        return HealthResponse(
+            status=d.get("status", "ok"),
+            uptime_sec=d.get("uptime_sec", 0),
+            gpu=d.get("gpu", "idle"),
+            providers=d.get("providers", {}),
+            components=d.get("components", {}),
+            reason=d.get("reason", ""),
+        )
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 

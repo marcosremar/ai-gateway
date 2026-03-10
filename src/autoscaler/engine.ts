@@ -77,7 +77,7 @@ export class AutoscalerEngine {
   private stateMap = new Map<string, GpuTierState[]>();
   /** Per-user mutex to prevent concurrent getAutoScaleDecision from racing on boot triggers */
   private decisionLocks = new Map<string, Promise<AutoScaleDecision>>();
-  /** Active boot health pollers — key: "userId:tierIndex" */
+  /** Active boot health pollers — key: "userId:tierIndex:timestamp" (unique per boot attempt) */
   private bootPollers = new Map<string, ReturnType<typeof setTimeout>>();
   private registry: GpuProviderRegistry;
   private sessionTracker: SessionTracker;
@@ -126,12 +126,11 @@ export class AutoscalerEngine {
   ): void {
     const POLL_INTERVAL_BASE_MS = 15_000; // 15 seconds base
     const POLL_INTERVAL_MAX_MS = 60_000;  // max 60 seconds between polls
-    const key = `${userId}:${tierIndex}`;
+    const key = `${userId}:${tierIndex}:${Date.now()}`;
     let pollCount = 0;
 
-    // Cancel any existing poller for this tier
-    const existing = this.bootPollers.get(key);
-    if (existing) clearTimeout(existing);
+    // Cancel any existing poller for this tier (match by "userId:tierIndex:" prefix)
+    this.cancelBootPollersByPrefix(`${userId}:${tierIndex}:`);
 
     const poll = () => {
       const tierStates = this.stateMap.get(userId);
@@ -926,13 +925,28 @@ export class AutoscalerEngine {
     return this.stateMap.get(userId) ?? [];
   }
 
+  /** Cancel all active boot health pollers matching a key prefix. */
+  private cancelBootPollersByPrefix(prefix: string): void {
+    for (const [key, timer] of this.bootPollers) {
+      if (key.startsWith(prefix)) {
+        clearTimeout(timer);
+        this.bootPollers.delete(key);
+      }
+    }
+  }
+
   /** Cancel an active boot health poller for a specific tier. */
   cancelBootPoller(userId: string, tierIndex: number): void {
-    const key = `${userId}:${tierIndex}`;
-    const existing = this.bootPollers.get(key);
-    if (existing) {
-      clearTimeout(existing);
-      this.bootPollers.delete(key);
+    const prefix = `${userId}:${tierIndex}:`;
+    let found = false;
+    for (const [key, timer] of this.bootPollers) {
+      if (key.startsWith(prefix)) {
+        clearTimeout(timer);
+        this.bootPollers.delete(key);
+        found = true;
+      }
+    }
+    if (found) {
       this.logger.log(`[autoscaler] Cancelled boot poller for tier ${tierIndex}`);
     }
   }

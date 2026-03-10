@@ -17,15 +17,24 @@ import type { ProxyConfig, ProxyRequest, ProxyResponse } from './types';
 /** Max request body size: 100MB (audio files can be large) */
 const MAX_BODY_SIZE = 100 * 1024 * 1024;
 
+const BODY_READ_TIMEOUT_MS = 30_000;
+
+class BodyTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Body read timed out after ${ms}ms`);
+    this.name = 'BodyTimeoutError';
+  }
+}
+
 function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
+  const inner = new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalSize = 0;
     req.on('data', (chunk: Buffer) => {
       totalSize += chunk.length;
       if (totalSize > maxSize) {
         req.destroy();
-        reject(new Error('Request body too large'));
+        reject(new Error(`Request body too large (limit: ${Math.round(maxSize / 1024 / 1024)}MB)`));
         return;
       }
       chunks.push(chunk);
@@ -33,6 +42,12 @@ function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
+  return Promise.race([
+    inner,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new BodyTimeoutError(BODY_READ_TIMEOUT_MS)), BODY_READ_TIMEOUT_MS),
+    ),
+  ]);
 }
 
 /** Security headers applied to all responses */
@@ -83,11 +98,14 @@ const MAX_FIELD_SIZE = 1 * 1024 * 1024;
 const MAX_PARTS = 20;
 /** Max upload file size (configurable via MAX_UPLOAD_SIZE_MB env var, default 50MB) */
 const MAX_UPLOAD_SIZE_BYTES = (parseInt(process.env.MAX_UPLOAD_SIZE_MB || '50', 10)) * 1024 * 1024;
+/** Max total upload size across all parts (configurable via MAX_TOTAL_UPLOAD_SIZE_MB env var, default 100MB) */
+const MAX_TOTAL_UPLOAD_BYTES = (parseInt(process.env.MAX_TOTAL_UPLOAD_SIZE_MB || '100', 10)) * 1024 * 1024;
 /** Warn threshold for large uploads (10MB) */
 const UPLOAD_WARN_THRESHOLD = 10 * 1024 * 1024;
 
 function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
   const parts: MultipartPart[] = [];
+  let totalBytes = 0;
   const boundaryBuf = Buffer.from(`--${boundary}`);
   const endBuf = Buffer.from(`--${boundary}--`);
 
@@ -144,6 +162,12 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
       console.warn(`[multipart] Field "${nameMatch?.[1]}" exceeds ${MAX_FIELD_SIZE} byte limit, skipping`);
       start = nextBoundary;
       continue;
+    }
+
+    // Enforce total upload size across all parts
+    totalBytes += partData.length;
+    if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
+      throw new Error(`Total upload size exceeds limit (${MAX_TOTAL_UPLOAD_BYTES / (1024 * 1024)}MB)`);
     }
 
     parts.push({
@@ -248,7 +272,10 @@ export function createProxyServer(config: ProxyConfig): Server {
           return;
         }
         if (contentType.includes('application/json')) {
-          try { body = JSON.parse(rawBody.toString()); } catch { body = {}; }
+          try { body = JSON.parse(rawBody.toString()); } catch {
+            sendError(res, 400, 'Invalid JSON in request body', requestId);
+            return;
+          }
         } else if (contentType.includes('multipart/form-data')) {
           // Extract text fields from multipart body so route handlers can read body.model etc.
           const boundaryMatch = contentType.match(/boundary=([^\s;]+)/);
@@ -314,6 +341,10 @@ export function createProxyServer(config: ProxyConfig): Server {
 
       sendResponse(res, proxyRes, requestId);
     } catch (err) {
+      if (err instanceof BodyTimeoutError) {
+        sendError(res, 408, 'Request Timeout', requestId);
+        return;
+      }
       console.error(`[ai-gateway] Internal error (${requestId}):`, err);
       sendError(res, 500, 'Internal server error', requestId);
     }

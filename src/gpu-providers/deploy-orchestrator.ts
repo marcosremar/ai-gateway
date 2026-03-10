@@ -46,7 +46,7 @@ export class ProviderCooldownTracker {
 
   constructor(
     private baseCooldownMs = 5 * 60_000,
-    private maxCooldownMs = 15 * 60_000,
+    private maxCooldownMs = 30 * 60_000,
   ) {}
 
   /** Load persisted cooldowns from a JSON file. Ignores expired entries. */

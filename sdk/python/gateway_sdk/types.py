@@ -134,6 +134,85 @@ class GpuOffersResponse:
     providers: list[dict]
 
 
+# ── Request log ──────────────────────────────────────────────────────────────
+
+
+@dataclass
+class RequestLogEntry:
+    id: int
+    timestamp: int  # epoch ms
+    stage: str  # 'stt' | 'llm' | 'tts' | 'translate'
+    provider: str
+    model: str
+    latency_ms: int
+    success: bool
+    error: str = ""
+    input_size: int = 0
+    output_preview: str = ""
+
+
+@dataclass
+class RequestLogStats:
+    total_requests: int
+    gpu_requests: int
+    cloud_requests: int
+    total_latency_ms: int
+    avg_latency_ms: int
+    gpu_percent: int
+    errors: int
+    by_stage: dict = field(default_factory=dict)
+
+
+@dataclass
+class RequestLogResponse:
+    entries: list[RequestLogEntry]
+    stats: RequestLogStats
+
+
+# ── Metrics ──────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class MetricsResponse:
+    requests_total: int
+    requests_by_stage: dict
+    requests_by_provider: dict
+    errors_total: int
+    db_log_failures: int
+    latency_p50_ms: int
+    latency_p95_ms: int
+    latency_p99_ms: int
+    gpu_status: str
+    uptime_sec: int
+
+
+# ── Health detail ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class HealthResponse:
+    status: str  # 'ok' | 'degraded'
+    uptime_sec: int
+    gpu: str  # deploy state status
+    providers: dict
+    components: dict
+    reason: str = ""
+
+
+# ── GPU logs ─────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class GpuLogsResponse:
+    logs: str
+    ssh_host: str
+    ssh_port: int
+    endpoint: str
+    pod_id: str
+    provider: str
+    status: str
+
+
 # ── Errors ───────────────────────────────────────────────────────────────────
 
 

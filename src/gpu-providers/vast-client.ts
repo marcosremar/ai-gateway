@@ -179,9 +179,19 @@ export class VastClient extends AbstractGpuProvider {
       searchBody.gpu_name = { in: normalizeGpuNames(spec.gpuTypes) };
     }
 
+    // Filter by minimum RAM if specified
+    if (spec.ramGb) {
+      searchBody.cpu_ram = { gte: spec.ramGb * 1024 };  // Vast.ai uses MB
+    }
+
     // Filter by region/geolocation if specified (e.g. 'US', 'EU', 'CA')
     if (spec.region) {
       searchBody.geolocation = { eq: spec.region };
+    }
+
+    // Filter by max price per hour if specified
+    if ((spec as any).maxPricePerHr) {
+      searchBody.dph_total = { lte: (spec as any).maxPricePerHr };
     }
 
     let offers = await this._searchOffers(searchBody, headers);
