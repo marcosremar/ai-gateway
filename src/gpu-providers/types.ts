@@ -45,6 +45,8 @@ export interface InstanceSpec {
   region?: string;
   /** Startup script to run on boot (Vast.ai onstart). Defaults to '/app/start.sh'. */
   onstart?: string;
+  /** Override Docker CMD (RunPod dockerStartCmd). Used for custom boot scripts like Docker builders. */
+  dockerStartCmd?: string;
   /** Install deps directly on VM instead of Docker (faster boot, no Docker overhead) */
   bareMetal?: boolean;
   /** Ports to expose on the instance (RunPod format, e.g. ['8000/http', '22/tcp']). Defaults to provider-specific defaults. */

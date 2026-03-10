@@ -161,6 +161,8 @@ export class RunpodClient extends AbstractGpuProvider {
       interruptible: spec.interruptible ?? true,
       // Region filter: e.g. 'US-TX-3', 'EU-RO-1', 'CA-MTL-1'
       ...(spec.region ? { dataCenterId: spec.region } : {}),
+      // Custom start command (overrides Docker CMD/ENTRYPOINT)
+      ...(spec.dockerStartCmd ? { dockerStartCmd: spec.dockerStartCmd } : {}),
     };
 
     // ── CPU-only pods ──────────────────────────────────────────────────
@@ -452,7 +454,7 @@ export class RunpodClient extends AbstractGpuProvider {
   async listOffers(options: ListOffersOptions, credentials: ProviderCredentials): Promise<GpuOffer[]> {
     const { apiKey } = credentials;
     try {
-      const query = `{ gpuTypes { id displayName memoryInGb communityPrice securePrice stockStatus communitySpotPrice secureSpotPrice } }`;
+      const query = `{ gpuTypes { id displayName memoryInGb communityPrice securePrice communitySpotPrice secureSpotPrice } }`;
       const res = await this.fetchRaw('https://api.runpod.io/graphql', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -478,10 +480,10 @@ export class RunpodClient extends AbstractGpuProvider {
         const fullId = (gpu.id || '') as string;
         const vram = (gpu.memoryInGb || 0) as number;
         const communityPrice = (gpu.communityPrice || 0) as number;
-        const stockStatus = (gpu.stockStatus || '') as string;
-        const available = stockStatus === 'High' ? 10 : stockStatus === 'Medium' ? 5 : stockStatus === 'Low' ? 1 : 0;
+        // stockStatus was removed from RunPod GraphQL API — infer from price
+        const available = communityPrice > 0 ? -1 : 0;
 
-        if (available === 0 && communityPrice === 0) continue;
+        if (communityPrice === 0) continue;
         if (filterSet && !filterSet.has(fullId.toLowerCase()) && !filterSet.has(displayName.toLowerCase())) continue;
 
         offers.push({
