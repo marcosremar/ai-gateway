@@ -81,11 +81,20 @@ interface MultipartPart {
 const MAX_FIELD_SIZE = 1 * 1024 * 1024;
 /** Max number of parts in multipart request */
 const MAX_PARTS = 20;
+/** Max upload file size (configurable via MAX_UPLOAD_SIZE_MB env var, default 50MB) */
+const MAX_UPLOAD_SIZE_BYTES = (parseInt(process.env.MAX_UPLOAD_SIZE_MB || '50', 10)) * 1024 * 1024;
+/** Warn threshold for large uploads (10MB) */
+const UPLOAD_WARN_THRESHOLD = 10 * 1024 * 1024;
 
 function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
   const parts: MultipartPart[] = [];
   const boundaryBuf = Buffer.from(`--${boundary}`);
   const endBuf = Buffer.from(`--${boundary}--`);
+
+  // Validate that the body contains the closing boundary
+  if (body.indexOf(endBuf) === -1) {
+    throw new Error('Malformed multipart body: missing closing boundary (truncated upload?)');
+  }
 
   let start = body.indexOf(boundaryBuf);
   if (start === -1) return parts;
@@ -115,6 +124,20 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
 
     const nameMatch = headerStr.match(/name="([^"]+)"/);
     const filenameMatch = headerStr.match(/filename="([^"]+)"/);
+
+    // Enforce max upload file size
+    if (filenameMatch && partData.length > MAX_UPLOAD_SIZE_BYTES) {
+      throw new Error(
+        `File "${filenameMatch[1]}" exceeds max upload size of ${MAX_UPLOAD_SIZE_BYTES / (1024 * 1024)}MB`,
+      );
+    }
+
+    // Warn on large uploads
+    if (filenameMatch && partData.length > UPLOAD_WARN_THRESHOLD) {
+      console.warn(
+        `[multipart] Large upload: file "${filenameMatch[1]}" is ${(partData.length / (1024 * 1024)).toFixed(1)}MB`,
+      );
+    }
 
     // Enforce size limit on non-file text fields
     if (!filenameMatch && partData.length > MAX_FIELD_SIZE) {
@@ -146,10 +169,24 @@ export function createProxyServer(config: ProxyConfig): Server {
     const url = req.url || '/';
     const requestId = (req.headers['x-request-id'] as string) || randomUUID();
 
+    // CORS origin validation
+    const corsOriginsEnv = process.env.CORS_ORIGINS || '*';
+    const requestOrigin = req.headers.origin || '';
+    let allowedOrigin = '*';
+    if (corsOriginsEnv !== '*') {
+      const allowedOrigins = corsOriginsEnv.split(',').map(o => o.trim()).filter(Boolean);
+      const isLocalhost = /^http:\/\/localhost(:\d+)?$/.test(requestOrigin);
+      if (isLocalhost || allowedOrigins.includes(requestOrigin)) {
+        allowedOrigin = requestOrigin;
+      } else {
+        allowedOrigin = allowedOrigins[0] || '*';
+      }
+    }
+
     // CORS preflight
     if (method === 'OPTIONS') {
       res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': allowedOrigin,
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'X-Request-Id': requestId,
@@ -158,6 +195,9 @@ export function createProxyServer(config: ProxyConfig): Server {
       res.end();
       return;
     }
+
+    // Set CORS origin header for all non-preflight responses
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
 
     // Auth
     const authHeader = req.headers.authorization;

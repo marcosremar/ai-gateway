@@ -11,6 +11,25 @@ import type { GatewayHooks, ErrorEvent } from '../hooks';
 import { emitHook } from '../hooks';
 import { defaultLogger } from '../logger';
 
+// ── Rate limiter ────────────────────────────────────────────────────────────
+
+/** Simple rate limiter that enforces a minimum interval between calls. */
+export class RateLimiter {
+  private lastCallMs = 0;
+  constructor(private minIntervalMs: number) {}
+  async wait(): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastCallMs;
+    if (elapsed < this.minIntervalMs) {
+      await new Promise(r => setTimeout(r, this.minIntervalMs - elapsed));
+    }
+    this.lastCallMs = Date.now();
+  }
+}
+
+/** Default rate limit: ~3 requests/second (334ms between calls). */
+export const DEFAULT_RATE_LIMIT_MS = 334;
+
 // ── Shared constants ────────────────────────────────────────────────────────
 
 /** Default timeouts (ms) for provider HTTP calls. */
@@ -52,11 +71,14 @@ export abstract class AbstractGpuProvider implements GpuProviderClient {
   protected log: Logger;
   protected onInstancePersist?: OnInstancePersist;
   protected hooks?: GatewayHooks;
+  /** Rate limiter for provider API calls. Subclasses can override via constructor. */
+  protected rateLimiter: RateLimiter;
 
   constructor(opts?: AbstractGpuProviderOptions) {
     this.log = opts?.logger ?? defaultLogger;
     this.onInstancePersist = opts?.onInstancePersist;
     this.hooks = opts?.hooks;
+    this.rateLimiter = new RateLimiter(DEFAULT_RATE_LIMIT_MS);
   }
 
   /** Emit an error event via hooks. Fire-and-forget. */

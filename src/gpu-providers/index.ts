@@ -23,7 +23,7 @@ export type {
 } from './types';
 
 // ── Abstract Base Class ──────────────────────────────────────────────────
-export { AbstractGpuProvider, FetchError, TIMEOUTS } from './abstract-provider';
+export { AbstractGpuProvider, FetchError, RateLimiter, TIMEOUTS, DEFAULT_RATE_LIMIT_MS } from './abstract-provider';
 export type { AbstractGpuProviderOptions } from './abstract-provider';
 
 // ── Registry ──────────────────────────────────────────────────────────────

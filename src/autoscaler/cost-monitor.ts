@@ -530,15 +530,28 @@ export function startCostMonitorTicker(
   intervalMs: number = 5 * 60 * 1000,
 ): () => void {
   const log = deps.logger ?? defaultLogger;
+  let costMonitorRunning = false;
+
+  const runGuarded = async () => {
+    if (costMonitorRunning) {
+      log.log('[cost] Previous cycle still running, skipping');
+      return;
+    }
+    costMonitorRunning = true;
+    try {
+      await runCostMonitorCycle(deps);
+    } catch (err) {
+      log.warn('[cost-monitor] Cycle failed:', err);
+    } finally {
+      costMonitorRunning = false;
+    }
+  };
+
   // Run immediately on start
-  void runCostMonitorCycle(deps).catch((err) =>
-    log.warn('[cost-monitor] Initial cycle failed:', err),
-  );
+  void runGuarded();
 
   const interval = setInterval(() => {
-    void runCostMonitorCycle(deps).catch((err) =>
-      log.warn('[cost-monitor] Cycle failed:', err),
-    );
+    void runGuarded();
   }, intervalMs);
 
   if (interval.unref) interval.unref();

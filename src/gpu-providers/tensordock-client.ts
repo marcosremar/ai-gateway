@@ -158,6 +158,7 @@ export class TensordockClient extends AbstractGpuProvider {
     apiKey: string,
   ): Promise<InstanceDetailV2 | null> {
     try {
+      await this.rateLimiter.wait();
       const res = await this.fetchRaw(`${TENSORDOCK_V2_BASE}/instances/${instanceId}`, {
         headers: this.headers(apiKey),
       }, TIMEOUTS.read);
@@ -198,43 +199,16 @@ export class TensordockClient extends AbstractGpuProvider {
     credentials: ProviderCredentials,
     _gpuTypes: string[],
   ): Promise<GpuInstance | null> {
-    const { apiKey, authId } = credentials;
     try {
-      const form = new URLSearchParams({ api_token: apiKey });
-      if (authId) form.set('api_key', authId);
-      const res = await fetch('https://marketplace.tensordock.com/api/v0/client/list', {
-        method: 'POST',
-        body: form,
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!res.ok) return null;
-      const data = (await res.json()) as Record<string, unknown>;
-      const vms = (data.virtualmachines ?? data.servers ?? {}) as Record<string, Record<string, unknown>>;
-      const entries = Object.entries(vms);
-      if (entries.length === 0) return null;
+      // Use v2 API via listInstances() — v0 API is deprecated
+      const instances = await this.listInstances(credentials);
+      if (instances.length === 0) return null;
 
-      const [id, vm] =
-        entries.find(([, v]) => String(v.status).toLowerCase() === 'running') ?? entries[0];
-      const ip = (vm.ip_address || '') as string;
-      const pfObj = vm.port_forwards as Record<string, string> | undefined;
-      let endpoint = '';
-      if (ip && pfObj && typeof pfObj === 'object' && !Array.isArray(pfObj)) {
-        const apiPort = Object.entries(pfObj).find(([, v]) => String(v) === '8000')?.[0];
-        if (apiPort) {
-          endpoint = `http://${ip}:${apiPort}`;
-        } else {
-          const monPort = Object.entries(pfObj).find(([, v]) => String(v) === '9090')?.[0];
-          endpoint = monPort ? `http://${ip}:${monPort}` : ip ? `http://${ip}:8000` : '';
-        }
-      }
-
-      // If v0 didn't give usable endpoint, try v2 detail
-      if (!endpoint) {
-        const detail = await this._getInstanceDetailV2(id, apiKey);
-        endpoint = detail ? this._endpointFromDetail(detail) : '';
-      }
-
-      return { instanceId: id, endpoint, status: String(vm.status || 'unknown'), ipAddress: ip };
+      // Prefer a running instance, otherwise take the first one
+      const running = instances.find(
+        (inst) => inst.status.toLowerCase() === 'running',
+      );
+      return running ?? instances[0];
     } catch {
       return null;
     }
@@ -324,6 +298,7 @@ export class TensordockClient extends AbstractGpuProvider {
         };
 
         try {
+          await this.rateLimiter.wait();
           const res = await this.fetchRaw(`${TENSORDOCK_V2_BASE}/instances`, {
             method: 'POST',
             headers,
@@ -413,6 +388,7 @@ export class TensordockClient extends AbstractGpuProvider {
     let v2Status = 0;
     let v2Body = '';
     try {
+      await this.rateLimiter.wait();
       const res = await this.fetchRaw(`${TENSORDOCK_V2_BASE}/instances/${instanceId}/start`, {
         method: 'POST',
         headers,
@@ -475,6 +451,7 @@ export class TensordockClient extends AbstractGpuProvider {
 
   async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const { apiKey } = credentials;
+    await this.rateLimiter.wait();
     const res = await this.fetchRaw(`${TENSORDOCK_V2_BASE}/instances/${instanceId}/stop`, {
       method: 'POST',
       headers: this.headers(apiKey),
@@ -492,6 +469,7 @@ export class TensordockClient extends AbstractGpuProvider {
 
   async deleteInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const { apiKey } = credentials;
+    await this.rateLimiter.wait();
     const res = await this.fetchRaw(`${TENSORDOCK_V2_BASE}/instances/${instanceId}`, {
       method: 'DELETE',
       headers: this.headers(apiKey),
@@ -507,50 +485,11 @@ export class TensordockClient extends AbstractGpuProvider {
   }
 
   async listInstances(credentials: ProviderCredentials): Promise<GpuInstance[]> {
-    const { apiKey, authId } = credentials;
+    const { apiKey } = credentials;
     const instances: GpuInstance[] = [];
     try {
-      // Try v0 marketplace list (returns all VMs for the account)
-      if (authId) {
-        const form = new URLSearchParams({ api_token: apiKey });
-        form.set('api_key', authId);
-        const res = await fetch('https://marketplace.tensordock.com/api/v0/client/list', {
-          method: 'POST',
-          body: form,
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!res.ok) {
-          this.log.warn(`[tensordock] v0 list failed: HTTP ${res.status} (credentials may be invalid)`);
-          this.emitError({
-            operation: 'listInstances', message: `v0 list failed: HTTP ${res.status}`,
-            httpStatus: res.status, retryable: res.status >= 500,
-          });
-        } else {
-          const data = (await res.json()) as Record<string, unknown>;
-          const vms = (data.virtualmachines ?? data.servers ?? {}) as Record<string, Record<string, unknown>>;
-          // v0 returned OK
-          for (const [id, vm] of Object.entries(vms)) {
-            const ip = (vm.ip_address || '') as string;
-            const pfObj = vm.port_forwards as Record<string, string> | undefined;
-            let endpoint = '';
-            if (ip && pfObj && typeof pfObj === 'object') {
-              const apiPort = Object.entries(pfObj).find(([, v]) => String(v) === '8000')?.[0];
-              endpoint = apiPort ? `http://${ip}:${apiPort}` : `http://${ip}:8000`;
-            }
-            instances.push({
-              instanceId: id,
-              instanceName: vm.name as string | undefined,
-              endpoint,
-              status: String(vm.status || 'unknown'),
-              ipAddress: ip,
-            });
-          }
-          // If v0 found instances, return them
-          if (instances.length > 0) return instances;
-          // Otherwise fall through to v2 (v0 may not see v2-created instances)
-        }
-      }
-      // v2 list (always try — catches instances created via v2 API)
+      // v2 API only — v0 is deprecated
+      await this.rateLimiter.wait();
       const res = await this.fetchRaw(`${TENSORDOCK_V2_BASE}/instances`, {
         headers: this.headers(apiKey),
       }, TIMEOUTS.read);
@@ -591,27 +530,9 @@ export class TensordockClient extends AbstractGpuProvider {
 
   async getInstanceStatus(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
     try {
-      const { apiKey, authId } = credentials;
-      // Try v0 list first (faster, returns all instances at once)
-      if (authId) {
-        const form = new URLSearchParams({ api_token: apiKey });
-        form.set('api_key', authId);
-        const res = await fetch('https://marketplace.tensordock.com/api/v0/client/list', {
-          method: 'POST',
-          body: form,
-          signal: AbortSignal.timeout(8000),
-        });
-        if (res.ok) {
-          const data = await res.json() as Record<string, unknown>;
-          const servers = (data.virtualmachines ?? data.servers ?? {}) as Record<string, unknown>;
-          if (instanceId in servers) {
-            const vm = servers[instanceId] as Record<string, unknown>;
-            return String(vm.status || 'unknown');
-          }
-          return null; // not found
-        }
-      }
-      // v2 fallback
+      const { apiKey } = credentials;
+      // v2 API only — v0 is deprecated
+      await this.rateLimiter.wait();
       const res = await this.fetchRaw(`${TENSORDOCK_V2_BASE}/instances/${instanceId}`, {
         headers: this.headers(apiKey),
       }, TIMEOUTS.read);

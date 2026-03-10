@@ -67,6 +67,7 @@ export class RunpodClient extends AbstractGpuProvider {
     const RETRY_DELAY_MS = 2_000;
     for (let attempt = 0; ; attempt++) {
       try {
+        await this.rateLimiter.wait();
         const res = await this.fetchRaw(url, init, timeoutMs);
         if (res.status < 500 || attempt >= maxRetries) return res;
         this.log.warn(`[runpod] _fetchWithRetry: HTTP ${res.status} on attempt ${attempt + 1}/${maxRetries + 1}, retrying in ${RETRY_DELAY_MS}ms...`);
@@ -210,6 +211,7 @@ export class RunpodClient extends AbstractGpuProvider {
 
       this.log.log(`[runpod] Creating CPU pod (flavors: ${cpuFlavors.join(', ')})...`);
 
+      await this.rateLimiter.wait();
       const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods`, {
         method: 'POST',
         headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
@@ -260,6 +262,7 @@ export class RunpodClient extends AbstractGpuProvider {
           await new Promise((r) => setTimeout(r, TRANSIENT_RETRY_DELAY_MS * attempt));
         }
 
+        await this.rateLimiter.wait();
         const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods`, {
           method: 'POST',
           headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
@@ -290,6 +293,7 @@ export class RunpodClient extends AbstractGpuProvider {
           this.log.log(`[runpod] No spot pricing for ${gpuType} — falling back to on-demand`);
           basePodConfig.interruptible = false;
           // Retry immediately with on-demand (don't count as a retry attempt)
+          await this.rateLimiter.wait();
           const odRes = await this.fetchRaw(`${RunpodClient.API_BASE}/pods`, {
             method: 'POST',
             headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
@@ -342,6 +346,7 @@ export class RunpodClient extends AbstractGpuProvider {
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const { apiKey } = credentials;
+    await this.rateLimiter.wait();
     const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods/${instanceId}/start`, {
       method: 'POST',
       headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
@@ -354,6 +359,7 @@ export class RunpodClient extends AbstractGpuProvider {
 
   async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const { apiKey } = credentials;
+    await this.rateLimiter.wait();
     const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods/${instanceId}/stop`, {
       method: 'POST',
       headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
@@ -366,6 +372,7 @@ export class RunpodClient extends AbstractGpuProvider {
 
   async deleteInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const { apiKey } = credentials;
+    await this.rateLimiter.wait();
     const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods/${instanceId}`, {
       method: 'DELETE',
       headers: this.authHeaders(apiKey),
@@ -441,17 +448,31 @@ export class RunpodClient extends AbstractGpuProvider {
     }
   }
 
-  /** Returns the hourly cost for a pod ($/hr), or null if unavailable. */
+  /** Returns the hourly cost for a pod ($/hr), or null if unavailable.
+   *  Also logs the estimated total cost based on actual runtime. */
   async getInstanceCost(instanceId: string, credentials: ProviderCredentials): Promise<number | null> {
     try {
       const { apiKey } = credentials;
+      await this.rateLimiter.wait();
       const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods/${instanceId}`, {
         headers: this.authHeaders(apiKey),
       }, TIMEOUTS.read);
       if (!res.ok) return null;
       const data = (await res.json()) as Record<string, unknown>;
       const costPerHr = data.costPerHr as number | undefined;
-      return costPerHr ?? null;
+      if (costPerHr == null) return null;
+
+      // Calculate and log estimated total cost from actual runtime
+      const runtime = data.runtime as Record<string, unknown> | undefined;
+      const uptimeSeconds = (runtime?.uptimeInSeconds as number) ?? null;
+      if (uptimeSeconds != null && uptimeSeconds > 0) {
+        const estimatedTotalCost = costPerHr * (uptimeSeconds / 3600);
+        this.log.log(
+          `[runpod] Pod ${instanceId}: $${costPerHr.toFixed(4)}/hr × ${(uptimeSeconds / 3600).toFixed(2)}h uptime = ~$${estimatedTotalCost.toFixed(4)} estimated total`,
+        );
+      }
+
+      return costPerHr;
     } catch {
       return null;
     }
@@ -472,6 +493,7 @@ export class RunpodClient extends AbstractGpuProvider {
   } | null> {
     try {
       const { apiKey } = credentials;
+      await this.rateLimiter.wait();
       const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods/${instanceId}`, {
         headers: this.authHeaders(apiKey),
       }, TIMEOUTS.read);
@@ -518,6 +540,7 @@ export class RunpodClient extends AbstractGpuProvider {
     const { apiKey } = credentials;
     try {
       const query = `{ gpuTypes { id displayName memoryInGb communityPrice securePrice communitySpotPrice secureSpotPrice } }`;
+      await this.rateLimiter.wait();
       const res = await this.fetchRaw('https://api.runpod.io/graphql', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },

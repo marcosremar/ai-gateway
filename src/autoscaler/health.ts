@@ -1,10 +1,28 @@
 import { defaultLogger } from '../logger';
 
+/**
+ * Whether to skip TLS certificate verification for GPU health probes.
+ * Useful for self-signed certs on private GPU endpoints.
+ *
+ * NOTE: Bun's fetch supports per-request TLS config via `tls: { rejectUnauthorized: false }`,
+ * but Node's native fetch does not. For Node, set the `NODE_TLS_REJECT_UNAUTHORIZED=0`
+ * environment variable as a workaround (applies process-wide).
+ */
+const GPU_HEALTH_SKIP_TLS = !!process.env.GPU_HEALTH_SKIP_TLS;
+
 /** Probe a GPU endpoint's /health to check if it's serving. */
 export async function probeGpuHealth(endpoint: string): Promise<boolean> {
   if (!endpoint) return false;
   try {
-    const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(8000) });
+    const fetchOptions: RequestInit & { tls?: { rejectUnauthorized: boolean } } = {
+      signal: AbortSignal.timeout(8000),
+    };
+    if (GPU_HEALTH_SKIP_TLS) {
+      // Bun supports per-request TLS config; Node does not.
+      // For Node, use env: NODE_TLS_REJECT_UNAUTHORIZED=0
+      (fetchOptions as any).tls = { rejectUnauthorized: false };
+    }
+    const res = await fetch(`${endpoint}/health`, fetchOptions);
     if (!res.ok) return false;
     const data = await res.json();
     // Accept both { status: 'healthy' } and { status: 'ok' } for flexibility
