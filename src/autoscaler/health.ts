@@ -25,8 +25,9 @@ export async function probeGpuHealth(endpoint: string): Promise<boolean> {
     const res = await fetch(`${endpoint}/health`, fetchOptions);
     if (!res.ok) return false;
     const data = await res.json();
-    // Accept both { status: 'healthy' } and { status: 'ok' } for flexibility
-    return data.status === 'healthy' || data.status === 'ok';
+    // Accept healthy, ok, degraded (partial services), and ready
+    const HEALTHY = new Set(['healthy', 'ok', 'degraded', 'ready']);
+    return HEALTHY.has(data.status);
   } catch {
     return false;
   }
@@ -64,7 +65,8 @@ export async function probeGpuHealthSsh(sshHost: string, sshPort: number): Promi
         return false;
       }
       const data = JSON.parse(trimmed);
-      return data.status === 'healthy' || data.status === 'ok';
+      const HEALTHY_SSH = new Set(['healthy', 'ok', 'degraded', 'ready']);
+      return HEALTHY_SSH.has(data.status);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (attempt < SSH_MAX_RETRIES) {
