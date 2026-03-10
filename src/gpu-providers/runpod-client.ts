@@ -4,10 +4,14 @@ import type { AbstractGpuProviderOptions } from './abstract-provider';
 
 /** GPU types to try in order of preference.
  *  Must match RunPod's REST API enum values exactly.
- *  RTX 5090 only — fastest for real-time STT/LLM/TTS pipeline.
- *  If unavailable, the gateway falls back to cloud providers (Groq). */
+ *  Tries RTX 5090 first, then falls back to GPUs with spot availability. */
 export const RUNPOD_GPU_FALLBACK = [
   'NVIDIA GeForce RTX 5090',
+  'NVIDIA GeForce RTX 4090',
+  'NVIDIA RTX A6000',
+  'NVIDIA L40S',
+  'NVIDIA RTX A5000',
+  'NVIDIA A40',
 ];
 
 /** Full RunPod GPU type names keyed by short display name */
@@ -154,15 +158,17 @@ export class RunpodClient extends AbstractGpuProvider {
       ...(needsVolume ? { volumeMountPath: '/workspace' } : {}),
       // IMPORTANT: Do NOT expose the same port on both HTTP and TCP — RunPod's proxy
       // will permanently return 404 if you do. Use HTTP for proxy access, TCP for SSH.
-      ports: spec.ports ?? ['8000/http', '22/tcp'],
+      // HTTP for proxy access, TCP for SSH, UDP for WebRTC media (STUN/TURN range)
+      ports: spec.ports ?? ['8000/http', '22/tcp', '8001/udp'],
       env: envVars,
-      // Cloud type + spot: defaults to COMMUNITY + interruptible for cost; override for reliability
+      // Cloud type: COMMUNITY (default) or SECURE
       cloudType: spec.cloudType ?? 'COMMUNITY',
-      interruptible: spec.interruptible ?? true,
+      // On-demand by default (reliable). Set interruptible=true for spot (cheaper but can be interrupted).
+      interruptible: spec.interruptible ?? false,
       // Region filter: e.g. 'US-TX-3', 'EU-RO-1', 'CA-MTL-1'
       ...(spec.region ? { dataCenterId: spec.region } : {}),
       // Custom start command (overrides Docker CMD/ENTRYPOINT)
-      ...(spec.dockerStartCmd ? { dockerStartCmd: spec.dockerStartCmd } : {}),
+      ...(spec.dockerStartCmd ? { dockerStartCmd: Array.isArray(spec.dockerStartCmd) ? spec.dockerStartCmd : ['bash', '-c', spec.dockerStartCmd] } : {}),
     };
 
     // ── CPU-only pods ──────────────────────────────────────────────────
@@ -218,6 +224,8 @@ export class RunpodClient extends AbstractGpuProvider {
     const TRANSIENT_RETRY_MAX = 2;
     const TRANSIENT_RETRY_DELAY_MS = 3_000;
 
+    const requestedSpot = basePodConfig.interruptible === true;
+
     for (const gpuType of gpuTypesToTry) {
       let lastErrText = '';
       let success = false;
@@ -243,15 +251,46 @@ export class RunpodClient extends AbstractGpuProvider {
             podId, endpoint, status: 'CREATING', podName,
           });
 
-          this.log.log(`[runpod] Created pod ${podName} (${podId}) with ${gpuType} → ${endpoint}`);
+          const mode = basePodConfig.interruptible ? 'spot' : 'on-demand';
+          this.log.log(`[runpod] Created ${mode} pod ${podName} (${podId}) with ${gpuType} → ${endpoint}`);
           return { instanceId: podId, instanceName: podName, endpoint, status: 'CREATING', gpuType };
         }
 
         lastErrText = await res.text().catch(() => '');
+        const noSpotPrice = lastErrText.includes('No spot price found') || lastErrText.includes('no spot price');
         const unavailable = lastErrText.includes('no instances') || lastErrText.includes('unavailable')
           || lastErrText.includes('no longer any instances') || lastErrText.includes('instances available');
-        if (unavailable) {
-          this.log.log(`[runpod] ${gpuType} unavailable, trying next GPU type...`);
+
+        // If spot was requested but no spot price exists, auto-fallback to on-demand for this GPU type
+        if (noSpotPrice && basePodConfig.interruptible) {
+          this.log.log(`[runpod] No spot pricing for ${gpuType} — falling back to on-demand`);
+          basePodConfig.interruptible = false;
+          // Retry immediately with on-demand (don't count as a retry attempt)
+          const odRes = await this.fetchRaw(`${RunpodClient.API_BASE}/pods`, {
+            method: 'POST',
+            headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...basePodConfig, gpuTypeIds: [gpuType] }),
+          }, TIMEOUTS.create);
+          // Restore original spot setting for next GPU type
+          basePodConfig.interruptible = true;
+
+          if (odRes.ok) {
+            const data = (await odRes.json()) as Record<string, unknown>;
+            const podId = data.id as string;
+            const endpoint = this.resolveEndpoint(data);
+            await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
+              podId, endpoint, status: 'CREATING', podName,
+            });
+            this.log.log(`[runpod] Created on-demand pod ${podName} (${podId}) with ${gpuType} → ${endpoint}`);
+            return { instanceId: podId, instanceName: podName, endpoint, status: 'CREATING', gpuType };
+          }
+          const odErrText = await odRes.text().catch(() => '');
+          this.log.log(`[runpod] On-demand fallback also failed for ${gpuType}: ${odErrText.substring(0, 120)}`);
+          break; // Move to next GPU type
+        }
+
+        if (unavailable || noSpotPrice) {
+          this.log.log(`[runpod] ${gpuType} unavailable (${lastErrText.substring(0, 120)}), trying next GPU type...`);
           success = false;
           break; // Don't retry unavailable — no point, move to next GPU type
         }
@@ -263,7 +302,7 @@ export class RunpodClient extends AbstractGpuProvider {
           continue;
         }
 
-        this.log.warn(`[runpod] Create pod failed for ${gpuType}: HTTP ${res.status} ${lastErrText.substring(0, 300)}`);
+        this.log.warn(`[runpod] Create pod failed for ${gpuType}: HTTP ${res.status} ${lastErrText.substring(0, 1000)}`);
         break;
       }
 
@@ -480,6 +519,7 @@ export class RunpodClient extends AbstractGpuProvider {
         const fullId = (gpu.id || '') as string;
         const vram = (gpu.memoryInGb || 0) as number;
         const communityPrice = (gpu.communityPrice || 0) as number;
+        const communitySpotPrice = (gpu.communitySpotPrice || 0) as number;
         // stockStatus was removed from RunPod GraphQL API — infer from price
         const available = communityPrice > 0 ? -1 : 0;
 
@@ -492,6 +532,7 @@ export class RunpodClient extends AbstractGpuProvider {
           gpuName: displayName,
           available,
           pricePerHr: communityPrice,
+          spotPricePerHr: communitySpotPrice,
           region: '',
           vram,
           offerId: fullId,

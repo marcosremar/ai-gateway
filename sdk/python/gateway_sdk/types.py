@@ -103,6 +103,7 @@ class DeployOptions:
     tensordock_api_key: str = ""
     tensordock_auth_id: str = ""
     llm_model: str = ""  # "translategemma" or "mistral"
+    interruptible: Optional[bool] = None  # True=spot (cheaper), False/None=on-demand (default)
 
 
 @dataclass
@@ -124,6 +125,7 @@ class GpuOffer:
     region: str
     vram: float
     offer_id: str = ""
+    spot_price_per_hr: float = 0.0  # Spot price, 0 if unavailable
 
 
 @dataclass

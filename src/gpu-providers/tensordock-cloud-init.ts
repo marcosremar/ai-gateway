@@ -912,6 +912,7 @@ function buildGitCloneCloudInit(
     '',
     '# Step 1: Install system deps',
     'write_phase "installing_deps" 10',
+    'ufw allow 8001/udp 2>/dev/null || iptables -I INPUT -p udp --dport 8001 -j ACCEPT 2>/dev/null || true',
     'ufw allow 50000:51000/udp 2>/dev/null || iptables -I INPUT -p udp --dport 50000:51000 -j ACCEPT 2>/dev/null || true',
     'apt-get update -qq',
     'apt-get install -y -qq python3-venv ffmpeg libsndfile1 sox git curl',

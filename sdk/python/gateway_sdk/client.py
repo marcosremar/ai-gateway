@@ -196,6 +196,8 @@ class GatewaySDK:
             body["tensordockAuthId"] = options.tensordock_auth_id
         if options.llm_model:
             body["llmModel"] = options.llm_model
+        if options.interruptible is not None:
+            body["interruptible"] = options.interruptible
 
         r = await http.post(
             "/v1/gpu/deploy",
@@ -281,6 +283,7 @@ class GatewaySDK:
                 region=o.get("region", ""),
                 vram=o.get("vram", 0),
                 offer_id=o.get("offerId", ""),
+                spot_price_per_hr=o.get("spotPricePerHr", 0.0),
             )
             for o in data.get("offers", [])
         ]

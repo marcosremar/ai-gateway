@@ -53,7 +53,7 @@ export interface InstanceSpec {
   ports?: string[];
   /** RunPod cloud type: 'COMMUNITY' (cheap, default) or 'SECURE' (reliable). */
   cloudType?: 'COMMUNITY' | 'SECURE';
-  /** RunPod interruptible (spot) instance. Default true. Set false for critical workloads. */
+  /** RunPod interruptible (spot) instance. Default false (on-demand). Set true for cheaper spot pricing. */
   interruptible?: boolean;
 }
 
@@ -65,6 +65,8 @@ export interface GpuOffer {
   gpuName: string;
   available: number;
   pricePerHr: number;
+  /** Spot (interruptible) price per hour, or 0 if spot is unavailable. */
+  spotPricePerHr?: number;
   region: string;
   vram: number;
   offerId?: string;
