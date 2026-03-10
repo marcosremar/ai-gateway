@@ -54,6 +54,30 @@ export class RunpodClient extends AbstractGpuProvider {
     return { Authorization: `Bearer ${apiKey}` };
   }
 
+  /**
+   * Fetch with automatic retry on transient errors (5xx, network failures).
+   * Returns immediately on 4xx (not transient).
+   */
+  private async _fetchWithRetry(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+    maxRetries = 2,
+  ): Promise<Response> {
+    const RETRY_DELAY_MS = 2_000;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const res = await this.fetchRaw(url, init, timeoutMs);
+        if (res.status < 500 || attempt >= maxRetries) return res;
+        this.log.warn(`[runpod] _fetchWithRetry: HTTP ${res.status} on attempt ${attempt + 1}/${maxRetries + 1}, retrying in ${RETRY_DELAY_MS}ms...`);
+      } catch (err) {
+        if (attempt >= maxRetries) throw err;
+        this.log.warn(`[runpod] _fetchWithRetry: network error on attempt ${attempt + 1}/${maxRetries + 1} (${this.errMsg(err)}), retrying in ${RETRY_DELAY_MS}ms...`);
+      }
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+    }
+  }
+
   private resolveEndpoint(pod: Record<string, unknown>): string {
     const podId = pod.id as string;
     const runtime = pod.runtime as Record<string, unknown> | undefined;
@@ -74,7 +98,7 @@ export class RunpodClient extends AbstractGpuProvider {
   ): Promise<GpuInstance | null> {
     const { apiKey } = credentials;
     try {
-      const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods`, {
+      const res = await this._fetchWithRetry(`${RunpodClient.API_BASE}/pods`, {
         headers: this.authHeaders(apiKey),
       }, TIMEOUTS.read);
       if (!res.ok) {
@@ -355,7 +379,7 @@ export class RunpodClient extends AbstractGpuProvider {
   async listInstances(credentials: ProviderCredentials): Promise<GpuInstance[]> {
     const { apiKey } = credentials;
     try {
-      const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods`, {
+      const res = await this._fetchWithRetry(`${RunpodClient.API_BASE}/pods`, {
         headers: this.authHeaders(apiKey),
       }, TIMEOUTS.read);
       if (!res.ok) {
@@ -391,7 +415,7 @@ export class RunpodClient extends AbstractGpuProvider {
   async getInstanceStatus(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
     try {
       const { apiKey } = credentials;
-      const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods/${instanceId}`, {
+      const res = await this._fetchWithRetry(`${RunpodClient.API_BASE}/pods/${instanceId}`, {
         headers: this.authHeaders(apiKey),
       }, TIMEOUTS.read);
       if (res.status === 404) return null;
@@ -474,7 +498,7 @@ export class RunpodClient extends AbstractGpuProvider {
   async resolveInstanceEndpoint(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
     try {
       const { apiKey } = credentials;
-      const res = await this.fetchRaw(`${RunpodClient.API_BASE}/pods/${instanceId}`, {
+      const res = await this._fetchWithRetry(`${RunpodClient.API_BASE}/pods/${instanceId}`, {
         headers: this.authHeaders(apiKey),
       }, TIMEOUTS.read);
       if (!res.ok) {
