@@ -164,13 +164,11 @@ export class VastClient extends AbstractGpuProvider {
       rented: { eq: false },
       num_gpus: { eq: spec.gpuCount ?? 1 },
       disk_space: { gte: diskGb },
-      direct_port_count: { gte: 3 },   // Hosts with 3+ open ports have better networking
-      static_ip: { eq: true },          // Stable IP (no NAT, no IP rotation)
-      // Host quality filters — avoid broken hosts (CDI failures, outdated drivers, NAT issues)
-      verified: { eq: true },           // Only hosts that passed Vast.ai health checks
+      direct_port_count: { gte: 1 },   // Need at least 1 open port for SSH
+      // Host quality filters
       reliability2: { gte: 0.9 },       // >90% reliability score
-      inet_down: { gte: 100 },          // Minimum 100 Mb/s download
-      inet_up: { gte: 100 },            // Minimum 100 Mb/s upload
+      inet_down: { gte: 50 },           // Minimum 50 Mb/s download
+      inet_up: { gte: 50 },             // Minimum 50 Mb/s upload
       order: [['dph_total', 'asc']],
     };
 

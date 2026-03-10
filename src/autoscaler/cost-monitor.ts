@@ -271,7 +271,10 @@ export async function runCostMonitorCycle(deps: CostMonitorDeps): Promise<CostMo
 
     let instances: GpuInstance[];
     try {
-      instances = await client.listInstances(account.credentials);
+      instances = await Promise.race([
+        client.listInstances(account.credentials),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('listInstances timed out after 30s')), 30_000)),
+      ]);
     } catch (err) {
       report.errors.push({
         userId: account.userId,

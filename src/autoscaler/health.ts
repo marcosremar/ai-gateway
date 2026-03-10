@@ -38,6 +38,7 @@ export async function probeGpuHealth(endpoint: string): Promise<boolean> {
  * transient SSH connection failures (host key issues, connection resets during boot).
  */
 export async function probeGpuHealthSsh(sshHost: string, sshPort: number): Promise<boolean> {
+  if (!sshHost || !sshPort || sshPort <= 0) return false;
   const SSH_MAX_RETRIES = 3;
   const SSH_RETRY_DELAY_MS = 3_000;
 
@@ -49,13 +50,13 @@ export async function probeGpuHealthSsh(sshHost: string, sshPort: number): Promi
       const { stdout } = await execFileAsync('ssh', [
         '-o', 'StrictHostKeyChecking=no',
         '-o', 'UserKnownHostsFile=/dev/null',  // avoid stale host key errors
-        '-o', 'ConnectTimeout=8',
+        '-o', 'ConnectTimeout=5',
         '-o', 'ServerAliveInterval=5',
         '-o', 'ServerAliveCountMax=2',
         '-o', 'BatchMode=yes',
         '-p', String(sshPort),
         `root@${sshHost}`,
-        'curl -s --max-time 5 http://localhost:8000/health 2>/dev/null || echo "{}"',
+        'curl -s --max-time 3 http://localhost:8000/health 2>/dev/null || echo "{}"',
       ], { timeout: 15_000 });
       const trimmed = stdout.trim();
       if (!trimmed || trimmed === '{}') {
