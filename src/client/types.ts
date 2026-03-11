@@ -88,6 +88,7 @@ export interface AIProfile {
 
   // STT options
   language?: string;
+  sttPrompt?: string;  // Previous transcription context (Whisper initial_prompt)
 
   // Image options
   imageWidth?: number;

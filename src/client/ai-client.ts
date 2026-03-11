@@ -151,6 +151,7 @@ export class AIClient {
           audio,
           model: entry.model ?? 'whisper-large-v3-turbo',
           language: profile.language,
+          ...(profile.sttPrompt && { prompt: profile.sttPrompt }),
         });
       },
       fallbackOpts,

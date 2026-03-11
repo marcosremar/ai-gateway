@@ -48,8 +48,10 @@ export class GatewaySDK {
   // ── Inference ───────────────────────────────────────────────────────────
 
   /** Transcribe audio to text (GPU-aware: gateway routes to GPU or cloud). */
-  async transcribe(audio: Uint8Array, language = 'fr'): Promise<TranscribeResponse> {
-    const res = await this.fetch(`/v1/transcribe?language=${encodeURIComponent(language)}`, {
+  async transcribe(audio: Uint8Array, language = 'fr', prompt = ''): Promise<TranscribeResponse> {
+    const params = new URLSearchParams({ language });
+    if (prompt) params.set('prompt', prompt);
+    const res = await this.fetch(`/v1/transcribe?${params}`, {
       method: 'POST',
       headers: { 'Content-Type': 'audio/wav' },
       body: audio,
@@ -60,12 +62,14 @@ export class GatewaySDK {
   }
 
   /** Translate text (GPU-aware: gateway routes to GPU or cloud LLM). */
-  async translate(text: string, sourceLang: string, targetLang: string): Promise<TranslateResponse> {
+  async translate(text: string, sourceLang: string, targetLang: string, glossary = ''): Promise<TranslateResponse> {
     if (!text.trim()) return { translatedText: '', usedGpu: false };
+    const body: Record<string, string> = { text, source_lang: sourceLang, target_lang: targetLang };
+    if (glossary) body.glossary = glossary;
     const res = await this.fetch('/v1/translate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, source_lang: sourceLang, target_lang: targetLang }),
+      body: JSON.stringify(body),
       timeout: this.timeouts.translate,
     });
     const data = await this.parseJson(res, '/v1/translate');

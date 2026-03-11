@@ -105,13 +105,20 @@ class GatewaySDK:
 
     # ── Inference ─────────────────────────────────────────────────────────
 
-    async def transcribe(self, audio: bytes, language: str = "fr") -> TranscribeResponse:
-        """Transcribe audio to text (GPU-aware routing)."""
+    async def transcribe(self, audio: bytes, language: str = "fr", prompt: str = "") -> TranscribeResponse:
+        """Transcribe audio to text (GPU-aware routing).
+
+        Args:
+            prompt: Previous transcription text for Whisper context (initial_prompt).
+        """
         http = self._get_http()
+        params: dict[str, str] = {"language": language}
+        if prompt:
+            params["prompt"] = prompt
         r = await http.post(
             "/v1/transcribe",
             content=audio,
-            params={"language": language},
+            params=params,
             headers={"Content-Type": "audio/wav"},
             timeout=self._timeouts.stt,
         )
@@ -123,16 +130,23 @@ class GatewaySDK:
         )
 
     async def translate(
-        self, text: str, source_lang: str, target_lang: str
+        self, text: str, source_lang: str, target_lang: str, glossary: str = ""
     ) -> TranslateResponse:
-        """Translate text (GPU-aware routing)."""
+        """Translate text (GPU-aware routing).
+
+        Args:
+            glossary: Domain-specific terms to preserve in translation.
+        """
         if not text.strip():
             return TranslateResponse(translated_text="", used_gpu=False)
 
         http = self._get_http()
+        body: dict = {"text": text, "source_lang": source_lang, "target_lang": target_lang}
+        if glossary:
+            body["glossary"] = glossary
         r = await http.post(
             "/v1/translate",
-            json={"text": text, "source_lang": source_lang, "target_lang": target_lang},
+            json=body,
             timeout=self._timeouts.translate,
         )
         self._check_response(r, "/v1/translate")
