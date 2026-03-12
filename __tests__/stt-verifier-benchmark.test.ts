@@ -120,6 +120,7 @@ interface PhraseResult {
   lang: string;
   audioSizeKb: number;
   providers: ProviderResult[];
+  timedOutProviders: string[];
   consensus: string;
   consensusWer: number;
   similarityMethod: string;
@@ -127,23 +128,18 @@ interface PhraseResult {
   scores: Record<string, number>;
   outliers: string[];
   totalMs: number;
-  fanOutMs: number;
-  similarityMs: number;
+  timeoutMs: number;
 }
 
 async function runBenchmark(
   phrase: { id: string; lang: string; text: string },
   providers: STTVerifierProviderEntry[],
-  embeddingFallbacks: ReturnType<typeof openrouterQwen3Embedding.isConfigured> extends boolean
-    ? typeof openrouterQwen3Embedding[]
-    : never[],
+  embeddingFallbacks: Parameters<typeof runVerifiedSTT>[3]['embeddingFallbacks'],
+  timeoutMs = 8000,
 ): Promise<PhraseResult> {
   const audio = await generateGTTS(phrase.text, phrase.lang);
 
-  // Fan-out: measure per-provider latency separately
-  const providerResults: ProviderResult[] = [];
-  const fanOutStart = Date.now();
-
+  // Measure per-provider latency (uncapped — to see real individual latencies)
   const perProviderResults = await Promise.allSettled(
     providers.map(async ({ name, provider }) => {
       const t = Date.now();
@@ -153,8 +149,7 @@ async function runBenchmark(
     }),
   );
 
-  const fanOutMs = Date.now() - fanOutStart;
-
+  const providerResults: ProviderResult[] = [];
   for (const r of perProviderResults) {
     if (r.status === 'fulfilled') {
       providerResults.push({
@@ -166,15 +161,19 @@ async function runBenchmark(
     }
   }
 
-  // Full ensemble (includes similarity scoring)
+  // Which providers would be cut at the given timeout?
+  const timedOutProviders = providerResults
+    .filter(p => p.latencyMs > timeoutMs)
+    .map(p => p.name);
+
+  // Full ensemble with the real-time timeout applied
   const t0 = Date.now();
   const result = await runVerifiedSTT(audio, phrase.lang, '', {
     providers,
-    embeddingFallbacks: embeddingFallbacks as Parameters<typeof runVerifiedSTT>[3]['embeddingFallbacks'],
-    timeoutMs: 8000,
+    embeddingFallbacks,
+    timeoutMs,
   });
   const totalMs = Date.now() - t0;
-  const similarityMs = totalMs - fanOutMs;
 
   return {
     id: phrase.id,
@@ -182,6 +181,7 @@ async function runBenchmark(
     lang: phrase.lang,
     audioSizeKb: Math.round(audio.length / 1024),
     providers: providerResults,
+    timedOutProviders,
     consensus: result.consensus,
     consensusWer: wer(phrase.text, result.consensus),
     similarityMethod: result.similarity_method,
@@ -189,8 +189,7 @@ async function runBenchmark(
     scores: result.scores,
     outliers: result.outliers,
     totalMs,
-    fanOutMs,
-    similarityMs,
+    timeoutMs,
   };
 }
 
@@ -207,34 +206,37 @@ function printBenchmarkTable(results: PhraseResult[]): void {
 
   for (const r of results) {
     console.log(`\n▸ [${r.id.toUpperCase()}] "${r.text}"`);
-    console.log(`  Audio: ${r.audioSizeKb}KB ${r.lang.toUpperCase()} | Fan-out: ${r.fanOutMs}ms | Total: ${r.totalMs}ms`);
+    console.log(`  Audio: ${r.audioSizeKb}KB ${r.lang.toUpperCase()} | Total (with ${r.timeoutMs}ms budget): ${r.totalMs}ms`);
     console.log(`  Similarity method: ${r.similarityMethod}${r.embeddingProvider ? ` (${r.embeddingProvider})` : ''}`);
+    if (r.timedOutProviders.length > 0) console.log(`  ✂ Cut by ${r.timeoutMs}ms timeout: ${r.timedOutProviders.join(', ')}`);
     if (r.outliers.length > 0) console.log(`  ⚠ Outliers: ${r.outliers.join(', ')}`);
 
     console.log('  ' + '─'.repeat(80));
-    console.log(`  ${pad('Provider', 12)} ${pad('Latency', 10)} ${pad('WER', 14)} ${pad('Score', 8)} Transcription`);
-    console.log('  ' + '─'.repeat(80));
+    console.log(`  ${pad('Provider', 12)} ${pad('Latency', 12)} ${pad('WER', 14)} ${pad('Score', 8)} Transcription`);
+    console.log('  ' + '─'.repeat(84));
 
     for (const p of r.providers) {
       const score = r.scores[p.name] ?? '-';
-      const scoreStr = typeof score === 'number' ? score.toFixed(3) : score;
+      const scoreStr = typeof score === 'number' ? score.toFixed(3) : '-';
       const werStr = `${(p.werScore * 100).toFixed(1)}% ${werLabel(p.werScore)}`;
+      const cut = r.timedOutProviders.includes(p.name) ? ' ✂' : '  ';
       const truncated = p.text.length > 45 ? p.text.slice(0, 42) + '...' : p.text;
-      console.log(`  ${pad(p.name, 12)} ${pad(p.latencyMs + 'ms', 10)} ${pad(werStr, 14)} ${pad(scoreStr, 8)} "${truncated}"`);
+      const latTag = `${p.latencyMs}ms${cut}`;
+      console.log(`  ${pad(p.name, 12)} ${pad(latTag, 12)} ${pad(werStr, 14)} ${pad(scoreStr, 8)} "${truncated}"`);
     }
 
-    console.log('  ' + '─'.repeat(80));
+    console.log('  ' + '─'.repeat(84));
     const cWerStr = `${(r.consensusWer * 100).toFixed(1)}% ${werLabel(r.consensusWer)}`;
     const cTrunc = r.consensus.length > 45 ? r.consensus.slice(0, 42) + '...' : r.consensus;
-    console.log(`  ${pad('CONSENSUS', 12)} ${pad('', 10)} ${pad(cWerStr, 14)} ${pad('', 8)} "${cTrunc}"`);
+    console.log(`  ${pad('CONSENSUS', 12)} ${pad('', 12)} ${pad(cWerStr, 14)} ${pad('', 8)} "${cTrunc}"`);
   }
 
   // Summary table
   console.log('\n' + '═'.repeat(100));
   console.log('  SUMMARY');
   console.log('═'.repeat(100));
-  console.log(`  ${pad('Phrase', 14)} ${pad('Method', 10)} ${pad('Total', 8)} ${pad('Fan-out', 9)} ${pad('Consensus WER', 15)} Providers`);
-  console.log('  ' + '─'.repeat(80));
+  console.log(`  ${pad('Phrase', 14)} ${pad('Method', 10)} ${pad('Total', 8)} ${pad('Timeout', 9)} ${pad('Cut', 12)} ${pad('Consensus WER', 15)} Providers`);
+  console.log('  ' + '─'.repeat(90));
 
   let totalWer = 0;
   let jaccardCount = 0;
@@ -252,17 +254,19 @@ function printBenchmarkTable(results: PhraseResult[]): void {
 
     const cWerStr = `${(r.consensusWer * 100).toFixed(1)}% ${werLabel(r.consensusWer)}`;
     const providerNames = r.providers.map(p => p.name).join('+');
+    const cutStr = r.timedOutProviders.length > 0 ? `✂ ${r.timedOutProviders.join(',')}` : '-';
     console.log(
       `  ${pad(r.id, 14)} ${pad(method, 10)} ${pad(r.totalMs + 'ms', 8)} ` +
-      `${pad(r.fanOutMs + 'ms', 9)} ${pad(cWerStr, 15)} ${providerNames}`,
+      `${pad(r.timeoutMs + 'ms', 9)} ${pad(cutStr, 12)} ${pad(cWerStr, 15)} ${providerNames}`,
     );
   }
 
   const avgWer = (totalWer / results.length * 100).toFixed(1);
-  const avgFanOut = Math.round(totalFanOut / results.length);
-  console.log('  ' + '─'.repeat(80));
-  console.log(`  ${'AVERAGE'.padEnd(14)} ${''.padEnd(10)} ${''.padEnd(8)} ${(avgFanOut + 'ms').padEnd(9)} Avg WER: ${avgWer}%`);
-  console.log(`  Methods used: Jaccard=${jaccardCount} | Embedding=${embeddingCount}`);
+  const totalCut = results.reduce((s, r) => s + r.timedOutProviders.length, 0);
+  const avgTotal = Math.round(results.reduce((s, r) => s + r.totalMs, 0) / results.length);
+  console.log('  ' + '─'.repeat(90));
+  console.log(`  ${'AVERAGE'.padEnd(14)} ${''.padEnd(10)} ${(avgTotal + 'ms').padEnd(8)} ${''.padEnd(9)} ${(totalCut + ' total').padEnd(12)} Avg WER: ${avgWer}%`);
+  console.log(`  Methods used: Jaccard=${jaccardCount} | Embedding=${embeddingCount} | Providers cut by timeout: ${totalCut}`);
   console.log('═'.repeat(100) + '\n');
 }
 
@@ -284,8 +288,17 @@ describe.skipIf(!hasAtLeastTwo)('STT Verifier — Integration Benchmark (Real AP
   if (hasOpenRouter) embeddingFallbacks.push(openrouterQwen3Embedding);
   if (hasOpenAI) embeddingFallbacks.push(openaiEmbedding);
 
+  // Real-time budget for production use
+  const REALTIME_TIMEOUT_MS = 1500;
+
   it.each(PHRASES)('[$id] $text', async ({ id, lang, text }) => {
-    const result = await runBenchmark({ id, lang, text }, activeProviders, embeddingFallbacks as never[]);
+    // Run with realtime timeout (production mode)
+    const result = await runBenchmark(
+      { id, lang, text },
+      activeProviders,
+      embeddingFallbacks as never[],
+      REALTIME_TIMEOUT_MS,
+    );
     allResults.push(result);
 
     // Basic assertions

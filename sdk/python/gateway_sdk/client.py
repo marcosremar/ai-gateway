@@ -129,22 +129,35 @@ class GatewaySDK:
             used_gpu=data.get("used_gpu", False),
         )
 
-    async def transcribe_ensemble(self, audio: bytes, language: str = "fr", prompt: str = "") -> "EnsembleTranscribeResponse":
-        """Transcribe audio using all configured STT providers, LLM picks best result.
+    async def transcribe_ensemble(
+        self,
+        audio: bytes,
+        language: str = "fr",
+        prompt: str = "",
+        timeout_ms: int = 1500,
+    ) -> "EnsembleTranscribeResponse":
+        """Transcribe audio using all configured STT providers; consensus via similarity.
+
+        Args:
+            timeout_ms: Per-provider deadline in ms. Providers that miss it are dropped
+                        and consensus is built from whoever arrived in time.
+                        Default 1500ms — keeps the subtitle pipeline responsive.
 
         Returns EnsembleTranscribeResponse with .consensus (best text) and .providers dict.
         """
         from gateway_sdk.types import EnsembleTranscribeResponse
         http = self._get_http()
-        params: dict[str, str] = {"language": language}
+        params: dict[str, str] = {"language": language, "timeout_ms": str(timeout_ms)}
         if prompt:
             params["prompt"] = prompt
+        # HTTP timeout = provider deadline + similarity overhead + network buffer
+        http_timeout = timeout_ms / 1000 + 5.0
         r = await http.post(
             "/v1/transcribe/ensemble",
             content=audio,
             params=params,
             headers={"Content-Type": "audio/wav"},
-            timeout=self._timeouts.stt * 2,  # ensemble is slower
+            timeout=http_timeout,
         )
         self._check_response(r, "/v1/transcribe/ensemble")
         data = self._parse_json(r, "/v1/transcribe/ensemble")
@@ -155,6 +168,8 @@ class GatewaySDK:
             latency_ms=data.get("latency_ms", 0),
             scores=data.get("scores", {}),
             outliers=data.get("outliers", []),
+            similarity_method=data.get("similarity_method", "jaccard"),
+            embedding_provider=data.get("embedding_provider", ""),
         )
 
     async def translate(
