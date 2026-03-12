@@ -12,6 +12,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { runVerifiedSTT } from '../src/ensemble-stt';
 import type { STTVerifierProviderEntry } from '../src/ensemble-stt';
 import type { STTProvider, STTRequest, STTResponse } from '../src/providers/types';
+import type { EmbeddingProvider } from '../src/providers/openai-compat/openai-compat-embedding';
 import { openaiSTT } from '../src/providers/openai';
 import { deepgramSTT } from '../src/providers/deepgram';
 import { loadEnv, makeTestWav, timed } from './helpers';
@@ -237,6 +238,144 @@ describe('runVerifiedSTT — unit (no API)', () => {
       const decimals = str.includes('.') ? str.split('.')[1].length : 0;
       expect(decimals).toBeLessThanOrEqual(3);
     }
+  });
+});
+
+// ─── Embedding Fallback Tests (unit — stub embedding provider) ───────────────
+
+describe('runVerifiedSTT — embedding fallback (unit)', () => {
+  /** Stub embedding provider: returns fixed vectors per text */
+  function stubEmbeddingProvider(
+    vectorMap: Record<string, number[]>,
+    name = 'stub-embed',
+  ) {
+    const provider: EmbeddingProvider = {
+      name,
+      providerId: 'openrouter' as const,
+      isConfigured: () => true,
+      embed: async (input: string | string[]) => {
+        const inputs = Array.isArray(input) ? input : [input];
+        const embeddings = inputs.map(text => vectorMap[text] ?? [0, 0, 1]);
+        return { embeddings, model: name, usage: { promptTokens: 0, totalTokens: 0 } };
+      },
+    };
+    return provider;
+  }
+
+  it('uses Jaccard when confidence is high — no embedding call', async () => {
+    let embeddingCalled = false;
+    const provider: EmbeddingProvider = {
+      name: 'should-not-be-called',
+      providerId: 'openrouter' as const,
+      isConfigured: () => true,
+      embed: async () => {
+        embeddingCalled = true;
+        return { embeddings: [], model: '', usage: { promptTokens: 0, totalTokens: 0 } };
+      },
+    };
+
+    const result = await runVerifiedSTT(SILENCE, 'fr', '', {
+      providers: [
+        stubProvider('p1', 'bonjour le monde'),
+        stubProvider('p2', 'bonjour le monde'),
+      ],
+      embeddingFallbacks: [provider],
+      embeddingFallbackThreshold: 0.3,
+    });
+
+    expect(embeddingCalled).toBe(false);
+    expect(result.similarity_method).toBe('jaccard');
+    expect(result.embedding_provider).toBeUndefined();
+  });
+
+  it('triggers embedding fallback when Jaccard confidence is below threshold', async () => {
+    // p1 and p2 share no words → Jaccard ~0, triggers fallback
+    // Embedding vectors: p1 and p2 are close, p3 is far
+    const vectors: Record<string, number[]> = {
+      'hello world':        [1, 0, 0],
+      'bonjour monde':      [0.95, 0.1, 0],  // close to p1
+      'something unrelated': [0, 0, 1],
+    };
+    const embProvider = stubEmbeddingProvider(vectors, 'test-embed');
+
+    const result = await runVerifiedSTT(SILENCE, 'fr', '', {
+      providers: [
+        stubProvider('p1', 'hello world'),
+        stubProvider('p2', 'bonjour monde'),
+        stubProvider('p3', 'something unrelated'),
+      ],
+      embeddingFallbacks: [embProvider],
+      embeddingFallbackThreshold: 0.9,  // very high — always triggers
+      embeddingOutlierThreshold: 0.5,
+    });
+
+    expect(result.similarity_method).toBe('embedding');
+    expect(result.embedding_provider).toBe('test-embed');
+    expect(result.outliers).toContain('p3');
+  });
+
+  it('skips unconfigured embedding providers', async () => {
+    let fallback2Called = false;
+    const unconfigured: EmbeddingProvider = {
+      name: 'unconfigured',
+      providerId: 'openrouter' as const,
+      isConfigured: () => false,
+      embed: async () => { throw new Error('should not be called'); },
+    };
+    const vectors = { 'text a': [1, 0], 'text b': [0.9, 0.1] };
+    const fallback2: EmbeddingProvider = {
+      name: 'fallback2',
+      providerId: 'openai' as const,
+      isConfigured: () => true,
+      embed: async (input) => {
+        fallback2Called = true;
+        const inputs = Array.isArray(input) ? input : [input];
+        return {
+          embeddings: inputs.map(t => vectors[t] ?? [0, 1]),
+          model: 'fallback2',
+          usage: { promptTokens: 0, totalTokens: 0 },
+        };
+      },
+    };
+
+    const result = await runVerifiedSTT(SILENCE, 'fr', '', {
+      providers: [stubProvider('p1', 'text a'), stubProvider('p2', 'text b')],
+      embeddingFallbacks: [unconfigured, fallback2],
+      embeddingFallbackThreshold: 0.9,  // always triggers
+    });
+
+    expect(fallback2Called).toBe(true);
+    expect(result.similarity_method).toBe('embedding');
+    expect(result.embedding_provider).toBe('fallback2');
+  });
+
+  it('falls back to Jaccard if all embedding providers fail', async () => {
+    const failingEmbed: EmbeddingProvider = {
+      name: 'failing-embed',
+      providerId: 'openrouter' as const,
+      isConfigured: () => true,
+      embed: async () => { throw new Error('API error'); },
+    };
+
+    const result = await runVerifiedSTT(SILENCE, 'fr', '', {
+      providers: [
+        stubProvider('p1', 'apple orange'),
+        stubProvider('p2', 'banana grape'),
+      ],
+      embeddingFallbacks: [failingEmbed],
+      embeddingFallbackThreshold: 0.9,
+    });
+
+    expect(result.similarity_method).toBe('jaccard');
+    expect(result.embedding_provider).toBeUndefined();
+  });
+
+  it('result always includes similarity_method field', async () => {
+    const result = await runVerifiedSTT(SILENCE, 'fr', '', {
+      providers: [stubProvider('p1', 'hello world')],
+    });
+    expect(result.similarity_method).toBeDefined();
+    expect(['jaccard', 'embedding']).toContain(result.similarity_method);
   });
 });
 

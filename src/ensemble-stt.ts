@@ -1,21 +1,23 @@
 /**
  * STT Verifier — fan-out to multiple STT providers in parallel, then pick
- * the best transcription using word-level similarity (majority agreement).
+ * the best transcription via layered similarity:
  *
- * No LLM needed: similarity-based consensus is faster and deterministic.
- * The text most "agreed upon" by other providers wins (highest avg Jaccard similarity).
- * Providers whose result deviates too much from the majority are flagged as outliers.
+ *   Layer 1 — Jaccard (word overlap):  zero cost, ~0ms, works for same-language STT
+ *   Layer 2 — Embedding fallback 1:    Qwen3-0.6b via OpenRouter (~25ms, $0.01/1M)
+ *   Layer 3 — Embedding fallback 2:    OpenAI text-embedding-3-small (~15ms, $0.02/1M)
  *
- * Usage:
- *   import { runVerifiedSTT } from './ensemble-stt';
- *   const result = await runVerifiedSTT(audioBuffer, 'fr', '', { providers });
+ * Fallback is triggered automatically when Jaccard agreement is too low
+ * (< embeddingFallbackThreshold, default 0.3) — typically caused by:
+ *   - Providers returning text in different languages (FR vs EN)
+ *   - Heavy paraphrasing on ambiguous audio
  *
- * Architecture (follows ai-gateway DI pattern):
+ * Architecture:
  *   - Providers injected via deps — no hard env-var dependency here.
- *   - gateway-server.ts wires up active providers from env and calls this function.
+ *   - gateway-server.ts wires up active providers + embedding fallbacks from env.
  */
 
 import type { STTProvider } from './providers/types';
+import type { EmbeddingProvider } from './providers/openai-compat/openai-compat-embedding';
 
 export interface STTVerifierProviderEntry {
   name: string;
@@ -25,42 +27,60 @@ export interface STTVerifierProviderEntry {
 export interface STTVerifierDeps {
   providers: STTVerifierProviderEntry[];
   /**
-   * Minimum Jaccard similarity score for a result to be considered "in the majority".
-   * Results below this threshold relative to the winning cluster are flagged as outliers.
-   * Default: 0.25 (tuned for short transcription segments).
+   * Minimum Jaccard score to consider a result "in the majority".
+   * Default: 0.25
    */
   outlierThreshold?: number;
   /**
-   * Maximum wall-clock budget in ms for provider fan-out.
-   * Providers that haven't responded within this deadline are dropped —
-   * consensus is built from whoever made it in time.
-   * This is critical for real-time use: set to e.g. 1500ms so the pipeline
-   * never blocks on a slow provider.
-   * Default: no timeout (wait for all providers).
+   * Wall-clock budget in ms for provider fan-out.
+   * Providers that miss the deadline are dropped; consensus uses whoever arrived.
+   * Set to e.g. 1500ms for real-time pipelines.
+   * Default: no timeout.
    */
   timeoutMs?: number;
+  /**
+   * Embedding providers tried in order when Jaccard confidence is too low.
+   * Recommended: [openrouterQwen3Embedding, openaiEmbedding]
+   * Each provider is tried until one succeeds (skips unconfigured ones).
+   */
+  embeddingFallbacks?: EmbeddingProvider[];
+  /**
+   * Jaccard best-score threshold below which embedding fallback is triggered.
+   * Default: 0.3 — catches language divergence and heavy disagreement.
+   */
+  embeddingFallbackThreshold?: number;
+  /**
+   * Minimum cosine similarity for a result to not be flagged as outlier
+   * when using embedding-based consensus.
+   * Default: 0.70 (embeddings produce higher raw scores than Jaccard).
+   */
+  embeddingOutlierThreshold?: number;
 }
 
 export interface STTVerifierResult {
-  /** Best transcription — the one with highest average word-similarity to others. */
+  /** Best transcription — highest average similarity to all others. */
   consensus: string;
-  /** Per-provider transcription text for each provider that succeeded. */
+  /** Per-provider transcription text (only providers that succeeded). */
   providers: Record<string, string>;
-  /** Per-provider similarity score (avg Jaccard vs all others). */
+  /** Per-provider similarity score (avg vs all others, 0–1). */
   scores: Record<string, number>;
   /** Providers flagged as outliers (low agreement with majority). */
   outliers: string[];
   /** How many providers returned a non-empty result. */
   used_providers: number;
-  /** Total wall-clock latency in ms (fan-out only — no LLM call). */
+  /** Total wall-clock latency in ms. */
   latency_ms: number;
+  /** Which similarity method produced the final consensus. */
+  similarity_method: 'jaccard' | 'embedding';
+  /** Name of the embedding provider used, if similarity_method is 'embedding'. */
+  embedding_provider?: string;
 }
 
 // ---------------------------------------------------------------------------
 // Similarity helpers
 // ---------------------------------------------------------------------------
 
-/** Tokenise text into lowercase words, keeping accented chars (French, etc.). */
+/** Tokenise text into lowercase words, preserving accented characters (French etc.). */
 function tokenize(text: string): string[] {
   return text
     .toLowerCase()
@@ -80,22 +100,29 @@ function jaccardSimilarity(a: string[], b: string[]): number {
   return union === 0 ? 1 : intersection / union;
 }
 
-/**
- * Pick the transcription with the highest average Jaccard similarity to all others.
- * Returns the index, per-text scores, and outlier indices.
- */
-function pickByAgreement(
-  texts: string[],
+/** Cosine similarity between two embedding vectors. */
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+/** Compute per-text agreement scores and outlier indices from a similarity matrix. */
+function scoreAndOutliers(
+  similarities: number[][],
   outlierThreshold: number,
 ): { bestIdx: number; scores: number[]; outlierIndices: number[] } {
-  const tokens = texts.map(tokenize);
-  const n = texts.length;
-
-  const scores = tokens.map((_, i) => {
+  const n = similarities.length;
+  const scores = similarities.map((row, i) => {
     if (n === 1) return 1;
     let total = 0;
     for (let j = 0; j < n; j++) {
-      if (i !== j) total += jaccardSimilarity(tokens[i], tokens[j]);
+      if (i !== j) total += row[j];
     }
     return total / (n - 1);
   });
@@ -109,13 +136,33 @@ function pickByAgreement(
   return { bestIdx, scores, outlierIndices };
 }
 
+/** Build a Jaccard similarity matrix for a list of tokenized texts. */
+function jaccardMatrix(texts: string[]): number[][] {
+  const tokens = texts.map(tokenize);
+  return tokens.map((a, i) => tokens.map((b, j) => i === j ? 1 : jaccardSimilarity(a, b)));
+}
+
+/**
+ * Build a cosine similarity matrix using an embedding provider.
+ * All texts are embedded in a single batched API call.
+ */
+async function embeddingMatrix(
+  texts: string[],
+  provider: EmbeddingProvider,
+): Promise<number[][]> {
+  const { embeddings } = await provider.embed(texts);
+  return embeddings.map((a, i) =>
+    embeddings.map((b, j) => i === j ? 1 : cosineSimilarity(a, b)),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
 /**
  * Run verified STT: fan-out to all providers in parallel, then select the
- * most agreed-upon transcription via word-level Jaccard similarity.
+ * most agreed-upon transcription via layered similarity (Jaccard → embeddings).
  */
 export async function runVerifiedSTT(
   audio: Buffer,
@@ -125,12 +172,15 @@ export async function runVerifiedSTT(
 ): Promise<STTVerifierResult> {
   const t0 = Date.now();
   const outlierThreshold = deps.outlierThreshold ?? 0.25;
+  const embeddingFallbackThreshold = deps.embeddingFallbackThreshold ?? 0.3;
+  const embeddingOutlierThreshold = deps.embeddingOutlierThreshold ?? 0.70;
 
   if (deps.providers.length === 0) {
     throw new Error('[stt-verifier] No STT providers configured');
   }
 
-  // Build per-provider promises — failures are silently collected by allSettled
+  // ── Fan-out to all STT providers in parallel ────────────────────────────
+
   const providerPromises = deps.providers.map(({ name, provider }) => {
     const modelId = provider.getModels()[0]?.id;
     if (!modelId) {
@@ -144,16 +194,15 @@ export async function runVerifiedSTT(
   let settled: PromiseSettledResult<{ name: string; text: string }>[];
 
   if (deps.timeoutMs !== undefined) {
-    // Race each provider against the shared deadline.
-    // Any provider that misses the deadline is treated as rejected.
     const deadline = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('timeout')), deps.timeoutMs),
     );
     settled = await Promise.allSettled(
       providerPromises.map(p => Promise.race([p, deadline])),
     );
-    const timedOut = settled.filter(r => r.status === 'rejected' &&
-      (r as PromiseRejectedResult).reason?.message === 'timeout').length;
+    const timedOut = settled.filter(r =>
+      r.status === 'rejected' && (r as PromiseRejectedResult).reason?.message === 'timeout',
+    ).length;
     if (timedOut > 0) {
       console.log(`[stt-verifier] ${timedOut} provider(s) timed out after ${deps.timeoutMs}ms`);
     }
@@ -187,27 +236,84 @@ export async function runVerifiedSTT(
       outliers: [],
       used_providers: 1,
       latency_ms: Date.now() - t0,
+      similarity_method: 'jaccard',
     };
   }
 
-  // Similarity-based consensus
-  const { bestIdx, scores: rawScores, outlierIndices } = pickByAgreement(texts, outlierThreshold);
+  // ── Layer 1: Jaccard ───────────────────────────────────────────────────
+
+  const jMatrix = jaccardMatrix(texts);
+  const jaccard = scoreAndOutliers(jMatrix, outlierThreshold);
+  const jaccardBestScore = Math.max(...jaccard.scores);
+
+  const useFallback =
+    deps.embeddingFallbacks &&
+    deps.embeddingFallbacks.length > 0 &&
+    jaccardBestScore < embeddingFallbackThreshold;
+
+  if (useFallback) {
+    console.log(
+      `[stt-verifier] Jaccard confidence low (${jaccardBestScore.toFixed(2)} < ${embeddingFallbackThreshold}) — trying embedding fallback`,
+    );
+  }
+
+  // ── Layers 2 & 3: Embedding fallbacks (tried in order) ─────────────────
+
+  if (useFallback) {
+    for (const embProvider of deps.embeddingFallbacks!) {
+      if (!embProvider.isConfigured()) continue;
+      try {
+        const eMatrix = await embeddingMatrix(texts, embProvider);
+        const emb = scoreAndOutliers(eMatrix, embeddingOutlierThreshold);
+
+        const scoreMap: Record<string, number> = {};
+        names.forEach((name, i) => { scoreMap[name] = Math.round(emb.scores[i] * 1000) / 1000; });
+
+        const outlierNames = emb.outlierIndices.map(i => names[i]);
+        if (outlierNames.length > 0) {
+          console.log(`[stt-verifier] Outliers (${embProvider.name}): ${outlierNames.join(', ')}`);
+        }
+
+        console.log(`[stt-verifier] Embedding consensus via ${embProvider.name}`);
+        return {
+          consensus: texts[emb.bestIdx],
+          providers: succeeded,
+          scores: scoreMap,
+          outliers: outlierNames,
+          used_providers: texts.length,
+          latency_ms: Date.now() - t0,
+          similarity_method: 'embedding',
+          embedding_provider: embProvider.name,
+        };
+      } catch (err) {
+        console.warn(
+          `[stt-verifier] Embedding fallback ${embProvider.name} failed:`,
+          err instanceof Error ? err.message : err,
+        );
+        // continue to next fallback
+      }
+    }
+    console.warn('[stt-verifier] All embedding fallbacks failed — using Jaccard result');
+  }
+
+  // ── Return Jaccard result ───────────────────────────────────────────────
 
   const scoreMap: Record<string, number> = {};
-  names.forEach((name, i) => { scoreMap[name] = Math.round(rawScores[i] * 1000) / 1000; });
+  names.forEach((name, i) => { scoreMap[name] = Math.round(jaccard.scores[i] * 1000) / 1000; });
 
-  const outlierNames = outlierIndices.map(i => names[i]);
+  const outlierNames = jaccard.outlierIndices.map(i => names[i]);
   if (outlierNames.length > 0) {
-    console.log(`[stt-verifier] Outliers detected: ${outlierNames.join(', ')}`);
+    console.log(`[stt-verifier] Outliers (Jaccard): ${outlierNames.join(', ')}`);
   }
 
   return {
-    consensus: texts[bestIdx],
+    consensus: texts[jaccard.bestIdx],
     providers: succeeded,
     scores: scoreMap,
     outliers: outlierNames,
     used_providers: texts.length,
     latency_ms: Date.now() - t0,
+    similarity_method: 'jaccard',
   };
 }
 

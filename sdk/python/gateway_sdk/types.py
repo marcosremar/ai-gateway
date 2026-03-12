@@ -39,12 +39,14 @@ class TranscribeResponse:
 
 @dataclass
 class EnsembleTranscribeResponse:
-    consensus: str                    # best transcription (highest avg word-similarity to others)
+    consensus: str                    # best transcription (highest avg similarity to others)
     providers: dict[str, str]         # {provider_name: text} for each provider that succeeded
     used_providers: int               # number of providers that returned results
-    latency_ms: int                   # total wall-clock time (similarity-based, no LLM call)
-    scores: dict[str, float] = field(default_factory=dict)   # {provider_name: jaccard_score}
+    latency_ms: int                   # total wall-clock time
+    scores: dict[str, float] = field(default_factory=dict)   # {provider_name: similarity_score}
     outliers: list[str] = field(default_factory=list)        # providers flagged as outliers
+    similarity_method: str = "jaccard"  # 'jaccard' | 'embedding'
+    embedding_provider: str = ""        # name of embedding provider used (if method='embedding')
 
 
 @dataclass
