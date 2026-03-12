@@ -14,6 +14,8 @@ export interface OpenAICompatSTTConfig {
   envKey: string;
   models: ModelInfo[];
   defaultModel?: string;
+  /** Override default response_format. Some models (gpt-4o-transcribe) only support 'json'. */
+  defaultResponseFormat?: 'json' | 'verbose_json' | 'text';
 }
 
 export class OpenAICompatSTTProvider implements STTProvider {
@@ -55,7 +57,7 @@ export class OpenAICompatSTTProvider implements STTProvider {
       ...(request.language && { language: request.language }),
       ...(request.prompt && { prompt: request.prompt }),
       ...(request.temperature !== undefined && { temperature: request.temperature }),
-      response_format: request.responseFormat === 'text' ? 'text' : 'verbose_json',
+      response_format: request.responseFormat === 'text' ? 'text' : (this.config.defaultResponseFormat ?? 'verbose_json'),
     };
 
     const transcription = await client.audio.transcriptions.create(params);
@@ -66,16 +68,20 @@ export class OpenAICompatSTTProvider implements STTProvider {
 
     const response: STTResponse = { text: transcription.text, raw: transcription };
 
-    if ('language' in transcription && transcription.language) {
-      response.language = transcription.language as string;
+    if ('language' in transcription && typeof transcription.language === 'string') {
+      response.language = transcription.language;
     }
-    if ('duration' in transcription && transcription.duration) {
-      response.duration = transcription.duration as number;
+    if ('duration' in transcription && typeof transcription.duration === 'number') {
+      response.duration = transcription.duration;
     }
     if ('words' in transcription && Array.isArray(transcription.words)) {
-      response.words = (transcription.words as Array<{ word: string; start: number; end: number }>).map((w) => ({
-        word: w.word, start: w.start, end: w.end,
-      }));
+      response.words = (transcription.words as unknown[])
+        .filter((w): w is { word: string; start: number; end: number } =>
+          typeof (w as Record<string, unknown>)?.word === 'string' &&
+          typeof (w as Record<string, unknown>)?.start === 'number' &&
+          typeof (w as Record<string, unknown>)?.end === 'number',
+        )
+        .map((w) => ({ word: w.word, start: w.start, end: w.end }));
     }
 
     return response;

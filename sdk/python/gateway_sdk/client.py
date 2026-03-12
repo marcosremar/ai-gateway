@@ -129,6 +129,34 @@ class GatewaySDK:
             used_gpu=data.get("used_gpu", False),
         )
 
+    async def transcribe_ensemble(self, audio: bytes, language: str = "fr", prompt: str = "") -> "EnsembleTranscribeResponse":
+        """Transcribe audio using all configured STT providers, LLM picks best result.
+
+        Returns EnsembleTranscribeResponse with .consensus (best text) and .providers dict.
+        """
+        from gateway_sdk.types import EnsembleTranscribeResponse
+        http = self._get_http()
+        params: dict[str, str] = {"language": language}
+        if prompt:
+            params["prompt"] = prompt
+        r = await http.post(
+            "/v1/transcribe/ensemble",
+            content=audio,
+            params=params,
+            headers={"Content-Type": "audio/wav"},
+            timeout=self._timeouts.stt * 2,  # ensemble is slower
+        )
+        self._check_response(r, "/v1/transcribe/ensemble")
+        data = self._parse_json(r, "/v1/transcribe/ensemble")
+        return EnsembleTranscribeResponse(
+            consensus=data.get("consensus", ""),
+            providers=data.get("providers", {}),
+            used_providers=data.get("used_providers", 0),
+            latency_ms=data.get("latency_ms", 0),
+            scores=data.get("scores", {}),
+            outliers=data.get("outliers", []),
+        )
+
     async def translate(
         self, text: str, source_lang: str, target_lang: str, glossary: str = ""
     ) -> TranslateResponse:

@@ -9,7 +9,7 @@
 // Provider Identification
 // ---------------------------------------------------------------------------
 
-export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks' | 'modal' | 'skypilot' | 'vast-serverless' | 'runpod' | 'tensordock' | 'ollama';
+export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks' | 'deepgram' | 'modal' | 'skypilot' | 'vast-serverless' | 'runpod' | 'tensordock' | 'ollama';
 
 /** @deprecated Use ProviderId instead */
 export type AIProviderId = ProviderId;
