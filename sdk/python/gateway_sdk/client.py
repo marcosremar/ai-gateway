@@ -135,6 +135,7 @@ class GatewaySDK:
         language: str = "fr",
         prompt: str = "",
         timeout_ms: int = 1500,
+        providers: list[str] | None = None,
     ) -> "EnsembleTranscribeResponse":
         """Transcribe audio using all configured STT providers; consensus via similarity.
 
@@ -142,6 +143,8 @@ class GatewaySDK:
             timeout_ms: Per-provider deadline in ms. Providers that miss it are dropped
                         and consensus is built from whoever arrived in time.
                         Default 1500ms — keeps the subtitle pipeline responsive.
+            providers: Subset of providers to use, e.g. ["groq", "openai"].
+                       None = use gateway default (ENSEMBLE_STT_PROVIDERS env var).
 
         Returns EnsembleTranscribeResponse with .consensus (best text) and .providers dict.
         """
@@ -150,6 +153,8 @@ class GatewaySDK:
         params: dict[str, str] = {"language": language, "timeout_ms": str(timeout_ms)}
         if prompt:
             params["prompt"] = prompt
+        if providers:
+            params["providers"] = ",".join(providers)
         # HTTP timeout = provider deadline + similarity overhead + network buffer
         http_timeout = timeout_ms / 1000 + 5.0
         r = await http.post(
