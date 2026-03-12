@@ -208,6 +208,34 @@ bun run build   # tsup → dist/ (ESM + CJS + declarations + sourcemaps)
 - **tsup** — Bundler (ESM + CJS dual output)
 - **OpenAI SDK** — Base client for OpenAI-compatible APIs
 
+## STT Quality Research — Whisper `initial_prompt`
+
+The gateway's STT pipeline uses Whisper's `initial_prompt` parameter to anchor transcription to domain-specific vocabulary. The following research informs our implementation:
+
+### Key Techniques
+
+| Technique | Effect | Status |
+|-----------|--------|--------|
+| Rolling prior-segment context (sliding window) | Most effective — conditions each segment on recent transcription | Implemented |
+| LLM-expanded domain prompt (title → 2-3 sentences) | ~17% relative WER reduction on domain-specific content | Implemented |
+| Glossary term injection | Biases spelling of technical vocabulary | Implemented |
+| `condition_on_previous_text=True` | Enables decoder to attend to prior output | Default in pipeline |
+
+### Guidelines
+
+- **224-token limit** (~170 words) — keep prompts compact
+- **Language must match audio** — wrong-language prompts degrade WER by ~19%
+- **Sentence-style prompts outperform keyword lists** — use natural prose, not comma-separated terms
+- **Most recent tokens** get highest attention weight — put the most relevant context last
+- **Static prompts plateau quickly** — rolling context + LLM expansion gives the best combined result
+
+### References
+
+- **arXiv 2602.18966** — "Improved Domain-Specific ASR via Large Language Model Prompt Engineering" (NBA commentary). LLM-generated compact domain prompts: **17% relative WER reduction** vs no prompt.
+- **arXiv 2406.05806** — "Do Prompts Really Prompt? Rethinking the Role of Prompts in Whisper Transcription". Comprehensive study of prompt strategies; sentence-style > keyword lists; language mismatch = catastrophic degradation.
+- **arXiv 2502.11572** — "Improving Whisper's Recognition of Rare Words via Initial Prompt Injection". Injection of rare/domain-specific terms in `initial_prompt` significantly improves recognition of OOV vocabulary.
+- **OpenAI Cookbook — Whisper Prompting Guide** — Practical guide covering spelling correction, filler word suppression, punctuation style, and fictional context prompts.
+
 ## License
 
 Private — Part of the Parle ecosystem.

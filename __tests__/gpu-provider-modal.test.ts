@@ -5,6 +5,7 @@ import type { ProviderCredentials, InstanceSpec } from '@ai-gateway/gpu-provider
 const mockExec = vi.fn();
 vi.mock('child_process', () => ({
   exec: mockExec,
+  execFile: mockExec,
 }));
 vi.mock('util', async () => {
   const actual = await vi.importActual('util');
@@ -176,7 +177,8 @@ describe('ModalClient', () => {
       mockExec.mockResolvedValueOnce({ stdout: 'Stopped', stderr: '' });
       await client.stopInstance('ap-1', creds);
       expect(mockExec).toHaveBeenCalledWith(
-        'python3 -m modal app stop ap-1',
+        'python3',
+        ['-m', 'modal', 'app', 'stop', 'ap-1'],
         expect.objectContaining({ timeout: 30_000 }),
       );
     });
@@ -192,7 +194,8 @@ describe('ModalClient', () => {
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
       await client.deleteInstance('ap-1', creds);
       expect(mockExec).toHaveBeenCalledWith(
-        expect.stringContaining('modal app stop ap-1'),
+        'python3',
+        expect.arrayContaining(['modal', 'app', 'stop', 'ap-1']),
         expect.anything(),
       );
     });

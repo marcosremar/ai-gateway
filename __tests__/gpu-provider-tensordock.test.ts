@@ -232,15 +232,16 @@ describe('TensordockClient', () => {
   // ── discoverInstance ────────────────────────────────────────────────────
 
   describe('discoverInstance', () => {
-    it('returns running VM from v0 API', async () => {
+    it('returns running VM from v2 API', async () => {
       fetchSpy.mockResolvedValueOnce(jsonResponse({
-        virtualmachines: {
-          'vm-1': {
+        data: [{
+          id: 'vm-1',
+          attributes: {
             status: 'running',
             ip_address: '10.0.0.1',
-            port_forwards: { '20002': '8000' },
+            port_forwards: [{ internal_port: 8000, external_port: 20002 }],
           },
-        },
+        }],
       }));
 
       const result = await client.discoverInstance(creds, ['RTX3090']);
@@ -250,35 +251,25 @@ describe('TensordockClient', () => {
       expect(result!.status).toBe('running');
     });
 
-    it('falls back to v2 detail when v0 has no port forwards', async () => {
-      // v0 returns VM with IP but no port_forwards
+    it('returns VM with ip but no 8000 port_forward (uses default :8000)', async () => {
       fetchSpy.mockResolvedValueOnce(jsonResponse({
-        virtualmachines: {
-          'vm-2': {
-            status: 'running',
-            ip_address: '',
-          },
-        },
-      }));
-      // v2 detail call
-      fetchSpy.mockResolvedValueOnce(jsonResponse({
-        data: {
+        data: [{
+          id: 'vm-2',
           attributes: {
+            status: 'running',
             ip_address: '10.0.0.2',
-            port_forwards: [
-              { internal_port: 8000, external_port: 30002 },
-            ],
+            port_forwards: [],
           },
-        },
+        }],
       }));
 
       const result = await client.discoverInstance(creds, ['RTX3090']);
       expect(result).toBeDefined();
-      expect(result!.endpoint).toBe('http://10.0.0.2:30002');
+      expect(result!.endpoint).toBe('http://10.0.0.2:8000');
     });
 
     it('returns null when no VMs exist', async () => {
-      fetchSpy.mockResolvedValueOnce(jsonResponse({ virtualmachines: {} }));
+      fetchSpy.mockResolvedValueOnce(jsonResponse({ data: [] }));
       const result = await client.discoverInstance(creds, ['RTX3090']);
       expect(result).toBeNull();
     });
@@ -297,37 +288,37 @@ describe('TensordockClient', () => {
 
     it('prefers running VM over non-running', async () => {
       fetchSpy.mockResolvedValueOnce(jsonResponse({
-        virtualmachines: {
-          'vm-stopped': {
-            status: 'stopped',
-            ip_address: '10.0.0.1',
-            port_forwards: { '20002': '8000' },
+        data: [
+          {
+            id: 'vm-stopped',
+            attributes: { status: 'stopped', ip_address: '10.0.0.1', port_forwards: [] },
           },
-          'vm-running': {
-            status: 'running',
-            ip_address: '10.0.0.2',
-            port_forwards: { '20002': '8000' },
+          {
+            id: 'vm-running',
+            attributes: { status: 'running', ip_address: '10.0.0.2', port_forwards: [] },
           },
-        },
+        ],
       }));
 
       const result = await client.discoverInstance(creds, ['RTX3090']);
       expect(result!.instanceId).toBe('vm-running');
     });
 
-    it('uses 9090 monitor port as fallback', async () => {
+    it('returns VM with non-8000 port_forward (endpoint defaults to :8000)', async () => {
       fetchSpy.mockResolvedValueOnce(jsonResponse({
-        virtualmachines: {
-          'vm-1': {
+        data: [{
+          id: 'vm-1',
+          attributes: {
             status: 'running',
             ip_address: '10.0.0.1',
-            port_forwards: { '20001': '9090' },
+            port_forwards: [{ internal_port: 9090, external_port: 20001 }],
           },
-        },
+        }],
       }));
 
       const result = await client.discoverInstance(creds, ['RTX3090']);
-      expect(result!.endpoint).toBe('http://10.0.0.1:20001');
+      // No 8000 port_forward → falls back to default :8000
+      expect(result!.endpoint).toBe('http://10.0.0.1:8000');
     });
   });
 
@@ -428,7 +419,7 @@ describe('TensordockClient', () => {
       // No candidates for RTX3090
       fetchSpy.mockResolvedValueOnce(jsonResponse({ data: { hostnodes: [] } }));
 
-      await expect(client.createInstance(spec, creds)).rejects.toThrow('esgotados');
+      await expect(client.createInstance(spec, creds)).rejects.toThrow('No GPUs available on TensorDock');
     });
 
     it('tries default GPU_FALLBACK when no gpuTypes in spec', async () => {
@@ -691,16 +682,19 @@ describe('TensordockClient', () => {
   // ── listInstances ──────────────────────────────────────────────────────
 
   describe('listInstances', () => {
-    it('returns instances from v0 first', async () => {
+    it('returns instances from v2 API', async () => {
       fetchSpy.mockResolvedValueOnce(jsonResponse({
-        virtualmachines: {
-          'vm-1': {
-            name: 'my-vm',
-            status: 'running',
-            ip_address: '10.0.0.1',
-            port_forwards: { '20002': '8000' },
+        data: [
+          {
+            id: 'vm-1',
+            attributes: {
+              name: 'my-vm',
+              status: 'running',
+              ip_address: '10.0.0.1',
+              port_forwards: [{ internal_port: 8000, external_port: 20002 }],
+            },
           },
-        },
+        ],
       }));
 
       const result = await client.listInstances(creds);
@@ -709,9 +703,7 @@ describe('TensordockClient', () => {
       expect(result[0].endpoint).toBe('http://10.0.0.1:20002');
     });
 
-    it('falls back to v2 when v0 returns empty', async () => {
-      // v0 returns empty
-      fetchSpy.mockResolvedValueOnce(jsonResponse({ virtualmachines: {} }));
+    it('returns instances from v2 (single API, no v0 fallback)', async () => {
       // v2 returns instances
       fetchSpy.mockResolvedValueOnce(jsonResponse({
         data: [
@@ -755,9 +747,7 @@ describe('TensordockClient', () => {
       expect(result[0].endpoint).toBe('http://10.0.0.3:8000');
     });
 
-    it('returns empty on v0 and v2 errors', async () => {
-      // v0 fails
-      fetchSpy.mockResolvedValueOnce(textResponse('error', 500));
+    it('returns empty on v2 error', async () => {
       // v2 fails
       fetchSpy.mockResolvedValueOnce(textResponse('error', 500));
 
@@ -791,33 +781,23 @@ describe('TensordockClient', () => {
   // ── getInstanceStatus ───────────────────────────────────────────────────
 
   describe('getInstanceStatus', () => {
-    it('returns status from v0 when found', async () => {
+    it('returns status from v2 when found', async () => {
       fetchSpy.mockResolvedValueOnce(jsonResponse({
-        virtualmachines: {
-          'vm-1': { status: 'running' },
-        },
+        data: { attributes: { status: 'running' } },
       }));
 
       const result = await client.getInstanceStatus('vm-1', creds);
       expect(result).toBe('running');
     });
 
-    it('returns null when not found in v0', async () => {
-      fetchSpy.mockResolvedValueOnce(jsonResponse({
-        virtualmachines: {
-          'vm-other': { status: 'running' },
-        },
-      }));
-      // v2 fallback - 404
+    it('returns null when not found (v2 404)', async () => {
       fetchSpy.mockResolvedValueOnce(textResponse('not found', 404));
 
       const result = await client.getInstanceStatus('vm-1', creds);
       expect(result).toBeNull();
     });
 
-    it('falls back to v2 when v0 fails', async () => {
-      // v0 fails
-      fetchSpy.mockResolvedValueOnce(textResponse('error', 500));
+    it('returns status from v2 directly', async () => {
       // v2 returns status
       fetchSpy.mockResolvedValueOnce(jsonResponse({
         data: { attributes: { status: 'stopped' } },

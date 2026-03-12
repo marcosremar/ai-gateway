@@ -127,6 +127,7 @@ class GatewaySDK:
         return TranscribeResponse(
             text=data.get("text", ""),
             used_gpu=data.get("used_gpu", False),
+            detected_language=data.get("language", ""),
         )
 
     async def transcribe_ensemble(

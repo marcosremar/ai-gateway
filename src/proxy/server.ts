@@ -256,7 +256,14 @@ export function createProxyServer(config: ProxyConfig): Server {
     if (config.customRoutes) {
       for (const route of config.customRoutes) {
         if (method === route.method.toUpperCase() && path === route.path) {
-          await route.handler(req, res);
+          try {
+            await route.handler(req, res);
+          } catch (err) {
+            console.error(`[ai-gateway] Unhandled error in custom route ${route.method} ${route.path}:`, err);
+            if (!res.headersSent) {
+              sendError(res, 500, 'Internal server error', requestId);
+            }
+          }
           return;
         }
       }

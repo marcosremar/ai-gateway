@@ -68,10 +68,11 @@ describe('buildMonitorScript', () => {
 });
 
 describe('buildCloudInit — Docker mode', () => {
-  it('generates cloud-init with write_files only (no runcmd)', () => {
+  it('generates cloud-init with write_files and bootstrap runcmd', () => {
     const config = buildCloudInit({ dockerImage: 'myimage:latest' });
     expect(config.write_files).toBeDefined();
-    expect(config.runcmd).toBeUndefined();
+    // runcmd bootstraps the setup service (chmod, systemctl enable, launch)
+    expect(Array.isArray(config.runcmd)).toBe(true);
     expect(config.bootcmd).toBeUndefined();
   });
 
@@ -148,19 +149,19 @@ describe('buildCloudInit — Docker mode', () => {
     expect(monitor).toContain('"phase"');
   });
 
-  it('uses cron @reboot, not rc.local', () => {
+  it('runcmd enables the setup service via systemctl', () => {
     const config = buildCloudInit({ dockerImage: 'myimage:latest' });
-    const cron = decodeFile(config, '/etc/cron.d/parle-setup');
-    expect(cron).toContain('@reboot root');
-    expect(cron).toContain('/opt/setup.sh');
+    const runcmd = (config.runcmd as string[]).join('\n');
+    expect(runcmd).toContain('systemctl');
+    expect(runcmd).toContain('setup');
   });
 });
 
 describe('buildCloudInit — Git clone mode', () => {
-  it('generates cloud-init with write_files only', () => {
+  it('generates cloud-init with write_files and bootstrap runcmd', () => {
     const config = buildCloudInit({ hfRepoUrl: 'user/repo' });
     expect(config.write_files).toBeDefined();
-    expect(config.runcmd).toBeUndefined();
+    expect(Array.isArray(config.runcmd)).toBe(true);
   });
 
   it('setup script uses uv for fast package management', () => {

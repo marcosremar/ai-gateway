@@ -150,8 +150,9 @@ export class RunpodClient extends AbstractGpuProvider {
     const podName = `parle-autoscale-${Date.now()}`;
 
     // Build env vars: base defaults + auto-detected keys + explicit overrides
+    // NOTE: Do NOT set TORCHINDUCTOR_CUDAGRAPH_TREES=0 — faster-qwen3-tts depends on CUDA
+    // graph trees for real-time inference and breaks when they are disabled.
     const envVars: Record<string, string> = {
-      TORCHINDUCTOR_CUDAGRAPH_TREES: '0',
       ...(hfToken || spec.hfToken ? { HF_TOKEN: hfToken || spec.hfToken! } : {}),
     };
     // Auto-inject CONF_GROQ_API_KEY for ultralight/API-based images

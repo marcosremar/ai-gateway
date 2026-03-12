@@ -78,7 +78,7 @@ describe('VastClient', () => {
   // ── createInstance ─────────────────────────────────────────────────────
 
   describe('createInstance', () => {
-    const baseSpec: InstanceSpec = { gpuTypes: ['RTX 3090'] };
+    const baseSpec: InstanceSpec = { gpuTypes: ['RTX 3090'], dockerImage: 'test/image:latest' };
 
     it('searches offers and creates instance', async () => {
       fetchSpy
@@ -100,7 +100,7 @@ describe('VastClient', () => {
     it('throws when no offers available', async () => {
       fetchSpy.mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
 
-      await expect(client.createInstance(baseSpec, creds)).rejects.toThrow('Nenhum GPU disponível no Vast.ai');
+      await expect(client.createInstance(baseSpec, creds)).rejects.toThrow('No GPUs available on Vast.ai');
     });
 
     it('throws when search fails', async () => {
@@ -113,7 +113,7 @@ describe('VastClient', () => {
       fetchSpy
         .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
 
-      await expect(client.createInstance({ gpuTypes: ['RTX3090'] }, creds)).rejects.toThrow();
+      await expect(client.createInstance({ gpuTypes: ['RTX3090'], dockerImage: 'test/image:latest' }, creds)).rejects.toThrow();
 
       const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
       expect(body.gpu_name).toEqual({ in: ['RTX 3090'] }); // Normalized from RTX3090
@@ -152,7 +152,7 @@ describe('VastClient', () => {
         .mockResolvedValueOnce(mockFetchResponse({ instances: { id: '777', actual_status: 'running', public_ipaddr: '1.1.1.1', direct_port_start: 8000 } }));
 
       await client.createInstance(
-        { gpuTypes: ['RTX 3090'], env: { CUSTOM_KEY: 'val' } },
+        { gpuTypes: ['RTX 3090'], env: { CUSTOM_KEY: 'val' }, dockerImage: 'test/image:latest' },
         { ...creds, hfToken: 'hf_test' },
       );
 
@@ -477,7 +477,7 @@ describe('VastClient', () => {
         }));
 
       await client.createInstance(
-        { gpuTypes: ['RTX 3090'], templateHashId: 'tpl_abc123' },
+        { gpuTypes: ['RTX 3090'], templateHashId: 'tpl_abc123', dockerImage: 'test/image:latest' },
         creds,
       );
 

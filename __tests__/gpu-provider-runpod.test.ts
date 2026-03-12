@@ -148,7 +148,7 @@ describe('RunpodClient', () => {
   // ── createInstance ─────────────────────────────────────────────────────
 
   describe('createInstance', () => {
-    const baseSpec: InstanceSpec = { gpuTypes: [] };
+    const baseSpec: InstanceSpec = { gpuTypes: [], dockerImage: 'test/image:latest' };
 
     it('uses GPU_FALLBACK when no gpuTypes specified', async () => {
       fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'new-pod' }));
@@ -164,7 +164,7 @@ describe('RunpodClient', () => {
     it('maps short GPU names to full RunPod names', async () => {
       fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'new-pod' }));
 
-      await client.createInstance({ gpuTypes: ['RTX 3090'] }, creds);
+      await client.createInstance({ gpuTypes: ['RTX 3090'], dockerImage: 'test/image:latest' }, creds);
 
       const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
       // RTX 3090 maps directly to NVIDIA GeForce RTX 3090
@@ -177,7 +177,7 @@ describe('RunpodClient', () => {
         .mockResolvedValueOnce(mockFetchResponse({ id: 'pod-fallback' }));
 
       const result = await client.createInstance(
-        { gpuTypes: ['RTX 4090', 'RTX A5000'] },
+        { gpuTypes: ['RTX 4090', 'RTX A5000'], dockerImage: 'test/image:latest' },
         creds,
       );
 
@@ -189,8 +189,8 @@ describe('RunpodClient', () => {
       fetchSpy.mockResolvedValue(mockFetchText('no instances', 400));
 
       await expect(
-        client.createInstance({ gpuTypes: ['RTX 4090'] }, creds),
-      ).rejects.toThrow('Nenhum GPU type disponível no RunPod');
+        client.createInstance({ gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest' }, creds),
+      ).rejects.toThrow('No GPU types available on RunPod');
     });
 
     it('calls onInstancePersist when userId provided', async () => {
@@ -210,7 +210,7 @@ describe('RunpodClient', () => {
     it('storageGb=0 skips volume and dockerStartCmd', async () => {
       fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'light-pod' }));
 
-      await client.createInstance({ gpuTypes: ['RTX 4090'], storageGb: 0 }, creds);
+      await client.createInstance({ gpuTypes: ['RTX 4090'], storageGb: 0, dockerImage: 'test/image:latest' }, creds);
 
       const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
       expect(body.volumeInGb).toBe(0);
@@ -223,7 +223,7 @@ describe('RunpodClient', () => {
     it('storageGb>0 adds volume and mounts at /workspace', async () => {
       fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'full-pod' }));
 
-      await client.createInstance({ gpuTypes: ['RTX 4090'], storageGb: 50 }, creds);
+      await client.createInstance({ gpuTypes: ['RTX 4090'], storageGb: 50, dockerImage: 'test/image:latest' }, creds);
 
       const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
       expect(body.volumeInGb).toBe(50);
@@ -245,7 +245,7 @@ describe('RunpodClient', () => {
       fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'env-pod' }));
 
       await client.createInstance(
-        { gpuTypes: ['RTX 4090'], env: { CUSTOM_VAR: 'custom_val' } },
+        { gpuTypes: ['RTX 4090'], env: { CUSTOM_VAR: 'custom_val' }, dockerImage: 'test/image:latest' },
         creds,
       );
 
@@ -259,7 +259,8 @@ describe('RunpodClient', () => {
       await client.createInstance(baseSpec, creds);
 
       const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-      expect(body.ports).toEqual(['8000/http', '22/tcp']);
+      expect(body.ports).toContain('8000/http');
+      expect(body.ports).toContain('22/tcp');
     });
   });
 

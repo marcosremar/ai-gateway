@@ -28,10 +28,10 @@ const VAST_API_BASE = 'https://console.vast.ai/api/v0';
 const POLL_BASE_MS = 5_000;
 const POLL_GROWTH = 1.4;
 const POLL_MAX_MS = 30_000;
-// Vast.ai on-demand instances typically get an IP within 2 min.
-// bootTimeSecs=120 → we poll for up to 2 min here (IP assignment phase only).
-// The boot health poller (engine.ts) handles the subsequent "app ready" phase.
-const POLL_TOTAL_MAX_MS = 120_000;
+// Vast.ai on-demand instances typically get an IP within 2 min for small images,
+// but large images (e.g. 52GB Blackwell) can take 5-10 min to pull + start.
+// We poll generously here; the boot health poller (engine.ts) handles "app ready".
+const POLL_TOTAL_MAX_MS = 600_000; // 10 minutes
 
 // ── Rate limiting ────────────────────────────────────────────────────────────
 // Vast.ai limits to ~4.5 req/s. We use a token bucket at 3 req/s to stay safe.
@@ -56,6 +56,8 @@ function normalizeGpuNames(gpuTypes: string[]): string[] {
   return gpuTypes.map((t) => {
     // Replace underscores with spaces (e.g. 'RTX_3090' → 'RTX 3090')
     let name = t.replace(/_/g, ' ');
+    // Strip NVIDIA prefix — Vast.ai uses short names like "RTX A6000", not "NVIDIA RTX A6000"
+    name = name.replace(/^NVIDIA\s+(GeForce\s+)?/i, '');
     // Add space before digits if missing (e.g. 'RTX3090' → 'RTX 3090', 'RTXA5000' → 'RTX A5000')
     name = name.replace(/^(RTX)(\d)/, '$1 $2').replace(/^(RTX)(A)/, '$1 $2');
     return name;

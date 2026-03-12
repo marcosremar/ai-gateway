@@ -19,6 +19,18 @@ export const GPU_ID_MAP: Record<string, string> = {
   'rtx4090-pcie-24gb': 'geforcertx4090-pcie-24gb',
   'geforcertx3090-pcie-24gb': 'geforcertx3090-pcie-24gb',
   'geforcertx4090-pcie-24gb': 'geforcertx4090-pcie-24gb',
+  // NVIDIA-prefixed names (from gateway allowlist)
+  'NVIDIA GeForce RTX 4090': 'geforcertx4090-pcie-24gb',
+  'NVIDIA GeForce RTX 3090': 'geforcertx3090-pcie-24gb',
+  'NVIDIA RTX A6000': 'rtxa6000-pcie-48gb',
+  'NVIDIA L40S': 'l40s-pcie-48gb',
+  'NVIDIA A40': 'a40-pcie-48gb',
+  'NVIDIA A100-SXM4-80GB': 'a100-sxm4-80gb',
+  'NVIDIA A100 80GB PCIe': 'a100-pcie-80gb',
+  // Short names
+  'A6000': 'rtxa6000-pcie-48gb',
+  'L40S': 'l40s-pcie-48gb',
+  'A40': 'a40-pcie-48gb',
 };
 
 /** GPU types to try in order of preference */

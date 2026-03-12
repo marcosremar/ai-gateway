@@ -35,6 +35,7 @@ class GatewayConfig:
 class TranscribeResponse:
     text: str
     used_gpu: bool
+    detected_language: str = ""
 
 
 @dataclass

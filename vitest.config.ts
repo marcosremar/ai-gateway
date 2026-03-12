@@ -13,5 +13,12 @@ export default defineConfig({
     testTimeout: 60_000,
     hookTimeout: 30_000,
     sequence: { concurrent: false },
+    server: {
+      deps: {
+        // Zod v4 changed its ESM structure; inline it so vitest bundles it
+        // through the normal pipeline instead of SSR (where z is undefined).
+        inline: ['zod'],
+      },
+    },
   },
 });
