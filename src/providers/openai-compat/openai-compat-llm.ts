@@ -6,6 +6,7 @@
 
 import OpenAI from 'openai';
 import type { ProviderId, LLMProvider, ChatRequest, ChatResponse } from '../types';
+import { getOrCreateClient } from './client-cache';
 
 export interface OpenAICompatLLMConfig {
   providerId: ProviderId;
@@ -29,11 +30,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
     if (!this.client) {
       const apiKey = process.env[this.config.envKey];
       if (!apiKey) throw new Error(`[${this.config.providerId} LLM] ${this.config.envKey} is not set`);
-      this.client = new OpenAI({
-        apiKey,
-        baseURL: this.config.baseURL,
-        ...(this.config.defaultHeaders && { defaultHeaders: this.config.defaultHeaders }),
-      });
+      this.client = getOrCreateClient(this.config.baseURL, apiKey, this.config.defaultHeaders);
     }
     return this.client;
   }

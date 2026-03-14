@@ -5,9 +5,9 @@
 // ── Config types ────────────────────────────────────────────────────────────
 
 export interface RetryConfig {
-  /** Max connection-level retries (NOT for HTTP errors). Default: 2 */
+  /** Max connection-level retries (NOT for HTTP errors). Default: 4 */
   maxRetries: number;
-  /** Backoff delays in ms. Default: [500, 1000] */
+  /** Backoff delays in ms. Default: [500, 1000, 2000, 4000] */
   backoffMs: number[];
 }
 
@@ -45,8 +45,8 @@ export const DEFAULT_TIMEOUTS: TimeoutConfig = {
 };
 
 export const DEFAULT_RETRY: RetryConfig = {
-  maxRetries: 2,
-  backoffMs: [500, 1000],
+  maxRetries: 4,
+  backoffMs: [500, 1000, 2000, 4000],
 };
 
 export const DEFAULT_CIRCUIT_BREAKER: CircuitBreakerConfig = {

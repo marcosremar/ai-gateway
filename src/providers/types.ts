@@ -9,7 +9,7 @@
 // Provider Identification
 // ---------------------------------------------------------------------------
 
-export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks' | 'deepgram' | 'modal' | 'skypilot' | 'vast-serverless' | 'runpod' | 'tensordock' | 'ollama';
+export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks' | 'deepgram' | 'modal' | 'modal-moss' | 'skypilot' | 'vast-serverless' | 'runpod' | 'tensordock' | 'ollama';
 
 /** @deprecated Use ProviderId instead */
 export type AIProviderId = ProviderId;
@@ -41,6 +41,7 @@ export interface STTRequest {
   prompt?: string;
   responseFormat?: 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt';
   temperature?: number;
+  wordTimestamps?: boolean;
 }
 
 export interface STTResponse {
@@ -102,9 +103,16 @@ export interface TTSProvider {
 // LLM (Chat Completion) — NEW
 // ---------------------------------------------------------------------------
 
+/** Content part for multimodal messages (vision, etc.). */
+export interface ContentPart {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: { url: string; detail?: 'auto' | 'low' | 'high' };
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: string | ContentPart[];
 }
 
 export interface ChatRequest {

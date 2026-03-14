@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+:root {
+  --color-bg: #09090b;
+  --color-surface: #131316;
+  --color-surface-elevated: #1a1a1f;
+  --color-surface-hover: #222228;
+  --color-border: #27272a;
+  --color-border-light: #1f1f23;
+  --color-text: #fafafa;
+  --color-text-secondary: #a1a1aa;
+  --color-text-muted: #71717a;
+  --color-primary: #10b981;
+  --color-primary-dim: #059669;
+  --color-btn-primary-bg: #059669;
+  --color-btn-primary-hover: #047857;
+  --color-btn-secondary-bg: #27272a;
+  --color-btn-secondary-text: #a1a1aa;
+  --color-btn-secondary-bg-hover: #3f3f46;
+  --color-btn-outline-border: #27272a;
+  --color-btn-outline-text: #a1a1aa;
+  --color-btn-outline-bg-hover: #18181b;
+  --color-btn-ghost-text: #a1a1aa;
+  --color-btn-ghost-bg-hover: #1a1a1f;
+  --color-ink-300: #3f3f46;
+  --color-ink-400: #52525b;
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --radius-md: 0.625rem;
+  --sidebar-width: 240px;
+  --sidebar-collapsed-width: 60px;
+}
+
+html { color-scheme: dark; }
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #27272a; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+
+::selection { background: rgba(16, 185, 129, 0.3); }
+
+input, textarea, select { color-scheme: dark; }
+
+/* Sidebar transition */
+.sidebar-transition {
+  transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1),
+              padding 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Subtle card hover */
+.card-hover {
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.card-hover:hover {
+  border-color: #3f3f46;
+  box-shadow: 0 0 0 1px rgba(63, 63, 70, 0.2);
+}
+/* 1773510973 */

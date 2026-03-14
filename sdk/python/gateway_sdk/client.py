@@ -21,6 +21,11 @@ from typing import Optional
 import httpx
 
 from gateway_sdk.types import (
+    ApiKeyEntry,
+    ApiKeysResponse,
+    CatalogProvider,
+    CatalogResponse,
+    ChatCompletionResponse,
     GatewayConfig,
     GatewayError,
     GpuOffer,
@@ -28,6 +33,9 @@ from gateway_sdk.types import (
     GpuLogsResponse,
     HealthResponse,
     MetricsResponse,
+    PipelineChainEntry,
+    ProviderConfigResponse,
+    ProviderProfile,
     RequestLogEntry,
     RequestLogResponse,
     RequestLogStats,
@@ -128,6 +136,7 @@ class GatewaySDK:
             text=data.get("text", ""),
             used_gpu=data.get("used_gpu", False),
             detected_language=data.get("language", ""),
+            avg_logprob=data.get("avg_logprob", 0.0),
         )
 
     async def transcribe_ensemble(
@@ -179,12 +188,14 @@ class GatewaySDK:
         )
 
     async def translate(
-        self, text: str, source_lang: str, target_lang: str, glossary: str = ""
+        self, text: str, source_lang: str, target_lang: str,
+        glossary: str = "", context: str = ""
     ) -> TranslateResponse:
         """Translate text (GPU-aware routing).
 
         Args:
             glossary: Domain-specific terms to preserve in translation.
+            context: Current session/event context to improve translation accuracy.
         """
         if not text.strip():
             return TranslateResponse(translated_text="", used_gpu=False)
@@ -193,6 +204,8 @@ class GatewaySDK:
         body: dict = {"text": text, "source_lang": source_lang, "target_lang": target_lang}
         if glossary:
             body["glossary"] = glossary
+        if context:
+            body["context"] = context
         r = await http.post(
             "/v1/translate",
             json=body,
@@ -239,6 +252,115 @@ class GatewaySDK:
                 llm_ms=timing.get("llm_ms", 0),
                 tts_ms=timing.get("tts_ms", 0),
             ),
+        )
+
+    async def chat(
+        self,
+        messages: list[dict],
+        model: str = "llama-3.3-70b-versatile",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> ChatCompletionResponse:
+        """Send a chat completion request through the gateway.
+
+        Supports text and vision (multimodal content arrays).
+        The gateway routes to the configured LLM provider.
+        """
+        http = self._get_http()
+        body: dict = {"model": model, "messages": messages}
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        r = await http.post(
+            "/v1/chat/completions",
+            json=body,
+            timeout=self._timeouts.translate,
+        )
+        self._check_response(r, "/v1/chat/completions")
+        data = self._parse_json(r, "/v1/chat/completions")
+        content = ""
+        choices = data.get("choices", [])
+        if choices:
+            content = choices[0].get("message", {}).get("content", "")
+        return ChatCompletionResponse(
+            content=content,
+            model=data.get("model", model),
+            usage=data.get("usage"),
+        )
+
+    # ── Config & catalog ──────────────────────────────────────────────────
+
+    async def get_api_keys(self) -> ApiKeysResponse:
+        """Get configured API keys (masked) from the gateway."""
+        http = self._get_http()
+        r = await http.get("/v1/config/api-keys", timeout=self._timeouts.health)
+        self._check_response(r, "/v1/config/api-keys")
+        data = self._parse_json(r, "/v1/config/api-keys")
+        keys = [ApiKeyEntry(**k) for k in data.get("keys", data if isinstance(data, list) else [])]
+        return ApiKeysResponse(keys=keys)
+
+    async def set_api_keys(self, keys: dict[str, str]) -> ApiKeysResponse:
+        """Update API keys on the gateway (persisted to .env)."""
+        http = self._get_http()
+        r = await http.post("/v1/config/api-keys", json={"keys": keys}, timeout=self._timeouts.health)
+        self._check_response(r, "/v1/config/api-keys")
+        data = self._parse_json(r, "/v1/config/api-keys")
+        entries = [ApiKeyEntry(**k) for k in data.get("keys", [])]
+        return ApiKeysResponse(keys=entries, saved=data.get("saved", False))
+
+    async def get_provider_config(self) -> ProviderConfigResponse:
+        """Get provider pipeline configuration from the gateway."""
+        http = self._get_http()
+        r = await http.get("/v1/config/providers", timeout=self._timeouts.health)
+        self._check_response(r, "/v1/config/providers")
+        data = self._parse_json(r, "/v1/config/providers")
+        return ProviderConfigResponse(
+            profiles=[ProviderProfile(
+                id=p["id"], name=p["name"],
+                stt=[PipelineChainEntry(**s) for s in p.get("stt", [])],
+                llm=[PipelineChainEntry(**l) for l in p.get("llm", [])],
+                tts=[PipelineChainEntry(**t) for t in p.get("tts", [])],
+            ) for p in data.get("profiles", [])],
+            active_profile_id=data.get("activeProfileId"),
+            pipeline_stt=[PipelineChainEntry(**s) for s in data.get("pipelineStt", [])],
+            pipeline_llm=[PipelineChainEntry(**l) for l in data.get("pipelineLlm", [])],
+            pipeline_tts=[PipelineChainEntry(**t) for t in data.get("pipelineTts", [])],
+            updated_at=data.get("updatedAt", 0),
+        )
+
+    async def patch_provider_config(self, partial: dict) -> ProviderConfigResponse:
+        """Patch (merge) provider pipeline configuration on the gateway."""
+        http = self._get_http()
+        r = await http.post("/v1/config/providers", json=partial, timeout=self._timeouts.health)
+        self._check_response(r, "/v1/config/providers")
+        data = self._parse_json(r, "/v1/config/providers")
+        return ProviderConfigResponse(
+            profiles=[ProviderProfile(
+                id=p["id"], name=p["name"],
+                stt=[PipelineChainEntry(**s) for s in p.get("stt", [])],
+                llm=[PipelineChainEntry(**l) for l in p.get("llm", [])],
+                tts=[PipelineChainEntry(**t) for t in p.get("tts", [])],
+            ) for p in data.get("profiles", [])],
+            active_profile_id=data.get("activeProfileId"),
+            pipeline_stt=[PipelineChainEntry(**s) for s in data.get("pipelineStt", [])],
+            pipeline_llm=[PipelineChainEntry(**l) for l in data.get("pipelineLlm", [])],
+            pipeline_tts=[PipelineChainEntry(**t) for t in data.get("pipelineTts", [])],
+            updated_at=data.get("updatedAt", 0),
+        )
+
+    async def catalog(self) -> CatalogResponse:
+        """Get the full provider/model/voice catalog from the gateway playground."""
+        http = self._get_http()
+        r = await http.get("/v1/playground/catalog", timeout=self._timeouts.health)
+        self._check_response(r, "/v1/playground/catalog")
+        data = self._parse_json(r, "/v1/playground/catalog")
+        return CatalogResponse(
+            providers=[CatalogProvider(**p) for p in data.get("providers", [])],
+            capabilities=data.get("capabilities", {}),
+            gpu=data.get("gpu", {}),
+            defaults=data.get("defaults", {}),
+            languages=data.get("languages", []),
         )
 
     # ── GPU management ────────────────────────────────────────────────────

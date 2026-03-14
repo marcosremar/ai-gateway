@@ -152,6 +152,7 @@ export class AIClient {
           model: entry.model ?? 'whisper-large-v3-turbo',
           language: profile.language,
           ...(profile.sttPrompt && { prompt: profile.sttPrompt }),
+          ...(profile.sttWordTimestamps && { wordTimestamps: true }),
         });
       },
       fallbackOpts,
@@ -161,6 +162,7 @@ export class AIClient {
       text: result.text,
       language: result.language,
       duration: result.duration,
+      words: result.words,
       provider: usedProvider,
       model: usedModel,
       fallbackUsed: attempts > 1,
@@ -404,8 +406,14 @@ export class AIClient {
       }
     }
 
-    // Cloud per-stage fallback
+    // Cloud per-stage fallback — overlap STT with LLM connection warmup
+    // Fire a lightweight /models probe to the LLM provider during STT to warm
+    // the TCP/TLS connection (saves ~100-300ms on cold connections).
+    const warmupPromise = gpuEndpoint
+      ? fetch(`${gpuEndpoint}/health`, { signal: AbortSignal.timeout(2000) }).catch(() => {})
+      : Promise.resolve();
     const stt = await this.transcribe(audio, profile);
+    await warmupPromise; // likely already done by now
     const userMessage = stt.text;
 
     const allMessages: ChatMessage[] = [

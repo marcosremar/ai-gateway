@@ -605,7 +605,7 @@ describe('TensordockClient', () => {
 
     it('throws not found for 404', async () => {
       fetchSpy.mockResolvedValueOnce(textResponse('not found', 404));
-      await expect(client.startInstance('vm-1', creds)).rejects.toThrow('não encontrada');
+      await expect(client.startInstance('vm-1', creds)).rejects.toThrow('not found');
     });
 
     it('falls back to v0 when v2 fails and authId present', async () => {

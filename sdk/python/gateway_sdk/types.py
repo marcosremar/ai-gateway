@@ -36,6 +36,7 @@ class TranscribeResponse:
     text: str
     used_gpu: bool
     detected_language: str = ""
+    avg_logprob: float = 0.0
 
 
 @dataclass
@@ -54,6 +55,90 @@ class EnsembleTranscribeResponse:
 class TranslateResponse:
     translated_text: str
     used_gpu: bool
+
+
+@dataclass
+class ChatCompletionResponse:
+    content: str
+    model: str
+    usage: dict | None = None
+
+
+@dataclass
+class ApiKeyEntry:
+    id: str
+    name: str
+    env_var: str
+    category: str  # "cloud" | "gpu"
+    configured: bool
+    masked: str = ""
+
+
+@dataclass
+class ApiKeysResponse:
+    keys: list[ApiKeyEntry]
+    saved: bool = False
+
+
+@dataclass
+class PipelineChainEntry:
+    provider: str
+    model: str
+    voice: str = ""
+
+
+@dataclass
+class ProviderProfile:
+    id: str
+    name: str
+    stt: list[PipelineChainEntry]
+    llm: list[PipelineChainEntry]
+    tts: list[PipelineChainEntry]
+
+
+@dataclass
+class ProviderConfigResponse:
+    profiles: list[ProviderProfile]
+    active_profile_id: str | None
+    pipeline_stt: list[PipelineChainEntry]
+    pipeline_llm: list[PipelineChainEntry]
+    pipeline_tts: list[PipelineChainEntry]
+    updated_at: int = 0
+
+
+@dataclass
+class CatalogModel:
+    id: str
+    name: str
+    description: str
+    provider_id: str
+    is_default: bool = False
+
+
+@dataclass
+class CatalogVoice:
+    id: str
+    name: str
+    provider_id: str
+    description: str = ""
+
+
+@dataclass
+class CatalogProvider:
+    id: str
+    name: str
+    description: str
+    available: bool
+    capabilities: list[str]
+
+
+@dataclass
+class CatalogResponse:
+    providers: list[CatalogProvider]
+    capabilities: dict  # raw dict with stt/llm/tts keys containing models/voices
+    gpu: dict  # raw dict with available, endpoint, warmth info
+    defaults: dict  # raw dict with stt/llm/tts default provider+model
+    languages: list[dict]  # list of {code, name}
 
 
 @dataclass

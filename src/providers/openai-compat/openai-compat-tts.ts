@@ -6,6 +6,7 @@
 
 import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, TTSAudioFormat, TTSProvider, TTSRequest, TTSResponse, VoiceInfo } from '../types';
+import { getOrCreateClient } from './client-cache';
 
 const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
   mp3: 'audio/mpeg',
@@ -49,7 +50,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
     if (!this.client) {
       const apiKey = process.env[this.config.envKey];
       if (!apiKey) throw new Error(`[${this.config.providerId} TTS] ${this.config.envKey} is not set`);
-      this.client = new OpenAI({ apiKey, baseURL: this.config.baseURL });
+      this.client = getOrCreateClient(this.config.baseURL, apiKey);
     }
     return this.client;
   }

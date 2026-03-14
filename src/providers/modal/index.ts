@@ -1,30 +1,27 @@
 /**
- * Modal TTS Provider (MOSS-TTS-Realtime)
+ * Modal TTS Provider (Qwen3-TTS)
  *
- * Uses the MOSS-TTS-Realtime model deployed on Modal.com.
- * Supports 20 languages and voice cloning with reference audio.
+ * Uses Qwen3-TTS deployed on Modal.com serverless GPU (L40S).
+ * OpenAI-compatible endpoint — POST /v1/audio/speech
  * No API key required — public endpoint.
  *
- * Voice ID format: moss-{lang}  e.g. "moss-pt", "moss-en"
- * Endpoint: POST /api/text  { text, language, temperature, top_p, top_k, reference_audio? }
- * Returns:  { audio (base64 WAV), sample_rate, duration_seconds, generation_time }
+ * Valid voices: aiden, dylan, eric, ono_anna, ryan, serena, sohee, uncle_fu, vivian
+ * Endpoint: POST /v1/audio/speech  { model, input, voice, response_format }
+ * Returns:  WAV audio bytes
  */
 
 import type { ProviderId, ModelInfo, TTSProvider, TTSRequest, TTSResponse, VoiceInfo } from '../types';
 
 const DEFAULT_ENDPOINT =
-  'https://marcosremar--moss-tts-realtime-mossttsrealtime-serve.modal.run';
+  'https://marcosremar--babelcast-tts-serve.modal.run';
 
-function parseVoiceId(voiceId: string): { language: string } {
-  const match = voiceId.match(/^moss-([a-z]{2})/);
-  return { language: match?.[1] || 'pt' };
-}
+const VALID_VOICES = ['aiden', 'dylan', 'eric', 'ono_anna', 'ryan', 'serena', 'sohee', 'uncle_fu', 'vivian'];
 
 export const MODAL_TTS_MODELS: ModelInfo[] = [
   {
-    id: 'moss-tts-realtime',
-    name: 'MOSS-TTS-Realtime 1.7B',
-    description: 'MOSS-TTS-Realtime - 20 idiomas, voice cloning, alta qualidade',
+    id: 'qwen3-tts',
+    name: 'Qwen3-TTS 0.6B',
+    description: 'Qwen3-TTS CustomVoice — high quality multilingual TTS on Modal GPU',
     capability: 'tts',
     isDefault: true,
   },
@@ -35,40 +32,40 @@ export class ModalTTSProvider implements TTSProvider {
   private endpoint: string;
 
   constructor(endpoint?: string) {
-    this.endpoint = endpoint || process.env.MOSS_TTS_URL || DEFAULT_ENDPOINT;
+    this.endpoint = endpoint || process.env.MODAL_TTS_URL || DEFAULT_ENDPOINT;
   }
 
   getModels(): ModelInfo[] { return MODAL_TTS_MODELS; }
-  getVoices(): VoiceInfo[] { return []; }
+  getVoices(): VoiceInfo[] {
+    return VALID_VOICES.map(v => ({ id: v, name: v }));
+  }
   isConfigured(): boolean { return true; }
 
   async synthesize(request: TTSRequest): Promise<TTSResponse> {
-    const { language } = parseVoiceId(request.voice ?? 'moss-pt');
+    const voice = VALID_VOICES.includes(request.voice ?? '') ? request.voice! : 'serena';
 
-    const res = await fetch(`${this.endpoint}/api/text`, {
+    const res = await fetch(`${this.endpoint}/v1/audio/speech`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text: request.input,
-        language,
-        temperature: 0.8,
-        top_p: 0.6,
-        top_k: 30,
-        ...(request.referenceAudio && { reference_audio: request.referenceAudio }),
+        model: 'qwen3-tts',
+        input: request.input,
+        voice,
+        response_format: 'wav',
       }),
     });
 
     if (!res.ok) {
       const body = await res.text();
       throw Object.assign(
-        new Error(`MOSS-TTS error (${res.status}): ${body}`),
+        new Error(`Modal TTS error (${res.status}): ${body}`),
         { status: res.status },
       );
     }
 
-    const data = await res.json();
+    const arrayBuf = await res.arrayBuffer();
     return {
-      audio: Buffer.from(data.audio, 'base64'),
+      audio: Buffer.from(arrayBuf),
       contentType: 'audio/wav',
     };
   }

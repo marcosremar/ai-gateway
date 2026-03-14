@@ -241,54 +241,32 @@ export const KOKORO_VOICE_CATALOG: ProviderVoiceCatalog = {
 // ---------------------------------------------------------------------------
 export const QWEN3_VOICE_CATALOG: ProviderVoiceCatalog = {
   providerId: 'qwen3',
-  providerName: 'Qwen3 TTS',
+  providerName: 'Qwen3 TTS (CustomVoice)',
   models: [
     {
       id: 'qwen3-tts',
-      name: 'Qwen3 TTS 0.6B',
+      name: 'Qwen3 TTS CustomVoice',
       voices: [
-        // Default
-        { id: 'default', name: 'Padrao', description: 'Voz padrao do modelo', gender: 'female', language: 'multi', languageName: 'Multilingue' },
+        // Official Qwen3-TTS preset speakers (from HuggingFace Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice)
+        // All 9 speakers can speak any of the 10 supported languages (zh, en, ja, ko, de, fr, ru, pt, es, it)
+        // but best quality is in their native language.
 
-        // Chinese voices
-        { id: 'zhongwen_nv1', name: 'Zhongwen Nv1', description: 'Chines feminino - Voz 1', gender: 'female', language: 'zh', languageName: 'Chines' },
-        { id: 'zhongwen_nv2', name: 'Zhongwen Nv2', description: 'Chines feminino - Voz 2', gender: 'female', language: 'zh', languageName: 'Chines' },
-        { id: 'zhongwen_nan1', name: 'Zhongwen Nan1', description: 'Chines masculino - Voz 1', gender: 'male', language: 'zh', languageName: 'Chines' },
-        { id: 'zhongwen_nan2', name: 'Zhongwen Nan2', description: 'Chines masculino - Voz 2', gender: 'male', language: 'zh', languageName: 'Chines' },
+        // Chinese native speakers
+        { id: 'Vivian', name: 'Vivian', description: 'Chinesa feminina — Voz brilhante e ligeiramente cortante', gender: 'female', language: 'zh', languageName: 'Chines' },
+        { id: 'Serena', name: 'Serena', description: 'Chinesa feminina — Voz calorosa e suave', gender: 'female', language: 'zh', languageName: 'Chines' },
+        { id: 'Uncle_Fu', name: 'Uncle Fu', description: 'Chines masculino — Voz experiente, grave e melosa', gender: 'male', language: 'zh', languageName: 'Chines' },
+        { id: 'Dylan', name: 'Dylan', description: 'Chines masculino (Beijing) — Voz jovem, clara e natural', gender: 'male', language: 'zh', languageName: 'Chines' },
+        { id: 'Eric', name: 'Eric', description: 'Chines masculino (Sichuan) — Voz animada, ligeiramente rouca', gender: 'male', language: 'zh', languageName: 'Chines' },
 
-        // English voices
-        { id: 'english_female1', name: 'English Female 1', description: 'Ingles feminino - Voz 1', gender: 'female', language: 'en', languageName: 'Ingles' },
-        { id: 'english_female2', name: 'English Female 2', description: 'Ingles feminino - Voz 2', gender: 'female', language: 'en', languageName: 'Ingles' },
-        { id: 'english_male1', name: 'English Male 1', description: 'Ingles masculino - Voz 1', gender: 'male', language: 'en', languageName: 'Ingles' },
-        { id: 'english_male2', name: 'English Male 2', description: 'Ingles masculino - Voz 2', gender: 'male', language: 'en', languageName: 'Ingles' },
+        // English native speakers
+        { id: 'Ryan', name: 'Ryan', description: 'Ingles masculino — Voz dinamica com ritmo forte', gender: 'male', language: 'en', languageName: 'Ingles' },
+        { id: 'Aiden', name: 'Aiden', description: 'Ingles masculino (US) — Voz ensolarada com medio claro', gender: 'male', language: 'en', languageName: 'Ingles' },
 
-        // Japanese voices
-        { id: 'japanese_female', name: 'Japanese Female', description: 'Japones feminino', gender: 'female', language: 'ja', languageName: 'Japones' },
-        { id: 'japanese_male', name: 'Japanese Male', description: 'Japones masculino', gender: 'male', language: 'ja', languageName: 'Japones' },
+        // Japanese native speaker
+        { id: 'Ono_Anna', name: 'Ono Anna', description: 'Japonesa feminina — Voz brincalhona, leve e agil', gender: 'female', language: 'ja', languageName: 'Japones' },
 
-        // Korean voices
-        { id: 'korean_female', name: 'Korean Female', description: 'Coreano feminino', gender: 'female', language: 'ko', languageName: 'Coreano' },
-        { id: 'korean_male', name: 'Korean Male', description: 'Coreano masculino', gender: 'male', language: 'ko', languageName: 'Coreano' },
-
-        // Portuguese voices
-        { id: 'portuguese_female', name: 'Portuguese Female', description: 'Portugues feminino', gender: 'female', language: 'pt', languageName: 'Portugues' },
-        { id: 'portuguese_male', name: 'Portuguese Male', description: 'Portugues masculino', gender: 'male', language: 'pt', languageName: 'Portugues' },
-
-        // Spanish voices
-        { id: 'spanish_female', name: 'Spanish Female', description: 'Espanhol feminino', gender: 'female', language: 'es', languageName: 'Espanhol' },
-        { id: 'spanish_male', name: 'Spanish Male', description: 'Espanhol masculino', gender: 'male', language: 'es', languageName: 'Espanhol' },
-
-        // French voices
-        { id: 'french_female', name: 'French Female', description: 'Frances feminino', gender: 'female', language: 'fr', languageName: 'Frances' },
-        { id: 'french_male', name: 'French Male', description: 'Frances masculino', gender: 'male', language: 'fr', languageName: 'Frances' },
-
-        // German voices
-        { id: 'german_female', name: 'German Female', description: 'Alemao feminino', gender: 'female', language: 'de', languageName: 'Alemao' },
-        { id: 'german_male', name: 'German Male', description: 'Alemao masculino', gender: 'male', language: 'de', languageName: 'Alemao' },
-
-        // Italian voices
-        { id: 'italian_female', name: 'Italian Female', description: 'Italiano feminino', gender: 'female', language: 'it', languageName: 'Italiano' },
-        { id: 'italian_male', name: 'Italian Male', description: 'Italiano masculino', gender: 'male', language: 'it', languageName: 'Italiano' },
+        // Korean native speaker
+        { id: 'Sohee', name: 'Sohee', description: 'Coreana feminina — Voz calorosa com emocao rica', gender: 'female', language: 'ko', languageName: 'Coreano' },
       ],
     },
   ],

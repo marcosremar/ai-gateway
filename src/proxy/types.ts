@@ -34,6 +34,8 @@ export interface ProxyConfig {
   rateLimit?: { rpm: number };
   hostname?: string;           // default '0.0.0.0'
   customRoutes?: CustomRoute[];
+  /** Directory of static files to serve (e.g. Next.js `out/` export). Falls back for non-API paths. */
+  staticDir?: string;
 }
 
 export interface ProxyRoute {

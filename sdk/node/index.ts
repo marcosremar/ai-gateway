@@ -30,6 +30,8 @@ import { DEFAULT_TIMEOUTS, DEFAULT_RETRY, DEFAULT_CIRCUIT_BREAKER } from './type
 export { CircuitBreaker, CircuitOpenError } from './circuit-breaker';
 export type { CircuitState } from './circuit-breaker';
 export * from './types';
+export { AudioSegmenter, VAD_WINDOW_SAMPLES } from './audio';
+export type { AudioSegmenterConfig, AudioSegment } from './audio';
 
 /** Thrown when the gateway returns an HTTP error. */
 export class GatewayHttpError extends Error {

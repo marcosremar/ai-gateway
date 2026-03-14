@@ -28,5 +28,5 @@ export const fireworksLLM = new OpenAICompatLLMProvider({
   providerId: 'fireworks',
   baseURL: BASE_URL,
   envKey: ENV_KEY,
-  defaultModel: FIREWORKS_LLM_MODELS[0]?.id ?? 'accounts/fireworks/models/llama-v3p1-70b-instruct',
+  defaultModel: FIREWORKS_LLM_MODELS[0]?.id ?? 'accounts/fireworks/models/llama-v3p3-70b-instruct',
 });

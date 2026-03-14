@@ -224,10 +224,42 @@ The gateway's STT pipeline uses Whisper's `initial_prompt` parameter to anchor t
 ### Guidelines
 
 - **224-token limit** (~170 words) — keep prompts compact
-- **Language must match audio** — wrong-language prompts degrade WER by ~19%
-- **Sentence-style prompts outperform keyword lists** — use natural prose, not comma-separated terms
+- **Language must match audio** — wrong-language prompts degrade WER by ~19% ([arXiv 2406.05806](https://arxiv.org/abs/2406.05806))
+- **Sentence-style prompts outperform keyword lists** — use natural flowing prose, not comma-separated terms ([arXiv 2406.05806](https://arxiv.org/abs/2406.05806))
+- **Vocabulary-dense prompts** — include speaker name, technical terms, and domain proper nouns; generic/register-only prompts show no gain ([arXiv 2406.05806](https://arxiv.org/abs/2406.05806), confirmed in our benchmarks)
+- **Avoid verbatim transcript overlap** — if prompt contains words that appear in the talk, Whisper treats them as "already transcribed" and may miss them in actual audio (observed in our benchmarks)
 - **Most recent tokens** get highest attention weight — put the most relevant context last
 - **Static prompts plateau quickly** — rolling context + LLM expansion gives the best combined result
+
+### Benchmark Results — TEDx French (4 videos, Groq Whisper-large-v3-turbo)
+
+Ground truth: professional human subtitles (TEDx manual captions). WER-sem = WER after LLM normalization (removes style differences: numbers, abbreviations, punctuation).
+
+| Video | Category | WER-sem (no prompt) | WER-sem (rolling + seed) | Δ |
+|-------|----------|--------------------:|-------------------------:|--:|
+| Les biais cognitifs | Psychology | 28.5% | 20.1% | **−8.4pp ✅** |
+| Le désir, moteur de nos vies | Philosophy | 23.3% | 17.3% | **−6.0pp ✅** |
+| Étienne Klein — Contre la montre | Physics/Philosophy | 15.3% | 16.6% | +1.3pp ≈ |
+| Pourquoi sommes-nous fascinés par les fictions | Humanities | 13.7% | 19.1% | +5.4pp ⚠️ |
+| **Average** | | **20.2%** | **18.3%** | **−1.9pp** |
+
+**Key findings:**
+
+1. **Rolling context alone is the most impactful technique.** Without it, WER is ~5pp higher on average. It resolves cross-boundary phrases and maintains spelling consistency chunk-to-chunk.
+
+2. **Seed context (LLM-expanded title) helps domain-specific talks significantly** — Psychology (−8.4pp) and Philosophy (−6.0pp) benefit because the prompt anchors domain vocabulary (e.g. *biais cognitif*, *heuristique*, *Schopenhauer*).
+
+3. **Seed context does NOT help — or hurts — general-vocabulary talks** (Klein, Fictions). Two mechanisms:
+   - **Vocabulary overlap**: if the prompt contains words that appear verbatim in the talk, Whisper treats them as "already transcribed" and may miss or distort them in the actual audio.
+   - **Floor effect**: talks already well-transcribed (WER ~15%) have little room to improve; any prompt competes with the rolling context for the 224-token window.
+
+4. **Prompt style matters**: vocabulary-dense prompts outperform register-only prompts for technical content. Register-only prompts ("Conférence TEDx en français...") are neutral at best.
+
+5. **Raw WER increases slightly with seed prompts** (~1-2pp) even when WER-sem improves — the prompt shifts Whisper's output style (more formal, different punctuation), which doesn't match the reference literally but is semantically correct.
+
+**Practical rule for the "Session title" field:**
+- Fill it for medical, legal, academic, or technical meetings → significant gains
+- Leave it empty for general conversation, casual talks, or pop-culture content → rolling context is sufficient
 
 ### References
 

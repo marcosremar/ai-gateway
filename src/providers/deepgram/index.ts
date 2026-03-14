@@ -5,9 +5,18 @@
 
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse } from '../types';
 
+
+interface DeepgramWord {
+  word: string;
+  start: number;
+  end: number;
+  confidence: number;
+}
+
 interface DeepgramAlternative {
   transcript: string;
   confidence: number;
+  words?: DeepgramWord[];
 }
 
 interface DeepgramResponse {
@@ -36,6 +45,7 @@ export class DeepgramSTTProvider implements STTProvider {
     const model = request.model || 'nova-3';
     const params = new URLSearchParams({ model, smart_format: 'true' });
     if (request.language) params.set('language', request.language);
+    if (request.wordTimestamps) params.set('punctuate', 'true');
 
     const audioBuffer = request.audio instanceof Blob
       ? Buffer.from(await request.audio.arrayBuffer())
@@ -57,8 +67,20 @@ export class DeepgramSTTProvider implements STTProvider {
     }
 
     const data = await res.json() as DeepgramResponse;
-    const transcript = data.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? '';
-    return { text: transcript, raw: data };
+    const alt = data.results?.channels?.[0]?.alternatives?.[0];
+    const transcript = alt?.transcript ?? '';
+    const response: STTResponse = { text: transcript, raw: data };
+
+    // Deepgram always returns word-level timestamps in alternatives
+    if (alt?.words && alt.words.length > 0) {
+      response.words = alt.words.map((w) => ({
+        word: w.word,
+        start: w.start,
+        end: w.end,
+      }));
+    }
+
+    return response;
   }
 }
 

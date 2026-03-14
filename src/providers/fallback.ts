@@ -145,6 +145,29 @@ export class CooldownTracker {
   getState(): Map<string, CooldownState> {
     return this.map;
   }
+
+  /** Serialize active cooldowns to a plain object for persistence. */
+  toJSON(): Record<string, CooldownState> {
+    const now = Date.now();
+    const result: Record<string, CooldownState> = {};
+    for (const [key, state] of this.map) {
+      // Only persist entries that are still cooling down
+      if (state.coolUntil > now) {
+        result[key] = state;
+      }
+    }
+    return result;
+  }
+
+  /** Restore cooldowns from a previously persisted object. */
+  fromJSON(data: Record<string, CooldownState>): void {
+    const now = Date.now();
+    for (const [key, state] of Object.entries(data)) {
+      if (state && typeof state.coolUntil === 'number' && state.coolUntil > now) {
+        this.map.set(key, state);
+      }
+    }
+  }
 }
 
 /** Default module-level instance for backward compat */
@@ -175,6 +198,9 @@ export function isTimeoutError(err: unknown): boolean {
 /** HTTP status codes that are retryable (transient server errors + rate limit + auth) */
 const RETRYABLE_STATUSES = new Set([401, 402, 403, 429, 500, 502, 503, 504]);
 
+/** Error codes that should be treated as retryable even on 400 status (provider-specific issues) */
+const RETRYABLE_ERROR_CODES = new Set(['model_terms_required', 'model_not_found', 'model_decommissioned']);
+
 /**
  * HTTP status codes that are retryable by switching provider but not by retrying.
  * 401/402/403: auth/billing errors — each provider has its own API key, so failure
@@ -201,6 +227,9 @@ export function isRetryableError(err: unknown): boolean {
   const e = err as Record<string, unknown>;
   if (isTimeoutError(err)) return true;
   if (isContextWindowError(err)) return true; // context errors are retryable (next provider)
+  // Provider-specific 400 errors that should trigger fallback (e.g. model terms not accepted)
+  const code = typeof e.code === 'string' ? e.code : '';
+  if (code && RETRYABLE_ERROR_CODES.has(code)) return true;
   const status = extractStatus(err);
   if (status === null) return true;
   return RETRYABLE_STATUSES.has(status);
