@@ -20,6 +20,11 @@ const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
 export class OpenAITTSProvider implements TTSProvider {
   readonly providerId: ProviderId = 'openai';
   private client: OpenAI | null = null;
+  private readonly voiceIds: Set<string>;
+
+  constructor() {
+    this.voiceIds = new Set(OPENAI_VOICES.map(v => v.id));
+  }
 
   private getClient(): OpenAI {
     if (!this.client) {
@@ -28,6 +33,12 @@ export class OpenAITTSProvider implements TTSProvider {
       this.client = new OpenAI({ apiKey });
     }
     return this.client;
+  }
+
+  /** Validate voice against known OpenAI voices; fallback to 'coral' for unknown names. */
+  private resolveVoice(requested?: string): string {
+    if (requested && this.voiceIds.has(requested)) return requested;
+    return 'coral';
   }
 
   withApiKey(apiKey: string): OpenAITTSProvider {
@@ -47,7 +58,7 @@ export class OpenAITTSProvider implements TTSProvider {
     const params: OpenAI.Audio.SpeechCreateParams = {
       model: request.model || 'gpt-4o-mini-tts-2025-03-20',
       input: request.input,
-      voice: request.voice as OpenAI.Audio.SpeechCreateParams['voice'] || 'coral',
+      voice: this.resolveVoice(request.voice) as OpenAI.Audio.SpeechCreateParams['voice'],
       response_format: format as OpenAI.Audio.SpeechCreateParams['response_format'],
       ...(request.speed && { speed: request.speed }),
       ...(request.instructions && { instructions: request.instructions }),
@@ -65,7 +76,7 @@ export class OpenAITTSProvider implements TTSProvider {
     const params: OpenAI.Audio.SpeechCreateParams = {
       model: request.model || 'gpt-4o-mini-tts-2025-03-20',
       input: request.input,
-      voice: request.voice as OpenAI.Audio.SpeechCreateParams['voice'] || 'coral',
+      voice: this.resolveVoice(request.voice) as OpenAI.Audio.SpeechCreateParams['voice'],
       response_format: format as OpenAI.Audio.SpeechCreateParams['response_format'],
       ...(request.speed && { speed: request.speed }),
       ...(request.instructions && { instructions: request.instructions }),

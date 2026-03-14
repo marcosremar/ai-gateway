@@ -261,6 +261,9 @@ export class RunpodClient extends AbstractGpuProvider {
 
     const requestedSpot = basePodConfig.interruptible === true;
 
+    // Track per-GPU failure reasons for diagnostics
+    const gpuFailures: Array<{ gpu: string; status: number; reason: string }> = [];
+
     for (const gpuType of gpuTypesToTry) {
       let lastErrText = '';
       let success = false;
@@ -296,6 +299,14 @@ export class RunpodClient extends AbstractGpuProvider {
         const noSpotPrice = lastErrText.includes('No spot price found') || lastErrText.includes('no spot price');
         const unavailable = lastErrText.includes('no instances') || lastErrText.includes('unavailable')
           || lastErrText.includes('no longer any instances') || lastErrText.includes('instances available');
+        const balanceTooLow = lastErrText.includes('balance is too low') || lastErrText.includes('add funds');
+
+        // Insufficient balance — no point retrying or trying other GPUs
+        if (balanceTooLow) {
+          this.log.error(`[runpod] Account balance too low — cannot create any pods`);
+          gpuFailures.push({ gpu: gpuType, status: res.status, reason: `balance too low` });
+          throw new Error(`RunPod account balance too low to rent a pod. Please add funds.`);
+        }
 
         // If spot was requested but no spot price exists, auto-fallback to on-demand for this GPU type
         if (noSpotPrice && basePodConfig.interruptible) {
@@ -322,35 +333,50 @@ export class RunpodClient extends AbstractGpuProvider {
             return { instanceId: podId, instanceName: podName, endpoint, status: 'CREATING', gpuType };
           }
           const odErrText = await odRes.text().catch(() => '');
+          const odBalanceLow = odErrText.includes('balance is too low') || odErrText.includes('add funds');
+          if (odBalanceLow) {
+            this.log.error(`[runpod] Account balance too low — cannot create any pods`);
+            gpuFailures.push({ gpu: gpuType, status: odRes.status, reason: `balance too low` });
+            throw new Error(`RunPod account balance too low to rent a pod. Please add funds.`);
+          }
           this.log.log(`[runpod] On-demand fallback also failed for ${gpuType}: ${odErrText.substring(0, 120)}`);
+          gpuFailures.push({ gpu: gpuType, status: odRes.status, reason: `spot→on-demand fallback: ${odErrText.substring(0, 150)}` });
           break; // Move to next GPU type
         }
 
         if (unavailable || noSpotPrice) {
           this.log.log(`[runpod] ${gpuType} unavailable (${lastErrText.substring(0, 120)}), trying next GPU type...`);
+          gpuFailures.push({ gpu: gpuType, status: res.status, reason: `unavailable: ${lastErrText.substring(0, 150)}` });
           success = false;
           break; // Don't retry unavailable — no point, move to next GPU type
         }
 
-        // Transient errors (5xx, timeout) — retry
+        // Transient errors (5xx, timeout) — retry only if body doesn't reveal a permanent issue
         const isTransient = res.status >= 500 || res.status === 429 || res.status === 0;
-        if (isTransient && attempt < TRANSIENT_RETRY_MAX) {
+        const bodyRevealsPermanent = lastErrText.includes('balance') || lastErrText.includes('funds')
+          || lastErrText.includes('unauthorized') || lastErrText.includes('forbidden');
+        if (isTransient && !bodyRevealsPermanent && attempt < TRANSIENT_RETRY_MAX) {
           this.log.warn(`[runpod] Create pod transient error HTTP ${res.status} — will retry`);
           continue;
         }
 
         this.log.warn(`[runpod] Create pod failed for ${gpuType}: HTTP ${res.status} ${lastErrText.substring(0, 1000)}`);
+        gpuFailures.push({ gpu: gpuType, status: res.status, reason: `HTTP ${res.status}: ${lastErrText.substring(0, 150)}` });
         break;
       }
 
       if (success) break; // shouldn't reach here (returns inside loop), but safety
     }
 
+    // Log detailed per-GPU failure summary for diagnostics
+    const failSummary = gpuFailures.map(f => `${f.gpu} → ${f.reason}`).join(' | ');
+    this.log.error(`[runpod] All ${gpuTypesToTry.length} GPU types exhausted. Failures: ${failSummary}`);
+
     this.emitError({
-      operation: 'createInstance', message: 'All GPU types exhausted on RunPod',
+      operation: 'createInstance', message: `All GPU types exhausted on RunPod: ${failSummary}`,
       errorCode: 'NO_GPU_AVAILABLE', retryable: false,
     });
-    throw new Error('No GPU types available on RunPod (all exhausted)');
+    throw new Error(`No GPU types available on RunPod (all exhausted). Tried ${gpuTypesToTry.length} types: ${failSummary}`);
   }
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
@@ -482,7 +508,8 @@ export class RunpodClient extends AbstractGpuProvider {
       }
 
       return costPerHr;
-    } catch {
+    } catch (e) {
+      this.log.debug(`[runpod] getInstanceCost(${instanceId}) failed: ${this.errMsg(e)}`);
       return null;
     }
   }
@@ -544,6 +571,26 @@ export class RunpodClient extends AbstractGpuProvider {
     }
   }
 
+  /** Check account balance via RunPod GraphQL API. Returns balance in USD or null on failure. */
+  async checkBalance(credentials: ProviderCredentials): Promise<{ balance: number } | null> {
+    const { apiKey } = credentials;
+    try {
+      await this.rateLimiter.wait();
+      const res = await this.fetchRaw('https://api.runpod.io/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ query: '{ myself { currentSpendPerHr creditBalance } }' }),
+      }, 5_000);
+      if (!res.ok) return null;
+      const data = (await res.json()) as { data?: { myself?: { creditBalance?: number; currentSpendPerHr?: number } } };
+      const balance = data?.data?.myself?.creditBalance;
+      return typeof balance === 'number' ? { balance } : null;
+    } catch (e) {
+      this.log.debug(`[runpod] checkBalance failed: ${e instanceof Error ? e.message : e}`);
+      return null;
+    }
+  }
+
   /** List available GPU types with real-time pricing from RunPod GraphQL API. */
   async listOffers(options: ListOffersOptions, credentials: ProviderCredentials): Promise<GpuOffer[]> {
     const { apiKey } = credentials;
@@ -584,8 +631,8 @@ export class RunpodClient extends AbstractGpuProvider {
 
         offers.push({
           provider: 'runpod',
-          gpuType: displayName.replace(/\s+/g, '').replace(/^NVIDIA/i, ''),
-          gpuName: displayName,
+          gpuType: fullId,    // Full RunPod API name (e.g. "NVIDIA RTX A5000") — matches allowlist and createPod
+          gpuName: fullId,    // Use fullId so it matches ALLOWED_GPU_TYPES format
           available,
           pricePerHr: communityPrice,
           spotPricePerHr: communitySpotPrice,

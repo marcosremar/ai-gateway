@@ -18,6 +18,8 @@ export interface GpuInstance {
   sshHost?: string;
   /** SSH port for fallback health checks */
   sshPort?: number;
+  /** Provider-specific metadata for host reputation tracking */
+  providerMeta?: Record<string, unknown>;
 }
 
 export interface InstanceSpec {
@@ -70,6 +72,30 @@ export interface GpuOffer {
   region: string;
   vram: number;
   offerId?: string;
+
+  // Extended fields (optional — not all providers populate these)
+  /** Human-readable geolocation, e.g. "France, FR" or "California, US" */
+  geolocation?: string;
+  /** Host reliability score (0–1) */
+  reliability?: number;
+  /** Download speed in Mbps */
+  inetDown?: number;
+  /** Upload speed in Mbps */
+  inetUp?: number;
+  /** Provider-specific host identifier */
+  hostId?: string;
+  /** CPU model name, e.g. "AMD EPYC 7453" */
+  cpuName?: string;
+  /** Effective CPU cores */
+  cpuCores?: number;
+  /** Total system RAM in GB */
+  ramGb?: number;
+  /** Available disk space in GB */
+  diskGb?: number;
+  /** Number of GPUs in this offer */
+  numGpus?: number;
+  /** Total GPU FLOPS */
+  totalFlops?: number;
 }
 
 export interface ListOffersOptions {

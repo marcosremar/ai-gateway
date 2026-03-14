@@ -112,6 +112,19 @@ export class ProviderCooldownTracker {
     this.persist();
   }
 
+  /** Record a billing/balance failure — longer cooldown (1h) since adding funds is manual. */
+  recordBillingFailure(name: string): void {
+    const BILLING_COOLDOWN_MS = 60 * 60_000; // 1 hour
+    const existing = this.cooldowns.get(name);
+    const failCount = (existing?.failCount ?? 0) + 1;
+    this.cooldowns.set(name, {
+      failedAt: Date.now(),
+      cooldownUntilMs: Date.now() + BILLING_COOLDOWN_MS,
+      failCount,
+    });
+    this.persist();
+  }
+
   recordSuccess(name: string): boolean {
     const had = this.cooldowns.has(name);
     this.cooldowns.delete(name);

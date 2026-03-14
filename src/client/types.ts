@@ -89,6 +89,7 @@ export interface AIProfile {
   // STT options
   language?: string;
   sttPrompt?: string;  // Previous transcription context (Whisper initial_prompt)
+  sttWordTimestamps?: boolean;  // Request per-word timestamps from STT provider
 
   // Image options
   imageWidth?: number;
@@ -145,6 +146,7 @@ export interface TranscribeResult extends BaseResult {
   text: string;
   language?: string;
   duration?: number;
+  words?: Array<{ word: string; start: number; end: number }>;
 }
 
 export interface ChatResult extends BaseResult {

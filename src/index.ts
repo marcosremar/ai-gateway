@@ -237,6 +237,10 @@ export { OLLAMA_STT_MODELS, OLLAMA_LLM_MODELS } from './providers/ollama';
 export { openrouterLLM, openrouterImage, OpenRouterImageProvider } from './providers/openrouter';
 export { OPENROUTER_LLM_MODELS, OPENROUTER_IMAGE_MODELS } from './providers/openrouter';
 
+// ── Cloud Provider Health Probes ───────────────────────────────────────────
+export { probeCloudProvider, probeAllCloudProviders } from './providers/cloud-health';
+export type { CloudProbeResult } from './providers/cloud-health';
+
 // ── Provider Errors ────────────────────────────────────────────────────────
 export { PROVIDER_LABELS, BILLING_URLS, buildProviderError, extractErrorStatus, extractErrorMessage, CreditExhaustedError } from './providers/errors';
 
@@ -386,6 +390,10 @@ export { ResponseCache } from './caching';
 export { withCache } from './caching';
 export type { WithCacheOptions, CacheConfig, CacheStats } from './caching';
 
+// ── Streaming STT Router ─────────────────────────────────────────────
+export { StreamingSTTRouter, StreamingSTTBackend } from './streaming-stt';
+export type { StreamingSTTConfig, StreamingSTTProvider, StreamingSTTStatus, StreamingSTTEvent } from './streaming-stt';
+
 // ── OpenAI-Compatible Proxy ──────────────────────────────────────────
 export { createProxyServer, startProxy } from './proxy';
 export { RateLimiter } from './proxy';
@@ -404,3 +412,7 @@ export {
   type DeployOptions as SDKDeployOptions,
   type DeployResponse as SDKDeployResponse,
 } from './sdk';
+
+// ── Language Detection ─────────────────────────────────────────────────────
+export { detectLanguage, detectLanguageWithSwap, SUPPORTED_LANGUAGES } from './language-detect';
+export type { LanguageDetectResult } from './language-detect';

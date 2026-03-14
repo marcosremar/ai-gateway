@@ -58,6 +58,26 @@ export class CreditBlockTracker {
   get size(): number {
     return this.blocks.size;
   }
+
+  /** Serialize active blocks to a plain object for persistence. */
+  toJSON(): Record<string, number> {
+    const now = Date.now();
+    const result: Record<string, number> = {};
+    for (const [key, until] of this.blocks) {
+      if (until > now) result[key] = until;
+    }
+    return result;
+  }
+
+  /** Restore blocks from a previously persisted object. */
+  fromJSON(data: Record<string, number>): void {
+    const now = Date.now();
+    for (const [key, until] of Object.entries(data)) {
+      if (typeof until === 'number' && until > now) {
+        this.blocks.set(key, until);
+      }
+    }
+  }
 }
 
 /** Default module-level singleton */

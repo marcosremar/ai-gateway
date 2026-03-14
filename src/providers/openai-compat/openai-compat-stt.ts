@@ -7,6 +7,7 @@
 import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse } from '../types';
 import { prepareAudioFile } from './audio-utils';
+import { getOrCreateClient } from './client-cache';
 
 export interface OpenAICompatSTTConfig {
   providerId: ProviderId;
@@ -32,7 +33,7 @@ export class OpenAICompatSTTProvider implements STTProvider {
     if (!this.client) {
       const apiKey = process.env[this.config.envKey];
       if (!apiKey) throw new Error(`[${this.config.providerId} STT] ${this.config.envKey} is not set`);
-      this.client = new OpenAI({ apiKey, baseURL: this.config.baseURL });
+      this.client = getOrCreateClient(this.config.baseURL, apiKey);
     }
     return this.client;
   }
@@ -57,7 +58,11 @@ export class OpenAICompatSTTProvider implements STTProvider {
       ...(request.language && { language: request.language }),
       ...(request.prompt && { prompt: request.prompt }),
       ...(request.temperature !== undefined && { temperature: request.temperature }),
-      response_format: request.responseFormat === 'text' ? 'text' : (this.config.defaultResponseFormat ?? 'verbose_json'),
+      response_format: request.responseFormat === 'text' ? 'text'
+        : (request.wordTimestamps && this.config.defaultResponseFormat !== 'json')
+          ? 'verbose_json'
+          : (this.config.defaultResponseFormat ?? 'verbose_json'),
+      ...(request.wordTimestamps && this.config.defaultResponseFormat !== 'json' && { timestamp_granularities: ['word'] }),
     };
 
     const transcription = await client.audio.transcriptions.create(params);

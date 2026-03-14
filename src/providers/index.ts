@@ -94,8 +94,11 @@ export { openaiImage, OpenAIImageProvider } from './openai/openai-image';
 export { fireworksSTT, fireworksLLM, fireworksImage, FireworksImageProvider } from './fireworks';
 export { FIREWORKS_STT_MODELS, FIREWORKS_LLM_MODELS, FIREWORKS_IMAGE_MODELS } from './fireworks';
 
-// ── Modal (MOSS-TTS) ──────────────────────────────────────────────────────
+// ── Modal (Qwen3-TTS — primary) ──────────────────────────────────────────
 export { ModalTTSProvider, modalTTS, MODAL_TTS_MODELS } from './modal';
+
+// ── Modal (MOSS-TTS-Realtime — alternative) ──────────────────────────────
+export { ModalMossTTSProvider, modalMossTTS, MODAL_MOSS_TTS_MODELS } from './modal-moss';
 
 // ── Self-Hosted ───────────────────────────────────────────────────────────
 export { SelfHostedSTTProvider, SelfHostedTTSProvider, SelfHostedLLMProvider } from './self-hosted/self-hosted-provider';

@@ -17,6 +17,7 @@ export interface GatewayConfig {
     stt?: number;
     translate?: number;
     pipeline?: number;
+    tts?: number;
     health?: number;
     deploy?: number;
   };
@@ -49,6 +50,35 @@ export interface PipelineOptions {
   source?: string;
   target?: string;
   speaker?: string;
+}
+
+export interface GenerateAudioOptions {
+  /** Voice/speaker name (default: "Ryan"). */
+  speaker?: string;
+  /** Language name, e.g. "English", "French" (default: "English"). */
+  language?: string;
+  /** Playback speed multiplier, e.g. 0.8 (slower) or 1.5 (faster). Default: 1.0. */
+  speed?: number;
+}
+
+export interface GenerateAudioResponse {
+  /** Raw WAV audio bytes. */
+  audio: Uint8Array;
+  /** Always "audio/wav". */
+  contentType: string;
+  /** True if the GPU pod was used. */
+  usedGpu: boolean;
+}
+
+export interface TtsVoice {
+  id: string;
+  name: string;
+  language: string;
+  gender: 'male' | 'female';
+}
+
+export interface ListVoicesResponse {
+  voices: TtsVoice[];
 }
 
 // ── GPU management responses ────────────────────────────────────────────────

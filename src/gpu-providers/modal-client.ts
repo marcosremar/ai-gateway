@@ -35,10 +35,19 @@ function splitModalKey(apiKey: string): { tokenId: string; tokenSecret: string }
 
 function buildModalEnv(apiKey: string): NodeJS.ProcessEnv {
   const { tokenId, tokenSecret } = splitModalKey(apiKey);
+
+  // Prepend venv bin to PATH so `python3 -m modal` finds the right interpreter
+  // (system python3 from /Library/Developer/CommandLineTools/ won't have modal installed)
+  const venvBin = process.env.VIRTUAL_ENV
+    ? `${process.env.VIRTUAL_ENV}/bin`
+    : `${process.cwd()}/.venv/bin`;
+  const origPath = process.env.PATH || '/usr/bin:/bin';
+
   return {
     ...process.env,
     MODAL_TOKEN_ID: tokenId,
     MODAL_TOKEN_SECRET: tokenSecret,
+    PATH: `${venvBin}:${origPath}`,
     TERM: 'dumb',
     NO_COLOR: '1',
     COLUMNS: '500',

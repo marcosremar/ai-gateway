@@ -18,6 +18,9 @@ import type {
   TranslateResponse,
   PipelineResponse,
   PipelineOptions,
+  GenerateAudioOptions,
+  GenerateAudioResponse,
+  ListVoicesResponse,
   GpuStatus,
   DeployOptions,
   DeployResponse,
@@ -28,9 +31,24 @@ const DEFAULT_TIMEOUTS = {
   stt: 15_000,
   translate: 15_000,
   pipeline: 30_000,
+  tts: 30_000,
   health: 8_000,
   deploy: 30_000,
 };
+
+/** Retry config for connection-level errors (gateway restart tolerance). */
+const MAX_RETRIES = 4;
+const RETRY_BACKOFF_MS = [500, 1000, 2000, 4000];
+
+/** Check if an error is a connection-level failure (retryable). */
+function isRetryableError(err: unknown): boolean {
+  // Timeouts (AbortError) are NOT retried — they indicate the server was reached but slow
+  if (err instanceof DOMException && err.name === 'AbortError') return false;
+  // TypeError = network failure (ECONNREFUSED, DNS, etc.)
+  if (err instanceof TypeError) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /ECONNREFUSED|ENOTFOUND|ECONNRESET|fetch failed|network/i.test(msg);
+}
 
 export class GatewaySDK {
   private readonly baseUrl: string;
@@ -101,6 +119,39 @@ export class GatewaySDK {
         usedGpu: data.timing?.used_gpu ?? false,
       },
     };
+  }
+
+  /** Generate speech from text via the GPU pod's TTS engine. Returns WAV bytes.
+   *
+   * @example
+   * const { audio } = await gw.generateAudio('Hello world', { speaker: 'Ryan', speed: 0.9 });
+   * await Bun.write('out.wav', audio);
+   */
+  async generateAudio(text: string, options: GenerateAudioOptions = {}): Promise<GenerateAudioResponse> {
+    const body: Record<string, unknown> = {
+      text,
+      speaker: options.speaker ?? 'Ryan',
+      language: options.language ?? 'English',
+    };
+    if (options.speed !== undefined && options.speed !== 1.0) body.speed = options.speed;
+    const res = await this.fetch('/v1/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      timeout: this.timeouts.tts,
+    });
+    const audio = new Uint8Array(await res.arrayBuffer());
+    return { audio, contentType: 'audio/wav', usedGpu: true };
+  }
+
+  /** List available preset TTS voices. */
+  async listVoices(): Promise<ListVoicesResponse> {
+    const res = await this.fetch('/v1/tts/voices', {
+      method: 'GET',
+      timeout: this.timeouts.health,
+    });
+    const data = await this.parseJson(res, '/v1/tts/voices');
+    return { voices: (data.voices as ListVoicesResponse['voices']) ?? [] };
   }
 
   // ── GPU management ──────────────────────────────────────────────────────
@@ -191,6 +242,12 @@ export class GatewaySDK {
 
   // ── Internal ──────────────────────────────────────────────────────────
 
+  /**
+   * Internal fetch with retry on connection-level errors.
+   * Retries ECONNREFUSED, network failures with exponential backoff
+   * so that gateway restarts don't cause permanent failures.
+   * HTTP 4xx/5xx errors are NOT retried.
+   */
   private async fetch(
     path: string,
     options: {
@@ -202,43 +259,71 @@ export class GatewaySDK {
     },
   ): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: options.method,
-        headers: { ...this.headers, ...options.headers },
-        body: options.body as BodyInit,
-        signal: AbortSignal.timeout(options.timeout),
-      });
-    } catch (err: unknown) {
-      // Network errors (ECONNREFUSED, DNS failure) and timeouts
-      if (err instanceof Error && err.name === 'AbortError') {
-        throw new GatewayError(
-          `${options.method} ${path} timed out (${options.timeout}ms)`,
-          0,
-          path,
-        );
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        const delay = RETRY_BACKOFF_MS[Math.min(attempt - 1, RETRY_BACKOFF_MS.length - 1)];
+        await new Promise(r => setTimeout(r, delay));
       }
-      if (err instanceof TypeError) {
-        throw new GatewayError(
-          `${options.method} ${path} network error: ${err.message}`,
-          0,
-          path,
-        );
+
+      try {
+        const res = await fetch(url, {
+          method: options.method,
+          headers: { ...this.headers, ...options.headers },
+          body: options.body as BodyInit,
+          signal: AbortSignal.timeout(options.timeout),
+        });
+
+        const allowed = options.allowedStatuses ?? [];
+        if (!res.ok && !allowed.includes(res.status)) {
+          const text = await res.text().catch(() => '');
+          throw new GatewayError(
+            `${options.method} ${path} failed (${res.status}): ${text.slice(0, 200)}`,
+            res.status,
+            path,
+          );
+        }
+        return res;
+      } catch (err: unknown) {
+        // HTTP errors (GatewayError with status code) are NOT retried
+        if (err instanceof GatewayError && err.statusCode > 0) throw err;
+
+        // Timeout errors are NOT retried
+        if (err instanceof Error && err.name === 'AbortError') {
+          throw new GatewayError(
+            `${options.method} ${path} timed out (${options.timeout}ms)`,
+            0,
+            path,
+          );
+        }
+
+        lastError = err;
+
+        // Only retry connection-level errors
+        if (!isRetryableError(err) || attempt >= MAX_RETRIES) {
+          if (err instanceof TypeError) {
+            throw new GatewayError(
+              `${options.method} ${path} network error: ${err.message}`,
+              0,
+              path,
+            );
+          }
+          throw err;
+        }
+        // Connection error — retry
       }
-      throw err;
     }
 
-    const allowed = options.allowedStatuses ?? [];
-    if (!res.ok && !allowed.includes(res.status)) {
-      const text = await res.text().catch(() => '');
+    // Unreachable, but satisfies TS
+    if (lastError instanceof TypeError) {
       throw new GatewayError(
-        `${options.method} ${path} failed (${res.status}): ${text.slice(0, 200)}`,
-        res.status,
+        `${options.method} ${path} network error after ${MAX_RETRIES + 1} attempts: ${(lastError as Error).message}`,
+        0,
         path,
       );
     }
-    return res;
+    throw lastError;
   }
 
   /** Parse JSON from response, throwing GatewayError on invalid JSON. */

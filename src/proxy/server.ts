@@ -5,6 +5,8 @@
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'http';
 import { randomUUID } from 'crypto';
+import { existsSync, readFileSync, statSync } from 'fs';
+import { join, extname } from 'path';
 import { validateAuth } from './middleware/auth';
 import { RateLimiter } from './middleware/rate-limit';
 import { handleChatCompletions } from './routes/chat-completions';
@@ -184,6 +186,82 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
   return parts;
 }
 
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html',
+  '.js': 'application/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.txt': 'text/plain',
+};
+
+function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse, requestId: string): boolean {
+  // Prevent path traversal
+  const safePath = urlPath.replace(/\.\./g, '').replace(/\/+/g, '/');
+
+  // Try exact file, then with .html, then as directory/index.html
+  const candidates = [
+    join(staticDir, safePath),
+    join(staticDir, safePath + '.html'),
+    join(staticDir, safePath, 'index.html'),
+  ];
+
+  // For root path, try index.html
+  if (safePath === '/') {
+    candidates.unshift(join(staticDir, 'index.html'));
+  }
+
+  for (const filePath of candidates) {
+    try {
+      if (!existsSync(filePath)) continue;
+      const stat = statSync(filePath);
+      if (!stat.isFile()) continue;
+
+      const ext = extname(filePath);
+      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+      const content = readFileSync(filePath);
+
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Length': content.length.toString(),
+        'X-Request-Id': requestId,
+        'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+        ...SECURITY_HEADERS,
+      });
+      res.end(content);
+      return true;
+    } catch {
+      continue;
+    }
+  }
+
+  // SPA fallback: serve index.html for non-file paths (client-side routing)
+  const indexPath = join(staticDir, 'index.html');
+  if (existsSync(indexPath) && !extname(safePath)) {
+    try {
+      const content = readFileSync(indexPath);
+      res.writeHead(200, {
+        'Content-Type': 'text/html',
+        'Content-Length': content.length.toString(),
+        'X-Request-Id': requestId,
+        'Cache-Control': 'no-cache',
+        ...SECURITY_HEADERS,
+      });
+      res.end(content);
+      return true;
+    } catch {
+      // fall through
+    }
+  }
+
+  return false;
+}
+
 export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
@@ -269,6 +347,11 @@ export function createProxyServer(config: ProxyConfig): Server {
       }
     }
 
+    // Static file serving — serve web UI assets before body parsing
+    if (method === 'GET' && config.staticDir && !path.startsWith('/v1/') && path !== '/health' && path !== '/metrics') {
+      if (serveStaticFile(config.staticDir, path, res, requestId)) return;
+    }
+
     try {
       let rawBody = method === 'POST' ? await readBody(req) : Buffer.alloc(0);
       let body: unknown = {};
@@ -342,6 +425,8 @@ export function createProxyServer(config: ProxyConfig): Server {
         }
       } else if (method === 'GET' && url === '/health') {
         proxyRes = { status: 200, body: { status: 'ok' } };
+      } else if (method === 'GET' && config.staticDir && serveStaticFile(config.staticDir, path, res, requestId)) {
+        return; // static file served
       } else {
         proxyRes = { status: 404, body: { error: { message: `Route not found: ${method} ${url}`, type: 'invalid_request_error' } } };
       }

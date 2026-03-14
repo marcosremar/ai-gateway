@@ -137,7 +137,16 @@ export abstract class AbstractGpuProvider implements GpuProviderClient {
         body,
       );
     }
-    return res.json() as Promise<T>;
+    const text = await res.text();
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new FetchError(
+        `${label ?? this.providerId}: invalid JSON response (HTTP ${res.status}): ${text.substring(0, 200)}`,
+        res.status,
+        text,
+      );
+    }
   }
 
   /** Fetch a URL and return the raw Response (for status-code branching like 404 = not found). */

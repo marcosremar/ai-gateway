@@ -78,10 +78,10 @@ export async function findSshKey(headers: Record<string, string>): Promise<SshKe
         const detail = await detailRes.json();
         publicKey = detail.data?.attributes?.value || detail.data?.value || detail.value;
       }
-    } catch { /* non-critical */ }
+    } catch (e) { /* SSH key detail fetch is non-critical */ }
 
     return { id: ssh.id as string, publicKey };
-  } catch {
+  } catch (e) {
     return undefined;
   }
 }
@@ -134,8 +134,8 @@ export async function findCheapestLocations(
       if (b.uptimePct !== a.uptimePct) return b.uptimePct - a.uptimePct; // better uptime first
       return a.price - b.price;                                 // cheaper first
     });
-  } catch {
-    // ignore
+  } catch (e) {
+    console.warn(`[tensordock] Failed to fetch hostnode candidates: ${e instanceof Error ? e.message : e}`);
   }
   return candidates;
 }
@@ -183,7 +183,8 @@ export class TensordockClient extends AbstractGpuProvider {
         external_port: number;
       }>;
       return { ip, portForwards };
-    } catch {
+    } catch (e) {
+      this.log.debug(`[tensordock] Failed to get network detail for ${instanceId}: ${this.errMsg(e)}`);
       return null;
     }
   }
@@ -221,7 +222,8 @@ export class TensordockClient extends AbstractGpuProvider {
         (inst) => inst.status.toLowerCase() === 'running',
       );
       return running ?? instances[0];
-    } catch {
+    } catch (e) {
+      this.log.debug(`[tensordock] discoverInstance failed: ${this.errMsg(e)}`);
       return null;
     }
   }
@@ -237,7 +239,7 @@ export class TensordockClient extends AbstractGpuProvider {
 
     const sshKeyInfo = await findSshKey(headers);
     if (!sshKeyInfo) {
-      throw new Error('Nenhuma SSH key encontrada na conta TensorDock. Crie uma em dashboard.tensordock.com > Secrets.');
+      throw new Error('No SSH key found in TensorDock account. Create one at dashboard.tensordock.com > Secrets.');
     }
 
     // SSH public key for cloud-init injection: env var > TensorDock API > local file
@@ -250,8 +252,13 @@ export class TensordockClient extends AbstractGpuProvider {
           const p = `${os.homedir()}/.ssh/${name}`;
           if (fs.existsSync(p)) { localSshPubKey = fs.readFileSync(p, 'utf-8').trim(); break; }
         }
-      } catch { /* non-critical */ }
+      } catch (e) {
+        this.log.debug(`[tensordock] Failed to read local SSH key: ${e instanceof Error ? e.message : e}`);
+      }
     }
+
+    // Track per-GPU failure reasons for diagnostics
+    const gpuFailures: Array<{ gpu: string; reason: string }> = [];
 
     for (const gpuShort of gpuTypesToTry) {
       const gpuId = GPU_ID_MAP[gpuShort] || gpuShort;
@@ -262,7 +269,8 @@ export class TensordockClient extends AbstractGpuProvider {
         candidates = candidates.filter(c => c.city.toLowerCase().includes(regionLower));
       }
       if (candidates.length === 0) {
-        this.log.log(`[tensordock] ${gpuShort} unavailable, trying next...`);
+        this.log.log(`[tensordock] ${gpuShort} (id=${gpuId}) unavailable, trying next...`);
+        gpuFailures.push({ gpu: gpuShort, reason: `no candidates (gpuId=${gpuId})` });
         continue;
       }
 
@@ -327,9 +335,14 @@ export class TensordockClient extends AbstractGpuProvider {
           }
           const data = await res.json();
           if (data.error || (data.status && data.status >= 400)) {
-            this.log.warn(`[tensordock] create at ${candidate.city} body error: ${JSON.stringify(data.error).substring(0, 300)}`);
+            const errStr = JSON.stringify(data.error);
+            this.log.warn(`[tensordock] create at ${candidate.city} body error: ${errStr.substring(0, 300)}`);
+            // Non-retryable: insufficient balance
+            if (errStr.includes('need at least') || errStr.includes('balance') || errStr.includes('insufficient')) {
+              throw new Error(`TensorDock account balance insufficient: ${errStr.substring(0, 200)}`);
+            }
             this.emitError({
-              operation: 'createInstance', message: `Create at ${candidate.city} body error: ${JSON.stringify(data.error).substring(0, 200)}`,
+              operation: 'createInstance', message: `Create at ${candidate.city} body error: ${errStr.substring(0, 200)}`,
               retryable: true,
             });
             continue;
@@ -374,9 +387,23 @@ export class TensordockClient extends AbstractGpuProvider {
           });
 
           this.log.log(`[tensordock] Created ${instanceName} (${instanceId}) at ${candidate.city}`);
-          return { instanceId, instanceName, endpoint, monitorUrl, ipAddress: ip, status: attrs.status || 'creating', gpuType: gpuShort, portForwards: pfs };
+          return {
+            instanceId, instanceName, endpoint, monitorUrl, ipAddress: ip,
+            status: attrs.status || 'creating', gpuType: gpuShort, portForwards: pfs,
+            providerMeta: {
+              hostnodeId: candidate.id,
+              tier: candidate.tier,
+              uptimePct: candidate.uptimePct,
+              city: candidate.city,
+              pricePerHr: candidate.price,
+              // Machine specs (limited data from TensorDock)
+              cpuCores: candidate.maxVcpu,
+              ramGb: candidate.maxRam,
+            },
+          };
         } catch (e) {
           this.log.warn(`[tensordock] create at ${candidate.city} error: ${this.errMsg(e)}`);
+          gpuFailures.push({ gpu: gpuShort, reason: `${candidate.city}: ${this.errMsg(e)}` });
           this.emitError({
             operation: 'createInstance', message: `Create at ${candidate.city}: ${this.errMsg(e)}`,
             retryable: true,
@@ -385,11 +412,14 @@ export class TensordockClient extends AbstractGpuProvider {
       }
     }
 
+    const failSummary = gpuFailures.map(f => `${f.gpu} → ${f.reason}`).join(' | ');
+    this.log.error(`[tensordock] All ${gpuTypesToTry.length} GPU types exhausted. Failures: ${failSummary}`);
+
     this.emitError({
-      operation: 'createInstance', message: 'All GPU types exhausted on TensorDock',
+      operation: 'createInstance', message: `All GPU types exhausted on TensorDock: ${failSummary}`,
       errorCode: 'NO_GPU_AVAILABLE', retryable: false,
     });
-    throw new Error('No GPUs available on TensorDock (all types exhausted)');
+    throw new Error(`No GPUs available on TensorDock (all types exhausted). Tried ${gpuTypesToTry.length} types: ${failSummary}`);
   }
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
@@ -417,11 +447,11 @@ export class TensordockClient extends AbstractGpuProvider {
       if (alreadyActive) return;
       // 404 = instance deleted — no point trying v0
       if (v2Status === 404 || v2Body.toLowerCase().includes('not found')) {
-        throw new Error(`Instância ${instanceId} não encontrada no TensorDock (deletada?). Reconfigure o tier.`);
+        throw new Error(`TensorDock instance ${instanceId} not found (deleted or expired)`);
       }
     } catch (err) {
       // Re-throw "not found" errors regardless of authId
-      if (err instanceof Error && err.message.includes('não encontrada')) throw err;
+      if (err instanceof Error && err.message.includes('not found')) throw err;
       if (!authId) throw err;
     }
 
@@ -553,7 +583,8 @@ export class TensordockClient extends AbstractGpuProvider {
       const data = await res.json();
       const attrs = data.data?.attributes || data.data || data;
       return String(attrs.status || 'unknown');
-    } catch {
+    } catch (e) {
+      this.log.debug(`[tensordock] getInstanceStatus(${instanceId}) failed: ${this.errMsg(e)}`);
       return null;
     }
   }
@@ -600,7 +631,8 @@ export class TensordockClient extends AbstractGpuProvider {
       // Monitor is running and setup is in progress (not failed) — keep boot alive
       if (data.phase && data.phase !== 'failed') return false;
       return false;
-    } catch {
+    } catch (e) {
+      this.log.debug(`[tensordock] Health check failed for ${instanceId}: ${this.errMsg(e)}`);
       return false;
     }
   }
@@ -620,7 +652,8 @@ export class TensordockClient extends AbstractGpuProvider {
       if (!res.ok) return null;
       const text = await res.text();
       return text;
-    } catch {
+    } catch (e) {
+      this.log.debug(`[tensordock] Failed to fetch logs for ${instanceId}: ${this.errMsg(e)}`);
       return null;
     }
   }
@@ -643,7 +676,8 @@ export class TensordockClient extends AbstractGpuProvider {
       const data = await res.json() as { success?: boolean; balance?: number; hourly_cost?: number };
       if (!data.success) return null;
       return { balance: data.balance ?? 0, hourlyCost: data.hourly_cost ?? 0 };
-    } catch {
+    } catch (e) {
+      this.log.debug(`[tensordock] Balance check failed: ${e instanceof Error ? e.message : e}`);
       return null;
     }
   }
@@ -682,17 +716,28 @@ export class TensordockClient extends AbstractGpuProvider {
             const regionLower = options.region.toLowerCase();
             filtered = candidates.filter(c => c.city.toLowerCase().includes(regionLower));
           }
-          return filtered.map(c => ({
-            provider: 'tensordock' as const,
-            gpuType: short,
-            gpuName: short.includes('RTX') ? `NVIDIA GeForce ${short}` : short,
-            available: 1,
-            pricePerHr: c.price,
-            region: c.city,
-            vram: short.includes('3090') ? 24 : short.includes('4090') ? 24 : 0,
-            offerId: c.id,
-          }));
-        } catch {
+          return filtered.map(c => {
+            // Build canonical GPU name matching gateway allowlist format
+            // Reverse-lookup: find the canonical NVIDIA name from GPU_ID_MAP
+            const canonical = Object.entries(GPU_ID_MAP).find(
+              ([k, v]) => v === id && k.startsWith('NVIDIA')
+            );
+            const gpuName = canonical ? canonical[0] : (short.includes('RTX') ? `NVIDIA GeForce ${short}` : short);
+            const vramMap: Record<string, number> = { '3090': 24, '4090': 24, 'A6000': 48, 'A40': 48, 'L40S': 48, 'A100': 80 };
+            const vram = Object.entries(vramMap).find(([k]) => short.includes(k))?.[1] ?? 0;
+            return {
+              provider: 'tensordock' as const,
+              gpuType: short,
+              gpuName,
+              available: 1,
+              pricePerHr: c.price,
+              region: c.city,
+              vram,
+              offerId: c.id,
+            };
+          });
+        } catch (e) {
+          this.log.debug(`[tensordock] listOffers for GPU ${gpuShort} failed: ${e instanceof Error ? e.message : e}`);
           return [];
         }
       }),

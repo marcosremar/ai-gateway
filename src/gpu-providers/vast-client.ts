@@ -29,9 +29,9 @@ const POLL_BASE_MS = 5_000;
 const POLL_GROWTH = 1.4;
 const POLL_MAX_MS = 30_000;
 // Vast.ai on-demand instances typically get an IP within 2 min for small images,
-// but large images (e.g. 52GB Blackwell) can take 5-10 min to pull + start.
+// but large images (e.g. 52GB Blackwell) can take 15-25 min to pull + start.
 // We poll generously here; the boot health poller (engine.ts) handles "app ready".
-const POLL_TOTAL_MAX_MS = 600_000; // 10 minutes
+const POLL_TOTAL_MAX_MS = 1_800_000; // 30 minutes
 
 // ── Rate limiting ────────────────────────────────────────────────────────────
 // Vast.ai limits to ~4.5 req/s. We use a token bucket at 3 req/s to stay safe.
@@ -184,9 +184,16 @@ export class VastClient extends AbstractGpuProvider {
       searchBody.cpu_ram = { gte: spec.ramGb * 1024 };  // Vast.ai uses MB
     }
 
-    // Filter by region/geolocation if specified (e.g. 'US', 'EU', 'CA')
+    // Filter by region/geolocation if specified (e.g. 'US', 'EU', 'FR', 'DE')
+    const EU_CC = ['AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','NO','CH','GB','IS'];
+    let createGeoFilter: string[] | undefined;
     if (spec.region) {
-      searchBody.geolocation = { eq: spec.region };
+      const r = spec.region.toUpperCase();
+      if (r === 'EU' || r === 'EUROPE') {
+        createGeoFilter = EU_CC; // filter client-side after search
+      } else {
+        searchBody.geolocation = { eq: spec.region };
+      }
     }
 
     // Filter by max price per hour if specified
@@ -195,6 +202,17 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     let offers = await this._searchOffers(searchBody, headers);
+
+    // Client-side geo filter for macro-regions (EU, etc.)
+    if (createGeoFilter && offers.length) {
+      const before = offers.length;
+      offers = offers.filter(o => {
+        const geo = String(o.geolocation || '');
+        return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`));
+      });
+      this.log.log(`[vast] Geo filter (create): ${before} → ${offers.length} offers in EU`);
+    }
+
     let hasDirectPortOffers = offers.length > 0;
 
     // Fallback: if no machines with direct ports, retry without the filter
@@ -203,14 +221,23 @@ export class VastClient extends AbstractGpuProvider {
       delete searchBody.direct_port_count;
       try {
         offers = await this._searchOffers(searchBody, headers);
-      } catch {
-        // Retry also failed — will throw below
+        // Re-apply geo filter
+        if (createGeoFilter && offers.length) {
+          offers = offers.filter(o => {
+            const geo = String(o.geolocation || '');
+            return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`));
+          });
+        }
+      } catch (retryErr) {
+        this.log.error(`[vast] Fallback search (no direct_port filter) also failed: ${this.errMsg(retryErr)}`);
       }
       hasDirectPortOffers = false;
     }
 
     if (!offers.length) {
-      throw new Error('No GPUs available on Vast.ai (all exhausted)');
+      const gpuFilter = spec.gpuTypes?.length ? normalizeGpuNames(spec.gpuTypes).join(', ') : 'any';
+      this.log.error(`[vast] No offers found. GPU filter: [${gpuFilter}], disk: ${diskGb}GB, region: ${spec.region || 'any'}`);
+      throw new Error(`No GPUs available on Vast.ai (0 offers matched). GPU filter: [${gpuFilter}], disk: ${diskGb}GB`);
     }
 
     // ── 2. Build env vars ──────────────────────────────────────────────────
@@ -225,6 +252,9 @@ export class VastClient extends AbstractGpuProvider {
     if (spec.env) Object.assign(envVars, spec.env);
 
     // ── 3. Try cheapest offers (up to 10 unique hosts) ─────────────────────
+    // Track per-offer failure reasons for diagnostics
+    const offerFailures: Array<{ offerId: string; gpu: string; reason: string }> = [];
+
     for (const offer of offers.slice(0, 10)) {
       const offerId = offer.id;
       const gpuName = (offer.gpu_name || 'unknown') as string;
@@ -265,15 +295,18 @@ export class VastClient extends AbstractGpuProvider {
           const unavailable = errText.includes('not available') || errText.includes('already rented');
           if (unavailable) {
             this.log.log(`[vast] Offer ${offerId} (${gpuName}) unavailable, trying next...`);
+            offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: 'unavailable/rented' });
             continue;
           }
           this.log.warn(`[vast] Create on offer ${offerId} failed: HTTP ${createRes.status} ${errText.substring(0, 300)}`);
+          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: `HTTP ${createRes.status}: ${errText.substring(0, 100)}` });
           continue;
         }
 
         const createData = (await createRes.json()) as Record<string, unknown>;
         if (!createData.success) {
           this.log.warn(`[vast] Create on offer ${offerId} returned: ${JSON.stringify(createData).substring(0, 300)}`);
+          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: `API returned success=false` });
           continue;
         }
 
@@ -281,8 +314,17 @@ export class VastClient extends AbstractGpuProvider {
         const instanceId = `inst-${contractId}`;
         const instanceName = `parle-autoscale-${Date.now()}`;
 
-        // Poll for IP assignment with exponential backoff
-        const { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers);
+        // Poll for IP assignment — short timeout (3 min) since pollHealthUntilReady handles the rest
+        const CREATE_POLL_MAX_MS = 180_000;
+        const { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS);
+
+        // If instance vanished during polling (reclaimed by host), clean up and try next offer
+        if (!endpoint && !ip) {
+          this.log.warn(`[vast] Instance ${contractId} has no endpoint or IP — trying next offer`);
+          try { await this.deleteInstance(instanceId, { apiKey }); } catch (delErr) { this.log.debug(`[vast] Cleanup of vanished instance ${contractId} failed: ${this.errMsg(delErr)}`); }
+          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: 'instance vanished during startup' });
+          continue;
+        }
 
         // Track host IP to avoid placing multiple instances on the same host
         if (ip) this._recentlyUsedIps.add(ip);
@@ -308,19 +350,42 @@ export class VastClient extends AbstractGpuProvider {
           ipAddress: ip,
           sshHost,
           sshPort,
+          providerMeta: {
+            hostIp: ip,
+            reliability2: offer.reliability2 as number | undefined,
+            inetDown: offer.inet_down as number | undefined,
+            inetUp: offer.inet_up as number | undefined,
+            dphTotal: pricePerHr,
+            region: (offer.geolocation || '') as string,
+            // Machine specs
+            cpuName: (offer.cpu_name || '') as string,
+            cpuCores: (offer.cpu_cores_effective || 0) as number,
+            ramGb: ((offer.cpu_ram || 0) as number) / 1024, // MB → GB
+            gpuVramGb: ((offer.gpu_ram || 0) as number) / 1024, // MB → GB
+            numGpus: (offer.num_gpus || 1) as number,
+            diskGb: (offer.disk_space || 0) as number,
+            diskReadMbps: (offer.disk_bw_read || 0) as number,
+            diskWriteMbps: (offer.disk_bw_write || 0) as number,
+            pcieBw: (offer.pcie_bw || 0) as number,
+            cudaVersion: (offer.cuda_max_good || 0) as number,
+          },
         };
       } catch (e) {
         this.log.warn(`[vast] Create on offer ${offerId} error: ${this.errMsg(e)}`);
+        offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: this.errMsg(e) });
       }
     }
 
+    const failSummary = offerFailures.map(f => `${f.gpu}(${f.offerId}): ${f.reason}`).join(' | ');
+    this.log.error(`[vast] All ${Math.min(offers.length, 10)} offers exhausted. Failures: ${failSummary}`);
+
     this.emitError({
       operation: 'createInstance',
-      message: 'All offers exhausted on Vast.ai',
+      message: `All offers exhausted on Vast.ai: ${failSummary}`,
       errorCode: 'NO_GPU_AVAILABLE',
       retryable: false,
     });
-    throw new Error('No GPUs available on Vast.ai (creation failed on all offers)');
+    throw new Error(`No GPUs available on Vast.ai (creation failed on ${offerFailures.length} offers). ${failSummary}`);
   }
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
@@ -547,7 +612,8 @@ export class VastClient extends AbstractGpuProvider {
       const data = (await res.json()) as Record<string, unknown>;
       const inst = (data.instances ?? data) as Record<string, unknown>;
       return (inst.dph_total as number) ?? null;
-    } catch {
+    } catch (e) {
+      this.log.debug(`[vast] getInstanceCost(${instanceId}) failed: ${this.errMsg(e)}`);
       return null;
     }
   }
@@ -673,11 +739,31 @@ export class VastClient extends AbstractGpuProvider {
       searchBody.gpu_name = { in: normalizeGpuNames(options.gpuTypes) };
     }
     if (options.region) {
-      searchBody.geolocation = { eq: options.region };
+      // Support macro-regions like "EU" by expanding to country codes
+      const EU_COUNTRIES = ['AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE', 'NO', 'CH', 'GB', 'IS'];
+      if (options.region.toUpperCase() === 'EU' || options.region.toUpperCase() === 'EUROPE') {
+        // Vast.ai geolocation format: "Country Name, CC" — filter client-side after fetch
+        // Don't set server-side filter; we'll filter results below
+        (searchBody as any)._clientSideGeoFilter = EU_COUNTRIES;
+      } else {
+        searchBody.geolocation = { eq: options.region };
+      }
     }
 
     try {
-      const offers = await this._searchOffers(searchBody, headers);
+      let offers = await this._searchOffers(searchBody, headers);
+
+      // Client-side geo filter for macro-regions (EU, etc.)
+      const geoFilter = (searchBody as any)._clientSideGeoFilter as string[] | undefined;
+      if (geoFilter) {
+        const before = offers.length;
+        offers = offers.filter(o => {
+          const geo = String(o.geolocation || '');
+          // Match ", FR" or ", DE" at end of geolocation string
+          return geoFilter.some(cc => geo.endsWith(`, ${cc}`));
+        });
+        this.log.log(`[vast] Geo filter: ${before} → ${offers.length} offers in ${geoFilter.length} countries`);
+      }
 
       // Group by gpu_name — aggregate availability, keep cheapest price
       const grouped = new Map<string, { count: number; cheapest: Record<string, unknown> }>();
@@ -695,13 +781,25 @@ export class VastClient extends AbstractGpuProvider {
       for (const [gpuName, { count, cheapest }] of grouped) {
         result.push({
           provider: 'vast',
-          gpuType: gpuName.replace(/\s+/g, ''),
+          gpuType: gpuName,
           gpuName,
           available: count,
           pricePerHr: (cheapest.dph_total || 0) as number,
           region: (cheapest.geolocation || '') as string,
           vram: ((cheapest.gpu_ram || 0) as number) / 1024, // MB → GB
           offerId: String(cheapest.id ?? ''),
+          // Extended fields from Vast.ai bundle response
+          geolocation: (cheapest.geolocation || undefined) as string | undefined,
+          reliability: (cheapest.reliability2 || undefined) as number | undefined,
+          inetDown: (cheapest.inet_down || undefined) as number | undefined,
+          inetUp: (cheapest.inet_up || undefined) as number | undefined,
+          hostId: cheapest.host_id != null ? String(cheapest.host_id) : undefined,
+          cpuName: (cheapest.cpu_name || undefined) as string | undefined,
+          cpuCores: (cheapest.cpu_cores_effective || undefined) as number | undefined,
+          ramGb: cheapest.cpu_ram ? ((cheapest.cpu_ram as number) / 1024) : undefined, // MB → GB
+          diskGb: (cheapest.disk_space || undefined) as number | undefined,
+          numGpus: (cheapest.num_gpus || undefined) as number | undefined,
+          totalFlops: (cheapest.total_flops || undefined) as number | undefined,
         });
       }
 
@@ -718,6 +816,7 @@ export class VastClient extends AbstractGpuProvider {
   private async _pollForEndpoint(
     contractId: string,
     headers: Record<string, string>,
+    maxWaitMs: number = POLL_TOTAL_MAX_MS,
   ): Promise<{ endpoint: string; ip: string; sshHost?: string; sshPort?: number }> {
     let endpoint = '';
     let ip = '';
@@ -728,8 +827,11 @@ export class VastClient extends AbstractGpuProvider {
 
     // Terminal statuses that mean the instance will never recover
     const TERMINAL_STATUSES = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted']);
+    let seenOnce = false;       // true once the API returns the instance at least once
+    let missingStreak = 0;      // consecutive polls where a previously-seen instance is gone
+    const MAX_MISSING_STREAK = 5; // abort after 5 consecutive "not found" polls (~2.5 min)
 
-    while (elapsed < POLL_TOTAL_MAX_MS) {
+    while (elapsed < maxWaitMs) {
       const delay = Math.min(POLL_BASE_MS * Math.pow(POLL_GROWTH, attempt), POLL_MAX_MS);
       await new Promise((r) => setTimeout(r, delay));
       elapsed += delay;
@@ -738,6 +840,8 @@ export class VastClient extends AbstractGpuProvider {
       try {
         const detail = await this._fetchInstanceDetail(contractId, headers);
         if (detail) {
+          seenOnce = true;
+          missingStreak = 0;
           ip = detail.ip;
           endpoint = detail.endpoint;
           sshHost = detail.sshHost;
@@ -765,7 +869,22 @@ export class VastClient extends AbstractGpuProvider {
             this.log.log(`[vast] Instance ${contractId} still loading (${Math.round(elapsed / 1000)}s, status=${detail.status ?? 'unknown'}, ip=${ip || 'none'}, ssh=${sshHost ? `${sshHost}:${sshPort}` : 'none'})`);
           }
         } else {
-          this.log.log(`[vast] Instance ${contractId} not found in API yet (${Math.round(elapsed / 1000)}s)`);
+          if (seenOnce) {
+            missingStreak++;
+            this.log.warn(`[vast] Instance ${contractId} disappeared from API (${Math.round(elapsed / 1000)}s, streak=${missingStreak}/${MAX_MISSING_STREAK})`);
+            if (missingStreak >= MAX_MISSING_STREAK) {
+              this.log.warn(`[vast] Instance ${contractId} vanished after being seen — likely reclaimed by host. Aborting poll.`);
+              this.emitError({
+                operation: '_pollForEndpoint', instanceId: `inst-${contractId}`,
+                message: `Instance vanished from API after ${Math.round(elapsed / 1000)}s (was previously visible)`,
+                errorCode: 'INSTANCE_VANISHED', retryable: true,
+                metadata: { ip, sshHost, sshPort, elapsedSecs: Math.round(elapsed / 1000) },
+              });
+              break;
+            }
+          } else {
+            this.log.log(`[vast] Instance ${contractId} not found in API yet (${Math.round(elapsed / 1000)}s)`);
+          }
         }
       } catch (err) {
         this.log.warn(`[vast] Polling instance ${contractId} attempt ${attempt} failed: ${this.errMsg(err)}`);
@@ -894,8 +1013,8 @@ export class VastClient extends AbstractGpuProvider {
         }
       }
       // If response is 200 but data is null/empty, fall through to list API
-    } catch {
-      // Individual endpoint failed, fall through to list API
+    } catch (e) {
+      this.log.debug(`[vast] Direct instance lookup for ${instanceId} failed, trying list API: ${this.errMsg(e)}`);
     }
 
     // Fallback: list all instances and find the one we need
@@ -913,7 +1032,12 @@ export class VastClient extends AbstractGpuProvider {
       if (!Array.isArray(instances)) return null;
 
       const inst = instances.find(i => String(i.id) === rawId);
-      if (!inst) return null;
+      if (!inst) {
+        // Debug: log all instance IDs to help diagnose mismatched contract/instance IDs
+        const ids = instances.map(i => String(i.id)).join(', ');
+        this.log.log(`[vast] _fetchInstanceDetail(${rawId}): not in list (${instances.length} instances: ${ids.substring(0, 200)})`);
+        return null;
+      }
 
       return this._parseInstance(inst);
     } catch (err) {

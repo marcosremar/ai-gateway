@@ -1,4 +1,5 @@
 export { detectAudioFormat, prepareAudioFile } from './audio-utils';
+export { getOrCreateClient } from './client-cache';
 export { OpenAICompatSTTProvider } from './openai-compat-stt';
 export type { OpenAICompatSTTConfig } from './openai-compat-stt';
 export { OpenAICompatTTSProvider } from './openai-compat-tts';
