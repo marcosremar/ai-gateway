@@ -46,6 +46,10 @@ export type { SavedProfile, PipelineStageConfig, UserProviderSettings } from './
 // ── Classification ────────────────────────────────────────────────────────
 export { ProviderClassification } from './classification';
 
+// ── Chain Diversifier ────────────────────────────────────────────────────
+export { diversifyChain } from './chain-diversifier';
+export type { DiversifyConfig } from './chain-diversifier';
+
 // ── Declarative Chain ─────────────────────────────────────────────────────
 export { resolveDeclarativeChain, findChainForStage } from './declarative-chain';
 export type { FallbackChainConfig, FallbackChainEntry, ResolvedChain } from './declarative-chain';
@@ -55,6 +59,18 @@ export { PROVIDER_LABELS, BILLING_URLS, buildProviderError, extractErrorStatus, 
 
 // ── Credit Block ──────────────────────────────────────────────────────────
 export { CreditBlockTracker, defaultCreditBlockTracker, hashApiKey } from './credit-block';
+
+// ── Adaptive Timeout ─────────────────────────────────────────────────────
+export { AdaptiveTimeoutCalculator } from './adaptive-timeout';
+export type { AdaptiveTimeoutConfig } from './adaptive-timeout';
+
+// ── Performance Ranker ───────────────────────────────────────────────────
+export { PerformanceRanker, defaultPerformanceRanker } from './performance-ranker';
+export type { PerformanceSample, PerformanceStats, PerformanceRankerConfig } from './performance-ranker';
+
+// ── TTFAC Tracker ────────────────────────────────────────────────────────
+export { TtfacTracker, defaultTtfacTracker } from './ttfac-tracker';
+export type { TtfacSample, TtfacStats, TtfacRoutingConfig } from './ttfac-tracker';
 
 // ── Voice Catalog ─────────────────────────────────────────────────────────
 export type { VoiceGender, VoiceSlot, ProviderVoice, ProviderVoiceCatalog, VoiceMapping, VoiceMappingConfig } from './voice-catalog';

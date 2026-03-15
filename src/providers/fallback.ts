@@ -23,8 +23,10 @@
  *   - 400 (other)       → throw immediately (invalid request, no point retrying)
  */
 
+import { AdaptiveTimeoutCalculator } from './adaptive-timeout';
 import { CreditBlockTracker, defaultCreditBlockTracker } from './credit-block';
 import { CreditExhaustedError } from './errors';
+import { PerformanceRanker } from './performance-ranker';
 
 export interface FallbackEntry {
   provider: string;
@@ -84,8 +86,25 @@ export interface FallbackOptions {
    * Key: provider id, Value: hashed API key (use hashApiKey()).
    */
   apiKeyHashes?: Record<string, string>;
+  /**
+   * Adaptive timeout calculator. When provided, per-provider timeouts are
+   * computed from observed latency history instead of using the static timeoutMs.
+   * After each successful call, the observed latency is recorded automatically.
+   */
+  adaptiveTimeout?: AdaptiveTimeoutCalculator;
   /** Logger for structured output. Default: console. */
   logger?: import('../deps').Logger;
+  /**
+   * Performance ranker for reordering fallback chains by observed latency.
+   * When provided (along with `stage`), the chain is reordered before iteration
+   * and latency samples are recorded after each attempt.
+   */
+  performanceRanker?: PerformanceRanker;
+  /**
+   * Pipeline stage name (e.g. 'stt', 'llm', 'tts').
+   * Required when performanceRanker is set — used as the key dimension.
+   */
+  stage?: string;
 }
 
 // ─── Cooldown tracking ──────────────────────────────────────────────────────
@@ -300,7 +319,10 @@ export async function withProviderFallback<T>(
     cooldownTracker: tracker = defaultCooldownTracker,
     creditBlockTracker: creditTracker = defaultCreditBlockTracker,
     apiKeyHashes = {},
+    adaptiveTimeout,
     logger: log = { log: console.log, warn: console.warn, error: console.error },
+    performanceRanker,
+    stage: perfStage,
   } = opts;
 
   // Clone so we can splice in context-window upgrades without mutating the caller's array
@@ -327,7 +349,11 @@ export async function withProviderFallback<T>(
   }
 
   // Use the filtered chain for iteration, but keep workChain for context-window splicing
-  const iterChain = availableChain;
+  // Optionally reorder by observed performance before iterating
+  const iterChain =
+    performanceRanker && perfStage
+      ? performanceRanker.rankChain(perfStage, availableChain)
+      : availableChain;
 
   let lastError: unknown;
   const got402From: string[] = [];
@@ -363,18 +389,23 @@ export async function withProviderFallback<T>(
       const t0 = Date.now();
 
       try {
+        // ── Resolve effective timeout ─────────────────────────────────────────
+        const effectiveTimeout = adaptiveTimeout
+          ? adaptiveTimeout.getTimeout(entry.provider, entry.model ?? '*', timeoutMs ?? 0)
+          : timeoutMs;
+
         // ── Execute with optional timeout ─────────────────────────────────────
         let call = fn(entry, i);
 
-        if (timeoutMs) {
+        if (effectiveTimeout) {
           let timeoutHandle: ReturnType<typeof setTimeout>;
           const timeoutRace = new Promise<never>((_, reject) => {
             timeoutHandle = setTimeout(() => {
               const err = new Error(
-                `${entry.provider}/${entry.model ?? 'default'} timeout after ${timeoutMs}ms`,
+                `${entry.provider}/${entry.model ?? 'default'} timeout after ${effectiveTimeout}ms`,
               );
               reject(markAsTimeout(err));
-            }, timeoutMs);
+            }, effectiveTimeout);
           });
           call = Promise.race([call, timeoutRace]).finally(() =>
             clearTimeout(timeoutHandle!),
@@ -385,6 +416,18 @@ export async function withProviderFallback<T>(
         const elapsed = Date.now() - t0;
 
         tracker.recordSuccess(entry);
+
+        // ── Record latency for adaptive timeout ──────────────────────────────
+        if (adaptiveTimeout) {
+          adaptiveTimeout.record(entry.provider, entry.model ?? '*', elapsed);
+        }
+
+        // Record successful latency sample
+        if (performanceRanker && perfStage) {
+          performanceRanker.record(
+            perfStage, entry.provider, entry.model ?? '*', elapsed, true,
+          );
+        }
 
         if (i > 0 || retryNum > 0) {
           log.log(
@@ -405,6 +448,13 @@ export async function withProviderFallback<T>(
         const isTimeout = isTimeoutError(err);
         const isContext = isContextWindowError(err);
         const retryable = isRetryableError(err);
+
+        // Record failed latency sample
+        if (performanceRanker && perfStage) {
+          performanceRanker.record(
+            perfStage, entry.provider, entry.model ?? '*', elapsed, false,
+          );
+        }
 
         // ── Non-retryable: abort everything ──────────────────────────────────
         if (!retryable && !isContext) {
