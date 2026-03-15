@@ -120,6 +120,8 @@ export interface AIClientOptions {
   spendTracker?: import('../tracking/spend-tracker').SpendTracker;
   /** GPU infrastructure registry for deploy/destroy operations. */
   gpuRegistry?: import('../gpu-providers/registry').GpuProviderRegistry;
+  /** Performance ranker for reordering fallback chains by observed latency. */
+  performanceRanker?: import('../providers/performance-ranker').PerformanceRanker;
 }
 
 /** Result of deploying a GPU instance via AIClient.deploy(). */

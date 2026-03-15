@@ -33,6 +33,8 @@ export type {
 export type { GpuTransport, GpuPipelineResponse, GpuHealthResponse } from './gpu-transport';
 /** @deprecated Streaming transports removed. Use pipeline() which returns PipelineResult. */
 export type { PipelineEvent, PipelineStage } from './pipeline-events';
+export { coldStartRace, waitForGpuReady } from './cold-start-racer';
+export type { ColdStartRacerConfig, RaceContext, RaceResult } from './cold-start-racer';
 
 // ── Factory ─────────────────────────────────────────────────────────────────
 

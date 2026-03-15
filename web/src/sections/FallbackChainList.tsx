@@ -54,18 +54,19 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
   const getModelsForProvider = (provId: string) =>
     (catalog.models as Record<string, { id: string; label: string; streaming?: boolean }[]>)[provId] ?? [];
 
-  /** For STT stage, determine if a provider entry supports streaming. */
-  const isStreamingEntry = (entry: PipelineChainEntry): boolean | null => {
-    if (stage !== 'stt') return null;
+  /** Determine if a provider entry supports streaming (shown for all stages). */
+  const getStreamingType = (entry: PipelineChainEntry): 'streaming' | 'batch' | null => {
     // If explicitly set on the entry, use that
-    if (entry.sttType) return entry.sttType === 'streaming';
-    // Otherwise infer from the provider catalog
+    if (entry.sttType) return entry.sttType;
+    // Infer from provider catalog
     const prov = (providers as readonly { id: string; label: string; streaming?: boolean }[]).find(p => p.id === entry.provider);
-    return prov?.streaming ?? false;
+    if (prov?.streaming !== undefined) return prov.streaming ? 'streaming' : 'batch';
+    // For STT stage, default to batch; for others, don't show badge
+    if (stage === 'stt') return 'batch';
+    return null;
   };
 
   const removeEntry = (index: number) => {
-    if (chain.length <= 1) return;
     setChain(chain.filter((_, i) => i !== index));
   };
 
@@ -76,7 +77,7 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
   const handleAddFallback = () => {
     if (!newProvider || !newModel) return;
     const entry: PipelineChainEntry = { provider: newProvider, model: newModel, enabled: true };
-    // Auto-set sttType for STT stage based on provider's streaming capability
+    // Auto-set sttType based on provider's streaming capability
     if (stage === 'stt') {
       const prov = (providers as readonly { id: string; label: string; streaming?: boolean }[]).find(p => p.id === newProvider);
       entry.sttType = prov?.streaming ? 'streaming' : 'batch';
@@ -117,6 +118,7 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
           const isPrimary = index === 0;
           const isLast = index === chain.length - 1;
           const isEnabled = entry.enabled !== false;
+          const streamType = getStreamingType(entry);
 
           return (
             <div key={`${entry.provider}-${entry.model}-${index}`} data-id={index}>
@@ -136,14 +138,12 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
                   opacity: isEnabled ? 1 : 0.5,
                 }}
               >
-                {/* Drag */}
-                {chain.length > 1 && (
-                  <div className="chain-drag-handle cursor-grab active:cursor-grabbing flex-shrink-0 p-0.5 rounded hover:bg-white/5">
-                    <GripVertical className="w-3.5 h-3.5" style={{ color: 'var(--color-text-muted)' }} />
-                  </div>
-                )}
+                {/* Drag handle — always visible for reordering */}
+                <div className="chain-drag-handle cursor-grab active:cursor-grabbing flex-shrink-0 p-0.5 rounded hover:bg-white/5">
+                  <GripVertical className="w-3.5 h-3.5" style={{ color: 'var(--color-text-muted)' }} />
+                </div>
 
-                {/* Order */}
+                {/* Order number */}
                 <span className="text-[10px] font-bold w-5 h-5 rounded flex items-center justify-center flex-shrink-0"
                   style={{
                     background: isPrimary && isEnabled
@@ -154,22 +154,22 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
                   {index + 1}
                 </span>
 
-                {/* Role */}
+                {/* Role label */}
                 <span className="text-[10px] font-semibold uppercase tracking-wide flex-shrink-0"
                   style={{ color: isPrimary && isEnabled ? accent.dot : 'var(--color-text-muted)', minWidth: '52px' }}>
                   {isPrimary ? 'Primary' : 'Fallback'}
                 </span>
 
-                {/* Provider + Model */}
+                {/* Provider + Model + streaming badge */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-1.5">
                     <span className={`text-xs font-semibold truncate ${!isEnabled ? 'line-through' : ''}`}>
                       {getProviderLabel(entry.provider)}
                     </span>
-                    {isStreamingEntry(entry) === true && (
+                    {streamType === 'streaming' && (
                       <span className="text-[9px] font-medium bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded flex-shrink-0">streaming</span>
                     )}
-                    {isStreamingEntry(entry) === false && (
+                    {streamType === 'batch' && (
                       <span className="text-[9px] font-medium bg-gray-500/20 text-gray-400 px-1.5 py-0.5 rounded flex-shrink-0">batch</span>
                     )}
                   </div>
@@ -181,16 +181,14 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
                 {/* Enable/Disable toggle */}
                 <Toggle checked={isEnabled} onChange={() => toggleEnabled(index)} size="sm" />
 
-                {/* Remove */}
-                {chain.length > 1 && (
-                  <button type="button" onClick={() => removeEntry(index)}
-                    className="opacity-0 group-hover:opacity-100 flex-shrink-0 p-1 rounded hover:bg-red-500/10 transition-opacity cursor-pointer">
-                    <Trash2 className="w-3 h-3 text-red-400" />
-                  </button>
-                )}
+                {/* Delete — always visible on hover */}
+                <button type="button" onClick={() => removeEntry(index)}
+                  className="opacity-0 group-hover:opacity-100 flex-shrink-0 p-1 rounded hover:bg-red-500/10 transition-opacity cursor-pointer">
+                  <Trash2 className="w-3 h-3 text-red-400" />
+                </button>
               </div>
 
-              {/* Arrow connector */}
+              {/* Arrow connector between items */}
               {!isLast && chain.length > 1 && (
                 <div className="flex items-center justify-center py-0.5">
                   <ChevronDown className="w-3 h-3" style={{ color: 'var(--color-text-muted)', opacity: 0.4 }} />
@@ -214,7 +212,9 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
                 style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}>
                 {providers.map(p => {
                   const pAny = p as { id: string; label: string; streaming?: boolean };
-                  const suffix = stage === 'stt' ? (pAny.streaming ? ' (streaming)' : ' (batch)') : '';
+                  const suffix = stage === 'stt'
+                    ? (pAny.streaming ? ' (streaming)' : ' (batch)')
+                    : '';
                   return <option key={p.id} value={p.id}>{p.label}{suffix}</option>;
                 })}
               </select>

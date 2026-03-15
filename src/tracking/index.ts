@@ -18,6 +18,10 @@ export type { SpendRecord, SpendSummary, BudgetConfig, BudgetStatus } from './sp
 export { DEFAULT_PRICING_TABLE, lookupPricing, estimateRequestCost } from './pricing';
 export type { ModelPricing } from './pricing';
 
+// ── Budget Guard ─────────────────────────────────────────────────────────
+export { BudgetGuard, BudgetExceededError } from './budget-guard';
+export type { BudgetGuardConfig, BudgetCheckResult } from './budget-guard';
+
 // ── Cost Anomaly Detector ─────────────────────────────────────────────────
 export { createCostAnomalyDetector } from './cost-anomaly-detector';
 export type { CostAnomaly, CostAnomalyDetectorConfig } from './cost-anomaly-detector';
