@@ -45,15 +45,18 @@ export class ModalTTSProvider implements TTSProvider {
     const rawVoice = (request.voice ?? '').toLowerCase();
     const voice = VALID_VOICES.includes(rawVoice) ? rawVoice : 'serena';
 
-    const res = await fetch(`${this.endpoint}/v1/audio/speech`, {
+    // Use /v1/tts when voice cloning (reference_audio), /v1/audio/speech for presets
+    const hasClone = Boolean(request.referenceAudio && request.refText);
+    const ttsUrl = hasClone ? `${this.endpoint}/v1/tts` : `${this.endpoint}/v1/audio/speech`;
+    const ttsBody: Record<string, unknown> = hasClone
+      ? { text: request.input, language: 'English', speaker: voice,
+          reference_audio: request.referenceAudio, ref_text: request.refText }
+      : { model: 'qwen3-tts', input: request.input, voice, response_format: 'wav' };
+
+    const res = await fetch(ttsUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'qwen3-tts',
-        input: request.input,
-        voice,
-        response_format: 'wav',
-      }),
+      body: JSON.stringify(ttsBody),
     });
 
     if (!res.ok) {
