@@ -1,13 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
-import { deployGpu, terminateGpu, getGpuLogs } from '@/lib/gateway';
+import { deployGpu, terminateGpu, getGpuLogs, getProviderConfig, patchProviderConfig } from '@/lib/gateway';
 import {
-  Card, CardHeader, CardBody, Button, FormSelect, StatusBadge,
-  AlertBanner, CardSectionHeader, SectionHeader,
+  Card, CardHeader, CardBody, Button, FormSelect, FormInput, StatusBadge,
+  AlertBanner, CardSectionHeader, SectionHeader, SaveBar,
 } from '@/components/ui';
-import { Cpu, Play, Square, ScrollText, RefreshCw, Zap, ServerCog, AlertCircle, Loader2, Check } from 'lucide-react';
+import { Cpu, Play, Square, ScrollText, RefreshCw, Zap, ServerCog, AlertCircle, Loader2, Check, Timer } from 'lucide-react';
 import { DOCKER_IMAGES, GPU_TYPES } from './provider-types';
 
 function formatUptime(sec: number): string {
@@ -16,6 +16,8 @@ function formatUptime(sec: number): string {
   const s = Math.floor(sec % 60);
   return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
+
+const TIMEOUT_PRESETS = [5, 10, 15, 30, 60, 0];
 
 export function GpuDeploySection() {
   const { gpu, error: gpuError, refresh } = useGpuStatus(true, 5000);
@@ -27,6 +29,45 @@ export function GpuDeploySection() {
   const [logs, setLogs] = useState<string | null>(null);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  // Idle timeout
+  const [idleTimeoutMin, setIdleTimeoutMin] = useState(15);
+  const [customTimeout, setCustomTimeout] = useState('');
+  const [showCustom, setShowCustom] = useState(false);
+  const [timeoutDirty, setTimeoutDirty] = useState(false);
+  const [timeoutSaving, setTimeoutSaving] = useState(false);
+  const [timeoutSaved, setTimeoutSaved] = useState(false);
+
+  useEffect(() => {
+    getProviderConfig().then((cfg: any) => {
+      if (typeof cfg.idleTimeoutMin === 'number') setIdleTimeoutMin(cfg.idleTimeoutMin);
+    }).catch(() => {});
+  }, []);
+
+  const handleTimeoutChange = (min: number) => {
+    setIdleTimeoutMin(min);
+    setTimeoutDirty(true);
+    setTimeoutSaved(false);
+    setShowCustom(false);
+  };
+
+  const handleCustomTimeout = () => {
+    const val = parseInt(customTimeout);
+    if (!isNaN(val) && val >= 0) {
+      handleTimeoutChange(val);
+      setCustomTimeout('');
+    }
+  };
+
+  const saveTimeout = async () => {
+    setTimeoutSaving(true);
+    try {
+      await patchProviderConfig({ idleTimeoutMin } as any);
+      setTimeoutDirty(false);
+      setTimeoutSaved(true);
+      setTimeout(() => setTimeoutSaved(false), 3000);
+    } catch {} finally { setTimeoutSaving(false); }
+  };
 
   const isActive = gpu && gpu.status !== 'idle' && gpu.status !== 'error';
 
@@ -373,6 +414,72 @@ export function GpuDeploySection() {
           </div>
         </div>
       )}
+
+      {/* Auto-stop / Idle timeout */}
+      <Card>
+        <CardHeader>
+          <CardSectionHeader icon={Timer} color="amber" title="Auto-Stop" subtitle="Terminate GPU after idle period to save costs" />
+        </CardHeader>
+        <CardBody className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            {TIMEOUT_PRESETS.map(min => (
+              <button key={min} onClick={() => handleTimeoutChange(min)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer"
+                style={{
+                  background: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 10%, transparent)' : 'transparent',
+                  borderColor: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 35%, transparent)' : 'var(--color-border)',
+                  color: idleTimeoutMin === min ? '#fbbf24' : 'var(--color-text-muted)',
+                }}>
+                {min === 0 ? 'Never' : `${min} min`}
+              </button>
+            ))}
+            {/* Custom value */}
+            {!showCustom && !TIMEOUT_PRESETS.includes(idleTimeoutMin) && idleTimeoutMin > 0 && (
+              <span className="px-3 py-1.5 rounded-lg text-xs font-medium border"
+                style={{ background: 'color-mix(in srgb, #f59e0b 10%, transparent)', borderColor: 'color-mix(in srgb, #f59e0b 35%, transparent)', color: '#fbbf24' }}>
+                {idleTimeoutMin} min
+              </span>
+            )}
+            {showCustom ? (
+              <div className="flex items-center gap-1.5">
+                <input type="number" min="1" value={customTimeout} onChange={e => setCustomTimeout(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleCustomTimeout(); if (e.key === 'Escape') setShowCustom(false); }}
+                  placeholder="min" autoFocus
+                  className="w-20 rounded-lg border px-2 py-1.5 text-xs font-mono"
+                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', color: 'var(--color-text)' }} />
+                <Button variant="primary" size="sm" onClick={handleCustomTimeout} disabled={!customTimeout}>Set</Button>
+                <Button variant="ghost" size="sm" onClick={() => setShowCustom(false)}>Cancel</Button>
+              </div>
+            ) : (
+              <button onClick={() => setShowCustom(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-dashed transition-all cursor-pointer hover:border-[var(--color-text-muted)]"
+                style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
+                Custom...
+              </button>
+            )}
+          </div>
+          <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+            {idleTimeoutMin === 0
+              ? 'GPU will stay running until manually terminated.'
+              : `GPU will auto-terminate after ${idleTimeoutMin} minutes without requests.`
+            }
+          </p>
+          {gpu && gpu.status === 'ready' && gpu.idleSec > 0 && (
+            <p className="text-xs" style={{ color: idleTimeoutMin > 0 && gpu.idleSec > idleTimeoutMin * 30 ? '#fbbf24' : 'var(--color-text-muted)' }}>
+              Current idle time: {formatUptime(gpu.idleSec)}
+              {idleTimeoutMin > 0 && ` / ${idleTimeoutMin}min`}
+            </p>
+          )}
+          {timeoutDirty && (
+            <div className="flex items-center gap-3 pt-2">
+              <Button onClick={saveTimeout} isLoading={timeoutSaving} loadingText="Saving..." size="sm">
+                <Check className="w-3.5 h-3.5" /> Save Timeout
+              </Button>
+              {timeoutSaved && <span className="text-xs text-emerald-400 flex items-center gap-1"><Check className="w-3 h-3" /> Saved</span>}
+            </div>
+          )}
+        </CardBody>
+      </Card>
 
       {/* Logs */}
       <Card>

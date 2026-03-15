@@ -34,6 +34,7 @@ export function ProvidersSection() {
   const [gpuImage, setGpuImage] = useState(DEFAULT_DOCKER_IMAGES[0].url);
   const [gpuTypes, setGpuTypes] = useState<string[]>([GPU_TYPES[0].id]);
   const [gpuProvider, setGpuProvider] = useState('');
+  const [idleTimeoutMin, setIdleTimeoutMin] = useState(15);
 
   // Add image form
   const [showAddImage, setShowAddImage] = useState(false);
@@ -65,6 +66,7 @@ export function ProvidersSection() {
         if (cfg.gpuTypes?.length) setGpuTypes(cfg.gpuTypes);
         if (cfg.gpuProvider !== undefined) setGpuProvider(cfg.gpuProvider);
         if (cfg.dockerImages?.length) setDockerImages(cfg.dockerImages);
+        if (typeof cfg.idleTimeoutMin === 'number') setIdleTimeoutMin(cfg.idleTimeoutMin);
         setConfigLoaded(true);
       })
       .catch(() => setConfigLoaded(true));
@@ -73,7 +75,7 @@ export function ProvidersSection() {
   // Track dirty
   useEffect(() => {
     if (configLoaded) setDirty(true);
-  }, [mode, profiles, activeProfileId, pipelineStt, pipelineLlm, pipelineTts, gpuImage, gpuTypes, gpuProvider, dockerImages]);
+  }, [mode, profiles, activeProfileId, pipelineStt, pipelineLlm, pipelineTts, gpuImage, gpuTypes, gpuProvider, dockerImages, idleTimeoutMin]);
 
   // Save
   const handleSave = async () => {
@@ -83,6 +85,7 @@ export function ProvidersSection() {
         mode, profiles, activeProfileId,
         pipelineStt, pipelineLlm, pipelineTts,
         gpuImage, gpuTypes, gpuProvider, dockerImages,
+        idleTimeoutMin,
       } as any);
       setDirty(false);
       setSaved(true);
@@ -336,6 +339,31 @@ export function ProvidersSection() {
                     );
                   })}
                 </div>
+              </div>
+              {/* Idle timeout */}
+              <div>
+                <label className="block text-xs font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
+                  Auto-stop after idle
+                </label>
+                <div className="flex items-center gap-2">
+                  {[5, 10, 15, 30, 60, 0].map(min => (
+                    <button key={min} onClick={() => setIdleTimeoutMin(min)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer"
+                      style={{
+                        background: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 10%, transparent)' : 'transparent',
+                        borderColor: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 35%, transparent)' : 'var(--color-border)',
+                        color: idleTimeoutMin === min ? '#fbbf24' : 'var(--color-text-muted)',
+                      }}>
+                      {min === 0 ? 'Never' : `${min}min`}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] mt-1.5" style={{ color: 'var(--color-text-muted)' }}>
+                  {idleTimeoutMin === 0
+                    ? 'GPU will stay running until manually terminated'
+                    : `GPU will auto-terminate after ${idleTimeoutMin} minutes without requests`
+                  }
+                </p>
               </div>
             </CardBody>
           </Card>
