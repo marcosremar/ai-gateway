@@ -258,14 +258,17 @@ class GatewaySDK:
         params = {"source": opts.source, "target": opts.target}
         if opts.speaker:
             params["speaker"] = opts.speaker
+
+        # reference_audio is base64 (~500KB) — send as header, not query param
+        headers: dict[str, str] = {"Content-Type": "audio/wav"}
         if opts.reference_audio:
-            params["reference_audio"] = opts.reference_audio
+            headers["X-Reference-Audio"] = opts.reference_audio
 
         r = await self._request_with_retry("post",
             "/v1/speech",
             content=audio,
             params=params,
-            headers={"Content-Type": "audio/wav"},
+            headers=headers,
             timeout=self._timeouts.pipeline,
         )
         self._check_response(r, "/v1/speech")
