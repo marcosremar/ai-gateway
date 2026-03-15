@@ -214,8 +214,8 @@ export function isTimeoutError(err: unknown): boolean {
 
 // ─── Error classification ─────────────────────────────────────────────────────
 
-/** HTTP status codes that are retryable (transient server errors + rate limit + auth) */
-const RETRYABLE_STATUSES = new Set([401, 402, 403, 429, 500, 502, 503, 504]);
+/** HTTP status codes that are retryable (transient server errors + rate limit + auth + not found) */
+const RETRYABLE_STATUSES = new Set([401, 402, 403, 404, 429, 500, 502, 503, 504]);
 
 /** Error codes that should be treated as retryable even on 400 status (provider-specific issues) */
 const RETRYABLE_ERROR_CODES = new Set(['model_terms_required', 'model_not_found', 'model_decommissioned']);
