@@ -388,11 +388,12 @@ export async function withProviderFallback<T>(
 
       const t0 = Date.now();
 
+      // Resolve effective timeout outside try so catch can reference it
+      const effectiveTimeout = adaptiveTimeout
+        ? adaptiveTimeout.getTimeout(entry.provider, entry.model ?? '*', timeoutMs ?? 0)
+        : timeoutMs;
+
       try {
-        // ── Resolve effective timeout ─────────────────────────────────────────
-        const effectiveTimeout = adaptiveTimeout
-          ? adaptiveTimeout.getTimeout(entry.provider, entry.model ?? '*', timeoutMs ?? 0)
-          : timeoutMs;
 
         // ── Execute with optional timeout ─────────────────────────────────────
         let call = fn(entry, i);
@@ -454,6 +455,14 @@ export async function withProviderFallback<T>(
           performanceRanker.record(
             perfStage, entry.provider, entry.model ?? '*', elapsed, false,
           );
+        }
+
+        // Record failure latency for adaptive timeout calibration
+        // On timeout: record the ceiling value so p95 reflects the cap was hit
+        // On other failures: record actual elapsed so fast-fail providers don't inflate timeouts
+        if (adaptiveTimeout) {
+          const latencyForTimeout = isTimeout && effectiveTimeout ? effectiveTimeout : elapsed;
+          adaptiveTimeout.record(entry.provider, entry.model ?? '*', latencyForTimeout);
         }
 
         // ── Non-retryable: abort everything ──────────────────────────────────

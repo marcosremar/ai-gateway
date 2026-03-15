@@ -80,6 +80,7 @@ export interface AIProfile {
   voice?: string;
   audioFormat?: TTSAudioFormat;
   voiceInstructions?: string;
+  referenceAudio?: string;  // base64 WAV for voice cloning (MOSS-TTS/Qwen3-TTS)
 
   // LLM options
   temperature?: number;
@@ -122,6 +123,16 @@ export interface AIClientOptions {
   gpuRegistry?: import('../gpu-providers/registry').GpuProviderRegistry;
   /** Performance ranker for reordering fallback chains by observed latency. */
   performanceRanker?: import('../providers/performance-ranker').PerformanceRanker;
+  /** Adaptive timeout calculator for per-provider timeout tuning. */
+  adaptiveTimeout?: import('../providers/adaptive-timeout').AdaptiveTimeoutCalculator;
+  /** TTFAC tracker for TTS routing by time-to-first-audio-chunk. */
+  ttfacTracker?: import('../providers/ttfac-tracker').TtfacTracker;
+  /** Budget guard for spend enforcement with graceful degradation. */
+  budgetGuard?: import('../tracking/budget-guard').BudgetGuard;
+  /** Daily spend limit in USD (used with budgetGuard). */
+  dailyLimitUsd?: number;
+  /** Enable chain auto-diversification (inject backup from different provider family). */
+  diversifyChains?: boolean;
 }
 
 /** Result of deploying a GPU instance via AIClient.deploy(). */

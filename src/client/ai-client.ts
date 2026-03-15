@@ -35,7 +35,12 @@ import { withProviderFallback } from '../providers/fallback';
 import { resolveApiKey } from '../providers/chain-builder';
 import { resolveProfile, mergeProfiles } from './presets';
 import { findChainForStage, resolveDeclarativeChain } from '../providers/declarative-chain';
+import { diversifyChain } from '../providers/chain-diversifier';
 import type { SpendTracker } from '../tracking/spend-tracker';
+import type { BudgetGuard } from '../tracking/budget-guard';
+import type { PerformanceRanker } from '../providers/performance-ranker';
+import type { AdaptiveTimeoutCalculator } from '../providers/adaptive-timeout';
+import type { TtfacTracker } from '../providers/ttfac-tracker';
 import { defaultCreditBlockTracker, hashApiKey } from '../providers/credit-block';
 import { defaultLogger } from '../logger';
 
@@ -52,6 +57,12 @@ export class AIClient {
   private readonly loadAutoscalerConfig?: () => Promise<import('../types').AutoScalerConfig | null>;
   private readonly log: Logger;
   private readonly spendTracker?: SpendTracker;
+  private readonly performanceRanker?: PerformanceRanker;
+  private readonly adaptiveTimeout?: AdaptiveTimeoutCalculator;
+  private readonly ttfacTracker?: TtfacTracker;
+  private readonly budgetGuard?: BudgetGuard;
+  private readonly dailyLimitUsd: number;
+  private readonly diversifyChains: boolean;
   /** Tracks deployed instances for cleanup. */
   private readonly deployedInstances = new Map<string, { provider: string; credentials: ProviderCredentials }>();
 
@@ -63,6 +74,12 @@ export class AIClient {
     this.loadAutoscalerConfig = options.loadAutoscalerConfig;
     this.log = options.logger ?? defaultLogger;
     this.spendTracker = options.spendTracker;
+    this.performanceRanker = options.performanceRanker;
+    this.adaptiveTimeout = options.adaptiveTimeout;
+    this.ttfacTracker = options.ttfacTracker;
+    this.budgetGuard = options.budgetGuard;
+    this.dailyLimitUsd = options.dailyLimitUsd ?? 0;
+    this.diversifyChains = options.diversifyChains ?? false;
 
     this.defaultProfile = options.defaultProfile
       ? resolveProfile(options.defaultProfile)
@@ -140,11 +157,19 @@ export class AIClient {
   ): Promise<TranscribeResult> {
     const profile = this.resolveEffectiveProfile(profileOverride);
     const { entries: chain, overrideOptions } = this.buildChain(profile, 'stt');
-    const fallbackOpts = this.buildFallbackOptions(profile, 'STT', overrideOptions);
+    const fallbackOpts = this.buildFallbackOptions(profile, 'STT', 'stt', overrideOptions);
+
+    // Budget guard: check spend and possibly downgrade models
+    let effectiveChain = chain;
+    if (this.budgetGuard && this.userId && this.dailyLimitUsd > 0) {
+      const check = await this.budgetGuard.checkAndDowngrade(this.userId, chain, 'stt', this.dailyLimitUsd);
+      effectiveChain = check.chain;
+      if (check.downgraded) this.log.warn(check.reason);
+    }
 
     const t0 = Date.now();
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
-      chain,
+      effectiveChain,
       async (entry) => {
         const provider = this.resolveProvider(id => this.registry.getSTTProvider(id), entry.provider as ProviderId, profile);
         return provider.transcribe({
@@ -179,11 +204,19 @@ export class AIClient {
   ): Promise<ChatResult> {
     const profile = this.resolveEffectiveProfile(profileOverride);
     const { entries: chain, overrideOptions } = this.buildChain(profile, 'llm');
-    const fallbackOpts = this.buildFallbackOptions(profile, 'LLM', overrideOptions);
+    const fallbackOpts = this.buildFallbackOptions(profile, 'LLM', 'llm', overrideOptions);
+
+    // Budget guard: check spend and possibly downgrade models
+    let effectiveChain = chain;
+    if (this.budgetGuard && this.userId && this.dailyLimitUsd > 0) {
+      const check = await this.budgetGuard.checkAndDowngrade(this.userId, chain, 'llm', this.dailyLimitUsd);
+      effectiveChain = check.chain;
+      if (check.downgraded) this.log.warn(check.reason);
+    }
 
     const t0 = Date.now();
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
-      chain,
+      effectiveChain,
       async (entry) => {
         const provider = this.resolveProvider(id => this.registry.getLLMProvider(id), entry.provider as ProviderId, profile);
         return provider.chat({
@@ -233,11 +266,21 @@ export class AIClient {
   ): Promise<SynthesizeResult> {
     const profile = this.resolveEffectiveProfile(profileOverride);
     const { entries: chain, overrideOptions } = this.buildChain(profile, 'tts');
-    const fallbackOpts = this.buildFallbackOptions(profile, 'TTS', overrideOptions);
+    const fallbackOpts = this.buildFallbackOptions(profile, 'TTS', 'tts', overrideOptions);
+
+    // TTFAC-aware routing: reorder TTS chain by time-to-first-audio-chunk
+    let effectiveChain = this.ttfacTracker ? this.ttfacTracker.rankByTtfac(chain) : chain;
+
+    // Budget guard: check spend and possibly downgrade models
+    if (this.budgetGuard && this.userId && this.dailyLimitUsd > 0) {
+      const check = await this.budgetGuard.checkAndDowngrade(this.userId, effectiveChain, 'tts', this.dailyLimitUsd);
+      effectiveChain = check.chain;
+      if (check.downgraded) this.log.warn(check.reason);
+    }
 
     const t0 = Date.now();
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
-      chain,
+      effectiveChain,
       async (entry) => {
         const provider = this.resolveProvider(id => this.registry.getTTSProvider(id), entry.provider as ProviderId, profile);
         return provider.synthesize({
@@ -246,10 +289,18 @@ export class AIClient {
           voice: profile.voice ?? 'coral',
           responseFormat: profile.audioFormat,
           instructions: profile.voiceInstructions,
+          referenceAudio: profile.referenceAudio,
         });
       },
       fallbackOpts,
     );
+
+    const latencyMs = Date.now() - t0;
+
+    // Record TTFAC sample (for non-streaming, TTFAC ≈ total latency)
+    if (this.ttfacTracker) {
+      this.ttfacTracker.record(usedProvider, usedModel ?? '*', latencyMs, latencyMs);
+    }
 
     return {
       audio: result.audio,
@@ -257,7 +308,7 @@ export class AIClient {
       provider: usedProvider,
       model: usedModel,
       fallbackUsed: attempts > 1,
-      latencyMs: Date.now() - t0,
+      latencyMs,
     };
   }
 
@@ -270,7 +321,7 @@ export class AIClient {
   ): Promise<ImageResult> {
     const profile = this.resolveEffectiveProfile(profileOverride);
     const { entries: chain, overrideOptions } = this.buildChain(profile, 'image');
-    const fallbackOpts = this.buildFallbackOptions(profile, 'Image', overrideOptions);
+    const fallbackOpts = this.buildFallbackOptions(profile, 'Image', 'image', overrideOptions);
 
     const t0 = Date.now();
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
@@ -310,7 +361,7 @@ export class AIClient {
   ): Promise<OmniResult> {
     const profile = this.resolveEffectiveProfile(profileOverride);
     const { entries: chain, overrideOptions } = this.buildChain(profile, 'omni');
-    const fallbackOpts = this.buildFallbackOptions(profile, 'Omni', overrideOptions);
+    const fallbackOpts = this.buildFallbackOptions(profile, 'Omni', 'omni', overrideOptions);
 
     const t0 = Date.now();
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
@@ -704,19 +755,28 @@ export class AIClient {
     // is duplicated in the chain. This gives automatic redundancy via the existing
     // fallback mechanism — if replica 1 fails, replica 2 (same provider) is tried
     // before moving to the next provider. Cloud APIs ignore replicas.
-    const entries: FallbackEntry[] = [];
+    let entries: FallbackEntry[] = [];
     for (const c of configs) {
       const count = (c.selfHosted && c.alwaysActive) ? Math.max(c.replicas ?? 1, 1) : 1;
       for (let r = 0; r < count; r++) {
         entries.push({ provider: c.provider, model: c.model });
       }
     }
+
+    // Auto-diversify: inject backup from a different provider family if chain is mono-provider
+    if (this.diversifyChains) {
+      const availableProviders = new Set<string>();
+      for (const id of this.registry.listProviders()) availableProviders.add(id);
+      entries = diversifyChain(entries, stage, availableProviders);
+    }
+
     return { entries };
   }
 
   private buildFallbackOptions(
     profile: AIProfile,
     logPrefix: string,
+    stage: string,
     overrideOptions?: Partial<FallbackOptions>,
   ): FallbackOptions {
     // Build apiKeyHashes from profile keys for credit-block tracking
@@ -732,6 +792,9 @@ export class AIClient {
       logPrefix: `[AIClient:${logPrefix}]`,
       creditBlockTracker: defaultCreditBlockTracker,
       apiKeyHashes,
+      // Wire intelligence modules into fallback
+      ...(this.performanceRanker && { performanceRanker: this.performanceRanker, stage }),
+      ...(this.adaptiveTimeout && { adaptiveTimeout: this.adaptiveTimeout }),
       ...profile.fallbackOptions,
       ...overrideOptions,
     };

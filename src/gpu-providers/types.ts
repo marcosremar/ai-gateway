@@ -53,7 +53,8 @@ export interface InstanceSpec {
   bareMetal?: boolean;
   /** Ports to expose on the instance (RunPod format, e.g. ['8000/http', '22/tcp']). Defaults to provider-specific defaults. */
   ports?: string[];
-  /** RunPod cloud type: 'COMMUNITY' (cheap, default) or 'SECURE' (reliable). */
+  /** RunPod cloud type. IMPORTANT: ALWAYS use 'SECURE'. NEVER use 'COMMUNITY' — community
+   *  machines are unreliable third-party hardware that frequently die mid-task. */
   cloudType?: 'COMMUNITY' | 'SECURE';
   /** RunPod interruptible (spot) instance. Default false (on-demand). Set true for cheaper spot pricing. */
   interruptible?: boolean;

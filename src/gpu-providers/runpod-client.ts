@@ -195,8 +195,10 @@ export class RunpodClient extends AbstractGpuProvider {
       // HTTP for proxy access, TCP for SSH, UDP for WebRTC media (STUN/TURN range)
       ports: spec.ports ?? ['8000/http', '22/tcp', '8001/udp'],
       env: envVars,
-      // Cloud type: COMMUNITY (default) or SECURE
-      cloudType: spec.cloudType ?? 'COMMUNITY',
+      // IMPORTANT: ALWAYS use SECURE cloud. NEVER use COMMUNITY — community machines are
+      // unreliable third-party hardware that dies mid-task (pods exit after ~8min, CDI GPU errors,
+      // OOM, etc.). Secure Cloud uses RunPod's own verified servers.
+      cloudType: 'SECURE',
       // On-demand by default (reliable). Set interruptible=true for spot (cheaper but can be interrupted).
       interruptible: spec.interruptible ?? false,
       // Region filter: e.g. 'US-TX-3', 'EU-RO-1', 'CA-MTL-1'
@@ -621,12 +623,13 @@ export class RunpodClient extends AbstractGpuProvider {
         const displayName = (gpu.displayName || gpu.id || '') as string;
         const fullId = (gpu.id || '') as string;
         const vram = (gpu.memoryInGb || 0) as number;
-        const communityPrice = (gpu.communityPrice || 0) as number;
-        const communitySpotPrice = (gpu.communitySpotPrice || 0) as number;
+        // IMPORTANT: Use SECURE pricing only — NEVER use community machines (unreliable third-party hardware)
+        const securePrice = (gpu.securePrice || 0) as number;
+        const secureSpotPrice = (gpu.secureSpotPrice || 0) as number;
         // stockStatus was removed from RunPod GraphQL API — infer from price
-        const available = communityPrice > 0 ? -1 : 0;
+        const available = securePrice > 0 ? -1 : 0;
 
-        if (communityPrice === 0) continue;
+        if (securePrice === 0) continue;  // Skip GPUs not available on Secure Cloud
         if (filterSet && !filterSet.has(fullId.toLowerCase()) && !filterSet.has(displayName.toLowerCase())) continue;
 
         offers.push({
@@ -634,8 +637,8 @@ export class RunpodClient extends AbstractGpuProvider {
           gpuType: fullId,    // Full RunPod API name (e.g. "NVIDIA RTX A5000") — matches allowlist and createPod
           gpuName: fullId,    // Use fullId so it matches ALLOWED_GPU_TYPES format
           available,
-          pricePerHr: communityPrice,
-          spotPricePerHr: communitySpotPrice,
+          pricePerHr: securePrice,
+          spotPricePerHr: secureSpotPrice,
           region: '',
           vram,
           offerId: fullId,
