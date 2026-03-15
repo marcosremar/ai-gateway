@@ -6,7 +6,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'http';
 import { randomUUID } from 'crypto';
 import { existsSync, readFileSync, statSync } from 'fs';
-import { join, extname } from 'path';
+import { join, extname, resolve } from 'path';
 import { validateAuth } from './middleware/auth';
 import { RateLimiter } from './middleware/rate-limit';
 import { handleChatCompletions } from './routes/chat-completions';
@@ -201,8 +201,16 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse, requestId: string): boolean {
-  // Prevent path traversal
-  const safePath = urlPath.replace(/\.\./g, '').replace(/\/+/g, '/');
+  // Prevent path traversal — resolve to absolute path and verify it stays within staticDir
+  const resolvedStaticDir = resolve(staticDir);
+  const decodedPath = decodeURIComponent(urlPath).replace(/\/+/g, '/');
+  const resolvedPath = resolve(resolvedStaticDir, decodedPath.replace(/^\/+/, ''));
+  if (!resolvedPath.startsWith(resolvedStaticDir)) {
+    res.writeHead(403, { 'Content-Type': 'application/json', 'X-Request-Id': requestId, ...SECURITY_HEADERS });
+    res.end(JSON.stringify({ error: 'Forbidden' }));
+    return true;
+  }
+  const safePath = decodedPath;
 
   // Try exact file, then with .html, then as directory/index.html
   const candidates = [
@@ -216,7 +224,10 @@ function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse
     candidates.unshift(join(staticDir, 'index.html'));
   }
 
-  for (const filePath of candidates) {
+  // Validate all candidates are within static dir
+  const validCandidates = candidates.filter(c => resolve(c).startsWith(resolvedStaticDir));
+
+  for (const filePath of validCandidates) {
     try {
       if (!existsSync(filePath)) continue;
       const stat = statSync(filePath);
@@ -272,7 +283,7 @@ export function createProxyServer(config: ProxyConfig): Server {
     const requestId = (req.headers['x-request-id'] as string) || randomUUID();
 
     // CORS origin validation
-    const corsOriginsEnv = process.env.CORS_ORIGINS || '*';
+    const corsOriginsEnv = process.env.CORS_ORIGINS || 'http://localhost:4000,http://localhost:3000';
     const requestOrigin = req.headers.origin || '';
     let allowedOrigin = '*';
     if (corsOriginsEnv !== '*') {
@@ -371,6 +382,11 @@ export function createProxyServer(config: ProxyConfig): Server {
           const boundaryMatch = contentType.match(/boundary=([^\s;]+)/);
           if (boundaryMatch) {
             const boundary = boundaryMatch[1];
+            // Validate boundary to prevent injection attacks (RFC 2046: up to 70 chars, alphanumeric + some symbols)
+            if (!/^[\w\-'()+,./:=? ]{1,70}$/.test(boundary)) {
+              sendError(res, 400, 'Invalid multipart boundary', requestId);
+              return;
+            }
             const parts = parseMultipart(rawBody, boundary);
             const fields: Record<string, string> = {};
             for (const part of parts) {
@@ -449,7 +465,7 @@ export function createProxyServer(config: ProxyConfig): Server {
 export function startProxy(config: ProxyConfig): Promise<Server> {
   const server = createProxyServer(config);
   const port = config.port || 4000;
-  const hostname = config.hostname || '0.0.0.0';
+  const hostname = config.hostname || process.env.GATEWAY_HOST || '127.0.0.1';
 
   return new Promise((resolve, reject) => {
     server.on('error', (err: NodeJS.ErrnoException) => {

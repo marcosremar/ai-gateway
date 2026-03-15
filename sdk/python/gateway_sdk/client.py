@@ -53,12 +53,21 @@ from gateway_sdk.types import (
 log = logging.getLogger(__name__)
 
 
+_RETRYABLE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, ConnectionResetError, OSError)
+
+
 class GatewaySDK:
     """Async HTTP client for the BabelCast AI Gateway.
 
     All inference methods are GPU-aware — the gateway routes to GPU pod
     when available, falls back to cloud (Groq) automatically.
+
+    Retries connection errors (ConnectError, ConnectTimeout, ConnectionReset,
+    OSError) with exponential backoff. HTTP errors (4xx, 5xx) and read/write
+    timeouts are NOT retried.
     """
+
+    RETRY_BACKOFF = [0.5, 1.0, 2.0, 4.0]  # seconds between retries (4 retries = 5 total attempts)
 
     def __init__(
         self,
@@ -111,6 +120,30 @@ class GatewaySDK:
             except Exception:
                 pass  # loop already closed or no loop — client will be GC'd
 
+    # ── Retry wrapper ──────────────────────────────────────────────────────
+
+    async def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Execute HTTP request with retry on connection errors.
+
+        Retries on ConnectError, ConnectTimeout, ConnectionResetError, OSError.
+        Does NOT retry on HTTP errors (4xx/5xx) or read/write timeouts.
+        """
+        last_err: BaseException | None = None
+        for attempt in range(1 + len(self.RETRY_BACKOFF)):
+            try:
+                http = self._get_http()
+                return await getattr(http, method)(url, **kwargs)
+            except _RETRYABLE_ERRORS as e:
+                last_err = e
+                if attempt < len(self.RETRY_BACKOFF):
+                    delay = self.RETRY_BACKOFF[attempt]
+                    log.debug("Retry %d/%d after %s: %s", attempt + 1, len(self.RETRY_BACKOFF), type(e).__name__, e)
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+
+        raise last_err  # unreachable, but satisfies type checker
+
     # ── Inference ─────────────────────────────────────────────────────────
 
     async def transcribe(self, audio: bytes, language: str = "fr", prompt: str = "") -> TranscribeResponse:
@@ -119,11 +152,10 @@ class GatewaySDK:
         Args:
             prompt: Previous transcription text for Whisper context (initial_prompt).
         """
-        http = self._get_http()
         params: dict[str, str] = {"language": language}
         if prompt:
             params["prompt"] = prompt
-        r = await http.post(
+        r = await self._request_with_retry("post",
             "/v1/transcribe",
             content=audio,
             params=params,
@@ -159,7 +191,6 @@ class GatewaySDK:
         Returns EnsembleTranscribeResponse with .consensus (best text) and .providers dict.
         """
         from gateway_sdk.types import EnsembleTranscribeResponse
-        http = self._get_http()
         params: dict[str, str] = {"language": language, "timeout_ms": str(timeout_ms)}
         if prompt:
             params["prompt"] = prompt
@@ -167,7 +198,7 @@ class GatewaySDK:
             params["providers"] = ",".join(providers)
         # HTTP timeout = provider deadline + similarity overhead + network buffer
         http_timeout = timeout_ms / 1000 + 5.0
-        r = await http.post(
+        r = await self._request_with_retry("post",
             "/v1/transcribe/ensemble",
             content=audio,
             params=params,
@@ -200,13 +231,12 @@ class GatewaySDK:
         if not text.strip():
             return TranslateResponse(translated_text="", used_gpu=False)
 
-        http = self._get_http()
         body: dict = {"text": text, "source_lang": source_lang, "target_lang": target_lang}
         if glossary:
             body["glossary"] = glossary
         if context:
             body["context"] = context
-        r = await http.post(
+        r = await self._request_with_retry("post",
             "/v1/translate",
             json=body,
             timeout=self._timeouts.translate,
@@ -229,8 +259,7 @@ class GatewaySDK:
         if opts.speaker:
             params["speaker"] = opts.speaker
 
-        http = self._get_http()
-        r = await http.post(
+        r = await self._request_with_retry("post",
             "/v1/speech",
             content=audio,
             params=params,
@@ -266,13 +295,12 @@ class GatewaySDK:
         Supports text and vision (multimodal content arrays).
         The gateway routes to the configured LLM provider.
         """
-        http = self._get_http()
         body: dict = {"model": model, "messages": messages}
         if temperature is not None:
             body["temperature"] = temperature
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
-        r = await http.post(
+        r = await self._request_with_retry("post",
             "/v1/chat/completions",
             json=body,
             timeout=self._timeouts.translate,
@@ -293,8 +321,7 @@ class GatewaySDK:
 
     async def get_api_keys(self) -> ApiKeysResponse:
         """Get configured API keys (masked) from the gateway."""
-        http = self._get_http()
-        r = await http.get("/v1/config/api-keys", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/v1/config/api-keys", timeout=self._timeouts.health)
         self._check_response(r, "/v1/config/api-keys")
         data = self._parse_json(r, "/v1/config/api-keys")
         keys = [ApiKeyEntry(**k) for k in data.get("keys", data if isinstance(data, list) else [])]
@@ -302,8 +329,7 @@ class GatewaySDK:
 
     async def set_api_keys(self, keys: dict[str, str]) -> ApiKeysResponse:
         """Update API keys on the gateway (persisted to .env)."""
-        http = self._get_http()
-        r = await http.post("/v1/config/api-keys", json={"keys": keys}, timeout=self._timeouts.health)
+        r = await self._request_with_retry("post","/v1/config/api-keys", json={"keys": keys}, timeout=self._timeouts.health)
         self._check_response(r, "/v1/config/api-keys")
         data = self._parse_json(r, "/v1/config/api-keys")
         entries = [ApiKeyEntry(**k) for k in data.get("keys", [])]
@@ -311,8 +337,7 @@ class GatewaySDK:
 
     async def get_provider_config(self) -> ProviderConfigResponse:
         """Get provider pipeline configuration from the gateway."""
-        http = self._get_http()
-        r = await http.get("/v1/config/providers", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/v1/config/providers", timeout=self._timeouts.health)
         self._check_response(r, "/v1/config/providers")
         data = self._parse_json(r, "/v1/config/providers")
         return ProviderConfigResponse(
@@ -331,8 +356,7 @@ class GatewaySDK:
 
     async def patch_provider_config(self, partial: dict) -> ProviderConfigResponse:
         """Patch (merge) provider pipeline configuration on the gateway."""
-        http = self._get_http()
-        r = await http.post("/v1/config/providers", json=partial, timeout=self._timeouts.health)
+        r = await self._request_with_retry("post","/v1/config/providers", json=partial, timeout=self._timeouts.health)
         self._check_response(r, "/v1/config/providers")
         data = self._parse_json(r, "/v1/config/providers")
         return ProviderConfigResponse(
@@ -351,8 +375,7 @@ class GatewaySDK:
 
     async def catalog(self) -> CatalogResponse:
         """Get the full provider/model/voice catalog from the gateway playground."""
-        http = self._get_http()
-        r = await http.get("/v1/playground/catalog", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/v1/playground/catalog", timeout=self._timeouts.health)
         self._check_response(r, "/v1/playground/catalog")
         data = self._parse_json(r, "/v1/playground/catalog")
         return CatalogResponse(
@@ -367,7 +390,6 @@ class GatewaySDK:
 
     async def deploy_gpu(self, options: DeployOptions) -> DeployResponse:
         """Deploy a GPU pod (non-blocking — returns immediately, poll gpu_status())."""
-        http = self._get_http()
         body: dict = {"apiKey": options.api_key}
         if options.docker_image:
             body["dockerImage"] = options.docker_image
@@ -390,7 +412,7 @@ class GatewaySDK:
         if options.interruptible is not None:
             body["interruptible"] = options.interruptible
 
-        r = await http.post(
+        r = await self._request_with_retry("post",
             "/v1/gpu/deploy",
             json=body,
             timeout=self._timeouts.deploy,
@@ -406,8 +428,7 @@ class GatewaySDK:
 
     async def gpu_status(self) -> GpuStatus:
         """Get current GPU deployment status, health, and active tier."""
-        http = self._get_http()
-        r = await http.get("/v1/gpu/status", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/v1/gpu/status", timeout=self._timeouts.health)
         self._check_response(r, "/v1/gpu/status")
         d = self._parse_json(r, "/v1/gpu/status")
         return GpuStatus(
@@ -431,8 +452,7 @@ class GatewaySDK:
 
     async def terminate_gpu(self, api_key: str) -> None:
         """Terminate the GPU pod."""
-        http = self._get_http()
-        r = await http.post(
+        r = await self._request_with_retry("post",
             "/v1/gpu/terminate",
             json={"apiKey": api_key},
             timeout=self._timeouts.deploy,
@@ -447,7 +467,6 @@ class GatewaySDK:
         limit: int = 100,
     ) -> GpuOffersResponse:
         """List available GPU offers across providers."""
-        http = self._get_http()
         params: dict[str, str] = {}
         if gpu_types:
             params["gpuTypes"] = ",".join(gpu_types)
@@ -457,7 +476,7 @@ class GatewaySDK:
             params["provider"] = provider
         if limit != 100:
             params["limit"] = str(limit)
-        r = await http.get(
+        r = await self._request_with_retry("get",
             "/v1/gpu/offers",
             params=params,
             timeout=30.0,
@@ -489,8 +508,7 @@ class GatewaySDK:
 
     async def gpu_logs(self) -> GpuLogsResponse:
         """Fetch recent GPU pod logs via SSH proxy."""
-        http = self._get_http()
-        r = await http.get("/v1/gpu/logs", timeout=self._timeouts.deploy)
+        r = await self._request_with_retry("get","/v1/gpu/logs", timeout=self._timeouts.deploy)
         self._check_response(r, "/v1/gpu/logs")
         d = self._parse_json(r, "/v1/gpu/logs")
         return GpuLogsResponse(
@@ -529,13 +547,12 @@ class GatewaySDK:
         self, since_id: int = 0, limit: int = 50
     ) -> RequestLogResponse:
         """Fetch request log entries and aggregate stats."""
-        http = self._get_http()
         params: dict[str, str] = {}
         if since_id > 0:
             params["since_id"] = str(since_id)
         if limit != 50:
             params["limit"] = str(limit)
-        r = await http.get(
+        r = await self._request_with_retry("get",
             "/v1/requests/log",
             params=params,
             timeout=self._timeouts.health,
@@ -572,8 +589,7 @@ class GatewaySDK:
 
     async def metrics(self) -> MetricsResponse:
         """Fetch gateway metrics (request counts, latency percentiles, etc.)."""
-        http = self._get_http()
-        r = await http.get("/metrics", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/metrics", timeout=self._timeouts.health)
         self._check_response(r, "/metrics")
         d = self._parse_json(r, "/metrics")
         return MetricsResponse(
@@ -594,16 +610,14 @@ class GatewaySDK:
     async def health(self) -> bool:
         """Check if the gateway is reachable."""
         try:
-            http = self._get_http()
-            r = await http.get("/health", timeout=self._timeouts.health)
+            r = await self._request_with_retry("get","/health", timeout=self._timeouts.health)
             return r.status_code == 200
         except Exception:
             return False
 
     async def health_detail(self) -> HealthResponse:
         """Fetch detailed health info (components, providers, GPU state)."""
-        http = self._get_http()
-        r = await http.get("/health", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/health", timeout=self._timeouts.health)
         self._check_response(r, "/health")
         d = self._parse_json(r, "/health")
         return HealthResponse(
