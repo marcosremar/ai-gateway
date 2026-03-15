@@ -62,16 +62,16 @@ const API_KEY = `${TOKEN_ID}:${TOKEN_SECRET}`;
 
 const hasCredentials = TOKEN_ID.length > 0 && TOKEN_SECRET.length > 0;
 
-const MOSS_TTS_ENDPOINT =
-  process.env.MOSS_TTS_URL ||
-  'https://marcosremar--moss-tts-realtime-mossttsrealtime-serve.modal.run';
+const MODAL_TTS_ENDPOINT =
+  process.env.MODAL_TTS_URL ||
+  'https://marcosremar--babelcast-tts-serve.modal.run';
 
 // ── Endpoint availability check ──────────────────────────────────────────
-let mossTtsAvailable = false;
+let modalTtsAvailable = false;
 
-async function checkMossTtsAvailability(): Promise<boolean> {
+async function checkModalTtsAvailability(): Promise<boolean> {
   try {
-    const res = await fetch(MOSS_TTS_ENDPOINT, {
+    const res = await fetch(MODAL_TTS_ENDPOINT, {
       signal: AbortSignal.timeout(10_000),
     });
     // 404 = stopped, 405 = running but method not allowed on root, 200 = running
@@ -198,17 +198,17 @@ describe('1. Modal REST API (handleModalApps)', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-// 2. Modal TTS — ModalTTSProvider (MOSS-TTS-Realtime)
+// 2. Modal TTS — ModalTTSProvider (Qwen3-TTS)
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe('2. Modal TTS (MOSS-TTS-Realtime)', () => {
+describe('2. Modal TTS (Qwen3-TTS)', () => {
   let tts: ModalTTSProvider;
 
   beforeAll(async () => {
-    tts = new ModalTTSProvider(MOSS_TTS_ENDPOINT);
-    mossTtsAvailable = await checkMossTtsAvailability();
-    if (!mossTtsAvailable) {
-      console.log(`[Modal TTS] Endpoint ${MOSS_TTS_ENDPOINT} is stopped/unavailable — skipping synthesis tests`);
+    tts = new ModalTTSProvider(MODAL_TTS_ENDPOINT);
+    modalTtsAvailable = await checkModalTtsAvailability();
+    if (!modalTtsAvailable) {
+      console.log(`[Modal TTS] Endpoint ${MODAL_TTS_ENDPOINT} is stopped/unavailable — skipping synthesis tests`);
     }
   });
 
@@ -217,15 +217,15 @@ describe('2. Modal TTS (MOSS-TTS-Realtime)', () => {
     expect(tts.providerId).toBe('modal');
   });
 
-  it('getModels() returns MOSS-TTS model', () => {
+  it('getModels() returns Qwen3-TTS model', () => {
     const models = tts.getModels();
     expect(models.length).toBeGreaterThan(0);
-    expect(models[0].id).toBe('moss-tts-realtime');
+    expect(models[0].id).toBe('qwen3-tts');
     expect(models[0].capability).toBe('tts');
   });
 
   it('synthesizes Portuguese speech', async () => {
-    if (!mossTtsAvailable) {
+    if (!modalTtsAvailable) {
       console.log('[Modal TTS] Skipped — endpoint stopped');
       return;
     }
@@ -246,7 +246,7 @@ describe('2. Modal TTS (MOSS-TTS-Realtime)', () => {
   }, 30_000);
 
   it('synthesizes English speech', async () => {
-    if (!mossTtsAvailable) {
+    if (!modalTtsAvailable) {
       console.log('[Modal TTS] Skipped — endpoint stopped');
       return;
     }
@@ -265,7 +265,7 @@ describe('2. Modal TTS (MOSS-TTS-Realtime)', () => {
   }, 30_000);
 
   it('synthesizes longer text', async () => {
-    if (!mossTtsAvailable) {
+    if (!modalTtsAvailable) {
       console.log('[Modal TTS] Skipped — endpoint stopped');
       return;
     }
@@ -286,7 +286,7 @@ describe('2. Modal TTS (MOSS-TTS-Realtime)', () => {
   }, 60_000);
 
   it('synthesizeStream returns a readable stream', async () => {
-    if (!mossTtsAvailable) {
+    if (!modalTtsAvailable) {
       console.log('[Modal TTS] Skipped — endpoint stopped');
       return;
     }
@@ -313,7 +313,7 @@ describe('2. Modal TTS (MOSS-TTS-Realtime)', () => {
   }, 30_000);
 
   it('defaults to Portuguese when voice has no language suffix', async () => {
-    if (!mossTtsAvailable) {
+    if (!modalTtsAvailable) {
       console.log('[Modal TTS] Skipped — endpoint stopped');
       return;
     }
@@ -516,7 +516,7 @@ describe('5. MOSS-TTS Endpoint Health', () => {
   }, 15_000);
 
   it('/api/text endpoint responds to POST (when running)', async () => {
-    if (!mossTtsAvailable) {
+    if (!modalTtsAvailable) {
       console.log('[Health] Skipped — endpoint stopped');
       return;
     }

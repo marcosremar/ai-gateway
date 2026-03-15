@@ -13,12 +13,13 @@ interface SaveBarProps {
 export function SaveBar({ hasChanges, saving, saved, onSave, label = 'Save Changes' }: SaveBarProps) {
   return (
     <div
-      className="sticky bottom-0 z-10 flex items-center justify-between px-6 py-4 border-t"
+      className="fixed bottom-0 right-0 z-20 flex items-center justify-between px-6 py-4 border-t backdrop-blur-md"
       style={{
+        left: '220px', /* sidebar width */
         borderColor: hasChanges ? 'color-mix(in srgb, #10b981 30%, var(--color-border))' : 'var(--color-border)',
         background: hasChanges
-          ? 'color-mix(in srgb, #10b981 4%, var(--color-surface))'
-          : 'var(--color-surface)',
+          ? 'color-mix(in srgb, #10b981 85%, var(--color-surface))'
+          : 'color-mix(in srgb, var(--color-surface) 90%, transparent)',
       }}
     >
       <div className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
