@@ -6,8 +6,15 @@
 import { timingSafeEqual } from 'crypto';
 
 function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  // Pad shorter buffer to match length, preventing length-based timing leak
+  if (aBuf.length !== bBuf.length) {
+    // Compare against itself to keep constant time, then return false
+    timingSafeEqual(aBuf, aBuf);
+    return false;
+  }
+  return timingSafeEqual(aBuf, bBuf);
 }
 
 export function validateAuth(authHeader: string | undefined, validKeys: string[]): boolean {

@@ -115,7 +115,7 @@ export async function handleChatCompletions(
       model: body.model,
       latencyMs: Date.now() - startTs,
       success: false,
-      error: String(err),
+      error: err instanceof Error ? err.message.replace(/https?:\/\/[^\s]+/g, '[redacted-url]') : 'Internal error',
       timestamp: Date.now(),
     });
 

@@ -58,6 +58,9 @@ export interface InstanceSpec {
   cloudType?: 'COMMUNITY' | 'SECURE';
   /** RunPod interruptible (spot) instance. Default false (on-demand). Set true for cheaper spot pricing. */
   interruptible?: boolean;
+  /** RunPod container disk size in GB (overlay filesystem at /). Default ~10GB. Increase for workloads
+   *  that install pip packages, download models to ~/.cache, or write temp files outside /workspace. */
+  containerDiskInGb?: number;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────

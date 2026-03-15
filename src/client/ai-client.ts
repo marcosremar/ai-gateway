@@ -290,6 +290,7 @@ export class AIClient {
           responseFormat: profile.audioFormat,
           instructions: profile.voiceInstructions,
           referenceAudio: profile.referenceAudio,
+          refText: profile.refText,
         });
       },
       fallbackOpts,

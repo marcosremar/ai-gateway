@@ -292,7 +292,8 @@ export function createProxyServer(config: ProxyConfig): Server {
       if (isLocalhost || allowedOrigins.includes(requestOrigin)) {
         allowedOrigin = requestOrigin;
       } else {
-        allowedOrigin = allowedOrigins[0] || '*';
+        // Non-matching origin: set empty string so browser blocks the request
+        allowedOrigin = '';
       }
     }
 
@@ -312,9 +313,16 @@ export function createProxyServer(config: ProxyConfig): Server {
     // Set CORS origin header for all non-preflight responses
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
 
-    // Auth
+    // Auth — when no API keys are configured, restrict to localhost-only requests
     const authHeader = req.headers.authorization;
-    if (!validateAuth(authHeader, apiKeys)) {
+    if (apiKeys.length === 0) {
+      const remoteAddr = req.socket?.remoteAddress || '';
+      const isLocal = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
+      if (!isLocal) {
+        sendError(res, 401, 'No GATEWAY_API_KEY configured — remote access denied. Set GATEWAY_API_KEY or connect from localhost.', requestId);
+        return;
+      }
+    } else if (!validateAuth(authHeader, apiKeys)) {
       sendError(res, 401, 'Invalid or missing API key', requestId);
       return;
     }

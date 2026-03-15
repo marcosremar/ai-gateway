@@ -81,6 +81,7 @@ export interface AIProfile {
   audioFormat?: TTSAudioFormat;
   voiceInstructions?: string;
   referenceAudio?: string;  // base64 WAV for voice cloning (MOSS-TTS/Qwen3-TTS)
+  refText?: string;         // transcription of reference audio (Qwen3-TTS Base cloning)
 
   // LLM options
   temperature?: number;

@@ -220,20 +220,17 @@ class GatewaySDK:
 
     async def translate(
         self, text: str, source_lang: str, target_lang: str,
-        glossary: str = "", context: str = ""
+        context: str = ""
     ) -> TranslateResponse:
         """Translate text (GPU-aware routing).
 
         Args:
-            glossary: Domain-specific terms to preserve in translation.
             context: Current session/event context to improve translation accuracy.
         """
         if not text.strip():
             return TranslateResponse(translated_text="", used_gpu=False)
 
         body: dict = {"text": text, "source_lang": source_lang, "target_lang": target_lang}
-        if glossary:
-            body["glossary"] = glossary
         if context:
             body["context"] = context
         r = await self._request_with_retry("post",
@@ -258,6 +255,8 @@ class GatewaySDK:
         params = {"source": opts.source, "target": opts.target}
         if opts.speaker:
             params["speaker"] = opts.speaker
+        if opts.ref_text:
+            params["ref_text"] = opts.ref_text
 
         # reference_audio is base64 (~500KB) — send as header, not query param
         headers: dict[str, str] = {"Content-Type": "audio/wav"}
