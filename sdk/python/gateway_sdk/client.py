@@ -255,13 +255,15 @@ class GatewaySDK:
         params = {"source": opts.source, "target": opts.target}
         if opts.speaker:
             params["speaker"] = opts.speaker
-        if opts.ref_text:
-            params["ref_text"] = opts.ref_text
-
-        # reference_audio is base64 (~500KB) — send as header, not query param
+        # Voice cloning: ref_id (cached on gateway) preferred over inline ref_audio
+        if opts.ref_id:
+            params["ref_id"] = opts.ref_id
         headers: dict[str, str] = {"Content-Type": "audio/wav"}
-        if opts.reference_audio:
+        if opts.reference_audio and not opts.ref_id:
             headers["X-Reference-Audio"] = opts.reference_audio
+        if opts.ref_text and not opts.ref_id:
+            import urllib.parse
+            headers["X-Ref-Text"] = urllib.parse.quote(opts.ref_text[:500], safe="")
 
         r = await self._request_with_retry("post",
             "/v1/speech",
