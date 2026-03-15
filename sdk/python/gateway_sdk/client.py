@@ -258,6 +258,8 @@ class GatewaySDK:
         params = {"source": opts.source, "target": opts.target}
         if opts.speaker:
             params["speaker"] = opts.speaker
+        if opts.reference_audio:
+            params["reference_audio"] = opts.reference_audio
 
         r = await self._request_with_retry("post",
             "/v1/speech",

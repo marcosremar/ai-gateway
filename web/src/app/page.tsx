@@ -3,12 +3,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
 import { Sidebar, type SidebarItem } from '@/components/ui';
-import { LayoutDashboard, Settings2, Cpu, TestTube, Bot, Shield, ScrollText, ScanSearch, Zap, KeyRound, Sparkles } from 'lucide-react';
+import { LayoutDashboard, Settings2, Cpu, TestTube, Bot, Shield, ScrollText, Zap, KeyRound, Sparkles } from 'lucide-react';
 import { OverviewSection } from '@/sections/OverviewSection';
 import { ProvidersSection } from '@/sections/ProvidersSection';
 import { GpuDeploySection } from '@/sections/GpuDeploySection';
 import { PipelineTestSection } from '@/sections/PipelineTestSection';
-import { LanguageDetectSection } from '@/sections/LanguageDetectSection';
 import { PathBenchmarkSection } from '@/sections/PathBenchmarkSection';
 import { BotSection } from '@/sections/BotSection';
 import { ReputationSection } from '@/sections/ReputationSection';
@@ -23,7 +22,6 @@ const NAV_ITEMS: SidebarItem[] = [
   { id: 'gpu', label: 'GPU Deploy', icon: Cpu },
   { id: 'playground', label: 'Playground', icon: Sparkles },
   { id: 'pipeline', label: 'Pipeline Test', icon: TestTube },
-  { id: 'langdetect', label: 'Language Detection', icon: ScanSearch },
   { id: 'pathbench', label: 'Path Benchmark', icon: Zap },
   { id: 'bot', label: 'Bot', icon: Bot },
   { id: 'reputation', label: 'Reputation', icon: Shield },
@@ -106,7 +104,6 @@ function Dashboard() {
           {activeTab === 'gpu' && <GpuDeploySection />}
           {activeTab === 'playground' && <PlaygroundSection />}
           {activeTab === 'pipeline' && <PipelineTestSection />}
-          {activeTab === 'langdetect' && <LanguageDetectSection />}
           {activeTab === 'pathbench' && <PathBenchmarkSection />}
           {activeTab === 'bot' && <BotSection />}
           {activeTab === 'reputation' && <ReputationSection />}
