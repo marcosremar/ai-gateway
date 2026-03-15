@@ -74,6 +74,7 @@ export interface TTSRequest {
   speed?: number;
   instructions?: string;
   referenceAudio?: string;
+  refText?: string;  // transcription of reference audio (required for Qwen3-TTS Base cloning)
 }
 
 export interface TTSResponse {

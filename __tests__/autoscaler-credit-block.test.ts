@@ -6,10 +6,10 @@ describe('hashApiKey', () => {
     expect(hashApiKey('sk-abc123')).toBe(hashApiKey('sk-abc123'));
   });
 
-  it('returns 12-character hex string', () => {
+  it('returns 32-character hex string', () => {
     const hash = hashApiKey('test-key');
-    expect(hash).toHaveLength(12);
-    expect(hash).toMatch(/^[0-9a-f]{12}$/);
+    expect(hash).toHaveLength(32);
+    expect(hash).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it('produces different hashes for different keys', () => {

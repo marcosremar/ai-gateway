@@ -165,6 +165,7 @@ class PipelineOptions:
     target: str = "en"
     speaker: str = ""
     reference_audio: str = ""  # base64 WAV for voice cloning (MOSS-TTS/Qwen3-TTS)
+    ref_text: str = ""         # transcription of reference audio (required for Qwen3-TTS Base cloning)
 
 
 # ── GPU management responses ────────────────────────────────────────────────

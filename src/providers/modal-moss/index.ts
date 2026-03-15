@@ -59,6 +59,7 @@ export class ModalMossTTSProvider implements TTSProvider {
       body: JSON.stringify({
         text: request.input,
         ...(request.referenceAudio && { reference_audio: request.referenceAudio }),
+        ...(request.refText && { ref_text: request.refText }),
       }),
     });
 

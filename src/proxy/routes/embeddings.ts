@@ -53,9 +53,11 @@ export async function handleEmbeddings(
       },
     };
   } catch (err) {
+    console.error(`[embeddings] Error for model ${body.model}:`, err);
+    const safeMessage = err instanceof Error ? err.message.replace(/https?:\/\/[^\s]+/g, '[redacted-url]') : 'Internal error';
     return {
       status: 500,
-      body: { error: { message: String(err), type: 'server_error' } },
+      body: { error: { message: safeMessage, type: 'server_error' } },
     };
   }
 }

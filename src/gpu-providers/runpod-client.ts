@@ -167,7 +167,12 @@ export class RunpodClient extends AbstractGpuProvider {
     // IMPORTANT: Do NOT override dockerStartCmd — it causes crash loops on parle-s2s images.
     const needsVolume = (spec.storageGb ?? 50) > 0;
     if (needsVolume) {
+      // Redirect ALL caches/temp to /workspace to prevent container disk from filling up.
+      // Container disk (overlay at /) is limited and fills up silently, causing pod EXITED.
       envVars.HF_HOME = '/workspace/huggingface';
+      envVars.TMPDIR = '/workspace/tmp';
+      envVars.PIP_CACHE_DIR = '/workspace/.pip_cache';
+      envVars.TRANSFORMERS_CACHE = '/workspace/huggingface';
     }
 
     // Auto-detect container disk size from Docker image when not explicitly configured
@@ -187,7 +192,9 @@ export class RunpodClient extends AbstractGpuProvider {
       supportPublicIp: true,
       // Container disk: auto-sized from image, minimum 10GB (RunPod requirement).
       // Volume: only for full pipeline images that need model cache persistence.
-      containerDiskInGb: Math.max(diskGb, 10),
+      // Minimum 20GB container disk — 10GB is too tight (pip packages + model cache + temp files
+      // can fill it silently, causing pod EXITED after ~5-8min).
+      containerDiskInGb: spec.containerDiskInGb ? Math.max(spec.containerDiskInGb, 20) : Math.max(diskGb, 20),
       volumeInGb: needsVolume ? Math.max(diskGb, 10) : 0,
       ...(needsVolume ? { volumeMountPath: '/workspace' } : {}),
       // IMPORTANT: Do NOT expose the same port on both HTTP and TCP — RunPod's proxy

@@ -8,12 +8,14 @@
  */
 
 import OpenAI from 'openai';
+import { createHash } from 'crypto';
 
 const cache = new Map<string, OpenAI>();
 
 /**
  * Get or create a shared OpenAI SDK client for the given config.
- * Clients are cached by `baseURL + apiKey` (+ defaultHeaders hash).
+ * Clients are cached by `baseURL + apiKeyHash` (+ defaultHeaders hash).
+ * API key is hashed to avoid storing plaintext secrets in memory maps.
  */
 export function getOrCreateClient(
   baseURL: string,
@@ -22,7 +24,8 @@ export function getOrCreateClient(
 ): OpenAI {
   // Include headers in cache key so providers with different headers get their own client
   const headersKey = defaultHeaders ? JSON.stringify(defaultHeaders) : '';
-  const key = `${baseURL}\0${apiKey}\0${headersKey}`;
+  const keyHash = apiKey ? createHash('sha256').update(apiKey).digest('hex').slice(0, 16) : '';
+  const key = `${baseURL}\0${keyHash}\0${headersKey}`;
 
   const existing = cache.get(key);
   if (existing) return existing;
