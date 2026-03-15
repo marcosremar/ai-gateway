@@ -42,7 +42,8 @@ export class ModalTTSProvider implements TTSProvider {
   isConfigured(): boolean { return true; }
 
   async synthesize(request: TTSRequest): Promise<TTSResponse> {
-    const voice = VALID_VOICES.includes(request.voice ?? '') ? request.voice! : 'serena';
+    const rawVoice = (request.voice ?? '').toLowerCase();
+    const voice = VALID_VOICES.includes(rawVoice) ? rawVoice : 'serena';
 
     const res = await fetch(`${this.endpoint}/v1/audio/speech`, {
       method: 'POST',

@@ -48,11 +48,21 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
 
   const getProviderLabel = (provId: string) => providers.find(p => p.id === provId)?.label || provId;
   const getModelLabel = (provId: string, modelId: string) => {
-    const models = (catalog.models as Record<string, { id: string; label: string }[]>)[provId] ?? [];
+    const models = (catalog.models as Record<string, { id: string; label: string; streaming?: boolean }[]>)[provId] ?? [];
     return models.find(m => m.id === modelId)?.label || modelId;
   };
   const getModelsForProvider = (provId: string) =>
-    (catalog.models as Record<string, { id: string; label: string }[]>)[provId] ?? [];
+    (catalog.models as Record<string, { id: string; label: string; streaming?: boolean }[]>)[provId] ?? [];
+
+  /** For STT stage, determine if a provider entry supports streaming. */
+  const isStreamingEntry = (entry: PipelineChainEntry): boolean | null => {
+    if (stage !== 'stt') return null;
+    // If explicitly set on the entry, use that
+    if (entry.sttType) return entry.sttType === 'streaming';
+    // Otherwise infer from the provider catalog
+    const prov = (providers as readonly { id: string; label: string; streaming?: boolean }[]).find(p => p.id === entry.provider);
+    return prov?.streaming ?? false;
+  };
 
   const removeEntry = (index: number) => {
     if (chain.length <= 1) return;
@@ -65,7 +75,13 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
 
   const handleAddFallback = () => {
     if (!newProvider || !newModel) return;
-    setChain([...chain, { provider: newProvider, model: newModel, enabled: true }]);
+    const entry: PipelineChainEntry = { provider: newProvider, model: newModel, enabled: true };
+    // Auto-set sttType for STT stage based on provider's streaming capability
+    if (stage === 'stt') {
+      const prov = (providers as readonly { id: string; label: string; streaming?: boolean }[]).find(p => p.id === newProvider);
+      entry.sttType = prov?.streaming ? 'streaming' : 'batch';
+    }
+    setChain([...chain, entry]);
     setAddingFallback(false);
     setNewProvider('');
     setNewModel('');
@@ -146,8 +162,16 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
 
                 {/* Provider + Model */}
                 <div className="flex-1 min-w-0">
-                  <div className={`text-xs font-semibold truncate ${!isEnabled ? 'line-through' : ''}`}>
-                    {getProviderLabel(entry.provider)}
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-xs font-semibold truncate ${!isEnabled ? 'line-through' : ''}`}>
+                      {getProviderLabel(entry.provider)}
+                    </span>
+                    {isStreamingEntry(entry) === true && (
+                      <span className="text-[9px] font-medium bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded flex-shrink-0">streaming</span>
+                    )}
+                    {isStreamingEntry(entry) === false && (
+                      <span className="text-[9px] font-medium bg-gray-500/20 text-gray-400 px-1.5 py-0.5 rounded flex-shrink-0">batch</span>
+                    )}
                   </div>
                   <div className="text-[10px] truncate" style={{ color: 'var(--color-text-muted)' }}>
                     {getModelLabel(entry.provider, entry.model)}
@@ -188,7 +212,11 @@ export default function FallbackChainList({ stage, chain, setChain, accent }: Fa
                 onChange={(e) => { setNewProvider(e.target.value); setNewModel(getModelsForProvider(e.target.value)[0]?.id || ''); }}
                 className="flex-1 rounded-lg border px-2 py-1 text-xs"
                 style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}>
-                {providers.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                {providers.map(p => {
+                  const pAny = p as { id: string; label: string; streaming?: boolean };
+                  const suffix = stage === 'stt' ? (pAny.streaming ? ' (streaming)' : ' (batch)') : '';
+                  return <option key={p.id} value={p.id}>{p.label}{suffix}</option>;
+                })}
               </select>
             </div>
             <div className="flex items-center gap-1.5">

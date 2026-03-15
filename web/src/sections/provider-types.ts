@@ -4,6 +4,7 @@ export interface PipelineChainEntry {
   provider: string;
   model: string;
   enabled?: boolean;  // default true — set false to skip this provider
+  sttType?: 'streaming' | 'batch';  // only relevant for STT stage
 }
 
 export interface ProviderProfile {
@@ -43,17 +44,19 @@ export const PIPELINE_CATALOG = {
     label: 'STT',
     subtitle: 'Speech-to-Text',
     providers: [
-      { id: 'groq',     label: 'Groq' },
-      { id: 'openai',   label: 'OpenAI' },
-      { id: 'deepgram', label: 'Deepgram' },
-      { id: 'gpu',      label: 'GPU (self-hosted)' },
+      { id: 'groq',      label: 'Groq',              streaming: false },
+      { id: 'openai',    label: 'OpenAI',             streaming: false },
+      { id: 'deepgram',  label: 'Deepgram',           streaming: false },
+      { id: 'fireworks', label: 'Fireworks',           streaming: true },
+      { id: 'gpu',       label: 'GPU (self-hosted)',   streaming: true },
     ],
     models: {
-      groq:     [{ id: 'whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo' }, { id: 'whisper-large-v3', label: 'Whisper Large v3' }],
-      openai:   [{ id: 'whisper-1', label: 'Whisper v2' }],
-      deepgram: [{ id: 'nova-2', label: 'Nova-2' }],
-      gpu:      [{ id: 'faster-whisper-large-v3', label: 'Faster Whisper Large v3' }, { id: 'faster-whisper-large-v3-turbo', label: 'Faster Whisper Turbo' }],
-    } as Record<string, { id: string; label: string }[]>,
+      groq:      [{ id: 'whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo', streaming: false }, { id: 'whisper-large-v3', label: 'Whisper Large v3', streaming: false }],
+      openai:    [{ id: 'whisper-1', label: 'Whisper v2', streaming: false }],
+      deepgram:  [{ id: 'nova-2', label: 'Nova-2', streaming: false }],
+      fireworks: [{ id: 'whisper-large-v3', label: 'Whisper Large v3 (streaming)', streaming: true }],
+      gpu:       [{ id: 'faster-whisper-large-v3', label: 'Faster Whisper Large v3', streaming: true }, { id: 'faster-whisper-large-v3-turbo', label: 'Faster Whisper Turbo', streaming: true }],
+    } as Record<string, { id: string; label: string; streaming?: boolean }[]>,
   },
   llm: {
     label: 'LLM',
