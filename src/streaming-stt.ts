@@ -128,8 +128,9 @@ export class StreamingSTTRouter {
   }
 
   /** Returns a connected backend for the given language, or null if unavailable. */
-  createBackend(language = 'fr'): StreamingSTTBackend | null {
+  createBackend(language?: string, excludeProviders?: Set<string>): StreamingSTTBackend | null {
     for (const id of this.order) {
+      if (excludeProviders?.has(id)) continue;
       if (id === 'gpu') {
         const gpuUrl = this.config.getGpuUrl();
         if (gpuUrl) {

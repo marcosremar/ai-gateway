@@ -232,8 +232,8 @@ describe('2. Modal TTS (Qwen3-TTS)', () => {
 
     const result = await tts.synthesize({
       input: 'Ola, como vai voce?',
-      model: 'moss-tts-realtime',
-      voice: 'moss-pt',
+      model: 'qwen3-tts',
+      voice: 'serena',
     });
 
     expect(result.audio).toBeInstanceOf(Buffer);
@@ -253,8 +253,8 @@ describe('2. Modal TTS (Qwen3-TTS)', () => {
 
     const result = await tts.synthesize({
       input: 'Hello, how are you today?',
-      model: 'moss-tts-realtime',
-      voice: 'moss-en',
+      model: 'qwen3-tts',
+      voice: 'ryan',
     });
 
     expect(result.audio).toBeInstanceOf(Buffer);
@@ -276,8 +276,8 @@ describe('2. Modal TTS (Qwen3-TTS)', () => {
 
     const result = await tts.synthesize({
       input: longText,
-      model: 'moss-tts-realtime',
-      voice: 'moss-pt',
+      model: 'qwen3-tts',
+      voice: 'serena',
     });
 
     expect(result.audio).toBeInstanceOf(Buffer);
@@ -293,8 +293,8 @@ describe('2. Modal TTS (Qwen3-TTS)', () => {
 
     const stream = await tts.synthesizeStream({
       input: 'Teste de stream.',
-      model: 'moss-tts-realtime',
-      voice: 'moss-pt',
+      model: 'qwen3-tts',
+      voice: 'serena',
     });
 
     expect(stream).toBeInstanceOf(ReadableStream);
@@ -312,7 +312,7 @@ describe('2. Modal TTS (Qwen3-TTS)', () => {
     console.log(`[Modal TTS] Stream: ${chunks.length} chunks, ${(totalBytes / 1024).toFixed(1)} KB`);
   }, 30_000);
 
-  it('defaults to Portuguese when voice has no language suffix', async () => {
+  it('defaults to serena when voice is unknown', async () => {
     if (!modalTtsAvailable) {
       console.log('[Modal TTS] Skipped — endpoint stopped');
       return;
@@ -320,7 +320,7 @@ describe('2. Modal TTS (Qwen3-TTS)', () => {
 
     const result = await tts.synthesize({
       input: 'Bom dia!',
-      model: 'moss-tts-realtime',
+      model: 'qwen3-tts',
       voice: 'unknown-voice',
     });
 
@@ -420,7 +420,7 @@ describe('4. Autoscaler with Modal Tier', () => {
   });
 
   it.skipIf(!hasCredentials)('probeGpuHealth handles MOSS-TTS endpoint', async () => {
-    const health = await probeGpuHealth(MOSS_TTS_ENDPOINT, 10_000);
+    const health = await probeGpuHealth(MODAL_TTS_ENDPOINT, 10_000);
 
     console.log(`[Autoscaler] Health probe result:`, health);
 
@@ -496,13 +496,13 @@ describe('5. MOSS-TTS Endpoint Health', () => {
     const timeout = setTimeout(() => controller.abort(), 10_000);
 
     try {
-      const res = await fetch(MOSS_TTS_ENDPOINT, {
+      const res = await fetch(MODAL_TTS_ENDPOINT, {
         signal: controller.signal,
       });
 
       // A running Modal app returns some response
       // 404 = app stopped, 200/405 = app running
-      console.log(`[Health] ${MOSS_TTS_ENDPOINT} -> ${res.status}`);
+      console.log(`[Health] ${MODAL_TTS_ENDPOINT} -> ${res.status}`);
       expect(res.status).toBeDefined();
 
       if (res.status === 404) {
@@ -525,7 +525,7 @@ describe('5. MOSS-TTS Endpoint Health', () => {
     const timeout = setTimeout(() => controller.abort(), 15_000);
 
     try {
-      const res = await fetch(`${MOSS_TTS_ENDPOINT}/api/text`, {
+      const res = await fetch(`${MODAL_TTS_ENDPOINT}/api/text`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
