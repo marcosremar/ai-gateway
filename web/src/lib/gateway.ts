@@ -182,7 +182,7 @@ export async function getGpuLogs(): Promise<{ logs: string; endpoint: string | n
 
 // ── AI Pipeline ──
 
-export type SpeechTransport = 'http' | 'sse' | 'ws';
+export type SpeechTransport = 'http' | 'sse' | 'ws' | 'webrtc';
 
 export interface SpeechPipelineResponse {
   transcription: string;
@@ -221,7 +221,7 @@ export async function speechPipeline(
   const transport = opts.transport ?? 'http';
   const timeoutMs = opts.timeoutMs ?? 10_000;
 
-  if (transport === 'sse' || transport === 'ws') {
+  if (transport === 'sse' || transport === 'ws' || transport === 'webrtc') {
     return speechPipelineViaSdkClient(audio, opts, transport, timeoutMs);
   }
   return speechPipelineViaHTTP(audio, opts, timeoutMs);
@@ -281,34 +281,44 @@ import type { ProtocolId, SpeechResponse } from '../../../src/browser/types';
  */
 async function speechPipelineViaSdkClient(
   audio: Blob | ArrayBuffer, opts: SpeechPipelineOpts,
-  transport: 'sse' | 'ws', timeoutMs: number,
+  transport: 'sse' | 'ws' | 'webrtc', timeoutMs: number,
 ): Promise<SpeechPipelineResponse> {
   const gwHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
   const gwOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000';
 
-  const protocol: ProtocolId = transport === 'ws' ? 'websocket' : 'sse';
+  const protocolMap: Record<string, ProtocolId> = { sse: 'sse', ws: 'websocket', webrtc: 'webrtc' };
+  const protocol = protocolMap[transport];
 
   // Dynamic import to avoid pulling in WebRTC dependency at build time
   const { SpeechClient } = await import('../../../src/browser/speech-client');
+
+  const transportConfig: Record<string, unknown> = {};
+  if (transport === 'sse') {
+    transportConfig.sse = {
+      endpoint: gwOrigin,
+      audioPath: `/v1/speech/stream?source=${opts.source ?? 'fr'}&target=${opts.target ?? 'en'}`,
+      healthPath: '/health',
+    };
+  } else if (transport === 'ws') {
+    transportConfig.websocket = {
+      url: `ws://${gwHost}:4001/v1/speech/ws`,
+      connectionTimeoutMs: timeoutMs,
+      systemPrompt: JSON.stringify({ source: opts.source ?? 'fr', target: opts.target ?? 'en', speaker: opts.speaker }),
+    };
+  } else if (transport === 'webrtc') {
+    // WebRTC requires a Pipecat signaling server — point at gateway's /api/offer endpoint
+    transportConfig.webrtc = {
+      signalingUrl: `${gwOrigin}/api/offer`,
+      clusterName: 'babelcast',
+    };
+  }
 
   const client = new SpeechClient({
     fallbackOrder: [protocol], // Force single transport — no fallback
     fallbackTimeoutMs: timeoutMs,
     responseTimeoutMs: timeoutMs,
     autoReconnect: false,
-    ...(transport === 'sse' ? {
-      sse: {
-        endpoint: gwOrigin,
-        audioPath: `/v1/speech/stream?source=${opts.source ?? 'fr'}&target=${opts.target ?? 'en'}`,
-        healthPath: '/health',
-      },
-    } : {
-      websocket: {
-        url: `ws://${gwHost}:4001/v1/speech/ws`,
-        connectionTimeoutMs: timeoutMs,
-        systemPrompt: JSON.stringify({ source: opts.source ?? 'fr', target: opts.target ?? 'en', speaker: opts.speaker }),
-      },
-    }),
+    ...transportConfig,
   });
 
   try {

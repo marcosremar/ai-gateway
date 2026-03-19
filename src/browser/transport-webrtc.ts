@@ -56,9 +56,11 @@ export class WebRTCTransport implements Transport {
     try {
       // Dynamic import — fails gracefully if not installed
       const [{ PipecatClient, RTVIEvent }, { SmallWebRTCTransport }] = await Promise.all([
-        import('@pipecat-ai/client-js'),
-        import('@pipecat-ai/small-webrtc-transport'),
-      ]);
+        // @ts-ignore optional peer dependency
+        import(/* webpackIgnore: true */ '@pipecat-ai/client-js'),
+        // @ts-ignore optional peer dependency
+        import(/* webpackIgnore: true */ '@pipecat-ai/small-webrtc-transport'),
+      ]) as [any, any];
 
       // Fetch ICE servers if backend available
       let iceServers: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
