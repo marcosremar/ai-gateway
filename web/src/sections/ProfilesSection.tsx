@@ -346,9 +346,9 @@ function ProfileFlowDiagram({
   const testStagesRef = useRef(testStages);
   useEffect(() => { testStagesRef.current = testStages; }, [testStages]);
 
-  // ── Stage hover tooltip ──
+  // ── Service chip hover tooltip ──
   const { gpu } = useGpuStatus(true, 10000);
-  const [hoveredStage, setHoveredStage] = useState<string | null>(null);
+  const [hoveredChip, setHoveredChip] = useState<{ stageKey: string; entryIdx: number } | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
   const resetTest = () => {
@@ -752,11 +752,8 @@ function ProfileFlowDiagram({
                     : isDone ? 'color-mix(in srgb, #10b981 6%, var(--color-surface))'
                     : stage.enabled ? `color-mix(in srgb, ${stage.color} 6%, var(--color-surface))` : 'var(--color-surface)';
                   return (
-                    <div className="w-full border px-3 py-2 text-center relative overflow-hidden transition-all cursor-help"
-                      style={{ borderRadius: '4px', borderColor: boxBorderColor, background: boxBg, borderTop: `3px solid ${boxTopColor}` }}
-                      onMouseEnter={e => { setHoveredStage(stage.key); setMousePos({ x: e.clientX, y: e.clientY }); }}
-                      onMouseMove={e => setMousePos({ x: e.clientX, y: e.clientY })}
-                      onMouseLeave={() => setHoveredStage(null)}>
+                    <div className="w-full border px-3 py-2 text-center relative overflow-hidden transition-all"
+                      style={{ borderRadius: '4px', borderColor: boxBorderColor, background: boxBg, borderTop: `3px solid ${boxTopColor}` }}>
                       {isActive && (
                         <div className="absolute inset-0 overflow-hidden pointer-events-none">
                           <div className="absolute inset-y-0 w-full opacity-15 animate-pulse"
@@ -841,7 +838,7 @@ function ProfileFlowDiagram({
                         </div>
                       )}
                       {/* Service chip — pill/oval shape (= "resource" shape) */}
-                      <div className={`w-full flex flex-col items-center px-2 py-2 border gap-1 transition-all ${isUsedService ? 'ring-1' : ''}`}
+                      <div className={`w-full flex flex-col items-center px-2 py-2 border gap-1 transition-all cursor-help ${isUsedService ? 'ring-1' : ''}`}
                         style={{
                           borderRadius: '20px',
                           background: isUsedService
@@ -851,7 +848,10 @@ function ProfileFlowDiagram({
                             ? 'color-mix(in srgb, #10b981 40%, transparent)'
                             : j === 0 ? `color-mix(in srgb, ${color} 35%, transparent)` : 'var(--color-border)',
                           ...(isUsedService ? { ringColor: 'rgba(16,185,129,0.3)' } as React.CSSProperties : {}),
-                        }}>
+                        }}
+                        onMouseEnter={e => { setHoveredChip({ stageKey: stage.key, entryIdx: j }); setMousePos({ x: e.clientX, y: e.clientY }); }}
+                        onMouseMove={e => setMousePos({ x: e.clientX, y: e.clientY })}
+                        onMouseLeave={() => setHoveredChip(null)}>
                         {/* Icon */}
                         {EntryIcon && (
                           <div className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
@@ -1155,111 +1155,109 @@ function ProfileFlowDiagram({
         )}
       </div>
 
-      {/* Stage hover tooltip — rendered via portal to escape overflow/transform ancestors */}
-      {hoveredStage && typeof document !== 'undefined' && (() => {
-        const stage = stages.find(s => s.key === hoveredStage);
+      {/* Service chip hover tooltip — rendered via portal to escape overflow/transform ancestors */}
+      {hoveredChip && typeof document !== 'undefined' && (() => {
+        const stage = stages.find(s => s.key === hoveredChip.stageKey);
         if (!stage) return null;
-        const ts = testStages.find(s => s.key === hoveredStage);
-        const routing = gpu?.pipelineRouting?.[hoveredStage as 'stt' | 'llm' | 'tts'];
-        const warmth = gpu?.modelWarmth?.[hoveredStage];
-        const stageColor = stage.color;
-        const TOOLTIP_W = 288;
-        const TOOLTIP_H_EST = 300;
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        const tipX = Math.max(8, Math.min(mousePos.x - TOOLTIP_W / 2, vw - TOOLTIP_W - 8));
-        const spaceAbove = mousePos.y - 20;
-        const renderBelow = spaceAbove < TOOLTIP_H_EST;
-        const tipY = renderBelow ? mousePos.y + 16 : mousePos.y - 16;
+        const entry = stage.chain[hoveredChip.entryIdx];
+        if (!entry) return null;
+        const ts = testStages.find(s => s.key === hoveredChip.stageKey);
+        const routing = gpu?.pipelineRouting?.[hoveredChip.stageKey as 'stt' | 'llm' | 'tts'];
+        const warmth = gpu?.modelWarmth?.[hoveredChip.stageKey];
+        const isGpuEntry = entry.provider === 'gpu';
+        const svc = isGpuEntry
+          ? (services.find(s => s.kind === 'gpu-pod' && s.id === entry.model) ?? services.find(s => s.kind === 'gpu-pod'))
+          : null;
+        const pi = PROVIDER_ICON[entry.provider];
+        const entryColor = pi?.color ?? pMeta(entry.provider).color;
+        const mLabel = modelLabel(hoveredChip.stageKey, entry);
+        const isUsed = ts?.state === 'done' && ts.provider && (
+          ts.provider === entry.provider ||
+          ts.provider.startsWith(entry.provider + '/') ||
+          (isGpuEntry && ts.provider === 'gpu')
+        );
+
+        const TOOLTIP_W = 272;
+        const TOOLTIP_H_EST = 260;
+        const tipX = Math.max(8, Math.min(mousePos.x - TOOLTIP_W / 2, window.innerWidth - TOOLTIP_W - 8));
+        const renderBelow = mousePos.y < TOOLTIP_H_EST + 20;
+        const tipY = renderBelow ? mousePos.y + 14 : mousePos.y - 14;
+
         return createPortal(
           <div className="fixed z-[9999] pointer-events-none"
             style={{ left: tipX, top: tipY, transform: renderBelow ? 'none' : 'translateY(-100%)', width: TOOLTIP_W }}>
-            <div className="rounded-xl border shadow-2xl p-3 w-72 text-xs space-y-2.5"
+            <div className="rounded-xl border shadow-2xl p-3 text-xs space-y-2.5"
               style={{
                 background: 'var(--color-surface-elevated)',
-                borderColor: `color-mix(in srgb, ${stageColor} 40%, var(--color-border))`,
-                boxShadow: `0 12px 40px rgba(0,0,0,0.4), 0 0 0 1px color-mix(in srgb, ${stageColor} 20%, transparent)`,
+                borderColor: `color-mix(in srgb, ${entryColor} 45%, var(--color-border))`,
+                boxShadow: `0 12px 40px rgba(0,0,0,0.45), 0 0 0 1px color-mix(in srgb, ${entryColor} 20%, transparent)`,
               }}>
-              {/* Header */}
+
+              {/* Header: service name + stage badge */}
               <div className="flex items-center gap-2 pb-2 border-b" style={{ borderColor: 'var(--color-border)' }}>
-                <div className="w-4 h-1 rounded-full flex-shrink-0" style={{ background: stageColor }} />
-                <span className="font-bold uppercase tracking-wider text-[11px]" style={{ color: stageColor }}>{stage.label}</span>
-                <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{stage.sublabel}</span>
-                {routing && (
-                  <span className="ml-auto text-[9px] font-bold uppercase px-1.5 py-0.5 rounded flex-shrink-0"
-                    style={{
-                      background: routing === 'local' ? 'color-mix(in srgb, #f59e0b 15%, transparent)' : 'color-mix(in srgb, #38bdf8 15%, transparent)',
-                      color: routing === 'local' ? '#f59e0b' : '#38bdf8',
-                    }}>
-                    {routing === 'local' ? 'GPU' : routing}
+                {pi?.icon && <pi.icon className="w-3.5 h-3.5 flex-shrink-0" style={{ color: entryColor }} />}
+                <span className="font-bold text-[11px] truncate" style={{ color: entryColor }}>
+                  {entryLabel(entry)}
+                </span>
+                <span className="ml-auto text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded flex-shrink-0"
+                  style={{ background: `color-mix(in srgb, ${stage.color} 15%, transparent)`, color: stage.color }}>
+                  {stage.label}
+                </span>
+                {hoveredChip.entryIdx > 0 && (
+                  <span className="text-[8px] font-semibold uppercase px-1 py-0.5 rounded flex-shrink-0"
+                    style={{ background: 'var(--color-surface)', color: 'var(--color-text-muted)', border: '1px solid var(--color-border)' }}>
+                    fallback
                   </span>
                 )}
               </div>
 
-              {/* Services in fallback chain */}
-              {stage.chain.length > 0 && (
-                <div className="space-y-1">
-                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>
-                    Services ({stage.chain.length})
-                  </div>
-                  {stage.chain.map((entry, i) => {
-                    const meta = pMeta(entry.provider);
-                    const pi = PROVIDER_ICON[entry.provider];
-                    const EntryIcon = pi?.icon;
-                    const color = pi?.color ?? meta.color;
-                    const svc = entry.provider === 'gpu'
-                      ? (services.find(s => s.kind === 'gpu-pod' && s.id === entry.model) ?? services.find(s => s.kind === 'gpu-pod'))
-                      : null;
-                    const mLabel = modelLabel(hoveredStage, entry);
-                    return (
-                      <div key={i} className="flex items-start gap-2 rounded-lg p-1.5"
-                        style={{ background: i === 0 ? `color-mix(in srgb, ${color} 8%, transparent)` : 'transparent' }}>
-                        {EntryIcon && <EntryIcon className="w-3 h-3 flex-shrink-0 mt-0.5" style={{ color }} />}
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-1">
-                            <span className="font-semibold truncate" style={{ color }}>{entryLabel(entry)}</span>
-                            {i > 0 && <span className="text-[8px] flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>fallback</span>}
-                          </div>
-                          {mLabel && <div className="text-[9px] truncate" style={{ color: 'var(--color-text-muted)' }}>{mLabel}</div>}
-                          {svc && (
-                            <div className="text-[9px] mt-0.5 space-y-0.5">
-                              {svc.dockerImage && (
-                                <div className="font-mono truncate opacity-70" style={{ color: 'var(--color-text-muted)' }}>
-                                  {svc.dockerImage.split('/').pop()}
-                                </div>
-                              )}
-                              {svc.gpuTypes && svc.gpuTypes.length > 0 && (
-                                <div className="truncate opacity-70" style={{ color: 'var(--color-text-muted)' }}>
-                                  {svc.gpuTypes.slice(0, 2).join(', ')}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
+              {/* Model */}
+              {mLabel && (
+                <div className="flex items-center gap-1.5">
+                  <Brain className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
+                  <span style={{ color: 'var(--color-text)' }}>{mLabel}</span>
                 </div>
               )}
 
-              {/* Active GPU runtime */}
-              {gpu && (gpu.gpuType || gpu.dockerImage) && (
-                <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--color-border)' }}>
-                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>
-                    Active GPU
-                  </div>
+              {/* GPU service details */}
+              {svc && (
+                <div className="space-y-1.5">
+                  {svc.dockerImage && (
+                    <div className="flex items-center gap-1.5">
+                      <Package className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
+                      <span className="font-mono text-[9px] truncate" style={{ color: 'var(--color-text-muted)' }}>
+                        {svc.dockerImage.split('/').pop()}
+                      </span>
+                    </div>
+                  )}
+                  {svc.gpuTypes && svc.gpuTypes.length > 0 && (
+                    <div className="flex items-start gap-1.5">
+                      <Cpu className="w-2.5 h-2.5 flex-shrink-0 mt-0.5" style={{ color: 'var(--color-text-muted)' }} />
+                      <span className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                        {svc.gpuTypes.slice(0, 3).join(', ')}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Active GPU runtime (when GPU is up) */}
+              {isGpuEntry && gpu && (gpu.gpuType || gpu.costPerHr != null) && (
+                <div className="pt-2 border-t space-y-1.5" style={{ borderColor: 'var(--color-border)' }}>
+                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>Active GPU</div>
                   {gpu.gpuType && (
                     <div className="flex items-center gap-1.5">
                       <Cpu className="w-2.5 h-2.5 flex-shrink-0" style={{ color: '#f59e0b' }} />
                       <span className="font-medium" style={{ color: '#f59e0b' }}>{gpu.gpuType}</span>
-                    </div>
-                  )}
-                  {gpu.dockerImage && (
-                    <div className="flex items-center gap-1.5">
-                      <Package className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
-                      <span className="font-mono text-[9px] truncate" style={{ color: 'var(--color-text-muted)' }}>
-                        {gpu.dockerImage.split('/').pop()}
-                      </span>
+                      {routing && (
+                        <span className="ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded"
+                          style={{
+                            background: routing === 'local' ? 'color-mix(in srgb, #f59e0b 15%, transparent)' : 'color-mix(in srgb, #38bdf8 15%, transparent)',
+                            color: routing === 'local' ? '#f59e0b' : '#38bdf8',
+                          }}>
+                          {routing === 'local' ? 'local' : routing}
+                        </span>
+                      )}
                     </div>
                   )}
                   {gpu.costPerHr != null && (
@@ -1270,20 +1268,17 @@ function ProfileFlowDiagram({
                 </div>
               )}
 
-              {/* Model warmth stats */}
-              {warmth && (
-                <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--color-border)' }}>
-                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>
-                    Model Stats
-                  </div>
+              {/* Model warmth stats (GPU only) */}
+              {isGpuEntry && warmth && (
+                <div className="pt-2 border-t" style={{ borderColor: 'var(--color-border)' }}>
                   <div className="flex items-center gap-4">
                     <div>
                       <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Requests</div>
-                      <div className="font-bold font-mono" style={{ color: stageColor }}>{warmth.requests}</div>
+                      <div className="font-bold font-mono" style={{ color: entryColor }}>{warmth.requests}</div>
                     </div>
                     <div>
                       <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Avg latency</div>
-                      <div className="font-bold font-mono" style={{ color: stageColor }}>
+                      <div className="font-bold font-mono" style={{ color: entryColor }}>
                         {warmth.avgLatencyMs < 1000 ? `${Math.round(warmth.avgLatencyMs)}ms` : `${(warmth.avgLatencyMs / 1000).toFixed(1)}s`}
                       </div>
                     </div>
@@ -1291,12 +1286,10 @@ function ProfileFlowDiagram({
                 </div>
               )}
 
-              {/* Last test result */}
-              {ts && ts.state === 'done' && ts.latencyMs != null && (
+              {/* Last request result (only if this provider was used) */}
+              {isUsed && ts?.latencyMs != null && (
                 <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--color-border)' }}>
-                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>
-                    Last Request
-                  </div>
+                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: '#10b981' }}>Last request ✓</div>
                   <div className="flex items-center gap-4">
                     <div>
                       <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Latency</div>
@@ -1304,13 +1297,7 @@ function ProfileFlowDiagram({
                         {ts.latencyMs < 1000 ? `${ts.latencyMs}ms` : `${(ts.latencyMs / 1000).toFixed(1)}s`}
                       </div>
                     </div>
-                    {ts.provider && (
-                      <div>
-                        <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Provider</div>
-                        <div className="font-medium truncate max-w-[100px]" style={{ color: 'var(--color-text)' }}>{ts.provider}</div>
-                      </div>
-                    )}
-                    {ts.ttfacMs != null && stage.key === 'tts' && (
+                    {ts.ttfacMs != null && hoveredChip.stageKey === 'tts' && (
                       <div>
                         <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>TTFAC</div>
                         <div className="font-bold font-mono" style={{ color: '#f59e0b' }}>{ts.ttfacMs}ms</div>
