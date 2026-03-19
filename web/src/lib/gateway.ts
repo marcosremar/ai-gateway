@@ -109,6 +109,8 @@ export interface GpuStatusResponse {
   deployDurationMs: number | null;
   pipelineRouting?: { stt: string; llm: string; tts: string; mode: string };
   modelWarmth?: Record<string, { requests: number; avgLatencyMs: number }>;
+  region?: string;
+  ipLocation?: { country: string; countryCode: string; city: string; flag: string };
 }
 
 export async function getGpuStatus(): Promise<GpuStatusResponse> {
@@ -180,49 +182,199 @@ export async function getGpuLogs(): Promise<{ logs: string; endpoint: string | n
 
 // ── AI Pipeline ──
 
+export type SpeechTransport = 'http' | 'sse' | 'ws';
+
 export interface SpeechPipelineResponse {
   transcription: string;
   response: string;
   audioBase64: string;
   contentType: string;
+  transport: SpeechTransport;
   timing: {
     totalMs: number;
     sttMs: number; llmMs: number; ttsMs: number;
+    ttfacMs?: number;
     sttProvider?: string; llmProvider?: string; ttsProvider?: string;
     usedGpu: boolean;
   };
 }
 
+export interface SpeechPipelineOpts {
+  source?: string;
+  target?: string;
+  speaker?: string;
+  /** Transport to use. Default: 'http'. */
+  transport?: SpeechTransport;
+  /** Timeout in ms. Default: 10000. */
+  timeoutMs?: number;
+}
+
+/**
+ * Run the speech pipeline via the specified transport.
+ * Uses the AI Gateway SDK client (SpeechClient) for SSE and WS transports.
+ * All transports return the same response shape — no fallbacks.
+ */
 export async function speechPipeline(
   audio: Blob | ArrayBuffer,
-  opts: { source?: string; target?: string; speaker?: string } = {},
+  opts: SpeechPipelineOpts = {},
+): Promise<SpeechPipelineResponse> {
+  const transport = opts.transport ?? 'http';
+  const timeoutMs = opts.timeoutMs ?? 10_000;
+
+  if (transport === 'sse' || transport === 'ws') {
+    return speechPipelineViaSdkClient(audio, opts, transport, timeoutMs);
+  }
+  return speechPipelineViaHTTP(audio, opts, timeoutMs);
+}
+
+// ── HTTP transport (direct fetch — lightweight, no SDK overhead) ──
+
+async function speechPipelineViaHTTP(
+  audio: Blob | ArrayBuffer, opts: SpeechPipelineOpts, timeoutMs: number,
 ): Promise<SpeechPipelineResponse> {
   const qs = new URLSearchParams({ source: opts.source ?? 'fr', target: opts.target ?? 'en' });
   if (opts.speaker) qs.set('speaker', opts.speaker);
   const contentType = audio instanceof Blob ? (audio.type || 'audio/wav') : 'audio/wav';
-  const res = await gw(`/v1/speech?${qs}`, {
-    method: 'POST',
-    headers: { 'Content-Type': contentType },
-    body: audio instanceof Blob ? await audio.arrayBuffer() : audio,
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await gw(`/v1/speech?${qs}`, {
+      method: 'POST',
+      headers: { 'Content-Type': contentType },
+      body: audio instanceof Blob ? await audio.arrayBuffer() : audio,
+      signal: ac.signal,
+    });
+    if (!res.ok) throw new Error(`Pipeline ${res.status}: ${await res.text()}`);
+    const d = await res.json();
+    return {
+      transcription: d.transcription ?? '',
+      response: d.response ?? '',
+      audioBase64: d.audio_base64 ?? '',
+      contentType: d.content_type ?? 'audio/wav',
+      transport: 'http',
+      timing: {
+        totalMs: d.timing?.total_ms ?? 0,
+        sttMs: d.timing?.stt_ms ?? 0,
+        llmMs: d.timing?.llm_ms ?? 0,
+        ttsMs: d.timing?.tts_ms ?? 0,
+        sttProvider: d.timing?.stt_provider,
+        llmProvider: d.timing?.llm_provider,
+        ttsProvider: d.timing?.tts_provider,
+        usedGpu: d.timing?.used_gpu ?? false,
+      },
+    };
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') throw new Error(`HTTP timeout (${timeoutMs}ms)`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ── SSE & WS transports via AI Gateway SDK SpeechClient ──
+
+import type { ProtocolId, SpeechResponse } from '../../../src/browser/types';
+
+/**
+ * Run pipeline via the AI Gateway SDK SpeechClient.
+ * Forces a single transport (no fallback) — if it fails, it errors.
+ */
+async function speechPipelineViaSdkClient(
+  audio: Blob | ArrayBuffer, opts: SpeechPipelineOpts,
+  transport: 'sse' | 'ws', timeoutMs: number,
+): Promise<SpeechPipelineResponse> {
+  const gwHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+  const gwOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000';
+
+  const protocol: ProtocolId = transport === 'ws' ? 'websocket' : 'sse';
+
+  // Dynamic import to avoid pulling in WebRTC dependency at build time
+  const { SpeechClient } = await import('../../../src/browser/speech-client');
+
+  const client = new SpeechClient({
+    fallbackOrder: [protocol], // Force single transport — no fallback
+    fallbackTimeoutMs: timeoutMs,
+    responseTimeoutMs: timeoutMs,
+    autoReconnect: false,
+    ...(transport === 'sse' ? {
+      sse: {
+        endpoint: gwOrigin,
+        audioPath: `/v1/speech/stream?source=${opts.source ?? 'fr'}&target=${opts.target ?? 'en'}`,
+        healthPath: '/health',
+      },
+    } : {
+      websocket: {
+        url: `ws://${gwHost}:4001/v1/speech/ws`,
+        connectionTimeoutMs: timeoutMs,
+        systemPrompt: JSON.stringify({ source: opts.source ?? 'fr', target: opts.target ?? 'en', speaker: opts.speaker }),
+      },
+    }),
   });
-  if (!res.ok) throw new Error(`Pipeline ${res.status}: ${await res.text()}`);
-  const d = await res.json();
-  return {
-    transcription: d.transcription ?? '',
-    response: d.response ?? '',
-    audioBase64: d.audio_base64 ?? '',
-    contentType: d.content_type ?? 'audio/wav',
-    timing: {
-      totalMs: d.timing?.total_ms ?? 0,
-      sttMs: d.timing?.stt_ms ?? 0,
-      llmMs: d.timing?.llm_ms ?? 0,
-      ttsMs: d.timing?.tts_ms ?? 0,
-      sttProvider: d.timing?.stt_provider,
-      llmProvider: d.timing?.llm_provider,
-      ttsProvider: d.timing?.tts_provider,
-      usedGpu: d.timing?.used_gpu ?? false,
-    },
-  };
+
+  try {
+    const connected = await client.connect();
+    if (!connected) throw new Error(`${transport.toUpperCase()} connection failed`);
+
+    // Convert audio to Float32Array PCM (SDK expects this)
+    const arrayBuf = audio instanceof Blob ? await audio.arrayBuffer() : audio;
+    const float32 = wavToFloat32(arrayBuf);
+
+    // Wait for response via event
+    const result = await new Promise<SpeechResponse>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${transport.toUpperCase()} timeout (${timeoutMs}ms)`)), timeoutMs);
+      client.on('response', (r) => { clearTimeout(timer); resolve(r); });
+      client.on('error', (e) => { clearTimeout(timer); reject(new Error(e.message)); });
+      client.sendAudio(float32).catch(reject);
+    });
+
+    return {
+      transcription: result.userText ?? '',
+      response: result.text ?? '',
+      audioBase64: result.audio ?? '',
+      contentType: 'audio/wav',
+      transport,
+      timing: {
+        totalMs: result.timing?.total_ms ?? 0,
+        sttMs: result.timing?.stt_ms ?? 0,
+        llmMs: result.timing?.llm_ms ?? 0,
+        ttsMs: result.timing?.tts_ms ?? 0,
+        ttfacMs: (result.timing as Record<string, unknown>)?.tts_ttfac_ms as number | undefined,
+        sttProvider: (result.timing as Record<string, unknown>)?.stt_provider as string | undefined,
+        llmProvider: (result.timing as Record<string, unknown>)?.llm_provider as string | undefined,
+        ttsProvider: (result.timing as Record<string, unknown>)?.tts_provider as string | undefined,
+        usedGpu: (result.timing as Record<string, unknown>)?.used_gpu === true,
+      },
+    };
+  } finally {
+    client.disconnect();
+    client.destroy();
+  }
+}
+
+/** Convert WAV ArrayBuffer to Float32Array PCM samples (what SDK transports expect). */
+function wavToFloat32(wav: ArrayBuffer): Float32Array {
+  const view = new DataView(wav);
+  // Find 'data' chunk
+  let offset = 12; // skip RIFF header
+  while (offset < wav.byteLength - 8) {
+    const chunkId = String.fromCharCode(view.getUint8(offset), view.getUint8(offset+1), view.getUint8(offset+2), view.getUint8(offset+3));
+    const chunkSize = view.getUint32(offset + 4, true);
+    if (chunkId === 'data') {
+      const samples = new Float32Array(chunkSize / 2);
+      for (let i = 0; i < samples.length; i++) {
+        samples[i] = view.getInt16(offset + 8 + i * 2, true) / 32768;
+      }
+      return samples;
+    }
+    offset += 8 + chunkSize;
+  }
+  // Fallback: treat entire buffer as 16-bit PCM after 44-byte header
+  const dataSize = wav.byteLength - 44;
+  const samples = new Float32Array(dataSize / 2);
+  for (let i = 0; i < samples.length; i++) {
+    samples[i] = view.getInt16(44 + i * 2, true) / 32768;
+  }
+  return samples;
 }
 
 export async function translate(opts: { text: string; source_lang?: string; target_lang?: string }): Promise<{ translated_text: string; used_gpu: boolean }> {
@@ -447,6 +599,7 @@ export interface PipelineChainEntry {
 export interface ProviderProfile {
   id: string;
   name: string;
+  latency?: 'realtime' | 'low' | 'batch';
   stt: PipelineChainEntry[];
   llm: PipelineChainEntry[];
   tts: PipelineChainEntry[];
@@ -804,24 +957,6 @@ export async function initiateStandbyHandover(): Promise<{ ok: boolean; error?: 
 
 export async function cancelStandbyDeploy(): Promise<{ ok: boolean }> {
   return gwPost('/v1/gpu/standby/cancel');
-}
-
-// ── Provider profiles + GPU deploy config ──
-
-export interface GpuDeployConfig {
-  dockerImage: string;
-  gpuTypes: string[];
-  region: string;
-  timeoutMin: number;
-  raceCount?: number;
-}
-
-export async function createProfile(profile: { id: string; name: string; gpuDeploy?: GpuDeployConfig }): Promise<ProviderConfigResponse> {
-  return gwPost('/v1/config/profiles', profile);
-}
-
-export async function deleteProfile(id: string): Promise<ProviderConfigResponse> {
-  return gwPost('/v1/config/profiles/' + id + '/delete');
 }
 
 // ── GPU Offers ──
