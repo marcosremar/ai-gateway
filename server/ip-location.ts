@@ -105,6 +105,10 @@ const RUNPOD_DC: Record<string, { country: string; countryCode: string; city: st
 /**
  * Query RunPod GraphQL to get the pod's datacenter, then map to IpLocation.
  * Result is cached per podId.
+ *
+ * TODO: move to RunpodClient.getDatacenterInfo() — direct GraphQL call used as no equivalent
+ * method exists yet. RunpodClient.getInstanceDetail() uses the REST API which does not expose
+ * dataCenterId; only the GraphQL API has this field.
  */
 export async function fetchRunPodDatacenter(podId: string, apiKey: string): Promise<IpLocation | null> {
   const cacheKey = `runpod:${podId}`;
