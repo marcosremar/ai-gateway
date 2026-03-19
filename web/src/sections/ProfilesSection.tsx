@@ -1216,8 +1216,8 @@ function ProfileFlowDiagram({
         );
 
         if (!chipRect) return null;
-        const TOOLTIP_W = 272;
-        const TOOLTIP_H_EST = 260;
+        const TOOLTIP_W = 300;
+        const TOOLTIP_H_EST = 380;
         const GAP = 8;
         // Center tooltip over the chip horizontally
         const tipX = Math.max(8, Math.min(chipRect.left + chipRect.width / 2 - TOOLTIP_W / 2, window.innerWidth - TOOLTIP_W - 8));
@@ -1225,139 +1225,180 @@ function ProfileFlowDiagram({
         const renderBelow = chipRect.top < TOOLTIP_H_EST + GAP;
         const tipY = renderBelow ? chipRect.bottom + GAP : chipRect.top - GAP;
 
+        const mi = isGpuEntry ? gpu?.machineInfo : undefined;
+        const isActive = isGpuEntry && (routing === 'gpu' || routing === 'local');
+
         return createPortal(
           <div className="fixed z-[9999] pointer-events-none"
             style={{ left: tipX, top: tipY, transform: renderBelow ? 'none' : 'translateY(-100%)', width: TOOLTIP_W }}>
-            <div className="rounded-xl border shadow-2xl p-3 text-xs space-y-2.5"
+            <div className="rounded-xl border shadow-2xl text-xs overflow-hidden"
               style={{
                 background: 'var(--color-surface-elevated)',
-                borderColor: `color-mix(in srgb, ${entryColor} 45%, var(--color-border))`,
-                boxShadow: `0 12px 40px rgba(0,0,0,0.45), 0 0 0 1px color-mix(in srgb, ${entryColor} 20%, transparent)`,
+                borderColor: 'var(--color-border)',
+                boxShadow: '0 16px 48px rgba(0,0,0,0.5)',
               }}>
 
-              {/* Header: service name + stage badge */}
-              <div className="flex items-center gap-2 pb-2 border-b" style={{ borderColor: 'var(--color-border)' }}>
+              {/* Header bar */}
+              <div className="flex items-center gap-2 px-3 py-2.5 border-b"
+                style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
                 {pi?.icon && <pi.icon className="w-3.5 h-3.5 flex-shrink-0" style={{ color: entryColor }} />}
                 <span className="font-bold text-[11px] truncate" style={{ color: entryColor }}>
                   {entryLabel(entry)}
                 </span>
-                <span className="ml-auto text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded flex-shrink-0"
-                  style={{ background: `color-mix(in srgb, ${stage.color} 15%, transparent)`, color: stage.color }}>
-                  {stage.label}
-                </span>
-                {hoveredChip.entryIdx > 0 && (
-                  <span className="text-[8px] font-semibold uppercase px-1 py-0.5 rounded flex-shrink-0"
-                    style={{ background: 'var(--color-surface)', color: 'var(--color-text-muted)', border: '1px solid var(--color-border)' }}>
-                    fallback
+                <div className="ml-auto flex items-center gap-1.5 flex-shrink-0">
+                  <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded"
+                    style={{ background: `color-mix(in srgb, ${stage.color} 15%, transparent)`, color: stage.color }}>
+                    {stage.label}
                   </span>
-                )}
+                  {hoveredChip.entryIdx > 0 && (
+                    <span className="text-[8px] font-semibold uppercase px-1 py-0.5 rounded"
+                      style={{ color: 'var(--color-text-muted)', border: '1px solid var(--color-border)' }}>
+                      fallback
+                    </span>
+                  )}
+                  {isGpuEntry && (
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded"
+                      style={{
+                        background: isActive ? 'color-mix(in srgb, #10b981 15%, transparent)' : 'color-mix(in srgb, #94a3b8 10%, transparent)',
+                        color: isActive ? '#10b981' : '#94a3b8',
+                      }}>
+                      {isActive ? '● live' : '○ idle'}
+                    </span>
+                  )}
+                </div>
               </div>
 
-              {/* Model */}
-              {mLabel && (
-                <div className="flex items-center gap-1.5">
-                  <Brain className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
-                  <span style={{ color: 'var(--color-text)' }}>{mLabel}</span>
-                </div>
-              )}
+              <div className="p-3 space-y-3">
 
-              {/* GPU service details */}
-              {svc && (
-                <div className="space-y-1.5">
-                  {svc.dockerImage && (
-                    <div className="flex items-center gap-1.5">
-                      <Package className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
-                      <span className="font-mono text-[9px] truncate" style={{ color: 'var(--color-text-muted)' }}>
-                        {svc.dockerImage.split('/').pop()}
-                      </span>
-                    </div>
-                  )}
-                  {svc.gpuTypes && svc.gpuTypes.length > 0 && (
-                    <div className="flex items-start gap-1.5">
-                      <Cpu className="w-2.5 h-2.5 flex-shrink-0 mt-0.5" style={{ color: 'var(--color-text-muted)' }} />
-                      <span className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
-                        {svc.gpuTypes.slice(0, 3).join(', ')}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Active GPU machine info (when GPU is up) */}
-              {isGpuEntry && gpu && gpu.status === 'ready' && (
-                <div className="pt-2 border-t space-y-1.5" style={{ borderColor: 'var(--color-border)' }}>
-                  <div className="flex items-center justify-between">
-                    <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>Running machine</div>
-                    {routing && (
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded"
-                        style={{
-                          background: routing === 'gpu' || routing === 'local' ? 'color-mix(in srgb, #10b981 15%, transparent)' : 'color-mix(in srgb, #94a3b8 15%, transparent)',
-                          color: routing === 'gpu' || routing === 'local' ? '#10b981' : '#94a3b8',
-                        }}>
-                        {routing === 'gpu' || routing === 'local' ? '● active' : '○ standby'}
-                      </span>
+                {/* Model + docker */}
+                {(mLabel || svc?.dockerImage) && (
+                  <div className="space-y-1">
+                    {mLabel && (
+                      <div className="flex items-center gap-1.5">
+                        <Brain className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
+                        <span style={{ color: 'var(--color-text)' }}>{mLabel}</span>
+                      </div>
+                    )}
+                    {svc?.dockerImage && (
+                      <div className="flex items-center gap-1.5">
+                        <Package className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
+                        <span className="font-mono text-[9px] truncate" style={{ color: 'var(--color-text-muted)' }}>
+                          {svc.dockerImage.split('/').pop()}
+                        </span>
+                      </div>
                     )}
                   </div>
+                )}
 
-                  {/* GPU model — prominent */}
-                  {gpu.gpuType && (
-                    <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg"
-                      style={{ background: 'color-mix(in srgb, #f59e0b 10%, transparent)', border: '1px solid color-mix(in srgb, #f59e0b 25%, transparent)' }}>
-                      <Cpu className="w-3 h-3 flex-shrink-0" style={{ color: '#f59e0b' }} />
-                      <span className="font-bold text-[11px]" style={{ color: '#f59e0b' }}>{gpu.gpuType}</span>
-                    </div>
-                  )}
+                {/* ── GPU machine block ── */}
+                {isGpuEntry && gpu && gpu.status === 'ready' && (
+                  <div className="space-y-2.5">
 
-                  {/* Location */}
-                  {(gpu.ipLocation || gpu.region) && (
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-sm leading-none flex-shrink-0">
-                        {gpu.ipLocation?.flag ?? '🌍'}
-                      </span>
-                      <span style={{ color: 'var(--color-text)' }}>
-                        {gpu.ipLocation
-                          ? `${gpu.ipLocation.city}, ${gpu.ipLocation.country}`
-                          : gpu.region}
-                      </span>
-                      {gpu.region && (
-                        <span className="font-mono text-[9px] ml-auto" style={{ color: 'var(--color-text-muted)' }}>
-                          {gpu.region}
-                        </span>
+                    {/* GPU model */}
+                    {gpu.gpuType && (
+                      <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg"
+                        style={{ background: 'color-mix(in srgb, var(--color-text) 5%, transparent)', border: '1px solid var(--color-border)' }}>
+                        <Cpu className="w-3 h-3 flex-shrink-0" style={{ color: 'var(--color-text-secondary)' }} />
+                        <div className="flex-1 min-w-0">
+                          <div className="font-bold text-[11px] truncate" style={{ color: 'var(--color-text)' }}>{gpu.gpuType}</div>
+                          {mi?.gpuVramGb && (
+                            <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>{mi.gpuVramGb}GB VRAM{mi.numGpus && mi.numGpus > 1 ? ` × ${mi.numGpus}` : ''}</div>
+                          )}
+                        </div>
+                        {mi?.gpuVramGb && (
+                          <span className="text-[9px] font-mono font-bold flex-shrink-0" style={{ color: 'var(--color-text-secondary)' }}>
+                            {mi.gpuVramGb}GB
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Machine ID + provider */}
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[9px]">
+                      {mi?.instanceId && (
+                        <div className="col-span-2">
+                          <div style={{ color: 'var(--color-text-muted)' }}>Machine ID</div>
+                          <div className="font-mono truncate font-medium" style={{ color: 'var(--color-text)' }}>{mi.instanceId}</div>
+                        </div>
+                      )}
+                      {gpu.provider && (
+                        <div>
+                          <div style={{ color: 'var(--color-text-muted)' }}>Provider</div>
+                          <div className="font-medium capitalize" style={{ color: 'var(--color-text)' }}>{gpu.provider}</div>
+                        </div>
+                      )}
+                      {gpu.costPerHr != null && gpu.costPerHr > 0 && (
+                        <div>
+                          <div style={{ color: 'var(--color-text-muted)' }}>Cost</div>
+                          <div className="font-mono font-medium" style={{ color: 'var(--color-text)' }}>${gpu.costPerHr.toFixed(3)}/hr</div>
+                        </div>
+                      )}
+                      {gpu.elapsedSec > 0 && (
+                        <div>
+                          <div style={{ color: 'var(--color-text-muted)' }}>Uptime</div>
+                          <div className="font-mono font-medium" style={{ color: 'var(--color-text)' }}>
+                            {gpu.elapsedSec < 3600 ? `${Math.floor(gpu.elapsedSec / 60)}m ${gpu.elapsedSec % 60}s` : `${(gpu.elapsedSec / 3600).toFixed(1)}h`}
+                          </div>
+                        </div>
                       )}
                     </div>
-                  )}
 
-                  {/* Provider + cost + uptime */}
-                  <div className="flex items-center gap-3 text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
-                    {gpu.provider && <span className="capitalize">{gpu.provider}</span>}
-                    {gpu.costPerHr != null && gpu.costPerHr > 0 && (
-                      <span className="font-mono">${gpu.costPerHr.toFixed(3)}/hr</span>
+                    {/* Hardware specs grid */}
+                    {(mi?.ramGb || mi?.diskGb || mi?.cpuCores || mi?.inetDownMbps) && (
+                      <div className="rounded-lg overflow-hidden border" style={{ borderColor: 'var(--color-border)' }}>
+                        <div className="px-2.5 py-1.5 text-[9px] font-semibold uppercase tracking-wider border-b"
+                          style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', color: 'var(--color-text-muted)' }}>
+                          Hardware
+                        </div>
+                        <div className="grid grid-cols-2 divide-x divide-y" style={{ borderColor: 'var(--color-border)' }}>
+                          {mi?.ramGb && (
+                            <div className="px-2.5 py-1.5">
+                              <div className="text-[8px] uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>RAM</div>
+                              <div className="font-mono font-bold text-[11px]" style={{ color: 'var(--color-text)' }}>{Math.round(mi.ramGb)}GB</div>
+                            </div>
+                          )}
+                          {mi?.diskGb && (
+                            <div className="px-2.5 py-1.5">
+                              <div className="text-[8px] uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>Disk</div>
+                              <div className="font-mono font-bold text-[11px]" style={{ color: 'var(--color-text)' }}>{Math.round(mi.diskGb)}GB</div>
+                            </div>
+                          )}
+                          {mi?.cpuCores && (
+                            <div className="px-2.5 py-1.5">
+                              <div className="text-[8px] uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>CPU</div>
+                              <div className="font-mono font-bold text-[11px]" style={{ color: 'var(--color-text)' }}>{mi.cpuCores}c</div>
+                            </div>
+                          )}
+                          {mi?.inetDownMbps && (
+                            <div className="px-2.5 py-1.5">
+                              <div className="text-[8px] uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>Network</div>
+                              <div className="font-mono font-bold text-[11px]" style={{ color: 'var(--color-text)' }}>{Math.round(mi.inetDownMbps)}↓</div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     )}
-                    {gpu.elapsedSec > 0 && (
-                      <span className="ml-auto">
-                        up {gpu.elapsedSec < 3600
-                          ? `${Math.floor(gpu.elapsedSec / 60)}m`
-                          : `${(gpu.elapsedSec / 3600).toFixed(1)}h`}
-                      </span>
+
+                    {/* Location */}
+                    {(gpu.ipLocation || gpu.region) && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-base leading-none">{gpu.ipLocation?.flag ?? '🌍'}</span>
+                        <div className="flex-1 min-w-0">
+                          <div style={{ color: 'var(--color-text)' }}>
+                            {gpu.ipLocation ? `${gpu.ipLocation.city}, ${gpu.ipLocation.country}` : gpu.region}
+                          </div>
+                          {gpu.region && (
+                            <div className="font-mono text-[9px]" style={{ color: 'var(--color-text-muted)' }}>{gpu.region}</div>
+                          )}
+                        </div>
+                      </div>
                     )}
                   </div>
+                )}
 
-                  {/* Docker image */}
-                  {gpu.dockerImage && (
-                    <div className="flex items-center gap-1.5">
-                      <Package className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
-                      <span className="font-mono text-[9px] truncate" style={{ color: 'var(--color-text-muted)' }}>
-                        {gpu.dockerImage.split('/').pop()}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Model warmth stats (GPU only) */}
-              {isGpuEntry && warmth && (
-                <div className="pt-2 border-t" style={{ borderColor: 'var(--color-border)' }}>
-                  <div className="flex items-center gap-4">
+                {/* Model warmth */}
+                {isGpuEntry && warmth && (
+                  <div className="pt-2 border-t flex items-center gap-4" style={{ borderColor: 'var(--color-border)' }}>
                     <div>
                       <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Requests</div>
                       <div className="font-bold font-mono" style={{ color: entryColor }}>{warmth.requests}</div>
@@ -1369,16 +1410,13 @@ function ProfileFlowDiagram({
                       </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {/* Last request result (only if this provider was used) */}
-              {isUsed && ts?.latencyMs != null && (
-                <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--color-border)' }}>
-                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: '#10b981' }}>Last request ✓</div>
-                  <div className="flex items-center gap-4">
+                {/* Last request (this service was used in test) */}
+                {isUsed && ts?.latencyMs != null && (
+                  <div className="pt-2 border-t flex items-center gap-4" style={{ borderColor: 'var(--color-border)' }}>
                     <div>
-                      <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Latency</div>
+                      <div className="text-[9px]" style={{ color: '#10b981' }}>Last request ✓</div>
                       <div className="font-bold font-mono" style={{ color: '#10b981' }}>
                         {ts.latencyMs < 1000 ? `${ts.latencyMs}ms` : `${(ts.latencyMs / 1000).toFixed(1)}s`}
                       </div>
@@ -1386,12 +1424,12 @@ function ProfileFlowDiagram({
                     {ts.ttfacMs != null && hoveredChip.stageKey === 'tts' && (
                       <div>
                         <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>TTFAC</div>
-                        <div className="font-bold font-mono" style={{ color: '#f59e0b' }}>{ts.ttfacMs}ms</div>
+                        <div className="font-bold font-mono" style={{ color: 'var(--color-text-secondary)' }}>{ts.ttfacMs}ms</div>
                       </div>
                     )}
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </div>
         , document.body);
