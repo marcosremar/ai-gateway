@@ -991,6 +991,23 @@ export class VastClient extends AbstractGpuProvider {
     return { ip, endpoint: '', status, sshHost, sshPort };
   }
 
+  async checkBalance(credentials: ProviderCredentials): Promise<{ balance: number } | null> {
+    const { apiKey } = credentials;
+    if (!apiKey) return null;
+    try {
+      const res = await this._vastFetch(`${VAST_API_BASE}/users/current/`, {
+        headers: this.jsonHeaders(apiKey),
+      }, 8_000);
+      if (!res.ok) return null;
+      const data = (await res.json()) as Record<string, unknown>;
+      const balance = typeof data.credit === 'number' ? data.credit : null;
+      if (balance === null) return null;
+      return { balance };
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Fetch detail for a single on-demand instance by raw Vast.ai ID.
    * Tries GET /instances/{id}/ first (efficient), falls back to list API.
