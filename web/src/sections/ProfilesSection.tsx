@@ -413,6 +413,14 @@ function ProfileFlowDiagram({
   const { gpu } = useGpuStatus(true, 10000);
   const [hoveredChip, setHoveredChip] = useState<{ stageKey: string; entryIdx: number } | null>(null);
   const [chipRect, setChipRect] = useState<DOMRect | null>(null);
+  const hideTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleHideTooltip = () => {
+    if (hideTooltipTimerRef.current) clearTimeout(hideTooltipTimerRef.current);
+    hideTooltipTimerRef.current = setTimeout(() => setHoveredChip(null), 200);
+  };
+  const cancelHideTooltip = () => {
+    if (hideTooltipTimerRef.current) clearTimeout(hideTooltipTimerRef.current);
+  };
   // mounted gate: avoids SSR/hydration mismatch with createPortal
   const [tooltipMounted, setTooltipMounted] = useState(false);
   useEffect(() => { setTooltipMounted(true); }, []);
@@ -881,6 +889,19 @@ function ProfileFlowDiagram({
                             style={{ background: `linear-gradient(90deg, transparent, ${stage.color}, transparent)` }} />
                         </div>
                       )}
+                      {/* Stage enable/disable toggle */}
+                      {onToggleStage && (
+                        <button
+                          type="button"
+                          onClick={() => onToggleStage(stage.key)}
+                          title={stage.enabled ? 'Disable stage' : 'Enable stage'}
+                          className="absolute top-0.5 right-0.5 w-4 h-4 rounded flex items-center justify-center transition-colors"
+                          style={{ background: 'transparent', border: 'none', cursor: 'pointer' }}>
+                          {stage.enabled
+                            ? <EyeOff className="w-2.5 h-2.5" style={{ color: 'var(--color-text-muted)', opacity: 0.5 }} />
+                            : <Eye className="w-2.5 h-2.5" style={{ color: '#10b981' }} />}
+                        </button>
+                      )}
                       <div className="flex items-center justify-center gap-1.5">
                         <span className="text-xs font-bold uppercase tracking-wider"
                           style={{ color: isError ? '#ef4444' : isDone ? '#10b981' : isActive ? stage.color : stage.enabled ? stage.color : 'var(--color-text-muted)' }}>
@@ -939,15 +960,17 @@ function ProfileFlowDiagram({
                   const mLabel = modelLabel(stage.key, entry);
                   const pi = PROVIDER_ICON[entry.provider];
                   const EntryIcon = pi?.icon;
+                  const isEntryDisabled = entry.enabled === false;
                   // Highlight the service pill that was actually used in the test
                   const usedProvider = ts?.provider;
-                  const isUsedService = ts?.state === 'done' && usedProvider && (
+                  const isUsedService = !isEntryDisabled && ts?.state === 'done' && usedProvider && (
                     usedProvider === entry.provider ||
                     usedProvider.startsWith(entry.provider + '/') ||
                     (entry.provider === 'gpu' && usedProvider === 'gpu')
                   );
                   const iconColor = isUsedService ? '#10b981' : j === 0 ? (pi?.color ?? color) : 'var(--color-text-muted)';
                   const chipColor = isUsedService ? '#10b981' : j === 0 ? color : 'var(--color-text-muted)';
+                  const isChipHovered = hoveredChip?.stageKey === stage.key && hoveredChip?.entryIdx === j;
                   return (
                     <div key={j} className="flex flex-col items-center w-full">
                       {j > 0 && (
@@ -958,51 +981,100 @@ function ProfileFlowDiagram({
                           <div className="w-px h-2" style={{ background: 'var(--color-border)' }} />
                         </div>
                       )}
-                      {/* Service chip — pill/oval shape (= "resource" shape) */}
-                      <div className={`w-full flex flex-col items-center px-2 py-2 border gap-1 transition-all cursor-help ${isUsedService ? 'ring-1' : ''}`}
-                        style={{
-                          borderRadius: '20px',
-                          background: isUsedService
-                            ? 'color-mix(in srgb, #10b981 8%, var(--color-surface))'
-                            : j === 0 ? `color-mix(in srgb, ${color} 10%, var(--color-surface))` : 'var(--color-surface-elevated)',
-                          borderColor: isUsedService
-                            ? 'color-mix(in srgb, #10b981 40%, transparent)'
-                            : j === 0 ? `color-mix(in srgb, ${color} 35%, transparent)` : 'var(--color-border)',
-                          ...(isUsedService ? { ringColor: 'rgba(16,185,129,0.3)' } as React.CSSProperties : {}),
-                        }}
-                        onMouseEnter={e => {
-                          setHoveredChip({ stageKey: stage.key, entryIdx: j });
-                          setChipRect(e.currentTarget.getBoundingClientRect());
-                          e.currentTarget.style.transform = 'scale(1.03)';
-                        }}
-                        onMouseLeave={e => {
-                          setHoveredChip(null);
-                          e.currentTarget.style.transform = '';
-                        }}>
-                        {/* Icon */}
-                        {EntryIcon && (
-                          <div className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
-                            style={{ background: `color-mix(in srgb, ${iconColor} 15%, transparent)` }}>
-                            <EntryIcon className="w-3.5 h-3.5" style={{ color: iconColor }} />
+                      {/* Chip wrapper — tracks hover for action buttons */}
+                      <div className="relative w-full"
+                        onMouseEnter={() => { cancelHideTooltip(); setHoveredChip({ stageKey: stage.key, entryIdx: j }); }}
+                        onMouseLeave={() => scheduleHideTooltip()}>
+                        {/* Service chip — pill/oval shape (= "resource" shape) */}
+                        <div className={`w-full flex flex-col items-center px-2 py-2 border gap-1 transition-all cursor-help ${isUsedService ? 'ring-1' : ''}`}
+                          style={{
+                            borderRadius: '20px',
+                            opacity: isEntryDisabled ? 0.45 : 1,
+                            background: isUsedService
+                              ? 'color-mix(in srgb, #10b981 8%, var(--color-surface))'
+                              : j === 0 ? `color-mix(in srgb, ${color} 10%, var(--color-surface))` : 'var(--color-surface-elevated)',
+                            borderColor: isEntryDisabled
+                              ? 'var(--color-border)'
+                              : isUsedService
+                                ? 'color-mix(in srgb, #10b981 40%, transparent)'
+                                : j === 0 ? `color-mix(in srgb, ${color} 35%, transparent)` : 'var(--color-border)',
+                            ...(isUsedService ? { ringColor: 'rgba(16,185,129,0.3)' } as React.CSSProperties : {}),
+                          }}
+                          onMouseEnter={e => {
+                            cancelHideTooltip();
+                            setChipRect(e.currentTarget.getBoundingClientRect());
+                            e.currentTarget.style.transform = 'scale(1.03)';
+                          }}
+                          onMouseLeave={e => {
+                            e.currentTarget.style.transform = '';
+                          }}>
+                          {/* Icon */}
+                          {EntryIcon && (
+                            <div className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
+                              style={{ background: `color-mix(in srgb, ${iconColor} 15%, transparent)` }}>
+                              <EntryIcon className="w-3.5 h-3.5" style={{ color: iconColor }} />
+                            </div>
+                          )}
+                          {/* Provider name */}
+                          <span className="text-[11px] font-semibold truncate w-full text-center leading-tight"
+                            style={{ color: chipColor }}>
+                            {label}
+                          </span>
+                          {/* Model name */}
+                          {mLabel && (
+                            <span className="text-[9px] truncate w-full text-center leading-tight"
+                              style={{ color: 'var(--color-text-muted)' }}>
+                              {mLabel}
+                            </span>
+                          )}
+                          {/* Used indicator with latency */}
+                          {isUsedService && ts?.latencyMs != null && (
+                            <span className="text-[8px] font-bold font-mono" style={{ color: '#10b981' }}>
+                              {ts.latencyMs < 1000 ? `${ts.latencyMs}ms` : `${(ts.latencyMs / 1000).toFixed(1)}s`}
+                            </span>
+                          )}
+                          {/* Disabled badge */}
+                          {isEntryDisabled && (
+                            <span className="text-[8px] font-semibold uppercase tracking-wider"
+                              style={{ color: 'var(--color-text-muted)' }}>off</span>
+                          )}
+                        </div>
+
+                        {/* Action overlay — shown on hover when editable */}
+                        {onToggleEntry && isChipHovered && (
+                          <div className="absolute flex flex-col gap-0.5"
+                            style={{ top: '2px', right: '2px', zIndex: 20 }}
+                            onMouseDown={e => e.stopPropagation()}>
+                            {/* Toggle enable/disable */}
+                            <button
+                              type="button"
+                              onClick={e => { e.stopPropagation(); onToggleEntry(stage.key, j); }}
+                              title={isEntryDisabled ? 'Enable provider' : 'Disable provider'}
+                              className="w-5 h-5 rounded-full flex items-center justify-center shadow-sm"
+                              style={{
+                                background: isEntryDisabled
+                                  ? 'color-mix(in srgb, #10b981 15%, var(--color-surface-elevated))'
+                                  : 'var(--color-surface-elevated)',
+                                border: `1px solid ${isEntryDisabled ? 'rgba(16,185,129,0.5)' : 'var(--color-border)'}`,
+                              }}>
+                              {isEntryDisabled
+                                ? <Eye className="w-2.5 h-2.5" style={{ color: '#10b981' }} />
+                                : <EyeOff className="w-2.5 h-2.5" style={{ color: 'var(--color-text-muted)' }} />}
+                            </button>
+                            {/* More options */}
+                            <button
+                              type="button"
+                              onClick={e => {
+                                e.stopPropagation();
+                                setMenuChip({ stageKey: stage.key, entryIdx: j });
+                                setMenuRect(e.currentTarget.getBoundingClientRect());
+                              }}
+                              title="More options"
+                              className="w-5 h-5 rounded-full flex items-center justify-center shadow-sm"
+                              style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)' }}>
+                              <MoreVertical className="w-2.5 h-2.5" style={{ color: 'var(--color-text-muted)' }} />
+                            </button>
                           </div>
-                        )}
-                        {/* Provider name */}
-                        <span className="text-[11px] font-semibold truncate w-full text-center leading-tight"
-                          style={{ color: chipColor }}>
-                          {label}
-                        </span>
-                        {/* Model name */}
-                        {mLabel && (
-                          <span className="text-[9px] truncate w-full text-center leading-tight"
-                            style={{ color: 'var(--color-text-muted)' }}>
-                            {mLabel}
-                          </span>
-                        )}
-                        {/* Used indicator with latency */}
-                        {isUsedService && ts?.latencyMs != null && (
-                          <span className="text-[8px] font-bold font-mono" style={{ color: '#10b981' }}>
-                            {ts.latencyMs < 1000 ? `${ts.latencyMs}ms` : `${(ts.latencyMs / 1000).toFixed(1)}s`}
-                          </span>
                         )}
                       </div>
                     </div>
@@ -1701,8 +1773,10 @@ function ProfileFlowDiagram({
         const isActive = isGpuEntry && (routing === 'gpu' || routing === 'local');
 
         return createPortal(
-          <div className="fixed z-[9999] pointer-events-none"
-            style={{ left: tipX, top: tipY, transform: renderBelow ? 'none' : 'translateY(-100%)', width: TOOLTIP_W }}>
+          <div className="fixed z-[9999]"
+            style={{ left: tipX, top: tipY, transform: renderBelow ? 'none' : 'translateY(-100%)', width: TOOLTIP_W }}
+            onMouseEnter={cancelHideTooltip}
+            onMouseLeave={scheduleHideTooltip}>
             <div className="rounded-xl border shadow-2xl text-xs overflow-hidden"
               style={{
                 background: 'var(--color-surface-elevated)',
@@ -1910,6 +1984,49 @@ function ProfileFlowDiagram({
             </div>
           </div>
         , document.body);
+      })()}
+
+      {/* Context menu portal */}
+      {tooltipMounted && menuChip && menuRect && onToggleEntry && (() => {
+        const menuStage = stages.find(s => s.key === menuChip.stageKey);
+        const menuEntry = menuStage?.chain[menuChip.entryIdx];
+        const isMenuEntryDisabled = menuEntry?.enabled === false;
+        const menuColor = STAGE_ACCENT[menuChip.stageKey]?.color ?? '#8b949e';
+        return createPortal(
+          <div
+            style={{
+              position: 'fixed',
+              top: menuRect.bottom + 4,
+              left: Math.min(menuRect.left, window.innerWidth - 180),
+              zIndex: 10000,
+              minWidth: 160,
+              background: 'var(--color-surface-elevated)',
+              borderColor: 'var(--color-border)',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+            }}
+            className="rounded-lg border py-1 text-xs overflow-hidden"
+            onMouseDown={e => e.stopPropagation()}>
+            <div className="px-3 py-1.5 border-b"
+              style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
+              <span className="text-[10px] font-semibold" style={{ color: menuColor }}>
+                {menuEntry ? pMeta(menuEntry.provider).label : 'Service'}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="w-full flex items-center gap-2 px-3 py-2 text-left transition-colors cursor-pointer"
+              style={{ color: isMenuEntryDisabled ? '#10b981' : 'var(--color-text)', background: 'transparent' }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'color-mix(in srgb, var(--color-text-muted) 8%, transparent)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+              onClick={() => { onToggleEntry(menuChip.stageKey, menuChip.entryIdx); setMenuChip(null); }}>
+              {isMenuEntryDisabled
+                ? <Eye className="w-3.5 h-3.5" style={{ color: '#10b981' }} />
+                : <EyeOff className="w-3.5 h-3.5" style={{ color: 'var(--color-text-muted)' }} />}
+              {isMenuEntryDisabled ? 'Enable provider' : 'Disable provider'}
+            </button>
+          </div>,
+          document.body
+        );
       })()}
     </div>
   );
@@ -3323,6 +3440,20 @@ export function ProfilesSection() {
           sttEnabled={sttEnabled} ttsEnabled={ttsEnabled}
           services={services} latency={latency}
           name={editingProfile?.name}
+          onToggleEntry={(stageKey, entryIdx) => {
+            setStages(prev => prev.map(s => {
+              if (s.key !== stageKey) return s;
+              return {
+                ...s,
+                chain: s.chain.map((e, i) =>
+                  i === entryIdx ? { ...e, enabled: e.enabled === false ? undefined : false } : e
+                ),
+              };
+            }));
+          }}
+          onToggleStage={(stageKey) => {
+            setStages(prev => prev.map(s => s.key === stageKey ? { ...s, enabled: !s.enabled } : s));
+          }}
         />
       </div>
 
