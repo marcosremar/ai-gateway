@@ -323,27 +323,25 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
                 // RTMP (TCP) not available via proxy; webcam push requires GPU pod
                 console.log(`[bot] CPU pod ready (proxy only — no RTMP/SSH direct access)`);
               } else {
-                // GPU pods: resolve direct IP + portMappings for RTMP/SSH
+                // GPU pods: resolve direct IP + port mappings for RTMP/SSH via RunpodClient
                 try {
-                  const podRes = await fetch(`https://rest.runpod.io/v1/pods/${instance.instanceId}`, {
-                    headers: { Authorization: `Bearer ${apiKey}` },
-                    signal: AbortSignal.timeout(10_000),
-                  });
-                  if (podRes.ok) {
-                    const podData = await podRes.json() as Record<string, unknown>;
-                    const publicIp = podData.publicIp as string | undefined;
-                    const portMappings = podData.portMappings as Record<string, number> | undefined;
-                    if (publicIp && portMappings) {
-                      const rtmpPublicPort = portMappings['1936'];
-                      if (rtmpPublicPort) {
-                        webcamRtmpUrl = `rtmp://${publicIp}:${rtmpPublicPort}/live`;
-                        console.log(`[bot] RTMP webcam URL: ${webcamRtmpUrl}`);
-                      }
-                      const sshPublicPort = portMappings['22'];
-                      if (sshPublicPort) {
-                        sshHost = publicIp;
-                        sshPort = sshPublicPort;
-                        console.log(`[bot] SSH: ${sshHost}:${sshPort}`);
+                  const podDetail = await runpod.getInstanceDetail(instance.instanceId, { apiKey });
+                  if (podDetail?.runtime) {
+                    const runtimePorts = podDetail.runtime.ports as Array<Record<string, unknown>> | undefined;
+                    if (runtimePorts && runtimePorts.length > 0) {
+                      const publicIp = runtimePorts[0]?.ip as string | undefined;
+                      if (publicIp) {
+                        const rtmpPort = runtimePorts.find(p => p.privatePort === 1936);
+                        if (rtmpPort?.publicPort) {
+                          webcamRtmpUrl = `rtmp://${publicIp}:${rtmpPort.publicPort}/live`;
+                          console.log(`[bot] RTMP webcam URL: ${webcamRtmpUrl}`);
+                        }
+                        const sshPort_ = runtimePorts.find(p => p.privatePort === 22);
+                        if (sshPort_?.publicPort) {
+                          sshHost = publicIp;
+                          sshPort = sshPort_.publicPort as number;
+                          console.log(`[bot] SSH: ${sshHost}:${sshPort}`);
+                        }
                       }
                     }
                   }

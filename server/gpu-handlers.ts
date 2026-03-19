@@ -194,26 +194,12 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     console.log(`[req=${requestId}] No GPU specified — using priority list: ${gpuTypes.join(', ')}`);
   }
 
-  // Pre-flight: validate RunPod key + check balance (fast GraphQL query)
+  // Pre-flight: validate RunPod key + check balance via RunpodClient (single call)
   let runpodApiKey = apiKey;
   if (runpodApiKey) {
     try {
-      const preflight = await fetch('https://rest.runpod.io/v1/pods', {
-        headers: { Authorization: `Bearer ${runpodApiKey}` },
-        signal: AbortSignal.timeout(5000),
-      });
-      if (preflight.status === 401 || preflight.status === 403) {
-        setDeployLock(false);
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'RunPod API key is invalid (401/403)' }));
-        return;
-      }
-    } catch { /* network error, proceed anyway — deploy will fail with better error */ }
-
-    // Check RunPod balance — skip provider if too low
-    try {
       const runpodBal = await runpod.checkBalance({ apiKey: runpodApiKey });
-      if (runpodBal) {
+      if (runpodBal !== null) {
         console.log(`[gpu] RunPod balance: $${runpodBal.balance.toFixed(2)}`);
         if (runpodBal.balance < 1.0) {
           console.warn(`[gpu] RunPod balance too low ($${runpodBal.balance.toFixed(2)}) — skipping provider`);
@@ -221,34 +207,23 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
         }
       }
     } catch (balErr) {
-      console.warn(`[gpu] RunPod balance check failed: ${balErr instanceof Error ? balErr.message : balErr} — proceeding anyway`);
+      const msg = balErr instanceof Error ? balErr.message : String(balErr);
+      if (/401|403|unauthorized|invalid/i.test(msg)) {
+        setDeployLock(false);
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'RunPod API key is invalid' }));
+        return;
+      }
+      console.warn(`[gpu] RunPod balance check failed: ${msg} — proceeding anyway`);
     }
   }
 
-  // Pre-flight: validate TensorDock credentials via balance check
-  if (tensordockApiKey && tensordockAuthId) {
-    try {
-      const preflight = await fetch('https://marketplace.tensordock.com/api/v0/client/get_balance', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ api_key: tensordockApiKey, api_token: tensordockAuthId }),
-        signal: AbortSignal.timeout(5000),
-      });
-      if (preflight.status === 401 || preflight.status === 403) {
-        setDeployLock(false);
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'TensorDock credentials are invalid (401/403)' }));
-        return;
-      }
-    } catch { /* network error, proceed anyway */ }
-  }
-
-  // Pre-deploy balance check for TensorDock — skip provider entirely if balance < $1
+  // Pre-deploy balance check for TensorDock — validates credentials and skips provider if balance < $1
   let tensordockOpts = tensordockApiKey && tensordockAuthId ? { apiKey: tensordockApiKey, authId: tensordockAuthId } : undefined;
   if (tensordockOpts) {
     try {
       const bal = await tensordock.checkBalance({ apiKey: tensordockApiKey, authId: tensordockAuthId });
-      if (bal) {
+      if (bal !== null) {
         console.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly cost: $${bal.hourlyCost.toFixed(3)})`);
         if (bal.balance < 1.0) {
           console.warn(`[gpu] TensorDock balance too low ($${bal.balance.toFixed(2)}) — skipping provider`);
@@ -256,7 +231,14 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
         }
       }
     } catch (balErr) {
-      console.warn(`[gpu] TensorDock balance check failed: ${balErr instanceof Error ? balErr.message : balErr} — proceeding anyway`);
+      const msg = balErr instanceof Error ? balErr.message : String(balErr);
+      if (/401|403|unauthorized|invalid/i.test(msg)) {
+        setDeployLock(false);
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'TensorDock credentials are invalid' }));
+        return;
+      }
+      console.warn(`[gpu] TensorDock balance check failed: ${msg} — proceeding anyway`);
     }
   }
 
@@ -580,7 +562,9 @@ async function refreshProviderBalance(
   credentials: ProviderCredentials,
 ): Promise<void> {
   try {
-    // Modal: no credit balance API — verify credentials only
+    // Modal: no credit balance API — verify credentials only via HTTP token check.
+    // TODO: replace with ModalClient method once it supports HTTP credential validation
+    // (ModalClient.listInstances() uses CLI exec internally, not suitable for a quick check)
     if (name === 'modal') {
       const [tokenId, tokenSecret] = (credentials.apiKey || '').split(':');
       const b64 = Buffer.from(`${tokenId}:${tokenSecret}`).toString('base64');

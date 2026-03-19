@@ -15,9 +15,11 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { getOrCreateRequestId, setRequestIdHeader, readJsonBody, handleBodyError } from './http-utils';
 import { loadProviderConfig, patchProviderConfig, saveProviderConfig } from './config-persistence';
+import type { PipelineChainEntry } from './config-persistence';
 import { reloadStreamingSTTRouter } from './ws-server';
 import type { GatewayProfile, ProviderConfig } from './config-persistence';
 import { reloadProviderAvailability, translationProfile, updateTranslationProfile } from './providers';
+import type { AIProfile } from '../src/client';
 import { broadcastWs } from './ws-state';
 import { setDeployTimeoutMin, setDeployRegion, setDeployDockerImage, setDeployRaceCount } from '../src/gpu-providers/deploy-settings';
 
@@ -62,15 +64,15 @@ export async function handlePatchProviderConfig(req: IncomingMessage, res: Serve
   try {
     const updated = patchProviderConfig(body as Parameters<typeof patchProviderConfig>[0]);
     // Apply changed chains to runtime translationProfile
-    if (body.pipelineStt && Array.isArray(body.pipelineStt) && (body.pipelineStt as any[]).length > 0) {
-      updateTranslationProfile({ stt: body.pipelineStt as any[] }, 'handlePatchProviderConfig:stt');
+    if (body.pipelineStt && Array.isArray(body.pipelineStt) && body.pipelineStt.length > 0) {
+      updateTranslationProfile({ stt: body.pipelineStt as PipelineChainEntry[] }, 'handlePatchProviderConfig:stt');
       reloadStreamingSTTRouter();
     }
-    if (body.pipelineLlm && Array.isArray(body.pipelineLlm) && (body.pipelineLlm as any[]).length > 0) {
-      updateTranslationProfile({ llm: body.pipelineLlm as any[] }, 'handlePatchProviderConfig:llm');
+    if (body.pipelineLlm && Array.isArray(body.pipelineLlm) && body.pipelineLlm.length > 0) {
+      updateTranslationProfile({ llm: body.pipelineLlm as PipelineChainEntry[] }, 'handlePatchProviderConfig:llm');
     }
-    if (body.pipelineTts && Array.isArray(body.pipelineTts) && (body.pipelineTts as any[]).length > 0) {
-      updateTranslationProfile({ tts: body.pipelineTts as any[] }, 'handlePatchProviderConfig:tts');
+    if (body.pipelineTts && Array.isArray(body.pipelineTts) && body.pipelineTts.length > 0) {
+      updateTranslationProfile({ tts: body.pipelineTts as PipelineChainEntry[] }, 'handlePatchProviderConfig:tts');
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(updated));
@@ -239,7 +241,7 @@ export async function handleCreateProfile(req: IncomingMessage, res: ServerRespo
     ...(gpuDeploy !== undefined ? { gpuDeploy } : existing?.gpuDeploy ? { gpuDeploy: existing.gpuDeploy } : {}),
     // Extended AIProfile fields (backward-compatible: omitted = inherited from existing/default)
     ...(voice !== undefined ? { voice } : existing?.voice ? { voice: existing.voice } : {}),
-    ...(audioFormat !== undefined ? { audioFormat: audioFormat as any } : existing?.audioFormat ? { audioFormat: existing.audioFormat } : {}),
+    ...(audioFormat !== undefined ? { audioFormat: audioFormat as GatewayProfile['audioFormat'] } : existing?.audioFormat ? { audioFormat: existing.audioFormat } : {}),
     ...(temperature !== undefined ? { temperature } : existing?.temperature !== undefined ? { temperature: existing.temperature } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : existing?.maxTokens !== undefined ? { maxTokens: existing.maxTokens } : {}),
     ...(language !== undefined ? { language } : existing?.language ? { language: existing.language } : {}),
@@ -346,7 +348,7 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
   saveProviderConfig(config);
 
   // ── Apply chains + extended fields to runtime translationProfile ──
-  const profilePatch: Record<string, unknown> = {
+  const profilePatch: Partial<AIProfile> = {
     stt: [...(profile.stt ?? [])],
     llm: [...(profile.llm ?? [])],
     tts: [...(profile.tts ?? [])],
@@ -356,7 +358,7 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
   if (profile.temperature !== undefined) profilePatch.temperature = profile.temperature;
   if (profile.maxTokens !== undefined) profilePatch.maxTokens = profile.maxTokens;
   if (profile.language !== undefined) profilePatch.language = profile.language;
-  updateTranslationProfile(profilePatch as any, `handleActivateProfile:${id}`);
+  updateTranslationProfile(profilePatch, `handleActivateProfile:${id}`);
 
   // Rebuild streaming STT router for new STT chain
   reloadStreamingSTTRouter();

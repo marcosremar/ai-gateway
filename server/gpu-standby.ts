@@ -236,11 +236,11 @@ async function terminateOldPod(podId: string, provider: string): Promise<void> {
   const { runpod, vast, tensordock } = await import('./providers');
   try {
     if (provider === 'runpod' && deployApiKey) {
-      await (runpod as any).terminatePod(podId, { apiKey: deployApiKey });
+      await runpod.deleteInstance(podId, { apiKey: deployApiKey });
     } else if (provider === 'vast' && deployVastApiKey) {
-      await (vast as any).terminateInstance(podId, { apiKey: deployVastApiKey });
+      await vast.deleteInstance(podId, { apiKey: deployVastApiKey });
     } else if (provider === 'tensordock' && deployTensordockApiKey) {
-      await (tensordock as any).terminateInstance(podId, { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId });
+      await tensordock.deleteInstance(podId, { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId });
     }
     console.log(`[standby] Old pod ${podId} terminated`);
   } catch (err) {

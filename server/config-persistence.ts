@@ -126,7 +126,7 @@ export function loadProviderConfig(): ProviderConfig {
     }
     // Preserve extra UI fields (dockerImages, gpuImage, gpuTypes, etc.)
     for (const key of Object.keys(data)) {
-      if (!(key in config)) (config as any)[key] = data[key as keyof typeof data];
+      if (!(key in config)) config[key] = data[key as keyof typeof data];
     }
     return config;
   } catch (err) {
@@ -163,7 +163,7 @@ export function patchProviderConfig(partial: Partial<ProviderConfig>): ProviderC
   // Copy any extra fields from partial (dockerImages, gpuImage, etc.)
   for (const key of Object.keys(partial)) {
     if (!(key in updated) && partial[key as keyof typeof partial] !== undefined) {
-      (updated as any)[key] = partial[key as keyof typeof partial];
+      updated[key] = partial[key as keyof typeof partial];
     }
   }
 
@@ -201,7 +201,7 @@ const LATENCY_TARGETS: Record<string, { sttMs: number; llmMs: number; ttsMs: num
 export function applyProfileLatencyTargets(profileId: string | null, profiles: GatewayProfile[]): void {
   if (!profileId) return;
   const profile = profiles.find(p => p.id === profileId);
-  const latency = (profile as any)?.latency as string | undefined;
+  const latency = (profile as Record<string, unknown>)?.latency as string | undefined;
   const targets = latency ? LATENCY_TARGETS[latency] : null;
   if (!targets) return;
   setSttTargetLatencyMs(targets.sttMs);

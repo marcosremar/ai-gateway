@@ -217,7 +217,7 @@ export async function handlePlaygroundStt(req: IncomingMessage, res: ServerRespo
     const result = await client.transcribe(audioBuffer, profile);
     const latencyMs = Date.now() - t0;
 
-    logRequest({ timestamp: Date.now(), stage: 'stt', provider: result.provider as any, model: result.model, latencyMs, success: true, inputSize: audioBuffer.length, outputPreview: result.text?.slice(0, 80) });
+    logRequest({ timestamp: Date.now(), stage: 'stt', provider: result.provider as 'gpu' | 'groq' | 'ollama', model: result.model, latencyMs, success: true, inputSize: audioBuffer.length, outputPreview: result.text?.slice(0, 80) });
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -284,7 +284,7 @@ export async function handlePlaygroundLlm(req: IncomingMessage, res: ServerRespo
     );
     const latencyMs = Date.now() - t0;
 
-    logRequest({ timestamp: Date.now(), stage: 'llm', provider: result.provider as any, model: result.model, latencyMs, success: true, outputPreview: result.content?.slice(0, 80), inputTokens: result.usage?.promptTokens, outputTokens: result.usage?.completionTokens });
+    logRequest({ timestamp: Date.now(), stage: 'llm', provider: result.provider as 'gpu' | 'groq' | 'ollama', model: result.model, latencyMs, success: true, outputPreview: result.content?.slice(0, 80), inputTokens: result.usage?.promptTokens, outputTokens: result.usage?.completionTokens });
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -341,7 +341,7 @@ export async function handlePlaygroundTts(req: IncomingMessage, res: ServerRespo
     const result = await client.synthesize(text, profile);
     const latencyMs = Date.now() - t0;
 
-    logRequest({ timestamp: Date.now(), stage: 'tts', provider: result.provider as any, model: result.model, latencyMs, success: true, outputPreview: `${result.audio.length} bytes` });
+    logRequest({ timestamp: Date.now(), stage: 'tts', provider: result.provider as 'gpu' | 'groq' | 'ollama', model: result.model, latencyMs, success: true, outputPreview: `${result.audio.length} bytes` });
 
     // Return audio as base64 + metadata (JSON response for playground testing)
     const returnAudio = body.return_audio !== false; // default true
@@ -400,10 +400,10 @@ export async function handlePlaygroundPipeline(req: IncomingMessage, res: Server
     const result = await client.pipeline(rawBody, systemPrompt, [], Object.keys(profile).length > 1 ? profile : undefined);
 
     // Log per-stage metrics
-    logRequest({ timestamp: Date.now(), stage: 'stt', provider: result.stt.provider as any, model: result.stt.model, latencyMs: result.stt.latencyMs, success: true, inputSize: rawBody.length, outputPreview: result.stt.text?.slice(0, 80) });
-    logRequest({ timestamp: Date.now(), stage: 'llm', provider: result.chat.provider as any, model: result.chat.model, latencyMs: result.chat.latencyMs, success: true, outputPreview: result.chat.content?.slice(0, 80), inputTokens: result.chat.usage?.promptTokens, outputTokens: result.chat.usage?.completionTokens });
-    logRequest({ timestamp: Date.now(), stage: 'tts', provider: result.tts.provider as any, model: result.tts.model, latencyMs: result.tts.latencyMs, success: true, outputPreview: `${result.tts.audio.length} bytes` });
-    logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: (result.usedGpu ? 'gpu' : result.stt.provider) as any, latencyMs: result.totalLatencyMs, success: true, inputSize: rawBody.length, outputPreview: result.chat.content?.slice(0, 80) });
+    logRequest({ timestamp: Date.now(), stage: 'stt', provider: result.stt.provider as 'gpu' | 'groq' | 'ollama', model: result.stt.model, latencyMs: result.stt.latencyMs, success: true, inputSize: rawBody.length, outputPreview: result.stt.text?.slice(0, 80) });
+    logRequest({ timestamp: Date.now(), stage: 'llm', provider: result.chat.provider as 'gpu' | 'groq' | 'ollama', model: result.chat.model, latencyMs: result.chat.latencyMs, success: true, outputPreview: result.chat.content?.slice(0, 80), inputTokens: result.chat.usage?.promptTokens, outputTokens: result.chat.usage?.completionTokens });
+    logRequest({ timestamp: Date.now(), stage: 'tts', provider: result.tts.provider as 'gpu' | 'groq' | 'ollama', model: result.tts.model, latencyMs: result.tts.latencyMs, success: true, outputPreview: `${result.tts.audio.length} bytes` });
+    logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: (result.usedGpu ? 'gpu' : result.stt.provider) as 'gpu' | 'groq' | 'ollama', latencyMs: result.totalLatencyMs, success: true, inputSize: rawBody.length, outputPreview: result.chat.content?.slice(0, 80) });
 
     const returnAudio = url.searchParams.get('return_audio') !== 'false';
     res.writeHead(200, { 'Content-Type': 'application/json' });
