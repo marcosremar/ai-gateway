@@ -2,17 +2,21 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, benchmarkPaths, type GpuTypeInfo, type DockerManifest, type SpeechTransport, type BenchmarkPathsResponse, type PathOption, type StageBenchResult } from '@/lib/gateway';
+import {
+  getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, benchmarkPaths, type GpuTypeInfo, type DockerManifest, type SpeechTransport, type BenchmarkPathsResponse, type PathOption, type StageBenchResult, type ProviderBenchResult, type PipelineIteration,
+  getReadinessStatus, resetGpuReadiness, type ReadinessStatusResponse,
+} from '@/lib/gateway';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import {
   Card, CardHeader, CardBody, Button, FormSelect, FormInput, SectionHeader,
-  IconBox,
+  IconBox, StatusBadge, Toggle,
 } from '@/components/ui';
 import {
   ChevronLeft, Mic, Plus, Check, Trash2, Circle,
   CircleCheck, Package, Server, Bot, Volume2, Pencil, Clock, Gauge, Timer, Search, Loader2,
   GripVertical, ClipboardCheck, Sparkles, Brain, Play, Square, Cpu, ScanSearch, AlertCircle,
-  Upload, Zap, X as XIcon, BarChart3, Trophy,
+  Upload, Zap, X as XIcon, BarChart3, Trophy, RotateCcw, RefreshCw, Activity, AlertTriangle,
+  TrendingDown, ArrowRight, ChevronDown, Settings2, Cloud, MoreVertical, Eye, EyeOff,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import Sortable from 'sortablejs';
@@ -307,12 +311,37 @@ interface FlowStage {
   input: string; output: string;
 }
 
+function BenchProgressionRow({ it, maxMs }: { it: PipelineIteration; maxMs: number }) {
+  const pct = maxMs > 0 ? Math.min((it.totalMs / maxMs) * 100, 100) : 0;
+  const color = it.error ? '#f87171' : it.usedGpu ? '#34d399' : '#60a5fa';
+  return (
+    <div className="flex items-center gap-3 text-xs">
+      <span className="w-6 text-right font-mono" style={{ color: 'var(--color-text-muted)' }}>{it.index + 1}</span>
+      <div className="flex-1 h-3 rounded-full relative" style={{ background: 'var(--color-ink-300)' }}>
+        <div className="h-3 rounded-full transition-all" style={{ width: `${pct}%`, background: color, opacity: 0.7 }} />
+        {!it.error && it.totalMs > 0 && (
+          <div className="absolute inset-0 flex rounded-full overflow-hidden">
+            <div style={{ width: `${(it.sttMs / it.totalMs) * pct}%`, background: '#fbbf24', opacity: 0.8 }} title={`STT ${it.sttMs}ms`} />
+            <div style={{ width: `${(it.llmMs / it.totalMs) * pct}%`, background: '#a78bfa', opacity: 0.8 }} title={`LLM ${it.llmMs}ms`} />
+            <div style={{ width: `${(it.ttsMs / it.totalMs) * pct}%`, background: '#34d399', opacity: 0.8 }} title={`TTS ${it.ttsMs}ms`} />
+          </div>
+        )}
+      </div>
+      <span className="w-14 text-right font-mono font-medium" style={{ color }}>{it.totalMs}ms</span>
+      <span className="w-10 text-center">{it.error ? '---' : it.usedGpu ? 'GPU' : 'Cloud'}</span>
+    </div>
+  );
+}
+
 function ProfileFlowDiagram({
   sttChain, llmChain, ttsChain, sttEnabled, ttsEnabled, services, latency, name,
+  onToggleEntry, onToggleStage,
 }: {
   sttChain: PipelineChainEntry[]; llmChain: PipelineChainEntry[]; ttsChain: PipelineChainEntry[];
   sttEnabled: boolean; ttsEnabled: boolean;
   services: ProfileService[]; latency: Latency; name?: string;
+  onToggleEntry?: (stageKey: string, entryIdx: number) => void;
+  onToggleStage?: (stageKey: string) => void;
 }) {
   // ── Inline test panel state ──
   const [testOpen, setTestOpen] = useState(false);
@@ -351,6 +380,12 @@ function ProfileFlowDiagram({
   const [benchRunning, setBenchRunning] = useState(false);
   const [benchResult, setBenchResult] = useState<BenchmarkPathsResponse | null>(null);
   const [benchError, setBenchError] = useState<string | null>(null);
+  const [benchAdvanced, setBenchAdvanced] = useState(false);
+  const [benchIterations, setBenchIterations] = useState(3);
+  const [benchPipelineIts, setBenchPipelineIts] = useState(5);
+  const [benchWarmupIts, setBenchWarmupIts] = useState(2);
+  const [benchIncludeGpu, setBenchIncludeGpu] = useState(true);
+  const [benchIncludeCloud, setBenchIncludeCloud] = useState(true);
 
   const runBenchmark = async () => {
     setBenchRunning(true);
@@ -358,13 +393,13 @@ function ProfileFlowDiagram({
     setBenchResult(null);
     try {
       const result = await benchmarkPaths({
-        iterations: 3,
-        pipelineIterations: 0,
-        warmupIterations: 1,
+        iterations: benchAdvanced ? benchIterations : 3,
+        pipelineIterations: benchAdvanced ? benchPipelineIts : 0,
+        warmupIterations: benchAdvanced ? benchWarmupIts : 1,
         source: testSrc,
         target: testTgt,
-        includeGpu: true,
-        includeCloud: true,
+        includeGpu: benchAdvanced ? benchIncludeGpu : true,
+        includeCloud: benchAdvanced ? benchIncludeCloud : true,
       });
       setBenchResult(result);
     } catch (e) {
@@ -381,6 +416,16 @@ function ProfileFlowDiagram({
   // mounted gate: avoids SSR/hydration mismatch with createPortal
   const [tooltipMounted, setTooltipMounted] = useState(false);
   useEffect(() => { setTooltipMounted(true); }, []);
+
+  // ── Service chip context menu ──
+  const [menuChip, setMenuChip] = useState<{ stageKey: string; entryIdx: number } | null>(null);
+  const [menuRect, setMenuRect] = useState<DOMRect | null>(null);
+  useEffect(() => {
+    if (!menuChip) return;
+    const close = () => setMenuChip(null);
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [menuChip]);
 
   const resetTest = () => {
     setTestStages([{ key: 'stt', state: 'idle' }, { key: 'llm', state: 'idle' }, { key: 'tts', state: 'idle' }]);
@@ -1255,12 +1300,74 @@ function ProfileFlowDiagram({
                     ({(benchResult.durationMs / 1000).toFixed(1)}s)
                   </span>
                 )}
+                <button type="button"
+                  onClick={() => setBenchAdvanced(prev => !prev)}
+                  className="flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-lg border cursor-pointer transition-all"
+                  style={{
+                    borderColor: benchAdvanced ? 'color-mix(in srgb, #8b5cf6 30%, transparent)' : 'var(--color-border)',
+                    color: benchAdvanced ? '#8b5cf6' : 'var(--color-text-muted)',
+                    background: benchAdvanced ? 'color-mix(in srgb, #8b5cf6 8%, transparent)' : 'transparent',
+                  }}>
+                  <Settings2 className="w-3 h-3" />
+                  Advanced
+                  <ChevronDown className={`w-3 h-3 transition-transform ${benchAdvanced ? 'rotate-180' : ''}`} />
+                </button>
               </div>
               <button type="button" onClick={() => { setBenchResult(null); setBenchError(null); }}
                 className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors">
                 <XIcon className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
               </button>
             </div>
+
+            {/* Advanced config panel */}
+            {benchAdvanced && (
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2 p-3 rounded-lg"
+                style={{ background: 'color-mix(in srgb, #8b5cf6 4%, var(--color-surface))' }}>
+                <div>
+                  <label className="text-[9px] font-bold uppercase mb-1 block" style={{ color: 'var(--color-text-muted)' }}>Per-stage iters</label>
+                  <input type="number" value={benchIterations} min={1} max={20}
+                    onChange={e => setBenchIterations(Math.max(1, Math.min(20, parseInt(e.target.value) || 3)))}
+                    className="w-full text-xs font-mono px-2 py-1.5 rounded-lg border"
+                    style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }} />
+                </div>
+                <div>
+                  <label className="text-[9px] font-bold uppercase mb-1 block" style={{ color: 'var(--color-text-muted)' }}>Pipeline iters</label>
+                  <input type="number" value={benchPipelineIts} min={0} max={30}
+                    onChange={e => setBenchPipelineIts(Math.max(0, Math.min(30, parseInt(e.target.value) || 5)))}
+                    className="w-full text-xs font-mono px-2 py-1.5 rounded-lg border"
+                    style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }} />
+                </div>
+                <div>
+                  <label className="text-[9px] font-bold uppercase mb-1 block" style={{ color: 'var(--color-text-muted)' }}>Warmup iters</label>
+                  <input type="number" value={benchWarmupIts} min={0} max={10}
+                    onChange={e => setBenchWarmupIts(Math.max(0, Math.min(10, parseInt(e.target.value) || 2)))}
+                    className="w-full text-xs font-mono px-2 py-1.5 rounded-lg border"
+                    style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }} />
+                </div>
+                <div className="flex flex-col gap-1.5 justify-center">
+                  <div className="flex items-center gap-2">
+                    <Toggle checked={benchIncludeGpu} onChange={setBenchIncludeGpu} size="sm" />
+                    <span className="text-[10px] font-medium" style={{ color: 'var(--color-text-secondary)' }}>GPU</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Toggle checked={benchIncludeCloud} onChange={setBenchIncludeCloud} size="sm" />
+                    <span className="text-[10px] font-medium" style={{ color: 'var(--color-text-secondary)' }}>Cloud</span>
+                  </div>
+                </div>
+                <div className="flex items-end">
+                  <button type="button" disabled={benchRunning} onClick={runBenchmark}
+                    className="flex items-center gap-1.5 text-[10px] font-semibold px-3 py-1.5 rounded-lg border cursor-pointer transition-all w-full justify-center"
+                    style={{
+                      background: 'color-mix(in srgb, #8b5cf6 10%, transparent)',
+                      borderColor: 'color-mix(in srgb, #8b5cf6 30%, transparent)',
+                      color: '#8b5cf6', opacity: benchRunning ? 0.7 : 1,
+                    }}>
+                    {benchRunning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                    {benchRunning ? 'Running...' : 'Re-run'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {benchError && (
               <div className="text-xs px-3 py-2 rounded-lg"
@@ -1269,8 +1376,27 @@ function ProfileFlowDiagram({
               </div>
             )}
 
+            {benchResult?.notes && benchResult.notes.length > 0 && (
+              <div className="text-[10px] px-3 py-1.5 rounded-lg"
+                style={{ background: 'color-mix(in srgb, #f59e0b 8%, transparent)', color: '#f59e0b' }}>
+                {benchResult.notes.join(' | ')}
+              </div>
+            )}
+
             {benchResult && (
               <>
+                {/* GPU status (advanced) */}
+                {benchAdvanced && benchResult.gpuStatus && (
+                  <div className="flex items-center gap-2 text-[10px]">
+                    <div className={`w-1.5 h-1.5 rounded-full ${benchResult.gpuStatus.available ? 'bg-emerald-500' : 'bg-gray-500'}`} />
+                    <span style={{ color: 'var(--color-text-muted)' }}>
+                      GPU: {benchResult.gpuStatus.available
+                        ? `${benchResult.gpuStatus.gpuType} (${benchResult.gpuStatus.dockerImage.split('/').pop()})`
+                        : 'unavailable'}
+                    </span>
+                  </div>
+                )}
+
                 {/* Per-stage provider latency bars */}
                 {benchResult.stages && (
                   <div className="space-y-3">
@@ -1326,6 +1452,13 @@ function ProfileFlowDiagram({
                                     </div>
                                   </div>
                                   {isFastest && <Trophy className="w-3 h-3 flex-shrink-0" style={{ color: '#10b981' }} />}
+                                  {benchAdvanced && data.p95 !== undefined && (
+                                    <span className="text-[9px] font-mono flex-shrink-0 flex gap-2" style={{ color: 'var(--color-text-muted)' }}>
+                                      <span>p95={data.p95}ms</span>
+                                      <span>min={data.min}ms</span>
+                                      {data.errors > 0 && <span style={{ color: '#f87171' }}>err={data.errors}</span>}
+                                    </span>
+                                  )}
                                 </div>
                               );
                             })}
@@ -1401,6 +1534,129 @@ function ProfileFlowDiagram({
                         {benchResult.recommendation.reason}
                       </div>
                     )}
+                  </div>
+                )}
+
+                {/* Advanced: Recommended routing path */}
+                {benchAdvanced && benchResult.recommendation && (
+                  <div className="pt-3 mt-2" style={{ borderTop: '1px solid var(--color-border)' }}>
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Trophy className="w-3 h-3" style={{ color: '#10b981' }} />
+                      <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#10b981' }}>
+                        Recommended Path
+                      </span>
+                      <span className="text-lg font-bold font-mono ml-auto" style={{ color: '#10b981' }}>
+                        {benchResult.recommendation.estimatedTotalMs}ms
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {(['stt', 'llm', 'tts'] as const).map((stage, i) => {
+                        const p = benchResult.recommendation!.routing[stage];
+                        if (!p) return null;
+                        const pi = PROVIDER_ICON[p];
+                        const provColor = pi?.color ?? pMeta(p).color;
+                        return (
+                          <React.Fragment key={stage}>
+                            {i > 0 && <ArrowRight className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />}
+                            <div className="flex items-center gap-1 px-2 py-1 rounded-lg"
+                              style={{ background: `color-mix(in srgb, ${provColor} 10%, transparent)`, border: `1px solid color-mix(in srgb, ${provColor} 25%, transparent)` }}>
+                              <span className="text-[9px] font-bold uppercase" style={{ color: 'var(--color-text-muted)' }}>{stage}</span>
+                              <span className="text-[10px] font-semibold" style={{ color: provColor }}>{pMeta(p).label}</span>
+                            </div>
+                          </React.Fragment>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Advanced: Pipeline Progression */}
+                {benchAdvanced && benchResult.progression && (
+                  <div className="pt-3 mt-2" style={{ borderTop: '1px solid var(--color-border)' }}>
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Activity className="w-3 h-3" style={{ color: '#8b5cf6' }} />
+                      <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#8b5cf6' }}>
+                        Pipeline Progression
+                      </span>
+                      <span className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                        {benchResult.progression.warmupIterations.length} warmup + {benchResult.progression.measuredIterations.length} measured
+                      </span>
+                    </div>
+
+                    {/* Legend */}
+                    <div className="flex gap-3 text-[9px] mb-2" style={{ color: 'var(--color-text-muted)' }}>
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded" style={{ background: '#fbbf24' }} /> STT</span>
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded" style={{ background: '#a78bfa' }} /> LLM</span>
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded" style={{ background: '#34d399' }} /> TTS</span>
+                    </div>
+
+                    {/* Iteration bars */}
+                    {(() => {
+                      const all = [...benchResult.progression!.warmupIterations, ...benchResult.progression!.measuredIterations];
+                      const maxMs = Math.max(...all.map(it => it.totalMs), 1);
+                      return (
+                        <div className="space-y-0.5">
+                          {benchResult.progression!.warmupIterations.length > 0 && (
+                            <div className="text-[9px] mb-0.5" style={{ color: 'var(--color-text-muted)' }}>Warmup (discarded)</div>
+                          )}
+                          {benchResult.progression!.warmupIterations.map((it, i) => (
+                            <div key={`w${i}`} style={{ opacity: 0.5 }}><BenchProgressionRow it={it} maxMs={maxMs} /></div>
+                          ))}
+                          {benchResult.progression!.warmupIterations.length > 0 && (
+                            <div className="border-b my-1.5" style={{ borderColor: 'var(--color-border)' }} />
+                          )}
+                          <div className="text-[9px] mb-0.5" style={{ color: 'var(--color-text-muted)' }}>Measured</div>
+                          {benchResult.progression!.measuredIterations.map((it, i) => (
+                            <BenchProgressionRow key={`m${i}`} it={it} maxMs={maxMs} />
+                          ))}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Analysis cards */}
+                    <div className="grid grid-cols-3 gap-2 mt-3">
+                      <div className="p-2 rounded-lg" style={{ background: 'var(--color-surface)' }}>
+                        <div className="flex items-center gap-1 mb-1">
+                          <TrendingDown className="w-3 h-3" style={{ color: '#34d399' }} />
+                          <span className="text-[9px] font-medium" style={{ color: 'var(--color-text-muted)' }}>Cold Start</span>
+                        </div>
+                        <div className="text-sm font-bold font-mono"
+                          style={{ color: benchResult.progression!.coldStartPenalty.penaltyMs > 200 ? '#fbbf24' : '#34d399' }}>
+                          +{benchResult.progression!.coldStartPenalty.penaltyMs}ms
+                        </div>
+                        <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                          {benchResult.progression!.coldStartPenalty.firstCallMs}ms first, {benchResult.progression!.coldStartPenalty.warmAvgMs}ms warm
+                        </div>
+                      </div>
+
+                      <div className="p-2 rounded-lg" style={{ background: 'var(--color-surface)' }}>
+                        <div className="flex items-center gap-1 mb-1">
+                          <Activity className="w-3 h-3" style={{ color: '#60a5fa' }} />
+                          <span className="text-[9px] font-medium" style={{ color: 'var(--color-text-muted)' }}>Trend</span>
+                        </div>
+                        <div className="text-sm font-bold font-mono"
+                          style={{ color: benchResult.progression!.trend.improvementPct > 0 ? '#34d399' : '#f87171' }}>
+                          {benchResult.progression!.trend.improvementPct > 0 ? '+' : ''}{benchResult.progression!.trend.improvementPct}%
+                        </div>
+                        <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                          1st half {benchResult.progression!.trend.firstHalfAvg}ms, 2nd {benchResult.progression!.trend.secondHalfAvg}ms
+                        </div>
+                      </div>
+
+                      <div className="p-2 rounded-lg" style={{ background: 'var(--color-surface)' }}>
+                        <div className="text-[9px] font-medium mb-1" style={{ color: 'var(--color-text-muted)' }}>Per-Stage</div>
+                        {Object.entries(benchResult.progression!.perStageTrend).map(([stage, t]) => (
+                          <div key={stage} className="flex items-center gap-1 text-[9px] font-mono">
+                            <span className="w-6" style={{ color: 'var(--color-text-muted)' }}>{stage}</span>
+                            <span>{(t as any).first}ms</span>
+                            <span style={{ color: (t as any).delta < 0 ? '#34d399' : (t as any).delta > 0 ? '#f87171' : 'var(--color-text-muted)' }}>
+                              {(t as any).delta < 0 ? '\u2193' : (t as any).delta > 0 ? '\u2191' : '\u2192'} {Math.abs((t as any).delta)}ms
+                            </span>
+                            <span>{(t as any).last}ms</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 )}
               </>
@@ -1506,22 +1762,22 @@ function ProfileFlowDiagram({
                   </div>
                 )}
 
-                {/* ── GPU machine block — show whenever GPU has any info ── */}
-                {isGpuEntry && gpu && (gpu.gpuType || gpu.podId || gpu.provider) && (
+                {/* ── GPU machine block — show when live pod data OR configured GPU types ── */}
+                {isGpuEntry && ((gpu && (gpu.gpuType || gpu.podId || gpu.provider)) || (svc?.gpuTypes && svc.gpuTypes.length > 0)) && (
                   <div className="space-y-2.5">
 
                     {/* GPU model */}
-                    {(gpu.gpuType || (svc?.gpuTypes && svc.gpuTypes.length > 0)) && (
+                    {(gpu?.gpuType || (svc?.gpuTypes && svc.gpuTypes.length > 0)) && (
                       <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg"
                         style={{ background: 'color-mix(in srgb, var(--color-text) 5%, transparent)', border: '1px solid var(--color-border)' }}>
                         <Cpu className="w-3 h-3 flex-shrink-0" style={{ color: 'var(--color-text-secondary)' }} />
                         <div className="flex-1 min-w-0">
                           <div className="font-bold text-[11px] truncate" style={{ color: 'var(--color-text)' }}>
-                            {gpu.gpuType || svc?.gpuTypes?.[0] || '—'}
+                            {gpu?.gpuType || svc?.gpuTypes?.[0] || '—'}
                           </div>
                           {mi?.gpuVramGb
                             ? <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>{mi.gpuVramGb}GB VRAM{mi.numGpus && mi.numGpus > 1 ? ` × ${mi.numGpus}` : ''}</div>
-                            : !gpu.gpuType && svc?.gpuTypes && svc.gpuTypes.length > 1 && (
+                            : !gpu?.gpuType && svc?.gpuTypes && svc.gpuTypes.length > 1 && (
                               <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>+{svc.gpuTypes.length - 1} alternates</div>
                             )
                           }
@@ -1542,23 +1798,23 @@ function ProfileFlowDiagram({
                           <div className="font-mono truncate font-medium" style={{ color: 'var(--color-text)' }}>{mi.instanceId}</div>
                         </div>
                       )}
-                      {gpu.provider && (
+                      {gpu?.provider && (
                         <div>
                           <div style={{ color: 'var(--color-text-muted)' }}>Provider</div>
-                          <div className="font-medium capitalize" style={{ color: 'var(--color-text)' }}>{gpu.provider}</div>
+                          <div className="font-medium capitalize" style={{ color: 'var(--color-text)' }}>{gpu?.provider}</div>
                         </div>
                       )}
-                      {gpu.costPerHr != null && gpu.costPerHr > 0 && (
+                      {gpu?.costPerHr != null && gpu.costPerHr > 0 && (
                         <div>
                           <div style={{ color: 'var(--color-text-muted)' }}>Cost</div>
-                          <div className="font-mono font-medium" style={{ color: 'var(--color-text)' }}>${gpu.costPerHr.toFixed(3)}/hr</div>
+                          <div className="font-mono font-medium" style={{ color: 'var(--color-text)' }}>${gpu?.costPerHr.toFixed(3)}/hr</div>
                         </div>
                       )}
-                      {gpu.elapsedSec > 0 && (
+                      {gpu?.elapsedSec != null && gpu.elapsedSec > 0 && (
                         <div>
                           <div style={{ color: 'var(--color-text-muted)' }}>Uptime</div>
                           <div className="font-mono font-medium" style={{ color: 'var(--color-text)' }}>
-                            {gpu.elapsedSec < 3600 ? `${Math.floor(gpu.elapsedSec / 60)}m ${gpu.elapsedSec % 60}s` : `${(gpu.elapsedSec / 3600).toFixed(1)}h`}
+                            {gpu?.elapsedSec < 3600 ? `${Math.floor(gpu.elapsedSec / 60)}m ${gpu.elapsedSec % 60}s` : `${(gpu.elapsedSec / 3600).toFixed(1)}h`}
                           </div>
                         </div>
                       )}
@@ -1601,15 +1857,15 @@ function ProfileFlowDiagram({
                     )}
 
                     {/* Location */}
-                    {(gpu.ipLocation || gpu.region) && (
+                    {(gpu?.ipLocation || gpu?.region) && (
                       <div className="flex items-center gap-2">
-                        <span className="text-base leading-none">{gpu.ipLocation?.flag ?? '🌍'}</span>
+                        <span className="text-base leading-none">{gpu?.ipLocation?.flag ?? '🌍'}</span>
                         <div className="flex-1 min-w-0">
                           <div style={{ color: 'var(--color-text)' }}>
-                            {gpu.ipLocation ? `${gpu.ipLocation.city}, ${gpu.ipLocation.country}` : gpu.region}
+                            {gpu?.ipLocation ? `${gpu.ipLocation.city}, ${gpu.ipLocation.country}` : gpu?.region}
                           </div>
-                          {gpu.region && (
-                            <div className="font-mono text-[9px]" style={{ color: 'var(--color-text-muted)' }}>{gpu.region}</div>
+                          {gpu?.region && (
+                            <div className="font-mono text-[9px]" style={{ color: 'var(--color-text-muted)' }}>{gpu?.region}</div>
                           )}
                         </div>
                       </div>
@@ -1665,12 +1921,25 @@ interface ServiceCardProps {
   onDelete: () => void;
 }
 
+interface RaceResult {
+  raceCount: number;
+  winnerMs: number;
+  gpuType?: string;
+  provider?: string;
+  completedAt: number;
+}
+
+function fmtBootTime(ms: number) {
+  if (ms < 60_000) return `${(ms / 1000).toFixed(0)}s`;
+  return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`;
+}
+
 function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
   const isGpu = service.kind === 'gpu-pod';
   const provIcon = !isGpu && service.cloudProvider ? PROVIDER_ICON[service.cloudProvider] : null;
   const color = isGpu ? '#a78bfa' : (provIcon?.color ?? '#7ba896');
   const ServiceIcon = isGpu ? Server : (provIcon?.icon ?? Package);
-  const { gpu, refresh } = useGpuStatus(isGpu, 5000);
+  const { gpu, refresh } = useGpuStatus(isGpu, 3000);
 
   const [deploying, setDeploying] = useState(false);
   const [terminating, setTerminating] = useState(false);
@@ -1678,6 +1947,12 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
   const [raceCount, setRaceCount] = useState(1);
   const [idleTimeoutMin, setIdleTimeoutMin] = useState(15);
   const [timeoutDirty, setTimeoutDirty] = useState(false);
+
+  // Race tracking
+  const [raceStartMs, setRaceStartMs] = useState<number | null>(null);
+  const [raceElapsedMs, setRaceElapsedMs] = useState(0);
+  const [raceResult, setRaceResult] = useState<RaceResult | null>(null);
+  const raceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isActive = gpu?.status === 'ready' || gpu?.status === 'creating' || gpu?.status === 'booting' || gpu?.status === 'installing';
   const isBooting = gpu?.status === 'creating' || gpu?.status === 'booting' || gpu?.status === 'installing';
@@ -1692,11 +1967,46 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
     }).catch(() => {});
   }, [isGpu]);
 
+  // Race timer: tick every second while a race deploy is in progress
+  useEffect(() => {
+    if (raceStartMs !== null && raceCount > 1 && !isReady && !isError) {
+      raceTimerRef.current = setInterval(() => {
+        setRaceElapsedMs(Date.now() - raceStartMs);
+      }, 1000);
+    } else {
+      if (raceTimerRef.current) clearInterval(raceTimerRef.current);
+    }
+    return () => { if (raceTimerRef.current) clearInterval(raceTimerRef.current); };
+  }, [raceStartMs, raceCount, isReady, isError]);
+
+  // Capture race result when GPU becomes ready
+  useEffect(() => {
+    if (isReady && raceStartMs !== null && raceCount > 1 && !raceResult) {
+      const ms = Date.now() - raceStartMs;
+      setRaceResult({
+        raceCount,
+        winnerMs: ms,
+        gpuType: gpu?.gpuType ?? undefined,
+        provider: gpu?.provider ?? undefined,
+        completedAt: Date.now(),
+      });
+      setRaceStartMs(null);
+    }
+  }, [isReady, raceStartMs, raceCount, raceResult, gpu?.gpuType, gpu?.provider]);
+
+  // Clear race state when not active
+  useEffect(() => {
+    if (!isActive && !isBooting) {
+      setRaceStartMs(null);
+      setRaceElapsedMs(0);
+    }
+  }, [isActive, isBooting]);
+
   const handleDeploy = async () => {
     setDeploying(true);
     setDeployError(null);
+    setRaceResult(null);
     try {
-      // Save idle timeout before deploying
       if (timeoutDirty) {
         await patchProviderConfig({ idleTimeoutMin } as any);
         setTimeoutDirty(false);
@@ -1707,6 +2017,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
         provider: service.gpuCloudProvider || undefined,
         raceCount: raceCount > 1 ? raceCount : undefined,
       });
+      if (raceCount > 1) setRaceStartMs(Date.now());
       refresh();
     } catch (e) {
       setDeployError(e instanceof Error ? e.message : 'Deploy failed');
@@ -1718,6 +2029,8 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
   const handleTerminate = async () => {
     setTerminating(true);
     setDeployError(null);
+    setRaceStartMs(null);
+    setRaceResult(null);
     try {
       await terminateGpu();
       refresh();
@@ -1830,10 +2143,44 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
               </div>
 
               {/* Progress bar during boot */}
-              {isBooting && (
+              {isBooting && raceCount <= 1 && (
                 <div className="w-full rounded-full h-1" style={{ background: 'var(--color-border)' }}>
                   <div className="h-1 rounded-full transition-all duration-1000 animate-pulse"
                     style={{ background: '#10b981', width: `${Math.min(90, Math.max(10, (gpu?.elapsedSec ?? 0) * 0.5))}%` }} />
+                </div>
+              )}
+
+              {/* Race slots during parallel boot */}
+              {isBooting && raceCount > 1 && (
+                <div className="space-y-1.5">
+                  <p className="text-[9px] font-semibold uppercase tracking-wide" style={{ color: '#a78bfa' }}>
+                    Race in progress — {raceCount} instances competing
+                  </p>
+                  {Array.from({ length: raceCount }).map((_, i) => {
+                    const slotElapsed = raceElapsedMs > 0 ? raceElapsedMs : (gpu?.elapsedSec ?? 0) * 1000;
+                    // Simulate slight stagger: each slot varies ±3% for visual distinction
+                    const stagger = 1 + (i % 3 === 0 ? -0.03 : i % 3 === 1 ? 0.02 : 0.01);
+                    const pct = Math.min(88, Math.max(5, (slotElapsed / 1000) * 0.5 * stagger));
+                    return (
+                      <div key={i} className="space-y-0.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] font-mono w-10 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
+                            slot {i + 1}
+                          </span>
+                          <div className="flex-1 rounded-full h-1.5" style={{ background: 'var(--color-border)' }}>
+                            <div className="h-1.5 rounded-full transition-all duration-1000"
+                              style={{ background: `color-mix(in srgb, #8b5cf6 ${60 + i * 10}%, #06b6d4)`, width: `${pct}%` }} />
+                          </div>
+                          <span className="text-[9px] font-mono w-8 text-right flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
+                            {fmtBootTime(slotElapsed)}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <p className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                    First to respond wins — others are terminated automatically.
+                  </p>
                 </div>
               )}
 
@@ -1866,6 +2213,26 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                 </div>
               )}
 
+              {/* Race result banner */}
+              {isReady && raceResult && (
+                <div className="rounded-lg px-2.5 py-2 flex items-center gap-2"
+                  style={{ background: 'color-mix(in srgb, #8b5cf6 8%, transparent)', border: '1px solid color-mix(in srgb, #8b5cf6 25%, transparent)' }}>
+                  <Trophy className="w-3.5 h-3.5 flex-shrink-0" style={{ color: '#a78bfa' }} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[10px] font-semibold" style={{ color: '#c4b5fd' }}>
+                      Race complete — winner in <span className="font-mono">{fmtBootTime(raceResult.winnerMs)}</span>
+                    </p>
+                    <p className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                      {raceResult.raceCount} instances launched · {raceResult.raceCount - 1} terminated
+                      {raceResult.gpuType ? ` · ${raceResult.gpuType}` : ''}
+                    </p>
+                  </div>
+                  <button onClick={() => setRaceResult(null)} className="p-0.5 rounded hover:bg-white/5 cursor-pointer flex-shrink-0">
+                    <XIcon className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
+                  </button>
+                </div>
+              )}
+
               {/* Error recovery */}
               {isError && (
                 <Button size="sm" onClick={handleDeploy} isLoading={deploying} loadingText="Deploying..."
@@ -1881,8 +2248,11 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                 {/* Parallel launch */}
                 <div className="rounded-lg p-2.5"
                   style={{ background: 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)' }}>
-                  <p className="text-[10px] font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Parallel launch (race)</p>
-                  <div className="flex gap-1">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <Zap className="w-3 h-3" style={{ color: '#8b5cf6' }} />
+                    <p className="text-[10px] font-semibold" style={{ color: 'var(--color-text)' }}>Parallel launch (race)</p>
+                  </div>
+                  <div className="flex gap-1 mb-1.5">
                     {[1, 2, 3, 5].map(n => (
                       <button key={n} onClick={() => setRaceCount(n)}
                         className="px-2.5 py-1 rounded text-[10px] font-medium transition-all cursor-pointer"
@@ -1895,10 +2265,29 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                       </button>
                     ))}
                   </div>
-                  {raceCount > 1 && (
-                    <p className="text-[9px] mt-1" style={{ color: '#a78bfa' }}>
-                      Launches {raceCount} — keeps fastest.
+                  {raceCount === 1 ? (
+                    <p className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                      Single instance — standard deploy.
                     </p>
+                  ) : (
+                    <div className="space-y-1">
+                      <p className="text-[9px]" style={{ color: '#a78bfa' }}>
+                        Launches <strong>{raceCount} instances simultaneously</strong> — first to boot wins, others are killed.
+                      </p>
+                      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                        <span>↓ Reduces cold-start by ~{Math.round((1 - 1/raceCount) * 100 * 0.6)}%</span>
+                        <span>↑ Eliminates slow-provider variance</span>
+                      </div>
+                    </div>
+                  )}
+                  {/* Last race result (compact) */}
+                  {raceResult && raceCount === raceResult.raceCount && (
+                    <div className="mt-1.5 flex items-center gap-1.5 text-[9px] rounded px-2 py-1"
+                      style={{ background: 'color-mix(in srgb, #8b5cf6 8%, transparent)' }}>
+                      <Trophy className="w-3 h-3 flex-shrink-0" style={{ color: '#a78bfa' }} />
+                      <span style={{ color: '#c4b5fd' }}>Last race: <span className="font-mono font-semibold">{fmtBootTime(raceResult.winnerMs)}</span></span>
+                      {raceResult.gpuType && <span style={{ color: 'var(--color-text-muted)' }}>· {raceResult.gpuType}</span>}
+                    </div>
                   )}
                 </div>
 
@@ -1929,7 +2318,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
               <div className="flex items-center justify-end">
                 <Button variant="primary" size="sm" onClick={handleDeploy} isLoading={deploying} loadingText="Deploying..."
                   disabled={!service.dockerImage || !service.gpuTypes?.length}>
-                  <Play className="w-3 h-3" /> Deploy{raceCount > 1 ? ` ×${raceCount}` : ''}
+                  <Play className="w-3 h-3" /> {raceCount > 1 ? `Race ×${raceCount}` : 'Deploy'}
                 </Button>
               </div>
             </div>
@@ -2477,6 +2866,167 @@ function StageList({ stages, setStages, services }: {
   );
 }
 
+// ── GPU Readiness Card (compact, embedded in profile list) ──
+
+type Phase = 'idle' | 'benchmarking' | 'ready' | 'degraded' | 'failed' | 'repechage' | 'condemned';
+
+function PhaseBadge({ phase }: { phase: Phase }) {
+  switch (phase) {
+    case 'ready':        return <StatusBadge variant="emerald" dot>Ready</StatusBadge>;
+    case 'benchmarking': return <StatusBadge variant="amber" dot>Benchmarking</StatusBadge>;
+    case 'degraded':     return <StatusBadge variant="orange" dot>Degraded</StatusBadge>;
+    case 'repechage':    return <StatusBadge variant="amber">Repechage</StatusBadge>;
+    case 'failed':       return <StatusBadge variant="red" dot>Failed</StatusBadge>;
+    case 'condemned':    return <StatusBadge variant="red" dot>Condemned</StatusBadge>;
+    default:             return <StatusBadge variant="gray" dot>Idle</StatusBadge>;
+  }
+}
+
+function fmtMs(ms: number | null): string {
+  return ms === null ? '—' : `${Math.round(ms)}ms`;
+}
+
+function p95Color(p95: number | null, target: number, multiplier: number): string {
+  if (p95 === null) return 'var(--color-text-muted)';
+  if (p95 <= target) return 'var(--color-emerald, #34d399)';
+  if (p95 <= target * multiplier) return 'var(--color-amber, #fbbf24)';
+  return 'var(--color-red, #f87171)';
+}
+
+function GpuReadinessCard() {
+  const [status, setStatus] = useState<ReadinessStatusResponse | null>(null);
+  const [resetting, setResetting] = useState(false);
+
+  const load = useCallback(async () => {
+    try { setStatus(await getReadinessStatus()); } catch {}
+  }, []);
+
+  const hasActivePhase = status && ['benchmarking', 'degraded', 'repechage', 'condemned'].some(p =>
+    status.readinessState.stt.phase === p || status.readinessState.llm.phase === p || status.readinessState.tts.phase === p
+  );
+  const pollMs = hasActivePhase || status?.readinessState.shadowPhase ? 2000 : 10000;
+
+  useEffect(() => {
+    load();
+    const iv = setInterval(load, pollMs);
+    return () => clearInterval(iv);
+  }, [load, pollMs]);
+
+  const handleReset = async () => {
+    setResetting(true);
+    try { await resetGpuReadiness(); await load(); } catch {} finally { setResetting(false); }
+  };
+
+  if (!status) return null;
+
+  const stages = ['stt', 'llm', 'tts'] as const;
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4" style={{ color: 'var(--color-text-muted)' }} />
+            <span className="text-sm font-semibold">GPU Readiness</span>
+          </div>
+          <div className="flex items-center gap-2">
+            {status.gpuReadyForProduction
+              ? <StatusBadge variant="emerald" dot>Production</StatusBadge>
+              : status.gpuShadowMode
+                ? <StatusBadge variant="amber" dot>Shadow</StatusBadge>
+                : <StatusBadge variant="gray" dot>Inactive</StatusBadge>
+            }
+          </div>
+        </div>
+      </CardHeader>
+      <CardBody>
+        {status.readinessState.condemned && (
+          <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg text-xs"
+            style={{ background: 'color-mix(in srgb, var(--color-red, #f87171) 8%, var(--color-surface-elevated))', color: 'var(--color-red, #f87171)' }}>
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+            GPU condemned — all traffic routed to cloud
+          </div>
+        )}
+
+        {/* Per-stage status + P95 in one compact grid */}
+        <div className="grid grid-cols-3 gap-3">
+          {stages.map(stage => {
+            const s = status.readinessState[stage];
+            const p95 = status.perStageP95[stage];
+            const target = status.targets[stage];
+            const threshold = target * status.p95DemotionMultiplier;
+            const pct = s.phase === 'benchmarking' && s.completedRuns > 0
+              ? Math.min(100, Math.round(s.completedRuns / 20 * 100)) : 0;
+
+            return (
+              <div key={stage} className="p-2.5 rounded-lg" style={{ background: 'var(--color-bg-secondary)' }}>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] uppercase font-mono font-semibold" style={{ color: 'var(--color-text-muted)' }}>{stage}</span>
+                  <PhaseBadge phase={s.phase as Phase} />
+                </div>
+
+                {/* P95 value */}
+                <div className="text-lg font-mono font-bold" style={{ color: p95Color(p95, target, status.p95DemotionMultiplier) }}>
+                  {fmtMs(p95)}
+                </div>
+                <div className="text-[10px] font-mono" style={{ color: 'var(--color-text-muted)' }}>
+                  target {target}ms · best {fmtMs(s.bestLatencyMs)}
+                </div>
+
+                {/* Benchmark progress bar */}
+                {s.phase === 'benchmarking' && (
+                  <div className="mt-1.5 h-1 rounded-full" style={{ background: 'var(--color-bg)' }}>
+                    <div className="h-1 rounded-full transition-all" style={{ width: `${pct}%`, background: 'var(--color-amber, #fbbf24)' }} />
+                  </div>
+                )}
+
+                {/* P95 bar (when ready/degraded) */}
+                {p95 !== null && s.phase !== 'benchmarking' && (
+                  <div className="mt-1.5 h-1 rounded-full" style={{ background: 'var(--color-bg)' }}>
+                    <div className="h-1 rounded-full transition-all" style={{
+                      width: `${Math.min(100, Math.round(p95 / threshold * 100))}%`,
+                      background: p95Color(p95, target, status.p95DemotionMultiplier),
+                    }} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Shadow / repechage status */}
+        {(status.readinessState.shadowPhase || status.readinessState.repechageAttempts > 0) && (
+          <div className="flex items-center gap-4 mt-2 text-xs" style={{ color: 'var(--color-text-muted)' }}>
+            {status.readinessState.shadowPhase && (
+              <span className="flex items-center gap-1">
+                <Activity className="w-3 h-3" style={{ color: 'var(--color-amber, #fbbf24)' }} />
+                Shadow {status.readinessState.shadowCompletedRuns}/5
+              </span>
+            )}
+            {status.readinessState.repechageAttempts > 0 && (
+              <span className="flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" style={{ color: 'var(--color-amber, #fbbf24)' }} />
+                Repechage {status.readinessState.repechageAttempts}/{status.repechageMaxAttempts}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="flex items-center gap-2 mt-3 pt-3" style={{ borderTop: '1px solid var(--color-border)' }}>
+          <Button size="sm" variant="secondary" onClick={handleReset} disabled={resetting}>
+            <RotateCcw className={`w-3.5 h-3.5 ${resetting ? 'animate-spin' : ''}`} />
+            {resetting ? 'Resetting...' : 'Re-run Benchmark'}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={load}>
+            <RefreshCw className="w-3.5 h-3.5" /> Refresh
+          </Button>
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
 // ── Main ProfilesSection ──
 
 /** Parse sub-route from URL: /config/profiles/edit/{id} or /config/profiles/new */
@@ -2597,6 +3147,7 @@ export function ProfilesSection() {
 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [detailTab, setDetailTab] = useState<'pipeline' | 'services'>('pipeline');
 
   /** Load a profile into stages state */
   const loadProfile = useCallback((p: ProviderProfile) => {
@@ -2723,11 +3274,11 @@ export function ProfilesSection() {
             <Mic className="w-4 h-4" /> New Profile
           </Button>
         </div>
+
+        <GpuReadinessCard />
       </div>
     );
   }
-
-  const [detailTab, setDetailTab] = useState<'pipeline' | 'services'>('pipeline');
 
   return (
     <div className="flex flex-col h-full">

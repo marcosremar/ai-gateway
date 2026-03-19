@@ -3,17 +3,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
 import { Sidebar, type SidebarItem } from '@/components/ui';
-import { LayoutDashboard, Settings2, TestTube, Bot, Shield, ScrollText, Zap, KeyRound, Sparkles, FlaskConical, LayoutList, Sun, Moon } from 'lucide-react';
+import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon } from 'lucide-react';
 import { OverviewSection } from '@/sections/OverviewSection';
-import { PipelineTestSection } from '@/sections/PipelineTestSection';
-import { PathBenchmarkSection } from '@/sections/PathBenchmarkSection';
 import { BotSection } from '@/sections/BotSection';
 import { ReputationSection } from '@/sections/ReputationSection';
 import { LogsSection } from '@/sections/LogsSection';
 import { ApiKeysSection } from '@/sections/ApiKeysSection';
 import { ProfilesSection } from '@/sections/ProfilesSection';
 import { PlaygroundSection } from '@/sections/PlaygroundSection';
-import { ReadinessSection } from '@/sections/ReadinessSection';
 
 const NAV_ITEMS: SidebarItem[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -24,12 +21,9 @@ const NAV_ITEMS: SidebarItem[] = [
 
   { id: '_tools', label: 'Tools', divider: true, icon: LayoutDashboard },
   { id: 'tools/playground', label: 'Playground', icon: Sparkles },
-  { id: 'tools/pipeline', label: 'Pipeline Test', icon: TestTube },
-  { id: 'tools/pathbench', label: 'Path Benchmark', icon: Zap },
   { id: 'tools/bot', label: 'Bot', icon: Bot },
 
   { id: '_monitor', label: 'Monitor', divider: true, icon: LayoutDashboard },
-  { id: 'monitor/readiness', label: 'GPU Readiness', icon: FlaskConical },
   { id: 'monitor/reputation', label: 'Reputation', icon: Shield },
   { id: 'monitor/logs', label: 'Logs & Metrics', icon: ScrollText },
 ];
@@ -44,8 +38,11 @@ function getRouteFromPath(): string {
   // Pathname: /config/providers or sub-routes like /config/profiles/edit/xxx
   const path = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
   if (VALID_ROUTES.has(path)) return path;
-  // Redirect removed page
+  // Redirect removed pages
   if (path === 'config/providers' || path === 'config/deploy') return 'config/profiles';
+  if (path === 'tools/pipeline') return 'tools/playground';
+  if (path === 'tools/pathbench') return 'config/profiles';
+  if (path === 'monitor/readiness') return 'config/profiles';
   // Match sub-routes: /config/profiles/edit/xxx → config/profiles
   for (const route of VALID_ROUTES) {
     if (path.startsWith(route + '/')) return route;
@@ -146,10 +143,7 @@ function Dashboard() {
           {activeTab === 'config/api-keys' && <ApiKeysSection />}
           {activeTab === 'config/profiles' && <ProfilesSection />}
           {activeTab === 'tools/playground' && <PlaygroundSection />}
-          {activeTab === 'tools/pipeline' && <PipelineTestSection />}
-          {activeTab === 'tools/pathbench' && <PathBenchmarkSection />}
           {activeTab === 'tools/bot' && <BotSection />}
-          {activeTab === 'monitor/readiness' && <ReadinessSection />}
           {activeTab === 'monitor/reputation' && <ReputationSection />}
           {activeTab === 'monitor/logs' && <LogsSection />}
         </div>
