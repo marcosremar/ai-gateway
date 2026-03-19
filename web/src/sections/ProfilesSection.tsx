@@ -294,6 +294,7 @@ interface TransportLatency {
   transport: TestTransport;
   totalMs?: number;
   ttfacMs?: number;
+  audioDurationSec?: number;
   error?: string;
   running: boolean;
   audioBase64?: string;
@@ -349,7 +350,7 @@ function ProfileFlowDiagram({
   // ── Service chip hover tooltip ──
   const { gpu } = useGpuStatus(true, 10000);
   const [hoveredChip, setHoveredChip] = useState<{ stageKey: string; entryIdx: number } | null>(null);
-  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [chipRect, setChipRect] = useState<DOMRect | null>(null);
 
   const resetTest = () => {
     setTestStages([{ key: 'stt', state: 'idle' }, { key: 'llm', state: 'idle' }, { key: 'tts', state: 'idle' }]);
@@ -417,18 +418,28 @@ function ProfileFlowDiagram({
       }
     }, 500);
 
-    // ── Fire all 3 transports in parallel via speechPipeline(transport:) ──
+    // ── Fire all transports in parallel via speechPipeline(transport:) ──
+    // WebRTC uses HTTP fallback (real WebRTC needs Pipecat infra)
     const transports: SpeechTransport[] = ['http', 'sse', 'ws'];
+    const allTransports: TestTransport[] = ['http', 'sse', 'ws', 'webrtc'];
     let firstResult = false;
 
-    for (const t of transports) {
+    for (const t of allTransports) {
       setTransportResult(t, { running: true });
     }
-    setTransportResult('webrtc', { running: false, error: 'Not available' });
 
-    const promises = transports.map(t => {
+    /** Estimate WAV audio duration from base64 */
+    const estimateAudioDuration = (b64: string): number | undefined => {
+      if (!b64) return undefined;
+      const byteLen = Math.floor(b64.length * 3 / 4);
+      // WAV: 44-byte header, 16-bit mono 16kHz → 32000 bytes/sec; or 16-bit mono 24kHz → 48000
+      const dataBytes = Math.max(0, byteLen - 44);
+      return dataBytes / 32000; // assume 16kHz mono 16-bit
+    };
+
+    const runTransport = (t: TestTransport, transport: SpeechTransport) => {
       const t0 = Date.now();
-      return speechPipeline(audio, { source: testSrc, target: testTgt, transport: t, timeoutMs: 10_000 })
+      return speechPipeline(audio, { source: testSrc, target: testTgt, transport, timeoutMs: 10_000 })
         .then(result => {
           setTransportResult(t, {
             running: false,
@@ -436,6 +447,7 @@ function ProfileFlowDiagram({
             ttfacMs: result.timing.ttfacMs,
             audioBase64: result.audioBase64,
             contentType: result.contentType,
+            audioDurationSec: estimateAudioDuration(result.audioBase64),
           });
           // First transport to finish populates the main result + stage timing
           if (!firstResult) {
@@ -468,7 +480,12 @@ function ProfileFlowDiagram({
         .catch(e => {
           setTransportResult(t, { running: false, error: e instanceof Error ? e.message : 'Failed' });
         });
-    });
+    };
+
+    const promises = [
+      ...transports.map(t => runTransport(t, t)),
+      runTransport('webrtc', 'http'), // WebRTC fallback via HTTP (real WebRTC needs Pipecat)
+    ];
 
     // Wait for all transports (success or failure)
     await Promise.allSettled(promises);
@@ -849,8 +866,7 @@ function ProfileFlowDiagram({
                             : j === 0 ? `color-mix(in srgb, ${color} 35%, transparent)` : 'var(--color-border)',
                           ...(isUsedService ? { ringColor: 'rgba(16,185,129,0.3)' } as React.CSSProperties : {}),
                         }}
-                        onMouseEnter={e => { setHoveredChip({ stageKey: stage.key, entryIdx: j }); setMousePos({ x: e.clientX, y: e.clientY }); }}
-                        onMouseMove={e => setMousePos({ x: e.clientX, y: e.clientY })}
+                        onMouseEnter={e => { setHoveredChip({ stageKey: stage.key, entryIdx: j }); setChipRect(e.currentTarget.getBoundingClientRect()); }}
                         onMouseLeave={() => setHoveredChip(null)}>
                         {/* Icon */}
                         {EntryIcon && (
@@ -995,7 +1011,7 @@ function ProfileFlowDiagram({
                         )}
                         {t.audioBase64 && (
                           <button type="button"
-                            className="w-5 h-5 rounded-full flex items-center justify-center ml-auto flex-shrink-0 cursor-pointer transition-all hover:scale-110"
+                            className="flex items-center gap-1 ml-auto flex-shrink-0 cursor-pointer transition-all hover:scale-105 rounded-full px-1.5 py-0.5"
                             style={{ background: `color-mix(in srgb, ${color} 15%, transparent)` }}
                             title={`Play ${t.transport.toUpperCase()} audio`}
                             onClick={() => {
@@ -1011,6 +1027,11 @@ function ProfileFlowDiagram({
                               } catch {}
                             }}>
                             <Play className="w-3 h-3" style={{ color }} />
+                            {t.audioDurationSec != null && (
+                              <span className="text-[9px] font-mono" style={{ color }}>
+                                {t.audioDurationSec.toFixed(1)}s
+                              </span>
+                            )}
                           </button>
                         )}
                       </div>
@@ -1177,11 +1198,15 @@ function ProfileFlowDiagram({
           (isGpuEntry && ts.provider === 'gpu')
         );
 
+        if (!chipRect) return null;
         const TOOLTIP_W = 272;
         const TOOLTIP_H_EST = 260;
-        const tipX = Math.max(8, Math.min(mousePos.x - TOOLTIP_W / 2, window.innerWidth - TOOLTIP_W - 8));
-        const renderBelow = mousePos.y < TOOLTIP_H_EST + 20;
-        const tipY = renderBelow ? mousePos.y + 14 : mousePos.y - 14;
+        const GAP = 8;
+        // Center tooltip over the chip horizontally
+        const tipX = Math.max(8, Math.min(chipRect.left + chipRect.width / 2 - TOOLTIP_W / 2, window.innerWidth - TOOLTIP_W - 8));
+        // Show above the chip if there's room, otherwise below
+        const renderBelow = chipRect.top < TOOLTIP_H_EST + GAP;
+        const tipY = renderBelow ? chipRect.bottom + GAP : chipRect.top - GAP;
 
         return createPortal(
           <div className="fixed z-[9999] pointer-events-none"
