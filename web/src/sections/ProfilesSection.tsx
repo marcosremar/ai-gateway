@@ -16,7 +16,7 @@ import {
   CircleCheck, Package, Server, Bot, Volume2, Pencil, Clock, Gauge, Timer, Search, Loader2,
   GripVertical, ClipboardCheck, Sparkles, Brain, Play, Square, Cpu, ScanSearch, AlertCircle,
   Upload, Zap, X as XIcon, BarChart3, Trophy, RotateCcw, RefreshCw, Activity, AlertTriangle,
-  TrendingDown, ArrowRight, ChevronDown, Settings2, Cloud, MoreVertical, Eye, EyeOff,
+  TrendingDown, ArrowRight, ChevronDown, Settings2, Cloud, MoreVertical, Eye, EyeOff, MapPin,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import Sortable from 'sortablejs';
@@ -1858,7 +1858,9 @@ function ProfileFlowDiagram({
                           {mi?.gpuVramGb
                             ? <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>{mi.gpuVramGb}GB VRAM{mi.numGpus && mi.numGpus > 1 ? ` × ${mi.numGpus}` : ''}</div>
                             : !gpu?.gpuType && svc?.gpuTypes && svc.gpuTypes.length > 1 && (
-                              <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>+{svc.gpuTypes.length - 1} alternates</div>
+                              <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }} title={svc.gpuTypes.slice(1).join(', ')}>
+                                fallbacks: {svc.gpuTypes.slice(1).join(', ')}
+                              </div>
                             )
                           }
                         </div>
@@ -2070,6 +2072,11 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
   const [raceCount, setRaceCount] = useState(1);
   const [idleTimeoutMin, setIdleTimeoutMin] = useState(15);
   const [timeoutDirty, setTimeoutDirty] = useState(false);
+  const [deployProvider, setDeployProvider] = useState<string>('auto');
+  const [overrideImage, setOverrideImage] = useState<string | null>(null);
+  const [deployRegion, setDeployRegion] = useState<string>('auto');
+  const [spotInstance, setSpotInstance] = useState(false);
+  const [autoBenchmark, setAutoBenchmark] = useState(false);
 
   // Race tracking
   const [raceStartMs, setRaceStartMs] = useState<number | null>(null);
@@ -2077,10 +2084,15 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
   const [raceResult, setRaceResult] = useState<RaceResult | null>(null);
   const raceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const isActive = gpu?.status === 'ready' || gpu?.status === 'creating' || gpu?.status === 'booting' || gpu?.status === 'installing';
-  const isBooting = gpu?.status === 'creating' || gpu?.status === 'booting' || gpu?.status === 'installing';
-  const isReady = gpu?.status === 'ready';
-  const isError = gpu?.status === 'error';
+  // Match this card's service against the running GPU — compare by dockerImage to avoid all cards activating
+  const isThisService = !gpu?.dockerImage || gpu.dockerImage === service.dockerImage ||
+    gpu.dockerImage.split('/').pop()?.replace(/:.*$/, '') === (service.dockerImage ?? '').split('/').pop()?.replace(/:.*$/, '');
+  const gpuRunning = gpu?.status === 'ready' || gpu?.status === 'creating' || gpu?.status === 'booting' || gpu?.status === 'installing';
+  const isActive = isThisService && gpuRunning;
+  const isBooting = isThisService && (gpu?.status === 'creating' || gpu?.status === 'booting' || gpu?.status === 'installing');
+  const isReady = isThisService && gpu?.status === 'ready';
+  const isError = isThisService && gpu?.status === 'error';
+  const isOtherActive = !isThisService && gpuRunning; // another service is running on the GPU
 
   // Load idle timeout from config on mount
   useEffect(() => {
@@ -2125,6 +2137,18 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
     }
   }, [isActive, isBooting]);
 
+  // Auto-benchmark when GPU becomes ready
+  const autoBenchmarkTriggered = useRef(false);
+  useEffect(() => {
+    if (isReady && autoBenchmark && !autoBenchmarkTriggered.current) {
+      autoBenchmarkTriggered.current = true;
+      benchmarkPaths({}).catch(() => {});
+    }
+    if (!isReady) {
+      autoBenchmarkTriggered.current = false;
+    }
+  }, [isReady, autoBenchmark]);
+
   const handleDeploy = async () => {
     setDeploying(true);
     setDeployError(null);
@@ -2134,11 +2158,16 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
         await patchProviderConfig({ idleTimeoutMin } as any);
         setTimeoutDirty(false);
       }
+      const effectiveImage = overrideImage || service.dockerImage || '';
+      const effectiveProvider = deployProvider === 'auto' ? (service.gpuCloudProvider || undefined) : deployProvider;
+      const effectiveRegion = deployRegion === 'auto' ? undefined : deployRegion;
       await deployGpu({
-        dockerImage: service.dockerImage || '',
+        dockerImage: effectiveImage,
         gpuTypes: service.gpuTypes || [],
-        provider: service.gpuCloudProvider || undefined,
+        provider: effectiveProvider,
         raceCount: raceCount > 1 ? raceCount : undefined,
+        interruptible: spotInstance || undefined,
+        region: effectiveRegion,
       });
       if (raceCount > 1) setRaceStartMs(Date.now());
       refresh();
@@ -2231,7 +2260,20 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
       {/* GPU Deploy controls */}
       {isGpu && (
         <div className="px-3 pb-3 pt-0 space-y-2">
-          {isActive ? (
+          {isOtherActive ? (
+            /* Another service is running — show which image is deployed */
+            <div className="rounded-lg px-3 py-2 flex items-center gap-2"
+              style={{ background: 'color-mix(in srgb, var(--color-text-muted) 5%, transparent)', border: '1px solid var(--color-border)' }}>
+              <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: '#f59e0b' }} />
+              <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                GPU in use —{' '}
+                <span className="font-mono font-semibold" style={{ color: 'var(--color-text)' }}>
+                  {gpu?.dockerImage?.split('/').pop() ?? gpu?.dockerImage ?? 'another service'}
+                </span>
+                {gpu?.gpuType && <span> · {gpu.gpuType}</span>}
+              </span>
+            </div>
+          ) : isActive ? (
             <div className="rounded-lg p-2.5 space-y-2"
               style={{
                 background: isReady
@@ -2365,15 +2407,87 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
               )}
             </div>
           ) : (
-            <div className="space-y-2.5">
-              {/* Race count + Auto-stop row */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div className="rounded-lg border overflow-hidden"
+              style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 3%, transparent)' }}>
+              {/* Header */}
+              <div className="flex items-center gap-1.5 px-2.5 py-2 border-b"
+                style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)' }}>
+                <Settings2 className="w-3 h-3 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
+                <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-text-muted)' }}>Deploy Settings</span>
+              </div>
+
+              <div className="p-2.5 space-y-2">
+                {/* Image quick-switch */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-medium w-16 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Image</span>
+                  <select
+                    className="flex-1 text-[10px] rounded border px-2 py-1 outline-none cursor-pointer"
+                    style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                    value={overrideImage || service.dockerImage || ''}
+                    onChange={e => setOverrideImage(e.target.value === service.dockerImage ? null : e.target.value)}
+                  >
+                    {DEFAULT_DOCKER_IMAGES.map(img => (
+                      <option key={img.url} value={img.url}>{img.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Provider preference */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-medium w-16 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Provider</span>
+                  <div className="flex gap-1 flex-wrap">
+                    {(['auto', ...GPU_PROVIDERS.map(p => p.id)] as const).map(pid => {
+                      const prov = GPU_PROVIDERS.find(p => p.id === pid);
+                      const label = pid === 'auto' ? 'Auto' : (prov?.name ?? pid);
+                      const sel = deployProvider === pid;
+                      return (
+                        <button key={pid} onClick={() => setDeployProvider(pid)}
+                          className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
+                          style={{
+                            background: sel ? '#06b6d4' : 'var(--color-surface)',
+                            color: sel ? '#fff' : 'var(--color-text-muted)',
+                            border: `1px solid ${sel ? '#06b6d4' : 'var(--color-border)'}`,
+                          }}>
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Region preference */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-medium w-16 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Region</span>
+                  <div className="flex gap-1">
+                    {(['auto', 'US', 'EU'] as const).map(r => {
+                      const sel = deployRegion === r;
+                      return (
+                        <button key={r} onClick={() => setDeployRegion(r)}
+                          className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
+                          style={{
+                            background: sel ? '#3b82f6' : 'var(--color-surface)',
+                            color: sel ? '#fff' : 'var(--color-text-muted)',
+                            border: `1px solid ${sel ? '#3b82f6' : 'var(--color-border)'}`,
+                          }}>
+                          {r === 'auto' ? 'Auto' : r}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Divider */}
+              <div className="border-t" style={{ borderColor: 'var(--color-border)' }} />
+
+              {/* Race + Auto-stop */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-0 divide-y sm:divide-y-0 sm:divide-x"
+                style={{ '--tw-divide-opacity': '1', borderColor: 'var(--color-border)' } as React.CSSProperties}>
                 {/* Parallel launch */}
-                <div className="rounded-lg p-2.5"
-                  style={{ background: 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)' }}>
+                <div className="p-2.5">
                   <div className="flex items-center gap-1.5 mb-1.5">
                     <Zap className="w-3 h-3" style={{ color: '#8b5cf6' }} />
-                    <p className="text-[10px] font-semibold" style={{ color: 'var(--color-text)' }}>Parallel launch (race)</p>
+                    <p className="text-[10px] font-semibold" style={{ color: 'var(--color-text)' }}>Parallel launch</p>
                   </div>
                   <div className="flex gap-1 mb-1.5">
                     {[1, 2, 3, 5].map(n => (
@@ -2384,40 +2498,33 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                           color: raceCount === n ? '#fff' : 'var(--color-text-muted)',
                           border: `1px solid ${raceCount === n ? '#8b5cf6' : 'var(--color-border)'}`,
                         }}>
-                        {n === 1 ? '1 (off)' : `×${n}`}
+                        {n === 1 ? '1' : `×${n}`}
                       </button>
                     ))}
                   </div>
                   {raceCount === 1 ? (
-                    <p className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
-                      Single instance — standard deploy.
-                    </p>
+                    <p className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Single instance — standard deploy.</p>
                   ) : (
-                    <div className="space-y-1">
-                      <p className="text-[9px]" style={{ color: '#a78bfa' }}>
-                        Launches <strong>{raceCount} instances simultaneously</strong> — first to boot wins, others are killed.
-                      </p>
-                      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
-                        <span>↓ Reduces cold-start by ~{Math.round((1 - 1/raceCount) * 100 * 0.6)}%</span>
-                        <span>↑ Eliminates slow-provider variance</span>
-                      </div>
-                    </div>
+                    <p className="text-[9px]" style={{ color: '#a78bfa' }}>
+                      {raceCount} instances race — first wins, others killed.
+                    </p>
                   )}
-                  {/* Last race result (compact) */}
                   {raceResult && raceCount === raceResult.raceCount && (
                     <div className="mt-1.5 flex items-center gap-1.5 text-[9px] rounded px-2 py-1"
                       style={{ background: 'color-mix(in srgb, #8b5cf6 8%, transparent)' }}>
                       <Trophy className="w-3 h-3 flex-shrink-0" style={{ color: '#a78bfa' }} />
-                      <span style={{ color: '#c4b5fd' }}>Last race: <span className="font-mono font-semibold">{fmtBootTime(raceResult.winnerMs)}</span></span>
+                      <span style={{ color: '#c4b5fd' }}>Last: <span className="font-mono font-semibold">{fmtBootTime(raceResult.winnerMs)}</span></span>
                       {raceResult.gpuType && <span style={{ color: 'var(--color-text-muted)' }}>· {raceResult.gpuType}</span>}
                     </div>
                   )}
                 </div>
 
                 {/* Auto-stop */}
-                <div className="rounded-lg p-2.5"
-                  style={{ background: 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)' }}>
-                  <p className="text-[10px] font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Auto-stop after idle</p>
+                <div className="p-2.5 border-t sm:border-t-0 sm:border-l" style={{ borderColor: 'var(--color-border)' }}>
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <Timer className="w-3 h-3" style={{ color: '#f59e0b' }} />
+                    <p className="text-[10px] font-semibold" style={{ color: 'var(--color-text)' }}>Auto-stop</p>
+                  </div>
                   <div className="flex flex-wrap gap-1">
                     {[5, 15, 30, 60, 0].map(min => (
                       <button key={min} onClick={() => { setIdleTimeoutMin(min); setTimeoutDirty(true); }}
@@ -2437,15 +2544,41 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                 </div>
               </div>
 
-              {/* Deploy button */}
-              <div className="flex items-center justify-end">
+              {/* Divider */}
+              <div className="border-t" style={{ borderColor: 'var(--color-border)' }} />
+
+              {/* Toggles row */}
+              <div className="flex items-center gap-4 px-2.5 py-2 border-b" style={{ borderColor: 'var(--color-border)' }}>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <Toggle checked={spotInstance} onChange={setSpotInstance} size="sm" />
+                  <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>Spot instance</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <Toggle checked={autoBenchmark} onChange={setAutoBenchmark} size="sm" />
+                  <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>Benchmark when ready</span>
+                </label>
+              </div>
+
+              {/* Footer: boot estimate + deploy button */}
+              <div className="flex items-center justify-between gap-3 px-2.5 py-2">
+                <div className="flex items-center gap-3 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                  <span className="flex items-center gap-1">
+                    <Clock className="w-3 h-3" />
+                    ~2–5 min typical
+                  </span>
+                  {spotInstance && (
+                    <span className="flex items-center gap-1" style={{ color: '#fbbf24' }}>
+                      <AlertTriangle className="w-3 h-3" /> Spot
+                    </span>
+                  )}
+                </div>
                 <Button variant="primary" size="sm" onClick={handleDeploy} isLoading={deploying} loadingText="Deploying..."
-                  disabled={!service.dockerImage || !service.gpuTypes?.length}>
+                  disabled={!service.dockerImage || !service.gpuTypes?.length || (!!gpu && gpu.status !== 'idle' && gpu.status !== 'error' && !isThisService)}>
                   <Play className="w-3 h-3" /> {raceCount > 1 ? `Race ×${raceCount}` : 'Deploy'}
                 </Button>
               </div>
             </div>
-          )}
+          ) /* end isOtherActive ? ... : isActive ? ... : ... */}
           {deployError && (
             <p className="text-[10px]" style={{ color: '#ef4444' }}>{deployError}</p>
           )}
@@ -2576,275 +2709,377 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
   };
 
   return (
-    <div className="p-4 rounded-xl border border-dashed space-y-3"
+    <div className="rounded-xl border border-dashed overflow-hidden"
       style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
-      <div className="flex items-center gap-2 mb-1">
-        <span className="text-xs font-semibold">{initial ? 'Edit Service' : 'Add Service'}</span>
+
+      {/* Header */}
+      <div className="flex items-center gap-2 px-4 py-3 border-b"
+        style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 3%, transparent)' }}>
+        <IconBox icon={Server} color="#a78bfa" size="sm" />
+        <span className="text-sm font-semibold">{initial ? 'Edit Service' : 'New Service'}</span>
       </div>
-      <FormInput label="Name" value={name} onChange={e => setName(e.target.value)} placeholder="GPU Pod A" />
-      <FormSelect label="Type" value={kind} onChange={e => setKind(e.target.value as ServiceKind)}>
-        <option value="gpu-pod">GPU Pod</option>
-        <option value="cloud">Cloud API</option>
-      </FormSelect>
-      {kind === 'cloud' ? (
-        <FormSelect label="Cloud Provider" value={cloudProvider} onChange={e => setCloudProvider(e.target.value)}>
-          <option value="groq">Groq</option>
-          <option value="openai">OpenAI</option>
-          <option value="deepgram">Deepgram</option>
-          <option value="fireworks">Fireworks</option>
-          <option value="modal">Modal</option>
-          <option value="tensordock">TensorDock</option>
-        </FormSelect>
-      ) : (
-        <>
-          {/* Docker image — preset dropdown or custom URL */}
+
+      <div className="p-4 space-y-4">
+
+        {/* ── Identity section ── */}
+        <div className="space-y-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-text-muted)' }}>Identity</p>
+          <FormInput label="Name" value={name} onChange={e => setName(e.target.value)} placeholder="GPU Pod A" />
+          {/* Kind toggle */}
           <div>
-            <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-secondary)' }}>Docker Image</label>
-            {!useCustom ? (
-              <div className="flex gap-2">
-                <select
-                  className="flex-1 text-xs rounded-lg border px-3 py-2 outline-none focus:ring-1 cursor-pointer"
-                  style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
-                  value={dockerImage}
-                  onChange={e => {
-                    const url = e.target.value;
-                    setDockerImage(url);
-                    setInspectResult(null);
-                    setInspectError(null);
-                    const known = DEFAULT_DOCKER_IMAGES.find(img => img.url === url);
-                    if (known) {
-                      setSttModel(known.sttModel || '');
-                      setLlmModel(known.llmModel || '');
-                      setTtsModel(known.ttsModel || '');
-                      if (!name || DEFAULT_DOCKER_IMAGES.some(i => `Babelcast ${i.label}` === name)) {
-                        setName(`Babelcast ${known.label}`);
-                      }
-                    }
-                  }}
-                >
-                  {DEFAULT_DOCKER_IMAGES.map(img => (
-                    <option key={img.url} value={img.url}>{img.label} — {img.description}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={() => { setUseCustom(true); setCustomDockerUrl(dockerImage); }}
-                  className="px-3 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer"
-                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text-muted)' }}
-                  title="Use a custom Docker image URL"
-                >
-                  Custom
-                </button>
-              </div>
-            ) : (
-              <div className="flex gap-2">
-                <input
-                  className="flex-1 text-xs rounded-lg border px-3 py-2 outline-none focus:ring-1"
-                  style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
-                  value={customDockerUrl}
-                  onChange={e => {
-                    const url = e.target.value;
-                    setCustomDockerUrl(url);
-                    setDockerImage(url);
-                    setInspectResult(null);
-                    setInspectError(null);
-                  }}
-                  placeholder="namespace/image:tag"
-                  autoFocus
-                />
-                <button
-                  type="button"
-                  onClick={handleInspect}
-                  disabled={inspecting || !customDockerUrl.trim()}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
-                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text-secondary)' }}
-                  title="Read service capabilities from Docker Hub labels"
-                >
-                  {inspecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanSearch className="w-3.5 h-3.5" />}
-                  Inspect
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setUseCustom(false); setDockerImage(DEFAULT_DOCKER_IMAGES[0].url); }}
-                  className="px-2 py-2 rounded-lg border text-xs transition-colors cursor-pointer"
-                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text-muted)' }}
-                  title="Back to presets"
-                >
-                  <XIcon className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
-            {/* Inspect result */}
-            {inspectResult && (
-              <div className="mt-2 p-2 rounded-lg border text-[11px] space-y-0.5"
-                style={{ borderColor: 'color-mix(in srgb, #10b981 30%, var(--color-border))', background: 'color-mix(in srgb, #10b981 4%, var(--color-surface-elevated))' }}>
-                <div className="font-semibold" style={{ color: '#34d399' }}>
-                  Services: {inspectResult.services.length > 0 ? inspectResult.services.join(', ') : '—'}
-                  {inspectResult.protocol !== 'rest' && <span className="ml-2" style={{ color: 'var(--color-text-muted)' }}>({inspectResult.protocol})</span>}
-                </div>
-                {[inspectResult.sttModel, inspectResult.llmModel, inspectResult.ttsModel].some(Boolean) && (
-                  <div style={{ color: 'var(--color-text-muted)' }}>Models auto-filled ↓</div>
-                )}
-              </div>
-            )}
-            {inspectError && (
-              <div className="mt-2 p-2 rounded-lg border text-[11px] flex items-center gap-1.5"
-                style={{ borderColor: 'color-mix(in srgb, #f87171 30%, var(--color-border))', color: '#f87171', background: 'color-mix(in srgb, #f87171 4%, var(--color-surface-elevated))' }}>
-                <AlertCircle className="w-3 h-3 flex-shrink-0" />
-                {inspectResult === null && 'No babelcast labels found — '}
-                {inspectError}
-              </div>
-            )}
+            <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-secondary)' }}>Type</label>
+            <div className="flex gap-2">
+              {(['gpu-pod', 'cloud'] as const).map(k => {
+                const sel = kind === k;
+                const KIcon = k === 'gpu-pod' ? Cpu : Cloud;
+                return (
+                  <button key={k} type="button" onClick={() => setKind(k)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer"
+                    style={{
+                      background: sel ? 'color-mix(in srgb, #a78bfa 12%, transparent)' : 'var(--color-surface-elevated)',
+                      borderColor: sel ? '#a78bfa' : 'var(--color-border)',
+                      color: sel ? '#c4b5fd' : 'var(--color-text-muted)',
+                    }}>
+                    <KIcon className="w-3.5 h-3.5" />
+                    {k === 'gpu-pod' ? 'GPU Pod' : 'Cloud API'}
+                  </button>
+                );
+              })}
+            </div>
           </div>
+        </div>
 
-          {/* Model capabilities */}
-          <div className="rounded-lg border p-3 space-y-2.5"
-            style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
-            <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-text-muted)' }}>
-              Models provided by this pod
-            </p>
-            {(['stt', 'llm', 'tts'] as const).map(stage => {
-              const stageModels = (PIPELINE_CATALOG[stage].models as Record<string, { id: string; label: string }[]>).gpu ?? [];
-              const currentVal = stage === 'stt' ? sttModel : stage === 'llm' ? llmModel : ttsModel;
-              const setter = stage === 'stt' ? setSttModel : stage === 'llm' ? setLlmModel : setTtsModel;
-              const hasUnknown = currentVal && !stageModels.find(m => m.id === currentVal);
-              return (
-                <FormSelect key={stage} label={`${stage.toUpperCase()} Model`} value={currentVal} onChange={e => setter(e.target.value)}>
-                  <option value="">— none —</option>
-                  {hasUnknown && <option value={currentVal}>{currentVal} (current)</option>}
-                  {stageModels.map(m => (
-                    <option key={m.id} value={m.id}>{m.label}</option>
-                  ))}
-                </FormSelect>
-              );
-            })}
-          </div>
-
-          <FormSelect label="GPU Cloud Provider" value={gpuCloudProvider} onChange={e => {
-            setGpuCloudProvider(e.target.value);
-            setGpuTypes([]);
-            setGpuSearch('');
-          }}>
-            {GPU_PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </FormSelect>
-
-          {/* GPU type search */}
+        {kind === 'cloud' ? (
+          /* ── Cloud provider buttons ── */
           <div>
-            <label className="block text-xs font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
-              GPU Types
-              {gpuTypes.length > 0 && (
-                <span className="ml-2 px-1.5 py-0.5 rounded-md text-[10px] font-bold"
-                  style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd' }}>
-                  {gpuTypes.length} selected
-                </span>
-              )}
-            </label>
-
-            {/* Selected chips — drag to reorder priority */}
-            {gpuTypes.length > 0 && (
-              <>
-                <p className="text-[10px] mb-1" style={{ color: 'var(--color-text-muted)' }}>
-                  Drag to set priority order — #1 is tried first
-                </p>
-                <div ref={gpuChipsRef} className="flex flex-wrap gap-1 mb-2">
-                  {gpuTypes.map((id, idx) => {
-                    const info = liveGpus.find(g => g.name === id);
-                    const label = info?.shortName ?? id.replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, '');
-                    return (
-                      <span key={id} data-gpu-id={id}
-                        className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium select-none"
-                        style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd', border: '1px solid color-mix(in srgb, #a78bfa 30%, transparent)' }}>
-                        <GripVertical className="gpu-drag-handle w-3 h-3 cursor-grab opacity-50 hover:opacity-100 flex-shrink-0" />
-                        <span className="text-[9px] font-bold opacity-60">#{idx + 1}</span>
-                        {label}
-                        <button type="button" onClick={() => toggleGpu(id)} className="ml-0.5 hover:opacity-70 cursor-pointer">
-                          ×
+            <p className="text-[10px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-muted)' }}>Cloud Provider</p>
+            <div className="flex flex-wrap gap-2">
+              {(['groq', 'openai', 'deepgram', 'fireworks', 'modal', 'tensordock'] as const).map(pid => {
+                const provIcon = PROVIDER_ICON[pid];
+                const ProvIcon = provIcon?.icon ?? Package;
+                const provColor = provIcon?.color ?? '#7ba896';
+                const sel = cloudProvider === pid;
+                return (
+                  <button key={pid} type="button" onClick={() => setCloudProvider(pid)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer capitalize"
+                    style={{
+                      background: sel ? `color-mix(in srgb, ${provColor} 12%, transparent)` : 'var(--color-surface-elevated)',
+                      borderColor: sel ? provColor : 'var(--color-border)',
+                      color: sel ? provColor : 'var(--color-text-muted)',
+                    }}>
+                    <ProvIcon className="w-3.5 h-3.5" />
+                    {pid}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* ── Docker Image section ── */}
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-muted)' }}>Docker Image</p>
+              {!useCustom ? (
+                <>
+                  {/* Visual image cards */}
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    {DEFAULT_DOCKER_IMAGES.map(img => {
+                      const sel = dockerImage === img.url;
+                      return (
+                        <button key={img.url} type="button"
+                          onClick={() => {
+                            setDockerImage(img.url);
+                            setInspectResult(null);
+                            setInspectError(null);
+                            setSttModel(img.sttModel || '');
+                            setLlmModel(img.llmModel || '');
+                            setTtsModel(img.ttsModel || '');
+                            if (!name || DEFAULT_DOCKER_IMAGES.some(i => `Babelcast ${i.label}` === name)) {
+                              setName(`Babelcast ${img.label}`);
+                            }
+                          }}
+                          className="text-left p-2.5 rounded-lg border transition-all cursor-pointer"
+                          style={{
+                            background: sel ? 'color-mix(in srgb, #a78bfa 8%, var(--color-surface-elevated))' : 'var(--color-surface-elevated)',
+                            borderColor: sel ? '#a78bfa' : 'var(--color-border)',
+                          }}>
+                          <p className="text-[11px] font-semibold mb-0.5" style={{ color: sel ? '#c4b5fd' : 'var(--color-text)' }}>{img.label}</p>
+                          <div className="flex flex-wrap gap-1 mb-1">
+                            {img.sttModel && <span className="text-[8px] font-semibold px-1 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #38bdf8 12%, transparent)', color: '#38bdf8' }}>STT</span>}
+                            {img.llmModel && <span className="text-[8px] font-semibold px-1 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#a78bfa' }}>LLM</span>}
+                            {img.ttsModel && <span className="text-[8px] font-semibold px-1 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #fbbf24 12%, transparent)', color: '#fbbf24' }}>TTS</span>}
+                          </div>
+                          <p className="text-[9px] leading-snug" style={{ color: 'var(--color-text-muted)' }}>{img.description}</p>
                         </button>
-                      </span>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setUseCustom(true); setCustomDockerUrl(dockerImage); }}
+                    className="text-[10px] font-medium transition-colors cursor-pointer"
+                    style={{ color: 'var(--color-text-muted)' }}
+                    title="Use a custom Docker image URL"
+                  >
+                    + Custom image URL
+                  </button>
+                </>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <input
+                      className="flex-1 text-xs rounded-lg border px-3 py-2 outline-none focus:ring-1"
+                      style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                      value={customDockerUrl}
+                      onChange={e => {
+                        const url = e.target.value;
+                        setCustomDockerUrl(url);
+                        setDockerImage(url);
+                        setInspectResult(null);
+                        setInspectError(null);
+                      }}
+                      placeholder="namespace/image:tag"
+                      autoFocus
+                    />
+                    <button
+                      type="button"
+                      onClick={handleInspect}
+                      disabled={inspecting || !customDockerUrl.trim()}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+                      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text-secondary)' }}
+                      title="Read service capabilities from Docker Hub labels"
+                    >
+                      {inspecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanSearch className="w-3.5 h-3.5" />}
+                      Inspect
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setUseCustom(false); setDockerImage(DEFAULT_DOCKER_IMAGES[0].url); }}
+                      className="px-2 py-2 rounded-lg border text-xs transition-colors cursor-pointer"
+                      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text-muted)' }}
+                      title="Back to presets"
+                    >
+                      <XIcon className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  {/* Inspect result */}
+                  {inspectResult && (
+                    <div className="p-2 rounded-lg border text-[11px] space-y-0.5"
+                      style={{ borderColor: 'color-mix(in srgb, #10b981 30%, var(--color-border))', background: 'color-mix(in srgb, #10b981 4%, var(--color-surface-elevated))' }}>
+                      <div className="font-semibold" style={{ color: '#34d399' }}>
+                        Services: {inspectResult.services.length > 0 ? inspectResult.services.join(', ') : '—'}
+                        {inspectResult.protocol !== 'rest' && <span className="ml-2" style={{ color: 'var(--color-text-muted)' }}>({inspectResult.protocol})</span>}
+                      </div>
+                      {[inspectResult.sttModel, inspectResult.llmModel, inspectResult.ttsModel].some(Boolean) && (
+                        <div style={{ color: 'var(--color-text-muted)' }}>Models auto-filled ↓</div>
+                      )}
+                    </div>
+                  )}
+                  {inspectError && (
+                    <div className="p-2 rounded-lg border text-[11px] flex items-center gap-1.5"
+                      style={{ borderColor: 'color-mix(in srgb, #f87171 30%, var(--color-border))', color: '#f87171', background: 'color-mix(in srgb, #f87171 4%, var(--color-surface-elevated))' }}>
+                      <AlertCircle className="w-3 h-3 flex-shrink-0" />
+                      {inspectResult === null && 'No babelcast labels found — '}
+                      {inspectError}
+                    </div>
+                  )}
                 </div>
-              </>
-            )}
-
-            {/* Search input */}
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none"
-                style={{ color: 'var(--color-text-muted)' }} />
-              {gpuLoading && (
-                <Loader2 className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin pointer-events-none"
-                  style={{ color: 'var(--color-text-muted)' }} />
               )}
-              <input
-                ref={searchRef}
-                type="text"
-                value={gpuSearch}
-                onChange={e => setGpuSearch(e.target.value)}
-                onFocus={() => setGpuFocused(true)}
-                onBlur={() => setTimeout(() => setGpuFocused(false), 150)}
-                placeholder={gpuLoading ? 'Loading GPUs...' : `Search ${liveGpus.length} GPU types...`}
-                className="w-full rounded-lg border pl-8 pr-8 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500"
-                style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}
-              />
             </div>
 
-            {/* Results list */}
-            {(gpuFocused || gpuSearch) && filteredGpus.length > 0 && (
-              <div className="mt-1.5 rounded-lg border overflow-hidden max-h-48 overflow-y-auto"
-                style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)' }}>
-                {filteredGpus.map(g => {
-                  const sel = gpuTypes.includes(g.name);
-                  const vramGb = g.vramGb ?? (g.vram > 0 ? g.vram : null);
+            {/* ── Models section ── */}
+            <div className="rounded-lg border overflow-hidden"
+              style={{ borderColor: 'var(--color-border)' }}>
+              <div className="px-3 py-2 border-b" style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)' }}>
+                <p className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-text-muted)' }}>Models provided by this pod</p>
+              </div>
+              <div className="p-3 space-y-2.5">
+                {(['stt', 'llm', 'tts'] as const).map(stage => {
+                  const stageModels = (PIPELINE_CATALOG[stage].models as Record<string, { id: string; label: string }[]>).gpu ?? [];
+                  const currentVal = stage === 'stt' ? sttModel : stage === 'llm' ? llmModel : ttsModel;
+                  const setter = stage === 'stt' ? setSttModel : stage === 'llm' ? setLlmModel : setTtsModel;
+                  const hasUnknown = currentVal && !stageModels.find(m => m.id === currentVal);
+                  const stageColor = stage === 'stt' ? '#38bdf8' : stage === 'llm' ? '#a78bfa' : '#fbbf24';
+                  const StageIcon = stage === 'stt' ? Mic : stage === 'llm' ? Bot : Volume2;
                   return (
-                    <button key={g.name} type="button" onClick={() => toggleGpu(g.name)}
-                      className="w-full flex items-center gap-3 px-3 py-2 text-left transition-colors cursor-pointer border-b last:border-b-0"
-                      style={{
-                        borderColor: 'var(--color-border)',
-                        background: sel ? 'color-mix(in srgb, #a78bfa 6%, var(--color-bg))' : 'transparent',
-                      }}
-                      onMouseEnter={e => { if (!sel) (e.currentTarget as HTMLElement).style.background = 'var(--color-surface)'; }}
-                      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = sel ? 'color-mix(in srgb, #a78bfa 6%, var(--color-bg))' : 'transparent'; }}
-                    >
-                      <div className="w-4 h-4 flex-shrink-0 flex items-center justify-center">
-                        {sel
-                          ? <CircleCheck className="w-4 h-4" style={{ color: '#a78bfa' }} />
-                          : <Circle className="w-4 h-4" style={{ color: 'var(--color-border)' }} />
-                        }
+                    <div key={stage} className="flex items-center gap-2.5">
+                      <div className="flex items-center gap-1.5 w-12 flex-shrink-0">
+                        <StageIcon className="w-3 h-3 flex-shrink-0" style={{ color: stageColor }} />
+                        <span className="text-[10px] font-semibold uppercase" style={{ color: stageColor }}>{stage}</span>
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <span className="text-xs font-medium" style={{ color: sel ? '#c4b5fd' : 'var(--color-text)' }}>
-                          {g.shortName}
-                        </span>
-                        {vramGb && (
-                          <span className="ml-2 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
-                            {vramGb}GB
-                          </span>
-                        )}
-                      </div>
-                      {g.minPricePerHr != null && (
-                        <span className="text-[10px] font-mono flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-                          from ${g.minPricePerHr.toFixed(2)}/hr
-                        </span>
-                      )}
-                    </button>
+                      <select
+                        className="flex-1 text-xs rounded-lg border px-2 py-1.5 outline-none focus:ring-1 cursor-pointer"
+                        style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                        value={currentVal}
+                        onChange={e => setter(e.target.value)}
+                      >
+                        <option value="">— none —</option>
+                        {hasUnknown && <option value={currentVal}>{currentVal} (current)</option>}
+                        {stageModels.map(m => (
+                          <option key={m.id} value={m.id}>{m.label}</option>
+                        ))}
+                      </select>
+                    </div>
                   );
                 })}
               </div>
-            )}
-            {!gpuLoading && gpuSearch && filteredGpus.length === 0 && (
-              <p className="text-[11px] mt-1.5 px-1" style={{ color: 'var(--color-text-muted)' }}>
-                No GPU types match "{gpuSearch}"
-              </p>
-            )}
-          </div>
-        </>
-      )}
-      <div className="flex gap-2 justify-end pt-1">
-        <Button variant="outline" size="sm" onClick={onCancel}>Cancel</Button>
-        <Button variant="primary" size="sm" onClick={handleSave} disabled={!name.trim()}>
-          <Check className="w-3.5 h-3.5" /> {initial ? 'Update' : 'Add'}
-        </Button>
-      </div>
+            </div>
+
+            {/* ── Infrastructure section ── */}
+            <div className="rounded-lg border overflow-hidden"
+              style={{ borderColor: 'var(--color-border)' }}>
+              <div className="px-3 py-2 border-b" style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)' }}>
+                <p className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-text-muted)' }}>Infrastructure</p>
+              </div>
+              <div className="p-3 space-y-3">
+                {/* GPU Cloud Provider as icon buttons */}
+                <div>
+                  <label className="block text-[10px] font-medium mb-1.5" style={{ color: 'var(--color-text-secondary)' }}>GPU Cloud Provider</label>
+                  <div className="flex gap-2 flex-wrap">
+                    {GPU_PROVIDERS.map(p => {
+                      const provIcon = PROVIDER_ICON[p.id];
+                      const PIcon = provIcon?.icon ?? Cpu;
+                      const pColor = provIcon?.color ?? p.color;
+                      const sel = gpuCloudProvider === p.id;
+                      return (
+                        <button key={p.id} type="button"
+                          onClick={() => { setGpuCloudProvider(p.id); setGpuTypes([]); setGpuSearch(''); }}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer"
+                          style={{
+                            background: sel ? `color-mix(in srgb, ${pColor} 12%, transparent)` : 'var(--color-surface-elevated)',
+                            borderColor: sel ? pColor : 'var(--color-border)',
+                            color: sel ? pColor : 'var(--color-text-muted)',
+                          }}>
+                          <PIcon className="w-3.5 h-3.5" />
+                          {p.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* GPU type search */}
+                <div>
+                  <label className="block text-[10px] font-medium mb-1.5" style={{ color: 'var(--color-text-secondary)' }}>
+                    GPU Types
+                    {gpuTypes.length > 0 && (
+                      <span className="ml-2 px-1.5 py-0.5 rounded-md text-[10px] font-bold"
+                        style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd' }}>
+                        {gpuTypes.length} selected
+                      </span>
+                    )}
+                  </label>
+
+                  {/* Selected chips — drag to reorder priority */}
+                  {gpuTypes.length > 0 && (
+                    <>
+                      <p className="text-[9px] mb-1" style={{ color: 'var(--color-text-muted)' }}>
+                        Drag to set priority order — #1 is tried first
+                      </p>
+                      <div ref={gpuChipsRef} className="flex flex-wrap gap-1 mb-2">
+                        {gpuTypes.map((id, idx) => {
+                          const info = liveGpus.find(g => g.name === id);
+                          const label = info?.shortName ?? id.replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, '');
+                          return (
+                            <span key={id} data-gpu-id={id}
+                              className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium select-none"
+                              style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd', border: '1px solid color-mix(in srgb, #a78bfa 30%, transparent)' }}>
+                              <GripVertical className="gpu-drag-handle w-3 h-3 cursor-grab opacity-50 hover:opacity-100 flex-shrink-0" />
+                              <span className="text-[9px] font-bold opacity-60">#{idx + 1}</span>
+                              {label}
+                              <button type="button" onClick={() => toggleGpu(id)} className="ml-0.5 hover:opacity-70 cursor-pointer">
+                                ×
+                              </button>
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+
+                  {/* Search input */}
+                  <div className="relative">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none"
+                      style={{ color: 'var(--color-text-muted)' }} />
+                    {gpuLoading && (
+                      <Loader2 className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin pointer-events-none"
+                        style={{ color: 'var(--color-text-muted)' }} />
+                    )}
+                    <input
+                      ref={searchRef}
+                      type="text"
+                      value={gpuSearch}
+                      onChange={e => setGpuSearch(e.target.value)}
+                      onFocus={() => setGpuFocused(true)}
+                      onBlur={() => setTimeout(() => setGpuFocused(false), 150)}
+                      placeholder={gpuLoading ? 'Loading GPUs...' : `Search ${liveGpus.length} GPU types...`}
+                      className="w-full rounded-lg border pl-8 pr-8 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500"
+                      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}
+                    />
+                  </div>
+
+                  {/* Results list */}
+                  {(gpuFocused || gpuSearch) && filteredGpus.length > 0 && (
+                    <div className="mt-1.5 rounded-lg border overflow-hidden max-h-48 overflow-y-auto"
+                      style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)' }}>
+                      {filteredGpus.map(g => {
+                        const sel = gpuTypes.includes(g.name);
+                        const vramGb = g.vramGb ?? (g.vram > 0 ? g.vram : null);
+                        return (
+                          <button key={g.name} type="button" onClick={() => toggleGpu(g.name)}
+                            className="w-full flex items-center gap-3 px-3 py-2 text-left transition-colors cursor-pointer border-b last:border-b-0"
+                            style={{
+                              borderColor: 'var(--color-border)',
+                              background: sel ? 'color-mix(in srgb, #a78bfa 6%, var(--color-bg))' : 'transparent',
+                            }}
+                            onMouseEnter={e => { if (!sel) (e.currentTarget as HTMLElement).style.background = 'var(--color-surface)'; }}
+                            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = sel ? 'color-mix(in srgb, #a78bfa 6%, var(--color-bg))' : 'transparent'; }}
+                          >
+                            <div className="w-4 h-4 flex-shrink-0 flex items-center justify-center">
+                              {sel
+                                ? <CircleCheck className="w-4 h-4" style={{ color: '#a78bfa' }} />
+                                : <Circle className="w-4 h-4" style={{ color: 'var(--color-border)' }} />
+                              }
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <span className="text-xs font-medium" style={{ color: sel ? '#c4b5fd' : 'var(--color-text)' }}>
+                                {g.shortName}
+                              </span>
+                              {vramGb && (
+                                <span className="ml-2 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                                  {vramGb}GB
+                                </span>
+                              )}
+                            </div>
+                            {g.minPricePerHr != null && (
+                              <span className="text-[10px] font-mono flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
+                                from ${g.minPricePerHr.toFixed(2)}/hr
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {!gpuLoading && gpuSearch && filteredGpus.length === 0 && (
+                    <p className="text-[11px] mt-1.5 px-1" style={{ color: 'var(--color-text-muted)' }}>
+                      No GPU types match "{gpuSearch}"
+                    </p>
+                  )}
+                </div>
+              </div>{/* end Infrastructure inner */}
+            </div>{/* end Infrastructure card */}
+          </>
+        )}
+
+        {/* Action buttons */}
+        <div className="flex gap-2 justify-end pt-1">
+          <Button variant="outline" size="sm" onClick={onCancel}>Cancel</Button>
+          <Button variant="primary" size="sm" onClick={handleSave} disabled={!name.trim()}>
+            <Check className="w-3.5 h-3.5" /> {initial ? 'Update' : 'Add'}
+          </Button>
+        </div>
+      </div>{/* end form body */}
     </div>
   );
 }
