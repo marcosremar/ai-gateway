@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, type GpuTypeInfo, type DockerManifest } from '@/lib/gateway';
+import { getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, speechPipelineSSE, speechPipelineWS, type GpuTypeInfo, type DockerManifest, type StreamCallbacks } from '@/lib/gateway';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import {
   Card, CardHeader, CardBody, Button, FormSelect, FormInput, SectionHeader,
@@ -1327,12 +1327,19 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
   const [name, setName] = useState(initial?.name || '');
   const [kind, setKind] = useState<ServiceKind>(initial?.kind || 'gpu-pod');
   const [cloudProvider, setCloudProvider] = useState(initial?.cloudProvider || 'groq');
-  const [dockerImage, setDockerImage] = useState(initial?.dockerImage || DEFAULT_DOCKER_IMAGES[0].url);
+
+  // Docker image: either a known preset or custom URL
+  const initDockerUrl = initial?.dockerImage || DEFAULT_DOCKER_IMAGES[0].url;
+  const isKnownUrl = (url: string) => DEFAULT_DOCKER_IMAGES.some(img => img.url === url);
+  const [dockerImage, setDockerImage] = useState(initDockerUrl);
+  const [customDockerUrl, setCustomDockerUrl] = useState(isKnownUrl(initDockerUrl) ? '' : initDockerUrl);
+  const [useCustom, setUseCustom] = useState(!isKnownUrl(initDockerUrl));
+
   const [gpuTypes, setGpuTypes] = useState<string[]>(initial?.gpuTypes || []);
   const [gpuCloudProvider, setGpuCloudProvider] = useState(initial?.gpuCloudProvider || GPU_PROVIDERS[0].id);
-  // Auto-fill models from known Docker image if no initial service
-  const initDockerUrl = initial?.dockerImage || DEFAULT_DOCKER_IMAGES[0].url;
-  const knownImg = !initial ? DEFAULT_DOCKER_IMAGES.find(img => img.url === initDockerUrl) : null;
+
+  // Auto-fill models from known Docker image (works for both new and edit)
+  const knownImg = DEFAULT_DOCKER_IMAGES.find(img => img.url === dockerImage);
   const [sttModel, setSttModel] = useState(initial?.sttModel || knownImg?.sttModel || '');
   const [llmModel, setLlmModel] = useState(initial?.llmModel || knownImg?.llmModel || '');
   const [ttsModel, setTtsModel] = useState(initial?.ttsModel || knownImg?.ttsModel || '');
@@ -1448,46 +1455,83 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
         </FormSelect>
       ) : (
         <>
-          {/* Docker image — text input + inspect */}
+          {/* Docker image — preset dropdown or custom URL */}
           <div>
             <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-secondary)' }}>Docker Image</label>
-            <div className="flex gap-2">
-              <input
-                className="flex-1 text-xs rounded-lg border px-3 py-2 outline-none focus:ring-1"
-                style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
-                value={dockerImage}
-                onChange={e => {
-                  const url = e.target.value;
-                  setDockerImage(url);
-                  setInspectResult(null);
-                  setInspectError(null);
-                  // Auto-fill models from known images
-                  const known = DEFAULT_DOCKER_IMAGES.find(img => img.url === url);
-                  if (known) {
-                    if (known.sttModel) setSttModel(known.sttModel); else setSttModel('');
-                    if (known.llmModel) setLlmModel(known.llmModel); else setLlmModel('');
-                    if (known.ttsModel) setTtsModel(known.ttsModel); else setTtsModel('');
-                    if (!name || DEFAULT_DOCKER_IMAGES.some(i => i.label === name)) setName(known.label);
-                  }
-                }}
-                placeholder="namespace/image:tag"
-                list="docker-image-suggestions"
-              />
-              <datalist id="docker-image-suggestions">
-                {DEFAULT_DOCKER_IMAGES.map(img => <option key={img.url} value={img.url}>{img.label} — {img.description}</option>)}
-              </datalist>
-              <button
-                type="button"
-                onClick={handleInspect}
-                disabled={inspecting || !dockerImage.trim()}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
-                style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text-secondary)' }}
-                title="Read service capabilities from Docker Hub labels"
-              >
-                {inspecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanSearch className="w-3.5 h-3.5" />}
-                Inspect
-              </button>
-            </div>
+            {!useCustom ? (
+              <div className="flex gap-2">
+                <select
+                  className="flex-1 text-xs rounded-lg border px-3 py-2 outline-none focus:ring-1 cursor-pointer"
+                  style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                  value={dockerImage}
+                  onChange={e => {
+                    const url = e.target.value;
+                    setDockerImage(url);
+                    setInspectResult(null);
+                    setInspectError(null);
+                    const known = DEFAULT_DOCKER_IMAGES.find(img => img.url === url);
+                    if (known) {
+                      setSttModel(known.sttModel || '');
+                      setLlmModel(known.llmModel || '');
+                      setTtsModel(known.ttsModel || '');
+                      if (!name || DEFAULT_DOCKER_IMAGES.some(i => `Babelcast ${i.label}` === name)) {
+                        setName(`Babelcast ${known.label}`);
+                      }
+                    }
+                  }}
+                >
+                  {DEFAULT_DOCKER_IMAGES.map(img => (
+                    <option key={img.url} value={img.url}>{img.label} — {img.description}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => { setUseCustom(true); setCustomDockerUrl(dockerImage); }}
+                  className="px-3 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer"
+                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text-muted)' }}
+                  title="Use a custom Docker image URL"
+                >
+                  Custom
+                </button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 text-xs rounded-lg border px-3 py-2 outline-none focus:ring-1"
+                  style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                  value={customDockerUrl}
+                  onChange={e => {
+                    const url = e.target.value;
+                    setCustomDockerUrl(url);
+                    setDockerImage(url);
+                    setInspectResult(null);
+                    setInspectError(null);
+                  }}
+                  placeholder="namespace/image:tag"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={handleInspect}
+                  disabled={inspecting || !customDockerUrl.trim()}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text-secondary)' }}
+                  title="Read service capabilities from Docker Hub labels"
+                >
+                  {inspecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanSearch className="w-3.5 h-3.5" />}
+                  Inspect
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setUseCustom(false); setDockerImage(DEFAULT_DOCKER_IMAGES[0].url); }}
+                  className="px-2 py-2 rounded-lg border text-xs transition-colors cursor-pointer"
+                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text-muted)' }}
+                  title="Back to presets"
+                >
+                  <XIcon className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
             {/* Inspect result */}
             {inspectResult && (
               <div className="mt-2 p-2 rounded-lg border text-[11px] space-y-0.5"
@@ -1497,9 +1541,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                   {inspectResult.protocol !== 'rest' && <span className="ml-2" style={{ color: 'var(--color-text-muted)' }}>({inspectResult.protocol})</span>}
                 </div>
                 {[inspectResult.sttModel, inspectResult.llmModel, inspectResult.ttsModel].some(Boolean) && (
-                  <div style={{ color: 'var(--color-text-muted)' }}>
-                    Models auto-filled ↓
-                  </div>
+                  <div style={{ color: 'var(--color-text-muted)' }}>Models auto-filled ↓</div>
                 )}
               </div>
             )}
