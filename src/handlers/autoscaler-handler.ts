@@ -429,7 +429,7 @@ export async function handleAutoscalerAction(
 
       const instance = await client.createInstance(
         {
-          gpuTypes: Array.isArray(gpuTypes) ? gpuTypes as string[] : ['RTX_3090', 'RTX_4090'],
+          gpuTypes: Array.isArray(gpuTypes) ? gpuTypes as string[] : ['NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000'],
           dockerImage: dockerImage as string | undefined,
           env: env as Record<string, string> | undefined,
           hfToken: creds.hfToken,
@@ -596,7 +596,7 @@ export async function handleAutoscalerAction(
       try {
         instance = await client.createInstance(
           {
-            gpuTypes: Array.isArray(gpuTypes) ? gpuTypes as string[] : ['RTX_3090', 'RTX_4090'],
+            gpuTypes: Array.isArray(gpuTypes) ? gpuTypes as string[] : ['NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000'],
             dockerImage: dockerImage as string | undefined,
             hfToken: creds.hfToken,
           },

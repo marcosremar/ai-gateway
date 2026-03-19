@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import { getProviderConfig, patchProviderConfig } from '@/lib/gateway';
 import {
@@ -10,10 +10,9 @@ import {
 import { Cloud, Cpu, Mic, Server, Plus, X, Check, Package, Circle, CircleDot, CircleCheck, Trash2, Loader2, ImagePlus } from 'lucide-react';
 import {
   DEFAULT_DOCKER_IMAGES, GPU_TYPES,
-  type DockerImage, type PipelineChainEntry, type ProviderProfile,
+  type DockerImage, type PipelineChainEntry,
 } from './provider-types';
 import PipelineStageConfig from './PipelineStageConfig';
-import ProfilesPanel from './ProfilesPanel';
 
 const DEFAULT_STT: PipelineChainEntry[] = [{ provider: 'groq', model: 'whisper-large-v3-turbo' }];
 const DEFAULT_LLM: PipelineChainEntry[] = [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }];
@@ -42,9 +41,6 @@ export function ProvidersSection() {
   const [newImageLabel, setNewImageLabel] = useState('');
   const [newImageDesc, setNewImageDesc] = useState('');
 
-  // Profiles
-  const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
   const [configLoaded, setConfigLoaded] = useState(false);
 
   // Dirty / save
@@ -60,8 +56,6 @@ export function ProvidersSection() {
         if (cfg.pipelineStt?.length) setPipelineStt(cfg.pipelineStt);
         if (cfg.pipelineLlm?.length) setPipelineLlm(cfg.pipelineLlm);
         if (cfg.pipelineTts?.length) setPipelineTts(cfg.pipelineTts);
-        if (cfg.profiles?.length) setProfiles(cfg.profiles);
-        if (cfg.activeProfileId) setActiveProfileId(cfg.activeProfileId);
         if (cfg.gpuImage) setGpuImage(cfg.gpuImage);
         if (cfg.gpuTypes?.length) setGpuTypes(cfg.gpuTypes);
         if (cfg.gpuProvider !== undefined) setGpuProvider(cfg.gpuProvider);
@@ -75,14 +69,14 @@ export function ProvidersSection() {
   // Track dirty
   useEffect(() => {
     if (configLoaded) setDirty(true);
-  }, [mode, profiles, activeProfileId, pipelineStt, pipelineLlm, pipelineTts, gpuImage, gpuTypes, gpuProvider, dockerImages, idleTimeoutMin]);
+  }, [mode, pipelineStt, pipelineLlm, pipelineTts, gpuImage, gpuTypes, gpuProvider, dockerImages, idleTimeoutMin]);
 
   // Save
   const handleSave = async () => {
     setSaving(true);
     try {
       await patchProviderConfig({
-        mode, profiles, activeProfileId,
+        mode,
         pipelineStt, pipelineLlm, pipelineTts,
         gpuImage, gpuTypes, gpuProvider, dockerImages,
         idleTimeoutMin,
@@ -92,40 +86,6 @@ export function ProvidersSection() {
       setTimeout(() => setSaved(false), 3000);
     } catch {} finally { setSaving(false); }
   };
-
-  // Auto-sync active profile
-  useEffect(() => {
-    if (!activeProfileId) return;
-    setProfiles(prev => prev.map(p => {
-      if (p.id !== activeProfileId) return p;
-      const updated: ProviderProfile = p.mode === 'pipeline'
-        ? { ...p, stt: pipelineStt, llm: pipelineLlm, tts: pipelineTts }
-        : { ...p, gpuImage, gpuTypes, gpuProvider };
-      if (JSON.stringify(p) === JSON.stringify(updated)) return p;
-      return updated;
-    }));
-  }, [activeProfileId, pipelineStt, pipelineLlm, pipelineTts, gpuImage, gpuTypes, gpuProvider]);
-
-  const createCurrentProfile = useCallback((name: string): ProviderProfile => {
-    if (mode === 'pipeline') {
-      return { id: uid(), name, mode: 'pipeline', stt: [...pipelineStt], llm: [...pipelineLlm], tts: [...pipelineTts] };
-    }
-    return { id: uid(), name, mode: 'gpu', stt: [], llm: [], tts: [], gpuImage, gpuTypes: [...gpuTypes], gpuProvider };
-  }, [mode, pipelineStt, pipelineLlm, pipelineTts, gpuImage, gpuTypes, gpuProvider]);
-
-  const applyProfile = useCallback((profile: ProviderProfile) => {
-    setMode(profile.mode || 'pipeline');
-    if (profile.mode === 'gpu') {
-      if (profile.gpuImage) setGpuImage(profile.gpuImage);
-      if (profile.gpuTypes?.length) setGpuTypes(profile.gpuTypes);
-      if (profile.gpuProvider !== undefined) setGpuProvider(profile.gpuProvider);
-    } else {
-      setPipelineStt(profile.stt.length ? profile.stt : DEFAULT_STT);
-      setPipelineLlm(profile.llm.length ? profile.llm : DEFAULT_LLM);
-      setPipelineTts(profile.tts.length ? profile.tts : DEFAULT_TTS);
-    }
-    setActiveProfileId(profile.id);
-  }, []);
 
   const toggleGpu = (id: string) => setGpuTypes(prev => prev.includes(id) ? prev.filter(g => g !== id) : [...prev, id]);
 
@@ -166,14 +126,6 @@ export function ProvidersSection() {
             )}
           </StatusBadge>
         }
-      />
-
-      {/* Profiles */}
-      <ProfilesPanel
-        profiles={profiles} setProfiles={setProfiles}
-        activeProfileId={activeProfileId} setActiveProfileId={setActiveProfileId}
-        onApplyProfile={applyProfile} createCurrentProfile={createCurrentProfile}
-        currentMode={mode}
       />
 
       {/* Mode toggle */}
@@ -373,8 +325,4 @@ export function ProvidersSection() {
       <SaveBar hasChanges={dirty} saving={saving} saved={saved} onSave={handleSave} />
     </div>
   );
-}
-
-function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
 }
