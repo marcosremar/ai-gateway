@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useGateway } from '@/hooks/useGateway';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
+import { useGpuList } from '@/hooks/useGpuList';
 import { useBotStatus } from '@/hooks/useBotStatus';
 import { getRequestLog, type RequestLogEntry } from '@/lib/gateway';
 import { Card, CardHeader, CardBody, StatusBadge, AlertBanner, Spinner } from '@/components/ui';
@@ -81,6 +82,7 @@ function computeStageLatencies(entries: RequestLogEntry[]): Record<string, Stage
 export function OverviewSection() {
   const { health, error } = useGateway();
   const { gpu } = useGpuStatus(true, 10000);
+  const { instances: gpuInstances } = useGpuList(true, 10000);
   const { bot } = useBotStatus(true, 10000);
   const [stageLatencies, setStageLatencies] = useState<Record<string, StageLatency>>({});
 
@@ -284,46 +286,76 @@ export function OverviewSection() {
         </div>
       )}
 
-      {/* GPU + Bot */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
+      {/* GPU instances (one card per instance) + Bot */}
+      <div className="space-y-4">
+        {gpuInstances.length === 0 ? (
+          <Card>
+            <CardHeader>
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-                  style={{ background: isGpuReady ? 'rgba(16, 185, 129, 0.1)' : 'rgba(96, 165, 250, 0.1)' }}>
-                  <Cpu className="w-4 h-4" style={{ color: isGpuReady ? '#34d399' : '#60a5fa' }} />
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(96, 165, 250, 0.1)' }}>
+                  <Cpu className="w-4 h-4" style={{ color: '#60a5fa' }} />
                 </div>
                 <h3 className="text-sm font-semibold">GPU</h3>
               </div>
-              {gpu && <StatusBadge variant={gpuVariant(gpu.status)} dot>{gpu.status}</StatusBadge>}
-            </div>
-          </CardHeader>
-          <CardBody>
-            {gpu && gpu.status !== 'idle' ? (
-              <div className="space-y-2 text-xs">
-                {gpu.provider && <KV label="Provider" value={gpu.provider} />}
-                {gpu.gpuType && <KV label="GPU" value={gpu.gpuType} />}
-                {gpu.costPerHr != null && gpu.costPerHr > 0 && <KV label="Cost" value={`$${gpu.costPerHr.toFixed(3)}/hr`} />}
-                {gpu.endpoint && <KV label="Endpoint" value={gpu.endpoint} mono />}
-                <KV label="Uptime" value={formatUptime(gpu.elapsedSec)} />
-                {gpu.pipelineRouting && (
-                  <div className="pt-2 mt-2 border-t flex gap-3" style={{ borderColor: 'var(--color-border-light)' }}>
-                    <span style={{ color: gpu.pipelineRouting.stt === 'gpu' ? '#38bdf8' : 'var(--color-text-muted)' }}>STT: {gpu.pipelineRouting.stt}</span>
-                    <span style={{ color: gpu.pipelineRouting.llm === 'gpu' ? '#a78bfa' : 'var(--color-text-muted)' }}>LLM: {gpu.pipelineRouting.llm}</span>
-                    <span style={{ color: gpu.pipelineRouting.tts === 'gpu' ? '#fbbf24' : 'var(--color-text-muted)' }}>TTS: {gpu.pipelineRouting.tts}</span>
-                  </div>
-                )}
-              </div>
-            ) : (
+            </CardHeader>
+            <CardBody>
               <div className="text-center py-3">
                 <Cpu className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--color-text-muted)', opacity: 0.3 }} />
                 <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No GPU deployed</p>
               </div>
-            )}
-          </CardBody>
-        </Card>
+            </CardBody>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {gpuInstances.map(inst => {
+              const apiKeyMap: Record<string, string> = {
+                vast: 'Vast.ai key', runpod: 'RunPod key',
+                tensordock: 'TensorDock key', modal: 'Modal (env)',
+              };
+              const isReady = inst.isActive || inst.status === 'ready';
+              return (
+                <Card key={inst.instanceId}>
+                  <CardHeader>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center"
+                          style={{ background: isReady ? 'rgba(16, 185, 129, 0.1)' : 'rgba(96, 165, 250, 0.1)' }}>
+                          <Cpu className="w-4 h-4" style={{ color: isReady ? '#34d399' : '#60a5fa' }} />
+                        </div>
+                        <h3 className="text-sm font-semibold">GPU</h3>
+                        {inst.isActive && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded font-bold uppercase"
+                            style={{ background: 'rgba(16,185,129,0.12)', color: '#34d399' }}>active</span>
+                        )}
+                      </div>
+                      <StatusBadge variant={gpuVariant(inst.status)} dot>{inst.status}</StatusBadge>
+                    </div>
+                  </CardHeader>
+                  <CardBody>
+                    <div className="space-y-2 text-xs">
+                      {inst.provider && <KV label="Provider" value={inst.provider} />}
+                      {inst.gpuType && <KV label="GPU" value={inst.gpuType} />}
+                      {inst.costPerHr != null && inst.costPerHr > 0 && <KV label="Cost" value={`$${inst.costPerHr.toFixed(3)}/hr`} />}
+                      {inst.elapsedSec != null && <KV label="Uptime" value={formatUptime(inst.elapsedSec)} />}
+                      {inst.endpoint && <KV label="Endpoint" value={inst.endpoint} mono />}
+                      {inst.provider && <KV label="API Key" value={apiKeyMap[inst.provider.toLowerCase()] ?? `${inst.provider} key`} />}
+                      {inst.isActive && gpu?.pipelineRouting && (
+                        <div className="pt-2 mt-2 border-t flex gap-3" style={{ borderColor: 'var(--color-border-light)' }}>
+                          <span style={{ color: gpu.pipelineRouting.stt === 'gpu' ? '#38bdf8' : 'var(--color-text-muted)' }}>STT: {gpu.pipelineRouting.stt}</span>
+                          <span style={{ color: gpu.pipelineRouting.llm === 'gpu' ? '#a78bfa' : 'var(--color-text-muted)' }}>LLM: {gpu.pipelineRouting.llm}</span>
+                          <span style={{ color: gpu.pipelineRouting.tts === 'gpu' ? '#fbbf24' : 'var(--color-text-muted)' }}>TTS: {gpu.pipelineRouting.tts}</span>
+                        </div>
+                      )}
+                    </div>
+                  </CardBody>
+                </Card>
+              );
+            })}
+          </div>
+        )}
 
+        {/* Bot */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
@@ -351,6 +383,7 @@ export function OverviewSection() {
             )}
           </CardBody>
         </Card>
+        </div>
       </div>
 
       {/* Budget */}

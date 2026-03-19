@@ -115,12 +115,30 @@ export async function getGpuStatus(): Promise<GpuStatusResponse> {
   return gwJson('/v1/gpu/status');
 }
 
+export interface GpuInstanceItem {
+  provider: string;
+  instanceId: string;
+  instanceName?: string;
+  endpoint: string;
+  status: string;
+  gpuType?: string;
+  costPerHr?: number;
+  elapsedSec?: number;
+  dockerImage?: string;
+  isActive: boolean;
+}
+
+export async function getGpuList(): Promise<{ instances: GpuInstanceItem[] }> {
+  return gwJson('/v1/gpu/list');
+}
+
 export interface DeployGpuOpts {
   dockerImage: string;
   gpuTypes?: string[];
   autoSelectGpu?: boolean;
   provider?: string;
   interruptible?: boolean;
+  raceCount?: number;
 }
 
 export async function deployGpu(opts: DeployGpuOpts): Promise<{ status: string; message: string }> {
@@ -148,6 +166,8 @@ export interface ReputationHost {
   avgLatencyMs: number;
   totalCostUsd: number;
   lastDeployAt: number;
+  tier?: 'gold' | 'silver' | 'bronze';
+  blacklisted?: boolean;
 }
 
 export async function getGpuReputation(provider?: string): Promise<{ hosts: ReputationHost[]; count: number }> {
@@ -534,4 +554,254 @@ export async function playgroundStt(audio: Blob, opts?: { provider?: string; mod
   });
   if (!res.ok) throw new Error(`Playground STT ${res.status}: ${await res.text()}`);
   return res.json();
+}
+
+export interface GpuTypeInfo {
+  name: string;
+  shortName: string;
+  type?: string;
+  label?: string;
+  vram: number;
+  vramGb?: number;
+  bestLatencyMs?: number | null;
+  bestRegion?: string | null;
+  minPricePerHr?: number | null;
+  avgLatencyMs?: number;
+  samples?: number;
+  count?: number;
+}
+
+export async function getGpuTypes(provider?: string): Promise<{ gpuTypes: GpuTypeInfo[] }> {
+  return gwJson(`/v1/gpu/types${provider ? `?provider=${encodeURIComponent(provider)}` : ""}`);
+}
+
+// ── Latency Settings & Probe Schedule ──
+
+export type GpuSortBy = 'price' | 'balanced' | 'latency';
+
+export interface LatencySettings {
+  intervalMin: number;
+  maxLatencyMs: number;
+  running: boolean;
+  lastRunAt: number;
+  nextRunAt: number;
+  gpuPriorityList: string[];
+  gpuPriorityByProvider: Record<string, string[]>;
+  gpuSortBy: GpuSortBy;
+  dbStats: { totalHosts: number; monitoredHosts: number; historyRows: number; unstable: number; failing: number } | null;
+  sttTargetLatencyMs: number | null;
+  llmTargetLatencyMs: number | null;
+  ttsTargetLatencyMs: number | null;
+  benchmarkMaxRuns: number | null;
+  benchmarkMarginPct: number | null;
+  shadowRuns: number | null;
+  p95DemotionMultiplier: number | null;
+  repechageMaxAttempts: number | null;
+  deployTimeoutMin: number | null;
+  deployRaceCount: number | null;
+  deployRegion: string | null;
+  deployDockerImage: string | null;
+  minVramGb: number | null;
+  preferSsd: boolean | null;
+  standbyEnabled: boolean | null;
+  standbyTriggerHours: number | null;
+  standbyDrainTimeoutMs: number | null;
+}
+
+export async function getLatencySettings(): Promise<LatencySettings> {
+  return gwJson('/v1/gpu/latency/settings');
+}
+
+export async function patchLatencySettings(patch: Partial<LatencySettings>): Promise<LatencySettings> {
+  return gwPost('/v1/gpu/latency/settings', patch);
+}
+
+export async function triggerLatencyRun(): Promise<{ ok: boolean }> {
+  return gwPost('/v1/gpu/latency/run');
+}
+
+export interface LatencyHost {
+  host_id: string;
+  provider: string;
+  gpu_type: string;
+  gpu_name: string;
+  region: string | null;
+  geolocation: string | null;
+  host_ip: string | null;
+  avg_latency_ms: number | null;
+  median_ms: number | null;
+  p90_ms: number | null;
+  stddev_ms: number | null;
+  monitored: 0 | 1;
+  error_count: number;
+  consecutive_failures: number;
+  success_rate: number;
+  last_probed_at: number | null;
+  price_usd: number;
+}
+
+export async function getLatencyHosts(opts?: { region?: string }): Promise<{ hosts: LatencyHost[]; from: { city: string; country: string; flag: string } | null }> {
+  const qs = opts?.region ? '?region=' + encodeURIComponent(opts.region) : '';
+  return gwJson('/v1/gpu/latency/hosts' + qs);
+}
+
+export async function patchLatencyHosts(hostIds: string[], monitored: boolean): Promise<{ ok: boolean }> {
+  return gwPost('/v1/gpu/latency/hosts', { hostIds, monitored });
+}
+
+export async function getGpuDefaults(): Promise<{ defaults: string[] }> {
+  return gwJson('/v1/gpu/defaults');
+}
+
+// ── GPU Readiness ──
+
+export interface ServiceReadinessState {
+  phase: 'idle' | 'benchmarking' | 'ready' | 'failed' | 'repechage' | 'condemned';
+  completedRuns: number;
+  bestLatencyMs: number | null;
+  targetMs: number;
+  latencySamples: number[];
+}
+
+export interface GpuReadinessState {
+  stt: ServiceReadinessState;
+  llm: ServiceReadinessState;
+  tts: ServiceReadinessState;
+  repechageAttempts: number;
+  shadowCompletedRuns: number;
+  shadowPhase: boolean;
+  condemned?: boolean;
+}
+
+export interface ReadinessHistoryRun {
+  ts: number;
+  stage: 'stt' | 'llm' | 'tts';
+  samples: number[];
+  bestLatencyMs: number;
+  targetMs: number;
+  passed: boolean;
+  runsUsed: number;
+}
+
+export interface ReadinessHistoryRecord {
+  runs: ReadinessHistoryRun[];
+  lastRunAt: number;
+  avgPassedMs: Partial<Record<'stt' | 'llm' | 'tts', number>>;
+}
+
+export interface GpuReadinessHistoryResponse {
+  history: Record<string, ReadinessHistoryRecord>;
+  currentState: GpuReadinessState;
+}
+
+export interface ReadinessStatusResponse {
+  gpuReadyForProduction: boolean;
+  gpuShadowMode: boolean;
+  readinessState: GpuReadinessState;
+  perStageP95: { stt: number | null; llm: number | null; tts: number | null };
+  targets: { stt: number; llm: number; tts: number };
+  p95DemotionMultiplier: number;
+  repechageMaxAttempts: number;
+}
+
+export async function getReadinessStatus(): Promise<ReadinessStatusResponse> {
+  return gwJson('/v1/gpu/readiness/status');
+}
+
+export async function getGpuReadinessHistory(): Promise<GpuReadinessHistoryResponse> {
+  return gwJson('/v1/gpu/readiness/history');
+}
+
+export async function resetGpuReadiness(): Promise<{ ok: boolean }> {
+  return gwPost('/v1/gpu/readiness/reset');
+}
+
+// ── GPU Standby ──
+
+export interface StandbyStatus {
+  status: 'idle' | 'deploying' | 'benchmarking' | 'ready' | 'handover' | 'error';
+  endpoint: string | null;
+  podId: string | null;
+  gpuType: string | null;
+  provider: string | null;
+  triggeredReason: string | null;
+  message: string | null;
+}
+
+export async function triggerStandbyDeploy(): Promise<{ ok: boolean; error?: string }> {
+  return gwPost('/v1/gpu/standby/deploy');
+}
+
+export async function initiateStandbyHandover(): Promise<{ ok: boolean; error?: string }> {
+  return gwPost('/v1/gpu/standby/handover');
+}
+
+export async function cancelStandbyDeploy(): Promise<{ ok: boolean }> {
+  return gwPost('/v1/gpu/standby/cancel');
+}
+
+// ── Provider profiles + GPU deploy config ──
+
+export interface GpuDeployConfig {
+  dockerImage: string;
+  gpuTypes: string[];
+  region: string;
+  timeoutMin: number;
+  raceCount?: number;
+}
+
+export async function createProfile(profile: { id: string; name: string; gpuDeploy?: GpuDeployConfig }): Promise<ProviderConfigResponse> {
+  return gwPost('/v1/config/profiles', profile);
+}
+
+export async function deleteProfile(id: string): Promise<ProviderConfigResponse> {
+  return gwPost('/v1/config/profiles/' + id + '/delete');
+}
+
+// ── GPU Offers ──
+
+export interface GpuOffer {
+  id: string;
+  provider: string;
+  gpuType: string;
+  gpuCount: number;
+  vramGb: number | null;
+  pricePerHr: number;
+  region: string | null;
+  reliability: number | null;
+}
+
+export async function getGpuOffers(opts?: { gpuType?: string; provider?: string }): Promise<{ offers: GpuOffer[] }> {
+  const qs = new URLSearchParams();
+  if (opts?.gpuType) qs.set('gpuType', opts.gpuType);
+  if (opts?.provider) qs.set('provider', opts.provider);
+  const q = qs.toString();
+  return gwJson('/v1/gpu/offers' + (q ? '?' + q : ''));
+}
+
+// ── Voice Profile ──
+
+export interface VoiceProfileStatus {
+  hasProfile: boolean;
+  totalDurationSec: number;
+  minDurationSec: number;
+  sampleCount: number;
+  ready: boolean;
+  state?: 'available' | 'unavailable' | 'error';
+  samplesCount?: number;
+  gender?: string;
+}
+
+export async function getVoiceProfileStatus(): Promise<VoiceProfileStatus> {
+  return gwJson('/v1/voice/profile');
+}
+
+export async function uploadVoiceReference(file: File): Promise<{ ok: boolean; message?: string }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  return gwJson('/v1/voice/reference', { method: 'POST', body: formData });
+}
+
+export async function resetVoiceProfile(): Promise<{ ok: boolean }> {
+  return gwPost('/v1/voice/profile/reset');
 }
