@@ -170,9 +170,6 @@ export const DEFAULT_DOCKER_IMAGES: DockerImage[] = [
   },
 ];
 
-/** @deprecated Use DockerImage[] state instead */
-export const DOCKER_IMAGES = DEFAULT_DOCKER_IMAGES.map(d => ({ value: d.url, label: d.label }));
-
 // ── GPU types ──
 
 export const GPU_TYPES = [
