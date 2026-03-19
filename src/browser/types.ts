@@ -136,18 +136,33 @@ export interface SSEConfig {
   language?: string;
 }
 
-/** WebRTC transport configuration (Pipecat-based). */
+/**
+ * WebRTC transport configuration.
+ *
+ * Two modes (auto-detected):
+ *   - **Pipecat**: set `clusterName` to enable. Requires @pipecat-ai/client-js.
+ *   - **aiortc simple**: omit `clusterName`. Uses plain RTCPeerConnection + POST /api/offer.
+ */
 export interface WebRTCConfig {
-  /** Pipecat signaling server URL. */
+  /** Signaling server URL. Pipecat mode or aiortc POST /api/offer endpoint. */
   signalingUrl: string;
-  /** Cluster name for the backend. */
-  clusterName: string;
-  /** Direct IP of the head node. */
+  /**
+   * Cluster name for Pipecat backend. When set, Pipecat mode is used.
+   * Omit for aiortc simple mode (plain SDP exchange via signalingUrl).
+   */
+  clusterName?: string;
+  /** Direct IP of the head node (Pipecat mode only). */
   headIp?: string;
-  /** Access mode for the cluster. */
+  /** Access mode for the cluster (Pipecat mode only). */
   accessMode?: 'direct' | 'ssh';
-  /** Backend endpoint for ICE server discovery. */
+  /** Backend endpoint for ICE server discovery (Pipecat mode only). */
   backendEndpoint?: string;
+  /** Source language code for aiortc mode (e.g. 'fr'). Default: 'fr'. */
+  sourceLanguage?: string;
+  /** Target language code for aiortc mode (e.g. 'en'). Default: 'en'. */
+  targetLanguage?: string;
+  /** TTS speaker name for aiortc mode. Default: 'Ryan'. */
+  speaker?: string;
 }
 
 // ── Circuit Breaker config ────────────────────────────────────────────────

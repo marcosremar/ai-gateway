@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, type GpuTypeInfo, type DockerManifest, type SpeechTransport } from '@/lib/gateway';
+import { getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, benchmarkPaths, type GpuTypeInfo, type DockerManifest, type SpeechTransport, type BenchmarkPathsResponse, type PathOption, type StageBenchResult } from '@/lib/gateway';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import {
   Card, CardHeader, CardBody, Button, FormSelect, FormInput, SectionHeader,
@@ -12,7 +12,7 @@ import {
   ChevronLeft, Mic, Plus, Check, Trash2, Circle,
   CircleCheck, Package, Server, Bot, Volume2, Pencil, Clock, Gauge, Timer, Search, Loader2,
   GripVertical, ClipboardCheck, Sparkles, Brain, Play, Square, Cpu, ScanSearch, AlertCircle,
-  Upload, Zap, X as XIcon,
+  Upload, Zap, X as XIcon, BarChart3, Trophy,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import Sortable from 'sortablejs';
@@ -347,6 +347,33 @@ function ProfileFlowDiagram({
   const testStagesRef = useRef(testStages);
   useEffect(() => { testStagesRef.current = testStages; }, [testStages]);
 
+  // ── Benchmark state ──
+  const [benchRunning, setBenchRunning] = useState(false);
+  const [benchResult, setBenchResult] = useState<BenchmarkPathsResponse | null>(null);
+  const [benchError, setBenchError] = useState<string | null>(null);
+
+  const runBenchmark = async () => {
+    setBenchRunning(true);
+    setBenchError(null);
+    setBenchResult(null);
+    try {
+      const result = await benchmarkPaths({
+        iterations: 3,
+        pipelineIterations: 0,
+        warmupIterations: 1,
+        source: testSrc,
+        target: testTgt,
+        includeGpu: true,
+        includeCloud: true,
+      });
+      setBenchResult(result);
+    } catch (e) {
+      setBenchError(e instanceof Error ? e.message : 'Benchmark failed');
+    } finally {
+      setBenchRunning(false);
+    }
+  };
+
   // ── Service chip hover tooltip ──
   const { gpu } = useGpuStatus(true, 10000);
   const [hoveredChip, setHoveredChip] = useState<{ stageKey: string; entryIdx: number } | null>(null);
@@ -598,16 +625,38 @@ function ProfileFlowDiagram({
         <span className="text-xs font-semibold" style={{ color: 'var(--color-text)' }}>
           {name || 'Pipeline Flow'}
         </span>
-        {latencyOpt && (
-          <span className="flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1 rounded-lg"
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={benchRunning}
+            onClick={runBenchmark}
+            className="flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer"
             style={{
-              background: `color-mix(in srgb, ${latencyOpt.color} 10%, transparent)`,
-              color: latencyOpt.color,
-            }}>
-            <latencyOpt.Icon className="w-3 h-3" />
-            {latencyOpt.label} · {latencyOpt.sub}
-          </span>
-        )}
+              background: benchRunning
+                ? 'color-mix(in srgb, #8b5cf6 8%, transparent)'
+                : 'color-mix(in srgb, #8b5cf6 5%, transparent)',
+              borderColor: 'color-mix(in srgb, #8b5cf6 25%, transparent)',
+              color: '#8b5cf6',
+              opacity: benchRunning ? 0.7 : 1,
+            }}
+            title="Benchmark all provider combinations to find the fastest path"
+          >
+            {benchRunning
+              ? <Loader2 className="w-3 h-3 animate-spin" />
+              : <BarChart3 className="w-3 h-3" />}
+            {benchRunning ? 'Benchmarking...' : 'Compare'}
+          </button>
+          {latencyOpt && (
+            <span className="flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1 rounded-lg"
+              style={{
+                background: `color-mix(in srgb, ${latencyOpt.color} 10%, transparent)`,
+                color: latencyOpt.color,
+              }}>
+              <latencyOpt.Icon className="w-3 h-3" />
+              {latencyOpt.label} · {latencyOpt.sub}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Flow */}
@@ -1193,6 +1242,173 @@ function ProfileFlowDiagram({
         )}
       </div>
 
+      {/* ── Benchmark Results ── */}
+      {(benchResult || benchError) && (
+        <div className="px-6 pb-5">
+          <div className="pt-4 space-y-3" style={{ borderTop: '1px solid var(--color-border)' }}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <BarChart3 className="w-3.5 h-3.5" style={{ color: '#8b5cf6' }} />
+                <span className="text-xs font-bold" style={{ color: '#8b5cf6' }}>Provider Comparison</span>
+                {benchResult?.durationMs != null && (
+                  <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                    ({(benchResult.durationMs / 1000).toFixed(1)}s)
+                  </span>
+                )}
+              </div>
+              <button type="button" onClick={() => { setBenchResult(null); setBenchError(null); }}
+                className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors">
+                <XIcon className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
+              </button>
+            </div>
+
+            {benchError && (
+              <div className="text-xs px-3 py-2 rounded-lg"
+                style={{ background: 'color-mix(in srgb, #ef4444 8%, transparent)', color: '#ef4444' }}>
+                {benchError}
+              </div>
+            )}
+
+            {benchResult && (
+              <>
+                {/* Per-stage provider latency bars */}
+                {benchResult.stages && (
+                  <div className="space-y-3">
+                    {(['stt', 'llm', 'tts'] as const).map(stageKey => {
+                      const stageData = benchResult.stages[stageKey] as StageBenchResult | undefined;
+                      if (!stageData?.providers) return null;
+                      const STAGE_COLORS: Record<string, string> = { stt: '#38bdf8', llm: '#a78bfa', tts: '#fbbf24' };
+                      const color = STAGE_COLORS[stageKey] || '#8b949e';
+                      const entries = Object.entries(stageData.providers)
+                        .filter(([, v]) => v && v.available && v.avg > 0)
+                        .sort(([, a], [, b]) => (a?.avg ?? Infinity) - (b?.avg ?? Infinity));
+                      if (entries.length === 0) return null;
+                      const maxAvg = Math.max(...entries.map(([, v]) => v?.avg ?? 0), 1);
+
+                      return (
+                        <div key={stageKey}>
+                          <div className="flex items-center gap-1.5 mb-1.5">
+                            <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color }}>
+                              {stageKey}
+                            </span>
+                            {stageData.fastest && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded" style={{
+                                background: 'color-mix(in srgb, #10b981 10%, transparent)', color: '#10b981',
+                              }}>fastest: {stageData.fastest}</span>
+                            )}
+                          </div>
+                          <div className="space-y-1">
+                            {entries.map(([provider, data]) => {
+                              if (!data) return null;
+                              const isFastest = provider === stageData.fastest;
+                              const barPct = Math.max(8, (data.avg / maxAvg) * 100);
+                              const pi = PROVIDER_ICON[provider];
+                              const provColor = pi?.color ?? pMeta(provider).color;
+                              return (
+                                <div key={provider} className="flex items-center gap-2">
+                                  <span className="text-[10px] font-semibold w-16 text-right truncate flex-shrink-0"
+                                    style={{ color: isFastest ? '#10b981' : provColor }}>
+                                    {pMeta(provider).label}
+                                  </span>
+                                  <div className="flex-1 h-4 rounded-full overflow-hidden relative"
+                                    style={{ background: 'color-mix(in srgb, var(--color-text) 5%, transparent)' }}>
+                                    <div className="h-full rounded-full transition-all duration-500 flex items-center justify-end pr-1.5"
+                                      style={{
+                                        width: `${barPct}%`,
+                                        background: isFastest
+                                          ? 'linear-gradient(90deg, color-mix(in srgb, #10b981 30%, transparent), #10b981)'
+                                          : `linear-gradient(90deg, color-mix(in srgb, ${provColor} 20%, transparent), color-mix(in srgb, ${provColor} 60%, transparent))`,
+                                      }}>
+                                      <span className="text-[9px] font-bold font-mono whitespace-nowrap"
+                                        style={{ color: isFastest ? '#10b981' : provColor }}>
+                                        {data.avg < 1000 ? `${data.avg}ms` : `${(data.avg / 1000).toFixed(1)}s`}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  {isFastest && <Trophy className="w-3 h-3 flex-shrink-0" style={{ color: '#10b981' }} />}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Best path combinations */}
+                {benchResult.paths && Object.keys(benchResult.paths).length > 0 && (
+                  <div className="pt-3 mt-1" style={{ borderTop: '1px solid var(--color-border)' }}>
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Zap className="w-3 h-3" style={{ color: '#f59e0b' }} />
+                      <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#f59e0b' }}>
+                        Best Combinations
+                      </span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {Object.entries(benchResult.paths)
+                        .sort(([, a], [, b]) => (a as PathOption).totalAvg - (b as PathOption).totalAvg)
+                        .slice(0, 5)
+                        .map(([pathKey, path], idx) => {
+                          const p = path as PathOption;
+                          const isRecommended = benchResult.recommendation?.path === pathKey;
+                          const maxTotal = Math.max(
+                            ...Object.values(benchResult.paths).map(v => (v as PathOption).totalAvg), 1
+                          );
+                          const barPct = Math.max(12, (p.totalAvg / maxTotal) * 100);
+                          return (
+                            <div key={pathKey}
+                              className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border transition-all"
+                              style={{
+                                borderColor: isRecommended
+                                  ? 'color-mix(in srgb, #10b981 40%, transparent)'
+                                  : 'color-mix(in srgb, var(--color-border) 50%, transparent)',
+                                background: isRecommended
+                                  ? 'color-mix(in srgb, #10b981 5%, var(--color-surface))'
+                                  : 'var(--color-surface)',
+                              }}>
+                              <span className="text-[10px] font-bold w-4 flex-shrink-0"
+                                style={{ color: idx === 0 ? '#10b981' : 'var(--color-text-muted)' }}>
+                                #{idx + 1}
+                              </span>
+                              <div className="flex-1 min-w-0">
+                                <div className="text-[10px] font-medium truncate" style={{ color: 'var(--color-text)' }}>
+                                  {p.description || pathKey}
+                                </div>
+                                <div className="h-1.5 rounded-full overflow-hidden mt-1"
+                                  style={{ background: 'color-mix(in srgb, var(--color-text) 5%, transparent)' }}>
+                                  <div className="h-full rounded-full transition-all duration-500"
+                                    style={{
+                                      width: `${barPct}%`,
+                                      background: idx === 0 ? '#10b981' : 'color-mix(in srgb, var(--color-text) 20%, transparent)',
+                                    }} />
+                                </div>
+                              </div>
+                              <span className="text-[11px] font-bold font-mono flex-shrink-0"
+                                style={{ color: idx === 0 ? '#10b981' : 'var(--color-text-secondary)' }}>
+                                {p.totalAvg < 1000 ? `${p.totalAvg}ms` : `${(p.totalAvg / 1000).toFixed(1)}s`}
+                              </span>
+                              {isRecommended && (
+                                <Trophy className="w-3.5 h-3.5 flex-shrink-0" style={{ color: '#10b981' }} />
+                              )}
+                            </div>
+                          );
+                        })}
+                    </div>
+                    {benchResult.recommendation?.reason && (
+                      <div className="text-[10px] mt-2 px-2.5 py-1.5 rounded-lg"
+                        style={{ background: 'color-mix(in srgb, #10b981 5%, transparent)', color: '#10b981' }}>
+                        {benchResult.recommendation.reason}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Service chip hover tooltip — portal renders after hydration (mounted gate) */}
       {tooltipMounted && hoveredChip && (() => {
         const stage = stages.find(s => s.key === hoveredChip.stageKey);
@@ -1290,24 +1506,29 @@ function ProfileFlowDiagram({
                   </div>
                 )}
 
-                {/* ── GPU machine block ── */}
-                {isGpuEntry && gpu && gpu.status === 'ready' && (
+                {/* ── GPU machine block — show whenever GPU has any info ── */}
+                {isGpuEntry && gpu && (gpu.gpuType || gpu.podId || gpu.provider) && (
                   <div className="space-y-2.5">
 
                     {/* GPU model */}
-                    {gpu.gpuType && (
+                    {(gpu.gpuType || (svc?.gpuTypes && svc.gpuTypes.length > 0)) && (
                       <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg"
                         style={{ background: 'color-mix(in srgb, var(--color-text) 5%, transparent)', border: '1px solid var(--color-border)' }}>
                         <Cpu className="w-3 h-3 flex-shrink-0" style={{ color: 'var(--color-text-secondary)' }} />
                         <div className="flex-1 min-w-0">
-                          <div className="font-bold text-[11px] truncate" style={{ color: 'var(--color-text)' }}>{gpu.gpuType}</div>
-                          {mi?.gpuVramGb && (
-                            <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>{mi.gpuVramGb}GB VRAM{mi.numGpus && mi.numGpus > 1 ? ` × ${mi.numGpus}` : ''}</div>
-                          )}
+                          <div className="font-bold text-[11px] truncate" style={{ color: 'var(--color-text)' }}>
+                            {gpu.gpuType || svc?.gpuTypes?.[0] || '—'}
+                          </div>
+                          {mi?.gpuVramGb
+                            ? <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>{mi.gpuVramGb}GB VRAM{mi.numGpus && mi.numGpus > 1 ? ` × ${mi.numGpus}` : ''}</div>
+                            : !gpu.gpuType && svc?.gpuTypes && svc.gpuTypes.length > 1 && (
+                              <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>+{svc.gpuTypes.length - 1} alternates</div>
+                            )
+                          }
                         </div>
                         {mi?.gpuVramGb && (
                           <span className="text-[9px] font-mono font-bold flex-shrink-0" style={{ color: 'var(--color-text-secondary)' }}>
-                            {mi.gpuVramGb}GB
+                            {mi.gpuVramGb}GB VRAM
                           </span>
                         )}
                       </div>

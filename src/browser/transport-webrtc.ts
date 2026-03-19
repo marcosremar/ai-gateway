@@ -1,7 +1,13 @@
 /**
- * WebRTC transport — lowest-latency audio via Pipecat.
+ * WebRTC transport — lowest-latency audio via Pipecat or aiortc.
  *
- * Ported from `use-webrtc-transport.ts`, removing all React dependencies.
+ * Two modes:
+ *   1. **Pipecat** (existing): uses @pipecat-ai/client-js + SmallWebRTCTransport.
+ *      Auto-selected when `config.clusterName` is set.
+ *   2. **aiortc simple** (new): plain browser RTCPeerConnection with SDP exchange
+ *      via POST to signalingUrl (/api/offer). No Pipecat dependency.
+ *      Auto-selected when `config.clusterName` is NOT set.
+ *
  * Dependencies (@pipecat-ai/client-js, @pipecat-ai/small-webrtc-transport)
  * are loaded via dynamic import so this module is safe to import even when
  * the packages aren't installed.
@@ -21,17 +27,23 @@ export class WebRTCTransport implements Transport {
   onDisconnect: (() => void) | null = null;
   onAudioChunk: ((chunk: Uint8Array) => void) | null = null;
 
-  private client: any = null; // PipecatClient (dynamically imported)
+  private client: any = null; // PipecatClient (Pipecat mode only)
+  private pc: RTCPeerConnection | null = null; // aiortc simple mode
+  private dataChannel: RTCDataChannel | null = null; // aiortc simple mode
   private remoteStream: MediaStream | null = null;
+  private localStream: MediaStream | null = null;
   private currentTranscript = '';
   private currentResponse = '';
   private connected = false;
   private sending = false;
   private config: WebRTCConfig;
   private log = createLogger('WebRTC');
+  private mode: 'pipecat' | 'aiortc' = 'pipecat';
 
   constructor(config: WebRTCConfig) {
     this.config = config;
+    // Auto-detect mode: clusterName present → Pipecat, otherwise → aiortc simple
+    this.mode = config.clusterName ? 'pipecat' : 'aiortc';
   }
 
   isConnected(): boolean {
@@ -43,6 +55,170 @@ export class WebRTCTransport implements Transport {
   }
 
   async connect(): Promise<boolean> {
+    if (this.mode === 'aiortc') {
+      return this.connectAiortc();
+    }
+    return this.connectPipecat();
+  }
+
+  // ── aiortc simple mode ────────────────────────────────────────────────────
+
+  private async connectAiortc(): Promise<boolean> {
+    const { signalingUrl } = this.config;
+
+    if (!signalingUrl) {
+      this.log.warn('missing signalingUrl for aiortc mode');
+      return false;
+    }
+
+    this.onStageChange?.('connecting');
+    this.log.debug('connecting (aiortc) to', signalingUrl);
+
+    try {
+      const iceServers: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+      const pc = new RTCPeerConnection({ iceServers });
+      this.pc = pc;
+
+      // Create DataChannel for receiving JSON events from the server
+      const dc = pc.createDataChannel('events');
+      this.dataChannel = dc;
+
+      dc.onopen = () => {
+        this.log.debug('DataChannel "events" opened');
+      };
+
+      dc.onmessage = (event: MessageEvent) => {
+        this.handleServerMessage(event.data);
+      };
+
+      dc.onclose = () => {
+        this.log.debug('DataChannel "events" closed');
+      };
+
+      // Handle remote audio track from server (TTS output)
+      pc.ontrack = (event: RTCTrackEvent) => {
+        if (event.track.kind === 'audio') {
+          this.remoteStream = new MediaStream([event.track]);
+          this.log.debug('remote audio track received');
+        }
+      };
+
+      // Handle ICE connection state changes
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        this.log.debug('connection state:', state);
+        if (state === 'connected') {
+          this.connected = true;
+          this.onStageChange?.('idle');
+          this.log.info('connected (aiortc)');
+        } else if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+          this.connected = false;
+          this.remoteStream = null;
+          this.log.info('disconnected (aiortc):', state);
+          this.onDisconnect?.();
+        }
+      };
+
+      // Get user media (microphone) and add audio track to the connection
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      this.localStream = stream;
+      for (const track of stream.getAudioTracks()) {
+        pc.addTrack(track, stream);
+      }
+
+      // Create SDP offer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // Wait for ICE gathering to complete (or timeout after 3s)
+      await this.waitForIceGathering(pc, 3000);
+
+      // POST the offer to the signaling endpoint
+      const res = await fetch(signalingUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sdp: pc.localDescription!.sdp,
+          type: pc.localDescription!.type,
+          source: this.config.sourceLanguage || 'fr',
+          target: this.config.targetLanguage || 'en',
+          speaker: this.config.speaker || 'Ryan',
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!res.ok) {
+        const errBody = await res.text();
+        throw new Error(`Signaling failed (${res.status}): ${errBody}`);
+      }
+
+      const answer = await res.json();
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+      this.log.info('SDP exchange complete');
+      return true;
+    } catch (err) {
+      this.log.warn('aiortc connection failed:', err);
+      this.disconnect();
+      return false;
+    }
+  }
+
+  /** Wait for ICE gathering to finish, with a timeout. */
+  private waitForIceGathering(pc: RTCPeerConnection, timeoutMs: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (pc.iceGatheringState === 'complete') {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(resolve, timeoutMs);
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === 'complete') {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+    });
+  }
+
+  /** Handle JSON messages from the server DataChannel (shared by both modes). */
+  private handleServerMessage(raw: string): void {
+    try {
+      const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+
+      if (msg.status === 'processing') {
+        this.onStageChange?.(msg.stage as ProcessingStage);
+        if (msg.transcript) this.currentTranscript = msg.transcript;
+        if (msg.response) this.currentResponse = msg.response;
+      }
+
+      if (msg.status === 'complete') {
+        this.onResponse?.({
+          text: msg.response || this.currentResponse || '',
+          audio: '',
+          visemes: [],
+          duration: 0,
+          userText: msg.transcript || this.currentTranscript || '',
+          timing: msg.timing,
+        });
+        this.onStageChange?.('complete');
+        this.currentTranscript = '';
+        this.currentResponse = '';
+        this.sending = false;
+      }
+
+      if (msg.status === 'error') {
+        this.log.error('server error:', msg.message);
+        this.onError?.(msg.message || 'WebRTC error');
+        this.onStageChange?.('idle');
+        this.sending = false;
+      }
+    } catch { /* ignore parse errors */ }
+  }
+
+  // ── Pipecat mode (existing) ───────────────────────────────────────────────
+
+  private async connectPipecat(): Promise<boolean> {
     const { signalingUrl, clusterName, headIp, accessMode, backendEndpoint } = this.config;
 
     if (!signalingUrl || !clusterName) {
@@ -51,7 +227,7 @@ export class WebRTCTransport implements Transport {
     }
 
     this.onStageChange?.('connecting');
-    this.log.debug('connecting to', signalingUrl);
+    this.log.debug('connecting (pipecat) to', signalingUrl);
 
     try {
       // Dynamic import — fails gracefully if not installed
@@ -128,37 +304,8 @@ export class WebRTCTransport implements Transport {
 
       // Handle server messages (status updates via DataChannel)
       client.on(RTVIEvent.ServerMessage, (message: unknown) => {
-        try {
-          const msg = typeof message === 'string' ? JSON.parse(message) : message;
-
-          if (msg.status === 'processing') {
-            this.onStageChange?.(msg.stage as ProcessingStage);
-            if (msg.transcript) this.currentTranscript = msg.transcript;
-            if (msg.response) this.currentResponse = msg.response;
-          }
-
-          if (msg.status === 'complete') {
-            this.onResponse?.({
-              text: msg.response || this.currentResponse || '',
-              audio: '',
-              visemes: [],
-              duration: 0,
-              userText: msg.transcript || this.currentTranscript || '',
-              timing: msg.timing,
-            });
-            this.onStageChange?.('complete');
-            this.currentTranscript = '';
-            this.currentResponse = '';
-            this.sending = false;
-          }
-
-          if (msg.status === 'error') {
-            this.log.error('server error:', msg.message);
-            this.onError?.(msg.message || 'WebRTC error');
-            this.onStageChange?.('idle');
-            this.sending = false;
-          }
-        } catch { /* ignore parse errors */ }
+        const raw = typeof message === 'string' ? message : JSON.stringify(message);
+        this.handleServerMessage(raw);
       });
 
       client.on(RTVIEvent.Error, (error: unknown) => {
@@ -189,26 +336,42 @@ export class WebRTCTransport implements Transport {
   }
 
   disconnect(): void {
+    // Pipecat mode cleanup
     if (this.client) {
-      this.log.debug('disconnecting');
+      this.log.debug('disconnecting (pipecat)');
       this.client.disconnect().catch(() => {});
       this.client = null;
     }
+
+    // aiortc mode cleanup
+    if (this.dataChannel) {
+      this.dataChannel.close();
+      this.dataChannel = null;
+    }
+    if (this.localStream) {
+      for (const track of this.localStream.getTracks()) {
+        track.stop();
+      }
+      this.localStream = null;
+    }
+    if (this.pc) {
+      this.log.debug('disconnecting (aiortc)');
+      this.pc.close();
+      this.pc = null;
+    }
+
     this.remoteStream = null;
     this.connected = false;
     this.sending = false;
   }
 
   async sendAudio(_data: Float32Array): Promise<void> {
-    // Pipecat streams mic audio automatically via WebRTC media track.
-    // Server-side Silero VAD detects speech and triggers the pipeline.
+    // Both modes stream mic audio automatically via the WebRTC media track.
+    // Server-side VAD detects speech and triggers the pipeline.
     this.sending = true;
   }
 
   async sendText(text: string): Promise<void> {
-    if (!this.client || !this.connected) {
-      throw new Error('WebRTC not connected');
-    }
     const trimmed = text.trim();
     if (!trimmed) {
       this.log.warn('sendText called with empty text, ignoring');
@@ -219,9 +382,24 @@ export class WebRTCTransport implements Transport {
       return;
     }
 
-    this.sending = true;
-    this.onStageChange?.('tts');
-    this.log.debug('sending text:', trimmed.slice(0, 50));
-    this.client.sendClientMessage('tts', { text: trimmed });
+    if (this.mode === 'aiortc') {
+      // aiortc mode: send text via DataChannel
+      if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+        throw new Error('WebRTC DataChannel not open');
+      }
+      this.sending = true;
+      this.onStageChange?.('tts');
+      this.log.debug('sending text (aiortc):', trimmed.slice(0, 50));
+      this.dataChannel.send(JSON.stringify({ type: 'tts', text: trimmed }));
+    } else {
+      // Pipecat mode
+      if (!this.client || !this.connected) {
+        throw new Error('WebRTC not connected');
+      }
+      this.sending = true;
+      this.onStageChange?.('tts');
+      this.log.debug('sending text (pipecat):', trimmed.slice(0, 50));
+      this.client.sendClientMessage('tts', { text: trimmed });
+    }
   }
 }
