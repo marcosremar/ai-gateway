@@ -351,6 +351,9 @@ function ProfileFlowDiagram({
   const { gpu } = useGpuStatus(true, 10000);
   const [hoveredChip, setHoveredChip] = useState<{ stageKey: string; entryIdx: number } | null>(null);
   const [chipRect, setChipRect] = useState<DOMRect | null>(null);
+  // mounted gate: avoids SSR/hydration mismatch with createPortal
+  const [tooltipMounted, setTooltipMounted] = useState(false);
+  useEffect(() => { setTooltipMounted(true); }, []);
 
   const resetTest = () => {
     setTestStages([{ key: 'stt', state: 'idle' }, { key: 'llm', state: 'idle' }, { key: 'tts', state: 'idle' }]);
@@ -674,41 +677,53 @@ function ProfileFlowDiagram({
                   )}
                 </button>
 
-                {/* Action buttons row: record + upload */}
-                <div className="flex items-center gap-1">
-                  {isAudioInput && !testRunning && (
+                {/* Action buttons row: Upload, Record, Clear — always visible */}
+                <div className="flex items-center gap-1.5">
+                  <button type="button" onClick={() => testFileRef.current?.click()}
+                    disabled={testRunning}
+                    className="w-8 h-8 rounded-lg flex items-center justify-center transition-all"
+                    style={{
+                      cursor: testRunning ? 'default' : 'pointer',
+                      opacity: testRunning ? 0.35 : 1,
+                      background: 'color-mix(in srgb, var(--color-text-muted) 8%, transparent)',
+                      border: '1px solid color-mix(in srgb, var(--color-text-muted) 15%, transparent)',
+                    }}
+                    title="Upload audio file">
+                    <Upload className="w-4 h-4" style={{ color: 'var(--color-text-muted)' }} />
+                  </button>
+                  {isAudioInput && (
                     <button type="button"
+                      disabled={testRunning}
                       onClick={() => {
                         if (testRecording) { testMediaRef.current?.stop(); setTestRecording(false); }
                         else startTestRecording();
                       }}
-                      className="w-5 h-5 rounded flex items-center justify-center cursor-pointer transition-all"
+                      className="w-8 h-8 rounded-lg flex items-center justify-center transition-all"
                       style={{
-                        background: testRecording ? 'color-mix(in srgb, #ef4444 15%, transparent)' : 'color-mix(in srgb, var(--color-text-muted) 10%, transparent)',
-                        border: `1px solid ${testRecording ? 'rgba(239,68,68,0.3)' : 'transparent'}`,
+                        cursor: testRunning ? 'default' : 'pointer',
+                        opacity: testRunning ? 0.35 : 1,
+                        background: testRecording ? 'color-mix(in srgb, #ef4444 15%, transparent)' : 'color-mix(in srgb, var(--color-text-muted) 8%, transparent)',
+                        border: `1px solid ${testRecording ? 'rgba(239,68,68,0.4)' : 'color-mix(in srgb, var(--color-text-muted) 15%, transparent)'}`,
                       }}
                       title={testRecording ? 'Stop recording' : 'Record audio'}>
                       {testRecording
-                        ? <div className="w-2 h-2 rounded-sm bg-red-500" />
-                        : <Mic className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />}
+                        ? <div className="w-2.5 h-2.5 rounded-sm bg-red-500 animate-pulse" />
+                        : <Mic className="w-4 h-4" style={{ color: 'var(--color-text-muted)' }} />}
                     </button>
                   )}
-                  {!testRunning && (
-                    <button type="button" onClick={() => testFileRef.current?.click()}
-                      className="w-5 h-5 rounded flex items-center justify-center cursor-pointer"
-                      style={{ background: 'color-mix(in srgb, var(--color-text-muted) 10%, transparent)' }}
-                      title="Upload audio file">
-                      <Upload className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
-                    </button>
-                  )}
-                  {hasAudio && !testRunning && (
-                    <button type="button" onClick={() => { setTestAudioFile(null); setTestRecordedBlob(null); resetTest(); }}
-                      className="w-5 h-5 rounded flex items-center justify-center cursor-pointer"
-                      style={{ background: 'color-mix(in srgb, var(--color-text-muted) 10%, transparent)' }}
-                      title="Clear audio">
-                      <XIcon className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
-                    </button>
-                  )}
+                  <button type="button"
+                    disabled={!hasAudio || testRunning}
+                    onClick={() => { setTestAudioFile(null); setTestRecordedBlob(null); resetTest(); }}
+                    className="w-8 h-8 rounded-lg flex items-center justify-center transition-all"
+                    style={{
+                      cursor: !hasAudio || testRunning ? 'default' : 'pointer',
+                      opacity: !hasAudio || testRunning ? 0.25 : 1,
+                      background: 'color-mix(in srgb, var(--color-text-muted) 8%, transparent)',
+                      border: '1px solid color-mix(in srgb, var(--color-text-muted) 15%, transparent)',
+                    }}
+                    title="Clear audio">
+                    <XIcon className="w-4 h-4" style={{ color: 'var(--color-text-muted)' }} />
+                  </button>
                 </div>
 
                 {/* Status label */}
@@ -861,8 +876,15 @@ function ProfileFlowDiagram({
                             : j === 0 ? `color-mix(in srgb, ${color} 35%, transparent)` : 'var(--color-border)',
                           ...(isUsedService ? { ringColor: 'rgba(16,185,129,0.3)' } as React.CSSProperties : {}),
                         }}
-                        onMouseEnter={e => { setHoveredChip({ stageKey: stage.key, entryIdx: j }); setChipRect(e.currentTarget.getBoundingClientRect()); }}
-                        onMouseLeave={() => setHoveredChip(null)}>
+                        onMouseEnter={e => {
+                          setHoveredChip({ stageKey: stage.key, entryIdx: j });
+                          setChipRect(e.currentTarget.getBoundingClientRect());
+                          e.currentTarget.style.transform = 'scale(1.03)';
+                        }}
+                        onMouseLeave={e => {
+                          setHoveredChip(null);
+                          e.currentTarget.style.transform = '';
+                        }}>
                         {/* Icon */}
                         {EntryIcon && (
                           <div className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
@@ -1171,8 +1193,8 @@ function ProfileFlowDiagram({
         )}
       </div>
 
-      {/* Service chip hover tooltip — rendered via portal to escape overflow/transform ancestors */}
-      {hoveredChip && typeof document !== 'undefined' && (() => {
+      {/* Service chip hover tooltip — portal renders after hydration (mounted gate) */}
+      {tooltipMounted && hoveredChip && (() => {
         const stage = stages.find(s => s.key === hoveredChip.stageKey);
         if (!stage) return null;
         const entry = stage.chain[hoveredChip.entryIdx];
