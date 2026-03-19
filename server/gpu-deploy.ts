@@ -1,0 +1,1908 @@
+// ── BabelCast Gateway — GPU Deploy Loop ─────────────────────────────────────
+// GPU deploy loop, monitoring, orphan cleanup, tier config, cooldown,
+// GPU type cache, health polling, log fetching.
+
+import { homedir } from 'os';
+import { join } from 'path';
+import type { GpuProviderClient, GpuOffer, ProviderCredentials } from '../src/gpu-providers/types';
+import { RunpodClient } from '../src/gpu-providers/runpod-client';
+import { ProviderCooldownTracker, cleanupProviderInstances, filterTiers, PROVIDER_LABELS, DEFAULT_STORAGE_GB } from '../src/gpu-providers/deploy-orchestrator';
+import type { ProviderName, GpuTier } from '../src/gpu-providers/deploy-orchestrator';
+import { probeGpuHealth } from '../src/autoscaler/health';
+import {
+  prisma,
+  deployState, setDeployState, deployCancelled, setDeployApiKey, setDeployVastApiKey,
+  setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey,
+  activeProvider, setActiveProvider, setGpuHealthy, gpuHealthy, setLastRequestTime,
+  monitorInterval, setMonitorInterval, deployApiKey, deployVastApiKey,
+  deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey,
+  resetDeployState, lastRequestTime, lastModelRequestTime,
+  DAILY_BUDGET_USD, dailyGpuSpendUsd, setDailyGpuSpendUsd, dailySpendResetDate, setDailySpendResetDate,
+  deploymentSM,
+  loadPersistedDeploy, clearPersistedDeploy, setDeployCancelled,
+  updateGpuModelWarmth, isStageWarm,
+  isGpuReadyForProduction, getPerStageP95, setGpuReadyForProduction, setServiceReadiness,
+} from './state';
+import {
+  translationProfile, updateTranslationProfile, runpod, vast, tensordock, modal, markGpuHealthy, markGpuUnhealthy,
+  markGpuShadowMode, markGpuWarmupFailed, _startReadinessCheck,
+} from './providers';
+import { isReadinessCheckInProgress } from './gpu-readiness';
+import {
+  getSttTargetLatencyMs, getLlmTargetLatencyMs, getTtsTargetLatencyMs,
+  getP95DemotionMultiplier, getP95IdleWindowSec,
+} from '../src/gpu-providers/deploy-settings';
+import { logGpuEvent, startDeploySession, updateDeploySession, upsertHostReputation, loadReputations, loadReputationsByGpuType, deriveHostKey, recordHostCrash, updateHostLatency } from './metrics';
+import { getBestLatencyByGpuModel } from './latency-db';
+import { getGpuSortBy, getDeployTimeoutMin, getGpuPriorityList, DEFAULT_GPU_PRIORITY } from '../src/gpu-providers/deploy-settings';
+import {
+  BLACKWELL_TO_STANDARD, STANDARD_TO_BLACKWELL,
+  PROVIDER_CHAIN,
+} from './config';
+import { BILLING_URLS } from '../src/providers/errors';
+import { broadcastProviderStatus, broadcastWs } from './ws-state';
+
+export const MAX_DEPLOY_RETRIES = 2;
+export const HEALTH_POLL_INTERVAL_MS = 10_000;
+export const DEPLOY_TIMEOUT_MS = 30 * 60_000; // 30 min total (pods need ~10 min to download models)
+export const GPU_MONITOR_INTERVAL_MS = 30_000; // health check every 30s
+export let IDLE_TIMEOUT_MS = 10 * 60_000;    // auto-terminate after 10 min idle (configurable via API)
+export function setIdleTimeoutMs(ms: number) { IDLE_TIMEOUT_MS = ms; }
+
+export const GPU_TYPE_CACHE_TTL_MS = 30 * 60_000; // refresh GPU type cache every 30 min
+export let gpuTypeCacheRefreshTimer: Timer | null = null;
+
+/** Refresh GPU type cache from all providers and save to DB. */
+export async function refreshGpuTypeCache(): Promise<void> {
+  const providerQueries: Array<{ name: string; client: GpuProviderClient; credentials: ProviderCredentials }> = [];
+  const rpKey = process.env.RUNPOD_API_KEY || '';
+  const vastKey = process.env.VAST_API_KEY || '';
+  const tdKey = process.env.TENSORDOCK_API_KEY || '';
+  const tdAuth = process.env.TENSORDOCK_AUTH_ID || '';
+  const modalId = process.env.MODAL_TOKEN_ID || '';
+  const modalSecret = process.env.MODAL_TOKEN_SECRET || '';
+
+  if (rpKey) providerQueries.push({ name: 'runpod', client: runpod, credentials: { apiKey: rpKey } });
+  if (vastKey) providerQueries.push({ name: 'vast', client: vast, credentials: { apiKey: vastKey } });
+  if (tdKey && tdAuth) providerQueries.push({ name: 'tensordock', client: tensordock, credentials: { apiKey: tdKey, authId: tdAuth } });
+  if (modalId && modalSecret) providerQueries.push({ name: 'modal', client: modal, credentials: { apiKey: `${modalId}:${modalSecret}` } });
+
+  if (providerQueries.length === 0) {
+    console.log('[gpu-cache] No provider API keys configured — skipping GPU type cache refresh');
+    return;
+  }
+
+  console.log(`[gpu-cache] Refreshing GPU types from ${providerQueries.length} provider(s)...`);
+  let totalUpserted = 0;
+
+  const results = await Promise.allSettled(
+    providerQueries.map(async ({ name, client, credentials }) => {
+      if (!client.listOffers) return { name, offers: [] as GpuOffer[] };
+      try {
+        const offers = await client.listOffers({ limit: 200 }, credentials);
+        return { name, offers };
+      } catch (err) {
+        console.warn(`[gpu-cache] ${name} listOffers failed: ${err instanceof Error ? err.message : err}`);
+        return { name, offers: [] as GpuOffer[] };
+      }
+    }),
+  );
+
+  // Collect all upserts across providers before writing to DB
+  type UpsertEntry = { name: string; gpuName: string; offer: GpuOffer };
+  const allUpserts: UpsertEntry[] = [];
+
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue;
+    const { name, offers } = result.value;
+    // Deduplicate by gpuName within this provider
+    const seen = new Map<string, GpuOffer>();
+    for (const offer of offers) {
+      const key = offer.gpuName || offer.gpuType;
+      if (!seen.has(key) || offer.pricePerHr < (seen.get(key)!.pricePerHr || Infinity)) {
+        seen.set(key, offer);
+      }
+    }
+    for (const [gpuName, offer] of seen) {
+      allUpserts.push({ name, gpuName, offer });
+    }
+  }
+
+  // Write all upserts in a single transaction so partial writes don't occur if the process is killed mid-loop
+  try {
+    await prisma.$transaction(async (tx) => {
+      for (const { name, gpuName, offer } of allUpserts) {
+        await tx.gpuTypeCache.upsert({
+          where: { provider_gpuName: { provider: name, gpuName } },
+          update: {
+            gpuType: offer.gpuType || gpuName,
+            vram: offer.vram || 0,
+            pricePerHr: offer.pricePerHr || 0,
+            available: offer.available ?? -1,
+            region: offer.region || '',
+          },
+          create: {
+            provider: name,
+            gpuName,
+            gpuType: offer.gpuType || gpuName,
+            vram: offer.vram || 0,
+            pricePerHr: offer.pricePerHr || 0,
+            available: offer.available ?? -1,
+            region: offer.region || '',
+          },
+        });
+      }
+    });
+    totalUpserted = allUpserts.length;
+  } catch (err) {
+    // Transaction failed — log but don't crash the cache refresh
+    console.warn(`[gpu-cache] Transaction failed during cache write: ${err instanceof Error ? err.message : err}`);
+  }
+  console.log(`[gpu-cache] Cached ${totalUpserted} GPU types from ${providerQueries.length} provider(s)`);
+}
+
+/** Validate GPU types against the DB cache. Returns null if valid, or a descriptive error string. */
+export async function validateGpuTypesFromCache(gpuTypes: string[], provider?: string): Promise<string | null> {
+  if (gpuTypes.length === 0) return null; // no filter = any GPU
+
+  // Fetch all cached GPU types (optionally filtered by provider)
+  const where = provider ? { provider } : {};
+  const cached = await prisma.gpuTypeCache.findMany({ where, orderBy: { pricePerHr: 'asc' } });
+  if (cached.length === 0) return null; // no cache yet = skip validation
+
+  // Build lookup sets: full names and short names (case-insensitive)
+  const validFullNames = new Set(cached.map(g => g.gpuName.toLowerCase()));
+  const validShortNames = new Set(cached.map(g => g.gpuType.toLowerCase()));
+
+  const invalid: string[] = [];
+  for (const requested of gpuTypes) {
+    const lower = requested.toLowerCase();
+    if (!validFullNames.has(lower) && !validShortNames.has(lower)) {
+      // Also check with NVIDIA prefix for partial matches
+      const withNvidia = `nvidia ${lower}`.toLowerCase();
+      const withNvidiaGeforce = `nvidia geforce ${lower}`.toLowerCase();
+      if (!validFullNames.has(withNvidia) && !validFullNames.has(withNvidiaGeforce)) {
+        invalid.push(requested);
+      }
+    }
+  }
+
+  if (invalid.length === 0) return null;
+
+  // Build descriptive error with valid options
+  const providerLabel = provider ? ` on ${provider}` : '';
+  const validList = cached
+    .filter((g, i, arr) => arr.findIndex(x => x.gpuName === g.gpuName) === i) // deduplicate
+    .slice(0, 15)
+    .map(g => {
+      const price = g.pricePerHr > 0 ? ` ($${g.pricePerHr.toFixed(2)}/h)` : '';
+      const vram = g.vram > 0 ? ` ${g.vram}GB` : '';
+      return `${g.gpuType}${vram}${price}`;
+    })
+    .join(', ');
+
+  return `GPU type(s) not found${providerLabel}: ${invalid.join(', ')}. Valid options: ${validList}`;
+}
+
+export function startGpuTypeCacheRefresh() {
+  // Initial refresh (non-blocking)
+  refreshGpuTypeCache().catch(err => console.warn(`[gpu-cache] Initial refresh failed: ${err}`));
+  // Periodic refresh
+  gpuTypeCacheRefreshTimer = setInterval(() => {
+    refreshGpuTypeCache().catch(err => console.warn(`[gpu-cache] Periodic refresh failed: ${err}`));
+  }, GPU_TYPE_CACHE_TTL_MS);
+}
+
+// ── GPU Monitoring ───────────────────────────────────────────────────────────
+
+let monitorRunning = false;
+let monitorConsecFails = 0;
+let monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
+let monitorBackoffMaxAlerted = false;
+
+// ── Staged Warmth Monitor ────────────────────────────────────────────────────
+// After initial deploy, TTS loads first and pod becomes healthy ("degraded").
+// STT + LLM load in the background (~2-5min). We activate the full GPU pipeline
+// only when both STT + LLM are warm, so cloud fallbacks handle STT/LLM until ready.
+
+let warmthMonitorTimer: ReturnType<typeof setTimeout> | null = null;
+
+function stopWarmthMonitor() {
+  if (warmthMonitorTimer) { clearTimeout(warmthMonitorTimer); warmthMonitorTimer = null; }
+}
+
+function startBackgroundWarmthMonitor(endpoint: string) {
+  stopWarmthMonitor();
+  // If already fully warm, run readiness benchmark before activating
+  if (isStageWarm('stt') && isStageWarm('llm')) {
+    _startReadinessCheck(endpoint);
+    return;
+  }
+  console.log('[gpu] Staged boot: TTS warm — polling until STT + LLM ready before activating full pipeline');
+
+  const poll = async () => {
+    if (deployState.status !== 'ready' || deployState.endpoint !== endpoint) {
+      console.log('[gpu] Warmth monitor: pod changed or offline — stopping');
+      warmthMonitorTimer = null;
+      return;
+    }
+    try {
+      const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(6000) });
+      if (res.ok) {
+        const data = await res.json() as Record<string, unknown>;
+        updateGpuModelWarmth(data);
+        const sttWarm = isStageWarm('stt');
+        const llmWarm = isStageWarm('llm');
+        const svc = (data.services ?? {}) as Record<string, string>;
+        console.log(`[gpu] Warmth poll: stt=${svc.whisper ?? '?'} llm=${svc.llama_cpp ?? '?'} tts=${svc.tts ?? '?'} → STT=${sttWarm} LLM=${llmWarm}`);
+        if (sttWarm && llmWarm) {
+          console.log('[gpu] STT + LLM warm — running readiness benchmark');
+          setDeployState({ stepDetail: '' });
+          warmthMonitorTimer = null;
+          _startReadinessCheck(endpoint);
+          return; // done — regular monitoring loop takes over
+        }
+        const loading = [!sttWarm && 'STT', !llmWarm && 'LLM'].filter(Boolean).join(', ');
+        setDeployState({ stepDetail: `Loading: ${loading} — using cloud fallback` });
+      }
+    } catch (err) {
+      console.debug(`[gpu] Warmth poll failed: ${err instanceof Error ? err.message : err}`);
+    }
+    warmthMonitorTimer = setTimeout(poll, 20_000);
+  };
+
+  warmthMonitorTimer = setTimeout(poll, 20_000); // first check after 20s
+}
+
+export function startGpuMonitoring() {
+  stopGpuMonitoring();
+  monitorConsecFails = 0;
+  monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
+  monitorBackoffMaxAlerted = false;
+  scheduleNextMonitorProbe();
+}
+
+export function scheduleNextMonitorProbe() {
+  setMonitorInterval(setTimeout(async () => {
+    if (monitorRunning) { scheduleNextMonitorProbe(); return; }
+    if (deployState.status !== 'ready' || !deployState.endpoint) { scheduleNextMonitorProbe(); return; }
+    monitorRunning = true;
+    try {
+      // Pod status check — detect EXITED pods proactively (RunPod spending limits, crashes, etc.)
+      if (activeProvider === 'runpod' && deployApiKey && deployState.podId) {
+        try {
+          const detail = await (runpod as RunpodClient).getInstanceDetail(deployState.podId, { apiKey: deployApiKey });
+          if (detail?.desiredStatus === 'EXITED') {
+            console.warn(`[gpu] RunPod pod ${deployState.podId} EXITED — attempting auto-restart...`);
+            try {
+              await runpod.startInstance(deployState.podId, { apiKey: deployApiKey });
+              console.log(`[gpu] Pod ${deployState.podId} auto-restart initiated`);
+              setDeployState({ alert: `Pod exited unexpectedly — auto-restart initiated` });
+              monitorDelayMs = 30_000; // Give it time to boot
+            } catch (restartErr) {
+              console.error(`[gpu] Auto-restart failed: ${restartErr instanceof Error ? restartErr.message : restartErr}`);
+              setDeployState({ status: 'error', message: `Pod exited and auto-restart failed: ${restartErr instanceof Error ? restartErr.message : restartErr}` });
+            }
+            monitorRunning = false;
+            scheduleNextMonitorProbe();
+            return;
+          }
+        } catch { /* best-effort pod status check */ }
+      }
+
+      // Health probe — returnData: true to also extract warmth info
+      const probeResult = await probeGpuHealth(deployState.endpoint, true);
+      const healthy = probeResult.ok;
+      if (healthy && probeResult.data) {
+        updateGpuModelWarmth(probeResult.data);
+        // Activate full GPU pipeline when STT + LLM become warm (staged boot)
+        if (isStageWarm('stt') && isStageWarm('llm') && !translationProfile.gpuEndpoint && !isReadinessCheckInProgress() && deployState.endpoint) {
+          console.log('[gpu] STT + LLM warm — running readiness benchmark via monitor');
+          stopWarmthMonitor();
+          const ep = deployState.endpoint;
+          _startReadinessCheck(ep);
+        }
+      }
+      if (healthy) {
+        markGpuHealthy();
+        monitorConsecFails = 0;
+        monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
+        monitorBackoffMaxAlerted = false;
+        // If health data indicates active training/work, treat as "not idle"
+        // (prevents idle timeout from killing fine-tuning or long-running jobs)
+        if (probeResult.data && (probeResult.data as Record<string, unknown>).training) {
+          setLastRequestTime(Date.now());
+        }
+      } else {
+        monitorConsecFails++;
+        // Only mark unhealthy after 2+ consecutive failures to tolerate
+        // transient timeouts when GPU is under heavy load (e.g. benchmark)
+        if (monitorConsecFails >= 2) {
+          markGpuUnhealthy('health probe failed');
+        } else {
+          console.log(`[gpu] Health probe failed (1st), will retry before marking unhealthy`);
+        }
+        if (monitorConsecFails >= 3) {
+          monitorDelayMs = Math.min(monitorDelayMs * 2, 120_000);
+          console.log(`[gpu] Health probe failed ${monitorConsecFails}x, backing off to ${monitorDelayMs / 1000}s`);
+          if (monitorDelayMs >= 120_000 && !monitorBackoffMaxAlerted) {
+            monitorBackoffMaxAlerted = true;
+            console.warn('[gpu] WARNING: GPU health probe has backed off to maximum interval (120s). Pod may be unreachable.');
+          }
+          // Record crash in host reputation at threshold (5 consecutive failures = likely crash)
+          if (monitorConsecFails === 5 && deployState.provider) {
+            recordHostCrash(deployState.provider, deployState.gpuType, deployState.providerMeta);
+          }
+          // Auto-restart: attempt to restart the pod before declaring it dead
+          if (monitorConsecFails === 5 && deployState.podId) {
+            const restartProvider = activeProvider === 'runpod' ? runpod : activeProvider === 'vast' ? vast : null;
+            if (restartProvider && (deployApiKey || deployVastApiKey)) {
+              const restartKey = activeProvider === 'runpod' ? deployApiKey : deployVastApiKey;
+              try {
+                console.log(`[gpu] Auto-restart attempt for ${activeProvider} pod ${deployState.podId}...`);
+                await restartProvider.startInstance(deployState.podId, { apiKey: restartKey });
+                console.log(`[gpu] Auto-restart initiated for pod ${deployState.podId} — resetting health counter`);
+                monitorConsecFails = 0;
+                monitorDelayMs = 30_000; // Give it time to boot
+                setDeployState({ alert: `Pod auto-restarted after 5 health failures` });
+              } catch (restartErr) {
+                console.error(`[gpu] Auto-restart failed for pod ${deployState.podId}: ${restartErr instanceof Error ? restartErr.message : restartErr}`);
+              }
+            }
+          }
+        }
+        // Balance check for RunPod — low balance causes pods to be auto-terminated
+        if (activeProvider === 'runpod' && deployApiKey && monitorConsecFails >= 2) {
+          try {
+            const bal = await runpod.checkBalance({ apiKey: deployApiKey });
+            if (bal) {
+              const hoursLeft = deployState.costPerHr > 0 ? bal.balance / deployState.costPerHr : 999;
+              if (bal.balance < 2.0 || hoursLeft < 2) {
+                const msg = `RunPod balance low: $${bal.balance.toFixed(2)} (~${hoursLeft.toFixed(1)}h left) — pod may be auto-stopped. Add funds: https://${BILLING_URLS.runpod}`;
+                console.warn(`[gpu] ${msg}`);
+                setDeployState({ alert: msg });
+              }
+            }
+          } catch { /* balance check is best-effort */ }
+        }
+        // If TensorDock, check balance — low balance causes VMs to be reclaimed
+        if (activeProvider === 'tensordock' && deployTensordockApiKey && deployTensordockAuthId) {
+          const bal = await tensordock.checkBalance({ apiKey: deployTensordockApiKey, authId: deployTensordockAuthId });
+          if (bal) {
+            console.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly: $${bal.hourlyCost.toFixed(3)})`);
+            if (bal.balance < 1.0) {
+              const msg = `TensorDock balance low: $${bal.balance.toFixed(2)} — VM may have been reclaimed. Add funds: https://${BILLING_URLS.tensordock}`;
+              console.warn(`[gpu] ${msg}`);
+              setDeployState({ alert: msg });
+            }
+          }
+        }
+      }
+
+      // Budget tracking: accumulate GPU spend
+      if (deployState.costPerHr > 0) {
+        const today = new Date().toISOString().slice(0, 10); // UTC date "YYYY-MM-DD" — locale-independent
+        if (today !== dailySpendResetDate) { setDailyGpuSpendUsd(0); setDailySpendResetDate(today); }
+        setDailyGpuSpendUsd(dailyGpuSpendUsd + deployState.costPerHr * (monitorDelayMs / 1000 / 3600));
+        if (DAILY_BUDGET_USD > 0 && dailyGpuSpendUsd > DAILY_BUDGET_USD) {
+          console.warn(`[budget] Daily GPU spend ($${dailyGpuSpendUsd.toFixed(2)}) exceeds budget ($${DAILY_BUDGET_USD.toFixed(2)}) — consider terminating`);
+        }
+      }
+
+      // P95 demotion check — only when GPU is in production and recently idle
+      if (isGpuReadyForProduction() && !isReadinessCheckInProgress()) {
+        const idleSec = lastModelRequestTime > 0 ? (Date.now() - lastModelRequestTime) / 1000 : 0;
+        if (lastModelRequestTime > 0 && idleSec > getP95IdleWindowSec()) {
+          const targets = { stt: getSttTargetLatencyMs(), llm: getLlmTargetLatencyMs(), tts: getTtsTargetLatencyMs() };
+          const multiplier = getP95DemotionMultiplier();
+          for (const stage of ['stt', 'llm', 'tts'] as const) {
+            const p95 = getPerStageP95(stage);
+            const threshold = targets[stage] * multiplier;
+            if (p95 !== null && p95 > threshold) {
+              console.warn(`[gpu] P95 degraded: ${stage} ${p95}ms > ${threshold}ms — demoting`);
+              setServiceReadiness(stage, { phase: 'degraded' });
+              broadcastWs({ type: 'gpu:readiness', stage, phase: 'degraded', p95Ms: p95, thresholdMs: threshold });
+              broadcastProviderStatus('booting', 'cloud', `GPU ${stage} P95 degraded — re-benchmarking`);
+              setGpuReadyForProduction(false);
+              _startReadinessCheck(deployState.endpoint);
+              break;
+            }
+          }
+        }
+      }
+
+      // Idle check — only model requests (STT/LLM/TTS/pipeline) count, not status polls
+      const _idleBase = lastModelRequestTime > 0 ? lastModelRequestTime : lastRequestTime;
+      if (_idleBase > 0 && Date.now() - _idleBase >= IDLE_TIMEOUT_MS) {
+        const idleMin = Math.round((Date.now() - _idleBase) / 60_000);
+        console.log(`[gpu] Idle ${idleMin} min (no model requests) — auto-terminating to save costs`);
+        await autoTerminateGpu();
+        return; // autoTerminate calls stopGpuMonitoring, don't reschedule
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[gpu] Monitor probe failed (provider=${activeProvider}, pod=${deployState.podId}): ${msg}`);
+    } finally {
+      monitorRunning = false;
+    }
+    scheduleNextMonitorProbe();
+  }, monitorDelayMs) as unknown as Timer);
+}
+
+export function stopGpuMonitoring() {
+  if (monitorInterval) { clearTimeout(monitorInterval as unknown as ReturnType<typeof setTimeout>); setMonitorInterval(null); }
+  monitorConsecFails = 0;
+  monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
+  setGpuHealthy(false);
+}
+
+export async function autoTerminateGpu() {
+  const rpKey = deployApiKey;
+  const vastKey = deployVastApiKey;
+  const tdKey = deployTensordockApiKey;
+  const tdAuthId = deployTensordockAuthId;
+  const modalKey = deployModalApiKey;
+  const provider = activeProvider;
+  const podId = deployState.podId;
+  broadcastProviderStatus('offline', 'cloud', 'GPU idle timeout — terminated');
+  stopGpuMonitoring();
+  stopWarmthMonitor();
+  resetDeployState();
+  updateTranslationProfile({ gpuEndpoint: undefined }, 'idleTimeout');
+  if (provider === 'modal' && modalKey && podId) {
+    console.log(`[gpu] Modal idle → stopping app ${podId}`);
+    try {
+      await modal.stopInstance(podId, { apiKey: modalKey });
+      console.log(`[gpu] Modal app ${podId} stopped`);
+      logGpuEvent('instance_stopped', 'modal', true, { metadata: { podId, reason: 'idle_timeout' } });
+    } catch (err) {
+      console.warn(`[gpu] Modal stop failed for app ${podId}: ${err instanceof Error ? err.message : err}`);
+      await cleanupModalApps(modalKey);
+    }
+  } else if (provider === 'tensordock' && tdKey && podId) {
+    // TensorDock: STOP (pause) instead of delete — preserves disk, fast restart
+    console.log(`[gpu] TensorDock idle → stopping (pausing) instance ${podId}`);
+    try {
+      await tensordock.stopInstance(podId, { apiKey: tdKey, authId: tdAuthId });
+      console.log(`[gpu] TensorDock instance ${podId} stopped (paused, disk preserved)`);
+      logGpuEvent('instance_stopped', 'tensordock', true, { metadata: { podId, reason: 'idle_timeout' } });
+    } catch (err) {
+      console.warn(`[gpu] TensorDock stop failed for instance ${podId}: ${err instanceof Error ? err.message : err} — falling back to full cleanup`);
+      await cleanupTensordockInstances(tdKey, tdAuthId);
+    }
+  } else if (provider === 'vast' && vastKey) {
+    await cleanupVastInstances(vastKey);
+    logGpuEvent('instance_stopped', 'vast', true, { metadata: { reason: 'idle_timeout' } });
+  } else if (rpKey) {
+    await cleanupAllPods(rpKey);
+    logGpuEvent('instance_stopped', 'runpod', true, { metadata: { podId, reason: 'idle_timeout' } });
+  }
+  updateDeploySession({ status: 'stopped', stoppedAt: new Date() });
+}
+
+// ── Orphan pod cleanup ──────────────────────────────────────────────────────
+
+export const POD_NAME_PREFIX = 'parle-autoscale-';
+
+/**
+ * Find and terminate ALL pods matching our naming prefix.
+ * This prevents orphaned pods from accumulating costs when the gateway restarts
+ * or when deploy requests race.
+ *
+ * @param apiKey RunPod API key
+ * @param knownPodIds Pods we already know about (will also be terminated)
+ */
+export async function cleanupAllPods(apiKey: string, knownPodIds: string[] = []): Promise<void> {
+  try {
+    const instances = await runpod.listInstances({ apiKey });
+    const toTerminate = instances.filter(inst =>
+      (inst.instanceName || '').startsWith(POD_NAME_PREFIX) && inst.status !== 'EXITED'
+    );
+
+    if (toTerminate.length === 0) return;
+
+    console.log(`[gpu] Cleaning up ${toTerminate.length} existing pod(s)...`);
+    await Promise.allSettled(
+      toTerminate.map(async (inst) => {
+        try {
+          await runpod.deleteInstance(inst.instanceId, { apiKey });
+          console.log(`[gpu] Terminated orphan pod ${inst.instanceId} (${inst.instanceName})`);
+        } catch (err) {
+          console.warn(`[gpu] Failed to terminate pod ${inst.instanceId} (${inst.instanceName}): ${err instanceof Error ? err.message : err}`);
+        }
+      })
+    );
+  } catch (err) {
+    console.warn(`[gpu] Failed to list pods for cleanup: ${err}`);
+    // Fall back to terminating only known pods
+    for (const podId of knownPodIds) {
+      try { await runpod.deleteInstance(podId, { apiKey }); }
+      catch (e) { console.warn(`[gpu] Failed to terminate known pod ${podId}: ${e instanceof Error ? e.message : e}`); }
+    }
+  }
+}
+
+
+
+export const cleanupVastInstances = (apiKey: string) =>
+  cleanupProviderInstances(vast, { apiKey }, ['running', 'active', 'loading', 'creating', 'created'], 'Vast.ai');
+
+export const cleanupTensordockInstances = (apiKey: string, authId?: string) =>
+  cleanupProviderInstances(tensordock, { apiKey, authId }, ['running', 'active', 'deploying', 'creating'], 'TensorDock');
+
+export const cleanupModalApps = (apiKey: string) =>
+  cleanupProviderInstances(modal, { apiKey }, ['running', 'deployed', 'active'], 'Modal');
+
+// ── Orphan instance sweep ─────────────────────────────────────────────────
+
+let orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
+const ORPHAN_SWEEP_INTERVAL_MS = 10 * 60_000; // every 10 minutes
+
+/**
+ * Scan all providers for instances we don't track and terminate them.
+ * Safe to call at any time — only kills instances NOT matching the active
+ * deploy or standby deploy podId.
+ */
+export async function sweepOrphanInstances(): Promise<{ found: number; terminated: number }> {
+  const tracked = new Set<string>();
+  if (deployState.podId) tracked.add(deployState.podId);
+  const { standbyDeployState } = await import('./state');
+  if (standbyDeployState.podId) tracked.add(standbyDeployState.podId);
+
+  let found = 0;
+  let terminated = 0;
+
+  // ── RunPod ──
+  const rpKey = deployApiKey || process.env.RUNPOD_API_KEY || '';
+  if (rpKey) {
+    try {
+      const instances = await runpod.listInstances({ apiKey: rpKey });
+      const orphans = instances.filter(i =>
+        (i.instanceName || '').startsWith(POD_NAME_PREFIX) &&
+        i.status !== 'EXITED' &&
+        !tracked.has(i.instanceId),
+      );
+      found += orphans.length;
+      for (const inst of orphans) {
+        try {
+          await runpod.deleteInstance(inst.instanceId, { apiKey: rpKey });
+          terminated++;
+          console.log(`[orphan-sweep] RunPod ${inst.instanceId} (${inst.instanceName}) terminated`);
+        } catch (err) {
+          console.warn(`[orphan-sweep] RunPod ${inst.instanceId} delete failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[orphan-sweep] RunPod list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // ── Vast.ai ──
+  const vastKey = deployVastApiKey || process.env.VAST_API_KEY || '';
+  if (vastKey) {
+    try {
+      const instances = await vast.listInstances({ apiKey: vastKey });
+      const orphans = instances.filter(i => {
+        const st = i.status?.toLowerCase() ?? '';
+        return ['running', 'active', 'loading', 'creating', 'created'].includes(st)
+          && !tracked.has(i.instanceId);
+      });
+      found += orphans.length;
+      for (const inst of orphans) {
+        try {
+          await vast.deleteInstance(inst.instanceId, { apiKey: vastKey });
+          terminated++;
+          console.log(`[orphan-sweep] Vast ${inst.instanceId} (${inst.gpuType}) terminated`);
+        } catch (err) {
+          console.warn(`[orphan-sweep] Vast ${inst.instanceId} delete failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[orphan-sweep] Vast list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // ── TensorDock ──
+  const tdKey = deployTensordockApiKey || process.env.TENSORDOCK_API_KEY || '';
+  const tdAuth = deployTensordockAuthId || process.env.TENSORDOCK_AUTH_ID || '';
+  if (tdKey) {
+    try {
+      const instances = await tensordock.listInstances({ apiKey: tdKey, authId: tdAuth });
+      const orphans = instances.filter(i => {
+        const st = i.status?.toLowerCase() ?? '';
+        return ['running', 'active', 'deploying', 'creating'].includes(st)
+          && !tracked.has(i.instanceId);
+      });
+      found += orphans.length;
+      for (const inst of orphans) {
+        try {
+          await tensordock.deleteInstance(inst.instanceId, { apiKey: tdKey, authId: tdAuth });
+          terminated++;
+          console.log(`[orphan-sweep] TensorDock ${inst.instanceId} terminated`);
+        } catch (err) {
+          console.warn(`[orphan-sweep] TensorDock ${inst.instanceId} delete failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[orphan-sweep] TensorDock list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // ── Modal ──
+  const modalKey = deployModalApiKey || process.env.MODAL_TOKEN_ID || '';
+  if (modalKey) {
+    try {
+      const instances = await modal.listInstances({ apiKey: modalKey });
+      const orphans = instances.filter(i => {
+        const st = i.status?.toLowerCase() ?? '';
+        return ['running', 'deployed', 'active'].includes(st)
+          && !tracked.has(i.instanceId);
+      });
+      found += orphans.length;
+      for (const inst of orphans) {
+        try {
+          await modal.deleteInstance(inst.instanceId, { apiKey: modalKey });
+          terminated++;
+          console.log(`[orphan-sweep] Modal ${inst.instanceId} terminated`);
+        } catch (err) {
+          console.warn(`[orphan-sweep] Modal ${inst.instanceId} delete failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[orphan-sweep] Modal list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  if (found > 0) {
+    console.log(`[orphan-sweep] Found ${found} orphan(s), terminated ${terminated}`);
+  }
+  return { found, terminated };
+}
+
+/** Start periodic orphan sweep. Safe to call multiple times. */
+export function startOrphanSweep(): void {
+  if (orphanSweepTimer) return;
+  // Run initial sweep after a short delay (let startup finish first)
+  setTimeout(() => {
+    sweepOrphanInstances().catch(err =>
+      console.warn(`[orphan-sweep] Initial sweep failed: ${err instanceof Error ? err.message : err}`),
+    );
+  }, 15_000);
+  // Then every 10 minutes
+  orphanSweepTimer = setInterval(() => {
+    sweepOrphanInstances().catch(err =>
+      console.warn(`[orphan-sweep] Periodic sweep failed: ${err instanceof Error ? err.message : err}`),
+    );
+  }, ORPHAN_SWEEP_INTERVAL_MS);
+  console.log(`[orphan-sweep] Started (interval: ${ORPHAN_SWEEP_INTERVAL_MS / 60_000}min)`);
+}
+
+/** Stop periodic orphan sweep. */
+export function stopOrphanSweep(): void {
+  if (orphanSweepTimer) {
+    clearInterval(orphanSweepTimer);
+    orphanSweepTimer = null;
+  }
+}
+
+/**
+ * Query available GPU offers from a tier's provider and pick the cheapest with adequate VRAM.
+ * Returns an array of unique GPU type strings sorted by price (cheapest first), or empty array if none found.
+ */
+export async function autoSelectCheapestGpu(
+  tiers: GpuTier[],
+  opts: { region?: string; minVramGb?: number; preferSsd?: boolean; maxResults?: number; allowedTypes?: Set<string> } = {},
+): Promise<string[]> {
+  const minVram = opts.minVramGb ?? 16;
+  const preferSsd = opts.preferSsd ?? false;
+  const maxResults = opts.maxResults ?? 8;
+  const allowed = opts.allowedTypes ?? new Set(getGpuPriorityList());
+  const allOffers: GpuOffer[] = [];
+
+  await Promise.allSettled(
+    tiers.map(async (tier) => {
+      if (!tier.client.listOffers) return;
+      try {
+        const offers = await tier.client.listOffers(
+          { region: opts.region, limit: 50 },
+          { apiKey: tier.apiKey, authId: tier.authId },
+        );
+        allOffers.push(...offers);
+      } catch (err) {
+        console.warn(`[gpu] autoSelectGpu: failed to query ${tier.label}: ${err instanceof Error ? err.message : err}`);
+      }
+    }),
+  );
+
+  // Filter by minimum VRAM
+  // Note: available === -1 means "unknown" (e.g. RunPod GraphQL doesn't report stock)
+  // so we treat -1 as "probably available" and only exclude available === 0
+  const base = allOffers.filter((o) => o.vram >= minVram && o.available !== 0 && o.pricePerHr > 0);
+
+  // SSD preference: keep offers where diskBwReadMbps > 200 MB/s (SSD/NVMe) or unknown.
+  // Fall back to all offers if none qualify (provider may not report disk speed).
+  const ssdFiltered = preferSsd ? base.filter(o => (o.diskBwReadMbps ?? 0) === 0 || (o.diskBwReadMbps ?? 0) > 200) : base;
+  const suitable = preferSsd && ssdFiltered.length === 0 ? base : ssdFiltered;
+
+  if (suitable.length === 0) {
+    console.warn(`[gpu] autoSelectGpu: ${allOffers.length} total offers, 0 suitable (minVram=${minVram}GB). Sample: ${allOffers.slice(0, 5).map(o => `${o.gpuName}(${o.vram}GB,$${o.pricePerHr},avail=${o.available})`).join(', ')}`);
+    return [];
+  }
+
+  // Load reputation data grouped by provider+gpuType.
+  // Since offers are grouped (we don't know specific hosts yet), we use aggregate
+  // reputation per GPU type to rank. This captures historical latency, reliability,
+  // and consistency across all hosts we've used with that GPU type on that provider.
+  const gpuTypeReps = await loadReputationsByGpuType();
+  const getRepScore = (o: GpuOffer): number => {
+    const key = `${o.provider}:${o.gpuName || o.gpuType}`;
+    return gpuTypeReps.get(key)?.avgScore ?? 0.5;
+  };
+
+  // Sort based on user-configured criteria: price, latency, or balanced (default)
+  const sortBy = getGpuSortBy();
+  const normalize_name = (s: string) => s.replace(/nvidia|geforce/gi, '').replace(/\s+/g, '').toLowerCase();
+  const latencyMap = sortBy !== 'price' ? getBestLatencyByGpuModel() : {};
+
+  const getLatencyMs = (o: GpuOffer): number | null => {
+    const key = normalize_name(o.gpuName || o.gpuType);
+    const entry = (latencyMap as Record<string, { bestMs: number; region: string }>)[key];
+    return entry?.bestMs ?? null;
+  };
+
+  if (sortBy === 'price') {
+    // Pure price sort — cheapest first
+    suitable.sort((a, b) => a.pricePerHr - b.pricePerHr);
+  } else if (sortBy === 'latency') {
+    // Sort by measured TCP latency (closest datacenter first); unknown latency goes last
+    suitable.sort((a, b) => {
+      const latA = getLatencyMs(a) ?? Infinity;
+      const latB = getLatencyMs(b) ?? Infinity;
+      return latA - latB;
+    });
+  } else {
+    // Balanced (default): effective price = pricePerHr / max(repScore, 0.1), weighted by latency if known
+    // latency bonus: each 10ms below 100ms reduces effective price by 5%
+    suitable.sort((a, b) => {
+      const repA = Math.max(getRepScore(a), 0.1);
+      const repB = Math.max(getRepScore(b), 0.1);
+      const latA = getLatencyMs(a);
+      const latB = getLatencyMs(b);
+      const latBonusA = latA != null ? Math.max(0.7, 1 - (100 - Math.min(latA, 100)) * 0.005) : 1;
+      const latBonusB = latB != null ? Math.max(0.7, 1 - (100 - Math.min(latB, 100)) * 0.005) : 1;
+      const effectiveA = (a.pricePerHr / repA) * latBonusA;
+      const effectiveB = (b.pricePerHr / repB) * latBonusB;
+      return effectiveA - effectiveB;
+    });
+  }
+
+  // Log sort criteria and top offers
+  {
+    const topOffers = suitable.slice(0, 5).map(o => {
+      const key = `${o.provider}:${o.gpuName || o.gpuType}`;
+      const rep = gpuTypeReps.get(key);
+      const score = rep?.avgScore ?? 0.5;
+      const latMs = getLatencyMs(o);
+      const latStr = latMs != null ? `,lat=${latMs}ms` : '';
+      const hostStr = rep ? `,${rep.hostCount}hosts` : '';
+      return `${o.gpuName}($${o.pricePerHr.toFixed(2)},rep=${score.toFixed(2)}${latStr}${hostStr})`;
+    });
+    console.log(`[gpu] autoSelectGpu: sort=${sortBy}, top 5: ${topOffers.join(', ')}`);
+  }
+
+  // Prefer allowlisted GPUs, then fall back to any suitable GPU.
+  // Providers use varying naming formats (e.g. "RTX 4090" vs "NVIDIA GeForce RTX 4090")
+  // so we normalize names for comparison: strip "NVIDIA", "GeForce", spaces, and lowercase.
+  const normalize = (s: string) => s.replace(/nvidia|geforce/gi, '').replace(/\s+/g, '').toLowerCase();
+  const allowedNormalized = new Set([...allowed].map(normalize));
+  const isAllowed = (o: GpuOffer) =>
+    allowed.has(o.gpuType) || allowed.has(o.gpuName) ||
+    allowedNormalized.has(normalize(o.gpuType)) || allowedNormalized.has(normalize(o.gpuName));
+  const allowedOffers = suitable.filter(isAllowed);
+  const prioritized = allowedOffers.length > 0 ? allowedOffers : suitable;
+  if (allowedOffers.length === 0) {
+    console.warn(`[gpu] autoSelectGpu: no offers match allowlist, using best available. Sample types: ${suitable.slice(0, 5).map(o => `${o.gpuName}(${o.gpuType})`).join(', ')}`);
+  }
+
+  // Deduplicate by gpuName (full name), keeping best effective-price offer for each type.
+  // Return gpuName (not gpuType) so it matches provider createInstance expectations.
+  const seen = new Set<string>();
+  const uniqueTypes: string[] = [];
+  for (const offer of prioritized) {
+    const key = offer.gpuName || offer.gpuType;
+    if (!seen.has(key)) {
+      seen.add(key);
+      // Use gpuName if it's a full name (e.g. "NVIDIA RTX A6000"), otherwise gpuType
+      uniqueTypes.push(offer.gpuName || offer.gpuType);
+      if (uniqueTypes.length >= maxResults) break;
+    }
+  }
+
+  console.log(`[gpu] autoSelectGpu: ${suitable.length} suitable offers (${allowedOffers.length} in allowlist, ${gpuTypeReps.size} with reputation) → ${uniqueTypes.length} GPU types: ${uniqueTypes.join(', ')}`);
+  return uniqueTypes;
+}
+
+// ── Deploy loop ─────────────────────────────────────────────────────────────
+
+export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; containerDiskInGb?: number; }
+
+export async function startDeployLoop(
+  providerClient: GpuProviderClient,
+  providerName: ProviderName,
+  apiKey: string,
+  dockerImage: string,
+  gpuTypes: string[],
+  authId?: string,
+  extra: DeployExtra = {},
+) {
+  setActiveProvider(providerName);
+  const credentials: ProviderCredentials = { apiKey, authId };
+  const startedAt = Date.now();
+  const label = PROVIDER_LABELS[providerName];
+  setDeployState({
+    status: 'creating', startedAt, retryCount: 0, podId: '', endpoint: '', gpuType: '',
+    message: `Creating ${label} instance...`, step: 'creating_pod', stepDetail: '', provider: providerName,
+    dockerImage,
+  });
+
+  // TensorDock: try to discover and resume a stopped instance first (fast restart)
+  if (providerName === 'tensordock') {
+    try {
+      console.log(`[gpu] TensorDock: checking for existing instances to resume...`);
+      const existing = await providerClient.discoverInstance(credentials, gpuTypes);
+      if (existing && existing.instanceId) {
+        console.log(`[gpu] TensorDock: found instance ${existing.instanceId} (status=${existing.status}, endpoint=${existing.endpoint || 'none'})`);
+        const isStopped = ['stopped', 'paused', 'suspended'].includes(existing.status?.toLowerCase() ?? '');
+        const isRunning = ['running', 'active'].includes(existing.status?.toLowerCase() ?? '');
+        if (isStopped) {
+          console.log(`[gpu] TensorDock: found stopped instance ${existing.instanceId} — resuming`);
+          setDeployState({ message: `Resuming stopped TensorDock instance...`, step: 'creating_pod' });
+          logGpuEvent('instance_resumed', 'tensordock', true, { metadata: { instanceId: existing.instanceId } });
+          await providerClient.startInstance(existing.instanceId, credentials);
+          // Resolve endpoint after start
+          let endpoint = existing.endpoint || '';
+          if (!endpoint) {
+            const resolved = await providerClient.resolveInstanceEndpoint(existing.instanceId, credentials);
+            if (resolved) endpoint = resolved;
+          }
+          setDeployState({
+            status: 'booting', podId: existing.instanceId, endpoint,
+            gpuType: existing.gpuType || '', step: 'waiting_health',
+            message: `TensorDock instance resumed, waiting for /health...`,
+          });
+          deploymentSM.startBooting(existing.instanceId);
+          const result = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, endpoint, startedAt);
+          if (result === 'ready') {
+            const durationMs = Date.now() - deployState.startedAt;
+            setGpuHealthy(true);
+            setLastRequestTime(Date.now());
+            setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs });
+            broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
+            deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
+            console.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (${label})`);
+            startGpuMonitoring();
+            startBackgroundWarmthMonitor(deployState.endpoint);
+            return;
+          }
+          if (result === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
+          console.log(`[gpu] Resumed TensorDock instance failed health check — creating new`);
+        } else if (isRunning && existing.endpoint) {
+          console.log(`[gpu] TensorDock: found running instance ${existing.instanceId} at ${existing.endpoint}`);
+          setDeployState({
+            status: 'booting', podId: existing.instanceId, endpoint: existing.endpoint,
+            gpuType: existing.gpuType || '', step: 'waiting_health',
+            message: `TensorDock instance already running, checking health...`,
+          });
+          deploymentSM.startBooting(existing.instanceId);
+          const result = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, existing.endpoint, startedAt);
+          if (result === 'ready') {
+            const durationMs = Date.now() - deployState.startedAt;
+            setGpuHealthy(true);
+            setLastRequestTime(Date.now());
+            setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs });
+            broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
+            deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
+            console.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (${label})`);
+            startGpuMonitoring();
+            startBackgroundWarmthMonitor(deployState.endpoint);
+            return;
+          }
+          if (result === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
+          console.log(`[gpu] Running TensorDock instance not healthy — creating new`);
+        }
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn(`[gpu] TensorDock discover/resume failed: ${errMsg} (will create new instance)`);
+    }
+  }
+
+  for (let attempt = 0; attempt <= MAX_DEPLOY_RETRIES; attempt++) {
+    if (deployCancelled) return;
+
+    if (attempt > 0) {
+      setDeployState({ retryCount: attempt, message: `Retry ${attempt + 1}/${MAX_DEPLOY_RETRIES + 1}: creating new ${label} instance...` });
+      await new Promise(r => setTimeout(r, 5_000));
+      if (deployCancelled) return;
+    }
+
+    try {
+      const defaultStorage = DEFAULT_STORAGE_GB[providerName];
+      const storageGb = Math.max(extra.storageGb || defaultStorage, defaultStorage);
+      const instance = await providerClient.createInstance(
+        { gpuTypes, dockerImage, storageGb, region: extra.region, hfToken: extra.hfToken, env: extra.env, bareMetal: providerName === 'tensordock', interruptible: extra.interruptible,
+          // IMPORTANT: RunPod must ALWAYS use SECURE cloud — NEVER COMMUNITY (unreliable third-party machines)
+          ...(providerName === 'runpod' ? { cloudType: 'SECURE' as const } : {}),
+          ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
+          ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
+        },
+        credentials,
+      );
+      if (deployCancelled) {
+        try { await providerClient.deleteInstance(instance.instanceId, credentials); }
+        catch (err) { console.warn(`[gpu] Failed to clean up cancelled instance ${instance.instanceId}: ${err}`); }
+        return;
+      }
+      const instanceCostPerHr = (instance.providerMeta?.dphTotal as number)
+        || (instance.providerMeta?.costPerHr as number)
+        || (instance.providerMeta?.pricePerHr as number)
+        || 0;
+      setDeployState({
+        status: 'booting',
+        podId: instance.instanceId,
+        endpoint: instance.endpoint,
+        gpuType: instance.gpuType || '',
+        dockerImage,
+        message: `Instance created (${instance.instanceId.slice(0, 8)}), pulling image...`,
+        step: 'pulling_image',
+        stepDetail: dockerImage,
+        sshHost: instance.sshHost || '',
+        sshPort: instance.sshPort || 0,
+        costPerHr: instanceCostPerHr,
+        providerMeta: { ...instance.providerMeta, gpuType: instance.gpuType || '' },
+      });
+      deploymentSM.startBooting(instance.instanceId);
+
+      const result = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt);
+      if (result === 'ready') {
+        const durationMs = Date.now() - deployState.startedAt;
+        setGpuHealthy(true);
+        setLastRequestTime(Date.now());
+        setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs });
+            broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
+        deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
+        console.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (${label})`);
+        startGpuMonitoring();
+        startBackgroundWarmthMonitor(deployState.endpoint);
+        return;
+      }
+
+      if (result === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
+      // instance crashed or timed out — fetch logs before cleanup
+      console.log(`[gpu] Instance ${instance.instanceId} failed (${result}), fetching remote logs before cleanup...`);
+      try {
+        const remoteLogs = await fetchGpuLogs(instance.sshHost, instance.sshPort, instance.endpoint);
+        console.log(`[gpu] ── Remote GPU Logs (${instance.instanceId}) ──\n${remoteLogs}\n── End GPU Logs ──`);
+      } catch (logErr) {
+        console.warn(`[gpu] Could not fetch remote logs: ${logErr}`);
+      }
+      console.log(`[gpu] Cleaning up crashed instance ${instance.instanceId}...`);
+      try { await providerClient.deleteInstance(instance.instanceId, credentials); }
+      catch (err) { console.warn(`[gpu] Failed to clean up crashed instance ${instance.instanceId}: ${err}`); }
+      continue;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[gpu] ${label} create attempt ${attempt + 1}/${MAX_DEPLOY_RETRIES + 1} failed: ${msg}`);
+      setDeployState({ message: `${label} create failed (attempt ${attempt + 1}): ${msg}` });
+
+      // Non-retryable errors — fail immediately without wasting retries
+      const lowerMsg = msg.toLowerCase();
+      const isBilling = lowerMsg.includes('balance') || lowerMsg.includes('funds') || lowerMsg.includes('insufficient');
+      const isAuth = lowerMsg.includes('authentication') || lowerMsg.includes('unauthorized')
+        || lowerMsg.includes('forbidden') || lowerMsg.includes('api key') || lowerMsg.includes('invalid key');
+      const nonRetryable = isBilling || isAuth;
+      if (nonRetryable || attempt >= MAX_DEPLOY_RETRIES) {
+        let errMsg: string;
+        if (isBilling) {
+          errMsg = `${label}: account balance too low — add funds and retry`;
+        } else if (isAuth) {
+          errMsg = `${label}: authentication failed — check API key in .env`;
+        } else {
+          errMsg = `${label} failed after ${MAX_DEPLOY_RETRIES + 1} attempts: ${msg}`;
+        }
+        console.error(`[gpu] ${label} deploy failed (non_retryable=${nonRetryable}, attempt=${attempt + 1}): ${msg}`);
+        setDeployState({ status: 'error', message: errMsg });
+        deploymentSM.markError(errMsg);
+        return;
+      }
+    }
+  }
+
+  const exhaustedMsg = `${label} deploy failed: max retries exceeded`;
+  setDeployState({ status: 'error', message: exhaustedMsg });
+  deploymentSM.markError(exhaustedMsg);
+}
+
+// ── GPU Tier Configuration ──────────────────────────────────────────────────
+// Tiers are tried in order (like ai-gateway autoscaler). If tier 0 fails,
+// tier 1 is attempted automatically.
+
+// ── Provider Cooldown (persisted to ~/.babelcast/cooldowns.json) ─────────────
+export const cooldownTracker = new ProviderCooldownTracker();
+cooldownTracker.loadFromFile(join(homedir(), '.babelcast', 'cooldowns.json'));
+{
+  const active = cooldownTracker.getActiveCooldowns();
+  const names = Object.keys(active);
+  if (names.length > 0) {
+    console.log(`[gateway] Restored cooldowns: ${names.map(n => `${n} (${active[n].remainSec}s left)`).join(', ')}`);
+  }
+}
+
+/** Map of provider name → client instance for tier building. */
+export const providerClients: Record<ProviderName, GpuProviderClient> = { runpod, vast, tensordock, modal };
+
+export function buildGpuTiers(runpodApiKey: string, vastApiKey?: string, tensordockOpts?: { apiKey: string; authId: string }, modalApiKey?: string): GpuTier[] {
+  // Build a map of available providers
+  const available: Record<string, GpuTier | null> = {
+    runpod: runpodApiKey ? { client: runpod, name: 'runpod', label: PROVIDER_LABELS.runpod, apiKey: runpodApiKey } : null,
+    tensordock: tensordockOpts ? { client: tensordock, name: 'tensordock', label: PROVIDER_LABELS.tensordock, apiKey: tensordockOpts.apiKey, authId: tensordockOpts.authId } : null,
+    vast: vastApiKey ? { client: vast, name: 'vast', label: PROVIDER_LABELS.vast, apiKey: vastApiKey } : null,
+    modal: modalApiKey ? { client: modal, name: 'modal', label: PROVIDER_LABELS.modal, apiKey: modalApiKey } : null,
+  };
+
+  // Respect PROVIDER_CHAIN order for GPU providers
+  const tiers: GpuTier[] = [];
+  const added = new Set<string>();
+  const gpuInChain = PROVIDER_CHAIN.filter(p => p === 'runpod' || p === 'tensordock' || p === 'vast' || p === 'modal');
+
+  // If chain has individual GPU providers, use their order
+  if (gpuInChain.length > 0) {
+    for (const name of gpuInChain) {
+      const tier = available[name];
+      if (tier && !added.has(name)) {
+        tiers.push(tier);
+        added.add(name);
+      }
+    }
+  }
+
+  // Add any providers not yet added (legacy "gpu" mode or providers not in chain)
+  for (const [name, tier] of Object.entries(available)) {
+    if (tier && !added.has(name)) {
+      tiers.push(tier);
+      added.add(name);
+    }
+  }
+
+  return tiers;
+}
+
+/**
+ * Classify a deploy failure into categories.
+ *
+ * Host-attributable (penalizes reputation):
+ *   timeout, crashed, network, unknown
+ *
+ * Non-host (does NOT penalize reputation):
+ *   billing, api_error, docker_image, cancelled
+ */
+function categorizeDeployFailure(message: string): string {
+  const m = message.toLowerCase();
+  if (m.includes('balance') || m.includes('funds') || m.includes('insufficient') || m.includes('need at least')) return 'billing';
+  if (m.includes('image') && (m.includes('pull') || m.includes('not found') || m.includes('manifest') || m.includes('registry'))) return 'docker_image';
+  if (m.includes('docker') && (m.includes('error') || m.includes('failed'))) return 'docker_image';
+  if (m.includes('cancelled') || m.includes('canceled')) return 'cancelled';
+  if (m.includes('timed out') || m.includes('timeout')) return 'timeout';
+  if (m.includes('crashed') || m.includes('exited') || m.includes('terminated')) return 'crashed';
+  if (message.includes('API') || message.includes('401') || message.includes('403') || message.includes('500')) return 'api_error';
+  if (m.includes('network') || m.includes('econnrefused') || m.includes('etimedout') || m.includes('fetch failed')) return 'network';
+  return 'unknown';
+}
+
+// ── Hedged / Race Deploy ─────────────────────────────────────────────────────
+// Launch raceCount instances in parallel, keep the first one that becomes healthy,
+// terminate the rest. Reduces cold-start latency at the cost of wasted instance-minutes
+// for the losers (typically <5min of cost during boot).
+
+interface RaceCandidate {
+  index: number;
+  tier: GpuTier;
+  instanceId: string;
+  endpoint: string;
+  gpuType: string;
+  costPerHr: number;
+  sshHost: string;
+  sshPort: number;
+  providerMeta: Record<string, unknown>;
+}
+
+export async function startDeployRace(
+  tiers: GpuTier[],
+  dockerImage: string,
+  gpuTypes: string[],
+  extra: DeployExtra,
+  raceCount: number,
+): Promise<void> {
+  const deployStartedAt = Date.now();
+  const raceN = Math.min(raceCount, 10); // cap at 10
+
+  // Build (tier, gpuType) pair list using provider-interleaved ordering:
+  // Prefer diversity across providers before repeating the same provider.
+  // e.g. [Vast×4090, TDock×4090, Vast×A6000, TDock×A6000, Vast×4090 ...]
+  // rather than [Vast×4090, Vast×A6000, TDock×4090, TDock×A6000 ...]
+  const gpuList = gpuTypes.length > 0 ? gpuTypes : [null];
+  // Build per-tier queues (ordered by GPU priority)
+  const tierQueues: Array<Array<{ tier: GpuTier; gpuType: string | null }>> = tiers.map(t =>
+    gpuList.map(g => ({ tier: t, gpuType: g })),
+  );
+  const pairs: Array<{ tier: GpuTier; gpuType: string | null }> = [];
+  let round = 0;
+  while (pairs.length < raceN * 2 + 1) { // generate enough to cycle
+    let addedThisRound = 0;
+    for (const q of tierQueues) {
+      const idx = round < q.length ? round : round % q.length;
+      pairs.push(q[idx]);
+      addedThisRound++;
+    }
+    if (addedThisRound === 0) break;
+    round++;
+  }
+
+  if (pairs.length === 0) {
+    setDeployState({ status: 'error', message: 'No deployment tiers available for race' });
+    deploymentSM.markError('No tiers available');
+    return;
+  }
+
+  const slots = Array.from({ length: raceN }, (_, i) => {
+    const { tier, gpuType } = pairs[i % pairs.length];
+    return {
+      index: i,
+      tier,
+      gpuTypes: gpuType ? [gpuType] : gpuTypes,
+      tierDockerImage: tier.name === 'modal' ? `${import.meta.dir}/../modal_babelcast.py` : dockerImage,
+    };
+  });
+
+  console.log(`[race] Hedged deploy: ${slots.length} slots across ${tiers.map(t => t.label).join(', ')}`);
+
+  // Set credentials for all participating tiers
+  for (const tier of tiers) {
+    if (tier.name === 'runpod') setDeployApiKey(tier.apiKey);
+    else if (tier.name === 'vast') setDeployVastApiKey(tier.apiKey);
+    else if (tier.name === 'tensordock') { setDeployTensordockApiKey(tier.apiKey); setDeployTensordockAuthId(tier.authId ?? ''); }
+    else if (tier.name === 'modal') setDeployModalApiKey(tier.apiKey);
+  }
+
+  setDeployState({
+    status: 'creating', startedAt: deployStartedAt, retryCount: 0,
+    podId: '', endpoint: '', gpuType: '',
+    message: `Launching ${slots.length} instances in parallel...`,
+    step: 'creating_pod', stepDetail: '', provider: slots[0].tier.name,
+  });
+
+  // Phase 1: Create all instances in parallel
+  const createResults = await Promise.allSettled(slots.map(async (slot) => {
+    const credentials = { apiKey: slot.tier.apiKey, authId: slot.tier.authId };
+    const defaultStorage = DEFAULT_STORAGE_GB[slot.tier.name] || 50;
+    const storageGb = Math.max(extra.storageGb || defaultStorage, defaultStorage);
+    const instance = await slot.tier.client.createInstance(
+      {
+        gpuTypes: slot.gpuTypes, dockerImage: slot.tierDockerImage, storageGb,
+        region: extra.region, hfToken: extra.hfToken, env: extra.env,
+        bareMetal: slot.tier.name === 'tensordock', interruptible: extra.interruptible,
+        ...(slot.tier.name === 'runpod' ? { cloudType: 'SECURE' as const } : {}),
+        ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
+        ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
+      },
+      credentials,
+    );
+    console.log(`[race] Slot ${slot.index}: created ${instance.instanceId.slice(0, 8)} (gpu=${instance.gpuType}, tier=${slot.tier.label})`);
+    return { slot, instance };
+  }));
+
+  const candidates: RaceCandidate[] = [];
+  for (const r of createResults) {
+    if (r.status === 'fulfilled') {
+      const { slot, instance } = r.value;
+      const costPerHr = (instance.providerMeta?.dphTotal as number)
+        || (instance.providerMeta?.costPerHr as number)
+        || (instance.providerMeta?.pricePerHr as number) || 0;
+      candidates.push({
+        index: slot.index, tier: slot.tier,
+        instanceId: instance.instanceId, endpoint: instance.endpoint,
+        gpuType: instance.gpuType || '', costPerHr,
+        sshHost: instance.sshHost || '', sshPort: instance.sshPort || 0,
+        providerMeta: (instance.providerMeta as Record<string, unknown>) ?? {},
+      });
+    } else {
+      console.warn(`[race] Slot create failed: ${r.reason}`);
+    }
+  }
+
+  if (candidates.length === 0) {
+    const msg = `All ${slots.length} race slots failed to create instances`;
+    setDeployState({ status: 'error', message: msg });
+    deploymentSM.markError(msg);
+    return;
+  }
+
+  console.log(`[race] ${candidates.length}/${slots.length} instances created — racing to first healthy`);
+  setDeployState({
+    status: 'booting', podId: candidates[0].instanceId,
+    endpoint: candidates[0].endpoint, gpuType: candidates[0].gpuType,
+    costPerHr: candidates[0].costPerHr, provider: candidates[0].tier.name,
+    message: `${candidates.length} instances booting — racing to first healthy...`,
+    step: 'waiting_health',
+  });
+  deploymentSM.startBooting(candidates[0].instanceId);
+
+  // Phase 2: Race health polling — first healthy wins, others are terminated
+  // AbortController lets the winner signal all losers instantly (no 5s sleep delay).
+  const raceAbort = new AbortController();
+  let winner: RaceCandidate | null = null;
+  let raceDone = false;
+
+  /** Abortable sleep: resolves after `ms` or immediately when raceAbort fires.
+   *  Guards against the signal being already aborted before addEventListener is called. */
+  const raceSleep = (ms: number) =>
+    new Promise<void>(resolve => {
+      if (raceAbort.signal.aborted) { resolve(); return; }
+      const t = setTimeout(resolve, ms);
+      raceAbort.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+    });
+
+  await Promise.all(candidates.map(async (c, idx) => {
+    const credentials = { apiKey: c.tier.apiKey, authId: c.tier.authId };
+    let localEndpoint = c.endpoint;
+    const timeoutMs = getDeployTimeoutMin() * 60_000;
+
+    while (!raceDone && !deployCancelled) {
+      if (Date.now() - deployStartedAt > timeoutMs) {
+        console.log(`[race] Slot ${idx} timed out`);
+        break;
+      }
+
+      // Re-resolve endpoint (needed for Vast.ai and others that assign ports mid-boot)
+      if (!localEndpoint || c.tier.name === 'vast') {
+        try {
+          const resolved = await c.tier.client.resolveInstanceEndpoint(c.instanceId, credentials);
+          if (resolved && resolved !== localEndpoint) {
+            localEndpoint = resolved;
+            if (idx === 0) setDeployState({ endpoint: localEndpoint });
+          }
+        } catch { /* expected during early boot */ }
+      }
+
+      // Probe /health
+      if (localEndpoint && !raceDone) {
+        try {
+          const res = await fetch(`${localEndpoint}/health`, { signal: AbortSignal.timeout(8000) });
+          if (res.ok) {
+            const data = await res.json() as { status?: string };
+            const HEALTHY = new Set(['healthy', 'ok', 'degraded', 'ready']);
+            if (HEALTHY.has(data.status ?? '')) {
+              if (!raceDone) {
+                // Winner — update global state and abort all other slots immediately
+                raceDone = true;
+                raceAbort.abort(); // wake up sleeping losers right away
+                const durationMs = Date.now() - deployStartedAt;
+                winner = { ...c, endpoint: localEndpoint };
+                setGpuHealthy(true);
+                setLastRequestTime(Date.now());
+                updateGpuModelWarmth(data as Record<string, unknown>);
+                setDeployState({
+                  status: 'ready',
+                  podId: c.instanceId, endpoint: localEndpoint, gpuType: c.gpuType,
+                  costPerHr: c.costPerHr, provider: c.tier.name,
+                  sshHost: c.sshHost, sshPort: c.sshPort, providerMeta: c.providerMeta,
+                  message: `GPU ready (race ${candidates.length}→1, ${Math.round(durationMs / 1000)}s): ${localEndpoint}`,
+                  step: 'ready', stepDetail: '', deployDurationMs: durationMs,
+                });
+                broadcastProviderStatus('booting', 'cloud', 'GPU deployed — warming up models');
+                deploymentSM.markReady(c.instanceId, localEndpoint, c.gpuType, c.costPerHr);
+                startGpuMonitoring();
+                startBackgroundWarmthMonitor(localEndpoint);
+                console.log(`[race] Slot ${idx} won! (${c.tier.label}, gpu=${c.gpuType}, t=${Math.round(durationMs / 1000)}s)`);
+                logGpuEvent('deploy_ready', c.tier.name, true, { durationMs, metadata: { endpoint: localEndpoint, gpuType: c.gpuType, raceCount: candidates.length } });
+                upsertHostReputation({ provider: c.tier.name, gpuType: c.gpuType, providerMeta: c.providerMeta, success: true, bootTimeS: Math.round(durationMs / 1000), dockerImage });
+                if (cooldownTracker.recordSuccess(c.tier.name)) {
+                  logGpuEvent('cooldown_cleared', c.tier.name, true, { durationMs });
+                }
+              }
+              return; // exit this slot's polling loop
+            }
+          }
+        } catch { /* health probe failed — keep trying */ }
+      }
+
+      if (idx === 0 && !raceDone) {
+        const elapsed = Math.round((Date.now() - deployStartedAt) / 1000);
+        setDeployState({ message: `${candidates.length} instances booting... [${elapsed}s]` });
+      }
+
+      await raceSleep(5000); // aborted immediately when winner is found
+    }
+
+    // Loser, timed out, or cancelled — terminate the instance and log wasted cost
+    if (!winner || winner.instanceId !== c.instanceId) {
+      const reason = raceDone ? 'lost' : deployCancelled ? 'cancelled' : 'timed out';
+      const aliveMs = Date.now() - deployStartedAt;
+      const wastedUsd = c.costPerHr > 0 ? c.costPerHr * aliveMs / 3_600_000 : 0;
+      try {
+        await c.tier.client.deleteInstance(c.instanceId, credentials);
+        console.log(
+          `[race] Slot ${idx} terminated (${reason}): ${c.instanceId.slice(0, 8)}, ` +
+          `alive=${Math.round(aliveMs / 1000)}s` +
+          (wastedUsd > 0 ? `, wasted≈$${wastedUsd.toFixed(3)}` : ''),
+        );
+      } catch (err) {
+        console.warn(`[race] Failed to terminate slot ${idx} (${reason}): ${err}`);
+      }
+    }
+  }));
+
+  // Phase 3: Final state / race summary
+  if (winner) {
+    // Log race efficiency: total wasted cost vs time saved vs sequential deploy
+    const winnerBootMs = winner.costPerHr > 0
+      ? candidates.find(c => c.instanceId === winner!.instanceId)
+        ? Date.now() - deployStartedAt : 0
+      : 0;
+    const loserCount = candidates.length - 1;
+    if (loserCount > 0) {
+      const totalWastedUsd = candidates
+        .filter(c => c.instanceId !== winner!.instanceId)
+        .reduce((sum, c) => sum + (c.costPerHr > 0 ? c.costPerHr * (Date.now() - deployStartedAt) / 3_600_000 : 0), 0);
+      console.log(
+        `[race] Summary: ${candidates.length} instances → winner in ${Math.round(winnerBootMs / 1000)}s, ` +
+        `${loserCount} loser(s) terminated, total wasted≈$${totalWastedUsd.toFixed(3)}`,
+      );
+    }
+  } else {
+    const msg = deployCancelled ? 'Deploy cancelled' : 'All race candidates failed to become healthy';
+    setDeployState({ status: 'error', message: msg });
+    deploymentSM.markError(msg);
+  }
+}
+
+export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>) {
+  // Filter out providers in cooldown
+  let availableTiers = tiers.filter(t => {
+    if (cooldownTracker.isCoolingDown(t.name)) {
+      const remainSec = cooldownTracker.getRemainingSeconds(t.name);
+      console.log(`[gpu] Skipping ${t.label} (cooldown, ${remainSec}s remaining)`);
+      logGpuEvent('cooldown_skip', t.name, false, {
+        failCount: cooldownTracker.getFailCount(t.name),
+        metadata: { remainSec },
+      });
+      return false;
+    }
+    return true;
+  });
+
+  if (availableTiers.length === 0 && tiers.length > 0) {
+    const earliestName = cooldownTracker.pickEarliestExpiry(tiers.map(t => t.name));
+    const earliest = tiers.find(t => t.name === earliestName) ?? tiers[0];
+    console.log(`[gpu] All providers in cooldown, trying ${earliest.label} anyway (forced=${tiers.length === 1}, tiers=${tiers.map(t => t.name).join(',')})`);
+    availableTiers = [earliest];
+  }
+
+  for (let i = 0; i < availableTiers.length; i++) {
+    const tier = availableTiers[i];
+    if (deployCancelled) return;
+
+    // Track active credentials
+    if (tier.name === 'runpod') setDeployApiKey(tier.apiKey);
+    else if (tier.name === 'vast') setDeployVastApiKey(tier.apiKey);
+    else if (tier.name === 'tensordock') { setDeployTensordockApiKey(tier.apiKey); setDeployTensordockAuthId(tier.authId ?? ''); }
+    else if (tier.name === 'modal') setDeployModalApiKey(tier.apiKey);
+
+    const tierStartedAt = Date.now();
+    logGpuEvent('deploy_started', tier.name, true);
+    startDeploySession(tier.name, dockerImage, gpuTypes[0] ?? '');
+
+    try {
+      // Modal uses a deploy script, not a Docker image — resolve to absolute path
+      const tierDockerImage = tier.name === 'modal'
+        ? `${import.meta.dir}/../docker/modal/babelcast.py`
+        : dockerImage;
+      const tierGpuTypes = gpuTypesByProvider?.[tier.name] ?? gpuTypes;
+      console.log(`[gpu] Starting ${tier.label} deploy loop (tier ${i + 1}/${availableTiers.length}, GPUs: ${tierGpuTypes.slice(0,3).map(g=>g.replace('NVIDIA ','').replace('GeForce ','')).join(', ')}...)`);
+      await startDeployLoop(tier.client, tier.name, tier.apiKey, tierDockerImage, tierGpuTypes, tier.authId, extra);
+      const durationMs = Date.now() - tierStartedAt;
+      if (deployState.status === 'ready') {
+        console.log(`[gpu] ✓ ${tier.label} deploy succeeded in ${Math.round(durationMs / 1000)}s`);
+        logGpuEvent('deploy_ready', tier.name, true, { durationMs, metadata: { endpoint: deployState.endpoint, gpuType: deployState.gpuType } });
+        updateDeploySession({
+          status: 'ready',
+          podId: deployState.podId,
+          endpoint: deployState.endpoint,
+          gpuType: deployState.gpuType,
+          region: deployState.sshHost ? 'ssh' : '',
+          costPerHr: deployState.costPerHr,
+          provisionTimeS: Math.round(durationMs / 1000),
+        });
+        // Record successful deploy in host reputation
+        upsertHostReputation({
+          provider: tier.name,
+          gpuType: deployState.gpuType,
+          providerMeta: deployState.providerMeta,
+          success: true,
+          bootTimeS: Math.round(durationMs / 1000),
+          dockerImage,
+          costUsd: deployState.costPerHr > 0 ? deployState.costPerHr * (durationMs / 1000 / 3600) : undefined,
+        });
+        if (cooldownTracker.recordSuccess(tier.name)) {
+          logGpuEvent('cooldown_cleared', tier.name, true, { durationMs });
+        }
+        return;
+      }
+      // Deploy loop returned without reaching 'ready' or 'error' — treat as failure
+      if (deployState.status !== 'error') {
+        const msg = `${tier.label} deploy ended without reaching ready (status=${deployState.status}, elapsed=${Math.round(durationMs / 1000)}s)`;
+        console.warn(`[gpu] ${msg}`);
+        setDeployState({ status: 'error', message: msg });
+      }
+    } catch (err) {
+      const durationMs = Date.now() - tierStartedAt;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[gpu] ✗ ${tier.label} deploy failed after ${Math.round(durationMs / 1000)}s: ${errMsg}`);
+      if (deployState.status !== 'error') {
+        setDeployState({ status: 'error', message: `${tier.label} deploy failed: ${errMsg}` });
+      }
+    }
+
+    // Detect silent failures: deploy returned to idle without error or ready
+    if (deployState.status === 'idle') {
+      const msg = `${tier.label} deploy returned to idle unexpectedly — possible silent failure`;
+      console.error(`[gpu] ${msg}`);
+      setDeployState({ status: 'error', message: msg });
+    }
+
+    if (deployState.status === 'error') {
+      const durationMs = Date.now() - tierStartedAt;
+      const failureCategory = categorizeDeployFailure(deployState.message ?? '');
+      logGpuEvent('deploy_failed', tier.name, false, { durationMs, error: deployState.message, metadata: { failureCategory } });
+      updateDeploySession({ status: 'failed', errorMessage: deployState.message ?? '' });
+      // Record failed deploy in host reputation
+      // Non-host failures (billing, docker_image, api_error) don't penalize the host's score
+      upsertHostReputation({
+        provider: tier.name,
+        gpuType: deployState.gpuType,
+        providerMeta: deployState.providerMeta,
+        success: false,
+        bootTimeS: Math.round(durationMs / 1000),
+        dockerImage,
+        failureCategory,
+      });
+      if (failureCategory === 'billing') {
+        cooldownTracker.recordBillingFailure(tier.name);
+        console.log(`[gpu] ${tier.name} billing cooldown set: ${cooldownTracker.getRemainingSeconds(tier.name)}s — add funds to resume`);
+      } else {
+        cooldownTracker.recordFailure(tier.name);
+        console.log(`[gpu] ${tier.name} cooldown set: ${cooldownTracker.getRemainingSeconds(tier.name)}s (fail #${cooldownTracker.getFailCount(tier.name)})`);
+      }
+    }
+
+    // If this tier failed and there's a next tier, set fallback alert
+    if (i < availableTiers.length - 1 && deployState.status === 'error') {
+      const next = availableTiers[i + 1];
+      const alertMsg = `${tier.label} indisponível — usando ${next.label} como fallback.`;
+      console.warn(`[gpu] ⚠️ ${alertMsg}`);
+      setDeployState({
+        status: 'creating', provider: next.name, step: 'creating_pod',
+        message: `${tier.label} indisponível. Tentando ${next.label}...`,
+        alert: alertMsg,
+      });
+    }
+  }
+
+  // Final guard: if all tiers were tried and deploy isn't ready, ensure error state
+  if (deployState.status !== 'ready' && deployState.status !== 'error') {
+    const labels = availableTiers.map(t => t.label).join(', ');
+    const lastMsg = deployState.message || 'unknown';
+    const msg = `All ${availableTiers.length} provider(s) failed (${labels}). Last error: ${lastMsg}`;
+    console.error(`[gpu] Deploy exhausted: ${msg}`);
+    setDeployState({ status: 'error', message: msg });
+    deploymentSM.markError(msg);
+  }
+
+  // If deploy failed and only one tier was provided (forced provider), append context
+  if (deployState.status === 'error' && tiers.length === 1) {
+    const originalMsg = deployState.message || 'unknown error';
+    setDeployState({
+      message: `${originalMsg} (no fallback — provider was forced)`,
+    });
+  }
+}
+
+export async function pollHealthUntilReady(
+  providerClient: GpuProviderClient,
+  providerName: string,
+  apiKey: string,
+  podId: string,
+  endpoint: string,
+  deployStartedAt: number,
+): Promise<'ready' | 'exited' | 'timeout' | 'cancelled' | 'crashed'> {
+  const credentials: ProviderCredentials = { apiKey };
+  let consecutiveExited = 0;
+  let containerStartedAt = 0;
+  let consecutiveHealthFailures = 0;       // health failures while container is supposedly running
+  let firstNonTransientErrorAt = 0;        // timestamp when non-transient HTTP errors started
+  let consecutiveNonTransient = 0;         // consecutive 4xx responses from /health
+
+  while (true) {
+    if (deployCancelled) return 'cancelled';
+    const deployTimeoutMs = getDeployTimeoutMin() * 60_000;
+    if (Date.now() - deployStartedAt > deployTimeoutMs) {
+      const phase = containerStartedAt ? 'waiting for /health' : 'pulling image';
+      const timeoutMsg = `Timed out after ${getDeployTimeoutMin()} min (stuck ${phase})`;
+      console.error(`[gpu] ${providerName} pod ${podId} timed out: ${phase}, endpoint=${endpoint || 'none'}`);
+      setDeployState({ status: 'error', message: timeoutMsg });
+      return 'timeout';
+    }
+
+    const elapsed = Math.round((Date.now() - deployStartedAt) / 1000);
+
+    // Provider-specific status polling
+    if (providerName === 'runpod') {
+      // RunPod: rich detail via getInstanceDetail()
+      try {
+        const detail = await (providerClient as RunpodClient).getInstanceDetail(podId, credentials);
+        if (detail) {
+          if (detail.desiredStatus === 'EXITED') {
+            consecutiveExited++;
+            if (consecutiveExited >= 2) return 'exited';
+          } else {
+            consecutiveExited = 0;
+          }
+
+          if (detail.gpuType) setDeployState({ gpuType: detail.gpuType });
+          if (detail.costPerHr) setDeployState({ costPerHr: detail.costPerHr });
+          const costStr = detail.costPerHr ? `$${detail.costPerHr.toFixed(3)}/h` : '';
+
+          if (!detail.runtime) {
+            setDeployState({
+              status: 'installing', step: 'pulling_image',
+              message: `Pulling image & starting container... [${elapsed}s]`,
+              stepDetail: [detail.imageName, detail.gpuType, costStr].filter(Boolean).join(' — '),
+            });
+          } else if (!containerStartedAt) {
+            containerStartedAt = Date.now();
+            const newEndpoint = await providerClient.resolveInstanceEndpoint(podId, credentials);
+            if (newEndpoint && newEndpoint !== endpoint) {
+              endpoint = newEndpoint;
+              setDeployState({ endpoint });
+            }
+            setDeployState({
+              status: 'booting', step: 'starting_container',
+              message: `Container running, loading models... [${elapsed}s]`,
+              stepDetail: [detail.gpuType, costStr].filter(Boolean).join(' — '),
+            });
+          } else {
+            const appElapsed = Math.round((Date.now() - containerStartedAt) / 1000);
+            setDeployState({
+              status: 'booting', step: 'waiting_health',
+              message: `App starting, waiting for /health... [${elapsed}s, container up ${appElapsed}s]`,
+              stepDetail: [detail.gpuType, costStr].filter(Boolean).join(' — '),
+            });
+          }
+        }
+      } catch (err) {
+        console.warn(`[gpu] Failed to get RunPod detail for pod ${podId}: ${err instanceof Error ? err.message : err}`);
+      }
+    } else {
+      // Vast.ai (and other providers): use GpuProviderClient interface
+      try {
+        const status = await providerClient.getInstanceStatus(podId, credentials);
+        if (status) {
+          const statusLower = status.toLowerCase();
+          const TERMINAL = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted']);
+          // TensorDock: stoppeddisassociated = GPU reclaimed by hostnode (unstable host)
+          const DISASSOCIATED = statusLower === 'stoppeddisassociated' || statusLower === 'stopped_disassociated';
+          if (TERMINAL.has(statusLower) || DISASSOCIATED) {
+            consecutiveExited++;
+            if (DISASSOCIATED) {
+              console.warn(`[gpu] ${providerName} instance ${podId} GPU disassociated (hostnode reclaimed GPU)`);
+              setDeployState({ alert: `GPU disassociated — hostnode reclaimed the GPU. Will retry on a more stable host.` });
+            }
+            if (consecutiveExited >= 2) return 'exited';
+          } else {
+            consecutiveExited = 0;
+          }
+
+          const isRunning = ['running', 'active'].includes(statusLower);
+          if (isRunning && !containerStartedAt) {
+            containerStartedAt = Date.now();
+          }
+
+          if (!containerStartedAt) {
+            setDeployState({
+              status: 'installing', step: 'pulling_image',
+              message: `Instance ${status}, pulling image... [${elapsed}s]`,
+              stepDetail: deployState.gpuType || '',
+            });
+          } else {
+            const appElapsed = Math.round((Date.now() - containerStartedAt) / 1000);
+            setDeployState({
+              status: 'booting', step: 'waiting_health',
+              message: `Container running, waiting for /health... [${elapsed}s, up ${appElapsed}s]`,
+              stepDetail: deployState.gpuType || '',
+            });
+          }
+        }
+      } catch (err) {
+        console.warn(`[gpu] Failed to get ${providerName} status for pod ${podId}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    // Re-resolve endpoint periodically (provider may assign IP mid-boot)
+    // For Vast.ai, always re-resolve since port mapping arrives after container starts
+    if (!containerStartedAt || !endpoint || providerName === 'vast') {
+      try {
+        const resolved = await providerClient.resolveInstanceEndpoint(podId, credentials);
+        if (resolved && resolved !== endpoint) {
+          console.log(`[gpu] ${providerName} endpoint resolved: ${endpoint || '(none)'} → ${resolved}`);
+          endpoint = resolved;
+          setDeployState({ endpoint });
+        }
+      } catch (err) {
+        // Endpoint resolution is expected to fail during early boot — suppress unless container is up
+        if (containerStartedAt) console.warn(`[gpu] Failed to resolve ${providerName} endpoint for pod ${podId}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    // Probe /health (with HTTP status tracking for crash detection)
+    if (endpoint) {
+      let httpStatus = 0;
+      try {
+        const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(8000) });
+        httpStatus = res.status;
+        if (res.ok) {
+          const data = await res.json();
+          // Update per-stage warmth from health response (services.tts/whisper/llama_cpp)
+          updateGpuModelWarmth(data);
+          const HEALTHY_STATUSES = new Set(['healthy', 'ok', 'degraded', 'ready']);
+          if (HEALTHY_STATUSES.has(data.status)) {
+            const svc = data.services ?? {};
+            const ttsReady = svc.tts === 'loaded' || svc.tts === 'disabled';
+            const sttReady = svc.whisper === 'loaded';
+            const llmReady = svc.llama_cpp === 'ready' || svc.llama_cpp === 'loaded';
+            const readyStages = [ttsReady && 'TTS', sttReady && 'STT', llmReady && 'LLM'].filter(Boolean);
+            const stepDetail = readyStages.length < 3
+              ? `GPU ready: ${readyStages.join(', ') || 'none'} — loading: ${[!sttReady && 'STT', !llmReady && 'LLM', !ttsReady && 'TTS'].filter(Boolean).join(', ')}`
+              : '';
+            console.log(`[gpu] Pod health: ${data.status} — stages ready: ${readyStages.join(', ') || 'none'}/3`);
+            setDeployState({ step: 'ready', stepDetail });
+            return 'ready';
+          }
+        }
+      } catch {
+        // Network error / timeout — transient, don't count as non-transient
+        httpStatus = 0;
+      }
+
+      // Track non-transient HTTP errors (4xx = container responded but app is broken)
+      if (httpStatus >= 400 && httpStatus < 500) {
+        consecutiveNonTransient++;
+        if (!firstNonTransientErrorAt) firstNonTransientErrorAt = Date.now();
+        const nonTransientDurationMs = Date.now() - firstNonTransientErrorAt;
+        if (nonTransientDurationMs > 3 * 60_000) {
+          console.error(`[gpu] Pod ${podId} returning HTTP ${httpStatus} for ${Math.round(nonTransientDurationMs / 1000)}s — container likely failed to start`);
+          // Fetch and log pod status for debugging
+          try {
+            const podStatus = await providerClient.getInstanceStatus(podId, credentials);
+            console.error(`[gpu] Pod ${podId} provider status: ${podStatus}`);
+          } catch (statusErr) {
+            console.warn(`[gpu] Failed to get ${providerName} pod ${podId} status during crash detection: ${statusErr instanceof Error ? statusErr.message : statusErr}`);
+          }
+          setDeployState({ status: 'error', message: `Container returning HTTP ${httpStatus} for ${Math.round(nonTransientDurationMs / 60_000)}+ min — app failed to start (check image logs)` });
+          return 'crashed';
+        }
+      } else {
+        consecutiveNonTransient = 0;
+        firstNonTransientErrorAt = 0;
+      }
+
+      // Track consecutive health failures while container is supposedly running
+      if (containerStartedAt) {
+        consecutiveHealthFailures++;
+      } else {
+        consecutiveHealthFailures = 0;
+      }
+
+      // After 10 consecutive failures with container "running", verify pod status directly
+      if (consecutiveHealthFailures >= 10 && containerStartedAt) {
+        try {
+          const podStatus = await providerClient.getInstanceStatus(podId, credentials);
+          const statusLower = podStatus?.toLowerCase() || '';
+          const CRASHED_STATES = new Set(['exited', 'terminated', 'error', 'failed', 'destroyed', 'deleted', 'stopped']);
+          if (CRASHED_STATES.has(statusLower)) {
+            const uptime = Math.round((Date.now() - containerStartedAt) / 1000);
+            console.error(`[gpu] ${providerName} pod ${podId} crashed: status=${podStatus} after ${consecutiveHealthFailures} health failures (container was up ${uptime}s, endpoint=${endpoint})`);
+            setDeployState({ status: 'error', message: `Pod crashed (status: ${podStatus}) after ${uptime}s — check GPU logs for details` });
+            return 'crashed';
+          }
+          // Pod still running but health failing — log for debugging
+          if (consecutiveHealthFailures % 10 === 0) {
+            console.warn(`[gpu] Pod ${podId} status=${podStatus} but ${consecutiveHealthFailures} consecutive health failures (container up ${Math.round((Date.now() - containerStartedAt) / 1000)}s)`);
+          }
+        } catch (err) {
+          console.warn(`[gpu] Failed to check pod status for crash detection: ${err}`);
+        }
+      }
+    }
+
+    await new Promise(r => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
+  }
+}
+
+// ── Remote GPU log fetching ──────────────────────────────────────────────────
+
+export async function fetchGpuLogs(sshHost?: string, sshPort?: number, endpoint?: string): Promise<string> {
+  const host = sshHost || deployState.sshHost;
+  const port = sshPort || deployState.sshPort;
+  const gpuEndpoint = endpoint || deployState.endpoint;
+  const lines: string[] = [];
+
+  // Method 1: Try HTTP /logs endpoint on the GPU (if start.sh exposes one)
+  if (gpuEndpoint) {
+    try {
+      const logsUrl = `${gpuEndpoint.replace(/\/$/, '')}/logs`;
+      const resp = await fetch(logsUrl, { signal: AbortSignal.timeout(5_000) });
+      if (resp.ok) {
+        const text = await resp.text();
+        lines.push('── HTTP /logs ──', text.slice(-8000));
+      }
+    } catch (e) { console.debug(`[gpu] HTTP /logs not available at ${gpuEndpoint}: ${e instanceof Error ? e.message : e}`); }
+  }
+
+  // Method 2: SSH into the machine and grab logs
+  if (host && port) {
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) return lines.join('\n') || '(no logs)';
+    const { execSync } = await import('child_process');
+    const sshCmd = `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o UserKnownHostsFile=/dev/null -p ${port} root@${host}`;
+    const logCommands = [
+      'tail -200 /var/log/babelcast.log 2>/dev/null || tail -200 /app/logs/*.log 2>/dev/null || echo "(no app log found)"',
+      'tail -50 /var/log/start.log 2>/dev/null || echo "(no start.log)"',
+      'docker logs --tail 100 babelcast 2>/dev/null || echo "(no docker container)"',
+      'nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || echo "(no GPU info)"',
+      'ps aux | grep -E "uvicorn|python|llama" | grep -v grep || echo "(no processes)"',
+    ];
+    for (const cmd of logCommands) {
+      try {
+        const out = execSync(`${sshCmd} '${cmd}'`, { timeout: 10_000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+        if (out.trim() && !out.includes('(no ')) {
+          lines.push(`── ${cmd.split(' ')[0]} ──`, out.trim().slice(-4000));
+        }
+      } catch (sshErr) { console.debug(`[gpu] SSH log fetch failed (${cmd.split(' ')[0]}): ${sshErr instanceof Error ? sshErr.message : sshErr}`); }
+    }
+  }
+
+  if (lines.length === 0) {
+    return '(no logs available — no SSH or HTTP access to GPU)';
+  }
+  const result = lines.join('\n');
+  deployState.lastLogs = result;
+  return result;
+}
+
+/**
+ * Return GPU types ordered by benchmark results (best median latency first).
+ * Only includes GPU types that have at least one passing test for any image
+ * compatible with `dockerImage` (after Blackwell auto-swap).
+ * Falls back to the AI Gateway priority list (deploy-settings.ts)
+ * if no benchmark data exists yet.
+ */
+export async function getVerifiedGpuTypes(dockerImage: string): Promise<string[]> {
+  try {
+    // Resolve the canonical standard image name for comparison
+    const canonicalImage = BLACKWELL_TO_STANDARD[dockerImage] ?? dockerImage;
+
+    // Get all passing tests for this image (or its Blackwell variant)
+    const rows = await prisma.gpuCompatibilityTest.findMany({
+      where: {
+        passed: true,
+        dockerImage: { in: [canonicalImage, STANDARD_TO_BLACKWELL[canonicalImage] ?? canonicalImage, dockerImage] },
+      },
+      select: { gpuType: true, translateMedianMs: true },
+      orderBy: [{ translateMedianMs: 'asc' }, { testedAt: 'desc' }],
+    });
+
+    if (rows.length === 0) {
+      // No benchmark data yet — use hardcoded allowlist
+      return getGpuPriorityList().length > 0 ? getGpuPriorityList() : [...DEFAULT_GPU_PRIORITY];
+    }
+
+    // Deduplicate, preserving latency order (lowest median first, nulls last)
+    const seen = new Set<string>();
+    const sorted: string[] = [];
+    const nullLatency: string[] = [];
+    for (const r of rows) {
+      if (seen.has(r.gpuType)) continue;
+      seen.add(r.gpuType);
+      if (r.translateMedianMs != null) sorted.push(r.gpuType);
+      else nullLatency.push(r.gpuType);
+    }
+    const verified = [...sorted, ...nullLatency];
+    console.log(`[gpu] Verified GPU types from benchmarks (${verified.length}): ${verified.join(', ')}`);
+    return verified;
+  } catch (err) {
+    console.warn(`[gpu] Failed to load verified GPU types from DB, using ai-gateway priority list: ${err instanceof Error ? err.message : err}`);
+    return getGpuPriorityList().length > 0 ? getGpuPriorityList() : [...DEFAULT_GPU_PRIORITY];
+  }
+}
+
+/**
+ * Attempt to reconnect to a GPU pod that was running before gateway restart.
+ * Loads persisted deploy state from disk, probes health, and restores monitoring if alive.
+ * Called once at gateway startup.
+ */
+export async function tryRecoverActiveDeploy(): Promise<boolean> {
+  const persisted = loadPersistedDeploy();
+  if (!persisted) return false;
+
+  console.log(`[gpu] Found persisted deploy: ${persisted.provider}/${persisted.gpuType} pod=${persisted.podId} endpoint=${persisted.endpoint}`);
+  console.log(`[gpu] Probing health to check if pod is still alive...`);
+
+  try {
+    const probeResult = await probeGpuHealth(persisted.endpoint, true);
+    const healthy = probeResult.ok;
+    if (probeResult.data) updateGpuModelWarmth(probeResult.data);
+    if (!healthy) {
+      console.log(`[gpu] Persisted pod is not healthy — discarding`);
+      clearPersistedDeploy();
+      return false;
+    }
+
+    // Pod is alive! Restore state
+    console.log(`[gpu] Pod is still healthy! Reconnecting...`);
+    setDeployCancelled(false);
+    setDeployState({
+      status: 'ready',
+      podId: persisted.podId,
+      endpoint: persisted.endpoint,
+      gpuType: persisted.gpuType,
+      dockerImage: persisted.dockerImage || '',
+      provider: persisted.provider as ProviderName,
+      costPerHr: persisted.costPerHr,
+      startedAt: persisted.startedAt,
+      sshHost: persisted.sshHost,
+      sshPort: persisted.sshPort,
+      providerMeta: persisted.providerMeta,
+      message: `Reconnected after restart (${persisted.provider}/${persisted.gpuType})`,
+      step: 'ready',
+      stepDetail: '',
+    });
+
+    // Restore provider credentials from env (needed for terminate)
+    if (persisted.provider === 'vast') {
+      setDeployVastApiKey(process.env.VAST_API_KEY || '');
+    } else if (persisted.provider === 'tensordock') {
+      setDeployTensordockApiKey(process.env.TENSORDOCK_API_KEY || '');
+      setDeployTensordockAuthId(process.env.TENSORDOCK_AUTH_ID || '');
+    } else if (persisted.provider === 'runpod') {
+      setDeployApiKey(process.env.RUNPOD_API_KEY || '');
+    } else if (persisted.provider === 'modal') {
+      const modalId = process.env.MODAL_TOKEN_ID || '';
+      const modalSecret = process.env.MODAL_TOKEN_SECRET || '';
+      setDeployModalApiKey(modalId && modalSecret ? `${modalId}:${modalSecret}` : '');
+    }
+    setActiveProvider(persisted.provider as ProviderName);
+
+    // Mark GPU healthy and set up translation routing
+    markGpuHealthy();
+    deploymentSM.markReady(persisted.podId, persisted.endpoint, persisted.gpuType, persisted.costPerHr);
+
+    // Start monitoring
+    startGpuMonitoring();
+
+    console.log(`[gpu] Successfully reconnected to ${persisted.provider} pod ${persisted.podId} (${persisted.gpuType} @ $${persisted.costPerHr}/hr)`);
+    return true;
+  } catch (err) {
+    console.warn(`[gpu] Recovery probe failed: ${err instanceof Error ? err.message : err}`);
+    clearPersistedDeploy();
+    return false;
+  }
+}
