@@ -419,14 +419,12 @@ function ProfileFlowDiagram({
     }, 500);
 
     // ── Fire all transports in parallel — no fallbacks, each must succeed on its own ──
-    const transports: SpeechTransport[] = ['http', 'sse', 'ws'];
+    const transports: SpeechTransport[] = ['http', 'sse', 'ws', 'webrtc'];
     let firstResult = false;
 
     for (const t of transports) {
       setTransportResult(t, { running: true });
     }
-    // WebRTC: not implemented yet — error immediately
-    setTransportResult('webrtc', { running: false, error: 'Not implemented (needs Pipecat + STUN/TURN)' });
 
     /** Estimate WAV audio duration from base64 */
     const estimateAudioDuration = (b64: string): number | undefined => {

@@ -66,7 +66,8 @@ import type {
 } from './types';
 import { WebSocketTransport } from './transport-ws';
 import { SSETransport } from './transport-sse';
-import { WebRTCTransport } from './transport-webrtc';
+// WebRTC imported lazily to avoid pulling in @pipecat-ai/small-webrtc-transport at build time
+type WebRTCTransportType = import('./transport-webrtc').WebRTCTransport;
 
 const DEFAULT_FALLBACK_ORDER: ProtocolId[] = ['webrtc', 'websocket', 'sse'];
 const DEFAULT_FALLBACK_TIMEOUT = 10_000;
@@ -212,7 +213,7 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
     let previousProtocol: ProtocolId | null = null;
 
     for (const protocol of order) {
-      const transport = this.createTransport(protocol);
+      const transport = await this.createTransport(protocol);
       if (!transport) continue;
 
       this.wireTransport(transport);
@@ -424,7 +425,7 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
 
   // ── Private ────────────────────────────────────────────────────────────
 
-  private createTransport(protocol: ProtocolId): Transport | null {
+  private async createTransport(protocol: ProtocolId): Promise<Transport | null> {
     switch (protocol) {
       case 'websocket':
         return this.config.websocket ? new WebSocketTransport(this.config.websocket) : null;
@@ -434,7 +435,14 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
           language: this.config.sse.language ?? this.config.language,
         }) : null;
       case 'webrtc':
-        return this.config.webrtc ? new WebRTCTransport(this.config.webrtc) : null;
+        if (!this.config.webrtc) return null;
+        try {
+          const { WebRTCTransport } = await import('./transport-webrtc');
+          return new WebRTCTransport(this.config.webrtc);
+        } catch {
+          this.log.warn('WebRTC transport unavailable (missing @pipecat-ai/small-webrtc-transport)');
+          return null;
+        }
       default:
         return null;
     }
