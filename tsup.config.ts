@@ -31,6 +31,6 @@ export default defineConfig({
   clean: true,
   outDir: 'dist',
   target: 'es2017',
-  external: ['openai', 'zod'],
+  external: ['openai', 'zod', '@pipecat-ai/client-js', '@pipecat-ai/small-webrtc-transport'],
   treeshake: true,
 });

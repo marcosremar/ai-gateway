@@ -60,7 +60,7 @@ export class OllamaLLMProvider implements LLMProvider {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const completion = await this.client.chat.completions.create({
       model: request.model || this._defaultModel,
-      messages: request.messages,
+      messages: request.messages as Parameters<typeof this.client.chat.completions.create>[0]['messages'],
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
       ...(request.responseFormat && { response_format: request.responseFormat }),

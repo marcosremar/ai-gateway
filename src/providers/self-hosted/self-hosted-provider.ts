@@ -200,7 +200,7 @@ export class SelfHostedLLMProvider implements LLMProvider {
 
     const completion = await client.chat.completions.create({
       model: request.model || '',
-      messages: request.messages,
+      messages: request.messages as OpenAI.ChatCompletionMessageParam[],
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
       ...(request.responseFormat && { response_format: request.responseFormat }),

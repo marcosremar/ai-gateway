@@ -52,7 +52,7 @@ export class OpenAISTTProvider implements STTProvider {
     if (model === 'whisper-1') {
       params.response_format = (request.responseFormat as OpenAI.Audio.TranscriptionCreateParams['response_format']) || 'verbose_json';
       if (request.wordTimestamps) {
-        (params as Record<string, unknown>).timestamp_granularities = ['word'];
+        (params as unknown as Record<string, unknown>).timestamp_granularities = ['word'];
       }
     } else {
       // gpt-4o-transcribe models only support 'json' | 'text' — no word timestamps

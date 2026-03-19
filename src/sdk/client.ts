@@ -327,9 +327,10 @@ export class GatewaySDK {
   }
 
   /** Parse JSON from response, throwing GatewayError on invalid JSON. */
-  private async parseJson(res: Response, path: string): Promise<Record<string, unknown>> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async parseJson(res: Response, path: string): Promise<any> {
     try {
-      return await res.json() as Record<string, unknown>;
+      return await res.json();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new GatewayError(

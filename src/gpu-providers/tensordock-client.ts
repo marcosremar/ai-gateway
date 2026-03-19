@@ -737,7 +737,7 @@ export class TensordockClient extends AbstractGpuProvider {
             };
           });
         } catch (e) {
-          this.log.debug(`[tensordock] listOffers for GPU ${gpuShort} failed: ${e instanceof Error ? e.message : e}`);
+          this.log.debug(`[tensordock] listOffers for GPU ${short} failed: ${e instanceof Error ? e.message : e}`);
           return [];
         }
       }),

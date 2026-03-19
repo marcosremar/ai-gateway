@@ -285,7 +285,7 @@ export class AIClient {
         const provider = this.resolveProvider(id => this.registry.getTTSProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.synthesize({
           input: text,
-          model: entry.model,  // provider uses its own defaultModel if undefined
+          model: entry.model ?? '',  // provider uses its own defaultModel if undefined
           voice: profile.voice ?? 'coral',
           responseFormat: profile.audioFormat,
           instructions: profile.voiceInstructions,
@@ -662,12 +662,12 @@ export class AIClient {
       throw new Error('[AIClient] No gpuRegistry configured. Pass gpuRegistry in AIClientOptions.');
     }
     const client = this.gpuRegistry.getOrThrow(provider);
-    this.log.info(`[AIClient] Deploying GPU instance via ${provider}...`);
+    this.log.log(`[AIClient] Deploying GPU instance via ${provider}...`);
 
     const instance = await client.createInstance(spec, credentials, this.userId);
     this.deployedInstances.set(instance.instanceId, { provider, credentials });
 
-    this.log.info(`[AIClient] Deployed ${instance.instanceId} → ${instance.endpoint} (${instance.gpuType || 'unknown GPU'})`);
+    this.log.log(`[AIClient] Deployed ${instance.instanceId} → ${instance.endpoint} (${instance.gpuType || 'unknown GPU'})`);
     return {
       instanceId: instance.instanceId,
       endpoint: instance.endpoint,
@@ -695,16 +695,16 @@ export class AIClient {
         });
         if (resp.ok) {
           const data = await resp.json() as { status?: string; services?: Record<string, string> };
-          this.log.info(`[AIClient] Health [${elapsed}s]: ${data.status} | ${JSON.stringify(data.services || {})}`);
+          this.log.log(`[AIClient] Health [${elapsed}s]: ${data.status} | ${JSON.stringify(data.services || {})}`);
           if (data.status === 'ok') {
             return { healthy: true, elapsedMs: Date.now() - start, services: data.services };
           }
         } else {
-          this.log.info(`[AIClient] Health [${elapsed}s]: HTTP ${resp.status}`);
+          this.log.log(`[AIClient] Health [${elapsed}s]: HTTP ${resp.status}`);
         }
       } catch (e: any) {
         const msg = e.message?.includes('fetch failed') ? 'not reachable yet' : e.message;
-        this.log.info(`[AIClient] Health [${elapsed}s]: ${msg}`);
+        this.log.log(`[AIClient] Health [${elapsed}s]: ${msg}`);
       }
       await new Promise(r => setTimeout(r, pollIntervalMs));
     }
@@ -732,10 +732,10 @@ export class AIClient {
     }
 
     const client = this.gpuRegistry.getOrThrow(prov);
-    this.log.info(`[AIClient] Destroying instance ${instanceId} via ${prov}...`);
+    this.log.log(`[AIClient] Destroying instance ${instanceId} via ${prov}...`);
     await client.deleteInstance(instanceId, creds);
     this.deployedInstances.delete(instanceId);
-    this.log.info(`[AIClient] Instance ${instanceId} destroyed.`);
+    this.log.log(`[AIClient] Instance ${instanceId} destroyed.`);
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
@@ -784,7 +784,7 @@ export class AIClient {
     // Auto-diversify: inject backup from a different provider family if chain is mono-provider
     if (this.diversifyChains) {
       const availableProviders = new Set<string>();
-      for (const id of this.registry.listProviders()) availableProviders.add(id);
+      for (const id of this.registry.listProviders()) availableProviders.add(id.id);
       entries = diversifyChain(entries, stage, availableProviders);
     }
 
@@ -828,7 +828,7 @@ export class AIClient {
     const apiKey = this.resolveKey(providerId, profile);
     if (apiKey && base.withApiKey) base = base.withApiKey(apiKey);
     // Per-entry endpoint override; fall back to global gpuEndpoint for gpu provider
-    const effectiveEndpoint = endpoint ?? (providerId === 'gpu' ? profile.gpuEndpoint : undefined);
+    const effectiveEndpoint = endpoint ?? ((providerId as string) === 'gpu' ? profile.gpuEndpoint : undefined);
     if (effectiveEndpoint && base.withEndpoint) base = base.withEndpoint(effectiveEndpoint);
     return base;
   }

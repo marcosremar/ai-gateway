@@ -225,7 +225,7 @@ export class RunpodClient extends AbstractGpuProvider {
         ...(spec.vcpus ? { vcpuCount: spec.vcpus } : {}),
       };
       // Remove GPU-specific fields that aren't applicable
-      delete cpuBody.gpuCount;
+      delete (cpuBody as Record<string, unknown>).gpuCount;
 
       this.log.log(`[runpod] Creating CPU pod (flavors: ${cpuFlavors.join(', ')})...`);
 
