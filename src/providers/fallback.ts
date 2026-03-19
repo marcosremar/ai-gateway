@@ -31,6 +31,10 @@ import { PerformanceRanker } from './performance-ranker';
 export interface FallbackEntry {
   provider: string;
   model?: string;
+  /** Per-entry endpoint override. When set, this endpoint is used instead of
+   *  the global gpuEndpoint on AIProfile. Enables distributed profiles
+   *  (STT→pod-A, LLM→pod-B, TTS→pod-C). */
+  endpoint?: string;
 }
 
 export interface FallbackOptions {

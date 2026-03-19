@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useBotStatus } from '@/hooks/useBotStatus';
 import { deployBot, joinMeeting, leaveBot, terminateBot } from '@/lib/gateway';
-import { Card, CardHeader, CardBody, CardFooter, Button, FormInput, StatusBadge, AlertBanner, CardSectionHeader, Toggle } from '@/components/ui';
+import { Card, CardHeader, CardBody, CardFooter, Button, FormInput, StatusBadge, AlertBanner, CardSectionHeader, Toggle, KV } from '@/components/ui';
 import { Bot, Play, Square, LogIn, LogOut, RefreshCw } from 'lucide-react';
 
 function formatUptime(sec: number): string {
@@ -164,15 +164,6 @@ export function BotSection() {
           </div>
         </CardFooter>
       </Card>
-    </div>
-  );
-}
-
-function KV({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="flex justify-between gap-4">
-      <span className="flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>{label}</span>
-      <span className={`${mono ? 'font-mono text-xs' : ''} truncate text-right`}>{value}</span>
     </div>
   );
 }

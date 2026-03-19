@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import { getProviderConfig, patchProviderConfig } from '@/lib/gateway';
 import {
@@ -66,9 +66,18 @@ export function ProvidersSection() {
       .catch(() => setConfigLoaded(true));
   }, []);
 
+  // Enable dirty tracking only after initial config load has settled
+  const dirtyEnabledRef = useRef(false);
+  useEffect(() => {
+    if (configLoaded) {
+      const t = setTimeout(() => { dirtyEnabledRef.current = true; }, 0);
+      return () => clearTimeout(t);
+    }
+  }, [configLoaded]);
+
   // Track dirty
   useEffect(() => {
-    if (configLoaded) setDirty(true);
+    if (dirtyEnabledRef.current) setDirty(true);
   }, [mode, pipelineStt, pipelineLlm, pipelineTts, gpuImage, gpuTypes, gpuProvider, dockerImages, idleTimeoutMin]);
 
   // Save
@@ -149,6 +158,22 @@ export function ProvidersSection() {
           <Server className="w-4 h-4" /> GPU Deploy
           {mode === 'gpu' && <span className="w-1.5 h-1.5 rounded-full bg-violet-400" />}
         </button>
+      </div>
+
+      {/* Contextual hint */}
+      <div className="text-xs leading-relaxed px-3 py-2.5 rounded-lg"
+        style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text-muted)' }}>
+        {mode === 'pipeline' ? (
+          <>
+            <span style={{ color: 'var(--color-text)', fontWeight: 600 }}>Pipeline chains </span>
+            define the fallback order for each stage (STT → LLM → TTS). The first provider in each chain handles the request; if it fails or times out, the next takes over. The gateway races GPU + cloud in parallel when a GPU pod is active — the fastest response wins and the slower one is cancelled.
+          </>
+        ) : (
+          <>
+            <span style={{ color: 'var(--color-text)', fontWeight: 600 }}>GPU Deploy config </span>
+            selects the Docker image and GPU type used when deploying a pod. The image bundles all 3 stages: <span style={{ color: '#38bdf8' }}>STT (Whisper)</span> · <span style={{ color: '#a78bfa' }}>LLM (TranslateGemma / Mistral)</span> · <span style={{ color: '#fbbf24' }}>TTS (Qwen3-TTS)</span>. Models load in the background after boot — the pipeline chain above handles cloud fallback while they warm up.
+          </>
+        )}
       </div>
 
       {/* Config section */}

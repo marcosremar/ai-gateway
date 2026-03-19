@@ -6,7 +6,8 @@ import { useGpuStatus } from '@/hooks/useGpuStatus';
 import { useGpuList } from '@/hooks/useGpuList';
 import { useBotStatus } from '@/hooks/useBotStatus';
 import { getRequestLog, type RequestLogEntry } from '@/lib/gateway';
-import { Card, CardHeader, CardBody, StatusBadge, AlertBanner, Spinner } from '@/components/ui';
+import { Card, CardHeader, CardBody, StatusBadge, AlertBanner, Spinner, IconBox, KV, StatusDot } from '@/components/ui';
+import { PipelineHealthCard } from './PipelineHealthCard';
 import {
   Activity, Cpu, Bot, Clock, Zap, DollarSign, ArrowRight,
   Mic, Volume2, Wifi, WifiOff, Snowflake, Flame,
@@ -177,6 +178,37 @@ export function OverviewSection() {
           </div>
         </CardHeader>
         <CardBody>
+          {/* Routing mode flow bar */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-4 px-3 py-2 rounded-lg text-xs overflow-x-auto"
+            style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)' }}
+          >
+            <span style={{ color: 'var(--color-text-muted)', flexShrink: 0 }}>Routing:</span>
+            {(['stt', 'llm', 'tts'] as const).map((s, i) => {
+              const r = gpu?.pipelineRouting;
+              const dest = (r ? { stt: r.stt, llm: r.llm, tts: r.tts }[s] : null) ?? 'cloud';
+              return (
+                <span key={s} className="flex items-center gap-1 flex-shrink-0">
+                  {i > 0 && <ArrowRight className="w-2.5 h-2.5" style={{ color: 'var(--color-border)' }} />}
+                  <span className="uppercase font-mono text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{s}</span>
+                  <span className="font-semibold" style={{ color: dest === 'gpu' ? '#10b981' : '#8b949e' }}>
+                    → {dest}
+                  </span>
+                </span>
+              );
+            })}
+            <span className="ml-auto flex-shrink-0 px-2 py-0.5 rounded text-[10px] font-bold"
+              style={{
+                background: gpu?.pipelineRouting?.mode === 'atomic-gpu' ? 'color-mix(in srgb, #10b981 12%, transparent)' :
+                            gpu?.pipelineRouting?.mode === 'hybrid' ? 'color-mix(in srgb, #f59e0b 12%, transparent)' :
+                            'var(--color-surface)',
+                color: gpu?.pipelineRouting?.mode === 'atomic-gpu' ? '#10b981' :
+                       gpu?.pipelineRouting?.mode === 'hybrid' ? '#f59e0b' : 'var(--color-text-muted)',
+                border: '1px solid currentColor',
+              }}
+            >
+              {gpu?.pipelineRouting?.mode ?? 'cloud'}
+            </span>
+          </div>
           <div className="grid grid-cols-3 gap-3">
             {pipelineStages.map((stage) => {
               const StageIcon = stage.icon;
@@ -199,10 +231,7 @@ export function OverviewSection() {
                 >
                   {/* Header */}
                   <div className="flex items-center gap-2.5 mb-3">
-                    <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-                      style={{ background: `color-mix(in srgb, ${stage.fg} 15%, transparent)` }}>
-                      <StageIcon className="w-4 h-4" style={{ color: stage.fg }} />
-                    </div>
+                    <IconBox icon={StageIcon} color={stage.fg} />
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-bold uppercase tracking-wide" style={{ color: isOk ? stage.fg : 'var(--color-text-muted)' }}>
                         {stage.key}
@@ -262,6 +291,9 @@ export function OverviewSection() {
         </CardBody>
       </Card>
 
+      {/* Pipeline health — profile → stage → provider hierarchy */}
+      <PipelineHealthCard health={health} />
+
       {/* Full pipeline latency (if pipeline stage data exists) */}
       {stageLatencies.pipeline && stageLatencies.pipeline.samples > 0 && (
         <div className="grid grid-cols-2 gap-3">
@@ -292,9 +324,7 @@ export function OverviewSection() {
           <CardHeader>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(96, 165, 250, 0.1)' }}>
-                  <Cpu className="w-4 h-4" style={{ color: '#60a5fa' }} />
-                </div>
+                <IconBox icon={Cpu} color="#60a5fa" />
                 <h3 className="text-sm font-semibold">GPU Instances</h3>
                 {gpuInstances.length > 0 && (
                   <span className="text-[10px] px-1.5 py-0.5 rounded font-bold"
@@ -317,9 +347,7 @@ export function OverviewSection() {
                   const isReady = inst.isActive || inst.status === 'ready';
                   return (
                     <div key={inst.instanceId} className="py-3 first:pt-0 last:pb-0 flex items-center gap-3">
-                      {/* Status dot */}
-                      <div className="w-2 h-2 rounded-full flex-shrink-0"
-                        style={{ background: isReady ? '#34d399' : ['creating','booting','loading'].includes(inst.status) ? '#f59e0b' : '#6b7280' }} />
+                      <StatusDot status={isReady ? 'ready' : ['creating','booting','loading'].includes(inst.status) ? 'booting' : 'idle'} />
                       {/* Provider + GPU */}
                       <div className="flex-1 min-w-0">
                         <div className="text-xs font-semibold capitalize truncate">
@@ -349,9 +377,7 @@ export function OverviewSection() {
           <CardHeader>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(167, 139, 250, 0.1)' }}>
-                  <Bot className="w-4 h-4" style={{ color: '#a78bfa' }} />
-                </div>
+                <IconBox icon={Bot} color="#a78bfa" />
                 <h3 className="text-sm font-semibold">Bot</h3>
               </div>
               {bot && <StatusBadge variant={bot.status === 'idle' ? 'gray' : bot.status === 'joined' ? 'emerald' : 'amber'} dot>{bot.status}</StatusBadge>}
@@ -380,9 +406,7 @@ export function OverviewSection() {
           <CardBody>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(251, 191, 36, 0.1)' }}>
-                  <DollarSign className="w-4 h-4" style={{ color: '#fbbf24' }} />
-                </div>
+                <IconBox icon={DollarSign} color="#fbbf24" />
                 <div>
                   <div className="text-sm font-medium">Daily Spend</div>
                   <div className="text-lg font-mono font-bold" style={{ color: health.budget.exceeded ? '#f87171' : 'var(--color-text)' }}>
@@ -439,21 +463,10 @@ function StatCard({ icon: Icon, label, value, color }: { icon: LucideIcon; label
   return (
     <div className="p-4 rounded-xl border card-hover" style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)' }}>
       <div className="flex items-center justify-between mb-3">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: `${color}15` }}>
-          <Icon className="w-4 h-4" style={{ color }} />
-        </div>
+        <IconBox icon={Icon} color={color} />
       </div>
       <div className="font-mono text-xl font-bold leading-none mb-1">{value}</div>
       <div className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>{label}</div>
-    </div>
-  );
-}
-
-function KV({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="flex justify-between">
-      <span style={{ color: 'var(--color-text-muted)' }}>{label}</span>
-      <span className={`${mono ? 'font-mono text-[10px]' : ''} truncate max-w-[60%] text-right`}>{value}</span>
     </div>
   );
 }

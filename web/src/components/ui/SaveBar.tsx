@@ -10,49 +10,38 @@ interface SaveBarProps {
   label?: string;
 }
 
-export function SaveBar({ hasChanges, saving, saved, onSave, label = 'Save Changes' }: SaveBarProps) {
+export function SaveBar({ hasChanges, saving, saved, onSave, label = 'Save' }: SaveBarProps) {
+  if (!hasChanges && !saving && !saved) return null;
+
   return (
     <div
-      className="fixed bottom-0 right-0 z-20 flex items-center justify-between px-6 py-4 border-t backdrop-blur-md"
+      className="fixed top-0 right-0 z-20 flex items-center gap-3 px-5"
       style={{
-        left: '220px', /* sidebar width */
-        borderColor: hasChanges ? 'color-mix(in srgb, #10b981 30%, var(--color-border))' : 'var(--color-border)',
-        background: hasChanges
-          ? 'color-mix(in srgb, #10b981 85%, var(--color-surface))'
-          : 'color-mix(in srgb, var(--color-surface) 90%, transparent)',
+        height: '56px', /* matches top bar h-14 */
+        borderLeft: '1px solid var(--color-border)',
+        background: 'color-mix(in srgb, var(--color-bg) 85%, transparent)',
+        backdropFilter: 'blur(12px)',
       }}
     >
-      <div className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-        {saved ? (
-          <span className="flex items-center gap-2 text-emerald-400 font-medium">
-            <Check className="w-4 h-4" /> Changes saved successfully
-          </span>
-        ) : hasChanges ? (
-          <span className="font-medium" style={{ color: 'var(--color-text)' }}>You have unsaved changes</span>
-        ) : (
-          'All changes saved'
-        )}
-      </div>
+      {saved && (
+        <span className="flex items-center gap-1.5 text-xs font-medium" style={{ color: '#34d399' }}>
+          <Check className="w-3.5 h-3.5" /> Saved
+        </span>
+      )}
       <button
         onClick={onSave}
         disabled={!hasChanges || saving}
-        className="flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-semibold transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+        className="flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
         style={{
-          background: hasChanges ? '#059669' : 'var(--color-btn-secondary-bg)',
+          background: hasChanges ? '#059669' : 'var(--color-surface-elevated)',
           color: hasChanges ? 'white' : 'var(--color-text-muted)',
-          boxShadow: hasChanges ? '0 1px 3px rgba(5, 150, 105, 0.3)' : 'none',
+          boxShadow: hasChanges ? '0 1px 4px rgba(5,150,105,0.35)' : 'none',
         }}
       >
         {saving ? (
-          <>
-            <Loader2 className="w-4 h-4 animate-spin" />
-            Saving...
-          </>
+          <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving...</>
         ) : (
-          <>
-            <Save className="w-4 h-4" />
-            {label}
-          </>
+          <><Save className="w-3.5 h-3.5" /> {label}</>
         )}
       </button>
     </div>

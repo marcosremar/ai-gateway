@@ -250,81 +250,17 @@ test.describe('Overview UI', () => {
   });
 });
 
-test.describe('Providers UI', () => {
-  test('mode toggle Pipeline/GPU exists on providers page', async ({ page }) => {
-    await page.goto(`${GW}/providers`);
-    await expect(page.getByRole('heading', { name: 'Provider Configuration' })).toBeVisible({ timeout: 10_000 });
-
-    // Both toggle buttons should exist
-    const pipelineBtn = page.locator('button').filter({ hasText: /Pipeline/ }).first();
-    const gpuBtn = page.locator('button').filter({ hasText: 'GPU Deploy' }).last();
-    await expect(pipelineBtn).toBeVisible();
-    await expect(gpuBtn).toBeVisible();
-  });
-
-  test('profiles are listed', async ({ page }) => {
-    await page.goto(`${GW}/providers`);
-    await expect(page.getByRole('heading', { name: 'Provider Configuration' })).toBeVisible({ timeout: 10_000 });
-    // Should show the test profile we created
-    await expect(page.getByText('Integration Test Profile')).toBeVisible();
-  });
-
-  test('save bar appears and works', async ({ page }) => {
-    await page.goto(`${GW}/providers`);
-    await expect(page.getByText('Provider Configuration')).toBeVisible({ timeout: 10_000 });
-
-    // SaveBar should be visible
-    await expect(page.getByText('Save Changes')).toBeVisible();
+test.describe('Profiles UI', () => {
+  test('profiles page loads', async ({ page }) => {
+    await page.goto(`${GW}/config/profiles`);
+    await expect(page.getByText('Profiles').first()).toBeVisible({ timeout: 10_000 });
   });
 });
 
-test.describe('GPU Deploy UI', () => {
-  test('shows deploy config and auto-stop', async ({ page }) => {
-    await page.goto(`${GW}/gpu`);
-    await expect(page.getByRole('heading', { name: 'GPU Deploy' })).toBeVisible({ timeout: 10_000 });
-
-    // Deploy config
-    await expect(page.getByText('Deploy Configuration')).toBeVisible();
-    await expect(page.getByText('Docker Image', { exact: true })).toBeVisible();
-
-    // Auto-stop section
-    await expect(page.getByText('Auto-Stop')).toBeVisible();
-    await expect(page.getByRole('button', { name: '15 min' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Never' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Custom...' })).toBeVisible();
-  });
-
-  test('auto-stop preset buttons are clickable', async ({ page }) => {
-    await page.goto(`${GW}/gpu`);
-    await expect(page.getByText('Auto-Stop')).toBeVisible({ timeout: 10_000 });
-
-    // Click 30 min
-    await page.locator('button').filter({ hasText: '30 min' }).click();
-    await expect(page.getByText('GPU will auto-terminate after 30 minutes')).toBeVisible();
-
-    // Click back to 15 min
-    await page.locator('button').filter({ hasText: '15 min' }).click();
-    await expect(page.getByText('GPU will auto-terminate after 15 minutes')).toBeVisible();
-  });
-
-  test('custom timeout input works', async ({ page }) => {
-    await page.goto(`${GW}/gpu`);
-    await expect(page.getByText('Auto-Stop')).toBeVisible({ timeout: 10_000 });
-
-    await page.locator('button').filter({ hasText: 'Custom...' }).click();
-    await page.locator('input[type="number"]').fill('45');
-    await page.locator('button').filter({ hasText: 'Set' }).click();
-
-    await expect(page.getByText('GPU will auto-terminate after 45 minutes')).toBeVisible();
-
-    // Restore 15
-    await page.locator('button').filter({ hasText: '15 min' }).click();
-  });
-});
 
 test.describe('API Keys UI', () => {
   test('shows configured providers with masked keys', async ({ page }) => {
-    await page.goto(`${GW}/api-keys`);
+    await page.goto(`${GW}/config/api-keys`);
     await expect(page.getByRole('heading', { name: 'API Keys', exact: true })).toBeVisible({ timeout: 10_000 });
 
     // Cloud section
@@ -344,11 +280,10 @@ test.describe('URL routing', () => {
   test('direct URL navigation works for all pages', async ({ page }) => {
     const routes = [
       { path: '/', text: 'Overview' },
-      { path: '/api-keys', text: 'API Keys' },
-      { path: '/providers', text: 'Provider Configuration' },
-      { path: '/gpu', text: 'GPU Deploy' },
-      { path: '/bot', text: 'Bot' },
-      { path: '/logs', text: 'Logs' },
+      { path: '/config/profiles', text: 'Profiles' },
+      { path: '/config/api-keys', text: 'API Keys' },
+      { path: '/tools/bot', text: 'Bot' },
+      { path: '/monitor/logs', text: 'Logs' },
     ];
 
     for (const route of routes) {

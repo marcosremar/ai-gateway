@@ -116,5 +116,8 @@ export { ModalTTSProvider, modalTTS, MODAL_TTS_MODELS } from './modal';
 // ── Modal (MOSS-TTS-Realtime — alternative) ──────────────────────────────
 export { ModalMossTTSProvider, modalMossTTS, MODAL_MOSS_TTS_MODELS } from './modal-moss';
 
+// ── Modal (SeamlessM4T v2 — ASR + speech/text translation) ───────────────
+export { ModalSeamlessSTTProvider, ModalSeamlessLLMProvider, modalSeamlessSTT, modalSeamlessLLM, SEAMLESS_MODELS } from './modal-seamless';
+
 // ── Self-Hosted ───────────────────────────────────────────────────────────
 export { SelfHostedSTTProvider, SelfHostedTTSProvider, SelfHostedLLMProvider } from './self-hosted/self-hosted-provider';

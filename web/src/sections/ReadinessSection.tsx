@@ -8,12 +8,13 @@ import {
 import { Card, CardHeader, CardBody, Button, AlertBanner, StatusBadge, FormInput, SectionHeader } from '@/components/ui';
 import { RefreshCw, RotateCcw, Activity, AlertTriangle } from 'lucide-react';
 
-type Phase = 'idle' | 'benchmarking' | 'ready' | 'failed' | 'repechage' | 'condemned';
+type Phase = 'idle' | 'benchmarking' | 'ready' | 'degraded' | 'failed' | 'repechage' | 'condemned';
 
 function PhaseBadge({ phase }: { phase: Phase }) {
   switch (phase) {
     case 'ready':        return <StatusBadge variant="emerald" dot>Ready</StatusBadge>;
     case 'benchmarking': return <StatusBadge variant="amber" dot>Benchmarking</StatusBadge>;
+    case 'degraded':     return <StatusBadge variant="orange" dot>Degraded</StatusBadge>;
     case 'repechage':    return <StatusBadge variant="amber">Repechage</StatusBadge>;
     case 'failed':       return <StatusBadge variant="red" dot>Failed</StatusBadge>;
     case 'condemned':    return <StatusBadge variant="red" dot>Condemned</StatusBadge>;
@@ -25,6 +26,7 @@ function phaseColor(phase: Phase): string {
   switch (phase) {
     case 'ready': return 'var(--color-emerald, #34d399)';
     case 'benchmarking': return 'var(--color-amber, #fbbf24)';
+    case 'degraded': return '#f97316';
     case 'repechage': return 'var(--color-purple, #a78bfa)';
     case 'failed': return 'var(--color-red, #f87171)';
     case 'condemned': return '#991b1b';
@@ -102,7 +104,7 @@ export function ReadinessSection() {
   }, []);
 
   // Determine if any stage is in an active phase
-  const hasActivePhase = status && ['benchmarking', 'repechage', 'condemned'].some(p =>
+  const hasActivePhase = status && ['benchmarking', 'degraded', 'repechage', 'condemned'].some(p =>
     status.readinessState.stt.phase === p || status.readinessState.llm.phase === p || status.readinessState.tts.phase === p
   );
   const pollIntervalMs = hasActivePhase || status?.readinessState.shadowPhase ? 2000 : 10000;
@@ -157,6 +159,75 @@ export function ReadinessSection() {
   return (
     <div className="space-y-6 p-6">
       <SectionHeader title="GPU Readiness" subtitle="Benchmark → shadow mode → production activation. GPU never handles real traffic until latency targets are proven." />
+
+      {/* Phase lifecycle diagram — directional */}
+      <Card>
+        <CardHeader><span className="text-sm font-semibold">Service Phase Lifecycle</span></CardHeader>
+        <CardBody>
+          <div className="text-xs mb-4" style={{ color: 'var(--color-text-muted)' }}>
+            Each GPU service (STT, LLM, TTS) transitions independently through these phases. Traffic is only routed to the GPU once a service reaches <strong style={{ color: '#10b981' }}>ready</strong>.
+          </div>
+
+          {/* Main happy path: idle → benchmarking → shadow → ready */}
+          <div className="flex items-center gap-1 flex-wrap mb-3">
+            {([
+              { phase: 'idle',         color: '#71717a', label: 'idle',         desc: 'GPU not deployed or service not started' },
+              null,
+              { phase: 'benchmarking', color: '#fbbf24', label: 'benchmarking', desc: 'Sending test requests — must beat target latency' },
+              null,
+              { phase: 'shadow',       color: '#38bdf8', label: 'shadow',       desc: 'Dry-run alongside cloud — validates stability' },
+              null,
+              { phase: 'ready',        color: '#10b981', label: 'ready',        desc: 'Serving live traffic — P95 within target' },
+            ] as const).map((item, i) =>
+              item === null ? (
+                <span key={i} className="text-base" style={{ color: 'var(--color-text-muted)' }}>→</span>
+              ) : (
+                <div key={item.phase} className="flex flex-col gap-1 px-3 py-2 rounded-lg border min-w-[110px]"
+                  style={{
+                    borderColor: `color-mix(in srgb, ${item.color} 35%, var(--color-border))`,
+                    background: `color-mix(in srgb, ${item.color} 7%, var(--color-surface-elevated))`,
+                  }}>
+                  <span className="font-bold text-[11px]" style={{ color: item.color }}>{item.label}</span>
+                  <span className="text-[10px] leading-tight" style={{ color: 'var(--color-text-muted)' }}>{item.desc}</span>
+                </div>
+              )
+            )}
+          </div>
+
+          {/* Failure path: benchmarking/ready → degraded/repechage → condemned */}
+          <div className="flex items-start gap-3 flex-wrap pt-3 border-t" style={{ borderColor: 'var(--color-border)' }}>
+            <span className="text-[10px] font-semibold pt-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>failure paths</span>
+            {([
+              { phase: 'degraded',  color: '#f97316', label: 'degraded',  desc: 'Live P95 exceeded threshold — pulled from traffic, re-benchmarking' },
+              null,
+              { phase: 'repechage', color: '#a78bfa', label: 'repechage', desc: 'Benchmark failed — retrying every 2 min (up to max attempts)' },
+              null,
+              { phase: 'condemned', color: '#f87171', label: 'condemned', desc: 'Max retries exhausted — cloud handles all traffic until manual reset' },
+            ] as const).map((item, i) =>
+              item === null ? (
+                <span key={i} className="text-base pt-2" style={{ color: 'var(--color-text-muted)' }}>→</span>
+              ) : (
+                <div key={item.phase} className="flex flex-col gap-1 px-3 py-2 rounded-lg border min-w-[130px]"
+                  style={{
+                    borderColor: `color-mix(in srgb, ${item.color} 35%, var(--color-border))`,
+                    background: `color-mix(in srgb, ${item.color} 7%, var(--color-surface-elevated))`,
+                  }}>
+                  <span className="font-bold text-[11px]" style={{ color: item.color }}>{item.label}</span>
+                  <span className="text-[10px] leading-tight" style={{ color: 'var(--color-text-muted)' }}>{item.desc}</span>
+                </div>
+              )
+            )}
+          </div>
+
+          {/* Note about profile latency targets */}
+          <div className="mt-3 pt-3 border-t text-[10px] leading-relaxed" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
+            <strong style={{ color: 'var(--color-text-secondary)' }}>Profile latency target:</strong>{' '}
+            The active profile's <em>Latency</em> field (realtime / low / batch) sets the benchmark thresholds automatically —
+            realtime uses STT&nbsp;300ms / LLM&nbsp;500ms / TTS&nbsp;300ms; low uses 800ms / 2s / 1.5s; batch accepts any latency.
+            Switching profiles updates thresholds immediately and takes effect on the next benchmark cycle.
+          </div>
+        </CardBody>
+      </Card>
 
       {error && <AlertBanner variant="error">{error}</AlertBanner>}
 
@@ -275,8 +346,9 @@ export function ReadinessSection() {
               <div className="mt-3 pt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px]" style={{ borderTop: '1px solid var(--color-border)', color: 'var(--color-text-muted)' }}>
                 <span><span style={{ color: '#71717a' }}>●</span> Idle — waiting for pod</span>
                 <span><span style={{ color: '#fbbf24' }}>●</span> Benchmarking — sending test requests</span>
-                <span><span style={{ color: '#a78bfa' }}>●</span> Repechage — retrying every 2 min</span>
                 <span><span style={{ color: '#34d399' }}>●</span> Ready — passed benchmark</span>
+                <span><span style={{ color: '#f97316' }}>●</span> Degraded — live P95 exceeded, re-benchmarking</span>
+                <span><span style={{ color: '#a78bfa' }}>●</span> Repechage — retrying every 2 min</span>
                 <span><span style={{ color: '#f87171' }}>●</span> Failed / Condemned</span>
               </div>
             </div>

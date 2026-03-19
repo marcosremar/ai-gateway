@@ -3,10 +3,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
 import { Sidebar, type SidebarItem } from '@/components/ui';
-import { LayoutDashboard, Settings2, Cpu, TestTube, Bot, Shield, ScrollText, Zap, KeyRound, Sparkles, FlaskConical, LayoutList } from 'lucide-react';
+import { LayoutDashboard, Settings2, TestTube, Bot, Shield, ScrollText, Zap, KeyRound, Sparkles, FlaskConical, LayoutList, Sun, Moon } from 'lucide-react';
 import { OverviewSection } from '@/sections/OverviewSection';
-import { ProvidersSection } from '@/sections/ProvidersSection';
-import { GpuDeploySection } from '@/sections/GpuDeploySection';
 import { PipelineTestSection } from '@/sections/PipelineTestSection';
 import { PathBenchmarkSection } from '@/sections/PathBenchmarkSection';
 import { BotSection } from '@/sections/BotSection';
@@ -19,33 +17,63 @@ import { ReadinessSection } from '@/sections/ReadinessSection';
 
 const NAV_ITEMS: SidebarItem[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'api-keys', label: 'API Keys', icon: KeyRound },
-  { id: 'profiles', label: 'Profiles', icon: LayoutList },
-  { id: 'providers', label: 'Providers', icon: Settings2 },
-  { id: 'deploy', label: 'Deploy', icon: Cpu },
-  { id: 'playground', label: 'Playground', icon: Sparkles },
-  { id: 'pipeline', label: 'Pipeline Test', icon: TestTube },
-  { id: 'pathbench', label: 'Path Benchmark', icon: Zap },
-  { id: 'bot', label: 'Bot', icon: Bot },
-  { id: 'readiness', label: 'GPU Readiness', icon: FlaskConical },
-  { id: 'reputation', label: 'Reputation', icon: Shield },
-  { id: 'logs', label: 'Logs & Metrics', icon: ScrollText },
+
+  { id: '_config', label: 'Config', divider: true, icon: LayoutDashboard },
+  { id: 'config/profiles', label: 'Profiles', icon: LayoutList },
+  { id: 'config/api-keys', label: 'API Keys', icon: KeyRound },
+
+  { id: '_tools', label: 'Tools', divider: true, icon: LayoutDashboard },
+  { id: 'tools/playground', label: 'Playground', icon: Sparkles },
+  { id: 'tools/pipeline', label: 'Pipeline Test', icon: TestTube },
+  { id: 'tools/pathbench', label: 'Path Benchmark', icon: Zap },
+  { id: 'tools/bot', label: 'Bot', icon: Bot },
+
+  { id: '_monitor', label: 'Monitor', divider: true, icon: LayoutDashboard },
+  { id: 'monitor/readiness', label: 'GPU Readiness', icon: FlaskConical },
+  { id: 'monitor/reputation', label: 'Reputation', icon: Shield },
+  { id: 'monitor/logs', label: 'Logs & Metrics', icon: ScrollText },
 ];
 
-const VALID_ROUTES = new Set(NAV_ITEMS.map(item => item.id));
+const VALID_ROUTES = new Set(NAV_ITEMS.filter(item => !item.divider).map(item => item.id));
 
 function getRouteFromPath(): string {
   if (typeof window === 'undefined') return 'overview';
-  // Support both /providers and /#/providers (backwards compat)
+  // Support hash navigation: /#/config/providers
   const hash = window.location.hash.replace('#/', '').replace('#', '');
   if (hash && VALID_ROUTES.has(hash)) return hash;
+  // Pathname: /config/providers or sub-routes like /config/profiles/edit/xxx
   const path = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
-  return VALID_ROUTES.has(path) ? path : 'overview';
+  if (VALID_ROUTES.has(path)) return path;
+  // Redirect removed page
+  if (path === 'config/providers' || path === 'config/deploy') return 'config/profiles';
+  // Match sub-routes: /config/profiles/edit/xxx → config/profiles
+  for (const route of VALID_ROUTES) {
+    if (path.startsWith(route + '/')) return route;
+  }
+  return 'overview';
+}
+
+function useTheme() {
+  const [light, setLight] = useState(false);
+  useEffect(() => {
+    const saved = localStorage.getItem('theme');
+    if (saved === 'light') { document.documentElement.classList.add('light'); setLight(true); }
+  }, []);
+  const toggle = useCallback(() => {
+    setLight(prev => {
+      const next = !prev;
+      document.documentElement.classList.toggle('light', next);
+      localStorage.setItem('theme', next ? 'light' : 'dark');
+      return next;
+    });
+  }, []);
+  return { light, toggle };
 }
 
 function Dashboard() {
   const [activeTab, setActiveTab] = useState('overview');
   const { health, error } = useGateway();
+  const { light, toggle: toggleTheme } = useTheme();
 
   // Sync tab with URL on mount and popstate
   useEffect(() => {
@@ -60,7 +88,7 @@ function Dashboard() {
     };
   }, []);
 
-  // Navigate: pushState with clean URL
+  // Navigate: pushState with clean nested URL
   const navigate = useCallback((id: string) => {
     const url = id === 'overview' ? '/' : `/${id}`;
     window.history.pushState(null, '', url);
@@ -93,6 +121,18 @@ function Dashboard() {
             </span>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={toggleTheme}
+              className="flex items-center justify-center w-8 h-8 rounded-lg border cursor-pointer transition-colors"
+              style={{
+                borderColor: 'var(--color-border)',
+                background: 'var(--color-surface-elevated)',
+                color: 'var(--color-text-muted)',
+              }}
+              title={light ? 'Switch to dark' : 'Switch to light'}
+            >
+              {light ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+            </button>
             <div className={`w-2 h-2 rounded-full ${health ? 'bg-emerald-500' : error ? 'bg-red-500' : 'bg-zinc-500'}`} />
             <span className="text-xs font-mono" style={{ color: 'var(--color-text-muted)' }}>
               {health ? `${health.status}` : error ? 'Offline' : 'Connecting...'}
@@ -101,19 +141,17 @@ function Dashboard() {
         </div>
 
         {/* Page content */}
-        <div className="max-w-6xl mx-auto">
+        <div className="max-w-6xl mx-auto" style={{ minHeight: 'calc(100vh - 3.5rem)' }}>
           {activeTab === 'overview' && <OverviewSection />}
-          {activeTab === 'api-keys' && <ApiKeysSection />}
-          {activeTab === 'profiles' && <ProfilesSection />}
-          {activeTab === 'providers' && <ProvidersSection />}
-          {activeTab === 'deploy' && <GpuDeploySection />}
-          {activeTab === 'playground' && <PlaygroundSection />}
-          {activeTab === 'pipeline' && <PipelineTestSection />}
-          {activeTab === 'pathbench' && <PathBenchmarkSection />}
-          {activeTab === 'bot' && <BotSection />}
-          {activeTab === 'readiness' && <ReadinessSection />}
-          {activeTab === 'reputation' && <ReputationSection />}
-          {activeTab === 'logs' && <LogsSection />}
+          {activeTab === 'config/api-keys' && <ApiKeysSection />}
+          {activeTab === 'config/profiles' && <ProfilesSection />}
+          {activeTab === 'tools/playground' && <PlaygroundSection />}
+          {activeTab === 'tools/pipeline' && <PipelineTestSection />}
+          {activeTab === 'tools/pathbench' && <PathBenchmarkSection />}
+          {activeTab === 'tools/bot' && <BotSection />}
+          {activeTab === 'monitor/readiness' && <ReadinessSection />}
+          {activeTab === 'monitor/reputation' && <ReputationSection />}
+          {activeTab === 'monitor/logs' && <LogsSection />}
         </div>
       </main>
     </div>

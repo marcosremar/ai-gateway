@@ -2,22 +2,15 @@
 
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
 import Sortable from 'sortablejs';
-import { X, Plus, Check, Trash2, GripVertical, Pencil, Mic, Server } from 'lucide-react';
+import { X, Plus, Check, Trash2, GripVertical, Pencil, Mic, Bot, Volume2 } from 'lucide-react';
 import { Button, Toggle, ConfirmModal } from '@/components/ui';
 import type { ProviderProfile } from './provider-types';
-import { PIPELINE_CATALOG, DOCKER_IMAGES, GPU_TYPES } from './provider-types';
 
-function provLabel(provId: string, stage: 'stt' | 'llm' | 'tts'): string {
-  return PIPELINE_CATALOG[stage].providers.find(p => p.id === provId)?.label || provId;
-}
-function imageLabel(image?: string): string {
-  if (!image) return '—';
-  const m = DOCKER_IMAGES.find(d => d.value === image);
-  return m ? m.label.split(' (')[0] : image.split('/').pop()?.replace(':latest', '') || image;
-}
-function gpuLabel(id: string): string {
-  return GPU_TYPES.find(g => g.id === id)?.label || id;
-}
+const LATENCY_BADGE: Record<string, { label: string; color: string }> = {
+  realtime: { label: 'realtime', color: '#10b981' },
+  low: { label: 'low', color: '#3b82f6' },
+  batch: { label: 'batch', color: '#6b7280' },
+};
 
 // ── Profile Item ──
 
@@ -41,25 +34,28 @@ const ProfileItem = memo(function ProfileItem({
     setEditing(false);
   };
 
-  const isPipeline = (profile.mode || 'pipeline') === 'pipeline';
   const isEnabled = profile.enabled !== false;
-  const modeColor = isPipeline ? '#0ea5e9' : '#a78bfa';
-  const ModeIcon = isPipeline ? Mic : Server;
+  const accentColor = '#0ea5e9';
 
-  let summary: string;
-  if (isPipeline) {
-    const parts = [
-      profile.stt[0] ? provLabel(profile.stt[0].provider, 'stt') : null,
-      profile.llm[0] ? provLabel(profile.llm[0].provider, 'llm') : null,
-      profile.tts[0] ? provLabel(profile.tts[0].provider, 'tts') : null,
-    ].filter(Boolean);
-    summary = parts.join(' → ');
-    const fb = [profile.stt, profile.llm, profile.tts].filter(s => s.length > 1).reduce((a, s) => a + s.length - 1, 0);
-    if (fb > 0) summary += ` (+${fb} fallback${fb > 1 ? 's' : ''})`;
-  } else {
-    const parts = [imageLabel(profile.gpuImage), profile.gpuTypes?.length ? profile.gpuTypes.map(gpuLabel).join(', ') : null].filter(Boolean);
-    summary = parts.join(' · ') || 'Not configured';
-  }
+  const latencyBadge = LATENCY_BADGE[profile.latency] ?? null;
+
+  const activeStages = [
+    profile.stt !== undefined ? 'stt' : null,
+    'llm',
+    profile.tts !== undefined ? 'tts' : null,
+  ].filter(Boolean) as string[];
+
+  const gpuCount = (profile.services ?? []).filter(s => s.kind === 'gpu-pod').length;
+
+  const summaryParts: string[] = [];
+  if (profile.stt && profile.stt[0]) summaryParts.push(profile.stt[0].provider);
+  if (profile.llm?.[0]) summaryParts.push(profile.llm[0].provider);
+  if (profile.tts && profile.tts[0]) summaryParts.push(profile.tts[0].provider);
+  let summary = summaryParts.join(' → ');
+  const allChains = [profile.stt, profile.llm, profile.tts].filter(Boolean) as typeof profile.llm[];
+  const fb = allChains.filter(s => s.length > 1).reduce((a, s) => a + s.length - 1, 0);
+  if (fb > 0) summary += ` (+${fb} fallback${fb > 1 ? 's' : ''})`;
+  if (gpuCount > 0) summary += ` · ${gpuCount} GPU pod${gpuCount > 1 ? 's' : ''}`;
 
   return (
     <div
@@ -67,8 +63,8 @@ const ProfileItem = memo(function ProfileItem({
       className="group flex items-center gap-2.5 rounded-lg border transition-all cursor-pointer px-3 py-2.5"
       onClick={() => !editing && onApply(profile)}
       style={{
-        borderColor: isActive ? `color-mix(in srgb, ${modeColor} 40%, transparent)` : 'var(--color-border)',
-        background: isActive ? `color-mix(in srgb, ${modeColor} 4%, var(--color-surface-elevated))` : 'var(--color-surface-elevated)',
+        borderColor: isActive ? `color-mix(in srgb, ${accentColor} 40%, transparent)` : 'var(--color-border)',
+        background: isActive ? `color-mix(in srgb, ${accentColor} 4%, var(--color-surface-elevated))` : 'var(--color-surface-elevated)',
         opacity: isEnabled ? 1 : 0.45,
       }}
     >
@@ -81,20 +77,38 @@ const ProfileItem = memo(function ProfileItem({
       {/* Rank */}
       <span className="text-[10px] font-bold w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0"
         style={{
-          background: isActive ? `color-mix(in srgb, ${modeColor} 15%, transparent)` : 'color-mix(in srgb, var(--color-text-muted) 10%, transparent)',
-          color: isActive ? modeColor : 'var(--color-text-muted)',
+          background: isActive ? `color-mix(in srgb, ${accentColor} 15%, transparent)` : 'color-mix(in srgb, var(--color-text-muted) 10%, transparent)',
+          color: isActive ? accentColor : 'var(--color-text-muted)',
         }}>
         {index + 1}
       </span>
 
-      {/* Mode badge */}
-      <div className="flex items-center gap-1 px-1.5 py-0.5 rounded-md flex-shrink-0"
-        style={{ background: `color-mix(in srgb, ${modeColor} 10%, transparent)` }}>
-        <ModeIcon className="w-3 h-3" style={{ color: modeColor }} />
-        <span className="text-[10px] font-semibold uppercase" style={{ color: modeColor }}>
-          {isPipeline ? 'Pipeline' : 'GPU'}
-        </span>
-      </div>
+      {/* Latency badge */}
+      {latencyBadge && (
+        <div className="flex items-center gap-1 px-1.5 py-0.5 rounded-md flex-shrink-0"
+          style={{ background: `color-mix(in srgb, ${latencyBadge.color} 10%, transparent)` }}>
+          <span className="text-[10px] font-semibold" style={{ color: latencyBadge.color }}>
+            {latencyBadge.label}
+          </span>
+        </div>
+      )}
+
+      {/* Stage pills */}
+      {activeStages.length > 0 && (
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {activeStages.map(stage => {
+            const stageColor = stage === 'stt' ? '#0ea5e9' : stage === 'llm' ? '#8b5cf6' : '#f59e0b';
+            const StageIcon = stage === 'stt' ? Mic : stage === 'llm' ? Bot : Volume2;
+            return (
+              <div key={stage} className="flex items-center gap-0.5 px-1 py-0.5 rounded flex-shrink-0"
+                style={{ background: `color-mix(in srgb, ${stageColor} 10%, transparent)` }}>
+                <StageIcon className="w-2.5 h-2.5" style={{ color: stageColor }} />
+                <span className="text-[9px] font-semibold uppercase" style={{ color: stageColor }}>{stage}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Name + summary */}
       {editing ? (
@@ -104,12 +118,12 @@ const ProfileItem = memo(function ProfileItem({
           onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') { setEditName(profile.name); setEditing(false); } }}
           onBlur={commitRename}
           className="flex-1 min-w-0 rounded-md border px-2 py-0.5 text-sm font-semibold"
-          style={{ borderColor: modeColor, background: 'var(--color-surface)', color: 'var(--color-text)', outline: 'none' }}
+          style={{ borderColor: accentColor, background: 'var(--color-surface)', color: 'var(--color-text)', outline: 'none' }}
         />
       ) : (
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
-            {isActive && <Check className="w-3.5 h-3.5 flex-shrink-0" style={{ color: modeColor }} />}
+            {isActive && <Check className="w-3.5 h-3.5 flex-shrink-0" style={{ color: accentColor }} />}
             <span className={`text-sm font-semibold truncate ${!isEnabled ? 'line-through' : ''}`}>{profile.name}</span>
           </div>
           <span className="text-[11px] truncate block" style={{ color: 'var(--color-text-muted)' }}>{summary}</span>
@@ -145,11 +159,10 @@ interface ProfilesPanelProps {
   setActiveProfileId: React.Dispatch<React.SetStateAction<string | null>>;
   onApplyProfile: (profile: ProviderProfile) => void;
   createCurrentProfile: (name: string) => ProviderProfile;
-  currentMode: 'pipeline' | 'gpu';
 }
 
 export default function ProfilesPanel({
-  profiles, setProfiles, activeProfileId, setActiveProfileId, onApplyProfile, createCurrentProfile, currentMode,
+  profiles, setProfiles, activeProfileId, setActiveProfileId, onApplyProfile, createCurrentProfile,
 }: ProfilesPanelProps) {
   const [newName, setNewName] = useState('');
   const [showInput, setShowInput] = useState(false);
@@ -195,8 +208,6 @@ export default function ProfilesPanel({
     setShowInput(false);
   };
 
-  const modeLabel = currentMode === 'pipeline' ? 'Pipeline' : 'GPU Deploy';
-
   return (
     <>
       <div className="rounded-xl border overflow-hidden" style={{ borderColor: 'var(--color-border)' }}>
@@ -205,7 +216,7 @@ export default function ProfilesPanel({
         }}>
           <p className="text-xs font-semibold">Profiles</p>
           <p className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
-            {profiles.length > 0 ? `${profiles.length} saved · click to load · toggle to enable/disable` : `Save ${modeLabel} config as a profile`}
+            {profiles.length > 0 ? `${profiles.length} saved · click to load · toggle to enable/disable` : 'Save current config as a profile'}
           </p>
         </div>
 
@@ -234,7 +245,7 @@ export default function ProfilesPanel({
             <button type="button" onClick={() => setShowInput(true)}
               className="flex items-center justify-center gap-1.5 w-full px-3 py-1.5 rounded-lg border border-dashed text-xs cursor-pointer transition-all hover:border-[var(--color-text-muted)]"
               style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
-              <Plus className="w-3 h-3" /> Save current {modeLabel} as profile
+              <Plus className="w-3 h-3" /> Save current config as profile
             </button>
           ) : (
             <div className="flex items-center gap-1.5">
