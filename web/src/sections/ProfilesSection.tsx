@@ -1852,7 +1852,19 @@ export function ProfilesSection() {
   // Detail state
   const [stages, setStages] = useState<ProfileStage[]>(() => DEFAULT_STAGES.map(s => ({ ...s, id: uid() })));
   const [latency, setLatency] = useState<Latency>('realtime');
-  const [services, setServices] = useState<ProfileService[]>([]);
+  const [services, setServices] = useState<ProfileService[]>(() =>
+    DEFAULT_DOCKER_IMAGES.map(img => ({
+      id: uid(),
+      name: `Babelcast ${img.label}`,
+      kind: 'gpu-pod' as const,
+      dockerImage: img.url,
+      gpuTypes: [],
+      gpuCloudProvider: 'vast',
+      ...(img.sttModel ? { sttModel: img.sttModel } : {}),
+      ...(img.llmModel ? { llmModel: img.llmModel } : {}),
+      ...(img.ttsModel ? { ttsModel: img.ttsModel } : {}),
+    }))
+  );
 
   // Convenience getters for backward compat (used by save/flow diagram)
   const sttStage = stages.find(s => s.key === 'stt' && s.enabled);
@@ -1870,23 +1882,22 @@ export function ProfilesSection() {
     const existing: ProfileService[] = (p.services && Array.isArray(p.services)) ? (p.services as ProfileService[]) : [];
     const result: ProfileService[] = [...existing];
 
-    // Migrate GPU pod from gpuDeploy (only if no gpu-pod service already exists)
+    // Migrate GPU pods: create one service per DEFAULT_DOCKER_IMAGES entry (only if no gpu-pod services yet)
     if (!result.some(s => s.kind === 'gpu-pod')) {
       const gpuDeploy = p.gpuDeploy as { dockerImage?: string; gpuTypes?: string[] } | undefined;
-      const dockerImage: string | undefined = gpuDeploy?.dockerImage ?? (p.gpuImage as string | undefined) ?? (p.dockerImage as string | undefined);
-      if (dockerImage) {
-        const gpuTypes: string[] = gpuDeploy?.gpuTypes ?? (p.gpuTypes as string[] | undefined) ?? [];
-        const gpuCloudProvider: string = (p.gpuProvider as string | undefined) ?? 'vast';
-        const imgBase = dockerImage.split('/').pop()?.replace(/:.*$/, '') ?? 'GPU Pod';
-        const name = imgBase.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-        const gpuStt = (p.stt as PipelineChainEntry[] | undefined)?.find(e => e.provider === 'gpu')?.model;
-        const gpuLlm = (p.llm as PipelineChainEntry[] | undefined)?.find(e => e.provider === 'gpu')?.model;
-        const gpuTts = (p.tts as PipelineChainEntry[] | undefined)?.find(e => e.provider === 'gpu')?.model;
+      const gpuTypes: string[] = gpuDeploy?.gpuTypes ?? (p.gpuTypes as string[] | undefined) ?? [];
+      const gpuCloudProvider: string = (p.gpuProvider as string | undefined) ?? 'vast';
+      for (const img of DEFAULT_DOCKER_IMAGES) {
         result.push({
-          id: uid(), name, kind: 'gpu-pod', dockerImage, gpuTypes, gpuCloudProvider,
-          ...(gpuStt ? { sttModel: gpuStt } : {}),
-          ...(gpuLlm ? { llmModel: gpuLlm } : {}),
-          ...(gpuTts ? { ttsModel: gpuTts } : {}),
+          id: uid(),
+          name: `Babelcast ${img.label}`,
+          kind: 'gpu-pod',
+          dockerImage: img.url,
+          gpuTypes,
+          gpuCloudProvider,
+          ...(img.sttModel ? { sttModel: img.sttModel } : {}),
+          ...(img.llmModel ? { llmModel: img.llmModel } : {}),
+          ...(img.ttsModel ? { ttsModel: img.ttsModel } : {}),
         });
       }
     }
