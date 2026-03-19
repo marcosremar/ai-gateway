@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, type GpuTypeInfo, type DockerManifest } from '@/lib/gateway';
+import { createPortal } from 'react-dom';
+import { getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, type GpuTypeInfo, type DockerManifest, type SpeechTransport } from '@/lib/gateway';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import {
   Card, CardHeader, CardBody, Button, FormSelect, FormInput, SectionHeader,
@@ -393,34 +394,8 @@ function ProfileFlowDiagram({
 
     testElapsedRef.current = setInterval(() => setTestRunningMs(Date.now() - testStartRef.current), 80);
 
-    // Poll request log for real-time per-stage completion
-    let baselineId = 0;
-    try { const { entries } = await getRequestLog(0, 1); if (entries.length) baselineId = entries[0].id; } catch {}
-
-    const seenStages = new Set<string>();
-    const stageKeys = stages.filter(s => s.enabled).map(s => s.key);
-    testPollRef.current = setInterval(async () => {
-      try {
-        const { entries } = await getRequestLog(baselineId, 20);
-        for (const entry of entries) {
-          if (seenStages.has(entry.stage)) continue;
-          seenStages.add(entry.stage);
-          const idx = stageKeys.indexOf(entry.stage);
-          if (idx === -1) continue;
-          setTestStages(prev => {
-            const next = prev.map((s, i) => {
-              if (s.key === entry.stage) return { ...s, state: 'done' as const, latencyMs: entry.latencyMs, provider: entry.provider };
-              if (i === idx + 1 && s.state === 'idle') return { ...s, state: 'active' as const };
-              return s;
-            });
-            testStagesRef.current = next;
-            return next;
-          });
-        }
-      } catch {}
-    }, 300);
-
     // Optimistic stage progression
+    const stageKeys = stages.filter(s => s.enabled).map(s => s.key);
     let lastAdvancedIdx = 0;
     testAdvanceRef.current = setInterval(() => {
       const elapsed = Date.now() - testStartRef.current;
@@ -442,45 +417,70 @@ function ProfileFlowDiagram({
       }
     }, 500);
 
-    try {
-      const result = await speechPipeline(audio, { source: testSrc, target: testTgt });
-      const stageTiming: Record<string, { ms: number; provider?: string }> = {
-        stt: { ms: result.timing.sttMs, provider: result.timing.sttProvider },
-        llm: { ms: result.timing.llmMs, provider: result.timing.llmProvider },
-        tts: { ms: result.timing.ttsMs, provider: result.timing.ttsProvider },
-      };
-      setTestStages(prev => {
-        const next = prev.map(s => ({
-          ...s,
-          state: (s.state === 'idle' || s.state === 'active') ? 'done' as const : s.state,
-          latencyMs: s.latencyMs ?? stageTiming[s.key]?.ms ?? undefined,
-          provider: s.provider ?? stageTiming[s.key]?.provider ?? undefined,
-        }));
-        testStagesRef.current = next;
-        return next;
-      });
-      setTestResult({
-        transcription: result.transcription, translation: result.response,
-        audioBase64: result.audioBase64, contentType: result.contentType,
-        totalMs: result.timing.totalMs || (Date.now() - testStartRef.current),
-        usedGpu: result.timing.usedGpu,
-        stages: testStagesRef.current,
-      });
-      // Show transport result for HTTP
-      setTransportResult('http', {
-        running: false,
-        totalMs: result.timing.totalMs || (Date.now() - testStartRef.current),
-        audioBase64: result.audioBase64,
-        contentType: result.contentType,
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Pipeline failed';
-      setTestError(msg);
-      setTestStages(prev => prev.map(s => ({ ...s, state: s.state === 'active' ? 'error' as const : s.state })));
-    } finally {
-      stopTestTimers();
-      setTestRunning(false);
+    // ── Fire all 3 transports in parallel via speechPipeline(transport:) ──
+    const transports: SpeechTransport[] = ['http', 'sse', 'ws'];
+    let firstResult = false;
+
+    for (const t of transports) {
+      setTransportResult(t, { running: true });
     }
+    setTransportResult('webrtc', { running: false, error: 'Not available' });
+
+    const promises = transports.map(t => {
+      const t0 = Date.now();
+      return speechPipeline(audio, { source: testSrc, target: testTgt, transport: t, timeoutMs: 10_000 })
+        .then(result => {
+          setTransportResult(t, {
+            running: false,
+            totalMs: result.timing.totalMs || (Date.now() - t0),
+            ttfacMs: result.timing.ttfacMs,
+            audioBase64: result.audioBase64,
+            contentType: result.contentType,
+          });
+          // First transport to finish populates the main result + stage timing
+          if (!firstResult) {
+            firstResult = true;
+            const stageTiming: Record<string, { ms: number; provider?: string }> = {
+              stt: { ms: result.timing.sttMs, provider: result.timing.sttProvider },
+              llm: { ms: result.timing.llmMs, provider: result.timing.llmProvider },
+              tts: { ms: result.timing.ttsMs, provider: result.timing.ttsProvider },
+            };
+            setTestStages(prev => {
+              const next = prev.map(s => ({
+                ...s,
+                state: 'done' as const,
+                latencyMs: s.latencyMs ?? stageTiming[s.key]?.ms,
+                provider: s.provider ?? stageTiming[s.key]?.provider,
+              }));
+              testStagesRef.current = next;
+              return next;
+            });
+            setTestResult({
+              transcription: result.transcription, translation: result.response,
+              audioBase64: result.audioBase64, contentType: result.contentType,
+              totalMs: result.timing.totalMs || (Date.now() - t0),
+              usedGpu: result.timing.usedGpu,
+              stages: testStagesRef.current,
+              ttfacMs: result.timing.ttfacMs,
+            });
+          }
+        })
+        .catch(e => {
+          setTransportResult(t, { running: false, error: e instanceof Error ? e.message : 'Failed' });
+        });
+    });
+
+    // Wait for all transports (success or failure)
+    await Promise.allSettled(promises);
+
+    // If no transport succeeded, show error
+    if (!firstResult) {
+      setTestError('All transports failed');
+      setTestStages(prev => prev.map(s => ({ ...s, state: s.state === 'active' ? 'error' as const : s.state })));
+    }
+
+    stopTestTimers();
+    setTestRunning(false);
   };
 
   const startTestRecording = async () => {
@@ -1155,18 +1155,25 @@ function ProfileFlowDiagram({
         )}
       </div>
 
-      {/* Stage hover tooltip — fixed position, never clipped */}
-      {hoveredStage && (() => {
+      {/* Stage hover tooltip — rendered via portal to escape overflow/transform ancestors */}
+      {hoveredStage && typeof document !== 'undefined' && (() => {
         const stage = stages.find(s => s.key === hoveredStage);
         if (!stage) return null;
         const ts = testStages.find(s => s.key === hoveredStage);
         const routing = gpu?.pipelineRouting?.[hoveredStage as 'stt' | 'llm' | 'tts'];
         const warmth = gpu?.modelWarmth?.[hoveredStage];
         const stageColor = stage.color;
-        const tipX = Math.min(mousePos.x - 144, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 296);
-        const tipY = mousePos.y - 12;
-        return (
-          <div className="fixed z-50 pointer-events-none" style={{ left: Math.max(8, tipX), top: tipY, transform: 'translateY(-100%)' }}>
+        const TOOLTIP_W = 288;
+        const TOOLTIP_H_EST = 300;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const tipX = Math.max(8, Math.min(mousePos.x - TOOLTIP_W / 2, vw - TOOLTIP_W - 8));
+        const spaceAbove = mousePos.y - 20;
+        const renderBelow = spaceAbove < TOOLTIP_H_EST;
+        const tipY = renderBelow ? mousePos.y + 16 : mousePos.y - 16;
+        return createPortal(
+          <div className="fixed z-[9999] pointer-events-none"
+            style={{ left: tipX, top: tipY, transform: renderBelow ? 'none' : 'translateY(-100%)', width: TOOLTIP_W }}>
             <div className="rounded-xl border shadow-2xl p-3 w-72 text-xs space-y-2.5"
               style={{
                 background: 'var(--color-surface-elevated)',
@@ -1314,7 +1321,7 @@ function ProfileFlowDiagram({
               )}
             </div>
           </div>
-        );
+        , document.body);
       })()}
     </div>
   );
