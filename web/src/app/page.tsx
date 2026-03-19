@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
 import { Sidebar, type SidebarItem } from '@/components/ui';
-import { LayoutDashboard, Settings2, Cpu, TestTube, Bot, Shield, ScrollText, Zap, KeyRound, Sparkles } from 'lucide-react';
+import { LayoutDashboard, Settings2, Cpu, TestTube, Bot, Shield, ScrollText, Zap, KeyRound, Sparkles, FlaskConical, LayoutList } from 'lucide-react';
 import { OverviewSection } from '@/sections/OverviewSection';
 import { ProvidersSection } from '@/sections/ProvidersSection';
 import { GpuDeploySection } from '@/sections/GpuDeploySection';
@@ -13,17 +13,21 @@ import { BotSection } from '@/sections/BotSection';
 import { ReputationSection } from '@/sections/ReputationSection';
 import { LogsSection } from '@/sections/LogsSection';
 import { ApiKeysSection } from '@/sections/ApiKeysSection';
+import { ProfilesSection } from '@/sections/ProfilesSection';
 import { PlaygroundSection } from '@/sections/PlaygroundSection';
+import { ReadinessSection } from '@/sections/ReadinessSection';
 
 const NAV_ITEMS: SidebarItem[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'api-keys', label: 'API Keys', icon: KeyRound },
+  { id: 'profiles', label: 'Profiles', icon: LayoutList },
   { id: 'providers', label: 'Providers', icon: Settings2 },
-  { id: 'gpu', label: 'GPU Deploy', icon: Cpu },
+  { id: 'deploy', label: 'Deploy', icon: Cpu },
   { id: 'playground', label: 'Playground', icon: Sparkles },
   { id: 'pipeline', label: 'Pipeline Test', icon: TestTube },
   { id: 'pathbench', label: 'Path Benchmark', icon: Zap },
   { id: 'bot', label: 'Bot', icon: Bot },
+  { id: 'readiness', label: 'GPU Readiness', icon: FlaskConical },
   { id: 'reputation', label: 'Reputation', icon: Shield },
   { id: 'logs', label: 'Logs & Metrics', icon: ScrollText },
 ];
@@ -100,12 +104,14 @@ function Dashboard() {
         <div className="max-w-6xl mx-auto">
           {activeTab === 'overview' && <OverviewSection />}
           {activeTab === 'api-keys' && <ApiKeysSection />}
+          {activeTab === 'profiles' && <ProfilesSection />}
           {activeTab === 'providers' && <ProvidersSection />}
-          {activeTab === 'gpu' && <GpuDeploySection />}
+          {activeTab === 'deploy' && <GpuDeploySection />}
           {activeTab === 'playground' && <PlaygroundSection />}
           {activeTab === 'pipeline' && <PipelineTestSection />}
           {activeTab === 'pathbench' && <PathBenchmarkSection />}
           {activeTab === 'bot' && <BotSection />}
+          {activeTab === 'readiness' && <ReadinessSection />}
           {activeTab === 'reputation' && <ReputationSection />}
           {activeTab === 'logs' && <LogsSection />}
         </div>

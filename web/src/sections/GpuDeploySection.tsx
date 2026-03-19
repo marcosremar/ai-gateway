@@ -1,19 +1,14 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import { deployGpu, terminateGpu, getGpuLogs, getProviderConfig, patchProviderConfig, getRankedGpuOffers, type GpuOffer } from '@/lib/gateway';
 import {
-  Card, CardHeader, CardBody, Button, FormSelect, FormInput, StatusBadge,
-  AlertBanner, CardSectionHeader, SectionHeader, SaveBar,
+  Card, CardHeader, CardBody, Button, FormSelect,
+  AlertBanner, CardSectionHeader, SectionHeader,
 } from '@/components/ui';
-import { Cpu, Play, Square, ScrollText, RefreshCw, Zap, ServerCog, AlertCircle, Loader2, Check, Timer, Shuffle, Search, X } from 'lucide-react';
-import { DOCKER_IMAGES, DEFAULT_DOCKER_IMAGES, GPU_TYPES, type ProviderProfile } from './provider-types';
-import ProfilesPanel from './ProfilesPanel';
-
-function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
-}
+import { Square, ScrollText, RefreshCw, Zap, ServerCog, AlertCircle, Loader2, Check, Timer, Shuffle, Search, X } from 'lucide-react';
+import { DOCKER_IMAGES, GPU_TYPES } from './provider-types';
 
 function formatUptime(sec: number): string {
   const h = Math.floor(sec / 3600);
@@ -47,19 +42,12 @@ export function GpuDeploySection() {
   const [image, setImage] = useState<string>(DOCKER_IMAGES[0].value);
   const [selectedGpus, setSelectedGpus] = useState<string[]>([GPU_TYPES[0].id]);
   const [provider, setProvider] = useState('');
-  const [raceCount, setRaceCount] = useState(1); // 1 = off, >1 = race N instances
+  const [raceCount, setRaceCount] = useState(1);
   const [deploying, setDeploying] = useState(false);
   const [terminating, setTerminating] = useState(false);
   const [logs, setLogs] = useState<string | null>(null);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-
-  // Profiles
-  const [gpuProfiles, setGpuProfiles] = useState<ProviderProfile[]>([]);
-  const [pipelineProfiles, setPipelineProfiles] = useState<ProviderProfile[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
-  const profilesLoaded = useRef(false);
-  const profilesSaveSkip = useRef(0);
 
   // Live GPU browser
   const [browseOpen, setBrowseOpen] = useState(false);
@@ -80,24 +68,11 @@ export function GpuDeploySection() {
   useEffect(() => {
     getProviderConfig().then((cfg: any) => {
       if (typeof cfg.idleTimeoutMin === 'number') setIdleTimeoutMin(cfg.idleTimeoutMin);
-      const all: ProviderProfile[] = cfg.profiles || [];
-      profilesSaveSkip.current = 1;
-      setPipelineProfiles(all.filter(p => (p.mode || 'pipeline') !== 'gpu'));
-      setGpuProfiles(all.filter(p => p.mode === 'gpu'));
-      if (cfg.activeProfileId) setActiveProfileId(cfg.activeProfileId);
-      profilesLoaded.current = true;
+      if (cfg.gpuImage) setImage(cfg.gpuImage);
+      if (cfg.gpuTypes?.length) setSelectedGpus(cfg.gpuTypes);
+      if (cfg.gpuProvider !== undefined) setProvider(cfg.gpuProvider);
     }).catch(() => {});
   }, []);
-
-  // Persist GPU profiles back (merged with pipeline profiles) whenever they change
-  useEffect(() => {
-    if (!profilesLoaded.current) return;
-    if (profilesSaveSkip.current > 0) { profilesSaveSkip.current--; return; }
-    patchProviderConfig({
-      profiles: [...pipelineProfiles, ...gpuProfiles],
-      activeProfileId,
-    } as any).catch(() => {});
-  }, [gpuProfiles, activeProfileId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function loadBrowseOffers() {
     setBrowseLoading(true);
@@ -204,41 +179,18 @@ export function GpuDeploySection() {
     setSelectedGpus(prev => prev.includes(gpuType) ? prev : [...prev, gpuType]);
   }
 
-  const applyProfile = useCallback((profile: ProviderProfile) => {
-    if (profile.gpuImage) setImage(profile.gpuImage);
-    if (profile.gpuTypes?.length) setSelectedGpus(profile.gpuTypes);
-    if (profile.gpuProvider !== undefined) setProvider(profile.gpuProvider);
-    setActiveProfileId(profile.id);
-  }, []);
-
-  const createCurrentProfile = useCallback((name: string): ProviderProfile => ({
-    id: uid(), name, mode: 'gpu', stt: [], llm: [], tts: [],
-    gpuImage: image, gpuTypes: [...selectedGpus], gpuProvider: provider,
-  }), [image, selectedGpus, provider]);
-
-  const selectedImageDesc = DEFAULT_DOCKER_IMAGES.find(d => d.url === image)?.description;
+  const selectedImageDesc = DOCKER_IMAGES.find(d => d.value === image)?.label;
   const providerLabel = provider === 'vast' ? 'Vast.ai' : provider === 'runpod' ? 'RunPod' : provider === 'tensordock' ? 'TensorDock' : provider === 'modal' ? 'Modal' : 'Auto';
 
   return (
     <div className="p-6 space-y-6">
       <SectionHeader
-        title="GPU Profile"
-        subtitle="Manage GPU profiles and deploy a self-hosted GPU pod for the full STT + LLM + TTS pipeline"
+        title="Deploy"
+        subtitle="Deploy a self-hosted GPU pod for the full STT + LLM + TTS pipeline"
       />
 
       {actionError && <AlertBanner variant="error">{actionError}</AlertBanner>}
       {gpuError && <AlertBanner variant="warning">Cannot fetch GPU status: {gpuError}</AlertBanner>}
-
-      {/* GPU Profiles */}
-      <ProfilesPanel
-        profiles={gpuProfiles}
-        setProfiles={setGpuProfiles}
-        activeProfileId={activeProfileId}
-        setActiveProfileId={setActiveProfileId}
-        onApplyProfile={applyProfile}
-        createCurrentProfile={createCurrentProfile}
-        currentMode="gpu"
-      />
 
       {/* Deploy Config */}
       <Card>
@@ -252,11 +204,6 @@ export function GpuDeploySection() {
               <FormSelect label="Docker Image" value={image} onChange={e => setImage(e.target.value)}>
                 {DOCKER_IMAGES.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
               </FormSelect>
-              {selectedImageDesc && (
-                <p className="mt-1.5 text-[11px] leading-relaxed" style={{ color: 'var(--color-text-muted)' }}>
-                  {selectedImageDesc}
-                </p>
-              )}
             </div>
             <FormSelect label="Provider" value={provider} onChange={e => setProvider(e.target.value)}>
               <option value="">Auto (best available)</option>
@@ -750,15 +697,6 @@ export function GpuDeploySection() {
           </pre>
         </CardBody>
       </Card>
-    </div>
-  );
-}
-
-function KV({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="flex justify-between gap-4">
-      <span className="flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>{label}</span>
-      <span className={`${mono ? 'font-mono text-xs' : ''} truncate text-right`}>{value}</span>
     </div>
   );
 }
