@@ -83,7 +83,7 @@ export class GatewayHttpClient {
     method: string,
     path: string,
     options: {
-      body?: BodyInit | null;
+      body?: BodyInit | Uint8Array | null;
       headers?: Record<string, string>;
       params?: Record<string, string>;
       timeoutMs?: number;
@@ -122,7 +122,7 @@ export class GatewayHttpClient {
         const response = await fetch(url.toString(), {
           method,
           headers,
-          body: options.body,
+          body: options.body as BodyInit,
           signal: AbortSignal.timeout(timeoutMs),
         });
 

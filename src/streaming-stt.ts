@@ -57,7 +57,8 @@ export class StreamingSTTBackend {
 
   connect(): void {
     // Bun exposes WebSocket globally (same API as browser but runs server-side)
-    const ws = new WebSocket(this.url, { headers: this.headers } as RequestInit);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ws = new WebSocket(this.url, { headers: this.headers } as any);
     this.ws = ws;
 
     ws.onopen = () => {

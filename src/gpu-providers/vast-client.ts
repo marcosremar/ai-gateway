@@ -1031,7 +1031,7 @@ export class VastClient extends AbstractGpuProvider {
       }
       // If response is 200 but data is null/empty, fall through to list API
     } catch (e) {
-      this.log.debug(`[vast] Direct instance lookup for ${instanceId} failed, trying list API: ${this.errMsg(e)}`);
+      this.log.debug(`[vast] Direct instance lookup for ${rawId} failed, trying list API: ${this.errMsg(e)}`);
     }
 
     // Fallback: list all instances and find the one we need
