@@ -414,13 +414,13 @@ function ProfileFlowDiagram({
   const [hoveredChip, setHoveredChip] = useState<{ stageKey: string; entryIdx: number } | null>(null);
   const [chipRect, setChipRect] = useState<DOMRect | null>(null);
   const hideTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scheduleHideTooltip = () => {
+  const scheduleHideTooltip = useCallback(() => {
     if (hideTooltipTimerRef.current) clearTimeout(hideTooltipTimerRef.current);
-    hideTooltipTimerRef.current = setTimeout(() => setHoveredChip(null), 200);
-  };
-  const cancelHideTooltip = () => {
-    if (hideTooltipTimerRef.current) clearTimeout(hideTooltipTimerRef.current);
-  };
+    hideTooltipTimerRef.current = setTimeout(() => setHoveredChip(null), 400);
+  }, []);
+  const cancelHideTooltip = useCallback(() => {
+    if (hideTooltipTimerRef.current) { clearTimeout(hideTooltipTimerRef.current); hideTooltipTimerRef.current = null; }
+  }, []);
   // mounted gate: avoids SSR/hydration mismatch with createPortal
   const [tooltipMounted, setTooltipMounted] = useState(false);
   useEffect(() => { setTooltipMounted(true); }, []);
@@ -1777,6 +1777,12 @@ function ProfileFlowDiagram({
             style={{ left: tipX, top: tipY, transform: renderBelow ? 'none' : 'translateY(-100%)', width: TOOLTIP_W }}
             onMouseEnter={cancelHideTooltip}
             onMouseLeave={scheduleHideTooltip}>
+            {/* Transparent bridge: fills gap between chip and tooltip so mouse doesn't leave hover area */}
+            <div className="absolute w-full" style={{
+              height: GAP + 4,
+              top: renderBelow ? -(GAP + 4) : '100%',
+              left: 0,
+            }} onMouseEnter={cancelHideTooltip} />
             <div className="rounded-xl border shadow-2xl text-xs overflow-hidden"
               style={{
                 background: 'var(--color-surface-elevated)',
