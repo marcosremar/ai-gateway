@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, speechPipelineSSE, speechPipelineWS, type GpuTypeInfo, type DockerManifest, type StreamCallbacks } from '@/lib/gateway';
+import { getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, type GpuTypeInfo, type DockerManifest } from '@/lib/gateway';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import {
   Card, CardHeader, CardBody, Button, FormSelect, FormInput, SectionHeader,
@@ -277,13 +277,26 @@ function pMeta(provider: string) {
 
 // ── Inline pipeline test types ──
 type TestStageState = 'idle' | 'active' | 'done' | 'error';
-interface TestStageStatus { key: string; state: TestStageState; latencyMs?: number; provider?: string; }
+interface TestStageStatus { key: string; state: TestStageState; latencyMs?: number; provider?: string; ttfacMs?: number; }
 interface TestResult {
   transcription?: string; translation?: string;
   audioBase64?: string; contentType?: string;
   totalMs?: number; usedGpu?: boolean;
   stages: TestStageStatus[];
   error?: string;
+  ttfacMs?: number;
+}
+
+type TestTransport = 'http' | 'sse' | 'ws' | 'webrtc';
+
+interface TransportLatency {
+  transport: TestTransport;
+  totalMs?: number;
+  ttfacMs?: number;
+  error?: string;
+  running: boolean;
+  audioBase64?: string;
+  contentType?: string;
 }
 
 interface FlowStage {
@@ -313,6 +326,13 @@ function ProfileFlowDiagram({
   ]);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
+  const [transportLatencies, setTransportLatencies] = useState<TransportLatency[]>([
+    { transport: 'http', running: false },
+    { transport: 'sse', running: false },
+    { transport: 'ws', running: false },
+    { transport: 'webrtc', running: false },
+  ]);
+  // SSE/WS/WebRTC are server-side only — UI uses HTTP API
   const testFileRef = useRef<HTMLInputElement>(null);
   const testAudioRef = useRef<HTMLAudioElement>(null);
   const [testPlaying, setTestPlaying] = useState(false);
@@ -325,10 +345,21 @@ function ProfileFlowDiagram({
   const testStagesRef = useRef(testStages);
   useEffect(() => { testStagesRef.current = testStages; }, [testStages]);
 
+  // ── Stage hover tooltip ──
+  const { gpu } = useGpuStatus(true, 10000);
+  const [hoveredStage, setHoveredStage] = useState<string | null>(null);
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+
   const resetTest = () => {
     setTestStages([{ key: 'stt', state: 'idle' }, { key: 'llm', state: 'idle' }, { key: 'tts', state: 'idle' }]);
     setTestResult(null); setTestError(null); setTestRunningMs(0);
     setTestAudioUrl(null); setTestPlaying(false);
+    setTransportLatencies([
+      { transport: 'http', running: false },
+      { transport: 'sse', running: false },
+      { transport: 'ws', running: false },
+      { transport: 'webrtc', running: false },
+    ]);
   };
 
   const testAdvanceRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -339,6 +370,11 @@ function ProfileFlowDiagram({
   };
 
   useEffect(() => () => stopTestTimers(), []);
+
+  /** Helper: update a single transport's latency entry */
+  const setTransportResult = (t: TestTransport, update: Partial<TransportLatency>) => {
+    setTransportLatencies(prev => prev.map(x => x.transport === t ? { ...x, ...update } : x));
+  };
 
   const runTest = async () => {
     const audio = testAudioFile || testRecordedBlob;
@@ -357,10 +393,10 @@ function ProfileFlowDiagram({
 
     testElapsedRef.current = setInterval(() => setTestRunningMs(Date.now() - testStartRef.current), 80);
 
+    // Poll request log for real-time per-stage completion
     let baselineId = 0;
     try { const { entries } = await getRequestLog(0, 1); if (entries.length) baselineId = entries[0].id; } catch {}
 
-    // Poll request log for real-time per-stage completion
     const seenStages = new Set<string>();
     const stageKeys = stages.filter(s => s.enabled).map(s => s.key);
     testPollRef.current = setInterval(async () => {
@@ -384,15 +420,13 @@ function ProfileFlowDiagram({
       } catch {}
     }, 300);
 
-    // Optimistic stage progression: advance through stages based on elapsed time
-    // so the user sees real-time visual feedback even if log polling is slow
+    // Optimistic stage progression
     let lastAdvancedIdx = 0;
     testAdvanceRef.current = setInterval(() => {
       const elapsed = Date.now() - testStartRef.current;
       const current = testStagesRef.current;
       const activeIdx = current.findIndex(s => s.state === 'active');
       if (activeIdx === -1) return;
-      // Advance every ~2s if poll hasn't caught the completion
       const shouldBeAt = Math.min(stageKeys.length - 1, Math.floor(elapsed / 2000));
       if (shouldBeAt > lastAdvancedIdx && activeIdx < shouldBeAt) {
         lastAdvancedIdx = shouldBeAt;
@@ -410,7 +444,6 @@ function ProfileFlowDiagram({
 
     try {
       const result = await speechPipeline(audio, { source: testSrc, target: testTgt });
-      // Apply per-stage timing + provider from the API response
       const stageTiming: Record<string, { ms: number; provider?: string }> = {
         stt: { ms: result.timing.sttMs, provider: result.timing.sttProvider },
         llm: { ms: result.timing.llmMs, provider: result.timing.llmProvider },
@@ -432,6 +465,13 @@ function ProfileFlowDiagram({
         totalMs: result.timing.totalMs || (Date.now() - testStartRef.current),
         usedGpu: result.timing.usedGpu,
         stages: testStagesRef.current,
+      });
+      // Show transport result for HTTP
+      setTransportResult('http', {
+        running: false,
+        totalMs: result.timing.totalMs || (Date.now() - testStartRef.current),
+        audioBase64: result.audioBase64,
+        contentType: result.contentType,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Pipeline failed';
@@ -559,7 +599,7 @@ function ProfileFlowDiagram({
       <div className="p-6">
         <div className="flex items-start gap-0">
 
-          {/* Pipeline input — interactive: click to record, or upload */}
+          {/* Pipeline input — compact controls: lang, record, upload, run */}
           {(() => {
             const firstStage = stages.find(s => s.enabled);
             const inType = firstStage?.input || 'audio';
@@ -567,15 +607,34 @@ function ProfileFlowDiagram({
             const isAudioInput = inType === 'audio';
             const hasAudio = !!(testAudioFile || testRecordedBlob);
             return (
-              <div className="flex flex-col items-center flex-shrink-0 gap-1">
+              <div className="flex flex-col items-center flex-shrink-0 gap-1.5" style={{ minWidth: '64px' }}>
+                {/* Language selects — compact inline */}
+                <div className="flex items-center gap-0.5">
+                  <select value={testSrc} onChange={e => setTestSrc(e.target.value)}
+                    className="text-[9px] font-bold uppercase rounded px-1 py-0.5 focus:outline-none w-[34px] text-center appearance-none cursor-pointer"
+                    style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: inColor, border: `1px solid color-mix(in srgb, ${inColor} 30%, transparent)` }}>
+                    {['auto','en','fr','es','de','pt','it','ja','zh','ko','ar','ru'].map(c => (
+                      <option key={c} value={c}>{c === 'auto' ? '?' : c.toUpperCase()}</option>
+                    ))}
+                  </select>
+                  <span className="text-[8px]" style={{ color: 'var(--color-text-muted)' }}>→</span>
+                  <select value={testTgt} onChange={e => setTestTgt(e.target.value)}
+                    className="text-[9px] font-bold uppercase rounded px-1 py-0.5 focus:outline-none w-[34px] text-center appearance-none cursor-pointer"
+                    style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: inColor, border: `1px solid color-mix(in srgb, ${inColor} 30%, transparent)` }}>
+                    {['en','fr','es','de','pt','it','ja','zh','ko','ar','ru'].map(c => (
+                      <option key={c} value={c}>{c.toUpperCase()}</option>
+                    ))}
+                  </select>
+                </div>
+
                 {/* Main input button */}
                 <button
                   type="button"
                   onClick={() => {
                     if (testRunning) return;
-                    if (isAudioInput) {
+                    if (hasAudio) { runTest(); }
+                    else if (isAudioInput) {
                       if (testRecording) { testMediaRef.current?.stop(); setTestRecording(false); }
-                      else if (hasAudio) { runTest(); }
                       else { startTestRecording(); }
                     } else {
                       testFileRef.current?.click();
@@ -590,39 +649,62 @@ function ProfileFlowDiagram({
                         : `color-mix(in srgb, ${inColor} 8%, var(--color-surface-elevated))`,
                     border: `1.5px solid ${testRecording ? 'rgba(239,68,68,0.4)' : hasAudio ? 'rgba(16,185,129,0.4)' : `color-mix(in srgb, ${inColor} 30%, transparent)`}`,
                   }}
-                  title={testRecording ? 'Stop recording' : hasAudio ? 'Run pipeline' : isAudioInput ? 'Click to record' : 'Click to upload'}
+                  title={testRecording ? 'Stop recording' : hasAudio ? 'Run all transports' : isAudioInput ? 'Click to record' : 'Click to upload'}
                 >
                   {testRecording ? (
                     <div className="w-3 h-3 rounded-sm bg-red-500 animate-pulse" />
                   ) : testRunning ? (
                     <Loader2 className="w-5 h-5 animate-spin" style={{ color: inColor }} />
                   ) : hasAudio ? (
-                    <Zap className="w-5 h-5" style={{ color: '#10b981' }} />
+                    <Play className="w-5 h-5" style={{ color: '#10b981' }} />
                   ) : (
                     <Mic className="w-5 h-5" style={{ color: inColor }} />
                   )}
                 </button>
-                {/* Label */}
-                <span className="text-[8px] font-bold uppercase tracking-wider"
+
+                {/* Action buttons row: record + upload */}
+                <div className="flex items-center gap-1">
+                  {isAudioInput && !testRunning && (
+                    <button type="button"
+                      onClick={() => {
+                        if (testRecording) { testMediaRef.current?.stop(); setTestRecording(false); }
+                        else startTestRecording();
+                      }}
+                      className="w-5 h-5 rounded flex items-center justify-center cursor-pointer transition-all"
+                      style={{
+                        background: testRecording ? 'color-mix(in srgb, #ef4444 15%, transparent)' : 'color-mix(in srgb, var(--color-text-muted) 10%, transparent)',
+                        border: `1px solid ${testRecording ? 'rgba(239,68,68,0.3)' : 'transparent'}`,
+                      }}
+                      title={testRecording ? 'Stop recording' : 'Record audio'}>
+                      {testRecording
+                        ? <div className="w-2 h-2 rounded-sm bg-red-500" />
+                        : <Mic className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />}
+                    </button>
+                  )}
+                  {!testRunning && (
+                    <button type="button" onClick={() => testFileRef.current?.click()}
+                      className="w-5 h-5 rounded flex items-center justify-center cursor-pointer"
+                      style={{ background: 'color-mix(in srgb, var(--color-text-muted) 10%, transparent)' }}
+                      title="Upload audio file">
+                      <Upload className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
+                    </button>
+                  )}
+                  {hasAudio && !testRunning && (
+                    <button type="button" onClick={() => { setTestAudioFile(null); setTestRecordedBlob(null); resetTest(); }}
+                      className="w-5 h-5 rounded flex items-center justify-center cursor-pointer"
+                      style={{ background: 'color-mix(in srgb, var(--color-text-muted) 10%, transparent)' }}
+                      title="Clear audio">
+                      <XIcon className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Status label */}
+                <span className="text-[8px] font-bold uppercase tracking-wider text-center"
                   style={{ color: testRecording ? '#ef4444' : hasAudio ? '#10b981' : inColor }}>
-                  {testRecording ? 'rec...' : hasAudio ? '▶ run' : inType}
+                  {testRecording ? 'rec...' : testRunning ? 'running' : hasAudio ? (testAudioFile?.name ? testAudioFile.name.slice(0, 8) : 'ready') : inType}
                 </span>
-                {/* Small upload link */}
-                {isAudioInput && !testRecording && !testRunning && (
-                  <button type="button" onClick={() => testFileRef.current?.click()}
-                    className="text-[7px] font-medium cursor-pointer hover:underline"
-                    style={{ color: 'var(--color-text-muted)' }}>
-                    upload
-                  </button>
-                )}
-                {/* Audio file indicator */}
-                {hasAudio && !testRunning && (
-                  <button type="button" onClick={() => { setTestAudioFile(null); setTestRecordedBlob(null); resetTest(); }}
-                    className="text-[7px] font-medium cursor-pointer hover:underline"
-                    style={{ color: 'var(--color-text-muted)' }}>
-                    clear
-                  </button>
-                )}
+
                 <input ref={testFileRef} type="file" accept="audio/*" className="hidden"
                   onChange={e => { const f = e.target.files?.[0]; if (f) { setTestAudioFile(f); setTestRecordedBlob(null); resetTest(); } e.target.value = ''; }} />
               </div>
@@ -670,8 +752,11 @@ function ProfileFlowDiagram({
                     : isDone ? 'color-mix(in srgb, #10b981 6%, var(--color-surface))'
                     : stage.enabled ? `color-mix(in srgb, ${stage.color} 6%, var(--color-surface))` : 'var(--color-surface)';
                   return (
-                    <div className="w-full border px-3 py-2 text-center relative overflow-hidden transition-all"
-                      style={{ borderRadius: '4px', borderColor: boxBorderColor, background: boxBg, borderTop: `3px solid ${boxTopColor}` }}>
+                    <div className="w-full border px-3 py-2 text-center relative overflow-hidden transition-all cursor-help"
+                      style={{ borderRadius: '4px', borderColor: boxBorderColor, background: boxBg, borderTop: `3px solid ${boxTopColor}` }}
+                      onMouseEnter={e => { setHoveredStage(stage.key); setMousePos({ x: e.clientX, y: e.clientY }); }}
+                      onMouseMove={e => setMousePos({ x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoveredStage(null)}>
                       {isActive && (
                         <div className="absolute inset-0 overflow-hidden pointer-events-none">
                           <div className="absolute inset-y-0 w-full opacity-15 animate-pulse"
@@ -692,11 +777,20 @@ function ProfileFlowDiagram({
                       </div>
                       {/* Timing — prominent display after completion */}
                       {isDone && ts?.latencyMs != null && (
-                        <div className="flex items-center justify-center gap-1 mt-1 px-2 py-0.5 rounded-md mx-auto"
-                          style={{ background: 'color-mix(in srgb, #10b981 10%, transparent)' }}>
-                          <span className="text-[10px] font-bold font-mono" style={{ color: '#10b981' }}>
-                            {ts.latencyMs < 1000 ? `${ts.latencyMs}ms` : `${(ts.latencyMs / 1000).toFixed(1)}s`}
-                          </span>
+                        <div className="flex flex-col items-center gap-0.5 mt-1">
+                          <div className="flex items-center justify-center gap-1 px-2 py-0.5 rounded-md"
+                            style={{ background: 'color-mix(in srgb, #10b981 10%, transparent)' }}>
+                            {ts.ttfacMs != null && stage.key === 'tts' && (
+                              <span className="text-[9px] font-bold font-mono" style={{ color: '#f59e0b' }}
+                                title="Time to First Audio Chunk">
+                                TTFAC: {ts.ttfacMs}ms
+                              </span>
+                            )}
+                            <span className="text-[10px] font-bold font-mono" style={{ color: '#10b981' }}>
+                              {ts.ttfacMs != null && stage.key === 'tts' ? 'Total: ' : ''}
+                              {ts.latencyMs < 1000 ? `${ts.latencyMs}ms` : `${(ts.latencyMs / 1000).toFixed(1)}s`}
+                            </span>
+                          </div>
                           {ts.provider && (
                             <span className="text-[8px] font-medium" style={{ color: 'var(--color-text-muted)' }}>
                               {ts.provider}
@@ -727,8 +821,15 @@ function ProfileFlowDiagram({
                   const mLabel = modelLabel(stage.key, entry);
                   const pi = PROVIDER_ICON[entry.provider];
                   const EntryIcon = pi?.icon;
-                  const iconColor = j === 0 ? (pi?.color ?? color) : 'var(--color-text-muted)';
-                  const chipColor = j === 0 ? color : 'var(--color-text-muted)';
+                  // Highlight the service pill that was actually used in the test
+                  const usedProvider = ts?.provider;
+                  const isUsedService = ts?.state === 'done' && usedProvider && (
+                    usedProvider === entry.provider ||
+                    usedProvider.startsWith(entry.provider + '/') ||
+                    (entry.provider === 'gpu' && usedProvider === 'gpu')
+                  );
+                  const iconColor = isUsedService ? '#10b981' : j === 0 ? (pi?.color ?? color) : 'var(--color-text-muted)';
+                  const chipColor = isUsedService ? '#10b981' : j === 0 ? color : 'var(--color-text-muted)';
                   return (
                     <div key={j} className="flex flex-col items-center w-full">
                       {j > 0 && (
@@ -740,15 +841,16 @@ function ProfileFlowDiagram({
                         </div>
                       )}
                       {/* Service chip — pill/oval shape (= "resource" shape) */}
-                      <div className="w-full flex flex-col items-center px-2 py-2 border gap-1"
+                      <div className={`w-full flex flex-col items-center px-2 py-2 border gap-1 transition-all ${isUsedService ? 'ring-1' : ''}`}
                         style={{
                           borderRadius: '20px',
-                          background: j === 0
-                            ? `color-mix(in srgb, ${color} 10%, var(--color-surface))`
-                            : 'var(--color-surface-elevated)',
-                          borderColor: j === 0
-                            ? `color-mix(in srgb, ${color} 35%, transparent)`
-                            : 'var(--color-border)',
+                          background: isUsedService
+                            ? 'color-mix(in srgb, #10b981 8%, var(--color-surface))'
+                            : j === 0 ? `color-mix(in srgb, ${color} 10%, var(--color-surface))` : 'var(--color-surface-elevated)',
+                          borderColor: isUsedService
+                            ? 'color-mix(in srgb, #10b981 40%, transparent)'
+                            : j === 0 ? `color-mix(in srgb, ${color} 35%, transparent)` : 'var(--color-border)',
+                          ...(isUsedService ? { ringColor: 'rgba(16,185,129,0.3)' } as React.CSSProperties : {}),
                         }}>
                         {/* Icon */}
                         {EntryIcon && (
@@ -767,6 +869,12 @@ function ProfileFlowDiagram({
                           <span className="text-[9px] truncate w-full text-center leading-tight"
                             style={{ color: 'var(--color-text-muted)' }}>
                             {mLabel}
+                          </span>
+                        )}
+                        {/* Used indicator with latency */}
+                        {isUsedService && ts?.latencyMs != null && (
+                          <span className="text-[8px] font-bold font-mono" style={{ color: '#10b981' }}>
+                            {ts.latencyMs < 1000 ? `${ts.latencyMs}ms` : `${(ts.latencyMs / 1000).toFixed(1)}s`}
                           </span>
                         )}
                       </div>
@@ -848,6 +956,80 @@ function ProfileFlowDiagram({
           })()}
         </div>
 
+        {/* Transport latency comparison — visible right below the flow */}
+        {transportLatencies.some(t => t.totalMs != null || t.error || t.running) && (
+          <div className="flex items-stretch gap-2 mt-4 pt-3" style={{ borderTop: '1px solid var(--color-border)' }}>
+            {transportLatencies.map(t => {
+              const TRANSPORT_COLORS: Record<string, string> = { http: '#64748b', sse: '#8b5cf6', ws: '#0ea5e9', webrtc: '#f59e0b' };
+              const color = TRANSPORT_COLORS[t.transport] || '#8b949e';
+              const maxMs = Math.max(...transportLatencies.filter(x => x.totalMs).map(x => x.totalMs!), 1);
+              const barPct = t.totalMs ? Math.max(8, (t.totalMs / maxMs) * 100) : 0;
+              const completedWithTime = transportLatencies.filter(x => x.totalMs != null);
+              const isFastest = t.totalMs != null && completedWithTime.length > 1 && t.totalMs === Math.min(...completedWithTime.map(x => x.totalMs!));
+              return (
+                <div key={t.transport} className="flex-1 rounded-lg border px-2.5 py-2 flex flex-col gap-1"
+                  style={{
+                    borderColor: isFastest ? `color-mix(in srgb, ${color} 50%, transparent)` : 'var(--color-border)',
+                    background: isFastest ? `color-mix(in srgb, ${color} 6%, var(--color-surface))` : 'var(--color-surface)',
+                  }}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color }}>
+                      {t.transport}
+                    </span>
+                    {t.running && <Loader2 className="w-3 h-3 animate-spin" style={{ color }} />}
+                    {isFastest && <Zap className="w-3 h-3" style={{ color }} />}
+                  </div>
+                  {t.totalMs != null ? (
+                    <>
+                      <div className="h-1.5 rounded-full overflow-hidden" style={{ background: `color-mix(in srgb, ${color} 12%, transparent)` }}>
+                        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${barPct}%`, background: color }} />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] font-bold font-mono" style={{ color }}>
+                          {t.totalMs < 1000 ? `${t.totalMs}ms` : `${(t.totalMs / 1000).toFixed(2)}s`}
+                        </span>
+                        {t.ttfacMs != null && (
+                          <span className="text-[9px] font-mono" style={{ color: 'var(--color-text-muted)' }}>
+                            TTFAC {t.ttfacMs}ms
+                          </span>
+                        )}
+                        {t.audioBase64 && (
+                          <button type="button"
+                            className="w-5 h-5 rounded-full flex items-center justify-center ml-auto flex-shrink-0 cursor-pointer transition-all hover:scale-110"
+                            style={{ background: `color-mix(in srgb, ${color} 15%, transparent)` }}
+                            title={`Play ${t.transport.toUpperCase()} audio`}
+                            onClick={() => {
+                              try {
+                                const binary = atob(t.audioBase64!);
+                                const bytes = new Uint8Array(binary.length);
+                                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                                const blob = new Blob([bytes], { type: t.contentType || 'audio/wav' });
+                                const url = URL.createObjectURL(blob);
+                                const a = new Audio(url);
+                                a.onended = () => URL.revokeObjectURL(url);
+                                a.play();
+                              } catch {}
+                            }}>
+                            <Play className="w-3 h-3" style={{ color }} />
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  ) : t.error ? (
+                    <span className="text-[10px]" style={{ color: t.transport === 'webrtc' ? 'var(--color-text-muted)' : '#ef4444' }}>
+                      {t.transport === 'webrtc' ? '—' : t.error.length > 40 ? t.error.slice(0, 37) + '...' : t.error}
+                    </span>
+                  ) : t.running ? (
+                    <span className="text-[10px] animate-pulse" style={{ color }}>running...</span>
+                  ) : (
+                    <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>—</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {/* Legend */}
         {(() => {
           const allEntries = [...sttChain, ...llmChain, ...ttsChain];
@@ -908,66 +1090,9 @@ function ProfileFlowDiagram({
           );
         })()}
 
-        {/* ── Inline Test Panel ── */}
-        <div className="mt-3 border-t" style={{ borderColor: 'var(--color-border)' }}>
-          <button type="button" onClick={() => { setTestOpen(o => !o); if (!testOpen) resetTest(); }}
-            className="w-full flex items-center gap-2 px-1 py-2.5 text-xs font-semibold cursor-pointer hover:opacity-80 transition-opacity"
-            style={{ color: 'var(--color-text-muted)' }}>
-            <Zap className="w-3.5 h-3.5" style={{ color: testOpen ? '#fbbf24' : undefined }} />
-            <span style={{ color: testOpen ? '#fbbf24' : undefined }}>Try this pipeline</span>
-            <span className="ml-auto text-[10px]">{testOpen ? '▲' : '▼'}</span>
-          </button>
-
-          {testOpen && (
-            <div className="pb-3 space-y-3">
-              {/* Language + audio controls row */}
-              <div className="flex items-center gap-2 flex-wrap">
-                <select value={testSrc} onChange={e => setTestSrc(e.target.value)}
-                  className="text-xs rounded-lg border px-2 py-1.5 focus:outline-none"
-                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}>
-                  {['auto','en','fr','es','de','pt','it','ja','zh','ko','ar','ru'].map(c => (
-                    <option key={c} value={c}>{c === 'auto' ? 'Auto' : c.toUpperCase()}</option>
-                  ))}
-                </select>
-                <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>→</span>
-                <select value={testTgt} onChange={e => setTestTgt(e.target.value)}
-                  className="text-xs rounded-lg border px-2 py-1.5 focus:outline-none"
-                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}>
-                  {['en','fr','es','de','pt','it','ja','zh','ko','ar','ru'].map(c => (
-                    <option key={c} value={c}>{c.toUpperCase()}</option>
-                  ))}
-                </select>
-
-                <Button variant="outline" size="sm" onClick={() => testFileRef.current?.click()} disabled={testRunning}>
-                  <Upload className="w-3 h-3" /> Upload
-                </Button>
-
-                {!testRecording ? (
-                  <Button variant="outline" size="sm" onClick={startTestRecording} disabled={testRunning}>
-                    <Mic className="w-3 h-3" /> Record
-                  </Button>
-                ) : (
-                  <Button variant="outline" size="sm" onClick={() => { testMediaRef.current?.stop(); setTestRecording(false); }}>
-                    <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> Stop
-                  </Button>
-                )}
-
-                {(testAudioFile || testRecordedBlob) && (
-                  <span className="text-[10px] flex items-center gap-1 px-2 py-1 rounded"
-                    style={{ background: 'color-mix(in srgb, #10b981 8%, transparent)', color: '#10b981' }}>
-                    <Check className="w-2.5 h-2.5" />
-                    {testAudioFile?.name ?? 'Recorded'}
-                  </span>
-                )}
-
-                <div className="ml-auto">
-                  <Button variant="primary" size="sm" onClick={runTest}
-                    isLoading={testRunning} loadingText="Running…"
-                    disabled={!(testAudioFile || testRecordedBlob) || testRunning}>
-                    <Zap className="w-3 h-3" /> Run
-                  </Button>
-                </div>
-              </div>
+        {/* ── Test Results (auto-shows when results exist) ── */}
+        {(testResult || testError) && (
+          <div className="mt-3 pt-3 space-y-2" style={{ borderTop: '1px solid var(--color-border)' }}>
 
               {/* Results */}
               {testError && (
@@ -984,6 +1109,11 @@ function ProfileFlowDiagram({
                     {testResult.totalMs != null && (
                       <span className="flex items-center gap-1">
                         <Clock className="w-2.5 h-2.5" /> {(testResult.totalMs / 1000).toFixed(2)}s total
+                      </span>
+                    )}
+                    {testResult.ttfacMs != null && (
+                      <span className="flex items-center gap-1" style={{ color: '#f59e0b' }}>
+                        <Timer className="w-2.5 h-2.5" /> TTFAC: {testResult.ttfacMs}ms
                       </span>
                     )}
                     {testResult.usedGpu && (
@@ -1021,10 +1151,171 @@ function ProfileFlowDiagram({
                   )}
                 </div>
               )}
-            </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
+
+      {/* Stage hover tooltip — fixed position, never clipped */}
+      {hoveredStage && (() => {
+        const stage = stages.find(s => s.key === hoveredStage);
+        if (!stage) return null;
+        const ts = testStages.find(s => s.key === hoveredStage);
+        const routing = gpu?.pipelineRouting?.[hoveredStage as 'stt' | 'llm' | 'tts'];
+        const warmth = gpu?.modelWarmth?.[hoveredStage];
+        const stageColor = stage.color;
+        const tipX = Math.min(mousePos.x - 144, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 296);
+        const tipY = mousePos.y - 12;
+        return (
+          <div className="fixed z-50 pointer-events-none" style={{ left: Math.max(8, tipX), top: tipY, transform: 'translateY(-100%)' }}>
+            <div className="rounded-xl border shadow-2xl p-3 w-72 text-xs space-y-2.5"
+              style={{
+                background: 'var(--color-surface-elevated)',
+                borderColor: `color-mix(in srgb, ${stageColor} 40%, var(--color-border))`,
+                boxShadow: `0 12px 40px rgba(0,0,0,0.4), 0 0 0 1px color-mix(in srgb, ${stageColor} 20%, transparent)`,
+              }}>
+              {/* Header */}
+              <div className="flex items-center gap-2 pb-2 border-b" style={{ borderColor: 'var(--color-border)' }}>
+                <div className="w-4 h-1 rounded-full flex-shrink-0" style={{ background: stageColor }} />
+                <span className="font-bold uppercase tracking-wider text-[11px]" style={{ color: stageColor }}>{stage.label}</span>
+                <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{stage.sublabel}</span>
+                {routing && (
+                  <span className="ml-auto text-[9px] font-bold uppercase px-1.5 py-0.5 rounded flex-shrink-0"
+                    style={{
+                      background: routing === 'local' ? 'color-mix(in srgb, #f59e0b 15%, transparent)' : 'color-mix(in srgb, #38bdf8 15%, transparent)',
+                      color: routing === 'local' ? '#f59e0b' : '#38bdf8',
+                    }}>
+                    {routing === 'local' ? 'GPU' : routing}
+                  </span>
+                )}
+              </div>
+
+              {/* Services in fallback chain */}
+              {stage.chain.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>
+                    Services ({stage.chain.length})
+                  </div>
+                  {stage.chain.map((entry, i) => {
+                    const meta = pMeta(entry.provider);
+                    const pi = PROVIDER_ICON[entry.provider];
+                    const EntryIcon = pi?.icon;
+                    const color = pi?.color ?? meta.color;
+                    const svc = entry.provider === 'gpu'
+                      ? (services.find(s => s.kind === 'gpu-pod' && s.id === entry.model) ?? services.find(s => s.kind === 'gpu-pod'))
+                      : null;
+                    const mLabel = modelLabel(hoveredStage, entry);
+                    return (
+                      <div key={i} className="flex items-start gap-2 rounded-lg p-1.5"
+                        style={{ background: i === 0 ? `color-mix(in srgb, ${color} 8%, transparent)` : 'transparent' }}>
+                        {EntryIcon && <EntryIcon className="w-3 h-3 flex-shrink-0 mt-0.5" style={{ color }} />}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1">
+                            <span className="font-semibold truncate" style={{ color }}>{entryLabel(entry)}</span>
+                            {i > 0 && <span className="text-[8px] flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>fallback</span>}
+                          </div>
+                          {mLabel && <div className="text-[9px] truncate" style={{ color: 'var(--color-text-muted)' }}>{mLabel}</div>}
+                          {svc && (
+                            <div className="text-[9px] mt-0.5 space-y-0.5">
+                              {svc.dockerImage && (
+                                <div className="font-mono truncate opacity-70" style={{ color: 'var(--color-text-muted)' }}>
+                                  {svc.dockerImage.split('/').pop()}
+                                </div>
+                              )}
+                              {svc.gpuTypes && svc.gpuTypes.length > 0 && (
+                                <div className="truncate opacity-70" style={{ color: 'var(--color-text-muted)' }}>
+                                  {svc.gpuTypes.slice(0, 2).join(', ')}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Active GPU runtime */}
+              {gpu && (gpu.gpuType || gpu.dockerImage) && (
+                <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--color-border)' }}>
+                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>
+                    Active GPU
+                  </div>
+                  {gpu.gpuType && (
+                    <div className="flex items-center gap-1.5">
+                      <Cpu className="w-2.5 h-2.5 flex-shrink-0" style={{ color: '#f59e0b' }} />
+                      <span className="font-medium" style={{ color: '#f59e0b' }}>{gpu.gpuType}</span>
+                    </div>
+                  )}
+                  {gpu.dockerImage && (
+                    <div className="flex items-center gap-1.5">
+                      <Package className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
+                      <span className="font-mono text-[9px] truncate" style={{ color: 'var(--color-text-muted)' }}>
+                        {gpu.dockerImage.split('/').pop()}
+                      </span>
+                    </div>
+                  )}
+                  {gpu.costPerHr != null && (
+                    <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                      ${gpu.costPerHr.toFixed(3)}/hr · {gpu.provider}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Model warmth stats */}
+              {warmth && (
+                <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--color-border)' }}>
+                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>
+                    Model Stats
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <div>
+                      <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Requests</div>
+                      <div className="font-bold font-mono" style={{ color: stageColor }}>{warmth.requests}</div>
+                    </div>
+                    <div>
+                      <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Avg latency</div>
+                      <div className="font-bold font-mono" style={{ color: stageColor }}>
+                        {warmth.avgLatencyMs < 1000 ? `${Math.round(warmth.avgLatencyMs)}ms` : `${(warmth.avgLatencyMs / 1000).toFixed(1)}s`}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Last test result */}
+              {ts && ts.state === 'done' && ts.latencyMs != null && (
+                <div className="pt-2 border-t space-y-1" style={{ borderColor: 'var(--color-border)' }}>
+                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>
+                    Last Request
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <div>
+                      <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Latency</div>
+                      <div className="font-bold font-mono" style={{ color: '#10b981' }}>
+                        {ts.latencyMs < 1000 ? `${ts.latencyMs}ms` : `${(ts.latencyMs / 1000).toFixed(1)}s`}
+                      </div>
+                    </div>
+                    {ts.provider && (
+                      <div>
+                        <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Provider</div>
+                        <div className="font-medium truncate max-w-[100px]" style={{ color: 'var(--color-text)' }}>{ts.provider}</div>
+                      </div>
+                    )}
+                    {ts.ttfacMs != null && stage.key === 'tts' && (
+                      <div>
+                        <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>TTFAC</div>
+                        <div className="font-bold font-mono" style={{ color: '#f59e0b' }}>{ts.ttfacMs}ms</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
