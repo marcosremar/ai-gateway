@@ -111,6 +111,16 @@ export interface GpuStatusResponse {
   modelWarmth?: Record<string, { requests: number; avgLatencyMs: number }>;
   region?: string;
   ipLocation?: { country: string; countryCode: string; city: string; flag: string };
+  machineInfo?: {
+    instanceId: string | null;
+    ramGb: number | null;
+    gpuVramGb: number | null;
+    diskGb: number | null;
+    numGpus: number | null;
+    inetDownMbps: number | null;
+    inetUpMbps: number | null;
+    cpuCores: number | null;
+  };
 }
 
 export async function getGpuStatus(): Promise<GpuStatusResponse> {
