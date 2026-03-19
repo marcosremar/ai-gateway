@@ -166,6 +166,85 @@ export function OverviewSection() {
         <StatCard icon={Activity} label="Requests" value={String(health.latency.samples)} color="#fbbf24" />
       </div>
 
+      {/* GPU Instances + Bot — half-width each */}
+      <div className="grid grid-cols-2 gap-3">
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <IconBox icon={Cpu} color="#60a5fa" />
+                <h3 className="text-sm font-semibold">GPU Instances</h3>
+                {gpuInstances.length > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded font-bold"
+                    style={{ background: 'rgba(96,165,250,0.1)', color: '#60a5fa' }}>
+                    {gpuInstances.length}
+                  </span>
+                )}
+              </div>
+            </div>
+          </CardHeader>
+          <CardBody>
+            {gpuInstances.length === 0 ? (
+              <div className="text-center py-4">
+                <Cpu className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--color-text-muted)', opacity: 0.3 }} />
+                <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No GPU deployed</p>
+              </div>
+            ) : (
+              <div className="divide-y" style={{ borderColor: 'var(--color-border-light)' }}>
+                {gpuInstances.map(inst => {
+                  const isReady = inst.isActive || inst.status === 'ready';
+                  return (
+                    <div key={inst.instanceId} className="py-3 first:pt-0 last:pb-0 flex items-center gap-3">
+                      <StatusDot status={isReady ? 'ready' : ['creating','booting','loading'].includes(inst.status) ? 'booting' : 'idle'} />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-semibold capitalize truncate">
+                          {inst.gpuType || inst.provider}
+                          {inst.isActive && (
+                            <span className="ml-1.5 text-[9px] px-1 py-0.5 rounded font-bold uppercase"
+                              style={{ background: 'rgba(16,185,129,0.12)', color: '#34d399' }}>active</span>
+                          )}
+                        </div>
+                        <div className="text-[10px] truncate" style={{ color: 'var(--color-text-muted)' }}>
+                          {inst.provider}{inst.elapsedSec != null ? ` · ${formatUptime(inst.elapsedSec)}` : ''}
+                          {inst.costPerHr ? ` · $${inst.costPerHr.toFixed(3)}/hr` : ''}
+                        </div>
+                      </div>
+                      <StatusBadge variant={gpuVariant(inst.status)} dot>{inst.status}</StatusBadge>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <IconBox icon={Bot} color="#a78bfa" />
+                <h3 className="text-sm font-semibold">Bot</h3>
+              </div>
+              {bot && <StatusBadge variant={bot.status === 'idle' ? 'gray' : bot.status === 'joined' ? 'emerald' : 'amber'} dot>{bot.status}</StatusBadge>}
+            </div>
+          </CardHeader>
+          <CardBody>
+            {bot && bot.status !== 'idle' ? (
+              <div className="space-y-2 text-xs">
+                {bot.podId && <KV label="Pod" value={bot.podId} mono />}
+                {bot.meetingUrl && <KV label="Meeting" value={bot.meetingUrl} mono />}
+                <KV label="Uptime" value={formatUptime(bot.elapsedSec)} />
+              </div>
+            ) : (
+              <div className="text-center py-3">
+                <Bot className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--color-text-muted)', opacity: 0.3 }} />
+                <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No bot active</p>
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      </div>
+
       {/* Active Pipeline — always show STT → LLM → TTS */}
       <Card>
         <CardHeader>
@@ -317,88 +396,6 @@ export function OverviewSection() {
           </div>
         </div>
       )}
-
-      {/* GPU instances — single card with list */}
-      <div className="space-y-4">
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <IconBox icon={Cpu} color="#60a5fa" />
-                <h3 className="text-sm font-semibold">GPU Instances</h3>
-                {gpuInstances.length > 0 && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded font-bold"
-                    style={{ background: 'rgba(96,165,250,0.1)', color: '#60a5fa' }}>
-                    {gpuInstances.length}
-                  </span>
-                )}
-              </div>
-            </div>
-          </CardHeader>
-          <CardBody>
-            {gpuInstances.length === 0 ? (
-              <div className="text-center py-4">
-                <Cpu className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--color-text-muted)', opacity: 0.3 }} />
-                <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No GPU deployed</p>
-              </div>
-            ) : (
-              <div className="divide-y" style={{ borderColor: 'var(--color-border-light)' }}>
-                {gpuInstances.map(inst => {
-                  const isReady = inst.isActive || inst.status === 'ready';
-                  return (
-                    <div key={inst.instanceId} className="py-3 first:pt-0 last:pb-0 flex items-center gap-3">
-                      <StatusDot status={isReady ? 'ready' : ['creating','booting','loading'].includes(inst.status) ? 'booting' : 'idle'} />
-                      {/* Provider + GPU */}
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs font-semibold capitalize truncate">
-                          {inst.gpuType || inst.provider}
-                          {inst.isActive && (
-                            <span className="ml-1.5 text-[9px] px-1 py-0.5 rounded font-bold uppercase"
-                              style={{ background: 'rgba(16,185,129,0.12)', color: '#34d399' }}>active</span>
-                          )}
-                        </div>
-                        <div className="text-[10px] truncate" style={{ color: 'var(--color-text-muted)' }}>
-                          {inst.provider}{inst.elapsedSec != null ? ` · ${formatUptime(inst.elapsedSec)}` : ''}
-                          {inst.costPerHr ? ` · $${inst.costPerHr.toFixed(3)}/hr` : ''}
-                        </div>
-                      </div>
-                      {/* Status badge */}
-                      <StatusBadge variant={gpuVariant(inst.status)} dot>{inst.status}</StatusBadge>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </CardBody>
-        </Card>
-
-        {/* Bot */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <IconBox icon={Bot} color="#a78bfa" />
-                <h3 className="text-sm font-semibold">Bot</h3>
-              </div>
-              {bot && <StatusBadge variant={bot.status === 'idle' ? 'gray' : bot.status === 'joined' ? 'emerald' : 'amber'} dot>{bot.status}</StatusBadge>}
-            </div>
-          </CardHeader>
-          <CardBody>
-            {bot && bot.status !== 'idle' ? (
-              <div className="space-y-2 text-xs">
-                {bot.podId && <KV label="Pod" value={bot.podId} mono />}
-                {bot.meetingUrl && <KV label="Meeting" value={bot.meetingUrl} mono />}
-                <KV label="Uptime" value={formatUptime(bot.elapsedSec)} />
-              </div>
-            ) : (
-              <div className="text-center py-3">
-                <Bot className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--color-text-muted)', opacity: 0.3 }} />
-                <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No bot active</p>
-              </div>
-            )}
-          </CardBody>
-        </Card>
-      </div>
 
       {/* Budget */}
       {health.budget && health.budget.dailySpendUsd > 0 && (
