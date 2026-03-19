@@ -418,15 +418,15 @@ function ProfileFlowDiagram({
       }
     }, 500);
 
-    // ── Fire all transports in parallel via speechPipeline(transport:) ──
-    // WebRTC uses HTTP fallback (real WebRTC needs Pipecat infra)
+    // ── Fire all transports in parallel — no fallbacks, each must succeed on its own ──
     const transports: SpeechTransport[] = ['http', 'sse', 'ws'];
-    const allTransports: TestTransport[] = ['http', 'sse', 'ws', 'webrtc'];
     let firstResult = false;
 
-    for (const t of allTransports) {
+    for (const t of transports) {
       setTransportResult(t, { running: true });
     }
+    // WebRTC: not implemented yet — error immediately
+    setTransportResult('webrtc', { running: false, error: 'Not implemented (needs Pipecat + STUN/TURN)' });
 
     /** Estimate WAV audio duration from base64 */
     const estimateAudioDuration = (b64: string): number | undefined => {
@@ -482,10 +482,7 @@ function ProfileFlowDiagram({
         });
     };
 
-    const promises = [
-      ...transports.map(t => runTransport(t, t)),
-      runTransport('webrtc', 'http'), // WebRTC fallback via HTTP (real WebRTC needs Pipecat)
-    ];
+    const promises = transports.map(t => runTransport(t, t));
 
     // Wait for all transports (success or failure)
     await Promise.allSettled(promises);
@@ -1037,8 +1034,8 @@ function ProfileFlowDiagram({
                       </div>
                     </>
                   ) : t.error ? (
-                    <span className="text-[10px]" style={{ color: t.transport === 'webrtc' ? 'var(--color-text-muted)' : '#ef4444' }}>
-                      {t.transport === 'webrtc' ? '—' : t.error.length > 40 ? t.error.slice(0, 37) + '...' : t.error}
+                    <span className="text-[10px]" style={{ color: '#ef4444' }}>
+                      {t.error!.length > 40 ? t.error!.slice(0, 37) + '...' : t.error}
                     </span>
                   ) : t.running ? (
                     <span className="text-[10px] animate-pulse" style={{ color }}>running...</span>
@@ -1266,28 +1263,72 @@ function ProfileFlowDiagram({
                 </div>
               )}
 
-              {/* Active GPU runtime (when GPU is up) */}
-              {isGpuEntry && gpu && (gpu.gpuType || gpu.costPerHr != null) && (
+              {/* Active GPU machine info (when GPU is up) */}
+              {isGpuEntry && gpu && gpu.status === 'ready' && (
                 <div className="pt-2 border-t space-y-1.5" style={{ borderColor: 'var(--color-border)' }}>
-                  <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>Active GPU</div>
+                  <div className="flex items-center justify-between">
+                    <div className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>Running machine</div>
+                    {routing && (
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded"
+                        style={{
+                          background: routing === 'gpu' || routing === 'local' ? 'color-mix(in srgb, #10b981 15%, transparent)' : 'color-mix(in srgb, #94a3b8 15%, transparent)',
+                          color: routing === 'gpu' || routing === 'local' ? '#10b981' : '#94a3b8',
+                        }}>
+                        {routing === 'gpu' || routing === 'local' ? '● active' : '○ standby'}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* GPU model — prominent */}
                   {gpu.gpuType && (
+                    <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg"
+                      style={{ background: 'color-mix(in srgb, #f59e0b 10%, transparent)', border: '1px solid color-mix(in srgb, #f59e0b 25%, transparent)' }}>
+                      <Cpu className="w-3 h-3 flex-shrink-0" style={{ color: '#f59e0b' }} />
+                      <span className="font-bold text-[11px]" style={{ color: '#f59e0b' }}>{gpu.gpuType}</span>
+                    </div>
+                  )}
+
+                  {/* Location */}
+                  {(gpu.ipLocation || gpu.region) && (
                     <div className="flex items-center gap-1.5">
-                      <Cpu className="w-2.5 h-2.5 flex-shrink-0" style={{ color: '#f59e0b' }} />
-                      <span className="font-medium" style={{ color: '#f59e0b' }}>{gpu.gpuType}</span>
-                      {routing && (
-                        <span className="ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded"
-                          style={{
-                            background: routing === 'local' ? 'color-mix(in srgb, #f59e0b 15%, transparent)' : 'color-mix(in srgb, #38bdf8 15%, transparent)',
-                            color: routing === 'local' ? '#f59e0b' : '#38bdf8',
-                          }}>
-                          {routing === 'local' ? 'local' : routing}
+                      <span className="text-sm leading-none flex-shrink-0">
+                        {gpu.ipLocation?.flag ?? '🌍'}
+                      </span>
+                      <span style={{ color: 'var(--color-text)' }}>
+                        {gpu.ipLocation
+                          ? `${gpu.ipLocation.city}, ${gpu.ipLocation.country}`
+                          : gpu.region}
+                      </span>
+                      {gpu.region && (
+                        <span className="font-mono text-[9px] ml-auto" style={{ color: 'var(--color-text-muted)' }}>
+                          {gpu.region}
                         </span>
                       )}
                     </div>
                   )}
-                  {gpu.costPerHr != null && (
-                    <div className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
-                      ${gpu.costPerHr.toFixed(3)}/hr · {gpu.provider}
+
+                  {/* Provider + cost + uptime */}
+                  <div className="flex items-center gap-3 text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                    {gpu.provider && <span className="capitalize">{gpu.provider}</span>}
+                    {gpu.costPerHr != null && gpu.costPerHr > 0 && (
+                      <span className="font-mono">${gpu.costPerHr.toFixed(3)}/hr</span>
+                    )}
+                    {gpu.elapsedSec > 0 && (
+                      <span className="ml-auto">
+                        up {gpu.elapsedSec < 3600
+                          ? `${Math.floor(gpu.elapsedSec / 60)}m`
+                          : `${(gpu.elapsedSec / 3600).toFixed(1)}h`}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Docker image */}
+                  {gpu.dockerImage && (
+                    <div className="flex items-center gap-1.5">
+                      <Package className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
+                      <span className="font-mono text-[9px] truncate" style={{ color: 'var(--color-text-muted)' }}>
+                        {gpu.dockerImage.split('/').pop()}
+                      </span>
                     </div>
                   )}
                 </div>
