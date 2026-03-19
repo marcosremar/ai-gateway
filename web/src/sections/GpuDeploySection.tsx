@@ -192,6 +192,29 @@ export function GpuDeploySection() {
       {actionError && <AlertBanner variant="error">{actionError}</AlertBanner>}
       {gpuError && <AlertBanner variant="warning">Cannot fetch GPU status: {gpuError}</AlertBanner>}
 
+      {/* What runs inside the pod */}
+      <div className="flex flex-wrap items-center gap-2 px-4 py-3 rounded-xl text-xs"
+        style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)' }}>
+        <span style={{ color: 'var(--color-text-muted)', flexShrink: 0, marginRight: 4 }}>Inside the pod:</span>
+        <span className="px-2.5 py-1 rounded-lg font-medium flex-shrink-0"
+          style={{ background: 'color-mix(in srgb, #38bdf8 10%, transparent)', color: '#38bdf8', border: '1px solid color-mix(in srgb, #38bdf8 30%, transparent)' }}>
+          STT · Whisper
+        </span>
+        <span style={{ color: 'var(--color-border)' }}>→</span>
+        <span className="px-2.5 py-1 rounded-lg font-medium flex-shrink-0"
+          style={{ background: 'color-mix(in srgb, #a78bfa 10%, transparent)', color: '#a78bfa', border: '1px solid color-mix(in srgb, #a78bfa 30%, transparent)' }}>
+          LLM · TranslateGemma
+        </span>
+        <span style={{ color: 'var(--color-border)' }}>→</span>
+        <span className="px-2.5 py-1 rounded-lg font-medium flex-shrink-0"
+          style={{ background: 'color-mix(in srgb, #fbbf24 10%, transparent)', color: '#fbbf24', border: '1px solid color-mix(in srgb, #fbbf24 30%, transparent)' }}>
+          TTS · Qwen3-TTS
+        </span>
+        <span style={{ color: 'var(--color-text-muted)', marginLeft: 'auto', flexShrink: 0 }}>
+          health: ~30s · fully warm: ~10 min
+        </span>
+      </div>
+
       {/* Deploy Config */}
       <Card>
         <CardHeader>

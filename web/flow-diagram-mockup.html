@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipeline Flow Diagram — Interactive HTML</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #09090b; --surface: #131316; --surface2: #1a1a1f; --border: #27272a;
+    --text: #fafafa; --muted: #71717a; --dim: #52525b;
+  }
+  body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; padding: 40px; }
+  h2 { font-size: 16px; margin-bottom: 20px; color: var(--muted); }
+
+  /* ── Flow container ── */
+  .flow-card {
+    border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+    background: var(--surface); max-width: 900px;
+  }
+  .flow-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--surface2);
+  }
+  .flow-header .name { font-size: 13px; font-weight: 700; }
+  .flow-header .latency {
+    font-size: 10px; font-weight: 600; padding: 4px 10px; border-radius: 8px;
+    background: rgba(16,185,129,0.08); color: #10b981;
+  }
+
+  .flow-body { padding: 24px; }
+
+  /* ── Pipeline row ── */
+  .pipeline {
+    display: flex; align-items: stretch; gap: 0;
+  }
+
+  /* ── I/O endpoint (mic / speaker) ── */
+  .io-endpoint {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    flex-shrink: 0; padding-top: 8px;
+  }
+  .io-box {
+    width: 44px; height: 44px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; transition: all 0.15s;
+  }
+  .io-label {
+    font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px;
+  }
+
+  /* ── Arrow connector ── */
+  .arrow {
+    display: flex; flex-direction: column; align-items: center;
+    width: 48px; flex-shrink: 0; padding-top: 4px;
+  }
+  .arrow .type-label {
+    font-size: 7px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;
+    margin-bottom: 2px; opacity: 0.8;
+  }
+  .arrow .line-wrap {
+    display: flex; align-items: center; width: 100%; margin-top: 14px;
+  }
+  .arrow .line { flex: 1; height: 1px; }
+  .arrow .tip {
+    width: 0; height: 0; flex-shrink: 0;
+    border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  }
+
+  /* ── Stage column ── */
+  .stage-col {
+    flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center;
+  }
+
+  /* Stage box (process) */
+  .stage-box {
+    width: 100%; border-radius: 6px; text-align: center;
+    padding: 10px 8px; position: relative; overflow: hidden;
+    transition: all 0.15s;
+  }
+  .stage-box .top-bar {
+    position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  }
+  .stage-box .stage-name {
+    font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px;
+  }
+  .stage-box .stage-sub {
+    font-size: 10px; color: var(--muted); margin-top: 2px;
+  }
+
+  /* I/O badges inside stage box */
+  .stage-io {
+    display: flex; justify-content: space-between; margin-top: 6px; gap: 4px;
+  }
+  .stage-io .io-badge {
+    font-size: 7px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+    padding: 2px 6px; border-radius: 4px; display: flex; align-items: center; gap: 3px;
+  }
+  .stage-io .io-badge .dot { width: 4px; height: 4px; border-radius: 50%; }
+
+  /* Vertical connector */
+  .v-connector {
+    width: 1px; height: 14px; flex-shrink: 0;
+  }
+
+  /* Service chip (oval) */
+  .service-chip {
+    width: 100%; border-radius: 20px; padding: 10px 8px;
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    transition: all 0.15s;
+  }
+  .service-chip .svc-icon {
+    width: 24px; height: 24px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center; font-size: 12px;
+  }
+  .service-chip .svc-name { font-size: 11px; font-weight: 600; text-align: center; line-height: 1.2; }
+  .service-chip .svc-model { font-size: 9px; color: var(--muted); text-align: center; }
+
+  /* Fallback label */
+  .fallback-label {
+    display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 2px 0;
+  }
+  .fallback-label .fl-line { width: 1px; height: 6px; background: var(--border); }
+  .fallback-label .fl-text { font-size: 7px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); }
+
+  /* ── Legend ── */
+  .legend {
+    display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+    border-top: 1px solid var(--border); flex-wrap: wrap;
+  }
+  .legend-group {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .legend-group .lg-label {
+    font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim);
+  }
+  .legend-item {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 9px; font-weight: 500; color: var(--muted);
+  }
+  .legend-item .li-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .legend-item .li-badge {
+    font-size: 8px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
+  }
+
+  /* ── Interactive test bar ── */
+  .test-bar {
+    display: flex; align-items: center; gap: 12px; padding: 10px 20px;
+    border-top: 1px solid var(--border); background: var(--surface2);
+    cursor: pointer;
+  }
+  .test-bar:hover { background: #1f1f24; }
+  .test-bar .tb-icon { font-size: 12px; }
+  .test-bar .tb-label { font-size: 11px; font-weight: 600; color: var(--muted); }
+
+  /* Utility */
+  .text-center { text-align: center; }
+</style>
+</head>
+<body>
+
+<h2>Pipeline Flow Diagram — Pure HTML/CSS (interactive mockup)</h2>
+
+<div class="flow-card">
+  <!-- Header -->
+  <div class="flow-header">
+    <span class="name">Real-time Translation + Dubbing</span>
+    <span class="latency">realtime &middot; &lt;300ms</span>
+  </div>
+
+  <!-- Flow body -->
+  <div class="flow-body">
+    <div class="pipeline">
+
+      <!-- ═══ Input endpoint ═══ -->
+      <div class="io-endpoint">
+        <div class="io-box" style="background: rgba(56,189,248,0.06); border: 1.5px solid rgba(56,189,248,0.25)">
+          <span style="font-size: 16px">🎤</span>
+        </div>
+        <span class="io-label" style="color: #38bdf8">audio</span>
+      </div>
+
+      <!-- ═══ Arrow: input → STT ═══ -->
+      <div class="arrow">
+        <span class="type-label" style="color: #38bdf8">audio</span>
+        <div class="line-wrap">
+          <div class="line" style="background: rgba(56,189,248,0.5)"></div>
+          <div class="tip" style="border-left: 6px solid rgba(56,189,248,0.6)"></div>
+        </div>
+      </div>
+
+      <!-- ═══ STT Stage ═══ -->
+      <div class="stage-col">
+        <div class="stage-box" style="border: 1.5px solid rgba(56,189,248,0.3); background: rgba(56,189,248,0.04)">
+          <div class="top-bar" style="background: #38bdf8"></div>
+          <div class="stage-name" style="color: #38bdf8">STT</div>
+          <div class="stage-sub">Speech → Text</div>
+          <div class="stage-io">
+            <span class="io-badge" style="background: rgba(56,189,248,0.1); color: #38bdf8">
+              <span class="dot" style="background: #38bdf8"></span> in: audio
+            </span>
+            <span class="io-badge" style="background: rgba(16,185,129,0.1); color: #10b981">
+              out: text <span class="dot" style="background: #10b981"></span>
+            </span>
+          </div>
+        </div>
+        <div class="v-connector" style="background: rgba(56,189,248,0.25)"></div>
+        <!-- Primary service -->
+        <div class="service-chip" style="border: 1px solid rgba(245,158,11,0.3); background: rgba(245,158,11,0.06)">
+          <div class="svc-icon" style="background: rgba(245,158,11,0.12)">⚙</div>
+          <div class="svc-name" style="color: #f59e0b">Babelcast Translategemma</div>
+          <div class="svc-model">Faster Whisper</div>
+        </div>
+        <!-- Fallback -->
+        <div class="fallback-label">
+          <div class="fl-line"></div>
+          <span class="fl-text">fallback</span>
+          <div class="fl-line"></div>
+        </div>
+        <div class="service-chip" style="border: 1px solid var(--border); background: var(--surface2)">
+          <div class="svc-icon" style="background: rgba(123,168,150,0.12)">⚡</div>
+          <div class="svc-name" style="color: var(--muted)">Groq</div>
+          <div class="svc-model">Whisper Large v3 Turbo</div>
+        </div>
+      </div>
+
+      <!-- ═══ Arrow: STT → LLM ═══ -->
+      <div class="arrow">
+        <span class="type-label" style="color: #a78bfa">text</span>
+        <div class="line-wrap">
+          <div class="line" style="background: rgba(139,92,246,0.5)"></div>
+          <div class="tip" style="border-left: 6px solid rgba(139,92,246,0.6)"></div>
+        </div>
+      </div>
+
+      <!-- ═══ LLM Stage ═══ -->
+      <div class="stage-col">
+        <div class="stage-box" style="border: 1.5px solid rgba(139,92,246,0.3); background: rgba(139,92,246,0.04)">
+          <div class="top-bar" style="background: #a78bfa"></div>
+          <div class="stage-name" style="color: #a78bfa">LLM</div>
+          <div class="stage-sub">Translation</div>
+          <div class="stage-io">
+            <span class="io-badge" style="background: rgba(139,92,246,0.1); color: #a78bfa">
+              <span class="dot" style="background: #a78bfa"></span> in: text
+            </span>
+            <span class="io-badge" style="background: rgba(16,185,129,0.1); color: #10b981">
+              out: text <span class="dot" style="background: #10b981"></span>
+            </span>
+          </div>
+        </div>
+        <div class="v-connector" style="background: rgba(139,92,246,0.25)"></div>
+        <div class="service-chip" style="border: 1px solid rgba(245,158,11,0.3); background: rgba(245,158,11,0.06)">
+          <div class="svc-icon" style="background: rgba(245,158,11,0.12)">⚙</div>
+          <div class="svc-name" style="color: #f59e0b">Babelcast Translategemma</div>
+          <div class="svc-model">TranslateGemma 12B</div>
+        </div>
+        <div class="fallback-label">
+          <div class="fl-line"></div>
+          <span class="fl-text">fallback</span>
+          <div class="fl-line"></div>
+        </div>
+        <div class="service-chip" style="border: 1px solid var(--border); background: var(--surface2)">
+          <div class="svc-icon" style="background: rgba(123,168,150,0.12)">⚡</div>
+          <div class="svc-name" style="color: var(--muted)">Groq</div>
+          <div class="svc-model">Llama 3.3 70B</div>
+        </div>
+      </div>
+
+      <!-- ═══ Arrow: LLM → TTS ═══ -->
+      <div class="arrow">
+        <span class="type-label" style="color: #fbbf24">text</span>
+        <div class="line-wrap">
+          <div class="line" style="background: rgba(251,191,36,0.5)"></div>
+          <div class="tip" style="border-left: 6px solid rgba(251,191,36,0.6)"></div>
+        </div>
+      </div>
+
+      <!-- ═══ TTS Stage ═══ -->
+      <div class="stage-col">
+        <div class="stage-box" style="border: 1.5px solid rgba(251,191,36,0.3); background: rgba(251,191,36,0.04)">
+          <div class="top-bar" style="background: #fbbf24"></div>
+          <div class="stage-name" style="color: #fbbf24">TTS</div>
+          <div class="stage-sub">Text → Speech</div>
+          <div class="stage-io">
+            <span class="io-badge" style="background: rgba(251,191,36,0.1); color: #fbbf24">
+              <span class="dot" style="background: #fbbf24"></span> in: text
+            </span>
+            <span class="io-badge" style="background: rgba(16,185,129,0.1); color: #10b981">
+              out: audio <span class="dot" style="background: #10b981"></span>
+            </span>
+          </div>
+        </div>
+        <div class="v-connector" style="background: rgba(251,191,36,0.25)"></div>
+        <div class="service-chip" style="border: 1px solid rgba(245,158,11,0.3); background: rgba(245,158,11,0.06)">
+          <div class="svc-icon" style="background: rgba(245,158,11,0.12)">⚙</div>
+          <div class="svc-name" style="color: #f59e0b">Babelcast Translategemma</div>
+          <div class="svc-model">Qwen3 TTS 0.6B</div>
+        </div>
+        <div class="fallback-label">
+          <div class="fl-line"></div>
+          <span class="fl-text">fallback</span>
+          <div class="fl-line"></div>
+        </div>
+        <div class="service-chip" style="border: 1px solid var(--border); background: var(--surface2)">
+          <div class="svc-icon" style="background: rgba(167,139,250,0.12)">🖥</div>
+          <div class="svc-name" style="color: var(--muted)">Modal</div>
+          <div class="svc-model">Qwen3-TTS 0.6B</div>
+        </div>
+      </div>
+
+      <!-- ═══ Arrow: TTS → output ═══ -->
+      <div class="arrow">
+        <span class="type-label" style="color: #fbbf24">audio</span>
+        <div class="line-wrap">
+          <div class="line" style="background: rgba(251,191,36,0.5)"></div>
+          <div class="tip" style="border-left: 6px solid rgba(251,191,36,0.6)"></div>
+        </div>
+      </div>
+
+      <!-- ═══ Output endpoint ═══ -->
+      <div class="io-endpoint">
+        <div class="io-box" style="background: rgba(251,191,36,0.06); border: 1.5px solid rgba(251,191,36,0.25)">
+          <span style="font-size: 16px">🔊</span>
+        </div>
+        <span class="io-label" style="color: #fbbf24">audio</span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend">
+    <div class="legend-group">
+      <span class="lg-label">Stage</span>
+      <span class="legend-item"><span class="li-badge" style="background: rgba(56,189,248,0.12); color: #38bdf8">STT</span> Speech-to-Text</span>
+      <span class="legend-item"><span class="li-badge" style="background: rgba(139,92,246,0.12); color: #a78bfa">LLM</span> Translation / AI</span>
+      <span class="legend-item"><span class="li-badge" style="background: rgba(251,191,36,0.12); color: #fbbf24">TTS</span> Text-to-Speech</span>
+    </div>
+    <div style="flex: 1"></div>
+    <div class="legend-group">
+      <span class="lg-label">Service</span>
+      <span class="legend-item"><span class="li-dot" style="background: #f59e0b"></span> GPU Pod</span>
+      <span class="legend-item"><span class="li-dot" style="background: #7ba896"></span> Groq</span>
+      <span class="legend-item"><span class="li-dot" style="background: #a78bfa"></span> Modal</span>
+    </div>
+  </div>
+
+  <!-- Test bar -->
+  <div class="test-bar" onclick="this.querySelector('.tb-label').textContent = 'Recording... click to stop'">
+    <span class="tb-icon">⚡</span>
+    <span class="tb-label">Try this pipeline</span>
+    <span style="flex:1"></span>
+    <span style="font-size: 10px; color: var(--dim)">▾</span>
+  </div>
+</div>
+
+<p style="margin-top: 24px; font-size: 11px; color: var(--dim); max-width: 900px; line-height: 1.6">
+  <strong>Key features of this HTML layout:</strong><br>
+  &bull; Each stage box shows <code>in: type</code> and <code>out: type</code> badges<br>
+  &bull; Input/output endpoints (mic/speaker) show the pipeline's overall I/O type<br>
+  &bull; Arrow connectors show the data type flowing between stages<br>
+  &bull; All pure HTML/CSS flexbox &mdash; no SVG, no absolute positioning<br>
+  &bull; Each element is a real DOM node that can have click handlers, inputs, tooltips
+</p>
+
+</body>
+</html>

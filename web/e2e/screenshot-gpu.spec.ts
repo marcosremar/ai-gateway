@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 test('capture GPU Deploy config', async ({ page }) => {
-  await page.goto('http://localhost:4000/providers');
+  await page.goto('http://localhost:4000/config/profiles');
   await page.waitForTimeout(1000);
   // Click GPU Deploy tab
   const gpuTab = page.locator('button').filter({ hasText: /^GPU Deploy/ }).first();

@@ -180,6 +180,51 @@ export async function getGpuLogs(): Promise<{ logs: string; endpoint: string | n
 
 // ── AI Pipeline ──
 
+export interface SpeechPipelineResponse {
+  transcription: string;
+  response: string;
+  audioBase64: string;
+  contentType: string;
+  timing: {
+    totalMs: number;
+    sttMs: number; llmMs: number; ttsMs: number;
+    sttProvider?: string; llmProvider?: string; ttsProvider?: string;
+    usedGpu: boolean;
+  };
+}
+
+export async function speechPipeline(
+  audio: Blob | ArrayBuffer,
+  opts: { source?: string; target?: string; speaker?: string } = {},
+): Promise<SpeechPipelineResponse> {
+  const qs = new URLSearchParams({ source: opts.source ?? 'fr', target: opts.target ?? 'en' });
+  if (opts.speaker) qs.set('speaker', opts.speaker);
+  const contentType = audio instanceof Blob ? (audio.type || 'audio/wav') : 'audio/wav';
+  const res = await gw(`/v1/speech?${qs}`, {
+    method: 'POST',
+    headers: { 'Content-Type': contentType },
+    body: audio instanceof Blob ? await audio.arrayBuffer() : audio,
+  });
+  if (!res.ok) throw new Error(`Pipeline ${res.status}: ${await res.text()}`);
+  const d = await res.json();
+  return {
+    transcription: d.transcription ?? '',
+    response: d.response ?? '',
+    audioBase64: d.audio_base64 ?? '',
+    contentType: d.content_type ?? 'audio/wav',
+    timing: {
+      totalMs: d.timing?.total_ms ?? 0,
+      sttMs: d.timing?.stt_ms ?? 0,
+      llmMs: d.timing?.llm_ms ?? 0,
+      ttsMs: d.timing?.tts_ms ?? 0,
+      sttProvider: d.timing?.stt_provider,
+      llmProvider: d.timing?.llm_provider,
+      ttsProvider: d.timing?.tts_provider,
+      usedGpu: d.timing?.used_gpu ?? false,
+    },
+  };
+}
+
 export async function translate(opts: { text: string; source_lang?: string; target_lang?: string }): Promise<{ translated_text: string; used_gpu: boolean }> {
   return gwPost('/v1/translate', opts);
 }
@@ -405,6 +450,8 @@ export interface ProviderProfile {
   stt: PipelineChainEntry[];
   llm: PipelineChainEntry[];
   tts: PipelineChainEntry[];
+  lastActivatedAt?: number;
+  lastRequestAt?: number;
 }
 
 export interface ProviderConfigResponse {
@@ -575,6 +622,25 @@ export async function getGpuTypes(provider?: string): Promise<{ gpuTypes: GpuTyp
   return gwJson(`/v1/gpu/types${provider ? `?provider=${encodeURIComponent(provider)}` : ""}`);
 }
 
+// ── Docker Image Inspection ──
+
+export interface DockerManifest {
+  image: string;
+  /** Declared services: 'stt' | 'llm' | 'tts' */
+  services: string[];
+  sttModel?: string;
+  llmModel?: string;
+  ttsModel?: string;
+  /** Transport protocol declared by image */
+  protocol: string;
+  version?: string;
+  rawLabels: Record<string, string>;
+}
+
+export async function inspectDockerImage(image: string): Promise<DockerManifest> {
+  return gwJson(`/v1/docker/inspect?image=${encodeURIComponent(image)}`);
+}
+
 // ── Latency Settings & Probe Schedule ──
 
 export type GpuSortBy = 'price' | 'balanced' | 'latency';
@@ -656,7 +722,7 @@ export async function getGpuDefaults(): Promise<{ defaults: string[] }> {
 // ── GPU Readiness ──
 
 export interface ServiceReadinessState {
-  phase: 'idle' | 'benchmarking' | 'ready' | 'failed' | 'repechage' | 'condemned';
+  phase: 'idle' | 'benchmarking' | 'ready' | 'degraded' | 'failed' | 'repechage' | 'condemned';
   completedRuns: number;
   bestLatencyMs: number | null;
   targetMs: number;

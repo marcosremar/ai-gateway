@@ -7,8 +7,9 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 export interface SidebarItem {
   id: string;
   label: string;
-  icon: LucideIcon;
+  icon?: LucideIcon;
   badge?: string;
+  divider?: boolean; // renders a section separator with optional label
 }
 
 interface SidebarProps {
@@ -59,8 +60,26 @@ export function Sidebar({ items, activeItem, onChange, health, error }: SidebarP
       <nav className="flex-1 overflow-y-auto py-2 px-2">
         <div className="space-y-0.5">
           {items.map((item) => {
+            if (item.divider) {
+              return (
+                <div key={item.id} className={collapsed ? 'py-2' : 'pt-3 pb-1'}>
+                  {!collapsed && item.label && (
+                    <span
+                      className="px-3 text-[10px] font-semibold uppercase tracking-widest"
+                      style={{ color: 'var(--color-text-muted)', opacity: 0.5 }}
+                    >
+                      {item.label}
+                    </span>
+                  )}
+                  {collapsed && (
+                    <div className="mx-2 border-t" style={{ borderColor: 'var(--color-border)' }} />
+                  )}
+                </div>
+              );
+            }
+
             const isActive = activeItem === item.id;
-            const Icon = item.icon;
+            const Icon = item.icon!;
             return (
               <button
                 key={item.id}
@@ -69,9 +88,6 @@ export function Sidebar({ items, activeItem, onChange, health, error }: SidebarP
                 className={[
                   'w-full flex items-center gap-3 rounded-lg text-sm font-medium transition-all cursor-pointer',
                   collapsed ? 'justify-center px-2 py-2.5' : 'px-3 py-2',
-                  isActive
-                    ? 'text-emerald-400'
-                    : 'hover:text-[var(--color-text)]',
                 ].join(' ')}
                 style={{
                   color: isActive ? '#10b981' : 'var(--color-text-muted)',

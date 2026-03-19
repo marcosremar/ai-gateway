@@ -15,3 +15,8 @@ export { CardSectionHeader } from './CardSectionHeader';
 export { ConfirmModal } from './ConfirmModal';
 export { SaveBar } from './SaveBar';
 export { useToast, ToastProvider } from './Toast';
+export { DropdownList } from './DropdownList';
+export type { DropdownOption, DropdownListProps } from './DropdownList';
+export { IconBox } from './IconBox';
+export { KV } from './KV';
+export { StatusDot } from './StatusDot';

@@ -146,6 +146,20 @@ const server = createServer(async (req, res) => {
     return json(res, base);
   }
 
+  // ── GPU List ──
+  if (method === 'GET' && url === '/v1/gpu/list') {
+    const instances = gpuStatus === 'idle' ? [] : [{
+      instanceId: 'pod-abc123',
+      provider: 'vast',
+      gpuType: 'NVIDIA RTX A6000',
+      status: gpuStatus,
+      isActive: gpuStatus === 'ready',
+      costPerHr: 0.42,
+      elapsedSec: 185,
+    }];
+    return json(res, { instances });
+  }
+
   // ── GPU Deploy ──
   if (method === 'POST' && url === '/v1/gpu/deploy') {
     const body = await readBody(req);

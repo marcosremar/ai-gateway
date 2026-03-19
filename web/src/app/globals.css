@@ -31,6 +31,37 @@
 }
 
 html { color-scheme: dark; }
+html.light { color-scheme: light; }
+
+html.light {
+  --color-bg: #f4f4f5;
+  --color-surface: #ffffff;
+  --color-surface-elevated: #f4f4f5;
+  --color-surface-hover: #e4e4e7;
+  --color-border: #d4d4d8;
+  --color-border-light: #e4e4e7;
+  --color-text: #18181b;
+  --color-text-secondary: #3f3f46;
+  --color-text-muted: #71717a;
+  --color-primary: #059669;
+  --color-primary-dim: #047857;
+  --color-btn-primary-bg: #059669;
+  --color-btn-primary-hover: #047857;
+  --color-btn-secondary-bg: #e4e4e7;
+  --color-btn-secondary-text: #3f3f46;
+  --color-btn-secondary-bg-hover: #d4d4d8;
+  --color-btn-outline-border: #d4d4d8;
+  --color-btn-outline-text: #52525b;
+  --color-btn-outline-bg-hover: #f4f4f5;
+  --color-btn-ghost-text: #52525b;
+  --color-btn-ghost-bg-hover: #f4f4f5;
+  --color-ink-300: #d4d4d8;
+  --color-ink-400: #a1a1aa;
+}
+
+html.light ::-webkit-scrollbar-thumb { background: #d4d4d8; }
+html.light ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+html.light input, html.light textarea, html.light select { color-scheme: light; }
 
 body {
   background: var(--color-bg);

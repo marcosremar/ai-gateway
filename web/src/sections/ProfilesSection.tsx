@@ -1,0 +1,2208 @@
+'use client';
+
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, type GpuTypeInfo, type DockerManifest } from '@/lib/gateway';
+import { useGpuStatus } from '@/hooks/useGpuStatus';
+import {
+  Card, CardHeader, CardBody, Button, FormSelect, FormInput, SectionHeader,
+  IconBox,
+} from '@/components/ui';
+import {
+  ChevronLeft, Mic, Plus, Check, Trash2, Circle,
+  CircleCheck, Package, Server, Bot, Volume2, Pencil, Clock, Gauge, Timer, Search, Loader2,
+  GripVertical, ClipboardCheck, Sparkles, Brain, Play, Square, Cpu, ScanSearch, AlertCircle,
+  Upload, Zap, X as XIcon,
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import Sortable from 'sortablejs';
+import {
+  DEFAULT_DOCKER_IMAGES, GPU_TYPES, GPU_TYPES_BY_PROVIDER, PIPELINE_CATALOG, GPU_PROVIDERS,
+  type PipelineChainEntry, type ProviderProfile,
+  type Latency, type ProfileService,
+} from './provider-types';
+import FallbackChainList, { PROVIDER_ICON } from './FallbackChainList';
+import ProfilesPanel from './ProfilesPanel';
+
+const DEFAULT_STT: PipelineChainEntry[] = [{ provider: 'groq', model: 'whisper-large-v3-turbo' }];
+const DEFAULT_LLM: PipelineChainEntry[] = [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }];
+const DEFAULT_TTS: PipelineChainEntry[] = [{ provider: 'gpu', model: 'qwen3-tts' }];
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
+}
+
+// ── Stage catalog ──
+
+export interface ProfileStage {
+  id: string;
+  key: string;          // 'stt' | 'llm' | 'tts' | 'eval' | custom
+  label: string;
+  chain: PipelineChainEntry[];
+  enabled: boolean;
+  input?: string;       // 'audio' | 'text' | 'vector' | custom
+  output?: string;
+}
+
+interface StageCatalogEntry {
+  key: string;
+  label: string;
+  subtitle: string;
+  icon: LucideIcon;
+  color: string;
+  defaultChain: PipelineChainEntry[];
+  input: string;
+  output: string;
+}
+
+const STAGE_CATALOG: StageCatalogEntry[] = [
+  { key: 'stt', label: 'STT', subtitle: 'Speech-to-Text', icon: Mic, color: '#0ea5e9', defaultChain: DEFAULT_STT, input: 'audio', output: 'text' },
+  { key: 'llm', label: 'LLM', subtitle: 'Translation', icon: Bot, color: '#8b5cf6', defaultChain: DEFAULT_LLM, input: 'text', output: 'text' },
+  { key: 'tts', label: 'TTS', subtitle: 'Text-to-Speech', icon: Volume2, color: '#f59e0b', defaultChain: DEFAULT_TTS, input: 'text', output: 'audio' },
+  { key: 'eval', label: 'Eval', subtitle: 'Quality Evaluation', icon: ClipboardCheck, color: '#10b981', defaultChain: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], input: 'text', output: 'text' },
+  { key: 'postprocess', label: 'Post', subtitle: 'Post-processing', icon: Sparkles, color: '#ec4899', defaultChain: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], input: 'text', output: 'text' },
+  { key: 'embedding', label: 'Embed', subtitle: 'Embedding', icon: Brain, color: '#06b6d4', defaultChain: [{ provider: 'openai', model: 'text-embedding-3-small' }], input: 'text', output: 'vector' },
+];
+
+const STAGE_ACCENT: Record<string, { color: string; Icon: LucideIcon }> = {};
+for (const s of STAGE_CATALOG) STAGE_ACCENT[s.key] = { color: s.color, Icon: s.icon };
+
+/** Default stages for a new profile */
+const DEFAULT_STAGES: ProfileStage[] = [
+  { id: uid(), key: 'stt', label: 'STT', chain: [...DEFAULT_STT], enabled: true },
+  { id: uid(), key: 'llm', label: 'LLM', chain: [...DEFAULT_LLM], enabled: true },
+  { id: uid(), key: 'tts', label: 'TTS', chain: [...DEFAULT_TTS], enabled: true },
+];
+
+/** Convert legacy stt/llm/tts fields to stages array */
+function profileToStages(p: ProviderProfile): ProfileStage[] {
+  const stages: ProfileStage[] = [];
+  if (p.stt !== undefined) stages.push({ id: uid(), key: 'stt', label: 'STT', chain: p.stt.length ? p.stt : DEFAULT_STT, enabled: true });
+  stages.push({ id: uid(), key: 'llm', label: 'LLM', chain: p.llm?.length ? p.llm : DEFAULT_LLM, enabled: true });
+  if (p.tts !== undefined) stages.push({ id: uid(), key: 'tts', label: 'TTS', chain: p.tts.length ? p.tts : DEFAULT_TTS, enabled: true });
+  // Load custom stages if present
+  if ((p as any).customStages) {
+    for (const cs of (p as any).customStages) {
+      stages.push({ id: uid(), key: cs.key, label: cs.label, chain: cs.chain || [], enabled: cs.enabled !== false });
+    }
+  }
+  return stages;
+}
+
+/** Convert stages array back to profile fields */
+function stagesToProfileFields(stages: ProfileStage[]): {
+  stt?: PipelineChainEntry[]; llm: PipelineChainEntry[]; tts?: PipelineChainEntry[];
+  customStages?: { key: string; label: string; chain: PipelineChainEntry[]; enabled: boolean }[];
+} {
+  const sttStage = stages.find(s => s.key === 'stt' && s.enabled);
+  const llmStage = stages.find(s => s.key === 'llm' && s.enabled);
+  const ttsStage = stages.find(s => s.key === 'tts' && s.enabled);
+  const custom = stages.filter(s => !['stt', 'llm', 'tts'].includes(s.key));
+  return {
+    stt: sttStage ? sttStage.chain : undefined,
+    llm: llmStage?.chain || DEFAULT_LLM,
+    tts: ttsStage ? ttsStage.chain : undefined,
+    ...(custom.length > 0 ? { customStages: custom.map(s => ({ key: s.key, label: s.label, chain: s.chain, enabled: s.enabled })) } : {}),
+  };
+}
+
+// ── Latency selector ──
+
+const LATENCY_OPTIONS: { value: Latency; label: string; sub: string; color: string; Icon: typeof Clock }[] = [
+  { value: 'realtime', label: 'realtime', sub: '<300ms', color: '#10b981', Icon: Gauge },
+  { value: 'low', label: 'low', sub: '<1s', color: '#3b82f6', Icon: Timer },
+  { value: 'batch', label: 'batch', sub: 'no limit', color: '#6b7280', Icon: Clock },
+];
+
+function LatencySelector({ value, onChange }: { value: Latency | undefined; onChange: (v: Latency) => void }) {
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      {LATENCY_OPTIONS.map(opt => {
+        const sel = value === opt.value;
+        const { Icon } = opt;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer"
+            style={{
+              background: sel ? `color-mix(in srgb, ${opt.color} 10%, transparent)` : 'transparent',
+              borderColor: sel ? `color-mix(in srgb, ${opt.color} 40%, transparent)` : 'var(--color-border)',
+              color: sel ? opt.color : 'var(--color-text-muted)',
+            }}
+          >
+            <Icon className="w-3.5 h-3.5 flex-shrink-0" />
+            <span className="font-semibold">{opt.label}</span>
+            <span className="opacity-60">{opt.sub}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Stage row ──
+
+const IO_OPTIONS = ['audio', 'text', 'vector', 'image'];
+
+interface StageRowProps {
+  stageKey: string;
+  label: string;
+  input: string;
+  output: string;
+  onChangeInput: (v: string) => void;
+  onChangeOutput: (v: string) => void;
+  chain: PipelineChainEntry[];
+  setChain: (c: PipelineChainEntry[]) => void;
+  enabled: boolean;
+  onToggle: () => void;
+  onRemove: () => void;
+  services: ProfileService[];
+}
+
+function StageRow({ stageKey, label, input, output, onChangeInput, onChangeOutput, chain, setChain, enabled, onToggle, onRemove, services }: StageRowProps) {
+  const catEntry = STAGE_CATALOG.find(s => s.key === stageKey);
+  const color = catEntry?.color ?? '#6b7280';
+  const Icon = catEntry?.icon ?? Sparkles;
+  const accent = { iconColor: color, dot: color };
+  const catalog = (PIPELINE_CATALOG as any)[stageKey];
+
+  return (
+    <div
+      className="rounded-xl border p-4 transition-all"
+      style={{
+        borderColor: enabled
+          ? `color-mix(in srgb, ${color} 25%, var(--color-border))`
+          : 'var(--color-border)',
+        background: 'var(--color-surface)',
+        opacity: enabled ? 1 : 0.55,
+      }}
+    >
+      <div className="flex items-center gap-3 mb-3">
+        <div className="stage-drag-handle cursor-grab active:cursor-grabbing p-0.5 rounded hover:bg-white/5">
+          <GripVertical className="w-3.5 h-3.5" style={{ color: 'var(--color-text-muted)' }} />
+        </div>
+        <IconBox icon={Icon} color={color} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold">{label}</span>
+            {catalog?.subtitle && (
+              <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                {catalog.subtitle}
+              </span>
+            )}
+            {!catalog && catEntry && (
+              <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                {catEntry.subtitle}
+              </span>
+            )}
+            {!enabled && (
+              <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded"
+                style={{ background: 'color-mix(in srgb, var(--color-text-muted) 12%, transparent)', color: 'var(--color-text-muted)' }}>
+                disabled
+              </span>
+            )}
+          </div>
+        </div>
+        {/* I/O type pills */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <select value={input} onChange={e => onChangeInput(e.target.value)}
+            className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-md border-none cursor-pointer appearance-none text-center"
+            style={{ background: 'color-mix(in srgb, #38bdf8 10%, transparent)', color: '#38bdf8', width: 'auto', minWidth: '44px' }}
+            title="Input type">
+            {IO_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+          <span className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>→</span>
+          <select value={output} onChange={e => onChangeOutput(e.target.value)}
+            className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-md border-none cursor-pointer appearance-none text-center"
+            style={{ background: 'color-mix(in srgb, #10b981 10%, transparent)', color: '#10b981', width: 'auto', minWidth: '44px' }}
+            title="Output type">
+            {IO_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+        </div>
+        <button
+          type="button"
+          onClick={onToggle}
+          className="text-[10px] font-medium px-2 py-1 rounded border cursor-pointer transition-all"
+          style={{
+            borderColor: enabled
+              ? `color-mix(in srgb, ${color} 30%, var(--color-border))`
+              : 'var(--color-border)',
+            color: enabled ? color : 'var(--color-text-muted)',
+            background: enabled
+              ? `color-mix(in srgb, ${color} 6%, transparent)`
+              : 'transparent',
+          }}
+        >
+          {enabled ? 'enabled' : 'disabled'}
+        </button>
+        <button type="button" onClick={onRemove}
+          className="p-1 rounded hover:bg-red-500/10 cursor-pointer transition-colors"
+          title="Remove stage">
+          <Trash2 className="w-3.5 h-3.5 text-red-400" />
+        </button>
+      </div>
+      {enabled && (
+        <FallbackChainList
+          stage={stageKey as any}
+          chain={chain}
+          setChain={setChain}
+          accent={accent}
+          services={services}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Service card ──
+
+// ── Profile Flow Diagram ──
+
+const PROVIDER_META: Record<string, { label: string; color: string; type: string }> = {
+  gpu:          { label: 'GPU Pod',    color: '#f59e0b', type: 'Self-hosted' },
+  groq:         { label: 'Groq',       color: '#7ba896', type: 'Cloud API'   },
+  modal:        { label: 'Modal',      color: '#a78bfa', type: 'Serverless'  },
+  'modal-moss': { label: 'Modal MOSS', color: '#c084fc', type: 'Serverless'  },
+  openai:       { label: 'OpenAI',     color: '#8b8fc7', type: 'Cloud API'   },
+  deepgram:     { label: 'Deepgram',   color: '#6366f1', type: 'Cloud API'   },
+  elevenlabs:   { label: 'ElevenLabs', color: '#f43f5e', type: 'Cloud API'   },
+  fireworks:    { label: 'Fireworks',  color: '#e07a3a', type: 'Cloud API'   },
+  openrouter:   { label: 'OpenRouter', color: '#34d399', type: 'Cloud API'   },
+  ollama:       { label: 'Ollama',     color: '#94a3b8', type: 'Self-hosted' },
+};
+function pMeta(provider: string) {
+  return PROVIDER_META[provider] ?? { label: provider, color: '#8b949e', type: 'API' };
+}
+
+// ── Inline pipeline test types ──
+type TestStageState = 'idle' | 'active' | 'done' | 'error';
+interface TestStageStatus { key: string; state: TestStageState; latencyMs?: number; provider?: string; }
+interface TestResult {
+  transcription?: string; translation?: string;
+  audioBase64?: string; contentType?: string;
+  totalMs?: number; usedGpu?: boolean;
+  stages: TestStageStatus[];
+  error?: string;
+}
+
+interface FlowStage {
+  key: string; label: string; sublabel: string;
+  chain: PipelineChainEntry[]; enabled: boolean; color: string;
+  input: string; output: string;
+}
+
+function ProfileFlowDiagram({
+  sttChain, llmChain, ttsChain, sttEnabled, ttsEnabled, services, latency, name,
+}: {
+  sttChain: PipelineChainEntry[]; llmChain: PipelineChainEntry[]; ttsChain: PipelineChainEntry[];
+  sttEnabled: boolean; ttsEnabled: boolean;
+  services: ProfileService[]; latency: Latency; name?: string;
+}) {
+  // ── Inline test panel state ──
+  const [testOpen, setTestOpen] = useState(false);
+  const [testSrc, setTestSrc] = useState('fr');
+  const [testTgt, setTestTgt] = useState('en');
+  const [testAudioFile, setTestAudioFile] = useState<File | null>(null);
+  const [testRecordedBlob, setTestRecordedBlob] = useState<Blob | null>(null);
+  const [testRecording, setTestRecording] = useState(false);
+  const [testRunning, setTestRunning] = useState(false);
+  const [testRunningMs, setTestRunningMs] = useState(0);
+  const [testStages, setTestStages] = useState<TestStageStatus[]>([
+    { key: 'stt', state: 'idle' }, { key: 'llm', state: 'idle' }, { key: 'tts', state: 'idle' },
+  ]);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const testFileRef = useRef<HTMLInputElement>(null);
+  const testAudioRef = useRef<HTMLAudioElement>(null);
+  const [testPlaying, setTestPlaying] = useState(false);
+  const [testAudioUrl, setTestAudioUrl] = useState<string | null>(null);
+  const testMediaRef = useRef<MediaRecorder | null>(null);
+  const testChunksRef = useRef<Blob[]>([]);
+  const testPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const testElapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const testStartRef = useRef(0);
+  const testStagesRef = useRef(testStages);
+  useEffect(() => { testStagesRef.current = testStages; }, [testStages]);
+
+  const resetTest = () => {
+    setTestStages([{ key: 'stt', state: 'idle' }, { key: 'llm', state: 'idle' }, { key: 'tts', state: 'idle' }]);
+    setTestResult(null); setTestError(null); setTestRunningMs(0);
+    setTestAudioUrl(null); setTestPlaying(false);
+  };
+
+  const testAdvanceRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopTestTimers = () => {
+    if (testPollRef.current) { clearInterval(testPollRef.current); testPollRef.current = null; }
+    if (testElapsedRef.current) { clearInterval(testElapsedRef.current); testElapsedRef.current = null; }
+    if (testAdvanceRef.current) { clearInterval(testAdvanceRef.current); testAdvanceRef.current = null; }
+  };
+
+  useEffect(() => () => stopTestTimers(), []);
+
+  const runTest = async () => {
+    const audio = testAudioFile || testRecordedBlob;
+    if (!audio) return;
+    resetTest();
+    setTestRunning(true);
+    testStartRef.current = Date.now();
+
+    const initStages: TestStageStatus[] = [
+      { key: 'stt', state: 'active', provider: sttChain[0]?.provider },
+      { key: 'llm', state: 'idle', provider: llmChain[0]?.provider },
+      { key: 'tts', state: 'idle', provider: ttsChain[0]?.provider },
+    ];
+    setTestStages(initStages);
+    testStagesRef.current = initStages;
+
+    testElapsedRef.current = setInterval(() => setTestRunningMs(Date.now() - testStartRef.current), 80);
+
+    let baselineId = 0;
+    try { const { entries } = await getRequestLog(0, 1); if (entries.length) baselineId = entries[0].id; } catch {}
+
+    // Poll request log for real-time per-stage completion
+    const seenStages = new Set<string>();
+    const stageKeys = stages.filter(s => s.enabled).map(s => s.key);
+    testPollRef.current = setInterval(async () => {
+      try {
+        const { entries } = await getRequestLog(baselineId, 20);
+        for (const entry of entries) {
+          if (seenStages.has(entry.stage)) continue;
+          seenStages.add(entry.stage);
+          const idx = stageKeys.indexOf(entry.stage);
+          if (idx === -1) continue;
+          setTestStages(prev => {
+            const next = prev.map((s, i) => {
+              if (s.key === entry.stage) return { ...s, state: 'done' as const, latencyMs: entry.latencyMs, provider: entry.provider };
+              if (i === idx + 1 && s.state === 'idle') return { ...s, state: 'active' as const };
+              return s;
+            });
+            testStagesRef.current = next;
+            return next;
+          });
+        }
+      } catch {}
+    }, 300);
+
+    // Optimistic stage progression: advance through stages based on elapsed time
+    // so the user sees real-time visual feedback even if log polling is slow
+    let lastAdvancedIdx = 0;
+    testAdvanceRef.current = setInterval(() => {
+      const elapsed = Date.now() - testStartRef.current;
+      const current = testStagesRef.current;
+      const activeIdx = current.findIndex(s => s.state === 'active');
+      if (activeIdx === -1) return;
+      // Advance every ~2s if poll hasn't caught the completion
+      const shouldBeAt = Math.min(stageKeys.length - 1, Math.floor(elapsed / 2000));
+      if (shouldBeAt > lastAdvancedIdx && activeIdx < shouldBeAt) {
+        lastAdvancedIdx = shouldBeAt;
+        setTestStages(prev => {
+          const next = prev.map((s, i) => {
+            if (i === activeIdx && s.state === 'active' && !s.latencyMs) return { ...s, state: 'done' as const };
+            if (i === activeIdx + 1 && s.state === 'idle') return { ...s, state: 'active' as const };
+            return s;
+          });
+          testStagesRef.current = next;
+          return next;
+        });
+      }
+    }, 500);
+
+    try {
+      const result = await speechPipeline(audio, { source: testSrc, target: testTgt });
+      // Apply per-stage timing + provider from the API response
+      const stageTiming: Record<string, { ms: number; provider?: string }> = {
+        stt: { ms: result.timing.sttMs, provider: result.timing.sttProvider },
+        llm: { ms: result.timing.llmMs, provider: result.timing.llmProvider },
+        tts: { ms: result.timing.ttsMs, provider: result.timing.ttsProvider },
+      };
+      setTestStages(prev => {
+        const next = prev.map(s => ({
+          ...s,
+          state: (s.state === 'idle' || s.state === 'active') ? 'done' as const : s.state,
+          latencyMs: s.latencyMs ?? stageTiming[s.key]?.ms ?? undefined,
+          provider: s.provider ?? stageTiming[s.key]?.provider ?? undefined,
+        }));
+        testStagesRef.current = next;
+        return next;
+      });
+      setTestResult({
+        transcription: result.transcription, translation: result.response,
+        audioBase64: result.audioBase64, contentType: result.contentType,
+        totalMs: result.timing.totalMs || (Date.now() - testStartRef.current),
+        usedGpu: result.timing.usedGpu,
+        stages: testStagesRef.current,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Pipeline failed';
+      setTestError(msg);
+      setTestStages(prev => prev.map(s => ({ ...s, state: s.state === 'active' ? 'error' as const : s.state })));
+    } finally {
+      stopTestTimers();
+      setTestRunning(false);
+    }
+  };
+
+  const startTestRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream);
+      testChunksRef.current = [];
+      mr.ondataavailable = e => { if (e.data.size > 0) testChunksRef.current.push(e.data); };
+      mr.onstop = () => {
+        setTestRecordedBlob(new Blob(testChunksRef.current, { type: 'audio/webm' }));
+        setTestAudioFile(null);
+        stream.getTracks().forEach(t => t.stop());
+      };
+      testMediaRef.current = mr;
+      mr.start();
+      setTestRecording(true);
+    } catch { setTestError('Microphone access denied'); }
+  };
+
+  const toggleTestAudio = () => {
+    if (!testAudioRef.current || !testResult?.audioBase64) return;
+    if (!testAudioUrl) {
+      const binary = atob(testResult.audioBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: testResult.contentType || 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      setTestAudioUrl(url);
+      testAudioRef.current.src = url;
+    }
+    if (testPlaying) { testAudioRef.current.pause(); setTestPlaying(false); }
+    else { testAudioRef.current.play(); setTestPlaying(true); }
+  };
+
+  useEffect(() => {
+    const el = testAudioRef.current;
+    if (!el) return;
+    const onEnd = () => setTestPlaying(false);
+    el.addEventListener('ended', onEnd);
+    return () => el.removeEventListener('ended', onEnd);
+  }, []);
+
+  const gpuService = services.find(s => s.kind === 'gpu-pod');
+  const latencyOpt = LATENCY_OPTIONS.find(o => o.value === latency);
+
+  const stages: FlowStage[] = [
+    { key: 'stt', label: 'STT', sublabel: 'Speech → Text',  chain: sttChain, enabled: sttEnabled, color: '#38bdf8', input: 'audio', output: 'text' },
+    { key: 'llm', label: 'LLM', sublabel: 'Translation',    chain: llmChain, enabled: true,        color: '#a78bfa', input: 'text',  output: 'text' },
+    { key: 'tts', label: 'TTS', sublabel: 'Text → Speech',  chain: ttsChain, enabled: ttsEnabled,  color: '#fbbf24', input: 'text',  output: 'audio' },
+  ];
+
+  const entryLabel = (entry: PipelineChainEntry) => {
+    if (entry.provider === 'gpu') {
+      const svc = services.find(s => s.kind === 'gpu-pod' && s.id === entry.model);
+      if (svc) return svc.name;
+      if (gpuService) return gpuService.name;
+      return 'GPU Pod';
+    }
+    return pMeta(entry.provider).label;
+  };
+
+  const humanizeId = (id: string) =>
+    id.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+  const modelLabel = (stageKey: string, entry: PipelineChainEntry): string | null => {
+    const catalog = PIPELINE_CATALOG[stageKey as keyof typeof PIPELINE_CATALOG];
+    if (!catalog) return null;
+    const gpuModels = (catalog.models as Record<string, { id: string; label: string }[]>)['gpu'] ?? [];
+    const provModels = (catalog.models as Record<string, { id: string; label: string }[]>)[entry.provider] ?? [];
+    // Direct catalog match (cloud providers + hardcoded GPU model IDs)
+    const fromCatalog = provModels.find(m => m.id === entry.model)?.label;
+    if (fromCatalog) return fromCatalog;
+    if (entry.provider === 'gpu') {
+      // Look for service where entry.model === service.id (new-style pod service)
+      const svcById = services.find(s => s.kind === 'gpu-pod' && s.id === entry.model);
+      if (svcById) {
+        const stageModelId = stageKey === 'stt' ? svcById.sttModel : stageKey === 'llm' ? svcById.llmModel : svcById.ttsModel;
+        if (stageModelId) return gpuModels.find(m => m.id === stageModelId)?.label ?? humanizeId(stageModelId);
+        if (svcById.dockerImage) return svcById.dockerImage.split('/').pop()?.replace(/:.*$/, '') ?? null;
+      }
+      // Fall back: look at the first GPU pod service's stage model (legacy profiles)
+      const gpuSvc = services.find(s => s.kind === 'gpu-pod');
+      if (gpuSvc) {
+        const stageModelId = stageKey === 'stt' ? gpuSvc.sttModel : stageKey === 'llm' ? gpuSvc.llmModel : gpuSvc.ttsModel;
+        if (stageModelId) return gpuModels.find(m => m.id === stageModelId)?.label ?? humanizeId(stageModelId);
+      }
+      // Last resort: humanize the model ID directly
+      return humanizeId(entry.model);
+    }
+    return null;
+  };
+
+  return (
+    <div className="rounded-xl border overflow-hidden"
+      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
+
+      {/* Header */}
+      <div className="flex items-center justify-between px-5 py-3 border-b"
+        style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
+        <span className="text-xs font-semibold" style={{ color: 'var(--color-text)' }}>
+          {name || 'Pipeline Flow'}
+        </span>
+        {latencyOpt && (
+          <span className="flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1 rounded-lg"
+            style={{
+              background: `color-mix(in srgb, ${latencyOpt.color} 10%, transparent)`,
+              color: latencyOpt.color,
+            }}>
+            <latencyOpt.Icon className="w-3 h-3" />
+            {latencyOpt.label} · {latencyOpt.sub}
+          </span>
+        )}
+      </div>
+
+      {/* Flow */}
+      <div className="p-6">
+        <div className="flex items-start gap-0">
+
+          {/* Pipeline input — interactive: click to record, or upload */}
+          {(() => {
+            const firstStage = stages.find(s => s.enabled);
+            const inType = firstStage?.input || 'audio';
+            const inColor = firstStage?.color || '#38bdf8';
+            const isAudioInput = inType === 'audio';
+            const hasAudio = !!(testAudioFile || testRecordedBlob);
+            return (
+              <div className="flex flex-col items-center flex-shrink-0 gap-1">
+                {/* Main input button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (testRunning) return;
+                    if (isAudioInput) {
+                      if (testRecording) { testMediaRef.current?.stop(); setTestRecording(false); }
+                      else if (hasAudio) { runTest(); }
+                      else { startTestRecording(); }
+                    } else {
+                      testFileRef.current?.click();
+                    }
+                  }}
+                  className="w-12 h-12 rounded-xl flex items-center justify-center cursor-pointer transition-all relative"
+                  style={{
+                    background: testRecording
+                      ? 'color-mix(in srgb, #ef4444 12%, var(--color-surface-elevated))'
+                      : hasAudio
+                        ? 'color-mix(in srgb, #10b981 12%, var(--color-surface-elevated))'
+                        : `color-mix(in srgb, ${inColor} 8%, var(--color-surface-elevated))`,
+                    border: `1.5px solid ${testRecording ? 'rgba(239,68,68,0.4)' : hasAudio ? 'rgba(16,185,129,0.4)' : `color-mix(in srgb, ${inColor} 30%, transparent)`}`,
+                  }}
+                  title={testRecording ? 'Stop recording' : hasAudio ? 'Run pipeline' : isAudioInput ? 'Click to record' : 'Click to upload'}
+                >
+                  {testRecording ? (
+                    <div className="w-3 h-3 rounded-sm bg-red-500 animate-pulse" />
+                  ) : testRunning ? (
+                    <Loader2 className="w-5 h-5 animate-spin" style={{ color: inColor }} />
+                  ) : hasAudio ? (
+                    <Zap className="w-5 h-5" style={{ color: '#10b981' }} />
+                  ) : (
+                    <Mic className="w-5 h-5" style={{ color: inColor }} />
+                  )}
+                </button>
+                {/* Label */}
+                <span className="text-[8px] font-bold uppercase tracking-wider"
+                  style={{ color: testRecording ? '#ef4444' : hasAudio ? '#10b981' : inColor }}>
+                  {testRecording ? 'rec...' : hasAudio ? '▶ run' : inType}
+                </span>
+                {/* Small upload link */}
+                {isAudioInput && !testRecording && !testRunning && (
+                  <button type="button" onClick={() => testFileRef.current?.click()}
+                    className="text-[7px] font-medium cursor-pointer hover:underline"
+                    style={{ color: 'var(--color-text-muted)' }}>
+                    upload
+                  </button>
+                )}
+                {/* Audio file indicator */}
+                {hasAudio && !testRunning && (
+                  <button type="button" onClick={() => { setTestAudioFile(null); setTestRecordedBlob(null); resetTest(); }}
+                    className="text-[7px] font-medium cursor-pointer hover:underline"
+                    style={{ color: 'var(--color-text-muted)' }}>
+                    clear
+                  </button>
+                )}
+                <input ref={testFileRef} type="file" accept="audio/*" className="hidden"
+                  onChange={e => { const f = e.target.files?.[0]; if (f) { setTestAudioFile(f); setTestRecordedBlob(null); resetTest(); } e.target.value = ''; }} />
+              </div>
+            );
+          })()}
+
+          {stages.map((stage) => {
+            const ts = testStages.find(s => s.key === stage.key);
+            const arrowActive = ts?.state === 'active';
+            const arrowDone = ts?.state === 'done';
+            return (
+            <div key={stage.key} className="flex items-start flex-1 min-w-0">
+              {/* Arrow with data type label */}
+              <div className="flex flex-col items-center w-12 flex-shrink-0">
+                <span className={`text-[8px] font-semibold uppercase tracking-wider mb-0.5 ${arrowActive ? 'animate-pulse' : ''}`}
+                  style={{ color: arrowDone ? '#10b981' : arrowActive ? stage.color : stage.enabled ? stage.color : 'var(--color-text-muted)', opacity: arrowActive ? 1 : 0.7 }}>
+                  {stage.input}
+                </span>
+                <div className="flex items-center w-full mt-0.5">
+                  <div className={`flex-1 transition-all duration-300 ${arrowActive ? 'h-[2px]' : 'h-px'}`}
+                    style={{ background: arrowDone ? '#10b981' : arrowActive ? stage.color : stage.enabled ? `color-mix(in srgb, ${stage.color} 60%, transparent)` : 'var(--color-border)' }} />
+                  <svg width="7" height="10" viewBox="0 0 7 10" className="flex-shrink-0">
+                    <path d="M0 1 L6 5 L0 9" stroke={stage.enabled ? stage.color : 'var(--color-border)'}
+                      strokeWidth="1.5" fill="none" strokeLinecap="round" strokeOpacity={stage.enabled ? 0.7 : 1} />
+                  </svg>
+                </div>
+              </div>
+
+              {/* Stage block */}
+              <div className={`flex flex-col items-center flex-1 min-w-0 ${!stage.enabled ? 'opacity-35' : ''}`}>
+                {/* Stage box — rectangle with colored top bar (= "process" shape) */}
+                {(() => {
+                  const ts = testStages.find(s => s.key === stage.key);
+                  const isActive = ts?.state === 'active';
+                  const isDone = ts?.state === 'done';
+                  const isError = ts?.state === 'error';
+                  const anyTest = testRunning || (testResult != null);
+                  const boxBorderColor = isError ? 'color-mix(in srgb, #ef4444 50%, transparent)'
+                    : isDone ? 'color-mix(in srgb, #10b981 40%, transparent)'
+                    : isActive ? `color-mix(in srgb, ${stage.color} 60%, transparent)`
+                    : stage.enabled ? `color-mix(in srgb, ${stage.color} 35%, transparent)` : 'var(--color-border)';
+                  const boxTopColor = isError ? '#ef4444' : isDone ? '#10b981'
+                    : isActive ? stage.color : stage.enabled ? stage.color : 'var(--color-border)';
+                  const boxBg = isActive ? `color-mix(in srgb, ${stage.color} 12%, var(--color-surface))`
+                    : isDone ? 'color-mix(in srgb, #10b981 6%, var(--color-surface))'
+                    : stage.enabled ? `color-mix(in srgb, ${stage.color} 6%, var(--color-surface))` : 'var(--color-surface)';
+                  return (
+                    <div className="w-full border px-3 py-2 text-center relative overflow-hidden transition-all"
+                      style={{ borderRadius: '4px', borderColor: boxBorderColor, background: boxBg, borderTop: `3px solid ${boxTopColor}` }}>
+                      {isActive && (
+                        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+                          <div className="absolute inset-y-0 w-full opacity-15 animate-pulse"
+                            style={{ background: `linear-gradient(90deg, transparent, ${stage.color}, transparent)` }} />
+                        </div>
+                      )}
+                      <div className="flex items-center justify-center gap-1.5">
+                        <span className="text-xs font-bold uppercase tracking-wider"
+                          style={{ color: isError ? '#ef4444' : isDone ? '#10b981' : isActive ? stage.color : stage.enabled ? stage.color : 'var(--color-text-muted)' }}>
+                          {stage.label}
+                        </span>
+                        {isActive && <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" style={{ color: stage.color }} />}
+                        {isDone && <Check className="w-3 h-3 flex-shrink-0" style={{ color: '#10b981' }} />}
+                        {isError && <XIcon className="w-3 h-3 flex-shrink-0" style={{ color: '#ef4444' }} />}
+                      </div>
+                      <div className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                        {stage.sublabel}
+                      </div>
+                      {/* Timing — prominent display after completion */}
+                      {isDone && ts?.latencyMs != null && (
+                        <div className="flex items-center justify-center gap-1 mt-1 px-2 py-0.5 rounded-md mx-auto"
+                          style={{ background: 'color-mix(in srgb, #10b981 10%, transparent)' }}>
+                          <span className="text-[10px] font-bold font-mono" style={{ color: '#10b981' }}>
+                            {ts.latencyMs < 1000 ? `${ts.latencyMs}ms` : `${(ts.latencyMs / 1000).toFixed(1)}s`}
+                          </span>
+                          {ts.provider && (
+                            <span className="text-[8px] font-medium" style={{ color: 'var(--color-text-muted)' }}>
+                              {ts.provider}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {isActive && anyTest && (
+                        <div className="text-[10px] font-mono font-bold mt-1" style={{ color: stage.color }}>
+                          {(testRunningMs / 1000).toFixed(1)}s
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Connector line down */}
+                {stage.enabled && stage.chain.length > 0 && (
+                  <div className="w-px h-4 flex-shrink-0"
+                    style={{ background: `color-mix(in srgb, ${stage.color} 30%, transparent)` }} />
+                )}
+
+                {/* Provider chain */}
+                {stage.enabled && stage.chain.map((entry, j) => {
+                  const meta = pMeta(entry.provider);
+                  const color = meta.color;
+                  const label = entryLabel(entry);
+                  const mLabel = modelLabel(stage.key, entry);
+                  const pi = PROVIDER_ICON[entry.provider];
+                  const EntryIcon = pi?.icon;
+                  const iconColor = j === 0 ? (pi?.color ?? color) : 'var(--color-text-muted)';
+                  const chipColor = j === 0 ? color : 'var(--color-text-muted)';
+                  return (
+                    <div key={j} className="flex flex-col items-center w-full">
+                      {j > 0 && (
+                        <div className="flex flex-col items-center py-0.5">
+                          <div className="w-px h-2" style={{ background: 'var(--color-border)' }} />
+                          <span className="text-[8px] font-semibold uppercase tracking-wider"
+                            style={{ color: 'var(--color-text-muted)' }}>fallback</span>
+                          <div className="w-px h-2" style={{ background: 'var(--color-border)' }} />
+                        </div>
+                      )}
+                      {/* Service chip — pill/oval shape (= "resource" shape) */}
+                      <div className="w-full flex flex-col items-center px-2 py-2 border gap-1"
+                        style={{
+                          borderRadius: '20px',
+                          background: j === 0
+                            ? `color-mix(in srgb, ${color} 10%, var(--color-surface))`
+                            : 'var(--color-surface-elevated)',
+                          borderColor: j === 0
+                            ? `color-mix(in srgb, ${color} 35%, transparent)`
+                            : 'var(--color-border)',
+                        }}>
+                        {/* Icon */}
+                        {EntryIcon && (
+                          <div className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
+                            style={{ background: `color-mix(in srgb, ${iconColor} 15%, transparent)` }}>
+                            <EntryIcon className="w-3.5 h-3.5" style={{ color: iconColor }} />
+                          </div>
+                        )}
+                        {/* Provider name */}
+                        <span className="text-[11px] font-semibold truncate w-full text-center leading-tight"
+                          style={{ color: chipColor }}>
+                          {label}
+                        </span>
+                        {/* Model name */}
+                        {mLabel && (
+                          <span className="text-[9px] truncate w-full text-center leading-tight"
+                            style={{ color: 'var(--color-text-muted)' }}>
+                            {mLabel}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            );
+          })}
+
+          {/* Arrow to output */}
+          {(() => {
+            const lastStage = [...stages].reverse().find(s => s.enabled);
+            const outType = lastStage?.output || 'audio';
+            const outColor = lastStage?.color || '#fbbf24';
+            return (
+              <div className="flex flex-col items-center w-12 flex-shrink-0">
+                <span className="text-[8px] font-semibold uppercase tracking-wider mb-0.5"
+                  style={{ color: outColor, opacity: 0.7 }}>
+                  {outType}
+                </span>
+                <div className="flex items-center w-full mt-0.5">
+                  <div className="flex-1 h-px"
+                    style={{ background: `color-mix(in srgb, ${outColor} 60%, transparent)` }} />
+                  <svg width="7" height="10" viewBox="0 0 7 10" className="flex-shrink-0">
+                    <path d="M0 1 L6 5 L0 9" stroke={outColor}
+                      strokeWidth="1.5" fill="none" strokeLinecap="round" strokeOpacity={0.7} />
+                  </svg>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Pipeline output — interactive: click to play result */}
+          {(() => {
+            const lastStage = [...stages].reverse().find(s => s.enabled);
+            const outType = lastStage?.output || 'audio';
+            const outColor = lastStage?.color || '#fbbf24';
+            const hasResult = !!testResult;
+            const isAudioOut = outType === 'audio';
+            return (
+              <div className="flex flex-col items-center flex-shrink-0 gap-1">
+                <button
+                  type="button"
+                  onClick={() => { if (hasResult && isAudioOut) toggleTestAudio(); }}
+                  disabled={!hasResult || !isAudioOut}
+                  className="w-12 h-12 rounded-xl flex items-center justify-center transition-all"
+                  style={{
+                    cursor: hasResult && isAudioOut ? 'pointer' : 'default',
+                    background: hasResult
+                      ? `color-mix(in srgb, ${outColor} 12%, var(--color-surface-elevated))`
+                      : `color-mix(in srgb, ${outColor} 5%, var(--color-surface-elevated))`,
+                    border: `1.5px solid ${hasResult ? `color-mix(in srgb, ${outColor} 40%, transparent)` : `color-mix(in srgb, ${outColor} 20%, transparent)`}`,
+                    opacity: hasResult ? 1 : 0.5,
+                  }}
+                  title={hasResult ? (testPlaying ? 'Stop playback' : 'Play result') : 'Output'}
+                >
+                  {testPlaying ? (
+                    <Square className="w-4 h-4" style={{ color: outColor }} />
+                  ) : (
+                    <Volume2 className="w-5 h-5" style={{ color: outColor }} />
+                  )}
+                </button>
+                <span className="text-[8px] font-bold uppercase tracking-wider"
+                  style={{ color: hasResult ? outColor : 'var(--color-text-muted)' }}>
+                  {hasResult ? (testPlaying ? 'playing' : '▶ play') : outType}
+                </span>
+                {hasResult && testResult?.transcription && (
+                  <span className="text-[7px] max-w-[60px] text-center truncate"
+                    style={{ color: 'var(--color-text-muted)' }}
+                    title={testResult.transcription}>
+                    {testResult.totalMs ? `${(testResult.totalMs / 1000).toFixed(1)}s` : ''}
+                  </span>
+                )}
+                <audio ref={testAudioRef} onEnded={() => setTestPlaying(false)} className="hidden" />
+              </div>
+            );
+          })()}
+        </div>
+
+        {/* Legend */}
+        {(() => {
+          const allEntries = [...sttChain, ...llmChain, ...ttsChain];
+          const seen = new Map<string, { label: string; color: string; type: string; Icon: React.ElementType }>();
+          for (const entry of allEntries) {
+            if (!seen.has(entry.provider)) {
+              const meta = pMeta(entry.provider);
+              const pi = PROVIDER_ICON[entry.provider];
+              if (pi) seen.set(entry.provider, { ...meta, Icon: pi.icon });
+            }
+          }
+          const stageDefs = [
+            { key: 'stt', label: 'STT', desc: 'Speech-to-Text', color: '#38bdf8', enabled: sttEnabled },
+            { key: 'llm', label: 'LLM', desc: 'Translation / AI', color: '#a78bfa', enabled: true },
+            { key: 'tts', label: 'TTS', desc: 'Text-to-Speech', color: '#fbbf24', enabled: ttsEnabled },
+          ];
+          return (
+            <div className="flex items-start justify-between mt-4 gap-4 pt-3"
+              style={{ borderTop: '1px solid var(--color-border)' }}>
+              {/* Stage glossary — rectangle shape indicator */}
+              <div className="flex items-center gap-3">
+                {/* Shape key: rectangle = stage */}
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <div className="w-5 h-3.5 border"
+                    style={{ borderRadius: '2px', borderColor: 'var(--color-text-muted)', borderTop: '2px solid var(--color-text-muted)', opacity: 0.5 }} />
+                  <span className="text-[9px] font-semibold uppercase tracking-wider"
+                    style={{ color: 'var(--color-text-muted)' }}>Stage</span>
+                </div>
+                {stageDefs.map(s => (
+                  <div key={s.key} className="flex items-center gap-1" style={{ opacity: s.enabled ? 1 : 0.35 }}>
+                    <span className="text-[10px] font-bold px-1.5 py-0.5"
+                      style={{ borderRadius: '2px', borderTop: `2px solid ${s.color}`, border: `1px solid color-mix(in srgb, ${s.color} 35%, transparent)`, background: `color-mix(in srgb, ${s.color} 8%, transparent)`, color: s.color }}>
+                      {s.label}
+                    </span>
+                    <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{s.desc}</span>
+                  </div>
+                ))}
+              </div>
+              {/* Provider legend — pill shape indicator */}
+              {seen.size > 0 && (
+                <div className="flex items-center gap-3 flex-shrink-0">
+                  {/* Shape key: pill = service */}
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-5 h-3.5 border"
+                      style={{ borderRadius: '999px', borderColor: 'var(--color-text-muted)', opacity: 0.5 }} />
+                    <span className="text-[9px] font-semibold uppercase tracking-wider"
+                      style={{ color: 'var(--color-text-muted)' }}>Service</span>
+                  </div>
+                  {[...seen.values()].map(({ label, color, Icon }) => (
+                    <div key={label} className="flex items-center gap-1">
+                      <Icon className="w-3 h-3 flex-shrink-0" style={{ color }} />
+                      <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{label}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* ── Inline Test Panel ── */}
+        <div className="mt-3 border-t" style={{ borderColor: 'var(--color-border)' }}>
+          <button type="button" onClick={() => { setTestOpen(o => !o); if (!testOpen) resetTest(); }}
+            className="w-full flex items-center gap-2 px-1 py-2.5 text-xs font-semibold cursor-pointer hover:opacity-80 transition-opacity"
+            style={{ color: 'var(--color-text-muted)' }}>
+            <Zap className="w-3.5 h-3.5" style={{ color: testOpen ? '#fbbf24' : undefined }} />
+            <span style={{ color: testOpen ? '#fbbf24' : undefined }}>Try this pipeline</span>
+            <span className="ml-auto text-[10px]">{testOpen ? '▲' : '▼'}</span>
+          </button>
+
+          {testOpen && (
+            <div className="pb-3 space-y-3">
+              {/* Language + audio controls row */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <select value={testSrc} onChange={e => setTestSrc(e.target.value)}
+                  className="text-xs rounded-lg border px-2 py-1.5 focus:outline-none"
+                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}>
+                  {['auto','en','fr','es','de','pt','it','ja','zh','ko','ar','ru'].map(c => (
+                    <option key={c} value={c}>{c === 'auto' ? 'Auto' : c.toUpperCase()}</option>
+                  ))}
+                </select>
+                <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>→</span>
+                <select value={testTgt} onChange={e => setTestTgt(e.target.value)}
+                  className="text-xs rounded-lg border px-2 py-1.5 focus:outline-none"
+                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}>
+                  {['en','fr','es','de','pt','it','ja','zh','ko','ar','ru'].map(c => (
+                    <option key={c} value={c}>{c.toUpperCase()}</option>
+                  ))}
+                </select>
+
+                <Button variant="outline" size="sm" onClick={() => testFileRef.current?.click()} disabled={testRunning}>
+                  <Upload className="w-3 h-3" /> Upload
+                </Button>
+
+                {!testRecording ? (
+                  <Button variant="outline" size="sm" onClick={startTestRecording} disabled={testRunning}>
+                    <Mic className="w-3 h-3" /> Record
+                  </Button>
+                ) : (
+                  <Button variant="outline" size="sm" onClick={() => { testMediaRef.current?.stop(); setTestRecording(false); }}>
+                    <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> Stop
+                  </Button>
+                )}
+
+                {(testAudioFile || testRecordedBlob) && (
+                  <span className="text-[10px] flex items-center gap-1 px-2 py-1 rounded"
+                    style={{ background: 'color-mix(in srgb, #10b981 8%, transparent)', color: '#10b981' }}>
+                    <Check className="w-2.5 h-2.5" />
+                    {testAudioFile?.name ?? 'Recorded'}
+                  </span>
+                )}
+
+                <div className="ml-auto">
+                  <Button variant="primary" size="sm" onClick={runTest}
+                    isLoading={testRunning} loadingText="Running…"
+                    disabled={!(testAudioFile || testRecordedBlob) || testRunning}>
+                    <Zap className="w-3 h-3" /> Run
+                  </Button>
+                </div>
+              </div>
+
+              {/* Results */}
+              {testError && (
+                <div className="text-xs px-3 py-2 rounded-lg"
+                  style={{ background: 'color-mix(in srgb, #ef4444 8%, transparent)', color: '#ef4444' }}>
+                  {testError}
+                </div>
+              )}
+
+              {testResult && !testError && (
+                <div className="space-y-2">
+                  {/* Timing row */}
+                  <div className="flex items-center gap-3 flex-wrap text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                    {testResult.totalMs != null && (
+                      <span className="flex items-center gap-1">
+                        <Clock className="w-2.5 h-2.5" /> {(testResult.totalMs / 1000).toFixed(2)}s total
+                      </span>
+                    )}
+                    {testResult.usedGpu && (
+                      <span className="flex items-center gap-1" style={{ color: '#f59e0b' }}>
+                        <Cpu className="w-2.5 h-2.5" /> GPU
+                      </span>
+                    )}
+                    {testResult.stages.filter(s => s.latencyMs != null).map(s => {
+                      const stageColor = s.key === 'stt' ? '#38bdf8' : s.key === 'llm' ? '#a78bfa' : '#fbbf24';
+                      return (
+                        <span key={s.key} className="flex items-center gap-1">
+                          <span className="font-semibold" style={{ color: stageColor }}>{s.key.toUpperCase()}</span>
+                          <span className="font-mono">{s.latencyMs! < 1000 ? `${s.latencyMs}ms` : `${(s.latencyMs! / 1000).toFixed(1)}s`}</span>
+                        </span>
+                      );
+                    })}
+                  </div>
+
+                  {testResult.transcription && (
+                    <div className="rounded-lg px-3 py-2 text-xs" style={{ background: 'color-mix(in srgb, #38bdf8 5%, var(--color-surface-elevated))' }}>
+                      <span className="text-[9px] font-semibold uppercase tracking-wider block mb-0.5" style={{ color: '#38bdf8' }}>Transcription</span>
+                      {testResult.transcription}
+                    </div>
+                  )}
+                  {testResult.translation && (
+                    <div className="rounded-lg px-3 py-2 text-xs" style={{ background: 'color-mix(in srgb, #a78bfa 5%, var(--color-surface-elevated))' }}>
+                      <span className="text-[9px] font-semibold uppercase tracking-wider block mb-0.5" style={{ color: '#a78bfa' }}>Translation</span>
+                      {testResult.translation}
+                    </div>
+                  )}
+                  {testResult.audioBase64 && (
+                    <Button size="sm" variant={testPlaying ? 'outline' : 'primary'} onClick={toggleTestAudio}>
+                      {testPlaying ? <><Square className="w-3 h-3" /> Stop audio</> : <><Volume2 className="w-3 h-3" /> Play audio</>}
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface ServiceCardProps {
+  service: ProfileService;
+  onEdit: () => void;
+  onDelete: () => void;
+}
+
+function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
+  const isGpu = service.kind === 'gpu-pod';
+  const provIcon = !isGpu && service.cloudProvider ? PROVIDER_ICON[service.cloudProvider] : null;
+  const color = isGpu ? '#a78bfa' : (provIcon?.color ?? '#7ba896');
+  const ServiceIcon = isGpu ? Server : (provIcon?.icon ?? Package);
+  const { gpu, refresh } = useGpuStatus(isGpu, 5000);
+
+  const [deploying, setDeploying] = useState(false);
+  const [terminating, setTerminating] = useState(false);
+  const [deployError, setDeployError] = useState<string | null>(null);
+  const [raceCount, setRaceCount] = useState(1);
+  const [idleTimeoutMin, setIdleTimeoutMin] = useState(15);
+  const [timeoutDirty, setTimeoutDirty] = useState(false);
+
+  const isActive = gpu?.status === 'ready' || gpu?.status === 'creating' || gpu?.status === 'booting' || gpu?.status === 'installing';
+  const isBooting = gpu?.status === 'creating' || gpu?.status === 'booting' || gpu?.status === 'installing';
+  const isReady = gpu?.status === 'ready';
+  const isError = gpu?.status === 'error';
+
+  // Load idle timeout from config on mount
+  useEffect(() => {
+    if (!isGpu) return;
+    getProviderConfig().then((cfg: any) => {
+      if (typeof cfg.idleTimeoutMin === 'number') setIdleTimeoutMin(cfg.idleTimeoutMin);
+    }).catch(() => {});
+  }, [isGpu]);
+
+  const handleDeploy = async () => {
+    setDeploying(true);
+    setDeployError(null);
+    try {
+      // Save idle timeout before deploying
+      if (timeoutDirty) {
+        await patchProviderConfig({ idleTimeoutMin } as any);
+        setTimeoutDirty(false);
+      }
+      await deployGpu({
+        dockerImage: service.dockerImage || '',
+        gpuTypes: service.gpuTypes || [],
+        provider: service.gpuCloudProvider || undefined,
+        raceCount: raceCount > 1 ? raceCount : undefined,
+      });
+      refresh();
+    } catch (e) {
+      setDeployError(e instanceof Error ? e.message : 'Deploy failed');
+    } finally {
+      setDeploying(false);
+    }
+  };
+
+  const handleTerminate = async () => {
+    setTerminating(true);
+    setDeployError(null);
+    try {
+      await terminateGpu();
+      refresh();
+    } catch (e) {
+      setDeployError(e instanceof Error ? e.message : 'Terminate failed');
+    } finally {
+      setTerminating(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border transition-all"
+      style={{
+        borderColor: isReady ? 'color-mix(in srgb, #10b981 40%, var(--color-border))' : 'var(--color-border)',
+        background: 'var(--color-surface-elevated)',
+      }}>
+      <div className="group flex items-start gap-3 p-3">
+        <IconBox icon={ServiceIcon} color={color} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold truncate">{service.name}</span>
+            <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded flex-shrink-0"
+              style={{ background: `color-mix(in srgb, ${color} 10%, transparent)`, color }}>
+              {service.kind}
+            </span>
+          </div>
+          {isGpu && (
+            <>
+              {service.dockerImage && (
+                <div className="text-[10px] font-mono truncate mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
+                  {service.dockerImage}
+                </div>
+              )}
+              {(service.sttModel || service.llmModel || service.ttsModel) && (
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {service.sttModel && (() => {
+                    const label = (PIPELINE_CATALOG.stt.models as Record<string, { id: string; label: string }[]>).gpu?.find(m => m.id === service.sttModel)?.label ?? service.sttModel;
+                    return <span key="stt" className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #38bdf8 12%, transparent)', color: '#38bdf8' }}>STT · {label}</span>;
+                  })()}
+                  {service.llmModel && (() => {
+                    const label = (PIPELINE_CATALOG.llm.models as Record<string, { id: string; label: string }[]>).gpu?.find(m => m.id === service.llmModel)?.label ?? service.llmModel;
+                    return <span key="llm" className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#a78bfa' }}>LLM · {label}</span>;
+                  })()}
+                  {service.ttsModel && (() => {
+                    const label = (PIPELINE_CATALOG.tts.models as Record<string, { id: string; label: string }[]>).gpu?.find(m => m.id === service.ttsModel)?.label ?? service.ttsModel;
+                    return <span key="tts" className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #fbbf24 12%, transparent)', color: '#fbbf24' }}>TTS · {label}</span>;
+                  })()}
+                </div>
+              )}
+              {service.gpuTypes && service.gpuTypes.length > 0 && (
+                <div className="text-[10px] mt-0.5 truncate" style={{ color: 'var(--color-text-muted)' }}>
+                  {service.gpuTypes.map(g => GPU_TYPES.find(t => t.id === g)?.label || g).join(', ')}
+                </div>
+              )}
+            </>
+          )}
+          {!isGpu && service.cloudProvider && (
+            <div className="text-[10px] mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
+              {service.cloudProvider}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button type="button" onClick={onEdit}
+            className="p-1.5 rounded hover:bg-white/5 cursor-pointer">
+            <Pencil className="w-3.5 h-3.5" style={{ color: 'var(--color-text-muted)' }} />
+          </button>
+          <button type="button" onClick={onDelete}
+            className="p-1.5 rounded hover:bg-red-500/10 cursor-pointer">
+            <Trash2 className="w-3.5 h-3.5 text-red-400" />
+          </button>
+        </div>
+      </div>
+
+      {/* GPU Deploy controls */}
+      {isGpu && (
+        <div className="px-3 pb-3 pt-0 space-y-2">
+          {isActive ? (
+            <div className="rounded-lg p-2.5 space-y-2"
+              style={{
+                background: isReady
+                  ? 'color-mix(in srgb, #10b981 6%, transparent)'
+                  : isError
+                    ? 'color-mix(in srgb, #ef4444 6%, transparent)'
+                    : 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)',
+              }}>
+              {/* Status row */}
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                  isReady ? 'bg-emerald-500' : isError ? 'bg-red-500' : 'bg-amber-500 animate-pulse'
+                }`} />
+                <span className="text-[11px] font-semibold" style={{
+                  color: isReady ? '#34d399' : isError ? '#ef4444' : '#fbbf24',
+                }}>
+                  {isReady ? 'Running' : isError ? 'Failed' : gpu?.status || 'Starting...'}
+                </span>
+                {gpu?.gpuType && (
+                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded"
+                    style={{ background: 'color-mix(in srgb, #10b981 10%, transparent)', color: '#10b981' }}>
+                    {gpu.gpuType}
+                  </span>
+                )}
+                {gpu?.provider && (
+                  <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{gpu.provider}</span>
+                )}
+                <div className="flex-1" />
+                <Button variant={isBooting ? 'danger' : 'outline'} size="sm" onClick={handleTerminate} isLoading={terminating} loadingText="...">
+                  <Square className="w-3 h-3" /> {isBooting ? 'Cancel' : 'Stop'}
+                </Button>
+              </div>
+
+              {/* Progress bar during boot */}
+              {isBooting && (
+                <div className="w-full rounded-full h-1" style={{ background: 'var(--color-border)' }}>
+                  <div className="h-1 rounded-full transition-all duration-1000 animate-pulse"
+                    style={{ background: '#10b981', width: `${Math.min(90, Math.max(10, (gpu?.elapsedSec ?? 0) * 0.5))}%` }} />
+                </div>
+              )}
+
+              {/* Details */}
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                {(gpu?.elapsedSec ?? 0) > 0 && (
+                  <span>Uptime: <span className="font-medium font-mono" style={{ color: 'var(--color-text)' }}>
+                    {Math.floor(gpu!.elapsedSec / 60)}m {Math.floor(gpu!.elapsedSec % 60)}s
+                  </span></span>
+                )}
+                {(gpu?.costPerHr ?? 0) > 0 && (
+                  <span>Cost: <span className="font-medium font-mono" style={{ color: 'var(--color-text)' }}>
+                    ${(gpu!.costPerHr ?? 0).toFixed(3)}/hr
+                  </span></span>
+                )}
+                {gpu?.podId && (
+                  <span>ID: <span className="font-mono" style={{ color: 'var(--color-text)' }}>{gpu.podId.slice(0, 12)}</span></span>
+                )}
+                {gpu?.message && !isReady && (
+                  <span className="font-medium" style={{ color: isError ? '#ef4444' : '#fbbf24' }}>{gpu.message}</span>
+                )}
+              </div>
+
+              {/* Pipeline routing when ready */}
+              {isReady && gpu?.pipelineRouting && (
+                <div className="flex gap-3 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                  {(['stt', 'llm', 'tts'] as const).map(s => (
+                    <span key={s}>{s.toUpperCase()}: <span style={{ color: gpu.pipelineRouting![s] === 'gpu' ? '#10b981' : 'var(--color-text)' }}>{gpu.pipelineRouting![s]}</span></span>
+                  ))}
+                </div>
+              )}
+
+              {/* Error recovery */}
+              {isError && (
+                <Button size="sm" onClick={handleDeploy} isLoading={deploying} loadingText="Deploying..."
+                  disabled={!service.dockerImage || !service.gpuTypes?.length}>
+                  <Cpu className="w-3 h-3" /> Retry Deploy
+                </Button>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {/* Race count + Auto-stop row */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {/* Parallel launch */}
+                <div className="rounded-lg p-2.5"
+                  style={{ background: 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)' }}>
+                  <p className="text-[10px] font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Parallel launch (race)</p>
+                  <div className="flex gap-1">
+                    {[1, 2, 3, 5].map(n => (
+                      <button key={n} onClick={() => setRaceCount(n)}
+                        className="px-2.5 py-1 rounded text-[10px] font-medium transition-all cursor-pointer"
+                        style={{
+                          background: raceCount === n ? '#8b5cf6' : 'var(--color-surface)',
+                          color: raceCount === n ? '#fff' : 'var(--color-text-muted)',
+                          border: `1px solid ${raceCount === n ? '#8b5cf6' : 'var(--color-border)'}`,
+                        }}>
+                        {n === 1 ? '1 (off)' : `×${n}`}
+                      </button>
+                    ))}
+                  </div>
+                  {raceCount > 1 && (
+                    <p className="text-[9px] mt-1" style={{ color: '#a78bfa' }}>
+                      Launches {raceCount} — keeps fastest.
+                    </p>
+                  )}
+                </div>
+
+                {/* Auto-stop */}
+                <div className="rounded-lg p-2.5"
+                  style={{ background: 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)' }}>
+                  <p className="text-[10px] font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Auto-stop after idle</p>
+                  <div className="flex flex-wrap gap-1">
+                    {[5, 15, 30, 60, 0].map(min => (
+                      <button key={min} onClick={() => { setIdleTimeoutMin(min); setTimeoutDirty(true); }}
+                        className="px-2 py-1 rounded text-[10px] font-medium transition-all cursor-pointer"
+                        style={{
+                          background: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 10%, transparent)' : 'transparent',
+                          color: idleTimeoutMin === min ? '#fbbf24' : 'var(--color-text-muted)',
+                          border: `1px solid ${idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 35%, transparent)' : 'var(--color-border)'}`,
+                        }}>
+                        {min === 0 ? 'Never' : `${min}m`}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[9px] mt-1" style={{ color: 'var(--color-text-muted)' }}>
+                    {idleTimeoutMin === 0 ? 'Runs until manually stopped.' : `Stops after ${idleTimeoutMin}min idle.`}
+                  </p>
+                </div>
+              </div>
+
+              {/* Deploy button */}
+              <div className="flex items-center justify-end">
+                <Button variant="primary" size="sm" onClick={handleDeploy} isLoading={deploying} loadingText="Deploying..."
+                  disabled={!service.dockerImage || !service.gpuTypes?.length}>
+                  <Play className="w-3 h-3" /> Deploy{raceCount > 1 ? ` ×${raceCount}` : ''}
+                </Button>
+              </div>
+            </div>
+          )}
+          {deployError && (
+            <p className="text-[10px]" style={{ color: '#ef4444' }}>{deployError}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Add/Edit Service inline form ──
+
+type ServiceKind = 'cloud' | 'gpu-pod';
+
+interface ServiceFormProps {
+  initial?: ProfileService;
+  onSave: (s: ProfileService) => void;
+  onCancel: () => void;
+}
+
+function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
+  const [name, setName] = useState(initial?.name || '');
+  const [kind, setKind] = useState<ServiceKind>(initial?.kind || 'gpu-pod');
+  const [cloudProvider, setCloudProvider] = useState(initial?.cloudProvider || 'groq');
+  const [dockerImage, setDockerImage] = useState(initial?.dockerImage || DEFAULT_DOCKER_IMAGES[0].url);
+  const [gpuTypes, setGpuTypes] = useState<string[]>(initial?.gpuTypes || []);
+  const [gpuCloudProvider, setGpuCloudProvider] = useState(initial?.gpuCloudProvider || GPU_PROVIDERS[0].id);
+  // Auto-fill models from known Docker image if no initial service
+  const initDockerUrl = initial?.dockerImage || DEFAULT_DOCKER_IMAGES[0].url;
+  const knownImg = !initial ? DEFAULT_DOCKER_IMAGES.find(img => img.url === initDockerUrl) : null;
+  const [sttModel, setSttModel] = useState(initial?.sttModel || knownImg?.sttModel || '');
+  const [llmModel, setLlmModel] = useState(initial?.llmModel || knownImg?.llmModel || '');
+  const [ttsModel, setTtsModel] = useState(initial?.ttsModel || knownImg?.ttsModel || '');
+
+  // Docker inspect
+  const [inspecting, setInspecting] = useState(false);
+  const [inspectResult, setInspectResult] = useState<DockerManifest | null>(null);
+  const [inspectError, setInspectError] = useState<string | null>(null);
+
+  const handleInspect = async () => {
+    if (!dockerImage.trim()) return;
+    setInspecting(true);
+    setInspectError(null);
+    setInspectResult(null);
+    try {
+      const result = await inspectDockerImage(dockerImage.trim());
+      setInspectResult(result);
+      if (result.sttModel) setSttModel(result.sttModel);
+      if (result.llmModel) setLlmModel(result.llmModel);
+      if (result.ttsModel) setTtsModel(result.ttsModel);
+    } catch (err) {
+      setInspectError(err instanceof Error ? err.message : 'Inspect failed');
+    } finally {
+      setInspecting(false);
+    }
+  };
+
+  // Live GPU catalog from provider
+  const [liveGpus, setLiveGpus] = useState<GpuTypeInfo[]>([]);
+  const [gpuLoading, setGpuLoading] = useState(false);
+  const [gpuSearch, setGpuSearch] = useState('');
+  const [gpuFocused, setGpuFocused] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const gpuChipsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setGpuLoading(true);
+    setLiveGpus([]);
+    getGpuTypes(gpuCloudProvider)
+      .then(data => setLiveGpus(data.gpuTypes))
+      .catch(() => {
+        // fall back to static list
+        const ids = GPU_TYPES_BY_PROVIDER[gpuCloudProvider] ?? GPU_TYPES.map(g => g.id);
+        setLiveGpus(ids.map(id => {
+          const meta = GPU_TYPES.find(g => g.id === id);
+          return { name: id, shortName: meta?.label ?? id.replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, ''), vram: parseInt(meta?.vram ?? '0') };
+        }));
+      })
+      .finally(() => setGpuLoading(false));
+  }, [gpuCloudProvider]);
+
+  const filteredGpus = liveGpus.filter(g => {
+    const q = gpuSearch.toLowerCase();
+    return !q || g.name.toLowerCase().includes(q) || g.shortName.toLowerCase().includes(q);
+  });
+
+  const toggleGpu = (id: string) =>
+    setGpuTypes(prev => prev.includes(id) ? prev.filter(g => g !== id) : [...prev, id]);
+
+  // Drag-to-reorder GPU chips
+  useEffect(() => {
+    const el = gpuChipsRef.current;
+    if (!el || gpuTypes.length < 2) return;
+    const sort = Sortable.create(el, {
+      animation: 150,
+      handle: '.gpu-drag-handle',
+      onEnd: () => {
+        const ids = Array.from(el.querySelectorAll('[data-gpu-id]'))
+          .map(n => (n as HTMLElement).dataset.gpuId!);
+        setGpuTypes(ids);
+      },
+    });
+    return () => sort.destroy();
+  }, [gpuTypes.length]); // re-init when count changes (add/remove)
+
+  const handleSave = () => {
+    if (!name.trim()) return;
+    const s: ProfileService = {
+      id: initial?.id || uid(),
+      name: name.trim(),
+      kind,
+      ...(kind === 'cloud'
+        ? { cloudProvider }
+        : {
+            dockerImage, gpuTypes, gpuCloudProvider,
+            ...(sttModel ? { sttModel } : {}),
+            ...(llmModel ? { llmModel } : {}),
+            ...(ttsModel ? { ttsModel } : {}),
+          }),
+    };
+    onSave(s);
+  };
+
+  return (
+    <div className="p-4 rounded-xl border border-dashed space-y-3"
+      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
+      <div className="flex items-center gap-2 mb-1">
+        <span className="text-xs font-semibold">{initial ? 'Edit Service' : 'Add Service'}</span>
+      </div>
+      <FormInput label="Name" value={name} onChange={e => setName(e.target.value)} placeholder="GPU Pod A" />
+      <FormSelect label="Type" value={kind} onChange={e => setKind(e.target.value as ServiceKind)}>
+        <option value="gpu-pod">GPU Pod</option>
+        <option value="cloud">Cloud API</option>
+      </FormSelect>
+      {kind === 'cloud' ? (
+        <FormSelect label="Cloud Provider" value={cloudProvider} onChange={e => setCloudProvider(e.target.value)}>
+          <option value="groq">Groq</option>
+          <option value="openai">OpenAI</option>
+          <option value="deepgram">Deepgram</option>
+          <option value="fireworks">Fireworks</option>
+          <option value="modal">Modal</option>
+          <option value="tensordock">TensorDock</option>
+        </FormSelect>
+      ) : (
+        <>
+          {/* Docker image — text input + inspect */}
+          <div>
+            <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-secondary)' }}>Docker Image</label>
+            <div className="flex gap-2">
+              <input
+                className="flex-1 text-xs rounded-lg border px-3 py-2 outline-none focus:ring-1"
+                style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                value={dockerImage}
+                onChange={e => {
+                  const url = e.target.value;
+                  setDockerImage(url);
+                  setInspectResult(null);
+                  setInspectError(null);
+                  // Auto-fill models from known images
+                  const known = DEFAULT_DOCKER_IMAGES.find(img => img.url === url);
+                  if (known) {
+                    if (known.sttModel) setSttModel(known.sttModel); else setSttModel('');
+                    if (known.llmModel) setLlmModel(known.llmModel); else setLlmModel('');
+                    if (known.ttsModel) setTtsModel(known.ttsModel); else setTtsModel('');
+                    if (!name || DEFAULT_DOCKER_IMAGES.some(i => i.label === name)) setName(known.label);
+                  }
+                }}
+                placeholder="namespace/image:tag"
+                list="docker-image-suggestions"
+              />
+              <datalist id="docker-image-suggestions">
+                {DEFAULT_DOCKER_IMAGES.map(img => <option key={img.url} value={img.url}>{img.label} — {img.description}</option>)}
+              </datalist>
+              <button
+                type="button"
+                onClick={handleInspect}
+                disabled={inspecting || !dockerImage.trim()}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+                style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text-secondary)' }}
+                title="Read service capabilities from Docker Hub labels"
+              >
+                {inspecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanSearch className="w-3.5 h-3.5" />}
+                Inspect
+              </button>
+            </div>
+            {/* Inspect result */}
+            {inspectResult && (
+              <div className="mt-2 p-2 rounded-lg border text-[11px] space-y-0.5"
+                style={{ borderColor: 'color-mix(in srgb, #10b981 30%, var(--color-border))', background: 'color-mix(in srgb, #10b981 4%, var(--color-surface-elevated))' }}>
+                <div className="font-semibold" style={{ color: '#34d399' }}>
+                  Services: {inspectResult.services.length > 0 ? inspectResult.services.join(', ') : '—'}
+                  {inspectResult.protocol !== 'rest' && <span className="ml-2" style={{ color: 'var(--color-text-muted)' }}>({inspectResult.protocol})</span>}
+                </div>
+                {[inspectResult.sttModel, inspectResult.llmModel, inspectResult.ttsModel].some(Boolean) && (
+                  <div style={{ color: 'var(--color-text-muted)' }}>
+                    Models auto-filled ↓
+                  </div>
+                )}
+              </div>
+            )}
+            {inspectError && (
+              <div className="mt-2 p-2 rounded-lg border text-[11px] flex items-center gap-1.5"
+                style={{ borderColor: 'color-mix(in srgb, #f87171 30%, var(--color-border))', color: '#f87171', background: 'color-mix(in srgb, #f87171 4%, var(--color-surface-elevated))' }}>
+                <AlertCircle className="w-3 h-3 flex-shrink-0" />
+                {inspectResult === null && 'No babelcast labels found — '}
+                {inspectError}
+              </div>
+            )}
+          </div>
+
+          {/* Model capabilities */}
+          <div className="rounded-lg border p-3 space-y-2.5"
+            style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
+            <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-text-muted)' }}>
+              Models provided by this pod
+            </p>
+            {(['stt', 'llm', 'tts'] as const).map(stage => {
+              const stageModels = (PIPELINE_CATALOG[stage].models as Record<string, { id: string; label: string }[]>).gpu ?? [];
+              const currentVal = stage === 'stt' ? sttModel : stage === 'llm' ? llmModel : ttsModel;
+              const setter = stage === 'stt' ? setSttModel : stage === 'llm' ? setLlmModel : setTtsModel;
+              const hasUnknown = currentVal && !stageModels.find(m => m.id === currentVal);
+              return (
+                <FormSelect key={stage} label={`${stage.toUpperCase()} Model`} value={currentVal} onChange={e => setter(e.target.value)}>
+                  <option value="">— none —</option>
+                  {hasUnknown && <option value={currentVal}>{currentVal} (current)</option>}
+                  {stageModels.map(m => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </FormSelect>
+              );
+            })}
+          </div>
+
+          <FormSelect label="GPU Cloud Provider" value={gpuCloudProvider} onChange={e => {
+            setGpuCloudProvider(e.target.value);
+            setGpuTypes([]);
+            setGpuSearch('');
+          }}>
+            {GPU_PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </FormSelect>
+
+          {/* GPU type search */}
+          <div>
+            <label className="block text-xs font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
+              GPU Types
+              {gpuTypes.length > 0 && (
+                <span className="ml-2 px-1.5 py-0.5 rounded-md text-[10px] font-bold"
+                  style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd' }}>
+                  {gpuTypes.length} selected
+                </span>
+              )}
+            </label>
+
+            {/* Selected chips — drag to reorder priority */}
+            {gpuTypes.length > 0 && (
+              <>
+                <p className="text-[10px] mb-1" style={{ color: 'var(--color-text-muted)' }}>
+                  Drag to set priority order — #1 is tried first
+                </p>
+                <div ref={gpuChipsRef} className="flex flex-wrap gap-1 mb-2">
+                  {gpuTypes.map((id, idx) => {
+                    const info = liveGpus.find(g => g.name === id);
+                    const label = info?.shortName ?? id.replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, '');
+                    return (
+                      <span key={id} data-gpu-id={id}
+                        className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium select-none"
+                        style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd', border: '1px solid color-mix(in srgb, #a78bfa 30%, transparent)' }}>
+                        <GripVertical className="gpu-drag-handle w-3 h-3 cursor-grab opacity-50 hover:opacity-100 flex-shrink-0" />
+                        <span className="text-[9px] font-bold opacity-60">#{idx + 1}</span>
+                        {label}
+                        <button type="button" onClick={() => toggleGpu(id)} className="ml-0.5 hover:opacity-70 cursor-pointer">
+                          ×
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {/* Search input */}
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none"
+                style={{ color: 'var(--color-text-muted)' }} />
+              {gpuLoading && (
+                <Loader2 className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin pointer-events-none"
+                  style={{ color: 'var(--color-text-muted)' }} />
+              )}
+              <input
+                ref={searchRef}
+                type="text"
+                value={gpuSearch}
+                onChange={e => setGpuSearch(e.target.value)}
+                onFocus={() => setGpuFocused(true)}
+                onBlur={() => setTimeout(() => setGpuFocused(false), 150)}
+                placeholder={gpuLoading ? 'Loading GPUs...' : `Search ${liveGpus.length} GPU types...`}
+                className="w-full rounded-lg border pl-8 pr-8 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500"
+                style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}
+              />
+            </div>
+
+            {/* Results list */}
+            {(gpuFocused || gpuSearch) && filteredGpus.length > 0 && (
+              <div className="mt-1.5 rounded-lg border overflow-hidden max-h-48 overflow-y-auto"
+                style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)' }}>
+                {filteredGpus.map(g => {
+                  const sel = gpuTypes.includes(g.name);
+                  const vramGb = g.vramGb ?? (g.vram > 0 ? g.vram : null);
+                  return (
+                    <button key={g.name} type="button" onClick={() => toggleGpu(g.name)}
+                      className="w-full flex items-center gap-3 px-3 py-2 text-left transition-colors cursor-pointer border-b last:border-b-0"
+                      style={{
+                        borderColor: 'var(--color-border)',
+                        background: sel ? 'color-mix(in srgb, #a78bfa 6%, var(--color-bg))' : 'transparent',
+                      }}
+                      onMouseEnter={e => { if (!sel) (e.currentTarget as HTMLElement).style.background = 'var(--color-surface)'; }}
+                      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = sel ? 'color-mix(in srgb, #a78bfa 6%, var(--color-bg))' : 'transparent'; }}
+                    >
+                      <div className="w-4 h-4 flex-shrink-0 flex items-center justify-center">
+                        {sel
+                          ? <CircleCheck className="w-4 h-4" style={{ color: '#a78bfa' }} />
+                          : <Circle className="w-4 h-4" style={{ color: 'var(--color-border)' }} />
+                        }
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <span className="text-xs font-medium" style={{ color: sel ? '#c4b5fd' : 'var(--color-text)' }}>
+                          {g.shortName}
+                        </span>
+                        {vramGb && (
+                          <span className="ml-2 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                            {vramGb}GB
+                          </span>
+                        )}
+                      </div>
+                      {g.minPricePerHr != null && (
+                        <span className="text-[10px] font-mono flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
+                          from ${g.minPricePerHr.toFixed(2)}/hr
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {!gpuLoading && gpuSearch && filteredGpus.length === 0 && (
+              <p className="text-[11px] mt-1.5 px-1" style={{ color: 'var(--color-text-muted)' }}>
+                No GPU types match "{gpuSearch}"
+              </p>
+            )}
+          </div>
+        </>
+      )}
+      <div className="flex gap-2 justify-end pt-1">
+        <Button variant="outline" size="sm" onClick={onCancel}>Cancel</Button>
+        <Button variant="primary" size="sm" onClick={handleSave} disabled={!name.trim()}>
+          <Check className="w-3.5 h-3.5" /> {initial ? 'Update' : 'Add'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ── Stage list with drag-reorder + add/remove ──
+
+function StageList({ stages, setStages, services }: {
+  stages: ProfileStage[];
+  setStages: React.Dispatch<React.SetStateAction<ProfileStage[]>>;
+  services: ProfileService[];
+}) {
+  const [showAddStage, setShowAddStage] = useState(false);
+  const sortRef = useRef<HTMLDivElement>(null);
+  const sortInst = useRef<Sortable | null>(null);
+  const stagesRef = useRef(stages);
+  useEffect(() => { stagesRef.current = stages; }, [stages]);
+
+  useEffect(() => {
+    const el = sortRef.current;
+    if (!el) return;
+    if (sortInst.current) sortInst.current.destroy();
+    sortInst.current = Sortable.create(el, {
+      handle: '.stage-drag-handle',
+      animation: 150,
+      ghostClass: 'opacity-50',
+      onEnd: (evt) => {
+        const { oldIndex, newIndex } = evt;
+        if (oldIndex == null || newIndex == null || oldIndex === newIndex) return;
+        const next = [...stagesRef.current];
+        const [moved] = next.splice(oldIndex, 1);
+        next.splice(newIndex, 0, moved);
+        setStages(next);
+      },
+    });
+    return () => { try { sortInst.current?.destroy(); } catch {} sortInst.current = null; };
+  }, [setStages]);
+
+  const updateStageChain = (id: string, chain: PipelineChainEntry[]) => {
+    setStages(prev => prev.map(s => s.id === id ? { ...s, chain } : s));
+  };
+
+  const toggleStage = (id: string) => {
+    setStages(prev => prev.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
+  };
+
+  const removeStage = (id: string) => {
+    setStages(prev => prev.filter(s => s.id !== id));
+  };
+
+  const updateStageIO = (id: string, field: 'input' | 'output', value: string) => {
+    setStages(prev => prev.map(s => s.id === id ? { ...s, [field]: value } : s));
+  };
+
+  const addStage = (catalogEntry: StageCatalogEntry) => {
+    setStages(prev => [...prev, {
+      id: uid(),
+      key: catalogEntry.key,
+      label: catalogEntry.label,
+      chain: [...catalogEntry.defaultChain],
+      enabled: true,
+      input: catalogEntry.input,
+      output: catalogEntry.output,
+    }]);
+    setShowAddStage(false);
+  };
+
+  // Which stage types are available to add (not already present)
+  const existingKeys = new Set(stages.map(s => s.key));
+  const availableStages = STAGE_CATALOG.filter(s => !existingKeys.has(s.key));
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Stages</h3>
+          <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+            {stages.length} stage{stages.length !== 1 ? 's' : ''} &middot; drag to reorder
+          </span>
+        </div>
+      </CardHeader>
+      <CardBody className="space-y-3">
+        <div ref={sortRef} className="space-y-3">
+          {stages.map(stage => (
+            <div key={stage.id} data-id={stage.id}>
+              <StageRow
+                stageKey={stage.key}
+                label={stage.label}
+                input={stage.input || STAGE_CATALOG.find(s => s.key === stage.key)?.input || 'text'}
+                output={stage.output || STAGE_CATALOG.find(s => s.key === stage.key)?.output || 'text'}
+                onChangeInput={(v) => updateStageIO(stage.id, 'input', v)}
+                onChangeOutput={(v) => updateStageIO(stage.id, 'output', v)}
+                chain={stage.chain}
+                setChain={(c) => updateStageChain(stage.id, c)}
+                enabled={stage.enabled}
+                onToggle={() => toggleStage(stage.id)}
+                onRemove={() => removeStage(stage.id)}
+                services={services}
+              />
+            </div>
+          ))}
+        </div>
+
+        {/* Add stage */}
+        {showAddStage ? (
+          <div className="p-3 rounded-xl border border-dashed space-y-2"
+            style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
+            <p className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: 'var(--color-text-muted)' }}>
+              Add Stage
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {availableStages.map(s => (
+                <button key={s.key} type="button" onClick={() => addStage(s)}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium cursor-pointer transition-all"
+                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = s.color; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--color-border)'; }}
+                >
+                  <IconBox icon={s.icon} color={s.color} size="xs" />
+                  <div>
+                    <span className="font-semibold">{s.label}</span>
+                    <span className="ml-1.5 opacity-60">{s.subtitle}</span>
+                  </div>
+                </button>
+              ))}
+              {availableStages.length === 0 && (
+                <p className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>All stage types already added</p>
+              )}
+            </div>
+            <div className="flex justify-end">
+              <Button variant="outline" size="sm" onClick={() => setShowAddStage(false)}>Cancel</Button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" onClick={() => setShowAddStage(true)}
+            className="flex items-center gap-1.5 w-full px-3 py-2 rounded-xl border border-dashed text-xs font-medium cursor-pointer transition-all hover:border-[var(--color-text-muted)]"
+            style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
+            <Plus className="w-3.5 h-3.5" /> Add Stage
+          </button>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+// ── Main ProfilesSection ──
+
+/** Parse sub-route from URL: /config/profiles/edit/{id} or /config/profiles/new */
+function getProfileSubRoute(): { view: 'list' | 'detail'; profileId: string | null } {
+  if (typeof window === 'undefined') return { view: 'list', profileId: null };
+  const path = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
+  if (path === 'config/profiles/new') return { view: 'detail', profileId: null };
+  const m = path.match(/^config\/profiles\/edit\/(.+)$/);
+  if (m) return { view: 'detail', profileId: m[1] };
+  return { view: 'list', profileId: null };
+}
+
+export function ProfilesSection() {
+  const initRoute = getProfileSubRoute();
+  const [view, setViewRaw] = useState<'list' | 'detail'>(initRoute.view);
+  const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(initRoute.profileId);
+
+  /** Navigate view with URL update */
+  const setView = useCallback((v: 'list' | 'detail', profileId?: string | null) => {
+    setViewRaw(v);
+    if (v === 'list') {
+      window.history.pushState(null, '', '/config/profiles');
+    } else if (profileId) {
+      window.history.pushState(null, '', `/config/profiles/edit/${profileId}`);
+    } else {
+      window.history.pushState(null, '', '/config/profiles/new');
+    }
+  }, []);
+
+  // Handle browser back/forward
+  useEffect(() => {
+    const onPop = () => {
+      const r = getProfileSubRoute();
+      setViewRaw(r.view);
+      if (r.view === 'detail' && r.profileId) {
+        setEditingProfileId(r.profileId);
+      }
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  // Detail state
+  const [stages, setStages] = useState<ProfileStage[]>(() => DEFAULT_STAGES.map(s => ({ ...s, id: uid() })));
+  const [latency, setLatency] = useState<Latency>('realtime');
+  const [services, setServices] = useState<ProfileService[]>([]);
+
+  // Convenience getters for backward compat (used by save/flow diagram)
+  const sttStage = stages.find(s => s.key === 'stt' && s.enabled);
+  const llmStage = stages.find(s => s.key === 'llm' && s.enabled);
+  const ttsStage = stages.find(s => s.key === 'tts' && s.enabled);
+  const sttChain = sttStage?.chain || [];
+  const llmChain = llmStage?.chain || DEFAULT_LLM;
+  const ttsChain = ttsStage?.chain || [];
+  const sttEnabled = !!sttStage;
+  const ttsEnabled = !!ttsStage;
+
+  /** Migrate old gpuDeploy/gpuImage/gpuTypes top-level fields into ProfileService entries,
+   *  and auto-derive cloud API service entries from chain providers. */
+  const migrateServices = (p: ProviderProfile & Record<string, unknown>): ProfileService[] => {
+    const existing: ProfileService[] = (p.services && Array.isArray(p.services)) ? (p.services as ProfileService[]) : [];
+    const result: ProfileService[] = [...existing];
+
+    // Migrate GPU pod from gpuDeploy (only if no gpu-pod service already exists)
+    if (!result.some(s => s.kind === 'gpu-pod')) {
+      const gpuDeploy = p.gpuDeploy as { dockerImage?: string; gpuTypes?: string[] } | undefined;
+      const dockerImage: string | undefined = gpuDeploy?.dockerImage ?? (p.gpuImage as string | undefined) ?? (p.dockerImage as string | undefined);
+      if (dockerImage) {
+        const gpuTypes: string[] = gpuDeploy?.gpuTypes ?? (p.gpuTypes as string[] | undefined) ?? [];
+        const gpuCloudProvider: string = (p.gpuProvider as string | undefined) ?? 'vast';
+        const imgBase = dockerImage.split('/').pop()?.replace(/:.*$/, '') ?? 'GPU Pod';
+        const name = imgBase.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const gpuStt = (p.stt as PipelineChainEntry[] | undefined)?.find(e => e.provider === 'gpu')?.model;
+        const gpuLlm = (p.llm as PipelineChainEntry[] | undefined)?.find(e => e.provider === 'gpu')?.model;
+        const gpuTts = (p.tts as PipelineChainEntry[] | undefined)?.find(e => e.provider === 'gpu')?.model;
+        result.push({
+          id: uid(), name, kind: 'gpu-pod', dockerImage, gpuTypes, gpuCloudProvider,
+          ...(gpuStt ? { sttModel: gpuStt } : {}),
+          ...(gpuLlm ? { llmModel: gpuLlm } : {}),
+          ...(gpuTts ? { ttsModel: gpuTts } : {}),
+        });
+      }
+    }
+
+    // Auto-derive cloud API services from chain entries (add missing providers)
+    const allChains: PipelineChainEntry[] = [
+      ...((p.stt as PipelineChainEntry[] | undefined) ?? []),
+      ...((p.llm as PipelineChainEntry[] | undefined) ?? []),
+      ...((p.tts as PipelineChainEntry[] | undefined) ?? []),
+    ];
+    for (const entry of allChains) {
+      if (entry.provider === 'gpu') continue;
+      if (!result.some(s => s.kind === 'cloud' && s.cloudProvider === entry.provider)) {
+        const meta = pMeta(entry.provider);
+        result.push({ id: uid(), name: meta.label, kind: 'cloud', cloudProvider: entry.provider });
+      }
+    }
+
+    return result;
+  };
+
+  // Service form state
+  const [showAddService, setShowAddService] = useState(false);
+  const [editingService, setEditingService] = useState<ProfileService | null>(null);
+
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  /** Load a profile into stages state */
+  const loadProfile = useCallback((p: ProviderProfile) => {
+    setStages(profileToStages(p));
+    setLatency(p.latency ?? 'realtime');
+    const svc = migrateServices(p as ProviderProfile & Record<string, unknown>);
+    console.log('[profiles] loadProfile services:', svc.length, svc.map(s => `${s.kind}:${s.name}`));
+    setServices(svc);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    getProviderConfig()
+      .then((cfg: any) => {
+        if (cfg.profiles?.length) setProfiles(cfg.profiles);
+        if (cfg.activeProfileId) setActiveProfileId(cfg.activeProfileId);
+        // Load default stages from active pipeline config
+        const defaultStages: ProfileStage[] = [];
+        if (cfg.pipelineStt?.length) defaultStages.push({ id: uid(), key: 'stt', label: 'STT', chain: cfg.pipelineStt, enabled: true });
+        defaultStages.push({ id: uid(), key: 'llm', label: 'LLM', chain: cfg.pipelineLlm?.length ? cfg.pipelineLlm : DEFAULT_LLM, enabled: true });
+        if (cfg.pipelineTts?.length) defaultStages.push({ id: uid(), key: 'tts', label: 'TTS', chain: cfg.pipelineTts, enabled: true });
+        if (defaultStages.length > 0) setStages(defaultStages);
+        // If URL points to a specific profile, open it
+        const route = getProfileSubRoute();
+        if (route.view === 'detail' && route.profileId && cfg.profiles?.length) {
+          const p = (cfg.profiles as ProviderProfile[]).find((x: ProviderProfile) => x.id === route.profileId);
+          if (p) {
+            setEditingProfileId(p.id);
+            loadProfile(p);
+          }
+        }
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const openNew = () => {
+    setStages(DEFAULT_STAGES.map(s => ({ ...s, id: uid() })));
+    setLatency('realtime');
+    setServices([]);
+    setEditingProfileId(null);
+    setView('detail', null);
+  };
+
+  const onApplyProfile = useCallback((profile: ProviderProfile) => {
+    setEditingProfileId(profile.id);
+    loadProfile(profile);
+    setView('detail', profile.id);
+  }, [setView, loadProfile]);
+
+  const createCurrentProfile = useCallback((name: string): ProviderProfile => {
+    const fields = stagesToProfileFields(stages);
+    return {
+      id: uid(),
+      name,
+      latency,
+      ...fields,
+      services: [...services],
+    };
+  }, [latency, stages, services]);
+
+  const handleSaveAndApply = async () => {
+    setSaving(true);
+    try {
+      let updatedProfiles: ProviderProfile[];
+      let newActiveId: string;
+
+      if (editingProfileId) {
+        const fields = stagesToProfileFields(stages);
+        updatedProfiles = profiles.map(p => {
+          if (p.id !== editingProfileId) return p;
+          return { ...p, latency, ...fields, services };
+        });
+        newActiveId = editingProfileId;
+      } else {
+        const p = createCurrentProfile('New Profile');
+        updatedProfiles = [...profiles, p];
+        newActiveId = p.id;
+      }
+
+      setProfiles(updatedProfiles);
+      setActiveProfileId(newActiveId);
+      setEditingProfileId(newActiveId);
+
+      const patch: Record<string, any> = {
+        profiles: updatedProfiles,
+        activeProfileId: newActiveId,
+        pipelineStt: sttEnabled ? sttChain : [],
+        pipelineLlm: llmChain,
+        pipelineTts: ttsEnabled ? ttsChain : [],
+      };
+
+      const gpuService = services.find(s => s.kind === 'gpu-pod');
+      if (gpuService) {
+        patch.gpuImage = gpuService.dockerImage;
+        patch.gpuTypes = gpuService.gpuTypes;
+        patch.gpuProvider = gpuService.gpuCloudProvider || '';
+      }
+
+      await patchProviderConfig(patch as any);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } catch {} finally { setSaving(false); }
+  };
+
+  const editingProfile = editingProfileId ? profiles.find(p => p.id === editingProfileId) : null;
+
+  if (view === 'list') {
+    return (
+      <div className="p-6 space-y-5 pb-20">
+        <SectionHeader
+          title="Profiles"
+          subtitle="Manage pipeline profiles"
+        />
+
+        <ProfilesPanel
+          profiles={profiles} setProfiles={setProfiles}
+          activeProfileId={activeProfileId} setActiveProfileId={setActiveProfileId}
+          onApplyProfile={onApplyProfile} createCurrentProfile={createCurrentProfile}
+        />
+
+        <div className="flex items-center gap-3">
+          <Button variant="outline" onClick={openNew}>
+            <Mic className="w-4 h-4" /> New Profile
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  const [detailTab, setDetailTab] = useState<'pipeline' | 'services'>('pipeline');
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Top bar: Back + editable name + Save */}
+      <div className="flex items-center gap-3 px-6 py-3 border-b flex-shrink-0"
+        style={{ borderColor: 'var(--color-border)' }}>
+        <button
+          onClick={() => setView('list', null)}
+          className="flex items-center gap-1 text-sm font-medium cursor-pointer transition-opacity hover:opacity-70 flex-shrink-0"
+          style={{ color: 'var(--color-text-muted)' }}
+        >
+          <ChevronLeft className="w-4 h-4" /> Profiles
+        </button>
+        <span style={{ color: 'var(--color-border)' }}>/</span>
+        <input
+          type="text"
+          value={editingProfile?.name || ''}
+          onChange={e => {
+            if (!editingProfileId) return;
+            setProfiles(prev => prev.map(p => p.id === editingProfileId ? { ...p, name: e.target.value } : p));
+          }}
+          placeholder="Profile name..."
+          className="flex-1 min-w-0 text-sm font-semibold bg-transparent border-none outline-none"
+          style={{ color: 'var(--color-text)' }}
+        />
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <Button variant="primary" onClick={handleSaveAndApply} isLoading={saving} loadingText="Saving...">
+            <Check className="w-4 h-4" /> Save & Apply
+          </Button>
+          {saved && (
+            <span className="text-xs text-emerald-400 flex items-center gap-1">
+              <Check className="w-3 h-3" /> Saved
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Flow diagram (always visible) */}
+      <div className="px-6 py-3 border-b flex-shrink-0" style={{ borderColor: 'var(--color-border)' }}>
+        <ProfileFlowDiagram
+          sttChain={sttChain} llmChain={llmChain} ttsChain={ttsChain}
+          sttEnabled={sttEnabled} ttsEnabled={ttsEnabled}
+          services={services} latency={latency}
+          name={editingProfile?.name}
+        />
+      </div>
+
+      {/* Tabs */}
+      {(() => {
+        const gpuCount = services.filter(s => s.kind === 'gpu-pod').length;
+        const cloudCount = services.filter(s => s.kind === 'cloud').length;
+        const tabDefs = [
+          { id: 'pipeline' as const, label: 'Pipeline', icon: Mic, color: '#38bdf8', badge: `${stages.length} stages` },
+          { id: 'services' as const, label: 'Services', icon: Server, color: '#a78bfa', badge: gpuCount > 0 ? `${gpuCount} GPU · ${cloudCount} cloud` : `${services.length} services` },
+        ];
+        return (
+          <div className="flex items-stretch border-b flex-shrink-0" style={{ borderColor: 'var(--color-border)' }}>
+            {tabDefs.map(tab => {
+              const active = detailTab === tab.id;
+              const TabIcon = tab.icon;
+              return (
+                <button key={tab.id} onClick={() => setDetailTab(tab.id)}
+                  className="flex-1 flex items-center justify-center gap-2.5 px-4 py-3 text-xs font-semibold transition-all cursor-pointer border-b-2 -mb-px"
+                  style={{
+                    color: active ? tab.color : 'var(--color-text-muted)',
+                    borderBottomColor: active ? tab.color : 'transparent',
+                    background: active ? `color-mix(in srgb, ${tab.color} 4%, transparent)` : 'transparent',
+                  }}
+                  onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = active ? `color-mix(in srgb, ${tab.color} 4%, transparent)` : 'transparent'; }}
+                >
+                  <TabIcon className="w-4 h-4" />
+                  <span>{tab.label}</span>
+                  <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full"
+                    style={{
+                      background: active ? `color-mix(in srgb, ${tab.color} 12%, transparent)` : 'color-mix(in srgb, var(--color-text-muted) 8%, transparent)',
+                      color: active ? tab.color : 'var(--color-text-muted)',
+                    }}>
+                    {tab.badge}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        );
+      })()}
+
+      {/* Tab content (scrollable) */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        {/* ── Pipeline tab ── */}
+        {detailTab === 'pipeline' && (
+          <StageList stages={stages} setStages={setStages} services={services} />
+        )}
+
+        {/* ── Services tab ── */}
+        {detailTab === 'services' && (
+          <>
+            {/* Latency target */}
+            <div className="flex items-center gap-3 px-4 py-3 rounded-xl border"
+              style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
+              <span className="text-xs font-semibold flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Latency</span>
+              <LatencySelector value={latency} onChange={setLatency} />
+            </div>
+
+            {services.map(svc => (
+              <div key={svc.id}>
+                <ServiceCard
+                  service={svc}
+                  onEdit={() => {
+                    if (editingService?.id === svc.id) { setEditingService(null); setShowAddService(false); }
+                    else { setEditingService(svc); setShowAddService(true); }
+                  }}
+                  onDelete={() => setServices(prev => prev.filter(s => s.id !== svc.id))}
+                />
+                {/* Inline edit form below this card */}
+                {showAddService && editingService?.id === svc.id && (
+                  <div className="mt-1">
+                    <ServiceForm
+                      initial={editingService}
+                      onSave={s => {
+                        setServices(prev => prev.map(x => x.id === s.id ? s : x));
+                        setShowAddService(false);
+                        setEditingService(null);
+                      }}
+                      onCancel={() => { setShowAddService(false); setEditingService(null); }}
+                    />
+                  </div>
+                )}
+              </div>
+            ))}
+            {services.length === 0 && !showAddService && (
+              <p className="text-xs py-4 text-center" style={{ color: 'var(--color-text-muted)' }}>
+                No services defined. Add a GPU pod or cloud API service.
+              </p>
+            )}
+            {/* Add new service form (not editing existing) */}
+            {showAddService && !editingService ? (
+              <ServiceForm
+                onSave={s => {
+                  setServices(prev => [...prev, s]);
+                  setShowAddService(false);
+                }}
+                onCancel={() => { setShowAddService(false); }}
+              />
+            ) : !showAddService && (
+              <button
+                type="button"
+                onClick={() => { setEditingService(null); setShowAddService(true); }}
+                className="flex items-center gap-1.5 w-full px-3 py-2.5 rounded-xl border border-dashed text-xs font-medium cursor-pointer transition-all hover:border-[var(--color-text-muted)]"
+                style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}
+              >
+                <Plus className="w-3.5 h-3.5" /> Add Service
+              </button>
+            )}
+          </>
+        )}
+
+      </div>
+    </div>
+  );
+}

@@ -91,6 +91,36 @@ GET http://localhost:4000/v1/gpu/status
 - TensorDock keys: `TENSORDOCK_API_KEY` + `TENSORDOCK_AUTH_ID` in `.env`
 - Cooldowns persist in `~/.babelcast/cooldowns.json` — delete to clear stuck cooldowns
 
+## Web UI Component Library (`web/src/components/ui/`)
+
+**All new UI code MUST use these components.** Do not re-implement inline.
+
+| Component | Import | Usage |
+|-----------|--------|-------|
+| `IconBox` | `import { IconBox } from '@/components/ui'` | Colored icon in rounded box. Props: `icon`, `color`, `size` (xs/sm/md/lg). **Never** write inline `div` with `color-mix` + icon — use this. |
+| `DropdownList` | `import { DropdownList } from '@/components/ui'` | Custom dropdown with icons, groups, portal rendering. Replace all native `<select>` with this for styled dropdowns. Props: `options`, `value`, `onChange`, `accent`, `onClose`, `autoOpen`. |
+| `KV` | `import { KV } from '@/components/ui'` | Key-value display row. Props: `label`, `value`, `mono?`. **Never** write inline flex label+value pairs — use this. |
+| `StatusDot` | `import { StatusDot } from '@/components/ui'` | Colored status indicator. Props: `status` (ready/online/booting/warning/error/offline/idle), `size`, `label?`. **Never** write inline colored dots — use this. |
+| `Button` | `import { Button } from '@/components/ui'` | Styled button with variants (primary/outline/danger) and loading state. |
+| `Toggle` | `import { Toggle } from '@/components/ui'` | On/off switch. Props: `checked`, `onChange`, `size`. |
+| `FormInput` | `import { FormInput } from '@/components/ui'` | Labeled text input. |
+| `FormSelect` | `import { FormSelect } from '@/components/ui'` | Labeled native select (use `DropdownList` for rich dropdowns). |
+| `Card` / `CardHeader` / `CardBody` | `import { Card, CardHeader, CardBody } from '@/components/ui'` | Content containers. |
+| `SectionHeader` | `import { SectionHeader } from '@/components/ui'` | Page section title + subtitle. |
+| `SaveBar` | `import { SaveBar } from '@/components/ui'` | Sticky bottom save/discard bar. |
+| `ConfirmModal` | `import { ConfirmModal } from '@/components/ui'` | Confirmation dialog. |
+| `Spinner` | `import { Spinner } from '@/components/ui'` | Loading indicator. |
+| `StatusBadge` | `import { StatusBadge } from '@/components/ui'` | Success/Pending/Error badge pill. |
+| `TabNav` | `import { TabNav } from '@/components/ui'` | Tab switcher. |
+| `AlertBanner` | `import { AlertBanner } from '@/components/ui'` | Alert messages. |
+
+### Provider icon registry (for pipeline/service UIs)
+
+```typescript
+import { PROVIDER_ICON } from '@/sections/FallbackChainList';
+// { gpu: { icon: Cpu, color: '#f59e0b' }, groq: { icon: Zap, color: '#7ba896' }, ... }
+```
+
 ## Key Gotchas
 
 - **RunPod ports**: never expose same port as both HTTP and TCP — use `['8000/http', '22/tcp']`

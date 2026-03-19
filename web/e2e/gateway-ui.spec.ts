@@ -59,14 +59,14 @@ test.describe('Overview Tab', () => {
 
   test('shows provider metrics section', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByText('Provider Metrics')).toBeVisible();
+    await expect(page.getByText('Provider Performance')).toBeVisible();
     await expect(page.getByText('groq').first()).toBeVisible();
   });
 
   test('shows pipeline components section', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByText('Pipeline Components')).toBeVisible();
-    // Components are rendered with uppercase names
+    await expect(page.getByText('Active Pipeline')).toBeVisible();
+    // Stage names are uppercase in routing bar
     await expect(page.getByText('STT').or(page.getByText('stt')).first()).toBeVisible();
   });
 });
@@ -78,8 +78,8 @@ test.describe('Overview Tab', () => {
 test.describe('Tab Navigation', () => {
   test('all tabs are present', async ({ page }) => {
     await page.goto('/');
-    for (const tab of ['Overview', 'Providers', 'GPU Deploy', 'Pipeline Test', 'Bot', 'Reputation', 'Logs & Metrics']) {
-      await expect(page.getByRole('button', { name: tab })).toBeVisible();
+    for (const tab of ['Overview', 'Profiles', 'Pipeline', 'Deploy', 'Pipeline Test', 'Bot', 'Reputation', 'Logs & Metrics']) {
+      await expect(page.getByRole('button', { name: tab, exact: true })).toBeVisible();
     }
   });
 
@@ -88,13 +88,9 @@ test.describe('Tab Navigation', () => {
     // Start on Overview
     await expect(page.getByText('P50 Latency')).toBeVisible();
 
-    // Switch to Providers
-    await page.getByRole('button', { name: 'Providers' }).click();
-    await expect(page.getByText('AI Providers')).toBeVisible();
-
-    // Switch to GPU Deploy
-    await page.getByRole('button', { name: 'GPU Deploy' }).click();
-    await expect(page.getByText('Deploy Configuration')).toBeVisible();
+    // Switch to Profiles
+    await page.getByRole('button', { name: 'Profiles', exact: true }).click();
+    await expect(page.getByText('Profiles').first()).toBeVisible();
 
     // Switch to Pipeline Test
     await page.getByRole('button', { name: 'Pipeline Test' }).click();
@@ -115,223 +111,51 @@ test.describe('Tab Navigation', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Providers Tab (replaces API Keys)
+// Profiles Tab
 // ─────────────────────────────────────────────────────────────────────────────
 
-test.describe('Providers Tab', () => {
+test.describe('Profiles Tab', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('button', { name: 'Providers' }).click();
+    await page.getByRole('button', { name: 'Profiles' }).click();
   });
 
-  test('shows section header', async ({ page }) => {
-    await expect(page.getByText('AI Providers')).toBeVisible();
-    await expect(page.getByText('Provider status, pipeline configuration, and profiles')).toBeVisible();
+  test('shows profiles section header', async ({ page }) => {
+    await expect(page.getByRole('heading', { name: 'Profiles' })).toBeVisible();
+    await expect(page.getByText('Manage pipeline profiles')).toBeVisible();
   });
 
-  test('shows cloud provider buttons with status', async ({ page }) => {
-    // Providers are shown with Configured/No key status
-    // Use .first() since provider names also appear in pipeline stage cards
-    await expect(page.getByText('Groq', { exact: true }).first()).toBeVisible();
-    await expect(page.getByText('OpenAI', { exact: true }).first()).toBeVisible();
-    await expect(page.getByText('Deepgram', { exact: true }).first()).toBeVisible();
-    await expect(page.getByText('Fireworks', { exact: true }).first()).toBeVisible();
+  test('shows empty state when no profiles', async ({ page }) => {
+    await expect(page.getByText('No profiles yet')).toBeVisible();
   });
 
-  test('shows GPU provider buttons', async ({ page }) => {
-    await expect(page.getByText('GPU Providers')).toBeVisible();
-    await expect(page.getByText('Vast.ai')).toBeVisible();
-    await expect(page.getByText('TensorDock')).toBeVisible();
-    await expect(page.getByText('RunPod')).toBeVisible();
-  });
-
-  test('shows info banner about env configuration', async ({ page }) => {
-    await expect(page.getByText('environment variables')).toBeVisible();
-  });
-
-  test('configured providers show Configured text', async ({ page }) => {
-    // groq and deepgram are configured in mock
-    const configuredText = page.getByText('Configured');
-    await expect(configuredText.first()).toBeVisible();
-  });
-
-  test('shows pipeline configuration section', async ({ page }) => {
-    await expect(page.getByRole('heading', { name: 'Provider Configuration' })).toBeVisible();
-  });
-
-  test('shows 3-column pipeline stage cards (STT, LLM, TTS)', async ({ page }) => {
-    // Stage cards have labels and subtitles
-    await expect(page.getByText('Speech-to-Text')).toBeVisible();
-    await expect(page.getByText('Translation')).toBeVisible();
-    await expect(page.getByText('Text-to-Speech')).toBeVisible();
-  });
-
-  test('shows cloud/GPU mode indicator', async ({ page }) => {
-    // Mode indicator is a centered horizontal toggle — may be below the fold
-    const modeToggle = page.getByText('API providers');
-    await modeToggle.scrollIntoViewIfNeeded();
-    await expect(modeToggle).toBeVisible();
-    await expect(page.getByText('Self-hosted', { exact: true })).toBeVisible();
-  });
-
-  test('shows provider metrics table when available', async ({ page }) => {
-    await expect(page.getByText('Provider Metrics')).toBeVisible();
-    // groq should show with stats from mock
-    await expect(page.getByText('95ms').first()).toBeVisible();
-  });
-
-  // ── Fallback chain tests ──
-
-  test('pipeline stages show editable fallback chains with primary badge', async ({ page }) => {
-    // The STT stage should show at least the default primary provider
-    await expect(page.getByText('#1 Primary').first()).toBeVisible();
-  });
-
-  test('can add fallback to pipeline stage', async ({ page }) => {
-    // Click "Add fallback" on the first stage (STT)
-    const addBtn = page.getByText('Add fallback').first();
-    await expect(addBtn).toBeVisible();
-    await addBtn.click();
-
-    // Fallback form should appear with provider/model selects
-    await expect(page.locator('label', { hasText: 'Provider' }).first()).toBeVisible();
-    await expect(page.locator('label', { hasText: 'Model' }).first()).toBeVisible();
-
-    // Click Add to add the fallback
-    const confirmBtn = page.getByRole('button', { name: 'Add' }).first();
-    await confirmBtn.click();
-
-    // Should now show a #2 Fallback badge
-    await expect(page.getByText('#2 Fallback').first()).toBeVisible();
-  });
-
-  // ── Profile tests ──
-
-  test('shows profiles section', async ({ page }) => {
-    // Profiles section is below the fold — scroll to it
-    const profilesHeading = page.getByText('Manage Profiles');
-    await profilesHeading.scrollIntoViewIfNeeded();
-    await expect(profilesHeading).toBeVisible();
-    await expect(page.getByText('No saved profiles')).toBeVisible();
-  });
-
-  test('can create and apply a profile', async ({ page }) => {
-    // Scroll to profiles section
-    const newBtn = page.getByText('New profile');
-    await newBtn.scrollIntoViewIfNeeded();
+  test('can create a new profile', async ({ page }) => {
+    const newBtn = page.getByRole('button', { name: 'New Profile' });
     await expect(newBtn).toBeVisible();
     await newBtn.click();
 
-    // Type profile name and save
-    const input = page.locator('input[placeholder="Profile name..."]');
-    await input.fill('Test Profile');
-    await page.getByRole('button', { name: 'Save' }).click();
-
-    // Profile should appear in the list
-    await expect(page.getByText('Test Profile')).toBeVisible();
+    // Should navigate to detail view with Profile Name card
+    await expect(page.getByText('Profile Name')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Save & Apply' }).first()).toBeVisible();
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GPU Deploy Tab
+// Pipeline Tab
 // ─────────────────────────────────────────────────────────────────────────────
 
-test.describe('GPU Deploy Tab', () => {
+test.describe('Profiles Tab', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('button', { name: 'GPU Deploy' }).click();
+    await page.getByRole('button', { name: 'Profiles', exact: true }).click();
   });
 
-  test('shows docker image selector', async ({ page }) => {
-    await expect(page.getByText('Docker Image', { exact: true })).toBeVisible();
-    // Select is inside the main content area
-    const select = page.locator('main select').first();
-    await expect(select).toBeVisible();
-    // Should have the default image selected
-    await expect(select).toHaveValue('marcosremar/babelcast-mistral:latest');
-  });
-
-  test('shows GPU type pill buttons with VRAM info', async ({ page }) => {
-    await expect(page.getByText('Select GPUs')).toBeVisible();
-    await expect(page.getByText('RTX A6000')).toBeVisible();
-    await expect(page.getByText('RTX 4090')).toBeVisible();
-    await expect(page.getByText('A100 SXM4')).toBeVisible();
-    // VRAM labels
-    await expect(page.getByText('48GB').first()).toBeVisible();
-  });
-
-  test('GPU type pills can be toggled', async ({ page }) => {
-    // Find the RTX 4090 button by its text content
-    const pill = page.locator('button', { hasText: 'RTX 4090' });
-    await expect(pill).toBeVisible();
-    // Click to toggle selection
-    await pill.click();
-    // Click again to toggle off
-    await pill.click();
-    // No crash — just verifying interaction works
-    await expect(pill).toBeVisible();
-  });
-
-  test('shows provider selector', async ({ page }) => {
-    // Use exact match to avoid matching "Providers" tab button
-    await expect(page.locator('main').getByText('Provider', { exact: true })).toBeVisible();
-    // Find the provider select by looking for the one containing "Auto (best available)"
-    const providerSelect = page.locator('main select', { has: page.locator('option', { hasText: 'Auto (best available)' }) });
-    await expect(providerSelect).toBeVisible();
-    await expect(providerSelect).toContainText('Auto (best available)');
-  });
-
-  test('deploy button triggers deploy and shows status', async ({ page }) => {
-    // Target the Deploy action button inside main (not the tab button "GPU Deploy")
-    const deployBtn = page.locator('main button', { hasText: 'Deploy' }).first();
-    await expect(deployBtn).toBeEnabled();
-
-    // Click and wait for the deploy POST to complete
-    const [response] = await Promise.all([
-      page.waitForResponse(resp => resp.url().includes('/v1/gpu/deploy') && resp.status() === 202),
-      deployBtn.click(),
-    ]);
-    expect(response.status()).toBe(202);
-
-    // After deploy, polling should pick up the new status and show Deploy Status bar
-    await expect(page.getByText('Deploy Status')).toBeVisible({ timeout: 15000 });
-  });
-
-  test('terminate button stops GPU', async ({ page, request }) => {
-    // Set GPU to ready state first
-    await request.post(`${MOCK}/mock/state`, { data: { gpuStatus: 'ready' } });
-    await page.goto('/');
-    await page.getByRole('button', { name: 'GPU Deploy' }).click();
-
-    // Wait for deploy status bar to show
-    await expect(page.getByText('Deploy Status')).toBeVisible({ timeout: 10000 });
-
-    const stopBtn = page.getByRole('button', { name: 'Stop' });
-    await expect(stopBtn).toBeEnabled();
-    await stopBtn.click();
-
-    // Deploy Status bar should disappear when idle
-    await expect(page.getByText('Deploy Status')).not.toBeVisible({ timeout: 10000 });
-  });
-
-  test('GPU logs viewer loads logs', async ({ page }) => {
-    await expect(page.getByText('GPU Logs')).toBeVisible({ timeout: 10000 });
-    const refreshBtn = page.getByRole('button', { name: 'Refresh Logs' });
-    await refreshBtn.click();
-
-    await expect(page.getByText('Starting BabelCast GPU server')).toBeVisible({ timeout: 5000 });
-    await expect(page.getByText('All models loaded')).toBeVisible();
-  });
-
-  test('shows error recovery UI when deploy failed', async ({ page, request }) => {
-    await request.post(`${MOCK}/mock/state`, { data: { gpuStatus: 'error' } });
-    await page.goto('/');
-    await page.getByRole('button', { name: 'GPU Deploy' }).click();
-
-    await expect(page.getByText('Deploy failed')).toBeVisible({ timeout: 10000 });
-    await expect(page.getByRole('button', { name: /Retry/ })).toBeVisible();
+  test('shows profiles page', async ({ page }) => {
+    await expect(page.getByText('Profiles').first()).toBeVisible();
   });
 });
+
+// Deploy Tab removed — deploy controls are now integrated into Profile Services
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pipeline Test Tab
@@ -589,6 +413,6 @@ test.describe('Gateway Unavailable', () => {
 test.describe('Header Branding', () => {
   test('shows AI Gateway title (not BabelCast)', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('aside h1')).toHaveText('AI Gateway');
+    await expect(page.locator('aside h1')).toHaveText('AI Gateway Settings');
   });
 });

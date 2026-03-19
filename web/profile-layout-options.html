@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Profile Editor — Layout Options</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --color-bg: #09090b; --color-surface: #131316; --color-surface-elevated: #1a1a1f;
+    --color-surface-hover: #222228; --color-border: #27272a; --color-border-light: #1f1f23;
+    --color-text: #fafafa; --color-text-secondary: #a1a1aa; --color-text-muted: #71717a;
+  }
+  body { font-family: 'Inter', system-ui, sans-serif; background: var(--color-bg); color: var(--color-text); -webkit-font-smoothing: antialiased; }
+  ::selection { background: rgba(16,185,129,0.3); }
+  ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 3px; }
+
+  .page-wrap { max-width: 1100px; margin: 0 auto; padding: 40px 24px 80px; }
+  .page-title { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+  .page-title span { color: #10b981; }
+  .page-sub { font-size: 12px; color: #71717a; margin-bottom: 48px; line-height: 1.5; }
+  .opt-label { font-size: 16px; font-weight: 700; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+  .opt-label .badge { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; padding: 2px 7px; border-radius: 5px; }
+  .opt-desc { font-size: 12px; color: #a1a1aa; margin-bottom: 16px; line-height: 1.5; }
+  .opt-sep { border: none; border-top: 1px solid #1a1a1f; margin: 40px 0; }
+
+  .pros-cons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+  .pros-cons div { font-size: 11px; line-height: 1.5; padding: 8px 12px; border-radius: 8px; }
+  .pros { background: rgba(16,185,129,0.05); border: 1px solid rgba(16,185,129,0.12); color: #6ee7b7; }
+  .cons { background: rgba(239,68,68,0.05); border: 1px solid rgba(239,68,68,0.12); color: #fca5a5; }
+
+  /* ── App shell ── */
+  .shell { border: 1px solid var(--color-border); border-radius: 14px; overflow: hidden; display: flex; height: 560px; background: var(--color-bg); }
+  .shell-sidebar { width: 200px; flex-shrink: 0; border-right: 1px solid var(--color-border); background: var(--color-surface); display: flex; flex-direction: column; }
+  .shell-sidebar .brand { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--color-border); height: 48px; }
+  .shell-sidebar .brand .logo { width: 28px; height: 28px; border-radius: 7px; background: #059669; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 10px; font-weight: 700; }
+  .shell-sidebar .brand .title { font-size: 11px; font-weight: 700; }
+  .shell-sidebar .brand .status { font-size: 9px; color: #71717a; display: flex; align-items: center; gap: 4px; }
+  .shell-sidebar .brand .status .dot { width: 5px; height: 5px; border-radius: 50%; background: #10b981; }
+  .shell-sidebar nav { flex: 1; overflow-y: auto; padding: 8px 6px; }
+  .shell-sidebar .divider { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #52525b; padding: 10px 10px 4px; }
+  .nav-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 7px; font-size: 12px; font-weight: 500; color: #71717a; cursor: pointer; transition: all .12s; }
+  .nav-item:hover { color: #a1a1aa; background: var(--color-surface-hover); }
+  .nav-item.active { color: #10b981; background: rgba(16,185,129,0.06); }
+  .nav-item .icon { width: 16px; text-align: center; font-size: 12px; }
+
+  .shell-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .shell-topbar { height: 48px; border-bottom: 1px solid var(--color-border); display: flex; align-items: center; justify-content: space-between; padding: 0 16px; flex-shrink: 0; background: color-mix(in srgb, var(--color-bg) 80%, transparent); }
+  .shell-topbar .page-label { font-size: 12px; font-weight: 600; }
+  .shell-topbar .health { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #71717a; font-family: monospace; }
+  .shell-topbar .health .dot { width: 6px; height: 6px; border-radius: 50%; background: #10b981; }
+  .shell-content { flex: 1; overflow-y: auto; }
+
+  /* ── Profile topbar (inside content) ── */
+  .profile-bar { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; border-bottom: 1px solid var(--color-border); flex-shrink: 0; }
+  .profile-bar .back { font-size: 12px; color: #71717a; cursor: pointer; display: flex; align-items: center; gap: 4px; }
+  .profile-bar .right { display: flex; align-items: center; gap: 8px; }
+  .profile-bar .name-badge { font-size: 10px; font-weight: 600; color: #38bdf8; background: rgba(56,189,248,0.08); padding: 3px 10px; border-radius: 5px; }
+  .save-btn { font-size: 11px; font-weight: 600; color: #fff; background: #059669; padding: 5px 14px; border-radius: 7px; border: none; cursor: pointer; }
+  .save-btn:hover { background: #047857; }
+
+  /* ── Flow diagram (shared) ── */
+  .flow { display: flex; align-items: center; gap: 6px; padding: 12px 16px; flex-wrap: wrap; flex-shrink: 0; }
+  .flow .pill { display: flex; align-items: center; gap: 5px; padding: 5px 11px; border-radius: 7px; font-size: 10px; font-weight: 600; }
+  .flow .arr { color: #3f3f46; font-size: 12px; }
+  .flow .meta { margin-left: auto; font-size: 9px; color: #52525b; }
+
+  /* ── Tabs (Option A) ── */
+  .htabs { display: flex; border-bottom: 1px solid var(--color-border); flex-shrink: 0; }
+  .htab { padding: 9px 16px; font-size: 11px; font-weight: 600; color: #71717a; cursor: pointer; border-bottom: 2px solid transparent; transition: all .12s; }
+  .htab:hover { color: #a1a1aa; }
+  .htab.active { color: #10b981; border-bottom-color: #10b981; }
+  .htab-panel { padding: 14px 16px; flex: 1; overflow-y: auto; }
+
+  /* ── Left nav (Option B) ── */
+  .split { display: flex; flex: 1; overflow: hidden; }
+  .split-nav { width: 160px; flex-shrink: 0; border-right: 1px solid var(--color-border); padding: 8px 0; background: #111114; overflow-y: auto; }
+  .split-nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 14px; font-size: 11px; font-weight: 500; color: #71717a; cursor: pointer; transition: all .12s; }
+  .split-nav-item:hover { color: #a1a1aa; background: rgba(255,255,255,0.02); }
+  .split-nav-item.active { color: #10b981; background: rgba(16,185,129,0.05); border-right: 2px solid #10b981; }
+  .split-nav-item .ndot { width: 7px; height: 7px; border-radius: 50%; }
+  .split-content { flex: 1; padding: 14px 16px; overflow-y: auto; }
+
+  /* ── Accordion (Option C) ── */
+  .acc { border-bottom: 1px solid var(--color-border); }
+  .acc-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; transition: background .12s; }
+  .acc-head:hover { background: rgba(255,255,255,0.015); }
+  .acc-head .ai { width: 28px; height: 28px; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
+  .acc-head .alabel { font-size: 12px; font-weight: 600; flex: 1; }
+  .acc-head .ahint { font-size: 10px; color: #52525b; }
+  .acc-head .achev { font-size: 10px; color: #52525b; transition: transform .15s; }
+  .acc-head.open .achev { transform: rotate(180deg); }
+  .acc-body { padding: 0 16px 12px 54px; display: none; }
+  .acc-body.open { display: block; }
+
+  /* ── Shared cards ── */
+  .mc { border: 1px solid var(--color-border); border-radius: 9px; padding: 10px 14px; background: var(--color-surface); margin-bottom: 6px; }
+  .mc .lbl { font-size: 10px; color: #71717a; margin-bottom: 3px; }
+  .mc .val { font-size: 12px; font-weight: 600; }
+  .cp { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 6px; font-size: 10px; font-weight: 600; border: 1px solid var(--color-border); margin: 2px; }
+  .cp .cd { width: 5px; height: 5px; border-radius: 50%; }
+  .stage-row { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+  .stage-num { font-size: 9px; font-weight: 700; width: 14px; text-align: center; }
+  .stage-label { font-weight: 600; width: 28px; }
+  .deploy-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(16,185,129,0.03); border: 1px solid rgba(16,185,129,0.15); border-radius: 8px; margin-top: 6px; }
+  .deploy-bar .sd { width: 7px; height: 7px; border-radius: 50%; background: #52525b; flex-shrink: 0; }
+  .deploy-bar .sd.ready { background: #10b981; }
+  .dbtn { font-size: 10px; font-weight: 600; color: #fff; background: #10b981; padding: 4px 12px; border-radius: 5px; border: none; cursor: pointer; margin-left: auto; }
+  .pill-row { display: flex; gap: 3px; flex-wrap: wrap; }
+  .pill-btn { padding: 3px 8px; border-radius: 5px; font-size: 9px; font-weight: 600; border: 1px solid var(--color-border); color: #71717a; cursor: pointer; background: transparent; }
+  .pill-btn.on { border-color: rgba(139,92,246,0.4); background: #8b5cf6; color: #fff; }
+  .pill-btn.amber { border-color: rgba(251,191,36,0.3); color: #fbbf24; background: rgba(251,191,36,0.06); }
+  .opts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+  .opts-box { background: rgba(255,255,255,0.015); border-radius: 7px; padding: 7px 10px; }
+  .opts-box .olbl { font-size: 9px; color: #71717a; margin-bottom: 3px; }
+  .svc-card { border: 1px solid var(--color-border); border-radius: 9px; padding: 10px 14px; background: var(--color-surface); margin-bottom: 6px; }
+  .svc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .svc-icon { width: 28px; height: 28px; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
+  .svc-name { font-size: 12px; font-weight: 600; }
+  .svc-badge { font-size: 8px; font-weight: 700; text-transform: uppercase; padding: 1px 6px; border-radius: 3px; }
+  .svc-detail { font-size: 9px; color: #71717a; font-family: monospace; }
+  .model-pills { display: flex; gap: 3px; margin: 4px 0; flex-wrap: wrap; }
+  .mp { font-size: 8px; font-weight: 600; padding: 2px 7px; border-radius: 4px; }
+  .add-link { font-size: 10px; color: #52525b; cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 6px 0; }
+</style>
+</head>
+<body>
+
+<div class="page-wrap">
+  <h1 class="page-title">Profile Editor — <span>3 Layout Options</span></h1>
+  <p class="page-sub">
+    Current page stacks Name → Latency → Stages → Services vertically, making it very long.<br>
+    Below are 3 approaches using the real app shell. Click tabs/sidebar/accordion to interact.
+  </p>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- OPTION A -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <div class="opt-label">Option A: Horizontal Tabs <span class="badge" style="background:rgba(56,189,248,0.1);color:#38bdf8">Recommended</span></div>
+  <p class="opt-desc">Flow diagram fixed on top. Tabs switch between Pipeline, Services, Settings. One panel visible at a time.</p>
+
+  <div class="shell" id="optA">
+    <!-- Sidebar -->
+    <div class="shell-sidebar">
+      <div class="brand"><div class="logo">AI</div><div><div class="title">AI Gateway Settings</div><div class="status"><span class="dot"></span> 2h 14m</div></div></div>
+      <nav>
+        <div class="nav-item"><span class="icon">📊</span> Overview</div>
+        <div class="divider">Config</div>
+        <div class="nav-item active"><span class="icon">📋</span> Profiles</div>
+        <div class="nav-item"><span class="icon">🔑</span> API Keys</div>
+        <div class="divider">Tools</div>
+        <div class="nav-item"><span class="icon">✨</span> Playground</div>
+        <div class="nav-item"><span class="icon">🧪</span> Pipeline Test</div>
+        <div class="nav-item"><span class="icon">⚡</span> Path Benchmark</div>
+        <div class="nav-item"><span class="icon">🤖</span> Bot</div>
+        <div class="divider">Monitor</div>
+        <div class="nav-item"><span class="icon">🧬</span> GPU Readiness</div>
+        <div class="nav-item"><span class="icon">🛡</span> Reputation</div>
+        <div class="nav-item"><span class="icon">📜</span> Logs & Metrics</div>
+      </nav>
+    </div>
+    <div class="shell-main">
+      <div class="shell-topbar"><span class="page-label">Profiles</span><div class="health"><span class="dot"></span> ok</div></div>
+      <div class="shell-content" style="display:flex;flex-direction:column">
+        <div class="profile-bar"><span class="back">← Profiles</span><div class="right"><span class="name-badge">Real-time Translation + Dubbing</span><button class="save-btn">✓ Save & Apply</button></div></div>
+        <div class="flow" style="border-bottom:1px solid var(--color-border)">
+          <div class="pill" style="background:rgba(56,189,248,0.08);color:#38bdf8;border:1px solid rgba(56,189,248,0.2)">🎤 STT</div>
+          <span class="arr">→</span>
+          <div class="pill" style="background:rgba(139,92,246,0.08);color:#a78bfa;border:1px solid rgba(139,92,246,0.2)">🤖 LLM</div>
+          <span class="arr">→</span>
+          <div class="pill" style="background:rgba(251,191,36,0.08);color:#fbbf24;border:1px solid rgba(251,191,36,0.2)">🔊 TTS</div>
+          <span class="meta">realtime · 3 stages · GPU + fallback</span>
+        </div>
+        <div class="htabs" id="htabsA">
+          <div class="htab active" onclick="stA('pipeline')">Pipeline</div>
+          <div class="htab" onclick="stA('services')">Services</div>
+          <div class="htab" onclick="stA('settings')">Settings</div>
+        </div>
+        <div class="htab-panel" id="pA-pipeline">
+          <div style="display:flex;justify-content:space-between;margin-bottom:8px"><span style="font-size:10px;color:#71717a">3 stages · drag to reorder</span><span class="add-link" style="padding:0">+ Add Stage</span></div>
+          <div class="mc" style="border-color:rgba(56,189,248,0.2)"><div class="stage-row"><span class="stage-num" style="color:#38bdf8">1</span><span class="stage-label" style="color:#38bdf8">STT</span><span class="cp"><span class="cd" style="background:#f59e0b"></span>GPU — Whisper</span><span style="color:#3f3f46">→</span><span class="cp"><span class="cd" style="background:#7ba896"></span>Groq — Turbo</span></div></div>
+          <div class="mc" style="border-color:rgba(139,92,246,0.2)"><div class="stage-row"><span class="stage-num" style="color:#a78bfa">2</span><span class="stage-label" style="color:#a78bfa">LLM</span><span class="cp"><span class="cd" style="background:#f59e0b"></span>GPU — TranslateGemma</span><span style="color:#3f3f46">→</span><span class="cp"><span class="cd" style="background:#7ba896"></span>Groq — Llama 70B</span></div></div>
+          <div class="mc" style="border-color:rgba(251,191,36,0.2)"><div class="stage-row"><span class="stage-num" style="color:#fbbf24">3</span><span class="stage-label" style="color:#fbbf24">TTS</span><span class="cp"><span class="cd" style="background:#f59e0b"></span>GPU — Qwen3 TTS</span><span style="color:#3f3f46">→</span><span class="cp"><span class="cd" style="background:#a78bfa"></span>Modal</span></div></div>
+        </div>
+        <div class="htab-panel" id="pA-services" style="display:none">
+          <div class="svc-card"><div class="svc-head"><div class="svc-icon" style="background:rgba(167,139,250,0.1)">📦</div><span class="svc-name">Babelcast Translategemma</span><span class="svc-badge" style="background:rgba(167,139,250,0.1);color:#a78bfa">GPU-POD</span></div><div class="svc-detail">marcosremar/babelcast-translategemma:latest</div><div class="model-pills"><span class="mp" style="background:rgba(56,189,248,0.1);color:#38bdf8">STT · Whisper</span><span class="mp" style="background:rgba(139,92,246,0.1);color:#a78bfa">LLM · TranslateGemma</span><span class="mp" style="background:rgba(251,191,36,0.1);color:#fbbf24">TTS · Qwen3</span></div><div class="svc-detail" style="margin-bottom:6px">RTX 4090, RTX A6000, A40 · Vast.ai</div><div class="opts-grid"><div class="opts-box"><div class="olbl">Parallel launch</div><div class="pill-row"><span class="pill-btn on">1 (off)</span><span class="pill-btn">×2</span><span class="pill-btn">×3</span><span class="pill-btn">×5</span></div></div><div class="opts-box"><div class="olbl">Auto-stop</div><div class="pill-row"><span class="pill-btn amber">15m</span><span class="pill-btn">30m</span><span class="pill-btn">60m</span><span class="pill-btn">Never</span></div></div></div><div class="deploy-bar"><span class="sd"></span><span style="font-size:10px;color:#71717a">Not deployed</span><button class="dbtn">▶ Deploy</button></div></div>
+          <div class="svc-card"><div class="svc-head"><div class="svc-icon" style="background:rgba(123,168,150,0.1)">⚡</div><span class="svc-name">Groq</span><span class="svc-badge" style="background:rgba(123,168,150,0.1);color:#7ba896">CLOUD</span></div><div class="svc-detail">groq</div></div>
+          <div class="svc-card"><div class="svc-head"><div class="svc-icon" style="background:rgba(167,139,250,0.1)">🖥</div><span class="svc-name">Modal</span><span class="svc-badge" style="background:rgba(167,139,250,0.1);color:#a78bfa">CLOUD</span></div><div class="svc-detail">modal</div></div>
+          <div class="add-link">+ Add Service</div>
+        </div>
+        <div class="htab-panel" id="pA-settings" style="display:none">
+          <div class="mc"><div class="lbl">Profile Name</div><div class="val">Real-time Translation + Dubbing</div></div>
+          <div class="mc"><div class="lbl">Latency Target</div><div style="display:flex;gap:4px;margin-top:4px"><span class="pill-btn" style="border-color:rgba(16,185,129,0.3);color:#10b981;background:rgba(16,185,129,0.08)">realtime</span><span class="pill-btn">low</span><span class="pill-btn">batch</span></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pros-cons"><div class="pros"><strong>+</strong> Clean · No scrolling · Familiar · Flow always visible</div><div class="cons"><strong>−</strong> Can't see stages + services simultaneously</div></div>
+
+  <hr class="opt-sep">
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- OPTION B -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <div class="opt-label">Option B: Split Panel</div>
+  <p class="opt-desc">Mini section nav on the left, content on the right. Flow diagram above. Quick jump between sections.</p>
+
+  <div class="shell" id="optB">
+    <div class="shell-sidebar">
+      <div class="brand"><div class="logo">AI</div><div><div class="title">AI Gateway Settings</div><div class="status"><span class="dot"></span> 2h 14m</div></div></div>
+      <nav>
+        <div class="nav-item">📊 Overview</div>
+        <div class="divider">Config</div>
+        <div class="nav-item active">📋 Profiles</div>
+        <div class="nav-item">🔑 API Keys</div>
+        <div class="divider">Tools</div>
+        <div class="nav-item">✨ Playground</div>
+        <div class="nav-item">🧪 Pipeline Test</div>
+        <div class="nav-item">⚡ Path Bench</div>
+        <div class="nav-item">🤖 Bot</div>
+        <div class="divider">Monitor</div>
+        <div class="nav-item">🧬 GPU Readiness</div>
+        <div class="nav-item">🛡 Reputation</div>
+        <div class="nav-item">📜 Logs</div>
+      </nav>
+    </div>
+    <div class="shell-main">
+      <div class="shell-topbar"><span class="page-label">Profiles</span><div class="health"><span class="dot"></span> ok</div></div>
+      <div class="shell-content" style="display:flex;flex-direction:column">
+        <div class="profile-bar"><span class="back">← Profiles</span><div class="right"><span class="name-badge">Real-time Translation + Dubbing</span><button class="save-btn">✓ Save & Apply</button></div></div>
+        <div class="flow" style="border-bottom:1px solid var(--color-border)">
+          <div class="pill" style="background:rgba(56,189,248,0.08);color:#38bdf8;border:1px solid rgba(56,189,248,0.2)">🎤 STT</div><span class="arr">→</span><div class="pill" style="background:rgba(139,92,246,0.08);color:#a78bfa;border:1px solid rgba(139,92,246,0.2)">🤖 LLM</div><span class="arr">→</span><div class="pill" style="background:rgba(251,191,36,0.08);color:#fbbf24;border:1px solid rgba(251,191,36,0.2)">🔊 TTS</div>
+        </div>
+        <div class="split">
+          <div class="split-nav" id="snB">
+            <div class="split-nav-item" onclick="stB('general')"><span class="ndot" style="background:#71717a"></span> General</div>
+            <div class="split-nav-item active" onclick="stB('pipeline')"><span class="ndot" style="background:#38bdf8"></span> Pipeline</div>
+            <div class="split-nav-item" onclick="stB('services')"><span class="ndot" style="background:#a78bfa"></span> Services</div>
+          </div>
+          <div class="split-content" id="scB-pipeline">
+            <div style="font-size:12px;font-weight:600;margin-bottom:8px">Pipeline Stages</div>
+            <div class="mc" style="border-color:rgba(56,189,248,0.2)"><div class="stage-row"><span style="cursor:grab;color:#52525b;font-size:10px">⠿</span><span class="stage-num" style="color:#38bdf8">1</span><span style="font-weight:600;color:#38bdf8;font-size:11px;width:28px">STT</span><span class="cp"><span class="cd" style="background:#f59e0b"></span>GPU</span><span style="color:#3f3f46;font-size:9px">→</span><span class="cp"><span class="cd" style="background:#7ba896"></span>Groq</span></div></div>
+            <div class="mc" style="border-color:rgba(139,92,246,0.2)"><div class="stage-row"><span style="cursor:grab;color:#52525b;font-size:10px">⠿</span><span class="stage-num" style="color:#a78bfa">2</span><span style="font-weight:600;color:#a78bfa;font-size:11px;width:28px">LLM</span><span class="cp"><span class="cd" style="background:#f59e0b"></span>GPU</span><span style="color:#3f3f46;font-size:9px">→</span><span class="cp"><span class="cd" style="background:#7ba896"></span>Groq</span></div></div>
+            <div class="mc" style="border-color:rgba(251,191,36,0.2)"><div class="stage-row"><span style="cursor:grab;color:#52525b;font-size:10px">⠿</span><span class="stage-num" style="color:#fbbf24">3</span><span style="font-weight:600;color:#fbbf24;font-size:11px;width:28px">TTS</span><span class="cp"><span class="cd" style="background:#f59e0b"></span>GPU</span><span style="color:#3f3f46;font-size:9px">→</span><span class="cp"><span class="cd" style="background:#a78bfa"></span>Modal</span></div></div>
+            <div class="add-link">+ Add Stage</div>
+          </div>
+          <div class="split-content" id="scB-services" style="display:none">
+            <div class="svc-card"><div class="svc-head"><div class="svc-icon" style="background:rgba(167,139,250,0.1)">📦</div><span class="svc-name">Babelcast Translategemma</span><span class="svc-badge" style="background:rgba(167,139,250,0.1);color:#a78bfa">GPU</span></div><div class="svc-detail">marcosremar/babelcast-translategemma:latest</div><div class="model-pills"><span class="mp" style="background:rgba(56,189,248,0.1);color:#38bdf8">STT</span><span class="mp" style="background:rgba(139,92,246,0.1);color:#a78bfa">LLM</span><span class="mp" style="background:rgba(251,191,36,0.1);color:#fbbf24">TTS</span></div><div class="opts-grid"><div class="opts-box"><div class="olbl">Parallel</div><div class="pill-row"><span class="pill-btn on">1</span><span class="pill-btn">×2</span><span class="pill-btn">×3</span></div></div><div class="opts-box"><div class="olbl">Auto-stop</div><div class="pill-row"><span class="pill-btn amber">15m</span><span class="pill-btn">30m</span><span class="pill-btn">Never</span></div></div></div><div class="deploy-bar"><span class="sd"></span><span style="font-size:10px;color:#71717a">Not deployed</span><button class="dbtn">▶ Deploy</button></div></div>
+            <div class="add-link">+ Add Service</div>
+          </div>
+          <div class="split-content" id="scB-general" style="display:none">
+            <div class="mc"><div class="lbl">Profile Name</div><div class="val">Real-time Translation + Dubbing</div></div>
+            <div class="mc"><div class="lbl">Latency</div><div style="display:flex;gap:4px;margin-top:3px"><span class="pill-btn" style="border-color:rgba(16,185,129,0.3);color:#10b981;background:rgba(16,185,129,0.06)">realtime</span><span class="pill-btn">low</span><span class="pill-btn">batch</span></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pros-cons"><div class="pros"><strong>+</strong> Quick jump · Independent scroll · Scales to many sections</div><div class="cons"><strong>−</strong> Two sidebars (app + profile) might confuse · Tighter on narrow screens</div></div>
+
+  <hr class="opt-sep">
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- OPTION C -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <div class="opt-label">Option C: Accordion</div>
+  <p class="opt-desc">Collapsible sections. Only one open at a time. Summary hints when collapsed. Single scrollable page.</p>
+
+  <div class="shell" id="optC">
+    <div class="shell-sidebar">
+      <div class="brand"><div class="logo">AI</div><div><div class="title">AI Gateway Settings</div><div class="status"><span class="dot"></span> 2h 14m</div></div></div>
+      <nav>
+        <div class="nav-item">📊 Overview</div>
+        <div class="divider">Config</div>
+        <div class="nav-item active">📋 Profiles</div>
+        <div class="nav-item">🔑 API Keys</div>
+        <div class="divider">Tools</div>
+        <div class="nav-item">✨ Playground</div>
+        <div class="nav-item">🧪 Pipeline Test</div>
+        <div class="nav-item">⚡ Path Bench</div>
+        <div class="nav-item">🤖 Bot</div>
+        <div class="divider">Monitor</div>
+        <div class="nav-item">🧬 GPU Readiness</div>
+        <div class="nav-item">🛡 Reputation</div>
+        <div class="nav-item">📜 Logs</div>
+      </nav>
+    </div>
+    <div class="shell-main">
+      <div class="shell-topbar"><span class="page-label">Profiles</span><div class="health"><span class="dot"></span> ok</div></div>
+      <div class="shell-content" style="display:flex;flex-direction:column">
+        <div class="profile-bar"><span class="back">← Profiles</span><div class="right"><span class="name-badge">Real-time Translation + Dubbing</span><button class="save-btn">✓ Save & Apply</button></div></div>
+        <div class="flow" style="border-bottom:1px solid var(--color-border)">
+          <div class="pill" style="background:rgba(56,189,248,0.08);color:#38bdf8;border:1px solid rgba(56,189,248,0.2)">🎤 STT</div><span class="arr">→</span><div class="pill" style="background:rgba(139,92,246,0.08);color:#a78bfa;border:1px solid rgba(139,92,246,0.2)">🤖 LLM</div><span class="arr">→</span><div class="pill" style="background:rgba(251,191,36,0.08);color:#fbbf24;border:1px solid rgba(251,191,36,0.2)">🔊 TTS</div>
+        </div>
+        <div style="flex:1;overflow-y:auto">
+          <div class="acc"><div class="acc-head open" onclick="tgC(this)"><div class="ai" style="background:rgba(56,189,248,0.08);color:#38bdf8">🔗</div><span class="alabel">Pipeline Stages</span><span class="ahint">3 stages · STT → LLM → TTS</span><span class="achev">▼</span></div><div class="acc-body open"><div class="mc" style="border-color:rgba(56,189,248,0.15);margin:0 0 4px"><div class="stage-row"><span class="stage-num" style="color:#38bdf8">1</span><span style="font-weight:600;font-size:11px">STT</span><span class="cp" style="margin-left:6px"><span class="cd" style="background:#f59e0b"></span>GPU</span><span style="color:#3f3f46;font-size:9px">→</span><span class="cp"><span class="cd" style="background:#7ba896"></span>Groq</span></div></div><div class="mc" style="border-color:rgba(139,92,246,0.15);margin:0 0 4px"><div class="stage-row"><span class="stage-num" style="color:#a78bfa">2</span><span style="font-weight:600;font-size:11px">LLM</span><span class="cp" style="margin-left:6px"><span class="cd" style="background:#f59e0b"></span>GPU</span><span style="color:#3f3f46;font-size:9px">→</span><span class="cp"><span class="cd" style="background:#7ba896"></span>Groq</span></div></div><div class="mc" style="border-color:rgba(251,191,36,0.15);margin:0"><div class="stage-row"><span class="stage-num" style="color:#fbbf24">3</span><span style="font-weight:600;font-size:11px">TTS</span><span class="cp" style="margin-left:6px"><span class="cd" style="background:#f59e0b"></span>GPU</span><span style="color:#3f3f46;font-size:9px">→</span><span class="cp"><span class="cd" style="background:#a78bfa"></span>Modal</span></div></div></div></div>
+          <div class="acc"><div class="acc-head" onclick="tgC(this)"><div class="ai" style="background:rgba(167,139,250,0.08);color:#a78bfa">📦</div><span class="alabel">Services</span><span class="ahint">1 GPU pod · 2 cloud</span><span class="achev">▼</span></div><div class="acc-body"><div class="svc-card" style="margin:0"><div class="svc-head"><span class="svc-name">Babelcast Translategemma</span><span class="svc-badge" style="background:rgba(167,139,250,0.1);color:#a78bfa">GPU</span></div><div class="svc-detail">RTX 4090, A6000 · Vast.ai</div><div class="opts-grid"><div class="opts-box"><div class="olbl">Parallel</div><div class="pill-row"><span class="pill-btn on">1</span><span class="pill-btn">×2</span><span class="pill-btn">×3</span></div></div><div class="opts-box"><div class="olbl">Auto-stop</div><div class="pill-row"><span class="pill-btn amber">15m</span><span class="pill-btn">30m</span><span class="pill-btn">Never</span></div></div></div><div class="deploy-bar"><span class="sd"></span><span style="font-size:10px;color:#71717a">Not deployed</span><button class="dbtn">▶ Deploy</button></div></div></div></div>
+          <div class="acc"><div class="acc-head" onclick="tgC(this)"><div class="ai" style="background:rgba(16,185,129,0.08);color:#10b981">⚙</div><span class="alabel">Settings</span><span class="ahint">realtime</span><span class="achev">▼</span></div><div class="acc-body"><div class="mc" style="margin:0 0 4px"><div class="lbl">Name</div><div class="val">Real-time Translation + Dubbing</div></div><div class="mc" style="margin:0"><div class="lbl">Latency</div><div style="display:flex;gap:3px;margin-top:3px"><span class="pill-btn" style="border-color:rgba(16,185,129,0.3);color:#10b981;background:rgba(16,185,129,0.06)">realtime</span><span class="pill-btn">low</span><span class="pill-btn">batch</span></div></div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pros-cons"><div class="pros"><strong>+</strong> All on one page · Compact · Hints visible collapsed · No context switch</div><div class="cons"><strong>−</strong> Can scroll if section is long · Less clean than tabs</div></div>
+
+  <hr class="opt-sep">
+  <p style="text-align:center;font-size:11px;color:#52525b;padding:10px 0 30px"><strong>Recommendation:</strong> Option A (tabs) for clean UX. Option C is a good single-page alternative.</p>
+</div>
+
+<script>
+function stA(t){document.querySelectorAll('#optA .htab').forEach(e=>e.classList.remove('active'));document.querySelectorAll('#optA .htab-panel').forEach(e=>e.style.display='none');event.target.classList.add('active');document.getElementById('pA-'+t).style.display='block';}
+function stB(t){document.querySelectorAll('#optB .split-nav-item').forEach(e=>e.classList.remove('active'));event.target.closest('.split-nav-item').classList.add('active');document.querySelectorAll('#optB .split-content').forEach(e=>e.style.display='none');document.getElementById('scB-'+t).style.display='block';}
+function tgC(h){var b=h.nextElementSibling,o=b.classList.contains('open');document.querySelectorAll('#optC .acc-head').forEach(e=>e.classList.remove('open'));document.querySelectorAll('#optC .acc-body').forEach(e=>{e.classList.remove('open');e.style.display='none';});if(!o){h.classList.add('open');b.classList.add('open');b.style.display='block';}}
+</script>
+</body>
+</html>

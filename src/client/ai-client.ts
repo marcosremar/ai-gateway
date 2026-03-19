@@ -171,7 +171,7 @@ export class AIClient {
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
       effectiveChain,
       async (entry) => {
-        const provider = this.resolveProvider(id => this.registry.getSTTProvider(id), entry.provider as ProviderId, profile);
+        const provider = this.resolveProvider(id => this.registry.getSTTProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.transcribe({
           audio,
           model: entry.model ?? 'whisper-large-v3-turbo',
@@ -218,7 +218,7 @@ export class AIClient {
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
       effectiveChain,
       async (entry) => {
-        const provider = this.resolveProvider(id => this.registry.getLLMProvider(id), entry.provider as ProviderId, profile);
+        const provider = this.resolveProvider(id => this.registry.getLLMProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.chat({
           messages,
           model: entry.model ?? 'gpt-4o',
@@ -282,7 +282,7 @@ export class AIClient {
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
       effectiveChain,
       async (entry) => {
-        const provider = this.resolveProvider(id => this.registry.getTTSProvider(id), entry.provider as ProviderId, profile);
+        const provider = this.resolveProvider(id => this.registry.getTTSProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.synthesize({
           input: text,
           model: entry.model,  // provider uses its own defaultModel if undefined
@@ -328,7 +328,7 @@ export class AIClient {
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
       chain,
       async (entry) => {
-        const provider = this.resolveProvider(id => this.registry.getImageProvider(id), entry.provider as ProviderId, profile);
+        const provider = this.resolveProvider(id => this.registry.getImageProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.generate({
           prompt,
           model: entry.model,
@@ -368,7 +368,7 @@ export class AIClient {
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
       chain,
       async (entry) => {
-        const provider = this.resolveProvider(id => this.registry.getOmniProvider(id), entry.provider as ProviderId, profile);
+        const provider = this.resolveProvider(id => this.registry.getOmniProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.omniChat({
           audio: input.audio,
           text: input.text,
@@ -417,6 +417,7 @@ export class AIClient {
       id => this.registry.getRealtimeProvider(id),
       entry.provider as ProviderId,
       profile,
+      entry.endpoint,
     );
 
     const session = await provider.createSession({
@@ -760,7 +761,11 @@ export class AIClient {
     for (const c of configs) {
       const count = (c.selfHosted && c.alwaysActive) ? Math.max(c.replicas ?? 1, 1) : 1;
       for (let r = 0; r < count; r++) {
-        entries.push({ provider: c.provider, model: c.model });
+        entries.push({
+          provider: c.provider,
+          model: c.model,
+          ...(c.endpoint ? { endpoint: c.endpoint } : {}),
+        });
       }
     }
 
@@ -801,14 +806,18 @@ export class AIClient {
     };
   }
 
-  private resolveProvider<T extends { withApiKey?: (key: string) => T }>(
+  private resolveProvider<T extends { withApiKey?: (key: string) => T; withEndpoint?: (url: string) => T }>(
     getter: (id: ProviderId) => T,
     providerId: ProviderId,
     profile: AIProfile,
+    endpoint?: string,
   ): T {
-    const base = getter(providerId);
+    let base = getter(providerId);
     const apiKey = this.resolveKey(providerId, profile);
-    if (apiKey && base.withApiKey) return base.withApiKey(apiKey);
+    if (apiKey && base.withApiKey) base = base.withApiKey(apiKey);
+    // Per-entry endpoint override; fall back to global gpuEndpoint for gpu provider
+    const effectiveEndpoint = endpoint ?? (providerId === 'gpu' ? profile.gpuEndpoint : undefined);
+    if (effectiveEndpoint && base.withEndpoint) base = base.withEndpoint(effectiveEndpoint);
     return base;
   }
 

@@ -28,6 +28,8 @@ export interface FallbackChainEntry {
   model?: string;
   /** Lower number = higher priority. Default: 0 */
   priority?: number;
+  /** Per-entry endpoint override for distributed profiles. */
+  endpoint?: string;
 }
 
 export interface FallbackChainConfig {
@@ -64,6 +66,7 @@ export function resolveDeclarativeChain(config: FallbackChainConfig): ResolvedCh
   const chain: FallbackEntry[] = sorted.map((entry) => ({
     provider: entry.provider,
     model: entry.model,
+    ...(entry.endpoint ? { endpoint: entry.endpoint } : {}),
   }));
 
   const options: Partial<FallbackOptions> = {};
