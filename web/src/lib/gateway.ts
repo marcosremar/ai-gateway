@@ -764,11 +764,28 @@ export interface GpuOffer {
   id: string;
   provider: string;
   gpuType: string;
+  gpuName?: string;
   gpuCount: number;
   vramGb: number | null;
   pricePerHr: number;
   region: string | null;
   reliability: number | null;
+  // ranked fields
+  networkRttMs?: number | null;
+  inferenceMs?: number | null;
+  totalMs?: number | null;
+  distanceKm?: number | null;
+  countryCode?: string | null;
+  canDeploy?: boolean;
+}
+
+export interface RankedGpuOffersResponse {
+  offers: GpuOffer[];
+  clientLat: number;
+  clientLon: number;
+  providers: Record<string, { count: number; error?: string }>;
+  balances: Record<string, { balance: number | null; canDeploy: boolean }>;
+  hostRttsCached: number;
 }
 
 export async function getGpuOffers(opts?: { gpuType?: string; provider?: string }): Promise<{ offers: GpuOffer[] }> {
@@ -777,6 +794,15 @@ export async function getGpuOffers(opts?: { gpuType?: string; provider?: string 
   if (opts?.provider) qs.set('provider', opts.provider);
   const q = qs.toString();
   return gwJson('/v1/gpu/offers' + (q ? '?' + q : ''));
+}
+
+export async function getRankedGpuOffers(opts?: { gpuTypes?: string[]; provider?: string; limit?: number }): Promise<RankedGpuOffersResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.gpuTypes?.length) qs.set('gpuTypes', opts.gpuTypes.join(','));
+  if (opts?.provider) qs.set('provider', opts.provider);
+  if (opts?.limit) qs.set('limit', String(opts.limit));
+  const q = qs.toString();
+  return gwJson('/v1/gpu/offers/ranked' + (q ? '?' + q : ''));
 }
 
 // ── Voice Profile ──
