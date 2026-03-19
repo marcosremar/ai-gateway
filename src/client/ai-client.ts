@@ -448,14 +448,26 @@ export class AIClient {
     const profile = this.resolveEffectiveProfile(profileOverride);
     const t0 = Date.now();
 
-    // Try GPU pipeline first
+    // Try unified GPU pipeline first (single pod handles all stages)
     const gpuEndpoint = await this.resolveGpuEndpoint(profile);
     if (gpuEndpoint) {
       try {
         const gpuResult = await this.tryGpuPipeline(gpuEndpoint, audio, systemPrompt, history, profile);
         return { ...gpuResult, totalLatencyMs: Date.now() - t0, usedGpu: true };
       } catch (err) {
-        this.log.warn('[AIClient] GPU pipeline failed, falling back to cloud per-stage:', err);
+        this.log.warn('[AIClient] GPU pipeline failed, trying chain protocol:', err);
+      }
+    }
+
+    // Try chain protocol: each stage on its own pod, pods talk directly to each other
+    // (avoids 2 gateway round-trips when pods are co-located or in the same datacenter)
+    const perStage = this.resolvePerStageEndpoints(profile);
+    if (perStage) {
+      try {
+        const chainResult = await this.tryChainPipeline(perStage, audio, systemPrompt, profile);
+        return { ...chainResult, totalLatencyMs: Date.now() - t0, usedGpu: true };
+      } catch (err) {
+        this.log.warn('[AIClient] Chain pipeline failed, falling back to cloud per-stage:', err);
       }
     }
 
@@ -873,6 +885,101 @@ export class AIClient {
     const error = `self-hosted endpoint ${base} not reachable`;
     this.log.warn(`[AIClient] Warmup self-hosted ${id}: ${error} (${ms}ms)`);
     return { id, stage, provider, model, status: 'error', latencyMs: ms, error };
+  }
+
+  /**
+   * Resolve per-stage GPU endpoints from the profile's STT/LLM/TTS chains.
+   *
+   * When different stages have dedicated GPU pod endpoints (e.g. one pod for
+   * STT, another for LLM, a third for TTS), the chain protocol lets them talk
+   * directly instead of routing through the gateway. Returns null when there
+   * are no per-stage GPU entries with explicit endpoints.
+   */
+  private resolvePerStageEndpoints(profile: AIProfile): {
+    stt: string; llm: string | null; tts: string | null;
+  } | null {
+    const sttEntry = profile.stt?.find(e => e.provider === 'gpu' && e.endpoint);
+    const llmEntry = profile.llm?.find(e => e.provider === 'gpu' && e.endpoint);
+    const ttsEntry = profile.tts?.find(e => e.provider === 'gpu' && e.endpoint);
+
+    // Need at least the STT entry with an endpoint to start the chain
+    if (!sttEntry?.endpoint) return null;
+
+    return {
+      stt: sttEntry.endpoint,
+      llm: llmEntry?.endpoint ?? null,
+      tts: ttsEntry?.endpoint ?? null,
+    };
+  }
+
+  /**
+   * Run the pipeline using the chain protocol: STT pod receives audio + chain
+   * config, forwards transcript directly to LLM pod, which forwards translation
+   * directly to TTS pod. Eliminates 2 gateway round-trips.
+   */
+  private async tryChainPipeline(
+    endpoints: { stt: string; llm: string | null; tts: string | null },
+    audio: Buffer | Blob,
+    systemPrompt: string,
+    profile: AIProfile,
+  ): Promise<Omit<PipelineResult, 'totalLatencyMs' | 'usedGpu'>> {
+    const timeoutMs = (profile.fallbackOptions?.timeoutMs ?? 30_000) + 15_000;
+    const sttBase = endpoints.stt.replace(/\/$/, '');
+
+    const audioBuffer = audio instanceof Blob
+      ? Buffer.from(await (audio as Blob).arrayBuffer())
+      : audio as Buffer;
+
+    const chainConfig = {
+      source_lang: profile.language ?? 'fr',
+      target_lang: 'en',
+      speaker: profile.voice ?? 'Ryan',
+      system_prompt: systemPrompt,
+      llm_url: endpoints.llm ?? '',
+      tts_url: endpoints.tts ?? '',
+    };
+
+    this.log.log(
+      `[AIClient] Chain pipeline: stt=${sttBase} llm=${endpoints.llm ?? 'local'} tts=${endpoints.tts ?? 'local'}`,
+    );
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(`${sttBase}/v1/chain/pipeline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audio_b64: audioBuffer.toString('base64'),
+          chain: chainConfig,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Chain pipeline ${response.status}: ${await response.text()}`);
+      }
+
+      const data = await response.json() as {
+        transcription?: string; response?: string;
+        audio_base64?: string; content_type?: string;
+        timing?: { stt_ms?: number; llm_ms?: number; tts_ms?: number };
+      };
+
+      const timing = data.timing ?? {};
+      return {
+        stt: { text: data.transcription ?? '', provider: 'chain-gpu', fallbackUsed: false, latencyMs: timing.stt_ms ?? 0 },
+        chat: { content: data.response ?? '', provider: 'chain-gpu', fallbackUsed: false, latencyMs: timing.llm_ms ?? 0 },
+        tts: {
+          audio: data.audio_base64 ? Buffer.from(data.audio_base64, 'base64') : Buffer.alloc(0),
+          contentType: data.content_type ?? 'audio/wav',
+          provider: 'chain-gpu', fallbackUsed: false, latencyMs: timing.tts_ms ?? 0,
+        },
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private async resolveGpuEndpoint(profile: AIProfile): Promise<string | null> {
