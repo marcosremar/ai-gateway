@@ -1,8 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import Sortable from 'sortablejs';
-import { X, Plus, Check, Trash2, GripVertical, Pencil, Mic, Bot, Volume2 } from 'lucide-react';
+import { X, Plus, Check, Trash2, Pencil, Mic, Bot, Volume2 } from 'lucide-react';
 import { Button, Toggle, ConfirmModal } from '@/components/ui';
 import type { ProviderProfile } from './provider-types';
 
@@ -68,12 +67,6 @@ const ProfileItem = memo(function ProfileItem({
         opacity: isEnabled ? 1 : 0.45,
       }}
     >
-      {/* Drag */}
-      <div className="drag-handle cursor-grab active:cursor-grabbing flex-shrink-0 p-0.5 rounded hover:bg-white/5"
-        onClick={e => e.stopPropagation()}>
-        <GripVertical className="w-3.5 h-3.5" style={{ color: 'var(--color-text-muted)' }} />
-      </div>
-
       {/* Rank */}
       <span className="text-[10px] font-bold w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0"
         style={{
@@ -168,24 +161,6 @@ export default function ProfilesPanel({
   const [showInput, setShowInput] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ProviderProfile | null>(null);
 
-  const sortRef = useRef<HTMLDivElement>(null);
-  const sortInst = useRef<Sortable | null>(null);
-
-  useEffect(() => {
-    const el = sortRef.current;
-    if (!el) return;
-    if (sortInst.current) sortInst.current.destroy();
-    sortInst.current = Sortable.create(el, {
-      handle: '.drag-handle', animation: 150, ghostClass: 'opacity-50',
-      onEnd: (evt) => {
-        const { oldIndex, newIndex } = evt;
-        if (oldIndex == null || newIndex == null || oldIndex === newIndex) return;
-        setProfiles(prev => { const n = [...prev]; const [m] = n.splice(oldIndex, 1); n.splice(newIndex, 0, m); return n; });
-      },
-    });
-    return () => { try { sortInst.current?.destroy(); } catch {} sortInst.current = null; };
-  }, [profiles.length, setProfiles]);
-
   const doDelete = () => {
     if (!confirmDelete) return;
     const next = profiles.filter(p => p.id !== confirmDelete.id);
@@ -222,7 +197,7 @@ export default function ProfilesPanel({
 
         {profiles.length > 0 ? (
           <div className="p-2" style={{ background: 'var(--color-bg)' }}>
-            <div ref={sortRef} className="flex flex-col gap-1.5">
+            <div className="flex flex-col gap-1.5">
               {profiles.map((p, i) => (
                 <ProfileItem key={p.id} profile={p} index={i}
                   isActive={activeProfileId === p.id}
