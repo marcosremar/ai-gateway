@@ -16,6 +16,6 @@
     "outDir": "./dist",
     "rootDir": "."
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "server/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

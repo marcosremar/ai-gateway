@@ -151,6 +151,7 @@ export interface DeployGpuOpts {
   provider?: string;
   interruptible?: boolean;
   raceCount?: number;
+  region?: string;
 }
 
 export async function deployGpu(opts: DeployGpuOpts): Promise<{ status: string; message: string }> {
@@ -981,6 +982,7 @@ export async function cancelStandbyDeploy(): Promise<{ ok: boolean }> {
 
 // ── GPU Offers ──
 
+// NOTE: mirrors GpuOffer from ai-gateway/src/gpu-providers/types.ts — keep in sync
 export interface GpuOffer {
   id: string;
   provider: string;
@@ -991,6 +993,11 @@ export interface GpuOffer {
   pricePerHr: number;
   region: string | null;
   reliability: number | null;
+  geolocation?: string | null;
+  hostId?: string | null;
+  numGpus?: number | null;
+  ramGb?: number | null;
+  diskGb?: number | null;
   // ranked fields
   networkRttMs?: number | null;
   inferenceMs?: number | null;
