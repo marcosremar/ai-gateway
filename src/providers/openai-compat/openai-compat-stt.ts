@@ -65,10 +65,12 @@ export class OpenAICompatSTTProvider implements STTProvider {
       ...(request.wordTimestamps && this.config.defaultResponseFormat !== 'json' && { timestamp_granularities: ['word'] }),
     };
 
+    const t0 = Date.now();
     const transcription = await client.audio.transcriptions.create(params);
+    const total_ms = Date.now() - t0;
 
     if (typeof transcription === 'string') {
-      return { text: transcription };
+      return { text: transcription, timing: { total_ms } };
     }
 
     const response: STTResponse = { text: transcription.text, raw: transcription };
@@ -88,6 +90,14 @@ export class OpenAICompatSTTProvider implements STTProvider {
         )
         .map((w) => ({ word: w.word, start: w.start, end: w.end }));
     }
+
+    // Extract server-side processing time if the provider returned it (e.g. our Modal endpoints)
+    const raw = transcription as unknown as Record<string, unknown>;
+    const server_ms = typeof raw['processing_ms'] === 'number' ? raw['processing_ms'] as number : undefined;
+
+    response.timing = server_ms !== undefined
+      ? { total_ms, server_ms, network_ms: total_ms - server_ms }
+      : { total_ms };
 
     return response;
   }

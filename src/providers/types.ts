@@ -50,6 +50,12 @@ export interface STTResponse {
   duration?: number;
   words?: Array<{ word: string; start: number; end: number }>;
   raw?: unknown;
+  /** Network latency breakdown. total_ms = network_ms + server_ms (when server_ms is available). */
+  timing?: {
+    total_ms: number;      // full round-trip (client-measured)
+    server_ms?: number;    // server-side processing (from processing_ms in response body)
+    network_ms?: number;   // total_ms - server_ms
+  };
 }
 
 export interface STTProvider {
