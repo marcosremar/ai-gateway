@@ -7,8 +7,8 @@ import {
   Card, CardHeader, CardBody, Button, FormSelect, FormInput, StatusBadge,
   AlertBanner, CardSectionHeader, SectionHeader, SaveBar,
 } from '@/components/ui';
-import { Cpu, Play, Square, ScrollText, RefreshCw, Zap, ServerCog, AlertCircle, Loader2, Check, Timer } from 'lucide-react';
-import { DOCKER_IMAGES, GPU_TYPES } from './provider-types';
+import { Cpu, Play, Square, ScrollText, RefreshCw, Zap, ServerCog, AlertCircle, Loader2, Check, Timer, ChevronDown, ChevronUp, Shuffle } from 'lucide-react';
+import { DOCKER_IMAGES, DEFAULT_DOCKER_IMAGES, GPU_TYPES } from './provider-types';
 
 function formatUptime(sec: number): string {
   const h = Math.floor(sec / 3600);
@@ -24,9 +24,11 @@ export function GpuDeploySection() {
   const [image, setImage] = useState<string>(DOCKER_IMAGES[0].value);
   const [selectedGpus, setSelectedGpus] = useState<string[]>([GPU_TYPES[0].id]);
   const [provider, setProvider] = useState('');
+  const [raceMode, setRaceMode] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [terminating, setTerminating] = useState(false);
   const [logs, setLogs] = useState<string | null>(null);
+  const [logsOpen, setLogsOpen] = useState(false);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -79,6 +81,7 @@ export function GpuDeploySection() {
         dockerImage: image,
         gpuTypes: selectedGpus,
         provider: provider || undefined,
+        raceCount: raceMode ? 3 : undefined,
       });
       refresh();
     } catch (e) {
@@ -103,6 +106,7 @@ export function GpuDeploySection() {
 
   async function handleLoadLogs() {
     setLoadingLogs(true);
+    setLogsOpen(true);
     try {
       const data = await getGpuLogs();
       setLogs(data.logs || '(no logs)');
@@ -119,10 +123,11 @@ export function GpuDeploySection() {
     );
   }
 
-  const providerLabel = provider === 'vast' ? 'Vast.ai' : provider === 'runpod' ? 'RunPod' : provider === 'tensordock' ? 'TensorDock' : provider === 'modal' ? 'Modal' : 'Auto';
+  const selectedImageDesc = DEFAULT_DOCKER_IMAGES.find(d => d.url === image)?.description;
+  const providerLabel = provider === 'vast' ? 'Vast.ai' : provider === 'runpod' ? 'RunPod' : provider === 'tensordock' ? 'TensorDock' : provider === 'modal' ? 'Modal' : 'best available';
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 space-y-4">
       <SectionHeader
         title="GPU Deploy"
         subtitle="Deploy a self-hosted GPU pod for the full STT + LLM + TTS pipeline"
@@ -131,34 +136,43 @@ export function GpuDeploySection() {
       {actionError && <AlertBanner variant="error">{actionError}</AlertBanner>}
       {gpuError && <AlertBanner variant="warning">Cannot fetch GPU status: {gpuError}</AlertBanner>}
 
-      {/* Deploy Config — 2 column layout (ported from Cabeção CloudDeployPanel) */}
+      {/* ── Config card ── */}
       <Card>
         <CardHeader>
-          <CardSectionHeader icon={ServerCog} color="blue" title="Deploy Configuration" subtitle="Docker image and GPU selection" />
+          <CardSectionHeader icon={ServerCog} color="blue" title="Deploy Configuration" subtitle="Image, GPU, and auto-stop" />
         </CardHeader>
-        <CardBody className="space-y-5">
-          {/* Docker image + Provider */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <FormSelect label="Docker Image" value={image} onChange={e => setImage(e.target.value)}>
-              {DOCKER_IMAGES.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
-            </FormSelect>
+        <CardBody className="space-y-4">
+          {/* Row 1: Image + Provider */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div>
+              <FormSelect label="Docker Image" value={image} onChange={e => setImage(e.target.value)}>
+                {DOCKER_IMAGES.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+              </FormSelect>
+              {selectedImageDesc && (
+                <p className="mt-1.5 text-[11px] leading-relaxed" style={{ color: 'var(--color-text-muted)' }}>
+                  {selectedImageDesc}
+                </p>
+              )}
+            </div>
             <FormSelect label="Provider" value={provider} onChange={e => setProvider(e.target.value)}>
               <option value="">Auto (best available)</option>
               <option value="tensordock">TensorDock</option>
               <option value="vast">Vast.ai</option>
-              <option value="runpod">RunPod</option>
+              <option value="runpod">RunPod (Secure)</option>
               <option value="modal">Modal</option>
             </FormSelect>
           </div>
 
-          {/* GPU Selection — Cabeção-style pill buttons */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
-            {/* Left: GPU pills */}
+          {/* Row 2: GPU pills (left) + Auto-stop + Actions (right) */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* GPU selection */}
             <div
-              className="rounded-xl border p-4 flex flex-col"
+              className="rounded-xl border p-3"
               style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}
             >
-              <h5 className="text-sm font-semibold mb-3">Select GPUs</h5>
+              <h5 className="text-xs font-semibold mb-2" style={{ color: 'var(--color-text-muted)' }}>
+                GPU Types <span className="font-normal">(select all acceptable)</span>
+              </h5>
               <div className="flex flex-wrap gap-1.5">
                 {GPU_TYPES.map(gpu => {
                   const selected = selectedGpus.includes(gpu.id);
@@ -166,23 +180,16 @@ export function GpuDeploySection() {
                     <button
                       key={gpu.id}
                       onClick={() => toggleGpu(gpu.id)}
-                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border cursor-pointer"
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all border cursor-pointer"
                       style={{
-                        background: selected
-                          ? 'color-mix(in srgb, #10b981 12%, transparent)'
-                          : 'transparent',
-                        borderColor: selected
-                          ? 'color-mix(in srgb, #10b981 40%, transparent)'
-                          : 'var(--color-border)',
+                        background: selected ? 'color-mix(in srgb, #10b981 12%, transparent)' : 'transparent',
+                        borderColor: selected ? 'color-mix(in srgb, #10b981 40%, transparent)' : 'var(--color-border)',
                         color: selected ? '#10b981' : 'var(--color-text-muted)',
                       }}
                     >
                       {selected && <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: '#10b981' }} />}
                       {gpu.label}
-                      <span
-                        className="text-[10px] font-normal"
-                        style={{ color: selected ? 'color-mix(in srgb, #10b981 60%, transparent)' : 'var(--color-text-muted)' }}
-                      >
+                      <span className="text-[10px] font-normal" style={{ color: selected ? 'color-mix(in srgb, #10b981 60%, transparent)' : 'var(--color-text-muted)' }}>
                         {gpu.vram}
                       </span>
                     </button>
@@ -191,21 +198,90 @@ export function GpuDeploySection() {
               </div>
             </div>
 
-            {/* Right: Deploy action */}
-            <div
-              className="rounded-xl border p-4 flex flex-col justify-between"
-              style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}
-            >
-              <div>
-                <h5 className="text-sm font-semibold mb-2">Deploy to {providerLabel}</h5>
-                <p className="text-xs leading-relaxed mb-4" style={{ color: 'var(--color-text-muted)' }}>
-                  Finds the best available GPU, deploys the Docker image, and returns a ready endpoint.
-                  Pipeline automatically routes to GPU when healthy.
-                </p>
+            {/* Auto-stop + actions */}
+            <div className="space-y-3">
+              {/* Auto-stop */}
+              <div
+                className="rounded-xl border p-3"
+                style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}
+              >
+                <h5 className="text-xs font-semibold mb-2" style={{ color: 'var(--color-text-muted)' }}>
+                  <Timer className="w-3 h-3 inline mr-1 -mt-px" />
+                  Auto-Stop
+                </h5>
+                <div className="flex flex-wrap gap-1.5">
+                  {TIMEOUT_PRESETS.map(min => (
+                    <button key={min} onClick={() => handleTimeoutChange(min)}
+                      className="px-2.5 py-1 rounded-lg text-xs font-medium border transition-all cursor-pointer"
+                      style={{
+                        background: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 10%, transparent)' : 'transparent',
+                        borderColor: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 35%, transparent)' : 'var(--color-border)',
+                        color: idleTimeoutMin === min ? '#fbbf24' : 'var(--color-text-muted)',
+                      }}>
+                      {min === 0 ? 'Never' : `${min}m`}
+                    </button>
+                  ))}
+                  {!TIMEOUT_PRESETS.includes(idleTimeoutMin) && idleTimeoutMin > 0 && (
+                    <span className="px-2.5 py-1 rounded-lg text-xs font-medium border"
+                      style={{ background: 'color-mix(in srgb, #f59e0b 10%, transparent)', borderColor: 'color-mix(in srgb, #f59e0b 35%, transparent)', color: '#fbbf24' }}>
+                      {idleTimeoutMin}m
+                    </span>
+                  )}
+                  {showCustom ? (
+                    <div className="flex items-center gap-1">
+                      <input type="number" min="1" value={customTimeout} onChange={e => setCustomTimeout(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') handleCustomTimeout(); if (e.key === 'Escape') setShowCustom(false); }}
+                        placeholder="min" autoFocus
+                        className="w-16 rounded-lg border px-2 py-1 text-xs font-mono"
+                        style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', color: 'var(--color-text)' }} />
+                      <Button variant="primary" size="sm" onClick={handleCustomTimeout} disabled={!customTimeout}>Set</Button>
+                      <Button variant="ghost" size="sm" onClick={() => setShowCustom(false)}>✕</Button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setShowCustom(true)}
+                      className="px-2.5 py-1 rounded-lg text-xs font-medium border border-dashed cursor-pointer"
+                      style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
+                      …
+                    </button>
+                  )}
+                </div>
+                {gpu?.status === 'ready' && gpu.idleSec > 0 && (
+                  <p className="text-[11px] mt-1.5" style={{ color: idleTimeoutMin > 0 && gpu.idleSec > idleTimeoutMin * 30 ? '#fbbf24' : 'var(--color-text-muted)' }}>
+                    Idle {formatUptime(gpu.idleSec)}{idleTimeoutMin > 0 && ` / ${idleTimeoutMin}m`}
+                  </p>
+                )}
+                {timeoutDirty && (
+                  <div className="flex items-center gap-2 mt-2">
+                    <Button onClick={saveTimeout} isLoading={timeoutSaving} loadingText="Saving..." size="sm">
+                      <Check className="w-3 h-3" /> Save
+                    </Button>
+                    {timeoutSaved && <span className="text-[11px] text-emerald-400">Saved</span>}
+                  </div>
+                )}
               </div>
-              <div className="flex gap-3">
+
+              {/* Race mode toggle */}
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <div
+                  onClick={() => setRaceMode(v => !v)}
+                  className="w-8 h-4 rounded-full transition-all relative cursor-pointer"
+                  style={{ background: raceMode ? '#10b981' : 'var(--color-border)' }}
+                >
+                  <div
+                    className="absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all"
+                    style={{ left: raceMode ? '17px' : '2px' }}
+                  />
+                </div>
+                <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                  <Shuffle className="w-3 h-3 inline mr-1 -mt-px" />
+                  Race mode — deploy to 3 providers simultaneously, use fastest
+                </span>
+              </label>
+
+              {/* Deploy actions */}
+              <div className="flex gap-2">
                 <Button onClick={handleDeploy} isLoading={deploying} loadingText="Deploying..." disabled={isActive || selectedGpus.length === 0}>
-                  <Zap className="w-4 h-4" /> Deploy
+                  <Zap className="w-4 h-4" /> Deploy to {providerLabel}
                 </Button>
                 <Button variant="danger" onClick={handleTerminate} isLoading={terminating} loadingText="Stopping..." disabled={!isActive}>
                   <Square className="w-4 h-4" /> Terminate
@@ -216,34 +292,27 @@ export function GpuDeploySection() {
         </CardBody>
       </Card>
 
-      {/* Deploy Status Bar — Cabeção DeployStatusClusterInfo pattern */}
+      {/* ── Status (only when active) ── */}
       {gpu && gpu.status !== 'idle' && (() => {
         const isReady = gpu.status === 'ready';
         const isError = gpu.status === 'error';
         const isBooting = gpu.status === 'creating' || gpu.status === 'booting' || gpu.status === 'installing';
         const elapsedMin = Math.floor(gpu.elapsedSec / 60);
         const elapsedSecRem = gpu.elapsedSec % 60;
-        const gpuProviderLabel = gpu.provider === 'vast' ? 'VAST.ai' : gpu.provider === 'runpod' ? 'RunPod' : gpu.provider === 'tensordock' ? 'TensorDock' : gpu.provider === 'modal' ? 'Modal' : gpu.provider || 'Unknown';
+        const gpuProviderLabel = gpu.provider === 'vast' ? 'VAST.ai' : gpu.provider === 'runpod' ? 'RunPod' : gpu.provider === 'tensordock' ? 'TensorDock' : gpu.provider === 'modal' ? 'Modal' : gpu.provider || '—';
 
         return (
-          <div className="flex gap-3 items-stretch">
-            {/* Left: Deploy Status */}
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3">
+            {/* Status */}
             <div
-              className="p-4 rounded-xl border flex-[8] min-w-0"
+              className="p-4 rounded-xl border"
               style={{
-                borderColor: isReady
-                  ? 'color-mix(in srgb, #10b981 40%, transparent)' : isError
-                  ? 'color-mix(in srgb, #ef4444 40%, transparent)' : 'var(--color-border)',
-                background: isReady
-                  ? 'color-mix(in srgb, #10b981 8%, var(--color-surface))' : isError
-                  ? 'color-mix(in srgb, #ef4444 8%, var(--color-surface))' : 'var(--color-surface)',
+                borderColor: isReady ? 'color-mix(in srgb, #10b981 40%, transparent)' : isError ? 'color-mix(in srgb, #ef4444 40%, transparent)' : 'var(--color-border)',
+                background: isReady ? 'color-mix(in srgb, #10b981 8%, var(--color-surface))' : isError ? 'color-mix(in srgb, #ef4444 8%, var(--color-surface))' : 'var(--color-surface)',
               }}
             >
-              <h5 className="text-sm font-semibold mb-2">Deploy Status</h5>
-              <div className="flex items-center justify-between mb-3">
-                <p className="text-xs font-medium flex items-center gap-2" style={{
-                  color: isReady ? '#10b981' : isError ? '#ef4444' : 'var(--color-text)',
-                }}>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-sm font-medium flex items-center gap-2" style={{ color: isReady ? '#10b981' : isError ? '#ef4444' : 'var(--color-text)' }}>
                   {isBooting && <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: '#10b981' }} />}
                   {isReady && <Check className="w-3.5 h-3.5" style={{ color: '#10b981' }} />}
                   {isError && <AlertCircle className="w-3.5 h-3.5" style={{ color: '#ef4444' }} />}
@@ -256,29 +325,22 @@ export function GpuDeploySection() {
                 )}
                 {isReady && gpu.deployDurationMs && (
                   <span className="text-xs font-mono" style={{ color: 'var(--color-text-muted)' }}>
-                    deployed in {(gpu.deployDurationMs / 1000).toFixed(1)}s
+                    booted in {(gpu.deployDurationMs / 1000).toFixed(1)}s
                   </span>
                 )}
               </div>
 
-              {/* Progress bar while booting */}
               {isBooting && (
                 <div className="mb-3">
                   <div className="w-full rounded-full h-1.5" style={{ background: 'var(--color-border)' }}>
-                    <div
-                      className="h-1.5 rounded-full transition-all duration-1000 animate-pulse"
-                      style={{
-                        background: '#10b981',
-                        width: `${Math.min(90, Math.max(10, gpu.elapsedSec * 0.5))}%`,
-                      }}
-                    />
+                    <div className="h-1.5 rounded-full transition-all duration-1000 animate-pulse"
+                      style={{ background: '#10b981', width: `${Math.min(90, Math.max(10, gpu.elapsedSec * 0.5))}%` }} />
                   </div>
                 </div>
               )}
 
-              {/* Ready: show pipeline routing */}
               {isReady && gpu.pipelineRouting && (
-                <div className="flex gap-4 text-xs mt-2" style={{ color: 'var(--color-text-muted)' }}>
+                <div className="flex gap-4 text-xs mb-2" style={{ color: 'var(--color-text-muted)' }}>
                   <span>STT: <span style={{ color: gpu.pipelineRouting.stt === 'gpu' ? '#10b981' : 'var(--color-text)' }}>{gpu.pipelineRouting.stt}</span></span>
                   <span>LLM: <span style={{ color: gpu.pipelineRouting.llm === 'gpu' ? '#10b981' : 'var(--color-text)' }}>{gpu.pipelineRouting.llm}</span></span>
                   <span>TTS: <span style={{ color: gpu.pipelineRouting.tts === 'gpu' ? '#10b981' : 'var(--color-text)' }}>{gpu.pipelineRouting.tts}</span></span>
@@ -286,111 +348,56 @@ export function GpuDeploySection() {
                 </div>
               )}
 
-              {/* Terminate button (only while booting, no instance card yet) */}
-              {isBooting && (
-                <div className="mt-3">
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    onClick={handleTerminate}
-                    isLoading={terminating}
-                    loadingText="Stopping..."
-                  >
-                    <Square className="w-3.5 h-3.5" /> Cancel Deploy
+              <div className="flex items-center gap-3">
+                {isBooting && (
+                  <Button variant="danger" size="sm" onClick={handleTerminate} isLoading={terminating} loadingText="Stopping...">
+                    <Square className="w-3.5 h-3.5" /> Cancel
                   </Button>
-                </div>
-              )}
+                )}
+                {(isReady || isError) && (
+                  <Button variant="danger" size="sm" onClick={handleTerminate} isLoading={terminating} loadingText="Stopping...">
+                    <Square className="w-3.5 h-3.5" /> {isReady ? 'Stop' : 'Terminate'}
+                  </Button>
+                )}
+                {isReady && (
+                  <span className="text-xs font-mono" style={{ color: 'var(--color-text-muted)' }}>
+                    up {formatUptime(gpu.elapsedSec)}
+                  </span>
+                )}
+              </div>
 
               {gpu.alert && <AlertBanner variant="warning" className="mt-3">{gpu.alert}</AlertBanner>}
             </div>
 
-            {/* Right: Instance Info */}
+            {/* Instance info — compact right panel */}
             <div
-              className="p-4 rounded-xl border flex-[2] min-w-0"
+              className="p-4 rounded-xl border w-52 flex-shrink-0 space-y-2"
               style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}
             >
-              <div className="flex items-center justify-between mb-3">
-                <h5 className="text-sm font-semibold">Instance</h5>
-                <div className="flex items-center gap-1.5">
-                  <div
-                    className={`w-2 h-2 rounded-full ${
-                      isReady ? 'bg-emerald-500' :
-                      isBooting ? 'bg-violet-500 animate-pulse' :
-                      isError ? 'bg-red-500' :
-                      'bg-gray-400 animate-pulse'
-                    }`}
-                  />
-                  <span className={`text-[10px] font-medium ${
-                    isReady ? 'text-emerald-400' :
-                    isBooting ? 'text-violet-400' :
-                    isError ? 'text-red-400' :
-                    'text-gray-400'
-                  }`}>
-                    {isReady ? 'Online' :
-                     isBooting ? 'Booting...' :
-                     isError ? 'Failed' :
-                     'Checking...'}
-                  </span>
-                </div>
+              <div className="flex items-center gap-2 mb-1">
+                <div className={`w-2 h-2 rounded-full ${isReady ? 'bg-emerald-500' : isBooting ? 'bg-violet-500 animate-pulse' : 'bg-red-500'}`} />
+                <span className={`text-xs font-medium ${isReady ? 'text-emerald-400' : isBooting ? 'text-violet-400' : 'text-red-400'}`}>
+                  {isReady ? 'Online' : isBooting ? 'Booting...' : 'Failed'}
+                </span>
               </div>
-              <div className="space-y-2 text-xs">
-                {gpu.provider && (
-                  <div className="flex justify-between">
-                    <span style={{ color: 'var(--color-text-muted)' }}>Provider</span>
-                    <span className="font-mono">{gpuProviderLabel}</span>
-                  </div>
-                )}
-                {gpu.gpuType && (
-                  <div className="flex justify-between">
-                    <span style={{ color: 'var(--color-text-muted)' }}>GPU</span>
-                    <span className="font-mono">{gpu.gpuType}</span>
-                  </div>
-                )}
-                {gpu.podId && (
-                  <div className="flex justify-between">
-                    <span style={{ color: 'var(--color-text-muted)' }}>ID</span>
-                    <span className="font-mono text-[10px] truncate max-w-[140px]" title={gpu.podId}>{gpu.podId}</span>
-                  </div>
-                )}
-                {gpu.costPerHr != null && (
-                  <div className="flex justify-between">
-                    <span style={{ color: 'var(--color-text-muted)' }}>Cost</span>
-                    <span className="font-mono">${gpu.costPerHr.toFixed(3)}/hr</span>
-                  </div>
-                )}
-                {gpu.endpoint && (
-                  <div className="flex justify-between">
-                    <span style={{ color: 'var(--color-text-muted)' }}>Endpoint</span>
-                    <span className="font-mono text-[10px] truncate max-w-[140px]" title={gpu.endpoint}>{gpu.endpoint}</span>
-                  </div>
-                )}
-                {isReady && (
-                  <div className="flex justify-between">
-                    <span style={{ color: 'var(--color-text-muted)' }}>Uptime</span>
-                    <span className="font-mono">{formatUptime(gpu.elapsedSec)}</span>
-                  </div>
-                )}
-              </div>
-
-              {(isReady || isError) && (
-                <div className="mt-3">
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    onClick={handleTerminate}
-                    isLoading={terminating}
-                    loadingText="Stopping..."
-                  >
-                    <Square className="w-3.5 h-3.5" /> {isReady ? 'Stop' : 'Terminate'}
-                  </Button>
+              {[
+                gpu.provider && ['Provider', gpuProviderLabel, false],
+                gpu.gpuType && ['GPU', gpu.gpuType, true],
+                gpu.podId && ['ID', gpu.podId, true],
+                gpu.costPerHr != null && ['Cost', `$${gpu.costPerHr.toFixed(3)}/hr`, true],
+                gpu.endpoint && ['URL', gpu.endpoint, true],
+              ].filter(Boolean).map(([label, value, mono]: any) => (
+                <div key={label} className="flex justify-between gap-2 text-xs">
+                  <span style={{ color: 'var(--color-text-muted)' }}>{label}</span>
+                  <span className={`${mono ? 'font-mono text-[10px]' : ''} truncate text-right max-w-[120px]`} title={value}>{value}</span>
                 </div>
-              )}
+              ))}
             </div>
           </div>
         );
       })()}
 
-      {/* Error recovery (ported from Cabeção CloudDeployPanel) */}
+      {/* Error recovery */}
       {gpu?.status === 'error' && !deploying && (
         <div
           className="p-4 rounded-xl border"
@@ -400,14 +407,10 @@ export function GpuDeploySection() {
             <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: '#f59e0b' }} />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium mb-1">Deploy failed</p>
-              <p className="text-xs leading-relaxed mb-3" style={{ color: 'var(--color-text-muted)' }}>
+              <p className="text-xs mb-3" style={{ color: 'var(--color-text-muted)' }}>
                 {gpu?.message || 'Unknown error. Try redeploying.'}
               </p>
-              <Button
-                onClick={handleDeploy}
-                disabled={selectedGpus.length === 0}
-                size="sm"
-              >
+              <Button onClick={handleDeploy} disabled={selectedGpus.length === 0} size="sm">
                 <Zap className="w-3.5 h-3.5" /> Retry Deploy
               </Button>
             </div>
@@ -415,103 +418,40 @@ export function GpuDeploySection() {
         </div>
       )}
 
-      {/* Auto-stop / Idle timeout */}
-      <Card>
-        <CardHeader>
-          <CardSectionHeader icon={Timer} color="amber" title="Auto-Stop" subtitle="Terminate GPU after idle period to save costs" />
-        </CardHeader>
-        <CardBody className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            {TIMEOUT_PRESETS.map(min => (
-              <button key={min} onClick={() => handleTimeoutChange(min)}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer"
-                style={{
-                  background: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 10%, transparent)' : 'transparent',
-                  borderColor: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 35%, transparent)' : 'var(--color-border)',
-                  color: idleTimeoutMin === min ? '#fbbf24' : 'var(--color-text-muted)',
-                }}>
-                {min === 0 ? 'Never' : `${min} min`}
-              </button>
-            ))}
-            {/* Custom value */}
-            {!showCustom && !TIMEOUT_PRESETS.includes(idleTimeoutMin) && idleTimeoutMin > 0 && (
-              <span className="px-3 py-1.5 rounded-lg text-xs font-medium border"
-                style={{ background: 'color-mix(in srgb, #f59e0b 10%, transparent)', borderColor: 'color-mix(in srgb, #f59e0b 35%, transparent)', color: '#fbbf24' }}>
-                {idleTimeoutMin} min
-              </span>
-            )}
-            {showCustom ? (
-              <div className="flex items-center gap-1.5">
-                <input type="number" min="1" value={customTimeout} onChange={e => setCustomTimeout(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') handleCustomTimeout(); if (e.key === 'Escape') setShowCustom(false); }}
-                  placeholder="min" autoFocus
-                  className="w-20 rounded-lg border px-2 py-1.5 text-xs font-mono"
-                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', color: 'var(--color-text)' }} />
-                <Button variant="primary" size="sm" onClick={handleCustomTimeout} disabled={!customTimeout}>Set</Button>
-                <Button variant="ghost" size="sm" onClick={() => setShowCustom(false)}>Cancel</Button>
-              </div>
-            ) : (
-              <button onClick={() => setShowCustom(true)}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-dashed transition-all cursor-pointer hover:border-[var(--color-text-muted)]"
-                style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
-                Custom...
-              </button>
-            )}
-          </div>
-          <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-            {idleTimeoutMin === 0
-              ? 'GPU will stay running until manually terminated.'
-              : `GPU will auto-terminate after ${idleTimeoutMin} minutes without requests.`
-            }
-          </p>
-          {gpu && gpu.status === 'ready' && gpu.idleSec > 0 && (
-            <p className="text-xs" style={{ color: idleTimeoutMin > 0 && gpu.idleSec > idleTimeoutMin * 30 ? '#fbbf24' : 'var(--color-text-muted)' }}>
-              Current idle time: {formatUptime(gpu.idleSec)}
-              {idleTimeoutMin > 0 && ` / ${idleTimeoutMin}min`}
-            </p>
-          )}
-          {timeoutDirty && (
-            <div className="flex items-center gap-3 pt-2">
-              <Button onClick={saveTimeout} isLoading={timeoutSaving} loadingText="Saving..." size="sm">
-                <Check className="w-3.5 h-3.5" /> Save Timeout
-              </Button>
-              {timeoutSaved && <span className="text-xs text-emerald-400 flex items-center gap-1"><Check className="w-3 h-3" /> Saved</span>}
-            </div>
-          )}
-        </CardBody>
-      </Card>
-
-      {/* Logs */}
+      {/* ── Logs (collapsible) ── */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <ScrollText className="w-5 h-5" style={{ color: 'var(--color-text-muted)' }} />
-              <h3 className="font-semibold">GPU Logs</h3>
+            <div className="flex items-center gap-2">
+              <ScrollText className="w-4 h-4" style={{ color: 'var(--color-text-muted)' }} />
+              <h3 className="font-semibold text-sm">GPU Logs</h3>
+              {logs && (
+                <button onClick={() => setLogsOpen(v => !v)} className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>
+                  {logsOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                </button>
+              )}
             </div>
             <Button variant="outline" size="sm" onClick={handleLoadLogs} isLoading={loadingLogs} loadingText="Loading...">
-              Refresh Logs
+              <RefreshCw className="w-3 h-3" /> Load Logs
             </Button>
           </div>
         </CardHeader>
-        <CardBody>
-          <pre
-            className="text-xs font-mono p-4 rounded-xl overflow-auto max-h-80 whitespace-pre-wrap"
-            style={{ background: 'var(--color-bg)', color: 'var(--color-text-muted)' }}
-          >
-            {logs ?? 'Click "Refresh Logs" to load GPU pod logs.'}
-          </pre>
-        </CardBody>
+        {(logsOpen && logs) && (
+          <CardBody>
+            <pre
+              className="text-xs font-mono p-3 rounded-xl overflow-auto max-h-72 whitespace-pre-wrap"
+              style={{ background: 'var(--color-bg)', color: 'var(--color-text-muted)' }}
+            >
+              {logs}
+            </pre>
+          </CardBody>
+        )}
+        {!logs && (
+          <CardBody>
+            <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>Click "Load Logs" to fetch GPU pod output.</p>
+          </CardBody>
+        )}
       </Card>
-    </div>
-  );
-}
-
-function KV({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="flex justify-between gap-4">
-      <span className="flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>{label}</span>
-      <span className={`${mono ? 'font-mono text-xs' : ''} truncate text-right`}>{value}</span>
     </div>
   );
 }
