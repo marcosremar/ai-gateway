@@ -6,7 +6,7 @@ import {
   type ReadinessStatusResponse, type GpuReadinessHistoryResponse, type ReadinessHistoryRun,
 } from '@/lib/gateway';
 import { Card, CardHeader, CardBody, Button, AlertBanner, StatusBadge, FormInput, SectionHeader } from '@/components/ui';
-import { RefreshCw, RotateCcw, Activity, AlertTriangle } from 'lucide-react';
+import { RefreshCw, RotateCcw, Activity, AlertTriangle, ChevronDown, ChevronRight, CheckCircle2, XCircle, Mic, Brain, Volume2 } from 'lucide-react';
 
 type Phase = 'idle' | 'benchmarking' | 'ready' | 'degraded' | 'failed' | 'repechage' | 'condemned';
 
@@ -34,12 +34,32 @@ function phaseColor(phase: Phase): string {
   }
 }
 
+function phaseBg(phase: Phase): string {
+  switch (phase) {
+    case 'ready':        return 'rgba(52, 211, 153, 0.06)';
+    case 'benchmarking': return 'rgba(251, 191, 36, 0.06)';
+    case 'degraded':     return 'rgba(249, 115, 22, 0.06)';
+    case 'repechage':    return 'rgba(167, 139, 250, 0.06)';
+    case 'failed':
+    case 'condemned':    return 'rgba(248, 113, 113, 0.06)';
+    default:             return 'transparent';
+  }
+}
+
 function p95Color(p95: number | null, target: number, multiplier: number): string {
   if (p95 === null) return 'var(--color-text-muted)';
   const threshold = target * multiplier;
   if (p95 <= target) return 'var(--color-emerald, #34d399)';
   if (p95 <= threshold) return 'var(--color-amber, #fbbf24)';
   return 'var(--color-red, #f87171)';
+}
+
+function p95BorderColor(p95: number | null, target: number, multiplier: number): string {
+  if (p95 === null) return 'var(--color-border)';
+  const threshold = target * multiplier;
+  if (p95 <= target) return 'rgba(52, 211, 153, 0.5)';
+  if (p95 <= threshold) return 'rgba(251, 191, 36, 0.5)';
+  return 'rgba(248, 113, 113, 0.5)';
 }
 
 function fmtMs(ms: number | null): string {
@@ -55,6 +75,54 @@ function fmtAgo(ts: number): string {
   if (h > 0) return `${h}h ${m % 60}m ago`;
   if (m > 0) return `${m}m ago`;
   return `${s}s ago`;
+}
+
+// ── Quick Status Cell ──
+
+const STAGE_META: Record<'stt' | 'llm' | 'tts', { label: string; icon: typeof Mic; shortLabel: string }> = {
+  stt: { label: 'Speech-to-Text', icon: Mic, shortLabel: 'STT' },
+  llm: { label: 'Language Model', icon: Brain, shortLabel: 'LLM' },
+  tts: { label: 'Text-to-Speech', icon: Volume2, shortLabel: 'TTS' },
+};
+
+interface QuickStatusCellProps {
+  stage: 'stt' | 'llm' | 'tts';
+  phase: Phase;
+  completedRuns: number;
+  maxRuns: number;
+}
+
+function QuickStatusCell({ stage, phase, completedRuns, maxRuns }: QuickStatusCellProps) {
+  const meta = STAGE_META[stage];
+  const Icon = meta.icon;
+  const color = phaseColor(phase);
+  const bg = phaseBg(phase);
+  const pct = phase === 'benchmarking' && maxRuns > 0 ? Math.round(completedRuns / maxRuns * 100) : null;
+
+  return (
+    <div className="flex-1 flex flex-col gap-1.5 px-4 py-3 rounded-xl border transition-all"
+      style={{
+        borderColor: phase !== 'idle' ? `color-mix(in srgb, ${color} 40%, var(--color-border))` : 'var(--color-border)',
+        background: phase !== 'idle' ? bg : 'var(--color-surface-elevated)',
+      }}>
+      <div className="flex items-center gap-2">
+        <div className="w-6 h-6 rounded-md flex items-center justify-center"
+          style={{ background: `color-mix(in srgb, ${color} 15%, transparent)` }}>
+          <Icon className="w-3.5 h-3.5" style={{ color }} />
+        </div>
+        <span className="text-xs font-semibold" style={{ color: 'var(--color-text-secondary)' }}>{meta.shortLabel}</span>
+      </div>
+      <PhaseBadge phase={phase} />
+      {pct !== null && (
+        <div className="space-y-1">
+          <div className="h-1 rounded-full" style={{ background: 'var(--color-border)' }}>
+            <div className="h-1 rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+          </div>
+          <span className="text-[10px] font-mono" style={{ color: 'var(--color-text-muted)' }}>{completedRuns}/{maxRuns}</span>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function ReadinessSection() {
@@ -75,6 +143,10 @@ export function ReadinessSection() {
   const [repechageMax, setRepechageMax] = useState(3);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // History row expand state
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
 
   const isActive = useRef(false);
 
@@ -152,7 +224,14 @@ export function ReadinessSection() {
 
   const markDirty = () => { setSettingsDirty(true); isActive.current = true; };
 
-  if (loading) return <div className="p-8 text-center" style={{ color: 'var(--color-text-muted)' }}>Loading...</div>;
+  if (loading) return (
+    <div className="p-8 text-center" style={{ color: 'var(--color-text-muted)' }}>
+      <div className="inline-flex items-center gap-2">
+        <RefreshCw className="w-4 h-4 animate-spin" />
+        <span>Loading readiness status...</span>
+      </div>
+    </div>
+  );
 
   const stages = ['stt', 'llm', 'tts'] as const;
 
@@ -160,7 +239,22 @@ export function ReadinessSection() {
     <div className="space-y-6 p-6">
       <SectionHeader title="GPU Readiness" subtitle="Benchmark → shadow mode → production activation. GPU never handles real traffic until latency targets are proven." />
 
-      {/* Phase lifecycle diagram — directional */}
+      {/* ── Quick Status Summary Strip ── */}
+      {status && (
+        <div className="flex gap-3">
+          {stages.map(stage => (
+            <QuickStatusCell
+              key={stage}
+              stage={stage}
+              phase={status.readinessState[stage].phase as Phase}
+              completedRuns={status.readinessState[stage].completedRuns}
+              maxRuns={benchMaxRuns}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* ── Phase Lifecycle Diagram ── */}
       <Card>
         <CardHeader><span className="text-sm font-semibold">Service Phase Lifecycle</span></CardHeader>
         <CardBody>
@@ -178,23 +272,37 @@ export function ReadinessSection() {
               { phase: 'shadow',       color: '#38bdf8', label: 'shadow',       desc: 'Dry-run alongside cloud — validates stability' },
               null,
               { phase: 'ready',        color: '#10b981', label: 'ready',        desc: 'Serving live traffic — P95 within target' },
-            ] as const).map((item, i) =>
-              item === null ? (
+            ] as const).map((item, i) => {
+              if (item === null) return (
                 <span key={i} className="text-base" style={{ color: 'var(--color-text-muted)' }}>→</span>
-              ) : (
-                <div key={item.phase} className="flex flex-col gap-1 px-3 py-2 rounded-lg border min-w-[110px]"
+              );
+              const isCurrentPhase = status && stages.some(s => status.readinessState[s].phase === item.phase);
+              return (
+                <div key={item.phase} className="relative flex flex-col gap-1 px-3 py-2 rounded-lg border min-w-[110px] transition-all"
                   style={{
-                    borderColor: `color-mix(in srgb, ${item.color} 35%, var(--color-border))`,
-                    background: `color-mix(in srgb, ${item.color} 7%, var(--color-surface-elevated))`,
+                    borderColor: isCurrentPhase
+                      ? item.color
+                      : `color-mix(in srgb, ${item.color} 35%, var(--color-border))`,
+                    background: isCurrentPhase
+                      ? `color-mix(in srgb, ${item.color} 12%, var(--color-surface-elevated))`
+                      : `color-mix(in srgb, ${item.color} 7%, var(--color-surface-elevated))`,
+                    boxShadow: isCurrentPhase ? `0 0 0 1px ${item.color}40, 0 0 12px ${item.color}20` : undefined,
                   }}>
+                  {isCurrentPhase && (
+                    <span className="absolute -top-1.5 -right-1.5 w-3 h-3 rounded-full border-2 animate-pulse"
+                      style={{ background: item.color, borderColor: 'var(--color-surface)' }} />
+                  )}
+                  {item.phase === 'ready' && !isCurrentPhase && (
+                    <CheckCircle2 className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5" style={{ color: '#10b981' }} />
+                  )}
                   <span className="font-bold text-[11px]" style={{ color: item.color }}>{item.label}</span>
                   <span className="text-[10px] leading-tight" style={{ color: 'var(--color-text-muted)' }}>{item.desc}</span>
                 </div>
-              )
-            )}
+              );
+            })}
           </div>
 
-          {/* Failure path: benchmarking/ready → degraded/repechage → condemned */}
+          {/* Failure path */}
           <div className="flex items-start gap-3 flex-wrap pt-3 border-t" style={{ borderColor: 'var(--color-border)' }}>
             <span className="text-[10px] font-semibold pt-2.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>failure paths</span>
             {([
@@ -203,26 +311,37 @@ export function ReadinessSection() {
               { phase: 'repechage', color: '#a78bfa', label: 'repechage', desc: 'Benchmark failed — retrying every 2 min (up to max attempts)' },
               null,
               { phase: 'condemned', color: '#f87171', label: 'condemned', desc: 'Max retries exhausted — cloud handles all traffic until manual reset' },
-            ] as const).map((item, i) =>
-              item === null ? (
+            ] as const).map((item, i) => {
+              if (item === null) return (
                 <span key={i} className="text-base pt-2" style={{ color: 'var(--color-text-muted)' }}>→</span>
-              ) : (
-                <div key={item.phase} className="flex flex-col gap-1 px-3 py-2 rounded-lg border min-w-[130px]"
+              );
+              const isCurrentPhase = status && stages.some(s => status.readinessState[s].phase === item.phase);
+              return (
+                <div key={item.phase} className="relative flex flex-col gap-1 px-3 py-2 rounded-lg border min-w-[130px] transition-all"
                   style={{
-                    borderColor: `color-mix(in srgb, ${item.color} 35%, var(--color-border))`,
-                    background: `color-mix(in srgb, ${item.color} 7%, var(--color-surface-elevated))`,
+                    borderColor: isCurrentPhase
+                      ? item.color
+                      : `color-mix(in srgb, ${item.color} 35%, var(--color-border))`,
+                    background: isCurrentPhase
+                      ? `color-mix(in srgb, ${item.color} 12%, var(--color-surface-elevated))`
+                      : `color-mix(in srgb, ${item.color} 7%, var(--color-surface-elevated))`,
+                    boxShadow: isCurrentPhase ? `0 0 0 1px ${item.color}40, 0 0 12px ${item.color}20` : undefined,
                   }}>
+                  {isCurrentPhase && (
+                    <span className="absolute -top-1.5 -right-1.5 w-3 h-3 rounded-full border-2 animate-pulse"
+                      style={{ background: item.color, borderColor: 'var(--color-surface)' }} />
+                  )}
                   <span className="font-bold text-[11px]" style={{ color: item.color }}>{item.label}</span>
                   <span className="text-[10px] leading-tight" style={{ color: 'var(--color-text-muted)' }}>{item.desc}</span>
                 </div>
-              )
-            )}
+              );
+            })}
           </div>
 
           {/* Note about profile latency targets */}
           <div className="mt-3 pt-3 border-t text-[10px] leading-relaxed" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
             <strong style={{ color: 'var(--color-text-secondary)' }}>Profile latency target:</strong>{' '}
-            The active profile's <em>Latency</em> field (realtime / low / batch) sets the benchmark thresholds automatically —
+            The active profile&apos;s <em>Latency</em> field (realtime / low / batch) sets the benchmark thresholds automatically —
             realtime uses STT&nbsp;300ms / LLM&nbsp;500ms / TTS&nbsp;300ms; low uses 800ms / 2s / 1.5s; batch accepts any latency.
             Switching profiles updates thresholds immediately and takes effect on the next benchmark cycle.
           </div>
@@ -235,51 +354,79 @@ export function ReadinessSection() {
         <AlertBanner variant="error">GPU condemned — repechage attempts exhausted. All traffic routed to cloud. Re-run benchmark to retry.</AlertBanner>
       )}
 
-      {/* Card 1: Benchmark Settings */}
+      {/* ── Benchmark Settings ── */}
       <Card>
         <CardHeader><span className="text-sm font-semibold">Benchmark Settings</span></CardHeader>
         <CardBody>
-          {/* Flow description */}
-          <div className="mb-4 text-xs space-y-1 leading-relaxed p-3 rounded-lg" style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text-muted)' }}>
-            <p><strong style={{ color: 'var(--color-text-secondary)' }}>How it works:</strong> When a GPU pod boots, each service (STT, LLM, TTS) is benchmarked independently before it handles real traffic.
+          {/* How it works description */}
+          <div className="mb-5 text-xs leading-relaxed p-3 rounded-lg border-l-2"
+            style={{ background: 'var(--color-surface-elevated)', borderLeftColor: 'rgba(56, 189, 248, 0.5)', color: 'var(--color-text-muted)' }}>
+            <strong style={{ color: 'var(--color-text-secondary)' }}>How it works:</strong>{' '}
+            When a GPU pod boots, each service is benchmarked independently before handling real traffic.
             The GPU must hit at least one request below <em>target × (1 − margin%)</em> within Max Runs attempts.
-            If all three pass, the GPU enters <strong>shadow mode</strong>: it runs in the background while cloud still serves users.
-            After Shadow Runs consecutive successes, the GPU goes live for production.
-            Once live, P95 latency is monitored continuously — if it exceeds target × Demotion Multiplier, the GPU is removed from the pool.
-            A failed benchmark triggers <strong>repechage</strong>: retries every 2 min up to Max Repechage Attempts before condemning the pod.</p>
+            If all three pass, it enters <strong style={{ color: 'var(--color-text-secondary)' }}>shadow mode</strong> (dry-run alongside cloud).
+            After Shadow Runs consecutive successes, the GPU goes live. Once live, P95 is monitored continuously —
+            exceed target × Demotion Multiplier and the GPU is pulled from the pool.
           </div>
-          <div className="grid grid-cols-3 gap-4">
-            <FormInput label="STT Target (ms)" type="number" value={sttTargetMs}
-              hint="Max acceptable latency for speech-to-text. GPU must hit target × (1 − margin%) in at least one run."
-              onChange={e => { setSttTargetMs(Number(e.target.value)); markDirty(); }} />
-            <FormInput label="LLM Target (ms)" type="number" value={llmTargetMs}
-              hint="Max acceptable latency for the LLM translation step."
-              onChange={e => { setLlmTargetMs(Number(e.target.value)); markDirty(); }} />
-            <FormInput label="TTS Target (ms)" type="number" value={ttsTargetMs}
-              hint="Max acceptable time-to-first-audio for TTS synthesis."
-              onChange={e => { setTtsTargetMs(Number(e.target.value)); markDirty(); }} />
+
+          {/* Basic settings — always visible */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-xs font-semibold" style={{ color: 'var(--color-text-secondary)' }}>Target Latencies</span>
+              <div className="flex-1 h-px" style={{ background: 'var(--color-border)' }} />
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <FormInput label="STT Target (ms)" type="number" value={sttTargetMs}
+                hint="Max acceptable latency for speech-to-text. GPU must hit target × (1 − margin%) in at least one run."
+                onChange={e => { setSttTargetMs(Number(e.target.value)); markDirty(); }} />
+              <FormInput label="LLM Target (ms)" type="number" value={llmTargetMs}
+                hint="Max acceptable latency for the LLM translation step."
+                onChange={e => { setLlmTargetMs(Number(e.target.value)); markDirty(); }} />
+              <FormInput label="TTS Target (ms)" type="number" value={ttsTargetMs}
+                hint="Max acceptable time-to-first-audio for TTS synthesis."
+                onChange={e => { setTtsTargetMs(Number(e.target.value)); markDirty(); }} />
+            </div>
           </div>
-          <div className="grid grid-cols-3 gap-4 mt-4">
-            <FormInput label="Max Runs" type="number" value={benchMaxRuns}
-              hint="Benchmark requests sent per service. If none hit the target, repechage kicks in."
-              onChange={e => { setBenchMaxRuns(Number(e.target.value)); markDirty(); }} />
-            <FormInput label="Margin %" type="number" value={benchMarginPct}
-              hint="Safety buffer. 10% means the GPU must hit target × 0.9, not just target."
-              onChange={e => { setBenchMarginPct(Number(e.target.value)); markDirty(); }} />
-            <FormInput label="Shadow Runs" type="number" value={shadowRunsVal}
-              hint="After benchmark passes, run this many background requests while cloud still serves. All must succeed before GPU goes live."
-              onChange={e => { setShadowRunsVal(Number(e.target.value)); markDirty(); }} />
+
+          {/* Advanced settings — collapsible */}
+          <div className="mt-5">
+            <button
+              onClick={() => setShowAdvanced(v => !v)}
+              className="flex items-center gap-2 text-xs font-medium transition-colors hover:opacity-80 mb-3 w-full"
+              style={{ color: 'var(--color-text-muted)' }}
+            >
+              {showAdvanced ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+              <span>{showAdvanced ? 'Hide advanced settings' : 'Show advanced settings'}</span>
+              <div className="flex-1 h-px ml-1" style={{ background: 'var(--color-border)' }} />
+            </button>
+
+            {showAdvanced && (
+              <div className="space-y-4 pt-1">
+                <div className="grid grid-cols-3 gap-4">
+                  <FormInput label="Max Runs" type="number" value={benchMaxRuns}
+                    hint="Benchmark requests sent per service. If none hit the target, repechage kicks in."
+                    onChange={e => { setBenchMaxRuns(Number(e.target.value)); markDirty(); }} />
+                  <FormInput label="Margin %" type="number" value={benchMarginPct}
+                    hint="Safety buffer. 10% means the GPU must hit target × 0.9, not just target."
+                    onChange={e => { setBenchMarginPct(Number(e.target.value)); markDirty(); }} />
+                  <FormInput label="Shadow Runs" type="number" value={shadowRunsVal}
+                    hint="After benchmark passes, run this many background requests while cloud still serves. All must succeed before GPU goes live."
+                    onChange={e => { setShadowRunsVal(Number(e.target.value)); markDirty(); }} />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <FormInput label="P95 Demotion Multiplier" type="number" step="0.1" value={p95Multiplier}
+                    hint="Live P95 threshold = target × multiplier. Exceed it and the GPU is pulled from production. E.g. 2.0 → demote at 2× target."
+                    onChange={e => { setP95Multiplier(Number(e.target.value)); markDirty(); }} />
+                  <FormInput label="Max Repechage Attempts" type="number" value={repechageMax}
+                    hint="How many times to retry a failed benchmark (every 2 min) before condemning the pod permanently."
+                    onChange={e => { setRepechageMax(Number(e.target.value)); markDirty(); }} />
+                </div>
+              </div>
+            )}
           </div>
-          <div className="grid grid-cols-2 gap-4 mt-4">
-            <FormInput label="P95 Demotion Multiplier" type="number" step="0.1" value={p95Multiplier}
-              hint="Live P95 threshold = target × multiplier. Exceed it and the GPU is pulled from production. E.g. 2.0 → demote at 2× target."
-              onChange={e => { setP95Multiplier(Number(e.target.value)); markDirty(); }} />
-            <FormInput label="Max Repechage Attempts" type="number" value={repechageMax}
-              hint="How many times to retry a failed benchmark (every 2 min) before condemning the pod permanently."
-              onChange={e => { setRepechageMax(Number(e.target.value)); markDirty(); }} />
-          </div>
+
           {settingsDirty && (
-            <div className="mt-4 flex justify-end">
+            <div className="mt-5 flex justify-end">
               <Button onClick={handleSaveSettings} disabled={savingSettings}>
                 {savingSettings ? 'Saving...' : 'Save Settings'}
               </Button>
@@ -288,7 +435,7 @@ export function ReadinessSection() {
         </CardBody>
       </Card>
 
-      {/* Card 2: Live Status */}
+      {/* ── Live Status ── */}
       {status && (
         <Card>
           <CardHeader>
@@ -305,43 +452,59 @@ export function ReadinessSection() {
             </div>
           </CardHeader>
           <CardBody>
-            <div className="space-y-3">
+            <div className="space-y-2">
               {stages.map(stage => {
                 const s = status.readinessState[stage];
+                const meta = STAGE_META[stage];
+                const Icon = meta.icon;
+                const phase = s.phase as Phase;
+                const color = phaseColor(phase);
                 const maxRuns = benchMaxRuns;
                 const pct = s.completedRuns > 0 ? Math.min(100, Math.round(s.completedRuns / maxRuns * 100)) : 0;
                 return (
-                  <div key={stage} className="flex items-center gap-4">
-                    <span className="w-10 font-mono text-xs uppercase" style={{ color: 'var(--color-text-muted)' }}>{stage}</span>
-                    <PhaseBadge phase={s.phase as Phase} />
-                    {s.phase === 'benchmarking' && (
+                  <div key={stage} className="flex items-center gap-4 px-4 py-3 rounded-xl border-l-4 transition-all"
+                    style={{
+                      borderLeftColor: color,
+                      background: phaseBg(phase),
+                      border: `1px solid color-mix(in srgb, ${color} 20%, var(--color-border))`,
+                      borderLeft: `4px solid ${color}`,
+                    }}>
+                    <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+                      style={{ background: `color-mix(in srgb, ${color} 15%, transparent)` }}>
+                      <Icon className="w-4 h-4" style={{ color }} />
+                    </div>
+                    <span className="w-10 font-mono text-xs uppercase font-bold" style={{ color: 'var(--color-text-secondary)' }}>{stage}</span>
+                    <PhaseBadge phase={phase} />
+                    {phase === 'benchmarking' && (
                       <div className="flex-1 flex items-center gap-2">
-                        <div className="flex-1 h-2 rounded-full" style={{ background: 'var(--color-bg-secondary)' }}>
-                          <div className="h-2 rounded-full transition-all" style={{ width: `${pct}%`, background: phaseColor(s.phase as Phase) }} />
+                        <div className="flex-1 h-1.5 rounded-full" style={{ background: 'var(--color-border)' }}>
+                          <div className="h-1.5 rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
                         </div>
                         <span className="text-xs font-mono" style={{ color: 'var(--color-text-muted)' }}>{s.completedRuns}/{maxRuns}</span>
                       </div>
                     )}
-                    <span className="text-xs font-mono">
-                      best: {fmtMs(s.bestLatencyMs)} / target: {fmtMs(s.targetMs)}
+                    <span className="text-xs font-mono ml-auto" style={{ color: 'var(--color-text-muted)' }}>
+                      best: <span style={{ color: 'var(--color-text-secondary)' }}>{fmtMs(s.bestLatencyMs)}</span>
+                      {' '}/ target: <span style={{ color: 'var(--color-text-secondary)' }}>{fmtMs(s.targetMs)}</span>
                     </span>
                   </div>
                 );
               })}
 
               {status.readinessState.shadowPhase && (
-                <div className="flex items-center gap-2 mt-2 pt-2" style={{ borderTop: '1px solid var(--color-border)' }}>
+                <div className="flex items-center gap-2 mt-2 pt-3 border-t" style={{ borderColor: 'var(--color-border)' }}>
                   <Activity className="w-4 h-4" style={{ color: 'var(--color-amber, #fbbf24)' }} />
                   <span className="text-sm">Shadow mode: {status.readinessState.shadowCompletedRuns}/{shadowRunsVal} runs</span>
                 </div>
               )}
 
               {status.readinessState.repechageAttempts > 0 && (
-                <div className="flex items-center gap-2 mt-2 pt-2" style={{ borderTop: '1px solid var(--color-border)' }}>
+                <div className="flex items-center gap-2 mt-2 pt-3 border-t" style={{ borderColor: 'var(--color-border)' }}>
                   <AlertTriangle className="w-4 h-4" style={{ color: 'var(--color-amber, #fbbf24)' }} />
                   <span className="text-sm">Repechage attempts: {status.readinessState.repechageAttempts}/{repechageMax}</span>
                 </div>
               )}
+
               {/* Phase legend */}
               <div className="mt-3 pt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px]" style={{ borderTop: '1px solid var(--color-border)', color: 'var(--color-text-muted)' }}>
                 <span><span style={{ color: '#71717a' }}>●</span> Idle — waiting for pod</span>
@@ -356,7 +519,7 @@ export function ReadinessSection() {
         </Card>
       )}
 
-      {/* Card 3: P95 Monitor */}
+      {/* ── P95 Monitor ── */}
       {status && (
         <Card>
           <CardHeader>
@@ -373,20 +536,35 @@ export function ReadinessSection() {
                 const p95 = status.perStageP95[stage];
                 const target = status.targets[stage];
                 const threshold = target * status.p95DemotionMultiplier;
+                const color = p95Color(p95, target, status.p95DemotionMultiplier);
+                const borderColor = p95BorderColor(p95, target, status.p95DemotionMultiplier);
+                const Icon = STAGE_META[stage].icon;
                 return (
-                  <div key={stage} className="text-center p-3 rounded-lg" style={{ background: 'var(--color-bg-secondary)' }}>
-                    <div className="text-xs uppercase font-mono mb-1" style={{ color: 'var(--color-text-muted)' }}>{stage}</div>
-                    <div className="text-2xl font-mono font-bold" style={{ color: p95Color(p95, target, status.p95DemotionMultiplier) }}>
+                  <div key={stage} className="p-4 rounded-xl border transition-all"
+                    style={{
+                      background: 'var(--color-surface-elevated)',
+                      borderColor,
+                      borderTop: `3px solid ${borderColor}`,
+                    }}>
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-6 h-6 rounded-md flex items-center justify-center"
+                        style={{ background: `color-mix(in srgb, ${color} 15%, transparent)` }}>
+                        <Icon className="w-3.5 h-3.5" style={{ color }} />
+                      </div>
+                      <span className="text-xs uppercase font-semibold font-mono" style={{ color: 'var(--color-text-muted)' }}>{stage}</span>
+                    </div>
+                    <div className="text-2xl font-mono font-bold mb-1" style={{ color }}>
                       {fmtMs(p95)}
                     </div>
-                    <div className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
-                      target: {target}ms / demote: {Math.round(threshold)}ms
+                    <div className="text-[11px] mb-2 space-y-0.5" style={{ color: 'var(--color-text-muted)' }}>
+                      <div>target: <span className="font-mono" style={{ color: 'var(--color-text-secondary)' }}>{target}ms</span></div>
+                      <div>demote: <span className="font-mono" style={{ color: 'var(--color-text-secondary)' }}>{Math.round(threshold)}ms</span></div>
                     </div>
                     {p95 !== null && (
-                      <div className="mt-2 h-1.5 rounded-full" style={{ background: 'var(--color-bg)' }}>
+                      <div className="h-1.5 rounded-full" style={{ background: 'var(--color-border)' }}>
                         <div className="h-1.5 rounded-full transition-all" style={{
                           width: `${Math.min(100, Math.round(p95 / threshold * 100))}%`,
-                          background: p95Color(p95, target, status.p95DemotionMultiplier),
+                          background: color,
                         }} />
                       </div>
                     )}
@@ -394,15 +572,15 @@ export function ReadinessSection() {
                 );
               })}
             </div>
-            <div className="flex items-center gap-4 mt-4 text-xs" style={{ color: 'var(--color-text-muted)' }}>
-              <span>Production: {status.gpuReadyForProduction ? 'Active' : 'Inactive'}</span>
-              <span>Shadow: {status.gpuShadowMode ? 'Active' : 'Inactive'}</span>
+            <div className="flex items-center gap-4 mt-4 pt-3 border-t text-xs" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
+              <span>Production: <span style={{ color: status.gpuReadyForProduction ? '#34d399' : 'var(--color-text-muted)' }}>{status.gpuReadyForProduction ? 'Active' : 'Inactive'}</span></span>
+              <span>Shadow: <span style={{ color: status.gpuShadowMode ? '#fbbf24' : 'var(--color-text-muted)' }}>{status.gpuShadowMode ? 'Active' : 'Inactive'}</span></span>
             </div>
           </CardBody>
         </Card>
       )}
 
-      {/* Card 4: Benchmark History */}
+      {/* ── Benchmark History ── */}
       {history && Object.keys(history.history).length > 0 && (
         <Card>
           <CardHeader><span className="text-sm font-semibold">Benchmark History</span></CardHeader>
@@ -411,32 +589,77 @@ export function ReadinessSection() {
               <table className="w-full text-xs font-mono">
                 <thead>
                   <tr style={{ color: 'var(--color-text-muted)' }}>
-                    <th className="text-left py-1 px-2">Image : GPU</th>
-                    <th className="text-left py-1 px-2">Stage</th>
-                    <th className="text-right py-1 px-2">Pass Rate</th>
-                    <th className="text-right py-1 px-2">Avg (ms)</th>
-                    <th className="text-right py-1 px-2">Last Run</th>
+                    <th className="text-left py-2 px-3 rounded-tl-lg" style={{ background: 'var(--color-surface-elevated)' }}>Image : GPU</th>
+                    <th className="text-left py-2 px-3" style={{ background: 'var(--color-surface-elevated)' }}>Stage</th>
+                    <th className="text-center py-2 px-3" style={{ background: 'var(--color-surface-elevated)' }}>Result</th>
+                    <th className="text-right py-2 px-3" style={{ background: 'var(--color-surface-elevated)' }}>Pass Rate</th>
+                    <th className="text-right py-2 px-3" style={{ background: 'var(--color-surface-elevated)' }}>Avg (ms)</th>
+                    <th className="text-right py-2 px-3 rounded-tr-lg" style={{ background: 'var(--color-surface-elevated)' }}>Last Run</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(history.history).map(([key, rec]) => {
+                  {Object.entries(history.history).flatMap(([key, rec], outerIdx) => {
                     const runs = rec.runs;
                     const byStage: Record<string, ReadinessHistoryRun[]> = {};
                     for (const r of runs) {
                       (byStage[r.stage] ??= []).push(r);
                     }
-                    return Object.entries(byStage).map(([stage, stageRuns]) => {
+                    const rowId = key;
+                    const isExpanded = expandedRows.has(rowId);
+                    const truncated = key.length > 40;
+                    const displayKey = truncated && !isExpanded ? `...${key.slice(-37)}` : key;
+
+                    return Object.entries(byStage).map(([stage, stageRuns], innerIdx) => {
                       const passed = stageRuns.filter(r => r.passed).length;
                       const total = stageRuns.length;
                       const avg = rec.avgPassedMs[stage as 'stt' | 'llm' | 'tts'];
                       const last = stageRuns[stageRuns.length - 1];
+                      const allPassed = passed === total;
+                      const isEven = (outerIdx + innerIdx) % 2 === 0;
                       return (
-                        <tr key={`${key}-${stage}`} style={{ borderTop: '1px solid var(--color-border)' }}>
-                          <td className="py-1 px-2">{key.length > 40 ? `...${key.slice(-37)}` : key}</td>
-                          <td className="py-1 px-2 uppercase">{stage}</td>
-                          <td className="py-1 px-2 text-right">{passed}/{total}</td>
-                          <td className="py-1 px-2 text-right">{avg ? `${avg}` : '—'}</td>
-                          <td className="py-1 px-2 text-right">{last ? fmtAgo(last.ts) : '—'}</td>
+                        <tr key={`${key}-${stage}`}
+                          style={{
+                            background: isEven ? 'transparent' : 'var(--color-surface-elevated)',
+                            borderTop: '1px solid var(--color-border)',
+                          }}>
+                          <td className="py-2 px-3">
+                            {truncated ? (
+                              <button
+                                onClick={() => setExpandedRows(prev => {
+                                  const next = new Set(prev);
+                                  next.has(rowId) ? next.delete(rowId) : next.add(rowId);
+                                  return next;
+                                })}
+                                className="text-left hover:underline transition-colors"
+                                style={{ color: 'var(--color-text-secondary)', cursor: 'pointer' }}
+                                title={key}
+                              >
+                                {displayKey}
+                                <span className="ml-1 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                                  {isExpanded ? '▲' : '▼'}
+                                </span>
+                              </button>
+                            ) : displayKey}
+                          </td>
+                          <td className="py-2 px-3">
+                            <span className="uppercase font-semibold text-[11px]" style={{ color: 'var(--color-text-secondary)' }}>{stage}</span>
+                          </td>
+                          <td className="py-2 px-3 text-center">
+                            {allPassed
+                              ? <CheckCircle2 className="w-4 h-4 inline" style={{ color: '#34d399' }} />
+                              : <XCircle className="w-4 h-4 inline" style={{ color: '#f87171' }} />
+                            }
+                          </td>
+                          <td className="py-2 px-3 text-right">
+                            <span style={{ color: allPassed ? '#34d399' : '#f87171' }}>{passed}</span>
+                            <span style={{ color: 'var(--color-text-muted)' }}>/{total}</span>
+                          </td>
+                          <td className="py-2 px-3 text-right" style={{ color: 'var(--color-text-secondary)' }}>
+                            {avg ? `${avg}` : '—'}
+                          </td>
+                          <td className="py-2 px-3 text-right" style={{ color: 'var(--color-text-muted)' }}>
+                            {last ? fmtAgo(last.ts) : '—'}
+                          </td>
                         </tr>
                       );
                     });
@@ -448,7 +671,7 @@ export function ReadinessSection() {
         </Card>
       )}
 
-      {/* Card 5: Actions */}
+      {/* ── Actions ── */}
       <Card>
         <CardHeader><span className="text-sm font-semibold">Actions</span></CardHeader>
         <CardBody>
