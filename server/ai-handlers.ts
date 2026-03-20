@@ -47,22 +47,34 @@ import type { RaceCandidate } from './race-providers';
 import { broadcastWs } from './ws-state';
 
 // ── SSRF protection — block fetches to private/internal IP addresses ─────────
-/** Block fetches to private/internal IP addresses (SSRF protection). */
+
+/** Patterns that match private/internal/metadata IP addresses. */
+const SSRF_BLOCKED_PATTERNS = [
+  /^localhost$/i,
+  /^127\./,
+  /^10\./,
+  /^192\.168\./,
+  /^172\.(1[6-9]|2\d|3[01])\./,
+  /^169\.254\./,                    // link-local range (includes cloud metadata 169.254.169.254)
+  /^0\.0\.0\.0$/,
+  /^\[?::1\]?$/,                    // IPv6 loopback
+  /^\[?::\]?$/,                     // IPv6 unspecified
+  /^\[?fe80:/i,                     // IPv6 link-local
+  /^\[?fd[0-9a-f]{2}:/i,            // IPv6 unique-local (ULA)
+];
+
+/** Return true if the URL points to a private/internal/metadata address. */
+export function isPrivateUrl(urlStr: string): boolean {
+  try {
+    const host = new URL(urlStr).hostname;
+    return SSRF_BLOCKED_PATTERNS.some(re => re.test(host));
+  } catch { return true; }
+}
+
+/** Block fetches to private/internal IP addresses (SSRF protection). Throws on match. */
 function validateEndpointUrl(urlStr: string): void {
-  const url = new URL(urlStr);
-  const host = url.hostname;
-  const blocked = [
-    /^localhost$/i,
-    /^127\./,
-    /^10\./,
-    /^192\.168\./,
-    /^172\.(1[6-9]|2\d|3[01])\./,
-    /^169\.254\./,
-    /^0\.0\.0\.0$/,
-    /^\[?::1\]?$/,
-    /^\[?::\]?$/,
-  ];
-  if (blocked.some(re => re.test(host))) {
+  const host = new URL(urlStr).hostname;
+  if (SSRF_BLOCKED_PATTERNS.some(re => re.test(host))) {
     throw new Error(`SSRF blocked: ${host} is a private/internal address`);
   }
 }
@@ -113,17 +125,37 @@ const TRANSLATION_CACHE_MAX = 256;
 const TRANSLATION_CACHE_TTL_MS = 30 * 60_000; // 30 minutes — meetings last hours
 const translationCache = new Map<string, { text: string; ts: number }>();
 
+// Cache hit/miss counters for metrics
+let cacheHits = 0;
+let cacheMisses = 0;
+export function getTranslationCacheStats() { return { cacheHits, cacheMisses, cacheSize: translationCache.size }; }
+
+// Periodic sweep: remove expired entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  let swept = 0;
+  for (const [key, entry] of translationCache) {
+    if (now - entry.ts > TRANSLATION_CACHE_TTL_MS) {
+      translationCache.delete(key);
+      swept++;
+    }
+  }
+  if (swept > 0) console.log(`[cache] Swept ${swept} expired translation entries`);
+}, 5 * 60_000);
+
 export function getCachedTranslation(text: string, srcLang: string, tgtLang: string, style = 'default'): string | null {
   const key = `${srcLang}|${tgtLang}|${style}|${text}`;
   const entry = translationCache.get(key);
-  if (!entry) return null;
+  if (!entry) { cacheMisses++; return null; }
   if (Date.now() - entry.ts > TRANSLATION_CACHE_TTL_MS) {
     translationCache.delete(key);
+    cacheMisses++;
     return null;
   }
   // Move to end (LRU)
   translationCache.delete(key);
   translationCache.set(key, entry);
+  cacheHits++;
   return entry.text;
 }
 
@@ -204,6 +236,7 @@ export interface GpuSTTResult {
 export async function fetchGpuSTT(
   gpuEndpoint: string, audio: Buffer, language: string, prompt: string,
   hotwords: string, wordTimestamps: boolean, signal: AbortSignal,
+  requestId?: string,
 ): Promise<GpuSTTResult> {
   validateRemoteEndpoint(gpuEndpoint);
   const form = new FormData();
@@ -214,8 +247,10 @@ export async function fetchGpuSTT(
   if (hotwords) params.set('hotwords', hotwords);
   if (wordTimestamps) params.set('word_timestamps', 'true');
   try {
+    const headers: Record<string, string> = {};
+    if (requestId) headers['X-Request-Id'] = requestId;
     const gpuRes = await fetch(`${gpuEndpoint}/v1/transcribe?${params}`, {
-      method: 'POST', body: form, signal,
+      method: 'POST', body: form, signal, headers,
     });
     if (!gpuRes.ok) {
       recordStageFailure('stt');
@@ -244,15 +279,18 @@ export interface GpuLLMResult {
 export async function fetchGpuLLM(
   gpuEndpoint: string, text: string, sourceLang: string, targetLang: string,
   glossary: string, context: string, signal: AbortSignal,
+  requestId?: string,
 ): Promise<GpuLLMResult> {
   validateRemoteEndpoint(gpuEndpoint);
   const body: Record<string, string> = { text, source_lang: sourceLang, target_lang: targetLang };
   if (glossary) body.glossary = glossary;
   if (context) body.context = context;
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (requestId) headers['X-Request-Id'] = requestId;
     const gpuRes = await fetch(`${gpuEndpoint}/v1/translate/text`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal,
     });
@@ -281,15 +319,18 @@ export interface GpuTTSResult {
 export async function fetchGpuTTS(
   gpuEndpoint: string, text: string, language: string, speaker: string,
   signal: AbortSignal, refAudio?: string, refText?: string,
+  requestId?: string,
 ): Promise<GpuTTSResult> {
   validateRemoteEndpoint(gpuEndpoint);
   try {
     const body: Record<string, string> = { text, language, speaker };
     if (refAudio) body.reference_audio = refAudio;
     if (refText) body.ref_text = refText;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (requestId) headers['X-Request-Id'] = requestId;
     const gpuRes = await fetch(`${gpuEndpoint}/v1/tts`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal,
     });
@@ -358,10 +399,8 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
   if (gpuShadowMode && deployState.endpoint) {
     const shadowEndpoint = deployState.endpoint;
     const shadowTarget = Math.round(getSttTargetLatencyMs() * (1 - getBenchmarkMarginPct() / 100));
-    const ac = new AbortController();
-    setTimeout(() => ac.abort(), GPU_STT_TIMEOUT_MS);
     const t0Shadow = Date.now();
-    fetchGpuSTT(shadowEndpoint, audio, language, prompt, hotwords, wordTimestamps, ac.signal)
+    fetchGpuSTT(shadowEndpoint, audio, language, prompt, hotwords, wordTimestamps, AbortSignal.timeout(GPU_STT_TIMEOUT_MS), requestId)
       .then(() => {
         const ms = Date.now() - t0Shadow;
         recordGpuLatency(ms);
@@ -380,7 +419,7 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
     candidates.push({
       name: 'gpu',
       timeoutMs: gpuSttTimeout,
-      run: (signal) => fetchGpuSTT(gpuEndpoint, audio, language, prompt, hotwords, wordTimestamps, signal),
+      run: (signal) => fetchGpuSTT(gpuEndpoint, audio, language, prompt, hotwords, wordTimestamps, signal, requestId),
     });
   }
 
@@ -418,7 +457,7 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
     candidates.push({
       name: 'gpu',
       timeoutMs: gpuSttTimeout,
-      run: (signal) => fetchGpuSTT(gpuEndpoint, audio, language, prompt, hotwords, wordTimestamps, signal),
+      run: (signal) => fetchGpuSTT(gpuEndpoint, audio, language, prompt, hotwords, wordTimestamps, signal, requestId),
     });
   }
 
@@ -679,10 +718,8 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
   if (gpuShadowMode && deployState.endpoint) {
     const shadowEndpoint = deployState.endpoint;
     const shadowTarget = Math.round(getLlmTargetLatencyMs() * (1 - getBenchmarkMarginPct() / 100));
-    const ac = new AbortController();
-    setTimeout(() => ac.abort(), GPU_LLM_TIMEOUT_MS);
     const t0Shadow = Date.now();
-    fetchGpuLLM(shadowEndpoint, text, sourceLang, targetLang, glossary, context, ac.signal)
+    fetchGpuLLM(shadowEndpoint, text, sourceLang, targetLang, glossary, context, AbortSignal.timeout(GPU_LLM_TIMEOUT_MS), requestId)
       .then(() => {
         const ms = Date.now() - t0Shadow;
         recordGpuLatency(ms);
@@ -700,7 +737,7 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
     candidates.push({
       name: 'gpu',
       timeoutMs: gpuLlmTimeout,
-      run: (signal) => fetchGpuLLM(gpuEndpoint, text, sourceLang, targetLang, glossary, context, signal),
+      run: (signal) => fetchGpuLLM(gpuEndpoint, text, sourceLang, targetLang, glossary, context, signal, requestId),
     });
   }
 
@@ -724,7 +761,7 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
     candidates.push({
       name: 'gpu',
       timeoutMs: gpuLlmTimeout,
-      run: (signal) => fetchGpuLLM(gpuEndpoint, text, sourceLang, targetLang, glossary, context, signal),
+      run: (signal) => fetchGpuLLM(gpuEndpoint, text, sourceLang, targetLang, glossary, context, signal, requestId),
     });
   }
 
@@ -774,21 +811,6 @@ export function buildSystemPrompt(source: string, target: string, style: string 
   return `${prompt}\nTranslate from ${source} to ${target}.`;
 }
 
-// Map GPU pod voice names (Qwen3-TTS) to Groq Orpheus voices for cloud fallback.
-// GPU path uses these names directly; cloud path needs Orpheus-compatible names.
-const VOICE_MAP_TO_ORPHEUS: Record<string, string> = {
-  // Qwen3-TTS male voices → Orpheus male voices (austin, daniel, troy)
-  'Ryan': 'daniel', 'Ethan': 'austin', 'Andrew': 'troy',
-  'Brian': 'daniel', 'Eric': 'austin', 'Guy': 'troy',
-  'Roger': 'daniel', 'Steffan': 'austin', 'Thomas': 'troy',
-  'male': 'daniel',
-  // Qwen3-TTS female voices → Orpheus female voices (autumn, diana, hannah)
-  'Aria': 'autumn', 'Luna': 'diana', 'Serena': 'hannah',
-  'Vivian': 'autumn', 'Ava': 'diana', 'Michelle': 'hannah',
-  'Sonia': 'autumn', 'Natasha': 'diana', 'Clara': 'hannah',
-  'female': 'autumn',
-};
-
 /** Resolve a speaker/voice name to one valid for the active TTS provider.
  * Now that Modal Qwen3-TTS is the primary cloud fallback, we keep the original
  * Qwen3-TTS name (Ryan, Vivian etc.) — Modal accepts them natively.
@@ -826,6 +848,7 @@ interface PipelineParams {
   allOnGpu: boolean;
   anyOnGpu: boolean;
   cloneGpuEndpoint: string | undefined;
+  requestId: string;
 }
 
 /** STT stage result. */
@@ -847,6 +870,7 @@ interface LlmStageResult {
 /** TTS stage result. */
 interface TtsStageResult {
   audioB64: string;
+  audioRaw?: Buffer;       // raw audio bytes (kept for binary HTTP responses)
   contentType: string;
   provider: string;
   latencyMs: number;
@@ -868,7 +892,7 @@ interface PipelineResponseBody {
  * Returns null if the request is invalid (response already sent to client).
  */
 async function _parsePipelineRequest(
-  req: IncomingMessage, res: ServerResponse, url: URL,
+  req: IncomingMessage, res: ServerResponse, url: URL, requestId: string,
 ): Promise<PipelineParams | null> {
   const source = validateLang(url.searchParams.get('source') || 'fr', 'fr');
   const target = validateLang(url.searchParams.get('target') || 'en', 'en');
@@ -979,6 +1003,7 @@ async function _parsePipelineRequest(
     referenceAudio, refText, isCloneRequest, cloneTtsChain, systemPrompt,
     audioBuffer, baseProfile, gpuBeforeCloud, cloudProfile,
     gpuEp, sttOnGpu, llmOnGpu, ttsOnGpu, allOnGpu, anyOnGpu, cloneGpuEndpoint,
+    requestId,
   };
 }
 
@@ -986,14 +1011,14 @@ async function _parsePipelineRequest(
  * Run the STT stage: race GPU vs cloud providers for transcription.
  */
 async function _runSttStage(params: PipelineParams): Promise<SttStageResult> {
-  const { sttOnGpu, gpuEp, audioBuffer, source, sttPrompt, cloudProfile } = params;
+  const { sttOnGpu, gpuEp, audioBuffer, source, sttPrompt, cloudProfile, requestId } = params;
 
   const sttCandidates: RaceCandidate<GpuSTTResult>[] = [];
   const sttTimeout = adaptiveStageTimeout('stt', GPU_STT_TIMEOUT_MS);
   if (sttOnGpu) {
     sttCandidates.push({
       name: 'gpu', timeoutMs: sttTimeout,
-      run: (signal) => fetchGpuSTT(gpuEp!, audioBuffer, source, sttPrompt, '', false, signal),
+      run: (signal) => fetchGpuSTT(gpuEp!, audioBuffer, source, sttPrompt, '', false, signal, requestId),
     });
   }
   sttCandidates.push({
@@ -1025,7 +1050,7 @@ async function _runSttStage(params: PipelineParams): Promise<SttStageResult> {
  * Also pushes early subtitle via WebSocket.
  */
 async function _runLlmStage(params: PipelineParams, sttResult: SttStageResult): Promise<LlmStageResult> {
-  const { source, target, style, llmOnGpu, gpuEp, cloudProfile, systemPrompt } = params;
+  const { source, target, style, llmOnGpu, gpuEp, cloudProfile, systemPrompt, requestId } = params;
   const sttText = sttResult.text;
 
   // [2] Check translation cache first
@@ -1052,7 +1077,7 @@ async function _runLlmStage(params: PipelineParams, sttResult: SttStageResult): 
   if (llmOnGpu) {
     llmCandidates.push({
       name: 'gpu', timeoutMs: llmTimeout,
-      run: (signal) => fetchGpuLLM(gpuEp!, sttText, source, target, '', '', signal),
+      run: (signal) => fetchGpuLLM(gpuEp!, sttText, source, target, '', '', signal, requestId),
     });
   }
   llmCandidates.push({
@@ -1097,7 +1122,7 @@ async function _runLlmStage(params: PipelineParams, sttResult: SttStageResult): 
 async function _runTtsStage(params: PipelineParams, translatedText: string): Promise<TtsStageResult> {
   const {
     isCloneRequest, ttsOnGpu, gpuEp, cloneGpuEndpoint,
-    targetName, speaker, referenceAudio, refText, cloudProfile,
+    targetName, speaker, referenceAudio, refText, cloudProfile, requestId,
   } = params;
 
   if (!translatedText.trim()) {
@@ -1116,7 +1141,7 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
     console.log(`[pipeline-tts] Adding GPU candidate (endpoint=${ttsGpuEp})`);
     ttsCandidates.push({
       name: 'gpu', timeoutMs: ttsTimeout,
-      run: (signal) => fetchGpuTTS(ttsGpuEp!, translatedText, targetName, speaker || 'Ryan', signal, referenceAudio, refText),
+      run: (signal) => fetchGpuTTS(ttsGpuEp!, translatedText, targetName, speaker || 'Ryan', signal, referenceAudio, refText, requestId),
     });
   }
   // Voice cloning: ALWAYS add Modal as candidate (GPU may be dead/circuit-open)
@@ -1155,6 +1180,7 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
   }
 
   let audioB64 = '';
+  let audioRaw: Buffer | undefined;
   let contentType = '';
   let ttsMs = 0;
   let ttsProvider = '';
@@ -1162,7 +1188,8 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
   console.log(`[pipeline-tts] Racing ${ttsCandidates.length} candidates: ${ttsCandidates.map(c => c.name).join(', ')}`);
   try {
     const ttsRace = await raceProviders(ttsCandidates, { logPrefix: '[pipeline-tts]', headstartMs: 0 });
-    audioB64 = ttsRace.result.audio.toString('base64');
+    audioRaw = Buffer.isBuffer(ttsRace.result.audio) ? ttsRace.result.audio : Buffer.from(ttsRace.result.audio);
+    audioB64 = audioRaw.toString('base64');
     contentType = ttsRace.result.contentType;
     ttsProvider = ttsRace.provider;
     ttsMs = ttsRace.latencyMs;
@@ -1175,7 +1202,8 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
         console.log(`[pipeline-tts] Clone failed — falling back to Groq preset voice`);
         const fallbackT0 = Date.now();
         const r = await client.synthesize(translatedText, { ...cloudProfile, referenceAudio: undefined, refText: undefined, tts: undefined });
-        audioB64 = r.audio.toString('base64');
+        audioRaw = Buffer.isBuffer(r.audio) ? r.audio : Buffer.from(r.audio);
+        audioB64 = audioRaw.toString('base64');
         contentType = r.contentType;
         ttsProvider = `${r.provider}/preset-fallback`;
         ttsMs = Date.now() - fallbackT0;
@@ -1200,7 +1228,7 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
     }
   }
 
-  return { audioB64, contentType, provider: ttsProvider, latencyMs: ttsMs };
+  return { audioB64, audioRaw, contentType, provider: ttsProvider, latencyMs: ttsMs };
 }
 
 /**
@@ -1226,6 +1254,38 @@ function _encodePipelineResponse(
   };
 }
 
+/**
+ * Check whether the client wants raw binary audio (Accept: audio/wav or application/octet-stream).
+ */
+function _wantsBinaryAudio(req: IncomingMessage): boolean {
+  const accept = req.headers['accept'] || '';
+  return accept.includes('audio/wav') || accept.includes('application/octet-stream');
+}
+
+/**
+ * Send the pipeline response — either raw binary audio with metadata in headers
+ * (when Accept: audio/wav) or the traditional JSON format (backwards compatible).
+ */
+function _sendPipelineResponse(
+  req: IncomingMessage, res: ServerResponse,
+  body: PipelineResponseBody,
+  audioRaw?: Buffer,
+): void {
+  if (_wantsBinaryAudio(req) && audioRaw && audioRaw.length > 0) {
+    res.writeHead(200, {
+      'Content-Type': 'audio/wav',
+      'X-Transcription': encodeURIComponent(body.transcription || ''),
+      'X-Translation': encodeURIComponent(body.response || ''),
+      'X-Timing': JSON.stringify(body.timing),
+      'Content-Length': String(audioRaw.length),
+    });
+    res.end(audioRaw);
+  } else {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(body));
+  }
+}
+
 // ── handlePipeline (orchestrator) ────────────────────────────────────────────
 
 export async function handlePipeline(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1236,7 +1296,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
   // ── Parse and validate request ────────────────────────────────────────────
-  const params = await _parsePipelineRequest(req, res, url);
+  const params = await _parsePipelineRequest(req, res, url, requestId);
   if (!params) return;  // invalid request — response already sent
 
   const {
@@ -1253,7 +1313,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
     ? `STT=${sttOnGpu ? 'gpu' : 'cloud'} LLM=${llmOnGpu ? 'gpu' : 'cloud'} TTS=${ttsOnGpu ? 'gpu' : 'cloud'}${isCloneRequest ? ' (clone→hybrid)' : ''}`
     : 'all=cloud';
   const mode = allOnGpu ? 'atomic-gpu' : anyOnGpu ? 'hybrid' : 'cloud';
-  console.log(`[pipeline] ── Incoming: ${audioDur}s audio (${audioBuffer.length} bytes) ${source}->${target}${speaker ? ` speaker=${speaker}` : ''} mode=${mode} ${stageRoutes} ──`);
+  console.log(`[pipeline] ── Incoming [req=${requestId.slice(0, 8)}]: ${audioDur}s audio (${audioBuffer.length} bytes) ${source}->${target}${speaker ? ` speaker=${speaker}` : ''} mode=${mode} ${stageRoutes} ──`);
 
   // ── Hybrid per-stage pipeline ─────────────────────────────────────────────
   // Optimizations applied:
@@ -1302,8 +1362,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
       if (ttsResult.audioB64) forwardToAvatar(ttsResult.audioB64);
 
       const body = _encodePipelineResponse(sttResult, llmResult, ttsResult, totalMs, isCloneRequest);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(body));
+      _sendPipelineResponse(req, res, body, ttsResult.audioRaw);
       return;
     } catch (err) {
       console.warn(`[pipeline] Hybrid pipeline failed: ${err instanceof Error ? err.message : err}`);
@@ -1383,7 +1442,8 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
       outputPreview: (result.chat.content || '').slice(0, 80),
     });
 
-    const audioB64 = result.tts?.audio ? result.tts.audio.toString('base64') : '';
+    const atomicAudioRaw = result.tts?.audio ? (Buffer.isBuffer(result.tts.audio) ? result.tts.audio : Buffer.from(result.tts.audio)) : undefined;
+    const audioB64 = atomicAudioRaw ? atomicAudioRaw.toString('base64') : '';
 
     // Forward TTS audio to avatar (fire-and-forget)
     if (audioB64) forwardToAvatar(audioB64);
@@ -1407,8 +1467,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
       },
     };
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(body));
+    _sendPipelineResponse(req, res, body, atomicAudioRaw);
   } catch (err) {
     console.warn(`[pipeline] Full pipeline failed: ${err instanceof Error ? err.message : err}`);
     // If pipeline fails (e.g. no TTS provider), try STT + LLM only (subtitles still work)
@@ -1457,8 +1516,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
         timing: { total_ms: fallbackMs, stt_ms: sttMs, llm_ms: llmMs, tts_ms: 0, used_gpu: false },
       };
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(body));
+      _sendPipelineResponse(req, res, body);
     } catch (fallbackErr) {
       const message = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
       console.error(`[pipeline] Complete failure: ${message}`);

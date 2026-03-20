@@ -13,6 +13,11 @@ import type { AIProfile } from '../src/client';
 const BABELCAST_DIR = join(homedir(), '.babelcast');
 const CONFIG_FILE = join(BABELCAST_DIR, 'provider-config.json');
 
+// ── In-memory config cache (avoids sync file I/O on every pipeline request) ──
+let _cachedConfig: ProviderConfig | null = null;
+let _cacheTime = 0;
+const CONFIG_CACHE_TTL_MS = 5_000;
+
 export interface PipelineChainEntry {
   provider: string;
   model: string;
@@ -105,10 +110,19 @@ const DEFAULT_CONFIG: ProviderConfig = {
   updatedAt: 0,
 };
 
-/** Load provider config from disk. Returns defaults if file doesn't exist. */
+/** Load provider config from disk. Returns defaults if file doesn't exist.
+ *  Uses in-memory cache with 5s TTL to avoid sync file I/O on the hot path. */
 export function loadProviderConfig(): ProviderConfig {
+  const now = Date.now();
+  if (_cachedConfig && (now - _cacheTime) < CONFIG_CACHE_TTL_MS) {
+    return _cachedConfig;
+  }
   try {
-    if (!existsSync(CONFIG_FILE)) return { ...DEFAULT_CONFIG };
+    if (!existsSync(CONFIG_FILE)) {
+      _cachedConfig = { ...DEFAULT_CONFIG };
+      _cacheTime = now;
+      return _cachedConfig;
+    }
     const raw = readFileSync(CONFIG_FILE, 'utf-8');
     const data = JSON.parse(raw) as Partial<ProviderConfig>;
     const config: ProviderConfig = {
@@ -134,19 +148,26 @@ export function loadProviderConfig(): ProviderConfig {
     for (const key of Object.keys(data)) {
       if (!(key in config)) config[key] = data[key as keyof typeof data];
     }
+    _cachedConfig = config;
+    _cacheTime = now;
     return config;
   } catch (err) {
     console.warn('[config] Failed to load provider config:', err instanceof Error ? err.message : err);
-    return { ...DEFAULT_CONFIG };
+    _cachedConfig = { ...DEFAULT_CONFIG };
+    _cacheTime = now;
+    return _cachedConfig;
   }
 }
 
-/** Save provider config to disk. */
+/** Save provider config to disk. Also updates the in-memory cache. */
 export function saveProviderConfig(config: ProviderConfig): void {
   try {
     mkdirSync(BABELCAST_DIR, { recursive: true });
     config.updatedAt = Date.now();
     writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+    // Update cache so subsequent reads skip file I/O
+    _cachedConfig = config;
+    _cacheTime = Date.now();
     console.log(`[config] Saved provider config (${config.profiles.length} profiles) to ${CONFIG_FILE}`);
   } catch (err) {
     console.warn('[config] Failed to save provider config:', err instanceof Error ? err.message : err);
@@ -234,19 +255,34 @@ export function applyProfileLatencyTargets(profileId: string | null, profiles: G
   console.log(`[config] Latency targets applied for profile "${profileId}" (${latency}): STT=${targets.sttMs}ms LLM=${targets.llmMs}ms TTS=${targets.ttsMs}ms`);
 }
 
-/** Throttled stamp: update lastRequestAt on the given profile (at most once per minute). */
-const _stampThrottle: Record<string, number> = {};
-export function stampProfileRequest(profileId: string | null): void {
-  if (!profileId) return;
-  const now = Date.now();
-  if (_stampThrottle[profileId] && now - _stampThrottle[profileId] < 60_000) return;
-  _stampThrottle[profileId] = now;
+/** Debounced stamp: update lastRequestAt on the given profile.
+ *  Batches writes — persists at most once per 10 seconds to avoid
+ *  sync file I/O on every pipeline request. */
+let _stampTimer: ReturnType<typeof setTimeout> | null = null;
+let _pendingStampId: string | null = null;
+
+function _flushStamp(profileId: string): void {
   try {
     const config = loadProviderConfig();
+    const now = Date.now();
     const updated = {
       ...config,
       profiles: config.profiles.map(p => p.id === profileId ? { ...p, lastRequestAt: now } : p),
     };
     saveProviderConfig(updated);
   } catch (e) { console.warn('[config] profile lastRequestAt update failed:', e instanceof Error ? e.message : e); }
+}
+
+export function stampProfileRequest(profileId: string | null): void {
+  if (!profileId) return;
+  _pendingStampId = profileId;
+  if (!_stampTimer) {
+    _stampTimer = setTimeout(() => {
+      _stampTimer = null;
+      if (_pendingStampId) {
+        _flushStamp(_pendingStampId);
+        _pendingStampId = null;
+      }
+    }, 10_000);
+  }
 }

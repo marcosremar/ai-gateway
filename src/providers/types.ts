@@ -141,6 +141,8 @@ export interface ChatResponse {
 export interface LLMProvider {
   readonly providerId: string;
   chat(request: ChatRequest): Promise<ChatResponse>;
+  /** Streaming chat — yields content tokens as they arrive. Optional; not all providers support it. */
+  chatStream?(request: ChatRequest): AsyncGenerator<string, void, undefined>;
   isConfigured(): boolean;
   withApiKey?(apiKey: string): LLMProvider;
   withConfig?(opts: { apiKey: string; baseURL?: string }): LLMProvider;

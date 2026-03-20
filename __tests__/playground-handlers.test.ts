@@ -2,7 +2,17 @@
  * Unit tests for playground-handlers — validates catalog structure
  * and handler exports without starting the full gateway.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// Mock bun:sqlite — not available in Vitest's Node.js runtime
+// (transitive dep: playground-handlers → gpu-deploy → latency-db → bun:sqlite)
+vi.mock('bun:sqlite', () => ({
+  Database: class MockDatabase {
+    exec() {}
+    prepare() { return { all: () => [], get: () => null, run: () => {} }; }
+    close() {}
+  },
+}));
 
 // Test that all handlers are exported
 describe('playground-handlers exports', () => {

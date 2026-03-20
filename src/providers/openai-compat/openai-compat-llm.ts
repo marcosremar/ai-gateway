@@ -79,4 +79,26 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       raw: completion,
     };
   }
+
+  /**
+   * Streaming chat completion — yields content tokens as they arrive.
+   * Used by StreamingOverlap to start TTS before the full LLM response is ready.
+   */
+  async *chatStream(request: ChatRequest): AsyncGenerator<string, void, undefined> {
+    const client = this.getClient();
+
+    const stream = await client.chat.completions.create({
+      model: request.model || this.config.defaultModel || '',
+      messages: request.messages as OpenAI.ChatCompletionMessageParam[],
+      ...(request.temperature !== undefined && { temperature: request.temperature }),
+      ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
+      ...(request.responseFormat && { response_format: request.responseFormat }),
+      stream: true,
+    });
+
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta?.content;
+      if (delta) yield delta;
+    }
+  }
 }
