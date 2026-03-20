@@ -11,6 +11,22 @@ export const GPU_PROVIDERS = new Set(['runpod', 'tensordock', 'vast', 'modal', '
 /** Balance threshold (USD) below which a low-balance alert is shown on the dashboard. */
 export const LOW_BALANCE_THRESHOLD_USD = parseFloat(process.env.LOW_BALANCE_THRESHOLD_USD || '1');
 
+// ── Docker Image Versioning ─────────────────────────────────────────────────
+
+/** Docker image version — update when a new set of images is built and verified.
+ *  CI/CD builds both :latest and :$DOCKER_IMAGE_VERSION tags.
+ *  Pin deploys to a specific version for reproducibility; use :latest for dev. */
+export const DOCKER_IMAGE_VERSION = 'v1.3.0';
+
+/** All known Docker image base names (without tag). */
+export const DOCKER_IMAGE_NAMES = [
+  'marcosremar/babelcast-translategemma',
+  'marcosremar/babelcast-translategemma-only-subtitles',
+  'marcosremar/babelcast-mistral',
+  'marcosremar/babelcast-groq',
+  'marcosremar/babelcast-qwen3-tts',
+] as const;
+
 // ── GPU × Image compatibility ────────────────────────────────────────────────
 // All images now use ARG BASE_IMAGE / CUDA_INDEX at build time.
 // No runtime Blackwell image swap needed — each image is built for its target arch.
@@ -20,6 +36,7 @@ export const LOW_BALANCE_THRESHOLD_USD = parseFloat(process.env.LOW_BALANCE_THRE
 // Blackwell ↔ standard image maps (kept for gpu-deploy.ts backward compat)
 export const STANDARD_TO_BLACKWELL: Record<string, string> = {
   'marcosremar/babelcast-mistral:latest': 'marcosremar/babelcast-blackwell-mistral:latest',
+  [`marcosremar/babelcast-mistral:${DOCKER_IMAGE_VERSION}`]: `marcosremar/babelcast-blackwell-mistral:${DOCKER_IMAGE_VERSION}`,
 };
 export const BLACKWELL_TO_STANDARD: Record<string, string> = {};
 for (const [std, bw] of Object.entries(STANDARD_TO_BLACKWELL)) {
@@ -47,13 +64,9 @@ export function resolveDockerImageForGpus(dockerImage: string, gpuTypes: string[
 /** Expose catalog via /v1/gpu/catalog endpoint for UI and debugging. */
 export function getImageCatalog() {
   return {
-    images: [
-      'marcosremar/babelcast-translategemma:latest',
-      'marcosremar/babelcast-translategemma-only-subtitles:latest',
-      'marcosremar/babelcast-mistral:latest',
-      'marcosremar/babelcast-groq:latest',
-      'marcosremar/babelcast-qwen3-tts:latest',
-    ],
+    version: DOCKER_IMAGE_VERSION,
+    images: DOCKER_IMAGE_NAMES.map(name => `${name}:${DOCKER_IMAGE_VERSION}`),
+    latestImages: DOCKER_IMAGE_NAMES.map(name => `${name}:latest`),
   };
 }
 

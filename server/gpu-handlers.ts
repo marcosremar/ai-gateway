@@ -148,6 +148,8 @@ async function _validateDeployRequest(
     ? body.env as Record<string, string> : {};
   const dockerStartCmd = (body.dockerStartCmd as string) || '';
   const containerDiskInGb = typeof body.containerDiskInGb === 'number' ? body.containerDiskInGb : 0;
+  // RunPod Network Volume ID — attach existing volume for persistent LLM GGUF cache
+  const volumeId = (body.volumeId as string) || '';
   const deployEnv: Record<string, string> = { ...customEnv };
   if (llmModel) deployEnv.CONF_LLM_MODEL = llmModel;
 
@@ -369,7 +371,7 @@ function _startDeployAndRespond(
     return;
   }
 
-  const extra = { region, storageGb, hfToken, env: Object.keys(deployEnv).length > 0 ? deployEnv : undefined, interruptible, ...(dockerStartCmd ? { dockerStartCmd } : {}), ...(containerDiskInGb > 0 ? { containerDiskInGb } : {}) };
+  const extra = { region, storageGb, hfToken, env: Object.keys(deployEnv).length > 0 ? deployEnv : undefined, interruptible, ...(dockerStartCmd ? { dockerStartCmd } : {}), ...(containerDiskInGb > 0 ? { containerDiskInGb } : {}), ...(volumeId ? { volumeId } : {}) };
   const deployFn = raceCount > 1
     ? startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount)
     : startDeployWithTiers(tiers, resolvedDockerImage, gpuTypes, extra, gpuPriorityByProvider);
