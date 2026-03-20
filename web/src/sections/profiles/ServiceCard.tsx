@@ -391,39 +391,33 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
               </div>
             )}
             <div className="rounded-lg border overflow-hidden"
-              style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 3%, transparent)' }}>
+              style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
 
-              {/* ── Header ── */}
-              <div className="flex items-center gap-1.5 px-3 py-2 border-b"
-                style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)' }}>
-                <Settings2 className="w-3 h-3 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
-                <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-text-muted)' }}>Deploy Settings</span>
+              {/* ── Image row (acts as header) ── */}
+              <div className="flex items-center gap-2.5 px-3 py-2.5 border-b"
+                style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 3%, transparent)' }}>
+                <Settings2 className="w-3.5 h-3.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
+                <div className="flex-1 min-w-0">
+                  <DropdownList
+                    options={DEFAULT_DOCKER_IMAGES.map(img => ({
+                      key: img.url,
+                      label: img.label,
+                      subtitle: img.description,
+                    }))}
+                    value={overrideImage || service.dockerImage || ''}
+                    onChange={key => setOverrideImage(key === service.dockerImage ? null : key)}
+                    accent="#a78bfa"
+                    size="sm"
+                  />
+                </div>
               </div>
 
-              {/* ── Target: Image + Provider + Region ── */}
-              <div className="p-3 space-y-2.5">
-                {/* Image */}
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-medium w-14 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Image</span>
-                  <div className="flex-1">
-                    <DropdownList
-                      options={DEFAULT_DOCKER_IMAGES.map(img => ({
-                        key: img.url,
-                        label: img.label,
-                        subtitle: img.description,
-                      }))}
-                      value={overrideImage || service.dockerImage || ''}
-                      onChange={key => setOverrideImage(key === service.dockerImage ? null : key)}
-                      accent="#a78bfa"
-                      size="sm"
-                    />
-                  </div>
-                </div>
-
-                {/* Provider + Region on same row */}
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <p className="text-[9px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Provider</p>
+              {/* ── Body: inline rows ── */}
+              <div className="px-3 py-2.5 space-y-2">
+                {/* Row 1: Provider + Region */}
+                <div className="grid grid-cols-[1fr,auto] gap-4 items-start">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide flex-shrink-0 w-[52px]" style={{ color: 'var(--color-text-muted)' }}>Provider</span>
                     <div className="flex gap-1 flex-wrap">
                       {(['auto', ...GPU_PROVIDERS.map(p => p.id)] as const).map(pid => {
                         const prov = GPU_PROVIDERS.find(p => p.id === pid);
@@ -431,9 +425,9 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                         const sel = deployProvider === pid;
                         return (
                           <button key={pid} onClick={() => setDeployProvider(pid)}
-                            className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
+                            className="px-2 py-[3px] rounded-md text-[10px] font-medium transition-all cursor-pointer"
                             style={{
-                              background: sel ? '#06b6d4' : 'var(--color-surface)',
+                              background: sel ? '#06b6d4' : 'transparent',
                               color: sel ? '#fff' : 'var(--color-text-muted)',
                               border: `1px solid ${sel ? '#06b6d4' : 'var(--color-border)'}`,
                             }}>
@@ -443,16 +437,16 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                       })}
                     </div>
                   </div>
-                  <div>
-                    <p className="text-[9px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Region</p>
-                    <div className="flex gap-1 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Region</span>
+                    <div className="flex gap-1">
                       {(['auto', 'US', 'EU', 'Asia'] as const).map(r => {
                         const sel = deployRegion === r;
                         return (
                           <button key={r} onClick={() => setDeployRegion(r)}
-                            className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
+                            className="px-2 py-[3px] rounded-md text-[10px] font-medium transition-all cursor-pointer"
                             style={{
-                              background: sel ? '#3b82f6' : 'var(--color-surface)',
+                              background: sel ? '#3b82f6' : 'transparent',
                               color: sel ? '#fff' : 'var(--color-text-muted)',
                               border: `1px solid ${sel ? '#3b82f6' : 'var(--color-border)'}`,
                             }}>
@@ -464,132 +458,112 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                   </div>
                 </div>
 
-                {/* Min VRAM */}
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-medium w-14 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Min VRAM</span>
-                  <div className="flex gap-1 flex-wrap">
-                    {[0, 8, 16, 24, 40, 80].map(gb => {
-                      const sel = minVramGb === gb;
-                      return (
-                        <button key={gb} onClick={() => setMinVramGb(gb)}
-                          className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
-                          style={{
-                            background: sel ? 'color-mix(in srgb, #10b981 15%, transparent)' : 'var(--color-surface)',
-                            color: sel ? '#34d399' : 'var(--color-text-muted)',
-                            border: `1px solid ${sel ? 'color-mix(in srgb, #10b981 40%, transparent)' : 'var(--color-border)'}`,
-                          }}>
-                          {gb === 0 ? 'Any' : `${gb}GB`}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-
-              <div className="border-t" style={{ borderColor: 'var(--color-border)' }} />
-
-              {/* ── 3-column: Parallel | Auto-stop | Disk ── */}
-              <div className="grid grid-cols-3 divide-x" style={{ borderColor: 'var(--color-border)' } as React.CSSProperties}>
-                {/* Parallel launch */}
-                <div className="p-2.5">
-                  <div className="flex items-center gap-1 mb-1.5">
-                    <Zap className="w-3 h-3 flex-shrink-0" style={{ color: '#8b5cf6' }} />
-                    <p className="text-[10px] font-semibold truncate" style={{ color: 'var(--color-text)' }}>Parallel</p>
-                  </div>
-                  <div className="flex flex-wrap gap-1 mb-1.5">
-                    {[1, 2, 3, 5].map(n => (
-                      <button key={n} onClick={() => setRaceCount(n)}
-                        className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
-                        style={{
-                          background: raceCount === n ? '#8b5cf6' : 'var(--color-surface)',
-                          color: raceCount === n ? '#fff' : 'var(--color-text-muted)',
-                          border: `1px solid ${raceCount === n ? '#8b5cf6' : 'var(--color-border)'}`,
-                        }}>
-                        {n === 1 ? '1' : `×${n}`}
-                      </button>
-                    ))}
-                  </div>
-                  {raceCount === 1 ? (
-                    <p className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Standard deploy.</p>
-                  ) : (
-                    <p className="text-[9px]" style={{ color: '#a78bfa' }}>{raceCount} instances — first wins.</p>
-                  )}
-                  {raceResult && raceCount === raceResult.raceCount && (
-                    <div className="mt-1 flex items-center gap-1 text-[9px]">
-                      <Trophy className="w-3 h-3 flex-shrink-0" style={{ color: '#a78bfa' }} />
-                      <span className="font-mono font-semibold" style={{ color: '#c4b5fd' }}>{fmtBootTime(raceResult.winnerMs)}</span>
+                {/* Row 2: Min VRAM + Disk */}
+                <div className="grid grid-cols-[1fr,auto] gap-4 items-start">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide flex-shrink-0 w-[52px]" style={{ color: 'var(--color-text-muted)' }}>VRAM</span>
+                    <div className="flex gap-1 flex-wrap">
+                      {[0, 8, 16, 24, 40, 80].map(gb => {
+                        const sel = minVramGb === gb;
+                        return (
+                          <button key={gb} onClick={() => setMinVramGb(gb)}
+                            className="px-2 py-[3px] rounded-md text-[10px] font-medium transition-all cursor-pointer"
+                            style={{
+                              background: sel ? 'color-mix(in srgb, #10b981 15%, transparent)' : 'transparent',
+                              color: sel ? '#34d399' : 'var(--color-text-muted)',
+                              border: `1px solid ${sel ? 'color-mix(in srgb, #10b981 40%, transparent)' : 'var(--color-border)'}`,
+                            }}>
+                            {gb === 0 ? 'Any' : `${gb}GB`}
+                          </button>
+                        );
+                      })}
                     </div>
-                  )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Disk</span>
+                    <div className="flex gap-1">
+                      {[10, 20, 50, 100].map(gb => (
+                        <button key={gb} onClick={() => setDiskGb(gb)}
+                          className="px-2 py-[3px] rounded-md text-[10px] font-medium transition-all cursor-pointer"
+                          style={{
+                            background: diskGb === gb ? 'color-mix(in srgb, #60a5fa 12%, transparent)' : 'transparent',
+                            color: diskGb === gb ? '#93c5fd' : 'var(--color-text-muted)',
+                            border: `1px solid ${diskGb === gb ? 'color-mix(in srgb, #60a5fa 35%, transparent)' : 'var(--color-border)'}`,
+                          }}>
+                          {gb}GB
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
 
-                {/* Auto-stop */}
-                <div className="p-2.5 border-l" style={{ borderColor: 'var(--color-border)' }}>
-                  <div className="flex items-center gap-1 mb-1.5">
-                    <Timer className="w-3 h-3 flex-shrink-0" style={{ color: '#f59e0b' }} />
-                    <p className="text-[10px] font-semibold truncate" style={{ color: 'var(--color-text)' }}>Auto-stop</p>
+                {/* Row 3: Parallel + Auto-stop */}
+                <div className="grid grid-cols-[1fr,auto] gap-4 items-start">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide flex-shrink-0 w-[52px]" style={{ color: 'var(--color-text-muted)' }}>
+                      <span className="flex items-center gap-1"><Zap className="w-3 h-3" style={{ color: '#8b5cf6' }} />Race</span>
+                    </span>
+                    <div className="flex gap-1">
+                      {[1, 2, 3, 5].map(n => (
+                        <button key={n} onClick={() => setRaceCount(n)}
+                          className="px-2 py-[3px] rounded-md text-[10px] font-medium transition-all cursor-pointer"
+                          style={{
+                            background: raceCount === n ? '#8b5cf6' : 'transparent',
+                            color: raceCount === n ? '#fff' : 'var(--color-text-muted)',
+                            border: `1px solid ${raceCount === n ? '#8b5cf6' : 'var(--color-border)'}`,
+                          }}>
+                          {n === 1 ? '1' : `×${n}`}
+                        </button>
+                      ))}
+                    </div>
+                    {raceCount > 1 && (
+                      <span className="text-[9px]" style={{ color: '#a78bfa' }}>{raceCount} instances — first wins</span>
+                    )}
+                    {raceResult && raceCount === raceResult.raceCount && (
+                      <span className="flex items-center gap-1 text-[9px]">
+                        <Trophy className="w-3 h-3 flex-shrink-0" style={{ color: '#a78bfa' }} />
+                        <span className="font-mono font-semibold" style={{ color: '#c4b5fd' }}>{fmtBootTime(raceResult.winnerMs)}</span>
+                      </span>
+                    )}
                   </div>
-                  <div className="flex flex-wrap gap-1">
-                    {[5, 15, 30, 60, 0].map(min => (
-                      <button key={min} onClick={() => { setIdleTimeoutMin(min); setTimeoutDirty(true); }}
-                        className="px-1.5 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
-                        style={{
-                          background: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 12%, transparent)' : 'transparent',
-                          color: idleTimeoutMin === min ? '#fbbf24' : 'var(--color-text-muted)',
-                          border: `1px solid ${idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 35%, transparent)' : 'var(--color-border)'}`,
-                        }}>
-                        {min === 0 ? 'Never' : `${min}m`}
-                      </button>
-                    ))}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
+                      <span className="flex items-center gap-1"><Timer className="w-3 h-3" style={{ color: '#f59e0b' }} />Idle</span>
+                    </span>
+                    <div className="flex gap-1">
+                      {[5, 15, 30, 60, 0].map(min => (
+                        <button key={min} onClick={() => { setIdleTimeoutMin(min); setTimeoutDirty(true); }}
+                          className="px-2 py-[3px] rounded-md text-[10px] font-medium transition-all cursor-pointer"
+                          style={{
+                            background: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 12%, transparent)' : 'transparent',
+                            color: idleTimeoutMin === min ? '#fbbf24' : 'var(--color-text-muted)',
+                            border: `1px solid ${idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 35%, transparent)' : 'var(--color-border)'}`,
+                          }}>
+                          {min === 0 ? '∞' : `${min}m`}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <p className="text-[9px] mt-1" style={{ color: 'var(--color-text-muted)' }}>
-                    {idleTimeoutMin === 0 ? 'Manual stop only.' : `Idle ${idleTimeoutMin}m → stop.`}
-                  </p>
-                </div>
-
-                {/* Disk */}
-                <div className="p-2.5 border-l" style={{ borderColor: 'var(--color-border)' }}>
-                  <div className="flex items-center gap-1 mb-1.5">
-                    <Server className="w-3 h-3 flex-shrink-0" style={{ color: '#60a5fa' }} />
-                    <p className="text-[10px] font-semibold truncate" style={{ color: 'var(--color-text)' }}>Disk</p>
-                  </div>
-                  <div className="flex flex-wrap gap-1">
-                    {[10, 20, 50, 100].map(gb => (
-                      <button key={gb} onClick={() => setDiskGb(gb)}
-                        className="px-1.5 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
-                        style={{
-                          background: diskGb === gb ? 'color-mix(in srgb, #60a5fa 12%, transparent)' : 'transparent',
-                          color: diskGb === gb ? '#93c5fd' : 'var(--color-text-muted)',
-                          border: `1px solid ${diskGb === gb ? 'color-mix(in srgb, #60a5fa 35%, transparent)' : 'var(--color-border)'}`,
-                        }}>
-                        {gb}GB
-                      </button>
-                    ))}
-                  </div>
-                  <p className="text-[9px] mt-1" style={{ color: 'var(--color-text-muted)' }}>Container disk.</p>
                 </div>
               </div>
 
-              <div className="border-t" style={{ borderColor: 'var(--color-border)' }} />
-
-              {/* ── Toggles + footer ── */}
-              <div className="flex items-center justify-between gap-2 px-3 py-2">
+              {/* ── Footer: toggles + deploy ── */}
+              <div className="flex items-center justify-between gap-2 px-3 py-2 border-t"
+                style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 3%, transparent)' }}>
                 <div className="flex items-center gap-3">
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <Toggle checked={spotInstance} onChange={setSpotInstance} size="sm" />
-                    <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>Spot</span>
+                    <span className="text-[10px] font-medium" style={{ color: spotInstance ? '#fbbf24' : 'var(--color-text-muted)' }}>
+                      Spot{spotInstance ? ' (preemptible)' : ''}
+                    </span>
                   </label>
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <Toggle checked={autoBenchmark} onChange={setAutoBenchmark} size="sm" />
-                    <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>Benchmark on ready</span>
+                    <span className="text-[10px] font-medium" style={{ color: autoBenchmark ? '#34d399' : 'var(--color-text-muted)' }}>Bench</span>
                   </label>
                   <span className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
                     <Clock className="w-3 h-3" /> ~2–5 min
                   </span>
-                  {spotInstance && (
-                    <span className="flex items-center gap-1 text-[10px]" style={{ color: '#fbbf24' }}>
-                      <AlertTriangle className="w-3 h-3" /> Preemptible
-                    </span>
-                  )}
                 </div>
                 <Button variant="primary" size="sm" onClick={handleDeploy} isLoading={deploying} loadingText="Deploying..."
                   disabled={!service.dockerImage || !service.gpuTypes?.length}>

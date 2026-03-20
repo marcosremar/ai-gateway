@@ -1,8 +1,10 @@
 // ── BabelCast Gateway — WebSocket Server ─────────────────────────────────────
 // handleWsCommand, startWsServer() — Bun native WS on PORT+1.
 
-import { botState, deployState, gpuHealthy } from './state';
-import { broadcastWs, wsClients, startBotTranscriptPoll, stopBotTranscriptPoll } from './ws-state';
+import { botState, deployState, gpuHealthy, gpuModelWarmth, gpuReadinessState, gpuReadyForProduction, isStageWarm, isTtsWarm } from './state';
+import { shouldPreferGpuTts } from './providers';
+import { isGpuAvailable } from './state';
+import { broadcastWs, wsClients, startBotTranscriptPoll, stopBotTranscriptPoll, subscribeDub, unsubscribeDub, getActiveTargets } from './ws-state';
 import type { BabelCastWS } from './ws-state';
 import { setBotState, isPrivateUrl } from './bot-handlers';
 import { PORT } from './config';
@@ -257,6 +259,19 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     setBotState({ status: 'ready', message: 'Bot left meeting', meetingUrl: '', botId: '' });
     broadcastWs({ type: 'bot:status', status: 'idle', message: 'Bot left meeting' });
 
+  } else if (type === 'dub:subscribe' || type === 'dub:switch') {
+    const target = String(cmd.target || '');
+    if (!target) {
+      ws.send(JSON.stringify({ type: 'error', message: 'target is required for dub:subscribe' }));
+      return;
+    }
+    subscribeDub(ws.data.id, ws, target);
+    ws.send(JSON.stringify({ type: 'dub:subscribed', target, activeTargets: getActiveTargets() }));
+
+  } else if (type === 'dub:unsubscribe') {
+    unsubscribeDub(ws.data.id);
+    ws.send(JSON.stringify({ type: 'dub:unsubscribed' }));
+
   } else if (type === 'ping') {
     ws.send(JSON.stringify({ type: 'pong' }));
   }
@@ -367,19 +382,42 @@ export function startWsServer() {
             botStatus: botState.status,
             message: botState.message,
           }));
-          // Send current provider status immediately so the client doesn't need to poll
+          // Push full GPU status immediately on connect — no polling needed on reconnect
           const _gpuStatus = deployState.status === 'ready' && gpuHealthy ? 'ready'
             : deployState.status === 'error' ? 'error'
             : deployState.status !== 'idle' ? 'booting'
             : 'offline';
-          const _tier = (_gpuStatus === 'ready') ? 'gpu' : 'cloud';
+          const _gpuAvail = isGpuAvailable();
+          const _tier = (_gpuStatus === 'ready' && _gpuAvail) ? 'gpu' : 'cloud';
+          const _sttGpu = _gpuAvail && isStageWarm('stt');
+          const _llmGpu = _gpuAvail && isStageWarm('llm');
+          const _ttsGpu = _gpuAvail && shouldPreferGpuTts();
           ws.send(JSON.stringify({
-            type: 'provider:status',
-            gpu: _gpuStatus,
+            type: 'gpu:status',
+            gpuStatus: _gpuStatus,
             tier: _tier,
             reason: deployState.message || 'Current status',
+            endpoint: deployState.endpoint || null,
+            gpuType: deployState.gpuType || null,
+            modelWarmth: { stt: gpuModelWarmth.stt.warm, llm: gpuModelWarmth.llm.warm, tts: isTtsWarm() },
+            pipelineRouting: _gpuAvail ? {
+              stt: _sttGpu ? 'gpu' : 'cloud',
+              llm: _llmGpu ? 'gpu' : 'cloud',
+              tts: _ttsGpu ? 'gpu' : 'cloud',
+              mode: (_sttGpu && _llmGpu && _ttsGpu) ? 'atomic-gpu' : (_sttGpu || _llmGpu || _ttsGpu) ? 'hybrid' : 'cloud',
+            } : null,
+            readiness: {
+              phase: gpuReadinessState.condemned ? 'condemned'
+                : gpuReadyForProduction ? 'production'
+                : gpuReadinessState.shadowPhase ? 'shadow'
+                : deployState.status === 'ready' ? 'benchmarking'
+                : 'idle',
+              shadowRuns: gpuReadinessState.shadowCompletedRuns,
+            },
           }));
-          console.log(`[ws] Client connected id=${ws.data.id} (total=${wsClients.size}), sent provider:status gpu=${_gpuStatus}`);
+          // Also send legacy provider:status for Python app backward compat
+          ws.send(JSON.stringify({ type: 'provider:status', gpu: _gpuStatus, tier: _tier, reason: deployState.message || 'Current status' }));
+          console.log(`[ws] Client connected id=${ws.data.id} (total=${wsClients.size}), sent gpu:status gpu=${_gpuStatus} tier=${_tier}`);
         }
       },
       message(ws, msg) {
@@ -501,6 +539,7 @@ export function startWsServer() {
           console.log(`[bot-audio] Bot audio source disconnected id=${ws.data.id} (${botAudioChunks} chunks relayed)`);
           botAudioChunks = 0;
         } else {
+          unsubscribeDub(ws.data.id);
           wsClients.delete(ws as unknown as BabelCastWS);
           console.log(`[ws] Client disconnected id=${ws.data.id} (total=${wsClients.size})`);
         }

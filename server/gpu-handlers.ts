@@ -542,16 +542,32 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
     deployDurationMs: deployState.deployDurationMs || undefined,
     sm: deploymentSM.toJSON(),
     modelWarmth: gpuModelWarmth,
-    pipelineRouting: isGpuAvailable() ? {
-      stt: isStageWarm('stt') ? 'gpu' : 'cloud',
-      llm: isStageWarm('llm') ? 'gpu' : 'cloud',
-      tts: shouldPreferGpuTts() ? 'gpu' : 'cloud',
-      mode: (isStageWarm('stt') && isStageWarm('llm') && shouldPreferGpuTts())
-        ? 'atomic-gpu'
-        : (isStageWarm('stt') || isStageWarm('llm') || shouldPreferGpuTts())
-          ? 'hybrid'
+    pipelineRouting: (() => {
+      if (!isGpuAvailable()) return undefined;
+      // Check active profile to see which stages use GPU — avoids showing 'gpu'
+      // routing for stages that the active profile routes to cloud only.
+      const _cfg = loadProviderConfig();
+      const _activeProfile = _cfg.activeProfileId
+        ? _cfg.profiles.find(p => p.id === _cfg.activeProfileId)
+        : null;
+      const profileUsesGpu = (stage: 'stt' | 'llm' | 'tts'): boolean => {
+        if (!_activeProfile) return true;
+        const chain = (_activeProfile as Record<string, unknown>)[stage] as Array<{ provider: string }> | undefined;
+        return !chain || chain.some(e => e.provider === 'gpu');
+      };
+      const sttGpu = profileUsesGpu('stt') && isStageWarm('stt');
+      const llmGpu = profileUsesGpu('llm') && isStageWarm('llm');
+      const ttsGpu = profileUsesGpu('tts') && shouldPreferGpuTts();
+      return {
+        stt: sttGpu ? 'gpu' : 'cloud',
+        llm: llmGpu ? 'gpu' : 'cloud',
+        tts: ttsGpu ? 'gpu' : 'cloud',
+        mode: (sttGpu && llmGpu && ttsGpu) ? 'atomic-gpu'
+          : (sttGpu || llmGpu || ttsGpu) ? 'hybrid'
           : 'cloud',
-    } : undefined,
+        activeProfile: _cfg.activeProfileId || undefined,
+      };
+    })(),
     ttsColdStartProfile: getColdStartProfile(deployState.gpuType, deployState.dockerImage, deployState.provider) || undefined,
     readinessState: gpuReadinessState,
     standby: {
