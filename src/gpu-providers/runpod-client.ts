@@ -209,7 +209,7 @@ export class RunpodClient extends AbstractGpuProvider {
       // On-demand by default (reliable). Set interruptible=true for spot (cheaper but can be interrupted).
       interruptible: spec.interruptible ?? false,
       // Region filter: e.g. 'US-TX-3', 'EU-RO-1', 'CA-MTL-1'
-      ...(spec.region ? { dataCenterId: spec.region } : {}),
+      ...(spec.region ? { dataCenterIds: [spec.region] } : {}),
       // Custom start command (overrides Docker CMD/ENTRYPOINT)
       ...(spec.dockerStartCmd ? { dockerStartCmd: Array.isArray(spec.dockerStartCmd) ? spec.dockerStartCmd : ['bash', '-c', spec.dockerStartCmd] } : {}),
     };
