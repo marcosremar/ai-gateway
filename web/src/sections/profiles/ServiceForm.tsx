@@ -13,12 +13,10 @@ import {
 } from 'lucide-react';
 import {
   DEFAULT_DOCKER_IMAGES, GPU_TYPES, GPU_TYPES_BY_PROVIDER, PIPELINE_CATALOG, GPU_PROVIDERS,
-  type PipelineChainEntry, type ProfileService,
+  type PipelineChainEntry, type ProfileService, type ServiceKind,
 } from '../provider-types';
 import { PROVIDER_ICON } from '../FallbackChainList';
 import { uid } from './constants';
-
-type ServiceKind = 'cloud' | 'gpu-pod';
 
 interface ServiceFormProps {
   initial?: ProfileService;
