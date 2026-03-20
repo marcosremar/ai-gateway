@@ -23,9 +23,10 @@ test.describe('Overview Tab', () => {
 
   test('shows overview with latency stats', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByText('P50 Latency')).toBeVisible();
+    // OverviewSection shows compact "p50 142ms" format in the status bar
+    await expect(page.getByText('p50')).toBeVisible();
+    await expect(page.getByText('p95')).toBeVisible();
     await expect(page.getByText('142ms')).toBeVisible();
-    await expect(page.getByText('P95 Latency')).toBeVisible();
     await expect(page.getByText('380ms')).toBeVisible();
   });
 
@@ -46,10 +47,11 @@ test.describe('Overview Tab', () => {
   test('shows GPU status card with ready state', async ({ page, request }) => {
     await request.post(`${MOCK}/mock/state`, { data: { gpuStatus: 'ready' } });
     await page.goto('/');
-    // Wait for polling to pick up the ready state
-    await expect(page.getByText('ready').first()).toBeVisible({ timeout: 15000 });
+    // Wait for GPU tile to show the ACTIVE badge (visible when isActive=true)
+    await expect(page.getByText('ACTIVE').first()).toBeVisible({ timeout: 15000 });
     await expect(page.getByText('vast')).toBeVisible();
-    await expect(page.getByText('NVIDIA RTX A6000')).toBeVisible();
+    // GpuTile strips the 'NVIDIA ' prefix when displaying the GPU type
+    await expect(page.getByText('RTX A6000')).toBeVisible();
   });
 
   test('shows bot status card', async ({ page }) => {
@@ -63,11 +65,18 @@ test.describe('Overview Tab', () => {
     await expect(page.getByText('groq').first()).toBeVisible();
   });
 
-  test('shows pipeline components section', async ({ page }) => {
+  test('shows pipeline components section', async ({ page, request }) => {
+    // Seed a profile so PipelineHealthCard renders
+    await request.post(`${MOCK}/v1/config/providers`, {
+      data: {
+        profiles: [{ id: 'p-ov', name: 'Default', stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'gpu', model: 'qwen3-tts' }] }],
+        activeProfileId: 'p-ov',
+      },
+    });
     await page.goto('/');
-    await expect(page.getByText('Active Pipeline')).toBeVisible();
-    // Stage names are uppercase in routing bar
-    await expect(page.getByText('STT').or(page.getByText('stt')).first()).toBeVisible();
+    // PipelineHealthCard renders stage labels: STT, LLM, TTS
+    await expect(page.getByText('STT').first()).toBeVisible();
+    await expect(page.getByText('LLM').first()).toBeVisible();
   });
 });
 
@@ -78,23 +87,23 @@ test.describe('Overview Tab', () => {
 test.describe('Tab Navigation', () => {
   test('all tabs are present', async ({ page }) => {
     await page.goto('/');
-    for (const tab of ['Overview', 'Profiles', 'Pipeline', 'Deploy', 'Pipeline Test', 'Bot', 'Reputation', 'Logs & Metrics']) {
+    for (const tab of ['Overview', 'Profiles', 'API Keys', 'Playground', 'Bot', 'Reputation', 'Logs & Metrics']) {
       await expect(page.getByRole('button', { name: tab, exact: true })).toBeVisible();
     }
   });
 
   test('clicking tabs switches content', async ({ page }) => {
     await page.goto('/');
-    // Start on Overview
-    await expect(page.getByText('P50 Latency')).toBeVisible();
+    // Start on Overview — compact status bar shows p50/p95 latency
+    await expect(page.getByText('p50')).toBeVisible();
 
     // Switch to Profiles
     await page.getByRole('button', { name: 'Profiles', exact: true }).click();
     await expect(page.getByText('Profiles').first()).toBeVisible();
 
-    // Switch to Pipeline Test
-    await page.getByRole('button', { name: 'Pipeline Test' }).click();
-    await expect(page.getByText('Translation Test')).toBeVisible();
+    // Switch to Playground (formerly "Pipeline Test")
+    await page.getByRole('button', { name: 'Playground', exact: true }).click();
+    await expect(page.getByText('STT').first()).toBeVisible();
 
     // Switch to Bot
     await page.getByRole('button', { name: /^Bot$/ }).click();
@@ -134,8 +143,8 @@ test.describe('Profiles Tab', () => {
     await expect(newBtn).toBeVisible();
     await newBtn.click();
 
-    // Should navigate to detail view with Profile Name card
-    await expect(page.getByText('Profile Name')).toBeVisible();
+    // Should navigate to detail view — shows editable name input and Save & Apply button
+    await expect(page.locator('[placeholder="Profile name..."]')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Save & Apply' }).first()).toBeVisible();
   });
 });
@@ -144,64 +153,37 @@ test.describe('Profiles Tab', () => {
 // Detailed Profiles tests are in profiles.spec.ts
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Pipeline Test Tab
+// Playground Tab (formerly "Pipeline Test")
 // ─────────────────────────────────────────────────────────────────────────────
 
-test.describe('Pipeline Test Tab', () => {
+test.describe('Playground Tab', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('button', { name: 'Pipeline Test' }).click();
+    await page.getByRole('button', { name: 'Playground', exact: true }).click();
   });
 
-  test('shows translation form with language selectors', async ({ page }) => {
-    await expect(page.getByText('Translation Test')).toBeVisible();
-    await expect(page.getByText('Source')).toBeVisible();
-    await expect(page.getByText('Target')).toBeVisible();
-    await expect(page.getByText('Input text')).toBeVisible();
+  test('shows playground with mode selector', async ({ page }) => {
+    // Playground has Chat / Transcribe / TTS mode buttons
+    await expect(page.getByRole('button', { name: /Chat/i }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /Transcribe/i }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /text to speech/i }).first()).toBeVisible();
   });
 
-  test('can translate text', async ({ page }) => {
+  test('shows STT section in sidebar', async ({ page }) => {
+    // Config panel shows STT and TTS sections
+    await expect(page.getByText('STT')).toBeVisible();
+  });
+
+  test('has a message input area', async ({ page }) => {
+    // The playground has a textarea for entering messages/text
     const textarea = page.locator('textarea').first();
-    await textarea.fill('Bonjour le monde');
-
-    const translateBtn = page.getByRole('button', { name: 'Translate' });
-    await translateBtn.click();
-
-    // Should show translated result
-    await expect(page.getByText('[Translated from fr to en]: Bonjour le monde')).toBeVisible({ timeout: 5000 });
-    // Should show latency
-    await expect(page.getByText('Result')).toBeVisible();
+    await expect(textarea).toBeVisible();
   });
 
-  test('translate button is disabled when input is empty', async ({ page }) => {
-    const translateBtn = page.getByRole('button', { name: 'Translate' });
-    await expect(translateBtn).toBeDisabled();
-  });
-
-  test('shows TTS preview section', async ({ page }) => {
-    await expect(page.getByText('TTS Preview')).toBeVisible();
-    await expect(page.getByText('Voice')).toBeVisible();
-    await expect(page.getByText('Language', { exact: true })).toBeVisible();
-  });
-
-  test('TTS speak button is disabled when input is empty', async ({ page }) => {
-    const speakBtn = page.getByRole('button', { name: 'Speak' });
-    await expect(speakBtn).toBeDisabled();
-  });
-
-  test('can trigger TTS preview', async ({ page }) => {
-    const ttsTextarea = page.locator('textarea').nth(1);
-    await ttsTextarea.fill('Hello world test');
-
-    const speakBtn = page.getByRole('button', { name: 'Speak' });
-    await expect(speakBtn).toBeEnabled();
-    await speakBtn.click();
-
-    // Should create audio element (mock returns valid WAV header)
-    // No error should appear
-    await page.waitForTimeout(1000);
-    const errorBanner = page.locator('text=TTS failed');
-    await expect(errorBanner).not.toBeVisible();
+  test('switching to TTS mode shows TTS controls', async ({ page }) => {
+    await page.getByRole('button', { name: /text to speech/i }).first().click();
+    // TTS mode shows "TTS" label in the sidebar (exact match to avoid matching "PlayAI TTS" etc.)
+    await expect(page.getByText('TTS', { exact: true })).toBeVisible();
   });
 });
 
@@ -217,8 +199,8 @@ test.describe('Bot Tab', () => {
 
   test('shows deploy controls with toggles', async ({ page }) => {
     await expect(page.getByText('Deploy a Meeting BaaS bot pod')).toBeVisible();
-    await expect(page.getByText('CPU only')).toBeVisible();
-    await expect(page.getByText('Local Docker')).toBeVisible();
+    await expect(page.getByText('CPU Pod', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Cloud Docker')).toBeVisible();
   });
 
   test('deploy bot creates a bot pod', async ({ page }) => {
@@ -290,30 +272,34 @@ test.describe('Reputation Tab', () => {
   });
 
   test('shows host data with scores', async ({ page }) => {
-    // Check for reputation scores
+    // 0.83 and 0.72 are in "Good" tier (expanded by default)
     await expect(page.getByText('0.83')).toBeVisible();
     await expect(page.getByText('0.72')).toBeVisible();
+    // 0.35 is in "Poor" tier (collapsed by default) — expand it first
+    await page.getByText('Poor').click();
     await expect(page.getByText('0.35')).toBeVisible();
   });
 
   test('scores are color-coded', async ({ page }) => {
-    // High score (0.83) should be green
+    // Scores use inline style colors (not Tailwind classes)
+    // 0.83 and 0.72 are in Good tier → #60a5fa (blue)
     const highScore = page.getByText('0.83');
-    await expect(highScore).toHaveClass(/text-emerald-400/);
+    await expect(highScore).toHaveCSS('color', 'rgb(96, 165, 250)');
 
-    // Medium score (0.72) should also be green (>= 0.7)
     const medScore = page.getByText('0.72');
-    await expect(medScore).toHaveClass(/text-emerald-400/);
+    await expect(medScore).toHaveCSS('color', 'rgb(96, 165, 250)');
 
-    // Low score (0.35) should be red
+    // 0.35 is in Poor tier — expand it first
+    await page.getByText('Poor').click();
+    // Low score (0.35) → #f87171 (red)
     const lowScore = page.getByText('0.35');
-    await expect(lowScore).toHaveClass(/text-red-400/);
+    await expect(lowScore).toHaveCSS('color', 'rgb(248, 113, 113)');
   });
 
   test('shows provider filter dropdown', async ({ page }) => {
-    const filter = page.locator('select').first();
-    await expect(filter).toContainText('All providers');
-    await expect(filter).toContainText('Vast.ai');
+    // Provider filter is a segmented button group (not a native <select>)
+    await expect(page.getByRole('button', { name: 'All providers' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Vast.ai' })).toBeVisible();
   });
 
   test('table columns are sortable', async ({ page }) => {

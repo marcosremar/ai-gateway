@@ -13,6 +13,7 @@ let gpuStatus = 'idle';
 let gpuDockerImage = 'marcosremar/babelcast-mistral:latest';
 let botStatus = 'idle';
 let deployCount = 0;
+let lastDeployBody: Record<string, unknown> = {};
 let pendingTimers: ReturnType<typeof setTimeout>[] = [];
 let providerConfig: Record<string, unknown> = {
   profiles: [],
@@ -171,6 +172,7 @@ const server = createServer(async (req, res) => {
     gpuDockerImage = parsed.dockerImage;
     gpuStatus = 'creating';
     deployCount++;
+    lastDeployBody = parsed;
     // Simulate async boot
     pendingTimers.push(setTimeout(() => { gpuStatus = 'booting'; }, 500));
     pendingTimers.push(setTimeout(() => { gpuStatus = 'ready'; }, 1500));
@@ -291,6 +293,51 @@ const server = createServer(async (req, res) => {
     });
   }
 
+  // ── Playground Catalog ──
+  if (method === 'GET' && url === '/v1/playground/catalog') {
+    return json(res, {
+      providers: [
+        { id: 'groq', name: 'Groq', description: 'Fast cloud inference', available: true, capabilities: ['stt', 'llm', 'tts'] },
+        { id: 'openai', name: 'OpenAI', description: 'OpenAI models', available: false, capabilities: ['llm', 'tts'] },
+        { id: 'gpu', name: 'GPU', description: 'Local GPU pod', available: gpuStatus === 'ready', capabilities: ['stt', 'llm', 'tts'] },
+      ],
+      capabilities: {
+        stt: {
+          models: [
+            { id: 'whisper-large-v3-turbo', name: 'Whisper Large V3 Turbo', description: 'Fast multilingual transcription', providerId: 'groq', isDefault: true },
+            { id: 'whisper-large-v3', name: 'Whisper Large V3', description: 'High accuracy transcription', providerId: 'groq', isDefault: false },
+          ],
+        },
+        llm: {
+          models: [
+            { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B', description: 'Fast large language model', providerId: 'groq', isDefault: true },
+            { id: 'mixtral-8x7b', name: 'Mixtral 8x7B', description: 'Mixture of experts', providerId: 'groq', isDefault: false },
+          ],
+        },
+        tts: {
+          models: [
+            { id: 'playai-tts', name: 'PlayAI TTS', description: 'High quality TTS', providerId: 'groq', isDefault: true },
+          ],
+          voices: [
+            { id: 'Arista-PlayAI', name: 'Arista', description: 'Female voice', providerId: 'groq' },
+            { id: 'Atlas-PlayAI', name: 'Atlas', description: 'Male voice', providerId: 'groq' },
+          ],
+        },
+      },
+      gpu: { available: gpuStatus === 'ready', endpoint: gpuStatus === 'ready' ? 'https://pod-abc123-8000.proxy.runpod.net' : null, status: gpuStatus, gpuType: gpuStatus === 'ready' ? 'NVIDIA RTX A6000' : null, warmth: {} },
+      defaults: {
+        stt: { provider: 'groq', model: 'whisper-large-v3-turbo' },
+        llm: { provider: 'groq', model: 'llama-3.3-70b-versatile' },
+        tts: { provider: 'groq', model: 'playai-tts', voice: 'Arista-PlayAI' },
+      },
+      languages: [
+        { code: 'en', name: 'English' },
+        { code: 'fr', name: 'French' },
+        { code: 'pt', name: 'Portuguese' },
+      ],
+    });
+  }
+
   // ── GPU Catalog ──
   if (method === 'GET' && url === '/v1/gpu/catalog') {
     return json(res, {
@@ -403,6 +450,7 @@ const server = createServer(async (req, res) => {
     gpuDockerImage = 'marcosremar/babelcast-mistral:latest';
     botStatus = 'idle';
     deployCount = 0;
+    lastDeployBody = {};
     providerConfig = {
       profiles: [],
       activeProfileId: null,
@@ -412,6 +460,10 @@ const server = createServer(async (req, res) => {
       updatedAt: 0,
     };
     return json(res, { ok: true });
+  }
+
+  if (method === 'GET' && url === '/mock/last-deploy') {
+    return json(res, { deployCount, lastDeployBody });
   }
 
   if (method === 'POST' && url === '/mock/state') {
