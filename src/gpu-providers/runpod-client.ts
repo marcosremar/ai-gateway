@@ -195,8 +195,14 @@ export class RunpodClient extends AbstractGpuProvider {
       // Minimum 20GB container disk — 10GB is too tight (pip packages + model cache + temp files
       // can fill it silently, causing pod EXITED after ~5-8min).
       containerDiskInGb: spec.containerDiskInGb ? Math.max(spec.containerDiskInGb, 20) : Math.max(diskGb, 20),
-      volumeInGb: needsVolume ? Math.max(diskGb, 10) : 0,
-      ...(needsVolume ? { volumeMountPath: '/workspace' } : {}),
+      // Network volume: when volumeId is provided, attach it instead of creating ephemeral storage.
+      // This lets LLM GGUFs (~7-12GB) persist across pod restarts, eliminating re-download on cold boot.
+      ...(spec.volumeId
+        ? { networkVolumeId: spec.volumeId, volumeMountPath: '/workspace' }
+        : {
+            volumeInGb: needsVolume ? Math.max(diskGb, 10) : 0,
+            ...(needsVolume ? { volumeMountPath: '/workspace' } : {}),
+          }),
       // IMPORTANT: Do NOT expose the same port on both HTTP and TCP — RunPod's proxy
       // will permanently return 404 if you do. Use HTTP for proxy access, TCP for SSH.
       // HTTP for proxy access, TCP for SSH, UDP for WebRTC media (STUN/TURN range)

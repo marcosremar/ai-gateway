@@ -61,6 +61,9 @@ export interface InstanceSpec {
   /** RunPod container disk size in GB (overlay filesystem at /). Default ~10GB. Increase for workloads
    *  that install pip packages, download models to ~/.cache, or write temp files outside /workspace. */
   containerDiskInGb?: number;
+  /** RunPod Network Volume ID. When provided, attaches an existing network volume at /workspace.
+   *  Pre-caching LLM GGUFs on a network volume eliminates ~5-10min download on each cold boot. */
+  volumeId?: string;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────

@@ -843,7 +843,7 @@ export async function autoSelectCheapestGpu(
 
 // ── Deploy loop ─────────────────────────────────────────────────────────────
 
-export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; containerDiskInGb?: number; }
+export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; containerDiskInGb?: number; volumeId?: string; }
 
 export async function startDeployLoop(
   providerClient: GpuProviderClient,
@@ -954,6 +954,7 @@ export async function startDeployLoop(
           ...(providerName === 'runpod' ? { cloudType: 'SECURE' as const } : {}),
           ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
           ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
+          ...(extra.volumeId ? { volumeId: extra.volumeId } : {}),
         },
         credentials,
       );
@@ -1214,6 +1215,7 @@ export async function startDeployRace(
           ...(slot.tier.name === 'runpod' ? { cloudType: 'SECURE' as const } : {}),
           ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
           ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
+          ...(extra.volumeId ? { volumeId: extra.volumeId } : {}),
         },
         credentials,
       ),
