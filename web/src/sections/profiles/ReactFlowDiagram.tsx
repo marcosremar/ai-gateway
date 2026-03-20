@@ -2,7 +2,7 @@
 
 import { useMemo, useCallback, useState, useEffect, useRef, memo } from 'react';
 import {
-  ReactFlow, Background, useNodesState,
+  ReactFlow, Background,
   Handle, Position, MarkerType,
   type Node, type Edge, type NodeProps,
 } from '@xyflow/react';
@@ -359,15 +359,15 @@ export function ReactFlowPipelineDiagram({
 
     const enabledStages = stagesDef.filter(s => s.enabled);
     const stageW = 220;
-    const stageGap = 80;
+    const stageGap = 120;
     const ioSize = 50;
-    const ioGap = 80;
+    const ioGap = 100;
     const startX = ioSize + ioGap;
 
     // Input — added last (below) so it renders on top of stage boxes
     const inputNode: Node = {
       id: 'input', type: 'io',
-      position: { x: 0, y: 80 },
+      position: { x: 0, y: 40 },
       data: { ioType: 'input', label: 'AUDIO', color: '#38bdf8' },
       draggable: true,
     };
@@ -377,7 +377,7 @@ export function ReactFlowPipelineDiagram({
 
       n.push({
         id: `stage-${stage.key}`, type: 'stage',
-        position: { x, y: 0 },
+        position: { x, y: 10 },
         data: {
           ...stage, stageKey: stage.key, width: stageW,
           entryLabels: stage.chain.map(e => getEntryLabel(e)),
@@ -411,7 +411,7 @@ export function ReactFlowPipelineDiagram({
 
     const outputNode: Node = {
       id: 'output', type: 'io',
-      position: { x: outX, y: 80 },
+      position: { x: outX, y: 40 },
       data: { ioType: 'output', label: (lastStage?.output ?? 'AUDIO').toUpperCase(), color: outColor },
       draggable: true,
     };
@@ -435,39 +435,32 @@ export function ReactFlowPipelineDiagram({
   const maxChainLen = Math.max(sttChain.length, llmChain.length, ttsChain.length, 1);
   const diagramHeight = Math.max(300, 46 + 14 + maxChainLen * 62 + 60 + 14 + 80);
 
-  // Managed node state so drag actually moves nodes
-  const [liveNodes, setLiveNodes, onNodesChange] = useNodesState(nodes);
-  const prevNodesRef = useRef(nodes);
-  if (nodes !== prevNodesRef.current) {
-    prevNodesRef.current = nodes;
-    setLiveNodes(nodes);
-  }
+  // Uncontrolled mode: React Flow manages drag state internally.
+  // key={dataKey} forces re-mount only when chain data changes.
+  const dataKey = `${sttChain.map(c=>c.provider+c.model+(c.enabled===false?'off':'')).join(',')}-${llmChain.map(c=>c.provider+c.model+(c.enabled===false?'off':'')).join(',')}-${ttsChain.map(c=>c.provider+c.model+(c.enabled===false?'off':'')).join(',')}`;
 
   return (
     <div className="rounded-xl border"
-      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', width: '100%', height: '100%', minHeight: `${diagramHeight}px`, overflow: 'visible' }}>
+      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', width: '100%', height: `${diagramHeight}px`, overflow: 'hidden' }}>
       <ReactFlow
-        nodes={liveNodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
+        key={dataKey}
+        defaultNodes={nodes}
+        defaultEdges={edges}
         nodeTypes={nodeTypes}
-        fitView
-        fitViewOptions={{ padding: 0.15, minZoom: 0.7, maxZoom: 1 }}
-        minZoom={0.5}
-        maxZoom={1.5}
-        translateExtent={[[0, 0], [1200, diagramHeight]]}
-        nodeExtent={[[0, 0], [1200, diagramHeight - 50]]}
+        defaultViewport={{ x: 10, y: 10, zoom: 1 }}
+        minZoom={1}
+        maxZoom={1}
         proOptions={{ hideAttribution: true }}
         nodesDraggable={true}
         nodesConnectable={false}
-        elementsSelectable={true}
-        selectNodesOnDrag={false}
+        elementsSelectable={false}
         nodesFocusable={false}
         panOnDrag={false}
+        panOnScroll={false}
         zoomOnScroll={false}
         zoomOnPinch={false}
         zoomOnDoubleClick={false}
-        preventScrolling={false}
+        preventScrolling
       >
         <Background color="var(--color-border)" gap={20} size={1} />
       </ReactFlow>
