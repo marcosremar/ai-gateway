@@ -8,11 +8,11 @@ import {
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import {
   Card, CardHeader, CardBody, Button, FormSelect, FormInput, SectionHeader,
-  IconBox, StatusBadge, Toggle, DropdownList,
+  IconBox, StatusBadge, Toggle, DropdownList, AlertBanner,
 } from '@/components/ui';
 import {
-  ChevronLeft, Mic, Plus, Check, Trash2, Circle,
-  CircleCheck, Package, Server, Bot, Volume2, Pencil, Clock, Gauge, Timer, Search, Loader2,
+  ChevronLeft, Mic, Plus, Check, Trash2,
+  Package, Server, Bot, Volume2, Pencil, Clock, Gauge, Timer, Loader2,
   GripVertical, ClipboardCheck, Sparkles, Brain, Play, Square, Cpu, ScanSearch, AlertCircle,
   Upload, Zap, X as XIcon, BarChart3, Trophy, Activity, AlertTriangle,
   TrendingDown, ArrowRight, ChevronDown, Settings2, Cloud, MoreVertical, Eye, EyeOff, MapPin,
@@ -102,9 +102,10 @@ function stagesToProfileFields(stages: ProfileStage[]): {
   const ttsStage = stages.find(s => s.key === 'tts' && s.enabled);
   const custom = stages.filter(s => !['stt', 'llm', 'tts'].includes(s.key));
   return {
-    stt: sttStage ? sttStage.chain : undefined,
-    llm: llmStage?.chain || DEFAULT_LLM,
-    tts: ttsStage ? ttsStage.chain : undefined,
+    // Only include stage if it has at least one chain entry; empty chains are omitted
+    stt: sttStage?.chain.length ? sttStage.chain : undefined,
+    llm: llmStage?.chain.length ? llmStage.chain : DEFAULT_LLM,
+    tts: ttsStage?.chain.length ? ttsStage.chain : undefined,
     ...(custom.length > 0 ? { customStages: custom.map(s => ({ key: s.key, label: s.label, chain: s.chain, enabled: s.enabled })) } : {}),
   };
 }
@@ -2722,6 +2723,8 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
   const [inspecting, setInspecting] = useState(false);
   const [inspectResult, setInspectResult] = useState<DockerManifest | null>(null);
   const [inspectError, setInspectError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const handleInspect = async () => {
     if (!dockerImage.trim()) return;
@@ -2730,24 +2733,22 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
     setInspectResult(null);
     try {
       const result = await inspectDockerImage(dockerImage.trim());
+      if (!mountedRef.current) return;
       setInspectResult(result);
       if (result.sttModel) setSttModel(result.sttModel);
       if (result.llmModel) setLlmModel(result.llmModel);
       if (result.ttsModel) setTtsModel(result.ttsModel);
     } catch (err) {
+      if (!mountedRef.current) return;
       setInspectError(err instanceof Error ? err.message : 'Inspect failed');
     } finally {
-      setInspecting(false);
+      if (mountedRef.current) setInspecting(false);
     }
   };
 
   // Live GPU catalog from provider
   const [liveGpus, setLiveGpus] = useState<GpuTypeInfo[]>([]);
   const [gpuLoading, setGpuLoading] = useState(false);
-  const [gpuSearch, setGpuSearch] = useState('');
-  const [gpuFocused, setGpuFocused] = useState(false);
-  const searchRef = useRef<HTMLInputElement>(null);
-  const gpuChipsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setGpuLoading(true);
@@ -2765,29 +2766,9 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
       .finally(() => setGpuLoading(false));
   }, [gpuCloudProvider]);
 
-  const filteredGpus = liveGpus.filter(g => {
-    const q = gpuSearch.toLowerCase();
-    return !q || g.name.toLowerCase().includes(q) || g.shortName.toLowerCase().includes(q);
-  });
-
   const toggleGpu = (id: string) =>
     setGpuTypes(prev => prev.includes(id) ? prev.filter(g => g !== id) : [...prev, id]);
 
-  // Drag-to-reorder GPU chips
-  useEffect(() => {
-    const el = gpuChipsRef.current;
-    if (!el || gpuTypes.length < 2) return;
-    const sort = Sortable.create(el, {
-      animation: 150,
-      handle: '.gpu-drag-handle',
-      onEnd: () => {
-        const ids = Array.from(el.querySelectorAll('[data-gpu-id]'))
-          .map(n => (n as HTMLElement).dataset.gpuId!);
-        setGpuTypes(ids);
-      },
-    });
-    return () => sort.destroy();
-  }, [gpuTypes.length]); // re-init when count changes (add/remove)
 
   const handleSave = () => {
     if (!name.trim()) return;
@@ -2880,43 +2861,35 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
               <p className="text-[10px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-muted)' }}>Docker Image</p>
               {!useCustom ? (
                 <>
-                  {/* Visual image cards */}
-                  <div className="grid grid-cols-2 gap-2 mb-2">
-                    {DEFAULT_DOCKER_IMAGES.map(img => {
-                      const sel = dockerImage === img.url;
-                      return (
-                        <button key={img.url} type="button"
-                          onClick={() => {
-                            setDockerImage(img.url);
-                            setInspectResult(null);
-                            setInspectError(null);
-                            setSttModel(img.sttModel || '');
-                            setLlmModel(img.llmModel || '');
-                            setTtsModel(img.ttsModel || '');
-                            if (!name || DEFAULT_DOCKER_IMAGES.some(i => `Babelcast ${i.label}` === name)) {
-                              setName(`Babelcast ${img.label}`);
-                            }
-                          }}
-                          className="text-left p-2.5 rounded-lg border transition-all cursor-pointer"
-                          style={{
-                            background: sel ? 'color-mix(in srgb, #a78bfa 8%, var(--color-surface-elevated))' : 'var(--color-surface-elevated)',
-                            borderColor: sel ? '#a78bfa' : 'var(--color-border)',
-                          }}>
-                          <p className="text-[11px] font-semibold mb-0.5" style={{ color: sel ? '#c4b5fd' : 'var(--color-text)' }}>{img.label}</p>
-                          <div className="flex flex-wrap gap-1 mb-1">
-                            {img.sttModel && <span className="text-[8px] font-semibold px-1 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #38bdf8 12%, transparent)', color: '#38bdf8' }}>STT</span>}
-                            {img.llmModel && <span className="text-[8px] font-semibold px-1 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#a78bfa' }}>LLM</span>}
-                            {img.ttsModel && <span className="text-[8px] font-semibold px-1 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #fbbf24 12%, transparent)', color: '#fbbf24' }}>TTS</span>}
-                          </div>
-                          <p className="text-[9px] leading-snug" style={{ color: 'var(--color-text-muted)' }}>{img.description}</p>
-                        </button>
-                      );
-                    })}
-                  </div>
+                  <DropdownList
+                    options={DEFAULT_DOCKER_IMAGES.map(img => ({
+                      key: img.url,
+                      label: img.label,
+                      subtitle: img.description,
+                    }))}
+                    value={dockerImage}
+                    onChange={key => {
+                      const img = DEFAULT_DOCKER_IMAGES.find(i => i.url === key);
+                      setDockerImage(key);
+                      setInspectResult(null);
+                      setInspectError(null);
+                      if (img) {
+                        setSttModel(img.sttModel || '');
+                        setLlmModel(img.llmModel || '');
+                        setTtsModel(img.ttsModel || '');
+                        if (!name || DEFAULT_DOCKER_IMAGES.some(i => `Babelcast ${i.label}` === name)) {
+                          setName(`Babelcast ${img.label}`);
+                        }
+                      }
+                    }}
+                    accent="#a78bfa"
+                    size="sm"
+                    placeholder="Select Docker image..."
+                  />
                   <button
                     type="button"
                     onClick={() => { setUseCustom(true); setCustomDockerUrl(dockerImage); }}
-                    className="text-[10px] font-medium transition-colors cursor-pointer"
+                    className="text-[10px] font-medium transition-colors cursor-pointer mt-1.5"
                     style={{ color: 'var(--color-text-muted)' }}
                     title="Use a custom Docker image URL"
                   >
@@ -3042,7 +3015,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                       const sel = gpuCloudProvider === p.id;
                       return (
                         <button key={p.id} type="button"
-                          onClick={() => { setGpuCloudProvider(p.id); setGpuTypes([]); setGpuSearch(''); }}
+                          onClick={() => { setGpuCloudProvider(p.id); setGpuTypes([]); }}
                           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer"
                           style={{
                             background: sel ? `color-mix(in srgb, ${pColor} 12%, transparent)` : 'var(--color-surface-elevated)',
@@ -3057,7 +3030,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                   </div>
                 </div>
 
-                {/* GPU type search */}
+                {/* GPU type selection */}
                 <div>
                   <label className="block text-[10px] font-medium mb-1.5" style={{ color: 'var(--color-text-secondary)' }}>
                     GPU Types
@@ -3069,102 +3042,43 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                     )}
                   </label>
 
-                  {/* Selected chips — drag to reorder priority */}
+                  {/* Selected chips (priority order) */}
                   {gpuTypes.length > 0 && (
-                    <>
-                      <p className="text-[9px] mb-1" style={{ color: 'var(--color-text-muted)' }}>
-                        Drag to set priority order — #1 is tried first
-                      </p>
-                      <div ref={gpuChipsRef} className="flex flex-wrap gap-1 mb-2">
-                        {gpuTypes.map((id, idx) => {
-                          const info = liveGpus.find(g => g.name === id);
-                          const label = info?.shortName ?? id.replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, '');
-                          return (
-                            <span key={id} data-gpu-id={id}
-                              className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium select-none"
-                              style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd', border: '1px solid color-mix(in srgb, #a78bfa 30%, transparent)' }}>
-                              <GripVertical className="gpu-drag-handle w-3 h-3 cursor-grab opacity-50 hover:opacity-100 flex-shrink-0" />
-                              <span className="text-[9px] font-bold opacity-60">#{idx + 1}</span>
-                              {label}
-                              <button type="button" onClick={() => toggleGpu(id)} className="ml-0.5 hover:opacity-70 cursor-pointer">
-                                ×
-                              </button>
-                            </span>
-                          );
-                        })}
-                      </div>
-                    </>
-                  )}
-
-                  {/* Search input */}
-                  <div className="relative">
-                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none"
-                      style={{ color: 'var(--color-text-muted)' }} />
-                    {gpuLoading && (
-                      <Loader2 className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin pointer-events-none"
-                        style={{ color: 'var(--color-text-muted)' }} />
-                    )}
-                    <input
-                      ref={searchRef}
-                      type="text"
-                      value={gpuSearch}
-                      onChange={e => setGpuSearch(e.target.value)}
-                      onFocus={() => setGpuFocused(true)}
-                      onBlur={() => setTimeout(() => setGpuFocused(false), 150)}
-                      placeholder={gpuLoading ? 'Loading GPUs...' : `Search ${liveGpus.length} GPU types...`}
-                      className="w-full rounded-lg border pl-8 pr-8 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500"
-                      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }}
-                    />
-                  </div>
-
-                  {/* Results list */}
-                  {(gpuFocused || gpuSearch) && filteredGpus.length > 0 && (
-                    <div className="mt-1.5 rounded-lg border overflow-hidden max-h-48 overflow-y-auto"
-                      style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)' }}>
-                      {filteredGpus.map(g => {
-                        const sel = gpuTypes.includes(g.name);
-                        const vramGb = g.vramGb ?? (g.vram > 0 ? g.vram : null);
+                    <div className="flex flex-wrap gap-1 mb-2">
+                      {gpuTypes.map((id, idx) => {
+                        const info = liveGpus.find(g => g.name === id);
+                        const label = info?.shortName ?? id.replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, '');
                         return (
-                          <button key={g.name} type="button" onClick={() => toggleGpu(g.name)}
-                            className="w-full flex items-center gap-3 px-3 py-2 text-left transition-colors cursor-pointer border-b last:border-b-0"
-                            style={{
-                              borderColor: 'var(--color-border)',
-                              background: sel ? 'color-mix(in srgb, #a78bfa 6%, var(--color-bg))' : 'transparent',
-                            }}
-                            onMouseEnter={e => { if (!sel) (e.currentTarget as HTMLElement).style.background = 'var(--color-surface)'; }}
-                            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = sel ? 'color-mix(in srgb, #a78bfa 6%, var(--color-bg))' : 'transparent'; }}
-                          >
-                            <div className="w-4 h-4 flex-shrink-0 flex items-center justify-center">
-                              {sel
-                                ? <CircleCheck className="w-4 h-4" style={{ color: '#a78bfa' }} />
-                                : <Circle className="w-4 h-4" style={{ color: 'var(--color-border)' }} />
-                              }
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <span className="text-xs font-medium" style={{ color: sel ? '#c4b5fd' : 'var(--color-text)' }}>
-                                {g.shortName}
-                              </span>
-                              {vramGb && (
-                                <span className="ml-2 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
-                                  {vramGb}GB
-                                </span>
-                              )}
-                            </div>
-                            {g.minPricePerHr != null && (
-                              <span className="text-[10px] font-mono flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-                                from ${g.minPricePerHr.toFixed(2)}/hr
-                              </span>
-                            )}
-                          </button>
+                          <span key={id}
+                            className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium"
+                            style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd', border: '1px solid color-mix(in srgb, #a78bfa 30%, transparent)' }}>
+                            <span className="text-[9px] font-bold opacity-60">#{idx + 1}</span>
+                            {label}
+                            <button type="button" onClick={() => toggleGpu(id)} className="ml-0.5 hover:opacity-70 cursor-pointer">×</button>
+                          </span>
                         );
                       })}
                     </div>
                   )}
-                  {!gpuLoading && gpuSearch && filteredGpus.length === 0 && (
-                    <p className="text-[11px] mt-1.5 px-1" style={{ color: 'var(--color-text-muted)' }}>
-                      No GPU types match "{gpuSearch}"
-                    </p>
-                  )}
+
+                  {/* Add GPU via DropdownList */}
+                  <DropdownList
+                    options={liveGpus
+                      .filter(g => !gpuTypes.includes(g.name))
+                      .map(g => {
+                        const vramGb = g.vramGb ?? (g.vram > 0 ? g.vram : null);
+                        return {
+                          key: g.name,
+                          label: g.shortName,
+                          subtitle: [vramGb ? `${vramGb}GB` : null, g.minPricePerHr != null ? `$${g.minPricePerHr.toFixed(2)}/hr` : null].filter(Boolean).join(' · ') || undefined,
+                        };
+                      })}
+                    value=""
+                    onChange={key => toggleGpu(key)}
+                    accent="#a78bfa"
+                    size="sm"
+                    placeholder={gpuLoading ? 'Loading GPUs...' : gpuTypes.length > 0 ? 'Add another GPU type...' : 'Select GPU type...'}
+                  />
                 </div>
               </div>{/* end Infrastructure inner */}
             </div>{/* end Infrastructure card */}
@@ -3397,11 +3311,14 @@ export function ProfilesSection() {
   /** Migrate old gpuDeploy/gpuImage/gpuTypes top-level fields into ProfileService entries,
    *  and auto-derive cloud API service entries from chain providers. */
   const migrateServices = (p: ProviderProfile & Record<string, unknown>): ProfileService[] => {
-    const existing: ProfileService[] = (p.services && Array.isArray(p.services)) ? (p.services as ProfileService[]) : [];
+    const hasExplicitServices = Array.isArray(p.services);
+    const existing: ProfileService[] = hasExplicitServices ? (p.services as ProfileService[]) : [];
     const result: ProfileService[] = [...existing];
 
-    // Migrate GPU pods: create one service per DEFAULT_DOCKER_IMAGES entry (only if no gpu-pod services yet)
-    if (!result.some(s => s.kind === 'gpu-pod')) {
+    // Migrate GPU pods from legacy gpuDeploy field, OR auto-generate for profiles
+    // that have NO services array at all (old format). If the profile has an explicit
+    // services array (even empty), respect the user's choice — don't re-inject defaults.
+    if (!hasExplicitServices && !result.some(s => s.kind === 'gpu-pod')) {
       const gpuDeploy = p.gpuDeploy as { dockerImage?: string; gpuTypes?: string[] } | undefined;
       const gpuTypes: string[] = gpuDeploy?.gpuTypes ?? (p.gpuTypes as string[] | undefined) ?? [];
       const gpuCloudProvider: string = (p.gpuProvider as string | undefined) ?? 'vast';
@@ -3420,17 +3337,20 @@ export function ProfilesSection() {
       }
     }
 
-    // Auto-derive cloud API services from chain entries (add missing providers)
-    const allChains: PipelineChainEntry[] = [
-      ...((p.stt as PipelineChainEntry[] | undefined) ?? []),
-      ...((p.llm as PipelineChainEntry[] | undefined) ?? []),
-      ...((p.tts as PipelineChainEntry[] | undefined) ?? []),
-    ];
-    for (const entry of allChains) {
-      if (entry.provider === 'gpu') continue;
-      if (!result.some(s => s.kind === 'cloud' && s.cloudProvider === entry.provider)) {
-        const meta = pMeta(entry.provider);
-        result.push({ id: uid(), name: meta.label, kind: 'cloud', cloudProvider: entry.provider });
+    // Auto-derive cloud API services from chain entries (only for legacy profiles
+    // without an explicit services array — don't inject services the user removed)
+    if (!hasExplicitServices) {
+      const allChains: PipelineChainEntry[] = [
+        ...((p.stt as PipelineChainEntry[] | undefined) ?? []),
+        ...((p.llm as PipelineChainEntry[] | undefined) ?? []),
+        ...((p.tts as PipelineChainEntry[] | undefined) ?? []),
+      ];
+      for (const entry of allChains) {
+        if (entry.provider === 'gpu') continue;
+        if (!result.some(s => s.kind === 'cloud' && s.cloudProvider === entry.provider)) {
+          const meta = pMeta(entry.provider);
+          result.push({ id: uid(), name: meta.label, kind: 'cloud', cloudProvider: entry.provider });
+        }
       }
     }
 
@@ -3443,6 +3363,7 @@ export function ProfilesSection() {
 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<'pipeline' | 'services'>('pipeline');
 
   /** Load a profile into stages state */
@@ -3506,7 +3427,29 @@ export function ProfilesSection() {
   }, [latency, stages, services]);
 
   const handleSaveAndApply = async () => {
+    // Validate: profile name must not be empty
+    const currentName = editingProfileId
+      ? profiles.find(p => p.id === editingProfileId)?.name
+      : 'New Profile';
+    if (!currentName?.trim()) {
+      setSaveError('Profile name cannot be empty.');
+      return;
+    }
+    // Validate: LLM chain must have at least one entry
+    const llmStageForValidation = stages.find(s => s.key === 'llm' && s.enabled);
+    if (!llmStageForValidation?.chain.length) {
+      setSaveError('LLM stage must have at least one provider.');
+      return;
+    }
+
     setSaving(true);
+    setSaveError(null);
+
+    // Snapshot current state for rollback
+    const prevProfiles = profiles;
+    const prevActiveId = activeProfileId;
+    const prevEditingId = editingProfileId;
+
     try {
       let updatedProfiles: ProviderProfile[];
       let newActiveId: string;
@@ -3515,15 +3458,16 @@ export function ProfilesSection() {
         const fields = stagesToProfileFields(stages);
         updatedProfiles = profiles.map(p => {
           if (p.id !== editingProfileId) return p;
-          return { ...p, latency, ...fields, services };
+          return { ...p, name: p.name.trim(), latency, ...fields, services };
         });
         newActiveId = editingProfileId;
       } else {
-        const p = createCurrentProfile('New Profile');
+        const p = createCurrentProfile(currentName.trim());
         updatedProfiles = [...profiles, p];
         newActiveId = p.id;
       }
 
+      // Optimistic update
       setProfiles(updatedProfiles);
       setActiveProfileId(newActiveId);
       setEditingProfileId(newActiveId);
@@ -3546,7 +3490,13 @@ export function ProfilesSection() {
       await patchProviderConfig(patch as any);
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
-    } catch {} finally { setSaving(false); }
+    } catch (err) {
+      // Rollback optimistic state
+      setProfiles(prevProfiles);
+      setActiveProfileId(prevActiveId);
+      setEditingProfileId(prevEditingId);
+      setSaveError(err instanceof Error ? err.message : 'Failed to save profile. Check gateway connection.');
+    } finally { setSaving(false); }
   };
 
   const editingProfile = editingProfileId ? profiles.find(p => p.id === editingProfileId) : null;
@@ -3610,6 +3560,15 @@ export function ProfilesSection() {
           )}
         </div>
       </div>
+
+      {/* Save error banner */}
+      {saveError && (
+        <div className="px-6 py-2 border-b flex-shrink-0" style={{ borderColor: 'var(--color-border)' }}>
+          <AlertBanner variant="error">
+            {saveError}
+          </AlertBanner>
+        </div>
+      )}
 
       {/* Flow diagram (always visible) */}
       <div className="px-6 py-3 border-b flex-shrink-0" style={{ borderColor: 'var(--color-border)' }}>
@@ -3733,14 +3692,48 @@ export function ProfilesSection() {
                 onCancel={() => { setShowAddService(false); }}
               />
             ) : !showAddService && (
-              <button
-                type="button"
-                onClick={() => { setEditingService(null); setShowAddService(true); }}
-                className="flex items-center gap-1.5 w-full px-3 py-2.5 rounded-xl border border-dashed text-xs font-medium cursor-pointer transition-all hover:border-[var(--color-text-muted)]"
-                style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}
-              >
-                <Plus className="w-3.5 h-3.5" /> Add Service
-              </button>
+              <div className="space-y-2">
+                {/* Quick-add cloud API services */}
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Quick add cloud API</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(['groq', 'openai', 'deepgram', 'fireworks', 'modal'] as const).map(pid => {
+                      const provIcon = PROVIDER_ICON[pid];
+                      const PIcon = provIcon?.icon ?? Cloud;
+                      const pColor = provIcon?.color ?? '#7ba896';
+                      const alreadyAdded = services.some(s => s.kind === 'cloud' && s.cloudProvider === pid);
+                      return (
+                        <button key={pid} type="button"
+                          disabled={alreadyAdded}
+                          onClick={() => {
+                            const providerName = pid.charAt(0).toUpperCase() + pid.slice(1);
+                            setServices(prev => [...prev, { id: uid(), name: providerName, kind: 'cloud', cloudProvider: pid }]);
+                          }}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer capitalize disabled:cursor-default"
+                          style={{
+                            background: alreadyAdded ? `color-mix(in srgb, ${pColor} 8%, transparent)` : 'var(--color-surface-elevated)',
+                            borderColor: alreadyAdded ? pColor : 'var(--color-border)',
+                            color: alreadyAdded ? pColor : 'var(--color-text-muted)',
+                            opacity: alreadyAdded ? 0.7 : 1,
+                          }}>
+                          <PIcon className="w-3.5 h-3.5" />
+                          {pid}
+                          {alreadyAdded && <Check className="w-3 h-3 ml-0.5" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                {/* Add GPU pod */}
+                <button
+                  type="button"
+                  onClick={() => { setEditingService(null); setShowAddService(true); }}
+                  className="flex items-center justify-center gap-1.5 w-full px-3 py-2 rounded-xl border border-dashed text-xs font-medium cursor-pointer transition-all hover:border-[var(--color-text-muted)]"
+                  style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}
+                >
+                  <Cpu className="w-3.5 h-3.5" /> Add GPU Pod
+                </button>
+              </div>
             )}
           </>
         )}
