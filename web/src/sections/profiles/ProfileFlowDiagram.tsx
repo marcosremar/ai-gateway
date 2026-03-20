@@ -11,7 +11,7 @@ import {
 } from '@/components/ui';
 import {
   Mic, Check,
-  Package, Bot, Volume2, Clock, Gauge, Timer, Loader2,
+  Package, Bot, Volume2, Clock, Gauge, Timer, Loader2, Plus,
   Play, Square, Cpu, X as XIcon, BarChart3, Trophy, Activity,
   TrendingDown, ArrowRight, ChevronDown, Settings2, MoreVertical, Eye, EyeOff, Upload, Zap, Brain,
 } from 'lucide-react';
@@ -49,13 +49,14 @@ function BenchProgressionRow({ it, maxMs }: { it: PipelineIteration; maxMs: numb
 
 function ProfileFlowDiagram({
   sttChain, llmChain, ttsChain, sttEnabled, ttsEnabled, services, latency, name,
-  onToggleEntry, onToggleStage,
+  onToggleEntry, onToggleStage, onAddService,
 }: {
   sttChain: PipelineChainEntry[]; llmChain: PipelineChainEntry[]; ttsChain: PipelineChainEntry[];
   sttEnabled: boolean; ttsEnabled: boolean;
   services: ProfileService[]; latency: Latency; name?: string;
   onToggleEntry?: (stageKey: string, entryIdx: number) => void;
   onToggleStage?: (stageKey: string) => void;
+  onAddService?: () => void;
 }) {
   // ── Inline test panel state ──
   const [testOpen, setTestOpen] = useState(false);
@@ -130,7 +131,11 @@ function ProfileFlowDiagram({
   const hideTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scheduleHideTooltip = useCallback(() => {
     if (hideTooltipTimerRef.current) clearTimeout(hideTooltipTimerRef.current);
-    hideTooltipTimerRef.current = setTimeout(() => setHoveredChip(null), 400);
+    hideTooltipTimerRef.current = setTimeout(() => {
+      // Don't hide if context menu is open — keeps action overlay visible
+      if (menuChipRef.current) return;
+      setHoveredChip(null);
+    }, 400);
   }, []);
   const cancelHideTooltip = useCallback(() => {
     if (hideTooltipTimerRef.current) { clearTimeout(hideTooltipTimerRef.current); hideTooltipTimerRef.current = null; }
@@ -141,6 +146,8 @@ function ProfileFlowDiagram({
 
   // ── Service chip context menu ──
   const [menuChip, setMenuChip] = useState<{ stageKey: string; entryIdx: number } | null>(null);
+  const menuChipRef = useRef(menuChip);
+  useEffect(() => { menuChipRef.current = menuChip; }, [menuChip]);
   const [menuRect, setMenuRect] = useState<DOMRect | null>(null);
   useEffect(() => {
     if (!menuChip) return;
@@ -726,7 +733,8 @@ function ProfileFlowDiagram({
                   );
                   const iconColor = isUsedService ? '#10b981' : j === 0 ? (pi?.color ?? color) : 'var(--color-text-muted)';
                   const chipColor = isUsedService ? '#10b981' : j === 0 ? color : 'var(--color-text-muted)';
-                  const isChipHovered = hoveredChip?.stageKey === stage.key && hoveredChip?.entryIdx === j;
+                  const isChipHovered = (hoveredChip?.stageKey === stage.key && hoveredChip?.entryIdx === j)
+                    || (menuChip?.stageKey === stage.key && menuChip?.entryIdx === j);
                   return (
                     <div key={j} className="flex flex-col items-center w-full">
                       {j > 0 && (
@@ -844,6 +852,17 @@ function ProfileFlowDiagram({
                               style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)' }}>
                               <MoreVertical className="w-2.5 h-2.5" style={{ color: 'var(--color-text-muted)' }} />
                             </button>
+                            {/* Add service */}
+                            {onAddService && (
+                              <button
+                                type="button"
+                                onClick={e => { e.stopPropagation(); onAddService(); }}
+                                title="Add service"
+                                className="w-5 h-5 rounded-full flex items-center justify-center shadow-sm"
+                                style={{ background: 'color-mix(in srgb, #a78bfa 15%, var(--color-surface-elevated))', border: '1px solid rgba(167,139,250,0.4)' }}>
+                                <Plus className="w-2.5 h-2.5" style={{ color: '#a78bfa' }} />
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>

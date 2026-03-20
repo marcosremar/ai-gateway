@@ -400,6 +400,7 @@ export function ProfilesSection() {
           onToggleStage={(stageKey) => {
             setStages(prev => prev.map(s => s.key === stageKey ? { ...s, enabled: !s.enabled } : s));
           }}
+          onAddService={() => { setDetailTab('services'); setEditingService(null); setShowAddService(true); }}
         />
       </div>
 
@@ -439,6 +440,14 @@ export function ProfilesSection() {
                 </button>
               );
             })}
+            {/* Add Service button — always visible in tab bar */}
+            <button
+              onClick={() => { setDetailTab('services'); setEditingService(null); setShowAddService(true); }}
+              className="flex items-center gap-1.5 px-4 py-3 text-xs font-semibold transition-all cursor-pointer flex-shrink-0 hover:opacity-80"
+              style={{ color: '#a78bfa' }}
+            >
+              <Plus className="w-3.5 h-3.5" /> Add Service
+            </button>
           </div>
         );
       })()}
