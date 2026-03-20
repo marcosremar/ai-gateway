@@ -8,7 +8,7 @@ import {
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import {
   Card, CardHeader, CardBody, Button, FormSelect, FormInput, SectionHeader,
-  IconBox, StatusBadge, Toggle,
+  IconBox, StatusBadge, Toggle, DropdownList,
 } from '@/components/ui';
 import {
   ChevronLeft, Mic, Plus, Check, Trash2, Circle,
@@ -2484,16 +2484,19 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                 {/* Image */}
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] font-medium w-14 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Image</span>
-                  <select
-                    className="flex-1 text-[10px] rounded-md border px-2 py-1.5 outline-none cursor-pointer"
-                    style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
-                    value={overrideImage || service.dockerImage || ''}
-                    onChange={e => setOverrideImage(e.target.value === service.dockerImage ? null : e.target.value)}
-                  >
-                    {DEFAULT_DOCKER_IMAGES.map(img => (
-                      <option key={img.url} value={img.url}>{img.label}</option>
-                    ))}
-                  </select>
+                  <div className="flex-1">
+                    <DropdownList
+                      options={DEFAULT_DOCKER_IMAGES.map(img => ({
+                        key: img.url,
+                        label: img.label,
+                        subtitle: img.description,
+                      }))}
+                      value={overrideImage || service.dockerImage || ''}
+                      onChange={key => setOverrideImage(key === service.dockerImage ? null : key)}
+                      accent="#a78bfa"
+                      size="sm"
+                    />
+                  </div>
                 </div>
 
                 {/* Provider + Region on same row */}
