@@ -152,6 +152,8 @@ export interface DeployGpuOpts {
   interruptible?: boolean;
   raceCount?: number;
   region?: string;
+  minVramGb?: number;
+  diskGb?: number;
 }
 
 export async function deployGpu(opts: DeployGpuOpts): Promise<{ status: string; message: string }> {
