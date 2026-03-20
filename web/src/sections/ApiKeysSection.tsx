@@ -4,9 +4,9 @@ import { useState, useEffect, useCallback } from 'react';
 import { getApiKeys, setApiKeys, type ApiKeyEntry } from '@/lib/gateway';
 import {
   Card, CardHeader, CardBody, Button, StatusBadge, AlertBanner,
-  Spinner, SectionHeader, CardSectionHeader,
+  Spinner, SectionHeader, CardSectionHeader, IconBox,
 } from '@/components/ui';
-import { Cloud, ServerCog, Eye, EyeOff, Save, Check } from 'lucide-react';
+import { Cloud, ServerCog, Eye, EyeOff, Save, Check, KeyRound, AlertTriangle } from 'lucide-react';
 
 export function ApiKeysSection() {
   const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
@@ -73,6 +73,10 @@ export function ApiKeysSection() {
   const cloudKeys = keys.filter(k => k.category === 'cloud');
   const gpuKeys = keys.filter(k => k.category === 'gpu');
 
+  const totalKeys = keys.length;
+  const configuredKeys = keys.filter(k => k.configured).length;
+  const progressPct = totalKeys > 0 ? Math.round((configuredKeys / totalKeys) * 100) : 0;
+
   return (
     <div className="p-6 space-y-5">
       <SectionHeader
@@ -99,6 +103,47 @@ export function ApiKeysSection() {
       />
 
       {error && <AlertBanner variant="error">{error}</AlertBanner>}
+
+      {/* Inline progress summary */}
+      <div
+        className="flex items-center gap-4 px-4 py-3 rounded-xl"
+        style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)' }}
+      >
+        <IconBox icon={KeyRound} color="#10b981" size="sm" />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>
+              {configuredKeys} of {totalKeys} providers configured
+            </span>
+            <span
+              className="text-xs font-mono font-semibold"
+              style={{ color: configuredKeys === totalKeys ? '#34d399' : '#fbbf24' }}
+            >
+              {progressPct}%
+            </span>
+          </div>
+          <div
+            className="h-1.5 rounded-full overflow-hidden"
+            style={{ background: 'var(--color-border)' }}
+          >
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${progressPct}%`,
+                background: configuredKeys === totalKeys
+                  ? 'linear-gradient(90deg, #10b981, #34d399)'
+                  : 'linear-gradient(90deg, #f59e0b, #fbbf24)',
+              }}
+            />
+          </div>
+        </div>
+        {configuredKeys < totalKeys && (
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+            <span className="text-xs text-amber-400 font-medium">{totalKeys - configuredKeys} missing</span>
+          </div>
+        )}
+      </div>
 
       <AlertBanner variant="info">
         Changes take effect immediately for new requests. Some providers may require a gateway restart for full reconfiguration.
@@ -159,52 +204,85 @@ function KeyRow({
   onToggleVisibility: () => void;
 }) {
   const isEditing = editValue !== undefined;
+  const isConfigured = entry.configured;
+
+  // Status-based accent colors
+  const accentColor = isConfigured ? '#10b981' : '#ef4444';
+  const bgTint = isConfigured ? 'rgba(16, 185, 129, 0.04)' : 'rgba(239, 68, 68, 0.04)';
+  const borderColor = isEditing
+    ? 'color-mix(in srgb, #10b981 50%, var(--color-border))'
+    : isConfigured
+      ? 'color-mix(in srgb, #10b981 20%, var(--color-border))'
+      : 'color-mix(in srgb, #ef4444 20%, var(--color-border))';
 
   return (
     <div
-      className="flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all"
+      className="flex items-center gap-3 rounded-lg overflow-hidden transition-all"
       style={{
-        borderColor: isEditing
-          ? 'color-mix(in srgb, #10b981 40%, var(--color-border))'
-          : 'var(--color-border)',
-        background: 'var(--color-surface)',
+        background: bgTint,
+        border: `1px solid ${borderColor}`,
+        borderLeft: `2.5px solid ${accentColor}`,
       }}
     >
-      {/* Name + env var */}
-      <div className="flex-shrink-0 w-36">
-        <div className="text-sm font-medium">{entry.name}</div>
-        <div className="text-[10px] font-mono" style={{ color: 'var(--color-text-muted)' }}>{entry.envVar}</div>
+      {/* Icon */}
+      <div className="flex-shrink-0 pl-3">
+        <IconBox
+          icon={KeyRound}
+          color={accentColor}
+          size="sm"
+        />
       </div>
 
-      {/* Input */}
-      <div className="flex-1 min-w-0">
+      {/* Name + env var */}
+      <div className="flex-shrink-0 w-36 py-2.5">
+        <div className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>{entry.name}</div>
+        <div
+          className="text-[10px] font-mono mt-0.5"
+          style={{ color: 'var(--color-text-muted)' }}
+        >
+          {entry.envVar}
+        </div>
+      </div>
+
+      {/* Code-editor style input area */}
+      <div
+        className="flex-1 min-w-0 mx-1 my-1.5 rounded-md px-3 py-1.5 flex items-center gap-2"
+        style={{
+          background: 'color-mix(in srgb, var(--color-surface) 60%, transparent)',
+          border: '1px solid var(--color-border)',
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+        }}
+      >
         <input
           type={isVisible ? 'text' : 'password'}
           value={isEditing ? editValue : ''}
           onChange={(e) => onEdit(e.target.value)}
           placeholder={entry.configured ? entry.masked : 'Not configured — paste key here'}
-          className="w-full bg-transparent border-0 text-sm font-mono py-1 px-0 focus:outline-none placeholder:text-[var(--color-text-muted)]"
-          style={{ color: 'var(--color-text)' }}
+          className="w-full bg-transparent border-0 text-xs py-0.5 px-0 focus:outline-none placeholder:opacity-50"
+          style={{
+            color: isEditing ? '#34d399' : 'var(--color-text-muted)',
+            fontFamily: 'inherit',
+          }}
         />
+        <button
+          type="button"
+          onClick={onToggleVisibility}
+          className="flex-shrink-0 p-1 rounded hover:bg-white/5 cursor-pointer transition-colors"
+          title={isVisible ? 'Hide' : 'Show'}
+        >
+          {isVisible
+            ? <EyeOff className="w-3.5 h-3.5" style={{ color: 'var(--color-text-muted)' }} />
+            : <Eye className="w-3.5 h-3.5" style={{ color: 'var(--color-text-muted)' }} />
+          }
+        </button>
       </div>
 
-      {/* Toggle visibility */}
-      <button
-        type="button"
-        onClick={onToggleVisibility}
-        className="flex-shrink-0 p-1.5 rounded-md hover:bg-white/5 cursor-pointer transition-colors"
-        title={isVisible ? 'Hide' : 'Show'}
-      >
-        {isVisible
-          ? <EyeOff className="w-4 h-4" style={{ color: 'var(--color-text-muted)' }} />
-          : <Eye className="w-4 h-4" style={{ color: 'var(--color-text-muted)' }} />
-        }
-      </button>
-
-      {/* Status badge */}
-      <StatusBadge variant={entry.configured ? 'emerald' : 'gray'} dot>
-        {entry.configured ? 'Active' : 'Missing'}
-      </StatusBadge>
+      {/* Status badge — more prominent */}
+      <div className="flex-shrink-0 pr-3">
+        <StatusBadge variant={isConfigured ? 'emerald' : 'red'} dot>
+          {isConfigured ? 'Active' : 'Missing'}
+        </StatusBadge>
+      </div>
     </div>
   );
 }
