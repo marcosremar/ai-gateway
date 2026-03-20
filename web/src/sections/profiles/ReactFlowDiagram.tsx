@@ -29,47 +29,74 @@ const IONode = memo(({ data }: NodeProps) => {
   const onSelectInput = data.onSelectInput as ((type: string) => void) | undefined;
 
   if (!isInput) {
+    // Output node — simple box
     return (
-      <div className="flex flex-col items-center gap-1">
-        <div className="w-10 h-10 rounded-full flex items-center justify-center shadow-md cursor-grab active:cursor-grabbing"
-          style={{ background: `color-mix(in srgb, ${color} 15%, var(--color-surface-elevated))`, border: `2px solid ${color}` }}>
-          <Headphones className="w-5 h-5" style={{ color }} />
-        </div>
-        <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color }}>{data.label as string}</span>
+      <div className="rounded-xl border px-4 py-3 text-center"
+        style={{
+          background: `color-mix(in srgb, ${color} 3%, var(--color-bg))`,
+          borderColor: `color-mix(in srgb, ${color} 25%, var(--color-border))`,
+          borderTop: `3px solid ${color}`,
+          minWidth: 120,
+        }}>
         <Handle type="target" position={Position.Left} style={{ background: color, width: 6, height: 6 }} />
+        <div className="flex items-center justify-center gap-1.5 mb-0.5">
+          <div className="w-5 h-5 rounded-md flex items-center justify-center"
+            style={{ background: `color-mix(in srgb, ${color} 15%, transparent)` }}>
+            <Headphones className="w-3 h-3" style={{ color }} />
+          </div>
+          <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color }}>Output</span>
+        </div>
+        <span className="text-[8px] font-medium" style={{ color: 'var(--color-text-muted)' }}>{data.label as string}</span>
       </div>
     );
   }
 
+  // Input node — box with selectable input types
   const sel = INPUT_TYPES.find(t => t.id === selected) ?? INPUT_TYPES[0];
 
   return (
-    <div className="flex flex-col items-center gap-1.5">
-      {/* Selected input circle — draggable area */}
-      <div className="w-12 h-12 rounded-full flex items-center justify-center shadow-md cursor-grab active:cursor-grabbing"
-        style={{ background: `color-mix(in srgb, ${sel.color} 15%, var(--color-surface-elevated))`, border: `2px solid ${sel.color}` }}>
-        <sel.Icon className="w-5 h-5" style={{ color: sel.color }} />
+    <div className="rounded-xl border"
+      style={{
+        background: `color-mix(in srgb, ${sel.color} 3%, var(--color-bg))`,
+        borderColor: `color-mix(in srgb, ${sel.color} 25%, var(--color-border))`,
+        borderTop: `3px solid ${sel.color}`,
+        minWidth: 140,
+        overflow: 'visible',
+      }}>
+      <Handle type="source" position={Position.Right} style={{ background: sel.color, width: 6, height: 6 }} />
+      {/* Header */}
+      <div className="flex items-center justify-center gap-1.5 px-3 py-2 border-b"
+        style={{ borderColor: `color-mix(in srgb, ${sel.color} 15%, var(--color-border))` }}>
+        <div className="w-5 h-5 rounded-md flex items-center justify-center"
+          style={{ background: `color-mix(in srgb, ${sel.color} 15%, transparent)` }}>
+          <sel.Icon className="w-3 h-3" style={{ color: sel.color }} />
+        </div>
+        <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: sel.color }}>Input</span>
+        <span className="text-[8px] font-medium" style={{ color: 'var(--color-text-muted)' }}>{sel.label}</span>
       </div>
-      {/* Input type selector buttons */}
-      <div className="flex items-center gap-1">
+      {/* Input type options */}
+      <div className="px-2 py-2 flex flex-col gap-1">
         {INPUT_TYPES.map(t => {
           const active = selected === t.id;
           return (
             <button key={t.id}
               onClick={() => { setSelected(t.id); onSelectInput?.(t.id); }}
-              title={t.label}
-              className="nodrag nopan w-6 h-6 rounded-md flex items-center justify-center cursor-pointer transition-all"
+              className="nodrag nopan flex items-center gap-2 px-2 py-1.5 rounded-lg transition-all cursor-pointer text-left"
               style={{
-                background: active ? `color-mix(in srgb, ${t.color} 15%, transparent)` : 'transparent',
-                border: active ? `1.5px solid ${t.color}` : '1.5px solid var(--color-border)',
+                background: active ? `color-mix(in srgb, ${t.color} 10%, transparent)` : 'transparent',
+                border: active ? `1px solid ${t.color}` : '1px solid transparent',
               }}>
-              <t.Icon className="w-3 h-3" style={{ color: active ? t.color : 'var(--color-text-muted)' }} />
+              <div className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0"
+                style={{ background: `color-mix(in srgb, ${t.color} 15%, transparent)` }}>
+                <t.Icon className="w-2.5 h-2.5" style={{ color: active ? t.color : 'var(--color-text-muted)' }} />
+              </div>
+              <span className="text-[9px] font-semibold" style={{ color: active ? t.color : 'var(--color-text-muted)' }}>
+                {t.label}
+              </span>
             </button>
           );
         })}
       </div>
-      <span className="text-[8px] font-bold uppercase tracking-widest" style={{ color: sel.color }}>{sel.label}</span>
-      <Handle type="source" position={Position.Right} style={{ background: sel.color, width: 6, height: 6 }} />
     </div>
   );
 });
@@ -433,15 +460,15 @@ export function ReactFlowPipelineDiagram({
   }, [sttChain, llmChain, ttsChain, sttEnabled, ttsEnabled, getEntryLabel, getModelLabel, services, onAddService, onReorderChain]);
 
   const maxChainLen = Math.max(sttChain.length, llmChain.length, ttsChain.length, 1);
-  const diagramHeight = Math.max(300, 46 + 14 + maxChainLen * 62 + 60 + 14 + 80);
+  const diagramHeight = Math.max(500, 46 + 14 + maxChainLen * 62 + 60 + 14 + 200);
 
   // Uncontrolled mode: React Flow manages drag state internally.
   // key={dataKey} forces re-mount only when chain data changes.
   const dataKey = `${sttChain.map(c=>c.provider+c.model+(c.enabled===false?'off':'')).join(',')}-${llmChain.map(c=>c.provider+c.model+(c.enabled===false?'off':'')).join(',')}-${ttsChain.map(c=>c.provider+c.model+(c.enabled===false?'off':'')).join(',')}`;
 
   return (
-    <div className="rounded-xl border"
-      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', width: '100%', height: `${diagramHeight}px`, overflow: 'hidden' }}>
+    <div className=""
+      style={{ background: 'var(--color-surface)', width: '100%', height: 'calc(100vh - 105px)', overflow: 'hidden' }}>
       <ReactFlow
         key={dataKey}
         defaultNodes={nodes}
@@ -455,10 +482,10 @@ export function ReactFlowPipelineDiagram({
         nodesConnectable={false}
         elementsSelectable={false}
         nodesFocusable={false}
-        panOnDrag={false}
-        panOnScroll={false}
-        zoomOnScroll={false}
-        zoomOnPinch={false}
+        panOnDrag
+        panOnScroll
+        zoomOnScroll
+        zoomOnPinch
         zoomOnDoubleClick={false}
         preventScrolling
       >

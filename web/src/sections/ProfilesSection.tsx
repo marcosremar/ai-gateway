@@ -382,8 +382,8 @@ export function ProfilesSection() {
         </div>
       )}
 
-      {/* React Flow pipeline diagram — fills available space */}
-      <div className="px-6 py-3 flex-1 min-h-0" style={{ borderColor: 'var(--color-border)' }}>
+      {/* React Flow pipeline diagram — fills all available space */}
+      <div className="flex-1 min-h-0" style={{ display: 'flex', flexDirection: 'column' }}>
         <ReactFlowPipelineDiagram
           sttChain={sttChain} llmChain={llmChain} ttsChain={ttsChain}
           sttEnabled={sttEnabled} ttsEnabled={ttsEnabled}
