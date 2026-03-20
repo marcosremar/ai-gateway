@@ -231,6 +231,8 @@ function startBackgroundWarmthMonitor(endpoint: string) {
   }
   console.log('[gpu] Staged boot: TTS warm — polling until STT + LLM ready before activating full pipeline');
 
+  let warmthPollCount = 0;
+
   const poll = async () => {
     if (deployState.status !== 'ready' || deployState.endpoint !== endpoint) {
       console.log('[gpu] Warmth monitor: pod changed or offline — stopping');
@@ -259,10 +261,13 @@ function startBackgroundWarmthMonitor(endpoint: string) {
     } catch (err) {
       console.debug(`[gpu] Warmth poll failed: ${err instanceof Error ? err.message : err}`);
     }
-    warmthMonitorTimer = setTimeout(poll, 20_000);
+    warmthPollCount++;
+    // Adaptive warmth polling: 10s for first 5 checks, then 20s
+    const nextDelayMs = warmthPollCount <= 5 ? 10_000 : 20_000;
+    warmthMonitorTimer = setTimeout(poll, nextDelayMs);
   };
 
-  warmthMonitorTimer = setTimeout(poll, 20_000); // first check after 20s
+  warmthMonitorTimer = setTimeout(poll, 5_000); // first check after 5s (not 20s)
 }
 
 export function startGpuMonitoring() {
@@ -1757,7 +1762,11 @@ export async function pollHealthUntilReady(
       }
     }
 
-    await new Promise(r => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
+    // Adaptive polling: fast (3s) during first 60s after container up, then slower (8s)
+    const pollMs = containerStartedAt && (Date.now() - containerStartedAt) < 60_000
+      ? 3_000   // container just booted — poll aggressively to catch readiness ASAP
+      : 8_000;  // still pulling image or slow boot — ease off
+    await new Promise(r => setTimeout(r, pollMs));
   }
 }
 

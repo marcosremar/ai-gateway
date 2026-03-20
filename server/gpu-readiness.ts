@@ -202,11 +202,21 @@ export async function runGpuReadinessCheck(
   }
 
   try {
-    // Benchmark STT
-    const sttResult = await benchmarkService('stt', endpoint, targets.stt, maxRuns);
+    // Benchmark STT and LLM in parallel (they hit independent endpoints on the GPU)
+    const [sttResult, llmResult] = await Promise.all([
+      benchmarkService('stt', endpoint, targets.stt, maxRuns),
+      benchmarkService('llm', endpoint, targets.llm, maxRuns),
+    ]);
+
+    // Process STT result
     setServiceReadiness('stt', { phase: sttResult.passed ? 'ready' : 'failed', bestLatencyMs: sttResult.bestMs });
     saveRun('stt', sttResult.samples, sttResult.bestMs, targets.stt, sttResult.passed);
     broadcastWs({ type: 'gpu:readiness', stage: 'stt', phase: sttResult.passed ? 'ready' : 'failed', bestLatencyMs: sttResult.bestMs, targetMs: targets.stt, passed: sttResult.passed, runsUsed: sttResult.samples.length });
+
+    // Process LLM result
+    setServiceReadiness('llm', { phase: llmResult.passed ? 'ready' : 'failed', bestLatencyMs: llmResult.bestMs });
+    saveRun('llm', llmResult.samples, llmResult.bestMs, targets.llm, llmResult.passed);
+    broadcastWs({ type: 'gpu:readiness', stage: 'llm', phase: llmResult.passed ? 'ready' : 'failed', bestLatencyMs: llmResult.bestMs, targetMs: targets.llm, passed: llmResult.passed, runsUsed: llmResult.samples.length });
 
     if (!sttResult.passed) {
       console.warn(`[readiness:stt] FAIL — best=${sttResult.bestMs}ms target=${targets.stt}ms`);
@@ -215,14 +225,8 @@ export async function runGpuReadinessCheck(
         onFail('stt', sttResult.bestMs, targets.stt);
       }
       checkInProgress = false;
-      return; // always abort — don't call onPass even if endpoint changed
+      return;
     }
-
-    // Benchmark LLM
-    const llmResult = await benchmarkService('llm', endpoint, targets.llm, maxRuns);
-    setServiceReadiness('llm', { phase: llmResult.passed ? 'ready' : 'failed', bestLatencyMs: llmResult.bestMs });
-    saveRun('llm', llmResult.samples, llmResult.bestMs, targets.llm, llmResult.passed);
-    broadcastWs({ type: 'gpu:readiness', stage: 'llm', phase: llmResult.passed ? 'ready' : 'failed', bestLatencyMs: llmResult.bestMs, targetMs: targets.llm, passed: llmResult.passed, runsUsed: llmResult.samples.length });
 
     if (!llmResult.passed) {
       console.warn(`[readiness:llm] FAIL — best=${llmResult.bestMs}ms target=${targets.llm}ms`);
@@ -231,10 +235,10 @@ export async function runGpuReadinessCheck(
         onFail('llm', llmResult.bestMs, targets.llm);
       }
       checkInProgress = false;
-      return; // always abort — don't call onPass even if endpoint changed
+      return;
     }
 
-    // Benchmark TTS (non-blocking for production activation — TTS can warm separately)
+    // Benchmark TTS after STT+LLM pass (non-blocking for production activation — TTS can warm separately)
     const ttsResult = await benchmarkService('tts', endpoint, targets.tts, maxRuns);
     setServiceReadiness('tts', { phase: ttsResult.passed ? 'ready' : 'failed', bestLatencyMs: ttsResult.bestMs });
     saveRun('tts', ttsResult.samples, ttsResult.bestMs, targets.tts, ttsResult.passed);
@@ -335,15 +339,17 @@ export async function runStandbyReadinessCheck(
   broadcastWs({ type: 'gpu:standby', status: 'benchmarking', llmTarget, sttTarget });
 
   try {
-    // Benchmark STT
-    const sttPassed = await benchmarkStandbyService('stt', endpoint, sttTarget, maxRuns);
+    // Benchmark STT and LLM in parallel (independent endpoints)
+    const [sttPassed, llmPassed] = await Promise.all([
+      benchmarkStandbyService('stt', endpoint, sttTarget, maxRuns),
+      benchmarkStandbyService('llm', endpoint, llmTarget, maxRuns),
+    ]);
+
     if (!sttPassed) {
       onFail('stt', sttTarget + 1, sttTarget);
       return;
     }
 
-    // Benchmark LLM (critical)
-    const llmPassed = await benchmarkStandbyService('llm', endpoint, llmTarget, maxRuns);
     if (!llmPassed) {
       onFail('llm', llmTarget + 1, llmTarget);
       return;
