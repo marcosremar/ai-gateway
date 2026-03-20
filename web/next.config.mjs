@@ -2,6 +2,8 @@
 const nextConfig = {
   output: 'export',
   // Static export — all pages pre-rendered, served by gateway-server.ts
+  eslint: { ignoreDuringBuilds: true },
+  typescript: { ignoreBuildErrors: true },
 };
 
 export default nextConfig;

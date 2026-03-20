@@ -102,7 +102,7 @@ export function ProfilesSection() {
   /** Migrate old gpuDeploy/gpuImage/gpuTypes top-level fields into ProfileService entries,
    *  and auto-derive cloud API service entries from chain providers. */
   const migrateServices = (p: ProviderProfile & Record<string, unknown>): ProfileService[] => {
-    const hasExplicitServices = Array.isArray(p.services) && (p.services as ProfileService[]).length > 0;
+    const hasExplicitServices = Array.isArray(p.services);
     const existing: ProfileService[] = hasExplicitServices ? (p.services as ProfileService[]) : [];
     const result: ProfileService[] = [...existing];
 
@@ -540,7 +540,7 @@ export function ProfilesSection() {
                   className="flex items-center justify-center gap-1.5 w-full px-3 py-2 rounded-xl border border-dashed text-xs font-medium cursor-pointer transition-all hover:border-[var(--color-text-muted)]"
                   style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}
                 >
-                  <Cpu className="w-3.5 h-3.5" /> Add GPU Pod
+                  <Cpu className="w-3.5 h-3.5" /> Add Service
                 </button>
               </div>
             )}
