@@ -10,6 +10,7 @@ const PORT = 4099;
 // ── Mutable state (tests can change via POST /mock/state) ──
 
 let gpuStatus = 'idle';
+let gpuDockerImage = 'marcosremar/babelcast-mistral:latest';
 let botStatus = 'idle';
 let deployCount = 0;
 let pendingTimers: ReturnType<typeof setTimeout>[] = [];
@@ -26,7 +27,7 @@ function json(res: ServerResponse, data: unknown, status = 200) {
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   });
   res.end(JSON.stringify(data));
@@ -48,7 +49,7 @@ const server = createServer(async (req, res) => {
   if (method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     });
     res.end();
@@ -125,7 +126,7 @@ const server = createServer(async (req, res) => {
       endpoint: gpuStatus === 'ready' ? 'https://pod-abc123-8000.proxy.runpod.net' : null,
       provider: gpuStatus === 'idle' ? null : 'vast',
       gpuType: gpuStatus === 'idle' ? null : 'NVIDIA RTX A6000',
-      dockerImage: gpuStatus === 'idle' ? null : 'marcosremar/babelcast-mistral:latest',
+      dockerImage: gpuStatus === 'idle' ? null : gpuDockerImage,
       costPerHr: gpuStatus === 'idle' ? null : 0.42,
       elapsedSec: gpuStatus === 'idle' ? 0 : 185,
       gpuHealthy: gpuStatus === 'ready',
@@ -167,6 +168,7 @@ const server = createServer(async (req, res) => {
     if (!parsed.dockerImage) {
       return json(res, { error: 'Missing dockerImage' }, 400);
     }
+    gpuDockerImage = parsed.dockerImage;
     gpuStatus = 'creating';
     deployCount++;
     // Simulate async boot
@@ -189,6 +191,103 @@ const server = createServer(async (req, res) => {
       podId: gpuStatus !== 'idle' ? 'pod-abc123' : null,
       provider: gpuStatus !== 'idle' ? 'vast' : null,
       status: gpuStatus,
+    });
+  }
+
+  // ── GPU Types ──
+  if (method === 'GET' && url === '/v1/gpu/types') {
+    return json(res, {
+      gpuTypes: [
+        { name: 'NVIDIA GeForce RTX 4090', shortName: 'RTX 4090', vram: 24 },
+        { name: 'NVIDIA RTX A6000', shortName: 'A6000', vram: 48 },
+        { name: 'NVIDIA GeForce RTX 5090', shortName: 'RTX 5090', vram: 32 },
+        { name: 'NVIDIA L40S', shortName: 'L40S', vram: 48 },
+        { name: 'NVIDIA A100-SXM4-80GB', shortName: 'A100 80GB', vram: 80 },
+      ],
+    });
+  }
+
+  // ── Docker Inspect ──
+  if (method === 'GET' && url === '/v1/docker/inspect') {
+    const qs = (req.url || '').split('?')[1] || '';
+    const imageParam = new URLSearchParams(qs).get('image') || '';
+    return json(res, {
+      image: imageParam,
+      sttModel: 'faster-whisper-large-v3',
+      llmModel: 'mistral-7b',
+      ttsModel: 'qwen3-tts',
+      size: '8.2 GB',
+      created: '2026-03-15T10:00:00Z',
+    });
+  }
+
+  // ── Readiness Status ──
+  if (method === 'GET' && url === '/v1/gpu/readiness') {
+    return json(res, {
+      status: gpuStatus === 'ready' ? 'ready' : 'pending',
+      stt: { status: gpuStatus === 'ready' ? 'loaded' : 'pending' },
+      llm: { status: gpuStatus === 'ready' ? 'loaded' : 'pending' },
+      tts: { status: gpuStatus === 'ready' ? 'loaded' : 'pending' },
+    });
+  }
+  if (method === 'POST' && url === '/v1/gpu/readiness/reset') {
+    return json(res, { ok: true });
+  }
+
+  // ── Profile-specific endpoints ──
+  if (method === 'POST' && url === '/v1/config/profiles') {
+    const body = JSON.parse(await readBody(req));
+    const profiles = (providerConfig.profiles as any[]) || [];
+    const existing = profiles.findIndex((p: any) => p.id === body.id);
+    if (existing >= 0) {
+      profiles[existing] = { ...profiles[existing], ...body };
+    } else {
+      profiles.push(body);
+    }
+    providerConfig.profiles = profiles;
+    providerConfig.updatedAt = Date.now();
+    return json(res, providerConfig, existing >= 0 ? 200 : 201);
+  }
+  if (method === 'DELETE' && url === '/v1/config/profiles') {
+    const body = JSON.parse(await readBody(req));
+    const profiles = (providerConfig.profiles as any[]) || [];
+    providerConfig.profiles = profiles.filter((p: any) => p.id !== body.id);
+    if (providerConfig.activeProfileId === body.id) providerConfig.activeProfileId = null;
+    providerConfig.updatedAt = Date.now();
+    return json(res, providerConfig);
+  }
+  if (method === 'POST' && url === '/v1/config/profiles/activate') {
+    const body = JSON.parse(await readBody(req));
+    const profiles = (providerConfig.profiles as any[]) || [];
+    const profile = profiles.find((p: any) => p.id === body.id);
+    if (!profile) return json(res, { error: 'Profile not found' }, 404);
+    providerConfig.activeProfileId = body.id;
+    if (profile.stt) providerConfig.pipelineStt = profile.stt;
+    if (profile.llm) providerConfig.pipelineLlm = profile.llm;
+    if (profile.tts) providerConfig.pipelineTts = profile.tts;
+    providerConfig.updatedAt = Date.now();
+    return json(res, providerConfig);
+  }
+
+  // ── Benchmark Paths ──
+  if (method === 'POST' && url === '/v1/benchmark/paths') {
+    return json(res, {
+      paths: [
+        { name: 'Cloud-only', stages: [{ key: 'stt', provider: 'groq', latencyMs: 120 }, { key: 'llm', provider: 'groq', latencyMs: 95 }, { key: 'tts', provider: 'groq', latencyMs: 180 }], totalMs: 395 },
+        { name: 'GPU', stages: [{ key: 'stt', provider: 'gpu', latencyMs: 85 }, { key: 'llm', provider: 'gpu', latencyMs: 110 }, { key: 'tts', provider: 'gpu', latencyMs: 210 }], totalMs: 405 },
+      ],
+      iterations: [],
+    });
+  }
+
+  // ── Speech Pipeline ──
+  if (method === 'POST' && url === '/v1/speech') {
+    return json(res, {
+      transcription: 'Bonjour le monde',
+      response: 'Hello world',
+      audio_base64: '',
+      content_type: 'audio/wav',
+      timing: { total_ms: 420, used_gpu: false },
     });
   }
 
@@ -301,6 +400,7 @@ const server = createServer(async (req, res) => {
     pendingTimers.forEach(t => clearTimeout(t));
     pendingTimers = [];
     gpuStatus = 'idle';
+    gpuDockerImage = 'marcosremar/babelcast-mistral:latest';
     botStatus = 'idle';
     deployCount = 0;
     providerConfig = {
@@ -318,6 +418,7 @@ const server = createServer(async (req, res) => {
     const body = JSON.parse(await readBody(req));
     if (body.gpuStatus) gpuStatus = body.gpuStatus;
     if (body.botStatus) botStatus = body.botStatus;
+    if (body.gpuDockerImage) gpuDockerImage = body.gpuDockerImage;
     return json(res, { ok: true, gpuStatus, botStatus });
   }
 

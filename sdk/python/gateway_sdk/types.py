@@ -167,6 +167,8 @@ class PipelineOptions:
     reference_audio: str = ""  # base64 WAV for voice cloning
     ref_text: str = ""         # transcription of reference audio
     ref_id: str = ""           # cached voice reference ID (from /v1/voice-reference)
+    stt_prompt: str = ""       # Whisper initial_prompt (recent transcript context)
+    style: str = "default"     # translation style hint
 
 
 # ── GPU management responses ────────────────────────────────────────────────

@@ -338,7 +338,7 @@ export function createProxyServer(config: ProxyConfig): Server {
 
     // Block direct streaming transport routes — clients must use POST /v1/speech
     const path = url.split('?')[0];
-    if (path === '/api/stream-audio' || path === '/ws/stream' || path === '/api/offer') {
+    if (path === '/api/stream-audio' || path === '/ws/stream') {
       sendError(res, 410, `Streaming transport ${path} is removed. Use POST /v1/speech instead.`, requestId);
       return;
     }
