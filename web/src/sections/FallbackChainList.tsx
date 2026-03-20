@@ -45,13 +45,29 @@ interface FallbackChainListProps {
   services?: ProfileService[];
 }
 
+// Latency stats per stage::provider from /v1/metrics/service-stats
+interface ServiceStats {
+  stats: Record<string, { avgMs: number; samples: number }>;
+  coldStart: { provider: string; coldTtfbMs: number; warmTtfbAvgMs: number } | null;
+  warmth: { stt: { warm: boolean; avgLatencyMs: number | null; requests: number }; llm: { warm: boolean; avgLatencyMs: number | null; requests: number }; tts: { warm: boolean; avgLatencyMs: number | null; requests: number } } | null;
+}
+
 export default function FallbackChainList({ stage, chain, setChain, accent, services }: FallbackChainListProps) {
   const [addingFallback, setAddingFallback] = useState(false);
   const [selectedKey, setSelectedKey] = useState('');
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [serviceStats, setServiceStats] = useState<ServiceStats | null>(null);
 
   const catalog = PIPELINE_CATALOG[stage];
   const providers = catalog.providers;
+
+  // Fetch service latency stats
+  useEffect(() => {
+    fetch('/v1/metrics/service-stats')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setServiceStats(d); })
+      .catch(() => {});
+  }, []);
 
   const sortableContainerRef = useRef<HTMLDivElement>(null);
   const sortableInstanceRef = useRef<Sortable | null>(null);
@@ -79,6 +95,25 @@ export default function FallbackChainList({ stage, chain, setChain, accent, serv
   }, [setChain]);
 
   const getIcon = (providerId: string) => PROVIDER_ICON[providerId] || DEFAULT_ICON;
+
+  /** Get latency suffix for a provider in the current stage. */
+  const getLatencySuffix = (provider: string): string => {
+    if (!serviceStats) return '';
+    const key = `${stage}::${provider}`;
+    const stat = serviceStats.stats[key];
+    const parts: string[] = [];
+    if (stat) parts.push(`~${stat.avgMs}ms`);
+    // Cold start for GPU (self-hosted) and serverless
+    if (provider === 'gpu' && serviceStats.coldStart) {
+      parts.push(`cold: ${Math.round(serviceStats.coldStart.coldTtfbMs / 1000)}s`);
+    }
+    const SERVERLESS_IDS = new Set(['modal', 'modal-moss']);
+    if (SERVERLESS_IDS.has(provider) && serviceStats.coldStart) {
+      // Modal cold start is different — typically 5-15s
+      parts.push('cold: ~10s');
+    }
+    return parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
+  };
 
   // Build flat list of all available service options
   // Order: Serverless (fast, few items) → Self-hosted → Cloud
@@ -177,8 +212,12 @@ export default function FallbackChainList({ stage, chain, setChain, accent, serv
       }
     }
 
-    return opts;
-  }, [services, providers, catalog.models]);
+    // Enrich subtitles with latency data
+    return opts.map(o => {
+      const suffix = getLatencySuffix(o.provider);
+      return suffix ? { ...o, subtitle: o.subtitle + suffix } : o;
+    });
+  }, [services, providers, catalog.models, serviceStats]);
 
   /** Find the ServiceOption matching a chain entry */
   const findOption = (entry: PipelineChainEntry): ServiceOption | undefined =>

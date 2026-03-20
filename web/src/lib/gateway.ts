@@ -1061,3 +1061,23 @@ export async function uploadVoiceReference(file: File): Promise<{ ok: boolean; m
 export async function resetVoiceProfile(): Promise<{ ok: boolean }> {
   return gwPost('/v1/voice/profile/reset');
 }
+
+// ── Labs Feature Flags ──
+
+export interface LabsFlags {
+  peakEwma: boolean;
+  speculativeTranslation: boolean;
+  streamingOverlap: boolean;
+  ewmaDecayFactor: number;
+  speculationMinConfidence: number;
+  overlapMinTokens: number;
+  updatedAt: number;
+}
+
+export async function getLabsFlags(): Promise<LabsFlags> {
+  return gwJson('/v1/config/labs');
+}
+
+export async function updateLabsFlags(updates: Partial<LabsFlags>): Promise<LabsFlags> {
+  return gwPost('/v1/config/labs', updates);
+}

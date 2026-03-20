@@ -8,7 +8,7 @@ import {
   Button, SectionHeader, AlertBanner,
 } from '@/components/ui';
 import {
-  ChevronLeft, Mic, Check, Server, Cloud, Cpu,
+  ChevronLeft, Mic, Check, Plus, Server, Cloud, Cpu,
 } from 'lucide-react';
 import {
   DEFAULT_DOCKER_IMAGES,
@@ -453,11 +453,15 @@ export function ProfilesSection() {
         {/* Services tab */}
         {detailTab === 'services' && (
           <>
-            {/* Latency target */}
+            {/* Latency + Add Service top bar */}
             <div className="flex items-center gap-3 px-4 py-3 rounded-xl border"
               style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
               <span className="text-xs font-semibold flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Latency</span>
               <LatencySelector value={latency} onChange={setLatency} />
+              <div className="flex-1" />
+              <Button variant="outline" size="sm" onClick={() => { setEditingService(null); setShowAddService(true); }}>
+                <Plus className="w-3.5 h-3.5" /> Add Service
+              </Button>
             </div>
 
             {services.map(svc => (

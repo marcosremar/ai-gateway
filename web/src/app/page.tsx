@@ -5,7 +5,7 @@ import dynamic from 'next/dynamic';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
 import { Sidebar, type SidebarItem } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
-import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon, Gauge, RefreshCw } from 'lucide-react';
+import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon, Gauge, RefreshCw, Activity, FlaskConical } from 'lucide-react';
 
 // Critical above-the-fold section — loaded eagerly
 import { OverviewSection } from '@/sections/OverviewSection';
@@ -51,6 +51,14 @@ const StandbySection = dynamic(
   () => import('@/sections/StandbySection').then(m => ({ default: m.StandbySection })),
   { loading: LoadingPlaceholder },
 );
+const LatencySection = dynamic(
+  () => import('@/sections/LatencySection').then(m => ({ default: m.LatencySection })),
+  { loading: LoadingPlaceholder },
+);
+const LabsSection = dynamic(
+  () => import('@/sections/LabsSection').then(m => ({ default: m.LabsSection })),
+  { loading: LoadingPlaceholder },
+);
 
 const NAV_ITEMS: SidebarItem[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -58,6 +66,7 @@ const NAV_ITEMS: SidebarItem[] = [
   { id: '_config', label: 'Config', divider: true, icon: LayoutDashboard },
   { id: 'config/profiles', label: 'Profiles', icon: LayoutList },
   { id: 'config/api-keys', label: 'API Keys', icon: KeyRound },
+  { id: 'config/labs', label: 'Labs', icon: FlaskConical },
 
   { id: '_tools', label: 'Tools', divider: true, icon: LayoutDashboard },
   { id: 'tools/playground', label: 'Playground', icon: Sparkles },
@@ -66,6 +75,7 @@ const NAV_ITEMS: SidebarItem[] = [
   { id: 'tools/standby', label: 'GPU Standby', icon: Moon },
 
   { id: '_monitor', label: 'Monitor', divider: true, icon: LayoutDashboard },
+  { id: 'monitor/latency', label: 'Latency', icon: Activity },
   { id: 'monitor/reputation', label: 'Reputation', icon: Shield },
   { id: 'monitor/logs', label: 'Logs & Metrics', icon: ScrollText },
   { id: 'monitor/readiness', label: 'Readiness', icon: Gauge },
@@ -183,9 +193,11 @@ function Dashboard() {
         <div className="max-w-6xl mx-auto" style={{ minHeight: 'calc(100vh - 3.5rem)' }}>
           {activeTab === 'overview' && <ErrorBoundary><OverviewSection /></ErrorBoundary>}
           {activeTab === 'config/api-keys' && <ErrorBoundary><ApiKeysSection /></ErrorBoundary>}
+          {activeTab === 'config/labs' && <ErrorBoundary><LabsSection /></ErrorBoundary>}
           {activeTab === 'config/profiles' && <ErrorBoundary><ProfilesSection /></ErrorBoundary>}
           {activeTab === 'tools/playground' && <ErrorBoundary><PlaygroundSection /></ErrorBoundary>}
           {activeTab === 'tools/bot' && <ErrorBoundary><BotSection /></ErrorBoundary>}
+          {activeTab === 'monitor/latency' && <ErrorBoundary><LatencySection /></ErrorBoundary>}
           {activeTab === 'monitor/reputation' && <ErrorBoundary><ReputationSection /></ErrorBoundary>}
           {activeTab === 'monitor/logs' && <ErrorBoundary><LogsSection /></ErrorBoundary>}
           {activeTab === 'monitor/readiness' && <ErrorBoundary><ReadinessSection /></ErrorBoundary>}

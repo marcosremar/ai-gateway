@@ -390,6 +390,9 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                 </span>
               </div>
             )}
+            <div className="text-[10px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: 'var(--color-text-muted)' }}>
+              Deploy Settings
+            </div>
             <div className="rounded-lg border overflow-hidden"
               style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
 
@@ -397,6 +400,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
               <div className="flex items-center gap-2.5 px-3 py-2.5 border-b"
                 style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 3%, transparent)' }}>
                 <Settings2 className="w-3.5 h-3.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
+                <span className="text-[10px] font-semibold uppercase tracking-wide flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Image</span>
                 <div className="flex-1 min-w-0">
                   <DropdownList
                     options={DEFAULT_DOCKER_IMAGES.map(img => ({
@@ -461,7 +465,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                 {/* Row 2: Min VRAM + Disk */}
                 <div className="grid grid-cols-[1fr,auto] gap-4 items-start">
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-semibold uppercase tracking-wide flex-shrink-0 w-[52px]" style={{ color: 'var(--color-text-muted)' }}>VRAM</span>
+                    <span className="text-[10px] font-semibold uppercase tracking-wide flex-shrink-0 w-[52px]" style={{ color: 'var(--color-text-muted)' }}>Min VRAM</span>
                     <div className="flex gap-1 flex-wrap">
                       {[0, 8, 16, 24, 40, 80].map(gb => {
                         const sel = minVramGb === gb;
@@ -494,6 +498,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                         </button>
                       ))}
                     </div>
+                    <span className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Container disk.</span>
                   </div>
                 </div>
 
@@ -516,6 +521,9 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                         </button>
                       ))}
                     </div>
+                    {raceCount === 1 && (
+                      <span className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Standard deploy.</span>
+                    )}
                     {raceCount > 1 && (
                       <span className="text-[9px]" style={{ color: '#a78bfa' }}>{raceCount} instances — first wins</span>
                     )}
@@ -539,10 +547,13 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                             color: idleTimeoutMin === min ? '#fbbf24' : 'var(--color-text-muted)',
                             border: `1px solid ${idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 35%, transparent)' : 'var(--color-border)'}`,
                           }}>
-                          {min === 0 ? '∞' : `${min}m`}
+                          {min === 0 ? 'Never' : `${min}m`}
                         </button>
                       ))}
                     </div>
+                    <span className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                      {idleTimeoutMin === 0 ? 'Manual stop only.' : `Idle ${idleTimeoutMin}m → stop.`}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -554,12 +565,12 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <Toggle checked={spotInstance} onChange={setSpotInstance} size="sm" />
                     <span className="text-[10px] font-medium" style={{ color: spotInstance ? '#fbbf24' : 'var(--color-text-muted)' }}>
-                      Spot{spotInstance ? ' (preemptible)' : ''}
+                      Spot{spotInstance ? ' (Preemptible)' : ''}
                     </span>
                   </label>
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <Toggle checked={autoBenchmark} onChange={setAutoBenchmark} size="sm" />
-                    <span className="text-[10px] font-medium" style={{ color: autoBenchmark ? '#34d399' : 'var(--color-text-muted)' }}>Bench</span>
+                    <span className="text-[10px] font-medium" style={{ color: autoBenchmark ? '#34d399' : 'var(--color-text-muted)' }}>Benchmark on ready</span>
                   </label>
                   <span className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
                     <Clock className="w-3 h-3" /> ~2–5 min
