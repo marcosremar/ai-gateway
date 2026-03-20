@@ -56,8 +56,7 @@ export function readRawBody(req: IncomingMessage, res?: ServerResponse): Promise
     const cl = parseInt(contentLength, 10);
     if (!isNaN(cl) && cl > MAX_BODY_BYTES) {
       if (res) {
-        res.writeHead(413, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Payload Too Large' }));
+        sendJsonError(res, 413, 'Payload Too Large', 'PAYLOAD_TOO_LARGE');
       }
       return null;
     }
@@ -105,13 +104,11 @@ export function validateLang(code: string, fallback: string): string {
 
 export function handleBodyError(res: ServerResponse, err?: unknown): void {
   if (err instanceof BodyTimeoutError) {
-    res.writeHead(408, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Request Timeout' }));
+    sendJsonError(res, 408, 'Request Timeout', 'REQUEST_TIMEOUT');
     return;
   }
   const message = err instanceof JsonParseError ? err.message : 'Invalid JSON body';
-  res.writeHead(400, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: message }));
+  sendJsonError(res, 400, message, 'BAD_REQUEST');
 }
 
 // ── GPU credential validation ───────────────────────────────────────────────
@@ -168,4 +165,26 @@ export function maskKey(key: string): string {
     return `${key.slice(0, 3)}***${key.slice(-3)}`;
   }
   return '***';
+}
+
+/**
+ * Send a standardized JSON error response.
+ * Format: { error: { message, code?, status } }
+ */
+export function sendJsonError(
+  res: ServerResponse,
+  status: number,
+  message: string,
+  code?: string,
+): void {
+  if (!res.headersSent) {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+  }
+  res.end(JSON.stringify({
+    error: {
+      message,
+      ...(code ? { code } : {}),
+      status,
+    },
+  }));
 }

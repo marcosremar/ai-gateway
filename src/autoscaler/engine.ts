@@ -644,7 +644,7 @@ export class AutoscalerEngine {
     // Chain per-user decisions into a serial queue to prevent concurrent boot triggers.
     // Each call runs only after the previous one completes (FIFO).
     const prev = this.decisionLocks.get(userId);
-    const chain = (prev ? prev.catch(() => {}) : Promise.resolve())
+    const chain = (prev ? prev.catch(e => console.warn('[autoscaler] previous decision failed:', e instanceof Error ? e.message : e)) : Promise.resolve())
       .then(() => this._getAutoScaleDecisionImpl(userId, config, options));
     this.decisionLocks.set(userId, chain);
     chain.finally(() => {

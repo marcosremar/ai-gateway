@@ -224,5 +224,5 @@ export function stampProfileRequest(profileId: string | null): void {
       profiles: config.profiles.map(p => p.id === profileId ? { ...p, lastRequestAt: now } : p),
     };
     saveProviderConfig(updated);
-  } catch {}
+  } catch (e) { console.warn('[config] profile lastRequestAt update failed:', e instanceof Error ? e.message : e); }
 }

@@ -22,7 +22,7 @@ function buildStreamingProviderOrder(): string[] {
       .filter(e => e.sttType === 'streaming' || (!e.sttType && STREAMING_PROVIDERS.has(e.provider)))
       .map(e => e.provider);
     if (order.length > 0) return order;
-  } catch {}
+  } catch (e) { console.warn('[ws] streaming provider order parse failed:', e instanceof Error ? e.message : e); }
   return ['gpu', 'fireworks']; // fallback default
 }
 

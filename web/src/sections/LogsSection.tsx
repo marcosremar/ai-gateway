@@ -6,6 +6,8 @@ import { Card, CardHeader, CardBody, Button, StatusBadge, AlertBanner, Spinner, 
 import { ScrollText, BarChart3, RefreshCw, ChevronDown, ChevronUp, Clock, AlertCircle, Activity, Cpu } from 'lucide-react';
 import { PROVIDER_ICON } from './FallbackChainList';
 
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
+
 export function LogsSection() {
   const [entries, setEntries] = useState<RequestLogEntry[]>([]);
   const [stats, setStats] = useState<{ totalRequests: number; gpuPercent: number; avgLatencyMs: number; errors: number } | null>(null);
@@ -14,6 +16,8 @@ export function LogsSection() {
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(20);
 
   const load = useCallback(async () => {
     try {
@@ -39,6 +43,12 @@ export function LogsSection() {
     const id = setInterval(load, 5000);
     return () => clearInterval(id);
   }, [autoRefresh, load]);
+
+  // Reset to first page whenever the entries list changes
+  useEffect(() => { setPage(0); }, [entries.length]);
+
+  const totalPages = Math.max(1, Math.ceil(entries.length / pageSize));
+  const pagedEntries = entries.slice(page * pageSize, page * pageSize + pageSize);
 
   function toggleRowExpand(id: string) {
     setExpandedRows(prev => {
@@ -175,7 +185,8 @@ export function LogsSection() {
               <p style={{ color: 'var(--color-text-muted)' }}>No requests logged yet.</p>
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <>
+            <div className="overflow-x-auto -mx-1 px-1">
               <table className="w-full text-sm">
                 <thead>
                   <tr
@@ -192,7 +203,7 @@ export function LogsSection() {
                   </tr>
                 </thead>
                 <tbody>
-                  {entries.map(e => {
+                  {pagedEntries.map(e => {
                     const isExpanded = expandedRows.has(String(e.id));
                     const rowTint = stageRowTint(e.stage);
                     const pi = PROVIDER_ICON[e.provider];
@@ -276,6 +287,60 @@ export function LogsSection() {
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination controls */}
+            <div
+                className="flex items-center justify-between mt-3 pt-3"
+                style={{ borderTop: '1px solid var(--color-border)' }}
+              >
+                {/* Page size selector */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>Rows</span>
+                  <div className="flex gap-1">
+                    {PAGE_SIZE_OPTIONS.map(size => (
+                      <button
+                        key={size}
+                        onClick={() => { setPageSize(size); setPage(0); }}
+                        className="px-2 py-0.5 rounded text-[10px] font-mono transition-all cursor-pointer"
+                        style={{
+                          background: pageSize === size ? 'var(--color-btn-primary-bg)' : 'var(--color-surface)',
+                          color: pageSize === size ? '#fff' : 'var(--color-text-muted)',
+                          border: '1px solid',
+                          borderColor: pageSize === size ? 'var(--color-btn-primary-bg)' : 'var(--color-border)',
+                        }}
+                      >
+                        {size}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Page indicator + Prev/Next */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-mono" style={{ color: 'var(--color-text-muted)' }}>
+                    Page {page + 1} of {totalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={page === 0}
+                    onClick={() => setPage(p => Math.max(0, p - 1))}
+                    className="text-[11px] px-2.5 py-1"
+                  >
+                    Prev
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={page >= totalPages - 1}
+                    onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                    className="text-[11px] px-2.5 py-1"
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            </>
           )}
         </CardBody>
       </Card>

@@ -59,8 +59,17 @@ const ProfileItem = memo(function ProfileItem({
   return (
     <div
       data-id={profile.id}
+      role="button"
+      tabIndex={0}
+      aria-label={`${profile.name} — ${profile.latency ?? 'realtime'}`}
       className="group flex items-center gap-2.5 rounded-lg border transition-all cursor-pointer px-3 py-2.5"
       onClick={() => !editing && onApply(profile)}
+      onKeyDown={e => {
+        if (editing) return;
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onApply(profile); }
+        if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); onDelete(profile); }
+        if (e.key === 'F2') { e.preventDefault(); setEditName(profile.name); setEditing(true); }
+      }}
       style={{
         borderColor: isActive ? `color-mix(in srgb, ${accentColor} 40%, transparent)` : 'var(--color-border)',
         background: isActive ? `color-mix(in srgb, ${accentColor} 4%, var(--color-surface-elevated))` : 'var(--color-surface-elevated)',
@@ -131,11 +140,13 @@ const ProfileItem = memo(function ProfileItem({
       {/* Actions */}
       {!editing && (
         <button type="button" onClick={e => { e.stopPropagation(); setEditName(profile.name); setEditing(true); }}
+          aria-label={`Rename ${profile.name}`}
           className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-white/5 flex-shrink-0 transition-opacity cursor-pointer">
           <Pencil className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
         </button>
       )}
       <button type="button" onClick={e => { e.stopPropagation(); onDelete(profile); }}
+        aria-label={`Delete ${profile.name}`}
         className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/10 flex-shrink-0 transition-opacity cursor-pointer">
         <Trash2 className="w-3 h-3 text-red-400" />
       </button>

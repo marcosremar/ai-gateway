@@ -181,7 +181,7 @@ export function scheduleBackgroundProbes(offers: GpuOffer[]): void {
         _probing.delete(hostId);
         saveProbeResult(hostId, result);
       })
-      .catch(() => { _probing.delete(hostId); });
+      .catch(err => { console.debug(`[latency] probe failed for ${hostId}:`, err instanceof Error ? err.message : err); _probing.delete(hostId); });
   }
 }
 

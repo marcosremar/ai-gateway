@@ -50,6 +50,7 @@ async function scwAction(action: 'poweron' | 'poweroff'): Promise<void> {
     method: 'POST',
     headers: scwHeaders(),
     body: JSON.stringify({ action }),
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {
     const body = await res.text();
@@ -62,6 +63,7 @@ async function scwGetServer(): Promise<{ state: string; public_ip: { address: st
   const id = scwInstanceId();
   const res = await fetch(`${SCW_API}/${zone}/servers/${id}`, {
     headers: scwHeaders(),
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {
     const body = await res.text();

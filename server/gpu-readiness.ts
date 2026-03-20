@@ -279,7 +279,7 @@ function scheduleRepechage(
     setGpuReadinessState({ condemned: true });
     broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'condemned', attempts });
     // Condemn GPU — route all traffic to cloud
-    import('./providers').then(p => p.markGpuCondemned()).catch(() => {});
+    import('./providers').then(p => p.markGpuCondemned()).catch(e => console.warn('[readiness] markGpuCondemned failed:', e instanceof Error ? e.message : e));
     return; // do NOT schedule retry timer
   }
 
@@ -296,7 +296,7 @@ function scheduleRepechage(
     repechageTimer = null;
     if (deployState.endpoint !== endpoint || deployState.status !== 'ready') return;
     console.log(`[readiness] Repechage retry ${attempts}`);
-    runGpuReadinessCheck(endpoint, onPass, onFail).catch(() => {});
+    runGpuReadinessCheck(endpoint, onPass, onFail).catch(e => console.warn('[readiness] repechage retry failed:', e instanceof Error ? e.message : e));
   }, 120_000);
 }
 

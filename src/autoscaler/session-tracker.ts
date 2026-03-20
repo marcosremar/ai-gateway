@@ -30,7 +30,7 @@ export class SessionTracker {
   async reportSessionHeartbeat(userId: string, sessionKey: string): Promise<void> {
     await this.stateStore.hset(this.key(userId), sessionKey, String(Date.now()));
     // Also aggregate under teacher if this user is a student
-    void this.aggregateToTeacher(userId, sessionKey).catch(() => {});
+    void this.aggregateToTeacher(userId, sessionKey).catch(e => console.warn('[session] teacher aggregation failed:', e instanceof Error ? e.message : e));
   }
 
   /**
@@ -65,7 +65,7 @@ export class SessionTracker {
       const ts = Number(tsStr);
       if (ts < cutoff) {
         // Cleanup expired — fire and forget
-        void this.stateStore.hdel(this.key(userId), field).catch(() => {});
+        void this.stateStore.hdel(this.key(userId), field).catch(e => console.warn('[session] expired session cleanup failed:', e instanceof Error ? e.message : e));
         continue;
       }
       count++;

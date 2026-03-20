@@ -78,13 +78,24 @@ export async function refreshGpuTypeCache(): Promise<void> {
   const results = await Promise.allSettled(
     providerQueries.map(async ({ name, client, credentials }) => {
       if (!client.listOffers) return { name, offers: [] as GpuOffer[] };
-      try {
-        const offers = await client.listOffers({ limit: 200 }, credentials);
-        return { name, offers };
-      } catch (err) {
-        console.warn(`[gpu-cache] ${name} listOffers failed: ${err instanceof Error ? err.message : err}`);
-        return { name, offers: [] as GpuOffer[] };
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const offers = await Promise.race([
+            client.listOffers({ limit: 200 }, credentials),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${name} listOffers timed out`)), 15_000)),
+          ]);
+          return { name, offers };
+        } catch (err) {
+          if (attempt < 2) {
+            console.warn(`[gpu-cache] ${name} listOffers attempt ${attempt + 1} failed: ${err instanceof Error ? err.message : err}, retrying...`);
+            await new Promise(r => setTimeout(r, 1000 * (2 ** attempt)));
+          } else {
+            console.warn(`[gpu-cache] ${name} listOffers failed after 3 attempts: ${err instanceof Error ? err.message : err}`);
+            return { name, offers: [] as GpuOffer[] };
+          }
+        }
       }
+      return { name, offers: [] as GpuOffer[] }; // unreachable, satisfies TS
     }),
   );
 
@@ -703,10 +714,13 @@ export async function autoSelectCheapestGpu(
     tiers.map(async (tier) => {
       if (!tier.client.listOffers) return;
       try {
-        const offers = await tier.client.listOffers(
-          { region: opts.region, limit: 50 },
-          { apiKey: tier.apiKey, authId: tier.authId },
-        );
+        const offers = await Promise.race([
+          tier.client.listOffers(
+            { region: opts.region, limit: 50 },
+            { apiKey: tier.apiKey, authId: tier.authId },
+          ),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${tier.label} listOffers timed out`)), 15_000)),
+        ]);
         allOffers.push(...offers);
       } catch (err) {
         console.warn(`[gpu] autoSelectGpu: failed to query ${tier.label}: ${err instanceof Error ? err.message : err}`);
@@ -1186,17 +1200,20 @@ export async function startDeployRace(
     const credentials = { apiKey: slot.tier.apiKey, authId: slot.tier.authId };
     const defaultStorage = DEFAULT_STORAGE_GB[slot.tier.name] || 50;
     const storageGb = Math.max(extra.storageGb || defaultStorage, defaultStorage);
-    const instance = await slot.tier.client.createInstance(
-      {
-        gpuTypes: slot.gpuTypes, dockerImage: slot.tierDockerImage, storageGb,
-        region: extra.region, hfToken: extra.hfToken, env: extra.env,
-        bareMetal: slot.tier.name === 'tensordock', interruptible: extra.interruptible,
-        ...(slot.tier.name === 'runpod' ? { cloudType: 'SECURE' as const } : {}),
-        ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
-        ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
-      },
-      credentials,
-    );
+    const instance = await Promise.race([
+      slot.tier.client.createInstance(
+        {
+          gpuTypes: slot.gpuTypes, dockerImage: slot.tierDockerImage, storageGb,
+          region: extra.region, hfToken: extra.hfToken, env: extra.env,
+          bareMetal: slot.tier.name === 'tensordock', interruptible: extra.interruptible,
+          ...(slot.tier.name === 'runpod' ? { cloudType: 'SECURE' as const } : {}),
+          ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
+          ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
+        },
+        credentials,
+      ),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${slot.tier.name} createInstance timed out`)), 60_000)),
+    ]);
     console.log(`[race] Slot ${slot.index}: created ${instance.instanceId.slice(0, 8)} (gpu=${instance.gpuType}, tier=${slot.tier.label})`);
     return { slot, instance };
   }));
@@ -1266,7 +1283,10 @@ export async function startDeployRace(
       // Re-resolve endpoint (needed for Vast.ai and others that assign ports mid-boot)
       if (!localEndpoint || c.tier.name === 'vast') {
         try {
-          const resolved = await c.tier.client.resolveInstanceEndpoint(c.instanceId, credentials);
+          const resolved = await Promise.race([
+            c.tier.client.resolveInstanceEndpoint(c.instanceId, credentials),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${c.tier.name} resolveInstanceEndpoint timed out`)), 30_000)),
+          ]);
           if (resolved && resolved !== localEndpoint) {
             localEndpoint = resolved;
             if (idx === 0) setDeployState({ endpoint: localEndpoint });
@@ -1330,7 +1350,10 @@ export async function startDeployRace(
       const aliveMs = Date.now() - deployStartedAt;
       const wastedUsd = c.costPerHr > 0 ? c.costPerHr * aliveMs / 3_600_000 : 0;
       try {
-        await c.tier.client.deleteInstance(c.instanceId, credentials);
+        await Promise.race([
+          c.tier.client.deleteInstance(c.instanceId, credentials),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${c.tier.name} deleteInstance timed out`)), 15_000)),
+        ]);
         console.log(
           `[race] Slot ${idx} terminated (${reason}): ${c.instanceId.slice(0, 8)}, ` +
           `alive=${Math.round(aliveMs / 1000)}s` +

@@ -261,6 +261,6 @@ export async function cancelStandby(): Promise<void> {
   broadcastWs({ type: 'gpu:standby', status: 'idle', message: 'Standby cancelled' });
   console.log('[standby] Cancelled');
   if (podId) {
-    terminateOldPod(podId, provider).catch(() => {});
+    terminateOldPod(podId, provider).catch(e => console.warn('[standby] old pod termination failed:', e instanceof Error ? e.message : e));
   }
 }

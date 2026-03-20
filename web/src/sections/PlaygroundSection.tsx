@@ -407,7 +407,8 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
       {/* ── Config Sidebar ── */}
       <div
         className="flex flex-col border-r shrink-0 transition-all duration-200"
-        style={{ width: showConfig ? 288 : 0, borderColor: 'var(--color-border)', background: 'var(--color-surface)', overflow: 'hidden' }}
+        aria-hidden={!showConfig}
+        style={{ width: showConfig ? 288 : 0, borderColor: 'var(--color-border)', background: 'var(--color-surface)', overflow: 'hidden', visibility: showConfig ? 'visible' : 'hidden' }}
       >
         <div className="p-4 space-y-5 overflow-y-auto flex-1" style={{ minWidth: 288 }}>
 
@@ -453,6 +454,12 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
                     </option>
                   ))}
                 </FormSelect>
+                {sttProviders.some(id => !providerAvailable(catalog, id)) && (
+                  <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                    Some providers need API keys →{' '}
+                    <a href="/config/api-keys" className="underline">Configure</a>
+                  </p>
+                )}
                 {mode === 'transcribe' && (
                   <>
                     <FormSelect label="Model" value={sttModel} onChange={e => setModelForMode(e.target.value)}>
@@ -493,6 +500,12 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
                     </option>
                   ))}
                 </FormSelect>
+                {llmProviders.some(id => !providerAvailable(catalog, id)) && (
+                  <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                    Some providers need API keys →{' '}
+                    <a href="/config/api-keys" className="underline">Configure</a>
+                  </p>
+                )}
                 <FormSelect label="Model" value={llmModel} onChange={e => setModelForMode(e.target.value)}>
                   {curModels.map(m => (
                     <option key={m.id} value={m.id}>{m.name}{m.isDefault ? ' (default)' : ''}</option>
@@ -540,6 +553,12 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
                     </option>
                   ))}
                 </FormSelect>
+                {ttsProviders.some(id => !providerAvailable(catalog, id)) && (
+                  <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                    Some providers need API keys →{' '}
+                    <a href="/config/api-keys" className="underline">Configure</a>
+                  </p>
+                )}
                 <FormSelect label="Model" value={ttsModel} onChange={e => setModelForMode(e.target.value)}>
                   {modelsForCapability(catalog, 'tts', ttsProvider).map(m => (
                     <option key={m.id} value={m.id}>{m.name}{m.isDefault ? ' (default)' : ''}</option>

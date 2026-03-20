@@ -140,22 +140,8 @@ test.describe('Profiles Tab', () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Pipeline Tab
-// ─────────────────────────────────────────────────────────────────────────────
-
-test.describe('Profiles Tab', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-    await page.getByRole('button', { name: 'Profiles', exact: true }).click();
-  });
-
-  test('shows profiles page', async ({ page }) => {
-    await expect(page.getByText('Profiles').first()).toBeVisible();
-  });
-});
-
 // Deploy Tab removed — deploy controls are now integrated into Profile Services
+// Detailed Profiles tests are in profiles.spec.ts
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pipeline Test Tab
