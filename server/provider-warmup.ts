@@ -81,7 +81,7 @@ async function runWarmupCycle(): Promise<void> {
 
   // Auto-warmup GPU TTS if pod is ready but TTS is cold
   if (deployState.status === 'ready' && deployState.endpoint && isGpuAvailable() && !isTtsWarm()) {
-    warmupGpuTts(deployState.endpoint, deployState.gpuType, deployState.dockerImage, deployState.provider).catch(() => {});
+    warmupGpuTts(deployState.endpoint, deployState.gpuType, deployState.dockerImage, deployState.provider).catch(e => console.warn('[warmup] GPU TTS warmup failed:', e instanceof Error ? e.message : e));
   }
 }
 

@@ -10,7 +10,7 @@ import { PrismaClient } from '@prisma/client';
 import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import { homedir } from 'os';
 import { join } from 'path';
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, renameSync } from 'fs';
 
 export const prisma = new PrismaClient();
 
@@ -170,17 +170,24 @@ function persistDeployState(): void {
       providerMeta: deployState.providerMeta ?? {},
       savedAt: Date.now(),
     };
-    writeFileSync(ACTIVE_DEPLOY_FILE, JSON.stringify(data, null, 2));
-  } catch {
-    // non-critical
+    // Atomic write: write to temp file then rename, so a crash mid-write
+    // never corrupts the active deploy file.
+    const tmpFile = ACTIVE_DEPLOY_FILE + '.tmp';
+    writeFileSync(tmpFile, JSON.stringify(data, null, 2));
+    renameSync(tmpFile, ACTIVE_DEPLOY_FILE);
+  } catch (e) {
+    console.warn('[gpu] Failed to persist deploy state:', e instanceof Error ? e.message : e);
   }
 }
 
 export function clearPersistedDeploy(): void {
   try {
     if (existsSync(ACTIVE_DEPLOY_FILE)) unlinkSync(ACTIVE_DEPLOY_FILE);
-  } catch {
-    // non-critical
+    // Clean up stale temp file too
+    const tmpFile = ACTIVE_DEPLOY_FILE + '.tmp';
+    if (existsSync(tmpFile)) unlinkSync(tmpFile);
+  } catch (e) {
+    console.warn('[gpu] Failed to clear persisted deploy:', e instanceof Error ? e.message : e);
   }
 }
 
@@ -197,7 +204,8 @@ export function loadPersistedDeploy(): PersistedDeploy | null {
     }
     if (!data.podId || !data.endpoint) return null;
     return data;
-  } catch {
+  } catch (e) {
+    console.warn('[gpu] Failed to load persisted deploy:', e instanceof Error ? e.message : e);
     return null;
   }
 }

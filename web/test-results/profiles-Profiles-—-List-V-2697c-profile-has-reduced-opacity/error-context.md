@@ -1,0 +1,95 @@
+# Page snapshot
+
+```yaml
+- generic [active] [ref=e1]:
+  - alert [ref=e2]
+  - generic [ref=e3]:
+    - complementary [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e7]: AI
+        - generic [ref=e8]:
+          - heading "AI Gateway Settings" [level=1] [ref=e9]
+          - generic [ref=e12]: 1h 1m
+      - navigation [ref=e13]:
+        - generic [ref=e14]:
+          - button "Overview" [ref=e15] [cursor=pointer]:
+            - img [ref=e16]
+            - generic [ref=e21]: Overview
+          - generic [ref=e22]: Config
+          - button "Profiles" [ref=e23] [cursor=pointer]:
+            - img [ref=e24]
+            - generic [ref=e27]: Profiles
+          - button "API Keys" [ref=e28] [cursor=pointer]:
+            - img [ref=e29]
+            - generic [ref=e32]: API Keys
+          - generic [ref=e33]: Tools
+          - button "Playground" [ref=e34] [cursor=pointer]:
+            - img [ref=e35]
+            - generic [ref=e37]: Playground
+          - button "Bot" [ref=e38] [cursor=pointer]:
+            - img [ref=e39]
+            - generic [ref=e42]: Bot
+          - button "Auto-Swap" [ref=e43] [cursor=pointer]:
+            - img [ref=e44]
+            - generic [ref=e49]: Auto-Swap
+          - button "GPU Standby" [ref=e50] [cursor=pointer]:
+            - img [ref=e51]
+            - generic [ref=e53]: GPU Standby
+          - generic [ref=e54]: Monitor
+          - button "Reputation" [ref=e55] [cursor=pointer]:
+            - img [ref=e56]
+            - generic [ref=e58]: Reputation
+          - button "Logs & Metrics" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+            - generic [ref=e63]: Logs & Metrics
+          - button "Readiness" [ref=e64] [cursor=pointer]:
+            - img [ref=e65]
+            - generic [ref=e68]: Readiness
+      - button "Collapse" [ref=e70] [cursor=pointer]:
+        - img [ref=e71]
+        - generic [ref=e73]: Collapse
+    - main [ref=e74]:
+      - generic [ref=e75]:
+        - generic [ref=e77]: Profiles
+        - generic [ref=e78]:
+          - button "Switch to light" [ref=e79] [cursor=pointer]:
+            - img [ref=e80]
+          - generic [ref=e87]: ok
+      - generic [ref=e89]:
+        - generic [ref=e91]:
+          - heading "Profiles" [level=2] [ref=e92]
+          - paragraph [ref=e93]: Manage pipeline profiles
+        - generic [ref=e94]:
+          - generic [ref=e95]:
+            - paragraph [ref=e96]: Profiles
+            - paragraph [ref=e97]: 1 saved · click to load · toggle to enable/disable
+          - button "GPU Deploy Test — realtime" [ref=e100] [cursor=pointer]:
+            - generic [ref=e101]: "1"
+            - generic [ref=e103]: realtime
+            - generic [ref=e104]:
+              - generic [ref=e105]:
+                - img [ref=e106]
+                - generic [ref=e109]: stt
+              - generic [ref=e110]:
+                - img [ref=e111]
+                - generic [ref=e114]: llm
+              - generic [ref=e115]:
+                - img [ref=e116]
+                - generic [ref=e120]: tts
+            - generic [ref=e121]:
+              - generic [ref=e122]:
+                - img [ref=e123]
+                - generic [ref=e125]: GPU Deploy Test
+              - generic [ref=e126]: gpu → gpu → gpu · 1 GPU pod
+            - switch [checked] [ref=e128]
+            - button "Rename GPU Deploy Test" [ref=e130]:
+              - img [ref=e131]
+            - button "Delete GPU Deploy Test" [ref=e134]:
+              - img [ref=e135]
+          - button "Save current config as profile" [ref=e139] [cursor=pointer]:
+            - img [ref=e140]
+            - text: Save current config as profile
+        - button "New Profile" [ref=e142] [cursor=pointer]:
+          - img [ref=e143]
+          - text: New Profile
+```

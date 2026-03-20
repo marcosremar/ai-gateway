@@ -169,7 +169,7 @@ export class StreamingAudioPlayer {
       this.destinationNode = null;
     }
     if (this.audioCtx) {
-      this.audioCtx.close().catch(() => {});
+      this.audioCtx.close().catch(e => console.warn('[audio] context close failed:', e instanceof Error ? e.message : e));
       this.audioCtx = null;
     }
     this.format = null;

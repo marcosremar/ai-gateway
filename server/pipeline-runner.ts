@@ -147,9 +147,9 @@ export async function runStreamingPipeline(
   // Pre-warm connections
   const effectiveGpuEp = gpuEp || cloneGpuEndpoint;
   if (effectiveGpuEp) {
-    probeGpuHealth(effectiveGpuEp).catch(() => {});
+    probeGpuHealth(effectiveGpuEp).catch(e => console.warn('[pipeline] GPU health probe failed:', e instanceof Error ? e.message : e));
     if (groqAvailable && process.env.GROQ_API_KEY) {
-      probeCloudProvider('groq', process.env.GROQ_API_KEY, 2000).catch(() => {});
+      probeCloudProvider('groq', process.env.GROQ_API_KEY, 2000).catch(e => console.warn('[pipeline] Groq warmup failed:', e instanceof Error ? e.message : e));
     }
   }
 

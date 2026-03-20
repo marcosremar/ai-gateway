@@ -339,7 +339,7 @@ export class WebRTCTransport implements Transport {
     // Pipecat mode cleanup
     if (this.client) {
       this.log.debug('disconnecting (pipecat)');
-      this.client.disconnect().catch(() => {});
+      this.client.disconnect().catch((e: unknown) => console.warn('[webrtc] disconnect failed:', e instanceof Error ? e.message : e));
       this.client = null;
     }
 

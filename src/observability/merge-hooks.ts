@@ -30,9 +30,9 @@ export function mergeHooks(...hookSets: Partial<GatewayHooks>[]): GatewayHooks {
           try {
             const result = fn(...args);
             if (result && typeof (result as Promise<void>).catch === 'function') {
-              (result as Promise<void>).catch(() => {}); // swallow
+              (result as Promise<void>).catch(e => console.warn('[hooks] hook error swallowed:', e instanceof Error ? e.message : e)); // swallow
             }
-          } catch { /* swallow */ }
+          } catch (e) { console.warn('[hooks] hook error swallowed:', e instanceof Error ? e.message : e); /* swallow */ }
         }
       };
     }

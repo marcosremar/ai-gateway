@@ -288,8 +288,8 @@ export function createProxyServer(config: ProxyConfig): Server {
     let allowedOrigin = '*';
     if (corsOriginsEnv !== '*') {
       const allowedOrigins = corsOriginsEnv.split(',').map(o => o.trim()).filter(Boolean);
-      const isLocalhost = /^http:\/\/localhost(:\d+)?$/.test(requestOrigin);
-      if (isLocalhost || allowedOrigins.includes(requestOrigin)) {
+      const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(requestOrigin);
+      if (isLocal || allowedOrigins.includes(requestOrigin)) {
         allowedOrigin = requestOrigin;
       } else {
         // Non-matching origin: set empty string so browser blocks the request
@@ -301,8 +301,8 @@ export function createProxyServer(config: ProxyConfig): Server {
     if (method === 'OPTIONS') {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': allowedOrigin,
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
         'X-Request-Id': requestId,
         ...SECURITY_HEADERS,
       });

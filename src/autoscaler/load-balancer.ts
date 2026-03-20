@@ -249,7 +249,7 @@ export class LoadBalancer {
     // Persist affinity
     const chosenTier = readyTiers[idx];
     if (chosenTier) {
-      void this.stateStore.set(affinityKey(userId), String(chosenTier.tierIndex), LATENCY_TTL_SECS).catch(() => {});
+      void this.stateStore.set(affinityKey(userId), String(chosenTier.tierIndex), LATENCY_TTL_SECS).catch(e => console.warn('[lb] affinity persist failed:', e instanceof Error ? e.message : e));
     }
     return idx;
   }

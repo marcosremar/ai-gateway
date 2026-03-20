@@ -231,8 +231,8 @@ export async function runWSBench(base: string, testWav: Buffer): Promise<ProtoRe
     return { ok: false, total_ms: Date.now() - ts, error: err instanceof Error ? err.message : 'Unknown error' };
   } finally {
     await Promise.all([
-      fs.unlink(audioPath).catch(() => {}),
-      fs.unlink(scriptPath).catch(() => {}),
+      fs.unlink(audioPath).catch(e => console.warn('[bench] temp file cleanup failed:', e instanceof Error ? e.message : e)),
+      fs.unlink(scriptPath).catch(e => console.warn('[bench] temp file cleanup failed:', e instanceof Error ? e.message : e)),
     ]);
   }
 }
@@ -277,7 +277,7 @@ export async function runWebRTCBench(base: string): Promise<ProtoResult> {
       error: isUnavailable ? 'WebRTC not available on this backend (missing /api/offer or aiortc)' : msg,
     };
   } finally {
-    await fs.unlink(scriptPath).catch(() => {});
+    await fs.unlink(scriptPath).catch(e => console.warn('[bench] temp file cleanup failed:', e instanceof Error ? e.message : e));
   }
 }
 

@@ -194,7 +194,7 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
           wasDiscovered: !!entry.instanceId,
           instanceId: entry.instanceId,
           timestamp: Date.now(),
-        }).catch(() => {});
+        }).catch(e => console.warn('[bench] dispatch record failed:', e instanceof Error ? e.message : e));
       }
     },
   };

@@ -8,7 +8,7 @@ import {
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import {
   Card, CardHeader, CardBody, Button, FormSelect, FormInput, SectionHeader,
-  IconBox, StatusBadge, Toggle, DropdownList, AlertBanner,
+  IconBox, StatusBadge, Toggle, DropdownList, AlertBanner, ConfirmModal,
 } from '@/components/ui';
 import {
   ChevronLeft, Mic, Plus, Check, Trash2,
@@ -1850,7 +1850,7 @@ function ProfileFlowDiagram({
               <div className="flex items-center gap-2 px-3 py-2.5 border-b"
                 style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
                 {pi?.icon && <pi.icon className="w-3.5 h-3.5 flex-shrink-0" style={{ color: entryColor }} />}
-                <span className="font-bold text-[11px] truncate" style={{ color: entryColor }}>
+                <span className="font-bold text-[11px] truncate" title={entryLabel(entry)} style={{ color: entryColor }}>
                   {entryLabel(entry)}
                 </span>
                 <div className="ml-auto flex items-center gap-1.5 flex-shrink-0">
@@ -1933,7 +1933,7 @@ function ProfileFlowDiagram({
                       {mi?.instanceId && (
                         <div className="col-span-2">
                           <div style={{ color: 'var(--color-text-muted)' }}>Machine ID</div>
-                          <div className="font-mono truncate font-medium" style={{ color: 'var(--color-text)' }}>{mi.instanceId}</div>
+                          <div className="font-mono truncate font-medium" title={mi.instanceId} style={{ color: 'var(--color-text)' }}>{mi.instanceId}</div>
                         </div>
                       )}
                       {gpu?.provider && (
@@ -2125,6 +2125,8 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
   const [deploying, setDeploying] = useState(false);
   const [terminating, setTerminating] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
+  const [confirmTerminate, setConfirmTerminate] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [raceCount, setRaceCount] = useState(1);
   const [idleTimeoutMin, setIdleTimeoutMin] = useState(15);
   const [timeoutDirty, setTimeoutDirty] = useState(false);
@@ -2263,7 +2265,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
         <IconBox icon={ServiceIcon} color={color} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold truncate">{service.name}</span>
+            <span className="text-sm font-semibold truncate" title={service.name}>{service.name}</span>
             <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded flex-shrink-0"
               style={{ background: `color-mix(in srgb, ${color} 10%, transparent)`, color }}>
               {service.kind}
@@ -2272,7 +2274,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
           {isGpu && (
             <>
               {service.dockerImage && (
-                <div className="text-[10px] font-mono truncate mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
+                <div className="text-[10px] font-mono truncate mt-0.5" title={service.dockerImage} style={{ color: 'var(--color-text-muted)' }}>
                   {service.dockerImage}
                 </div>
               )}
@@ -2293,7 +2295,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                 </div>
               )}
               {service.gpuTypes && service.gpuTypes.length > 0 && (
-                <div className="text-[10px] mt-0.5 truncate" style={{ color: 'var(--color-text-muted)' }}>
+                <div className="text-[10px] mt-0.5 truncate" title={service.gpuTypes.map(g => GPU_TYPES.find(t => t.id === g)?.label || g).join(', ')} style={{ color: 'var(--color-text-muted)' }}>
                   {service.gpuTypes.map(g => GPU_TYPES.find(t => t.id === g)?.label || g).join(', ')}
                 </div>
               )}
@@ -2310,7 +2312,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
             className="p-1.5 rounded hover:bg-white/5 cursor-pointer">
             <Pencil className="w-3.5 h-3.5" style={{ color: 'var(--color-text-muted)' }} />
           </button>
-          <button type="button" onClick={onDelete}
+          <button type="button" onClick={() => setConfirmDelete(true)}
             className="p-1.5 rounded hover:bg-red-500/10 cursor-pointer">
             <Trash2 className="w-3.5 h-3.5 text-red-400" />
           </button>
@@ -2349,7 +2351,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                   <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{gpu.provider}</span>
                 )}
                 <div className="flex-1" />
-                <Button variant={isBooting ? 'danger' : 'outline'} size="sm" onClick={handleTerminate} isLoading={terminating} loadingText="...">
+                <Button variant={isBooting ? 'danger' : 'outline'} size="sm" onClick={() => setConfirmTerminate(true)} isLoading={terminating} loadingText="...">
                   <Square className="w-3 h-3" /> {isBooting ? 'Cancel' : 'Stop'}
                 </Button>
               </div>
@@ -2684,6 +2686,27 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
           )}
         </div>
       )}
+
+      <ConfirmModal
+        open={confirmTerminate}
+        onClose={() => setConfirmTerminate(false)}
+        onConfirm={() => { setConfirmTerminate(false); handleTerminate(); }}
+        title="Stop GPU?"
+        description="This will terminate the running GPU instance. Pipeline will fall back to cloud providers."
+        confirmLabel="Stop"
+        variant="danger"
+        isLoading={terminating}
+      />
+
+      <ConfirmModal
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        onConfirm={() => { setConfirmDelete(false); onDelete(); }}
+        title="Delete service?"
+        description={`${service.name} will be removed from this profile.`}
+        confirmLabel="Delete"
+        variant="danger"
+      />
     </div>
   );
 }
@@ -3361,6 +3384,7 @@ export function ProfilesSection() {
   const [showAddService, setShowAddService] = useState(false);
   const [editingService, setEditingService] = useState<ProfileService | null>(null);
 
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -3371,7 +3395,6 @@ export function ProfilesSection() {
     setStages(profileToStages(p));
     setLatency(p.latency ?? 'realtime');
     const svc = migrateServices(p as ProviderProfile & Record<string, unknown>);
-    console.log('[profiles] loadProfile services:', svc.length, svc.map(s => `${s.kind}:${s.name}`));
     setServices(svc);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -3397,7 +3420,8 @@ export function ProfilesSection() {
           }
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -3509,14 +3533,31 @@ export function ProfilesSection() {
           subtitle="Manage pipeline profiles"
         />
 
-        <ProfilesPanel
-          profiles={profiles} setProfiles={setProfiles}
-          activeProfileId={activeProfileId} setActiveProfileId={setActiveProfileId}
-          onApplyProfile={onApplyProfile} createCurrentProfile={createCurrentProfile}
-        />
+        {loading ? (
+          /* Loading skeleton */
+          <div className="space-y-3 animate-pulse" aria-busy="true" aria-label="Loading profiles">
+            {[1, 2, 3].map(i => (
+              <div key={i} className="rounded-lg border p-3 flex items-center gap-3"
+                style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
+                <div className="w-5 h-5 rounded-md" style={{ background: 'var(--color-border)' }} />
+                <div className="flex-1 space-y-2">
+                  <div className="h-3.5 rounded w-1/3" style={{ background: 'var(--color-border)' }} />
+                  <div className="h-2.5 rounded w-2/3" style={{ background: 'color-mix(in srgb, var(--color-border) 50%, transparent)' }} />
+                </div>
+                <div className="w-8 h-4 rounded-full" style={{ background: 'var(--color-border)' }} />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <ProfilesPanel
+            profiles={profiles} setProfiles={setProfiles}
+            activeProfileId={activeProfileId} setActiveProfileId={setActiveProfileId}
+            onApplyProfile={onApplyProfile} createCurrentProfile={createCurrentProfile}
+          />
+        )}
 
         <div className="flex items-center gap-3">
-          <Button variant="outline" onClick={openNew}>
+          <Button variant="outline" onClick={openNew} disabled={loading}>
             <Mic className="w-4 h-4" /> New Profile
           </Button>
         </div>
@@ -3563,7 +3604,7 @@ export function ProfilesSection() {
 
       {/* Save error banner */}
       {saveError && (
-        <div className="px-6 py-2 border-b flex-shrink-0" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="px-6 py-2 border-b flex-shrink-0" role="alert" style={{ borderColor: 'var(--color-border)' }}>
           <AlertBanner variant="error">
             {saveError}
           </AlertBanner>

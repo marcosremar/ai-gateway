@@ -74,6 +74,20 @@ export async function handlePatchProviderConfig(req: IncomingMessage, res: Serve
     if (body.pipelineTts && Array.isArray(body.pipelineTts) && body.pipelineTts.length > 0) {
       updateTranslationProfile({ tts: body.pipelineTts as PipelineChainEntry[] }, 'handlePatchProviderConfig:tts');
     }
+    // Broadcast config change to all connected WS clients (Python app, other dashboards)
+    if (body.activeProfileId !== undefined || body.pipelineStt || body.pipelineLlm || body.pipelineTts) {
+      const activeProfile = updated.profiles?.find((p: any) => p.id === updated.activeProfileId);
+      broadcastWs({
+        type: 'config:updated',
+        activeProfileId: updated.activeProfileId,
+        profileName: activeProfile?.name ?? null,
+        chains: {
+          stt: updated.pipelineStt,
+          llm: updated.pipelineLlm,
+          tts: updated.pipelineTts,
+        },
+      });
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(updated));
   } catch (err) {

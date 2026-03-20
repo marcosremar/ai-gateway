@@ -9,9 +9,7 @@ import { getRequestLog, type RequestLogEntry } from '@/lib/gateway';
 import { AlertBanner, Spinner } from '@/components/ui';
 import { PipelineHealthCard } from './PipelineHealthCard';
 import {
-  Activity, Cpu, Bot, Clock, Zap, DollarSign,
-  Wifi, WifiOff, Snowflake, Flame, TrendingUp, Server,
-  type LucideIcon,
+  Cpu, Bot, Snowflake, Flame, Server,
 } from 'lucide-react';
 
 function formatUptime(sec: number): string {
@@ -56,43 +54,6 @@ function computeStageLatencies(entries: RequestLogEntry[]): Record<string, Stage
     };
   }
   return result;
-}
-
-// ── Stat Card ─────────────────────────────────────────────────────────────────
-
-function StatCard({ icon: Icon, label, value, color, sub }: {
-  icon: LucideIcon; label: string; value: string; color: string; sub?: string;
-}) {
-  return (
-    <div className="relative overflow-hidden rounded-xl border p-4 transition-all"
-      style={{
-        borderColor: `color-mix(in srgb, ${color} 18%, var(--color-border))`,
-        background: 'var(--color-surface-elevated)',
-        borderTop: `2px solid ${color}`,
-      }}>
-      {/* Subtle glow in corner */}
-      <div className="absolute top-0 right-0 w-20 h-20 pointer-events-none"
-        style={{
-          background: `radial-gradient(circle at 100% 0%, color-mix(in srgb, ${color} 8%, transparent) 0%, transparent 70%)`,
-        }} />
-      <div className="flex items-start justify-between mb-2.5">
-        <span className="text-[10px] font-semibold uppercase"
-          style={{ color: 'var(--color-text-muted)', letterSpacing: '0.1em' }}>
-          {label}
-        </span>
-        <div className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
-          style={{ background: `color-mix(in srgb, ${color} 14%, transparent)` }}>
-          <Icon className="w-3.5 h-3.5" style={{ color }} />
-        </div>
-      </div>
-      <div className="font-mono text-2xl font-bold leading-none tracking-tight mb-1">
-        {value}
-      </div>
-      {sub && (
-        <div className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{sub}</div>
-      )}
-    </div>
-  );
 }
 
 // ── GPU Instance Tile ─────────────────────────────────────────────────────────
@@ -155,8 +116,8 @@ function GpuTile({ inst }: { inst: ReturnType<typeof useGpuList>['instances'][0]
 
 // ── Provider Bar Row ──────────────────────────────────────────────────────────
 
-function ProviderBar({ name, requests, avgLatencyMs, errorRate, maxRequests }: {
-  name: string; requests: number; avgLatencyMs: number; errorRate: number; maxRequests: number;
+function ProviderBar({ name, requests, avgLatencyMs, errorRate, maxRequests, trend }: {
+  name: string; requests: number; avgLatencyMs: number; errorRate: number; maxRequests: number; trend?: number[];
 }) {
   const barPct = maxRequests > 0 ? (requests / maxRequests) * 100 : 0;
   const latColor = avgLatencyMs < 300 ? '#10b981' : avgLatencyMs < 800 ? '#f59e0b' : '#ef4444';
@@ -174,6 +135,22 @@ function ProviderBar({ name, requests, avgLatencyMs, errorRate, maxRequests }: {
         <div className="h-full rounded-full transition-all duration-700"
           style={{ width: `${barPct}%`, background: 'color-mix(in srgb, #60a5fa 70%, #a78bfa)' }} />
       </div>
+      {/* Sparkline trend */}
+      {trend && trend.length > 1 && (
+        <svg width="40" height="16" className="flex-shrink-0" style={{ opacity: 0.7 }}>
+          <polyline
+            fill="none"
+            stroke={latColor}
+            strokeWidth="1.5"
+            points={trend.map((v, i) => {
+              const maxVal = Math.max(...trend);
+              const x = (i / (trend.length - 1)) * 38 + 1;
+              const y = maxVal > 0 ? 16 - (v / maxVal) * 14 + 1 : 9;
+              return `${x},${y}`;
+            }).join(' ')}
+          />
+        </svg>
+      )}
       <span className="text-[10px] font-mono w-8 text-right flex-shrink-0"
         style={{ color: 'var(--color-text-muted)' }}>
         {requests}
@@ -198,11 +175,25 @@ export function OverviewSection() {
   const { instances: gpuInstances } = useGpuList(true, 10000);
   const { bot } = useBotStatus(true, 10000);
   const [stageLatencies, setStageLatencies] = useState<Record<string, StageLatency>>({});
+  const [providerTrends, setProviderTrends] = useState<Record<string, number[]>>({});
 
   const loadLatencies = useCallback(async () => {
     try {
       const log = await getRequestLog(0, 100);
       setStageLatencies(computeStageLatencies(log.entries));
+
+      // Compute per-provider latency trends (last 20 data points)
+      const byProvider: Record<string, number[]> = {};
+      for (const e of log.entries) {
+        if (!e.success) continue;
+        if (!byProvider[e.provider]) byProvider[e.provider] = [];
+        byProvider[e.provider].push(e.latencyMs);
+      }
+      const trends: Record<string, number[]> = {};
+      for (const [provider, latencies] of Object.entries(byProvider)) {
+        trends[provider] = latencies.slice(-20);
+      }
+      setProviderTrends(trends);
     } catch {}
   }, []);
 
@@ -268,17 +259,6 @@ export function OverviewSection() {
             <span className="text-[11px] ml-auto font-medium" style={{ color: '#fbbf24' }}>{(health as any).reason}</span>
           )}
         </div>
-      </div>
-
-      {/* ── Stat cards ── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard icon={Clock} label="Uptime" value={formatUptime(health.uptime_sec)} color="#34d399" />
-        <StatCard icon={Zap} label="P50 Latency" value={`${health.latency.p50_ms}ms`} color="#60a5fa"
-          sub="median response" />
-        <StatCard icon={TrendingUp} label="P95 Latency" value={`${health.latency.p95_ms}ms`} color="#a78bfa"
-          sub="tail latency" />
-        <StatCard icon={Activity} label="Requests" value={String(health.latency.samples)} color="#fbbf24"
-          sub="in-memory ring buffer" />
       </div>
 
       {/* ── Infrastructure: GPU + Bot ── */}
@@ -438,6 +418,7 @@ export function OverviewSection() {
                   avgLatencyMs={m.avgLatencyMs}
                   errorRate={m.errorRate}
                   maxRequests={maxRequests}
+                  trend={providerTrends[name]}
                 />
               ))}
           </div>

@@ -251,7 +251,7 @@ export class AIClient {
         inputTokens: result.usage.promptTokens,
         outputTokens: result.usage.completionTokens,
         costUsd, timestamp: Date.now(),
-      }).catch(() => {});
+      }).catch(e => console.warn('[bench] record failed:', e instanceof Error ? e.message : e));
     }
 
     return chatResult;
@@ -475,7 +475,7 @@ export class AIClient {
     // Fire a lightweight /models probe to the LLM provider during STT to warm
     // the TCP/TLS connection (saves ~100-300ms on cold connections).
     const warmupPromise = gpuEndpoint
-      ? fetch(`${gpuEndpoint}/health`, { signal: AbortSignal.timeout(2000) }).catch(() => {})
+      ? fetch(`${gpuEndpoint}/health`, { signal: AbortSignal.timeout(2000) }).catch(e => console.warn('[pipeline] GPU warmup failed:', e instanceof Error ? e.message : e))
       : Promise.resolve();
     const stt = await this.transcribe(audio, profile);
     await warmupPromise; // likely already done by now

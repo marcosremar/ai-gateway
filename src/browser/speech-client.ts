@@ -517,7 +517,7 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
     }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect().catch(() => {});
+      this.connect().catch(e => console.warn('[speech] reconnect failed:', e instanceof Error ? e.message : e));
     }, delay);
   }
 

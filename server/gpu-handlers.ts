@@ -47,6 +47,349 @@ import { loadProviderConfig } from './config-persistence';
 
 // ── GPU management endpoints ────────────────────────────────────────────────
 
+// ── Deploy request validation & config types ─────────────────────────────────
+
+/** Validated deploy configuration produced by _validateDeployRequest. */
+interface DeployConfig {
+  apiKey: string;              // RunPod API key (may be empty)
+  vastApiKey: string;
+  tensordockApiKey: string;
+  tensordockAuthId: string;
+  modalApiKey: string;
+  dockerImage: string;
+  gpuTypes: string[];
+  autoSelectGpu: boolean;
+  region: string;
+  minVramGb: number;
+  preferSsd: boolean;
+  storageGb: number;
+  hfToken: string;
+  llmModel: string;
+  interruptible: boolean | undefined;
+  raceCount: number;
+  deployEnv: Record<string, string>;
+  dockerStartCmd: string;
+  containerDiskInGb: number;
+  providerFilter: ProviderName | undefined;
+}
+
+/**
+ * Parse and validate the deploy request body. Returns a typed DeployConfig or
+ * throws an error with { status, message } for the caller to send as an HTTP response.
+ */
+async function _validateDeployRequest(
+  body: Record<string, unknown>,
+  requestId: string,
+): Promise<DeployConfig> {
+  const apiKey = (body.apiKey as string) || process.env.RUNPOD_API_KEY || '';
+  const vastApiKey = (body.vastApiKey as string) || process.env.VAST_API_KEY || '';
+  const tensordockApiKey = (body.tensordockApiKey as string) || process.env.TENSORDOCK_API_KEY || '';
+  const tensordockAuthId = (body.tensordockAuthId as string) || process.env.TENSORDOCK_AUTH_ID || '';
+  const modalTokenId = (body.modalTokenId as string) || process.env.MODAL_TOKEN_ID || '';
+  const modalTokenSecret = (body.modalTokenSecret as string) || process.env.MODAL_TOKEN_SECRET || '';
+  const modalApiKey = modalTokenId && modalTokenSecret ? `${modalTokenId}:${modalTokenSecret}` : '';
+
+  // Validate credential format before using them
+  const credError = validateGpuCredentials({
+    runpodApiKey: apiKey,
+    vastApiKey,
+    tensordockApiKey,
+    tensordockAuthId,
+    modalTokenId,
+    modalTokenSecret,
+  });
+  if (credError) {
+    throw { status: 400, message: credError };
+  }
+
+  if (!apiKey && !vastApiKey && !tensordockApiKey && !modalApiKey) {
+    throw { status: 400, message: 'At least one provider API key is required (apiKey, vastApiKey, or Modal tokens)' };
+  }
+
+  // Resolve profile-based GPU deploy config — use active profile as defaults
+  const profileId = (body.profileId as string) || loadProviderConfig().activeProfileId;
+  const profiles = loadProviderConfig().profiles;
+  const activeProfile = profileId ? profiles.find(p => p.id === profileId) : null;
+  const profileGpu = activeProfile?.gpuDeploy;
+
+  const dockerImage = (body.dockerImage as string) || profileGpu?.dockerImage || '';
+  if (!dockerImage) {
+    throw { status: 400, message: 'dockerImage is required — provide dockerImage, profileId, or set an active profile with gpuDeploy config' };
+  }
+
+  const rawGpuTypes = body.gpuTypes;
+  let gpuTypes: string[] = Array.isArray(rawGpuTypes)
+    ? rawGpuTypes
+    : typeof rawGpuTypes === 'string'
+      ? rawGpuTypes.split(',').map((s: string) => s.trim()).filter(Boolean)
+      : profileGpu?.gpuTypes ?? [];
+  const autoSelectGpu = body.autoSelectGpu === true;
+
+  // Region / hardware filters: profile → saved preference → request body
+  const region = (body.region as string) || profileGpu?.region || getDeployRegion();
+  // Apply profile timeout if provided (and not overridden by body)
+  if (profileGpu?.timeoutMin && typeof body.timeoutMin !== 'number') {
+    setDeployTimeoutMin(profileGpu.timeoutMin);
+  }
+  const minVramGb = typeof body.minVramGb === 'number' ? body.minVramGb : getMinVramGb();
+  const preferSsd = typeof body.preferSsd === 'boolean' ? body.preferSsd : getPreferSsd();
+  const storageGb = (body.storageGb as number) || 0;
+  const hfToken = (body.hfToken as string) || process.env.HF_TOKEN || '';
+  const llmModel = (body.llmModel as string) || '';
+  const interruptible = body.interruptible === true ? true : undefined;
+
+  // Hedged deploy: launch raceCount instances in parallel, keep first healthy
+  const raceCount = typeof body.raceCount === 'number' && body.raceCount >= 1
+    ? Math.min(Math.floor(body.raceCount), 10)
+    : getDeployRaceCount();
+
+  // Custom env vars, Docker start command, and container disk
+  const customEnv = (typeof body.env === 'object' && body.env !== null && !Array.isArray(body.env))
+    ? body.env as Record<string, string> : {};
+  const dockerStartCmd = (body.dockerStartCmd as string) || '';
+  const containerDiskInGb = typeof body.containerDiskInGb === 'number' ? body.containerDiskInGb : 0;
+  const deployEnv: Record<string, string> = { ...customEnv };
+  if (llmModel) deployEnv.CONF_LLM_MODEL = llmModel;
+
+  // Enforce GPU allowlist — only tested & approved GPUs are permitted.
+  if (gpuTypes.length > 0) {
+    const effectiveAllowed = new Set(getGpuPriorityList());
+    const rejected = gpuTypes.filter(g => !effectiveAllowed.has(g));
+    if (rejected.length > 0) {
+      console.warn(`[req=${requestId}] Rejected non-tested GPU(s): ${rejected.join(', ')}`);
+    }
+    gpuTypes = gpuTypes.filter(g => effectiveAllowed.has(g));
+    if (gpuTypes.length === 0) {
+      throw { status: 400, message: `None of the requested GPUs are in the tested allowlist. Allowed: ${[...effectiveAllowed].join(', ')}` };
+    }
+  } else if (!autoSelectGpu) {
+    // No GPU specified and no auto-select — use user-configured priority list from settings
+    const userList = getGpuPriorityList();
+    gpuTypes = userList.length > 0 ? userList : await getVerifiedGpuTypes(dockerImage);
+    console.log(`[req=${requestId}] No GPU specified — using priority list: ${gpuTypes.join(', ')}`);
+  }
+
+  return {
+    apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
+    dockerImage, gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
+    storageGb, hfToken, llmModel, interruptible, raceCount, deployEnv,
+    dockerStartCmd, containerDiskInGb,
+    providerFilter: body.provider as ProviderName | undefined,
+  };
+}
+
+// ── Tier selection: balance checks, GPU ordering, image resolution ────────────
+
+/** Result of tier selection — everything needed to start the deploy. */
+interface TierSelectionResult {
+  tiers: import('../src/gpu-providers/deploy-orchestrator').GpuTier[];
+  gpuTypes: string[];
+  resolvedDockerImage: string;
+  gpuPriorityByProvider: Record<string, string[]>;
+}
+
+/**
+ * Check provider balances, build tier list, auto-select GPUs, apply latency
+ * sorting, and resolve the Docker image. Throws { status, message } on failure.
+ */
+async function _selectDeploymentTier(
+  config: DeployConfig,
+  requestId: string,
+): Promise<TierSelectionResult> {
+  let { gpuTypes } = config;
+  const { apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
+    dockerImage, autoSelectGpu, region, minVramGb: minVramGbReq, preferSsd: preferSsdReq,
+    providerFilter } = config;
+
+  // Pre-flight: validate RunPod key + check balance via RunpodClient
+  let runpodApiKey = apiKey;
+  if (runpodApiKey) {
+    try {
+      const runpodBal = await runpod.checkBalance({ apiKey: runpodApiKey });
+      if (runpodBal !== null) {
+        console.log(`[gpu] RunPod balance: $${runpodBal.balance.toFixed(2)}`);
+        if (runpodBal.balance < 1.0) {
+          console.warn(`[gpu] RunPod balance too low ($${runpodBal.balance.toFixed(2)}) — skipping provider`);
+          runpodApiKey = '';  // exclude from tier list
+        }
+      }
+    } catch (balErr) {
+      const msg = balErr instanceof Error ? balErr.message : String(balErr);
+      if (/401|403|unauthorized|invalid/i.test(msg)) {
+        throw { status: 401, message: 'RunPod API key is invalid' };
+      }
+      console.warn(`[gpu] RunPod balance check failed: ${msg} — proceeding anyway`);
+    }
+  }
+
+  // Pre-deploy balance check for TensorDock
+  let tensordockOpts = tensordockApiKey && tensordockAuthId ? { apiKey: tensordockApiKey, authId: tensordockAuthId } : undefined;
+  if (tensordockOpts) {
+    try {
+      const bal = await tensordock.checkBalance({ apiKey: tensordockApiKey, authId: tensordockAuthId });
+      if (bal !== null) {
+        console.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly cost: $${bal.hourlyCost.toFixed(3)})`);
+        if (bal.balance < 1.0) {
+          console.warn(`[gpu] TensorDock balance too low ($${bal.balance.toFixed(2)}) — skipping provider`);
+          tensordockOpts = undefined;  // exclude from tier list
+        }
+      }
+    } catch (balErr) {
+      const msg = balErr instanceof Error ? balErr.message : String(balErr);
+      if (/401|403|unauthorized|invalid/i.test(msg)) {
+        throw { status: 401, message: 'TensorDock credentials are invalid' };
+      }
+      console.warn(`[gpu] TensorDock balance check failed: ${msg} — proceeding anyway`);
+    }
+  }
+
+  // Log providers excluded due to insufficient balance
+  const balanceExcluded: string[] = [];
+  if (apiKey && !runpodApiKey) balanceExcluded.push('RunPod');
+  if ((tensordockApiKey && tensordockAuthId) && !tensordockOpts) balanceExcluded.push('TensorDock');
+  if (balanceExcluded.length > 0) {
+    console.warn(`[gpu] Providers excluded (balance < $1): ${balanceExcluded.join(', ')}`);
+  }
+
+  // Build tier list from available API keys, optionally filtered to a specific provider
+  const allTiers = buildGpuTiers(runpodApiKey, vastApiKey || undefined, tensordockOpts, modalApiKey || undefined);
+  const filtered = filterTiers(allTiers, providerFilter);
+  if ('error' in filtered) {
+    const balanceHint = balanceExcluded.length > 0
+      ? ` (${balanceExcluded.join(', ')} excluded — balance < $1)`
+      : '';
+    throw { status: 400, message: filtered.error + balanceHint };
+  }
+  const tiers = filtered.tiers;
+
+  // Auto-select cheapest GPUs with adequate VRAM when autoSelectGpu is true and no gpuTypes specified
+  if (autoSelectGpu && gpuTypes.length === 0 && tiers.length > 0) {
+    const selectedGpus = await autoSelectCheapestGpu(tiers, { region, minVramGb: minVramGbReq, preferSsd: preferSsdReq });
+    if (selectedGpus.length > 0) {
+      gpuTypes = selectedGpus;
+      console.log(`[gpu] Auto-selected ${gpuTypes.length} GPU types: ${gpuTypes.join(', ')}`);
+    } else {
+      console.warn(`[gpu] autoSelectGpu: no suitable GPU found (>=${getMinVramGb()}GB VRAM), falling back to verified GPU list`);
+      gpuTypes = await getVerifiedGpuTypes(dockerImage);
+    }
+  }
+
+  // Latency-aware GPU type ordering: deprioritise types where ALL known hosts exceed threshold.
+  const maxLatencyMs = getLatencyMaxMs();
+  if (maxLatencyMs > 0 && gpuTypes.length > 1) {
+    const sorted = sortGpuTypesByLatency(gpuTypes, maxLatencyMs);
+    if (sorted.join(',') !== gpuTypes.join(',')) {
+      console.log(`[gpu] Latency filter (threshold=${maxLatencyMs}ms): ${gpuTypes.join(', ')} → ${sorted.join(', ')}`);
+    }
+    gpuTypes = sorted;
+  }
+
+  // Auto-swap Docker image to Blackwell variant when a Blackwell GPU is selected
+  const resolvedDockerImage = resolveDockerImageForGpus(dockerImage, gpuTypes);
+
+  // Validate GPU types against cached provider inventory
+  if (gpuTypes.length > 0) {
+    const gpuTypeError = await validateGpuTypesFromCache(gpuTypes);
+    if (gpuTypeError) {
+      console.warn(`[req=${requestId}] GPU type validation warning: ${gpuTypeError}`);
+    }
+  }
+
+  // Clean up ALL existing instances (not just the tracked one) to prevent orphans
+  const oldPodId = deployState.podId;
+  stopGpuMonitoring();
+  updateTranslationProfile({ gpuEndpoint: undefined }, 'handleGpuDeploy:cleanup');
+  try {
+    if (apiKey) {
+      await cleanupAllPods(apiKey, oldPodId ? [oldPodId] : []);
+    }
+    if (vastApiKey) {
+      await cleanupVastInstances(vastApiKey);
+    }
+    if (tensordockOpts) {
+      await cleanupTensordockInstances(tensordockOpts.apiKey, tensordockOpts.authId);
+    }
+    if (modalApiKey) {
+      await cleanupModalApps(modalApiKey);
+    }
+  } catch (cleanupErr) {
+    console.warn(`[gpu] Pre-deploy cleanup error (non-fatal): ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`);
+  }
+
+  // Build per-provider GPU type map (provider's own priority list, filtered to the selected types)
+  const gpuPriorityByProvider = getDefaultGpuPriorityByProvider();
+  for (const p of Object.keys(gpuPriorityByProvider)) {
+    gpuPriorityByProvider[p] = getGpuPriorityForProvider(p)
+      .filter(g => gpuTypes.includes(g) || gpuTypes.length === 0);
+    if (gpuPriorityByProvider[p].length === 0) gpuPriorityByProvider[p] = gpuTypes;
+  }
+
+  // Apply selection criteria: re-sort per-provider GPU lists (and main gpuTypes) at deploy time.
+  const sortBy = getGpuSortBy();
+  if (sortBy === 'latency') {
+    const latencyData = getBestLatencyByGpuModel();
+    const normalizeGpu = (s: string) => s.replace(/nvidia|geforce/gi, '').replace(/\s+/g, '').toLowerCase();
+    const getLatMs = (gpu: string): number => (latencyData[normalizeGpu(gpu)]?.bestMs ?? Infinity);
+    const sortByLatency = (list: string[]) => [...list].sort((a, b) => getLatMs(a) - getLatMs(b));
+    gpuTypes = sortByLatency(gpuTypes);
+    for (const p of Object.keys(gpuPriorityByProvider)) {
+      gpuPriorityByProvider[p] = sortByLatency(gpuPriorityByProvider[p]);
+    }
+    console.log(`[gpu] deploy sort=latency → ${gpuTypes.map(g => `${g.replace('NVIDIA ','').replace('GeForce ','')}(${getLatMs(g) === Infinity ? '?' : getLatMs(g) + 'ms'})`).join(', ')}`);
+  } else if (sortBy === 'price') {
+    // Price sorting is handled inside autoSelectCheapestGpu / provider clients — nothing to reorder here.
+  }
+  // balanced: keep existing order (user priority list already incorporates reputation/latency balance)
+
+  return { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider };
+}
+
+// ── Deploy kickoff: launch the deploy promise and send HTTP response ──────────
+
+/**
+ * Start the async deploy, set up the deploy promise, and write the 202 response.
+ */
+function _startDeployAndRespond(
+  config: DeployConfig,
+  tierResult: TierSelectionResult,
+  requestId: string,
+  res: ServerResponse,
+): void {
+  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, containerDiskInGb } = config;
+  const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
+
+  setDeployCancelled(false);
+  try {
+    deploymentSM.startDeploying();
+  } catch (smErr) {
+    console.error(`[gpu] State machine error: ${smErr}`);
+    setDeployLock(false);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Internal server error', type: 'server_error' } }));
+    return;
+  }
+
+  const extra = { region, storageGb, hfToken, env: Object.keys(deployEnv).length > 0 ? deployEnv : undefined, interruptible, ...(dockerStartCmd ? { dockerStartCmd } : {}), ...(containerDiskInGb > 0 ? { containerDiskInGb } : {}) };
+  const deployFn = raceCount > 1
+    ? startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount)
+    : startDeployWithTiers(tiers, resolvedDockerImage, gpuTypes, extra, gpuPriorityByProvider);
+  setDeployPromise(
+    deployFn
+      .catch(err => {
+        console.error(`[gpu] Deploy failed unexpectedly: ${err}`);
+        setDeployState({ status: 'error', message: `Deploy failed: ${err instanceof Error ? err.message : err}` });
+      })
+      .finally(() => { setDeployLock(false); setDeployPromise(null); })
+  );
+
+  const modeLabel = raceCount > 1 ? `race×${raceCount}` : `${tiers.length} tier(s): ${tiers.map(t => t.label).join(' → ')}`;
+  console.log(`[req=${requestId}] GPU deploy started: ${modeLabel}`);
+  res.writeHead(202, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ status: 'creating', message: `Deploy started (${modeLabel})` }));
+}
+
+// ── Main deploy handler (orchestrator) ───────────────────────────────────────
+
 export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
@@ -89,292 +432,46 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   }
   setDeployLock(true);
 
-  let body: Record<string, unknown>;
-  try { body = await readJsonBody(req); }
-  catch (e) { setDeployLock(false); handleBodyError(res, e); return; }
-  const apiKey = (body.apiKey as string) || process.env.RUNPOD_API_KEY || '';  // RunPod API key (optional if other providers set)
-  const vastApiKey = (body.vastApiKey as string) || process.env.VAST_API_KEY || '';
-  const tensordockApiKey = (body.tensordockApiKey as string) || process.env.TENSORDOCK_API_KEY || '';
-  const tensordockAuthId = (body.tensordockAuthId as string) || process.env.TENSORDOCK_AUTH_ID || '';
-  const modalTokenId = (body.modalTokenId as string) || process.env.MODAL_TOKEN_ID || '';
-  const modalTokenSecret = (body.modalTokenSecret as string) || process.env.MODAL_TOKEN_SECRET || '';
-  const modalApiKey = modalTokenId && modalTokenSecret ? `${modalTokenId}:${modalTokenSecret}` : '';
+  // Once _startDeployAndRespond is called, it takes ownership of the lock
+  // (released in the deploy promise's .finally()). Track this so we only
+  // release the lock in our finally block if ownership was NOT transferred.
+  let lockTransferred = false;
+  try {
+    let body: Record<string, unknown>;
+    try { body = await readJsonBody(req); }
+    catch (e) { handleBodyError(res, e); return; }
 
-  // Validate credential format before using them
-  const credError = validateGpuCredentials({
-    runpodApiKey: apiKey,
-    vastApiKey,
-    tensordockApiKey,
-    tensordockAuthId,
-    modalTokenId,
-    modalTokenSecret,
-  });
-  if (credError) {
-    setDeployLock(false);
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: credError }));
-    return;
-  }
-
-  if (!apiKey && !vastApiKey && !tensordockApiKey && !modalApiKey) {
-    setDeployLock(false);  // Release lock on validation failure
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'At least one provider API key is required (apiKey, vastApiKey, or Modal tokens)' }));
-    return;
-  }
-  // Resolve profile-based GPU deploy config — use active profile as defaults
-  const profileId = (body.profileId as string) || loadProviderConfig().activeProfileId;
-  const profiles = loadProviderConfig().profiles;
-  const activeProfile = profileId ? profiles.find(p => p.id === profileId) : null;
-  const profileGpu = activeProfile?.gpuDeploy;
-
-  const dockerImage = (body.dockerImage as string) || profileGpu?.dockerImage || '';
-  if (!dockerImage) {
-    setDeployLock(false);
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'dockerImage is required — provide dockerImage, profileId, or set an active profile with gpuDeploy config' }));
-    return;
-  }
-  const rawGpuTypes = body.gpuTypes;
-  let gpuTypes: string[] = Array.isArray(rawGpuTypes)
-    ? rawGpuTypes
-    : typeof rawGpuTypes === 'string'
-      ? rawGpuTypes.split(',').map((s: string) => s.trim()).filter(Boolean)
-      : profileGpu?.gpuTypes ?? [];
-  const autoSelectGpu = body.autoSelectGpu === true;
-  // Region / hardware filters: profile → saved preference → request body
-  const region = (body.region as string) || profileGpu?.region || getDeployRegion();
-  // Apply profile timeout if provided (and not overridden by body)
-  if (profileGpu?.timeoutMin && typeof body.timeoutMin !== 'number') {
-    setDeployTimeoutMin(profileGpu.timeoutMin);
-  }
-  const minVramGbReq = typeof body.minVramGb === 'number' ? body.minVramGb : getMinVramGb();
-  const preferSsdReq = typeof body.preferSsd === 'boolean' ? body.preferSsd : getPreferSsd();
-  const storageGb = (body.storageGb as number) || 0;
-  const hfToken = (body.hfToken as string) || process.env.HF_TOKEN || '';
-  const llmModel = (body.llmModel as string) || '';  // "translategemma", "mistral", or "groq"
-  // Spot (interruptible) instances — default false (on-demand) for reliability
-  const interruptible = body.interruptible === true ? true : undefined;
-  // Hedged deploy: launch raceCount instances in parallel, keep first healthy
-  // Body overrides persisted setting; persisted setting overrides default of 1
-  const raceCount = typeof body.raceCount === 'number' && body.raceCount >= 1
-    ? Math.min(Math.floor(body.raceCount), 10)
-    : getDeployRaceCount();
-  // Custom env vars, Docker start command, and container disk for arbitrary workloads (e.g. fine-tuning)
-  const customEnv = (typeof body.env === 'object' && body.env !== null && !Array.isArray(body.env))
-    ? body.env as Record<string, string> : {};
-  const dockerStartCmd = (body.dockerStartCmd as string) || '';
-  const containerDiskInGb = typeof body.containerDiskInGb === 'number' ? body.containerDiskInGb : 0;
-  const deployEnv: Record<string, string> = { ...customEnv };
-  if (llmModel) deployEnv.CONF_LLM_MODEL = llmModel;
-  // No cloud API keys sent to GPU pod — the gateway handles all cloud
-  // fallback routing (GPU cold → Groq/OpenAI). Pod only serves local models.
-
-  // Enforce GPU allowlist — only tested & approved GPUs are permitted.
-  // Preferred GPUs are tried first; A40 is backup only when nothing else is available.
-  if (gpuTypes.length > 0) {
-    // Allowlist = AI Gateway priority list (deploy-settings.ts) — single source of truth
-    const effectiveAllowed = new Set(getGpuPriorityList());
-    const rejected = gpuTypes.filter(g => !effectiveAllowed.has(g));
-    if (rejected.length > 0) {
-      console.warn(`[req=${requestId}] Rejected non-tested GPU(s): ${rejected.join(', ')}`);
-    }
-    gpuTypes = gpuTypes.filter(g => effectiveAllowed.has(g));
-    if (gpuTypes.length === 0) {
-      setDeployLock(false);  // release lock — validation failed, no deploy started
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: `None of the requested GPUs are in the tested allowlist. Allowed: ${[...effectiveAllowed].join(', ')}` }));
+    // Step 1: Validate request and build typed config
+    let config: DeployConfig;
+    try {
+      config = await _validateDeployRequest(body, requestId);
+    } catch (err: unknown) {
+      const { status, message } = err as { status: number; message: string };
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: message }));
       return;
     }
-  } else if (!autoSelectGpu) {
-    // No GPU specified and no auto-select — use user-configured priority list from settings
-    // (falls back to getVerifiedGpuTypes which uses benchmark data or hardcoded defaults)
-    const userList = getGpuPriorityList();
-    gpuTypes = userList.length > 0 ? userList : await getVerifiedGpuTypes(dockerImage);
-    console.log(`[req=${requestId}] No GPU specified — using priority list: ${gpuTypes.join(', ')}`);
-  }
 
-  // Pre-flight: validate RunPod key + check balance via RunpodClient (single call)
-  let runpodApiKey = apiKey;
-  if (runpodApiKey) {
+    // Step 2: Select deployment tiers (balance checks, GPU ordering, image resolution)
+    let tierResult: TierSelectionResult;
     try {
-      const runpodBal = await runpod.checkBalance({ apiKey: runpodApiKey });
-      if (runpodBal !== null) {
-        console.log(`[gpu] RunPod balance: $${runpodBal.balance.toFixed(2)}`);
-        if (runpodBal.balance < 1.0) {
-          console.warn(`[gpu] RunPod balance too low ($${runpodBal.balance.toFixed(2)}) — skipping provider`);
-          runpodApiKey = '';  // exclude from tier list
-        }
-      }
-    } catch (balErr) {
-      const msg = balErr instanceof Error ? balErr.message : String(balErr);
-      if (/401|403|unauthorized|invalid/i.test(msg)) {
-        setDeployLock(false);
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'RunPod API key is invalid' }));
-        return;
-      }
-      console.warn(`[gpu] RunPod balance check failed: ${msg} — proceeding anyway`);
+      tierResult = await _selectDeploymentTier(config, requestId);
+    } catch (err: unknown) {
+      const { status, message } = err as { status: number; message: string };
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: message }));
+      return;
+    }
+
+    // Step 3: Start the deploy and send the 202 response.
+    // _startDeployAndRespond takes ownership of the lock (released in .finally()).
+    lockTransferred = true;
+    _startDeployAndRespond(config, tierResult, requestId, res);
+  } finally {
+    if (!lockTransferred) {
+      setDeployLock(false);
     }
   }
-
-  // Pre-deploy balance check for TensorDock — validates credentials and skips provider if balance < $1
-  let tensordockOpts = tensordockApiKey && tensordockAuthId ? { apiKey: tensordockApiKey, authId: tensordockAuthId } : undefined;
-  if (tensordockOpts) {
-    try {
-      const bal = await tensordock.checkBalance({ apiKey: tensordockApiKey, authId: tensordockAuthId });
-      if (bal !== null) {
-        console.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly cost: $${bal.hourlyCost.toFixed(3)})`);
-        if (bal.balance < 1.0) {
-          console.warn(`[gpu] TensorDock balance too low ($${bal.balance.toFixed(2)}) — skipping provider`);
-          tensordockOpts = undefined;  // exclude from tier list
-        }
-      }
-    } catch (balErr) {
-      const msg = balErr instanceof Error ? balErr.message : String(balErr);
-      if (/401|403|unauthorized|invalid/i.test(msg)) {
-        setDeployLock(false);
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'TensorDock credentials are invalid' }));
-        return;
-      }
-      console.warn(`[gpu] TensorDock balance check failed: ${msg} — proceeding anyway`);
-    }
-  }
-
-  // Build tier list from available API keys, optionally filtered to a specific provider
-  // Log providers excluded due to insufficient balance
-  const balanceExcluded: string[] = [];
-  if (apiKey && !runpodApiKey) balanceExcluded.push('RunPod');
-  if ((tensordockApiKey && tensordockAuthId) && !tensordockOpts) balanceExcluded.push('TensorDock');
-  if (balanceExcluded.length > 0) {
-    console.warn(`[gpu] Providers excluded (balance < $1): ${balanceExcluded.join(', ')}`);
-  }
-
-  const allTiers = buildGpuTiers(runpodApiKey, vastApiKey || undefined, tensordockOpts, modalApiKey || undefined);
-  const filtered = filterTiers(allTiers, body.provider as ProviderName | undefined);
-  if ('error' in filtered) {
-    const balanceHint = balanceExcluded.length > 0
-      ? ` (${balanceExcluded.join(', ')} excluded — balance < $1)`
-      : '';
-    setDeployLock(false);
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: filtered.error + balanceHint }));
-    return;
-  }
-  const tiers = filtered.tiers;
-
-  // Auto-select cheapest GPUs with adequate VRAM when autoSelectGpu is true and no gpuTypes specified
-  if (autoSelectGpu && gpuTypes.length === 0 && tiers.length > 0) {
-    const selectedGpus = await autoSelectCheapestGpu(tiers, { region, minVramGb: minVramGbReq, preferSsd: preferSsdReq });
-    if (selectedGpus.length > 0) {
-      gpuTypes = selectedGpus;
-      console.log(`[gpu] Auto-selected ${gpuTypes.length} GPU types: ${gpuTypes.join(', ')}`);
-    } else {
-      console.warn(`[gpu] autoSelectGpu: no suitable GPU found (>=${getMinVramGb()}GB VRAM), falling back to verified GPU list`);
-      gpuTypes = await getVerifiedGpuTypes(dockerImage);
-    }
-  }
-
-  // Latency-aware GPU type ordering: deprioritise types where ALL known hosts exceed threshold.
-  // Types with no latency data are left in place (unknown = don't block).
-  // This runs after autoSelectGpu so the sorted list gets the correct order.
-  const maxLatencyMs = getLatencyMaxMs();
-  if (maxLatencyMs > 0 && gpuTypes.length > 1) {
-    const sorted = sortGpuTypesByLatency(gpuTypes, maxLatencyMs);
-    if (sorted.join(',') !== gpuTypes.join(',')) {
-      console.log(`[gpu] Latency filter (threshold=${maxLatencyMs}ms): ${gpuTypes.join(', ')} → ${sorted.join(', ')}`);
-    }
-    gpuTypes = sorted;
-  }
-
-  // Auto-swap Docker image to Blackwell variant when a Blackwell GPU is selected
-  // (must run AFTER autoSelectGpu so Blackwell GPUs get the right image)
-  const resolvedDockerImage = resolveDockerImageForGpus(dockerImage, gpuTypes);
-
-  // Validate GPU types against cached provider inventory
-  if (gpuTypes.length > 0) {
-    const gpuTypeError = await validateGpuTypesFromCache(gpuTypes);
-    if (gpuTypeError) {
-      console.warn(`[req=${requestId}] GPU type validation warning: ${gpuTypeError}`);
-    }
-  }
-
-  // Clean up ALL existing instances (not just the tracked one) to prevent orphans
-  const oldPodId = deployState.podId;
-  stopGpuMonitoring();
-  updateTranslationProfile({ gpuEndpoint: undefined }, 'handleGpuDeploy:cleanup');
-  try {
-    if (apiKey) {
-      await cleanupAllPods(apiKey, oldPodId ? [oldPodId] : []);
-    }
-    if (vastApiKey) {
-      await cleanupVastInstances(vastApiKey);
-    }
-    if (tensordockOpts) {
-      await cleanupTensordockInstances(tensordockOpts.apiKey, tensordockOpts.authId);
-    }
-    if (modalApiKey) {
-      await cleanupModalApps(modalApiKey);
-    }
-  } catch (cleanupErr) {
-    console.warn(`[gpu] Pre-deploy cleanup error (non-fatal): ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`);
-  }
-
-  setDeployCancelled(false); // reset in case previous deploy set this to true
-  try {
-    deploymentSM.startDeploying();
-  } catch (smErr) {
-    console.error(`[gpu] State machine error: ${smErr}`);
-    setDeployLock(false);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: { message: 'Internal server error', type: 'server_error' } }));
-    return;
-  }
-  // Build per-provider GPU type map (provider's own priority list, filtered to the selected types)
-  const gpuPriorityByProvider = getDefaultGpuPriorityByProvider(); // load defaults
-  for (const p of Object.keys(gpuPriorityByProvider)) {
-    gpuPriorityByProvider[p] = getGpuPriorityForProvider(p)
-      .filter(g => gpuTypes.includes(g) || gpuTypes.length === 0);
-    if (gpuPriorityByProvider[p].length === 0) gpuPriorityByProvider[p] = gpuTypes;
-  }
-
-  // Apply selection criteria: re-sort per-provider GPU lists (and main gpuTypes) at deploy time.
-  // This ensures the criteria setting (price / latency / balanced) is respected on every deploy,
-  // not just in auto-select mode.
-  const sortBy = getGpuSortBy();
-  if (sortBy === 'latency') {
-    const latencyData = getBestLatencyByGpuModel();
-    const normalizeGpu = (s: string) => s.replace(/nvidia|geforce/gi, '').replace(/\s+/g, '').toLowerCase();
-    const getLatMs = (gpu: string): number => (latencyData[normalizeGpu(gpu)]?.bestMs ?? Infinity);
-    const sortByLatency = (list: string[]) => [...list].sort((a, b) => getLatMs(a) - getLatMs(b));
-    gpuTypes = sortByLatency(gpuTypes);
-    for (const p of Object.keys(gpuPriorityByProvider)) {
-      gpuPriorityByProvider[p] = sortByLatency(gpuPriorityByProvider[p]);
-    }
-    console.log(`[gpu] deploy sort=latency → ${gpuTypes.map(g => `${g.replace('NVIDIA ','').replace('GeForce ','')}(${getLatMs(g) === Infinity ? '?' : getLatMs(g) + 'ms'})`).join(', ')}`);
-  } else if (sortBy === 'price') {
-    // Price sorting is handled inside autoSelectCheapestGpu / provider clients — nothing to reorder here.
-    // The user's priority list is preserved; cheapest offer within each type is naturally chosen.
-  }
-  // balanced: keep existing order (user priority list already incorporates reputation/latency balance)
-  const extra = { region, storageGb, hfToken, env: Object.keys(deployEnv).length > 0 ? deployEnv : undefined, interruptible, ...(dockerStartCmd ? { dockerStartCmd } : {}), ...(containerDiskInGb > 0 ? { containerDiskInGb } : {}) };
-  const deployFn = raceCount > 1
-    ? startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount)
-    : startDeployWithTiers(tiers, resolvedDockerImage, gpuTypes, extra, gpuPriorityByProvider);
-  setDeployPromise(
-    deployFn
-      .catch(err => {
-        console.error(`[gpu] Deploy failed unexpectedly: ${err}`);
-        setDeployState({ status: 'error', message: `Deploy failed: ${err instanceof Error ? err.message : err}` });
-      })
-      .finally(() => { setDeployLock(false); setDeployPromise(null); })
-  );
-
-  const modeLabel = raceCount > 1 ? `race×${raceCount}` : `${tiers.length} tier(s): ${tiers.map(t => t.label).join(' → ')}`;
-  console.log(`[req=${requestId}] GPU deploy started: ${modeLabel}`);
-  res.writeHead(202, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ status: 'creating', message: `Deploy started (${modeLabel})` }));
 }
 
 export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -562,9 +659,8 @@ async function refreshProviderBalance(
   credentials: ProviderCredentials,
 ): Promise<void> {
   try {
-    // Modal: no credit balance API — verify credentials only via HTTP token check.
-    // TODO: replace with ModalClient method once it supports HTTP credential validation
-    // (ModalClient.listInstances() uses CLI exec internally, not suitable for a quick check)
+    // Modal: no credit balance API — validate credentials via HTTP health check.
+    // Uses /v1/apps?limit=1 as a lightweight auth probe (returns 401 on bad creds).
     if (name === 'modal') {
       const [tokenId, tokenSecret] = (credentials.apiKey || '').split(':');
       const b64 = Buffer.from(`${tokenId}:${tokenSecret}`).toString('base64');
@@ -577,13 +673,16 @@ async function refreshProviderBalance(
         canDeploy: r.ok,
         balanceNote: r.ok
           ? 'Modal does not expose a credit balance API — check modal.com/settings/billing'
-          : 'Modal credentials invalid (401)',
+          : `Modal credentials invalid (HTTP ${r.status})`,
         cachedAt: Date.now(),
       });
       return;
     }
     if (!client.checkBalance) return;
-    const result = await client.checkBalance(credentials);
+    const result = await Promise.race([
+      client.checkBalance(credentials),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${name} checkBalance timed out`)), 10_000)),
+    ]);
     if (result === null) {
       console.warn(`[balance-cache] ${name} returned null — keeping previous cache`);
       return;
@@ -919,7 +1018,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
           entry.spendPerDay = entry.spendPerHr * 24;
           entry.low = bal.balance < threshold;
         }
-      }).catch(() => {}),
+      }).catch(err => { console.warn(`[balance] RunPod balance check failed: ${err instanceof Error ? err.message : err}`); }),
     );
   }
 
@@ -941,7 +1040,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
           entry.spendPerDay = entry.spendPerHr * 24;
           entry.low = bal.balance < threshold;
         }
-      }).catch(() => {}),
+      }).catch(err => { console.warn(`[balance] TensorDock balance check failed: ${err instanceof Error ? err.message : err}`); }),
     );
   }
 
@@ -962,7 +1061,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
           entry.spendPerDay = entry.spendPerHr * 24;
           entry.low = bal.balance < threshold;
         }
-      }).catch(() => {}),
+      }).catch(err => { console.warn(`[balance] Vast.ai balance check failed: ${err instanceof Error ? err.message : err}`); }),
     );
   }
 
@@ -987,7 +1086,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
           entry.balance = Math.round(pct); // show as % remaining
           entry.low = pct < 10;
         }
-      }).catch(() => {}),
+      }).catch(err => { console.warn(`[balance] ElevenLabs balance check failed: ${err instanceof Error ? err.message : err}`); }),
     );
   }
 
@@ -1019,7 +1118,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
           const totalBal = (balData.balances || []).reduce((s, b) => s + (b.amount || 0), 0);
           entry.balance = totalBal;
           entry.low = totalBal < threshold;
-        } catch {}
+        } catch (err) { console.warn(`[balance] Deepgram balance check failed: ${err instanceof Error ? err.message : err}`); }
       })(),
     );
   }
@@ -1551,7 +1650,7 @@ export async function handlePostResetReadiness(_req: IncomingMessage, res: Serve
       ep,
       () => markGpuShadowMode(ep),
       (stage, bestMs, targetMs) => markGpuWarmupFailed(stage, bestMs, targetMs),
-    ).catch(() => {});
+    ).catch(err => { console.warn(`[readiness] GPU readiness check failed after reset: ${err instanceof Error ? err.message : err}`); });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, message: 'Readiness check restarted' }));
   } else {
@@ -1627,7 +1726,7 @@ export async function handleGetGpuTypes(req: IncomingMessage, res: ServerRespons
           byType.set(name, { name, vram: offer.vram ?? 0, count: 1, minPrice: offer.pricePerHr ?? 0 });
         }
       }
-    } catch { /* skip provider on error */ }
+    } catch (err) { console.warn(`[gpu-types] Provider offer fetch failed: ${err instanceof Error ? err.message : err}`); }
   }));
 
   const gpuTypes = [...byType.values()]

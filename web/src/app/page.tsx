@@ -1,16 +1,56 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import dynamic from 'next/dynamic';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
 import { Sidebar, type SidebarItem } from '@/components/ui';
-import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon } from 'lucide-react';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon, Gauge, RefreshCw } from 'lucide-react';
+
+// Critical above-the-fold section — loaded eagerly
 import { OverviewSection } from '@/sections/OverviewSection';
-import { BotSection } from '@/sections/BotSection';
-import { ReputationSection } from '@/sections/ReputationSection';
-import { LogsSection } from '@/sections/LogsSection';
-import { ApiKeysSection } from '@/sections/ApiKeysSection';
-import { ProfilesSection } from '@/sections/ProfilesSection';
-import { PlaygroundSection } from '@/sections/PlaygroundSection';
+
+// Lazy-load sections that aren't visible on initial page load
+const LoadingPlaceholder = () => (
+  <div className="p-8 text-center" style={{ color: 'var(--color-text-muted)' }}>Loading...</div>
+);
+
+const BotSection = dynamic(
+  () => import('@/sections/BotSection').then(m => ({ default: m.BotSection })),
+  { loading: LoadingPlaceholder },
+);
+const ReputationSection = dynamic(
+  () => import('@/sections/ReputationSection').then(m => ({ default: m.ReputationSection })),
+  { loading: LoadingPlaceholder },
+);
+const LogsSection = dynamic(
+  () => import('@/sections/LogsSection').then(m => ({ default: m.LogsSection })),
+  { loading: LoadingPlaceholder },
+);
+const ApiKeysSection = dynamic(
+  () => import('@/sections/ApiKeysSection').then(m => ({ default: m.ApiKeysSection })),
+  { loading: LoadingPlaceholder },
+);
+const ProfilesSection = dynamic(
+  () => import('@/sections/ProfilesSection').then(m => ({ default: m.ProfilesSection })),
+  { loading: LoadingPlaceholder },
+);
+const PlaygroundSection = dynamic(
+  () => import('@/sections/PlaygroundSection').then(m => ({ default: m.PlaygroundSection })),
+  { loading: LoadingPlaceholder },
+);
+const ReadinessSection = dynamic(
+  () => import('@/sections/ReadinessSection').then(m => ({ default: m.ReadinessSection })),
+  { loading: LoadingPlaceholder },
+);
+const AutoSwapSection = dynamic(
+  () => import('@/sections/AutoSwapSection').then(m => ({ default: m.AutoSwapSection })),
+  { loading: LoadingPlaceholder },
+);
+const StandbySection = dynamic(
+  () => import('@/sections/StandbySection').then(m => ({ default: m.StandbySection })),
+  { loading: LoadingPlaceholder },
+);
 
 const NAV_ITEMS: SidebarItem[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -22,10 +62,13 @@ const NAV_ITEMS: SidebarItem[] = [
   { id: '_tools', label: 'Tools', divider: true, icon: LayoutDashboard },
   { id: 'tools/playground', label: 'Playground', icon: Sparkles },
   { id: 'tools/bot', label: 'Bot', icon: Bot },
+  { id: 'tools/auto-swap', label: 'Auto-Swap', icon: RefreshCw },
+  { id: 'tools/standby', label: 'GPU Standby', icon: Moon },
 
   { id: '_monitor', label: 'Monitor', divider: true, icon: LayoutDashboard },
   { id: 'monitor/reputation', label: 'Reputation', icon: Shield },
   { id: 'monitor/logs', label: 'Logs & Metrics', icon: ScrollText },
+  { id: 'monitor/readiness', label: 'Readiness', icon: Gauge },
 ];
 
 const VALID_ROUTES = new Set(NAV_ITEMS.filter(item => !item.divider).map(item => item.id));
@@ -42,7 +85,6 @@ function getRouteFromPath(): string {
   if (path === 'config/providers' || path === 'config/deploy') return 'config/profiles';
   if (path === 'tools/pipeline') return 'tools/playground';
   if (path === 'tools/pathbench') return 'config/profiles';
-  if (path === 'monitor/readiness') return 'config/profiles';
   // Match sub-routes: /config/profiles/edit/xxx → config/profiles
   for (const route of VALID_ROUTES) {
     if (path.startsWith(route + '/')) return route;
@@ -139,13 +181,16 @@ function Dashboard() {
 
         {/* Page content */}
         <div className="max-w-6xl mx-auto" style={{ minHeight: 'calc(100vh - 3.5rem)' }}>
-          {activeTab === 'overview' && <OverviewSection />}
-          {activeTab === 'config/api-keys' && <ApiKeysSection />}
-          {activeTab === 'config/profiles' && <ProfilesSection />}
-          {activeTab === 'tools/playground' && <PlaygroundSection />}
-          {activeTab === 'tools/bot' && <BotSection />}
-          {activeTab === 'monitor/reputation' && <ReputationSection />}
-          {activeTab === 'monitor/logs' && <LogsSection />}
+          {activeTab === 'overview' && <ErrorBoundary><OverviewSection /></ErrorBoundary>}
+          {activeTab === 'config/api-keys' && <ErrorBoundary><ApiKeysSection /></ErrorBoundary>}
+          {activeTab === 'config/profiles' && <ErrorBoundary><ProfilesSection /></ErrorBoundary>}
+          {activeTab === 'tools/playground' && <ErrorBoundary><PlaygroundSection /></ErrorBoundary>}
+          {activeTab === 'tools/bot' && <ErrorBoundary><BotSection /></ErrorBoundary>}
+          {activeTab === 'monitor/reputation' && <ErrorBoundary><ReputationSection /></ErrorBoundary>}
+          {activeTab === 'monitor/logs' && <ErrorBoundary><LogsSection /></ErrorBoundary>}
+          {activeTab === 'monitor/readiness' && <ErrorBoundary><ReadinessSection /></ErrorBoundary>}
+          {activeTab === 'tools/auto-swap' && <ErrorBoundary><AutoSwapSection /></ErrorBoundary>}
+          {activeTab === 'tools/standby' && <ErrorBoundary><StandbySection /></ErrorBoundary>}
         </div>
       </main>
     </div>

@@ -368,7 +368,7 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
         recordPerStageLatency('stt', ms);
         recordShadowRun(ms, shadowTarget, () => markGpuProductionReady(shadowEndpoint));
       })
-      .catch(() => {}); // ignore shadow errors
+      .catch(e => console.warn('[shadow] STT run failed:', e instanceof Error ? e.message : e)); // ignore shadow errors
   }
 
   // Build race candidates: GPU (if available) + cloud providers
@@ -689,7 +689,7 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
         recordPerStageLatency('llm', ms);
         recordShadowRun(ms, shadowTarget, () => markGpuProductionReady(shadowEndpoint));
       })
-      .catch(() => {}); // ignore shadow errors
+      .catch(e => console.warn('[shadow] LLM run failed:', e instanceof Error ? e.message : e)); // ignore shadow errors
   }
 
   // Build race candidates: GPU (if available) + cloud providers
@@ -927,9 +927,9 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
   if ((anyOnGpu && !allOnGpu && gpuEp) || forceHybridForClone) {
     // [4] Pre-warm GPU + cloud connections in parallel (via ai-gateway)
     const effectiveGpuEp = gpuEp || cloneGpuEndpoint!;
-    probeGpuHealth(effectiveGpuEp).catch(() => {});
+    probeGpuHealth(effectiveGpuEp).catch(e => console.warn('[probe] GPU health failed:', e instanceof Error ? e.message : e));
     if (groqAvailable && process.env.GROQ_API_KEY) {
-      probeCloudProvider('groq', process.env.GROQ_API_KEY, 2000).catch(() => {});
+      probeCloudProvider('groq', process.env.GROQ_API_KEY, 2000).catch(e => console.warn('[probe] Groq warmup failed:', e instanceof Error ? e.message : e));
     }
 
     try {
@@ -1169,7 +1169,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
   // Warm GPU connection while preparing pipeline call (TCP/TLS handshake overlaps)
   if (effectiveGpuEndpoint) {
     validateRemoteEndpoint(effectiveGpuEndpoint);
-    fetch(`${effectiveGpuEndpoint}/health`, { signal: AbortSignal.timeout(2000) }).catch(() => {});
+    fetch(`${effectiveGpuEndpoint}/health`, { signal: AbortSignal.timeout(2000) }).catch(e => console.warn('[probe] GPU pre-warm failed:', e instanceof Error ? e.message : e));
   }
 
   try {

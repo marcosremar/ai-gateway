@@ -1,0 +1,161 @@
+# Page snapshot
+
+```yaml
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e6]: AI
+        - generic [ref=e7]:
+          - heading "AI Gateway Settings" [level=1] [ref=e8]
+          - generic [ref=e11]: 1h 1m
+      - navigation [ref=e12]:
+        - generic [ref=e13]:
+          - button "Overview" [ref=e14] [cursor=pointer]:
+            - img [ref=e15]
+            - generic [ref=e20]: Overview
+          - generic [ref=e21]: Config
+          - button "Profiles" [ref=e22] [cursor=pointer]:
+            - img [ref=e23]
+            - generic [ref=e26]: Profiles
+          - button "API Keys" [ref=e27] [cursor=pointer]:
+            - img [ref=e28]
+            - generic [ref=e31]: API Keys
+          - generic [ref=e32]: Tools
+          - button "Playground" [ref=e33] [cursor=pointer]:
+            - img [ref=e34]
+            - generic [ref=e36]: Playground
+          - button "Bot" [ref=e37] [cursor=pointer]:
+            - img [ref=e38]
+            - generic [ref=e41]: Bot
+          - button "Auto-Swap" [ref=e42] [cursor=pointer]:
+            - img [ref=e43]
+            - generic [ref=e48]: Auto-Swap
+          - button "GPU Standby" [ref=e49] [cursor=pointer]:
+            - img [ref=e50]
+            - generic [ref=e52]: GPU Standby
+          - generic [ref=e53]: Monitor
+          - button "Reputation" [ref=e54] [cursor=pointer]:
+            - img [ref=e55]
+            - generic [ref=e57]: Reputation
+          - button "Logs & Metrics" [ref=e58] [cursor=pointer]:
+            - img [ref=e59]
+            - generic [ref=e62]: Logs & Metrics
+          - button "Readiness" [ref=e63] [cursor=pointer]:
+            - img [ref=e64]
+            - generic [ref=e67]: Readiness
+      - button "Collapse" [ref=e69] [cursor=pointer]:
+        - img [ref=e70]
+        - generic [ref=e72]: Collapse
+    - main [ref=e73]:
+      - generic [ref=e74]:
+        - generic [ref=e76]: Overview
+        - generic [ref=e77]:
+          - button "Switch to light" [ref=e78] [cursor=pointer]:
+            - img [ref=e79]
+          - generic [ref=e86]: ok
+      - generic [ref=e88]:
+        - generic [ref=e89]:
+          - generic [ref=e92]: Online
+          - generic [ref=e93]:
+            - generic [ref=e94]: uptime 1h 1m
+            - generic [ref=e95]:
+              - text: p50
+              - generic [ref=e96]: 142ms
+            - generic [ref=e97]:
+              - text: p95
+              - generic [ref=e98]: 380ms
+            - generic [ref=e99]: 256 requests
+            - generic [ref=e100]:
+              - text: spend today
+              - generic [ref=e101]: $1.23 / $10.00
+        - generic [ref=e102]:
+          - generic [ref=e103]:
+            - generic [ref=e105]:
+              - img [ref=e107]
+              - generic [ref=e110]: GPU Instances
+            - generic [ref=e112]:
+              - img [ref=e113]
+              - paragraph [ref=e116]: No GPU deployed
+          - generic [ref=e117]:
+            - generic [ref=e118]:
+              - generic [ref=e119]:
+                - img [ref=e121]
+                - generic [ref=e124]: Meeting Bot
+              - generic [ref=e127]: idle
+            - generic [ref=e129]:
+              - img [ref=e130]
+              - paragraph [ref=e133]: No bot active
+        - generic [ref=e134]:
+          - generic [ref=e136]:
+            - heading "Profiles" [level=3] [ref=e137]
+            - generic [ref=e138]: 1 profile
+          - generic [ref=e141]:
+            - generic [ref=e142]:
+              - button [ref=e143] [cursor=pointer]:
+                - img [ref=e144]
+              - button "GPU Deploy Test" [ref=e147] [cursor=pointer]
+              - generic [ref=e148]:
+                - generic [ref=e149]:
+                  - img [ref=e150]
+                  - text: issues
+                - generic [ref=e152]: active
+                - button "Edit profile" [ref=e153] [cursor=pointer]:
+                  - img [ref=e154]
+            - generic [ref=e158]:
+              - generic [ref=e159]:
+                - generic [ref=e160]:
+                  - img [ref=e162]
+                  - generic [ref=e165]: STT
+                - generic [ref=e168]:
+                  - img [ref=e169]
+                  - generic [ref=e173]: gpu
+                  - generic [ref=e174]: 210ms
+              - generic [ref=e175]:
+                - generic [ref=e176]:
+                  - img [ref=e178]
+                  - generic [ref=e181]: LLM
+                - generic [ref=e184]:
+                  - img [ref=e185]
+                  - generic [ref=e189]: gpu
+                  - generic [ref=e190]: 210ms
+              - generic [ref=e191]:
+                - generic [ref=e192]:
+                  - img [ref=e194]
+                  - generic [ref=e198]: TTS
+                - generic [ref=e201]:
+                  - img [ref=e202]
+                  - generic [ref=e206]: gpu
+                  - generic [ref=e207]: 210ms
+        - generic [ref=e208]:
+          - generic [ref=e209]:
+            - generic [ref=e210]:
+              - img [ref=e211]
+              - generic [ref=e224]: Full Pipeline — Cold
+            - generic [ref=e225]: 425ms
+          - generic [ref=e226]:
+            - generic [ref=e227]:
+              - img [ref=e228]
+              - generic [ref=e230]: Full Pipeline — Warm
+            - generic [ref=e231]: —
+        - generic [ref=e232]:
+          - generic [ref=e233]:
+            - generic [ref=e234]: Provider Performance
+            - generic [ref=e235]:
+              - generic [ref=e236]: reqs
+              - generic [ref=e237]: avg lat
+              - generic [ref=e238]: err%
+          - generic [ref=e239]:
+            - generic [ref=e240]:
+              - generic [ref=e241]: groq
+              - img [ref=e244]
+              - generic [ref=e246]: "180"
+              - generic [ref=e247]: 95ms
+              - generic [ref=e248]: 2%
+            - generic [ref=e249]:
+              - generic [ref=e250]: gpu
+              - generic [ref=e253]: "45"
+              - generic [ref=e254]: 210ms
+              - generic [ref=e255]: 0%
+  - alert [ref=e256]
+```
