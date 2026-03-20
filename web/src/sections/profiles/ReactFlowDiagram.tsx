@@ -2,32 +2,74 @@
 
 import { useMemo, useCallback, useState, useEffect, useRef, memo } from 'react';
 import {
-  ReactFlow, Background,
+  ReactFlow, Background, useNodesState,
   Handle, Position, MarkerType,
   type Node, type Edge, type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import Sortable from 'sortablejs';
-import { Mic, Bot, Volume2, Headphones, Plus, GripVertical, ChevronDown } from 'lucide-react';
+import { Mic, Bot, Volume2, Headphones, Plus, GripVertical, ChevronDown, Cloud, Cpu, Zap, Upload, Type, Radio } from 'lucide-react';
 import { PIPELINE_CATALOG, type PipelineChainEntry, type ProfileService } from '../provider-types';
 import { PROVIDER_ICON } from '../FallbackChainList';
 import { pMeta } from './constants';
 
 // ── IO Node (mic / headphones) ──
 
+const INPUT_TYPES = [
+  { id: 'mic', label: 'Mic', Icon: Mic, color: '#38bdf8' },
+  { id: 'upload', label: 'Upload', Icon: Upload, color: '#10b981' },
+  { id: 'text', label: 'Text', Icon: Type, color: '#a78bfa' },
+  { id: 'stream', label: 'Stream', Icon: Radio, color: '#f59e0b' },
+];
+
 const IONode = memo(({ data }: NodeProps) => {
   const isInput = data.ioType === 'input';
   const color = (data.color as string) || '#38bdf8';
-  const Icon = isInput ? Mic : Headphones;
-  return (
-    <div className="flex flex-col items-center gap-1">
-      <div className="w-10 h-10 rounded-full flex items-center justify-center shadow-md"
-        style={{ background: `color-mix(in srgb, ${color} 15%, var(--color-surface-elevated))`, border: `2px solid ${color}` }}>
-        <Icon className="w-5 h-5" style={{ color }} />
+  const [selected, setSelected] = useState('mic');
+  const onSelectInput = data.onSelectInput as ((type: string) => void) | undefined;
+
+  if (!isInput) {
+    return (
+      <div className="flex flex-col items-center gap-1">
+        <div className="w-10 h-10 rounded-full flex items-center justify-center shadow-md cursor-grab active:cursor-grabbing"
+          style={{ background: `color-mix(in srgb, ${color} 15%, var(--color-surface-elevated))`, border: `2px solid ${color}` }}>
+          <Headphones className="w-5 h-5" style={{ color }} />
+        </div>
+        <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color }}>{data.label as string}</span>
+        <Handle type="target" position={Position.Left} style={{ background: color, width: 6, height: 6 }} />
       </div>
-      <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color }}>{data.label as string}</span>
-      {isInput && <Handle type="source" position={Position.Right} style={{ background: color, width: 6, height: 6 }} />}
-      {!isInput && <Handle type="target" position={Position.Left} style={{ background: color, width: 6, height: 6 }} />}
+    );
+  }
+
+  const sel = INPUT_TYPES.find(t => t.id === selected) ?? INPUT_TYPES[0];
+
+  return (
+    <div className="flex flex-col items-center gap-1.5">
+      {/* Selected input circle — draggable area */}
+      <div className="w-12 h-12 rounded-full flex items-center justify-center shadow-md cursor-grab active:cursor-grabbing"
+        style={{ background: `color-mix(in srgb, ${sel.color} 15%, var(--color-surface-elevated))`, border: `2px solid ${sel.color}` }}>
+        <sel.Icon className="w-5 h-5" style={{ color: sel.color }} />
+      </div>
+      {/* Input type selector buttons */}
+      <div className="flex items-center gap-1">
+        {INPUT_TYPES.map(t => {
+          const active = selected === t.id;
+          return (
+            <button key={t.id}
+              onClick={() => { setSelected(t.id); onSelectInput?.(t.id); }}
+              title={t.label}
+              className="nodrag nopan w-6 h-6 rounded-md flex items-center justify-center cursor-pointer transition-all"
+              style={{
+                background: active ? `color-mix(in srgb, ${t.color} 15%, transparent)` : 'transparent',
+                border: active ? `1.5px solid ${t.color}` : '1.5px solid var(--color-border)',
+              }}>
+              <t.Icon className="w-3 h-3" style={{ color: active ? t.color : 'var(--color-text-muted)' }} />
+            </button>
+          );
+        })}
+      </div>
+      <span className="text-[8px] font-bold uppercase tracking-widest" style={{ color: sel.color }}>{sel.label}</span>
+      <Handle type="source" position={Position.Right} style={{ background: sel.color, width: 6, height: 6 }} />
     </div>
   );
 });
@@ -35,24 +77,34 @@ IONode.displayName = 'IONode';
 
 // ── Provider Item (rendered inside StageNode's sortable list) ──
 
-function ProviderItem({ entry, index, entryLabel, modelLabel }: {
+function ProviderItem({ entry, index, entryLabel, modelLabel, onClick }: {
   entry: PipelineChainEntry; index: number;
   entryLabel: string; modelLabel: string | null;
+  onClick?: () => void;
 }) {
+  const [hovered, setHovered] = useState(false);
   const pi = PROVIDER_ICON[entry.provider];
   const provColor = pi?.color ?? pMeta(entry.provider).color;
   const Icon = pi?.icon;
   const isDisabled = entry.enabled === false;
 
   return (
-    <div className="flex items-center gap-1.5 rounded-lg border transition-all"
-      style={{ opacity: isDisabled ? 0.4 : 1, background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)' }}>
+    <div
+      className="flex items-center gap-1.5 rounded-lg border transition-all"
+      onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
+      style={{
+        opacity: isDisabled ? 0.4 : 1,
+        cursor: onClick ? 'pointer' : 'default',
+        background: hovered ? `color-mix(in srgb, ${provColor} 8%, var(--color-surface-elevated))` : 'var(--color-surface-elevated)',
+        borderColor: hovered ? provColor : 'var(--color-border)',
+      }}>
       {/* Drag handle */}
       <div className="drag-handle pl-1.5 py-2 cursor-grab active:cursor-grabbing flex-shrink-0">
         <GripVertical className="w-3 h-3" style={{ color: 'var(--color-text-muted)', opacity: 0.5 }} />
       </div>
-      {/* Card content */}
+      {/* Card content — click opens service settings */}
       <div className="flex items-center gap-2 pr-2.5 py-1.5 flex-1 min-w-0"
+        onClick={onClick}
         style={{
           borderLeft: `2.5px solid ${isDisabled ? 'var(--color-border)' : index === 0 ? provColor : 'var(--color-border)'}`,
           paddingLeft: 8,
@@ -73,6 +125,10 @@ function ProviderItem({ entry, index, entryLabel, modelLabel }: {
             </span>
           )}
         </div>
+        {/* Arrow hint on hover */}
+        {hovered && onClick && (
+          <ChevronDown className="w-3 h-3 -rotate-90 flex-shrink-0" style={{ color: provColor }} />
+        )}
       </div>
     </div>
   );
@@ -91,8 +147,9 @@ const StageNode = memo(({ data }: NodeProps) => {
   const entryLabels = data.entryLabels as string[];
   const modelLabels = data.modelLabels as (string | null)[];
   const services = data.services as ProfileService[];
-  const onAddFallback = data.onAddFallback as ((sk: string, p: string, m: string) => void) | undefined;
+  const onAddService = data.onAddService as ((sk: string, p: string, m: string) => void) | undefined;
   const onReorderChain = data.onReorderChain as ((sk: string, c: PipelineChainEntry[]) => void) | undefined;
+  const onClickProvider = data.onClickProvider as ((sk: string, idx: number) => void) | undefined;
   const existingProviders = chain.map(c => c.provider);
 
   const StageIcon = stageKey === 'stt' ? Mic : stageKey === 'tts' ? Volume2 : Bot;
@@ -124,9 +181,10 @@ const StageNode = memo(({ data }: NodeProps) => {
   }, [chain.length, stageKey, onReorderChain, chain]);
 
   return (
-    <div className="nodrag nopan rounded-xl border"
+    <div className="rounded-xl border cursor-grab active:cursor-grabbing"
       style={{
         width: data.width as number,
+        overflow: 'visible',
         background: enabled ? `color-mix(in srgb, ${color} 3%, var(--color-bg))` : 'var(--color-surface)',
         borderColor: `color-mix(in srgb, ${color} 25%, var(--color-border))`,
         borderTop: `3px solid ${enabled ? color : 'var(--color-border)'}`,
@@ -151,8 +209,8 @@ const StageNode = memo(({ data }: NodeProps) => {
       </div>
 
       {/* Sortable provider list (sortablejs) */}
-      <div className="px-3 py-2.5">
-        <div ref={listRef} className="flex flex-col gap-1.5">
+      <div className="px-3 py-2.5" style={{ overflow: 'visible' }}>
+        <div ref={listRef} className="flex flex-col gap-1.5" style={{ overflow: 'visible' }}>
           {chain.map((entry, j) => (
             <div key={`${entry.provider}-${entry.model}-${j}`} data-index={j}>
               {j > 0 && (
@@ -166,20 +224,51 @@ const StageNode = memo(({ data }: NodeProps) => {
               <ProviderItem
                 entry={entry} index={j}
                 entryLabel={entryLabels[j]} modelLabel={modelLabels[j]}
+                onClick={onClickProvider ? () => onClickProvider(stageKey, j) : undefined}
               />
             </div>
           ))}
         </div>
 
         {/* Add Fallback button */}
-        {onAddFallback && enabled && (
+        {onAddService && enabled && (
           <div className="pt-1">
-            {chain.length > 0 && (
+            {chain.length > 0 && !addOpen && (
               <div className="flex justify-center py-0.5">
                 <svg width="10" height="10" viewBox="0 0 10 10">
                   <path d="M5 0 L5 7 M2 5 L5 9 L8 5" stroke="var(--color-text-muted)" strokeWidth="1.2"
                     fill="none" strokeLinecap="round" strokeLinejoin="round" opacity="0.2" />
                 </svg>
+              </div>
+            )}
+            {/* Service type selector */}
+            {addOpen && (
+              <div className="nodrag nopan mb-1 rounded-lg border overflow-hidden"
+                style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)' }}>
+                {[
+                  { type: 'cloud', label: 'Cloud API', sub: 'Groq, OpenAI, Deepgram...', color: '#38bdf8', provider: 'groq', Icon: Cloud },
+                  { type: 'serverless', label: 'Serverless', sub: 'Modal, Lambda...', color: '#a78bfa', provider: 'modal', Icon: Zap },
+                  { type: 'self-hosted', label: 'Self-hosted', sub: 'GPU Pod, Docker...', color: '#f59e0b', provider: 'gpu', Icon: Cpu },
+                ].map(opt => {
+                  const defaultModel = (catalog?.models as Record<string, { id: string }[]>)?.[opt.provider]?.[0]?.id ?? opt.provider;
+                  return (
+                    <button key={opt.type}
+                      onClick={() => { onAddService(stageKey, opt.provider, defaultModel); setAddOpen(false); }}
+                      className="nodrag nopan w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors cursor-pointer"
+                      onMouseEnter={e => { e.currentTarget.style.background = 'color-mix(in srgb, var(--color-text-muted) 6%, transparent)'; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                    >
+                      <div className="w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0"
+                        style={{ background: `color-mix(in srgb, ${opt.color} 12%, transparent)` }}>
+                        <opt.Icon className="w-3 h-3" style={{ color: opt.color }} />
+                      </div>
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-[10px] font-semibold" style={{ color: 'var(--color-text)' }}>{opt.label}</span>
+                        <span className="text-[8px]" style={{ color: 'var(--color-text-muted)' }}>{opt.sub}</span>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             )}
             <button
@@ -192,47 +281,8 @@ const StageNode = memo(({ data }: NodeProps) => {
                 background: addOpen ? `color-mix(in srgb, ${color} 6%, transparent)` : 'transparent',
               }}>
               <Plus className="w-3.5 h-3.5" style={{ transition: 'transform 0.2s', transform: addOpen ? 'rotate(45deg)' : 'none' }} />
-              {addOpen ? 'Choose provider' : 'Add Fallback'}
+              {addOpen ? 'Close' : 'Add Service'}
             </button>
-            {addOpen && (
-              <div className="nodrag nopan mt-1.5 rounded-lg border overflow-hidden"
-                style={{ background: 'var(--color-surface-elevated)', borderColor: color, boxShadow: `0 4px 16px color-mix(in srgb, ${color} 15%, rgba(0,0,0,0.4))` }}>
-                {availableProviders.map(p => {
-                  const ppi = PROVIDER_ICON[p.id];
-                  const pColor = ppi?.color ?? '#8b949e';
-                  const PIcon = ppi?.icon;
-                  const already = existingProviders.includes(p.id);
-                  const models = (catalog?.models as Record<string, { id: string; label: string }[]>)?.[p.id] ?? [];
-                  const defaultModel = models[0]?.id ?? p.id;
-                  return (
-                    <button key={p.id} disabled={already}
-                      onClick={() => { onAddFallback(stageKey, p.id, defaultModel); setAddOpen(false); }}
-                      className="nodrag nopan w-full flex items-center gap-2.5 px-3 py-2 text-left text-[10px] transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default"
-                      style={{ color: already ? 'var(--color-text-muted)' : 'var(--color-text)' }}
-                      onMouseEnter={e => { if (!already) e.currentTarget.style.background = `color-mix(in srgb, ${pColor} 10%, transparent)`; }}
-                      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
-                    >
-                      {PIcon && (
-                        <div className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0"
-                          style={{ background: `color-mix(in srgb, ${pColor} 15%, transparent)` }}>
-                          <PIcon className="w-3 h-3" style={{ color: pColor }} />
-                        </div>
-                      )}
-                      <div className="flex flex-col min-w-0 flex-1">
-                        <span className="font-semibold" style={{ color: already ? 'var(--color-text-muted)' : pColor }}>{p.label}</span>
-                        {models[0] && <span className="text-[8px]" style={{ color: 'var(--color-text-muted)' }}>{models[0].label}</span>}
-                      </div>
-                      {already && (
-                        <span className="text-[8px] px-1.5 py-0.5 rounded-full flex-shrink-0"
-                          style={{ background: 'color-mix(in srgb, var(--color-text-muted) 10%, transparent)', color: 'var(--color-text-muted)' }}>
-                          added
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -258,14 +308,14 @@ interface ReactFlowDiagramProps {
   sttEnabled: boolean;
   ttsEnabled: boolean;
   services: ProfileService[];
-  onAddService?: () => void;
-  onAddFallback?: (stageKey: string, provider: string, model: string) => void;
+  onAddService?: (stageKey: string, provider: string, model: string) => void;
   onReorderChain?: (stageKey: string, newChain: PipelineChainEntry[]) => void;
+  onClickProvider?: (stageKey: string, entryIdx: number) => void;
 }
 
 export function ReactFlowPipelineDiagram({
   sttChain, llmChain, ttsChain, sttEnabled, ttsEnabled, services,
-  onAddFallback, onReorderChain,
+  onAddService, onReorderChain, onClickProvider,
 }: ReactFlowDiagramProps) {
 
   const gpuService = services.find(s => s.kind === 'gpu-pod');
@@ -311,16 +361,16 @@ export function ReactFlowPipelineDiagram({
     const stageW = 220;
     const stageGap = 80;
     const ioSize = 50;
-    const ioGap = 40;
+    const ioGap = 80;
     const startX = ioSize + ioGap;
 
-    // Input
-    n.push({
+    // Input — added last (below) so it renders on top of stage boxes
+    const inputNode: Node = {
       id: 'input', type: 'io',
       position: { x: 0, y: 80 },
       data: { ioType: 'input', label: 'AUDIO', color: '#38bdf8' },
-      draggable: false,
-    });
+      draggable: true,
+    };
 
     enabledStages.forEach((stage, i) => {
       const x = startX + i * (stageW + stageGap);
@@ -333,10 +383,11 @@ export function ReactFlowPipelineDiagram({
           entryLabels: stage.chain.map(e => getEntryLabel(e)),
           modelLabels: stage.chain.map(e => getModelLabel(stage.key, e)),
           services,
-          onAddFallback,
+          onAddService,
           onReorderChain,
+          onClickProvider,
         },
-        draggable: false,
+        draggable: true,
       });
 
       // Edge from previous
@@ -358,12 +409,12 @@ export function ReactFlowPipelineDiagram({
     const outX = startX + enabledStages.length * (stageW + stageGap) - stageGap + ioGap;
     const outColor = DATA_TYPE_COLORS[lastStage?.output ?? 'audio'] ?? '#fbbf24';
 
-    n.push({
+    const outputNode: Node = {
       id: 'output', type: 'io',
       position: { x: outX, y: 80 },
       data: { ioType: 'output', label: (lastStage?.output ?? 'AUDIO').toUpperCase(), color: outColor },
-      draggable: false,
-    });
+      draggable: true,
+    };
 
     e.push({
       id: 'e-last-output',
@@ -375,25 +426,39 @@ export function ReactFlowPipelineDiagram({
       markerEnd: { type: MarkerType.ArrowClosed, color: outColor, width: 12, height: 12 },
     });
 
+    // Add IO nodes last so they render on top of stage boxes
+    n.push(inputNode, outputNode);
+
     return { nodes: n, edges: e };
-  }, [sttChain, llmChain, ttsChain, sttEnabled, ttsEnabled, getEntryLabel, getModelLabel, services, onAddFallback, onReorderChain]);
+  }, [sttChain, llmChain, ttsChain, sttEnabled, ttsEnabled, getEntryLabel, getModelLabel, services, onAddService, onReorderChain]);
 
   const maxChainLen = Math.max(sttChain.length, llmChain.length, ttsChain.length, 1);
   const diagramHeight = Math.max(300, 46 + 14 + maxChainLen * 62 + 60 + 14 + 80);
 
+  // Managed node state so drag actually moves nodes
+  const [liveNodes, setLiveNodes, onNodesChange] = useNodesState(nodes);
+  const prevNodesRef = useRef(nodes);
+  if (nodes !== prevNodesRef.current) {
+    prevNodesRef.current = nodes;
+    setLiveNodes(nodes);
+  }
+
   return (
     <div className="rounded-xl border"
-      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', width: '100%', height: `${diagramHeight}px`, overflow: 'visible' }}>
+      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', width: '100%', height: '100%', minHeight: `${diagramHeight}px`, overflow: 'visible' }}>
       <ReactFlow
-        nodes={nodes}
+        nodes={liveNodes}
         edges={edges}
+        onNodesChange={onNodesChange}
         nodeTypes={nodeTypes}
         fitView
         fitViewOptions={{ padding: 0.15, minZoom: 0.7, maxZoom: 1 }}
         minZoom={0.5}
         maxZoom={1.5}
+        translateExtent={[[0, 0], [1200, diagramHeight]]}
+        nodeExtent={[[0, 0], [1200, diagramHeight - 50]]}
         proOptions={{ hideAttribution: true }}
-        nodesDraggable={false}
+        nodesDraggable={true}
         nodesConnectable={false}
         elementsSelectable={true}
         selectNodesOnDrag={false}

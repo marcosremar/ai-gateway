@@ -23,10 +23,10 @@ import {
   type ProfileStage,
 } from './profiles/constants';
 import { LatencySelector } from './profiles/LatencySelector';
-import { ProfileFlowDiagram } from './profiles/ProfileFlowDiagram';
 import { ServiceCard } from './profiles/ServiceCard';
 import { ServiceForm } from './profiles/ServiceForm';
 import { StageList } from './profiles/StageList';
+import { ReactFlowPipelineDiagram } from './profiles/ReactFlowDiagram';
 
 // ── Main ProfilesSection ──
 
@@ -151,6 +151,9 @@ export function ProfilesSection() {
   // Service form state
   const [showAddService, setShowAddService] = useState(false);
   const [editingService, setEditingService] = useState<ProfileService | null>(null);
+
+  // Slide-in panel: shows ServiceCard from the right when clicking a provider in the diagram
+  const [slideService, setSlideService] = useState<ProfileService | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -335,7 +338,7 @@ export function ProfilesSection() {
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full" style={{ position: 'relative' }}>
       {/* Top bar: Back + editable name + Save */}
       <div className="flex items-center gap-3 px-6 py-3 border-b flex-shrink-0"
         style={{ borderColor: 'var(--color-border)' }}>
@@ -379,187 +382,131 @@ export function ProfilesSection() {
         </div>
       )}
 
-      {/* Flow diagram (always visible) */}
-      <div className="px-6 py-3 border-b flex-shrink-0" style={{ borderColor: 'var(--color-border)' }}>
-        <ProfileFlowDiagram
+      {/* React Flow pipeline diagram — fills available space */}
+      <div className="px-6 py-3 flex-1 min-h-0" style={{ borderColor: 'var(--color-border)' }}>
+        <ReactFlowPipelineDiagram
           sttChain={sttChain} llmChain={llmChain} ttsChain={ttsChain}
           sttEnabled={sttEnabled} ttsEnabled={ttsEnabled}
-          services={services} latency={latency}
-          name={editingProfile?.name}
-          onToggleEntry={(stageKey, entryIdx) => {
+          services={services}
+          onAddService={(stageKey, provider, model) => {
+            // 1. Add to chain
             setStages(prev => prev.map(s => {
               if (s.key !== stageKey) return s;
-              return {
-                ...s,
-                chain: s.chain.map((e, i) =>
-                  i === entryIdx ? { ...e, enabled: e.enabled === false ? undefined : false } : e
-                ),
-              };
+              return { ...s, chain: [...s.chain, { provider, model }] };
+            }));
+            // 2. Find or create the matching service and open slide panel
+            const isGpu = provider === 'gpu';
+            let svc = isGpu
+              ? services.find(s => s.kind === 'gpu-pod')
+              : services.find(s => s.kind === 'cloud' && s.cloudProvider === provider);
+            if (!svc) {
+              // Auto-create the service entry
+              const providerName = provider.charAt(0).toUpperCase() + provider.slice(1);
+              svc = { id: uid(), name: providerName, kind: isGpu ? 'gpu-pod' : 'cloud', cloudProvider: isGpu ? undefined : provider };
+              setServices(prev => [...prev, svc!]);
+            }
+            setSlideService(svc);
+          }}
+          onReorderChain={(stageKey, newChain) => {
+            setStages(prev => prev.map(s => {
+              if (s.key !== stageKey) return s;
+              return { ...s, chain: newChain };
             }));
           }}
-          onToggleStage={(stageKey) => {
-            setStages(prev => prev.map(s => s.key === stageKey ? { ...s, enabled: !s.enabled } : s));
+          onClickProvider={(stageKey, entryIdx) => {
+            const stage = stages.find(s => s.key === stageKey);
+            const entry = stage?.chain[entryIdx];
+            if (!entry) return;
+            const matchingSvc = entry.provider === 'gpu'
+              ? services.find(s => s.kind === 'gpu-pod')
+              : services.find(s => s.kind === 'cloud' && s.cloudProvider === entry.provider);
+            if (matchingSvc) {
+              setSlideService(prev => prev?.id === matchingSvc.id ? null : matchingSvc);
+            }
           }}
-          onAddService={() => { setDetailTab('services'); setEditingService(null); setShowAddService(true); }}
         />
       </div>
 
-      {/* Tabs */}
-      {(() => {
-        const gpuCount = services.filter(s => s.kind === 'gpu-pod').length;
-        const cloudCount = services.filter(s => s.kind === 'cloud').length;
-        const tabDefs = [
-          { id: 'pipeline' as const, label: 'Pipeline', icon: Mic, color: '#38bdf8', badge: `${stages.length} stages` },
-          { id: 'services' as const, label: 'Services', icon: Server, color: '#a78bfa', badge: gpuCount > 0 ? `${gpuCount} GPU · ${cloudCount} cloud` : `${services.length} services` },
-        ];
-        return (
-          <div className="flex items-stretch border-b flex-shrink-0" style={{ borderColor: 'var(--color-border)' }}>
-            {tabDefs.map(tab => {
-              const active = detailTab === tab.id;
-              const TabIcon = tab.icon;
-              return (
-                <button key={tab.id} onClick={() => setDetailTab(tab.id)}
-                  className="flex-1 flex items-center justify-center gap-2.5 px-4 py-3 text-xs font-semibold transition-all cursor-pointer border-b-2 -mb-px"
-                  style={{
-                    color: active ? tab.color : 'var(--color-text-muted)',
-                    borderBottomColor: active ? tab.color : 'transparent',
-                    background: active ? `color-mix(in srgb, ${tab.color} 4%, transparent)` : 'transparent',
-                  }}
-                  onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)'; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = active ? `color-mix(in srgb, ${tab.color} 4%, transparent)` : 'transparent'; }}
-                >
-                  <TabIcon className="w-4 h-4" />
-                  <span>{tab.label}</span>
-                  <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full"
-                    style={{
-                      background: active ? `color-mix(in srgb, ${tab.color} 12%, transparent)` : 'color-mix(in srgb, var(--color-text-muted) 8%, transparent)',
-                      color: active ? tab.color : 'var(--color-text-muted)',
-                    }}>
-                    {tab.badge}
-                  </span>
-                </button>
-              );
-            })}
-            {/* Add Service button — always visible in tab bar */}
-            <button
-              onClick={() => { setDetailTab('services'); setEditingService(null); setShowAddService(true); }}
-              className="flex items-center gap-1.5 px-4 py-3 text-xs font-semibold transition-all cursor-pointer flex-shrink-0 hover:opacity-80"
-              style={{ color: '#a78bfa' }}
-            >
-              <Plus className="w-3.5 h-3.5" /> Add Service
-            </button>
-          </div>
-        );
-      })()}
 
-      {/* Tab content (scrollable) */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-4">
-        {/* Pipeline tab */}
-        {detailTab === 'pipeline' && (
-          <StageList stages={stages} setStages={setStages} services={services} />
-        )}
+      {/* Backdrop overlay */}
+      {slideService && (
+        <div className="fixed inset-0" style={{ background: 'rgba(0,0,0,0.3)', zIndex: 50 }}
+          onClick={() => setSlideService(null)} />
+      )}
 
-        {/* Services tab */}
-        {detailTab === 'services' && (
-          <>
-            {/* Latency + Add Service top bar */}
-            <div className="flex items-center gap-3 px-4 py-3 rounded-xl border"
+      {/* Slide-in service panel — fixed to viewport right */}
+      <div
+        className="fixed top-0 right-0 h-full border-l transition-transform duration-300 ease-in-out"
+        style={{
+          width: 'min(560px, 90vw)',
+          transform: slideService ? 'translateX(0)' : 'translateX(100%)',
+          background: 'var(--color-bg)',
+          borderColor: 'var(--color-border)',
+          zIndex: 51,
+          boxShadow: '-8px 0 40px rgba(0,0,0,0.4)',
+        }}>
+        {slideService && (
+          <div className="flex flex-col h-full">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-3 border-b flex-shrink-0"
               style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
-              <span className="text-xs font-semibold flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Latency</span>
-              <LatencySelector value={latency} onChange={setLatency} />
-              <div className="flex-1" />
-              <Button variant="outline" size="sm" onClick={() => { setEditingService(null); setShowAddService(true); }}>
-                <Plus className="w-3.5 h-3.5" /> Add Service
-              </Button>
+              <div className="flex items-center gap-2">
+                <Server className="w-4 h-4" style={{ color: 'var(--color-text-muted)' }} />
+                <span className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>
+                  {slideService.name}
+                </span>
+                <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded"
+                  style={{
+                    background: slideService.kind === 'gpu-pod'
+                      ? 'color-mix(in srgb, #f59e0b 12%, transparent)'
+                      : slideService.cloudProvider === 'modal'
+                        ? 'color-mix(in srgb, #a78bfa 12%, transparent)'
+                        : 'color-mix(in srgb, #38bdf8 12%, transparent)',
+                    color: slideService.kind === 'gpu-pod'
+                      ? '#f59e0b'
+                      : slideService.cloudProvider === 'modal'
+                        ? '#a78bfa'
+                        : '#38bdf8',
+                  }}>
+                  {slideService.kind === 'gpu-pod' ? 'Self-hosted' : slideService.cloudProvider === 'modal' ? 'Serverless' : 'Cloud API'}
+                </span>
+              </div>
+              <button onClick={() => setSlideService(null)}
+                className="p-1.5 rounded cursor-pointer transition-colors"
+                style={{ color: 'var(--color-text-muted)' }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'color-mix(in srgb, var(--color-text-muted) 10%, transparent)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
+                <ChevronLeft className="w-4 h-4" style={{ transform: 'rotate(180deg)' }} />
+              </button>
             </div>
-
-            {services.map(svc => (
-              <div key={svc.id}>
+            {/* GPU pod: ServiceCard with deploy settings */}
+            {slideService.kind === 'gpu-pod' && (
+              <div className="flex-1 overflow-y-auto">
                 <ServiceCard
-                  service={svc}
-                  onEdit={() => {
-                    if (editingService?.id === svc.id) { setEditingService(null); setShowAddService(false); }
-                    else { setEditingService(svc); setShowAddService(true); }
+                  service={slideService}
+                  onEdit={() => {}}
+                  onDelete={() => {
+                    setServices(prev => prev.filter(s => s.id !== slideService.id));
+                    setSlideService(null);
                   }}
-                  onDelete={() => setServices(prev => prev.filter(s => s.id !== svc.id))}
                 />
-                {/* Inline edit form below this card */}
-                {showAddService && editingService?.id === svc.id && (
-                  <div className="mt-1">
-                    <ServiceForm
-                      initial={editingService}
-                      onSave={s => {
-                        setServices(prev => prev.map(x => x.id === s.id ? s : x));
-                        setShowAddService(false);
-                        setEditingService(null);
-                      }}
-                      onCancel={() => { setShowAddService(false); setEditingService(null); }}
-                    />
-                  </div>
-                )}
-              </div>
-            ))}
-            {services.length === 0 && !showAddService && (
-              <p className="text-xs py-4 text-center" style={{ color: 'var(--color-text-muted)' }}>
-                No services defined. Add a GPU pod or cloud API service.
-              </p>
-            )}
-            {/* Add new service form (not editing existing) */}
-            {showAddService && !editingService ? (
-              <ServiceForm
-                onSave={s => {
-                  setServices(prev => [...prev, s]);
-                  setShowAddService(false);
-                }}
-                onCancel={() => { setShowAddService(false); }}
-              />
-            ) : !showAddService && (
-              <div className="space-y-2">
-                {/* Quick-add cloud API services */}
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Quick add cloud API</p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {(['groq', 'openai', 'deepgram', 'fireworks', 'modal'] as const).map(pid => {
-                      const provIcon = PROVIDER_ICON[pid];
-                      const PIcon = provIcon?.icon ?? Cloud;
-                      const pColor = provIcon?.color ?? '#7ba896';
-                      const alreadyAdded = services.some(s => s.kind === 'cloud' && s.cloudProvider === pid);
-                      return (
-                        <button key={pid} type="button"
-                          disabled={alreadyAdded}
-                          onClick={() => {
-                            const providerName = pid.charAt(0).toUpperCase() + pid.slice(1);
-                            setServices(prev => [...prev, { id: uid(), name: providerName, kind: 'cloud', cloudProvider: pid }]);
-                          }}
-                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer capitalize disabled:cursor-default"
-                          style={{
-                            background: alreadyAdded ? `color-mix(in srgb, ${pColor} 8%, transparent)` : 'var(--color-surface-elevated)',
-                            borderColor: alreadyAdded ? pColor : 'var(--color-border)',
-                            color: alreadyAdded ? pColor : 'var(--color-text-muted)',
-                            opacity: alreadyAdded ? 0.7 : 1,
-                          }}>
-                          <PIcon className="w-3.5 h-3.5" />
-                          {pid}
-                          {alreadyAdded && <Check className="w-3 h-3 ml-0.5" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-                {/* Add GPU pod */}
-                <button
-                  type="button"
-                  onClick={() => { setEditingService(null); setShowAddService(true); }}
-                  className="flex items-center justify-center gap-1.5 w-full px-3 py-2 rounded-xl border border-dashed text-xs font-medium cursor-pointer transition-all hover:border-[var(--color-text-muted)]"
-                  style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}
-                >
-                  <Cpu className="w-3.5 h-3.5" /> Add Service
-                </button>
               </div>
             )}
-          </>
+            {/* Cloud or edit form: ServiceForm with all settings */}
+            {slideService.kind === 'cloud' && (
+              <div className="flex-1 overflow-y-auto p-4">
+                <ServiceForm
+                  initial={slideService}
+                  onSave={s => {
+                    setServices(prev => prev.map(x => x.id === s.id ? s : x));
+                    setSlideService(s);
+                  }}
+                  onCancel={() => setSlideService(null)}
+                />
+              </div>
+            )}
+          </div>
         )}
-
       </div>
     </div>
   );

@@ -9,10 +9,12 @@
   box-shadow: none !important;
 }
 
-/* Allow NodeToolbar popups to overflow the React Flow container */
+/* Allow NodeToolbar popups and sliding panels to overflow the React Flow container */
 .react-flow,
 .react-flow__viewport,
-.react-flow__renderer {
+.react-flow__renderer,
+.react-flow__nodes,
+.react-flow__node {
   overflow: visible !important;
 }
 
