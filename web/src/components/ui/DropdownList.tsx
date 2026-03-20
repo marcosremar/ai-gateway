@@ -41,23 +41,31 @@ export function DropdownList({
 
   const close = useCallback(() => { setOpen(false); onClose?.(); }, [onClose]);
 
-  // Compute position when opening
+  // Compute position when opening — flip above trigger if not enough space below
+  const MAX_PANEL_H = 256; // matches max-h-64 (16rem = 256px)
   useEffect(() => {
     if (!open || !triggerRef.current) return;
-    const rect = triggerRef.current.getBoundingClientRect();
-    setPos({ top: rect.bottom + 4, left: rect.left, width: rect.width });
 
-    // Reposition on scroll/resize
-    const reposition = () => {
+    const computePos = () => {
       if (!triggerRef.current) return;
-      const r = triggerRef.current.getBoundingClientRect();
-      setPos({ top: r.bottom + 4, left: r.left, width: r.width });
+      const rect = triggerRef.current.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom - 8;
+      const spaceAbove = rect.top - 8;
+      // Open above if not enough space below but enough above
+      const openAbove = spaceBelow < MAX_PANEL_H && spaceAbove > spaceBelow;
+      setPos({
+        top: openAbove ? rect.top - Math.min(MAX_PANEL_H, spaceAbove) - 4 : rect.bottom + 4,
+        left: rect.left,
+        width: rect.width,
+      });
     };
-    window.addEventListener('scroll', reposition, true);
-    window.addEventListener('resize', reposition);
+
+    computePos();
+    window.addEventListener('scroll', computePos, true);
+    window.addEventListener('resize', computePos);
     return () => {
-      window.removeEventListener('scroll', reposition, true);
-      window.removeEventListener('resize', reposition);
+      window.removeEventListener('scroll', computePos, true);
+      window.removeEventListener('resize', computePos);
     };
   }, [open]);
 

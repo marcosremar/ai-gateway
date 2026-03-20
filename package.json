@@ -38,6 +38,8 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "franc": "6"
+    "franc": "6",
+    "opusscript": "^0.1.1",
+    "werift": "^0.22.9"
   }
 }
