@@ -2,7 +2,10 @@
 // handleWsCommand, startWsServer() — Bun native WS on PORT+1.
 
 import { botState, deployState, gpuHealthy, gpuModelWarmth, gpuReadinessState, gpuReadyForProduction, isStageWarm, isTtsWarm } from './state';
-import { shouldPreferGpuTts } from './providers';
+import {
+  shouldPreferGpuTts,
+  client, groqProfile, ollamaProfile, translationProfile,
+} from './providers';
 import { isGpuAvailable } from './state';
 import { broadcastWs, wsClients, startBotTranscriptPoll, stopBotTranscriptPoll, subscribeDub, unsubscribeDub, getActiveTargets } from './ws-state';
 import type { BabelCastWS } from './ws-state';
@@ -12,6 +15,10 @@ import { StreamingSTTRouter } from '../src/streaming-stt';
 import { loadProviderConfig } from './config-persistence';
 import { runStreamingPipeline } from './pipeline-runner';
 import type { PipelineCallbacks, PipelineResult } from './pipeline-runner';
+import { speculativeCache } from './speculative-cache';
+import { getLabsFlags } from './labs-settings';
+import { buildSystemPrompt, getCloudProviderName, getCloudProfile } from './ai-handlers';
+import { langNames } from './http-utils';
 
 // ── Streaming STT router — reads provider order from config, filters for streaming-capable ──
 function buildStreamingProviderOrder(): string[] {
@@ -52,6 +59,102 @@ const sttSessions = new Map<string, import('../ai-gateway/src/streaming-stt').St
 let botAudioSource: BabelCastWS | null = null;
 let botAudioSampleRate = 16000;
 let botAudioChunks = 0;
+
+// ── Bot audio → pipeline auto-processing ─────────────────────────────────
+// Buffers incoming bot PCM chunks. When enough audio accumulates (VAD-like),
+// runs the speech pipeline (STT→LLM→TTS) and broadcasts subtitle:early.
+
+let botAudioBuffer: Buffer[] = [];
+let botAudioBufferBytes = 0;
+let botAudioProcessing = false;
+let botAudioLastProcess = 0;
+
+// Config: process every ~3s of audio (16kHz 16-bit mono = 32000 bytes/s → ~96KB)
+const BOT_AUDIO_CHUNK_THRESHOLD = 3 * 32000; // 3 seconds at 16kHz 16-bit
+const BOT_AUDIO_MIN_INTERVAL_MS = 2000; // don't process more than once every 2s
+
+function getBotSourceTarget(): { source: string; target: string } {
+  // Read from bot join config or default
+  const url = botState.meetingUrl || '';
+  // Default: FR→EN (most common demo scenario)
+  return { source: 'fr', target: 'en' };
+}
+
+async function processBotAudioBuffer(): Promise<void> {
+  if (botAudioProcessing || botAudioBufferBytes < BOT_AUDIO_CHUNK_THRESHOLD) return;
+  if (Date.now() - botAudioLastProcess < BOT_AUDIO_MIN_INTERVAL_MS) return;
+
+  botAudioProcessing = true;
+  botAudioLastProcess = Date.now();
+
+  // Grab the buffered audio and reset
+  const chunks = botAudioBuffer;
+  const totalBytes = botAudioBufferBytes;
+  botAudioBuffer = [];
+  botAudioBufferBytes = 0;
+
+  try {
+    // Convert Int16 PCM to WAV
+    const pcmData = Buffer.concat(chunks);
+    const sampleRate = botAudioSampleRate || 16000;
+    const wavHeader = Buffer.alloc(44);
+    const dataSize = pcmData.length;
+    const fileSize = dataSize + 36;
+    wavHeader.write('RIFF', 0);
+    wavHeader.writeUInt32LE(fileSize, 4);
+    wavHeader.write('WAVE', 8);
+    wavHeader.write('fmt ', 12);
+    wavHeader.writeUInt32LE(16, 16); // fmt chunk size
+    wavHeader.writeUInt16LE(1, 20);  // PCM
+    wavHeader.writeUInt16LE(1, 22);  // mono
+    wavHeader.writeUInt32LE(sampleRate, 24);
+    wavHeader.writeUInt32LE(sampleRate * 2, 28); // byte rate
+    wavHeader.writeUInt16LE(2, 32);  // block align
+    wavHeader.writeUInt16LE(16, 34); // bits per sample
+    wavHeader.write('data', 36);
+    wavHeader.writeUInt32LE(dataSize, 40);
+    const wavBuffer = Buffer.concat([wavHeader, pcmData]);
+
+    const { source, target } = getBotSourceTarget();
+    console.log(`[bot-audio] Processing ${(totalBytes / 1024).toFixed(0)}KB audio (${(totalBytes / 32000).toFixed(1)}s) ${source}→${target}`);
+
+    const callbacks: PipelineCallbacks = {
+      onStageStart() {},
+      onStageDone() {},
+      onAudioChunk() {},
+      onComplete(result: PipelineResult) {
+        if (result.transcription?.trim()) {
+          console.log(`[bot-audio] Pipeline: "${result.transcription.slice(0, 40)}" → "${result.translation?.slice(0, 40)}"`);
+          // Broadcast as subtitle:early — this is what the website listens for
+          broadcastWs({
+            type: 'subtitle:early',
+            transcription: result.transcription,
+            translation: result.translation || '',
+            source,
+            target,
+          });
+          // Also broadcast as transcript
+          broadcastWs({
+            type: 'transcript',
+            text: result.transcription,
+            speaker: 'Meeting',
+          });
+        }
+      },
+      onError(stage: string, error: Error) {
+        console.error(`[bot-audio] Pipeline error at ${stage}: ${error.message}`);
+      },
+    };
+
+    await runStreamingPipeline(wavBuffer, {
+      source, target,
+    }, callbacks);
+  } catch (err) {
+    console.error(`[bot-audio] Pipeline error:`, err instanceof Error ? err.message : err);
+  } finally {
+    botAudioProcessing = false;
+  }
+}
 
 // ── PulseAudio capture from Docker container ─────────────────────────────────
 // Captures audio directly from PulseAudio's monitor source inside the bot
@@ -141,6 +244,26 @@ export function stopParecCapture(): void {
     parecProc = null;
     parecChunks = 0;
   }
+}
+
+/**
+ * Build a translation function for speculative cache that uses the same
+ * LLM routing as the normal pipeline (cloud providers).
+ */
+function buildSpeculativeTranslateFn(source: string, target: string, style: string): (text: string) => Promise<string> {
+  return async (text: string): Promise<string> => {
+    const sourceName = langNames[source] || source;
+    const targetName = langNames[target] || target;
+    const systemPrompt = buildSystemPrompt(sourceName, targetName, style);
+    const messages = [
+      { role: 'system' as const, content: systemPrompt },
+      { role: 'user' as const, content: text },
+    ];
+    const cloudProfile = getCloudProfile();
+    if (!cloudProfile) throw new Error('No cloud profile available');
+    const r = await client.chat(messages, cloudProfile);
+    return r.content;
+  };
 }
 
 export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unknown>): Promise<void> {
@@ -272,12 +395,36 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     unsubscribeDub(ws.data.id);
     ws.send(JSON.stringify({ type: 'dub:unsubscribed' }));
 
+  } else if (type === 'speculation:feed') {
+    // Feed a partial ASR result into the speculative translation cache.
+    // The client sends: { type: 'speculation:feed', sessionId, text, source, target, style? }
+    const labs = getLabsFlags();
+    if (!labs.speculativeTranslation) return; // no-op when flag is off
+
+    const sessionId = String(cmd.sessionId || '');
+    const text = String(cmd.text || '');
+    const source = String(cmd.source || 'fr');
+    const target = String(cmd.target || 'en');
+    const style = String(cmd.style || 'default');
+
+    if (!sessionId || !text.trim()) return;
+
+    const translateFn = buildSpeculativeTranslateFn(source, target, style);
+    speculativeCache.speculate(sessionId, text, translateFn);
+
   } else if (type === 'ping') {
     ws.send(JSON.stringify({ type: 'pong' }));
   }
 }
 
-type WsData = { id: string; type: 'bot' | 'stt' | 'bot-audio' | 'speech'; language?: string; speechConfig?: { source: string; target: string; speaker?: string } };
+type WsData = {
+  id: string;
+  type: 'bot' | 'stt' | 'bot-audio' | 'speech';
+  language?: string;
+  /** Target language for STT sessions — enables auto-speculation when set. */
+  speculateTarget?: string;
+  speechConfig?: { source: string; target: string; speaker?: string };
+};
 
 export function startWsServer() {
   const WS_PORT = PORT + 1;
@@ -312,7 +459,8 @@ export function startWsServer() {
         if (upgraded) return;
       } else if (url.pathname === '/v1/stt/stream') {
         const language = url.searchParams.get('language') || undefined;
-        const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'stt', language } });
+        const speculateTarget = url.searchParams.get('target') || undefined;
+        const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'stt', language, speculateTarget } });
         if (upgraded) return;
       } else if (url.pathname === '/ws/bot-audio') {
         // Bot audio relay — the meeting bot streams raw PCM here
@@ -352,6 +500,15 @@ export function startWsServer() {
             };
             backend.onResult = (evt) => {
               ws.send(JSON.stringify({ type: 'partial', text: evt.text, provider: evt.provider }));
+              // Auto-speculation: when target is set and Labs flag is on,
+              // feed partial STT results into the speculative cache.
+              const labs = getLabsFlags();
+              if (labs.speculativeTranslation && ws.data.speculateTarget && evt.text.trim()) {
+                const srcLang = ws.data.language || 'fr';
+                const tgtLang = ws.data.speculateTarget;
+                const translateFn = buildSpeculativeTranslateFn(srcLang, tgtLang, 'default');
+                speculativeCache.speculate(ws.data.id, evt.text, translateFn);
+              }
             };
             backend.onDisconnected = (reason) => {
               console.log(`[stt-ws] Backend ${backend.provider} disconnected: ${reason} id=${ws.data.id}`);
@@ -485,6 +642,7 @@ export function startWsServer() {
             };
             runStreamingPipeline(audioBuffer, {
               source: config.source, target: config.target, speaker: config.speaker,
+              sessionId: ws.data.id,
             }, callbacks).catch(err => {
               ws.send(JSON.stringify({ status: 'error', message: err instanceof Error ? err.message : String(err) }));
             });
@@ -518,6 +676,13 @@ export function startWsServer() {
           for (const client of wsClients) {
             try { client.send(msg); } catch { wsClients.delete(client); }
           }
+          // Auto-process: buffer audio and run through pipeline when enough accumulates
+          const audioChunk = Buffer.from(msg as ArrayBuffer);
+          botAudioBuffer.push(audioChunk);
+          botAudioBufferBytes += audioChunk.length;
+          if (botAudioBufferBytes >= BOT_AUDIO_CHUNK_THRESHOLD) {
+            processBotAudioBuffer().catch(e => console.warn('[bot-audio] buffer processing failed:', e instanceof Error ? e.message : e));
+          }
         } else {
           try {
             const raw = typeof msg === 'string' ? msg : Buffer.from(msg as ArrayBuffer).toString();
@@ -527,6 +692,9 @@ export function startWsServer() {
         }
       },
       close(ws) {
+        // Clean up speculative cache on disconnect
+        speculativeCache.clear(ws.data.id);
+
         if (ws.data.type === 'speech') {
           console.log(`[speech-ws] Client disconnected id=${ws.data.id}`);
         } else if (ws.data.type === 'stt') {
@@ -536,8 +704,14 @@ export function startWsServer() {
           console.log(`[stt-ws] Client disconnected id=${ws.data.id}`);
         } else if (ws.data.type === 'bot-audio') {
           if (botAudioSource === ws) botAudioSource = null;
+          // Process any remaining buffered audio
+          if (botAudioBufferBytes > 16000) { // at least 0.5s
+            processBotAudioBuffer().catch(e => console.warn('[bot-audio] final buffer flush failed:', e instanceof Error ? e.message : e));
+          }
           console.log(`[bot-audio] Bot audio source disconnected id=${ws.data.id} (${botAudioChunks} chunks relayed)`);
           botAudioChunks = 0;
+          botAudioBuffer = [];
+          botAudioBufferBytes = 0;
         } else {
           unsubscribeDub(ws.data.id);
           wsClients.delete(ws as unknown as BabelCastWS);
