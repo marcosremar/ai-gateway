@@ -1327,15 +1327,15 @@ function ProfileFlowDiagram({
                   </div>
                 ))}
               </div>
-              {/* Provider legend — pill shape indicator */}
+              {/* Provider legend */}
               {seen.size > 0 && (
-                <div className="flex items-center gap-3 flex-shrink-0">
-                  {/* Shape key: pill = service */}
+                <div className="flex items-center gap-2.5 flex-shrink-0">
+                  {/* Shape key: card = service */}
                   <div className="flex items-center gap-1.5">
                     <div className="w-5 h-3.5 border"
-                      style={{ borderRadius: '999px', borderColor: 'var(--color-text-muted)', opacity: 0.5 }} />
-                    <span className="text-[9px] font-semibold uppercase tracking-wider"
-                      style={{ color: 'var(--color-text-muted)' }}>Service</span>
+                      style={{ borderRadius: '4px', borderColor: 'var(--color-text-muted)', borderLeft: '2px solid var(--color-text-muted)', opacity: 0.45 }} />
+                    <span className="text-[9px] font-semibold uppercase tracking-widest"
+                      style={{ color: 'var(--color-text-muted)', letterSpacing: '0.1em' }}>Service</span>
                   </div>
                   {[...seen.values()].map(({ label, color, Icon }) => (
                     <div key={label} className="flex items-center gap-1">
