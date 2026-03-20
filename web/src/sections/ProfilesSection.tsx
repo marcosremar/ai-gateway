@@ -102,7 +102,7 @@ export function ProfilesSection() {
   /** Migrate old gpuDeploy/gpuImage/gpuTypes top-level fields into ProfileService entries,
    *  and auto-derive cloud API service entries from chain providers. */
   const migrateServices = (p: ProviderProfile & Record<string, unknown>): ProfileService[] => {
-    const hasExplicitServices = Array.isArray(p.services);
+    const hasExplicitServices = Array.isArray(p.services) && (p.services as ProfileService[]).length > 0;
     const existing: ProfileService[] = hasExplicitServices ? (p.services as ProfileService[]) : [];
     const result: ProfileService[] = [...existing];
 
@@ -163,7 +163,6 @@ export function ProfilesSection() {
     setStages(profileToStages(p));
     setLatency(p.latency ?? 'realtime');
     const svc = migrateServices(p as ProviderProfile & Record<string, unknown>);
-    console.log('[profiles] loadProfile services:', svc.length, svc.map(s => `${s.kind}:${s.name}`));
     setServices(svc);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

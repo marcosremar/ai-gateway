@@ -32,8 +32,54 @@ export function broadcastProviderStatus(
   tier: 'gpu' | 'cloud',
   reason: string,
 ): void {
+  // Legacy event (Python app backward compat)
   broadcastWs({ type: 'provider:status', gpu, tier, reason });
+  // Richer event with routing + warmth info (new clients + web UI)
+  broadcastGpuStatusEvent(gpu, tier, reason);
   console.log(`[ws] provider:status → gpu=${gpu} tier=${tier} (${reason})`);
+}
+
+/**
+ * Push a gpu:status event with routing, warmth, and readiness state.
+ * Uses dynamic import to avoid circular deps (state/providers → ws-state).
+ */
+export function broadcastGpuStatusEvent(
+  gpuStatus: 'ready' | 'offline' | 'booting' | 'error',
+  tier: 'gpu' | 'cloud',
+  reason: string,
+): void {
+  Promise.all([
+    import('./state'),
+    import('./providers'),
+  ]).then(([state, prov]) => {
+    const { gpuModelWarmth, gpuReadinessState, gpuReadyForProduction, deployState, isStageWarm, isTtsWarm, isGpuAvailable } = state;
+    const { shouldPreferGpuTts } = prov;
+    const gpuAvail = isGpuAvailable();
+    const sttGpu = gpuAvail && isStageWarm('stt');
+    const llmGpu = gpuAvail && isStageWarm('llm');
+    const ttsGpu = gpuAvail && shouldPreferGpuTts();
+    broadcastWs({
+      type: 'gpu:status',
+      gpuStatus, tier, reason,
+      endpoint: deployState.endpoint || null,
+      gpuType: deployState.gpuType || null,
+      modelWarmth: { stt: gpuModelWarmth.stt.warm, llm: gpuModelWarmth.llm.warm, tts: isTtsWarm() },
+      pipelineRouting: gpuAvail ? {
+        stt: sttGpu ? 'gpu' : 'cloud',
+        llm: llmGpu ? 'gpu' : 'cloud',
+        tts: ttsGpu ? 'gpu' : 'cloud',
+        mode: (sttGpu && llmGpu && ttsGpu) ? 'atomic-gpu' : (sttGpu || llmGpu || ttsGpu) ? 'hybrid' : 'cloud',
+      } : null,
+      readiness: {
+        phase: gpuReadinessState.condemned ? 'condemned'
+          : gpuReadyForProduction ? 'production'
+          : gpuReadinessState.shadowPhase ? 'shadow'
+          : deployState.status === 'ready' ? 'benchmarking'
+          : 'idle',
+        shadowRuns: gpuReadinessState.shadowCompletedRuns,
+      },
+    });
+  }).catch(() => { /* suppress — ws-state must not throw on circular import race */ });
 }
 
 export function startBotTranscriptPoll(): void {
@@ -74,5 +120,45 @@ export function stopBotTranscriptPoll(): void {
     botTranscriptPollTimer = null;
     botTranscriptCursor = 0;
     console.log('[ws] Bot transcript polling stopped');
+  }
+}
+
+// ── Dub Subscription Tracking ─────────────────────────────────────────────────
+// Tracks which WS clients are subscribed to which target language for dub audio.
+
+const dubTargetClients = new Map<string, Set<BabelCastWS>>();
+const dubClientTarget = new Map<string, string>();
+const dubClientWs = new Map<string, BabelCastWS>();
+
+export function subscribeDub(clientId: string, ws: BabelCastWS, target: string): void {
+  unsubscribeDub(clientId); // clean up previous subscription
+  dubClientTarget.set(clientId, target);
+  dubClientWs.set(clientId, ws);
+  if (!dubTargetClients.has(target)) dubTargetClients.set(target, new Set());
+  dubTargetClients.get(target)!.add(ws);
+  console.log(`[ws] dub:subscribe client=${clientId} target=${target} (${dubTargetClients.get(target)!.size} subscribers)`);
+}
+
+export function unsubscribeDub(clientId: string): void {
+  const target = dubClientTarget.get(clientId);
+  const ws = dubClientWs.get(clientId);
+  if (target && ws) {
+    dubTargetClients.get(target)?.delete(ws);
+    if (dubTargetClients.get(target)?.size === 0) dubTargetClients.delete(target);
+  }
+  dubClientTarget.delete(clientId);
+  dubClientWs.delete(clientId);
+}
+
+export function getActiveTargets(): string[] {
+  return [...dubTargetClients.keys()].filter(t => (dubTargetClients.get(t)?.size ?? 0) > 0);
+}
+
+export function broadcastDubAudio(target: string, msg: Record<string, unknown>): void {
+  const clients = dubTargetClients.get(target);
+  if (!clients || clients.size === 0) return;
+  const json = JSON.stringify(msg);
+  for (const ws of clients) {
+    try { ws.send(json); } catch { clients.delete(ws); }
   }
 }

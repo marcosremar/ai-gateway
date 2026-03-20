@@ -18,6 +18,7 @@ import {
   deployState,
   setServiceReadiness, setGpuReadinessState, gpuReadinessState,
   setGpuShadowMode, setGpuReadyForProduction,
+  isStageWarm,
 } from './state';
 import { broadcastWs } from './ws-state';
 import {
@@ -77,6 +78,40 @@ function saveRun(stage: 'stt' | 'llm' | 'tts', samples: number[], bestMs: number
 
 export function getReadinessHistory(): ReadinessHistory { return loadHistory(); }
 
+// ── Shadow mode persistence ───────────────────────────────────────────────────
+// Survives gateway restart so shadow progress isn't lost mid-validation.
+
+const SHADOW_STATE_FILE = path.join(os.homedir(), '.babelcast', 'shadow-state.json');
+
+interface PersistedShadowState {
+  completedRuns: number;
+  endpoint: string;
+  savedAt: number;
+}
+
+function loadShadowRuns(): number {
+  try {
+    if (!fs.existsSync(SHADOW_STATE_FILE)) return 0;
+    const data = JSON.parse(fs.readFileSync(SHADOW_STATE_FILE, 'utf8')) as PersistedShadowState;
+    // Only restore if saved within the last 10 minutes and same endpoint
+    if (Date.now() - data.savedAt > 10 * 60 * 1000) return 0;
+    if (data.endpoint !== deployState.endpoint) return 0;
+    return data.completedRuns ?? 0;
+  } catch { return 0; }
+}
+
+function saveShadowRuns(completedRuns: number): void {
+  try {
+    const dir = path.dirname(SHADOW_STATE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(SHADOW_STATE_FILE, JSON.stringify({ completedRuns, endpoint: deployState.endpoint, savedAt: Date.now() }));
+  } catch { /* ignore */ }
+}
+
+function clearShadowRuns(): void {
+  try { if (fs.existsSync(SHADOW_STATE_FILE)) fs.unlinkSync(SHADOW_STATE_FILE); } catch { /* ignore */ }
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let checkInProgress = false;
@@ -89,6 +124,7 @@ export function resetReadinessCheck(): void {
   checkInProgress = false;
   if (repechageTimer) { clearTimeout(repechageTimer); repechageTimer = null; }
   repechageEndpoint = '';
+  clearShadowRuns();
 }
 
 // ── Benchmark one service ─────────────────────────────────────────────────────
@@ -238,6 +274,29 @@ export async function runGpuReadinessCheck(
       return;
     }
 
+    // Pre-warm TTS: absorb CUDA graph compilation (~11-30s) before the latency benchmark.
+    // Without this, the first TTS inference always misses the target (300ms vs 11s cold start).
+    if (!isStageWarm('tts')) {
+      console.log('[readiness:tts] Pre-warming TTS (CUDA graph compilation)...');
+      broadcastWs({ type: 'gpu:readiness', stage: 'tts', phase: 'warming' });
+      const warmStart = Date.now();
+      try {
+        const res = await fetch(`${endpoint}/v1/tts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: 'Hello world.', language: 'English', speaker: 'Ryan' }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (res.ok) {
+          console.log(`[readiness:tts] TTS pre-warm done in ${Date.now() - warmStart}ms`);
+        } else {
+          console.warn(`[readiness:tts] TTS pre-warm HTTP ${res.status} — benchmark may fail`);
+        }
+      } catch (e) {
+        console.warn(`[readiness:tts] TTS pre-warm failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+
     // Benchmark TTS after STT+LLM pass (non-blocking for production activation — TTS can warm separately)
     const ttsResult = await benchmarkService('tts', endpoint, targets.tts, maxRuns);
     setServiceReadiness('tts', { phase: ttsResult.passed ? 'ready' : 'failed', bestLatencyMs: ttsResult.bestMs });
@@ -245,11 +304,16 @@ export async function runGpuReadinessCheck(
     broadcastWs({ type: 'gpu:readiness', stage: 'tts', phase: ttsResult.passed ? 'ready' : 'failed', bestLatencyMs: ttsResult.bestMs, targetMs: targets.tts, passed: ttsResult.passed, runsUsed: ttsResult.samples.length });
     // TTS failure doesn't block STT+LLM activation
 
-    // STT + LLM passed — enter shadow mode
-    console.log(`[readiness] STT + LLM passed → entering shadow mode (${getShadowRuns()} rounds)`);
+    // STT + LLM passed — enter shadow mode. Restore persisted shadow progress (survives gateway restart).
+    const restoredRuns = loadShadowRuns();
+    const initialShadowRuns = restoredRuns > 0 ? restoredRuns : 0;
+    if (restoredRuns > 0) {
+      console.log(`[readiness] Restored ${restoredRuns}/${getShadowRuns()} shadow runs from disk`);
+    }
+    console.log(`[readiness] STT + LLM passed → entering shadow mode (${getShadowRuns()} rounds, starting at ${initialShadowRuns})`);
     setGpuShadowMode(true);
-    setGpuReadinessState({ shadowPhase: true, shadowCompletedRuns: 0 });
-    broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'shadow', shadowRuns: getShadowRuns() });
+    setGpuReadinessState({ shadowPhase: true, shadowCompletedRuns: initialShadowRuns });
+    broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'shadow', shadowRuns: getShadowRuns(), shadowCompletedRuns: initialShadowRuns });
     onPass(); // caller (providers.ts) calls markGpuShadowMode()
 
   } catch (err) {
@@ -429,6 +493,7 @@ export function recordShadowRun(latencyMs: number, targetMs: number, onProductio
   const passed = latencyMs <= targetMs;
   const next = passed ? gpuReadinessState.shadowCompletedRuns + 1 : 0; // reset on failure
   setGpuReadinessState({ shadowCompletedRuns: next });
+  saveShadowRuns(next); // persist across gateway restarts
 
   broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'shadow', shadowCompletedRuns: next, shadowTotalRuns: targetRuns, latencyMs, passed });
   console.log(`[readiness] Shadow run ${next}/${targetRuns}: ${latencyMs}ms ${passed ? '✓' : '✗ (reset)'}`);
@@ -437,6 +502,7 @@ export function recordShadowRun(latencyMs: number, targetMs: number, onProductio
     console.log('[readiness] Shadow mode complete — GPU activated for production');
     setGpuShadowMode(false);
     setGpuReadinessState({ shadowPhase: false });
+    clearShadowRuns(); // done — clear persisted state
     onProductionReady();
   }
 }

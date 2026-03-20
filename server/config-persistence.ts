@@ -39,6 +39,12 @@ export interface GatewayProfile extends AIProfile {
   gpuDeploy?: GpuDeployConfig;
   lastActivatedAt?: number;
   lastRequestAt?: number;
+  /** Per-stage latency targets (ms). Overrides the tier-based defaults when set. */
+  latencyTargetsMs?: {
+    stt?: number;
+    llm?: number;
+    tts?: number;
+  };
 }
 
 
@@ -201,6 +207,24 @@ const LATENCY_TARGETS: Record<string, { sttMs: number; llmMs: number; ttsMs: num
 export function applyProfileLatencyTargets(profileId: string | null, profiles: GatewayProfile[]): void {
   if (!profileId) return;
   const profile = profiles.find(p => p.id === profileId);
+  if (!profile) return;
+
+  // Profile-level per-stage overrides take precedence over tier defaults
+  if (profile.latencyTargetsMs) {
+    const { stt, llm, tts } = profile.latencyTargetsMs;
+    const latency = (profile as Record<string, unknown>)?.latency as string | undefined;
+    const tierDefaults = latency ? LATENCY_TARGETS[latency] : null;
+    const sttMs = stt ?? tierDefaults?.sttMs;
+    const llmMs = llm ?? tierDefaults?.llmMs;
+    const ttsMs = tts ?? tierDefaults?.ttsMs;
+    if (sttMs !== undefined) setSttTargetLatencyMs(sttMs);
+    if (llmMs !== undefined) setLlmTargetLatencyMs(llmMs);
+    if (ttsMs !== undefined) setTtsTargetLatencyMs(ttsMs);
+    console.log(`[config] Latency targets applied for profile "${profileId}" (custom): STT=${sttMs}ms LLM=${llmMs}ms TTS=${ttsMs}ms`);
+    return;
+  }
+
+  // Fall back to tier-based defaults
   const latency = (profile as Record<string, unknown>)?.latency as string | undefined;
   const targets = latency ? LATENCY_TARGETS[latency] : null;
   if (!targets) return;
