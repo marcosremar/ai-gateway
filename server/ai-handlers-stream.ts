@@ -148,7 +148,8 @@ export async function handlePipelineSSE(req: IncomingMessage, res: ServerRespons
     },
   };
 
+  const sessionId = url.searchParams.get('session_id') || requestId;
   await runStreamingPipeline(audioBuffer, {
-    source, target, speaker, style, sttPrompt, refId,
+    source, target, speaker, style, sttPrompt, refId, sessionId,
   }, callbacks);
 }

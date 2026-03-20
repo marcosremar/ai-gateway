@@ -14,24 +14,8 @@ import { maskKey } from './http-utils';
 import { readJsonBody, handleBodyError } from './http-utils';
 import { broadcastWs, startBotTranscriptPoll, stopBotTranscriptPoll } from './ws-state';
 import { PORT } from './config';
-
-// ── SSRF protection — block requests to private/internal networks ────────────
-export function isPrivateUrl(urlStr: string): boolean {
-  try {
-    const url = new URL(urlStr);
-    const host = url.hostname;
-    // Block private/internal IPs
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
-    if (host.startsWith('10.')) return true;
-    if (host.startsWith('192.168.')) return true;
-    if (host.startsWith('169.254.')) return true;
-    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
-    if (host === '0.0.0.0' || host === '[::]') return true;
-    // Block cloud metadata endpoints
-    if (host === '169.254.169.254') return true;
-    return false;
-  } catch { return true; }
-}
+// Re-export consolidated SSRF check from ai-handlers (single source of truth)
+export { isPrivateUrl } from './ai-handlers';
 
 /** Redact meeting URL for logging — show only protocol + domain, hide path/query. */
 function redactMeetingUrl(url: string): string {
@@ -433,9 +417,14 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
   // For local Docker: parec captures audio directly from PulseAudio (no Web Audio needed).
   // For RunPod: bot streams via WebSocket.
   const isLocalBot = botState.podId === 'local';
+  // For cloud bots: use GATEWAY_PUBLIC_WS_URL if set (bot pod needs to reach the gateway).
+  // Without a public URL, bot audio streaming won't work from cloud pods.
+  const publicWsUrl = process.env.GATEWAY_PUBLIC_WS_URL;
   const streamingOutput = isLocalBot
     ? ''  // parec handles audio for local Docker
-    : `ws://${isLocalBot ? 'host.docker.internal' : 'localhost'}:${PORT + 1}/ws/bot-audio`;
+    : publicWsUrl
+      ? `${publicWsUrl}/ws/bot-audio`
+      : `ws://localhost:${PORT + 1}/ws/bot-audio`;
 
   const botUuid = crypto.randomUUID();
   const config = {
@@ -484,8 +473,9 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
       ? await joinRes.json().catch(() => ({}))
       : await joinRes.text().catch(() => '');
     if (!joinRes.ok) {
-      console.warn(`[bot] /join returned ${joinRes.status}: ${JSON.stringify(joinBody)}`);
-      setBotState({ status: 'ready', message: 'Bot /join failed — pod still running' });
+      const errDetail = typeof joinBody === 'string' ? joinBody : JSON.stringify(joinBody);
+      console.warn(`[bot] /join returned ${joinRes.status}: ${errDetail}`);
+      setBotState({ status: 'ready', message: `Bot /join failed (HTTP ${joinRes.status}): ${errDetail.slice(0, 100)}` });
     } else {
       console.log(`[bot] /join OK: ${JSON.stringify(joinBody)}`);
       setBotState({ status: 'joined' });

@@ -22,7 +22,7 @@ import {
   getStandbyEnabled, setStandbyEnabled, getStandbyTriggerHours, setStandbyTriggerHours,
   getStandbyDrainTimeoutMs, setStandbyDrainTimeoutMs,
 } from '../src/gpu-providers/deploy-settings';
-import { shouldPreferGpuTts } from './providers';
+import { shouldPreferGpuTts, getStageBreakersSnapshot } from './providers';
 import {
   translationProfile, updateTranslationProfile, runpod, vast, tensordock, modal,
   ollamaAvailable, groqAvailable, openaiAvailable,
@@ -189,6 +189,8 @@ interface TierSelectionResult {
   gpuTypes: string[];
   resolvedDockerImage: string;
   gpuPriorityByProvider: Record<string, string[]>;
+  /** Providers excluded from this deploy due to low balance. */
+  balanceWarnings: string[];
 }
 
 /**
@@ -246,16 +248,53 @@ async function _selectDeploymentTier(
     }
   }
 
+  // Pre-deploy balance check for Vast.ai
+  let effectiveVastApiKey = vastApiKey;
+  if (effectiveVastApiKey) {
+    try {
+      const bal = await vast.checkBalance({ apiKey: effectiveVastApiKey });
+      if (bal !== null) {
+        console.log(`[gpu] Vast.ai balance: $${bal.balance.toFixed(2)}`);
+        if (bal.balance <= 0) {
+          console.warn(`[gpu] Vast.ai balance is $${bal.balance.toFixed(2)} — skipping provider`);
+          effectiveVastApiKey = '';  // exclude from tier list
+        } else if (bal.balance < LOW_BALANCE_THRESHOLD_USD) {
+          console.warn(`[gpu] Vast.ai balance low ($${bal.balance.toFixed(2)}) — skipping provider`);
+          effectiveVastApiKey = '';  // exclude from tier list
+        }
+      }
+    } catch (balErr) {
+      const msg = balErr instanceof Error ? balErr.message : String(balErr);
+      if (/401|403|unauthorized|invalid/i.test(msg)) {
+        throw { status: 401, message: 'Vast.ai API key is invalid' };
+      }
+      console.warn(`[gpu] Vast.ai balance check failed: ${msg} — proceeding anyway`);
+    }
+  }
+
   // Log providers excluded due to insufficient balance
   const balanceExcluded: string[] = [];
   if (apiKey && !runpodApiKey) balanceExcluded.push('RunPod');
   if ((tensordockApiKey && tensordockAuthId) && !tensordockOpts) balanceExcluded.push('TensorDock');
+  if (vastApiKey && !effectiveVastApiKey) balanceExcluded.push('Vast.ai');
   if (balanceExcluded.length > 0) {
-    console.warn(`[gpu] Providers excluded (balance < $1): ${balanceExcluded.join(', ')}`);
+    console.warn(`[gpu] Providers excluded (balance < $${LOW_BALANCE_THRESHOLD_USD}): ${balanceExcluded.join(', ')}`);
+  }
+
+  // If ALL configured providers were excluded due to insufficient balance, reject the deploy
+  const configuredProviders: string[] = [];
+  if (apiKey) configuredProviders.push('RunPod');
+  if (tensordockApiKey && tensordockAuthId) configuredProviders.push('TensorDock');
+  if (vastApiKey) configuredProviders.push('Vast.ai');
+  // Modal doesn't have a balance API, so don't include it in the all-excluded check
+  const nonModalConfigured = configuredProviders.length;
+  if (nonModalConfigured > 0 && balanceExcluded.length >= nonModalConfigured && !modalApiKey) {
+    const providerList = balanceExcluded.map(p => `${p}`).join(', ');
+    throw { status: 402, message: `Insufficient balance for all configured providers (${providerList}). Please add funds before deploying.` };
   }
 
   // Build tier list from available API keys, optionally filtered to a specific provider
-  const allTiers = buildGpuTiers(runpodApiKey, vastApiKey || undefined, tensordockOpts, modalApiKey || undefined);
+  const allTiers = buildGpuTiers(runpodApiKey, effectiveVastApiKey || undefined, tensordockOpts, modalApiKey || undefined);
   const filtered = filterTiers(allTiers, providerFilter);
   if ('error' in filtered) {
     const balanceHint = balanceExcluded.length > 0
@@ -344,7 +383,7 @@ async function _selectDeploymentTier(
   }
   // balanced: keep existing order (user priority list already incorporates reputation/latency balance)
 
-  return { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider };
+  return { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider, balanceWarnings: balanceExcluded };
 }
 
 // ── Deploy kickoff: launch the deploy promise and send HTTP response ──────────
@@ -388,7 +427,14 @@ function _startDeployAndRespond(
   const modeLabel = raceCount > 1 ? `race×${raceCount}` : `${tiers.length} tier(s): ${tiers.map(t => t.label).join(' → ')}`;
   console.log(`[req=${requestId}] GPU deploy started: ${modeLabel}`);
   res.writeHead(202, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ status: 'creating', message: `Deploy started (${modeLabel})` }));
+  const responseBody: Record<string, unknown> = { status: 'creating', message: `Deploy started (${modeLabel})` };
+  if (tierResult.balanceWarnings.length > 0) {
+    responseBody.balanceWarnings = tierResult.balanceWarnings.map(p =>
+      `${p} excluded — balance below $${LOW_BALANCE_THRESHOLD_USD}`
+    );
+    console.warn(`[req=${requestId}] Deploy balance warnings: ${tierResult.balanceWarnings.join(', ')} excluded (low balance)`);
+  }
+  res.end(JSON.stringify(responseBody));
 }
 
 // ── Main deploy handler (orchestrator) ───────────────────────────────────────
@@ -1258,6 +1304,8 @@ export async function handleHealth(_req: IncomingMessage, res: ServerResponse): 
     dailyLimitUsd: DAILY_BUDGET_USD || null,
     exceeded: DAILY_BUDGET_USD > 0 && dailyGpuSpendUsd > DAILY_BUDGET_USD,
   };
+  // Per-stage circuit breakers (GPU pipeline stages: stt, llm, tts)
+  body.circuitBreakers = getStageBreakersSnapshot();
   // Provider performance metrics (with token usage)
   const providerPerfSummary: Record<string, {
     avgLatencyMs: number; requests: number; errorRate: number;

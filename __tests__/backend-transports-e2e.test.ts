@@ -31,6 +31,10 @@ try {
 import path from 'path';
 import fs from 'fs';
 
+const hasBackendServers =
+  fs.existsSync(path.resolve(process.cwd(), 'backend/ws-server.ts')) &&
+  fs.existsSync(path.resolve(process.cwd(), 'backend/webrtc-server.ts'));
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -113,7 +117,7 @@ const hasKeys = !!process.env.GROQ_API_KEY || !!process.env.OPENAI_API_KEY;
 // ── Setup / Teardown ────────────────────────────────────────────────────────
 
 beforeAll(async () => {
-  if (!hasKeys) return;
+  if (!hasKeys || !hasBackendServers) return;
 
   const cwd = process.cwd();
 
@@ -139,7 +143,7 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(() => {
-  if (!hasKeys) return;
+  if (!hasKeys || !hasBackendServers) return;
   wsProc?.kill('SIGTERM');
   rtcProc?.kill('SIGTERM');
 });
@@ -148,7 +152,7 @@ afterAll(() => {
 // WebSocket E2E Pipeline
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!hasKeys || !hasNativeDeps)('WebSocket E2E pipeline', () => {
+describe.skipIf(!hasKeys || !hasNativeDeps || !hasBackendServers)('WebSocket E2E pipeline', () => {
   it('completes full STT → LLM → TTS pipeline with audio response', async () => {
     const ws = await connectWS(`ws://127.0.0.1:${WS_PORT}/ws/stream`);
 
@@ -313,7 +317,7 @@ describe.skipIf(!hasKeys || !hasNativeDeps)('WebSocket E2E pipeline', () => {
 // WebRTC E2E SDP + DataChannel
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!hasKeys || !hasNativeDeps)('WebRTC E2E pipeline', () => {
+describe.skipIf(!hasKeys || !hasNativeDeps || !hasBackendServers)('WebRTC E2E pipeline', () => {
   it('establishes peer connection and receives DataChannel messages', async () => {
     // Create client-side PeerConnection (simulates browser)
     const clientPc = new RTCPeerConnection({
@@ -443,7 +447,7 @@ describe.skipIf(!hasKeys || !hasNativeDeps)('WebRTC E2E pipeline', () => {
 // Comparative Latency Summary
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!hasKeys || !hasNativeDeps)('Transport latency comparison', () => {
+describe.skipIf(!hasKeys || !hasNativeDeps || !hasBackendServers)('Transport latency comparison', () => {
   it('measures WS connection + ping round-trip', async () => {
     const runs = 5;
     const connectTimes: number[] = [];

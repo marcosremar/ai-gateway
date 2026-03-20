@@ -69,15 +69,16 @@ let botAudioBufferBytes = 0;
 let botAudioProcessing = false;
 let botAudioLastProcess = 0;
 
+// Bot language pair — set from bot:join command, reset on bot:leave
+let botSourceLang = 'fr';
+let botTargetLang = 'en';
+
 // Config: process every ~3s of audio (16kHz 16-bit mono = 32000 bytes/s → ~96KB)
 const BOT_AUDIO_CHUNK_THRESHOLD = 3 * 32000; // 3 seconds at 16kHz 16-bit
 const BOT_AUDIO_MIN_INTERVAL_MS = 2000; // don't process more than once every 2s
 
 function getBotSourceTarget(): { source: string; target: string } {
-  // Read from bot join config or default
-  const url = botState.meetingUrl || '';
-  // Default: FR→EN (most common demo scenario)
-  return { source: 'fr', target: 'en' };
+  return { source: botSourceLang, target: botTargetLang };
 }
 
 async function processBotAudioBuffer(): Promise<void> {
@@ -240,9 +241,11 @@ export function startParecCapture(): void {
 export function stopParecCapture(): void {
   if (parecProc) {
     console.log(`[parec] Stopping PulseAudio capture (${parecChunks} chunks sent)...`);
-    try { parecProc.kill(); } catch { /* ignore */ }
-    parecProc = null;
+    const proc = parecProc;
+    parecProc = null; // null before kill so reader loop stops trying to read
     parecChunks = 0;
+    try { proc.kill(); } catch { /* ignore */ }
+    proc.exited.catch(() => {}); // fire-and-forget await — ensures process cleanup
   }
 }
 
@@ -275,6 +278,10 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     const sourceLang = (cmd.sourceLang as string) ?? 'fr';
     const targetLang = (cmd.targetLang as string) ?? 'en';
     const botName = (cmd.botName as string) ?? 'BabelCast Bot';
+
+    // Store language pair for bot audio pipeline (getBotSourceTarget)
+    botSourceLang = (cmd.source as string) || sourceLang;
+    botTargetLang = (cmd.target as string) || targetLang;
 
     if (!meetingUrl) {
       ws.send(JSON.stringify({ type: 'error', message: 'meetingUrl is required' }));
@@ -366,6 +373,9 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
   } else if (type === 'bot:leave') {
     stopParecCapture();
     stopBotTranscriptPoll();
+    // Reset language pair to defaults
+    botSourceLang = 'fr';
+    botTargetLang = 'en';
     const endpoint = botState.endpoint;
     if (!endpoint) {
       broadcastWs({ type: 'bot:status', status: 'idle', message: 'Bot not active' });
@@ -713,6 +723,7 @@ export function startWsServer() {
           botAudioChunks = 0;
           botAudioBuffer = [];
           botAudioBufferBytes = 0;
+          botAudioProcessing = false;
         } else {
           unsubscribeDub(ws.data.id);
           wsClients.delete(ws as unknown as BabelCastWS);

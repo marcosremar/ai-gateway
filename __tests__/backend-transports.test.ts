@@ -11,6 +11,8 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcess } from 'child_process';
+import { existsSync } from 'fs';
+import { resolve } from 'path';
 
 let RTCPeerConnection: any, RTCSessionDescription: any, useOPUS: any, MediaStreamTrack: any;
 let WebSocket: any;
@@ -22,6 +24,10 @@ try {
 } catch {
   // werift not installed — tests will be skipped
 }
+
+const hasBackendServers =
+  existsSync(resolve(process.cwd(), 'backend/ws-server.ts')) &&
+  existsSync(resolve(process.cwd(), 'backend/webrtc-server.ts'));
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -111,6 +117,8 @@ function sendAndWaitJSON(ws: WebSocket, msg: unknown, timeoutMs = 5000): Promise
 // ── Setup / Teardown ────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  if (!hasWerift || !hasBackendServers) return;
+
   const cwd = process.cwd();
 
   wsProc = spawn('bun', ['backend/ws-server.ts'], {
@@ -135,6 +143,7 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(() => {
+  if (!hasWerift || !hasBackendServers) return;
   wsProc?.kill('SIGTERM');
   rtcProc?.kill('SIGTERM');
 });
@@ -143,7 +152,7 @@ afterAll(() => {
 // WebSocket Server Tests
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!hasWerift)('WebSocket backend server', () => {
+describe.skipIf(!hasWerift || !hasBackendServers)('WebSocket backend server', () => {
 
   // ── Health ──────────────────────────────────────────────────────────────
 
@@ -324,7 +333,7 @@ describe.skipIf(!hasWerift)('WebSocket backend server', () => {
 // WebRTC Server Tests
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!hasWerift)('WebRTC backend server', () => {
+describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () => {
 
   // ── Health ──────────────────────────────────────────────────────────────
 
@@ -526,7 +535,7 @@ describe.skipIf(!hasWerift)('WebRTC backend server', () => {
 // Discovery Probing Tests
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!hasWerift)('Discovery probing', () => {
+describe.skipIf(!hasWerift || !hasBackendServers)('Discovery probing', () => {
   async function probe(url: string, timeoutMs = 2000): Promise<boolean> {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });

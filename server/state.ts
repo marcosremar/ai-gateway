@@ -324,19 +324,20 @@ export const perStageLatencyRing: Record<'stt' | 'llm' | 'tts', number[]> = {
   stt: [], llm: [], tts: [],
 };
 
+const perStageRingIdx: Record<string, number> = {};
+
 export function recordPerStageLatency(stage: 'stt' | 'llm' | 'tts', ms: number): void {
   const ring = perStageLatencyRing[stage];
+  const key = stage;
+  if (!perStageRingIdx[key]) perStageRingIdx[key] = 0;
+
   if (ring.length < PER_STAGE_RING_SIZE) {
     ring.push(ms);
   } else {
-    ring[ring.length % PER_STAGE_RING_SIZE] = ms;
-    // Rotate: shift oldest out by overwriting at a rolling index
-    // Since we always push and the ring is full, use modular index
+    const idx = perStageRingIdx[key] % PER_STAGE_RING_SIZE;
+    ring[idx] = ms;
   }
-  // Keep ring at max size by using splice when over
-  if (ring.length > PER_STAGE_RING_SIZE) {
-    ring.shift();
-  }
+  perStageRingIdx[key]++;
 }
 
 export function getPerStageP95(stage: 'stt' | 'llm' | 'tts'): number | null {
@@ -351,6 +352,9 @@ export function resetPerStageLatencyRings(): void {
   perStageLatencyRing.stt.length = 0;
   perStageLatencyRing.llm.length = 0;
   perStageLatencyRing.tts.length = 0;
+  perStageRingIdx.stt = 0;
+  perStageRingIdx.llm = 0;
+  perStageRingIdx.tts = 0;
 }
 
 /**

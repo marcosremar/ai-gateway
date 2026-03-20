@@ -10,6 +10,7 @@ import {
   activeDeploySessionId, setActiveDeploySessionId, startedAt, deployState,
 } from './state';
 import { getOrCreateRequestId, setRequestIdHeader } from './http-utils';
+import { getTranslationCacheStats } from './ai-handlers';
 
 // ── Request Log (Prisma + SQLite) ────────────────────────────────────────────
 
@@ -665,6 +666,7 @@ export async function handleMetrics(_req: IncomingMessage, res: ServerResponse):
       totalOutputTokens: metricsCounters.totalOutputTokens,
       totalTokens: metricsCounters.totalInputTokens + metricsCounters.totalOutputTokens,
     },
+    translationCache: getTranslationCacheStats(),
   };
 
   const requestId = getOrCreateRequestId(_req);
@@ -743,5 +745,61 @@ export async function handleRequestLog(req: IncomingMessage, res: ServerResponse
     console.error('[db] Request log query failed:', err);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Database query failed', entries: [], stats: {} }));
+  }
+}
+
+// ── Per-service latency stats (last N requests avg + cold start) ─────────────
+
+export async function handleServiceStats(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const SAMPLE_SIZE = 5;
+
+  try {
+    // Get last 200 successful requests, grouped by stage+provider
+    const recent = await prisma.requestLog.findMany({
+      where: { success: true },
+      orderBy: { id: 'desc' },
+      take: 200,
+      select: { stage: true, provider: true, model: true, latencyMs: true },
+    });
+
+    // Group by stage::provider and compute avg of last N
+    const buckets = new Map<string, number[]>();
+    for (const r of recent) {
+      const key = `${r.stage}::${r.provider}`;
+      if (!buckets.has(key)) buckets.set(key, []);
+      const arr = buckets.get(key)!;
+      if (arr.length < SAMPLE_SIZE) arr.push(r.latencyMs);
+    }
+
+    const stats: Record<string, { avgMs: number; samples: number }> = {};
+    for (const [key, latencies] of buckets) {
+      const avg = Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length);
+      stats[key] = { avgMs: avg, samples: latencies.length };
+    }
+
+    // Cold start data from deploy state
+    const { deployState, getColdStartProfile } = await import('./state');
+    let coldStart: { provider: string; coldTtfbMs: number; warmTtfbAvgMs: number } | null = null;
+    if (deployState.gpuType && deployState.dockerImage && deployState.provider) {
+      const profile = getColdStartProfile(deployState.gpuType, deployState.dockerImage, deployState.provider);
+      if (profile) {
+        coldStart = {
+          provider: profile.provider,
+          coldTtfbMs: profile.coldTtfbMs,
+          warmTtfbAvgMs: profile.warmTtfbAvgMs,
+        };
+      }
+    }
+
+    // Model warmth (per-stage avg latency from GPU health)
+    const { gpuModelWarmth } = await import('./state');
+    const warmth = gpuModelWarmth;
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ stats, coldStart, warmth }));
+  } catch (err) {
+    console.error('[db] Service stats query failed:', err);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ stats: {}, coldStart: null, warmth: null }));
   }
 }
