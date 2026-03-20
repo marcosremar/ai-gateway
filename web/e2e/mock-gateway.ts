@@ -432,6 +432,23 @@ const server = createServer(async (req, res) => {
     return json(res, { ok: true });
   }
 
+  // ── API Keys ──
+  if (method === 'GET' && url === '/v1/config/api-keys') {
+    return json(res, {
+      keys: [
+        { id: 'groq', name: 'Groq', envVar: 'GROQ_API_KEY', category: 'cloud', configured: true, masked: 'gsk_***abc123' },
+        { id: 'openai', name: 'OpenAI', envVar: 'OPENAI_API_KEY', category: 'cloud', configured: false, masked: '' },
+        { id: 'deepgram', name: 'Deepgram', envVar: 'DEEPGRAM_API_KEY', category: 'cloud', configured: true, masked: 'dg_***xyz789' },
+        { id: 'vast', name: 'Vast.ai', envVar: 'VAST_API_KEY', category: 'gpu', configured: false, masked: '' },
+        { id: 'runpod', name: 'RunPod', envVar: 'RUNPOD_API_KEY', category: 'gpu', configured: false, masked: '' },
+      ],
+    });
+  }
+  if (method === 'POST' && url === '/v1/config/api-keys') {
+    const body = JSON.parse(await readBody(req));
+    return json(res, { ok: true, updated: Object.keys(body).length });
+  }
+
   // ── Provider Config ──
   if (method === 'GET' && url === '/v1/config/providers') {
     return json(res, providerConfig);

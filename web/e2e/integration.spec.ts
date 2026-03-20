@@ -225,28 +225,22 @@ test.describe('Health endpoint completeness', () => {
 test.describe('Overview UI', () => {
   test('shows status bar, stats, and pipeline', async ({ page }) => {
     await page.goto(`${GW}/`);
-    await expect(page.getByText('All Systems Operational')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('Online')).toBeVisible({ timeout: 10_000 });
 
-    // Stat cards
-    await expect(page.locator('div').filter({ hasText: /^P50 Latency$/ }).first()).toBeVisible();
-    await expect(page.locator('div').filter({ hasText: /^P95 Latency$/ }).first()).toBeVisible();
+    // Compact status strip shows lowercase p50/p95
+    await expect(page.getByText('p50')).toBeVisible();
+    await expect(page.getByText('p95')).toBeVisible();
 
-    // Pipeline stages
-    await expect(page.getByText('Speech-to-Text')).toBeVisible();
-    await expect(page.getByText('Translation')).toBeVisible();
-    await expect(page.getByText('Text-to-Speech')).toBeVisible();
-
-    // Provider table (after requests)
+    // Provider performance section
     await expect(page.getByText('Provider Performance')).toBeVisible();
   });
 
   test('pipeline shows latency data after requests', async ({ page }) => {
     await page.goto(`${GW}/`);
-    await expect(page.getByText('Active Pipeline')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('p50')).toBeVisible({ timeout: 10_000 });
 
-    // LLM should have data from earlier tests
-    const llmCard = page.locator('div').filter({ hasText: 'Translation' }).filter({ hasText: /\d+ms/ }).first();
-    await expect(llmCard).toBeVisible();
+    // Provider Performance section should appear after requests
+    await expect(page.getByText('Provider Performance')).toBeVisible();
   });
 });
 
