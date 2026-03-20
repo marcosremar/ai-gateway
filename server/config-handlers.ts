@@ -1,6 +1,7 @@
 // ── BabelCast Gateway — Config HTTP Handlers ────────────────────────────────
 // handleGetProviderConfig, handlePatchProviderConfig, handleGetApiKeys, handleSetApiKeys
 // handleCreateProfile, handleDeleteProfile, handleActivateProfile
+// handleGetLabsFlags, handlePatchLabsFlags
 // GET    /v1/config/providers          — load provider config
 // POST   /v1/config/providers          — patch (merge) provider config
 // GET    /v1/config/api-keys           — list configured API keys (masked)
@@ -8,6 +9,8 @@
 // POST   /v1/config/profiles           — create or update a profile
 // DELETE /v1/config/profiles           — delete a profile by id
 // POST   /v1/config/profiles/activate  — activate a profile (copy chains to top-level)
+// GET    /v1/config/labs               — get labs feature flags
+// POST   /v1/config/labs               — patch labs feature flags
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
@@ -22,6 +25,8 @@ import { reloadProviderAvailability, translationProfile, updateTranslationProfil
 import type { AIProfile } from '../src/client';
 import { broadcastWs } from './ws-state';
 import { setDeployTimeoutMin, setDeployRegion, setDeployDockerImage, setDeployRaceCount } from '../src/gpu-providers/deploy-settings';
+import { getLabsFlags, setLabsFlags } from './labs-settings';
+import { speculativeCache } from './speculative-cache';
 
 /** GET /v1/config/providers — returns the full provider config */
 export async function handleGetProviderConfig(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -393,4 +398,42 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(config));
+}
+
+// ── Labs Feature Flags ───────────────────────────────────────────────────────
+
+/** GET /v1/config/labs — returns current labs feature flags + speculation stats */
+export async function handleGetLabsFlags(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const requestId = getOrCreateRequestId(req);
+  setRequestIdHeader(res, requestId);
+
+  try {
+    const flags = getLabsFlags();
+    const speculationStats = speculativeCache.stats();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ...flags, speculationStats }));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: (err as Error).message }));
+  }
+}
+
+/** POST /v1/config/labs — patch labs feature flags (merge partial update) */
+export async function handlePatchLabsFlags(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const requestId = getOrCreateRequestId(req);
+  setRequestIdHeader(res, requestId);
+
+  let body: Record<string, unknown>;
+  try { body = await readJsonBody(req); }
+  catch (e) { handleBodyError(res, e); return; }
+
+  try {
+    const updated = setLabsFlags(body as Parameters<typeof setLabsFlags>[0]);
+    console.log(`[config] Labs flags updated:`, JSON.stringify(updated));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(updated));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: (err as Error).message }));
+  }
 }

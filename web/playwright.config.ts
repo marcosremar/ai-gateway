@@ -6,6 +6,7 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   fullyParallel: false,
   retries: 0,
+  workers: 1,
   use: {
     baseURL: 'http://localhost:3099',
     headless: true,
@@ -16,14 +17,14 @@ export default defineConfig({
     {
       command: 'bun run e2e/mock-gateway.ts',
       port: 4099,
-      reuseExistingServer: false,
+      reuseExistingServer: true,
     },
-    // Next.js dev server on port 3099
+    // Next.js static export served on port 3099
     {
-      command: 'NEXT_PUBLIC_GATEWAY_URL=http://localhost:4099 bun run next dev -p 3099',
+      command: 'NEXT_PUBLIC_GATEWAY_URL=http://localhost:4099 bunx serve out -l 3099 -s',
       port: 3099,
-      reuseExistingServer: false,
-      timeout: 30_000,
+      reuseExistingServer: true,
+      timeout: 10_000,
     },
   ],
 });

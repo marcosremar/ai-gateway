@@ -350,12 +350,17 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                     {gpuTypes.map((id, idx) => {
                       const info = liveGpus.find(g => g.name === id);
                       const label = info?.shortName ?? id.replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, '');
+                      const latMs = info?.bestLatencyMs;
+                      const latColor = latMs == null ? 'var(--color-text-muted)' : latMs < 100 ? '#34d399' : latMs < 250 ? '#fbbf24' : '#f87171';
                       return (
                         <span key={id}
                           className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium"
                           style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd', border: '1px solid color-mix(in srgb, #a78bfa 30%, transparent)' }}>
                           <span className="text-[9px] font-bold opacity-60">#{idx + 1}</span>
                           {label}
+                          {latMs != null && (
+                            <span className="text-[9px] font-mono" style={{ color: latColor }}>{Math.round(latMs)}ms</span>
+                          )}
                           <button type="button" onClick={() => toggleGpu(id)} className="ml-0.5 hover:opacity-70 cursor-pointer">×</button>
                         </span>
                       );
@@ -367,10 +372,12 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                     .filter(g => !gpuTypes.includes(g.name))
                     .map(g => {
                       const vramGb = g.vramGb ?? (g.vram > 0 ? g.vram : null);
+                      const latMs = g.bestLatencyMs;
+                      const latLabel = latMs != null ? `${Math.round(latMs)}ms` : null;
                       return {
                         key: g.name,
                         label: g.shortName,
-                        subtitle: [vramGb ? `${vramGb}GB` : null, g.minPricePerHr != null ? `$${g.minPricePerHr.toFixed(2)}/hr` : null].filter(Boolean).join(' · ') || undefined,
+                        subtitle: [vramGb ? `${vramGb}GB` : null, g.minPricePerHr != null ? `$${g.minPricePerHr.toFixed(2)}/hr` : null, latLabel].filter(Boolean).join(' · ') || undefined,
                       };
                     })}
                   value=""
