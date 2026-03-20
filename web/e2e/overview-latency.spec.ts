@@ -54,49 +54,41 @@ test.describe('Overview latency data', () => {
     expect(stages.has('llm')).toBe(true);
   });
 
-  test('Overview page shows Active Pipeline with 3 stages', async ({ page }) => {
+  test('Overview page shows latency stats and provider performance', async ({ page }) => {
     await page.goto(`${GATEWAY}/`);
-    await expect(page.getByText('All Systems Operational')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText('Active Pipeline')).toBeVisible();
-
-    // All 3 stages visible by their subtitle text (unique per stage)
-    await expect(page.getByText('Speech-to-Text')).toBeVisible();
-    await expect(page.getByText('Translation')).toBeVisible();
-    await expect(page.getByText('Text-to-Speech')).toBeVisible();
-  });
-
-  test('LLM stage card shows latency values', async ({ page }) => {
-    await page.goto(`${GATEWAY}/`);
-    await expect(page.getByText('All Systems Operational')).toBeVisible({ timeout: 10_000 });
-
-    // The LLM card should have at least one latency reading with "ms"
-    // Find the card that contains both "Translation" (LLM subtitle) and a ms value
-    const llmCard = page.locator('div').filter({ hasText: 'Translation' }).filter({ hasText: /\d+ms/ }).first();
-    await expect(llmCard).toBeVisible();
-
-    // Should show Cold or Warm label
-    const text = await llmCard.textContent() || '';
-    const hasColdOrWarm = text.includes('Cold') || text.includes('Warm');
-    expect(hasColdOrWarm).toBe(true);
-  });
-
-  test('Stat cards show P50 and P95 latency', async ({ page }) => {
-    await page.goto(`${GATEWAY}/`);
-    await expect(page.getByText('All Systems Operational')).toBeVisible({ timeout: 10_000 });
-
-    // P50 card should exist and show a ms value
-    const p50 = page.locator('div').filter({ hasText: 'P50 Latency' }).filter({ hasText: /\d+ms/ }).first();
-    await expect(p50).toBeVisible();
-
-    // P95 card
-    const p95 = page.locator('div').filter({ hasText: 'P95 Latency' }).filter({ hasText: /\d+ms/ }).first();
-    await expect(p95).toBeVisible();
-  });
-
-  test('Provider Performance table shows groq', async ({ page }) => {
-    await page.goto(`${GATEWAY}/`);
-    await expect(page.getByText('All Systems Operational')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('Online')).toBeVisible({ timeout: 10_000 });
+    // Status strip shows compact "p50 Xms p95 Xms" format (lowercase)
+    await expect(page.getByText('p50')).toBeVisible();
+    await expect(page.getByText('p95')).toBeVisible();
+    // Provider Performance section
     await expect(page.getByText('Provider Performance')).toBeVisible();
-    await expect(page.locator('td').filter({ hasText: 'groq' }).first()).toBeVisible();
+  });
+
+  test('Provider Performance section shows latency data', async ({ page }) => {
+    await page.goto(`${GATEWAY}/`);
+    await expect(page.getByText('Online')).toBeVisible({ timeout: 10_000 });
+    // Provider Performance section shows providers with latency bars
+    await expect(page.getByText('Provider Performance')).toBeVisible();
+    // The groq provider should appear in the performance bar
+    await expect(page.getByText('groq').first()).toBeVisible();
+  });
+
+  test('Status strip shows p50 and p95 latency values', async ({ page }) => {
+    await page.goto(`${GATEWAY}/`);
+    await expect(page.getByText('Online')).toBeVisible({ timeout: 10_000 });
+
+    // Status strip shows "p50 Xms" and "p95 Xms" (lowercase, compact format)
+    await expect(page.getByText('p50')).toBeVisible();
+    await expect(page.getByText('p95')).toBeVisible();
+    // At least one ms value should be visible
+    await expect(page.locator('span').filter({ hasText: /\d+ms/ }).first()).toBeVisible();
+  });
+
+  test('Provider Performance section shows groq', async ({ page }) => {
+    await page.goto(`${GATEWAY}/`);
+    await expect(page.getByText('Online')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('Provider Performance')).toBeVisible();
+    // ProviderBar renders provider name in a span (not a td)
+    await expect(page.getByText('groq').first()).toBeVisible();
   });
 });
