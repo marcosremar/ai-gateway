@@ -70,6 +70,7 @@ interface DeployConfig {
   deployEnv: Record<string, string>;
   dockerStartCmd: string;
   containerDiskInGb: number;
+  volumeId: string;
   providerFilter: ProviderName | undefined;
 }
 
@@ -175,7 +176,7 @@ async function _validateDeployRequest(
     apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
     dockerImage, gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
     storageGb, hfToken, llmModel, interruptible, raceCount, deployEnv,
-    dockerStartCmd, containerDiskInGb,
+    dockerStartCmd, containerDiskInGb, volumeId,
     providerFilter: body.provider as ProviderName | undefined,
   };
 }
@@ -357,7 +358,7 @@ function _startDeployAndRespond(
   requestId: string,
   res: ServerResponse,
 ): void {
-  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, containerDiskInGb } = config;
+  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, containerDiskInGb, volumeId } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   setDeployCancelled(false);
