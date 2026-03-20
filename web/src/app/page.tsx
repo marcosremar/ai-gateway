@@ -156,45 +156,49 @@ function Dashboard() {
 
       {/* Main content */}
       <main className="flex-1 overflow-auto" style={{ background: 'var(--color-bg)' }}>
-        {/* Top bar */}
-        <div
-          className="sticky top-0 z-10 flex items-center justify-between px-6 h-14 border-b backdrop-blur-sm"
-          style={{
-            borderColor: 'var(--color-border)',
-            background: 'color-mix(in srgb, var(--color-bg) 80%, transparent)',
-          }}
-        >
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold">
-              {NAV_ITEMS.find(t => t.id === activeTab)?.label}
-            </span>
+        {/* Top bar — hidden for profiles (has its own breadcrumb bar) */}
+        {activeTab !== 'config/profiles' && (
+          <div
+            className="sticky top-0 z-10 flex items-center justify-between px-6 h-14 border-b backdrop-blur-sm"
+            style={{
+              borderColor: 'var(--color-border)',
+              background: 'color-mix(in srgb, var(--color-bg) 80%, transparent)',
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold">
+                {NAV_ITEMS.find(t => t.id === activeTab)?.label}
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={toggleTheme}
+                className="flex items-center justify-center w-8 h-8 rounded-lg border cursor-pointer transition-colors"
+                style={{
+                  borderColor: 'var(--color-border)',
+                  background: 'var(--color-surface-elevated)',
+                  color: 'var(--color-text-muted)',
+                }}
+                title={light ? 'Switch to dark' : 'Switch to light'}
+              >
+                {light ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+              </button>
+              <div className={`w-2 h-2 rounded-full ${health ? 'bg-emerald-500' : error ? 'bg-red-500' : 'bg-zinc-500'}`} />
+              <span className="text-xs font-mono" style={{ color: 'var(--color-text-muted)' }}>
+                {health ? `${health.status}` : error ? 'Offline' : 'Connecting...'}
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={toggleTheme}
-              className="flex items-center justify-center w-8 h-8 rounded-lg border cursor-pointer transition-colors"
-              style={{
-                borderColor: 'var(--color-border)',
-                background: 'var(--color-surface-elevated)',
-                color: 'var(--color-text-muted)',
-              }}
-              title={light ? 'Switch to dark' : 'Switch to light'}
-            >
-              {light ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-            </button>
-            <div className={`w-2 h-2 rounded-full ${health ? 'bg-emerald-500' : error ? 'bg-red-500' : 'bg-zinc-500'}`} />
-            <span className="text-xs font-mono" style={{ color: 'var(--color-text-muted)' }}>
-              {health ? `${health.status}` : error ? 'Offline' : 'Connecting...'}
-            </span>
-          </div>
-        </div>
+        )}
+
+        {/* Profiles — full width, no max-w constraint, own top bar */}
+        {activeTab === 'config/profiles' && <ErrorBoundary><ProfilesSection /></ErrorBoundary>}
 
         {/* Page content */}
         <div className="max-w-6xl mx-auto" style={{ minHeight: 'calc(100vh - 3.5rem)' }}>
           {activeTab === 'overview' && <ErrorBoundary><OverviewSection /></ErrorBoundary>}
           {activeTab === 'config/api-keys' && <ErrorBoundary><ApiKeysSection /></ErrorBoundary>}
           {activeTab === 'config/labs' && <ErrorBoundary><LabsSection /></ErrorBoundary>}
-          {activeTab === 'config/profiles' && <ErrorBoundary><ProfilesSection /></ErrorBoundary>}
           {activeTab === 'tools/playground' && <ErrorBoundary><PlaygroundSection /></ErrorBoundary>}
           {activeTab === 'tools/bot' && <ErrorBoundary><BotSection /></ErrorBoundary>}
           {activeTab === 'monitor/latency' && <ErrorBoundary><LatencySection /></ErrorBoundary>}
