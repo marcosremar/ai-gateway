@@ -13,6 +13,7 @@ import { modalTTS } from '../src/providers/modal';
 import { modalMossTTS } from '../src/providers/modal-moss';
 import { modalSeamlessSTT, modalSeamlessLLM } from '../src/providers/modal-seamless';
 import { qwen3asrPipelineSTT, qwen3asrPipelineLLM } from '../src/providers/modal-qwen3asr-pipeline';
+import { modalVoxtralSTT } from '../src/providers/modal-voxtral';
 import { openrouterQwen3Embedding } from '../src/providers/openrouter/openrouter-embedding';
 import { openaiEmbedding } from '../src/providers/openai/openai-embedding';
 import { AIProviderRegistry } from '../src/providers/registry';
@@ -169,6 +170,17 @@ registry.register({
 });
 console.log('[gateway] Modal Qwen3-ASR Pipeline registered (STT + LLM translation, no API key needed)');
 
+// Modal Voxtral — Mistral open-weights ASR (no API key, 13 languages, Apache 2.0)
+registry.register({
+  id: 'modal-voxtral',
+  name: 'Modal Voxtral',
+  description: 'Modal serverless GPU — Voxtral-Mini-3B (Mistral ASR, 13 languages, Apache 2.0)',
+  capabilities: ['stt'],
+  requiresApiKey: false,
+  stt: modalVoxtralSTT,
+});
+console.log('[gateway] Modal Voxtral registered (STT, no API key needed)');
+
 // OpenAI STT + TTS
 export const openaiTTS = openaiAvailable ? new OpenAITTSProvider() : null;
 if (openaiAvailable) {
@@ -243,6 +255,7 @@ export const translationProfile: AIProfile = {
   stt: [
     { provider: 'groq', model: groqSttModel },
     { provider: 'modal-qwen3asr-pipeline', model: 'qwen3-asr-1.7b' },
+    { provider: 'modal-voxtral', model: 'voxtral-mini-3b' },
   ],
   llm: [
     { provider: 'groq', model: groqLlmModel },
@@ -498,6 +511,39 @@ export function resetStageBreakers(): void {
   }
 }
 
+/** Snapshot of stage circuit breaker state for /health endpoint. */
+export interface StageBreakerSnapshot {
+  state: 'closed' | 'open' | 'half-open';
+  failures: number;
+  lastFailure: string | null;
+  opensAt: string | null;
+}
+
+/** Return a snapshot of all stage circuit breakers for external consumption. */
+export function getStageBreakersSnapshot(): Record<string, StageBreakerSnapshot> {
+  const result: Record<string, StageBreakerSnapshot> = {};
+  const now = Date.now();
+  for (const stage of ['stt', 'llm', 'tts'] as const) {
+    const b = stageBreakers[stage];
+    let state: 'closed' | 'open' | 'half-open';
+    if (b.openUntil === 0) {
+      state = 'closed';
+    } else if (now >= b.openUntil) {
+      // Recovery timeout elapsed — effectively half-open (will allow next probe)
+      state = 'half-open';
+    } else {
+      state = 'open';
+    }
+    result[stage] = {
+      state,
+      failures: b.failures,
+      lastFailure: b.openUntil > 0 ? new Date(b.openUntil - BREAKER_RECOVERY_MS).toISOString() : null,
+      opensAt: state === 'open' ? new Date(b.openUntil).toISOString() : null,
+    };
+  }
+  return result;
+}
+
 /** Clean up recovery timer on shutdown. */
 export function cleanupProviders(): void {
   cancelGpuRecoveryProbe();
@@ -650,7 +696,7 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
 // Re-export providers needed by handlers
 export { groqSTT, groqLLM, groqTTS, ollamaSTT, ollamaLLM, OllamaLLMProvider, OllamaSTTProvider };
 export { openaiSTT, fireworksSTT, deepgramSTT, elevenlabsSTT };
-export { fireworksLLM, modalTTS, modalMossTTS, modalSeamlessSTT, modalSeamlessLLM, qwen3asrPipelineSTT, qwen3asrPipelineLLM };
+export { fireworksLLM, modalTTS, modalMossTTS, modalSeamlessSTT, modalSeamlessLLM, qwen3asrPipelineSTT, qwen3asrPipelineLLM, modalVoxtralSTT };
 export { openrouterQwen3Embedding, openaiEmbedding };
 // Re-export state values needed by ai-handlers
 export { gpuShadowMode } from './state';
