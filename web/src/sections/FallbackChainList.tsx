@@ -2,10 +2,10 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import Sortable from 'sortablejs';
-import { GripVertical, Plus, Trash2, ChevronDown, Cpu, Cloud, Zap, Server, Pencil, Mic2, Shuffle, Box, Globe, Flame } from 'lucide-react';
+import { GripVertical, Plus, Trash2, ChevronDown, Cpu, Cloud, Zap, Server, Pencil, Mic2, Shuffle, Box, Globe, Flame, Rocket } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button, Toggle, DropdownList, type DropdownOption } from '@/components/ui';
-import { type PipelineChainEntry, type ProfileService, PIPELINE_CATALOG } from './provider-types';
+import { type PipelineChainEntry, type ProfileService, PIPELINE_CATALOG, DEFAULT_DOCKER_IMAGES } from './provider-types';
 
 interface Accent { iconColor: string; dot: string; }
 
@@ -17,8 +17,8 @@ export const PROVIDER_ICON: Record<string, { icon: LucideIcon; color: string }> 
   deepgram:     { icon: Mic2,    color: '#6366f1' },
   elevenlabs:   { icon: Mic2,    color: '#f43f5e' },
   fireworks:    { icon: Flame,   color: '#e07a3a' },
-  modal:        { icon: Server,  color: '#a78bfa' },
-  'modal-moss': { icon: Server,  color: '#c084fc' },
+  modal:        { icon: Rocket,  color: '#a78bfa' },
+  'modal-moss': { icon: Rocket,  color: '#c084fc' },
   openrouter:   { icon: Shuffle, color: '#34d399' },
   ollama:       { icon: Box,     color: '#94a3b8' },
 };
@@ -81,45 +81,90 @@ export default function FallbackChainList({ stage, chain, setChain, accent, serv
   const getIcon = (providerId: string) => PROVIDER_ICON[providerId] || DEFAULT_ICON;
 
   // Build flat list of all available service options
+  // Order: Serverless (fast, few items) → Self-hosted → Cloud
   const serviceOptions = useMemo((): ServiceOption[] => {
     const opts: ServiceOption[] = [];
+    const gi = PROVIDER_ICON['gpu'] || DEFAULT_ICON;
+    const existing = new Set<string>();
 
-    // Always include hardcoded GPU models
-    const gpuProvider = providers.find(p => p.id === 'gpu');
-    if (gpuProvider) {
-      const gi = PROVIDER_ICON['gpu'] || DEFAULT_ICON;
-      const models = (catalog.models as Record<string, { id: string; label: string; streaming?: boolean }[]>)['gpu'] ?? [];
+    // 1. Serverless providers (Modal) — fast cold start, shown first
+    const SERVERLESS_IDS = new Set(['modal', 'modal-moss']);
+    for (const p of providers) {
+      if (!SERVERLESS_IDS.has(p.id)) continue;
+      const pi = PROVIDER_ICON[p.id] || DEFAULT_ICON;
+      const models = (catalog.models as Record<string, { id: string; label: string; streaming?: boolean }[]>)[p.id] ?? [];
       for (const m of models) {
+        const pAny = p as { id: string; label: string; streaming?: boolean };
         opts.push({
-          key: `gpu::${m.id}`, label: `GPU — ${m.label}`, subtitle: m.label,
-          provider: 'gpu', model: m.id, group: 'Self-hosted',
-          streaming: m.streaming, icon: gi.icon, iconColor: gi.color,
+          key: `${p.id}::${m.id}`, label: `${p.label} — ${m.label}`, subtitle: m.label,
+          provider: p.id, model: m.id, group: 'Serverless',
+          streaming: pAny.streaming ?? m.streaming, icon: pi.icon, iconColor: pi.color,
         });
       }
     }
 
-    // GPU pod services
+    // 2. Self-hosted services (Docker images on GPU pods)
     if (services) {
-      const existing = new Set(opts.map(o => o.key));
-      const gi = PROVIDER_ICON['gpu'] || DEFAULT_ICON;
       for (const svc of services) {
-        if (svc.kind === 'gpu-pod') {
+        if (svc.kind !== 'gpu-pod') continue;
+
+        const knownImg = svc.dockerImage
+          ? DEFAULT_DOCKER_IMAGES.find(i => i.url === svc.dockerImage)
+          : undefined;
+        const effectiveStt = svc.sttModel || knownImg?.sttModel;
+        const effectiveLlm = svc.llmModel || knownImg?.llmModel;
+        const effectiveTts = svc.ttsModel || knownImg?.ttsModel;
+        const hasAnyModel = !!(effectiveStt || effectiveLlm || effectiveTts);
+
+        const stageModel = stage === 'stt' ? effectiveStt
+          : stage === 'llm' ? effectiveLlm
+          : effectiveTts;
+
+        if (stageModel) {
           const k = `gpu::${svc.id}`;
-          if (!existing.has(k)) {
-            opts.push({
-              key: k, label: svc.name,
-              subtitle: svc.dockerImage ? svc.dockerImage.split('/').pop() || svc.dockerImage : 'GPU Pod',
-              provider: 'gpu', model: svc.id, group: 'GPU Pods',
-              icon: gi.icon, iconColor: gi.color,
-            });
-          }
+          existing.add(k);
+          const dockerShort = svc.dockerImage ? svc.dockerImage.split('/').pop() || svc.dockerImage : '';
+          opts.push({
+            key: k, label: stageModel,
+            subtitle: dockerShort,
+            provider: 'gpu', model: svc.id, group: 'Self-hosted Services',
+            icon: gi.icon, iconColor: gi.color,
+          });
+        } else if (!hasAnyModel) {
+          const k = `gpu::${svc.id}`;
+          existing.add(k);
+          opts.push({
+            key: k, label: svc.name,
+            subtitle: svc.dockerImage ? svc.dockerImage.split('/').pop() || svc.dockerImage : '',
+            provider: 'gpu', model: svc.id, group: 'Self-hosted Services',
+            icon: gi.icon, iconColor: gi.color,
+          });
         }
       }
     }
 
-    // Cloud provider + model combos
+    // GPU models from catalog (fallback for services not in profile)
+    const gpuProvider = providers.find(p => p.id === 'gpu');
+    if (gpuProvider) {
+      const models = (catalog.models as Record<string, { id: string; label: string; streaming?: boolean }[]>)['gpu'] ?? [];
+      for (const m of models) {
+        const k = `gpu::${m.id}`;
+        if (!existing.has(k)) {
+          existing.add(k);
+          opts.push({
+            key: k, label: m.label, subtitle: m.id,
+            provider: 'gpu', model: m.id, group: 'Self-hosted Services',
+            streaming: m.streaming, icon: gi.icon, iconColor: gi.color,
+          });
+        }
+      }
+      // Note: GPU options are NOT deduplicated against the chain — users can add
+      // the same GPU multiple times for redundancy (gpu → gpu → cloud).
+    }
+
+    // 3. Cloud API providers
     for (const p of providers) {
-      if (p.id === 'gpu') continue;
+      if (p.id === 'gpu' || SERVERLESS_IDS.has(p.id)) continue;
       const pi = PROVIDER_ICON[p.id] || DEFAULT_ICON;
       const models = (catalog.models as Record<string, { id: string; label: string; streaming?: boolean }[]>)[p.id] ?? [];
       for (const m of models) {
@@ -198,9 +243,13 @@ export default function FallbackChainList({ stage, chain, setChain, accent, serv
   };
 
   const startAddFallback = () => {
-    const existing = new Set(chain.map(e => `${e.provider}::${e.model}`));
-    // Pick first option not already in chain
-    const first = serviceOptions.find(o => !existing.has(`${o.provider}::${o.model}`));
+    const existingNonGpu = new Set(
+      chain.filter(e => e.provider !== 'gpu').map(e => `${e.provider}::${e.model}`)
+    );
+    // Pick first option not already in chain (GPU always allowed for redundancy)
+    const first = serviceOptions.find(o =>
+      o.provider === 'gpu' || !existingNonGpu.has(`${o.provider}::${o.model}`)
+    );
     setSelectedKey(first?.key || serviceOptions[0]?.key || '');
     setAddingFallback(true);
   };
