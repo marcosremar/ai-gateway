@@ -2132,6 +2132,8 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
   const [deployRegion, setDeployRegion] = useState<string>('auto');
   const [spotInstance, setSpotInstance] = useState(false);
   const [autoBenchmark, setAutoBenchmark] = useState(false);
+  const [minVramGb, setMinVramGb] = useState(0);
+  const [diskGb, setDiskGb] = useState(20);
 
   // Race tracking
   const [raceStartMs, setRaceStartMs] = useState<number | null>(null);
@@ -2223,6 +2225,8 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
         raceCount: raceCount > 1 ? raceCount : undefined,
         interruptible: spotInstance || undefined,
         region: effectiveRegion,
+        minVramGb: minVramGb > 0 ? minVramGb : undefined,
+        diskGb,
       });
       if (raceCount > 1) setRaceStartMs(Date.now());
       refresh();
@@ -2467,19 +2471,21 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
             )}
             <div className="rounded-lg border overflow-hidden"
               style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 3%, transparent)' }}>
-              {/* Header */}
-              <div className="flex items-center gap-1.5 px-2.5 py-2 border-b"
+
+              {/* ── Header ── */}
+              <div className="flex items-center gap-1.5 px-3 py-2 border-b"
                 style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 4%, transparent)' }}>
                 <Settings2 className="w-3 h-3 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
                 <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--color-text-muted)' }}>Deploy Settings</span>
               </div>
 
-              <div className="p-2.5 space-y-2">
-                {/* Image quick-switch */}
+              {/* ── Target: Image + Provider + Region ── */}
+              <div className="p-3 space-y-2.5">
+                {/* Image */}
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-medium w-16 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Image</span>
+                  <span className="text-[10px] font-medium w-14 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Image</span>
                   <select
-                    className="flex-1 text-[10px] rounded border px-2 py-1 outline-none cursor-pointer"
+                    className="flex-1 text-[10px] rounded-md border px-2 py-1.5 outline-none cursor-pointer"
                     style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
                     value={overrideImage || service.dockerImage || ''}
                     onChange={e => setOverrideImage(e.target.value === service.dockerImage ? null : e.target.value)}
@@ -2490,44 +2496,65 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                   </select>
                 </div>
 
-                {/* Provider preference */}
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-medium w-16 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Provider</span>
-                  <div className="flex gap-1 flex-wrap">
-                    {(['auto', ...GPU_PROVIDERS.map(p => p.id)] as const).map(pid => {
-                      const prov = GPU_PROVIDERS.find(p => p.id === pid);
-                      const label = pid === 'auto' ? 'Auto' : (prov?.name ?? pid);
-                      const sel = deployProvider === pid;
-                      return (
-                        <button key={pid} onClick={() => setDeployProvider(pid)}
-                          className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
-                          style={{
-                            background: sel ? '#06b6d4' : 'var(--color-surface)',
-                            color: sel ? '#fff' : 'var(--color-text-muted)',
-                            border: `1px solid ${sel ? '#06b6d4' : 'var(--color-border)'}`,
-                          }}>
-                          {label}
-                        </button>
-                      );
-                    })}
+                {/* Provider + Region on same row */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <p className="text-[9px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Provider</p>
+                    <div className="flex gap-1 flex-wrap">
+                      {(['auto', ...GPU_PROVIDERS.map(p => p.id)] as const).map(pid => {
+                        const prov = GPU_PROVIDERS.find(p => p.id === pid);
+                        const label = pid === 'auto' ? 'Auto' : (prov?.name ?? pid);
+                        const sel = deployProvider === pid;
+                        return (
+                          <button key={pid} onClick={() => setDeployProvider(pid)}
+                            className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
+                            style={{
+                              background: sel ? '#06b6d4' : 'var(--color-surface)',
+                              color: sel ? '#fff' : 'var(--color-text-muted)',
+                              border: `1px solid ${sel ? '#06b6d4' : 'var(--color-border)'}`,
+                            }}>
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-[9px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Region</p>
+                    <div className="flex gap-1 flex-wrap">
+                      {(['auto', 'US', 'EU', 'Asia'] as const).map(r => {
+                        const sel = deployRegion === r;
+                        return (
+                          <button key={r} onClick={() => setDeployRegion(r)}
+                            className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
+                            style={{
+                              background: sel ? '#3b82f6' : 'var(--color-surface)',
+                              color: sel ? '#fff' : 'var(--color-text-muted)',
+                              border: `1px solid ${sel ? '#3b82f6' : 'var(--color-border)'}`,
+                            }}>
+                            {r === 'auto' ? 'Auto' : r}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
 
-                {/* Region preference */}
+                {/* Min VRAM */}
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-medium w-16 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Region</span>
-                  <div className="flex gap-1">
-                    {(['auto', 'US', 'EU'] as const).map(r => {
-                      const sel = deployRegion === r;
+                  <span className="text-[10px] font-medium w-14 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>Min VRAM</span>
+                  <div className="flex gap-1 flex-wrap">
+                    {[0, 8, 16, 24, 40, 80].map(gb => {
+                      const sel = minVramGb === gb;
                       return (
-                        <button key={r} onClick={() => setDeployRegion(r)}
+                        <button key={gb} onClick={() => setMinVramGb(gb)}
                           className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
                           style={{
-                            background: sel ? '#3b82f6' : 'var(--color-surface)',
-                            color: sel ? '#fff' : 'var(--color-text-muted)',
-                            border: `1px solid ${sel ? '#3b82f6' : 'var(--color-border)'}`,
+                            background: sel ? 'color-mix(in srgb, #10b981 15%, transparent)' : 'var(--color-surface)',
+                            color: sel ? '#34d399' : 'var(--color-text-muted)',
+                            border: `1px solid ${sel ? 'color-mix(in srgb, #10b981 40%, transparent)' : 'var(--color-border)'}`,
                           }}>
-                          {r === 'auto' ? 'Auto' : r}
+                          {gb === 0 ? 'Any' : `${gb}GB`}
                         </button>
                       );
                     })}
@@ -2535,22 +2562,20 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                 </div>
               </div>
 
-              {/* Divider */}
               <div className="border-t" style={{ borderColor: 'var(--color-border)' }} />
 
-              {/* Race + Auto-stop */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-0 divide-y sm:divide-y-0 sm:divide-x"
-                style={{ '--tw-divide-opacity': '1', borderColor: 'var(--color-border)' } as React.CSSProperties}>
+              {/* ── 3-column: Parallel | Auto-stop | Disk ── */}
+              <div className="grid grid-cols-3 divide-x" style={{ borderColor: 'var(--color-border)' } as React.CSSProperties}>
                 {/* Parallel launch */}
                 <div className="p-2.5">
-                  <div className="flex items-center gap-1.5 mb-1.5">
-                    <Zap className="w-3 h-3" style={{ color: '#8b5cf6' }} />
-                    <p className="text-[10px] font-semibold" style={{ color: 'var(--color-text)' }}>Parallel launch</p>
+                  <div className="flex items-center gap-1 mb-1.5">
+                    <Zap className="w-3 h-3 flex-shrink-0" style={{ color: '#8b5cf6' }} />
+                    <p className="text-[10px] font-semibold truncate" style={{ color: 'var(--color-text)' }}>Parallel</p>
                   </div>
-                  <div className="flex gap-1 mb-1.5">
+                  <div className="flex flex-wrap gap-1 mb-1.5">
                     {[1, 2, 3, 5].map(n => (
                       <button key={n} onClick={() => setRaceCount(n)}
-                        className="px-2.5 py-1 rounded text-[10px] font-medium transition-all cursor-pointer"
+                        className="px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
                         style={{
                           background: raceCount === n ? '#8b5cf6' : 'var(--color-surface)',
                           color: raceCount === n ? '#fff' : 'var(--color-text-muted)',
@@ -2561,34 +2586,30 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                     ))}
                   </div>
                   {raceCount === 1 ? (
-                    <p className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Single instance — standard deploy.</p>
+                    <p className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Standard deploy.</p>
                   ) : (
-                    <p className="text-[9px]" style={{ color: '#a78bfa' }}>
-                      {raceCount} instances race — first wins, others killed.
-                    </p>
+                    <p className="text-[9px]" style={{ color: '#a78bfa' }}>{raceCount} instances — first wins.</p>
                   )}
                   {raceResult && raceCount === raceResult.raceCount && (
-                    <div className="mt-1.5 flex items-center gap-1.5 text-[9px] rounded px-2 py-1"
-                      style={{ background: 'color-mix(in srgb, #8b5cf6 8%, transparent)' }}>
+                    <div className="mt-1 flex items-center gap-1 text-[9px]">
                       <Trophy className="w-3 h-3 flex-shrink-0" style={{ color: '#a78bfa' }} />
-                      <span style={{ color: '#c4b5fd' }}>Last: <span className="font-mono font-semibold">{fmtBootTime(raceResult.winnerMs)}</span></span>
-                      {raceResult.gpuType && <span style={{ color: 'var(--color-text-muted)' }}>· {raceResult.gpuType}</span>}
+                      <span className="font-mono font-semibold" style={{ color: '#c4b5fd' }}>{fmtBootTime(raceResult.winnerMs)}</span>
                     </div>
                   )}
                 </div>
 
                 {/* Auto-stop */}
-                <div className="p-2.5 border-t sm:border-t-0 sm:border-l" style={{ borderColor: 'var(--color-border)' }}>
-                  <div className="flex items-center gap-1.5 mb-1.5">
-                    <Timer className="w-3 h-3" style={{ color: '#f59e0b' }} />
-                    <p className="text-[10px] font-semibold" style={{ color: 'var(--color-text)' }}>Auto-stop</p>
+                <div className="p-2.5 border-l" style={{ borderColor: 'var(--color-border)' }}>
+                  <div className="flex items-center gap-1 mb-1.5">
+                    <Timer className="w-3 h-3 flex-shrink-0" style={{ color: '#f59e0b' }} />
+                    <p className="text-[10px] font-semibold truncate" style={{ color: 'var(--color-text)' }}>Auto-stop</p>
                   </div>
                   <div className="flex flex-wrap gap-1">
                     {[5, 15, 30, 60, 0].map(min => (
                       <button key={min} onClick={() => { setIdleTimeoutMin(min); setTimeoutDirty(true); }}
-                        className="px-2 py-1 rounded text-[10px] font-medium transition-all cursor-pointer"
+                        className="px-1.5 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
                         style={{
-                          background: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 10%, transparent)' : 'transparent',
+                          background: idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 12%, transparent)' : 'transparent',
                           color: idleTimeoutMin === min ? '#fbbf24' : 'var(--color-text-muted)',
                           border: `1px solid ${idleTimeoutMin === min ? 'color-mix(in srgb, #f59e0b 35%, transparent)' : 'var(--color-border)'}`,
                         }}>
@@ -2597,36 +2618,52 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                     ))}
                   </div>
                   <p className="text-[9px] mt-1" style={{ color: 'var(--color-text-muted)' }}>
-                    {idleTimeoutMin === 0 ? 'Runs until manually stopped.' : `Stops after ${idleTimeoutMin}min idle.`}
+                    {idleTimeoutMin === 0 ? 'Manual stop only.' : `Idle ${idleTimeoutMin}m → stop.`}
                   </p>
+                </div>
+
+                {/* Disk */}
+                <div className="p-2.5 border-l" style={{ borderColor: 'var(--color-border)' }}>
+                  <div className="flex items-center gap-1 mb-1.5">
+                    <Server className="w-3 h-3 flex-shrink-0" style={{ color: '#60a5fa' }} />
+                    <p className="text-[10px] font-semibold truncate" style={{ color: 'var(--color-text)' }}>Disk</p>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {[10, 20, 50, 100].map(gb => (
+                      <button key={gb} onClick={() => setDiskGb(gb)}
+                        className="px-1.5 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer"
+                        style={{
+                          background: diskGb === gb ? 'color-mix(in srgb, #60a5fa 12%, transparent)' : 'transparent',
+                          color: diskGb === gb ? '#93c5fd' : 'var(--color-text-muted)',
+                          border: `1px solid ${diskGb === gb ? 'color-mix(in srgb, #60a5fa 35%, transparent)' : 'var(--color-border)'}`,
+                        }}>
+                        {gb}GB
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[9px] mt-1" style={{ color: 'var(--color-text-muted)' }}>Container disk.</p>
                 </div>
               </div>
 
-              {/* Divider */}
               <div className="border-t" style={{ borderColor: 'var(--color-border)' }} />
 
-              {/* Toggles row */}
-              <div className="flex items-center gap-4 px-2.5 py-2 border-b" style={{ borderColor: 'var(--color-border)' }}>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <Toggle checked={spotInstance} onChange={setSpotInstance} size="sm" />
-                  <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>Spot instance</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <Toggle checked={autoBenchmark} onChange={setAutoBenchmark} size="sm" />
-                  <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>Benchmark when ready</span>
-                </label>
-              </div>
-
-              {/* Footer: boot estimate + deploy button */}
-              <div className="flex items-center justify-between gap-3 px-2.5 py-2">
-                <div className="flex items-center gap-3 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
-                  <span className="flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
-                    ~2–5 min typical
+              {/* ── Toggles + footer ── */}
+              <div className="flex items-center justify-between gap-2 px-3 py-2">
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <Toggle checked={spotInstance} onChange={setSpotInstance} size="sm" />
+                    <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>Spot</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <Toggle checked={autoBenchmark} onChange={setAutoBenchmark} size="sm" />
+                    <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>Benchmark on ready</span>
+                  </label>
+                  <span className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                    <Clock className="w-3 h-3" /> ~2–5 min
                   </span>
                   {spotInstance && (
-                    <span className="flex items-center gap-1" style={{ color: '#fbbf24' }}>
-                      <AlertTriangle className="w-3 h-3" /> Spot
+                    <span className="flex items-center gap-1 text-[10px]" style={{ color: '#fbbf24' }}>
+                      <AlertTriangle className="w-3 h-3" /> Preemptible
                     </span>
                   )}
                 </div>
