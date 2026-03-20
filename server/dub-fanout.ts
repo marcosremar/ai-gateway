@@ -137,7 +137,8 @@ export async function runMultiLangFanout(
 
       const ttsRace = await raceProviders(ttsCandidates, { logPrefix: `[dub-tts:${target}]` });
       const ttsMs = Date.now() - ttsT0;
-      const audioB64 = ttsRace.result.audio.toString('base64');
+      const ttsAudioBuffer = ttsRace.result.audio;
+      const audioB64 = ttsAudioBuffer.toString('base64');
       const totalMs = Date.now() - t0;
 
       // Send dubbed audio only to clients subscribed to this target
@@ -148,7 +149,7 @@ export async function runMultiLangFanout(
         transcription: sttText,
         translation: translatedText,
         timing: { stt_ms: sttMs, llm_ms: llmMs, tts_ms: ttsMs, total_ms: totalMs },
-      });
+      }, ttsAudioBuffer);
 
       console.log(`[dub-fanout] ${target}: ${totalMs}ms (LLM=${llmMs}ms[${llmProvider}] TTS=${ttsMs}ms[${ttsRace.provider}])`);
     } catch (err) {
