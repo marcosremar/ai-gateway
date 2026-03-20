@@ -388,8 +388,9 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
       ws.send(JSON.stringify({ type: 'error', message: 'target is required for dub:subscribe' }));
       return;
     }
-    subscribeDub(ws.data.id, ws, target);
-    ws.send(JSON.stringify({ type: 'dub:subscribed', target, activeTargets: getActiveTargets() }));
+    const binaryAudio = cmd.binaryAudio === true;
+    subscribeDub(ws.data.id, ws, target, binaryAudio);
+    ws.send(JSON.stringify({ type: 'dub:subscribed', target, binaryAudio, activeTargets: getActiveTargets() }));
 
   } else if (type === 'dub:unsubscribe') {
     unsubscribeDub(ws.data.id);

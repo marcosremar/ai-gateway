@@ -414,7 +414,7 @@ export async function runStreamingPipeline(
               audio: audioB64,
               transcription: sttText, translation: translatedText,
               timing: { stt_ms: sttMs, llm_ms: llmMs, tts_ms: ttsMs, total_ms: Date.now() - pipeT0 },
-            });
+            }, combinedAudio.length > 0 ? combinedAudio : undefined);
           }
 
           cb.onStageDone('tts', { latencyMs: ttsMs, provider: ttsProvider });
@@ -528,7 +528,7 @@ export async function runStreamingPipeline(
             audio: audioB64,
             transcription: sttText, translation: translatedText,
             timing: { stt_ms: sttMs, llm_ms: llmMs, tts_ms: ttsMs, total_ms: Date.now() - pipeT0 },
-          });
+          }, audioBuffer);
 
           // Track GPU TTS warmth
           if (ttsProvider === 'gpu' && ttsMs > 0) {
