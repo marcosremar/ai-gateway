@@ -9,8 +9,8 @@ import { getRequestLog, type RequestLogEntry } from '@/lib/gateway';
 import { Card, CardHeader, CardBody, StatusBadge, AlertBanner, Spinner, IconBox, KV, StatusDot } from '@/components/ui';
 import { PipelineHealthCard } from './PipelineHealthCard';
 import {
-  Activity, Cpu, Bot, Clock, Zap, DollarSign, ArrowRight,
-  Mic, Volume2, Wifi, WifiOff, Snowflake, Flame,
+  Activity, Cpu, Bot, Clock, Zap, DollarSign,
+  Wifi, WifiOff, Snowflake, Flame,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -104,30 +104,6 @@ export function OverviewSection() {
 
   if (error) return <AlertBanner variant="error" className="m-6">Gateway unavailable: {error}</AlertBanner>;
   if (!health) return <div className="flex justify-center p-12"><Spinner size="lg" /></div>;
-
-  const isGpuReady = gpu?.status === 'ready';
-
-  // Always show the 3 pipeline stages — STT, LLM, TTS
-  const pipelineStages: Array<{
-    key: string; label: string; fg: string; icon: LucideIcon;
-    status: string; provider: string;
-  }> = [
-    {
-      key: 'stt', label: 'Speech-to-Text', fg: '#38bdf8', icon: Mic,
-      status: health.components.stt?.status || 'unavailable',
-      provider: health.components.stt?.provider || '—',
-    },
-    {
-      key: 'llm', label: 'Translation', fg: '#a78bfa', icon: Bot,
-      status: health.components.llm?.status || 'unavailable',
-      provider: health.components.llm?.provider || '—',
-    },
-    {
-      key: 'tts', label: 'Text-to-Speech', fg: '#fbbf24', icon: Volume2,
-      status: health.components.tts?.status || 'unavailable',
-      provider: health.components.tts?.provider || (isGpuReady ? 'gpu' : 'cloud fallback'),
-    },
-  ];
 
   return (
     <div className="p-6 space-y-5">
@@ -244,131 +220,6 @@ export function OverviewSection() {
           </CardBody>
         </Card>
       </div>
-
-      {/* Active Pipeline — always show STT → LLM → TTS */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold">Active Pipeline</h3>
-            <div className="flex items-center gap-3 text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
-              <span className="flex items-center gap-1"><Snowflake className="w-3 h-3" style={{ color: '#60a5fa' }} /> Cold start</span>
-              <span className="flex items-center gap-1"><Flame className="w-3 h-3" style={{ color: '#f59e0b' }} /> Warm</span>
-            </div>
-          </div>
-        </CardHeader>
-        <CardBody>
-          {/* Routing mode flow bar */}
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-4 px-3 py-2 rounded-lg text-xs overflow-x-auto"
-            style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)' }}
-          >
-            <span style={{ color: 'var(--color-text-muted)', flexShrink: 0 }}>Routing:</span>
-            {(['stt', 'llm', 'tts'] as const).map((s, i) => {
-              const r = gpu?.pipelineRouting;
-              const dest = (r ? { stt: r.stt, llm: r.llm, tts: r.tts }[s] : null) ?? 'cloud';
-              return (
-                <span key={s} className="flex items-center gap-1 flex-shrink-0">
-                  {i > 0 && <ArrowRight className="w-2.5 h-2.5" style={{ color: 'var(--color-border)' }} />}
-                  <span className="uppercase font-mono text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{s}</span>
-                  <span className="font-semibold" style={{ color: dest === 'gpu' ? '#10b981' : '#8b949e' }}>
-                    → {dest}
-                  </span>
-                </span>
-              );
-            })}
-            <span className="ml-auto flex-shrink-0 px-2 py-0.5 rounded text-[10px] font-bold"
-              style={{
-                background: gpu?.pipelineRouting?.mode === 'atomic-gpu' ? 'color-mix(in srgb, #10b981 12%, transparent)' :
-                            gpu?.pipelineRouting?.mode === 'hybrid' ? 'color-mix(in srgb, #f59e0b 12%, transparent)' :
-                            'var(--color-surface)',
-                color: gpu?.pipelineRouting?.mode === 'atomic-gpu' ? '#10b981' :
-                       gpu?.pipelineRouting?.mode === 'hybrid' ? '#f59e0b' : 'var(--color-text-muted)',
-                border: '1px solid currentColor',
-              }}
-            >
-              {gpu?.pipelineRouting?.mode ?? 'cloud'}
-            </span>
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            {pipelineStages.map((stage) => {
-              const StageIcon = stage.icon;
-              const lat = stageLatencies[stage.key];
-              const isOk = stage.status === 'ok' || stage.status === 'ready';
-
-              return (
-                <div
-                  key={stage.key}
-                  className="rounded-xl border p-4 transition-all"
-                  style={{
-                    borderColor: isOk
-                      ? `color-mix(in srgb, ${stage.fg} 25%, var(--color-border))`
-                      : 'var(--color-border)',
-                    background: isOk
-                      ? `color-mix(in srgb, ${stage.fg} 3%, var(--color-surface))`
-                      : 'var(--color-surface)',
-                    opacity: isOk ? 1 : 0.5,
-                  }}
-                >
-                  {/* Header */}
-                  <div className="flex items-center gap-2.5 mb-3">
-                    <IconBox icon={StageIcon} color={stage.fg} />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-bold uppercase tracking-wide" style={{ color: isOk ? stage.fg : 'var(--color-text-muted)' }}>
-                        {stage.key}
-                      </div>
-                      <div className="text-[11px] truncate" style={{ color: 'var(--color-text-muted)' }}>
-                        {stage.label}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Provider */}
-                  <div className="text-xs font-medium mb-3 capitalize">{stage.provider}</div>
-
-                  {/* Latency */}
-                  {lat && lat.samples > 0 ? (
-                    <div className="space-y-2 pt-3 border-t" style={{ borderColor: 'var(--color-border-light)' }}>
-                      {lat.cold !== null && (
-                        <div className="flex items-center justify-between">
-                          <span className="flex items-center gap-1.5 text-xs" style={{ color: '#60a5fa' }}>
-                            <Snowflake className="w-3 h-3" /> Cold
-                          </span>
-                          <span className="text-sm font-mono font-bold">{lat.cold}ms</span>
-                        </div>
-                      )}
-                      {lat.warm !== null && (
-                        <div className="flex items-center justify-between">
-                          <span className="flex items-center gap-1.5 text-xs" style={{ color: '#f59e0b' }}>
-                            <Flame className="w-3 h-3" /> Warm
-                          </span>
-                          <span className="text-sm font-mono font-bold">{lat.warm}ms</span>
-                        </div>
-                      )}
-                      <div className="text-[10px] text-right" style={{ color: 'var(--color-text-muted)' }}>
-                        {lat.samples} samples
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="pt-3 border-t" style={{ borderColor: 'var(--color-border-light)' }}>
-                      <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                        {isOk ? 'No latency data yet' : 'Unavailable'}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Flow arrows between stages — visual indicator */}
-          <div className="flex items-center justify-center gap-1 mt-3">
-            <span className="text-[10px] font-mono" style={{ color: '#38bdf8' }}>STT</span>
-            <ArrowRight className="w-3 h-3" style={{ color: 'var(--color-text-muted)', opacity: 0.4 }} />
-            <span className="text-[10px] font-mono" style={{ color: '#a78bfa' }}>LLM</span>
-            <ArrowRight className="w-3 h-3" style={{ color: 'var(--color-text-muted)', opacity: 0.4 }} />
-            <span className="text-[10px] font-mono" style={{ color: '#fbbf24' }}>TTS</span>
-          </div>
-        </CardBody>
-      </Card>
 
       {/* Pipeline health — profile → stage → provider hierarchy */}
       <PipelineHealthCard health={health} />

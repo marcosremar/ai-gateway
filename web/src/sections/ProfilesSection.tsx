@@ -4,7 +4,6 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   getProviderConfig, patchProviderConfig, getGpuTypes, deployGpu, terminateGpu, inspectDockerImage, getRequestLog, speechPipeline, benchmarkPaths, type GpuTypeInfo, type DockerManifest, type SpeechTransport, type BenchmarkPathsResponse, type PathOption, type StageBenchResult, type ProviderBenchResult, type PipelineIteration,
-  getReadinessStatus, resetGpuReadiness, type ReadinessStatusResponse,
 } from '@/lib/gateway';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import {
@@ -15,7 +14,7 @@ import {
   ChevronLeft, Mic, Plus, Check, Trash2, Circle,
   CircleCheck, Package, Server, Bot, Volume2, Pencil, Clock, Gauge, Timer, Search, Loader2,
   GripVertical, ClipboardCheck, Sparkles, Brain, Play, Square, Cpu, ScanSearch, AlertCircle,
-  Upload, Zap, X as XIcon, BarChart3, Trophy, RotateCcw, RefreshCw, Activity, AlertTriangle,
+  Upload, Zap, X as XIcon, BarChart3, Trophy, Activity, AlertTriangle,
   TrendingDown, ArrowRight, ChevronDown, Settings2, Cloud, MoreVertical, Eye, EyeOff, MapPin,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -713,7 +712,12 @@ function ProfileFlowDiagram({
       </div>
 
       {/* Flow */}
-      <div className="p-6">
+      <div className="p-5 rounded-b-xl relative"
+        style={{
+          background: 'var(--color-surface)',
+          backgroundImage: 'radial-gradient(circle, color-mix(in srgb, var(--color-text-muted) 12%, transparent) 1px, transparent 1px)',
+          backgroundSize: '20px 20px',
+        }}>
         <div className="flex items-start gap-0">
 
           {/* Pipeline input — compact controls: lang, record, upload, run */}
@@ -847,17 +851,32 @@ function ProfileFlowDiagram({
             return (
             <div key={stage.key} className="flex items-start flex-1 min-w-0">
               {/* Arrow with data type label */}
-              <div className="flex flex-col items-center w-12 flex-shrink-0">
-                <span className={`text-[8px] font-semibold uppercase tracking-wider mb-0.5 ${arrowActive ? 'animate-pulse' : ''}`}
-                  style={{ color: arrowDone ? '#10b981' : arrowActive ? stage.color : stage.enabled ? stage.color : 'var(--color-text-muted)', opacity: arrowActive ? 1 : 0.7 }}>
+              <div className="flex flex-col items-center w-10 flex-shrink-0 pt-3">
+                <span className={`text-[7px] font-bold uppercase tracking-widest mb-1 ${arrowActive ? 'animate-pulse' : ''}`}
+                  style={{
+                    color: arrowDone ? '#10b981' : arrowActive ? stage.color : stage.enabled ? stage.color : 'var(--color-text-muted)',
+                    opacity: arrowActive ? 1 : 0.65,
+                    letterSpacing: '0.12em',
+                  }}>
                   {stage.input}
                 </span>
-                <div className="flex items-center w-full mt-0.5">
-                  <div className={`flex-1 transition-all duration-300 ${arrowActive ? 'h-[2px]' : 'h-px'}`}
-                    style={{ background: arrowDone ? '#10b981' : arrowActive ? stage.color : stage.enabled ? `color-mix(in srgb, ${stage.color} 60%, transparent)` : 'var(--color-border)' }} />
-                  <svg width="7" height="10" viewBox="0 0 7 10" className="flex-shrink-0">
-                    <path d="M0 1 L6 5 L0 9" stroke={stage.enabled ? stage.color : 'var(--color-border)'}
-                      strokeWidth="1.5" fill="none" strokeLinecap="round" strokeOpacity={stage.enabled ? 0.7 : 1} />
+                <div className="flex items-center w-full">
+                  <div className={`flex-1 transition-all duration-500 ${arrowActive ? 'h-[2.5px]' : 'h-[1.5px]'}`}
+                    style={{
+                      background: arrowDone
+                        ? '#10b981'
+                        : arrowActive
+                          ? stage.color
+                          : stage.enabled
+                            ? `color-mix(in srgb, ${stage.color} 50%, transparent)`
+                            : 'var(--color-border)',
+                      borderRadius: '1px',
+                    }} />
+                  <svg width="6" height="10" viewBox="0 0 6 10" className="flex-shrink-0">
+                    <path d="M0 1.5 L5 5 L0 8.5"
+                      stroke={arrowDone ? '#10b981' : stage.enabled ? stage.color : 'var(--color-border)'}
+                      strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"
+                      strokeOpacity={arrowActive ? 1 : stage.enabled ? 0.65 : 1} />
                   </svg>
                 </div>
               </div>
@@ -881,11 +900,18 @@ function ProfileFlowDiagram({
                     : isDone ? 'color-mix(in srgb, #10b981 6%, var(--color-surface))'
                     : stage.enabled ? `color-mix(in srgb, ${stage.color} 6%, var(--color-surface))` : 'var(--color-surface)';
                   return (
-                    <div className="w-full border px-3 py-2 text-center relative overflow-hidden transition-all"
-                      style={{ borderRadius: '4px', borderColor: boxBorderColor, background: boxBg, borderTop: `3px solid ${boxTopColor}` }}>
+                    <div className="w-full border px-3 py-2.5 text-center relative overflow-hidden transition-all"
+                      style={{
+                        borderRadius: '10px',
+                        borderColor: boxBorderColor,
+                        background: boxBg,
+                        borderTop: `3px solid ${boxTopColor}`,
+                        boxShadow: isActive ? `0 0 16px color-mix(in srgb, ${stage.color} 22%, transparent)` : isDone ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
+                        backdropFilter: 'blur(2px)',
+                      }}>
                       {isActive && (
                         <div className="absolute inset-0 overflow-hidden pointer-events-none">
-                          <div className="absolute inset-y-0 w-full opacity-15 animate-pulse"
+                          <div className="absolute inset-y-0 w-full opacity-20 animate-pulse"
                             style={{ background: `linear-gradient(90deg, transparent, ${stage.color}, transparent)` }} />
                         </div>
                       )}
@@ -895,23 +921,32 @@ function ProfileFlowDiagram({
                           type="button"
                           onClick={() => onToggleStage(stage.key)}
                           title={stage.enabled ? 'Disable stage' : 'Enable stage'}
-                          className="absolute top-0.5 right-0.5 w-4 h-4 rounded flex items-center justify-center transition-colors"
-                          style={{ background: 'transparent', border: 'none', cursor: 'pointer' }}>
+                          className="absolute top-1 right-1 w-4 h-4 rounded flex items-center justify-center transition-colors"
+                          style={{ background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0 }}
+                          onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+                          onMouseLeave={e => (e.currentTarget.style.opacity = '0')}>
                           {stage.enabled
-                            ? <EyeOff className="w-2.5 h-2.5" style={{ color: 'var(--color-text-muted)', opacity: 0.5 }} />
+                            ? <EyeOff className="w-2.5 h-2.5" style={{ color: 'var(--color-text-muted)' }} />
                             : <Eye className="w-2.5 h-2.5" style={{ color: '#10b981' }} />}
                         </button>
                       )}
-                      <div className="flex items-center justify-center gap-1.5">
-                        <span className="text-xs font-bold uppercase tracking-wider"
-                          style={{ color: isError ? '#ef4444' : isDone ? '#10b981' : isActive ? stage.color : stage.enabled ? stage.color : 'var(--color-text-muted)' }}>
+                      {/* Stage icon + label row */}
+                      <div className="flex items-center justify-center gap-1.5 mb-0.5">
+                        <div className="w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0"
+                          style={{ background: `color-mix(in srgb, ${isError ? '#ef4444' : isDone ? '#10b981' : stage.color} 15%, transparent)` }}>
+                          {stage.key === 'stt' && <Mic className="w-3 h-3" style={{ color: isError ? '#ef4444' : isDone ? '#10b981' : isActive ? stage.color : stage.color }} />}
+                          {stage.key === 'llm' && <Bot className="w-3 h-3" style={{ color: isError ? '#ef4444' : isDone ? '#10b981' : isActive ? stage.color : stage.color }} />}
+                          {stage.key === 'tts' && <Volume2 className="w-3 h-3" style={{ color: isError ? '#ef4444' : isDone ? '#10b981' : isActive ? stage.color : stage.color }} />}
+                        </div>
+                        <span className="text-[11px] font-bold uppercase tracking-widest"
+                          style={{ color: isError ? '#ef4444' : isDone ? '#10b981' : isActive ? stage.color : stage.enabled ? stage.color : 'var(--color-text-muted)', letterSpacing: '0.12em' }}>
                           {stage.label}
                         </span>
                         {isActive && <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" style={{ color: stage.color }} />}
                         {isDone && <Check className="w-3 h-3 flex-shrink-0" style={{ color: '#10b981' }} />}
                         {isError && <XIcon className="w-3 h-3 flex-shrink-0" style={{ color: '#ef4444' }} />}
                       </div>
-                      <div className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                      <div className="text-[9px] font-medium" style={{ color: 'var(--color-text-muted)', letterSpacing: '0.02em' }}>
                         {stage.sublabel}
                       </div>
                       {/* Timing — prominent display after completion */}
@@ -948,8 +983,14 @@ function ProfileFlowDiagram({
 
                 {/* Connector line down */}
                 {stage.enabled && stage.chain.length > 0 && (
-                  <div className="w-px h-4 flex-shrink-0"
-                    style={{ background: `color-mix(in srgb, ${stage.color} 30%, transparent)` }} />
+                  <div className="flex flex-col items-center gap-0.5 py-1">
+                    <div className="w-px h-3 flex-shrink-0"
+                      style={{ background: `color-mix(in srgb, ${stage.color} 35%, transparent)` }} />
+                    <svg width="6" height="5" viewBox="0 0 6 5">
+                      <path d="M1 0.5 L3 4 L5 0.5" stroke={stage.color} strokeWidth="1.2" fill="none"
+                        strokeLinecap="round" strokeOpacity="0.5" />
+                    </svg>
+                  </div>
                 )}
 
                 {/* Provider chain */}
@@ -974,68 +1015,82 @@ function ProfileFlowDiagram({
                   return (
                     <div key={j} className="flex flex-col items-center w-full">
                       {j > 0 && (
-                        <div className="flex flex-col items-center py-0.5">
-                          <div className="w-px h-2" style={{ background: 'var(--color-border)' }} />
-                          <span className="text-[8px] font-semibold uppercase tracking-wider"
-                            style={{ color: 'var(--color-text-muted)' }}>fallback</span>
-                          <div className="w-px h-2" style={{ background: 'var(--color-border)' }} />
+                        <div className="flex items-center gap-1 py-1 w-full">
+                          <div className="flex-1 h-px" style={{ background: 'var(--color-border)', opacity: 0.6 }} />
+                          <span className="text-[7px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded-full"
+                            style={{
+                              color: 'var(--color-text-muted)',
+                              background: 'color-mix(in srgb, var(--color-text-muted) 8%, transparent)',
+                              border: '1px solid var(--color-border)',
+                              letterSpacing: '0.1em',
+                            }}>
+                            fallback
+                          </span>
+                          <div className="flex-1 h-px" style={{ background: 'var(--color-border)', opacity: 0.6 }} />
                         </div>
                       )}
                       {/* Chip wrapper — tracks hover for action buttons */}
                       <div className="relative w-full"
                         onMouseEnter={() => { cancelHideTooltip(); setHoveredChip({ stageKey: stage.key, entryIdx: j }); }}
                         onMouseLeave={() => scheduleHideTooltip()}>
-                        {/* Service chip — pill/oval shape (= "resource" shape) */}
-                        <div className={`w-full flex flex-col items-center px-2 py-2 border gap-1 transition-all cursor-help ${isUsedService ? 'ring-1' : ''}`}
+                        {/* Service chip — horizontal card with left-border accent */}
+                        <div className={`w-full flex items-center px-2 py-1.5 border gap-2 transition-all cursor-help ${isUsedService ? 'ring-1 ring-emerald-500/20' : ''}`}
                           style={{
-                            borderRadius: '20px',
-                            opacity: isEntryDisabled ? 0.45 : 1,
+                            borderRadius: '8px',
+                            opacity: isEntryDisabled ? 0.4 : 1,
                             background: isUsedService
                               ? 'color-mix(in srgb, #10b981 8%, var(--color-surface))'
-                              : j === 0 ? `color-mix(in srgb, ${color} 10%, var(--color-surface))` : 'var(--color-surface-elevated)',
+                              : j === 0
+                                ? `color-mix(in srgb, ${color} 7%, var(--color-surface))`
+                                : 'var(--color-surface-elevated)',
                             borderColor: isEntryDisabled
                               ? 'var(--color-border)'
                               : isUsedService
-                                ? 'color-mix(in srgb, #10b981 40%, transparent)'
-                                : j === 0 ? `color-mix(in srgb, ${color} 35%, transparent)` : 'var(--color-border)',
-                            ...(isUsedService ? { ringColor: 'rgba(16,185,129,0.3)' } as React.CSSProperties : {}),
+                                ? 'color-mix(in srgb, #10b981 35%, transparent)'
+                                : j === 0
+                                  ? `color-mix(in srgb, ${color} 25%, transparent)`
+                                  : 'var(--color-border)',
+                            borderLeft: `2.5px solid ${isEntryDisabled ? 'var(--color-border)' : isUsedService ? '#10b981' : j === 0 ? color : 'var(--color-border)'}`,
+                            boxShadow: isUsedService ? `0 1px 6px color-mix(in srgb, #10b981 15%, transparent)` : j === 0 ? `0 1px 4px color-mix(in srgb, ${color} 10%, transparent)` : 'none',
                           }}
                           onMouseEnter={e => {
                             cancelHideTooltip();
                             setChipRect(e.currentTarget.getBoundingClientRect());
-                            e.currentTarget.style.transform = 'scale(1.03)';
+                            e.currentTarget.style.transform = 'translateX(1px)';
                           }}
                           onMouseLeave={e => {
                             e.currentTarget.style.transform = '';
                           }}>
                           {/* Icon */}
                           {EntryIcon && (
-                            <div className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
-                              style={{ background: `color-mix(in srgb, ${iconColor} 15%, transparent)` }}>
-                              <EntryIcon className="w-3.5 h-3.5" style={{ color: iconColor }} />
+                            <div className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0"
+                              style={{ background: `color-mix(in srgb, ${iconColor} 18%, transparent)` }}>
+                              <EntryIcon className="w-3 h-3" style={{ color: iconColor }} />
                             </div>
                           )}
-                          {/* Provider name */}
-                          <span className="text-[11px] font-semibold truncate w-full text-center leading-tight"
-                            style={{ color: chipColor }}>
-                            {label}
-                          </span>
-                          {/* Model name */}
-                          {mLabel && (
-                            <span className="text-[9px] truncate w-full text-center leading-tight"
-                              style={{ color: 'var(--color-text-muted)' }}>
-                              {mLabel}
+                          {/* Text stack */}
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <span className="text-[10px] font-semibold truncate leading-tight"
+                              style={{ color: chipColor }}>
+                              {label}
                             </span>
-                          )}
+                            {mLabel && (
+                              <span className="text-[8px] truncate leading-tight"
+                                style={{ color: 'var(--color-text-muted)' }}>
+                                {mLabel}
+                              </span>
+                            )}
+                          </div>
                           {/* Used indicator with latency */}
                           {isUsedService && ts?.latencyMs != null && (
-                            <span className="text-[8px] font-bold font-mono" style={{ color: '#10b981' }}>
+                            <span className="text-[8px] font-bold font-mono flex-shrink-0 px-1 py-0.5 rounded"
+                              style={{ color: '#10b981', background: 'color-mix(in srgb, #10b981 10%, transparent)' }}>
                               {ts.latencyMs < 1000 ? `${ts.latencyMs}ms` : `${(ts.latencyMs / 1000).toFixed(1)}s`}
                             </span>
                           )}
                           {/* Disabled badge */}
                           {isEntryDisabled && (
-                            <span className="text-[8px] font-semibold uppercase tracking-wider"
+                            <span className="text-[7px] font-bold uppercase tracking-widest flex-shrink-0"
                               style={{ color: 'var(--color-text-muted)' }}>off</span>
                           )}
                         </div>
@@ -2260,20 +2315,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
       {/* GPU Deploy controls */}
       {isGpu && (
         <div className="px-3 pb-3 pt-0 space-y-2">
-          {isOtherActive ? (
-            /* Another service is running — show which image is deployed */
-            <div className="rounded-lg px-3 py-2 flex items-center gap-2"
-              style={{ background: 'color-mix(in srgb, var(--color-text-muted) 5%, transparent)', border: '1px solid var(--color-border)' }}>
-              <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: '#f59e0b' }} />
-              <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
-                GPU in use —{' '}
-                <span className="font-mono font-semibold" style={{ color: 'var(--color-text)' }}>
-                  {gpu?.dockerImage?.split('/').pop() ?? gpu?.dockerImage ?? 'another service'}
-                </span>
-                {gpu?.gpuType && <span> · {gpu.gpuType}</span>}
-              </span>
-            </div>
-          ) : isActive ? (
+          {isActive ? (
             <div className="rounded-lg p-2.5 space-y-2"
               style={{
                 background: isReady
@@ -2407,6 +2449,22 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
               )}
             </div>
           ) : (
+            <>
+            {/* Another GPU is running — small amber note above deploy section */}
+            {isOtherActive && (
+              <div className="rounded-lg px-2.5 py-1.5 flex items-center gap-2"
+                style={{ background: 'color-mix(in srgb, #f59e0b 8%, transparent)', border: '1px solid color-mix(in srgb, #f59e0b 25%, transparent)' }}>
+                <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: '#f59e0b' }} />
+                <span className="text-[10px] truncate" style={{ color: '#fbbf24' }}>
+                  Running:{' '}
+                  <span className="font-mono font-semibold">
+                    {gpu?.dockerImage?.split('/').pop() ?? 'another service'}
+                  </span>
+                  {gpu?.gpuType && <span className="font-normal opacity-70"> · {gpu.gpuType}</span>}
+                  <span className="opacity-60"> — deploying will terminate it</span>
+                </span>
+              </div>
+            )}
             <div className="rounded-lg border overflow-hidden"
               style={{ borderColor: 'var(--color-border)', background: 'color-mix(in srgb, var(--color-text-muted) 3%, transparent)' }}>
               {/* Header */}
@@ -2573,12 +2631,13 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                   )}
                 </div>
                 <Button variant="primary" size="sm" onClick={handleDeploy} isLoading={deploying} loadingText="Deploying..."
-                  disabled={!service.dockerImage || !service.gpuTypes?.length || (!!gpu && gpu.status !== 'idle' && gpu.status !== 'error' && !isThisService)}>
+                  disabled={!service.dockerImage || !service.gpuTypes?.length}>
                   <Play className="w-3 h-3" /> {raceCount > 1 ? `Race ×${raceCount}` : 'Deploy'}
                 </Button>
               </div>
             </div>
-          ) /* end isOtherActive ? ... : isActive ? ... : ... */}
+            </>
+          )}
           {deployError && (
             <p className="text-[10px]" style={{ color: '#ef4444' }}>{deployError}</p>
           )}
@@ -3224,167 +3283,6 @@ function StageList({ stages, setStages, services }: {
   );
 }
 
-// ── GPU Readiness Card (compact, embedded in profile list) ──
-
-type Phase = 'idle' | 'benchmarking' | 'ready' | 'degraded' | 'failed' | 'repechage' | 'condemned';
-
-function PhaseBadge({ phase }: { phase: Phase }) {
-  switch (phase) {
-    case 'ready':        return <StatusBadge variant="emerald" dot>Ready</StatusBadge>;
-    case 'benchmarking': return <StatusBadge variant="amber" dot>Benchmarking</StatusBadge>;
-    case 'degraded':     return <StatusBadge variant="orange" dot>Degraded</StatusBadge>;
-    case 'repechage':    return <StatusBadge variant="amber">Repechage</StatusBadge>;
-    case 'failed':       return <StatusBadge variant="red" dot>Failed</StatusBadge>;
-    case 'condemned':    return <StatusBadge variant="red" dot>Condemned</StatusBadge>;
-    default:             return <StatusBadge variant="gray" dot>Idle</StatusBadge>;
-  }
-}
-
-function fmtMs(ms: number | null): string {
-  return ms === null ? '—' : `${Math.round(ms)}ms`;
-}
-
-function p95Color(p95: number | null, target: number, multiplier: number): string {
-  if (p95 === null) return 'var(--color-text-muted)';
-  if (p95 <= target) return 'var(--color-emerald, #34d399)';
-  if (p95 <= target * multiplier) return 'var(--color-amber, #fbbf24)';
-  return 'var(--color-red, #f87171)';
-}
-
-function GpuReadinessCard() {
-  const [status, setStatus] = useState<ReadinessStatusResponse | null>(null);
-  const [resetting, setResetting] = useState(false);
-
-  const load = useCallback(async () => {
-    try { setStatus(await getReadinessStatus()); } catch {}
-  }, []);
-
-  const hasActivePhase = status && ['benchmarking', 'degraded', 'repechage', 'condemned'].some(p =>
-    status.readinessState.stt.phase === p || status.readinessState.llm.phase === p || status.readinessState.tts.phase === p
-  );
-  const pollMs = hasActivePhase || status?.readinessState.shadowPhase ? 2000 : 10000;
-
-  useEffect(() => {
-    load();
-    const iv = setInterval(load, pollMs);
-    return () => clearInterval(iv);
-  }, [load, pollMs]);
-
-  const handleReset = async () => {
-    setResetting(true);
-    try { await resetGpuReadiness(); await load(); } catch {} finally { setResetting(false); }
-  };
-
-  if (!status) return null;
-
-  const stages = ['stt', 'llm', 'tts'] as const;
-
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Activity className="w-4 h-4" style={{ color: 'var(--color-text-muted)' }} />
-            <span className="text-sm font-semibold">GPU Readiness</span>
-          </div>
-          <div className="flex items-center gap-2">
-            {status.gpuReadyForProduction
-              ? <StatusBadge variant="emerald" dot>Production</StatusBadge>
-              : status.gpuShadowMode
-                ? <StatusBadge variant="amber" dot>Shadow</StatusBadge>
-                : <StatusBadge variant="gray" dot>Inactive</StatusBadge>
-            }
-          </div>
-        </div>
-      </CardHeader>
-      <CardBody>
-        {status.readinessState.condemned && (
-          <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg text-xs"
-            style={{ background: 'color-mix(in srgb, var(--color-red, #f87171) 8%, var(--color-surface-elevated))', color: 'var(--color-red, #f87171)' }}>
-            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
-            GPU condemned — all traffic routed to cloud
-          </div>
-        )}
-
-        {/* Per-stage status + P95 in one compact grid */}
-        <div className="grid grid-cols-3 gap-3">
-          {stages.map(stage => {
-            const s = status.readinessState[stage];
-            const p95 = status.perStageP95[stage];
-            const target = status.targets[stage];
-            const threshold = target * status.p95DemotionMultiplier;
-            const pct = s.phase === 'benchmarking' && s.completedRuns > 0
-              ? Math.min(100, Math.round(s.completedRuns / 20 * 100)) : 0;
-
-            return (
-              <div key={stage} className="p-2.5 rounded-lg" style={{ background: 'var(--color-bg-secondary)' }}>
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[10px] uppercase font-mono font-semibold" style={{ color: 'var(--color-text-muted)' }}>{stage}</span>
-                  <PhaseBadge phase={s.phase as Phase} />
-                </div>
-
-                {/* P95 value */}
-                <div className="text-lg font-mono font-bold" style={{ color: p95Color(p95, target, status.p95DemotionMultiplier) }}>
-                  {fmtMs(p95)}
-                </div>
-                <div className="text-[10px] font-mono" style={{ color: 'var(--color-text-muted)' }}>
-                  target {target}ms · best {fmtMs(s.bestLatencyMs)}
-                </div>
-
-                {/* Benchmark progress bar */}
-                {s.phase === 'benchmarking' && (
-                  <div className="mt-1.5 h-1 rounded-full" style={{ background: 'var(--color-bg)' }}>
-                    <div className="h-1 rounded-full transition-all" style={{ width: `${pct}%`, background: 'var(--color-amber, #fbbf24)' }} />
-                  </div>
-                )}
-
-                {/* P95 bar (when ready/degraded) */}
-                {p95 !== null && s.phase !== 'benchmarking' && (
-                  <div className="mt-1.5 h-1 rounded-full" style={{ background: 'var(--color-bg)' }}>
-                    <div className="h-1 rounded-full transition-all" style={{
-                      width: `${Math.min(100, Math.round(p95 / threshold * 100))}%`,
-                      background: p95Color(p95, target, status.p95DemotionMultiplier),
-                    }} />
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Shadow / repechage status */}
-        {(status.readinessState.shadowPhase || status.readinessState.repechageAttempts > 0) && (
-          <div className="flex items-center gap-4 mt-2 text-xs" style={{ color: 'var(--color-text-muted)' }}>
-            {status.readinessState.shadowPhase && (
-              <span className="flex items-center gap-1">
-                <Activity className="w-3 h-3" style={{ color: 'var(--color-amber, #fbbf24)' }} />
-                Shadow {status.readinessState.shadowCompletedRuns}/5
-              </span>
-            )}
-            {status.readinessState.repechageAttempts > 0 && (
-              <span className="flex items-center gap-1">
-                <AlertTriangle className="w-3 h-3" style={{ color: 'var(--color-amber, #fbbf24)' }} />
-                Repechage {status.readinessState.repechageAttempts}/{status.repechageMaxAttempts}
-              </span>
-            )}
-          </div>
-        )}
-
-        {/* Actions */}
-        <div className="flex items-center gap-2 mt-3 pt-3" style={{ borderTop: '1px solid var(--color-border)' }}>
-          <Button size="sm" variant="secondary" onClick={handleReset} disabled={resetting}>
-            <RotateCcw className={`w-3.5 h-3.5 ${resetting ? 'animate-spin' : ''}`} />
-            {resetting ? 'Resetting...' : 'Re-run Benchmark'}
-          </Button>
-          <Button size="sm" variant="ghost" onClick={load}>
-            <RefreshCw className="w-3.5 h-3.5" /> Refresh
-          </Button>
-        </div>
-      </CardBody>
-    </Card>
-  );
-}
-
 // ── Main ProfilesSection ──
 
 /** Parse sub-route from URL: /config/profiles/edit/{id} or /config/profiles/new */
@@ -3633,7 +3531,6 @@ export function ProfilesSection() {
           </Button>
         </div>
 
-        <GpuReadinessCard />
       </div>
     );
   }

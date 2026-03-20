@@ -119,5 +119,8 @@ export { ModalMossTTSProvider, modalMossTTS, MODAL_MOSS_TTS_MODELS } from './mod
 // ── Modal (SeamlessM4T v2 — ASR + speech/text translation) ───────────────
 export { ModalSeamlessSTTProvider, ModalSeamlessLLMProvider, modalSeamlessSTT, modalSeamlessLLM, SEAMLESS_MODELS } from './modal-seamless';
 
+// ── Modal (Qwen3-ASR + TranslateGemma pipeline — best ASR + translation) ─
+export { Qwen3ASRPipelineSTTProvider, Qwen3ASRPipelineLLMProvider, qwen3asrPipelineSTT, qwen3asrPipelineLLM, QWEN3ASR_PIPELINE_MODELS } from './modal-qwen3asr-pipeline';
+
 // ── Self-Hosted ───────────────────────────────────────────────────────────
 export { SelfHostedSTTProvider, SelfHostedTTSProvider, SelfHostedLLMProvider } from './self-hosted/self-hosted-provider';
