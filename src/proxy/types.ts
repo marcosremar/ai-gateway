@@ -36,6 +36,8 @@ export interface ProxyConfig {
   customRoutes?: CustomRoute[];
   /** Directory of static files to serve (e.g. Next.js `out/` export). Falls back for non-API paths. */
   staticDir?: string;
+  /** Next.js dev server URL for HMR proxy (e.g. 'http://localhost:3000'). Overrides staticDir when set. */
+  nextDevUrl?: string;
 }
 
 export interface ProxyRoute {

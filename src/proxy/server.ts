@@ -200,6 +200,26 @@ const MIME_TYPES: Record<string, string> = {
   '.txt': 'text/plain',
 };
 
+/** Reverse-proxy a request to the Next.js dev server for HMR support. */
+function proxyToNextDev(nextDevUrl: string, req: IncomingMessage, res: ServerResponse): void {
+  const target = new URL(req.url || '/', nextDevUrl);
+  const proxyReq = (target.protocol === 'https:' ? require('https') : require('http')).request(
+    target,
+    { method: req.method, headers: { ...req.headers, host: target.host } },
+    (proxyRes: IncomingMessage) => {
+      res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+      proxyRes.pipe(res);
+    },
+  );
+  proxyReq.on('error', () => {
+    if (!res.headersSent) {
+      res.writeHead(502, { 'Content-Type': 'text/plain' });
+      res.end('Next.js dev server not running. Start it with: cd ai-gateway/web && bun run dev');
+    }
+  });
+  req.pipe(proxyReq);
+}
+
 function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse, requestId: string): boolean {
   // Prevent path traversal — resolve to absolute path and verify it stays within staticDir
   const resolvedStaticDir = resolve(staticDir);
@@ -343,8 +363,12 @@ export function createProxyServer(config: ProxyConfig): Server {
       return;
     }
 
-    // Block WebSocket upgrades to streaming paths
+    // Block WebSocket upgrades to streaming paths (except Next.js HMR in dev mode)
     if (req.headers.upgrade?.toLowerCase() === 'websocket') {
+      if (config.nextDevUrl && path.startsWith('/_next/')) {
+        proxyToNextDev(config.nextDevUrl, req, res);
+        return;
+      }
       sendError(res, 410, 'WebSocket transport is removed. Use POST /v1/speech instead.', requestId);
       return;
     }
@@ -364,6 +388,12 @@ export function createProxyServer(config: ProxyConfig): Server {
           return;
         }
       }
+    }
+
+    // Dev mode: proxy to Next.js dev server (HMR support)
+    if (config.nextDevUrl && !path.startsWith('/v1/') && path !== '/health' && path !== '/metrics') {
+      proxyToNextDev(config.nextDevUrl, req, res);
+      return;
     }
 
     // Static file serving — serve web UI assets before body parsing
@@ -465,6 +495,30 @@ export function createProxyServer(config: ProxyConfig): Server {
       sendError(res, 500, 'Internal server error', requestId);
     }
   });
+
+  // Proxy WebSocket upgrades to Next.js dev server for HMR
+  if (config.nextDevUrl) {
+    const nextUrl = config.nextDevUrl;
+    server.on('upgrade', (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => {
+      const path = req.url || '/';
+      if (!path.startsWith('/_next/')) { socket.destroy(); return; }
+      const target = new URL(path, nextUrl);
+      const proxyReq = require('http').request(target, {
+        method: 'GET',
+        headers: { ...req.headers, host: target.host },
+      });
+      proxyReq.on('upgrade', (_: unknown, proxySocket: import('net').Socket, proxyHead: Buffer) => {
+        socket.write('HTTP/1.1 101 Switching Protocols\r\n' +
+          Object.entries((_ as any).headers || {}).map(([k, v]: [string, any]) => `${k}: ${v}`).join('\r\n') +
+          '\r\n\r\n');
+        if (proxyHead.length) socket.write(proxyHead);
+        proxySocket.pipe(socket);
+        socket.pipe(proxySocket);
+      });
+      proxyReq.on('error', () => socket.destroy());
+      proxyReq.end();
+    });
+  }
 
   return server;
 }
