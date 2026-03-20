@@ -1,4 +1,20 @@
 @import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+
+/* Hide React Flow node selection outline — nodes are interactive but not visually selectable */
+.react-flow__node.selected,
+.react-flow__node:focus,
+.react-flow__node:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Allow NodeToolbar popups to overflow the React Flow container */
+.react-flow,
+.react-flow__viewport,
+.react-flow__renderer {
+  overflow: visible !important;
+}
 
 :root {
   --color-bg: #09090b;
