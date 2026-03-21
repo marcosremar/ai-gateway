@@ -186,9 +186,17 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
 
   try {
     // Drain primary: wait for active requests to finish (max drainTimeout)
+    // Set deploy step to 'draining' so UI shows the drain state
+    const { setDeployState } = await import('./state');
+    setDeployState({ step: 'draining', message: `Draining ${activeRequests} active request(s) before handover...` });
+    broadcastWs({ type: 'gpu:transition', status: 'draining', step: 'draining', provider: deployState.provider, elapsed: 0, detail: `${activeRequests} requests draining` });
+
     const drainTimeout = getStandbyDrainTimeoutMs();
     const drainStart = Date.now();
     while (activeRequests > 0 && Date.now() - drainStart < drainTimeout) {
+      if ((Date.now() - drainStart) % 2000 < 200) {
+        broadcastWs({ type: 'gpu:draining', activeRequests, elapsed: Math.round((Date.now() - drainStart) / 1000), timeout: Math.round(drainTimeout / 1000) });
+      }
       await new Promise(r => setTimeout(r, 200));
     }
     if (activeRequests > 0) {

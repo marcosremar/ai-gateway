@@ -56,13 +56,13 @@ export const providerMetrics: Record<string, {
 // ── GPU Deployment State ─────────────────────────────────────────────────────
 
 export interface DeploymentState {
-  status: 'idle' | 'searching' | 'creating' | 'booting' | 'installing' | 'ready' | 'error';
+  status: 'idle' | 'searching' | 'queued' | 'creating' | 'booting' | 'installing' | 'ready' | 'error';
   podId: string;
   endpoint: string;
   gpuType: string;
   dockerImage: string;  // e.g. "marcosremar/babelcast-mistral:latest"
   message: string;
-  step: string;       // structured step: 'searching_offers' | 'no_offers' | 'creating_pod' | 'pulling_image' | 'starting_container' | 'waiting_health' | 'ready'
+  step: string;       // structured step: 'searching_offers' | 'no_offers' | 'queued' | 'creating_pod' | 'pulling_image' | 'starting_container' | 'downloading_models' | 'loading_stt' | 'loading_llm' | 'loading_tts' | 'compiling_tts' | 'waiting_health' | 'draining' | 'ready'
   stepDetail: string;  // e.g. image name, GPU type, cost
   startedAt: number;
   retryCount: number;

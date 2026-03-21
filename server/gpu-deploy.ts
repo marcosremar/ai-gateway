@@ -1807,11 +1807,22 @@ export async function pollHealthUntilReady(
           }
 
           if (!containerStartedAt) {
-            setDeployState({
-              status: 'installing', step: 'pulling_image',
-              message: `Instance ${status}, pulling image... [${elapsed}s]`,
-              stepDetail: deployState.gpuType || '',
-            });
+            // Distinguish queued (allocated, waiting for slot) vs pulling image
+            const isQueued = ['created', 'loading', 'pending', 'queued', 'provisioning'].includes(statusLower);
+            const isPulling = ['pulling', 'starting', 'initializing'].includes(statusLower) || (!isQueued && !isRunning);
+            if (isQueued) {
+              setDeployState({
+                status: 'queued', step: 'queued',
+                message: `GPU allocated, waiting in queue... [${elapsed}s]`,
+                stepDetail: deployState.gpuType || '',
+              });
+            } else {
+              setDeployState({
+                status: 'installing', step: 'pulling_image',
+                message: `Pulling Docker image... [${elapsed}s]`,
+                stepDetail: deployState.gpuType || '',
+              });
+            }
           } else {
             const appElapsed = Math.round((Date.now() - containerStartedAt) / 1000);
             setDeployState({
@@ -1874,13 +1885,45 @@ export async function pollHealthUntilReady(
               return 'ready';
             }
 
-            // /health OK but no services loaded yet — show loading status, keep polling
-            setDeployState({
-              status: 'booting', step: 'waiting_health',
-              message: `App healthy, models downloading... [${elapsed}s]`,
-              stepDetail: `Services: ${Object.entries(svc).map(([k, v]) => `${k}=${v}`).join(', ')}`,
-            });
+            // /health OK but no services loaded yet — show granular model download status
             if (!containerStartedAt) containerStartedAt = Date.now();
+            const appElapsed = Math.round((Date.now() - containerStartedAt) / 1000);
+
+            // Determine most specific loading step
+            const whisperStatus = svc.whisper || svc.stt || '';
+            const llamaStatus = svc.llama_cpp || svc.llm || '';
+            const ttsStatus = svc.tts || '';
+            let modelStep = 'downloading_models';
+            let modelDetail = '';
+
+            if (whisperStatus === 'downloading') {
+              modelStep = 'loading_stt';
+              modelDetail = 'Downloading Whisper STT model...';
+            } else if (whisperStatus === 'loading') {
+              modelStep = 'loading_stt';
+              modelDetail = 'Loading Whisper into memory...';
+            } else if (llamaStatus === 'downloading') {
+              modelStep = 'loading_llm';
+              modelDetail = 'Downloading LLM model...';
+            } else if (llamaStatus === 'loading' || llamaStatus === 'starting') {
+              modelStep = 'loading_llm';
+              modelDetail = 'Loading LLM into GPU VRAM...';
+            } else if (ttsStatus === 'downloading') {
+              modelStep = 'loading_tts';
+              modelDetail = 'Downloading TTS model...';
+            } else if (ttsStatus === 'loading' || ttsStatus === 'compiling') {
+              modelStep = 'compiling_tts';
+              modelDetail = 'Compiling TTS CUDA graphs...';
+            } else {
+              modelDetail = `Services: ${Object.entries(svc).map(([k, v]) => `${k}=${v}`).join(', ')}`;
+            }
+
+            setDeployState({
+              status: 'booting', step: modelStep,
+              message: `${modelDetail} [${elapsed}s, up ${appElapsed}s]`,
+              stepDetail: `${Object.entries(svc).map(([k, v]) => `${k}=${v}`).join(', ')}`,
+            });
+            broadcastWs({ type: 'gpu:services', step: modelStep, services: svc });
           }
         }
       } catch {

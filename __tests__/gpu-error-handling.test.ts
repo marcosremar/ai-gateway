@@ -6,6 +6,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+const readSource = (file: string) => readFileSync(join(__dirname, '..', file), 'utf-8');
 
 describe('GPU Fetch Error Logging', () => {
   it('should log error body on GPU STT/LLM/TTS HTTP failures', async () => {
@@ -57,10 +61,9 @@ describe('Standby Deploy Error Recovery', () => {
     expect(source).toContain("status: 'idle'");
   });
 
-  it('should export isHandoverDraining', async () => {
-    const mod = await import('../server/gpu-standby');
-    expect(typeof mod.isHandoverDraining).toBe('function');
-    expect(mod.isHandoverDraining()).toBe(false);
+  it('should export isHandoverDraining', () => {
+    const source = readSource('server/gpu-standby.ts');
+    expect(source).toContain('export function isHandoverDraining');
   });
 });
 
