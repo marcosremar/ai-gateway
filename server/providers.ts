@@ -40,6 +40,26 @@ import { runGpuReadinessCheck, resetReadinessCheck, isReadinessCheckInProgress }
 import { RUNPOD_ENDPOINT, PROVIDER_CHAIN } from './config';
 import { broadcastProviderStatus } from './ws-state';
 
+// ── Per-provider latency tracking for adaptive routing ─────────────────────
+const providerLatencyTracker: Record<string, { samples: number[]; lastDemotedAt: number }> = {};
+const PROVIDER_LATENCY_RING_SIZE = 30;
+
+export function recordProviderLatency(provider: string, stage: string, latencyMs: number): void {
+  const key = `${provider}:${stage}`;
+  if (!providerLatencyTracker[key]) providerLatencyTracker[key] = { samples: [], lastDemotedAt: 0 };
+  const tracker = providerLatencyTracker[key];
+  if (tracker.samples.length >= PROVIDER_LATENCY_RING_SIZE) tracker.samples.shift();
+  tracker.samples.push(latencyMs);
+}
+
+export function getProviderP95(provider: string, stage: string): number | null {
+  const key = `${provider}:${stage}`;
+  const tracker = providerLatencyTracker[key];
+  if (!tracker || tracker.samples.length < 5) return null;
+  const sorted = [...tracker.samples].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length * 0.95)];
+}
+
 // ── Provider availability ────────────────────────────────────────────────────
 
 export let groqAvailable = !!process.env.GROQ_API_KEY;
