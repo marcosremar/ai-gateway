@@ -205,8 +205,7 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
       console.log(`[standby] Primary drained (${Date.now() - drainStart}ms)`);
     }
 
-    // Promote standby to primary — dynamic import to avoid circular deps
-    const { setDeployState } = await import('./state');
+    // Promote standby to primary
     setDeployState({
       endpoint: standbyEndpoint,
       podId: standbyDeployState.podId,
