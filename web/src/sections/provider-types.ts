@@ -25,6 +25,26 @@ export interface ProfileService {
   sttModel?: string          // e.g. 'faster-whisper-large-v3'
   llmModel?: string          // e.g. 'mistral-7b'
   ttsModel?: string          // e.g. 'qwen3-tts'
+  // deploy settings (gpu-pod / serverless)
+  raceCount?: number         // hedged deploy: 1 (off) to 10
+  idleTimeoutMin?: number    // auto-stop after idle: 5, 15, 30, 60, 0 = never
+  spotInstance?: boolean     // preemptible/interruptible
+  autoBenchmark?: boolean    // benchmark on ready
+  region?: string            // '' | 'US' | 'EU' | 'AP'
+  minVramGb?: number         // 0 = any, 8, 16, 24, 40, 80
+  diskGb?: number            // container disk: 10, 20, 50, 100
+  // readiness latency targets (override system defaults per-service)
+  sttTargetMs?: number       // default: 800ms
+  llmTargetMs?: number       // default: 2000ms
+  ttsTargetMs?: number       // default: 1500ms
+  // readiness behavior
+  p95DemotionMultiplier?: number  // P95 > target × multiplier → demote (default: 2.0)
+  repechageMaxAttempts?: number   // retries before condemning (default: 3)
+  shadowRuns?: number             // consecutive successes before going live (default: 5)
+  benchmarkMaxRuns?: number       // max attempts per benchmark (default: 20)
+  autoRecoveryEnabled?: boolean   // auto-deploy replacement on condemnation (default: true)
+  autoRecoveryMaxRetries?: number // max recovery attempts (default: 2)
+  deployTimeoutMin?: number       // max deploy time before giving up (default: 30, uses avg boot time if available)
 }
 
 export interface ProviderProfile {
@@ -69,6 +89,7 @@ export const PIPELINE_CATALOG = {
       { id: 'deepgram',    label: 'Deepgram',           streaming: false },
       { id: 'elevenlabs',  label: 'ElevenLabs',         streaming: false },
       { id: 'fireworks',   label: 'Fireworks',          streaming: true  },
+      { id: 'qwen3-asr',   label: 'Qwen3-ASR (Modal)',  streaming: true  },
       { id: 'gpu',         label: 'GPU (self-hosted)',  streaming: true  },
     ],
     models: {
@@ -77,6 +98,7 @@ export const PIPELINE_CATALOG = {
       deepgram:   [{ id: 'nova-2', label: 'Nova-2', streaming: false }, { id: 'nova-3', label: 'Nova-3', streaming: false }],
       elevenlabs: [{ id: 'scribe_v2', label: 'Scribe v2', streaming: false }, { id: 'scribe_v1', label: 'Scribe v1', streaming: false }],
       fireworks:  [{ id: 'whisper-large-v3', label: 'Whisper Large v3 (streaming)', streaming: true }],
+      'qwen3-asr': [{ id: 'qwen3-asr-1.7b', label: 'Qwen3-ASR 1.7B (7.7% WER, streaming)', streaming: true }],
       gpu:        [{ id: 'faster-whisper-large-v3', label: 'Faster Whisper Large v3', streaming: true }, { id: 'faster-whisper-large-v3-turbo', label: 'Faster Whisper Turbo', streaming: true }, { id: 'whisper', label: 'Faster Whisper', streaming: true }],
     } as Record<string, { id: string; label: string; streaming?: boolean }[]>,
   },

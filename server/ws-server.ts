@@ -76,6 +76,17 @@ let botTargetLang = 'en';
 // Config: process every ~3s of audio (16kHz 16-bit mono = 32000 bytes/s → ~96KB)
 const BOT_AUDIO_CHUNK_THRESHOLD = 3 * 32000; // 3 seconds at 16kHz 16-bit
 const BOT_AUDIO_MIN_INTERVAL_MS = 2000; // don't process more than once every 2s
+const BOT_AUDIO_MAX_BUFFER_BYTES = 10 * 1024 * 1024; // 10 MB cap to prevent OOM
+
+/** Force-flush bot audio buffer (called on disconnect or when buffer is too large) */
+function flushBotAudioBuffer(): void {
+  if (botAudioBufferBytes > 0 && botAudioBufferBytes >= 16000) { // at least 0.5s of audio
+    processBotAudioBuffer().catch(e => console.warn('[bot-audio] Flush failed:', e instanceof Error ? e.message : e));
+  } else {
+    botAudioBuffer = [];
+    botAudioBufferBytes = 0;
+  }
+}
 
 function getBotSourceTarget(): { source: string; target: string } {
   return { source: botSourceLang, target: botTargetLang };
@@ -421,7 +432,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     if (!sessionId || !text.trim()) return;
 
     const translateFn = buildSpeculativeTranslateFn(source, target, style);
-    speculativeCache.speculate(sessionId, text, translateFn);
+    speculativeCache.speculate(sessionId, text, translateFn).catch(e => console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e));
 
   } else if (type === 'ping') {
     ws.send(JSON.stringify({ type: 'pong' }));
@@ -510,6 +521,7 @@ export function startWsServer() {
               ws.send(JSON.stringify({ type: 'connected', provider: backend.provider }));
             };
             backend.onResult = (evt) => {
+              if (ws.readyState !== 1) return; // WS closed — skip
               ws.send(JSON.stringify({ type: 'partial', text: evt.text, provider: evt.provider }));
               // Auto-speculation: when target is set and Labs flag is on,
               // feed partial STT results into the speculative cache.
@@ -518,18 +530,19 @@ export function startWsServer() {
                 const srcLang = ws.data.language || 'fr';
                 const tgtLang = ws.data.speculateTarget;
                 const translateFn = buildSpeculativeTranslateFn(srcLang, tgtLang, 'default');
-                speculativeCache.speculate(ws.data.id, evt.text, translateFn);
+                speculativeCache.speculate(ws.data.id, evt.text, translateFn).catch(e => console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e));
               }
             };
             backend.onDisconnected = (reason) => {
               console.log(`[stt-ws] Backend ${backend.provider} disconnected: ${reason} id=${ws.data.id}`);
               sttSessions.delete(ws.data.id);
               // If it failed quickly (<5s), try next provider automatically
-              if (Date.now() - t0 < 5000) {
+              // But only if the client WS is still open (avoid reconnecting for a dead client)
+              if (Date.now() - t0 < 5000 && ws.readyState === 1 /* OPEN */) {
                 excluded.add(backend.provider);
                 console.log(`[stt-ws] Fast disconnect — trying next provider (excluded: ${[...excluded].join(',')})`);
-                connectBackend();
-              } else {
+                try { connectBackend(); } catch (e) { console.warn(`[stt-ws] Reconnect failed:`, e instanceof Error ? e.message : e); }
+              } else if (ws.readyState === 1) {
                 ws.send(JSON.stringify({ type: 'disconnected', reason }));
               }
             };
@@ -544,6 +557,12 @@ export function startWsServer() {
           botAudioSource = ws as unknown as BabelCastWS;
         } else {
           // ── Bot events session ─────────────────────────────────────
+          const MAX_WS_CLIENTS = 500;
+          if (wsClients.size >= MAX_WS_CLIENTS) {
+            console.warn(`[ws] Connection limit reached (${MAX_WS_CLIENTS}) — rejecting`);
+            ws.close(1013, 'Too many connections');
+            return;
+          }
           wsClients.add(ws as unknown as BabelCastWS);
           ws.send(JSON.stringify({
             type: 'connected',
@@ -691,6 +710,13 @@ export function startWsServer() {
           const audioChunk = Buffer.from(msg as ArrayBuffer);
           botAudioBuffer.push(audioChunk);
           botAudioBufferBytes += audioChunk.length;
+          // Cap buffer to prevent OOM on runaway audio streams
+          if (botAudioBufferBytes > BOT_AUDIO_MAX_BUFFER_BYTES) {
+            console.warn(`[bot-audio] Buffer exceeded ${BOT_AUDIO_MAX_BUFFER_BYTES / 1024 / 1024}MB — dropping oldest chunks`);
+            while (botAudioBufferBytes > BOT_AUDIO_CHUNK_THRESHOLD && botAudioBuffer.length > 1) {
+              botAudioBufferBytes -= botAudioBuffer.shift()!.length;
+            }
+          }
           if (botAudioBufferBytes >= BOT_AUDIO_CHUNK_THRESHOLD) {
             processBotAudioBuffer().catch(e => console.warn('[bot-audio] buffer processing failed:', e instanceof Error ? e.message : e));
           }
@@ -715,14 +741,16 @@ export function startWsServer() {
           console.log(`[stt-ws] Client disconnected id=${ws.data.id}`);
         } else if (ws.data.type === 'bot-audio') {
           if (botAudioSource === ws) botAudioSource = null;
-          // Process any remaining buffered audio
-          if (botAudioBufferBytes > 16000) { // at least 0.5s
+          console.log(`[bot-audio] Bot audio source disconnected id=${ws.data.id} (${botAudioChunks} chunks relayed, ${botAudioBufferBytes} bytes buffered)`);
+          // Flush remaining audio, then clear (processBotAudioBuffer grabs+clears the buffer atomically)
+          if (botAudioBufferBytes >= 16000) {
             processBotAudioBuffer().catch(e => console.warn('[bot-audio] final buffer flush failed:', e instanceof Error ? e.message : e));
+          } else {
+            // Not enough audio to process — just discard
+            botAudioBuffer = [];
+            botAudioBufferBytes = 0;
           }
-          console.log(`[bot-audio] Bot audio source disconnected id=${ws.data.id} (${botAudioChunks} chunks relayed)`);
           botAudioChunks = 0;
-          botAudioBuffer = [];
-          botAudioBufferBytes = 0;
           botAudioProcessing = false;
         } else {
           unsubscribeDub(ws.data.id);

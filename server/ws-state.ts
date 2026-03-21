@@ -79,7 +79,7 @@ export function broadcastGpuStatusEvent(
         shadowRuns: gpuReadinessState.shadowCompletedRuns,
       },
     });
-  }).catch(() => { /* suppress — ws-state must not throw on circular import race */ });
+  }).catch(e => { console.warn('[ws] broadcastGpuStatusEvent failed:', e instanceof Error ? e.message : e); });
 }
 
 export function startBotTranscriptPoll(): void {
@@ -216,4 +216,6 @@ export function broadcastDubAudio(target: string, msg: Record<string, unknown>, 
       clients.delete(ws);
     }
   }
+  // Clean up empty target entries to prevent memory leak
+  if (clients.size === 0) dubTargetClients.delete(target);
 }

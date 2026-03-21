@@ -253,6 +253,8 @@ export async function fetchGpuSTT(
       method: 'POST', body: form, signal, headers,
     });
     if (!gpuRes.ok) {
+      const errBody = await gpuRes.text().catch(() => '');
+      console.warn(`[gpu:stt] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
       recordStageFailure('stt');
       throw new Error(`GPU STT HTTP ${gpuRes.status}`);
     }
@@ -295,6 +297,8 @@ export async function fetchGpuLLM(
       signal,
     });
     if (!gpuRes.ok) {
+      const errBody = await gpuRes.text().catch(() => '');
+      console.warn(`[gpu:llm] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
       recordStageFailure('llm');
       throw new Error(`GPU LLM HTTP ${gpuRes.status}`);
     }
@@ -335,6 +339,8 @@ export async function fetchGpuTTS(
       signal,
     });
     if (!gpuRes.ok) {
+      const errBody = await gpuRes.text().catch(() => '');
+      console.warn(`[gpu:tts] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
       recordStageFailure('tts');
       throw new Error(`GPU TTS HTTP ${gpuRes.status}`);
     }
@@ -1872,6 +1878,11 @@ export function getVoiceReference(refId: string): { audio: string; text: string 
 // Prevents Modal from scaling to zero mid-session (scaledown=15min).
 let modalKeepaliveTimer: ReturnType<typeof setInterval> | null = null;
 let lastCloneRequestAt = 0;
+
+/** Stop modal keepalive timer (called on shutdown) */
+export function stopModalKeepalive(): void {
+  if (modalKeepaliveTimer) { clearInterval(modalKeepaliveTimer); modalKeepaliveTimer = null; }
+}
 
 /** Called on every clone TTS request to reset the keepalive timer. */
 export function touchModalKeepalive(): void {

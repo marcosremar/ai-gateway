@@ -126,7 +126,8 @@ export class LoadBalancer {
     strategy: LoadBalanceStrategy = 'hash',
     priority: RequestPriority = 'normal',
   ): Promise<number> {
-    if (readyTiers.length <= 1) return 0;
+    if (readyTiers.length === 0) return -1; // no tiers available
+    if (readyTiers.length === 1) return 0;
 
     switch (strategy) {
       case 'hash':
@@ -288,9 +289,10 @@ export class LoadBalancer {
 
       if (raw) {
         const existing = JSON.parse(raw) as TierConnectionMetrics;
+        const prev = typeof existing?.activeConnections === 'number' ? existing.activeConnections : 0;
         metrics = {
           tierIndex,
-          activeConnections: (existing.activeConnections ?? 0) + 1,
+          activeConnections: prev + 1,
           lastUpdated: Date.now(),
         };
       } else {
@@ -313,7 +315,8 @@ export class LoadBalancer {
       if (!raw) return;
 
       const existing = JSON.parse(raw) as TierConnectionMetrics;
-      const newCount = Math.max(0, (existing.activeConnections ?? 1) - 1);
+      const prev = typeof existing?.activeConnections === 'number' ? existing.activeConnections : 1;
+      const newCount = Math.max(0, prev - 1);
 
       if (newCount > 0) {
         await this.stateStore.set(key, JSON.stringify({

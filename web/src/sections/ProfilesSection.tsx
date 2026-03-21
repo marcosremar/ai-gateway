@@ -8,7 +8,7 @@ import {
   Button, SectionHeader, AlertBanner,
 } from '@/components/ui';
 import {
-  ChevronLeft, Mic, Check, Plus, Server, Cloud, Cpu,
+  ChevronLeft, Mic, Check, Plus, Server, Cloud, Cpu, Pencil,
 } from 'lucide-react';
 import {
   DEFAULT_DOCKER_IMAGES,
@@ -67,11 +67,13 @@ export function ProfilesSection() {
       setViewRaw(r.view);
       if (r.view === 'detail' && r.profileId) {
         setEditingProfileId(r.profileId);
+        const p = profiles.find(x => x.id === r.profileId);
+        if (p) setProfileName(p.name);
       }
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
-  }, []);
+  }, [profiles]);
 
   // Detail state
   const [stages, setStages] = useState<ProfileStage[]>(() => DEFAULT_STAGES.map(s => ({ ...s, id: uid() })));
@@ -164,6 +166,7 @@ export function ProfilesSection() {
   // Slide-in panel: shows ServiceCard from the right when clicking a provider in the diagram
   const [slideService, setSlideService] = useState<ProfileService | null>(null);
 
+  const [profileName, setProfileName] = useState('New Profile');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -196,11 +199,12 @@ export function ProfilesSection() {
           const p = (cfg.profiles as ProviderProfile[]).find((x: ProviderProfile) => x.id === route.profileId);
           if (p) {
             setEditingProfileId(p.id);
+            setProfileName(p.name);
             loadProfile(p);
           }
         }
       })
-      .catch(() => {})
+      .catch((err) => { console.error('[ProfilesSection] Failed to load config:', err); })
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -210,11 +214,13 @@ export function ProfilesSection() {
     setLatency('realtime');
     setServices([]);
     setEditingProfileId(null);
+    setProfileName('New Profile');
     setView('detail', null);
   };
 
   const onApplyProfile = useCallback((profile: ProviderProfile) => {
     setEditingProfileId(profile.id);
+    setProfileName(profile.name);
     loadProfile(profile);
     setView('detail', profile.id);
   }, [setView, loadProfile]);
@@ -232,9 +238,7 @@ export function ProfilesSection() {
 
   const handleSaveAndApply = async () => {
     // Validate: profile name must not be empty
-    const currentName = editingProfileId
-      ? profiles.find(p => p.id === editingProfileId)?.name
-      : 'New Profile';
+    const currentName = profileName || profiles.find(p => p.id === editingProfileId)?.name || '';
     if (!currentName?.trim()) {
       setSaveError('Profile name cannot be empty.');
       return;
@@ -262,7 +266,7 @@ export function ProfilesSection() {
         const fields = stagesToProfileFields(stages);
         updatedProfiles = profiles.map(p => {
           if (p.id !== editingProfileId) return p;
-          return { ...p, name: p.name.trim(), latency, ...fields, services };
+          return { ...p, name: currentName.trim(), latency, ...fields, services };
         });
         newActiveId = editingProfileId;
       } else {
@@ -302,8 +306,6 @@ export function ProfilesSection() {
       setSaveError(err instanceof Error ? err.message : 'Failed to save profile. Check gateway connection.');
     } finally { setSaving(false); }
   };
-
-  const editingProfile = editingProfileId ? profiles.find(p => p.id === editingProfileId) : null;
 
   if (view === 'list') {
     return (
@@ -353,23 +355,23 @@ export function ProfilesSection() {
         style={{ borderColor: 'var(--color-border)' }}>
         <button
           onClick={() => setView('list', null)}
-          className="flex items-center gap-1 text-sm font-medium cursor-pointer transition-opacity hover:opacity-70 flex-shrink-0"
+          className="flex items-center gap-1 text-sm cursor-pointer transition-opacity hover:opacity-70 flex-shrink-0"
           style={{ color: 'var(--color-text-muted)' }}
         >
           <ChevronLeft className="w-4 h-4" /> Profiles
         </button>
         <span style={{ color: 'var(--color-border)' }}>/</span>
-        <input
-          type="text"
-          value={editingProfile?.name || ''}
-          onChange={e => {
-            if (!editingProfileId) return;
-            setProfiles(prev => prev.map(p => p.id === editingProfileId ? { ...p, name: e.target.value } : p));
-          }}
-          placeholder="Profile name..."
-          className="flex-1 min-w-0 text-sm font-semibold bg-transparent border-none outline-none"
-          style={{ color: 'var(--color-text)' }}
-        />
+        <div className="group flex items-center gap-1.5 flex-1 min-w-0">
+          <input
+            type="text"
+            value={profileName || profiles.find(p => p.id === editingProfileId)?.name || ''}
+            onChange={e => setProfileName(e.target.value)}
+            placeholder="Profile name..."
+            className="flex-1 min-w-0 text-base font-bold bg-transparent border-none outline-none rounded px-1 -ml-1 transition-colors hover:bg-white/5 focus:bg-white/5"
+            style={{ color: 'var(--color-text)' }}
+          />
+          <Pencil className="w-3 h-3 flex-shrink-0 opacity-0 group-hover:opacity-40 transition-opacity" style={{ color: 'var(--color-text-muted)' }} />
+        </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <Button variant="primary" onClick={handleSaveAndApply} isLoading={saving} loadingText="Saving...">
             <Check className="w-4 h-4" /> Save & Apply
@@ -397,6 +399,7 @@ export function ProfilesSection() {
           sttChain={sttChain} llmChain={llmChain} ttsChain={ttsChain}
           sttEnabled={sttEnabled} ttsEnabled={ttsEnabled}
           services={services}
+          profileId={editingProfileId}
           pipelineState={pipeline}
           onRunPipeline={pipeline.run}
           onResetPipeline={pipeline.reset}
@@ -456,7 +459,7 @@ export function ProfilesSection() {
       <div
         className="fixed top-0 right-0 h-full border-l transition-transform duration-300 ease-in-out"
         style={{
-          width: 'min(560px, 90vw)',
+          width: 'min(700px, 90vw)',
           transform: slideService ? 'translateX(0)' : 'translateX(100%)',
           background: 'var(--color-bg)',
           borderColor: 'var(--color-border)',
@@ -497,32 +500,17 @@ export function ProfilesSection() {
                 <ChevronLeft className="w-4 h-4" style={{ transform: 'rotate(180deg)' }} />
               </button>
             </div>
-            {/* GPU pod / Serverless: ServiceCard with deploy settings */}
-            {(slideService.kind === 'gpu-pod' || slideService.kind === 'serverless') && (
-              <div className="flex-1 overflow-y-auto">
-                <ServiceCard
-                  service={slideService}
-                  onEdit={() => {}}
-                  onDelete={() => {
-                    setServices(prev => prev.filter(s => s.id !== slideService.id));
-                    setSlideService(null);
-                  }}
-                />
-              </div>
-            )}
-            {/* Cloud: ServiceForm with all settings */}
-            {slideService.kind === 'cloud' && (
-              <div className="flex-1 overflow-y-auto p-4">
-                <ServiceForm
-                  initial={slideService}
-                  onSave={s => {
-                    setServices(prev => prev.map(x => x.id === s.id ? s : x));
-                    setSlideService(s);
-                  }}
-                  onCancel={() => setSlideService(null)}
-                />
-              </div>
-            )}
+            {/* ServiceForm for all service kinds */}
+            <div className="flex-1 overflow-y-auto p-4">
+              <ServiceForm
+                initial={slideService}
+                onSave={s => {
+                  setServices(prev => prev.map(x => x.id === s.id ? s : x));
+                  setSlideService(s);
+                }}
+                onCancel={() => setSlideService(null)}
+              />
+            </div>
           </div>
         )}
       </div>

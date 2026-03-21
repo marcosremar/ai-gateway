@@ -14,6 +14,7 @@ import { modalMossTTS } from '../src/providers/modal-moss';
 import { modalSeamlessSTT, modalSeamlessLLM } from '../src/providers/modal-seamless';
 import { qwen3asrPipelineSTT, qwen3asrPipelineLLM } from '../src/providers/modal-qwen3asr-pipeline';
 import { modalVoxtralSTT } from '../src/providers/modal-voxtral';
+import { MlxQwen3AsrProvider, mlxQwen3AsrSTT } from '../src/providers/mlx-qwen3-asr';
 import { openrouterQwen3Embedding } from '../src/providers/openrouter/openrouter-embedding';
 import { openaiEmbedding } from '../src/providers/openai/openai-embedding';
 import { AIProviderRegistry } from '../src/providers/registry';
@@ -35,7 +36,7 @@ import {
   isStageWarm, gpuModelWarmth,
   setGpuReadyForProduction, setGpuShadowMode, gpuShadowMode, resetGpuReadinessState, setGpuReadinessState,
 } from './state';
-import { runGpuReadinessCheck, resetReadinessCheck } from './gpu-readiness';
+import { runGpuReadinessCheck, resetReadinessCheck, isReadinessCheckInProgress } from './gpu-readiness';
 import { RUNPOD_ENDPOINT, PROVIDER_CHAIN } from './config';
 import { broadcastProviderStatus } from './ws-state';
 
@@ -57,6 +58,10 @@ export const ollamaModel = process.env.OLLAMA_MODEL || 'llama3.2';
 export let ollamaAvailable = !!ollamaHost && PROVIDER_CHAIN.includes('ollama');
 // Ensemble STT: whisper is available for ensemble independently of ollama LLM chain
 export let whisperAvailable = !!whisperHost;
+// MLX Qwen3-ASR: local Apple Silicon STT (mlx-qwen3-asr serve)
+export const mlxQwenHost = process.env.MLX_QWEN3_ASR_HOST || '';
+export const mlxQwenApiKey = process.env.MLX_QWEN3_ASR_API_KEY || '';
+export let mlxQwenAvailable = !!mlxQwenHost;
 // ENSEMBLE_STT_PROVIDERS: comma-separated list of providers to include (default: all configured)
 // Values: groq, openai, deepgram, fireworks, whisper — or "all" to use every configured provider
 export const ENSEMBLE_STT_PROVIDERS = (process.env.ENSEMBLE_STT_PROVIDERS || 'all')
@@ -93,6 +98,17 @@ if (ollamaAvailable) {
   providers.chat['llama-3.1-8b-instant'] = providers.chat['llama-3.1-8b-instant'] || ollamaLLMProvider;
   console.log(`[gateway] Ollama LLM: ${ollamaHost} (model: ${ollamaModel})`);
   console.log(`[gateway] Whisper STT: ${whisperHost}`);
+}
+
+// MLX Qwen3-ASR local STT
+export let mlxQwenProvider: MlxQwen3AsrProvider | null = null;
+if (mlxQwenAvailable) {
+  const baseURL = mlxQwenHost.endsWith('/v1') ? mlxQwenHost : `${mlxQwenHost.replace(/\/$/, '')}/v1`;
+  mlxQwenProvider = new MlxQwen3AsrProvider(baseURL, mlxQwenApiKey || undefined);
+  providers.stt['qwen3-asr'] = mlxQwenProvider;
+  providers.stt['qwen3-asr-0.6b-4bit'] = mlxQwenProvider;
+  providers.stt['qwen3-asr-0.6b'] = mlxQwenProvider;
+  console.log(`[gateway] MLX Qwen3-ASR: ${mlxQwenHost} (local Apple Silicon STT)`);
 }
 
 if (elevenlabsAvailable) console.log(`[gateway] ElevenLabs key: ${maskKey(process.env.ELEVENLABS_API_KEY!)} (STT: scribe_v2)`);
@@ -180,6 +196,19 @@ registry.register({
   stt: modalVoxtralSTT,
 });
 console.log('[gateway] Modal Voxtral registered (STT, no API key needed)');
+
+// MLX Qwen3-ASR — local Apple Silicon STT (4-bit or fp16, no API key needed)
+if (mlxQwenAvailable && mlxQwenProvider) {
+  registry.register({
+    id: 'mlx-qwen3-asr',
+    name: 'MLX Qwen3-ASR',
+    description: 'Local Apple Silicon — Qwen3-ASR (4-bit: 55x RT, fp16: 12x RT, 30 languages)',
+    capabilities: ['stt'],
+    requiresApiKey: false,
+    stt: mlxQwenProvider,
+  });
+  console.log('[gateway] MLX Qwen3-ASR registered (local STT, Apple Silicon Metal GPU)');
+}
 
 // OpenAI STT + TTS
 export const openaiTTS = openaiAvailable ? new OpenAITTSProvider() : null;
@@ -348,7 +377,10 @@ export function markGpuHealthy(): void {
   recoveryAttempt = 0;
   cancelGpuRecoveryProbe();
   const hasWarmthData = gpuModelWarmth.updatedAt > 0;
-  if (!hasWarmthData || (isStageWarm('stt') && isStageWarm('llm'))) {
+  // Avoid launching duplicate readiness checks (race condition fix)
+  if (isReadinessCheckInProgress()) {
+    console.log('[gpu] Health recovered but readiness check already running — skipping');
+  } else if (!hasWarmthData || (isStageWarm('stt') && isStageWarm('llm'))) {
     _startReadinessCheck(deployState.endpoint);
   } else {
     console.log(`[gpu] Health recovered — STT=${isStageWarm('stt')} LLM=${isStageWarm('llm')}, waiting for warmth`);
@@ -591,6 +623,13 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
     providers.chat['llama-3.1-8b-instant'] = groqLLM;
   }
 
+  // MLX Qwen3-ASR (unchanged at runtime — local server)
+  if (mlxQwenAvailable && mlxQwenProvider) {
+    providers.stt['qwen3-asr'] = mlxQwenProvider;
+    providers.stt['qwen3-asr-0.6b-4bit'] = mlxQwenProvider;
+    providers.stt['qwen3-asr-0.6b'] = mlxQwenProvider;
+  }
+
   // Ollama providers are constructed from ollamaHost (unchanged at runtime)
   if (ollamaAvailable && ollamaLLMProvider && ollamaSTTProvider) {
     providers.stt['whisper-large-v3'] = providers.stt['whisper-large-v3'] || ollamaSTTProvider;
@@ -697,6 +736,7 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
 export { groqSTT, groqLLM, groqTTS, ollamaSTT, ollamaLLM, OllamaLLMProvider, OllamaSTTProvider };
 export { openaiSTT, fireworksSTT, deepgramSTT, elevenlabsSTT };
 export { fireworksLLM, modalTTS, modalMossTTS, modalSeamlessSTT, modalSeamlessLLM, qwen3asrPipelineSTT, qwen3asrPipelineLLM, modalVoxtralSTT };
+export { mlxQwen3AsrSTT, MlxQwen3AsrProvider } from '../src/providers/mlx-qwen3-asr';
 export { openrouterQwen3Embedding, openaiEmbedding };
 // Re-export state values needed by ai-handlers
 export { gpuShadowMode } from './state';

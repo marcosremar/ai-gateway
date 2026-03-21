@@ -56,13 +56,13 @@ export const providerMetrics: Record<string, {
 // ── GPU Deployment State ─────────────────────────────────────────────────────
 
 export interface DeploymentState {
-  status: 'idle' | 'creating' | 'booting' | 'installing' | 'ready' | 'error';
+  status: 'idle' | 'searching' | 'creating' | 'booting' | 'installing' | 'ready' | 'error';
   podId: string;
   endpoint: string;
   gpuType: string;
   dockerImage: string;  // e.g. "marcosremar/babelcast-mistral:latest"
   message: string;
-  step: string;       // structured step: 'creating_pod' | 'pulling_image' | 'starting_container' | 'waiting_health' | 'ready'
+  step: string;       // structured step: 'searching_offers' | 'no_offers' | 'creating_pod' | 'pulling_image' | 'starting_container' | 'waiting_health' | 'ready'
   stepDetail: string;  // e.g. image name, GPU type, cost
   startedAt: number;
   retryCount: number;
@@ -263,6 +263,8 @@ export function touchRequest() {
 export let lastModelRequestTime = 0;
 export function touchModelRequest() {
   lastModelRequestTime = Date.now();
+  // Reset idle-related state in gpu-deploy (lazy import to avoid circular deps)
+  try { const { resetIdleState } = require('./gpu-deploy'); resetIdleState?.(); } catch {}
 }
 export function setLastModelRequestTime(v: number) { lastModelRequestTime = v; }
 
@@ -391,11 +393,13 @@ export interface GpuReadinessState {
   shadowCompletedRuns: number;
   shadowPhase: boolean;
   condemned: boolean;
+  autoRecoveryAttempt: number;
 }
 
 export let gpuReadinessState: GpuReadinessState = {
   stt: _defaultServiceState(), llm: _defaultServiceState(), tts: _defaultServiceState(),
   repechageAttempts: 0, shadowCompletedRuns: 0, shadowPhase: false, condemned: false,
+  autoRecoveryAttempt: 0,
 };
 
 export let gpuReadyForProduction = false;
@@ -425,6 +429,7 @@ export function resetGpuReadinessState(): void {
   gpuReadinessState = {
     stt: _defaultServiceState(), llm: _defaultServiceState(), tts: _defaultServiceState(),
     repechageAttempts: 0, shadowCompletedRuns: 0, shadowPhase: false, condemned: false,
+    autoRecoveryAttempt: 0,
   };
   gpuReadyForProduction = false;
   gpuShadowMode = false;

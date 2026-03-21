@@ -60,6 +60,11 @@ export interface ProbeResult {
 
 let _db: Database | null = null;
 
+/** Close the latency DB connection (call on gateway shutdown) */
+export function closeLatencyDb(): void {
+  if (_db) { try { _db.close(); } catch {} _db = null; }
+}
+
 function getDb(): Database {
   if (_db) return _db;
   const dir = path.dirname(DB_PATH);
@@ -185,8 +190,8 @@ export function saveProbeResult(hostId: string, result: ProbeResult, now = Date.
 
   const totalInWindow = (db.prepare(`
     SELECT COUNT(*) as n FROM host_latency_history
-    WHERE host_id = $hostId ORDER BY probed_at DESC LIMIT $limit
-  `).get({ $hostId: hostId, $limit: HISTORY_SIZE }) as { n: number }).n;
+    WHERE host_id = $hostId
+  `).get({ $hostId: hostId }) as { n: number }).n;
 
   const medians     = history.map(r => r.median_ms);
   const successRate = totalInWindow > 0 ? medians.length / totalInWindow : 1;
