@@ -15,6 +15,7 @@ const PHASE_META: Record<string, { color: string; label: string; icon: typeof Lo
   searching_offers: { color: '#a78bfa', label: 'Searching',       icon: Loader2 },
   no_offers:        { color: '#f59e0b', label: 'No GPUs Found',   icon: AlertTriangle },
   // Deploy phases
+  queued:           { color: '#a78bfa', label: 'Queued',          icon: Clock },
   creating:         { color: '#38bdf8', label: 'Creating',        icon: Loader2 },
   creating_pod:     { color: '#38bdf8', label: 'Creating Pod',    icon: Loader2 },
   installing:       { color: '#38bdf8', label: 'Pulling Image',   icon: Loader2 },
@@ -22,6 +23,12 @@ const PHASE_META: Record<string, { color: string; label: string; icon: typeof Lo
   starting_container: { color: '#38bdf8', label: 'Starting',      icon: Loader2 },
   booting:          { color: '#38bdf8', label: 'Booting',         icon: Loader2 },
   waiting_health:   { color: '#a78bfa', label: 'Loading Models',  icon: Loader2 },
+  // Granular model loading
+  downloading_models: { color: '#a78bfa', label: 'Downloading',   icon: Loader2 },
+  loading_stt:      { color: '#38bdf8', label: 'Loading STT',     icon: Loader2 },
+  loading_llm:      { color: '#a78bfa', label: 'Loading LLM',     icon: Loader2 },
+  loading_tts:      { color: '#fbbf24', label: 'Loading TTS',     icon: Loader2 },
+  compiling_tts:    { color: '#fbbf24', label: 'Compiling TTS',   icon: Loader2 },
   // Readiness
   warming:          { color: '#a78bfa', label: 'Warming Models',  icon: Loader2 },
   benchmarking:     { color: '#38bdf8', label: 'Benchmarking',    icon: Activity },
@@ -36,6 +43,7 @@ const PHASE_META: Record<string, { color: string; label: string; icon: typeof Lo
   failed:           { color: '#ef4444', label: 'Failed',          icon: X },
   condemned:        { color: '#ef4444', label: 'Condemned',       icon: X },
   'auto-recovery':  { color: '#06b6d4', label: 'Auto-Recovery',   icon: Zap },
+  draining:         { color: '#a78bfa', label: 'Draining',        icon: Loader2 },
   error:            { color: '#ef4444', label: 'Error',           icon: X },
 };
 
@@ -53,14 +61,21 @@ function formatElapsed(ms: number): string {
 
 /* ── Deploy Sub-Steps Bar ── */
 
-const DEPLOY_STEPS = ['searching_offers', 'creating_pod', 'pulling_image', 'starting_container', 'waiting_health', 'benchmarking', 'shadow', 'ready'];
+const DEPLOY_STEPS = ['searching_offers', 'queued', 'creating_pod', 'pulling_image', 'starting_container', 'downloading_models', 'benchmarking', 'shadow', 'ready'];
 const DEPLOY_STEP_LABELS: Record<string, string> = {
-  searching_offers: 'Search', creating_pod: 'Create', pulling_image: 'Pull Image',
-  starting_container: 'Boot', waiting_health: 'Models', benchmarking: 'Benchmark', shadow: 'Shadow', ready: 'Ready',
+  searching_offers: 'Search', queued: 'Queue', creating_pod: 'Create', pulling_image: 'Pull',
+  starting_container: 'Boot', downloading_models: 'Models', benchmarking: 'Bench', shadow: 'Shadow', ready: 'Ready',
+};
+// Map granular model steps to the same position in the progress bar
+const STEP_ALIASES: Record<string, string> = {
+  loading_stt: 'downloading_models', loading_llm: 'downloading_models',
+  loading_tts: 'downloading_models', compiling_tts: 'downloading_models',
+  waiting_health: 'downloading_models', no_offers: 'searching_offers',
 };
 
 function DeployProgressBar({ currentStep, gpuType, elapsed }: { currentStep: string; gpuType?: string; elapsed?: number }) {
-  const stepIdx = DEPLOY_STEPS.indexOf(currentStep);
+  const resolvedStep = STEP_ALIASES[currentStep] || currentStep;
+  const stepIdx = DEPLOY_STEPS.indexOf(resolvedStep);
 
   return (
     <div>
@@ -206,8 +221,9 @@ export function GpuLiveStatus() {
   // Deploy sub-step
   const deployStep = gpuStatus?.status === 'ready' ? 'ready'
     : (gpuStatus as Record<string, unknown>)?.step as string || currentPhase;
-  const showDeployBar = ['searching', 'creating', 'booting'].includes(gpuStatus?.status || '') ||
-    ['searching_offers', 'no_offers', 'creating_pod', 'pulling_image', 'booting', 'waiting_health'].includes(deployStep);
+  const showDeployBar = ['searching', 'queued', 'creating', 'booting', 'installing'].includes(gpuStatus?.status || '') ||
+    ['searching_offers', 'no_offers', 'queued', 'creating_pod', 'pulling_image', 'starting_container', 'booting',
+     'waiting_health', 'downloading_models', 'loading_stt', 'loading_llm', 'loading_tts', 'compiling_tts'].includes(deployStep);
 
   return (
     <div className="space-y-3">

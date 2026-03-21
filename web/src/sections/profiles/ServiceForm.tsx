@@ -209,23 +209,29 @@ interface DeploySettingsProps {
 const LIFECYCLE_PHASES = [
   // Pre-deploy
   { phase: 'Offline', color: '#6b7280', desc: 'No GPU deployed. Service uses cloud providers only.', time: '—' },
-  { phase: 'Searching', color: '#a78bfa', desc: 'Querying providers (Vast.ai, RunPod, Modal) for available GPUs. Filters by speed, VRAM, price.', time: '0-2s' },
-  { phase: 'No Offers', color: '#f59e0b', desc: 'No GPUs available on this provider. Automatically tries next provider in chain.', time: '0-5s' },
+  { phase: 'Searching', color: '#a78bfa', desc: 'Querying providers (Vast.ai, RunPod, Modal) for available GPUs. Filters by speed ≥500 Mbps, VRAM, price.', time: '0-2s' },
+  { phase: 'No Offers', color: '#f59e0b', desc: 'No GPUs match filters on this provider. Tries next provider automatically. Blacklisted hosts excluded.', time: '0-5s' },
   // Deploy
-  { phase: 'Creating', color: '#38bdf8', desc: 'Provider is allocating GPU hardware, assigning IP, setting up networking and SSH.', time: '30-210s' },
-  { phase: 'Pulling Image', color: '#38bdf8', desc: 'Docker image being downloaded on the machine. Speed depends on host internet (500+ Mbps required).', time: '3-120s' },
-  { phase: 'Booting', color: '#38bdf8', desc: 'Container started, uvicorn initializing. Server process is starting up.', time: '5-30s' },
-  { phase: 'Loading Models', color: '#a78bfa', desc: 'Downloading ML models (Whisper STT, LLM, TTS). Each service activates individually when loaded.', time: '30-300s' },
+  { phase: 'Queued', color: '#a78bfa', desc: 'GPU allocated but waiting in provider queue. Hardware being provisioned, IP being assigned.', time: '10-120s' },
+  { phase: 'Creating', color: '#38bdf8', desc: 'Instance being created. Provider setting up networking, SSH access, and storage volumes.', time: '30-90s' },
+  { phase: 'Pulling Image', color: '#38bdf8', desc: 'Docker image downloading on host. Faster on machines with cached layers. ≥500 Mbps required.', time: '3-120s' },
+  { phase: 'Booting', color: '#38bdf8', desc: 'Container started. Uvicorn server process initializing. /health endpoint not yet responding.', time: '5-30s' },
+  // Model loading (granular)
+  { phase: 'Loading STT', color: '#38bdf8', desc: 'Downloading and loading Whisper STT model (~1.5 GB). Transcription routes to cloud until loaded.', time: '30-120s' },
+  { phase: 'Loading LLM', color: '#a78bfa', desc: 'Downloading LLM and loading into GPU VRAM. Translation routes to cloud until loaded.', time: '60-300s' },
+  { phase: 'Loading TTS', color: '#fbbf24', desc: 'Downloading TTS model and compiling CUDA graphs for fast inference. Audio routes to cloud until ready.', time: '30-90s' },
   // Validation
-  { phase: 'Benchmarking', color: '#38bdf8', desc: 'Testing each service (STT, LLM, TTS) against max latency targets. Progressive relaxation on marginal misses.', time: '30-120s' },
-  { phase: 'Shadow', color: '#a78bfa', desc: 'GPU runs in background alongside cloud. Must pass N consecutive requests to activate. Early activation for fast GPUs.', time: '10-60s' },
+  { phase: 'Benchmarking', color: '#38bdf8', desc: 'Testing each service against max latency targets. Progressive relaxation on marginal misses (±15%).', time: '30-120s' },
+  { phase: 'Shadow', color: '#a78bfa', desc: 'GPU runs alongside cloud. N consecutive successes required. Fast GPUs (30%+ better) activate in 2 runs.', time: '10-60s' },
   // Production
-  { phase: 'Ready', color: '#10b981', desc: 'GPU serving production traffic. P95 latency monitored continuously. Routes per-service (STT/LLM/TTS).', time: '∞' },
+  { phase: 'Ready', color: '#10b981', desc: 'GPU serving production traffic. P95 monitored with 3-violation cooldown. Per-service routing active.', time: '∞' },
   // Degradation
-  { phase: 'Degraded', color: '#f59e0b', desc: 'P95 latency exceeded threshold (3 consecutive violations). Traffic falls back to next provider. Re-benchmark triggered.', time: '30-90s' },
-  { phase: 'Repechage', color: '#f97316', desc: 'Re-benchmarking after failure. Retries every 2 min up to N times. Latency rings cleared between retries.', time: '2-6 min' },
-  { phase: 'Condemned', color: '#ef4444', desc: 'All retries exhausted. All traffic routed to cloud. Auto-recovery deploys replacement if enabled.', time: '—' },
-  { phase: 'Auto-Recovery', color: '#06b6d4', desc: 'Deploying replacement machine with same config. Swaps in when ready. Max retries configurable.', time: '2-10 min' },
+  { phase: 'Degraded', color: '#f59e0b', desc: 'P95 > target × multiplier (3 consecutive checks). Falls back to cloud. Re-benchmark triggered.', time: '30-90s' },
+  { phase: 'Repechage', color: '#f97316', desc: 'Re-benchmarking after failure. Retries every 2 min, max N times. Latency data cleared between tries.', time: '2-6 min' },
+  { phase: 'Condemned', color: '#ef4444', desc: 'All retries exhausted. Traffic on cloud. Auto-recovery deploys replacement machine if enabled.', time: '—' },
+  { phase: 'Auto-Recovery', color: '#06b6d4', desc: 'Deploying replacement with same config. Full lifecycle runs again. Max retries configurable.', time: '2-10 min' },
+  // Handover
+  { phase: 'Draining', color: '#a78bfa', desc: 'Standby ready. Waiting for active requests on primary to finish before switching. Max 30s drain.', time: '0-30s' },
 ];
 
 function DeploySettings(props: DeploySettingsProps) {
