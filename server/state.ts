@@ -74,10 +74,12 @@ export interface DeploymentState {
   deployDurationMs: number;  // time from deploy start to ready
   costPerHr: number;         // last known hourly cost for budget tracking
   providerMeta: Record<string, unknown>;  // host-level metadata for reputation tracking
+  /** Ordered log of state transitions with timestamps — for UI timeline and debugging */
+  transitions: Array<{ status: string; step: string; provider: string; ts: number; elapsed: number; detail?: string }>;
 }
 
 export let deployState: DeploymentState = {
-  status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {},
+  status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [],
 };
 export let deployCancelled = false;
 export let deployLock = false;
@@ -233,7 +235,27 @@ export function setDeployState(patch: Partial<DeploymentState>) {
     return; // don't update primary deployState or persist
   }
   if (deployCancelled && patch.status !== 'idle') return; // don't update after cancel
+
+  // Record state transition when status or step changes
+  const prevStatus = deployState.status;
+  const prevStep = deployState.step;
   Object.assign(deployState, patch);
+
+  const newStatus = deployState.status;
+  const newStep = deployState.step;
+  if (newStatus !== prevStatus || newStep !== prevStep) {
+    const elapsed = deployState.startedAt > 0 ? Math.round((Date.now() - deployState.startedAt) / 1000) : 0;
+    deployState.transitions.push({
+      status: newStatus, step: newStep, provider: deployState.provider || '',
+      ts: Date.now(), elapsed,
+      detail: deployState.gpuType || deployState.message?.slice(0, 60),
+    });
+    // Keep last 30 transitions
+    if (deployState.transitions.length > 30) deployState.transitions = deployState.transitions.slice(-30);
+    // Broadcast transition for real-time UI
+    try { const { broadcastWs: bws } = require('./ws-state'); bws?.({ type: 'gpu:transition', status: newStatus, step: newStep, provider: deployState.provider, elapsed, gpuType: deployState.gpuType, detail: deployState.message?.slice(0, 80) }); } catch {}
+  }
+
   console.log(`[gpu] ${deployState.status}: ${deployState.message}`);
   // Persist to disk so we can reconnect after restart
   persistDeployState();
@@ -247,7 +269,7 @@ export function resetDeployState() {
   deployTensordockAuthId = '';
   deployModalApiKey = '';
   activeProvider = '';
-  deployState = { status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {} };
+  deployState = { status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [] };
   clearPersistedDeploy();
   resetTtsWarmth(); // new pod = cold TTS
   resetGpuReadinessState();
