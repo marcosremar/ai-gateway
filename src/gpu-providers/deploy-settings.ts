@@ -104,7 +104,7 @@ const DEFAULTS: DeploySettings = {
   standbyEnabled:        false,
   standbyTriggerHours:   4,
   standbyDrainTimeoutMs: 30_000,
-  deployRaceCount:       1,
+  deployRaceCount:       3,
   autoRecoveryEnabled:   true,
   autoRecoveryDelaySec:  10,
   autoRecoveryMaxRetries: 2,
