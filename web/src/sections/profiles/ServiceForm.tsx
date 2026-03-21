@@ -207,16 +207,25 @@ interface DeploySettingsProps {
 
 /* Service lifecycle phases */
 const LIFECYCLE_PHASES = [
-  { phase: 'Offline', color: '#6b7280', desc: 'Service not deployed — no GPU machine running' },
-  { phase: 'Searching', color: '#a78bfa', desc: 'Looking for available GPUs across cloud providers' },
-  { phase: 'Deploying', color: '#38bdf8', desc: 'GPU found — creating instance, pulling image, booting' },
-  { phase: 'Benchmarking', color: '#38bdf8', desc: 'Testing each service (STT, LLM, TTS) against max latency targets' },
-  { phase: 'Shadow', color: '#a78bfa', desc: 'GPU runs alongside cloud — must pass N consecutive requests' },
-  { phase: 'Ready', color: '#10b981', desc: 'GPU is live, serving production traffic' },
-  { phase: 'Degraded', color: '#f59e0b', desc: 'P95 latency exceeded — falls back to next provider in chain' },
-  { phase: 'Repechage', color: '#f97316', desc: 'Re-benchmarking after failure — retries N times before condemning' },
-  { phase: 'Condemned', color: '#ef4444', desc: 'All retries exhausted — traffic on cloud while auto-recovery deploys replacement' },
-  { phase: 'Auto-Recovery', color: '#06b6d4', desc: 'Deploying a replacement machine with same config — swaps in when ready' },
+  // Pre-deploy
+  { phase: 'Offline', color: '#6b7280', desc: 'No GPU deployed. Service uses cloud providers only.', time: '—' },
+  { phase: 'Searching', color: '#a78bfa', desc: 'Querying providers (Vast.ai, RunPod, Modal) for available GPUs. Filters by speed, VRAM, price.', time: '0-2s' },
+  { phase: 'No Offers', color: '#f59e0b', desc: 'No GPUs available on this provider. Automatically tries next provider in chain.', time: '0-5s' },
+  // Deploy
+  { phase: 'Creating', color: '#38bdf8', desc: 'Provider is allocating GPU hardware, assigning IP, setting up networking and SSH.', time: '30-210s' },
+  { phase: 'Pulling Image', color: '#38bdf8', desc: 'Docker image being downloaded on the machine. Speed depends on host internet (500+ Mbps required).', time: '3-120s' },
+  { phase: 'Booting', color: '#38bdf8', desc: 'Container started, uvicorn initializing. Server process is starting up.', time: '5-30s' },
+  { phase: 'Loading Models', color: '#a78bfa', desc: 'Downloading ML models (Whisper STT, LLM, TTS). Each service activates individually when loaded.', time: '30-300s' },
+  // Validation
+  { phase: 'Benchmarking', color: '#38bdf8', desc: 'Testing each service (STT, LLM, TTS) against max latency targets. Progressive relaxation on marginal misses.', time: '30-120s' },
+  { phase: 'Shadow', color: '#a78bfa', desc: 'GPU runs in background alongside cloud. Must pass N consecutive requests to activate. Early activation for fast GPUs.', time: '10-60s' },
+  // Production
+  { phase: 'Ready', color: '#10b981', desc: 'GPU serving production traffic. P95 latency monitored continuously. Routes per-service (STT/LLM/TTS).', time: '∞' },
+  // Degradation
+  { phase: 'Degraded', color: '#f59e0b', desc: 'P95 latency exceeded threshold (3 consecutive violations). Traffic falls back to next provider. Re-benchmark triggered.', time: '30-90s' },
+  { phase: 'Repechage', color: '#f97316', desc: 'Re-benchmarking after failure. Retries every 2 min up to N times. Latency rings cleared between retries.', time: '2-6 min' },
+  { phase: 'Condemned', color: '#ef4444', desc: 'All retries exhausted. All traffic routed to cloud. Auto-recovery deploys replacement if enabled.', time: '—' },
+  { phase: 'Auto-Recovery', color: '#06b6d4', desc: 'Deploying replacement machine with same config. Swaps in when ready. Max retries configurable.', time: '2-10 min' },
 ];
 
 function DeploySettings(props: DeploySettingsProps) {
@@ -611,6 +620,9 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                   <div className="flex items-center gap-1.5 mb-1">
                     <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: p.color }} />
                     <span className="text-[11px] font-bold" style={{ color: p.color }}>{p.phase}</span>
+                    {p.time && p.time !== '—' && (
+                      <span className="text-[8px] font-mono ml-auto" style={{ color: 'var(--color-text-muted)' }}>~{p.time}</span>
+                    )}
                   </div>
                   <p className="text-[10px] leading-snug" style={{ color: 'var(--color-text-muted)' }}>
                     {p.desc}
