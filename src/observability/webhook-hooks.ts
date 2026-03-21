@@ -38,10 +38,10 @@ export function createWebhookHooks(config: WebhookConfig): Partial<GatewayHooks>
   function enqueue(hookName: string, data: unknown): void {
     if (allowedEvents && !allowedEvents.has(hookName)) return;
     queue.push({ hookName, data, timestamp: new Date().toISOString() });
-    if (queue.length >= batchSize) flush();
+    if (queue.length >= batchSize) flush().catch(() => {}); // async flush, errors handled inside
     if (!timer) {
       timer = setInterval(() => {
-        flush();
+        flush().catch(() => {}); // errors handled inside flush()
         if (queue.length === 0 && timer) {
           clearInterval(timer);
           timer = null;

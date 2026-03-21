@@ -421,13 +421,15 @@ interface ReactFlowDiagramProps {
   onRunPipeline?: (input: PipelineInput) => void;
   onResetPipeline?: () => void;
   onPipelineEdgesChange?: (edges: { source: string; target: string; dataType: string }[]) => void;
+  /** Profile ID for persisting node positions to localStorage */
+  profileId?: string | null;
 }
 
 export function ReactFlowPipelineDiagram({
   sttChain, llmChain, ttsChain, sttEnabled, ttsEnabled, services,
   onAddService, onReorderChain, onClickProvider,
   pipelineState, onRunPipeline, onResetPipeline,
-  onPipelineEdgesChange,
+  onPipelineEdgesChange, profileId,
 }: ReactFlowDiagramProps) {
 
   const [inputType, setInputType] = useState('mic');
@@ -455,6 +457,33 @@ export function ReactFlowPipelineDiagram({
     if (entry.provider === 'gpu') { const gpuModels = (catalog.models as Record<string, { id: string; label: string }[]>)['gpu'] ?? []; const svc = services.find(s => s.kind === 'gpu-pod' && s.id === entry.model) ?? gpuService; if (svc) { const mid = stageKey === 'stt' ? svc.sttModel : stageKey === 'llm' ? svc.llmModel : svc.ttsModel; if (mid) return gpuModels.find(m => m.id === mid)?.label ?? mid.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()); } }
     return null;
   }, [services, gpuService]);
+
+  // ── Position persistence ──
+  const storageKey = profileId ? `babelcast:rf-positions:${profileId}` : null;
+
+  const getSavedPositions = useCallback((): Record<string, { x: number; y: number }> => {
+    if (!storageKey) return {};
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) return {};
+      const arr = JSON.parse(raw) as Array<{ id: string; position: { x: number; y: number } }>;
+      const map: Record<string, { x: number; y: number }> = {};
+      for (const entry of arr) map[entry.id] = entry.position;
+      return map;
+    } catch { return {}; }
+  }, [storageKey]);
+
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const rfNodesRef = useRef<Node[]>([]);
+
+  const savePositions = useCallback(() => {
+    if (!storageKey) return;
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      const toSave = rfNodesRef.current.map(n => ({ id: n.id, position: n.position }));
+      try { localStorage.setItem(storageKey, JSON.stringify(toSave)); } catch {}
+    }, 400);
+  }, [storageKey]);
 
   // ── Build initial nodes + edges from props ──
   const { initialNodes, initialEdges } = useMemo(() => {
@@ -492,12 +521,33 @@ export function ReactFlowPipelineDiagram({
     const outputNode: Node = { id: 'output', type: 'io', position: { x: outX, y: 20 }, data: { ioType: 'output', label: prevType.toUpperCase(), color: outColor, inputType: prevType }, draggable: true };
     e.push(makeStyledEdge('e-last-output', prevId, 'output', prevType));
     n.push(inputNode, outputNode);
+
+    // Apply saved positions from localStorage
+    const saved = getSavedPositions();
+    if (Object.keys(saved).length > 0) {
+      for (const node of n) {
+        const pos = saved[node.id];
+        if (pos) node.position = pos;
+      }
+    }
+
     return { initialNodes: n, initialEdges: e };
-  }, [sttChain, llmChain, ttsChain, sttEnabled, ttsEnabled, inputType, getEntryLabel, getModelLabel, services, handleSelectInput, stableOnAddService, stableOnReorderChain, stableOnClickProvider]);
+  }, [sttChain, llmChain, ttsChain, sttEnabled, ttsEnabled, inputType, getEntryLabel, getModelLabel, services, handleSelectInput, stableOnAddService, stableOnReorderChain, stableOnClickProvider, getSavedPositions]);
 
   // ── Controlled React Flow state ──
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState(initialNodes);
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState(initialEdges);
+
+  // Keep ref in sync for debounced save
+  rfNodesRef.current = rfNodes;
+
+  // Save positions on drag (wraps onNodesChange)
+  const handleNodesChangeWithSave = useCallback((changes: import('@xyflow/react').NodeChange[]) => {
+    onNodesChange(changes);
+    if (changes.some(c => c.type === 'position' && !('dragging' in c && c.dragging))) {
+      savePositions();
+    }
+  }, [onNodesChange, savePositions]);
 
   const dataKey = [sttChain.map(c => c.provider + c.model + (c.enabled === false ? 'off' : '')).join(','), llmChain.map(c => c.provider + c.model + (c.enabled === false ? 'off' : '')).join(','), ttsChain.map(c => c.provider + c.model + (c.enabled === false ? 'off' : '')).join(','), inputType, sttEnabled, ttsEnabled].join('|');
   const prevDataKey = useRef(dataKey);
@@ -537,7 +587,7 @@ export function ReactFlowPipelineDiagram({
         <style>{`.react-flow .react-flow__handle{transition:box-shadow .15s ease,transform .15s ease;cursor:crosshair}.react-flow .react-flow__handle:hover{transform:scale(1.4);box-shadow:0 0 8px 2px rgba(255,255,255,.25)}.react-flow__edge{cursor:pointer}.react-flow__edge.selected .react-flow__edge-path{stroke-width:3!important;filter:drop-shadow(0 0 6px currentColor)}.react-flow__connection-path{stroke-width:2.5}`}</style>
         <ReactFlow
           nodes={rfNodes} edges={rfEdges}
-          onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
+          onNodesChange={handleNodesChangeWithSave} onEdgesChange={onEdgesChange}
           onConnect={handleConnect} onEdgesDelete={handleEdgesDelete}
           isValidConnection={isValidConnection}
           nodeTypes={nodeTypes}

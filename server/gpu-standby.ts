@@ -146,6 +146,12 @@ export async function triggerStandbyDeploy(reason: 'manual' | 'session_duration'
     console.error('[standby] Deploy failed:', msg);
     setStandbyDeployState({ status: 'error', message: msg });
     broadcastWs({ type: 'gpu:standby', status: 'error', reason: msg });
+    // Reset to idle after 30s so deploys aren't permanently blocked
+    setTimeout(() => {
+      if (standbyDeployState.status === 'error') {
+        setStandbyDeployState({ status: 'idle', message: '' });
+      }
+    }, 30_000);
     return { ok: false, error: msg };
   } finally {
     setDeployTarget('primary'); // Always restore primary target
@@ -158,6 +164,9 @@ export async function triggerStandbyDeploy(reason: 'manual' | 'session_duration'
 // ── Handover ─────────────────────────────────────────────────────────────────
 
 let handoverInProgress = false;
+
+/** True during handover drain — new GPU requests should route to cloud */
+export function isHandoverDraining(): boolean { return handoverInProgress; }
 
 export async function initiateHandover(): Promise<{ ok: boolean; error?: string }> {
   if (handoverInProgress) return { ok: false, error: 'Handover already in progress' };

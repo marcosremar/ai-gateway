@@ -211,6 +211,17 @@ let monitorConsecFails = 0;
 let monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
 let monitorBackoffMaxAlerted = false;
 
+// P95 demotion: require N consecutive violations before demoting (avoids transient spike false positives)
+const P95_DEMOTION_CONSECUTIVE_VIOLATIONS = 3;
+let p95ViolationCount: Record<string, number> = { stt: 0, llm: 0, tts: 0 };
+
+// Budget enforcement: soft warn once per day, hard terminate at 100%
+let budgetSoftWarned = false;
+
+// Idle warning: warn once before auto-terminate, reset on activity
+let idleWarned = false;
+export function resetIdleState() { idleWarned = false; monitorDelayMs = GPU_MONITOR_INTERVAL_MS; }
+
 // ── Staged Warmth Monitor ────────────────────────────────────────────────────
 // After initial deploy, TTS loads first and pod becomes healthy ("degraded").
 // STT + LLM load in the background (~2-5min). We activate the full GPU pipeline
@@ -395,17 +406,31 @@ export function scheduleNextMonitorProbe() {
         }
       }
 
-      // Budget tracking: accumulate GPU spend
+      // Budget tracking: accumulate GPU spend with enforcement
       if (deployState.costPerHr > 0) {
-        const today = new Date().toISOString().slice(0, 10); // UTC date "YYYY-MM-DD" — locale-independent
-        if (today !== dailySpendResetDate) { setDailyGpuSpendUsd(0); setDailySpendResetDate(today); }
+        const today = new Date().toISOString().slice(0, 10);
+        if (today !== dailySpendResetDate) { setDailyGpuSpendUsd(0); setDailySpendResetDate(today); budgetSoftWarned = false; }
         setDailyGpuSpendUsd(dailyGpuSpendUsd + deployState.costPerHr * (monitorDelayMs / 1000 / 3600));
-        if (DAILY_BUDGET_USD > 0 && dailyGpuSpendUsd > DAILY_BUDGET_USD) {
-          console.warn(`[budget] Daily GPU spend ($${dailyGpuSpendUsd.toFixed(2)}) exceeds budget ($${DAILY_BUDGET_USD.toFixed(2)}) — consider terminating`);
+        if (DAILY_BUDGET_USD > 0) {
+          const pct = dailyGpuSpendUsd / DAILY_BUDGET_USD;
+          const forecast = dailyGpuSpendUsd + (deployState.costPerHr * ((24 - new Date().getUTCHours()) / 24));
+          if (pct >= 1.0) {
+            // HARD BUDGET: auto-terminate to prevent overspend
+            console.error(`[budget] HARD LIMIT: $${dailyGpuSpendUsd.toFixed(2)} >= $${DAILY_BUDGET_USD.toFixed(2)} — auto-terminating GPU`);
+            broadcastWs({ type: 'gpu:budget', action: 'hard-limit', spend: dailyGpuSpendUsd, budget: DAILY_BUDGET_USD });
+            await autoTerminateGpu();
+            return;
+          } else if (pct >= 0.8 && !budgetSoftWarned) {
+            // SOFT BUDGET: warn + block new deploys
+            budgetSoftWarned = true;
+            console.warn(`[budget] SOFT LIMIT: $${dailyGpuSpendUsd.toFixed(2)} (${Math.round(pct * 100)}% of $${DAILY_BUDGET_USD.toFixed(2)}) — new deploys blocked`);
+            broadcastWs({ type: 'gpu:budget', action: 'soft-limit', spend: dailyGpuSpendUsd, budget: DAILY_BUDGET_USD, forecast });
+          }
         }
       }
 
       // P95 demotion check — only when GPU is in production and recently idle
+      // Requires 3 consecutive violations before demoting (avoids false positives from transient spikes)
       if (isGpuReadyForProduction() && !isReadinessCheckInProgress()) {
         const idleSec = lastModelRequestTime > 0 ? (Date.now() - lastModelRequestTime) / 1000 : 0;
         if (lastModelRequestTime > 0 && idleSec > getP95IdleWindowSec()) {
@@ -415,13 +440,22 @@ export function scheduleNextMonitorProbe() {
             const p95 = getPerStageP95(stage);
             const threshold = targets[stage] * multiplier;
             if (p95 !== null && p95 > threshold) {
-              console.warn(`[gpu] P95 degraded: ${stage} ${p95}ms > ${threshold}ms — demoting`);
-              setServiceReadiness(stage, { phase: 'degraded' });
-              broadcastWs({ type: 'gpu:readiness', stage, phase: 'degraded', p95Ms: p95, thresholdMs: threshold });
-              broadcastProviderStatus('booting', 'cloud', `GPU ${stage} P95 degraded — re-benchmarking`);
-              setGpuReadyForProduction(false);
-              _startReadinessCheck(deployState.endpoint);
-              break;
+              p95ViolationCount[stage] = (p95ViolationCount[stage] || 0) + 1;
+              if (p95ViolationCount[stage] >= P95_DEMOTION_CONSECUTIVE_VIOLATIONS) {
+                console.warn(`[gpu] P95 degraded: ${stage} ${p95}ms > ${threshold}ms (${p95ViolationCount[stage]} consecutive) — demoting`);
+                setServiceReadiness(stage, { phase: 'degraded' });
+                broadcastWs({ type: 'gpu:readiness', stage, phase: 'degraded', p95Ms: p95, thresholdMs: threshold });
+                broadcastProviderStatus('booting', 'cloud', `GPU ${stage} P95 degraded — re-benchmarking`);
+                setGpuReadyForProduction(false);
+                p95ViolationCount = { stt: 0, llm: 0, tts: 0 };
+                _startReadinessCheck(deployState.endpoint);
+                break;
+              } else {
+                console.log(`[gpu] P95 warning: ${stage} ${p95}ms > ${threshold}ms (${p95ViolationCount[stage]}/${P95_DEMOTION_CONSECUTIVE_VIOLATIONS})`);
+              }
+            } else {
+              // Reset violation counter for this stage when P95 is within threshold
+              p95ViolationCount[stage] = 0;
             }
           }
         }
@@ -429,11 +463,26 @@ export function scheduleNextMonitorProbe() {
 
       // Idle check — only model requests (STT/LLM/TTS/pipeline) count, not status polls
       const _idleBase = lastModelRequestTime > 0 ? lastModelRequestTime : lastRequestTime;
-      if (_idleBase > 0 && Date.now() - _idleBase >= IDLE_TIMEOUT_MS) {
-        const idleMin = Math.round((Date.now() - _idleBase) / 60_000);
-        console.log(`[gpu] Idle ${idleMin} min (no model requests) — auto-terminating to save costs`);
-        await autoTerminateGpu();
-        return; // autoTerminate calls stopGpuMonitoring, don't reschedule
+      if (_idleBase > 0) {
+        const idleMs = Date.now() - _idleBase;
+        if (idleMs >= IDLE_TIMEOUT_MS) {
+          const idleMin = Math.round(idleMs / 60_000);
+          console.log(`[gpu] Idle ${idleMin} min (no model requests) — auto-terminating to save costs`);
+          broadcastWs({ type: 'gpu:idle', idleMs, timeoutMs: IDLE_TIMEOUT_MS, action: 'terminate' });
+          await autoTerminateGpu();
+          return;
+        }
+        // Warn at 75% of idle timeout (gives user chance to send a request)
+        if (idleMs >= IDLE_TIMEOUT_MS * 0.75 && !idleWarned) {
+          idleWarned = true;
+          const remainingSec = Math.round((IDLE_TIMEOUT_MS - idleMs) / 1000);
+          console.log(`[gpu] Idle warning: ${remainingSec}s until auto-terminate`);
+          broadcastWs({ type: 'gpu:idle', idleMs, timeoutMs: IDLE_TIMEOUT_MS, action: 'warning', remainingSec });
+        }
+        // Adaptive monitor frequency during idle: slow down polling to save overhead
+        if (idleMs > 60_000 && monitorDelayMs < 60_000) {
+          monitorDelayMs = 60_000; // idle > 1min → check every 60s instead of 30s
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -859,10 +908,11 @@ export async function startDeployLoop(
   const startedAt = Date.now();
   const label = PROVIDER_LABELS[providerName];
   setDeployState({
-    status: 'creating', startedAt, retryCount: 0, podId: '', endpoint: '', gpuType: '',
-    message: `Creating ${label} instance...`, step: 'creating_pod', stepDetail: '', provider: providerName,
+    status: 'searching', startedAt, retryCount: 0, podId: '', endpoint: '', gpuType: '',
+    message: `Searching for GPU on ${label}...`, step: 'searching_offers', stepDetail: gpuTypes.join(', '), provider: providerName,
     dockerImage,
   });
+  broadcastWs({ type: 'gpu:deploy', phase: 'searching', provider: providerName, gpuTypes });
 
   // TensorDock: try to discover and resume a stopped instance first (fast restart)
   if (providerName === 'tensordock') {
@@ -946,6 +996,10 @@ export async function startDeployLoop(
     }
 
     try {
+      // Transition: searching → creating (found offers, now creating instance)
+      setDeployState({ status: 'creating', step: 'creating_pod', message: `Creating ${label} instance...` });
+      broadcastWs({ type: 'gpu:deploy', phase: 'creating', provider: providerName });
+
       const defaultStorage = DEFAULT_STORAGE_GB[providerName];
       const storageGb = Math.max(extra.storageGb || defaultStorage, defaultStorage);
       const instance = await providerClient.createInstance(
@@ -1020,7 +1074,12 @@ export async function startDeployLoop(
       const isBilling = lowerMsg.includes('balance') || lowerMsg.includes('funds') || lowerMsg.includes('insufficient');
       const isAuth = lowerMsg.includes('authentication') || lowerMsg.includes('unauthorized')
         || lowerMsg.includes('forbidden') || lowerMsg.includes('api key') || lowerMsg.includes('invalid key');
-      const nonRetryable = isBilling || isAuth;
+      const isNoOffers = lowerMsg.includes('no gpus available') || lowerMsg.includes('0 offers') || lowerMsg.includes('no offers');
+      if (isNoOffers) {
+        setDeployState({ step: 'no_offers', message: `${label}: no GPUs available — trying next provider` });
+        broadcastWs({ type: 'gpu:deploy', phase: 'no_offers', provider: providerName, gpuTypes });
+      }
+      const nonRetryable = isBilling || isAuth || isNoOffers;
       if (nonRetryable || attempt >= MAX_DEPLOY_RETRIES) {
         let errMsg: string;
         if (isBilling) {
@@ -1565,7 +1624,21 @@ export async function pollHealthUntilReady(
   while (true) {
     if (deployCancelled) return 'cancelled';
     const deployTimeoutMs = getDeployTimeoutMin() * 60_000;
-    if (Date.now() - deployStartedAt > deployTimeoutMs) {
+    const totalElapsedMs = Date.now() - deployStartedAt;
+
+    // Image pull timeout: 10 min max for pulling image (machine with slow internet should be abandoned)
+    const IMAGE_PULL_TIMEOUT_MS = 10 * 60_000;
+    if (!containerStartedAt && totalElapsedMs > IMAGE_PULL_TIMEOUT_MS) {
+      const pullMin = Math.round(totalElapsedMs / 60_000);
+      const timeoutMsg = `Image pull timeout after ${pullMin} min — machine has slow internet, trying next`;
+      console.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
+      broadcastWs({ type: 'gpu:deploy', phase: 'pull_timeout', provider: providerName, elapsedMs: totalElapsedMs });
+      setDeployState({ status: 'error', step: 'pulling_image', message: timeoutMsg });
+      return 'timeout';
+    }
+
+    // Overall deploy timeout
+    if (totalElapsedMs > deployTimeoutMs) {
       const phase = containerStartedAt ? 'waiting for /health' : 'pulling image';
       const timeoutMsg = `Timed out after ${getDeployTimeoutMin()} min (stuck ${phase})`;
       console.error(`[gpu] ${providerName} pod ${podId} timed out: ${phase}, endpoint=${endpoint || 'none'}`);
@@ -1938,5 +2011,76 @@ export async function tryRecoverActiveDeploy(): Promise<boolean> {
     console.warn(`[gpu] Recovery probe failed: ${err instanceof Error ? err.message : err}`);
     clearPersistedDeploy();
     return false;
+  }
+}
+
+// ── Auto-Recovery Deploy ──────────────────────────────────────────────────────
+// Called when GPU is condemned — deploys a replacement with the same config.
+// If the current machine has some services working, the new machine gets
+// the full config so all services are tested. Once the replacement passes
+// readiness, it becomes the active machine (handled by the normal deploy flow).
+
+export async function startAutoRecoveryDeploy(): Promise<void> {
+  // Prevent concurrent deploys — bail if another deploy is in progress
+  if (deployState.status === 'creating' || deployState.status === 'booting' || deployState.status === 'waiting_health') {
+    console.warn('[gpu] Auto-recovery: deploy already in progress — skipping');
+    return;
+  }
+
+  const lastImage = deployState.dockerImage;
+  const lastGpuType = deployState.gpuType;
+  const lastProvider = deployState.provider;
+
+  if (!lastImage) {
+    console.warn('[gpu] Auto-recovery: no Docker image from last deploy — skipping');
+    return;
+  }
+
+  // Save API keys BEFORE reset (resetDeployState clears them)
+  const savedKeys = {
+    runpod: deployApiKey,
+    vast: deployVastApiKey,
+    tensordock: deployTensordockApiKey ? { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId } : undefined,
+    modal: deployModalApiKey,
+  };
+
+  console.log(`[gpu] Auto-recovery: deploying replacement (image=${lastImage}, lastGpu=${lastGpuType}, lastProvider=${lastProvider})`);
+  broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery', message: `Deploying replacement (${lastImage})...` });
+
+  // Reset deploy state for a fresh deploy
+  resetDeployState();
+
+  // Restore API keys after reset
+  if (savedKeys.runpod) setDeployApiKey(savedKeys.runpod);
+  if (savedKeys.vast) setDeployVastApiKey(savedKeys.vast);
+  if (savedKeys.tensordock) {
+    setDeployTensordockApiKey(savedKeys.tensordock.apiKey);
+    setDeployTensordockAuthId(savedKeys.tensordock.authId);
+  }
+  if (savedKeys.modal) setDeployModalApiKey(savedKeys.modal);
+
+  // Build tiers from saved credentials
+  const tiers = buildGpuTiers(
+    savedKeys.runpod,
+    savedKeys.vast || undefined,
+    savedKeys.tensordock,
+    savedKeys.modal || undefined,
+  );
+
+  if (tiers.length === 0) {
+    console.error('[gpu] Auto-recovery: no provider tiers available — staying on cloud');
+    broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery-failed', error: 'No provider credentials' });
+    return;
+  }
+
+  // Use the same GPU types from the priority list, or fallback to the last used type
+  const gpuTypes = lastGpuType ? [lastGpuType] : getGpuPriorityList();
+
+  try {
+    await startDeployWithTiers(tiers, lastImage, gpuTypes, { autoRecovery: true });
+    console.log('[gpu] Auto-recovery: deploy started — readiness check will run automatically');
+  } catch (err) {
+    console.error(`[gpu] Auto-recovery deploy failed: ${err instanceof Error ? err.message : err}`);
+    broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery-failed', error: err instanceof Error ? err.message : 'Deploy failed' });
   }
 }

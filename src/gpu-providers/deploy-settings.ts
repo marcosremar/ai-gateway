@@ -75,6 +75,9 @@ interface DeploySettings {
   standbyTriggerHours:   number;                   // default 4 — trigger standby after N hours of session
   standbyDrainTimeoutMs: number;                   // default 30000 — max drain window ms before force handover
   deployRaceCount:       number;                   // hedged deploy: launch N instances in parallel, keep first healthy (1 = off)
+  autoRecoveryEnabled:   boolean;                  // auto-deploy replacement when GPU condemned (default true)
+  autoRecoveryDelaySec:  number;                   // seconds to wait before auto-recovery deploy (default 10)
+  autoRecoveryMaxRetries: number;                  // max auto-recovery attempts before giving up (default 2)
 }
 
 const DEFAULTS: DeploySettings = {
@@ -102,6 +105,9 @@ const DEFAULTS: DeploySettings = {
   standbyTriggerHours:   4,
   standbyDrainTimeoutMs: 30_000,
   deployRaceCount:       1,
+  autoRecoveryEnabled:   true,
+  autoRecoveryDelaySec:  10,
+  autoRecoveryMaxRetries: 2,
 };
 
 let _s: DeploySettings = { ...DEFAULTS, gpuPriorityList: [...DEFAULT_GPU_PRIORITY], gpuPriorityByProvider: { ...DEFAULT_GPU_PRIORITY_BY_PROVIDER } };
@@ -128,7 +134,24 @@ export function loadDeploySettings(): void {
   } catch { /* use defaults */ }
 }
 
+// Debounced save — batches rapid config changes (e.g. slider drags) into one disk write
+let _settingsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
 export function saveDeploySettings(): void {
+  if (_settingsSaveTimer) clearTimeout(_settingsSaveTimer);
+  _settingsSaveTimer = setTimeout(() => {
+    _settingsSaveTimer = null;
+    try {
+      const dir = path.dirname(SETTINGS_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(SETTINGS_PATH, JSON.stringify(_s, null, 2));
+    } catch { /* ignore */ }
+  }, 300);
+}
+
+/** Force immediate save (for shutdown hooks) */
+export function flushDeploySettings(): void {
+  if (_settingsSaveTimer) { clearTimeout(_settingsSaveTimer); _settingsSaveTimer = null; }
   try {
     const dir = path.dirname(SETTINGS_PATH);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -322,5 +345,22 @@ export function setStandbyDrainTimeoutMs(ms: number): void {
 export function getDeployRaceCount(): number { return _s.deployRaceCount ?? 1; }
 export function setDeployRaceCount(n: number): void {
   _s.deployRaceCount = Math.max(1, Math.min(10, Math.floor(n)));
+  saveDeploySettings();
+}
+
+// ── Auto-Recovery on Condemnation ─────────────────────────────────────────────
+
+export function getAutoRecoveryEnabled(): boolean { return _s.autoRecoveryEnabled ?? true; }
+export function setAutoRecoveryEnabled(v: boolean): void { _s.autoRecoveryEnabled = v; saveDeploySettings(); }
+
+export function getAutoRecoveryDelaySec(): number { return _s.autoRecoveryDelaySec ?? 10; }
+export function setAutoRecoveryDelaySec(v: number): void {
+  _s.autoRecoveryDelaySec = Math.max(5, Math.min(300, v));
+  saveDeploySettings();
+}
+
+export function getAutoRecoveryMaxRetries(): number { return _s.autoRecoveryMaxRetries ?? 2; }
+export function setAutoRecoveryMaxRetries(v: number): void {
+  _s.autoRecoveryMaxRetries = Math.max(0, Math.min(10, v));
   saveDeploySettings();
 }

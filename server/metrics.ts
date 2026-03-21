@@ -8,6 +8,7 @@ import {
   metricsCounters, providerMetrics, pendingDbWrites, setPendingDbWrites,
   consecutiveDbFailures, setConsecutiveDbFailures, DB_FAILURE_WARN_THRESHOLD,
   activeDeploySessionId, setActiveDeploySessionId, startedAt, deployState,
+  dailyGpuSpendUsd, DAILY_BUDGET_USD,
 } from './state';
 import { getOrCreateRequestId, setRequestIdHeader } from './http-utils';
 import { getTranslationCacheStats } from './ai-handlers';
@@ -77,35 +78,44 @@ export function logRequest(entry: RequestLogInput & { requestId?: string }) {
     }
   }
 
-  // Fire-and-forget — don't block the request handler
+  // Fire-and-forget with retry — don't block the request handler
+  const dbData = {
+    timestamp: new Date(entry.timestamp),
+    stage: entry.stage,
+    provider: entry.provider,
+    model: entry.model ?? null,
+    latencyMs: entry.latencyMs,
+    success: entry.success,
+    error: entry.error ?? null,
+    inputSize: entry.inputSize ?? null,
+    outputPreview: entry.outputPreview ?? null,
+  };
+
   setPendingDbWrites(pendingDbWrites + 1);
-  prisma.requestLog
-    .create({
-      data: {
-        timestamp: new Date(entry.timestamp),
-        stage: entry.stage,
-        provider: entry.provider,
-        model: entry.model ?? null,
-        latencyMs: entry.latencyMs,
-        success: entry.success,
-        error: entry.error ?? null,
-        inputSize: entry.inputSize ?? null,
-        outputPreview: entry.outputPreview ?? null,
-      },
-    })
-    .then(() => {
-      setPendingDbWrites(pendingDbWrites - 1);
-      setConsecutiveDbFailures(0);
-    })
-    .catch(err => {
-      setPendingDbWrites(pendingDbWrites - 1);
-      metricsCounters.dbLogFailures++;
-      setConsecutiveDbFailures(consecutiveDbFailures + 1);
-      if (consecutiveDbFailures === DB_FAILURE_WARN_THRESHOLD) {
-        console.error(`[db] WARN: ${DB_FAILURE_WARN_THRESHOLD} consecutive DB write failures — database may be unavailable`);
-      }
-      console.warn('[db] Failed to log request:', err);
-    });
+
+  const tryWrite = (attempt: number) => {
+    prisma.requestLog
+      .create({ data: dbData })
+      .then(() => {
+        setPendingDbWrites(pendingDbWrites - 1);
+        setConsecutiveDbFailures(0);
+      })
+      .catch(err => {
+        if (attempt < 2) {
+          // Retry once after 500ms
+          setTimeout(() => tryWrite(attempt + 1), 500);
+          return;
+        }
+        setPendingDbWrites(pendingDbWrites - 1);
+        metricsCounters.dbLogFailures++;
+        setConsecutiveDbFailures(consecutiveDbFailures + 1);
+        if (consecutiveDbFailures === DB_FAILURE_WARN_THRESHOLD) {
+          console.error(`[db] WARN: ${DB_FAILURE_WARN_THRESHOLD} consecutive DB write failures — database may be unavailable`);
+        }
+        console.warn('[db] Failed to log request (attempt %d):', attempt + 1, err);
+      });
+  };
+  tryWrite(0);
 }
 
 // ── GPU event logging ────────────────────────────────────────────────────────
@@ -667,6 +677,18 @@ export async function handleMetrics(_req: IncomingMessage, res: ServerResponse):
       totalTokens: metricsCounters.totalInputTokens + metricsCounters.totalOutputTokens,
     },
     translationCache: getTranslationCacheStats(),
+    // Cost tracking
+    cost: {
+      dailySpendUsd: dailyGpuSpendUsd,
+      dailyBudgetUsd: DAILY_BUDGET_USD,
+      budgetPct: DAILY_BUDGET_USD > 0 ? Math.round((dailyGpuSpendUsd / DAILY_BUDGET_USD) * 100) : 0,
+      costPerHr: deployState.costPerHr || 0,
+      gpuRequests: metricsCounters.byProvider['gpu'] || 0,
+      cloudRequests: (metricsCounters.byProvider['groq'] || 0) + (metricsCounters.byProvider['openai'] || 0) + (metricsCounters.byProvider['modal'] || 0),
+      costPerGpuRequest: (metricsCounters.byProvider['gpu'] || 0) > 0 && deployState.costPerHr > 0
+        ? +(dailyGpuSpendUsd / (metricsCounters.byProvider['gpu'] || 1)).toFixed(5)
+        : null,
+    },
   };
 
   const requestId = getOrCreateRequestId(_req);

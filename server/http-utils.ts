@@ -31,7 +31,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
 }
 
 const JSON_BODY_TIMEOUT_MS = 15_000;
-const RAW_BODY_TIMEOUT_MS = 30_000;
+const RAW_BODY_TIMEOUT_MS = 120_000; // 2 min — allows large audio uploads on slow connections
 
 export function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   const inner = new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -48,13 +48,24 @@ export function readJsonBody(req: IncomingMessage): Promise<Record<string, unkno
   return withTimeout(inner, JSON_BODY_TIMEOUT_MS, 'readJsonBody');
 }
 
-const MAX_BODY_BYTES = 50 * 1024 * 1024; // 50 MB
+const MAX_BODY_BYTES = 50 * 1024 * 1024; // 50 MB (audio uploads)
+
+/** Per-route body size limits — prevents abuse on text-only endpoints */
+const ROUTE_MAX_BYTES: Record<string, number> = {
+  '/v1/translate': 1 * 1024 * 1024,        // 1 MB
+  '/v1/chat/completions': 1 * 1024 * 1024,  // 1 MB
+  '/v1/playground/llm': 1 * 1024 * 1024,    // 1 MB
+  '/v1/config/providers': 512 * 1024,       // 512 KB
+  '/v1/config/api-keys': 64 * 1024,         // 64 KB
+  '/v1/config/labs': 64 * 1024,             // 64 KB
+};
 
 export function readRawBody(req: IncomingMessage, res?: ServerResponse): Promise<Buffer> | null {
+  const routeLimit = ROUTE_MAX_BYTES[req.url?.split('?')[0] ?? ''] ?? MAX_BODY_BYTES;
   const contentLength = req.headers['content-length'];
   if (contentLength) {
     const cl = parseInt(contentLength, 10);
-    if (!isNaN(cl) && cl > MAX_BODY_BYTES) {
+    if (!isNaN(cl) && cl > routeLimit) {
       if (res) {
         sendJsonError(res, 413, 'Payload Too Large', 'PAYLOAD_TOO_LARGE');
       }
@@ -67,9 +78,9 @@ export function readRawBody(req: IncomingMessage, res?: ServerResponse): Promise
     let totalSize = 0;
     req.on('data', (chunk: Buffer) => {
       totalSize += chunk.length;
-      if (totalSize > MAX_BODY_BYTES) {
+      if (totalSize > routeLimit) {
         req.destroy();
-        reject(new Error(`Request body too large (>${Math.round(MAX_BODY_BYTES / 1024 / 1024)}MB)`));
+        reject(new Error(`Request body too large (>${Math.round(routeLimit / 1024)}KB)`));
         return;
       }
       chunks.push(chunk);

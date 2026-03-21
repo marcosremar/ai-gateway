@@ -26,20 +26,24 @@ export interface DropdownListProps {
   className?: string;
   onClose?: () => void;
   autoOpen?: boolean;
+  /** Show a search/filter input at the top of the dropdown */
+  searchable?: boolean;
 }
 
 // ── Component ──
 
 export function DropdownList({
   options, value, onChange, accent = '#10b981', placeholder = 'Select...', size = 'md', className = '',
-  onClose, autoOpen = false,
+  onClose, autoOpen = false, searchable = false,
 }: DropdownListProps) {
   const [open, setOpen] = useState(autoOpen);
+  const [search, setSearch] = useState('');
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const [pos, setPos] = useState({ top: 0, left: 0, width: 0 });
 
-  const close = useCallback(() => { setOpen(false); onClose?.(); }, [onClose]);
+  const close = useCallback(() => { setOpen(false); setSearch(''); onClose?.(); }, [onClose]);
 
   // Compute position when opening — flip above trigger if not enough space below
   const MAX_PANEL_H = 256; // matches max-h-64 (16rem = 256px)
@@ -90,8 +94,18 @@ export function DropdownList({
     return () => document.removeEventListener('keydown', handler);
   }, [open, close]);
 
+  // Focus search input when dropdown opens
+  useEffect(() => {
+    if (open && searchable) setTimeout(() => searchRef.current?.focus(), 0);
+  }, [open, searchable]);
+
+  // Filter options by search text
+  const filteredOptions = searchable && search.trim()
+    ? options.filter(o => o.label.toLowerCase().includes(search.toLowerCase()) || o.subtitle?.toLowerCase().includes(search.toLowerCase()))
+    : options;
+
   const selected = options.find(o => o.key === value);
-  const groups = buildGroups(options);
+  const groups = buildGroups(filteredOptions);
   const py = size === 'sm' ? 'py-1.5' : 'py-2';
   const textSize = size === 'sm' ? 'text-xs' : 'text-sm';
 
@@ -147,6 +161,20 @@ export function DropdownList({
             boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
           }}
         >
+          {searchable && (
+            <div className="px-1.5 pb-1.5 mb-1 border-b" style={{ borderColor: 'var(--color-border)' }}>
+              <input
+                ref={searchRef}
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search..."
+                className="w-full text-xs px-2.5 py-1.5 rounded-lg border outline-none"
+                style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                onClick={e => e.stopPropagation()}
+              />
+            </div>
+          )}
           {groups.map(({ label: groupLabel, items }) => (
             <div key={groupLabel || '__ungrouped'} className="mb-1 last:mb-0">
               {groupLabel && (

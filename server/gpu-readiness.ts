@@ -18,13 +18,14 @@ import {
   deployState,
   setServiceReadiness, setGpuReadinessState, gpuReadinessState,
   setGpuShadowMode, setGpuReadyForProduction,
-  isStageWarm,
+  isStageWarm, resetPerStageLatencyRings,
 } from './state';
 import { broadcastWs } from './ws-state';
 import {
   getSttTargetLatencyMs, getLlmTargetLatencyMs, getTtsTargetLatencyMs,
   getBenchmarkMaxRuns, getBenchmarkMarginPct, getShadowRuns,
   getRepechageMaxAttempts,
+  getAutoRecoveryEnabled, getAutoRecoveryDelaySec, getAutoRecoveryMaxRetries,
 } from '../src/gpu-providers/deploy-settings';
 
 // ── Persistent history ────────────────────────────────────────────────────────
@@ -57,22 +58,36 @@ function loadHistory(): ReadinessHistory {
   try { return JSON.parse(fs.readFileSync(HISTORY_PATH, 'utf8')); } catch { return {}; }
 }
 
+// Async save with debounce — avoids blocking the event loop during benchmark hot path
+let _pendingSaveRun: ReturnType<typeof setTimeout> | null = null;
+let _pendingSaveData: { hist: ReadinessHistory } | null = null;
+
 function saveRun(stage: 'stt' | 'llm' | 'tts', samples: number[], bestMs: number, targetMs: number, passed: boolean): void {
   try {
-    const hist = loadHistory();
+    const hist = _pendingSaveData?.hist ?? loadHistory();
     const key = historyKey();
     const rec: ReadinessRecord = hist[key] ?? { runs: [], lastRunAt: 0, avgPassedMs: {} };
     rec.runs = [...rec.runs.slice(-29), { ts: Date.now(), stage, samples, bestLatencyMs: bestMs, targetMs, passed, runsUsed: samples.length }];
-    // Update avg for this stage from passed runs
     const passedForStage = rec.runs.filter(r => r.stage === stage && r.passed);
     if (passedForStage.length > 0) {
       rec.avgPassedMs[stage] = Math.round(passedForStage.reduce((s, r) => s + r.bestLatencyMs, 0) / passedForStage.length);
     }
     rec.lastRunAt = Date.now();
     hist[key] = rec;
-    const dir = path.dirname(HISTORY_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(HISTORY_PATH, JSON.stringify(hist, null, 2));
+    _pendingSaveData = { hist };
+
+    // Debounce: batch writes over 500ms to reduce disk I/O during rapid benchmark iterations
+    if (_pendingSaveRun) clearTimeout(_pendingSaveRun);
+    _pendingSaveRun = setTimeout(() => {
+      _pendingSaveRun = null;
+      if (!_pendingSaveData) return;
+      try {
+        const dir = path.dirname(HISTORY_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(HISTORY_PATH, JSON.stringify(_pendingSaveData.hist, null, 2));
+      } catch { /* ignore */ }
+      _pendingSaveData = null;
+    }, 500);
   } catch { /* ignore */ }
 }
 
@@ -100,12 +115,19 @@ function loadShadowRuns(): number {
   } catch { return 0; }
 }
 
+let _shadowSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
 function saveShadowRuns(completedRuns: number): void {
-  try {
-    const dir = path.dirname(SHADOW_STATE_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(SHADOW_STATE_FILE, JSON.stringify({ completedRuns, endpoint: deployState.endpoint, savedAt: Date.now() }));
-  } catch { /* ignore */ }
+  // Debounce: write at most once per second to reduce disk I/O
+  if (_shadowSaveTimer) clearTimeout(_shadowSaveTimer);
+  _shadowSaveTimer = setTimeout(() => {
+    _shadowSaveTimer = null;
+    try {
+      const dir = path.dirname(SHADOW_STATE_FILE);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(SHADOW_STATE_FILE, JSON.stringify({ completedRuns, endpoint: deployState.endpoint, savedAt: Date.now() }));
+    } catch { /* ignore */ }
+  }, 1000);
 }
 
 function clearShadowRuns(): void {
@@ -116,16 +138,36 @@ function clearShadowRuns(): void {
 
 let checkInProgress = false;
 let repechageTimer: ReturnType<typeof setTimeout> | null = null;
+let autoRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
 let repechageEndpoint = '';
 
 export function isReadinessCheckInProgress(): boolean { return checkInProgress; }
+/** True when an auto-recovery deploy is scheduled or in progress */
+export function isAutoRecoveryPending(): boolean { return autoRecoveryTimer !== null; }
 
 export function resetReadinessCheck(): void {
   checkInProgress = false;
   if (repechageTimer) { clearTimeout(repechageTimer); repechageTimer = null; }
+  if (autoRecoveryTimer) { clearTimeout(autoRecoveryTimer); autoRecoveryTimer = null; }
   repechageEndpoint = '';
   clearShadowRuns();
+  shadowStartedAt = 0;
+  setGpuReadinessState({ autoRecoveryAttempt: 0 });
 }
+
+// ── Pre-built silence WAV for STT benchmarks (reused across all runs) ────────
+
+const STT_BENCH_WAV = (() => {
+  const headerSize = 44, dataSize = 32000; // 1s 16kHz 16-bit mono silence
+  const wav = Buffer.alloc(headerSize + dataSize);
+  wav.write('RIFF', 0); wav.writeUInt32LE(36 + dataSize, 4);
+  wav.write('WAVE', 8); wav.write('fmt ', 12); wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28);
+  wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
+  wav.write('data', 36); wav.writeUInt32LE(dataSize, 40);
+  return new Blob([wav], { type: 'audio/wav' });
+})();
 
 // ── Benchmark one service ─────────────────────────────────────────────────────
 
@@ -156,17 +198,8 @@ async function benchmarkService(
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         await res.json();
       } else if (stage === 'stt') {
-        // 1s silence WAV for STT benchmark
-        const headerSize = 44, dataSize = 32000; // 1s 16kHz 16-bit mono
-        const wav = Buffer.alloc(headerSize + dataSize);
-        wav.write('RIFF', 0); wav.writeUInt32LE(36 + dataSize, 4);
-        wav.write('WAVE', 8); wav.write('fmt ', 12); wav.writeUInt32LE(16, 16);
-        wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
-        wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28);
-        wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
-        wav.write('data', 36); wav.writeUInt32LE(dataSize, 40);
         const form = new FormData();
-        form.append('file', new Blob([wav], { type: 'audio/wav' }), 'bench.wav');
+        form.append('file', STT_BENCH_WAV, 'bench.wav');
         const res = await fetch(`${endpoint}/v1/transcribe?language=en`, {
           method: 'POST', body: form, signal: AbortSignal.timeout(15_000),
         });
@@ -195,7 +228,10 @@ async function benchmarkService(
     }
 
     setServiceReadiness(stage, { completedRuns: i + 1, latencySamples: [...samples], bestLatencyMs: bestMs === Infinity ? null : bestMs });
-    broadcastWs({ type: 'gpu:readiness', stage, phase: 'benchmarking', run: i + 1, totalRuns: maxRuns, latencyMs: ms, bestLatencyMs: bestMs, targetMs });
+    // Batch broadcasts: send every 3rd run or on first/last to reduce WS traffic
+    if (i === 0 || (i + 1) % 3 === 0 || i === maxRuns - 1) {
+      broadcastWs({ type: 'gpu:readiness', stage, phase: 'benchmarking', run: i + 1, totalRuns: maxRuns, latencyMs: ms, bestLatencyMs: bestMs, targetMs });
+    }
     console.log(`[readiness:${stage}] Run ${i + 1}/${maxRuns}: ${ms}ms (best: ${bestMs}ms, target: ${targetMs}ms)`);
 
     if (bestMs <= targetMs) {
@@ -348,6 +384,32 @@ function scheduleRepechage(
     broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'condemned', attempts });
     // Condemn GPU — route all traffic to cloud
     import('./providers').then(p => p.markGpuCondemned()).catch(e => console.warn('[readiness] markGpuCondemned failed:', e instanceof Error ? e.message : e));
+
+    // Auto-recovery: deploy a replacement machine if enabled
+    if (getAutoRecoveryEnabled()) {
+      const recoveryAttempt = gpuReadinessState.autoRecoveryAttempt || 0;
+      const maxRecovery = getAutoRecoveryMaxRetries();
+      if (recoveryAttempt < maxRecovery) {
+        const delaySec = getAutoRecoveryDelaySec();
+        setGpuReadinessState({ autoRecoveryAttempt: recoveryAttempt + 1 });
+        broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery', attempt: recoveryAttempt + 1, maxAttempts: maxRecovery, retryInMs: delaySec * 1000 });
+        console.log(`[readiness] Auto-recovery: deploying replacement in ${delaySec}s (attempt ${recoveryAttempt + 1}/${maxRecovery})`);
+        autoRecoveryTimer = setTimeout(async () => {
+          autoRecoveryTimer = null;
+          try {
+            const { startAutoRecoveryDeploy } = await import('./gpu-deploy');
+            await startAutoRecoveryDeploy();
+          } catch (e) {
+            console.error('[readiness] Auto-recovery deploy failed:', e instanceof Error ? e.message : e);
+            broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery-failed', error: e instanceof Error ? e.message : 'unknown' });
+          }
+        }, delaySec * 1000);
+      } else {
+        console.warn(`[readiness] Auto-recovery exhausted (${recoveryAttempt}/${maxRecovery}) — staying on cloud`);
+        broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery-exhausted', attempts: recoveryAttempt });
+      }
+    }
+
     return; // do NOT schedule retry timer
   }
 
@@ -357,15 +419,26 @@ function scheduleRepechage(
     }
   }
 
-  broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'repechage', attempts, retryInMs: 120_000 });
-  console.log(`[readiness] Entering repechage (attempt ${attempts}/${max}) — retry in 2min`);
+  // Clear stale latency samples so P95 demotion doesn't use old data during repechage
+  resetPerStageLatencyRings();
+
+  const REPECHAGE_DELAY_MS = 120_000; // 2 minutes between retries
+  broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'repechage', attempts, retryInMs: REPECHAGE_DELAY_MS });
+  console.log(`[readiness] Entering repechage (attempt ${attempts}/${max}) — retry in ${REPECHAGE_DELAY_MS / 1000}s`);
+
+  // Capture pod identity at scheduling time to detect pod replacement
+  const podId = deployState.podId;
 
   repechageTimer = setTimeout(() => {
     repechageTimer = null;
-    if (deployState.endpoint !== endpoint || deployState.status !== 'ready') return;
+    // Validate both endpoint AND podId to avoid retrying on a different pod
+    if (deployState.endpoint !== endpoint || deployState.status !== 'ready' || deployState.podId !== podId) {
+      console.log('[readiness] Repechage cancelled — pod changed');
+      return;
+    }
     console.log(`[readiness] Repechage retry ${attempts}`);
     runGpuReadinessCheck(endpoint, onPass, onFail).catch(e => console.warn('[readiness] repechage retry failed:', e instanceof Error ? e.message : e));
-  }, 120_000);
+  }, REPECHAGE_DELAY_MS);
 }
 
 // ── Standby readiness check ───────────────────────────────────────────────────
@@ -488,8 +561,37 @@ async function benchmarkStandbyService(
 // ── Shadow mode progress ──────────────────────────────────────────────────────
 
 /** Called from ai-handlers when a background GPU request completes during shadow mode. */
+const SHADOW_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour max in shadow mode
+let shadowStartedAt = 0;
+
 export function recordShadowRun(latencyMs: number, targetMs: number, onProductionReady: () => void): void {
-  const targetRuns = getShadowRuns();
+  // Guard: don't mutate shadow state while a readiness check is re-running (race condition fix)
+  if (checkInProgress) {
+    console.warn('[readiness] Shadow run skipped: readiness check in progress');
+    return;
+  }
+
+  // Track when shadow mode started
+  if (shadowStartedAt === 0) shadowStartedAt = Date.now();
+
+  // Timeout: if shadow mode has been running > 1 hour, reset and re-benchmark
+  if (Date.now() - shadowStartedAt > SHADOW_TIMEOUT_MS) {
+    console.warn('[readiness] Shadow mode timeout (>1h) — resetting, will re-benchmark');
+    setGpuShadowMode(false);
+    setGpuReadinessState({ shadowPhase: false, shadowCompletedRuns: 0 });
+    clearShadowRuns();
+    resetPerStageLatencyRings();
+    shadowStartedAt = 0;
+    import('./providers').then(p => p._startReadinessCheck(deployState.endpoint)).catch(e => console.error('[readiness] Shadow timeout re-benchmark failed:', e instanceof Error ? e.message : e));
+    return;
+  }
+
+  const configuredRuns = getShadowRuns();
+  // Early activation: if latency is significantly better than target (30%+ margin), trust it faster
+  const earlyActivationThreshold = targetMs * 0.7;
+  const targetRuns = (gpuReadinessState.shadowCompletedRuns >= 2 && latencyMs < earlyActivationThreshold)
+    ? Math.min(configuredRuns, 2) // proven fast GPU → accept after 2 consecutive
+    : configuredRuns;
   const passed = latencyMs <= targetMs;
   const next = passed ? gpuReadinessState.shadowCompletedRuns + 1 : 0; // reset on failure
   setGpuReadinessState({ shadowCompletedRuns: next });
@@ -503,6 +605,7 @@ export function recordShadowRun(latencyMs: number, targetMs: number, onProductio
     setGpuShadowMode(false);
     setGpuReadinessState({ shadowPhase: false });
     clearShadowRuns(); // done — clear persisted state
+    shadowStartedAt = 0;
     onProductionReady();
   }
 }
