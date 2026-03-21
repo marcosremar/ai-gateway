@@ -269,6 +269,7 @@ function startBackgroundWarmthMonitor(endpoint: string) {
         }
         const loading = [!sttWarm && 'STT', !llmWarm && 'LLM'].filter(Boolean).join(', ');
         setDeployState({ stepDetail: `Loading: ${loading} — using cloud fallback` });
+        broadcastWs({ type: 'gpu:services', loaded: [sttWarm && 'stt', llmWarm && 'llm'].filter(Boolean), loading: [!sttWarm && 'stt', !llmWarm && 'llm'].filter(Boolean) });
       }
     } catch (err) {
       console.debug(`[gpu] Warmth poll failed: ${err instanceof Error ? err.message : err}`);
@@ -1845,13 +1846,29 @@ export async function pollHealthUntilReady(
             const ttsReady = svc.tts === 'loaded' || svc.tts === 'disabled';
             const sttReady = svc.whisper === 'loaded';
             const llmReady = svc.llama_cpp === 'ready' || svc.llama_cpp === 'loaded';
-            const readyStages = [ttsReady && 'TTS', sttReady && 'STT', llmReady && 'LLM'].filter(Boolean);
-            const stepDetail = readyStages.length < 3
-              ? `GPU ready: ${readyStages.join(', ') || 'none'} — loading: ${[!sttReady && 'STT', !llmReady && 'LLM', !ttsReady && 'TTS'].filter(Boolean).join(', ')}`
-              : '';
-            console.log(`[gpu] Pod health: ${data.status} — stages ready: ${readyStages.join(', ') || 'none'}/3`);
-            setDeployState({ step: 'ready', stepDetail });
-            return 'ready';
+            const readyStages = [sttReady && 'STT', llmReady && 'LLM', ttsReady && 'TTS'].filter(Boolean);
+            const loadingStages = [!sttReady && 'STT', !llmReady && 'LLM', !ttsReady && 'TTS'].filter(Boolean);
+
+            // Mark as ready as soon as /health responds OK — even if some models are still downloading.
+            // Per-service routing handles this: cloud serves stages that aren't loaded yet.
+            // The warmth monitor will activate each service as it becomes ready.
+            if (readyStages.length > 0 || containerStartedAt) {
+              const stepDetail = loadingStages.length > 0
+                ? `${readyStages.join(', ') || 'none'} ready — loading: ${loadingStages.join(', ')}`
+                : 'all services loaded';
+              console.log(`[gpu] Pod health OK — ${readyStages.length}/3 services loaded (${readyStages.join(', ') || 'none'}). Loading: ${loadingStages.join(', ') || 'none'}`);
+              broadcastWs({ type: 'gpu:services', loaded: readyStages, loading: loadingStages });
+              setDeployState({ step: 'ready', stepDetail });
+              return 'ready';
+            }
+
+            // /health OK but no services loaded yet — show loading status, keep polling
+            setDeployState({
+              status: 'booting', step: 'waiting_health',
+              message: `App healthy, models downloading... [${elapsed}s]`,
+              stepDetail: `Services: ${Object.entries(svc).map(([k, v]) => `${k}=${v}`).join(', ')}`,
+            });
+            if (!containerStartedAt) containerStartedAt = Date.now();
           }
         }
       } catch {
