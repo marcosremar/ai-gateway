@@ -808,10 +808,22 @@ export async function autoSelectCheapestGpu(
   // so we treat -1 as "probably available" and only exclude available === 0
   const base = allOffers.filter((o) => o.vram >= minVram && o.available !== 0 && o.pricePerHr > 0);
 
+  // Internet speed filter: prefer machines with fast download (>500 Mbps) for quick image pulls.
+  // Fall back to all offers if none qualify (some providers don't report speed).
+  const MIN_INET_MBPS = 500;
+  const fastInet = base.filter(o => {
+    const dl = (o as Record<string, unknown>).inetDown as number ?? (o as Record<string, unknown>).inetDownMbps as number ?? 0;
+    return dl === 0 || dl >= MIN_INET_MBPS; // 0 = unknown (allow), >= 500 = fast enough
+  });
+  const inetFiltered = fastInet.length > 0 ? fastInet : base;
+  if (fastInet.length < base.length && fastInet.length > 0) {
+    console.log(`[gpu] autoSelectGpu: filtered ${base.length - fastInet.length} slow hosts (<${MIN_INET_MBPS} Mbps), keeping ${fastInet.length}`);
+  }
+
   // SSD preference: keep offers where diskBwReadMbps > 200 MB/s (SSD/NVMe) or unknown.
   // Fall back to all offers if none qualify (provider may not report disk speed).
-  const ssdFiltered = preferSsd ? base.filter(o => (o.diskBwReadMbps ?? 0) === 0 || (o.diskBwReadMbps ?? 0) > 200) : base;
-  const suitable = preferSsd && ssdFiltered.length === 0 ? base : ssdFiltered;
+  const ssdFiltered = preferSsd ? inetFiltered.filter(o => (o.diskBwReadMbps ?? 0) === 0 || (o.diskBwReadMbps ?? 0) > 200) : inetFiltered;
+  const suitable = preferSsd && ssdFiltered.length === 0 ? inetFiltered : ssdFiltered;
 
   // Load blacklisted hosts (crash count >= 3 in last 7 days)
   let blacklistedHosts: Set<string> | null = null;

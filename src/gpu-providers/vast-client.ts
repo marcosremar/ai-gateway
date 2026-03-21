@@ -169,8 +169,8 @@ export class VastClient extends AbstractGpuProvider {
       direct_port_count: { gte: 1 },   // Need at least 1 open port for SSH
       // Host quality filters
       reliability2: { gte: 0.9 },       // >90% reliability score
-      inet_down: { gte: 50 },           // Minimum 50 Mb/s download
-      inet_up: { gte: 50 },             // Minimum 50 Mb/s upload
+      inet_down: { gte: 500 },          // Minimum 500 Mb/s download (fast image pulls)
+      inet_up: { gte: 100 },            // Minimum 100 Mb/s upload
       order: [['dph_total', 'asc']],
     };
 
