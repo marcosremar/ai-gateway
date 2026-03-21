@@ -269,8 +269,49 @@ export function GpuLiveStatus() {
         </div>
       )}
 
-      {/* Pipeline routing */}
-      {gpuStatus?.pipelineRouting && (
+      {/* Per-service status (separated from deploy state) */}
+      {readiness && currentPhase !== 'idle' && (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Service Status</p>
+          <div className="grid grid-cols-3 gap-1.5">
+            {(['stt', 'llm', 'tts'] as const).map(stage => {
+              const colors = { stt: '#38bdf8', llm: '#a78bfa', tts: '#fbbf24' };
+              const labels = { stt: 'STT', llm: 'LLM', tts: 'TTS' };
+              const rs = (readiness as any)?.readinessState?.[stage] || {};
+              const phase = rs.phase || 'idle';
+              const meta = phaseMeta(phase);
+              const route = (gpuStatus?.pipelineRouting as Record<string, string>)?.[stage];
+              const detail = rs.loadDetail || '';
+              const best = rs.bestLatencyMs;
+              const Icon = meta.icon;
+              return (
+                <div key={stage} className="rounded-lg border p-2"
+                  style={{ borderColor: `color-mix(in srgb, ${colors[stage]} 25%, var(--color-border))`, background: `color-mix(in srgb, ${colors[stage]} 4%, transparent)` }}>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className="text-[10px] font-bold uppercase" style={{ color: colors[stage] }}>{labels[stage]}</span>
+                    <span className="ml-auto text-[8px] font-medium px-1.5 py-0.5 rounded"
+                      style={{ background: `color-mix(in srgb, ${meta.color} 15%, transparent)`, color: meta.color }}>
+                      {meta.label}
+                    </span>
+                  </div>
+                  {detail && <p className="text-[8px] truncate" style={{ color: 'var(--color-text-muted)' }}>{detail}</p>}
+                  <div className="flex items-center justify-between mt-1">
+                    {best != null && <span className="text-[8px] font-mono" style={{ color: meta.color }}>{Math.round(best)}ms</span>}
+                    {route && (
+                      <span className="text-[7px] font-bold uppercase" style={{ color: route === 'gpu' ? colors[stage] : 'var(--color-text-muted)' }}>
+                        {route === 'gpu' ? 'GPU' : 'Cloud'}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Pipeline routing (compact — only when no readiness data) */}
+      {gpuStatus?.pipelineRouting && !readiness && (
         <div>
           <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Pipeline Routing</p>
           <div className="flex gap-2">
