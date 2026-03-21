@@ -8,26 +8,35 @@ import { useGatewayWs, type GatewayWsState } from '@/hooks/useGatewayWs';
 /* ── Phase config ── */
 
 const PHASE_META: Record<string, { color: string; label: string; icon: typeof Loader2 }> = {
-  idle:           { color: '#6b7280', label: 'Offline',       icon: Clock },
-  offline:        { color: '#6b7280', label: 'Offline',       icon: Clock },
-  searching:      { color: '#a78bfa', label: 'Searching GPU', icon: Loader2 },
-  searching_offers: { color: '#a78bfa', label: 'Searching',   icon: Loader2 },
-  no_offers:      { color: '#f59e0b', label: 'No GPUs Found', icon: AlertTriangle },
-  creating_pod:   { color: '#38bdf8', label: 'Creating Pod',  icon: Loader2 },
-  pulling_image:  { color: '#38bdf8', label: 'Pulling Image', icon: Loader2 },
-  booting:        { color: '#38bdf8', label: 'Booting',       icon: Loader2 },
-  waiting_health: { color: '#38bdf8', label: 'Health Check',  icon: Loader2 },
-  benchmarking:   { color: '#38bdf8', label: 'Benchmarking',  icon: Activity },
-  warming:        { color: '#a78bfa', label: 'Warming Models', icon: Loader2 },
-  shadow:         { color: '#a78bfa', label: 'Shadow Mode',   icon: Activity },
-  ready:          { color: '#10b981', label: 'Ready',         icon: Check },
-  production:     { color: '#10b981', label: 'Production',    icon: Check },
-  degraded:       { color: '#f59e0b', label: 'Degraded',      icon: AlertTriangle },
-  repechage:      { color: '#f97316', label: 'Repechage',     icon: Loader2 },
-  failed:         { color: '#ef4444', label: 'Failed',        icon: X },
-  condemned:      { color: '#ef4444', label: 'Condemned',     icon: X },
-  'auto-recovery': { color: '#06b6d4', label: 'Auto-Recovery', icon: Zap },
-  error:          { color: '#ef4444', label: 'Error',         icon: X },
+  // Pre-deploy
+  idle:             { color: '#6b7280', label: 'Offline',         icon: Clock },
+  offline:          { color: '#6b7280', label: 'Offline',         icon: Clock },
+  searching:        { color: '#a78bfa', label: 'Searching GPU',   icon: Loader2 },
+  searching_offers: { color: '#a78bfa', label: 'Searching',       icon: Loader2 },
+  no_offers:        { color: '#f59e0b', label: 'No GPUs Found',   icon: AlertTriangle },
+  // Deploy phases
+  creating:         { color: '#38bdf8', label: 'Creating',        icon: Loader2 },
+  creating_pod:     { color: '#38bdf8', label: 'Creating Pod',    icon: Loader2 },
+  installing:       { color: '#38bdf8', label: 'Pulling Image',   icon: Loader2 },
+  pulling_image:    { color: '#38bdf8', label: 'Pulling Image',   icon: Loader2 },
+  starting_container: { color: '#38bdf8', label: 'Starting',      icon: Loader2 },
+  booting:          { color: '#38bdf8', label: 'Booting',         icon: Loader2 },
+  waiting_health:   { color: '#a78bfa', label: 'Loading Models',  icon: Loader2 },
+  // Readiness
+  warming:          { color: '#a78bfa', label: 'Warming Models',  icon: Loader2 },
+  benchmarking:     { color: '#38bdf8', label: 'Benchmarking',    icon: Activity },
+  shadow:           { color: '#a78bfa', label: 'Shadow Mode',     icon: Activity },
+  'fast-tracked':   { color: '#10b981', label: 'Fast-Tracked',    icon: Zap },
+  // Production
+  ready:            { color: '#10b981', label: 'Ready',           icon: Check },
+  production:       { color: '#10b981', label: 'Production',      icon: Check },
+  // Degradation
+  degraded:         { color: '#f59e0b', label: 'Degraded',        icon: AlertTriangle },
+  repechage:        { color: '#f97316', label: 'Repechage',       icon: Loader2 },
+  failed:           { color: '#ef4444', label: 'Failed',          icon: X },
+  condemned:        { color: '#ef4444', label: 'Condemned',       icon: X },
+  'auto-recovery':  { color: '#06b6d4', label: 'Auto-Recovery',   icon: Zap },
+  error:            { color: '#ef4444', label: 'Error',           icon: X },
 };
 
 function phaseMeta(phase: string) {
@@ -44,10 +53,10 @@ function formatElapsed(ms: number): string {
 
 /* ── Deploy Sub-Steps Bar ── */
 
-const DEPLOY_STEPS = ['searching_offers', 'creating_pod', 'pulling_image', 'booting', 'waiting_health', 'benchmarking', 'shadow', 'ready'];
+const DEPLOY_STEPS = ['searching_offers', 'creating_pod', 'pulling_image', 'starting_container', 'waiting_health', 'benchmarking', 'shadow', 'ready'];
 const DEPLOY_STEP_LABELS: Record<string, string> = {
-  searching_offers: 'Search', creating_pod: 'Create', pulling_image: 'Pull', booting: 'Boot',
-  waiting_health: 'Health', benchmarking: 'Bench', shadow: 'Shadow', ready: 'Ready',
+  searching_offers: 'Search', creating_pod: 'Create', pulling_image: 'Pull Image',
+  starting_container: 'Boot', waiting_health: 'Models', benchmarking: 'Benchmark', shadow: 'Shadow', ready: 'Ready',
 };
 
 function DeployProgressBar({ currentStep, gpuType, elapsed }: { currentStep: string; gpuType?: string; elapsed?: number }) {
