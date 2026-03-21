@@ -44,7 +44,7 @@ const ProfileItem = memo(function ProfileItem({
     profile.tts !== undefined ? 'tts' : null,
   ].filter(Boolean) as string[];
 
-  const gpuCount = (profile.services ?? []).filter(s => s.kind === 'gpu-pod').length;
+  const gpuCount = (profile.services ?? []).filter(s => s.kind === 'gpu-pod' || s.kind === 'serverless').length;
 
   const summaryParts: string[] = [];
   if (profile.stt && profile.stt[0]) summaryParts.push(profile.stt[0].provider);

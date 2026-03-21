@@ -37,9 +37,12 @@ interface RaceResult {
 
 function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
   const isGpu = service.kind === 'gpu-pod';
-  const provIcon = !isGpu && service.cloudProvider ? PROVIDER_ICON[service.cloudProvider] : null;
-  const color = isGpu ? '#a78bfa' : (provIcon?.color ?? '#7ba896');
-  const ServiceIcon = isGpu ? Server : (provIcon?.icon ?? Package);
+  const isServerless = service.kind === 'serverless';
+  const hasDockerImage = isGpu || isServerless;
+  const provIcon = !hasDockerImage && service.cloudProvider ? PROVIDER_ICON[service.cloudProvider] : null;
+  const color = isGpu ? '#a78bfa' : isServerless ? '#22c55e' : (provIcon?.color ?? '#7ba896');
+  const ServiceIcon = isGpu ? Server : isServerless ? (PROVIDER_ICON[service.cloudProvider || '']?.icon ?? Server) : (provIcon?.icon ?? Package);
+  const kindLabel = isGpu ? 'Self-hosted' : isServerless ? 'Serverless' : 'Cloud API';
   const { gpu, refresh } = useGpuStatus(isGpu, 3000);
 
   const [deploying, setDeploying] = useState(false);
@@ -186,10 +189,10 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
             <span className="text-sm font-semibold truncate">{service.name}</span>
             <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded flex-shrink-0"
               style={{ background: `color-mix(in srgb, ${color} 10%, transparent)`, color }}>
-              {service.kind}
+              {kindLabel}
             </span>
           </div>
-          {isGpu && (
+          {hasDockerImage && (
             <>
               {service.dockerImage && (
                 <div className="text-[10px] font-mono truncate mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
@@ -212,14 +215,14 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
                   })()}
                 </div>
               )}
-              {service.gpuTypes && service.gpuTypes.length > 0 && (
+              {isGpu && service.gpuTypes && service.gpuTypes.length > 0 && (
                 <div className="text-[10px] mt-0.5 truncate" style={{ color: 'var(--color-text-muted)' }}>
                   {service.gpuTypes.map(g => GPU_TYPES.find(t => t.id === g)?.label || g).join(', ')}
                 </div>
               )}
             </>
           )}
-          {!isGpu && service.cloudProvider && (
+          {!hasDockerImage && service.cloudProvider && (
             <div className="text-[10px] mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
               {service.cloudProvider}
             </div>

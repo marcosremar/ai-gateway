@@ -9,10 +9,11 @@ import {
 } from '@/components/ui';
 import {
   Check, Package, Server, Bot, Volume2, Mic, Loader2,
-  Cpu, ScanSearch, AlertCircle, X as XIcon, Cloud,
+  Cpu, ScanSearch, AlertCircle, X as XIcon, Cloud, Zap,
 } from 'lucide-react';
 import {
   DEFAULT_DOCKER_IMAGES, GPU_TYPES, GPU_TYPES_BY_PROVIDER, PIPELINE_CATALOG, GPU_PROVIDERS,
+  CLOUD_API_PROVIDERS, SERVERLESS_PROVIDERS,
   type PipelineChainEntry, type ProfileService, type ServiceKind,
 } from '../provider-types';
 import { PROVIDER_ICON } from '../FallbackChainList';
@@ -25,9 +26,21 @@ interface ServiceFormProps {
 }
 
 function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
+  // Derive initial kind — migrate modal-cloud → serverless
+  const deriveKind = (s?: ProfileService): ServiceKind => {
+    if (!s) return 'gpu-pod';
+    if (s.kind === 'cloud' && s.cloudProvider === 'modal') return 'serverless';
+    return s.kind;
+  };
+
   const [name, setName] = useState(initial?.name || '');
-  const [kind, setKind] = useState<ServiceKind>(initial?.kind || 'gpu-pod');
+  const [kind, setKind] = useState<ServiceKind>(deriveKind(initial));
   const [cloudProvider, setCloudProvider] = useState(initial?.cloudProvider || 'groq');
+  const [serverlessProvider, setServerlessProvider] = useState(
+    (initial?.kind === 'cloud' && initial?.cloudProvider === 'modal') ? 'modal'
+    : initial?.kind === 'serverless' ? (initial?.cloudProvider || 'modal')
+    : 'modal'
+  );
 
   // Docker image: either a known preset or custom URL
   const initDockerUrl = initial?.dockerImage || DEFAULT_DOCKER_IMAGES[0].url;
@@ -72,11 +85,12 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
     }
   };
 
-  // Live GPU catalog from provider
+  // Live GPU catalog from provider (only for self-hosted)
   const [liveGpus, setLiveGpus] = useState<GpuTypeInfo[]>([]);
   const [gpuLoading, setGpuLoading] = useState(false);
 
   useEffect(() => {
+    if (kind !== 'gpu-pod') return;
     setGpuLoading(true);
     setLiveGpus([]);
     getGpuTypes(gpuCloudProvider)
@@ -90,7 +104,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
         }));
       })
       .finally(() => setGpuLoading(false));
-  }, [gpuCloudProvider]);
+  }, [gpuCloudProvider, kind]);
 
   const toggleGpu = (id: string) =>
     setGpuTypes(prev => prev.includes(id) ? prev.filter(g => g !== id) : [...prev, id]);
@@ -98,19 +112,20 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
 
   const handleSave = () => {
     if (!name.trim()) return;
-    const s: ProfileService = {
-      id: initial?.id || uid(),
-      name: name.trim(),
-      kind,
-      ...(kind === 'cloud'
-        ? { cloudProvider }
-        : {
-            dockerImage, gpuTypes, gpuCloudProvider,
-            ...(sttModel ? { sttModel } : {}),
-            ...(llmModel ? { llmModel } : {}),
-            ...(ttsModel ? { ttsModel } : {}),
-          }),
+    const base = { id: initial?.id || uid(), name: name.trim(), kind };
+    const modelFields = {
+      ...(sttModel ? { sttModel } : {}),
+      ...(llmModel ? { llmModel } : {}),
+      ...(ttsModel ? { ttsModel } : {}),
     };
+    let s: ProfileService;
+    if (kind === 'cloud') {
+      s = { ...base, cloudProvider };
+    } else if (kind === 'serverless') {
+      s = { ...base, cloudProvider: serverlessProvider, dockerImage, ...modelFields };
+    } else {
+      s = { ...base, dockerImage, gpuTypes, gpuCloudProvider, ...modelFields };
+    }
     onSave(s);
   };
 
@@ -126,19 +141,22 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
           <span className="text-sm font-semibold">{initial ? 'Edit Service' : 'New Service'}</span>
         </div>
         <div className="flex gap-1.5">
-          {(['gpu-pod', 'cloud'] as const).map(k => {
-            const sel = kind === k;
-            const KIcon = k === 'gpu-pod' ? Cpu : Cloud;
+          {([
+            { k: 'gpu-pod' as ServiceKind, label: 'Self-hosted', TabIcon: Server },
+            { k: 'serverless' as ServiceKind, label: 'Serverless', TabIcon: Cloud },
+            { k: 'cloud' as ServiceKind, label: 'Cloud API', TabIcon: Zap },
+          ]).map(tab => {
+            const sel = kind === tab.k;
             return (
-              <button key={k} type="button" onClick={() => setKind(k)}
+              <button key={tab.k} type="button" onClick={() => setKind(tab.k)}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-medium transition-all cursor-pointer"
                 style={{
                   background: sel ? 'color-mix(in srgb, #a78bfa 12%, transparent)' : 'transparent',
                   borderColor: sel ? '#a78bfa' : 'var(--color-border)',
                   color: sel ? '#c4b5fd' : 'var(--color-text-muted)',
                 }}>
-                <KIcon className="w-3 h-3" />
-                {k === 'gpu-pod' ? 'GPU Pod' : 'Cloud API'}
+                <tab.TabIcon className="w-3 h-3" />
+                {tab.label}
               </button>
             );
           })}
@@ -148,28 +166,28 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
       <div className="p-4 space-y-3">
 
         {/* ── Name ── */}
-        <FormInput label="Name" value={name} onChange={e => setName(e.target.value)} placeholder="GPU Pod A" />
+        <FormInput label="Name" value={name} onChange={e => setName(e.target.value)} placeholder="Service name" />
 
         {kind === 'cloud' ? (
-          /* ── Cloud provider buttons ── */
+          /* ── Cloud API provider buttons ── */
           <div>
             <p className="text-[10px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-muted)' }}>Cloud Provider</p>
             <div className="flex flex-wrap gap-1.5">
-              {(['groq', 'openai', 'deepgram', 'fireworks', 'modal', 'tensordock'] as const).map(pid => {
-                const provIcon = PROVIDER_ICON[pid];
+              {CLOUD_API_PROVIDERS.map(p => {
+                const provIcon = PROVIDER_ICON[p.id];
                 const ProvIcon = provIcon?.icon ?? Package;
-                const provColor = provIcon?.color ?? '#7ba896';
-                const sel = cloudProvider === pid;
+                const provColor = provIcon?.color ?? p.color;
+                const sel = cloudProvider === p.id;
                 return (
-                  <button key={pid} type="button" onClick={() => setCloudProvider(pid)}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer capitalize"
+                  <button key={p.id} type="button" onClick={() => setCloudProvider(p.id)}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer"
                     style={{
                       background: sel ? `color-mix(in srgb, ${provColor} 12%, transparent)` : 'var(--color-surface-elevated)',
                       borderColor: sel ? provColor : 'var(--color-border)',
                       color: sel ? provColor : 'var(--color-text-muted)',
                     }}>
                     <ProvIcon className="w-3.5 h-3.5" />
-                    {pid}
+                    {p.name}
                   </button>
                 );
               })}
@@ -177,7 +195,34 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
           </div>
         ) : (
           <>
-            {/* ── Docker Image ── */}
+            {/* ── Serverless provider buttons ── */}
+            {kind === 'serverless' && (
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-muted)' }}>Provider</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {SERVERLESS_PROVIDERS.map(p => {
+                    const provIcon = PROVIDER_ICON[p.id];
+                    const PIcon = provIcon?.icon ?? Cloud;
+                    const pColor = provIcon?.color ?? p.color;
+                    const sel = serverlessProvider === p.id;
+                    return (
+                      <button key={p.id} type="button" onClick={() => setServerlessProvider(p.id)}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer"
+                        style={{
+                          background: sel ? `color-mix(in srgb, ${pColor} 12%, transparent)` : 'var(--color-surface-elevated)',
+                          borderColor: sel ? pColor : 'var(--color-border)',
+                          color: sel ? pColor : 'var(--color-text-muted)',
+                        }}>
+                        <PIcon className="w-3.5 h-3.5" />
+                        {p.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* ── Docker Image (shared: self-hosted + serverless) ── */}
             <div>
               <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Docker Image</p>
               {!useCustom ? (
@@ -261,11 +306,11 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                     <div className="p-2 rounded-lg border text-[11px] space-y-0.5"
                       style={{ borderColor: 'color-mix(in srgb, #10b981 30%, var(--color-border))', background: 'color-mix(in srgb, #10b981 4%, var(--color-surface-elevated))' }}>
                       <div className="font-semibold" style={{ color: '#34d399' }}>
-                        Services: {inspectResult.services.length > 0 ? inspectResult.services.join(', ') : '—'}
+                        Services: {inspectResult.services.length > 0 ? inspectResult.services.join(', ') : '\u2014'}
                         {inspectResult.protocol !== 'rest' && <span className="ml-2" style={{ color: 'var(--color-text-muted)' }}>({inspectResult.protocol})</span>}
                       </div>
                       {[inspectResult.sttModel, inspectResult.llmModel, inspectResult.ttsModel].some(Boolean) && (
-                        <div style={{ color: 'var(--color-text-muted)' }}>Models auto-filled ↓</div>
+                        <div style={{ color: 'var(--color-text-muted)' }}>Models auto-filled</div>
                       )}
                     </div>
                   )}
@@ -273,7 +318,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                     <div className="p-2 rounded-lg border text-[11px] flex items-center gap-1.5"
                       style={{ borderColor: 'color-mix(in srgb, #f87171 30%, var(--color-border))', color: '#f87171', background: 'color-mix(in srgb, #f87171 4%, var(--color-surface-elevated))' }}>
                       <AlertCircle className="w-3 h-3 flex-shrink-0" />
-                      {inspectResult === null && 'No babelcast labels found — '}
+                      {inspectResult === null && 'No babelcast labels found \u2014 '}
                       {inspectError}
                     </div>
                   )}
@@ -281,113 +326,110 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
               )}
             </div>
 
-            {/* ── Models (compact inline row) ── */}
+            {/* ── Services (read-only, auto-detected from Docker image) ── */}
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Pod Models</p>
-              <div className="grid grid-cols-3 gap-2">
-                {(['stt', 'llm', 'tts'] as const).map(stage => {
-                  const stageModels = (PIPELINE_CATALOG[stage].models as Record<string, { id: string; label: string }[]>).gpu ?? [];
-                  const currentVal = stage === 'stt' ? sttModel : stage === 'llm' ? llmModel : ttsModel;
-                  const setter = stage === 'stt' ? setSttModel : stage === 'llm' ? setLlmModel : setTtsModel;
-                  const hasUnknown = currentVal && !stageModels.find(m => m.id === currentVal);
-                  const stageColor = stage === 'stt' ? '#38bdf8' : stage === 'llm' ? '#a78bfa' : '#fbbf24';
-                  const StageIcon = stage === 'stt' ? Mic : stage === 'llm' ? Bot : Volume2;
+              <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Services</p>
+              <div className="flex flex-wrap gap-1.5">
+                {([
+                  { stage: 'stt' as const, model: sttModel, StageIcon: Mic, color: '#38bdf8' },
+                  { stage: 'llm' as const, model: llmModel, StageIcon: Bot, color: '#a78bfa' },
+                  { stage: 'tts' as const, model: ttsModel, StageIcon: Volume2, color: '#fbbf24' },
+                ]).filter(s => s.model).map(s => {
+                  const models = (PIPELINE_CATALOG[s.stage].models as Record<string, { id: string; label: string }[]>).gpu ?? [];
+                  const modelLabel = models.find(m => m.id === s.model)?.label ?? s.model;
                   return (
-                    <div key={stage}>
-                      <div className="flex items-center gap-1 mb-1">
-                        <StageIcon className="w-3 h-3 flex-shrink-0" style={{ color: stageColor }} />
-                        <span className="text-[10px] font-semibold uppercase" style={{ color: stageColor }}>{stage}</span>
-                      </div>
-                      <select
-                        className="w-full text-[11px] rounded-md border px-2 py-1.5 outline-none focus:ring-1 cursor-pointer"
-                        style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
-                        value={currentVal}
-                        onChange={e => setter(e.target.value)}
-                      >
-                        <option value="">— none —</option>
-                        {hasUnknown && <option value={currentVal}>{currentVal}</option>}
-                        {stageModels.map(m => (
-                          <option key={m.id} value={m.id}>{m.label}</option>
-                        ))}
-                      </select>
+                    <div key={s.stage}
+                      className="flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px]"
+                      style={{
+                        borderColor: `color-mix(in srgb, ${s.color} 30%, var(--color-border))`,
+                        background: `color-mix(in srgb, ${s.color} 6%, transparent)`,
+                      }}>
+                      <s.StageIcon className="w-3 h-3" style={{ color: s.color }} />
+                      <span className="font-semibold uppercase" style={{ color: s.color }}>{s.stage}</span>
+                      <span style={{ color: 'var(--color-text-secondary)' }}>{modelLabel}</span>
                     </div>
                   );
                 })}
-              </div>
-            </div>
-
-            {/* ── Infrastructure ── */}
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Infrastructure</p>
-
-              {/* GPU Cloud Provider */}
-              <div className="flex gap-1.5 flex-wrap mb-2">
-                {GPU_PROVIDERS.map(p => {
-                  const provIcon = PROVIDER_ICON[p.id];
-                  const PIcon = provIcon?.icon ?? Cpu;
-                  const pColor = provIcon?.color ?? p.color;
-                  const sel = gpuCloudProvider === p.id;
-                  return (
-                    <button key={p.id} type="button"
-                      onClick={() => { setGpuCloudProvider(p.id); setGpuTypes([]); }}
-                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-medium transition-all cursor-pointer"
-                      style={{
-                        background: sel ? `color-mix(in srgb, ${pColor} 12%, transparent)` : 'transparent',
-                        borderColor: sel ? pColor : 'var(--color-border)',
-                        color: sel ? pColor : 'var(--color-text-muted)',
-                      }}>
-                      <PIcon className="w-3 h-3" />
-                      {p.name}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* GPU type selection */}
-              <div>
-                {gpuTypes.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mb-1.5">
-                    {gpuTypes.map((id, idx) => {
-                      const info = liveGpus.find(g => g.name === id);
-                      const label = info?.shortName ?? id.replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, '');
-                      const latMs = info?.bestLatencyMs;
-                      const latColor = latMs == null ? 'var(--color-text-muted)' : latMs < 100 ? '#34d399' : latMs < 250 ? '#fbbf24' : '#f87171';
-                      return (
-                        <span key={id}
-                          className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium"
-                          style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd', border: '1px solid color-mix(in srgb, #a78bfa 30%, transparent)' }}>
-                          <span className="text-[9px] font-bold opacity-60">#{idx + 1}</span>
-                          {label}
-                          {latMs != null && (
-                            <span className="text-[9px] font-mono" style={{ color: latColor }}>{Math.round(latMs)}ms</span>
-                          )}
-                          <button type="button" onClick={() => toggleGpu(id)} className="ml-0.5 hover:opacity-70 cursor-pointer">×</button>
-                        </span>
-                      );
-                    })}
-                  </div>
+                {!sttModel && !llmModel && !ttsModel && (
+                  <span className="text-[11px] italic" style={{ color: 'var(--color-text-muted)' }}>No services detected</span>
                 )}
-                <DropdownList
-                  options={liveGpus
-                    .filter(g => !gpuTypes.includes(g.name))
-                    .map(g => {
-                      const vramGb = g.vramGb ?? (g.vram > 0 ? g.vram : null);
-                      const latMs = g.bestLatencyMs;
-                      const latLabel = latMs != null ? `${Math.round(latMs)}ms` : null;
-                      return {
-                        key: g.name,
-                        label: g.shortName,
-                        subtitle: [vramGb ? `${vramGb}GB` : null, g.minPricePerHr != null ? `$${g.minPricePerHr.toFixed(2)}/hr` : null, latLabel].filter(Boolean).join(' · ') || undefined,
-                      };
-                    })}
-                  value=""
-                  onChange={key => toggleGpu(key)}
-                  accent="#a78bfa"
-                  size="sm"
-                  placeholder={gpuLoading ? 'Loading GPUs...' : gpuTypes.length > 0 ? 'Add GPU...' : 'Select GPU type...'}
-                />
               </div>
             </div>
+
+            {/* ── Infrastructure (self-hosted only) ── */}
+            {kind === 'gpu-pod' && (
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Infrastructure</p>
+
+                {/* GPU Cloud Provider */}
+                <div className="flex gap-1.5 flex-wrap mb-2">
+                  {GPU_PROVIDERS.map(p => {
+                    const provIcon = PROVIDER_ICON[p.id];
+                    const PIcon = provIcon?.icon ?? Cpu;
+                    const pColor = provIcon?.color ?? p.color;
+                    const sel = gpuCloudProvider === p.id;
+                    return (
+                      <button key={p.id} type="button"
+                        onClick={() => { setGpuCloudProvider(p.id); setGpuTypes([]); }}
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-medium transition-all cursor-pointer"
+                        style={{
+                          background: sel ? `color-mix(in srgb, ${pColor} 12%, transparent)` : 'transparent',
+                          borderColor: sel ? pColor : 'var(--color-border)',
+                          color: sel ? pColor : 'var(--color-text-muted)',
+                        }}>
+                        <PIcon className="w-3 h-3" />
+                        {p.name}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* GPU type selection */}
+                <div>
+                  {gpuTypes.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-1.5">
+                      {gpuTypes.map((id, idx) => {
+                        const info = liveGpus.find(g => g.name === id);
+                        const label = info?.shortName ?? id.replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, '');
+                        const latMs = info?.bestLatencyMs;
+                        const latColor = latMs == null ? 'var(--color-text-muted)' : latMs < 100 ? '#34d399' : latMs < 250 ? '#fbbf24' : '#f87171';
+                        return (
+                          <span key={id}
+                            className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium"
+                            style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#c4b5fd', border: '1px solid color-mix(in srgb, #a78bfa 30%, transparent)' }}>
+                            <span className="text-[9px] font-bold opacity-60">#{idx + 1}</span>
+                            {label}
+                            {latMs != null && (
+                              <span className="text-[9px] font-mono" style={{ color: latColor }}>{Math.round(latMs)}ms</span>
+                            )}
+                            <button type="button" onClick={() => toggleGpu(id)} className="ml-0.5 hover:opacity-70 cursor-pointer">&times;</button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <DropdownList
+                    options={liveGpus
+                      .filter(g => !gpuTypes.includes(g.name))
+                      .map(g => {
+                        const vramGb = g.vramGb ?? (g.vram > 0 ? g.vram : null);
+                        const latMs = g.bestLatencyMs;
+                        const latLabel = latMs != null ? `${Math.round(latMs)}ms` : null;
+                        return {
+                          key: g.name,
+                          label: g.shortName,
+                          subtitle: [vramGb ? `${vramGb}GB` : null, g.minPricePerHr != null ? `$${g.minPricePerHr.toFixed(2)}/hr` : null, latLabel].filter(Boolean).join(' \u00b7 ') || undefined,
+                        };
+                      })}
+                    value=""
+                    onChange={key => toggleGpu(key)}
+                    accent="#a78bfa"
+                    size="sm"
+                    placeholder={gpuLoading ? 'Loading GPUs...' : gpuTypes.length > 0 ? 'Add GPU...' : 'Select GPU type...'}
+                  />
+                </div>
+              </div>
+            )}
           </>
         )}
 

@@ -155,7 +155,7 @@ function Dashboard() {
       />
 
       {/* Main content */}
-      <main className="flex-1 overflow-auto" style={{ background: 'var(--color-bg)' }}>
+      <main className={`flex-1 ${activeTab === 'config/profiles' ? 'overflow-hidden flex flex-col' : 'overflow-auto'}`} style={{ background: 'var(--color-bg)' }}>
         {/* Top bar — hidden for profiles (has its own breadcrumb bar) */}
         {activeTab !== 'config/profiles' && (
           <div
@@ -192,10 +192,10 @@ function Dashboard() {
         )}
 
         {/* Profiles — full width, no max-w constraint, own top bar */}
-        {activeTab === 'config/profiles' && <ErrorBoundary><ProfilesSection /></ErrorBoundary>}
+        {activeTab === 'config/profiles' && <ErrorBoundary><div className="flex-1 min-h-0 flex flex-col"><ProfilesSection /></div></ErrorBoundary>}
 
         {/* Page content */}
-        <div className="max-w-6xl mx-auto" style={{ minHeight: 'calc(100vh - 3.5rem)' }}>
+        {activeTab !== 'config/profiles' && <div className="max-w-6xl mx-auto" style={{ minHeight: 'calc(100vh - 3.5rem)' }}>
           {activeTab === 'overview' && <ErrorBoundary><OverviewSection /></ErrorBoundary>}
           {activeTab === 'config/api-keys' && <ErrorBoundary><ApiKeysSection /></ErrorBoundary>}
           {activeTab === 'config/labs' && <ErrorBoundary><LabsSection /></ErrorBoundary>}
@@ -207,7 +207,7 @@ function Dashboard() {
           {activeTab === 'monitor/readiness' && <ErrorBoundary><ReadinessSection /></ErrorBoundary>}
           {activeTab === 'tools/auto-swap' && <ErrorBoundary><AutoSwapSection /></ErrorBoundary>}
           {activeTab === 'tools/standby' && <ErrorBoundary><StandbySection /></ErrorBoundary>}
-        </div>
+        </div>}
       </main>
     </div>
   );
