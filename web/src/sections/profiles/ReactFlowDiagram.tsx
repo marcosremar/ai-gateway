@@ -11,6 +11,7 @@ import Sortable from 'sortablejs';
 import { Mic, Bot, Volume2, Headphones, Plus, GripVertical, ChevronDown, Cloud, Cpu, Zap, Upload, Type, Radio } from 'lucide-react';
 import { PIPELINE_CATALOG, type PipelineChainEntry, type ProfileService } from '../provider-types';
 import { PROVIDER_ICON } from '../FallbackChainList';
+import { DropdownList, type DropdownOption } from '@/components/ui';
 import { pMeta } from './constants';
 
 // ── IO Node (mic / headphones) ──
@@ -51,8 +52,15 @@ const IONode = memo(({ data }: NodeProps) => {
     );
   }
 
-  // Input node — box with selectable input types
+  // Input node — compact box with dropdown + action area
   const sel = INPUT_TYPES.find(t => t.id === selected) ?? INPUT_TYPES[0];
+
+  const dropdownOptions: DropdownOption[] = INPUT_TYPES.map(t => ({
+    key: t.id,
+    label: t.label,
+    icon: t.Icon,
+    iconColor: t.color,
+  }));
 
   return (
     <div className="rounded-xl border"
@@ -60,42 +68,58 @@ const IONode = memo(({ data }: NodeProps) => {
         background: `color-mix(in srgb, ${sel.color} 3%, var(--color-bg))`,
         borderColor: `color-mix(in srgb, ${sel.color} 25%, var(--color-border))`,
         borderTop: `3px solid ${sel.color}`,
-        minWidth: 140,
+        width: 180,
         overflow: 'visible',
       }}>
       <Handle type="source" position={Position.Right} style={{ background: sel.color, width: 6, height: 6 }} />
       {/* Header */}
-      <div className="flex items-center justify-center gap-1.5 px-3 py-2 border-b"
+      <div className="flex items-center gap-1.5 px-3 py-2 border-b"
         style={{ borderColor: `color-mix(in srgb, ${sel.color} 15%, var(--color-border))` }}>
         <div className="w-5 h-5 rounded-md flex items-center justify-center"
           style={{ background: `color-mix(in srgb, ${sel.color} 15%, transparent)` }}>
           <sel.Icon className="w-3 h-3" style={{ color: sel.color }} />
         </div>
         <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: sel.color }}>Input</span>
-        <span className="text-[8px] font-medium" style={{ color: 'var(--color-text-muted)' }}>{sel.label}</span>
       </div>
-      {/* Input type options */}
-      <div className="px-2 py-2 flex flex-col gap-1">
-        {INPUT_TYPES.map(t => {
-          const active = selected === t.id;
-          return (
-            <button key={t.id}
-              onClick={() => { setSelected(t.id); onSelectInput?.(t.id); }}
-              className="nodrag nopan flex items-center gap-2 px-2 py-1.5 rounded-lg transition-all cursor-pointer text-left"
-              style={{
-                background: active ? `color-mix(in srgb, ${t.color} 10%, transparent)` : 'transparent',
-                border: active ? `1px solid ${t.color}` : '1px solid transparent',
-              }}>
-              <div className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0"
-                style={{ background: `color-mix(in srgb, ${t.color} 15%, transparent)` }}>
-                <t.Icon className="w-2.5 h-2.5" style={{ color: active ? t.color : 'var(--color-text-muted)' }} />
-              </div>
-              <span className="text-[9px] font-semibold" style={{ color: active ? t.color : 'var(--color-text-muted)' }}>
-                {t.label}
-              </span>
-            </button>
-          );
-        })}
+      {/* Dropdown selector */}
+      <div className="px-2.5 py-2 nodrag nopan">
+        <DropdownList
+          options={dropdownOptions}
+          value={selected}
+          onChange={v => { setSelected(v); onSelectInput?.(v); }}
+          accent={sel.color}
+          size="sm"
+        />
+      </div>
+      {/* Action area based on selected type */}
+      <div className="px-2.5 pb-2.5 nodrag nopan">
+        {selected === 'mic' && (
+          <button className="nodrag nopan w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-semibold cursor-pointer transition-all"
+            style={{ background: `color-mix(in srgb, ${sel.color} 10%, transparent)`, color: sel.color, border: `1px solid color-mix(in srgb, ${sel.color} 25%, transparent)` }}>
+            <Mic className="w-3.5 h-3.5" /> Record Audio
+          </button>
+        )}
+        {selected === 'upload' && (
+          <label className="nodrag nopan w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-semibold cursor-pointer transition-all"
+            style={{ background: `color-mix(in srgb, ${sel.color} 10%, transparent)`, color: sel.color, border: `1px solid color-mix(in srgb, ${sel.color} 25%, transparent)` }}>
+            <Upload className="w-3.5 h-3.5" /> Upload File
+            <input type="file" accept="audio/*" className="hidden" />
+          </label>
+        )}
+        {selected === 'text' && (
+          <textarea
+            placeholder="Type text..."
+            rows={2}
+            className="nodrag nopan w-full rounded-lg border px-2.5 py-1.5 text-[10px] resize-none"
+            style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)', outline: 'none' }}
+          />
+        )}
+        {selected === 'stream' && (
+          <button className="nodrag nopan w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-semibold cursor-pointer transition-all"
+            style={{ background: `color-mix(in srgb, ${sel.color} 10%, transparent)`, color: sel.color, border: `1px solid color-mix(in srgb, ${sel.color} 25%, transparent)` }}>
+            <Radio className="w-3.5 h-3.5" /> Connect Stream
+          </button>
+        )}
       </div>
     </div>
   );
