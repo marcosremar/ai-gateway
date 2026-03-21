@@ -27,6 +27,7 @@ import { ServiceCard } from './profiles/ServiceCard';
 import { ServiceForm } from './profiles/ServiceForm';
 import { StageList } from './profiles/StageList';
 import { ReactFlowPipelineDiagram } from './profiles/ReactFlowDiagram';
+import { usePipelineRunner } from './profiles/usePipelineRunner';
 
 // ── Main ProfilesSection ──
 
@@ -98,6 +99,14 @@ export function ProfilesSection() {
   const ttsChain = ttsStage?.chain || [];
   const sttEnabled = !!sttStage;
   const ttsEnabled = !!ttsStage;
+
+  // Pipeline runner for testing profiles
+  const pipeline = usePipelineRunner({
+    sttEnabled,
+    ttsEnabled,
+    sourceLang: 'fr',
+    targetLang: 'en',
+  });
 
   /** Migrate old gpuDeploy/gpuImage/gpuTypes top-level fields into ProfileService entries,
    *  and auto-derive cloud API service entries from chain providers. */
@@ -388,6 +397,9 @@ export function ProfilesSection() {
           sttChain={sttChain} llmChain={llmChain} ttsChain={ttsChain}
           sttEnabled={sttEnabled} ttsEnabled={ttsEnabled}
           services={services}
+          pipelineState={pipeline}
+          onRunPipeline={pipeline.run}
+          onResetPipeline={pipeline.reset}
           onAddService={(stageKey, provider, model) => {
             // 1. Add to chain
             setStages(prev => prev.map(s => {
@@ -396,13 +408,17 @@ export function ProfilesSection() {
             }));
             // 2. Find or create the matching service and open slide panel
             const isGpu = provider === 'gpu';
+            const isServerless = provider === 'modal';
             let svc = isGpu
               ? services.find(s => s.kind === 'gpu-pod')
-              : services.find(s => s.kind === 'cloud' && s.cloudProvider === provider);
+              : isServerless
+                ? services.find(s => s.kind === 'serverless' && s.cloudProvider === 'modal')
+                : services.find(s => s.kind === 'cloud' && s.cloudProvider === provider);
             if (!svc) {
               // Auto-create the service entry
               const providerName = provider.charAt(0).toUpperCase() + provider.slice(1);
-              svc = { id: uid(), name: providerName, kind: isGpu ? 'gpu-pod' : 'cloud', cloudProvider: isGpu ? undefined : provider };
+              const svcKind = isGpu ? 'gpu-pod' : isServerless ? 'serverless' : 'cloud';
+              svc = { id: uid(), name: providerName, kind: svcKind, cloudProvider: isGpu ? undefined : provider } as ProfileService;
               setServices(prev => [...prev, svc!]);
             }
             setSlideService(svc);
@@ -419,7 +435,9 @@ export function ProfilesSection() {
             if (!entry) return;
             const matchingSvc = entry.provider === 'gpu'
               ? services.find(s => s.kind === 'gpu-pod')
-              : services.find(s => s.kind === 'cloud' && s.cloudProvider === entry.provider);
+              : entry.provider === 'modal'
+                ? services.find(s => s.kind === 'serverless' && s.cloudProvider === 'modal')
+                : services.find(s => s.kind === 'cloud' && s.cloudProvider === entry.provider);
             if (matchingSvc) {
               setSlideService(prev => prev?.id === matchingSvc.id ? null : matchingSvc);
             }
@@ -459,16 +477,16 @@ export function ProfilesSection() {
                   style={{
                     background: slideService.kind === 'gpu-pod'
                       ? 'color-mix(in srgb, #f59e0b 12%, transparent)'
-                      : slideService.cloudProvider === 'modal'
+                      : slideService.kind === 'serverless'
                         ? 'color-mix(in srgb, #a78bfa 12%, transparent)'
                         : 'color-mix(in srgb, #38bdf8 12%, transparent)',
                     color: slideService.kind === 'gpu-pod'
                       ? '#f59e0b'
-                      : slideService.cloudProvider === 'modal'
+                      : slideService.kind === 'serverless'
                         ? '#a78bfa'
                         : '#38bdf8',
                   }}>
-                  {slideService.kind === 'gpu-pod' ? 'Self-hosted' : slideService.cloudProvider === 'modal' ? 'Serverless' : 'Cloud API'}
+                  {slideService.kind === 'gpu-pod' ? 'Self-hosted' : slideService.kind === 'serverless' ? 'Serverless' : 'Cloud API'}
                 </span>
               </div>
               <button onClick={() => setSlideService(null)}
@@ -479,8 +497,8 @@ export function ProfilesSection() {
                 <ChevronLeft className="w-4 h-4" style={{ transform: 'rotate(180deg)' }} />
               </button>
             </div>
-            {/* GPU pod: ServiceCard with deploy settings */}
-            {slideService.kind === 'gpu-pod' && (
+            {/* GPU pod / Serverless: ServiceCard with deploy settings */}
+            {(slideService.kind === 'gpu-pod' || slideService.kind === 'serverless') && (
               <div className="flex-1 overflow-y-auto">
                 <ServiceCard
                   service={slideService}
@@ -492,7 +510,7 @@ export function ProfilesSection() {
                 />
               </div>
             )}
-            {/* Cloud or edit form: ServiceForm with all settings */}
+            {/* Cloud: ServiceForm with all settings */}
             {slideService.kind === 'cloud' && (
               <div className="flex-1 overflow-y-auto p-4">
                 <ServiceForm

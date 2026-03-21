@@ -9,7 +9,7 @@ export interface PipelineChainEntry {
 
 export type Latency = 'realtime' | 'low' | 'batch'
 
-export type ServiceKind = 'cloud' | 'gpu-pod'
+export type ServiceKind = 'cloud' | 'gpu-pod' | 'serverless'
 
 export interface ProfileService {
   id: string
@@ -51,6 +51,10 @@ export const GPU_PROVIDERS = [
   { id: 'vast',       name: 'Vast.ai',    iconName: 'HardDrive', color: '#7a9fb5' },
   { id: 'tensordock', name: 'TensorDock', iconName: 'HardDrive', color: '#4db6ac' },
   { id: 'runpod',     name: 'RunPod',     iconName: 'HardDrive', color: '#9b8db8' },
+] as const;
+
+export const SERVERLESS_PROVIDERS = [
+  { id: 'modal', name: 'Modal', iconName: 'CloudLightning', color: '#22c55e' },
 ] as const;
 
 // ── Pipeline catalog — models/providers per stage ──

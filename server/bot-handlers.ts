@@ -9,7 +9,7 @@ import {
 } from './state';
 import { warmupAllGpuModels } from './provider-warmup';
 import type { BotDeploymentState } from './state';
-import { runpod } from './providers';
+import { runpod, scaleway } from './providers';
 import { maskKey } from './http-utils';
 import { readJsonBody, handleBodyError } from './http-utils';
 import { broadcastWs, startBotTranscriptPoll, stopBotTranscriptPoll } from './ws-state';
@@ -219,6 +219,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
       // Try GPU first (much faster boot ~1min), fallback to CPU ($0.12/hr)
       // Bot doesn't need GPU but GPU pods pull images faster
       let isCpuPod = forceCpu;
+      let isScalewayPod = false;
       let instance: Awaited<ReturnType<typeof runpod.createInstance>> | null = null;
       if (!forceCpu) {
         try {
@@ -243,22 +244,44 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
       }
       if (!instance) {
         isCpuPod = true;
-        instance = await runpod.createInstance(
-          {
-            computeType: 'CPU',
-            cpuFlavorIds: ['cpu5c', 'cpu5g', 'cpu3c', 'cpu3g'],
-            vcpus: 4,
-            memoryGb: 16,  // Chromium needs ≥8GB; 16GB avoids OOM on busy meetings
-            dockerImage: botDockerImage,
-            storageGb: 20,
-            ports: BOT_PORTS,
-            // IMPORTANT: NEVER use 'COMMUNITY' — unreliable third-party machines that die mid-task
-            cloudType: 'SECURE',
-            interruptible: false,
-            env: podEnv,
-          },
-          { apiKey },
-        );
+        try {
+          instance = await runpod.createInstance(
+            {
+              computeType: 'CPU',
+              cpuFlavorIds: ['cpu5c', 'cpu5g', 'cpu3c', 'cpu3g'],
+              vcpus: 4,
+              memoryGb: 16,  // Chromium needs ≥8GB; 16GB avoids OOM on busy meetings
+              dockerImage: botDockerImage,
+              storageGb: 20,
+              ports: BOT_PORTS,
+              // IMPORTANT: NEVER use 'COMMUNITY' — unreliable third-party machines that die mid-task
+              cloudType: 'SECURE',
+              interruptible: false,
+              env: podEnv,
+            },
+            { apiKey },
+          );
+        } catch (runpodErr) {
+          console.warn(`[bot] RunPod CPU failed: ${runpodErr instanceof Error ? runpodErr.message : runpodErr}`);
+          // Fallback to Scaleway if RunPod fails (e.g. insufficient balance)
+          const scwKey = process.env.SCALEWAY_SECRET_KEY || '';
+          if (scwKey) {
+            console.log('[bot] Trying Scaleway fallback...');
+            setBotState({ message: 'RunPod unavailable, deploying on Scaleway...' });
+            isScalewayPod = true;
+            instance = await scaleway.createInstance(
+              {
+                dockerImage: botDockerImage,
+                region: process.env.SCALEWAY_ZONE || 'fr-par-1',
+                ramGb: 12,
+                env: podEnv,
+              },
+              { apiKey: scwKey },
+            );
+          } else {
+            throw runpodErr;
+          }
+        }
       }
 
       setBotState({
@@ -273,14 +296,32 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
       while (true) {
         if (Date.now() - startedAt > BOT_TIMEOUT_MS) {
           setBotState({ status: 'error', message: 'Bot pod timed out waiting for startup' });
-          try { await runpod.deleteInstance(instance.instanceId, { apiKey }); } catch {}
+          try {
+            if (isScalewayPod) {
+              await scaleway.deleteInstance(instance.instanceId, { apiKey: process.env.SCALEWAY_SECRET_KEY || '' });
+            } else {
+              await runpod.deleteInstance(instance.instanceId, { apiKey });
+            }
+          } catch {}
           return;
         }
 
-        // Resolve endpoint — CPU pods only have proxy URLs (no publicIp/portMappings)
+        // Resolve endpoint — Scaleway uses public IP, RunPod CPU uses proxy, RunPod GPU uses resolved endpoint
         let endpoint = botState.endpoint;
         if (!endpoint) {
-          if (isCpuPod) {
+          if (isScalewayPod) {
+            // Scaleway: resolve public IP from instance detail
+            try {
+              const scwKey = process.env.SCALEWAY_SECRET_KEY || '';
+              const detail = await scaleway.getInstanceDetail(instance.instanceId, { apiKey: scwKey });
+              const ip = detail?.publicIp || detail?.ip;
+              if (ip) {
+                endpoint = `http://${ip}:8080`;
+                setBotState({ endpoint });
+                console.log(`[bot] Scaleway endpoint: ${endpoint}`);
+              }
+            } catch { /* not ready yet */ }
+          } else if (isCpuPod) {
             // CPU pods: build proxy URL directly from pod ID (RunPod doesn't expose runtime/IP)
             endpoint = `https://${instance.instanceId}-8080.proxy.runpod.net`;
             setBotState({ endpoint });
