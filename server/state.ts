@@ -393,7 +393,20 @@ export function isGpuLatencyAcceptable(): boolean {
 
 // ── Per-service readiness state ────────────────────────────────────────────
 
-export type ServiceReadinessPhase = 'idle' | 'benchmarking' | 'ready' | 'degraded' | 'failed' | 'repechage' | 'condemned';
+// Per-service lifecycle phases (independent of deploy/infra states)
+export type ServiceReadinessPhase =
+  | 'idle'           // not started
+  | 'downloading'    // model downloading from HuggingFace/registry
+  | 'loading'        // model loading into memory/VRAM
+  | 'compiling'      // CUDA graph compilation (TTS)
+  | 'warming'        // first inference warming up
+  | 'benchmarking'   // latency benchmark running
+  | 'shadow'         // shadow mode validation
+  | 'ready'          // serving production traffic
+  | 'degraded'       // P95 exceeded, falling back to cloud
+  | 'failed'         // benchmark failed
+  | 'repechage'      // retrying after failure
+  | 'condemned';     // permanently failed
 
 export interface ServiceReadinessState {
   phase: ServiceReadinessPhase;
@@ -401,6 +414,10 @@ export interface ServiceReadinessState {
   latencySamples: number[];
   targetMs: number;        // effective target = configuredMax * (1 - margin%)
   bestLatencyMs: number | null;
+  /** Model download/load progress detail (e.g., "downloading whisper-large-v3") */
+  loadDetail?: string;
+  /** Timestamp when this phase started */
+  phaseStartedAt?: number;
 }
 
 function _defaultServiceState(): ServiceReadinessState {
@@ -520,8 +537,16 @@ export function updateGpuModelWarmth(healthData: Record<string, any>): void {
       llama_cpp: 'llm',
       tts: 'tts',
     };
+    // Map service status → per-service readiness phase
+    const STATUS_TO_PHASE: Record<string, ServiceReadinessPhase> = {
+      downloading: 'downloading', loading: 'loading', starting: 'loading',
+      compiling: 'compiling', warming: 'warming',
+      loaded: 'ready', ready: 'ready', disabled: 'idle',
+      failed: 'failed', error: 'failed',
+    };
+
     for (const [svcName, stage] of Object.entries(serviceWarmMap)) {
-      const status = svc[svcName];
+      const status = svc[svcName] as string | undefined;
       if (status) {
         const isWarm = status === 'loaded' || status === 'ready';
         if (isWarm && !gpuModelWarmth[stage].warm) {
@@ -531,6 +556,18 @@ export function updateGpuModelWarmth(healthData: Record<string, any>): void {
             avgLatencyMs: gpuModelWarmth[stage].avgLatencyMs,
             requests: gpuModelWarmth[stage].requests,
           };
+        }
+
+        // Update per-service readiness phase (only for loading states — don't override benchmark/shadow)
+        const newPhase = STATUS_TO_PHASE[status];
+        const currentPhase = gpuReadinessState[stage].phase;
+        const isLoadingPhase = ['idle', 'downloading', 'loading', 'compiling', 'warming'].includes(currentPhase);
+        if (newPhase && isLoadingPhase) {
+          setServiceReadiness(stage, {
+            phase: newPhase,
+            loadDetail: `${svcName}: ${status}`,
+            phaseStartedAt: gpuReadinessState[stage].phaseStartedAt || Date.now(),
+          });
         }
       }
     }

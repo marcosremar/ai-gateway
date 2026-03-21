@@ -206,33 +206,33 @@ interface DeploySettingsProps {
 }
 
 /* Service lifecycle phases */
-const LIFECYCLE_PHASES = [
-  // Pre-deploy
-  { phase: 'Offline', color: '#6b7280', desc: 'No GPU deployed. Service uses cloud providers only.', time: '—' },
-  { phase: 'Searching', color: '#a78bfa', desc: 'Querying providers (Vast.ai, RunPod, Modal) for available GPUs. Filters by speed ≥500 Mbps, VRAM, price.', time: '0-2s' },
-  { phase: 'No Offers', color: '#f59e0b', desc: 'No GPUs match filters on this provider. Tries next provider automatically. Blacklisted hosts excluded.', time: '0-5s' },
-  // Deploy
-  { phase: 'Queued', color: '#a78bfa', desc: 'GPU allocated but waiting in provider queue. Hardware being provisioned, IP being assigned.', time: '10-120s' },
-  { phase: 'Creating', color: '#38bdf8', desc: 'Instance being created. Provider setting up networking, SSH access, and storage volumes.', time: '30-90s' },
-  { phase: 'Pulling Image', color: '#38bdf8', desc: 'Docker image downloading on host. Faster on machines with cached layers. ≥500 Mbps required.', time: '3-120s' },
-  { phase: 'Booting', color: '#38bdf8', desc: 'Container started. Uvicorn server process initializing. /health endpoint not yet responding.', time: '5-30s' },
-  // Model loading (granular)
-  { phase: 'Loading STT', color: '#38bdf8', desc: 'Downloading and loading Whisper STT model (~1.5 GB). Transcription routes to cloud until loaded.', time: '30-120s' },
-  { phase: 'Loading LLM', color: '#a78bfa', desc: 'Downloading LLM and loading into GPU VRAM. Translation routes to cloud until loaded.', time: '60-300s' },
-  { phase: 'Loading TTS', color: '#fbbf24', desc: 'Downloading TTS model and compiling CUDA graphs for fast inference. Audio routes to cloud until ready.', time: '30-90s' },
-  // Validation
-  { phase: 'Benchmarking', color: '#38bdf8', desc: 'Testing each service against max latency targets. Progressive relaxation on marginal misses (±15%).', time: '30-120s' },
-  { phase: 'Shadow', color: '#a78bfa', desc: 'GPU runs alongside cloud. N consecutive successes required. Fast GPUs (30%+ better) activate in 2 runs.', time: '10-60s' },
-  // Production
-  { phase: 'Ready', color: '#10b981', desc: 'GPU serving production traffic. P95 monitored with 3-violation cooldown. Per-service routing active.', time: '∞' },
-  // Degradation
-  { phase: 'Degraded', color: '#f59e0b', desc: 'P95 > target × multiplier (3 consecutive checks). Falls back to cloud. Re-benchmark triggered.', time: '30-90s' },
-  { phase: 'Repechage', color: '#f97316', desc: 'Re-benchmarking after failure. Retries every 2 min, max N times. Latency data cleared between tries.', time: '2-6 min' },
-  { phase: 'Condemned', color: '#ef4444', desc: 'All retries exhausted. Traffic on cloud. Auto-recovery deploys replacement machine if enabled.', time: '—' },
-  { phase: 'Auto-Recovery', color: '#06b6d4', desc: 'Deploying replacement with same config. Full lifecycle runs again. Max retries configurable.', time: '2-10 min' },
-  // Handover
-  { phase: 'Draining', color: '#a78bfa', desc: 'Standby ready. Waiting for active requests on primary to finish before switching. Max 30s drain.', time: '0-30s' },
+// DEPLOY STATES (infrastructure — applies to the whole pod)
+const DEPLOY_PHASES = [
+  { phase: 'Offline', color: '#6b7280', desc: 'No GPU deployed. All traffic routes to cloud providers.', time: '—' },
+  { phase: 'Searching', color: '#a78bfa', desc: 'Querying providers for available GPUs. Filters: ≥500 Mbps, VRAM, price, reputation.', time: '0-2s' },
+  { phase: 'No Offers', color: '#f59e0b', desc: 'No GPUs match on this provider. Tries next provider. Blacklisted hosts excluded.', time: '0-5s' },
+  { phase: 'Queued', color: '#a78bfa', desc: 'GPU allocated, waiting in provider queue. Hardware provisioning.', time: '10-120s' },
+  { phase: 'Creating', color: '#38bdf8', desc: 'Instance being created. Setting up networking, SSH, storage.', time: '30-90s' },
+  { phase: 'Pulling Image', color: '#38bdf8', desc: 'Docker image downloading. Faster on hosts with cached layers.', time: '3-120s' },
+  { phase: 'Booting', color: '#38bdf8', desc: 'Container started. Server process initializing.', time: '5-30s' },
+  { phase: 'Draining', color: '#a78bfa', desc: 'Standby ready. Active requests finishing before handover.', time: '0-30s' },
 ];
+
+// SERVICE STATES (per STT/LLM/TTS — each service has its own lifecycle)
+const SERVICE_PHASES = [
+  { phase: 'Downloading', color: '#a78bfa', desc: 'Model downloading from HuggingFace. Cloud serves this stage.', time: '30-180s' },
+  { phase: 'Loading', color: '#a78bfa', desc: 'Model loading into GPU memory/VRAM.', time: '10-60s' },
+  { phase: 'Compiling', color: '#fbbf24', desc: 'CUDA graph compilation for fast inference (TTS only).', time: '10-30s' },
+  { phase: 'Benchmarking', color: '#38bdf8', desc: 'Testing latency against target. Progressive relaxation ±15%.', time: '30-120s' },
+  { phase: 'Shadow', color: '#a78bfa', desc: 'Validation alongside cloud. N consecutive successes needed.', time: '10-60s' },
+  { phase: 'Ready', color: '#10b981', desc: 'Serving production traffic. P95 monitored continuously.', time: '∞' },
+  { phase: 'Degraded', color: '#f59e0b', desc: 'P95 exceeded (3 violations). Falls back to cloud.', time: '30-90s' },
+  { phase: 'Repechage', color: '#f97316', desc: 'Retrying benchmark. Max N attempts, 2 min between.', time: '2-6 min' },
+  { phase: 'Condemned', color: '#ef4444', desc: 'All retries failed. Auto-recovery deploys replacement.', time: '—' },
+];
+
+// Combined for backward compat
+const LIFECYCLE_PHASES = [...DEPLOY_PHASES, ...SERVICE_PHASES];
 
 function DeploySettings(props: DeploySettingsProps) {
   const { raceCount, setRaceCount, idleTimeoutMin, setIdleTimeoutMin,
@@ -615,30 +615,51 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
           <GpuLiveStatus />
 
           {/* Lifecycle phases — two rows of 4 for readability */}
+          {/* Deploy States (infrastructure) */}
           <div>
             <p className="text-[10px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-muted)' }}>
-              Service Lifecycle
+              Deploy Lifecycle <span className="normal-case font-normal">(infrastructure — whole pod)</span>
             </p>
             <div className="grid grid-cols-4 gap-1.5">
-              {LIFECYCLE_PHASES.map(p => (
-                <div key={p.phase} className="rounded-lg p-2.5"
+              {DEPLOY_PHASES.map(p => (
+                <div key={p.phase} className="rounded-lg p-2"
                   style={{ background: `color-mix(in srgb, ${p.color} 8%, var(--color-surface))`, border: `1px solid color-mix(in srgb, ${p.color} 15%, var(--color-border))` }}>
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: p.color }} />
-                    <span className="text-[11px] font-bold" style={{ color: p.color }}>{p.phase}</span>
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: p.color }} />
+                    <span className="text-[10px] font-bold" style={{ color: p.color }}>{p.phase}</span>
                     {p.time && p.time !== '—' && (
-                      <span className="text-[8px] font-mono ml-auto" style={{ color: 'var(--color-text-muted)' }}>~{p.time}</span>
+                      <span className="text-[7px] font-mono ml-auto" style={{ color: 'var(--color-text-muted)' }}>~{p.time}</span>
                     )}
                   </div>
-                  <p className="text-[10px] leading-snug" style={{ color: 'var(--color-text-muted)' }}>
-                    {p.desc}
-                  </p>
+                  <p className="text-[9px] leading-snug" style={{ color: 'var(--color-text-muted)' }}>{p.desc}</p>
                 </div>
               ))}
             </div>
-            <p className="text-[10px] mt-2.5 px-3 py-2 rounded-lg"
+          </div>
+
+          {/* Service States (per STT/LLM/TTS) */}
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-muted)' }}>
+              Service Lifecycle <span className="normal-case font-normal">(per STT / LLM / TTS — independent)</span>
+            </p>
+            <div className="grid grid-cols-3 gap-1.5">
+              {SERVICE_PHASES.map(p => (
+                <div key={p.phase} className="rounded-lg p-2"
+                  style={{ background: `color-mix(in srgb, ${p.color} 8%, var(--color-surface))`, border: `1px solid color-mix(in srgb, ${p.color} 15%, var(--color-border))` }}>
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: p.color }} />
+                    <span className="text-[10px] font-bold" style={{ color: p.color }}>{p.phase}</span>
+                    {p.time && p.time !== '—' && (
+                      <span className="text-[7px] font-mono ml-auto" style={{ color: 'var(--color-text-muted)' }}>~{p.time}</span>
+                    )}
+                  </div>
+                  <p className="text-[9px] leading-snug" style={{ color: 'var(--color-text-muted)' }}>{p.desc}</p>
+                </div>
+              ))}
+            </div>
+            <p className="text-[9px] mt-2 px-3 py-1.5 rounded-lg"
               style={{ background: 'color-mix(in srgb, #38bdf8 5%, transparent)', color: 'var(--color-text-muted)' }}>
-              Uses <strong style={{ color: '#38bdf8' }}>P95</strong> (95th percentile) — service is demoted only if 95% of requests exceed the max latency. Occasional spikes are tolerated.
+              Each service (STT/LLM/TTS) progresses through these states <strong>independently</strong>. A service routes to cloud until it reaches Ready. Uses <strong style={{ color: '#38bdf8' }}>P95</strong> for demotion.
             </p>
           </div>
         </div>
