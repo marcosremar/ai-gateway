@@ -22,6 +22,7 @@ import {
   loadPersistedDeploy, clearPersistedDeploy, setDeployCancelled,
   updateGpuModelWarmth, isStageWarm,
   isGpuReadyForProduction, getPerStageP95, setGpuReadyForProduction, setServiceReadiness,
+  perStageLatencyRing,
 } from './state';
 import {
   translationProfile, updateTranslationProfile, runpod, vast, tensordock, modal, markGpuHealthy, markGpuUnhealthy,
@@ -429,6 +430,25 @@ export function scheduleNextMonitorProbe() {
         }
       }
 
+      // Latency trend prediction: detect degradation slope before P95 threshold is hit
+      const TREND_WINDOW = 5;
+      for (const stage of ['stt', 'llm', 'tts'] as const) {
+        const ring = perStageLatencyRing[stage];
+        if (ring.length >= TREND_WINDOW) {
+          const recent = ring.slice(-TREND_WINDOW);
+          const older = ring.slice(-TREND_WINDOW * 2, -TREND_WINDOW);
+          if (older.length >= TREND_WINDOW) {
+            const recentAvg = recent.reduce((s, v) => s + v, 0) / recent.length;
+            const olderAvg = older.reduce((s, v) => s + v, 0) / older.length;
+            const trend = (recentAvg - olderAvg) / olderAvg;
+            if (trend > 0.2) { // 20%+ increase
+              console.warn(`[gpu] Latency trend warning: ${stage} increasing ${Math.round(trend * 100)}% (${Math.round(olderAvg)}ms → ${Math.round(recentAvg)}ms)`);
+              broadcastWs({ type: 'gpu:latency-trend', stage, trend: Math.round(trend * 100), oldAvg: Math.round(olderAvg), newAvg: Math.round(recentAvg) });
+            }
+          }
+        }
+      }
+
       // P95 demotion check — only when GPU is in production and recently idle
       // Requires 3 consecutive violations before demoting (avoids false positives from transient spikes)
       if (isGpuReadyForProduction() && !isReadinessCheckInProgress()) {
@@ -792,7 +812,29 @@ export async function autoSelectCheapestGpu(
   const ssdFiltered = preferSsd ? base.filter(o => (o.diskBwReadMbps ?? 0) === 0 || (o.diskBwReadMbps ?? 0) > 200) : base;
   const suitable = preferSsd && ssdFiltered.length === 0 ? base : ssdFiltered;
 
-  if (suitable.length === 0) {
+  // Load blacklisted hosts (crash count >= 3 in last 7 days)
+  let blacklistedHosts: Set<string> | null = null;
+  try {
+    const rows = await prisma.hostReputation.findMany({
+      where: { crashCount: { gte: 3 }, lastDeployAt: { gt: Date.now() - 7 * 24 * 60 * 60 * 1000 } },
+      select: { hostKey: true },
+    });
+    blacklistedHosts = new Set(rows.map(r => r.hostKey));
+    if (blacklistedHosts.size > 0) {
+      console.log(`[gpu] autoSelectGpu: ${blacklistedHosts.size} host(s) blacklisted (3+ crashes in 7d)`);
+    }
+  } catch {}
+  // Filter out blacklisted hosts from offers
+  const filtered = blacklistedHosts && blacklistedHosts.size > 0
+    ? suitable.filter(o => {
+        const hostKey = `${o.provider}:${o.hostId || o.offerId || o.gpuName}`;
+        return !blacklistedHosts!.has(hostKey);
+      })
+    : suitable;
+  // Use filtered list (fallback to full list if all blacklisted)
+  const ranked = filtered.length > 0 ? filtered : suitable;
+
+  if (ranked.length === 0) {
     console.warn(`[gpu] autoSelectGpu: ${allOffers.length} total offers, 0 suitable (minVram=${minVram}GB). Sample: ${allOffers.slice(0, 5).map(o => `${o.gpuName}(${o.vram}GB,$${o.pricePerHr},avail=${o.available})`).join(', ')}`);
     return [];
   }
@@ -820,10 +862,10 @@ export async function autoSelectCheapestGpu(
 
   if (sortBy === 'price') {
     // Pure price sort — cheapest first
-    suitable.sort((a, b) => a.pricePerHr - b.pricePerHr);
+    ranked.sort((a, b) => a.pricePerHr - b.pricePerHr);
   } else if (sortBy === 'latency') {
     // Sort by measured TCP latency (closest datacenter first); unknown latency goes last
-    suitable.sort((a, b) => {
+    ranked.sort((a, b) => {
       const latA = getLatencyMs(a) ?? Infinity;
       const latB = getLatencyMs(b) ?? Infinity;
       return latA - latB;
@@ -831,7 +873,7 @@ export async function autoSelectCheapestGpu(
   } else {
     // Balanced (default): effective price = pricePerHr / max(repScore, 0.1), weighted by latency if known
     // latency bonus: each 10ms below 100ms reduces effective price by 5%
-    suitable.sort((a, b) => {
+    ranked.sort((a, b) => {
       const repA = Math.max(getRepScore(a), 0.1);
       const repB = Math.max(getRepScore(b), 0.1);
       const latA = getLatencyMs(a);
@@ -846,7 +888,7 @@ export async function autoSelectCheapestGpu(
 
   // Log sort criteria and top offers
   {
-    const topOffers = suitable.slice(0, 5).map(o => {
+    const topOffers = ranked.slice(0, 5).map(o => {
       const key = `${o.provider}:${o.gpuName || o.gpuType}`;
       const rep = gpuTypeReps.get(key);
       const score = rep?.avgScore ?? 0.5;
@@ -866,10 +908,10 @@ export async function autoSelectCheapestGpu(
   const isAllowed = (o: GpuOffer) =>
     allowed.has(o.gpuType) || allowed.has(o.gpuName) ||
     allowedNormalized.has(normalize(o.gpuType)) || allowedNormalized.has(normalize(o.gpuName));
-  const allowedOffers = suitable.filter(isAllowed);
-  const prioritized = allowedOffers.length > 0 ? allowedOffers : suitable;
+  const allowedOffers = ranked.filter(isAllowed);
+  const prioritized = allowedOffers.length > 0 ? allowedOffers : ranked;
   if (allowedOffers.length === 0) {
-    console.warn(`[gpu] autoSelectGpu: no offers match allowlist, using best available. Sample types: ${suitable.slice(0, 5).map(o => `${o.gpuName}(${o.gpuType})`).join(', ')}`);
+    console.warn(`[gpu] autoSelectGpu: no offers match allowlist, using best available. Sample types: ${ranked.slice(0, 5).map(o => `${o.gpuName}(${o.gpuType})`).join(', ')}`);
   }
 
   // Deduplicate by gpuName (full name), keeping best effective-price offer for each type.
@@ -886,7 +928,7 @@ export async function autoSelectCheapestGpu(
     }
   }
 
-  console.log(`[gpu] autoSelectGpu: ${suitable.length} suitable offers (${allowedOffers.length} in allowlist, ${gpuTypeReps.size} with reputation) → ${uniqueTypes.length} GPU types: ${uniqueTypes.join(', ')}`);
+  console.log(`[gpu] autoSelectGpu: ${ranked.length} suitable offers (${allowedOffers.length} in allowlist, ${gpuTypeReps.size} with reputation) → ${uniqueTypes.length} GPU types: ${uniqueTypes.join(', ')}`);
   return uniqueTypes;
 }
 
@@ -1475,6 +1517,37 @@ export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string
     const earliest = tiers.find(t => t.name === earliestName) ?? tiers[0];
     console.log(`[gpu] All providers in cooldown, trying ${earliest.label} anyway (forced=${tiers.length === 1}, tiers=${tiers.map(t => t.name).join(',')})`);
     availableTiers = [earliest];
+  }
+
+  // Probe all providers in parallel (20s timeout) to check availability before committing
+  if (availableTiers.length > 1) {
+    const probeResults = await Promise.allSettled(
+      availableTiers.map(async (tier) => {
+        const start = Date.now();
+        try {
+          if (!tier.client.listOffers) return { tier, available: true, ms: 0, offerCount: 0 };
+          const offers = await Promise.race([
+            tier.client.listOffers({ limit: 3 }, { apiKey: tier.apiKey, authId: tier.authId }),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('probe timeout')), 20_000)),
+          ]);
+          return { tier, available: offers.length > 0, offerCount: offers.length, ms: Date.now() - start };
+        } catch {
+          return { tier, available: false, offerCount: 0, ms: Date.now() - start };
+        }
+      }),
+    );
+
+    // Reorder tiers: available first, then by response time
+    const probed = probeResults
+      .filter((r): r is PromiseFulfilledResult<{tier: GpuTier; available: boolean; ms: number; offerCount: number}> => r.status === 'fulfilled')
+      .map(r => r.value)
+      .sort((a, b) => (b.available ? 1 : 0) - (a.available ? 1 : 0) || a.ms - b.ms);
+
+    const reorderedTiers = probed.map(p => p.tier);
+    if (reorderedTiers.length > 0) {
+      console.log(`[gpu] Provider probe: ${probed.map(p => `${p.tier.label}(${p.available ? p.offerCount + ' offers' : 'unavailable'}, ${p.ms}ms)`).join(', ')}`);
+      availableTiers = reorderedTiers;
+    }
   }
 
   for (let i = 0; i < availableTiers.length; i++) {

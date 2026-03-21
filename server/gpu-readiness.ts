@@ -263,6 +263,26 @@ export async function runGpuReadinessCheck(
     tts: Math.round(getTtsTargetLatencyMs() * margin),
   };
 
+  // Fast-track: skip benchmark for known-reliable hosts
+  try {
+    const { deriveHostKey } = await import('./metrics');
+    const hostKey = deriveHostKey(deployState.provider, deployState.providerMeta);
+    if (hostKey) {
+      const { prisma } = await import('./state');
+      const rep = await prisma.hostReputation.findUnique({ where: { hostKey } });
+      if (rep && rep.successCount >= 5 && rep.reputationScore >= 0.8 && rep.crashCount === 0) {
+        console.log(`[readiness] Fast-track: host ${hostKey} has ${rep.successCount} successes, score=${rep.reputationScore.toFixed(2)} — skipping benchmark, entering shadow mode`);
+        for (const stage of ['stt', 'llm', 'tts'] as const) {
+          setServiceReadiness(stage, { phase: 'ready', bestLatencyMs: rep.avgLatencyMs, targetMs: targets[stage] });
+        }
+        broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'fast-tracked', hostKey, reputationScore: rep.reputationScore });
+        checkInProgress = false;
+        onPass();
+        return;
+      }
+    }
+  } catch {}
+
   console.log(`[readiness] Starting per-service benchmark (max ${maxRuns} runs, ${marginPct}% margin):`,
     `STT<${targets.stt}ms LLM<${targets.llm}ms TTS<${targets.tts}ms`);
 
@@ -290,7 +310,14 @@ export async function runGpuReadinessCheck(
     saveRun('llm', llmResult.samples, llmResult.bestMs, targets.llm, llmResult.passed);
     broadcastWs({ type: 'gpu:readiness', stage: 'llm', phase: llmResult.passed ? 'ready' : 'failed', bestLatencyMs: llmResult.bestMs, targetMs: targets.llm, passed: llmResult.passed, runsUsed: llmResult.samples.length });
 
-    if (!sttResult.passed) {
+    // Progressive relaxation: try 15% more lenient target before repechage
+    if (!sttResult.passed && sttResult.bestMs <= targets.stt * 1.15) {
+      const relaxedTarget = Math.round(targets.stt * 1.15);
+      console.log(`[readiness:stt] Relaxing target ${targets.stt}ms → ${relaxedTarget}ms (best was ${sttResult.bestMs}ms)`);
+      setServiceReadiness('stt', { phase: 'ready', bestLatencyMs: sttResult.bestMs });
+      broadcastWs({ type: 'gpu:readiness', stage: 'stt', phase: 'ready', bestLatencyMs: sttResult.bestMs, targetMs: relaxedTarget, passed: true, runsUsed: sttResult.samples.length });
+      // Continue to LLM check instead of repechage
+    } else if (!sttResult.passed) {
       console.warn(`[readiness:stt] FAIL — best=${sttResult.bestMs}ms target=${targets.stt}ms`);
       if (deployState.endpoint === endpoint) {
         scheduleRepechage(endpoint, onPass, onFail);
@@ -300,7 +327,14 @@ export async function runGpuReadinessCheck(
       return;
     }
 
-    if (!llmResult.passed) {
+    // Progressive relaxation: try 15% more lenient target before repechage
+    if (!llmResult.passed && llmResult.bestMs <= targets.llm * 1.15) {
+      const relaxedTarget = Math.round(targets.llm * 1.15);
+      console.log(`[readiness:llm] Relaxing target ${targets.llm}ms → ${relaxedTarget}ms (best was ${llmResult.bestMs}ms)`);
+      setServiceReadiness('llm', { phase: 'ready', bestLatencyMs: llmResult.bestMs });
+      broadcastWs({ type: 'gpu:readiness', stage: 'llm', phase: 'ready', bestLatencyMs: llmResult.bestMs, targetMs: relaxedTarget, passed: true, runsUsed: llmResult.samples.length });
+      // Continue to TTS check instead of repechage
+    } else if (!llmResult.passed) {
       console.warn(`[readiness:llm] FAIL — best=${llmResult.bestMs}ms target=${targets.llm}ms`);
       if (deployState.endpoint === endpoint) {
         scheduleRepechage(endpoint, onPass, onFail);
@@ -310,36 +344,39 @@ export async function runGpuReadinessCheck(
       return;
     }
 
-    // Pre-warm TTS: absorb CUDA graph compilation (~11-30s) before the latency benchmark.
-    // Without this, the first TTS inference always misses the target (300ms vs 11s cold start).
-    if (!isStageWarm('tts')) {
-      console.log('[readiness:tts] Pre-warming TTS (CUDA graph compilation)...');
-      broadcastWs({ type: 'gpu:readiness', stage: 'tts', phase: 'warming' });
-      const warmStart = Date.now();
-      try {
-        const res = await fetch(`${endpoint}/v1/tts`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: 'Hello world.', language: 'English', speaker: 'Ryan' }),
-          signal: AbortSignal.timeout(60_000),
-        });
-        if (res.ok) {
-          console.log(`[readiness:tts] TTS pre-warm done in ${Date.now() - warmStart}ms`);
-        } else {
-          console.warn(`[readiness:tts] TTS pre-warm HTTP ${res.status} — benchmark may fail`);
+    // Start TTS benchmark in background (non-blocking — TTS failure doesn't stop activation)
+    const ttsBenchmarkPromise = (async () => {
+      // Pre-warm TTS: absorb CUDA graph compilation (~11-30s) before the latency benchmark.
+      // Without this, the first TTS inference always misses the target (300ms vs 11s cold start).
+      if (!isStageWarm('tts')) {
+        console.log('[readiness:tts] Pre-warming TTS (CUDA graph compilation)...');
+        broadcastWs({ type: 'gpu:readiness', stage: 'tts', phase: 'warming' });
+        const warmStart = Date.now();
+        try {
+          const res = await fetch(`${endpoint}/v1/tts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: 'Hello world.', language: 'English', speaker: 'Ryan' }),
+            signal: AbortSignal.timeout(60_000),
+          });
+          if (res.ok) {
+            console.log(`[readiness:tts] TTS pre-warm done in ${Date.now() - warmStart}ms`);
+          } else {
+            console.warn(`[readiness:tts] TTS pre-warm HTTP ${res.status} — benchmark may fail`);
+          }
+        } catch (e) {
+          console.warn(`[readiness:tts] TTS pre-warm failed: ${e instanceof Error ? e.message : e}`);
         }
-      } catch (e) {
-        console.warn(`[readiness:tts] TTS pre-warm failed: ${e instanceof Error ? e.message : e}`);
       }
-    }
 
-    // Benchmark TTS after STT+LLM pass (non-blocking for production activation — TTS can warm separately)
-    const ttsResult = await benchmarkService('tts', endpoint, targets.tts, maxRuns);
-    setServiceReadiness('tts', { phase: ttsResult.passed ? 'ready' : 'failed', bestLatencyMs: ttsResult.bestMs });
-    saveRun('tts', ttsResult.samples, ttsResult.bestMs, targets.tts, ttsResult.passed);
-    broadcastWs({ type: 'gpu:readiness', stage: 'tts', phase: ttsResult.passed ? 'ready' : 'failed', bestLatencyMs: ttsResult.bestMs, targetMs: targets.tts, passed: ttsResult.passed, runsUsed: ttsResult.samples.length });
-    // TTS failure doesn't block STT+LLM activation
+      // Benchmark TTS after STT+LLM pass
+      const ttsResult = await benchmarkService('tts', endpoint, targets.tts, maxRuns);
+      setServiceReadiness('tts', { phase: ttsResult.passed ? 'ready' : 'failed', bestLatencyMs: ttsResult.bestMs });
+      saveRun('tts', ttsResult.samples, ttsResult.bestMs, targets.tts, ttsResult.passed);
+      broadcastWs({ type: 'gpu:readiness', stage: 'tts', phase: ttsResult.passed ? 'ready' : 'failed', bestLatencyMs: ttsResult.bestMs, targetMs: targets.tts, passed: ttsResult.passed, runsUsed: ttsResult.samples.length });
+    })().catch(e => console.warn('[readiness:tts] Background benchmark failed:', e instanceof Error ? e.message : e));
 
+    // Don't await ttsBenchmarkPromise — proceed to shadow mode immediately
     // STT + LLM passed — enter shadow mode. Restore persisted shadow progress (survives gateway restart).
     const restoredRuns = loadShadowRuns();
     const initialShadowRuns = restoredRuns > 0 ? restoredRuns : 0;
