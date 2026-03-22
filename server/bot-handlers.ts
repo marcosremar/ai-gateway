@@ -15,7 +15,8 @@ import { readJsonBody, handleBodyError } from './http-utils';
 import { broadcastWs, startBotTranscriptPoll, stopBotTranscriptPoll } from './ws-state';
 import { PORT } from './config';
 // Re-export consolidated SSRF check from ai-handlers (single source of truth)
-export { isPrivateUrl } from './ai-handlers';
+import { isPrivateUrl } from './ai-handlers';
+export { isPrivateUrl };
 
 /** Redact meeting URL for logging — show only protocol + domain, hide path/query. */
 function redactMeetingUrl(url: string): string {
@@ -95,6 +96,7 @@ async function deployLocalDocker(dockerImage: string, envVars?: Record<string, s
 
   const proc = Bun.spawn([
     'docker', 'run', '-d',
+    '--platform', 'linux/amd64',     // Bot image is x86 — Rosetta on ARM Macs
     '--name', BOT_LOCAL_CONTAINER,
     '--shm-size', '2g',              // Chromium needs shared memory
     '-p', `${LOCAL_BOT_PORT}:8080`,
@@ -105,9 +107,17 @@ async function deployLocalDocker(dockerImage: string, envVars?: Record<string, s
   ], { stdout: 'pipe', stderr: 'pipe' });
 
   const exitCode = await proc.exited;
+  // exit 125 with platform warning is OK on ARM Macs — container still runs
   if (exitCode !== 0) {
     const stderr = await new Response(proc.stderr).text();
-    throw new Error(`Docker run failed (exit ${exitCode}): ${stderr.slice(0, 200)}`);
+    // Check if container is actually running despite the exit code
+    const check = Bun.spawn(['docker', 'inspect', '-f', '{{.State.Running}}', BOT_LOCAL_CONTAINER], { stdout: 'pipe', stderr: 'pipe' });
+    await check.exited;
+    const isRunning = (await new Response(check.stdout).text()).trim() === 'true';
+    if (!isRunning) {
+      throw new Error(`Docker run failed (exit ${exitCode}): ${stderr.slice(0, 200)}`);
+    }
+    console.log(`[bot] Docker exited ${exitCode} but container is running (platform warning)`);
   }
 
   const endpoint = `http://localhost:${LOCAL_BOT_PORT}`;
@@ -116,9 +126,9 @@ async function deployLocalDocker(dockerImage: string, envVars?: Record<string, s
     message: 'Local container started, waiting for bot startup...',
   });
 
-  // Poll /version until ready (5 min timeout for image pull + startup)
+  // Poll /version until ready (10 min timeout — Rosetta emulation on ARM is slow)
   const startedAt = Date.now();
-  const TIMEOUT_MS = 5 * 60_000;
+  const TIMEOUT_MS = 10 * 60_000;
   while (true) {
     if (Date.now() - startedAt > TIMEOUT_MS) {
       setBotState({ status: 'error', message: 'Local bot timed out waiting for startup' });

@@ -20,6 +20,23 @@ import {
 import { PROVIDER_ICON } from '../FallbackChainList';
 import { fmtBootTime } from './constants';
 
+// ── Deploy error categorization ─────────────────────────────────────────────
+
+function categorizeDeployError(msg: string): { icon: typeof AlertTriangle; summary: string; suggestion: string } {
+  const lower = msg.toLowerCase();
+  if (lower.includes('quota') || lower.includes('spending limit') || lower.includes('balance'))
+    return { icon: AlertTriangle, summary: 'Quota / spending limit', suggestion: 'Check provider balance or increase spending limit' };
+  if (lower.includes('timeout') || lower.includes('timed out'))
+    return { icon: Clock, summary: 'Deploy timeout', suggestion: 'Retry — or try a different GPU type / provider' };
+  if (lower.includes('image') || lower.includes('pull') || lower.includes('manifest'))
+    return { icon: Package, summary: 'Docker image error', suggestion: 'Verify image exists and is accessible' };
+  if (lower.includes('no offers') || lower.includes('no available') || lower.includes('no gpu'))
+    return { icon: AlertTriangle, summary: 'No GPUs available', suggestion: 'Try a different GPU type or wait for availability' };
+  if (lower.includes('network') || lower.includes('connect') || lower.includes('fetch'))
+    return { icon: AlertTriangle, summary: 'Network error', suggestion: 'Check internet connection and provider status' };
+  return { icon: AlertTriangle, summary: 'Deploy failed', suggestion: msg.slice(0, 120) };
+}
+
 interface ServiceCardProps {
   service: ProfileService;
   onEdit: () => void;
@@ -587,9 +604,20 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
             </div>
             </>
           )}
-          {deployError && (
-            <p className="text-[10px]" style={{ color: '#ef4444' }}>{deployError}</p>
-          )}
+          {deployError && (() => {
+            const err = categorizeDeployError(deployError);
+            const ErrIcon = err.icon;
+            return (
+              <div className="flex items-start gap-2 px-2 py-1.5 rounded-md border"
+                style={{ borderColor: 'color-mix(in srgb, #ef4444 25%, var(--color-border))', background: 'color-mix(in srgb, #ef4444 4%, transparent)' }}>
+                <ErrIcon className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" style={{ color: '#ef4444' }} />
+                <div>
+                  <span className="text-[10px] font-semibold block" style={{ color: '#f87171' }}>{err.summary}</span>
+                  <span className="text-[9px] block" style={{ color: 'var(--color-text-muted)' }}>{err.suggestion}</span>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>

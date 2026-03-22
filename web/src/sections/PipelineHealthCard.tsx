@@ -5,12 +5,11 @@ import { Mic, Bot, Volume2, AlertTriangle, ArrowRight, CheckCircle2, ChevronDown
 import type { LucideIcon } from 'lucide-react';
 import { Card, CardHeader, CardBody, StatusBadge } from '@/components/ui';
 import { getProviderConfig, getReadinessStatus } from '@/lib/gateway';
-import type { HealthResponse, ProviderConfigResponse, ReadinessStatusResponse, PipelineChainEntry } from '@/lib/gateway';
+import type { HealthResponse, ProviderConfigResponse, ReadinessStatusResponse, PipelineChainEntry, ServicePhase } from '@/lib/gateway';
+import { STAGE_COLORS } from '@/lib/phase-colors';
 import { PROVIDER_ICON } from './FallbackChainList';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-
-type ServicePhase = 'idle' | 'benchmarking' | 'ready' | 'degraded' | 'failed' | 'repechage' | 'condemned';
 
 type ProviderPhase = 'active' | 'ok' | 'benchmarking' | 'ready' | 'degraded' | 'repechage' | 'error' | 'idle';
 
@@ -20,9 +19,9 @@ interface ProviderStatus {
 }
 
 const STAGE_META: Record<'stt' | 'llm' | 'tts', { label: string; icon: LucideIcon; color: string }> = {
-  stt: { label: 'STT', icon: Mic,    color: '#38bdf8' },
-  llm: { label: 'LLM', icon: Bot,    color: '#a78bfa' },
-  tts: { label: 'TTS', icon: Volume2, color: '#fbbf24' },
+  stt: { label: 'STT', icon: Mic,    color: STAGE_COLORS.stt },
+  llm: { label: 'LLM', icon: Bot,    color: STAGE_COLORS.llm },
+  tts: { label: 'TTS', icon: Volume2, color: STAGE_COLORS.tts },
 };
 
 // ── Status helpers ────────────────────────────────────────────────────────────
@@ -78,7 +77,10 @@ function deriveStatus(
 
   if (provider === 'gpu' || provider === 'local') {
     if (!gpuPhase || gpuPhase === 'idle') return { phase: 'idle', avgLatencyMs };
+    if (gpuPhase === 'downloading' || gpuPhase === 'loading' || gpuPhase === 'compiling' || gpuPhase === 'warming')
+      return { phase: 'benchmarking', avgLatencyMs }; // show as "loading" phase in the chain
     if (gpuPhase === 'benchmarking') return { phase: 'benchmarking', avgLatencyMs };
+    if (gpuPhase === 'shadow')       return { phase: 'benchmarking', avgLatencyMs };
     if (gpuPhase === 'degraded')     return { phase: 'degraded', avgLatencyMs };
     if (gpuPhase === 'repechage')    return { phase: 'repechage', avgLatencyMs };
     if (gpuPhase === 'failed' || gpuPhase === 'condemned') return { phase: 'error', avgLatencyMs };

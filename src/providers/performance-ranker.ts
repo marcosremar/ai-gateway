@@ -9,8 +9,7 @@
  *   2. Computes p50/p95 percentiles and success rate
  *   3. Detects gradual degradation (current p50 vs historical baseline)
  *   4. Exposes rankChain() to reorder FallbackEntry[] by real performance
- *
- * In-memory only — no Redis, no external deps.
+ *   5. Persistence: toJSON()/fromJSON() + auto-save to disk for restart resilience
  */
 
 import type { FallbackEntry } from './fallback';
@@ -44,6 +43,17 @@ export interface PerformanceRankerConfig {
    * Default: 2.0
    */
   degradationThreshold?: number;
+  /** Path to persist snapshots on disk. Null disables persistence. */
+  persistPath?: string | null;
+  /** How often to auto-save to disk in ms (default: 60_000 = 1 min) */
+  persistIntervalMs?: number;
+}
+
+/** Serialized format for disk persistence */
+interface PerformanceSnapshot {
+  version: 1;
+  savedAt: number;
+  buffers: Record<string, PerformanceSample[]>;
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
@@ -86,12 +96,27 @@ export class PerformanceRanker {
   private readonly windowTimeMs: number;
   private readonly minSamples: number;
   private readonly degradationThreshold: number;
+  private readonly persistPath: string | null;
+  private persistTimer: ReturnType<typeof setInterval> | null = null;
+  private dirty = false;
 
   constructor(config: PerformanceRankerConfig = {}) {
     this.windowSize = config.windowSize ?? DEFAULT_WINDOW_SIZE;
     this.windowTimeMs = config.windowTimeMs ?? DEFAULT_WINDOW_TIME_MS;
     this.minSamples = config.minSamples ?? DEFAULT_MIN_SAMPLES;
     this.degradationThreshold = config.degradationThreshold ?? DEFAULT_DEGRADATION_THRESHOLD;
+    this.persistPath = config.persistPath ?? null;
+
+    // Auto-load from disk if path configured
+    if (this.persistPath) {
+      this.loadFromDisk();
+      const intervalMs = config.persistIntervalMs ?? 60_000;
+      this.persistTimer = setInterval(() => this.saveToDisk(), intervalMs);
+      // Don't prevent process exit
+      if (this.persistTimer && typeof this.persistTimer === 'object' && 'unref' in this.persistTimer) {
+        this.persistTimer.unref();
+      }
+    }
   }
 
   /**
@@ -118,6 +143,8 @@ export class PerformanceRanker {
     while (buffer.length > this.windowSize) {
       buffer.shift();
     }
+
+    this.dirty = true;
   }
 
   /**
@@ -215,10 +242,14 @@ export class PerformanceRanker {
    *   - Penalize low success rates: multiply by (2 - successRate)
    *     At 100% success → 1x. At 50% success → 1.5x. At 0% → 2x.
    *   - Penalize degrading providers: multiply by degradationThreshold
+   *   - Inactivity decay: blend score toward a high neutral value as samples age,
+   *     so stale providers gradually lose their ranking advantage
    *
    * Returns null if there are not enough samples to rank.
    */
   private scoreEntry(stage: string, provider: string, model: string): number | null {
+    const key = sampleKey(stage, provider, model);
+    const samples = this.getActiveSamples(key);
     const stats = this.getStats(stage, provider, model);
     if (stats.sampleCount < this.minSamples || stats.p50 === null) return null;
 
@@ -229,6 +260,20 @@ export class PerformanceRanker {
     if (stats.trend === 'degrading') {
       score *= this.degradationThreshold;
     }
+
+    // Inactivity decay: if newest sample is old, blend score toward a high
+    // neutral value so stale providers don't keep a privileged ranking.
+    // At half the window age, decay is ~30%; at full window age, ~63%.
+    if (samples.length > 0) {
+      const newestTs = samples[samples.length - 1].timestamp;
+      const ageFraction = (Date.now() - newestTs) / this.windowTimeMs;
+      if (ageFraction > 0.1) { // only apply after 10% of window has passed
+        const NEUTRAL_SCORE = 500; // ms — a "mediocre" latency as neutral anchor
+        const decayFactor = Math.exp(-ageFraction * 1.5); // τ ≈ 67% of windowTimeMs
+        score = score * decayFactor + NEUTRAL_SCORE * (1 - decayFactor);
+      }
+    }
+
     return score;
   }
 
@@ -263,11 +308,83 @@ export class PerformanceRanker {
     return [...scored.map((s) => s.entry), ...unscored];
   }
 
+  // ─── Persistence ──────────────────────────────────────────────────────────
+
+  /** Serialize current state for disk persistence. */
+  toJSON(): PerformanceSnapshot {
+    const buffers: Record<string, PerformanceSample[]> = {};
+    for (const [key, samples] of this.buffers) {
+      if (samples.length > 0) {
+        buffers[key] = samples;
+      }
+    }
+    return { version: 1, savedAt: Date.now(), buffers };
+  }
+
+  /** Restore state from a snapshot. Expired samples are pruned on next access. */
+  fromJSON(snapshot: PerformanceSnapshot): void {
+    this.buffers.clear();
+    if (!snapshot || snapshot.version !== 1 || !snapshot.buffers) return;
+
+    const cutoff = Date.now() - this.windowTimeMs;
+    for (const [key, samples] of Object.entries(snapshot.buffers)) {
+      // Only restore samples that are still within the time window
+      const valid = samples.filter(s => s.timestamp >= cutoff);
+      if (valid.length > 0) {
+        this.buffers.set(key, valid.slice(-this.windowSize));
+      }
+    }
+  }
+
+  /** Save snapshot to disk (no-op if no persistPath or no changes). */
+  saveToDisk(): void {
+    if (!this.persistPath || !this.dirty) return;
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const dir = path.dirname(this.persistPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(this.persistPath, JSON.stringify(this.toJSON()), 'utf-8');
+      this.dirty = false;
+    } catch {
+      // non-critical — persistence is best-effort
+    }
+  }
+
+  /** Load snapshot from disk (no-op if file missing or corrupt). */
+  private loadFromDisk(): void {
+    if (!this.persistPath) return;
+    try {
+      const fs = require('fs');
+      if (!fs.existsSync(this.persistPath)) return;
+      const raw = fs.readFileSync(this.persistPath, 'utf-8');
+      const snapshot = JSON.parse(raw) as PerformanceSnapshot;
+      this.fromJSON(snapshot);
+      const keys = this.buffers.size;
+      const samples = [...this.buffers.values()].reduce((s, b) => s + b.length, 0);
+      if (keys > 0) {
+        console.log(`[perf-ranker] Restored ${samples} samples across ${keys} keys from disk`);
+      }
+    } catch {
+      // corrupt or missing file — start fresh
+    }
+  }
+
+  /** Stop auto-save timer and flush final snapshot. Call on shutdown. */
+  dispose(): void {
+    if (this.persistTimer) {
+      clearInterval(this.persistTimer);
+      this.persistTimer = null;
+    }
+    this.saveToDisk();
+  }
+
   /**
    * Clear all samples (useful for testing or reset).
    */
   clear(): void {
     this.buffers.clear();
+    this.dirty = true;
   }
 
   /**
@@ -278,5 +395,16 @@ export class PerformanceRanker {
   }
 }
 
-/** Default module-level singleton */
-export const defaultPerformanceRanker = new PerformanceRanker();
+/** Default module-level singleton (with disk persistence in ~/.babelcast/) */
+export function createDefaultPerformanceRanker(): PerformanceRanker {
+  try {
+    const os = require('os');
+    const path = require('path');
+    const persistPath = path.join(os.homedir(), '.babelcast', 'perf-ranker.json');
+    return new PerformanceRanker({ persistPath });
+  } catch {
+    return new PerformanceRanker();
+  }
+}
+
+export const defaultPerformanceRanker = createDefaultPerformanceRanker();

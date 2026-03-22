@@ -42,14 +42,21 @@ const RATE_LIMIT_429_MAX_RETRIES = 3;
 /** Check if an IP address is RFC1918 private / loopback / link-local (unreachable from internet). */
 function isPrivateIp(ip: string): boolean {
   if (!ip) return true;
-  if (ip === '0.0.0.0' || ip === '::') return true;
+  if (ip === '0.0.0.0' || ip === '::' || ip === '::1') return true;
+  // IPv4 private ranges
   if (ip.startsWith('10.')) return true;
   if (ip.startsWith('192.168.')) return true;
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
   if (ip.startsWith('127.')) return true;
   if (ip.startsWith('169.254.')) return true;
+  // IPv6 private ranges
+  if (ip.startsWith('fe80:') || ip.startsWith('fe80%')) return true; // link-local
+  if (ip.startsWith('fc') || ip.startsWith('fd')) return true;       // ULA (unique local)
   return false;
 }
+
+/** Max IPs to track in _recentlyUsedIps before pruning (prevents memory leak). */
+const MAX_RECENTLY_USED_IPS = 200;
 
 /** Normalize short GPU type names (e.g. 'RTX3090') to Vast.ai search names (e.g. 'RTX 3090') */
 function normalizeGpuNames(gpuTypes: string[]): string[] {
@@ -75,7 +82,7 @@ export interface VastClientOptions extends AbstractGpuProviderOptions {}
 
 export class VastClient extends AbstractGpuProvider {
   readonly providerId = 'vast';
-  readonly bootTimeSecs = 120;
+  readonly bootTimeSecs = 600; // 10 min base — engine uses 2× (20 min) for large images
   private _lastRequestMs = 0;
   /** IPs of hosts where we recently created instances (cross-call dedup). */
   private _recentlyUsedIps = new Set<string>();
@@ -314,8 +321,12 @@ export class VastClient extends AbstractGpuProvider {
         const instanceId = `inst-${contractId}`;
         const instanceName = `parle-autoscale-${Date.now()}`;
 
-        // Poll for IP assignment — short timeout (3 min) since pollHealthUntilReady handles the rest
-        const CREATE_POLL_MAX_MS = 180_000;
+        // Poll for IP assignment — timeout scales with image size since large images
+        // (52GB+) can take 15-25 min to pull. Boot health poller handles app readiness.
+        const CREATE_POLL_MAX_MS = diskGb < 15 ? 180_000    // 3 min (small image)
+          : diskGb < 40 ? 300_000                           // 5 min (medium)
+          : diskGb < 80 ? 600_000                           // 10 min (large)
+          : 900_000;                                        // 15 min (huge)
         const { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS);
 
         // If instance vanished during polling (reclaimed by host), clean up and try next offer
@@ -327,7 +338,14 @@ export class VastClient extends AbstractGpuProvider {
         }
 
         // Track host IP to avoid placing multiple instances on the same host
-        if (ip) this._recentlyUsedIps.add(ip);
+        if (ip) {
+          this._recentlyUsedIps.add(ip);
+          // Prune oldest entries to prevent memory leak on long-running processes
+          if (this._recentlyUsedIps.size > MAX_RECENTLY_USED_IPS) {
+            const oldest = this._recentlyUsedIps.values().next().value;
+            if (oldest !== undefined) this._recentlyUsedIps.delete(oldest);
+          }
+        }
 
         // Persist to settings
         await this.persistInstance(userId, spec.machineKey || 'vastInstance', {
@@ -803,7 +821,7 @@ export class VastClient extends AbstractGpuProvider {
         });
       }
 
-      return result.sort((a, b) => a.pricePerHr - b.pricePerHr);
+      return result.sort((a, b) => a.pricePerHr - b.pricePerHr || (a.gpuType ?? '').localeCompare(b.gpuType ?? ''));
     } catch (err) {
       this.log.warn(`[vast] listOffers failed: ${this.errMsg(err)}`);
       return [];
@@ -829,7 +847,8 @@ export class VastClient extends AbstractGpuProvider {
     const TERMINAL_STATUSES = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted']);
     let seenOnce = false;       // true once the API returns the instance at least once
     let missingStreak = 0;      // consecutive polls where a previously-seen instance is gone
-    const MAX_MISSING_STREAK = 5; // abort after 5 consecutive "not found" polls (~2.5 min)
+    const MAX_MISSING_STREAK = 5; // abort after 5 consecutive "not found" polls (~55s with backoff)
+    let sshOnlyRunningCount = 0; // consecutive polls where instance is running with SSH but no endpoint
 
     while (elapsed < maxWaitMs) {
       const delay = Math.min(POLL_BASE_MS * Math.pow(POLL_GROWTH, attempt), POLL_MAX_MS);
@@ -862,6 +881,19 @@ export class VastClient extends AbstractGpuProvider {
           if (endpoint) {
             this.log.log(`[vast] Instance ${contractId} got endpoint after ${Math.round(elapsed / 1000)}s: ${endpoint} (status=${detail.status})`);
             break;
+          }
+
+          // Early exit for SSH-only instances: if running with SSH but no endpoint
+          // after 3 consecutive polls, the host likely has no direct ports.
+          // Return early so the engine's boot poller can use SSH health checks.
+          if (!endpoint && sshHost && sshPort && detail.status?.toLowerCase() === 'running') {
+            sshOnlyRunningCount++;
+            if (sshOnlyRunningCount >= 3) {
+              this.log.log(`[vast] Instance ${contractId} SSH-only (no endpoint after ${Math.round(elapsed / 1000)}s, ssh=${sshHost}:${sshPort}) — returning early for SSH health check`);
+              break;
+            }
+          } else {
+            sshOnlyRunningCount = 0;
           }
 
           // Log progress on every ~30s boundary to aid debugging
@@ -953,7 +985,8 @@ export class VastClient extends AbstractGpuProvider {
     const ip = (inst.public_ipaddr || inst.ssh_host || '') as string;
     const status = String(inst.actual_status ?? inst.status_msg ?? inst.cur_state ?? 'unknown');
     const sshHost = (inst.ssh_host ?? inst.public_ipaddr) as string | undefined;
-    const sshPort = inst.ssh_port as number | undefined;
+    const rawSshPort = inst.ssh_port as number | undefined;
+    const sshPort = rawSshPort && rawSshPort >= 1 && rawSshPort <= 65535 ? rawSshPort : undefined;
 
     if (!ip) return { ip: '', endpoint: '', status, sshHost, sshPort };
 

@@ -4,8 +4,9 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Loader2, Check, X, AlertTriangle, Clock, Zap, Activity } from 'lucide-react';
 import { getGpuStatus, getReadinessStatus, type GpuStatusResponse, type ReadinessStatusResponse } from '@/lib/gateway';
 import { useGatewayWs, type GatewayWsState } from '@/hooks/useGatewayWs';
+import { STAGE_COLORS, formatPhaseDuration } from '@/lib/phase-colors';
 
-/* ── Phase config ── */
+/* ── Phase config (includes deploy-specific phases not in shared phase-colors) ── */
 
 const PHASE_META: Record<string, { color: string; label: string; icon: typeof Loader2 }> = {
   // Pre-deploy
@@ -110,7 +111,7 @@ function DeployProgressBar({ currentStep, gpuType, elapsed }: { currentStep: str
 
 function BenchmarkProgress({ progress }: { progress: GatewayWsState['benchmarkProgress'] }) {
   const stages = ['stt', 'llm', 'tts'] as const;
-  const colors = { stt: '#38bdf8', llm: '#a78bfa', tts: '#fbbf24' };
+  const colors = STAGE_COLORS;
 
   return (
     <div className="grid grid-cols-3 gap-1.5">
@@ -275,12 +276,13 @@ export function GpuLiveStatus() {
           <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Service Status</p>
           <div className="grid grid-cols-3 gap-1.5">
             {(['stt', 'llm', 'tts'] as const).map(stage => {
-              const colors = { stt: '#38bdf8', llm: '#a78bfa', tts: '#fbbf24' };
+              const colors = STAGE_COLORS;
               const labels = { stt: 'STT', llm: 'LLM', tts: 'TTS' };
               const rs = (readiness as any)?.readinessState?.[stage] || {};
               const phase = rs.phase || 'idle';
               const meta = phaseMeta(phase);
               const route = (gpuStatus?.pipelineRouting as Record<string, string>)?.[stage];
+              const phaseDur = formatPhaseDuration(rs.phaseStartedAt);
               const detail = rs.loadDetail || '';
               const best = rs.bestLatencyMs;
               const Icon = meta.icon;
@@ -295,6 +297,9 @@ export function GpuLiveStatus() {
                     </span>
                   </div>
                   {detail && <p className="text-[8px] truncate" style={{ color: 'var(--color-text-muted)' }}>{detail}</p>}
+                  {phaseDur && phase !== 'idle' && phase !== 'ready' && (
+                    <span className="text-[7px] font-mono" style={{ color: 'var(--color-text-muted)' }}>{phaseDur}</span>
+                  )}
                   <div className="flex items-center justify-between mt-1">
                     {best != null && <span className="text-[8px] font-mono" style={{ color: meta.color }}>{Math.round(best)}ms</span>}
                     {route && (
@@ -318,13 +323,12 @@ export function GpuLiveStatus() {
             {(['stt', 'llm', 'tts'] as const).map(stage => {
               const route = (gpuStatus.pipelineRouting as Record<string, string>)?.[stage];
               const isGpu = route === 'gpu';
-              const colors = { stt: '#38bdf8', llm: '#a78bfa', tts: '#fbbf24' };
               return (
                 <div key={stage} className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[10px] font-bold uppercase"
                   style={{
-                    background: `color-mix(in srgb, ${colors[stage]} ${isGpu ? 10 : 4}%, transparent)`,
-                    borderColor: `color-mix(in srgb, ${colors[stage]} ${isGpu ? 25 : 10}%, var(--color-border))`,
-                    color: isGpu ? colors[stage] : 'var(--color-text-muted)',
+                    background: `color-mix(in srgb, ${STAGE_COLORS[stage]} ${isGpu ? 10 : 4}%, transparent)`,
+                    borderColor: `color-mix(in srgb, ${STAGE_COLORS[stage]} ${isGpu ? 25 : 10}%, var(--color-border))`,
+                    color: isGpu ? STAGE_COLORS[stage] : 'var(--color-text-muted)',
                   }}>
                   {stage}
                   <span className="text-[9px] font-medium normal-case">{isGpu ? 'GPU' : 'Cloud'}</span>

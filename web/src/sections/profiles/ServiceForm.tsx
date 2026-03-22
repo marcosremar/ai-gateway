@@ -223,10 +223,12 @@ const SERVICE_PHASES = [
   { phase: 'Downloading', color: '#a78bfa', desc: 'Model downloading from HuggingFace. Cloud serves this stage.', time: '30-180s' },
   { phase: 'Loading', color: '#a78bfa', desc: 'Model loading into GPU memory/VRAM.', time: '10-60s' },
   { phase: 'Compiling', color: '#fbbf24', desc: 'CUDA graph compilation for fast inference (TTS only).', time: '10-30s' },
+  { phase: 'Warming', color: '#fbbf24', desc: 'First inference warming up. Establishing baseline latency.', time: '5-15s' },
   { phase: 'Benchmarking', color: '#38bdf8', desc: 'Testing latency against target. Progressive relaxation ±15%.', time: '30-120s' },
   { phase: 'Shadow', color: '#a78bfa', desc: 'Validation alongside cloud. N consecutive successes needed.', time: '10-60s' },
   { phase: 'Ready', color: '#10b981', desc: 'Serving production traffic. P95 monitored continuously.', time: '∞' },
   { phase: 'Degraded', color: '#f59e0b', desc: 'P95 exceeded (3 violations). Falls back to cloud.', time: '30-90s' },
+  { phase: 'Failed', color: '#ef4444', desc: 'Benchmark failed — did not meet target latency.', time: '—' },
   { phase: 'Repechage', color: '#f97316', desc: 'Retrying benchmark. Max N attempts, 2 min between.', time: '2-6 min' },
   { phase: 'Condemned', color: '#ef4444', desc: 'All retries failed. Auto-recovery deploys replacement.', time: '—' },
 ];

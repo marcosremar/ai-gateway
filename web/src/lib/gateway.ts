@@ -121,6 +121,7 @@ export interface GpuStatusResponse {
     inetUpMbps: number | null;
     cpuCores: number | null;
   };
+  readinessState?: GpuReadinessState;
 }
 
 export async function getGpuStatus(): Promise<GpuStatusResponse> {
@@ -897,12 +898,16 @@ export async function getGpuDefaults(): Promise<{ defaults: string[] }> {
 
 // ── GPU Readiness ──
 
+export type ServicePhase = 'idle' | 'downloading' | 'loading' | 'compiling' | 'warming' | 'benchmarking' | 'shadow' | 'ready' | 'degraded' | 'failed' | 'repechage' | 'condemned';
+
 export interface ServiceReadinessState {
-  phase: 'idle' | 'benchmarking' | 'ready' | 'degraded' | 'failed' | 'repechage' | 'condemned';
+  phase: ServicePhase;
   completedRuns: number;
   bestLatencyMs: number | null;
   targetMs: number;
   latencySamples: number[];
+  loadDetail?: string;
+  phaseStartedAt?: number;
 }
 
 export interface GpuReadinessState {
