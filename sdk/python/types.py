@@ -42,6 +42,7 @@ class DeployOptions:
     storage_gb: int = 0
     hf_token: str = ""
     llm_model: str = ""  # "translategemma" or "mistral"
+    race_count: int = 0  # parallel deploy race (0=disabled)
 
 
 @dataclass
@@ -103,6 +104,12 @@ class GpuStatus:
     idle_timeout_sec: int = 900
     started_at: int = 0
     retry_count: int = 0
+    cost_per_hr: float = 0.0
+    docker_image: str = ""
+    region: str = ""
+    ip_flag: str = ""
+    ip_city: str = ""
+    ip_country: str = ""
 
 
 # ── Health types ─────────────────────────────────────────────────────────────

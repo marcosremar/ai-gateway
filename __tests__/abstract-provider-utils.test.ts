@@ -166,10 +166,13 @@ describe('pollUntilReady', () => {
       if (calls === 1) throw new Error('transient');
       return 'ok';
     });
-    // pollUntilReady doesn't catch errors — they propagate
+    // pollUntilReady doesn't catch errors — they propagate.
+    // Attach a catch handler immediately to prevent unhandled rejection warnings.
     const promise = pollUntilReady(checkFn, { baseIntervalMs: 100, maxWaitMs: 5_000 });
+    const caught = promise.catch(() => {}); // prevent unhandled rejection
     await vi.runAllTimersAsync();
     await expect(promise).rejects.toThrow('transient');
+    await caught;
   });
 
   it('returns first truthy result immediately without further polling', async () => {
