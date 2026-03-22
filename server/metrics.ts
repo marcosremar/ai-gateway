@@ -249,6 +249,10 @@ export function computeReputationScore(host: {
   avgLatencyMs: number;
   latencyVariance?: number;
   requestCount?: number;
+  // Per-stage latency (optional, used for stage penalty)
+  avgSttMs?: number;
+  avgLlmMs?: number;
+  avgTtsMs?: number;
   reliability: number;
   inetDownMbps: number;
   inetUpMbps?: number;
@@ -266,6 +270,19 @@ export function computeReputationScore(host: {
   if (host.avgLatencyMs > 0) {
     latencyScore = Math.max(0, Math.min(1, 1 - (host.avgLatencyMs - 150) / 650));
   }
+
+  // ── 1b. Per-stage penalty: if any stage exceeds 2x its target, penalize
+  // STT target ~500ms, LLM target ~300ms, TTS target ~400ms
+  let stagePenalty = 0;
+  const stageTargets = { stt: 500, llm: 300, tts: 400 };
+  const stageLatencies = { stt: host.avgSttMs ?? 0, llm: host.avgLlmMs ?? 0, tts: host.avgTtsMs ?? 0 };
+  for (const [stage, target] of Object.entries(stageTargets) as Array<[string, number]>) {
+    const actual = stageLatencies[stage as keyof typeof stageLatencies];
+    if (actual > target * 2 && actual > 0) {
+      stagePenalty += 0.05; // 5% per stage exceeding 2x target
+    }
+  }
+  stagePenalty = Math.min(stagePenalty, 0.15); // cap at 15%
 
   // ── 2. Consistency score (0-1): low variance = predictable latency
   // stddev < 30ms = 1.0, 100ms = 0.5, 300ms+ = 0.0
@@ -323,10 +340,21 @@ export function computeReputationScore(host: {
     uptimeScore      * 0.05 +
     crashPenalty     * 0.05;
 
+  // Apply per-stage penalty (capped at 0.15)
+  const rawWithStage = Math.max(0, raw - stagePenalty);
+
+  // Confidence weighting: low-sample hosts blend toward neutral (0.5)
+  // Full trust after 20 requests; hosts with fewer requests are less trusted.
+  const requestCount = host.requestCount ?? 0;
+  const confidence = Math.min(1, requestCount / 20);
+  const rawWithConfidence = requestCount > 0
+    ? rawWithStage * confidence + 0.5 * (1 - confidence)
+    : rawWithStage; // no request data yet — trust deploy-time metrics
+
   // Recency decay: blend toward 0.5 as data ages (τ=30 days)
   const daysSinceLastDeploy = (Date.now() - host.lastDeployAt.getTime()) / (1000 * 60 * 60 * 24);
   const decayFactor = Math.exp(-daysSinceLastDeploy / 30);
-  return 0.5 + (raw - 0.5) * decayFactor;
+  return 0.5 + (rawWithConfidence - 0.5) * decayFactor;
 }
 
 /** Extract region + machine specs from providerMeta, only including non-empty values. */
@@ -440,6 +468,7 @@ export async function upsertHostReputation(opts: {
         deployCount, successCount, failCount, crashCount,
         avgBootTimeS, avgUptimeS, avgLatencyMs,
         latencyVariance: existing.latencyVariance, requestCount: existing.requestCount,
+        avgSttMs: existing.avgSttMs, avgLlmMs: existing.avgLlmMs, avgTtsMs: existing.avgTtsMs,
         reliability, inetDownMbps, inetUpMbps, tier, uptimePct,
         pcieBw: existing.pcieBw, diskReadMbps: existing.diskReadMbps,
         lastDeployAt: new Date(),
@@ -515,6 +544,38 @@ export async function upsertHostReputation(opts: {
       const outcomeLabel = isCrash ? 'crash' : opts.success ? 'success' : skipCounting ? `ignored:${opts.failureCategory}` : 'fail';
       console.log(`[reputation] Created ${hostKey}: score=${reputationScore.toFixed(3)} (${outcomeLabel}, boot=${bootTimeS}s)`);
     }
+
+    // ── GPU type failure alert: check if >50% of hosts for this GPU type failed recently
+    if (!opts.success && opts.gpuType && isHostAttributableFailure(opts.failureCategory)) {
+      try {
+        const gpuType = opts.gpuType;
+        const recentHosts = await prisma.hostReputation.findMany({
+          where: {
+            gpuType,
+            deployCount: { gt: 0 },
+            lastDeployAt: { gt: new Date(Date.now() - 24 * 3600_000) },
+          },
+          select: { hostKey: true, successCount: true, failCount: true, crashCount: true },
+        });
+        if (recentHosts.length >= 2) {
+          const failedHosts = recentHosts.filter(h => (h.failCount + h.crashCount) > h.successCount);
+          const failRate = failedHosts.length / recentHosts.length;
+          if (failRate > 0.5) {
+            console.warn(`[reputation] ALERT: GPU type "${gpuType}" failing globally — ${failedHosts.length}/${recentHosts.length} hosts failed (${(failRate * 100).toFixed(0)}%) in last 24h`);
+            try {
+              const { broadcastWs } = await import('./ws-server');
+              broadcastWs({
+                type: 'gpu:type_failing',
+                gpuType,
+                failedHosts: failedHosts.length,
+                totalHosts: recentHosts.length,
+                failRate: Math.round(failRate * 100),
+              });
+            } catch {}
+          }
+        }
+      } catch {}
+    }
   } catch (err) {
     console.warn(`[reputation] Failed to upsert ${hostKey}:`, err);
   }
@@ -568,6 +629,10 @@ export async function updateHostLatency(
     const shouldRecalc = requestCount % REPUTATION_RECALC_INTERVAL === 0;
     let scoreUpdate: Record<string, number> = {};
     if (shouldRecalc) {
+      // Use updated per-stage latencies for score calculation
+      const updatedSttMs = stageUpdate.avgSttMs ?? existing.avgSttMs;
+      const updatedLlmMs = stageUpdate.avgLlmMs ?? existing.avgLlmMs;
+      const updatedTtsMs = stageUpdate.avgTtsMs ?? existing.avgTtsMs;
       const reputationScore = computeReputationScore({
         deployCount: existing.deployCount,
         successCount: existing.successCount,
@@ -578,6 +643,7 @@ export async function updateHostLatency(
         avgLatencyMs,
         latencyVariance,
         requestCount,
+        avgSttMs: updatedSttMs, avgLlmMs: updatedLlmMs, avgTtsMs: updatedTtsMs,
         reliability: existing.reliability,
         inetDownMbps: existing.inetDownMbps,
         inetUpMbps: existing.inetUpMbps,
@@ -587,7 +653,16 @@ export async function updateHostLatency(
         diskReadMbps: existing.diskReadMbps,
         lastDeployAt: existing.lastDeployAt ?? new Date(),
       });
+      const oldScore = existing.reputationScore;
       scoreUpdate = { reputationScore };
+      // P2.2: Alert on reputation cliff drop (>0.2 in one recalc)
+      if (oldScore - reputationScore > 0.2) {
+        console.warn(`[reputation] WARNING: ${hostKey} score dropped ${oldScore.toFixed(3)} → ${reputationScore.toFixed(3)} (Δ=${(oldScore - reputationScore).toFixed(3)})`);
+        try {
+          const { broadcastWs } = await import('./ws-server');
+          broadcastWs({ type: 'host:degraded', hostKey, oldScore, newScore: reputationScore, reason: `latency=${avgLatencyMs.toFixed(0)}ms` });
+        } catch {}
+      }
       console.log(`[reputation] Recalc ${hostKey} after ${requestCount} requests: score=${reputationScore.toFixed(3)} (latency=${avgLatencyMs.toFixed(0)}ms, var=${latencyVariance.toFixed(0)})`);
     }
 

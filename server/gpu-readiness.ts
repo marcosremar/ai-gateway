@@ -310,6 +310,20 @@ export async function runGpuReadinessCheck(
     saveRun('llm', llmResult.samples, llmResult.bestMs, targets.llm, llmResult.passed);
     broadcastWs({ type: 'gpu:readiness', stage: 'llm', phase: llmResult.passed ? 'ready' : 'failed', bestLatencyMs: llmResult.bestMs, targetMs: targets.llm, passed: llmResult.passed, runsUsed: llmResult.samples.length });
 
+    // Feed benchmark results into host reputation (seeds initial per-stage latency data)
+    if (deployState.provider && deployState.gpuType) {
+      try {
+        const { updateHostLatency } = await import('./metrics');
+        if (sttResult.passed && sttResult.bestMs < Infinity) {
+          await updateHostLatency(deployState.provider, deployState.gpuType, sttResult.bestMs, 'stt', deployState.providerMeta);
+        }
+        if (llmResult.passed && llmResult.bestMs < Infinity) {
+          await updateHostLatency(deployState.provider, deployState.gpuType, llmResult.bestMs, 'llm', deployState.providerMeta);
+        }
+        console.log(`[readiness] Fed benchmark results into reputation: STT=${sttResult.bestMs}ms LLM=${llmResult.bestMs}ms`);
+      } catch {}
+    }
+
     // Progressive relaxation: try 15% more lenient target before repechage
     if (!sttResult.passed && sttResult.bestMs <= targets.stt * 1.15) {
       const relaxedTarget = Math.round(targets.stt * 1.15);
@@ -374,6 +388,15 @@ export async function runGpuReadinessCheck(
       setServiceReadiness('tts', { phase: ttsResult.passed ? 'ready' : 'failed', bestLatencyMs: ttsResult.bestMs });
       saveRun('tts', ttsResult.samples, ttsResult.bestMs, targets.tts, ttsResult.passed);
       broadcastWs({ type: 'gpu:readiness', stage: 'tts', phase: ttsResult.passed ? 'ready' : 'failed', bestLatencyMs: ttsResult.bestMs, targetMs: targets.tts, passed: ttsResult.passed, runsUsed: ttsResult.samples.length });
+
+      // Feed TTS benchmark result into reputation
+      if (ttsResult.passed && ttsResult.bestMs < Infinity && deployState.provider && deployState.gpuType) {
+        try {
+          const { updateHostLatency } = await import('./metrics');
+          await updateHostLatency(deployState.provider, deployState.gpuType, ttsResult.bestMs, 'tts', deployState.providerMeta);
+          console.log(`[readiness] Fed TTS benchmark into reputation: ${ttsResult.bestMs}ms`);
+        } catch {}
+      }
     })().catch(e => console.warn('[readiness:tts] Background benchmark failed:', e instanceof Error ? e.message : e));
 
     // Don't await ttsBenchmarkPromise — proceed to shadow mode immediately

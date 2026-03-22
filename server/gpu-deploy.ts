@@ -825,7 +825,7 @@ export async function autoSelectCheapestGpu(
   const ssdFiltered = preferSsd ? inetFiltered.filter(o => (o.diskBwReadMbps ?? 0) === 0 || (o.diskBwReadMbps ?? 0) > 200) : inetFiltered;
   const suitable = preferSsd && ssdFiltered.length === 0 ? inetFiltered : ssdFiltered;
 
-  // Load blacklisted hosts (crash count >= 3 in last 7 days)
+  // ── Blacklist: hosts with 3+ crashes in 7 days
   let blacklistedHosts: Set<string> | null = null;
   try {
     const rows = await prisma.hostReputation.findMany({
@@ -837,14 +837,83 @@ export async function autoSelectCheapestGpu(
       console.log(`[gpu] autoSelectGpu: ${blacklistedHosts.size} host(s) blacklisted (3+ crashes in 7d)`);
     }
   } catch {}
-  // Filter out blacklisted hosts from offers
-  const filtered = blacklistedHosts && blacklistedHosts.size > 0
-    ? suitable.filter(o => {
-        const hostKey = `${o.provider}:${o.hostId || o.offerId || o.gpuName}`;
-        return !blacklistedHosts!.has(hostKey);
-      })
-    : suitable;
-  // Use filtered list (fallback to full list if all blacklisted)
+
+  // ── Reputation floor: skip hosts with score < 0.3 (proven unreliable)
+  let lowRepHosts: Set<string> | null = null;
+  try {
+    const rows = await prisma.hostReputation.findMany({
+      where: { reputationScore: { lt: 0.3 }, deployCount: { gte: 2 } }, // at least 2 deploys to avoid penalizing new hosts
+      select: { hostKey: true, reputationScore: true },
+    });
+    lowRepHosts = new Set(rows.map(r => r.hostKey));
+    if (lowRepHosts.size > 0) {
+      console.log(`[gpu] autoSelectGpu: ${lowRepHosts.size} host(s) below reputation floor (<0.3)`);
+    }
+  } catch {}
+
+  // ── Compatibility filter: skip GPU+image combos that have failed tests
+  let incompatibleGpuTypes: Set<string> | null = null;
+  try {
+    const currentImage = deployState.dockerImage || '';
+    if (currentImage) {
+      const failedTests = await prisma.gpuCompatibilityTest.findMany({
+        where: {
+          dockerImage: currentImage,
+          passed: false,
+          testedAt: { gt: new Date(Date.now() - 14 * 86400_000) }, // last 14 days
+        },
+        select: { gpuType: true },
+      });
+      if (failedTests.length > 0) {
+        incompatibleGpuTypes = new Set(failedTests.map(t => t.gpuType));
+        console.log(`[gpu] autoSelectGpu: ${incompatibleGpuTypes.size} GPU type(s) incompatible with ${currentImage}: ${[...incompatibleGpuTypes].join(', ')}`);
+      }
+    }
+  } catch {}
+
+  // ── Deploy session history: boost GPU types with recent success on same image
+  let sessionSuccessRates: Map<string, number> | null = null;
+  try {
+    const currentImage = deployState.dockerImage || '';
+    if (currentImage) {
+      const recentSessions = await prisma.gpuDeploySession.findMany({
+        where: {
+          dockerImage: currentImage,
+          createdAt: { gt: new Date(Date.now() - 7 * 86400_000) },
+          status: { in: ['ready', 'failed'] },
+        },
+        select: { gpuType: true, status: true },
+      });
+      if (recentSessions.length > 0) {
+        const grouped = new Map<string, { success: number; total: number }>();
+        for (const s of recentSessions) {
+          if (!s.gpuType) continue;
+          const g = grouped.get(s.gpuType) || { success: 0, total: 0 };
+          g.total++;
+          if (s.status === 'ready') g.success++;
+          grouped.set(s.gpuType, g);
+        }
+        sessionSuccessRates = new Map();
+        for (const [gpu, { success, total }] of grouped) {
+          if (total >= 2) sessionSuccessRates.set(gpu, success / total);
+        }
+        if (sessionSuccessRates.size > 0) {
+          const rates = [...sessionSuccessRates.entries()].map(([g, r]) => `${g}=${(r * 100).toFixed(0)}%`).join(', ');
+          console.log(`[gpu] autoSelectGpu: session success rates (7d): ${rates}`);
+        }
+      }
+    }
+  } catch {}
+
+  // Apply all filters (blacklist + low reputation + incompatible)
+  const filtered = suitable.filter(o => {
+    const hostKey = `${o.provider}:${o.hostId || o.offerId || o.gpuName}`;
+    if (blacklistedHosts?.has(hostKey)) return false;
+    if (lowRepHosts?.has(hostKey)) return false;
+    if (incompatibleGpuTypes?.has(o.gpuType) || incompatibleGpuTypes?.has(o.gpuName)) return false;
+    return true;
+  });
+  // Use filtered list (fallback to full list if all filtered out)
   const ranked = filtered.length > 0 ? filtered : suitable;
 
   if (ranked.length === 0) {
@@ -892,19 +961,22 @@ export async function autoSelectCheapestGpu(
       return latA - latB;
     });
   } else {
-    // Balanced (default): combine reputation, TCP latency, and price into a unified score.
-    // qualityScore = repScore * 0.6 + tcpScore * 0.4 (both on 0-1 scale)
+    // Balanced (default): combine reputation, TCP latency, session history, and price.
+    // qualityScore components (all 0-1 scale):
+    //   repScore   × 0.50 — host reputation (embeds pipeline latency, reliability)
+    //   tcpScore   × 0.30 — network proximity
+    //   sessionBonus × 0.20 — recent deploy success rate with same image
     // effectivePrice = price / max(qualityScore, 0.1)
-    // Lower effectivePrice = better value per quality unit.
     ranked.sort((a, b) => {
       const repA = getRepScore(a);
       const repB = getRepScore(b);
       const tcpA = tcpLatencyScore(a);
       const tcpB = tcpLatencyScore(b);
-      // Reputation already includes pipeline latency (30% weight inside computeReputationScore),
-      // so we weight it higher. TCP measures network proximity which is additive.
-      const qualityA = Math.max(repA * 0.6 + tcpA * 0.4, 0.1);
-      const qualityB = Math.max(repB * 0.6 + tcpB * 0.4, 0.1);
+      // Session history bonus: prefer GPU types with proven success on this image
+      const sessA = sessionSuccessRates?.get(a.gpuType) ?? sessionSuccessRates?.get(a.gpuName) ?? 0.5;
+      const sessB = sessionSuccessRates?.get(b.gpuType) ?? sessionSuccessRates?.get(b.gpuName) ?? 0.5;
+      const qualityA = Math.max(repA * 0.50 + tcpA * 0.30 + sessA * 0.20, 0.1);
+      const qualityB = Math.max(repB * 0.50 + tcpB * 0.30 + sessB * 0.20, 0.1);
       const effectiveA = a.pricePerHr / qualityA;
       const effectiveB = b.pricePerHr / qualityB;
       return effectiveA - effectiveB;

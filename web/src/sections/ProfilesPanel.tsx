@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { X, Plus, Check, Trash2, Pencil, Mic, Bot, Volume2 } from 'lucide-react';
+import { X, Plus, Check, Trash2, Pencil, Copy, Mic, Bot, Volume2 } from 'lucide-react';
 import { Button, Toggle, ConfirmModal } from '@/components/ui';
 import type { ProviderProfile } from './provider-types';
 
@@ -14,13 +14,14 @@ const LATENCY_BADGE: Record<string, { label: string; color: string }> = {
 // ── Profile Item ──
 
 const ProfileItem = memo(function ProfileItem({
-  profile, index, isActive, onApply, onDelete, onRename, onToggleEnabled,
+  profile, index, isActive, onApply, onDelete, onRename, onToggleEnabled, onDuplicate,
 }: {
   profile: ProviderProfile; index: number; isActive: boolean;
   onApply: (p: ProviderProfile) => void;
   onDelete: (p: ProviderProfile) => void;
   onRename: (id: string, name: string) => void;
   onToggleEnabled: (id: string) => void;
+  onDuplicate: (p: ProviderProfile) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(profile.name);
@@ -140,13 +141,18 @@ const ProfileItem = memo(function ProfileItem({
       {/* Actions */}
       {!editing && (
         <button type="button" onClick={e => { e.stopPropagation(); setEditName(profile.name); setEditing(true); }}
-          aria-label={`Rename ${profile.name}`}
+          aria-label={`Rename ${profile.name}`} title="Rename"
           className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-white/5 flex-shrink-0 transition-opacity cursor-pointer">
           <Pencil className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
         </button>
       )}
+      <button type="button" onClick={e => { e.stopPropagation(); onDuplicate(profile); }}
+        aria-label={`Duplicate ${profile.name}`} title="Duplicate"
+        className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-white/5 flex-shrink-0 transition-opacity cursor-pointer">
+        <Copy className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
+      </button>
       <button type="button" onClick={e => { e.stopPropagation(); onDelete(profile); }}
-        aria-label={`Delete ${profile.name}`}
+        aria-label={`Delete ${profile.name}`} title="Delete"
         className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/10 flex-shrink-0 transition-opacity cursor-pointer">
         <Trash2 className="w-3 h-3 text-red-400" />
       </button>
@@ -184,6 +190,11 @@ export default function ProfilesPanel({
     setProfiles(prev => prev.map(p => p.id === id ? { ...p, enabled: !(p.enabled !== false) } : p));
   }, [setProfiles]);
 
+  const duplicateProfile = useCallback((p: ProviderProfile) => {
+    const copy: ProviderProfile = { ...p, id: `${p.id}-${Date.now()}`, name: `${p.name} (copy)` };
+    setProfiles(prev => [...prev, copy]);
+  }, [setProfiles]);
+
   const save = () => {
     const name = newName.trim();
     if (!name) return;
@@ -216,6 +227,7 @@ export default function ProfilesPanel({
                   onDelete={p => setConfirmDelete(p)}
                   onRename={(id, name) => setProfiles(prev => prev.map(x => x.id === id ? { ...x, name } : x))}
                   onToggleEnabled={toggleEnabled}
+                  onDuplicate={duplicateProfile}
                 />
               ))}
             </div>
