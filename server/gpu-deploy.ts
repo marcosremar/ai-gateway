@@ -1963,8 +1963,9 @@ export async function pollHealthUntilReady(
 
           if (!containerStartedAt) {
             // Distinguish queued (allocated, waiting for slot) vs pulling image
-            const isQueued = ['created', 'loading', 'pending', 'queued', 'provisioning'].includes(statusLower);
-            const isPulling = ['pulling', 'starting', 'initializing'].includes(statusLower) || (!isQueued && !isRunning);
+            // Vast.ai: 'created' = allocated waiting, 'loading' = pulling Docker image
+            const isQueued = ['created', 'pending', 'queued', 'provisioning'].includes(statusLower);
+            const isPulling = ['loading', 'pulling', 'starting', 'initializing'].includes(statusLower) || (!isQueued && !isRunning);
             if (isQueued) {
               setDeployState({
                 status: 'queued', step: 'queued',
