@@ -2,7 +2,7 @@
 
 import type { ReactNode } from 'react';
 
-type BadgeVariant = 'emerald' | 'red' | 'amber' | 'orange' | 'blue' | 'violet' | 'gray';
+export type BadgeVariant = 'emerald' | 'red' | 'amber' | 'orange' | 'blue' | 'violet' | 'gray';
 
 interface StatusBadgeProps {
   variant?: BadgeVariant;

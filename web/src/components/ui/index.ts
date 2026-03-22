@@ -10,6 +10,7 @@ export { Toggle } from './Toggle';
 export { SectionHeader } from './SectionHeader';
 export { AlertBanner } from './AlertBanner';
 export { StatusBadge } from './StatusBadge';
+export type { BadgeVariant } from './StatusBadge';
 export { Spinner } from './Spinner';
 export { CardSectionHeader } from './CardSectionHeader';
 export { ConfirmModal } from './ConfirmModal';

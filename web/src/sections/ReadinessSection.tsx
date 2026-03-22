@@ -6,44 +6,12 @@ import {
   type ReadinessStatusResponse, type GpuReadinessHistoryResponse, type ReadinessHistoryRun,
 } from '@/lib/gateway';
 import { Card, CardHeader, CardBody, Button, AlertBanner, StatusBadge, FormInput, SectionHeader } from '@/components/ui';
+import { phaseColor, phaseBg, phaseVariant, phaseLabel as phaseLabel_, type ServicePhase as Phase } from '@/lib/phase-colors';
 import { RefreshCw, RotateCcw, Activity, AlertTriangle, ChevronDown, ChevronRight, CheckCircle2, XCircle, Mic, Brain, Volume2 } from 'lucide-react';
 
-type Phase = 'idle' | 'benchmarking' | 'ready' | 'degraded' | 'failed' | 'repechage' | 'condemned';
-
 function PhaseBadge({ phase }: { phase: Phase }) {
-  switch (phase) {
-    case 'ready':        return <StatusBadge variant="emerald" dot>Ready</StatusBadge>;
-    case 'benchmarking': return <StatusBadge variant="amber" dot>Benchmarking</StatusBadge>;
-    case 'degraded':     return <StatusBadge variant="orange" dot>Degraded</StatusBadge>;
-    case 'repechage':    return <StatusBadge variant="amber">Repechage</StatusBadge>;
-    case 'failed':       return <StatusBadge variant="red" dot>Failed</StatusBadge>;
-    case 'condemned':    return <StatusBadge variant="red" dot>Condemned</StatusBadge>;
-    default:             return <StatusBadge variant="gray" dot>Idle</StatusBadge>;
-  }
-}
-
-function phaseColor(phase: Phase): string {
-  switch (phase) {
-    case 'ready': return 'var(--color-emerald, #34d399)';
-    case 'benchmarking': return 'var(--color-amber, #fbbf24)';
-    case 'degraded': return '#f97316';
-    case 'repechage': return 'var(--color-purple, #a78bfa)';
-    case 'failed': return 'var(--color-red, #f87171)';
-    case 'condemned': return '#991b1b';
-    default: return 'var(--color-text-muted, #71717a)';
-  }
-}
-
-function phaseBg(phase: Phase): string {
-  switch (phase) {
-    case 'ready':        return 'rgba(52, 211, 153, 0.06)';
-    case 'benchmarking': return 'rgba(251, 191, 36, 0.06)';
-    case 'degraded':     return 'rgba(249, 115, 22, 0.06)';
-    case 'repechage':    return 'rgba(167, 139, 250, 0.06)';
-    case 'failed':
-    case 'condemned':    return 'rgba(248, 113, 113, 0.06)';
-    default:             return 'transparent';
-  }
+  const dot = phase !== 'repechage';
+  return <StatusBadge variant={phaseVariant(phase)} dot={dot}>{phaseLabel_(phase)}</StatusBadge>;
 }
 
 function p95Color(p95: number | null, target: number, multiplier: number): string {
@@ -475,6 +443,17 @@ export function ReadinessSection() {
                     </div>
                     <span className="w-10 font-mono text-xs uppercase font-bold" style={{ color: 'var(--color-text-secondary)' }}>{stage}</span>
                     <PhaseBadge phase={phase} />
+                    {/* Phase duration */}
+                    {phase !== 'idle' && s.phaseStartedAt && (() => {
+                      const elapsed = Date.now() - s.phaseStartedAt;
+                      const sec = Math.floor(elapsed / 1000);
+                      const dur = sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`;
+                      return <span className="text-[10px] font-mono" style={{ color: 'var(--color-text-muted)' }}>{dur}</span>;
+                    })()}
+                    {/* Load detail during download/load/compile */}
+                    {(phase === 'downloading' || phase === 'loading' || phase === 'compiling') && s.loadDetail && (
+                      <span className="text-[10px] truncate max-w-[180px]" style={{ color: 'var(--color-text-muted)' }}>{s.loadDetail}</span>
+                    )}
                     {phase === 'benchmarking' && (
                       <div className="flex-1 flex items-center gap-2">
                         <div className="flex-1 h-1.5 rounded-full" style={{ background: 'var(--color-border)' }}>
@@ -568,6 +547,27 @@ export function ReadinessSection() {
                         }} />
                       </div>
                     )}
+                    {/* P95 sparkline from latency samples */}
+                    {(() => {
+                      const samples = status.readinessState[stage].latencySamples;
+                      if (!samples || samples.length < 2) return null;
+                      const recent = samples.slice(-20);
+                      const maxVal = Math.max(...recent, target);
+                      const w = 120, h = 28;
+                      const points = recent.map((v, i) => {
+                        const x = (i / (recent.length - 1)) * (w - 2) + 1;
+                        const y = maxVal > 0 ? h - (v / maxVal) * (h - 4) + 2 : h / 2;
+                        return `${x},${y}`;
+                      }).join(' ');
+                      const targetY = maxVal > 0 ? h - (target / maxVal) * (h - 4) + 2 : h / 2;
+                      return (
+                        <svg width={w} height={h} className="mt-2 w-full" style={{ opacity: 0.8 }}>
+                          {/* Target line */}
+                          <line x1="0" y1={targetY} x2={w} y2={targetY} stroke="#34d399" strokeWidth="0.5" strokeDasharray="3,2" />
+                          <polyline fill="none" stroke={color} strokeWidth="1.5" points={points} />
+                        </svg>
+                      );
+                    })()}
                   </div>
                 );
               })}

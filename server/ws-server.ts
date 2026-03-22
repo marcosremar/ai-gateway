@@ -32,21 +32,23 @@ function buildStreamingProviderOrder(): string[] {
       .map(e => e.provider);
     if (order.length > 0) return order;
   } catch (e) { console.warn('[ws] streaming provider order parse failed:', e instanceof Error ? e.message : e); }
-  // Include local Qwen3-ASR if configured
-  const defaultOrder = ['gpu', 'fireworks'];
-  if (process.env.MLX_QWEN3_ASR_HOST) defaultOrder.splice(1, 0, 'qwen3-asr');
-  return defaultOrder;
+  // Default: GPU first (lowest latency), then Qwen3-ASR (best accuracy), then Fireworks
+  return ['gpu', 'qwen3-asr', 'fireworks'];
 }
 
-// MLX Qwen3-ASR local URL (from env)
-function getMlxQwenUrl(): string | null {
-  const host = process.env.MLX_QWEN3_ASR_HOST;
-  return host || null;
+// Qwen3-ASR endpoint — local MLX, env override, or Modal (default STT)
+const MODAL_QWEN3ASR_DEFAULT = 'https://marcosremar--babelcast-qwen3asr-qwen3asr-serve.modal.run';
+
+function getQwen3AsrUrl(): string | null {
+  return process.env.MLX_QWEN3_ASR_HOST
+    || process.env.QWEN3_ASR_URL
+    || process.env.MODAL_QWEN3ASR_URL
+    || MODAL_QWEN3ASR_DEFAULT;
 }
 
 let sttRouter = new StreamingSTTRouter({
   getGpuUrl: () => deployState.status === 'ready' && deployState.endpoint ? deployState.endpoint : null,
-  getQwen3AsrUrl: getMlxQwenUrl,
+  getQwen3AsrUrl,
   get fireworksApiKey() { return process.env.FIREWORKS_API_KEY ?? ''; },
   providerOrder: buildStreamingProviderOrder(),
 });
@@ -56,7 +58,7 @@ export function reloadStreamingSTTRouter(): void {
   const order = buildStreamingProviderOrder();
   sttRouter = new StreamingSTTRouter({
     getGpuUrl: () => deployState.status === 'ready' && deployState.endpoint ? deployState.endpoint : null,
-    getQwen3AsrUrl: getMlxQwenUrl,
+    getQwen3AsrUrl,
     get fireworksApiKey() { return process.env.FIREWORKS_API_KEY ?? ''; },
     providerOrder: order,
   });
@@ -249,6 +251,14 @@ export function startParecCapture(): void {
 
           for (const client of wsClients) {
             try { client.send(chunk); } catch { wsClients.delete(client); }
+          }
+
+          // Auto-process: buffer parec audio for pipeline processing (same as bot-audio)
+          const buf = Buffer.from(chunk);
+          botAudioBuffer.push(buf);
+          botAudioBufferBytes += buf.length;
+          if (botAudioBufferBytes >= BOT_AUDIO_CHUNK_THRESHOLD) {
+            processBotAudioBuffer().catch(() => {});
           }
         }
       }

@@ -30,6 +30,89 @@ export class RateLimiter {
 /** Default rate limit: ~3 requests/second (334ms between calls). */
 export const DEFAULT_RATE_LIMIT_MS = 334;
 
+// ── Shared retry / polling utilities ─────────────────────────────────────────
+
+export interface RetryOptions {
+  /** Maximum number of retry attempts (default: 2) */
+  maxRetries?: number;
+  /** Base delay in ms before first retry (default: 2000) */
+  baseDelayMs?: number;
+  /** Backoff growth factor (default: 2.0 for exponential) */
+  growth?: number;
+  /** Maximum delay cap in ms (default: 30_000) */
+  maxDelayMs?: number;
+  /** Predicate: should we retry this error? Default: always retry */
+  shouldRetry?: (err: unknown, attempt: number) => boolean;
+}
+
+/**
+ * Retry a function with configurable backoff.
+ * Delay formula: min(baseDelayMs * growth^attempt, maxDelayMs)
+ */
+export async function retryWithBackoff<T>(
+  fn: (attempt: number) => Promise<T>,
+  opts: RetryOptions = {},
+): Promise<T> {
+  const maxRetries = opts.maxRetries ?? 2;
+  const baseDelayMs = opts.baseDelayMs ?? 2_000;
+  const growth = opts.growth ?? 2.0;
+  const maxDelayMs = opts.maxDelayMs ?? 30_000;
+  const shouldRetry = opts.shouldRetry ?? (() => true);
+
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= maxRetries || !shouldRetry(err, attempt)) throw err;
+      const delay = Math.min(baseDelayMs * Math.pow(growth, attempt), maxDelayMs);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastErr; // unreachable but satisfies TypeScript
+}
+
+export interface PollOptions {
+  /** Maximum total wait time in ms (default: 300_000 = 5 min) */
+  maxWaitMs?: number;
+  /** Base poll interval in ms (default: 5_000) */
+  baseIntervalMs?: number;
+  /** Backoff growth factor per attempt (default: 1.4) */
+  growth?: number;
+  /** Maximum single interval cap in ms (default: 30_000) */
+  maxIntervalMs?: number;
+}
+
+/**
+ * Poll a check function with exponential backoff until it returns a truthy value.
+ * Returns the truthy result, or null if maxWaitMs is exceeded.
+ */
+export async function pollUntilReady<T>(
+  checkFn: (attempt: number, elapsedMs: number) => Promise<T | null | false | undefined>,
+  opts: PollOptions = {},
+): Promise<T | null> {
+  const maxWaitMs = opts.maxWaitMs ?? 300_000;
+  const baseIntervalMs = opts.baseIntervalMs ?? 5_000;
+  const growth = opts.growth ?? 1.4;
+  const maxIntervalMs = opts.maxIntervalMs ?? 30_000;
+
+  let elapsed = 0;
+  let attempt = 0;
+
+  while (elapsed < maxWaitMs) {
+    const delay = Math.min(baseIntervalMs * Math.pow(growth, attempt), maxIntervalMs);
+    await new Promise(r => setTimeout(r, delay));
+    elapsed += delay;
+    attempt++;
+
+    const result = await checkFn(attempt, elapsed);
+    if (result) return result;
+  }
+
+  return null;
+}
+
 // ── Shared constants ────────────────────────────────────────────────────────
 
 /** Default timeouts (ms) for provider HTTP calls. */

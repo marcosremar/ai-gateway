@@ -538,6 +538,9 @@ export async function recordHostCrash(provider: string, gpuType: string, provide
  * Update host latency EMA from a successful GPU request.
  * Tracks per-stage latency (stt/llm/tts/pipeline) and latency variance (jitter).
  */
+/** Recalculate reputationScore every N requests to keep it fresh with latency data */
+const REPUTATION_RECALC_INTERVAL = 10;
+
 export async function updateHostLatency(
   provider: string, gpuType: string, latencyMs: number,
   stage: 'stt' | 'llm' | 'tts' | 'pipeline',
@@ -561,9 +564,36 @@ export async function updateHostLatency(
     else if (stage === 'tts') stageUpdate.avgTtsMs = emaUpdate(existing.avgTtsMs, latencyMs);
     else if (stage === 'pipeline') stageUpdate.avgPipelineMs = emaUpdate(existing.avgPipelineMs, latencyMs);
 
+    // Recalculate reputationScore periodically so latency changes are reflected
+    const shouldRecalc = requestCount % REPUTATION_RECALC_INTERVAL === 0;
+    let scoreUpdate: Record<string, number> = {};
+    if (shouldRecalc) {
+      const reputationScore = computeReputationScore({
+        deployCount: existing.deployCount,
+        successCount: existing.successCount,
+        failCount: existing.failCount,
+        crashCount: existing.crashCount,
+        avgBootTimeS: existing.avgBootTimeS,
+        avgUptimeS: existing.avgUptimeS,
+        avgLatencyMs,
+        latencyVariance,
+        requestCount,
+        reliability: existing.reliability,
+        inetDownMbps: existing.inetDownMbps,
+        inetUpMbps: existing.inetUpMbps,
+        tier: existing.tier,
+        uptimePct: existing.uptimePct,
+        pcieBw: existing.pcieBw,
+        diskReadMbps: existing.diskReadMbps,
+        lastDeployAt: existing.lastDeployAt ?? new Date(),
+      });
+      scoreUpdate = { reputationScore };
+      console.log(`[reputation] Recalc ${hostKey} after ${requestCount} requests: score=${reputationScore.toFixed(3)} (latency=${avgLatencyMs.toFixed(0)}ms, var=${latencyVariance.toFixed(0)})`);
+    }
+
     await prisma.hostReputation.update({
       where: { hostKey },
-      data: { avgLatencyMs, latencyVariance, requestCount, ...stageUpdate },
+      data: { avgLatencyMs, latencyVariance, requestCount, ...stageUpdate, ...scoreUpdate },
     });
   } catch {
     // non-critical, don't log every request
@@ -823,5 +853,129 @@ export async function handleServiceStats(_req: IncomingMessage, res: ServerRespo
     console.error('[db] Service stats query failed:', err);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ stats: {}, coldStart: null, warmth: null }));
+  }
+}
+
+// ── RequestLog → HostReputation Batch Aggregation ─────────────────────────────
+
+/** Track the last aggregated timestamp to avoid re-processing */
+let lastAggregatedAt: Date = new Date(Date.now() - 5 * 60_000); // start 5min ago
+
+/**
+ * Aggregate recent GPU RequestLog entries and update HostReputation scores.
+ * Reads all GPU requests since lastAggregatedAt, groups by stage, updates
+ * per-stage EMA latencies and recalculates reputationScore for the current host.
+ *
+ * This closes the feedback loop: request-level data → host reputation.
+ */
+export async function aggregateRequestLogsToReputation(): Promise<{ processed: number; hostKey: string | null }> {
+  const { deployState } = await import('./state');
+  if (!deployState.provider || !deployState.gpuType) {
+    return { processed: 0, hostKey: null };
+  }
+
+  const hostKey = deriveHostKey(deployState.provider, deployState.providerMeta);
+  if (!hostKey) return { processed: 0, hostKey: null };
+
+  try {
+    const existing = await prisma.hostReputation.findUnique({ where: { hostKey } });
+    if (!existing) return { processed: 0, hostKey };
+
+    // Fetch GPU requests since last aggregation
+    const logs = await prisma.requestLog.findMany({
+      where: {
+        provider: 'gpu',
+        success: true,
+        timestamp: { gt: lastAggregatedAt },
+        latencyMs: { gt: 0 },
+      },
+      select: { stage: true, latencyMs: true, timestamp: true },
+      orderBy: { timestamp: 'asc' },
+    });
+
+    if (logs.length === 0) return { processed: 0, hostKey };
+
+    // Update the watermark
+    lastAggregatedAt = logs[logs.length - 1].timestamp;
+
+    // Group by stage and compute batch EMA updates
+    let avgLatencyMs = existing.avgLatencyMs;
+    let latencyVariance = existing.latencyVariance;
+    let requestCount = existing.requestCount;
+    let avgSttMs = existing.avgSttMs;
+    let avgLlmMs = existing.avgLlmMs;
+    let avgTtsMs = existing.avgTtsMs;
+    let avgPipelineMs = existing.avgPipelineMs;
+
+    for (const log of logs) {
+      const deviation = log.latencyMs - avgLatencyMs;
+      avgLatencyMs = emaUpdate(avgLatencyMs, log.latencyMs);
+      latencyVariance = emaUpdate(latencyVariance, deviation * deviation);
+      requestCount++;
+
+      if (log.stage === 'stt') avgSttMs = emaUpdate(avgSttMs, log.latencyMs);
+      else if (log.stage === 'llm') avgLlmMs = emaUpdate(avgLlmMs, log.latencyMs);
+      else if (log.stage === 'tts') avgTtsMs = emaUpdate(avgTtsMs, log.latencyMs);
+      else if (log.stage === 'pipeline') avgPipelineMs = emaUpdate(avgPipelineMs, log.latencyMs);
+    }
+
+    // Recalculate reputation score with aggregated data
+    const reputationScore = computeReputationScore({
+      deployCount: existing.deployCount,
+      successCount: existing.successCount,
+      failCount: existing.failCount,
+      crashCount: existing.crashCount,
+      avgBootTimeS: existing.avgBootTimeS,
+      avgUptimeS: existing.avgUptimeS,
+      avgLatencyMs,
+      latencyVariance,
+      requestCount,
+      reliability: existing.reliability,
+      inetDownMbps: existing.inetDownMbps,
+      inetUpMbps: existing.inetUpMbps,
+      tier: existing.tier,
+      uptimePct: existing.uptimePct,
+      pcieBw: existing.pcieBw,
+      diskReadMbps: existing.diskReadMbps,
+      lastDeployAt: existing.lastDeployAt ?? new Date(),
+    });
+
+    await prisma.hostReputation.update({
+      where: { hostKey },
+      data: {
+        avgLatencyMs, latencyVariance, requestCount, reputationScore,
+        avgSttMs, avgLlmMs, avgTtsMs, avgPipelineMs,
+      },
+    });
+
+    console.log(`[reputation-batch] ${hostKey}: aggregated ${logs.length} requests, score=${reputationScore.toFixed(3)} (latency=${avgLatencyMs.toFixed(0)}ms)`);
+    return { processed: logs.length, hostKey };
+  } catch (err) {
+    console.warn('[reputation-batch] Aggregation failed:', err);
+    return { processed: 0, hostKey };
+  }
+}
+
+const AGGREGATION_INTERVAL_MS = 5 * 60_000; // 5 minutes
+let aggregationTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Start periodic aggregation of RequestLog → HostReputation. */
+export function startReputationAggregation(): void {
+  if (aggregationTimer) return; // already running
+  aggregationTimer = setInterval(() => {
+    aggregateRequestLogsToReputation().catch(() => {});
+  }, AGGREGATION_INTERVAL_MS);
+  // Don't prevent process exit
+  if (aggregationTimer && typeof aggregationTimer === 'object' && 'unref' in aggregationTimer) {
+    aggregationTimer.unref();
+  }
+  console.log('[reputation-batch] Started periodic aggregation (every 5min)');
+}
+
+/** Stop periodic aggregation. */
+export function stopReputationAggregation(): void {
+  if (aggregationTimer) {
+    clearInterval(aggregationTimer);
+    aggregationTimer = null;
   }
 }

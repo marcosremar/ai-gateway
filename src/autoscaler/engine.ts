@@ -200,10 +200,17 @@ export class AutoscalerEngine {
         });
       };
 
+      let sshAlreadyProbed = false;
       void resolveEndpoint().then(async (endpoint): Promise<boolean | 'skip'> => {
-        // If endpoint is still empty, skip the HTTP probe — no point hitting an empty URL.
-        // The resolve loop will retry on the next poll cycle.
         if (!endpoint) {
+          // SSH-only instance (e.g. Vast.ai without direct ports) — try SSH health check directly
+          if (booting.sshHost && booting.sshPort) {
+            this.logger.log(`[boot-poller] Tier ${tierIndex} (${provider}) no HTTP endpoint — trying SSH health (${booting.sshHost}:${booting.sshPort}, ${Math.round(elapsed / 1000)}s elapsed)`);
+            const { probeGpuHealthSsh } = await import('./health');
+            sshAlreadyProbed = true;
+            return probeGpuHealthSsh(booting.sshHost, booting.sshPort);
+          }
+          // No endpoint AND no SSH — schedule next poll and wait for endpoint resolution
           this.logger.log(`[boot-poller] Tier ${tierIndex} (${provider}) endpoint not yet available (${Math.round(elapsed / 1000)}s elapsed) — skipping probe`);
           pollCount++;
           const nextInterval = Math.min(POLL_INTERVAL_BASE_MS * Math.pow(1.5, pollCount - 1), POLL_INTERVAL_MAX_MS);
@@ -213,14 +220,15 @@ export class AutoscalerEngine {
           return 'skip'; // signal: already scheduled next poll, skip further processing
         }
         return this.probeHealth(endpoint);
-      }).then(async (httpHealthy): Promise<boolean | 'skip'> => {
-        if (httpHealthy === 'skip') return 'skip'; // already scheduled next poll above
+      }).then(async (healthy): Promise<boolean | 'skip'> => {
+        if (healthy === 'skip') return 'skip'; // already scheduled next poll above
         // If HTTP failed and we have SSH info, try SSH fallback (Vast.ai without direct ports)
-        if (!httpHealthy && booting.sshHost && booting.sshPort) {
+        // Skip if SSH was already probed in the first stage (avoids double SSH probe)
+        if (!healthy && !sshAlreadyProbed && booting.sshHost && booting.sshPort) {
           const { probeGpuHealthSsh } = await import('./health');
           return probeGpuHealthSsh(booting.sshHost, booting.sshPort);
         }
-        return httpHealthy;
+        return healthy;
       }).then(async (healthy) => {
         if (healthy === 'skip') return; // already handled
         // Re-check state — might have changed during the probe
@@ -933,6 +941,16 @@ export class AutoscalerEngine {
         this.bootPollers.delete(key);
       }
     }
+  }
+
+  /** Cancel all boot pollers and clean up resources. Call on gateway shutdown. */
+  destroy(): void {
+    for (const [key, timer] of this.bootPollers) {
+      clearTimeout(timer);
+    }
+    this.bootPollers.clear();
+    this.decisionLocks.clear();
+    this.logger.log(`[autoscaler] Engine destroyed — ${this.stateMap.size} user states preserved`);
   }
 
   /** Cancel an active boot health poller for a specific tier. */

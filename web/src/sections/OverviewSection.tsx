@@ -5,11 +5,13 @@ import { useGateway } from '@/hooks/useGateway';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import { useGpuList } from '@/hooks/useGpuList';
 import { useBotStatus } from '@/hooks/useBotStatus';
-import { getRequestLog, type RequestLogEntry } from '@/lib/gateway';
-import { AlertBanner, Spinner } from '@/components/ui';
+import { useGatewayWs } from '@/hooks/useGatewayWs';
+import { getRequestLog, getReadinessStatus, type RequestLogEntry, type GpuReadinessState, type ReadinessStatusResponse } from '@/lib/gateway';
+import { AlertBanner, Spinner, StatusBadge } from '@/components/ui';
+import { phaseColor, phaseBg, phaseVariant, phaseLabel, formatPhaseDuration, STAGE_COLORS, type ServicePhase } from '@/lib/phase-colors';
 import { PipelineHealthCard } from './PipelineHealthCard';
 import {
-  Cpu, Bot, Snowflake, Flame, Server,
+  Cpu, Bot, Snowflake, Flame, Server, AlertTriangle, Activity, Mic, Brain, Volume2, ArrowRight,
 } from 'lucide-react';
 
 function formatUptime(sec: number): string {
@@ -56,9 +58,83 @@ function computeStageLatencies(entries: RequestLogEntry[]): Record<string, Stage
   return result;
 }
 
+// ── Service Summary (per-service phase badges) ──────────────────────────────
+
+const STAGE_META = {
+  stt: { label: 'STT', icon: Mic,    color: STAGE_COLORS.stt },
+  llm: { label: 'LLM', icon: Brain,  color: STAGE_COLORS.llm },
+  tts: { label: 'TTS', icon: Volume2, color: STAGE_COLORS.tts },
+} as const;
+
+function ServiceSummary({ readiness, pipelineRouting }: {
+  readiness: GpuReadinessState;
+  pipelineRouting?: { stt: string; llm: string; tts: string; mode: string };
+}) {
+  return (
+    <div className="flex gap-1.5 mt-2">
+      {(['stt', 'llm', 'tts'] as const).map(stage => {
+        const s = readiness[stage];
+        const phase = s.phase as ServicePhase;
+        const color = phaseColor(phase);
+        const meta = STAGE_META[stage];
+        const Icon = meta.icon;
+        const duration = formatPhaseDuration(s.phaseStartedAt);
+        const route = pipelineRouting?.[stage];
+        const isBench = phase === 'benchmarking';
+        const isLoading = phase === 'downloading' || phase === 'loading' || phase === 'compiling';
+
+        return (
+          <div key={stage} className="flex-1 rounded-md border px-1.5 py-1 transition-all"
+            style={{
+              borderColor: phase !== 'idle' ? `color-mix(in srgb, ${color} 30%, var(--color-border))` : 'var(--color-border)',
+              background: phase !== 'idle' ? `color-mix(in srgb, ${color} 5%, transparent)` : 'transparent',
+            }}>
+            <div className="flex items-center gap-1">
+              <Icon className="w-2.5 h-2.5 flex-shrink-0" style={{ color: meta.color }} />
+              <span className="text-[8px] font-bold uppercase" style={{ color: meta.color }}>{meta.label}</span>
+              <span className="ml-auto text-[7px] font-semibold uppercase px-1 py-0.5 rounded"
+                style={{ background: `color-mix(in srgb, ${color} 12%, transparent)`, color }}>
+                {phaseLabel(phase)}
+              </span>
+            </div>
+            {/* Benchmark progress */}
+            {isBench && s.completedRuns > 0 && (
+              <div className="flex items-center gap-1 mt-0.5">
+                <div className="flex-1 h-0.5 rounded-full" style={{ background: 'var(--color-border)' }}>
+                  <div className="h-0.5 rounded-full transition-all" style={{ width: `${Math.min(100, s.completedRuns * 5)}%`, background: color }} />
+                </div>
+                <span className="text-[7px] font-mono" style={{ color: 'var(--color-text-muted)' }}>{s.completedRuns}</span>
+              </div>
+            )}
+            {/* Load detail during loading phases */}
+            {isLoading && s.loadDetail && (
+              <p className="text-[7px] truncate mt-0.5" style={{ color: 'var(--color-text-muted)' }}>{s.loadDetail}</p>
+            )}
+            {/* Phase duration */}
+            {phase !== 'idle' && phase !== 'ready' && duration && (
+              <span className="text-[7px] font-mono block mt-0.5" style={{ color: 'var(--color-text-muted)' }}>{duration}</span>
+            )}
+            {/* Routing indicator */}
+            {route && phase === 'ready' && (
+              <span className="text-[7px] font-bold uppercase block mt-0.5"
+                style={{ color: route === 'gpu' ? meta.color : 'var(--color-text-muted)' }}>
+                → {route === 'gpu' ? 'GPU' : 'Cloud'}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── GPU Instance Tile ─────────────────────────────────────────────────────────
 
-function GpuTile({ inst }: { inst: ReturnType<typeof useGpuList>['instances'][0] }) {
+function GpuTile({ inst, readiness, pipelineRouting }: {
+  inst: ReturnType<typeof useGpuList>['instances'][0];
+  readiness?: GpuReadinessState;
+  pipelineRouting?: { stt: string; llm: string; tts: string; mode: string };
+}) {
   const isReady = inst.isActive || inst.status === 'ready';
   const isBooting = ['creating', 'booting', 'loading', 'installing'].includes(inst.status);
   const isError = inst.status === 'error';
@@ -74,6 +150,7 @@ function GpuTile({ inst }: { inst: ReturnType<typeof useGpuList>['instances'][0]
 
   const elapsed = inst.elapsedSec ?? 0;
   const bootPct = isBooting ? Math.min(90, Math.max(5, elapsed * 0.5)) : 0;
+  const hasReadiness = readiness && (readiness.stt.phase !== 'idle' || readiness.llm.phase !== 'idle' || readiness.tts.phase !== 'idle');
 
   return (
     <div className="rounded-lg border p-2.5 transition-all"
@@ -110,6 +187,8 @@ function GpuTile({ inst }: { inst: ReturnType<typeof useGpuList>['instances'][0]
             style={{ width: `${bootPct}%`, background: '#f59e0b' }} />
         </div>
       )}
+      {/* Per-service readiness badges */}
+      {hasReadiness && <ServiceSummary readiness={readiness} pipelineRouting={pipelineRouting} />}
     </div>
   );
 }
@@ -174,8 +253,23 @@ export function OverviewSection() {
   const { gpu } = useGpuStatus(true, 10000);
   const { instances: gpuInstances } = useGpuList(true, 10000);
   const { bot } = useBotStatus(true, 10000);
+  const ws = useGatewayWs();
   const [stageLatencies, setStageLatencies] = useState<Record<string, StageLatency>>({});
   const [providerTrends, setProviderTrends] = useState<Record<string, number[]>>({});
+  const [readinessStatus, setReadinessStatus] = useState<ReadinessStatusResponse | null>(null);
+
+  // Fetch readiness status when any service is ready/degraded (for P95 warning)
+  const readiness = gpu?.readinessState;
+  const anyReady = readiness && (['stt', 'llm', 'tts'] as const).some(
+    s => readiness[s].phase === 'ready' || readiness[s].phase === 'degraded'
+  );
+  useEffect(() => {
+    if (!anyReady) { setReadinessStatus(null); return; }
+    const poll = () => { getReadinessStatus().then(setReadinessStatus).catch(() => {}); };
+    poll();
+    const id = setInterval(poll, 10000);
+    return () => clearInterval(id);
+  }, [anyReady]);
 
   const loadLatencies = useCallback(async () => {
     try {
@@ -290,7 +384,63 @@ export function OverviewSection() {
               </div>
             ) : (
               <div className="space-y-2">
-                {gpuInstances.map(inst => <GpuTile key={inst.instanceId} inst={inst} />)}
+                {gpuInstances.map(inst => (
+                  <GpuTile key={inst.instanceId} inst={inst}
+                    readiness={inst.isActive ? readiness : undefined}
+                    pipelineRouting={inst.isActive ? gpu?.pipelineRouting : undefined} />
+                ))}
+              </div>
+            )}
+            {/* Shadow progress badge */}
+            {ws.shadowProgress && ws.shadowProgress.completed < ws.shadowProgress.total && (
+              <div className="flex items-center gap-2 mt-2 px-2 py-1.5 rounded-md border"
+                style={{ borderColor: 'color-mix(in srgb, #a78bfa 25%, var(--color-border))', background: 'color-mix(in srgb, #a78bfa 4%, transparent)' }}>
+                <Activity className="w-3 h-3 flex-shrink-0" style={{ color: '#a78bfa' }} />
+                <span className="text-[9px] font-semibold" style={{ color: '#a78bfa' }}>Shadow</span>
+                <div className="flex-1 h-1 rounded-full" style={{ background: 'var(--color-border)' }}>
+                  <div className="h-1 rounded-full transition-all"
+                    style={{ width: `${Math.round((ws.shadowProgress.completed / ws.shadowProgress.total) * 100)}%`, background: '#a78bfa' }} />
+                </div>
+                <span className="text-[8px] font-mono" style={{ color: '#a78bfa' }}>{ws.shadowProgress.completed}/{ws.shadowProgress.total}</span>
+              </div>
+            )}
+            {/* P95 warning banner */}
+            {readinessStatus && (() => {
+              const warnings: string[] = [];
+              for (const stage of ['stt', 'llm', 'tts'] as const) {
+                const p95 = readinessStatus.perStageP95[stage];
+                const target = readinessStatus.targets[stage];
+                const threshold = target * readinessStatus.p95DemotionMultiplier;
+                if (p95 !== null && p95 > threshold * 0.75) {
+                  const pct = Math.round((p95 / threshold) * 100);
+                  warnings.push(`${stage.toUpperCase()} P95 at ${pct}% of demotion threshold`);
+                }
+              }
+              if (warnings.length === 0) return null;
+              return (
+                <div className="flex items-center gap-2 mt-2 px-2 py-1.5 rounded-md border"
+                  style={{ borderColor: 'color-mix(in srgb, #f59e0b 30%, var(--color-border))', background: 'color-mix(in srgb, #f59e0b 5%, transparent)' }}>
+                  <AlertTriangle className="w-3 h-3 flex-shrink-0" style={{ color: '#f59e0b' }} />
+                  <span className="text-[9px] font-medium" style={{ color: '#fbbf24' }}>{warnings.join(' · ')}</span>
+                </div>
+              );
+            })()}
+            {/* Compact transition timeline (last 5) */}
+            {ws.transitions.length > 0 && (
+              <div className="mt-2 space-y-0.5">
+                {ws.transitions.slice(-5).map((t, i) => {
+                  const color = phaseColor(t.phase as ServicePhase);
+                  const ago = Date.now() - t.ts;
+                  const agoStr = ago < 60000 ? `${Math.floor(ago / 1000)}s` : `${Math.floor(ago / 60000)}m`;
+                  return (
+                    <div key={i} className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: color }} />
+                      <span className="text-[8px] font-semibold" style={{ color }}>{phaseLabel(t.phase as ServicePhase)}</span>
+                      {t.stage !== 'all' && <span className="text-[7px] font-bold uppercase" style={{ color: 'var(--color-text-muted)' }}>{t.stage}</span>}
+                      <span className="text-[7px] font-mono ml-auto" style={{ color: 'var(--color-text-muted)' }}>{agoStr}</span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

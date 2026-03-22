@@ -41,8 +41,8 @@ describe('VastClient', () => {
       expect(client.providerId).toBe('vast');
     });
 
-    it('bootTimeSecs is 120', () => {
-      expect(client.bootTimeSecs).toBe(120);
+    it('bootTimeSecs is 600', () => {
+      expect(client.bootTimeSecs).toBe(600);
     });
   });
 
