@@ -2005,8 +2005,31 @@ export async function pollHealthUntilReady(
           setDeployState({ endpoint });
         }
       } catch (err) {
-        // Endpoint resolution is expected to fail during early boot — suppress unless container is up
         if (containerStartedAt) console.warn(`[gpu] Failed to resolve ${providerName} endpoint for pod ${podId}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    // SSH tunnel fallback: if container is running but no direct endpoint after 60s, open SSH tunnel
+    if (!endpoint && containerStartedAt && (Date.now() - containerStartedAt) > 60_000 && deployState.sshHost && deployState.sshPort) {
+      try {
+        const { getOrCreateTunnel } = await import('./ssh-tunnel');
+        const tunnel = getOrCreateTunnel(deployState.sshHost, deployState.sshPort, 8000);
+        if (!tunnel.isOpen) {
+          console.log(`[gpu] No direct endpoint — opening SSH tunnel to ${deployState.sshHost}:${deployState.sshPort}`);
+          setDeployState({ step: 'ssh_tunnel', message: `Opening SSH tunnel (no direct port)...` });
+          const ok = await tunnel.open();
+          if (ok) {
+            endpoint = tunnel.endpoint;
+            setDeployState({ endpoint, message: `SSH tunnel active: ${endpoint}` });
+            console.log(`[gpu] SSH tunnel established: ${endpoint}`);
+          } else {
+            console.warn(`[gpu] SSH tunnel failed to ${deployState.sshHost}:${deployState.sshPort}`);
+          }
+        } else {
+          endpoint = tunnel.endpoint;
+        }
+      } catch (err) {
+        console.warn(`[gpu] SSH tunnel error: ${err instanceof Error ? err.message : err}`);
       }
     }
 
