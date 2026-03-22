@@ -83,9 +83,9 @@ const shouldRun = GROQ_API_KEY || OPENROUTER_API_KEY;
     // tier 2 has 0
     
     const mockTiers = [
-      { tierIndex: 0, provider: 'runpod' as const, gpuType: ' RTX 3090', endpoint: 'http://gpu-0:8000', sshEndpoint: 'gpu-0.example.com', state: 'ready' as const, activeSessions: 0, bootStartedAt: Date.now() - 60000 },
-      { tierIndex: 1, provider: 'runpod' as const, gpuType: ' RTX 3090', endpoint: 'http://gpu-1:8000', sshEndpoint: 'gpu-1.example.com', state: 'ready' as const, activeSessions: 0, bootStartedAt: Date.now() - 60000 },
-      { tierIndex: 2, provider: 'runpod' as const, gpuType: ' RTX 3090', endpoint: 'http://gpu-2:8000', sshEndpoint: 'gpu-2.example.com', state: 'ready' as const, activeSessions: 0, bootStartedAt: Date.now() - 60000 },
+      { tierIndex: 0, endpoint: 'http://gpu-0:8000', state: 'ready' as const, lastHealthyAt: Date.now() },
+      { tierIndex: 1, endpoint: 'http://gpu-1:8000', state: 'ready' as const, lastHealthyAt: Date.now() },
+      { tierIndex: 2, endpoint: 'http://gpu-2:8000', state: 'ready' as const, lastHealthyAt: Date.now() },
     ];
     
     const selectedIdx = await balancer.selectTier('user-1', mockTiers, 'least-busy');

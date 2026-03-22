@@ -85,7 +85,7 @@ function createTestWav(durationSec = 0.5, sampleRate = 16000): Buffer {
 }
 
 /** Connect a ws.WebSocket and resolve when open. */
-function connectWS(url: string, timeoutMs = 5000): Promise<WebSocket> {
+function connectWS(url: string, timeoutMs = 5000): Promise<any> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     const timer = setTimeout(() => {
@@ -98,10 +98,10 @@ function connectWS(url: string, timeoutMs = 5000): Promise<WebSocket> {
 }
 
 /** Send a JSON message and wait for the first JSON reply. */
-function sendAndWaitJSON(ws: WebSocket, msg: unknown, timeoutMs = 5000): Promise<any> {
+function sendAndWaitJSON(ws: any, msg: unknown, timeoutMs = 5000): Promise<any> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(null), timeoutMs);
-    const handler = (data: WebSocket.RawData) => {
+    const handler = (data: any) => {
       try {
         const parsed = JSON.parse(data.toString());
         clearTimeout(timer);

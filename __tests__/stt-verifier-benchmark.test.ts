@@ -129,6 +129,7 @@ interface PhraseResult {
   outliers: string[];
   totalMs: number;
   timeoutMs: number;
+  fanOutMs: number;
 }
 
 async function runBenchmark(
@@ -190,6 +191,7 @@ async function runBenchmark(
     outliers: result.outliers,
     totalMs,
     timeoutMs,
+    fanOutMs: result.latency_ms ?? 0,
   };
 }
 

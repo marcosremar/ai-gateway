@@ -396,15 +396,16 @@ describe('2. AIClient — Integration', () => {
 
     for (const id of ['groq', 'openai', 'openrouter', 'fireworks', 'modal']) {
       registry.register({
-        id,
+        id: id as any,
         name: id,
         description: `Mock ${id}`,
         capabilities: ['stt', 'llm', 'tts', 'image'] as any[],
+        requiresApiKey: false,
         stt: mockSTT(id) as any,
         llm: mockLLM(id) as any,
         tts: mockTTS(id) as any,
         image: mockImage(id) as any,
-      });
+      } as any);
     }
 
     return registry;
@@ -1598,10 +1599,11 @@ describe('11. AIProviderRegistry', () => {
   it('registers and retrieves providers', () => {
     const registry = new AIProviderRegistry();
     registry.register({
-      id: 'test',
+      id: 'test' as any,
       name: 'Test Provider',
       description: 'A test provider',
       capabilities: ['stt', 'llm'],
+      requiresApiKey: false,
       stt: {
         transcribe: vi.fn(),
         isConfigured: () => true,
@@ -1611,48 +1613,49 @@ describe('11. AIProviderRegistry', () => {
         chat: vi.fn(),
         isConfigured: () => true,
       } as any,
-    });
+    } as any);
 
-    expect(registry.getProvider('test')).toBeDefined();
-    expect(registry.getProvider('test')!.name).toBe('Test Provider');
+    expect(registry.getProvider('test' as any)).toBeDefined();
+    expect(registry.getProvider('test' as any)!.name).toBe('Test Provider');
   });
 
   it('throws when provider not found', () => {
     const registry = new AIProviderRegistry();
-    expect(() => registry.getSTTProvider('missing')).toThrow('not found');
-    expect(() => registry.getLLMProvider('missing')).toThrow('not found');
-    expect(() => registry.getTTSProvider('missing')).toThrow('not found');
-    expect(() => registry.getImageProvider('missing')).toThrow('not found');
-    expect(() => registry.getRealtimeProvider('missing')).toThrow('not found');
+    expect(() => registry.getSTTProvider('missing' as any)).toThrow('not found');
+    expect(() => registry.getLLMProvider('missing' as any)).toThrow('not found');
+    expect(() => registry.getTTSProvider('missing' as any)).toThrow('not found');
+    expect(() => registry.getImageProvider('missing' as any)).toThrow('not found');
+    expect(() => registry.getRealtimeProvider('missing' as any)).toThrow('not found');
   });
 
   it('throws when provider exists but capability missing', () => {
     const registry = new AIProviderRegistry();
     registry.register({
-      id: 'stt-only',
+      id: 'stt-only' as any,
       name: 'STT Only',
       description: 'Only supports STT',
       capabilities: ['stt'],
+      requiresApiKey: false,
       stt: { transcribe: vi.fn(), isConfigured: () => true, getModels: () => [] } as any,
-    });
+    } as any);
 
-    expect(() => registry.getSTTProvider('stt-only')).not.toThrow();
-    expect(() => registry.getLLMProvider('stt-only')).toThrow('does not support LLM');
-    expect(() => registry.getTTSProvider('stt-only')).toThrow('does not support TTS');
+    expect(() => registry.getSTTProvider('stt-only' as any)).not.toThrow();
+    expect(() => registry.getLLMProvider('stt-only' as any)).toThrow('does not support LLM');
+    expect(() => registry.getTTSProvider('stt-only' as any)).toThrow('does not support TTS');
   });
 
   it('listProviders returns all registered', () => {
     const registry = new AIProviderRegistry();
-    registry.register({ id: 'a', name: 'A', description: '', capabilities: [] });
-    registry.register({ id: 'b', name: 'B', description: '', capabilities: [] });
+    registry.register({ id: 'a' as any, name: 'A', description: '', capabilities: [] } as any);
+    registry.register({ id: 'b' as any, name: 'B', description: '', capabilities: [] } as any);
     expect(registry.listProviders()).toHaveLength(2);
   });
 
   it('listProvidersByCapability filters correctly', () => {
     const registry = new AIProviderRegistry();
-    registry.register({ id: 'a', name: 'A', description: '', capabilities: ['stt', 'llm'] });
-    registry.register({ id: 'b', name: 'B', description: '', capabilities: ['tts'] });
-    registry.register({ id: 'c', name: 'C', description: '', capabilities: ['llm', 'tts'] });
+    registry.register({ id: 'a' as any, name: 'A', description: '', capabilities: ['stt', 'llm'] } as any);
+    registry.register({ id: 'b' as any, name: 'B', description: '', capabilities: ['tts'] } as any);
+    registry.register({ id: 'c' as any, name: 'C', description: '', capabilities: ['llm', 'tts'] } as any);
 
     expect(registry.listProvidersByCapability('llm')).toHaveLength(2);
     expect(registry.listProvidersByCapability('tts')).toHaveLength(2);
@@ -1837,7 +1840,7 @@ describe('14. Tier Lifecycle Management', () => {
     const autoscaler = createAutoscaler({
       settingsStore: new MockSettingsStore(), stateStore, sessionResolver,
       loadConfig: async () => config,
-      lifecycleLogger: { log: (e) => { lifecycleEvents.push(e as Record<string, unknown>); } },
+      lifecycleLogger: { log: (e) => { lifecycleEvents.push(e as unknown as Record<string, unknown>); } },
     });
 
     // Force tier 0 ready
@@ -1898,7 +1901,7 @@ describe('14. Tier Lifecycle Management', () => {
     const autoscaler = createAutoscaler({
       settingsStore: new MockSettingsStore(), stateStore, sessionResolver,
       loadConfig: async () => config,
-      lifecycleLogger: { log: (e) => { lifecycleEvents.push(e as Record<string, unknown>); } },
+      lifecycleLogger: { log: (e) => { lifecycleEvents.push(e as unknown as Record<string, unknown>); } },
     });
 
     autoscaler.forceTierReady(USER, 0, config.tiers[0].endpoint!);
@@ -1963,7 +1966,7 @@ describe('14. Tier Lifecycle Management', () => {
     const autoscaler = createAutoscaler({
       settingsStore: new MockSettingsStore(), stateStore, sessionResolver,
       loadConfig: async () => config,
-      lifecycleLogger: { log: (e) => { lifecycleEvents.push(e as Record<string, unknown>); } },
+      lifecycleLogger: { log: (e) => { lifecycleEvents.push(e as unknown as Record<string, unknown>); } },
     });
 
     // Start

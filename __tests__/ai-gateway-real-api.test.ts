@@ -158,6 +158,7 @@ function createRealClient(): AIClient {
     registry.register({
       id: 'openai',
       name: 'OpenAI',
+      description: 'OpenAI provider',
       capabilities: ['llm', 'stt', 'tts'],
       requiresApiKey: true,
       llm: makeOpenaiLLM(),
@@ -170,6 +171,7 @@ function createRealClient(): AIClient {
     registry.register({
       id: 'groq',
       name: 'Groq',
+      description: 'Groq provider',
       capabilities: ['llm', 'stt', 'tts'],
       requiresApiKey: true,
       llm: groqLLM,
@@ -182,6 +184,7 @@ function createRealClient(): AIClient {
     registry.register({
       id: 'openrouter',
       name: 'OpenRouter',
+      description: 'OpenRouter provider',
       capabilities: ['llm'],
       requiresApiKey: true,
       llm: openrouterLLM,
@@ -192,6 +195,7 @@ function createRealClient(): AIClient {
     registry.register({
       id: 'fireworks',
       name: 'Fireworks',
+      description: 'Fireworks provider',
       capabilities: ['llm'],
       requiresApiKey: true,
       llm: fireworksLLM,
@@ -201,6 +205,7 @@ function createRealClient(): AIClient {
   registry.register({
     id: 'modal',
     name: 'Modal',
+    description: 'Modal provider',
     capabilities: ['tts'],
     requiresApiKey: false,
     tts: modalTTS,

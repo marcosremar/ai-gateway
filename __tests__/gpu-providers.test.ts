@@ -374,20 +374,20 @@ describe('Observability Hooks — lifecycle tracking', () => {
   it('tracks full request lifecycle with hooks', async () => {
     const events: Array<{ hook: string; data: Record<string, any> }> = [];
     const hooks: GatewayHooks = {
-      onRequestStart: (e) => events.push({ hook: 'start', data: e }),
-      onRequestEnd: (e) => events.push({ hook: 'end', data: e }),
-      onScaleUp: (e) => events.push({ hook: 'scaleUp', data: e }),
-      onScaleDown: (e) => events.push({ hook: 'scaleDown', data: e }),
-      onHealthChange: (e) => events.push({ hook: 'healthChange', data: e }),
-      onCostAlert: (e) => events.push({ hook: 'costAlert', data: e }),
+      onRequestStart: (e) => { events.push({ hook: 'start', data: e }); },
+      onRequestEnd: (e) => { events.push({ hook: 'end', data: e }); },
+      onScaleUp: (e) => { events.push({ hook: 'scaleUp', data: e }); },
+      onScaleDown: (e) => { events.push({ hook: 'scaleDown', data: e }); },
+      onHealthChange: (e) => { events.push({ hook: 'healthChange', data: e }); },
+      onCostAlert: (e) => { events.push({ hook: 'costAlert', data: e }); },
     };
 
     // Simulate a real request flow
     emitHook(hooks, 'onRequestStart', { userId: 'u1', provider: 'openai', stage: 'llm', model: 'gpt-4o-mini', timestamp: Date.now() });
     emitHook(hooks, 'onRequestEnd', { userId: 'u1', provider: 'openai', stage: 'llm', model: 'gpt-4o-mini', latencyMs: 450, success: true, timestamp: Date.now() });
     emitHook(hooks, 'onScaleUp', { userId: 'u1', tierIndex: 0, provider: 'runpod', trigger: 'sessions', activeSessions: 6, timestamp: Date.now() });
-    emitHook(hooks, 'onHealthChange', { userId: 'u1', tierIndex: 0, oldState: 'booting', newState: 'ready', endpoint: 'http://gpu:8000', timestamp: Date.now() });
-    emitHook(hooks, 'onScaleDown', { userId: 'u1', tierIndex: 0, reason: 'idle', idleMinutes: 15, timestamp: Date.now() });
+    emitHook(hooks, 'onHealthChange', { userId: 'u1', tierIndex: 0, provider: 'runpod', previousState: 'booting', newState: 'ready', endpoint: 'http://gpu:8000', timestamp: Date.now() });
+    emitHook(hooks, 'onScaleDown', { userId: 'u1', tierIndex: 0, provider: 'runpod', reason: 'idle', idleMinutes: 15, timestamp: Date.now() });
 
     expect(events).toHaveLength(5);
     expect(events.map(e => e.hook)).toEqual(['start', 'end', 'scaleUp', 'healthChange', 'scaleDown']);
@@ -640,10 +640,10 @@ describe('E2E: Gateway decision flow', () => {
     const events: string[] = [];
 
     const hooks: GatewayHooks = {
-      onRequestStart: (e) => events.push(`start:${e.stage}:${e.provider}`),
-      onRequestEnd: (e) => events.push(`end:${e.stage}:${e.success ? 'ok' : 'fail'}`),
-      onScaleUp: (e) => events.push(`scaleUp:tier${e.tierIndex}`),
-      onHealthChange: (e) => events.push(`health:${e.oldState}→${e.newState}`),
+      onRequestStart: (e) => { events.push(`start:${e.stage}:${e.provider}`); },
+      onRequestEnd: (e) => { events.push(`end:${e.stage}:${e.success ? 'ok' : 'fail'}`); },
+      onScaleUp: (e) => { events.push(`scaleUp:tier${e.tierIndex}`); },
+      onHealthChange: (e) => { events.push(`health:${e.previousState}→${e.newState}`); },
     };
 
     // Step 1: Resolve fallback chain
@@ -690,7 +690,7 @@ describe('E2E: Gateway decision flow', () => {
 
     // Step 6: Simulate scale-up event
     emitHook(hooks, 'onScaleUp', { userId: 'e2e-user', tierIndex: 0, provider: 'runpod', trigger: 'sessions', activeSessions: 6, timestamp: Date.now() });
-    emitHook(hooks, 'onHealthChange', { userId: 'e2e-user', tierIndex: 0, oldState: 'booting', newState: 'ready', endpoint: 'http://gpu-0:8000', timestamp: Date.now() });
+    emitHook(hooks, 'onHealthChange', { userId: 'e2e-user', tierIndex: 0, provider: 'runpod', previousState: 'booting', newState: 'ready', endpoint: 'http://gpu-0:8000', timestamp: Date.now() });
 
     expect(events).toEqual([
       'start:llm:groq',
@@ -755,21 +755,21 @@ describe.skipIf(!process.env.RUNPOD_API_KEY)('E2E: GPU Boot Cycle — stop, boot
     registry.register(client);
 
     // Use the autoscaler engine to boot
-    const { AutoscalerEngine } = await import('../../packages/ai-gateway/src/autoscaler/engine');
-    const { SessionTracker } = await import('../../packages/ai-gateway/src/autoscaler/session-tracker');
-    const { LatencyTracker } = await import('../../packages/ai-gateway/src/autoscaler/latency-tracker');
-    const { StatePersistence } = await import('../../packages/ai-gateway/src/autoscaler/state-persistence');
+    const { AutoscalerEngine } = await import('@ai-gateway/autoscaler/engine');
+    const { SessionTracker } = await import('@ai-gateway/autoscaler/session-tracker');
+    const { LatencyTracker } = await import('@ai-gateway/autoscaler/latency-tracker');
+    const { StatePersistence } = await import('@ai-gateway/autoscaler/state-persistence');
 
     const store = new MemoryStateStore();
-    const sessionTracker = new SessionTracker(store, { getActiveSessionKeys: async () => [] });
+    const sessionTracker = new SessionTracker(store, { getActiveSessionCount: async () => 0 } as any);
     const latencyTracker = new LatencyTracker(store);
     const persistence = new StatePersistence(store);
     const noop = async () => {};
 
-    const engine = new AutoscalerEngine(
+    const engine = new AutoscalerEngine({
       registry, sessionTracker, latencyTracker, persistence,
-      probeGpuHealth, async () => {}, // cleanup noop
-    );
+      probeHealth: probeGpuHealth, cleanupInstance: async () => {},
+    } as any);
 
     const tierConfig = {
       provider: 'runpod' as const,

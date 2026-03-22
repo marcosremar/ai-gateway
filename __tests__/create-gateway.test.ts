@@ -86,7 +86,7 @@ describe('createGateway', () => {
 
     it('getPoolStatus returns array', () => {
       const pool = gateway.getPoolStatus('user-1');
-      expect(Array.isArray(pool) || typeof pool?.then === 'function').toBe(true);
+      expect(Array.isArray(pool)).toBe(true);
     });
 
     it('getReadyEndpoints returns array', () => {

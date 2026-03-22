@@ -55,6 +55,14 @@ import { probeGpuHealth } from '@ai-gateway/autoscaler/health';
 import type { AutoScalerConfig, GpuTierConfig } from '@ai-gateway/types';
 import type { HandlerResult } from '@ai-gateway/handlers/types';
 
+interface ModalAppsResult {
+  connected: boolean;
+  apps?: Array<{ appId: string; name: string; stateLabel: string; nRunningTasks: number; webUrl?: string }>;
+  totalCount?: number;
+  deployedCount?: number;
+  error?: string;
+}
+
 // ── Credential helpers ───────────────────────────────────────────────────
 const TOKEN_ID = process.env.MODAL_TOKEN_ID ?? '';
 const TOKEN_SECRET = process.env.MODAL_TOKEN_SECRET ?? '';
@@ -86,17 +94,15 @@ function createModalAutoscaler(userId: string, activeSessions: number) {
   const stateAdapter = new InMemoryStateAdapter();
 
   const config: AutoScalerConfig = {
-    userId,
     enabled: true,
-    route: { stt: 'gpu', llm: 'gpu', tts: 'gpu' },
-    scaleTrigger: 'session',
     threshold: 1,
     windowMinutes: 5,
+    maxLatencyMs: 2000,
     tiers: [
       {
         provider: 'modal',
         gpuTypes: ['parle-ultralight'],
-        credentials: { apiKey: API_KEY },
+        apiKey: API_KEY,
       } as GpuTierConfig,
     ],
   };
@@ -127,35 +133,37 @@ function createModalAutoscaler(userId: string, activeSessions: number) {
 
 describe('1. Modal REST API (handleModalApps)', () => {
   it.skipIf(!hasCredentials)('calls Modal API and returns a valid response', async () => {
-    const result: HandlerResult = await handleModalApps(TOKEN_ID, TOKEN_SECRET);
+    const result = await handleModalApps(TOKEN_ID, TOKEN_SECRET);
+    const body = result.body as ModalAppsResult;
 
     expect(result.status).toBe(200);
 
     // Modal's v1/apps endpoint may return gRPC/protobuf instead of JSON.
     // handleModalApps returns connected:false with an error in that case.
-    if (result.body.connected) {
+    if (body.connected) {
       // REST JSON worked — validate app structure
-      expect(result.body.apps).toBeDefined();
-      expect(Array.isArray(result.body.apps)).toBe(true);
-      expect(typeof result.body.totalCount).toBe('number');
-      expect(typeof result.body.deployedCount).toBe('number');
+      expect(body.apps).toBeDefined();
+      expect(Array.isArray(body.apps)).toBe(true);
+      expect(typeof body.totalCount).toBe('number');
+      expect(typeof body.deployedCount).toBe('number');
 
-      console.log(`[Modal API] Connected! Found ${result.body.totalCount} apps (${result.body.deployedCount} deployed)`);
-      for (const app of result.body.apps ?? []) {
+      console.log(`[Modal API] Connected! Found ${body.totalCount} apps (${body.deployedCount} deployed)`);
+      for (const app of body.apps ?? []) {
         console.log(`  - ${app.name} [${app.stateLabel}] tasks=${app.nRunningTasks} appId=${app.appId}`);
       }
     } else {
       // gRPC/protobuf response — handler gracefully reports disconnected
-      expect(typeof result.body.error).toBe('string');
-      console.log(`[Modal API] API returned non-JSON (gRPC): ${result.body.error}`);
+      expect(typeof body.error).toBe('string');
+      console.log(`[Modal API] API returned non-JSON (gRPC): ${body.error}`);
     }
   });
 
   it.skipIf(!hasCredentials)('apps have required fields when API returns JSON', async () => {
     const result = await handleModalApps(TOKEN_ID, TOKEN_SECRET);
-    if (!result.body.connected) return; // skip if gRPC
+    const body = result.body as ModalAppsResult;
+    if (!body.connected) return; // skip if gRPC
 
-    const apps = result.body.apps ?? [];
+    const apps = body.apps ?? [];
     for (const app of apps) {
       expect(app.appId).toBeTruthy();
       expect(typeof app.name).toBe('string');
@@ -166,9 +174,10 @@ describe('1. Modal REST API (handleModalApps)', () => {
 
   it.skipIf(!hasCredentials)('apps are sorted by state priority when API returns JSON', async () => {
     const result = await handleModalApps(TOKEN_ID, TOKEN_SECRET);
-    if (!result.body.connected) return; // skip if gRPC
+    const body = result.body as ModalAppsResult;
+    if (!body.connected) return; // skip if gRPC
 
-    const apps = result.body.apps ?? [];
+    const apps = body.apps ?? [];
     if (apps.length >= 2) {
       const statePriority: Record<string, number> = {
         deployed: 0, ephemeral: 1, initializing: 2,
@@ -184,16 +193,18 @@ describe('1. Modal REST API (handleModalApps)', () => {
 
   it('returns error for invalid credentials', async () => {
     const result = await handleModalApps('invalid-token', 'invalid-secret');
+    const body = result.body as ModalAppsResult;
     expect(result.status).toBe(200);
-    expect(result.body.connected).toBe(false);
-    expect(result.body.error).toBeTruthy();
-    console.log(`[Modal API] Invalid creds error: ${result.body.error}`);
+    expect(body.connected).toBe(false);
+    expect(body.error).toBeTruthy();
+    console.log(`[Modal API] Invalid creds error: ${body.error}`);
   });
 
   it('returns error for empty credentials', async () => {
     const result = await handleModalApps('', '');
+    const body = result.body as ModalAppsResult;
     expect(result.status).toBe(400);
-    expect(result.body.error).toBeTruthy();
+    expect(body.error).toBeTruthy();
   });
 });
 
@@ -424,13 +435,12 @@ describe('4. Autoscaler with Modal Tier', () => {
 
     console.log(`[Autoscaler] Health probe result:`, health);
 
-    // If endpoint is stopped (404), health may be null or unhealthy
-    // If endpoint is running, health should be 'healthy'
-    // The probe should never crash regardless
+    // probeGpuHealth returns boolean: true = healthy, false = unhealthy/unreachable
+    expect(typeof health).toBe('boolean');
     if (health) {
-      expect(typeof health.status).toBe('string');
+      console.log('[Autoscaler] GPU endpoint is healthy');
     } else {
-      console.log('[Autoscaler] Health probe returned null (endpoint likely stopped)');
+      console.log('[Autoscaler] Health probe returned false (endpoint likely stopped)');
     }
   }, 15_000);
 
@@ -559,13 +569,14 @@ describe('5. MOSS-TTS Endpoint Health', () => {
 describe('6. Gateway unified API', () => {
   it.skipIf(!hasCredentials)('handleModalApps returns valid response structure', async () => {
     const result = await handleModalApps(TOKEN_ID, TOKEN_SECRET);
+    const body = result.body as ModalAppsResult;
 
     expect(result.status).toBe(200);
-    expect(typeof result.body.connected).toBe('boolean');
+    expect(typeof body.connected).toBe('boolean');
 
-    if (result.body.connected) {
+    if (body.connected) {
       // REST JSON worked
-      const deployed = (result.body.apps ?? []).filter(
+      const deployed = (body.apps ?? []).filter(
         (a: { stateLabel: string }) => a.stateLabel === 'deployed',
       );
 
@@ -577,8 +588,8 @@ describe('6. Gateway unified API', () => {
       console.log(`[Gateway] ${deployed.length} deployed apps found`);
     } else {
       // gRPC response — handler returned graceful error
-      expect(result.body.error).toBeTruthy();
-      console.log(`[Gateway] Modal API non-JSON response: ${result.body.error}`);
+      expect(body.error).toBeTruthy();
+      console.log(`[Gateway] Modal API non-JSON response: ${body.error}`);
     }
   });
 
