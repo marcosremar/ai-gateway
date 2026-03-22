@@ -1079,20 +1079,25 @@ export async function startDeployLoop(
             message: `TensorDock instance resumed, waiting for /health...`,
           });
           deploymentSM.startBooting(existing.instanceId);
-          const { result } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, endpoint, startedAt, dockerImage);
-          if (result === 'ready') {
+          const { result: res1, pullTimeS: pt1 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>);
+          if (res1 === 'ready') {
             const durationMs = Date.now() - deployState.startedAt;
             setGpuHealthy(true);
             setLastRequestTime(Date.now());
             setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
             deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
-            console.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (${label})`);
+            console.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pt1 ?? '?'}s, ${label})`);
+            if (pt1 != null) {
+              const { recordPullTime, deriveHostKey: dk } = await import('../src/gpu-providers/pull-time-estimator');
+              dk(providerName, existing.providerMeta as Record<string, unknown>);
+              recordPullTime(dockerImage, pt1, undefined, dk(providerName, existing.providerMeta as Record<string, unknown>), Math.round(durationMs / 1000));
+            }
             startGpuMonitoring();
             startBackgroundWarmthMonitor(deployState.endpoint);
             return;
           }
-          if (result === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
+          if (res1 === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
           console.log(`[gpu] Resumed TensorDock instance failed health check — creating new`);
         } else if (isRunning && existing.endpoint) {
           console.log(`[gpu] TensorDock: found running instance ${existing.instanceId} at ${existing.endpoint}`);
@@ -1102,20 +1107,24 @@ export async function startDeployLoop(
             message: `TensorDock instance already running, checking health...`,
           });
           deploymentSM.startBooting(existing.instanceId);
-          const { result } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, existing.endpoint, startedAt, dockerImage);
-          if (result === 'ready') {
+          const { result: res2, pullTimeS: pt2 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, existing.endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>);
+          if (res2 === 'ready') {
             const durationMs = Date.now() - deployState.startedAt;
             setGpuHealthy(true);
             setLastRequestTime(Date.now());
             setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
             deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
-            console.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (${label})`);
+            console.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pt2 ?? '?'}s, ${label})`);
+            if (pt2 != null) {
+              const { recordPullTime, deriveHostKey: dk } = await import('../src/gpu-providers/pull-time-estimator');
+              recordPullTime(dockerImage, pt2, undefined, dk(providerName, existing.providerMeta as Record<string, unknown>), Math.round(durationMs / 1000));
+            }
             startGpuMonitoring();
             startBackgroundWarmthMonitor(deployState.endpoint);
             return;
           }
-          if (result === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
+          if (res2 === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
           console.log(`[gpu] Running TensorDock instance not healthy — creating new`);
         }
       }
