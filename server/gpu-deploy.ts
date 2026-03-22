@@ -1718,6 +1718,7 @@ export async function pollHealthUntilReady(
   let healthRespondedOnce = false;   // true after first /health 200
   let healthFirstResponseAt = 0;     // timestamp of first /health response
   let allServicesLoaded = false;     // true when all STT+LLM+TTS report loaded
+  let pullStartedAt = 0;             // timestamp when image pull phase began
   let consecutiveHealthFailures = 0;       // health failures while container is supposedly running
   let firstNonTransientErrorAt = 0;        // timestamp when non-transient HTTP errors started
   let consecutiveNonTransient = 0;         // consecutive 4xx responses from /health
@@ -1734,9 +1735,10 @@ export async function pollHealthUntilReady(
       MODELS:     10 * 60_000,   // 10 min — HuggingFace model download + load
     };
 
-    // Image pull timeout
-    if (!containerStartedAt && totalElapsedMs > PHASE_TIMEOUTS.IMAGE_PULL) {
-      const timeoutMsg = `Image pull timeout (${Math.round(totalElapsedMs / 60_000)} min) — trying next machine`;
+    // Image pull timeout — track from when pull actually started, not deploy start
+    if (!containerStartedAt && pullStartedAt > 0 && (Date.now() - pullStartedAt) > PHASE_TIMEOUTS.IMAGE_PULL) {
+      const pullSec = Math.round((Date.now() - pullStartedAt) / 1000);
+      const timeoutMsg = `Image pull timeout (${pullSec}s pulling) — machine too slow, trying next`;
       console.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
       broadcastWs({ type: 'gpu:deploy', phase: 'pull_timeout', provider: providerName, elapsedMs: totalElapsedMs });
       setDeployState({ status: 'error', step: 'pulling_image', message: timeoutMsg });
@@ -1792,6 +1794,7 @@ export async function pollHealthUntilReady(
           const costStr = detail.costPerHr ? `$${detail.costPerHr.toFixed(3)}/h` : '';
 
           if (!detail.runtime) {
+            if (!pullStartedAt) pullStartedAt = Date.now();
             setDeployState({
               status: 'installing', step: 'pulling_image',
               message: `Pulling image & starting container... [${elapsed}s]`,
@@ -1857,6 +1860,7 @@ export async function pollHealthUntilReady(
                 stepDetail: deployState.gpuType || '',
               });
             } else {
+              if (!pullStartedAt) pullStartedAt = Date.now();
               setDeployState({
                 status: 'installing', step: 'pulling_image',
                 message: `Pulling Docker image... [${elapsed}s]`,
