@@ -192,6 +192,12 @@ class GpuStatus:
     retry_count: int
     provider: str = ""   # 'runpod' | 'vast' | ''
     alert: str = ""      # e.g. "RunPod blocked, using Vast.ai fallback"
+    cost_per_hr: float = 0.0
+    docker_image: str = ""
+    region: str = ""
+    ip_flag: str = ""
+    ip_city: str = ""
+    ip_country: str = ""
 
 
 @dataclass
@@ -207,6 +213,7 @@ class DeployOptions:
     tensordock_auth_id: str = ""
     llm_model: str = ""  # "translategemma" or "mistral"
     interruptible: Optional[bool] = None  # True=spot (cheaper), False/None=on-demand (default)
+    race_count: int = 0  # parallel deploy race (0=disabled)
 
 
 @dataclass
