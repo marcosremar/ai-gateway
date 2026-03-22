@@ -78,28 +78,29 @@ export const SERVERLESS_PROVIDERS = [
 ] as const;
 
 // ── Pipeline catalog — models/providers per stage ──
+// Qwen3-ASR is the DEFAULT streaming STT (6.6% WER, 1.7x better than Fireworks).
 
 export const PIPELINE_CATALOG = {
   stt: {
     label: 'STT',
     subtitle: 'Speech-to-Text',
     providers: [
-      { id: 'groq',        label: 'Groq',              streaming: false },
-      { id: 'openai',      label: 'OpenAI',             streaming: false },
-      { id: 'deepgram',    label: 'Deepgram',           streaming: false },
-      { id: 'elevenlabs',  label: 'ElevenLabs',         streaming: false },
-      { id: 'fireworks',   label: 'Fireworks',          streaming: true  },
-      { id: 'qwen3-asr',   label: 'Qwen3-ASR (Modal)',  streaming: true  },
-      { id: 'gpu',         label: 'GPU (self-hosted)',  streaming: true  },
+      { id: 'qwen3-asr',   label: 'Qwen3-ASR (default)', streaming: true  },
+      { id: 'gpu',         label: 'GPU (self-hosted)',    streaming: true  },
+      { id: 'fireworks',   label: 'Fireworks',            streaming: true  },
+      { id: 'groq',        label: 'Groq',                streaming: false },
+      { id: 'openai',      label: 'OpenAI',               streaming: false },
+      { id: 'deepgram',    label: 'Deepgram',             streaming: false },
+      { id: 'elevenlabs',  label: 'ElevenLabs',           streaming: false },
     ],
     models: {
+      'qwen3-asr': [{ id: 'qwen3-asr-1.7b', label: 'Qwen3-ASR 1.7B — 6.6% WER, streaming', streaming: true }],
+      gpu:        [{ id: 'faster-whisper-large-v3', label: 'Faster Whisper Large v3', streaming: true }, { id: 'faster-whisper-large-v3-turbo', label: 'Faster Whisper Turbo', streaming: true }, { id: 'whisper', label: 'Faster Whisper', streaming: true }],
+      fireworks:  [{ id: 'whisper-large-v3', label: 'Whisper Large v3 (streaming)', streaming: true }],
       groq:       [{ id: 'whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo', streaming: false }, { id: 'whisper-large-v3', label: 'Whisper Large v3', streaming: false }],
       openai:     [{ id: 'whisper-1', label: 'Whisper v2', streaming: false }],
       deepgram:   [{ id: 'nova-2', label: 'Nova-2', streaming: false }, { id: 'nova-3', label: 'Nova-3', streaming: false }],
       elevenlabs: [{ id: 'scribe_v2', label: 'Scribe v2', streaming: false }, { id: 'scribe_v1', label: 'Scribe v1', streaming: false }],
-      fireworks:  [{ id: 'whisper-large-v3', label: 'Whisper Large v3 (streaming)', streaming: true }],
-      'qwen3-asr': [{ id: 'qwen3-asr-1.7b', label: 'Qwen3-ASR 1.7B (7.7% WER, streaming)', streaming: true }],
-      gpu:        [{ id: 'faster-whisper-large-v3', label: 'Faster Whisper Large v3', streaming: true }, { id: 'faster-whisper-large-v3-turbo', label: 'Faster Whisper Turbo', streaming: true }, { id: 'whisper', label: 'Faster Whisper', streaming: true }],
     } as Record<string, { id: string; label: string; streaming?: boolean }[]>,
   },
   llm: {

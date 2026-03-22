@@ -298,10 +298,12 @@ export const ollamaProfile: AIProfile | null = ollamaAvailable ? {
 } : null;
 
 // translationProfile is used by client.pipeline() — gpuEndpoint is dynamically toggled
-// Fallback order: GPU (fastest when warm) → Groq (fast cloud) → Qwen3-ASR Pipeline (best quality)
+// Fallback order: Local Qwen3 (fastest) → GPU → Groq (cloud) → Modal Qwen3-ASR (serverless)
 export const translationProfile: AIProfile = {
   gpuEndpoint: RUNPOD_ENDPOINT,
   stt: [
+    // Local MLX Qwen3-ASR (Apple Silicon, fastest when available)
+    ...(mlxQwenAvailable ? [{ provider: 'mlx-qwen3-asr' as const, model: 'qwen3-asr' }] : []),
     { provider: 'groq', model: groqSttModel },
     { provider: 'modal-qwen3asr-pipeline', model: 'qwen3-asr-1.7b' },
     { provider: 'modal-voxtral', model: 'voxtral-mini-3b' },

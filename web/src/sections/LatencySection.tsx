@@ -394,6 +394,127 @@ export function LatencySection() {
           )}
         </CardBody>
       </Card>
+
+      {/* ── Streaming STT Benchmark Reference ── */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+              style={{ background: 'rgba(6,182,212,0.12)' }}>
+              <Wifi className="w-4 h-4 text-cyan-400" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-sm" style={{ color: 'var(--color-text)' }}>Streaming STT Benchmark</h3>
+              <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                Qwen3-ASR 1.7B vs Fireworks Whisper v3 — real-time mic simulation, 2026-03-21
+              </p>
+            </div>
+          </div>
+        </CardHeader>
+        <CardBody>
+          <div className="space-y-3">
+            {/* Provider comparison */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr style={{ color: 'var(--color-text-muted)' }}>
+                    <th className="text-left py-1 pr-3">Corpus</th>
+                    <th className="text-right py-1 px-2" colSpan={2}>Qwen3-ASR</th>
+                    <th className="text-right py-1 px-2" colSpan={2}>Fireworks</th>
+                    <th className="text-center py-1 px-2">Winner</th>
+                  </tr>
+                  <tr style={{ color: 'var(--color-text-muted)', fontSize: '10px' }}>
+                    <th></th>
+                    <th className="text-right px-2">TTFR</th>
+                    <th className="text-right px-2">WER</th>
+                    <th className="text-right px-2">TTFR</th>
+                    <th className="text-right px-2">WER</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {[
+                    { corpus: 'VoxPopuli FR', qTtfr: 2503, qWer: 11.6, fTtfr: 784, fWer: 12.4, winner: 'Qwen3' },
+                    { corpus: 'VoxPopuli EN', qTtfr: 2487, qWer: 6.8, fTtfr: 729, fWer: 13.1, winner: 'Qwen3' },
+                    { corpus: 'FLEURS FR', qTtfr: 2698, qWer: 9.3, fTtfr: 1663, fWer: 26.0, winner: 'Qwen3' },
+                    { corpus: 'FLEURS EN', qTtfr: 2488, qWer: 3.1, fTtfr: 1277, fWer: 5.5, winner: 'Qwen3' },
+                  ].map(r => (
+                    <tr key={r.corpus} className="border-t" style={{ borderColor: 'var(--color-border)' }}>
+                      <td className="py-1.5 pr-3" style={{ color: 'var(--color-text)' }}>{r.corpus}</td>
+                      <td className="py-1.5 px-2 text-right" style={{ color: 'var(--color-text-muted)' }}>{r.qTtfr}ms</td>
+                      <td className="py-1.5 px-2 text-right font-semibold" style={{ color: r.qWer < r.fWer ? '#34d399' : 'var(--color-text)' }}>{r.qWer}%</td>
+                      <td className="py-1.5 px-2 text-right" style={{ color: 'var(--color-text-muted)' }}>{r.fTtfr}ms</td>
+                      <td className="py-1.5 px-2 text-right" style={{ color: r.fWer < r.qWer ? '#34d399' : 'var(--color-text)' }}>{r.fWer}%</td>
+                      <td className="py-1.5 px-2 text-center" style={{ color: '#34d399' }}>{r.winner}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Chunk size tradeoff */}
+            <div className="mt-3 pt-3" style={{ borderTop: '1px solid var(--color-border)' }}>
+              <p className="text-xs font-semibold mb-2" style={{ color: 'var(--color-text)' }}>
+                Chunk Size vs Accuracy (VoxPopuli FR, default: 1.0s)
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs font-mono">
+                  <thead>
+                    <tr style={{ color: 'var(--color-text-muted)' }}>
+                      <th className="text-left py-1">Chunk</th>
+                      <th className="text-right py-1">TTFR</th>
+                      <th className="text-right py-1">WER</th>
+                      <th className="text-right py-1">Est. RTX 4090</th>
+                      <th className="text-left py-1 pl-3">Note</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[
+                      { chunk: '0.5s', ttfr: 980, wer: 13.7, est4090: '~625ms', note: 'Fastest, some accuracy loss' },
+                      { chunk: '1.0s', ttfr: 1439, wer: 10.1, est4090: '~700ms', note: 'Best tradeoff (default)', active: true },
+                      { chunk: '2.0s', ttfr: 2489, wer: 9.1, est4090: '~1150ms', note: 'Best accuracy' },
+                      { chunk: '4.0s', ttfr: 4763, wer: 9.1, est4090: '~2200ms', note: 'No gain vs 2.0s' },
+                    ].map(r => (
+                      <tr key={r.chunk} className="border-t" style={{
+                        borderColor: 'var(--color-border)',
+                        background: r.active ? 'rgba(6,182,212,0.06)' : undefined,
+                      }}>
+                        <td className="py-1" style={{ color: r.active ? '#06b6d4' : 'var(--color-text)' }}>
+                          {r.active ? `${r.chunk} *` : r.chunk}
+                        </td>
+                        <td className="py-1 text-right" style={{ color: 'var(--color-text-muted)' }}>{r.ttfr}ms</td>
+                        <td className="py-1 text-right" style={{ color: r.wer <= 10.1 ? '#34d399' : '#fbbf24' }}>{r.wer}%</td>
+                        <td className="py-1 text-right" style={{ color: 'var(--color-text-muted)' }}>{r.est4090}</td>
+                        <td className="py-1 pl-3 text-left" style={{ color: 'var(--color-text-muted)', fontFamily: 'inherit' }}>{r.note}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* GPU recommendation */}
+            <div className="mt-3 pt-3" style={{ borderTop: '1px solid var(--color-border)' }}>
+              <p className="text-xs font-semibold mb-1" style={{ color: 'var(--color-text)' }}>
+                GPU Recommendation (Vast.ai, chunk=1.0s)
+              </p>
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                {[
+                  { gpu: 'RTX 5090', price: '$0.31/hr', ttfr: '~800ms', label: 'Best value' },
+                  { gpu: 'RTX 4090', price: '$0.59/hr', ttfr: '~700ms', label: 'Fastest' },
+                  { gpu: 'L40S', price: '$0.47/hr', ttfr: '~750ms', label: 'Most VRAM' },
+                ].map(g => (
+                  <div key={g.gpu} className="rounded-lg p-2" style={{ background: 'var(--color-card-bg)', border: '1px solid var(--color-border)' }}>
+                    <div className="font-semibold" style={{ color: 'var(--color-text)' }}>{g.gpu}</div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>{g.price} &middot; {g.ttfr}</div>
+                    <div style={{ color: '#06b6d4', fontSize: '10px' }}>{g.label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </CardBody>
+      </Card>
     </div>
   );
 }
