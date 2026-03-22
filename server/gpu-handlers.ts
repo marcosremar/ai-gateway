@@ -1570,6 +1570,34 @@ import {
 export async function handleGetLatencySettings(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   const status = getLatencySchedulerStatus();
   const dbStats = getLatencyDbStats();
+  // Pull time learning stats
+  let pullTimeLearning: Record<string, unknown> = {};
+  try {
+    const { getObservationCount, estimatePullTimeout } = await import('../src/gpu-providers/pull-time-estimator');
+    const knownImages = [
+      'marcosremar/babelcast-translategemma:latest',
+      'marcosremar/babelcast-mistral:latest',
+      'marcosremar/babelcast-groq:latest',
+      'marcosremar/babelcast-qwen3asr:latest',
+    ];
+    const imageStats: Record<string, unknown> = {};
+    for (const img of knownImages) {
+      const count = getObservationCount(img);
+      const est = await estimatePullTimeout({ dockerImage: img });
+      imageStats[img] = {
+        observations: count,
+        phase: count >= 10 ? 'data-driven' : count > 0 ? 'learning' : 'no-data',
+        confidence: est.confidence,
+        timeoutSec: Math.round(est.timeoutMs / 1000),
+        basis: est.basis,
+      };
+    }
+    pullTimeLearning = {
+      description: 'Adaptive pull timeouts: < 10 deploys = generous 30min; ≥ 10 = avg + 30% safety',
+      images: imageStats,
+    };
+  } catch { /* estimator not available */ }
+
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     ...status,
@@ -1587,6 +1615,7 @@ export async function handleGetLatencySettings(_req: IncomingMessage, res: Serve
     standbyDrainTimeoutMs: getStandbyDrainTimeoutMs(),
     deployRaceCount: getDeployRaceCount(),
     dbStats,
+    pullTimeLearning,
   }));
 }
 

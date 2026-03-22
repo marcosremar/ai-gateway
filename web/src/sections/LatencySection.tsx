@@ -395,6 +395,103 @@ export function LatencySection() {
         </CardBody>
       </Card>
 
+      {/* ── Pull Time Learning ── */}
+      {settings?.pullTimeLearning && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+                style={{ background: 'rgba(251,191,36,0.12)' }}>
+                <Clock className="w-4 h-4 text-amber-400" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-sm" style={{ color: 'var(--color-text)' }}>Adaptive Pull Timeouts</h3>
+                <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                  Learns from deploy history — tight timeout after 10+ deploys per image
+                </p>
+              </div>
+            </div>
+          </CardHeader>
+          <CardBody>
+            <div className="space-y-3">
+              {/* How it works */}
+              <div className="text-xs p-2 rounded-lg" style={{ background: 'var(--color-card-bg)', border: '1px solid var(--color-border)' }}>
+                <p style={{ color: 'var(--color-text-muted)' }}>
+                  <strong style={{ color: 'var(--color-text)' }}>Learning timeline:</strong>{' '}
+                  0 deploys → 30 min generous timeout (collect baseline) →
+                  1-9 deploys → 2× max observed (still learning) →
+                  <strong style={{ color: '#34d399' }}> 10+ deploys → avg + 30% safety (data-driven)</strong>
+                </p>
+              </div>
+
+              {/* Per-image status */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr style={{ color: 'var(--color-text-muted)' }}>
+                      <th className="text-left py-1 pr-3">Image</th>
+                      <th className="text-center py-1 px-2">Phase</th>
+                      <th className="text-right py-1 px-2">Observations</th>
+                      <th className="text-right py-1 px-2">Timeout</th>
+                      <th className="text-left py-1 pl-3">Basis</th>
+                    </tr>
+                  </thead>
+                  <tbody className="font-mono">
+                    {Object.entries(settings.pullTimeLearning.images).map(([img, data]) => {
+                      const shortName = img.replace('marcosremar/', '').replace(':latest', '');
+                      const phaseColor = data.phase === 'data-driven' ? '#34d399'
+                        : data.phase === 'learning' ? '#fbbf24' : 'var(--color-text-muted)';
+                      const phaseLabel = data.phase === 'data-driven' ? 'avg+30%'
+                        : data.phase === 'learning' ? 'learning' : 'no data';
+                      return (
+                        <tr key={img} className="border-t" style={{ borderColor: 'var(--color-border)' }}>
+                          <td className="py-1.5 pr-3" style={{ color: 'var(--color-text)' }}>{shortName}</td>
+                          <td className="py-1.5 px-2 text-center">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                              style={{ background: `${phaseColor}20`, color: phaseColor }}>
+                              {phaseLabel}
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-right" style={{ color: 'var(--color-text-muted)' }}>
+                            {data.observations}/10
+                          </td>
+                          <td className="py-1.5 px-2 text-right" style={{ color: 'var(--color-text)' }}>
+                            {data.timeoutSec}s
+                          </td>
+                          <td className="py-1.5 pl-3 text-left" style={{ color: 'var(--color-text-muted)', fontFamily: 'inherit', fontSize: '10px' }}>
+                            {data.basis.length > 60 ? data.basis.slice(0, 57) + '…' : data.basis}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Progress bar for each image */}
+              <div className="grid grid-cols-2 gap-2">
+                {Object.entries(settings.pullTimeLearning.images).map(([img, data]) => {
+                  const shortName = img.replace('marcosremar/', '').replace(':latest', '');
+                  const progress = Math.min(data.observations / 10, 1);
+                  const barColor = progress >= 1 ? '#34d399' : '#fbbf24';
+                  return (
+                    <div key={img} className="text-[10px]">
+                      <div className="flex justify-between mb-0.5">
+                        <span style={{ color: 'var(--color-text-muted)' }}>{shortName}</span>
+                        <span style={{ color: barColor }}>{data.observations}/10</span>
+                      </div>
+                      <div className="h-1 rounded-full" style={{ background: 'var(--color-border)' }}>
+                        <div className="h-1 rounded-full transition-all" style={{ width: `${progress * 100}%`, background: barColor }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
       {/* ── Streaming STT Benchmark Reference ── */}
       <Card>
         <CardHeader>

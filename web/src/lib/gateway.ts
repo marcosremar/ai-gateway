@@ -849,6 +849,16 @@ export interface LatencySettings {
   standbyEnabled: boolean | null;
   standbyTriggerHours: number | null;
   standbyDrainTimeoutMs: number | null;
+  pullTimeLearning?: {
+    description: string;
+    images: Record<string, {
+      observations: number;
+      phase: 'data-driven' | 'learning' | 'no-data';
+      confidence: string;
+      timeoutSec: number;
+      basis: string;
+    }>;
+  };
 }
 
 export async function getLatencySettings(): Promise<LatencySettings> {
