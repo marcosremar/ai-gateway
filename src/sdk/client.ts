@@ -76,7 +76,7 @@ export class GatewaySDK {
       timeout: this.timeouts.stt,
     });
     const data = await this.parseJson(res, '/v1/transcribe');
-    return { text: data.text ?? '', usedGpu: data.used_gpu ?? false };
+    return { text: (data.text as string) ?? '', usedGpu: (data.used_gpu as boolean) ?? false };
   }
 
   /** Translate text (GPU-aware: gateway routes to GPU or cloud LLM). */
@@ -91,7 +91,7 @@ export class GatewaySDK {
       timeout: this.timeouts.translate,
     });
     const data = await this.parseJson(res, '/v1/translate');
-    return { translatedText: data.translated_text ?? '', usedGpu: data.used_gpu ?? false };
+    return { translatedText: (data.translated_text as string) ?? '', usedGpu: (data.used_gpu as boolean) ?? false };
   }
 
   /** Full pipeline: audio → STT → LLM → TTS (GPU-aware routing). */
@@ -109,14 +109,15 @@ export class GatewaySDK {
       timeout: this.timeouts.pipeline,
     });
     const data = await this.parseJson(res, '/v1/speech');
+    const timing = data.timing as Record<string, unknown> | undefined;
     return {
-      transcription: data.transcription ?? '',
-      response: data.response ?? '',
-      audioBase64: data.audio_base64 ?? '',
-      contentType: data.content_type ?? '',
+      transcription: (data.transcription as string) ?? '',
+      response: (data.response as string) ?? '',
+      audioBase64: (data.audio_base64 as string) ?? '',
+      contentType: (data.content_type as string) ?? '',
       timing: {
-        totalMs: data.timing?.total_ms ?? 0,
-        usedGpu: data.timing?.used_gpu ?? false,
+        totalMs: (timing?.total_ms as number) ?? 0,
+        usedGpu: (timing?.used_gpu as boolean) ?? false,
       },
     };
   }
@@ -170,7 +171,7 @@ export class GatewaySDK {
       allowedStatuses: [202, 409], // 409 = deploy already in progress
     });
     const data = await this.parseJson(res, '/v1/gpu/deploy');
-    return { status: data.status ?? '', message: data.message ?? '' };
+    return { status: (data.status as string) ?? '', message: (data.message as string) ?? '' };
   }
 
   /** Get current GPU deployment status, health, and active tier. */
@@ -181,20 +182,20 @@ export class GatewaySDK {
     });
     const d = await this.parseJson(res, '/v1/gpu/status');
     return {
-      status: d.status ?? 'idle',
-      podId: d.podId ?? '',
-      endpoint: d.endpoint ?? '',
-      gpuType: d.gpuType ?? '',
-      message: d.message ?? '',
-      step: d.step ?? '',
-      stepDetail: d.stepDetail ?? '',
-      gpuHealthy: d.gpuHealthy ?? false,
-      activeTier: d.activeTier ?? 'cloud',
-      idleSec: d.idleSec ?? 0,
-      idleTimeoutSec: d.idleTimeoutSec ?? 0,
-      elapsedSec: d.elapsedSec ?? 0,
-      startedAt: d.startedAt ?? 0,
-      retryCount: d.retryCount ?? 0,
+      status: (d.status as GpuStatus['status']) ?? 'idle',
+      podId: (d.podId as string) ?? '',
+      endpoint: (d.endpoint as string) ?? '',
+      gpuType: (d.gpuType as string) ?? '',
+      message: (d.message as string) ?? '',
+      step: (d.step as string) ?? '',
+      stepDetail: (d.stepDetail as string) ?? '',
+      gpuHealthy: (d.gpuHealthy as boolean) ?? false,
+      activeTier: (d.activeTier as GpuStatus['activeTier']) ?? 'cloud',
+      idleSec: (d.idleSec as number) ?? 0,
+      idleTimeoutSec: (d.idleTimeoutSec as number) ?? 0,
+      elapsedSec: (d.elapsedSec as number) ?? 0,
+      startedAt: (d.startedAt as number) ?? 0,
+      retryCount: (d.retryCount as number) ?? 0,
     };
   }
 

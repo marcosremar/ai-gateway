@@ -25,7 +25,7 @@ beforeAll(() => loadEnv());
 function stubProvider(name: string, text: string): STTVerifierProviderEntry {
   const provider: STTProvider = {
     providerId: 'groq' as const,
-    getModels: () => [{ id: 'stub', name: 'Stub', capability: 'stt' as const }],
+    getModels: () => [{ id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const }],
     isConfigured: () => true,
     transcribe: async (_req: STTRequest): Promise<STTResponse> => ({ text }),
     withApiKey: function(k: string) { return this; },
@@ -37,7 +37,7 @@ function stubProvider(name: string, text: string): STTVerifierProviderEntry {
 function failingProvider(name: string): STTVerifierProviderEntry {
   const provider: STTProvider = {
     providerId: 'groq' as const,
-    getModels: () => [{ id: 'stub', name: 'Stub', capability: 'stt' as const }],
+    getModels: () => [{ id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const }],
     isConfigured: () => true,
     transcribe: async (_req: STTRequest): Promise<STTResponse> => {
       throw new Error('API error');
@@ -51,7 +51,7 @@ function failingProvider(name: string): STTVerifierProviderEntry {
 function slowProvider(name: string, text: string, delayMs: number): STTVerifierProviderEntry {
   const provider: STTProvider = {
     providerId: 'groq' as const,
-    getModels: () => [{ id: 'stub', name: 'Stub', capability: 'stt' as const }],
+    getModels: () => [{ id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const }],
     isConfigured: () => true,
     transcribe: async (_req: STTRequest): Promise<STTResponse> => {
       await new Promise(r => setTimeout(r, delayMs));
@@ -187,7 +187,7 @@ describe('runVerifiedSTT — unit (no API)', () => {
     let capturedPrompt = '';
     const provider: STTProvider = {
       providerId: 'groq' as const,
-      getModels: () => [{ id: 'stub', name: 'Stub', capability: 'stt' as const }],
+      getModels: () => [{ id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const }],
       isConfigured: () => true,
       transcribe: async (req: STTRequest): Promise<STTResponse> => {
         capturedLang = req.language ?? '';
@@ -425,7 +425,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI STT (Real API)', () => {
   it('transcribes WAV audio', async () => {
     const audio = makeTestWav(1.0);
     const { result, ms } = await timed(() =>
-      openaiSTT.transcribe({ audio, language: 'fr' }),
+      openaiSTT.transcribe({ audio, model: 'whisper-1', language: 'fr' }),
     );
 
     expect(typeof result.text).toBe('string');
@@ -449,7 +449,7 @@ describe.skipIf(!process.env.DEEPGRAM_API_KEY)('Deepgram STT (Real API)', () => 
   it('transcribes WAV audio', async () => {
     const audio = makeTestWav(1.0);
     const { result, ms } = await timed(() =>
-      deepgramSTT.transcribe({ audio, language: 'fr' }),
+      deepgramSTT.transcribe({ audio, model: 'nova-2', language: 'fr' }),
     );
 
     expect(typeof result.text).toBe('string');

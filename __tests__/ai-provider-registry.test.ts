@@ -4,7 +4,7 @@ import type { ProviderDescriptor, ProviderCapability, ModelInfo } from '@ai-gate
 
 function mockProvider(id: string, caps: ProviderCapability[] = ['stt', 'tts', 'llm']): ProviderDescriptor {
   return {
-    id,
+    id: id as any,
     name: `Mock ${id}`,
     description: `Mock provider ${id}`,
     capabilities: caps,
@@ -53,7 +53,7 @@ describe('AIProviderRegistry', () => {
     });
 
     it('returns undefined for unknown provider', () => {
-      expect(registry.getProvider('nonexistent')).toBeUndefined();
+      expect(registry.getProvider('nonexistent' as any)).toBeUndefined();
     });
 
     it('listProviders returns all registered', () => {
@@ -108,17 +108,17 @@ describe('AIProviderRegistry', () => {
 
   describe('missing provider/capability throws', () => {
     it('getSTTProvider throws for unknown provider', () => {
-      expect(() => registry.getSTTProvider('unknown')).toThrow('not found');
+      expect(() => registry.getSTTProvider('unknown' as any)).toThrow('not found');
     });
 
     it('getLLMProvider throws when provider lacks LLM', () => {
       registry.register(mockProvider('stt-only', ['stt']));
-      expect(() => registry.getLLMProvider('stt-only')).toThrow('does not support LLM');
+      expect(() => registry.getLLMProvider('stt-only' as any)).toThrow('does not support LLM');
     });
 
     it('getTTSProvider throws when provider lacks TTS', () => {
       registry.register(mockProvider('llm-only', ['llm']));
-      expect(() => registry.getTTSProvider('llm-only')).toThrow('does not support TTS');
+      expect(() => registry.getTTSProvider('llm-only' as any)).toThrow('does not support TTS');
     });
   });
 
@@ -173,12 +173,12 @@ describe('AIProviderRegistry', () => {
     });
 
     it('returns false for unknown provider', () => {
-      expect(registry.isProviderReady('unknown', 'stt')).toBe(false);
+      expect(registry.isProviderReady('unknown' as any, 'stt')).toBe(false);
     });
 
     it('returns false for unsupported capability', () => {
       registry.register(mockProvider('stt-only', ['stt']));
-      expect(registry.isProviderReady('stt-only', 'image')).toBe(false);
+      expect(registry.isProviderReady('stt-only' as any, 'image')).toBe(false);
     });
   });
 

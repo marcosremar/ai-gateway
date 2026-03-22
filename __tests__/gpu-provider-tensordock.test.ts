@@ -410,7 +410,7 @@ describe('TensordockClient', () => {
       mockCreateDeps();
       mockCandidatesAndCreate();
 
-      await clientWithPersist.createInstance({ ...spec, machineKey: 'mySlot' }, creds, 'user-1');
+      await clientWithPersist.createInstance({ ...spec, machineKey: 'tensordockInstance' as const }, creds, 'user-1');
       expect(onPersist).toHaveBeenCalledWith('user-1', 'mySlot', expect.anything());
     });
 

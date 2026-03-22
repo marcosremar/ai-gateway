@@ -125,6 +125,44 @@ export const SYSTEM_PROFILE: AIProfile = {
   },
 };
 
+/**
+ * Speech-to-Speech profile — full STT → LLM → TTS pipeline.
+ *
+ * Primary: self-hosted GPU (TensorDock RTX 3090) running
+ *   Whisper (STT) → Gemma 3 4B (LLM) → Kokoro 82M (TTS)
+ * Fallback: cloud providers (Groq → OpenAI)
+ *
+ * The self-hosted entries require a GPU endpoint to be set at runtime
+ * via the autoscaler or gpuEndpoint override.
+ */
+export const SPEECH_TO_SPEECH_PROFILE: AIProfile = {
+  preset: 'speech-to-speech',
+  stt: [
+    { provider: 'self-hosted', model: 'whisper-small', selfHosted: true },
+    { provider: 'groq', model: 'whisper-large-v3-turbo' },
+    { provider: 'openai', model: 'gpt-4o-mini-transcribe' },
+  ],
+  llm: [
+    { provider: 'self-hosted', model: 'gemma-3-4b-it', selfHosted: true },
+    { provider: 'groq', model: 'llama-3.3-70b-versatile' },
+    { provider: 'openai', model: 'gpt-4o-mini' },
+  ],
+  tts: [
+    { provider: 'self-hosted', model: 'kokoro-82m', selfHosted: true },
+    { provider: 'groq', model: 'canopylabs/orpheus-v1-english' },
+    { provider: 'openai', model: 'gpt-4o-mini-tts' },
+    { provider: 'modal', model: 'moss-tts-realtime' },
+  ],
+  voice: 'af_heart',
+  audioFormat: 'wav',
+  language: 'pt',
+  temperature: 0.7,
+  fallbackOptions: {
+    timeoutMs: 15_000,
+    retriesPerProvider: 0,
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Preset Map
 // ---------------------------------------------------------------------------
@@ -137,6 +175,7 @@ const PRESETS: Record<PresetName, AIProfile> = {
   llm: LLM_PROFILE,
   image: IMAGE_PROFILE,
   system: SYSTEM_PROFILE,
+  'speech-to-speech': SPEECH_TO_SPEECH_PROFILE,
 };
 
 // ---------------------------------------------------------------------------

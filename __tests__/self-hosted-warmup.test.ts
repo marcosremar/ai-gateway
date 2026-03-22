@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AIClient } from '../src/client/ai-client';
 import { AIProviderRegistry } from '../src/providers/registry';
 import type { AIProfile, StageConfig } from '../src/client/types';
-import type { LLMProvider, ChatRequest, ChatResponse, STTProvider, STTRequest, STTResponse, ModelInfo } from '../src/providers/types';
+import type { LLMProvider, ChatRequest, ChatResponse, STTProvider, STTRequest, STTResponse, ModelInfo, ProviderId } from '../src/providers/types';
 import { runWatchdogCycle } from '../src/autoscaler/watchdog';
 import type { WatchdogDeps } from '../src/autoscaler/watchdog';
 import type { AutoScalerConfig, ReadyTierState, GpuTierState, IdleTierState } from '../src/types';
@@ -32,8 +32,8 @@ class MockLLMProvider implements LLMProvider {
   }
 }
 
-class MockSTTProvider implements STTProvider {
-  readonly providerId = 'mock-stt';
+class MockSTTProvider {
+  readonly providerId: ProviderId = 'groq';
 
   isConfigured() { return true; }
   getModels(): ModelInfo[] { return []; }
@@ -55,7 +55,7 @@ function makeRegistry(): { registry: AIProviderRegistry; llm: MockLLMProvider; s
     capabilities: ['llm', 'stt'],
     requiresApiKey: false,
     llm,
-    stt,
+    stt: stt as unknown as STTProvider,
   });
 
   registry.register({
@@ -65,7 +65,7 @@ function makeRegistry(): { registry: AIProviderRegistry; llm: MockLLMProvider; s
     capabilities: ['llm', 'stt'],
     requiresApiKey: true,
     llm: new MockLLMProvider(),
-    stt: new MockSTTProvider(),
+    stt: new MockSTTProvider() as unknown as STTProvider,
   });
 
   return { registry, llm, stt };

@@ -42,13 +42,9 @@ class MockStateStore implements StateStore {
 function createMockTiers(count: number): GpuTierState[] {
   return Array.from({ length: count }, (_, i) => ({
     tierIndex: i,
-    provider: 'runpod' as const,
-    gpuType: ' RTX 3090',
     endpoint: `http://gpu-${i}:8000`,
-    sshEndpoint: `gpu-${i}.example.com`,
     state: 'ready' as const,
-    activeSessions: 0,
-    bootStartedAt: Date.now() - 60000,
+    lastHealthyAt: Date.now(),
   }));
 }
 

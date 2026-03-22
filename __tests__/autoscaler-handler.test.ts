@@ -123,6 +123,9 @@ describe('autoscaler-handler', () => {
         maxLatencyMs: 1500,
         p95LatencyMs: 800,
         gpuState: 'ready',
+        activeTiers: 1,
+        bootingTiers: 0,
+        totalTiers: 1,
       });
 
       const result = await handleAutoscalerGet(deps, userId, loadConfigEnabled);

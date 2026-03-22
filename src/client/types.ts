@@ -60,7 +60,7 @@ export interface StageConfig {
 // AI Profile
 // ---------------------------------------------------------------------------
 
-export type PresetName = 'voice' | 'chat' | 'stt' | 'tts' | 'llm' | 'system' | 'image';
+export type PresetName = 'voice' | 'chat' | 'stt' | 'tts' | 'llm' | 'system' | 'image' | 'speech-to-speech';
 
 export interface AIProfile {
   preset?: PresetName;

@@ -89,7 +89,7 @@ function createRealisticWav(durationSec = 1.5, sampleRate = 16000): Buffer {
 }
 
 /** Connect a ws.WebSocket and resolve when open. */
-function connectWS(url: string, timeoutMs = 5000): Promise<WebSocket> {
+function connectWS(url: string, timeoutMs = 5000): Promise<any> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     const timer = setTimeout(() => { ws.close(); reject(new Error('WS connect timeout')); }, timeoutMs);

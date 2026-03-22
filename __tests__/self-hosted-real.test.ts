@@ -87,7 +87,7 @@ function buildRegistry() {
   });
 
   registry.register({
-    id: 'fake-cloud',
+    id: 'fake-cloud' as any,
     name: 'Fake Cloud',
     description: 'Fake cloud LLM for testing',
     capabilities: ['llm'],
@@ -96,7 +96,7 @@ function buildRegistry() {
   });
 
   registry.register({
-    id: 'broken-local',
+    id: 'broken-local' as any,
     name: 'Broken Local',
     description: 'Broken self-hosted LLM',
     capabilities: ['llm'],

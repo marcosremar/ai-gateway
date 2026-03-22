@@ -11,6 +11,7 @@ export {
   LLM_PROFILE,
   IMAGE_PROFILE,
   SYSTEM_PROFILE,
+  SPEECH_TO_SPEECH_PROFILE,
   resolveProfile,
   mergeProfiles,
 } from './presets';

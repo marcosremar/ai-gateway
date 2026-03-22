@@ -126,7 +126,7 @@ describe('runWatchdogCycle', () => {
     expect(client.stopInstance).toHaveBeenCalled();
     // Tier should be set to idle with unhealthy flag
     expect(stateMap.get('user-1')![0].state).toBe('idle');
-    expect((stateMap.get('user-1')![0] as IdleTierState).unhealthy).toBe(true);
+    expect((stateMap.get('user-1')![0] as unknown as IdleTierState).unhealthy).toBe(true);
   });
 
   it('does not stop tier if still within boot window', async () => {

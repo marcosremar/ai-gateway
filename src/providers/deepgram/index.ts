@@ -57,7 +57,7 @@ export class DeepgramSTTProvider implements STTProvider {
         Authorization: `Token ${apiKey}`,
         'Content-Type': 'audio/wav',
       },
-      body: audioBuffer,
+      body: audioBuffer as unknown as BodyInit,
       signal: AbortSignal.timeout(15_000),
     });
 

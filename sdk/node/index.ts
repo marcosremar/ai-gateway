@@ -208,7 +208,7 @@ export class GatewayHttpClient {
     const { data } = await this._request<{ text: string; used_gpu: boolean }>(
       'POST', '/v1/transcribe',
       {
-        body: audio,
+        body: audio as unknown as BodyInit,
         headers: { 'Content-Type': 'audio/wav' },
         params: { language },
         timeoutMs: this.timeouts.sttMs,
@@ -248,14 +248,14 @@ export class GatewayHttpClient {
     }>(
       'POST', '/v1/speech',
       {
-        body: audio,
+        body: audio as unknown as BodyInit,
         headers: { 'Content-Type': 'audio/wav' },
         params,
         timeoutMs: this.timeouts.pipelineMs,
       },
     );
 
-    const timing = data.timing || {};
+    const timing = data.timing || { total_ms: 0, stt_ms: 0, llm_ms: 0, tts_ms: 0, used_gpu: false };
     return {
       transcription: data.transcription || '',
       response: data.response || '',
