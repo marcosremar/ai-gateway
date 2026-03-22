@@ -1187,9 +1187,11 @@ export async function startDeployLoop(
         console.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pullTimeS ?? '?'}s, ${label})`);
         // Record pull time for adaptive timeout learning
         if (pullTimeS != null) {
-          const { recordPullTime } = await import('../src/gpu-providers/pull-time-estimator');
+          const { recordPullTime, deriveHostKey: dk } = await import('../src/gpu-providers/pull-time-estimator');
           const inetDown = (instance.providerMeta?.inetDown as number) || (instance.providerMeta?.inet_down as number);
-          recordPullTime(dockerImage, pullTimeS, inetDown);
+          const hk = dk(providerName, instance.providerMeta);
+          const bootTimeS = Math.round(durationMs / 1000);
+          recordPullTime(dockerImage, pullTimeS, inetDown, hk, bootTimeS);
         }
         startGpuMonitoring();
         startBackgroundWarmthMonitor(deployState.endpoint);
@@ -1810,13 +1812,15 @@ export async function pollHealthUntilReady(
   let consecutiveNonTransient = 0;         // consecutive 4xx responses from /health
 
   // ── Adaptive pull timeout ──────────────────────────────────────────────
-  const { estimatePullTimeout } = await import('../src/gpu-providers/pull-time-estimator');
+  const { estimatePullTimeout, deriveHostKey: deriveKey } = await import('../src/gpu-providers/pull-time-estimator');
   const inetDown = (providerMeta?.inetDown as number) || (providerMeta?.inet_down as number) || 500;
   const diskGb = (providerMeta?.diskGb as number) || 20;
+  const hostKey = deriveKey(providerName, providerMeta);
   const pullEstimate = await estimatePullTimeout({
     dockerImage: dockerImage || 'unknown',
     inetDownMbps: inetDown,
     diskGb,
+    hostKey,
   });
   console.log(`[gpu] Pull timeout: ${Math.round(pullEstimate.timeoutMs / 1000)}s (${pullEstimate.confidence}: ${pullEstimate.basis})`);
 

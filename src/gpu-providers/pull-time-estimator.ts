@@ -26,6 +26,8 @@ export interface PullTimeEstimate {
 const MIN_TIMEOUT_MS = 120_000;  // 2 min
 /** Maximum pull timeout — if it takes this long, the host is too slow. */
 const MAX_TIMEOUT_MS = 1_800_000; // 30 min
+/** First-run timeout — no data yet, let it run long to collect baseline. */
+const FIRST_RUN_TIMEOUT_MS = 1_800_000; // 30 min
 /** Default safety multiplier applied to estimated pull time. */
 const DEFAULT_SAFETY = 2.0;
 
@@ -43,27 +45,55 @@ const CACHE_TTL_MS = 24 * 3600_000; // 24 hours
 
 interface PullRecord {
   dockerImage: string;
+  hostKey: string;         // provider:machineId or provider:ip — identifies the physical machine
   inetDownMbps: number;
   pullTimeS: number;
+  bootTimeS: number;       // total boot time (pull + container start + model load)
   recordedAt: number;
 }
 
 const pullHistory: PullRecord[] = [];
-const MAX_HISTORY = 200;
+const MAX_HISTORY = 500;
 
 /**
- * Record an actual pull time observation. Called after successful deploys.
+ * Derive a stable host key from provider metadata.
+ * This identifies the physical machine across deploys.
  */
-export function recordPullTime(dockerImage: string, pullTimeS: number, inetDownMbps?: number): void {
+export function deriveHostKey(provider: string, meta?: Record<string, unknown>): string {
+  const machineId = meta?.machineId ?? meta?.machine_id ?? meta?.hostId ?? meta?.host_id;
+  if (machineId) return `${provider}:${machineId}`;
+  const ip = meta?.publicIp ?? meta?.public_ipaddr ?? meta?.ip;
+  if (ip) return `${provider}:${ip}`;
+  return `${provider}:unknown`;
+}
+
+/**
+ * Record an actual pull/boot time observation. Called after successful deploys.
+ */
+export function recordPullTime(
+  dockerImage: string, pullTimeS: number,
+  inetDownMbps?: number, hostKey?: string, bootTimeS?: number,
+): void {
   pullHistory.push({
     dockerImage,
+    hostKey: hostKey || 'unknown',
     inetDownMbps: inetDownMbps || 500,
     pullTimeS,
+    bootTimeS: bootTimeS || pullTimeS,
     recordedAt: Date.now(),
   });
-  // Trim old entries
   while (pullHistory.length > MAX_HISTORY) pullHistory.shift();
-  console.log(`[pull-estimator] Recorded: ${dockerImage} pulled in ${pullTimeS}s (inet=${inetDownMbps || '?'}Mbps)`);
+  console.log(`[pull-estimator] Recorded: ${dockerImage} on ${hostKey || '?'} — pull=${pullTimeS}s boot=${bootTimeS || '?'}s inet=${inetDownMbps || '?'}Mbps`);
+}
+
+/**
+ * How many observations we have for a given image (or image+host).
+ */
+export function getObservationCount(dockerImage: string, hostKey?: string): number {
+  if (hostKey) {
+    return pullHistory.filter(r => r.dockerImage === dockerImage && r.hostKey === hostKey).length;
+  }
+  return pullHistory.filter(r => r.dockerImage === dockerImage).length;
 }
 
 /**
@@ -150,63 +180,89 @@ async function getCompressedSizeGb(dockerImage: string): Promise<number | null> 
 
 /**
  * Estimate how long a Docker image pull will take and return an adaptive timeout.
+ *
+ * Strategy:
+ *   - < 10 observations for this image: generous timeout (30 min) to collect baseline
+ *   - ≥ 10 observations: avg pull time + 30% safety margin (tight, data-driven)
+ *   - Host-specific history overrides image-level when available
  */
 export async function estimatePullTimeout(opts: {
   dockerImage: string;
   inetDownMbps?: number;
   diskGb?: number;
-  safetyMultiplier?: number;
+  hostKey?: string;
 }): Promise<PullTimeEstimate> {
-  const { dockerImage, inetDownMbps = 500, diskGb = 20 } = opts;
-  const safety = opts.safetyMultiplier ?? DEFAULT_SAFETY;
+  const { dockerImage, inetDownMbps = 500, diskGb = 20, hostKey } = opts;
 
-  // ── Priority 1: Historical pull times for this exact image ──────────────
+  // ── Priority 1: Host-specific history for this image ────────────────────
+  if (hostKey) {
+    const hostHistory = pullHistory.filter(r => r.dockerImage === dockerImage && r.hostKey === hostKey);
+    if (hostHistory.length >= 3) {
+      const avgPullS = hostHistory.reduce((s, r) => s + r.pullTimeS, 0) / hostHistory.length;
+      const timeoutMs = clamp(avgPullS * 1.3 * 1000);  // +30% of this host's average
+      return {
+        estimatedPullS: Math.round(avgPullS),
+        timeoutMs,
+        confidence: 'historical',
+        basis: `host ${hostKey}: ${hostHistory.length} runs, avg ${Math.round(avgPullS)}s × 1.3`,
+      };
+    }
+  }
+
+  // ── Priority 2: Image-level history (≥10 observations = tight timeout) ──
   const imageHistory = pullHistory.filter(r => r.dockerImage === dockerImage);
-  if (imageHistory.length >= 2) {
-    // Adjust for host speed difference
+  if (imageHistory.length >= 10) {
+    // Enough data — use avg + 30% safety, adjusted for host speed
     const avgPullS = imageHistory.reduce((s, r) => s + r.pullTimeS, 0) / imageHistory.length;
     const avgInet = imageHistory.reduce((s, r) => s + r.inetDownMbps, 0) / imageHistory.length;
     const speedRatio = avgInet / Math.max(inetDownMbps, 100);
     const adjusted = avgPullS * speedRatio;
-    const timeoutMs = clamp(adjusted * safety * 1000);
+    const timeoutMs = clamp(adjusted * 1.3 * 1000);  // +30% safety
 
     return {
       estimatedPullS: Math.round(adjusted),
       timeoutMs,
       confidence: 'historical',
-      basis: `${imageHistory.length} observations, avg ${Math.round(avgPullS)}s @ ${Math.round(avgInet)}Mbps → adjusted ${Math.round(adjusted)}s @ ${inetDownMbps}Mbps`,
+      basis: `${imageHistory.length} observations, avg ${Math.round(avgPullS)}s @ ${Math.round(avgInet)}Mbps → ${Math.round(adjusted)}s @ ${inetDownMbps}Mbps × 1.3`,
     };
   }
 
-  // ── Priority 2: Calculate from compressed image size + host speed ───────
+  // ── Priority 3: Few observations (< 10) — generous timeout to learn ─────
+  if (imageHistory.length > 0) {
+    // Some data but not enough — use generous timeout while collecting more
+    const maxSeen = Math.max(...imageHistory.map(r => r.pullTimeS));
+    const timeoutMs = clamp(Math.max(maxSeen * 2.0, FIRST_RUN_TIMEOUT_MS / 2) * 1000);
+    return {
+      estimatedPullS: Math.round(maxSeen),
+      timeoutMs,
+      confidence: 'calculated',
+      basis: `${imageHistory.length}/10 observations (learning), max seen ${Math.round(maxSeen)}s × 2.0 — need ${10 - imageHistory.length} more for tight timeout`,
+    };
+  }
+
+  // ── Priority 4: No history — calculate from image size if possible ──────
   const compressedGb = await getCompressedSizeGb(dockerImage);
   if (compressedGb !== null && compressedGb > 0) {
-    // Pull time ≈ compressed_size / download_speed
-    // Add overhead: registry throttling, decompression, layer extraction (~30%)
+    // First deploy of this image — use calculated estimate but be generous
     const theoreticalS = (compressedGb * 1024 * 8) / Math.max(inetDownMbps, 100);
     const withOverhead = theoreticalS * 1.3;
-    const timeoutMs = clamp(withOverhead * safety * 1000);
+    // First run: use max of calculated×2 or 15 min, up to 30 min
+    const timeoutMs = clamp(Math.max(withOverhead * 2.0, 900) * 1000);
 
     return {
       estimatedPullS: Math.round(withOverhead),
       timeoutMs,
       confidence: 'calculated',
-      basis: `${compressedGb.toFixed(1)}GB compressed ÷ ${inetDownMbps}Mbps = ${Math.round(theoreticalS)}s + 30% overhead`,
+      basis: `FIRST RUN: ${compressedGb.toFixed(1)}GB ÷ ${inetDownMbps}Mbps ≈ ${Math.round(withOverhead)}s — generous timeout (no history)`,
     };
   }
 
-  // ── Priority 3: Fallback based on estimated disk size ───────────────────
-  const fallbackS = diskGb < 15 ? 90
-    : diskGb < 40 ? 180
-    : diskGb < 80 ? 420
-    : 600;
-  const timeoutMs = clamp(fallbackS * safety * 1000);
-
+  // ── Priority 5: No data at all — maximum generous timeout ───────────────
   return {
-    estimatedPullS: fallbackS,
-    timeoutMs,
+    estimatedPullS: 0,
+    timeoutMs: FIRST_RUN_TIMEOUT_MS,  // 30 min — let it run to collect baseline
     confidence: 'default',
-    basis: `disk=${diskGb}GB → default ${fallbackS}s`,
+    basis: `NO DATA: first deploy of ${dockerImage}, 30 min generous timeout to collect baseline`,
   };
 }
 
