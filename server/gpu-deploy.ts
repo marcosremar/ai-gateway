@@ -1079,7 +1079,7 @@ export async function startDeployLoop(
             message: `TensorDock instance resumed, waiting for /health...`,
           });
           deploymentSM.startBooting(existing.instanceId);
-          const result = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, endpoint, startedAt);
+          const { result } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, endpoint, startedAt, dockerImage);
           if (result === 'ready') {
             const durationMs = Date.now() - deployState.startedAt;
             setGpuHealthy(true);
@@ -1102,7 +1102,7 @@ export async function startDeployLoop(
             message: `TensorDock instance already running, checking health...`,
           });
           deploymentSM.startBooting(existing.instanceId);
-          const result = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, existing.endpoint, startedAt);
+          const { result } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, existing.endpoint, startedAt, dockerImage);
           if (result === 'ready') {
             const durationMs = Date.now() - deployState.startedAt;
             setGpuHealthy(true);
@@ -1176,7 +1176,7 @@ export async function startDeployLoop(
       });
       deploymentSM.startBooting(instance.instanceId);
 
-      const result = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt);
+      const { result, pullTimeS } = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt, dockerImage, instance.providerMeta);
       if (result === 'ready') {
         const durationMs = Date.now() - deployState.startedAt;
         setGpuHealthy(true);
@@ -1184,7 +1184,13 @@ export async function startDeployLoop(
         setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
         deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
-        console.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (${label})`);
+        console.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pullTimeS ?? '?'}s, ${label})`);
+        // Record pull time for adaptive timeout learning
+        if (pullTimeS != null) {
+          const { recordPullTime } = await import('../src/gpu-providers/pull-time-estimator');
+          const inetDown = (instance.providerMeta?.inetDown as number) || (instance.providerMeta?.inet_down as number);
+          recordPullTime(dockerImage, pullTimeS, inetDown);
+        }
         startGpuMonitoring();
         startBackgroundWarmthMonitor(deployState.endpoint);
         return;
@@ -1776,6 +1782,11 @@ export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string
   }
 }
 
+export interface PollHealthResult {
+  result: 'ready' | 'exited' | 'timeout' | 'cancelled' | 'crashed';
+  pullTimeS?: number;  // actual measured pull duration (pullStarted → containerStarted)
+}
+
 export async function pollHealthUntilReady(
   providerClient: GpuProviderClient,
   providerName: string,
@@ -1783,7 +1794,9 @@ export async function pollHealthUntilReady(
   podId: string,
   endpoint: string,
   deployStartedAt: number,
-): Promise<'ready' | 'exited' | 'timeout' | 'cancelled' | 'crashed'> {
+  dockerImage?: string,
+  providerMeta?: Record<string, unknown>,
+): Promise<PollHealthResult> {
   const credentials: ProviderCredentials = { apiKey };
   let consecutiveExited = 0;
   let containerStartedAt = 0;
@@ -1791,18 +1804,30 @@ export async function pollHealthUntilReady(
   let healthFirstResponseAt = 0;     // timestamp of first /health response
   let allServicesLoaded = false;     // true when all STT+LLM+TTS report loaded
   let pullStartedAt = 0;             // timestamp when image pull phase began
+  let actualPullTimeS: number | undefined;  // measured pull duration
   let consecutiveHealthFailures = 0;       // health failures while container is supposedly running
   let firstNonTransientErrorAt = 0;        // timestamp when non-transient HTTP errors started
   let consecutiveNonTransient = 0;         // consecutive 4xx responses from /health
 
+  // ── Adaptive pull timeout ──────────────────────────────────────────────
+  const { estimatePullTimeout } = await import('../src/gpu-providers/pull-time-estimator');
+  const inetDown = (providerMeta?.inetDown as number) || (providerMeta?.inet_down as number) || 500;
+  const diskGb = (providerMeta?.diskGb as number) || 20;
+  const pullEstimate = await estimatePullTimeout({
+    dockerImage: dockerImage || 'unknown',
+    inetDownMbps: inetDown,
+    diskGb,
+  });
+  console.log(`[gpu] Pull timeout: ${Math.round(pullEstimate.timeoutMs / 1000)}s (${pullEstimate.confidence}: ${pullEstimate.basis})`);
+
   while (true) {
-    if (deployCancelled) return 'cancelled';
+    if (deployCancelled) return { result: 'cancelled' };
     const deployTimeoutMs = getDeployTimeoutMin() * 60_000;
     const totalElapsedMs = Date.now() - deployStartedAt;
 
     // ── Per-phase timeouts (fail fast, try next machine) ──
     const PHASE_TIMEOUTS = {
-      IMAGE_PULL:  5 * 60_000,   // 5 min — 3GB at 500Mbps = 50s, 5min is generous
+      IMAGE_PULL:  pullEstimate.timeoutMs,  // ADAPTIVE — based on image size + host speed
       BOOT:        5 * 60_000,   // 5 min — models download before uvicorn starts on some images
       MODELS:     10 * 60_000,   // 10 min — HuggingFace model download + load after /health
     };
@@ -1814,7 +1839,7 @@ export async function pollHealthUntilReady(
       console.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
       broadcastWs({ type: 'gpu:deploy', phase: 'pull_timeout', provider: providerName, elapsedMs: totalElapsedMs });
       setDeployState({ status: 'error', step: 'pulling_image', message: timeoutMsg });
-      return 'timeout';
+      return { result: 'timeout', pullTimeS: actualPullTimeS };
     }
 
     // Boot timeout — container started but /health never responded
@@ -1824,7 +1849,7 @@ export async function pollHealthUntilReady(
       console.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
       broadcastWs({ type: 'gpu:deploy', phase: 'boot_timeout', provider: providerName });
       setDeployState({ status: 'error', step: 'waiting_health', message: timeoutMsg });
-      return 'timeout';
+      return { result: 'timeout', pullTimeS: actualPullTimeS };
     }
 
     // Model loading timeout — /health responds but services still downloading
@@ -1834,7 +1859,7 @@ export async function pollHealthUntilReady(
       console.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
       broadcastWs({ type: 'gpu:deploy', phase: 'model_timeout', provider: providerName });
       setDeployState({ status: 'error', step: 'downloading_models', message: timeoutMsg });
-      return 'timeout';
+      return { result: 'timeout', pullTimeS: actualPullTimeS };
     }
 
     // Overall deploy timeout (safety net)
@@ -1843,7 +1868,7 @@ export async function pollHealthUntilReady(
       const timeoutMsg = `Overall timeout after ${getDeployTimeoutMin()} min (stuck ${phase})`;
       console.error(`[gpu] ${providerName} pod ${podId} timed out: ${phase}, endpoint=${endpoint || 'none'}`);
       setDeployState({ status: 'error', message: timeoutMsg });
-      return 'timeout';
+      return { result: 'timeout', pullTimeS: actualPullTimeS };
     }
 
     const elapsed = Math.round((Date.now() - deployStartedAt) / 1000);
@@ -1856,7 +1881,7 @@ export async function pollHealthUntilReady(
         if (detail) {
           if (detail.desiredStatus === 'EXITED') {
             consecutiveExited++;
-            if (consecutiveExited >= 2) return 'exited';
+            if (consecutiveExited >= 2) return { result: 'exited', pullTimeS: actualPullTimeS };
           } else {
             consecutiveExited = 0;
           }
@@ -1874,6 +1899,7 @@ export async function pollHealthUntilReady(
             });
           } else if (!containerStartedAt) {
             containerStartedAt = Date.now();
+            if (pullStartedAt > 0) actualPullTimeS = Math.round((containerStartedAt - pullStartedAt) / 1000);
             const newEndpoint = await providerClient.resolveInstanceEndpoint(podId, credentials);
             if (newEndpoint && newEndpoint !== endpoint) {
               endpoint = newEndpoint;
@@ -1911,7 +1937,7 @@ export async function pollHealthUntilReady(
               console.warn(`[gpu] ${providerName} instance ${podId} GPU disassociated (hostnode reclaimed GPU)`);
               setDeployState({ alert: `GPU disassociated — hostnode reclaimed the GPU. Will retry on a more stable host.` });
             }
-            if (consecutiveExited >= 2) return 'exited';
+            if (consecutiveExited >= 2) return { result: 'exited', pullTimeS: actualPullTimeS };
           } else {
             consecutiveExited = 0;
           }
@@ -1919,6 +1945,7 @@ export async function pollHealthUntilReady(
           const isRunning = ['running', 'active'].includes(statusLower);
           if (isRunning && !containerStartedAt) {
             containerStartedAt = Date.now();
+            if (pullStartedAt > 0) actualPullTimeS = Math.round((containerStartedAt - pullStartedAt) / 1000);
           }
 
           if (!containerStartedAt) {
@@ -2003,11 +2030,14 @@ export async function pollHealthUntilReady(
               console.log(`[gpu] Pod health OK — ${readyStages.length}/3 services loaded (${readyStages.join(', ') || 'none'}). Loading: ${loadingStages.join(', ') || 'none'}`);
               broadcastWs({ type: 'gpu:services', loaded: readyStages, loading: loadingStages });
               setDeployState({ step: 'ready', stepDetail });
-              return 'ready';
+              return { result: 'ready', pullTimeS: actualPullTimeS };
             }
 
             // /health OK but no services loaded yet — show granular model download status
-            if (!containerStartedAt) containerStartedAt = Date.now();
+            if (!containerStartedAt) {
+              containerStartedAt = Date.now();
+              if (pullStartedAt > 0) actualPullTimeS = Math.round((containerStartedAt - pullStartedAt) / 1000);
+            }
             const appElapsed = Math.round((Date.now() - containerStartedAt) / 1000);
 
             // Determine most specific loading step
@@ -2067,7 +2097,7 @@ export async function pollHealthUntilReady(
             console.warn(`[gpu] Failed to get ${providerName} pod ${podId} status during crash detection: ${statusErr instanceof Error ? statusErr.message : statusErr}`);
           }
           setDeployState({ status: 'error', message: `Container returning HTTP ${httpStatus} for ${Math.round(nonTransientDurationMs / 60_000)}+ min — app failed to start (check image logs)` });
-          return 'crashed';
+          return { result: 'crashed', pullTimeS: actualPullTimeS };
         }
       } else {
         consecutiveNonTransient = 0;
@@ -2091,7 +2121,7 @@ export async function pollHealthUntilReady(
             const uptime = Math.round((Date.now() - containerStartedAt) / 1000);
             console.error(`[gpu] ${providerName} pod ${podId} crashed: status=${podStatus} after ${consecutiveHealthFailures} health failures (container was up ${uptime}s, endpoint=${endpoint})`);
             setDeployState({ status: 'error', message: `Pod crashed (status: ${podStatus}) after ${uptime}s — check GPU logs for details` });
-            return 'crashed';
+            return { result: 'crashed', pullTimeS: actualPullTimeS };
           }
           // Pod still running but health failing — log for debugging
           if (consecutiveHealthFailures % 10 === 0) {

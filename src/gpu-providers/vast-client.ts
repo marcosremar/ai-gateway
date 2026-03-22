@@ -325,12 +325,14 @@ export class VastClient extends AbstractGpuProvider {
         const instanceId = `inst-${contractId}`;
         const instanceName = `parle-autoscale-${Date.now()}`;
 
-        // Poll for IP assignment — timeout scales with image size since large images
-        // (52GB+) can take 15-25 min to pull. Boot health poller handles app readiness.
-        const CREATE_POLL_MAX_MS = diskGb < 15 ? 180_000    // 3 min (small image)
-          : diskGb < 40 ? 300_000                           // 5 min (medium)
-          : diskGb < 80 ? 600_000                           // 10 min (large)
-          : 900_000;                                        // 15 min (huge)
+        // Poll for IP assignment — timeout based on image size + host download speed.
+        // Formula: compressed_size / bandwidth * safety, clamped to [3min, 15min].
+        const inetDown = (offer.inet_down as number) || 500; // Mbps
+        const pullEstimateS = (diskGb * 8 * 1024) / Math.max(inetDown, 100); // theoretical seconds
+        const CREATE_POLL_MAX_MS = Math.max(
+          Math.min(Math.round(pullEstimateS * 2 * 1000), 900_000), // 2x safety, cap 15 min
+          180_000, // floor 3 min
+        );
         const { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS);
 
         // If instance vanished during polling (reclaimed by host), clean up and try next offer
