@@ -45,8 +45,8 @@ export class ProviderCooldownTracker {
   private persistPath: string | null = null;
 
   constructor(
-    private baseCooldownMs = 5 * 60_000,
-    private maxCooldownMs = 30 * 60_000,
+    private baseCooldownMs = 60_000,       // 1 min base (was 5 min — too slow for retries)
+    private maxCooldownMs = 5 * 60_000,   // 5 min max (was 30 min — blocked all providers)
   ) {}
 
   /** Load persisted cooldowns from a JSON file. Ignores expired entries. */
