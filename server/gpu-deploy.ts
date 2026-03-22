@@ -873,6 +873,14 @@ export async function autoSelectCheapestGpu(
     return entry?.bestMs ?? null;
   };
 
+  // Unified latency score: normalize TCP RTT (0-1) — <30ms=1.0, 150ms=0.5, 300ms+=0.0
+  // This puts TCP latency on the same 0-1 scale as reputationScore (which embeds pipeline latency)
+  const tcpLatencyScore = (o: GpuOffer): number => {
+    const ms = getLatencyMs(o);
+    if (ms == null) return 0.5; // neutral for unknown
+    return Math.max(0, Math.min(1, 1 - (ms - 30) / 270));
+  };
+
   if (sortBy === 'price') {
     // Pure price sort — cheapest first
     ranked.sort((a, b) => a.pricePerHr - b.pricePerHr);
@@ -884,17 +892,21 @@ export async function autoSelectCheapestGpu(
       return latA - latB;
     });
   } else {
-    // Balanced (default): effective price = pricePerHr / max(repScore, 0.1), weighted by latency if known
-    // latency bonus: each 10ms below 100ms reduces effective price by 5%
+    // Balanced (default): combine reputation, TCP latency, and price into a unified score.
+    // qualityScore = repScore * 0.6 + tcpScore * 0.4 (both on 0-1 scale)
+    // effectivePrice = price / max(qualityScore, 0.1)
+    // Lower effectivePrice = better value per quality unit.
     ranked.sort((a, b) => {
-      const repA = Math.max(getRepScore(a), 0.1);
-      const repB = Math.max(getRepScore(b), 0.1);
-      const latA = getLatencyMs(a);
-      const latB = getLatencyMs(b);
-      const latBonusA = latA != null ? Math.max(0.7, 1 - (100 - Math.min(latA, 100)) * 0.005) : 1;
-      const latBonusB = latB != null ? Math.max(0.7, 1 - (100 - Math.min(latB, 100)) * 0.005) : 1;
-      const effectiveA = (a.pricePerHr / repA) * latBonusA;
-      const effectiveB = (b.pricePerHr / repB) * latBonusB;
+      const repA = getRepScore(a);
+      const repB = getRepScore(b);
+      const tcpA = tcpLatencyScore(a);
+      const tcpB = tcpLatencyScore(b);
+      // Reputation already includes pipeline latency (30% weight inside computeReputationScore),
+      // so we weight it higher. TCP measures network proximity which is additive.
+      const qualityA = Math.max(repA * 0.6 + tcpA * 0.4, 0.1);
+      const qualityB = Math.max(repB * 0.6 + tcpB * 0.4, 0.1);
+      const effectiveA = a.pricePerHr / qualityA;
+      const effectiveB = b.pricePerHr / qualityB;
       return effectiveA - effectiveB;
     });
   }
@@ -1703,6 +1715,9 @@ export async function pollHealthUntilReady(
   const credentials: ProviderCredentials = { apiKey };
   let consecutiveExited = 0;
   let containerStartedAt = 0;
+  let healthRespondedOnce = false;   // true after first /health 200
+  let healthFirstResponseAt = 0;     // timestamp of first /health response
+  let allServicesLoaded = false;     // true when all STT+LLM+TTS report loaded
   let consecutiveHealthFailures = 0;       // health failures while container is supposedly running
   let firstNonTransientErrorAt = 0;        // timestamp when non-transient HTTP errors started
   let consecutiveNonTransient = 0;         // consecutive 4xx responses from /health
@@ -1712,21 +1727,46 @@ export async function pollHealthUntilReady(
     const deployTimeoutMs = getDeployTimeoutMin() * 60_000;
     const totalElapsedMs = Date.now() - deployStartedAt;
 
-    // Image pull timeout: 10 min max for pulling image (machine with slow internet should be abandoned)
-    const IMAGE_PULL_TIMEOUT_MS = 10 * 60_000;
-    if (!containerStartedAt && totalElapsedMs > IMAGE_PULL_TIMEOUT_MS) {
-      const pullMin = Math.round(totalElapsedMs / 60_000);
-      const timeoutMsg = `Image pull timeout after ${pullMin} min — machine has slow internet, trying next`;
+    // ── Per-phase timeouts (fail fast, try next machine) ──
+    const PHASE_TIMEOUTS = {
+      IMAGE_PULL:  5 * 60_000,   // 5 min — 3GB at 500Mbps = 50s, 5min is generous
+      BOOT:        2 * 60_000,   // 2 min — uvicorn should start in <30s
+      MODELS:     10 * 60_000,   // 10 min — HuggingFace model download + load
+    };
+
+    // Image pull timeout
+    if (!containerStartedAt && totalElapsedMs > PHASE_TIMEOUTS.IMAGE_PULL) {
+      const timeoutMsg = `Image pull timeout (${Math.round(totalElapsedMs / 60_000)} min) — trying next machine`;
       console.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
       broadcastWs({ type: 'gpu:deploy', phase: 'pull_timeout', provider: providerName, elapsedMs: totalElapsedMs });
       setDeployState({ status: 'error', step: 'pulling_image', message: timeoutMsg });
       return 'timeout';
     }
 
-    // Overall deploy timeout
+    // Boot timeout — container started but /health never responded
+    if (containerStartedAt && !healthRespondedOnce && (Date.now() - containerStartedAt) > PHASE_TIMEOUTS.BOOT) {
+      const bootSec = Math.round((Date.now() - containerStartedAt) / 1000);
+      const timeoutMsg = `Boot timeout (${bootSec}s) — container up but /health not responding`;
+      console.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
+      broadcastWs({ type: 'gpu:deploy', phase: 'boot_timeout', provider: providerName });
+      setDeployState({ status: 'error', step: 'waiting_health', message: timeoutMsg });
+      return 'timeout';
+    }
+
+    // Model loading timeout — /health responds but services still downloading
+    if (healthRespondedOnce && !allServicesLoaded && (Date.now() - (healthFirstResponseAt || Date.now())) > PHASE_TIMEOUTS.MODELS) {
+      const modelSec = Math.round((Date.now() - (healthFirstResponseAt || Date.now())) / 1000);
+      const timeoutMsg = `Model loading timeout (${modelSec}s) — services still downloading`;
+      console.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
+      broadcastWs({ type: 'gpu:deploy', phase: 'model_timeout', provider: providerName });
+      setDeployState({ status: 'error', step: 'downloading_models', message: timeoutMsg });
+      return 'timeout';
+    }
+
+    // Overall deploy timeout (safety net)
     if (totalElapsedMs > deployTimeoutMs) {
       const phase = containerStartedAt ? 'waiting for /health' : 'pulling image';
-      const timeoutMsg = `Timed out after ${getDeployTimeoutMin()} min (stuck ${phase})`;
+      const timeoutMsg = `Overall timeout after ${getDeployTimeoutMin()} min (stuck ${phase})`;
       console.error(`[gpu] ${providerName} pod ${podId} timed out: ${phase}, endpoint=${endpoint || 'none'}`);
       setDeployState({ status: 'error', message: timeoutMsg });
       return 'timeout';
@@ -1865,10 +1905,15 @@ export async function pollHealthUntilReady(
           updateGpuModelWarmth(data);
           const HEALTHY_STATUSES = new Set(['healthy', 'ok', 'degraded', 'ready']);
           if (HEALTHY_STATUSES.has(data.status)) {
+            // Track health response milestones for per-phase timeouts
+            if (!healthRespondedOnce) { healthRespondedOnce = true; healthFirstResponseAt = Date.now(); }
+            consecutiveHealthFailures = 0;
+
             const svc = data.services ?? {};
             const ttsReady = svc.tts === 'loaded' || svc.tts === 'disabled';
             const sttReady = svc.whisper === 'loaded';
             const llmReady = svc.llama_cpp === 'ready' || svc.llama_cpp === 'loaded';
+            allServicesLoaded = sttReady && llmReady && ttsReady;
             const readyStages = [sttReady && 'STT', llmReady && 'LLM', ttsReady && 'TTS'].filter(Boolean);
             const loadingStages = [!sttReady && 'STT', !llmReady && 'LLM', !ttsReady && 'TTS'].filter(Boolean);
 
