@@ -1731,8 +1731,8 @@ export async function pollHealthUntilReady(
     // ── Per-phase timeouts (fail fast, try next machine) ──
     const PHASE_TIMEOUTS = {
       IMAGE_PULL:  5 * 60_000,   // 5 min — 3GB at 500Mbps = 50s, 5min is generous
-      BOOT:        2 * 60_000,   // 2 min — uvicorn should start in <30s
-      MODELS:     10 * 60_000,   // 10 min — HuggingFace model download + load
+      BOOT:        5 * 60_000,   // 5 min — models download before uvicorn starts on some images
+      MODELS:     10 * 60_000,   // 10 min — HuggingFace model download + load after /health
     };
 
     // Image pull timeout — track from when pull actually started, not deploy start
