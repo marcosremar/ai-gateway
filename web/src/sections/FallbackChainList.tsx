@@ -17,6 +17,7 @@ export const PROVIDER_ICON: Record<string, { icon: LucideIcon; color: string }> 
   deepgram:     { icon: Mic2,    color: '#6366f1' },
   elevenlabs:   { icon: Mic2,    color: '#f43f5e' },
   fireworks:    { icon: Flame,   color: '#e07a3a' },
+  'qwen3-asr':  { icon: Mic2,    color: '#06b6d4' },
   modal:        { icon: Rocket,  color: '#a78bfa' },
   'modal-moss': { icon: Rocket,  color: '#c084fc' },
   openrouter:   { icon: Shuffle, color: '#34d399' },

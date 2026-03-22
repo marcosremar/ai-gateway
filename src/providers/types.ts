@@ -9,7 +9,7 @@
 // Provider Identification
 // ---------------------------------------------------------------------------
 
-export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks' | 'deepgram' | 'modal' | 'modal-moss' | 'modal-seamless' | 'modal-qwen3asr-pipeline' | 'skypilot' | 'vast-serverless' | 'runpod' | 'tensordock' | 'ollama';
+export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks' | 'deepgram' | 'modal' | 'modal-moss' | 'modal-seamless' | 'modal-qwen3asr-pipeline' | 'skypilot' | 'vast-serverless' | 'runpod' | 'tensordock' | 'ollama' | 'mlx-qwen3-asr';
 
 /** @deprecated Use ProviderId instead */
 export type AIProviderId = ProviderId;

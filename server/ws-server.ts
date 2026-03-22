@@ -26,17 +26,27 @@ function buildStreamingProviderOrder(): string[] {
     const config = loadProviderConfig();
     const sttChain = config.pipelineStt || [];
     // Filter: only providers with sttType === 'streaming' (or gpu/fireworks which are streaming by default)
-    const STREAMING_PROVIDERS = new Set(['gpu', 'fireworks']);
+    const STREAMING_PROVIDERS = new Set(['gpu', 'fireworks', 'qwen3-asr', 'mlx-qwen3-asr']);
     const order = sttChain
       .filter(e => e.sttType === 'streaming' || (!e.sttType && STREAMING_PROVIDERS.has(e.provider)))
       .map(e => e.provider);
     if (order.length > 0) return order;
   } catch (e) { console.warn('[ws] streaming provider order parse failed:', e instanceof Error ? e.message : e); }
-  return ['gpu', 'fireworks']; // fallback default
+  // Include local Qwen3-ASR if configured
+  const defaultOrder = ['gpu', 'fireworks'];
+  if (process.env.MLX_QWEN3_ASR_HOST) defaultOrder.splice(1, 0, 'qwen3-asr');
+  return defaultOrder;
+}
+
+// MLX Qwen3-ASR local URL (from env)
+function getMlxQwenUrl(): string | null {
+  const host = process.env.MLX_QWEN3_ASR_HOST;
+  return host || null;
 }
 
 let sttRouter = new StreamingSTTRouter({
   getGpuUrl: () => deployState.status === 'ready' && deployState.endpoint ? deployState.endpoint : null,
+  getQwen3AsrUrl: getMlxQwenUrl,
   get fireworksApiKey() { return process.env.FIREWORKS_API_KEY ?? ''; },
   providerOrder: buildStreamingProviderOrder(),
 });
@@ -46,6 +56,7 @@ export function reloadStreamingSTTRouter(): void {
   const order = buildStreamingProviderOrder();
   sttRouter = new StreamingSTTRouter({
     getGpuUrl: () => deployState.status === 'ready' && deployState.endpoint ? deployState.endpoint : null,
+    getQwen3AsrUrl: getMlxQwenUrl,
     get fireworksApiKey() { return process.env.FIREWORKS_API_KEY ?? ''; },
     providerOrder: order,
   });
