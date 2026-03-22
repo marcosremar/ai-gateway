@@ -266,14 +266,21 @@ function ProviderItem({ entry, index, entryLabel, modelLabel, onClick }: { entry
   const provColor = pi?.color ?? pMeta(entry.provider).color;
   const Icon = pi?.icon;
   const isDisabled = entry.enabled === false;
+  const isPrimary = index === 0;
   return (
     <div className="flex items-center gap-1.5 rounded-lg border transition-all" onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} style={{ opacity: isDisabled ? 0.4 : 1, cursor: onClick ? 'pointer' : 'default', background: hovered ? `color-mix(in srgb, ${provColor} 8%, var(--color-surface-elevated))` : 'var(--color-surface-elevated)', borderColor: hovered ? provColor : 'var(--color-border)' }}>
-      <div className="drag-handle pl-1.5 py-2 cursor-grab active:cursor-grabbing flex-shrink-0"><GripVertical className="w-3 h-3" style={{ color: 'var(--color-text-muted)', opacity: 0.5 }} /></div>
-      <div className="flex items-center gap-2 pr-2.5 py-1.5 flex-1 min-w-0" onClick={onClick} style={{ borderLeft: `2.5px solid ${isDisabled ? 'var(--color-border)' : index === 0 ? provColor : 'var(--color-border)'}`, paddingLeft: 8 }}>
+      <div className="drag-handle pl-1.5 py-2 cursor-grab active:cursor-grabbing flex-shrink-0" title="Drag to reorder"><GripVertical className="w-3 h-3 transition-opacity" style={{ color: 'var(--color-text-muted)', opacity: hovered ? 0.9 : 0.35 }} /></div>
+      <div className="flex items-center gap-2 pr-2.5 py-1.5 flex-1 min-w-0" onClick={onClick} style={{ borderLeft: `2.5px solid ${isDisabled ? 'var(--color-border)' : isPrimary ? provColor : 'var(--color-border)'}`, paddingLeft: 8 }}>
         {Icon && (<div className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0" style={{ background: `color-mix(in srgb, ${provColor} 18%, transparent)` }}><Icon className="w-3 h-3" style={{ color: provColor }} /></div>)}
         <div className="flex flex-col min-w-0 flex-1">
-          <span className="text-[10px] font-semibold truncate" style={{ color: index === 0 ? provColor : 'var(--color-text-muted)' }}>{entryLabel}</span>
-          {modelLabel && (<span className="text-[8px] truncate" style={{ color: 'var(--color-text-muted)' }}>{modelLabel}</span>)}
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-[10px] font-semibold truncate" title={entryLabel} style={{ color: isPrimary ? provColor : 'var(--color-text-muted)' }}>{entryLabel}</span>
+            {isPrimary
+              ? <span className="text-[7px] font-bold uppercase px-1 py-0.5 rounded flex-shrink-0" style={{ background: 'color-mix(in srgb, #10b981 12%, transparent)', color: '#34d399', letterSpacing: '0.05em' }}>1st</span>
+              : <span className="text-[7px] font-bold uppercase px-1 py-0.5 rounded flex-shrink-0" style={{ background: 'color-mix(in srgb, #f59e0b 10%, transparent)', color: '#fbbf24', letterSpacing: '0.05em' }}>FB</span>
+            }
+          </div>
+          {modelLabel && (<span className="text-[8px] truncate" title={modelLabel} style={{ color: 'var(--color-text-muted)' }}>{modelLabel}</span>)}
         </div>
         {hovered && onClick && (<ChevronDown className="w-3 h-3 -rotate-90 flex-shrink-0" style={{ color: provColor }} />)}
       </div>
@@ -369,7 +376,7 @@ const StageNode = memo(({ data }: NodeProps) => {
                 })}
               </div>
             )}
-            <button onClick={() => setAddOpen(prev => !prev)} className="nodrag nopan w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border text-[10px] font-semibold cursor-pointer transition-all" style={{ borderColor: addOpen ? color : `color-mix(in srgb, ${color} 20%, var(--color-border))`, borderStyle: addOpen ? 'solid' : 'dashed', color: addOpen ? color : 'var(--color-text-muted)', background: addOpen ? `color-mix(in srgb, ${color} 6%, transparent)` : 'transparent' }}><Plus className="w-3.5 h-3.5" style={{ transition: 'transform 0.2s', transform: addOpen ? 'rotate(45deg)' : 'none' }} />{addOpen ? 'Close' : 'Add Service'}</button>
+            <button onClick={() => setAddOpen(prev => !prev)} className="nodrag nopan w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border text-[10px] font-bold cursor-pointer transition-all" style={{ borderColor: addOpen ? color : `color-mix(in srgb, ${color} 35%, var(--color-border))`, borderStyle: addOpen ? 'solid' : 'dashed', color: addOpen ? color : `color-mix(in srgb, ${color} 80%, var(--color-text-muted))`, background: addOpen ? `color-mix(in srgb, ${color} 8%, transparent)` : `color-mix(in srgb, ${color} 3%, transparent)` }}><Plus className="w-3.5 h-3.5" style={{ transition: 'transform 0.2s', transform: addOpen ? 'rotate(45deg)' : 'none' }} />{addOpen ? 'Close' : 'Add Fallback'}</button>
           </div>
         )}
       </div>
@@ -495,7 +502,7 @@ export function ReactFlowPipelineDiagram({
       { key: 'tts', label: 'TTS', sublabel: 'Text \u2192 Speech', chain: ttsChain, enabled: ttsEnabled, color: '#fbbf24', input: 'text',  output: 'audio' },
     ];
     const enabledStages = stagesDef.filter(s => s.enabled);
-    const inputW = 260, stageW = 220, stageGap = 100, inputGap = 60;
+    const inputW = 260, stageW = 260, stageGap = 80, inputGap = 60;
     const startX = inputW + inputGap;
     const outputDataType = INPUT_TYPE_DATA[inputType] ?? 'audio';
 

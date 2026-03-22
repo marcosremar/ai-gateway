@@ -128,11 +128,23 @@ function cooldownKey(entry: FallbackEntry): string {
 }
 
 /**
+ * Optional callback to fetch reputation score for a provider.
+ * Used to scale cooldown duration: low-rep providers get longer cooldowns.
+ */
+export type ReputationLookup = (provider: string) => number | null;
+
+/**
  * Encapsulates provider cooldown state.
  * Testable: inject a fresh instance per test instead of relying on module-level state.
  */
 export class CooldownTracker {
   private map = new Map<string, CooldownState>();
+  private reputationLookup: ReputationLookup | null = null;
+
+  /** Set an optional reputation lookup to scale cooldowns by host quality. */
+  setReputationLookup(fn: ReputationLookup): void {
+    this.reputationLookup = fn;
+  }
 
   isCoolingDown(entry: FallbackEntry): boolean {
     const state = this.map.get(cooldownKey(entry));
@@ -155,7 +167,17 @@ export class CooldownTracker {
     state.failures += 1;
 
     if (state.failures >= allowedFails) {
-      state.coolUntil = now + cooldownMs;
+      // Scale cooldown by reputation: poor hosts (score 0.2) get 3x cooldown, good hosts (0.8+) get 1x
+      let effectiveCooldown = cooldownMs;
+      if (this.reputationLookup) {
+        const score = this.reputationLookup(entry.provider);
+        if (score !== null && score < 0.7) {
+          // Multiplier: score=0.2 → 3x, score=0.5 → 1.6x, score=0.7 → 1x
+          const multiplier = 1 + (0.7 - Math.max(score, 0.1)) * 4;
+          effectiveCooldown = Math.round(cooldownMs * multiplier);
+        }
+      }
+      state.coolUntil = now + effectiveCooldown;
     }
 
     this.map.set(key, state);

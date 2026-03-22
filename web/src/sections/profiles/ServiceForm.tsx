@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  inspectDockerImage, getGpuTypes, type GpuTypeInfo, type DockerManifest,
+  inspectDockerImage, getGpuTypes, getApiKeys, type GpuTypeInfo, type DockerManifest,
 } from '@/lib/gateway';
 import {
   Button, FormInput, IconBox, DropdownList, Toggle,
@@ -437,6 +437,34 @@ function DeploySettings(props: DeploySettingsProps) {
   );
 }
 
+/* ── Cloud API key status indicator ── */
+
+function CloudApiKeyStatus({ provider }: { provider: string }) {
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  useEffect(() => {
+    let mounted = true;
+    getApiKeys().then(({ keys }) => {
+      if (!mounted) return;
+      const key = keys.find(k => k.id === provider || k.name.toLowerCase().includes(provider));
+      setConfigured(key?.configured ?? false);
+    }).catch(() => { if (mounted) setConfigured(null); });
+    return () => { mounted = false; };
+  }, [provider]);
+
+  if (configured === null) return null;
+  return (
+    <div className="flex items-center gap-2 p-2.5 rounded-lg border" style={{
+      borderColor: configured ? 'color-mix(in srgb, #10b981 25%, var(--color-border))' : 'color-mix(in srgb, #f59e0b 25%, var(--color-border))',
+      background: configured ? 'color-mix(in srgb, #10b981 4%, transparent)' : 'color-mix(in srgb, #f59e0b 4%, transparent)',
+    }}>
+      <div className={`w-2 h-2 rounded-full flex-shrink-0 ${configured ? '' : 'animate-pulse'}`} style={{ background: configured ? '#10b981' : '#f59e0b' }} />
+      <span className="text-[10px] font-medium" style={{ color: configured ? '#34d399' : '#fbbf24' }}>
+        {configured ? 'API key configured' : 'API key not set — configure in API Keys page'}
+      </span>
+    </div>
+  );
+}
+
 /* ── ServiceForm ── */
 
 interface ServiceFormProps {
@@ -673,7 +701,8 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
         <FormInput label="Name" value={name} onChange={e => setName(e.target.value)} placeholder="Service name" />
 
         {kind === 'cloud' ? (
-          /* ── Cloud API provider buttons ── */
+          /* ── Cloud API provider buttons + model + key status ── */
+          <>
           <div>
             <p className="text-[10px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-muted)' }}>Cloud Provider</p>
             <div className="flex flex-wrap gap-1.5">
@@ -697,6 +726,47 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
               })}
             </div>
           </div>
+
+          {/* ── Available models per stage ── */}
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-muted)' }}>Available Models</p>
+            <div className="space-y-2">
+              {(['stt', 'llm', 'tts'] as const).map(stage => {
+                const catalog = PIPELINE_CATALOG[stage];
+                const models = (catalog.models as Record<string, { id: string; label: string }[]>)[cloudProvider] ?? [];
+                if (models.length === 0) return null;
+                const stageColors = { stt: '#38bdf8', llm: '#a78bfa', tts: '#fbbf24' };
+                const stageIcons = { stt: Mic, llm: Bot, tts: Volume2 };
+                const StIcon = stageIcons[stage];
+                const stColor = stageColors[stage];
+                return (
+                  <div key={stage} className="flex items-start gap-2 p-2 rounded-lg border" style={{ borderColor: `color-mix(in srgb, ${stColor} 20%, var(--color-border))`, background: `color-mix(in srgb, ${stColor} 3%, transparent)` }}>
+                    <div className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0 mt-0.5" style={{ background: `color-mix(in srgb, ${stColor} 15%, transparent)` }}>
+                      <StIcon className="w-3 h-3" style={{ color: stColor }} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <span className="text-[9px] font-bold uppercase tracking-wide" style={{ color: stColor }}>{stage}</span>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {models.map(m => (
+                          <span key={m.id} className="text-[9px] px-1.5 py-0.5 rounded border font-medium" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)', background: 'var(--color-surface-elevated)' }}>{m.label}</span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {(['stt', 'llm', 'tts'] as const).every(stage => {
+                const models = (PIPELINE_CATALOG[stage].models as Record<string, { id: string }[]>)[cloudProvider] ?? [];
+                return models.length === 0;
+              }) && (
+                <p className="text-[10px] italic" style={{ color: 'var(--color-text-muted)' }}>No models configured for {cloudProvider}</p>
+              )}
+            </div>
+          </div>
+
+          {/* ── API key status ── */}
+          <CloudApiKeyStatus provider={cloudProvider} />
+          </>
         ) : (
           <>
             {/* ── Serverless provider buttons ── */}

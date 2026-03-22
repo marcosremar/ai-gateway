@@ -268,13 +268,17 @@ export class VastClient extends AbstractGpuProvider {
       const pricePerHr = (offer.dph_total || 0) as number;
 
       const hasDirectPorts = hasDirectPortOffers || (offer.direct_port_count as number ?? 0) >= 1;
+      // Build onstart: ensure script runs even if Docker CMD is replaced (SSH mode).
+      // Vast.ai SSH mode replaces Docker ENTRYPOINT/CMD — onstart is the ONLY way
+      // to launch the application. We wrap it to log failures.
+      const onstart = spec.onstart || '/app/start.sh';
+      const wrappedOnstart = `bash -c '${onstart} >> /tmp/start.log 2>&1 || echo "[vast] onstart failed: $?" >> /tmp/start.log'`;
+
       const createBody: Record<string, unknown> = {
         client_id: 'me',
         image: imageName,
-        disk: diskGb,
-        // SSH mode required for direct port mapping; onstart runs /app/start.sh
-        // (in SSH mode, Docker ENTRYPOINT/CMD is not called — onstart replaces it)
-        onstart: spec.onstart || '/app/start.sh',
+        disk: diskGb + 15,  // +15GB headroom for runtime model downloads
+        onstart: wrappedOnstart,
         // Vast.ai env dict: env vars as key-value + port mappings as "-p X:X": "1"
         // Port exposure MUST be in env dict — the separate 'ports' field is ignored
         env: {
@@ -286,8 +290,8 @@ export class VastClient extends AbstractGpuProvider {
         ...(hasDirectPorts ? { direct_port_count: 1 } : {}),
         // Template support: use pre-configured template for faster boot
         ...(spec.templateHashId ? { template_hash_id: spec.templateHashId } : {}),
-        // Fail-fast: cancel creation immediately if GPU unavailable
-        ...(spec.cancelUnavail !== false ? { cancel_unavail: true } : {}),
+        // Don't cancel_unavail — let it queue instead of silently destroying
+        ...(spec.cancelUnavail === true ? { cancel_unavail: true } : {}),
       };
 
       try {
@@ -850,6 +854,13 @@ export class VastClient extends AbstractGpuProvider {
     const MAX_MISSING_STREAK = 5; // abort after 5 consecutive "not found" polls (~55s with backoff)
     let sshOnlyRunningCount = 0; // consecutive polls where instance is running with SSH but no endpoint
 
+    // Initial delay: Vast.ai API takes 3-5s to propagate instance after creation
+    if (attempt === 0) {
+      const initialDelay = 5_000;
+      await new Promise((r) => setTimeout(r, initialDelay));
+      elapsed += initialDelay;
+    }
+
     while (elapsed < maxWaitMs) {
       const delay = Math.min(POLL_BASE_MS * Math.pow(POLL_GROWTH, attempt), POLL_MAX_MS);
       await new Promise((r) => setTimeout(r, delay));
@@ -988,7 +999,15 @@ export class VastClient extends AbstractGpuProvider {
     const rawSshPort = inst.ssh_port as number | undefined;
     const sshPort = rawSshPort && rawSshPort >= 1 && rawSshPort <= 65535 ? rawSshPort : undefined;
 
-    if (!ip) return { ip: '', endpoint: '', status, sshHost, sshPort };
+    if (!ip) {
+      this.log.log(`[vast] _parseInstance: no IP yet (status=${status}, cur_state=${inst.cur_state}, actual_status=${inst.actual_status})`);
+      return { ip: '', endpoint: '', status, sshHost, sshPort };
+    }
+
+    // Log raw port data for debugging connectivity issues
+    const ports = inst.ports as Record<string, unknown> | undefined;
+    const directPort = inst.direct_port_start as number | undefined;
+    this.log.log(`[vast] _parseInstance: ip=${ip} status=${status} direct_port=${directPort ?? 'none'} ports=${ports ? Object.keys(ports).join(',') : 'none'} ssh=${sshHost}:${sshPort}`);
 
     // Reject private/unreachable IPs (NAT-only hosts reporting RFC1918 as public)
     if (isPrivateIp(ip)) {
@@ -1002,7 +1021,6 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     // Parse ports — Vast.ai format: { "8000/tcp": [{ "HostIp": "...", "HostPort": "..." }] }
-    const ports = inst.ports as Record<string, unknown> | undefined;
     if (ports) {
       // Check both '8000/tcp' and '8000' keys (API inconsistency)
       const p8000 = (ports['8000/tcp'] ?? ports['8000']) as Array<{ HostPort?: string; HostIp?: string }> | undefined;
@@ -1015,7 +1033,6 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     // Fallback: direct port mapping (skip invalid ports like -1 or 0 during loading)
-    const directPort = inst.direct_port_start as number | undefined;
     if (directPort && directPort > 0) {
       return { ip, endpoint: `http://${ip}:${directPort}`, status, sshHost, sshPort };
     }
