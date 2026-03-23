@@ -10,7 +10,7 @@ import type { Transport, SSEConfig, ProcessingStage, SpeechResponse, TimingInfo 
 import { float32ToWavBuffer, combineWavChunksToBase64 } from './audio';
 import { createLogger } from './logger';
 
-const DEFAULT_HEALTH_TIMEOUT = 10_000;
+const DEFAULT_HEALTH_TIMEOUT = 15_000;
 
 export class SSETransport implements Transport {
   readonly protocol = 'sse' as const;
@@ -46,6 +46,7 @@ export class SSETransport implements Transport {
     try {
       const res = await fetch(healthUrl, {
         signal: AbortSignal.timeout(healthCheckTimeoutMs),
+        credentials: 'include', // Send auth cookies (required for /api/speech/health)
       });
 
       if (res.status === 401 || res.status === 403) {
