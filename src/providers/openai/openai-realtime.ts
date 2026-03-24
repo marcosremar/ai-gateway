@@ -17,6 +17,7 @@ import type {
   RealtimeProvider,
   RealtimeSession,
   RealtimeSessionConfig,
+  RealtimeSdpConfig,
 } from '../types';
 import { OPENAI_REALTIME_MODELS, OPENAI_VOICES } from './models';
 
@@ -59,6 +60,59 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
    * Returns a client_secret that the browser uses to authenticate
    * a WebRTC or WebSocket connection directly to OpenAI.
    */
+  /**
+   * SDP proxy flow — exchange a browser SDP offer for an SDP answer via
+   * OpenAI's /v1/realtime/calls endpoint.
+   *
+   * Note: multipart/form-data is built manually because Bun's native FormData
+   * hangs indefinitely when posting to OpenAI's endpoint.
+   */
+  async exchangeSdp(config: RealtimeSdpConfig): Promise<string> {
+    const apiKey = this.getApiKey();
+    const model = config.model || 'gpt-4o-mini-realtime-preview';
+    const voice = config.voice || 'ash';
+
+    const sessionConfig = JSON.stringify({ type: 'realtime', model, audio: { output: { voice } } });
+
+    // Build multipart body manually (Bun's FormData + fetch to OpenAI hangs)
+    const boundary = '----FormBoundary' + Math.random().toString(36).slice(2);
+    const parts = [
+      `--${boundary}\r\nContent-Disposition: form-data; name="sdp"\r\n\r\n${config.sdpOffer}`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="session"\r\n\r\n${sessionConfig}`,
+      `--${boundary}--\r\n`,
+    ];
+    const bodyStr = parts.join('\r\n');
+
+    const response = await fetch('https://api.openai.com/v1/realtime/calls', {
+      method: 'POST',
+      signal: AbortSignal.timeout(30_000),
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body: new Blob([bodyStr], { type: `multipart/form-data; boundary=${boundary}` }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`[OpenAI Realtime] SDP exchange failed (${response.status}): ${errorText}`);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    const body = await response.text();
+
+    // OpenAI may return plain SDP or wrap it in JSON
+    if (contentType.includes('application/json')) {
+      try {
+        const json = JSON.parse(body);
+        return (json.sdp || json.answer || body) as string;
+      } catch {
+        return body;
+      }
+    }
+    return body;
+  }
+
   async createSession(config: RealtimeSessionConfig): Promise<RealtimeSession> {
     const apiKey = this.getApiKey();
     const model = config.model || 'gpt-4o-mini-realtime-preview';
@@ -110,3 +164,6 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
     };
   }
 }
+
+/** Singleton instance — use `.withApiKey(key)` for per-user keys. */
+export const openaiRealtime = new OpenAIRealtimeProvider();

@@ -202,6 +202,7 @@ export type {
   ChatRequest,
   ChatResponse,
   RealtimeSessionConfig,
+  RealtimeSdpConfig,
   RealtimeSession,
   RealtimeTransport,
   ImageRequest,
@@ -259,7 +260,7 @@ export {
 // ── OpenAI Providers ───────────────────────────────────────────────────────
 export { OpenAISTTProvider } from './providers/openai/openai-stt';
 export { OpenAITTSProvider } from './providers/openai/openai-tts';
-export { OpenAIRealtimeProvider } from './providers/openai/openai-realtime';
+export { OpenAIRealtimeProvider, openaiRealtime } from './providers/openai/openai-realtime';
 export { OpenAIOmniProvider } from './providers/openai/openai-omni';
 
 // ── OpenAI Model Constants ─────────────────────────────────────────────────

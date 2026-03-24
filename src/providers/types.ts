@@ -9,7 +9,7 @@
 // Provider Identification
 // ---------------------------------------------------------------------------
 
-export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks' | 'deepgram' | 'modal' | 'modal-moss' | 'modal-seamless' | 'modal-qwen3asr-pipeline' | 'skypilot' | 'vast-serverless' | 'runpod' | 'tensordock' | 'ollama' | 'mlx-qwen3-asr';
+export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks' | 'deepgram' | 'modal' | 'modal-moss' | 'modal-seamless' | 'modal-qwen3asr-pipeline' | 'skypilot' | 'vast-serverless' | 'runpod' | 'tensordock' | 'ollama' | 'mlx-qwen3-asr' | 'self-hosted';
 
 /** @deprecated Use ProviderId instead */
 export type AIProviderId = ProviderId;
@@ -175,11 +175,20 @@ export interface RealtimeSession {
   config: RealtimeSessionConfig;
 }
 
+export interface RealtimeSdpConfig {
+  /** SDP offer from the browser (text/plain, starts with "v=0"). */
+  sdpOffer: string;
+  model?: string;
+  voice?: string;
+}
+
 export interface RealtimeProvider {
   readonly providerId: ProviderId;
   getModels(): ModelInfo[];
   getVoices(): VoiceInfo[];
   createSession(config: RealtimeSessionConfig): Promise<RealtimeSession>;
+  /** SDP proxy flow: exchange SDP offer for SDP answer server-side. */
+  exchangeSdp?(config: RealtimeSdpConfig): Promise<string>;
   isConfigured(): boolean;
   withApiKey?(apiKey: string): RealtimeProvider;
 }
