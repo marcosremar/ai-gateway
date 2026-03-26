@@ -14,16 +14,16 @@ import type { AIProfile, PresetName } from './types';
 export const VOICE_PROFILE: AIProfile = {
   preset: 'voice',
   stt: [
-    { provider: 'groq', model: 'whisper-large-v3-turbo' },
     { provider: 'openai', model: 'gpt-4o-mini-transcribe' },
+    { provider: 'groq', model: 'whisper-large-v3-turbo' },
   ],
   llm: [
-    { provider: 'groq', model: 'llama-3.3-70b-versatile' },
     { provider: 'openai', model: 'gpt-4o-mini' },
+    { provider: 'groq', model: 'llama-3.3-70b-versatile' },
   ],
   tts: [
-    { provider: 'groq', model: 'canopylabs/orpheus-v1-english' },
     { provider: 'openai', model: 'gpt-4o-mini-tts' },
+    { provider: 'groq', model: 'canopylabs/orpheus-v1-english' },
     { provider: 'modal', model: 'moss-tts-realtime' },
   ],
   omni: [
@@ -32,7 +32,7 @@ export const VOICE_PROFILE: AIProfile = {
   realtime: [
     { provider: 'openai', model: 'gpt-4o-mini-realtime-preview' },
   ],
-  voice: 'coral',
+  voice: 'nova',
   audioFormat: 'wav',
   fallbackOptions: { timeoutMs: 8_000, retriesPerProvider: 0 },
 };
@@ -69,7 +69,7 @@ export const TTS_PROFILE: AIProfile = {
     { provider: 'openai', model: 'gpt-4o-mini-tts' },
     { provider: 'modal', model: 'moss-tts-realtime' },
   ],
-  voice: 'coral',
+  voice: 'nova',
   audioFormat: 'wav',
   fallbackOptions: { timeoutMs: 8_000, retriesPerProvider: 0 },
 };
@@ -138,27 +138,64 @@ export const SYSTEM_PROFILE: AIProfile = {
 export const SPEECH_TO_SPEECH_PROFILE: AIProfile = {
   preset: 'speech-to-speech',
   stt: [
-    { provider: 'self-hosted', model: 'whisper-small', selfHosted: true },
     { provider: 'groq', model: 'whisper-large-v3-turbo' },
     { provider: 'openai', model: 'gpt-4o-mini-transcribe' },
+    { provider: 'self-hosted', model: 'whisper-small', selfHosted: true },
   ],
   llm: [
-    { provider: 'self-hosted', model: 'gemma-3-4b-it', selfHosted: true },
     { provider: 'groq', model: 'llama-3.3-70b-versatile' },
     { provider: 'openai', model: 'gpt-4o-mini' },
+    { provider: 'self-hosted', model: 'gemma-3-4b-it', selfHosted: true },
   ],
   tts: [
-    { provider: 'self-hosted', model: 'kokoro-82m', selfHosted: true },
     { provider: 'groq', model: 'canopylabs/orpheus-v1-english' },
     { provider: 'openai', model: 'gpt-4o-mini-tts' },
     { provider: 'modal', model: 'moss-tts-realtime' },
+    { provider: 'self-hosted', model: 'kokoro-82m', selfHosted: true },
   ],
-  voice: 'af_heart',
+  voice: 'nova',
   audioFormat: 'wav',
   language: 'pt',
   temperature: 0.7,
   fallbackOptions: {
     timeoutMs: 15_000,
+    retriesPerProvider: 0,
+  },
+};
+
+/**
+ * OpenAI Realtime Speech-to-Speech — single-call audio-in → audio-out.
+ *
+ * Uses OpenAI's Realtime API (WebRTC) which handles STT + LLM + TTS
+ * in one round-trip, ~300-500ms latency. No separate pipeline stages.
+ * Falls back to omni (gpt-audio-mini) then to the sequential pipeline.
+ */
+export const OPENAI_REALTIME_PROFILE: AIProfile = {
+  preset: 'openai-realtime',
+  realtime: [
+    { provider: 'openai', model: 'gpt-4o-mini-realtime-preview' },
+    { provider: 'openai', model: 'gpt-4o-realtime-preview' },
+  ],
+  omni: [
+    { provider: 'openai', model: 'gpt-audio-mini' },
+    { provider: 'openai', model: 'gpt-audio' },
+  ],
+  // Sequential fallback if realtime + omni both fail
+  stt: [
+    { provider: 'openai', model: 'gpt-4o-mini-transcribe' },
+  ],
+  llm: [
+    { provider: 'openai', model: 'gpt-4o-mini' },
+  ],
+  tts: [
+    { provider: 'openai', model: 'gpt-4o-mini-tts' },
+  ],
+  voice: 'nova',
+  audioFormat: 'wav',
+  language: 'pt',
+  temperature: 0.7,
+  fallbackOptions: {
+    timeoutMs: 10_000,
     retriesPerProvider: 0,
   },
 };
@@ -175,6 +212,7 @@ const PRESETS: Record<PresetName, AIProfile> = {
   llm: LLM_PROFILE,
   image: IMAGE_PROFILE,
   system: SYSTEM_PROFILE,
+  'openai-realtime': OPENAI_REALTIME_PROFILE,
   'speech-to-speech': SPEECH_TO_SPEECH_PROFILE,
 };
 

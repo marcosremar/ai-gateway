@@ -11,13 +11,13 @@ import { defaultLogger } from '../logger';
 const GPU_HEALTH_SKIP_TLS = !!process.env.GPU_HEALTH_SKIP_TLS;
 
 /** Probe a GPU endpoint's /health to check if it's serving. */
-export async function probeGpuHealth(endpoint: string): Promise<boolean>;
-export async function probeGpuHealth(endpoint: string, returnData: true): Promise<{ ok: boolean; data?: Record<string, any> }>;
-export async function probeGpuHealth(endpoint: string, returnData?: boolean): Promise<boolean | { ok: boolean; data?: Record<string, any> }> {
+export async function probeGpuHealth(endpoint: string, returnData?: false, timeoutMs?: number): Promise<boolean>;
+export async function probeGpuHealth(endpoint: string, returnData: true, timeoutMs?: number): Promise<{ ok: boolean; timedOut?: boolean; data?: Record<string, any> }>;
+export async function probeGpuHealth(endpoint: string, returnData?: boolean, timeoutMs = 15_000): Promise<boolean | { ok: boolean; timedOut?: boolean; data?: Record<string, any> }> {
   if (!endpoint) return returnData ? { ok: false } : false;
   try {
     const fetchOptions: RequestInit & { tls?: { rejectUnauthorized: boolean } } = {
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     };
     if (GPU_HEALTH_SKIP_TLS) {
       // Bun supports per-request TLS config; Node does not.
@@ -31,8 +31,9 @@ export async function probeGpuHealth(endpoint: string, returnData?: boolean): Pr
     const HEALTHY = new Set(['healthy', 'ok', 'degraded', 'ready']);
     const ok = HEALTHY.has(data.status);
     return returnData ? { ok, data: ok ? data : undefined } : ok;
-  } catch {
-    return returnData ? { ok: false } : false;
+  } catch (err) {
+    const timedOut = err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+    return returnData ? { ok: false, timedOut: timedOut || undefined } : false;
   }
 }
 

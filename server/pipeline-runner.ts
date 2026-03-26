@@ -491,7 +491,7 @@ export async function runStreamingPipeline(
             name: 'modal', timeoutMs: ttsTimeout,
             run: async (signal) => {
               if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-              const r = await modalTTS.synthesize({ input: translatedText, voice: speaker || 'Ryan', referenceAudio, refText });
+              const r = await modalTTS.synthesize({ input: translatedText, model: 'qwen3-tts', voice: speaker || 'Ryan', referenceAudio, refText });
               return { audio: r.audio, contentType: r.contentType, used_gpu: false };
             },
           });

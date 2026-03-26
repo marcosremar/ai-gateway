@@ -63,6 +63,8 @@ export interface SpeechResponse {
   speechMetrics?: SpeechMetrics;
   adaptiveSpeed?: AdaptiveSpeed;
   timing?: TimingInfo;
+  /** Providers used for each stage (stt, llm, tts). */
+  providers?: Record<string, string>;
 }
 
 // ── Transport interface ────────────────────────────────────────────────────
@@ -134,6 +136,8 @@ export interface SSEConfig {
   history?: Array<{ role: string; content: string }>;
   /** ISO language code for STT (e.g. 'pt', 'en'). Improves Whisper accuracy. */
   language?: string;
+  /** Skip the health check on connect — assume endpoint is available. */
+  skipHealthCheck?: boolean;
 }
 
 /**

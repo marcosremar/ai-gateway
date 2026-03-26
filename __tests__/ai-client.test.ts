@@ -38,7 +38,8 @@ class OpenAILLMProvider implements LLMProvider {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const response = await this.client.chat.completions.create({
       model: request.model || 'gpt-4o-mini',
-      messages: request.messages.map(m => ({ role: m.role, content: m.content })),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      messages: request.messages as any,
       temperature: request.temperature,
       max_tokens: request.maxTokens,
       ...(request.responseFormat && { response_format: request.responseFormat }),
@@ -76,7 +77,8 @@ class GroqLLMProvider implements LLMProvider {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const response = await this.client.chat.completions.create({
       model: request.model || 'llama-3.3-70b-versatile',
-      messages: request.messages.map(m => ({ role: m.role, content: m.content })),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      messages: request.messages as any,
       temperature: request.temperature,
       max_tokens: request.maxTokens,
     });

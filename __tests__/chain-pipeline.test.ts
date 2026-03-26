@@ -24,7 +24,8 @@ import type {
 // ── Minimal mock providers (cloud fallback, never used when chain succeeds) ──
 
 class MockSTT implements STTProvider {
-  readonly providerId = 'mock-stt';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly providerId: any = 'mock-stt';
   calls = 0;
   isConfigured() { return true; }
   getModels(): ModelInfo[] { return []; }
@@ -35,7 +36,8 @@ class MockSTT implements STTProvider {
 }
 
 class MockLLM implements LLMProvider {
-  readonly providerId = 'mock-llm';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly providerId: any = 'mock-llm';
   calls = 0;
   isConfigured() { return true; }
   withApiKey() { return this; }
@@ -46,13 +48,18 @@ class MockLLM implements LLMProvider {
 }
 
 class MockTTS implements TTSProvider {
-  readonly providerId = 'mock-tts';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly providerId: any = 'mock-tts';
   calls = 0;
   isConfigured() { return true; }
   getModels(): ModelInfo[] { return []; }
   async synthesize(_r: TTSRequest): Promise<TTSResponse> {
     this.calls++;
     return { audio: Buffer.from('cloud-tts-fallback'), contentType: 'audio/wav' };
+  }
+  getVoices(): import('../src/providers/types').VoiceInfo[] { return []; }
+  synthesizeStream(_r: TTSRequest): Promise<ReadableStream<Uint8Array>> {
+    return Promise.resolve(new ReadableStream());
   }
 }
 

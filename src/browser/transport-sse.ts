@@ -39,7 +39,15 @@ export class SSETransport implements Transport {
    * For SSE, "connect" means health-checking the endpoint.
    */
   async connect(): Promise<boolean> {
-    const { endpoint, healthCheckTimeoutMs = DEFAULT_HEALTH_TIMEOUT, healthPath = '/health' } = this.config;
+    const { endpoint, healthCheckTimeoutMs = DEFAULT_HEALTH_TIMEOUT, healthPath = '/health', skipHealthCheck } = this.config;
+
+    if (skipHealthCheck) {
+      this.connected = true;
+      this.log.info('connected (health check skipped)');
+      this.onStageChange?.('idle');
+      return true;
+    }
+
     const healthUrl = healthPath.startsWith('http') ? healthPath : `${endpoint}${healthPath}`;
     this.log.debug('health check', healthUrl);
 
@@ -119,6 +127,7 @@ export class SSETransport implements Transport {
         body: formData,
         headers,
         signal: abortController.signal,
+        credentials: 'include', // Send auth cookies so /api/speech knows the user
       });
 
       if (res.status === 401 || res.status === 403) {
@@ -180,6 +189,7 @@ export class SSETransport implements Transport {
         body: formData,
         headers,
         signal: abortController.signal,
+        credentials: 'include', // Send auth cookies so /api/speech knows the user
       });
 
       if (res.status === 401 || res.status === 403) {
@@ -227,7 +237,7 @@ export class SSETransport implements Transport {
 
   private async parseSSEStream(body: ReadableStream<Uint8Array>): Promise<void> {
     const audioChunks: Uint8Array[] = [];
-    const state = { responseText: '', transcript: '', timing: null as TimingInfo | null };
+    const state = { responseText: '', transcript: '', timing: null as TimingInfo | null, providers: undefined as Record<string, string> | undefined };
 
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -289,6 +299,7 @@ export class SSETransport implements Transport {
               state.responseText = data.response || state.responseText;
               state.transcript = data.transcript || state.transcript;
               state.timing = data.timing || null;
+              state.providers = data.providers || undefined;
               break;
 
             case 'error':
@@ -312,6 +323,7 @@ export class SSETransport implements Transport {
       duration: 0,
       userText: state.transcript,
       timing: state.timing || undefined,
+      providers: state.providers,
     });
 
     this.onStageChange?.('complete');

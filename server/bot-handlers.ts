@@ -260,7 +260,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
               computeType: 'CPU',
               cpuFlavorIds: ['cpu5c', 'cpu5g', 'cpu3c', 'cpu3g'],
               vcpus: 4,
-              memoryGb: 16,  // Chromium needs ≥8GB; 16GB avoids OOM on busy meetings
+              ramGb: 16,  // Chromium needs ≥8GB; 16GB avoids OOM on busy meetings
               dockerImage: botDockerImage,
               storageGb: 20,
               ports: BOT_PORTS,
@@ -320,17 +320,12 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
         let endpoint = botState.endpoint;
         if (!endpoint) {
           if (isScalewayPod) {
-            // Scaleway: resolve public IP from instance detail
-            try {
-              const scwKey = process.env.SCALEWAY_SECRET_KEY || '';
-              const detail = await scaleway.getInstanceDetail(instance.instanceId, { apiKey: scwKey });
-              const ip = detail?.publicIp || detail?.ip;
-              if (ip) {
-                endpoint = `http://${ip}:8080`;
-                setBotState({ endpoint });
-                console.log(`[bot] Scaleway endpoint: ${endpoint}`);
-              }
-            } catch { /* not ready yet */ }
+            // Scaleway: endpoint is stored in instance when created (already in botState)
+            // Try to get from stored instance or use instance ID format
+            if (botState.endpoint) {
+              endpoint = botState.endpoint;
+              console.log(`[bot] Scaleway endpoint from state: ${endpoint}`);
+            }
           } else if (isCpuPod) {
             // CPU pods: build proxy URL directly from pod ID (RunPod doesn't expose runtime/IP)
             endpoint = `https://${instance.instanceId}-8080.proxy.runpod.net`;

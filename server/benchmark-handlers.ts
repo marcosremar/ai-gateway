@@ -282,7 +282,7 @@ async function benchGpuSTT(
   for (let i = 0; i < n; i++) {
     try {
       const form = new FormData();
-      form.append('file', new Blob([audio], { type: mimeType }), fileName);
+      form.append('file', new Blob([audio as BlobPart], { type: mimeType }), fileName);
       form.append('model', 'whisper-large-v3-turbo');
       if (source) form.append('language', source);
       const t0 = Date.now();
@@ -419,7 +419,7 @@ function ttsTargets(text: string, target: string, speaker: string): BenchTarget[
     targets.push({
       name: 'openai',
       available: true,
-      bench: (n) => benchProviderTTS(openaiTTS, 'gpt-4o-mini-tts', 'coral', text, n),
+      bench: (n) => benchProviderTTS(openaiTTS!, 'gpt-4o-mini-tts', 'coral', text, n),
     });
   }
 
@@ -550,7 +550,7 @@ async function runPipelineProgression(
       const r = await fetch(`http://localhost:${PORT}/v1/speech?source=${source}&target=${target}${speaker ? `&speaker=${speaker}` : ''}`, {
         method: 'POST',
         headers: { 'Content-Type': mimeType },
-        body: audio,
+        body: new Blob([audio as BlobPart], { type: mimeType }),
         signal: AbortSignal.timeout(30_000),
       });
       const totalMs = Date.now() - t0;
@@ -618,6 +618,68 @@ async function runPipelineProgression(
     coldStartPenalty: { firstCallMs, warmAvgMs, penaltyMs },
     perStageTrend,
   };
+}
+
+// ── Realtime TTFC Benchmark ──────────────────────────────────────────────────
+/**
+ * POST /v1/benchmark/realtime — Measure TTFC and total latency under realistic load
+ *
+ * Body: { requestCount?: 10, intervalMs?: 2000 }
+ *
+ * Measures Time To First Content (transcript/audio) for real-time performance analysis.
+ */
+export async function handleRealtimeTTFCBenchmark(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const requestId = getOrCreateRequestId(req);
+  setRequestIdHeader(res, requestId);
+
+  const body = await readJsonBody(req) as {
+    requestCount?: number;
+    intervalMs?: number;
+  } | undefined;
+
+  const requestCount = Math.min(body?.requestCount || 10, 50); // Max 50 requests
+  const intervalMs = body?.intervalMs || 2000; // Default 2s between requests
+
+  console.log(`[rt-bench] Starting realtime TTFC benchmark: ${requestCount} requests @ ${intervalMs}ms intervals`);
+
+  const { globalTracer } = await import('../src/observability/distributed-tracer');
+
+  try {
+    const results = await globalTracer.runRealtimeBenchmark(requestCount, intervalMs);
+
+    const metrics = globalTracer.getRealtimeMetrics();
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      benchmark: {
+        ttfcStats: results.ttfcStats,
+        reliability: results.reliability,
+        throughput: results.throughput,
+        analysis: results.analysis
+      },
+      realtimeMetrics: {
+        ttfcP50: metrics.ttfcP50,
+        ttfcP95: metrics.ttfcP95,
+        coldStartRate: metrics.coldStartRate,
+        userExperienceScore: metrics.userExperienceScore
+      },
+      config: {
+        requestCount,
+        intervalMs,
+        timestamp: new Date().toISOString()
+      }
+    }));
+
+  } catch (error) {
+    console.warn(`[rt-bench] Failed: ${error instanceof Error ? error.message : error}`);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      requestId
+    }));
+  }
 }
 
 // ── Main handler ────────────────────────────────────────────────────────────

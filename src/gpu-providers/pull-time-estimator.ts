@@ -41,6 +41,17 @@ interface ImageSizeEntry {
 const imageSizeCache = new Map<string, ImageSizeEntry>();
 const CACHE_TTL_MS = 24 * 3600_000; // 24 hours
 
+// Periodic sweep of expired image size cache entries
+if (typeof setInterval !== 'undefined') {
+  const _sweep = setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of imageSizeCache) {
+      if (now - entry.fetchedAt > CACHE_TTL_MS) imageSizeCache.delete(key);
+    }
+  }, 60 * 60_000); // every 1 hour
+  if (_sweep.unref) _sweep.unref();
+}
+
 // ── In-memory pull time history (persists for gateway lifetime) ─────────────
 
 interface PullRecord {

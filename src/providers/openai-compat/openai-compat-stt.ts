@@ -59,9 +59,9 @@ export class OpenAICompatSTTProvider implements STTProvider {
       ...(request.prompt && { prompt: request.prompt }),
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       response_format: request.responseFormat === 'text' ? 'text'
-        : (request.wordTimestamps && this.config.defaultResponseFormat !== 'json')
+        : (request.wordTimestamps && this.config.defaultResponseFormat !== 'json' && !model.includes('transcribe'))
           ? 'verbose_json'
-          : (this.config.defaultResponseFormat ?? 'verbose_json'),
+          : (model.includes('transcribe') ? 'json' : (this.config.defaultResponseFormat ?? 'verbose_json')),
       ...(request.wordTimestamps && this.config.defaultResponseFormat !== 'json' && { timestamp_granularities: ['word'] }),
     };
 

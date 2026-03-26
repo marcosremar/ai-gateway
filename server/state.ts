@@ -716,7 +716,7 @@ export function getColdStartProfile(gpuType: string, dockerImage?: string, provi
 // ── Bot Deployment State ─────────────────────────────────────────────────────
 
 export interface BotDeploymentState {
-  status: 'idle' | 'creating' | 'booting' | 'ready' | 'joined' | 'error';
+  status: 'idle' | 'creating' | 'booting' | 'ready' | 'joined' | 'joining' | 'error';
   podId: string;
   endpoint: string;  // http://<pod-ip>:8080
   sshHost: string;

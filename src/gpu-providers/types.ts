@@ -103,6 +103,12 @@ export interface GpuOffer {
   numGpus?: number;
   /** Total GPU FLOPS */
   totalFlops?: number;
+  /** Provider-specific host IP (for direct connections) */
+  hostIp?: string;
+  /** Direct port for host connection */
+  hostDirectPort?: number;
+  /** Disk read bandwidth in MB/s (for SSD detection) */
+  diskBwReadMbps?: number;
 }
 
 export interface ListOffersOptions {

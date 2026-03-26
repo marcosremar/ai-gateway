@@ -70,7 +70,7 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
   async exchangeSdp(config: RealtimeSdpConfig): Promise<string> {
     const apiKey = this.getApiKey();
     const model = config.model || 'gpt-4o-mini-realtime-preview';
-    const voice = config.voice || 'ash';
+    const voice = config.voice || 'nova';
 
     const sessionConfig = JSON.stringify({ type: 'realtime', model, audio: { output: { voice } } });
 

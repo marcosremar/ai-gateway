@@ -67,7 +67,7 @@ describe('cleanupProviderInstance', () => {
     const registry = new GpuProviderRegistry();
     registry.register(client);
 
-    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
     await expect(cleanupProviderInstance(baseTier, registry, 'test', logger)).resolves.toBeUndefined();
     expect(logger.warn).toHaveBeenCalled();
   });

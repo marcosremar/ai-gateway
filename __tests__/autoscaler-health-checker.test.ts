@@ -11,7 +11,7 @@ import type { GpuTierState, GpuTierConfig, IdleTierState, BootingTierState, Read
 import type { GpuLifecycleLogger } from '../src/autoscaler/lifecycle-logger';
 import type { Logger } from '../src/deps';
 
-const silentLogger: Logger = { log: () => {}, warn: () => {}, error: () => {} };
+const silentLogger: Logger = { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 const noopLogger: GpuLifecycleLogger = { log: () => {} };
 
 function makeBooting(tierIndex: number, extra: Partial<BootingTierState> = {}): BootingTierState {

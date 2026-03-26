@@ -25,7 +25,7 @@ function makeKvStore() {
   return store;
 }
 
-const silentLogger = { log: () => {}, warn: () => {}, error: () => {} };
+const silentLogger = { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 
 function makeIdle(tierIndex: number, extra: Partial<IdleTierState> = {}): IdleTierState {
   return { state: 'idle', tierIndex, ...extra };

@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TierCircuitBreaker } from '@ai-gateway/autoscaler/circuit-breaker';
-import type { KvStore } from '@ai-gateway/deps';
+import type { KvStore, ListStore, HashStore } from '@ai-gateway/deps';
 
-function makeStore(): KvStore & { data: Map<string, string> } {
+function makeStore(): KvStore & ListStore & HashStore & { data: Map<string, string> } {
   const data = new Map<string, string>();
   return {
     data,
@@ -13,12 +13,11 @@ function makeStore(): KvStore & { data: Map<string, string> } {
       const prefix = pattern.replace('*', '');
       return [...data.keys()].filter((k) => k.startsWith(prefix));
     }),
-    // ListStore + HashStore stubs (not used by circuit breaker)
-    rpush: vi.fn(),
-    ltrim: vi.fn(),
+    rpush: vi.fn(async () => {}),
+    ltrim: vi.fn(async () => {}),
     lrange: vi.fn(async () => []),
-    hset: vi.fn(),
-    hdel: vi.fn(),
+    hset: vi.fn(async () => {}),
+    hdel: vi.fn(async () => {}),
     hgetall: vi.fn(async () => ({})),
   };
 }

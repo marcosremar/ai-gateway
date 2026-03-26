@@ -12,11 +12,22 @@ export class SessionTracker {
   private logger: Logger;
   /** Cache: studentId → teacherId (TTL: 5 min). Avoids repeated DB lookups. */
   private teacherCache = new Map<string, { teacherId: string | null; expiresAt: number }>();
+  private lastTeacherCacheClean = Date.now();
 
   constructor(stateStore: HashStore, sessionResolver: SessionResolver, logger?: Logger) {
     this.stateStore = stateStore;
     this.sessionResolver = sessionResolver;
     this.logger = logger ?? defaultLogger;
+  }
+
+  /** Evict expired teacherCache entries to prevent unbounded growth. */
+  private cleanTeacherCache(): void {
+    const now = Date.now();
+    if (now - this.lastTeacherCacheClean < 2 * 60_000) return; // every 2 min max
+    this.lastTeacherCacheClean = now;
+    for (const [key, entry] of this.teacherCache) {
+      if (entry.expiresAt < now) this.teacherCache.delete(key);
+    }
   }
 
   private key(userId: string): string {
@@ -77,6 +88,7 @@ export class SessionTracker {
    * Resolve student→teacher and double-store heartbeat under teacher's ID.
    */
   private async aggregateToTeacher(userId: string, sessionKey: string): Promise<void> {
+    this.cleanTeacherCache();
     const cached = this.teacherCache.get(userId);
     let teacherId: string | null;
 

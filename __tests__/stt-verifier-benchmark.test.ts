@@ -21,6 +21,7 @@ import { openaiSTT } from '../src/providers/openai';
 import { deepgramSTT } from '../src/providers/deepgram';
 import { openrouterQwen3Embedding } from '../src/providers/openrouter/openrouter-embedding';
 import { openaiEmbedding } from '../src/providers/openai/openai-embedding';
+import type { EmbeddingProvider } from '../src/providers/openai-compat/openai-compat-embedding';
 import { loadEnv } from './helpers';
 
 beforeAll(() => loadEnv());
@@ -286,7 +287,7 @@ describe.skipIf(!hasAtLeastTwo)('STT Verifier — Integration Benchmark (Real AP
   if (hasOpenAI) activeProviders.push({ name: 'openai', provider: openaiSTT });
   if (hasDeepgram) activeProviders.push({ name: 'deepgram', provider: deepgramSTT });
 
-  const embeddingFallbacks = [];
+  const embeddingFallbacks: EmbeddingProvider[] = [];
   if (hasOpenRouter) embeddingFallbacks.push(openrouterQwen3Embedding);
   if (hasOpenAI) embeddingFallbacks.push(openaiEmbedding);
 
@@ -298,7 +299,7 @@ describe.skipIf(!hasAtLeastTwo)('STT Verifier — Integration Benchmark (Real AP
     const result = await runBenchmark(
       { id, lang, text },
       activeProviders,
-      embeddingFallbacks as never[],
+      embeddingFallbacks as EmbeddingProvider[],
       REALTIME_TIMEOUT_MS,
     );
     allResults.push(result);

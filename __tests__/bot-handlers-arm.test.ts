@@ -21,7 +21,7 @@ describe('Bot handlers — ARM/Rosetta compatibility', () => {
     it('should treat exit code 125 as success if container is actually running', () => {
       // Simulate: docker run exits with 125 (platform warning on ARM Mac)
       // but container IS running (docker inspect returns true)
-      const exitCode = 125;
+      const exitCode = 125 as number;
       const isRunning = true; // docker inspect says it's running
 
       // Logic: if exitCode !== 0 but container is running, don't throw
@@ -30,7 +30,7 @@ describe('Bot handlers — ARM/Rosetta compatibility', () => {
     });
 
     it('should throw if exit code is non-zero AND container is not running', () => {
-      const exitCode = 1;
+      const exitCode = 1 as number;
       const isRunning = false;
 
       const shouldThrow = exitCode !== 0 && !isRunning;

@@ -1,15 +1,7 @@
-/**
- * Pure functions for building provider fallback chains and resolving API keys.
- * Extracted from the app-level get-user-provider.ts — no DB or framework deps.
- */
-
 import { ProviderClassification } from './classification';
+import { getVault } from '../vault/vault-singleton';
 import type { ProviderId } from './types';
 import type { FallbackEntry } from './fallback';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export interface SavedProfile {
   pipelineMode: 'omni' | 'pipeline';
@@ -41,46 +33,18 @@ export interface UserProviderSettings {
   systemStt?: { provider: string; model: string };
 }
 
-// ---------------------------------------------------------------------------
-// API Key Resolution
-// ---------------------------------------------------------------------------
-
-/** Default env var mapping per provider */
-const ENV_KEY_MAP: Partial<Record<ProviderId, string>> = {
-  openai: 'OPENAI_API_KEY',
-  groq: 'GROQ_API_KEY',
-  openrouter: 'OPENROUTER_API_KEY',
-  fireworks: 'FIREWORKS_API_KEY',
-  'vast-serverless': 'VAST_API_KEY',
-};
-
-/**
- * Resolve the API key for a provider.
- * Checks user's saved key first, then falls back to environment variable.
- */
-export function resolveApiKey(
-  providerId: ProviderId,
-  userKeys?: Record<string, string>,
-): string | null {
-  const userKey = userKeys?.[providerId];
-  if (userKey) return userKey;
-
-  const envVarName = ENV_KEY_MAP[providerId];
-  return envVarName ? (process.env[envVarName] || null) : null;
+export async function resolveApiKey(providerId: ProviderId): Promise<string | null> {
+  const vault = getVault();
+  if (!vault) {
+    throw new Error(`[resolveApiKey] Vault not initialized. Set VAULT_MASTER_KEY and VAULT_PATH in .env`);
+  }
+  try {
+    return await vault.retrieve(`${providerId}:apiKey`);
+  } catch {
+    return null;
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Fallback Chain Building
-// ---------------------------------------------------------------------------
-
-/**
- * Pure function: builds an ordered fallback chain from already-loaded settings.
- *
- * Priority order:
- *   1. Explicit profiles array (drag-and-drop order from Settings UI)
- *   2. pipelineStages (current active pipeline config)
- *   3. activeProvider as last resort
- */
 export function buildFallbackChain(
   settings: UserProviderSettings | null,
   stage: 'stt' | 'llm' | 'tts' | 'image',
@@ -98,7 +62,6 @@ export function buildFallbackChain(
     }
   };
 
-  // 1. Profiles (ordered by drag-and-drop priority in Settings)
   for (const profile of profiles) {
     if (profile.pipelineMode !== 'pipeline') continue;
     const stageCfg = profile[stage];
@@ -106,7 +69,6 @@ export function buildFallbackChain(
     addEntry(stageCfg.provider, stageCfg.model);
   }
 
-  // 2. pipelineStages
   if (chain.length === 0) {
     const stageCfg = settings?.pipelineStages?.[stage];
     if (stageCfg?.provider) {
@@ -114,7 +76,6 @@ export function buildFallbackChain(
     }
   }
 
-  // 3. Last resort: activeProvider
   if (chain.length === 0) {
     const fallback = settings?.activeProvider;
     chain.push({
@@ -125,10 +86,6 @@ export function buildFallbackChain(
   return chain;
 }
 
-/**
- * Get the system LLM entry from already-loaded settings (pure, no DB).
- * Falls back to first LLM entry in the user's profile chain.
- */
 export function getSystemLlmEntryFromSettings(settings: UserProviderSettings | null): FallbackEntry {
   if (settings?.systemLlm?.provider && (ProviderClassification.isCloud(settings.systemLlm.provider) || settings.systemLlm.provider === 'vast-serverless')) {
     return { provider: settings.systemLlm.provider, model: settings.systemLlm.model };
@@ -137,9 +94,6 @@ export function getSystemLlmEntryFromSettings(settings: UserProviderSettings | n
   return chain[0];
 }
 
-/**
- * Get the system STT entry from already-loaded settings (pure, no DB).
- */
 export function getSystemSttEntryFromSettings(settings: UserProviderSettings | null): FallbackEntry {
   if (settings?.systemStt?.provider && (ProviderClassification.isCloud(settings.systemStt.provider) || settings.systemStt.provider === 'vast-serverless')) {
     return { provider: settings.systemStt.provider, model: settings.systemStt.model };

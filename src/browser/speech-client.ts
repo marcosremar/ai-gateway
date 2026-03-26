@@ -190,6 +190,15 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
       throw new SpeechSDKError('DESTROYED', 'SpeechClient has been destroyed');
     }
 
+    // Disconnect any existing transport to prevent duplicate connections.
+    // Without this, calling connect() twice leaves the old transport active
+    // alongside the new one, causing double responses.
+    if (this.transport) {
+      this.log.debug('disconnecting existing transport before reconnect');
+      this.transport.disconnect();
+      this.transport = null;
+    }
+
     // Auto-discover transport URLs from the backend
     if (this.config.discoveryEndpoint && !this.discoveryDone) {
       await this.discover();
@@ -240,7 +249,12 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
         return true;
       }
 
-      // Cleanup failed transport
+      // Cleanup failed transport — disconnect AND clear callbacks to prevent ghost events
+      transport.onResponse = null as any;
+      transport.onStageChange = null as any;
+      transport.onError = null as any;
+      transport.onDisconnect = null as any;
+      transport.onAudioChunk = null as any;
       transport.disconnect();
       previousProtocol = protocol;
       this.log.debug(protocol, 'failed, trying next...');
@@ -400,11 +414,19 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
 
   // ── Disconnect & destroy ───────────────────────────────────────────────
 
-  /** Gracefully disconnect the active transport. */
+  /** Gracefully disconnect the active transport and clear its callbacks. */
   disconnect(): void {
     const protocol = this.transport?.protocol ?? null;
-    this.transport?.disconnect();
-    this.transport = null;
+    if (this.transport) {
+      // Clear callbacks before disconnect to prevent ghost events during teardown
+      this.transport.onResponse = null as any;
+      this.transport.onStageChange = null as any;
+      this.transport.onError = null as any;
+      this.transport.onDisconnect = null as any;
+      this.transport.onAudioChunk = null as any;
+      this.transport.disconnect();
+      this.transport = null;
+    }
     this.clearResponseTimeout();
     this.setStage('idle');
     this.emit('disconnected', { protocol });
@@ -669,9 +691,22 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
     }
   }
 
+  /**
+   * Update the system prompt on the active and configured transports without
+   * reconnecting. Call this when user profile data (nativeLanguage, birthDate,
+   * studentName) arrives asynchronously after the initial connection.
+   */
+  updateSystemPrompt(prompt: string): void {
+    this.config.systemPrompt = prompt;
+    // Propagate to transport-level configs so the new prompt is sent on the next request
+    if (this.config.sse) this.config.sse.systemPrompt = prompt;
+    if (this.config.websocket) this.config.websocket.systemPrompt = prompt;
+  }
+
   // ── Stage management ───────────────────────────────────────────────────
 
   private setStage(stage: ProcessingStage): void {
+    if (stage === this._stage) return;
     this._stage = stage;
     this.emit('stage-change', { stage });
   }

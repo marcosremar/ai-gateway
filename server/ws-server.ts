@@ -66,7 +66,7 @@ export function reloadStreamingSTTRouter(): void {
 }
 
 // Active STT sessions: client WS id → upstream backend
-const sttSessions = new Map<string, import('../ai-gateway/src/streaming-stt').StreamingSTTBackend>();
+const sttSessions = new Map<string, import('../src/streaming-stt').StreamingSTTBackend>();
 
 // Bot audio relay state
 let botAudioSource: BabelCastWS | null = null;
@@ -209,8 +209,8 @@ export function startParecCapture(): void {
 
   // Read stderr for errors
   (async () => {
-    if (!parecProc?.stderr) return;
-    const reader = parecProc.stderr.getReader();
+    if (!parecProc?.stderr || !(parecProc.stderr instanceof ReadableStream)) return;
+    const reader = (parecProc.stderr as ReadableStream).getReader();
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -226,8 +226,8 @@ export function startParecCapture(): void {
   let buffer = new Uint8Array(0);
 
   (async () => {
-    if (!parecProc?.stdout) return;
-    const reader = parecProc.stdout.getReader();
+    if (!parecProc?.stdout || !(parecProc.stdout instanceof ReadableStream)) return;
+    const reader = (parecProc.stdout as ReadableStream).getReader();
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -346,7 +346,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     const { Duplex } = await import('stream');
 
     // Build minimal fake req/res to reuse handleBotJoin
-    const fakeReq = Object.assign(new IncomingMessage(new Duplex()), {
+    const fakeReq = Object.assign(new IncomingMessage(new Duplex() as unknown as import('net').Socket), {
       _body: JSON.stringify(fakeBody),
     });
     // Instead of full fake req/res, directly call the join logic inline:
@@ -453,7 +453,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     if (!sessionId || !text.trim()) return;
 
     const translateFn = buildSpeculativeTranslateFn(source, target, style);
-    speculativeCache.speculate(sessionId, text, translateFn).catch(e => console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e));
+    try { speculativeCache.speculate(sessionId, text, translateFn); } catch (e) { console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e); }
 
   } else if (type === 'ping') {
     ws.send(JSON.stringify({ type: 'pong' }));
@@ -551,7 +551,7 @@ export function startWsServer() {
                 const srcLang = ws.data.language || 'fr';
                 const tgtLang = ws.data.speculateTarget;
                 const translateFn = buildSpeculativeTranslateFn(srcLang, tgtLang, 'default');
-                speculativeCache.speculate(ws.data.id, evt.text, translateFn).catch(e => console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e));
+                try { speculativeCache.speculate(ws.data.id, evt.text, translateFn); } catch (e) { console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e); }
               }
             };
             backend.onDisconnected = (reason) => {
@@ -631,7 +631,7 @@ export function startWsServer() {
       message(ws, msg) {
         // ── Message size guard — reject oversized payloads ──
         const MAX_WS_MESSAGE_SIZE = 5 * 1024 * 1024; // 5MB
-        if (typeof msg !== 'string' && (msg as ArrayBuffer).byteLength > MAX_WS_MESSAGE_SIZE) {
+        if (typeof msg !== 'string' && (msg as unknown as ArrayBuffer).byteLength > MAX_WS_MESSAGE_SIZE) {
           ws.close(1009, 'Message too large');
           return;
         }
@@ -659,7 +659,7 @@ export function startWsServer() {
             } catch { /* ignore parse errors */ }
           } else {
             // Binary message = WAV audio → run pipeline
-            const audioBuffer = Buffer.from(msg as ArrayBuffer);
+            const audioBuffer = Buffer.from(msg as unknown as ArrayBuffer);
             if (audioBuffer.length === 0) {
               ws.send(JSON.stringify({ status: 'error', message: 'No audio data' }));
               return;
@@ -702,7 +702,7 @@ export function startWsServer() {
           // Forward binary PCM to upstream backend
           const backend = sttSessions.get(ws.data.id);
           if (backend && typeof msg !== 'string') {
-            backend.sendAudio(msg as ArrayBuffer);
+            backend.sendAudio(msg as unknown as ArrayBuffer);
           }
         } else if (ws.data.type === 'bot-audio') {
           // Bot audio: first JSON message is handshake (has protocol_version),
@@ -722,13 +722,13 @@ export function startWsServer() {
           // Relay binary audio to all connected Python clients
           botAudioChunks++;
           if (botAudioChunks === 1 || botAudioChunks % 500 === 0) {
-            console.log(`[bot-audio] Relaying audio chunk #${botAudioChunks} (${(msg as ArrayBuffer).byteLength} bytes) to ${wsClients.size} clients`);
+            console.log(`[bot-audio] Relaying audio chunk #${botAudioChunks} (${(msg as unknown as ArrayBuffer).byteLength} bytes) to ${wsClients.size} clients`);
           }
           for (const client of wsClients) {
             try { client.send(msg); } catch { wsClients.delete(client); }
           }
           // Auto-process: buffer audio and run through pipeline when enough accumulates
-          const audioChunk = Buffer.from(msg as ArrayBuffer);
+          const audioChunk = Buffer.from(msg as unknown as ArrayBuffer);
           botAudioBuffer.push(audioChunk);
           botAudioBufferBytes += audioChunk.length;
           // Cap buffer to prevent OOM on runaway audio streams
@@ -743,7 +743,7 @@ export function startWsServer() {
           }
         } else {
           try {
-            const raw = typeof msg === 'string' ? msg : Buffer.from(msg as ArrayBuffer).toString();
+            const raw = typeof msg === 'string' ? msg : Buffer.from(msg as unknown as ArrayBuffer).toString();
             const cmd = JSON.parse(raw) as Record<string, unknown>;
             handleWsCommand(ws as unknown as BabelCastWS, cmd).catch(err => console.error('[ws] Command error:', err));
           } catch { /* ignore parse errors */ }

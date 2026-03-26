@@ -33,6 +33,12 @@ const POLL_MAX_MS = 30_000;
 // We poll generously here; the boot health poller (engine.ts) handles "app ready".
 const POLL_TOTAL_MAX_MS = 1_800_000; // 30 minutes
 
+// ── Host reliability tracking ────────────────────────────────────────────────
+// Hosts that reclaim instances during loading are blacklisted for a cooldown period.
+// This prevents wasting time and money on unreliable hosts.
+const UNSTABLE_HOST_COOLDOWN_MS = 30 * 60 * 1000; // 30 min cooldown after a reclaim
+const MAX_UNSTABLE_HOSTS = 50;
+
 // ── Rate limiting ────────────────────────────────────────────────────────────
 // Vast.ai limits to ~4.5 req/s. We use a token bucket at 3 req/s to stay safe.
 const RATE_LIMIT_INTERVAL_MS = 334; // ~3 req/s
@@ -86,9 +92,33 @@ export class VastClient extends AbstractGpuProvider {
   private _lastRequestMs = 0;
   /** IPs of hosts where we recently created instances (cross-call dedup). */
   private _recentlyUsedIps = new Set<string>();
+  /** Hosts that reclaimed instances during loading — blacklisted with expiry timestamps. */
+  private _unstableHosts = new Map<string, number>(); // ip → timestamp when blacklisted
 
   constructor(opts?: VastClientOptions) {
     super(opts);
+  }
+
+  /** Mark a host as unstable (reclaimed an instance during loading). */
+  private _markHostUnstable(ip: string): void {
+    this._unstableHosts.set(ip, Date.now());
+    this.log.warn(`[vast] Host ${ip} marked as unstable (instance reclaimed during loading). Cooldown: ${UNSTABLE_HOST_COOLDOWN_MS / 60_000}min`);
+    // Prune old entries
+    if (this._unstableHosts.size > MAX_UNSTABLE_HOSTS) {
+      const oldest = [...this._unstableHosts.entries()].sort((a, b) => a[1] - b[1])[0];
+      if (oldest) this._unstableHosts.delete(oldest[0]);
+    }
+  }
+
+  /** Check if a host is currently blacklisted. */
+  private _isHostUnstable(ip: string): boolean {
+    const ts = this._unstableHosts.get(ip);
+    if (!ts) return false;
+    if (Date.now() - ts > UNSTABLE_HOST_COOLDOWN_MS) {
+      this._unstableHosts.delete(ip); // Cooldown expired
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -174,6 +204,7 @@ export class VastClient extends AbstractGpuProvider {
       num_gpus: { eq: spec.gpuCount ?? 1 },
       disk_space: { gte: diskGb },
       direct_port_count: { gte: 1 },   // Need at least 1 open port for SSH
+      cuda_max_good: { gte: 12.4 },    // Minimum CUDA 12.4 (our base image)
       // Host quality filters
       reliability2: { gte: 0.9 },       // >90% reliability score
       inet_down: { gte: 500 },          // Minimum 500 Mb/s download (fast image pulls)
@@ -191,15 +222,27 @@ export class VastClient extends AbstractGpuProvider {
       searchBody.cpu_ram = { gte: spec.ramGb * 1024 };  // Vast.ai uses MB
     }
 
-    // Filter by region/geolocation if specified (e.g. 'US', 'EU', 'FR', 'DE')
+    // Filter by region/geolocation if specified (e.g. 'US', 'EU', 'FR', 'DE', 'France,Spain')
+    // Vast.ai geolocation format: "France, FR" — client-side endsWith(', CC') is the only
+    // reliable filter. Server-side geolocation eq filter does not work for country codes.
     const EU_CC = ['AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','NO','CH','GB','IS'];
     let createGeoFilter: string[] | undefined;
     if (spec.region) {
       const r = spec.region.toUpperCase();
       if (r === 'EU' || r === 'EUROPE') {
-        createGeoFilter = EU_CC; // filter client-side after search
+        createGeoFilter = EU_CC;
       } else {
-        searchBody.geolocation = { eq: spec.region };
+        // Support comma-separated list of country codes or names (e.g. 'FR,ES' or 'France,Spain')
+        // Map full names to 2-letter codes for the endsWith filter
+        const COUNTRY_TO_CC: Record<string, string> = {
+          FRANCE: 'FR', SPAIN: 'ES', GERMANY: 'DE', NETHERLANDS: 'NL', ITALY: 'IT',
+          PORTUGAL: 'PT', POLAND: 'PL', SWEDEN: 'SE', NORWAY: 'NO', SWITZERLAND: 'CH',
+          UNITEDKINGDOM: 'GB', UK: 'GB', UNITEDSTATES: 'US', USA: 'US',
+        };
+        createGeoFilter = r.split(',').map(s => {
+          const trimmed = s.trim().replace(/\s+/g, '');
+          return COUNTRY_TO_CC[trimmed] ?? trimmed;
+        });
       }
     }
 
@@ -210,14 +253,14 @@ export class VastClient extends AbstractGpuProvider {
 
     let offers = await this._searchOffers(searchBody, headers);
 
-    // Client-side geo filter for macro-regions (EU, etc.)
+    // Client-side geo filter — Vast.ai geolocation is "Country, CC", so endsWith(', CC')
     if (createGeoFilter && offers.length) {
       const before = offers.length;
       offers = offers.filter(o => {
         const geo = String(o.geolocation || '');
-        return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`));
+        return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`) || geo.toUpperCase().startsWith(`${cc},`));
       });
-      this.log.log(`[vast] Geo filter (create): ${before} → ${offers.length} offers in EU`);
+      this.log.log(`[vast] Geo filter (create): ${before} → ${offers.length} offers matching [${createGeoFilter.join(',')}]`);
     }
 
     let hasDirectPortOffers = offers.length > 0;
@@ -277,7 +320,12 @@ export class VastClient extends AbstractGpuProvider {
       const createBody: Record<string, unknown> = {
         client_id: 'me',
         image: imageName,
+        // Do NOT include 'price' — omitting it = on-demand (fixed price, non-interruptible).
+        // Passing price:null or price:0 creates an interruptible/spot instance that gets reclaimed!
         disk: diskGb + 15,  // +15GB headroom for runtime model downloads
+        // runtype: 'args' → Docker mode: Docker CMD runs as main process + port NAT works.
+        // SSH mode (default) ignores Docker CMD and requires app to listen on direct_port (unknown at deploy time).
+        runtype: 'args',
         onstart: wrappedOnstart,
         // Vast.ai env dict: env vars as key-value + port mappings as "-p X:X": "1"
         // Port exposure MUST be in env dict — the separate 'ports' field is ignored
@@ -335,11 +383,21 @@ export class VastClient extends AbstractGpuProvider {
         );
         const { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS);
 
-        // If instance vanished during polling (reclaimed by host), clean up and try next offer
-        if (!endpoint && !ip) {
-          this.log.warn(`[vast] Instance ${contractId} has no endpoint or IP — trying next offer`);
-          try { await this.deleteInstance(instanceId, { apiKey }); } catch (delErr) { this.log.debug(`[vast] Cleanup of vanished instance ${contractId} failed: ${this.errMsg(delErr)}`); }
-          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: 'instance vanished during startup' });
+        // If instance vanished (no IP) or is SSH-only (no endpoint), destroy and try next offer
+        if (!endpoint) {
+          const reason = !ip ? 'instance vanished during startup (host reclaimed)' : 'SSH-only (no direct port mapping)';
+          this.log.warn(`[vast] Instance ${contractId} has no endpoint (ip=${ip || 'none'}) — ${reason}. Destroying and trying next offer...`);
+          // Blacklist host that reclaimed our instance
+          if (!ip && sshHost) {
+            // Extract IP from the offer we tried
+            const offerIp = String(offer.public_ipaddr ?? '');
+            if (offerIp) this._markHostUnstable(offerIp);
+          } else if (ip) {
+            // SSH-only hosts get a shorter blacklist (they work, just no ports)
+            this._markHostUnstable(ip);
+          }
+          try { await this.deleteInstance(instanceId, { apiKey }); } catch (delErr) { this.log.debug(`[vast] Cleanup of ${contractId} failed: ${this.errMsg(delErr)}`); }
+          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason });
           continue;
         }
 
@@ -897,12 +955,12 @@ export class VastClient extends AbstractGpuProvider {
           }
 
           // Early exit for SSH-only instances: if running with SSH but no endpoint
-          // after 3 consecutive polls, the host likely has no direct ports.
-          // Return early so the engine's boot poller can use SSH health checks.
+          // after 10 consecutive polls (~2.5min), the host likely has no direct ports.
+          // Return early so createInstance can try the next offer.
           if (!endpoint && sshHost && sshPort && detail.status?.toLowerCase() === 'running') {
             sshOnlyRunningCount++;
-            if (sshOnlyRunningCount >= 3) {
-              this.log.log(`[vast] Instance ${contractId} SSH-only (no endpoint after ${Math.round(elapsed / 1000)}s, ssh=${sshHost}:${sshPort}) — returning early for SSH health check`);
+            if (sshOnlyRunningCount >= 10) {
+              this.log.log(`[vast] Instance ${contractId} SSH-only (no endpoint after ${Math.round(elapsed / 1000)}s, ssh=${sshHost}:${sshPort}) — returning early, will try next offer`);
               break;
             }
           } else {
@@ -976,17 +1034,19 @@ export class VastClient extends AbstractGpuProvider {
     // A single host can have many machine_ids/host_ids (one per GPU), but
     // they all share the same public_ipaddr. Spreading across IPs avoids
     // funneling all instances onto the same broken host.
-    // Also skip hosts where we recently created instances (cross-call dedup).
+    // Also skip: recently used hosts (cross-call dedup) + unstable hosts (reclaimed instances).
     const seenIps = new Set<string>(this._recentlyUsedIps);
+    let unstableSkipped = 0;
     const deduplicated: Array<Record<string, unknown>> = [];
     for (const offer of allOffers) {
       const ip = String(offer.public_ipaddr ?? '');
       if (ip && seenIps.has(ip)) continue;
+      if (ip && this._isHostUnstable(ip)) { unstableSkipped++; continue; }
       if (ip) seenIps.add(ip);
       deduplicated.push(offer);
     }
 
-    this.log.log(`[vast] Search: ${allOffers.length} offers → ${deduplicated.length} unique hosts (${this._recentlyUsedIps.size} recently used)`);
+    this.log.log(`[vast] Search: ${allOffers.length} offers → ${deduplicated.length} unique hosts (${this._recentlyUsedIps.size} recently used, ${unstableSkipped} unstable skipped)`);
     return deduplicated;
   }
 

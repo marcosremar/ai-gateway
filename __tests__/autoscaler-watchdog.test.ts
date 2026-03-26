@@ -76,7 +76,7 @@ function makeDeps(stateMap: Map<string, GpuTierState[]>, overrides?: Partial<Wat
     loadConfig: vi.fn().mockResolvedValue(defaultConfig),
     hooks: {},
     lifecycleLogger: { log: vi.fn() },
-    logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     ...overrides,
   };
 }

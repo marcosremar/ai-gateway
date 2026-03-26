@@ -121,6 +121,7 @@ function createModalAutoscaler(userId: string, activeSessions: number) {
       log: (...args: unknown[]) => console.log('[autoscaler]', ...args),
       warn: (...args: unknown[]) => console.warn('[autoscaler]', ...args),
       error: (...args: unknown[]) => console.error('[autoscaler]', ...args),
+      debug: (...args: unknown[]) => console.debug('[autoscaler]', ...args),
     },
   });
 
@@ -431,7 +432,7 @@ describe('4. Autoscaler with Modal Tier', () => {
   });
 
   it.skipIf(!hasCredentials)('probeGpuHealth handles MOSS-TTS endpoint', async () => {
-    const health = await probeGpuHealth(MODAL_TTS_ENDPOINT, 10_000);
+    const health = await probeGpuHealth(MODAL_TTS_ENDPOINT, false, 10_000);
 
     console.log(`[Autoscaler] Health probe result:`, health);
 

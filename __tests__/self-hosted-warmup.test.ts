@@ -183,7 +183,7 @@ describe('AIClient.warmup() — self-hosted', () => {
   it('skips selfHosted without endpoint and logs warning', async () => {
     const { registry } = makeRegistry();
 
-    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 
     const client = new AIClient({
       registry,
@@ -354,7 +354,7 @@ describe('watchdog — respects alwaysActive on GpuTierConfig', () => {
       loadConfig: vi.fn().mockResolvedValue(config),
       hooks: {},
       lifecycleLogger: { log: vi.fn() },
-      logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     };
   }
 

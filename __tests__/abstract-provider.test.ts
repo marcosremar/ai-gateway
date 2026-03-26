@@ -84,7 +84,7 @@ describe('AbstractGpuProvider', () => {
     });
 
     it('uses custom logger from options', () => {
-      const custom = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const custom = { log: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
       const provider = new TestProvider({ logger: custom });
       expect(provider.getLog()).toBe(custom);
     });
@@ -120,7 +120,7 @@ describe('AbstractGpuProvider', () => {
       const persist = vi.fn().mockRejectedValue(new Error('db down'));
       const provider = new TestProvider({
         onInstancePersist: persist,
-        logger: { log: vi.fn(), warn: vi.fn(), error: logError },
+        logger: { log: vi.fn(), warn: vi.fn(), error: logError, debug: vi.fn() },
       });
 
       await provider.testPersistInstance('user-1', 'runpodPod', { podId: 'x' });
