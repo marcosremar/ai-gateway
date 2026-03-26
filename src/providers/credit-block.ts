@@ -24,9 +24,21 @@ function blockKey(provider: string, apiKeyHash: string): string {
 
 export class CreditBlockTracker {
   private blocks = new Map<string, number>(); // key → blockedUntil timestamp
+  private lastSweep = Date.now();
+
+  /** Remove expired entries to prevent unbounded growth. */
+  private sweep(): void {
+    const now = Date.now();
+    if (now - this.lastSweep < 5 * 60_000) return;
+    this.lastSweep = now;
+    for (const [key, until] of this.blocks) {
+      if (until <= now) this.blocks.delete(key);
+    }
+  }
 
   /** Record a 402 — immediately blocks this provider:key pair */
   recordBlock(provider: string, apiKeyHash: string): void {
+    this.sweep();
     const key = blockKey(provider, apiKeyHash);
     this.blocks.set(key, Date.now() + BLOCK_TTL_MS);
   }

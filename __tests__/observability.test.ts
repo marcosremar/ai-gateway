@@ -70,7 +70,7 @@ describe('Observability', () => {
   describe('createConsoleHooks', () => {
     it('logs structured JSON', () => {
       const mockLog = vi.fn();
-      const hooks = createConsoleHooks({ log: mockLog, warn: vi.fn(), error: vi.fn() });
+      const hooks = createConsoleHooks({ log: mockLog, warn: vi.fn(), error: vi.fn(), debug: vi.fn() });
 
       hooks.onRequestStart!({
         userId: 'u1', stage: 'llm', provider: 'openai', timestamp: 1234,

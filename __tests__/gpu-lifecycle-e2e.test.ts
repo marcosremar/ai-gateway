@@ -76,7 +76,8 @@ const patchSettings  = (patch: Partial<LatencySettings>) =>
 
 const runSTT = async () => {
   const wav = makeTestWav(1.0);
-  const r = await fetch(`${GW}/v1/playground/stt`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wav, signal: AbortSignal.timeout(30_000) });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = await fetch(`${GW}/v1/playground/stt`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wav as any, signal: AbortSignal.timeout(30_000) });
   return r.json() as Promise<{ text: string; latencyMs: number; provider: string }>;
 };
 const runLLM = (text = 'Hello') => gwPost<{ content: string; latencyMs: number; provider: string }>('/v1/playground/llm', {

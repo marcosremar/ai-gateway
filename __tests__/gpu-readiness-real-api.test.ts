@@ -80,8 +80,10 @@ async function getGpuStatus(): Promise<GpuStatus> { return gw('/v1/gpu/status');
 async function getHealth(): Promise<HealthResponse> { return gw('/health'); }
 async function getLatencySettings(): Promise<LatencySettings> { return gw('/v1/gpu/latency/settings'); }
 async function patchLatencySettings(patch: Partial<LatencySettings>): Promise<LatencySettings> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return gw('/v1/gpu/latency/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })
-    .catch(() => gw('/v1/gpu/latency/settings', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .catch(() => gw('/v1/gpu/latency/settings', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })) as Promise<LatencySettings>;
 }
 
 async function runSTT(): Promise<{ text: string; latencyMs: number; provider: string }> {
@@ -89,7 +91,8 @@ async function runSTT(): Promise<{ text: string; latencyMs: number; provider: st
   const res = await fetch(`${GW}/v1/playground/stt`, {
     method: 'POST',
     headers: { 'Content-Type': 'audio/wav' },
-    body: wav,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    body: wav as any,
     signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) throw new Error(`STT ${res.status}: ${await res.text()}`);

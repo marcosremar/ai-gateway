@@ -49,6 +49,9 @@ export async function runWatchdogCycle(deps: WatchdogDeps): Promise<void> {
     await engine.initTierStatesFromDb(userId, config.tiers);
   }
 
+  // Evict idle users to prevent unbounded stateMap growth
+  engine.evictIdleUsers();
+
   // Iterate all users with active state
   for (const [userId, tierStates] of stateMap) {
     const hasActive = tierStates.some(

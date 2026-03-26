@@ -24,6 +24,7 @@ import { PerformanceRanker } from '../src/providers/performance-ranker';
 import { AdaptiveTimeoutCalculator } from '../src/providers/adaptive-timeout';
 import { TtfacTracker } from '../src/providers/ttfac-tracker';
 import type { ProviderMapping } from '../src/proxy/types';
+import type { ProviderId } from '../src/providers/types';
 import { RunpodClient } from '../src/gpu-providers/runpod-client';
 import { VastClient } from '../src/gpu-providers/vast-client';
 import { TensordockClient } from '../src/gpu-providers/tensordock-client';
@@ -99,10 +100,10 @@ export function maskKey(key: string): string {
 }
 
 if (groqAvailable) {
-  providers.stt['whisper-large-v3'] = groqSTT;
-  providers.stt['whisper-large-v3-turbo'] = groqSTT;
-  providers.chat['llama-3.3-70b-versatile'] = groqLLM;
-  providers.chat['llama-3.1-8b-instant'] = groqLLM;
+  providers.stt!['whisper-large-v3'] = groqSTT;
+  providers.stt!['whisper-large-v3-turbo'] = groqSTT;
+  providers.chat!['llama-3.3-70b-versatile'] = groqLLM;
+  providers.chat!['llama-3.1-8b-instant'] = groqLLM;
   console.log(`[gateway] Groq key: ${maskKey(process.env.GROQ_API_KEY!)}`);
 }
 
@@ -111,11 +112,11 @@ export let ollamaSTTProvider: OllamaSTTProvider | null = null;
 if (ollamaAvailable) {
   ollamaLLMProvider = new OllamaLLMProvider(ollamaHost, ollamaModel);
   ollamaSTTProvider = new OllamaSTTProvider(whisperHost);
-  providers.stt['whisper-large-v3'] = providers.stt['whisper-large-v3'] || ollamaSTTProvider;
-  providers.stt['whisper-large-v3-turbo'] = providers.stt['whisper-large-v3-turbo'] || ollamaSTTProvider;
-  providers.chat[ollamaModel] = ollamaLLMProvider;
-  providers.chat['llama-3.3-70b-versatile'] = providers.chat['llama-3.3-70b-versatile'] || ollamaLLMProvider;
-  providers.chat['llama-3.1-8b-instant'] = providers.chat['llama-3.1-8b-instant'] || ollamaLLMProvider;
+  providers.stt!['whisper-large-v3'] = providers.stt!['whisper-large-v3'] || ollamaSTTProvider;
+  providers.stt!['whisper-large-v3-turbo'] = providers.stt!['whisper-large-v3-turbo'] || ollamaSTTProvider;
+  providers.chat![ollamaModel] = ollamaLLMProvider;
+  providers.chat!['llama-3.3-70b-versatile'] = providers.chat!['llama-3.3-70b-versatile'] || ollamaLLMProvider;
+  providers.chat!['llama-3.1-8b-instant'] = providers.chat!['llama-3.1-8b-instant'] || ollamaLLMProvider;
   console.log(`[gateway] Ollama LLM: ${ollamaHost} (model: ${ollamaModel})`);
   console.log(`[gateway] Whisper STT: ${whisperHost}`);
 }
@@ -125,9 +126,9 @@ export let mlxQwenProvider: MlxQwen3AsrProvider | null = null;
 if (mlxQwenAvailable) {
   const baseURL = mlxQwenHost.endsWith('/v1') ? mlxQwenHost : `${mlxQwenHost.replace(/\/$/, '')}/v1`;
   mlxQwenProvider = new MlxQwen3AsrProvider(baseURL, mlxQwenApiKey || undefined);
-  providers.stt['qwen3-asr'] = mlxQwenProvider;
-  providers.stt['qwen3-asr-0.6b-4bit'] = mlxQwenProvider;
-  providers.stt['qwen3-asr-0.6b'] = mlxQwenProvider;
+  providers.stt!['qwen3-asr'] = mlxQwenProvider;
+  providers.stt!['qwen3-asr-0.6b-4bit'] = mlxQwenProvider;
+  providers.stt!['qwen3-asr-0.6b'] = mlxQwenProvider;
   console.log(`[gateway] MLX Qwen3-ASR: ${mlxQwenHost} (local Apple Silicon STT)`);
 }
 
@@ -208,7 +209,7 @@ console.log('[gateway] Modal Qwen3-ASR Pipeline registered (STT + LLM translatio
 
 // Modal Voxtral — Mistral open-weights ASR (no API key, 13 languages, Apache 2.0)
 registry.register({
-  id: 'modal-voxtral',
+  id: 'modal-voxtral' as ProviderId,
   name: 'Modal Voxtral',
   description: 'Modal serverless GPU — Voxtral-Mini-3B (Mistral ASR, 13 languages, Apache 2.0)',
   capabilities: ['stt'],
@@ -258,7 +259,7 @@ if (openaiAvailable) {
 // ElevenLabs Scribe STT — highest accuracy (2.3% WER)
 if (elevenlabsAvailable) {
   registry.register({
-    id: 'elevenlabs',
+    id: 'elevenlabs' as ProviderId,
     name: 'ElevenLabs',
     description: 'ElevenLabs Scribe — highest accuracy STT',
     capabilities: ['stt'],
@@ -703,7 +704,7 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
   // ElevenLabs Scribe STT
   if (elevenlabsAvailable) {
     registry.register({
-      id: 'elevenlabs',
+      id: 'elevenlabs' as ProviderId,
       name: 'ElevenLabs',
       description: 'ElevenLabs Scribe — highest accuracy STT',
       capabilities: ['stt'],

@@ -1278,9 +1278,9 @@ describe('7. Load Balancer', () => {
 
   describe('round-robin strategy', () => {
     it('cycles through tiers', async () => {
-      const results = [];
+      const results: any[] = [];
       for (let i = 0; i < 6; i++) {
-        results.push(await lb.selectTier('any-user', readyTiers, 'weighted-round-robin'));
+        (results as number[]).push(await lb.selectTier('any-user', readyTiers as any, 'weighted-round-robin' as any));
       }
       expect(results).toEqual([0, 1, 2, 0, 1, 2]);
     });

@@ -615,6 +615,37 @@ export class TensordockClient extends AbstractGpuProvider {
     }
   }
 
+  /**
+   * Full instance detail: status, IP, port forwards, derived endpoint and monitor URL.
+   * Returns null if the instance is not found (404) or on any error.
+   */
+  async getInstanceDetail(instanceId: string, credentials: ProviderCredentials): Promise<TensordockInstanceDetail | null> {
+    try {
+      await this.rateLimiter.wait();
+      const res = await this.fetchRaw(`${TENSORDOCK_V2_BASE}/instances/${instanceId}`, {
+        headers: this.headers(credentials.apiKey),
+      }, TIMEOUTS.read);
+      if (res.status === 404) return null;
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.error || (data.status && data.status >= 400)) return null;
+      const attrs = data.data?.attributes || data.data || data;
+      const id = (data.data?.id || attrs.id || instanceId) as string;
+      const status = String(attrs.status || 'unknown');
+      const ip = (attrs.ipAddress || attrs.ip_address || '') as string;
+      const portForwards: Array<{ internal_port: number; external_port: number }> =
+        attrs.portForwards || attrs.port_forwards || [];
+      const apiPf = portForwards.find(p => p.internal_port === 8000);
+      const monitorPf = portForwards.find(p => p.internal_port === 9090);
+      const endpoint = ip && apiPf ? `http://${ip}:${apiPf.external_port}` : ip ? `http://${ip}:8000` : '';
+      const monitorUrl = ip && monitorPf ? `http://${ip}:${monitorPf.external_port}` : '';
+      return { id, status, ip, portForwards, endpoint, monitorUrl };
+    } catch (e) {
+      this.log.debug(`[tensordock] getInstanceDetail(${instanceId}) failed: ${this.errMsg(e)}`);
+      return null;
+    }
+  }
+
   /** Re-resolve endpoint for an existing TensorDock instance using v2 API detail. */
   async resolveInstanceEndpoint(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
     const detail = await this._getInstanceDetailV2(instanceId, credentials.apiKey);
@@ -780,4 +811,13 @@ export class TensordockClient extends AbstractGpuProvider {
 export interface TensordockBalance {
   balance: number;
   hourlyCost: number;
+}
+
+export interface TensordockInstanceDetail {
+  id: string;
+  status: string;
+  ip: string;
+  portForwards: Array<{ internal_port: number; external_port: number }>;
+  endpoint: string;
+  monitorUrl: string;
 }

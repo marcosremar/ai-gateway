@@ -91,6 +91,7 @@ const DEFAULT_DEGRADATION_THRESHOLD = 2.0;
 
 export class PerformanceRanker {
   private buffers = new Map<string, PerformanceSample[]>();
+  private lastBufferClean = Date.now();
 
   private readonly windowSize: number;
   private readonly windowTimeMs: number;
@@ -151,7 +152,21 @@ export class PerformanceRanker {
    * Get active (non-expired) samples for a key.
    * Also prunes expired entries from the buffer.
    */
+  /** Evict stale buffer keys that have no recent samples. */
+  private evictStaleBuffers(): void {
+    const now = Date.now();
+    if (now - this.lastBufferClean < 5 * 60_000) return;
+    this.lastBufferClean = now;
+    const cutoff = now - this.windowTimeMs * 2;
+    for (const [key, samples] of this.buffers) {
+      if (samples.length === 0 || samples[samples.length - 1].timestamp < cutoff) {
+        this.buffers.delete(key);
+      }
+    }
+  }
+
   private getActiveSamples(key: string): PerformanceSample[] {
+    this.evictStaleBuffers();
     const buffer = this.buffers.get(key);
     if (!buffer || buffer.length === 0) return [];
 

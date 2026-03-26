@@ -11,7 +11,7 @@ import type { SettingsStore, Logger } from '../src/deps';
 import { GpuProviderRegistry } from '../src/gpu-providers/registry';
 import type { GpuProviderClient } from '../src/gpu-providers/types';
 
-const silentLogger: Logger = { log: () => {}, warn: () => {}, error: () => {} };
+const silentLogger: Logger = { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 
 function makeSettingsStore(settings: Record<string, unknown> = {}): SettingsStore & { patched: Record<string, unknown>[] } {
   const patched: Record<string, unknown>[] = [];

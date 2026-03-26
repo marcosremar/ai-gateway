@@ -20,7 +20,7 @@ const CONFIG_CACHE_TTL_MS = 5_000;
 
 export interface PipelineChainEntry {
   provider: string;
-  model: string;
+  model?: string;
   sttType?: 'streaming' | 'batch';
 }
 
@@ -233,11 +233,9 @@ export function applyProfileLatencyTargets(profileId: string | null, profiles: G
   // Profile-level per-stage overrides take precedence over tier defaults
   if (profile.latencyTargetsMs) {
     const { stt, llm, tts } = profile.latencyTargetsMs;
-    const latency = (profile as Record<string, unknown>)?.latency as string | undefined;
-    const tierDefaults = latency ? LATENCY_TARGETS[latency] : null;
-    const sttMs = stt ?? tierDefaults?.sttMs;
-    const llmMs = llm ?? tierDefaults?.llmMs;
-    const ttsMs = tts ?? tierDefaults?.ttsMs;
+    const sttMs = stt;
+    const llmMs = llm;
+    const ttsMs = tts;
     if (sttMs !== undefined) setSttTargetLatencyMs(sttMs);
     if (llmMs !== undefined) setLlmTargetLatencyMs(llmMs);
     if (ttsMs !== undefined) setTtsTargetLatencyMs(ttsMs);
@@ -245,14 +243,7 @@ export function applyProfileLatencyTargets(profileId: string | null, profiles: G
     return;
   }
 
-  // Fall back to tier-based defaults
-  const latency = (profile as Record<string, unknown>)?.latency as string | undefined;
-  const targets = latency ? LATENCY_TARGETS[latency] : null;
-  if (!targets) return;
-  setSttTargetLatencyMs(targets.sttMs);
-  setLlmTargetLatencyMs(targets.llmMs);
-  setTtsTargetLatencyMs(targets.ttsMs);
-  console.log(`[config] Latency targets applied for profile "${profileId}" (${latency}): STT=${targets.sttMs}ms LLM=${targets.llmMs}ms TTS=${targets.ttsMs}ms`);
+  console.log(`[config] No latency targets configured for profile "${profileId}"`);
 }
 
 /** Debounced stamp: update lastRequestAt on the given profile.

@@ -18,7 +18,7 @@ import { getTranslationCacheStats } from './ai-handlers';
 interface RequestLogInput {
   timestamp: number;
   stage: 'stt' | 'llm' | 'tts' | 'pipeline';
-  provider: 'gpu' | 'groq' | 'ollama';
+  provider: 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid' | 'stream';
   model?: string;
   latencyMs: number;
   success: boolean;
@@ -563,7 +563,7 @@ export async function upsertHostReputation(opts: {
           if (failRate > 0.5) {
             console.warn(`[reputation] ALERT: GPU type "${gpuType}" failing globally — ${failedHosts.length}/${recentHosts.length} hosts failed (${(failRate * 100).toFixed(0)}%) in last 24h`);
             try {
-              const { broadcastWs } = await import('./ws-server');
+              const { broadcastWs } = await import('./ws-state');
               broadcastWs({
                 type: 'gpu:type_failing',
                 gpuType,
@@ -659,7 +659,7 @@ export async function updateHostLatency(
       if (oldScore - reputationScore > 0.2) {
         console.warn(`[reputation] WARNING: ${hostKey} score dropped ${oldScore.toFixed(3)} → ${reputationScore.toFixed(3)} (Δ=${(oldScore - reputationScore).toFixed(3)})`);
         try {
-          const { broadcastWs } = await import('./ws-server');
+          const { broadcastWs } = await import('./ws-state');
           broadcastWs({ type: 'host:degraded', hostKey, oldScore, newScore: reputationScore, reason: `latency=${avgLatencyMs.toFixed(0)}ms` });
         } catch {}
       }

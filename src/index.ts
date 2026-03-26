@@ -354,12 +354,12 @@ export { handleAutoscalerGet, handleAutoscalerAction } from './handlers/autoscal
 export { handleModalApps, handleModalStop } from './handlers/modal-handler';
 export type { HandlerDeps, HandlerResult } from './handlers/types';
 export { ok, err } from './handlers/types';
-export { createCredentialResolver, PROVIDER_KEY_MAP, PROVIDER_ENV_MAP } from './handlers/credential-resolver';
+export { createCredentialResolver } from './handlers/credential-resolver';
 export { AutoscalerSettingsSchema, AutoscalerTierSchema } from './handlers/autoscaler-schemas';
 export type { AutoscalerSettings } from './handlers/autoscaler-schemas';
 
 // ── Vault (Secret Management) ──────────────────────────────────────────
-export { Vault } from './vault';
+export { Vault, FileVaultStore, initVaultFromEnv, getVault, setVault, resetVault } from './vault';
 export type { VaultConfig, EncryptedBlob } from './vault';
 
 // ── Embedding Providers ──────────────────────────────────────────────

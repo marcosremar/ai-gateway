@@ -171,7 +171,7 @@ export class AIClient {
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
       effectiveChain,
       async (entry) => {
-        const provider = this.resolveProvider(id => this.registry.getSTTProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
+        const provider = await this.resolveProvider(id => this.registry.getSTTProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.transcribe({
           audio,
           model: entry.model ?? 'whisper-large-v3-turbo',
@@ -218,7 +218,7 @@ export class AIClient {
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
       effectiveChain,
       async (entry) => {
-        const provider = this.resolveProvider(id => this.registry.getLLMProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
+        const provider = await this.resolveProvider(id => this.registry.getLLMProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.chat({
           messages,
           model: entry.model ?? 'gpt-4o',
@@ -282,11 +282,11 @@ export class AIClient {
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
       effectiveChain,
       async (entry) => {
-        const provider = this.resolveProvider(id => this.registry.getTTSProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
+        const provider = await this.resolveProvider(id => this.registry.getTTSProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.synthesize({
           input: text,
           model: entry.model ?? '',  // provider uses its own defaultModel if undefined
-          voice: profile.voice ?? 'coral',
+          voice: profile.voice ?? 'nova',
           responseFormat: profile.audioFormat,
           instructions: profile.voiceInstructions,
           referenceAudio: profile.referenceAudio,
@@ -328,7 +328,7 @@ export class AIClient {
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
       chain,
       async (entry) => {
-        const provider = this.resolveProvider(id => this.registry.getImageProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
+        const provider = await this.resolveProvider(id => this.registry.getImageProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.generate({
           prompt,
           model: entry.model,
@@ -368,7 +368,7 @@ export class AIClient {
     const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
       chain,
       async (entry) => {
-        const provider = this.resolveProvider(id => this.registry.getOmniProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
+        const provider = await this.resolveProvider(id => this.registry.getOmniProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.omniChat({
           audio: input.audio,
           text: input.text,
@@ -413,7 +413,7 @@ export class AIClient {
     }
 
     const entry = chains[0];
-    const provider = this.resolveProvider(
+    const provider = await this.resolveProvider(
       id => this.registry.getRealtimeProvider(id),
       entry.provider as ProviderId,
       profile,
@@ -765,12 +765,13 @@ export class AIClient {
       throw new Error(`[AIClient] No ${stage.toUpperCase()} providers configured in profile`);
     }
 
-    // Expand replicas for self-hosted providers: each config with replicas > 1
-    // is duplicated in the chain. This gives automatic redundancy via the existing
-    // fallback mechanism — if replica 1 fails, replica 2 (same provider) is tried
-    // before moving to the next provider. Cloud APIs ignore replicas.
+    const hasGpuEndpoint = !!(profile.gpuEndpoint);
     let entries: FallbackEntry[] = [];
     for (const c of configs) {
+      if (c.selfHosted && !c.endpoint && !hasGpuEndpoint) {
+        this.log.log(`[AIClient] Skipping self-hosted ${c.provider}/${c.model ?? 'default'} — no GPU endpoint configured`);
+        continue;
+      }
       const count = (c.selfHosted && c.alwaysActive) ? Math.max(c.replicas ?? 1, 1) : 1;
       for (let r = 0; r < count; r++) {
         entries.push({
@@ -818,14 +819,14 @@ export class AIClient {
     };
   }
 
-  private resolveProvider<T extends { withApiKey?: (key: string) => T; withEndpoint?: (url: string) => T }>(
+  private async resolveProvider<T extends { withApiKey?: (key: string) => T; withEndpoint?: (url: string) => T }>(
     getter: (id: ProviderId) => T,
     providerId: ProviderId,
     profile: AIProfile,
     endpoint?: string,
-  ): T {
+  ): Promise<T> {
     let base = getter(providerId);
-    const apiKey = this.resolveKey(providerId, profile);
+    const apiKey = await this.resolveKey(providerId);
     if (apiKey && base.withApiKey) base = base.withApiKey(apiKey);
     // Per-entry endpoint override; fall back to global gpuEndpoint for gpu provider
     const effectiveEndpoint = endpoint ?? ((providerId as string) === 'gpu' ? profile.gpuEndpoint : undefined);
@@ -833,8 +834,8 @@ export class AIClient {
     return base;
   }
 
-  private resolveKey(providerId: ProviderId, profile: AIProfile): string | null {
-    return resolveApiKey(providerId, profile.keys as Record<string, string> | undefined);
+  private async resolveKey(providerId: ProviderId): Promise<string | null> {
+    return resolveApiKey(providerId);
   }
 
   /**

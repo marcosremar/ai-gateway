@@ -37,7 +37,7 @@ function makeStore() {
   return { store, hashes };
 }
 
-const silentLogger = { log: () => {}, warn: () => {}, error: () => {} };
+const silentLogger = { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 
 describe('recordUsageForPrediction', () => {
   it('records usage for current bucket', async () => {

@@ -35,6 +35,8 @@ export class StreamingAudioPlayer {
 
   /** Total PCM samples scheduled so far (for duration tracking). */
   private totalSamplesScheduled = 0;
+  /** Target volume (saved for fade-in). */
+  private targetVolume = 1;
 
   /** Callbacks */
   onStarted: (() => void) | null = null;
@@ -45,6 +47,11 @@ export class StreamingAudioPlayer {
   private endCheckTimer: ReturnType<typeof setTimeout> | null = null;
   /** Track all scheduled source nodes so they can be stopped on destroy. */
   private sourceNodes: AudioBufferSourceNode[] = [];
+
+  /** Web Worker for off-main-thread PCM decoding. */
+  private decodeWorker: Worker | null = null;
+  private workerMsgId = 0;
+  private workerCallbacks = new Map<number, (float32: Float32Array) => void>();
 
   /**
    * Initialize the audio context and nodes.
@@ -69,7 +76,49 @@ export class StreamingAudioPlayer {
     this.activeSources = 0;
     this.sourceNodes = [];
 
+    // Spin up decode Worker (offloads pcmToFloat32 off main thread)
+    this.initWorker();
+
     log.debug('initialized, sampleRate:', this.audioCtx.sampleRate);
+  }
+
+  /** Create Web Worker for PCM decoding using inline blob (avoids separate file). */
+  private initWorker(): void {
+    if (this.decodeWorker) return;
+    try {
+      const code = `self.onmessage=function(e){var d=e.data,p=d.pcm,b=d.bitsPerSample,bs=d.bytesPerSample,id=d.id;var v=new DataView(p.buffer,p.byteOffset,p.byteLength);var n=Math.floor(p.length/bs);var f=new Float32Array(n);if(b===16){for(var i=0;i<n;i++)f[i]=v.getInt16(i*2,true)/32768}else if(b===24){for(var i=0;i<n;i++){var o=i*3;f[i]=(v.getUint8(o)|(v.getUint8(o+1)<<8)|(v.getInt8(o+2)<<16))/8388608}}else if(b===32){for(var i=0;i<n;i++)f[i]=v.getFloat32(i*4,true)}self.postMessage({float32:f,id:id},[f.buffer])}`;
+      const blob = new Blob([code], { type: 'application/javascript' });
+      this.decodeWorker = new Worker(URL.createObjectURL(blob));
+      this.decodeWorker.onmessage = (e: MessageEvent) => {
+        const { float32, id } = e.data as { float32: Float32Array; id: number };
+        const cb = this.workerCallbacks.get(id);
+        if (cb) {
+          this.workerCallbacks.delete(id);
+          cb(float32);
+        }
+      };
+    } catch {
+      log.debug('Worker unavailable, falling back to main-thread decode');
+      this.decodeWorker = null;
+    }
+  }
+
+  /** Decode PCM via Worker (async) or fall back to main-thread sync. */
+  private decodePCM(pcm: Uint8Array, format: WavFormat): Promise<Float32Array> {
+    if (this.decodeWorker) {
+      return new Promise((resolve) => {
+        const id = ++this.workerMsgId;
+        this.workerCallbacks.set(id, resolve);
+        // Transfer pcm buffer to worker (zero-copy)
+        const copy = pcm.slice(); // copy because original may be reused
+        this.decodeWorker!.postMessage(
+          { pcm: copy, bitsPerSample: format.bitsPerSample, bytesPerSample: format.bytesPerSample, id },
+          [copy.buffer] as unknown as Transferable[],
+        );
+      });
+    }
+    // Fallback: main-thread decode
+    return Promise.resolve(this.pcmToFloat32(pcm, format));
   }
 
   /**
@@ -77,6 +126,7 @@ export class StreamingAudioPlayer {
    * Applies immediately to current and future chunks.
    */
   setVolume(value: number): void {
+    this.targetVolume = value;
     if (this.gainNode && this.audioCtx) {
       this.gainNode.gain.setValueAtTime(value, this.audioCtx.currentTime);
     }
@@ -88,6 +138,25 @@ export class StreamingAudioPlayer {
    */
   getMediaStream(): MediaStream | null {
     return this.destinationNode?.stream ?? null;
+  }
+
+  /**
+   * Disconnect from default speakers (for VR spatial audio routing).
+   * Audio still flows to the MediaStream destination for lip-sync.
+   */
+  disconnectSpeakers(): void {
+    if (this.gainNode && this.audioCtx) {
+      try { this.gainNode.disconnect(this.audioCtx.destination); } catch { /* not connected */ }
+    }
+  }
+
+  /**
+   * Reconnect to default speakers (when exiting VR).
+   */
+  reconnectSpeakers(): void {
+    if (this.gainNode && this.audioCtx) {
+      try { this.gainNode.connect(this.audioCtx.destination); } catch { /* already connected */ }
+    }
   }
 
   /**
@@ -118,12 +187,12 @@ export class StreamingAudioPlayer {
     const pcmData = chunk.slice(44);
     if (pcmData.length === 0) return;
 
-    // Convert PCM to Float32
-    const float32 = this.pcmToFloat32(pcmData, this.format);
-    if (float32.length === 0) return;
-
-    // Schedule playback
-    this.scheduleBuffer(float32, this.format);
+    // Decode PCM to Float32 (off main thread via Worker when available)
+    const fmt = this.format;
+    this.decodePCM(pcmData, fmt).then((float32) => {
+      if (this.destroyed || float32.length === 0) return;
+      this.scheduleBuffer(float32, fmt);
+    });
   }
 
   /**
@@ -175,6 +244,12 @@ export class StreamingAudioPlayer {
     this.format = null;
     this.started = false;
     this.activeSources = 0;
+    // Terminate decode worker
+    if (this.decodeWorker) {
+      this.decodeWorker.terminate();
+      this.decodeWorker = null;
+      this.workerCallbacks.clear();
+    }
   }
 
   /** Current approximate playback duration scheduled (seconds). */
@@ -279,8 +354,13 @@ export class StreamingAudioPlayer {
     // Schedule the chunk
     if (!this.started) {
       // First chunk: start slightly ahead of currentTime to avoid glitches
-      this.nextStartTime = ctx.currentTime + 0.02;
+      this.nextStartTime = ctx.currentTime + 0.05;
       this.started = true;
+
+      // Fade in over ~50ms to eliminate the click/pop at playback start
+      gain.gain.setValueAtTime(0, ctx.currentTime);
+      gain.gain.linearRampToValueAtTime(this.targetVolume, this.nextStartTime);
+
       log.debug('first chunk, starting at', this.nextStartTime.toFixed(3));
       this.onStarted?.();
     }

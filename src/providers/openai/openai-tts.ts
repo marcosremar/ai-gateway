@@ -38,7 +38,7 @@ export class OpenAITTSProvider implements TTSProvider {
   /** Validate voice against known OpenAI voices; fallback to 'coral' for unknown names. */
   private resolveVoice(requested?: string): string {
     if (requested && this.voiceIds.has(requested)) return requested;
-    return 'coral';
+    return 'nova';
   }
 
   withApiKey(apiKey: string): OpenAITTSProvider {

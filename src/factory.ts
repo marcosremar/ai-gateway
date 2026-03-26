@@ -214,6 +214,18 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
   const lastWatchdogMap = new Map<string, number>();
   const lastReconcileMap = new Map<string, number>();
 
+  // Periodic cleanup of rate-limit maps to prevent unbounded growth
+  const _rateLimitCleanup = setInterval(() => {
+    const now = Date.now();
+    for (const [uid, ts] of lastWatchdogMap) {
+      if (now - ts > 10 * 60_000) lastWatchdogMap.delete(uid);
+    }
+    for (const [uid, ts] of lastReconcileMap) {
+      if (now - ts > 30 * 60_000) lastReconcileMap.delete(uid);
+    }
+  }, 10 * 60_000);
+  if (_rateLimitCleanup.unref) _rateLimitCleanup.unref();
+
   // Update watchdog deps to use wrapped logger
   const watchdogDeps = { engine, sessionTracker, persistence, registry, loadConfig, hooks, lifecycleLogger: wrappedLogger };
 

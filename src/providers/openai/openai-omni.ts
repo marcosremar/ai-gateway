@@ -44,7 +44,7 @@ export class OpenAIOmniProvider implements OmniProvider {
   async omniChat(request: OmniRequest): Promise<OmniResponse> {
     const apiKey = this.getApiKey();
     const model = request.model || 'gpt-audio-mini';
-    const voice = request.voice || 'coral';
+    const voice = request.voice || 'nova';
     const format = request.audioFormat || 'wav';
 
     // Build messages array

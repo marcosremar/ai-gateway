@@ -48,7 +48,7 @@ function makeDeps(
     loadAllAccounts: vi.fn().mockResolvedValue(accounts),
     probeHealth: false,
     staleTracker: new StaleTracker(),
-    logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     ...overrides,
   };
 }

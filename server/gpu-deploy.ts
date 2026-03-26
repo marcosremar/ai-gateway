@@ -812,8 +812,8 @@ export async function autoSelectCheapestGpu(
   // Fall back to all offers if none qualify (some providers don't report speed).
   const MIN_INET_MBPS = 500;
   const fastInet = base.filter(o => {
-    const dl = (o as Record<string, unknown>).inetDown as number ?? (o as Record<string, unknown>).inetDownMbps as number ?? 0;
-    return dl === 0 || dl >= MIN_INET_MBPS; // 0 = unknown (allow), >= 500 = fast enough
+    const dl = (o as unknown as Record<string, unknown>).inetDown as number | undefined;
+    return !dl || dl >= MIN_INET_MBPS; // 0/undefined = unknown (allow), >= 500 = fast enough
   });
   const inetFiltered = fastInet.length > 0 ? fastInet : base;
   if (fastInet.length < base.length && fastInet.length > 0) {
@@ -822,7 +822,10 @@ export async function autoSelectCheapestGpu(
 
   // SSD preference: keep offers where diskBwReadMbps > 200 MB/s (SSD/NVMe) or unknown.
   // Fall back to all offers if none qualify (provider may not report disk speed).
-  const ssdFiltered = preferSsd ? inetFiltered.filter(o => (o.diskBwReadMbps ?? 0) === 0 || (o.diskBwReadMbps ?? 0) > 200) : inetFiltered;
+  const ssdFiltered = preferSsd ? inetFiltered.filter(o => {
+    const bw = (o as unknown as Record<string, unknown>).diskBwReadMbps as number | undefined;
+    return !bw || bw > 200;
+  }) : inetFiltered;
   const suitable = preferSsd && ssdFiltered.length === 0 ? inetFiltered : ssdFiltered;
 
   // ── Blacklist: hosts with 3+ crashes in 7 days
@@ -1031,7 +1034,7 @@ export async function autoSelectCheapestGpu(
 
 // ── Deploy loop ─────────────────────────────────────────────────────────────
 
-export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; containerDiskInGb?: number; volumeId?: string; }
+export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; containerDiskInGb?: number; volumeId?: string; autoRecovery?: boolean; }
 
 export async function startDeployLoop(
   providerClient: GpuProviderClient,
@@ -1589,15 +1592,16 @@ export async function startDeployRace(
 
   // Phase 3: Final state / race summary
   if (winner) {
-    // Log race efficiency: total wasted cost vs time saved vs sequential deploy
-    const winnerBootMs = winner.costPerHr > 0
-      ? candidates.find(c => c.instanceId === winner!.instanceId)
+    const w = winner as RaceCandidate;
+    const winnerBootMs = w.costPerHr > 0
+      ? candidates.find(c => c.instanceId === w.instanceId)
         ? Date.now() - deployStartedAt : 0
       : 0;
     const loserCount = candidates.length - 1;
     if (loserCount > 0) {
+      const w = winner as RaceCandidate;
       const totalWastedUsd = candidates
-        .filter(c => c.instanceId !== winner!.instanceId)
+        .filter(c => c.instanceId !== w.instanceId)
         .reduce((sum, c) => sum + (c.costPerHr > 0 ? c.costPerHr * (Date.now() - deployStartedAt) / 3_600_000 : 0), 0);
       console.log(
         `[race] Summary: ${candidates.length} instances → winner in ${Math.round(winnerBootMs / 1000)}s, ` +
@@ -2355,7 +2359,7 @@ export async function tryRecoverActiveDeploy(): Promise<boolean> {
 
 export async function startAutoRecoveryDeploy(): Promise<void> {
   // Prevent concurrent deploys — bail if another deploy is in progress
-  if (deployState.status === 'creating' || deployState.status === 'booting' || deployState.status === 'waiting_health') {
+  if (deployState.status === 'creating' || deployState.status === 'booting' || deployState.step === 'waiting_health') {
     console.warn('[gpu] Auto-recovery: deploy already in progress — skipping');
     return;
   }

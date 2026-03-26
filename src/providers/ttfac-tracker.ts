@@ -200,6 +200,12 @@ export class TtfacTracker {
       buf.shift();
     }
 
+    // Remove empty buffer keys to prevent unbounded Map growth
+    if (buf.length === 0) {
+      this.buffers.delete(key);
+      return [];
+    }
+
     return buf;
   }
 }

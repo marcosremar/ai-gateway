@@ -326,6 +326,15 @@ export class AutoscalerEngine {
     return this.stateMap;
   }
 
+  /** Evict stateMap entries where all tiers are idle (prevents unbounded growth). */
+  evictIdleUsers(): void {
+    for (const [userId, tierStates] of this.stateMap) {
+      if (tierStates.every(ts => ts.state === 'idle')) {
+        this.stateMap.delete(userId);
+      }
+    }
+  }
+
   private getTierStates(userId: string, tiers: GpuTierConfig[]): GpuTierState[] {
     const existing = this.stateMap.get(userId);
     // config.endpoint is just a stored address — not an indicator the instance is running.

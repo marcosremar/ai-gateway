@@ -41,6 +41,7 @@ const silentLogger: Logger = {
   log: () => {},
   warn: () => {},
   error: () => {},
+  debug: () => {},
 };
 
 describe('SessionTracker', () => {

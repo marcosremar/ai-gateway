@@ -48,7 +48,7 @@ function makeDeps(overrides?: Partial<TierLifecycleDeps>): TierLifecycleDeps {
     registry: { get: vi.fn().mockReturnValue(mockClient) } as any,
     lifecycleLogger: { log: vi.fn() },
     loadConfig: vi.fn().mockResolvedValue(defaultConfig),
-    logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     ...overrides,
   };
 }

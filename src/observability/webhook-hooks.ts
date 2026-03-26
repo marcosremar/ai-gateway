@@ -35,8 +35,12 @@ export function createWebhookHooks(config: WebhookConfig): Partial<GatewayHooks>
     } catch { /* fire-and-forget */ }
   }
 
+  const MAX_QUEUE_SIZE = 500;
+
   function enqueue(hookName: string, data: unknown): void {
     if (allowedEvents && !allowedEvents.has(hookName)) return;
+    // Drop oldest events if queue is too large (webhook endpoint may be down)
+    if (queue.length >= MAX_QUEUE_SIZE) queue.splice(0, queue.length - MAX_QUEUE_SIZE + 1);
     queue.push({ hookName, data, timestamp: new Date().toISOString() });
     if (queue.length >= batchSize) flush().catch(() => {}); // async flush, errors handled inside
     if (!timer) {

@@ -11,6 +11,7 @@ import OpenAI from 'openai';
 import { createHash } from 'crypto';
 
 const cache = new Map<string, OpenAI>();
+const MAX_CACHE_SIZE = 50;
 
 /**
  * Get or create a shared OpenAI SDK client for the given config.
@@ -35,6 +36,11 @@ export function getOrCreateClient(
     baseURL,
     ...(defaultHeaders && { defaultHeaders }),
   });
+  // Evict oldest entry if cache is full (simple FIFO)
+  if (cache.size >= MAX_CACHE_SIZE) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
   cache.set(key, client);
   return client;
 }

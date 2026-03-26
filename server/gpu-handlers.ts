@@ -601,7 +601,7 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
         : null;
       const profileUsesGpu = (stage: 'stt' | 'llm' | 'tts'): boolean => {
         if (!_activeProfile) return true;
-        const chain = (_activeProfile as Record<string, unknown>)[stage] as Array<{ provider: string }> | undefined;
+        const chain = (_activeProfile as unknown as Record<string, unknown>)[stage] as Array<{ provider: string }> | undefined;
         return !chain || chain.some(e => e.provider === 'gpu');
       };
       const sttGpu = profileUsesGpu('stt') && isStageWarm('stt');
@@ -743,9 +743,11 @@ async function refreshProviderBalance(
       });
       return;
     }
-    if (!client.checkBalance) return;
+    if (!client || !('checkBalance' in client)) return;
+    const checkBalanceFn = (client as { checkBalance?: (creds: ProviderCredentials) => Promise<{ balance: number } | null> }).checkBalance;
+    if (!checkBalanceFn) return;
     const result = await Promise.race([
-      client.checkBalance(credentials),
+      checkBalanceFn(credentials),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${name} checkBalance timed out`)), 10_000)),
     ]);
     if (result === null) {
@@ -919,7 +921,10 @@ export async function handleGpuOffers(req: IncomingMessage, res: ServerResponse)
     filteredOffers = filteredOffers.filter(o => o.vram >= minVramGbParam);
   }
   if (preferSsdParam) {
-    const ssdOnly = filteredOffers.filter(o => (o.diskBwReadMbps ?? 0) === 0 || (o.diskBwReadMbps ?? 0) > 200);
+    const ssdOnly = filteredOffers.filter(o => {
+      const bw = (o as unknown as Record<string, unknown>).diskBwReadMbps as number | undefined;
+      return !bw || bw > 200;
+    });
     if (ssdOnly.length > 0) filteredOffers = ssdOnly;
   }
 
@@ -1079,7 +1084,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
       runpod.checkBalance({ apiKey: rpKey }).then(bal => {
         if (bal) {
           entry.balance = bal.balance;
-          entry.spendPerHr = bal.spendPerHr ?? (currentProvider === 'runpod' ? currentCostPerHr : 0);
+          entry.spendPerHr = (bal as { balance: number; spendPerHr?: number }).spendPerHr ?? (currentProvider === 'runpod' ? currentCostPerHr : 0);
           entry.spendPerDay = entry.spendPerHr * 24;
           entry.low = bal.balance < threshold;
         }
@@ -1122,7 +1127,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
       vast.checkBalance({ apiKey: vastKey }).then(bal => {
         if (bal) {
           entry.balance = bal.balance;
-          entry.spendPerHr = bal.spendPerHr ?? (currentProvider === 'vast' ? currentCostPerHr : 0);
+          entry.spendPerHr = (bal as { balance: number; spendPerHr?: number }).spendPerHr ?? (currentProvider === 'vast' ? currentCostPerHr : 0);
           entry.spendPerDay = entry.spendPerHr * 24;
           entry.low = bal.balance < threshold;
         }
@@ -1799,9 +1804,9 @@ export async function handleGetGpuTypes(req: IncomingMessage, res: ServerRespons
   if (vastApiKey      && (!providerFilter || providerFilter === 'vast'))
     queries.push({ name: 'vast',       client: vast,       credentials: { apiKey: vastApiKey } });
   if (runpodApiKey    && (!providerFilter || providerFilter === 'runpod'))
-    queries.push({ name: 'runpod',     client: runpod as typeof vast,     credentials: { apiKey: runpodApiKey } });
+    queries.push({ name: 'runpod',     client: runpod as unknown as typeof vast,     credentials: { apiKey: runpodApiKey } });
   if (tensordockApiKey && tensordockAuthId && (!providerFilter || providerFilter === 'tensordock'))
-    queries.push({ name: 'tensordock', client: tensordock as typeof vast, credentials: { apiKey: tensordockApiKey, authId: tensordockAuthId } });
+    queries.push({ name: 'tensordock', client: tensordock as unknown as typeof vast, credentials: { apiKey: tensordockApiKey, authId: tensordockAuthId } });
 
   const latencyMap = getBestLatencyByGpuModel();
 

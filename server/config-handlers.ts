@@ -160,7 +160,7 @@ export async function handleSetApiKeys(req: IncomingMessage, res: ServerResponse
   }
 
   // Validate: only allow known env vars
-  const validEnvVars = new Set(API_KEY_DEFS.map(d => d.envVar));
+  const validEnvVars = new Set(API_KEY_DEFS.map(d => d.envVar) as string[]);
   for (const key of Object.keys(updates)) {
     if (!validEnvVars.has(key)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -359,9 +359,9 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
 
   // Copy profile chains to top-level pipeline fields
   config.activeProfileId = id;
-  config.pipelineStt = [...profile.stt];
-  config.pipelineLlm = [...profile.llm];
-  config.pipelineTts = [...profile.tts];
+  config.pipelineStt = ((profile.stt || []) as unknown as PipelineChainEntry[]);
+  config.pipelineLlm = ((profile.llm || []) as unknown as PipelineChainEntry[]);
+  config.pipelineTts = ((profile.tts || []) as unknown as PipelineChainEntry[]);
 
   // Apply profile GPU deploy settings if present
   if (profile.gpuDeploy) {
