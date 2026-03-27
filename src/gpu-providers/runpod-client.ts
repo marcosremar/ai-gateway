@@ -44,6 +44,36 @@ export const RUNPOD_GPU_TYPE_MAP: Record<string, string> = {
   'RTXA4000': 'NVIDIA RTX A5000',
 };
 
+/**
+ * Map generic region codes → RunPod-specific datacenter IDs.
+ * RunPod REST API now requires exact datacenter IDs (e.g. 'EU-RO-1') in
+ * dataCenterIds[] — generic codes like 'EU' or 'US' are no longer accepted.
+ * If a region is already a specific ID (contains '-'), it's used as-is.
+ */
+const RUNPOD_DATACENTER_MAP: Record<string, string[]> = {
+  EU: ['EU-RO-1', 'EU-SE-1', 'EU-CZ-1', 'EU-NL-1', 'EU-FR-1', 'EUR-IS-1', 'EUR-IS-2', 'EUR-IS-3', 'EUR-NO-1'],
+  US: ['US-TX-3', 'US-TX-1', 'US-TX-4', 'US-IL-1', 'US-KS-2', 'US-KS-3', 'US-GA-1', 'US-GA-2', 'US-WA-1', 'US-CA-2', 'US-NC-1', 'US-DE-1'],
+  CA: ['CA-MTL-1', 'CA-MTL-2', 'CA-MTL-3'],
+  AP: ['AP-JP-1'],
+  OC: ['OC-AU-1'],
+};
+
+/** Resolve a region string to RunPod datacenter IDs.
+ * 'EU-RO-1' → ['EU-RO-1']  (already specific)
+ * 'EU'      → ['EU-RO-1', 'EU-SE-1', ...]  (expand generic code)
+ * ''        → []  (any datacenter)
+ */
+function resolveDatacenterIds(region: string | undefined): string[] | undefined {
+  if (!region) return undefined;
+  // Already a specific datacenter ID (e.g. 'EU-RO-1', 'US-TX-3')
+  if (region.includes('-')) return [region];
+  // Generic region code — expand to all known datacenters
+  const ids = RUNPOD_DATACENTER_MAP[region.toUpperCase()];
+  if (ids) return ids;
+  // Unknown code — omit to avoid schema error (fall back to any datacenter)
+  return undefined;
+}
+
 export interface RunpodClientOptions extends AbstractGpuProviderOptions {}
 
 export class RunpodClient extends AbstractGpuProvider {
@@ -214,8 +244,9 @@ export class RunpodClient extends AbstractGpuProvider {
       cloudType: 'SECURE',
       // On-demand by default (reliable). Set interruptible=true for spot (cheaper but can be interrupted).
       interruptible: spec.interruptible ?? false,
-      // Region filter: e.g. 'US-TX-3', 'EU-RO-1', 'CA-MTL-1'
-      ...(spec.region ? { dataCenterIds: [spec.region] } : {}),
+      // Region filter: generic codes ('EU','US') are expanded to specific datacenter IDs.
+      // RunPod REST API requires exact IDs (e.g. 'EU-RO-1') — generic codes cause HTTP 400.
+      ...(() => { const ids = resolveDatacenterIds(spec.region); return ids ? { dataCenterIds: ids } : {}; })(),
       // Custom start command (overrides Docker CMD/ENTRYPOINT)
       ...(spec.dockerStartCmd ? { dockerStartCmd: Array.isArray(spec.dockerStartCmd) ? spec.dockerStartCmd : ['bash', '-c', spec.dockerStartCmd] } : {}),
     };

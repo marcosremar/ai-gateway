@@ -49,6 +49,8 @@ class EnsembleTranscribeResponse:
     outliers: list[str] = field(default_factory=list)        # providers flagged as outliers
     similarity_method: str = "jaccard"  # 'jaccard' | 'embedding'
     embedding_provider: str = ""        # name of embedding provider used (if method='embedding')
+    corrected: str = ""                 # LLM-corrected text (only set when llm_correct=True)
+    correction_applied: bool = False    # True if LLM changed the consensus text
 
 
 @dataclass

@@ -66,7 +66,7 @@ export function reloadStreamingSTTRouter(): void {
 }
 
 // Active STT sessions: client WS id → upstream backend
-const sttSessions = new Map<string, import('../src/streaming-stt').StreamingSTTBackend>();
+const sttSessions = new Map<string, import('../ai-gateway/src/streaming-stt').StreamingSTTBackend>();
 
 // Bot audio relay state
 let botAudioSource: BabelCastWS | null = null;
@@ -209,8 +209,8 @@ export function startParecCapture(): void {
 
   // Read stderr for errors
   (async () => {
-    if (!parecProc?.stderr || !(parecProc.stderr instanceof ReadableStream)) return;
-    const reader = (parecProc.stderr as ReadableStream).getReader();
+    if (!parecProc?.stderr) return;
+    const reader = parecProc.stderr.getReader();
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -226,8 +226,8 @@ export function startParecCapture(): void {
   let buffer = new Uint8Array(0);
 
   (async () => {
-    if (!parecProc?.stdout || !(parecProc.stdout instanceof ReadableStream)) return;
-    const reader = (parecProc.stdout as ReadableStream).getReader();
+    if (!parecProc?.stdout) return;
+    const reader = parecProc.stdout.getReader();
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -346,7 +346,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     const { Duplex } = await import('stream');
 
     // Build minimal fake req/res to reuse handleBotJoin
-    const fakeReq = Object.assign(new IncomingMessage(new Duplex() as unknown as import('net').Socket), {
+    const fakeReq = Object.assign(new IncomingMessage(new Duplex()), {
       _body: JSON.stringify(fakeBody),
     });
     // Instead of full fake req/res, directly call the join logic inline:
@@ -453,7 +453,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     if (!sessionId || !text.trim()) return;
 
     const translateFn = buildSpeculativeTranslateFn(source, target, style);
-    try { speculativeCache.speculate(sessionId, text, translateFn); } catch (e) { console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e); }
+    speculativeCache.speculate(sessionId, text, translateFn).catch(e => console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e));
 
   } else if (type === 'ping') {
     ws.send(JSON.stringify({ type: 'pong' }));
@@ -466,6 +466,8 @@ type WsData = {
   language?: string;
   /** Target language for STT sessions — enables auto-speculation when set. */
   speculateTarget?: string;
+  /** Silence timeout before flushing accumulated STT text (ms). Default 700. */
+  pauseMs?: number;
   speechConfig?: { source: string; target: string; speaker?: string };
 };
 
@@ -503,7 +505,8 @@ export function startWsServer() {
       } else if (url.pathname === '/v1/stt/stream') {
         const language = url.searchParams.get('language') || undefined;
         const speculateTarget = url.searchParams.get('target') || undefined;
-        const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'stt', language, speculateTarget } });
+        const pauseMs = parseInt(url.searchParams.get('pause_ms') || '700', 10);
+        const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'stt', language, speculateTarget, pauseMs } });
         if (upgraded) return;
       } else if (url.pathname === '/ws/bot-audio') {
         // Bot audio relay — the meeting bot streams raw PCM here
@@ -541,30 +544,103 @@ export function startWsServer() {
               console.log(`[stt-ws] Backend connected: ${backend.provider} id=${ws.data.id}`);
               ws.send(JSON.stringify({ type: 'connected', provider: backend.provider }));
             };
-            backend.onResult = (evt) => {
-              if (ws.readyState !== 1) return; // WS closed — skip
-              ws.send(JSON.stringify({ type: 'partial', text: evt.text, provider: evt.provider }));
-              // Auto-speculation: when target is set and Labs flag is on,
-              // feed partial STT results into the speculative cache.
+            // Text accumulator: the STT backend emits the FULL running text on each
+            // result (all active segments concatenated).  We track the full text and
+            // a "flushed" cursor so we only send the NEW (delta) portion to the client.
+            //
+            // Short-segment grouping: when isFinal fires but the pending text is too
+            // short for a useful subtitle (<5 words / <30 chars), we hold it in
+            // `shortBuf` and merge it with the next segment before flushing.
+            let sttFullText = '';          // latest full text from STT backend (REPLACED each event)
+            let sttFlushedLen = 0;         // chars of sttFullText already sent as "text" message
+            let sttAccumTimer: ReturnType<typeof setTimeout> | null = null;
+            let shortBuf = '';             // held-back short segment waiting to be merged
+            const sttContext: string[] = [];  // sliding window of recent transcripts for STT seed
+            const STT_CONTEXT_MAX = 5;
+            const STT_ACCUM_TIMEOUT_MS = ws.data.pauseMs ?? 700;   // configurable via ?pause_ms=
+            const STT_SHORT_TIMEOUT_MS = Math.max(1200, (ws.data.pauseMs ?? 700) * 2);
+            const STT_MIN_FLUSH_WORDS = 3;
+            const STT_MIN_FLUSH_CHARS = 20;
+
+            const emitText = (text: string) => {
+              if (!text || ws.readyState !== 1) return;
+              ws.send(JSON.stringify({ type: 'text', text, provider: backend.provider }));
+              // Push to STT context window and seed backend (GPU/Qwen3-ASR only)
+              sttContext.push(text);
+              while (sttContext.length > STT_CONTEXT_MAX) sttContext.shift();
+              backend.sendSeed(sttContext.join(' '));
+              // Speculative translation
               const labs = getLabsFlags();
-              if (labs.speculativeTranslation && ws.data.speculateTarget && evt.text.trim()) {
+              if (labs.speculativeTranslation && ws.data.speculateTarget && text) {
                 const srcLang = ws.data.language || 'fr';
                 const tgtLang = ws.data.speculateTarget;
                 const translateFn = buildSpeculativeTranslateFn(srcLang, tgtLang, 'default');
-                try { speculativeCache.speculate(ws.data.id, evt.text, translateFn); } catch (e) { console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e); }
+                speculativeCache.speculate(ws.data.id, text, translateFn).catch(e => console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e));
+              }
+            };
+
+            const flushSttAccum = () => {
+              if (sttAccumTimer) { clearTimeout(sttAccumTimer); sttAccumTimer = null; }
+              const pending = sttFullText.slice(sttFlushedLen).trim();
+              if (!pending && !shortBuf) return;
+              sttFlushedLen = sttFullText.length;
+              // Merge any held-back short segment with the new pending text
+              const merged = (shortBuf ? shortBuf + ' ' + pending : pending).trim();
+              shortBuf = '';
+              emitText(merged);
+            };
+
+            backend.onResult = (evt) => {
+              if (ws.readyState !== 1) return;
+              const newText = evt.text.trim();
+              if (!newText) return;
+
+              // Backend emits full running text — REPLACE, never append.
+              sttFullText = newText;
+
+              // Pending = text not yet flushed as a stable segment
+              const pending = sttFullText.slice(sttFlushedLen).trim();
+
+              // Always relay partial for live-typing preview (pending portion only)
+              const partialText = shortBuf ? (shortBuf + ' ' + pending).trim() : (pending || newText);
+              ws.send(JSON.stringify({ type: 'partial', text: partialText, provider: evt.provider }));
+
+              if (!pending) return;
+
+              if (evt.isFinal) {
+                // Check if the combined text (shortBuf + pending) is long enough
+                const combined = (shortBuf ? shortBuf + ' ' + pending : pending).trim();
+                const wordCount = combined.split(/\s+/).length;
+                if (wordCount >= STT_MIN_FLUSH_WORDS || combined.length >= STT_MIN_FLUSH_CHARS) {
+                  // Long enough — flush immediately
+                  flushSttAccum();
+                } else {
+                  // Too short — hold back and wait for more text
+                  shortBuf = combined;
+                  sttFlushedLen = sttFullText.length;
+                  // But don't hold forever — flush after STT_SHORT_TIMEOUT_MS
+                  if (sttAccumTimer) clearTimeout(sttAccumTimer);
+                  sttAccumTimer = setTimeout(flushSttAccum, STT_SHORT_TIMEOUT_MS);
+                }
+              } else {
+                // Reset silence timeout
+                if (sttAccumTimer) clearTimeout(sttAccumTimer);
+                sttAccumTimer = setTimeout(flushSttAccum, STT_ACCUM_TIMEOUT_MS);
               }
             };
             backend.onDisconnected = (reason) => {
               console.log(`[stt-ws] Backend ${backend.provider} disconnected: ${reason} id=${ws.data.id}`);
               sttSessions.delete(ws.data.id);
-              // If it failed quickly (<5s), try next provider automatically
-              // But only if the client WS is still open (avoid reconnecting for a dead client)
-              if (Date.now() - t0 < 5000 && ws.readyState === 1 /* OPEN */) {
-                excluded.add(backend.provider);
-                console.log(`[stt-ws] Fast disconnect — trying next provider (excluded: ${[...excluded].join(',')})`);
-                try { connectBackend(); } catch (e) { console.warn(`[stt-ws] Reconnect failed:`, e instanceof Error ? e.message : e); }
-              } else if (ws.readyState === 1) {
-                ws.send(JSON.stringify({ type: 'disconnected', reason }));
+              if (ws.readyState !== 1 /* OPEN */) return; // client already gone
+              // Always try to reconnect with next available provider.
+              // connectBackend() handles the "no provider" case by closing the client WS.
+              excluded.add(backend.provider);
+              console.log(`[stt-ws] Reconnecting (excluded: ${[...excluded].join(',')}) id=${ws.data.id}`);
+              try {
+                connectBackend();
+              } catch (e) {
+                console.warn(`[stt-ws] Reconnect failed — closing client WS:`, e instanceof Error ? e.message : e);
+                ws.close(1001, 'STT backend reconnect failed');
               }
             };
             backend.connect();
@@ -631,7 +707,7 @@ export function startWsServer() {
       message(ws, msg) {
         // ── Message size guard — reject oversized payloads ──
         const MAX_WS_MESSAGE_SIZE = 5 * 1024 * 1024; // 5MB
-        if (typeof msg !== 'string' && (msg as unknown as ArrayBuffer).byteLength > MAX_WS_MESSAGE_SIZE) {
+        if (typeof msg !== 'string' && (msg as ArrayBuffer).byteLength > MAX_WS_MESSAGE_SIZE) {
           ws.close(1009, 'Message too large');
           return;
         }
@@ -659,7 +735,7 @@ export function startWsServer() {
             } catch { /* ignore parse errors */ }
           } else {
             // Binary message = WAV audio → run pipeline
-            const audioBuffer = Buffer.from(msg as unknown as ArrayBuffer);
+            const audioBuffer = Buffer.from(msg as ArrayBuffer);
             if (audioBuffer.length === 0) {
               ws.send(JSON.stringify({ status: 'error', message: 'No audio data' }));
               return;
@@ -699,10 +775,19 @@ export function startWsServer() {
             });
           }
         } else if (ws.data.type === 'stt') {
-          // Forward binary PCM to upstream backend
           const backend = sttSessions.get(ws.data.id);
-          if (backend && typeof msg !== 'string') {
-            backend.sendAudio(msg as unknown as ArrayBuffer);
+          if (!backend) return;
+          if (typeof msg === 'string') {
+            // Text message from client: handle control commands
+            try {
+              const ctrl = JSON.parse(msg);
+              if (ctrl.action === 'clear') {
+                backend.clearState?.();
+              }
+            } catch { /* ignore malformed */ }
+          } else {
+            // Forward binary PCM to upstream backend
+            backend.sendAudio(msg as ArrayBuffer);
           }
         } else if (ws.data.type === 'bot-audio') {
           // Bot audio: first JSON message is handshake (has protocol_version),
@@ -722,13 +807,13 @@ export function startWsServer() {
           // Relay binary audio to all connected Python clients
           botAudioChunks++;
           if (botAudioChunks === 1 || botAudioChunks % 500 === 0) {
-            console.log(`[bot-audio] Relaying audio chunk #${botAudioChunks} (${(msg as unknown as ArrayBuffer).byteLength} bytes) to ${wsClients.size} clients`);
+            console.log(`[bot-audio] Relaying audio chunk #${botAudioChunks} (${(msg as ArrayBuffer).byteLength} bytes) to ${wsClients.size} clients`);
           }
           for (const client of wsClients) {
             try { client.send(msg); } catch { wsClients.delete(client); }
           }
           // Auto-process: buffer audio and run through pipeline when enough accumulates
-          const audioChunk = Buffer.from(msg as unknown as ArrayBuffer);
+          const audioChunk = Buffer.from(msg as ArrayBuffer);
           botAudioBuffer.push(audioChunk);
           botAudioBufferBytes += audioChunk.length;
           // Cap buffer to prevent OOM on runaway audio streams
@@ -743,7 +828,7 @@ export function startWsServer() {
           }
         } else {
           try {
-            const raw = typeof msg === 'string' ? msg : Buffer.from(msg as unknown as ArrayBuffer).toString();
+            const raw = typeof msg === 'string' ? msg : Buffer.from(msg as ArrayBuffer).toString();
             const cmd = JSON.parse(raw) as Record<string, unknown>;
             handleWsCommand(ws as unknown as BabelCastWS, cmd).catch(err => console.error('[ws] Command error:', err));
           } catch { /* ignore parse errors */ }
