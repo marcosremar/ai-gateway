@@ -1036,6 +1036,7 @@ export async function autoSelectCheapestGpu(
 
 export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; containerDiskInGb?: number; volumeId?: string; autoRecovery?: boolean; }
 
+
 export async function startDeployLoop(
   providerClient: GpuProviderClient,
   providerName: ProviderName,
@@ -1398,7 +1399,7 @@ export async function startDeployRace(
       index: i,
       tier,
       gpuTypes: gpuType ? [gpuType] : gpuTypes,
-      tierDockerImage: tier.name === 'modal' ? `${import.meta.dir}/../modal_babelcast.py` : dockerImage,
+      tierDockerImage: tier.name === 'modal' ? `${import.meta.dir}/../../docker/modal/babelcast.py` : dockerImage,
     };
   });
 
@@ -1685,7 +1686,7 @@ export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string
     try {
       // Modal uses a deploy script, not a Docker image — resolve to absolute path
       const tierDockerImage = tier.name === 'modal'
-        ? `${import.meta.dir}/../docker/modal/babelcast.py`
+        ? `${import.meta.dir}/../../docker/modal/babelcast.py`
         : dockerImage;
       const tierGpuTypes = gpuTypesByProvider?.[tier.name] ?? gpuTypes;
       console.log(`[gpu] Starting ${tier.label} deploy loop (tier ${i + 1}/${availableTiers.length}, GPUs: ${tierGpuTypes.slice(0,3).map(g=>g.replace('NVIDIA ','').replace('GeForce ','')).join(', ')}...)`);

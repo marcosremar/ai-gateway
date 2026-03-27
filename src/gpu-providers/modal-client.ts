@@ -76,6 +76,8 @@ export class ModalClient extends AbstractGpuProvider {
   private workspace: string | null;
   private defaultFunctionName: string;
   private workspacePromise: Promise<string> | null = null;
+  /** Correct endpoint URL captured from last `modal deploy` output — takes priority over listInstances URL. */
+  private lastDeployedEndpoint: string | null = null;
 
   constructor(options?: ModalClientOptions) {
     super(options);
@@ -168,6 +170,8 @@ export class ModalClient extends AbstractGpuProvider {
       // Example: "Created web function web => https://marcosremar--parle-ultralight-web.modal.run"
       const urlMatch = (stdout + stderr).match(/https:\/\/[^\s]+\.modal\.run/);
       const endpoint = urlMatch?.[0] ?? '';
+      this.log.log(`[modal] deploy stdout len=${stdout.length} stderr len=${stderr.length} urlMatch=${endpoint || '(none)'} deployFile=${deployFile}`);
+      if (endpoint) this.lastDeployedEndpoint = endpoint;
 
       // Parse app name from output or file
       const workspace = await this.getWorkspace(credentials);
@@ -228,8 +232,15 @@ export class ModalClient extends AbstractGpuProvider {
     return found?.status ?? null;
   }
 
-  /** Re-resolve endpoint for a Modal app by looking it up in the app list. */
+  /** Re-resolve endpoint for a Modal app.
+   * Prefers the URL captured from `modal deploy` output (which includes the class name).
+   * Falls back to listInstances (which uses buildEndpointUrl and may lack the class name).
+   */
   async resolveInstanceEndpoint(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
+    // The correct URL is captured in createInstance from modal deploy stdout.
+    // listInstances/parseApp uses buildEndpointUrl which lacks the class name segment,
+    // so always prefer the cached lastDeployedEndpoint when available.
+    if (this.lastDeployedEndpoint) return this.lastDeployedEndpoint;
     const instances = await this.listInstances(credentials);
     const found = instances.find((i) => i.instanceId === instanceId);
     return found?.endpoint || null;

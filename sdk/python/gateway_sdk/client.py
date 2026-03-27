@@ -178,6 +178,7 @@ class GatewaySDK:
         prompt: str = "",
         timeout_ms: int = 1500,
         providers: list[str] | None = None,
+        llm_correct: bool = False,
     ) -> "EnsembleTranscribeResponse":
         """Transcribe audio using all configured STT providers; consensus via similarity.
 
@@ -187,6 +188,9 @@ class GatewaySDK:
                         Default 1500ms — keeps the subtitle pipeline responsive.
             providers: Subset of providers to use, e.g. ["groq", "openai"].
                        None = use gateway default (ENSEMBLE_STT_PROVIDERS env var).
+            llm_correct: When True, runs an LLM pass to fix proper names and obvious
+                         errors after the consensus vote. Adds ~300ms. Returns
+                         .corrected and .correction_applied in the response.
 
         Returns EnsembleTranscribeResponse with .consensus (best text) and .providers dict.
         """
@@ -196,6 +200,8 @@ class GatewaySDK:
             params["prompt"] = prompt
         if providers:
             params["providers"] = ",".join(providers)
+        if llm_correct:
+            params["llm_correct"] = "true"
         # HTTP timeout = provider deadline + similarity overhead + network buffer
         http_timeout = timeout_ms / 1000 + 5.0
         r = await self._request_with_retry("post",
@@ -216,6 +222,8 @@ class GatewaySDK:
             outliers=data.get("outliers", []),
             similarity_method=data.get("similarity_method", "jaccard"),
             embedding_provider=data.get("embedding_provider", ""),
+            corrected=data.get("corrected", ""),
+            correction_applied=data.get("correction_applied", False),
         )
 
     async def translate(

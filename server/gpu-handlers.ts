@@ -412,6 +412,7 @@ function _startDeployAndRespond(
   }
 
   const extra = { region, storageGb, hfToken, env: Object.keys(deployEnv).length > 0 ? deployEnv : undefined, interruptible, ...(dockerStartCmd ? { dockerStartCmd } : {}), ...(containerDiskInGb > 0 ? { containerDiskInGb } : {}), ...(volumeId ? { volumeId } : {}) };
+
   const deployFn = raceCount > 1
     ? startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount)
     : startDeployWithTiers(tiers, resolvedDockerImage, gpuTypes, extra, gpuPriorityByProvider);
