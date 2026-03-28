@@ -241,12 +241,15 @@ import {
   getSttTargetLatencyMs, getLlmTargetLatencyMs, getBenchmarkMarginPct,
 } from '../src/gpu-providers/deploy-settings';
 import { loadProviderConfig, stampProfileRequest } from './config-persistence';
+import { filterHallucinations, DEFAULT_HALLUCINATION_FILTER_CONFIG } from '../src/stt-hallucination-filter';
+import type { STTHallucinationFilterConfig } from '../src/stt-hallucination-filter';
+import type { STTResponse } from '../src/providers/types';
 import { logRequest } from './metrics';
 import {
   getOrCreateRequestId, setRequestIdHeader, readJsonBody, readRawBody,
   handleBodyError, validateLang, langNames, BodyTimeoutError,
 } from './http-utils';
-import { PROVIDER_CHAIN, GPU_PROVIDERS } from './config';
+import { PROVIDER_CHAIN, GPU_PROVIDERS, MODAL_BABELCAST_URL } from './config';
 import { raceProviders } from './race-providers';
 import { probeCloudProvider, probeGpuHealth } from '../src';
 import type { RaceCandidate } from './race-providers';
@@ -770,14 +773,46 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
       timeoutMs,
     });
 
+    // Apply hallucination filter (metadata + blocklist)
+    const config = loadProviderConfig();
+    const filterSettings = config.sttHallucinationFilter;
+    const filterConfig: STTHallucinationFilterConfig = {
+      ...DEFAULT_HALLUCINATION_FILTER_CONFIG,
+      ...(filterSettings?.metadataFilterEnabled !== undefined && { metadataFilterEnabled: filterSettings.metadataFilterEnabled }),
+      ...(filterSettings?.blocklistFilterEnabled !== undefined && { blocklistFilterEnabled: filterSettings.blocklistFilterEnabled }),
+      ...(filterSettings?.noSpeechProbThreshold !== undefined && { noSpeechProbThreshold: filterSettings.noSpeechProbThreshold }),
+      ...(filterSettings?.compressionRatioThreshold !== undefined && { compressionRatioThreshold: filterSettings.compressionRatioThreshold }),
+      ...(filterSettings?.avgLogprobThreshold !== undefined && { avgLogprobThreshold: filterSettings.avgLogprobThreshold }),
+    };
+
+    // Build a synthetic STTResponse for the filter
+    const sttResponse: STTResponse = {
+      text: result.consensus,
+      segments: result.segments,
+      avg_logprob: result.avg_logprob,
+      compression_ratio: result.compression_ratio,
+      no_speech_prob: result.no_speech_prob,
+    };
+    const filterResult = filterHallucinations(sttResponse, language, filterConfig);
+
+    if (filterResult.filtered) {
+      console.log(`[ensemble] Hallucination filter: "${result.consensus.slice(0, 60)}" → "${filterResult.text.slice(0, 60)}" [${filterResult.reasons.join('; ')}]`);
+      result.consensus = filterResult.text;
+    }
+
     const methodTag = result.similarity_method === 'embedding'
       ? `embed(${result.embedding_provider ?? '?'})`
       : 'jaccard';
     console.log(`[ensemble] ${Object.keys(result.providers).join('+')} [${methodTag}] → ${result.latency_ms}ms: "${result.consensus.slice(0, 80)}"`);
     logRequest({ timestamp: Date.now(), stage: 'stt', provider: 'ensemble', latencyMs: result.latency_ms, success: true, inputSize: audio.length, outputPreview: result.consensus.slice(0, 80) });
 
+    // Include filter metadata in response for Python client
+    const responseBody: Record<string, unknown> = { ...result };
+    if (filterResult.metrics) responseBody.hallucinationMetrics = filterResult.metrics;
+    if (filterResult.filtered) responseBody.hallucinationFiltered = true;
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(result));
+    res.end(JSON.stringify(responseBody));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const latencyMs = Date.now() - t0;
@@ -1234,6 +1269,13 @@ async function _runSttStage(params: PipelineParams): Promise<SttStageResult> {
       run: (signal) => fetchGpuSTT(gpuEp!, audioBuffer, source, sttPrompt, '', false, signal, requestId),
     });
   }
+  // Add Modal tier 2 unless Modal IS the active GPU endpoint AND already handling this stage via sttOnGpu
+  if (MODAL_BABELCAST_URL && !(sttOnGpu && deployState.endpoint === MODAL_BABELCAST_URL)) {
+    sttCandidates.push({
+      name: 'modal-babelcast', timeoutMs: 15_000,
+      run: (signal) => fetchGpuSTT(MODAL_BABELCAST_URL!, audioBuffer, source, sttPrompt, '', false, signal, requestId),
+    });
+  }
   sttCandidates.push({
     name: getCloudProviderName(), timeoutMs: 8_000,
     run: async (signal) => {
@@ -1292,6 +1334,13 @@ async function _runLlmStage(params: PipelineParams, sttResult: SttStageResult): 
     llmCandidates.push({
       name: 'gpu', timeoutMs: llmTimeout,
       run: (signal) => fetchGpuLLM(gpuEp!, sttText, source, target, '', '', signal, requestId),
+    });
+  }
+  // Add Modal tier 2 unless Modal IS the active GPU endpoint AND already handling this stage via llmOnGpu
+  if (MODAL_BABELCAST_URL && !(llmOnGpu && deployState.endpoint === MODAL_BABELCAST_URL)) {
+    llmCandidates.push({
+      name: 'modal-babelcast', timeoutMs: 15_000,
+      run: (signal) => fetchGpuLLM(MODAL_BABELCAST_URL!, sttText, source, target, '', '', signal, requestId),
     });
   }
   llmCandidates.push({
@@ -1383,6 +1432,13 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
       },
     });
   } else if (!isCloneRequest) {
+    // Add Modal tier 2 unless Modal IS the active GPU endpoint AND already handling this stage via ttsOnGpu
+    if (MODAL_BABELCAST_URL && !(ttsOnGpu && deployState.endpoint === MODAL_BABELCAST_URL)) {
+      ttsCandidates.push({
+        name: 'modal-babelcast', timeoutMs: 20_000,
+        run: (signal) => fetchGpuTTS(MODAL_BABELCAST_URL!, translatedText, targetName, speaker || 'Ryan', signal, undefined, undefined, requestId),
+      });
+    }
     console.log(`[pipeline-tts] Adding cloud TTS candidate (${getCloudProviderName()})`);
     ttsCandidates.push({
       name: getCloudProviderName(), timeoutMs: 8_000,
@@ -1678,7 +1734,11 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
   // Use deployState.endpoint directly — gpuEp may be undefined if warmth checks fail.
   // For clone: use GPU endpoint even if gpuHealthy hasn't been confirmed yet (health check may be slow)
   const forceHybridForClone = !!cloneGpuEndpoint;
-  if ((anyOnGpu && !allOnGpu && gpuEp) || forceHybridForClone) {
+  // Modal BabelCast tier 2: force hybrid path when Modal is available and not ALL stages are
+  // already being handled via the atomic GPU path (allOnGpu + Modal IS the GPU = atomic handles it).
+  const isModalTheGpu = MODAL_BABELCAST_URL === deployState.endpoint;
+  const hasModalFallback = !!(MODAL_BABELCAST_URL && !(allOnGpu && isModalTheGpu));
+  if ((anyOnGpu && !allOnGpu && gpuEp) || forceHybridForClone || hasModalFallback) {
     // [4] Pre-warm GPU + cloud connections in parallel (via ai-gateway)
     const effectiveGpuEp = gpuEp || cloneGpuEndpoint!;
     probeGpuHealth(effectiveGpuEp).catch(e => console.warn('[probe] GPU health failed:', e instanceof Error ? e.message : e));
