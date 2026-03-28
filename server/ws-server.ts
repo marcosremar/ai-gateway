@@ -561,6 +561,8 @@ export function startWsServer() {
             const STT_SHORT_TIMEOUT_MS = Math.max(1200, (ws.data.pauseMs ?? 700) * 2);
             const STT_MIN_FLUSH_WORDS = 3;
             const STT_MIN_FLUSH_CHARS = 20;
+            const STT_MAX_ACCUM_MS = 5000;  // force flush after 5s even during continuous speech
+            let sttAccumStartTime: number | null = null;  // when current accumulation started
 
             const emitText = (text: string) => {
               if (!text || ws.readyState !== 1) return;
@@ -568,7 +570,7 @@ export function startWsServer() {
               // Push to STT context window and seed backend (GPU/Qwen3-ASR only)
               sttContext.push(text);
               while (sttContext.length > STT_CONTEXT_MAX) sttContext.shift();
-              backend.sendSeed(sttContext.join(' '));
+              (backend as any).sendSeed?.(sttContext.join(' '));
               // Speculative translation
               const labs = getLabsFlags();
               if (labs.speculativeTranslation && ws.data.speculateTarget && text) {
@@ -587,6 +589,7 @@ export function startWsServer() {
               // Merge any held-back short segment with the new pending text
               const merged = (shortBuf ? shortBuf + ' ' + pending : pending).trim();
               shortBuf = '';
+              sttAccumStartTime = null;  // reset accumulation timer
               emitText(merged);
             };
 
@@ -606,6 +609,16 @@ export function startWsServer() {
               ws.send(JSON.stringify({ type: 'partial', text: partialText, provider: evt.provider }));
 
               if (!pending) return;
+
+              // Track accumulation start — force flush after STT_MAX_ACCUM_MS
+              // to prevent long gaps during continuous speech without isFinal
+              if (!sttAccumStartTime) sttAccumStartTime = Date.now();
+              const accumAge = Date.now() - sttAccumStartTime;
+              if (accumAge >= STT_MAX_ACCUM_MS && pending.split(/\s+/).length >= STT_MIN_FLUSH_WORDS) {
+                console.log(`[stt-ws] Max accum timeout (${accumAge}ms, ${pending.split(/\s+/).length}w) — forcing flush id=${ws.data.id}`);
+                flushSttAccum();
+                return;
+              }
 
               if (evt.isFinal) {
                 // Check if the combined text (shortBuf + pending) is long enough

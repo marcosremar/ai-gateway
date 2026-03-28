@@ -281,7 +281,10 @@ let ttsChain = [
 // Profiles for each cloud/local provider
 export const groqProfile: AIProfile | null = groqAvailable ? {
   stt: [{ provider: 'groq', model: groqSttModel }],
-  llm: [{ provider: 'groq', model: groqLlmModel }],
+  llm: [
+    { provider: 'groq', model: groqLlmModel },
+    { provider: 'modal-qwen3asr-pipeline', model: 'translategemma-12b' },
+  ],
   tts: ttsChain,
   keys: { groq: process.env.GROQ_API_KEY!, ...(openaiAvailable ? { openai: process.env.OPENAI_API_KEY! } : {}) },
   audioFormat: 'wav',  // VoiceDubService expects WAV for AudioStreamBuffer
@@ -727,7 +730,10 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
       ...(openaiAvailable ? { openai: process.env.OPENAI_API_KEY! } : {}),
     },
     stt: [{ provider: 'groq', model: groqSttModel }],
-    llm: [{ provider: 'groq', model: groqLlmModel }],
+    llm: [
+      { provider: 'groq', model: groqLlmModel },
+      { provider: 'modal-qwen3asr-pipeline', model: 'translategemma-12b' },
+    ],
     tts: ttsChain,
   }, 'reloadProviderAvailability');
 

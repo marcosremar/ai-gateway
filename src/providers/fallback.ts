@@ -384,11 +384,20 @@ export async function withProviderFallback<T>(
   let lastError: unknown;
   const got402From: string[] = [];
 
+  // Check if ALL providers are in cooldown — if so, ignore cooldowns entirely
+  // (better to retry a cooled-down provider than to fail with no attempt)
+  const allCooledDown = iterChain.length > 0 && iterChain.every((e) => tracker.isCoolingDown(e));
+  if (allCooledDown) {
+    log.warn(
+      `${logPrefix} all ${iterChain.length} providers in cooldown — ignoring cooldowns to avoid total failure`,
+    );
+  }
+
   for (let i = 0; i < iterChain.length; i++) {
     const entry = iterChain[i];
 
-    // ── Cooldown check ────────────────────────────────────────────────────────
-    if (tracker.isCoolingDown(entry)) {
+    // ── Cooldown check (skipped if all providers are cooled down) ──────────
+    if (!allCooledDown && tracker.isCoolingDown(entry)) {
       const state = tracker.getState().get(cooldownKey(entry));
       const remainingSecs = state ? Math.ceil((state.coolUntil - Date.now()) / 1000) : 0;
       log.log(

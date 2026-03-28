@@ -2183,7 +2183,7 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
     const latencyMs = Date.now() - (req as any)._startTime || 0;
     logRequest({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      timestamp: Date.now(), stage: 'llm', provider: (result as any).provider as 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid', model: result.model,
+      timestamp: Date.now(), stage: 'llm', provider: (chatProvider.providerId ?? 'groq') as 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid', model: result.model,
       latencyMs, success: true, outputPreview: result.content?.slice(0, 80),
       inputTokens: result.usage?.promptTokens, outputTokens: result.usage?.completionTokens,
     });
