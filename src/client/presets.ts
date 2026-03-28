@@ -141,19 +141,24 @@ export const SPEECH_TO_SPEECH_PROFILE: AIProfile = {
   omni: [
     { provider: 'openai', model: 'gpt-4o-mini-audio-preview' },
   ],
-  // Fallback: sequential pipeline (STT → LLM → TTS) — OpenAI first, Groq as fallback
+  // Fallback: sequential pipeline — Groq first (already configured + fast),
+  // OpenAI as secondary. Groq is primary to avoid wasting time on missing OpenAI key.
   stt: [
-    { provider: 'openai', model: 'gpt-4o-mini-transcribe' },
     { provider: 'groq', model: 'whisper-large-v3-turbo' },
+    { provider: 'openai', model: 'gpt-4o-mini-transcribe' },
     { provider: 'self-hosted', model: 'whisper-small', selfHosted: true },
   ],
   llm: [
-    { provider: 'openai', model: 'gpt-4o-mini' },
     { provider: 'groq', model: 'llama-3.1-8b-instant' },
+    { provider: 'openai', model: 'gpt-4o-mini' },
     { provider: 'self-hosted', model: 'gemma-3-4b-it', selfHosted: true },
   ],
   tts: [
-    { provider: 'openai', model: 'gpt-4o-mini-tts' },
+    // tts-1 is OpenAI's fast model (~0.5-1.5s), multilingual incl. Portuguese.
+    // Much faster than gpt-4o-mini-tts (~3-6s) for short conversational text.
+    { provider: 'openai', model: 'tts-1' },
+    // groq/orpheus is English-only but available without extra keys.
+    // Kept as fallback for when OPENAI_API_KEY is not set.
     { provider: 'groq', model: 'canopylabs/orpheus-v1-english' },
     { provider: 'self-hosted', model: 'kokoro-82m', selfHosted: true },
   ],
