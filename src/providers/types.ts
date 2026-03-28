@@ -44,11 +44,28 @@ export interface STTRequest {
   wordTimestamps?: boolean;
 }
 
+/** Per-segment metadata returned by Whisper (verbose_json). */
+export interface STTSegment {
+  id: number;
+  start: number;
+  end: number;
+  text: string;
+  avg_logprob: number;
+  compression_ratio: number;
+  no_speech_prob: number;
+}
+
 export interface STTResponse {
   text: string;
   language?: string;
   duration?: number;
   words?: Array<{ word: string; start: number; end: number }>;
+  /** Per-segment Whisper metadata (available when verbose_json is used). */
+  segments?: STTSegment[];
+  /** Aggregate confidence metrics (averages across all segments). */
+  avg_logprob?: number;
+  compression_ratio?: number;
+  no_speech_prob?: number;
   raw?: unknown;
   /** Network latency breakdown. total_ms = network_ms + server_ms (when server_ms is available). */
   timing?: {

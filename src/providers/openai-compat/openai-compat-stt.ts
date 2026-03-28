@@ -5,7 +5,7 @@
  */
 
 import OpenAI from 'openai';
-import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse } from '../types';
+import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse, STTSegment } from '../types';
 import { prepareAudioFile } from './audio-utils';
 import { getOrCreateClient } from './client-cache';
 
@@ -58,10 +58,10 @@ export class OpenAICompatSTTProvider implements STTProvider {
       ...(request.language && { language: request.language }),
       ...(request.prompt && { prompt: request.prompt }),
       ...(request.temperature !== undefined && { temperature: request.temperature }),
+      // Always prefer verbose_json to get segment-level metadata (no_speech_prob, compression_ratio, avg_logprob)
+      // for hallucination filtering. Only fall back to 'json' for models that don't support it.
       response_format: request.responseFormat === 'text' ? 'text'
-        : (request.wordTimestamps && this.config.defaultResponseFormat !== 'json' && !model.includes('transcribe'))
-          ? 'verbose_json'
-          : (model.includes('transcribe') ? 'json' : (this.config.defaultResponseFormat ?? 'verbose_json')),
+        : (model.includes('transcribe') ? 'json' : 'verbose_json'),
       ...(request.wordTimestamps && this.config.defaultResponseFormat !== 'json' && { timestamp_granularities: ['word'] }),
     };
 
@@ -89,6 +89,43 @@ export class OpenAICompatSTTProvider implements STTProvider {
           typeof (w as Record<string, unknown>)?.end === 'number',
         )
         .map((w) => ({ word: w.word, start: w.start, end: w.end }));
+    }
+
+    // Extract per-segment Whisper metadata from verbose_json (no_speech_prob, compression_ratio, avg_logprob)
+    const rawObj = transcription as unknown as Record<string, unknown>;
+    if ('segments' in rawObj && Array.isArray(rawObj.segments)) {
+      const segments: STTSegment[] = [];
+      for (const seg of rawObj.segments as Record<string, unknown>[]) {
+        if (typeof seg.text === 'string') {
+          segments.push({
+            id: typeof seg.id === 'number' ? seg.id : segments.length,
+            start: typeof seg.start === 'number' ? seg.start : 0,
+            end: typeof seg.end === 'number' ? seg.end : 0,
+            text: seg.text,
+            avg_logprob: typeof seg.avg_logprob === 'number' ? seg.avg_logprob : 0,
+            compression_ratio: typeof seg.compression_ratio === 'number' ? seg.compression_ratio : 0,
+            no_speech_prob: typeof seg.no_speech_prob === 'number' ? seg.no_speech_prob : 0,
+          });
+        }
+      }
+      if (segments.length > 0) {
+        response.segments = segments;
+        // Compute aggregate metrics (weighted average by segment duration)
+        let totalDur = 0;
+        let wLogprob = 0, wCompression = 0, wNoSpeech = 0;
+        for (const s of segments) {
+          const dur = Math.max(s.end - s.start, 0.01);
+          totalDur += dur;
+          wLogprob += s.avg_logprob * dur;
+          wCompression += s.compression_ratio * dur;
+          wNoSpeech += s.no_speech_prob * dur;
+        }
+        if (totalDur > 0) {
+          response.avg_logprob = Math.round((wLogprob / totalDur) * 1000) / 1000;
+          response.compression_ratio = Math.round((wCompression / totalDur) * 1000) / 1000;
+          response.no_speech_prob = Math.round((wNoSpeech / totalDur) * 1000) / 1000;
+        }
+      }
     }
 
     // Extract server-side processing time if the provider returned it (e.g. our Modal endpoints)

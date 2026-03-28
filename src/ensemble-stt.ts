@@ -16,7 +16,7 @@
  *   - gateway-server.ts wires up active providers + embedding fallbacks from env.
  */
 
-import type { STTProvider } from './providers/types';
+import type { STTProvider, STTSegment } from './providers/types';
 import type { EmbeddingProvider } from './providers/openai-compat/openai-compat-embedding';
 
 export interface STTVerifierProviderEntry {
@@ -74,6 +74,12 @@ export interface STTVerifierResult {
   similarity_method: 'jaccard' | 'embedding';
   /** Name of the embedding provider used, if similarity_method is 'embedding'. */
   embedding_provider?: string;
+  /** Whisper segment metadata from the consensus provider (if verbose_json was used). */
+  segments?: STTSegment[];
+  /** Aggregate confidence metrics from the consensus provider. */
+  avg_logprob?: number;
+  compression_ratio?: number;
+  no_speech_prob?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +187,15 @@ export async function runVerifiedSTT(
 
   // ── Fan-out to all STT providers in parallel ────────────────────────────
 
+  interface ProviderResult {
+    name: string;
+    text: string;
+    segments?: STTSegment[];
+    avg_logprob?: number;
+    compression_ratio?: number;
+    no_speech_prob?: number;
+  }
+
   const providerPromises = deps.providers.map(({ name, provider }) => {
     const modelId = provider.getModels()[0]?.id;
     if (!modelId) {
@@ -188,10 +203,17 @@ export async function runVerifiedSTT(
     }
     return provider
       .transcribe({ audio, model: modelId, language, prompt })
-      .then(r => ({ name, text: r.text }));
+      .then((r): ProviderResult => ({
+        name,
+        text: r.text,
+        segments: r.segments,
+        avg_logprob: r.avg_logprob,
+        compression_ratio: r.compression_ratio,
+        no_speech_prob: r.no_speech_prob,
+      }));
   });
 
-  let settled: PromiseSettledResult<{ name: string; text: string }>[];
+  let settled: PromiseSettledResult<ProviderResult>[];
 
   if (deps.timeoutMs !== undefined) {
     const deadline = new Promise<never>((_, reject) =>
@@ -211,12 +233,14 @@ export async function runVerifiedSTT(
   }
 
   const succeeded: Record<string, string> = {};
+  const providerMetadata: Record<string, ProviderResult> = {};
   for (const r of settled) {
     if (r.status === 'rejected') {
       const msg = (r.reason as Error)?.message ?? String(r.reason);
       if (msg !== 'timeout') console.warn('[stt-verifier] provider failed:', msg);
     } else if (r.value.text.trim()) {
       succeeded[r.value.name] = r.value.text;
+      providerMetadata[r.value.name] = r.value;
     }
   }
 
@@ -228,6 +252,18 @@ export async function runVerifiedSTT(
     throw new Error(`[stt-verifier] All ${total} provider${total !== 1 ? 's' : ''} failed or timed out`);
   }
 
+  // Helper: extract metadata from the winning provider's result
+  function getMetadata(winnerName: string): Pick<STTVerifierResult, 'segments' | 'avg_logprob' | 'compression_ratio' | 'no_speech_prob'> {
+    const meta = providerMetadata[winnerName];
+    if (!meta) return {};
+    return {
+      ...(meta.segments ? { segments: meta.segments } : {}),
+      ...(meta.avg_logprob !== undefined ? { avg_logprob: meta.avg_logprob } : {}),
+      ...(meta.compression_ratio !== undefined ? { compression_ratio: meta.compression_ratio } : {}),
+      ...(meta.no_speech_prob !== undefined ? { no_speech_prob: meta.no_speech_prob } : {}),
+    };
+  }
+
   if (texts.length === 1) {
     return {
       consensus: texts[0],
@@ -237,6 +273,7 @@ export async function runVerifiedSTT(
       used_providers: 1,
       latency_ms: Date.now() - t0,
       similarity_method: 'jaccard',
+      ...getMetadata(names[0]),
     };
   }
 
@@ -284,6 +321,7 @@ export async function runVerifiedSTT(
           latency_ms: Date.now() - t0,
           similarity_method: 'embedding',
           embedding_provider: embProvider.name,
+          ...getMetadata(names[emb.bestIdx]),
         };
       } catch (err) {
         console.warn(
@@ -314,6 +352,7 @@ export async function runVerifiedSTT(
     used_providers: texts.length,
     latency_ms: Date.now() - t0,
     similarity_method: 'jaccard',
+    ...getMetadata(names[jaccard.bestIdx]),
   };
 }
 

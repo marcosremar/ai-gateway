@@ -53,6 +53,20 @@ export interface GatewayProfile extends AIProfile {
 }
 
 
+/** STT hallucination filter thresholds (persisted with provider config). */
+export interface SttHallucinationFilterSettings {
+  /** Enable metadata-based filtering (no_speech_prob, compression_ratio, avg_logprob). Default: true */
+  metadataFilterEnabled?: boolean;
+  /** Enable blocklist-based filtering (sachaarbonel/whisper-hallucinations dataset). Default: true */
+  blocklistFilterEnabled?: boolean;
+  /** Maximum no_speech_prob before a segment is rejected. Default: 0.6 */
+  noSpeechProbThreshold?: number;
+  /** Maximum compression_ratio before a segment is rejected. Default: 2.4 */
+  compressionRatioThreshold?: number;
+  /** Minimum avg_logprob — below this the segment is rejected. Default: -0.8 */
+  avgLogprobThreshold?: number;
+}
+
 export interface ProviderConfig {
   profiles: GatewayProfile[];
   activeProfileId: string | null;
@@ -60,6 +74,8 @@ export interface ProviderConfig {
   pipelineLlm: PipelineChainEntry[];
   pipelineTts: PipelineChainEntry[];
   idleTimeoutMin: number;  // auto-terminate GPU after N minutes idle (0 = disabled)
+  /** STT hallucination filter settings. */
+  sttHallucinationFilter?: SttHallucinationFilterSettings;
   updatedAt: number;
   [key: string]: unknown;  // allow extra fields from UI (dockerImages, gpuTypes, etc.)
 }
