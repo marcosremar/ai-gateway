@@ -932,7 +932,7 @@ describe('14. Full lifecycle — multi-tier failover and recovery', () => {
   it('exercises the complete autoscaler flow with 3 tiers', async () => {
     const tiers = [
       makeTier('runpod', 0),
-      makeTier('tensordock', 1),
+      makeTier('runpod', 1),
       makeTier('runpod', 2),
     ];
     const config = makeConfig({ threshold: 1, tiers });

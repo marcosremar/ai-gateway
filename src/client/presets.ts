@@ -137,20 +137,24 @@ export const SYSTEM_PROFILE: AIProfile = {
  */
 export const SPEECH_TO_SPEECH_PROFILE: AIProfile = {
   preset: 'speech-to-speech',
+  // Primary: OpenAI omni (single call handles STT+LLM+TTS, ~500ms)
+  omni: [
+    { provider: 'openai', model: 'gpt-4o-mini-audio-preview' },
+  ],
+  // Fallback: sequential pipeline (STT → LLM → TTS) — OpenAI first, Groq as fallback
   stt: [
-    { provider: 'groq', model: 'whisper-large-v3-turbo' },
     { provider: 'openai', model: 'gpt-4o-mini-transcribe' },
+    { provider: 'groq', model: 'whisper-large-v3-turbo' },
     { provider: 'self-hosted', model: 'whisper-small', selfHosted: true },
   ],
   llm: [
-    { provider: 'groq', model: 'llama-3.3-70b-versatile' },
     { provider: 'openai', model: 'gpt-4o-mini' },
+    { provider: 'groq', model: 'llama-3.1-8b-instant' },
     { provider: 'self-hosted', model: 'gemma-3-4b-it', selfHosted: true },
   ],
   tts: [
-    { provider: 'groq', model: 'canopylabs/orpheus-v1-english' },
     { provider: 'openai', model: 'gpt-4o-mini-tts' },
-    { provider: 'modal', model: 'moss-tts-realtime' },
+    { provider: 'groq', model: 'canopylabs/orpheus-v1-english' },
     { provider: 'self-hosted', model: 'kokoro-82m', selfHosted: true },
   ],
   voice: 'nova',

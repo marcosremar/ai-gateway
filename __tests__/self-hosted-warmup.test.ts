@@ -344,6 +344,7 @@ describe('watchdog — respects alwaysActive on GpuTierConfig', () => {
         setTierState: vi.fn(),
         cancelBootPoller: vi.fn(),
         initTierStatesFromDb: vi.fn(),
+        evictIdleUsers: vi.fn(),
       } as any,
       sessionTracker: { countActiveSessions: vi.fn().mockResolvedValue(0) } as any,
       persistence: {

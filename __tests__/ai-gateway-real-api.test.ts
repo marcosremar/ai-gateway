@@ -1028,20 +1028,21 @@ describe('Real API: Error Handling', () => {
 
   const test = skipIf(!HAS_GROQ, 'GROQ_API_KEY not set');
 
-  test('non-retryable 404 (bad model) aborts without fallback', async () => {
-    // 404 is not in RETRYABLE_STATUSES, so it aborts the chain immediately
-    await expect(
-      client.chat(
-        [{ role: 'user', content: 'Say hi' }],
-        {
-          llm: [
-            { provider: 'groq', model: 'nonexistent-model-xyz' },
-            { provider: 'groq', model: 'llama-3.1-8b-instant' },
-          ],
-          fallbackOptions: { timeoutMs: 15_000, retriesPerProvider: 0 },
-        },
-      ),
-    ).rejects.toThrow(/404|does not exist/);
+  test('non-existent model (404) falls back to next provider', async () => {
+    // 404 is in RETRYABLE_STATUSES, so it falls back to the next provider
+    const result = await client.chat(
+      [{ role: 'user', content: 'Say hi' }],
+      {
+        llm: [
+          { provider: 'groq', model: 'nonexistent-model-xyz' },
+          { provider: 'groq', model: 'llama-3.1-8b-instant' },
+        ],
+        fallbackOptions: { timeoutMs: 15_000, retriesPerProvider: 0 },
+      },
+    );
+    expect(result.provider).toBe('groq');
+    expect(result.fallbackUsed).toBe(true);
+    expect(result.content.length).toBeGreaterThan(0);
   }, 30_000);
 
   test('rate limit (429) moves to next provider without retry', async () => {

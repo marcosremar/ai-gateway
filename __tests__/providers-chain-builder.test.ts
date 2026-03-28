@@ -19,7 +19,7 @@ import {
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
-  for (const k of ['OPENAI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'VAST_API_KEY']) {
+  for (const k of ['OPENAI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'MODAL_API_KEY', 'VAST_API_KEY']) {
     savedEnv[k] = process.env[k];
     delete process.env[k];
   }
@@ -33,55 +33,54 @@ afterEach(() => {
 });
 
 describe('resolveApiKey', () => {
-  it('returns user key when present', () => {
-    const key = resolveApiKey('openai', { openai: 'user-openai-key' });
-    expect(key).toBe('user-openai-key');
-  });
-
-  it('falls back to env var when no user key', () => {
+  it('returns env var when set for openai', async () => {
     process.env.OPENAI_API_KEY = 'env-openai-key';
-    const key = resolveApiKey('openai', {});
+    const key = await resolveApiKey('openai');
     expect(key).toBe('env-openai-key');
   });
 
-  it('prefers user key over env var', () => {
-    process.env.OPENAI_API_KEY = 'env-key';
-    const key = resolveApiKey('openai', { openai: 'user-key' });
-    expect(key).toBe('user-key');
-  });
-
-  it('returns null when no user key and no env var', () => {
-    const key = resolveApiKey('openai', {});
+  it('returns null when no env var', async () => {
+    const key = await resolveApiKey('openai');
     expect(key).toBeNull();
   });
 
-  it('returns null for unknown provider with no env mapping', () => {
-    const key = resolveApiKey('unknown-provider' as never, {});
+  it('returns null for unknown provider with no env mapping', async () => {
+    const key = await resolveApiKey('unknown-provider' as never);
     expect(key).toBeNull();
   });
 
-  it('handles groq env var', () => {
+  it('handles groq env var', async () => {
     process.env.GROQ_API_KEY = 'groq-env-key';
-    const key = resolveApiKey('groq', {});
+    const key = await resolveApiKey('groq');
     expect(key).toBe('groq-env-key');
   });
 
-  it('handles openrouter env var', () => {
+  it('handles openrouter env var', async () => {
     process.env.OPENROUTER_API_KEY = 'or-env-key';
-    const key = resolveApiKey('openrouter', {});
+    const key = await resolveApiKey('openrouter');
     expect(key).toBe('or-env-key');
   });
 
-  it('handles vast-serverless env var', () => {
-    process.env.VAST_API_KEY = 'vast-env-key';
-    const key = resolveApiKey('vast-serverless', {});
-    expect(key).toBe('vast-env-key');
+  it('handles fireworks env var', async () => {
+    process.env.FIREWORKS_API_KEY = 'fw-env-key';
+    const key = await resolveApiKey('fireworks');
+    expect(key).toBe('fw-env-key');
   });
 
-  it('handles undefined userKeys', () => {
-    process.env.GROQ_API_KEY = 'groq-key';
-    const key = resolveApiKey('groq', undefined);
-    expect(key).toBe('groq-key');
+  it('handles modal env var', async () => {
+    process.env.MODAL_API_KEY = 'modal-env-key';
+    const key = await resolveApiKey('modal');
+    expect(key).toBe('modal-env-key');
+  });
+
+  it('returns null for ollama (no env key)', async () => {
+    const key = await resolveApiKey('ollama');
+    expect(key).toBeNull();
+  });
+
+  it('returns null for gpu (no env key)', async () => {
+    const key = await resolveApiKey('gpu');
+    expect(key).toBeNull();
   });
 });
 

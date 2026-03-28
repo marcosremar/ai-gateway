@@ -22,7 +22,7 @@ import { runHealthCheck, runSSEBench } from './benchmarking/bench';
 import { InMemoryStateAdapter } from './adapters/in-memory-state';
 import { StatePersistence } from './autoscaler/state-persistence';
 import { startCostMonitorTicker } from './autoscaler/cost-monitor';
-import { initVaultFromEnv, getVault } from './vault/vault-singleton';
+
 import type { HandlerDeps } from './handlers/types';
 
 export interface GatewayConfig {
@@ -67,12 +67,7 @@ export function createGateway(config: GatewayConfig): Gateway {
 
   const credentialStore = storage.resolveCredentials
     ? { resolve: (userId: string, provider: string) => storage.resolveCredentials!(userId, provider) }
-    : (() => {
-        initVaultFromEnv();
-        const vault = getVault();
-        if (!vault) throw new Error('[createGateway] Vault not initialized. Set VAULT_MASTER_KEY and VAULT_PATH in .env');
-        return createCredentialResolver(vault);
-      })();
+    : createCredentialResolver(settingsStore);
 
   const lifecycleLogStore = storage.queryLifecycleLogs
     ? { query: storage.queryLifecycleLogs.bind(storage) }

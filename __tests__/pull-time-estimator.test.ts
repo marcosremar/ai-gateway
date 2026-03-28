@@ -8,7 +8,7 @@
  *   Host-specific → tightest (3+ runs on same host)
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll } from 'vitest';
 
 // Reset module state between tests
 let estimatePullTimeout: typeof import('../src/gpu-providers/pull-time-estimator').estimatePullTimeout;
@@ -206,12 +206,19 @@ describe('Pull Time Estimator', () => {
 });
 
 describe('Pull Time Learning — Gateway Integration', () => {
+  let gatewayAvailable = false;
+
+  beforeAll(async () => {
+    try {
+      const res = await fetch('http://localhost:4000/v1/gpu/latency/settings', { signal: AbortSignal.timeout(2000) });
+      gatewayAvailable = res.ok;
+    } catch { gatewayAvailable = false; }
+  });
+
   it('GET /v1/gpu/latency/settings returns pullTimeLearning', async () => {
+    if (!gatewayAvailable) return;
     const res = await fetch('http://localhost:4000/v1/gpu/latency/settings');
-    if (!res.ok) {
-      console.log('Gateway not running — skipping integration test');
-      return;
-    }
+    if (!res.ok) return;
     const data = await res.json() as Record<string, unknown>;
 
     expect(data).toHaveProperty('pullTimeLearning');
@@ -238,6 +245,7 @@ describe('Pull Time Learning — Gateway Integration', () => {
   });
 
   it('prewarm cached known image sizes on startup', async () => {
+    if (!gatewayAvailable) return;
     const res = await fetch('http://localhost:4000/v1/gpu/latency/settings');
     if (!res.ok) return;
     const data = await res.json() as Record<string, unknown>;

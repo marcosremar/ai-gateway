@@ -158,8 +158,8 @@ export interface RealtimeSessionConfig {
   model: string;
   voice?: string;
   instructions?: string;
-  inputAudioFormat?: 'pcm16' | 'g711_ulaw' | 'g711_alaw';
-  outputAudioFormat?: 'pcm16' | 'g711_ulaw' | 'g711_alaw';
+  inputAudioFormat?: 'audio/pcm' | 'audio/pcmu' | 'audio/pcma' | 'pcm16' | 'g711_ulaw' | 'g711_alaw';
+  outputAudioFormat?: 'audio/pcm' | 'audio/pcmu' | 'audio/pcma' | 'pcm16' | 'g711_ulaw' | 'g711_alaw';
   turnDetection?: {
     type: 'server_vad' | 'semantic_vad';
     threshold?: number;

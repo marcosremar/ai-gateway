@@ -15,7 +15,7 @@ import { createHash } from 'crypto';
 const BLOCK_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 export function hashApiKey(key: string): string {
-  return createHash('sha256').update(key).digest('hex').slice(0, 32);
+  return createHash('sha256').update(key).digest('hex').slice(0, 12);
 }
 
 function blockKey(provider: string, apiKeyHash: string): string {

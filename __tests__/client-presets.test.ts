@@ -37,7 +37,7 @@ describe('client-presets', () => {
       expect(VOICE_PROFILE.stt!.length).toBeGreaterThan(0);
       expect(VOICE_PROFILE.llm!.length).toBeGreaterThan(0);
       expect(VOICE_PROFILE.tts!.length).toBeGreaterThan(0);
-      expect(VOICE_PROFILE.voice).toBe('coral');
+      expect(VOICE_PROFILE.voice).toBe('nova');
     });
 
     it('image profile has image chain and dimensions', () => {

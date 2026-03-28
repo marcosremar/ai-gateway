@@ -127,10 +127,14 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
         audio: {
           output: {
             voice: config.voice || 'coral',
-            ...(config.outputAudioFormat && { format: config.outputAudioFormat }),
+            ...(config.outputAudioFormat && {
+              format: { type: config.outputAudioFormat, rate: 24000 },
+            }),
           },
           input: {
-            ...(config.inputAudioFormat && { format: config.inputAudioFormat }),
+            ...(config.inputAudioFormat && {
+              format: { type: config.inputAudioFormat, rate: 24000 },
+            }),
             ...(config.noiseReduction && {
               noise_reduction: { type: config.noiseReduction.type },
             }),

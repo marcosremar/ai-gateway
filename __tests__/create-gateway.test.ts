@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createGateway, type GatewayConfig } from '@ai-gateway/create-gateway';
 import type { GatewayStorage } from '@ai-gateway/storage';
 import type { Gateway } from '@ai-gateway/gateway-api';
+import { resetVault } from '@ai-gateway/vault';
 
 function mockStorage(): GatewayStorage {
   return {
@@ -23,8 +24,17 @@ describe('createGateway', () => {
   let storage: GatewayStorage;
 
   beforeEach(() => {
+    process.env.VAULT_MASTER_KEY = 'a'.repeat(64); // 32 bytes as hex
+    process.env.VAULT_PATH = `/tmp/test-vault-${Date.now()}`;
+    resetVault();
     storage = mockStorage();
     gateway = createGateway({ storage });
+  });
+
+  afterEach(() => {
+    delete process.env.VAULT_MASTER_KEY;
+    delete process.env.VAULT_PATH;
+    resetVault();
   });
 
   // ── Creation ──────────────────────────────────────────────────────────

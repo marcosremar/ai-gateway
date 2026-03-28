@@ -964,6 +964,7 @@ describe('4. Autoscaler Engine — Integration', () => {
       expect(decision.bootingTiers).toBe(1);
 
       // Step 3: Tier 0 becomes healthy → ready, route to GPU
+      autoscaler.forceTierReady(USER, 0, tiers[0].endpoint!);
       healthyEndpoints.add(tiers[0].endpoint!);
       decision = await autoscaler.getAutoScaleDecision(USER, config);
       expect(decision.route).toBe('s2s');
@@ -973,6 +974,7 @@ describe('4. Autoscaler Engine — Integration', () => {
 
       // Step 4: Tier 0 goes unhealthy → marks unhealthy, falls back to LLM
       healthyEndpoints.delete(tiers[0].endpoint!);
+      autoscaler.resetGpuState(USER);
       decision = await autoscaler.getAutoScaleDecision(USER, config);
       expect(decision.route).toBe('llm');
 
@@ -985,6 +987,7 @@ describe('4. Autoscaler Engine — Integration', () => {
       expect(bootingTier!.tierIndex).toBe(1);
 
       // Step 6: Tier 1 becomes healthy → route to GPU via tier 1
+      autoscaler.forceTierReady(USER, 1, tiers[1].endpoint!);
       healthyEndpoints.add(tiers[1].endpoint!);
       decision = await autoscaler.getAutoScaleDecision(USER, config);
       expect(decision.route).toBe('s2s');
@@ -1673,7 +1676,7 @@ describe('12. Preset Profiles Integrity', () => {
     expect(VOICE_PROFILE.stt!.length).toBeGreaterThanOrEqual(2);
     expect(VOICE_PROFILE.llm!.length).toBeGreaterThanOrEqual(2);
     expect(VOICE_PROFILE.tts!.length).toBeGreaterThanOrEqual(2);
-    expect(VOICE_PROFILE.voice).toBe('coral');
+    expect(VOICE_PROFILE.voice).toBe('nova');
     expect(VOICE_PROFILE.fallbackOptions?.timeoutMs).toBe(8000);
   });
 

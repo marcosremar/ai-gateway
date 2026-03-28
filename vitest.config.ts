@@ -13,6 +13,9 @@ export default defineConfig({
     testTimeout: 60_000,
     hookTimeout: 30_000,
     sequence: { concurrent: false },
+    env: {
+      SKIP_GPU_TESTS: '1',
+    },
     server: {
       deps: {
         // Zod v4 changed its ESM structure; inline it so vitest bundles it

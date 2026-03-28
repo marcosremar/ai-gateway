@@ -1,23 +1,33 @@
 /**
  * ResponseCache — cache AI provider responses with TTL, keyed by request hash.
  * Uses StateStore (KvStore) for storage.
+ * 
+ * Supports per-request cache options (similar to Cloudflare cf-aig-cache headers):
+ *   - enabled: override global cache setting
+ *   - ttl: custom TTL for this specific request
+ *   - cacheKey: custom cache key override
  */
 
 import { createHash } from 'crypto';
 import type { KvStore } from '../deps';
-import type { CacheConfig, CacheStats } from './types';
+import type { CacheConfig, CacheStats, CacheRequestOptions, CacheMetadata } from './types';
 
 export class ResponseCache {
   private store: KvStore;
   private defaultTtlMs: number;
   private prefix: string;
+  private semanticEnabled: boolean;
+  private similarityThreshold: number;
   private _hits = 0;
   private _misses = 0;
+  private _total = 0;
 
   constructor(store: KvStore, opts?: CacheConfig) {
     this.store = store;
     this.defaultTtlMs = opts?.defaultTtlMs ?? 300_000;
     this.prefix = opts?.prefix ?? 'cache:';
+    this.semanticEnabled = opts?.semantic ?? false;
+    this.similarityThreshold = opts?.similarityThreshold ?? 0.9;
   }
 
   /** Build a deterministic cache key from request params */
@@ -34,7 +44,24 @@ export class ResponseCache {
     return `${this.prefix}${hash}`;
   }
 
-  async get<T>(key: string): Promise<T | null> {
+  /** Build custom key from explicit string (for override) */
+  buildCustomKey(key: string): string {
+    return `${this.prefix}custom:${createHash('sha256').update(key).digest('hex')}`;
+  }
+
+  /**
+   * Get cached value with optional per-request options.
+   * Similar to Cloudflare's cf-aig-cache header behavior.
+   */
+  async get<T>(key: string, options?: CacheRequestOptions): Promise<T | null> {
+    this._total++;
+    
+    // Check if cache is disabled for this specific request
+    if (options?.enabled === false) {
+      this._misses++;
+      return null;
+    }
+
     const raw = await this.store.get(key);
     if (!raw) {
       this._misses++;
@@ -42,11 +69,11 @@ export class ResponseCache {
     }
     this._hits++;
     try {
-      const envelope = JSON.parse(raw) as { data: T; expiresAt: number };
-      if (envelope.expiresAt && Date.now() > envelope.expiresAt) {
+      const envelope = JSON.parse(raw) as { data: T; metadata: CacheMetadata };
+      if (envelope.metadata.expiresAt && Date.now() > envelope.metadata.expiresAt) {
         await this.store.del(key);
         this._misses++;
-        this._hits--; // undo the hit count
+        this._hits--;
         return null;
       }
       return envelope.data;
@@ -55,15 +82,38 @@ export class ResponseCache {
     }
   }
 
-  async set<T>(key: string, value: T, ttlMs?: number): Promise<void> {
+  /**
+   * Set cached value with optional per-request TTL override.
+   * Similar to Cloudflare's cf-aig-cache-ttl header.
+   */
+  async set<T>(key: string, value: T, ttlMs?: number, metadata?: Partial<CacheMetadata>): Promise<void> {
+    // Use request-specific TTL if provided, otherwise fall back to global default
     const ttl = ttlMs ?? this.defaultTtlMs;
+    const now = Date.now();
     const envelope = {
       data: value,
-      expiresAt: Date.now() + ttl,
+      metadata: {
+        cachedAt: now,
+        expiresAt: now + ttl,
+        ...metadata,
+      },
     };
-    // ttlSecs for KvStore (Redis TTL is in seconds)
     const ttlSecs = Math.ceil(ttl / 1000);
     await this.store.set(key, JSON.stringify(envelope), ttlSecs);
+  }
+
+  /**
+   * Check if semantic caching is enabled
+   */
+  isSemanticEnabled(): boolean {
+    return this.semanticEnabled;
+  }
+
+  /**
+   * Get similarity threshold for semantic matching
+   */
+  getSimilarityThreshold(): number {
+    return this.similarityThreshold;
   }
 
   async invalidate(pattern: string): Promise<void> {
@@ -71,7 +121,34 @@ export class ResponseCache {
     await Promise.all(keys.map((k) => this.store.del(k)));
   }
 
+  /**
+   * Invalidate all cache entries for a specific provider
+   */
+  async invalidateProvider(provider: string): Promise<void> {
+    await this.invalidate(`p:${provider}*`);
+  }
+
+  /**
+   * Invalidate all cache entries for a specific model
+   */
+  async invalidateModel(provider: string, model: string): Promise<void> {
+    await this.invalidate(`p:${provider}:m:${model}*`);
+  }
+
   stats(): CacheStats {
-    return { hits: this._hits, misses: this._misses };
+    const total = this._hits + this._misses;
+    return { 
+      hits: this._hits, 
+      misses: this._misses,
+      hitRate: total > 0 ? (this._hits / total) * 100 : 0,
+      total,
+    };
+  }
+
+  /** Reset stats */
+  resetStats(): void {
+    this._hits = 0;
+    this._misses = 0;
+    this._total = 0;
   }
 }

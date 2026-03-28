@@ -28,7 +28,6 @@ export type { GatewayStorage } from './storage';
 
 // ── Autoscaler Factory ──────────────────────────────────────────────────────
 export { createAutoscaler } from './factory';
-export type { Autoscaler, CreateAutoscalerOptions } from './factory';
 
 // ── Gateway Singleton (legacy — prefer createGateway) ────────────────────────
 export { initGateway, getGateway, resetGateway } from './gateway';
@@ -43,7 +42,7 @@ export type { RedisLike } from './adapters/redis-state';
 export type {
   AutoScaleRoute,
   GpuBootState,
-  ScaleTrigger,
+  GpuInstance,
   GpuProvider,
   StageTimeouts,
   GpuTierConfig,
@@ -54,6 +53,7 @@ export type {
   ReadyTierState,
   AutoScaleDecision,
   DeploySessionRecord,
+  WorkloadSpec,
 } from './types';
 export { DEFAULT_STAGE_TIMEOUTS, resolveStageTimeouts } from './types';
 
@@ -78,7 +78,6 @@ export type {
 // ── GPU Provider types ──────────────────────────────────────────────────────
 export type {
   ProviderCredentials,
-  GpuInstance,
   InstanceSpec,
   GpuProviderClient,
   MonitorableProvider,
@@ -307,6 +306,7 @@ export type {
   RealtimeResult,
   PipelineResult,
   DeployResult,
+  WorkloadLaunchResult,
   GpuTransport,
   GpuPipelineResponse,
   GpuHealthResponse,

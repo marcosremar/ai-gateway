@@ -50,6 +50,18 @@ export { ProviderClassification } from './classification';
 export { diversifyChain } from './chain-diversifier';
 export type { DiversifyConfig } from './chain-diversifier';
 
+// ── Percentage Routing (A/B Testing) ───────────────────────────────────────
+export { selectPercentageRoute, selectRandomRoute, buildPercentageRoutes } from './percentage-routing';
+export type { PercentageRoute, PercentageRoutingOptions } from './percentage-routing';
+
+// ── Guardrails (Content Moderation) ──────────────────────────────────────
+export { checkContent, checkPromptAndResponse, createGuardrailMiddleware, DEFAULT_GUARDRAIL_CONFIG } from './guardrails';
+export type { GuardrailConfig, GuardrailResult, GuardrailOptions } from './guardrails';
+
+// ── DLP (Data Loss Prevention) ───────────────────────────────────────────────
+export { detectPII, scanPromptAndResponse, createDLPMiddleware, createComplianceConfig, COMPLIANCE_PATTERNS, DEFAULT_DLP_CONFIG } from './dlp';
+export type { DLPConfig, DLPResult, DLPOptions, DLPMatch } from './dlp';
+
 // ── Declarative Chain ─────────────────────────────────────────────────────
 export { resolveDeclarativeChain, findChainForStage } from './declarative-chain';
 export type { FallbackChainConfig, FallbackChainEntry, ResolvedChain } from './declarative-chain';

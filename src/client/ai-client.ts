@@ -352,8 +352,7 @@ export class AIClient {
   }
 
   /**
-   * Omni audio chat: audio/text in → audio+text out in one call.
-   * Uses the omni fallback chain (default: gpt-audio-mini).
+   * @deprecated Use `realtimeSpeech({ audio, text, instructions })` instead.
    */
   async omniChat(
     input: { audio?: Buffer | Blob; text?: string },
@@ -361,75 +360,157 @@ export class AIClient {
     profileOverride?: AIProfile | PresetName,
   ): Promise<OmniResult> {
     const profile = this.resolveEffectiveProfile(profileOverride);
-    const { entries: chain, overrideOptions } = this.buildChain(profile, 'omni');
-    const fallbackOpts = this.buildFallbackOptions(profile, 'Omni', 'omni', overrideOptions);
-
-    const t0 = Date.now();
-    const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
-      chain,
-      async (entry) => {
-        const provider = await this.resolveProvider(id => this.registry.getOmniProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
-        return provider.omniChat({
-          audio: input.audio,
-          text: input.text,
-          model: entry.model ?? 'gpt-audio-mini',
-          voice: profile.voice,
-          instructions,
-          language: profile.language,
-          audioFormat: profile.audioFormat === 'wav' || profile.audioFormat === 'mp3' || profile.audioFormat === 'flac' || profile.audioFormat === 'opus'
-            ? profile.audioFormat
-            : undefined,
-        });
-      },
-      fallbackOpts,
+    if (!profile.omni || profile.omni.length === 0) {
+      throw new Error('No OMNI providers configured');
+    }
+    const result = await this.realtimeSpeech(
+      { audio: input.audio, text: input.text, instructions },
+      profileOverride,
     );
-
     return {
-      text: result.text,
-      audio: result.audio,
-      audioBase64: result.audioBase64,
-      contentType: result.contentType,
+      text: result.responseText ?? '',
+      audio: result.responseAudio ?? Buffer.alloc(0),
+      audioBase64: result.audioBase64 ?? '',
+      contentType: result.responseAudio ? 'audio/wav' : 'text/plain',
       userTranscript: result.userTranscript,
-      usage: result.usage,
-      provider: usedProvider,
-      model: usedModel ?? result.model,
-      fallbackUsed: attempts > 1,
-      latencyMs: Date.now() - t0,
+      usage: result.usage as OmniResult['usage'],
+      provider: result.provider,
+      model: result.model,
+      fallbackUsed: (result as any).fallbackUsed ?? false,
+      latencyMs: result.latencyMs ?? 0,
     };
   }
 
   /**
-   * Create an ephemeral Realtime API session (WebRTC/WebSocket).
-   * Returns a client_secret for direct browser → OpenAI connection.
+   * @deprecated Use `realtimeSpeech()` instead.
    */
   async createRealtimeSession(
     config: RealtimeSessionConfig,
     profileOverride?: AIProfile | PresetName,
   ): Promise<RealtimeResult> {
+    const result = await this.realtimeSpeech(
+      { model: config.model, voice: config.voice, instructions: config.instructions, turnDetection: config.turnDetection as Record<string, unknown>, noiseReduction: config.noiseReduction as any },
+      profileOverride,
+    );
+    return {
+      clientSecret: result.clientSecret ?? '',
+      expiresAt: result.expiresAt ?? 0,
+      provider: result.provider,
+      model: result.model,
+    };
+  }
+
+  /**
+   * Realtime speech — unified, transport-agnostic.
+   *
+   * The gateway decides the transport based on input + profile:
+   *
+   * 1. `input.sdpOffer` provided → **WebRTC** SDP exchange
+   * 2. `input.audio` or `input.text` provided + profile has `omni` chain → **Omni** call (audio in → audio+text out)
+   * 3. Otherwise → **Session token** (ephemeral key for browser WebRTC/WebSocket)
+   *
+   * ```ts
+   * // WebRTC SDP exchange
+   * const r = await client.realtimeSpeech({ sdpOffer });
+   *
+   * // Omni: audio in → audio+text out (single call)
+   * const r = await client.realtimeSpeech({ audio: wavBuffer, instructions: '...' });
+   *
+   * // Session token for persistent connection
+   * const r = await client.realtimeSpeech({ voice: 'ash', instructions: '...' });
+   * ```
+   */
+  async realtimeSpeech(
+    input: import('./types').RealtimeSpeechInput,
+    profileOverride?: AIProfile | PresetName,
+  ): Promise<import('./types').RealtimeSpeechResult> {
     const profile = this.resolveEffectiveProfile(profileOverride);
+    const voice = input.voice || profile.voice || 'ash';
+
+    // ── 1. WebRTC: SDP exchange ──
+    if (input.sdpOffer) {
+      const chains = profile.realtime;
+      if (!chains || chains.length === 0) {
+        throw new Error('[AIClient] No realtime providers configured in profile');
+      }
+      const entry = chains[0];
+      const model = input.model || entry.model || 'gpt-4o-mini-realtime-preview';
+      const provider = await this.resolveProvider(
+        id => this.registry.getRealtimeProvider(id),
+        entry.provider as ProviderId, profile, entry.endpoint,
+      );
+      if (!provider.exchangeSdp) {
+        throw new Error(`[AIClient] Provider ${entry.provider} does not support WebRTC SDP exchange`);
+      }
+      const sdpAnswer = await provider.exchangeSdp({ sdpOffer: input.sdpOffer, model, voice });
+      return { transport: 'webrtc', sdpAnswer, provider: entry.provider, model, voice };
+    }
+
+    // ── 2. Omni: audio/text in → audio+text out ──
+    if ((input.audio || input.text) && profile.omni && profile.omni.length > 0) {
+      const { entries: chain, overrideOptions } = this.buildChain(profile, 'omni');
+      const fallbackOpts = this.buildFallbackOptions(profile, 'Omni', 'omni', overrideOptions);
+      const t0 = Date.now();
+
+      const { result, usedProvider, usedModel, attempts } = await withProviderFallback(
+        chain,
+        async (entry) => {
+          const provider = await this.resolveProvider(
+            id => this.registry.getOmniProvider(id), entry.provider as ProviderId, profile, entry.endpoint,
+          );
+          return provider.omniChat({
+            audio: input.audio,
+            text: input.text,
+            model: entry.model ?? 'gpt-audio-mini',
+            voice,
+            instructions: input.instructions,
+            language: profile.language,
+            audioFormat: profile.audioFormat === 'wav' || profile.audioFormat === 'mp3' || profile.audioFormat === 'flac' || profile.audioFormat === 'opus'
+              ? profile.audioFormat : undefined,
+          });
+        },
+        fallbackOpts,
+      );
+
+      return {
+        transport: 'omni',
+        responseText: result.text,
+        responseAudio: result.audio,
+        audioBase64: result.audioBase64,
+        userTranscript: result.userTranscript,
+        usage: result.usage,
+        provider: usedProvider,
+        model: usedModel ?? result.model ?? '',
+        voice,
+        latencyMs: Date.now() - t0,
+        fallbackUsed: attempts > 1,
+      };
+    }
+
+    // ── 3. Session token (WebSocket / data-channel) ──
     const chains = profile.realtime;
     if (!chains || chains.length === 0) {
       throw new Error('[AIClient] No realtime providers configured in profile');
     }
-
     const entry = chains[0];
+    const model = input.model || entry.model || 'gpt-4o-mini-realtime-preview';
     const provider = await this.resolveProvider(
       id => this.registry.getRealtimeProvider(id),
-      entry.provider as ProviderId,
-      profile,
-      entry.endpoint,
+      entry.provider as ProviderId, profile, entry.endpoint,
     );
-
     const session = await provider.createSession({
-      ...config,
-      model: config.model || entry.model || 'gpt-4o-mini-realtime-preview',
-    });
+      model, voice,
+      instructions: input.instructions,
+      turnDetection: input.turnDetection as RealtimeSessionConfig['turnDetection'],
+      ...(input.noiseReduction != null && { noiseReduction: input.noiseReduction as RealtimeSessionConfig['noiseReduction'] }),
+    } satisfies RealtimeSessionConfig);
 
     return {
+      transport: 'session',
       clientSecret: session.clientSecret,
       expiresAt: session.expiresAt,
       provider: entry.provider,
-      model: config.model || entry.model || 'gpt-4o-mini-realtime-preview',
+      model, voice,
     };
   }
 
@@ -468,6 +549,28 @@ export class AIClient {
         return { ...chainResult, totalLatencyMs: Date.now() - t0, usedGpu: true };
       } catch (err) {
         this.log.warn('[AIClient] Chain pipeline failed, falling back to cloud per-stage:', err);
+      }
+    }
+
+    // ── Try omni first if profile has omni chain (single call: audio → audio+text) ──
+    if (profile.omni && profile.omni.length > 0) {
+      try {
+        this.log.debug?.('[AIClient] Pipeline: trying omni (single-call STT+LLM+TTS)...');
+        const omniResult = await this.realtimeSpeech(
+          { audio, instructions: systemPrompt, voice: profile.voice },
+          profile,
+        );
+        if (omniResult.transport === 'omni' && omniResult.responseText) {
+          return {
+            stt: { text: omniResult.userTranscript ?? '', provider: omniResult.provider, model: omniResult.model, fallbackUsed: false, latencyMs: omniResult.latencyMs ?? 0 },
+            chat: { content: omniResult.responseText, provider: omniResult.provider, model: omniResult.model, fallbackUsed: false, latencyMs: omniResult.latencyMs ?? 0 },
+            tts: { audio: omniResult.responseAudio ?? Buffer.alloc(0), contentType: 'audio/wav', provider: omniResult.provider, model: omniResult.model, fallbackUsed: false, latencyMs: omniResult.latencyMs ?? 0 },
+            totalLatencyMs: Date.now() - t0,
+            usedGpu: false,
+          };
+        }
+      } catch (err) {
+        this.log.warn('[AIClient] Omni pipeline failed, falling back to sequential:', err);
       }
     }
 
@@ -596,6 +699,45 @@ export class AIClient {
       } catch (err) {
         this.log.warn('[AIClient] GPU pipeline failed, falling back to cloud per-stage:', err);
         yield { event: 'error', data: { message: 'GPU pipeline failed, falling back to cloud', stage: 'stt', recoverable: true } };
+      }
+    }
+
+    // ── Try omni first (single call: STT+LLM+TTS combined, fastest) ──
+    if (profile.omni && profile.omni.length > 0) {
+      try {
+        yield { event: 'stage', data: { stage: 'stt', status: 'start' } };
+        const audioBuffer = audio instanceof Buffer ? audio : Buffer.from(await (audio as Blob).arrayBuffer());
+        const omniResult = await this.realtimeSpeech(
+          { audio: audioBuffer, instructions: systemPrompt, voice: profile.voice },
+          profile,
+        );
+        if (omniResult.transport === 'omni' && omniResult.responseText) {
+          const latency = omniResult.latencyMs ?? (Date.now() - t0);
+          yield { event: 'stage', data: { stage: 'stt', status: 'complete' } };
+          yield { event: 'transcript', data: { text: omniResult.userTranscript ?? '', provider: omniResult.provider, latencyMs: latency } };
+          providers.stt = omniResult.provider;
+
+          yield { event: 'stage', data: { stage: 'llm', status: 'start' } };
+          yield { event: 'stage', data: { stage: 'llm', status: 'complete' } };
+          yield { event: 'response', data: { text: omniResult.responseText, provider: omniResult.provider, latencyMs: latency } };
+          providers.llm = omniResult.provider;
+
+          yield { event: 'stage', data: { stage: 'tts', status: 'start' } };
+          yield { event: 'stage', data: { stage: 'tts', status: 'complete' } };
+          const audioData = omniResult.responseAudio ?? Buffer.alloc(0);
+          const ttsBase64 = audioData instanceof Buffer ? audioData.toString('base64') : Buffer.from(audioData).toString('base64');
+          yield { event: 'audio', data: { base64: ttsBase64, contentType: 'audio/wav', provider: omniResult.provider, latencyMs: latency } };
+          providers.tts = omniResult.provider;
+
+          yield { event: 'complete', data: {
+            timing: { stt_ms: 0, llm_ms: 0, tts_ms: 0, omni_ms: latency, total_ms: Date.now() - t0 },
+            usedGpu: false,
+            providers,
+          } };
+          return;
+        }
+      } catch (err) {
+        this.log.warn('[AIClient] Omni pipelineStream failed, falling back to sequential:', err instanceof Error ? err.message : err);
       }
     }
 
@@ -738,6 +880,154 @@ export class AIClient {
     this.log.log(`[AIClient] Instance ${instanceId} destroyed.`);
   }
 
+  /**
+   * Launch a GPU workload with intelligent provider selection.
+   * Uses price, reliability, and performance data to select the best provider.
+   * This is the unified API inspired by SkyPilot's approach.
+   */
+  async launchGpuWorkload(
+    workload: import('../types').WorkloadSpec,
+    credentialsMap?: Record<string, ProviderCredentials>,
+  ): Promise<DeployResult & { pricePerHour?: number; reliability?: number }> {
+    if (!this.gpuRegistry) {
+      throw new Error('[AIClient] No gpuRegistry configured. Pass gpuRegistry in AIClientOptions.');
+    }
+
+    // Get all available providers
+    const providerIds = ['vast', 'runpod', 'tensordock', 'modal'];
+    const providerScores: Array<{
+      providerId: string;
+      score: number;
+      pricePerHour: number;
+      reliability: number;
+      bootTimeSecs: number;
+    }> = [];
+
+    // Query each provider for pricing and availability
+    for (const providerId of providerIds) {
+      const client = this.gpuRegistry.get(providerId);
+      if (!client?.listOffers) continue;
+
+      const creds = credentialsMap?.[providerId] ?? await this._getEnvCredentials(providerId);
+      if (!creds) continue;
+
+      try {
+        const offers = await client.listOffers({
+          gpuTypes: workload.accelerator ? [workload.accelerator] : undefined,
+          region: workload.preferredRegions?.[0],
+          limit: 10,
+        }, creds);
+
+        if (offers.length === 0) continue;
+
+        // Filter by constraints
+        let eligibleOffers = offers.filter(o => {
+          if (workload.maxPricePerHour && o.pricePerHr > workload.maxPricePerHour) return false;
+          if (workload.memoryGb && o.vram < workload.memoryGb) return false;
+          if (!workload.allowSpot && o.spotPricePerHr && o.spotPricePerHr > 0) {
+            // If spot not allowed, prefer on-demand (higher pricePerHr)
+          }
+          return true;
+        });
+
+        if (eligibleOffers.length === 0) continue;
+
+        // Get the best (cheapest) offer
+        const bestOffer = eligibleOffers.reduce((best, o) => 
+          o.pricePerHr < best.pricePerHr ? o : best, eligibleOffers[0]);
+
+        // Calculate score (0-100)
+        const priceScore = Math.max(0, 100 - (bestOffer.pricePerHr / (workload.maxPricePerHour ?? 5)) * 100);
+        const reliabilityScore = (bestOffer.reliability ?? 0.5) * 100;
+        const bootTimeScore = Math.max(0, 100 - (client.bootTimeSecs / 600) * 100);
+        const score = priceScore * 0.4 + reliabilityScore * 0.3 + bootTimeScore * 0.3;
+
+        providerScores.push({
+          providerId,
+          score,
+          pricePerHour: bestOffer.pricePerHr,
+          reliability: bestOffer.reliability ?? 0.5,
+          bootTimeSecs: client.bootTimeSecs,
+        });
+
+        this.log.log(`[AIClient] Provider ${providerId}: $${bestOffer.pricePerHr.toFixed(3)}/hr, reliability=${(bestOffer.reliability ?? 0.5).toFixed(2)}, score=${score.toFixed(1)}`);
+      } catch (err) {
+        this.log.warn(`[AIClient] Failed to get offers from ${providerId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (providerScores.length === 0) {
+      throw new Error('[AIClient] No providers available for the specified workload');
+    }
+
+    // Sort by score (highest first)
+    providerScores.sort((a, b) => b.score - a.score);
+
+    // Try providers in order of score
+    const errors: string[] = [];
+    for (const { providerId, pricePerHour, reliability } of providerScores) {
+      const client = this.gpuRegistry.getOrThrow(providerId);
+      const creds = credentialsMap?.[providerId] ?? await this._getEnvCredentials(providerId);
+      if (!creds) continue;
+
+      try {
+        const spec: InstanceSpec = {
+          gpuTypes: workload.accelerator ? [workload.accelerator] : undefined,
+          storageGb: workload.storageGb,
+          dockerImage: workload.dockerImage,
+          env: workload.env,
+          ports: workload.expose,
+          region: workload.preferredRegions?.[0],
+          interruptible: workload.allowSpot,
+        };
+
+        this.log.log(`[AIClient] Launching workload on ${providerId} (score-based selection)...`);
+        const instance = await client.createInstance(spec, creds, this.userId);
+        this.deployedInstances.set(instance.instanceId, { provider: providerId, credentials: creds });
+
+        this.log.log(`[AIClient] Launched ${instance.instanceId} → ${instance.endpoint} on ${providerId}`);
+        return {
+          instanceId: instance.instanceId,
+          endpoint: instance.endpoint,
+          gpuType: instance.gpuType,
+          status: instance.status,
+          provider: providerId,
+          pricePerHour,
+          reliability,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`${providerId}: ${msg}`);
+        this.log.warn(`[AIClient] Failed to launch on ${providerId}: ${msg}`);
+      }
+    }
+
+    throw new Error(`[AIClient] All providers failed: ${errors.join('; ')}`);
+  }
+
+  /**
+   * Get credentials from environment variables for a provider.
+   */
+  private async _getEnvCredentials(providerId: string): Promise<ProviderCredentials | null> {
+    switch (providerId) {
+      case 'vast':
+        return process.env.VAST_API_KEY ? { apiKey: process.env.VAST_API_KEY } : null;
+      case 'runpod':
+        return process.env.RUNPOD_API_KEY ? { apiKey: process.env.RUNPOD_API_KEY } : null;
+      case 'tensordock':
+        return (process.env.TENSORDOCK_API_TOKEN && process.env.TENSORDOCK_AUTH_ID)
+          ? { apiKey: process.env.TENSORDOCK_API_TOKEN, authId: process.env.TENSORDOCK_AUTH_ID }
+          : null;
+      case 'modal':
+        if (process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET) {
+          return { apiKey: `${process.env.MODAL_TOKEN_ID}:${process.env.MODAL_TOKEN_SECRET}` };
+        }
+        return process.env.MODAL_API_KEY ? { apiKey: process.env.MODAL_API_KEY } : null;
+      default:
+        return null;
+    }
+  }
+
   // ── Private helpers ───────────────────────────────────────────────────────
 
   private resolveEffectiveProfile(override?: AIProfile | PresetName): AIProfile {
@@ -826,16 +1116,13 @@ export class AIClient {
     endpoint?: string,
   ): Promise<T> {
     let base = getter(providerId);
-    const apiKey = await this.resolveKey(providerId);
+    const profileKeys = profile.keys as Record<string, string> | undefined;
+    const apiKey = profileKeys?.[providerId] ?? await resolveApiKey(providerId);
     if (apiKey && base.withApiKey) base = base.withApiKey(apiKey);
     // Per-entry endpoint override; fall back to global gpuEndpoint for gpu provider
     const effectiveEndpoint = endpoint ?? ((providerId as string) === 'gpu' ? profile.gpuEndpoint : undefined);
     if (effectiveEndpoint && base.withEndpoint) base = base.withEndpoint(effectiveEndpoint);
     return base;
-  }
-
-  private async resolveKey(providerId: ProviderId): Promise<string | null> {
-    return resolveApiKey(providerId);
   }
 
   /**

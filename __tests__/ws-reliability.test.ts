@@ -58,11 +58,11 @@ describe('WebSocket State Management', () => {
 
     it('should catch speculative cache errors', () => {
       const source = readSource('server/ws-server.ts');
-      // Every .speculate() call should be followed by .catch() within the same statement
-      const matches = [...source.matchAll(/speculativeCache\.speculate\([^;]+/g)];
+      const matches = [...source.matchAll(/speculativeCache\.speculate\([^)]+\)/g)];
       expect(matches.length).toBeGreaterThan(0);
       for (const match of matches) {
-        expect(match[0]).toContain('.catch(');
+        const before = source.slice(Math.max(0, match.index! - 30), match.index!);
+        expect(before + match[0]).toMatch(/try\s*\{.*speculativeCache\.speculate|\.speculate\([^)]+\)\s*;\s*\}\s*catch|\.speculate\([^)]+\)\.catch\(/);
       }
     });
   });
