@@ -16,6 +16,15 @@ export { WebRTCTransport } from './transport-webrtc';
 // ── Emitter ────────────────────────────────────────────────────────────────
 export { TypedEmitter } from './emitter';
 
+// ── OpenAI Realtime WebRTC ─────────────────────────────────────────────────
+export { OpenAIRealtimeClient } from './openai-realtime';
+export type {
+  NetworkQuality,
+  ConnectionPhase,
+  OpenAIRealtimeOptions,
+  OpenAIRealtimeResponse,
+} from './openai-realtime';
+
 // ── Errors ─────────────────────────────────────────────────────────────────
 export { SpeechSDKError } from './errors';
 export type { SpeechErrorCode } from './errors';
@@ -31,6 +40,10 @@ export {
   combineWavChunksToBase64,
   buildSilentWav,
 } from './audio';
+
+// ── SSE Frame Parser
+export { SSEFrameParser } from './sse-frame-parser';
+export type { SSEFrame } from './sse-frame-parser';
 
 // ── Streaming Audio ───────────────────────────────────────────────────────
 export { StreamingAudioPlayer } from './streaming-audio';

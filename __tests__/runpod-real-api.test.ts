@@ -86,8 +86,9 @@ describe.skipIf(!hasKeys)('RunpodClient — Read-Only (Real API)', () => {
     expect(RUNPOD_GPU_TYPE_MAP['RTX 4090']).toBe('NVIDIA GeForce RTX 4090');
     expect(RUNPOD_GPU_TYPE_MAP['A100']).toBe('NVIDIA A100 80GB PCIe');
     expect(RUNPOD_GPU_TYPE_MAP['RTX A5000']).toBe('NVIDIA RTX A5000');
-    // Legacy mappings → cheapest alternative
-    expect(RUNPOD_GPU_TYPE_MAP['RTX 3090']).toBe('NVIDIA GeForce RTX 4090');
+    expect(RUNPOD_GPU_TYPE_MAP['RTX 3090']).toBe('NVIDIA GeForce RTX 3090');
+    // Legacy fallback mappings (GPUs no longer on RunPod)
+    expect(RUNPOD_GPU_TYPE_MAP['RTX 4080']).toBe('NVIDIA GeForce RTX 4090');
   });
 
   it('GPU_FALLBACK has at least 3 GPU types', () => {

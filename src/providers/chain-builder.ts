@@ -33,16 +33,30 @@ export interface UserProviderSettings {
   systemStt?: { provider: string; model: string };
 }
 
+const PROVIDER_ENV_KEYS: Partial<Record<ProviderId, string>> = {
+  openai: 'OPENAI_API_KEY',
+  groq: 'GROQ_API_KEY',
+  openrouter: 'OPENROUTER_API_KEY',
+  fireworks: 'FIREWORKS_API_KEY',
+  modal: 'MODAL_API_KEY',
+  ollama: '',
+  gpu: '',
+  'vast-serverless': '',
+};
+
 export async function resolveApiKey(providerId: ProviderId): Promise<string | null> {
   const vault = getVault();
-  if (!vault) {
-    throw new Error(`[resolveApiKey] Vault not initialized. Set VAULT_MASTER_KEY and VAULT_PATH in .env`);
+  if (vault) {
+    try {
+      const key = await vault.retrieve(`${providerId}:apiKey`);
+      if (key) return key;
+    } catch {
+      // fall through to env var
+    }
   }
-  try {
-    return await vault.retrieve(`${providerId}:apiKey`);
-  } catch {
-    return null;
-  }
+  const envKey = PROVIDER_ENV_KEYS[providerId];
+  if (envKey === undefined) return null;
+  return envKey ? (process.env[envKey] ?? null) : null;
 }
 
 export function buildFallbackChain(

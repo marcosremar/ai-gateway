@@ -31,7 +31,7 @@ import { loadEnv, requireEnv, timed, waitFor } from './helpers';
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 
-const hasKeys = !!process.env.RUNPOD_API_KEY && !!process.env.VAST_API_KEY;
+const hasKeys = !!process.env.RUNPOD_API_KEY && !!process.env.VAST_API_KEY && !process.env.SKIP_GPU_TESTS;
 
 let runpodCreds: ProviderCredentials;
 let vastCreds: ProviderCredentials;

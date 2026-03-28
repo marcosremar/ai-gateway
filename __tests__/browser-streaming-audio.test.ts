@@ -38,8 +38,10 @@ const mockCreateBuffer = vi.fn((channels: number, length: number, sampleRate: nu
   getChannelData: mockGetChannelData,
 }));
 
+const mockLinearRampToValueAtTime = vi.fn();
+
 const mockGainNode = {
-  gain: { setValueAtTime: mockSetValueAtTime },
+  gain: { setValueAtTime: mockSetValueAtTime, linearRampToValueAtTime: mockLinearRampToValueAtTime },
   connect: mockConnect,
   disconnect: mockDisconnect,
 };
@@ -70,6 +72,8 @@ class MockAudioContext {
 
 // Install global mock
 vi.stubGlobal('AudioContext', MockAudioContext);
+
+const flushMicrotasks = () => new Promise(resolve => setTimeout(resolve, 0));
 
 // ── Helper: create a minimal WAV chunk ───────────────────────────────────────
 
@@ -185,36 +189,40 @@ describe('StreamingAudioPlayer', () => {
       expect(mockCreateBuffer).not.toHaveBeenCalled();
     });
 
-    it('should process 16-bit WAV chunk', () => {
+    it('should process 16-bit WAV chunk', async () => {
       const chunk = makeWavChunk(16000, 16, 1, 100);
       player.feedChunk(chunk);
+      await flushMicrotasks();
       expect(mockCreateBuffer).toHaveBeenCalled();
       expect(mockCreateBufferSource).toHaveBeenCalled();
     });
 
-    it('should start playing on first valid chunk', () => {
+    it('should start playing on first valid chunk', async () => {
       const chunk = makeWavChunk();
       mockCurrentTime = 1.0;
       player.feedChunk(chunk);
+      await flushMicrotasks();
       expect(mockStart).toHaveBeenCalledWith(expect.any(Number));
       const startTime = (mockStart.mock.calls[0] as number[])[0];
       expect(startTime).toBeGreaterThan(1.0);
     });
 
-    it('should fire onStarted callback on first chunk', () => {
+    it('should fire onStarted callback on first chunk', async () => {
       const onStarted = vi.fn();
       player.onStarted = onStarted;
       const chunk = makeWavChunk();
       player.feedChunk(chunk);
+      await flushMicrotasks();
       expect(onStarted).toHaveBeenCalledOnce();
     });
 
-    it('should not fire onStarted on subsequent chunks', () => {
+    it('should not fire onStarted on subsequent chunks', async () => {
       const onStarted = vi.fn();
       player.onStarted = onStarted;
       const chunk = makeWavChunk();
       player.feedChunk(chunk);
       player.feedChunk(chunk);
+      await flushMicrotasks();
       expect(onStarted).toHaveBeenCalledTimes(1);
     });
 
@@ -232,9 +240,10 @@ describe('StreamingAudioPlayer', () => {
       expect(mockCreateBuffer).not.toHaveBeenCalled();
     });
 
-    it('should handle stereo chunks', () => {
+    it('should handle stereo chunks', async () => {
       const chunk = makeWavChunk(44100, 16, 2, 100);
       player.feedChunk(chunk);
+      await flushMicrotasks();
       expect(mockCreateBuffer).toHaveBeenCalledWith(2, expect.any(Number), 44100);
     });
 
@@ -289,9 +298,10 @@ describe('StreamingAudioPlayer', () => {
       expect(mockDisconnect).toHaveBeenCalled();
     });
 
-    it('should stop all scheduled sources', () => {
+    it('should stop all scheduled sources', async () => {
       const chunk = makeWavChunk();
       player.feedChunk(chunk);
+      await flushMicrotasks();
       player.destroy();
       expect(mockStop).toHaveBeenCalled();
     });

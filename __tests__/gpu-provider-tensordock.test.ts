@@ -411,7 +411,7 @@ describe('TensordockClient', () => {
       mockCandidatesAndCreate();
 
       await clientWithPersist.createInstance({ ...spec, machineKey: 'tensordockInstance' as const }, creds, 'user-1');
-      expect(onPersist).toHaveBeenCalledWith('user-1', 'mySlot', expect.anything());
+      expect(onPersist).toHaveBeenCalledWith('user-1', 'tensordockInstance', expect.anything());
     });
 
     it('throws when all GPU types exhausted', async () => {

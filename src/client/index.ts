@@ -26,8 +26,11 @@ export type {
   ImageResult,
   OmniResult,
   RealtimeResult,
+  RealtimeSpeechInput,
+  RealtimeSpeechResult,
   PipelineResult,
   DeployResult,
+  WorkloadLaunchResult,
   WarmupResult,
   WarmupEntry,
 } from './types';

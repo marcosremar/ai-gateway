@@ -43,6 +43,8 @@ const PHRASES = [
 
 // ─── Audio generation via gTTS ───────────────────────────────────────────────
 
+const HAS_BUN = typeof Bun !== 'undefined';
+
 // Resolve Python from .venv if available, fall back to system python3
 const PYTHON = (() => {
   const venv = new URL('../../.venv/bin/python3', import.meta.url).pathname;
@@ -280,7 +282,7 @@ const hasDeepgram = !!process.env.DEEPGRAM_API_KEY;
 const hasAtLeastTwo = hasOpenAI && hasDeepgram;
 const hasOpenRouter = !!process.env.OPENROUTER_API_KEY;
 
-describe.skipIf(!hasAtLeastTwo)('STT Verifier — Integration Benchmark (Real APIs)', () => {
+describe.skipIf(!hasAtLeastTwo || !HAS_BUN)('STT Verifier — Integration Benchmark (Real APIs)', () => {
   let allResults: PhraseResult[] = [];
 
   const activeProviders: STTVerifierProviderEntry[] = [];
@@ -329,7 +331,7 @@ describe.skipIf(!hasAtLeastTwo)('STT Verifier — Integration Benchmark (Real AP
   });
 });
 
-describe.skipIf(!hasOpenAI || !hasDeepgram)('STT Verifier — Embedding Fallback Trigger (Real APIs)', () => {
+describe.skipIf(!hasOpenAI || !hasDeepgram || !HAS_BUN)('STT Verifier — Embedding Fallback Trigger (Real APIs)', () => {
   it('detects low-confidence Jaccard and triggers embedding fallback', async () => {
     // Use a very high embeddingFallbackThreshold to force the embedding path
     const audio = await generateGTTS('Bonjour, comment allez-vous aujourd\'hui?', 'fr');

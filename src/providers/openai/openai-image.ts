@@ -64,8 +64,8 @@ export class OpenAIImageProvider implements ImageProvider {
       body.response_format = 'b64_json';
     }
 
-    // dall-e-3 supports quality param
-    if (model.startsWith('dall-e')) {
+    // dall-e-3 supports quality param (dall-e-2 does not)
+    if (model.startsWith('dall-e-3')) {
       body.quality = 'standard';
     }
 

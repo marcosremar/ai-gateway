@@ -7,7 +7,7 @@
  */
 
 import type { Transport, SSEConfig, ProcessingStage, SpeechResponse, TimingInfo } from './types';
-import { float32ToWavBuffer, combineWavChunksToBase64 } from './audio';
+import { float32ToWavBuffer } from './audio';
 import { createLogger } from './logger';
 
 const DEFAULT_HEALTH_TIMEOUT = 15_000;
@@ -204,7 +204,13 @@ export class SSETransport implements Transport {
         await this.parseSSEStream(res.body);
       } else {
         // JSON response (direct GPU /api/text)
-        const data = await res.json();
+        const text = await res.text();
+        if (!text) {
+          this.log.warn('Empty response from server');
+          this.onError?.('Empty response from server');
+          return;
+        }
+        const data = JSON.parse(text);
         this.onResponse?.({
           text: data.response || trimmed,
           audio: data.audio_base64 || '',
@@ -241,17 +247,48 @@ export class SSETransport implements Transport {
 
     const reader = body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
+    // Raw byte buffer for mixed text/binary parsing
+    let rawBuffer = new Uint8Array(0);
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split('\n\n');
-      buffer = events.pop() || '';
+      // Append new bytes to raw buffer
+      const merged = new Uint8Array(rawBuffer.length + value.length);
+      merged.set(rawBuffer);
+      merged.set(value, rawBuffer.length);
+      rawBuffer = merged;
 
-      for (const eventBlock of events) {
+      // Process buffer: detect binary frames (\x00AUDI + 4-byte length + payload)
+      // and SSE text events (terminated by \n\n)
+      while (rawBuffer.length > 0) {
+        // Check for binary audio frame: starts with \x00AUDI (5 bytes)
+        if (rawBuffer[0] === 0x00 && rawBuffer.length >= 9 &&
+            rawBuffer[1] === 0x41 && rawBuffer[2] === 0x55 &&
+            rawBuffer[3] === 0x44 && rawBuffer[4] === 0x49) {
+          // Read uint32LE length at offset 5
+          const len = rawBuffer[5] | (rawBuffer[6] << 8) | (rawBuffer[7] << 16) | (rawBuffer[8] << 24);
+          if (rawBuffer.length < 9 + len) break; // need more data
+          // Extract binary audio
+          const audioBytes = rawBuffer.slice(9, 9 + len);
+          audioChunks.push(audioBytes);
+          this.onAudioChunk?.(audioBytes);
+          rawBuffer = rawBuffer.slice(9 + len);
+          continue;
+        }
+
+        // Not a binary frame — parse as SSE text
+        // Find the next \n\n delimiter
+        const text = decoder.decode(rawBuffer, { stream: true });
+        const doubleNewline = text.indexOf('\n\n');
+        if (doubleNewline === -1) break; // need more data
+
+        const eventBlock = text.slice(0, doubleNewline);
+        // Calculate byte length of consumed text (re-encode to know exact bytes)
+        const consumedBytes = new TextEncoder().encode(text.slice(0, doubleNewline + 2));
+        rawBuffer = rawBuffer.slice(consumedBytes.length);
+
         if (!eventBlock.trim()) continue;
 
         const lines = eventBlock.split('\n');
@@ -283,17 +320,23 @@ export class SSETransport implements Transport {
               this.onStageChange?.('tts');
               break;
 
+            // Legacy base64 audio (from GPU-direct or older backends)
             case 'audio': {
-              const binaryStr = atob(data.chunk);
-              const bytes = new Uint8Array(binaryStr.length);
-              for (let i = 0; i < binaryStr.length; i++) {
-                bytes[i] = binaryStr.charCodeAt(i);
+              if (data.chunk) {
+                const binaryStr = atob(data.chunk);
+                const bytes = new Uint8Array(binaryStr.length);
+                for (let i = 0; i < binaryStr.length; i++) {
+                  bytes[i] = binaryStr.charCodeAt(i);
+                }
+                audioChunks.push(bytes);
+                this.onAudioChunk?.(bytes);
               }
-              audioChunks.push(bytes);
-              // Emit streaming audio chunk
-              this.onAudioChunk?.(bytes);
               break;
             }
+
+            case 'audio-size':
+              // Binary audio already handled above — this is just a size marker
+              break;
 
             case 'complete':
               state.responseText = data.response || state.responseText;
@@ -306,15 +349,33 @@ export class SSETransport implements Transport {
               throw new Error(data.message || 'Server error');
           }
         } catch (parseErr: unknown) {
-          // Re-throw server errors (from 'error' event case above).
-          // Only swallow JSON parse failures for malformed SSE data.
           if (parseErr instanceof SyntaxError) continue;
           throw parseErr;
         }
       }
     }
 
-    const audioBase64 = combineWavChunksToBase64(audioChunks);
+    // Combine audio chunks into base64 for the response.
+    // Audio was already played via onAudioChunk (streaming), but we include
+    // the base64 so the avatar can build a viseme timeline from the audio duration
+    // (speakAudio uses audio length to time lip-sync). The avatar's AudioService
+    // already played the audio — speakAudio will detect this and only set visemes.
+    let audioBase64 = '';
+    if (audioChunks.length > 0) {
+      const totalLen = audioChunks.reduce((s, c) => s + c.length, 0);
+      const combined = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const chunk of audioChunks) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+      }
+      // Convert to base64
+      let binary = '';
+      for (let i = 0; i < combined.length; i++) {
+        binary += String.fromCharCode(combined[i]);
+      }
+      audioBase64 = btoa(binary);
+    }
 
     this.onResponse?.({
       text: state.responseText,

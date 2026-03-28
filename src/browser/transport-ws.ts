@@ -149,7 +149,7 @@ export class WebSocketTransport implements Transport {
     this.currentResponse = '';
 
     this.log.debug('sending text:', trimmed.slice(0, 50));
-    this.ws!.send(JSON.stringify({ type: 'tts', text: trimmed }));
+    this.ws!.send(JSON.stringify({ type: 'text', text: trimmed }));
   }
 
   /** Update the auth token (used after token refresh). */

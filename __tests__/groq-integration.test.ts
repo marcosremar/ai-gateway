@@ -48,8 +48,8 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq TTS (Real API)', () => {
     const { result, ms } = await timed(() =>
       groqTTS.synthesize({
         input: 'Hello, this is a test.',
-        model: 'playai-tts',
-        voice: 'Fritz-PlayAI',
+        model: 'canopylabs/orpheus-v1-english',
+        voice: 'autumn',
         responseFormat: 'wav',
       }),
     );

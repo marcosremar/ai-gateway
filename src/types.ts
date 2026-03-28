@@ -4,6 +4,7 @@ export type AutoScaleRoute = 'llm' | 's2s';
 export type GpuBootState = 'idle' | 'booting' | 'ready';
 export type ScaleTrigger = 'sessions' | 'latency' | 'manual' | 'predictive';
 export type GpuProvider = 'tensordock' | 'runpod' | 'vast' | 'modal' | 'skypilot';
+export type { GpuInstance } from './gpu-providers/types';
 
 /**
  * Per-stage timeout config (ms). Each stage of the boot pipeline has a hard
@@ -76,6 +77,39 @@ export interface GpuTierConfig {
   stageTimeouts?: StageTimeouts;
   /** Optional region filter (e.g. 'US', 'EU', 'CA' for Vast; 'US-TX-3' for RunPod; city for TensorDock) */
   region?: string;
+}
+
+/**
+ * Unified workload specification for GPU provisioning.
+ * Inspired by SkyPilot's approach to abstract away cloud provider specifics.
+ */
+export interface WorkloadSpec {
+  /** Accelerator type (e.g., "A100", "H100", "L40S", "RTX4090") */
+  accelerator?: string;
+  /** Minimum GPU memory in GB */
+  memoryGb?: number;
+  /** Minimum storage in GB */
+  storageGb?: number;
+  /** Preferred regions (e.g., ["us-east-1", "eu-west-1"]) */
+  preferredRegions?: string[];
+  /** Maximum price per hour in USD */
+  maxPricePerHour?: number;
+  /** Whether to allow spot/preemptible instances */
+  allowSpot?: boolean;
+  /** Whether the workload is fault-tolerant (can handle interruptions) */
+  faultTolerant?: boolean;
+  /** Maximum acceptable boot time in seconds */
+  maxBootTime?: number;
+  /** Docker image to run */
+  dockerImage?: string;
+  /** Environment variables to set */
+  env?: Record<string, string>;
+  /** SSH public key for access */
+  sshPublicKey?: string;
+  /** Ports to expose (format: "port/protocol") */
+  expose?: string[];
+  /** Storage volumes to mount */
+  volumes?: { mountPath: string; sizeGb: number }[];
 }
 
 export interface AutoScalerConfig {

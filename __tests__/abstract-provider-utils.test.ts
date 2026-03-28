@@ -29,6 +29,7 @@ describe('retryWithBackoff', () => {
   it('throws after maxRetries exhausted', async () => {
     const fn = vi.fn(async () => { throw new Error('permanent'); });
     const promise = retryWithBackoff(fn, { maxRetries: 1, baseDelayMs: 100 });
+    promise.catch(() => {}); // silence unhandled rejection before timers advance
     await vi.runAllTimersAsync();
     await expect(promise).rejects.toThrow('permanent');
     expect(fn).toHaveBeenCalledTimes(2); // initial + 1 retry
@@ -45,6 +46,7 @@ describe('retryWithBackoff', () => {
       baseDelayMs: 100,
       shouldRetry: (err) => (err as Error).message === 'retry',
     });
+    promise.catch(() => {}); // silence unhandled rejection
     await vi.runAllTimersAsync();
     await expect(promise).rejects.toThrow('stop');
     expect(fn).toHaveBeenCalledTimes(2);
@@ -59,6 +61,7 @@ describe('retryWithBackoff', () => {
       maxDelayMs: 10_000,
     });
     // Delays should be: 1000, 2000, 4000 (capped by maxDelayMs if needed)
+    promise.catch(() => {}); // silence unhandled rejection
     await vi.runAllTimersAsync();
     await expect(promise).rejects.toThrow('fail');
     expect(fn).toHaveBeenCalledTimes(4);
@@ -72,6 +75,7 @@ describe('retryWithBackoff', () => {
       growth: 10,
       maxDelayMs: 15_000,
     });
+    promise.catch(() => {}); // silence unhandled rejection
     await vi.runAllTimersAsync();
     await expect(promise).rejects.toThrow('fail');
     expect(fn).toHaveBeenCalledTimes(4);

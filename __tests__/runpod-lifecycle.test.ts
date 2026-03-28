@@ -35,7 +35,7 @@ const ULTRALIGHT_IMAGE = 'marcosremar/parle-s2s-ultralight:latest';
 loadEnv();
 const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const HAS_KEYS = !!(RUNPOD_API_KEY && GROQ_API_KEY);
+const HAS_KEYS = !!(RUNPOD_API_KEY && GROQ_API_KEY) && !process.env.SKIP_GPU_TESTS;
 
 // ─── Sequential Lifecycle Tests ─────────────────────────────────────────────
 

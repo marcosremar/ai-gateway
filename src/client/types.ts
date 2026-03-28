@@ -145,6 +145,20 @@ export interface DeployResult {
   provider: string;
 }
 
+/** Result of launching a GPU workload via AIClient.launchGpuWorkload(). */
+export interface WorkloadLaunchResult extends DeployResult {
+  pricePerHour?: number;
+  reliability?: number;
+}
+
+/** Result of launching a GPU workload via AIClient.launchGpuWorkload(). */
+export interface WorkloadLaunchResult extends DeployResult {
+  /** Estimated price per hour in USD */
+  pricePerHour?: number;
+  /** Provider reliability score (0-1) */
+  reliability?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Result Types
 // ---------------------------------------------------------------------------
@@ -193,6 +207,52 @@ export interface RealtimeResult {
   expiresAt: number;
   provider: string;
   model: string;
+}
+
+/** Input for `realtimeSpeech()` — transport-agnostic realtime connection. */
+export interface RealtimeSpeechInput {
+  /** Audio input — when provided with omni profile, does single audio call. */
+  audio?: Buffer | Blob;
+  /** Text input — alternative to audio for omni mode. */
+  text?: string;
+  /** SDP offer from browser. When provided, does WebRTC SDP exchange. */
+  sdpOffer?: string;
+  model?: string;
+  voice?: string;
+  instructions?: string;
+  turnDetection?: Record<string, unknown>;
+  noiseReduction?: { type: string } | boolean;
+}
+
+/**
+ * Result from `realtimeSpeech()` — the profile decides the transport.
+ *
+ * - `transport: 'webrtc'` → `sdpAnswer` is set
+ * - `transport: 'session'` → `clientSecret` + `expiresAt` are set
+ * - `transport: 'omni'` → `responseText` + optionally `responseAudio` are set
+ */
+export interface RealtimeSpeechResult {
+  transport: 'webrtc' | 'session' | 'omni';
+  /** SDP answer — present when `transport === 'webrtc'` */
+  sdpAnswer?: string;
+  /** Ephemeral session token — present when `transport === 'session'` */
+  clientSecret?: string;
+  expiresAt?: number;
+  /** LLM text response — present when `transport === 'omni'` */
+  responseText?: string;
+  /** TTS audio response — present when `transport === 'omni'` */
+  responseAudio?: Buffer;
+  /** Base64-encoded audio — present when `transport === 'omni'` */
+  audioBase64?: string;
+  /** User's speech transcript — present when `transport === 'omni'` with audio input */
+  userTranscript?: string;
+  usage?: { promptTokens?: number; completionTokens?: number };
+  provider: string;
+  model: string;
+  voice: string;
+  latencyMs?: number;
+  /** Whether a fallback provider was used (omni transport only) */
+  fallbackUsed?: boolean;
 }
 
 export interface PipelineResult {

@@ -178,13 +178,11 @@ describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI Realtime (Real API)', () =>
   });
 
   it('supports noise reduction config', async () => {
-
-
     const session = await realtime.createSession({
       model: 'gpt-4o-mini-realtime-preview',
       voice: 'sage',
-      inputAudioFormat: 'pcm16',
-      outputAudioFormat: 'pcm16',
+      inputAudioFormat: 'audio/pcm' as any,
+      outputAudioFormat: 'audio/pcm' as any,
       noiseReduction: { type: 'near_field' },
     });
 

@@ -62,12 +62,17 @@ export class StreamingAudioPlayer {
 
     this.audioCtx = new AudioContext();
     this.gainNode = this.audioCtx.createGain();
+    // Start at zero to prevent any click/pop on AudioContext creation
+    this.gainNode.gain.setValueAtTime(0, this.audioCtx.currentTime);
     this.destinationNode = this.audioCtx.createMediaStreamDestination();
 
-    // Route: source → gain → destination (for MediaStream)
-    // Also connect gain → audioCtx.destination (for speaker output)
-    this.gainNode.connect(this.destinationNode);
+    // Route: source → gain → speakers (volume-controlled)
+    //         source → destinationNode (unity gain for lip-sync MediaStream)
+    // This keeps the MediaStream at natural volume so HeadAudio gets
+    // consistent amplitude regardless of the user's volume setting.
     this.gainNode.connect(this.audioCtx.destination);
+    // Lip-sync stream: bypass gainNode — connect sources directly at unity gain
+    // We'll connect sources to destinationNode in scheduleBuffer instead.
 
     this.started = false;
     this.ended = false;
@@ -197,9 +202,19 @@ export class StreamingAudioPlayer {
 
   /**
    * Signal that no more chunks will arrive.
-   * The player will fire onEnded after all scheduled buffers finish.
+   * Applies a short fade-out to prevent click/pop at the end,
+   * then fires onEnded after all scheduled buffers finish.
    */
   finalize(): void {
+    // Apply fade-out ramp before the last scheduled audio ends.
+    // This prevents the click/pop when audio abruptly stops.
+    if (this.gainNode && this.audioCtx && this.nextStartTime > this.audioCtx.currentTime) {
+      const fadeOutMs = 0.02; // 20ms
+      const endTime = this.nextStartTime;
+      this.gainNode.gain.setValueAtTime(this.targetVolume, Math.max(endTime - fadeOutMs, this.audioCtx.currentTime));
+      this.gainNode.gain.linearRampToValueAtTime(0, endTime);
+    }
+
     // The end detection happens via activeSources count
     // If all sources already ended (or no chunks were ever scheduled), fire now
     if (this.activeSources === 0) {
@@ -347,9 +362,27 @@ export class StreamingAudioPlayer {
       }
     }
 
+    // Apply PCM-level fade-in on the first chunk to eliminate click/pop.
+    // TTS models (Kokoro, etc.) often start with high-amplitude samples.
+    // Modifying the buffer directly ensures both speakers and lip-sync
+    // MediaStream receive the faded audio.
+    if (!this.started) {
+      const fadeInSamples = Math.min(Math.floor(format.sampleRate * 0.015), framesPerChannel); // 15ms
+      for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+        const channelData = buffer.getChannelData(ch);
+        for (let i = 0; i < fadeInSamples; i++) {
+          channelData[i] *= i / fadeInSamples;
+        }
+      }
+    }
+
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(gain);
+    // Also connect to MediaStream destination at unity gain for lip-sync analysis
+    if (this.destinationNode) {
+      source.connect(this.destinationNode);
+    }
 
     // Schedule the chunk
     if (!this.started) {
@@ -357,7 +390,7 @@ export class StreamingAudioPlayer {
       this.nextStartTime = ctx.currentTime + 0.05;
       this.started = true;
 
-      // Fade in over ~50ms to eliminate the click/pop at playback start
+      // Ramp gain from 0 to target as an extra safety net
       gain.gain.setValueAtTime(0, ctx.currentTime);
       gain.gain.linearRampToValueAtTime(this.targetVolume, this.nextStartTime);
 

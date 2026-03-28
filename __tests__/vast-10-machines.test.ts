@@ -6,7 +6,8 @@
  *
  * Goal: gather real-world data to improve the ai-gateway Vast.ai client.
  *
- * Run: VAST_API_KEY=<key> bunx vitest run __tests__/vast-10-machines.test.ts --reporter=verbose
+ * Run: VAST_API_KEY=<key> SKIP_GPU_TESTS=1 bunx vitest run __tests__/vast-10-machines.test.ts --reporter=verbose
+ * Set SKIP_GPU_TESTS=1 to skip (default when running full suite)
  */
 
 import { describe, it, expect, afterAll } from 'vitest';
@@ -206,7 +207,7 @@ function printReport(results: MachineResult[]): void {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe('Vast.ai 10-Machine Stress Test', () => {
+describe.skipIf(!VAST_API_KEY || !!process.env.SKIP_GPU_TESTS)('Vast.ai 10-Machine Stress Test', () => {
   const creds: ProviderCredentials = { apiKey: VAST_API_KEY || '' };
   const client = new VastClient();
 

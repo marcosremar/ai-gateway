@@ -468,22 +468,19 @@ describe('Fallback chain: tier 0 → tier 1 on failure (Task #10)', () => {
     expect(bootingTier!.tierIndex).toBe(1);
   });
 
-  it('should skip tiers in cooldown and try the next one', async () => {
+  it('should boot a tier when sessions reach threshold after reset', async () => {
     const tiers = [makeTier('tensordock', 0), makeTier('runpod', 1)];
     const config = makeConfig({ threshold: 1, tiers });
     const { autoscaler } = setupAutoscaler(sessionResolver);
 
-    // Put tier 0 in cooldown manually
-    const pool = autoscaler.getPoolStatus(USER);
-    // Force tier states so tier 0 is in cooldown
     autoscaler.resetGpuState(USER);
 
     sessionResolver.dbSessionCount = 1;
-    // First call initializes states from empty — both idle
     await autoscaler.getAutoScaleDecision(USER, config);
-    // Tier 0 should start booting
+    // Engine picks the best tier by score (price/reliability), not necessarily tier 0
     const pool2 = autoscaler.getPoolStatus(USER);
-    expect(pool2[0]?.state).toBe('booting');
+    const bootingTier = pool2.find(t => t.state === 'booting');
+    expect(bootingTier).toBeDefined();
   });
 
   it('should not boot anything when no sessions reach threshold', async () => {
@@ -504,11 +501,12 @@ describe('Fallback chain: tier 0 → tier 1 on failure (Task #10)', () => {
 
     sessionResolver.dbSessionCount = 1;
     await autoscaler.getAutoScaleDecision(USER, config);
-    // Tier 0 is booting. Second call should NOT boot tier 1 in parallel.
+    // One tier is booting. Second call should NOT boot another in parallel.
     const decision = await autoscaler.getAutoScaleDecision(USER, config);
     expect(decision.bootingTiers).toBe(1);
     const pool = autoscaler.getPoolStatus(USER);
-    expect(pool[1]?.state).toBe('idle');
+    expect(pool.filter(t => t.state === 'booting').length).toBe(1);
+    expect(pool.filter(t => t.state === 'idle').length).toBe(1);
   });
 
   it('should keep using ready tier even after sessions increase', async () => {
@@ -516,10 +514,11 @@ describe('Fallback chain: tier 0 → tier 1 on failure (Task #10)', () => {
     const config = makeConfig({ threshold: 1, tiers });
     const { autoscaler } = setupAutoscaler(sessionResolver);
 
-    // Boot + ready tier 0
+    // Boot + ready whichever tier the engine selects
     sessionResolver.dbSessionCount = 1;
     await autoscaler.getAutoScaleDecision(USER, config);
-    healthyEndpoints.add(tiers[0].endpoint!);
+    // Add all endpoints so the booting tier's health probe succeeds
+    tiers.forEach(t => healthyEndpoints.add(t.endpoint!));
     await autoscaler.getAutoScaleDecision(USER, config);
 
     // Sessions jump to 10 — should still use the single ready tier, NOT boot more
@@ -676,7 +675,7 @@ describe('Server restart recovery', () => {
     const settingsStore = new MockSettingsStore();
     const config = makeConfig({
       threshold: 1,
-      tiers: [makeTier('tensordock', 0), makeTier('runpod', 1)],
+      tiers: [makeTier('runpod', 0), makeTier('runpod', 1)],
     });
 
     const makeAutoscaler = () => createAutoscaler({
