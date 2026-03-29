@@ -25,6 +25,15 @@ export type {
   OpenAIRealtimeResponse,
 } from './openai-realtime';
 
+// ── Unified Client (Realtime + Pipeline) ──────────────────────────────
+export { UnifiedSpeechClient } from './unified-client';
+export type {
+  UnifiedSpeechClientConfig,
+  UnifiedSpeechClientEventMap,
+  UnifiedResponse,
+  ActiveTransport,
+} from './unified-client';
+
 // ── Errors ─────────────────────────────────────────────────────────────────
 export { SpeechSDKError } from './errors';
 export type { SpeechErrorCode } from './errors';
