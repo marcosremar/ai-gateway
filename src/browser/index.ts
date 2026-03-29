@@ -34,6 +34,9 @@ export type {
   ActiveTransport,
 } from './unified-client';
 
+// ── Realtime Lipsync (WebRTC audio → viseme estimation) ──────────────────
+export { RealtimeLipsyncAnalyser } from './realtime-lipsync';
+
 // ── Errors ─────────────────────────────────────────────────────────────────
 export { SpeechSDKError } from './errors';
 export type { SpeechErrorCode } from './errors';
