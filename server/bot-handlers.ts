@@ -636,7 +636,23 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
     } else {
       console.log(`[bot] /join OK: ${JSON.stringify(joinBody)}`);
       setBotState({ status: 'joined' });
-      broadcastWs({ type: 'bot:status', status: 'in_meeting', message: 'Bot joined meeting' });
+      broadcastWs({ type: 'bot:status', status: 'joining', message: 'Bot connecting to meeting...' });
+      // Wait for bot to actually enter the meeting by checking if audio chunks arrive.
+      // /version returns meeting_active even when stuck in lobby, so it's unreliable.
+      // Audio streaming only starts when the bot is truly inside the meeting.
+      (async () => {
+        const { getBotAudioChunks } = await import('./ws-server');
+        const startChunks = getBotAudioChunks();
+        for (let i = 0; i < 90; i++) { // up to 3 min
+          await new Promise(r => setTimeout(r, 2000));
+          if (botState.status !== 'joined') break;
+          if (getBotAudioChunks() > startChunks + 5) {
+            broadcastWs({ type: 'bot:status', status: 'in_meeting', message: 'Bot joined meeting' });
+            console.log(`[bot] Bot confirmed in meeting (audio chunks: ${getBotAudioChunks() - startChunks})`);
+            break;
+          }
+        }
+      })().catch(() => {});
       // Predictive warmup: warm all GPU models for minimal first-request latency
       if (deployState.status === 'ready' && deployState.endpoint) {
         warmupAllGpuModels(deployState.endpoint).catch(err =>
