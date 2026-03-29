@@ -126,23 +126,32 @@ export const SYSTEM_PROFILE: AIProfile = {
 };
 
 /**
- * Speech-to-Speech profile — full STT → LLM → TTS pipeline.
+ * Speech-to-Speech profile — voice conversation with 3-tier fallback.
  *
- * Primary: self-hosted GPU (TensorDock RTX 3090) running
- *   Whisper (STT) → Gemma 3 4B (LLM) → Kokoro 82M (TTS)
- * Fallback: cloud providers (Groq → OpenAI)
+ * Tier 1: OpenAI Realtime (WebRTC, ~300-500ms round-trip)
+ *   Browser connects directly to OpenAI Realtime API via WebRTC.
+ *   Lowest latency, handles STT+LLM+TTS in one connection.
  *
- * The self-hosted entries require a GPU endpoint to be set at runtime
- * via the autoscaler or gpuEndpoint override.
+ * Tier 2: OpenAI Omni (single API call, ~1-2s)
+ *   gpt-4o-mini-audio-preview handles audio-in → audio+text-out.
+ *   Used when Realtime is unavailable or for server-side pipeline.
+ *
+ * Tier 3: Sequential pipeline (STT → LLM → TTS, ~2-3s)
+ *   Groq for STT/LLM (fast), OpenAI tts-1 for TTS.
+ *   Self-hosted GPU as final fallback.
  */
 export const SPEECH_TO_SPEECH_PROFILE: AIProfile = {
   preset: 'speech-to-speech',
-  // Primary: OpenAI omni (single call handles STT+LLM+TTS, ~500ms)
+  // Tier 1: OpenAI Realtime — lowest latency (~300-500ms)
+  realtime: [
+    { provider: 'openai', model: 'gpt-4o-mini-realtime-preview' },
+    { provider: 'openai', model: 'gpt-4o-realtime-preview' },
+  ],
+  // Tier 2: OpenAI Omni — single call STT+LLM+TTS (~1-2s)
   omni: [
     { provider: 'openai', model: 'gpt-4o-mini-audio-preview' },
   ],
-  // Fallback: sequential pipeline — Groq first (already configured + fast),
-  // OpenAI as secondary. Groq is primary to avoid wasting time on missing OpenAI key.
+  // Tier 3: Sequential pipeline — fast cloud providers with self-hosted fallback
   stt: [
     { provider: 'groq', model: 'whisper-large-v3-turbo' },
     { provider: 'openai', model: 'gpt-4o-mini-transcribe' },
@@ -154,20 +163,23 @@ export const SPEECH_TO_SPEECH_PROFILE: AIProfile = {
     { provider: 'self-hosted', model: 'gemma-3-4b-it', selfHosted: true },
   ],
   tts: [
-    // tts-1 is OpenAI's fast model (~0.5-1.5s), multilingual incl. Portuguese.
-    // Much faster than gpt-4o-mini-tts (~3-6s) for short conversational text.
+    // tts-1: fastest cloud TTS (~0.5-1.5s), multilingual incl. Portuguese.
     { provider: 'openai', model: 'tts-1' },
-    // groq/orpheus is English-only but available without extra keys.
-    // Kept as fallback for when OPENAI_API_KEY is not set.
+    // Groq Orpheus: fallback (~1-2.5s), English-only.
     { provider: 'groq', model: 'canopylabs/orpheus-v1-english' },
     { provider: 'self-hosted', model: 'kokoro-82m', selfHosted: true },
   ],
   voice: 'nova',
-  audioFormat: 'wav',
+  // mp3 is 10x smaller than wav → faster transfer with negligible decode overhead.
+  // Browser AudioContext.decodeAudioData() handles mp3 natively.
+  audioFormat: 'mp3',
   language: 'pt',
   temperature: 0.7,
+  // Cap response length — shorter text = faster TTS synthesis (Tier 3 only).
+  // 60 tokens ≈ 30–40 words ≈ 2 short sentences. Keeps TTS under 2.5s.
+  maxTokens: 60,
   fallbackOptions: {
-    timeoutMs: 15_000,
+    timeoutMs: 5_000,
     retriesPerProvider: 0,
   },
 };
@@ -189,22 +201,26 @@ export const OPENAI_REALTIME_PROFILE: AIProfile = {
     { provider: 'openai', model: 'gpt-audio-mini' },
     { provider: 'openai', model: 'gpt-audio' },
   ],
-  // Sequential fallback if realtime + omni both fail
+  // Sequential fallback with fast Groq providers (if realtime + omni both fail)
   stt: [
+    { provider: 'groq', model: 'whisper-large-v3-turbo' },
     { provider: 'openai', model: 'gpt-4o-mini-transcribe' },
   ],
   llm: [
+    { provider: 'groq', model: 'llama-3.1-8b-instant' },
     { provider: 'openai', model: 'gpt-4o-mini' },
   ],
   tts: [
-    { provider: 'openai', model: 'gpt-4o-mini-tts' },
+    { provider: 'openai', model: 'tts-1' },
+    { provider: 'groq', model: 'canopylabs/orpheus-v1-english' },
   ],
   voice: 'nova',
-  audioFormat: 'wav',
+  audioFormat: 'mp3',
   language: 'pt',
   temperature: 0.7,
+  maxTokens: 60,
   fallbackOptions: {
-    timeoutMs: 10_000,
+    timeoutMs: 5_000,
     retriesPerProvider: 0,
   },
 };

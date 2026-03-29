@@ -285,7 +285,7 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
     this.log.debug('discovering transports from', endpoint);
 
     try {
-      const res = await fetch(endpoint, { signal: AbortSignal.timeout(3_000), credentials: 'include' });
+      const res = await fetch(endpoint, { signal: AbortSignal.timeout(5_000), credentials: 'include' });
       if (!res.ok) {
         this.log.warn('discovery failed:', res.status);
         return null;

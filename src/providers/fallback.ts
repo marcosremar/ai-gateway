@@ -121,7 +121,7 @@ interface CooldownState {
 
 const COOLDOWN_WINDOW_MS = 60_000; // rolling window for counting failures
 const DEFAULT_ALLOWED_FAILS = 3;
-const DEFAULT_COOLDOWN_MS = 60_000;
+const DEFAULT_COOLDOWN_MS = 15_000;
 
 function cooldownKey(entry: FallbackEntry): string {
   return `${entry.provider}:${entry.model ?? '*'}`;

@@ -70,7 +70,7 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
   async exchangeSdp(config: RealtimeSdpConfig): Promise<string> {
     const apiKey = this.getApiKey();
     const model = config.model || 'gpt-4o-mini-realtime-preview';
-    const voice = config.voice || 'nova';
+    const voice = this.resolveRealtimeVoice(config.voice);
 
     const sessionConfig = JSON.stringify({ type: 'realtime', model, audio: { output: { voice } } });
 
@@ -113,9 +113,23 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
     return body;
   }
 
+  /**
+   * Map TTS voices to Realtime-compatible equivalents.
+   * Realtime API supports: alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar.
+   * TTS-only voices (nova, fable, onyx) need mapping.
+   */
+  private resolveRealtimeVoice(requested?: string): string {
+    const REALTIME_VOICES = new Set(['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar']);
+    if (requested && REALTIME_VOICES.has(requested)) return requested;
+    // Map TTS-only voices to closest Realtime equivalent
+    const VOICE_MAP: Record<string, string> = { nova: 'coral', fable: 'sage', onyx: 'ash' };
+    return VOICE_MAP[requested ?? ''] ?? 'coral';
+  }
+
   async createSession(config: RealtimeSessionConfig): Promise<RealtimeSession> {
     const apiKey = this.getApiKey();
     const model = config.model || 'gpt-4o-mini-realtime-preview';
+    const voice = this.resolveRealtimeVoice(config.voice);
 
     // Note: client_secrets endpoint only supports model, audio, and voice config.
     // turn_detection, instructions, etc. must be set via session.update on the
@@ -126,7 +140,7 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
         model,
         audio: {
           output: {
-            voice: config.voice || 'coral',
+            voice,
             ...(config.outputAudioFormat && {
               format: { type: config.outputAudioFormat, rate: 24000 },
             }),
