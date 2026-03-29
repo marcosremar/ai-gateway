@@ -418,3 +418,34 @@ export {
 // ── Language Detection ─────────────────────────────────────────────────────
 export { detectLanguage, detectLanguageWithSwap, SUPPORTED_LANGUAGES } from './language-detect';
 export type { LanguageDetectResult } from './language-detect';
+
+
+// ── Database abstraction ──────────────────────────────────────────────────────
+export type {
+  DatabaseEnvironment,
+  DatabaseConfig,
+  NeonProject,
+  NeonBranch,
+  NeonDatabase,
+  NeonEndpoint,
+  BackupType,
+  BackupInfo,
+  BackupOptions,
+  BackupResult,
+  RestoreOptions,
+  QueryResult,
+} from './database/index';
+export { DatabaseError } from './database/index';
+export {
+  detectEnvironment,
+  isPooledUrl,
+  buildConnectionConfig,
+  buildPrismaUrl,
+  getUnpooledUrl,
+  getPooledUrl,
+} from './database/index';
+export type { SqlDriver } from './database/index';
+export { createSqlDriver, createNeonDriver, createPgDriver } from './database/index';
+export { NeonManagementClient } from './database/index';
+export { BackupService } from './database/index';
+export { DatabaseService, createDatabaseService, getDatabase } from './database/index';
