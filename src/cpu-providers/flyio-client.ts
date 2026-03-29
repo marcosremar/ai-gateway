@@ -76,9 +76,11 @@ export class FlyioClient extends AbstractGpuProvider {
       image = `registry.hub.docker.com/${image}`;
     }
 
-    // Free tier: max 2 CPU cores. Use 2 vCPU + 4GB as default (sufficient for Chromium bot).
-    const cpus = Math.min(spec.vcpus ?? 2, 2);
-    const memoryMb = (spec.ramGb ?? 4) * 1024;
+    // Chromium + FFmpeg + PulseAudio need at least 4 vCPUs to avoid audio dropouts.
+    // Use performance CPUs for consistent scheduling (shared CPUs cause audio glitches).
+    const cpus = spec.vcpus ?? 4;
+    const cpuKind = cpus > 2 ? 'performance' : 'shared';
+    const memoryMb = (spec.ramGb ?? 8) * 1024;
     const name = `babelcast-bot-${Date.now()}`;
 
     this.log.log(`[flyio] Creating machine in ${region}: ${image} (${cpus} vCPU, ${memoryMb}MB RAM)`);
@@ -93,7 +95,7 @@ export class FlyioClient extends AbstractGpuProvider {
         image,
         env: spec.env || {},
         guest: {
-          cpu_kind: 'shared',
+          cpu_kind: cpuKind as 'shared' | 'performance',
           cpus,
           memory_mb: memoryMb,
         },

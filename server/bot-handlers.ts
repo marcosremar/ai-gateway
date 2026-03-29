@@ -653,6 +653,60 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
           }
         }
       })().catch(() => {});
+      // Watchdog: detect if bot leaves/crashes and auto-rejoin
+      (async () => {
+        const probeHeaders: Record<string, string> = {};
+        const flyHost = flyio.getFlyHost();
+        if (flyHost) probeHeaders['Host'] = flyHost;
+        if (botState.podId && botState.podId !== 'local') probeHeaders['fly-force-instance-id'] = botState.podId;
+
+        let wasInMeeting = false;
+        let reconnectAttempts = 0;
+        const MAX_RECONNECTS = 3;
+
+        while (botState.status === 'joined' && botState.meetingUrl) {
+          await new Promise(r => setTimeout(r, 10_000)); // check every 10s
+          if (botState.status !== 'joined') break;
+
+          try {
+            const r = await fetch(`${botEndpoint}/version`, { headers: probeHeaders, signal: AbortSignal.timeout(5000) });
+            if (r.ok) {
+              const data = await r.json() as { status?: string };
+              if (data.status === 'meeting_active') {
+                wasInMeeting = true;
+                reconnectAttempts = 0;
+              } else if (data.status === 'idle' && wasInMeeting && reconnectAttempts < MAX_RECONNECTS) {
+                // Bot left the meeting — auto-rejoin
+                reconnectAttempts++;
+                console.log(`[bot] Bot dropped from meeting — auto-rejoin attempt ${reconnectAttempts}/${MAX_RECONNECTS}`);
+                broadcastWs({ type: 'bot:status', status: 'joining', message: `Bot reconnecting (${reconnectAttempts}/${MAX_RECONNECTS})...` });
+                try {
+                  const rejoinRes = await fetch(`${botEndpoint}/join`, {
+                    method: 'POST',
+                    headers: botHeaders(),
+                    body: JSON.stringify(joinBody),
+                    signal: AbortSignal.timeout(30_000),
+                  });
+                  if (rejoinRes.ok) {
+                    console.log(`[bot] Auto-rejoin sent successfully`);
+                    wasInMeeting = false; // wait for meeting_active again
+                  } else {
+                    console.warn(`[bot] Auto-rejoin failed: HTTP ${rejoinRes.status}`);
+                  }
+                } catch (e) {
+                  console.warn(`[bot] Auto-rejoin error: ${e instanceof Error ? e.message : e}`);
+                }
+              } else if (data.status === 'idle' && wasInMeeting && reconnectAttempts >= MAX_RECONNECTS) {
+                console.log(`[bot] Bot left meeting after ${MAX_RECONNECTS} reconnect attempts — giving up`);
+                broadcastWs({ type: 'bot:status', status: 'ended', message: 'Bot disconnected from meeting' });
+                setBotState({ status: 'ready', message: 'Bot disconnected — pod still running' });
+                break;
+              }
+            }
+          } catch { /* probe failed, bot might be restarting */ }
+        }
+      })().catch(() => {});
+
       // Predictive warmup: warm all GPU models for minimal first-request latency
       if (deployState.status === 'ready' && deployState.endpoint) {
         warmupAllGpuModels(deployState.endpoint).catch(err =>
