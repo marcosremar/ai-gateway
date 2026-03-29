@@ -118,8 +118,23 @@ describe.skipIf(!hasKeys)('SDK Pipeline Integration (requires OPENAI_API_KEY)', 
   it('full pipeline: transcribe() + chat() + synthesize() end-to-end', async () => {
     const client = new AIClient({ registry, defaultProfile: OPENAI_VOICE_PROFILE });
 
+    const buf = Buffer.alloc(44 + 8000 * 2);
+    buf.write('RIFF', 0);
+    buf.writeUInt32LE(36 + 8000 * 2, 4);
+    buf.write('WAVE', 8);
+    buf.write('fmt ', 12);
+    buf.writeUInt32LE(16, 16);
+    buf.writeUInt16LE(1, 20);
+    buf.writeUInt16LE(1, 22);
+    buf.writeUInt32LE(16000, 24);
+    buf.writeUInt32LE(32000, 28);
+    buf.writeUInt16LE(2, 32);
+    buf.writeUInt16LE(16, 34);
+    buf.write('data', 36);
+    buf.writeUInt32LE(8000 * 2, 40);
+
     const result = await client.pipeline(
-      Buffer.alloc(0) as any,
+      buf,
       'You are a helpful assistant. Reply with exactly: "Pipeline works."',
       [{ role: 'user', content: 'test' }],
     );

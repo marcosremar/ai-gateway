@@ -367,6 +367,9 @@ describe('Summary', () => {
     }
 
     console.log(`\n${'═'.repeat(90)}\n`);
-    expect(rows.length).toBeGreaterThan(0);
+    // Only assert results when at least one provider was available during this run
+    if (HAS_OPENAI || HAS_GROQ || MODAL_AVAILABLE) {
+      expect(rows.length).toBeGreaterThan(0);
+    }
   });
 });

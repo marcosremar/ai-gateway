@@ -454,7 +454,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     if (!sessionId || !text.trim()) return;
 
     const translateFn = buildSpeculativeTranslateFn(source, target, style);
-    speculativeCache.speculate(sessionId, text, translateFn).catch(e => console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e));
+    try { speculativeCache.speculate(sessionId, text, translateFn); } catch (e) { console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e); }
 
   } else if (type === 'ping') {
     ws.send(JSON.stringify({ type: 'pong' }));
@@ -578,7 +578,7 @@ export function startWsServer() {
                 const srcLang = ws.data.language || 'fr';
                 const tgtLang = ws.data.speculateTarget;
                 const translateFn = buildSpeculativeTranslateFn(srcLang, tgtLang, 'default');
-                speculativeCache.speculate(ws.data.id, text, translateFn).catch(e => console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e));
+                try { speculativeCache.speculate(ws.data.id, text, translateFn); } catch (e) { console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e); }
               }
             };
 
@@ -646,15 +646,17 @@ export function startWsServer() {
               console.log(`[stt-ws] Backend ${backend.provider} disconnected: ${reason} id=${ws.data.id}`);
               sttSessions.delete(ws.data.id);
               if (ws.readyState !== 1 /* OPEN */) return; // client already gone
-              // Always try to reconnect with next available provider.
+              // Always try to reconnect with next available provider (only when ws.readyState === 1).
               // connectBackend() handles the "no provider" case by closing the client WS.
-              excluded.add(backend.provider);
-              console.log(`[stt-ws] Reconnecting (excluded: ${[...excluded].join(',')}) id=${ws.data.id}`);
-              try {
-                connectBackend();
-              } catch (e) {
-                console.warn(`[stt-ws] Reconnect failed — closing client WS:`, e instanceof Error ? e.message : e);
-                ws.close(1001, 'STT backend reconnect failed');
+              if (ws.readyState === 1) {
+                excluded.add(backend.provider);
+                console.log(`[stt-ws] Reconnecting (excluded: ${[...excluded].join(',')}) id=${ws.data.id}`);
+                try {
+                  connectBackend();
+                } catch (e) {
+                  console.warn(`[stt-ws] Reconnect failed — closing client WS:`, e instanceof Error ? e.message : e);
+                  ws.close(1001, 'STT backend reconnect failed');
+                }
               }
             };
             backend.connect();
