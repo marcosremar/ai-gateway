@@ -157,8 +157,8 @@ export function checkContent(
     }
   }
 
-  // Calculate confidence based on number of matches (1 match = 60 confidence)
-  const confidence = Math.min(100, allMatches.length * 60);
+  // Calculate confidence based on number of matches (1 match = 20 confidence)
+  const confidence = Math.min(100, allMatches.length * 20);
   const flagged = triggeredCategories.length > 0 && confidence >= (config.confidenceThreshold || 50);
 
   // Determine action based on config and results

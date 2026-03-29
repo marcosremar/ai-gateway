@@ -27,7 +27,7 @@ import { loadAutoscalerConfig } from './autoscaler/config-loader';
 export const PROVIDER_BOOT_SECS: Record<string, number> = {
   tensordock: 1200,
   runpod: 1200,
-  vast: 300,
+  vast: 900,
   modal: 60,
 };
 import { LoadBalancer } from './autoscaler/load-balancer';
