@@ -126,8 +126,26 @@ describe('buildPrismaUrl', () => {
 // ── URL helpers ────────────────────────────────────────────────────────────────
 
 describe('getUnpooledUrl / getPooledUrl', () => {
-  beforeEach(() => vi.unstubAllEnvs());
-  afterEach(() => vi.unstubAllEnvs());
+  // These vars may be populated by the vault in test setup; save/restore around each test
+  const UNPOOLED_KEYS = ['POSTGRES_URL_NON_POOLING', 'DATABASE_URL_UNPOOLED'];
+  const POOLED_KEYS = ['POSTGRES_PRISMA_URL', 'POSTGRES_URL'];
+  let saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+    saved = {};
+    for (const k of [...UNPOOLED_KEYS, ...POOLED_KEYS]) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
 
   it('getUnpooledUrl prefers POSTGRES_URL_NON_POOLING', () => {
     vi.stubEnv('POSTGRES_URL_NON_POOLING', 'postgresql://unpooled');
@@ -291,7 +309,8 @@ describe('DatabaseService', () => {
 
   it('management methods throw DatabaseError when credentials are missing', async () => {
     vi.stubEnv('DATABASE_URL', 'postgresql://user:pass@ep-abc.neon.tech/db');
-    // No NEON_API_KEY or NEON_PROJECT_ID
+    vi.stubEnv('NEON_API_KEY', '');
+    vi.stubEnv('NEON_PROJECT_ID', '');
     const svc = new DatabaseService();
     await expect(svc.listBranches()).rejects.toThrow(DatabaseError);
     await expect(svc.listBranches()).rejects.toThrow('NEON_API_KEY');

@@ -37,7 +37,11 @@ export class FileVaultStore implements VaultStore {
   }
 
   async get(name: string): Promise<string | null> {
-    return this.load()[name] ?? null;
+    const val = this.load()[name] ?? null;
+    if (val === null) return null;
+    // Normalize: vault.json may store blobs as objects (not JSON-encoded strings)
+    if (typeof val !== 'string') return JSON.stringify(val);
+    return val;
   }
 
   async set(name: string, encrypted: string): Promise<void> {
