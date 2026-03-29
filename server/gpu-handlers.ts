@@ -295,6 +295,7 @@ async function _selectDeploymentTier(
 
   // Build tier list from available API keys, optionally filtered to a specific provider
   const allTiers = buildGpuTiers(runpodApiKey, effectiveVastApiKey || undefined, tensordockOpts, modalApiKey || undefined);
+  console.log(`[req=${requestId}] providerFilter=${providerFilter ?? 'none'}, allTiers=[${allTiers.map(t => t.name).join(', ')}]`);
   const filtered = filterTiers(allTiers, providerFilter);
   if ('error' in filtered) {
     const balanceHint = balanceExcluded.length > 0

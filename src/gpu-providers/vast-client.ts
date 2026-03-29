@@ -205,10 +205,10 @@ export class VastClient extends AbstractGpuProvider {
       disk_space: { gte: diskGb },
       direct_port_count: { gte: 1 },   // Need at least 1 open port for SSH
       cuda_vers: { gte: 12.4 },         // Minimum CUDA 12.4 (our base image) — filter field is cuda_vers, not cuda_max_good (response-only)
-      // Host quality filters
-      reliability2: { gte: 0.9 },       // >90% reliability score
-      inet_down: { gte: 500 },          // Minimum 500 Mb/s download (fast image pulls)
-      inet_up: { gte: 100 },            // Minimum 100 Mb/s upload
+      // Host quality filters — fast internet critical for 10GB+ images to boot under 15min
+      reliability2: { gte: 0.95 },      // >95% reliability score
+      inet_down: { gte: 2000 },         // Minimum 2 Gb/s download (10GB image in ~40s)
+      inet_up: { gte: 200 },            // Minimum 200 Mb/s upload
       order: [['dph_total', 'asc']],
     };
 
@@ -267,10 +267,10 @@ export class VastClient extends AbstractGpuProvider {
 
     // Fallback: relax network requirements to find more direct-port hosts
     if (!offers.length) {
-      this.log.warn('[vast] No offers with strict filters — relaxing network requirements (inet_down: 200, inet_up: 50, reliability: 0.8)');
-      searchBody.inet_down = { gte: 200 };
-      searchBody.inet_up = { gte: 50 };
-      searchBody.reliability2 = { gte: 0.8 };
+      this.log.warn('[vast] No offers with strict filters — relaxing to inet_down: 500, reliability: 0.9');
+      searchBody.inet_down = { gte: 500 };
+      searchBody.inet_up = { gte: 100 };
+      searchBody.reliability2 = { gte: 0.9 };
       try {
         offers = await this._searchOffers(searchBody, headers);
         if (createGeoFilter && offers.length) {
@@ -330,22 +330,26 @@ export class VastClient extends AbstractGpuProvider {
       const pricePerHr = (offer.dph_total || 0) as number;
 
       const hasDirectPorts = hasDirectPortOffers || (offer.direct_port_count as number ?? 0) >= 1;
-      // Build onstart: ensure script runs even if Docker CMD is replaced (SSH mode).
-      // Vast.ai SSH mode replaces Docker ENTRYPOINT/CMD — onstart is the ONLY way
-      // to launch the application. We wrap it to log failures.
+      // Build onstart command.
+      // In Docker 'args' mode: onstart is passed to Docker exec form — the ENTIRE string
+      // becomes the binary path. bash -c wrapping FAILS because Docker tries to stat
+      // "bash -c '...'" as a single file. Use bare script path only.
+      // In SSH 'ssh_direct' mode: a shell interprets onstart, so wrapping works.
       const onstart = spec.onstart || '/app/start.sh';
       const wrappedOnstart = `bash -c '${onstart} >> /tmp/start.log 2>&1 || echo "[vast] onstart failed: $?" >> /tmp/start.log'`;
 
+      // Choose runtype based on host capabilities:
+      // - Direct ports available → 'args' (Docker mode, CMD runs, port NAT works)
+      // - No direct ports → 'ssh_direct' (SSH mode, onstart runs app, gateway uses SSH tunnel)
+      const useDockerMode = hasDirectPorts;
       const createBody: Record<string, unknown> = {
         client_id: 'me',
         image: imageName,
         // Do NOT include 'price' — omitting it = on-demand (fixed price, non-interruptible).
         // Passing price:null or price:0 creates an interruptible/spot instance that gets reclaimed!
         disk: diskGb + 15,  // +15GB headroom for runtime model downloads
-        // runtype: 'args' → Docker mode: Docker CMD runs as main process + port NAT works.
-        // SSH mode (default) ignores Docker CMD and requires app to listen on direct_port (unknown at deploy time).
-        runtype: 'args',
-        onstart: wrappedOnstart,
+        runtype: useDockerMode ? 'args' : 'ssh_direct',
+        onstart: useDockerMode ? onstart : wrappedOnstart,
         // Vast.ai env dict: env vars as key-value + port mappings as "-p X:X": "1"
         // Port exposure MUST be in env dict — the separate 'ports' field is ignored
         env: {
@@ -402,21 +406,65 @@ export class VastClient extends AbstractGpuProvider {
         );
         const { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS);
 
-        // If instance vanished (no IP) or is SSH-only (no endpoint), destroy and try next offer
-        if (!endpoint) {
-          const reason = !ip ? 'instance vanished during startup (host reclaimed)' : 'SSH-only (no direct port mapping)';
-          this.log.warn(`[vast] Instance ${contractId} has no endpoint (ip=${ip || 'none'}) — ${reason}. Destroying and trying next offer...`);
-          // Blacklist host that reclaimed our instance
-          if (!ip && sshHost) {
-            // Extract IP from the offer we tried
-            const offerIp = String(offer.public_ipaddr ?? '');
-            if (offerIp) this._markHostUnstable(offerIp);
-          } else if (ip) {
-            // SSH-only hosts get a shorter blacklist (they work, just no ports)
-            this._markHostUnstable(ip);
-          }
+        // If instance vanished (no IP), destroy and try next offer
+        if (!endpoint && !ip) {
+          const reason = 'instance vanished during startup (host reclaimed)';
+          try {
+            const logs = await this.getInstanceLogs(instanceId, { apiKey }, 50);
+            if (logs) this.log.warn(`[vast] Instance ${contractId} logs before destroy:\n${logs.substring(0, 500)}`);
+          } catch {}
+          this.log.warn(`[vast] Instance ${contractId} has no IP — ${reason}. Destroying and trying next offer...`);
+          const offerIp = String(offer.public_ipaddr ?? '');
+          if (offerIp) this._markHostUnstable(offerIp);
           try { await this.deleteInstance(instanceId, { apiKey }); } catch (delErr) { this.log.debug(`[vast] Cleanup of ${contractId} failed: ${this.errMsg(delErr)}`); }
           offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason });
+          continue;
+        }
+
+        // SSH-only hosts (RTX 5090 Blackwell often have no direct ports):
+        // Use SSH tunnel to forward port 8000 to localhost
+        if (!endpoint && ip && sshHost && sshPort) {
+          this.log.log(`[vast] Instance ${contractId} is SSH-only (no direct ports). Setting up SSH tunnel to ${sshHost}:${sshPort}...`);
+          try {
+            const { SshTunnel } = await import('../../server/ssh-tunnel');
+            const tunnel = new SshTunnel(sshHost, sshPort, 8000);
+            const ok = await tunnel.open(15_000);
+            if (ok) {
+              this.log.log(`[vast] SSH tunnel opened: ${tunnel.endpoint} → ${sshHost}:8000`);
+              // Return the tunnel endpoint as the instance endpoint
+              return {
+                instanceId,
+                instanceName: `parle-autoscale-${Date.now()}`,
+                endpoint: tunnel.endpoint,
+                status: 'running',
+                gpuType: gpuName,
+                ipAddress: ip,
+                sshHost,
+                sshPort,
+                providerMeta: {
+                  gpuType: gpuName,
+                  gpuVramGb: ((offer.gpu_ram as number) ?? 0) / 1024,
+                  inetDown: offer.inet_down as number | undefined,
+                  inetUp: offer.inet_up as number | undefined,
+                  dphTotal: pricePerHr,
+                  sshTunnel: true,
+                },
+              };
+            }
+            this.log.warn(`[vast] SSH tunnel failed for ${contractId}. Destroying...`);
+          } catch (tunnelErr) {
+            this.log.warn(`[vast] SSH tunnel error for ${contractId}: ${this.errMsg(tunnelErr)}`);
+          }
+          try { await this.deleteInstance(instanceId, { apiKey }); } catch {}
+          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: 'SSH tunnel failed' });
+          continue;
+        }
+
+        // No endpoint and no SSH — skip
+        if (!endpoint) {
+          this.log.warn(`[vast] Instance ${contractId} has no endpoint and no SSH — destroying...`);
+          try { await this.deleteInstance(instanceId, { apiKey }); } catch {}
+          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: 'no endpoint, no SSH' });
           continue;
         }
 
@@ -598,6 +646,40 @@ export class VastClient extends AbstractGpuProvider {
       throw new Error(`Vast delete failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
     }
     this.log.log(`[vast] deleteInstance(${instanceId}): permanently destroyed`);
+  }
+
+  /**
+   * Fetch container logs from a Vast.ai instance for debugging.
+   * Uses the Vast.ai /instances/{id}/logs/ endpoint.
+   */
+  async getInstanceLogs(instanceId: string, credentials: ProviderCredentials, lines: number = 200): Promise<string | null> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId } = stripPrefix(instanceId);
+
+    try {
+      const res = await this._vastFetch(
+        `${VAST_API_BASE}/instances/request_logs/${rawId}/?api_key=${apiKey}&tail=${lines}`,
+        { method: 'PUT', headers },
+        TIMEOUTS.read,
+      );
+      if (!res.ok) return null;
+
+      // Vast.ai returns logs asynchronously — poll for them
+      await new Promise(r => setTimeout(r, 2000));
+      const logsRes = await this._vastFetch(
+        `${VAST_API_BASE}/instances/${rawId}/?api_key=${apiKey}`,
+        { method: 'GET', headers },
+        TIMEOUTS.read,
+      );
+      if (!logsRes.ok) return null;
+      const data = await logsRes.json() as Record<string, unknown>;
+      const statusMsg = String(data.status_msg || '');
+      return statusMsg || null;
+    } catch (err) {
+      this.log.debug(`[vast] getInstanceLogs(${instanceId}) failed: ${this.errMsg(err)}`);
+      return null;
+    }
   }
 
   /**
