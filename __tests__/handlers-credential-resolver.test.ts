@@ -3,7 +3,7 @@
  * - createCredentialResolver()
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createCredentialResolver } from '../src/handlers/credential-resolver';
 import type { Vault } from '../src/vault/vault';
 
@@ -23,6 +23,26 @@ function makeVault(secrets: Record<string, string | Error> = {}): Vault {
 }
 
 describe('createCredentialResolver', () => {
+  // Vault may have populated these in global setup; save/restore for isolation
+  const PROVIDER_ENVS = ['RUNPOD_API_KEY', 'VAST_API_KEY', 'TENSORDOCK_API_KEY', 'TENSORDOCK_AUTH_ID', 'MODAL_API_KEY', 'HF_TOKEN'];
+  let saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+    saved = {};
+    for (const k of PROVIDER_ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
   it('resolves credentials from vault', async () => {
     const vault = makeVault({ 'runpod:apiKey': 'rp-key' });
     const resolver = createCredentialResolver(vault);

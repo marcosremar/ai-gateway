@@ -10,6 +10,7 @@ export default defineConfig({
   },
   test: {
     include: ['__tests__/**/*.test.ts'],
+    setupFiles: ['__tests__/vitest-setup.ts'],
     testTimeout: 60_000,
     hookTimeout: 30_000,
     sequence: { concurrent: false },

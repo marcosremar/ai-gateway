@@ -4,7 +4,7 @@
 
 import { execSync } from 'child_process';
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { dirname, isAbsolute, join } from 'path';
 
 /**
  * Run a command on a remote cluster via SSH and return stdout.
@@ -29,33 +29,67 @@ export function parseJSON(raw: string): Record<string, unknown> {
   }
 }
 
-/** Load .env file into process.env (no dotenv dependency) */
-export function loadEnv(): void {
-  // Try package-level .env first, then root web/.env
+/** Load .env file into process.env, then load secrets from vault (vault wins over .env file) */
+export async function loadEnv(): Promise<void> {
+  // Snapshot env vars that already exist (shell env / CI — highest precedence)
+  const originalEnvKeys = new Set(Object.keys(process.env));
+
+  // Try package-level .env first, then root .env
   const paths = [
     join(__dirname, '..', '.env'),
     join(__dirname, '..', '..', '..', '.env'),
   ];
+  let rootEnvDir: string | undefined;
   for (const envPath of paths) {
     try {
       const content = readFileSync(envPath, 'utf-8');
       for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eqIdx = trimmed.indexOf('=');
-      if (eqIdx === -1) continue;
-      const key = trimmed.slice(0, eqIdx).trim();
-      let value = trimmed.slice(eqIdx + 1).trim();
-      // Strip quotes
-      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx === -1) continue;
+        const key = trimmed.slice(0, eqIdx).trim();
+        let value = trimmed.slice(eqIdx + 1).trim();
+        // Strip quotes
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        if (!originalEnvKeys.has(key)) {
+          process.env[key] = value;
+        }
       }
-      if (!process.env[key]) {
-        process.env[key] = value;
-      }
-    }
+      rootEnvDir = dirname(envPath);
     } catch {
       // File not found — try next path
+    }
+  }
+
+  // Load secrets from vault — vault takes precedence over .env file values,
+  // but never overrides env vars that existed before loadEnv() was called.
+  const masterKey = process.env.VAULT_MASTER_KEY;
+  let vaultPath = process.env.VAULT_PATH;
+  if (masterKey && vaultPath) {
+    // Resolve relative path against the directory of the .env file that set it
+    if (!isAbsolute(vaultPath) && rootEnvDir) {
+      vaultPath = join(rootEnvDir, vaultPath);
+    }
+    try {
+      const { Vault } = await import('../src/vault/vault');
+      const { FileVaultStore } = await import('../src/vault/file-store');
+      const store = new FileVaultStore(vaultPath);
+      const vault = new Vault(masterKey, store);
+      const names = await vault.list();
+      for (const name of names) {
+        if (!originalEnvKeys.has(name)) {
+          try {
+            process.env[name] = await vault.retrieve(name);
+          } catch {
+            // Secret not decryptable — skip
+          }
+        }
+      }
+    } catch {
+      // Vault unavailable — silently continue with env vars only
     }
   }
 }
