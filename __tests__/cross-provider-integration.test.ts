@@ -41,9 +41,14 @@ describe('Cross-Provider STT', () => {
       if (!process.env[envKey]) return;
       const audio = makeTestWav(1.0);
 
-      const { result, ms } = await timed(() =>
-        provider.transcribe({ audio, model }),
-      );
+      let result: Awaited<ReturnType<typeof provider.transcribe>>, ms: number;
+      try {
+        ({ result, ms } = await timed(() => provider.transcribe({ audio, model })));
+      } catch (err: unknown) {
+        const status = (err as Record<string, unknown>)?.status;
+        if (status === 401 || status === 402 || status === 403) return; // key invalid / no credits
+        throw err;
+      }
 
       // Contract: must have text string
       expect(typeof result.text).toBe('string');
@@ -79,14 +84,16 @@ describe('Cross-Provider TTS', () => {
     it(`${name}: synthesize returns TTSResponse contract`, async () => {
       if (!process.env[envKey]) return;
 
-      const { result, ms } = await timed(() =>
-        provider.synthesize({
-          input: 'Integration test audio.',
-          model,
-          voice,
-          responseFormat: 'wav',
-        }),
-      );
+      let result: Awaited<ReturnType<typeof provider.synthesize>>, ms: number;
+      try {
+        ({ result, ms } = await timed(() =>
+          provider.synthesize({ input: 'Integration test audio.', model, voice, responseFormat: 'wav' }),
+        ));
+      } catch (err: unknown) {
+        const status = (err as Record<string, unknown>)?.status;
+        if (status === 401 || status === 402 || status === 403) return;
+        throw err;
+      }
 
       // Contract: audio Buffer, contentType string
       expect(result.audio).toBeInstanceOf(Buffer);
@@ -121,17 +128,24 @@ describe('Cross-Provider LLM', () => {
     it(`${name}: chat returns ChatResponse contract`, async () => {
       if (!process.env[envKey]) return;
 
-      const { result, ms } = await timed(() =>
-        provider.chat({
-          messages: [
-            { role: 'system', content: 'Reply with exactly one word.' },
-            { role: 'user', content: 'What is 1 + 1?' },
-          ],
-          model,
-          temperature: 0,
-          maxTokens: 10,
-        }),
-      );
+      let result: Awaited<ReturnType<typeof provider.chat>>, ms: number;
+      try {
+        ({ result, ms } = await timed(() =>
+          provider.chat({
+            messages: [
+              { role: 'system', content: 'Reply with exactly one word.' },
+              { role: 'user', content: 'What is 1 + 1?' },
+            ],
+            model,
+            temperature: 0,
+            maxTokens: 10,
+          }),
+        ));
+      } catch (err: unknown) {
+        const status = (err as Record<string, unknown>)?.status;
+        if (status === 401 || status === 402 || status === 403) return;
+        throw err;
+      }
 
       // Contract: content string, model string
       expect(typeof result.content).toBe('string');
@@ -161,9 +175,9 @@ describe('Cross-Provider LLM', () => {
         });
         results.push({ name, response });
       } catch (err: unknown) {
-        // Skip providers with auth errors (deactivated keys)
+        // Skip providers with auth/billing errors (deactivated keys or no credits)
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 403) continue;
+        if (status === 401 || status === 402 || status === 403) continue;
         throw err;
       }
     }
