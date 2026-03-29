@@ -173,14 +173,20 @@ export interface DockerImage {
 
 export const DEFAULT_DOCKER_IMAGES: DockerImage[] = [
   {
+    url: 'marcosremar/babelcast-subtitle:latest',
+    label: 'Subtitles Only',
+    description: 'Subtitle pipeline: Faster Whisper STT + TranslateGemma 12B LLM. No TTS. ~3.6GB image, fast boot.',
+    sttModel: 'faster-whisper-large-v3-turbo', llmModel: 'translategemma-12b',
+  },
+  {
     url: 'marcosremar/babelcast-translategemma:latest',
-    label: 'TranslateGemma',
+    label: 'TranslateGemma (Full)',
     description: 'Full pipeline: Faster Whisper STT + TranslateGemma 12B LLM + Qwen3 TTS.',
     sttModel: 'faster-whisper-large-v3', llmModel: 'translategemma-12b', ttsModel: 'qwen3-tts',
   },
   {
     url: 'marcosremar/babelcast-mistral:latest',
-    label: 'Mistral',
+    label: 'Mistral (Full)',
     description: 'Full pipeline: Faster Whisper STT + Mistral 7B LLM + Qwen3 TTS.',
     sttModel: 'faster-whisper-large-v3', llmModel: 'mistral-7b', ttsModel: 'qwen3-tts',
   },
@@ -233,15 +239,16 @@ export const GPU_TYPES_BY_PROVIDER: Record<string, string[]> = {
     'Tesla T4',
   ],
   runpod: [
+    'NVIDIA GeForce RTX 5090',
     'NVIDIA RTX A6000',
     'NVIDIA L40S',
     'NVIDIA A100-SXM4-80GB',
     'NVIDIA A100 80GB PCIe',
-    'NVIDIA GeForce RTX 5090',
     'NVIDIA GeForce RTX 4090',
     'NVIDIA A40',
   ],
   tensordock: [
+    'NVIDIA GeForce RTX 5090',
     'NVIDIA GeForce RTX 4090',
     'NVIDIA GeForce RTX 4080',
     'NVIDIA RTX A6000',
