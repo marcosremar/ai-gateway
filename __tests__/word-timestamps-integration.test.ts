@@ -64,13 +64,19 @@ function assertWordTimestamps(response: STTResponse): void {
 
 describe.skipIf(!process.env.GROQ_API_KEY)('Groq word timestamps (Real API)', () => {
   it('returns word timestamps with whisper-large-v3-turbo', async () => {
-    const { result, ms } = await timed(() =>
-      groqSTT.transcribe({ audio, model: 'whisper-large-v3-turbo', wordTimestamps: true }),
-    );
+    try {
+      const { result, ms } = await timed(() =>
+        groqSTT.transcribe({ audio, model: 'whisper-large-v3-turbo', wordTimestamps: true }),
+      );
 
-    assertWordTimestamps(result);
-    console.log(`  Groq: ${result.words!.length} words, ${ms}ms`);
-    console.log(`  Words: ${result.words!.map(w => `${w.word}[${w.start.toFixed(2)}-${w.end.toFixed(2)}]`).join(' ')}`);
+      assertWordTimestamps(result);
+      console.log(`  Groq: ${result.words!.length} words, ${ms}ms`);
+      console.log(`  Words: ${result.words!.map(w => `${w.word}[${w.start.toFixed(2)}-${w.end.toFixed(2)}]`).join(' ')}`);
+    } catch (err: unknown) {
+      const status = (err as Record<string, unknown>)?.status;
+      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      throw err;
+    }
   });
 });
 
