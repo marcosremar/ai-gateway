@@ -16,7 +16,7 @@ import {
   recordStageSuccess, recordStageFailure, isStageCircuitClosed,
   providers, modalTTS,
 } from './providers';
-import { PROVIDER_CHAIN, GPU_PROVIDERS } from './config';
+import { PROVIDER_CHAIN, GPU_PROVIDERS, MODAL_BABELCAST_URL } from './config';
 import { raceProviders } from './race-providers';
 import type { RaceCandidate } from './race-providers';
 import { EWMATracker } from './ewma-tracker';
@@ -27,6 +27,9 @@ import { broadcastWs, broadcastDubAudio } from './ws-state';
 import { getActiveTargets, runMultiLangFanout } from './dub-fanout';
 import { logRequest } from './metrics';
 import { loadProviderConfig, stampProfileRequest } from './config-persistence';
+import { runEnsembleSTT } from '../src/ensemble-stt';
+import type { EnsembleSTTProviderEntry } from '../src/ensemble-stt';
+import { groqSTT } from '../src/providers/groq';
 import { langNames } from './http-utils';
 import { probeCloudProvider, probeGpuHealth } from '../src';
 import {
@@ -240,6 +243,13 @@ export async function runStreamingPipeline(
         run: (signal) => fetchGpuSTT(gpuEp!, audio, source, sttPrompt, '', false, signal),
       });
     }
+    // Tier 2: add Modal unless Modal IS the GPU AND already handling this stage via sttOnGpu
+    if (MODAL_BABELCAST_URL && !(sttOnGpu && deployState.endpoint === MODAL_BABELCAST_URL)) {
+      sttCandidates.push({
+        name: 'modal-babelcast', timeoutMs: 15_000,
+        run: (signal) => fetchGpuSTT(MODAL_BABELCAST_URL!, audio, source, sttPrompt, '', false, signal),
+      });
+    }
     sttCandidates.push({
       name: getCloudProviderName(), timeoutMs: 8_000,
       run: async (signal) => {
@@ -248,6 +258,21 @@ export async function runStreamingPipeline(
         return { text: r.text, language: r.language || '', used_gpu: false, avg_logprob: 0 };
       },
     });
+    // Ensemble fallback: works without vault (uses env vars directly).
+    // Added as last candidate so it only runs if AIClient fails (e.g. no vault configured).
+    if (groqAvailable) {
+      sttCandidates.push({
+        name: 'ensemble-fallback', timeoutMs: 3_000,
+        run: async (signal) => {
+          if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+          const ensembleProviders: EnsembleSTTProviderEntry[] = [{ name: 'groq', provider: groqSTT }];
+          const result = await runEnsembleSTT(audio, source, sttPrompt, {
+            providers: ensembleProviders, timeoutMs: 2500,
+          });
+          return { text: result.consensus, language: '', used_gpu: false, avg_logprob: result.avg_logprob ?? 0 };
+        },
+      });
+    }
 
     const sttEwmaOpts = ewmaRaceOpts(sttCandidates as RaceCandidate<unknown>[], 'STT', labs);
     const sttRace = await raceProviders(sttCandidates, { logPrefix: '[stream-stt]', headstartMs: sttEwmaOpts.headstartMs });
@@ -429,6 +454,13 @@ export async function runStreamingPipeline(
               run: (signal) => fetchGpuLLM(gpuEp!, sttText, source, target, '', '', signal),
             });
           }
+          // Tier 2: add Modal unless Modal IS the GPU AND already handling this stage via llmOnGpu
+          if (MODAL_BABELCAST_URL && !(llmOnGpu && deployState.endpoint === MODAL_BABELCAST_URL)) {
+            llmCandidates.push({
+              name: 'modal-babelcast', timeoutMs: 15_000,
+              run: (signal) => fetchGpuLLM(MODAL_BABELCAST_URL!, sttText, source, target, '', '', signal),
+            });
+          }
           llmCandidates.push({
             name: getCloudProviderName(), timeoutMs: 8_000,
             run: async (signal) => {
@@ -496,6 +528,13 @@ export async function runStreamingPipeline(
             },
           });
         } else {
+          // Tier 2: add Modal unless Modal IS the GPU AND already handling this stage via ttsOnGpu
+          if (MODAL_BABELCAST_URL && !(ttsOnGpu && deployState.endpoint === MODAL_BABELCAST_URL)) {
+            ttsCandidates.push({
+              name: 'modal-babelcast', timeoutMs: 20_000,
+              run: (signal) => fetchGpuTTS(MODAL_BABELCAST_URL!, translatedText, targetName, speaker || 'Ryan', signal),
+            });
+          }
           ttsCandidates.push({
             name: getCloudProviderName(), timeoutMs: 8_000,
             run: async (signal) => {

@@ -9,7 +9,7 @@ import {
 } from './state';
 import { warmupAllGpuModels } from './provider-warmup';
 import type { BotDeploymentState } from './state';
-import { runpod, scaleway } from './providers';
+import { runpod, scaleway, flyio } from './providers';
 import { maskKey } from './http-utils';
 import { readJsonBody, handleBodyError } from './http-utils';
 import { broadcastWs, startBotTranscriptPoll, stopBotTranscriptPoll } from './ws-state';
@@ -36,6 +36,12 @@ export const BOT_PORTS = ['8080/http', '1936/tcp', '5900/http', '22/tcp', '3099/
 function botHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const h: Record<string, string> = { 'Content-Type': 'application/json', ...extra };
   if (botPodApiKey) h['Authorization'] = `Bearer ${botPodApiKey}`;
+  // Fly.io: target specific machine (shared app URL) + Host header when using IP
+  if (botState.podId && botState.podId !== 'local' && (botState.endpoint?.includes('.fly.dev') || flyio.getFlyHost())) {
+    h['fly-force-instance-id'] = botState.podId;
+    const flyHost = flyio.getFlyHost();
+    if (flyHost) h['Host'] = flyHost;
+  }
   return h;
 }
 
@@ -45,25 +51,50 @@ export function setBotState(patch: Partial<BotDeploymentState>) {
 }
 
 export async function cleanupBotPods(apiKey: string): Promise<void> {
+  // Clean up RunPod bot pods
   try {
     const instances = await runpod.listInstances({ apiKey });
     const toTerminate = instances.filter(inst =>
       (inst.instanceName || '').startsWith(BOT_POD_PREFIX) && inst.status !== 'EXITED'
     );
-    if (toTerminate.length === 0) return;
-    console.log(`[bot] Cleaning up ${toTerminate.length} bot pod(s)...`);
-    await Promise.allSettled(
-      toTerminate.map(async (inst) => {
-        try {
-          await runpod.deleteInstance(inst.instanceId, { apiKey });
-          console.log(`[bot] Terminated bot pod ${inst.instanceId} (${inst.instanceName})`);
-        } catch (err) {
-          console.warn(`[bot] Failed to terminate bot pod ${inst.instanceId}: ${err}`);
-        }
-      })
-    );
+    if (toTerminate.length > 0) {
+      console.log(`[bot] Cleaning up ${toTerminate.length} RunPod bot pod(s)...`);
+      await Promise.allSettled(
+        toTerminate.map(async (inst) => {
+          try {
+            await runpod.deleteInstance(inst.instanceId, { apiKey });
+            console.log(`[bot] Terminated RunPod bot pod ${inst.instanceId}`);
+          } catch (err) {
+            console.warn(`[bot] Failed to terminate RunPod bot pod ${inst.instanceId}: ${err}`);
+          }
+        })
+      );
+    }
   } catch (err) {
-    console.warn(`[bot] Failed to list pods for bot cleanup: ${err}`);
+    console.warn(`[bot] Failed to list RunPod pods for bot cleanup: ${err}`);
+  }
+  // Clean up Fly.io bot machines
+  const flyKey = process.env.FLY_API_TOKEN || '';
+  if (flyKey) {
+    try {
+      const flyInstances = await flyio.listInstances({ apiKey: flyKey });
+      const flyToTerminate = flyInstances.filter(inst => inst.status === 'running');
+      if (flyToTerminate.length > 0) {
+        console.log(`[bot] Cleaning up ${flyToTerminate.length} Fly.io bot machine(s)...`);
+        await Promise.allSettled(
+          flyToTerminate.map(async (inst) => {
+            try {
+              await flyio.deleteInstance(inst.instanceId, { apiKey: flyKey });
+              console.log(`[bot] Terminated Fly.io bot machine ${inst.instanceId}`);
+            } catch (err) {
+              console.warn(`[bot] Failed to terminate Fly.io bot ${inst.instanceId}: ${err}`);
+            }
+          })
+        );
+      }
+    } catch (err) {
+      console.warn(`[bot] Failed to list Fly.io machines for cleanup: ${err}`);
+    }
   }
 }
 
@@ -193,16 +224,18 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
     return;
   }
 
-  // ── RunPod cloud deploy ──
+  // ── Cloud deploy (Fly.io preferred, RunPod fallback) ──
+  const flyKey = process.env.FLY_API_TOKEN || '';
   const apiKey = (body.apiKey as string) || deployApiKey || process.env.RUNPOD_API_KEY || '';
-  if (!apiKey) {
+  if (!flyKey && !apiKey) {
     setBotDeployLock(false);
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'RunPod API key required (apiKey or RUNPOD_API_KEY env)' }));
+    res.end(JSON.stringify({ error: 'No deploy credentials — set FLY_API_TOKEN or RUNPOD_API_KEY in .env' }));
     return;
   }
-  setBotApiKey(apiKey);
+  if (apiKey) setBotApiKey(apiKey);
   const forceCpu = !!(body.cpuOnly || body.cpu);
+  const preferFlyio = !!flyKey && !body.runpod; // Fly.io is default when token available
 
   // Generate a random API key for bot pod HTTP auth
   const podApiKey = crypto.randomUUID();
@@ -214,24 +247,50 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
     ...(enableAvatar ? { ENABLE_AVATAR: 'true' } : {}),
   };
 
-  // Clean up any existing bot pods
-  await cleanupBotPods(apiKey);
+  // Clean up any existing bot pods (RunPod only)
+  if (apiKey) await cleanupBotPods(apiKey);
 
   const podName = `${BOT_POD_PREFIX}${Date.now()}`;
   setBotState({
     status: 'creating', startedAt: Date.now(), podId: '', endpoint: '',
-    message: `Creating bot pod on RunPod${forceCpu ? ' (CPU)' : ''}...`, botId: '', meetingUrl: '',
+    message: `Creating bot pod${preferFlyio ? ' on Fly.io' : ` on RunPod${forceCpu ? ' (CPU)' : ''}`}...`, botId: '', meetingUrl: '',
   });
 
   // Deploy asynchronously
   (async () => {
     try {
-      // Try GPU first (much faster boot ~1min), fallback to CPU ($0.12/hr)
-      // Bot doesn't need GPU but GPU pods pull images faster
       let isCpuPod = forceCpu;
       let isScalewayPod = false;
+      let isFlyioPod = false;
       let instance: Awaited<ReturnType<typeof runpod.createInstance>> | null = null;
-      if (!forceCpu) {
+
+      // ── Fly.io (default when FLY_API_TOKEN is set) ──
+      if (preferFlyio) {
+        try {
+          console.log('[bot] Deploying on Fly.io (default)...');
+          isFlyioPod = true;
+          isCpuPod = true;
+          instance = await flyio.createInstance(
+            {
+              dockerImage: botDockerImage,
+              ramGb: 4,
+              vcpus: 2,
+              env: podEnv,
+            },
+            { apiKey: flyKey },
+          );
+        } catch (flyErr) {
+          console.warn(`[bot] Fly.io failed: ${flyErr instanceof Error ? flyErr.message : flyErr}`);
+          isFlyioPod = false;
+          instance = null;
+          if (!apiKey) throw flyErr; // no RunPod fallback available
+          console.log('[bot] Falling back to RunPod...');
+          setBotState({ message: 'Fly.io failed, trying RunPod...' });
+        }
+      }
+
+      // ── RunPod (fallback or when Fly.io not configured) ──
+      if (!instance && !forceCpu) {
         try {
           instance = await runpod.createInstance(
             {
@@ -259,7 +318,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
             {
               computeType: 'CPU',
               cpuFlavorIds: ['cpu5c', 'cpu5g', 'cpu3c', 'cpu3g'],
-              vcpus: 4,
+              vcpus: 2,
               ramGb: 16,  // Chromium needs ≥8GB; 16GB avoids OOM on busy meetings
               dockerImage: botDockerImage,
               storageGb: 20,
@@ -274,19 +333,55 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
         } catch (runpodErr) {
           console.warn(`[bot] RunPod CPU failed: ${runpodErr instanceof Error ? runpodErr.message : runpodErr}`);
           // Fallback to Scaleway if RunPod fails (e.g. insufficient balance)
+          // Fallback chain: Scaleway → Fly.io
           const scwKey = process.env.SCALEWAY_SECRET_KEY || '';
+          const flyKey = process.env.FLY_API_TOKEN || '';
           if (scwKey) {
-            console.log('[bot] Trying Scaleway fallback...');
-            setBotState({ message: 'RunPod unavailable, deploying on Scaleway...' });
-            isScalewayPod = true;
-            instance = await scaleway.createInstance(
+            try {
+              console.log('[bot] Trying Scaleway fallback...');
+              setBotState({ message: 'RunPod unavailable, deploying on Scaleway...' });
+              isScalewayPod = true;
+              instance = await scaleway.createInstance(
+                {
+                  dockerImage: botDockerImage,
+                  region: process.env.SCALEWAY_ZONE || 'fr-par-1',
+                  ramGb: 12,
+                  env: podEnv,
+                },
+                { apiKey: scwKey },
+              );
+            } catch (scwErr) {
+              console.warn(`[bot] Scaleway failed: ${scwErr instanceof Error ? scwErr.message : scwErr}`);
+              isScalewayPod = false;
+              if (flyKey) {
+                console.log('[bot] Trying Fly.io fallback...');
+                setBotState({ message: 'Scaleway unavailable, deploying on Fly.io...' });
+                isFlyioPod = true;
+                instance = await flyio.createInstance(
+                  {
+                    dockerImage: botDockerImage,
+                    ramGb: 4,
+                    vcpus: 2,
+                    env: podEnv,
+                  },
+                  { apiKey: flyKey },
+                );
+              } else {
+                throw scwErr;
+              }
+            }
+          } else if (flyKey) {
+            console.log('[bot] Trying Fly.io fallback...');
+            setBotState({ message: 'RunPod unavailable, deploying on Fly.io...' });
+            isFlyioPod = true;
+            instance = await flyio.createInstance(
               {
                 dockerImage: botDockerImage,
-                region: process.env.SCALEWAY_ZONE || 'fr-par-1',
-                ramGb: 12,
+                ramGb: 4,
+                vcpus: 2,
                 env: podEnv,
               },
-              { apiKey: scwKey },
+              { apiKey: flyKey },
             );
           } else {
             throw runpodErr;
@@ -307,7 +402,9 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
         if (Date.now() - startedAt > BOT_TIMEOUT_MS) {
           setBotState({ status: 'error', message: 'Bot pod timed out waiting for startup' });
           try {
-            if (isScalewayPod) {
+            if (isFlyioPod) {
+              await flyio.deleteInstance(instance.instanceId, { apiKey: flyKey });
+            } else if (isScalewayPod) {
               await scaleway.deleteInstance(instance.instanceId, { apiKey: process.env.SCALEWAY_SECRET_KEY || '' });
             } else {
               await runpod.deleteInstance(instance.instanceId, { apiKey });
@@ -319,9 +416,12 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
         // Resolve endpoint — Scaleway uses public IP, RunPod CPU uses proxy, RunPod GPU uses resolved endpoint
         let endpoint = botState.endpoint;
         if (!endpoint) {
-          if (isScalewayPod) {
+          if (isFlyioPod) {
+            // Fly.io: endpoint is the app's fly.dev URL (set during createInstance)
+            endpoint = instance.endpoint || `https://${process.env.FLY_APP_NAME || 'babelcast-bot'}.fly.dev`;
+            setBotState({ endpoint });
+          } else if (isScalewayPod) {
             // Scaleway: endpoint is stored in instance when created (already in botState)
-            // Try to get from stored instance or use instance ID format
             if (botState.endpoint) {
               endpoint = botState.endpoint;
               console.log(`[bot] Scaleway endpoint from state: ${endpoint}`);
@@ -342,16 +442,27 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
         // Probe /version endpoint (lightweight health check)
         if (endpoint) {
           try {
-            const resp = await fetch(`${endpoint}/version`, { signal: AbortSignal.timeout(5_000) });
+            const probeHeaders: Record<string, string> = {};
+            const fetchOpts: Record<string, unknown> = { headers: probeHeaders, signal: AbortSignal.timeout(5_000) };
+            // Fly.io: target specific machine + Host header when connecting via IP
+            if (isFlyioPod) {
+              probeHeaders['fly-force-instance-id'] = instance.instanceId;
+              const flyHost = flyio.getFlyHost();
+              if (flyHost) {
+                probeHeaders['Host'] = flyHost;
+                // Skip TLS cert validation when connecting via IP (cert is for *.fly.dev)
+                (fetchOpts as any).tls = { rejectUnauthorized: false };
+              }
+            }
+            const resp = await fetch(`${endpoint}/version`, fetchOpts as any);
             if (resp.ok) {
               let webcamRtmpUrl = '';
               let sshHost = '';
               let sshPort = 0;
 
-              if (isCpuPod) {
-                // CPU pods: no direct IP/TCP ports — only HTTP proxy URLs available
-                // RTMP (TCP) not available via proxy; webcam push requires GPU pod
-                console.log(`[bot] CPU pod ready (proxy only — no RTMP/SSH direct access)`);
+              if (isFlyioPod || isCpuPod) {
+                // Fly.io + CPU pods: no direct IP/TCP ports — only HTTP(S) URLs available
+                console.log(`[bot] ${isFlyioPod ? 'Fly.io' : 'CPU'} pod ready (HTTPS only — no RTMP/SSH)`);
               } else {
                 // GPU pods: resolve direct IP + port mappings for RTMP/SSH via RunpodClient
                 try {
@@ -645,20 +756,34 @@ export async function handleBotTerminate(req: IncomingMessage, res: ServerRespon
   });
   setBotDeployLock(false);
 
-  // Clean up local Docker container if it was a local deploy
+  // Clean up the bot pod/machine based on provider
   if (podId === 'local') {
     await cleanupLocalDocker();
     console.log(`[bot] Stopped local Docker container`);
-  } else if (apiKey) {
-    if (podId) {
+  } else if (podId) {
+    // Try Fly.io first (if endpoint looks like fly.dev or we have a fly token)
+    const flyKey = process.env.FLY_API_TOKEN || '';
+    if (flyKey && (botState.endpoint?.includes('.fly.dev') || botState.endpoint?.includes('66.'))) {
+      try {
+        await flyio.deleteInstance(podId, { apiKey: flyKey });
+        console.log(`[bot] Terminated Fly.io bot machine ${podId}`);
+      } catch (err) {
+        console.warn(`[bot] Failed to terminate Fly.io bot ${podId}: ${err}`);
+      }
+    } else if (apiKey) {
       try {
         await runpod.deleteInstance(podId, { apiKey });
-        console.log(`[bot] Terminated bot pod ${podId}`);
+        console.log(`[bot] Terminated RunPod bot pod ${podId}`);
       } catch (err) {
-        console.warn(`[bot] Failed to terminate pod ${podId}: ${err}`);
+        console.warn(`[bot] Failed to terminate RunPod pod ${podId}: ${err}`);
       }
     }
-    await cleanupBotPods(apiKey);
+  }
+  // Sweep any orphaned bot pods/machines across all providers
+  if (apiKey) await cleanupBotPods(apiKey);
+  else {
+    const flyKey = process.env.FLY_API_TOKEN || '';
+    if (flyKey) await cleanupBotPods('');
   }
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
