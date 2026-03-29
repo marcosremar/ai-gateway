@@ -496,9 +496,10 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     try {
       config = await _validateDeployRequest(body, requestId);
     } catch (err: unknown) {
-      const { status, message } = err as { status: number; message: string };
+      const status = (err as any)?.status ?? 400;
+      const message = (err as any)?.message ?? String(err);
       res.writeHead(status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: message }));
+      res.end(JSON.stringify({ error: { message, type: 'validation_error' } }));
       return;
     }
 
@@ -507,9 +508,10 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     try {
       tierResult = await _selectDeploymentTier(config, requestId);
     } catch (err: unknown) {
-      const { status, message } = err as { status: number; message: string };
+      const status = (err as any)?.status ?? 500;
+      const message = (err as any)?.message ?? String(err);
       res.writeHead(status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: message }));
+      res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
       return;
     }
 
