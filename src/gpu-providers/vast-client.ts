@@ -99,6 +99,13 @@ export class VastClient extends AbstractGpuProvider {
     super(opts);
   }
 
+  /** Check if any requested GPU type requires Blackwell CUDA (12.8+). */
+  private _needsBlackwellCuda(gpuTypes?: string[]): boolean {
+    if (!gpuTypes?.length) return false;
+    const blackwell = ['5090', '5080', '5070', 'B200', 'B100', 'GB200'];
+    return gpuTypes.some(g => blackwell.some(b => g.includes(b)));
+  }
+
   /** Mark a host as unstable (reclaimed an instance during loading). */
   private _markHostUnstable(ip: string): void {
     this._unstableHosts.set(ip, Date.now());
@@ -203,8 +210,9 @@ export class VastClient extends AbstractGpuProvider {
       rented: { eq: false },
       num_gpus: { eq: spec.gpuCount ?? 1 },
       disk_space: { gte: diskGb },
-      direct_port_count: { gte: 1 },   // Need at least 1 open port for SSH
-      cuda_vers: { gte: 12.4 },         // Minimum CUDA 12.4 (our base image) — filter field is cuda_vers, not cuda_max_good (response-only)
+      // No direct_port_count filter — Docker NAT via '-p 8000:8000' in env handles port mapping
+      // CUDA filter: 12.8+ for Blackwell (RTX 5090/5080), 12.4+ for everything else
+      cuda_vers: { gte: this._needsBlackwellCuda(spec.gpuTypes) ? 12.8 : 12.4 },
       // Host quality filters — fast internet critical for 10GB+ images to boot under 15min
       reliability2: { gte: 0.95 },      // >95% reliability score
       inet_down: { gte: 2000 },         // Minimum 2 Gb/s download (10GB image in ~40s)
@@ -263,9 +271,7 @@ export class VastClient extends AbstractGpuProvider {
       this.log.log(`[vast] Geo filter (create): ${before} → ${offers.length} offers matching [${createGeoFilter.join(',')}]`);
     }
 
-    let hasDirectPortOffers = offers.length > 0;
-
-    // Fallback: relax network requirements to find more direct-port hosts
+    // Fallback: relax network requirements to find more hosts
     if (!offers.length) {
       this.log.warn('[vast] No offers with strict filters — relaxing to inet_down: 500, reliability: 0.9');
       searchBody.inet_down = { gte: 500 };
@@ -279,28 +285,9 @@ export class VastClient extends AbstractGpuProvider {
             return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`) || geo.toUpperCase().startsWith(`${cc},`));
           });
         }
-        hasDirectPortOffers = offers.length > 0;
       } catch (retryErr) {
         this.log.error(`[vast] Relaxed search also failed: ${this.errMsg(retryErr)}`);
       }
-    }
-
-    // Last resort: remove direct_port filter, but mark as SSH-only
-    if (!offers.length) {
-      this.log.warn('[vast] No direct-port offers even with relaxed filters — trying SSH-only hosts (last resort)');
-      delete searchBody.direct_port_count;
-      try {
-        offers = await this._searchOffers(searchBody, headers);
-        if (createGeoFilter && offers.length) {
-          offers = offers.filter(o => {
-            const geo = String(o.geolocation || '');
-            return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`));
-          });
-        }
-      } catch (retryErr) {
-        this.log.error(`[vast] SSH-only fallback search also failed: ${this.errMsg(retryErr)}`);
-      }
-      hasDirectPortOffers = false;
     }
 
     if (!offers.length) {
@@ -329,36 +316,24 @@ export class VastClient extends AbstractGpuProvider {
       const gpuName = (offer.gpu_name || 'unknown') as string;
       const pricePerHr = (offer.dph_total || 0) as number;
 
-      const hasDirectPorts = hasDirectPortOffers || (offer.direct_port_count as number ?? 0) >= 1;
-      // Build onstart command.
-      // In Docker 'args' mode: onstart is passed to Docker exec form — the ENTIRE string
-      // becomes the binary path. bash -c wrapping FAILS because Docker tries to stat
-      // "bash -c '...'" as a single file. Use bare script path only.
-      // In SSH 'ssh_direct' mode: a shell interprets onstart, so wrapping works.
+      // ssh_direct: Vast.ai provides SSH access + runs onstart script.
+      // Works on ALL hosts (including those without direct ports like RTX 5090).
+      // The app is launched via onstart and port-forwarded via SSH tunnel.
       const onstart = spec.onstart || '/app/start.sh';
-      const wrappedOnstart = `bash -c '${onstart} >> /tmp/start.log 2>&1 || echo "[vast] onstart failed: $?" >> /tmp/start.log'`;
-
-      // Choose runtype based on host capabilities:
-      // - Direct ports available → 'args' (Docker mode, CMD runs, port NAT works)
-      // - No direct ports → 'ssh_direct' (SSH mode, onstart runs app, gateway uses SSH tunnel)
-      const useDockerMode = hasDirectPorts;
       const createBody: Record<string, unknown> = {
         client_id: 'me',
         image: imageName,
         // Do NOT include 'price' — omitting it = on-demand (fixed price, non-interruptible).
-        // Passing price:null or price:0 creates an interruptible/spot instance that gets reclaimed!
-        disk: diskGb + 15,  // +15GB headroom for runtime model downloads
-        runtype: useDockerMode ? 'args' : 'ssh_direct',
-        onstart: useDockerMode ? onstart : wrappedOnstart,
-        // Vast.ai env dict: env vars as key-value + port mappings as "-p X:X": "1"
-        // Port exposure MUST be in env dict — the separate 'ports' field is ignored
+        disk: diskGb + 15,
+        runtype: 'ssh_direct',
+        onstart: `nohup bash -c '${onstart}' > /var/log/app.log 2>&1 &`,
+        // Port mappings via env dict (works when host has direct ports)
         env: {
           TZ: 'UTC',
           ...envVars,
-          '-p 8000:8000': '1',       // TCP (HTTP app port)
-          '-p 8001:8001/udp': '1',   // UDP (WebRTC media)
+          '-p 8000:8000': '1',
+          '-p 8001:8001/udp': '1',
         },
-        ...(hasDirectPorts ? { direct_port_count: 1 } : {}),
         // Template support: use pre-configured template for faster boot
         ...(spec.templateHashId ? { template_hash_id: spec.templateHashId } : {}),
         // Don't cancel_unavail — let it queue instead of silently destroying
@@ -658,14 +633,36 @@ export class VastClient extends AbstractGpuProvider {
     const { rawId } = stripPrefix(instanceId);
 
     try {
-      const res = await this._vastFetch(
-        `${VAST_API_BASE}/instances/request_logs/${rawId}/?api_key=${apiKey}&tail=${lines}`,
-        { method: 'PUT', headers },
+      // Request logs via Vast.ai async log service
+      const reqRes = await this._vastFetch(
+        `${VAST_API_BASE}/instances/request_logs/${rawId}/`,
+        { method: 'PUT', headers, body: JSON.stringify({ api_key: apiKey, tail: String(lines) }) },
         TIMEOUTS.read,
       );
-      if (!res.ok) return null;
+      if (!reqRes.ok) {
+        this.log.debug(`[vast] request_logs failed: HTTP ${reqRes.status}`);
+        return null;
+      }
 
-      // Vast.ai returns logs asynchronously — poll for them
+      const reqData = await reqRes.json() as Record<string, unknown>;
+      const resultUrl = reqData.result_url as string | undefined;
+
+      // If we got a direct S3 URL, fetch the full logs
+      if (resultUrl) {
+        // Poll S3 URL (async upload may take 2-5s)
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            const logRes = await fetch(resultUrl, { signal: AbortSignal.timeout(5000) });
+            if (logRes.ok) {
+              const text = await logRes.text();
+              if (text.trim()) return text;
+            }
+          } catch { /* S3 not ready yet, retry */ }
+        }
+      }
+
+      // Fallback: read status_msg from instance detail
       await new Promise(r => setTimeout(r, 2000));
       const logsRes = await this._vastFetch(
         `${VAST_API_BASE}/instances/${rawId}/?api_key=${apiKey}`,
@@ -674,8 +671,7 @@ export class VastClient extends AbstractGpuProvider {
       );
       if (!logsRes.ok) return null;
       const data = await logsRes.json() as Record<string, unknown>;
-      const statusMsg = String(data.status_msg || '');
-      return statusMsg || null;
+      return String(data.status_msg || '') || null;
     } catch (err) {
       this.log.debug(`[vast] getInstanceLogs(${instanceId}) failed: ${this.errMsg(err)}`);
       return null;
