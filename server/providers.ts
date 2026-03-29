@@ -30,6 +30,7 @@ import { VastClient } from '../src/gpu-providers/vast-client';
 import { TensordockClient } from '../src/gpu-providers/tensordock-client';
 import { ModalClient } from '../src/gpu-providers/modal-client';
 import { ScalewayClient } from '../src/cpu-providers/scaleway-client';
+import { FlyioClient } from '../src/cpu-providers/flyio-client';
 import {
   latencyRing, latencyRingIdx, setLatencyRingIdx, deployState, gpuHealthy, setGpuHealthy,
   isGpuAvailable, isGpuLatencyAcceptable,
@@ -344,6 +345,7 @@ export const vast = new VastClient();
 export const tensordock = new TensordockClient();
 export const modal = new ModalClient({ defaultFunctionName: 'serve' });
 export const scaleway = new ScalewayClient();
+export const flyio = new FlyioClient();
 
 // ── Centralized translationProfile mutator ───────────────────────────────────
 

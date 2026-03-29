@@ -4,6 +4,9 @@
 export const PORT = parseInt(process.env.PORT || '4000');
 export const PROVIDER = process.env.PROVIDER || 'groq';
 export const RUNPOD_ENDPOINT = process.env.RUNPOD_ENDPOINT;  // e.g. http://pod-ip:8000
+/** Full-pipeline server URL for tier 2 fallback (STT + LLM + TTS, same API as GPU pod).
+ *  Set MODAL_BABELCAST_URL in .env to enable. No default — not activated unless configured. */
+export const MODAL_BABELCAST_URL = process.env.MODAL_BABELCAST_URL;
 export const PROVIDER_CHAIN: string[] = (process.env.PROVIDER_CHAIN || 'gpu,groq')
   .split(',').map(s => s.trim()).filter(Boolean);
 export const GPU_PROVIDERS = new Set(['runpod', 'tensordock', 'vast', 'modal', 'gpu']);

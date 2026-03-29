@@ -2,9 +2,9 @@ import type { ModelInfo } from '../types';
 
 export const FIREWORKS_STT_MODELS: ModelInfo[] = [
   {
-    id: 'whisper-v3-turbo',
-    name: 'Whisper V3 Turbo',
-    description: 'Fast multilingual transcription (Fireworks-optimized)',
+    id: 'whisper-v3',
+    name: 'Whisper V3',
+    description: 'Multilingual transcription (Fireworks)',
     capability: 'stt',
     isDefault: true,
   },

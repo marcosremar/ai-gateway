@@ -256,6 +256,13 @@ function startBackgroundWarmthMonitor(endpoint: string) {
       if (res.ok) {
         const data = await res.json() as Record<string, unknown>;
         updateGpuModelWarmth(data);
+        // Populate GPU hardware info from /health if not already known (e.g. Modal)
+        if (!deployState.gpuType && data.gpu_type) {
+          setDeployState({ gpuType: String(data.gpu_type) });
+        }
+        if (data.gpu_vram_gb && !deployState.providerMeta?.gpuVramGb) {
+          setDeployState({ providerMeta: { ...deployState.providerMeta, gpuVramGb: Number(data.gpu_vram_gb) } });
+        }
         const sttWarm = isStageWarm('stt');
         const llmWarm = isStageWarm('llm');
         const svc = (data.services ?? {}) as Record<string, string>;
@@ -324,6 +331,13 @@ export function scheduleNextMonitorProbe() {
       const healthy = probeResult.ok;
       if (healthy && probeResult.data) {
         updateGpuModelWarmth(probeResult.data);
+        // Populate GPU hardware info from /health if not already known (e.g. Modal)
+        if (!deployState.gpuType && probeResult.data.gpu_type) {
+          setDeployState({ gpuType: String(probeResult.data.gpu_type) });
+        }
+        if (probeResult.data.gpu_vram_gb && !deployState.providerMeta?.gpuVramGb) {
+          setDeployState({ providerMeta: { ...deployState.providerMeta, gpuVramGb: Number(probeResult.data.gpu_vram_gb) } });
+        }
         // Activate full GPU pipeline when STT + LLM become warm (staged boot)
         if (isStageWarm('stt') && isStageWarm('llm') && !translationProfile.gpuEndpoint && !isReadinessCheckInProgress() && deployState.endpoint) {
           console.log('[gpu] STT + LLM warm — running readiness benchmark via monitor');

@@ -204,7 +204,7 @@ export class VastClient extends AbstractGpuProvider {
       num_gpus: { eq: spec.gpuCount ?? 1 },
       disk_space: { gte: diskGb },
       direct_port_count: { gte: 1 },   // Need at least 1 open port for SSH
-      cuda_max_good: { gte: 12.4 },    // Minimum CUDA 12.4 (our base image)
+      cuda_vers: { gte: 12.4 },         // Minimum CUDA 12.4 (our base image) — filter field is cuda_vers, not cuda_max_good (response-only)
       // Host quality filters
       reliability2: { gte: 0.9 },       // >90% reliability score
       inet_down: { gte: 500 },          // Minimum 500 Mb/s download (fast image pulls)
@@ -820,31 +820,39 @@ export class VastClient extends AbstractGpuProvider {
     if (options.gpuTypes?.length) {
       searchBody.gpu_name = { in: normalizeGpuNames(options.gpuTypes) };
     }
+    // Client-side geo filter — same logic as createMachine.
+    // Vast.ai geolocation format: "France, FR" — server-side { eq: "FR" } never matches.
+    // Always filter client-side after fetch.
+    const EU_CC = ['AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','NO','CH','GB','IS'];
+    const COUNTRY_TO_CC: Record<string, string> = {
+      FRANCE: 'FR', SPAIN: 'ES', GERMANY: 'DE', NETHERLANDS: 'NL', ITALY: 'IT',
+      PORTUGAL: 'PT', POLAND: 'PL', SWEDEN: 'SE', NORWAY: 'NO', SWITZERLAND: 'CH',
+      UNITEDKINGDOM: 'GB', UK: 'GB', UNITEDSTATES: 'US', USA: 'US',
+    };
+    let listGeoFilter: string[] | undefined;
     if (options.region) {
-      // Support macro-regions like "EU" by expanding to country codes
-      const EU_COUNTRIES = ['AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE', 'NO', 'CH', 'GB', 'IS'];
-      if (options.region.toUpperCase() === 'EU' || options.region.toUpperCase() === 'EUROPE') {
-        // Vast.ai geolocation format: "Country Name, CC" — filter client-side after fetch
-        // Don't set server-side filter; we'll filter results below
-        (searchBody as any)._clientSideGeoFilter = EU_COUNTRIES;
+      const r = options.region.toUpperCase();
+      if (r === 'EU' || r === 'EUROPE') {
+        listGeoFilter = EU_CC;
       } else {
-        searchBody.geolocation = { eq: options.region };
+        listGeoFilter = r.split(',').map(s => {
+          const trimmed = s.trim().replace(/\s+/g, '');
+          return COUNTRY_TO_CC[trimmed] ?? trimmed;
+        });
       }
     }
 
     try {
       let offers = await this._searchOffers(searchBody, headers);
 
-      // Client-side geo filter for macro-regions (EU, etc.)
-      const geoFilter = (searchBody as any)._clientSideGeoFilter as string[] | undefined;
-      if (geoFilter) {
+      // Client-side geo filter
+      if (listGeoFilter && offers.length) {
         const before = offers.length;
         offers = offers.filter(o => {
           const geo = String(o.geolocation || '');
-          // Match ", FR" or ", DE" at end of geolocation string
-          return geoFilter.some(cc => geo.endsWith(`, ${cc}`));
+          return listGeoFilter!.some(cc => geo.endsWith(`, ${cc}`) || geo.toUpperCase().startsWith(`${cc},`));
         });
-        this.log.log(`[vast] Geo filter: ${before} → ${offers.length} offers in ${geoFilter.length} countries`);
+        this.log.log(`[vast] Geo filter: ${before} → ${offers.length} offers matching [${listGeoFilter.join(',')}]`);
       }
 
       // Group by gpu_name — aggregate availability, keep cheapest price
