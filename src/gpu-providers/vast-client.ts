@@ -265,13 +265,32 @@ export class VastClient extends AbstractGpuProvider {
 
     let hasDirectPortOffers = offers.length > 0;
 
-    // Fallback: if no machines with direct ports, retry without the filter
+    // Fallback: relax network requirements to find more direct-port hosts
     if (!offers.length) {
-      this.log.warn('[vast] No offers with direct_port_count >= 1 — retrying without direct port filter (SSH fallback will be used)');
+      this.log.warn('[vast] No offers with strict filters — relaxing network requirements (inet_down: 200, inet_up: 50, reliability: 0.8)');
+      searchBody.inet_down = { gte: 200 };
+      searchBody.inet_up = { gte: 50 };
+      searchBody.reliability2 = { gte: 0.8 };
+      try {
+        offers = await this._searchOffers(searchBody, headers);
+        if (createGeoFilter && offers.length) {
+          offers = offers.filter(o => {
+            const geo = String(o.geolocation || '');
+            return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`) || geo.toUpperCase().startsWith(`${cc},`));
+          });
+        }
+        hasDirectPortOffers = offers.length > 0;
+      } catch (retryErr) {
+        this.log.error(`[vast] Relaxed search also failed: ${this.errMsg(retryErr)}`);
+      }
+    }
+
+    // Last resort: remove direct_port filter, but mark as SSH-only
+    if (!offers.length) {
+      this.log.warn('[vast] No direct-port offers even with relaxed filters — trying SSH-only hosts (last resort)');
       delete searchBody.direct_port_count;
       try {
         offers = await this._searchOffers(searchBody, headers);
-        // Re-apply geo filter
         if (createGeoFilter && offers.length) {
           offers = offers.filter(o => {
             const geo = String(o.geolocation || '');
@@ -279,7 +298,7 @@ export class VastClient extends AbstractGpuProvider {
           });
         }
       } catch (retryErr) {
-        this.log.error(`[vast] Fallback search (no direct_port filter) also failed: ${this.errMsg(retryErr)}`);
+        this.log.error(`[vast] SSH-only fallback search also failed: ${this.errMsg(retryErr)}`);
       }
       hasDirectPortOffers = false;
     }
@@ -963,11 +982,11 @@ export class VastClient extends AbstractGpuProvider {
           }
 
           // Early exit for SSH-only instances: if running with SSH but no endpoint
-          // after 10 consecutive polls (~2.5min), the host likely has no direct ports.
-          // Return early so createInstance can try the next offer.
+          // after 3 consecutive polls (~30s), the host likely has no direct ports.
+          // Return early so createInstance can try the next offer faster.
           if (!endpoint && sshHost && sshPort && detail.status?.toLowerCase() === 'running') {
             sshOnlyRunningCount++;
-            if (sshOnlyRunningCount >= 10) {
+            if (sshOnlyRunningCount >= 3) {
               this.log.log(`[vast] Instance ${contractId} SSH-only (no endpoint after ${Math.round(elapsed / 1000)}s, ssh=${sshHost}:${sshPort}) — returning early, will try next offer`);
               break;
             }

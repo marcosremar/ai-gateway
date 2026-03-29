@@ -89,8 +89,8 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
     tts: [{ provider: 'gpu', model: 'qwen3-tts' }, { provider: 'modal', model: 'qwen3-tts' }],
     gpuDeploy: {
       dockerImage: 'marcosremar/babelcast-translategemma:latest',
-      gpuTypes: ['NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
-      region: 'EU',
+      gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
+      region: 'US',
       timeoutMin: 30,
     },
   },
@@ -101,9 +101,9 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
     llm: [{ provider: 'gpu', model: 'translategemma' }, { provider: 'groq', model: 'llama-3.3-70b-versatile' }],
     tts: [{ provider: 'groq', model: 'orpheus-v1-english' }],
     gpuDeploy: {
-      dockerImage: 'marcosremar/babelcast-translategemma-only-subtitles:latest',
-      gpuTypes: ['NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
-      region: 'EU',
+      dockerImage: 'marcosremar/babelcast-subtitle:latest',
+      gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
+      region: 'US',
       timeoutMin: 30,
     },
   },

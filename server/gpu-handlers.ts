@@ -667,6 +667,8 @@ export async function handleGpuList(_req: IncomingMessage, res: ServerResponse):
             status: i.status,
             gpuType: i.gpuType,
             isActive: i.instanceId === deployState.podId && deployState.status === 'ready',
+            sshHost: i.sshHost,
+            sshPort: i.sshPort,
           }));
       })
   );

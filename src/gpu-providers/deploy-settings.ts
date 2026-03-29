@@ -31,6 +31,7 @@ export const DEFAULT_GPU_PRIORITY: string[] = [
 export const DEFAULT_GPU_PRIORITY_BY_PROVIDER: Record<string, string[]> = {
   vast: [...DEFAULT_GPU_PRIORITY], // Vast has the widest GPU selection
   runpod: [                        // RunPod Secure Cloud — data center GPUs
+    'NVIDIA GeForce RTX 5090',
     'NVIDIA RTX A6000',
     'NVIDIA L40S',
     'NVIDIA A100-SXM4-80GB',
@@ -39,6 +40,7 @@ export const DEFAULT_GPU_PRIORITY_BY_PROVIDER: Record<string, string[]> = {
     'NVIDIA A40',
   ],
   tensordock: [                    // TensorDock bare metal marketplace
+    'NVIDIA GeForce RTX 5090',
     'NVIDIA GeForce RTX 4090',
     'NVIDIA RTX A6000',
     'NVIDIA A40',
