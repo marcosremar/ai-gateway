@@ -72,6 +72,7 @@ const sttSessions = new Map<string, import('../ai-gateway/src/streaming-stt').St
 let botAudioSource: BabelCastWS | null = null;
 let botAudioSampleRate = 16000;
 let botAudioChunks = 0;
+export function getBotAudioChunks(): number { return botAudioChunks; }
 
 // ── Bot audio → pipeline auto-processing ─────────────────────────────────
 // Buffers incoming bot PCM chunks. When enough audio accumulates (VAD-like),
