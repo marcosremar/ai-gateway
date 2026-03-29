@@ -4,7 +4,7 @@
  * - Local: uses pg_dump / psql
  */
 
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { randomUUID } from 'crypto';
 import type { DatabaseConfig, BackupInfo, BackupOptions, BackupResult, RestoreOptions } from './types';
@@ -68,12 +68,14 @@ export class BackupService {
     const connStr = options?.connectionString ?? this.config.databaseUrl;
     const parsed = parseConnectionString(connStr);
 
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    if (parsed.password) env.PGPASSWORD = parsed.password;
+    const isLocal = !parsed.host || parsed.host === 'localhost' || parsed.host === '127.0.0.1';
+    const env = buildPgEnv(parsed.password, isLocal);
 
     const args = ['--no-password', '--clean', '--if-exists', '--format=plain'];
-    if (parsed.host) args.push(`--host=${parsed.host}`);
-    if (parsed.port) args.push(`--port=${parsed.port}`);
+    // For localhost, skip --host so pg_dump uses the Unix socket. Also unset
+    // PGHOST/PGPORT in the env to prevent inherited values from overriding.
+    if (!isLocal) args.push(`--host=${parsed.host}`);
+    if (!isLocal && parsed.port) args.push(`--port=${parsed.port}`);
     if (parsed.user) args.push(`--username=${parsed.user}`);
     if (parsed.database) args.push(parsed.database);
 
@@ -97,24 +99,56 @@ export class BackupService {
     const parsed = parseConnectionString(connStr);
     const sqlContent = Buffer.from(base64Sql, 'base64').toString('utf8');
 
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    if (parsed.password) env.PGPASSWORD = parsed.password;
+    const isLocal = !parsed.host || parsed.host === 'localhost' || parsed.host === '127.0.0.1';
+    const env = buildPgEnv(parsed.password, isLocal);
 
     const args = ['--no-password'];
-    if (parsed.host) args.push(`--host=${parsed.host}`);
-    if (parsed.port) args.push(`--port=${parsed.port}`);
+    if (!isLocal) args.push(`--host=${parsed.host}`);
+    if (!isLocal && parsed.port) args.push(`--port=${parsed.port}`);
     if (parsed.user) args.push(`--username=${parsed.user}`);
     if (parsed.database) args.push(parsed.database);
 
-    await execFileAsync('psql', args, {
-      env,
-      input: sqlContent,
-      maxBuffer: 100 * 1024 * 1024,
-    } as Parameters<typeof execFileAsync>[2]);
+    // execFile doesn't support piping stdin — use spawn to write SQL directly.
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('psql', args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+      const stderr: Buffer[] = [];
+
+      child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (code !== 0) {
+          const msg = Buffer.concat(stderr).toString('utf8').trim();
+          reject(new DatabaseError(`psql restore failed (exit ${code}): ${msg}`, 'RESTORE_FAILED'));
+        } else {
+          resolve();
+        }
+      });
+
+      child.stdin?.write(sqlContent);
+      child.stdin?.end();
+    });
   }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Build a clean process env for pg_dump / psql.
+ * For local connections we strip all PG* env vars so that inherited values
+ * (e.g. PGHOST pointing at a remote Neon host) don't override the socket path.
+ */
+function buildPgEnv(password: string | undefined, isLocal: boolean): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (isLocal) {
+    // Remove all PostgreSQL connection env vars — let pg_dump discover the socket
+    for (const key of ['PGHOST', 'PGHOSTADDR', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGPASSFILE']) {
+      delete env[key];
+    }
+  } else if (password) {
+    env.PGPASSWORD = password;
+  }
+  return env;
+}
 
 function parseConnectionString(url: string): {
   host?: string;
