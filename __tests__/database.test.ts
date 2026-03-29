@@ -16,6 +16,7 @@ import {
   DatabaseService,
   createDatabaseService,
   getDatabase,
+  parseConnectionString,
 } from '@ai-gateway/database/index';
 
 // ── detectEnvironment ─────────────────────────────────────────────────────────
@@ -312,5 +313,199 @@ describe('getDatabase', () => {
     const b = getDatabase();
     expect(a).toBe(b);
     vi.unstubAllEnvs();
+  });
+
+  it('clearing globalThis creates a fresh instance', () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://user:pass@localhost:5432/db');
+    const first = getDatabase();
+    // Simulate process restart / fresh module load
+    (globalThis as Record<string, unknown>)['__aiGatewayDb__'] = undefined;
+    const second = getDatabase();
+    expect(second).not.toBe(first);
+    vi.unstubAllEnvs();
+  });
+});
+
+// ── parseConnectionString ──────────────────────────────────────────────────────
+
+describe('parseConnectionString', () => {
+  it('parses a full connection string', () => {
+    const result = parseConnectionString('postgresql://alice:secret@db.example.com:5433/mydb');
+    expect(result.host).toBe('db.example.com');
+    expect(result.port).toBe('5433');
+    expect(result.user).toBe('alice');
+    expect(result.password).toBe('secret');
+    expect(result.database).toBe('mydb');
+  });
+
+  it('parses a URL without password', () => {
+    const result = parseConnectionString('postgresql://maramosp@localhost:5432/dumonttalker');
+    expect(result.user).toBe('maramosp');
+    expect(result.password).toBeUndefined();
+    expect(result.host).toBe('localhost');
+    expect(result.database).toBe('dumonttalker');
+  });
+
+  it('parses a Neon URL', () => {
+    const result = parseConnectionString('postgresql://neondb_owner:npg_key@ep-floral-wind-pooler.neon.tech/neondb?sslmode=require');
+    expect(result.host).toBe('ep-floral-wind-pooler.neon.tech');
+    expect(result.user).toBe('neondb_owner');
+    expect(result.database).toBe('neondb');
+  });
+
+  it('decodes URL-encoded special chars in password', () => {
+    const result = parseConnectionString('postgresql://user:p%40ss%21@host/db');
+    expect(result.password).toBe('p@ss!');
+  });
+
+  it('returns empty object for malformed URL', () => {
+    const result = parseConnectionString('not-a-url');
+    expect(result).toEqual({});
+  });
+
+  it('returns empty object for empty string', () => {
+    const result = parseConnectionString('');
+    expect(result).toEqual({});
+  });
+});
+
+// ── DatabaseService.close() ────────────────────────────────────────────────────
+
+describe('DatabaseService.close()', () => {
+  beforeEach(() => vi.unstubAllEnvs());
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('close() before any query does not throw', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://user:pass@localhost:5432/db');
+    const svc = new DatabaseService();
+    await expect(svc.close()).resolves.not.toThrow();
+  });
+
+  it('multiple close() calls do not throw', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://user:pass@localhost:5432/db');
+    const svc = new DatabaseService();
+    await svc.close();
+    await expect(svc.close()).resolves.not.toThrow();
+    await expect(svc.close()).resolves.not.toThrow();
+  });
+});
+
+// ── DatabaseService.prisma getter ─────────────────────────────────────────────
+
+describe('DatabaseService.prisma', () => {
+  beforeEach(() => vi.unstubAllEnvs());
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('returns the same instance on repeated accesses (lazy singleton)', () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://user:pass@localhost:5432/db');
+    const svc = new DatabaseService();
+    const p1 = svc.prisma;
+    const p2 = svc.prisma;
+    expect(p1).toBe(p2); // same reference
+  });
+
+  it('prisma instance has $disconnect method', () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://user:pass@localhost:5432/db');
+    const svc = new DatabaseService();
+    const p = svc.prisma as Record<string, unknown>;
+    expect(typeof p['$disconnect']).toBe('function');
+  });
+
+  it('close() clears cached prisma instance (new access creates fresh one)', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://user:pass@localhost:5432/db');
+    const svc = new DatabaseService();
+    const p1 = svc.prisma;
+    await svc.close();
+    const p2 = svc.prisma;
+    // After close, a new instance is created
+    expect(p2).not.toBe(p1);
+  });
+});
+
+// ── NeonManagementClient — getBranchConnectionUri / createDatabase / deleteDatabase ──
+
+describe('NeonManagementClient — untested methods', () => {
+  const mockFetch = vi.fn();
+  beforeEach(() => {
+    vi.stubGlobal('fetch', mockFetch);
+    mockFetch.mockReset();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  function mockResponse(body: unknown, status = 200) {
+    mockFetch.mockResolvedValueOnce({
+      ok: status >= 200 && status < 300,
+      status,
+      json: () => Promise.resolve(body),
+      text: () => Promise.resolve(JSON.stringify(body)),
+    });
+  }
+
+  const client = new NeonManagementClient('test-api-key', 'proj-abc');
+
+  it('getBranchConnectionUri makes GET to project-level connection_uri endpoint', async () => {
+    mockResponse({ uri: 'postgresql://role:pass@ep-test.neon.tech/mydb' });
+    const uri = await client.getBranchConnectionUri('br-1', 'mydb', 'myrole');
+    expect(uri).toBe('postgresql://role:pass@ep-test.neon.tech/mydb');
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/connection_uri?branch_id=br-1'),
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('database_name=mydb'),
+      expect.anything(),
+    );
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('role_name=myrole'),
+      expect.anything(),
+    );
+  });
+
+  it('getBranchConnectionUri URL-encodes database name', async () => {
+    mockResponse({ uri: 'postgresql://role:pass@ep-test.neon.tech/my%20db' });
+    await client.getBranchConnectionUri('br-1', 'my db', 'role');
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('database_name=my%20db'),
+      expect.anything(),
+    );
+  });
+
+  it('createDatabase makes POST with name and owner_name', async () => {
+    mockResponse({
+      database: {
+        id: 42,
+        branch_id: 'br-1',
+        name: 'newdb',
+        owner_name: 'admin',
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+      },
+    });
+    const db = await client.createDatabase('br-1', 'newdb', 'admin');
+    expect(db.name).toBe('newdb');
+    expect(db.ownerName).toBe('admin');
+    expect(db.branchId).toBe('br-1');
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/branches/br-1/databases'),
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('deleteDatabase makes DELETE to correct URL', async () => {
+    mockResponse({});
+    await client.deleteDatabase('br-1', 'mydb');
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/branches/br-1/databases/mydb'),
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+  });
+
+  it('deleteDatabase URL-encodes database name with special chars', async () => {
+    mockResponse({});
+    await client.deleteDatabase('br-1', 'my db');
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/databases/my%20db'),
+      expect.anything(),
+    );
   });
 });

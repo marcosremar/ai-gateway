@@ -79,7 +79,19 @@ export class BackupService {
     if (parsed.user) args.push(`--username=${parsed.user}`);
     if (parsed.database) args.push(parsed.database);
 
-    const { stdout } = await execFileAsync('pg_dump', args, { env, maxBuffer: 100 * 1024 * 1024 });
+    let stdout: string;
+    try {
+      ({ stdout } = await execFileAsync('pg_dump', args, { env, maxBuffer: 100 * 1024 * 1024 }));
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') {
+        throw new DatabaseError(
+          'pg_dump not found. Install PostgreSQL client tools (e.g. apt install postgresql-client or brew install libpq).',
+          'BINARY_NOT_FOUND',
+        );
+      }
+      throw err;
+    }
 
     const backup: BackupInfo = {
       id: randomUUID(),
@@ -114,7 +126,16 @@ export class BackupService {
       const stderr: Buffer[] = [];
 
       child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
-      child.on('error', reject);
+      child.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT') {
+          reject(new DatabaseError(
+            'psql not found. Install PostgreSQL client tools (e.g. apt install postgresql-client or brew install libpq).',
+            'BINARY_NOT_FOUND',
+          ));
+        } else {
+          reject(err);
+        }
+      });
       child.on('close', (code) => {
         if (code !== 0) {
           const msg = Buffer.concat(stderr).toString('utf8').trim();
@@ -150,7 +171,7 @@ function buildPgEnv(password: string | undefined, isLocal: boolean): NodeJS.Proc
   return env;
 }
 
-function parseConnectionString(url: string): {
+export function parseConnectionString(url: string): {
   host?: string;
   port?: string;
   user?: string;

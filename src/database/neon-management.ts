@@ -63,8 +63,14 @@ export class NeonManagementClient {
   }
 
   async createBranch(name: string, parentId?: string): Promise<NeonBranch> {
-    const body: Record<string, unknown> = { branch: { name } };
-    if (parentId) body.branch = { ...(body.branch as object), parent_id: parentId };
+    const branchSpec: Record<string, unknown> = { name };
+    if (parentId) branchSpec.parent_id = parentId;
+    // Include a read-write compute endpoint so the branch is immediately usable
+    // (required for createDatabase, getBranchConnectionUri, and SQL connections)
+    const body: Record<string, unknown> = {
+      branch: branchSpec,
+      endpoints: [{ type: 'read_write' }],
+    };
     const data = await this.request<{ branch: RawBranch }>(
       'POST',
       `/projects/${this.projectId}/branches`,
@@ -82,9 +88,10 @@ export class NeonManagementClient {
     databaseName: string,
     roleName: string,
   ): Promise<string> {
+    // Project-level endpoint: GET /projects/{id}/connection_uri?branch_id=...
     const data = await this.request<{ uri: string }>(
       'GET',
-      `/projects/${this.projectId}/branches/${branchId}/connection_uri?database_name=${encodeURIComponent(databaseName)}&role_name=${encodeURIComponent(roleName)}`,
+      `/projects/${this.projectId}/connection_uri?branch_id=${encodeURIComponent(branchId)}&database_name=${encodeURIComponent(databaseName)}&role_name=${encodeURIComponent(roleName)}`,
     );
     return data.uri;
   }

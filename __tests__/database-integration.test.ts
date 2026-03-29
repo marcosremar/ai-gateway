@@ -20,6 +20,7 @@ import {
   DatabaseService,
   NeonManagementClient,
   DatabaseError,
+  createSqlDriver,
 } from '@ai-gateway/database/index';
 
 // ── Load env files ─────────────────────────────────────────────────────────────
@@ -55,6 +56,14 @@ const NEON_PROJECT_ID = process.env.NEON_PROJECT_ID ?? '';
 const HAS_LOCAL_PG = !!DATABASE_URL && detectEnvironment(DATABASE_URL) === 'local';
 const HAS_NEON_DB = !!DATABASE_URL && detectEnvironment(DATABASE_URL) === 'neon';
 const HAS_NEON_MGMT = !!NEON_API_KEY && !!NEON_PROJECT_ID;
+
+// Neon-specific URL: DATABASE_URL may point to local PG when .env overrides .env.vercel.
+// Fall back to POSTGRES_URL or POSTGRES_URL_NON_POOLING from .env.vercel.
+const NEON_DATABASE_URL = [
+  DATABASE_URL,
+  process.env.POSTGRES_URL_NON_POOLING ?? '',
+  process.env.POSTGRES_URL ?? '',
+].find((u) => u && detectEnvironment(u) === 'neon') ?? '';
 
 // ── Admin URL helper (connect to postgres system DB) ───────────────────────────
 
@@ -753,13 +762,13 @@ describe.skipIf(!HAS_NEON_MGMT)('Neon branch lifecycle', () => {
 // NEON BRANCH BACKUP
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!HAS_NEON_MGMT)('Neon branch backup', () => {
+describe.skipIf(!HAS_NEON_MGMT || !NEON_DATABASE_URL)('Neon branch backup', () => {
   let svc: DatabaseService;
   const createdBranches: string[] = [];
 
   beforeAll(() => {
     svc = new DatabaseService({
-      databaseUrl: DATABASE_URL,
+      databaseUrl: NEON_DATABASE_URL,
       apiKey: NEON_API_KEY,
       projectId: NEON_PROJECT_ID,
     });
@@ -804,4 +813,289 @@ describe.skipIf(!HAS_NEON_MGMT)('Neon branch backup', () => {
     const after = (await svc.listBranches()).length;
     expect(after).toBe(before + 2);
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOCAL POSTGRESQL — close() LIFECYCLE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe.skipIf(!HAS_LOCAL_PG)('Local PostgreSQL — close() lifecycle', () => {
+  const TEST_DB = `ai_gateway_close_${Date.now()}`;
+
+  beforeAll(async () => {
+    const admin = createDatabaseService({ databaseUrl: getAdminUrl() });
+    await admin.query(`CREATE DATABASE "${TEST_DB}"`);
+    await admin.close();
+  });
+
+  afterAll(async () => {
+    const admin = createDatabaseService({ databaseUrl: getAdminUrl() });
+    await admin.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+      [TEST_DB],
+    );
+    await admin.query(`DROP DATABASE IF EXISTS "${TEST_DB}"`);
+    await admin.close();
+  });
+
+  it('query after close() reconnects automatically', async () => {
+    const svc = createDatabaseService({ databaseUrl: getTestDbUrl(TEST_DB) });
+    await svc.query('SELECT 1');
+    await svc.close();
+    // Driver is gone — next query must re-create the connection
+    const { rows } = await svc.query<{ val: string }>('SELECT 2::text AS val');
+    expect(rows[0].val).toBe('2');
+    await svc.close();
+  });
+
+  it('close() twice does not throw', async () => {
+    const svc = createDatabaseService({ databaseUrl: getTestDbUrl(TEST_DB) });
+    await svc.query('SELECT 1');
+    await svc.close();
+    await expect(svc.close()).resolves.not.toThrow();
+  });
+
+  it('close() before any query does not throw', async () => {
+    const svc = createDatabaseService({ databaseUrl: getTestDbUrl(TEST_DB) });
+    await expect(svc.close()).resolves.not.toThrow();
+  });
+
+  it('close() clears prisma and re-accessing prisma creates fresh instance', async () => {
+    const svc = createDatabaseService({ databaseUrl: getTestDbUrl(TEST_DB) });
+    const p1 = svc.prisma;
+    await svc.close();
+    const p2 = svc.prisma;
+    // New instance after close
+    expect(p2).not.toBe(p1);
+    // Cleanup: disconnect new prisma
+    await (p2 as { $disconnect(): Promise<void> }).$disconnect();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOCAL POSTGRESQL — PRISMA INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe.skipIf(!HAS_LOCAL_PG)('Local PostgreSQL — Prisma integration', () => {
+  const TEST_DB = `ai_gateway_prisma_${Date.now()}`;
+
+  beforeAll(async () => {
+    const admin = createDatabaseService({ databaseUrl: getAdminUrl() });
+    await admin.query(`CREATE DATABASE "${TEST_DB}"`);
+    await admin.close();
+  });
+
+  afterAll(async () => {
+    const admin = createDatabaseService({ databaseUrl: getAdminUrl() });
+    await admin.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+      [TEST_DB],
+    );
+    await admin.query(`DROP DATABASE IF EXISTS "${TEST_DB}"`);
+    await admin.close();
+  });
+
+  it('db.prisma returns a PrismaClient-like with $disconnect', () => {
+    const svc = createDatabaseService({ databaseUrl: getTestDbUrl(TEST_DB) });
+    const p = svc.prisma as Record<string, unknown>;
+    expect(typeof p['$disconnect']).toBe('function');
+    expect(typeof p['$connect']).toBe('function');
+    expect(typeof p['$queryRaw']).toBe('function');
+  });
+
+  it('db.prisma returns the same instance on repeated access', () => {
+    const svc = createDatabaseService({ databaseUrl: getTestDbUrl(TEST_DB) });
+    expect(svc.prisma).toBe(svc.prisma);
+  });
+
+  it('two DatabaseService instances have separate prisma clients', () => {
+    const svc1 = createDatabaseService({ databaseUrl: getTestDbUrl(TEST_DB) });
+    const svc2 = createDatabaseService({ databaseUrl: getTestDbUrl(TEST_DB) });
+    expect(svc1.prisma).not.toBe(svc2.prisma);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOCAL POSTGRESQL — BINARY NOT FOUND ERRORS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe.skipIf(!HAS_LOCAL_PG)('Local PostgreSQL — missing binary errors', () => {
+  const TEST_DB = `ai_gateway_binaries_${Date.now()}`;
+  let svc: DatabaseService;
+
+  beforeAll(async () => {
+    const admin = createDatabaseService({ databaseUrl: getAdminUrl() });
+    await admin.query(`CREATE DATABASE "${TEST_DB}"`);
+    await admin.close();
+    svc = createDatabaseService({ databaseUrl: getTestDbUrl(TEST_DB) });
+    await svc.query(`CREATE TABLE _test (id SERIAL PRIMARY KEY, val TEXT)`);
+    await svc.query(`INSERT INTO _test (val) VALUES ('hello')`);
+  });
+
+  afterAll(async () => {
+    await svc.close();
+    const admin = createDatabaseService({ databaseUrl: getAdminUrl() });
+    await admin.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+      [TEST_DB],
+    );
+    await admin.query(`DROP DATABASE IF EXISTS "${TEST_DB}"`);
+    await admin.close();
+  });
+
+  it('backup() throws DatabaseError with BINARY_NOT_FOUND when pg_dump is not in PATH', async () => {
+    const { BackupService } = await import('@ai-gateway/database/index');
+    const { buildConnectionConfig } = await import('@ai-gateway/database/index');
+    const config = buildConnectionConfig({ databaseUrl: getTestDbUrl(TEST_DB) });
+
+    const backupSvc = new BackupService(config);
+    // Run with empty PATH so pg_dump cannot be found
+    const origPath = process.env.PATH;
+    process.env.PATH = '';
+    try {
+      await expect(backupSvc.backup()).rejects.toThrow(DatabaseError);
+      await expect(backupSvc.backup()).rejects.toMatchObject({ code: 'BINARY_NOT_FOUND' });
+    } finally {
+      process.env.PATH = origPath;
+    }
+  }, 15_000);
+
+  it('restore() throws DatabaseError with BINARY_NOT_FOUND when psql is not in PATH', async () => {
+    // First create a valid backup with the normal PATH
+    const { BackupService } = await import('@ai-gateway/database/index');
+    const { buildConnectionConfig } = await import('@ai-gateway/database/index');
+    const config = buildConnectionConfig({ databaseUrl: getTestDbUrl(TEST_DB) });
+    const backupSvc = new BackupService(config);
+    const { backup } = await backupSvc.backup();
+
+    // Now restore with empty PATH
+    const origPath = process.env.PATH;
+    process.env.PATH = '';
+    try {
+      await expect(backupSvc.restore(backup)).rejects.toThrow(DatabaseError);
+      await expect(backupSvc.restore(backup)).rejects.toMatchObject({ code: 'BINARY_NOT_FOUND' });
+    } finally {
+      process.env.PATH = origPath;
+    }
+  }, 30_000);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEON — getBranchConnectionUri / createDatabase / deleteDatabase
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe.skipIf(!HAS_NEON_MGMT)('Neon — getBranchConnectionUri, createDatabase, deleteDatabase', () => {
+  const mgmt = new NeonManagementClient(NEON_API_KEY, NEON_PROJECT_ID);
+  let testBranchId: string | undefined;
+  let primaryDatabaseName: string;
+  let primaryOwnerName: string;
+  // Shared created DB name reused across tests to avoid back-to-back createDatabase calls
+  const createdDbState: { name?: string } = {};
+
+  beforeAll(async () => {
+    // Create a dedicated test branch (includes a read-write endpoint)
+    const branch = await mgmt.createBranch(`test-crud-${Date.now()}`);
+    testBranchId = branch.id;
+    const dbs = await mgmt.listDatabases(testBranchId);
+    primaryDatabaseName = dbs[0].name;
+    primaryOwnerName = dbs[0].ownerName;
+  });
+
+  afterAll(async () => {
+    if (testBranchId) await mgmt.deleteBranch(testBranchId).catch(() => {});
+  });
+
+  it('getBranchConnectionUri returns a valid neon.tech URI', async () => {
+    if (!testBranchId) return;
+    const uri = await mgmt.getBranchConnectionUri(testBranchId, primaryDatabaseName, primaryOwnerName);
+    expect(uri).toContain('neon.tech');
+    expect(uri).toContain(primaryDatabaseName);
+    expect(uri).toMatch(/^postgresql:\/\//);
+  });
+
+  it('getBranchConnectionUri URI is usable with SQL driver', async () => {
+    if (!testBranchId) return;
+    const uri = await mgmt.getBranchConnectionUri(testBranchId, primaryDatabaseName, primaryOwnerName);
+    const driver = await createSqlDriver({ databaseUrl: uri, environment: 'neon' });
+    const { rows } = await driver.query<{ val: string }>('SELECT 1::text AS val');
+    expect(rows[0].val).toBe('1');
+    await driver.close();
+  });
+
+  it('createDatabase creates a new database visible in listDatabases', async () => {
+    if (!testBranchId) return;
+    const dbName = `testdb_${Date.now()}`;
+    const created = await mgmt.createDatabase(testBranchId, dbName, primaryOwnerName);
+    expect(created.name).toBe(dbName);
+    expect(created.branchId).toBe(testBranchId);
+
+    const dbs = await mgmt.listDatabases(testBranchId);
+    const found = dbs.find((d) => d.name === dbName);
+    expect(found).toBeDefined();
+    expect(found!.ownerName).toBe(primaryOwnerName);
+    // Persist so the next test can delete it without needing a new createDatabase
+    createdDbState.name = dbName;
+  });
+
+  it('deleteDatabase removes the database from listDatabases', async () => {
+    // Use the DB created in the previous test to avoid a back-to-back createDatabase.
+    // Wait briefly for Neon's async operation from createDatabase to complete before deleting.
+    if (!testBranchId || !createdDbState.name) return;
+    const dbName = createdDbState.name;
+    await new Promise((r) => setTimeout(r, 3000)); // wait for Neon operation to settle
+
+    await expect(mgmt.deleteDatabase(testBranchId, dbName)).resolves.not.toThrow();
+
+    const dbs = await mgmt.listDatabases(testBranchId);
+    expect(dbs.find((d) => d.name === dbName)).toBeUndefined();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEON — BRANCH BACKUP DATA INTEGRITY (copy-on-write semantics)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe.skipIf(!HAS_NEON_MGMT || !NEON_DATABASE_URL)('Neon — branch backup copy-on-write integrity', () => {
+  const mgmt = new NeonManagementClient(NEON_API_KEY, NEON_PROJECT_ID);
+  const createdBranches: string[] = [];
+
+  afterAll(async () => {
+    for (const id of createdBranches) {
+      await mgmt.deleteBranch(id).catch(() => {});
+    }
+  });
+
+  it('snapshot branch preserves data from before backup (copy-on-write)', async () => {
+    // 1. Create a work branch (child of primary)
+    const workBranch = await mgmt.createBranch(`test-cow-work-${Date.now()}`);
+    createdBranches.push(workBranch.id);
+
+    // 2. Get connection URI for the work branch
+    const dbs = await mgmt.listDatabases(workBranch.id);
+    const dbName = dbs[0].name;
+    const roleName = dbs[0].ownerName;
+    const workUri = await mgmt.getBranchConnectionUri(workBranch.id, dbName, roleName);
+
+    // 3. Insert test data into work branch
+    const workDriver = await createSqlDriver({ databaseUrl: workUri, environment: 'neon' });
+    await workDriver.query(`CREATE TABLE IF NOT EXISTS _cow_test (id SERIAL PRIMARY KEY, val TEXT NOT NULL)`);
+    await workDriver.query(`INSERT INTO _cow_test (val) VALUES ('before-backup')`);
+
+    // 4. Create snapshot branch (copy-on-write snapshot NOW)
+    const snapshotBranch = await mgmt.createBranch(`test-cow-snap-${Date.now()}`, workBranch.id);
+    createdBranches.push(snapshotBranch.id);
+
+    // 5. Modify work branch data AFTER snapshot
+    await workDriver.query(`UPDATE _cow_test SET val = 'after-backup'`);
+    await workDriver.close();
+
+    // 6. Verify snapshot branch still has pre-snapshot data (copy-on-write!)
+    const snapUri = await mgmt.getBranchConnectionUri(snapshotBranch.id, dbName, roleName);
+    const snapDriver = await createSqlDriver({ databaseUrl: snapUri, environment: 'neon' });
+    const { rows } = await snapDriver.query<{ val: string }>(`SELECT val FROM _cow_test`);
+    await snapDriver.close();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].val).toBe('before-backup'); // copy-on-write preserved pre-snapshot state
+  }, 60_000);
 });

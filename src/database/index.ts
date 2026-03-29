@@ -33,7 +33,7 @@ export { createSqlDriver, createNeonDriver, createPgDriver } from './pg-driver';
 export { NeonManagementClient } from './neon-management';
 
 // ── Backup ─────────────────────────────────────────────────────────────────────
-export { BackupService } from './backup';
+export { BackupService, parseConnectionString } from './backup';
 
 // ── Service (main entry point) ─────────────────────────────────────────────────
 export { DatabaseService, createDatabaseService, getDatabase } from './service';
