@@ -176,7 +176,32 @@ export function loadProviderConfig(): ProviderConfig {
   }
 }
 
-/** Save provider config to disk. Also updates the in-memory cache. */
+// ── Current authenticated user API key ───────────────────────────────────────
+// Set by onAuth hook when a request is authenticated. Used so saveProviderConfig
+// can persist to the user's DB record without breaking existing call signatures.
+
+let _currentUserApiKey: string | null = null;
+
+/** Set the API key of the currently authenticated user (called from onAuth hook). */
+export function setCurrentUserApiKey(apiKey: string | null): void {
+  _currentUserApiKey = apiKey;
+}
+
+/** Get the API key of the currently authenticated user (null in localhost-only mode). */
+export function getCurrentUserApiKey(): string | null {
+  return _currentUserApiKey;
+}
+
+/**
+ * Apply a config directly to the in-memory cache without writing to disk.
+ * Called after loading a user's profile from DB so all subsequent reads use it.
+ */
+export function applyUserConfig(config: ProviderConfig): void {
+  _cachedConfig = config;
+  _cacheTime = Date.now();
+}
+
+/** Save provider config to disk + DB (if a user API key is active). Also updates the in-memory cache. */
 export function saveProviderConfig(config: ProviderConfig): void {
   try {
     mkdirSync(BABELCAST_DIR, { recursive: true });
@@ -188,6 +213,13 @@ export function saveProviderConfig(config: ProviderConfig): void {
     console.log(`[config] Saved provider config (${config.profiles.length} profiles) to ${CONFIG_FILE}`);
   } catch (err) {
     console.warn('[config] Failed to save provider config:', err instanceof Error ? err.message : err);
+  }
+  // Also persist to the AI Gateway user DB if there is an authenticated user
+  if (_currentUserApiKey) {
+    try {
+      const { saveUserConfig } = await import('./user-profiles');
+      saveUserConfig(_currentUserApiKey, 'Default', config);
+    } catch { /* non-critical — JSON file is the authoritative fallback */ }
   }
 }
 

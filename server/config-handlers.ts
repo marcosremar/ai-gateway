@@ -2,6 +2,7 @@
 // handleGetProviderConfig, handlePatchProviderConfig, handleGetApiKeys, handleSetApiKeys
 // handleCreateProfile, handleDeleteProfile, handleActivateProfile
 // handleGetLabsFlags, handlePatchLabsFlags
+// handleGetUserAccounts, handleCreateUserAccount
 // GET    /v1/config/providers          — load provider config
 // POST   /v1/config/providers          — patch (merge) provider config
 // GET    /v1/config/api-keys           — list configured API keys (masked)
@@ -11,6 +12,8 @@
 // POST   /v1/config/profiles/activate  — activate a profile (copy chains to top-level)
 // GET    /v1/config/labs               — get labs feature flags
 // POST   /v1/config/labs               — patch labs feature flags
+// GET    /v1/config/users              — list user accounts (API keys masked)
+// POST   /v1/config/users              — create a new user account
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import { readFileSync, writeFileSync, existsSync, chmodSync } from 'fs';
@@ -444,4 +447,46 @@ export async function handlePatchLabsFlags(req: IncomingMessage, res: ServerResp
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: (err as Error).message }));
   }
+}
+
+// ── User Account Handlers ────────────────────────────────────────────────────
+
+/** GET /v1/config/users — list all user accounts (API keys masked) */
+export async function handleGetUserAccounts(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const { listUserAccounts } = await import('./user-profiles');
+  const accounts = await listUserAccounts();
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ accounts, dbAvailable: accounts.length >= 0 }));
+}
+
+/** POST /v1/config/users — create a new user account with its own API key */
+export async function handleCreateUserAccount(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const requestId = getOrCreateRequestId(req);
+  setRequestIdHeader(res, requestId);
+
+  let body: Record<string, unknown>;
+  try { body = await readJsonBody(req); }
+  catch (e) { handleBodyError(res, e); return; }
+
+  const apiKey = body.apiKey as string;
+  const name = (body.name as string) || 'User';
+  if (!apiKey || apiKey.length < 16) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'apiKey must be at least 16 characters' }));
+    return;
+  }
+
+  // Use current config as the starting profile for the new user
+  const config = loadProviderConfig();
+  const { createUserAccount } = await import('./user-profiles');
+  const created = await createUserAccount(apiKey, name, config);
+  if (!created) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'API key already exists or DB unavailable' }));
+    return;
+  }
+
+  console.log(`[config] User account created: name="${name}", key=…${apiKey.slice(-4)}`);
+  res.writeHead(201, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: true, name, apiKeyHint: `${apiKey.slice(0, 4)}…${apiKey.slice(-4)}` }));
 }
