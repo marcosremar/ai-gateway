@@ -16,7 +16,7 @@ import {
   activeProvider, setActiveProvider, setGpuHealthy, gpuHealthy, setLastRequestTime,
   monitorInterval, setMonitorInterval, deployApiKey, deployVastApiKey,
   deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey,
-  resetDeployState, lastRequestTime, lastModelRequestTime,
+  resetDeployState, lastRequestTime, lastModelRequestTime, setLastModelRequestTime,
   DAILY_BUDGET_USD, dailyGpuSpendUsd, setDailyGpuSpendUsd, dailySpendResetDate, setDailySpendResetDate,
   deploymentSM,
   loadPersistedDeploy, clearPersistedDeploy, setDeployCancelled,
@@ -295,6 +295,10 @@ export function startGpuMonitoring() {
   monitorConsecFails = 0;
   monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
   monitorBackoffMaxAlerted = false;
+  // Reset idle clock so the timer starts fresh from GPU-ready, not from last session's request.
+  // Without this, a pod that boots 12 min after the previous session's last request immediately
+  // hits the 10-min idle timeout and self-terminates.
+  setLastModelRequestTime(Date.now());
   scheduleNextMonitorProbe();
 }
 
