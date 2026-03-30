@@ -57,7 +57,9 @@ export class FlyioClient extends AbstractGpuProvider {
   }
 
   private appName(): string {
-    return process.env.FLY_APP_NAME || DEFAULT_APP;
+    // BOT_FLY_APP_NAME takes priority — avoids conflict with Fly.io's auto-injected
+    // FLY_APP_NAME which is set to the *gateway* app name when running on Fly.io
+    return process.env.BOT_FLY_APP_NAME || process.env.FLY_APP_NAME || DEFAULT_APP;
   }
 
   // ── Instance lifecycle ─────────────────────────────────────────────────
