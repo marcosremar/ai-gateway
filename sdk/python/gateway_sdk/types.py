@@ -216,6 +216,7 @@ class DeployOptions:
     llm_model: str = ""  # "translategemma" or "mistral"
     interruptible: Optional[bool] = None  # True=spot (cheaper), False/None=on-demand (default)
     race_count: int = 0  # parallel deploy race (0=disabled)
+    provider: str = ""  # force provider: "runpod" | "vast" | "tensordock" | "" (auto)
 
 
 @dataclass
