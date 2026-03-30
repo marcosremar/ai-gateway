@@ -200,6 +200,7 @@ class GpuStatus:
     ip_flag: str = ""
     ip_city: str = ""
     ip_country: str = ""
+    boot_on_startup: bool = False
 
 
 @dataclass

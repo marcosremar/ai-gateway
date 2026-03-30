@@ -679,6 +679,11 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
     })(),
     ttsColdStartProfile: getColdStartProfile(deployState.gpuType, deployState.dockerImage, deployState.provider) || undefined,
     readinessState: gpuReadinessState,
+    bootOnStartup: (() => {
+      const _cfg = loadProviderConfig();
+      const _activeProfile = _cfg.profiles?.find(p => p.id === _cfg.activeProfileId);
+      return _activeProfile?.gpuDeploy?.bootOnStartup ?? false;
+    })(),
     standby: {
       status: standbyDeployState.status,
       endpoint: standbyDeployState.endpoint || null,
