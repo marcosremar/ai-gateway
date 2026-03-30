@@ -51,7 +51,9 @@ function startBotAudioPull(botEndpoint: string) {
   stopBotAudioPull();
   // Use fly.dev hostname (not IP) for valid TLS certificate
   const flyHost = flyio.getFlyHost();
-  const appName = process.env.FLY_APP_NAME || 'babelcast-bot';
+  // Use BOT_FLY_APP_NAME to avoid conflict with Fly.io's auto-injected FLY_APP_NAME
+  // (which is set to the gateway's own app name when running on Fly.io, not the bot app)
+  const appName = process.env.BOT_FLY_APP_NAME || 'babelcast-bot';
   const baseUrl = flyHost ? `wss://${flyHost}` : `wss://${appName}.fly.dev`;
   const wsUrl = baseUrl + '/ws/audio-out';
   console.log(`[bot-audio-pull] Connecting to ${wsUrl}`);
@@ -268,7 +270,7 @@ export async function autoDeployBot(): Promise<void> {
 
     setBotState({
       status: 'booting', podId: instance.instanceId,
-      endpoint: instance.endpoint || `https://${process.env.FLY_APP_NAME || 'babelcast-bot'}.fly.dev`,
+      endpoint: instance.endpoint || `https://${process.env.BOT_FLY_APP_NAME || 'babelcast-bot'}.fly.dev`,
       message: `Auto-boot: bot machine created (${instance.instanceId.slice(0, 8)}), waiting for startup...`,
     });
 
@@ -281,7 +283,7 @@ export async function autoDeployBot(): Promise<void> {
         return;
       }
 
-      const endpoint = botState.endpoint || instance.endpoint || `https://${process.env.FLY_APP_NAME || 'babelcast-bot'}.fly.dev`;
+      const endpoint = botState.endpoint || instance.endpoint || `https://${process.env.BOT_FLY_APP_NAME || 'babelcast-bot'}.fly.dev`;
       try {
         const probeHeaders: Record<string, string> = { 'fly-force-instance-id': instance.instanceId };
         const flyHost = flyio.getFlyHost();
@@ -547,7 +549,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
         if (!endpoint) {
           if (isFlyioPod) {
             // Fly.io: endpoint is the app's fly.dev URL (set during createInstance)
-            endpoint = instance.endpoint || `https://${process.env.FLY_APP_NAME || 'babelcast-bot'}.fly.dev`;
+            endpoint = instance.endpoint || `https://${process.env.BOT_FLY_APP_NAME || 'babelcast-bot'}.fly.dev`;
             setBotState({ endpoint });
           } else if (isScalewayPod) {
             // Scaleway: endpoint is stored in instance when created (already in botState)
