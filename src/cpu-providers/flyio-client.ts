@@ -70,9 +70,13 @@ export class FlyioClient extends AbstractGpuProvider {
     const app = this.appName();
     const region = spec.region || process.env.FLY_REGION || DEFAULT_REGION;
 
-    // Docker Hub images need registry prefix on Fly
+    // Prefer Fly registry image (built via flyctl deploy) over Docker Hub
     let image = spec.dockerImage || 'marcosremar/meet-teams-bot:latest';
-    if (!image.includes('/') || (!image.startsWith('registry.') && !image.includes('.io/'))) {
+    if (image === 'marcosremar/meet-teams-bot:latest') {
+      // Use Fly registry image if available (has patches not yet in Docker Hub)
+      const flyImage = process.env.FLY_BOT_IMAGE || `registry.fly.io/${this.appName()}:latest`;
+      image = flyImage;
+    } else if (!image.includes('/') || (!image.startsWith('registry.') && !image.includes('.io/'))) {
       image = `registry.hub.docker.com/${image}`;
     }
 
@@ -183,7 +187,7 @@ export class FlyioClient extends AbstractGpuProvider {
       await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}/stop`, {
         method: 'POST',
         headers: this.headers(token),
-        signal: AbortSignal.timeout(TIMEOUTS.delete),
+        signal: AbortSignal.timeout(15_000),
       });
       await this.waitForState(app, instanceId, token, 'stopped', 30).catch(() => {});
     } catch { /* might already be stopped */ }
@@ -191,7 +195,7 @@ export class FlyioClient extends AbstractGpuProvider {
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}?force=true`, {
       method: 'DELETE',
       headers: this.headers(token),
-      signal: AbortSignal.timeout(TIMEOUTS.delete),
+      signal: AbortSignal.timeout(15_000),
     });
 
     if (!res.ok && res.status !== 404) {
