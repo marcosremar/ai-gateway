@@ -73,9 +73,14 @@ export class FlyioClient extends AbstractGpuProvider {
     // Prefer Fly registry image (built via flyctl deploy) over Docker Hub
     let image = spec.dockerImage || 'marcosremar/meet-teams-bot:latest';
     if (image === 'marcosremar/meet-teams-bot:latest') {
-      // Use Fly registry image if available (has patches not yet in Docker Hub)
-      const flyImage = process.env.FLY_BOT_IMAGE || `registry.fly.io/${this.appName()}:latest`;
-      image = flyImage;
+      // Prefer the latest Fly registry image (built via flyctl deploy, has newest patches).
+      // FLY_BOT_IMAGE env var overrides everything; otherwise fetch the latest release tag.
+      if (process.env.FLY_BOT_IMAGE) {
+        image = process.env.FLY_BOT_IMAGE;
+      } else {
+        const latestFlyImage = await this.getLatestReleaseImage(this.appName(), token).catch(() => null);
+        image = latestFlyImage ?? `registry.fly.io/${this.appName()}:latest`;
+      }
     } else if (!image.includes('/') || (!image.startsWith('registry.') && !image.includes('.io/'))) {
       image = `registry.hub.docker.com/${image}`;
     }
@@ -309,6 +314,18 @@ export class FlyioClient extends AbstractGpuProvider {
       const text = await res.text();
       throw new Error(`Wait for ${state} failed (${res.status}): ${text.slice(0, 200)}`);
     }
+  }
+
+  /** Return the image tag from the most recent successful Fly release. */
+  private async getLatestReleaseImage(app: string, token: string): Promise<string | null> {
+    const res = await fetch(`${FLY_API}/apps/${app}/releases?limit=1`, {
+      headers: this.headers(token),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as Array<{ image_ref?: string }>;
+    const img = data[0]?.image_ref;
+    return img || null;
   }
 
   /** Ensure the Fly app exists (create if needed — idempotent). */
