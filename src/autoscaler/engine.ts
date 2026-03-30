@@ -11,7 +11,7 @@ import type {
 } from '../types';
 import { resolveStageTimeouts } from '../types';
 import type { GpuProviderRegistry } from '../gpu-providers/registry';
-import type { ProviderCredentials, GpuOffer } from '../gpu-providers/types';
+import type { ProviderCredentials } from '../gpu-providers/types';
 import type { SessionTracker } from './session-tracker';
 import type { LatencyTracker } from './latency-tracker';
 import type { StatePersistence } from './state-persistence';
@@ -25,36 +25,12 @@ import { defaultLogger } from '../logger';
 import { handleBootTimeout } from './boot-timeout';
 import { probeAllTiers, processHealthResults } from './health-checker';
 import { buildDecision } from './decision-builder';
+import { BootOrchestrator, type BootOrchestratorCallbacks } from './boot-orchestrator';
+import { ProviderMonitor } from './provider-monitor';
+import { TierSelector } from './tier-selector';
 
-/** Error thrown when a boot pipeline stage exceeds its timeout */
-export class StageTimeoutError extends Error {
-  readonly stage: string;
-  readonly timeoutMs: number;
-  constructor(stage: string, timeoutMs: number) {
-    super(`Stage "${stage}" timed out after ${Math.round(timeoutMs / 1000)}s`);
-    this.name = 'StageTimeoutError';
-    this.stage = stage;
-    this.timeoutMs = timeoutMs;
-  }
-}
-
-/** Wrap a promise with a hard timeout. Rejects with StageTimeoutError on expiry. */
-function withStageTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  stage: string,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new StageTimeoutError(stage, timeoutMs));
-    }, timeoutMs);
-    if (timer.unref) timer.unref();
-    promise.then(
-      (val) => { clearTimeout(timer); resolve(val); },
-      (err) => { clearTimeout(timer); reject(err); },
-    );
-  });
-}
+// Re-export for backward compatibility
+export { StageTimeoutError } from './stage-timeout';
 
 export const MAX_BOOT_FAILURES = 3;
 export const BOOT_COOLDOWN_BASE_MS = 2 * 60_000;  // 2 min base, exponential backoff
@@ -80,29 +56,21 @@ export class AutoscalerEngine {
   private stateMap = new Map<string, GpuTierState[]>();
   /** Per-user mutex to prevent concurrent getAutoScaleDecision from racing on boot triggers */
   private decisionLocks = new Map<string, Promise<AutoScaleDecision>>();
-  /** Active boot health pollers — key: "userId:tierIndex:timestamp" (unique per boot attempt) */
-  private bootPollers = new Map<string, ReturnType<typeof setTimeout>>();
-  private registry: GpuProviderRegistry;
-  private sessionTracker: SessionTracker;
-  private latencyTracker: LatencyTracker;
-  private persistence: StatePersistence;
-  private hooks?: GatewayHooks;
-  private lifecycleLogger: GpuLifecycleLogger;
-  private logger: Logger;
-  /** Price monitoring for intelligent provider selection */
-  private priceMonitor: Map<string, { price: number; timestamp: number }> = new Map();
-  /** Last time prices were updated */
-  private lastPriceUpdate: number = 0;
-  /** Price update interval (5 minutes) */
-  private readonly PRICE_UPDATE_INTERVAL_MS = 5 * 60 * 1000;
-  /** Provider reliability scores (0-1) */
-  private reliabilityScores: Map<string, number> = new Map();
-  /** Provider health stats for reliability tracking */
-  private providerHealthStats: Map<string, { success: number; failure: number; lastUpdate: number }> = new Map();
-  private probeHealth: (endpoint: string) => Promise<boolean>;
-  private cleanupInstance: (config: GpuTierConfig, registry: GpuProviderRegistry, reason: string) => Promise<void>;
-  private onInstancePersist?: (userId: string, machineKey: string, data: Record<string, unknown>) => Promise<void>;
-  private resolveCredentials?: (provider: string) => Promise<ProviderCredentials | null>;
+
+  private readonly registry: GpuProviderRegistry;
+  private readonly sessionTracker: SessionTracker;
+  private readonly latencyTracker: LatencyTracker;
+  private readonly persistence: StatePersistence;
+  private readonly hooks?: GatewayHooks;
+  private readonly lifecycleLogger: GpuLifecycleLogger;
+  private readonly logger: Logger;
+  private readonly probeHealth: (endpoint: string) => Promise<boolean>;
+  private readonly cleanupInstance: (config: GpuTierConfig, registry: GpuProviderRegistry, reason: string) => Promise<void>;
+  private readonly onInstancePersist?: (userId: string, machineKey: string, data: Record<string, unknown>) => Promise<void>;
+
+  private readonly bootOrchestrator: BootOrchestrator;
+  private readonly providerMonitor: ProviderMonitor;
+  private readonly tierSelector: TierSelector;
 
   constructor(opts: AutoscalerEngineOptions) {
     this.registry = opts.registry;
@@ -115,7 +83,32 @@ export class AutoscalerEngine {
     this.onInstancePersist = opts.onInstancePersist;
     this.lifecycleLogger = opts.lifecycleLogger ?? noopLifecycleLogger;
     this.logger = opts.logger ?? defaultLogger;
-    this.resolveCredentials = opts.resolveCredentials;
+
+    this.providerMonitor = new ProviderMonitor({
+      registry: this.registry,
+      logger: this.logger,
+      resolveCredentials: opts.resolveCredentials,
+    });
+    this.tierSelector = new TierSelector({ registry: this.registry, logger: this.logger });
+
+    const callbacks: BootOrchestratorCallbacks = {
+      getStates: (userId) => this.stateMap.get(userId),
+      setStates: (userId, s) => this.stateMap.set(userId, s),
+      persistStates: (userId, s) => void this.persistence.persistTierStates(userId, s).catch((err) =>
+        this.logger.warn('[autoscaler] Background persist failed:', err),
+      ),
+      emitError: (f) => this.emitError(f),
+      recordProviderHealthEvent: (p, ok) => this.providerMonitor.recordHealthEvent(p, ok),
+    };
+    this.bootOrchestrator = new BootOrchestrator({
+      registry: this.registry,
+      probeHealth: this.probeHealth,
+      hooks: this.hooks,
+      lifecycleLogger: this.lifecycleLogger,
+      logger: this.logger,
+      onInstancePersist: this.onInstancePersist,
+      callbacks,
+    });
   }
 
   /** Emit an error event via hooks. Fire-and-forget. */
@@ -125,216 +118,6 @@ export class AutoscalerEngine {
       ...fields,
       timestamp: Date.now(),
     });
-  }
-
-  /**
-   * Start background health polling for a booting tier.
-   * Polls every POLL_INTERVAL_MS until healthy, then transitions to ready and logs boot_ok.
-   * Stops on timeout (bootTimeSecs × 2) or if tier state changed externally.
-   */
-  private startBootHealthPoller(
-    userId: string,
-    tierIndex: number,
-    provider: string,
-    bootTimestamp: number,
-    tierConfig?: GpuTierConfig,
-  ): void {
-    const POLL_INTERVAL_BASE_MS = 15_000; // 15 seconds base
-    const POLL_INTERVAL_MAX_MS = 60_000;  // max 60 seconds between polls
-    const key = `${userId}:${tierIndex}:${Date.now()}`;
-    let pollCount = 0;
-
-    // Cancel any existing poller for this tier (match by "userId:tierIndex:" prefix)
-    this.cancelBootPollersByPrefix(`${userId}:${tierIndex}:`);
-
-    const poll = () => {
-      const tierStates = this.stateMap.get(userId);
-      const ts = tierStates?.[tierIndex];
-
-      // Stop polling if tier is no longer booting or boot was replaced
-      if (!ts || ts.state !== 'booting') {
-        this.bootPollers.delete(key);
-        return;
-      }
-      if ((ts as BootingTierState).bootTriggeredAt !== bootTimestamp) {
-        this.bootPollers.delete(key);
-        return;
-      }
-
-      const bootTimeSecs = this.registry.get(provider)?.bootTimeSecs ?? 120;
-      const maxBootMs = bootTimeSecs * 2 * 1000;
-      const elapsed = Date.now() - bootTimestamp;
-      if (elapsed > maxBootMs) {
-        // Timeout — will be handled by engine pre-probe or watchdog
-        const bootTs = ts as BootingTierState;
-        this.logger.warn(`[boot-poller] Tier ${tierIndex} (${provider}) polling stopped — timeout (${Math.round(elapsed / 1000)}s, instanceId=${bootTs.discoveredInstanceId || 'none'}, endpoint=${bootTs.endpoint || 'none'})`);
-        this.bootPollers.delete(key);
-        return;
-      }
-
-      const booting = ts as BootingTierState;
-
-      // Re-resolve endpoint from the provider API when endpoint is empty
-      // (e.g. Vast.ai: IP not assigned at creation time).
-      // Note: RunPod proxy URLs (*.proxy.runpod.net) are the reliable way to access
-      // pods — do NOT resolve them to direct IPs which may be unreachable.
-      const needsResolve = !booting.endpoint;
-      const resolveEndpoint = (): Promise<string> => {
-        if (!needsResolve || !booting.discoveredInstanceId || !tierConfig?.apiKey) {
-          return Promise.resolve(booting.endpoint);
-        }
-        const client = this.registry.get(provider);
-        if (!client) return Promise.resolve(booting.endpoint);
-        return client.resolveInstanceEndpoint(
-          booting.discoveredInstanceId,
-          { apiKey: tierConfig.apiKey, authId: tierConfig.authId },
-        ).then((resolved) => {
-          if (!resolved && !booting.endpoint) {
-            this.logger.log(`[boot-poller] Tier ${tierIndex} (${provider}) endpoint not yet assigned (instance ${booting.discoveredInstanceId})`);
-          }
-          if (resolved && resolved !== booting.endpoint) {
-            this.logger.log(`[boot-poller] Resolved direct endpoint for tier ${tierIndex}: ${resolved}`);
-            // Update the booting state with the direct endpoint
-            const states = this.stateMap.get(userId);
-            if (states?.[tierIndex]?.state === 'booting') {
-              (states[tierIndex] as BootingTierState).endpoint = resolved;
-              this.stateMap.set(userId, states);
-            }
-            return resolved;
-          }
-          return booting.endpoint;
-        }).catch((err) => {
-          this.logger.warn(`[boot-poller] Endpoint resolution failed for tier ${tierIndex} (${provider}): ${err instanceof Error ? err.message : String(err)}`);
-          this.emitError({
-            operation: 'resolveEndpoint', provider, tierIndex, userId,
-            instanceId: booting.discoveredInstanceId,
-            message: err instanceof Error ? err.message : String(err),
-            retryable: true,
-          });
-          return booting.endpoint;
-        });
-      };
-
-      let sshAlreadyProbed = false;
-      void resolveEndpoint().then(async (endpoint): Promise<boolean | 'skip'> => {
-        if (!endpoint) {
-          // SSH-only instance (e.g. Vast.ai without direct ports) — try SSH health check directly
-          if (booting.sshHost && booting.sshPort) {
-            this.logger.log(`[boot-poller] Tier ${tierIndex} (${provider}) no HTTP endpoint — trying SSH health (${booting.sshHost}:${booting.sshPort}, ${Math.round(elapsed / 1000)}s elapsed)`);
-            const { probeGpuHealthSsh } = await import('./health');
-            sshAlreadyProbed = true;
-            return probeGpuHealthSsh(booting.sshHost, booting.sshPort);
-          }
-          // No endpoint AND no SSH — schedule next poll and wait for endpoint resolution
-          this.logger.log(`[boot-poller] Tier ${tierIndex} (${provider}) endpoint not yet available (${Math.round(elapsed / 1000)}s elapsed) — skipping probe`);
-          pollCount++;
-          const nextInterval = Math.min(POLL_INTERVAL_BASE_MS * Math.pow(1.5, pollCount - 1), POLL_INTERVAL_MAX_MS);
-          const timer = setTimeout(poll, nextInterval);
-          if (timer.unref) timer.unref();
-          this.bootPollers.set(key, timer);
-          return 'skip'; // signal: already scheduled next poll, skip further processing
-        }
-        return this.probeHealth(endpoint);
-      }).then(async (healthy): Promise<boolean | 'skip'> => {
-        if (healthy === 'skip') return 'skip'; // already scheduled next poll above
-        // If HTTP failed and we have SSH info, try SSH fallback (Vast.ai without direct ports)
-        // Skip if SSH was already probed in the first stage (avoids double SSH probe)
-        if (!healthy && !sshAlreadyProbed && booting.sshHost && booting.sshPort) {
-          const { probeGpuHealthSsh } = await import('./health');
-          return probeGpuHealthSsh(booting.sshHost, booting.sshPort);
-        }
-        return healthy;
-      }).then(async (healthy) => {
-        if (healthy === 'skip') return; // already handled
-        // Re-check state — might have changed during the probe
-        const currentStates = this.stateMap.get(userId);
-        const current = currentStates?.[tierIndex];
-        if (!current || current.state !== 'booting') {
-          this.bootPollers.delete(key);
-          return;
-        }
-        if ((current as BootingTierState).bootTriggeredAt !== bootTimestamp) {
-          this.bootPollers.delete(key);
-          return;
-        }
-
-        if (healthy) {
-          const bootDurationMs = Date.now() - bootTimestamp;
-          const currentBooting = current as BootingTierState;
-          const newReady: ReadyTierState = {
-            state: 'ready',
-            tierIndex,
-            endpoint: currentBooting.endpoint,
-            lastHealthyAt: Date.now(),
-            trigger: currentBooting.trigger,
-            bootedAt: bootTimestamp,
-            sshHost: currentBooting.sshHost,
-            sshPort: currentBooting.sshPort,
-          };
-          currentStates[tierIndex] = newReady;
-          this.stateMap.set(userId, currentStates);
-          void this.persistence.persistTierStates(userId, currentStates).catch((err) => {
-            this.logger.warn('[boot-poller] Background persist failed:', err);
-            this.emitError({
-              operation: 'persistTierStates', userId,
-              message: err instanceof Error ? err.message : String(err),
-              errorCode: 'PERSIST_FAILED', retryable: true,
-            });
-          });
-
-          emitHook(this.hooks, 'onHealthChange', {
-            userId, tierIndex, provider,
-            previousState: 'booting', newState: 'ready',
-            endpoint: currentBooting.endpoint, timestamp: Date.now(),
-          });
-          void this.lifecycleLogger.log({
-            userId, tierIndex, provider,
-            eventType: 'boot_ok', durationMs: bootDurationMs,
-            instanceId: currentBooting.discoveredInstanceId,
-            endpoint: currentBooting.endpoint, trigger: currentBooting.trigger,
-            oldState: 'booting', newState: 'ready',
-            metadata: { bootTriggeredAt: bootTimestamp, source: 'boot-poller' },
-          });
-          this.recordProviderHealthEvent(provider, true);
-          this.logger.log(`[boot-poller] Tier ${tierIndex} (${provider}) is healthy after ${Math.round(bootDurationMs / 1000)}s — ready!`);
-          this.bootPollers.delete(key);
-          return;
-        }
-
-        // Not healthy yet — schedule next poll with backoff
-        pollCount++;
-        const nextInterval = Math.min(POLL_INTERVAL_BASE_MS * Math.pow(1.5, pollCount - 1), POLL_INTERVAL_MAX_MS);
-        this.logger.log(`[boot-poller] Tier ${tierIndex} (${provider}) not ready yet (${Math.round(elapsed / 1000)}s elapsed, next in ${Math.round(nextInterval / 1000)}s)`);
-        const timer = setTimeout(poll, nextInterval);
-        if (timer.unref) timer.unref();
-        this.bootPollers.set(key, timer);
-      }).catch((err) => {
-        this.logger.warn(`[boot-poller] Probe failed for tier ${tierIndex} (${provider}, instanceId=${booting.discoveredInstanceId || 'none'}): ${err instanceof Error ? err.message : String(err)}`);
-        this.emitError({
-          operation: 'bootProbe', provider, tierIndex, userId,
-          instanceId: booting.discoveredInstanceId,
-          message: err instanceof Error ? err.message : String(err),
-          retryable: true,
-        });
-        pollCount++;
-        const nextInterval = Math.min(POLL_INTERVAL_BASE_MS * Math.pow(1.5, pollCount - 1), POLL_INTERVAL_MAX_MS);
-        const timer = setTimeout(poll, nextInterval);
-        if (timer.unref) timer.unref();
-        this.bootPollers.set(key, timer);
-      });
-    };
-
-    // Start first poll after a provider-appropriate delay.
-    // Vast.ai needs up to 5 min just for IP assignment + container start.
-    // RunPod proxy URLs are available immediately, but container takes 10-20 min.
-    // Use half of bootTimeSecs as the initial wait (avoids wasted probe calls during early boot).
-    const bootTimeSecs = this.registry.get(provider)?.bootTimeSecs ?? 120;
-    // Initial delay: 20% of expected boot time (fast feedback), min 30s, max 3 min
-    const initialDelay = Math.min(Math.max(bootTimeSecs * 0.2 * 1000, 30_000), 180_000);
-    const timer = setTimeout(poll, initialDelay);
-    if (timer.unref) timer.unref();
-    this.bootPollers.set(key, timer);
-    this.logger.log(`[boot-poller] Started polling tier ${tierIndex} (${provider}) with backoff (first in ${Math.round(initialDelay / 1000)}s, bootTimeSecs=${bootTimeSecs})`);
   }
 
   /** Expose stateMap for watchdog/external iteration */
@@ -470,205 +253,6 @@ export class AutoscalerEngine {
     }
   }
 
-  async triggerGpuBoot(
-    tierConfig: GpuTierConfig,
-    tierIndex: number,
-    userId: string,
-    attempt = 0,
-  ): Promise<{ ok: boolean; instanceId?: string; endpoint?: string; activeGpuType?: string; reason?: string; sshHost?: string; sshPort?: number; monitorUrl?: string }> {
-    if (attempt >= 2) return { ok: false, reason: 'Max retry attempts reached' };
-    if (!tierConfig.apiKey) return { ok: false, reason: 'API key não configurada' };
-
-    // Work on a local copy — never mutate the caller's tierConfig
-    const cfg = { ...tierConfig };
-    let sshHost: string | undefined;
-    let sshPort: number | undefined;
-    let monitorUrl: string | undefined;
-
-    // Resolve per-stage timeouts: tier config > provider defaults > fallback
-    const timeouts = resolveStageTimeouts(cfg.provider, cfg.stageTimeouts);
-
-    try {
-      let justCreated = false;
-      if (!cfg.instanceId) {
-        const client = this.registry.get(cfg.provider);
-        if (client) {
-          let discovered = await withStageTimeout(
-            client.discoverInstance(
-              { apiKey: cfg.apiKey!, authId: cfg.authId },
-              cfg.gpuTypes ?? [],
-            ),
-            timeouts.discoverMs,
-            'discover',
-          ).catch((err) => {
-            // On timeout, treat as "no instance discovered" — proceed to create
-            if (err instanceof StageTimeoutError) {
-              this.logger.warn(`[autoscaler] Tier ${tierIndex} (${cfg.provider}) discover timed out (${Math.round(timeouts.discoverMs / 1000)}s) — proceeding to create`);
-              this.emitError({
-                operation: 'discoverInstance', provider: cfg.provider,
-                tierIndex, userId,
-                message: err.message,
-                errorCode: 'STAGE_TIMEOUT', retryable: true,
-                metadata: { stage: 'discover', timeoutMs: timeouts.discoverMs },
-              });
-              return null;
-            }
-            throw err;
-          });
-          if (discovered) {
-            const isUsable = discovered.status?.toLowerCase() === 'running' && !!discovered.endpoint;
-            if (isUsable) {
-              cfg.instanceId = discovered.instanceId;
-              cfg.endpoint = discovered.endpoint;
-              this.logger.log(`[autoscaler] Discovered ${cfg.provider}: ${discovered.instanceId} (running) → ${discovered.endpoint || '(no endpoint)'}`);
-              // Persist discovered instance so cost-monitor knows it's tracked
-              if (this.onInstancePersist && userId) {
-                const machineKey = cfg.provider === 'runpod' ? 'runpodPod'
-                  : cfg.provider === 'vast' ? 'vastInstance'
-                  : 'tensordockInstance';
-                void this.onInstancePersist(userId, machineKey, {
-                  ...(cfg.provider === 'runpod'
-                    ? { podId: discovered.instanceId, endpoint: discovered.endpoint }
-                    : { instanceId: discovered.instanceId, endpoint: discovered.endpoint }),
-                  ipAddress: discovered.ipAddress,
-                  provider: cfg.provider,
-                }).catch((err) => {
-                  this.logger.warn('[autoscaler] Failed to persist discovered instance:', err);
-                  this.emitError({
-                    operation: 'persistDiscoveredInstance', provider: cfg.provider,
-                    tierIndex, userId, message: err instanceof Error ? err.message : String(err),
-                    errorCode: 'PERSIST_FAILED', retryable: true,
-                  });
-                });
-              }
-            } else {
-              this.logger.log(`[autoscaler] Discovered ${cfg.provider}: ${discovered.instanceId} unusable (status=${discovered.status}, endpoint=${discovered.endpoint || 'none'}) — creating new`);
-              discovered = null;
-            }
-          }
-          if (!discovered) {
-            try {
-              const created = await withStageTimeout(
-                client.createInstance(
-                  {
-                    gpuTypes: cfg.gpuTypes ?? [],
-                    dockerImage: cfg.dockerImage,
-                    hfToken: cfg.hfToken,
-                    env: cfg.env,
-                    storageGb: cfg.storageGb,
-                  },
-                  { apiKey: cfg.apiKey!, authId: cfg.authId, hfToken: cfg.hfToken },
-                  userId,
-                ),
-                timeouts.createMs,
-                'create',
-              );
-              cfg.instanceId = created.instanceId;
-              if (created.endpoint) cfg.endpoint = created.endpoint;
-              // Store SSH info for fallback health checks (Vast.ai)
-              sshHost = created.sshHost;
-              sshPort = created.sshPort;
-              monitorUrl = created.monitorUrl;
-              justCreated = true;
-              this.logger.log(`[autoscaler] Auto-created ${cfg.provider} machine: ${created.instanceId}`);
-            } catch (createErr) {
-              const isTimeout = createErr instanceof StageTimeoutError;
-              const msg = createErr instanceof Error ? createErr.message : 'auto-create failed';
-              this.emitError({
-                operation: 'triggerGpuBoot:createInstance', provider: cfg.provider,
-                tierIndex, userId, message: msg,
-                errorCode: isTimeout ? 'STAGE_TIMEOUT' : 'CREATE_FAILED',
-                retryable: isTimeout,
-                metadata: isTimeout ? { stage: 'create', timeoutMs: timeouts.createMs } : undefined,
-              });
-              return { ok: false, reason: `${cfg.provider}: ${msg}` };
-            }
-          }
-        }
-      }
-
-      if (!cfg.instanceId) {
-        return { ok: false, reason: `${cfg.provider}: instanceId not available after discovery` };
-      }
-
-      if (justCreated) {
-        this.logger.log(`[autoscaler] Boot tier ${tierIndex} (${cfg.provider}) for user ${userId}: OK (auto-provisioned, already starting)`);
-        return {
-          ok: true, instanceId: cfg.instanceId, endpoint: cfg.endpoint,
-          sshHost,
-          sshPort,
-          monitorUrl,
-        };
-      }
-
-      const client = this.registry.get(cfg.provider);
-      if (!client) {
-        return { ok: false, reason: `Provider "${cfg.provider}" não suporta boot automático` };
-      }
-
-      try {
-        await withStageTimeout(
-          client.startInstance(cfg.instanceId, {
-            apiKey: cfg.apiKey!,
-            authId: cfg.authId,
-          }),
-          timeouts.startMs,
-          'start',
-        );
-      } catch (startErr) {
-        // Stage timeout — don't retry, just fail fast
-        if (startErr instanceof StageTimeoutError) {
-          this.emitError({
-            operation: 'triggerGpuBoot:startInstance', provider: cfg.provider,
-            tierIndex, userId, instanceId: cfg.instanceId,
-            message: startErr.message,
-            errorCode: 'STAGE_TIMEOUT', retryable: true,
-            metadata: { stage: 'start', timeoutMs: timeouts.startMs },
-          });
-          return { ok: false, reason: `${cfg.provider}: ${startErr.message}` };
-        }
-        const startMsg = startErr instanceof Error ? startErr.message : '';
-        const isGone = startMsg.includes('não encontrada') || startMsg.includes('not found');
-        const isExpired = startMsg.includes('não pode ser iniciada') || startMsg.includes('slot');
-        if (isGone || isExpired) {
-          if (isExpired && cfg.instanceId) {
-            this.logger.warn(`[autoscaler] Instance ${cfg.instanceId} start failed (slot expired) — deleting and re-creating`);
-            try {
-              await client.deleteInstance(cfg.instanceId, {
-                apiKey: cfg.apiKey!,
-                authId: cfg.authId,
-              });
-            } catch (delErr) {
-              this.logger.warn(`[autoscaler] Delete stale instance failed (non-fatal):`, delErr);
-            }
-          } else {
-            this.logger.warn(`[autoscaler] Instance ${cfg.instanceId} gone — retrying with auto-discover`);
-          }
-          // Retry with cleared instanceId — no recursion beyond attempt + 1
-          return this.triggerGpuBoot(
-            { ...tierConfig, instanceId: undefined, endpoint: undefined },
-            tierIndex,
-            userId,
-            attempt + 1,
-          );
-        }
-        throw startErr;
-      }
-
-      this.logger.log(`[autoscaler] Boot tier ${tierIndex} (${cfg.provider}) for user ${userId}: OK`);
-      return { ok: true, instanceId: cfg.instanceId, endpoint: cfg.endpoint };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'erro desconhecido';
-      this.logger.warn(`[autoscaler] triggerGpuBoot tier ${tierIndex} (${cfg.provider}) failed:`, err);
-      this.emitError({
-        operation: 'triggerGpuBoot', provider: cfg.provider,
-        tierIndex, userId, instanceId: cfg.instanceId,
-        message: msg, retryable: false,
-      });
-      return { ok: false, reason: msg };
-    }
-  }
-
   async getAutoScaleDecision(
     userId: string,
     config: AutoScalerConfig,
@@ -694,7 +278,7 @@ export class AutoscalerEngine {
     const dryRun = options?.dryRun ?? false;
     const maxLatencyMs = config.maxLatencyMs ?? 1500;
     const tiers = [...(config.tiers ?? [])];
-    let totalTiers = tiers.length;
+    const totalTiers = tiers.length;
 
     if (!config.enabled) {
       return {
@@ -722,9 +306,6 @@ export class AutoscalerEngine {
     const latencyTriggered = latencyBreaches >= LATENCY_BREACH_COUNT;
     const sessionTriggered = activeSessions >= config.threshold;
 
-    // We need at most 1 active GPU tier at a time.  The tiers array is an
-    // ordered fallback chain (e.g. [tensordock, runpod]) — we try tier 0 first
-    // and only fall back to tier 1+ when tier 0 fails / is unhealthy.
     const needsGpu = sessionTriggered || latencyTriggered;
 
     const tierStates = this.stateMap.has(userId)
@@ -765,149 +346,57 @@ export class AutoscalerEngine {
     });
 
     // ── Step 2+3: Fallback boot — try one tier at a time ──
-    // Tiers are an ordered fallback chain (e.g. [tensordock, runpod]).
-    // We boot tier 0; if tier 0 is unhealthy/failed/cooldown, we try tier 1, etc.
-    // Only ONE tier should be booting or ready at any given time.
     const trigger: ScaleTrigger = sessionTriggered ? 'sessions' : latencyTriggered ? 'latency' : 'sessions';
 
-    // Check if any tier is already active (ready or booting)
     const hasActiveTier = tierStates.some(ts => ts.state === 'ready' || ts.state === 'booting');
 
-     if (needsGpu && !hasActiveTier && !dryRun) {
-       // Use intelligent tier selection based on price, reliability, and performance
-       const bestTierIndex = await this._findBestTierForBoot(tiers, tierStates, userId);
-       
-       if (bestTierIndex >= 0) {
-         const i = bestTierIndex;
-         const ts = tierStates[i];
-         const tierConfig = tiers[i];
+    if (needsGpu && !hasActiveTier && !dryRun) {
+      const bestTierIndex = await this.tierSelector.findBestTierForBoot(tiers, tierStates, userId, this.providerMonitor);
 
-         // Check if we should consider spot instances for cost savings
-         const shouldConsiderSpot = tierConfig.storageGb === 0 && 
-           (tierConfig.dockerImage?.includes('babelcast') || tierConfig.dockerImage?.includes('parle')) &&
-           !tierConfig.env?.['REQUIRES_ON_DEMAND'];
-           
-         const priceInfo = this.priceMonitor.get(tierConfig.provider);
-         const reliability = this.reliabilityScores.get(tierConfig.provider);
-         
-         this.logger.log(`[autoscaler] Boot tier ${i} (${tierConfig.provider}) for user ${userId} — trigger=${trigger} spotEligible=${shouldConsiderSpot} price=$${priceInfo?.price.toFixed(3) ?? 'N/A'}/hr reliability=${reliability?.toFixed(2) ?? 'N/A'}`);
-         emitHook(this.hooks, 'onScaleUp', {
-           userId, tierIndex: i, provider: tierConfig.provider,
-           trigger, activeSessions, timestamp: Date.now(),
-         });
-         void this.lifecycleLogger.log({
-           userId, tierIndex: i, provider: tierConfig.provider,
-           eventType: 'boot_started', trigger,
-           oldState: 'idle', newState: 'booting',
-           endpoint: tierConfig.endpoint,
-           metadata: { activeSessions, pricePerHr: priceInfo?.price, reliability },
-         });
+      if (bestTierIndex >= 0) {
+        const i = bestTierIndex;
+        const ts = tierStates[i];
+        const tierConfig = tiers[i];
 
-         // Transition: idle → booting
-         const newBooting: BootingTierState = {
-           state: 'booting',
-           tierIndex: i,
-           endpoint: tierConfig.endpoint ?? '',
-           bootTriggeredAt: Date.now(),
-           trigger,
-           prevBootFailCount: (ts as IdleTierState).bootFailCount ?? 0,
-         };
-         tierStates[i] = newBooting;
+        const shouldConsiderSpot = tierConfig.storageGb === 0 &&
+          (tierConfig.dockerImage?.includes('babelcast') || tierConfig.dockerImage?.includes('parle')) &&
+          !tierConfig.env?.['REQUIRES_ON_DEMAND'];
 
-         // Fire-and-forget boot; update state with discovered endpoint/instanceId.
-         const bootTimestamp = newBooting.bootTriggeredAt;
-         this.triggerGpuBoot(tierConfig, i, userId)
-          .then(({ ok, instanceId, endpoint, reason, sshHost, sshPort, monitorUrl }) => {
-            const currentStates = this.stateMap.get(userId);
-            const current = currentStates?.[i];
-            const stateStillBooting = current?.state === 'booting'
-              && (current as BootingTierState).bootTriggeredAt === bootTimestamp;
+        const priceInfo = this.providerMonitor.getPriceInfo(tierConfig.provider);
+        const reliability = this.providerMonitor.getReliabilityScore(tierConfig.provider);
 
-            // If state was reset/changed while boot was in progress but we got
-            // a real instanceId back, persist it so cost-monitor can track it.
-            if (!stateStillBooting && ok && instanceId) {
-              this.logger.warn(`[autoscaler] Boot tier ${i} succeeded (instanceId=${instanceId}) but state was already ${current?.state ?? 'cleared'} — persisting instanceId for tracking`);
-              if (this.onInstancePersist) {
-                void this.onInstancePersist(userId, `autoscaler_orphan_tier${i}`, {
-                  instanceId, endpoint, provider: tierConfig.provider,
-                  createdAt: bootTimestamp, orphanedBecause: 'state_reset_during_boot',
-                }).catch((err) => {
-                  this.logger.warn(`[autoscaler] Failed to persist orphaned instance ${instanceId}: ${err instanceof Error ? err.message : String(err)}`);
-                  this.emitError({
-                    operation: 'persistOrphanedInstance', provider: tierConfig.provider,
-                    tierIndex: i, userId, instanceId,
-                    message: err instanceof Error ? err.message : String(err),
-                    errorCode: 'PERSIST_FAILED', retryable: false,
-                  });
-                });
-              }
-              void this.lifecycleLogger.log({
-                userId, tierIndex: i, provider: tierConfig.provider,
-                eventType: 'boot_ok', instanceId, endpoint,
-                oldState: 'booting', newState: current?.state ?? 'cleared',
-                trigger, error: 'State changed during boot — instanceId persisted for tracking',
-                metadata: { orphaned: true, bootTimestamp },
-              });
-              this.recordProviderHealthEvent(tierConfig.provider, true);
-              return;
-            }
+        this.logger.log(`[autoscaler] Boot tier ${i} (${tierConfig.provider}) for user ${userId} — trigger=${trigger} spotEligible=${shouldConsiderSpot} price=$${priceInfo?.price.toFixed(3) ?? 'N/A'}/hr reliability=${reliability?.toFixed(2) ?? 'N/A'}`);
+        emitHook(this.hooks, 'onScaleUp', {
+          userId, tierIndex: i, provider: tierConfig.provider,
+          trigger, activeSessions, timestamp: Date.now(),
+        });
+        void this.lifecycleLogger.log({
+          userId, tierIndex: i, provider: tierConfig.provider,
+          eventType: 'boot_started', trigger,
+          oldState: 'idle', newState: 'booting',
+          endpoint: tierConfig.endpoint,
+          metadata: { activeSessions, pricePerHr: priceInfo?.price, reliability },
+        });
 
-            if (!currentStates || !stateStillBooting) return;
+        // Transition: idle → booting
+        const newBooting: BootingTierState = {
+          state: 'booting',
+          tierIndex: i,
+          endpoint: tierConfig.endpoint ?? '',
+          bootTriggeredAt: Date.now(),
+          trigger,
+          prevBootFailCount: (ts as IdleTierState).bootFailCount ?? 0,
+        };
+        tierStates[i] = newBooting;
 
-            if (!ok) {
-              this.logger.warn(`[autoscaler] Boot tier ${i} (${tierConfig.provider}) failed: ${reason ?? 'unknown'}`);
-              this.emitError({
-                operation: 'boot', provider: tierConfig.provider,
-                tierIndex: i, userId, message: reason ?? 'unknown',
-                errorCode: 'BOOT_FAILED', retryable: true,
-              });
-              this.recordProviderHealthEvent(tierConfig.provider, false);
-              const failCount = (current.prevBootFailCount ?? 0) + 1;
-              const durationMs = Date.now() - (current as BootingTierState).bootTriggeredAt;
-              const newIdle: IdleTierState = {
-                state: 'idle',
-                tierIndex: i,
-                bootFailCount: failCount,
-                cooldownUntil: Date.now() + Math.min(BOOT_COOLDOWN_BASE_MS * Math.pow(2, failCount - 1), BOOT_COOLDOWN_MAX_MS),
-              };
-              currentStates[i] = newIdle;
-              this.saveTierStates(userId, currentStates);
-              void this.lifecycleLogger.log({
-                userId, tierIndex: i, provider: tierConfig.provider,
-                eventType: 'boot_failed', durationMs,
-                instanceId: (current as BootingTierState).discoveredInstanceId,
-                endpoint: (current as BootingTierState).endpoint, trigger: (current as BootingTierState).trigger,
-                oldState: 'booting', newState: 'idle',
-                error: reason ?? 'unknown',
-                metadata: { failCount },
-              });
-              return;
-            }
+        // Fire-and-forget boot via orchestrator
+        const bootPromise = this.bootOrchestrator.triggerGpuBoot(tierConfig, i, userId);
+        this.bootOrchestrator.handleBootResult(userId, i, tierConfig, newBooting.bootTriggeredAt, trigger, bootPromise);
 
-            const booting = current as BootingTierState;
-            const updates: Partial<BootingTierState> = {};
-            if (endpoint && endpoint !== booting.endpoint) {
-              this.logger.log(`[autoscaler] Tier ${i} endpoint updated: ${booting.endpoint || 'none'} → ${endpoint}`);
-              updates.endpoint = endpoint;
-            }
-            if (instanceId) updates.discoveredInstanceId = instanceId;
-            if (sshHost) updates.sshHost = sshHost;
-            if (sshPort) updates.sshPort = sshPort;
-            if (monitorUrl) updates.monitorUrl = monitorUrl;
-            if (Object.keys(updates).length > 0) {
-              currentStates[i] = { ...booting, ...updates };
-            }
-            this.saveTierStates(userId, currentStates);
-          })
-          .catch((err) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            this.logger.error(`[autoscaler] Boot tier ${i} (${tierConfig.provider}) unexpected error: ${msg}`);
-          });
-
-        // Start background health poller to detect when GPU becomes ready
-        this.startBootHealthPoller(userId, i, tierConfig.provider, newBooting.bootTriggeredAt, tierConfig);
-       }
-     }
+        // Start background health poller
+        this.bootOrchestrator.startBootHealthPoller(userId, i, tierConfig.provider, newBooting.bootTriggeredAt, tierConfig);
+      }
+    }
 
     this.saveTierStates(userId, tierStates, prevSnapshot);
 
@@ -963,347 +452,41 @@ export class AutoscalerEngine {
     return this.stateMap.get(userId) ?? [];
   }
 
-  /** Cancel all active boot health pollers matching a key prefix. */
-  private cancelBootPollersByPrefix(prefix: string): void {
-    for (const [key, timer] of this.bootPollers) {
-      if (key.startsWith(prefix)) {
-        clearTimeout(timer);
-        this.bootPollers.delete(key);
-      }
-    }
-  }
-
-  /** Cancel all boot pollers and clean up resources. Call on gateway shutdown. */
-  destroy(): void {
-    for (const [key, timer] of this.bootPollers) {
-      clearTimeout(timer);
-    }
-    this.bootPollers.clear();
-    this.decisionLocks.clear();
-    this.logger.log(`[autoscaler] Engine destroyed — ${this.stateMap.size} user states preserved`);
+  /** Trigger a GPU boot for a tier directly (exposed for factory/predictive-warmup use). */
+  triggerGpuBoot(
+    tierConfig: GpuTierConfig,
+    tierIndex: number,
+    userId: string,
+    attempt = 0,
+  ): Promise<{ ok: boolean; instanceId?: string; endpoint?: string; activeGpuType?: string; reason?: string; sshHost?: string; sshPort?: number; monitorUrl?: string }> {
+    return this.bootOrchestrator.triggerGpuBoot(tierConfig, tierIndex, userId, attempt);
   }
 
   /** Cancel an active boot health poller for a specific tier. */
   cancelBootPoller(userId: string, tierIndex: number): void {
-    const prefix = `${userId}:${tierIndex}:`;
-    let found = false;
-    for (const [key, timer] of this.bootPollers) {
-      if (key.startsWith(prefix)) {
-        clearTimeout(timer);
-        this.bootPollers.delete(key);
-        found = true;
-      }
-    }
-    if (found) {
-      this.logger.log(`[autoscaler] Cancelled boot poller for tier ${tierIndex}`);
-    }
+    this.bootOrchestrator.cancelBootPoller(userId, tierIndex);
   }
 
-  /**
-   * Find the best tier for booting, with async price cache update.
-   * This is the main entry point for intelligent tier selection.
-   * @returns Index of the best tier, or -1 if no suitable tier found
-   */
-  private async _findBestTierForBoot(tiers: GpuTierConfig[], tierStates: GpuTierState[], userId: string): Promise<number> {
-    // Update price cache if needed (async)
-    await this.updatePriceCacheIfNeeded();
-    
-    return this._selectBestTierSync(tiers, tierStates, userId);
+  /** Cancel all boot pollers and clean up resources. Call on gateway shutdown. */
+  destroy(): void {
+    this.bootOrchestrator.destroyAllPollers();
+    this.decisionLocks.clear();
+    this.logger.log(`[autoscaler] Engine destroyed — ${this.stateMap.size} user states preserved`);
   }
 
-  /**
-   * Select the best tier for booting based on price, reliability, and performance.
-   * Implements intelligent multi-provider shopping inspired by SkyPilot.
-   * @returns Index of the best tier, or -1 if no suitable tier found
-   */
-  private _selectBestTierSync(tiers: GpuTierConfig[], tierStates: GpuTierState[], userId: string): number {
-    let bestScore = -1;
-    let bestIndex = -1;
-    
-    for (let i = 0; i < tiers.length; i++) {
-      const tierConfig = tiers[i];
-      const tierState = tierStates[i];
-      
-      // Skip if tier is not eligible for booting
-      if (!this.isTierEligibleForBoot(tierConfig, tierState)) {
-        continue;
-      }
-      
-      // Calculate score for this tier
-      const score = this.calculateTierScore(tierConfig, tierState, userId);
-      
-      if (score > bestScore) {
-        bestScore = score;
-        bestIndex = i;
-      }
-    }
-    
-    return bestIndex;
-  }
-
-  /**
-   * Check if a tier is eligible for booting (not manual stopped, not unhealthy, not in cooldown)
-   */
-  private isTierEligibleForBoot(tierConfig: GpuTierConfig, tierState: GpuTierState): boolean {
-    if (tierState.state === 'idle') {
-      const idleState = tierState as IdleTierState;
-      // Skip manually stopped
-      if (idleState.manualStop) return false;
-      // Skip unhealthy (too many boot failures)
-      if (idleState.unhealthy) return false;
-      // Skip if in cooldown
-      if (idleState.cooldownUntil && Date.now() < idleState.cooldownUntil) return false;
-    }
-    // Only idle tiers can be booted (ready/booting tiers are already active)
-    return tierState.state === 'idle';
-  }
-
-  /**
-   * Calculate a score for a tier based on price, reliability, and performance factors.
-   * Higher score = better tier.
-   */
-  private calculateTierScore(tierConfig: GpuTierConfig, tierState: GpuTierState, userId: string): number {
-    let score = 0;
-    const provider = tierConfig.provider;
-    
-    // Price factor (0-40 points): lower price = higher score
-    const priceInfo = this.priceMonitor.get(provider);
-    if (priceInfo && Date.now() - priceInfo.timestamp < this.PRICE_UPDATE_INTERVAL_MS) {
-      // Normalize price: assume $0-5/hour range, lower is better
-      const normalizedPrice = Math.min(5, Math.max(0, priceInfo.price));
-      const priceScore = ((5 - normalizedPrice) / 5) * 40; // 0-40 points
-      score += priceScore;
-    } else {
-      // No price data available, give neutral score
-      score += 20;
-    }
-    
-    // Reliability factor (0-30 points): based on historical success rates
-    const reliabilityScore = this.reliabilityScores.get(provider) ?? 0.5; // Default to 50% reliability
-    score += reliabilityScore * 30; // 0-30 points
-    
-    // Performance factor (0-20 points): based on boot time and performance history
-    const providerClient = this.registry.get(provider);
-    if (providerClient) {
-      // Faster boot time = higher score
-      const bootTimeSecs = providerClient.bootTimeSecs ?? 300; // Default 5 min
-      const bootTimeScore = Math.max(0, (600 - bootTimeSecs) / 600) * 20; // 0-20 points, 10min max
-      score += bootTimeScore;
-    } else {
-      // Unknown provider, give neutral score
-      score += 10;
-    }
-    
-    // Spot instance bonus (0-10 points): if fault-tolerant workload and spot allowed
-    // This would be enhanced with actual workload context in a real implementation
-    if (tierConfig.storageGb === 0 && // Likely a stateless workload
-        ['vast', 'runpod'].includes(provider)) { // Providers known for good spot instances
-      score += 5; // Bonus for spot-friendly tiers
-    }
-    
-    return score;
-  }
-
-  /**
-   * Fallback to original tier selection logic if intelligent selection fails.
-   */
-  private _selectTierFallback(tiers: GpuTierConfig[], tierStates: GpuTierState[], userId: string, trigger: ScaleTrigger, dryRun: boolean): void {
-    // Original logic copied from before modification
-    for (let i = 0; i < tiers.length; i++) {
-      const ts = tierStates[i];
-      const tierConfig = tiers[i];
-      if (!ts || !tierConfig) continue;
-      // Skip manually stopped (user explicitly stopped this tier)
-      if ((ts as IdleTierState).manualStop) continue;
-      // Skip unhealthy (too many boot failures) or in cooldown
-      if ((ts as IdleTierState).unhealthy) continue;
-      if ((ts as IdleTierState).cooldownUntil && Date.now() < (ts as IdleTierState).cooldownUntil!) continue;
-
-      this.logger.log(`[autoscaler] Boot tier ${i} (${tierConfig.provider}) for user ${userId} — trigger=${trigger}`);
-      emitHook(this.hooks, 'onScaleUp', {
-        userId, tierIndex: i, provider: tierConfig.provider,
-        trigger, activeSessions: 0, timestamp: Date.now(), // activeSessions would need to be passed in
-      });
-      void this.lifecycleLogger.log({
-        userId, tierIndex: i, provider: tierConfig.provider,
-        eventType: 'boot_started', trigger,
-        oldState: 'idle', newState: 'booting',
-        endpoint: tierConfig.endpoint,
-        metadata: { activeSessions: 0 }, // Would need actual value
-      });
-
-      // Transition: idle → booting
-      const newBooting: BootingTierState = {
-        state: 'booting',
-        tierIndex: i,
-        endpoint: tierConfig.endpoint ?? '',
-        bootTriggeredAt: Date.now(),
-        trigger,
-        prevBootFailCount: (ts as IdleTierState).bootFailCount ?? 0,
-      };
-      tierStates[i] = newBooting;
-
-      // Fire-and-forget boot; update state with discovered endpoint/instanceId.
-      const bootTimestamp = newBooting.bootTriggeredAt;
-      this.triggerGpuBoot(tierConfig, i, userId)
-        .then(({ ok, instanceId, endpoint, reason, sshHost, sshPort, monitorUrl }) => {
-          // ... rest of original logic would go here
-          // For brevity in this example, we're showing the concept
-          return { ok: true }; // Placeholder
-        })
-        .catch((error) => {
-          // ... error handling would go here
-        });
-      
-      // Only boot one tier at a time in fallback mode
-      break;
-    }
-  }
-
-  /**
-   * Update price cache by querying providers for current pricing.
-   * Called periodically to keep price information fresh.
-   */
-  private async updatePriceCacheIfNeeded(): Promise<void> {
-    const now = Date.now();
-    if (now - this.lastPriceUpdate < this.PRICE_UPDATE_INTERVAL_MS) {
-      return; // Cache is still fresh
-    }
-    
-    this.logger.log(`[autoscaler] Updating GPU price cache...`);
-    this.lastPriceUpdate = now;
-    
-    const providerIds = ['vast', 'runpod', 'tensordock', 'modal'];
-    
-    for (const providerId of providerIds) {
-      const client = this.registry.get(providerId);
-      if (!client?.listOffers) continue;
-      
-      try {
-        const credentials = await this._getProviderCredentials(providerId);
-        if (!credentials) {
-          this.logger.log(`[autoscaler] No credentials for ${providerId}, using fallback pricing`);
-          this._setFallbackPrice(providerId, now);
-          continue;
-        }
-        
-        const offers = await client.listOffers({}, credentials);
-        if (offers.length > 0) {
-          // Find the cheapest offer
-          const cheapest = offers.reduce((best, o) => 
-            o.pricePerHr < best.pricePerHr ? o : best, offers[0]);
-          
-          this.priceMonitor.set(providerId, { 
-            price: cheapest.pricePerHr, 
-            timestamp: now 
-          });
-          
-          // Update reliability from offer data if available
-          const avgReliability = offers
-            .filter(o => o.reliability !== undefined)
-            .reduce((sum, o, _, arr) => sum + (o.reliability ?? 0) / arr.length, 0);
-          
-          if (avgReliability > 0) {
-            // Blend API-reported reliability with our tracked reliability
-            const trackedReliability = this.reliabilityScores.get(providerId) ?? 0.5;
-            this.reliabilityScores.set(providerId, trackedReliability * 0.3 + avgReliability * 0.7);
-          }
-          
-          this.logger.log(`[autoscaler] ${providerId}: $${cheapest.pricePerHr.toFixed(3)}/hr, ${offers.length} offers available`);
-        } else {
-          this._setFallbackPrice(providerId, now);
-        }
-      } catch (err) {
-        this.logger.warn(`[autoscaler] Failed to fetch prices for ${providerId}: ${err instanceof Error ? err.message : String(err)}`);
-        this._setFallbackPrice(providerId, now);
-      }
-    }
-    
-    this.logger.log(`[autoscaler] Price cache updated with ${this.priceMonitor.size} providers`);
-  }
-
-  /**
-   * Get credentials for a provider, using callback or environment variables.
-   */
-  private async _getProviderCredentials(providerId: string): Promise<ProviderCredentials | null> {
-    if (this.resolveCredentials) {
-      const creds = await this.resolveCredentials(providerId);
-      if (creds) return creds;
-    }
-    
-    // Fallback to environment variables
-    switch (providerId) {
-      case 'vast':
-        return process.env.VAST_API_KEY ? { apiKey: process.env.VAST_API_KEY } : null;
-      case 'runpod':
-        return process.env.RUNPOD_API_KEY ? { apiKey: process.env.RUNPOD_API_KEY } : null;
-      case 'tensordock':
-        return (process.env.TENSORDOCK_API_TOKEN && process.env.TENSORDOCK_AUTH_ID)
-          ? { apiKey: process.env.TENSORDOCK_API_TOKEN, authId: process.env.TENSORDOCK_AUTH_ID }
-          : null;
-      case 'modal':
-        if (process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET) {
-          return { apiKey: `${process.env.MODAL_TOKEN_ID}:${process.env.MODAL_TOKEN_SECRET}` };
-        }
-        return process.env.MODAL_API_KEY ? { apiKey: process.env.MODAL_API_KEY } : null;
-      default:
-        return null;
-    }
-  }
-
-  /**
-   * Set fallback price for a provider when API is unavailable.
-   */
-  private _setFallbackPrice(providerId: string, timestamp: number): void {
-    const fallbackPrices: Record<string, number> = {
-      vast: 0.35,
-      runpod: 0.45,
-      tensordock: 0.60,
-      modal: 1.20,
-    };
-    this.priceMonitor.set(providerId, { price: fallbackPrices[providerId] ?? 0.50, timestamp });
-  }
-
-  /**
-   * Record a health event for a provider to update reliability scores.
-   * Call this when a boot succeeds or fails.
-   */
+  /** Record a health event for a provider to update reliability scores. */
   recordProviderHealthEvent(provider: string, success: boolean): void {
-    const stats = this.providerHealthStats.get(provider) ?? { success: 0, failure: 0, lastUpdate: Date.now() };
-    
-    if (success) {
-      stats.success++;
-    } else {
-      stats.failure++;
-    }
-    stats.lastUpdate = Date.now();
-    
-    this.providerHealthStats.set(provider, stats);
-    
-    // Calculate reliability score (exponential moving average)
-    const total = stats.success + stats.failure;
-    if (total > 0) {
-      const rawReliability = stats.success / total;
-      const currentScore = this.reliabilityScores.get(provider) ?? 0.5;
-      // Blend new event with existing score (90% old, 10% new)
-      const newScore = currentScore * 0.9 + rawReliability * 0.1;
-      this.reliabilityScores.set(provider, Math.min(1, Math.max(0, newScore)));
-    }
+    this.providerMonitor.recordHealthEvent(provider, success);
   }
 
-  /**
-   * Get current reliability score for a provider.
-   */
+  /** Get current reliability score for a provider. */
   getProviderReliability(provider: string): number {
-    return this.reliabilityScores.get(provider) ?? 0.5;
+    return this.providerMonitor.getProviderReliability(provider);
   }
 
-  /**
-   * Get current price for a provider.
-   */
+  /** Get current price for a provider. */
   getProviderPrice(provider: string): number | null {
-    const info = this.priceMonitor.get(provider);
-    return info?.price ?? null;
+    return this.providerMonitor.getProviderPrice(provider);
   }
 
   /** Directly set a tier's state (used by tier-lifecycle for explicit control). */

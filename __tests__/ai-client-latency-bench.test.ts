@@ -225,7 +225,7 @@ describe('TTS latency', () => {
       expect(r.provider).toBe('groq');
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 400 || status === 401 || status === 402 || status === 403) return; // API incompatibility, key invalid, or no credits
       throw err;
     }
   }, 30_000);

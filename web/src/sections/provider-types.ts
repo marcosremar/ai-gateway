@@ -175,8 +175,8 @@ export const DEFAULT_DOCKER_IMAGES: DockerImage[] = [
   {
     url: 'marcosremar/babelcast-subtitle:latest',
     label: 'Subtitles Only',
-    description: 'Subtitle pipeline: Faster Whisper STT + TranslateGemma 12B LLM. No TTS. ~3.6GB image, fast boot.',
-    sttModel: 'faster-whisper-large-v3-turbo', llmModel: 'translategemma-12b',
+    description: 'Subtitle pipeline: Faster Whisper STT + TranslateGemma 4B Q8 LLM (llama.cpp, flash_attn). No TTS.',
+    sttModel: 'faster-whisper-large-v3-turbo', llmModel: 'translategemma-4b-q8',
   },
   {
     url: 'marcosremar/babelcast-translategemma:latest',

@@ -63,6 +63,7 @@ interface DeploySettings {
   deployRegion:          string;                   // region filter ('' = any, 'EU', 'US', 'AP', …)
   deployDockerImage:     string;                   // last-used Docker image (persisted across reloads)
   minVramGb:             number;                   // minimum VRAM filter in GB (0 = any)
+  minDiskGb:             number;                   // minimum disk space in GB (default 100)
   preferSsd:             boolean;                  // prefer SSD/NVMe over HDD (diskBwRead > 200 MB/s)
   sttTargetLatencyMs:    number;                   // per-service max latency for STT
   llmTargetLatencyMs:    number;                   // per-service max latency for LLM/translate
@@ -93,6 +94,7 @@ const DEFAULTS: DeploySettings = {
   deployRegion:          '',
   deployDockerImage:     '',
   minVramGb:             16,
+  minDiskGb:             100,
   preferSsd:             false,
   sttTargetLatencyMs:    800,
   llmTargetLatencyMs:    2000,
@@ -257,6 +259,13 @@ export function getMinVramGb(): number { return _s.minVramGb; }
 
 export function setMinVramGb(gb: number): void {
   _s.minVramGb = Math.max(0, gb);
+  saveDeploySettings();
+}
+
+export function getMinDiskGb(): number { return _s.minDiskGb ?? 100; }
+
+export function setMinDiskGb(gb: number): void {
+  _s.minDiskGb = Math.max(0, gb);
   saveDeploySettings();
 }
 

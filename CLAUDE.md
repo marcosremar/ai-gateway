@@ -2,14 +2,55 @@
 
 ## Purpose
 
-Standalone workspace package — the **single source of truth** for all GPU, AI provider, autoscaler, benchmarking, and infra code. Do not put AI/GPU logic in `gateway-server.ts` directly.
+`@parle/ai-gateway` is the AI and GPU infrastructure layer of the Parle platform — a real-time multilingual speech-to-speech translation system. It is a **standalone workspace package** (zero hard framework dependencies) and the **single source of truth** for all GPU, AI provider, autoscaler, benchmarking, and infra code.
+
+**Core use case:** a caller sends raw audio in one language and receives translated audio back. The pipeline is `STT → LLM → TTS`, and the transport (GPU vs cloud) is fully hidden from the caller.
+
+**What this package owns:**
+- **Speech pipeline** — `POST /v1/speech` handles the full STT→LLM→TTS flow in one HTTP call
+- **Multi-tier GPU autoscaler** — cascades through RunPod → TensorDock → Vast.ai → Modal with health checks, idle watchdog, and cost monitoring
+- **AI provider abstraction** — unified interface over 8+ providers (OpenAI, Groq, Fireworks, OpenRouter, Modal, self-hosted) for STT, TTS, LLM, and Image modalities
+- **Provider fallback chains** — declarative, config-driven failover with cooldown and credit-exhaustion tracking
+- **Predictive warmup** — ML-based usage prediction to pre-boot GPUs before demand spikes
+- **Spend tracking** — per-request cost estimation and budget enforcement
+
+Do not put AI/GPU logic in `gateway-server.ts` or host app code directly — it belongs here.
 
 ## Commands
 
 ```bash
 bun install
-bun run build   # tsup → dist/ (ESM + CJS + .d.ts for 12 entry points)
-bun run test    # Vitest
+bun run build        # tsup → dist/ (ESM + CJS + .d.ts for 12 entry points)
+bun run test         # All tests (Vitest, sequential — no parallelism)
+bun run test:watch   # Watch mode
+
+# Provider integration tests (require live API keys in .env)
+bun run test:groq
+bun run test:openai
+bun run test:fireworks
+bun run test:openrouter
+bun run test:modal
+bun run test:cross           # Cross-provider fallback
+bun run test:auth
+bun run test:runpod-lifecycle
+bun run test:vast-lifecycle
+```
+
+`SKIP_GPU_TESTS=1` skips real API calls (default in CI). Tests load vault credentials via `loadVaultCredentials()` in setup — use `describe.skipIf` to guard integration tests.
+
+## Module Entry Points
+
+12 independent entry points (tree-shakeable):
+
+```typescript
+import { createGateway } from '@parle/ai-gateway';                      // Full gateway API
+import { AIProviderRegistry } from '@parle/ai-gateway/providers';        // AI providers only
+import { createAutoscaler } from '@parle/ai-gateway/autoscaler';         // GPU autoscaler engine
+import { GpuProviderRegistry } from '@parle/ai-gateway/gpu-providers';   // Cloud GPU clients
+import { createAIClient } from '@parle/ai-gateway/client';               // Unified client
+import { InMemoryStateAdapter, RedisStateAdapter } from '@parle/ai-gateway/adapters';
+import { signGpuToken, verifyGpuToken } from '@parle/ai-gateway/auth';
+// Also: /handlers, /tracking, /infra, /benchmarking, /vault, /observability, /alerting, /caching, /proxy
 ```
 
 ## API — How to call it
@@ -69,16 +110,39 @@ gateway.handleGet(userId);
 gateway.handleAction(userId, action, body);
 ```
 
+## Provider Fallback Pattern
+
+Prefer declarative chains over programmatic for user-facing configs:
+
+```typescript
+// Declarative (config-driven, preferred)
+const chains: FallbackChainConfig[] = [
+  { stage: 'stt', entries: [
+    { providerId: 'groq-whisper', weight: 1.0 },
+    { providerId: 'openai-whisper', weight: 0.5, cooldownMs: 30_000 },
+  ]},
+];
+
+// Programmatic (for custom orchestration logic)
+await withProviderFallback([groqLLM, openaiLLM, openrouterLLM], (p) => p.chat(messages), {
+  maxRetries: 2,
+  cooldownMs: 30_000,
+});
+```
+
 ## GPU Machine Deployment
 
-**Always use the ai-gateway to deploy/start GPU machines** — never provision raw cloud VMs manually. The ai-gateway handles port mapping, health checks, Docker image selection, and provider failover automatically. This also serves as an integration test for the ai-gateway package itself.
+**Always use the ai-gateway to deploy/start GPU machines** — never provision raw cloud VMs manually.
 
 ```bash
 # Deploy via gateway (requires gateway running: bun run gateway-server.ts)
 POST http://localhost:4000/v1/gpu/deploy
-Body: {"dockerImage": "marcosremar/babelcast-mistral:latest", "gpuTypes": ["NVIDIA GeForce RTX 4090"]}
+Body: {"dockerImage": "marcosremar/babelcast-subtitle:latest", "gpuTypes": ["NVIDIA GeForce RTX 5090"]}
 
-# For Blackwell GPUs (RTX 5090/5080):
+# Same image works on all GPUs — no separate Blackwell variant needed (CUDA 12.8.1 base)
+Body: {"dockerImage": "marcosremar/babelcast-subtitle:latest", "gpuTypes": ["NVIDIA GeForce RTX 4090"]}
+
+# For mistral (still has Blackwell variant):
 Body: {"dockerImage": "marcosremar/babelcast-blackwell-mistral:latest", "gpuTypes": ["NVIDIA GeForce RTX 5090"]}
 
 # Check status
@@ -86,40 +150,49 @@ GET http://localhost:4000/v1/gpu/status
 ```
 
 - Provider order: TensorDock → Vast.ai → Modal (based on available credentials in `.env`)
-- GPU type names must match allowlist exactly (see `PREFERRED_GPU_TYPES` in `gateway-server.ts`)
-- Vast.ai key: `VAST_API_KEY` in `.env`
-- TensorDock keys: `TENSORDOCK_API_KEY` + `TENSORDOCK_AUTH_ID` in `.env`
+- GPU type names must match allowlist exactly (see `PREFERRED_GPU_TYPES` in `server/config.ts`)
+- Vast.ai key: `VAST_API_KEY` | TensorDock: `TENSORDOCK_API_KEY` + `TENSORDOCK_AUTH_ID`
+- Docker Hub auth: `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` (avoids Vast.ai pull rate limits)
 - Cooldowns persist in `~/.babelcast/cooldowns.json` — delete to clear stuck cooldowns
+
+## Docker Images (`ai-gateway-dockers` repo)
+
+Docker images are built and pushed via GitHub Actions in [marcosremar/ai-gateway-dockers](https://github.com/marcosremar/ai-gateway-dockers).
+
+```bash
+# Trigger build manually (or push to babelcast-subtitle/ directory)
+gh workflow run build-babelcast-subtitle.yml --repo marcosremar/ai-gateway-dockers
+```
+
+| Image | Base | LLM | GPU Support |
+|-------|------|-----|-------------|
+| `babelcast-subtitle` | CUDA 12.8.1 | TranslateGemma 4B Q8 (llama.cpp, flash_attn) | Universal (Blackwell + Ada + Ampere) |
+| `babelcast-mistral` | CUDA 12.4 | Mistral 7B | Standard only (has Blackwell variant) |
+
+- **Universal images** (CUDA 12.8.1 base) run on ALL GPUs — no Blackwell swap needed
+- Only `babelcast-mistral` still uses the `STANDARD_TO_BLACKWELL` mapping in `server/config.ts`
+- Vast.ai `image_login` is injected automatically when `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` env vars are set
 
 ## Web UI Component Library (`web/src/components/ui/`)
 
 **All new UI code MUST use these components.** Do not re-implement inline.
 
-| Component | Import | Usage |
-|-----------|--------|-------|
-| `IconBox` | `import { IconBox } from '@/components/ui'` | Colored icon in rounded box. Props: `icon`, `color`, `size` (xs/sm/md/lg). **Never** write inline `div` with `color-mix` + icon — use this. |
-| `DropdownList` | `import { DropdownList } from '@/components/ui'` | Custom dropdown with icons, groups, portal rendering. Replace all native `<select>` with this for styled dropdowns. Props: `options`, `value`, `onChange`, `accent`, `onClose`, `autoOpen`. |
-| `KV` | `import { KV } from '@/components/ui'` | Key-value display row. Props: `label`, `value`, `mono?`. **Never** write inline flex label+value pairs — use this. |
-| `StatusDot` | `import { StatusDot } from '@/components/ui'` | Colored status indicator. Props: `status` (ready/online/booting/warning/error/offline/idle), `size`, `label?`. **Never** write inline colored dots — use this. |
-| `Button` | `import { Button } from '@/components/ui'` | Styled button with variants (primary/outline/danger) and loading state. |
-| `Toggle` | `import { Toggle } from '@/components/ui'` | On/off switch. Props: `checked`, `onChange`, `size`. |
-| `FormInput` | `import { FormInput } from '@/components/ui'` | Labeled text input. |
-| `FormSelect` | `import { FormSelect } from '@/components/ui'` | Labeled native select (use `DropdownList` for rich dropdowns). |
-| `Card` / `CardHeader` / `CardBody` | `import { Card, CardHeader, CardBody } from '@/components/ui'` | Content containers. |
-| `SectionHeader` | `import { SectionHeader } from '@/components/ui'` | Page section title + subtitle. |
-| `SaveBar` | `import { SaveBar } from '@/components/ui'` | Sticky bottom save/discard bar. |
-| `ConfirmModal` | `import { ConfirmModal } from '@/components/ui'` | Confirmation dialog. |
-| `Spinner` | `import { Spinner } from '@/components/ui'` | Loading indicator. |
-| `StatusBadge` | `import { StatusBadge } from '@/components/ui'` | Success/Pending/Error badge pill. |
-| `TabNav` | `import { TabNav } from '@/components/ui'` | Tab switcher. |
-| `AlertBanner` | `import { AlertBanner } from '@/components/ui'` | Alert messages. |
-
-### Provider icon registry (for pipeline/service UIs)
-
 ```typescript
+// Always import from the barrel — never inline equivalent markup
+import { IconBox, DropdownList, KV, StatusDot, Button, Toggle } from '@/components/ui';
+import { FormInput, FormSelect, Card, CardHeader, CardBody } from '@/components/ui';
+import { SectionHeader, SaveBar, ConfirmModal, Spinner, StatusBadge, TabNav, AlertBanner } from '@/components/ui';
+
+// Provider icon registry (pipeline/service UIs)
 import { PROVIDER_ICON } from '@/sections/FallbackChainList';
 // { gpu: { icon: Cpu, color: '#f59e0b' }, groq: { icon: Zap, color: '#7ba896' }, ... }
 ```
+
+Key rules:
+- **Never** write a `div` with `color-mix` + icon — use `IconBox` (`icon`, `color`, `size`: xs/sm/md/lg)
+- **Never** write inline colored dots — use `StatusDot` (`status`: ready/online/booting/warning/error/offline/idle)
+- **Never** write inline flex label+value pairs — use `KV` (`label`, `value`, `mono?`)
+- **Never** use native `<select>` for styled dropdowns — use `DropdownList`
 
 ## Key Gotchas
 

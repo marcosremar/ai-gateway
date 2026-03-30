@@ -19,6 +19,14 @@ vi.mock('bun:sqlite', () => ({
   },
 }));
 
+// Mock @prisma/client — not installed in this package (server/state.ts imports it statically)
+vi.mock('@prisma/client', () => ({
+  PrismaClient: class MockPrismaClient {
+    $disconnect = vi.fn(async () => {});
+    $connect = vi.fn(async () => {});
+  },
+}));
+
 describe('playground-handlers exports', () => {
   afterEach(() => {
     vi.restoreAllMocks();

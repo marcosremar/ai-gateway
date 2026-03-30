@@ -142,9 +142,10 @@ export class VastClient extends AbstractGpuProvider {
     this._lastRequestMs = Date.now();
 
     // Fetch with 429 retry
+    let lastRes: Response | undefined;
     for (let attempt = 0; attempt <= RATE_LIMIT_429_MAX_RETRIES; attempt++) {
-      const res = await this.fetchRaw(url, init, timeout);
-      if (res.status !== 429) return res;
+      lastRes = await this.fetchRaw(url, init, timeout);
+      if (lastRes.status !== 429) return lastRes;
 
       if (attempt < RATE_LIMIT_429_MAX_RETRIES) {
         const backoff = RATE_LIMIT_429_RETRY_MS * (attempt + 1);
@@ -162,7 +163,7 @@ export class VastClient extends AbstractGpuProvider {
       httpStatus: 429,
       retryable: true,
     });
-    return this.fetchRaw(url, init, timeout);
+    return lastRes!;
   }
 
   async discoverInstance(
@@ -196,11 +197,13 @@ export class VastClient extends AbstractGpuProvider {
       throw new Error('[vast] spec.dockerImage is required — no default image');
     }
     const imageName = spec.dockerImage;
+    const { getMinDiskGb } = await import('./deploy-settings');
     let diskGb = spec.storageGb ?? 0;
     if (diskGb <= 0) {
       diskGb = await AbstractGpuProvider.estimateImageDiskGb(imageName, 20);
       this.log.log(`[vast] Auto-detected disk size for ${imageName}: ${diskGb}GB`);
     }
+    diskGb = Math.max(diskGb, getMinDiskGb());
 
     // ── 2. Search for cheapest available offer ─────────────────────────────
     const searchBody: Record<string, unknown> = {
@@ -326,7 +329,7 @@ export class VastClient extends AbstractGpuProvider {
         // Do NOT include 'price' — omitting it = on-demand (fixed price, non-interruptible).
         disk: diskGb + 15,
         runtype: 'ssh_direct',
-        onstart: `nohup bash -c '${onstart}' > /var/log/app.log 2>&1 &`,
+        onstart: `nohup bash -c ${JSON.stringify(onstart)} > /var/log/app.log 2>&1 &`,
         // Port mappings via env dict (works when host has direct ports)
         env: {
           TZ: 'UTC',
@@ -338,6 +341,10 @@ export class VastClient extends AbstractGpuProvider {
         ...(spec.templateHashId ? { template_hash_id: spec.templateHashId } : {}),
         // Don't cancel_unavail — let it queue instead of silently destroying
         ...(spec.cancelUnavail === true ? { cancel_unavail: true } : {}),
+        // Docker Hub auth to avoid unauthenticated pull rate limits (10 pulls/hr)
+        ...((process.env.DOCKERHUB_USERNAME || process.env.DOCKER_HUB_USER) && (process.env.DOCKERHUB_TOKEN || process.env.DOCKER_HUB_TOKEN)
+          ? { image_login: `-u ${process.env.DOCKERHUB_USERNAME || process.env.DOCKER_HUB_USER} -p ${process.env.DOCKERHUB_TOKEN || process.env.DOCKER_HUB_TOKEN} docker.io` }
+          : {}),
       };
 
       try {
@@ -379,21 +386,29 @@ export class VastClient extends AbstractGpuProvider {
           Math.min(Math.round(pullEstimateS * 2 * 1000), 900_000), // 2x safety, cap 15 min
           180_000, // floor 3 min
         );
-        const { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS);
+        let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS);
 
-        // If instance vanished (no IP), destroy and try next offer
-        if (!endpoint && !ip) {
-          const reason = 'instance vanished during startup (host reclaimed)';
-          try {
-            const logs = await this.getInstanceLogs(instanceId, { apiKey }, 50);
-            if (logs) this.log.warn(`[vast] Instance ${contractId} logs before destroy:\n${logs.substring(0, 500)}`);
-          } catch {}
-          this.log.warn(`[vast] Instance ${contractId} has no IP — ${reason}. Destroying and trying next offer...`);
-          const offerIp = String(offer.public_ipaddr ?? '');
-          if (offerIp) this._markHostUnstable(offerIp);
-          try { await this.deleteInstance(instanceId, { apiKey }); } catch (delErr) { this.log.debug(`[vast] Cleanup of ${contractId} failed: ${this.errMsg(delErr)}`); }
-          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason });
-          continue;
+        // If instance vanished (no endpoint), verify it still exists before trying SSH.
+        // _pollForEndpoint may have cached ip/sshHost from an early poll before the host reclaimed.
+        if (!endpoint) {
+          const stillExists = await this._fetchInstanceDetail(contractId, headers);
+          if (!stillExists || !stillExists.ip || ['exited', 'failed', 'destroyed', 'error', 'deleted'].includes(stillExists.status?.toLowerCase())) {
+            const reason = 'instance vanished during startup (host reclaimed)';
+            try {
+              const logs = await this.getInstanceLogs(instanceId, { apiKey }, 50);
+              if (logs) this.log.warn(`[vast] Instance ${contractId} logs before destroy:\n${logs.substring(0, 500)}`);
+            } catch {}
+            this.log.warn(`[vast] Instance ${contractId} no longer exists (status=${stillExists?.status ?? 'gone'}) — ${reason}. Destroying and trying next offer...`);
+            const offerIp = String(offer.public_ipaddr ?? '');
+            if (offerIp) this._markHostUnstable(offerIp);
+            try { await this.deleteInstance(instanceId, { apiKey }); } catch (delErr) { this.log.debug(`[vast] Cleanup of ${contractId} failed: ${this.errMsg(delErr)}`); }
+            offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason });
+            continue;
+          }
+          // Refresh ip/sshHost/sshPort from the live check
+          ip = stillExists.ip;
+          sshHost = stillExists.sshHost;
+          sshPort = stillExists.sshPort;
         }
 
         // SSH-only hosts (RTX 5090 Blackwell often have no direct ports):
@@ -401,8 +416,8 @@ export class VastClient extends AbstractGpuProvider {
         if (!endpoint && ip && sshHost && sshPort) {
           this.log.log(`[vast] Instance ${contractId} is SSH-only (no direct ports). Setting up SSH tunnel to ${sshHost}:${sshPort}...`);
           try {
-            const { SshTunnel } = await import('../../server/ssh-tunnel');
-            const tunnel = new SshTunnel(sshHost, sshPort, 8000);
+            const { getOrCreateTunnel } = await import('../../server/ssh-tunnel');
+            const tunnel = getOrCreateTunnel(sshHost, sshPort, 8000);
             const ok = await tunnel.open(15_000);
             if (ok) {
               this.log.log(`[vast] SSH tunnel opened: ${tunnel.endpoint} → ${sshHost}:8000`);
@@ -636,7 +651,7 @@ export class VastClient extends AbstractGpuProvider {
       // Request logs via Vast.ai async log service
       const reqRes = await this._vastFetch(
         `${VAST_API_BASE}/instances/request_logs/${rawId}/`,
-        { method: 'PUT', headers, body: JSON.stringify({ api_key: apiKey, tail: String(lines) }) },
+        { method: 'PUT', headers, body: JSON.stringify({ tail: lines }) },
         TIMEOUTS.read,
       );
       if (!reqRes.ok) {
@@ -665,7 +680,7 @@ export class VastClient extends AbstractGpuProvider {
       // Fallback: read status_msg from instance detail
       await new Promise(r => setTimeout(r, 2000));
       const logsRes = await this._vastFetch(
-        `${VAST_API_BASE}/instances/${rawId}/?api_key=${apiKey}`,
+        `${VAST_API_BASE}/instances/${rawId}/`,
         { method: 'GET', headers },
         TIMEOUTS.read,
       );
@@ -1161,7 +1176,7 @@ export class VastClient extends AbstractGpuProvider {
     sshHost?: string; sshPort?: number;
   } {
     const ip = (inst.public_ipaddr || inst.ssh_host || '') as string;
-    const status = String(inst.actual_status ?? inst.status_msg ?? inst.cur_state ?? 'unknown');
+    const status = String(inst.actual_status ?? inst.cur_state ?? 'unknown');
     const sshHost = (inst.ssh_host ?? inst.public_ipaddr) as string | undefined;
     const rawSshPort = inst.ssh_port as number | undefined;
     const sshPort = rawSshPort && rawSshPort >= 1 && rawSshPort <= 65535 ? rawSshPort : undefined;
