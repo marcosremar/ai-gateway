@@ -68,8 +68,8 @@ function startBotAudioPull(botEndpoint: string) {
     ws.on('open', () => console.log('[bot-audio-pull] Connected — receiving audio'));
     ws.on('message', (data) => {
       chunks++;
-      if (chunks === 1 || chunks % 500 === 0) {
-        console.log(`[bot-audio-pull] Audio chunk #${chunks} (${(data as Buffer).length} bytes) → relay to ${wsClients.size} clients`);
+      if (chunks === 1 || chunks % 5000 === 0) {
+        console.log(`[bot-audio-pull] chunk #${chunks} → ${wsClients.size} client(s)`);
       }
       // Relay binary audio to all connected Python app clients (same as parec path)
       for (const client of wsClients) {
@@ -227,6 +227,84 @@ async function deployLocalDocker(dockerImage: string, envVars?: Record<string, s
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
     setBotState({ message: `Waiting for local bot startup... [${elapsed}s]` });
     await new Promise(r => setTimeout(r, 3_000));
+  }
+}
+
+/**
+ * Auto-deploy the bot on Fly.io at gateway startup.
+ * Called once from gateway-server.ts after startup — no HTTP request needed.
+ * Skips silently if the bot is already deployed or FLY_API_TOKEN is not set.
+ */
+export async function autoDeployBot(): Promise<void> {
+  if (botState.status !== 'idle' && botState.status !== 'error') {
+    console.log(`[bot] Auto-boot: bot already deployed (status=${botState.status}), skipping`);
+    return;
+  }
+  const flyKey = process.env.FLY_API_TOKEN || '';
+  if (!flyKey) {
+    console.log('[bot] Auto-boot: FLY_API_TOKEN not set — bot will not auto-deploy');
+    return;
+  }
+
+  const bootStartMs = Date.now();
+  const podApiKey = crypto.randomUUID();
+  setBotPodApiKey(podApiKey);
+  const podEnv: Record<string, string> = {
+    SERVERLESS: 'true', NODE_ENV: 'production', BOT_API_KEY: podApiKey, TMPDIR: '/tmp',
+  };
+
+  setBotDeployLock(true);
+  setBotState({
+    status: 'creating', startedAt: Date.now(), podId: '', endpoint: '',
+    message: 'Auto-boot: deploying bot on Fly.io...', botId: '', meetingUrl: '',
+  });
+
+  try {
+    console.log('[bot] Auto-boot: starting Fly.io bot deploy...');
+    const instance = await flyio.createInstance(
+      { dockerImage: BOT_DOCKER_IMAGE, ramGb: 4, vcpus: 2, env: podEnv },
+      { apiKey: flyKey },
+    );
+
+    setBotState({
+      status: 'booting', podId: instance.instanceId,
+      endpoint: instance.endpoint || `https://${process.env.FLY_APP_NAME || 'babelcast-bot'}.fly.dev`,
+      message: `Auto-boot: bot machine created (${instance.instanceId.slice(0, 8)}), waiting for startup...`,
+    });
+
+    // Poll /version until ready (max 30 min)
+    const BOT_TIMEOUT_MS = 30 * 60_000;
+    while (true) {
+      if (Date.now() - bootStartMs > BOT_TIMEOUT_MS) {
+        setBotState({ status: 'error', message: 'Auto-boot: bot timed out waiting for startup' });
+        await flyio.deleteInstance(instance.instanceId, { apiKey: flyKey }).catch(() => {});
+        return;
+      }
+
+      const endpoint = botState.endpoint || instance.endpoint || `https://${process.env.FLY_APP_NAME || 'babelcast-bot'}.fly.dev`;
+      try {
+        const probeHeaders: Record<string, string> = { 'fly-force-instance-id': instance.instanceId };
+        const flyHost = flyio.getFlyHost();
+        if (flyHost) probeHeaders['Host'] = flyHost;
+        const resp = await fetch(`${endpoint}/version`, { headers: probeHeaders, signal: AbortSignal.timeout(5_000) });
+        if (resp.ok) {
+          const bootSec = Math.round((Date.now() - bootStartMs) / 1000);
+          setBotState({ status: 'ready', message: `Auto-boot: bot ready in ${bootSec}s (Fly.io)`, webcamRtmpUrl: '', sshHost: '', sshPort: 0 });
+          console.log(`[bot] Auto-boot: Fly.io bot ready in ${bootSec}s — endpoint: ${endpoint}`);
+          return;
+        }
+      } catch { /* not ready yet */ }
+
+      const elapsed = Math.round((Date.now() - bootStartMs) / 1000);
+      setBotState({ message: `Auto-boot: waiting for bot startup... [${elapsed}s]` });
+      await new Promise(r => setTimeout(r, 5_000));
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[bot] Auto-boot: Fly.io deploy failed — ${msg}`);
+    setBotState({ status: 'error', message: `Auto-boot failed: ${msg}` });
+  } finally {
+    setBotDeployLock(false);
   }
 }
 
@@ -706,22 +784,35 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
       })().catch(() => {});
       // Watchdog: detect if bot leaves/crashes and auto-rejoin
       (async () => {
-        const probeHeaders: Record<string, string> = {};
         const flyHost = flyio.getFlyHost();
+        // Use fly.dev hostname for probe (valid TLS cert) instead of raw IP which fails TLS.
+        // Fall back to botEndpoint with TLS skipped if no flyHost.
+        const probeUrl = flyHost
+          ? `https://${flyHost}/version`
+          : `${botEndpoint}/version`;
+        const probeHeaders: Record<string, string> = {};
         if (flyHost) probeHeaders['Host'] = flyHost;
         if (botState.podId && botState.podId !== 'local') probeHeaders['fly-force-instance-id'] = botState.podId;
+        const probeFetchOpts: Record<string, unknown> = { headers: probeHeaders, signal: AbortSignal.timeout(5000) };
+        if (!flyHost && botEndpoint.includes('https://')) {
+          (probeFetchOpts as any).tls = { rejectUnauthorized: false };
+        }
+        console.log(`[bot-watchdog] Probing ${probeUrl} every 10s (machine-id=${botState.podId ?? 'n/a'})`);
 
         let wasInMeeting = false;
         let reconnectAttempts = 0;
+        let consecutiveProbeFailures = 0;
         const MAX_RECONNECTS = 3;
+        const MAX_PROBE_FAILURES = 6; // 6 × 10s = 60s of unreachable machine → declare crashed
 
         while (botState.status === 'joined' && botState.meetingUrl) {
           await new Promise(r => setTimeout(r, 10_000)); // check every 10s
           if (botState.status !== 'joined') break;
 
           try {
-            const r = await fetch(`${botEndpoint}/version`, { headers: probeHeaders, signal: AbortSignal.timeout(5000) });
+            const r = await fetch(probeUrl, { ...probeFetchOpts, signal: AbortSignal.timeout(5000) } as any);
             if (r.ok) {
+              consecutiveProbeFailures = 0; // reset on successful probe
               const data = await r.json() as { status?: string };
               if (data.status === 'meeting_active') {
                 wasInMeeting = true;
@@ -740,7 +831,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
                   });
                   if (rejoinRes.ok) {
                     console.log(`[bot] Auto-rejoin sent successfully`);
-                    wasInMeeting = false; // wait for meeting_active again
+                    // Keep wasInMeeting=true so next idle check continues counting reconnect attempts
                   } else {
                     console.warn(`[bot] Auto-rejoin failed: HTTP ${rejoinRes.status}`);
                   }
@@ -754,7 +845,15 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
                 break;
               }
             }
-          } catch { /* probe failed, bot might be restarting */ }
+          } catch {
+            consecutiveProbeFailures++;
+            if (consecutiveProbeFailures >= MAX_PROBE_FAILURES) {
+              console.warn(`[bot] Machine unreachable for ${consecutiveProbeFailures} consecutive probes — declaring crashed`);
+              broadcastWs({ type: 'bot:status', status: 'ended', message: 'Bot machine crashed' });
+              setBotState({ status: 'idle', message: 'Bot machine crashed — redeploy to reconnect' });
+              break;
+            }
+          }
         }
       })().catch(() => {});
 
