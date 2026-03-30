@@ -6,6 +6,10 @@ export default defineConfig({
     alias: [
       { find: /^@ai-gateway\/(.*)$/, replacement: `${path.resolve(__dirname, 'src')}/$1` },
       { find: '@ai-gateway', replacement: path.resolve(__dirname, 'src/index.ts') },
+      // @prisma/client is not installed in this package (no hard dep by design).
+      // Alias it to a mock so tests that exercise DatabaseService.prisma or
+      // server/state.ts can run without the real package.
+      { find: '@prisma/client', replacement: path.resolve(__dirname, '__tests__/__mocks__/prisma-client-mock.ts') },
     ],
   },
   test: {

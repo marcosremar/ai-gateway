@@ -23,6 +23,7 @@ export const DOCKER_IMAGE_VERSION = 'v1.3.0';
 
 /** All known Docker image base names (without tag). */
 export const DOCKER_IMAGE_NAMES = [
+  'marcosremar/babelcast-subtitle',
   'marcosremar/babelcast-translategemma',
   'marcosremar/babelcast-translategemma-only-subtitles',
   'marcosremar/babelcast-mistral',

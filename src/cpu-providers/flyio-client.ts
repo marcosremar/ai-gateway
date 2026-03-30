@@ -187,7 +187,7 @@ export class FlyioClient extends AbstractGpuProvider {
       await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}/stop`, {
         method: 'POST',
         headers: this.headers(token),
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(TIMEOUTS.write),
       });
       await this.waitForState(app, instanceId, token, 'stopped', 30).catch(() => {});
     } catch { /* might already be stopped */ }
@@ -195,7 +195,7 @@ export class FlyioClient extends AbstractGpuProvider {
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}?force=true`, {
       method: 'DELETE',
       headers: this.headers(token),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(TIMEOUTS.write),
     });
 
     if (!res.ok && res.status !== 404) {

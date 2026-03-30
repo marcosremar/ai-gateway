@@ -26,6 +26,10 @@ export interface OpenAICompatTTSConfig {
   defaultModel?: string;
   defaultVoice?: string;
   defaultFormat?: TTSAudioFormat;
+  /** When set, only these formats are accepted. If the request asks for a
+   *  format not in this list (e.g. 'mp3' but the model only supports 'wav'),
+   *  the provider silently falls back to `defaultFormat`. */
+  allowedFormats?: TTSAudioFormat[];
 }
 
 export class OpenAICompatTTSProvider implements TTSProvider {
@@ -65,9 +69,15 @@ export class OpenAICompatTTSProvider implements TTSProvider {
   getVoices(): VoiceInfo[] { return this.config.voices; }
   isConfigured(): boolean { return !!process.env[this.config.envKey]; }
 
+  private resolveFormat(requested?: TTSAudioFormat): TTSAudioFormat {
+    const fmt = requested || this.config.defaultFormat || 'mp3';
+    const allowed = this.config.allowedFormats;
+    return (allowed && !allowed.includes(fmt)) ? (this.config.defaultFormat || 'wav') : fmt;
+  }
+
   async synthesize(request: TTSRequest): Promise<TTSResponse> {
     const client = this.getClient();
-    const format = request.responseFormat || this.config.defaultFormat || 'mp3';
+    const format = this.resolveFormat(request.responseFormat);
 
     const params: OpenAI.Audio.SpeechCreateParams = {
       model: request.model || this.config.defaultModel || this.config.models[0]?.id,
@@ -85,7 +95,7 @@ export class OpenAICompatTTSProvider implements TTSProvider {
 
   async synthesizeStream(request: TTSRequest): Promise<ReadableStream<Uint8Array>> {
     const client = this.getClient();
-    const format = request.responseFormat || this.config.defaultFormat || 'mp3';
+    const format = this.resolveFormat(request.responseFormat);
 
     const params: OpenAI.Audio.SpeechCreateParams = {
       model: request.model || this.config.defaultModel || this.config.models[0]?.id,

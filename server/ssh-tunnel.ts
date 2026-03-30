@@ -63,8 +63,10 @@ export class SshTunnel {
           resolve(false);
         });
 
+        let processExited = false;
         this.proc.on('exit', (code) => {
           this._open = false;
+          processExited = true;
           if (code !== 0 && code !== null) {
             console.warn(`[ssh-tunnel] Exited with code ${code}`);
           }
@@ -74,6 +76,11 @@ export class SshTunnel {
         // Wait a bit then test the connection
         setTimeout(async () => {
           clearTimeout(timer);
+          // If the SSH process already exited, the tunnel is dead — don't report success
+          if (processExited) {
+            resolve(false);
+            return;
+          }
           try {
             // Quick test: can we connect to the local port?
             const testRes = await fetch(`http://127.0.0.1:${this._localPort}/health`, {

@@ -31,6 +31,8 @@ export const groqTTS = new OpenAICompatTTSProvider({
   defaultModel: 'canopylabs/orpheus-v1-english',
   defaultVoice: 'autumn',
   defaultFormat: 'wav',
+  // Groq orpheus models only accept wav — silently downgrade mp3/opus/etc. requests
+  allowedFormats: ['wav'],
 });
 
 export const groqLLM = new OpenAICompatLLMProvider({

@@ -222,8 +222,8 @@ export function filterTiers(
 // ── Default Storage per Provider ────────────────────────────────────────────
 
 export const DEFAULT_STORAGE_GB: Record<ProviderName, number> = {
-  runpod: 50,
+  runpod: 100,
   tensordock: 100,
-  vast: 0,
+  vast: 100,
   modal: 0,
 };

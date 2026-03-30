@@ -210,11 +210,13 @@ export class RunpodClient extends AbstractGpuProvider {
       throw new Error('[runpod] spec.dockerImage is required — no default image');
     }
     const imageName = spec.dockerImage;
+    const { getMinDiskGb } = await import('./deploy-settings');
     let diskGb = spec.storageGb ?? 0;
     if (diskGb <= 0) {
       diskGb = await AbstractGpuProvider.estimateImageDiskGb(imageName, 20);
       this.log.log(`[runpod] Auto-detected disk size for ${imageName}: ${diskGb}GB`);
     }
+    diskGb = Math.max(diskGb, getMinDiskGb());
 
     const basePodConfig: Record<string, unknown> = {
       name: podName,

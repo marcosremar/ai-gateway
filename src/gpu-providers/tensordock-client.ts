@@ -328,7 +328,7 @@ export class TensordockClient extends AbstractGpuProvider {
               resources: {
                 vcpu_count: Math.min(spec.vcpus ?? 4, candidate.maxVcpu),
                 ram_gb: Math.min(spec.ramGb ?? 16, candidate.maxRam),
-                storage_gb: spec.storageGb ?? 100,
+                storage_gb: Math.max(spec.storageGb ?? 100, (await import('./deploy-settings')).getMinDiskGb()),
                 gpus: { [gpuId]: { count: spec.gpuCount ?? 1 } },
               },
               location_id: candidate.id,
