@@ -30,6 +30,7 @@ export interface GpuDeployConfig {
   region: string;       // '' = any, 'EU', 'US', 'FR', etc.
   timeoutMin: number;   // deploy timeout in minutes
   raceCount?: number;   // hedged deploy: launch N in parallel, keep first healthy (1 = off)
+  bootOnStartup?: boolean; // auto-boot GPU when gateway starts (Groq handles requests during boot)
 }
 
 /**
@@ -92,6 +93,7 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
       gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
       region: 'US',
       timeoutMin: 30,
+      bootOnStartup: true,
     },
   },
   {
