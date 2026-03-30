@@ -339,8 +339,9 @@ class GatewaySDK:
         self._check_response(r, "/v1/config/api-keys")
         data = self._parse_json(r, "/v1/config/api-keys")
         def _norm_key_entry(k: dict) -> ApiKeyEntry:
-            if "envVar" in k and "env_var" not in k:
-                k = {**k, "env_var": k.pop("envVar")}
+            k = dict(k)
+            if "envVar" in k:
+                k["env_var"] = k.pop("envVar")
             return ApiKeyEntry(**k)
         keys = [_norm_key_entry(k) for k in data.get("keys", data if isinstance(data, list) else [])]
         return ApiKeysResponse(keys=keys)
@@ -351,8 +352,9 @@ class GatewaySDK:
         self._check_response(r, "/v1/config/api-keys")
         data = self._parse_json(r, "/v1/config/api-keys")
         def _norm(k: dict) -> ApiKeyEntry:
-            if "envVar" in k and "env_var" not in k:
-                k = {**k, "env_var": k.pop("envVar")}
+            k = dict(k)
+            if "envVar" in k:
+                k["env_var"] = k.pop("envVar")
             return ApiKeyEntry(**k)
         entries = [_norm(k) for k in data.get("keys", [])]
         return ApiKeysResponse(keys=entries, saved=data.get("saved", False))
@@ -474,6 +476,7 @@ class GatewaySDK:
             retry_count=d.get("retryCount", 0),
             provider=d.get("provider", ""),
             alert=d.get("alert", ""),
+            boot_on_startup=d.get("bootOnStartup", False),
         )
 
     async def terminate_gpu(self, api_key: str) -> None:
