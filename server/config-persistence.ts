@@ -93,7 +93,6 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
       gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
       region: 'US',
       timeoutMin: 30,
-      bootOnStartup: true,
     },
   },
   {
