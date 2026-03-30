@@ -338,7 +338,11 @@ class GatewaySDK:
         r = await self._request_with_retry("get","/v1/config/api-keys", timeout=self._timeouts.health)
         self._check_response(r, "/v1/config/api-keys")
         data = self._parse_json(r, "/v1/config/api-keys")
-        keys = [ApiKeyEntry(**k) for k in data.get("keys", data if isinstance(data, list) else [])]
+        def _norm_key_entry(k: dict) -> ApiKeyEntry:
+            if "envVar" in k and "env_var" not in k:
+                k = {**k, "env_var": k.pop("envVar")}
+            return ApiKeyEntry(**k)
+        keys = [_norm_key_entry(k) for k in data.get("keys", data if isinstance(data, list) else [])]
         return ApiKeysResponse(keys=keys)
 
     async def set_api_keys(self, keys: dict[str, str]) -> ApiKeysResponse:
@@ -346,7 +350,11 @@ class GatewaySDK:
         r = await self._request_with_retry("post","/v1/config/api-keys", json={"keys": keys}, timeout=self._timeouts.health)
         self._check_response(r, "/v1/config/api-keys")
         data = self._parse_json(r, "/v1/config/api-keys")
-        entries = [ApiKeyEntry(**k) for k in data.get("keys", [])]
+        def _norm(k: dict) -> ApiKeyEntry:
+            if "envVar" in k and "env_var" not in k:
+                k = {**k, "env_var": k.pop("envVar")}
+            return ApiKeyEntry(**k)
+        entries = [_norm(k) for k in data.get("keys", [])]
         return ApiKeysResponse(keys=entries, saved=data.get("saved", False))
 
     async def get_provider_config(self) -> ProviderConfigResponse:
