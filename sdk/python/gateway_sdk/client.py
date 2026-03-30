@@ -425,6 +425,10 @@ class GatewaySDK:
             body["llmModel"] = options.llm_model
         if options.interruptible is not None:
             body["interruptible"] = options.interruptible
+        if options.race_count > 0:
+            body["raceCount"] = options.race_count
+        if options.provider:
+            body["provider"] = options.provider
 
         r = await self._request_with_retry("post",
             "/v1/gpu/deploy",
