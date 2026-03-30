@@ -340,3 +340,15 @@ export function stampProfileRequest(profileId: string | null): void {
     }, 10_000);
   }
 }
+
+// ── User config stubs (local/desktop — no multi-user DB) ─────────────────────
+
+let _currentUserApiKey: string | null = null;
+
+export function setCurrentUserApiKey(apiKey: string): void {
+  _currentUserApiKey = apiKey;
+}
+
+export function applyUserConfig(_config: Record<string, unknown>): void {
+  // No-op for desktop — single user, config already loaded from JSON
+}
