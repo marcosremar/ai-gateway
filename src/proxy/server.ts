@@ -345,6 +345,10 @@ export function createProxyServer(config: ProxyConfig): Server {
     } else if (!validateAuth(authHeader, apiKeys)) {
       sendError(res, 401, 'Invalid or missing API key', requestId);
       return;
+    } else if (config.onAuth && authHeader) {
+      // Authenticated — load per-user profile from DB (non-blocking, best-effort)
+      const token = authHeader.replace(/^Bearer\s+/i, '');
+      config.onAuth(token).catch(() => {});
     }
 
     // Rate limit

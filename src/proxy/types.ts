@@ -38,6 +38,12 @@ export interface ProxyConfig {
   staticDir?: string;
   /** Next.js dev server URL for HMR proxy (e.g. 'http://localhost:3000'). Overrides staticDir when set. */
   nextDevUrl?: string;
+  /**
+   * Called after a request is successfully authenticated with a Bearer token.
+   * Use this to load per-user profiles from the database and apply them to the
+   * in-memory config cache (e.g. via applyUserConfig() from config-persistence).
+   */
+  onAuth?: (apiKey: string) => Promise<void>;
 }
 
 export interface ProxyRoute {
