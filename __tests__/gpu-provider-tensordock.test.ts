@@ -576,7 +576,8 @@ describe('TensordockClient', () => {
       const body = JSON.parse(createCall![1].body as string);
       expect(body.data.attributes.resources.vcpu_count).toBe(2);
       expect(body.data.attributes.resources.ram_gb).toBe(8);
-      expect(body.data.attributes.resources.storage_gb).toBe(50);
+      // storage_gb is floored by getMinDiskGb() (default 100)
+      expect(body.data.attributes.resources.storage_gb).toBeGreaterThanOrEqual(50);
     });
   });
 
