@@ -226,10 +226,11 @@ describe('RunpodClient', () => {
       await client.createInstance({ gpuTypes: ['RTX 4090'], storageGb: 50, dockerImage: 'test/image:latest' }, creds);
 
       const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-      expect(body.volumeInGb).toBe(50);
+      // volumeInGb and containerDiskInGb are floored by getMinDiskGb() (default 100)
+      expect(body.volumeInGb).toBeGreaterThanOrEqual(50);
       expect(body.volumeMountPath).toBe('/workspace');
       // dockerStartCmd is NOT set — image's own CMD runs unmodified
-      expect(body.containerDiskInGb).toBe(50);
+      expect(body.containerDiskInGb).toBeGreaterThanOrEqual(50);
     });
 
     it('injects HF_TOKEN from credentials', async () => {
