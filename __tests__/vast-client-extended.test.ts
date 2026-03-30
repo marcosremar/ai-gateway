@@ -528,6 +528,150 @@ describe('VastClient — extended unit tests', () => {
     }, 60000);
   });
 
+  // ── Smart offer ranking ─────────────────────────────────────────────────
+
+  describe('tiered offer ranking (progressive budget, sort by inet_down)', () => {
+    it('Tier 1: picks fastest internet within 20% of avg price', async () => {
+      // Offers: $0.20, $0.22, $0.24, $0.30, $0.50 → avg=$0.292
+      // Tier 1 (≤$0.350): $0.20, $0.22, $0.24, $0.30 → sorted by inet_down desc
+      // → id=3 (5000Mbps) first
+      fetchSpy
+        .mockResolvedValueOnce(mockFetchResponse({
+          offers: [
+            { id: '1', gpu_name: 'RTX 4090', dph_total: 0.20, inet_down: 1000, public_ipaddr: '1.1.1.1' },
+            { id: '2', gpu_name: 'RTX 4090', dph_total: 0.22, inet_down: 3000, public_ipaddr: '2.2.2.2' },
+            { id: '3', gpu_name: 'RTX 4090', dph_total: 0.24, inet_down: 5000, public_ipaddr: '3.3.3.3' },
+            { id: '4', gpu_name: 'RTX 4090', dph_total: 0.30, inet_down: 2000, public_ipaddr: '4.4.4.4' },
+            { id: '5', gpu_name: 'RTX 4090', dph_total: 0.50, inet_down: 8000, public_ipaddr: '5.5.5.5' },
+          ],
+        }))
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '300' }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          instances: { id: '300', actual_status: 'running', public_ipaddr: '3.3.3.3', direct_port_start: 8000 },
+        }));
+
+      const result = await client.createInstance(
+        { gpuTypes: ['RTX 4090'], dockerImage: 'test:latest' },
+        creds,
+      );
+      const createCall = fetchSpy.mock.calls.find((c: any[]) =>
+        typeof c[0] === 'string' && c[0].includes('/asks/') && c[1]?.method === 'PUT',
+      );
+      expect(createCall![0]).toContain('/asks/3/'); // fastest Tier 1
+      expect(result.endpoint).toBe('http://3.3.3.3:8000');
+    }, 60000);
+
+    it('expensive offer only tried after all cheaper tiers exhausted', async () => {
+      // Offers: $0.10, $0.12, $0.50 → avg=$0.24
+      // Tier 1 (≤$0.288): $0.10, $0.12 → inet_down desc: $0.12@2000 > $0.10@500
+      // Tier 2 (≤$0.312): no new
+      // Tier 3 (≤$0.336): no new
+      // Tier 4 (rest): $0.50@10000
+      fetchSpy
+        .mockResolvedValueOnce(mockFetchResponse({
+          offers: [
+            { id: '1', gpu_name: 'RTX 4090', dph_total: 0.10, inet_down: 500, public_ipaddr: '1.1.1.1' },
+            { id: '2', gpu_name: 'RTX 4090', dph_total: 0.12, inet_down: 2000, public_ipaddr: '2.2.2.2' },
+            { id: '3', gpu_name: 'RTX 4090', dph_total: 0.50, inet_down: 10000, public_ipaddr: '3.3.3.3' },
+          ],
+        }))
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '200' }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          instances: { id: '200', actual_status: 'running', public_ipaddr: '2.2.2.2', direct_port_start: 8000 },
+        }));
+
+      await client.createInstance({ gpuTypes: ['RTX 4090'], dockerImage: 'test:latest' }, creds);
+      const createCall = fetchSpy.mock.calls.find((c: any[]) =>
+        typeof c[0] === 'string' && c[0].includes('/asks/') && c[1]?.method === 'PUT',
+      );
+      // Should pick offer 2 (fastest in Tier 1), NOT offer 3 ($0.50)
+      expect(createCall![0]).toContain('/asks/2/');
+    }, 60000);
+
+    it('keeps original order with single offer', async () => {
+      fetchSpy
+        .mockResolvedValueOnce(mockFetchResponse({
+          offers: [
+            { id: '1', gpu_name: 'RTX 4090', dph_total: 0.30, inet_down: 1000, public_ipaddr: '1.1.1.1' },
+          ],
+        }))
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '100' }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          instances: { id: '100', actual_status: 'running', public_ipaddr: '1.1.1.1', direct_port_start: 8000 },
+        }));
+
+      const result = await client.createInstance(
+        { gpuTypes: ['RTX 4090'], dockerImage: 'test:latest' },
+        creds,
+      );
+      expect(result.endpoint).toBe('http://1.1.1.1:8000');
+    }, 60000);
+
+    it('progresses through tiers: Tier1 fails → Tier2 → Tier3 → expensive', async () => {
+      // Offers: $0.18, $0.20, $0.22, $0.80 → avg=$0.35
+      // Tier 1 (≤$0.42): $0.18, $0.20, $0.22 — sorted by inet_down: $0.20@4000 > $0.22@2000 > $0.18@500
+      // Tier 2/3: no new offers below those ceilings
+      // Tier 4: $0.80@9000
+      fetchSpy
+        .mockResolvedValueOnce(mockFetchResponse({
+          offers: [
+            { id: '1', gpu_name: 'RTX 4090', dph_total: 0.18, inet_down: 500, public_ipaddr: '1.1.1.1' },
+            { id: '2', gpu_name: 'RTX 4090', dph_total: 0.20, inet_down: 4000, public_ipaddr: '2.2.2.2' },
+            { id: '3', gpu_name: 'RTX 4090', dph_total: 0.22, inet_down: 2000, public_ipaddr: '3.3.3.3' },
+            { id: '4', gpu_name: 'RTX 4090', dph_total: 0.80, inet_down: 9000, public_ipaddr: '4.4.4.4' },
+          ],
+        }))
+        .mockResolvedValueOnce(mockFetchText('not available', 400))  // offer 2 fails
+        .mockResolvedValueOnce(mockFetchText('not available', 400))  // offer 3 fails
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '100' }))  // offer 1 succeeds
+        .mockResolvedValueOnce(mockFetchResponse({
+          instances: { id: '100', actual_status: 'running', public_ipaddr: '1.1.1.1', direct_port_start: 8000 },
+        }));
+
+      const result = await client.createInstance(
+        { gpuTypes: ['RTX 4090'], dockerImage: 'test:latest' },
+        creds,
+      );
+      const askCalls = fetchSpy.mock.calls.filter((c: any[]) =>
+        typeof c[0] === 'string' && c[0].includes('/asks/') && c[1]?.method === 'PUT',
+      );
+      // Order: 2 (fastest T1) → 3 (2nd T1) → 1 (slowest T1) → never reaches 4
+      expect(askCalls[0][0]).toContain('/asks/2/');
+      expect(askCalls[1][0]).toContain('/asks/3/');
+      expect(askCalls[2][0]).toContain('/asks/1/');
+      expect(result.instanceId).toBe('inst-100');
+    }, 60000);
+
+    it('falls through to expensive tier when all cheap tiers fail', async () => {
+      // Only 2 offers: $0.10 (slow), $0.90 (fast)
+      // avg=$0.50, T1 ceiling=$0.60 → only $0.10 in T1
+      // If $0.10 fails → T2/T3 still only $0.10 → T4 gets $0.90
+      fetchSpy
+        .mockResolvedValueOnce(mockFetchResponse({
+          offers: [
+            { id: '1', gpu_name: 'RTX 4090', dph_total: 0.10, inet_down: 500, public_ipaddr: '1.1.1.1' },
+            { id: '2', gpu_name: 'RTX 4090', dph_total: 0.90, inet_down: 8000, public_ipaddr: '2.2.2.2' },
+          ],
+        }))
+        .mockResolvedValueOnce(mockFetchText('not available', 400))  // offer 1 fails
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '200' }))  // offer 2 succeeds
+        .mockResolvedValueOnce(mockFetchResponse({
+          instances: { id: '200', actual_status: 'running', public_ipaddr: '2.2.2.2', direct_port_start: 8000 },
+        }));
+
+      const result = await client.createInstance(
+        { gpuTypes: ['RTX 4090'], dockerImage: 'test:latest' },
+        creds,
+      );
+      const askCalls = fetchSpy.mock.calls.filter((c: any[]) =>
+        typeof c[0] === 'string' && c[0].includes('/asks/') && c[1]?.method === 'PUT',
+      );
+      expect(askCalls[0][0]).toContain('/asks/1/'); // cheap first
+      expect(askCalls[1][0]).toContain('/asks/2/'); // expensive as fallback
+      expect(result.instanceId).toBe('inst-200');
+    }, 60000);
+  });
+
   // ── createInstance — Blackwell CUDA detection ──────────────────────────
 
   describe('createInstance — Blackwell CUDA requirement', () => {

@@ -293,6 +293,30 @@ export class VastClient extends AbstractGpuProvider {
       }
     }
 
+    // ── Tiered offer ranking: prefer fast internet, expand budget progressively ──
+    // Tier 1 (≤avg×1.2): try fastest internet first at near-average price.
+    // Tier 2 (≤avg×1.3): expand to slightly more expensive if Tier 1 exhausted.
+    // Tier 3 (≤avg×1.4): expand further.
+    // Tier 4: everything else (expensive, last resort).
+    // Within each tier, offers are sorted by inet_down desc (fastest boot).
+    if (offers.length > 1) {
+      const avgPrice = offers.reduce((s, o) => s + Number(o.dph_total || 0), 0) / offers.length;
+      const tiers = [1.2, 1.3, 1.4, Infinity];
+      const ranked: typeof offers = [];
+      const seen = new Set<string>();
+
+      for (const mult of tiers) {
+        const ceiling = mult === Infinity ? Infinity : avgPrice * mult;
+        const tier = offers.filter(o => !seen.has(String(o.id)) && Number(o.dph_total || 0) <= ceiling);
+        tier.sort((a, b) => Number(b.inet_down || 0) - Number(a.inet_down || 0));
+        for (const o of tier) { seen.add(String(o.id)); ranked.push(o); }
+      }
+
+      offers = ranked;
+      const t1Count = offers.filter(o => Number(o.dph_total || 0) <= avgPrice * 1.2).length;
+      this.log.log(`[vast] Tiered ranking: avg $${avgPrice.toFixed(3)}/hr, ${t1Count} in Tier1 (≤$${(avgPrice * 1.2).toFixed(3)}), ${offers.length} total — top: ${Number(offers[0]?.inet_down || 0).toFixed(0)} Mbps @ $${Number(offers[0]?.dph_total || 0).toFixed(3)}/hr`);
+    }
+
     if (!offers.length) {
       const gpuFilter = spec.gpuTypes?.length ? normalizeGpuNames(spec.gpuTypes).join(', ') : 'any';
       this.log.error(`[vast] No offers found. GPU filter: [${gpuFilter}], disk: ${diskGb}GB, region: ${spec.region || 'any'}`);
