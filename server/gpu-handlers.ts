@@ -527,6 +527,62 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   }
 }
 
+/**
+ * Auto-boot GPU from the active profile's gpuDeploy config.
+ * Called at gateway startup when the active profile has bootOnStartup: true.
+ * Fires-and-forgets: deploy runs in background, gateway starts regardless.
+ */
+export async function autoBootFromProfile(): Promise<void> {
+  const cfg = loadProviderConfig();
+  const activeProfile = cfg.profiles?.find(p => p.id === cfg.activeProfileId);
+  if (!activeProfile?.gpuDeploy?.bootOnStartup) return;
+  if (deployState.status !== 'idle') {
+    console.log('[gpu] autoBootFromProfile: deploy already in progress, skipping');
+    return;
+  }
+  if (deployLock) {
+    console.log('[gpu] autoBootFromProfile: deploy lock held, skipping');
+    return;
+  }
+
+  const gd = activeProfile.gpuDeploy;
+  console.log(`[gpu] Auto-booting GPU for profile: ${activeProfile.name} (${gd.dockerImage})`);
+  const requestId = 'startup:autoboot';
+
+  setDeployLock(true);
+  let lockTransferred = false;
+  try {
+    const body: Record<string, unknown> = {
+      dockerImage: gd.dockerImage,
+      gpuTypes: gd.gpuTypes,
+      region: gd.region ?? '',
+      ...(gd.timeoutMin ? { deployTimeoutMin: gd.timeoutMin } : {}),
+      ...(typeof gd.raceCount === 'number' && gd.raceCount > 1 ? { raceCount: gd.raceCount } : {}),
+    };
+    const config = await _validateDeployRequest(body, requestId);
+    const tierResult = await _selectDeploymentTier(config, requestId);
+
+    // No-op HTTP stub — deploy is fire-and-forget at startup
+    const stubRes = {
+      writeHead: () => {},
+      end: (data: string) => {
+        try {
+          const j = JSON.parse(data);
+          console.log(`[gpu] autoBootFromProfile: ${j.status} — ${j.message}`);
+        } catch {}
+      },
+    } as unknown as ServerResponse;
+
+    lockTransferred = true;
+    _startDeployAndRespond(config, tierResult, requestId, stubRes);
+  } catch (err: unknown) {
+    const msg = (err as { message?: string })?.message ?? String(err);
+    console.warn(`[gpu] autoBootFromProfile failed: ${msg}`);
+  } finally {
+    if (!lockTransferred) setDeployLock(false);
+  }
+}
+
 export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(_req);
   setRequestIdHeader(res, requestId);
