@@ -1159,3 +1159,9 @@ export async function handleBotProxy(req: IncomingMessage, res: ServerResponse):
     res.end(JSON.stringify({ error: `Proxy failed: ${(err as Error).message}` }));
   }
 }
+
+// ── Auto-deploy stub (local/desktop) ─────────────────────────────────────────
+
+export async function autoDeployBot(): Promise<void> {
+  // No-op for desktop — bot is deployed manually via UI
+}
