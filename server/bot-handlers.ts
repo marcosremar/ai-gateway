@@ -12,7 +12,7 @@ import type { BotDeploymentState } from './state';
 import { runpod, scaleway, flyio } from './providers';
 import { maskKey } from './http-utils';
 import { readJsonBody, handleBodyError } from './http-utils';
-import { broadcastWs, startBotTranscriptPoll, stopBotTranscriptPoll } from './ws-state';
+import { broadcastWs, wsClients, startBotTranscriptPoll, stopBotTranscriptPoll } from './ws-state';
 import { PORT } from './config';
 // Re-export consolidated SSRF check from ai-handlers (single source of truth)
 import { isPrivateUrl } from './ai-handlers';
@@ -43,6 +43,57 @@ function botHeaders(extra: Record<string, string> = {}): Record<string, string> 
     if (flyHost) h['Host'] = flyHost;
   }
   return h;
+}
+
+/** Connect to the cloud bot's /ws/audio-out to pull audio (no tunnel needed). */
+let botAudioPullWs: import('ws').WebSocket | null = null;
+function startBotAudioPull(botEndpoint: string) {
+  stopBotAudioPull();
+  // Use fly.dev hostname (not IP) for valid TLS certificate
+  const flyHost = flyio.getFlyHost();
+  const appName = process.env.FLY_APP_NAME || 'babelcast-bot';
+  const baseUrl = flyHost ? `wss://${flyHost}` : `wss://${appName}.fly.dev`;
+  const wsUrl = baseUrl + '/ws/audio-out';
+  console.log(`[bot-audio-pull] Connecting to ${wsUrl}`);
+  import('ws').then(({ WebSocket }) => {
+    const headers: Record<string, string> = {};
+    if (botPodApiKey) headers['Authorization'] = `Bearer ${botPodApiKey}`;
+    const flyHost = flyio.getFlyHost();
+    if (flyHost) headers['Host'] = flyHost;
+    if (botState.podId && botState.podId !== 'local') headers['fly-force-instance-id'] = botState.podId;
+
+    const ws = new WebSocket(wsUrl, { headers, handshakeTimeout: 15_000 });
+    botAudioPullWs = ws;
+    let chunks = 0;
+    ws.on('open', () => console.log('[bot-audio-pull] Connected — receiving audio'));
+    ws.on('message', (data) => {
+      chunks++;
+      if (chunks === 1 || chunks % 500 === 0) {
+        console.log(`[bot-audio-pull] Audio chunk #${chunks} (${(data as Buffer).length} bytes) → relay to ${wsClients.size} clients`);
+      }
+      // Relay binary audio to all connected Python app clients (same as parec path)
+      for (const client of wsClients) {
+        try { client.send(data); } catch { wsClients.delete(client); }
+      }
+    });
+    ws.on('close', () => {
+      console.log(`[bot-audio-pull] Disconnected (${chunks} chunks received)`);
+      botAudioPullWs = null;
+      // Auto-reconnect if bot is still joined
+      if (botState.status === 'joined') {
+        setTimeout(() => startBotAudioPull(botEndpoint), 5000);
+      }
+    });
+    ws.on('error', (err) => {
+      console.warn(`[bot-audio-pull] Error: ${err.message}`);
+    });
+  });
+}
+function stopBotAudioPull() {
+  if (botAudioPullWs) {
+    try { botAudioPullWs.close(); } catch {}
+    botAudioPullWs = null;
+  }
 }
 
 export function setBotState(patch: Partial<BotDeploymentState>) {
@@ -713,9 +764,14 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
           console.warn('[warmup] Predictive warmup failed:', err instanceof Error ? err.message : err)
         );
       }
-      // Start PulseAudio capture for local Docker
+      // Start audio capture from bot
       const { startParecCapture } = await import('./ws-server');
-      startParecCapture();
+      if (isLocalBot) {
+        startParecCapture(); // local Docker: use PulseAudio parec
+      } else {
+        // Cloud bot: connect to bot's /ws/audio-out to pull audio (no tunnel needed)
+        startBotAudioPull(botEndpoint);
+      }
     }
   } catch (err) {
     console.warn(`[bot] Failed to POST /join: ${err}`);
