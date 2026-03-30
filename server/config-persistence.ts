@@ -83,15 +83,29 @@ export interface ProviderConfig {
 
 export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
   {
+    id: 'realtime-translation-dubbing-mistral',
+    name: 'Real-time Translation + Dubbing (Mistral)',
+    stt: [{ provider: 'gpu', model: 'whisper' }, { provider: 'groq', model: 'whisper-large-v3-turbo' }],
+    llm: [{ provider: 'gpu', model: 'mistral' }, { provider: 'groq', model: 'llama-3.3-70b-versatile' }],
+    tts: [{ provider: 'gpu', model: 'qwen3-tts' }, { provider: 'modal', model: 'qwen3-tts' }],
+    gpuDeploy: {
+      dockerImage: 'marcosremar/babelcast-mistral:latest',
+      gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
+      region: '',
+      timeoutMin: 30,
+      bootOnStartup: true,
+    },
+  },
+  {
     id: 'realtime-translation-dubbing',
-    name: 'Real-time Translation + Dubbing',
+    name: 'Real-time Translation + Dubbing (TranslateGemma)',
     stt: [{ provider: 'gpu', model: 'whisper' }, { provider: 'groq', model: 'whisper-large-v3-turbo' }],
     llm: [{ provider: 'gpu', model: 'translategemma' }, { provider: 'groq', model: 'llama-3.3-70b-versatile' }],
     tts: [{ provider: 'gpu', model: 'qwen3-tts' }, { provider: 'modal', model: 'qwen3-tts' }],
     gpuDeploy: {
       dockerImage: 'marcosremar/babelcast-translategemma:latest',
       gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
-      region: 'US',
+      region: '',
       timeoutMin: 30,
     },
   },
@@ -104,7 +118,7 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
     gpuDeploy: {
       dockerImage: 'marcosremar/babelcast-subtitle:latest',
       gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
-      region: 'US',
+      region: '',
       timeoutMin: 30,
     },
   },
@@ -119,7 +133,7 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
 
 const DEFAULT_CONFIG: ProviderConfig = {
   profiles: [...DEFAULT_GPU_PROFILES],
-  activeProfileId: 'realtime-translation-dubbing',
+  activeProfileId: 'realtime-translation-dubbing-mistral',
   pipelineStt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }],
   pipelineLlm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }],
   pipelineTts: [{ provider: 'gpu', model: 'qwen3-tts' }, { provider: 'modal', model: 'qwen3-tts' }],
@@ -214,12 +228,12 @@ export function saveProviderConfig(config: ProviderConfig): void {
   } catch (err) {
     console.warn('[config] Failed to save provider config:', err instanceof Error ? err.message : err);
   }
-  // Also persist to the AI Gateway user DB if there is an authenticated user
+  // Also persist to the AI Gateway user DB if there is an authenticated user (fire-and-forget)
   if (_currentUserApiKey) {
-    try {
-      const { saveUserConfig } = await import('./user-profiles');
-      saveUserConfig(_currentUserApiKey, 'Default', config);
-    } catch { /* non-critical — JSON file is the authoritative fallback */ }
+    const apiKey = _currentUserApiKey;
+    import('./user-profiles').then(({ saveUserConfig }) => {
+      saveUserConfig(apiKey, 'Default', config).catch(() => {});
+    }).catch(() => {});
   }
 }
 
