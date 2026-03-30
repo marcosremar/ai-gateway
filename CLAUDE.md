@@ -132,24 +132,47 @@ await withProviderFallback([groqLLM, openaiLLM, openrouterLLM], (p) => p.chat(me
 
 ## GPU Machine Deployment
 
-**Always use the ai-gateway to deploy/start GPU machines** — never provision raw cloud VMs manually.
+**MANDATORY: All GPU deploys MUST go through the SDK client** — never use raw HTTP, curl, or direct provider APIs. The SDK enforces the correct GPU name format, fallback chain, and monitoring.
 
-```bash
-# Deploy via gateway (requires gateway running: bun run gateway-server.ts)
-POST http://localhost:4000/v1/gpu/deploy
-Body: {"dockerImage": "marcosremar/babelcast-subtitle:latest", "gpuTypes": ["NVIDIA GeForce RTX 5090"]}
+```typescript
+// TypeScript (Node SDK) — REQUIRED approach
+import { GatewayHttpClient } from '@parle/ai-gateway/sdk/node';
 
-# Same image works on all GPUs — no separate Blackwell variant needed (CUDA 12.8.1 base)
-Body: {"dockerImage": "marcosremar/babelcast-subtitle:latest", "gpuTypes": ["NVIDIA GeForce RTX 4090"]}
+const gw = new GatewayHttpClient({ baseUrl: 'http://localhost:4000' });
 
-# For mistral (still has Blackwell variant):
-Body: {"dockerImage": "marcosremar/babelcast-blackwell-mistral:latest", "gpuTypes": ["NVIDIA GeForce RTX 5090"]}
+// Deploy (non-blocking — poll gpuStatus() until ready)
+await gw.deployGpu({
+  apiKey: process.env.RUNPOD_API_KEY,       // RunPod key (starts with rpa_)
+  dockerImage: 'marcosremar/ultravox-s2s:blackwell',
+  gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090'],
+});
 
-# Check status
-GET http://localhost:4000/v1/gpu/status
+// Poll until ready
+const status = await gw.gpuStatus();
+// { status: 'ready'|'booting'|'error', endpoint, gpuType, step, ... }
 ```
 
-- Provider order: TensorDock → Vast.ai → Modal (based on available credentials in `.env`)
+```python
+# Python SDK — alternative
+from gateway_sdk import GatewaySDK, DeployOptions
+gw = GatewaySDK(base_url="http://localhost:4000")
+await gw.deploy_gpu(DeployOptions(
+    api_key=os.environ["RUNPOD_API_KEY"],
+    docker_image="marcosremar/ultravox-s2s:blackwell",
+    gpu_types=["NVIDIA GeForce RTX 5090", "NVIDIA GeForce RTX 4090"],
+))
+```
+
+**GPU type names for RunPod** (must be exact):
+- `NVIDIA GeForce RTX 5090` — Blackwell, use `:blackwell` image (cu128)
+- `NVIDIA GeForce RTX 4090` — Ada, use `:latest` image (cu124)
+- `NVIDIA RTX A6000`, `NVIDIA L40S`, `NVIDIA RTX A5000`, `NVIDIA A40`
+
+**ultravox-s2s images** (`marcosremar/ai-gateway-dockers`):
+- `:latest` — CUDA 12.4, RTX 3090/4090 (Ada + Ampere)
+- `:blackwell` — CUDA 12.8.1, RTX 5090/5080 (Blackwell). **Models pre-baked** (no runtime download). No HEALTHCHECK (avoids Vast.ai auto-destroy during model loading).
+
+- Provider order: RunPod → Vast.ai → Modal (based on available credentials in `.env`)
 - GPU type names must match allowlist exactly (see `PREFERRED_GPU_TYPES` in `server/config.ts`)
 - Vast.ai key: `VAST_API_KEY` | TensorDock: `TENSORDOCK_API_KEY` + `TENSORDOCK_AUTH_ID`
 - Docker Hub auth: `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` (avoids Vast.ai pull rate limits)
