@@ -24,8 +24,16 @@ import type {
   GpuStatus,
   DeployOptions,
   DeployResponse,
+  ChatMessage,
+  ChatCompletionOptions,
+  ChatCompletionResponse,
 } from './types';
 import { GatewayError } from './types';
+
+const GROQ_API_BASE = 'https://api.groq.com/openai/v1';
+/** Groq model IDs used when the gateway is unreachable. */
+const GROQ_FALLBACK_STT_MODEL = 'whisper-large-v3-turbo';
+const GROQ_FALLBACK_LLM_MODEL = 'llama-3.3-70b-versatile';
 
 const DEFAULT_TIMEOUTS = {
   stt: 15_000,
@@ -54,6 +62,7 @@ export class GatewaySDK {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
   private readonly timeouts: Required<NonNullable<GatewayConfig['timeouts']>>;
+  private readonly groqApiKey: string;
 
   constructor(config: GatewayConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
@@ -61,22 +70,68 @@ export class GatewaySDK {
       ? { Authorization: `Bearer ${config.apiKey}` }
       : {};
     this.timeouts = { ...DEFAULT_TIMEOUTS, ...config.timeouts };
+    this.groqApiKey = config.groqApiKey ?? (typeof process !== 'undefined' ? (process.env.GROQ_API_KEY ?? '') : '');
   }
 
   // ── Inference ───────────────────────────────────────────────────────────
 
-  /** Transcribe audio to text (GPU-aware: gateway routes to GPU or cloud). */
+  /** Transcribe audio to text (GPU-aware: gateway routes to GPU or cloud).
+   *  Falls back to Groq Whisper directly when the gateway is unreachable. */
   async transcribe(audio: Uint8Array, language = 'fr', prompt = ''): Promise<TranscribeResponse> {
     const params = new URLSearchParams({ language });
     if (prompt) params.set('prompt', prompt);
-    const res = await this.fetch(`/v1/transcribe?${params}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'audio/wav' },
-      body: audio,
-      timeout: this.timeouts.stt,
-    });
-    const data = await this.parseJson(res, '/v1/transcribe');
-    return { text: (data.text as string) ?? '', usedGpu: (data.used_gpu as boolean) ?? false };
+    try {
+      const res = await this.fetch(`/v1/transcribe?${params}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'audio/wav' },
+        body: audio,
+        timeout: this.timeouts.stt,
+      });
+      const data = await this.parseJson(res, '/v1/transcribe');
+      return { text: (data.text as string) ?? '', usedGpu: (data.used_gpu as boolean) ?? false };
+    } catch (err) {
+      if (err instanceof GatewayError && err.isNetworkError && this.groqApiKey) {
+        return this.groqTranscribeFallback(audio, language, prompt);
+      }
+      throw err;
+    }
+  }
+
+  /** Send a chat completion request through the gateway.
+   *  Falls back to Groq directly when the gateway is unreachable. */
+  async chat(messages: ChatMessage[], options: ChatCompletionOptions = {}): Promise<ChatCompletionResponse> {
+    const body: Record<string, unknown> = {
+      model: options.model ?? GROQ_FALLBACK_LLM_MODEL,
+      messages,
+    };
+    if (options.temperature !== undefined) body.temperature = options.temperature;
+    if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens;
+    try {
+      const res = await this.fetch('/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        timeout: this.timeouts.translate,
+      });
+      const data = await this.parseJson(res, '/v1/chat/completions');
+      const choices = (data.choices as Array<{ message: { content: string } }>) ?? [];
+      const content = choices[0]?.message?.content ?? '';
+      const usage = data.usage as { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
+      return {
+        content,
+        model: (data.model as string) ?? (options.model ?? GROQ_FALLBACK_LLM_MODEL),
+        usage: usage ? {
+          promptTokens: usage.prompt_tokens,
+          completionTokens: usage.completion_tokens,
+          totalTokens: usage.total_tokens,
+        } : undefined,
+      };
+    } catch (err) {
+      if (err instanceof GatewayError && err.isNetworkError && this.groqApiKey) {
+        return this.groqChatFallback(messages, options);
+      }
+      throw err;
+    }
   }
 
   /** Translate text (GPU-aware: gateway routes to GPU or cloud LLM). */
@@ -234,6 +289,70 @@ export class GatewaySDK {
     }
   }
 
+  // ── Groq direct fallback (gateway offline) ────────────────────────────
+
+  /** Call Groq Whisper directly — used when the gateway is unreachable. */
+  private async groqTranscribeFallback(audio: Uint8Array, language: string, prompt: string): Promise<TranscribeResponse> {
+    const form = new FormData();
+    form.append('file', new Blob([audio], { type: 'audio/wav' }), 'audio.wav');
+    form.append('model', GROQ_FALLBACK_STT_MODEL);
+    form.append('language', language);
+    form.append('response_format', 'json');
+    if (prompt) form.append('prompt', prompt);
+
+    const res = await fetch(`${GROQ_API_BASE}/audio/transcriptions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.groqApiKey}` },
+      body: form,
+      signal: AbortSignal.timeout(this.timeouts.stt),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new GatewayError(`Groq STT fallback failed (${res.status}): ${text.slice(0, 200)}`, res.status, '/groq/audio/transcriptions');
+    }
+    const data = await res.json() as { text?: string };
+    return { text: data.text ?? '', usedGpu: false };
+  }
+
+  /** Call Groq chat completions directly — used when the gateway is unreachable. */
+  private async groqChatFallback(messages: ChatMessage[], options: ChatCompletionOptions): Promise<ChatCompletionResponse> {
+    const body: Record<string, unknown> = {
+      model: options.model ?? GROQ_FALLBACK_LLM_MODEL,
+      messages,
+    };
+    if (options.temperature !== undefined) body.temperature = options.temperature;
+    if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens;
+
+    const res = await fetch(`${GROQ_API_BASE}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.groqApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.timeouts.translate),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new GatewayError(`Groq LLM fallback failed (${res.status}): ${text.slice(0, 200)}`, res.status, '/groq/chat/completions');
+    }
+    const data = await res.json() as {
+      model?: string;
+      choices?: Array<{ message: { content: string } }>;
+      usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+    };
+    const content = data.choices?.[0]?.message?.content ?? '';
+    return {
+      content,
+      model: data.model ?? (options.model ?? GROQ_FALLBACK_LLM_MODEL),
+      usage: data.usage ? {
+        promptTokens: data.usage.prompt_tokens,
+        completionTokens: data.usage.completion_tokens,
+        totalTokens: data.usage.total_tokens,
+      } : undefined,
+    };
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   /** Clean up resources. No-op for now (fetch has no persistent connections). */
@@ -308,6 +427,7 @@ export class GatewaySDK {
               `${options.method} ${path} network error: ${err.message}`,
               0,
               path,
+              true, // isNetworkError — triggers Groq fallback
             );
           }
           throw err;
@@ -322,6 +442,7 @@ export class GatewaySDK {
         `${options.method} ${path} network error after ${MAX_RETRIES + 1} attempts: ${(lastError as Error).message}`,
         0,
         path,
+        true, // isNetworkError
       );
     }
     throw lastError;
