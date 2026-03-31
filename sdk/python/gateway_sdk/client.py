@@ -15,6 +15,7 @@ Mirror SDK: ai-gateway/src/sdk/client.ts (TypeScript)
 
 import asyncio
 import logging
+import os
 import threading
 from typing import Optional
 
@@ -55,6 +56,11 @@ log = logging.getLogger(__name__)
 
 _RETRYABLE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, ConnectionResetError, OSError)
 
+_GROQ_API_BASE = "https://api.groq.com/openai/v1"
+# Models used for direct Groq fallback when the gateway is unreachable.
+_GROQ_FALLBACK_STT_MODEL = "whisper-large-v3-turbo"
+_GROQ_FALLBACK_LLM_MODEL = "llama-3.3-70b-versatile"
+
 
 class GatewaySDK:
     """Async HTTP client for the BabelCast AI Gateway.
@@ -74,12 +80,14 @@ class GatewaySDK:
         base_url: str = "http://localhost:4000",
         api_key: str = "",
         timeouts: Optional[Timeouts] = None,
+        groq_api_key: str = "",
     ):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeouts = timeouts or Timeouts()
         self._http: Optional[httpx.AsyncClient] = None
         self._http_lock = threading.Lock()
+        self._groq_api_key = groq_api_key or os.environ.get("GROQ_API_KEY", "")
 
     @property
     def base_url(self) -> str:
@@ -149,19 +157,27 @@ class GatewaySDK:
     async def transcribe(self, audio: bytes, language: str = "fr", prompt: str = "") -> TranscribeResponse:
         """Transcribe audio to text (GPU-aware routing).
 
+        Falls back to Groq Whisper directly when the gateway is unreachable.
+
         Args:
             prompt: Previous transcription text for Whisper context (initial_prompt).
         """
         params: dict[str, str] = {"language": language}
         if prompt:
             params["prompt"] = prompt
-        r = await self._request_with_retry("post",
-            "/v1/transcribe",
-            content=audio,
-            params=params,
-            headers={"Content-Type": "audio/wav"},
-            timeout=self._timeouts.stt,
-        )
+        try:
+            r = await self._request_with_retry("post",
+                "/v1/transcribe",
+                content=audio,
+                params=params,
+                headers={"Content-Type": "audio/wav"},
+                timeout=self._timeouts.stt,
+            )
+        except _RETRYABLE_ERRORS:
+            if self._groq_api_key:
+                log.warning("Gateway unreachable — falling back to Groq Whisper directly")
+                return await self._groq_transcribe(audio, language, prompt)
+            raise
         self._check_response(r, "/v1/transcribe")
         data = self._parse_json(r, "/v1/transcribe")
         return TranscribeResponse(
@@ -204,13 +220,26 @@ class GatewaySDK:
             params["llm_correct"] = "true"
         # HTTP timeout = provider deadline + similarity overhead + network buffer
         http_timeout = timeout_ms / 1000 + 5.0
-        r = await self._request_with_retry("post",
-            "/v1/transcribe/ensemble",
-            content=audio,
-            params=params,
-            headers={"Content-Type": "audio/wav"},
-            timeout=http_timeout,
-        )
+        try:
+            r = await self._request_with_retry("post",
+                "/v1/transcribe/ensemble",
+                content=audio,
+                params=params,
+                headers={"Content-Type": "audio/wav"},
+                timeout=http_timeout,
+            )
+        except _RETRYABLE_ERRORS:
+            if self._groq_api_key:
+                log.warning("Gateway unreachable — falling back to Groq Whisper directly (ensemble)")
+                stt = await self._groq_transcribe(audio, language, prompt)
+                return EnsembleTranscribeResponse(
+                    consensus=stt.text,
+                    providers={"groq": stt.text},
+                    used_providers=1,
+                    latency_ms=0,
+                    similarity_method="none",
+                )
+            raise
         self._check_response(r, "/v1/transcribe/ensemble")
         data = self._parse_json(r, "/v1/transcribe/ensemble")
         return EnsembleTranscribeResponse(
@@ -314,11 +343,17 @@ class GatewaySDK:
             body["temperature"] = temperature
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
-        r = await self._request_with_retry("post",
-            "/v1/chat/completions",
-            json=body,
-            timeout=self._timeouts.translate,
-        )
+        try:
+            r = await self._request_with_retry("post",
+                "/v1/chat/completions",
+                json=body,
+                timeout=self._timeouts.translate,
+            )
+        except _RETRYABLE_ERRORS:
+            if self._groq_api_key:
+                log.warning("Gateway unreachable — falling back to Groq LLM directly")
+                return await self._groq_chat(messages, model, temperature, max_tokens)
+            raise
         self._check_response(r, "/v1/chat/completions")
         data = self._parse_json(r, "/v1/chat/completions")
         content = ""
@@ -328,6 +363,82 @@ class GatewaySDK:
         return ChatCompletionResponse(
             content=content,
             model=data.get("model", model),
+            usage=data.get("usage"),
+        )
+
+    # ── Groq direct fallback (gateway offline) ───────────────────────────
+
+    async def _groq_transcribe(self, audio: bytes, language: str, prompt: str) -> TranscribeResponse:
+        """Call Groq Whisper directly — used when the gateway is unreachable."""
+        files = {"file": ("audio.wav", audio, "audio/wav")}
+        data: dict[str, str] = {
+            "model": _GROQ_FALLBACK_STT_MODEL,
+            "language": language,
+            "response_format": "json",
+        }
+        if prompt:
+            data["prompt"] = prompt
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{_GROQ_API_BASE}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {self._groq_api_key}"},
+                files=files,
+                data=data,
+                timeout=self._timeouts.stt,
+            )
+        if r.status_code >= 400:
+            raise GatewayError(
+                f"Groq STT fallback failed ({r.status_code}): {r.text[:200]}",
+                status_code=r.status_code,
+                endpoint="/groq/audio/transcriptions",
+            )
+        body = self._parse_json(r, "/groq/audio/transcriptions")
+        return TranscribeResponse(
+            text=body.get("text", ""),
+            used_gpu=False,
+            detected_language=language,
+        )
+
+    async def _groq_chat(
+        self,
+        messages: list[dict],
+        model: str,
+        temperature: float | None,
+        max_tokens: int | None,
+    ) -> ChatCompletionResponse:
+        """Call Groq chat completions directly — used when the gateway is unreachable."""
+        body: dict = {
+            "model": model or _GROQ_FALLBACK_LLM_MODEL,
+            "messages": messages,
+        }
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{_GROQ_API_BASE}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._groq_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=self._timeouts.translate,
+            )
+        if r.status_code >= 400:
+            raise GatewayError(
+                f"Groq LLM fallback failed ({r.status_code}): {r.text[:200]}",
+                status_code=r.status_code,
+                endpoint="/groq/chat/completions",
+            )
+        data = self._parse_json(r, "/groq/chat/completions")
+        content = ""
+        choices = data.get("choices", [])
+        if choices:
+            content = choices[0].get("message", {}).get("content", "")
+        return ChatCompletionResponse(
+            content=content,
+            model=data.get("model", model or _GROQ_FALLBACK_LLM_MODEL),
             usage=data.get("usage"),
         )
 
