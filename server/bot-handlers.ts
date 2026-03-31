@@ -264,7 +264,7 @@ export async function autoDeployBot(): Promise<void> {
   try {
     console.log('[bot] Auto-boot: starting Fly.io bot deploy...');
     const instance = await flyio.createInstance(
-      { dockerImage: BOT_DOCKER_IMAGE, ramGb: 4, vcpus: 2, env: podEnv },
+      { dockerImage: BOT_DOCKER_IMAGE, ramGb: 8, vcpus: 4, env: podEnv },
       { apiKey: flyKey },
     );
 
@@ -404,7 +404,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
           instance = await flyio.createInstance(
             {
               dockerImage: botDockerImage,
-              ramGb: 4,
+              ramGb: 8,
               vcpus: 2,
               env: podEnv,
             },
@@ -491,7 +491,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
                 instance = await flyio.createInstance(
                   {
                     dockerImage: botDockerImage,
-                    ramGb: 4,
+                    ramGb: 8,
                     vcpus: 2,
                     env: podEnv,
                   },
@@ -508,7 +508,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
             instance = await flyio.createInstance(
               {
                 dockerImage: botDockerImage,
-                ramGb: 4,
+                ramGb: 8,
                 vcpus: 2,
                 env: podEnv,
               },
@@ -720,7 +720,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
     bot_name: botName,
     bot_uuid: botUuid,
     streaming_output: streamingOutput,
-    streaming_audio_frequency: 16000,
+    streaming_audio_frequency: 48000,
     recording_mode: 'speaker_view',
     remote: null,
     speech_to_text_provider: 'Default',
