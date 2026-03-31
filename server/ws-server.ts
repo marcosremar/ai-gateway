@@ -463,7 +463,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
 
 type WsData = {
   id: string;
-  type: 'bot' | 'stt' | 'bot-audio' | 'speech';
+  type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio';
   language?: string;
   /** Target language for STT sessions — enables auto-speculation when set. */
   speculateTarget?: string;
@@ -478,6 +478,20 @@ export function startWsServer() {
     port: WS_PORT,
     fetch(req, server) {
       const url = new URL(req.url);
+
+      // ── Recall.ai audio endpoint — uses its own secret, checked before gateway auth ──
+      if (url.pathname === '/recall/audio') {
+        const recallSecret = process.env.RECALL_WS_SECRET;
+        if (recallSecret) {
+          const token = url.searchParams.get('token') || req.headers.get('authorization')?.replace('Bearer ', '');
+          if (token !== recallSecret) {
+            return new Response('Unauthorized', { status: 401 });
+          }
+        }
+        const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'recall-audio' } });
+        if (upgraded) return;
+        return new Response('WebSocket upgrade failed', { status: 400 });
+      }
 
       // WebSocket authentication — always check auth.
       // Localhost exemption: if no GATEWAY_API_KEY is set AND connection is from localhost, allow it.
@@ -668,6 +682,12 @@ export function startWsServer() {
           // ── Bot audio relay — meeting bot streams raw PCM here ──────
           console.log(`[bot-audio] Bot audio source connected id=${ws.data.id}`);
           botAudioSource = ws as unknown as BabelCastWS;
+        } else if (ws.data.type === 'recall-audio') {
+          // ── Recall.ai audio receiver — Recall bot connects here ──────
+          console.log(`[recall-audio] Recall bot connected id=${ws.data.id}`);
+          import('./recall-handlers').then(({ setRecallState }) => {
+            setRecallState({ wsConnected: true, status: 'in_meeting', message: 'Recall bot streaming audio' });
+          }).catch(() => {});
         } else {
           // ── Bot events session ─────────────────────────────────────
           const MAX_WS_CLIENTS = 500;
@@ -805,6 +825,20 @@ export function startWsServer() {
             // Forward binary PCM to upstream backend
             backend.sendAudio(msg as ArrayBuffer);
           }
+        } else if (ws.data.type === 'recall-audio') {
+          // Recall.ai audio: first message is JSON metadata, then binary S16LE 16kHz PCM.
+          if (typeof msg === 'string') {
+            try {
+              const meta = JSON.parse(msg) as Record<string, unknown>;
+              console.log(`[recall-audio] Metadata: bot_id=${meta.bot_id} recording_id=${meta.recording_id}`);
+            } catch { /* ignore */ }
+            return;
+          }
+          // Binary: raw S16LE 16kHz mono PCM — relay to all Python app clients
+          const recallChunk = Buffer.from(msg as ArrayBuffer);
+          for (const client of wsClients) {
+            try { client.send(recallChunk); } catch { wsClients.delete(client); }
+          }
         } else if (ws.data.type === 'bot-audio') {
           // Bot audio: first JSON message is handshake (has protocol_version),
           // subsequent JSON messages are speaker state updates (array of speakers).
@@ -861,6 +895,16 @@ export function startWsServer() {
           backend?.close();
           sttSessions.delete(ws.data.id);
           console.log(`[stt-ws] Client disconnected id=${ws.data.id}`);
+        } else if (ws.data.type === 'recall-audio') {
+          console.log(`[recall-audio] Recall bot disconnected id=${ws.data.id}`);
+          import('./recall-handlers').then(({ recallState, setRecallState }) => {
+            if (recallState.wsConnected) {
+              setRecallState({ wsConnected: false, status: 'ended', message: 'Recall bot disconnected' });
+              setTimeout(() => {
+                if (recallState.status === 'ended') setRecallState({ status: 'idle', message: '' });
+              }, 5_000);
+            }
+          }).catch(() => {});
         } else if (ws.data.type === 'bot-audio') {
           if (botAudioSource === ws) botAudioSource = null;
           console.log(`[bot-audio] Bot audio source disconnected id=${ws.data.id} (${botAudioChunks} chunks relayed, ${botAudioBufferBytes} bytes buffered)`);
