@@ -23,6 +23,8 @@ export interface CircuitBreakerConfig {
 export interface GatewayHttpClientConfig {
   baseUrl: string;
   apiKey?: string;
+  /** Groq API key for direct fallback when gateway is unreachable. Falls back to GROQ_API_KEY env var. */
+  groqApiKey?: string;
   timeouts?: Partial<TimeoutConfig>;
   retry?: Partial<RetryConfig>;
   circuitBreaker?: Partial<CircuitBreakerConfig>;
@@ -60,6 +62,12 @@ export const DEFAULT_CIRCUIT_BREAKER: CircuitBreakerConfig = {
 export interface TranscribeResult {
   text: string;
   usedGpu: boolean;
+}
+
+export interface ChatCompletionResult {
+  content: string;
+  model: string;
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
 export interface TranslateResult {

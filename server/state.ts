@@ -7,12 +7,17 @@ export { deploymentSM };
 
 import type { Server } from 'http';
 import { PrismaClient } from '@prisma/client';
+import { PrismaBunSqlite } from 'prisma-adapter-bun-sqlite';
 import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import { homedir } from 'os';
 import { join } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, renameSync } from 'fs';
 
-export const prisma = new PrismaClient();
+// Resolve DB path relative to project root (state.ts is at ai-gateway/server/)
+const dbPath = join(import.meta.dir, '../../data/babelcast.db');
+mkdirSync(join(import.meta.dir, '../../data'), { recursive: true });
+const adapter = new PrismaBunSqlite({ url: `file:${dbPath}` });
+export const prisma = new PrismaClient({ adapter });
 
 export const startedAt = Date.now();
 export let activeRequests = 0;
