@@ -70,7 +70,7 @@ const sttSessions = new Map<string, import('../ai-gateway/src/streaming-stt').St
 
 // Bot audio relay state
 let botAudioSource: BabelCastWS | null = null;
-let botAudioSampleRate = 16000;
+let botAudioSampleRate = 48000;
 let botAudioChunks = 0;
 export function getBotAudioChunks(): number { return botAudioChunks; }
 
@@ -204,7 +204,7 @@ export function startParecCapture(): void {
   console.log(`[parec] Starting PulseAudio capture from container ${containerName}...`);
   parecProc = Bun.spawn([
     'docker', 'exec', containerName,
-    'parec', '--format=s16le', '--channels=1', '--rate=16000',
+    'parec', '--format=s16le', '--channels=1', '--rate=48000',
     '--device=virtual_speaker.monitor',
   ], { stdout: 'pipe', stderr: 'pipe' });
 
@@ -369,7 +369,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
       bot_name: botName,
       bot_uuid: botUuid,
       streaming_output: streamingOutput,
-      streaming_audio_frequency: 16000,
+      streaming_audio_frequency: 48000,
       recording_mode: 'speaker_view',
       remote: null,
       speech_to_text_provider: 'Default',
