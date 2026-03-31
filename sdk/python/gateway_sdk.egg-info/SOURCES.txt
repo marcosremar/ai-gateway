@@ -1,5 +1,6 @@
 pyproject.toml
 gateway_sdk/__init__.py
+gateway_sdk/audio.py
 gateway_sdk/client.py
 gateway_sdk/types.py
 gateway_sdk.egg-info/PKG-INFO

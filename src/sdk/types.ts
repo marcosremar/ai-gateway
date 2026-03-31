@@ -12,6 +12,9 @@ export interface GatewayConfig {
   baseUrl: string;
   /** Optional Bearer token for authenticated endpoints */
   apiKey?: string;
+  /** Groq API key for direct fallback when the gateway is unreachable.
+   *  Falls back to GROQ_API_KEY env var if not provided. */
+  groqApiKey?: string;
   /** Per-endpoint timeout overrides (milliseconds) */
   timeouts?: {
     stt?: number;
@@ -111,6 +114,29 @@ export interface DeployResponse {
   message: string;
 }
 
+// ── Chat completions ────────────────────────────────────────────────────────
+
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+export interface ChatCompletionOptions {
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+}
+
+export interface ChatCompletionResponse {
+  content: string;
+  model: string;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 export class GatewayError extends Error {
@@ -118,6 +144,9 @@ export class GatewayError extends Error {
     message: string,
     public readonly statusCode: number,
     public readonly endpoint: string,
+    /** True when the error is a network-level connection failure (gateway unreachable),
+     *  as opposed to an HTTP error or timeout. Used to decide whether to fall back to Groq. */
+    public readonly isNetworkError: boolean = false,
   ) {
     super(message);
     this.name = 'GatewayError';
