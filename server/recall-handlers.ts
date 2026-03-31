@@ -1,0 +1,199 @@
+// ── Recall.ai Bot Handlers ───────────────────────────────────────────────────
+// Manages Recall.ai bot lifecycle via their cloud API.
+// Bot joins meetings, streams audio back through our gateway WebSocket.
+
+import type { IncomingMessage, ServerResponse } from 'http';
+import { readJsonBody, handleBodyError } from './http-utils';
+import { broadcastWs } from './ws-state';
+
+// ── Module State ─────────────────────────────────────────────────────────────
+
+let recallBotId: string | null = null;
+let recallBotStatus: 'idle' | 'joining' | 'in_meeting' | 'ended' | 'error' = 'idle';
+let recallBotMeetingUrl = '';
+
+function getRecallApiBase(): string {
+  const region = process.env.RECALL_REGION || 'us-west-2';
+  // us-west-2 uses the default domain; other regions use {region}.recall.ai
+  return region === 'us-west-2'
+    ? 'https://api.recall.ai/api/v1'
+    : `https://${region}.recall.ai/api/v1`;
+}
+const RECALL_FETCH_TIMEOUT_MS = 30_000;
+
+export function getRecallState() {
+  return { botId: recallBotId, status: recallBotStatus, meetingUrl: recallBotMeetingUrl };
+}
+
+export function resetRecallState() {
+  recallBotId = null;
+  recallBotStatus = 'idle';
+  recallBotMeetingUrl = '';
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function getRecallApiKey(): string | undefined {
+  return process.env.RECALL_API_KEY;
+}
+
+function jsonResponse(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+// ── Handlers ─────────────────────────────────────────────────────────────────
+
+export async function handleRecallJoin(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: Record<string, unknown>;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    handleBodyError(res, err);
+    return;
+  }
+
+  const meetingUrl = typeof body.meetingUrl === 'string' ? body.meetingUrl.trim() : '';
+  const botName = typeof body.botName === 'string' ? body.botName.trim() : 'BabelCast';
+
+  if (!meetingUrl) {
+    jsonResponse(res, 400, { error: 'meetingUrl is required' });
+    return;
+  }
+
+  const apiKey = getRecallApiKey();
+  if (!apiKey) {
+    jsonResponse(res, 500, { error: 'RECALL_API_KEY not configured' });
+    return;
+  }
+
+  if (recallBotId) {
+    jsonResponse(res, 409, { error: 'Recall bot already active', botId: recallBotId, status: recallBotStatus });
+    return;
+  }
+
+  try {
+    const apiBase = getRecallApiBase();
+    const resp = await fetch(`${apiBase}/bot`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Token ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        meeting_url: meetingUrl,
+        bot_name: botName,
+      }),
+      signal: AbortSignal.timeout(RECALL_FETCH_TIMEOUT_MS),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => 'unknown error');
+      console.error(`[recall] Recall.ai API error ${resp.status}: ${errText.slice(0, 200)}`);
+      jsonResponse(res, 502, { error: `Recall.ai API error: ${resp.status}` });
+      return;
+    }
+
+    const data = await resp.json() as Record<string, unknown>;
+    recallBotId = (data.id as string) || null;
+    recallBotStatus = 'joining';
+    recallBotMeetingUrl = meetingUrl;
+
+    broadcastWs({ type: 'recall:status', status: 'joining', message: 'Bot joining meeting...' });
+    console.log(`[recall] Bot created: id=${recallBotId?.slice(0, 8) ?? '?'} url=${meetingUrl.slice(0, 40)}`);
+
+    jsonResponse(res, 201, { botId: recallBotId, status: 'joining' });
+  } catch (err) {
+    console.error('[recall] Failed to create bot:', err);
+    jsonResponse(res, 502, { error: `Failed to reach Recall.ai API: ${(err as Error).message}` });
+  }
+}
+
+export async function handleRecallLeave(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!recallBotId) {
+    jsonResponse(res, 404, { error: 'No active Recall bot' });
+    return;
+  }
+
+  const apiKey = getRecallApiKey();
+  if (!apiKey) {
+    jsonResponse(res, 500, { error: 'RECALL_API_KEY not configured' });
+    return;
+  }
+
+  const botId = recallBotId;
+
+  try {
+    const resp = await fetch(`${getRecallApiBase()}/bot/${botId}/leave_call`, {
+      method: 'POST',
+      headers: { 'Authorization': `Token ${apiKey}` },
+      signal: AbortSignal.timeout(RECALL_FETCH_TIMEOUT_MS),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => 'unknown error');
+      console.error(`[recall] Recall.ai leave error ${resp.status}: ${errText.slice(0, 200)}`);
+      // Still reset state — bot may be gone
+    }
+  } catch (err) {
+    console.error('[recall] Failed to stop bot:', err);
+    // Still reset state
+  }
+
+  recallBotId = null;
+  recallBotStatus = 'idle';
+  recallBotMeetingUrl = '';
+
+  broadcastWs({ type: 'recall:status', status: 'idle', message: 'Bot stopped' });
+  console.log(`[recall] Bot stopped: id=${botId.slice(0, 8)}`);
+
+  jsonResponse(res, 200, { status: 'idle', message: 'Bot stopped' });
+}
+
+export async function handleRecallStatus(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  jsonResponse(res, 200, {
+    botId: recallBotId,
+    status: recallBotStatus,
+    meetingUrl: recallBotMeetingUrl,
+  });
+}
+
+export async function handleRecallWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: Record<string, unknown>;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    handleBodyError(res, err);
+    return;
+  }
+
+  const event = typeof body.event === 'string' ? body.event : '';
+  const data = (body.data ?? {}) as Record<string, unknown>;
+
+  console.log(`[recall-webhook] event=${event} bot_id=${data.bot_id ?? '?'}`);
+
+  // Map Recall.ai webhook events to our status
+  const statusCode = ((data.status ?? {}) as Record<string, unknown>).code as string | undefined;
+
+  if (statusCode === 'in_call_not_recording' || statusCode === 'in_call_recording') {
+    recallBotStatus = 'in_meeting';
+    broadcastWs({
+      type: 'recall:status',
+      status: 'in_meeting',
+      message: 'Bot is in the meeting',
+      wsConnected: statusCode === 'in_call_recording',
+    });
+  } else if (statusCode === 'call_ended' || statusCode === 'done') {
+    recallBotStatus = 'ended';
+    recallBotId = null;
+    recallBotMeetingUrl = '';
+    broadcastWs({ type: 'recall:status', status: 'ended', message: 'Meeting ended' });
+  } else if (statusCode === 'fatal') {
+    recallBotStatus = 'error';
+    const errorMsg = typeof data.status_changes === 'string' ? data.status_changes : 'Bot error';
+    broadcastWs({ type: 'recall:status', status: 'error', message: errorMsg });
+  }
+
+  // Always acknowledge
+  jsonResponse(res, 200, { received: true });
+}

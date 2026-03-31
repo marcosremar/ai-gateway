@@ -17,6 +17,7 @@ import type {
   RetryConfig,
   TranscribeResult,
   TranslateResult,
+  ChatCompletionResult,
   PipelineResult,
   PipelineOptions,
   DeployOptions,
@@ -26,6 +27,8 @@ import type {
   GatewayMetrics,
 } from './types';
 import { DEFAULT_TIMEOUTS, DEFAULT_RETRY, DEFAULT_CIRCUIT_BREAKER } from './types';
+
+const GROQ_API_BASE = 'https://api.groq.com/openai/v1';
 
 export { CircuitBreaker, CircuitOpenError } from './circuit-breaker';
 export type { CircuitState } from './circuit-breaker';
@@ -60,6 +63,7 @@ function generateRequestId(): string {
 export class GatewayHttpClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
+  private readonly groqApiKey: string;
   private readonly timeouts: TimeoutConfig;
   private readonly retryConfig: RetryConfig;
   private readonly circuitBreaker: CircuitBreaker;
@@ -68,6 +72,7 @@ export class GatewayHttpClient {
   constructor(config: GatewayHttpClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
     this.apiKey = config.apiKey ?? '';
+    this.groqApiKey = config.groqApiKey ?? (typeof process !== 'undefined' ? process.env.GROQ_API_KEY ?? '' : '');
     this.timeouts = { ...DEFAULT_TIMEOUTS, ...config.timeouts };
     this.retryConfig = { ...DEFAULT_RETRY, ...config.retry };
     this.circuitBreaker = new CircuitBreaker({
@@ -205,30 +210,75 @@ export class GatewayHttpClient {
   // ── STT ─────────────────────────────────────────────────────────────────
 
   async transcribe(audio: Uint8Array | Buffer, language = 'fr'): Promise<TranscribeResult> {
-    const { data } = await this._request<{ text: string; used_gpu: boolean }>(
-      'POST', '/v1/transcribe',
-      {
-        body: audio as unknown as BodyInit,
-        headers: { 'Content-Type': 'audio/wav' },
-        params: { language },
-        timeoutMs: this.timeouts.sttMs,
-      },
-    );
-    return { text: data.text || '', usedGpu: data.used_gpu ?? false };
+    try {
+      const { data } = await this._request<{ text: string; used_gpu: boolean }>(
+        'POST', '/v1/transcribe',
+        {
+          body: audio as unknown as BodyInit,
+          headers: { 'Content-Type': 'audio/wav' },
+          params: { language },
+          timeoutMs: this.timeouts.sttMs,
+        },
+      );
+      return { text: data.text || '', usedGpu: data.used_gpu ?? false };
+    } catch (err) {
+      if (!isConnectionError(err) || !this.groqApiKey) throw err;
+      return this._groqTranscribe(audio, language);
+    }
+  }
+
+  // ── Chat (LLM) ────────────────────────────────────────────────────────────
+
+  async chat(
+    messages: Array<{ role: string; content: string }>,
+    model = 'llama-3.3-70b-versatile',
+    options?: { temperature?: number; maxTokens?: number },
+  ): Promise<ChatCompletionResult> {
+    try {
+      const body: Record<string, unknown> = { model, messages };
+      if (options?.temperature !== undefined) body.temperature = options.temperature;
+      if (options?.maxTokens !== undefined) body.max_tokens = options.maxTokens;
+      const { data } = await this._request<{
+        model: string;
+        choices: Array<{ message: { content: string } }>;
+        usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+      }>(
+        'POST', '/v1/chat/completions',
+        {
+          body: JSON.stringify(body),
+          headers: { 'Content-Type': 'application/json' },
+          timeoutMs: this.timeouts.translateMs,
+        },
+      );
+      const content = data.choices?.[0]?.message?.content ?? '';
+      return { content, model: data.model || model, usage: data.usage };
+    } catch (err) {
+      if (!isConnectionError(err) || !this.groqApiKey) throw err;
+      return this._groqChat(messages, model, options);
+    }
   }
 
   // ── Translation ─────────────────────────────────────────────────────────
 
   async translate(text: string, sourceLang = 'fr', targetLang = 'en'): Promise<TranslateResult> {
-    const { data } = await this._request<{ translated_text: string; used_gpu: boolean }>(
-      'POST', '/v1/translate',
-      {
-        body: JSON.stringify({ text, source_lang: sourceLang, target_lang: targetLang }),
-        headers: { 'Content-Type': 'application/json' },
-        timeoutMs: this.timeouts.translateMs,
-      },
-    );
-    return { translatedText: data.translated_text || '', usedGpu: data.used_gpu ?? false };
+    try {
+      const { data } = await this._request<{ translated_text: string; used_gpu: boolean }>(
+        'POST', '/v1/translate',
+        {
+          body: JSON.stringify({ text, source_lang: sourceLang, target_lang: targetLang }),
+          headers: { 'Content-Type': 'application/json' },
+          timeoutMs: this.timeouts.translateMs,
+        },
+      );
+      return { translatedText: data.translated_text || '', usedGpu: data.used_gpu ?? false };
+    } catch (err) {
+      if (!isConnectionError(err) || !this.groqApiKey) throw err;
+      const result = await this._groqChat(
+        [{ role: 'user', content: `Translate the following text from ${sourceLang} to ${targetLang}. Return ONLY the translation, nothing else.\n\n${text}` }],
+        'llama-3.3-70b-versatile',
+      );
+      return { translatedText: result.content, usedGpu: false };
+    }
   }
 
   // ── Pipeline ────────────────────────────────────────────────────────────
@@ -322,6 +372,67 @@ export class GatewayHttpClient {
       },
     );
     return data;
+  }
+
+  // ── Groq direct fallback ────────────────────────────────────────────────
+
+  private async _groqTranscribe(audio: Uint8Array | Buffer, language: string): Promise<TranscribeResult> {
+    const form = new FormData();
+    form.append('file', new Blob([audio as unknown as BlobPart], { type: 'audio/wav' }), 'audio.wav');
+    form.append('model', 'whisper-large-v3-turbo');
+    form.append('language', language);
+
+    const res = await fetch(`${GROQ_API_BASE}/audio/transcriptions`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${this.groqApiKey}` },
+      body: form,
+      signal: AbortSignal.timeout(this.timeouts.sttMs),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new GatewayHttpError(
+        `Groq STT fallback failed (${res.status}): ${text.slice(0, 200)}`,
+        res.status,
+        'groq:/audio/transcriptions',
+      );
+    }
+    const data = await res.json() as { text?: string };
+    return { text: data.text || '', usedGpu: false };
+  }
+
+  private async _groqChat(
+    messages: Array<{ role: string; content: string }>,
+    model: string,
+    options?: { temperature?: number; maxTokens?: number },
+  ): Promise<ChatCompletionResult> {
+    const body: Record<string, unknown> = { model, messages };
+    if (options?.temperature !== undefined) body.temperature = options.temperature;
+    if (options?.maxTokens !== undefined) body.max_tokens = options.maxTokens;
+
+    const res = await fetch(`${GROQ_API_BASE}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.groqApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.timeouts.translateMs),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new GatewayHttpError(
+        `Groq LLM fallback failed (${res.status}): ${text.slice(0, 200)}`,
+        res.status,
+        'groq:/chat/completions',
+      );
+    }
+    const data = await res.json() as {
+      model: string;
+      choices: Array<{ message: { content: string } }>;
+      usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+    };
+    const content = data.choices?.[0]?.message?.content ?? '';
+    return { content, model: data.model || model, usage: data.usage };
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
