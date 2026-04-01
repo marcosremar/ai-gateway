@@ -141,10 +141,16 @@ if (openrouterAvailable) console.log(`[gateway] OpenRouter key: ${maskKey(proces
 if (whisperAvailable && !ollamaAvailable) console.log(`[gateway] Whisper STT (ensemble): ${whisperHost}`);
 console.log(`[gateway] Ensemble STT providers: ${ENSEMBLE_STT_PROVIDERS.join(',') || 'all'}`);
 
-if (!groqAvailable && !ollamaAvailable) {
-  // Must have at least one cloud/local provider
-  console.error('[gateway] No providers configured. Set GROQ_API_KEY or OLLAMA_HOST+PROVIDER_CHAIN=ollama');
+if (!groqAvailable && !ollamaAvailable && !fireworksAvailable) {
+  // Must have at least one cloud/local LLM provider
+  console.error('[gateway] No LLM provider configured. Set GROQ_API_KEY, FIREWORKS_API_KEY, or OLLAMA_HOST+PROVIDER_CHAIN=ollama');
   process.exit(1);
+}
+
+if (fireworksAvailable) {
+  // Fireworks LLM — used as primary when Groq is absent, fallback otherwise
+  providers.chat!['accounts/fireworks/models/llama-v3p3-70b-instruct'] = fireworksLLM;
+  providers.chat!['accounts/fireworks/models/llama-v3p1-70b-instruct'] = fireworksLLM;
 }
 
 // ── AIClient for voice dubbing pipeline ─────────────────────────────────────
@@ -232,6 +238,20 @@ if (mlxQwenAvailable && mlxQwenProvider) {
   console.log('[gateway] MLX Qwen3-ASR registered (local STT, Apple Silicon Metal GPU)');
 }
 
+// Fireworks AI — STT (ensemble) + LLM (primary when Groq absent)
+if (fireworksAvailable) {
+  registry.register({
+    id: 'fireworks' as ProviderId,
+    name: 'Fireworks AI',
+    description: 'Fireworks AI (STT: whisper-v3, LLM: Llama-3.3-70B)',
+    capabilities: ['stt', 'llm'],
+    requiresApiKey: true,
+    stt: fireworksSTT,
+    llm: fireworksLLM,
+  });
+  console.log(`[gateway] Fireworks registered (STT + LLM${groqAvailable ? ', Groq is primary LLM' : ' — Groq absent, Fireworks is primary LLM'})`);
+}
+
 // OpenAI STT + TTS
 export const openaiTTS = openaiAvailable ? new OpenAITTSProvider() : null;
 if (openaiAvailable) {
@@ -309,16 +329,21 @@ export const translationProfile: AIProfile = {
   stt: [
     // Local MLX Qwen3-ASR (Apple Silicon, fastest when available)
     ...(mlxQwenAvailable ? [{ provider: 'mlx-qwen3-asr' as const, model: 'qwen3-asr' }] : []),
-    { provider: 'groq', model: groqSttModel },
+    ...(groqAvailable ? [{ provider: 'groq' as const, model: groqSttModel }] : []),
+    ...(fireworksAvailable && !groqAvailable ? [{ provider: 'fireworks' as const, model: 'whisper-v3' }] : []),
     { provider: 'modal-qwen3asr-pipeline', model: 'qwen3-asr-1.7b' },
     { provider: 'modal-voxtral', model: 'voxtral-mini-3b' },
   ],
   llm: [
-    { provider: 'groq', model: groqLlmModel },
+    ...(groqAvailable ? [{ provider: 'groq' as const, model: groqLlmModel }] : []),
+    ...(fireworksAvailable ? [{ provider: 'fireworks' as const, model: 'accounts/fireworks/models/llama-v3p3-70b-instruct' }] : []),
     { provider: 'modal-qwen3asr-pipeline', model: 'translategemma-12b' },
   ],
   tts: ttsChain,
-  keys: { groq: process.env.GROQ_API_KEY || '', ...(openaiAvailable ? { openai: process.env.OPENAI_API_KEY! } : {}) },
+  keys: {
+    ...(groqAvailable ? { groq: process.env.GROQ_API_KEY! } : {}),
+    ...(openaiAvailable ? { openai: process.env.OPENAI_API_KEY! } : {}),
+  },
   audioFormat: 'wav',  // VoiceDubService expects WAV for AudioStreamBuffer
   language: 'fr',
   maxTokens: 150,

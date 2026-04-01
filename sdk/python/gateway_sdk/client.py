@@ -14,12 +14,10 @@ Mirror SDK: ai-gateway/src/sdk/client.ts (TypeScript)
 """
 
 import asyncio
-import collections
 import logging
 import os
 import threading
-import time
-from typing import Any, Callable, Awaitable, Optional
+from typing import Optional
 
 import httpx
 
@@ -43,7 +41,6 @@ from gateway_sdk.types import (
     RequestLogEntry,
     RequestLogResponse,
     RequestLogStats,
-    RetryMode,
     Timeouts,
     TranscribeResponse,
     TranslateResponse,
@@ -87,12 +84,10 @@ class GatewaySDK:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeouts = timeouts or Timeouts()
-        self._race_config = race_config or RaceConfig()
         self._http: Optional[httpx.AsyncClient] = None
-        self._groq_http: Optional[httpx.AsyncClient] = None
         self._http_lock = threading.Lock()
         self._groq_api_key = groq_api_key or os.environ.get("GROQ_API_KEY", "")
-        self._adaptive_wins: collections.deque = collections.deque(maxlen=self._race_config.adaptive_window)
+        self._race_config: Optional[RaceConfig] = race_config
 
     @property
     def base_url(self) -> str:
@@ -135,22 +130,31 @@ class GatewaySDK:
 
     # ── Retry wrapper ──────────────────────────────────────────────────────
 
-    async def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """Execute HTTP request with retry on connection errors and 429 rate limits.
+    @staticmethod
+    def _parse_retry_after(response: httpx.Response, attempt: int) -> float:
+        """Parse Retry-After header; fall back to RETRY_BACKOFF on invalid/missing."""
+        header = response.headers.get("Retry-After", "")
+        try:
+            delay = float(header)
+            return min(delay, 30.0)
+        except (ValueError, TypeError):
+            idx = min(attempt, len(GatewaySDK.RETRY_BACKOFF) - 1)
+            return GatewaySDK.RETRY_BACKOFF[idx]
 
-        Retries on ConnectError, ConnectTimeout, ConnectionResetError, OSError.
-        Also retries on HTTP 429 (rate limit) — respects the Retry-After header.
+    async def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Execute HTTP request with retry on connection errors and 429 responses.
+
+        Retries on ConnectError, ConnectTimeout, ConnectionResetError, OSError, and 429.
         Does NOT retry on other HTTP errors (4xx/5xx) or read/write timeouts.
         """
         last_err: BaseException | None = None
-        max_attempts = 1 + len(self.RETRY_BACKOFF)
-        for attempt in range(max_attempts):
+        for attempt in range(1 + len(self.RETRY_BACKOFF)):
             try:
                 http = self._get_http()
                 r = await getattr(http, method)(url, **kwargs)
-                if r.status_code == 429 and attempt < max_attempts - 1:
+                if r.status_code == 429 and attempt < len(self.RETRY_BACKOFF):
                     delay = self._parse_retry_after(r, attempt)
-                    log.warning("Rate limited (429) on %s, retry %d/%d after %.1fs", url, attempt + 1, len(self.RETRY_BACKOFF), delay)
+                    log.debug("429 rate-limited; retrying in %.2fs (attempt %d)", delay, attempt + 1)
                     await asyncio.sleep(delay)
                     continue
                 return r
@@ -165,205 +169,25 @@ class GatewaySDK:
 
         raise last_err  # unreachable, but satisfies type checker
 
-    @staticmethod
-    def _parse_retry_after(response: httpx.Response, attempt: int) -> float:
-        """Parse Retry-After header, fall back to exponential backoff."""
-        header = response.headers.get("retry-after", "")
-        if header:
-            try:
-                delay = float(header)
-                return min(delay, 30.0)  # cap at 30s
-            except ValueError:
-                pass
-        # Fall back to exponential backoff
-        backoff = GatewaySDK.RETRY_BACKOFF
-        return backoff[min(attempt, len(backoff) - 1)]
-
-    # ── Realtime N-way race ────────────────────────────────────────────────
-
-    def _get_groq_http(self) -> httpx.AsyncClient:
-        """Lazy-create the Groq direct HTTP client (thread-safe)."""
-        with self._http_lock:
-            if self._groq_http is None or self._groq_http.is_closed:
-                self._groq_http = httpx.AsyncClient(
-                    base_url=_GROQ_API_BASE,
-                    headers={"Authorization": f"Bearer {self._groq_api_key}"},
-                    timeout=5.0,
-                )
-            return self._groq_http
-
-    def _record_win(self, provider: str):
-        self._adaptive_wins.append(provider)
-
-    def _adaptive_slots(self) -> list[str]:
-        """Return wave_size provider slots biased by recent race winners."""
-        cfg = self._race_config
-        wins = dict(collections.Counter(self._adaptive_wins))
-        groq_wins = wins.get("groq", 0)
-        gw_wins = wins.get("gateway", 0)
-        total_wins = groq_wins + gw_wins
-        slots: list[str] = []
-        if total_wins == 0:
-            slots = ["gateway"] * (cfg.wave_size - 1) + (["groq"] if self._groq_api_key else ["gateway"])
-        else:
-            groq_ratio = groq_wins / total_wins
-            groq_slots = round(groq_ratio * cfg.wave_size)
-            gw_slots = cfg.wave_size - groq_slots
-            if self._groq_api_key:
-                slots = ["gateway"] * max(gw_slots, 1) + ["groq"] * max(groq_slots, 0)
-            else:
-                slots = ["gateway"] * cfg.wave_size
-        while len(slots) < cfg.wave_size:
-            slots.append("groq" if self._groq_api_key else "gateway")
-        return slots[: cfg.wave_size]
-
-    async def _race_wave(
-        self,
-        callables: list[tuple[Callable[[], Awaitable[Any]], str]],
-        timeout_s: float,
-    ) -> tuple[Any, str] | None:
-        """Race N async callables, return (result, provider) of first success.
-
-        Cancels all remaining tasks on first success or timeout.
-        Returns None if all failed or timed out.
-        """
-        if not callables:
-            return None
-
-        tasks: dict[asyncio.Task, str] = {}
-        for fn, name in callables:
-            task = asyncio.ensure_future(fn())
-            tasks[task] = name
-
-        deadline = time.monotonic() + timeout_s
-        pending: set[asyncio.Task] = set(tasks.keys())
-
-        try:
-            while pending:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-
-                done, pending = await asyncio.wait(
-                    pending,
-                    timeout=remaining,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-
-                for task in done:
-                    exc = task.exception()
-                    if exc is None:
-                        provider = tasks[task]
-                        for t in pending | (done - {task}):
-                            t.cancel()
-                        return (task.result(), provider)
-                    else:
-                        log.debug("[race] %s failed: %s", tasks[task], exc)
-        finally:
-            for t in set(tasks.keys()):
-                if not t.done():
-                    t.cancel()
-
-        return None
-
-    async def _realtime_fetch(
-        self,
-        gateway_fn: Callable[[], Awaitable[Any]],
-        groq_fn: Callable[[], Awaitable[Any]] | None,
-        endpoint: str,
-    ) -> Any:
-        """Realtime N-way race with waves, fast-fail, and adaptive bias.
-
-        Fires wave_size parallel requests per wave. Uses the first response.
-        If all fail fast (<30% of wave_timeout), immediately launches next wave.
-        Up to max_waves attempts.
-        """
-        cfg = self._race_config
-
-        if cfg.mode == RetryMode.BATCH or groq_fn is None:
-            return await gateway_fn()
-
-        for wave in range(cfg.max_waves):
-            slots = self._adaptive_slots()
-            callables: list[tuple[Callable[[], Awaitable[Any]], str]] = []
-            for slot in slots:
-                if slot == "groq":
-                    callables.append((groq_fn, "groq"))
-                else:
-                    callables.append((gateway_fn, "gateway"))
-
-            t0 = time.monotonic()
-            result = await self._race_wave(callables, cfg.wave_timeout_s)
-
-            if result is not None:
-                data, provider = result
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                self._record_win(provider)
-                log.info("[race] %s wave %d won by '%s' in %.0fms", endpoint, wave + 1, provider, elapsed_ms)
-                return data
-
-            elapsed = time.monotonic() - t0
-            if elapsed < cfg.wave_timeout_s * 0.3:
-                log.debug(
-                    "[race] %s wave %d fast-failed (%.0fms), next wave immediately", endpoint, wave + 1, elapsed * 1000
-                )
-            else:
-                log.warning(
-                    "[race] %s wave %d timed out (%.0fms), launching wave %d/%d",
-                    endpoint,
-                    wave + 1,
-                    elapsed * 1000,
-                    wave + 2,
-                    cfg.max_waves,
-                )
-
-        raise TimeoutError(f"{endpoint}: all {cfg.max_waves} race waves failed")
-
     # ── Inference ─────────────────────────────────────────────────────────
 
     async def transcribe(self, audio: bytes, language: str = "fr", prompt: str = "") -> TranscribeResponse:
         """Transcribe audio to text (GPU-aware routing).
 
-        In REALTIME mode: races gateway + Groq direct, first response wins.
-        In BATCH mode: sequential with retry backoff + Groq fallback.
+        When race_config is set, launches parallel wave races across gateway
+        and Groq providers. Otherwise falls back to Groq on connection error.
+
+        Args:
+            prompt: Previous transcription text for Whisper context (initial_prompt).
         """
-        if self._race_config.mode == RetryMode.BATCH or not self._groq_api_key:
-            return await self._transcribe_batch(audio, language, prompt)
+        if self._race_config is not None:
+            return await self._transcribe_race(audio, language, prompt)
 
-        async def _gateway():
-            params: dict[str, str] = {"language": language}
-            if prompt:
-                params["prompt"] = prompt
-            r = await self._request_with_retry(
-                "post",
-                "/v1/transcribe",
-                content=audio,
-                params=params,
-                headers={"Content-Type": "audio/wav"},
-                timeout=self._timeouts.stt,
-            )
-            self._check_response(r, "/v1/transcribe")
-            data = self._parse_json(r, "/v1/transcribe")
-            return TranscribeResponse(
-                text=data.get("text", ""),
-                used_gpu=data.get("used_gpu", False),
-                detected_language=data.get("language", ""),
-                avg_logprob=data.get("avg_logprob", 0.0),
-            )
-
-        async def _groq():
-            return await self._groq_transcribe(audio, language, prompt)
-
-        return await self._realtime_fetch(_gateway, _groq, "/v1/transcribe")
-
-    async def _transcribe_batch(self, audio: bytes, language: str, prompt: str) -> TranscribeResponse:
-        """BATCH mode: sequential gateway request with Groq fallback."""
         try:
             params: dict[str, str] = {"language": language}
             if prompt:
                 params["prompt"] = prompt
-            r = await self._request_with_retry(
-                "post",
+            r = await self._request_with_retry("post",
                 "/v1/transcribe",
                 content=audio,
                 params=params,
@@ -383,6 +207,51 @@ class GatewaySDK:
             avg_logprob=data.get("avg_logprob", 0.0),
         )
 
+    async def _transcribe_race(self, audio: bytes, language: str, prompt: str) -> TranscribeResponse:
+        """Wave-racing transcription: parallel requests across providers per wave."""
+        rc = self._race_config
+        assert rc is not None
+
+        async def _gw() -> TranscribeResponse:
+            params: dict[str, str] = {"language": language}
+            if prompt:
+                params["prompt"] = prompt
+            r = await self._request_with_retry("post", "/v1/transcribe",
+                content=audio, params=params,
+                headers={"Content-Type": "audio/wav"},
+                timeout=self._timeouts.stt,
+            )
+            self._check_response(r, "/v1/transcribe")
+            d = self._parse_json(r, "/v1/transcribe")
+            return TranscribeResponse(
+                text=d.get("text", ""),
+                used_gpu=d.get("used_gpu", False),
+                detected_language=d.get("language", ""),
+                avg_logprob=d.get("avg_logprob", 0.0),
+            )
+
+        providers = [_gw]
+        if self._groq_api_key:
+            providers.append(lambda: self._groq_transcribe(audio, language, prompt))
+
+        n_slots = min(rc.wave_size, len(providers))
+
+        for wave_idx in range(rc.max_waves):
+            wave_coros = [p() for p in providers[:n_slots]]
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*wave_coros, return_exceptions=True),
+                    timeout=rc.wave_timeout_s,
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            for result in results:
+                if not isinstance(result, BaseException):
+                    return result
+
+        raise TimeoutError(f"all {rc.max_waves} race waves failed")
+
     async def transcribe_ensemble(
         self,
         audio: bytes,
@@ -393,9 +262,6 @@ class GatewaySDK:
         llm_correct: bool = False,
     ) -> "EnsembleTranscribeResponse":
         """Transcribe audio using all configured STT providers; consensus via similarity.
-
-        In REALTIME mode: races gateway ensemble + Groq direct, first response wins.
-        In BATCH mode: sequential with Groq fallback.
 
         Args:
             timeout_ms: Per-provider deadline in ms. Providers that miss it are dropped
@@ -410,42 +276,6 @@ class GatewaySDK:
         Returns EnsembleTranscribeResponse with .consensus (best text) and .providers dict.
         """
         from gateway_sdk.types import EnsembleTranscribeResponse
-
-        if self._race_config.mode == RetryMode.BATCH or not self._groq_api_key:
-            return await self._ensemble_batch(audio, language, prompt, timeout_ms, providers, llm_correct)
-
-        async def _gateway():
-            return await self._ensemble_batch(audio, language, prompt, timeout_ms, providers, llm_correct)
-
-        async def _groq():
-            stt = await self._groq_transcribe(audio, language, prompt)
-            return EnsembleTranscribeResponse(
-                consensus=stt.text,
-                providers={"groq": stt.text},
-                used_providers=1,
-                latency_ms=0,
-                scores={},
-                outliers=[],
-                similarity_method="none",
-                embedding_provider="",
-                corrected="",
-                correction_applied=False,
-            )
-
-        return await self._realtime_fetch(_gateway, _groq, "/v1/transcribe/ensemble")
-
-    async def _ensemble_batch(
-        self,
-        audio: bytes,
-        language: str,
-        prompt: str,
-        timeout_ms: int,
-        providers: list[str] | None,
-        llm_correct: bool,
-    ) -> "EnsembleTranscribeResponse":
-        """BATCH mode: sequential gateway ensemble with Groq fallback."""
-        from gateway_sdk.types import EnsembleTranscribeResponse
-
         try:
             params: dict[str, str] = {"language": language, "timeout_ms": str(timeout_ms)}
             if prompt:
@@ -454,9 +284,9 @@ class GatewaySDK:
                 params["providers"] = ",".join(providers)
             if llm_correct:
                 params["llm_correct"] = "true"
+            # HTTP timeout = provider deadline + similarity overhead + network buffer
             http_timeout = timeout_ms / 1000 + 5.0
-            r = await self._request_with_retry(
-                "post",
+            r = await self._request_with_retry("post",
                 "/v1/transcribe/ensemble",
                 content=audio,
                 params=params,
@@ -494,7 +324,10 @@ class GatewaySDK:
             correction_applied=data.get("correction_applied", False),
         )
 
-    async def translate(self, text: str, source_lang: str, target_lang: str, context: str = "") -> TranslateResponse:
+    async def translate(
+        self, text: str, source_lang: str, target_lang: str,
+        context: str = ""
+    ) -> TranslateResponse:
         """Translate text (GPU-aware routing).
 
         Args:
@@ -506,8 +339,7 @@ class GatewaySDK:
         body: dict = {"text": text, "source_lang": source_lang, "target_lang": target_lang}
         if context:
             body["context"] = context
-        r = await self._request_with_retry(
-            "post",
+        r = await self._request_with_retry("post",
             "/v1/translate",
             json=body,
             timeout=self._timeouts.translate,
@@ -537,11 +369,9 @@ class GatewaySDK:
             headers["X-Reference-Audio"] = opts.reference_audio
         if opts.ref_text and not opts.ref_id:
             import urllib.parse
-
             headers["X-Ref-Text"] = urllib.parse.quote(opts.ref_text[:500], safe="")
 
-        r = await self._request_with_retry(
-            "post",
+        r = await self._request_with_retry("post",
             "/v1/speech",
             content=audio,
             params=params,
@@ -574,36 +404,19 @@ class GatewaySDK:
     ) -> ChatCompletionResponse:
         """Send a chat completion request through the gateway.
 
-        In REALTIME mode: races gateway + Groq direct, first response wins.
-        In BATCH mode: sequential with Groq fallback.
+        Falls back to Groq LLM directly when the gateway is unreachable
+        and groq_api_key is configured.
+
+        Supports text and vision (multimodal content arrays).
+        The gateway routes to the configured LLM provider.
         """
-        if self._race_config.mode == RetryMode.BATCH or not self._groq_api_key:
-            return await self._chat_batch(messages, model, temperature, max_tokens)
-
-        async def _gateway():
-            return await self._chat_batch(messages, model, temperature, max_tokens)
-
-        async def _groq():
-            return await self._groq_chat(messages, model, temperature, max_tokens)
-
-        return await self._realtime_fetch(_gateway, _groq, "/v1/chat/completions")
-
-    async def _chat_batch(
-        self,
-        messages: list[dict],
-        model: str = "llama-3.3-70b-versatile",
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> ChatCompletionResponse:
-        """BATCH mode: sequential gateway chat with Groq fallback."""
-        body: dict = {"model": model, "messages": messages}
-        if temperature is not None:
-            body["temperature"] = temperature
-        if max_tokens is not None:
-            body["max_tokens"] = max_tokens
         try:
-            r = await self._request_with_retry(
-                "post",
+            body: dict = {"model": model, "messages": messages}
+            if temperature is not None:
+                body["temperature"] = temperature
+            if max_tokens is not None:
+                body["max_tokens"] = max_tokens
+            r = await self._request_with_retry("post",
                 "/v1/chat/completions",
                 json=body,
                 timeout=self._timeouts.translate,
@@ -628,16 +441,20 @@ class GatewaySDK:
 
     async def _groq_transcribe(self, audio: bytes, language: str, prompt: str) -> TranscribeResponse:
         """Call Groq Whisper directly when gateway is unreachable."""
-        log.warning("Groq STT direct fallback")
-        client = self._get_groq_http()
-        data: dict[str, str] = {"model": "whisper-large-v3-turbo", "language": language}
-        if prompt:
-            data["prompt"] = prompt
-        r = await client.post(
-            "/audio/transcriptions",
-            data=data,
-            files={"file": ("audio.wav", audio, "audio/wav")},
-        )
+        log.warning("Gateway unreachable — falling back to Groq STT")
+        async with httpx.AsyncClient(
+            base_url=_GROQ_API_BASE,
+            headers={"Authorization": f"Bearer {self._groq_api_key}"},
+            timeout=self._timeouts.stt,
+        ) as client:
+            data: dict[str, str] = {"model": "whisper-large-v3-turbo", "language": language}
+            if prompt:
+                data["prompt"] = prompt
+            r = await client.post(
+                "/audio/transcriptions",
+                data=data,
+                files={"file": ("audio.wav", audio, "audio/wav")},
+            )
         if r.status_code >= 400:
             raise GatewayError(
                 f"Groq STT fallback failed ({r.status_code}): {r.text[:200]}",
@@ -653,21 +470,22 @@ class GatewaySDK:
         )
 
     async def _groq_chat(
-        self,
-        messages: list[dict],
-        model: str,
-        temperature: float | None,
-        max_tokens: int | None,
+        self, messages: list[dict], model: str,
+        temperature: float | None, max_tokens: int | None,
     ) -> ChatCompletionResponse:
         """Call Groq LLM directly when gateway is unreachable."""
-        log.warning("Groq LLM direct fallback")
-        client = self._get_groq_http()
-        body: dict = {"model": model, "messages": messages}
-        if temperature is not None:
-            body["temperature"] = temperature
-        if max_tokens is not None:
-            body["max_tokens"] = max_tokens
-        r = await client.post("/chat/completions", json=body)
+        log.warning("Gateway unreachable — falling back to Groq LLM")
+        async with httpx.AsyncClient(
+            base_url=_GROQ_API_BASE,
+            headers={"Authorization": f"Bearer {self._groq_api_key}"},
+            timeout=self._timeouts.translate,
+        ) as client:
+            body: dict = {"model": model, "messages": messages}
+            if temperature is not None:
+                body["temperature"] = temperature
+            if max_tokens is not None:
+                body["max_tokens"] = max_tokens
+            r = await client.post("/chat/completions", json=body)
         if r.status_code >= 400:
             raise GatewayError(
                 f"Groq LLM fallback failed ({r.status_code}): {r.text[:200]}",
@@ -689,52 +507,42 @@ class GatewaySDK:
 
     async def get_api_keys(self) -> ApiKeysResponse:
         """Get configured API keys (masked) from the gateway."""
-        r = await self._request_with_retry("get", "/v1/config/api-keys", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/v1/config/api-keys", timeout=self._timeouts.health)
         self._check_response(r, "/v1/config/api-keys")
         data = self._parse_json(r, "/v1/config/api-keys")
-
         def _norm_key_entry(k: dict) -> ApiKeyEntry:
             k = dict(k)
             if "envVar" in k:
                 k["env_var"] = k.pop("envVar")
             return ApiKeyEntry(**k)
-
         keys = [_norm_key_entry(k) for k in data.get("keys", data if isinstance(data, list) else [])]
         return ApiKeysResponse(keys=keys)
 
     async def set_api_keys(self, keys: dict[str, str]) -> ApiKeysResponse:
         """Update API keys on the gateway (persisted to .env)."""
-        r = await self._request_with_retry(
-            "post", "/v1/config/api-keys", json={"keys": keys}, timeout=self._timeouts.health
-        )
+        r = await self._request_with_retry("post","/v1/config/api-keys", json={"keys": keys}, timeout=self._timeouts.health)
         self._check_response(r, "/v1/config/api-keys")
         data = self._parse_json(r, "/v1/config/api-keys")
-
         def _norm(k: dict) -> ApiKeyEntry:
             k = dict(k)
             if "envVar" in k:
                 k["env_var"] = k.pop("envVar")
             return ApiKeyEntry(**k)
-
         entries = [_norm(k) for k in data.get("keys", [])]
         return ApiKeysResponse(keys=entries, saved=data.get("saved", False))
 
     async def get_provider_config(self) -> ProviderConfigResponse:
         """Get provider pipeline configuration from the gateway."""
-        r = await self._request_with_retry("get", "/v1/config/providers", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/v1/config/providers", timeout=self._timeouts.health)
         self._check_response(r, "/v1/config/providers")
         data = self._parse_json(r, "/v1/config/providers")
         return ProviderConfigResponse(
-            profiles=[
-                ProviderProfile(
-                    id=p["id"],
-                    name=p["name"],
-                    stt=[PipelineChainEntry(**s) for s in p.get("stt", [])],
-                    llm=[PipelineChainEntry(**l) for l in p.get("llm", [])],
-                    tts=[PipelineChainEntry(**t) for t in p.get("tts", [])],
-                )
-                for p in data.get("profiles", [])
-            ],
+            profiles=[ProviderProfile(
+                id=p["id"], name=p["name"],
+                stt=[PipelineChainEntry(**s) for s in p.get("stt", [])],
+                llm=[PipelineChainEntry(**l) for l in p.get("llm", [])],
+                tts=[PipelineChainEntry(**t) for t in p.get("tts", [])],
+            ) for p in data.get("profiles", [])],
             active_profile_id=data.get("activeProfileId"),
             pipeline_stt=[PipelineChainEntry(**s) for s in data.get("pipelineStt", [])],
             pipeline_llm=[PipelineChainEntry(**l) for l in data.get("pipelineLlm", [])],
@@ -744,20 +552,16 @@ class GatewaySDK:
 
     async def patch_provider_config(self, partial: dict) -> ProviderConfigResponse:
         """Patch (merge) provider pipeline configuration on the gateway."""
-        r = await self._request_with_retry("post", "/v1/config/providers", json=partial, timeout=self._timeouts.health)
+        r = await self._request_with_retry("post","/v1/config/providers", json=partial, timeout=self._timeouts.health)
         self._check_response(r, "/v1/config/providers")
         data = self._parse_json(r, "/v1/config/providers")
         return ProviderConfigResponse(
-            profiles=[
-                ProviderProfile(
-                    id=p["id"],
-                    name=p["name"],
-                    stt=[PipelineChainEntry(**s) for s in p.get("stt", [])],
-                    llm=[PipelineChainEntry(**l) for l in p.get("llm", [])],
-                    tts=[PipelineChainEntry(**t) for t in p.get("tts", [])],
-                )
-                for p in data.get("profiles", [])
-            ],
+            profiles=[ProviderProfile(
+                id=p["id"], name=p["name"],
+                stt=[PipelineChainEntry(**s) for s in p.get("stt", [])],
+                llm=[PipelineChainEntry(**l) for l in p.get("llm", [])],
+                tts=[PipelineChainEntry(**t) for t in p.get("tts", [])],
+            ) for p in data.get("profiles", [])],
             active_profile_id=data.get("activeProfileId"),
             pipeline_stt=[PipelineChainEntry(**s) for s in data.get("pipelineStt", [])],
             pipeline_llm=[PipelineChainEntry(**l) for l in data.get("pipelineLlm", [])],
@@ -767,7 +571,7 @@ class GatewaySDK:
 
     async def catalog(self) -> CatalogResponse:
         """Get the full provider/model/voice catalog from the gateway playground."""
-        r = await self._request_with_retry("get", "/v1/playground/catalog", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/v1/playground/catalog", timeout=self._timeouts.health)
         self._check_response(r, "/v1/playground/catalog")
         data = self._parse_json(r, "/v1/playground/catalog")
         return CatalogResponse(
@@ -808,8 +612,7 @@ class GatewaySDK:
         if options.provider:
             body["provider"] = options.provider
 
-        r = await self._request_with_retry(
-            "post",
+        r = await self._request_with_retry("post",
             "/v1/gpu/deploy",
             json=body,
             timeout=self._timeouts.deploy,
@@ -825,7 +628,7 @@ class GatewaySDK:
 
     async def gpu_status(self) -> GpuStatus:
         """Get current GPU deployment status, health, and active tier."""
-        r = await self._request_with_retry("get", "/v1/gpu/status", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/v1/gpu/status", timeout=self._timeouts.health)
         self._check_response(r, "/v1/gpu/status")
         d = self._parse_json(r, "/v1/gpu/status")
         return GpuStatus(
@@ -850,8 +653,7 @@ class GatewaySDK:
 
     async def terminate_gpu(self, api_key: str) -> None:
         """Terminate the GPU pod."""
-        r = await self._request_with_retry(
-            "post",
+        r = await self._request_with_retry("post",
             "/v1/gpu/terminate",
             json={"apiKey": api_key},
             timeout=self._timeouts.deploy,
@@ -875,8 +677,7 @@ class GatewaySDK:
             params["provider"] = provider
         if limit != 100:
             params["limit"] = str(limit)
-        r = await self._request_with_retry(
-            "get",
+        r = await self._request_with_retry("get",
             "/v1/gpu/offers",
             params=params,
             timeout=30.0,
@@ -908,7 +709,7 @@ class GatewaySDK:
 
     async def gpu_logs(self) -> GpuLogsResponse:
         """Fetch recent GPU pod logs via SSH proxy."""
-        r = await self._request_with_retry("get", "/v1/gpu/logs", timeout=self._timeouts.deploy)
+        r = await self._request_with_retry("get","/v1/gpu/logs", timeout=self._timeouts.deploy)
         self._check_response(r, "/v1/gpu/logs")
         d = self._parse_json(r, "/v1/gpu/logs")
         return GpuLogsResponse(
@@ -921,10 +722,11 @@ class GatewaySDK:
             status=d.get("status", ""),
         )
 
-    async def wait_for_gpu(self, poll_interval_s: float = 5.0, timeout_s: float = 20 * 60) -> GpuStatus:
+    async def wait_for_gpu(
+        self, poll_interval_s: float = 5.0, timeout_s: float = 20 * 60
+    ) -> GpuStatus:
         """Wait for GPU to reach 'ready' status (polls gpu_status)."""
         import time
-
         start = time.monotonic()
         while time.monotonic() - start < timeout_s:
             status = await self.gpu_status()
@@ -937,21 +739,21 @@ class GatewaySDK:
             await asyncio.sleep(poll_interval_s)
         raise GatewayError(
             f"GPU deploy timed out after {int(timeout_s / 60)} min",
-            0,
-            "/v1/gpu/status",
+            0, "/v1/gpu/status",
         )
 
     # ── Observability ────────────────────────────────────────────────────
 
-    async def request_log(self, since_id: int = 0, limit: int = 50) -> RequestLogResponse:
+    async def request_log(
+        self, since_id: int = 0, limit: int = 50
+    ) -> RequestLogResponse:
         """Fetch request log entries and aggregate stats."""
         params: dict[str, str] = {}
         if since_id > 0:
             params["since_id"] = str(since_id)
         if limit != 50:
             params["limit"] = str(limit)
-        r = await self._request_with_retry(
-            "get",
+        r = await self._request_with_retry("get",
             "/v1/requests/log",
             params=params,
             timeout=self._timeouts.health,
@@ -988,7 +790,7 @@ class GatewaySDK:
 
     async def metrics(self) -> MetricsResponse:
         """Fetch gateway metrics (request counts, latency percentiles, etc.)."""
-        r = await self._request_with_retry("get", "/metrics", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/metrics", timeout=self._timeouts.health)
         self._check_response(r, "/metrics")
         d = self._parse_json(r, "/metrics")
         return MetricsResponse(
@@ -1009,14 +811,14 @@ class GatewaySDK:
     async def health(self) -> bool:
         """Check if the gateway is reachable."""
         try:
-            r = await self._request_with_retry("get", "/health", timeout=self._timeouts.health)
+            r = await self._request_with_retry("get","/health", timeout=self._timeouts.health)
             return r.status_code == 200
         except Exception:
             return False
 
     async def health_detail(self) -> HealthResponse:
         """Fetch detailed health info (components, providers, GPU state)."""
-        r = await self._request_with_retry("get", "/health", timeout=self._timeouts.health)
+        r = await self._request_with_retry("get","/health", timeout=self._timeouts.health)
         self._check_response(r, "/health")
         d = self._parse_json(r, "/health")
         return HealthResponse(

@@ -11,6 +11,7 @@ Mirror SDK: ai-gateway/src/sdk/ (TypeScript)
 """
 
 from gateway_sdk.client import GatewaySDK
+from gateway_sdk.types import RaceConfig, RetryMode
 from gateway_sdk.types import (
     ApiKeyEntry,
     ApiKeysResponse,
