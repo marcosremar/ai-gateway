@@ -4,17 +4,40 @@ Keep in sync with: ai-gateway/src/sdk/types.ts
 """
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
 
+class RetryMode(Enum):
+    REALTIME = "realtime"
+    BATCH = "batch"
+
+
+@dataclass
+class RaceConfig:
+    """Configuration for the realtime N-way race retry strategy.
+
+    REALTIME mode: fire N requests in parallel, use the first response.
+    If all fail or timeout, retry up to max_waves times.
+    Adaptive: track which provider wins and bias future waves.
+    """
+
+    wave_size: int = 3
+    wave_timeout_s: float = 3.0
+    max_waves: int = 3
+    mode: RetryMode = RetryMode.REALTIME
+    adaptive_window: int = 10
+
+
 @dataclass
 class Timeouts:
     """Per-endpoint timeout overrides (seconds)."""
-    stt: float = 15.0
-    translate: float = 15.0
+
+    stt: float = 5.0
+    translate: float = 5.0
     pipeline: float = 30.0
     health: float = 8.0
     deploy: float = 30.0
@@ -23,9 +46,11 @@ class Timeouts:
 @dataclass
 class GatewayConfig:
     """Configuration for GatewaySDK."""
+
     base_url: str
     api_key: str = ""
     timeouts: Timeouts = field(default_factory=Timeouts)
+    race_config: RaceConfig = field(default_factory=RaceConfig)
 
 
 # ── Inference responses ──────────────────────────────────────────────────────
@@ -41,16 +66,16 @@ class TranscribeResponse:
 
 @dataclass
 class EnsembleTranscribeResponse:
-    consensus: str                    # best transcription (highest avg similarity to others)
-    providers: dict[str, str]         # {provider_name: text} for each provider that succeeded
-    used_providers: int               # number of providers that returned results
-    latency_ms: int                   # total wall-clock time
-    scores: dict[str, float] = field(default_factory=dict)   # {provider_name: similarity_score}
-    outliers: list[str] = field(default_factory=list)        # providers flagged as outliers
+    consensus: str  # best transcription (highest avg similarity to others)
+    providers: dict[str, str]  # {provider_name: text} for each provider that succeeded
+    used_providers: int  # number of providers that returned results
+    latency_ms: int  # total wall-clock time
+    scores: dict[str, float] = field(default_factory=dict)  # {provider_name: similarity_score}
+    outliers: list[str] = field(default_factory=list)  # providers flagged as outliers
     similarity_method: str = "jaccard"  # 'jaccard' | 'embedding'
-    embedding_provider: str = ""        # name of embedding provider used (if method='embedding')
-    corrected: str = ""                 # LLM-corrected text (only set when llm_correct=True)
-    correction_applied: bool = False    # True if LLM changed the consensus text
+    embedding_provider: str = ""  # name of embedding provider used (if method='embedding')
+    corrected: str = ""  # LLM-corrected text (only set when llm_correct=True)
+    correction_applied: bool = False  # True if LLM changed the consensus text
 
 
 @dataclass
@@ -167,10 +192,10 @@ class PipelineOptions:
     target: str = "en"
     speaker: str = ""
     reference_audio: str = ""  # base64 WAV for voice cloning
-    ref_text: str = ""         # transcription of reference audio
-    ref_id: str = ""           # cached voice reference ID (from /v1/voice-reference)
-    stt_prompt: str = ""       # Whisper initial_prompt (recent transcript context)
-    style: str = "default"     # translation style hint
+    ref_text: str = ""  # transcription of reference audio
+    ref_id: str = ""  # cached voice reference ID (from /v1/voice-reference)
+    stt_prompt: str = ""  # Whisper initial_prompt (recent transcript context)
+    style: str = "default"  # translation style hint
 
 
 # ── GPU management responses ────────────────────────────────────────────────
@@ -192,8 +217,8 @@ class GpuStatus:
     elapsed_sec: int
     started_at: int
     retry_count: int
-    provider: str = ""   # 'runpod' | 'vast' | ''
-    alert: str = ""      # e.g. "RunPod blocked, using Vast.ai fallback"
+    provider: str = ""  # 'runpod' | 'vast' | ''
+    alert: str = ""  # e.g. "RunPod blocked, using Vast.ai fallback"
     cost_per_hr: float = 0.0
     docker_image: str = ""
     region: str = ""
