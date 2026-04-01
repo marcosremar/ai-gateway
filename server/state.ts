@@ -7,16 +7,14 @@ export { deploymentSM };
 
 import type { Server } from 'http';
 import { PrismaClient } from '@prisma/client';
-import { PrismaBunSqlite } from 'prisma-adapter-bun-sqlite';
+import { PrismaPg } from '@prisma/adapter-pg';
 import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import { homedir } from 'os';
 import { join } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, renameSync } from 'fs';
 
-// Resolve DB path relative to project root (state.ts is at ai-gateway/server/)
-const dbPath = join(import.meta.dir, '../../data/babelcast.db');
-mkdirSync(join(import.meta.dir, '../../data'), { recursive: true });
-const adapter = new PrismaBunSqlite({ url: `file:${dbPath}` });
+// PostgreSQL via DATABASE_URL (Neon serverless pooler)
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 export const prisma = new PrismaClient({ adapter });
 
 export const startedAt = Date.now();
