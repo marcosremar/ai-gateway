@@ -90,7 +90,7 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': `multipart/form-data; boundary=${boundary}`,
       },
-      body: new Blob([bodyStr], { type: `multipart/form-data; boundary=${boundary}` }),
+      body: bodyStr,
     });
 
     if (!response.ok) {
