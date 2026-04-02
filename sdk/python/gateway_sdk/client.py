@@ -195,6 +195,7 @@ class GatewaySDK:
         self._timeouts = timeouts or Timeouts()
         self._race_config: Optional[RaceConfig] = race_config
         self._http: Optional[httpx.AsyncClient] = None
+        self._http_loop_id: Optional[int] = None  # event loop that owns _http
         self._sync_http: Optional[httpx.Client] = None
         self._http_lock = threading.Lock()
 
@@ -223,9 +224,20 @@ class GatewaySDK:
         return self._base_url
 
     def _get_http(self) -> httpx.AsyncClient:
-        """Lazy-create the HTTP client (thread-safe)."""
+        """Lazy-create the HTTP client, bound to the current running event loop.
+
+        If the running loop changed (e.g. pipeline worker vs main thread), a new
+        client is created so httpcore/anyio primitives are always bound to the
+        correct loop, preventing 'bound to a different event loop' RuntimeErrors.
+        """
+        try:
+            current_loop_id = id(asyncio.get_running_loop())
+        except RuntimeError:
+            current_loop_id = None
         with self._http_lock:
-            if self._http is None or self._http.is_closed:
+            if (self._http is None or self._http.is_closed
+                    or (current_loop_id is not None
+                        and self._http_loop_id != current_loop_id)):
                 headers = {}
                 if self._api_key:
                     headers["Authorization"] = f"Bearer {self._api_key}"
@@ -234,6 +246,7 @@ class GatewaySDK:
                     headers=headers,
                     timeout=self._timeouts.health,
                 )
+                self._http_loop_id = current_loop_id
             return self._http
 
     def reset(self) -> None:
@@ -363,10 +376,17 @@ class GatewaySDK:
     # ── Realtime N-way race ────────────────────────────────────────────────
 
     def _get_provider_http(self, provider_id: str) -> httpx.AsyncClient:
-        """Lazy-create an HTTP client for a direct provider (thread-safe)."""
+        """Lazy-create an HTTP client for a direct provider, bound to the current loop."""
+        try:
+            current_loop_id = id(asyncio.get_running_loop())
+        except RuntimeError:
+            current_loop_id = None
         with self._http_lock:
             client = self._provider_http.get(provider_id)
-            if client is None or client.is_closed:
+            loop_key = f"_loop_{provider_id}"
+            stored_loop_id = getattr(self, loop_key, None)
+            if (client is None or client.is_closed
+                    or (current_loop_id is not None and stored_loop_id != current_loop_id)):
                 spec = self._provider_specs[provider_id]
                 key = self._provider_keys[provider_id]
                 # Different auth header per provider API type
@@ -382,6 +402,7 @@ class GatewaySDK:
                     timeout=spec.timeout,
                 )
                 self._provider_http[provider_id] = client
+                setattr(self, loop_key, current_loop_id)
             return client
 
     def _record_win(self, provider: str):
