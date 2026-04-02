@@ -8,9 +8,17 @@ import type { ResponseCache } from '../caching/response-cache';
 import type { LLMProvider, STTProvider, TTSProvider } from '../providers/types';
 import type { EmbeddingProvider } from '../providers/openai-compat/openai-compat-embedding';
 
+export interface ChatFallbackEntry {
+  providerId: string;
+  model: string;
+  provider: LLMProvider;
+}
+
 export interface ProviderMapping {
   /** model name → LLM provider instance */
   chat?: Record<string, LLMProvider>;
+  /** Ordered fallback chain for LLM chat (Groq → Fireworks → Ollama) */
+  chatFallbackChain?: ChatFallbackEntry[];
   /** model name → Embedding provider instance */
   embedding?: Record<string, EmbeddingProvider>;
   /** model name → STT provider instance */

@@ -153,6 +153,21 @@ if (fireworksAvailable) {
   providers.chat!['accounts/fireworks/models/llama-v3p1-70b-instruct'] = fireworksLLM;
 }
 
+// Build LLM fallback chain: Groq → Fireworks → Ollama (ordered by latency)
+import type { ChatFallbackEntry } from '../src/proxy/types';
+const chatFallbackChain: ChatFallbackEntry[] = [];
+if (groqAvailable) {
+  chatFallbackChain.push({ providerId: 'groq', model: groqLlmModel, provider: groqLLM });
+}
+if (fireworksAvailable) {
+  chatFallbackChain.push({ providerId: 'fireworks', model: 'accounts/fireworks/models/llama-v3p3-70b-instruct', provider: fireworksLLM });
+}
+if (ollamaAvailable && ollamaLLMProvider) {
+  chatFallbackChain.push({ providerId: 'ollama', model: ollamaModel, provider: ollamaLLMProvider });
+}
+providers.chatFallbackChain = chatFallbackChain;
+console.log(`[gateway] LLM fallback chain: ${chatFallbackChain.map(e => e.providerId).join(' → ') || 'none'}`);
+
 // ── AIClient for voice dubbing pipeline ─────────────────────────────────────
 
 export const registry = new AIProviderRegistry();
