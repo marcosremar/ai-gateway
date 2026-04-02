@@ -1,19 +1,26 @@
 /**
- * POST /v1/chat/completions — chat completion (streaming & non-streaming).
+ * POST /v1/chat/completions — chat completion with provider fallback.
+ *
+ * When Groq returns 429, transparently falls back to Fireworks → Ollama.
+ * The client never sees a 429 — the gateway absorbs rate limits internally.
  */
 
 import type { LLMProvider, ChatMessage } from '../../providers/types';
 import type { ResponseCache } from '../../caching/response-cache';
 import type { GatewayHooks } from '../../hooks';
 import { emitHook } from '../../hooks';
-import type { ProxyRequest, ProxyResponse } from '../types';
-import { withProxyRetry } from './retry';
+import type { ProxyRequest, ProxyResponse, ChatFallbackEntry } from '../types';
+import { withProviderFallback, type FallbackEntry, type FallbackOptions, CooldownTracker } from '../../providers/fallback';
+
+/** Shared cooldown tracker for LLM proxy route */
+const llmCooldownTracker = new CooldownTracker();
 
 export async function handleChatCompletions(
   req: ProxyRequest,
   chatProviders: Record<string, LLMProvider>,
   cache?: ResponseCache,
   hooks?: GatewayHooks,
+  fallbackChain?: ChatFallbackEntry[],
 ): Promise<ProxyResponse> {
   const body = req.body as {
     model: string;
@@ -37,25 +44,27 @@ export async function handleChatCompletions(
     return { status: 400, body: { error: { message: 'max_tokens must be between 1 and 128000', type: 'invalid_request_error' } } };
   }
 
-  const provider = chatProviders[body.model];
-  if (!provider) {
+  // Build fallback chain: use the configured chain, or fall back to single-provider lookup
+  const chain = buildChain(body.model, chatProviders, fallbackChain);
+  if (chain.length === 0) {
     return { status: 404, body: { error: { message: `Model "${body.model}" not found`, type: 'invalid_request_error' } } };
   }
 
   const startTs = Date.now();
+  const primaryProvider = chain[0].provider;
   emitHook(hooks, 'onRequestStart', {
     userId: 'proxy',
     stage: 'llm',
-    provider: provider.providerId,
+    provider: primaryProvider,
     model: body.model,
     timestamp: startTs,
   });
 
   try {
-    // Check cache
+    // Check cache (only for deterministic requests)
     if (cache && (body.temperature === undefined || body.temperature === 0)) {
       const key = cache.buildKey({
-        provider: provider.providerId,
+        provider: primaryProvider,
         model: body.model,
         messages: body.messages,
         temperature: body.temperature,
@@ -69,23 +78,48 @@ export async function handleChatCompletions(
       }
     }
 
-    const result = await withProxyRetry(
-      provider.providerId,
-      body.model,
-      () => provider.chat({
-        model: body.model,
-        messages: body.messages,
-        temperature: body.temperature,
-        maxTokens: body.max_tokens,
-        responseFormat: body.response_format,
-      }),
-      'LLM',
+    // Build fallback entries for withProviderFallback
+    const fallbackEntries: FallbackEntry[] = chain.map(e => ({
+      provider: e.provider,
+      model: e.model,
+    }));
+
+    const chatOpts = {
+      model: body.model,
+      messages: body.messages,
+      temperature: body.temperature,
+      maxTokens: body.max_tokens,
+      responseFormat: body.response_format,
+    };
+
+    const opts: FallbackOptions = {
+      logPrefix: '[proxy:llm]',
+      timeoutMs: 15_000,
+      retriesPerProvider: 1,
+      retryBaseDelayMs: 200,
+      cooldownTracker: llmCooldownTracker,
+    };
+
+    // Map from FallbackEntry to the actual provider instance for each attempt
+    const providerMap = new Map<string, LLMProvider>();
+    for (const entry of chain) {
+      providerMap.set(entry.provider, entry.instance);
+    }
+
+    const { result, usedProvider, usedModel } = await withProviderFallback(
+      fallbackEntries,
+      async (entry) => {
+        const instance = providerMap.get(entry.provider);
+        if (!instance) throw new Error(`Provider ${entry.provider} not found`);
+        return instance.chat(chatOpts);
+      },
+      opts,
     );
 
     // Store in cache
     if (cache && (body.temperature === undefined || body.temperature === 0)) {
       const key = cache.buildKey({
-        provider: provider.providerId,
+        provider: primaryProvider,
         model: body.model,
         messages: body.messages,
         temperature: body.temperature,
@@ -96,8 +130,8 @@ export async function handleChatCompletions(
     emitHook(hooks, 'onRequestEnd', {
       userId: 'proxy',
       stage: 'llm',
-      provider: provider.providerId,
-      model: body.model,
+      provider: usedProvider,
+      model: usedModel || body.model,
       latencyMs: Date.now() - startTs,
       success: true,
       timestamp: Date.now(),
@@ -111,7 +145,7 @@ export async function handleChatCompletions(
     emitHook(hooks, 'onRequestEnd', {
       userId: 'proxy',
       stage: 'llm',
-      provider: provider.providerId,
+      provider: primaryProvider,
       model: body.model,
       latencyMs: Date.now() - startTs,
       success: false,
@@ -119,12 +153,50 @@ export async function handleChatCompletions(
       timestamp: Date.now(),
     });
 
-    console.error(`[chat-completions] Error for model ${body.model}:`, err);
+    const status = extractStatus(err);
+    console.error(`[chat-completions] All providers failed for model ${body.model}:`, err);
     return {
-      status: 500,
+      status: status || 500,
       body: { error: { message: 'Chat completion failed', type: 'server_error' } },
     };
   }
+}
+
+/** Build a provider chain: requested model first, then fallbacks with compatible models. */
+function buildChain(
+  requestedModel: string,
+  chatProviders: Record<string, LLMProvider>,
+  fallbackChain?: ChatFallbackEntry[],
+): Array<{ provider: string; model: string; instance: LLMProvider }> {
+  const chain: Array<{ provider: string; model: string; instance: LLMProvider }> = [];
+  const seen = new Set<string>();
+
+  // 1. Try the exact requested model first (direct lookup)
+  const direct = chatProviders[requestedModel];
+  if (direct) {
+    const pid = direct.providerId;
+    chain.push({ provider: pid, model: requestedModel, instance: direct });
+    seen.add(pid);
+  }
+
+  // 2. Append fallback providers (different providers with their own models)
+  if (fallbackChain) {
+    for (const entry of fallbackChain) {
+      if (!seen.has(entry.providerId)) {
+        chain.push({ provider: entry.providerId, model: entry.model, instance: entry.provider });
+        seen.add(entry.providerId);
+      }
+    }
+  }
+
+  return chain;
+}
+
+function extractStatus(err: unknown): number | null {
+  if (!err || typeof err !== 'object') return null;
+  const e = err as Record<string, unknown>;
+  if (typeof e.status === 'number') return e.status;
+  return null;
 }
 
 function formatResponse(content: string, model: string, usage?: unknown) {

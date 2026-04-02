@@ -461,7 +461,7 @@ export function createProxyServer(config: ProxyConfig): Server {
         if (!config.providers.chat) {
           proxyRes = { status: 404, body: { error: { message: 'No chat providers configured', type: 'invalid_request_error' } } };
         } else {
-          proxyRes = await handleChatCompletions(proxyReq, config.providers.chat, config.cache, config.hooks);
+          proxyRes = await handleChatCompletions(proxyReq, config.providers.chat, config.cache, config.hooks, config.providers.chatFallbackChain);
         }
       } else if (method === 'POST' && url === '/v1/embeddings') {
         if (!config.providers.embedding) {

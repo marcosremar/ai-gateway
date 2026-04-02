@@ -20,7 +20,7 @@ class RetryMode(str, Enum):
 @dataclass
 class RaceConfig:
     """Configuration for parallel wave racing in REALTIME mode."""
-    wave_size: int = 2            # parallel slots per wave (providers per wave)
+    wave_size: int = 3            # parallel slots per wave (providers per wave)
     wave_timeout_s: float = 3.0   # seconds before a wave is considered failed
     max_waves: int = 3            # maximum number of waves before giving up
     mode: RetryMode = RetryMode.REALTIME
@@ -43,6 +43,7 @@ class GatewayConfig:
     base_url: str
     api_key: str = ""
     timeouts: Timeouts = field(default_factory=Timeouts)
+    race_config: RaceConfig = field(default_factory=RaceConfig)
 
 
 # ── Inference responses ──────────────────────────────────────────────────────
