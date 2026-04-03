@@ -20,7 +20,7 @@ import type { SqlDriver } from './pg-driver';
 
 // ── Dynamic Prisma loader (no hard dep on @prisma/client) ───────────────────
 
-function loadPrisma(url: string): unknown {
+function loadPrisma(config: DatabaseConfig): unknown {
   let PrismaClient: new (opts: unknown) => unknown;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -33,9 +33,44 @@ function loadPrisma(url: string): unknown {
     );
   }
 
+  // Use Neon HTTP adapter (port 443) instead of TCP (port 5432) for Neon environments.
+  // This avoids firewall/network issues with the standard PostgreSQL port.
+  console.log('[database] loadPrisma env:', config.environment, '| url:', config.databaseUrl?.replace(/:[^@]+@/, ':***@').slice(0, 80));
+  if (config.environment === 'neon') {
+    try {
+      // Use PrismaNeonHTTP (HTTP/fetch via port 443) to avoid TCP port 5432 firewall issues.
+      // PrismaNeon (WebSocket/Pool) causes an instanceof mismatch when there are multiple
+      // copies of @neondatabase/serverless in node_modules. PrismaNeonHTTP uses the neon()
+      // fetch function and has no such coupling issue.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { neon, types } = require('@neondatabase/serverless') as {
+        neon: (connectionString: string) => unknown;
+        types: { setTypeParser: (oid: number, parser: (val: string) => unknown) => void };
+      };
+      // Return timestamps as raw strings so Prisma's WASM engine (driverAdapters) receives
+      // the ISO/PostgreSQL string it expects. @neondatabase/serverless v1.0 converts timestamps
+      // to Date objects by default, but those get serialized as {} at the WASM boundary.
+      types.setTypeParser(1082, (val: string) => val); // DATE
+      types.setTypeParser(1114, (val: string) => val); // TIMESTAMP
+      types.setTypeParser(1184, (val: string) => val); // TIMESTAMPTZ
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { PrismaNeonHTTP } = require('@prisma/adapter-neon') as {
+        PrismaNeonHTTP: new (sql: unknown) => unknown;
+      };
+      const sql = neon(config.databaseUrl);
+      const adapter = new PrismaNeonHTTP(sql);
+      return new PrismaClient({
+        adapter,
+        log: process.env.NODE_ENV === 'production' ? ['error'] : ['error', 'warn'],
+      });
+    } catch (adapterErr) {
+      console.error('[database] Neon adapter failed, falling back to TCP:', adapterErr);
+    }
+  }
+
   return new PrismaClient({
     log: process.env.NODE_ENV === 'production' ? ['error'] : ['error', 'warn'],
-    datasources: { db: { url } },
+    datasources: { db: { url: buildPrismaUrl(config) } },
   });
 }
 
@@ -56,7 +91,7 @@ export class DatabaseService {
 
   get prisma(): unknown {
     if (!this._prisma) {
-      this._prisma = loadPrisma(buildPrismaUrl(this.config));
+      this._prisma = loadPrisma(this.config);
     }
     return this._prisma;
   }

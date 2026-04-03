@@ -163,7 +163,7 @@ Rules:
   const profileParts: string[] = [];
   if (nativeLanguage) {
     const nativeName = langNamesMap[nativeLanguage] || nativeLanguage;
-    profileParts.push(`${studentName}'s native language is ${nativeName}. Use this to anticipate typical errors and provide translations when helpful.`);
+    profileParts.push(`${studentName}'s native language is ${nativeName}. Use this to anticipate typical errors. NEVER switch to ${nativeName} or provide translations — respond EXCLUSIVELY in the target language.`);
   }
   if (birthDate) {
     const age = Math.floor((Date.now() - new Date(birthDate).getTime()) / (365.25 * 24 * 60 * 60 * 1000));
