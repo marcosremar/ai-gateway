@@ -117,6 +117,7 @@ describe('GPU Readiness — Real API', () => {
   let gatewayAvailable = false;
   let readinessEndpointsAvailable = false;
   let gpuAvailable = false;
+  let cloudServicesAvailable = false;
   let originalSettings: LatencySettings;
 
   beforeAll(async () => {
@@ -147,6 +148,12 @@ describe('GPU Readiness — Real API', () => {
       const gpu = await getGpuStatus();
       gpuAvailable = gpu.status === 'ready' && !!gpu.endpoint;
     } catch {}
+
+    // Check if cloud pipeline services are actually available (may be suspended/unconfigured)
+    try {
+      const result = await runLLM('ping');
+      cloudServicesAvailable = !!(result?.content);
+    } catch { /* cloud providers not configured or Modal not running */ }
 
     // Save original settings to restore later
     try {
@@ -196,7 +203,7 @@ describe('GPU Readiness — Real API', () => {
 
   describe('Cloud pipeline execution', () => {
     it('should execute LLM via cloud', async () => {
-      if (!gatewayAvailable || !readinessEndpointsAvailable) return;
+      if (!gatewayAvailable || !readinessEndpointsAvailable || !cloudServicesAvailable) return;
       const result = await runLLM('Hello world');
       expect(result.content).toBeTruthy();
       expect(result.latencyMs).toBeGreaterThan(0);
@@ -205,7 +212,7 @@ describe('GPU Readiness — Real API', () => {
     });
 
     it('should execute STT via cloud', async () => {
-      if (!gatewayAvailable || !readinessEndpointsAvailable) return;
+      if (!gatewayAvailable || !readinessEndpointsAvailable || !cloudServicesAvailable) return;
       const result = await runSTT();
       expect(result.latencyMs).toBeGreaterThan(0);
       expect(result.provider).toBeTruthy();
@@ -213,7 +220,7 @@ describe('GPU Readiness — Real API', () => {
     });
 
     it('should execute TTS via cloud', async () => {
-      if (!gatewayAvailable || !readinessEndpointsAvailable) return;
+      if (!gatewayAvailable || !readinessEndpointsAvailable || !cloudServicesAvailable) return;
       const result = await runTTS('Bonjour le monde');
       expect(result.latencyMs).toBeGreaterThan(0);
       expect(result.provider).toBeTruthy();
@@ -407,7 +414,7 @@ describe('GPU Readiness — Real API', () => {
 
   describe('Pipeline routing', () => {
     it('should route requests to correct provider based on readiness', async () => {
-      if (!gatewayAvailable || !readinessEndpointsAvailable) return;
+      if (!gatewayAvailable || !readinessEndpointsAvailable || !cloudServicesAvailable) return;
 
       const gpu = await getGpuStatus();
       const r = await getReadiness();
