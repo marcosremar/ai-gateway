@@ -86,8 +86,8 @@ describe('runVerifiedSTT', () => {
     });
   });
 
-  describe('multiple providers — Jaccard consensus', () => {
-    it('selects consensus with highest agreement', async () => {
+  describe('multiple providers — race mode', () => {
+    it('returns the first provider to respond', async () => {
       const deps: STTVerifierDeps = {
         providers: [
           makeProvider('hello world today', 'p1'),
@@ -96,13 +96,13 @@ describe('runVerifiedSTT', () => {
         ],
       };
       const result = await runVerifiedSTT(AUDIO, 'en', '', deps);
-      // p1 and p2 agree — consensus should be their text
-      expect(result.consensus).toBe('hello world today');
+      // First to respond wins — used_providers is always 1
+      expect(result.consensus).toBeTruthy();
       expect(result.similarity_method).toBe('jaccard');
-      expect(result.used_providers).toBe(3);
+      expect(result.used_providers).toBe(1);
     });
 
-    it('identifies outliers', async () => {
+    it('outliers is always empty in race mode', async () => {
       const deps: STTVerifierDeps = {
         providers: [
           makeProvider('the quick brown fox', 'p1'),
@@ -112,10 +112,10 @@ describe('runVerifiedSTT', () => {
         outlierThreshold: 0.3,
       };
       const result = await runVerifiedSTT(AUDIO, 'en', '', deps);
-      expect(result.outliers).toContain('p3');
+      expect(result.outliers).toEqual([]);
     });
 
-    it('includes all providers in providers map', async () => {
+    it('providers map contains only the winner', async () => {
       const deps: STTVerifierDeps = {
         providers: [
           makeProvider('text one', 'p1'),
@@ -123,8 +123,8 @@ describe('runVerifiedSTT', () => {
         ],
       };
       const result = await runVerifiedSTT(AUDIO, 'en', '', deps);
-      expect(result.providers).toHaveProperty('p1');
-      expect(result.providers).toHaveProperty('p2');
+      expect(Object.keys(result.providers)).toHaveLength(1);
+      expect(result.used_providers).toBe(1);
     });
 
     it('scores sum to values between 0 and 1', async () => {
@@ -193,29 +193,27 @@ describe('runVerifiedSTT', () => {
   });
 
   describe('embedding fallback', () => {
-    it('uses embedding when Jaccard confidence is low', async () => {
+    it('embeddingFallbacks is ignored — always returns jaccard (first wins)', async () => {
       const mockEmbProvider = {
         name: 'test-embed',
         providerId: 'openai',
         isConfigured: () => true,
-        embed: vi.fn(async (texts: string[]) => ({
-          embeddings: texts.map((_, i) => [i === 0 ? 1 : 0, i === 0 ? 0 : 1]),
-          model: 'text-embed',
-          usage: { promptTokens: 10 },
-        })),
+        embed: vi.fn(),
       };
 
       const deps: STTVerifierDeps = {
         providers: [
           makeProvider('bonjour le monde', 'p1'),
-          makeProvider('hello the world', 'p2'), // different language
+          makeProvider('hello the world', 'p2'),
         ],
         embeddingFallbacks: [mockEmbProvider as any],
-        embeddingFallbackThreshold: 0.99, // force fallback (Jaccard will be < 0.99)
+        embeddingFallbackThreshold: 0.99,
       };
       const result = await runVerifiedSTT(AUDIO, 'fr', '', deps);
-      expect(result.similarity_method).toBe('embedding');
-      expect(result.embedding_provider).toBe('test-embed');
+      // Race mode: always jaccard, embedding not used
+      expect(result.similarity_method).toBe('jaccard');
+      expect(result.used_providers).toBe(1);
+      expect(mockEmbProvider.embed).not.toHaveBeenCalled();
     });
 
     it('falls back to Jaccard when embedding provider not configured', async () => {
@@ -260,8 +258,8 @@ describe('runVerifiedSTT', () => {
     });
   });
 
-  describe('Jaccard similarity internals', () => {
-    it('identical texts get score of 1', async () => {
+  describe('race winner score', () => {
+    it('winner always gets score of 1', async () => {
       const text = 'the quick brown fox';
       const deps: STTVerifierDeps = {
         providers: [
@@ -270,9 +268,10 @@ describe('runVerifiedSTT', () => {
         ],
       };
       const result = await runVerifiedSTT(AUDIO, 'en', '', deps);
-      // Both have identical text — both should score 1.0
-      expect(result.scores.p1).toBe(1);
-      expect(result.scores.p2).toBe(1);
+      // Only winner in scores, always 1
+      const scores = Object.values(result.scores);
+      expect(scores).toHaveLength(1);
+      expect(scores[0]).toBe(1);
     });
 
     it('completely different texts still picks best', async () => {

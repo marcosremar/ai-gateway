@@ -12,6 +12,7 @@ const nextConfig = {
     async rewrites() {
       return [
         { source: '/v1/:path*', destination: `${gatewayUrl}/v1/:path*` },
+        { source: '/api/:path*', destination: `${gatewayUrl}/api/:path*` },
         { source: '/health', destination: `${gatewayUrl}/health` },
         { source: '/metrics', destination: `${gatewayUrl}/metrics` },
       ];

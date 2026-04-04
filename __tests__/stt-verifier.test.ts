@@ -84,7 +84,7 @@ describe('runVerifiedSTT — unit (no API)', () => {
     expect(result.providers['p1']).toBe('bonjour le monde');
   });
 
-  it('two identical transcriptions — both score 1', async () => {
+  it('two identical transcriptions — winner gets score 1 (race mode)', async () => {
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
       providers: [
         stubProvider('p1', 'bonjour le monde'),
@@ -93,14 +93,16 @@ describe('runVerifiedSTT — unit (no API)', () => {
     });
 
     expect(result.consensus).toBe('bonjour le monde');
-    expect(result.used_providers).toBe(2);
-    expect(result.scores['p1']).toBeCloseTo(1, 2);
-    expect(result.scores['p2']).toBeCloseTo(1, 2);
+    // Race mode: only first responder reported
+    expect(result.used_providers).toBe(1);
+    expect(Object.keys(result.providers)).toHaveLength(1);
+    const winnerScore = Object.values(result.scores)[0];
+    expect(winnerScore).toBe(1);
     expect(result.outliers).toHaveLength(0);
   });
 
-  it('majority wins over outlier', async () => {
-    // 3 providers agree, 1 is completely different
+  it('majority wins over outlier — race mode returns first responder', async () => {
+    // Race mode: outlierThreshold ignored, first non-empty wins
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
       providers: [
         stubProvider('p1', 'bonjour je voudrais un café'),
@@ -111,9 +113,10 @@ describe('runVerifiedSTT — unit (no API)', () => {
       outlierThreshold: 0.25,
     });
 
-    expect(result.consensus).toBe('bonjour je voudrais un café');
-    expect(result.outliers).toContain('p4');
-    expect(result.scores['p1']).toBeGreaterThan(result.scores['p4']);
+    expect(result.consensus).toBeTruthy();
+    expect(result.used_providers).toBe(1);
+    // Race mode: outliers is always empty
+    expect(result.outliers).toHaveLength(0);
   });
 
   it('provider failure is silently skipped', async () => {
@@ -147,8 +150,8 @@ describe('runVerifiedSTT — unit (no API)', () => {
     expect(result.used_providers).toBe(1);
   });
 
-  it('picks provider with most agreement, not alphabetically', async () => {
-    // p1 and p3 agree; p2 is the outlier
+  it('picks provider with most agreement — race mode returns first responder', async () => {
+    // Race mode: first non-empty provider wins regardless of agreement
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
       providers: [
         stubProvider('p1', 'apple orange banana'),
@@ -158,8 +161,9 @@ describe('runVerifiedSTT — unit (no API)', () => {
       outlierThreshold: 0.25,
     });
 
-    expect(['apple orange banana']).toContain(result.consensus);
-    expect(result.outliers).toContain('p2');
+    expect(result.consensus).toBeTruthy();
+    expect(result.used_providers).toBe(1);
+    expect(result.outliers).toHaveLength(0);
   });
 
   it('returns latency_ms > 0', async () => {
@@ -288,12 +292,11 @@ describe('runVerifiedSTT — embedding fallback (unit)', () => {
     expect(result.embedding_provider).toBeUndefined();
   });
 
-  it('triggers embedding fallback when Jaccard confidence is below threshold', async () => {
-    // p1 and p2 share no words → Jaccard ~0, triggers fallback
-    // Embedding vectors: p1 and p2 are close, p3 is far
+  it('embedding fallbacks are ignored in race mode — always jaccard, first wins', async () => {
+    // Race mode: embeddingFallbacks is ignored, similarity_method always 'jaccard'
     const vectors: Record<string, number[]> = {
       'hello world':        [1, 0, 0],
-      'bonjour monde':      [0.95, 0.1, 0],  // close to p1
+      'bonjour monde':      [0.95, 0.1, 0],
       'something unrelated': [0, 0, 1],
     };
     const embProvider = stubEmbeddingProvider(vectors, 'test-embed');
@@ -305,16 +308,16 @@ describe('runVerifiedSTT — embedding fallback (unit)', () => {
         stubProvider('p3', 'something unrelated'),
       ],
       embeddingFallbacks: [embProvider],
-      embeddingFallbackThreshold: 0.9,  // very high — always triggers
+      embeddingFallbackThreshold: 0.9,
       embeddingOutlierThreshold: 0.5,
     });
 
-    expect(result.similarity_method).toBe('embedding');
-    expect(result.embedding_provider).toBe('test-embed');
-    expect(result.outliers).toContain('p3');
+    expect(result.similarity_method).toBe('jaccard');
+    expect(result.used_providers).toBe(1);
+    expect(result.outliers).toHaveLength(0);
   });
 
-  it('skips unconfigured embedding providers', async () => {
+  it('skips unconfigured embedding providers — race mode: embedding never called', async () => {
     let fallback2Called = false;
     const unconfigured: EmbeddingProvider = {
       name: 'unconfigured',
@@ -341,12 +344,13 @@ describe('runVerifiedSTT — embedding fallback (unit)', () => {
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
       providers: [stubProvider('p1', 'text a'), stubProvider('p2', 'text b')],
       embeddingFallbacks: [unconfigured, fallback2],
-      embeddingFallbackThreshold: 0.9,  // always triggers
+      embeddingFallbackThreshold: 0.9,
     });
 
-    expect(fallback2Called).toBe(true);
-    expect(result.similarity_method).toBe('embedding');
-    expect(result.embedding_provider).toBe('fallback2');
+    // Race mode: embedding never triggered regardless of threshold
+    expect(fallback2Called).toBe(false);
+    expect(result.similarity_method).toBe('jaccard');
+    expect(result.used_providers).toBe(1);
   });
 
   it('falls back to Jaccard if all embedding providers fail', async () => {
@@ -382,24 +386,23 @@ describe('runVerifiedSTT — embedding fallback (unit)', () => {
 // ─── Timeout / Real-time Tests ────────────────────────────────────────────────
 
 describe('runVerifiedSTT — timeout / partial results (unit)', () => {
-  it('fast providers used even if slow one times out', async () => {
+  it('fast provider wins race before slow one times out', async () => {
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
       providers: [
         stubProvider('fast1', 'bonjour le monde'),
-        stubProvider('fast2', 'bonjour le monde'),
-        slowProvider('slow', 'bonjour le monde', 5000), // 5s — should be cut
+        slowProvider('slow', 'bonjour le monde', 5000), // 5s — loses the race
       ],
       timeoutMs: 200, // only 200ms budget
     });
 
-    // Should have used fast1 + fast2 (slow was cut)
+    // Race mode: first fast provider wins
     expect(result.consensus).toBe('bonjour le monde');
-    expect(result.used_providers).toBe(2);
+    expect(result.used_providers).toBe(1);
     expect('slow' in result.providers).toBe(false);
     expect(result.latency_ms).toBeLessThan(1000);
   });
 
-  it('uses all providers when they all finish within timeout', async () => {
+  it('first provider to respond wins (race mode)', async () => {
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
       providers: [
         slowProvider('p1', 'bonjour', 50),
@@ -408,14 +411,17 @@ describe('runVerifiedSTT — timeout / partial results (unit)', () => {
       timeoutMs: 2000,
     });
 
-    expect(result.used_providers).toBe(2);
+    // Race mode: only the winner (p1, faster) is reported
+    expect(result.used_providers).toBe(1);
+    expect(result.consensus).toBe('bonjour');
   });
 
-  it('works with no timeoutMs (default behavior unchanged)', async () => {
+  it('works with no timeoutMs — first responder wins', async () => {
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
       providers: [stubProvider('p1', 'hello'), stubProvider('p2', 'hello')],
     });
-    expect(result.used_providers).toBe(2);
+    expect(result.used_providers).toBe(1);
+    expect(result.consensus).toBe('hello');
   });
 });
 
