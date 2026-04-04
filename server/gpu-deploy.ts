@@ -583,6 +583,13 @@ export async function autoTerminateGpu() {
 export const POD_NAME_PREFIX = 'parle-autoscale-';
 
 /**
+ * Instance IDs that are currently part of an active race deploy.
+ * The orphan sweep must not terminate these — they are legitimately booting.
+ * Populated by startDeployRace, cleared when race resolves.
+ */
+export const activeRaceInstanceIds = new Set<string>();
+
+/**
  * Find and terminate ALL pods matching our naming prefix.
  * This prevents orphaned pods from accumulating costs when the gateway restarts
  * or when deploy requests race.
@@ -646,6 +653,8 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
   if (deployState.podId) tracked.add(deployState.podId);
   const { standbyDeployState } = await import('./state');
   if (standbyDeployState.podId) tracked.add(standbyDeployState.podId);
+  // Include all active race candidates — they are legitimately booting, not orphans
+  for (const id of activeRaceInstanceIds) tracked.add(id);
 
   let found = 0;
   let terminated = 0;
@@ -1483,6 +1492,8 @@ export async function startDeployRace(
   }
 
   console.log(`[race] ${candidates.length}/${slots.length} instances created — racing to first healthy`);
+  // Register all race candidates so the orphan sweep doesn't mistake them for orphans
+  for (const c of candidates) activeRaceInstanceIds.add(c.instanceId);
   setDeployState({
     status: 'booting', podId: candidates[0].instanceId,
     endpoint: candidates[0].endpoint, gpuType: candidates[0].gpuType,
@@ -1604,6 +1615,8 @@ export async function startDeployRace(
   }));
 
   // Phase 3: Final state / race summary
+  // Clear race tracking — sweep may now treat any remaining instances as orphans
+  for (const c of candidates) activeRaceInstanceIds.delete(c.instanceId);
   if (winner) {
     const w = winner as RaceCandidate;
     const winnerBootMs = w.costPerHr > 0

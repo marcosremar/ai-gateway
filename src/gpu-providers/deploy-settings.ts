@@ -108,7 +108,7 @@ const DEFAULTS: DeploySettings = {
   standbyEnabled:        false,
   standbyTriggerHours:   4,
   standbyDrainTimeoutMs: 30_000,
-  deployRaceCount:       3,
+  deployRaceCount:       1,  // RunPod SECURE is reliable; race only needed for Vast.ai (set to 2)
   autoRecoveryEnabled:   true,
   autoRecoveryDelaySec:  10,
   autoRecoveryMaxRetries: 2,
