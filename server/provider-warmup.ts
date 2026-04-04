@@ -65,9 +65,11 @@ async function runWarmupCycle(): Promise<void> {
 
   const failures: string[] = [];
 
-  // Process cloud results
+  // Process cloud results — skip 401/403 (API reachable, key lacks list-models scope)
   for (const { provider, ok, error } of cloudResults) {
-    if (!ok) failures.push(`${provider}(${error || 'not ok'})`);
+    if (!ok && !error?.includes('401') && !error?.includes('403')) {
+      failures.push(`${provider}(${error || 'not ok'})`);
+    }
   }
 
   // Process GPU result

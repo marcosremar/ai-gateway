@@ -352,8 +352,8 @@ describe('deploy-settings', () => {
   describe('deploy race count', () => {
     beforeEach(() => flushDeploySettings());
 
-    it('getDeployRaceCount defaults to 3', () => {
-      expect(getDeployRaceCount()).toBe(3);
+    it('getDeployRaceCount defaults to 1 (no race — RunPod SECURE is reliable)', () => {
+      expect(getDeployRaceCount()).toBe(1);
     });
 
     it('setDeployRaceCount updates value', () => {

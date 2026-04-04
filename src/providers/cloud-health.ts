@@ -46,10 +46,14 @@ export async function probeCloudProvider(
       headers: authHeader(provider, apiKey),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    // 401/403 = API is reachable but key lacks list-models permission.
-    // Treat as "ok" — the API is up; actual request failures will be caught separately.
-    const ok = res.ok || res.status === 401 || res.status === 403;
-    return { provider, ok, latencyMs: Date.now() - t0 };
+    // Preserve the original ok semantics but expose the status so callers can
+    // distinguish "API down" (5xx/timeout) from "key lacks scope" (401/403).
+    return {
+      provider,
+      ok: res.ok,
+      latencyMs: Date.now() - t0,
+      ...(res.ok ? {} : { error: `HTTP ${res.status}` }),
+    };
   } catch (err) {
     return {
       provider,
