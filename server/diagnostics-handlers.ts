@@ -68,9 +68,8 @@ export async function handleDiagnosticsScores(req: IncomingMessage, res: ServerR
       };
     }
 
-    // 4. TCP latency stats (latency.db)
-    const latencyDbStats = getLatencyDbStats();
-    const tcpHosts = getAllHostLatencies();
+    // 4. TCP latency stats (HostLatency in Neon)
+    const [latencyDbStats, tcpHosts] = await Promise.all([getLatencyDbStats(), getAllHostLatencies()]);
     const tcpSummary = tcpHosts
       .filter(h => h.median_ms !== null)
       .sort((a, b) => (a.median_ms ?? Infinity) - (b.median_ms ?? Infinity))
