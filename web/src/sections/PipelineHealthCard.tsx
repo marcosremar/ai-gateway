@@ -5,7 +5,7 @@ import { Mic, Bot, Volume2, AlertTriangle, ArrowRight, CheckCircle2, ChevronDown
 import type { LucideIcon } from 'lucide-react';
 import { Card, CardHeader, CardBody, StatusBadge } from '@/components/ui';
 import { getProviderConfig, getReadinessStatus } from '@/lib/gateway';
-import type { HealthResponse, ProviderConfigResponse, ReadinessStatusResponse, PipelineChainEntry, ServicePhase } from '@/lib/gateway';
+import type { HealthResponse, ProviderConfigResponse, ReadinessStatusResponse, PipelineChainEntry, ServicePhase, CloudHealthEntry } from '@/lib/gateway';
 import { STAGE_COLORS } from '@/lib/phase-colors';
 import { PROVIDER_ICON } from './FallbackChainList';
 
@@ -66,6 +66,7 @@ function deriveStatus(
   gpuPhase: ServicePhase | null,
   isActiveProfile: boolean,
   configuredProviders: Record<string, boolean>,
+  cloudHealth?: CloudHealthEntry[],
 ): ProviderStatus {
   const m = metrics[provider] ?? metrics[`${provider}-${stage}`] ?? null;
   const avgLatencyMs = m?.avgLatencyMs ?? null;
@@ -89,6 +90,12 @@ function deriveStatus(
     }
   }
 
+  // Cloud probe: if provider is down or unreachable, show error
+  const probe = cloudHealth?.find(e => e.provider === provider);
+  if (probe && !probe.ok) return { phase: 'error', avgLatencyMs };
+  // High latency from live probe → degrade
+  if (probe && probe.latencyMs > 1500) return { phase: 'degraded', avgLatencyMs };
+
   if ((m?.errorRate ?? 0) > 0.2) return { phase: 'error', avgLatencyMs };
   if (activeProvider === provider) return { phase: 'active', avgLatencyMs };
   if (m && m.requests > 0) return { phase: 'ok', avgLatencyMs };
@@ -98,7 +105,7 @@ function deriveStatus(
 // ── Inline chain ──────────────────────────────────────────────────────────────
 
 function InlineChain({
-  chain, stage, activeProvider, metrics, gpuPhase, isActiveProfile, configuredProviders,
+  chain, stage, activeProvider, metrics, gpuPhase, isActiveProfile, configuredProviders, cloudHealth,
 }: {
   chain: PipelineChainEntry[];
   stage: 'stt' | 'llm' | 'tts';
@@ -107,13 +114,14 @@ function InlineChain({
   gpuPhase: ServicePhase | null;
   isActiveProfile: boolean;
   configuredProviders: Record<string, boolean>;
+  cloudHealth?: CloudHealthEntry[];
 }) {
   if (!chain.length) return <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>—</span>;
 
   return (
     <div className="flex items-center gap-1 flex-wrap">
       {chain.map((entry, i) => {
-        const s = deriveStatus(entry.provider, stage, activeProvider, metrics, gpuPhase, isActiveProfile, configuredProviders);
+        const s = deriveStatus(entry.provider, stage, activeProvider, metrics, gpuPhase, isActiveProfile, configuredProviders, cloudHealth);
         const color = dotColor(s.phase);
         const isActive = s.phase === 'active';
         const pi = PROVIDER_ICON[entry.provider];
@@ -163,7 +171,7 @@ function InlineChain({
 // ── Profile row ───────────────────────────────────────────────────────────────
 
 function ProfileRow({
-  profile, isActive, activeProviders, metrics, gpuPhases, defaultOpen, configuredProviders,
+  profile, isActive, activeProviders, metrics, gpuPhases, defaultOpen, configuredProviders, cloudHealth,
 }: {
   profile: ProviderConfigResponse['profiles'][0];
   isActive: boolean;
@@ -172,6 +180,7 @@ function ProfileRow({
   gpuPhases: Record<'stt' | 'llm' | 'tts', ServicePhase | null>;
   defaultOpen: boolean;
   configuredProviders: Record<string, boolean>;
+  cloudHealth?: CloudHealthEntry[];
 }) {
   const [open, setOpen] = useState(defaultOpen);
 
@@ -189,6 +198,13 @@ function ProfileRow({
       const active = activeProviders[stage];
       if (active && active !== primary.provider) hasIssue = true;
       if (gpuPhases[stage] === 'degraded') hasIssue = true;
+      // Cloud probe failure on any provider in this chain
+      if (cloudHealth) {
+        for (const entry of chain) {
+          const probe = cloudHealth.find(e => e.provider === entry.provider);
+          if (probe && !probe.ok) hasIssue = true;
+        }
+      }
     }
   }
 
@@ -343,6 +359,7 @@ function ProfileRow({
                   gpuPhase={gpuPhases[stage]}
                   isActiveProfile={isActive}
                   configuredProviders={configuredProviders}
+                  cloudHealth={cloudHealth}
                 />
 
                 {/* Fallback warning */}
@@ -427,6 +444,7 @@ export function PipelineHealthCard({ health }: PipelineHealthCardProps) {
               gpuPhases={gpuPhases}
               defaultOpen={profile.id === config.activeProfileId}
               configuredProviders={health.providers}
+              cloudHealth={health.cloudHealth}
             />
           ))}
         </div>

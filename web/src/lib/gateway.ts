@@ -25,6 +25,13 @@ async function gwPost<T>(path: string, body?: unknown): Promise<T> {
 
 // ── Health & Metrics ──
 
+export interface CloudHealthEntry {
+  provider: string;
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+}
+
 export interface HealthResponse {
   status: string;
   uptime_sec: number;
@@ -36,6 +43,8 @@ export interface HealthResponse {
   providerMetrics: Record<string, { avgLatencyMs: number; requests: number; errorRate: number }>;
   pendingDbWrites: number;
   reason?: string;
+  cloudHealth?: CloudHealthEntry[];
+  cloudHealthAt?: number;
 }
 
 export async function getHealth(): Promise<HealthResponse> {

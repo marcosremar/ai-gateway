@@ -19,6 +19,13 @@ import type { CloudProbeResult } from '../src';
 const WARMUP_INTERVAL_MS = 60_000; // 60s between probes
 let warmupTimer: ReturnType<typeof setInterval> | null = null;
 
+// ── Cached cloud probe results (used by /health endpoint) ─────────────────────
+let lastCloudProbeResults: CloudProbeResult[] = [];
+let lastCloudProbeAt = 0;
+
+export function getCloudProbeResults(): CloudProbeResult[] { return lastCloudProbeResults; }
+export function getCloudProbeAt(): number { return lastCloudProbeAt; }
+
 // Idle threshold: only run GPU monitoring probes when no active requests and idle for > 15s
 const IDLE_THRESHOLD_MS = 15_000;
 
@@ -49,6 +56,12 @@ async function runWarmupCycle(): Promise<void> {
     cloudProbe,
     gpuProbe,
   ]);
+
+  // Store cloud probe results for /health endpoint
+  if (cloudResults.length > 0) {
+    lastCloudProbeResults = cloudResults;
+    lastCloudProbeAt = Date.now();
+  }
 
   const failures: string[] = [];
 

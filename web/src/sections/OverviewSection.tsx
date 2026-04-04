@@ -6,7 +6,7 @@ import { useGpuStatus } from '@/hooks/useGpuStatus';
 import { useGpuList } from '@/hooks/useGpuList';
 import { useBotStatus } from '@/hooks/useBotStatus';
 import { useGatewayWs } from '@/hooks/useGatewayWs';
-import { getRequestLog, getReadinessStatus, type RequestLogEntry, type GpuReadinessState, type ReadinessStatusResponse } from '@/lib/gateway';
+import { getRequestLog, getReadinessStatus, type RequestLogEntry, type GpuReadinessState, type ReadinessStatusResponse, type CloudHealthEntry } from '@/lib/gateway';
 import { AlertBanner, Spinner, StatusBadge } from '@/components/ui';
 import { phaseColor, phaseBg, phaseVariant, phaseLabel, formatPhaseDuration, STAGE_COLORS, type ServicePhase } from '@/lib/phase-colors';
 import { PipelineHealthCard } from './PipelineHealthCard';
@@ -246,6 +246,71 @@ function ProviderBar({ name, requests, avgLatencyMs, errorRate, maxRequests, tre
   );
 }
 
+// ── Cloud API Health ──────────────────────────────────────────────────────────
+
+type ApiStatus = 'ok' | 'slow' | 'down' | 'unstable';
+
+function classifyApiHealth(entry: CloudHealthEntry, errorRate?: number): ApiStatus {
+  if (!entry.ok) return 'down';
+  if ((errorRate ?? 0) > 0.2) return 'unstable';
+  if (entry.latencyMs > 1500) return 'slow';
+  if (entry.latencyMs > 800 || (errorRate ?? 0) > 0.1) return 'slow';
+  return 'ok';
+}
+
+const API_STATUS_COLOR: Record<ApiStatus, string> = {
+  ok: '#10b981',
+  slow: '#f59e0b',
+  down: '#ef4444',
+  unstable: '#f97316',
+};
+
+const API_STATUS_LABEL: Record<ApiStatus, string> = {
+  ok: 'ok',
+  slow: 'lento',
+  down: 'offline',
+  unstable: 'instável',
+};
+
+function ApiHealthPills({ cloudHealth, providerMetrics }: {
+  cloudHealth: CloudHealthEntry[];
+  providerMetrics: Record<string, { avgLatencyMs: number; requests: number; errorRate: number }>;
+}) {
+  if (cloudHealth.length === 0) return null;
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      {cloudHealth.map(entry => {
+        const m = providerMetrics[entry.provider];
+        const status = classifyApiHealth(entry, m?.errorRate);
+        const color = API_STATUS_COLOR[status];
+        const label = API_STATUS_LABEL[status];
+        const isOk = status === 'ok';
+        return (
+          <div key={entry.provider}
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px]"
+            style={{
+              borderColor: `color-mix(in srgb, ${color} 35%, var(--color-border))`,
+              background: `color-mix(in srgb, ${color} ${isOk ? '5' : '10'}%, var(--color-surface-elevated))`,
+            }}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${!isOk ? 'animate-pulse' : ''}`}
+              style={{ background: color }} />
+            <span className="font-medium capitalize" style={{ color: isOk ? 'var(--color-text-secondary)' : color }}>
+              {entry.provider}
+            </span>
+            {!isOk && (
+              <span className="font-semibold" style={{ color }}>{label}</span>
+            )}
+            {isOk && entry.latencyMs > 0 && (
+              <span className="font-mono" style={{ color: 'var(--color-text-muted)' }}>{entry.latencyMs}ms</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Main Section ──────────────────────────────────────────────────────────────
 
 export function OverviewSection() {
@@ -309,51 +374,74 @@ export function OverviewSection() {
     <div className="p-6 space-y-5">
 
       {/* ── Status strip ── */}
-      <div className="flex items-stretch rounded-xl border overflow-hidden"
-        style={{
-          borderColor: `color-mix(in srgb, ${statusColor} 22%, var(--color-border))`,
-          background: 'var(--color-surface-elevated)',
-        }}>
-        {/* Status pill */}
-        <div className="flex items-center gap-2.5 px-4 py-2.5 border-r flex-shrink-0"
-          style={{
-            borderColor: `color-mix(in srgb, ${statusColor} 22%, var(--color-border))`,
-            background: `color-mix(in srgb, ${statusColor} 6%, transparent)`,
-          }}>
-          <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isOnline ? 'animate-pulse' : ''}`}
-            style={{ background: statusColor }} />
-          <span className="text-[11px] font-bold uppercase tracking-widest"
-            style={{ color: statusColor, letterSpacing: '0.12em' }}>
-            {isOnline ? 'Online' : 'Degraded'}
-          </span>
-        </div>
-        {/* Metrics inline */}
-        <div className="flex items-center gap-6 px-5 py-2.5 flex-1 flex-wrap">
-          <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
-            uptime <span className="font-mono font-semibold" style={{ color: 'var(--color-text)' }}>{formatUptime(health.uptime_sec)}</span>
-          </span>
-          <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
-            p50 <span className="font-mono font-semibold" style={{ color: '#60a5fa' }}>{health.latency.p50_ms}ms</span>
-          </span>
-          <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
-            p95 <span className="font-mono font-semibold" style={{ color: '#a78bfa' }}>{health.latency.p95_ms}ms</span>
-          </span>
-          <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
-            <span className="font-mono font-semibold" style={{ color: '#fbbf24' }}>{health.latency.samples}</span> requests
-          </span>
-          {health.budget && health.budget.dailySpendUsd > 0 && (
-            <span className="text-[11px] ml-auto" style={{ color: 'var(--color-text-muted)' }}>
-              spend today <span className="font-mono font-semibold" style={{ color: health.budget.exceeded ? '#ef4444' : '#fbbf24' }}>
-                ${health.budget.dailySpendUsd.toFixed(2)}
-                {health.budget.dailyLimitUsd ? ` / $${health.budget.dailyLimitUsd.toFixed(2)}` : ''}
-              </span>
-            </span>
-          )}
-          {(health as any).reason && (
-            <span className="text-[11px] ml-auto font-medium" style={{ color: '#fbbf24' }}>{(health as any).reason}</span>
-          )}
-        </div>
-      </div>
+      {(() => {
+        const cloudHealth = health.cloudHealth ?? [];
+        const hasApiIssues = cloudHealth.some(e => {
+          const m = health.providerMetrics[e.provider];
+          return classifyApiHealth(e, m?.errorRate) !== 'ok';
+        });
+        const stripBorderColor = hasApiIssues
+          ? `color-mix(in srgb, #f59e0b 30%, var(--color-border))`
+          : `color-mix(in srgb, ${statusColor} 22%, var(--color-border))`;
+
+        return (
+          <div className="rounded-xl border overflow-hidden"
+            style={{ borderColor: stripBorderColor, background: 'var(--color-surface-elevated)' }}>
+            <div className="flex items-stretch">
+              {/* Status pill */}
+              <div className="flex items-center gap-2.5 px-4 py-2.5 border-r flex-shrink-0"
+                style={{
+                  borderColor: stripBorderColor,
+                  background: `color-mix(in srgb, ${statusColor} 6%, transparent)`,
+                }}>
+                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isOnline ? 'animate-pulse' : ''}`}
+                  style={{ background: statusColor }} />
+                <span className="text-[11px] font-bold uppercase tracking-widest"
+                  style={{ color: statusColor, letterSpacing: '0.12em' }}>
+                  {isOnline ? 'Online' : 'Degraded'}
+                </span>
+              </div>
+              {/* Metrics inline */}
+              <div className="flex items-center gap-6 px-5 py-2.5 flex-1 flex-wrap">
+                <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
+                  uptime <span className="font-mono font-semibold" style={{ color: 'var(--color-text)' }}>{formatUptime(health.uptime_sec)}</span>
+                </span>
+                <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
+                  p50 <span className="font-mono font-semibold" style={{ color: '#60a5fa' }}>{health.latency.p50_ms}ms</span>
+                </span>
+                <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
+                  p95 <span className="font-mono font-semibold" style={{ color: '#a78bfa' }}>{health.latency.p95_ms}ms</span>
+                </span>
+                <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
+                  <span className="font-mono font-semibold" style={{ color: '#fbbf24' }}>{health.latency.samples}</span> requests
+                </span>
+                {health.budget && health.budget.dailySpendUsd > 0 && (
+                  <span className="text-[11px] ml-auto" style={{ color: 'var(--color-text-muted)' }}>
+                    spend today <span className="font-mono font-semibold" style={{ color: health.budget.exceeded ? '#ef4444' : '#fbbf24' }}>
+                      ${health.budget.dailySpendUsd.toFixed(2)}
+                      {health.budget.dailyLimitUsd ? ` / $${health.budget.dailyLimitUsd.toFixed(2)}` : ''}
+                    </span>
+                  </span>
+                )}
+                {health.reason && (
+                  <span className="text-[11px] ml-auto font-medium" style={{ color: '#fbbf24' }}>{health.reason}</span>
+                )}
+              </div>
+            </div>
+            {/* Cloud API health row */}
+            {cloudHealth.length > 0 && (
+              <div className="flex items-center gap-3 px-4 py-1.5 border-t"
+                style={{ borderColor: 'var(--color-border)', background: hasApiIssues ? 'color-mix(in srgb, #f59e0b 3%, transparent)' : undefined }}>
+                <span className="text-[9px] font-semibold uppercase flex-shrink-0"
+                  style={{ color: 'var(--color-text-muted)', letterSpacing: '0.1em' }}>
+                  APIs
+                </span>
+                <ApiHealthPills cloudHealth={cloudHealth} providerMetrics={health.providerMetrics} />
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Infrastructure: GPU + Bot ── */}
       <div className="grid grid-cols-2 gap-3">
