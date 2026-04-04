@@ -27,6 +27,13 @@ vi.mock('@prisma/client', () => ({
   },
 }));
 
+// Mock @prisma/adapter-pg — not installed in ai-gateway package (babelcast root dep)
+vi.mock('@prisma/adapter-pg', () => ({
+  PrismaPg: class MockPrismaPg {
+    constructor(_opts: unknown) {}
+  },
+}));
+
 describe('playground-handlers exports', () => {
   afterEach(() => {
     vi.restoreAllMocks();
