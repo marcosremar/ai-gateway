@@ -82,6 +82,9 @@ let botAudioBuffer: Buffer[] = [];
 let botAudioBufferBytes = 0;
 let botAudioProcessing = false;
 let botAudioLastProcess = 0;
+// Held audio from a previous short/meaningless segment — merged with the next chunk
+let botAudioHeldPcm: Buffer | null = null;
+let botAudioHeldMergeCount = 0;
 
 // Bot language pair — set from bot:join command, reset on bot:leave
 let botSourceLang = 'fr';
@@ -91,6 +94,16 @@ let botTargetLang = 'en';
 const BOT_AUDIO_CHUNK_THRESHOLD = 3 * 32000; // 3 seconds at 16kHz 16-bit
 const BOT_AUDIO_MIN_INTERVAL_MS = 2000; // don't process more than once every 2s
 const BOT_AUDIO_MAX_BUFFER_BYTES = 10 * 1024 * 1024; // 10 MB cap to prevent OOM
+// Segment merge limits
+const BOT_AUDIO_MAX_MERGE_COUNT = 3;        // max merges before forcing output
+const BOT_AUDIO_MAX_HELD_BYTES = 15 * 32000; // max 15s of held audio
+
+/** Returns true if the transcription is a meaningful phrase (not just stray letters/words). */
+function isMeaningfulTranscription(text: string): boolean {
+  const trimmed = text.trim();
+  const words = trimmed.split(/\s+/).filter(w => w.length > 0);
+  return words.length >= 3 || trimmed.length >= 15;
+}
 
 /** Force-flush bot audio buffer (called on disconnect or when buffer is too large) */
 function flushBotAudioBuffer(): void {
@@ -99,6 +112,9 @@ function flushBotAudioBuffer(): void {
   } else {
     botAudioBuffer = [];
     botAudioBufferBytes = 0;
+    // Discard any held audio — no new audio is coming to merge with
+    botAudioHeldPcm = null;
+    botAudioHeldMergeCount = 0;
   }
 }
 
@@ -115,13 +131,17 @@ async function processBotAudioBuffer(): Promise<void> {
 
   // Grab the buffered audio and reset
   const chunks = botAudioBuffer;
-  const totalBytes = botAudioBufferBytes;
   botAudioBuffer = [];
   botAudioBufferBytes = 0;
 
   try {
-    // Convert Int16 PCM to WAV
-    const pcmData = Buffer.concat(chunks);
+    // Convert Int16 PCM to WAV — prepend held audio from previous short segment
+    let pcmData: Buffer = Buffer.concat(chunks);
+    if (botAudioHeldPcm) {
+      console.log(`[bot-audio] Merging held audio (${(botAudioHeldPcm.length / 32000).toFixed(1)}s) with new chunk (${(pcmData.length / 32000).toFixed(1)}s)`);
+      pcmData = Buffer.concat([botAudioHeldPcm, pcmData]);
+      botAudioHeldPcm = null;
+    }
     const sampleRate = botAudioSampleRate || 16000;
     const wavHeader = Buffer.alloc(44);
     const dataSize = pcmData.length;
@@ -142,30 +162,53 @@ async function processBotAudioBuffer(): Promise<void> {
     const wavBuffer = Buffer.concat([wavHeader, pcmData]);
 
     const { source, target } = getBotSourceTarget();
-    console.log(`[bot-audio] Processing ${(totalBytes / 1024).toFixed(0)}KB audio (${(totalBytes / 32000).toFixed(1)}s) ${source}→${target}`);
+    console.log(`[bot-audio] Processing ${(pcmData.length / 1024).toFixed(0)}KB audio (${(pcmData.length / 32000).toFixed(1)}s) ${source}→${target}`);
 
     const callbacks: PipelineCallbacks = {
       onStageStart() {},
       onStageDone() {},
       onAudioChunk() {},
       onComplete(result: PipelineResult) {
-        if (result.transcription?.trim()) {
-          console.log(`[bot-audio] Pipeline: "${result.transcription.slice(0, 40)}" → "${result.translation?.slice(0, 40)}"`);
-          // Broadcast as subtitle:early — this is what the website listens for
-          broadcastWs({
-            type: 'subtitle:early',
-            transcription: result.transcription,
-            translation: result.translation || '',
-            source,
-            target,
-          });
-          // Also broadcast as transcript
-          broadcastWs({
-            type: 'transcript',
-            text: result.transcription,
-            speaker: 'Meeting',
-          });
+        const transcription = result.transcription?.trim();
+        if (!transcription) {
+          // No speech detected — discard any held audio to avoid infinite merging
+          botAudioHeldPcm = null;
+          botAudioHeldMergeCount = 0;
+          return;
         }
+
+        // If the segment is just stray letters or a word or two, hold the audio
+        // and merge with the next chunk so the STT gets more context
+        if (
+          !isMeaningfulTranscription(transcription) &&
+          botAudioHeldMergeCount < BOT_AUDIO_MAX_MERGE_COUNT &&
+          pcmData.length < BOT_AUDIO_MAX_HELD_BYTES
+        ) {
+          botAudioHeldPcm = pcmData;
+          botAudioHeldMergeCount++;
+          console.log(`[bot-audio] Short segment "${transcription.slice(0, 30)}" — holding audio for merge #${botAudioHeldMergeCount}`);
+          return;
+        }
+
+        // Meaningful (or forced after max merges) — broadcast and clear held state
+        botAudioHeldPcm = null;
+        botAudioHeldMergeCount = 0;
+
+        console.log(`[bot-audio] Pipeline: "${transcription.slice(0, 40)}" → "${result.translation?.slice(0, 40)}"`);
+        // Broadcast as subtitle:early — this is what the website listens for
+        broadcastWs({
+          type: 'subtitle:early',
+          transcription: result.transcription,
+          translation: result.translation || '',
+          source,
+          target,
+        });
+        // Also broadcast as transcript
+        broadcastWs({
+          type: 'transcript',
+          text: result.transcription,
+          speaker: 'Meeting',
+        });
       },
       onError(stage: string, error: Error) {
         console.error(`[bot-audio] Pipeline error at ${stage}: ${error.message}`);

@@ -44,6 +44,7 @@ import { fetchIpLocation, extractIp, fetchRunPodDatacenter, parseProviderRegion,
 import { rankOffers, scheduleBackgroundProbes, probeAndSaveOffers } from './gpu-latency';
 import { upsertHostMeta, getHostRttMap, getAllHostLatencies, getLatencyDbStats, setHostsMonitored, sortGpuTypesByLatency, getBestLatencyByGpuModel } from './latency-db';
 import { loadProviderConfig } from './config-persistence';
+import { getCloudProbeResults, getCloudProbeAt } from './provider-warmup';
 
 // ── GPU management endpoints ────────────────────────────────────────────────
 
@@ -1399,6 +1400,17 @@ export async function handleHealth(_req: IncomingMessage, res: ServerResponse): 
     totalTokens: metricsCounters.totalInputTokens + metricsCounters.totalOutputTokens,
   };
   body.pendingDbWrites = pendingDbWrites;
+  // Cloud provider probe results (from periodic warmup cycle)
+  const cloudProbe = getCloudProbeResults();
+  if (cloudProbe.length > 0) {
+    body.cloudHealth = cloudProbe.map(r => ({
+      provider: r.provider,
+      ok: r.ok,
+      latencyMs: r.latencyMs,
+      ...(r.error ? { error: r.error } : {}),
+    }));
+    body.cloudHealthAt = getCloudProbeAt();
+  }
   res.end(JSON.stringify(body));
 }
 
