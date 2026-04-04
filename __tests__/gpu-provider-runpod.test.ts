@@ -173,8 +173,10 @@ describe('RunpodClient', () => {
 
     it('falls back to next GPU on "no instances" error', async () => {
       fetchSpy
-        .mockResolvedValueOnce(mockFetchText('no instances available', 400))
-        .mockResolvedValueOnce(mockFetchResponse({ id: 'pod-fallback' }));
+        .mockResolvedValueOnce(mockFetchText('no instances available', 400))     // RTX 4090 create → error
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'pod-fallback' }))         // RTX A5000 create → success
+        // Ghost detection: post-create poll returns pod with machine assigned (not a ghost)
+        .mockResolvedValueOnce(mockFetchResponse({ machine: { id: 'machine-1' }, runtime: null }));
 
       const result = await client.createInstance(
         { gpuTypes: ['RTX 4090', 'RTX A5000'], dockerImage: 'test/image:latest' },
@@ -182,7 +184,7 @@ describe('RunpodClient', () => {
       );
 
       expect(result.instanceId).toBe('pod-fallback');
-      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(fetchSpy).toHaveBeenCalledTimes(3); // create×2 + ghost-check×1
     });
 
     it('throws when all GPU types exhausted', async () => {
