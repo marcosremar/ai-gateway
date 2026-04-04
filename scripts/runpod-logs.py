@@ -96,112 +96,106 @@ def load_cookies():
 
 
 def fetch_pod_logs(pod_id: str, cookies: list, log_type: str = "all") -> dict:
-    """Fetch logs for a specific pod via headless browser."""
+    """Fetch logs for a specific pod via headless Playwright browser.
+
+    Uses the RunPod console SPA flow:
+    1. Navigate to console.runpod.io/pods (establishes Clerk auth session)
+    2. Click on the pod row to expand it
+    3. Click "Logs" tab — triggers fetch to hapi.runpod.net/v1/pod/{id}/logs
+    4. Intercept the hapi response containing { container: [], system: [] }
+    """
     from playwright.sync_api import sync_playwright
 
     result = {"pod_id": pod_id, "container_logs": None, "system_logs": None, "error": None}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
+        context = browser.new_context(viewport={"width": 1400, "height": 900})
         context.add_cookies(cookies)
 
         page = context.new_page()
-        pod_url = f"https://www.runpod.io/console/pods/{pod_id}"
-        print(f"Navigating to {pod_url}...")
+        hapi_logs = []
+
+        def on_response(response):
+            if "hapi" in response.url and "/logs" in response.url:
+                try:
+                    body = response.text()
+                    hapi_logs.append({"status": response.status, "body": body})
+                except Exception:
+                    pass
+
+        page.on("response", on_response)
 
         try:
-            page.goto(pod_url, timeout=30_000)
-            page.wait_for_load_state("networkidle", timeout=15_000)
-        except Exception as e:
-            # Check if redirected to login
+            # Step 1: Navigate to pods list
+            page.goto("https://console.runpod.io/pods", timeout=30_000)
+            time.sleep(4)
+
             if "login" in page.url.lower() or "sign" in page.url.lower():
                 result["error"] = "Session expired — run with --login to re-authenticate"
                 browser.close()
                 return result
-            result["error"] = f"Failed to load pod page: {e}"
-            browser.close()
-            return result
 
-        # Try to find and click the Logs tab/section
-        try:
-            # RunPod console has "Logs" tab — try multiple selectors
-            logs_selectors = [
-                'text="Logs"',
-                'button:has-text("Logs")',
-                '[data-testid="logs-tab"]',
-                'a:has-text("Logs")',
-                '.tab:has-text("Logs")',
-                '[role="tab"]:has-text("Logs")',
-            ]
-            clicked = False
-            for sel in logs_selectors:
+            # Step 2: Click on the pod row to expand it
+            pod_row = page.locator("tr, [class*='row'], [class*='Row']").filter(has_text=pod_id[:12])
+            if pod_row.count() > 0:
+                pod_row.first.click()
+                time.sleep(3)
+            else:
+                result["error"] = f"Pod {pod_id} not found on pods page"
+                browser.close()
+                return result
+
+            # Step 3: Click "Logs" tab in expanded pod
+            logs_clicked = False
+            for sel in ['text="Logs"', 'button:has-text("Logs")']:
                 try:
                     el = page.locator(sel).first
                     if el.is_visible(timeout=2000):
                         el.click()
-                        clicked = True
-                        print(f"  Clicked logs tab via: {sel}")
+                        logs_clicked = True
                         break
                 except Exception:
                     continue
 
-            if not clicked:
-                print("  Could not find Logs tab — trying to read page content directly")
-
-            page.wait_for_timeout(3000)
-
-            # Extract container logs
-            log_selectors = [
-                '[class*="log"]',
-                '[class*="Log"]',
-                'pre',
-                'code',
-                '[class*="terminal"]',
-                '[class*="console"]',
-                '[data-testid*="log"]',
-            ]
-
-            logs_text = ""
-            for sel in log_selectors:
-                try:
-                    elements = page.locator(sel).all()
-                    for el in elements:
-                        text = el.inner_text(timeout=2000)
-                        if text and len(text) > 50:  # Skip tiny elements
-                            logs_text += text + "\n---\n"
-                except Exception:
-                    continue
-
-            if logs_text:
-                result["container_logs"] = logs_text.strip()
-                print(f"  Captured {len(logs_text)} chars of logs")
-            else:
-                # Fallback: get all visible text
-                body_text = page.locator("body").inner_text(timeout=5000)
-                result["container_logs"] = body_text
-                print(f"  Fallback: captured {len(body_text)} chars of page text")
-
-            # Try to get system logs tab if available
-            if log_type == "all":
-                for sys_sel in ['text="System Logs"', 'button:has-text("System")', '[data-testid="system-logs"]']:
+            if not logs_clicked:
+                # Try kebab menu → Logs
+                buttons = page.locator("button").all()
+                for btn in buttons[-10:]:
                     try:
-                        el = page.locator(sys_sel).first
-                        if el.is_visible(timeout=1000):
-                            el.click()
-                            page.wait_for_timeout(2000)
-                            for sel in log_selectors:
-                                try:
-                                    elements = page.locator(sel).all()
-                                    for el2 in elements:
-                                        text = el2.inner_text(timeout=2000)
-                                        if text and len(text) > 50:
-                                            result["system_logs"] = (result["system_logs"] or "") + text + "\n"
-                                except Exception:
-                                    continue
-                            break
+                        box = btn.bounding_box()
+                        if box and box["x"] > 600:
+                            btn.click()
+                            time.sleep(1)
+                            logs_el = page.locator('text="Logs"').first
+                            if logs_el.is_visible(timeout=1000):
+                                logs_el.click()
+                                logs_clicked = True
+                                break
                     except Exception:
                         continue
+
+            # Step 4: Wait for hapi log responses (polled every 5s)
+            time.sleep(7)
+
+            # Step 5: Parse captured hapi responses
+            if hapi_logs:
+                latest = hapi_logs[-1]
+                if latest["status"] == 200:
+                    import json as _json
+                    data = _json.loads(latest["body"])
+                    container = data.get("container", [])
+                    system = data.get("system", [])
+                    result["container_logs"] = "\n".join(container) if container else None
+                    result["system_logs"] = "\n".join(system) if system else None
+                    print(f"  Captured {len(container)} container + {len(system)} system log lines via hapi")
+                else:
+                    result["error"] = f"hapi returned HTTP {latest['status']}"
+            else:
+                # Fallback: read visible page text
+                body_text = page.locator("body").inner_text(timeout=5000)
+                result["container_logs"] = body_text
+                print(f"  No hapi response captured — fallback to page text ({len(body_text)} chars)")
 
         except Exception as e:
             result["error"] = f"Failed to extract logs: {e}"
