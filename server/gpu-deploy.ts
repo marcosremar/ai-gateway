@@ -138,7 +138,7 @@ export async function refreshGpuTypeCache(): Promise<void> {
           },
         });
       }
-    });
+    }, { timeout: 30_000 });
     totalUpserted = allUpserts.length;
   } catch (err) {
     // Transaction failed — log but don't crash the cache refresh
