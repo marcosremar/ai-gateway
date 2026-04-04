@@ -334,6 +334,59 @@ export class RunpodClient extends AbstractGpuProvider {
           const podId = data.id as string;
           const endpoint = this.resolveEndpoint(data);
 
+          // ── Ghost machine detection ─────────────────────────────────────
+          // RunPod may return HTTP 200 with a machine object, but then silently
+          // fail to schedule the pod (machine becomes {} within seconds). This
+          // happens when no physical machine can satisfy the storage/GPU request.
+          // Poll the pod after a short delay to verify the machine was actually assigned.
+          const GHOST_CHECK_DELAY_MS = 8_000;
+          const GHOST_CHECK_RETRIES = 2;
+          let ghostDetected = false;
+          for (let gc = 0; gc < GHOST_CHECK_RETRIES; gc++) {
+            await new Promise((r) => setTimeout(r, GHOST_CHECK_DELAY_MS));
+            try {
+              const checkRes = await this._fetchWithRetry(`${RunpodClient.API_BASE}/pods/${podId}`, {
+                headers: this.authHeaders(apiKey),
+              }, TIMEOUTS.read);
+              if (checkRes.ok) {
+                const pod = (await checkRes.json()) as Record<string, unknown>;
+                const machine = pod.machine as Record<string, unknown> | undefined;
+                const hasMachine = machine && Object.keys(machine).length > 0;
+                const runtime = pod.runtime as Record<string, unknown> | undefined;
+                if (hasMachine || runtime) {
+                  // Machine still assigned or container already running — good
+                  this.log.log(`[runpod] Post-create check: pod ${podId} machine assigned ✓`);
+                  ghostDetected = false;
+                  break;
+                }
+                this.log.warn(`[runpod] Post-create check ${gc + 1}/${GHOST_CHECK_RETRIES}: pod ${podId} has empty machine{} (ghost assignment)`);
+                ghostDetected = true;
+              }
+            } catch {
+              // Network error during check — don't treat as ghost, proceed normally
+              ghostDetected = false;
+              break;
+            }
+          }
+
+          if (ghostDetected) {
+            // Delete the ghost pod and try next GPU type
+            this.log.warn(`[runpod] Ghost machine detected for ${gpuType} — pod ${podId} created but no machine assigned. Deleting and trying next GPU.`);
+            this.emitError({
+              operation: 'createInstance', instanceId: podId,
+              message: `Ghost machine: pod created with ${gpuType} but machine became empty (no physical machine available for requested config: disk=${basePodConfig.containerDiskInGb}GB, volume=${basePodConfig.volumeInGb ?? 0}GB)`,
+              errorCode: 'GHOST_MACHINE', retryable: true,
+              metadata: { gpuType, containerDiskInGb: basePodConfig.containerDiskInGb, volumeInGb: basePodConfig.volumeInGb },
+            });
+            try {
+              await this.fetchRaw(`${RunpodClient.API_BASE}/pods/${podId}`, {
+                method: 'DELETE', headers: this.authHeaders(apiKey),
+              }, TIMEOUTS.write);
+            } catch { /* best effort cleanup */ }
+            gpuFailures.push({ gpu: gpuType, status: 200, reason: 'ghost machine — created but no physical machine assigned' });
+            break; // Move to next GPU type
+          }
+
           await this.persistInstance(userId, spec.machineKey || 'runpodPod', {
             podId, endpoint, status: 'CREATING', podName,
           });
@@ -574,6 +627,8 @@ export class RunpodClient extends AbstractGpuProvider {
     gpuType: string | null;
     costPerHr: number | null;
     uptimeSecs: number | null;
+    /** True when desiredStatus=RUNNING but machine={} and runtime=null — pod is stuck. */
+    ghostMachine: boolean;
   } | null> {
     try {
       const { apiKey } = credentials;
@@ -586,13 +641,30 @@ export class RunpodClient extends AbstractGpuProvider {
       const data = (await res.json()) as Record<string, unknown>;
       const runtime = (data.runtime as Record<string, unknown>) ?? null;
       const uptimeSecs = runtime?.uptimeInSeconds as number | null ?? null;
+      const machine = data.machine as Record<string, unknown> | undefined;
+      const hasMachine = machine && Object.keys(machine).length > 0;
+      const desiredStatus = (data.desiredStatus as string) ?? null;
+
+      // Ghost machine: pod wants to run but has no machine and no runtime.
+      // This means RunPod accepted the request but couldn't schedule it.
+      const ghostMachine = desiredStatus === 'RUNNING' && !hasMachine && !runtime;
+      if (ghostMachine) {
+        this.log.warn(`[runpod] getInstanceDetail(${instanceId}): ghost machine detected — RUNNING but machine={} and runtime=null`);
+        this.emitError({
+          operation: 'getInstanceDetail', instanceId,
+          message: `Ghost machine: pod ${instanceId} is RUNNING but has no machine assigned and no runtime`,
+          errorCode: 'GHOST_MACHINE', retryable: false,
+        });
+      }
+
       return {
-        desiredStatus: (data.desiredStatus as string) ?? null,
+        desiredStatus,
         runtime,
         imageName: (data.imageName as string) ?? null,
         gpuType: (data.machine as Record<string, unknown>)?.gpuDisplayName as string ?? data.gpuType as string ?? null,
         costPerHr: (data.costPerHr as number) ?? null,
         uptimeSecs,
+        ghostMachine,
       };
     } catch (err) {
       this.log.warn(`[runpod] getInstanceDetail(${instanceId}) failed: ${this.errMsg(err)}`);

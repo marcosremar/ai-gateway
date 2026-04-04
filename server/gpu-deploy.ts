@@ -1892,6 +1892,29 @@ export async function pollHealthUntilReady(
       return { result: 'timeout', pullTimeS: actualPullTimeS };
     }
 
+    // Ghost machine detection (RunPod) — pod created but machine silently unassigned.
+    // RunPod may return 200 on create but then fail to schedule the pod onto a physical
+    // machine (e.g. insufficient local disk, GPU type temporarily unavailable). The pod
+    // stays in desiredStatus=RUNNING but machine={} and runtime=null indefinitely.
+    // Check after 90s of no container start — enough for image pull to begin on a real machine.
+    if (!containerStartedAt && providerName === 'runpod' && totalElapsedMs > 90_000) {
+      try {
+        const { RunpodClient } = await import('../src/gpu-providers/runpod-client');
+        if (providerClient instanceof RunpodClient) {
+          const detail = await providerClient.getInstanceDetail(podId, credentials);
+          if (detail?.ghostMachine) {
+            const ghostMsg = `Ghost machine — pod created but no physical machine assigned after ${Math.round(totalElapsedMs / 1000)}s. RunPod silently failed to schedule (check storage size, GPU availability).`;
+            console.error(`[gpu] ${providerName} pod ${podId}: ${ghostMsg}`);
+            broadcastWs({ type: 'gpu:deploy', phase: 'ghost_machine', provider: providerName, elapsedMs: totalElapsedMs });
+            setDeployState({ status: 'error', step: 'ghost_machine', message: ghostMsg });
+            // Clean up the ghost pod
+            try { await providerClient.deleteInstance(podId, credentials); } catch { /* best effort */ }
+            return { result: 'crashed', pullTimeS: actualPullTimeS };
+          }
+        }
+      } catch { /* best-effort ghost detection */ }
+    }
+
     // Overall deploy timeout (safety net)
     if (totalElapsedMs > deployTimeoutMs) {
       const phase = containerStartedAt ? 'waiting for /health' : 'pulling image';
