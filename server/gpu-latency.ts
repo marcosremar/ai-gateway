@@ -172,14 +172,14 @@ export function scheduleBackgroundProbes(offers: GpuOffer[]): void {
       geolocation: geolocation ?? '',
       priceUsd:    pricePerHr  ?? 0,
       directPort:  hostDirectPort,
-    });
+    }).catch(() => {});
 
     const extraPorts = hostDirectPort ? [hostDirectPort] : [];
     _probing.add(hostId);
     probeHostFull(hostIp, extraPorts)
       .then(result => {
         _probing.delete(hostId);
-        saveProbeResult(hostId, result);
+        return saveProbeResult(hostId, result);
       })
       .catch(err => { console.debug(`[latency] probe failed for ${hostId}:`, err instanceof Error ? err.message : err); _probing.delete(hostId); });
   }
@@ -194,7 +194,7 @@ export async function probeAndSaveOffers(offers: GpuOffer[]): Promise<Record<str
 
   await Promise.all(toProbe.map(async offer => {
     const { hostId, hostIp, provider, gpuName, geolocation, pricePerHr, hostDirectPort } = offer;
-    upsertHostMeta(hostId!, {
+    await upsertHostMeta(hostId!, {
       hostIp:      hostIp!,
       provider:    provider    ?? '',
       gpuName:     gpuName     ?? '',
@@ -204,7 +204,7 @@ export async function probeAndSaveOffers(offers: GpuOffer[]): Promise<Record<str
     });
     const extraPorts = hostDirectPort ? [hostDirectPort] : [];
     const result = await probeHostFull(hostIp!, extraPorts);
-    saveProbeResult(hostId!, result);
+    await saveProbeResult(hostId!, result);
   }));
 
   return getHostRttMap(toProbe.map(o => o.hostId!));

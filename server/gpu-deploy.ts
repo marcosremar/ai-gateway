@@ -79,24 +79,18 @@ export async function refreshGpuTypeCache(): Promise<void> {
   const results = await Promise.allSettled(
     providerQueries.map(async ({ name, client, credentials }) => {
       if (!client.listOffers) return { name, offers: [] as GpuOffer[] };
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const offers = await Promise.race([
-            client.listOffers({ limit: 200 }, credentials),
-            new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${name} listOffers timed out`)), 15_000)),
-          ]);
-          return { name, offers };
-        } catch (err) {
-          if (attempt < 2) {
-            console.warn(`[gpu-cache] ${name} listOffers attempt ${attempt + 1} failed: ${err instanceof Error ? err.message : err}, retrying...`);
-            await new Promise(r => setTimeout(r, 1000 * (2 ** attempt)));
-          } else {
-            console.warn(`[gpu-cache] ${name} listOffers failed after 3 attempts: ${err instanceof Error ? err.message : err}`);
-            return { name, offers: [] as GpuOffer[] };
-          }
-        }
+      // Single attempt — cache refresh is a background operation; retrying on timeout
+      // just floods logs (especially for consistently slow providers like TensorDock).
+      try {
+        const offers = await Promise.race([
+          client.listOffers({ limit: 200 }, credentials),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${name} listOffers timed out`)), 15_000)),
+        ]);
+        return { name, offers };
+      } catch (err) {
+        console.warn(`[gpu-cache] ${name} listOffers failed: ${err instanceof Error ? err.message : err}`);
+        return { name, offers: [] as GpuOffer[] };
       }
-      return { name, offers: [] as GpuOffer[] }; // unreachable, satisfies TS
     }),
   );
 
@@ -955,7 +949,7 @@ export async function autoSelectCheapestGpu(
   // Sort based on user-configured criteria: price, latency, or balanced (default)
   const sortBy = getGpuSortBy();
   const normalize_name = (s: string) => s.replace(/nvidia|geforce/gi, '').replace(/\s+/g, '').toLowerCase();
-  const latencyMap = sortBy !== 'price' ? getBestLatencyByGpuModel() : {};
+  const latencyMap = sortBy !== 'price' ? await getBestLatencyByGpuModel() : {};
 
   const getLatencyMs = (o: GpuOffer): number | null => {
     const key = normalize_name(o.gpuName || o.gpuType);

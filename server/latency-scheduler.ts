@@ -114,7 +114,7 @@ async function runCycle(forceDiscovery = false): Promise<void> {
     }
 
     const stableIntervalMs = s.intervalMin * 60_000;
-    const hosts = getHostsToProbe(Date.now(), stableIntervalMs);
+    const hosts = await getHostsToProbe(Date.now(), stableIntervalMs);
     if (hosts.length === 0) return;
 
     console.log(`[latency] Probing ${hosts.length} stale host(s)`);
@@ -123,7 +123,7 @@ async function runCycle(forceDiscovery = false): Promise<void> {
       try {
         const extraPorts = host.direct_port ? [host.direct_port] : [];
         const result = await probeHostFull(host.host_ip, extraPorts);
-        saveProbeResult(host.host_id, result);
+        await saveProbeResult(host.host_id, result);
       } catch { /* ignore individual probe failures */ }
     }));
     console.log(`[latency] Probed ${hosts.length} host(s) in ${Date.now() - t}ms`);
@@ -148,14 +148,14 @@ async function discoverHosts(): Promise<void> {
     let count = 0;
     for (const offer of offers) {
       if (!offer.hostId || !offer.hostIp) continue;
-      upsertHostMeta(offer.hostId, {
+      await upsertHostMeta(offer.hostId, {
         hostIp:      offer.hostIp,
         provider:    offer.provider    ?? '',
         gpuName:     offer.gpuName     ?? '',
         geolocation: offer.geolocation ?? '',
         priceUsd:    offer.pricePerHr  ?? 0,
         directPort:  offer.hostDirectPort,
-      });
+      }).catch(() => {});
       count++;
     }
     console.log(`[latency] Discovery: ${count} hosts with IPs from ${offers.length} offers`);

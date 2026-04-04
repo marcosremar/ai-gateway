@@ -321,7 +321,7 @@ async function _selectDeploymentTier(
   // Latency-aware GPU type ordering: deprioritise types where ALL known hosts exceed threshold.
   const maxLatencyMs = getLatencyMaxMs();
   if (maxLatencyMs > 0 && gpuTypes.length > 1) {
-    const sorted = sortGpuTypesByLatency(gpuTypes, maxLatencyMs);
+    const sorted = await sortGpuTypesByLatency(gpuTypes, maxLatencyMs);
     if (sorted.join(',') !== gpuTypes.join(',')) {
       console.log(`[gpu] Latency filter (threshold=${maxLatencyMs}ms): ${gpuTypes.join(', ')} → ${sorted.join(', ')}`);
     }
@@ -371,7 +371,7 @@ async function _selectDeploymentTier(
   // Apply selection criteria: re-sort per-provider GPU lists (and main gpuTypes) at deploy time.
   const sortBy = getGpuSortBy();
   if (sortBy === 'latency') {
-    const latencyData = getBestLatencyByGpuModel();
+    const latencyData = await getBestLatencyByGpuModel();
     const normalizeGpu = (s: string) => s.replace(/nvidia|geforce/gi, '').replace(/\s+/g, '').toLowerCase();
     const getLatMs = (gpu: string): number => (latencyData[normalizeGpu(gpu)]?.bestMs ?? Infinity);
     const sortByLatency = (list: string[]) => [...list].sort((a, b) => getLatMs(a) - getLatMs(b));
@@ -1535,7 +1535,7 @@ export async function handleGpuOffersRanked(req: IncomingMessage, res: ServerRes
         gpuName:     offer.gpuName     ?? '',
         geolocation: offer.geolocation ?? '',
         priceUsd:    offer.pricePerHr  ?? 0,
-      });
+      }).catch(() => {});
     }
   }
 
@@ -1548,7 +1548,7 @@ export async function handleGpuOffersRanked(req: IncomingMessage, res: ServerRes
     hostRtts = await probeAndSaveOffers(allOffers).catch(() => ({}));
   } else {
     scheduleBackgroundProbes(allOffers);
-    hostRtts = getHostRttMap(hostIds);
+    hostRtts = await getHostRttMap(hostIds);
   }
 
   const ranked = rankOffers(allOffers, clientLat, clientLon, {}, hostRtts).map(o => ({
@@ -1594,7 +1594,7 @@ export async function handleGpuLatencyProbe(req: IncomingMessage, res: ServerRes
     'MK','MT','NL','NO','PL','PT','RO','RS','SE','SI','SK','UA','XK',
   ]);
 
-  let hosts = getAllHostLatencies();
+  let hosts = await getAllHostLatencies();
 
   if (regionEU) {
     hosts = hosts.filter(h => {
@@ -1607,8 +1607,7 @@ export async function handleGpuLatencyProbe(req: IncomingMessage, res: ServerRes
     hosts = hosts.filter(h => h.gpu_name.toLowerCase().includes(gpuFilter));
   }
 
-  const stats = getLatencyDbStats();
-  const loc   = await fetchMyLocation();
+  const [stats, loc] = await Promise.all([getLatencyDbStats(), fetchMyLocation()]);
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
@@ -1653,7 +1652,7 @@ import {
  */
 export async function handleGetLatencySettings(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   const status = getLatencySchedulerStatus();
-  const dbStats = getLatencyDbStats();
+  const dbStats = await getLatencyDbStats();
   // Pull time learning stats
   let pullTimeLearning: Record<string, unknown> = {};
   try {
@@ -1887,7 +1886,7 @@ export async function handleGetGpuTypes(req: IncomingMessage, res: ServerRespons
   if (tensordockApiKey && tensordockAuthId && (!providerFilter || providerFilter === 'tensordock'))
     queries.push({ name: 'tensordock', client: tensordock as unknown as typeof vast, credentials: { apiKey: tensordockApiKey, authId: tensordockAuthId } });
 
-  const latencyMap = getBestLatencyByGpuModel();
+  const latencyMap = await getBestLatencyByGpuModel();
 
   // Aggregate GPU types across all queried providers
   const byType = new Map<string, { name: string; vram: number; count: number; minPrice: number }>();
@@ -1957,7 +1956,7 @@ export async function handlePatchLatencyHosts(req: IncomingMessage, res: ServerR
     return;
   }
   const hostIds = Array.isArray(body.hostIds) ? (body.hostIds as string[]) : [];
-  setHostsMonitored(hostIds, body.monitored);
+  await setHostsMonitored(hostIds, body.monitored);
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: true, updated: hostIds.length || 'all' }));
 }
