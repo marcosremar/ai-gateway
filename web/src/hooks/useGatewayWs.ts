@@ -76,7 +76,10 @@ export function useGatewayWs(): GatewayWsState {
     if (typeof window === 'undefined') return;
 
     const host = window.location.hostname;
-    const port = parseInt(window.location.port || '4000', 10) + 1;
+    // In dev mode (Next.js on 3000), connect to gateway WS on 4001.
+    // In production, WS is location.port + 1.
+    const locationPort = parseInt(window.location.port || '4000', 10);
+    const port = locationPort === 3000 ? 4001 : locationPort + 1;
     const url = `ws://${host}:${port}/`;
 
     try {
