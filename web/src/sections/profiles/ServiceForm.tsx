@@ -756,7 +756,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                 );
               })}
               {(['stt', 'llm', 'tts'] as const).every(stage => {
-                const models = (PIPELINE_CATALOG[stage].models as Record<string, { id: string }[]>)[cloudProvider] ?? [];
+                const models = (PIPELINE_CATALOG[stage]?.models as Record<string, { id: string }[]> | undefined)?.[cloudProvider] ?? [];
                 return models.length === 0;
               }) && (
                 <p className="text-[10px] italic" style={{ color: 'var(--color-text-muted)' }}>No models configured for {cloudProvider}</p>
@@ -908,7 +908,8 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                   { stage: 'llm' as const, model: llmModel, StageIcon: Bot, color: '#a78bfa' },
                   { stage: 'tts' as const, model: ttsModel, StageIcon: Volume2, color: '#fbbf24' },
                 ]).filter(s => s.model).map(s => {
-                  const models = (PIPELINE_CATALOG[s.stage].models as Record<string, { id: string; label: string }[]>).gpu ?? [];
+                  const catalog = PIPELINE_CATALOG[s.stage];
+                  const models = (catalog?.models as Record<string, { id: string; label: string }[]> | undefined)?.gpu ?? [];
                   const modelLabel = models.find(m => m.id === s.model)?.label ?? s.model;
                   return (
                     <div key={s.stage}
