@@ -993,28 +993,49 @@ export function startWsServer() {
 
   // ── HTTP API server on PORT (REST endpoints for GPU handlers) ──────────
   try {
-    const {
-      handleGpuDeploy, handleGpuStatus, handleGpuStop, handleGpuResume,
-      handleGpuTerminate, handleGpuLogs, handleGpuEventLogs, handleGpuOffers,
-      handleGpuTypes, handleGpuList, handleGpuCatalog, handleGpuMyLocation,
-      handleGpuReputation, handleHealth,
-    } = require('./gpu-handlers');
+    const gh = require('./gpu-handlers');
+    const ch = require('./config-handlers');
+    const bh = require('./bot-handlers');
+    const mt = require('./metrics');
 
     const handlers: Record<string, (req: any, res: any) => void> = {
-      'POST /v1/gpu/deploy': handleGpuDeploy,
-      'GET /v1/gpu/status': handleGpuStatus,
-      'POST /v1/gpu/stop': handleGpuStop,
-      'POST /v1/gpu/resume': handleGpuResume,
-      'POST /v1/gpu/terminate': handleGpuTerminate,
-      'GET /v1/gpu/logs': handleGpuLogs,
-      'GET /v1/gpu/logs/events': handleGpuEventLogs,
-      'GET /v1/gpu/offers': handleGpuOffers,
-      'GET /v1/gpu/types': handleGpuTypes,
-      'GET /v1/gpu/list': handleGpuList,
-      'GET /v1/gpu/catalog': handleGpuCatalog,
-      'GET /v1/gpu/my-location': handleGpuMyLocation,
-      'GET /v1/gpu/reputation': handleGpuReputation,
-      'GET /health': handleHealth,
+      // GPU
+      'POST /v1/gpu/deploy': gh.handleGpuDeploy,
+      'GET /v1/gpu/status': gh.handleGpuStatus,
+      'POST /v1/gpu/stop': gh.handleGpuStop,
+      'POST /v1/gpu/resume': gh.handleGpuResume,
+      'POST /v1/gpu/terminate': gh.handleGpuTerminate,
+      'GET /v1/gpu/logs': gh.handleGpuLogs,
+      'GET /v1/gpu/logs/events': gh.handleGpuEventLogs,
+      'GET /v1/gpu/offers': gh.handleGpuOffers,
+      'GET /v1/gpu/types': gh.handleGpuTypes,
+      'GET /v1/gpu/list': gh.handleGpuList,
+      'GET /v1/gpu/catalog': gh.handleGpuCatalog,
+      'GET /v1/gpu/my-location': gh.handleGpuMyLocation,
+      'GET /v1/gpu/reputation': gh.handleGpuReputation,
+      'GET /v1/gpu/readiness/status': gh.handleGetGpuReadinessStatus,
+      'GET /v1/gpu/readiness/history': gh.handleGetGpuReadinessHistory,
+      'POST /v1/gpu/readiness/reset': gh.handlePostResetReadiness,
+      'GET /health': gh.handleHealth,
+      // Config
+      'GET /v1/config/providers': ch.handleGetProviderConfig,
+      'POST /v1/config/providers': ch.handlePatchProviderConfig,
+      'GET /v1/config/api-keys': ch.handleGetApiKeys,
+      'POST /v1/config/api-keys': ch.handleSetApiKeys,
+      'POST /v1/config/profiles': ch.handleCreateProfile,
+      'DELETE /v1/config/profiles': ch.handleDeleteProfile,
+      'POST /v1/config/profiles/activate': ch.handleActivateProfile,
+      'GET /v1/config/labs': ch.handleGetLabsFlags,
+      'POST /v1/config/labs': ch.handlePatchLabsFlags,
+      // Bot
+      'POST /v1/bot/deploy': bh.handleBotDeploy,
+      'GET /v1/bot/status': bh.handleBotStatus,
+      'POST /v1/bot/join': bh.handleBotJoin,
+      'POST /v1/bot/leave': bh.handleBotLeave,
+      'POST /v1/bot/terminate': bh.handleBotTerminate,
+      // Metrics
+      'GET /v1/requests/log': mt.handleRequestLog,
+      'GET /v1/service-stats': mt.handleServiceStats,
     };
 
     Bun.serve({
