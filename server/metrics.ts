@@ -876,8 +876,15 @@ export async function handleRequestLog(req: IncomingMessage, res: ServerResponse
     }));
   } catch (err) {
     console.error('[db] Request log query failed:', err);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Database query failed', entries: [], stats: {} }));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      entries: [],
+      stats: {
+        totalRequests: 0, gpuRequests: 0, cloudRequests: 0,
+        totalLatencyMs: 0, avgLatencyMs: 0, gpuPercent: 0, errors: 0,
+        requestsByStage: {}, requestsByProvider: {}, byStage: {},
+      },
+    }));
   }
 }
 
