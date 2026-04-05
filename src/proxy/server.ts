@@ -41,7 +41,7 @@ function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('end', () => resolve(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks)));
     req.on('error', reject);
   });
   return Promise.race([
@@ -467,7 +467,7 @@ export function createProxyServer(config: ProxyConfig): Server {
         if (!config.providers.embedding) {
           proxyRes = { status: 404, body: { error: { message: 'No embedding providers configured', type: 'invalid_request_error' } } };
         } else {
-          proxyRes = await handleEmbeddings(proxyReq, config.providers.embedding);
+          proxyRes = await handleEmbeddings(proxyReq, config.providers.embedding, config.cache);
         }
       } else if (method === 'POST' && url === '/v1/audio/speech') {
         if (!config.providers.tts) {
