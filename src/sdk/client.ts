@@ -15,6 +15,7 @@
 import type {
   GatewayConfig,
   TranscribeResponse,
+  TranscribeOptions,
   TranslateResponse,
   PipelineResponse,
   PipelineOptions,
@@ -22,8 +23,16 @@ import type {
   GenerateAudioResponse,
   ListVoicesResponse,
   GpuStatus,
+  GpuOffer,
+  GpuInstance,
+  GpuEventLog,
+  StopResumeResponse,
   DeployOptions,
   DeployResponse,
+  ProviderConfig,
+  ApiKeyInfo,
+  BotDeployOptions,
+  BotStatus,
   ChatMessage,
   ChatCompletionOptions,
   ChatCompletionResponse,
@@ -76,22 +85,28 @@ export class GatewaySDK {
   // ── Inference ───────────────────────────────────────────────────────────
 
   /** Transcribe audio to text (GPU-aware: gateway routes to GPU or cloud).
-   *  Falls back to Groq Whisper directly when the gateway is unreachable. */
-  async transcribe(audio: Uint8Array, language = 'fr', prompt = ''): Promise<TranscribeResponse> {
+   *  Falls back to Groq Whisper directly when the gateway is unreachable.
+   *  @param options.ensemble — race multiple STT providers, return best result */
+  async transcribe(audio: Uint8Array, languageOrOpts: string | TranscribeOptions = 'fr', prompt = ''): Promise<TranscribeResponse> {
+    const opts: TranscribeOptions = typeof languageOrOpts === 'string'
+      ? { language: languageOrOpts, prompt }
+      : languageOrOpts;
+    const language = opts.language ?? 'fr';
     const params = new URLSearchParams({ language });
-    if (prompt) params.set('prompt', prompt);
+    if (opts.prompt) params.set('prompt', opts.prompt);
+    const endpoint = opts.ensemble ? '/v1/transcribe/ensemble' : '/v1/transcribe';
     try {
-      const res = await this.fetch(`/v1/transcribe?${params}`, {
+      const res = await this.fetch(`${endpoint}?${params}`, {
         method: 'POST',
         headers: { 'Content-Type': 'audio/wav' },
         body: audio,
         timeout: this.timeouts.stt,
       });
-      const data = await this.parseJson(res, '/v1/transcribe');
+      const data = await this.parseJson(res, endpoint);
       return { text: (data.text as string) ?? '', usedGpu: (data.used_gpu as boolean) ?? false };
     } catch (err) {
       if (err instanceof GatewayError && err.isNetworkError && this.groqApiKey) {
-        return this.groqTranscribeFallback(audio, language, prompt);
+        return this.groqTranscribeFallback(audio, language, opts.prompt ?? '');
       }
       throw err;
     }
@@ -277,6 +292,229 @@ export class GatewaySDK {
     throw new GatewayError(`GPU deploy timed out after ${Math.round(timeoutMs / 60_000)} min`, 0, '/v1/gpu/status');
   }
 
+  // ── GPU extended ────────────────────────────────────────────────────────
+
+  /** Stop (pause) the GPU pod — preserves disk, no charges. */
+  async stopGpu(): Promise<StopResumeResponse> {
+    const res = await this.fetch('/v1/gpu/stop', { method: 'POST', timeout: this.timeouts.deploy });
+    return await this.parseJson(res, '/v1/gpu/stop') as StopResumeResponse;
+  }
+
+  /** Resume a previously stopped GPU pod. */
+  async resumeGpu(podId?: string, provider?: string): Promise<StopResumeResponse> {
+    const body: Record<string, string> = {};
+    if (podId) body.podId = podId;
+    if (provider) body.provider = provider;
+    const res = await this.fetch('/v1/gpu/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      timeout: this.timeouts.deploy,
+    });
+    return await this.parseJson(res, '/v1/gpu/resume') as StopResumeResponse;
+  }
+
+  /** List available GPU offers from providers (sorted by price). */
+  async gpuOffers(): Promise<GpuOffer[]> {
+    const res = await this.fetch('/v1/gpu/offers', { method: 'GET', timeout: this.timeouts.deploy });
+    const data = await this.parseJson(res, '/v1/gpu/offers');
+    return (data.offers as GpuOffer[]) ?? [];
+  }
+
+  /** List verified GPU types. */
+  async gpuTypes(): Promise<Record<string, unknown>[]> {
+    const res = await this.fetch('/v1/gpu/types', { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/gpu/types');
+    return (data.types ?? data) as Record<string, unknown>[];
+  }
+
+  /** List all active GPU instances across providers. */
+  async gpuList(): Promise<GpuInstance[]> {
+    const res = await this.fetch('/v1/gpu/list', { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/gpu/list');
+    return (data.instances ?? data) as GpuInstance[];
+  }
+
+  /** Fetch GPU deployment logs (container stdout from running pod). */
+  async gpuLogs(): Promise<string> {
+    const res = await this.fetch('/v1/gpu/logs', { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/gpu/logs');
+    return (data.logs as string) ?? '';
+  }
+
+  /** Fetch persistent GPU event logs (JSONL file-based). */
+  async gpuEventLogs(lines = 100): Promise<GpuEventLog> {
+    const res = await this.fetch(`/v1/gpu/logs/events?lines=${lines}`, { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/v1/gpu/logs/events') as GpuEventLog;
+  }
+
+  /** Get GPU catalog (available Docker images). */
+  async gpuCatalog(): Promise<Record<string, unknown>> {
+    const res = await this.fetch('/v1/gpu/catalog', { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/v1/gpu/catalog') as Record<string, unknown>;
+  }
+
+  /** Get gateway's geographic location. */
+  async gpuMyLocation(): Promise<Record<string, unknown>> {
+    const res = await this.fetch('/v1/gpu/my-location', { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/v1/gpu/my-location') as Record<string, unknown>;
+  }
+
+  /** Get GPU host reputation scores. */
+  async gpuReputation(): Promise<Record<string, unknown>[]> {
+    const res = await this.fetch('/v1/gpu/reputation', { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/gpu/reputation');
+    return (data.reputations ?? data) as Record<string, unknown>[];
+  }
+
+  // ── Config ─────────────────────────────────────────────────────────────
+
+  /** Get provider configuration (STT/LLM/TTS chains). */
+  async getProviderConfig(): Promise<ProviderConfig> {
+    const res = await this.fetch('/v1/config/providers', { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/v1/config/providers') as ProviderConfig;
+  }
+
+  /** Update provider configuration. */
+  async setProviderConfig(config: Partial<ProviderConfig>): Promise<void> {
+    await this.fetch('/v1/config/providers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+      timeout: this.timeouts.health,
+    });
+  }
+
+  /** Get configured API keys (masked). */
+  async getApiKeys(): Promise<ApiKeyInfo[]> {
+    const res = await this.fetch('/v1/config/api-keys', { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/config/api-keys');
+    return (data.keys ?? data) as ApiKeyInfo[];
+  }
+
+  /** Update API keys. */
+  async setApiKeys(keys: Record<string, string>): Promise<void> {
+    await this.fetch('/v1/config/api-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(keys),
+      timeout: this.timeouts.health,
+    });
+  }
+
+  /** Get labs feature flags. */
+  async getLabsFlags(): Promise<Record<string, unknown>> {
+    const res = await this.fetch('/v1/config/labs', { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/v1/config/labs') as Record<string, unknown>;
+  }
+
+  /** Update labs feature flags. */
+  async setLabsFlags(flags: Record<string, unknown>): Promise<void> {
+    await this.fetch('/v1/config/labs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(flags),
+      timeout: this.timeouts.health,
+    });
+  }
+
+  // ── Inference extended ─────────────────────────────────────────────────
+
+  /** Preview TTS with specific voice and speed. Returns WAV audio. */
+  async ttsPreview(text: string, options: GenerateAudioOptions = {}): Promise<GenerateAudioResponse> {
+    const body: Record<string, unknown> = { text, ...options };
+    const res = await this.fetch('/v1/tts/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      timeout: this.timeouts.tts,
+    });
+    const audio = new Uint8Array(await res.arrayBuffer());
+    return { audio, contentType: 'audio/wav', usedGpu: true };
+  }
+
+  /** Auto-detect input language. */
+  async detectLanguage(text: string): Promise<{ language: string; confidence: number }> {
+    const res = await this.fetch('/v1/detect-language', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+      timeout: this.timeouts.health,
+    });
+    return await this.parseJson(res, '/v1/detect-language') as { language: string; confidence: number };
+  }
+
+  // ── Bot ────────────────────────────────────────────────────────────────
+
+  /** Deploy a meeting bot instance. */
+  async deployBot(options: BotDeployOptions): Promise<BotStatus> {
+    const res = await this.fetch('/v1/bot/deploy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options),
+      timeout: this.timeouts.deploy,
+    });
+    return await this.parseJson(res, '/v1/bot/deploy') as BotStatus;
+  }
+
+  /** Get bot deployment status. */
+  async botStatus(): Promise<BotStatus> {
+    const res = await this.fetch('/v1/bot/status', { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/v1/bot/status') as BotStatus;
+  }
+
+  /** Bot joins meeting. */
+  async botJoin(meetingUrl: string): Promise<void> {
+    await this.fetch('/v1/bot/join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meetingUrl }),
+      timeout: this.timeouts.deploy,
+    });
+  }
+
+  /** Bot leaves meeting. */
+  async botLeave(): Promise<void> {
+    await this.fetch('/v1/bot/leave', { method: 'POST', timeout: this.timeouts.health });
+  }
+
+  /** Terminate bot pod. */
+  async botTerminate(): Promise<void> {
+    await this.fetch('/v1/bot/terminate', { method: 'POST', timeout: this.timeouts.deploy });
+  }
+
+  // ── Diagnostics ────────────────────────────────────────────────────────
+
+  /** Get request history/log. */
+  async requestLog(limit = 50): Promise<Record<string, unknown>[]> {
+    const res = await this.fetch(`/v1/request-log?limit=${limit}`, { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/request-log');
+    return (data.requests ?? data) as Record<string, unknown>[];
+  }
+
+  /** Get Prometheus-style metrics. */
+  async metrics(): Promise<string> {
+    const res = await this.fetch('/metrics', { method: 'GET', timeout: this.timeouts.health });
+    return await res.text();
+  }
+
+  /** Get service statistics. */
+  async serviceStats(): Promise<Record<string, unknown>> {
+    const res = await this.fetch('/v1/service-stats', { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/v1/service-stats') as Record<string, unknown>;
+  }
+
+  /** Inspect Docker image metadata from Docker Hub. */
+  async dockerInspect(imageName: string): Promise<Record<string, unknown>> {
+    const res = await this.fetch('/v1/docker-inspect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: imageName }),
+      timeout: this.timeouts.health,
+    });
+    return await this.parseJson(res, '/v1/docker-inspect') as Record<string, unknown>;
+  }
+
   // ── Health ──────────────────────────────────────────────────────────────
 
   /** Check if the gateway is reachable. */
@@ -287,6 +525,12 @@ export class GatewaySDK {
     } catch {
       return false;
     }
+  }
+
+  /** Get detailed health info (providers, GPU state, uptime). */
+  async healthDetail(): Promise<Record<string, unknown>> {
+    const res = await this.fetch('/health', { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/health') as Record<string, unknown>;
   }
 
   // ── Groq direct fallback (gateway offline) ────────────────────────────
