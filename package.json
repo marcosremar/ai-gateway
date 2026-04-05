@@ -32,7 +32,14 @@
     "test:k6:smoke": "k6 run load-testing/k6/smoke.js",
     "test:k6:100": "k6 run load-testing/k6/ramp-100.js",
     "test:k6:spike": "k6 run load-testing/k6/spike.js",
-    "test:k6:soak": "k6 run load-testing/k6/soak.js"
+    "test:k6:soak": "k6 run load-testing/k6/soak.js",
+    "test:stt-load": "vitest run --config vitest.config.ts __tests__/stt-load.test.ts",
+    "test:coalescer": "vitest run --config vitest.config.ts __tests__/coalescer-effectiveness.test.ts",
+    "test:cold-start": "vitest run --config vitest.config.ts __tests__/cold-start.test.ts",
+    "test:zero-downtime": "vitest run --config vitest.config.ts __tests__/zero-downtime-deploy.test.ts",
+    "test:breaking-point": "vitest run --config vitest.config.ts __tests__/breaking-point.test.ts",
+    "test:memory-soak": "vitest run --config vitest.config.ts __tests__/memory-soak.test.ts",
+    "test:cache": "vitest run --config vitest.config.ts __tests__/cache-effectiveness.test.ts"
   },
   "peerDependencies": {
     "openai": ">=4.0.0",
