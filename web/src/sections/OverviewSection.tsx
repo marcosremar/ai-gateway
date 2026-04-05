@@ -367,7 +367,7 @@ export function OverviewSection() {
 
   const isOnline = health.status === 'ok';
   const statusColor = isOnline ? '#10b981' : '#f59e0b';
-  const providerEntries = Object.entries(health.providerMetrics);
+  const providerEntries = Object.entries(health.providerMetrics || {});
   const maxRequests = Math.max(...providerEntries.map(([, m]) => m.requests), 1);
 
   return (

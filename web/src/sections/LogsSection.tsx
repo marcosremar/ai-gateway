@@ -113,11 +113,11 @@ export function LogsSection() {
               />
             </div>
 
-            {Object.keys(metrics.requestsByStage).length > 0 && (
+            {Object.keys(metrics.requestsByStage || {}).length > 0 && (
               <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
                 <div className="text-xs mb-3 font-medium" style={{ color: 'var(--color-text-muted)' }}>By Stage</div>
                 <div className="flex gap-3 flex-wrap">
-                  {Object.entries(metrics.requestsByStage).map(([stage, count]) => (
+                  {Object.entries(metrics.requestsByStage || {}).map(([stage, count]) => (
                     <div key={stage} className="flex items-center gap-2 px-3 py-1.5 rounded-lg" style={{ background: 'var(--color-surface)' }}>
                       <span
                         className="w-2 h-2 rounded-sm flex-shrink-0"
@@ -131,11 +131,11 @@ export function LogsSection() {
               </div>
             )}
 
-            {Object.keys(metrics.requestsByProvider).length > 0 && (
+            {Object.keys(metrics.requestsByProvider || {}).length > 0 && (
               <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-border)' }}>
                 <div className="text-xs mb-3 font-medium" style={{ color: 'var(--color-text-muted)' }}>By Provider</div>
                 <div className="flex gap-3 flex-wrap">
-                  {Object.entries(metrics.requestsByProvider).map(([prov, count]) => {
+                  {Object.entries(metrics.requestsByProvider || {}).map(([prov, count]) => {
                     const pi = PROVIDER_ICON[prov];
                     const Icon = pi?.icon;
                     return (
