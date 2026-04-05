@@ -159,8 +159,13 @@ describe('Proxy', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     });
 
-    it('rejects request without auth', async () => {
+    it('health endpoint is public (no auth required)', async () => {
       const res = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(res.status).toBe(200);
+    });
+
+    it('rejects non-health request without auth', async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/models`);
       expect(res.status).toBe(401);
     });
 
