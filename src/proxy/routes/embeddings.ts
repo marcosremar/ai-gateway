@@ -29,9 +29,11 @@ export async function handleEmbeddings(
 
   try {
     // Embeddings are always deterministic — cache aggressively
-    if (cache) {
-      const cacheKey = cache.buildKey({ provider: provider.providerId, model: body.model, input: body.input, dimensions: body.dimensions });
-      const cached = await cache.get<{ embeddings: number[][]; model: string; usage: { promptTokens: number; totalTokens: number } }>(cacheKey);
+    // Build cache key once, reuse for get and set
+    const cacheKey = cache ? cache.buildKey({ provider: provider.providerId, model: body.model, input: body.input, dimensions: body.dimensions }) : null;
+
+    if (cacheKey) {
+      const cached = await cache!.get<{ embeddings: number[][]; model: string; usage: { promptTokens: number; totalTokens: number } }>(cacheKey);
       if (cached) {
         return {
           status: 200,
@@ -55,10 +57,8 @@ export async function handleEmbeddings(
       'Embedding',
     );
 
-    // Cache the result
-    if (cache) {
-      const cacheKey = cache.buildKey({ provider: provider.providerId, model: body.model, input: body.input, dimensions: body.dimensions });
-      await cache.set(cacheKey, result);
+    if (cacheKey) {
+      await cache!.set(cacheKey, result);
     }
 
     return {

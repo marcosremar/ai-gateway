@@ -495,8 +495,7 @@ export function createProxyServer(config: ProxyConfig): Server {
         } else {
           proxyRes = await handleAudioTranscriptions(proxyReq, config.providers.stt);
         }
-      } else if (method === 'GET' && url === '/health') {
-        proxyRes = { status: 200, body: { status: 'ok' } };
+      // /health is handled before auth (line 345) — no need to match here
       } else if (method === 'GET' && config.staticDir && serveStaticFile(config.staticDir, path, res, requestId)) {
         return; // static file served
       } else {

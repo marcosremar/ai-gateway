@@ -69,8 +69,11 @@ export class RateLimiter {
     const elapsed = now - bucket.lastRefill;
     if (elapsed > 0) {
       bucket.tokens = Math.min(this.capacity, bucket.tokens + elapsed * this.refillRatePerMs);
-      bucket.lastRefill = now;
+    } else if (elapsed < -60_000) {
+      // Clock went backwards by >1min (NTP adjustment) — reset to avoid stuck state
+      bucket.tokens = this.capacity;
     }
+    bucket.lastRefill = now;
 
     if (bucket.tokens < 1) {
       console.warn(`[rate-limit] Rate limit exceeded for ${clientId}`);

@@ -55,8 +55,8 @@ const server = await startProxy({
 // ── Process-level error handlers ─────────────────────────────────────────────
 
 process.on('uncaughtException', (err) => {
-  console.error('[serve] Uncaught exception:', err);
-  // Don't exit — let the process continue serving if possible
+  console.error('[serve] Uncaught exception — exiting:', err);
+  process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
