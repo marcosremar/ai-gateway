@@ -76,10 +76,13 @@ export function useGatewayWs(): GatewayWsState {
     if (typeof window === 'undefined') return;
 
     const host = window.location.hostname;
+    const isSecure = window.location.protocol === 'https:';
     // In dev mode (Next.js on 3000), connect to gateway WS on 4001.
-    // In production, WS is location.port + 1.
-    const locationPort = parseInt(window.location.port || '4000', 10);
+    // In production (Fly.io), WS not available separately — disable.
+    const locationPort = parseInt(window.location.port || '443', 10);
     const port = locationPort === 3000 ? 4001 : locationPort + 1;
+    // Skip WS on HTTPS production (Fly.io only exposes one port)
+    if (isSecure) return;
     const url = `ws://${host}:${port}/`;
 
     try {
