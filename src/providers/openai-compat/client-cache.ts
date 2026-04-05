@@ -45,10 +45,13 @@ export function getOrCreateClient(
     httpsAgent: sharedHttpsAgent,
     ...(defaultHeaders && { defaultHeaders }),
   });
-  // Evict oldest entry if cache is full (simple FIFO)
+  // Evict oldest entry if cache is full (FIFO)
   if (cache.size >= MAX_CACHE_SIZE) {
     const oldest = cache.keys().next().value;
-    if (oldest !== undefined) cache.delete(oldest);
+    if (oldest !== undefined) {
+      cache.delete(oldest);
+      // Note: OpenAI SDK client connections will be GC'd with the client
+    }
   }
   cache.set(key, client);
   return client;

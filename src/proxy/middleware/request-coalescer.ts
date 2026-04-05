@@ -10,7 +10,8 @@
 import { createHash } from 'crypto';
 
 export class RequestCoalescer {
-  private inflight = new Map<string, Promise<unknown>>();
+  private inflight = new Map<string, { promise: Promise<unknown>; timestamp: number }>();
+  private static readonly STALE_MS = 30_000; // Clean up entries older than 30s
 
   /** Build a coalescing key from request params. Returns null if not coalescable. */
   buildKey(params: { provider: string; model: string; messages: unknown[]; temperature?: number }): string | null {
@@ -35,15 +36,26 @@ export class RequestCoalescer {
 
     const existing = this.inflight.get(key);
     if (existing) {
-      return existing as Promise<T>;
+      // Only coalesce if the existing promise is recent (not stale)
+      if (Date.now() - existing.timestamp < RequestCoalescer.STALE_MS) {
+        return existing.promise as Promise<T>;
+      }
+      // Stale entry — remove and create new
+      this.inflight.delete(key);
     }
 
-    const promise = fn().finally(() => {
-      this.inflight.delete(key);
-    });
+    const promise = fn()
+      .then((result) => {
+        this.inflight.delete(key);
+        return result;
+      })
+      .catch((err) => {
+        this.inflight.delete(key);
+        throw err;
+      });
 
-    this.inflight.set(key, promise);
-    return promise;
+    this.inflight.set(key, { promise, timestamp: Date.now() });
+    return promise as Promise<T>;
   }
 
   /** Number of in-flight coalesced requests (for monitoring) */

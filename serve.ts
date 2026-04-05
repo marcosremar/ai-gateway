@@ -52,14 +52,37 @@ const server = await startProxy({
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
 
-// Graceful shutdown
+// ── Process-level error handlers ─────────────────────────────────────────────
+
+process.on('uncaughtException', (err) => {
+  console.error('[serve] Uncaught exception:', err);
+  // Don't exit — let the process continue serving if possible
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[serve] Unhandled rejection:', reason);
+});
+
+// ── Graceful shutdown with request draining ──────────────────────────────────
+
+let shuttingDown = false;
+
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
-    console.log(`[serve] Received ${signal}, shutting down...`);
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[serve] Received ${signal}, draining connections...`);
+
+    // Stop accepting new connections
     server.close(() => {
-      console.log('[serve] Server closed');
+      console.log('[serve] All connections drained. Exiting.');
       process.exit(0);
     });
-    setTimeout(() => process.exit(1), 10_000);
+
+    // Force exit after 25s (before Fly's 30s kill_timeout)
+    setTimeout(() => {
+      console.error('[serve] Drain timeout — forcing exit');
+      process.exit(1);
+    }, 25_000).unref();
   });
 }

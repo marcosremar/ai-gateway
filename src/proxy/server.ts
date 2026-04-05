@@ -46,9 +46,12 @@ function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer
   });
   return Promise.race([
     inner,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new BodyTimeoutError(BODY_READ_TIMEOUT_MS)), BODY_READ_TIMEOUT_MS),
-    ),
+    new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        req.destroy(); // Kill the socket to stop slow clients
+        reject(new BodyTimeoutError(BODY_READ_TIMEOUT_MS));
+      }, BODY_READ_TIMEOUT_MS);
+    }),
   ]);
 }
 
@@ -208,6 +211,7 @@ function proxyToNextDev(nextDevUrl: string, req: IncomingMessage, res: ServerRes
     { method: req.method, headers: { ...req.headers, host: target.host } },
     (proxyRes: IncomingMessage) => {
       res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+      proxyRes.on('error', () => { if (!res.writableEnded) res.end(); });
       proxyRes.pipe(res);
     },
   );
@@ -215,8 +219,11 @@ function proxyToNextDev(nextDevUrl: string, req: IncomingMessage, res: ServerRes
     if (!res.headersSent) {
       res.writeHead(502, { 'Content-Type': 'text/plain' });
       res.end('Next.js dev server not running. Start it with: cd ai-gateway/web && bun run dev');
+    } else if (!res.writableEnded) {
+      res.end();
     }
   });
+  req.on('error', () => { proxyReq.destroy(); });
   req.pipe(proxyReq);
 }
 
@@ -332,6 +339,13 @@ export function createProxyServer(config: ProxyConfig): Server {
 
     // Set CORS origin header for all non-preflight responses
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+
+    // Skip auth for health endpoint (Fly.io health checks don't send tokens)
+    const urlPath = url.split('?')[0];
+    if (method === 'GET' && urlPath === '/health') {
+      sendResponse(res, { status: 200, body: { status: 'ok' } }, requestId);
+      return;
+    }
 
     // Auth — when no API keys are configured, restrict to localhost-only requests
     const authHeader = req.headers.authorization;
@@ -516,6 +530,8 @@ export function createProxyServer(config: ProxyConfig): Server {
           Object.entries((_ as any).headers || {}).map(([k, v]: [string, any]) => `${k}: ${v}`).join('\r\n') +
           '\r\n\r\n');
         if (proxyHead.length) socket.write(proxyHead);
+        proxySocket.on('error', () => socket.destroy());
+        socket.on('error', () => proxySocket.destroy());
         proxySocket.pipe(socket);
         socket.pipe(proxySocket);
       });

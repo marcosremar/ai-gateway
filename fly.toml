@@ -24,6 +24,13 @@ kill_timeout = '30s'
     hard_limit = 250
     soft_limit = 100
 
+  [[http_service.checks]]
+    interval = '10s'
+    timeout = '5s'
+    grace_period = '15s'
+    method = 'GET'
+    path = '/health'
+
 [[vm]]
   size = 'shared-cpu-2x'
   memory = '1024mb'
