@@ -516,6 +516,14 @@ type WsData = {
 };
 
 export function startWsServer() {
+  // Install persistent file logging — captures all console output + GPU events
+  try {
+    const { installConsoleCapture } = require('./file-logger');
+    installConsoleCapture();
+  } catch (err) {
+    console.warn('[ws-server] Failed to install file logger:', err);
+  }
+
   const WS_PORT = PORT + 1;
   Bun.serve<WsData>({
     port: WS_PORT,
