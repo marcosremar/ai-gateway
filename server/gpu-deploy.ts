@@ -47,8 +47,10 @@ export const MAX_DEPLOY_RETRIES = 2;
 export const HEALTH_POLL_INTERVAL_MS = 10_000;
 export const DEPLOY_TIMEOUT_MS = 30 * 60_000; // 30 min total (pods need ~10 min to download models)
 export const GPU_MONITOR_INTERVAL_MS = 30_000; // health check every 30s
-export let IDLE_TIMEOUT_MS = 10 * 60_000;    // auto-terminate after 10 min idle (configurable via API)
+export let IDLE_TIMEOUT_MS = 15 * 60_000;    // auto-STOP (pause) after 15 min idle (configurable via API)
 export function setIdleTimeoutMs(ms: number) { IDLE_TIMEOUT_MS = ms; }
+export let IDLE_DESTROY_MS = 2 * 60 * 60_000; // auto-DESTROY 2 hours after stop (configurable)
+export function setIdleDestroyMs(ms: number) { IDLE_DESTROY_MS = ms; }
 
 export const GPU_TYPE_CACHE_TTL_MS = 30 * 60_000; // refresh GPU type cache every 30 min
 export let gpuTypeCacheRefreshTimer: Timer | null = null;
@@ -500,9 +502,9 @@ export function scheduleNextMonitorProbe() {
         const idleMs = Date.now() - _idleBase;
         if (idleMs >= IDLE_TIMEOUT_MS) {
           const idleMin = Math.round(idleMs / 60_000);
-          console.log(`[gpu] Idle ${idleMin} min (no model requests) — auto-terminating to save costs`);
-          broadcastWs({ type: 'gpu:idle', idleMs, timeoutMs: IDLE_TIMEOUT_MS, action: 'terminate' });
-          await autoTerminateGpu();
+          console.log(`[gpu] Idle ${idleMin} min (no model requests) — auto-stopping (pausing) to save costs`);
+          broadcastWs({ type: 'gpu:idle', idleMs, timeoutMs: IDLE_TIMEOUT_MS, action: 'stop' });
+          await autoStopGpu();
           return;
         }
         // Warn at 75% of idle timeout (gives user chance to send a request)
@@ -534,7 +536,87 @@ export function stopGpuMonitoring() {
   setGpuHealthy(false);
 }
 
+// ── Destroy timer — deletes pod N hours after auto-stop ─────────────────────
+let destroyTimer: Timer | null = null;
+
+function scheduleAutoDestroy(delayMs: number) {
+  clearAutoDestroyTimer();
+  const provider = activeProvider;
+  const podId = deployState.podId;
+  console.log(`[gpu] Auto-destroy scheduled in ${Math.round(delayMs / 60_000)} min for ${provider} pod ${podId}`);
+  destroyTimer = setTimeout(async () => {
+    console.log(`[gpu] Auto-destroy triggered — deleting stopped pod ${podId} (${provider})`);
+    broadcastWs({ type: 'gpu:idle', action: 'destroy', provider, podId });
+    await autoTerminateGpu();
+  }, delayMs) as unknown as Timer;
+}
+
+export function clearAutoDestroyTimer() {
+  if (destroyTimer) { clearTimeout(destroyTimer as unknown as ReturnType<typeof setTimeout>); destroyTimer = null; }
+}
+
+/**
+ * Auto-stop (pause) GPU when idle — preserves disk, no hourly charges.
+ * Schedules auto-destroy after IDLE_DESTROY_MS (default 2h).
+ */
+export async function autoStopGpu() {
+  const provider = activeProvider;
+  const podId = deployState.podId;
+
+  if (!podId || !provider) {
+    console.warn('[gpu] autoStopGpu: no active pod to stop');
+    await autoTerminateGpu();
+    return;
+  }
+
+  // Resolve credentials
+  const credentials: ProviderCredentials = {};
+  let client: GpuProviderClient | null = null;
+  if (provider === 'runpod' && deployApiKey) {
+    client = runpod; credentials.apiKey = deployApiKey;
+  } else if (provider === 'vast' && deployVastApiKey) {
+    client = vast; credentials.apiKey = deployVastApiKey;
+  } else if (provider === 'tensordock' && deployTensordockApiKey) {
+    client = tensordock; credentials.apiKey = deployTensordockApiKey; credentials.authId = deployTensordockAuthId;
+  } else if (provider === 'modal' && deployModalApiKey) {
+    client = modal; credentials.apiKey = deployModalApiKey;
+  }
+
+  if (!client) {
+    console.warn(`[gpu] autoStopGpu: no client for ${provider} — falling back to terminate`);
+    await autoTerminateGpu();
+    return;
+  }
+
+  try {
+    await client.stopInstance(podId, credentials);
+    console.log(`[gpu] Pod ${podId} stopped (paused) on ${provider} — disk preserved, no charges`);
+    logGpuEvent('instance_stopped', provider, true, { metadata: { podId, reason: 'idle_timeout' } });
+  } catch (err) {
+    console.warn(`[gpu] Stop failed for ${provider} pod ${podId}: ${err instanceof Error ? err.message : err} — falling back to terminate`);
+    await autoTerminateGpu();
+    return;
+  }
+
+  broadcastProviderStatus('offline', 'cloud', `GPU idle → stopped (paused). Auto-destroy in ${Math.round(IDLE_DESTROY_MS / 60_000)} min.`);
+  stopGpuMonitoring();
+  stopWarmthMonitor();
+  updateTranslationProfile({ gpuEndpoint: undefined }, 'idleStop');
+
+  // Keep podId/provider in state so resume can find it
+  setDeployState({
+    status: 'idle',
+    message: `Pod stopped (idle ${Math.round(IDLE_TIMEOUT_MS / 60_000)} min). Will be destroyed in ${Math.round(IDLE_DESTROY_MS / 60_000)} min if not resumed.`,
+  });
+  deployState.podId = podId;
+  deployState.provider = provider;
+
+  // Schedule auto-destroy
+  scheduleAutoDestroy(IDLE_DESTROY_MS);
+}
+
 export async function autoTerminateGpu() {
+  clearAutoDestroyTimer();
   const rpKey = deployApiKey;
   const vastKey = deployVastApiKey;
   const tdKey = deployTensordockApiKey;
