@@ -220,10 +220,13 @@ export function filterTiers(
 }
 
 // ── Default Storage per Provider ────────────────────────────────────────────
-
+// Keep storage low to avoid ghost machines — RunPod silently fails to schedule
+// pods requesting >100GB local disk (most Secure Cloud hosts don't have it).
+// Images with pre-baked models need minimal disk; download-at-boot images
+// should set storageGb explicitly in the deploy request.
 export const DEFAULT_STORAGE_GB: Record<ProviderName, number> = {
-  runpod: 100,
-  tensordock: 100,
-  vast: 100,
+  runpod: 20,      // RunPod default is 20GB; 100GB causes ghost machines
+  tensordock: 50,
+  vast: 30,
   modal: 0,
 };
