@@ -132,7 +132,18 @@ await withProviderFallback([groqLLM, openaiLLM, openrouterLLM], (p) => p.chat(me
 
 ## GPU Machine Deployment
 
-**MANDATORY: All GPU deploys MUST go through the SDK client** — never use raw HTTP, curl, or direct provider APIs. The SDK enforces the correct GPU name format, fallback chain, and monitoring.
+**MANDATORY: All GPU operations MUST go through the ai-gateway API or SDK client** — NEVER use raw HTTP to RunPod (`rest.runpod.io`), Vast.ai (`console.vast.ai/api`), or any provider API directly. Direct calls bypass idle watchdog, logging, ghost detection, and cost tracking. This applies to deploy, stop, resume, terminate, and status checks.
+
+**Available GPU endpoints:**
+- `POST /v1/gpu/deploy` — deploy a GPU pod (non-blocking, poll status)
+- `GET  /v1/gpu/status` — poll pod status + health
+- `POST /v1/gpu/stop` — pause pod (preserves disk, no charges)
+- `POST /v1/gpu/resume` — restart a stopped pod
+- `POST /v1/gpu/terminate` — delete pod permanently
+- `GET  /v1/gpu/logs` — fetch container logs
+- `GET  /v1/gpu/logs/events` — persistent GPU event log (JSONL)
+
+**Idle behavior:** Pods auto-stop after 15 min idle (configurable via `IDLE_TIMEOUT_MIN` env). Auto-destroy 2h after stop if not resumed. Container-level watchdog works even without the gateway server running.
 
 ```typescript
 // TypeScript (Node SDK) — REQUIRED approach
