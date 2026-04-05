@@ -411,15 +411,15 @@ export function PipelineHealthCard({ health }: PipelineHealthCardProps) {
   if (profiles.length === 0) return null;
 
   const activeProviders: Record<'stt' | 'llm' | 'tts', string> = {
-    stt: health.components.stt?.provider ?? '',
-    llm: health.components.llm?.provider ?? '',
-    tts: health.components.tts?.provider ?? '',
+    stt: health.components?.stt?.provider ?? '',
+    llm: health.components?.llm?.provider ?? '',
+    tts: health.components?.tts?.provider ?? '',
   };
 
   const gpuPhases: Record<'stt' | 'llm' | 'tts', ServicePhase | null> = {
-    stt: (readiness?.readinessState.stt.phase as ServicePhase) ?? null,
-    llm: (readiness?.readinessState.llm.phase as ServicePhase) ?? null,
-    tts: (readiness?.readinessState.tts.phase as ServicePhase) ?? null,
+    stt: (readiness?.readinessState?.stt?.phase as ServicePhase) ?? null,
+    llm: (readiness?.readinessState?.llm?.phase as ServicePhase) ?? null,
+    tts: (readiness?.readinessState?.tts?.phase as ServicePhase) ?? null,
   };
 
   return (
