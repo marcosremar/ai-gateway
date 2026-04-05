@@ -407,13 +407,13 @@ export function OverviewSection() {
                   uptime <span className="font-mono font-semibold" style={{ color: 'var(--color-text)' }}>{formatUptime(health.uptime_sec)}</span>
                 </span>
                 <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
-                  p50 <span className="font-mono font-semibold" style={{ color: '#60a5fa' }}>{health.latency.p50_ms}ms</span>
+                  p50 <span className="font-mono font-semibold" style={{ color: '#60a5fa' }}>{health.latency?.p50_ms ?? 0}ms</span>
                 </span>
                 <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
-                  p95 <span className="font-mono font-semibold" style={{ color: '#a78bfa' }}>{health.latency.p95_ms}ms</span>
+                  p95 <span className="font-mono font-semibold" style={{ color: '#a78bfa' }}>{health.latency?.p95_ms ?? 0}ms</span>
                 </span>
                 <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
-                  <span className="font-mono font-semibold" style={{ color: '#fbbf24' }}>{health.latency.samples}</span> requests
+                  <span className="font-mono font-semibold" style={{ color: '#fbbf24' }}>{health.latency?.samples ?? 0}</span> requests
                 </span>
                 {health.budget && health.budget.dailySpendUsd > 0 && (
                   <span className="text-[11px] ml-auto" style={{ color: 'var(--color-text-muted)' }}>
