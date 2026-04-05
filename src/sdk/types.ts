@@ -137,6 +137,80 @@ export interface ChatCompletionResponse {
   };
 }
 
+// ── GPU extended responses ──────────────────────────────────────────────────
+
+export interface GpuOffer {
+  id: string | number;
+  provider: string;
+  gpuName: string;
+  vramGb: number;
+  pricePerHr: number;
+  region?: string;
+  available: boolean;
+  [key: string]: unknown;
+}
+
+export interface GpuInstance {
+  instanceId: string;
+  instanceName?: string;
+  endpoint: string;
+  status: string;
+  gpuType?: string;
+  provider?: string;
+}
+
+export interface GpuEventLog {
+  type: string;
+  lines: number;
+  entries: Array<Record<string, unknown>>;
+}
+
+export interface StopResumeResponse {
+  ok: boolean;
+  podId?: string;
+  provider?: string;
+  message?: string;
+}
+
+// ── Config types ───────────────────────────────────────────────────────────
+
+export interface ProviderConfig {
+  pipelineStt?: string[];
+  pipelineLlm?: string[];
+  pipelineTts?: string[];
+  [key: string]: unknown;
+}
+
+export interface ApiKeyInfo {
+  provider: string;
+  hint: string;
+  set: boolean;
+}
+
+// ── Bot types ──────────────────────────────────────────────────────────────
+
+export interface BotDeployOptions {
+  meetingUrl: string;
+  botName?: string;
+  [key: string]: unknown;
+}
+
+export interface BotStatus {
+  status: string;
+  meetingUrl?: string;
+  botId?: string;
+  [key: string]: unknown;
+}
+
+// ── Transcribe options ─────────────────────────────────────────────────────
+
+export interface TranscribeOptions {
+  language?: string;
+  prompt?: string;
+  /** Use ensemble mode — race multiple STT providers, return best result */
+  ensemble?: boolean;
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 export class GatewayError extends Error {
