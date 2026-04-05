@@ -1036,6 +1036,7 @@ export function startWsServer() {
       // Metrics
       'GET /v1/requests/log': mt.handleRequestLog,
       'GET /v1/service-stats': mt.handleServiceStats,
+      'GET /metrics': mt.handleMetrics,
     };
 
     Bun.serve({
