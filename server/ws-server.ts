@@ -977,5 +977,19 @@ export function startWsServer() {
       },
     },
   });
+
+  // Optional DB connection — ws-server works without it (noopPrisma fallback).
+  // Uses require() so Bun doesn't resolve @prisma at parse time.
+  if (process.env.DATABASE_URL) {
+    try {
+      const { initPrisma } = require('./prisma-init');
+      initPrisma().catch((e: any) => console.warn('[ws-server] DB init failed:', e?.message?.slice(0, 80)));
+    } catch {
+      console.warn('[ws-server] prisma-init not available — running without DB');
+    }
+  } else {
+    console.warn('[ws-server] DATABASE_URL not set — running without DB');
+  }
+
   return WS_PORT;
 }

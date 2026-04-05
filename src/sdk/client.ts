@@ -33,6 +33,9 @@ import type {
   ApiKeyInfo,
   BotDeployOptions,
   BotStatus,
+  CreateProfileOptions,
+  GpuReadinessStatus,
+  GpuReadinessHistory,
   ChatMessage,
   ChatCompletionOptions,
   ChatCompletionResponse,
@@ -416,6 +419,61 @@ export class GatewaySDK {
       body: JSON.stringify(flags),
       timeout: this.timeouts.health,
     });
+  }
+
+  // ── Profiles ───────────────────────────────────────────────────────────
+
+  /** Create or update a provider profile. */
+  async createProfile(profile: CreateProfileOptions): Promise<ProviderConfig> {
+    const res = await this.fetch('/v1/config/profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(profile),
+      timeout: this.timeouts.health,
+    });
+    return await this.parseJson(res, '/v1/config/profiles') as ProviderConfig;
+  }
+
+  /** Delete a provider profile. */
+  async deleteProfile(id: string): Promise<ProviderConfig> {
+    const res = await this.fetch('/v1/config/profiles', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+      timeout: this.timeouts.health,
+    });
+    return await this.parseJson(res, '/v1/config/profiles') as ProviderConfig;
+  }
+
+  /** Activate a profile (copy its chains to top-level config). Pass null to deactivate. */
+  async activateProfile(id: string | null): Promise<ProviderConfig> {
+    const res = await this.fetch('/v1/config/profiles/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+      timeout: this.timeouts.health,
+    });
+    return await this.parseJson(res, '/v1/config/profiles/activate') as ProviderConfig;
+  }
+
+  // ── GPU Readiness ──────────────────────────────────────────────────────
+
+  /** Get GPU readiness status (benchmark state, P95 latencies, production flag). */
+  async gpuReadinessStatus(): Promise<GpuReadinessStatus> {
+    const res = await this.fetch('/v1/gpu/readiness/status', { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/v1/gpu/readiness/status') as GpuReadinessStatus;
+  }
+
+  /** Get GPU readiness history (state transitions over time). */
+  async gpuReadinessHistory(): Promise<GpuReadinessHistory> {
+    const res = await this.fetch('/v1/gpu/readiness/history', { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/v1/gpu/readiness/history') as GpuReadinessHistory;
+  }
+
+  /** Reset GPU readiness tracking (clears benchmarks, restarts readiness check). */
+  async resetGpuReadiness(): Promise<{ ok: boolean; message: string }> {
+    const res = await this.fetch('/v1/gpu/readiness/reset', { method: 'POST', timeout: this.timeouts.health });
+    return await this.parseJson(res, '/v1/gpu/readiness/reset') as { ok: boolean; message: string };
   }
 
   // ── Inference extended ─────────────────────────────────────────────────
