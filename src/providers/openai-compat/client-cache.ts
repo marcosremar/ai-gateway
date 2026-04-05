@@ -9,9 +9,15 @@
 
 import OpenAI from 'openai';
 import { createHash } from 'crypto';
+import { Agent as HttpAgent } from 'http';
+import { Agent as HttpsAgent } from 'https';
 
 const cache = new Map<string, OpenAI>();
 const MAX_CACHE_SIZE = 50;
+
+/** Shared HTTP agents with tuned connection pool for high concurrency */
+const sharedHttpAgent = new HttpAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 16, timeout: 30_000 });
+const sharedHttpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 16, timeout: 30_000 });
 
 /**
  * Get or create a shared OpenAI SDK client for the given config.
@@ -34,6 +40,9 @@ export function getOrCreateClient(
   const client = new OpenAI({
     apiKey,
     baseURL,
+    httpAgent: sharedHttpAgent,
+    // @ts-expect-error — OpenAI SDK accepts httpsAgent but types may lag
+    httpsAgent: sharedHttpsAgent,
     ...(defaultHeaders && { defaultHeaders }),
   });
   // Evict oldest entry if cache is full (simple FIFO)

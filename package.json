@@ -25,7 +25,14 @@
     "test:runpod": "vitest run --config vitest.config.ts __tests__/runpod-real-api.test.ts",
     "test:vast": "vitest run --config vitest.config.ts __tests__/vast-real-api.test.ts",
     "test:runpod-lifecycle": "vitest run --config vitest.config.ts __tests__/runpod-lifecycle.test.ts",
-    "test:vast-lifecycle": "vitest run --config vitest.config.ts __tests__/vast-lifecycle.test.ts"
+    "test:vast-lifecycle": "vitest run --config vitest.config.ts __tests__/vast-lifecycle.test.ts",
+    "test:load": "vitest run --config vitest.config.ts __tests__/load-live.test.ts",
+    "test:network": "vitest run --config vitest.config.ts __tests__/network-stress.test.ts",
+    "test:soak": "vitest run --config vitest.config.ts __tests__/soak-live.test.ts",
+    "test:k6:smoke": "k6 run load-testing/k6/smoke.js",
+    "test:k6:100": "k6 run load-testing/k6/ramp-100.js",
+    "test:k6:spike": "k6 run load-testing/k6/spike.js",
+    "test:k6:soak": "k6 run load-testing/k6/soak.js"
   },
   "peerDependencies": {
     "openai": ">=4.0.0",

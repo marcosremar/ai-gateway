@@ -11,9 +11,15 @@ import type { GatewayHooks } from '../../hooks';
 import { emitHook } from '../../hooks';
 import type { ProxyRequest, ProxyResponse, ChatFallbackEntry } from '../types';
 import { withProviderFallback, type FallbackEntry, type FallbackOptions, CooldownTracker } from '../../providers/fallback';
+import { RequestCoalescer } from '../middleware/request-coalescer';
+import { ProviderSemaphores } from '../middleware/semaphore';
 
 /** Shared cooldown tracker for LLM proxy route */
 const llmCooldownTracker = new CooldownTracker();
+/** Deduplicates identical in-flight requests */
+const coalescer = new RequestCoalescer();
+/** Limits concurrent calls per upstream provider */
+const providerSemaphores = new ProviderSemaphores(150);
 
 export async function handleChatCompletions(
   req: ProxyRequest,
@@ -61,15 +67,18 @@ export async function handleChatCompletions(
   });
 
   try {
-    // Check cache (only for deterministic requests)
-    if (cache && (body.temperature === undefined || body.temperature === 0)) {
-      const key = cache.buildKey({
-        provider: primaryProvider,
-        model: body.model,
-        messages: body.messages,
-        temperature: body.temperature,
-      });
-      const cached = await cache.get<{ content: string; model: string; usage?: unknown }>(key);
+    // Build cache key once (reused for get and set)
+    const isDeterministic = body.temperature === undefined || body.temperature === 0;
+    const cacheKey = cache && isDeterministic ? cache.buildKey({
+      provider: primaryProvider,
+      model: body.model,
+      messages: body.messages,
+      temperature: body.temperature,
+    }) : null;
+
+    // Check cache
+    if (cacheKey) {
+      const cached = await cache!.get<{ content: string; model: string; usage?: unknown }>(cacheKey);
       if (cached) {
         return {
           status: 200,
@@ -93,7 +102,7 @@ export async function handleChatCompletions(
     };
 
     const opts: FallbackOptions = {
-      logPrefix: '[proxy:llm]',
+      logPrefix: process.env.NODE_ENV === 'production' ? '' : '[proxy:llm]',
       timeoutMs: 15_000,
       retriesPerProvider: 1,
       retryBaseDelayMs: 200,
@@ -106,25 +115,33 @@ export async function handleChatCompletions(
       providerMap.set(entry.provider, entry.instance);
     }
 
-    const { result, usedProvider, usedModel } = await withProviderFallback(
-      fallbackEntries,
-      async (entry) => {
-        const instance = providerMap.get(entry.provider);
-        if (!instance) throw new Error(`Provider ${entry.provider} not found`);
-        return instance.chat(chatOpts);
-      },
-      opts,
+    // Request coalescing key (deduplicates identical in-flight requests)
+    const coalescingKey = coalescer.buildKey({
+      provider: primaryProvider,
+      model: body.model,
+      messages: body.messages,
+      temperature: body.temperature,
+    });
+
+    // Execute with coalescing + per-provider semaphore
+    const { result, usedProvider, usedModel } = await coalescer.execute(
+      coalescingKey,
+      () => providerSemaphores.withLimit(primaryProvider, () =>
+        withProviderFallback(
+          fallbackEntries,
+          async (entry) => {
+            const instance = providerMap.get(entry.provider);
+            if (!instance) throw new Error(`Provider ${entry.provider} not found`);
+            return instance.chat(chatOpts);
+          },
+          opts,
+        ),
+      ),
     );
 
-    // Store in cache
-    if (cache && (body.temperature === undefined || body.temperature === 0)) {
-      const key = cache.buildKey({
-        provider: primaryProvider,
-        model: body.model,
-        messages: body.messages,
-        temperature: body.temperature,
-      });
-      await cache.set(key, result);
+    // Store in cache (key already computed above)
+    if (cacheKey) {
+      await cache!.set(cacheKey, result);
     }
 
     emitHook(hooks, 'onRequestEnd', {
