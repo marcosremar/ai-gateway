@@ -991,11 +991,97 @@ export function startWsServer() {
     console.warn('[ws-server] DATABASE_URL not set — running without DB');
   }
 
+  // ── HTTP API server on PORT (REST endpoints for GPU handlers) ──────────
+  try {
+    const {
+      handleGpuDeploy, handleGpuStatus, handleGpuStop, handleGpuResume,
+      handleGpuTerminate, handleGpuLogs, handleGpuEventLogs, handleGpuOffers,
+      handleGpuTypes, handleGpuList, handleGpuCatalog, handleGpuMyLocation,
+      handleGpuReputation, handleHealth,
+    } = require('./gpu-handlers');
+
+    const handlers: Record<string, (req: any, res: any) => void> = {
+      'POST /v1/gpu/deploy': handleGpuDeploy,
+      'GET /v1/gpu/status': handleGpuStatus,
+      'POST /v1/gpu/stop': handleGpuStop,
+      'POST /v1/gpu/resume': handleGpuResume,
+      'POST /v1/gpu/terminate': handleGpuTerminate,
+      'GET /v1/gpu/logs': handleGpuLogs,
+      'GET /v1/gpu/logs/events': handleGpuEventLogs,
+      'GET /v1/gpu/offers': handleGpuOffers,
+      'GET /v1/gpu/types': handleGpuTypes,
+      'GET /v1/gpu/list': handleGpuList,
+      'GET /v1/gpu/catalog': handleGpuCatalog,
+      'GET /v1/gpu/my-location': handleGpuMyLocation,
+      'GET /v1/gpu/reputation': handleGpuReputation,
+      'GET /health': handleHealth,
+    };
+
+    Bun.serve({
+      port: PORT,
+      fetch: async (req) => {
+        const url = new URL(req.url);
+        const method = req.method;
+
+        // CORS preflight
+        if (method === 'OPTIONS') {
+          return new Response(null, { status: 204, headers: {
+            'Access-Control-Allow-Origin': req.headers.get('origin') || '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          }});
+        }
+
+        const key = `${method} ${url.pathname}`;
+        const handler = handlers[key];
+        if (!handler) {
+          return new Response(JSON.stringify({ error: 'Not found', endpoints: Object.keys(handlers) }), {
+            status: 404, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+          });
+        }
+
+        // Node→Bun adapter
+        const body = method !== 'GET' && method !== 'HEAD' ? await req.text() : '';
+        const listeners: Record<string, Function[]> = {};
+        const fakeReq: any = {
+          method, url: url.pathname + url.search,
+          headers: Object.fromEntries(req.headers.entries()),
+          on: (ev: string, cb: Function) => { (listeners[ev] = listeners[ev] || []).push(cb); return fakeReq; },
+        };
+        queueMicrotask(() => {
+          if (body) (listeners['data'] || []).forEach(cb => cb(Buffer.from(body)));
+          (listeners['end'] || []).forEach(cb => cb());
+        });
+
+        return new Promise<Response>((resolve) => {
+          let statusCode = 200;
+          const resHeaders: Record<string, string> = {};
+          const chunks: string[] = [];
+          const fakeRes: any = {
+            writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode = code; if (hdrs) Object.assign(resHeaders, hdrs); },
+            setHeader: (k: string, v: string) => { resHeaders[k] = v; },
+            end: (data?: string) => { if (data) chunks.push(data); resolve(new Response(chunks.join(''), {
+              status: fakeRes.statusCode || statusCode,
+              headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders },
+            })); },
+            write: (data: string) => { chunks.push(data); },
+            getHeader: (k: string) => resHeaders[k],
+            statusCode: 200,
+          };
+          handler(fakeReq, fakeRes);
+        });
+      },
+    });
+    console.log(`[ws-server] HTTP API on port ${PORT}`);
+  } catch (e: any) {
+    console.warn(`[ws-server] HTTP API not started: ${e.message?.slice(0, 80)}`);
+  }
+
   return WS_PORT;
 }
 
 // Auto-start when run directly (bun server/ws-server.ts)
 if (typeof Bun !== 'undefined' && Bun.main === import.meta.path) {
   const port = startWsServer();
-  console.log(`[ws-server] Listening on port ${port}`);
+  console.log(`[ws-server] Listening on WS port ${port}, HTTP port ${PORT}`);
 }
