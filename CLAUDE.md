@@ -146,32 +146,85 @@ await withProviderFallback([groqLLM, openaiLLM, openrouterLLM], (p) => p.chat(me
 **Idle behavior:** Pods auto-stop after 15 min idle (configurable via `IDLE_TIMEOUT_MIN` env). Auto-destroy 2h after stop if not resumed. Container-level watchdog works even without the gateway server running.
 
 ```typescript
-// TypeScript (Node SDK) — REQUIRED approach
-import { GatewayHttpClient } from '@parle/ai-gateway/sdk/node';
+// TypeScript (Node SDK) — REQUIRED approach for ALL GPU and AI operations
+import { GatewaySDK } from '@ai-gateway/sdk';
 
-const gw = new GatewayHttpClient({ baseUrl: 'http://localhost:4000' });
+const gw = new GatewaySDK({ baseUrl: 'http://localhost:4000' });
 
-// Deploy (non-blocking — poll gpuStatus() until ready)
+// ── Inference ────────────────────────────────────────────────────────
+// STT: transcribe audio to text
+const { text, usedGpu } = await gw.transcribe(audioBuffer, 'fr');
+
+// LLM: chat completion
+const { content, model, usage } = await gw.chat([
+  { role: 'user', content: 'Hello' }
+], { temperature: 0.7, maxTokens: 512 });
+
+// Translate: text translation via GPU or cloud LLM
+const { translatedText } = await gw.translate(text, 'fr', 'en');
+
+// TTS: generate speech audio from text
+const { audio } = await gw.generateAudio('Hello world', { speaker: 'Ryan' });
+
+// Full pipeline: audio → STT → LLM → TTS (GPU-aware routing)
+const result = await gw.pipeline(audioBuffer, { source: 'fr', target: 'en' });
+// { transcription, response, audioBase64, contentType, timing: { totalMs, usedGpu } }
+
+// List available TTS voices
+const { voices } = await gw.listVoices();
+
+// ── GPU Management ───────────────────────────────────────────────────
+// Deploy (non-blocking — returns immediately, poll gpuStatus())
 await gw.deployGpu({
-  apiKey: process.env.RUNPOD_API_KEY,       // RunPod key (starts with rpa_)
-  dockerImage: 'marcosremar/ultravox-s2s:blackwell',
+  apiKey: process.env.RUNPOD_API_KEY,
+  dockerImage: 'marcosremar/babelcast-subtitle:latest',
   gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090'],
 });
 
 // Poll until ready
 const status = await gw.gpuStatus();
-// { status: 'ready'|'booting'|'error', endpoint, gpuType, step, ... }
+// { status: 'ready'|'booting'|'error'|'idle', podId, endpoint, gpuType,
+//   message, step, gpuHealthy, activeTier, idleSec, idleTimeoutSec }
+
+// Wait for GPU (blocks until ready or throws on error/timeout)
+const ready = await gw.waitForGpu(5000, 20 * 60_000);
+
+// Terminate (delete pod permanently)
+await gw.terminateGpu(process.env.RUNPOD_API_KEY);
+
+// Health check
+const isUp = await gw.health();
+
+// ── Stop/Resume (via HTTP — not yet in SDK, use fetch) ───────────────
+// Stop (pause — preserves disk, no charges)
+await fetch('http://localhost:4000/v1/gpu/stop', { method: 'POST' });
+
+// Resume (restart a stopped pod)
+await fetch('http://localhost:4000/v1/gpu/resume', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ podId: 'xxx', provider: 'runpod' }),
+});
 ```
 
 ```python
 # Python SDK — alternative
 from gateway_sdk import GatewaySDK, DeployOptions
 gw = GatewaySDK(base_url="http://localhost:4000")
+
+# Inference
+result = await gw.transcribe(audio_bytes, language="fr")
+result = await gw.pipeline(audio_bytes, source="fr", target="en")
+
+# GPU management
 await gw.deploy_gpu(DeployOptions(
     api_key=os.environ["RUNPOD_API_KEY"],
-    docker_image="marcosremar/ultravox-s2s:blackwell",
+    docker_image="marcosremar/babelcast-subtitle:latest",
     gpu_types=["NVIDIA GeForce RTX 5090", "NVIDIA GeForce RTX 4090"],
 ))
+status = await gw.gpu_status()
+ready = await gw.wait_for_gpu(poll_interval=5000, timeout=20*60_000)
+await gw.terminate_gpu(api_key=os.environ["RUNPOD_API_KEY"])
 ```
 
 **GPU type names for RunPod** (must be exact):
