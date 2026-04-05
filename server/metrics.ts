@@ -132,6 +132,12 @@ export function logGpuEvent(
     metadata?: Record<string, unknown>;
   },
 ) {
+  // Always write to file (persistent, no DB dependency)
+  try {
+    const { logGpuEventToFile } = require('./file-logger');
+    logGpuEventToFile(event, provider, success, opts);
+  } catch {}
+
   setPendingDbWrites(pendingDbWrites + 1);
   prisma.gpuEvent
     .create({

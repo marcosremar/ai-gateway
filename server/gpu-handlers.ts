@@ -1593,6 +1593,39 @@ export async function handleGpuLogs(_req: IncomingMessage, res: ServerResponse) 
   }
 }
 
+// ── GPU event logs endpoint (persistent file-based) ─────────────────────────
+
+/**
+ * GET /v1/gpu/logs/events?lines=100 — Returns recent GPU lifecycle events from file.
+ * GET /v1/gpu/logs/server?lines=200 — Returns recent server console logs from file.
+ */
+export function handleGpuEventLogs(req: IncomingMessage, res: ServerResponse) {
+  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const lines = parseInt(url.searchParams.get('lines') || '100', 10);
+  const type = url.pathname.includes('/server') ? 'server'
+    : url.pathname.includes('/gpu') ? 'gpu' : 'events';
+
+  try {
+    const { readRecentEvents, readRecentGpuEvents, readRecentServerLogs, LOG_DIR } = require('./file-logger');
+    const logLines = type === 'server' ? readRecentServerLogs(lines)
+      : type === 'gpu' ? readRecentGpuEvents(lines)
+      : readRecentEvents(lines);
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      type,
+      lines: logLines.length,
+      logDir: LOG_DIR,
+      entries: logLines.map((l: string) => {
+        try { return JSON.parse(l); } catch { return { raw: l }; }
+      }),
+    }));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Failed to read logs: ${err}` }));
+  }
+}
+
 // ── GPU catalog endpoint ────────────────────────────────────────────────────
 
 export function handleGpuCatalog(_req: IncomingMessage, res: ServerResponse) {
