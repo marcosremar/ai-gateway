@@ -993,3 +993,9 @@ export function startWsServer() {
 
   return WS_PORT;
 }
+
+// Auto-start when run directly (bun server/ws-server.ts)
+if (typeof Bun !== 'undefined' && Bun.main === import.meta.path) {
+  const port = startWsServer();
+  console.log(`[ws-server] Listening on port ${port}`);
+}
