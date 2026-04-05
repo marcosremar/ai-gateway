@@ -94,7 +94,7 @@ const DEFAULTS: DeploySettings = {
   deployRegion:          '',
   deployDockerImage:     '',
   minVramGb:             16,
-  minDiskGb:             100,
+  minDiskGb:             20,   // was 100 — caused ghost machines on RunPod (no host has 200GB free)
   preferSsd:             false,
   sttTargetLatencyMs:    800,
   llmTargetLatencyMs:    2000,
