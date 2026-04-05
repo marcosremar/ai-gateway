@@ -32,7 +32,7 @@ import {
   stopGpuMonitoring, startDeployWithTiers, startDeployRace, buildGpuTiers, cooldownTracker,
   cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps,
   autoSelectCheapestGpu, fetchGpuLogs, getVerifiedGpuTypes, validateGpuTypesFromCache,
-  IDLE_TIMEOUT_MS, POD_NAME_PREFIX,
+  IDLE_TIMEOUT_MS, POD_NAME_PREFIX, clearAutoDestroyTimer,
 } from './gpu-deploy';
 import { logGpuEvent, updateDeploySession, computePercentile, upsertHostReputation, getAllReputations } from './metrics';
 import {
@@ -1208,6 +1208,7 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   }
 
   try {
+    clearAutoDestroyTimer(); // Cancel pending auto-destroy
     await client.startInstance(podId, credentials);
 
     // Resolve endpoint for the restarted pod
