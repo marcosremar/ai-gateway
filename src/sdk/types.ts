@@ -211,6 +211,42 @@ export interface TranscribeOptions {
   ensemble?: boolean;
 }
 
+// ── Profile management ─────────────────────────────────────────────────────
+
+export interface CreateProfileOptions {
+  id: string;
+  name: string;
+  stt?: Array<{ provider: string; model?: string }>;
+  llm?: Array<{ provider: string; model?: string }>;
+  tts?: Array<{ provider: string; model?: string }>;
+  gpuDeploy?: {
+    dockerImage: string;
+    gpuTypes: string[];
+    region?: string;
+    timeoutMin?: number;
+    raceCount?: number;
+  };
+  voice?: string;
+  language?: string;
+  [key: string]: unknown;
+}
+
+// ── GPU readiness ──────────────────────────────────────────────────────────
+
+export interface GpuReadinessStatus {
+  readinessState: Record<string, unknown>;
+  gpuReadyForProduction: boolean;
+  gpuShadowMode: boolean;
+  perStageP95: { stt: number | null; llm: number | null; tts: number | null };
+  targets: { stt: number; llm: number; tts: number };
+  [key: string]: unknown;
+}
+
+export interface GpuReadinessHistory {
+  history: Record<string, unknown>;
+  currentState: Record<string, unknown>;
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 export class GatewayError extends Error {
