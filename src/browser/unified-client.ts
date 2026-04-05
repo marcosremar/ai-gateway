@@ -248,10 +248,25 @@ export class UnifiedSpeechClient extends TypedEmitter<UnifiedSpeechClientEventMa
       this.emit('stage-change', { stage: phase });
     });
 
-    // Connect with timeout
+    // Wait for the DataChannel to actually open (the `connected` event).
+    // client.connect() only resolves after SDP exchange — the DataChannel
+    // opens asynchronously afterwards. We must await the `connected` event,
+    // not just connect(), to know the WebRTC session is truly ready.
     const timeoutMs = this.config.realtimeTimeoutMs ?? 15_000;
+
+    // Set up promise BEFORE connect() so we don't miss events fired during SDP.
+    const dcOpenedPromise = new Promise<void>((resolve, reject) => {
+      const onConnected = () => { offConnected(); offError(); resolve(); };
+      const onError = ({ message }: { message: string }) => { offConnected(); offError(); reject(new Error(message)); };
+      const offConnected = client.on('connected', onConnected);
+      const offError = client.on('error', onError);
+    });
+
+    // Race: (SDP exchange + wait for DC open) vs timeout.
+    // If client.connect() rejects (mic denied, etc.), that error propagates.
+    // If it resolves (SDP done), we continue waiting for the DC to open.
     await Promise.race([
-      client.connect(),
+      client.connect().then(() => dcOpenedPromise),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error(`Realtime connect timeout (${timeoutMs}ms)`)), timeoutMs),
       ),

@@ -330,14 +330,21 @@ export class OpenAIRealtimeClient extends TypedEmitter<OpenAIRealtimeEventMap> {
         if (!navigator.mediaDevices?.getUserMedia) {
           throw new Error('Microphone not available (requires HTTPS or localhost)');
         }
-        micStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            echoCancellation: true,
-            autoGainControl: true,
-            noiseSuppression: true,
-          },
-        });
+        // Wrap in a 4s timeout — headless/sandboxed browsers may hang indefinitely
+        // instead of immediately rejecting with NotAllowedError.
+        micStream = await Promise.race([
+          navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              echoCancellation: true,
+              autoGainControl: true,
+              noiseSuppression: true,
+            },
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Microphone request timed out')), 3_000)
+          ),
+        ]);
       } catch (micErr) {
         const msg = micErr instanceof Error ? micErr.message : 'Microphone access denied';
         if (msg.includes('NotAllowedError') || msg.includes('Permission denied') || msg.includes('not allowed')) {
