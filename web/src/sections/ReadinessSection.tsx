@@ -130,11 +130,11 @@ export function ReadinessSection() {
 
       // Sync settings from server (only when not dirty)
       if (!isActive.current) {
-        setSttTargetMs(s.targets.stt);
-        setLlmTargetMs(s.targets.llm);
-        setTtsTargetMs(s.targets.tts);
-        setP95Multiplier(s.p95DemotionMultiplier);
-        setRepechageMax(s.repechageMaxAttempts);
+        setSttTargetMs(s.targets?.stt ?? 800);
+        setLlmTargetMs(s.targets?.llm ?? 2000);
+        setTtsTargetMs(s.targets?.tts ?? 1500);
+        setP95Multiplier(s.p95DemotionMultiplier ?? 2);
+        setRepechageMax(s.repechageMaxAttempts ?? 3);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
