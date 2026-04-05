@@ -6,16 +6,37 @@ import { deploymentSM } from './deployment-state-machine';
 export { deploymentSM };
 
 import type { Server } from 'http';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
 import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import { homedir } from 'os';
 import { join } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, renameSync } from 'fs';
 
 // PostgreSQL via DATABASE_URL (Neon serverless pooler)
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-export const prisma = new PrismaClient({ adapter });
+// Optional: gateway works without DB (GPU events logged to file instead).
+// No-op proxy: any prisma.table.method() call resolves silently.
+const _noopPrisma: any = new Proxy({}, {
+  get: (_t, _p) => new Proxy({}, {
+    get: (_t2, m) => (..._a: unknown[]) => Promise.resolve(m === 'findMany' ? [] : null),
+  }),
+});
+export let prisma: any = _noopPrisma;
+
+// Lazy Prisma init — called by ws-server after startup.
+// Separate function avoids Bun resolving @prisma imports at parse time.
+// Lazy Prisma init — loads from a separate file to prevent Bun static resolution.
+export async function initPrisma(): Promise<void> {
+  if (!process.env.DATABASE_URL) {
+    console.warn('[state] DATABASE_URL not set — running without DB');
+    return;
+  }
+  try {
+    const { createPrismaClient } = await import('./prisma-loader');
+    prisma = createPrismaClient(process.env.DATABASE_URL);
+    console.log('[state] Prisma connected (PostgreSQL)');
+  } catch (e: any) {
+    console.warn(`[state] Prisma unavailable: ${e.message?.slice(0, 80)} — running without DB`);
+  }
+}
 
 export const startedAt = Date.now();
 export let activeRequests = 0;
