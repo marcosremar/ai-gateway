@@ -3,7 +3,7 @@ const GATEWAY = typeof window !== 'undefined'
   : 'http://localhost:4000';
 
 async function gw(path: string, opts?: RequestInit): Promise<Response> {
-  return fetch(`${GATEWAY}${path}`, opts);
+  return fetch(`${GATEWAY}${path}`, { credentials: 'include', ...opts });
 }
 
 async function gwJson<T>(path: string, opts?: RequestInit): Promise<T> {
