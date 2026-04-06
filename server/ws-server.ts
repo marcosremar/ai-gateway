@@ -1052,6 +1052,15 @@ export function startWsServer() {
         'POST /v1/playground/pipeline': pg.handlePlaygroundPipeline,
       });
     } catch {}
+    // Auto-swap, AI handlers
+    try {
+      const ai = require('./ai-handlers');
+      Object.assign(handlers, {
+        'GET /v1/auto-swap/status': ai.handleAutoSwapStatus,
+        'POST /v1/auto-swap/toggle': ai.handleAutoSwapToggle,
+        'POST /v1/auto-swap/benchmark': ai.handleAutoSwapBenchmark,
+      });
+    } catch {}
 
     Bun.serve({
       port: PORT,
