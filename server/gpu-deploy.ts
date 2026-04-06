@@ -301,6 +301,12 @@ export function startGpuMonitoring() {
 export function scheduleNextMonitorProbe() {
   setMonitorInterval(setTimeout(async () => {
     if (monitorRunning) { scheduleNextMonitorProbe(); return; }
+    // If status is 'error' but a pod exists, clean up the orphaned pod
+    if (deployState.status === 'error' && deployState.podId) {
+      console.warn(`[gpu] Monitor: deploy in error state but pod ${deployState.podId} exists on ${deployState.provider} — cleaning up orphaned pod`);
+      try { await autoTerminateGpu(); } catch (e) { console.warn('[gpu] Orphan cleanup failed:', e); }
+      return; // Don't reschedule — pod is gone
+    }
     if (deployState.status !== 'ready' || !deployState.endpoint) { scheduleNextMonitorProbe(); return; }
     monitorRunning = true;
     try {
