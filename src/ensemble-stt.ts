@@ -80,6 +80,9 @@ export async function runVerifiedSTT(
     no_speech_prob?: number;
   }
 
+  // Track deadline timers so we can clean them up after the race
+  const deadlineTimers: ReturnType<typeof setTimeout>[] = [];
+
   const races = deps.providers.map(({ name, provider }) => {
     const modelId = provider.getModels()[0]?.id;
     if (!modelId) {
@@ -101,9 +104,10 @@ export async function runVerifiedSTT(
       });
 
     if (deps.timeoutMs !== undefined) {
-      const deadline = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`${name}: timeout after ${deps.timeoutMs}ms`)), deps.timeoutMs),
-      );
+      const deadline = new Promise<never>((_, reject) => {
+        const t = setTimeout(() => reject(new Error(`${name}: timeout after ${deps.timeoutMs}ms`)), deps.timeoutMs);
+        deadlineTimers.push(t);
+      });
       p = Promise.race([p, deadline]);
     }
 
@@ -116,6 +120,9 @@ export async function runVerifiedSTT(
   } catch {
     const total = deps.providers.length;
     throw new Error(`[stt-verifier] All ${total} provider${total !== 1 ? 's' : ''} failed or timed out`);
+  } finally {
+    // Clear all deadline timers to prevent leaks (winner found or all failed)
+    for (const t of deadlineTimers) clearTimeout(t);
   }
 
   const latency_ms = Date.now() - t0;

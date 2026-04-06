@@ -20,6 +20,7 @@ export interface GeoLocation extends IpLocation {
 
 // In-memory cache — IPs / pod IDs don't change during a session
 const _cache = new Map<string, IpLocation | null>();
+const IP_CACHE_MAX = 5_000; // prevent unbounded growth on long-running gateways
 
 /** Convert ISO 3166-1 alpha-2 country code to flag emoji. */
 function codeToFlag(code: string): string {
@@ -63,6 +64,11 @@ export async function fetchIpLocation(ip: string): Promise<IpLocation | null> {
       city: String(d.city || ''),
       flag: codeToFlag(String(d.country_code || '')),
     };
+    // Evict oldest entries when cache exceeds limit
+    if (_cache.size >= IP_CACHE_MAX) {
+      const first = _cache.keys().next().value;
+      if (first !== undefined) _cache.delete(first);
+    }
     _cache.set(ip, loc);
     return loc;
   } catch {

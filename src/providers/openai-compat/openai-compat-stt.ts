@@ -48,6 +48,13 @@ export class OpenAICompatSTTProvider implements STTProvider {
   isConfigured(): boolean { return !!process.env[this.config.envKey]; }
 
   async transcribe(request: STTRequest): Promise<STTResponse> {
+    // Validate audio buffer before sending to API
+    const audioLen = Buffer.isBuffer(request.audio) ? request.audio.length
+      : request.audio instanceof Blob ? request.audio.size : 0;
+    if (audioLen === 0) {
+      return { text: '', timing: { total_ms: 0 } };
+    }
+
     const client = this.getClient();
     const model = request.model || this.config.defaultModel || this.config.models[0]?.id;
     const file = await prepareAudioFile(request.audio);
