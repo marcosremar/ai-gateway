@@ -33,6 +33,7 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 function makeClient(overrides?: Partial<ConstructorParameters<typeof GatewayHttpClient>[0]>) {
   return new GatewayHttpClient({
     baseUrl: 'http://gw.test:4000',
+    groqApiKey: '', // disable Groq fallback so only gateway retries are counted
     retry: { maxRetries: 1, backoffMs: [10] },
     circuitBreaker: { failureThreshold: 3, recoveryTimeoutMs: 50, successThreshold: 2 },
     ...overrides,

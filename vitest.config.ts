@@ -20,6 +20,7 @@ export default defineConfig({
     sequence: { concurrent: false },
     env: {
       SKIP_GPU_TESTS: '1',
+      SKIP_LIVE_TESTS: '1',
     },
     server: {
       deps: {

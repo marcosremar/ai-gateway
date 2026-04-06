@@ -43,7 +43,7 @@ function jsonResponse(body: unknown, status = 200) {
 
 describe('GatewaySDK (TS SDK) — Retry', () => {
   function makeSdk() {
-    return new GatewaySDK({ baseUrl: 'http://gw.test:4000' });
+    return new GatewaySDK({ baseUrl: 'http://gw.test:4000', groqApiKey: '' });
   }
 
   // ── Retry exhaustion ───────────────────────────────────────────────────
@@ -283,6 +283,7 @@ describe('GatewayHttpClient (Node SDK) — Advanced Retry', () => {
   function makeNodeClient(overrides?: Partial<ConstructorParameters<typeof GatewayHttpClient>[0]>) {
     return new GatewayHttpClient({
       baseUrl: 'http://gw.test:4000',
+      groqApiKey: '', // disable Groq fallback so only gateway retries are counted
       retry: { maxRetries: 4, backoffMs: [10, 20, 30, 40] },
       circuitBreaker: { failureThreshold: 10, recoveryTimeoutMs: 50, successThreshold: 2 },
       ...overrides,

@@ -14,6 +14,14 @@ export async function getUserConfig(_apiKey: string): Promise<Record<string, unk
   return null; // No DB — caller falls back to in-memory config
 }
 
+export async function saveUserConfig(
+  _apiKey: string,
+  _name: string,
+  _config: Record<string, unknown>,
+): Promise<void> {
+  // No-op for local usage — config saved to disk by config-persistence.ts
+}
+
 export async function seedDefaultUserAccount(
   _apiKey: string,
   _name: string,
