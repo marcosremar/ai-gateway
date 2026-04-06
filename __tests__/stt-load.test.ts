@@ -53,15 +53,13 @@ function percentile(sorted: number[], p: number): number {
 async function timedSttUpload(wav: Uint8Array): Promise<TimedResult> {
   const start = performance.now();
   try {
-    const form = new FormData();
-    form.append('file', new Blob([wav], { type: 'audio/wav' }), 'test.wav');
-    form.append('model', 'whisper-large-v3-turbo');
-    form.append('language', 'en');
-
-    const res = await fetch(`${GATEWAY_URL}/v1/audio/transcriptions`, {
+    const res = await fetch(`${GATEWAY_URL}/v1/transcribe?language=en`, {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${GATEWAY_API_KEY}` },
-      body: form,
+      headers: {
+        'Content-Type': 'audio/wav',
+        'Authorization': `Bearer ${GATEWAY_API_KEY}`,
+      },
+      body: wav,
       signal: AbortSignal.timeout(30_000),
     });
     return { ok: res.status === 200, latencyMs: performance.now() - start, status: res.status };
