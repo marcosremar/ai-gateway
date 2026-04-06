@@ -534,8 +534,8 @@ export function scheduleNextMonitorProbe() {
       console.warn(`[gpu] Monitor probe failed (provider=${activeProvider}, pod=${deployState.podId}): ${msg}`);
     } finally {
       monitorRunning = false;
+      scheduleNextMonitorProbe(); // always reschedule, even after errors
     }
-    scheduleNextMonitorProbe();
   }, monitorDelayMs) as unknown as Timer);
 }
 
