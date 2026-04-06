@@ -601,7 +601,7 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
   catch (e) {
     if (e instanceof BodyTimeoutError) { res.writeHead(408, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Request Timeout' })); return; }
     const msg = e instanceof Error ? e.message : String(e);
-    res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: `Body read error: ${msg}` })); return;
+    res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid request body' })); return;
   }
 
   if (audio.length === 0) {
@@ -736,7 +736,7 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
     const msg = e instanceof Error ? e.message : String(e);
     console.error('[ensemble] Body read error:', msg);
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: `Body read error: ${msg}` }));
+    res.end(JSON.stringify({ error: 'Invalid request body' }));
     return;
   }
 
@@ -1190,7 +1190,7 @@ async function _parsePipelineRequest(
   catch (e) {
     if (e instanceof BodyTimeoutError) { res.writeHead(408, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Request Timeout' })); return null; }
     const msg = e instanceof Error ? e.message : String(e);
-    res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: `Body read error: ${msg}` })); return null;
+    res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid request body' })); return null;
   }
   if (audioBuffer.length === 0) {
     res.writeHead(400, { 'Content-Type': 'application/json' });

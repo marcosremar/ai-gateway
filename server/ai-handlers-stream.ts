@@ -120,31 +120,42 @@ export async function handlePipelineSSE(req: IncomingMessage, res: ServerRespons
     'X-Request-ID': requestId,
   });
 
+  // Track client disconnect to stop pipeline early
+  let clientClosed = false;
+  res.on('close', () => { clientClosed = true; });
+
+  const safeSseWrite = (event: string, data: unknown) => {
+    if (clientClosed) return;
+    try { sseWrite(res, event, data); } catch { clientClosed = true; }
+  };
+
   const callbacks: PipelineCallbacks = {
     onStageStart(stage: string) {
-      sseWrite(res, 'status', { stage });
+      safeSseWrite('status', { stage });
     },
     onStageDone(stage: string, result) {
       if (stage === 'stt' && result.text) {
-        sseWrite(res, 'transcript', { transcript: result.text, latencyMs: result.latencyMs, provider: result.provider });
+        safeSseWrite('transcript', { transcript: result.text, latencyMs: result.latencyMs, provider: result.provider });
       } else if (stage === 'llm' && result.text) {
-        sseWrite(res, 'response', { response: result.text, latencyMs: result.latencyMs, provider: result.provider });
+        safeSseWrite('response', { response: result.text, latencyMs: result.latencyMs, provider: result.provider });
       }
     },
     onAudioChunk(chunk: Buffer, isFirst: boolean) {
-      sseWrite(res, 'audio', { chunk: chunk.toString('base64'), isFirst });
+      safeSseWrite('audio', { chunk: chunk.toString('base64'), isFirst });
     },
     onComplete(result: PipelineResult) {
-      sseWrite(res, 'complete', {
+      if (clientClosed) return;
+      safeSseWrite('complete', {
         transcription: result.transcription,
         response: result.translation,
         timing: result.timing,
       });
-      res.end();
+      try { res.end(); } catch {}
     },
     onError(stage: string, error: Error) {
-      sseWrite(res, 'error', { message: error.message, stage });
-      res.end();
+      if (clientClosed) return;
+      safeSseWrite('error', { message: error.message, stage });
+      try { res.end(); } catch {}
     },
   };
 
