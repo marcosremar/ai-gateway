@@ -87,7 +87,7 @@ describe('Service Lifecycle States', () => {
     it('should keep last 30 transitions', () => {
       const source = readSource('server/state.ts');
       expect(source).toContain('transitions.length > 30');
-      expect(source).toContain('.slice(-30)');
+      expect(source).toContain('transitions.length - 30');
     });
 
     it('resetDeployState should clear transitions', () => {

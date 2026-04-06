@@ -13,9 +13,11 @@ export let botTranscriptCursor = 0;  // index of last seen transcript
 export function broadcastWs(msg: Record<string, unknown>): void {
   if (wsClients.size === 0) return;
   const json = JSON.stringify(msg);
+  const dead: BabelCastWS[] = [];
   for (const ws of wsClients) {
-    try { ws.send(json); } catch { wsClients.delete(ws); }
+    try { ws.send(json); } catch { dead.push(ws); }
   }
+  for (const ws of dead) wsClients.delete(ws);
 }
 
 /**
