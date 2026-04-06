@@ -5,7 +5,7 @@
 import { OpenAICompatSTTProvider } from '../openai-compat/openai-compat-stt';
 import type { ModelInfo } from '../types';
 
-const BASE_URL = 'https://api.openai.com/v1';
+const BASE_URL = process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
 const ENV_KEY = 'OPENAI_API_KEY';
 
 const OPENAI_STT_MODELS: ModelInfo[] = [

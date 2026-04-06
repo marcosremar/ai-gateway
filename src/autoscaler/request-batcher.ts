@@ -96,7 +96,11 @@ export class RequestBatcher<T> {
     this.flushFn(data)
       .then((results) => {
         for (let i = 0; i < batch.length; i++) {
-          batch[i].resolve(results[i]);
+          if (i < results.length) {
+            batch[i].resolve(results[i]);
+          } else {
+            batch[i].reject(new Error('Batch result missing for this item'));
+          }
         }
       })
       .catch((err) => {

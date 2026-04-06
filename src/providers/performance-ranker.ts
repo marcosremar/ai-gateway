@@ -410,12 +410,13 @@ export class PerformanceRanker {
   }
 }
 
-/** Default module-level singleton (with disk persistence in ~/.babelcast/) */
+/** Default module-level singleton (with disk persistence) */
 export function createDefaultPerformanceRanker(): PerformanceRanker {
   try {
     const os = require('os');
     const path = require('path');
-    const persistPath = path.join(os.homedir(), '.babelcast', 'perf-ranker.json');
+    const configDir = process.env.AI_GATEWAY_CONFIG_DIR || path.join(os.homedir(), '.ai-gateway');
+    const persistPath = path.join(configDir, 'perf-ranker.json');
     return new PerformanceRanker({ persistPath });
   } catch {
     return new PerformanceRanker();

@@ -293,7 +293,7 @@ export class BootOrchestrator {
           if (states?.[tierIndex]?.state === 'booting') {
             states[tierIndex] = { state: 'idle', tierIndex };
             this.callbacks.setStates(userId, states);
-            void this.callbacks.persistStates(userId, states).catch(() => {});
+            void this.callbacks.persistStates(userId, states);
             this.logger.warn(`[boot-poller] Tier ${tierIndex} reset to idle after boot timeout`);
           }
         } catch { /* best effort state cleanup */ }

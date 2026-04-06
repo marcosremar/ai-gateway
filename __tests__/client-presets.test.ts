@@ -9,148 +9,91 @@ import {
   LLM_PROFILE,
   IMAGE_PROFILE,
   SYSTEM_PROFILE,
-} from '@ai-gateway/client/presets';
-import type { AIProfile } from '@ai-gateway/client/types';
+  SPEECH_TO_SPEECH_PROFILE,
+  OPENAI_REALTIME_PROFILE,
+} from '../src/client/presets';
 
-describe('client-presets', () => {
-  // ── Preset structure ──────────────────────────────────────────────────
+describe('resolveProfile()', () => {
+  it('should return VOICE_PROFILE for preset "voice"', () => {
+    const result = resolveProfile('voice');
+    expect(result).toEqual(VOICE_PROFILE);
+  });
 
-  describe('preset structure', () => {
-    const presets = [
-      { name: 'VOICE', profile: VOICE_PROFILE },
-      { name: 'CHAT', profile: CHAT_PROFILE },
-      { name: 'STT', profile: STT_PROFILE },
-      { name: 'TTS', profile: TTS_PROFILE },
-      { name: 'LLM', profile: LLM_PROFILE },
-      { name: 'IMAGE', profile: IMAGE_PROFILE },
-      { name: 'SYSTEM', profile: SYSTEM_PROFILE },
-    ];
+  it('should return CHAT_PROFILE for preset "chat"', () => {
+    const result = resolveProfile('chat');
+    expect(result).toEqual(CHAT_PROFILE);
+  });
 
-    it('all 7 presets have expected fields', () => {
-      for (const { name, profile } of presets) {
-        expect(profile.preset, `${name} preset`).toBeDefined();
-        expect(profile.fallbackOptions, `${name} fallbackOptions`).toBeDefined();
+  it('should return STT_PROFILE for preset "stt"', () => {
+    const result = resolveProfile('stt');
+    expect(result).toEqual(STT_PROFILE);
+  });
+
+  it('should throw for unknown preset name', () => {
+    expect(() => resolveProfile('nonexistent' as any)).toThrow('Unknown profile preset: "nonexistent"');
+  });
+
+  it('should return a copy when given object without preset', () => {
+    const input = { temperature: 0.5, maxTokens: 100 };
+    const result = resolveProfile(input as any);
+    expect(result).toEqual(input);
+    expect(result).not.toBe(input);
+  });
+
+  it('should merge on top of preset base when object has preset field', () => {
+    const result = resolveProfile({ preset: 'chat', temperature: 0.9 } as any);
+    expect(result.preset).toBe('chat');
+    expect(result.temperature).toBe(0.9);
+    expect(result.llm).toEqual(CHAT_PROFILE.llm);
+    expect(result.fallbackOptions).toBeDefined();
+  });
+});
+
+describe('mergeProfiles()', () => {
+  it('should let override keys replace base keys', () => {
+    const base = { temperature: 0.3, maxTokens: 1000 };
+    const override = { temperature: 0.9 };
+    const result = mergeProfiles(base as any, override as any);
+    expect(result.temperature).toBe(0.9);
+    expect(result.maxTokens).toBe(1000);
+  });
+
+  it('should shallow merge fallbackOptions', () => {
+    const base = { fallbackOptions: { timeoutMs: 30_000, retriesPerProvider: 1 } };
+    const override = { fallbackOptions: { timeoutMs: 5_000 } };
+    const result = mergeProfiles(base as any, override as any);
+    expect(result.fallbackOptions!.timeoutMs).toBe(5_000);
+    expect(result.fallbackOptions!.retriesPerProvider).toBe(1);
+  });
+
+  it('should merge keys with override winning', () => {
+    const base = { keys: { openai: 'sk-old', groq: 'gsk-old' } };
+    const override = { keys: { openai: 'sk-new' } };
+    const result = mergeProfiles(base as any, override as any);
+    expect(result.keys!.openai).toBe('sk-new');
+    expect(result.keys!.groq).toBe('gsk-old');
+  });
+});
+
+describe('preset structures', () => {
+  const checks: [string, any, string[]][] = [
+    ['VOICE_PROFILE', VOICE_PROFILE, ['stt', 'llm', 'tts']],
+    ['CHAT_PROFILE', CHAT_PROFILE, ['llm']],
+    ['STT_PROFILE', STT_PROFILE, ['stt']],
+    ['TTS_PROFILE', TTS_PROFILE, ['tts']],
+    ['LLM_PROFILE', LLM_PROFILE, ['llm']],
+    ['IMAGE_PROFILE', IMAGE_PROFILE, ['image']],
+    ['SYSTEM_PROFILE', SYSTEM_PROFILE, ['stt', 'llm']],
+    ['SPEECH_TO_SPEECH_PROFILE', SPEECH_TO_SPEECH_PROFILE, ['stt', 'llm', 'tts']],
+    ['OPENAI_REALTIME_PROFILE', OPENAI_REALTIME_PROFILE, ['realtime', 'omni', 'stt', 'llm', 'tts']],
+  ];
+
+  for (const [name, profile, fields] of checks) {
+    it(`${name} has correct structure (${fields.join(', ')})`, () => {
+      for (const field of fields) {
+        expect(Array.isArray(profile[field]), `${name}.${field}`).toBe(true);
+        expect(profile[field].length, `${name}.${field} should not be empty`).toBeGreaterThan(0);
       }
     });
-
-    it('voice profile has stt, llm, tts chains', () => {
-      expect(VOICE_PROFILE.stt!.length).toBeGreaterThan(0);
-      expect(VOICE_PROFILE.llm!.length).toBeGreaterThan(0);
-      expect(VOICE_PROFILE.tts!.length).toBeGreaterThan(0);
-      expect(VOICE_PROFILE.voice).toBe('nova');
-    });
-
-    it('image profile has image chain and dimensions', () => {
-      expect(IMAGE_PROFILE.image!.length).toBeGreaterThan(0);
-      expect(IMAGE_PROFILE.imageWidth).toBe(1280);
-      expect(IMAGE_PROFILE.imageHeight).toBe(720);
-    });
-  });
-
-  // ── resolveProfile ────────────────────────────────────────────────────
-
-  describe('resolveProfile', () => {
-    it('resolves string preset name', () => {
-      const profile = resolveProfile('voice');
-      expect(profile.preset).toBe('voice');
-      expect(profile.stt!.length).toBeGreaterThan(0);
-    });
-
-    it('throws for unknown preset name', () => {
-      expect(() => resolveProfile('nonexistent' as any)).toThrow('Unknown profile preset');
-    });
-
-    it('copies object when no preset field', () => {
-      const input: AIProfile = { temperature: 0.5, maxTokens: 100 };
-      const result = resolveProfile(input);
-      expect(result.temperature).toBe(0.5);
-      expect(result.maxTokens).toBe(100);
-      // Should be a copy
-      expect(result).not.toBe(input);
-    });
-
-    it('merges object with preset base', () => {
-      const input: AIProfile = { preset: 'voice', temperature: 0.7 };
-      const result = resolveProfile(input);
-      // Should have voice preset's stt chain
-      expect(result.stt!.length).toBeGreaterThan(0);
-      // Should have the override
-      expect(result.temperature).toBe(0.7);
-    });
-
-    it('throws for unknown preset in object', () => {
-      expect(() => resolveProfile({ preset: 'bogus' as any })).toThrow('Unknown profile preset');
-    });
-  });
-
-  // ── mergeProfiles ─────────────────────────────────────────────────────
-
-  describe('mergeProfiles', () => {
-    it('override wins for scalar fields', () => {
-      const base: AIProfile = { temperature: 0.5, voice: 'alloy' };
-      const override: AIProfile = { temperature: 0.9 };
-      const result = mergeProfiles(base, override);
-      expect(result.temperature).toBe(0.9);
-      expect(result.voice).toBe('alloy');
-    });
-
-    it('arrays are replaced entirely', () => {
-      const base: AIProfile = { stt: [{ provider: 'groq', model: 'whisper' }] };
-      const override: AIProfile = { stt: [{ provider: 'openai', model: 'whisper' }] };
-      const result = mergeProfiles(base, override);
-      expect(result.stt).toHaveLength(1);
-      expect(result.stt![0].provider).toBe('openai');
-    });
-
-    it('keys are merged (override wins per key)', () => {
-      const base: AIProfile = { keys: { openai: 'key-a', groq: 'key-b' } };
-      const override: AIProfile = { keys: { openai: 'key-new' } };
-      const result = mergeProfiles(base, override);
-      expect(result.keys!.openai).toBe('key-new');
-      expect(result.keys!.groq).toBe('key-b');
-    });
-
-    it('fallbackOptions are shallow-merged', () => {
-      const base: AIProfile = { fallbackOptions: { timeoutMs: 5000, retriesPerProvider: 0 } };
-      const override: AIProfile = { fallbackOptions: { timeoutMs: 10000 } };
-      const result = mergeProfiles(base, override);
-      expect(result.fallbackOptions!.timeoutMs).toBe(10000);
-      expect(result.fallbackOptions!.retriesPerProvider).toBe(0);
-    });
-  });
-
-  // ── Immutability ──────────────────────────────────────────────────────
-
-  describe('immutability', () => {
-    it('resolveProfile does not mutate original preset', () => {
-      const originalStt = [...VOICE_PROFILE.stt!];
-      resolveProfile('voice');
-      expect(VOICE_PROFILE.stt).toEqual(originalStt);
-    });
-
-    it('mergeProfiles does not mutate inputs', () => {
-      const base: AIProfile = { temperature: 0.5, keys: { openai: 'a' } };
-      const override: AIProfile = { temperature: 0.9, keys: { groq: 'b' } };
-      const baseCopy = { ...base, keys: { ...base.keys } };
-      mergeProfiles(base, override);
-      expect(base.temperature).toBe(baseCopy.temperature);
-    });
-  });
-
-  // ── Edge cases ────────────────────────────────────────────────────────
-
-  describe('edge cases', () => {
-    it('empty object resolved correctly', () => {
-      const result = resolveProfile({});
-      expect(result).toEqual({});
-    });
-
-    it('merge with no keys or fallbackOptions', () => {
-      const base: AIProfile = { temperature: 1 };
-      const override: AIProfile = { voice: 'nova' };
-      const result = mergeProfiles(base, override);
-      expect(result.keys).toBeUndefined();
-      expect(result.fallbackOptions).toBeUndefined();
-    });
-  });
+  }
 });

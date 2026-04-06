@@ -11,7 +11,8 @@ import os from 'os';
 import path from 'path';
 import fs from 'fs';
 
-const SETTINGS_PATH = path.join(os.homedir(), '.babelcast', 'latency-settings.json');
+const configDir = process.env.AI_GATEWAY_CONFIG_DIR || path.join(os.homedir(), '.ai-gateway');
+const SETTINGS_PATH = path.join(configDir, 'latency-settings.json');
 
 // ── GPU Priority Defaults ────────────────────────────────────────────────────
 

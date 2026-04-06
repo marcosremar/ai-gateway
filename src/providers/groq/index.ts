@@ -8,7 +8,7 @@ import { OpenAICompatTTSProvider } from '../openai-compat/openai-compat-tts';
 import { OpenAICompatLLMProvider } from '../openai-compat/openai-compat-llm';
 import { GROQ_STT_MODELS, GROQ_TTS_MODELS, GROQ_TTS_VOICES, GROQ_LLM_MODELS } from './models';
 
-const BASE_URL = 'https://api.groq.com/openai/v1';
+const BASE_URL = process.env.GROQ_API_BASE || 'https://api.groq.com/openai/v1';
 const ENV_KEY = 'GROQ_API_KEY';
 
 const sttModel = process.env.GROQ_STT_MODEL || 'whisper-large-v3-turbo';

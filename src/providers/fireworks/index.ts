@@ -11,7 +11,7 @@ export { FIREWORKS_STT_MODELS, FIREWORKS_LLM_MODELS, FIREWORKS_IMAGE_MODELS } fr
 export { FireworksImageProvider, fireworksImage } from './fireworks-image';
 
 // Fireworks endpoint (OpenAI-compatible)
-const BASE_URL = 'https://api.fireworks.ai/inference/v1';
+const BASE_URL = process.env.FIREWORKS_API_BASE || 'https://api.fireworks.ai/inference/v1';
 const ENV_KEY = 'FIREWORKS_API_KEY';
 
 const sttModel = process.env.FIREWORKS_STT_MODEL || 'whisper-v3';

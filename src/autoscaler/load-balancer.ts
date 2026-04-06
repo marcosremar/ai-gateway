@@ -83,11 +83,12 @@ function tokenBucketKey(clientId: string): string {
 }
 
 function hashUserId(userId: string): number {
-  let hash = 0;
+  let hash = 2166136261;
   for (let i = 0; i < userId.length; i++) {
-    hash = hash + userId.charCodeAt(i);
+    hash ^= userId.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
   }
-  return hash;
+  return hash >>> 0;
 }
 
 export class LoadBalancer {
@@ -301,7 +302,7 @@ export class LoadBalancer {
    * Report a closed connection to a tier. Call when request ends.
    */
   async decrementConnections(tierIndex: number): Promise<void> {
-    const count = Math.max(0, (this.connectionCounts.get(tierIndex) || 1) - 1);
+    const count = Math.max(0, (this.connectionCounts.get(tierIndex) ?? 0) - 1);
     this.connectionCounts.set(tierIndex, count);
     const key = connectionsKey(tierIndex);
     try {
