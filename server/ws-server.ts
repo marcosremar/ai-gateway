@@ -1037,7 +1037,21 @@ export function startWsServer() {
       'GET /v1/requests/log': mt.handleRequestLog,
       'GET /v1/service-stats': mt.handleServiceStats,
       'GET /metrics': mt.handleMetrics,
+      // Latency
+      'GET /v1/gpu/latency/settings': gh.handleGetLatencySettings,
+      'PATCH /v1/gpu/latency/settings': gh.handlePatchLatencySettings,
     };
+    // Playground
+    try {
+      const pg = require('./playground-handlers');
+      Object.assign(handlers, {
+        'GET /v1/playground/catalog': pg.handlePlaygroundCatalog,
+        'POST /v1/playground/stt': pg.handlePlaygroundStt,
+        'POST /v1/playground/llm': pg.handlePlaygroundLlm,
+        'POST /v1/playground/tts': pg.handlePlaygroundTts,
+        'POST /v1/playground/pipeline': pg.handlePlaygroundPipeline,
+      });
+    } catch {}
 
     Bun.serve({
       port: PORT,
