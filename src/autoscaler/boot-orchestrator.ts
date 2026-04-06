@@ -287,6 +287,16 @@ export class BootOrchestrator {
         const bootTs = ts as BootingTierState;
         this.logger.warn(`[boot-poller] Tier ${tierIndex} (${provider}) polling stopped — timeout (${Math.round(elapsed / 1000)}s, instanceId=${bootTs.discoveredInstanceId || 'none'}, endpoint=${bootTs.endpoint || 'none'})`);
         this.bootPollers.delete(key);
+        // Transition tier back to idle so it can be retried (prevents stuck 'booting' state)
+        try {
+          const states = this.callbacks.getStates(userId);
+          if (states?.[tierIndex]?.state === 'booting') {
+            states[tierIndex] = { state: 'idle', tierIndex };
+            this.callbacks.setStates(userId, states);
+            void this.callbacks.persistStates(userId, states).catch(() => {});
+            this.logger.warn(`[boot-poller] Tier ${tierIndex} reset to idle after boot timeout`);
+          }
+        } catch { /* best effort state cleanup */ }
         return;
       }
 

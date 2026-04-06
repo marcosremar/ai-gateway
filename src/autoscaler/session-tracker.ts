@@ -28,6 +28,14 @@ export class SessionTracker {
     for (const [key, entry] of this.teacherCache) {
       if (entry.expiresAt < now) this.teacherCache.delete(key);
     }
+    // Hard cap: if cache exceeds 10k entries, evict oldest half
+    if (this.teacherCache.size > 10_000) {
+      const entries = Array.from(this.teacherCache.entries())
+        .sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+      for (let i = 0; i < entries.length / 2; i++) {
+        this.teacherCache.delete(entries[i][0]);
+      }
+    }
   }
 
   private key(userId: string): string {
