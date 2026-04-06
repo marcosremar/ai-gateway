@@ -281,27 +281,19 @@ export class LoadBalancer {
   /**
    * Report an active connection to a tier. Call when request starts.
    */
+  /** In-memory connection counters — avoids get-parse-modify-set race condition */
+  private connectionCounts = new Map<number, number>();
+
   async incrementConnections(tierIndex: number): Promise<void> {
+    const count = (this.connectionCounts.get(tierIndex) || 0) + 1;
+    this.connectionCounts.set(tierIndex, count);
     const key = connectionsKey(tierIndex);
     try {
-      const raw = await this.stateStore.get(key);
-      let metrics: TierConnectionMetrics;
-
-      if (raw) {
-        const existing = JSON.parse(raw) as TierConnectionMetrics;
-        const prev = typeof existing?.activeConnections === 'number' ? existing.activeConnections : 0;
-        metrics = {
-          tierIndex,
-          activeConnections: prev + 1,
-          lastUpdated: Date.now(),
-        };
-      } else {
-        metrics = { tierIndex, activeConnections: 1, lastUpdated: Date.now() };
-      }
-
-      await this.stateStore.set(key, JSON.stringify(metrics), CONNECTIONS_TTL_SECS);
+      await this.stateStore.set(key, JSON.stringify({
+        tierIndex, activeConnections: count, lastUpdated: Date.now(),
+      } satisfies TierConnectionMetrics), CONNECTIONS_TTL_SECS);
     } catch {
-      // Non-critical
+      // Non-critical — in-memory counter is still accurate
     }
   }
 
@@ -309,26 +301,19 @@ export class LoadBalancer {
    * Report a closed connection to a tier. Call when request ends.
    */
   async decrementConnections(tierIndex: number): Promise<void> {
+    const count = Math.max(0, (this.connectionCounts.get(tierIndex) || 1) - 1);
+    this.connectionCounts.set(tierIndex, count);
     const key = connectionsKey(tierIndex);
     try {
-      const raw = await this.stateStore.get(key);
-      if (!raw) return;
-
-      const existing = JSON.parse(raw) as TierConnectionMetrics;
-      const prev = typeof existing?.activeConnections === 'number' ? existing.activeConnections : 1;
-      const newCount = Math.max(0, prev - 1);
-
-      if (newCount > 0) {
+      if (count > 0) {
         await this.stateStore.set(key, JSON.stringify({
-          tierIndex,
-          activeConnections: newCount,
-          lastUpdated: Date.now(),
-        }), CONNECTIONS_TTL_SECS);
+          tierIndex, activeConnections: count, lastUpdated: Date.now(),
+        } satisfies TierConnectionMetrics), CONNECTIONS_TTL_SECS);
       } else {
         await this.stateStore.del(key);
       }
     } catch {
-      // Non-critical
+      // Non-critical — in-memory counter is still accurate
     }
   }
 

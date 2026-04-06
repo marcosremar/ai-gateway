@@ -517,7 +517,7 @@ export async function withProviderFallback<T>(
             `${logPrefix} ${entry.provider}/${entry.model ?? 'default'} ` +
             `context window exceeded (${elapsed}ms) → next`,
           );
-          tracker.recordFailure(entry, allowedFails, cooldownMs);
+          if (!allCooledDown) tracker.recordFailure(entry, allowedFails, cooldownMs);
 
           // Optionally insert a larger-context model upgrade into the chain
           if (contextWindowFallbacks && entry.model) {
@@ -540,7 +540,7 @@ export async function withProviderFallback<T>(
         // ── Timeout or auth/rate-limit: move on immediately, no retry ─────────
         const moveOnStatus = extractStatus(err);
         if (isTimeout || MOVE_ON_STATUSES.has(moveOnStatus ?? 0)) {
-          tracker.recordFailure(entry, allowedFails, cooldownMs);
+          if (!allCooledDown) tracker.recordFailure(entry, allowedFails, cooldownMs);
 
           // ── Record 402 in credit block tracker ──────────────────────────────
           if (moveOnStatus === 402) {
@@ -567,7 +567,7 @@ export async function withProviderFallback<T>(
         }
 
         // ── 5xx transient error ───────────────────────────────────────────────
-        tracker.recordFailure(entry, allowedFails, cooldownMs);
+        if (!allCooledDown) tracker.recordFailure(entry, allowedFails, cooldownMs);
 
         const isLastRetry = retryNum >= maxAttempts - 1;
         const hasNextProvider = iterChain.slice(i + 1).some((e) => !tracker.isCoolingDown(e));

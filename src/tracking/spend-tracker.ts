@@ -80,6 +80,12 @@ export class SpendTracker {
    * Record a spend event. Cost is auto-calculated if not provided (set to 0).
    */
   async record(record: SpendRecord): Promise<void> {
+    // Guard against negative costs corrupting budget enforcement
+    if (record.costUsd < 0) {
+      console.warn(`[spend-tracker] Ignoring record with negative cost: $${record.costUsd} (provider=${record.provider})`);
+      return;
+    }
+
     const date = new Date(record.timestamp).toISOString().slice(0, 10);
     const rKey = recordsKey(record.userId, date);
     const dKey = dailyKey(record.userId, date);
