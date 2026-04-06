@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { loadEnv, makeTestWav, waitFor } from './helpers';
+import { loadEnv, makeTestWav, loadTestVoiceWav, waitFor } from './helpers';
 
 const GW = process.env.GATEWAY_URL || 'http://localhost:4000';
 
@@ -87,7 +87,7 @@ async function patchLatencySettings(patch: Partial<LatencySettings>): Promise<La
 }
 
 async function runSTT(): Promise<{ text: string; latencyMs: number; provider: string }> {
-  const wav = makeTestWav(1.0);
+  const wav = loadTestVoiceWav();
   const res = await fetch(`${GW}/v1/playground/stt`, {
     method: 'POST',
     headers: { 'Content-Type': 'audio/wav' },
