@@ -128,14 +128,18 @@ describe.skipIf(!hasKeys)('RunpodClient — Read-Only (Real API)', () => {
 describe.skipIf(!hasKeys)('RunpodClient — Create & Lifecycle (Real API)', () => {
   it('creates an ultralight pod, checks status, then deletes it', async () => {
     try {
-      // Use the smallest possible pod: ultralight image, no volume, cheapest GPU
+      // Use a CPU pod for reliable lifecycle testing (GPU pods often ghost)
       const { result: instance, ms: createMs } = await timed(() =>
         client.createInstance(
           {
-            gpuTypes: ['RTX 4090', 'RTX A5000', 'A40'],
-            gpuCount: 1,
-            storageGb: 0, // No volume — ultralight
+            computeType: 'CPU',
+            cpuFlavorIds: ['cpu3c', 'cpu3g', 'cpu5c', 'cpu5g'],
+            vcpus: 1,
+            ramGb: 4,
+            containerDiskInGb: 10,
+            storageGb: 0,
             dockerImage: 'python:3.11-slim',
+            cloudType: 'SECURE',
             env: { TEST_MODE: 'true' },
           },
           creds,
@@ -207,10 +211,13 @@ describe.skipIf(!hasKeys)('RunpodClient — Create & Lifecycle (Real API)', () =
     try {
       const instance = await clientWithPersist.createInstance(
         {
-          gpuTypes: ['RTX 4090', 'RTX A5000', 'A40'],
-          gpuCount: 1,
+          computeType: 'CPU',
+          cpuFlavorIds: ['cpu3c', 'cpu3g', 'cpu5c', 'cpu5g'],
+          vcpus: 1,
+          ramGb: 4,
           storageGb: 0,
           dockerImage: 'python:3.11-slim',
+          cloudType: 'SECURE',
         },
         creds,
         'test-user-123',

@@ -226,7 +226,9 @@ export class RunpodClient extends AbstractGpuProvider {
       // Volume: only for full pipeline images that need model cache persistence.
       // Minimum 20GB container disk — 10GB is too tight (pip packages + model cache + temp files
       // can fill it silently, causing pod EXITED after ~5-8min).
-      containerDiskInGb: spec.containerDiskInGb ? Math.max(spec.containerDiskInGb, 20) : Math.max(diskGb, 20),
+      containerDiskInGb: spec.computeType === 'CPU'
+        ? Math.min(spec.containerDiskInGb || 10, 10)   // CPU pods: max 10GB
+        : spec.containerDiskInGb ? Math.max(spec.containerDiskInGb, 20) : Math.max(diskGb, 20),
       // Network volume: when volumeId is provided, attach it instead of creating ephemeral storage.
       // This lets LLM GGUFs (~7-12GB) persist across pod restarts, eliminating re-download on cold boot.
       ...(spec.volumeId
@@ -339,8 +341,8 @@ export class RunpodClient extends AbstractGpuProvider {
           // fail to schedule the pod (machine becomes {} within seconds). This
           // happens when no physical machine can satisfy the storage/GPU request.
           // Poll the pod after a short delay to verify the machine was actually assigned.
-          const GHOST_CHECK_DELAY_MS = 8_000;
-          const GHOST_CHECK_RETRIES = 2;
+          const GHOST_CHECK_DELAY_MS = 10_000;
+          const GHOST_CHECK_RETRIES = 3;
           let ghostDetected = false;
           for (let gc = 0; gc < GHOST_CHECK_RETRIES; gc++) {
             await new Promise((r) => setTimeout(r, GHOST_CHECK_DELAY_MS));
