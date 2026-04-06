@@ -29,7 +29,7 @@ function redactMeetingUrl(url: string): string {
 }
 
 export const BOT_POD_PREFIX = 'babelcast-bot-';
-export const BOT_DOCKER_IMAGE = 'marcosremar/meet-teams-bot:latest';
+export const BOT_DOCKER_IMAGE = process.env.BOT_DOCKER_IMAGE || 'marcosremar/meet-teams-bot:latest';
 export const BOT_PORTS = ['8080/http', '1936/tcp', '5900/http', '22/tcp', '3099/http']; // control API + RTMP webcam input + VNC debug + SSH + Avatar
 
 /** Build headers for proxied requests to the bot pod (includes Bearer auth if key is set). */
@@ -1188,8 +1188,4 @@ export async function handleBotProxy(req: IncomingMessage, res: ServerResponse):
   }
 }
 
-// ── Auto-deploy stub (local/desktop) ─────────────────────────────────────────
-
-export async function autoDeployBot(): Promise<void> {
-  // No-op for desktop — bot is deployed manually via UI
-}
+// ── Auto-deploy stub removed — autoDeployBot is defined at line 266 ──────────
