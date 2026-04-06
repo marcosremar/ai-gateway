@@ -1040,6 +1040,21 @@ export function startWsServer() {
       // Latency
       'GET /v1/gpu/latency/settings': gh.handleGetLatencySettings,
       'PATCH /v1/gpu/latency/settings': gh.handlePatchLatencySettings,
+      'POST /v1/gpu/latency/run': gh.handleTriggerLatencyRun,
+      'PATCH /v1/gpu/latency/hosts': gh.handlePatchLatencyHosts,
+      'POST /v1/gpu/latency/probe': gh.handleGpuLatencyProbe,
+      // GET /v1/gpu/latency/hosts — return host latency data
+      'GET /v1/gpu/latency/hosts': async (_req: any, res: any) => {
+        try {
+          const { getAllHostLatencies } = require('./latency-db');
+          const hosts = await getAllHostLatencies();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ hosts }));
+        } catch {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ hosts: [] }));
+        }
+      },
     };
     // Playground
     try {
