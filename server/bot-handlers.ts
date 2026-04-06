@@ -74,9 +74,12 @@ function startBotAudioPull(botEndpoint: string) {
         console.log(`[bot-audio-pull] chunk #${chunks} → ${wsClients.size} client(s)`);
       }
       // Relay binary audio to all connected Python app clients (same as parec path)
+      // Collect-then-delete to avoid Set mutation during iteration
+      const dead: typeof wsClients extends Set<infer T> ? T[] : never[] = [];
       for (const client of wsClients) {
-        try { client.send(data); } catch { wsClients.delete(client); }
+        try { client.send(data); } catch { dead.push(client); }
       }
+      for (const c of dead) wsClients.delete(c);
     });
     ws.on('close', () => {
       console.log(`[bot-audio-pull] Disconnected (${chunks} chunks received)`);
@@ -125,6 +128,29 @@ export async function cleanupBotPods(apiKey: string): Promise<void> {
     }
   } catch (err) {
     console.warn(`[bot] Failed to list RunPod pods for bot cleanup: ${err}`);
+  }
+  // Clean up Scaleway bot instances
+  const scwKey = process.env.SCALEWAY_SECRET_KEY || '';
+  if (scwKey) {
+    try {
+      const scwInstances = await scaleway.listInstances({ apiKey: scwKey });
+      const scwToTerminate = scwInstances.filter(inst => inst.status === 'running');
+      if (scwToTerminate.length > 0) {
+        console.log(`[bot] Cleaning up ${scwToTerminate.length} Scaleway bot instance(s)...`);
+        await Promise.allSettled(
+          scwToTerminate.map(async (inst) => {
+            try {
+              await scaleway.deleteInstance(inst.instanceId, { apiKey: scwKey });
+              console.log(`[bot] Terminated Scaleway bot ${inst.instanceId}`);
+            } catch (err) {
+              console.warn(`[bot] Failed to terminate Scaleway bot ${inst.instanceId}: ${err}`);
+            }
+          })
+        );
+      }
+    } catch (err) {
+      console.warn(`[bot] Failed to list Scaleway instances for cleanup: ${err}`);
+    }
   }
   // Clean up Fly.io bot machines
   const flyKey = process.env.FLY_API_TOKEN || '';
