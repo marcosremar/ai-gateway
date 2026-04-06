@@ -589,7 +589,7 @@ export function startWsServer() {
       } else if (url.pathname === '/v1/stt/stream') {
         const language = url.searchParams.get('language') || undefined;
         const speculateTarget = url.searchParams.get('target') || undefined;
-        const pauseMs = parseInt(url.searchParams.get('pause_ms') || '700', 10);
+        const pauseMs = Math.max(50, Math.min(30_000, parseInt(url.searchParams.get('pause_ms') || '700', 10) || 700));
         const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'stt', language, speculateTarget, pauseMs } });
         if (upgraded) return;
       } else if (url.pathname === '/ws/bot-audio') {

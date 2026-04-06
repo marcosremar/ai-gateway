@@ -1342,7 +1342,14 @@ export async function startDeployLoop(
       }
       console.log(`[gpu] Cleaning up crashed instance ${instance.instanceId}...`);
       try { await providerClient.deleteInstance(instance.instanceId, credentials); }
-      catch (err) { console.warn(`[gpu] Failed to clean up crashed instance ${instance.instanceId}: ${err}`); }
+      catch (cleanupErr) {
+        // If cleanup fails, don't continue creating new instances — the orphan will keep billing
+        const errMsg = `Failed to clean up crashed instance ${instance.instanceId} on ${providerName}: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`;
+        console.error(`[gpu] ${errMsg}`);
+        setDeployState({ status: 'error', message: errMsg, podId: instance.instanceId });
+        deploymentSM.markError(errMsg);
+        return; // Stop deploy — orphan sweep will attempt cleanup later
+      }
       continue;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
