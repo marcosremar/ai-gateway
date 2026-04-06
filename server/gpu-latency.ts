@@ -176,12 +176,14 @@ export function scheduleBackgroundProbes(offers: GpuOffer[]): void {
 
     const extraPorts = hostDirectPort ? [hostDirectPort] : [];
     _probing.add(hostId);
-    probeHostFull(hostIp, extraPorts)
-      .then(result => {
-        _probing.delete(hostId);
-        return saveProbeResult(hostId, result);
-      })
-      .catch(err => { console.debug(`[latency] probe failed for ${hostId}:`, err instanceof Error ? err.message : err); _probing.delete(hostId); });
+    // Wrap entire probe+save in a timeout to prevent orphaned dedup entries
+    const probeTimeout = new Promise<never>((_, rej) => setTimeout(() => rej(new Error('probe timeout')), 30_000));
+    Promise.race([
+      probeHostFull(hostIp, extraPorts).then(result => saveProbeResult(hostId, result)),
+      probeTimeout,
+    ])
+      .catch(err => console.debug(`[latency] probe failed for ${hostId}:`, err instanceof Error ? err.message : err))
+      .finally(() => _probing.delete(hostId));
   }
 }
 

@@ -30,6 +30,7 @@ import { runStandbyReadinessCheck } from './gpu-readiness';
 
 let standbyDeployInProgress = false;
 let standbyMonitorTimer: ReturnType<typeof setInterval> | null = null;
+let _standbyErrorResetTimer: ReturnType<typeof setTimeout> | null = null;
 const STANDBY_MONITOR_INTERVAL_MS = 60_000; // check every 60s
 
 // ── Trigger monitoring ────────────────────────────────────────────────────────
@@ -147,7 +148,9 @@ export async function triggerStandbyDeploy(reason: 'manual' | 'session_duration'
     setStandbyDeployState({ status: 'error', message: msg });
     broadcastWs({ type: 'gpu:standby', status: 'error', reason: msg });
     // Reset to idle after 30s so deploys aren't permanently blocked
-    setTimeout(() => {
+    if (_standbyErrorResetTimer) clearTimeout(_standbyErrorResetTimer);
+    _standbyErrorResetTimer = setTimeout(() => {
+      _standbyErrorResetTimer = null;
       if (standbyDeployState.status === 'error') {
         setStandbyDeployState({ status: 'idle', message: '' });
       }
@@ -229,10 +232,14 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
     console.log('[standby] Primary promoted from standby — terminating old pod');
     broadcastWs({ type: 'gpu:standby', status: 'idle', message: 'Handover complete' });
 
-    // Terminate old pod (fire and forget)
-    terminateOldPod(oldPodId, oldProvider).catch(err =>
-      console.warn('[standby] Old pod termination failed:', err instanceof Error ? err.message : err),
-    );
+    // Terminate old pod with retry to prevent dual billing
+    terminateOldPod(oldPodId, oldProvider).catch(async (err) => {
+      console.warn('[standby] Old pod termination failed, retrying in 10s:', err instanceof Error ? err.message : err);
+      await new Promise(r => setTimeout(r, 10_000));
+      terminateOldPod(oldPodId, oldProvider).catch(err2 =>
+        console.error('[standby] Old pod termination retry failed — MANUAL CLEANUP NEEDED:', oldPodId, err2 instanceof Error ? err2.message : err2),
+      );
+    });
 
     resetStandbyDeployState();
     return { ok: true };
