@@ -152,6 +152,18 @@ export function makeTestWav(durationSecs = 0.5, sampleRate = 16000): Buffer {
   return buffer;
 }
 
+/** Load the real voice WAV fixture (TTS-generated, 16kHz, works with all STT providers) */
+export function loadTestVoiceWav(): Buffer {
+  const path = require('path');
+  const fs = require('fs');
+  const fixture = path.join(__dirname, 'fixtures', 'test-voice.wav');
+  if (!fs.existsSync(fixture)) {
+    // Fall back to synthetic WAV if fixture not available
+    return makeTestWav(1.0);
+  }
+  return fs.readFileSync(fixture);
+}
+
 /** Measure execution time */
 export async function timed<T>(fn: () => Promise<T>): Promise<{ result: T; ms: number }> {
   const start = Date.now();

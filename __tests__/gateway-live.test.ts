@@ -14,6 +14,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { GatewayHttpClient } from '../sdk/node';
+import { loadTestVoiceWav } from './helpers';
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'https://babelcast-gateway.fly.dev';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_a7970fa694c2f381390fbd12962a2fe915c8d0a24406b28b';
@@ -120,8 +121,8 @@ describe.skipIf(SKIP)('Gateway Live — Node SDK', () => {
   // ── STT / Transcribe ─────────────────────────────────────────────────
 
   describe('transcribe', () => {
-    it('accepts silence WAV and returns a result', async () => {
-      const wav = makeWav(1.5);
+    it('accepts voice WAV and returns a result', async () => {
+      const wav = loadTestVoiceWav();
       const result = await gw.transcribe(wav, 'en');
       expect(typeof result.text).toBe('string');
     });

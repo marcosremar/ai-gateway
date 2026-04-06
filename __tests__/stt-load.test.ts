@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { loadTestVoiceWav } from './helpers';
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'https://parle-gateway-loadtest.fly.dev';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_loadtest_2026';
@@ -82,8 +83,8 @@ function logBatch(label: string, results: TimedResult[]) {
 }
 
 describe.skipIf(SKIP)('STT Load Test — Live Gateway', { timeout: 300_000 }, () => {
-  const wav1s = makeWav(1.0);
-  const wav3s = makeWav(3.0);
+  const wav1s = loadTestVoiceWav();  // real TTS-generated voice (works with all STT providers)
+  const wav3s = wav1s;  // reuse same fixture (duration doesn't matter for load test)
 
   it('single STT request works', { timeout: 30_000 }, async () => {
     const result = await timedSttUpload(wav1s);

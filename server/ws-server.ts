@@ -1125,7 +1125,7 @@ export function startWsServer() {
 
         // Workload routes (dynamic :id segments — checked before flat handlers)
         if (routeWorkloadRequest && url.pathname.startsWith('/v1/workloads')) {
-          const body = method !== 'GET' && method !== 'HEAD' && method !== 'DELETE' ? await req.text() : '';
+          const bodyBuf = method !== 'GET' && method !== 'HEAD' && method !== 'DELETE' ? Buffer.from(await req.arrayBuffer()) : null;
           const listeners: Record<string, Function[]> = {};
           const fakeReq: any = {
             method, url: url.pathname + url.search,
@@ -1133,7 +1133,7 @@ export function startWsServer() {
             on: (ev: string, cb: Function) => { (listeners[ev] = listeners[ev] || []).push(cb); return fakeReq; },
           };
           queueMicrotask(() => {
-            if (body) (listeners['data'] || []).forEach(cb => cb(Buffer.from(body)));
+            if (bodyBuf && bodyBuf.length) (listeners['data'] || []).forEach(cb => cb(bodyBuf));
             (listeners['end'] || []).forEach(cb => cb());
           });
 
@@ -1168,8 +1168,8 @@ export function startWsServer() {
           });
         }
 
-        // Node→Bun adapter
-        const body = method !== 'GET' && method !== 'HEAD' ? await req.text() : '';
+        // Node→Bun adapter (use arrayBuffer for binary-safe body transfer)
+        const bodyBuf = method !== 'GET' && method !== 'HEAD' ? Buffer.from(await req.arrayBuffer()) : null;
         const listeners: Record<string, Function[]> = {};
         const fakeReq: any = {
           method, url: url.pathname + url.search,
@@ -1177,7 +1177,7 @@ export function startWsServer() {
           on: (ev: string, cb: Function) => { (listeners[ev] = listeners[ev] || []).push(cb); return fakeReq; },
         };
         queueMicrotask(() => {
-          if (body) (listeners['data'] || []).forEach(cb => cb(Buffer.from(body)));
+          if (bodyBuf && bodyBuf.length) (listeners['data'] || []).forEach(cb => cb(bodyBuf));
           (listeners['end'] || []).forEach(cb => cb());
         });
 
