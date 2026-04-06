@@ -377,7 +377,7 @@ export function OverviewSection() {
       {(() => {
         const cloudHealth = health.cloudHealth ?? [];
         const hasApiIssues = cloudHealth.some(e => {
-          const m = health.providerMetrics[e.provider];
+          const m = (health.providerMetrics || {})[e.provider];
           return classifyApiHealth(e, m?.errorRate) !== 'ok';
         });
         const stripBorderColor = hasApiIssues
@@ -436,7 +436,7 @@ export function OverviewSection() {
                   style={{ color: 'var(--color-text-muted)', letterSpacing: '0.1em' }}>
                   APIs
                 </span>
-                <ApiHealthPills cloudHealth={cloudHealth} providerMetrics={health.providerMetrics} />
+                <ApiHealthPills cloudHealth={cloudHealth} providerMetrics={health.providerMetrics || {}} />
               </div>
             )}
           </div>
