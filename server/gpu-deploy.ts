@@ -214,6 +214,7 @@ let p95ViolationCount: Record<string, number> = { stt: 0, llm: 0, tts: 0 };
 
 // Budget enforcement: soft warn once per day, hard terminate at 100%
 let budgetSoftWarned = false;
+let lastBudgetCalcTime = 0;
 
 // Idle warning: warn once before auto-terminate, reset on activity
 let idleWarned = false;
@@ -244,7 +245,7 @@ function startBackgroundWarmthMonitor(endpoint: string) {
   const poll = async () => {
     if (deployState.status !== 'ready' || deployState.endpoint !== endpoint) {
       console.log('[gpu] Warmth monitor: pod changed or offline — stopping');
-      warmthMonitorTimer = null;
+      stopWarmthMonitor(); // clear timer properly instead of just nulling
       return;
     }
     try {
@@ -432,7 +433,10 @@ export function scheduleNextMonitorProbe() {
       if (deployState.costPerHr > 0) {
         const today = new Date().toISOString().slice(0, 10);
         if (today !== dailySpendResetDate) { setDailyGpuSpendUsd(0); setDailySpendResetDate(today); budgetSoftWarned = false; }
-        setDailyGpuSpendUsd(dailyGpuSpendUsd + deployState.costPerHr * (monitorDelayMs / 1000 / 3600));
+        // Use actual elapsed time since last probe instead of assuming monitorDelayMs
+        const actualElapsedMs = lastBudgetCalcTime > 0 ? Date.now() - lastBudgetCalcTime : monitorDelayMs;
+        lastBudgetCalcTime = Date.now();
+        setDailyGpuSpendUsd(dailyGpuSpendUsd + deployState.costPerHr * (actualElapsedMs / 1000 / 3600));
         if (DAILY_BUDGET_USD > 0) {
           const pct = dailyGpuSpendUsd / DAILY_BUDGET_USD;
           const forecast = dailyGpuSpendUsd + (deployState.costPerHr * ((24 - new Date().getUTCHours()) / 24));
@@ -632,6 +636,8 @@ export async function autoTerminateGpu() {
   const podId = deployState.podId;
   broadcastProviderStatus('offline', 'cloud', 'GPU idle timeout — terminated');
   stopGpuMonitoring();
+  // Close all SSH tunnels to prevent orphaned ssh processes
+  try { const { closeAllTunnels } = await import('./ssh-tunnel'); closeAllTunnels(); } catch {}
   stopWarmthMonitor();
   resetDeployState();
   updateTranslationProfile({ gpuEndpoint: undefined }, 'idleTimeout');
@@ -854,11 +860,14 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
   return { found, terminated };
 }
 
+let orphanSweepInitialTimer: ReturnType<typeof setTimeout> | null = null;
+
 /** Start periodic orphan sweep. Safe to call multiple times. */
 export function startOrphanSweep(): void {
-  if (orphanSweepTimer) return;
+  if (orphanSweepTimer || orphanSweepInitialTimer) return;
   // Run initial sweep after a short delay (let startup finish first)
-  setTimeout(() => {
+  orphanSweepInitialTimer = setTimeout(() => {
+    orphanSweepInitialTimer = null;
     sweepOrphanInstances().catch(err =>
       console.warn(`[orphan-sweep] Initial sweep failed: ${err instanceof Error ? err.message : err}`),
     );
@@ -874,6 +883,7 @@ export function startOrphanSweep(): void {
 
 /** Stop periodic orphan sweep. */
 export function stopOrphanSweep(): void {
+  if (orphanSweepInitialTimer) { clearTimeout(orphanSweepInitialTimer); orphanSweepInitialTimer = null; }
   if (orphanSweepTimer) {
     clearInterval(orphanSweepTimer);
     orphanSweepTimer = null;
@@ -1155,6 +1165,7 @@ export async function startDeployLoop(
   authId?: string,
   extra: DeployExtra = {},
 ) {
+  setDeployCancelled(false); // reset cancel flag from previous deploy
   setActiveProvider(providerName);
   const credentials: ProviderCredentials = { apiKey, authId };
   const startedAt = Date.now();

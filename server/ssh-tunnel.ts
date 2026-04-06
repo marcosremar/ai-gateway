@@ -111,8 +111,11 @@ export class SshTunnel {
 
   close(): void {
     if (this.proc) {
-      try { this.proc.kill('SIGTERM'); } catch {}
+      const p = this.proc;
       this.proc = null;
+      try { p.kill('SIGTERM'); } catch {}
+      // Force kill after 3s if SIGTERM doesn't work (stuck SSH connections)
+      setTimeout(() => { try { p.kill('SIGKILL'); } catch {} }, 3_000);
     }
     this._open = false;
   }

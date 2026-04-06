@@ -68,6 +68,24 @@ export function reloadStreamingSTTRouter(): void {
 // Active STT sessions: client WS id → upstream backend
 const sttSessions = new Map<string, import('../ai-gateway/src/streaming-stt').StreamingSTTBackend>();
 
+// Periodic cleanup of stale STT sessions (clients that disconnected ungracefully)
+setInterval(() => {
+  if (sttSessions.size === 0) return;
+  const stale: string[] = [];
+  for (const [id] of sttSessions) {
+    // If the WS client is gone, the session is stale
+    let found = false;
+    for (const ws of wsClients) { if (ws.data.id === id) { found = true; break; } }
+    if (!found) stale.push(id);
+  }
+  for (const id of stale) {
+    const backend = sttSessions.get(id);
+    if (backend) try { backend.close(); } catch {}
+    sttSessions.delete(id);
+  }
+  if (stale.length) console.log(`[ws] Cleaned ${stale.length} stale STT session(s)`);
+}, 60_000); // check every minute
+
 // Bot audio relay state
 let botAudioSource: BabelCastWS | null = null;
 let botAudioSampleRate = 48000;
