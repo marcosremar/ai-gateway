@@ -32,15 +32,21 @@ export class ResponseCache {
 
   /** Build a deterministic cache key from request params */
   buildKey(params: { provider: string; model: string; messages?: unknown[]; input?: unknown; temperature?: number }): string {
-    const hash = createHash('sha256')
-      .update(JSON.stringify({
+    let serialized: string;
+    try {
+      // Sort keys for deterministic hashing (prevents cache splits from key reordering)
+      serialized = JSON.stringify({
         p: params.provider,
         m: params.model,
         msgs: params.messages,
         inp: params.input,
         t: params.temperature,
-      }))
-      .digest('hex');
+      });
+    } catch {
+      // Non-serializable input (circular refs, etc.) — use provider+model only
+      serialized = `${params.provider}:${params.model}:fallback`;
+    }
+    const hash = createHash('sha256').update(serialized).digest('hex');
     return `${this.prefix}${hash}`;
   }
 

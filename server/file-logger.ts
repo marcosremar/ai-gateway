@@ -134,25 +134,36 @@ export function installConsoleCapture(): void {
 
 // ── Utility: read recent log entries ────────────────────────────────────────
 
-export function readRecentEvents(lines = 100): string[] {
+const MAX_READ_LINES = 1000; // Cap to prevent OOM on large files
+const MAX_FILE_READ_BYTES = 10 * 1024 * 1024; // 10 MB max read
+
+function readTailLines(filePath: string, lines: number): string[] {
   try {
-    const content = fs.readFileSync(EVENTS_FILE, 'utf-8');
-    return content.trim().split('\n').slice(-lines);
+    const capped = Math.min(Math.max(1, lines), MAX_READ_LINES);
+    const stat = fs.statSync(filePath);
+    // For large files, only read the tail portion to avoid OOM
+    if (stat.size > MAX_FILE_READ_BYTES) {
+      const fd = fs.openSync(filePath, 'r');
+      const buf = Buffer.alloc(MAX_FILE_READ_BYTES);
+      fs.readSync(fd, buf, 0, MAX_FILE_READ_BYTES, stat.size - MAX_FILE_READ_BYTES);
+      fs.closeSync(fd);
+      return buf.toString('utf-8').trim().split('\n').slice(-capped);
+    }
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return content.trim().split('\n').slice(-capped);
   } catch { return []; }
+}
+
+export function readRecentEvents(lines = 100): string[] {
+  return readTailLines(EVENTS_FILE, lines);
 }
 
 export function readRecentGpuEvents(lines = 100): string[] {
-  try {
-    const content = fs.readFileSync(GPU_FILE, 'utf-8');
-    return content.trim().split('\n').slice(-lines);
-  } catch { return []; }
+  return readTailLines(GPU_FILE, lines);
 }
 
 export function readRecentServerLogs(lines = 200): string[] {
-  try {
-    const content = fs.readFileSync(SERVER_FILE, 'utf-8');
-    return content.trim().split('\n').slice(-lines);
-  } catch { return []; }
+  return readTailLines(SERVER_FILE, lines);
 }
 
 export { LOG_DIR, EVENTS_FILE, GPU_FILE, SERVER_FILE };

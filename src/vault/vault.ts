@@ -89,26 +89,58 @@ export class Vault {
   async rotateKey(newMasterKey: string): Promise<void> {
     const newKey = Vault.deriveKey(newMasterKey);
     const names = await this._store.list();
+    const reEncrypted: string[] = [];
 
-    for (const name of names) {
-      // Decrypt with old key
-      const plaintext = await this.retrieve(name);
-      // Encrypt with new key
-      const iv = randomBytes(IV_LENGTH);
-      const cipher = createCipheriv(ALGORITHM, newKey, iv, { authTagLength: TAG_LENGTH });
-      const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-      const tag = cipher.getAuthTag();
+    try {
+      for (const name of names) {
+        const plaintext = await this.retrieve(name);
+        const iv = randomBytes(IV_LENGTH);
+        const cipher = createCipheriv(ALGORITHM, newKey, iv, { authTagLength: TAG_LENGTH });
+        const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+        const tag = cipher.getAuthTag();
 
-      const blob: EncryptedBlob = {
-        iv: iv.toString('hex'),
-        ciphertext: encrypted.toString('hex'),
-        tag: tag.toString('hex'),
-        version: this.keyVersion + 1,
-      };
-      await this._store.set(name, JSON.stringify(blob));
+        const blob: EncryptedBlob = {
+          iv: iv.toString('hex'),
+          ciphertext: encrypted.toString('hex'),
+          tag: tag.toString('hex'),
+          version: this.keyVersion + 1,
+        };
+        await this._store.set(name, JSON.stringify(blob));
+        reEncrypted.push(name);
+      }
+
+      this.key = newKey;
+      this.keyVersion += 1;
+    } catch (err) {
+      // Rollback: decrypt with newKey (the key used to re-encrypt), then re-encrypt with OLD key
+      for (const name of reEncrypted) {
+        try {
+          const raw = await this._store.get(name);
+          if (!raw) continue;
+          const blob: EncryptedBlob = JSON.parse(raw);
+          // Properly decrypt using newKey (the key that encrypted these blobs)
+          const decipher = createDecipheriv(ALGORITHM, newKey, Buffer.from(blob.iv, 'hex'), { authTagLength: TAG_LENGTH });
+          decipher.setAuthTag(Buffer.from(blob.tag, 'hex'));
+          const plaintext = decipher.update(Buffer.from(blob.ciphertext, 'hex')) + decipher.final('utf8');
+
+          // Re-encrypt with the original (old) key
+          const iv = randomBytes(IV_LENGTH);
+          const cipher = createCipheriv(ALGORITHM, this.key, iv, { authTagLength: TAG_LENGTH });
+          const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+          const tag = cipher.getAuthTag();
+
+          const rolledBack: EncryptedBlob = {
+            iv: iv.toString('hex'),
+            ciphertext: encrypted.toString('hex'),
+            tag: tag.toString('hex'),
+            version: this.keyVersion,
+          };
+          await this._store.set(name, JSON.stringify(rolledBack));
+        } catch {
+          // Best-effort rollback — log but don't mask original error
+        }
+      }
+      throw err;
     }
-
-    this.key = newKey;
-    this.keyVersion += 1;
   }
 }
