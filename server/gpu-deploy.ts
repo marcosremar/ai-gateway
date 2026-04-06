@@ -1606,6 +1606,8 @@ export async function startDeployRace(
       raceAbort.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
     });
 
+  // Wrap in try/finally to guarantee loser cleanup even if Promise.all throws
+  try {
   await Promise.all(candidates.map(async (c, idx) => {
     const credentials = { apiKey: c.tier.apiKey, authId: c.tier.authId };
     let localEndpoint = c.endpoint;
@@ -1701,10 +1703,26 @@ export async function startDeployRace(
       }
     }
   }));
+  } catch (raceErr) {
+    // Promise.all threw — some slots may not have cleaned up their pods.
+    // Force-terminate any non-winner instances that are still alive.
+    console.error(`[race] Promise.all exception — force-cleaning ${candidates.length} race instances:`, raceErr);
+    for (const c of candidates) {
+      if (winner && winner.instanceId === c.instanceId) continue;
+      try {
+        await Promise.race([
+          c.tier.client.deleteInstance(c.instanceId, { apiKey: c.tier.apiKey, authId: c.tier.authId }),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 10_000)),
+        ]);
+        console.log(`[race] Force-cleaned ${c.instanceId.slice(0, 8)} on ${c.tier.name}`);
+      } catch { /* best effort */ }
+    }
+  } finally {
+    // Always clear race tracking — sweep may now treat any remaining instances as orphans
+    for (const c of candidates) activeRaceInstanceIds.delete(c.instanceId);
+  }
 
   // Phase 3: Final state / race summary
-  // Clear race tracking — sweep may now treat any remaining instances as orphans
-  for (const c of candidates) activeRaceInstanceIds.delete(c.instanceId);
   if (winner) {
     const w = winner as RaceCandidate;
     const winnerBootMs = w.costPerHr > 0
