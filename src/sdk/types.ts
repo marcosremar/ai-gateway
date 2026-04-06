@@ -247,6 +247,32 @@ export interface GpuReadinessHistory {
   currentState: Record<string, unknown>;
 }
 
+// ── Workload types ────────────────────────────────────────────────────────
+
+export type WorkloadType = 'gpu' | 'bot' | 'db';
+export type WorkloadStatus = 'idle' | 'deploying' | 'running' | 'stopped' | 'error';
+
+export interface WorkloadInfo {
+  id: string;
+  type: WorkloadType;
+  name: string;
+  status: WorkloadStatus;
+  provider: string;
+  endpoint?: string;
+  costPerHr: number;
+  instanceId?: string;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+  error?: string;
+}
+
+export interface WorkloadDeployOptions {
+  name: string;
+  type: WorkloadType;
+  config?: Record<string, unknown>;
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 export class GatewayError extends Error {

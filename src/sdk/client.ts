@@ -39,6 +39,8 @@ import type {
   ChatMessage,
   ChatCompletionOptions,
   ChatCompletionResponse,
+  WorkloadInfo,
+  WorkloadDeployOptions,
 } from './types';
 import { GatewayError } from './types';
 
@@ -539,6 +541,51 @@ export class GatewaySDK {
   /** Terminate bot pod. */
   async botTerminate(): Promise<void> {
     await this.fetch('/v1/bot/terminate', { method: 'POST', timeout: this.timeouts.deploy });
+  }
+
+  // ── Workloads ──────────────────────────────────────────────────────────
+
+  /** List all workloads, optionally filtered by type. */
+  async listWorkloads(type?: WorkloadInfo['type']): Promise<WorkloadInfo[]> {
+    const qs = type ? `?type=${type}` : '';
+    const res = await this.fetch(`/v1/workloads${qs}`, { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/workloads');
+    return (data.workloads ?? []) as WorkloadInfo[];
+  }
+
+  /** Deploy a new workload (GPU, bot, or database). */
+  async deployWorkload(options: WorkloadDeployOptions): Promise<WorkloadInfo> {
+    const res = await this.fetch('/v1/workloads', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options),
+      timeout: this.timeouts.deploy,
+      allowedStatuses: [201],
+    });
+    return await this.parseJson(res, '/v1/workloads') as WorkloadInfo;
+  }
+
+  /** Get status of a specific workload. */
+  async workloadStatus(id: string): Promise<WorkloadInfo> {
+    const res = await this.fetch(`/v1/workloads/${id}`, { method: 'GET', timeout: this.timeouts.health });
+    return await this.parseJson(res, `/v1/workloads/${id}`) as WorkloadInfo;
+  }
+
+  /** Stop (pause) a workload. */
+  async stopWorkload(id: string): Promise<WorkloadInfo> {
+    const res = await this.fetch(`/v1/workloads/${id}/stop`, { method: 'POST', timeout: this.timeouts.deploy });
+    return await this.parseJson(res, `/v1/workloads/${id}/stop`) as WorkloadInfo;
+  }
+
+  /** Start / resume a stopped workload. */
+  async startWorkload(id: string): Promise<WorkloadInfo> {
+    const res = await this.fetch(`/v1/workloads/${id}/start`, { method: 'POST', timeout: this.timeouts.deploy });
+    return await this.parseJson(res, `/v1/workloads/${id}/start`) as WorkloadInfo;
+  }
+
+  /** Terminate (destroy) a workload permanently. */
+  async terminateWorkload(id: string): Promise<void> {
+    await this.fetch(`/v1/workloads/${id}`, { method: 'DELETE', timeout: this.timeouts.deploy });
   }
 
   // ── Diagnostics ────────────────────────────────────────────────────────

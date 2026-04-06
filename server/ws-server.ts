@@ -1077,6 +1077,26 @@ export function startWsServer() {
       });
     } catch {}
 
+    // ── Initialize workload registry ────────────────────────────────────
+    try {
+      const { workloadRegistry } = require('../src/workloads/registry');
+      const { GpuWorkloadDriver } = require('../src/workloads/gpu-driver');
+      const { BotWorkloadDriver } = require('../src/workloads/bot-driver');
+      const { DbWorkloadDriver } = require('../src/workloads/db-driver');
+      workloadRegistry.registerDriver(new GpuWorkloadDriver());
+      workloadRegistry.registerDriver(new BotWorkloadDriver());
+      workloadRegistry.registerDriver(new DbWorkloadDriver());
+      console.log('[ws-server] Workload registry initialized (gpu, bot, db drivers)');
+    } catch (e: any) {
+      console.warn(`[ws-server] Workload registry not available: ${e.message?.slice(0, 80)}`);
+    }
+
+    let routeWorkloadRequest: ((req: any, res: any, pathname: string, method: string) => boolean) | null = null;
+    try {
+      const wh = require('./workload-handlers');
+      routeWorkloadRequest = wh.routeWorkloadRequest;
+    } catch {}
+
     Bun.serve({
       port: PORT,
       fetch: async (req) => {
@@ -1087,9 +1107,46 @@ export function startWsServer() {
         if (method === 'OPTIONS') {
           return new Response(null, { status: 204, headers: {
             'Access-Control-Allow-Origin': req.headers.get('origin') || '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
             'Access-Control-Allow-Headers': 'Content-Type, Authorization',
           }});
+        }
+
+        // Workload routes (dynamic :id segments — checked before flat handlers)
+        if (routeWorkloadRequest && url.pathname.startsWith('/v1/workloads')) {
+          const body = method !== 'GET' && method !== 'HEAD' && method !== 'DELETE' ? await req.text() : '';
+          const listeners: Record<string, Function[]> = {};
+          const fakeReq: any = {
+            method, url: url.pathname + url.search,
+            headers: Object.fromEntries(req.headers.entries()),
+            on: (ev: string, cb: Function) => { (listeners[ev] = listeners[ev] || []).push(cb); return fakeReq; },
+          };
+          queueMicrotask(() => {
+            if (body) (listeners['data'] || []).forEach(cb => cb(Buffer.from(body)));
+            (listeners['end'] || []).forEach(cb => cb());
+          });
+
+          return new Promise<Response>((resolve) => {
+            let statusCode = 200;
+            const resHeaders: Record<string, string> = {};
+            const chunks: string[] = [];
+            const fakeRes: any = {
+              writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode = code; if (hdrs) Object.assign(resHeaders, hdrs); },
+              setHeader: (k: string, v: string) => { resHeaders[k] = v; },
+              end: (data?: string) => { if (data) chunks.push(data); resolve(new Response(chunks.join(''), {
+                status: fakeRes.statusCode || statusCode,
+                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders },
+              })); },
+              write: (data: string) => { chunks.push(data); },
+              getHeader: (k: string) => resHeaders[k],
+              statusCode: 200,
+            };
+            if (!routeWorkloadRequest!(fakeReq, fakeRes, url.pathname, method)) {
+              resolve(new Response(JSON.stringify({ error: 'Not found' }), {
+                status: 404, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+              }));
+            }
+          });
         }
 
         const key = `${method} ${url.pathname}`;

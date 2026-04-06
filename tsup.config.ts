@@ -19,6 +19,7 @@ export default defineConfig({
     alerting: 'src/alerting/index.ts',
     caching: 'src/caching/index.ts',
     proxy: 'src/proxy/index.ts',
+    workloads: 'src/workloads/index.ts',
   },
   format: ['esm', 'cjs'],
   dts: {
