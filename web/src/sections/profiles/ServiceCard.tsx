@@ -219,15 +219,15 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
               {(service.sttModel || service.llmModel || service.ttsModel) && (
                 <div className="flex flex-wrap gap-1 mt-1">
                   {service.sttModel && (() => {
-                    const label = (PIPELINE_CATALOG.stt.models as Record<string, { id: string; label: string }[]>).gpu?.find(m => m.id === service.sttModel)?.label ?? service.sttModel;
+                    const label = (PIPELINE_CATALOG.stt?.models as Record<string, { id: string; label: string }[]> | undefined)?.gpu?.find(m => m.id === service.sttModel)?.label ?? service.sttModel;
                     return <span key="stt" className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #38bdf8 12%, transparent)', color: '#38bdf8' }}>STT · {label}</span>;
                   })()}
                   {service.llmModel && (() => {
-                    const label = (PIPELINE_CATALOG.llm.models as Record<string, { id: string; label: string }[]>).gpu?.find(m => m.id === service.llmModel)?.label ?? service.llmModel;
+                    const label = (PIPELINE_CATALOG.llm?.models as Record<string, { id: string; label: string }[]> | undefined)?.gpu?.find(m => m.id === service.llmModel)?.label ?? service.llmModel;
                     return <span key="llm" className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#a78bfa' }}>LLM · {label}</span>;
                   })()}
                   {service.ttsModel && (() => {
-                    const label = (PIPELINE_CATALOG.tts.models as Record<string, { id: string; label: string }[]>).gpu?.find(m => m.id === service.ttsModel)?.label ?? service.ttsModel;
+                    const label = (PIPELINE_CATALOG.tts?.models as Record<string, { id: string; label: string }[]> | undefined)?.gpu?.find(m => m.id === service.ttsModel)?.label ?? service.ttsModel;
                     return <span key="tts" className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{ background: 'color-mix(in srgb, #fbbf24 12%, transparent)', color: '#fbbf24' }}>TTS · {label}</span>;
                   })()}
                 </div>
