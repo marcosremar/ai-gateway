@@ -155,15 +155,16 @@ export class VastClient extends AbstractGpuProvider {
       }
     }
 
-    // All retries exhausted — emit error and return last 429 response
+    // All retries exhausted — throw instead of returning 429 (callers expect valid data)
+    const errMsg = `Vast.ai rate limit exhausted after ${RATE_LIMIT_429_MAX_RETRIES} retries: ${url.replace(VAST_API_BASE, '')}`;
     this.emitError({
       operation: '_vastFetch',
-      message: `Rate limit exhausted after ${RATE_LIMIT_429_MAX_RETRIES} retries: ${url.replace(VAST_API_BASE, '')}`,
+      message: errMsg,
       errorCode: 'HTTP_429',
       httpStatus: 429,
       retryable: true,
     });
-    return lastRes!;
+    throw new Error(errMsg);
   }
 
   async discoverInstance(

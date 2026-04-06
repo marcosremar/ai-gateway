@@ -121,11 +121,12 @@ export class RunpodClient extends AbstractGpuProvider {
     const podId = pod.id as string;
     const runtime = pod.runtime as Record<string, unknown> | undefined;
     const runtimePorts = runtime?.ports as Array<Record<string, unknown>> | undefined;
-    const runtimeIp = runtimePorts?.[0]?.ip;
-    const runtimePort = runtimePorts?.find((p) => p.privatePort === 8000)?.publicPort;
-    const topIp = pod.publicIp as string | undefined;
-    const portMappings = pod.portMappings as Record<string, number> | undefined;
-    const topPort = portMappings?.['8000'];
+    const runtimeIp = typeof runtimePorts?.[0]?.ip === 'string' ? runtimePorts[0].ip : undefined;
+    const portEntry = runtimePorts?.find((p) => p.privatePort === 8000);
+    const runtimePort = typeof portEntry?.publicPort === 'number' ? portEntry.publicPort : undefined;
+    const topIp = typeof pod.publicIp === 'string' ? pod.publicIp : undefined;
+    const portMappings = pod.portMappings as Record<string, unknown> | undefined;
+    const topPort = typeof portMappings?.['8000'] === 'number' ? portMappings['8000'] as number : undefined;
     return runtimeIp && runtimePort ? `http://${runtimeIp}:${runtimePort}`
       : topIp && topPort ? `http://${topIp}:${topPort}`
       : `https://${podId}-8000.proxy.runpod.net`;
@@ -734,8 +735,12 @@ export class RunpodClient extends AbstractGpuProvider {
       const gpuTypes = data?.data?.gpuTypes;
       if (!Array.isArray(gpuTypes)) return this._staticOffers(options);
 
+      // Whitelist GPU types through the known mapping to prevent arbitrary strings
       const filterSet = options.gpuTypes?.length
-        ? new Set(options.gpuTypes.map(t => (RUNPOD_GPU_TYPE_MAP[t] ?? t).toLowerCase()))
+        ? new Set(options.gpuTypes.flatMap(t => {
+            const mapped = RUNPOD_GPU_TYPE_MAP[t] ?? (RUNPOD_GPU_FALLBACK.includes(t) ? t : null);
+            return mapped ? [mapped.toLowerCase()] : [t.toLowerCase()]; // pass-through if not in map but still filter
+          }))
         : null;
 
       const offers: GpuOffer[] = [];
