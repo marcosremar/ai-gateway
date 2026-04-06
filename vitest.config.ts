@@ -19,8 +19,9 @@ export default defineConfig({
     hookTimeout: 30_000,
     sequence: { concurrent: false },
     env: {
-      SKIP_GPU_TESTS: '1',
-      SKIP_LIVE_TESTS: '1',
+      // Set to '0' to run live/GPU tests (require running gateway + GPU pod)
+      SKIP_GPU_TESTS: process.env.SKIP_GPU_TESTS ?? '1',
+      SKIP_LIVE_TESTS: process.env.SKIP_LIVE_TESTS ?? '1',
     },
     server: {
       deps: {
