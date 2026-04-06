@@ -1073,7 +1073,8 @@ export function startWsServer() {
       Object.assign(handlers, {
         // Inference
         'POST /v1/transcribe': ai.handleTranscribe,
-        'POST /v1/audio/transcriptions': ai.handleTranscribe, // OpenAI-compatible alias
+        // Note: /v1/audio/transcriptions (OpenAI multipart format) is NOT supported.
+        // Use POST /v1/transcribe with raw audio/wav body instead.
         'POST /v1/transcribe/ensemble': ai.handleEnsembleTranscribe,
         'POST /v1/chat/completions': ai.handleChatCompletions,
         'POST /v1/translate': ai.handleTranslate,
@@ -1141,10 +1142,10 @@ export function startWsServer() {
             const resHeaders: Record<string, string> = {};
             const chunks: string[] = [];
             const fakeRes: any = {
-              writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode = code; if (hdrs) Object.assign(resHeaders, hdrs); },
+              writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode = code; fakeRes.statusCode = code; if (hdrs) Object.assign(resHeaders, hdrs); },
               setHeader: (k: string, v: string) => { resHeaders[k] = v; },
               end: (data?: string) => { if (data) chunks.push(data); resolve(new Response(chunks.join(''), {
-                status: fakeRes.statusCode || statusCode,
+                status: statusCode,
                 headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders },
               })); },
               write: (data: string) => { chunks.push(data); },
@@ -1185,10 +1186,10 @@ export function startWsServer() {
           const resHeaders: Record<string, string> = {};
           const chunks: string[] = [];
           const fakeRes: any = {
-            writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode = code; if (hdrs) Object.assign(resHeaders, hdrs); },
+            writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode = code; fakeRes.statusCode = code; if (hdrs) Object.assign(resHeaders, hdrs); },
             setHeader: (k: string, v: string) => { resHeaders[k] = v; },
             end: (data?: string) => { if (data) chunks.push(data); resolve(new Response(chunks.join(''), {
-              status: fakeRes.statusCode || statusCode,
+              status: statusCode,
               headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders },
             })); },
             write: (data: string) => { chunks.push(data); },
