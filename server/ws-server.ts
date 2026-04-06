@@ -1067,10 +1067,20 @@ export function startWsServer() {
         'POST /v1/playground/pipeline': pg.handlePlaygroundPipeline,
       });
     } catch {}
-    // Auto-swap, AI handlers
+    // AI handlers (inference endpoints) + Auto-swap
     try {
       const ai = require('./ai-handlers');
       Object.assign(handlers, {
+        // Inference
+        'POST /v1/transcribe': ai.handleTranscribe,
+        'POST /v1/audio/transcriptions': ai.handleTranscribe, // OpenAI-compatible alias
+        'POST /v1/transcribe/ensemble': ai.handleEnsembleTranscribe,
+        'POST /v1/chat/completions': ai.handleChatCompletions,
+        'POST /v1/translate': ai.handleTranslate,
+        'POST /v1/tts/preview': ai.handleTtsPreview,
+        'POST /v1/speech': ai.handlePipeline,
+        'POST /v1/detect-language': ai.handleDetectLanguage,
+        // Auto-swap
         'GET /v1/auto-swap/status': ai.handleAutoSwapStatus,
         'POST /v1/auto-swap/toggle': ai.handleAutoSwapToggle,
         'POST /v1/auto-swap/benchmark': ai.handleAutoSwapBenchmark,
