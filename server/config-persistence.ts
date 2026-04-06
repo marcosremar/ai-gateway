@@ -342,7 +342,4 @@ export function stampProfileRequest(profileId: string | null): void {
 }
 
 // ── User config stubs (local/desktop — no multi-user DB) ─────────────────────
-
-export function applyUserConfig(_config: Record<string, unknown>): void {
-  // No-op for desktop — single user, config already loaded from JSON
-}
+// applyUserConfig is already exported above (line 213) — no duplicate needed.

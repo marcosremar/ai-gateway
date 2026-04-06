@@ -112,7 +112,9 @@ async function runTTS(text = 'Bonjour'): Promise<{ latencyMs: number; provider: 
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-describe('GPU Readiness — Real API', () => {
+const SKIP = process.env.SKIP_LIVE_TESTS === '1' || process.env.SKIP_GPU_TESTS === '1';
+
+describe.skipIf(SKIP)('GPU Readiness — Real API', () => {
 
   let gatewayAvailable = false;
   let readinessEndpointsAvailable = false;

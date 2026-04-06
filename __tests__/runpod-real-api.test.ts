@@ -12,7 +12,7 @@ import { RunpodClient, RUNPOD_GPU_TYPE_MAP, RUNPOD_GPU_FALLBACK } from '../src/g
 import type { ProviderCredentials } from '../src/gpu-providers/types';
 import { loadEnv, requireEnv, timed } from './helpers';
 
-const hasKeys = !!process.env.RUNPOD_API_KEY;
+const hasKeys = !!process.env.RUNPOD_API_KEY && process.env.SKIP_GPU_TESTS !== '1';
 
 let creds: ProviderCredentials;
 let client: RunpodClient;
