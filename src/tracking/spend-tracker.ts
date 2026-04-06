@@ -91,13 +91,16 @@ export class SpendTracker {
     const dKey = dailyKey(record.userId, date);
 
     try {
-      // Append to daily records list
+      // Append to daily records list (used by getDailySummary for per-provider breakdown)
       await this.stateStore.rpush(rKey, JSON.stringify(record));
       await this.stateStore.ltrim(rKey, -MAX_RECORDS_PER_DAY, -1);
 
-      // Update daily aggregates in hash
-      await this.stateStore.hset(dKey, 'totalCost', await this.sumDailyCost(record.userId, date));
-      await this.stateStore.hset(dKey, 'requestCount', await this.countDailyRequests(record.userId, date));
+      // Update daily aggregates in hash (fast path for budget checks)
+      const daily = await this.stateStore.hgetall(dKey);
+      const existingCost = parseFloat(daily['totalCost'] ?? '0');
+      const existingCount = parseInt(daily['requestCount'] ?? '0', 10);
+      await this.stateStore.hset(dKey, 'totalCost', (existingCost + record.costUsd).toFixed(6));
+      await this.stateStore.hset(dKey, 'requestCount', String(existingCount + 1));
     } catch {
       // Non-critical — swallow
     }

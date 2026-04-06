@@ -33,10 +33,21 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
 const JSON_BODY_TIMEOUT_MS = 15_000;
 const RAW_BODY_TIMEOUT_MS = 120_000; // 2 min — allows large audio uploads on slow connections
 
+const JSON_BODY_MAX_BYTES = 2 * 1024 * 1024; // 2 MB hard cap for JSON bodies
+
 export function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   const inner = new Promise<Record<string, unknown>>((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    let totalSize = 0;
+    req.on('data', (chunk: Buffer) => {
+      totalSize += chunk.length;
+      if (totalSize > JSON_BODY_MAX_BYTES) {
+        req.destroy();
+        reject(new Error(`JSON body too large (>${Math.round(JSON_BODY_MAX_BYTES / 1024)}KB)`));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString();
       if (!raw.trim()) { resolve({}); return; }  // empty body is OK (optional JSON)

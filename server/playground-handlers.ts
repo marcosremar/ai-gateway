@@ -193,7 +193,7 @@ export async function handlePlaygroundStt(req: IncomingMessage, res: ServerRespo
   }
 
   // Parse query params
-  const url = new URL(req.url || '/', `http://${req.headers.host}`);
+  const url = new URL(req.url || '/', 'http://localhost');
   const provider = url.searchParams.get('provider') || undefined;
   const model = url.searchParams.get('model') || undefined;
   const language = url.searchParams.get('language') || undefined;
@@ -378,7 +378,7 @@ export async function handlePlaygroundPipeline(req: IncomingMessage, res: Server
   }
 
   // Parse query params
-  const url = new URL(req.url || '/', `http://${req.headers.host}`);
+  const url = new URL(req.url || '/', 'http://localhost');
   const sourceLang = url.searchParams.get('source') || undefined;
   const targetLang = url.searchParams.get('target') || 'en';
   const voice = url.searchParams.get('voice') || undefined;
