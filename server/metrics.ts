@@ -61,7 +61,6 @@ export function logRequest(entry: RequestLogInput & { requestId?: string }) {
   if (latencyRing.length < LATENCY_RING_SIZE) {
     latencyRing.push(entry.latencyMs);
   } else {
-    if (latencyRingIdx >= latencyRing.length) setLatencyRingIdx(0);
     latencyRing[latencyRingIdx] = entry.latencyMs;
   }
   setLatencyRingIdx((latencyRingIdx + 1) % LATENCY_RING_SIZE);

@@ -220,7 +220,10 @@ export function saveProviderConfig(config: ProviderConfig): void {
   try {
     mkdirSync(BABELCAST_DIR, { recursive: true });
     config.updatedAt = Date.now();
-    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+    // Atomic write: write to temp file then rename (prevents corruption on crash)
+    const tmpFile = CONFIG_FILE + '.tmp';
+    writeFileSync(tmpFile, JSON.stringify(config, null, 2));
+    renameSync(tmpFile, CONFIG_FILE);
     // Update cache so subsequent reads skip file I/O
     _cachedConfig = config;
     _cacheTime = Date.now();

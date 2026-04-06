@@ -192,6 +192,10 @@ export async function runStreamingPipeline(
   const gpuIdx = PROVIDER_CHAIN.findIndex(p => GPU_PROVIDERS.has(p));
   const baseProfile = (firstCloudIdx >= 0 && PROVIDER_CHAIN[firstCloudIdx] === 'ollama' && ollamaProfile)
     ? ollamaProfile : (groqProfile || ollamaProfile || translationProfile);
+  if (!baseProfile) {
+    cb.onError('pipeline', new Error('No LLM provider configured (groq, ollama, or translation profile required)'));
+    return;
+  }
   const gpuBeforeCloud = gpuIdx >= 0 && (firstCloudIdx < 0 || gpuIdx < firstCloudIdx);
 
   const gpuEp = (gpuBeforeCloud && isGpuAvailable()) ? deployState.endpoint : undefined;
