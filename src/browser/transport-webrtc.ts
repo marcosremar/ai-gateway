@@ -75,7 +75,8 @@ export class WebRTCTransport implements Transport {
     this.log.debug('connecting (aiortc) to', signalingUrl);
 
     try {
-      const iceServers: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+      const stunServer = process.env.STUN_SERVER || 'stun:stun.l.google.com:19302';
+      const iceServers: RTCIceServer[] = [{ urls: stunServer }];
       const pc = new RTCPeerConnection({ iceServers });
       this.pc = pc;
 
@@ -239,7 +240,8 @@ export class WebRTCTransport implements Transport {
       ]) as [any, any];
 
       // Fetch ICE servers if backend available
-      let iceServers: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+      const stunUrl = process.env.STUN_SERVER || 'stun:stun.l.google.com:19302';
+      let iceServers: RTCIceServer[] = [{ urls: stunUrl }];
       if (backendEndpoint) {
         try {
           const iceRes = await fetch(`${backendEndpoint}/api/ice-servers`, {

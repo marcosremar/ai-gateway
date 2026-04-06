@@ -8,6 +8,8 @@
  * auto-detects it) and cron @reboot as backup.
  */
 
+import { randomBytes } from 'crypto';
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /** SSH public key for TensorDock VM access — reads from TENSORDOCK_SSH_PUBKEY env var */
@@ -183,7 +185,7 @@ export function buildCloudInit(spec: CloudInitSpec): Record<string, unknown> {
   // and breaks the default user creation entirely.
 
   // Password fallback for SSH (TensorDock has ssh_pwauth: True by default)
-  config.password = 'parle2024gpu';
+  config.password = process.env.GPU_SSH_PASSWORD || `gpu-${randomBytes(8).toString('hex')}`;
   config.chpasswd = { expire: false };
 
   // runcmd triggers: enable systemd service + run launcher directly
@@ -448,7 +450,7 @@ function buildBareMetalCloudInit(
     '# Download pre-packaged API tarball (45K, fast even on slow connections)',
     'EXTRACT_OK=0',
     'for i in 1 2 3; do',
-    '  TARBALL=$(python3 -c "from huggingface_hub import hf_hub_download; print(hf_hub_download(\'marcosremar2/babelcast-api\', \'babelcast-api.tar.gz\'))" 2>&1 | tail -1)',
+    `  TARBALL=$(python3 -c "from huggingface_hub import hf_hub_download; print(hf_hub_download('${process.env.BABELCAST_API_HF_REPO || 'marcosremar2/babelcast-api'}', 'babelcast-api.tar.gz'))" 2>&1 | tail -1)`,
     '  if [ -f "$TARBALL" ]; then',
     '    tar -xzf "$TARBALL" -C /app/',
     '    if [ -d "/app/api" ]; then',

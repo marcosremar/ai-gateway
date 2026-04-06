@@ -60,8 +60,12 @@ export class RateLimiter {
 
       // Evict oldest if too many buckets
       if (this.buckets.size > RateLimiter.MAX_BUCKETS) {
-        const oldest = this.buckets.keys().next().value;
-        if (oldest !== undefined && oldest !== clientId) this.buckets.delete(oldest);
+        let oldestKey: string | null = null;
+        let oldestTime = Infinity;
+        for (const [key, b] of this.buckets) {
+          if (b.lastRefill < oldestTime) { oldestTime = b.lastRefill; oldestKey = key; }
+        }
+        if (oldestKey !== null) this.buckets.delete(oldestKey);
       }
     }
 

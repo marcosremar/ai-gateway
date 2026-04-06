@@ -44,15 +44,14 @@ function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer
     req.on('end', () => resolve(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks)));
     req.on('error', reject);
   });
-  return Promise.race([
-    inner,
-    new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        req.destroy(); // Kill the socket to stop slow clients
-        reject(new BodyTimeoutError(BODY_READ_TIMEOUT_MS));
-      }, BODY_READ_TIMEOUT_MS);
-    }),
-  ]);
+  let timeoutHandle: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      req.destroy();
+      reject(new BodyTimeoutError(BODY_READ_TIMEOUT_MS));
+    }, BODY_READ_TIMEOUT_MS);
+  });
+  return Promise.race([inner, timeoutPromise]).finally(() => clearTimeout(timeoutHandle));
 }
 
 /** Security headers applied to all responses */

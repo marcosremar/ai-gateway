@@ -23,8 +23,8 @@ import type {
 import { prepareAudioFile } from '../openai-compat/audio-utils';
 import { OLLAMA_STT_MODELS, OLLAMA_LLM_MODELS } from './models';
 
-const OLLAMA_BASE_URL = 'http://localhost:11434/v1';
-const WHISPER_SERVER_BASE_URL = 'http://localhost:8000/v1';
+const OLLAMA_BASE_URL = process.env.OLLAMA_API_BASE || 'http://localhost:11434/v1';
+const WHISPER_SERVER_BASE_URL = process.env.WHISPER_SERVER_BASE_URL || 'http://localhost:8000/v1';
 
 // ---------------------------------------------------------------------------
 // Ollama LLM Provider

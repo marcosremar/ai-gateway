@@ -6,14 +6,19 @@
 import { OpenAICompatLLMProvider } from '../openai-compat/openai-compat-llm';
 import { OPENROUTER_LLM_MODELS } from './models';
 
+const BASE_URL = process.env.OPENROUTER_API_BASE || 'https://openrouter.ai/api/v1';
+
+const APP_URL = process.env.APP_URL || 'https://parle.app';
+const APP_NAME = process.env.APP_NAME || 'PARLE';
+
 export const openrouterLLM = new OpenAICompatLLMProvider({
   providerId: 'openrouter',
-  baseURL: 'https://openrouter.ai/api/v1',
+  baseURL: BASE_URL,
   envKey: 'OPENROUTER_API_KEY',
-  defaultModel: 'openai/gpt-4o-mini',
+  defaultModel: process.env.OPENROUTER_DEFAULT_MODEL || 'openai/gpt-4o-mini',
   defaultHeaders: {
-    'HTTP-Referer': 'https://parle.app',
-    'X-Title': 'PARLE',
+    'HTTP-Referer': APP_URL,
+    'X-Title': APP_NAME,
   },
 });
 

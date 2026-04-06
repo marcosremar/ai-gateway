@@ -22,7 +22,7 @@ import type {
 import { prepareAudioFile } from '../openai-compat/audio-utils';
 import { MLX_QWEN3_ASR_MODELS } from './models';
 
-const DEFAULT_BASE_URL = 'http://localhost:8765/v1';
+const DEFAULT_BASE_URL = process.env.MLX_QWEN3_ASR_BASE_URL || 'http://localhost:8765/v1';
 
 export class MlxQwen3AsrProvider implements STTProvider {
   readonly providerId: ProviderId = 'mlx-qwen3-asr';
