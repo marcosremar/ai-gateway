@@ -8,9 +8,13 @@ import { broadcastWs } from './ws-state';
 
 // ── Module State ─────────────────────────────────────────────────────────────
 
+type RecallStatus = 'idle' | 'joining' | 'in_meeting' | 'ended' | 'error';
+
 let recallBotId: string | null = null;
-let recallBotStatus: 'idle' | 'joining' | 'in_meeting' | 'ended' | 'error' = 'idle';
+let recallBotStatus: RecallStatus = 'idle';
 let recallBotMeetingUrl = '';
+let recallBotWsConnected = false;
+let recallBotMessage = '';
 
 function getRecallApiBase(): string {
   const region = process.env.RECALL_REGION || 'us-west-2';
@@ -25,10 +29,44 @@ export function getRecallState() {
   return { botId: recallBotId, status: recallBotStatus, meetingUrl: recallBotMeetingUrl };
 }
 
+/**
+ * Live-reading view of the full recall bot state, including ws-connection
+ * tracking. Callers read properties lazily so they always observe the
+ * latest module state.
+ */
+export const recallState = {
+  get botId() { return recallBotId; },
+  get status() { return recallBotStatus; },
+  get meetingUrl() { return recallBotMeetingUrl; },
+  get wsConnected() { return recallBotWsConnected; },
+  get message() { return recallBotMessage; },
+};
+
+/**
+ * Partial state update — only fields specified in the update object are
+ * mutated, others keep their current value. Used from ws-server.ts when
+ * the Recall bot connects/disconnects via WebSocket.
+ */
+export function setRecallState(update: Partial<{
+  botId: string | null;
+  status: RecallStatus;
+  meetingUrl: string;
+  wsConnected: boolean;
+  message: string;
+}>): void {
+  if (update.botId !== undefined) recallBotId = update.botId;
+  if (update.status !== undefined) recallBotStatus = update.status;
+  if (update.meetingUrl !== undefined) recallBotMeetingUrl = update.meetingUrl;
+  if (update.wsConnected !== undefined) recallBotWsConnected = update.wsConnected;
+  if (update.message !== undefined) recallBotMessage = update.message;
+}
+
 export function resetRecallState() {
   recallBotId = null;
   recallBotStatus = 'idle';
   recallBotMeetingUrl = '';
+  recallBotWsConnected = false;
+  recallBotMessage = '';
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

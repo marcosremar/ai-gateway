@@ -29,7 +29,7 @@ import {
   ollamaAvailable, groqAvailable, openaiAvailable,
 } from './providers';
 import {
-  stopGpuMonitoring, startDeployWithTiers, startDeployRace, buildGpuTiers, cooldownTracker,
+  startGpuMonitoring, stopGpuMonitoring, startDeployWithTiers, startDeployRace, buildGpuTiers, cooldownTracker,
   cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps,
   autoSelectCheapestGpu, fetchGpuLogs, getVerifiedGpuTypes, validateGpuTypesFromCache,
   IDLE_TIMEOUT_MS, POD_NAME_PREFIX, clearAutoDestroyTimer,
@@ -1117,7 +1117,7 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
 
   // Resolve provider client and credentials
   let client: GpuProviderClient | null = null;
-  let credentials: ProviderCredentials = {};
+  let credentials: ProviderCredentials = { apiKey: '' };
 
   if (provider === 'runpod' && (deployApiKey || process.env.RUNPOD_API_KEY)) {
     client = runpod;
@@ -1179,7 +1179,7 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   catch { /* empty body is fine */ }
 
   const podId = (body.podId as string) || deployState.podId;
-  const provider = (body.provider as string) || deployState.provider || 'runpod';
+  const provider: ProviderName = (body.provider as ProviderName) || deployState.provider || 'runpod';
 
   if (!podId) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1188,7 +1188,7 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   }
 
   let client: GpuProviderClient | null = null;
-  let credentials: ProviderCredentials = {};
+  let credentials: ProviderCredentials = { apiKey: '' };
 
   if (provider === 'runpod' && (deployApiKey || process.env.RUNPOD_API_KEY)) {
     client = runpod;

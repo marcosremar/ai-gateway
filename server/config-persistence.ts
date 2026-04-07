@@ -5,7 +5,7 @@
 
 import { homedir } from 'os';
 import { join } from 'path';
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from 'fs';
 import { setIdleTimeoutMs } from './gpu-deploy';
 import { setSttTargetLatencyMs, setLlmTargetLatencyMs, setTtsTargetLatencyMs } from '../src/gpu-providers/deploy-settings';
 import type { AIProfile } from '../src/client';

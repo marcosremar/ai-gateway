@@ -73,11 +73,18 @@ function startBotAudioPull(botEndpoint: string) {
       if (chunks === 1 || chunks % 5000 === 0) {
         console.log(`[bot-audio-pull] chunk #${chunks} → ${wsClients.size} client(s)`);
       }
+      // Normalize RawData (Buffer | ArrayBuffer | Buffer[]) to a Buffer so it
+      // matches Bun ServerWebSocket.send's BufferSource parameter.
+      const buf = Buffer.isBuffer(data)
+        ? data
+        : Array.isArray(data)
+          ? Buffer.concat(data)
+          : Buffer.from(data);
       // Relay binary audio to all connected Python app clients (same as parec path)
       // Collect-then-delete to avoid Set mutation during iteration
       const dead: typeof wsClients extends Set<infer T> ? T[] : never[] = [];
       for (const client of wsClients) {
-        try { client.send(data); } catch { dead.push(client); }
+        try { client.send(buf); } catch { dead.push(client); }
       }
       for (const c of dead) wsClients.delete(c);
     });

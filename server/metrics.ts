@@ -99,7 +99,7 @@ export function logRequest(entry: RequestLogInput & { requestId?: string }) {
         setPendingDbWrites(pendingDbWrites - 1);
         setConsecutiveDbFailures(0);
       })
-      .catch(err => {
+      .catch((err: unknown) => {
         if (attempt < 2) {
           // Retry once after 500ms
           setTimeout(() => tryWrite(attempt + 1), 500);
@@ -155,7 +155,7 @@ export function logGpuEvent(
       setPendingDbWrites(pendingDbWrites - 1);
       setConsecutiveDbFailures(0);
     })
-    .catch(err => {
+    .catch((err: unknown) => {
       setPendingDbWrites(pendingDbWrites - 1);
       setConsecutiveDbFailures(consecutiveDbFailures + 1);
       if (consecutiveDbFailures === DB_FAILURE_WARN_THRESHOLD) {
@@ -172,8 +172,8 @@ export function logGpuEvent(
 export function startDeploySession(provider: string, dockerImage: string, gpuType: string) {
   prisma.gpuDeploySession
     .create({ data: { provider, dockerImage, gpuType, status: 'deploying' } })
-    .then(row => { setActiveDeploySessionId(row.id); })
-    .catch(err => console.warn('[db] Failed to create deploy session:', err));
+    .then((row: { id: number }) => { setActiveDeploySessionId(row.id); })
+    .catch((err: unknown) => console.warn('[db] Failed to create deploy session:', err));
 }
 
 export function updateDeploySession(patch: {
@@ -194,7 +194,7 @@ export function updateDeploySession(patch: {
   }
   prisma.gpuDeploySession
     .update({ where: { id }, data: patch })
-    .catch(err => console.warn('[db] Failed to update deploy session:', err));
+    .catch((err: unknown) => console.warn('[db] Failed to update deploy session:', err));
 }
 
 // ── Host Reputation ─────────────────────────────────────────────────────────
@@ -563,7 +563,7 @@ export async function upsertHostReputation(opts: {
           select: { hostKey: true, successCount: true, failCount: true, crashCount: true },
         });
         if (recentHosts.length >= 2) {
-          const failedHosts = recentHosts.filter(h => (h.failCount + h.crashCount) > h.successCount);
+          const failedHosts = recentHosts.filter((h: { failCount: number; crashCount: number; successCount: number }) => (h.failCount + h.crashCount) > h.successCount);
           const failRate = failedHosts.length / recentHosts.length;
           if (failRate > 0.5) {
             console.warn(`[reputation] ALERT: GPU type "${gpuType}" failing globally — ${failedHosts.length}/${recentHosts.length} hosts failed (${(failRate * 100).toFixed(0)}%) in last 24h`);
@@ -850,7 +850,7 @@ export async function handleRequestLog(req: IncomingMessage, res: ServerResponse
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      entries: entries.map(e => ({
+      entries: entries.map((e: any) => ({
         id: e.id,
         timestamp: e.timestamp.getTime(),
         stage: e.stage,
