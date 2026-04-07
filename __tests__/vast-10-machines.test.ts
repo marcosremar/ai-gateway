@@ -207,7 +207,7 @@ function printReport(results: MachineResult[]): void {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe.skipIf(!VAST_API_KEY || !!process.env.SKIP_GPU_TESTS)('Vast.ai 10-Machine Stress Test', () => {
+describe.skipIf(!VAST_API_KEY || !process.env.SKIP_GPU_TESTS !== '1')('Vast.ai 10-Machine Stress Test', () => {
   const creds: ProviderCredentials = { apiKey: VAST_API_KEY || '' };
   const client = new VastClient();
 
