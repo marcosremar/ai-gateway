@@ -452,7 +452,7 @@ describe('handleTranscribe', () => {
     const { shouldPreferGpu } = await import('../server/providers');
     vi.mocked(isGpuReadyForProduction).mockReturnValue(true);
     vi.mocked(shouldPreferGpu).mockReturnValue(true);
-    (deployState as any).endpoint = 'https://gpu-pod.runpod.io:8000';
+    (deployState as any).endpoint = 'https://gpu-pod.test:8000';
     (deployState as any).status = 'ready';
 
     const audio = fakeAudio();
@@ -496,7 +496,7 @@ describe('handleTranscribe', () => {
     const { shouldPreferGpu } = await import('../server/providers');
     vi.mocked(isGpuReadyForProduction).mockReturnValue(true);
     vi.mocked(shouldPreferGpu).mockReturnValue(false);
-    (deployState as any).endpoint = 'https://gpu-pod.runpod.io:8000';
+    (deployState as any).endpoint = 'https://gpu-pod.test:8000';
 
     const audio = fakeAudio();
     mockRaceProviders.mockResolvedValueOnce({
@@ -612,7 +612,7 @@ describe('handleTranscribe', () => {
     const providersMod = await import('../server/providers');
     const stateMod = await import('../server/state');
     (providersMod as any).gpuShadowMode = true;
-    (stateMod.deployState as any).endpoint = 'https://gpu-pod.runpod.io:8000';
+    (stateMod.deployState as any).endpoint = 'https://gpu-pod.test:8000';
 
     const audio = fakeAudio();
     // The shadow GPU fetch will be called with mockFetch
@@ -1392,7 +1392,7 @@ describe('handleTtsPreview', () => {
   it('#062 uses GPU endpoint when available', async () => {
     const { isGpuAvailable, deployState } = await import('../server/state');
     vi.mocked(isGpuAvailable).mockReturnValue(true);
-    (deployState as any).endpoint = 'https://gpu-pod.runpod.io:8000';
+    (deployState as any).endpoint = 'https://gpu-pod.test:8000';
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -1404,7 +1404,7 @@ describe('handleTtsPreview', () => {
     await handleTtsPreview(req, res);
     expect(res.statusCode).toBe(200);
     expect(mockFetch).toHaveBeenCalledWith(
-      expect.stringContaining('gpu-pod.runpod.io'),
+      expect.stringContaining('gpu-pod.test'),
       expect.any(Object),
     );
 
@@ -1551,7 +1551,7 @@ describe('Cross-cutting concerns', () => {
   // #073: SSRF protection — public URLs are allowed
   it('#073 isPrivateUrl allows public URLs', () => {
     expect(isPrivateUrl('https://api.groq.com/v1/audio')).toBe(false);
-    expect(isPrivateUrl('https://gpu-pod.runpod.io:8000/v1/transcribe')).toBe(false);
+    expect(isPrivateUrl('https://gpu-pod.test:8000/v1/transcribe')).toBe(false);
     expect(isPrivateUrl('https://example.com/api')).toBe(false);
   });
 

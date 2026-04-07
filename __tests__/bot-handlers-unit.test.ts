@@ -207,7 +207,7 @@ describe('Bot handlers — deploy lock', () => {
     process.env.FLY_API_TOKEN = 'test-fly-token';
     vi.mocked(readJsonBody).mockResolvedValue({});
     mockFlyioCreateInstance.mockResolvedValue({
-      instanceId: 'fly-123', endpoint: 'https://bot.fly.dev',
+      instanceId: 'fly-123', endpoint: 'https://bot.test:8080',
     });
 
     const req = mockReq({});
@@ -234,7 +234,7 @@ describe('Bot handlers — deploy providers', () => {
     process.env.FLY_API_TOKEN = 'test-fly-token';
     vi.mocked(readJsonBody).mockResolvedValue({});
     mockFlyioCreateInstance.mockResolvedValue({
-      instanceId: 'fly-123', endpoint: 'https://bot.fly.dev',
+      instanceId: 'fly-123', endpoint: 'https://bot.test:8080',
     });
 
     const req = mockReq({});
@@ -303,7 +303,7 @@ describe('Bot handlers — status', () => {
   // #230
   it('returns current bot state with elapsed time', async () => {
     setBotStateVar({
-      ...botState, status: 'ready', endpoint: 'https://bot.fly.dev',
+      ...botState, status: 'ready', endpoint: 'https://bot.test:8080',
       startedAt: Date.now() - 10_000, podId: 'fly-123',
     });
 
@@ -345,7 +345,7 @@ describe('Bot handlers — status', () => {
 describe('Bot handlers — join', () => {
   // #233
   it('requires meetingUrl in body', async () => {
-    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.fly.dev' });
+    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.test:8080' });
     vi.mocked(readJsonBody).mockResolvedValue({});
 
     const req = mockReq({});
@@ -357,7 +357,7 @@ describe('Bot handlers — join', () => {
 
   // #234
   it('rejects invalid URL format', async () => {
-    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.fly.dev' });
+    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.test:8080' });
     vi.mocked(readJsonBody).mockResolvedValue({ meetingUrl: 'not-a-url' });
 
     const req = mockReq({});
@@ -369,7 +369,7 @@ describe('Bot handlers — join', () => {
 
   // #235
   it('rejects non-http/https protocols', async () => {
-    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.fly.dev' });
+    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.test:8080' });
     vi.mocked(readJsonBody).mockResolvedValue({ meetingUrl: 'ftp://evil.com/meeting' });
 
     const req = mockReq({});
@@ -381,7 +381,7 @@ describe('Bot handlers — join', () => {
 
   // #236
   it('SSRF protection blocks private/internal URLs', async () => {
-    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.fly.dev' });
+    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.test:8080' });
     vi.mocked(readJsonBody).mockResolvedValue({ meetingUrl: 'http://127.0.0.1/meeting' });
 
     const req = mockReq({});
@@ -393,7 +393,7 @@ describe('Bot handlers — join', () => {
 
   // #237
   it('SSRF blocks 192.168.x.x addresses', async () => {
-    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.fly.dev' });
+    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.test:8080' });
     vi.mocked(readJsonBody).mockResolvedValue({ meetingUrl: 'http://192.168.1.1/meeting' });
 
     const req = mockReq({});
@@ -405,7 +405,7 @@ describe('Bot handlers — join', () => {
 
   // #238
   it('returns 409 when bot is not ready', async () => {
-    setBotStateVar({ ...botState, status: 'booting', endpoint: 'https://bot.fly.dev' });
+    setBotStateVar({ ...botState, status: 'booting', endpoint: 'https://bot.test:8080' });
     vi.mocked(readJsonBody).mockResolvedValue({ meetingUrl: 'https://meet.google.com/abc-def-ghi' });
 
     const req = mockReq({});
@@ -417,7 +417,7 @@ describe('Bot handlers — join', () => {
 
   // #239
   it('sends join request to bot endpoint on valid URL', async () => {
-    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.fly.dev', podId: 'fly-123' });
+    setBotStateVar({ ...botState, status: 'ready', endpoint: 'https://bot.test:8080', podId: 'fly-123' });
     vi.mocked(readJsonBody).mockResolvedValue({
       meetingUrl: 'https://meet.google.com/abc-def-ghi',
       botName: 'Test Bot',
@@ -472,7 +472,7 @@ describe('Bot handlers — leave', () => {
   // #242
   it('sends stop_record to bot pod on leave', async () => {
     setBotStateVar({
-      ...botState, status: 'joined', endpoint: 'https://bot.fly.dev',
+      ...botState, status: 'joined', endpoint: 'https://bot.test:8080',
       meetingUrl: 'https://meet.google.com/abc', podId: 'fly-123',
     });
 
@@ -500,7 +500,7 @@ describe('Bot handlers — terminate', () => {
   // #243
   it('resets bot state to idle on terminate', async () => {
     setBotStateVar({
-      ...botState, status: 'ready', endpoint: 'https://bot.fly.dev',
+      ...botState, status: 'ready', endpoint: 'https://bot.test:8080',
       podId: 'fly-123',
     });
     process.env.FLY_API_TOKEN = 'test-fly-token';

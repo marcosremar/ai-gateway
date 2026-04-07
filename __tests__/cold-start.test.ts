@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { execSync } from 'child_process';
 
-const GATEWAY_URL = process.env.GATEWAY_URL || 'https://parle-gateway-loadtest.fly.dev';
+const GATEWAY_URL = process.env.GATEWAY_URL || process.env.GATEWAY_URL || 'http://localhost:4000';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_loadtest_2026';
 const FLY_APP = process.env.FLY_APP || 'parle-gateway-loadtest';
 const SKIP = process.env.SKIP_LIVE_TESTS === '1';
