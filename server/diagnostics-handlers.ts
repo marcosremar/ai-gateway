@@ -223,7 +223,7 @@ export async function handleDiagnosticsCleanup(req: IncomingMessage, res: Server
       if (staleHosts.length > 0) {
         const shResult = await prisma.hostReputation.deleteMany({
           where: {
-            hostKey: { in: staleHosts.map(h => h.hostKey) },
+            hostKey: { in: staleHosts.map((h: { hostKey: string }) => h.hostKey) },
           },
         });
         deleted.staleHosts = shResult.count;
@@ -232,7 +232,7 @@ export async function handleDiagnosticsCleanup(req: IncomingMessage, res: Server
       if (failOnlyHosts.length > 0) {
         const fhResult = await prisma.hostReputation.deleteMany({
           where: {
-            hostKey: { in: failOnlyHosts.map(h => h.hostKey) },
+            hostKey: { in: failOnlyHosts.map((h: { hostKey: string }) => h.hostKey) },
           },
         });
         deleted.failOnlyHosts = fhResult.count;
@@ -252,8 +252,8 @@ export async function handleDiagnosticsCleanup(req: IncomingMessage, res: Server
       wouldDelete: {
         requestLogRows: requestLogStale,
         gpuEventRows: gpuEventStale,
-        staleHosts: staleHosts.map(h => ({ hostKey: h.hostKey, provider: h.provider, gpuType: h.gpuType })),
-        failOnlyHosts: failOnlyHosts.map(h => ({
+        staleHosts: staleHosts.map((h: Record<string, unknown>) => ({ hostKey: h.hostKey, provider: h.provider, gpuType: h.gpuType })),
+        failOnlyHosts: failOnlyHosts.map((h: Record<string, unknown>) => ({
           hostKey: h.hostKey, provider: h.provider, gpuType: h.gpuType,
           score: h.reputationScore, deploys: h.deployCount,
         })),

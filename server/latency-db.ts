@@ -150,7 +150,7 @@ export async function saveProbeResult(hostId: string, result: ProbeResult, now =
 
   const totalInWindow = await prisma.hostLatencyHistory.count({ where: { hostId } });
 
-  const medians     = history.map(r => r.medianMs!);
+  const medians     = history.map((r: { medianMs: number | null }) => r.medianMs!);
   const successRate = totalInWindow > 0 ? medians.length / totalInWindow : 1;
   const stats       = medians.length > 0 ? computeStats(medians) : null;
 
@@ -273,11 +273,11 @@ export async function sortGpuTypesByLatency(gpuTypes: string[], thresholdMs: num
       select: { medianMs: true },
     });
 
-    const withData = rows.filter(r => r.medianMs !== null);
+    const withData = rows.filter((r: { medianMs: number | null }) => r.medianMs !== null);
     if (withData.length === 0) {
       unknown.push(gpuType);
     } else {
-      const best = Math.min(...withData.map(r => r.medianMs!));
+      const best = Math.min(...withData.map((r: { medianMs: number | null }) => r.medianMs!));
       if (best <= thresholdMs) good.push(gpuType);
       else allBad.push(gpuType);
     }

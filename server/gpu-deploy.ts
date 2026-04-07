@@ -118,7 +118,7 @@ export async function refreshGpuTypeCache(): Promise<void> {
 
   // Write all upserts in a single transaction so partial writes don't occur if the process is killed mid-loop
   try {
-    await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx: any) => {
       for (const { name, gpuName, offer } of allUpserts) {
         await tx.gpuTypeCache.upsert({
           where: { provider_gpuName: { provider: name, gpuName } },
@@ -159,8 +159,8 @@ export async function validateGpuTypesFromCache(gpuTypes: string[], provider?: s
   if (cached.length === 0) return null; // no cache yet = skip validation
 
   // Build lookup sets: full names and short names (case-insensitive)
-  const validFullNames = new Set(cached.map(g => g.gpuName.toLowerCase()));
-  const validShortNames = new Set(cached.map(g => g.gpuType.toLowerCase()));
+  const validFullNames = new Set(cached.map((g: any) => g.gpuName.toLowerCase()));
+  const validShortNames = new Set(cached.map((g: any) => g.gpuType.toLowerCase()));
 
   const invalid: string[] = [];
   for (const requested of gpuTypes) {
@@ -180,9 +180,9 @@ export async function validateGpuTypesFromCache(gpuTypes: string[], provider?: s
   // Build descriptive error with valid options
   const providerLabel = provider ? ` on ${provider}` : '';
   const validList = cached
-    .filter((g, i, arr) => arr.findIndex(x => x.gpuName === g.gpuName) === i) // deduplicate
+    .filter((g: any, i: number, arr: any[]) => arr.findIndex((x: any) => x.gpuName === g.gpuName) === i) // deduplicate
     .slice(0, 15)
-    .map(g => {
+    .map((g: any) => {
       const price = g.pricePerHr > 0 ? ` ($${g.pricePerHr.toFixed(2)}/h)` : '';
       const vram = g.vram > 0 ? ` ${g.vram}GB` : '';
       return `${g.gpuType}${vram}${price}`;
@@ -579,8 +579,8 @@ export async function autoStopGpu() {
     return;
   }
 
-  // Resolve credentials
-  const credentials: ProviderCredentials = {};
+  // Resolve credentials (apiKey is overwritten below based on provider)
+  const credentials: ProviderCredentials = { apiKey: '' };
   let client: GpuProviderClient | null = null;
   if (provider === 'runpod' && deployApiKey) {
     client = runpod; credentials.apiKey = deployApiKey;
@@ -954,7 +954,7 @@ export async function autoSelectCheapestGpu(
       where: { crashCount: { gte: 3 }, lastDeployAt: { gt: Date.now() - 7 * 24 * 60 * 60 * 1000 } },
       select: { hostKey: true },
     });
-    blacklistedHosts = new Set(rows.map(r => r.hostKey));
+    blacklistedHosts = new Set(rows.map((r: { hostKey: string }) => r.hostKey));
     if (blacklistedHosts.size > 0) {
       console.log(`[gpu] autoSelectGpu: ${blacklistedHosts.size} host(s) blacklisted (3+ crashes in 7d)`);
     }
@@ -967,7 +967,7 @@ export async function autoSelectCheapestGpu(
       where: { reputationScore: { lt: 0.3 }, deployCount: { gte: 2 } }, // at least 2 deploys to avoid penalizing new hosts
       select: { hostKey: true, reputationScore: true },
     });
-    lowRepHosts = new Set(rows.map(r => r.hostKey));
+    lowRepHosts = new Set(rows.map((r: { hostKey: string }) => r.hostKey));
     if (lowRepHosts.size > 0) {
       console.log(`[gpu] autoSelectGpu: ${lowRepHosts.size} host(s) below reputation floor (<0.3)`);
     }
@@ -987,7 +987,7 @@ export async function autoSelectCheapestGpu(
         select: { gpuType: true },
       });
       if (failedTests.length > 0) {
-        incompatibleGpuTypes = new Set(failedTests.map(t => t.gpuType));
+        incompatibleGpuTypes = new Set(failedTests.map((t: { gpuType: string }) => t.gpuType));
         console.log(`[gpu] autoSelectGpu: ${incompatibleGpuTypes.size} GPU type(s) incompatible with ${currentImage}: ${[...incompatibleGpuTypes].join(', ')}`);
       }
     }
@@ -1725,8 +1725,11 @@ export async function startDeployRace(
     // Promise.all threw — some slots may not have cleaned up their pods.
     // Force-terminate any non-winner instances that are still alive.
     console.error(`[race] Promise.all exception — force-cleaning ${candidates.length} race instances:`, raceErr);
+    // TS narrows `winner` to `never` in this catch block because all assignments
+    // live inside Promise callbacks. Re-cast to match the declared type.
+    const winnerCandidate = winner as RaceCandidate | null;
     for (const c of candidates) {
-      if (winner && winner.instanceId === c.instanceId) continue;
+      if (winnerCandidate && winnerCandidate.instanceId === c.instanceId) continue;
       try {
         await Promise.race([
           c.tier.client.deleteInstance(c.instanceId, { apiKey: c.tier.apiKey, authId: c.tier.authId }),

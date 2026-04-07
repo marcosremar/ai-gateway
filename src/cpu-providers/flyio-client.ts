@@ -170,13 +170,14 @@ export class FlyioClient extends AbstractGpuProvider {
 
     return {
       instanceId: machine.id,
-      providerId: 'flyio',
       status: 'running',
       endpoint,
       sshHost: '',
       sshPort: 0,
-      costPerHr: 0.03, // approximate for shared-cpu-4x 8GB
-      createdAt: new Date(machine.created_at),
+      providerMeta: {
+        costPerHr: 0.03, // approximate for shared-cpu-4x 8GB
+        createdAt: machine.created_at,
+      },
     };
   }
 
@@ -213,6 +214,64 @@ export class FlyioClient extends AbstractGpuProvider {
     this.log.log(`[flyio] Machine ${instanceId} destroyed`);
   }
 
+  /** Fly doesn't have a "discover existing instance" concept — deploys are always fresh. */
+  async discoverInstance(
+    _credentials: ProviderCredentials,
+    _gpuTypes: string[],
+  ): Promise<GpuInstance | null> {
+    return null;
+  }
+
+  async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    const token = credentials.apiKey;
+    const app = this.appName();
+    const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}/start`, {
+      method: 'POST',
+      headers: this.headers(token),
+      signal: AbortSignal.timeout(TIMEOUTS.write),
+    });
+    if (!res.ok && res.status !== 412) {
+      // 412 = already started
+      const text = await res.text();
+      throw new Error(`Fly.io start failed (${res.status}): ${text.slice(0, 200)}`);
+    }
+  }
+
+  async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    const token = credentials.apiKey;
+    const app = this.appName();
+    const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}/stop`, {
+      method: 'POST',
+      headers: this.headers(token),
+      signal: AbortSignal.timeout(TIMEOUTS.write),
+    });
+    if (!res.ok && res.status !== 412) {
+      const text = await res.text();
+      throw new Error(`Fly.io stop failed (${res.status}): ${text.slice(0, 200)}`);
+    }
+  }
+
+  async getInstanceStatus(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
+    const token = credentials.apiKey;
+    const app = this.appName();
+    try {
+      const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}`, {
+        headers: this.headers(token),
+        signal: AbortSignal.timeout(TIMEOUTS.read),
+      });
+      if (!res.ok) return null;
+      const machine = await res.json() as FlyMachine;
+      // Map Fly state → canonical status used by the provider registry
+      if (machine.state === 'started') return 'running';
+      if (machine.state === 'stopped') return 'stopped';
+      if (machine.state === 'starting' || machine.state === 'created') return 'booting';
+      if (machine.state === 'stopping' || machine.state === 'destroying' || machine.state === 'destroyed') return 'terminated';
+      return machine.state;
+    } catch {
+      return null;
+    }
+  }
+
   async listInstances(credentials: ProviderCredentials): Promise<GpuInstance[]> {
     const token = credentials.apiKey;
     const app = this.appName();
@@ -230,13 +289,14 @@ export class FlyioClient extends AbstractGpuProvider {
         .filter(m => m.name.startsWith('babelcast-bot-'))
         .map(m => ({
           instanceId: m.id,
-          providerId: 'flyio' as const,
-          status: m.state === 'started' ? 'running' as const : 'stopped' as const,
+          status: m.state === 'started' ? 'running' : 'stopped',
           endpoint: `https://${app}.fly.dev`,
           sshHost: '',
           sshPort: 0,
-          costPerHr: 0.03,
-          createdAt: new Date(m.created_at),
+          providerMeta: {
+            costPerHr: 0.03,
+            createdAt: m.created_at,
+          },
         }));
     } catch {
       return [];

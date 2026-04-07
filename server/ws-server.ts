@@ -66,7 +66,7 @@ export function reloadStreamingSTTRouter(): void {
 }
 
 // Active STT sessions: client WS id → upstream backend
-const sttSessions = new Map<string, import('../ai-gateway/src/streaming-stt').StreamingSTTBackend>();
+const sttSessions = new Map<string, import('../src/streaming-stt').StreamingSTTBackend>();
 
 // Periodic cleanup of stale STT sessions (clients that disconnected ungracefully)
 setInterval(() => {
@@ -271,7 +271,10 @@ export function startParecCapture(): void {
 
   // Read stderr for errors
   (async () => {
-    if (!parecProc?.stderr) return;
+    // stdout/stderr is ReadableStream when spawned with { stderr: 'pipe' },
+    // but Bun types it as `number | ReadableStream` (the number case is for
+    // 'inherit'). Narrow explicitly.
+    if (!parecProc?.stderr || typeof parecProc.stderr === 'number') return;
     const reader = parecProc.stderr.getReader();
     try {
       while (true) {
@@ -288,7 +291,7 @@ export function startParecCapture(): void {
   let buffer = new Uint8Array(0);
 
   (async () => {
-    if (!parecProc?.stdout) return;
+    if (!parecProc?.stdout || typeof parecProc.stdout === 'number') return;
     const reader = parecProc.stdout.getReader();
     try {
       while (true) {
@@ -402,16 +405,8 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
       return;
     }
 
-    // Reuse existing handleBotJoin logic by faking an HTTP request
-    const fakeBody = { meetingUrl, source: sourceLang, target: targetLang, botName };
-    const { IncomingMessage, ServerResponse } = await import('http');
-    const { Duplex } = await import('stream');
-
-    // Build minimal fake req/res to reuse handleBotJoin
-    const fakeReq = Object.assign(new IncomingMessage(new Duplex()), {
-      _body: JSON.stringify(fakeBody),
-    });
-    // Instead of full fake req/res, directly call the join logic inline:
+    // Directly call the join logic inline (bypassing the HTTP handler reuse
+    // — previous fake-IncomingMessage approach was removed as dead code).
     const botEndpoint = botState.endpoint;
     if (!botEndpoint) {
       broadcastWs({ type: 'bot:status', status: 'error', message: 'Bot pod has no endpoint' });
@@ -812,7 +807,7 @@ export function startWsServer() {
       message(ws, msg) {
         // ── Message size guard — reject oversized payloads ──
         const MAX_WS_MESSAGE_SIZE = 5 * 1024 * 1024; // 5MB
-        if (typeof msg !== 'string' && (msg as ArrayBuffer).byteLength > MAX_WS_MESSAGE_SIZE) {
+        if (typeof msg !== 'string' && msg.byteLength > MAX_WS_MESSAGE_SIZE) {
           ws.close(1009, 'Message too large');
           return;
         }
@@ -840,7 +835,7 @@ export function startWsServer() {
             } catch { /* ignore parse errors */ }
           } else {
             // Binary message = WAV audio → run pipeline
-            const audioBuffer = Buffer.from(msg as ArrayBuffer);
+            const audioBuffer = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
             if (audioBuffer.length === 0) {
               ws.send(JSON.stringify({ status: 'error', message: 'No audio data' }));
               return;
@@ -887,12 +882,13 @@ export function startWsServer() {
             try {
               const ctrl = JSON.parse(msg);
               if (ctrl.action === 'clear') {
-                backend.clearState?.();
+                // clearState is optional on the backend (only some providers support it)
+                (backend as { clearState?: () => void }).clearState?.();
               }
             } catch { /* ignore malformed */ }
           } else {
-            // Forward binary PCM to upstream backend
-            backend.sendAudio(msg as ArrayBuffer);
+            // Forward binary PCM to upstream backend (msg is Buffer here)
+            backend.sendAudio(msg);
           }
         } else if (ws.data.type === 'recall-audio') {
           // Recall.ai audio: first message is JSON metadata, then binary S16LE 16kHz PCM.
@@ -904,7 +900,7 @@ export function startWsServer() {
             return;
           }
           // Binary: raw S16LE 16kHz mono PCM — relay to all Python app clients
-          const recallChunk = Buffer.from(msg as ArrayBuffer);
+          const recallChunk = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
           for (const client of wsClients) {
             try { client.send(recallChunk); } catch { wsClients.delete(client); }
           }
@@ -926,13 +922,13 @@ export function startWsServer() {
           // Relay binary audio to all connected Python clients
           botAudioChunks++;
           if (botAudioChunks === 1 || botAudioChunks % 500 === 0) {
-            console.log(`[bot-audio] Relaying audio chunk #${botAudioChunks} (${(msg as ArrayBuffer).byteLength} bytes) to ${wsClients.size} clients`);
+            console.log(`[bot-audio] Relaying audio chunk #${botAudioChunks} (${msg.byteLength} bytes) to ${wsClients.size} clients`);
           }
           for (const client of wsClients) {
             try { client.send(msg); } catch { wsClients.delete(client); }
           }
           // Auto-process: buffer audio and run through pipeline when enough accumulates
-          const audioChunk = Buffer.from(msg as ArrayBuffer);
+          const audioChunk = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
           botAudioBuffer.push(audioChunk);
           botAudioBufferBytes += audioChunk.length;
           // Cap buffer to prevent OOM on runaway audio streams
@@ -947,7 +943,7 @@ export function startWsServer() {
           }
         } else {
           try {
-            const raw = typeof msg === 'string' ? msg : Buffer.from(msg as ArrayBuffer).toString();
+            const raw = typeof msg === 'string' ? msg : (Buffer.isBuffer(msg) ? msg : Buffer.from(msg)).toString();
             const cmd = JSON.parse(raw) as Record<string, unknown>;
             handleWsCommand(ws as unknown as BabelCastWS, cmd).catch(err => console.error('[ws] Command error:', err));
           } catch { /* ignore parse errors */ }
@@ -1147,7 +1143,7 @@ export function startWsServer() {
           const listeners: Record<string, Function[]> = {};
           const fakeReq: any = {
             method, url: url.pathname + url.search,
-            headers: Object.fromEntries(req.headers.entries()),
+            headers: (() => { const h: Record<string, string> = {}; req.headers.forEach((v, k) => { h[k] = v; }); return h; })(),
             on: (ev: string, cb: Function) => { (listeners[ev] = listeners[ev] || []).push(cb); return fakeReq; },
           };
           queueMicrotask(() => {
@@ -1191,7 +1187,7 @@ export function startWsServer() {
         const listeners: Record<string, Function[]> = {};
         const fakeReq: any = {
           method, url: url.pathname + url.search,
-          headers: Object.fromEntries(req.headers.entries()),
+          headers: (() => { const h: Record<string, string> = {}; req.headers.forEach((v, k) => { h[k] = v; }); return h; })(),
           on: (ev: string, cb: Function) => { (listeners[ev] = listeners[ev] || []).push(cb); return fakeReq; },
         };
         queueMicrotask(() => {

@@ -31,7 +31,7 @@ export class ResponseCache {
   }
 
   /** Build a deterministic cache key from request params */
-  buildKey(params: { provider: string; model: string; messages?: unknown[]; input?: unknown; temperature?: number }): string {
+  buildKey(params: { provider: string; model: string; messages?: unknown[]; input?: unknown; temperature?: number; dimensions?: number }): string {
     let serialized: string;
     try {
       // Sort keys for deterministic hashing (prevents cache splits from key reordering)
@@ -41,6 +41,7 @@ export class ResponseCache {
         msgs: params.messages,
         inp: params.input,
         t: params.temperature,
+        d: params.dimensions,
       });
     } catch {
       // Non-serializable input (circular refs, etc.) — use provider+model only
