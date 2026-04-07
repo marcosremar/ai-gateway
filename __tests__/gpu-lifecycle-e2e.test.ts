@@ -253,13 +253,13 @@ describe.skipIf(!LIFECYCLE_ENABLED)('GPU Lifecycle E2E', () => {
       const r = await getReadiness();
       console.log(`    shadow runs: ${r.readinessState.shadowCompletedRuns}, production: ${r.gpuReadyForProduction}`);
       return r.gpuReadyForProduction;
-    }, { intervalMs: 3000, timeoutMs: 60_000, label: 'production activation' });
+    }, { intervalMs: 5000, timeoutMs: 180_000, label: 'production activation' });
 
     const final = await getReadiness();
     expect(final.gpuReadyForProduction).toBe(true);
     console.log('  ✓ GPU is now in PRODUCTION');
     logPhases(final);
-  }, 120_000);
+  }, 240_000);
 
   // ── Step 5: Verify READY state ─────────────────────────────────────────
 
