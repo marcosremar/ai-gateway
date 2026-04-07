@@ -3,7 +3,7 @@
  *
  * Uses OpenMOSS-Team/MOSS-TTS deployed on Modal.com serverless GPU.
  * Auto-detects language from text, supports voice cloning with reference audio.
- * No API key required — public endpoint.
+ * Supports proxy auth via MODAL_PROXY_SECRET env (format: key:secret).
  *
  * Voice ID format: moss-{lang}  e.g. "moss-pt", "moss-en" (language hint, model auto-detects)
  * Endpoint: POST /api/text  { text, reference_audio? }
@@ -11,6 +11,14 @@
  */
 
 import type { ProviderId, ModelInfo, TTSProvider, TTSRequest, TTSResponse, VoiceInfo } from '../types';
+
+function buildProxyAuthHeaders(): Record<string, string> {
+  const token = process.env.MODAL_PROXY_SECRET;
+  if (!token) return {};
+  const [key, secret] = token.split(':');
+  if (!key || !secret) return {};
+  return { 'Modal-Key': key, 'Modal-Secret': secret };
+}
 
 const DEFAULT_ENDPOINT =
   'https://marcosremar--babelcast-moss-tts-serve.modal.run';
@@ -55,7 +63,7 @@ export class ModalMossTTSProvider implements TTSProvider {
   async synthesize(request: TTSRequest): Promise<TTSResponse> {
     const res = await fetch(`${this.endpoint}/api/text`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...buildProxyAuthHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text: request.input,
         ...(request.referenceAudio && { reference_audio: request.referenceAudio }),

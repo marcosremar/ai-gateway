@@ -367,7 +367,6 @@ describe.skipIf(!hasEndpoint)('LLM — TranslateGemma Translation', () => {
 
 describe.skipIf(!hasEndpoint)('Chat Completions — OpenAI-compatible', () => {
   it('POST /v1/chat/completions returns valid structure', async () => {
-    if (!llmReady) return;
     const r = await fetch(`${endpoint}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

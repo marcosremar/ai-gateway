@@ -132,6 +132,123 @@ export class RunpodClient extends AbstractGpuProvider {
       : `https://${podId}-8000.proxy.runpod.net`;
   }
 
+  // ── Network Volume CRUD ───────────────────────────────────────────────
+  // Network volumes are persistent storage attached at /workspace.
+  // KEY CONSTRAINTS:
+  //   - Volumes are tied to ONE datacenter (e.g. EU-RO-1)
+  //   - Pods using a volume MUST be deployed to that same datacenter
+  //   - Volumes persist across pod terminations (charged $0.07/GB/month)
+  //   - Volume size can be expanded later but never reduced
+  //
+  // Use cases (where they HELP):
+  //   - HuggingFace model cache (HF_HOME=/workspace/huggingface)
+  //   - Pip cache, transformers cache, runtime-downloaded files
+  //   - Persistent app state (DB files, logs)
+  //
+  // They DO NOT cache the Docker image itself — image pull still happens
+  // on every cold boot. Pre-baked images don't benefit unless restructured
+  // to lazily download models to /workspace.
+
+  /** Create a new RunPod network volume in the specified datacenter. */
+  async createNetworkVolume(
+    name: string,
+    sizeGb: number,
+    dataCenterId: string,
+    credentials: ProviderCredentials,
+  ): Promise<{ id: string; name: string; size: number; dataCenterId: string }> {
+    const { apiKey } = credentials;
+    const res = await this._fetchWithRetry(
+      `${RunpodClient.API_BASE}/networkvolumes`,
+      {
+        method: 'POST',
+        headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, size: sizeGb, dataCenterId }),
+      },
+      TIMEOUTS.create,
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`[runpod] createNetworkVolume failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+    }
+    const data = (await res.json()) as Record<string, unknown>;
+    this.log.log(`[runpod] Created network volume "${name}" (${sizeGb}GB) in ${dataCenterId} → ${data.id}`);
+    return {
+      id: String(data.id),
+      name: String(data.name ?? name),
+      size: Number(data.size ?? sizeGb),
+      dataCenterId: String(data.dataCenterId ?? dataCenterId),
+    };
+  }
+
+  /** List all network volumes in the account. */
+  async listNetworkVolumes(
+    credentials: ProviderCredentials,
+  ): Promise<Array<{ id: string; name: string; size: number; dataCenterId: string }>> {
+    const { apiKey } = credentials;
+    const res = await this._fetchWithRetry(
+      `${RunpodClient.API_BASE}/networkvolumes`,
+      { headers: this.authHeaders(apiKey) },
+      TIMEOUTS.read,
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      this.log.warn(`[runpod] listNetworkVolumes failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      return [];
+    }
+    const data = (await res.json()) as unknown;
+    const arr = Array.isArray(data) ? data : ((data as Record<string, unknown>).networkVolumes as unknown[] ?? []);
+    return (arr as Array<Record<string, unknown>>).map(v => ({
+      id: String(v.id),
+      name: String(v.name ?? ''),
+      size: Number(v.size ?? 0),
+      dataCenterId: String(v.dataCenterId ?? ''),
+    }));
+  }
+
+  /** Get a single network volume by ID (returns null if not found). */
+  async getNetworkVolume(
+    volumeId: string,
+    credentials: ProviderCredentials,
+  ): Promise<{ id: string; name: string; size: number; dataCenterId: string } | null> {
+    const { apiKey } = credentials;
+    const res = await this._fetchWithRetry(
+      `${RunpodClient.API_BASE}/networkvolumes/${volumeId}`,
+      { headers: this.authHeaders(apiKey) },
+      TIMEOUTS.read,
+    );
+    if (!res.ok) {
+      if (res.status === 404) return null;
+      const body = await res.text().catch(() => '');
+      this.log.warn(`[runpod] getNetworkVolume(${volumeId}) failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      return null;
+    }
+    const data = (await res.json()) as Record<string, unknown>;
+    return {
+      id: String(data.id),
+      name: String(data.name ?? ''),
+      size: Number(data.size ?? 0),
+      dataCenterId: String(data.dataCenterId ?? ''),
+    };
+  }
+
+  /** Permanently delete a network volume. Data is unrecoverable. */
+  async deleteNetworkVolume(
+    volumeId: string,
+    credentials: ProviderCredentials,
+  ): Promise<void> {
+    const { apiKey } = credentials;
+    const res = await this._fetchWithRetry(
+      `${RunpodClient.API_BASE}/networkvolumes/${volumeId}`,
+      { method: 'DELETE', headers: this.authHeaders(apiKey) },
+      TIMEOUTS.write,
+    );
+    if (!res.ok && res.status !== 404) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`[runpod] deleteNetworkVolume failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+    }
+    this.log.log(`[runpod] Deleted network volume ${volumeId}`);
+  }
+
   async discoverInstance(
     credentials: ProviderCredentials,
     _gpuTypes: string[],
@@ -219,6 +336,24 @@ export class RunpodClient extends AbstractGpuProvider {
     }
     diskGb = Math.max(diskGb, getMinDiskGb());
 
+    // ── Network volume DC auto-restriction ─────────────────────────────────
+    // If a volumeId is given, the pod MUST land in the same datacenter as the
+    // volume. Resolve the volume's DC and override spec.region — this prevents
+    // a "no machines available" error when the volume is in DC X but offers
+    // come from DC Y.
+    let effectiveRegion = spec.region;
+    if (spec.volumeId) {
+      const vol = await this.getNetworkVolume(spec.volumeId, credentials);
+      if (!vol) {
+        throw new Error(`[runpod] Volume ${spec.volumeId} not found — cannot auto-restrict DC`);
+      }
+      if (effectiveRegion && effectiveRegion !== vol.dataCenterId) {
+        this.log.warn(`[runpod] Volume ${spec.volumeId} is in ${vol.dataCenterId} but spec.region=${effectiveRegion}. Overriding to volume's DC.`);
+      }
+      effectiveRegion = vol.dataCenterId;
+      this.log.log(`[runpod] Volume ${spec.volumeId} → forcing dataCenterIds=[${vol.dataCenterId}]`);
+    }
+
     const basePodConfig: Record<string, unknown> = {
       name: podName,
       imageName,
@@ -251,7 +386,8 @@ export class RunpodClient extends AbstractGpuProvider {
       interruptible: spec.interruptible ?? false,
       // Region filter: generic codes ('EU','US') are expanded to specific datacenter IDs.
       // RunPod REST API requires exact IDs (e.g. 'EU-RO-1') — generic codes cause HTTP 400.
-      ...(() => { const ids = resolveDatacenterIds(spec.region); return ids ? { dataCenterIds: ids } : {}; })(),
+      // When a volumeId is provided, effectiveRegion is forced to the volume's DC.
+      ...(() => { const ids = resolveDatacenterIds(effectiveRegion); return ids ? { dataCenterIds: ids } : {}; })(),
       // Custom start command (overrides Docker CMD/ENTRYPOINT)
       ...(spec.dockerStartCmd ? { dockerStartCmd: Array.isArray(spec.dockerStartCmd) ? spec.dockerStartCmd : ['bash', '-c', spec.dockerStartCmd] } : {}),
     };

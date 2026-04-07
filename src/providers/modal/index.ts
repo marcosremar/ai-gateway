@@ -3,7 +3,9 @@
  *
  * Uses Qwen3-TTS deployed on Modal.com serverless GPU (L40S).
  * OpenAI-compatible endpoint — POST /v1/audio/speech
- * No API key required — public endpoint.
+ *
+ * Supports Proxy Auth Tokens: set MODAL_PROXY_SECRET env var (format: "key:secret")
+ * to authenticate requests against Modal's proxy auth.
  *
  * Valid voices: aiden, dylan, eric, ono_anna, ryan, serena, sohee, uncle_fu, vivian
  * Endpoint: POST /v1/audio/speech  { model, input, voice, response_format }
@@ -27,6 +29,14 @@ export const MODAL_TTS_MODELS: ModelInfo[] = [
   },
 ];
 
+function buildProxyAuthHeaders(): Record<string, string> {
+  const token = process.env.MODAL_PROXY_SECRET;
+  if (!token) return {};
+  const [key, secret] = token.split(':');
+  if (!key || !secret) return {};
+  return { 'Modal-Key': key, 'Modal-Secret': secret };
+}
+
 export class ModalTTSProvider implements TTSProvider {
   readonly providerId: ProviderId = 'modal';
   private endpoint: string;
@@ -45,7 +55,6 @@ export class ModalTTSProvider implements TTSProvider {
     const rawVoice = (request.voice ?? '').toLowerCase();
     const voice = VALID_VOICES.includes(rawVoice) ? rawVoice : 'serena';
 
-    // Use /v1/tts when voice cloning (reference_audio), /v1/audio/speech for presets
     const hasClone = Boolean(request.referenceAudio && request.refText);
     const ttsUrl = hasClone ? `${this.endpoint}/v1/tts` : `${this.endpoint}/v1/audio/speech`;
     const ttsBody: Record<string, unknown> = hasClone
@@ -55,7 +64,7 @@ export class ModalTTSProvider implements TTSProvider {
 
     const res = await fetch(ttsUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...buildProxyAuthHeaders() },
       body: JSON.stringify(ttsBody),
     });
 

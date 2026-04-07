@@ -9,14 +9,20 @@
  *
  * Auth: apiKey = `{tokenId}:{tokenSecret}`
  * The Modal API uses protobuf, so we use the CLI as the primary interface.
+ *
+ * Advanced features:
+ *   - Rolling deploy strategy (--strategy rolling) for zero-downtime
+ *   - Deploy tagging (--tag) for version tracking and rollback
+ *   - Named deployments (--name) and environment targeting (--env)
+ *   - Dynamic autoscaler updates (min_containers, buffer_containers, max_containers)
+ *   - Warmup probe on startInstance to pre-trigger snapshot restore
+ *   - Proxy auth token support for endpoint protection
  */
 
 import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 
-// Lazy-load child_process to avoid breaking browser bundles (Next.js client-side).
-// Uses execFile (no shell) to prevent command injection.
 let _execFileAsync: ((file: string, args: string[], opts?: { env?: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number }) => Promise<{ stdout: string; stderr: string }>) | null = null;
 async function getExecFileAsync() {
   if (!_execFileAsync) {
@@ -36,8 +42,6 @@ function splitModalKey(apiKey: string): { tokenId: string; tokenSecret: string }
 function buildModalEnv(apiKey: string): NodeJS.ProcessEnv {
   const { tokenId, tokenSecret } = splitModalKey(apiKey);
 
-  // Prepend venv bin to PATH so `python3 -m modal` finds the right interpreter
-  // (system python3 from /Library/Developer/CommandLineTools/ won't have modal installed)
   const venvBin = process.env.VIRTUAL_ENV
     ? `${process.env.VIRTUAL_ENV}/bin`
     : `${process.cwd()}/.venv/bin`;
@@ -54,12 +58,30 @@ function buildModalEnv(apiKey: string): NodeJS.ProcessEnv {
   };
 }
 
-/**
- * Build the Modal web endpoint URL.
- * Pattern: https://{workspace}--{appName}-{functionName}.modal.run
- */
 function buildEndpointUrl(workspace: string, appName: string, functionName = 'web'): string {
   return `https://${workspace}--${appName}-${functionName}.modal.run`;
+}
+
+/** Options for deploy via `modal deploy`. */
+export interface ModalDeployOptions {
+  /** Deploy strategy: 'rolling' (default, zero-downtime) or 'recreate'. */
+  strategy?: 'rolling' | 'recreate';
+  /** Tag this deployment with a version string (e.g. 'v1.2.3'). */
+  tag?: string;
+  /** Custom deployment name (overrides the app name in the .py file). */
+  name?: string;
+  /** Target Modal environment (e.g. 'dev', 'prod'). */
+  env?: string;
+}
+
+/** Parameters for dynamic autoscaler updates (no redeploy needed). */
+export interface ModalAutoscalerParams {
+  /** Minimum number of warm containers (keeps containers always running). */
+  minContainers?: number;
+  /** Extra buffer containers while the function is active (for burst traffic). */
+  bufferContainers?: number;
+  /** Maximum number of containers (upper limit). */
+  maxContainers?: number;
 }
 
 export interface ModalClientOptions extends AbstractGpuProviderOptions {
@@ -67,25 +89,27 @@ export interface ModalClientOptions extends AbstractGpuProviderOptions {
   workspace?: string;
   /** Default ASGI function name in deployed apps. Default: "web" */
   defaultFunctionName?: string;
+  /** Proxy auth token — if set, endpoints require Modal-Key/Modal-Secret headers. */
+  proxyAuthToken?: string;
 }
 
 export class ModalClient extends AbstractGpuProvider {
   readonly providerId = 'modal';
-  readonly bootTimeSecs = 60; // Modal cold starts are fast (~10-60s)
+  readonly bootTimeSecs = 10; // With GPU snapshots + min_containers, cold start is ~5-10s
 
   private workspace: string | null;
   private defaultFunctionName: string;
   private workspacePromise: Promise<string> | null = null;
-  /** Correct endpoint URL captured from last `modal deploy` output — takes priority over listInstances URL. */
   private lastDeployedEndpoint: string | null = null;
+  private proxyAuthToken: string | null;
 
   constructor(options?: ModalClientOptions) {
     super(options);
     this.workspace = options?.workspace ?? null;
     this.defaultFunctionName = options?.defaultFunctionName ?? 'web';
+    this.proxyAuthToken = options?.proxyAuthToken ?? process.env.MODAL_PROXY_SECRET ?? null;
   }
 
-  /** Resolve workspace name from CLI profile if not provided */
   private async getWorkspace(credentials: ProviderCredentials): Promise<string> {
     if (this.workspace) return this.workspace;
     if (this.workspacePromise) return this.workspacePromise;
@@ -100,7 +124,6 @@ export class ModalClient extends AbstractGpuProvider {
         this.workspace = stdout.trim();
         return this.workspace;
       } catch {
-        // Fallback: extract from token ID prefix
         const { tokenId } = splitModalKey(credentials.apiKey);
         this.workspace = tokenId.replace(/^ak-/, '');
         return this.workspace;
@@ -109,14 +132,6 @@ export class ModalClient extends AbstractGpuProvider {
     return this.workspacePromise;
   }
 
-  /**
-   * Discover a running or deployed Modal app.
-   * gpuTypes[0] can optionally be an app name filter (e.g. "parle-ultralight").
-   * Priority: running (active tasks) > deployed (auto-wake ready).
-   *
-   * "deployed" apps are normalized to status "running" because Modal auto-wakes
-   * them on HTTP request — the autoscaler engine treats them as usable.
-   */
   async discoverInstance(
     credentials: ProviderCredentials,
     gpuTypes: string[],
@@ -124,20 +139,16 @@ export class ModalClient extends AbstractGpuProvider {
     const instances = await this.listInstances(credentials);
     const nameFilter = gpuTypes[0] ?? '';
 
-    // If a name filter is provided, narrow results
     const candidates = nameFilter
       ? instances.filter(i => i.instanceName?.includes(nameFilter))
       : instances;
 
-    // Prefer running (has active tasks) > deployed (auto-wake)
     const found = candidates.find(i => i.status === 'running')
       ?? candidates.find(i => i.status === 'deployed')
       ?? null;
 
     if (!found) return null;
 
-    // Normalize "deployed" to "running" — Modal auto-wakes on request,
-    // so from the autoscaler's perspective a deployed app is usable.
     if (found.status === 'deployed' && found.endpoint) {
       return { ...found, status: 'running' };
     }
@@ -146,12 +157,15 @@ export class ModalClient extends AbstractGpuProvider {
 
   /**
    * Deploy a Modal app via `modal deploy`.
-   * spec.dockerImage should be the path to the modal .py file (e.g. "spaces/parle-s2s-ultralight/modal_ultralight.py")
+   * spec.dockerImage should be the path to the modal .py file (e.g. "dockers/modal/babelcast.py")
+   *
+   * Supports rolling deploys (default), version tagging, named deploys, and environment targeting.
    */
   async createInstance(
     spec: InstanceSpec,
     credentials: ProviderCredentials,
     _userId?: string,
+    deployOpts?: ModalDeployOptions,
   ): Promise<GpuInstance> {
     const deployFile = spec.dockerImage;
     if (!deployFile) {
@@ -159,26 +173,36 @@ export class ModalClient extends AbstractGpuProvider {
     }
 
     const env = buildModalEnv(credentials.apiKey);
+    const args = ['-m', 'modal', 'deploy', deployFile];
+
+    const strategy = deployOpts?.strategy ?? spec.env?.MODAL_DEPLOY_STRATEGY ?? 'rolling';
+    args.push('--strategy', strategy);
+
+    if (deployOpts?.tag) {
+      args.push('--tag', deployOpts.tag);
+    }
+    if (deployOpts?.name) {
+      args.push('--name', deployOpts.name);
+    }
+    if (deployOpts?.env) {
+      args.push('--env', deployOpts.env);
+    }
 
     try {
       const { stdout, stderr } = await (await getExecFileAsync())(
-        'python3', ['-m', 'modal', 'deploy', deployFile],
+        'python3', args,
         { env, timeout: 180_000, maxBuffer: 10 * 1024 * 1024 },
       );
 
-      // Parse the endpoint URL from deploy output
-      // Example: "Created web function web => https://marcosremar--parle-ultralight-web.modal.run"
       const urlMatch = (stdout + stderr).match(/https:\/\/[^\s]+\.modal\.run/);
       const endpoint = urlMatch?.[0] ?? '';
-      this.log.log(`[modal] deploy stdout len=${stdout.length} stderr len=${stderr.length} urlMatch=${endpoint || '(none)'} deployFile=${deployFile}`);
+      this.log.log(`[modal] deploy strategy=${strategy} tag=${deployOpts?.tag ?? '-'} stdout len=${stdout.length} stderr len=${stderr.length} urlMatch=${endpoint || '(none)'} deployFile=${deployFile}`);
       if (endpoint) this.lastDeployedEndpoint = endpoint;
 
-      // Parse app name from output or file
       const workspace = await this.getWorkspace(credentials);
 
-      // Get the app ID from listing — match by name first, then status
       const instances = await this.listInstances(credentials);
-      const appName = deployFile.match(/modal_(\w+)\.py/)?.[1] ?? 'unknown';
+      const appName = deployFile.match(/(?:modal_)?(\w+)\.py/)?.[1] ?? 'unknown';
       const found =
         instances.find(i => i.instanceName?.includes(appName)) ??
         instances.find(i => i.status === 'deployed');
@@ -195,19 +219,54 @@ export class ModalClient extends AbstractGpuProvider {
   }
 
   /**
-   * Modal apps auto-start on invocation. "starting" just means hitting the endpoint
-   * to trigger a cold start. We verify with a health check.
+   * Start a Modal app by verifying it exists and triggering a warmup probe.
+   * The warmup probe hits the endpoint to pre-trigger snapshot restore,
+   * so the first real request doesn't pay the cold-start penalty.
    */
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
-    // For Modal, the app auto-wakes on request. We just verify it exists.
     const status = await this.getInstanceStatus(instanceId, credentials);
     if (!status) {
       throw new Error(`[modal] app ${instanceId} not found — deploy first`);
     }
-    // If stopped, it means the deployment was removed. If deployed, it will auto-wake.
     if (status === 'stopped') {
       this.log.warn(`[modal] app ${instanceId} is stopped — may need re-deploy`);
     }
+
+    // Warmup probe: hit the endpoint to trigger snapshot restore
+    const endpoint = await this.resolveInstanceEndpoint(instanceId, credentials);
+    if (endpoint) {
+      await this.warmupProbe(endpoint);
+    }
+  }
+
+  /**
+   * Send a lightweight HTTP request to the endpoint to trigger
+   * snapshot restore and container warmup before real traffic arrives.
+   */
+  private async warmupProbe(endpoint: string): Promise<void> {
+    const healthPaths = ['/health', '/v1/models', '/'];
+    for (const path of healthPaths) {
+      try {
+        const headers: Record<string, string> = {};
+        if (this.proxyAuthToken) {
+          const [key, secret] = this.proxyAuthToken.split(':');
+          headers['Modal-Key'] = key;
+          headers['Modal-Secret'] = secret || key;
+        }
+        const res = await fetch(`${endpoint}${path}`, {
+          method: 'GET',
+          signal: AbortSignal.timeout(30_000),
+          headers,
+        });
+        if (res.ok || res.status === 404) {
+          this.log.log(`[modal] warmup probe ${path} → ${res.status} (container warmed)`);
+          return;
+        }
+      } catch {
+        // Try next path
+      }
+    }
+    this.log.warn(`[modal] warmup probe failed for ${endpoint} — first request may have cold start`);
   }
 
   async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
@@ -232,18 +291,47 @@ export class ModalClient extends AbstractGpuProvider {
     return found?.status ?? null;
   }
 
-  /** Re-resolve endpoint for a Modal app.
-   * Prefers the URL captured from `modal deploy` output (which includes the class name).
-   * Falls back to listInstances (which uses buildEndpointUrl and may lack the class name).
-   */
   async resolveInstanceEndpoint(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
-    // The correct URL is captured in createInstance from modal deploy stdout.
-    // listInstances/parseApp uses buildEndpointUrl which lacks the class name segment,
-    // so always prefer the cached lastDeployedEndpoint when available.
     if (this.lastDeployedEndpoint) return this.lastDeployedEndpoint;
     const instances = await this.listInstances(credentials);
     const found = instances.find((i) => i.instanceId === instanceId);
     return found?.endpoint || null;
+  }
+
+  /**
+   * Dynamically update autoscaler settings without redeploying the app.
+   * Uses a small Python script that calls Function.update_autoscaler().
+   *
+   * Settings revert to the decorator config on next deploy.
+   */
+  async updateAutoscaler(
+    instanceId: string,
+    credentials: ProviderCredentials,
+    params: ModalAutoscalerParams,
+  ): Promise<void> {
+    const env = buildModalEnv(credentials.apiKey);
+
+    const parts: string[] = [];
+    if (params.minContainers !== undefined) parts.push(`min_containers=${params.minContainers}`);
+    if (params.bufferContainers !== undefined) parts.push(`buffer_containers=${params.bufferContainers}`);
+    if (params.maxContainers !== undefined) parts.push(`max_containers=${params.maxContainers}`);
+
+    if (parts.length === 0) {
+      this.log.warn('[modal] updateAutoscaler called with no parameters');
+      return;
+    }
+
+    const script = `import modal; app = modal.App.lookup("${instanceId}"); fns = list(app.registered_functions); fn = fns[0] if fns else None; fn and fn.update_autoscaler(${parts.join(', ')}); print("autoscaler updated")`;
+
+    try {
+      const { stdout } = await (await getExecFileAsync())(
+        'python3', ['-c', script],
+        { env, timeout: 30_000 },
+      );
+      this.log.log(`[modal] autoscaler updated for ${instanceId}: ${parts.join(', ')} stdout=${stdout.trim()}`);
+    } catch (err) {
+      throw new Error(`[modal] updateAutoscaler failed for ${instanceId}: ${this.errMsg(err).substring(0, 300)}`);
+    }
   }
 
   /**
@@ -255,7 +343,6 @@ export class ModalClient extends AbstractGpuProvider {
     const workspace = await this.getWorkspace(credentials);
 
     try {
-      // Try JSON output first (newer modal CLI versions)
       try {
         const { stdout: jsonOut } = await (await getExecFileAsync())(
           'python3', ['-m', 'modal', 'app', 'list', '--json'],
@@ -297,9 +384,6 @@ export class ModalClient extends AbstractGpuProvider {
     };
   }
 
-  /**
-   * Parse table output from `modal app list` (uses Unicode box-drawing characters).
-   */
   private parseTableOutput(output: string, workspace: string): GpuInstance[] {
     const results: GpuInstance[] = [];
 
@@ -361,7 +445,7 @@ export class ModalClient extends AbstractGpuProvider {
         provider: 'modal',
         gpuType: gpu.name.replace('NVIDIA ', ''),
         gpuName: gpu.name,
-        available: -1, // serverless = always available
+        available: -1,
         pricePerHr: gpu.price,
         region: 'us',
         vram: gpu.vram,

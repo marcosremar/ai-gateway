@@ -54,6 +54,7 @@ export type { VastClientOptions } from './vast-client';
 
 // ── Modal ─────────────────────────────────────────────────────────────────
 export { ModalClient } from './modal-client';
+export type { ModalClientOptions, ModalDeployOptions, ModalAutoscalerParams } from './modal-client';
 
 // ── Deploy Orchestrator ──────────────────────────────────────────────────
 export {

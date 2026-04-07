@@ -4,11 +4,19 @@
  * #1 open-weights TTS on Artificial Analysis leaderboard (Elo 1060).
  * 54+ voices across 10 languages, 24kHz output, ~35-100x realtime on GPU.
  * OpenAI-compatible endpoint — POST /v1/audio/speech
- * No API key required — public endpoint.
+ * Supports proxy auth via MODAL_PROXY_SECRET env (format: key:secret).
  */
 
 import type { ProviderId, ModelInfo, TTSProvider, TTSRequest, TTSResponse, VoiceInfo } from '../types';
 import { KOKORO_VOICE_CATALOG } from '../voice-catalog';
+
+function buildProxyAuthHeaders(): Record<string, string> {
+  const token = process.env.MODAL_PROXY_SECRET;
+  if (!token) return {};
+  const [key, secret] = token.split(':');
+  if (!key || !secret) return {};
+  return { 'Modal-Key': key, 'Modal-Secret': secret };
+}
 
 const DEFAULT_ENDPOINT =
   'https://marcosremar--babelcast-kokoro-kokorotts-serve.modal.run';
@@ -48,7 +56,7 @@ export class ModalKokoroTTSProvider implements TTSProvider {
 
     const res = await fetch(`${this.endpoint}/v1/audio/speech`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...buildProxyAuthHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'kokoro-82m',
         input: request.input,
