@@ -128,7 +128,7 @@ describe.skipIf(!process.env.TENSORDOCK_API_TOKEN)('TensorDock — real API', ()
   }, 20_000);
 });
 
-describe.skipIf(!process.env.RUNPOD_API_KEY || !process.env.SKIP_GPU_TESTS !== '1')('RunPod — real API', () => {
+describe.skipIf(!process.env.RUNPOD_API_KEY || process.env.SKIP_GPU_TESTS === '1')('RunPod — real API', () => {
   let client: RunpodClient;
   let creds: ProviderCredentials;
 
@@ -243,7 +243,7 @@ describe.skipIf(!process.env.MODAL_TOKEN_ID || !process.env.MODAL_TOKEN_SECRET)(
 // 2. GPU INFERENCE TESTS (real speech pipeline on RunPod)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!process.env.RUNPOD_API_KEY || !process.env.SKIP_GPU_TESTS !== '1')('GPU Inference — RunPod live pod', () => {
+describe.skipIf(!process.env.RUNPOD_API_KEY || process.env.SKIP_GPU_TESTS === '1')('GPU Inference — RunPod live pod', () => {
   let endpoint: string;
 
   beforeAll(async () => {
@@ -708,7 +708,7 @@ describe('E2E: Gateway decision flow', () => {
 // 5. FULL BOOT CYCLE: Stop → Boot → Wait → Inference
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!process.env.RUNPOD_API_KEY || !process.env.SKIP_GPU_TESTS !== '1')('E2E: GPU Boot Cycle — stop, boot, wait, inference', () => {
+describe.skipIf(!process.env.RUNPOD_API_KEY || process.env.SKIP_GPU_TESTS === '1')('E2E: GPU Boot Cycle — stop, boot, wait, inference', () => {
   let client: RunpodClient;
   let creds: ProviderCredentials;
   let bootedEndpoint: string;
