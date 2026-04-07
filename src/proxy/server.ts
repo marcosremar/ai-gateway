@@ -19,7 +19,7 @@ import type { ProxyConfig, ProxyRequest, ProxyResponse } from './types';
 /** Max request body size: 100MB (audio files can be large) */
 const MAX_BODY_SIZE = 100 * 1024 * 1024;
 
-const BODY_READ_TIMEOUT_MS = 30_000;
+const BODY_READ_TIMEOUT_MS = parseInt(process.env.PROXY_BODY_READ_TIMEOUT_MS || '30000', 10);
 
 class BodyTimeoutError extends Error {
   constructor(ms: number) {

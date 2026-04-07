@@ -169,7 +169,7 @@ export function buildMonitorScript(logFiles: Record<string, string>): string {
  * 4. cron @reboot (backup)
  */
 export function buildCloudInit(spec: CloudInitSpec): Record<string, unknown> {
-  const { hfRepoUrl = 'marcosremar2/parle-speech-to-speech', hfToken, dockerImage, sshPubKey, env, bareMetal } = spec;
+  const { hfRepoUrl = process.env.PARLE_SPEECH_TO_SPEECH_HF_REPO || 'marcosremar2/parle-speech-to-speech', hfToken, dockerImage, sshPubKey, env, bareMetal } = spec;
 
   // Use provided key or fall back to env var TENSORDOCK_SSH_PUBKEY
   const effectiveSshKey = sshPubKey || getDefaultSshPubKey();

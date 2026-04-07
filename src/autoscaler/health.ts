@@ -13,7 +13,7 @@ const GPU_HEALTH_SKIP_TLS = !!process.env.GPU_HEALTH_SKIP_TLS;
 /** Probe a GPU endpoint's /health to check if it's serving. */
 export async function probeGpuHealth(endpoint: string, returnData?: false, timeoutMs?: number): Promise<boolean>;
 export async function probeGpuHealth(endpoint: string, returnData: true, timeoutMs?: number): Promise<{ ok: boolean; timedOut?: boolean; data?: Record<string, any> }>;
-export async function probeGpuHealth(endpoint: string, returnData?: boolean, timeoutMs = 15_000): Promise<boolean | { ok: boolean; timedOut?: boolean; data?: Record<string, any> }> {
+export async function probeGpuHealth(endpoint: string, returnData?: boolean, timeoutMs = parseInt(process.env.GPU_HEALTH_TIMEOUT_MS || '15000', 10)): Promise<boolean | { ok: boolean; timedOut?: boolean; data?: Record<string, any> }> {
   if (!endpoint) return returnData ? { ok: false } : false;
   try {
     const fetchOptions: RequestInit & { tls?: { rejectUnauthorized: boolean } } = {

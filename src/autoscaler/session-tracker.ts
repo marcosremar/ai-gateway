@@ -1,10 +1,9 @@
 import type { HashStore, SessionResolver, Logger } from '../deps';
 import { defaultLogger } from '../logger';
 
-const TEACHER_CACHE_TTL_MS = 5 * 60_000;
+const TEACHER_CACHE_TTL_MS = parseInt(process.env.TEACHER_CACHE_TTL_MS || String(5 * 60_000), 10);
 
-/** Heartbeat TTL in Redis: entries auto-expire after 30 min of no updates */
-const HEARTBEAT_TTL_SECS = 30 * 60;
+const HEARTBEAT_TTL_SECS = parseInt(process.env.HEARTBEAT_TTL_SECS || String(30 * 60), 10);
 
 export class SessionTracker {
   private stateStore: HashStore;

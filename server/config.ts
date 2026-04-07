@@ -19,16 +19,18 @@ export const LOW_BALANCE_THRESHOLD_USD = parseFloat(process.env.LOW_BALANCE_THRE
 /** Docker image version — update when a new set of images is built and verified.
  *  CI/CD builds both :latest and :$DOCKER_IMAGE_VERSION tags.
  *  Pin deploys to a specific version for reproducibility; use :latest for dev. */
-export const DOCKER_IMAGE_VERSION = 'v1.3.0';
+export const DOCKER_IMAGE_VERSION = process.env.DOCKER_IMAGE_VERSION || 'v1.3.0';
+
+const IMAGE_PREFIX = process.env.DOCKER_IMAGE_PREFIX || 'marcosremar';
 
 /** All known Docker image base names (without tag). */
 export const DOCKER_IMAGE_NAMES = [
-  'marcosremar/babelcast-subtitle',
-  'marcosremar/babelcast-translategemma',
-  'marcosremar/babelcast-translategemma-only-subtitles',
-  'marcosremar/babelcast-mistral',
-  'marcosremar/babelcast-groq',
-  'marcosremar/babelcast-qwen3-tts',
+  `${IMAGE_PREFIX}/babelcast-subtitle`,
+  `${IMAGE_PREFIX}/babelcast-translategemma`,
+  `${IMAGE_PREFIX}/babelcast-translategemma-only-subtitles`,
+  `${IMAGE_PREFIX}/babelcast-mistral`,
+  `${IMAGE_PREFIX}/babelcast-groq`,
+  `${IMAGE_PREFIX}/babelcast-qwen3-tts`,
 ] as const;
 
 // ── GPU × Image compatibility ────────────────────────────────────────────────
@@ -39,8 +41,8 @@ export const DOCKER_IMAGE_NAMES = [
 
 // Blackwell ↔ standard image maps (kept for gpu-deploy.ts backward compat)
 export const STANDARD_TO_BLACKWELL: Record<string, string> = {
-  'marcosremar/babelcast-mistral:latest': 'marcosremar/babelcast-blackwell-mistral:latest',
-  [`marcosremar/babelcast-mistral:${DOCKER_IMAGE_VERSION}`]: `marcosremar/babelcast-blackwell-mistral:${DOCKER_IMAGE_VERSION}`,
+  [`${IMAGE_PREFIX}/babelcast-mistral:latest`]: `${IMAGE_PREFIX}/babelcast-blackwell-mistral:latest`,
+  [`${IMAGE_PREFIX}/babelcast-mistral:${DOCKER_IMAGE_VERSION}`]: `${IMAGE_PREFIX}/babelcast-blackwell-mistral:${DOCKER_IMAGE_VERSION}`,
 };
 export const BLACKWELL_TO_STANDARD: Record<string, string> = {};
 for (const [std, bw] of Object.entries(STANDARD_TO_BLACKWELL)) {

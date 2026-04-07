@@ -81,7 +81,7 @@ export class RunpodClient extends AbstractGpuProvider {
   /** First cold boot can take 10-20 min (image pull + model download). Max wait = 2x = 40 min. */
   readonly bootTimeSecs = 1200;
 
-  private static readonly API_BASE = 'https://rest.runpod.io/v1';
+  private static readonly API_BASE = process.env.RUNPOD_API_BASE || 'https://rest.runpod.io/v1';
 
   constructor(opts?: RunpodClientOptions) {
     super(opts);
@@ -102,7 +102,7 @@ export class RunpodClient extends AbstractGpuProvider {
     timeoutMs: number,
     maxRetries = 2,
   ): Promise<Response> {
-    const RETRY_DELAY_MS = 2_000;
+    const RETRY_DELAY_MS = parseInt(process.env.RUNPOD_RETRY_DELAY_MS || '2000', 10);
     for (let attempt = 0; ; attempt++) {
       try {
         await this.rateLimiter.wait();
@@ -307,8 +307,8 @@ export class RunpodClient extends AbstractGpuProvider {
     // Map short names (e.g. "RTX 3090") to RunPod API names (e.g. "NVIDIA GeForce RTX 3090")
     const gpuTypesToTry = [...new Set(rawGpuTypes.map((t) => RUNPOD_GPU_TYPE_MAP[t] ?? t))];
 
-    const TRANSIENT_RETRY_MAX = 2;
-    const TRANSIENT_RETRY_DELAY_MS = 3_000;
+    const TRANSIENT_RETRY_MAX = parseInt(process.env.RUNPOD_TRANSIENT_RETRIES || '2', 10);
+    const TRANSIENT_RETRY_DELAY_MS = parseInt(process.env.RUNPOD_TRANSIENT_RETRY_DELAY_MS || '3000', 10);
 
     const requestedSpot = basePodConfig.interruptible === true;
 
@@ -342,7 +342,7 @@ export class RunpodClient extends AbstractGpuProvider {
           // fail to schedule the pod (machine becomes {} within seconds). This
           // happens when no physical machine can satisfy the storage/GPU request.
           // Poll the pod after a short delay to verify the machine was actually assigned.
-          const GHOST_CHECK_DELAY_MS = 10_000;
+          const GHOST_CHECK_DELAY_MS = parseInt(process.env.RUNPOD_GHOST_CHECK_DELAY_MS || '10000', 10);
           const GHOST_CHECK_RETRIES = 3;
           let ghostDetected = false;
           for (let gc = 0; gc < GHOST_CHECK_RETRIES; gc++) {
@@ -699,7 +699,8 @@ export class RunpodClient extends AbstractGpuProvider {
     const { apiKey } = credentials;
     try {
       await this.rateLimiter.wait();
-      const res = await this.fetchRaw('https://api.runpod.io/graphql', {
+      const gqlUrl = process.env.RUNPOD_GRAPHQL_URL || 'https://api.runpod.io/graphql';
+      const res = await this.fetchRaw(gqlUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({ query: '{ myself { currentSpendPerHr creditBalance } }' }),
@@ -720,7 +721,8 @@ export class RunpodClient extends AbstractGpuProvider {
     try {
       const query = `{ gpuTypes { id displayName memoryInGb communityPrice securePrice communitySpotPrice secureSpotPrice } }`;
       await this.rateLimiter.wait();
-      const res = await this.fetchRaw('https://api.runpod.io/graphql', {
+      const gqlUrl = process.env.RUNPOD_GRAPHQL_URL || 'https://api.runpod.io/graphql';
+      const res = await this.fetchRaw(gqlUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({ query }),

@@ -5,7 +5,7 @@ import { emitHook } from '../hooks';
 import { defaultLogger } from '../logger';
 
 /** Rate-limit reconcile to once per 10 min per user */
-const RECONCILE_INTERVAL_MS = 10 * 60 * 1000;
+const RECONCILE_INTERVAL_MS = parseInt(process.env.RECONCILE_INTERVAL_MS || String(10 * 60 * 1000), 10);
 
 /**
  * Grace period: don't clear DB entries for instances persisted within this window.
@@ -13,7 +13,7 @@ const RECONCILE_INTERVAL_MS = 10 * 60 * 1000;
  * persists the instance, but the provider may not yet have it visible in the API).
  * Default: 25 minutes — covers boot timeout (2× bootTimeSecs ≈ 20 min) plus margin.
  */
-const PERSIST_GRACE_MS = 25 * 60 * 1000;
+const PERSIST_GRACE_MS = parseInt(process.env.PERSIST_GRACE_MS || String(25 * 60 * 1000), 10);
 
 export interface ReconcileDeps {
   settingsStore: SettingsStore;

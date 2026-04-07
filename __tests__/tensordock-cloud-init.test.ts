@@ -254,7 +254,7 @@ describe('buildCloudInit — SSH key injection', () => {
 
   it('sets password fallback', () => {
     const config = buildCloudInit({ dockerImage: 'myimage:latest' });
-    expect(config.password).toBe('parle2024gpu');
+    expect(config.password).toMatch(/^gpu-[0-9a-f]{16}$/);
     expect(config.chpasswd).toEqual({ expire: false });
   });
 });
