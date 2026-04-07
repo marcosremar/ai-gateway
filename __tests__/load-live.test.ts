@@ -17,7 +17,7 @@ import { GatewayHttpClient } from '../sdk/node';
 const GATEWAY_URL = process.env.GATEWAY_URL || 'https://parle-gateway-loadtest.fly.dev';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_loadtest_2026';
 const SKIP = process.env.SKIP_LIVE_TESTS === '1';
-const MAX_CONCURRENCY = Number(process.env.LOAD_TEST_CONCURRENCY) || 100;
+const MAX_CONCURRENCY = Number(process.env.LOAD_TEST_CONCURRENCY) || 30;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
