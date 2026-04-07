@@ -214,7 +214,9 @@ export class VastClient extends AbstractGpuProvider {
       rented: { eq: false },
       num_gpus: { eq: spec.gpuCount ?? 1 },
       disk_space: { gte: diskGb },
-      // No direct_port_count filter — Docker NAT via '-p 8000:8000' in env handles port mapping
+      // Prefer hosts with direct HTTP ports (no SSH tunnel needed)
+      // Hosts with direct_port_count=0 require SSH tunnel which adds latency
+      direct_port_count: { gte: 1 },
       // CUDA filter: 12.8+ for Blackwell (RTX 5090/5080), 12.4+ for everything else
       cuda_vers: { gte: this._needsBlackwellCuda(spec.gpuTypes) ? 12.8 : 12.4 },
       // Host quality filters — fast internet critical for 10GB+ images to boot under 15min
@@ -232,6 +234,11 @@ export class VastClient extends AbstractGpuProvider {
     // Filter by minimum RAM if specified
     if (spec.ramGb) {
       searchBody.cpu_ram = { gte: spec.ramGb * 1024 };  // Vast.ai uses MB
+    }
+
+    // Merge extra search filters (e.g. { direct_port_count: { gte: 1 } })
+    if (spec.extraSearch) {
+      Object.assign(searchBody, spec.extraSearch);
     }
 
     // Filter by region/geolocation if specified (e.g. 'US', 'EU', 'FR', 'DE', 'France,Spain')
@@ -1095,8 +1102,15 @@ export class VastClient extends AbstractGpuProvider {
           }
 
           if (endpoint) {
-            this.log.log(`[vast] Instance ${contractId} got endpoint after ${Math.round(elapsed / 1000)}s: ${endpoint} (status=${detail.status})`);
-            break;
+            // Verify endpoint is actually reachable (some hosts report ports but are firewalled)
+            const reachable = await this._probeEndpoint(endpoint, 8_000);
+            if (reachable) {
+              this.log.log(`[vast] Instance ${contractId} got endpoint after ${Math.round(elapsed / 1000)}s: ${endpoint} (status=${detail.status})`);
+              break;
+            }
+            // Endpoint not reachable — clear it so SSH tunnel kicks in
+            this.log.warn(`[vast] Instance ${contractId} endpoint ${endpoint} not reachable — will use SSH tunnel`);
+            endpoint = '';
           }
 
           // Early exit for SSH-only instances: if running with SSH but no endpoint
@@ -1150,6 +1164,24 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     return { endpoint, ip, sshHost, sshPort };
+  }
+
+  /** Quick TCP probe to verify an endpoint is reachable (not firewalled). */
+  private async _probeEndpoint(endpoint: string, timeoutMs: number = 8_000): Promise<boolean> {
+    try {
+      const url = new URL(endpoint);
+      const { createConnection } = await import('net');
+      return new Promise<boolean>((resolve) => {
+        const socket = createConnection(
+          { host: url.hostname, port: parseInt(url.port), timeout: timeoutMs },
+          () => { socket.destroy(); resolve(true); }
+        );
+        socket.on('error', () => { socket.destroy(); resolve(false); });
+        socket.on('timeout', () => { socket.destroy(); resolve(false); });
+      });
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1228,7 +1260,10 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     // Parse ports — Vast.ai format: { "8000/tcp": [{ "HostIp": "...", "HostPort": "..." }] }
-    if (ports) {
+    // Only trust direct port mapping if direct_port_start > 0 (SSH-only hosts report ports
+    // in Docker NAT format but they're NOT accessible without SSH tunnel)
+    const hasDirect = directPort && directPort > 0;
+    if (ports && hasDirect) {
       // Check both '8000/tcp' and '8000' keys (API inconsistency)
       const p8000 = (ports['8000/tcp'] ?? ports['8000']) as Array<{ HostPort?: string; HostIp?: string }> | undefined;
       const entry = p8000?.find((e) => Number(e.HostPort) > 0);

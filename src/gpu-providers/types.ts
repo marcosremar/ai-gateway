@@ -64,6 +64,8 @@ export interface InstanceSpec {
   /** RunPod Network Volume ID. When provided, attaches an existing network volume at /workspace.
    *  Pre-caching LLM GGUFs on a network volume eliminates ~5-10min download on each cold boot. */
   volumeId?: string;
+  /** Extra search filters passed to the provider API (e.g. Vast.ai { direct_port_count: { gte: 1 } }) */
+  extraSearch?: Record<string, unknown>;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────
