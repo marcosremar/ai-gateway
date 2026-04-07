@@ -124,9 +124,13 @@ describe.skipIf(!hasKeys)('Test 1: RunPod Lifecycle', () => {
     const { result, ms } = await timed(() =>
       runpodClient.createInstance(
         {
-          gpuTypes: ['RTX 4090', 'RTX A5000', 'A40'],
-          gpuCount: 1,
+          computeType: 'CPU',
+          cpuFlavorIds: ['cpu3c', 'cpu3g', 'cpu5c', 'cpu5g'],
+          vcpus: 1,
+          ramGb: 4,
+          containerDiskInGb: 10,
           storageGb: 0,
+          cloudType: 'SECURE',
           dockerImage: 'python:3.11-slim',
           env: { TEST_E2E: 'autoscaler' },
         },
@@ -203,7 +207,7 @@ describe.skipIf(!hasKeys)('Test 2: Vast.ai Lifecycle', () => {
       const { result, ms } = await timed(() =>
         vastClient.createInstance(
           {
-            gpuTypes: ['RTX 4090', 'RTX 3090', 'RTX A5000'],
+            computeType: 'CPU', cpuFlavorIds: ['cpu3c', 'cpu5c'], vcpus: 1, ramGb: 4, containerDiskInGb: 10, cloudType: 'SECURE',
             gpuCount: 1,
             storageGb: 10,
             dockerImage: 'nginx:latest',  // Stays running (Debian-based, not alpine/musl)
@@ -318,7 +322,7 @@ describe.skipIf(!hasKeys)('Test 3: Autoscaler Engine with RunPod', () => {
         {
           provider: 'runpod',
           apiKey: runpodCreds.apiKey,
-          gpuTypes: ['RTX 4090', 'RTX A5000', 'A40'],
+          computeType: 'CPU', cpuFlavorIds: ['cpu3c', 'cpu5c'], vcpus: 1, ramGb: 4, containerDiskInGb: 10, cloudType: 'SECURE',
           dockerImage: 'python:3.11-slim',
           storageGb: 0,
           env: { TEST_E2E: 'engine' },
@@ -380,7 +384,7 @@ describe.skipIf(!hasKeys)('Test 3: Autoscaler Engine with RunPod', () => {
         {
           provider: 'runpod',
           apiKey: runpodCreds.apiKey,
-          gpuTypes: ['RTX 4090', 'RTX A5000', 'A40'],
+          computeType: 'CPU', cpuFlavorIds: ['cpu3c', 'cpu5c'], vcpus: 1, ramGb: 4, containerDiskInGb: 10, cloudType: 'SECURE',
           dockerImage: 'python:3.11-slim',
           storageGb: 0,
         },
@@ -445,7 +449,7 @@ describe.skipIf(!hasKeys)('Test 4: Autoscaler Engine with Vast.ai', () => {
         {
           provider: 'vast',
           apiKey: vastCreds.apiKey,
-          gpuTypes: ['RTX 4090', 'RTX 3090', 'RTX A5000'],
+          computeType: 'CPU', cpuFlavorIds: ['cpu3c', 'cpu5c'], vcpus: 1, ramGb: 4, containerDiskInGb: 10, cloudType: 'SECURE',
           dockerImage: 'nginx:latest',  // Stays running (Debian-based, not alpine/musl)
           storageGb: 10,
           env: { TEST_E2E: 'engine-vast' },
@@ -541,7 +545,7 @@ describe.skipIf(!hasKeys)('Test 5: Fallback — Tier 0 (bad) → Tier 1 (RunPod)
         {
           provider: 'runpod',
           apiKey: 'invalid-key-will-fail-12345',
-          gpuTypes: ['RTX 4090'],
+          computeType: 'CPU', cpuFlavorIds: ['cpu3c'], vcpus: 1, ramGb: 4, containerDiskInGb: 10, cloudType: 'SECURE',
           dockerImage: 'python:3.11-slim',
           storageGb: 0,
         },
@@ -549,7 +553,7 @@ describe.skipIf(!hasKeys)('Test 5: Fallback — Tier 0 (bad) → Tier 1 (RunPod)
         {
           provider: 'runpod',
           apiKey: runpodCreds.apiKey,
-          gpuTypes: ['RTX 4090', 'RTX A5000', 'A40'],
+          computeType: 'CPU', cpuFlavorIds: ['cpu3c', 'cpu5c'], vcpus: 1, ramGb: 4, containerDiskInGb: 10, cloudType: 'SECURE',
           dockerImage: 'python:3.11-slim',
           storageGb: 0,
           env: { TEST_E2E: 'fallback' },
