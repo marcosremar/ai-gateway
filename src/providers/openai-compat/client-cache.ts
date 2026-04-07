@@ -3,22 +3,20 @@
  *
  * Multiple OpenAI-compat providers that share the same baseURL + API key
  * (e.g. Groq STT + Groq LLM + Groq TTS) reuse a single OpenAI client
- * instance — and thus a single HTTP/2 connection pool. This halves (or
+ * instance — and thus the same HTTP connection pool. This halves (or
  * thirds) TCP/TLS handshake overhead on first request after cold start.
+ *
+ * Since OpenAI SDK v5.x the transport moved to global fetch (undici under
+ * the hood in Node 18+) which manages connection pooling automatically.
+ * The SDK no longer accepts `httpAgent`/`httpsAgent` in ClientOptions; for
+ * custom pool sizing, use `fetchOptions: { dispatcher: new undici.Agent(...) }`.
  */
 
 import OpenAI from 'openai';
 import { createHash } from 'crypto';
-import { Agent as HttpAgent } from 'http';
-import { Agent as HttpsAgent } from 'https';
 
 const cache = new Map<string, OpenAI>();
 const MAX_CACHE_SIZE = 50;
-
-/** Shared HTTP agents with tuned connection pool for high concurrency */
-const httpAgentTimeout = parseInt(process.env.HTTP_AGENT_TIMEOUT_MS || '30000', 10);
-const sharedHttpAgent = new HttpAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 16, timeout: httpAgentTimeout });
-const sharedHttpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 16, timeout: httpAgentTimeout });
 
 /**
  * Get or create a shared OpenAI SDK client for the given config.
@@ -41,9 +39,6 @@ export function getOrCreateClient(
   const client = new OpenAI({
     apiKey,
     baseURL,
-    httpAgent: sharedHttpAgent,
-    // @ts-expect-error — OpenAI SDK accepts httpsAgent but types may lag
-    httpsAgent: sharedHttpsAgent,
     ...(defaultHeaders && { defaultHeaders }),
   });
   // Evict oldest entry if cache is full (FIFO)

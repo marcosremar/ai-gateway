@@ -36,8 +36,12 @@ export class RealtimeLipsyncAnalyser {
   private _ctx: AudioContext | null = null;
   private _source: MediaStreamAudioSourceNode | null = null;
   private _analyser: AnalyserNode | null = null;
-  private _freqData: Float32Array | null = null;
-  private _timeData: Float32Array | null = null;
+  // Explicit <ArrayBuffer> (not ArrayBufferLike) — AnalyserNode's
+  // getFloatFrequencyData/getFloatTimeDomainData reject SharedArrayBuffer-backed
+  // typed arrays. Keeping them as plain Float32Array defaults to the generic
+  // ArrayBufferLike which is a type error in TS 5.7+.
+  private _freqData: Float32Array<ArrayBuffer> | null = null;
+  private _timeData: Float32Array<ArrayBuffer> | null = null;
   private _values: Record<string, number> = {};
   private _active = false;
   private _sampleRate = 48000;
