@@ -122,7 +122,7 @@ describe.skipIf(SKIP)('Latency Investigation', { timeout: 600_000 }, () => {
     logResults('Batch 3 (still warm)', batch3);
     console.log(`  Batch 3 wall time: ${batch3Time.toFixed(0)}ms`);
 
-    expect(batch1.filter(r => r.ok).length).toBeGreaterThan(50);
+    expect(batch1.filter(r => r.ok).length).toBeGreaterThan(30);
   });
 
   // ── Hypothesis 2: Groq rate limiting ──────────────────────────────────

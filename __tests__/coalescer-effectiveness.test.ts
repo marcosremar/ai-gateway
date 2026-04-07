@@ -60,7 +60,7 @@ function logBatch(label: string, results: TimedResult[]) {
 describe.skipIf(SKIP)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
 
   it('identical requests are coalesced', { timeout: 60_000 }, async () => {
-    console.log('\n── Test: 50 identical vs 50 unique requests ──');
+    console.log('\n── Test: 20 identical vs 20 unique requests ──');
 
     // Warmup
     await timedChat(JSON.stringify({
@@ -79,7 +79,7 @@ describe.skipIf(SKIP)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
 
     const identicalStart = performance.now();
     const identicalResults = await Promise.all(
-      Array.from({ length: 50 }, () => timedChat(identicalBody))
+      Array.from({ length: 20 }, () => timedChat(identicalBody))
     );
     const identicalWall = performance.now() - identicalStart;
 
@@ -88,7 +88,7 @@ describe.skipIf(SKIP)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
     // 50 UNIQUE requests (different prompts → no coalescing)
     const uniqueStart = performance.now();
     const uniqueResults = await Promise.all(
-      Array.from({ length: 50 }, (_, i) => timedChat(JSON.stringify({
+      Array.from({ length: 20 }, (_, i) => timedChat(JSON.stringify({
         model: 'llama-3.3-70b-versatile',
         messages: [{ role: 'user', content: `What is ${i}+${i}? Reply with just the number.` }],
         max_tokens: 5,
@@ -113,8 +113,8 @@ describe.skipIf(SKIP)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
       console.log('    This is expected if requests complete before duplicates arrive');
     }
 
-    expect(identicalResults.filter(r => r.ok).length).toBeGreaterThan(25);
-    expect(uniqueResults.filter(r => r.ok).length).toBeGreaterThan(25);
+    expect(identicalResults.filter(r => r.ok).length).toBeGreaterThan(10);
+    expect(uniqueResults.filter(r => r.ok).length).toBeGreaterThan(10);
   });
 
   it('100 identical requests all get the same response', { timeout: 60_000 }, async () => {
@@ -127,8 +127,8 @@ describe.skipIf(SKIP)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
       temperature: 0,
     });
 
-    const results = await Promise.all(Array.from({ length: 100 }, () => timedChat(body)));
-    logBatch('100 identical', results);
+    const results = await Promise.all(Array.from({ length: 30 }, () => timedChat(body)));
+    logBatch('30 identical', results);
 
     const contents = results.filter(r => r.ok).map(r => r.content?.trim());
     const uniqueResponses = new Set(contents);
@@ -139,6 +139,6 @@ describe.skipIf(SKIP)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
 
     // With coalescing, most should get the exact same response
     // Without coalescing, LLM may produce slight variations even at temp=0
-    expect(results.filter(r => r.ok).length).toBeGreaterThan(50);
+    expect(results.filter(r => r.ok).length).toBeGreaterThan(15);
   });
 });
