@@ -39,7 +39,9 @@
     "test:zero-downtime": "vitest run --config vitest.config.ts __tests__/zero-downtime-deploy.test.ts",
     "test:breaking-point": "vitest run --config vitest.config.ts __tests__/breaking-point.test.ts",
     "test:memory-soak": "vitest run --config vitest.config.ts __tests__/memory-soak.test.ts",
-    "test:cache": "vitest run --config vitest.config.ts __tests__/cache-effectiveness.test.ts"
+    "test:cache": "vitest run --config vitest.config.ts __tests__/cache-effectiveness.test.ts",
+    "test:snapgpu": "vitest run --config vitest.config.ts __tests__/snapgpu-sdk.test.ts",
+    "test:snapgpu-benchmark": "vitest run --config vitest.config.ts __tests__/snapgpu-benchmark.test.ts"
   },
   "peerDependencies": {
     "openai": ">=4.0.0",
