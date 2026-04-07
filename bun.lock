@@ -10,6 +10,7 @@
         "franc": "6",
         "opusscript": "^0.1.1",
         "werift": "^0.22.9",
+        "ws": "^8.20.0",
       },
       "devDependencies": {
         "dotenv": "^17.3.1",
@@ -440,6 +441,8 @@
     "werift-sctp": ["werift-sctp@0.0.11", "", { "dependencies": { "@shinyoshiaki/jspack": "^0.0.6" } }, "sha512-7109yuI5U7NTEHjqjn0A8VeynytkgVaxM6lRr1Ziv0D8bPcaB8A7U/P88M7WaCpWDoELHoXiRUjQycMWStIgjQ=="],
 
     "why-is-node-running": ["why-is-node-running@2.3.0", "", { "dependencies": { "siginfo": "^2.0.0", "stackback": "0.0.2" }, "bin": { "why-is-node-running": "cli.js" } }, "sha512-hUrmaWBdVDcxvYqnyh09zunKzROWjbZTiNy8dBEjkS7ehEDQibXJ7XvlmtbwuTclUiIyN+CyXQD4Vmko8fNm8w=="],
+
+    "ws": ["ws@8.20.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-sAt8BhgNbzCtgGbt2OxmpuryO63ZoDk/sqaB/znQm94T4fCEsy/yV+7CdC1kJhOU9lboAEU7R3kquuycDoibVA=="],
 
     "xtend": ["xtend@4.0.2", "", {}, "sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ=="],
 
