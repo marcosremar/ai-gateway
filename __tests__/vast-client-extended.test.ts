@@ -1085,7 +1085,7 @@ describe('VastClient — extended unit tests', () => {
 // INTEGRATION TESTS (require VAST_API_KEY)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const hasVastKey = !!process.env.VAST_API_KEY && !process.env.SKIP_GPU_TESTS;
+const hasVastKey = !!process.env.VAST_API_KEY && process.env.SKIP_GPU_TESTS !== '1';
 
 describe.skipIf(!hasVastKey)('VastClient — integration tests (real API)', () => {
   let client: VastClient;

@@ -43,7 +43,7 @@ const PHRASES = [
 
 // ─── Audio generation via gTTS ───────────────────────────────────────────────
 
-const HAS_BUN = typeof Bun !== 'undefined';
+const HAS_BUN = true; // Using child_process fallback instead of Bun.spawn
 
 // Resolve Python from .venv if available, fall back to system python3
 const PYTHON = (() => {
@@ -55,14 +55,11 @@ async function generateGTTS(text: string, lang: string): Promise<Buffer> {
   const tmpPath = `/tmp/gtts_bench_${Date.now()}_${Math.random().toString(36).slice(2)}.mp3`;
   try {
     const escapedText = text.replace(/'/g, "\\'").replace(/"/g, '\\"');
-    const proc = Bun.spawn(
-      [PYTHON, '-c', `from gtts import gTTS; gTTS("${escapedText}", lang="${lang}").save("${tmpPath}")`],
-      { stderr: 'pipe' },
-    );
-    const exitCode = await proc.exited;
-    if (exitCode !== 0) {
-      const err = await new Response(proc.stderr).text();
-      throw new Error(`gTTS failed (exit ${exitCode}): ${err.slice(0, 200)}`);
+    const { execSync } = require('child_process');
+    try {
+      execSync(`${PYTHON} -c "from gtts import gTTS; gTTS(\\"${escapedText}\\", lang=\\"${lang}\\").save(\\"${tmpPath}\\")"`, { timeout: 30_000 });
+    } catch (e: any) {
+      throw new Error(`gTTS failed: ${e.message?.slice(0, 200)}`);
     }
     const buf = readFileSync(tmpPath);
     return buf;

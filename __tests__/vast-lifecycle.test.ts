@@ -36,7 +36,7 @@ let groqKey: string;
 // Shared state across sequential tests
 let createdInstance: GpuInstance | null = null;
 
-const hasVastKeys = !!process.env.VAST_API_KEY && !process.env.SKIP_GPU_TESTS;
+const hasVastKeys = !!process.env.VAST_API_KEY && process.env.SKIP_GPU_TESTS !== '1';
 
 beforeAll(() => {
   if (!hasVastKeys) return;
