@@ -282,6 +282,69 @@ gh workflow run build-babelcast-subtitle.yml --repo marcosremar/ai-gateway-docke
 - Only `babelcast-mistral` still uses the `STANDARD_TO_BLACKWELL` mapping in `server/config.ts`
 - Vast.ai `image_login` is injected automatically when `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` env vars are set
 
+### Model Download Convention (MANDATORY for all ML Dockerfiles)
+
+**Use `hf_hub_download` / `snapshot_download` with `HF_XET_HIGH_PERFORMANCE=1` and `HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50` env vars.** This is the fastest method on datacenter GPU hosts by a validated 24% margin. `HF_HUB_ENABLE_HF_TRANSFER=1` is **deprecated** as of huggingface_hub 1.0 — the new default backend is `hf-xet` (chunked deduplication), and it requires different tuning.
+
+**Validated benchmark (Vast.ai RTX 4090, 64GB RAM, 3 runs each, 770MB GGUF, 2026-04-07):**
+
+| Rank | Method | Avg MB/s | Min | Max | Spread | vs production |
+|---|---|---|---|---|---|---|
+| 🏆 | `HF_XET_FIXED_DOWNLOAD_CONCURRENCY=100` | **410** | 369 | 453 | 20% | +29% |
+| 2 | HP + `FIXED_DOWNLOAD_CONCURRENCY=50` | **394** | 365 | 410 | **11%** | **+24%** ← chosen |
+| 3 | `FIXED_DOWNLOAD_CONCURRENCY=50` alone | 381 | 367 | 408 | 11% | +19% |
+| 4 | `HF_XET_HIGH_PERFORMANCE=1` alone | 365 | 355 | 370 | **4%** | +14% |
+| 5 | curl single-stream (reference) | 359 | 339 | 387 | 13% | +12% |
+| 6 | Legacy `HF_HUB_ENABLE_HF_TRANSFER=1` | 319 | 285 | 336 | 16% | baseline |
+| 7 | hf_xet default (adaptive) | **269** | 215 | 306 | **34%** | **-16%** ⚠ |
+
+**Why `HF_XET_HIGH_PERFORMANCE=1` + `HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50` is the production choice** (not the fastest `FIXED=100`):
+- Only 4% slower than absolute fastest
+- Half the variance spread (11% vs 20%) → more predictable cold boots
+- `HIGH_PERFORMANCE` also bumps buffer sizes for large multi-file snapshots
+- Requires ≥64GB RAM host — degrades on smaller hosts, so the `start.sh` in `ultravox-s2s` guards it with a RAM check
+
+**⚠ Critical gotcha: hf-xet's default adaptive concurrency is BAD for short downloads.** The adaptive controller starts at 1 stream and only scales after round-trip time measurements, so for 2-4s downloads it never escalates. Pinning via `HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50` bypasses the warmup entirely.
+
+**⚠ Critical gotcha: aria2c multi-connection is SLOWER than single-stream on Vast.ai** — HF CDN already saturates 1 TCP connection at ~400 MB/s on datacenter hosts, and multi-conn setup overhead dominates. aria2c hit 198-232 MB/s in the same bench (worse than curl!). An earlier home-Wi-Fi benchmark showed aria2c_x8 was +29% faster, but that was a local-network bandwidth-per-connection artifact — never generalize home-network benchmarks to GPU datacenters.
+
+**In every ML Dockerfile** (`ultravox-s2s`, `babelcast-subtitle`, `dit360`, `kokoro-tts`, `modal/*.py`, and any new image that downloads model weights):
+
+```dockerfile
+# 1. Install aria2 + zstd (kept only as fallback / manual debug tool)
+RUN apt-get install -y --no-install-recommends ... aria2 zstd && ...
+
+# 2. Copy the hf-download helper (lives at dockers/_common/hf-download, copied
+#    into each image subdir for Docker build-context compatibility).
+#    The helper tries hf_hub_download first, falls back to aria2c, then curl.
+COPY hf-download /usr/local/bin/hf-download
+RUN chmod +x /usr/local/bin/hf-download
+
+# 3. Pin huggingface_hub >= 1.0 so hf_xet (new default backend) is auto-installed
+RUN pip install --no-cache-dir "huggingface-hub>=1.0.0" "hf_xet>=1.4.0"
+
+# 4. Set xet tuning env vars (validated as fastest — see bench table above)
+ENV HF_XET_HIGH_PERFORMANCE=1 \
+    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50
+
+# 5. Pre-bake single files with hf_hub_download (lands in standard HF cache,
+#    compatible with try_to_load_from_cache() at runtime)
+RUN python3 -c "from huggingface_hub import hf_hub_download; \
+    hf_hub_download('bullerwins/translategemma-4b-it-GGUF', 'translategemma-4b-it-Q8_0.gguf')"
+
+# 6. Pre-bake multi-file snapshots with snapshot_download + max_workers=8
+RUN python3 -c "from huggingface_hub import snapshot_download; \
+    snapshot_download('org/repo', max_workers=8)"
+```
+
+**Never use** `HF_HUB_ENABLE_HF_TRANSFER=1` — it's deprecated. Never use `hf_transfer` as a pip dependency — replace with `hf_xet`.
+
+**Runtime servers** (`server.py`) should use `hf_hub_download` with `try_to_load_from_cache` fast-path — see `dockers/babelcast-subtitle/server.py::_load_llm()` for the canonical pattern. The `hf-download` shell helper is available in PATH for manual/debug downloads or when Python/HF SDK is unavailable.
+
+**Always pre-bake models at build time** when the total image size stays under ~20GB. Runtime model downloads cause Vast.ai cold boots of 1-2 min for small models and ~60s for the 24GB FLUX.1-dev at ~394 MB/s. The `babelcast-subtitle` image pre-bakes BOTH the GGUF LLM (~5GB) AND the Whisper STT (~3GB) for this reason.
+
+**Benchmark script:** `scripts/model-download-bench/` has the tooling to validate download strategies on new hosts. Run `vast-benchmark.sh` to re-measure if HF CDN behavior changes. **Do not re-benchmark from scratch each time** — the conclusions above are current as of 2026-04-07 with 3-run validation on real Vast.ai hardware. The `dockers/_common/hf-download` helper implements the fallback chain.
+
 ## Web UI Component Library (`web/src/components/ui/`)
 
 **All new UI code MUST use these components.** Do not re-implement inline.
