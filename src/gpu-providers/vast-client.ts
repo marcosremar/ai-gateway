@@ -22,7 +22,7 @@ import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCr
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 
-const VAST_API_BASE = 'https://console.vast.ai/api/v0';
+const VAST_API_BASE = process.env.VAST_API_BASE || 'https://console.vast.ai/api/v0';
 
 // ── Polling constants ─────────────────────────────────────────────────────────
 const POLL_BASE_MS = 5_000;
@@ -36,13 +36,13 @@ const POLL_TOTAL_MAX_MS = 1_800_000; // 30 minutes
 // ── Host reliability tracking ────────────────────────────────────────────────
 // Hosts that reclaim instances during loading are blacklisted for a cooldown period.
 // This prevents wasting time and money on unreliable hosts.
-const UNSTABLE_HOST_COOLDOWN_MS = 30 * 60 * 1000; // 30 min cooldown after a reclaim
+const UNSTABLE_HOST_COOLDOWN_MS = parseInt(process.env.VAST_UNSTABLE_HOST_COOLDOWN_MS || String(30 * 60 * 1000), 10);
 const MAX_UNSTABLE_HOSTS = 50;
 
 // ── Rate limiting ────────────────────────────────────────────────────────────
 // Vast.ai limits to ~4.5 req/s. We use a token bucket at 3 req/s to stay safe.
 const RATE_LIMIT_INTERVAL_MS = 334; // ~3 req/s
-const RATE_LIMIT_429_RETRY_MS = 2_000;
+const RATE_LIMIT_429_RETRY_MS = parseInt(process.env.VAST_RATE_LIMIT_429_RETRY_MS || '2000', 10);
 const RATE_LIMIT_429_MAX_RETRIES = 3;
 
 /** Check if an IP address is RFC1918 private / loopback / link-local (unreachable from internet). */

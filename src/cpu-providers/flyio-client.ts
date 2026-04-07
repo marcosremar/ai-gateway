@@ -18,7 +18,7 @@ import type { GpuInstance, InstanceSpec, ProviderCredentials } from '../gpu-prov
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const FLY_API = 'https://api.machines.dev/v1';
+const FLY_API = process.env.FLY_API_BASE || 'https://api.machines.dev/v1';
 const DEFAULT_APP = 'babelcast-bot';
 const DEFAULT_REGION = 'iad'; // US East (low latency to Teams servers)
 
@@ -73,8 +73,8 @@ export class FlyioClient extends AbstractGpuProvider {
     const region = spec.region || process.env.FLY_REGION || DEFAULT_REGION;
 
     // Prefer Fly registry image (built via flyctl deploy) over Docker Hub
-    let image = spec.dockerImage || 'marcosremar/meet-teams-bot:latest';
-    if (image === 'marcosremar/meet-teams-bot:latest') {
+    let image = spec.dockerImage || process.env.BOT_DOCKER_IMAGE || 'marcosremar/meet-teams-bot:latest';
+    if (image === (process.env.BOT_DOCKER_IMAGE || 'marcosremar/meet-teams-bot:latest')) {
       // Prefer the latest Fly registry image (built via flyctl deploy, has newest patches).
       // FLY_BOT_IMAGE env var overrides everything; otherwise fetch the latest release tag.
       if (process.env.FLY_BOT_IMAGE) {

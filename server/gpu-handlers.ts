@@ -1845,11 +1845,12 @@ export async function handleGetLatencySettings(_req: IncomingMessage, res: Serve
   let pullTimeLearning: Record<string, unknown> = {};
   try {
     const { getObservationCount, estimatePullTimeout } = await import('../src/gpu-providers/pull-time-estimator');
+    const pfx = process.env.DOCKER_IMAGE_PREFIX || 'marcosremar';
     const knownImages = [
-      'marcosremar/babelcast-translategemma:latest',
-      'marcosremar/babelcast-mistral:latest',
-      'marcosremar/babelcast-groq:latest',
-      'marcosremar/babelcast-qwen3asr:latest',
+      `${pfx}/babelcast-translategemma:latest`,
+      `${pfx}/babelcast-mistral:latest`,
+      `${pfx}/babelcast-groq:latest`,
+      `${pfx}/babelcast-qwen3asr:latest`,
     ];
     const imageStats: Record<string, unknown> = {};
     for (const img of knownImages) {

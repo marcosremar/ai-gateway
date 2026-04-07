@@ -8,7 +8,7 @@ export interface ProviderMonitorOptions {
   resolveCredentials?: (provider: string) => Promise<ProviderCredentials | null>;
 }
 
-const PRICE_UPDATE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const PRICE_UPDATE_INTERVAL_MS = parseInt(process.env.PRICE_UPDATE_INTERVAL_MS || String(5 * 60 * 1000), 10);
 
 /** Tracks real-time GPU pricing and provider reliability scores. */
 export class ProviderMonitor {

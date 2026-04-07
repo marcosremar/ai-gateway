@@ -260,8 +260,8 @@ export class BootOrchestrator {
     bootTimestamp: number,
     tierConfig?: GpuTierConfig,
   ): void {
-    const POLL_INTERVAL_BASE_MS = 15_000;
-    const POLL_INTERVAL_MAX_MS = 60_000;
+    const POLL_INTERVAL_BASE_MS = parseInt(process.env.BOOT_POLL_BASE_MS || '15000', 10);
+    const POLL_INTERVAL_MAX_MS = parseInt(process.env.BOOT_POLL_MAX_MS || '60000', 10);
     const key = `${userId}:${tierIndex}:${Date.now()}`;
     let pollCount = 0;
 

@@ -18,8 +18,8 @@ import type { GpuInstance, InstanceSpec, ProviderCredentials } from '../gpu-prov
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const SCW_API = 'https://api.scaleway.com/instance/v1';
-const SCW_IAM_API = 'https://api.scaleway.com/iam/v1alpha1';
+const SCW_API = process.env.SCALEWAY_API_BASE || 'https://api.scaleway.com/instance/v1';
+const SCW_IAM_API = process.env.SCALEWAY_IAM_API_BASE || 'https://api.scaleway.com/iam/v1alpha1';
 
 /** All known Scaleway zones — queried in parallel for listInstances. */
 const KNOWN_ZONES = ['fr-par-1', 'fr-par-2', 'fr-par-3', 'nl-ams-1', 'nl-ams-2', 'nl-ams-3', 'pl-waw-1', 'pl-waw-2', 'pl-waw-3'];
@@ -390,7 +390,7 @@ export class ScalewayClient extends AbstractGpuProvider {
    * The bot exposes port 8080 (HTTP API), 5900 (VNC), 3099 (avatar).
    */
   private buildUserData(spec: InstanceSpec): string {
-    const image = spec.dockerImage || 'marcosremar/meet-teams-bot:latest';
+    const image = spec.dockerImage || process.env.BOT_DOCKER_IMAGE || 'marcosremar/meet-teams-bot:latest';
     const envFlags = Object.entries(spec.env || {})
       .map(([k, v]) => `-e ${k}="${v}"`)
       .join(' ');

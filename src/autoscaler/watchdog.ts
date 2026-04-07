@@ -13,7 +13,7 @@ import { cleanupProviderInstance } from './cleanup';
 import { defaultLogger } from '../logger';
 
 /** Rate-limit per-user watchdog to 2 min */
-const WATCHDOG_INTERVAL_MS = 2 * 60 * 1000;
+const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS || String(2 * 60 * 1000), 10);
 
 export interface WatchdogDeps {
   engine: AutoscalerEngine;

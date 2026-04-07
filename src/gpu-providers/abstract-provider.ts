@@ -117,10 +117,10 @@ export async function pollUntilReady<T>(
 
 /** Default timeouts (ms) for provider HTTP calls. */
 export const TIMEOUTS: Record<string, number> & { read: number; write: number; create: number; deploy: number } = {
-  read: 10_000,
-  write: 15_000,
-  create: 30_000,
-  deploy: 180_000,
+  read: parseInt(process.env.GPU_TIMEOUT_READ_MS || '10000', 10),
+  write: parseInt(process.env.GPU_TIMEOUT_WRITE_MS || '15000', 10),
+  create: parseInt(process.env.GPU_TIMEOUT_CREATE_MS || '30000', 10),
+  deploy: parseInt(process.env.GPU_TIMEOUT_DEPLOY_MS || '180000', 10),
 };
 
 // ── Shared types ────────────────────────────────────────────────────────────

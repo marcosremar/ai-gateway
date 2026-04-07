@@ -612,8 +612,8 @@ export async function handleAutoscalerAction(
       }
 
       // Poll health until ready (max 40 min for cold start)
-      const MAX_POLL_MS = 40 * 60 * 1000;
-      const POLL_INTERVAL = 15_000;
+      const MAX_POLL_MS = parseInt(process.env.GPU_READY_MAX_POLL_MS || String(40 * 60 * 1000), 10);
+      const POLL_INTERVAL = parseInt(process.env.GPU_READY_POLL_INTERVAL_MS || '15000', 10);
       const pollStart = Date.now();
       let healthy = false;
       let healthLatency: number | undefined;

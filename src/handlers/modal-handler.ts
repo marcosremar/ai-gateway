@@ -5,6 +5,8 @@
 import type { HandlerResult } from './types';
 import { ok, err } from './types';
 
+const MODAL_API_BASE = process.env.MODAL_API_BASE || 'https://api.modal.com/v1';
+
 const APP_STATE: Record<number, string> = {
   1: 'ephemeral',
   2: 'detached',
@@ -69,7 +71,7 @@ export async function handleModalApps(
   };
 
   try {
-    const res = await fetch('https://api.modal.com/v1/apps', {
+    const res = await fetch(`${MODAL_API_BASE}/apps`, {
       headers,
       signal: AbortSignal.timeout(15_000),
     });
@@ -169,7 +171,7 @@ export async function handleModalStop(
 
   const credentials = Buffer.from(`${tokenId}:${tokenSecret}`).toString('base64');
 
-  const res = await fetch(`https://api.modal.com/v1/apps/${appId}/stop`, {
+  const res = await fetch(`${MODAL_API_BASE}/apps/${appId}/stop`, {
     method: 'POST',
     headers: {
       Authorization: `Basic ${credentials}`,

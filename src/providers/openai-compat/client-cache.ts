@@ -16,8 +16,9 @@ const cache = new Map<string, OpenAI>();
 const MAX_CACHE_SIZE = 50;
 
 /** Shared HTTP agents with tuned connection pool for high concurrency */
-const sharedHttpAgent = new HttpAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 16, timeout: 30_000 });
-const sharedHttpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 16, timeout: 30_000 });
+const httpAgentTimeout = parseInt(process.env.HTTP_AGENT_TIMEOUT_MS || '30000', 10);
+const sharedHttpAgent = new HttpAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 16, timeout: httpAgentTimeout });
+const sharedHttpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 16, timeout: httpAgentTimeout });
 
 /**
  * Get or create a shared OpenAI SDK client for the given config.

@@ -9,7 +9,7 @@ export { buildCloudInit, b64, buildMonitorScript, buildEnvFlags, buildExportLine
 export type { CloudInitSpec, DockerSetupPhase, GitCloneSetupPhase } from './tensordock-cloud-init';
 import { buildCloudInit, getDefaultSshPubKey } from './tensordock-cloud-init';
 
-export const TENSORDOCK_V2_BASE = 'https://dashboard.tensordock.com/api/v2';
+export const TENSORDOCK_V2_BASE = process.env.TENSORDOCK_API_BASE || 'https://dashboard.tensordock.com/api/v2';
 
 /** Map frontend GPU names to TensorDock v2 GPU model IDs — single definition */
 export const GPU_ID_MAP: Record<string, string> = {
@@ -485,7 +485,8 @@ export class TensordockClient extends AbstractGpuProvider {
     if (authId) {
       const form = new URLSearchParams({ api_token: apiKey, server_id: instanceId });
       form.set('api_key', authId);
-      const res = await fetch('https://marketplace.tensordock.com/api/v0/client/start/single', {
+      const tdMarketBase = process.env.TENSORDOCK_MARKETPLACE_BASE || 'https://marketplace.tensordock.com/api/v0';
+      const res = await fetch(`${tdMarketBase}/client/start/single`, {
         method: 'POST',
         body: form,
         signal: AbortSignal.timeout(15_000),
@@ -724,7 +725,8 @@ export class TensordockClient extends AbstractGpuProvider {
     if (!authId) return null;  // v0 requires both api_key (authId) and api_token (apiKey)
     try {
       const form = new URLSearchParams({ api_token: apiKey, api_key: authId });
-      const res = await fetch('https://marketplace.tensordock.com/api/v0/billing/balance', {
+      const tdMarketBase = process.env.TENSORDOCK_MARKETPLACE_BASE || 'https://marketplace.tensordock.com/api/v0';
+      const res = await fetch(`${tdMarketBase}/billing/balance`, {
         method: 'POST',
         body: form,
         signal: AbortSignal.timeout(10_000),

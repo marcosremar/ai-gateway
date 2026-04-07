@@ -34,7 +34,7 @@ export class BotWorkloadDriver implements WorkloadDriver {
       throw new Error('No deploy credentials — set FLY_API_TOKEN or RUNPOD_API_KEY');
     }
 
-    const botDockerImage = cfg.dockerImage || 'marcosremar/meet-teams-bot:latest';
+    const botDockerImage = cfg.dockerImage || process.env.BOT_DOCKER_IMAGE || 'marcosremar/meet-teams-bot:latest';
     const podApiKey = crypto.randomUUID();
     const podEnv: Record<string, string> = {
       SERVERLESS: 'true',
