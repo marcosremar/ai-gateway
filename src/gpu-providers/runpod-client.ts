@@ -231,6 +231,136 @@ export class RunpodClient extends AbstractGpuProvider {
     };
   }
 
+  /**
+   * RunPod REST POST /pods enum — datacenter IDs that the REST API accepts.
+   * GraphQL `dataCenters` returns MORE DCs than the REST API enum (e.g. US-MD-1,
+   * US-MO-2 appear in GraphQL but POST /pods rejects them with HTTP 400).
+   * Discovered from RunPod's HTTP 400 schema validation error on 2026-04-08.
+   * Update this list if the API enum changes.
+   */
+  static readonly REST_VALID_DC_IDS = new Set([
+    'EU-RO-1', 'CA-MTL-1', 'EU-SE-1', 'US-IL-1', 'EUR-IS-1', 'EU-CZ-1', 'US-TX-3',
+    'EUR-IS-2', 'US-KS-2', 'US-GA-2', 'US-WA-1', 'US-TX-1', 'CA-MTL-3', 'EU-NL-1',
+    'US-TX-4', 'US-CA-2', 'US-NC-1', 'OC-AU-1', 'US-DE-1', 'EUR-IS-3', 'CA-MTL-2',
+    'AP-JP-1', 'EUR-NO-1', 'EU-FR-1', 'US-KS-3', 'US-GA-1',
+  ]);
+
+  /**
+   * Discover all RunPod datacenters that support network volumes and the GPU
+   * availability inside each. Uses the RunPod GraphQL API (no auth required for
+   * dataCenters query, but we send the bearer anyway for rate-limit fairness).
+   *
+   * Returns one entry per (DC, GPU) combination ordered by stock status:
+   *   stockStatus = 'High' | 'Medium' | 'Low' | 'unknown'
+   *
+   * Use this BEFORE creating a network volume to pick a DC where your target
+   * GPU is actually available — RunPod has no per-DC REST availability endpoint.
+   *
+   * IMPORTANT: GraphQL returns DCs that REST POST /pods rejects (like US-MD-1).
+   * This method filters to only DCs in REST_VALID_DC_IDS to prevent HTTP 400s.
+   *
+   * @param opts.gpuFilter — only return rows whose gpuTypeId or displayName matches
+   * @param opts.minStock — 'High' | 'Medium' | 'Low' (default: 'Medium')
+   */
+  async discoverNetworkVolumeDCs(
+    credentials: ProviderCredentials,
+    opts?: { gpuFilter?: string[]; minStock?: 'High' | 'Medium' | 'Low' },
+  ): Promise<Array<{
+    dataCenterId: string;
+    gpuTypeId: string;
+    gpuDisplayName: string;
+    stockStatus: string;
+    storageSupport: boolean;
+  }>> {
+    const { apiKey } = credentials;
+    const minStock = opts?.minStock ?? 'Medium';
+    const stockRank: Record<string, number> = { High: 3, Medium: 2, Low: 1, unknown: 0 };
+    const minRank = stockRank[minStock] ?? 2;
+
+    const query = `{
+      dataCenters {
+        id
+        storageSupport
+        gpuAvailability {
+          gpuTypeId
+          stockStatus
+        }
+      }
+    }`;
+
+    try {
+      const gqlUrl = process.env.RUNPOD_GRAPHQL_URL || 'https://api.runpod.io/graphql';
+      await this.rateLimiter.wait();
+      const res = await this.fetchRaw(gqlUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ query }),
+      }, TIMEOUTS.read);
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        this.log.warn(`[runpod] discoverNetworkVolumeDCs HTTP ${res.status}: ${body.substring(0, 200)}`);
+        return [];
+      }
+
+      const json = await res.json() as { data?: { dataCenters?: any[] } };
+      const dcs = json?.data?.dataCenters ?? [];
+
+      // Build flat list of (DC, GPU) tuples for DCs with storageSupport
+      const rows: Array<{
+        dataCenterId: string;
+        gpuTypeId: string;
+        gpuDisplayName: string;
+        stockStatus: string;
+        storageSupport: boolean;
+      }> = [];
+
+      for (const dc of dcs) {
+        if (!dc.storageSupport) continue;
+        // Filter out DCs that GraphQL knows about but REST POST /pods rejects
+        if (!RunpodClient.REST_VALID_DC_IDS.has(dc.id)) {
+          this.log.debug(`[runpod] discoverNetworkVolumeDCs: skipping ${dc.id} (not in REST POST enum)`);
+          continue;
+        }
+        const avail = dc.gpuAvailability ?? [];
+        for (const a of avail) {
+          const gpuTypeId = a.gpuTypeId ?? '';
+          if (!gpuTypeId) continue;
+          const stock = a.stockStatus ?? 'unknown';
+          if ((stockRank[stock] ?? 0) < minRank) continue;
+          // Filter by gpu name if provided
+          if (opts?.gpuFilter?.length) {
+            const wanted = opts.gpuFilter.map(g => g.toLowerCase());
+            const matches = wanted.some(w =>
+              gpuTypeId.toLowerCase().includes(w) ||
+              w.includes(gpuTypeId.toLowerCase()),
+            );
+            if (!matches) continue;
+          }
+          rows.push({
+            dataCenterId: dc.id,
+            gpuTypeId,
+            gpuDisplayName: gpuTypeId,
+            stockStatus: stock,
+            storageSupport: true,
+          });
+        }
+      }
+
+      // Sort: High > Medium > Low; ties broken by gpuTypeId for stability
+      rows.sort((a, b) => {
+        const r = (stockRank[b.stockStatus] ?? 0) - (stockRank[a.stockStatus] ?? 0);
+        return r !== 0 ? r : a.gpuTypeId.localeCompare(b.gpuTypeId);
+      });
+
+      this.log.log(`[runpod] discoverNetworkVolumeDCs: ${rows.length} candidates (≥${minStock} stock${opts?.gpuFilter?.length ? `, filter=${opts.gpuFilter.join(',')}` : ''})`);
+      return rows;
+    } catch (err) {
+      this.log.warn(`[runpod] discoverNetworkVolumeDCs failed: ${this.errMsg(err)}`);
+      return [];
+    }
+  }
+
   /** Permanently delete a network volume. Data is unrecoverable. */
   async deleteNetworkVolume(
     volumeId: string,
