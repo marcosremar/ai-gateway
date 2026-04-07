@@ -58,7 +58,8 @@
     "@prisma/client": "^7.6.0",
     "franc": "6",
     "opusscript": "^0.1.1",
-    "werift": "^0.22.9"
+    "werift": "^0.22.9",
+    "ws": "^8.20.0"
   },
   "optionalDependencies": {
     "pg": "^8.13.0"
