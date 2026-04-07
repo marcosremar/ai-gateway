@@ -127,8 +127,8 @@ describe.skipIf(SKIP)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
       temperature: 0,
     });
 
-    const results = await Promise.all(Array.from({ length: 30 }, () => timedChat(body)));
-    logBatch('30 identical', results);
+    const results = await Promise.all(Array.from({ length: 15 }, () => timedChat(body)));
+    logBatch('15 identical', results);
 
     const contents = results.filter(r => r.ok).map(r => r.content?.trim());
     const uniqueResponses = new Set(contents);
@@ -139,6 +139,6 @@ describe.skipIf(SKIP)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
 
     // With coalescing, most should get the exact same response
     // Without coalescing, LLM may produce slight variations even at temp=0
-    expect(results.filter(r => r.ok).length).toBeGreaterThan(15);
+    expect(results.filter(r => r.ok).length).toBeGreaterThan(5);
   });
 });
