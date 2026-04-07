@@ -20,7 +20,7 @@ const creds: ProviderCredentials = { apiKey };
 const client = new RunpodClient();
 
 // Direct uvicorn start — no start.sh overhead
-const startCmd = 'cd /app/api && HF_HOME=/app/.cache/huggingface HF_HUB_ENABLE_HF_TRANSFER=1 python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info';
+const startCmd = 'cd /app/api && HF_HOME=/app/.cache/huggingface HF_XET_HIGH_PERFORMANCE=1 HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50 python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info';
 
 console.log('Deploying with direct uvicorn (no start.sh)...');
 const t0 = Date.now();

@@ -3,11 +3,19 @@
  *
  * Combined ASR (best noise-robust, 7.4% WER) + translation (55 langs).
  * Single endpoint handles both STT and LLM stages.
- * No API key required — public Modal endpoint.
+ * Supports proxy auth via MODAL_PROXY_SECRET env (format: key:secret).
  * Apache 2.0 license (both models).
  */
 
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse, LLMProvider, ChatRequest, ChatResponse } from '../types';
+
+function buildProxyAuthHeaders(): Record<string, string> {
+  const token = process.env.MODAL_PROXY_SECRET;
+  if (!token) return {};
+  const [key, secret] = token.split(':');
+  if (!key || !secret) return {};
+  return { 'Modal-Key': key, 'Modal-Secret': secret };
+}
 
 const DEFAULT_ENDPOINT =
   'https://marcosremar--babelcast-qwen3asr-pipe-qwen3asrpipeline-serve.modal.run';
@@ -52,6 +60,7 @@ export class Qwen3ASRPipelineSTTProvider implements STTProvider {
 
     const res = await fetch(`${this.endpoint}/v1/audio/transcriptions`, {
       method: 'POST',
+      headers: buildProxyAuthHeaders(),
       body: formData,
     });
 
@@ -109,7 +118,7 @@ export class Qwen3ASRPipelineLLMProvider implements LLMProvider {
 
     const res = await fetch(`${this.endpoint}/v1/translate/text`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...buildProxyAuthHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, source_lang: sourceLang, target_lang: targetLang }),
     });
 

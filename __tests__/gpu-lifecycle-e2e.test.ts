@@ -246,10 +246,12 @@ describe.skipIf(!LIFECYCLE_ENABLED)('GPU Lifecycle E2E', () => {
     }
 
     console.log('  Firing requests to complete shadow validation...');
-    // Shadow needs N consecutive successes (configured to 2)
-    await fireRequests(5, 1000);
+    // Shadow needs N consecutive successes — fire more requests with retries
+    await fireRequests(10, 2000);
 
     await waitFor(async () => {
+      // Keep firing requests to drive shadow completions
+      await fireRequests(3, 1000).catch(() => {});
       const r = await getReadiness();
       console.log(`    shadow runs: ${r.readinessState.shadowCompletedRuns}, production: ${r.gpuReadyForProduction}`);
       return r.gpuReadyForProduction;

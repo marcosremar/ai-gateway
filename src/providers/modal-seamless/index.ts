@@ -4,12 +4,20 @@
  * Multimodal speech+text translation model.
  * Capabilities: ASR (speech→text), S2TT (speech→translated text), T2TT (text→translated text).
  * 101 input languages, 96 text output languages. Better than Whisper on ASR (en/fr).
- * No API key required — public Modal endpoint.
+ * Supports proxy auth via MODAL_PROXY_SECRET env (format: key:secret).
  *
  * License: CC-BY-NC-4.0 (non-commercial)
  */
 
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse, LLMProvider, ChatRequest, ChatResponse } from '../types';
+
+function buildProxyAuthHeaders(): Record<string, string> {
+  const token = process.env.MODAL_PROXY_SECRET;
+  if (!token) return {};
+  const [key, secret] = token.split(':');
+  if (!key || !secret) return {};
+  return { 'Modal-Key': key, 'Modal-Secret': secret };
+}
 
 const DEFAULT_ENDPOINT =
   'https://marcosremar--babelcast-seamless-seamlessm4t-serve.modal.run';
@@ -72,6 +80,7 @@ export class ModalSeamlessSTTProvider implements STTProvider {
 
       const res = await fetch(`${this.endpoint}/v1/translate/speech`, {
         method: 'POST',
+        headers: buildProxyAuthHeaders(),
         body: formData,
       });
 
@@ -96,6 +105,7 @@ export class ModalSeamlessSTTProvider implements STTProvider {
 
       const res = await fetch(`${this.endpoint}/v1/audio/transcriptions`, {
         method: 'POST',
+        headers: buildProxyAuthHeaders(),
         body: formData,
       });
 
@@ -162,7 +172,7 @@ export class ModalSeamlessLLMProvider implements LLMProvider {
 
     const res = await fetch(`${this.endpoint}/v1/translate/text`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...buildProxyAuthHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text,
         source_lang: sourceLang,

@@ -21,6 +21,9 @@
 import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
+import os from 'os';
+import path from 'path';
+import fs from 'fs';
 
 const VAST_API_BASE = process.env.VAST_API_BASE || 'https://console.vast.ai/api/v0';
 
@@ -44,6 +47,13 @@ const MAX_UNSTABLE_HOSTS = 50;
 const RATE_LIMIT_INTERVAL_MS = 334; // ~3 req/s
 const RATE_LIMIT_429_RETRY_MS = parseInt(process.env.VAST_RATE_LIMIT_429_RETRY_MS || '2000', 10);
 const RATE_LIMIT_429_MAX_RETRIES = 3;
+
+// ── Offer cache ─────────────────────────────────────────────────────────────
+const OFFER_CACHE_TTL_MS = parseInt(process.env.VAST_OFFER_CACHE_TTL_MS || '60000', 10); // 60s
+
+// ── Host reputation persistence ─────────────────────────────────────────────
+const REPUTATION_DIR = process.env.AI_GATEWAY_CONFIG_DIR || path.join(os.homedir(), '.ai-gateway');
+const REPUTATION_PATH = path.join(REPUTATION_DIR, 'vast-host-reputation.json');
 
 /** Check if an IP address is RFC1918 private / loopback / link-local (unreachable from internet). */
 function isPrivateIp(ip: string): boolean {
@@ -84,6 +94,38 @@ function stripPrefix(id: string): { rawId: string; type: 'instance' | 'endpoint'
   return { rawId: id, type: 'instance' };
 }
 
+/** Load persisted unstable hosts from disk. */
+function loadHostReputation(): Map<string, number> {
+  try {
+    const raw = fs.readFileSync(REPUTATION_PATH, 'utf8');
+    const data = JSON.parse(raw) as Record<string, number>;
+    const map = new Map<string, number>();
+    const now = Date.now();
+    for (const [ip, ts] of Object.entries(data)) {
+      // Only load entries that haven't expired
+      if (now - ts < UNSTABLE_HOST_COOLDOWN_MS) map.set(ip, ts);
+    }
+    return map;
+  } catch { return new Map(); }
+}
+
+/** Save unstable hosts to disk (debounced by caller). */
+function saveHostReputation(hosts: Map<string, number>): void {
+  try {
+    if (!fs.existsSync(REPUTATION_DIR)) fs.mkdirSync(REPUTATION_DIR, { recursive: true });
+    const obj: Record<string, number> = {};
+    for (const [ip, ts] of hosts) obj[ip] = ts;
+    fs.writeFileSync(REPUTATION_PATH, JSON.stringify(obj, null, 2));
+  } catch { /* ignore write errors */ }
+}
+
+/** Offer cache entry */
+interface OfferCacheEntry {
+  offers: Array<Record<string, unknown>>;
+  ts: number;
+  key: string;
+}
+
 export interface VastClientOptions extends AbstractGpuProviderOptions {}
 
 export class VastClient extends AbstractGpuProvider {
@@ -93,10 +135,19 @@ export class VastClient extends AbstractGpuProvider {
   /** IPs of hosts where we recently created instances (cross-call dedup). */
   private _recentlyUsedIps = new Set<string>();
   /** Hosts that reclaimed instances during loading — blacklisted with expiry timestamps. */
-  private _unstableHosts = new Map<string, number>(); // ip → timestamp when blacklisted
+  private _unstableHosts: Map<string, number>;
+  /** Debounce timer for persisting reputation. */
+  private _reputationSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Offer search cache — avoids redundant API calls within TTL. */
+  private _offerCache: OfferCacheEntry | null = null;
 
   constructor(opts?: VastClientOptions) {
     super(opts);
+    // P1b: Load persisted host reputation from disk
+    this._unstableHosts = loadHostReputation();
+    if (this._unstableHosts.size > 0) {
+      this.log.log(`[vast] Loaded ${this._unstableHosts.size} unstable hosts from disk`);
+    }
   }
 
   /** Check if any requested GPU type requires Blackwell CUDA (12.8+). */
@@ -106,7 +157,7 @@ export class VastClient extends AbstractGpuProvider {
     return gpuTypes.some(g => blackwell.some(b => g.includes(b)));
   }
 
-  /** Mark a host as unstable (reclaimed an instance during loading). */
+  /** Mark a host as unstable (reclaimed an instance during loading). Persists to disk. */
   private _markHostUnstable(ip: string): void {
     this._unstableHosts.set(ip, Date.now());
     this.log.warn(`[vast] Host ${ip} marked as unstable (instance reclaimed during loading). Cooldown: ${UNSTABLE_HOST_COOLDOWN_MS / 60_000}min`);
@@ -115,6 +166,17 @@ export class VastClient extends AbstractGpuProvider {
       const oldest = [...this._unstableHosts.entries()].sort((a, b) => a[1] - b[1])[0];
       if (oldest) this._unstableHosts.delete(oldest[0]);
     }
+    // Debounced persist to disk
+    this._persistReputation();
+  }
+
+  /** Debounced save of host reputation to disk. */
+  private _persistReputation(): void {
+    if (this._reputationSaveTimer) clearTimeout(this._reputationSaveTimer);
+    this._reputationSaveTimer = setTimeout(() => {
+      this._reputationSaveTimer = null;
+      saveHostReputation(this._unstableHosts);
+    }, 500);
   }
 
   /** Check if a host is currently blacklisted. */
@@ -207,6 +269,9 @@ export class VastClient extends AbstractGpuProvider {
     diskGb = Math.max(diskGb, getMinDiskGb());
 
     // ── 2. Search for cheapest available offer ─────────────────────────────
+    // P0b: NOTE — direct_port_count filter intentionally REMOVED. SSH-only hosts
+    // (e.g. RTX 5090 Blackwell) are now first-class citizens via SSH tunnel fallback.
+    // We try direct-port hosts first (faster), then SSH-only as a 2nd-pass fallback.
     const searchBody: Record<string, unknown> = {
       limit: 50,
       type: 'on-demand',
@@ -214,8 +279,7 @@ export class VastClient extends AbstractGpuProvider {
       rented: { eq: false },
       num_gpus: { eq: spec.gpuCount ?? 1 },
       disk_space: { gte: diskGb },
-      // Prefer hosts with direct HTTP ports (no SSH tunnel needed)
-      // Hosts with direct_port_count=0 require SSH tunnel which adds latency
+      // P0b: Phase-1 — prefer direct-port hosts (no SSH tunnel needed, faster)
       direct_port_count: { gte: 1 },
       // CUDA filter: 12.8+ for Blackwell (RTX 5090/5080), 12.4+ for everything else
       cuda_vers: { gte: this._needsBlackwellCuda(spec.gpuTypes) ? 12.8 : 12.4 },
@@ -301,6 +365,37 @@ export class VastClient extends AbstractGpuProvider {
       }
     }
 
+    // P0b: Phase-2 fallback — SSH-only hosts (no direct ports). Critical for
+    // RTX 5090 Blackwell hosts which often have direct_port_end: -1.
+    // Only run if Phase-1 yielded NOTHING — we don't want to consume API
+    // bandwidth on this when we already have offers.
+    if (offers.length === 0) {
+      this.log.log('[vast] Phase-2: searching SSH-only hosts (no direct_port filter)');
+      const sshOnlyBody = { ...searchBody };
+      delete sshOnlyBody.direct_port_count;
+      try {
+        const sshOffers = await this._searchOffers(sshOnlyBody, headers);
+        let filtered = sshOffers;
+        if (createGeoFilter && filtered.length) {
+          filtered = filtered.filter(o => {
+            const geo = String(o.geolocation || '');
+            return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`) || geo.toUpperCase().startsWith(`${cc},`));
+          });
+        }
+        // Mark SSH-only offers and merge (dedupe by id)
+        const seenIds = new Set(offers.map(o => String(o.id)));
+        for (const o of filtered) {
+          if (!seenIds.has(String(o.id))) {
+            (o as Record<string, unknown>)._sshOnlyHint = true;
+            offers.push(o);
+          }
+        }
+        this.log.log(`[vast] Phase-2 added ${filtered.length} SSH-only offers (total: ${offers.length})`);
+      } catch (sshErr) {
+        this.log.warn(`[vast] SSH-only fallback search failed: ${this.errMsg(sshErr)}`);
+      }
+    }
+
     // ── Tiered offer ranking: prefer fast internet, expand budget progressively ──
     // Tier 1 (≤avg×1.2): try fastest internet first at near-average price.
     // Tier 2 (≤avg×1.3): expand to slightly more expensive if Tier 1 exhausted.
@@ -342,213 +437,59 @@ export class VastClient extends AbstractGpuProvider {
     // Merge explicit env overrides from tier config
     if (spec.env) Object.assign(envVars, spec.env);
 
-    // ── 3. Try cheapest offers (up to 10 unique hosts) ─────────────────────
-    // Track per-offer failure reasons for diagnostics
+    // ── 3. Hedged deploy: try N offers in parallel, keep first success ─────
+    // P0a: Vast.ai is unreliable (host reclaims, slow pulls). Default raceCount=2
+    // for Vast.ai (overridable via spec.raceCount). Each parallel attempt picks
+    // a different offer; the first one to return a healthy endpoint wins, the
+    // others are torn down to avoid runaway costs.
     const offerFailures: Array<{ offerId: string; gpu: string; reason: string }> = [];
+    const failuresMutex = { push: (f: typeof offerFailures[number]) => offerFailures.push(f) };
+    const raceCount = Math.max(1, Math.min(5, (spec as any).raceCount ?? 2));
+    const offerPool = offers.slice(0, 10);
+    const losers: Array<{ instanceId: string; contractId: string }> = [];
 
-    for (const offer of offers.slice(0, 10)) {
-      const offerId = offer.id;
-      const gpuName = (offer.gpu_name || 'unknown') as string;
-      const pricePerHr = (offer.dph_total || 0) as number;
+    this.log.log(`[vast] Hedged deploy: race=${raceCount}, pool=${offerPool.length} offers`);
 
-      // ssh_direct: Vast.ai provides SSH access + runs onstart script.
-      // Works on ALL hosts (including those without direct ports like RTX 5090).
-      // The app is launched via onstart and port-forwarded via SSH tunnel.
-      const onstart = spec.onstart || '/app/start.sh';
-      const createBody: Record<string, unknown> = {
-        client_id: 'me',
-        image: imageName,
-        // Do NOT include 'price' — omitting it = on-demand (fixed price, non-interruptible).
-        disk: diskGb + 15,
-        runtype: 'ssh_direct',
-        onstart: `nohup bash -c ${JSON.stringify(onstart)} > /var/log/app.log 2>&1 &`,
-        // Port mappings via env dict (works when host has direct ports)
-        env: {
-          TZ: 'UTC',
-          ...envVars,
-          '-p 8000:8000': '1',
-          '-p 8001:8001/udp': '1',
-        },
-        // Template support: use pre-configured template for faster boot
-        ...(spec.templateHashId ? { template_hash_id: spec.templateHashId } : {}),
-        // Don't cancel_unavail — let it queue instead of silently destroying
-        ...(spec.cancelUnavail === true ? { cancel_unavail: true } : {}),
-        // Docker Hub auth to avoid unauthenticated pull rate limits (10 pulls/hr)
-        ...((process.env.DOCKERHUB_USERNAME || process.env.DOCKER_HUB_USER) && (process.env.DOCKERHUB_TOKEN || process.env.DOCKER_HUB_TOKEN)
-          ? { image_login: `-u ${process.env.DOCKERHUB_USERNAME || process.env.DOCKER_HUB_USER} -p ${process.env.DOCKERHUB_TOKEN || process.env.DOCKER_HUB_TOKEN} docker.io` }
-          : {}),
-      };
+    const winner = await this._raceOffers({
+      offers: offerPool,
+      raceCount,
+      headers,
+      apiKey,
+      diskGb,
+      imageName,
+      envVars,
+      spec,
+      userId,
+      failures: failuresMutex,
+      losers,
+    });
 
-      try {
-        const createRes = await this._vastFetch(`${VAST_API_BASE}/asks/${offerId}/`, {
-          method: 'PUT',
-          headers,
-          body: JSON.stringify(createBody),
-        }, TIMEOUTS.create);
-
-        if (!createRes.ok) {
-          const errText = await createRes.text().catch(() => '');
-          const unavailable = errText.includes('not available') || errText.includes('already rented');
-          if (unavailable) {
-            this.log.log(`[vast] Offer ${offerId} (${gpuName}) unavailable, trying next...`);
-            offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: 'unavailable/rented' });
-            continue;
-          }
-          this.log.warn(`[vast] Create on offer ${offerId} failed: HTTP ${createRes.status} ${errText.substring(0, 300)}`);
-          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: `HTTP ${createRes.status}: ${errText.substring(0, 100)}` });
-          continue;
-        }
-
-        const createData = (await createRes.json()) as Record<string, unknown>;
-        if (!createData.success) {
-          this.log.warn(`[vast] Create on offer ${offerId} returned: ${JSON.stringify(createData).substring(0, 300)}`);
-          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: `API returned success=false` });
-          continue;
-        }
-
-        const contractId = String(createData.new_contract);
-        const instanceId = `inst-${contractId}`;
-        const instanceName = `parle-autoscale-${Date.now()}`;
-
-        // Poll for IP assignment — timeout based on image size + host download speed.
-        // Formula: compressed_size / bandwidth * safety, clamped to [3min, 15min].
-        const inetDown = (offer.inet_down as number) || 500; // Mbps
-        const pullEstimateS = (diskGb * 8 * 1024) / Math.max(inetDown, 100); // theoretical seconds
-        const CREATE_POLL_MAX_MS = Math.max(
-          Math.min(Math.round(pullEstimateS * 2 * 1000), 900_000), // 2x safety, cap 15 min
-          180_000, // floor 3 min
-        );
-        let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS);
-
-        // If instance vanished (no endpoint), verify it still exists before trying SSH.
-        // _pollForEndpoint may have cached ip/sshHost from an early poll before the host reclaimed.
-        if (!endpoint) {
-          const stillExists = await this._fetchInstanceDetail(contractId, headers);
-          if (!stillExists || !stillExists.ip || ['exited', 'failed', 'destroyed', 'error', 'deleted'].includes(stillExists.status?.toLowerCase())) {
-            const reason = 'instance vanished during startup (host reclaimed)';
-            try {
-              const logs = await this.getInstanceLogs(instanceId, { apiKey }, 50);
-              if (logs) this.log.warn(`[vast] Instance ${contractId} logs before destroy:\n${logs.substring(0, 500)}`);
-            } catch {}
-            this.log.warn(`[vast] Instance ${contractId} no longer exists (status=${stillExists?.status ?? 'gone'}) — ${reason}. Destroying and trying next offer...`);
-            const offerIp = String(offer.public_ipaddr ?? '');
-            if (offerIp) this._markHostUnstable(offerIp);
-            try { await this.deleteInstance(instanceId, { apiKey }); } catch (delErr) { this.log.debug(`[vast] Cleanup of ${contractId} failed: ${this.errMsg(delErr)}`); }
-            offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason });
-            continue;
-          }
-          // Refresh ip/sshHost/sshPort from the live check
-          ip = stillExists.ip;
-          sshHost = stillExists.sshHost;
-          sshPort = stillExists.sshPort;
-        }
-
-        // SSH-only hosts (RTX 5090 Blackwell often have no direct ports):
-        // Use SSH tunnel to forward port 8000 to localhost
-        if (!endpoint && ip && sshHost && sshPort) {
-          this.log.log(`[vast] Instance ${contractId} is SSH-only (no direct ports). Setting up SSH tunnel to ${sshHost}:${sshPort}...`);
-          try {
-            const { getOrCreateTunnel } = await import('../../server/ssh-tunnel');
-            const tunnel = getOrCreateTunnel(sshHost, sshPort, 8000);
-            const ok = await tunnel.open(15_000);
-            if (ok) {
-              this.log.log(`[vast] SSH tunnel opened: ${tunnel.endpoint} → ${sshHost}:8000`);
-              // Return the tunnel endpoint as the instance endpoint
-              return {
-                instanceId,
-                instanceName: `parle-autoscale-${Date.now()}`,
-                endpoint: tunnel.endpoint,
-                status: 'running',
-                gpuType: gpuName,
-                ipAddress: ip,
-                sshHost,
-                sshPort,
-                providerMeta: {
-                  gpuType: gpuName,
-                  gpuVramGb: ((offer.gpu_ram as number) ?? 0) / 1024,
-                  inetDown: offer.inet_down as number | undefined,
-                  inetUp: offer.inet_up as number | undefined,
-                  dphTotal: pricePerHr,
-                  sshTunnel: true,
-                },
-              };
-            }
-            this.log.warn(`[vast] SSH tunnel failed for ${contractId}. Destroying...`);
-          } catch (tunnelErr) {
-            this.log.warn(`[vast] SSH tunnel error for ${contractId}: ${this.errMsg(tunnelErr)}`);
-          }
-          try { await this.deleteInstance(instanceId, { apiKey }); } catch {}
-          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: 'SSH tunnel failed' });
-          continue;
-        }
-
-        // No endpoint and no SSH — skip
-        if (!endpoint) {
-          this.log.warn(`[vast] Instance ${contractId} has no endpoint and no SSH — destroying...`);
-          try { await this.deleteInstance(instanceId, { apiKey }); } catch {}
-          offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: 'no endpoint, no SSH' });
-          continue;
-        }
-
-        // Track host IP to avoid placing multiple instances on the same host
-        if (ip) {
-          this._recentlyUsedIps.add(ip);
-          // Prune oldest entries to prevent memory leak on long-running processes
-          if (this._recentlyUsedIps.size > MAX_RECENTLY_USED_IPS) {
-            const oldest = this._recentlyUsedIps.values().next().value;
-            if (oldest !== undefined) this._recentlyUsedIps.delete(oldest);
-          }
-        }
-
-        // Persist to settings
-        await this.persistInstance(userId, spec.machineKey || 'vastInstance', {
-          instanceId,
-          instanceName,
-          endpoint,
-          ipAddress: ip,
-          gpuType: gpuName,
-          status: 'creating',
-          pricePerHr,
-        });
-
-        this.log.log(`[vast] Created ${instanceName} (${contractId}) with ${gpuName} @ $${pricePerHr}/h → ${endpoint || '(pending)'}${sshHost ? ` (ssh: ${sshHost}:${sshPort})` : ''}`);
-        return {
-          instanceId,
-          instanceName,
-          endpoint,
-          status: 'creating',
-          gpuType: gpuName,
-          ipAddress: ip,
-          sshHost,
-          sshPort,
-          providerMeta: {
-            hostIp: ip,
-            reliability2: offer.reliability2 as number | undefined,
-            inetDown: offer.inet_down as number | undefined,
-            inetUp: offer.inet_up as number | undefined,
-            dphTotal: pricePerHr,
-            region: (offer.geolocation || '') as string,
-            // Machine specs
-            cpuName: (offer.cpu_name || '') as string,
-            cpuCores: (offer.cpu_cores_effective || 0) as number,
-            ramGb: ((offer.cpu_ram || 0) as number) / 1024, // MB → GB
-            gpuVramGb: ((offer.gpu_ram || 0) as number) / 1024, // MB → GB
-            numGpus: (offer.num_gpus || 1) as number,
-            diskGb: (offer.disk_space || 0) as number,
-            diskReadMbps: (offer.disk_bw_read || 0) as number,
-            diskWriteMbps: (offer.disk_bw_write || 0) as number,
-            pcieBw: (offer.pcie_bw || 0) as number,
-            cudaVersion: (offer.cuda_max_good || 0) as number,
-          },
-        };
-      } catch (e) {
-        this.log.warn(`[vast] Create on offer ${offerId} error: ${this.errMsg(e)}`);
-        offerFailures.push({ offerId: String(offerId), gpu: gpuName, reason: this.errMsg(e) });
+    // Tear down losing parallel attempts (fire-and-forget but logged)
+    if (losers.length > 0) {
+      this.log.log(`[vast] Tearing down ${losers.length} losing parallel attempts`);
+      for (const loser of losers) {
+        this.deleteInstance(loser.instanceId, { apiKey })
+          .then(() => this.log.log(`[vast] Cleaned up loser ${loser.contractId}`))
+          .catch((e) => this.log.warn(`[vast] Failed to clean up loser ${loser.contractId}: ${this.errMsg(e)}`));
       }
     }
 
+    if (winner) {
+      // P1a: Auto-snapshot in background (no await — non-blocking)
+      if ((spec as any).autoSnapshot !== false && !(spec as any)._sshOnlyHint) {
+        setTimeout(() => {
+          this.takeSnapshot(winner.instanceId, { apiKey })
+            .then((ref) => ref && this.log.log(`[vast] Auto-snapshot scheduled for ${winner.instanceId}: ${ref}`))
+            .catch((e) => this.log.debug(`[vast] Auto-snapshot failed for ${winner.instanceId}: ${this.errMsg(e)}`));
+        }, 60_000); // wait 1min so container is fully booted
+      }
+      return winner;
+    }
+
     const failSummary = offerFailures.map(f => `${f.gpu}(${f.offerId}): ${f.reason}`).join(' | ');
-    this.log.error(`[vast] All ${Math.min(offers.length, 10)} offers exhausted. Failures: ${failSummary}`);
+    this.log.error(`[vast] All ${offerPool.length} offers exhausted. Failures: ${failSummary}`);
+    // Invalidate offer cache on total failure
+    this._offerCache = null;
 
     this.emitError({
       operation: 'createInstance',
@@ -557,6 +498,277 @@ export class VastClient extends AbstractGpuProvider {
       retryable: false,
     });
     throw new Error(`No GPUs available on Vast.ai (creation failed on ${offerFailures.length} offers). ${failSummary}`);
+  }
+
+  /**
+   * P0a: Hedged deploy — try multiple offers in parallel, return first success.
+   * Tracks "loser" instances so caller can clean them up.
+   */
+  private async _raceOffers(args: {
+    offers: Array<Record<string, unknown>>;
+    raceCount: number;
+    headers: Record<string, string>;
+    apiKey: string;
+    diskGb: number;
+    imageName: string;
+    envVars: Record<string, string>;
+    spec: InstanceSpec;
+    userId?: string;
+    failures: { push: (f: { offerId: string; gpu: string; reason: string }) => void };
+    losers: Array<{ instanceId: string; contractId: string }>;
+  }): Promise<GpuInstance | null> {
+    const { offers, raceCount, headers, apiKey, diskGb, imageName, envVars, spec, userId, failures, losers } = args;
+
+    let nextOfferIdx = 0;
+    const inflight = new Map<number, Promise<{ result: GpuInstance | null; idx: number; offerId: string }>>();
+
+    const launch = (): boolean => {
+      if (nextOfferIdx >= offers.length) return false;
+      const idx = nextOfferIdx++;
+      const offer = offers[idx];
+      const offerId = String(offer.id);
+      const p = this._tryOffer({
+        offer, headers, apiKey, diskGb, imageName, envVars, spec, userId, failures,
+      }).then((result) => ({ result, idx, offerId }));
+      inflight.set(idx, p);
+      return true;
+    };
+
+    // Launch initial wave
+    for (let i = 0; i < raceCount; i++) {
+      if (!launch()) break;
+    }
+
+    let winner: GpuInstance | null = null;
+    while (inflight.size > 0 && !winner) {
+      const settled = await Promise.race(inflight.values());
+      inflight.delete(settled.idx);
+      if (settled.result) {
+        // We have a winner! Mark all currently in-flight as losers.
+        winner = settled.result;
+        // Wait for in-flight attempts to settle so we can mark losers
+        const remaining = await Promise.allSettled(inflight.values());
+        for (const r of remaining) {
+          if (r.status === 'fulfilled' && r.value.result) {
+            losers.push({
+              instanceId: r.value.result.instanceId,
+              contractId: r.value.result.instanceId.replace(/^inst-/, ''),
+            });
+          }
+        }
+        inflight.clear();
+        break;
+      }
+      // Failed attempt — launch next offer to keep raceCount in flight
+      launch();
+    }
+
+    return winner;
+  }
+
+  /**
+   * P0a: Try a single offer — extracted from createInstance for hedged deploy.
+   * Returns the GpuInstance on success, or null on failure (failure logged via `failures.push`).
+   */
+  private async _tryOffer(args: {
+    offer: Record<string, unknown>;
+    headers: Record<string, string>;
+    apiKey: string;
+    diskGb: number;
+    imageName: string;
+    envVars: Record<string, string>;
+    spec: InstanceSpec;
+    userId?: string;
+    failures: { push: (f: { offerId: string; gpu: string; reason: string }) => void };
+  }): Promise<GpuInstance | null> {
+    const { offer, headers, apiKey, diskGb, imageName, envVars, spec, userId, failures } = args;
+    const offerId = String(offer.id);
+    const gpuName = (offer.gpu_name || 'unknown') as string;
+    const pricePerHr = (offer.dph_total || 0) as number;
+    const isSshOnlyHint = Boolean((offer as Record<string, unknown>)._sshOnlyHint);
+
+    // ssh_direct: Vast.ai provides SSH access + runs onstart script.
+    // Works on ALL hosts (including those without direct ports like RTX 5090).
+    const onstart = spec.onstart || '/app/start.sh';
+    const createBody: Record<string, unknown> = {
+      client_id: 'me',
+      image: imageName,
+      disk: diskGb + 15,
+      runtype: 'ssh_direct',
+      onstart: `nohup bash -c ${JSON.stringify(onstart)} > /var/log/app.log 2>&1 &`,
+      env: {
+        TZ: 'UTC',
+        ...envVars,
+        '-p 8000:8000': '1',
+        '-p 8001:8001/udp': '1',
+      },
+      ...(spec.templateHashId ? { template_hash_id: spec.templateHashId } : {}),
+      ...(spec.cancelUnavail === true ? { cancel_unavail: true } : {}),
+      ...((process.env.DOCKERHUB_USERNAME || process.env.DOCKER_HUB_USER) && (process.env.DOCKERHUB_TOKEN || process.env.DOCKER_HUB_TOKEN)
+        ? { image_login: `-u ${process.env.DOCKERHUB_USERNAME || process.env.DOCKER_HUB_USER} -p ${process.env.DOCKERHUB_TOKEN || process.env.DOCKER_HUB_TOKEN} docker.io` }
+        : {}),
+    };
+
+    try {
+      const createRes = await this._vastFetch(`${VAST_API_BASE}/asks/${offerId}/`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(createBody),
+      }, TIMEOUTS.create);
+
+      if (!createRes.ok) {
+        const errText = await createRes.text().catch(() => '');
+        const unavailable = errText.includes('not available') || errText.includes('already rented');
+        if (unavailable) {
+          this.log.log(`[vast] Offer ${offerId} (${gpuName}) unavailable, trying next...`);
+          failures.push({ offerId, gpu: gpuName, reason: 'unavailable/rented' });
+          return null;
+        }
+        this.log.warn(`[vast] Create on offer ${offerId} failed: HTTP ${createRes.status} ${errText.substring(0, 300)}`);
+        failures.push({ offerId, gpu: gpuName, reason: `HTTP ${createRes.status}: ${errText.substring(0, 100)}` });
+        return null;
+      }
+
+      const createData = (await createRes.json()) as Record<string, unknown>;
+      if (!createData.success) {
+        this.log.warn(`[vast] Create on offer ${offerId} returned: ${JSON.stringify(createData).substring(0, 300)}`);
+        failures.push({ offerId, gpu: gpuName, reason: `API returned success=false` });
+        return null;
+      }
+
+      const contractId = String(createData.new_contract);
+      const instanceId = `inst-${contractId}`;
+      const instanceName = `parle-autoscale-${Date.now()}`;
+
+      // P3: Adaptive polling — base timeout on host's actual download speed.
+      // Faster hosts get tighter timeouts; slower hosts get more headroom.
+      const inetDown = (offer.inet_down as number) || 500; // Mbps
+      const pullEstimateS = (diskGb * 8 * 1024) / Math.max(inetDown, 100); // theoretical seconds
+      const CREATE_POLL_MAX_MS = Math.max(
+        Math.min(Math.round(pullEstimateS * 2 * 1000), 900_000), // 2x safety, cap 15 min
+        180_000, // floor 3 min
+      );
+      let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS, inetDown);
+
+      // If instance vanished (no endpoint), verify it still exists before trying SSH.
+      if (!endpoint) {
+        const stillExists = await this._fetchInstanceDetail(contractId, headers);
+        if (!stillExists || !stillExists.ip || ['exited', 'failed', 'destroyed', 'error', 'deleted'].includes(stillExists.status?.toLowerCase())) {
+          const reason = 'instance vanished during startup (host reclaimed)';
+          try {
+            const logs = await this.getInstanceLogs(instanceId, { apiKey }, 50);
+            if (logs) this.log.warn(`[vast] Instance ${contractId} logs before destroy:\n${logs.substring(0, 500)}`);
+          } catch {}
+          this.log.warn(`[vast] Instance ${contractId} no longer exists (status=${stillExists?.status ?? 'gone'}) — ${reason}.`);
+          const offerIp = String(offer.public_ipaddr ?? '');
+          if (offerIp) this._markHostUnstable(offerIp);
+          try { await this.deleteInstance(instanceId, { apiKey }); } catch (delErr) { this.log.debug(`[vast] Cleanup of ${contractId} failed: ${this.errMsg(delErr)}`); }
+          failures.push({ offerId, gpu: gpuName, reason });
+          return null;
+        }
+        ip = stillExists.ip;
+        sshHost = stillExists.sshHost;
+        sshPort = stillExists.sshPort;
+      }
+
+      // SSH-only hosts: use SSH tunnel
+      if (!endpoint && ip && sshHost && sshPort) {
+        this.log.log(`[vast] Instance ${contractId} is SSH-only (no direct ports). Setting up SSH tunnel to ${sshHost}:${sshPort}...`);
+        try {
+          const { getOrCreateTunnel } = await import('../../server/ssh-tunnel');
+          const tunnel = getOrCreateTunnel(sshHost, sshPort, 8000);
+          const ok = await tunnel.open(15_000);
+          if (ok) {
+            this.log.log(`[vast] SSH tunnel opened: ${tunnel.endpoint} → ${sshHost}:8000`);
+            return {
+              instanceId,
+              instanceName,
+              endpoint: tunnel.endpoint,
+              status: 'running',
+              gpuType: gpuName,
+              ipAddress: ip,
+              sshHost,
+              sshPort,
+              providerMeta: {
+                gpuType: gpuName,
+                gpuVramGb: ((offer.gpu_ram as number) ?? 0) / 1024,
+                inetDown: offer.inet_down as number | undefined,
+                inetUp: offer.inet_up as number | undefined,
+                dphTotal: pricePerHr,
+                sshTunnel: true,
+                sshOnlyHint: isSshOnlyHint,
+              },
+            };
+          }
+          this.log.warn(`[vast] SSH tunnel failed for ${contractId}. Destroying...`);
+        } catch (tunnelErr) {
+          this.log.warn(`[vast] SSH tunnel error for ${contractId}: ${this.errMsg(tunnelErr)}`);
+        }
+        try { await this.deleteInstance(instanceId, { apiKey }); } catch {}
+        failures.push({ offerId, gpu: gpuName, reason: 'SSH tunnel failed' });
+        return null;
+      }
+
+      if (!endpoint) {
+        this.log.warn(`[vast] Instance ${contractId} has no endpoint and no SSH — destroying...`);
+        try { await this.deleteInstance(instanceId, { apiKey }); } catch {}
+        failures.push({ offerId, gpu: gpuName, reason: 'no endpoint, no SSH' });
+        return null;
+      }
+
+      // Track host IP to avoid placing multiple instances on the same host
+      if (ip) {
+        this._recentlyUsedIps.add(ip);
+        if (this._recentlyUsedIps.size > MAX_RECENTLY_USED_IPS) {
+          const oldest = this._recentlyUsedIps.values().next().value;
+          if (oldest !== undefined) this._recentlyUsedIps.delete(oldest);
+        }
+      }
+
+      await this.persistInstance(userId, spec.machineKey || 'vastInstance', {
+        instanceId,
+        instanceName,
+        endpoint,
+        ipAddress: ip,
+        gpuType: gpuName,
+        status: 'creating',
+        pricePerHr,
+      });
+
+      this.log.log(`[vast] Created ${instanceName} (${contractId}) with ${gpuName} @ $${pricePerHr}/h → ${endpoint || '(pending)'}${sshHost ? ` (ssh: ${sshHost}:${sshPort})` : ''}`);
+      return {
+        instanceId,
+        instanceName,
+        endpoint,
+        status: 'creating',
+        gpuType: gpuName,
+        ipAddress: ip,
+        sshHost,
+        sshPort,
+        providerMeta: {
+          hostIp: ip,
+          reliability2: offer.reliability2 as number | undefined,
+          inetDown: offer.inet_down as number | undefined,
+          inetUp: offer.inet_up as number | undefined,
+          dphTotal: pricePerHr,
+          region: (offer.geolocation || '') as string,
+          cpuName: (offer.cpu_name || '') as string,
+          cpuCores: (offer.cpu_cores_effective || 0) as number,
+          ramGb: ((offer.cpu_ram || 0) as number) / 1024,
+          gpuVramGb: ((offer.gpu_ram || 0) as number) / 1024,
+          numGpus: (offer.num_gpus || 1) as number,
+          diskGb: (offer.disk_space || 0) as number,
+          diskReadMbps: (offer.disk_bw_read || 0) as number,
+          diskWriteMbps: (offer.disk_bw_write || 0) as number,
+          pcieBw: (offer.pcie_bw || 0) as number,
+          cudaVersion: (offer.cuda_max_good || 0) as number,
+        },
+      };
+    } catch (e) {
+      this.log.warn(`[vast] Create on offer ${offerId} error: ${this.errMsg(e)}`);
+      failures.push({ offerId, gpu: gpuName, reason: this.errMsg(e) });
+      return null;
+    }
   }
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
@@ -1046,11 +1258,15 @@ export class VastClient extends AbstractGpuProvider {
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
-  /** Poll for endpoint assignment with exponential backoff. */
+  /** Poll for endpoint assignment with exponential backoff.
+   * P3: Adaptive polling — `inetDownMbps` (host download speed) tightens initial
+   * intervals for fast hosts. Slow hosts get the legacy 5s base interval.
+   */
   private async _pollForEndpoint(
     contractId: string,
     headers: Record<string, string>,
     maxWaitMs: number = POLL_TOTAL_MAX_MS,
+    inetDownMbps?: number,
   ): Promise<{ endpoint: string; ip: string; sshHost?: string; sshPort?: number }> {
     let endpoint = '';
     let ip = '';
@@ -1066,15 +1282,19 @@ export class VastClient extends AbstractGpuProvider {
     const MAX_MISSING_STREAK = 5; // abort after 5 consecutive "not found" polls (~55s with backoff)
     let sshOnlyRunningCount = 0; // consecutive polls where instance is running with SSH but no endpoint
 
-    // Initial delay: Vast.ai API takes 3-5s to propagate instance after creation
+    // P3: Adaptive base interval — fast hosts (>5Gbps) get 2s base, slow get 5s
+    const isFastHost = (inetDownMbps ?? 0) >= 5000;
+    const baseMs = isFastHost ? 2_000 : POLL_BASE_MS;
+
+    // Initial delay: Vast.ai API takes 3-5s to propagate. Fast hosts: 2s; slow: 5s.
     if (attempt === 0) {
-      const initialDelay = 5_000;
+      const initialDelay = isFastHost ? 2_000 : 5_000;
       await new Promise((r) => setTimeout(r, initialDelay));
       elapsed += initialDelay;
     }
 
     while (elapsed < maxWaitMs) {
-      const delay = Math.min(POLL_BASE_MS * Math.pow(POLL_GROWTH, attempt), POLL_MAX_MS);
+      const delay = Math.min(baseMs * Math.pow(POLL_GROWTH, attempt), POLL_MAX_MS);
       await new Promise((r) => setTimeout(r, delay));
       elapsed += delay;
       attempt++;
@@ -1188,11 +1408,23 @@ export class VastClient extends AbstractGpuProvider {
    * Search Vast.ai offers with the given body, returning the offers array.
    * Deduplicates by machine_id so we spread across different physical hosts
    * (avoids funneling all instances onto the same broken host).
+   *
+   * P2b: Caches results with OFFER_CACHE_TTL_MS TTL. Cache key = stringified searchBody.
+   * Cache is invalidated when createInstance fails on all offers.
    */
   private async _searchOffers(
     searchBody: Record<string, unknown>,
     headers: Record<string, string>,
   ): Promise<Array<Record<string, unknown>>> {
+    // P2b: Check cache first
+    const cacheKey = JSON.stringify(searchBody);
+    const now = Date.now();
+    if (this._offerCache && this._offerCache.key === cacheKey && (now - this._offerCache.ts) < OFFER_CACHE_TTL_MS) {
+      this.log.log(`[vast] Offer cache hit (age: ${Math.round((now - this._offerCache.ts) / 1000)}s, ${this._offerCache.offers.length} offers)`);
+      // Return a shallow copy so callers can mutate without poisoning the cache
+      return this._offerCache.offers.map(o => ({ ...o }));
+    }
+
     const searchRes = await this._vastFetch(`${VAST_API_BASE}/bundles/`, {
       method: 'POST',
       headers,
@@ -1224,6 +1456,14 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     this.log.log(`[vast] Search: ${allOffers.length} offers → ${deduplicated.length} unique hosts (${this._recentlyUsedIps.size} recently used, ${unstableSkipped} unstable skipped)`);
+
+    // P2b: Populate cache (snapshot before mutations by callers)
+    this._offerCache = {
+      offers: deduplicated.map(o => ({ ...o })),
+      ts: Date.now(),
+      key: cacheKey,
+    };
+
     return deduplicated;
   }
 

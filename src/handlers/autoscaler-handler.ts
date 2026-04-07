@@ -321,7 +321,7 @@ export async function handleAutoscalerAction(
     // ── Modal GPU Management ──────────────────────────────────────────────
 
     case 'modal-deploy': {
-      const { deployFile, gpuTypes: bodyGpuTypes, apiKey: bodyApiKey } = body;
+      const { deployFile, gpuTypes: bodyGpuTypes, apiKey: bodyApiKey, strategy, tag, name: deployName, env: deployEnv } = body;
       const creds = bodyApiKey
         ? { apiKey: bodyApiKey as string }
         : await credentialStore.resolve(userId, 'modal');
@@ -333,6 +333,13 @@ export async function handleAutoscalerAction(
       const instance = await modalClient.createInstance(
         { gpuTypes: Array.isArray(bodyGpuTypes) ? bodyGpuTypes as string[] : [], dockerImage: file },
         creds,
+        undefined,
+        {
+          strategy: (strategy as 'rolling' | 'recreate') || 'rolling',
+          tag: tag as string | undefined,
+          name: deployName as string | undefined,
+          env: deployEnv as string | undefined,
+        },
       );
 
       // Persist the modal instance info in user settings
@@ -396,6 +403,29 @@ export async function handleAutoscalerAction(
       });
 
       return ok({ success: true, message: `App ${appId} stopped` });
+    }
+
+    case 'modal-autoscaler-update': {
+      const { appId, minContainers, bufferContainers, maxContainers, apiKey: bodyApiKey } = body;
+      if (!appId) return err('appId is required');
+
+      const creds = bodyApiKey
+        ? { apiKey: bodyApiKey as string }
+        : await credentialStore.resolve(userId, 'modal');
+      if (!creds) return err('Modal API key not configured');
+
+      if (minContainers === undefined && bufferContainers === undefined && maxContainers === undefined) {
+        return err('At least one of minContainers, bufferContainers, or maxContainers is required');
+      }
+
+      const modalClient = new ModalClient();
+      await modalClient.updateAutoscaler(appId as string, creds, {
+        minContainers: minContainers as number | undefined,
+        bufferContainers: bufferContainers as number | undefined,
+        maxContainers: maxContainers as number | undefined,
+      });
+
+      return ok({ success: true, appId, minContainers, bufferContainers, maxContainers });
     }
 
     // ── Direct Instance Lifecycle (provider-level, not tier-bound) ─────────

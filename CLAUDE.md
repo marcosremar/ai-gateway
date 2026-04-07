@@ -282,6 +282,58 @@ gh workflow run build-babelcast-subtitle.yml --repo marcosremar/ai-gateway-docke
 - Only `babelcast-mistral` still uses the `STANDARD_TO_BLACKWELL` mapping in `server/config.ts`
 - Vast.ai `image_login` is injected automatically when `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` env vars are set
 
+### RunPod Network Volumes — when to use them
+
+**Network volumes are persistent NVMe storage tied to a single datacenter.** They mount at `/workspace` and persist across pod terminations.
+
+**Pricing:** $0.07/GB/month (first 1 TB), $0.05/GB/month after. **Performance:** 200-400 MB/s standard, up to 10 GB/s peak.
+
+**Critical constraint:** A volume can only attach to a Secure-Cloud Pod **in its own datacenter**. The `RunpodClient.createInstance()` auto-restricts `dataCenterIds` when `spec.volumeId` is given — do not pass conflicting `spec.region`.
+
+**When network volumes HELP:**
+- HuggingFace cache (`HF_HOME=/workspace/huggingface`) — runtime model downloads survive pod death
+- Pip / transformers caches → faster Python deps install on warm boots
+- Persistent app state (DB files, inference logs)
+
+**When they DO NOT help:**
+- **Pre-baked Docker images** (e.g. current `babelcast-subtitle:latest`). Models live inside the image at `/app/models`, not on `/workspace`. The full image is still pulled on every cold boot — volume gives **zero benefit**.
+- One-shot deploys where each session uses a different image
+- Workloads where boot dominated by image extract, not model download
+
+To benefit, the image must be **restructured to lazy-download models to `/workspace` at runtime**. Trade-off:
+- Pre-baked: bigger image (slower pull), but boot is deterministic
+- Lazy + volume: smaller image (faster pull), first boot slow (download), subsequent boots fast (cache hit on volume)
+
+**SDK usage:**
+
+```typescript
+import { RunpodClient } from '@parle/ai-gateway/gpu-providers';
+
+const client = new RunpodClient();
+
+// 1. Create a volume in the desired DC (one-time)
+const vol = await client.createNetworkVolume(
+  'parle-models',     // name
+  100,                // sizeGb
+  'EU-RO-1',          // datacenter
+  { apiKey },
+);
+
+// 2. Use it on every deploy. DC is auto-forced to vol.dataCenterId.
+await client.createInstance({
+  dockerImage: 'marcosremar/babelcast-runtime:latest',
+  gpuTypes: ['NVIDIA GeForce RTX 4090'],
+  volumeId: vol.id,
+}, { apiKey });
+
+// 3. List / inspect / delete
+const all = await client.listNetworkVolumes({ apiKey });
+const v = await client.getNetworkVolume(vol.id, { apiKey });
+await client.deleteNetworkVolume(vol.id, { apiKey }); // ⚠ data unrecoverable
+```
+
+**Benchmarking:** see `scripts/runpod-volume-benchmark.ts` for cold-vs-warm boot timing. Run `bun run scripts/runpod-volume-benchmark.ts --dry-run` first to see the plan; expect ~$0.30-0.50 in compute + volume cost for a full run.
+
 ### Model Download Convention (MANDATORY for all ML Dockerfiles)
 
 **Use `hf_hub_download` / `snapshot_download` with `HF_XET_HIGH_PERFORMANCE=1` and `HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50` env vars.** This is the fastest method on datacenter GPU hosts by a validated 24% margin. `HF_HUB_ENABLE_HF_TRANSFER=1` is **deprecated** as of huggingface_hub 1.0 — the new default backend is `hf-xet` (chunked deduplication), and it requires different tuning.

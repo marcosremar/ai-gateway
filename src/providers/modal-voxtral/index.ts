@@ -4,7 +4,9 @@
  * Uses mistralai/Voxtral-Mini-3B-2507 — Mistral's open-weights audio model.
  * Apache 2.0 license. Best for French/multilingual, 13 languages.
  * GPU snapshots enabled — ~15-20s cold start after first boot.
- * No API key required — public Modal endpoint.
+ *
+ * Supports Proxy Auth Tokens: set MODAL_PROXY_SECRET env var (format: "key:secret")
+ * to authenticate requests against Modal's proxy auth.
  */
 
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse } from '../types';
@@ -21,6 +23,14 @@ export const VOXTRAL_MODELS: ModelInfo[] = [
     isDefault: true,
   },
 ];
+
+function buildProxyAuthHeaders(): Record<string, string> {
+  const token = process.env.MODAL_PROXY_SECRET;
+  if (!token) return {};
+  const [key, secret] = token.split(':');
+  if (!key || !secret) return {};
+  return { 'Modal-Key': key, 'Modal-Secret': secret };
+}
 
 export class ModalVoxtralSTTProvider implements STTProvider {
   readonly providerId: ProviderId = 'modal-voxtral' as ProviderId;
@@ -45,6 +55,7 @@ export class ModalVoxtralSTTProvider implements STTProvider {
     const res = await fetch(`${this.endpoint}/v1/audio/transcriptions`, {
       method: 'POST',
       body: formData,
+      headers: buildProxyAuthHeaders(),
     });
 
     if (!res.ok) {
