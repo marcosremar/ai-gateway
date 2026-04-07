@@ -131,7 +131,7 @@ beforeAll(async () => {
     } catch { OPENAI_VALID = false; }
   }
   try {
-    const r = await fetch('https://marcosremar--moss-tts-realtime-mossttsrealtime-serve.modal.run/health', { signal: AbortSignal.timeout(8000) });
+    const r = await fetch(process.env.MOSS_TTS_URL || 'https://marcosremar--babelcast-moss-tts-serve.modal.run/health', { signal: AbortSignal.timeout(8000) });
     MODAL_AVAILABLE = r.ok;
   } catch { MODAL_AVAILABLE = false; }
 

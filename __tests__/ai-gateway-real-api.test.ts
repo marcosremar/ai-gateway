@@ -242,7 +242,7 @@ beforeAll(async () => {
 
   // Quick health check for Modal TTS endpoint
   try {
-    const modalRes = await fetch('https://marcosremar--moss-tts-realtime-mossttsrealtime-serve.modal.run/health', {
+    const modalRes = await fetch(process.env.MOSS_TTS_URL || 'https://marcosremar--babelcast-moss-tts-serve.modal.run/health', {
       signal: AbortSignal.timeout(10_000),
     });
     MODAL_AVAILABLE = modalRes.ok;
