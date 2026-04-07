@@ -1,13 +1,8 @@
-"""Warm container pool with scale-to-zero and snapshot-based fast starts.
-
-Uses the ai-gateway GPU providers (VastClient, RunpodClient) to create
-real GPU containers on cloud infrastructure.
-"""
+"""Warm container pool with scale-to-zero and snapshot-based fast starts."""
 
 from __future__ import annotations
 import asyncio
 import time
-import os
 from dataclasses import dataclass, field
 from typing import Optional
 from ..db import get_session, ContainerModel, ContainerStatus, SnapshotModel
@@ -136,86 +131,15 @@ class ContainerPool:
     async def _cold_start(
         self, app_name: str, function_name: Optional[str], class_name: Optional[str]
     ) -> ContainerInfo:
-        """Start a new container via ai-gateway GPU providers (Vast.ai, RunPod).
-
-        This is the slow path — creates a real GPU container on cloud infra.
-        Uses the ai-gateway's VastClient/RunpodClient under the hood.
-        """
-        from ...src.gpu_providers.vast_client import VastClient  # type: ignore
-        from ...src.gpu_providers.runpod_client import RunpodClient  # type: ignore
-
-        # Resolve GPU provider and credentials from env
-        vast_key = os.environ.get('VAST_API_KEY', '')
-        runpod_key = os.environ.get('RUNPOD_API_KEY', '')
-
-        # Get app spec to determine image and GPU requirements
-        from ..db import get_session, AppModel
-        from sqlmodel import select as sel
-        with get_session() as session:
-            app = session.exec(sel(AppModel).where(AppModel.name == app_name)).first()
-
-        spec = app.spec if app else {}
-        fn_spec = spec.get('functions', {}).get(function_name or '', {})
-        cls_spec = spec.get('classes', {}).get(class_name or '', {})
-        target_spec = fn_spec or cls_spec
-
-        docker_image = target_spec.get('docker_image', 'marcosremar/parle-s2s-ultralight:latest')
-        gpu_type = target_spec.get('gpu', 'RTX 4090')
-
-        container_id = None
-        endpoint_url = None
-        gpu_used = None
-
-        # Try Vast.ai first (cheapest), then RunPod
-        if vast_key:
-            try:
-                client = VastClient()
-                instance = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: asyncio.get_event_loop().run_until_complete(
-                        client.createInstance(
-                            {'gpuTypes': [gpu_type], 'gpuCount': 1, 'storageGb': 10,
-                             'dockerImage': docker_image, 'env': {}},
-                            {'apiKey': vast_key},
-                        )
-                    )
-                )
-                container_id = instance.instanceId
-                endpoint_url = instance.endpoint
-                gpu_used = instance.gpuType
-            except Exception as e:
-                print(f"[pool] Vast.ai cold start failed: {e}")
-
-        if not container_id and runpod_key:
-            try:
-                client = RunpodClient()
-                instance = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: asyncio.get_event_loop().run_until_complete(
-                        client.createInstance(
-                            {'gpuTypes': [gpu_type], 'gpuCount': 1, 'storageGb': 10,
-                             'dockerImage': docker_image},
-                            {'apiKey': runpod_key},
-                        )
-                    )
-                )
-                container_id = instance.instanceId
-                endpoint_url = instance.endpoint
-                gpu_used = instance.gpuType
-            except Exception as e:
-                print(f"[pool] RunPod cold start failed: {e}")
-
-        # Fallback: local container ID if no cloud provider available
-        if not container_id:
-            container_id = f"snap-local-{app_name}-{int(time.time())}"
-            print(f"[pool] No GPU provider available — using local placeholder {container_id}")
-
+        """Start a new container from scratch (slow path)."""
+        # TODO: Use Docker SDK to start container with GPU
+        container_id = f"snap-{app_name}-{int(time.time())}"
         info = ContainerInfo(
             container_id=container_id,
             app_name=app_name,
             function_name=function_name,
             class_name=class_name,
-            gpu_device=gpu_used,
+            gpu_device=None,
             status="running",
             last_request_at=time.time(),
             request_count=1,
@@ -233,12 +157,10 @@ class ContainerPool:
                 function_name=function_name,
                 class_name=class_name,
                 status=ContainerStatus.RUNNING,
-                gpu_type=gpu_used,
             )
             session.add(model)
             session.commit()
 
-        print(f"[pool] Cold start: {container_id} (gpu={gpu_used}, endpoint={endpoint_url})")
         return info
 
     async def _stop_container(self, container_id: str, create_snapshot: bool = True):
