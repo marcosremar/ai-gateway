@@ -121,15 +121,18 @@ beforeAll(async () => {
 
   const cwd = process.cwd();
 
+  // NODE_PATH needed for werift's generate-function dep resolution in Bun
+  const nodeModules = resolve(cwd, 'node_modules');
+
   wsProc = spawn('bun', ['backend/ws-server.ts'], {
     cwd,
-    env: { ...process.env, WS_BACKEND_PORT: String(WS_PORT) },
+    env: { ...process.env, WS_BACKEND_PORT: String(WS_PORT), NODE_PATH: nodeModules },
     stdio: 'pipe',
   });
 
   rtcProc = spawn('bun', ['backend/webrtc-server.ts'], {
     cwd,
-    env: { ...process.env, WEBRTC_BACKEND_PORT: String(RTC_PORT) },
+    env: { ...process.env, WEBRTC_BACKEND_PORT: String(RTC_PORT), NODE_PATH: nodeModules },
     stdio: 'pipe',
   });
 
