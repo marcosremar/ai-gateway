@@ -643,7 +643,10 @@ export class GatewaySDK {
   /** Call Groq Whisper directly — used when the gateway is unreachable. */
   private async groqTranscribeFallback(audio: Uint8Array, language: string, prompt: string): Promise<TranscribeResponse> {
     const form = new FormData();
-    form.append('file', new Blob([audio], { type: 'audio/wav' }), 'audio.wav');
+    // Cast to BlobPart[] — audio is always ArrayBuffer-backed (never
+    // SharedArrayBuffer) but TS 5.7+ defaults Uint8Array to generic
+    // ArrayBufferLike, which Blob rejects.
+    form.append('file', new Blob([audio as BlobPart], { type: 'audio/wav' }), 'audio.wav');
     form.append('model', GROQ_FALLBACK_STT_MODEL);
     form.append('language', language);
     form.append('response_format', 'json');
