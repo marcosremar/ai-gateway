@@ -43,7 +43,8 @@ const PHRASES = [
 
 // ─── Audio generation via gTTS ───────────────────────────────────────────────
 
-const HAS_BUN = true; // Using child_process fallback instead of Bun.spawn
+// gTTS requires Python < 3.14 with compatible requests package
+const HAS_BUN = (() => { try { require('child_process').execSync('python3 -c "from gtts import gTTS"', { timeout: 5000 }); return true; } catch { return false; } })();
 
 // Resolve Python from .venv if available, fall back to system python3
 const PYTHON = (() => {
