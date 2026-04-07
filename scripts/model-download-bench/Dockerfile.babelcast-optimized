@@ -1,0 +1,101 @@
+# ── BabelCast Subtitle — Optimized Download Image ────────────────────────────
+# Same as standard babelcast-subtitle but with:
+#   1. aria2c for multi-connection downloads (4-8x faster than curl/wget)
+#   2. Whisper model pre-baked (eliminates 3GB runtime download)
+#   3. Optional B2/R2 CDN source for models
+#   4. zstd support for compressed model transfers
+#
+# Build:
+#   docker build -f Dockerfile.babelcast-optimized -t babelcast-subtitle:fast .
+#
+#   # With CDN source (skip HuggingFace):
+#   docker build --build-arg CDN_BASE_URL=https://f005.backblazeb2.com/file/parle-models \
+#     -f Dockerfile.babelcast-optimized -t babelcast-subtitle:fast .
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARG BASE_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    COMPUTE_TYPE=float16 \
+    LLM_REPO=bullerwins/translategemma-4b-it-GGUF \
+    LLM_FILENAME=translategemma-4b-it-Q8_0.gguf \
+    N_CTX=1024 \
+    N_BATCH=1024 \
+    N_UBATCH=512 \
+    FLASH_ATTN=true
+
+# System deps — add aria2 + zstd for fast downloads
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3.11-dev python3-pip \
+    ffmpeg libsndfile1 curl aria2 zstd && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Step 1: PyTorch from CUDA 12.8 index
+ARG CUDA_INDEX=https://download.pytorch.org/whl/cu128
+RUN pip install --no-cache-dir torch==2.11.0 --index-url ${CUDA_INDEX}
+
+# Step 2: llama-cpp-python — pre-built cu124 wheel (forward-compat with 12.8)
+ARG LLAMA_CPP_VERSION=0.3.19
+RUN curl -L -o /tmp/llama_cpp_python-${LLAMA_CPP_VERSION}-cp311-cp311-linux_x86_64.whl \
+    "https://github.com/abetlen/llama-cpp-python/releases/download/v${LLAMA_CPP_VERSION}-cu124/llama_cpp_python-${LLAMA_CPP_VERSION}-cp311-cp311-linux_x86_64.whl" && \
+    pip install --no-cache-dir "/tmp/llama_cpp_python-${LLAMA_CPP_VERSION}-cp311-cp311-linux_x86_64.whl[server]" && \
+    rm /tmp/llama_cpp_python-*.whl
+
+# Step 3: Python deps
+RUN pip install --no-cache-dir \
+    "faster-whisper>=1.2.1" \
+    "ctranslate2>=4.7.1" \
+    httpx \
+    huggingface-hub hf_transfer \
+    python-multipart \
+    uvicorn[standard] \
+    fastapi
+
+ENV HF_HOME=/app/.cache/huggingface \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HUGGINGFACE_HUB_CACHE=/app/.cache/huggingface/hub
+
+# ── Pre-download ALL models (eliminates runtime downloads) ───────────────────
+
+# GGUF model (~5GB)
+ARG CDN_BASE_URL=""
+RUN if [ -n "${CDN_BASE_URL}" ]; then \
+        echo "Downloading GGUF from CDN: ${CDN_BASE_URL}..." && \
+        mkdir -p /app/.cache/huggingface/hub && \
+        aria2c -x 16 -s 16 -k 10M --file-allocation=none \
+            --max-connection-per-server=16 --min-split-size=5M \
+            -d /app/.cache/huggingface/hub -o "gguf_model.gguf" \
+            "${CDN_BASE_URL}/babelcast/translategemma-4b-it-Q8_0.gguf" && \
+        echo "GGUF downloaded from CDN"; \
+    else \
+        python3 -c "from huggingface_hub import hf_hub_download; \
+            hf_hub_download('bullerwins/translategemma-4b-it-GGUF', 'translategemma-4b-it-Q8_0.gguf')" \
+        || echo "GGUF pre-download skipped"; \
+    fi
+
+# Whisper large-v3-turbo (~3GB) — NOW PRE-BAKED (was runtime-only before)
+RUN python3 -c "\
+from faster_whisper import WhisperModel; \
+print('Downloading Whisper large-v3-turbo...'); \
+model = WhisperModel('large-v3-turbo', device='cpu', compute_type='int8'); \
+print('Whisper model cached successfully'); \
+del model" \
+    || echo "Whisper pre-download skipped (will download at boot)"
+
+COPY server.py .
+COPY idle_watchdog.py .
+COPY start.sh .
+RUN chmod +x start.sh
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -sf http://localhost:8000/health || exit 1
+
+CMD ["/app/start.sh"]
