@@ -7,3 +7,6 @@ dist/
 __pycache__/
 .vercel
 load-testing/results/
+snapgpu.egg-info/
+snapgpu.db
+__pycache__/
