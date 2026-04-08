@@ -1,0 +1,54 @@
+# WiLoR — End-to-end 3D Hand Localization & Reconstruction
+# Quick start:
+#   1. Get MANO_RIGHT.pkl from https://mano.is.tue.mpg.de/ (free registration)
+#   2. Place it at ./mano_data/MANO_RIGHT.pkl
+#   3. docker compose up -d
+#   4. open http://localhost:7860
+#
+# To run the CLI demo instead of gradio:
+#   docker compose run --rm wilor python demo.py \
+#     --img_folder demo_img --out_folder /app/out --fast --save_mesh
+
+services:
+  wilor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wilor:cu124
+    container_name: wilor
+    restart: unless-stopped
+
+    # NVIDIA GPU runtime — needs nvidia-container-toolkit on the host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1            # set to "all" for multi-GPU
+              capabilities: [gpu]
+
+    # Web UI on :7860 (gradio default)
+    ports:
+      - "7860:7860"
+
+    volumes:
+      # MANO_RIGHT.pkl (mandatory — license-restricted, not in image)
+      - ./mano_data:/app/WiLoR/mano_data:ro
+      # Mount your own input images here
+      - ./input:/app/WiLoR/demo_img
+      # Mesh + visualization outputs land here
+      - ./output:/app/WiLoR/demo_out
+
+    environment:
+      # Make gradio listen on all interfaces inside the container
+      GRADIO_SERVER_NAME: 0.0.0.0
+      GRADIO_SERVER_PORT: 7860
+      # CUDA visible devices (default: first GPU)
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+      # Force EGL backend for pyrender (headless mesh visualization)
+      PYOPENGL_PLATFORM: egl
+
+    # tty + stdin_open let `docker compose exec wilor bash` work nicely
+    tty: true
+    stdin_open: true
