@@ -221,7 +221,7 @@ export class ScalewayClient extends AbstractGpuProvider {
       endpoint,
       ipAddress: ip || undefined,
       status: 'starting',
-      providerMeta: { zone, commercialType: usedType.type, pricePerHr: usedType.pricePerHr },
+      providerMeta: { provider: 'scaleway', zone, commercialType: usedType.type, pricePerHr: usedType.pricePerHr },
     };
   }
 
@@ -333,7 +333,7 @@ export class ScalewayClient extends AbstractGpuProvider {
       endpoint: ip ? `http://${ip}:8080` : '',
       ipAddress: ip || undefined,
       status: s.state,
-      providerMeta: { zone, commercialType: s.commercial_type, tags: s.tags },
+      providerMeta: { provider: 'scaleway', zone, commercialType: s.commercial_type, tags: s.tags },
     };
   }
 

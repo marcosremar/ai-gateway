@@ -41,7 +41,16 @@ export type BootResult = {
 
 export class BootOrchestrator {
   /** Active boot health pollers — key: "userId:tierIndex:timestamp" (unique per boot attempt) */
-  private bootPollers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * Active boot pollers keyed by `${userId}:${tierIndex}:${ts}`.
+   *
+   * Stored as `{ timer, cancelled }` (not just `timer`) so cancellation works
+   * even when a poll is mid-flight. Without the `cancelled` flag, an in-flight
+   * poll's promise can call `setTimeout(poll, ...)` AFTER clearTimeout has been
+   * called externally, resurrecting the poller under the same key. Each poll
+   * iteration checks `cancelled` before re-scheduling.
+   */
+  private bootPollers = new Map<string, { timer: ReturnType<typeof setTimeout>; cancelled: boolean }>();
 
   private readonly registry: GpuProviderRegistry;
   private readonly probeHealth: (endpoint: string) => Promise<boolean>;
@@ -68,7 +77,20 @@ export class BootOrchestrator {
     attempt = 0,
   ): Promise<BootResult> {
     if (attempt >= 2) return { ok: false, reason: 'Max retry attempts reached' };
-    if (!tierConfig.apiKey) return { ok: false, reason: 'API key não configurada' };
+
+    // Validate the tier config up front. Without this, missing/invalid fields
+    // surface as cryptic errors deep inside the provider client (e.g. "TypeError:
+    // Cannot read property 'length' of undefined" 3 minutes into a deploy).
+    const validationError = this._validateTierConfig(tierConfig, tierIndex);
+    if (validationError) {
+      this.logger.warn(`[autoscaler] tier ${tierIndex} config invalid: ${validationError}`);
+      this.callbacks.emitError({
+        operation: 'triggerGpuBoot:validate', provider: tierConfig.provider || 'unknown',
+        tierIndex, userId, message: validationError,
+        errorCode: 'INVALID_CONFIG', retryable: false,
+      });
+      return { ok: false, reason: validationError };
+    }
 
     const cfg = { ...tierConfig };
     let sshHost: string | undefined;
@@ -143,6 +165,20 @@ export class BootOrchestrator {
           }
 
           if (!discovered) {
+            // Emit boot_started BEFORE the create call. If the deploy fails
+            // after the pod is created (e.g., health never passes), cost-monitor
+            // can correlate boot_started with boot_failed to compute wasted $.
+            const bootStartedAt = Date.now();
+            void this.lifecycleLogger.log({
+              userId, tierIndex, provider: cfg.provider,
+              eventType: 'boot_started', trigger: 'autoscaler',
+              oldState: 'idle', newState: 'booting',
+              metadata: {
+                dockerImage: cfg.dockerImage,
+                gpuTypes: cfg.gpuTypes,
+                attempt,
+              },
+            });
             try {
               const created = await withStageTimeout(
                 client.createInstance(
@@ -218,14 +254,35 @@ export class BootOrchestrator {
         const isExpired = startMsg.includes('não pode ser iniciada') || startMsg.includes('slot');
         if (isGone || isExpired) {
           if (isExpired && cfg.instanceId) {
-            this.logger.warn(`[autoscaler] Instance ${cfg.instanceId} start failed (slot expired) — deleting and re-creating`);
+            this.logger.warn(`[autoscaler] Instance ${cfg.instanceId} start failed (slot expired) — deleting before retry`);
+            // Gate the retry on delete success: if delete fails, the old pod is
+            // still around accruing $$$, and recursing would create a SECOND pod
+            // alongside it. Better to bail out than orphan resources.
+            let deleteOk = false;
             try {
               await client.deleteInstance(cfg.instanceId, { apiKey: cfg.apiKey!, authId: cfg.authId });
+              deleteOk = true;
             } catch (delErr) {
-              this.logger.warn(`[autoscaler] Delete stale instance failed (non-fatal):`, delErr);
+              this.logger.error(`[autoscaler] ⚠ Delete stale instance ${cfg.instanceId} FAILED — refusing recursive retry to avoid orphan: ${delErr instanceof Error ? delErr.message : String(delErr)}`);
+              this.callbacks.emitError({
+                operation: 'triggerGpuBoot:deleteStale', provider: cfg.provider,
+                tierIndex, userId, instanceId: cfg.instanceId,
+                message: `Failed to delete expired-slot instance: ${delErr instanceof Error ? delErr.message : String(delErr)}`,
+                retryable: false,
+                metadata: { reason: 'refused-retry-to-prevent-orphan' },
+              });
+            }
+            if (!deleteOk) {
+              return { ok: false, reason: `${cfg.provider}: stale instance ${cfg.instanceId} could not be deleted (orphan risk)` };
             }
           } else {
             this.logger.warn(`[autoscaler] Instance ${cfg.instanceId} gone — retrying with auto-discover`);
+          }
+          // Cap recursion depth — even with successful delete, prevent infinite loop
+          const MAX_BOOT_RETRIES = parseInt(process.env.AUTOSCALER_BOOT_RETRY_MAX || '3', 10);
+          if (attempt + 1 > MAX_BOOT_RETRIES) {
+            this.logger.error(`[autoscaler] Boot retry depth exceeded (${MAX_BOOT_RETRIES}) for tier ${tierIndex}`);
+            return { ok: false, reason: `${cfg.provider}: max boot retries (${MAX_BOOT_RETRIES}) exceeded` };
           }
           return this.triggerGpuBoot(
             { ...tierConfig, instanceId: undefined, endpoint: undefined },
@@ -267,7 +324,29 @@ export class BootOrchestrator {
 
     this.cancelBootPollersByPrefix(`${userId}:${tierIndex}:`);
 
+    // Capture poller state object so cancellation propagates into in-flight polls.
+    // The poll function checks `pollerState.cancelled` before re-scheduling.
+    const pollerState = { timer: null as unknown as ReturnType<typeof setTimeout>, cancelled: false };
+
+    const reschedule = (intervalMs: number) => {
+      // Honor cancellation — if cancelled while a probe was in flight, do NOT
+      // re-register a new timer (which would resurrect the poller forever).
+      if (pollerState.cancelled) {
+        this.bootPollers.delete(key);
+        return;
+      }
+      const t = setTimeout(poll, intervalMs);
+      if (t.unref) t.unref();
+      pollerState.timer = t;
+      this.bootPollers.set(key, pollerState);
+    };
+
     const poll = () => {
+      // Check cancellation at the top of every iteration
+      if (pollerState.cancelled) {
+        this.bootPollers.delete(key);
+        return;
+      }
       const tierStates = this.callbacks.getStates(userId);
       const ts = tierStates?.[tierIndex];
 
@@ -350,9 +429,7 @@ export class BootOrchestrator {
           this.logger.log(`[boot-poller] Tier ${tierIndex} (${provider}) endpoint not yet available (${Math.round(elapsed / 1000)}s elapsed) — skipping probe`);
           pollCount++;
           const nextInterval = Math.min(POLL_INTERVAL_BASE_MS * Math.pow(1.5, pollCount - 1), POLL_INTERVAL_MAX_MS);
-          const timer = setTimeout(poll, nextInterval);
-          if (timer.unref) timer.unref();
-          this.bootPollers.set(key, timer);
+          reschedule(nextInterval);
           return 'skip';
         }
         return this.probeHealth(endpoint);
@@ -417,9 +494,7 @@ export class BootOrchestrator {
         pollCount++;
         const nextInterval = Math.min(POLL_INTERVAL_BASE_MS * Math.pow(1.5, pollCount - 1), POLL_INTERVAL_MAX_MS);
         this.logger.log(`[boot-poller] Tier ${tierIndex} (${provider}) not ready yet (${Math.round(elapsed / 1000)}s elapsed, next in ${Math.round(nextInterval / 1000)}s)`);
-        const timer = setTimeout(poll, nextInterval);
-        if (timer.unref) timer.unref();
-        this.bootPollers.set(key, timer);
+        reschedule(nextInterval);
       }).catch((err) => {
         this.logger.warn(`[boot-poller] Probe failed for tier ${tierIndex} (${provider}, instanceId=${booting.discoveredInstanceId || 'none'}): ${err instanceof Error ? err.message : String(err)}`);
         this.callbacks.emitError({
@@ -430,25 +505,51 @@ export class BootOrchestrator {
         });
         pollCount++;
         const nextInterval = Math.min(POLL_INTERVAL_BASE_MS * Math.pow(1.5, pollCount - 1), POLL_INTERVAL_MAX_MS);
-        const timer = setTimeout(poll, nextInterval);
-        if (timer.unref) timer.unref();
-        this.bootPollers.set(key, timer);
+        reschedule(nextInterval);
       });
     };
 
     const bootTimeSecs = this.registry.get(provider)?.bootTimeSecs ?? 120;
     const initialDelay = Math.min(Math.max(bootTimeSecs * 0.2 * 1000, 30_000), 180_000);
-    const timer = setTimeout(poll, initialDelay);
-    if (timer.unref) timer.unref();
-    this.bootPollers.set(key, timer);
+    reschedule(initialDelay);
     this.logger.log(`[boot-poller] Started polling tier ${tierIndex} (${provider}) with backoff (first in ${Math.round(initialDelay / 1000)}s, bootTimeSecs=${bootTimeSecs})`);
+  }
+
+  /**
+   * Validate a tier config. Returns null if valid, or a human-readable error
+   * message describing the first problem. Caller should treat as fail-fast —
+   * deploys should not proceed when this returns non-null.
+   */
+  private _validateTierConfig(cfg: GpuTierConfig, tierIndex: number): string | null {
+    if (!cfg) return `tier ${tierIndex}: config is null/undefined`;
+    if (!cfg.provider || typeof cfg.provider !== 'string') {
+      return `tier ${tierIndex}: provider is required (got ${typeof cfg.provider})`;
+    }
+    if (!cfg.apiKey) {
+      return `tier ${tierIndex} (${cfg.provider}): apiKey is required`;
+    }
+    // Allow tiers that resume an existing instance (instanceId set, no dockerImage)
+    if (!cfg.dockerImage && !cfg.instanceId) {
+      return `tier ${tierIndex} (${cfg.provider}): either dockerImage or instanceId must be set`;
+    }
+    if (cfg.dockerImage && typeof cfg.dockerImage !== 'string') {
+      return `tier ${tierIndex} (${cfg.provider}): dockerImage must be a string (got ${typeof cfg.dockerImage})`;
+    }
+    if (cfg.dockerImage && !/^[a-z0-9._/-]+(:[a-z0-9._-]+)?$/i.test(cfg.dockerImage)) {
+      return `tier ${tierIndex} (${cfg.provider}): dockerImage "${cfg.dockerImage}" doesn't look like a valid Docker image reference`;
+    }
+    if (cfg.gpuTypes && !Array.isArray(cfg.gpuTypes)) {
+      return `tier ${tierIndex} (${cfg.provider}): gpuTypes must be an array (got ${typeof cfg.gpuTypes})`;
+    }
+    return null;
   }
 
   /** Cancel all active boot health pollers matching a key prefix. */
   private cancelBootPollersByPrefix(prefix: string): void {
-    for (const [key, timer] of this.bootPollers) {
+    for (const [key, entry] of this.bootPollers) {
       if (key.startsWith(prefix)) {
-        clearTimeout(timer);
+        clearTimeout(entry.timer);
+        entry.cancelled = true;  // poison flag for in-flight polls
         this.bootPollers.delete(key);
       }
     }
@@ -458,9 +559,10 @@ export class BootOrchestrator {
   cancelBootPoller(userId: string, tierIndex: number): void {
     const prefix = `${userId}:${tierIndex}:`;
     let found = false;
-    for (const [key, timer] of this.bootPollers) {
+    for (const [key, entry] of this.bootPollers) {
       if (key.startsWith(prefix)) {
-        clearTimeout(timer);
+        clearTimeout(entry.timer);
+        entry.cancelled = true;
         this.bootPollers.delete(key);
         found = true;
       }
@@ -472,8 +574,9 @@ export class BootOrchestrator {
 
   /** Cancel all boot pollers. Call on gateway shutdown. */
   destroyAllPollers(): void {
-    for (const [, timer] of this.bootPollers) {
-      clearTimeout(timer);
+    for (const [, entry] of this.bootPollers) {
+      clearTimeout(entry.timer);
+      entry.cancelled = true;
     }
     this.bootPollers.clear();
   }
@@ -500,9 +603,15 @@ export class BootOrchestrator {
         if (!stateStillBooting && ok && instanceId) {
           this.logger.warn(`[autoscaler] Boot tier ${tierIndex} succeeded (instanceId=${instanceId}) but state was already ${current?.state ?? 'cleared'} — persisting instanceId for tracking`);
           if (this.onInstancePersist) {
-            void this.onInstancePersist(userId, `autoscaler_orphan_tier${tierIndex}`, {
+            // Structured key: `autoscaler_orphan:${provider}:${tierIndex}:${ts}`
+            // (was `autoscaler_orphan_tier${i}` — flat and unfilterable). The new
+            // format lets cost-monitor/cleanup queries filter by provider, age,
+            // or tier without scanning all keys and parsing.
+            const orphanKey = `autoscaler_orphan:${tierConfig.provider}:${tierIndex}:${bootTimestamp}`;
+            void this.onInstancePersist(userId, orphanKey, {
               instanceId, endpoint, provider: tierConfig.provider,
-              createdAt: bootTimestamp, orphanedBecause: 'state_reset_during_boot',
+              tierIndex, createdAt: bootTimestamp,
+              orphanedBecause: 'state_reset_during_boot',
             }).catch((err) => {
               this.logger.warn(`[autoscaler] Failed to persist orphaned instance ${instanceId}: ${err instanceof Error ? err.message : String(err)}`);
               this.callbacks.emitError({
@@ -544,6 +653,11 @@ export class BootOrchestrator {
           };
           currentStates[tierIndex] = newIdle;
           this.callbacks.setStates(userId, currentStates);
+          // Estimate wasted cost: durationMs of billing time × typical hourly rate.
+          // This is approximate (actual rate depends on GPU type) but gives a
+          // ballpark for cost-monitor dashboards and alerts.
+          const TYPICAL_RATE_PER_HR = 0.40; // ~$0.40/hr for RTX 4090 spot
+          const estimatedWasteCost = (durationMs / 3_600_000) * TYPICAL_RATE_PER_HR;
           void this.lifecycleLogger.log({
             userId, tierIndex, provider: tierConfig.provider,
             eventType: 'boot_failed', durationMs,
@@ -551,7 +665,7 @@ export class BootOrchestrator {
             endpoint: (current as BootingTierState).endpoint, trigger: (current as BootingTierState).trigger,
             oldState: 'booting', newState: 'idle',
             error: reason ?? 'unknown',
-            metadata: { failCount },
+            metadata: { failCount, estimatedWasteCost: +estimatedWasteCost.toFixed(4) },
           });
           return;
         }

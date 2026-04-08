@@ -130,7 +130,9 @@ export interface VastClientOptions extends AbstractGpuProviderOptions {}
 
 export class VastClient extends AbstractGpuProvider {
   readonly providerId = 'vast';
-  readonly bootTimeSecs = 600; // 10 min base — engine uses 2× (20 min) for large images
+  /** Vast.ai cold boot. 10 min base — engine uses 2× (20 min) for large images.
+   *  Override via env var VAST_BOOT_TIME_SECS for custom images. */
+  readonly bootTimeSecs = parseInt(process.env.VAST_BOOT_TIME_SECS || '600', 10);
   private _lastRequestMs = 0;
   /** IPs of hosts where we recently created instances (cross-call dedup). */
   private _recentlyUsedIps = new Set<string>();
@@ -188,6 +190,39 @@ export class VastClient extends AbstractGpuProvider {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Best-effort cleanup of an instance that failed during creation/setup.
+   *
+   * Why this exists: bare `try { deleteInstance(...) } catch {}` blocks were
+   * silently leaking instances when cleanup failed (e.g., API timeout, rate
+   * limit). Each leaked instance is a $0.30-1.00/hr bill running until manual
+   * intervention. This helper retries once and ALWAYS surfaces the failure
+   * via log + emitError + persistence event so cost-monitor can reconcile it.
+   */
+  private async _safeCleanupInstance(instanceId: string, apiKey: string, reason: string): Promise<void> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await this.deleteInstance(instanceId, { apiKey });
+        if (attempt > 0) this.log.log(`[vast] cleanup ${instanceId} succeeded on retry (reason: ${reason})`);
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (attempt === 0) await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+    // Cleanup failed after retry — instance is potentially orphaned and accruing cost.
+    // Log loudly so the orphan-detection sweep picks it up.
+    const errMsg = this.errMsg(lastErr);
+    this.log.error(`[vast] ⚠ ORPHAN RISK: failed to delete instance ${instanceId} (${reason}): ${errMsg}`);
+    this.emitError({
+      operation: 'cleanup',
+      instanceId,
+      message: `Failed to delete instance after ${reason}: ${errMsg}`,
+      retryable: false,
+    });
   }
 
   /**
@@ -254,6 +289,9 @@ export class VastClient extends AbstractGpuProvider {
   ): Promise<GpuInstance> {
     const { apiKey } = credentials;
     const headers = this.jsonHeaders(apiKey);
+
+    // ── Preflight: account balance check ──────────────────────────────────
+    await this._runPreflight(credentials);
 
     // ── 1. Auto-detect disk from Docker image if not specified ─────────────
     if (!spec.dockerImage) {
@@ -330,8 +368,8 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     // Filter by max price per hour if specified
-    if ((spec as any).maxPricePerHr) {
-      searchBody.dph_total = { lte: (spec as any).maxPricePerHr };
+    if (spec.maxPricePerHr) {
+      searchBody.dph_total = { lte: spec.maxPricePerHr };
     }
 
     let offers = await this._searchOffers(searchBody, headers);
@@ -444,7 +482,7 @@ export class VastClient extends AbstractGpuProvider {
     // others are torn down to avoid runaway costs.
     const offerFailures: Array<{ offerId: string; gpu: string; reason: string }> = [];
     const failuresMutex = { push: (f: typeof offerFailures[number]) => offerFailures.push(f) };
-    const raceCount = Math.max(1, Math.min(5, (spec as any).raceCount ?? 2));
+    const raceCount = Math.max(1, Math.min(5, spec.raceCount ?? 2));
     const offerPool = offers.slice(0, 10);
     const losers: Array<{ instanceId: string; contractId: string }> = [];
 
@@ -655,14 +693,19 @@ export class VastClient extends AbstractGpuProvider {
         const stillExists = await this._fetchInstanceDetail(contractId, headers);
         if (!stillExists || !stillExists.ip || ['exited', 'failed', 'destroyed', 'error', 'deleted'].includes(stillExists.status?.toLowerCase())) {
           const reason = 'instance vanished during startup (host reclaimed)';
+          // Best-effort fetch of pre-destroy logs for diagnostics. Host reclaims
+          // are the #1 Vast.ai failure mode and the logs are usually our only clue.
           try {
             const logs = await this.getInstanceLogs(instanceId, { apiKey }, 50);
             if (logs) this.log.warn(`[vast] Instance ${contractId} logs before destroy:\n${logs.substring(0, 500)}`);
-          } catch {}
+            else this.log.warn(`[vast] Instance ${contractId} returned null logs (likely already destroyed)`);
+          } catch (logErr) {
+            this.log.warn(`[vast] Instance ${contractId}: log fetch failed (${this.errMsg(logErr)}) — proceeding to cleanup`);
+          }
           this.log.warn(`[vast] Instance ${contractId} no longer exists (status=${stillExists?.status ?? 'gone'}) — ${reason}.`);
           const offerIp = String(offer.public_ipaddr ?? '');
           if (offerIp) this._markHostUnstable(offerIp);
-          try { await this.deleteInstance(instanceId, { apiKey }); } catch (delErr) { this.log.debug(`[vast] Cleanup of ${contractId} failed: ${this.errMsg(delErr)}`); }
+          await this._safeCleanupInstance(instanceId, apiKey, `host reclaim: ${reason}`);
           failures.push({ offerId, gpu: gpuName, reason });
           return null;
         }
@@ -690,7 +733,7 @@ export class VastClient extends AbstractGpuProvider {
               sshHost,
               sshPort,
               providerMeta: {
-                gpuType: gpuName,
+                provider: 'vast',
                 gpuVramGb: ((offer.gpu_ram as number) ?? 0) / 1024,
                 inetDown: offer.inet_down as number | undefined,
                 inetUp: offer.inet_up as number | undefined,
@@ -704,14 +747,14 @@ export class VastClient extends AbstractGpuProvider {
         } catch (tunnelErr) {
           this.log.warn(`[vast] SSH tunnel error for ${contractId}: ${this.errMsg(tunnelErr)}`);
         }
-        try { await this.deleteInstance(instanceId, { apiKey }); } catch {}
+        await this._safeCleanupInstance(instanceId, apiKey, 'SSH tunnel failed');
         failures.push({ offerId, gpu: gpuName, reason: 'SSH tunnel failed' });
         return null;
       }
 
       if (!endpoint) {
         this.log.warn(`[vast] Instance ${contractId} has no endpoint and no SSH — destroying...`);
-        try { await this.deleteInstance(instanceId, { apiKey }); } catch {}
+        await this._safeCleanupInstance(instanceId, apiKey, 'no endpoint, no SSH');
         failures.push({ offerId, gpu: gpuName, reason: 'no endpoint, no SSH' });
         return null;
       }
@@ -746,6 +789,7 @@ export class VastClient extends AbstractGpuProvider {
         sshHost,
         sshPort,
         providerMeta: {
+          provider: 'vast',
           hostIp: ip,
           reliability2: offer.reliability2 as number | undefined,
           inetDown: offer.inet_down as number | undefined,
@@ -1538,6 +1582,31 @@ export class VastClient extends AbstractGpuProvider {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Preflight: check Vast.ai account balance before deploy.
+   * Override of AbstractGpuProvider.preflight().
+   *
+   * Vast.ai requires positive credit to launch instances. Below ~$0.50 the
+   * smallest pods (~$0.30/hr) can't even start a 1-hour job.
+   */
+  async preflight(credentials: ProviderCredentials): Promise<{
+    canDeploy: boolean;
+    blockReason: string | null;
+    balance?: number;
+    quota?: number;
+  } | null> {
+    const result = await this.checkBalance(credentials);
+    if (!result) return null;  // API unreachable — proceed optimistically
+    if (result.balance < 0.5) {
+      return {
+        canDeploy: false,
+        blockReason: `Vast.ai balance too low: $${result.balance.toFixed(4)}. Add credit at console.vast.ai/billing.`,
+        balance: result.balance,
+      };
+    }
+    return { canDeploy: true, blockReason: null, balance: result.balance };
   }
 
   /**

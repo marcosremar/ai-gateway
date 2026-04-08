@@ -178,6 +178,67 @@ export abstract class AbstractGpuProvider implements GpuProviderClient {
 
   abstract discoverInstance(credentials: ProviderCredentials, gpuTypes: string[]): Promise<GpuInstance | null>;
   abstract createInstance(spec: InstanceSpec, credentials: ProviderCredentials, userId?: string): Promise<GpuInstance>;
+
+  /**
+   * Preflight account check — runs BEFORE attempting deploy to detect blocked
+   * accounts (zero quota, insufficient balance, expired credentials, etc.)
+   * and fail fast with a clear error.
+   *
+   * Why this matters: providers like RunPod silently accept pod creation
+   * requests even when the account is blocked, then never assign hardware.
+   * Without preflight, each blocked deploy burns 3+ minutes before timing out,
+   * which during multi-tier fallback compounds to ~10 minutes of dead air.
+   *
+   * Default impl is a no-op (always green) — concrete clients override with
+   * their own balance/quota query. Returning `canDeploy: false` causes
+   * createInstance to throw immediately with `blockReason`.
+   *
+   * Implementations MUST be cheap (single API call, < 5s) and MUST tolerate
+   * the API being unreachable (return `null` instead of throwing — gateway
+   * proceeds optimistically rather than blocking on transient errors).
+   */
+  async preflight(_credentials: ProviderCredentials): Promise<{
+    canDeploy: boolean;
+    blockReason: string | null;
+    balance?: number;
+    quota?: number;
+  } | null> {
+    return { canDeploy: true, blockReason: null };
+  }
+
+  /**
+   * Helper for concrete clients: call preflight() and throw if blocked.
+   * Use this at the top of createInstance() to fail fast on blocked accounts.
+   */
+  protected async _runPreflight(credentials: ProviderCredentials): Promise<void> {
+    let result: Awaited<ReturnType<typeof this.preflight>>;
+    try {
+      result = await this.preflight(credentials);
+    } catch (err) {
+      // Preflight should never throw — but if it does, treat as "unreachable"
+      // and proceed optimistically rather than hard-blocking.
+      this.log.warn(`[${this.providerId}] preflight threw (proceeding optimistically): ${this.errMsg(err)}`);
+      return;
+    }
+    if (result === null) {
+      // API unreachable — don't hard-fail. Provider might still work.
+      this.log.warn(`[${this.providerId}] preflight skipped (account API unreachable)`);
+      return;
+    }
+    const balanceStr = result.balance != null ? `$${result.balance.toFixed(2)}` : '?';
+    const quotaStr = result.quota != null ? String(result.quota) : '?';
+    this.log.log(`[${this.providerId}] preflight ok: balance=${balanceStr} quota=${quotaStr}`);
+    if (!result.canDeploy) {
+      const msg = result.blockReason || `${this.providerId} account blocked`;
+      this.log.warn(`[${this.providerId}] PREFLIGHT BLOCKED: ${msg}`);
+      this.emitError({
+        operation: 'createInstance',
+        message: msg,
+        retryable: false,
+      });
+      throw new Error(`${this.providerId} preflight blocked: ${msg}`);
+    }
+  }
   abstract startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void>;
   abstract stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void>;
   abstract deleteInstance(instanceId: string, credentials: ProviderCredentials): Promise<void>;

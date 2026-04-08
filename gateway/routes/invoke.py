@@ -44,7 +44,7 @@ async def invoke_function(app_name: str, fn_name: str, body: InvokeRequest) -> I
         spec = app.spec
         fn_spec = spec.get("functions", {}).get(fn_name)
         cls_spec = None
-        if fn_spec is None:
+        if not fn_spec:
             # Check if it's a class method
             for cls_name, cls_data in spec.get("classes", {}).items():
                 if fn_name in cls_data.get("methods", []):

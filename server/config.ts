@@ -31,6 +31,7 @@ export const DOCKER_IMAGE_NAMES = [
   `${IMAGE_PREFIX}/babelcast-mistral`,
   `${IMAGE_PREFIX}/babelcast-groq`,
   `${IMAGE_PREFIX}/babelcast-qwen3-tts`,
+  `${IMAGE_PREFIX}/hybrik-x`,
 ] as const;
 
 // ── GPU × Image compatibility ────────────────────────────────────────────────

@@ -8,6 +8,7 @@
 
 export type DeployPhase =
   | { phase: 'idle' }
+  | { phase: 'stopped'; podId: string; provider: string; gpuType: string; costPerHr: number; stoppedAt: number; dockerImage: string }
   | { phase: 'deploying'; startedAt: number; podId?: string }
   | { phase: 'booting'; startedAt: number; podId: string }
   | { phase: 'ready'; podId: string; endpoint: string; gpuType: string; costPerHr: number; readyAt: number }
@@ -22,6 +23,7 @@ export class DeploymentStateMachine {
   get state(): DeployPhase { return this._state; }
   get phase(): string { return this._state.phase; }
   get isIdle(): boolean { return this._state.phase === 'idle'; }
+  get isStopped(): boolean { return this._state.phase === 'stopped'; }
   get isDeploying(): boolean { return this._state.phase === 'deploying' || this._state.phase === 'booting'; }
   get isReady(): boolean { return this._state.phase === 'ready'; }
   get endpoint(): string | null {
@@ -32,8 +34,12 @@ export class DeploymentStateMachine {
     this._handlers.push(handler);
   }
 
+  markStopped(podId: string, provider: string, gpuType: string, costPerHr: number, dockerImage: string): void {
+    this._transition({ phase: 'stopped', podId, provider, gpuType, costPerHr, stoppedAt: Date.now(), dockerImage });
+  }
+
   startDeploying(podId?: string): void {
-    if (this._state.phase !== 'idle' && this._state.phase !== 'error') {
+    if (this._state.phase !== 'idle' && this._state.phase !== 'error' && this._state.phase !== 'stopped') {
       console.warn(`[deploy-sm] Invalid transition ${this._state.phase} → deploying`);
     }
     this._transition({ phase: 'deploying', startedAt: Date.now(), podId });
@@ -67,6 +73,7 @@ export class DeploymentStateMachine {
   toJSON(): Record<string, unknown> {
     const s = this._state;
     const base = { phase: s.phase };
+    if (s.phase === 'stopped') return { ...base, podId: s.podId, provider: s.provider, gpuType: s.gpuType, costPerHr: s.costPerHr, stoppedAt: s.stoppedAt, dockerImage: s.dockerImage };
     if (s.phase === 'deploying') return { ...base, startedAt: s.startedAt, podId: s.podId };
     if (s.phase === 'booting') return { ...base, startedAt: s.startedAt, podId: s.podId };
     if (s.phase === 'ready') return { ...base, podId: s.podId, endpoint: s.endpoint, gpuType: s.gpuType, costPerHr: s.costPerHr };

@@ -51,11 +51,35 @@ export function scheduleReconcile(
  * skip clearing it, even if the provider API can't find the instance.
  * This prevents a race where reconcile clears an entry that the engine
  * just persisted during boot, before the provider API reflects it.
+ *
+ * Falls back to `createdAt` if `persistedAt` is missing — legacy entries
+ * persisted before this field was added still get a sensible grace window.
  */
 function isWithinGracePeriod(machine: Record<string, unknown>): boolean {
-  const persistedAt = machine.persistedAt as number | undefined;
+  const persistedAt = (machine.persistedAt as number | undefined)
+    ?? (machine.createdAt as number | undefined);
   if (!persistedAt) return false;
   return Date.now() - persistedAt < PERSIST_GRACE_MS;
+}
+
+/**
+ * Wrap a getInstanceStatus call to distinguish "definitely not found" (returns null
+ * from a successful API call) from "could not check" (network error, timeout, 5xx).
+ *
+ * Why this matters: previously the code did `.catch(() => null)` which conflated
+ * "API said pod is gone" with "I couldn't reach the API". On a transient API error,
+ * reconcile would clear the DB entry — but the pod might still be running on the
+ * provider, accruing $$$. This wrapper returns 'TRANSIENT_ERROR' on caught errors
+ * so the caller can keep the entry instead of deleting it.
+ */
+async function safeStatusCheck(
+  fn: () => Promise<string | null>,
+): Promise<string | null | 'TRANSIENT_ERROR'> {
+  try {
+    return await fn();
+  } catch {
+    return 'TRANSIENT_ERROR';
+  }
 }
 
 async function reconcileStaleConfigs(deps: ReconcileDeps, userId: string): Promise<void> {
@@ -84,7 +108,11 @@ async function reconcileStaleConfigs(deps: ReconcileDeps, userId: string): Promi
       const client = registry.get('runpod');
       if (!client) { patch[key] = null; changed = true; continue; }
 
-      const status = await client.getInstanceStatus(podId, { apiKey: runpodApiKey }).catch(() => null);
+      const status = await safeStatusCheck(() => client.getInstanceStatus(podId, { apiKey: runpodApiKey }));
+      if (status === 'TRANSIENT_ERROR') {
+        log.warn(`[autoscaler] Auto-reconcile: ${key} (podId=${podId}) status check failed (transient) — keeping entry`);
+        continue;
+      }
       if (status === null) {
         if (isWithinGracePeriod(machine)) {
           log.log(`[autoscaler] Auto-reconcile: skipping ${key} (podId=${podId}) — within grace period`);
@@ -106,9 +134,13 @@ async function reconcileStaleConfigs(deps: ReconcileDeps, userId: string): Promi
       const client = registry.get('tensordock');
       if (!client) { patch[key] = null; changed = true; continue; }
 
-      const status = await client
-        .getInstanceStatus(instanceId, { apiKey: tensordockApiKey, authId: tensordockAuthId })
-        .catch(() => null);
+      const status = await safeStatusCheck(() =>
+        client.getInstanceStatus(instanceId, { apiKey: tensordockApiKey, authId: tensordockAuthId })
+      );
+      if (status === 'TRANSIENT_ERROR') {
+        log.warn(`[autoscaler] Auto-reconcile: ${key} (instanceId=${instanceId}) status check failed (transient) — keeping entry`);
+        continue;
+      }
       if (status === null) {
         if (isWithinGracePeriod(machine)) {
           log.log(`[autoscaler] Auto-reconcile: skipping ${key} (instanceId=${instanceId}) — within grace period`);
@@ -130,9 +162,11 @@ async function reconcileStaleConfigs(deps: ReconcileDeps, userId: string): Promi
       const client = registry.get('vast');
       if (!client) { patch[key] = null; changed = true; continue; }
 
-      const status = await client
-        .getInstanceStatus(instanceId, { apiKey: vastApiKey })
-        .catch(() => null);
+      const status = await safeStatusCheck(() => client.getInstanceStatus(instanceId, { apiKey: vastApiKey }));
+      if (status === 'TRANSIENT_ERROR') {
+        log.warn(`[autoscaler] Auto-reconcile: ${key} (instanceId=${instanceId}) status check failed (transient) — keeping entry`);
+        continue;
+      }
       if (status === null) {
         if (isWithinGracePeriod(machine)) {
           log.log(`[autoscaler] Auto-reconcile: skipping ${key} (instanceId=${instanceId}) — within grace period`);

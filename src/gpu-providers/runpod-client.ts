@@ -78,8 +78,9 @@ export interface RunpodClientOptions extends AbstractGpuProviderOptions {}
 
 export class RunpodClient extends AbstractGpuProvider {
   readonly providerId = 'runpod';
-  /** First cold boot can take 10-20 min (image pull + model download). Max wait = 2x = 40 min. */
-  readonly bootTimeSecs = 1200;
+  /** First cold boot can take 10-20 min (image pull + model download). Max wait = 2x = 40 min.
+   *  Override via env var RUNPOD_BOOT_TIME_SECS for custom images with different boot profiles. */
+  readonly bootTimeSecs = parseInt(process.env.RUNPOD_BOOT_TIME_SECS || '1200', 10);
 
   private static readonly API_BASE = process.env.RUNPOD_API_BASE || 'https://rest.runpod.io/v1';
 
@@ -488,6 +489,9 @@ export class RunpodClient extends AbstractGpuProvider {
     const { apiKey, hfToken } = credentials;
     const podName = `parle-autoscale-${Date.now()}`;
 
+    // ── Preflight: account quota / balance check ──────────────────────────
+    await this._runPreflight(credentials);
+
     // Build env vars: base defaults + auto-detected keys + explicit overrides
     // NOTE: Do NOT set TORCHINDUCTOR_CUDAGRAPH_TREES=0 — faster-qwen3-tts depends on CUDA
     // graph trees for real-time inference and breaks when they are disabled.
@@ -846,6 +850,97 @@ export class RunpodClient extends AbstractGpuProvider {
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`RunPod delete failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+    }
+  }
+
+  /**
+   * Preflight: check RunPod account quota + balance before deploy.
+   * Override of AbstractGpuProvider.preflight().
+   */
+  async preflight(credentials: ProviderCredentials): Promise<{
+    canDeploy: boolean;
+    blockReason: string | null;
+    balance?: number;
+    quota?: number;
+  } | null> {
+    const account = await this.getAccountStatus(credentials);
+    if (!account) return null;  // GraphQL unreachable — let _runPreflight() proceed optimistically
+    return {
+      canDeploy: account.canDeploy,
+      blockReason: account.blockReason,
+      balance: account.clientBalance,
+      quota: account.machineQuota,
+    };
+  }
+
+  /**
+   * Query RunPod account state via the GraphQL `myself` endpoint.
+   * Returns quota / balance / pod count so we can detect "RunPod blocked the
+   * account" issues *before* burning a 3-minute deploy attempt on an
+   * impossible-to-fulfill request.
+   *
+   * Common failure mode: `machineQuota === 0` means RunPod has frozen the
+   * account from creating new GPU pods (typical after rapid create/destroy
+   * loops, low balance, or KYC flag). In that state the REST API still
+   * accepts `POST /pods` but never assigns a physical machine — the gateway
+   * sees this as a "ghost machine" symptom, but the real cause is the quota.
+   */
+  async getAccountStatus(credentials: ProviderCredentials): Promise<{
+    email: string | null;
+    machineQuota: number;
+    clientBalance: number;
+    currentSpendPerHr: number;
+    activePodCount: number;
+    canDeploy: boolean;
+    blockReason: string | null;
+  } | null> {
+    const { apiKey } = credentials;
+    try {
+      const res = await this._fetchWithRetry('https://api.runpod.io/graphql', {
+        method: 'POST',
+        headers: { ...this.authHeaders(apiKey), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: 'query { myself { id email currentSpendPerHr machineQuota clientBalance pods { id desiredStatus } } }',
+        }),
+      }, TIMEOUTS.read);
+      if (!res.ok) {
+        this.log.warn(`[runpod] getAccountStatus HTTP ${res.status}`);
+        return null;
+      }
+      const data = (await res.json()) as { data?: { myself?: Record<string, unknown> }; errors?: unknown };
+      const me = data.data?.myself;
+      if (!me) {
+        this.log.warn(`[runpod] getAccountStatus: empty response ${JSON.stringify(data).slice(0, 200)}`);
+        return null;
+      }
+      const machineQuota = Number(me.machineQuota ?? 0);
+      const clientBalance = Number(me.clientBalance ?? 0);
+      const currentSpendPerHr = Number(me.currentSpendPerHr ?? 0);
+      const pods = Array.isArray(me.pods) ? (me.pods as Array<{ desiredStatus?: string }>) : [];
+      const activePodCount = pods.length;
+
+      let canDeploy = true;
+      let blockReason: string | null = null;
+      if (machineQuota === 0) {
+        canDeploy = false;
+        blockReason = `RunPod machine quota is 0 — account blocked from creating GPUs (balance=$${clientBalance.toFixed(2)}, ${activePodCount} active pods). Likely causes: rapid create/destroy loop triggered abuse flag, low balance, or KYC pending. Fix: contact RunPod support, add credit, or wait ~24h.`;
+      } else if (clientBalance < 0.5) {
+        canDeploy = false;
+        blockReason = `RunPod balance too low: $${clientBalance.toFixed(4)}. Add credit at runpod.io/console/billing.`;
+      }
+
+      return {
+        email: (me.email as string) ?? null,
+        machineQuota,
+        clientBalance,
+        currentSpendPerHr,
+        activePodCount,
+        canDeploy,
+        blockReason,
+      };
+    } catch (err) {
+      this.log.warn(`[runpod] getAccountStatus failed: ${this.errMsg(err)}`);
+      return null;
     }
   }
 

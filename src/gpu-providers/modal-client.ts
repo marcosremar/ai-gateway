@@ -95,7 +95,9 @@ export interface ModalClientOptions extends AbstractGpuProviderOptions {
 
 export class ModalClient extends AbstractGpuProvider {
   readonly providerId = 'modal';
-  readonly bootTimeSecs = 10; // With GPU snapshots + min_containers, cold start is ~5-10s
+  /** Modal cold boot. With GPU snapshots + min_containers, ~5-10s.
+   *  Override via env var MODAL_BOOT_TIME_SECS for slower images. */
+  readonly bootTimeSecs = parseInt(process.env.MODAL_BOOT_TIME_SECS || '10', 10);
 
   private workspace: string | null;
   private defaultFunctionName: string;

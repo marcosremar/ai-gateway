@@ -5,6 +5,103 @@ export interface ProviderCredentials {
   hfToken?: string;
 }
 
+// ── Provider-specific metadata interfaces ──────────────────────────────────
+// Each provider returns a different shape from createInstance(); typing them
+// concretely lets host apps narrow on `meta.provider` and access fields safely
+// without `as any` casts or string-key indexing.
+
+// Each interface includes `[key: string]: unknown` so it remains assignable to
+// `Record<string, unknown>` (used by legacy host-app code that hasn't migrated
+// to the discriminated union yet). New code should narrow on `meta.provider`.
+
+export interface RunpodProviderMeta {
+  provider: 'runpod';
+  /** RunPod GPU type (e.g. "NVIDIA GeForce RTX 4090") */
+  gpuType?: string;
+  gpuVramGb?: number;
+  costPerHr?: number;
+  dataCenterId?: string;
+  cloudType?: 'COMMUNITY' | 'SECURE';
+  [key: string]: unknown;
+}
+
+export interface VastProviderMeta {
+  provider: 'vast';
+  hostIp?: string;
+  reliability2?: number;
+  inetDown?: number;
+  inetUp?: number;
+  dphTotal?: number;
+  region?: string;
+  cpuName?: string;
+  cpuCores?: number;
+  ramGb?: number;
+  gpuVramGb?: number;
+  numGpus?: number;
+  diskGb?: number;
+  diskReadMbps?: number;
+  diskWriteMbps?: number;
+  pcieBw?: number;
+  cudaVersion?: number;
+  /** SSH tunnel was used (no direct ports) */
+  sshTunnel?: boolean;
+  /** Hint that this offer was an SSH-only host */
+  sshOnlyHint?: boolean;
+  [key: string]: unknown;
+}
+
+export interface TensordockProviderMeta {
+  provider: 'tensordock';
+  hostnodeId?: string;
+  /** Location tier: 0=residential, 3-4=data center */
+  tier?: number;
+  uptimePct?: number;
+  city?: string;
+  pricePerHr?: number;
+  cpuCores?: number;
+  ramGb?: number;
+  [key: string]: unknown;
+}
+
+export interface ModalProviderMeta {
+  provider: 'modal';
+  appName?: string;
+  region?: string;
+  [key: string]: unknown;
+}
+
+export interface FlyioProviderMeta {
+  provider: 'flyio';
+  costPerHr?: number;
+  createdAt?: string;
+  [key: string]: unknown;
+}
+
+export interface ScalewayProviderMeta {
+  provider: 'scaleway';
+  zone?: string;
+  commercialType?: string;
+  pricePerHr?: number;
+  tags?: string[];
+  [key: string]: unknown;
+}
+
+/** Generic fallback metadata for providers that haven't been explicitly typed yet. */
+export interface GenericProviderMeta {
+  provider: string;
+  [key: string]: unknown;
+}
+
+/** Union of all provider-specific metadata shapes. Discriminate on `.provider`. */
+export type ProviderMeta =
+  | RunpodProviderMeta
+  | VastProviderMeta
+  | TensordockProviderMeta
+  | ModalProviderMeta
+  | FlyioProviderMeta
+  | ScalewayProviderMeta
+  | GenericProviderMeta;
+
 export interface GpuInstance {
   instanceId: string;
   instanceName?: string;
@@ -18,8 +115,8 @@ export interface GpuInstance {
   sshHost?: string;
   /** SSH port for fallback health checks */
   sshPort?: number;
-  /** Provider-specific metadata for host reputation tracking */
-  providerMeta?: Record<string, unknown>;
+  /** Provider-specific metadata. Discriminated union — narrow on `meta.provider`. */
+  providerMeta?: ProviderMeta;
 }
 
 export interface InstanceSpec {
@@ -66,6 +163,11 @@ export interface InstanceSpec {
   volumeId?: string;
   /** Extra search filters passed to the provider API (e.g. Vast.ai { direct_port_count: { gte: 1 } }) */
   extraSearch?: Record<string, unknown>;
+  /** Vast.ai-only: cap on hourly price for offer search. Filters out offers above this dph_total. */
+  maxPricePerHr?: number;
+  /** Vast.ai-only: number of parallel deploy attempts (race). Default 2, max 5.
+   *  Useful because Vast.ai hosts often reclaim/fail mid-boot — racing N hosts increases success rate. */
+  raceCount?: number;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────

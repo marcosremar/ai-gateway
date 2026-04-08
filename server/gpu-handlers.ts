@@ -32,7 +32,7 @@ import {
   startGpuMonitoring, stopGpuMonitoring, startDeployWithTiers, startDeployRace, buildGpuTiers, cooldownTracker,
   cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps,
   autoSelectCheapestGpu, fetchGpuLogs, getVerifiedGpuTypes, validateGpuTypesFromCache,
-  IDLE_TIMEOUT_MS, POD_NAME_PREFIX, clearAutoDestroyTimer,
+  IDLE_TIMEOUT_MS, POD_NAME_PREFIX, clearAutoDestroyTimer, resumeOrDeploy,
 } from './gpu-deploy';
 import { logGpuEvent, updateDeploySession, computePercentile, upsertHostReputation, getAllReputations } from './metrics';
 import {
@@ -448,7 +448,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   setRequestIdHeader(res, requestId);
 
   // If a deploy is already in progress (creating/booting/installing), cancel it first for redeploy
-  if (deployState.status !== 'idle' && deployState.status !== 'error' && deployState.status !== 'ready') {
+  if (deployState.status !== 'idle' && deployState.status !== 'stopped' && deployState.status !== 'error' && deployState.status !== 'ready') {
     console.log(`[req=${requestId}] Cancelling in-progress deploy (status=${deployState.status}) for redeploy`);
     setDeployCancelled(true);
     stopGpuMonitoring();
@@ -1140,14 +1140,17 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
     await client.stopInstance(podId, credentials);
     stopGpuMonitoring();
     updateTranslationProfile({ gpuEndpoint: undefined }, 'handleGpuStop');
+    // Transition to 'stopped' — preserves pod info for fast resume
+    const gpuType = deployState.gpuType;
+    const costPerHr = deployState.costPerHr;
+    const dockerImage = deployState.dockerImage;
+    deploymentSM.markStopped(podId, provider, gpuType, costPerHr, dockerImage);
     setDeployState({
-      status: 'idle',
+      status: 'stopped',
       message: `Pod ${podId} stopped (paused). Use POST /v1/gpu/resume to restart.`,
-      // Preserve podId, provider, gpuType, costPerHr so resume knows what to restart
+      podId,
+      provider,
     });
-    // Keep podId in state so resume can find it
-    deployState.podId = podId;
-    deployState.provider = provider;
 
     console.log(`[req=${requestId}] Pod ${podId} stopped on ${provider} (was ${prevStatus})`);
     logGpuEvent('instance_stopped', 'manual', true, { metadata: { reason: 'manual_stop', provider } });
@@ -1178,72 +1181,39 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   try { body = await readJsonBody(req); }
   catch { /* empty body is fine */ }
 
-  const podId = (body.podId as string) || deployState.podId;
-  const provider: ProviderName = (body.provider as ProviderName) || deployState.provider || 'runpod';
+  // Allow explicit podId/provider override from body (backward compat)
+  if (body.podId) {
+    deployState.podId = body.podId as string;
+    if (body.provider) deployState.provider = body.provider as ProviderName;
+  }
 
-  if (!podId) {
+  if (!deployState.podId) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'No pod to resume. Provide { podId } or stop a pod first.' }));
     return;
   }
 
-  let client: GpuProviderClient | null = null;
-  let credentials: ProviderCredentials = { apiKey: '' };
-
-  if (provider === 'runpod' && (deployApiKey || process.env.RUNPOD_API_KEY)) {
-    client = runpod;
-    credentials = { apiKey: deployApiKey || process.env.RUNPOD_API_KEY || '' };
-  } else if (provider === 'vast' && (deployVastApiKey || process.env.VAST_API_KEY)) {
-    client = vast;
-    credentials = { apiKey: deployVastApiKey || process.env.VAST_API_KEY || '' };
-  } else if (provider === 'tensordock' && (deployTensordockApiKey || process.env.TENSORDOCK_API_KEY)) {
-    client = tensordock;
-    credentials = { apiKey: deployTensordockApiKey || process.env.TENSORDOCK_API_KEY || '', authId: deployTensordockAuthId || process.env.TENSORDOCK_AUTH_ID || '' };
-  }
-
-  if (!client) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: `Cannot resume: no credentials for provider "${provider}"` }));
-    return;
-  }
-
   try {
-    clearAutoDestroyTimer(); // Cancel pending auto-destroy
-    await client.startInstance(podId, credentials);
-
-    // Resolve endpoint for the restarted pod
-    let endpoint = '';
-    try {
-      const resolved = await client.resolveInstanceEndpoint?.(podId, credentials);
-      if (resolved) endpoint = resolved;
-    } catch { /* endpoint will be resolved during boot monitoring */ }
-
-    if (!endpoint) {
-      // Fallback: construct proxy URL for RunPod
-      if (provider === 'runpod') endpoint = `https://${podId}-8000.proxy.runpod.net`;
-    }
-
-    setDeployState({
-      status: 'booting',
-      podId,
-      endpoint,
-      provider,
-      message: `Pod ${podId} resuming on ${provider}...`,
-      step: 'waiting_health',
-    });
-    deploymentSM.startBooting(podId);
-    startGpuMonitoring();
-
-    console.log(`[req=${requestId}] Pod ${podId} resume initiated on ${provider} → ${endpoint}`);
-    logGpuEvent('instance_resumed', 'manual', true, { metadata: { reason: 'manual_resume', provider } });
+    // resumeOrDeploy: tries resume first, falls back to fresh deploy if
+    // the host was reclaimed / pod was GC'd / any other error.
+    const result = await resumeOrDeploy({ reason: 'manual', requestId });
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, podId, provider, endpoint, message: 'Pod resume initiated. Poll /v1/gpu/status for readiness.' }));
+    res.end(JSON.stringify({
+      ok: true,
+      method: result.method, // 'resumed' or 'fresh_deploy'
+      podId: result.podId,
+      provider: result.provider,
+      message: result.method === 'resumed'
+        ? 'Pod resumed. Poll /v1/gpu/status for readiness.'
+        : 'Resume failed — fresh deploy started. Poll /v1/gpu/status for readiness.',
+    }));
   } catch (err) {
+    // Both resume AND fallback deploy failed
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[req=${requestId}] GPU resume failed: ${msg}`);
+    console.error(`[req=${requestId}] GPU resume + fallback deploy failed: ${msg}`);
     res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: `Resume failed: ${msg}` }));
+    res.end(JSON.stringify({ error: `Resume and fallback deploy both failed: ${msg}` }));
   }
 }
 
@@ -1479,6 +1449,8 @@ export async function handleHealth(_req: IncomingMessage, res: ServerResponse): 
     };
   } else if (deployState.status === 'idle') {
     components.gpu = { status: 'idle' };
+  } else if (deployState.status === 'stopped') {
+    components.gpu = { status: 'stopped', podId: deployState.podId, provider: deployState.provider };
   } else {
     components.gpu = { status: deployState.status, step: deployState.step };
   }
