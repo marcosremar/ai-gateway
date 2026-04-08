@@ -40,6 +40,18 @@ export type {
 export { noopLifecycleLogger } from './lifecycle-logger';
 export type { GpuLifecycleLogger, GpuLifecycleLogEntry } from './lifecycle-logger';
 
+// ── File-based Lifecycle Logger (persistent JSONL — default) ─────────────
+export {
+  fileLifecycleLogger,
+  logGpuEvent,
+  readRecentLogs,
+  GPU_LIFECYCLE_LOG_PATH,
+} from './file-lifecycle-logger';
+
+// ── GPU Sweep (discover ALL instances across ALL providers) ──────────────
+export { sweepAllProviders, printSweepReport } from './gpu-sweep';
+export type { SweepInstance, SweepReport } from './gpu-sweep';
+
 // ── Tier Lifecycle ────────────────────────────────────────────────────────
 export type { TierActionResult, TierDetail } from './tier-lifecycle';
 
