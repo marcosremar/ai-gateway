@@ -23,6 +23,11 @@ describe('RunpodClient', () => {
   let client: RunpodClient;
   let fetchSpy: ReturnType<typeof vi.fn>;
 
+  /** Mock the preflight GraphQL call that createInstance now does before POST /pods. */
+  const mockPreflight = () => mockFetchResponse({
+    data: { myself: { id: '1', email: 'test@test.com', machineQuota: 10, clientBalance: 100, currentSpendPerHr: 0, pods: [] } },
+  });
+
   beforeEach(() => {
     client = new RunpodClient();
     fetchSpy = vi.fn();
@@ -150,33 +155,40 @@ describe('RunpodClient', () => {
   describe('createInstance', () => {
     const baseSpec: InstanceSpec = { gpuTypes: [], dockerImage: 'test/image:latest' };
 
+    // NOTE: createInstance now calls _runPreflight() (GraphQL account check)
+    // before POST /pods. Every createInstance test must mock the preflight
+    // response first, then the actual pod create response.
+
     it('uses GPU_FALLBACK when no gpuTypes specified', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'new-pod' }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())          // preflight
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'new-pod' }));
 
       await client.createInstance(baseSpec, creds);
 
-      const call = fetchSpy.mock.calls[0];
+      // calls[0] = preflight GraphQL, calls[1] = POST /pods
+      const call = fetchSpy.mock.calls[1];
       const body = JSON.parse(call[1].body);
-      // Should try the first GPU type from fallback list (NVIDIA RTX A5000 is first)
       expect(body.gpuTypeIds).toEqual([RUNPOD_GPU_FALLBACK[0]]);
     });
 
     it('maps short GPU names to full RunPod names', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'new-pod' }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'new-pod' }));
 
       await client.createInstance({ gpuTypes: ['RTX 3090'], dockerImage: 'test/image:latest' }, creds);
 
-      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-      // RTX 3090 maps directly to NVIDIA GeForce RTX 3090
+      const body = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(body.gpuTypeIds).toEqual(['NVIDIA GeForce RTX 3090']);
     });
 
     it('falls back to next GPU on "no instances" error', async () => {
       fetchSpy
-        .mockResolvedValueOnce(mockFetchText('no instances available', 400))     // RTX 4090 create → error
-        .mockResolvedValueOnce(mockFetchResponse({ id: 'pod-fallback' }))         // RTX A5000 create → success
-        // Ghost detection: post-create poll returns pod with machine assigned (not a ghost)
-        .mockResolvedValueOnce(mockFetchResponse({ machine: { id: 'machine-1' }, runtime: null }));
+        .mockResolvedValueOnce(mockPreflight())                                    // preflight
+        .mockResolvedValueOnce(mockFetchText('no instances available', 400))        // RTX 4090 → error
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'pod-fallback' }))           // RTX A5000 → success
+        .mockResolvedValueOnce(mockFetchResponse({ machine: { id: 'machine-1' }, runtime: null })); // ghost check
 
       const result = await client.createInstance(
         { gpuTypes: ['RTX 4090', 'RTX A5000'], dockerImage: 'test/image:latest' },
@@ -184,11 +196,13 @@ describe('RunpodClient', () => {
       );
 
       expect(result.instanceId).toBe('pod-fallback');
-      expect(fetchSpy).toHaveBeenCalledTimes(3); // create×2 + ghost-check×1
+      expect(fetchSpy).toHaveBeenCalledTimes(4); // preflight + create×2 + ghost-check×1
     });
 
     it('throws when all GPU types exhausted', async () => {
-      fetchSpy.mockResolvedValue(mockFetchText('no instances', 400));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValue(mockFetchText('no instances', 400));
 
       await expect(
         client.createInstance({ gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest' }, creds),
@@ -199,7 +213,9 @@ describe('RunpodClient', () => {
       const onPersist = vi.fn().mockResolvedValue(undefined);
       const clientWithPersist = new RunpodClient({ onInstancePersist: onPersist });
       vi.stubGlobal('fetch', fetchSpy);
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'pod-persist' }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'pod-persist' }));
 
       await clientWithPersist.createInstance(baseSpec, creds, 'user-1');
 
@@ -210,58 +226,66 @@ describe('RunpodClient', () => {
     });
 
     it('storageGb=0 skips volume and dockerStartCmd', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'light-pod' }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'light-pod' }));
 
       await client.createInstance({ gpuTypes: ['RTX 4090'], storageGb: 0, dockerImage: 'test/image:latest' }, creds);
 
-      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      // calls[0] = preflight, calls[1] = POST /pods
+      const body = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(body.volumeInGb).toBe(0);
       expect(body.volumeMountPath).toBeUndefined();
       expect(body.dockerStartCmd).toBeUndefined();
-      // containerDiskInGb = max(estimateImageDiskGb(), 10) — auto-detected from image
       expect(body.containerDiskInGb).toBeGreaterThanOrEqual(10);
     });
 
     it('storageGb>0 adds volume and mounts at /workspace', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'full-pod' }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'full-pod' }));
 
       await client.createInstance({ gpuTypes: ['RTX 4090'], storageGb: 50, dockerImage: 'test/image:latest' }, creds);
 
-      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-      // volumeInGb and containerDiskInGb are floored by getMinDiskGb() (default 100)
+      const body = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(body.volumeInGb).toBeGreaterThanOrEqual(50);
       expect(body.volumeMountPath).toBe('/workspace');
-      // dockerStartCmd is NOT set — image's own CMD runs unmodified
       expect(body.containerDiskInGb).toBeGreaterThanOrEqual(50);
     });
 
     it('injects HF_TOKEN from credentials', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'hf-pod' }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'hf-pod' }));
 
       await client.createInstance(baseSpec, credsWithHf);
 
-      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const body = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(body.env.HF_TOKEN).toBe('hf_test_token');
     });
 
     it('injects spec.env overrides', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'env-pod' }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'env-pod' }));
 
       await client.createInstance(
         { gpuTypes: ['RTX 4090'], env: { CUSTOM_VAR: 'custom_val' }, dockerImage: 'test/image:latest' },
         creds,
       );
 
-      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const body = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(body.env.CUSTOM_VAR).toBe('custom_val');
     });
 
     it('uses correct ports: 8000/http + 22/tcp', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ id: 'port-pod' }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'port-pod' }));
 
       await client.createInstance(baseSpec, creds);
 
-      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const body = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(body.ports).toContain('8000/http');
       expect(body.ports).toContain('22/tcp');
     });
