@@ -397,6 +397,47 @@ RUN python3 -c "from huggingface_hub import snapshot_download; \
 
 **Benchmark script:** `scripts/model-download-bench/` has the tooling to validate download strategies on new hosts. Run `vast-benchmark.sh` to re-measure if HF CDN behavior changes. **Do not re-benchmark from scratch each time** — the conclusions above are current as of 2026-04-07 with 3-run validation on real Vast.ai hardware. The `dockers/_common/hf-download` helper implements the fallback chain.
 
+### Cold-Start Optimization (validated, with HONEST numbers)
+
+The `dockers/_common/coldstart.py` helper provides opt-in cold-start primitives. **Read the docstrings carefully before using** — many "fast loaders" only help in specific scenarios and can be HARMFUL on others.
+
+**Real GPU bench results** (Vast.ai RTX 4090, 251 GB RAM, NVMe local storage, 2026-04-08):
+
+| Optimization | Measured speedup | Status | When to use |
+|---|---|---|---|
+| **hf-xet HP+FIXED=50** | +24% downloads | ✅ keep | Always (already env vars in all ML Dockerfiles) |
+| **Whisper pre-bake at build** | -15s cold boot | ✅ keep | babelcast (already done) |
+| `torch.compile` cache | 1.06x (~0.3s) | 🟡 marginal | Free, set the env vars but don't oversell |
+| `fastsafetensors` (single-shard) | 1.74x (~0.18s) | 🟡 marginal | Only for small models (<5GB) — diminishing returns above |
+| `fastsafetensors` (multi-shard) | **BROKEN** | ❌ avoid | Whisper-shaped models (encoder/decoder shared keys) FAIL |
+| `prefetch_safetensors()` | **+37ms overhead** | ❌ harmful | NEVER call from server.py paths on fast NVMe |
+| `runai-model-streamer` | 0.02x (50x slower) | ❌ avoid | Designed for S3, not local NVMe; 20s cold-init overhead |
+
+**The honest truth about cold-boot optimization on Vast.ai/RunPod with NVMe:**
+
+1. **Disk I/O is NOT the bottleneck.** safetensors → CUDA already runs at 3.2 GB/s on Vast.ai NVMe, which means a 1.3 GB Ultravox file loads in 0.4s. Optimizing the deserializer saves ~0.2s — irrelevant in a 60-120s cold boot.
+
+2. **The real bottlenecks are:**
+   - Docker image pull (dominant for non-pre-baked images)
+   - `transformers.pipeline()` / `diffusers.from_pretrained()` high-level init (config + tokenizer + processor downloads, sequential network ops)
+   - First-request CUDA kernel compilation / warmup
+   - Model dispatch / dtype conversion / shard merging
+
+3. **The biggest cold-start wins (by far) come from pre-baking models in the image.** Everything else is decimal-place optimization. babelcast already pre-bakes Whisper + GGUF; ultravox and dit360 should do the same when image size budget allows.
+
+4. **`prefetch_safetensors()` exists in the helper for slow-storage scenarios** (S3, network volumes) but is HARMFUL on fast NVMe. The current `server.py` files import it but DO NOT call it — the import is kept for forward compat / debug only.
+
+5. **fastsafetensors only works for models without repeated tensor keys** across shards. Whisper, T5, BART and other encoder-decoder models trigger key collisions and fall back to standard safetensors anyway. Use `coldstart.load_with_fastsafetensors()` which handles the fallback automatically.
+
+**Validated config for production (`bootstrap()` defaults):**
+- `TORCHINDUCTOR_CACHE_DIR=/workspace/.torch-cache` (RunPod) or `/app/.torch-cache` (Vast.ai)
+- `TORCHINDUCTOR_FX_GRAPH_CACHE=1`
+- `TORCHINDUCTOR_AUTOGRAD_CACHE=1`
+- `HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50`
+- `HF_XET_HIGH_PERFORMANCE=1` (only on hosts with ≥64GB RAM, auto-detected from `/proc/meminfo`)
+
+If `bootstrap()` fails for any reason (read-only filesystem, missing helper, etc.), it logs and degrades silently — the optimization is OPTIONAL and must NEVER block server startup. Both `ultravox-s2s/api/server.py` and `dit360/server.py` wrap the call in `try/except Exception`.
+
 ## Web UI Component Library (`web/src/components/ui/`)
 
 **All new UI code MUST use these components.** Do not re-implement inline.
