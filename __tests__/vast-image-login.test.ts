@@ -45,6 +45,13 @@ describe('VastClient image_login', () => {
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
+    // Mock the entire poll loop to return immediately. These tests only care
+    // about the CREATE body (image_login field), not the poll/probe behavior.
+    // Without this, _pollForEndpoint waits 5s initial + does TCP probes on
+    // fake IPs that time out, causing 60s test timeouts.
+    vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({
+      endpoint: 'http://1.2.3.4:8000', ip: '1.2.3.4',
+    });
 
     // Backup and clear Docker env vars
     for (const key of ['DOCKERHUB_USERNAME', 'DOCKERHUB_TOKEN', 'DOCKER_HUB_USER', 'DOCKER_HUB_TOKEN']) {
@@ -62,14 +69,18 @@ describe('VastClient image_login', () => {
     }
   });
 
-  /** Setup fetch mock for a successful create flow (search → create → poll). */
+  /** Mock the preflight balance check (Vast checkBalance → /users/current/). */
+  const mockPreflight = () => mockFetchResponse({ credit: 100 });
+
+  /** Setup fetch mock for a successful create flow (preflight → search → create → poll). */
   function setupSuccessfulCreate() {
     fetchSpy
-      .mockResolvedValueOnce(mockFetchResponse({
+      .mockResolvedValueOnce(mockPreflight())                                  // preflight balance check
+      .mockResolvedValueOnce(mockFetchResponse({                               // search offers
         offers: [{ id: 'offer-1', gpu_name: 'RTX 3090', dph_total: 0.50 }],
       }))
-      .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '999' }))
-      .mockResolvedValueOnce(mockFetchResponse({
+      .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '999' })) // create
+      .mockResolvedValueOnce(mockFetchResponse({                                         // poll endpoint
         instances: { id: '999', actual_status: 'running', public_ipaddr: '1.2.3.4', direct_port_start: 8000 },
       }));
   }
