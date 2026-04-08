@@ -80,58 +80,80 @@ async function probeAvailableDc(
   // Probe Medium first
   const PROBE_LIMIT = parseInt(process.env.RUNPOD_BENCH_PROBE_LIMIT || '6', 10);
   const tryProbe = async (c: typeof candidates[number]) => {
-    // Build name variants — only prefix with NVIDIA/NVIDIA GeForce for NVIDIA GPUs.
-    // (Don't prepend NVIDIA to AMD/Intel/etc.)
-    const isNvidiaCandidate = !c.gpuTypeId.startsWith('AMD') && !c.gpuTypeId.startsWith('Intel');
-    const gpuVariants = [c.gpuTypeId];
-    if (isNvidiaCandidate && !c.gpuTypeId.startsWith('NVIDIA')) {
-      gpuVariants.push(`NVIDIA ${c.gpuTypeId}`);
-      // RTX 30/40/50 series uses "GeForce" branding
-      if (/^RTX (3|4|5)0/.test(c.gpuTypeId)) {
-        gpuVariants.push(`NVIDIA GeForce ${c.gpuTypeId}`);
-      }
+    // gpuTypeId is already normalized to the REST POST enum by discoverNetworkVolumeDCs
+    const gpuType = c.gpuTypeId;
+    console.log(`[probe] Trying ${c.dataCenterId} × ${gpuType} (${c.stockStatus})...`);
+    try {
+      const inst = await client.createInstance({
+        dockerImage: IMAGE,
+        gpuTypes: [gpuType],
+        region: c.dataCenterId,
+        dockerStartCmd: 'echo PROBE_OK && sleep infinity',
+        machineKey: 'bench-volume-probe',
+        ports: ['22/tcp'],
+        // Probe optimization: smallest possible footprint to maximize schedulability
+        containerDiskInGb: 20, // RunPod GPU minimum
+        storageGb: 0,           // no ephemeral volume
+      } as any, { apiKey, hfToken });
+      console.log(`[probe] ✓ ${c.dataCenterId} × ${gpuType} → pod ${inst.instanceId}`);
+      return { dc: c.dataCenterId, gpuType, probePodId: inst.instanceId };
+    } catch (e) {
+      const msg = (e as Error).message;
+      const short = msg.length > 100 ? msg.substring(0, 100) + '…' : msg;
+      console.log(`[probe] ✗ ${c.dataCenterId} × ${gpuType}: ${short}`);
+      return null;
     }
-    for (const gpuType of gpuVariants) {
-      console.log(`[probe] Trying ${c.dataCenterId} × ${gpuType} (${c.stockStatus})...`);
-      try {
-        const inst = await client.createInstance({
-          dockerImage: IMAGE,
-          gpuTypes: [gpuType],
-          region: c.dataCenterId,
-          dockerStartCmd: 'echo PROBE_OK && sleep infinity',
-          machineKey: 'bench-volume-probe',
-          ports: ['22/tcp'],
-        } as any, { apiKey, hfToken });
-        console.log(`[probe] ✓ ${c.dataCenterId} × ${gpuType} → pod ${inst.instanceId}`);
-        return { dc: c.dataCenterId, gpuType, probePodId: inst.instanceId };
-      } catch (e) {
-        const msg = (e as Error).message;
-        const short = msg.length > 100 ? msg.substring(0, 100) + '…' : msg;
-        console.log(`[probe] ✗ ${c.dataCenterId} × ${gpuType}: ${short}`);
-      }
-    }
-    return null;
   };
 
-  // ── Round 1: Medium stock ──────────────────────────────────────────────
+  // OPTIMIZATION: parallel probes. Each probe takes ~30s sequential due to
+  // ghost-check delays. Running 6+ in parallel cuts total wall time by ~6x.
+  // The first one to succeed wins; we cancel the rest by deleting their pods.
+  const PARALLEL = parseInt(process.env.RUNPOD_BENCH_PROBE_PARALLEL || '6', 10);
+
+  const tryBatchParallel = async (batch: typeof candidates): Promise<{ dc: string; gpuType: string; probePodId: string } | null> => {
+    if (batch.length === 0) return null;
+    console.log(`[probe] Launching ${batch.length} probes in parallel...`);
+    const results = await Promise.allSettled(batch.map(c => tryProbe(c)));
+    // Find first success
+    let winner: { dc: string; gpuType: string; probePodId: string } | null = null;
+    const losers: { dc: string; gpuType: string; probePodId: string }[] = [];
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) {
+        if (!winner) winner = r.value;
+        else losers.push(r.value);
+      }
+    }
+    // Tear down losers (don't pay for unused pods)
+    if (losers.length > 0) {
+      console.log(`[probe] Tearing down ${losers.length} loser pods (parallel)`);
+      await Promise.allSettled(losers.map(l =>
+        client.deleteInstance(l.probePodId, { apiKey })
+          .catch(e => console.log(`  ⚠ ${l.probePodId}: ${(e as Error).message}`)),
+      ));
+    }
+    return winner;
+  };
+
+  // ── Round 1: Medium stock (parallel batches) ───────────────────────────
   if (candidates.length > 0) {
-    console.log('\n[probe] Round 1 — trying Medium stock candidates...');
-    for (const c of candidates.slice(0, PROBE_LIMIT)) {
-      const r = await tryProbe(c);
-      if (r) return r;
+    console.log(`\n[probe] Round 1 — Medium stock (${candidates.length} candidates, ${PARALLEL} parallel)`);
+    for (let i = 0; i < Math.min(candidates.length, PROBE_LIMIT); i += PARALLEL) {
+      const batch = candidates.slice(i, i + PARALLEL);
+      const winner = await tryBatchParallel(batch);
+      if (winner) return winner;
     }
   }
 
-  // ── Round 2: Low stock fallback ────────────────────────────────────────
+  // ── Round 2: Low stock fallback (parallel batches) ─────────────────────
   console.log('\n[discover] Medium exhausted — querying Low stock candidates...');
   const lowCandidates = await client.discoverNetworkVolumeDCs({ apiKey }, { minStock: 'Low' });
-  // Skip ones we already tried
   const triedKeys = new Set(candidates.map(c => `${c.dataCenterId}:${c.gpuTypeId}`));
   const lowOnly = lowCandidates.filter(c => !triedKeys.has(`${c.dataCenterId}:${c.gpuTypeId}`));
   console.log(`[discover] Low stock new candidates: ${lowOnly.length}`);
-  for (const c of lowOnly.slice(0, PROBE_LIMIT * 2)) {
-    const r = await tryProbe(c);
-    if (r) return r;
+  for (let i = 0; i < Math.min(lowOnly.length, PROBE_LIMIT * 2); i += PARALLEL) {
+    const batch = lowOnly.slice(i, i + PARALLEL);
+    const winner = await tryBatchParallel(batch);
+    if (winner) return winner;
   }
 
   return null;
