@@ -429,14 +429,23 @@ The `dockers/_common/coldstart.py` helper provides opt-in cold-start primitives.
 
 5. **fastsafetensors only works for models without repeated tensor keys** across shards. Whisper, T5, BART and other encoder-decoder models trigger key collisions and fall back to standard safetensors anyway. Use `coldstart.load_with_fastsafetensors()` which handles the fallback automatically.
 
-**Validated config for production (`bootstrap()` defaults):**
+**Production config — env vars set in Dockerfile + start.sh, NOT via Python helper:**
 - `TORCHINDUCTOR_CACHE_DIR=/workspace/.torch-cache` (RunPod) or `/app/.torch-cache` (Vast.ai)
 - `TORCHINDUCTOR_FX_GRAPH_CACHE=1`
 - `TORCHINDUCTOR_AUTOGRAD_CACHE=1`
 - `HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50`
-- `HF_XET_HIGH_PERFORMANCE=1` (only on hosts with ≥64GB RAM, auto-detected from `/proc/meminfo`)
+- `HF_XET_HIGH_PERFORMANCE=1` (only on hosts with ≥64GB RAM — `ultravox-s2s/start.sh` guards this with a `free -m` check)
 
-If `bootstrap()` fails for any reason (read-only filesystem, missing helper, etc.), it logs and degrades silently — the optimization is OPTIONAL and must NEVER block server startup. Both `ultravox-s2s/api/server.py` and `dit360/server.py` wrap the call in `try/except Exception`.
+The env vars are set in the `ENV` directive of each ML Dockerfile and re-applied with `export` in `start.sh` (where `start.sh` exists). `start.sh` also picks `/workspace/.torch-cache` if `/workspace` is mounted (RunPod), otherwise falls back to `/app/.torch-cache` (Vast.ai). This RAM-guard + path-fallback was previously implemented in the Python helper `dockers/_common/coldstart.py::bootstrap()`, but real GPU benchmark on Vast.ai RTX 4090 (2026-04-08) measured ~56ms of import overhead per server start with **zero current benefit** (no model in this project calls `torch.compile()` or runtime `huggingface_hub.snapshot_download()`). The env vars do the same thing for free.
+
+The `dockers/_common/coldstart.py` helper still exists with the same functions (`bootstrap`, `prefetch_safetensors`, `load_with_fastsafetensors`) for **manual / debug use** but is no longer auto-imported by `server.py`. If you need to debug a cold-start question on a pod:
+
+```bash
+scp dockers/_common/coldstart.py root@<pod>:/tmp/coldstart.py
+ssh <pod> python3 /tmp/coldstart.py  # smoke test
+```
+
+The full test suite is at `scripts/model-download-bench/coldstart-test-suite.py` and was validated 17/17 on Vast.ai RTX 4090.
 
 ## Web UI Component Library (`web/src/components/ui/`)
 
