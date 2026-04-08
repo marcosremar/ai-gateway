@@ -51,7 +51,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Make python3.10 the default `python` and `pip`
 RUN ln -sf /usr/bin/python3.10 /usr/local/bin/python && \
     ln -sf /usr/bin/python3.10 /usr/local/bin/python3 && \
-    python -m ensurepip --upgrade && \
+    wget -qO /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && \
+    python3.10 /tmp/get-pip.py && \
+    rm /tmp/get-pip.py && \
     python -m pip install --upgrade pip setuptools wheel
 
 WORKDIR /app
