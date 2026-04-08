@@ -22,12 +22,20 @@ describe('VastClient', () => {
   let client: VastClient;
   let fetchSpy: ReturnType<typeof vi.fn>;
 
+  /** Mock the preflight balance check (Vast checkBalance → /users/current/). */
+  const mockPreflight = () => mockFetchResponse({ credit: 100 });
+
   beforeEach(() => {
     client = new VastClient();
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     // Prevent Docker Hub calls during createInstance — return fixed disk size
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
+    // Mock the poll+probe loop to return immediately — avoids 5s initial delay
+    // + TCP probe on fake IPs that time out (60s test timeout).
+    vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({
+      endpoint: 'http://5.5.5.5:8000', ip: '5.5.5.5',
+    });
   });
 
   afterEach(() => {
@@ -82,14 +90,11 @@ describe('VastClient', () => {
 
     it('searches offers and creates instance', async () => {
       fetchSpy
-        .mockResolvedValueOnce(mockFetchResponse({
+        .mockResolvedValueOnce(mockPreflight())                                   // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({                                // search offers
           offers: [{ id: 'offer-1', gpu_name: 'RTX 3090', dph_total: 0.50 }],
         }))
-        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '999' }))
-        // Poll: individual endpoint returns valid data
-        .mockResolvedValueOnce(mockFetchResponse({
-          instances: { id: '999', actual_status: 'running', public_ipaddr: '5.5.5.5', direct_port_start: 8000 },
-        }));
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '999' })); // create
 
       const result = await client.createInstance(baseSpec, creds);
       expect(result.instanceId).toBe('inst-999');
@@ -98,24 +103,34 @@ describe('VastClient', () => {
     }, 60000);
 
     it('throws when no offers available', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                    // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }))  // strict search → empty
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }))  // relaxed search fallback → empty
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] })); // SSH-only fallback → empty
 
       await expect(client.createInstance(baseSpec, creds)).rejects.toThrow('No GPUs available on Vast.ai');
     });
 
     it('throws when search fails', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchText('Server Error', 500));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                      // preflight balance check
+        .mockResolvedValueOnce(mockFetchText('Server Error', 500));  // strict search fails
 
       await expect(client.createInstance(baseSpec, creds)).rejects.toThrow('Search offers failed');
     });
 
     it('filters by GPU type in search', async () => {
       fetchSpy
-        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+        .mockResolvedValueOnce(mockPreflight())                    // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }))  // strict search → empty
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }))  // relaxed search fallback → empty
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] })); // SSH-only fallback → empty
 
       await expect(client.createInstance({ gpuTypes: ['RTX3090'], dockerImage: 'test/image:latest' }, creds)).rejects.toThrow();
 
-      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      // calls[0] = preflight, calls[1] = first search
+      const body = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(body.gpu_name).toEqual({ in: ['RTX 3090'] }); // Normalized from RTX3090
     });
 
@@ -125,18 +140,15 @@ describe('VastClient', () => {
       }));
 
       fetchSpy
-        .mockResolvedValueOnce(mockFetchResponse({ offers }))
+        .mockResolvedValueOnce(mockPreflight())                // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers }))  // search offers
         // First 4 fail
         .mockResolvedValueOnce(mockFetchText('not available', 400))
         .mockResolvedValueOnce(mockFetchText('not available', 400))
         .mockResolvedValueOnce(mockFetchText('not available', 400))
         .mockResolvedValueOnce(mockFetchText('not available', 400))
         // 5th succeeds
-        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '555' }))
-        // Poll: individual endpoint returns data
-        .mockResolvedValueOnce(mockFetchResponse({
-          instances: { id: '555', actual_status: 'running', public_ipaddr: '9.9.9.9', direct_port_start: 8000 },
-        }));
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '555' }));
 
       const result = await client.createInstance(baseSpec, creds);
       expect(result.instanceId).toBe('inst-555');
@@ -144,20 +156,19 @@ describe('VastClient', () => {
 
     it('injects env vars (HF_TOKEN, spec.env)', async () => {
       fetchSpy
-        .mockResolvedValueOnce(mockFetchResponse({
+        .mockResolvedValueOnce(mockPreflight())                                   // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({                                // search offers
           offers: [{ id: 'offer-1', gpu_name: 'RTX 3090', dph_total: 0.50 }],
         }))
-        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '777' }))
-        // Poll: individual endpoint (needs ports for endpoint to be resolved)
-        .mockResolvedValueOnce(mockFetchResponse({ instances: { id: '777', actual_status: 'running', public_ipaddr: '1.1.1.1', direct_port_start: 8000 } }));
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '777' })); // create
 
       await client.createInstance(
         { gpuTypes: ['RTX 3090'], env: { CUSTOM_KEY: 'val' }, dockerImage: 'test/image:latest' },
         { ...creds, hfToken: 'hf_test' },
       );
 
-      // Check the create call body has env dict with vars
-      const createBody = JSON.parse(fetchSpy.mock.calls[1][1].body);
+      // calls[0]=preflight, calls[1]=search, calls[2]=create
+      const createBody = JSON.parse(fetchSpy.mock.calls[2][1].body);
       expect(createBody.env.HF_TOKEN).toBe('hf_test');
       expect(createBody.env.CUSTOM_KEY).toBe('val');
       // Port exposure via env dict keys (Vast.ai format: "-p X:X": "1")
@@ -168,15 +179,19 @@ describe('VastClient', () => {
     it('calls onInstancePersist when userId provided', async () => {
       const onPersist = vi.fn().mockResolvedValue(undefined);
       const clientWithPersist = new VastClient({ onInstancePersist: onPersist });
+      // Must mock _pollForEndpoint on the new client too (beforeEach only mocks `client`)
+      vi.spyOn(clientWithPersist as any, '_pollForEndpoint').mockResolvedValue({
+        endpoint: 'http://2.2.2.2:8000', ip: '2.2.2.2',
+      });
+      vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
       vi.stubGlobal('fetch', fetchSpy);
 
       fetchSpy
-        .mockResolvedValueOnce(mockFetchResponse({
+        .mockResolvedValueOnce(mockPreflight())                                   // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({                                // search offers
           offers: [{ id: 'offer-1', gpu_name: 'RTX 3090', dph_total: 0.50 }],
         }))
-        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '888' }))
-        // Poll: individual endpoint (needs ports for endpoint to be resolved)
-        .mockResolvedValueOnce(mockFetchResponse({ instances: { id: '888', actual_status: 'creating', public_ipaddr: '2.2.2.2', direct_port_start: 8000 } }));
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '888' })); // create
 
       await clientWithPersist.createInstance(baseSpec, creds, 'user-1');
 
@@ -279,7 +294,7 @@ describe('VastClient', () => {
       fetchSpy
         .mockResolvedValueOnce(mockFetchResponse({
           instances: [
-            { id: '10', actual_status: 'running', public_ipaddr: '1.1.1.1', ports: { '8000/tcp': [{ HostPort: '18000' }] }, gpu_name: 'RTX 3090' },
+            { id: '10', actual_status: 'running', public_ipaddr: '1.1.1.1', direct_port_start: 18000, ports: { '8000/tcp': [{ HostPort: '18000' }] }, gpu_name: 'RTX 3090' },
           ],
         }))
         .mockResolvedValueOnce(mockFetchResponse([
@@ -298,7 +313,7 @@ describe('VastClient', () => {
       fetchSpy
         .mockResolvedValueOnce(mockFetchResponse({
           instances: [
-            { id: '1', actual_status: 'running', public_ipaddr: '2.2.2.2', ports: { '8000/tcp': [{ HostPort: '28000' }] } },
+            { id: '1', actual_status: 'running', public_ipaddr: '2.2.2.2', direct_port_start: 28000, ports: { '8000/tcp': [{ HostPort: '28000' }] } },
           ],
         }))
         .mockResolvedValueOnce(mockFetchResponse([]));

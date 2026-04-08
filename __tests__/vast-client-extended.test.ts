@@ -37,11 +37,18 @@ describe('VastClient — extended unit tests', () => {
   let client: VastClient;
   let fetchSpy: ReturnType<typeof vi.fn>;
 
+  /** Mock the preflight balance check (Vast checkBalance → /users/current/). */
+  const mockPreflight = () => mockFetchResponse({ credit: 100 });
+
   beforeEach(() => {
     client = new VastClient();
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
+    // Mock _pollForEndpoint to return immediately — avoids 5s initial delay + TCP probes
+    vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({
+      endpoint: 'http://1.2.3.4:8000', ip: '1.2.3.4',
+    });
   });
 
   afterEach(() => {
@@ -344,6 +351,7 @@ describe('VastClient — extended unit tests', () => {
         .mockResolvedValueOnce(mockFetchResponse({
           instances: [{
             id: '1', actual_status: 'running', public_ipaddr: '44.55.66.77',
+            direct_port_start: 18000,
             ports: { '8000/tcp': [{ HostIp: '203.0.113.5', HostPort: '18000' }] },
           }],
         }))
@@ -358,6 +366,7 @@ describe('VastClient — extended unit tests', () => {
         .mockResolvedValueOnce(mockFetchResponse({
           instances: [{
             id: '1', actual_status: 'running', public_ipaddr: '5.5.5.5',
+            direct_port_start: 18000,
             ports: { '8000/tcp': [{ HostIp: '172.17.0.1', HostPort: '18000' }] },
           }],
         }))
@@ -372,6 +381,7 @@ describe('VastClient — extended unit tests', () => {
         .mockResolvedValueOnce(mockFetchResponse({
           instances: [{
             id: '1', actual_status: 'running', public_ipaddr: '6.6.6.6',
+            direct_port_start: 28000,
             ports: { '8000': [{ HostPort: '28000' }] },
           }],
         }))
@@ -478,8 +488,14 @@ describe('VastClient — extended unit tests', () => {
       // createInstance now calls _fetchInstanceDetail to verify the instance still exists.
       // We test this indirectly by verifying createInstance makes the verification call.
 
+      // Override _pollForEndpoint to match expected IP
+      vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({
+        endpoint: 'http://5.5.5.5:8000', ip: '5.5.5.5',
+      });
+
       // Mock a scenario where instance gets endpoint immediately (no vanish check needed)
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
         .mockResolvedValueOnce(mockFetchResponse({
           offers: [{ id: 'offer-1', gpu_name: 'RTX 4090', dph_total: 0.50 }],
         }))
@@ -510,6 +526,7 @@ describe('VastClient — extended unit tests', () => {
       ];
 
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
         .mockResolvedValueOnce(mockFetchResponse({ offers }))
         // offer-1 create fails
         .mockResolvedValueOnce(mockFetchText('not available', 400))
@@ -535,7 +552,11 @@ describe('VastClient — extended unit tests', () => {
       // Offers: $0.20, $0.22, $0.24, $0.30, $0.50 → avg=$0.292
       // Tier 1 (≤$0.350): $0.20, $0.22, $0.24, $0.30 → sorted by inet_down desc
       // → id=3 (5000Mbps) first
+      vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({
+        endpoint: 'http://3.3.3.3:8000', ip: '3.3.3.3',
+      });
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
         .mockResolvedValueOnce(mockFetchResponse({
           offers: [
             { id: '1', gpu_name: 'RTX 4090', dph_total: 0.20, inet_down: 1000, public_ipaddr: '1.1.1.1' },
@@ -568,6 +589,7 @@ describe('VastClient — extended unit tests', () => {
       // Tier 3 (≤$0.336): no new
       // Tier 4 (rest): $0.50@10000
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
         .mockResolvedValueOnce(mockFetchResponse({
           offers: [
             { id: '1', gpu_name: 'RTX 4090', dph_total: 0.10, inet_down: 500, public_ipaddr: '1.1.1.1' },
@@ -589,7 +611,11 @@ describe('VastClient — extended unit tests', () => {
     }, 60000);
 
     it('keeps original order with single offer', async () => {
+      vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({
+        endpoint: 'http://1.1.1.1:8000', ip: '1.1.1.1',
+      });
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
         .mockResolvedValueOnce(mockFetchResponse({
           offers: [
             { id: '1', gpu_name: 'RTX 4090', dph_total: 0.30, inet_down: 1000, public_ipaddr: '1.1.1.1' },
@@ -613,6 +639,7 @@ describe('VastClient — extended unit tests', () => {
       // Tier 2/3: no new offers below those ceilings
       // Tier 4: $0.80@9000
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
         .mockResolvedValueOnce(mockFetchResponse({
           offers: [
             { id: '1', gpu_name: 'RTX 4090', dph_total: 0.18, inet_down: 500, public_ipaddr: '1.1.1.1' },
@@ -647,6 +674,7 @@ describe('VastClient — extended unit tests', () => {
       // avg=$0.50, T1 ceiling=$0.60 → only $0.10 in T1
       // If $0.10 fails → T2/T3 still only $0.10 → T4 gets $0.90
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
         .mockResolvedValueOnce(mockFetchResponse({
           offers: [
             { id: '1', gpu_name: 'RTX 4090', dph_total: 0.10, inet_down: 500, public_ipaddr: '1.1.1.1' },
@@ -676,38 +704,44 @@ describe('VastClient — extended unit tests', () => {
 
   describe('createInstance — Blackwell CUDA requirement', () => {
     it('requires CUDA 12.8 for RTX 5090', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
 
       await expect(client.createInstance(
         { gpuTypes: ['NVIDIA GeForce RTX 5090'], dockerImage: 'test:latest' },
         creds,
       )).rejects.toThrow();
 
-      const searchBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const searchBody = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(searchBody.cuda_vers).toEqual({ gte: 12.8 });
     });
 
     it('requires CUDA 12.8 for B200', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
 
       await expect(client.createInstance(
         { gpuTypes: ['B200'], dockerImage: 'test:latest' },
         creds,
       )).rejects.toThrow();
 
-      const searchBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const searchBody = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(searchBody.cuda_vers).toEqual({ gte: 12.8 });
     });
 
     it('uses CUDA 12.4 for non-Blackwell GPUs', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
 
       await expect(client.createInstance(
         { gpuTypes: ['RTX 4090'], dockerImage: 'test:latest' },
         creds,
       )).rejects.toThrow();
 
-      const searchBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const searchBody = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(searchBody.cuda_vers).toEqual({ gte: 12.4 });
     });
   });
@@ -716,62 +750,72 @@ describe('VastClient — extended unit tests', () => {
 
   describe('GPU name normalization', () => {
     it('strips NVIDIA GeForce prefix', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
 
       await expect(client.createInstance(
         { gpuTypes: ['NVIDIA GeForce RTX 4090'], dockerImage: 'test:latest' },
         creds,
       )).rejects.toThrow();
 
-      const searchBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const searchBody = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(searchBody.gpu_name).toEqual({ in: ['RTX 4090'] });
     });
 
     it('strips NVIDIA prefix without GeForce', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
 
       await expect(client.createInstance(
         { gpuTypes: ['NVIDIA RTX A6000'], dockerImage: 'test:latest' },
         creds,
       )).rejects.toThrow();
 
-      const searchBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const searchBody = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(searchBody.gpu_name).toEqual({ in: ['RTX A6000'] });
     });
 
     it('adds space before digits: RTX3090 → RTX 3090', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
 
       await expect(client.createInstance(
         { gpuTypes: ['RTX3090'], dockerImage: 'test:latest' },
         creds,
       )).rejects.toThrow();
 
-      const searchBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const searchBody = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(searchBody.gpu_name).toEqual({ in: ['RTX 3090'] });
     });
 
     it('adds space before A: RTXA5000 → RTX A5000', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
 
       await expect(client.createInstance(
         { gpuTypes: ['RTXA5000'], dockerImage: 'test:latest' },
         creds,
       )).rejects.toThrow();
 
-      const searchBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const searchBody = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(searchBody.gpu_name).toEqual({ in: ['RTX A5000'] });
     });
 
     it('replaces underscores with spaces', async () => {
-      fetchSpy.mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));
 
       await expect(client.createInstance(
         { gpuTypes: ['RTX_3090'], dockerImage: 'test:latest' },
         creds,
       )).rejects.toThrow();
 
-      const searchBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      const searchBody = JSON.parse(fetchSpy.mock.calls[1][1].body);
       expect(searchBody.gpu_name).toEqual({ in: ['RTX 3090'] });
     });
   });
@@ -785,6 +829,7 @@ describe('VastClient — extended unit tests', () => {
 
     it('filters by country code', async () => {
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
         .mockResolvedValueOnce(mockFetchResponse({
           offers: [
             makeOffer('1', 'France, FR'),
@@ -799,12 +844,13 @@ describe('VastClient — extended unit tests', () => {
         creds,
       )).rejects.toThrow(); // Fails because create calls aren't mocked, but filter runs
 
-      // Verify the search was made (first call is /bundles/)
+      // Verify the search was made (first call is preflight, second is /bundles/)
       expect(fetchSpy).toHaveBeenCalled();
     });
 
     it('expands EU to all EU country codes', async () => {
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
         .mockResolvedValueOnce(mockFetchResponse({
           offers: [
             makeOffer('1', 'France, FR'),
@@ -824,6 +870,7 @@ describe('VastClient — extended unit tests', () => {
   describe('createInstance — env injection', () => {
     it('uses ssh_direct runtype for all instances', async () => {
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
         .mockResolvedValueOnce(mockFetchResponse({
           offers: [{ id: 'offer-1', gpu_name: 'RTX 4090', dph_total: 0.50 }],
         }))
@@ -859,6 +906,7 @@ describe('VastClient — extended unit tests', () => {
 
       try {
         fetchSpy
+          .mockResolvedValueOnce(mockPreflight())                                     // preflight balance check
           .mockResolvedValueOnce(mockFetchResponse({
             offers: [{ id: 'offer-1', gpu_name: 'RTX 4090', dph_total: 0.50 }],
           }))
@@ -889,21 +937,24 @@ describe('VastClient — extended unit tests', () => {
   describe('createInstance — fallback search relaxation', () => {
     it('relaxes inet_down and reliability on empty first search', async () => {
       // First search: strict → no offers
-      // Second search (relaxed) → has offers but create fails → error
+      // Second search (relaxed) → still no offers
+      // Third search (SSH-only fallback) → still no offers → error
       fetchSpy
-        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }))  // strict search
-        .mockResolvedValueOnce(mockFetchResponse({ offers: [] })); // relaxed search
+        .mockResolvedValueOnce(mockPreflight())                      // preflight balance check
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }))    // strict search
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }))    // relaxed search
+        .mockResolvedValueOnce(mockFetchResponse({ offers: [] }));   // SSH-only fallback search
 
       await expect(client.createInstance(
         { gpuTypes: ['RTX 4090'], dockerImage: 'test:latest' },
         creds,
       )).rejects.toThrow('No GPUs available');
 
-      // Two /bundles/ calls made
+      // Three /bundles/ calls: strict, relaxed, SSH-only fallback
       const bundleCalls = fetchSpy.mock.calls.filter((c: any[]) =>
         typeof c[0] === 'string' && c[0].includes('/bundles/'),
       );
-      expect(bundleCalls).toHaveLength(2);
+      expect(bundleCalls).toHaveLength(3);
 
       // Second search should have relaxed filters
       const relaxedBody = JSON.parse(bundleCalls[1][1].body);
