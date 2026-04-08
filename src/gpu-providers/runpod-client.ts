@@ -246,6 +246,59 @@ export class RunpodClient extends AbstractGpuProvider {
   ]);
 
   /**
+   * RunPod REST POST /pods enum — gpuTypeIds that the REST API accepts.
+   * GraphQL `dataCenters[].gpuAvailability` returns MORE GPU types than the REST
+   * API enum (e.g. "RTX PRO 4500 Blackwell" appears in GraphQL but POST /pods
+   * rejects with HTTP 400). Discovered from RunPod's schema error on 2026-04-08.
+   * Update if the enum changes.
+   */
+  static readonly REST_VALID_GPU_TYPES = new Set([
+    'NVIDIA GeForce RTX 4090', 'NVIDIA A40', 'NVIDIA RTX A5000',
+    'NVIDIA GeForce RTX 5090', 'NVIDIA H100 80GB HBM3', 'NVIDIA GeForce RTX 3090',
+    'NVIDIA RTX A4500', 'NVIDIA L40S', 'NVIDIA H200', 'NVIDIA L4',
+    'NVIDIA RTX 6000 Ada Generation', 'NVIDIA A100-SXM4-80GB',
+    'NVIDIA RTX 4000 Ada Generation', 'NVIDIA RTX A6000', 'NVIDIA A100 80GB PCIe',
+    'NVIDIA RTX 2000 Ada Generation', 'NVIDIA RTX A4000',
+    'NVIDIA RTX PRO 6000 Blackwell Server Edition', 'NVIDIA H100 PCIe',
+    'NVIDIA H100 NVL', 'NVIDIA L40', 'NVIDIA B200', 'NVIDIA GeForce RTX 3080 Ti',
+    'NVIDIA RTX PRO 6000 Blackwell Workstation Edition',
+    'NVIDIA GeForce RTX 3080', 'NVIDIA GeForce RTX 3070',
+    'AMD Instinct MI300X OAM',
+  ]);
+
+  /**
+   * Map a GraphQL gpuTypeId (short name like "RTX 4090") to the canonical
+   * REST POST /pods enum value ("NVIDIA GeForce RTX 4090"). Returns null if
+   * the GPU type is not in the REST enum (i.e. cannot be deployed via REST).
+   */
+  static normalizeGpuTypeId(gpuTypeId: string): string | null {
+    // Reject empty/short inputs to prevent substring fallback false positives
+    // (e.g. "" or "A" would match everything via includes()).
+    if (!gpuTypeId || gpuTypeId.trim().length < 3) return null;
+    const trimmed = gpuTypeId.trim();
+    if (RunpodClient.REST_VALID_GPU_TYPES.has(trimmed)) return trimmed;
+    // Try common prefixes
+    for (const prefix of ['NVIDIA ', 'NVIDIA GeForce ']) {
+      const candidate = prefix + trimmed;
+      if (RunpodClient.REST_VALID_GPU_TYPES.has(candidate)) return candidate;
+    }
+    // Substring match (e.g. "A100 PCIe" → "NVIDIA A100 80GB PCIe")
+    // Require the input to be at least 4 chars to avoid matching too aggressively.
+    if (trimmed.length < 4) return null;
+    const lower = trimmed.toLowerCase();
+    for (const valid of RunpodClient.REST_VALID_GPU_TYPES) {
+      const validLower = valid.toLowerCase();
+      const validStripped = validLower.replace(/^nvidia (geforce )?/, '');
+      // Both sides must be non-empty for the substring check to be meaningful
+      if (validStripped.length === 0) continue;
+      if (validLower.includes(lower) || lower.includes(validStripped)) {
+        return valid;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Discover all RunPod datacenters that support network volumes and the GPU
    * availability inside each. Uses the RunPod GraphQL API (no auth required for
    * dataCenters query, but we send the bearer anyway for rate-limit fairness).
@@ -324,8 +377,16 @@ export class RunpodClient extends AbstractGpuProvider {
         }
         const avail = dc.gpuAvailability ?? [];
         for (const a of avail) {
-          const gpuTypeId = a.gpuTypeId ?? '';
-          if (!gpuTypeId) continue;
+          const rawGpuTypeId = a.gpuTypeId ?? '';
+          if (!rawGpuTypeId) continue;
+          // Normalize to a REST-deployable name. If null, the GPU is in the
+          // GraphQL response but cannot be deployed via REST POST /pods (rejected
+          // with HTTP 400). Skip those.
+          const gpuTypeId = RunpodClient.normalizeGpuTypeId(rawGpuTypeId);
+          if (!gpuTypeId) {
+            this.log.debug(`[runpod] discoverNetworkVolumeDCs: ${dc.id} skipping ${rawGpuTypeId} (not in REST GPU enum)`);
+            continue;
+          }
           const stock = a.stockStatus ?? 'unknown';
           if ((stockRank[stock] ?? 0) < minRank) continue;
           // Filter by gpu name if provided
@@ -340,7 +401,7 @@ export class RunpodClient extends AbstractGpuProvider {
           rows.push({
             dataCenterId: dc.id,
             gpuTypeId,
-            gpuDisplayName: gpuTypeId,
+            gpuDisplayName: rawGpuTypeId,
             stockStatus: stock,
             storageSupport: true,
           });
