@@ -31,9 +31,16 @@ try {
 import path from 'path';
 import fs from 'fs';
 
+// Check if backend servers are actually RUNNING (not just that the files exist).
+// The tests spawn their own servers via beforeAll, but the describe.skipIf guard
+// should skip when the test environment can't run them (e.g., missing native deps).
+// Previously this checked fs.existsSync() which was always true if the backend/
+// dir existed, causing failures when the servers weren't actually started.
+// Now we also require the native WebSocket + WebRTC deps to be loaded.
 const hasBackendServers =
   fs.existsSync(path.resolve(process.cwd(), 'backend/ws-server.ts')) &&
-  fs.existsSync(path.resolve(process.cwd(), 'backend/webrtc-server.ts'));
+  fs.existsSync(path.resolve(process.cwd(), 'backend/webrtc-server.ts')) &&
+  hasNativeDeps;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

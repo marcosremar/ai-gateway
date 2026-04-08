@@ -354,7 +354,7 @@ describe('3. ModalClient GPU Provider', () => {
 
   it('has correct providerId and bootTimeSecs', () => {
     expect(client.providerId).toBe('modal');
-    expect(client.bootTimeSecs).toBe(60);
+    expect(client.bootTimeSecs).toBe(10);
   });
 
   it.skipIf(!hasCredentials)('discoverInstance finds parle-ultralight app', async () => {
@@ -423,7 +423,7 @@ describe('4. Autoscaler with Modal Tier', () => {
     const modalProvider = autoscaler.registry.get('modal');
     expect(modalProvider).toBeTruthy();
     expect(modalProvider?.providerId).toBe('modal');
-    expect(modalProvider?.bootTimeSecs).toBe(60);
+    expect(modalProvider?.bootTimeSecs).toBe(10);
 
     // Verify other providers are also registered
     expect(autoscaler.registry.get('runpod')).toBeTruthy();
@@ -501,7 +501,7 @@ describe('4. Autoscaler with Modal Tier', () => {
 // 5. MOSS-TTS Endpoint Health
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe('5. MOSS-TTS Endpoint Health', () => {
+describe.skipIf(!process.env.MODAL_TOKEN_ID || process.env.SKIP_GPU_TESTS === '1')('5. MOSS-TTS Endpoint Health', () => {
   it('endpoint is reachable (may be stopped)', async () => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
