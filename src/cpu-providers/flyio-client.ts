@@ -175,6 +175,7 @@ export class FlyioClient extends AbstractGpuProvider {
       sshHost: '',
       sshPort: 0,
       providerMeta: {
+        provider: 'flyio',
         costPerHr: 0.03, // approximate for shared-cpu-4x 8GB
         createdAt: machine.created_at,
       },
@@ -294,6 +295,7 @@ export class FlyioClient extends AbstractGpuProvider {
           sshHost: '',
           sshPort: 0,
           providerMeta: {
+            provider: 'flyio',
             costPerHr: 0.03,
             createdAt: m.created_at,
           },

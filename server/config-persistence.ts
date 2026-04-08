@@ -123,6 +123,16 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
     },
   },
   {
+    id: 'pose-estimation-hybrik-x',
+    name: 'Pose Estimation (HybrIK-X)',
+    gpuDeploy: {
+      dockerImage: `${process.env.DOCKER_IMAGE_PREFIX || 'marcosremar'}/hybrik-x:latest`,
+      gpuTypes: ['NVIDIA GeForce RTX 4090', 'NVIDIA GeForce RTX 3090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
+      region: '',
+      timeoutMin: 30,
+    },
+  },
+  {
     id: 'cloud-only',
     name: 'Cloud Only (fast boot, no GPU)',
     stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }],

@@ -37,6 +37,9 @@ function mockText(text: string, status = 400): Response {
 describe('Vast.ai reliability improvements', () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
+  /** Preflight balance check response — createInstance calls /users/current/ first. */
+  const mockPreflight = () => mockResp({ credit: 100 });
+
   beforeEach(() => {
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
@@ -205,7 +208,9 @@ describe('Vast.ai reliability improvements', () => {
       // Verify the spec field is recognized — we just check the createInstance
       // API accepts the field without crashing
       const client = new VastClient();
-      fetchSpy.mockResolvedValueOnce(mockResp({ offers: [] })); // empty → throws
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight()) // balance check
+        .mockResolvedValueOnce(mockResp({ offers: [] })); // empty → throws
 
       await expect(
         client.createInstance(
@@ -221,9 +226,10 @@ describe('Vast.ai reliability improvements', () => {
     it('triggers Phase-2 search ONLY when Phase-1 returns zero offers', async () => {
       const client = new VastClient();
 
-      // Mock: Phase-1 returns 0 offers, then relax search returns 0,
-      // then Phase-2 (no direct_port_count) returns offers
+      // Mock: preflight balance check, then Phase-1 returns 0 offers,
+      // then relax search returns 0, then Phase-2 (no direct_port_count) returns offers
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight()) // balance check
         .mockResolvedValueOnce(mockResp({ offers: [] })) // Phase-1 strict
         .mockResolvedValueOnce(mockResp({ offers: [] })) // Phase-1 relaxed
         .mockResolvedValueOnce(mockResp({ offers: [] })); // Phase-2 SSH-only
@@ -232,11 +238,11 @@ describe('Vast.ai reliability improvements', () => {
         client.createInstance({ gpuTypes: ['RTX 5090'], dockerImage: 'test/image:latest' }, { apiKey: 'k' }),
       ).rejects.toThrow();
 
-      // 3 fetches expected: Phase-1 strict, Phase-1 relaxed, Phase-2 SSH-only
-      expect(fetchSpy.mock.calls.length).toBe(3);
+      // 4 fetches: preflight + Phase-1 strict + Phase-1 relaxed + Phase-2 SSH-only
+      expect(fetchSpy.mock.calls.length).toBe(4);
 
-      // Verify Phase-2 dropped direct_port_count
-      const phase2Body = JSON.parse(fetchSpy.mock.calls[2][1].body);
+      // Verify Phase-2 dropped direct_port_count (index shifted +1 for preflight)
+      const phase2Body = JSON.parse(fetchSpy.mock.calls[3][1].body);
       expect(phase2Body.direct_port_count).toBeUndefined();
     });
 
@@ -245,6 +251,7 @@ describe('Vast.ai reliability improvements', () => {
 
       // Phase-1 returns 1 offer; create fails immediately
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight()) // balance check
         .mockResolvedValueOnce(mockResp({
           offers: [{ id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 }],
         }))
@@ -255,8 +262,8 @@ describe('Vast.ai reliability improvements', () => {
         client.createInstance({ gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest' }, { apiKey: 'k' }),
       ).rejects.toThrow();
 
-      // Should be exactly 2 fetches: search + 1 create attempt (no Phase-2)
-      expect(fetchSpy.mock.calls.length).toBe(2);
+      // Should be exactly 3 fetches: preflight + search + 1 create attempt (no Phase-2)
+      expect(fetchSpy.mock.calls.length).toBe(3);
     });
   });
 
@@ -267,6 +274,7 @@ describe('Vast.ai reliability improvements', () => {
 
       // 3 offers, race=2 — all 3 fail (so we can count attempts)
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight()) // balance check
         .mockResolvedValueOnce(mockResp({
           offers: [
             { id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 },
@@ -278,7 +286,7 @@ describe('Vast.ai reliability improvements', () => {
 
       await expect(
         client.createInstance(
-          { gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest', raceCount: 2 } as any,
+          { gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest', raceCount: 2 },
           { apiKey: 'k' },
         ),
       ).rejects.toThrow();
@@ -292,6 +300,7 @@ describe('Vast.ai reliability improvements', () => {
       const client = new VastClient();
 
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight()) // balance check
         .mockResolvedValueOnce(mockResp({
           offers: [
             { id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 },
@@ -302,7 +311,7 @@ describe('Vast.ai reliability improvements', () => {
 
       await expect(
         client.createInstance(
-          { gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest', raceCount: 1 } as any,
+          { gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest', raceCount: 1 },
           { apiKey: 'k' },
         ),
       ).rejects.toThrow();
@@ -316,6 +325,7 @@ describe('Vast.ai reliability improvements', () => {
       const client = new VastClient();
 
       fetchSpy
+        .mockResolvedValueOnce(mockPreflight()) // balance check
         .mockResolvedValueOnce(mockResp({
           offers: Array.from({ length: 10 }, (_, i) => ({
             id: `o${i}`, gpu_name: 'RTX 4090', dph_total: 0.5 + i * 0.1,
@@ -325,7 +335,7 @@ describe('Vast.ai reliability improvements', () => {
 
       await expect(
         client.createInstance(
-          { gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest', raceCount: 100 } as any,
+          { gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest', raceCount: 100 },
           { apiKey: 'k' },
         ),
       ).rejects.toThrow();

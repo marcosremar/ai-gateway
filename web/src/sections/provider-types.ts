@@ -201,6 +201,11 @@ export const DEFAULT_DOCKER_IMAGES: DockerImage[] = [
     description: 'Standalone TTS server with Qwen3 0.6B.',
     ttsModel: 'qwen3-tts',
   },
+  {
+    url: 'marcosremar/hybrik-x:latest',
+    label: 'HybrIK-X Pose',
+    description: 'Whole-body SMPL-X pose estimation from a single image. 55 joint quaternions, 3D positions, shape betas. ~4GB VRAM.',
+  },
 ];
 
 // ── GPU types ──

@@ -613,16 +613,155 @@ export async function autoStopGpu() {
   stopWarmthMonitor();
   updateTranslationProfile({ gpuEndpoint: undefined }, 'idleStop');
 
-  // Keep podId/provider in state so resume can find it
+  // Transition to 'stopped' — preserves pod info for fast resume (19s vs 288s cold boot).
+  // The stopped state is distinct from 'idle' so the status API, auto-resume trigger,
+  // and UI can distinguish "never deployed" from "paused and resumable".
+  const gpuType = deployState.gpuType;
+  const costPerHr = deployState.costPerHr;
+  const dockerImage = deployState.dockerImage;
+  deploymentSM.markStopped(podId, provider, gpuType, costPerHr, dockerImage);
   setDeployState({
-    status: 'idle',
+    status: 'stopped',
     message: `Pod stopped (idle ${Math.round(IDLE_TIMEOUT_MS / 60_000)} min). Will be destroyed in ${Math.round(IDLE_DESTROY_MS / 60_000)} min if not resumed.`,
+    podId,
+    provider,
   });
-  deployState.podId = podId;
-  deployState.provider = provider;
 
   // Schedule auto-destroy
   scheduleAutoDestroy(IDLE_DESTROY_MS);
+}
+
+/**
+ * Resume a stopped pod, or fall back to a fresh deploy if resume fails.
+ *
+ * This is the core cold-boot optimization: a stopped pod resumes in ~19s
+ * (validated on Vast.ai, 2026-04-08). If the host was reclaimed, the pod
+ * was GC'd, or any other error occurs, we transparently fall back to a
+ * standard deploy via the existing tier cascade + hedged deploy flow.
+ *
+ * Callers get `method: 'resumed' | 'fresh_deploy'` in the return value
+ * so they can log/display which path was taken.
+ */
+export async function resumeOrDeploy(opts: {
+  reason: 'autoscaler' | 'manual';
+  requestId?: string;
+}): Promise<{ method: 'resumed' | 'fresh_deploy'; podId: string; provider: string }> {
+  const podId = deployState.podId;
+  const provider = deployState.provider as ProviderName;
+  const dockerImage = deployState.dockerImage;
+
+  if (!podId || !provider) {
+    throw new Error('No stopped pod to resume (podId or provider missing)');
+  }
+
+  // Resolve provider client + credentials (same pattern as autoStopGpu)
+  const credentials: ProviderCredentials = { apiKey: '' };
+  let client: GpuProviderClient | null = null;
+  if (provider === 'runpod' && deployApiKey) {
+    client = runpod; credentials.apiKey = deployApiKey;
+  } else if (provider === 'vast' && deployVastApiKey) {
+    client = vast; credentials.apiKey = deployVastApiKey;
+  } else if (provider === 'tensordock' && deployTensordockApiKey) {
+    client = tensordock; credentials.apiKey = deployTensordockApiKey; credentials.authId = deployTensordockAuthId;
+  } else if (provider === 'modal' && deployModalApiKey) {
+    client = modal; credentials.apiKey = deployModalApiKey;
+  }
+
+  if (!client) {
+    throw new Error(`No credentials for provider ${provider} — cannot resume`);
+  }
+
+  // ── Attempt resume ──────────────────────────────────────────────────────
+  clearAutoDestroyTimer();
+  broadcastWs({ type: 'gpu:resume', action: 'attempting', podId, provider, reason: opts.reason });
+  console.log(`[gpu] resumeOrDeploy: attempting resume of ${provider} pod ${podId} (reason=${opts.reason})`);
+
+  try {
+    await client.startInstance(podId, credentials);
+    console.log(`[gpu] Resume succeeded: ${provider} pod ${podId}`);
+
+    // Resolve endpoint
+    let endpoint = '';
+    try {
+      const info = await (client as any).resolveInstanceEndpoint?.(podId, credentials);
+      if (info?.endpoint) endpoint = info.endpoint;
+    } catch {}
+    if (!endpoint) endpoint = deployState.endpoint; // fallback to last known
+
+    // Transition to booting
+    setDeployState({
+      status: 'booting',
+      podId,
+      endpoint,
+      provider,
+      message: 'Pod resumed — waiting for health check',
+      startedAt: Date.now(),
+    });
+    deploymentSM.startBooting(podId);
+    startGpuMonitoring();
+    logGpuEvent('instance_resumed', provider, true, { metadata: { podId, reason: opts.reason } });
+    broadcastWs({ type: 'gpu:resume', action: 'success', podId, provider });
+
+    return { method: 'resumed', podId, provider };
+  } catch (resumeErr) {
+    const msg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
+    console.warn(`[gpu] Resume failed for ${provider} pod ${podId}: ${msg} — falling back to fresh deploy`);
+    logGpuEvent('resume_failed', provider, false, { metadata: { podId, reason: opts.reason, error: msg } });
+    broadcastWs({ type: 'gpu:resume', action: 'fallback', podId, provider, error: msg });
+
+    // ── Clean up the orphaned stopped pod ──────────────────────────────
+    try {
+      await client.deleteInstance(podId, credentials);
+      console.log(`[gpu] Cleaned up orphaned pod ${podId} on ${provider}`);
+    } catch (cleanupErr) {
+      // Non-fatal — pod may already be gone (which is why resume failed)
+      console.warn(`[gpu] Orphan cleanup failed (non-fatal): ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`);
+    }
+
+    // ── Fall back to fresh deploy ─────────────────────────────────────
+    // Save API keys BEFORE reset (resetDeployState clears them)
+    const savedKeys = {
+      runpod: deployApiKey,
+      vast: deployVastApiKey,
+      tensordock: deployTensordockApiKey ? { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId } : undefined,
+      modal: deployModalApiKey,
+    };
+
+    resetDeployState();
+
+    // Restore API keys after reset
+    if (savedKeys.runpod) setDeployApiKey(savedKeys.runpod);
+    if (savedKeys.vast) setDeployVastApiKey(savedKeys.vast);
+    if (savedKeys.tensordock) {
+      setDeployTensordockApiKey(savedKeys.tensordock.apiKey);
+      setDeployTensordockAuthId(savedKeys.tensordock.authId);
+    }
+    if (savedKeys.modal) setDeployModalApiKey(savedKeys.modal);
+
+    // Build tiers from saved credentials
+    const tiers = buildGpuTiers(
+      savedKeys.runpod,
+      savedKeys.vast || undefined,
+      savedKeys.tensordock,
+      savedKeys.modal || undefined,
+    );
+
+    if (tiers.length === 0) {
+      throw new Error('Resume failed and no provider tiers available for fresh deploy');
+    }
+
+    const image = dockerImage || 'marcosremar/babelcast-subtitle:latest';
+    const gpuTypes = getGpuPriorityList();
+
+    console.log(`[gpu] Starting fresh deploy as fallback (image=${image}, tiers=${tiers.length})`);
+    await startDeployWithTiers(tiers, image, gpuTypes, {});
+
+    return {
+      method: 'fresh_deploy',
+      podId: deployState.podId,
+      provider: deployState.provider,
+    };
+  }
 }
 
 export async function autoTerminateGpu() {

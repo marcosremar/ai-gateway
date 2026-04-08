@@ -1,0 +1,97 @@
+#!/bin/bash
+# Auto-generated from scripts/r2-vs-hf-bench.sh.tmpl by r2-vs-hf-bench.ts
+# Generated:  __GENERATED_AT__
+# Object key: __R2_KEY__
+# Expires at: __EXPIRES_AT__
+#
+# Bench runs on a Vast.ai pod (or any Linux box with curl + python3).
+# Downloads the same model 3x from HuggingFace, uploads it once to R2, then
+# downloads it 3x from R2 via a presigned URL. Compares average MB/s.
+
+set -euo pipefail
+
+HF_URL='__HF_URL__'
+R2_PUT_URL='__R2_PUT_URL__'
+R2_GET_URL='__R2_GET_URL__'
+RUNS=3
+
+WORK=/tmp/bench-work
+mkdir -p "$WORK"
+cd "$WORK"
+
+echo '═══════════════════════════════════════════════════════════════'
+echo ' R2 vs HF download bench'
+echo '═══════════════════════════════════════════════════════════════'
+echo " host:     $(hostname)"
+echo " kernel:   $(uname -r)"
+echo " runs:     $RUNS each"
+echo " object:   __HF_FILE__"
+echo
+
+declare -a hf_results r2_results
+
+# ── 1. HF baseline (3 runs) ────────────────────────────────────────────────
+echo '── HuggingFace CDN ────────────────────────────────────────────'
+for i in $(seq 1 $RUNS); do
+  echo "  run $i:"
+  secs=$(curl -fsL --tcp-nodelay -w '%{time_total}' -o model.bin "$HF_URL")
+  bytes=$(stat -c '%s' model.bin)
+  mbps=$(python3 -c "print(round($bytes / float('$secs') / 1024 / 1024, 2))")
+  printf '    secs=%s  MB/s=%s  bytes=%s\n' "$secs" "$mbps" "$bytes"
+  hf_results+=("$mbps")
+done
+
+# ── 2. Upload to R2 (one-shot) ─────────────────────────────────────────────
+echo
+echo '── Uploading to R2 (one-time, untimed) ───────────────────────'
+file_size=$(stat -c '%s' model.bin)
+upload_start=$(date +%s)
+curl -fsL -X PUT -T model.bin -H "Content-Type: application/octet-stream" "$R2_PUT_URL"
+upload_secs=$(($(date +%s) - upload_start))
+upload_mbps=$(python3 -c "print(round($file_size / $upload_secs / 1024 / 1024, 2))")
+echo "  upload: ${upload_secs}s @ ${upload_mbps} MB/s"
+
+rm -f model.bin
+
+# ── 3. R2 download (3 runs) ────────────────────────────────────────────────
+echo
+echo '── Cloudflare R2 ──────────────────────────────────────────────'
+for i in $(seq 1 $RUNS); do
+  echo "  run $i:"
+  secs=$(curl -fsL --tcp-nodelay -w '%{time_total}' -o model.bin "$R2_GET_URL")
+  bytes=$(stat -c '%s' model.bin)
+  mbps=$(python3 -c "print(round($bytes / float('$secs') / 1024 / 1024, 2))")
+  printf '    secs=%s  MB/s=%s  bytes=%s\n' "$secs" "$mbps" "$bytes"
+  r2_results+=("$mbps")
+  rm -f model.bin
+done
+
+# ── 4. Summary ──────────────────────────────────────────────────────────────
+echo
+echo '═══════════════════════════════════════════════════════════════'
+echo ' RESULTS'
+echo '═══════════════════════════════════════════════════════════════'
+hf_csv=$(IFS=,; echo "${hf_results[*]}")
+r2_csv=$(IFS=,; echo "${r2_results[*]}")
+hf_avg=$(python3 -c "vals=[$hf_csv]; print(round(sum(vals)/len(vals), 2))")
+r2_avg=$(python3 -c "vals=[$r2_csv]; print(round(sum(vals)/len(vals), 2))")
+delta=$(python3 -c "print(round(($r2_avg - $hf_avg) / $hf_avg * 100, 1))")
+
+printf 'HF avg: %s MB/s  (runs: %s)\n' "$hf_avg" "${hf_results[*]}"
+printf 'R2 avg: %s MB/s  (runs: %s)\n' "$r2_avg" "${r2_results[*]}"
+printf 'Delta:  %s%%  (R2 vs HF baseline)\n' "$delta"
+echo
+echo 'JSON_RESULT:'
+python3 -c "
+import json
+print(json.dumps({
+    'hf_runs': [$hf_csv],
+    'r2_runs': [$r2_csv],
+    'hf_avg_mbps': $hf_avg,
+    'r2_avg_mbps': $r2_avg,
+    'delta_pct': $delta,
+    'object': '__HF_FILE__',
+    'r2_key': '__R2_KEY__',
+    'upload_mbps': $upload_mbps,
+}, indent=2))
+"

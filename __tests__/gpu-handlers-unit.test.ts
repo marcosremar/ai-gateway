@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { PassThrough } from 'stream';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { readFileSync } from 'fs';
+import { join } from 'path';
 
 // ── Source code (read once) ──────────────────────────────────────────────────
 const handlersSource = readFileSync('server/gpu-handlers.ts', 'utf8');
@@ -422,14 +423,14 @@ describe('handleGpuStop', () => {
     expect(fnBody).toContain('400');
   });
 
-  it('#125 calls client.stopInstance and preserves podId for resume', () => {
+  it('#125 calls client.stopInstance and transitions to stopped state', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuStop');
     const fnEnd = handlersSource.indexOf('\n// ──', fnStart + 100);
     const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
     expect(fnBody).toContain('client.stopInstance');
-    // After stop, podId should be preserved in deployState
-    expect(fnBody).toContain('deployState.podId = podId');
-    expect(fnBody).toContain('deployState.provider = provider');
+    // After stop, transitions to 'stopped' state with podId preserved via setDeployState
+    expect(fnBody).toContain("status: 'stopped'");
+    expect(fnBody).toContain('deploymentSM.markStopped(');
   });
 
   it('#126 returns 200 with ok:true on success', () => {
@@ -465,35 +466,41 @@ describe('handleGpuResume', () => {
     expect(fnBody).toContain('deployState.podId');
   });
 
-  it('#130 clears auto-destroy timer on resume', () => {
+  it('#130 delegates to resumeOrDeploy for resume-with-fallback', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuResume');
     const fnEnd = handlersSource.indexOf('\n// ──', fnStart + 100);
     const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
-    expect(fnBody).toContain('clearAutoDestroyTimer');
+    // Handler delegates to resumeOrDeploy which handles resume + fallback
+    expect(fnBody).toContain('resumeOrDeploy(');
+    expect(fnBody).toContain("reason: 'manual'");
   });
 
-  it('#131 calls client.startInstance with podId', () => {
-    const fnStart = handlersSource.indexOf('export async function handleGpuResume');
-    const fnEnd = handlersSource.indexOf('\n// ──', fnStart + 100);
-    const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
-    expect(fnBody).toContain('client.startInstance(podId');
+  it('#131 resumeOrDeploy in gpu-deploy calls startInstance and clears timer', () => {
+    // The logic moved from handler to gpu-deploy.ts resumeOrDeploy()
+    const deploySource = readFileSync(join(__dirname, '../server/gpu-deploy.ts'), 'utf-8');
+    const fnStart = deploySource.indexOf('export async function resumeOrDeploy');
+    const fnEnd = deploySource.indexOf('\nexport async function autoTerminateGpu', fnStart);
+    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
+    expect(fnBody).toContain('client.startInstance(podId, credentials)');
+    expect(fnBody).toContain('clearAutoDestroyTimer()');
   });
 
-  it('#132 sets deploy state to booting and starts monitoring', () => {
-    const fnStart = handlersSource.indexOf('export async function handleGpuResume');
-    const fnEnd = handlersSource.indexOf('\n// ──', fnStart + 100);
-    const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
+  it('#132 resumeOrDeploy sets booting state and starts monitoring on success', () => {
+    const deploySource = readFileSync(join(__dirname, '../server/gpu-deploy.ts'), 'utf-8');
+    const fnStart = deploySource.indexOf('export async function resumeOrDeploy');
+    const fnEnd = deploySource.indexOf('\nexport async function autoTerminateGpu', fnStart);
+    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
     expect(fnBody).toContain("status: 'booting'");
-    expect(fnBody).toContain('startGpuMonitoring');
+    expect(fnBody).toContain('startGpuMonitoring()');
   });
 
-  it('#133 returns 200 with ok:true and endpoint', () => {
+  it('#133 returns 200 with ok:true and method field', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuResume');
     const fnEnd = handlersSource.indexOf('\n// ──', fnStart + 100);
     const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
     expect(fnBody).toContain('res.writeHead(200');
     expect(fnBody).toContain('ok: true');
-    expect(fnBody).toContain('endpoint');
+    expect(fnBody).toContain('method: result.method');
   });
 });
 

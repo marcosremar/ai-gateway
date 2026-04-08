@@ -151,7 +151,8 @@ export interface TensordockClientOptions extends AbstractGpuProviderOptions {}
 
 export class TensordockClient extends AbstractGpuProvider {
   readonly providerId = 'tensordock';
-  readonly bootTimeSecs = 1200;
+  /** TensorDock cold boot. Override via env var TENSORDOCK_BOOT_TIME_SECS. */
+  readonly bootTimeSecs = parseInt(process.env.TENSORDOCK_BOOT_TIME_SECS || '1200', 10);
 
   constructor(opts?: TensordockClientOptions) {
     super(opts);
@@ -259,6 +260,9 @@ export class TensordockClient extends AbstractGpuProvider {
     credentials: ProviderCredentials,
     userId?: string,
   ): Promise<GpuInstance> {
+    // ── Preflight: account balance check ──────────────────────────────────
+    await this._runPreflight(credentials);
+
     const { apiKey, hfToken } = credentials;
     const gpuTypesToTry = spec.gpuTypes?.length ? spec.gpuTypes : GPU_FALLBACK;
     const headers = this.headers(apiKey);
@@ -417,6 +421,7 @@ export class TensordockClient extends AbstractGpuProvider {
             instanceId, instanceName, endpoint, monitorUrl, ipAddress: ip,
             status: attrs.status || 'creating', gpuType: gpuShort, portForwards: pfs,
             providerMeta: {
+              provider: 'tensordock',
               hostnodeId: candidate.id,
               tier: candidate.tier,
               uptimePct: candidate.uptimePct,
@@ -739,6 +744,32 @@ export class TensordockClient extends AbstractGpuProvider {
       this.log.debug(`[tensordock] Balance check failed: ${e instanceof Error ? e.message : e}`);
       return null;
     }
+  }
+
+  /**
+   * Preflight: check TensorDock balance before deploy.
+   * Override of AbstractGpuProvider.preflight().
+   *
+   * TensorDock requires positive balance to launch — the API does return
+   * "need at least $X" errors, but only after the deploy is in flight.
+   * Catch it here and fail fast instead of burning a deploy attempt.
+   */
+  async preflight(credentials: ProviderCredentials): Promise<{
+    canDeploy: boolean;
+    blockReason: string | null;
+    balance?: number;
+    quota?: number;
+  } | null> {
+    const result = await this.checkBalance(credentials);
+    if (!result) return null;  // API unreachable — proceed optimistically
+    if (result.balance < 1.0) {
+      return {
+        canDeploy: false,
+        blockReason: `TensorDock balance too low: $${result.balance.toFixed(2)} (current spend rate $${result.hourlyCost.toFixed(2)}/hr). Add credit at dashboard.tensordock.com.`,
+        balance: result.balance,
+      };
+    }
+    return { canDeploy: true, blockReason: null, balance: result.balance };
   }
 
   /** List available GPU offers from TensorDock hostnodes. */

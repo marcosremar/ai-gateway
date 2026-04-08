@@ -41,7 +41,8 @@
     "test:memory-soak": "vitest run --config vitest.config.ts __tests__/memory-soak.test.ts",
     "test:cache": "vitest run --config vitest.config.ts __tests__/cache-effectiveness.test.ts",
     "test:snapgpu": "vitest run --config vitest.config.ts __tests__/snapgpu-sdk.test.ts",
-    "test:snapgpu-benchmark": "vitest run --config vitest.config.ts __tests__/snapgpu-benchmark.test.ts"
+    "test:snapgpu-benchmark": "vitest run --config vitest.config.ts __tests__/snapgpu-benchmark.test.ts",
+    "test:object-storage": "bun --bun ./node_modules/.bin/vitest run --config vitest.config.ts __tests__/object-storage-r2-integration.test.ts"
   },
   "peerDependencies": {
     "openai": ">=4.0.0",

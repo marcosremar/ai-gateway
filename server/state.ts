@@ -65,7 +65,7 @@ export const providerMetrics: Record<string, {
 // ── GPU Deployment State ─────────────────────────────────────────────────────
 
 export interface DeploymentState {
-  status: 'idle' | 'searching' | 'queued' | 'creating' | 'booting' | 'installing' | 'ready' | 'error';
+  status: 'idle' | 'stopped' | 'searching' | 'queued' | 'creating' | 'booting' | 'installing' | 'ready' | 'error';
   podId: string;
   endpoint: string;
   gpuType: string;
@@ -160,12 +160,17 @@ interface PersistedDeploy {
   sshPort: number;
   providerMeta: Record<string, unknown>;
   savedAt: number;
+  /** When set, indicates this is a stopped (paused) pod that can be resumed. */
+  stoppedAt?: number;
 }
 
 function persistDeployState(): void {
   // Only persist states where a pod exists
-  if (!deployState.podId || !deployState.endpoint) return;
-  if (deployState.status !== 'ready' && deployState.status !== 'booting' && deployState.status !== 'installing') return;
+  if (!deployState.podId) return;
+  // Persist running pods (ready/booting/installing) and stopped pods (resumable)
+  const isStopped = deployState.status === 'stopped';
+  if (!isStopped && !deployState.endpoint) return;
+  if (!isStopped && deployState.status !== 'ready' && deployState.status !== 'booting' && deployState.status !== 'installing') return;
   try {
     mkdirSync(BABELCAST_DIR, { recursive: true });
     const data: PersistedDeploy = {
@@ -180,6 +185,7 @@ function persistDeployState(): void {
       sshPort: deployState.sshPort,
       providerMeta: deployState.providerMeta ?? {},
       savedAt: Date.now(),
+      ...(isStopped ? { stoppedAt: Date.now() } : {}),
     };
     // Atomic write: write to temp file then rename, so a crash mid-write
     // never corrupts the active deploy file.
@@ -207,9 +213,11 @@ export function loadPersistedDeploy(): PersistedDeploy | null {
     if (!existsSync(ACTIVE_DEPLOY_FILE)) return null;
     const raw = readFileSync(ACTIVE_DEPLOY_FILE, 'utf-8');
     const data = JSON.parse(raw) as PersistedDeploy;
-    // Reject stale records (>6 hours old — pod likely auto-terminated or cost too much)
-    if (Date.now() - data.savedAt > 6 * 60 * 60 * 1000) {
-      console.log('[gpu] Persisted deploy too old (>6h), ignoring');
+    // Reject stale records — stopped pods expire faster (2h = auto-destroy window),
+    // running pods expire after 6h.
+    const maxAgeMs = data.stoppedAt ? 2 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000;
+    if (Date.now() - data.savedAt > maxAgeMs) {
+      console.log(`[gpu] Persisted deploy too old (>${data.stoppedAt ? '2h stopped' : '6h running'}), ignoring`);
       clearPersistedDeploy();
       return null;
     }
@@ -296,6 +304,18 @@ export function touchModelRequest() {
   lastModelRequestTime = Date.now();
   // Reset idle-related state in gpu-deploy (lazy import to avoid circular deps)
   try { const { resetIdleState } = require('./gpu-deploy'); resetIdleState?.(); } catch {}
+  // Auto-resume: if a stopped GPU pod exists, transparently resume it (or fall
+  // back to fresh deploy) when a new AI request arrives. Fire-and-forget —
+  // the caller gets a "booting" status and retries on the next poll.
+  try {
+    const { deploymentSM } = require('./deployment-state-machine');
+    if (deploymentSM.isStopped) {
+      const { resumeOrDeploy } = require('./gpu-deploy');
+      resumeOrDeploy({ reason: 'autoscaler' }).catch((err: unknown) =>
+        console.error(`[gpu] Auto-resume failed: ${err instanceof Error ? err.message : err}`)
+      );
+    }
+  } catch {}
 }
 export function setLastModelRequestTime(v: number) { lastModelRequestTime = v; }
 

@@ -253,14 +253,14 @@ describe('idle watchdog', () => {
     expect(fnBody).toContain('Idle warning');
   });
 
-  it('#195 autoStopGpu preserves podId for resume', () => {
+  it('#195 autoStopGpu transitions to stopped state for resume', () => {
     const fnStart = deploySource.indexOf('export async function autoStopGpu');
     const fnEnd = deploySource.indexOf('\nexport ', fnStart + 50);
     const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 3000);
     expect(fnBody).toContain('client.stopInstance');
-    // After stop, podId is preserved
-    expect(fnBody).toContain('deployState.podId = podId');
-    expect(fnBody).toContain('deployState.provider = provider');
+    // After stop, transitions to 'stopped' state with podId preserved via setDeployState
+    expect(fnBody).toContain("status: 'stopped'");
+    expect(fnBody).toContain('deploymentSM.markStopped(');
   });
 
   it('#196 autoStopGpu schedules auto-destroy after IDLE_DESTROY_MS', () => {
