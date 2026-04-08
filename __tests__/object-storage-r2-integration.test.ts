@@ -16,8 +16,10 @@
  * The test cleans up after itself by deleting the test object on completion.
  */
 
-import { describe, it, expect } from 'vitest';
-import { createR2Store } from '../src/object-storage';
+import { describe, it, expect, beforeAll } from 'vitest';
+
+// NOTE: createR2Store imports @aws-sdk/client-s3 which may not be installed.
+// We lazy-import inside the describe to let describe.skipIf() bail first.
 
 const skip =
   process.env.SKIP_R2_TESTS !== '0' ||
@@ -27,11 +29,15 @@ const skip =
   !process.env.R2_SECRET_ACCESS_KEY;
 
 describe.skipIf(skip)('object-storage / R2 integration', () => {
-  const store = createR2Store({
-    accountId: process.env.R2_ACCOUNT_ID!,
-    bucket: process.env.R2_BUCKET!,
-    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+  let store: any;
+  beforeAll(async () => {
+    const { createR2Store } = await import('../src/object-storage');
+    store = createR2Store({
+      accountId: process.env.R2_ACCOUNT_ID!,
+      bucket: process.env.R2_BUCKET!,
+      accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+    });
   });
 
   // Use a unique key per run so concurrent CI doesn't collide
