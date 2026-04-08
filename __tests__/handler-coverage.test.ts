@@ -185,7 +185,7 @@ describe('GPU Handlers: handleGpuResume (#125-#129)', () => {
   const src = read('server/gpu-handlers.ts');
   const body = fn(src, 'export async function handleGpuResume');
 
-  it('#125 resumes last stopped pod', () => { expect(body).toContain('startInstance'); });
+  it('#125 resumes last stopped pod', () => { expect(body).toContain('resumeOrDeploy'); });
   it('#127 returns 400 when no pod', () => { expect(body).toContain('400'); });
 });
 

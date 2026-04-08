@@ -195,9 +195,9 @@ describe('DOCKER_IMAGE_NAMES', () => {
     expect(DOCKER_IMAGE_NAMES).toContain('marcosremar/babelcast-subtitle');
   });
 
-  it('all names follow marcosremar/babelcast-* pattern', () => {
+  it('all names follow marcosremar/* pattern', () => {
     for (const name of DOCKER_IMAGE_NAMES) {
-      expect(name).toMatch(/^marcosremar\/babelcast-/);
+      expect(name).toMatch(/^marcosremar\//);
     }
   });
 

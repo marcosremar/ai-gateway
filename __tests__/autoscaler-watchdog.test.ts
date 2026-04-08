@@ -65,6 +65,8 @@ function makeDeps(stateMap: Map<string, GpuTierState[]>, overrides?: Partial<Wat
       cancelBootPoller: vi.fn(),
       initTierStatesFromDb: vi.fn(),
       evictIdleUsers: vi.fn(),
+      isDecisionInFlight: vi.fn().mockReturnValue(false),
+      waitForDecision: vi.fn().mockResolvedValue(undefined),
     } as any,
     sessionTracker: {
       countActiveSessions: vi.fn().mockResolvedValue(0),

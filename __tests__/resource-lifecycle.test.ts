@@ -129,9 +129,12 @@ describe('WebSocket broadcast', () => {
 describe('SSH tunnel lifecycle', () => {
   it('force-kills with SIGKILL after SIGTERM timeout', async () => {
     const source = (await import('fs')).readFileSync('server/ssh-tunnel.ts', 'utf8');
+    // close() delegates to _killProc() which does SIGTERM then SIGKILL
     const closeFn = source.slice(source.indexOf('close():'), source.indexOf('close():') + 300);
-    expect(closeFn).toContain('SIGTERM');
-    expect(closeFn).toContain('SIGKILL');
+    expect(closeFn).toContain('_killProc');
+    const killProc = source.slice(source.indexOf('_killProc():'), source.indexOf('_killProc():') + 300);
+    expect(killProc).toContain('SIGTERM');
+    expect(killProc).toContain('SIGKILL');
   });
 
   it('closeAllTunnels is called during autoTerminateGpu', async () => {

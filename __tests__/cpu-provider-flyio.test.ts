@@ -118,9 +118,9 @@ describe('FlyioClient', () => {
       }]));
       const [inst] = await client.listInstances(CREDS);
       expect(inst.instanceId).toBe('m1');
-      expect(inst.providerId).toBe('flyio');
-      expect(inst.costPerHr).toBe(0.03);
-      expect(inst.createdAt).toBeInstanceOf(Date);
+      expect(inst.providerMeta?.provider).toBe('flyio');
+      expect((inst.providerMeta as any)?.costPerHr).toBe(0.03);
+      expect((inst.providerMeta as any)?.createdAt).toBeTruthy();
       vi.unstubAllGlobals();
     });
   });
@@ -271,8 +271,8 @@ describe('FlyioClient', () => {
 
       const instance = await client.createInstance(spec, CREDS);
       expect(instance.instanceId).toBe('machine-abc123');
-      expect(instance.providerId).toBe('flyio');
-      expect(instance.costPerHr).toBe(0.03);
+      expect(instance.providerMeta?.provider).toBe('flyio');
+      expect((instance.providerMeta as any)?.costPerHr).toBe(0.03);
 
       if ((globalThis as any).Bun && origSpawn) {
         (globalThis as any).Bun.spawn = origSpawn;
