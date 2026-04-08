@@ -1,0 +1,52 @@
+# HaMeR — Reconstructing Hands in 3D with Transformers (ICCV 2023)
+# Quick start:
+#   1. Get MANO_RIGHT.pkl from https://mano.is.tue.mpg.de/ (free registration)
+#   2. mkdir -p mano_data input output && cp MANO_RIGHT.pkl mano_data/
+#   3. cp your_photos/*.jpg input/
+#   4. docker compose run --rm hamer
+#   5. results land in ./output/
+#
+# Long-running interactive session:
+#   docker compose run --rm --entrypoint /bin/bash hamer
+#
+# HaMeR has no built-in web UI — it's CLI/Python only. If you want a UI,
+# use the WiLoR setup at ../wilor/ (gradio at :7860) or write your own
+# wrapper around hamer.demo.
+
+services:
+  hamer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hamer:cu124
+    container_name: hamer
+
+    # NVIDIA GPU runtime — needs nvidia-container-toolkit on the host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1            # set to "all" for multi-GPU
+              capabilities: [gpu]
+
+    volumes:
+      # MANO_RIGHT.pkl (mandatory — license-restricted, not in image)
+      - ./mano_data:/app/hamer/_DATA/data/mano:ro
+      # Your input images
+      - ./input:/app/hamer/example_data
+      # HaMeR writes 3D meshes (.obj), side-view renders, and overlays here
+      - ./output:/app/hamer/demo_out
+
+    environment:
+      # CUDA visible devices (default: first GPU)
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      # pyrender headless backend (no display required)
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+      PYOPENGL_PLATFORM: egl
+      # detectron2 sometimes complains without this
+      MKL_THREADING_LAYER: GNU
+
+    # tty + stdin_open let `docker compose exec` and interactive runs work
+    tty: true
+    stdin_open: true
