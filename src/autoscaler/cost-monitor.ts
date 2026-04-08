@@ -19,7 +19,7 @@ import type { StatePersistence } from './state-persistence';
 import type { GatewayHooks } from '../hooks';
 import type { GpuLifecycleLogger } from './lifecycle-logger';
 import type { Logger } from '../deps';
-import { noopLifecycleLogger } from './lifecycle-logger';
+import { fileLifecycleLogger } from './file-lifecycle-logger';
 import { emitHook } from '../hooks';
 import { probeGpuHealth } from './health';
 import { defaultLogger } from '../logger';
@@ -465,7 +465,7 @@ export async function runCostMonitorCycle(deps: CostMonitorDeps): Promise<CostMo
           timestamp: Date.now(),
         });
 
-        const costLogger = deps.lifecycleLogger ?? noopLifecycleLogger;
+        const costLogger = deps.lifecycleLogger ?? fileLifecycleLogger;
         try {
           await client.deleteInstance(instance.instanceId, account.credentials);
           entry.actionTaken = 'deleted';

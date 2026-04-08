@@ -1030,6 +1030,30 @@ export function startWsServer() {
       'GET /v1/gpu/readiness/status': gh.handleGetGpuReadinessStatus,
       'GET /v1/gpu/readiness/history': gh.handleGetGpuReadinessHistory,
       'POST /v1/gpu/readiness/reset': gh.handlePostResetReadiness,
+      'GET /v1/gpu/sweep': async (_req: any, res: any) => {
+        try {
+          const { sweepAllProviders } = await import('../src/autoscaler/gpu-sweep');
+          const report = await sweepAllProviders();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(report));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      },
+      'GET /v1/gpu/lifecycle-logs': async (req: any, res: any) => {
+        try {
+          const { readRecentLogs } = await import('../src/autoscaler/file-lifecycle-logger');
+          const url = new URL(req.url, 'http://localhost');
+          const lines = parseInt(url.searchParams.get('lines') || '100', 10);
+          const logs = readRecentLogs(Math.min(lines, 1000));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(logs));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      },
       'GET /health': gh.handleHealth,
       // Config
       'GET /v1/config/providers': ch.handleGetProviderConfig,
