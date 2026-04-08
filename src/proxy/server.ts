@@ -62,10 +62,12 @@ const SECURITY_HEADERS: Record<string, string> = {
 };
 
 function sendResponse(res: ServerResponse, proxyRes: ProxyResponse, requestId: string): void {
+  const existingCors = res.getHeader('Access-Control-Allow-Origin');
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'X-Request-Id': requestId,
     ...SECURITY_HEADERS,
+    ...(existingCors !== undefined ? { 'Access-Control-Allow-Origin': String(existingCors) } : {}),
     ...proxyRes.headers,
   };
 
@@ -81,10 +83,12 @@ function sendResponse(res: ServerResponse, proxyRes: ProxyResponse, requestId: s
 }
 
 function sendError(res: ServerResponse, status: number, message: string, requestId?: string): void {
+  const existingCors = res.getHeader('Access-Control-Allow-Origin');
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...SECURITY_HEADERS,
     ...(requestId ? { 'X-Request-Id': requestId } : {}),
+    ...(existingCors !== undefined ? { 'Access-Control-Allow-Origin': String(existingCors) } : {}),
   };
   res.writeHead(status, headers);
   res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
@@ -311,22 +315,22 @@ export function createProxyServer(config: ProxyConfig): Server {
     // CORS origin validation
     const corsOriginsEnv = process.env.CORS_ORIGINS || 'http://localhost:4000,http://localhost:3000';
     const requestOrigin = req.headers.origin || '';
-    let allowedOrigin = '*';
+    let allowedOrigin: string | null = '*';
     if (corsOriginsEnv !== '*') {
       const allowedOrigins = corsOriginsEnv.split(',').map(o => o.trim()).filter(Boolean);
       const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(requestOrigin);
       if (isLocal || allowedOrigins.includes(requestOrigin)) {
         allowedOrigin = requestOrigin;
       } else {
-        // Non-matching origin: set empty string so browser blocks the request
-        allowedOrigin = '';
+        // Non-matching origin: omit CORS header so browser blocks the request
+        allowedOrigin = null;
       }
     }
 
     // CORS preflight
     if (method === 'OPTIONS') {
       res.writeHead(204, {
-        'Access-Control-Allow-Origin': allowedOrigin,
+        ...(allowedOrigin !== null ? { 'Access-Control-Allow-Origin': allowedOrigin } : {}),
         'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
         'X-Request-Id': requestId,
@@ -337,7 +341,9 @@ export function createProxyServer(config: ProxyConfig): Server {
     }
 
     // Set CORS origin header for all non-preflight responses
-    res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+    if (allowedOrigin !== null) {
+      res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+    }
 
     // Skip auth for health endpoint (Fly.io health checks don't send tokens)
     const urlPath = url.split('?')[0];
@@ -512,12 +518,11 @@ export function createProxyServer(config: ProxyConfig): Server {
     }
   });
 
-  // Proxy WebSocket upgrades to Next.js dev server for HMR
-  if (config.nextDevUrl) {
-    const nextUrl = config.nextDevUrl;
-    server.on('upgrade', (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => {
-      const path = req.url || '/';
-      if (!path.startsWith('/_next/')) { socket.destroy(); return; }
+  // Handle all WebSocket upgrade requests — proxy HMR to Next.js dev server, block everything else with 410
+  server.on('upgrade', (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => {
+    const path = req.url || '/';
+    if (config.nextDevUrl && path.startsWith('/_next/')) {
+      const nextUrl = config.nextDevUrl;
       const target = new URL(path, nextUrl);
       const proxyReq = require('http').request(target, {
         method: 'GET',
@@ -535,8 +540,15 @@ export function createProxyServer(config: ProxyConfig): Server {
       });
       proxyReq.on('error', () => socket.destroy());
       proxyReq.end();
-    });
-  }
+      return;
+    }
+    // All other WebSocket upgrades: return 410 Gone
+    const body = JSON.stringify({ error: { message: 'WebSocket transport is removed. Use POST /v1/speech instead.', type: 'gone' } });
+    socket.write(
+      `HTTP/1.1 410 Gone\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+    );
+    socket.end();
+  });
 
   return server;
 }
