@@ -406,7 +406,7 @@ describe('AutoscalerEngine', () => {
       const tier: GpuTierConfig = { provider: 'runpod', gpuTypes: ['RTX3090'] };
       const result = await engine.triggerGpuBoot(tier, 0, 'user1');
       expect(result.ok).toBe(false);
-      expect(result.reason).toContain('API key');
+      expect(result.reason).toContain('apiKey');
     });
 
     it('should discover existing instance and return ok=true', async () => {
@@ -421,7 +421,7 @@ describe('AutoscalerEngine', () => {
         registry: registry as unknown as GpuProviderRegistry,
       }));
       const tier: GpuTierConfig = {
-        provider: 'runpod', gpuTypes: ['RTX3090'], apiKey: 'test-key',
+        provider: 'runpod', gpuTypes: ['RTX3090'], apiKey: 'test-key', dockerImage: 'test:latest',
       };
       const result = await engine.triggerGpuBoot(tier, 0, 'user1');
       expect(result.ok).toBe(true);

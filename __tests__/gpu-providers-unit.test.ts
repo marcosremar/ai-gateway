@@ -151,6 +151,10 @@ describe('RunpodClient', () => {
       dockerImage: 'marcosremar/babelcast-subtitle:latest',
       cpuFlavorIds: ['cpu3c'],
     };
+    // preflight: getAccountStatus GraphQL
+    fetchSpy.mockResolvedValueOnce(mockResponse({
+      data: { myself: { id: '1', email: 'test@test.com', machineQuota: 10, clientBalance: 100, currentSpendPerHr: 0, pods: [] } },
+    }));
     fetchSpy.mockResolvedValueOnce(mockResponse({ id: 'cpu-pod-1' }));
 
     const result = await client.createInstance(spec, creds);
@@ -272,6 +276,10 @@ describe('RunpodClient', () => {
       dockerImage: 'test:latest',
       cpuFlavorIds: ['cpu3c'],
     };
+    // preflight: getAccountStatus GraphQL
+    fetchSpy.mockResolvedValueOnce(mockResponse({
+      data: { myself: { id: '1', email: 'test@test.com', machineQuota: 10, clientBalance: 100, currentSpendPerHr: 0, pods: [] } },
+    }));
     fetchSpy.mockResolvedValueOnce(mockResponse({ id: 'cpu-pod' }));
     await clientWithPersist.createInstance(spec, creds, 'user-1');
     expect(persistFn).toHaveBeenCalledWith('user-1', 'runpodPod', expect.objectContaining({ podId: 'cpu-pod' }));

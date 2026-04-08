@@ -73,6 +73,10 @@ class MockAudioContext {
 // Install global mock
 vi.stubGlobal('AudioContext', MockAudioContext);
 
+// Disable Worker so StreamingAudioPlayer falls back to synchronous main-thread PCM decode.
+// In bun's test runtime, real Workers don't flush in time for setTimeout(0).
+vi.stubGlobal('Worker', class { constructor() { throw new Error('no Worker in test'); } });
+
 const flushMicrotasks = () => new Promise(resolve => setTimeout(resolve, 0));
 
 // ── Helper: create a minimal WAV chunk ───────────────────────────────────────

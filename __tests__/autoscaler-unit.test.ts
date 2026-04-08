@@ -264,7 +264,7 @@ describe('BootOrchestrator', () => {
       'user-1',
     );
     expect(result.ok).toBe(false);
-    expect(result.reason).toContain('key');
+    expect(result.reason).toContain('apiKey');
   });
 
   // #486 — max retry attempts

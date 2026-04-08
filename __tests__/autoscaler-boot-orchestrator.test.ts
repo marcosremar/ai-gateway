@@ -114,7 +114,7 @@ describe('BootOrchestrator.triggerGpuBoot', () => {
       0, 'user',
     );
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/api key/i);
+    expect(result.reason).toMatch(/api\s?key/i);
   });
 
   it('returns failure when max attempts exceeded', async () => {

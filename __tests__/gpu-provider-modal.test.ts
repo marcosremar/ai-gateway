@@ -35,8 +35,8 @@ describe('ModalClient', () => {
       expect(client.providerId).toBe('modal');
     });
 
-    it('bootTimeSecs is 60', () => {
-      expect(client.bootTimeSecs).toBe(60);
+    it('bootTimeSecs is 10', () => {
+      expect(client.bootTimeSecs).toBe(10);
     });
   });
 

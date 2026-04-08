@@ -331,6 +331,8 @@ describe('TensordockClient', () => {
     };
 
     function mockCreateDeps() {
+      // 0. preflight: checkBalance (marketplace v0 balance endpoint)
+      fetchSpy.mockResolvedValueOnce(jsonResponse({ success: true, balance: 100, hourly_cost: 0 }));
       // 1. findSshKey: list secrets
       fetchSpy.mockResolvedValueOnce(jsonResponse({
         data: { secrets: [{ id: 'ssh-1', type: 'SSHKEY' }] },
@@ -375,6 +377,8 @@ describe('TensordockClient', () => {
     }
 
     it('requires SSH key', async () => {
+      // preflight: checkBalance
+      fetchSpy.mockResolvedValueOnce(jsonResponse({ success: true, balance: 100, hourly_cost: 0 }));
       // findSshKey returns nothing
       fetchSpy.mockResolvedValueOnce(jsonResponse({ data: { secrets: [] } }));
 
