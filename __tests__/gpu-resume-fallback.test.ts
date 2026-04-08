@@ -12,13 +12,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { DeploymentStateMachine } from '../server/deployment-state-machine';
 
 // ── 1. State Machine tests (import directly, no mocks needed) ──────────────
 
 describe('DeploymentStateMachine — stopped phase', () => {
-  // Fresh SM instance per test to avoid cross-test pollution
   function createSM() {
-    const { DeploymentStateMachine } = require('../server/deployment-state-machine');
     return new DeploymentStateMachine();
   }
 
