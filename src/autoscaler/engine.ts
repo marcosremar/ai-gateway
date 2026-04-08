@@ -18,7 +18,7 @@ import type { StatePersistence } from './state-persistence';
 import type { GatewayHooks } from '../hooks';
 import type { GpuLifecycleLogger } from './lifecycle-logger';
 import type { Logger } from '../deps';
-import { noopLifecycleLogger } from './lifecycle-logger';
+import { fileLifecycleLogger } from './file-lifecycle-logger';
 import { LATENCY_BREACH_COUNT, countRecentBreaches } from './latency-tracker';
 import { emitHook } from '../hooks';
 import { defaultLogger } from '../logger';
@@ -81,7 +81,7 @@ export class AutoscalerEngine {
     this.cleanupInstance = opts.cleanupInstance;
     this.hooks = opts.hooks;
     this.onInstancePersist = opts.onInstancePersist;
-    this.lifecycleLogger = opts.lifecycleLogger ?? noopLifecycleLogger;
+    this.lifecycleLogger = opts.lifecycleLogger ?? fileLifecycleLogger;
     this.logger = opts.logger ?? defaultLogger;
 
     this.providerMonitor = new ProviderMonitor({
@@ -123,6 +123,27 @@ export class AutoscalerEngine {
   /** Expose stateMap for watchdog/external iteration */
   getStateMap(): Map<string, GpuTierState[]> {
     return this.stateMap;
+  }
+
+  /**
+   * True if a getAutoScaleDecision call for this user is currently in flight.
+   * Watchdog uses this to skip stopping tiers while the engine is mid-decision —
+   * otherwise watchdog can race the engine and stop a tier the engine is about
+   * to mark as needed.
+   */
+  isDecisionInFlight(userId: string): boolean {
+    return this.decisionLocks.has(userId);
+  }
+
+  /**
+   * Wait for any in-flight decision for this user to complete. Resolves
+   * immediately if no decision is pending. Use this from watchdog before
+   * mutating tier state to avoid racing with engine.
+   */
+  async waitForDecision(userId: string): Promise<void> {
+    const lock = this.decisionLocks.get(userId);
+    if (!lock) return;
+    try { await lock; } catch { /* ignore — engine already logged */ }
   }
 
   /** Evict stateMap entries where all tiers are idle (prevents unbounded growth). */
@@ -261,8 +282,22 @@ export class AutoscalerEngine {
     // Chain per-user decisions into a serial queue to prevent concurrent boot triggers.
     // Each call runs only after the previous one completes (FIFO).
     const prev = this.decisionLocks.get(userId);
-    const chain = (prev ? prev.catch(e => console.warn('[autoscaler] previous decision failed:', e instanceof Error ? e.message : e)) : Promise.resolve())
-      .then(() => this._getAutoScaleDecisionImpl(userId, config, options));
+    const chain = (prev
+      ? prev.catch((e) => {
+          // Surface previous decision failures via the hooks system, not just stderr.
+          // Without this, host apps had no way to detect that a prior autoscaler
+          // decision crashed (silent observability gap noted in the audit).
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn('[autoscaler] previous decision failed:', msg);
+          this.emitError({
+            userId,
+            operation: 'getAutoScaleDecision:previousChain',
+            message: `Previous decision in chain failed: ${msg}`,
+            retryable: true,
+          });
+        })
+      : Promise.resolve()
+    ).then(() => this._getAutoScaleDecisionImpl(userId, config, options));
     this.decisionLocks.set(userId, chain);
     chain.finally(() => {
       if (this.decisionLocks.get(userId) === chain) this.decisionLocks.delete(userId);

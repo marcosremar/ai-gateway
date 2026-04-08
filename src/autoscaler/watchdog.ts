@@ -7,7 +7,7 @@ import type { GpuProviderRegistry } from '../gpu-providers/registry';
 import type { GatewayHooks } from '../hooks';
 import type { GpuLifecycleLogger } from './lifecycle-logger';
 import type { Logger } from '../deps';
-import { noopLifecycleLogger } from './lifecycle-logger';
+import { fileLifecycleLogger } from './file-lifecycle-logger';
 import { emitHook } from '../hooks';
 import { cleanupProviderInstance } from './cleanup';
 import { defaultLogger } from '../logger';
@@ -115,8 +115,20 @@ async function runWatchdogForUser(
   config: AutoScalerConfig,
 ): Promise<void> {
   const { engine, sessionTracker, persistence, registry, hooks } = deps;
-  const logger = deps.lifecycleLogger ?? noopLifecycleLogger;
+  const logger = deps.lifecycleLogger ?? fileLifecycleLogger;
   const log = deps.logger ?? defaultLogger;
+
+  // Wait for any in-flight engine decision before mutating tier state.
+  // Without this, watchdog can race the engine: e.g., engine decides "I need
+  // tier 1, boot it" and starts the boot, while watchdog (running concurrently)
+  // sees tier 0 as idle and stops it — leaving the user with NO ready tiers
+  // mid-decision. The persistence layer eventually corrects it, but the window
+  // is observable as a brief outage.
+  if (engine.isDecisionInFlight(userId)) {
+    log.log(`[watchdog] User ${userId}: decision in flight, awaiting before sweep`);
+    await engine.waitForDecision(userId);
+  }
+
   const stateMap = engine.getStateMap();
   const tierStates = stateMap.get(userId) ?? [];
   if (tierStates.length === 0) return;
