@@ -83,6 +83,8 @@ export interface GpuTierConfig {
   snapgpuPreloadApp?: string;
   /** Snapgpu-only: snapshot ID to restore from instead of cold booting. */
   snapgpuRestoreFromSnapshot?: string;
+  /** Snapgpu-only: underlying provider to deploy on ('vast' or 'runpod'). Defaults to 'vast'. */
+  snapgpuBackend?: 'vast' | 'runpod';
 }
 
 /**

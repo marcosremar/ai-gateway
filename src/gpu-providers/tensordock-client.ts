@@ -53,35 +53,145 @@ export interface SshKeyInfo {
 }
 
 /**
- * Finds the first SSH key in the account's secrets.
- * Returns both the secret ID and the raw public key content.
+ * Extracts the base64 key material from an SSH public key string for comparison.
+ * Ignores the algorithm prefix and comment suffix so keys from different machines
+ * with different comments still match if they share the same key material.
+ */
+function sshKeyBody(pubKey: string): string {
+  return pubKey.trim().split(/\s+/)[1] || '';
+}
+
+/**
+ * Creates a new SSHKEY secret in TensorDock.
+ * Format discovered via API inspection: JSON:API with type="secret" and attributes.type="SSHKEY".
+ *
+ * @returns The new secret's ID, or undefined on failure.
+ */
+export async function createSshKeySecret(
+  headers: Record<string, string>,
+  name: string,
+  publicKey: string,
+): Promise<string | undefined> {
+  try {
+    const res = await fetch(`${TENSORDOCK_V2_BASE}/secrets`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        data: {
+          type: 'secret',
+          attributes: { type: 'SSHKEY', name, value: publicKey },
+        },
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return undefined;
+    const data = await res.json();
+    return (data.data?.id as string | undefined) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Deletes a secret by ID.
+ */
+export async function deleteSecret(headers: Record<string, string>, secretId: string): Promise<void> {
+  await fetch(`${TENSORDOCK_V2_BASE}/secrets/${secretId}`, {
+    method: 'DELETE',
+    headers,
+    signal: AbortSignal.timeout(10_000),
+  }).catch(() => {/* best-effort */});
+}
+
+/**
+ * Lists all SSH key secrets in the account.
+ * Response shape: GET /api/v2/secrets → { data: { secrets: [...] } }
+ * Each secret: { type: "SSHKEY", id: string, name: string }
+ */
+export async function listSshKeySecrets(
+  headers: Record<string, string>,
+): Promise<Array<{ id: string; name: string }>> {
+  try {
+    const res = await fetch(`${TENSORDOCK_V2_BASE}/secrets`, { headers, signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const secrets = data.data?.secrets || data.secrets || data.data || [];
+    if (!Array.isArray(secrets)) return [];
+    return secrets
+      .filter((s: { type?: string }) => (s.type || '').toUpperCase() === 'SSHKEY')
+      .map((s: { id: string; name: string }) => ({ id: s.id, name: s.name }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Finds the SSH key secret whose value matches the local machine's public key.
+ * If no match is found, auto-creates a new secret with the local key.
+ *
+ * This ensures the deployed VM uses the correct key for the current machine —
+ * avoids the "Permission denied (publickey)" failure that occurs when TensorDock
+ * picks the first SSHKEY in the list (e.g. id_rsa) which may not match id_ed25519.
  */
 export async function findSshKey(headers: Record<string, string>): Promise<SshKeyInfo | undefined> {
+  const localRaw = getDefaultSshPubKey();
+  const localBody = localRaw ? sshKeyBody(localRaw) : undefined;
+
   try {
     const res = await fetch(`${TENSORDOCK_V2_BASE}/secrets`, { headers, signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return undefined;
     const data = await res.json();
     const secrets = data.data?.secrets || data.secrets || data.data || [];
     if (!Array.isArray(secrets)) return undefined;
-    const ssh = secrets.find(
-      (s: { type?: string; attributes?: { type?: string } }) =>
-        (s.type || '').toUpperCase() === 'SSHKEY' ||
-        (s.attributes?.type || '').toUpperCase() === 'SSHKEY',
+
+    const sshSecrets = secrets.filter(
+      (s: { type?: string }) => (s.type || '').toUpperCase() === 'SSHKEY',
     );
-    if (!ssh?.id) return undefined;
+    if (sshSecrets.length === 0) return undefined;
 
-    // Try to fetch the raw public key content from the secret
-    let publicKey: string | undefined;
-    try {
-      const detailRes = await fetch(`${TENSORDOCK_V2_BASE}/secrets/${ssh.id}`, { headers, signal: AbortSignal.timeout(10_000) });
-      if (detailRes.ok) {
-        const detail = await detailRes.json();
-        publicKey = detail.data?.attributes?.value || detail.data?.value || detail.value;
+    // Fetch each key's value and find the one matching the local pubkey
+    let bestId: string | undefined;
+    let bestPublicKey: string | undefined;
+
+    for (const ssh of sshSecrets) {
+      if (!ssh?.id) continue;
+      let publicKey: string | undefined;
+      try {
+        const detailRes = await fetch(`${TENSORDOCK_V2_BASE}/secrets/${ssh.id}`, {
+          headers, signal: AbortSignal.timeout(10_000),
+        });
+        if (detailRes.ok) {
+          const detail = await detailRes.json();
+          publicKey = detail.data?.attributes?.value || detail.data?.value || detail.value;
+        }
+      } catch { /* non-critical */ }
+
+      // Prefer the key whose body matches the local key
+      if (localBody && publicKey && sshKeyBody(publicKey) === localBody) {
+        return { id: ssh.id as string, publicKey };
       }
-    } catch (e) { /* SSH key detail fetch is non-critical */ }
 
-    return { id: ssh.id as string, publicKey };
-  } catch (e) {
+      // Keep track of first available as fallback
+      if (!bestId) {
+        bestId = ssh.id as string;
+        bestPublicKey = publicKey;
+      }
+    }
+
+    // No exact match — auto-create a secret with the local key
+    if (localRaw) {
+      const newId = await createSshKeySecret(
+        headers,
+        `ai-gateway-${Date.now()}`,
+        localRaw,
+      );
+      if (newId) return { id: newId, publicKey: localRaw };
+    }
+
+    // Fall back to first SSHKEY if no local key is configured
+    if (bestId) return { id: bestId, publicKey: bestPublicKey };
+    return undefined;
+  } catch {
     return undefined;
   }
 }
@@ -582,6 +692,29 @@ export class TensordockClient extends AbstractGpuProvider {
     }
   }
 
+  // ── Secrets management ────────────────────────────────────────────────────
+
+  /** List SSH key secrets registered in the TensorDock account. */
+  async listSshKeySecrets(credentials: ProviderCredentials): Promise<Array<{ id: string; name: string }>> {
+    return listSshKeySecrets(this.headers(credentials.apiKey));
+  }
+
+  /**
+   * Create a new SSHKEY secret.
+   * Use this to register a machine's public key so future deploys can reference it by ID.
+   * API format: POST /api/v2/secrets with JSON:API body (discovered via interface inspection).
+   */
+  async createSshKeySecret(credentials: ProviderCredentials, name: string, publicKey: string): Promise<string | undefined> {
+    return createSshKeySecret(this.headers(credentials.apiKey), name, publicKey);
+  }
+
+  /** Delete a secret by ID. Secrets cannot be updated (PATCH → 405), only deleted + recreated. */
+  async deleteSecret(credentials: ProviderCredentials, secretId: string): Promise<void> {
+    return deleteSecret(this.headers(credentials.apiKey), secretId);
+  }
+
+  // ── Instance lifecycle ────────────────────────────────────────────────────
+
   async deleteInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const { apiKey } = credentials;
     await this.rateLimiter.wait();
@@ -617,21 +750,30 @@ export class TensordockClient extends AbstractGpuProvider {
         return [];
       }
       const data = (await res.json()) as Record<string, unknown>;
-      const list = (data.data ?? []) as unknown[];
-      if (!Array.isArray(list)) return [];
+      // API returns { data: [...] } (flat array, observed via inspection).
+      // Docs show { data: { instances: [...] } } — handle both for robustness.
+      let rawList: unknown = data.data ?? [];
+      if (!Array.isArray(rawList)) {
+        rawList = (rawList as Record<string, unknown>).instances ?? [];
+      }
+      const list = rawList as unknown[];
       for (const item of list) {
         const it = item as Record<string, unknown>;
+        // Instance items use flat camelCase fields (ipAddress, portForwards, status)
+        // matching the single-instance GET response format.
         const attrs = ((it.attributes || it) as Record<string, unknown>);
         const ip = (attrs.ip_address || attrs.ipAddress || '') as string;
         const pfs = (attrs.port_forwards || attrs.portForwards || []) as Array<{ internal_port: number; external_port: number }>;
         const apiPf = pfs.find((p) => p.internal_port === 8000);
+        const sshPf = pfs.find((p) => p.internal_port === 22);
         const endpoint = ip && apiPf ? `http://${ip}:${apiPf.external_port}` : ip ? `http://${ip}:8000` : '';
         instances.push({
           instanceId: ((it.id || attrs.id) as string),
-          instanceName: attrs.name as string | undefined,
+          instanceName: (it.name || attrs.name) as string | undefined,
           endpoint,
-          status: String(attrs.status || 'unknown'),
+          status: String(it.status || attrs.status || 'unknown'),
           ipAddress: ip,
+          sshPort: sshPf?.external_port,
         });
       }
     } catch (err) {

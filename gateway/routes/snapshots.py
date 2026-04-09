@@ -103,23 +103,35 @@ async def create_snapshot(body: CreateSnapshotRequest):
     # Store worker_port so the pool's _find_snapshot() can locate and use this
     # snapshot for fast CRIU restores.  Without worker_port set, the pool filters
     # the row out (worker_port != None guard) and always falls back to cold start.
-    worker_port: Optional[int] = None
-    if pid:
-        worker_port = get_pool().get_port_for_pid(pid)
+    worker_port: Optional[int] = get_pool().get_port_for_pid(pid) if pid else None
 
+    # Read back metadata and (optionally) update worker_port inside a single
+    # session so we never touch a detached SQLModel object.
+    size_bytes = 0
+    gpu_memory_included = False
     with get_session() as session:
         snap = session.exec(
             select(SnapshotModel).where(SnapshotModel.snapshot_id == snapshot_id)
         ).first()
-        if snap and worker_port:
+        if snap is None:
+            # Snapshot was returned by _manager.create() but not in DB — should
+            # not happen; return a partial response rather than crashing.
+            return CreateSnapshotResponse(
+                snapshot_id=snapshot_id,
+                error="Snapshot created but not found in DB — check gateway logs",
+            )
+        if worker_port:
             snap.worker_port = worker_port
             session.add(snap)
             session.commit()
+        # Read inside session while object is still live
+        size_bytes = snap.size_bytes or 0
+        gpu_memory_included = snap.gpu_memory_included or False
 
     return CreateSnapshotResponse(
         snapshot_id=snapshot_id,
-        size_bytes=snap.size_bytes if snap else 0,
-        gpu_memory_included=snap.gpu_memory_included if snap else False,
+        size_bytes=size_bytes,
+        gpu_memory_included=gpu_memory_included,
     )
 
 

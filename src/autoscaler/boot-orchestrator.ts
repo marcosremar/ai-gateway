@@ -222,6 +222,8 @@ export class BootOrchestrator {
                     env: cfg.env,
                     storageGb: cfg.storageGb,
                     snapgpuRestoreFromSnapshot: cfg.snapgpuRestoreFromSnapshot,
+                    snapgpuPreloadApp: cfg.snapgpuPreloadApp,
+                    snapgpuBackend: cfg.snapgpuBackend,
                   },
                   { apiKey: cfg.apiKey!, authId: cfg.authId, hfToken: cfg.hfToken },
                   userId,
