@@ -10,3 +10,12 @@ load-testing/results/
 snapgpu.egg-info/
 snapgpu.db
 __pycache__/
+
+# Generated reports and temp files
+COVERAGE_*
+TEST_*
+PRIORITY_ACTION_PLAN.md
+1timeout
+qr-screenshot.png
+opencode.json
+backend
