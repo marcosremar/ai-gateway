@@ -1677,7 +1677,7 @@ describe('12. Preset Profiles Integrity', () => {
     expect(VOICE_PROFILE.llm!.length).toBeGreaterThanOrEqual(2);
     expect(VOICE_PROFILE.tts!.length).toBeGreaterThanOrEqual(2);
     expect(VOICE_PROFILE.voice).toBe('nova');
-    expect(VOICE_PROFILE.fallbackOptions?.timeoutMs).toBe(8000);
+    expect(VOICE_PROFILE.fallbackOptions?.timeoutMs).toBe(15000);
   });
 
   it('CHAT_PROFILE has context window fallbacks configured', () => {

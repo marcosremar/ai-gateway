@@ -8,12 +8,15 @@ Requires CRIU and optionally cuda-checkpoint for GPU memory snapshots.
 
 from __future__ import annotations
 import os
+import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlmodel import select
 from ..db import get_session, SnapshotModel
 
 
@@ -76,20 +79,14 @@ class SnapshotManager:
         snapshot_path.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Step 1: Checkpoint GPU memory (if available and requested)
-            gpu_included = False
-            if include_gpu and self.cuda_checkpoint_available:
-                print(f"[snapshot] Checkpointing GPU memory for PID {pid}...")
-                result = subprocess.run(
-                    ["cuda-checkpoint", "--toggle", "--pid", str(pid)],
-                    capture_output=True, text=True, timeout=30,
-                )
-                if result.returncode == 0:
-                    gpu_included = True
-                else:
-                    print(f"[snapshot] cuda-checkpoint failed: {result.stderr}")
+            # cuda_plugin.so (at /usr/lib/criu/cuda_plugin.so) handles GPU memory
+            # automatically during criu dump — no manual cuda-checkpoint pre-call needed.
+            # Pre-calling --toggle would cause a double-freeze and break the dump.
+            gpu_included = include_gpu and self.cuda_checkpoint_available
 
-            # Step 2: CRIU checkpoint
+            # CRIU checkpoint.
+            # --ext-unix-sk: required for processes that hold Unix socket FDs (validated).
+            # --leave-running: process keeps running after dump (warm pool: snapshot + keep serving).
             print(f"[snapshot] Creating CRIU checkpoint for PID {pid}...")
             result = subprocess.run(
                 [
@@ -98,6 +95,7 @@ class SnapshotManager:
                     "--images-dir", str(snapshot_path),
                     "--leave-running",
                     "--shell-job",
+                    "--ext-unix-sk",
                     "--tcp-established",
                     "--file-locks",
                 ],
@@ -145,7 +143,6 @@ class SnapshotManager:
             return None
 
         with get_session() as session:
-            from sqlmodel import select
             snapshot = session.exec(
                 select(SnapshotModel).where(SnapshotModel.snapshot_id == snapshot_id)
             ).first()
@@ -159,16 +156,23 @@ class SnapshotManager:
             print(f"[snapshot] Snapshot directory missing: {snapshot_path}")
             return None
 
+        # Use a unique pidfile per restore so concurrent restores don't
+        # overwrite each other's PID.
+        pid_fd, pid_path = tempfile.mkstemp(prefix='criu-restore-', suffix='.pid')
+        os.close(pid_fd)
+
         try:
             print(f"[snapshot] Restoring from {snapshot_id}...")
             result = subprocess.run(
                 [
                     "criu", "restore",
                     "--images-dir", str(snapshot_path),
+                    "--restore-detached",  # exit immediately after restore (don't wait for process to exit)
                     "--shell-job",
+                    "--ext-unix-sk",
                     "--tcp-established",
                     "--file-locks",
-                    "--pidfile", "/tmp/criu-restore.pid",
+                    "--pidfile", pid_path,
                 ],
                 capture_output=True, text=True, timeout=30,
             )
@@ -177,28 +181,30 @@ class SnapshotManager:
                 print(f"[snapshot] CRIU restore failed: {result.stderr}")
                 return None
 
-            # Read restored PID
-            pid_file = Path("/tmp/criu-restore.pid")
+            pid_file = Path(pid_path)
             if pid_file.exists():
-                pid = int(pid_file.read_text().strip())
-                print(f"[snapshot] Restored PID {pid} from {snapshot_id}")
-                return pid
+                content = pid_file.read_text().strip()
+                if content.isdigit():
+                    pid = int(content)
+                    print(f"[snapshot] Restored PID {pid} from {snapshot_id}")
+                    return pid
 
+            print(f"[snapshot] CRIU restore succeeded but pidfile missing/empty: {pid_path}")
             return None
 
         except subprocess.TimeoutExpired:
             print("[snapshot] Restore timed out")
             return None
+        finally:
+            Path(pid_path).unlink(missing_ok=True)
 
     def delete(self, snapshot_id: str):
         """Delete a snapshot and its files."""
         with get_session() as session:
-            from sqlmodel import select
             snapshot = session.exec(
                 select(SnapshotModel).where(SnapshotModel.snapshot_id == snapshot_id)
             ).first()
             if snapshot:
-                import shutil
                 shutil.rmtree(snapshot.snapshot_path, ignore_errors=True)
                 session.delete(snapshot)
                 session.commit()

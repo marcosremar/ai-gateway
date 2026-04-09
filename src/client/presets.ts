@@ -34,7 +34,8 @@ export const VOICE_PROFILE: AIProfile = {
   ],
   voice: 'nova',
   audioFormat: 'wav',
-  fallbackOptions: { timeoutMs: 8_000, retriesPerProvider: 0 },
+  // 15s: Groq Orpheus and OpenAI TTS can take 10-15s cold or under load.
+  fallbackOptions: { timeoutMs: 15_000, retriesPerProvider: 0 },
 };
 
 export const CHAT_PROFILE: AIProfile = {
@@ -71,7 +72,9 @@ export const TTS_PROFILE: AIProfile = {
   ],
   voice: 'nova',
   audioFormat: 'wav',
-  fallbackOptions: { timeoutMs: 8_000, retriesPerProvider: 0 },
+  // 15s: Groq Orpheus streams audio token-by-token and can take 10-15s on cold
+  // start or under load. 8s was too tight and caused spurious test timeouts.
+  fallbackOptions: { timeoutMs: 15_000, retriesPerProvider: 0 },
 };
 
 export const LLM_PROFILE: AIProfile = {

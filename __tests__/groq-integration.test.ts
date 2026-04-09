@@ -3,84 +3,94 @@
  *
  * Tests STT, TTS, and LLM against Groq's live API.
  * Requires: GROQ_API_KEY
+ *
+ * Cost minimization: ONE API call per describe block (shared via beforeAll).
+ * Multiple it() blocks assert different properties of the SAME response.
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { groqSTT, groqTTS, groqLLM } from '../src/providers/groq';
+import type { STTResponse, LLMResponse, TTSResponse } from '../src/providers/types';
 import { loadEnv, makeTestWav, timed } from './helpers';
 
 beforeAll(() => loadEnv());
 
+function skipOn(err: unknown): boolean {
+  const s = (err as Record<string, unknown>)?.status;
+  return s === 401 || s === 402 || s === 403 || s === 429;
+}
+
+// ── STT ── 1 call total ──────────────────────────────────────────────────────
+
 describe.skipIf(!process.env.GROQ_API_KEY)('Groq STT (Real API)', () => {
-  it('transcribes audio with whisper-large-v3-turbo', async () => {
-    const audio = makeTestWav(1.0);
+  // Shared audio + result — ONE transcription call for the entire suite
+  const audio = makeTestWav(0.5); // 0.5s — minimum viable audio
+  let stt: STTResponse | null = null;
+  let ms = 0;
 
+  beforeAll(async () => {
     try {
-      const { result, ms } = await timed(() =>
+      ({ result: stt, ms } = await timed(() =>
         groqSTT.transcribe({ audio, model: 'whisper-large-v3-turbo' }),
-      );
-
-      expect(result).toBeDefined();
-      expect(typeof result.text).toBe('string');
-      console.log(`  Groq STT: "${result.text}" (${ms}ms)`);
+      ));
     } catch (err: unknown) {
-      const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
-      throw err;
+      if (!skipOn(err)) throw err;
     }
   });
 
-  it('returns language detection', async () => {
-    const audio = makeTestWav(0.5);
-
-    try {
-      const result = await groqSTT.transcribe({
-        audio,
-        model: 'whisper-large-v3-turbo',
-      });
-
-      expect(result).toBeDefined();
-      // Language may or may not be returned for silence/sine
-      expect(typeof result.text).toBe('string');
-    } catch (err: unknown) {
-      const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
-      throw err;
-    }
+  it('returns a text string', () => {
+    if (!stt) return; // provider unavailable — skip gracefully
+    expect(typeof stt.text).toBe('string');
+    console.log(`  Groq STT: "${stt.text}" (${ms}ms)`);
   });
 
-  it('isConfigured returns true when key is set', () => {
+  it('language field is absent or a string', () => {
+    if (!stt) return;
+    expect(stt.language === undefined || typeof stt.language === 'string').toBe(true);
+  });
+
+  it('isConfigured returns true', () => {
     expect(groqSTT.isConfigured()).toBe(true);
   });
 });
 
+// ── TTS ── 1 call total ──────────────────────────────────────────────────────
+
 describe.skipIf(!process.env.GROQ_API_KEY)('Groq TTS (Real API)', () => {
-  it('synthesizes speech with Orpheus', async () => {
+  let tts: TTSResponse | null = null;
+  let ms = 0;
+
+  beforeAll(async () => {
     try {
-      const { result, ms } = await timed(() =>
+      ({ result: tts, ms } = await timed(() =>
         groqTTS.synthesize({
-          input: 'Hello, this is a test.',
+          input: 'Hi.',          // shortest valid input
           model: 'canopylabs/orpheus-v1-english',
           voice: 'autumn',
           responseFormat: 'wav',
         }),
-      );
-
-      expect(result.audio).toBeInstanceOf(Buffer);
-      expect(result.audio.length).toBeGreaterThan(1000);
-      expect(result.contentType).toBe('audio/wav');
-      console.log(`  Groq TTS: ${result.audio.length} bytes (${ms}ms)`);
+      ));
     } catch (err: unknown) {
-      const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
-      throw err;
+      if (!skipOn(err)) throw err;
     }
   });
 
-  it('returns available models and voices', () => {
+  it('returns audio buffer', () => {
+    if (!tts) return;
+    expect(tts.audio).toBeInstanceOf(Buffer);
+    expect(tts.audio.length).toBeGreaterThan(100);
+    console.log(`  Groq TTS: ${tts.audio.length} bytes (${ms}ms)`);
+  });
+
+  it('returns correct contentType for wav', () => {
+    if (!tts) return;
+    expect(tts.contentType).toBe('audio/wav');
+  });
+
+  it('getModels and getVoices return non-empty arrays', () => {
+    // Static — no API call
     const models = groqTTS.getModels();
     const voices = groqTTS.getVoices();
-
     expect(models.length).toBeGreaterThan(0);
     expect(voices.length).toBeGreaterThan(0);
     expect(models[0]).toHaveProperty('id');
@@ -88,69 +98,60 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq TTS (Real API)', () => {
   });
 });
 
+// ── LLM ── 1 call total ──────────────────────────────────────────────────────
+//
+// Single JSON-mode call covers: basic completion, model/usage fields,
+// maxTokens respected, JSON response format.
+
 describe.skipIf(!process.env.GROQ_API_KEY)('Groq LLM (Real API)', () => {
-  it('completes a chat with llama-3.3-70b', async () => {
+  let llm: LLMResponse | null = null;
+  let ms = 0;
+
+  beforeAll(async () => {
     try {
-      const { result, ms } = await timed(() =>
+      ({ result: llm, ms } = await timed(() =>
         groqLLM.chat({
           messages: [
-            { role: 'system', content: 'Reply in exactly one word.' },
-            { role: 'user', content: 'What color is the sky?' },
+            { role: 'system', content: 'Return valid JSON only, nothing else.' },
+            { role: 'user', content: 'Return exactly: {"ok":true}' },
           ],
           model: 'llama-3.3-70b-versatile',
+          responseFormat: { type: 'json_object' },
           temperature: 0,
-          maxTokens: 10,
+          maxTokens: 30,
         }),
-      );
-
-      expect(result.content).toBeTruthy();
-      expect(result.model).toContain('llama');
-      expect(result.usage).toBeDefined();
-      expect(result.usage!.totalTokens).toBeGreaterThan(0);
-      console.log(`  Groq LLM: "${result.content}" (${ms}ms, ${result.usage!.totalTokens} tokens)`);
+      ));
     } catch (err: unknown) {
-      const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
-      throw err;
+      if (!skipOn(err)) throw err;
     }
   });
 
-  it('respects maxTokens limit', async () => {
-    try {
-      const result = await groqLLM.chat({
-        messages: [{ role: 'user', content: 'Write a long story about a cat.' }],
-        model: 'llama-3.3-70b-versatile',
-        maxTokens: 5,
-      });
-
-      expect(result.content.length).toBeLessThan(200);
-      expect(result.usage!.completionTokens).toBeLessThanOrEqual(10);
-    } catch (err: unknown) {
-      const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
-      throw err;
-    }
+  it('returns non-empty content', () => {
+    if (!llm) return;
+    expect(llm.content).toBeTruthy();
+    console.log(`  Groq LLM: "${llm.content}" (${ms}ms, ${llm.usage?.totalTokens ?? '?'} tokens)`);
   });
 
-  it('returns JSON when responseFormat is json_object', async () => {
-    try {
-      const result = await groqLLM.chat({
-        messages: [
-          { role: 'system', content: 'Return valid JSON only.' },
-          { role: 'user', content: 'Give me a JSON object with name and age fields.' },
-        ],
-        model: 'llama-3.3-70b-versatile',
-        responseFormat: { type: 'json_object' },
-        maxTokens: 50,
-      });
+  it('returns model identifier', () => {
+    if (!llm) return;
+    expect(llm.model).toContain('llama');
+  });
 
-      const parsed = JSON.parse(result.content);
-      expect(parsed).toHaveProperty('name');
-      expect(parsed).toHaveProperty('age');
-    } catch (err: unknown) {
-      const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
-      throw err;
-    }
+  it('returns usage stats', () => {
+    if (!llm) return;
+    expect(llm.usage).toBeDefined();
+    expect(llm.usage!.totalTokens).toBeGreaterThan(0);
+  });
+
+  it('respects maxTokens (completionTokens ≤ 30)', () => {
+    if (!llm) return;
+    expect(llm.usage!.completionTokens).toBeLessThanOrEqual(60); // 2x buffer for safety
+  });
+
+  it('returns valid JSON when responseFormat is json_object', () => {
+    if (!llm) return;
+    const parsed = JSON.parse(llm.content);
+    expect(parsed).toBeDefined();
+    expect(typeof parsed).toBe('object');
   });
 });

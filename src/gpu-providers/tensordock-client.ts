@@ -344,7 +344,12 @@ export class TensordockClient extends AbstractGpuProvider {
                 gpus: { [gpuId]: { count: spec.gpuCount ?? 1 } },
               },
               location_id: candidate.id,
-              ssh_key: sshKeyInfo.id,
+              // Use ssh_key_id (reference to TensorDock secrets) if available,
+              // otherwise fall back to the raw public key content.
+              // The v2 API requires exactly one of ssh_key or ssh_key_id.
+              ...(sshKeyInfo.id
+                ? { ssh_key_id: sshKeyInfo.id }
+                : { ssh_key: localSshPubKey }),
               port_forwards: [
                 { external_port: candidate.ports[0] || 20000, internal_port: 22 },
                 { external_port: candidate.ports[1] || 20001, internal_port: 9090 },

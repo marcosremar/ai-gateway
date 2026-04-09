@@ -9,6 +9,7 @@ from enum import Enum
 
 try:
     from sqlmodel import SQLModel, Field, create_engine, Session, select
+    from sqlalchemy import text as sa_text
 except ImportError:
     raise ImportError("sqlmodel is required: pip install sqlmodel")
 
@@ -105,6 +106,7 @@ class SnapshotModel(SQLModel, table=True):
     snapshot_path: str = ""  # Path to CRIU snapshot directory
     gpu_memory_included: bool = False
     size_bytes: int = 0
+    worker_port: Optional[int] = None  # TCP port the worker was listening on; used after CRIU restore
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -131,7 +133,27 @@ def get_engine():
     if _engine is None:
         _engine = create_engine(_DB_URL, echo=False)
         SQLModel.metadata.create_all(_engine)
+        _migrate(_engine)
     return _engine
+
+
+def _migrate(engine) -> None:
+    """Apply additive schema migrations for columns added after initial deploy.
+
+    SQLite does not support IF NOT EXISTS in ALTER TABLE, so we check the
+    existing column list before issuing the statement.
+    """
+    migrations = [
+        # (table, column, sql_type)
+        ("snapshots", "worker_port", "INTEGER"),
+    ]
+    for table, column, sql_type in migrations:
+        with engine.connect() as conn:
+            result = conn.execute(sa_text(f"PRAGMA table_info({table})"))
+            existing = {row[1] for row in result}
+        if column not in existing:
+            with engine.begin() as conn:
+                conn.execute(sa_text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
 
 
 def get_session() -> Session:

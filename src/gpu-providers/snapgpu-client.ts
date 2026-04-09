@@ -251,10 +251,22 @@ export class SnapgpuClient extends AbstractGpuProvider {
    * snapshot ID, or null if snapgpu reported no CRIU/cuda-checkpoint
    * available (gracefully degraded boot).
    */
+  async getAppPid(endpoint: string, appName: string): Promise<number | null> {
+    const url = `${endpoint.replace(/\/$/, '')}/v1/apps/${encodeURIComponent(appName)}/pid`;
+    try {
+      const res = await this.fetchRaw(url, { method: 'GET' }, 5_000);
+      if (!res.ok) return null;
+      const data = (await res.json()) as { pid?: number; found?: boolean };
+      return data.pid ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   async createSnapshot(
     endpoint: string,
     appName: string,
-    options: { functionName?: string; className?: string; includeGpu?: boolean } = {},
+    options: { functionName?: string; className?: string; includeGpu?: boolean; pid?: number } = {},
   ): Promise<string | null> {
     const url = `${endpoint.replace(/\/$/, '')}/v1/snapshots`;
     try {
@@ -268,6 +280,7 @@ export class SnapgpuClient extends AbstractGpuProvider {
             function_name: options.functionName,
             class_name: options.className,
             include_gpu: options.includeGpu ?? true,
+            pid: options.pid,
           }),
         },
         TIMEOUTS.create,
