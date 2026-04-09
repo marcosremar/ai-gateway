@@ -15,9 +15,12 @@ import type { STTProvider, STTRequest, STTResponse } from '../src/providers/type
 import type { EmbeddingProvider } from '../src/providers/openai-compat/openai-compat-embedding';
 import { openaiSTT } from '../src/providers/openai';
 import { deepgramSTT } from '../src/providers/deepgram';
-import { loadEnv, makeTestWav, timed } from './helpers';
+import { loadEnv, checkOpenAIAvailable, makeTestWav, timed } from './helpers';
 
-beforeAll(() => loadEnv());
+await loadEnv();
+const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
+  ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY)
+  : false;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -427,7 +430,7 @@ describe('runVerifiedSTT — timeout / partial results (unit)', () => {
 
 // ─── Integration Tests — OpenAI STT ──────────────────────────────────────────
 
-describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI STT (Real API)', () => {
+describe.skipIf(!OPENAI_AVAILABLE)('OpenAI STT (Real API)', () => {
   it('transcribes WAV audio', async () => {
     const audio = makeTestWav(1.0);
     const { result, ms } = await timed(() =>
@@ -469,9 +472,8 @@ describe.skipIf(!process.env.DEEPGRAM_API_KEY)('Deepgram STT (Real API)', () => 
 
 // ─── Integration Tests — Full Ensemble ───────────────────────────────────────
 
-const hasOpenAI = !!process.env.OPENAI_API_KEY;
 const hasDeepgram = !!process.env.DEEPGRAM_API_KEY;
-const hasAtLeastTwo = hasOpenAI && hasDeepgram;
+const hasAtLeastTwo = OPENAI_AVAILABLE && hasDeepgram;
 
 describe.skipIf(!hasAtLeastTwo)('STT Verifier — Full Ensemble (Real API)', () => {
   it('fans out to OpenAI + Deepgram and returns consensus', async () => {

@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { loadEnv, timed } from './helpers';
+import { loadEnv, checkOpenAIAvailable, timed } from './helpers';
 import { groqSTT } from '../src/providers/groq';
 import { openaiSTT } from '../src/providers/openai';
 import { OpenAISTTProvider } from '../src/providers/openai/openai-stt';
@@ -20,7 +20,10 @@ import { execSync } from 'child_process';
 import { readFileSync, unlinkSync, existsSync } from 'fs';
 import { makeTestWav } from './helpers';
 
-beforeAll(() => loadEnv());
+await loadEnv();
+const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
+  ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY)
+  : false;
 
 /** Generate real speech WAV via macOS say + ffmpeg for reliable STT testing. */
 function makeSpeechWav(): Buffer {
@@ -82,7 +85,7 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq word timestamps (Real API)', ()
 
 // ── OpenAI ────────────────────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI word timestamps (Real API)', () => {
+describe.skipIf(!OPENAI_AVAILABLE)('OpenAI word timestamps (Real API)', () => {
   // Use native OpenAISTTProvider which handles whisper-1 vs gpt-4o format differences
   const nativeOpenai = new OpenAISTTProvider();
 

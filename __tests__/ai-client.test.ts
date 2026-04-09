@@ -153,7 +153,7 @@ describe.skipIf(!hasKeys)('AIClient — real API calls', () => {
       expect(result.fallbackUsed).toBe(false);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 15_000);
@@ -179,7 +179,7 @@ describe.skipIf(!hasKeys)('AIClient — real API calls', () => {
       expect(result.fallbackUsed).toBe(false);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 15_000);
@@ -207,7 +207,7 @@ describe.skipIf(!hasKeys)('AIClient — real API calls', () => {
       expect(result.fallbackUsed).toBe(true);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 20_000);
@@ -231,7 +231,7 @@ describe.skipIf(!hasKeys)('AIClient — real API calls', () => {
       expect(result.provider).toBe('openai');
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 15_000);
@@ -256,7 +256,7 @@ describe.skipIf(!hasKeys)('AIClient — real API calls', () => {
       expect(result.provider).toBe('openai');
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 15_000);
@@ -299,7 +299,7 @@ describe.skipIf(!hasKeys)('AIClient — real API calls', () => {
       expect(result.totalLatencyMs).toBeGreaterThan(0);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 30_000);

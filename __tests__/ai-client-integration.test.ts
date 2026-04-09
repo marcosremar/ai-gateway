@@ -191,11 +191,14 @@ beforeAll(async () => {
 
   if (HAS_OPENAI) {
     try {
-      const res = await fetch('https://api.openai.com/v1/models', {
-        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: '.' }], max_tokens: 1 }),
+        signal: AbortSignal.timeout(10_000),
       });
       OPENAI_VALID = res.ok;
-      if (!OPENAI_VALID) console.log(`[ai-client-integration] OpenAI key INVALID (${res.status})`);
+      if (!OPENAI_VALID) console.log(`[ai-client-integration] OpenAI unavailable (${res.status}) — will skip OpenAI tests`);
     } catch {
       OPENAI_VALID = false;
     }

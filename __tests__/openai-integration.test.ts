@@ -5,16 +5,23 @@
  * Requires: OPENAI_API_KEY
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { OpenAISTTProvider } from '../src/providers/openai/openai-stt';
 import { OpenAITTSProvider } from '../src/providers/openai/openai-tts';
 import { OpenAIRealtimeProvider } from '../src/providers/openai/openai-realtime';
 import { OpenAIOmniProvider } from '../src/providers/openai/openai-omni';
 import { OpenAIImageProvider } from '../src/providers/openai/openai-image';
 import { OpenAICompatLLMProvider } from '../src/providers/openai-compat/openai-compat-llm';
-import { loadEnv, makeTestWav, timed } from './helpers';
+import { loadEnv, checkOpenAIAvailable, makeTestWav, timed } from './helpers';
 
-beforeAll(() => loadEnv());
+// Top-level await: load env and verify OpenAI is actually usable (not rate-limited)
+await loadEnv();
+const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
+  ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY)
+  : false;
+if (!OPENAI_AVAILABLE && process.env.OPENAI_API_KEY) {
+  console.log('[openai-integration] OpenAI unavailable (rate-limited or invalid key) — all tests will be skipped');
+}
 
 const openaiLLM = new OpenAICompatLLMProvider({
   providerId: 'openai',
@@ -23,7 +30,7 @@ const openaiLLM = new OpenAICompatLLMProvider({
   defaultModel: 'gpt-4o-mini',
 });
 
-describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI STT (Real API)', () => {
+describe.skipIf(!OPENAI_AVAILABLE)('OpenAI STT (Real API)', () => {
   const stt = new OpenAISTTProvider();
 
   it('transcribes with whisper-1', async () => {
@@ -59,7 +66,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI STT (Real API)', () => {
   });
 });
 
-describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI TTS (Real API)', () => {
+describe.skipIf(!OPENAI_AVAILABLE)('OpenAI TTS (Real API)', () => {
   const tts = new OpenAITTSProvider();
 
   it('synthesizes speech with gpt-4o-mini-tts', async () => {
@@ -118,7 +125,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI TTS (Real API)', () => {
   });
 });
 
-describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI LLM (Real API)', () => {
+describe.skipIf(!OPENAI_AVAILABLE)('OpenAI LLM (Real API)', () => {
   it('completes chat with gpt-4o-mini', async () => {
 
 
@@ -157,7 +164,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI LLM (Real API)', () => {
   });
 });
 
-describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI Realtime (Real API)', () => {
+describe.skipIf(!OPENAI_AVAILABLE)('OpenAI Realtime (Real API)', () => {
   const realtime = new OpenAIRealtimeProvider();
 
   it('creates an ephemeral session', async () => {
@@ -190,7 +197,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI Realtime (Real API)', () =>
   });
 });
 
-describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI Omni (Real API)', () => {
+describe.skipIf(!OPENAI_AVAILABLE)('OpenAI Omni (Real API)', () => {
   const omni = new OpenAIOmniProvider();
 
   it('generates text+audio from text input', async () => {
@@ -214,7 +221,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI Omni (Real API)', () => {
   });
 });
 
-describe.skipIf(!process.env.OPENAI_API_KEY)('OpenAI Image (Real API)', () => {
+describe.skipIf(!OPENAI_AVAILABLE)('OpenAI Image (Real API)', () => {
   const image = new OpenAIImageProvider();
 
   it('generates an image with dall-e-2', async () => {

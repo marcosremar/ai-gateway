@@ -224,19 +224,22 @@ function createRealClient(): AIClient {
 beforeAll(async () => {
   console.log(`\n[real-api] API keys available: GROQ=${HAS_GROQ}, OPENAI=${HAS_OPENAI}, OPENROUTER=${HAS_OPENROUTER}, FIREWORKS=${HAS_FIREWORKS}`);
 
-  // Quick health check for OpenAI key
+  // Check OpenAI API is actually usable (not just authenticated — also checks for 429 rate limits)
   if (HAS_OPENAI) {
     try {
-      const res = await fetch('https://api.openai.com/v1/models', {
-        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: '.' }], max_tokens: 1 }),
+        signal: AbortSignal.timeout(10_000),
       });
       OPENAI_VALID = res.ok;
       if (!OPENAI_VALID) {
-        console.log(`[real-api] OpenAI key is INVALID (${res.status}) — OpenAI tests will be skipped`);
+        console.log(`[real-api] OpenAI unavailable (${res.status}) — OpenAI tests will be skipped`);
       }
     } catch {
       OPENAI_VALID = false;
-      console.log('[real-api] OpenAI key check failed — OpenAI tests will be skipped');
+      console.log('[real-api] OpenAI check failed — OpenAI tests will be skipped');
     }
   }
 
@@ -275,7 +278,7 @@ describe('Real API: Provider Direct Calls', () => {
         expect(typeof result.text).toBe('string');
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -291,7 +294,7 @@ describe('Real API: Provider Direct Calls', () => {
         expect(result.text).toBeDefined();
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -308,7 +311,7 @@ describe('Real API: Provider Direct Calls', () => {
         }
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -351,7 +354,7 @@ describe('Real API: Provider Direct Calls', () => {
         expect(result.content.toLowerCase()).toContain('4');
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -369,7 +372,7 @@ describe('Real API: Provider Direct Calls', () => {
         expect(result.usage!.totalTokens).toBeGreaterThan(0);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -385,7 +388,7 @@ describe('Real API: Provider Direct Calls', () => {
         expect(result.content.toLowerCase()).toContain('paris');
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -399,7 +402,7 @@ describe('Real API: Provider Direct Calls', () => {
         expect(r1.content).toBe(r2.content);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -486,7 +489,7 @@ describe('Real API: Provider Direct Calls', () => {
         expect(result.contentType).toBeDefined();
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -537,7 +540,7 @@ describe('Real API: Provider Direct Calls', () => {
         expect(result.content).toContain('6');
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -572,7 +575,7 @@ describe('Real API: AIClient Unified Interface', () => {
         expect(result.latencyMs).toBeGreaterThan(0);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -588,7 +591,7 @@ describe('Real API: AIClient Unified Interface', () => {
         expect(result.provider).toBe('groq');
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -611,7 +614,7 @@ describe('Real API: AIClient Unified Interface', () => {
         expect(result.latencyMs).toBeGreaterThan(0);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -632,7 +635,7 @@ describe('Real API: AIClient Unified Interface', () => {
         expect(result.content).toContain('56');
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -651,7 +654,7 @@ describe('Real API: AIClient Unified Interface', () => {
         expect(result.provider).toBe('groq');
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -666,7 +669,7 @@ describe('Real API: AIClient Unified Interface', () => {
         expect(result.usage!.totalTokens).toBeGreaterThan(0);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -693,7 +696,7 @@ describe('Real API: AIClient Unified Interface', () => {
         expect(result.latencyMs).toBeGreaterThan(0);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -758,7 +761,7 @@ describe('Real API: Fallback Chain Behavior', () => {
         expect(result.content.length).toBeGreaterThan(0);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -784,7 +787,7 @@ describe('Real API: Fallback Chain Behavior', () => {
         expect(result.content.length).toBeGreaterThan(0);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -821,7 +824,7 @@ describe('Real API: Fallback Chain Behavior', () => {
         expect(result.content.length).toBeGreaterThan(0);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -857,7 +860,7 @@ describe('Real API: Fallback Chain Behavior', () => {
         expect(typeof result.text).toBe('string');
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -888,7 +891,7 @@ describe('Real API: Fallback Chain Behavior', () => {
         expect(result.audio.length).toBeGreaterThan(100);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -948,7 +951,7 @@ describe('Real API: Fallback Chain Behavior', () => {
         expect(result.content.length).toBeGreaterThan(0);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -1005,7 +1008,7 @@ describe('Real API: Full Pipeline (STT → LLM → TTS)', () => {
         expect(result.usedGpu).toBe(false);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 60_000);
@@ -1070,7 +1073,7 @@ describe('Real API: Full Pipeline (STT → LLM → TTS)', () => {
         expect(completeEvent.data.providers).toBeDefined();
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 60_000);
@@ -1127,7 +1130,7 @@ describe('Real API: Preset Profiles', () => {
         expect(result.provider).toBe('groq');
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -1149,7 +1152,7 @@ describe('Real API: Preset Profiles', () => {
         expect(r1.content.trim()).toBe(r2.content.trim());
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -1210,7 +1213,7 @@ describe('Real API: Error Handling', () => {
       expect(result.content.length).toBeGreaterThan(0);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 30_000);
@@ -1244,7 +1247,7 @@ describe('Real API: Error Handling', () => {
       expect(attempts).toBe(2);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 30_000);
@@ -1280,7 +1283,7 @@ describe('Real API: Error Handling', () => {
       expect(usedProvider).toBe('groq');
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 30_000);
@@ -1315,7 +1318,7 @@ describe('Real API: Latency & Performance', () => {
         expect(result.latencyMs).toBeLessThan(5_000);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 10_000);
@@ -1330,7 +1333,7 @@ describe('Real API: Latency & Performance', () => {
         expect(Date.now() - t0).toBeLessThan(8_000);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 15_000);
@@ -1345,7 +1348,7 @@ describe('Real API: Latency & Performance', () => {
         expect(Date.now() - t0).toBeLessThan(8_000);
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 15_000);
@@ -1403,7 +1406,7 @@ describe('Real API: Cross-Model Consistency', () => {
         expect(smallResult.content).toContain('42');
       } catch (err: unknown) {
         const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+        if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
         throw err;
       }
     }, 30_000);
@@ -1429,7 +1432,7 @@ describe('Real API: buildSilentWav with real STT', () => {
       expect(result.text.length).toBeLessThan(100);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 30_000);
@@ -1506,7 +1509,7 @@ describe('Real API: Cooldown system', () => {
       expect(usedProvider).toBe('groq');
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 30_000);

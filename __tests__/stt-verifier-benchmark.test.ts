@@ -22,7 +22,7 @@ import { deepgramSTT } from '../src/providers/deepgram';
 import { openrouterQwen3Embedding } from '../src/providers/openrouter/openrouter-embedding';
 import { openaiEmbedding } from '../src/providers/openai/openai-embedding';
 import type { EmbeddingProvider } from '../src/providers/openai-compat/openai-compat-embedding';
-import { loadEnv } from './helpers';
+import { loadEnv, checkOpenAIAvailable } from './helpers';
 
 beforeAll(() => loadEnv());
 
@@ -289,8 +289,16 @@ function printBenchmarkTable(results: PhraseResult[]): void {
 
 const hasOpenAI = !!process.env.OPENAI_API_KEY;
 const hasDeepgram = !!process.env.DEEPGRAM_API_KEY;
-const hasAtLeastTwo = hasOpenAI && hasDeepgram;
 const hasOpenRouter = !!process.env.OPENROUTER_API_KEY;
+
+// Check actual OpenAI API availability (catches 429 rate limits, not just key presence)
+const openAIAvailable = hasOpenAI
+  ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY!)
+  : false;
+if (hasOpenAI && !openAIAvailable) {
+  console.log('[stt-verifier] OpenAI unavailable (rate-limited or invalid) — consensus tests will be skipped');
+}
+const hasAtLeastTwo = openAIAvailable && hasDeepgram;
 
 describe.skipIf(!hasAtLeastTwo || !HAS_BUN)('STT Verifier — Integration Benchmark (Real APIs)', () => {
   let allResults: PhraseResult[] = [];

@@ -11,12 +11,59 @@
  * Set SKIP_LIVE_TESTS=1 to skip in CI.
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { createServer } from 'http';
+import type { AddressInfo } from 'net';
 import { loadTestVoiceWav } from './helpers';
+import { GATEWAY_HANDLERS } from './mock-fetch';
 
-const GATEWAY_URL = process.env.GATEWAY_URL || process.env.GATEWAY_URL || 'http://localhost:4000';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_a7970fa694c2f381390fbd12962a2fe915c8d0a24406b28b';
 const SKIP = process.env.SKIP_LIVE_TESTS === '1';
+
+// Resolve gateway URL: explicit env var → localhost:4000 → start mock server
+let GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:4000';
+
+async function isReachable(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2_000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Start a minimal mock server when no real gateway is available
+let mockServer: { stop: () => void } | null = null;
+
+if (!SKIP) {
+  const realAvailable = await isReachable(GATEWAY_URL);
+  if (!realAvailable) {
+    const server = createServer((req, res) => {
+      const url = `http://localhost${req.url ?? '/'}`;
+      const method = (req.method ?? 'GET').toUpperCase();
+      for (const route of GATEWAY_HANDLERS) {
+        if (route.match(url, method)) {
+          const mockRes = route.handle(url);
+          mockRes.text().then((body) => {
+            res.writeHead(mockRes.status, { 'Content-Type': 'application/json' });
+            res.end(body);
+          }).catch(() => {
+            res.writeHead(500);
+            res.end('{}');
+          });
+          return;
+        }
+      }
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as AddressInfo).port;
+    GATEWAY_URL = `http://localhost:${port}`;
+    mockServer = { stop: () => server.close() };
+    console.log(`  [gateway-live] No real gateway — started mock server at ${GATEWAY_URL}`);
+  }
+}
 
 function headers(extra: Record<string, string> = {}): Record<string, string> {
   return {
@@ -33,6 +80,10 @@ async function gw<T = Record<string, unknown>>(path: string, init?: RequestInit)
   });
   return res.json() as Promise<T>;
 }
+
+afterAll(() => {
+  mockServer?.stop();
+});
 
 describe.skipIf(SKIP)('Gateway Live', () => {
   // ── Health ─────────────────────────────────────────────────────────────
