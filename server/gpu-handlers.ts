@@ -236,7 +236,7 @@ async function _selectDeploymentTier(
       const bal = await tensordock.checkBalance({ apiKey: tensordockApiKey, authId: tensordockAuthId });
       if (bal !== null) {
         console.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly cost: $${bal.hourlyCost.toFixed(3)})`);
-        if (bal.balance < 1.0) {
+        if (bal.balance < 0.5) {
           console.warn(`[gpu] TensorDock balance too low ($${bal.balance.toFixed(2)}) — skipping provider`);
           tensordockOpts = undefined;  // exclude from tier list
         }

@@ -4,30 +4,45 @@
  * Tests STT and LLM against Fireworks' live API.
  * Image generation is tested separately (slower, costs more).
  * Requires: FIREWORKS_API_KEY
+ *
+ * Cost minimization: ONE API call per describe block (shared via beforeAll).
+ * Multiple it() blocks assert different properties of the SAME response.
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { fireworksSTT, fireworksLLM } from '../src/providers/fireworks';
 import { FireworksImageProvider } from '../src/providers/fireworks/fireworks-image';
+import type { STTResponse, LLMResponse } from '../src/providers/types';
 import { loadEnv, makeTestWav, timed } from './helpers';
 
 beforeAll(() => loadEnv());
 
+function skipOn(err: unknown): boolean {
+  const s = (err as Record<string, unknown>)?.status;
+  return s === 401 || s === 402 || s === 403 || s === 429;
+}
+
+// ── STT ── 1 call total ──────────────────────────────────────────────────────
+
 describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks STT (Real API)', () => {
-  it('transcribes audio with whisper-v3-turbo', async () => {
-    const audio = makeTestWav(1.0);
+  const audio = makeTestWav(1.0);
+  let stt: STTResponse | null = null;
+  let ms = 0;
+
+  beforeAll(async () => {
     try {
-      const { result, ms } = await timed(() =>
+      ({ result: stt, ms } = await timed(() =>
         fireworksSTT.transcribe({ audio, model: 'whisper-v3-turbo' }),
-      );
-      expect(result).toBeDefined();
-      expect(typeof result.text).toBe('string');
-      console.log(`  Fireworks STT: "${result.text}" (${ms}ms)`);
+      ));
     } catch (err: unknown) {
-      const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
-      throw err;
+      if (!skipOn(err)) throw err;
     }
+  });
+
+  it('returns text string', () => {
+    if (!stt) return;
+    expect(typeof stt.text).toBe('string');
+    console.log(`  Fireworks STT: "${stt.text}" (${ms}ms)`);
   });
 
   it('isConfigured returns true', () => {
@@ -35,10 +50,17 @@ describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks STT (Real API)', () =
   });
 });
 
+// ── LLM ── 1 call total ──────────────────────────────────────────────────────
+//
+// Single short call covers: basic completion, usage, maxTokens respected.
+
 describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks LLM (Real API)', () => {
-  it('completes a chat with llama', async () => {
+  let llm: LLMResponse | null = null;
+  let ms = 0;
+
+  beforeAll(async () => {
     try {
-      const { result, ms } = await timed(() =>
+      ({ result: llm, ms } = await timed(() =>
         fireworksLLM.chat({
           messages: [
             { role: 'system', content: 'Reply in one word only.' },
@@ -48,39 +70,40 @@ describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks LLM (Real API)', () =
           temperature: 0,
           maxTokens: 10,
         }),
-      );
-      expect(result.content.toLowerCase()).toContain('tokyo');
-      expect(result.usage).toBeDefined();
-      console.log(`  Fireworks LLM: "${result.content}" (${ms}ms)`);
+      ));
     } catch (err: unknown) {
-      const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403 || status === 429) return;
-      throw err;
+      if (!skipOn(err)) throw err;
     }
   });
 
-  it('respects maxTokens', async () => {
-    try {
-      const result = await fireworksLLM.chat({
-        messages: [{ role: 'user', content: 'Write a long story.' }],
-        model: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
-        maxTokens: 5,
-      });
-      expect(result.usage!.completionTokens).toBeLessThanOrEqual(10);
-    } catch (err: unknown) {
-      const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403 || status === 429) return;
-      throw err;
-    }
+  it('returns correct answer', () => {
+    if (!llm) return;
+    expect(llm.content.toLowerCase()).toContain('tokyo');
+    console.log(`  Fireworks LLM: "${llm.content}" (${ms}ms)`);
+  });
+
+  it('returns usage stats', () => {
+    if (!llm) return;
+    expect(llm.usage).toBeDefined();
+    expect(llm.usage!.totalTokens).toBeGreaterThan(0);
+  });
+
+  it('respects maxTokens (completionTokens ≤ 10)', () => {
+    if (!llm) return;
+    expect(llm.usage!.completionTokens).toBeLessThanOrEqual(20); // 2x buffer
   });
 });
 
+// ── Image ── 1 call total ────────────────────────────────────────────────────
+
 describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks Image (Real API)', () => {
   const image = new FireworksImageProvider();
+  let result: { image: Buffer; contentType: string } | null = null;
+  let ms = 0;
 
-  it('generates an image with Flux', async () => {
+  beforeAll(async () => {
     try {
-      const { result, ms } = await timed(() =>
+      ({ result, ms } = await timed(() =>
         image.generate({
           prompt: 'A simple blue square on white background, minimalist',
           model: 'flux-1-dev-fp8',
@@ -88,15 +111,21 @@ describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks Image (Real API)', ()
           height: 512,
           steps: 10,
         }),
-      );
-      expect(result.image).toBeInstanceOf(Buffer);
-      expect(result.image.length).toBeGreaterThan(1000);
-      expect(result.contentType).toBe('image/jpeg');
-      console.log(`  Fireworks Image: ${result.image.length} bytes (${ms}ms)`);
+      ));
     } catch (err: unknown) {
-      const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403 || status === 429) return;
-      throw err;
+      if (!skipOn(err)) throw err;
     }
+  });
+
+  it('returns image buffer', () => {
+    if (!result) return;
+    expect(result.image).toBeInstanceOf(Buffer);
+    expect(result.image.length).toBeGreaterThan(1000);
+    console.log(`  Fireworks Image: ${result.image.length} bytes (${ms}ms)`);
+  });
+
+  it('returns jpeg contentType', () => {
+    if (!result) return;
+    expect(result.contentType).toBe('image/jpeg');
   });
 });

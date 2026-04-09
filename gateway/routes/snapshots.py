@@ -11,6 +11,7 @@ from typing import Optional
 
 from ..builder.snapshot import SnapshotManager
 from ..db import get_session, SnapshotModel
+from ..pool_singleton import get_pool
 from sqlmodel import select
 
 router = APIRouter(prefix="/v1/snapshots", tags=["snapshots"])
@@ -99,11 +100,21 @@ async def create_snapshot(body: CreateSnapshotRequest):
     if not snapshot_id:
         return CreateSnapshotResponse(error="Snapshot creation failed — check gateway logs")
 
-    # Read back the snapshot metadata from DB
+    # Store worker_port so the pool's _find_snapshot() can locate and use this
+    # snapshot for fast CRIU restores.  Without worker_port set, the pool filters
+    # the row out (worker_port != None guard) and always falls back to cold start.
+    worker_port: Optional[int] = None
+    if pid:
+        worker_port = get_pool().get_port_for_pid(pid)
+
     with get_session() as session:
         snap = session.exec(
             select(SnapshotModel).where(SnapshotModel.snapshot_id == snapshot_id)
         ).first()
+        if snap and worker_port:
+            snap.worker_port = worker_port
+            session.add(snap)
+            session.commit()
 
     return CreateSnapshotResponse(
         snapshot_id=snapshot_id,

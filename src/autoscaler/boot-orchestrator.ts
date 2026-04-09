@@ -25,6 +25,9 @@ export interface BootOrchestratorOptions {
   lifecycleLogger: GpuLifecycleLogger;
   logger: Logger;
   onInstancePersist?: (userId: string, machineKey: string, data: Record<string, unknown>) => Promise<void>;
+  /** Read back a value previously written via onInstancePersist. Used to
+   *  retrieve the last SnapGPU snapshot ID for a tier across restarts. */
+  getPersistedData?: (userId: string, key: string) => Promise<Record<string, unknown> | null>;
   callbacks: BootOrchestratorCallbacks;
 }
 
@@ -58,6 +61,7 @@ export class BootOrchestrator {
   private readonly lifecycleLogger: GpuLifecycleLogger;
   private readonly logger: Logger;
   private readonly onInstancePersist?: (userId: string, machineKey: string, data: Record<string, unknown>) => Promise<void>;
+  private readonly getPersistedData?: (userId: string, key: string) => Promise<Record<string, unknown> | null>;
   private readonly callbacks: BootOrchestratorCallbacks;
 
   constructor(opts: BootOrchestratorOptions) {
@@ -67,6 +71,7 @@ export class BootOrchestrator {
     this.lifecycleLogger = opts.lifecycleLogger;
     this.logger = opts.logger;
     this.onInstancePersist = opts.onInstancePersist;
+    this.getPersistedData = opts.getPersistedData;
     this.callbacks = opts.callbacks;
   }
 
@@ -96,6 +101,34 @@ export class BootOrchestrator {
     let sshHost: string | undefined;
     let sshPort: number | undefined;
     let monitorUrl: string | undefined;
+
+    // ── SnapGPU: restore from last snapshot if available ───────────────────
+    // If no explicit snapgpuRestoreFromSnapshot in config, check persistent
+    // storage for a snapshot ID saved by a previous auto-snapshot run.
+    // Key uses appName (not tierIndex) so it survives tier-config reorders.
+    if (cfg.provider === 'snapgpu' && !cfg.snapgpuRestoreFromSnapshot && !this.getPersistedData) {
+      this.logger.warn(`[autoscaler] Tier ${tierIndex} (snapgpu): getPersistedData not wired — snapshot restore disabled. Pass getPersistedData in BootOrchestratorOptions to enable automatic fast cold-starts.`);
+    }
+    if (cfg.provider === 'snapgpu' && !cfg.snapgpuRestoreFromSnapshot && this.getPersistedData) {
+      const appName = cfg.snapgpuPreloadApp || 'default';
+      const snapKey = `snapgpu_snapshot:${appName}`;
+      try {
+        const saved = await this.getPersistedData(userId, snapKey);
+        if (saved?.snapshotId && typeof saved.snapshotId === 'string') {
+          // Ignore snapshots older than 7 days — they may have been deleted
+          const age = Date.now() - (typeof saved.createdAt === 'number' ? saved.createdAt : 0);
+          const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+          if (age < SEVEN_DAYS_MS) {
+            cfg.snapgpuRestoreFromSnapshot = saved.snapshotId;
+            this.logger.log(`[autoscaler] Tier ${tierIndex} (snapgpu): will restore from snapshot ${cfg.snapgpuRestoreFromSnapshot}`);
+          } else {
+            this.logger.log(`[autoscaler] Tier ${tierIndex} (snapgpu): persisted snapshot ${saved.snapshotId} is ${Math.round(age / 86_400_000)}d old — ignoring`);
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`[autoscaler] getPersistedData failed for ${snapKey}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     const timeouts = resolveStageTimeouts(cfg.provider, cfg.stageTimeouts);
 
@@ -188,6 +221,7 @@ export class BootOrchestrator {
                     hfToken: cfg.hfToken,
                     env: cfg.env,
                     storageGb: cfg.storageGb,
+                    snapgpuRestoreFromSnapshot: cfg.snapgpuRestoreFromSnapshot,
                   },
                   { apiKey: cfg.apiKey!, authId: cfg.authId, hfToken: cfg.hfToken },
                   userId,
@@ -487,8 +521,13 @@ export class BootOrchestrator {
                 const client = this.registry.get('snapgpu');
                 if (client && client instanceof SnapgpuClient) {
                   const appName = tierConfig?.snapgpuPreloadApp || 'default';
-                  this.logger.log(`[autoscaler] Auto-snapshot: creating snapshot for ${appName} on tier ${tierIndex}...`);
-                  const snapId = await client.createSnapshot(currentBooting.endpoint, appName);
+                  const pid = await client.getAppPid(currentBooting.endpoint, appName);
+                  if (!pid) {
+                    this.logger.warn(`[autoscaler] Auto-snapshot: could not find PID for ${appName} — skipping`);
+                    return;
+                  }
+                  this.logger.log(`[autoscaler] Auto-snapshot: creating snapshot for ${appName} (pid ${pid}) on tier ${tierIndex}...`);
+                  const snapId = await client.createSnapshot(currentBooting.endpoint, appName, { pid });
                   if (snapId) {
                     this.logger.log(`[autoscaler] Auto-snapshot: ${snapId} created for ${appName}`);
                     void this.lifecycleLogger.log({
@@ -498,6 +537,17 @@ export class BootOrchestrator {
                       endpoint: currentBooting.endpoint,
                       metadata: { snapshotId: snapId, appName, bootDurationMs },
                     });
+                    // Persist snapshot ID so next triggerGpuBoot can restore it.
+                    // Key is stable: uses appName not tierIndex.
+                    if (this.onInstancePersist) {
+                      void this.onInstancePersist(userId, `snapgpu_snapshot:${appName}`, {
+                        snapshotId: snapId,
+                        appName,
+                        createdAt: Date.now(),
+                      }).catch((e) => {
+                        this.logger.warn(`[autoscaler] Failed to persist snapshot ID: ${e instanceof Error ? e.message : String(e)}`);
+                      });
+                    }
                   }
                 }
               } catch (snapErr) {
