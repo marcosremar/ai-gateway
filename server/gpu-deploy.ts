@@ -1451,7 +1451,8 @@ export async function startDeployLoop(
       });
       deploymentSM.startBooting(instance.instanceId);
 
-      const { result, pullTimeS } = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt, dockerImage, instance.providerMeta);
+      const pollResult = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt, dockerImage, instance.providerMeta);
+      const { result, pullTimeS } = pollResult;
       if (result === 'ready') {
         const durationMs = Date.now() - deployState.startedAt;
         setGpuHealthy(true);
@@ -1474,13 +1475,40 @@ export async function startDeployLoop(
       }
 
       if (result === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
-      // instance crashed or timed out — fetch logs before cleanup
+      // instance crashed, timed out, or app reported error — fetch logs
+      // before cleanup. App-error is a special case: the container itself
+      // is healthy and SSH-accessible, we just know the model failed to
+      // load. The remote logs (with full traceback) are GOLD here, and
+      // recurringly retrying the same image won't help — fail the whole
+      // deploy after this one attempt, no retries.
       console.log(`[gpu] Instance ${instance.instanceId} failed (${result}), fetching remote logs before cleanup...`);
+      let remoteLogsCaptured = '';
       try {
-        const remoteLogs = await fetchGpuLogs(instance.sshHost, instance.sshPort, instance.endpoint);
-        console.log(`[gpu] ── Remote GPU Logs (${instance.instanceId}) ──\n${remoteLogs}\n── End GPU Logs ──`);
+        remoteLogsCaptured = await fetchGpuLogs(instance.sshHost, instance.sshPort, instance.endpoint);
+        console.log(`[gpu] ── Remote GPU Logs (${instance.instanceId}) ──\n${remoteLogsCaptured}\n── End GPU Logs ──`);
       } catch (logErr) {
         console.warn(`[gpu] Could not fetch remote logs: ${logErr}`);
+      }
+      // Persist the full diagnostic bundle to disk so the operator can
+      // review it later via /v1/gpu/deploy-history (added in a follow-up
+      // commit). Always best-effort — never let logging failures abort
+      // the cleanup path.
+      try {
+        const { persistDeployDiagnostics } = await import('./deploy-diagnostics');
+        await persistDeployDiagnostics({
+          instanceId: instance.instanceId,
+          provider: providerName,
+          dockerImage,
+          sshHost: instance.sshHost,
+          sshPort: instance.sshPort,
+          endpoint: instance.endpoint,
+          result,
+          appError: pollResult.appError,
+          remoteLogs: remoteLogsCaptured,
+          startedAt,
+        });
+      } catch (e) {
+        console.warn(`[gpu] Failed to persist deploy diagnostics: ${e instanceof Error ? e.message : e}`);
       }
       console.log(`[gpu] Cleaning up crashed instance ${instance.instanceId}...`);
       try { await providerClient.deleteInstance(instance.instanceId, credentials); }
@@ -1492,6 +1520,20 @@ export async function startDeployLoop(
         deploymentSM.markError(errMsg);
         return; // Stop deploy — orphan sweep will attempt cleanup later
       }
+
+      // App-error is non-retryable: the model itself failed to load, so
+      // retrying on a different host will hit the exact same failure
+      // (HuggingFace 404, missing weights, unsupported CUDA, etc.). Fail
+      // the whole deploy immediately with the captured error message.
+      if (result === 'app_error') {
+        const appErr = pollResult.appError;
+        const errMsg = `App load failed (non-retryable): ${appErr?.message ?? 'unknown'}`;
+        console.error(`[gpu] ${errMsg}`);
+        setDeployState({ status: 'error', message: errMsg, step: 'app_error' });
+        deploymentSM.markError(errMsg);
+        return;
+      }
+
       continue;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -2095,8 +2137,13 @@ export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string
 }
 
 export interface PollHealthResult {
-  result: 'ready' | 'exited' | 'timeout' | 'cancelled' | 'crashed';
+  result: 'ready' | 'exited' | 'timeout' | 'cancelled' | 'crashed' | 'app_error';
   pullTimeS?: number;  // actual measured pull duration (pullStarted → containerStarted)
+  // Populated when result === 'app_error': the structured error reported by
+  // the container's /health endpoint (e.g. model load failure). Lets the
+  // orchestrator surface a useful failure reason instead of "timeout" and
+  // skip the boot-timeout wait.
+  appError?: { message: string; traceback?: string };
 }
 
 export async function pollHealthUntilReady(
@@ -2446,6 +2493,44 @@ export async function pollHealthUntilReady(
           const data = await res.json();
           // Update per-stage warmth from health response (services.tts/whisper/llama_cpp)
           updateGpuModelWarmth(data);
+
+          // ── Fail-fast on app-reported error ──────────────────────────
+          // The container's /health is HTTP 200 (healthy from a TCP/HTTP
+          // standpoint) but the JSON body says `status: 'error'` with an
+          // error message and traceback. This means the model failed to
+          // load and there is no point waiting for boot timeout — the app
+          // will never become ready. Bail out immediately so the
+          // orchestrator can move to the next host (or, more likely, fail
+          // the whole deploy with a meaningful error message).
+          if (data && typeof data === 'object' && data.status === 'error') {
+            const appErrMsg = String(data.error ?? data.message ?? 'unknown app error');
+            const appTraceback = typeof data.error_traceback === 'string'
+              ? data.error_traceback
+              : undefined;
+            console.error(`[gpu] App reported error via /health — failing deploy fast.`);
+            console.error(`[gpu]   error: ${appErrMsg}`);
+            if (appTraceback) {
+              console.error(`[gpu]   traceback (first 2KiB):\n${appTraceback.slice(0, 2048)}`);
+            }
+            setDeployState({
+              status: 'error',
+              step: 'app_error',
+              message: `App load failed: ${appErrMsg}`,
+              stepDetail: appErrMsg.slice(0, 200),
+            });
+            broadcastWs({
+              type: 'gpu:deploy',
+              phase: 'app_error',
+              provider: providerName,
+              error: appErrMsg,
+            });
+            return {
+              result: 'app_error',
+              pullTimeS: actualPullTimeS,
+              appError: { message: appErrMsg, traceback: appTraceback },
+            };
+          }
+
           const HEALTHY_STATUSES = new Set(['healthy', 'ok', 'degraded', 'ready']);
           if (HEALTHY_STATUSES.has(data.status)) {
             // Track health response milestones for per-phase timeouts
