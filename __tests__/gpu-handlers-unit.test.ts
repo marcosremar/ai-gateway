@@ -17,8 +17,13 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-// ── Source code (read once) ──────────────────────────────────────────────────
-const handlersSource = readFileSync('server/gpu-handlers.ts', 'utf8');
+// ── Source code (read once — spans all split handler modules) ────────────────
+const handlersSource = [
+  'server/gpu-handlers.ts',
+  'server/gpu-handlers-offers.ts',
+  'server/gpu-handlers-info.ts',
+  'server/gpu-handlers-settings.ts',
+].map(f => readFileSync(f, 'utf8')).join('\n');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -196,20 +201,21 @@ describe('handleGpuDeploy — cancel/redeploy', () => {
 
   it('#096 _startDeployAndRespond writes 202 response', () => {
     const fnStart = handlersSource.indexOf('function _startDeployAndRespond');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 25000);
     expect(fnBody).toContain('res.writeHead(202');
     expect(fnBody).toContain('Deploy started');
   });
 
   it('#097 _startDeployAndRespond calls deploymentSM.startDeploying()', () => {
     const fnStart = handlersSource.indexOf('function _startDeployAndRespond');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 25000);
     expect(fnBody).toContain('deploymentSM.startDeploying()');
   });
 
   it('#098 _startDeployAndRespond includes balanceWarnings in response', () => {
     const fnStart = handlersSource.indexOf('function _startDeployAndRespond');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    // The function is large; read enough chars to cover the balanceWarnings usage
+    const fnBody = handlersSource.slice(fnStart, fnStart + 25000);
     expect(fnBody).toContain('balanceWarnings');
   });
 });
