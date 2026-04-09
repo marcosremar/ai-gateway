@@ -131,7 +131,17 @@ async function _validateDeployRequest(
   const minVramGb = typeof body.minVramGb === 'number' ? body.minVramGb : getMinVramGb();
   const preferSsd = typeof body.preferSsd === 'boolean' ? body.preferSsd : getPreferSsd();
   const storageGb = (body.storageGb as number) || 0;
-  const hfToken = (body.hfToken as string) || process.env.HF_TOKEN || '';
+  // HuggingFace token has FOUR canonical env-var spellings depending on
+  // which library is reading it (transformers, diffusers, datasets, hub).
+  // Accept any of them so the operator does not have to remember which one
+  // — whichever is set in the gateway env, we forward it as HF_TOKEN to
+  // the container, which is the most widely accepted name.
+  const hfToken = (body.hfToken as string)
+    || process.env.HF_TOKEN
+    || process.env.HUGGINGFACE_TOKEN
+    || process.env.HUGGINGFACE_HUB_TOKEN
+    || process.env.HUGGING_FACE_HUB_TOKEN
+    || '';
   const llmModel = (body.llmModel as string) || '';
   const interruptible = body.interruptible === true ? true : undefined;
 
@@ -1019,6 +1029,36 @@ df -h / 2>&1
 
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(result.join(''));
+}
+
+// ── Deploy history (persisted failure diagnostics) ───────────────────────────
+
+/**
+ * GET /v1/gpu/deploy-history — list past deploy attempts (newest first).
+ * Returns lightweight summaries; use the per-id endpoint for full bundles.
+ */
+export async function handleGpuDeployHistory(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const { listDeployDiagnostics, getDeployDiagnostics } = await import('./deploy-diagnostics');
+  // Per-id fetch lives at the same URL with ?id=... so we don't need a
+  // separate route handler. Path-based routing in this codebase is flat,
+  // and ?id keeps it parseable by any HTTP client.
+  const url = new URL(req.url || '/', 'http://localhost');
+  const id = url.searchParams.get('id');
+  if (id) {
+    const record = getDeployDiagnostics(id);
+    if (!record) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `deploy diagnostic ${id} not found` }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(record, null, 2));
+    return;
+  }
+  const limit = Number(url.searchParams.get('limit') || '50');
+  const summaries = listDeployDiagnostics(Math.min(Math.max(limit, 1), 500));
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ count: summaries.length, items: summaries }, null, 2));
 }
 
 // ── Re-exports from split modules ────────────────────────────────────────────
