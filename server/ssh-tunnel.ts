@@ -15,8 +15,12 @@ import { spawn, type ChildProcess } from 'child_process';
 
 let nextLocalPort = 19000; // start range for local tunnel ports
 
-const DEFAULT_OPEN_RETRIES = 3;
-const RECONNECT_BACKOFF_MS = [2_000, 5_000, 10_000, 20_000]; // capped exponential
+// Initial open retries: we need a generous budget because Vast.ai instances
+// often take 5-15 minutes after going to "running" status before the
+// container's docker image finishes pulling and the in-container sshd
+// becomes reachable. 20 attempts with progressive backoff ≈ 12 min total.
+const DEFAULT_OPEN_RETRIES = 20;
+const RECONNECT_BACKOFF_MS = [2_000, 5_000, 10_000, 20_000, 30_000, 30_000, 45_000, 45_000, 60_000];
 const MAX_RECONNECT_ATTEMPTS = 10;
 
 export class SshTunnel {

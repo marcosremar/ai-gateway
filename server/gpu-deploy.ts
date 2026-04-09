@@ -2121,6 +2121,22 @@ export async function pollHealthUntilReady(
   let firstNonTransientErrorAt = 0;        // timestamp when non-transient HTTP errors started
   let consecutiveNonTransient = 0;         // consecutive 4xx responses from /health
 
+  // TODO: pipe spec.healthEndpoint through pollHealthUntilReady() signature so
+  // apps can override this (e.g. '/healthz', '/api/status'). For now we default
+  // to '/health' since all gateway-managed images expose that path.
+  const healthPath = '/health';
+  // Count of consecutive TCP/connection failures (container not up yet).
+  // Only these count toward the BOOT timeout — HTTP 4xx/5xx means the app is
+  // alive (just unhappy), so we keep polling without advancing the boot clock.
+  let consecutiveConnectionRefused = 0;
+  // Most recent 4xx/5xx body captured for debugging (truncated to 500 chars).
+  let lastErrorBody = '';
+  // First time we got *any* HTTP response from the app (even 5xx). We use this
+  // to grant extra leeway past the BOOT timeout: if the app is returning 5xx,
+  // it's alive but still loading — give it up to BOOT_5XX_LEEWAY_MS more.
+  let firstAppResponseAt = 0;
+  const BOOT_5XX_LEEWAY_MS = 60_000;
+
   // ── Adaptive pull timeout ──────────────────────────────────────────────
   const { estimatePullTimeout, deriveHostKey: deriveKey } = await import('../src/gpu-providers/pull-time-estimator');
   const inetDown = (providerMeta?.inetDown as number) || (providerMeta?.inet_down as number) || 500;
@@ -2156,14 +2172,24 @@ export async function pollHealthUntilReady(
       return { result: 'timeout', pullTimeS: actualPullTimeS };
     }
 
-    // Boot timeout — container started but /health never responded
+    // Boot timeout — container started but /health never responded.
+    // If the app has been returning 4xx/5xx (firstAppResponseAt set), grant
+    // BOOT_5XX_LEEWAY_MS of extra time — the container is alive, just still
+    // loading models and reporting errors. Only TCP-refused failures (where
+    // firstAppResponseAt is still 0) trip the boot timeout on schedule.
     if (containerStartedAt && !healthRespondedOnce && (Date.now() - containerStartedAt) > PHASE_TIMEOUTS.BOOT) {
-      const bootSec = Math.round((Date.now() - containerStartedAt) / 1000);
-      const timeoutMsg = `Boot timeout (${bootSec}s) — container up but /health not responding`;
-      console.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
-      broadcastWs({ type: 'gpu:deploy', phase: 'boot_timeout', provider: providerName });
-      setDeployState({ status: 'error', step: 'waiting_health', message: timeoutMsg });
-      return { result: 'timeout', pullTimeS: actualPullTimeS };
+      const inLeeway = firstAppResponseAt > 0 && (Date.now() - firstAppResponseAt) < BOOT_5XX_LEEWAY_MS;
+      if (!inLeeway) {
+        const bootSec = Math.round((Date.now() - containerStartedAt) / 1000);
+        const leewayNote = firstAppResponseAt > 0
+          ? ` (app was returning errors, last body: ${lastErrorBody.slice(0, 120)})`
+          : ` (TCP refused — ${consecutiveConnectionRefused} consecutive failures)`;
+        const timeoutMsg = `Boot timeout (${bootSec}s) — container up but /health not responding${leewayNote}`;
+        console.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
+        broadcastWs({ type: 'gpu:deploy', phase: 'boot_timeout', provider: providerName });
+        setDeployState({ status: 'error', step: 'waiting_health', message: timeoutMsg });
+        return { result: 'timeout', pullTimeS: actualPullTimeS };
+      }
     }
 
     // Model loading timeout — /health responds but services still downloading
@@ -2357,12 +2383,29 @@ export async function pollHealthUntilReady(
       }
     }
 
-    // Probe /health (with HTTP status tracking for crash detection)
+    // Probe health endpoint (with HTTP status tracking for crash detection)
     if (endpoint) {
       let httpStatus = 0;
+      let connectionRefused = false;
       try {
-        const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(8000) });
+        const res = await fetch(`${endpoint}${healthPath}`, { signal: AbortSignal.timeout(8000) });
         httpStatus = res.status;
+        // We got a response — the app is alive (TCP-wise), so reset the
+        // connection-refused counter regardless of status code.
+        consecutiveConnectionRefused = 0;
+        if (!firstAppResponseAt) firstAppResponseAt = Date.now();
+        if (!res.ok) {
+          // 4xx / 5xx — app is up but returning an error. Capture the body
+          // (truncated) so operators can debug wrong-endpoint or model-load
+          // failures without having to SSH in.
+          const body = await res.text().catch(() => '<unreadable>');
+          lastErrorBody = body.substring(0, 500);
+          const kind = httpStatus >= 500 ? '5xx (app bug or model loading)' : '4xx (wrong endpoint?)';
+          console.warn(`[gpu] Health endpoint ${endpoint}${healthPath} returned ${httpStatus} ${kind}: ${lastErrorBody}`);
+          // Do NOT count toward boot timeout — the container is alive,
+          // just unhappy. 5xx during model loading is common; 4xx usually
+          // means the app is using a different health path. Keep polling.
+        }
         if (res.ok) {
           const data = await res.json();
           // Update per-stage warmth from health response (services.tts/whisper/llama_cpp)
@@ -2438,10 +2481,20 @@ export async function pollHealthUntilReady(
             broadcastWs({ type: 'gpu:services', step: modelStep, services: svc });
           }
         }
-      } catch {
-        // Network error / timeout — transient, don't count as non-transient
+      } catch (fetchErr) {
+        // Network error / timeout — TCP connection refused or app not listening.
+        // This *does* mean the container isn't serving yet, so track it
+        // separately and let it count toward the boot timeout.
         httpStatus = 0;
+        connectionRefused = true;
+        consecutiveConnectionRefused++;
+        if (consecutiveConnectionRefused === 1 || consecutiveConnectionRefused % 5 === 0) {
+          const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+          console.debug(`[gpu] Health probe ${endpoint}${healthPath} TCP fail #${consecutiveConnectionRefused}: ${msg}`);
+        }
       }
+      // Suppress unused-var warnings for variables we may expand later.
+      void connectionRefused;
 
       // Track non-transient HTTP errors (4xx = container responded but app is broken)
       if (httpStatus >= 400 && httpStatus < 500) {
