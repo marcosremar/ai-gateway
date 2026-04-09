@@ -32,10 +32,10 @@ import { resolveDockerImageForGpus, LOW_BALANCE_THRESHOLD_USD } from './config';
 import { loadProviderConfig } from './config-persistence';
 import {
   getGpuPriorityList, getDefaultGpuPriorityByProvider, getGpuPriorityForProvider,
-  getGpuSortBy, getDeployTimeoutMin, getDeployRegion, getMinVramGb, getPreferSsd,
+  getGpuSortBy, getDeployTimeoutMin, setDeployTimeoutMin, getDeployRegion, getMinVramGb, getPreferSsd,
   getDeployRaceCount, getLatencyMaxMs,
 } from '../src/gpu-providers/deploy-settings';
-import { getBestLatencyByGpuModel } from './latency-db';
+import { getBestLatencyByGpuModel, sortGpuTypesByLatency } from './latency-db';
 
 // ── GPU management endpoints ────────────────────────────────────────────────
 
