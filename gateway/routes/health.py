@@ -21,12 +21,28 @@ def _check_criu() -> bool:
 
 
 def _check_cuda_checkpoint() -> bool:
+    """Check for GPU snapshot support.
+
+    CRIU 4.0+ ships a `cuda_plugin.so` that handles GPU memory checkpointing
+    internally — no separate `cuda-checkpoint` binary is needed. We check for
+    the plugin first (preferred), then fall back to the standalone binary.
+    """
     global _cuda_ckpt_ok
     if _cuda_ckpt_ok is not None:
         return _cuda_ckpt_ok
     if os.environ.get("SNAPGPU_DISABLE_GPU_SNAPSHOT") == "1":
         _cuda_ckpt_ok = False
         return False
+    # Check for CRIU's built-in CUDA plugin (CRIU 4.0+)
+    cuda_plugin_paths = [
+        "/usr/lib/criu/cuda_plugin.so",
+        "/usr/local/lib/criu/cuda_plugin.so",
+    ]
+    for p in cuda_plugin_paths:
+        if os.path.isfile(p):
+            _cuda_ckpt_ok = True
+            return True
+    # Fallback: check for standalone cuda-checkpoint binary
     _cuda_ckpt_ok = shutil.which("cuda-checkpoint") is not None
     return _cuda_ckpt_ok
 
