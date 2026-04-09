@@ -2169,3 +2169,114 @@ export async function handleStandbyCancel(_req: IncomingMessage, res: ServerResp
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: true }));
 }
+
+// ── SnapGPU Snapshot endpoints ────────────────────────────────────────────────
+// Proxy to the snapgpu-gateway /v1/snapshots routes running inside the GPU pod.
+// The ai-gateway acts as a pass-through — it reads the active GPU endpoint from
+// deployState and forwards the request to the snapgpu-gateway.
+
+/** POST /v1/gpu/snapshot — create snapshot of the current GPU container */
+export async function handleSnapshotCreate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const endpoint = deployState.endpoint;
+  if (!endpoint) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'No active GPU — deploy first' }));
+    return;
+  }
+  try {
+    const body = await readJsonBody(req).catch(() => ({}));
+    const upstream = await fetch(`${endpoint.replace(/\/$/, '')}/v1/snapshots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const data = await upstream.json();
+    res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+  } catch (err) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Snapshot create failed: ${err instanceof Error ? err.message : err}` }));
+  }
+}
+
+/** GET /v1/gpu/snapshot — list all snapshots on the active GPU */
+export async function handleSnapshotList(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const endpoint = deployState.endpoint;
+  if (!endpoint) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ snapshots: [] }));
+    return;
+  }
+  try {
+    const upstream = await fetch(`${endpoint.replace(/\/$/, '')}/v1/snapshots`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await upstream.json();
+    res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+  } catch (err) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Snapshot list failed: ${err instanceof Error ? err.message : err}` }));
+  }
+}
+
+/** POST /v1/gpu/snapshot/:id/restore — restore a snapshot on the active GPU */
+export async function handleSnapshotRestore(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const endpoint = deployState.endpoint;
+  if (!endpoint) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'No active GPU — deploy first' }));
+    return;
+  }
+  const url = new URL(req.url || '', `http://${req.headers.host}`);
+  const snapshotId = url.pathname.split('/').pop() === 'restore'
+    ? url.pathname.split('/').at(-2) || ''
+    : '';
+  if (!snapshotId) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Missing snapshot_id in URL' }));
+    return;
+  }
+  try {
+    const upstream = await fetch(`${endpoint.replace(/\/$/, '')}/v1/snapshots/${encodeURIComponent(snapshotId)}/restore`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(30_000),
+    });
+    const data = await upstream.json();
+    res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+  } catch (err) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Snapshot restore failed: ${err instanceof Error ? err.message : err}` }));
+  }
+}
+
+/** DELETE /v1/gpu/snapshot/:id — delete a snapshot */
+export async function handleSnapshotDelete(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const endpoint = deployState.endpoint;
+  if (!endpoint) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'No active GPU — deploy first' }));
+    return;
+  }
+  const url = new URL(req.url || '', `http://${req.headers.host}`);
+  const snapshotId = url.pathname.split('/').pop() || '';
+  if (!snapshotId) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Missing snapshot_id in URL' }));
+    return;
+  }
+  try {
+    const upstream = await fetch(`${endpoint.replace(/\/$/, '')}/v1/snapshots/${encodeURIComponent(snapshotId)}`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await upstream.json();
+    res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+  } catch (err) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Snapshot delete failed: ${err instanceof Error ? err.message : err}` }));
+  }
+}

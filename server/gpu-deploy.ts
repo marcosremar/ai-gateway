@@ -25,7 +25,7 @@ import {
   perStageLatencyRing,
 } from './state';
 import {
-  translationProfile, updateTranslationProfile, runpod, vast, tensordock, modal, markGpuHealthy, markGpuUnhealthy,
+  translationProfile, updateTranslationProfile, runpod, vast, tensordock, modal, snapgpu, markGpuHealthy, markGpuUnhealthy,
   markGpuShadowMode, markGpuWarmupFailed, _startReadinessCheck,
 } from './providers';
 import { isReadinessCheckInProgress } from './gpu-readiness';
@@ -1544,7 +1544,7 @@ cooldownTracker.loadFromFile(join(homedir(), '.babelcast', 'cooldowns.json'));
 }
 
 /** Map of provider name → client instance for tier building. */
-export const providerClients: Record<ProviderName, GpuProviderClient> = { runpod, vast, tensordock, modal };
+export const providerClients: Record<ProviderName, GpuProviderClient> = { runpod, vast, tensordock, modal, snapgpu };
 
 export function buildGpuTiers(runpodApiKey: string, vastApiKey?: string, tensordockOpts?: { apiKey: string; authId: string }, modalApiKey?: string): GpuTier[] {
   // Build a map of available providers

@@ -65,6 +65,9 @@ export class AIClient {
   private readonly diversifyChains: boolean;
   /** Tracks deployed instances for cleanup. */
   private readonly deployedInstances = new Map<string, { provider: string; credentials: ProviderCredentials }>();
+  /** Set of endpoints known to be backed by snapgpu-runtime containers.
+   *  Used by tryGpuPipeline to decide between /v1/speech and /v1/invoke. */
+  private _snapgpuEndpoints?: Set<string>;
 
   constructor(options: AIClientOptions) {
     this.registry = options.registry;
@@ -221,7 +224,7 @@ export class AIClient {
         const provider = await this.resolveProvider(id => this.registry.getLLMProvider(id), entry.provider as ProviderId, profile, entry.endpoint);
         return provider.chat({
           messages,
-          model: entry.model ?? 'gpt-4o',
+          model: entry.model ?? '',  // empty string → provider uses its own defaultModel
           temperature: profile.temperature,
           maxTokens: profile.maxTokens,
           responseFormat: profile.responseFormat,
@@ -1300,7 +1303,18 @@ export class AIClient {
     profile: AIProfile,
   ): Promise<Omit<PipelineResult, 'totalLatencyMs' | 'usedGpu'>> {
     const timeoutMs = profile.fallbackOptions?.timeoutMs ?? 30_000;
-    const url = `${endpoint.replace(/\/$/, '')}/v1/speech`;
+    // SnapGPU containers expose /v1/invoke/{app}/{fn} instead of /v1/speech.
+    // The active provider is stored by the gateway in deployState; we detect
+    // snapgpu by the endpoint URL containing 'snapgpu' or via an explicit
+    // x-snapgpu header (set by the deploy handler). When neither is available,
+    // we default to /v1/speech for backward compatibility.
+    const isSnapgpu = profile.gpuProvider === 'snapgpu'
+      || endpoint.includes('snapgpu')
+      || this._snapgpuEndpoints?.has(endpoint);
+    const speechPath = isSnapgpu
+      ? `/v1/invoke/${profile.snapgpuAppName || 'babelcast'}/speech`
+      : '/v1/speech';
+    const url = `${endpoint.replace(/\/$/, '')}${speechPath}`;
 
     const formData = new FormData();
     const audioBlob = audio instanceof Blob ? audio : new Blob([audio as BlobPart]);
