@@ -933,6 +933,12 @@ export async function handleGpuInspect(_req: IncomingMessage, res: ServerRespons
   const sshHost = deployState.sshHost;
   const sshPort = deployState.sshPort;
 
+  // The remote command is intentionally a single multi-line bash here-doc
+  // executed via SSH. We pull EVERYTHING the operator might need in one
+  // round-trip: process state, ports, the raw /var/log/app.log tail, the
+  // FastAPI /health + /diag + /logs endpoints (which carry the full
+  // model-load traceback when it failed), HF cache size, and dmesg.
+  // Each section is bracketed by '===== ' so the output is grep-friendly.
   const cmd = `
 echo '===== STATUS ====='
 date
@@ -950,8 +956,8 @@ echo
 echo '===== SSHD ====='
 ps aux | grep sshd | grep -v grep
 echo
-echo '===== APP LOG (last 100) ====='
-tail -100 /var/log/app.log 2>/dev/null || echo 'NO /var/log/app.log'
+echo '===== APP LOG (last 300 lines) ====='
+tail -300 /var/log/app.log 2>/dev/null || echo 'NO /var/log/app.log'
 echo
 echo '===== DOCKER ENV ====='
 env | grep -iE 'pytorch|cuda|hf_|trellis|public_key' | head -20
@@ -964,7 +970,13 @@ echo '===== /APP CONTENTS ====='
 ls -la /app/ 2>/dev/null
 echo
 echo '===== HEALTH FROM INSIDE ====='
-curl -sf --max-time 5 http://localhost:8000/health 2>&1 || echo 'localhost:8000 connection failed'
+curl -sf --max-time 5 http://localhost:8000/health 2>&1 || echo 'localhost:8000 /health failed'
+echo
+echo '===== DIAG FROM INSIDE ====='
+curl -sf --max-time 10 http://localhost:8000/diag 2>&1 || echo 'localhost:8000 /diag failed'
+echo
+echo '===== /LOGS ENDPOINT (last 500 lines from FastAPI) ====='
+curl -sf --max-time 10 'http://localhost:8000/logs?lines=500' 2>&1 || echo 'localhost:8000 /logs failed'
 echo
 echo '===== DMESG (kernel — OOM check) ====='
 dmesg 2>/dev/null | tail -20 || echo 'no dmesg access'
