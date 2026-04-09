@@ -14,6 +14,7 @@
  */
 
 import { AbstractGpuProvider } from './abstract-provider';
+import { defaultLogger as log } from '../logger';
 
 export interface PullTimeEstimate {
   estimatedPullS: number;
@@ -94,7 +95,7 @@ export function recordPullTime(
     recordedAt: Date.now(),
   });
   while (pullHistory.length > MAX_HISTORY) pullHistory.shift();
-  console.log(`[pull-estimator] Recorded: ${dockerImage} on ${hostKey || '?'} — pull=${pullTimeS}s boot=${bootTimeS || '?'}s inet=${inetDownMbps || '?'}Mbps`);
+  log.log(`[pull-estimator] Recorded: ${dockerImage} on ${hostKey || '?'} — pull=${pullTimeS}s boot=${bootTimeS || '?'}s inet=${inetDownMbps || '?'}Mbps`);
 }
 
 /**
@@ -290,11 +291,11 @@ export async function prewarmImageSizeCache(images: string[]): Promise<void> {
     images.map(async (img) => {
       const size = await getCompressedSizeGb(img);
       if (size !== null) {
-        console.log(`[pull-estimator] Cached: ${img} = ${size.toFixed(2)}GB compressed`);
+        log.log(`[pull-estimator] Cached: ${img} = ${size.toFixed(2)}GB compressed`);
       }
       return size;
     }),
   );
   const cached = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
-  console.log(`[pull-estimator] Pre-warmed ${cached}/${images.length} image sizes`);
+  log.log(`[pull-estimator] Pre-warmed ${cached}/${images.length} image sizes`);
 }

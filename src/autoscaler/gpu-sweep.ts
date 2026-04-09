@@ -24,6 +24,7 @@
 
 import type { GpuInstance } from '../gpu-providers/types';
 import { logGpuEvent } from './file-lifecycle-logger';
+import { defaultLogger as log } from '../logger';
 
 export interface SweepInstance extends GpuInstance {
   provider: string;
@@ -48,23 +49,23 @@ interface ProviderSweepConfig {
   envKey: string;        // e.g. 'VAST_API_KEY'
   envKeyAlt?: string;    // e.g. 'RUNPOD_API_KEY'
   authIdEnv?: string;    // e.g. 'TENSORDOCK_AUTH_ID'
-  createClient: () => any;
+  createClient: () => Promise<any>;
 }
 
 const PROVIDER_CONFIGS: ProviderSweepConfig[] = [
   {
     provider: 'vast',
     envKey: 'VAST_API_KEY',
-    createClient: () => {
-      const { VastClient } = require('../gpu-providers/vast-client');
+    createClient: async () => {
+      const { VastClient } = await import('../gpu-providers/vast-client');
       return new VastClient();
     },
   },
   {
     provider: 'runpod',
     envKey: 'RUNPOD_API_KEY',
-    createClient: () => {
-      const { RunpodClient } = require('../gpu-providers/runpod-client');
+    createClient: async () => {
+      const { RunpodClient } = await import('../gpu-providers/runpod-client');
       return new RunpodClient();
     },
   },
@@ -72,8 +73,8 @@ const PROVIDER_CONFIGS: ProviderSweepConfig[] = [
     provider: 'tensordock',
     envKey: 'TENSORDOCK_API_KEY',
     authIdEnv: 'TENSORDOCK_AUTH_ID',
-    createClient: () => {
-      const { TensordockClient } = require('../gpu-providers/tensordock-client');
+    createClient: async () => {
+      const { TensordockClient } = await import('../gpu-providers/tensordock-client');
       return new TensordockClient();
     },
   },
@@ -120,7 +121,7 @@ export async function sweepAllProviders(
     report.providers.push(cfg.provider);
 
     try {
-      const client = cfg.createClient();
+      const client = await cfg.createClient();
       const instances: GpuInstance[] = await client.listInstances({
         apiKey,
         authId,
@@ -161,7 +162,7 @@ export async function sweepAllProviders(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       report.errors.push({ provider: cfg.provider, error: msg });
-      console.warn(`[gpu-sweep] ${cfg.provider} sweep failed: ${msg}`);
+      log.warn(`[gpu-sweep] ${cfg.provider} sweep failed: ${msg}`);
     }
   });
 
@@ -213,31 +214,31 @@ export async function sweepAllProviders(
  * the admin panel's "GPU Inventory" section.
  */
 export function printSweepReport(report: SweepReport): void {
-  console.log(`\n=== GPU Sweep @ ${report.ts} ===`);
-  console.log(`Providers: ${report.providers.join(', ')}`);
-  console.log(`Running: ${report.totalRunning} | Stopped: ${report.totalStopped} | Cost: $${report.totalCostPerHr.toFixed(2)}/hr`);
+  log.log(`\n=== GPU Sweep @ ${report.ts} ===`);
+  log.log(`Providers: ${report.providers.join(', ')}`);
+  log.log(`Running: ${report.totalRunning} | Stopped: ${report.totalStopped} | Cost: $${report.totalCostPerHr.toFixed(2)}/hr`);
 
   if (report.instances.length === 0) {
-    console.log('No instances found.');
+    log.log('No instances found.');
   } else {
-    console.log('\nInstances:');
+    log.log('\nInstances:');
     for (const inst of report.instances) {
       const icon = inst.isTracked ? '✅' : '⚠️';
       const cost = inst.costPerHr != null ? `$${inst.costPerHr.toFixed(2)}/hr` : '';
-      console.log(
+      log.log(
         `  ${icon} ${inst.provider.padEnd(10)} ${inst.instanceId.padEnd(25)} ${(inst.status || '?').padEnd(10)} ${(inst.gpuType || '?').padEnd(20)} ${cost} ${inst.isTracked ? '' : '← UNTRACKED'}`,
       );
     }
   }
 
   if (report.untracked.length > 0) {
-    console.log(`\n⚠️  ${report.untracked.length} UNTRACKED instance(s) found!`);
-    console.log('   These are running outside the autoscaler and will NOT be auto-stopped.');
+    log.warn(`\n⚠️  ${report.untracked.length} UNTRACKED instance(s) found!`);
+    log.warn('   These are running outside the autoscaler and will NOT be auto-stopped.');
   }
 
   if (report.errors.length > 0) {
-    console.log(`\n❌ ${report.errors.length} provider error(s):`);
-    for (const e of report.errors) console.log(`   ${e.provider}: ${e.error}`);
+    log.error(`\n❌ ${report.errors.length} provider error(s):`);
+    for (const e of report.errors) log.error(`   ${e.provider}: ${e.error}`);
   }
-  console.log('');
+  log.log('');
 }

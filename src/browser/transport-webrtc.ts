@@ -27,7 +27,7 @@ export class WebRTCTransport implements Transport {
   onDisconnect: (() => void) | null = null;
   onAudioChunk: ((chunk: Uint8Array) => void) | null = null;
 
-  private client: any = null; // PipecatClient (Pipecat mode only)
+  private client: { disconnect(): Promise<void>; sendClientMessage(topic: string, payload: Record<string, unknown>): void } | null = null;
   private pc: RTCPeerConnection | null = null; // aiortc simple mode
   private dataChannel: RTCDataChannel | null = null; // aiortc simple mode
   private remoteStream: MediaStream | null = null;

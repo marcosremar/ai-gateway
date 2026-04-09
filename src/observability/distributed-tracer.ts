@@ -7,6 +7,7 @@
 
 import { randomBytes } from 'crypto';
 import type { TraceContext, PipelineMetrics } from './types';
+import { defaultLogger as log } from '../logger';
 
 export class DistributedTracer {
   private spans = new Map<string, TraceContext>();
@@ -34,14 +35,14 @@ export class DistributedTracer {
     return span;
   }
 
-  addTag(spanId: string, key: string, value: any): void {
+  addTag(spanId: string, key: string, value: unknown): void {
     const span = this.spans.get(spanId);
     if (span) {
       span.tags[key] = value;
     }
   }
 
-  addEvent(spanId: string, name: string, attributes: Record<string, any> = {}): void {
+  addEvent(spanId: string, name: string, attributes: Record<string, unknown> = {}): void {
     const span = this.spans.get(spanId);
     if (span) {
       span.events.push({
@@ -241,7 +242,7 @@ export class DistributedTracer {
     const startTime = Date.now();
     let successCount = 0;
 
-    console.log(`[tracer] Starting realtime benchmark: ${requestCount} requests, ${intervalMs}ms intervals`);
+    log.log(`[tracer] Starting realtime benchmark: ${requestCount} requests, ${intervalMs}ms intervals`);
 
     for (let i = 0; i < requestCount; i++) {
       try {
@@ -258,7 +259,7 @@ export class DistributedTracer {
         successCount++;
 
         const ttfc = Date.now() - benchmarkStart;
-        console.log(`[tracer] Request ${i+1}/${requestCount}: TTFC=${ttfc}ms`);
+        log.log(`[tracer] Request ${i+1}/${requestCount}: TTFC=${ttfc}ms`);
 
         // Record in tracer for analysis
         const span = this.startSpan('benchmark_request');
@@ -266,7 +267,7 @@ export class DistributedTracer {
         this.endSpan(span.spanId);
 
       } catch (error) {
-        console.log(`[tracer] Request ${i+1} failed:`, error);
+        log.error(`[tracer] Request ${i+1} failed:`, error);
       }
     }
 
@@ -342,6 +343,6 @@ export const globalTracer = new DistributedTracer();
 setInterval(() => {
   const removed = globalTracer.cleanup();
   if (removed > 0) {
-    console.log(`[tracer] Cleaned up ${removed} old traces`);
+    log.log(`[tracer] Cleaned up ${removed} old traces`);
   }
 }, 5 * 60 * 1000);

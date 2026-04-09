@@ -3,7 +3,8 @@
  * No Express/Hono dependency.
  */
 
-import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'http';
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse, type Server } from 'http';
+import { request as httpsRequest } from 'https';
 import { randomUUID } from 'crypto';
 import { existsSync, readFileSync, statSync } from 'fs';
 import { join, extname, resolve } from 'path';
@@ -209,7 +210,7 @@ const MIME_TYPES: Record<string, string> = {
 /** Reverse-proxy a request to the Next.js dev server for HMR support. */
 function proxyToNextDev(nextDevUrl: string, req: IncomingMessage, res: ServerResponse): void {
   const target = new URL(req.url || '/', nextDevUrl);
-  const proxyReq = (target.protocol === 'https:' ? require('https') : require('http')).request(
+  const proxyReq = (target.protocol === 'https:' ? httpsRequest : httpRequest)(
     target,
     { method: req.method, headers: { ...req.headers, host: target.host } },
     (proxyRes: IncomingMessage) => {
@@ -524,7 +525,7 @@ export function createProxyServer(config: ProxyConfig): Server {
     if (config.nextDevUrl && path.startsWith('/_next/')) {
       const nextUrl = config.nextDevUrl;
       const target = new URL(path, nextUrl);
-      const proxyReq = require('http').request(target, {
+      const proxyReq = httpRequest(target, {
         method: 'GET',
         headers: { ...req.headers, host: target.host },
       });

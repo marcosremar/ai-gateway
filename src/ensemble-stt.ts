@@ -10,6 +10,7 @@
 
 import type { STTProvider, STTSegment } from './providers/types';
 import type { EmbeddingProvider } from './providers/openai-compat/openai-compat-embedding';
+import { defaultLogger as log } from './logger';
 
 export interface STTVerifierProviderEntry {
   name: string;
@@ -126,7 +127,7 @@ export async function runVerifiedSTT(
   }
 
   const latency_ms = Date.now() - t0;
-  console.log(`[stt-verifier] ${winner.name} won in ${latency_ms}ms`);
+  log.log(`[stt-verifier] ${winner.name} won in ${latency_ms}ms`);
 
   return {
     consensus: winner.text,

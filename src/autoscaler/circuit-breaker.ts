@@ -13,6 +13,7 @@
  */
 
 import type { KvStore } from '../deps';
+import { defaultLogger as log } from '../logger';
 
 export type CircuitState = 'closed' | 'open' | 'half-open';
 
@@ -314,7 +315,7 @@ export class TierCircuitBreaker {
                       (state.lastSuccessRate < this.config.minSuccessRate) ? "low success rate" :
                       "consecutive failures";
 
-    console.log(`[circuit-breaker] 🔴 Circuit OPENED for tier ${tierIndex} due to ${riskFactor} ` +
+    log.log(`[circuit-breaker] 🔴 Circuit OPENED for tier ${tierIndex} due to ${riskFactor} ` +
                 `(success: ${(state.lastSuccessRate * 100).toFixed(1)}%, threshold: ${(this.config.minSuccessRate * 100).toFixed(1)}%, predictive: ${(state.predictiveScore * 100).toFixed(1)}%)`);
   }
 

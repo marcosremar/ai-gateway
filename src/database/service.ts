@@ -23,7 +23,6 @@ import type { SqlDriver } from './pg-driver';
 function loadPrisma(config: DatabaseConfig): unknown {
   let PrismaClient: new (opts: unknown) => unknown;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mod = require('@prisma/client') as { PrismaClient: new (opts: unknown) => unknown };
     PrismaClient = mod.PrismaClient;
   } catch {
@@ -42,7 +41,6 @@ function loadPrisma(config: DatabaseConfig): unknown {
       // PrismaNeon (WebSocket/Pool) causes an instanceof mismatch when there are multiple
       // copies of @neondatabase/serverless in node_modules. PrismaNeonHTTP uses the neon()
       // fetch function and has no such coupling issue.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { neon, types } = require('@neondatabase/serverless') as {
         neon: (connectionString: string) => unknown;
         types: { setTypeParser: (oid: number, parser: (val: string) => unknown) => void };
@@ -53,7 +51,6 @@ function loadPrisma(config: DatabaseConfig): unknown {
       types.setTypeParser(1082, (val: string) => val); // DATE
       types.setTypeParser(1114, (val: string) => val); // TIMESTAMP
       types.setTypeParser(1184, (val: string) => val); // TIMESTAMPTZ
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { PrismaNeonHTTP } = require('@prisma/adapter-neon') as {
         PrismaNeonHTTP: new (sql: unknown) => unknown;
       };

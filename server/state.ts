@@ -270,7 +270,7 @@ export function setDeployState(patch: Partial<DeploymentState>) {
     // Keep last 30 transitions (splice in-place instead of allocating new array)
     if (deployState.transitions.length > 30) deployState.transitions.splice(0, deployState.transitions.length - 30);
     // Broadcast transition for real-time UI
-    try { const { broadcastWs: bws } = require('./ws-state'); bws?.({ type: 'gpu:transition', status: newStatus, step: newStep, provider: deployState.provider, elapsed, gpuType: deployState.gpuType, detail: deployState.message?.slice(0, 80) }); } catch {}
+    try { const { broadcastWs: bws } = require('./ws-state'); bws?.({ type: 'gpu:transition', status: newStatus, step: newStep, provider: deployState.provider, elapsed, gpuType: deployState.gpuType, detail: deployState.message?.slice(0, 80) }); } catch (e) { console.warn('[state] broadcastWs failed:', e instanceof Error ? e.message : e); }
   }
 
   console.log(`[gpu] ${deployState.status}: ${deployState.message}`);
@@ -303,7 +303,7 @@ export let lastModelRequestTime = 0;
 export function touchModelRequest() {
   lastModelRequestTime = Date.now();
   // Reset idle-related state in gpu-deploy (lazy import to avoid circular deps)
-  try { const { resetIdleState } = require('./gpu-deploy'); resetIdleState?.(); } catch {}
+  try { const { resetIdleState } = require('./gpu-deploy'); resetIdleState?.(); } catch (e) { console.warn('[state] resetIdleState failed:', e instanceof Error ? e.message : e); }
   // Auto-resume: if a stopped GPU pod exists, transparently resume it (or fall
   // back to fresh deploy) when a new AI request arrives. Fire-and-forget —
   // the caller gets a "booting" status and retries on the next poll.
@@ -315,7 +315,7 @@ export function touchModelRequest() {
         console.error(`[gpu] Auto-resume failed: ${err instanceof Error ? err.message : err}`)
       );
     }
-  } catch {}
+  } catch (e) { console.warn('[state] auto-resume failed:', e instanceof Error ? e.message : e); }
 }
 export function setLastModelRequestTime(v: number) { lastModelRequestTime = v; }
 
