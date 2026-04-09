@@ -401,7 +401,7 @@ export async function handleGpuList(_req: IncomingMessage, res: ServerResponse):
   for (const result of results) {
     if (result.status !== 'fulfilled') continue;
     for (const inst of result.value) {
-      if (!instances.some((x: { instanceId: string }) => x.instanceId === inst.instanceId)) {
+      if (!instances.some((x: unknown) => (x as { instanceId: string }).instanceId === (inst as { instanceId: string }).instanceId)) {
         instances.push(inst);
       }
     }
