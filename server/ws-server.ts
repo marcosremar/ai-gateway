@@ -1020,6 +1020,7 @@ export function startWsServer() {
       'POST /v1/gpu/resume': gh.handleGpuResume,
       'POST /v1/gpu/terminate': gh.handleGpuTerminate,
       'GET /v1/gpu/logs': gh.handleGpuLogs,
+      'GET /v1/gpu/inspect': gh.handleGpuInspect,
       'GET /v1/gpu/logs/events': gh.handleGpuEventLogs,
       'GET /v1/gpu/offers': gh.handleGpuOffers,
       'GET /v1/gpu/types': gh.handleGpuTypes,

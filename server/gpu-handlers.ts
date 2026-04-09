@@ -912,6 +912,103 @@ export async function handleSnapshotDelete(req: IncomingMessage, res: ServerResp
   }
 }
 
+/**
+ * Live SSH forensics on the current GPU instance. Spawns ssh to the
+ * deployed instance's sshHost:sshPort and runs a battery of diagnostic
+ * commands. Returns the combined output as plain text. Useful when a
+ * deploy is stuck in "booting" / "waiting_health" and you want to see
+ * what's actually going on inside the container.
+ *
+ * Requires the deploy to be in 'creating', 'booting', or 'ready' state
+ * with sshHost/sshPort populated.
+ */
+export async function handleGpuInspect(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!deployState.sshHost || !deployState.sshPort) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'No active deploy with SSH host', state: deployState.status }));
+    return;
+  }
+
+  const { spawn } = await import('child_process');
+  const sshHost = deployState.sshHost;
+  const sshPort = deployState.sshPort;
+
+  const cmd = `
+echo '===== STATUS ====='
+date
+uptime
+echo
+echo '===== PORTS LISTENING ====='
+ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || echo 'no ss/netstat'
+echo
+echo '===== PROCESSES ====='
+ps auxf | head -50
+echo
+echo '===== PYTHON / SERVER ====='
+ps aux | grep -E 'python|server\\.py|uvicorn' | grep -v grep
+echo
+echo '===== SSHD ====='
+ps aux | grep sshd | grep -v grep
+echo
+echo '===== APP LOG (last 100) ====='
+tail -100 /var/log/app.log 2>/dev/null || echo 'NO /var/log/app.log'
+echo
+echo '===== DOCKER ENV ====='
+env | grep -iE 'pytorch|cuda|hf_|trellis|public_key' | head -20
+echo
+echo '===== HF CACHE ====='
+du -sh /root/.cache/huggingface/ 2>/dev/null || echo 'no hf cache'
+ls /root/.cache/huggingface/hub/ 2>/dev/null | head -5
+echo
+echo '===== /APP CONTENTS ====='
+ls -la /app/ 2>/dev/null
+echo
+echo '===== HEALTH FROM INSIDE ====='
+curl -sf --max-time 5 http://localhost:8000/health 2>&1 || echo 'localhost:8000 connection failed'
+echo
+echo '===== DMESG (kernel — OOM check) ====='
+dmesg 2>/dev/null | tail -20 || echo 'no dmesg access'
+echo
+echo '===== DISK ====='
+df -h / 2>&1
+`;
+
+  const result: string[] = [];
+  const sshProc = spawn('ssh', [
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'UserKnownHostsFile=/dev/null',
+    '-o', 'ConnectTimeout=10',
+    '-o', 'LogLevel=ERROR',
+    '-p', String(sshPort),
+    `root@${sshHost}`,
+    cmd,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  sshProc.stdout.on('data', (chunk) => result.push(chunk.toString()));
+  sshProc.stderr.on('data', (chunk) => result.push(`STDERR: ${chunk.toString()}`));
+
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      try { sshProc.kill('SIGKILL'); } catch {}
+      result.push('\nTIMEOUT after 30s\n');
+      resolve();
+    }, 30_000);
+    sshProc.on('exit', (code) => {
+      clearTimeout(timer);
+      result.push(`\n--- ssh exited with code ${code} ---\n`);
+      resolve();
+    });
+    sshProc.on('error', (err) => {
+      clearTimeout(timer);
+      result.push(`\nERROR: ${err.message}\n`);
+      resolve();
+    });
+  });
+
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end(result.join(''));
+}
+
 // ── Re-exports from split modules ────────────────────────────────────────────
 
 export {
