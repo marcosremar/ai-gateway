@@ -74,6 +74,10 @@ interface DeployConfig {
   containerDiskInGb: number;
   volumeId: string;
   providerFilter: ProviderName | undefined;
+  /** Vast.ai template hash ID — pre-configured image/env/ports for faster boot */
+  templateHashId: string | undefined;
+  /** Force SSH tunnel for Vast.ai (skip direct-port endpoint, use SSH proxy) */
+  forceSshTunnel: boolean | undefined;
 }
 
 /**
@@ -180,6 +184,9 @@ async function _validateDeployRequest(
     storageGb, hfToken, llmModel, interruptible, raceCount, deployEnv,
     dockerStartCmd, containerDiskInGb, volumeId,
     providerFilter: body.provider as ProviderName | undefined,
+    templateHashId: typeof body.templateHashId === 'string' && body.templateHashId.length > 0
+      ? body.templateHashId : undefined,
+    forceSshTunnel: body.forceSshTunnel === true ? true : undefined,
   };
 }
 
@@ -400,7 +407,7 @@ function _startDeployAndRespond(
   requestId: string,
   res: ServerResponse,
 ): void {
-  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, containerDiskInGb, volumeId } = config;
+  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, containerDiskInGb, volumeId, templateHashId, forceSshTunnel } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   setDeployCancelled(false);
@@ -414,7 +421,7 @@ function _startDeployAndRespond(
     return;
   }
 
-  const extra = { region, storageGb, hfToken, env: Object.keys(deployEnv).length > 0 ? deployEnv : undefined, interruptible, ...(dockerStartCmd ? { dockerStartCmd } : {}), ...(containerDiskInGb > 0 ? { containerDiskInGb } : {}), ...(volumeId ? { volumeId } : {}) };
+  const extra = { region, storageGb, hfToken, env: Object.keys(deployEnv).length > 0 ? deployEnv : undefined, interruptible, ...(dockerStartCmd ? { dockerStartCmd } : {}), ...(containerDiskInGb > 0 ? { containerDiskInGb } : {}), ...(volumeId ? { volumeId } : {}), ...(templateHashId ? { templateHashId } : {}), ...(forceSshTunnel ? { forceSshTunnel } : {}) };
 
   const deployFn = raceCount > 1
     ? startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount)

@@ -282,6 +282,153 @@ export class VastClient extends AbstractGpuProvider {
     return anyRunning ?? null;
   }
 
+  // ── Templates ────────────────────────────────────────────────────────────
+  // Vast.ai templates are pre-configured "blueprints" that contain a Docker
+  // image, environment vars, ports, onstart command, etc. They have two
+  // benefits over passing the same fields on every create:
+  //   1. **Hosts cache by template** — once a host has run the template once,
+  //      subsequent instances on the same host skip the docker pull entirely.
+  //      For a 15GB image this drops the boot time from ~25 min to ~30 sec.
+  //   2. **Cleaner metadata** — Vast's marketplace shows the template name
+  //      so you can identify the workload across instances.
+  //
+  // Use `findOrCreateTemplate(name, ...)` for idempotent setup: it lists
+  // your existing templates first, returning the hash_id if a matching
+  // (name + image) one already exists, or creating a new one otherwise.
+
+  /**
+   * Spec for creating a Vast.ai template. Mirrors the POST /template/ body
+   * with TS-friendly camelCase field names.
+   */
+  /* eslint-disable @typescript-eslint/no-unused-vars */
+  // (interface defined inline to avoid bloating ./types.ts; only used here)
+
+  /**
+   * Create a Vast.ai template via POST /template/. Returns the new template's
+   * `hash_id` which can be passed as `templateHashId` to `createInstance()`.
+   *
+   * NOTE: this is idempotent at the API level — Vast.ai allows duplicate
+   * templates with the same name. Use `findOrCreateTemplate()` for true
+   * idempotency.
+   */
+  async createTemplate(
+    spec: {
+      name: string;
+      image: string;          // e.g. 'marcosremar/trellis2'
+      tag?: string;           // default: 'latest'
+      envVars?: Record<string, string>;  // expanded into -e KEY=VAL flags
+      exposePorts?: number[]; // expanded into -p PORT:PORT flags
+      onstartCmd?: string;    // command to run after boot
+      diskSpaceGb?: number;   // recommended disk
+      useSsh?: boolean;       // default: true
+      useJupyter?: boolean;   // default: false
+    },
+    credentials: ProviderCredentials,
+  ): Promise<{ hashId: string; id: number }> {
+    const tag = spec.tag ?? 'latest';
+    // Build the env string Vast.ai expects: "-p 8000:8000 -e KEY=VAL ..."
+    const envParts: string[] = [];
+    for (const port of spec.exposePorts ?? [8000]) {
+      envParts.push(`-p ${port}:${port}`);
+    }
+    for (const [k, v] of Object.entries(spec.envVars ?? {})) {
+      envParts.push(`-e ${k}=${v}`);
+    }
+    const envString = envParts.join(' ');
+
+    const body = {
+      name: spec.name,
+      image: spec.image,
+      tag,
+      image_uuid: `${spec.image}:${tag}`,
+      env: envString,
+      onstart_cmd: spec.onstartCmd ?? '',
+      runtype: 'args',
+      use_jupyter_lab: spec.useJupyter ?? false,
+      use_ssh: spec.useSsh ?? true,
+      extra_filters: {},
+      disk_space: spec.diskSpaceGb ?? 16,
+    };
+
+    const res = await this._vastFetch(`${VAST_API_BASE}/template/`, {
+      method: 'POST',
+      headers: this.jsonHeaders(credentials.apiKey),
+      body: JSON.stringify(body),
+    }, TIMEOUTS.create);
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Vast.ai createTemplate failed: HTTP ${res.status} ${errText.substring(0, 300)}`);
+    }
+    const data = (await res.json()) as { success: boolean; template?: { hash_id: string; id: number }; msg?: string };
+    if (!data.success || !data.template?.hash_id) {
+      throw new Error(`Vast.ai createTemplate returned unexpected payload: ${JSON.stringify(data).substring(0, 300)}`);
+    }
+    this.log.log(`[vast] Created template "${spec.name}" → ${data.template.hash_id} (id=${data.template.id})`);
+    return { hashId: data.template.hash_id, id: data.template.id };
+  }
+
+  /**
+   * List all templates owned by the current user. Returns a minimal projection
+   * suitable for matching by name/image.
+   */
+  async listTemplates(credentials: ProviderCredentials): Promise<Array<{
+    hashId: string;
+    id: number;
+    name: string;
+    image: string;
+    tag?: string;
+  }>> {
+    const res = await this._vastFetch(`${VAST_API_BASE}/users/current/templates/`, {
+      method: 'GET',
+      headers: this.jsonHeaders(credentials.apiKey),
+    }, TIMEOUTS.read);
+    if (!res.ok) {
+      throw new Error(`Vast.ai listTemplates failed: HTTP ${res.status}`);
+    }
+    const data = (await res.json()) as { templates?: Array<Record<string, unknown>> };
+    return (data.templates ?? []).map((t) => ({
+      hashId: (t.hash_id as string) ?? '',
+      id: (t.id as number) ?? 0,
+      name: (t.name as string) ?? '',
+      image: (t.image as string) ?? (t.image_uuid as string) ?? '',
+      tag: t.tag as string | undefined,
+    })).filter(t => t.hashId);
+  }
+
+  /**
+   * Idempotent template setup: if a template with the same name AND image
+   * already exists, return its hash_id. Otherwise create one.
+   *
+   * This is the recommended way to set up a template once and reuse it
+   * across deploys — host caching kicks in after the first deploy on each
+   * host, so subsequent deploys to the same host skip the docker pull.
+   */
+  async findOrCreateTemplate(
+    spec: Parameters<typeof this.createTemplate>[0],
+    credentials: ProviderCredentials,
+  ): Promise<{ hashId: string; id: number; created: boolean }> {
+    const tag = spec.tag ?? 'latest';
+    const wantImage = spec.image;
+    const wantTag = tag;
+    try {
+      const existing = await this.listTemplates(credentials);
+      const match = existing.find(t =>
+        t.name === spec.name &&
+        t.image === wantImage &&
+        (t.tag === wantTag || (!t.tag && wantTag === 'latest'))
+      );
+      if (match) {
+        this.log.log(`[vast] Reusing existing template "${spec.name}" → ${match.hashId}`);
+        return { hashId: match.hashId, id: match.id, created: false };
+      }
+    } catch (e) {
+      this.log.warn(`[vast] listTemplates failed, will try to create: ${this.errMsg(e)}`);
+    }
+    const created = await this.createTemplate(spec, credentials);
+    return { ...created, created: true };
+  }
+
   async createInstance(
     spec: InstanceSpec,
     credentials: ProviderCredentials,
@@ -687,6 +834,16 @@ export class VastClient extends AbstractGpuProvider {
         180_000, // floor 3 min
       );
       let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS, inetDown);
+
+      // forceSshTunnel: skip the direct endpoint even if it looks reachable.
+      // Use this on residential hosts where the direct port is unreliable but
+      // SSH tunneling works fine. The probe stage above will have validated
+      // the L7 reachability — but if even L7 succeeds and you still want a
+      // tunnel (e.g. for stable WebSocket connections), this forces it.
+      if (endpoint && spec.forceSshTunnel) {
+        this.log.log(`[vast] Instance ${contractId} forceSshTunnel=true — clearing direct endpoint ${endpoint} to force SSH tunnel fallback`);
+        endpoint = '';
+      }
 
       // If instance vanished (no endpoint), verify it still exists before trying SSH.
       if (!endpoint) {
@@ -1431,11 +1588,20 @@ export class VastClient extends AbstractGpuProvider {
   }
 
   /** Quick TCP probe to verify an endpoint is reachable (not firewalled). */
+  /**
+   * Two-stage probe: first TCP connect, then HTTP GET. This catches the
+   * common Vast.ai residential-host failure mode where the host's port
+   * mapping accepts the TCP SYN even though the container app isn't
+   * actually listening yet. A successful TCP connect alone isn't enough —
+   * we need an actual HTTP response (or even an HTTP-shaped error like
+   * 404, which still proves something is listening at L7).
+   */
   private async _probeEndpoint(endpoint: string, timeoutMs: number = 8_000): Promise<boolean> {
     try {
       const url = new URL(endpoint);
       const { createConnection } = await import('net');
-      return new Promise<boolean>((resolve) => {
+      // Stage 1: TCP connect
+      const tcpOk = await new Promise<boolean>((resolve) => {
         const socket = createConnection(
           { host: url.hostname, port: parseInt(url.port), timeout: timeoutMs },
           () => { socket.destroy(); resolve(true); }
@@ -1443,6 +1609,28 @@ export class VastClient extends AbstractGpuProvider {
         socket.on('error', () => { socket.destroy(); resolve(false); });
         socket.on('timeout', () => { socket.destroy(); resolve(false); });
       });
+      if (!tcpOk) return false;
+      // Stage 2: HTTP GET. We accept any HTTP response (even 404 or 500)
+      // because that proves L7 is responding. AbortSignal cancels after
+      // timeoutMs to avoid waiting forever on a slow app.
+      try {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), timeoutMs);
+        const res = await fetch(`${endpoint.replace(/\/$/, '')}/health`, {
+          method: 'GET',
+          signal: ctl.signal,
+        }).catch(() => null);
+        clearTimeout(t);
+        if (res) return true;  // any HTTP response (even errors) = L7 alive
+        // Try root path as fallback (some apps don't have /health)
+        const ctl2 = new AbortController();
+        const t2 = setTimeout(() => ctl2.abort(), timeoutMs);
+        const res2 = await fetch(endpoint, { method: 'GET', signal: ctl2.signal }).catch(() => null);
+        clearTimeout(t2);
+        return res2 !== null;
+      } catch {
+        return false;
+      }
     } catch {
       return false;
     }

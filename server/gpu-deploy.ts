@@ -1292,7 +1292,7 @@ export async function autoSelectCheapestGpu(
 
 // ── Deploy loop ─────────────────────────────────────────────────────────────
 
-export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; containerDiskInGb?: number; volumeId?: string; autoRecovery?: boolean; }
+export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; containerDiskInGb?: number; volumeId?: string; autoRecovery?: boolean; templateHashId?: string; forceSshTunnel?: boolean; }
 
 
 export async function startDeployLoop(
@@ -1420,6 +1420,9 @@ export async function startDeployLoop(
           ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
           ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
           ...(extra.volumeId ? { volumeId: extra.volumeId } : {}),
+          // Vast.ai-specific options (ignored by other providers)
+          ...(extra.templateHashId ? { templateHashId: extra.templateHashId } : {}),
+          ...(extra.forceSshTunnel ? { forceSshTunnel: extra.forceSshTunnel } : {}),
         },
         credentials,
       );
@@ -1701,6 +1704,8 @@ export async function startDeployRace(
           ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
           ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
           ...(extra.volumeId ? { volumeId: extra.volumeId } : {}),
+          ...(extra.templateHashId ? { templateHashId: extra.templateHashId } : {}),
+          ...(extra.forceSshTunnel ? { forceSshTunnel: extra.forceSshTunnel } : {}),
         },
         credentials,
       ),

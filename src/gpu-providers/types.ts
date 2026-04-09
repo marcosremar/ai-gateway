@@ -152,6 +152,12 @@ export interface InstanceSpec {
   env?: Record<string, string>;
   /** Vast.ai template hash ID — pre-configured image/env/ports for faster boot */
   templateHashId?: string;
+  /** Force SSH tunnel for Vast.ai instances (skip direct-port endpoint).
+   *  Use this when targeting residential hosts whose NAT/firewall accepts
+   *  TCP SYN packets for the mapped port even when the container app isn't
+   *  listening yet — the gateway's direct-port probe gives a false positive
+   *  and never falls back to the (working) SSH tunnel. */
+  forceSshTunnel?: boolean;
   /** Cancel creation immediately if GPU unavailable (Vast.ai fail-fast) */
   cancelUnavail?: boolean;
   /** Region filter (e.g. 'US', 'EU' for Vast; 'US-TX-3' for RunPod; city name for TensorDock) */
