@@ -281,7 +281,7 @@ export async function runGpuReadinessCheck(
         return;
       }
     }
-  } catch {}
+  } catch (e) { console.warn('[readiness] Fast-track check failed:', e instanceof Error ? e.message : e); }
 
   console.log(`[readiness] Starting per-service benchmark (max ${maxRuns} runs, ${marginPct}% margin):`,
     `STT<${targets.stt}ms LLM<${targets.llm}ms TTS<${targets.tts}ms`);
@@ -321,7 +321,7 @@ export async function runGpuReadinessCheck(
           await updateHostLatency(deployState.provider, deployState.gpuType, llmResult.bestMs, 'llm', deployState.providerMeta);
         }
         console.log(`[readiness] Fed benchmark results into reputation: STT=${sttResult.bestMs}ms LLM=${llmResult.bestMs}ms`);
-      } catch {}
+      } catch (e) { console.warn('[readiness] Reputation update failed:', e instanceof Error ? e.message : e); }
     }
 
     // Progressive relaxation: try 15% more lenient target before repechage

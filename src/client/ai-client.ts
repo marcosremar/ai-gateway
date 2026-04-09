@@ -847,8 +847,8 @@ export class AIClient {
         } else {
           this.log.log(`[AIClient] Health [${elapsed}s]: HTTP ${resp.status}`);
         }
-      } catch (e: any) {
-        const msg = e.message?.includes('fetch failed') ? 'not reachable yet' : e.message;
+      } catch (e: unknown) {
+        const msg = e instanceof Error && e.message?.includes('fetch failed') ? 'not reachable yet' : e instanceof Error ? e.message : String(e);
         this.log.log(`[AIClient] Health [${elapsed}s]: ${msg}`);
       }
       await new Promise(r => setTimeout(r, pollIntervalMs));

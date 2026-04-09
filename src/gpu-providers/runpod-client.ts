@@ -357,7 +357,7 @@ export class RunpodClient extends AbstractGpuProvider {
         return [];
       }
 
-      const json = await res.json() as { data?: { dataCenters?: any[] } };
+      const json = await res.json() as { data?: { dataCenters?: Array<{ id: string; storageSupport?: boolean; gpuAvailability?: Array<{ gpuTypeId?: string; stockStatus?: string }> }> } };
       const dcs = json?.data?.dataCenters ?? [];
 
       // Build flat list of (DC, GPU) tuples for DCs with storageSupport

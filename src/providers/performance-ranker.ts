@@ -12,6 +12,9 @@
  *   5. Persistence: toJSON()/fromJSON() + auto-save to disk for restart resilience
  */
 
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import type { FallbackEntry } from './fallback';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -355,8 +358,6 @@ export class PerformanceRanker {
   saveToDisk(): void {
     if (!this.persistPath || !this.dirty) return;
     try {
-      const fs = require('fs');
-      const path = require('path');
       const dir = path.dirname(this.persistPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(this.persistPath, JSON.stringify(this.toJSON()), 'utf-8');
@@ -370,7 +371,6 @@ export class PerformanceRanker {
   private loadFromDisk(): void {
     if (!this.persistPath) return;
     try {
-      const fs = require('fs');
       if (!fs.existsSync(this.persistPath)) return;
       const raw = fs.readFileSync(this.persistPath, 'utf-8');
       const snapshot = JSON.parse(raw) as PerformanceSnapshot;
@@ -413,8 +413,6 @@ export class PerformanceRanker {
 /** Default module-level singleton (with disk persistence) */
 export function createDefaultPerformanceRanker(): PerformanceRanker {
   try {
-    const os = require('os');
-    const path = require('path');
     const configDir = process.env.AI_GATEWAY_CONFIG_DIR || path.join(os.homedir(), '.ai-gateway');
     const persistPath = path.join(configDir, 'perf-ranker.json');
     return new PerformanceRanker({ persistPath });

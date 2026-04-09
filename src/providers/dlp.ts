@@ -266,7 +266,7 @@ export function createDLPMiddleware(config: DLPConfig) {
         // Extract text from messages
         if (Array.isArray(b.messages)) {
           text = b.messages
-            .map((m: any) => m.content)
+            .map((m: { content?: string }) => m.content)
             .filter(Boolean)
             .join(' ');
         } else if (b.prompt) {
@@ -289,7 +289,7 @@ export function createDLPMiddleware(config: DLPConfig) {
         const b = body as Record<string, unknown>;
         if (b.choices && Array.isArray(b.choices)) {
           text = b.choices
-            .map((c: any) => c.message?.content)
+            .map((c: { message?: { content?: string } }) => c.message?.content)
             .filter(Boolean)
             .join(' ');
         } else if (b.text) {

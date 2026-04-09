@@ -5,6 +5,8 @@
  * in ai-gateway. The gateway-server.ts imports these and wires them to HTTP endpoints.
  */
 
+import fs from 'fs';
+import path from 'path';
 import type { GpuProviderClient, ProviderCredentials } from './types';
 
 // ── Provider Name & Tier ────────────────────────────────────────────────────
@@ -54,7 +56,6 @@ export class ProviderCooldownTracker {
   loadFromFile(filePath: string): void {
     this.persistPath = filePath;
     try {
-      const fs = require('fs');
       if (!fs.existsSync(filePath)) return;
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, CooldownEntry>;
       const now = Date.now();
@@ -70,8 +71,6 @@ export class ProviderCooldownTracker {
   private persist(): void {
     if (!this.persistPath) return;
     try {
-      const fs = require('fs');
-      const path = require('path');
       fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
       const obj: Record<string, CooldownEntry> = {};
       for (const [name, cd] of this.cooldowns) {

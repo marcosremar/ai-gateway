@@ -170,8 +170,8 @@ export class SshTunnel {
     if (this.proc) {
       const p = this.proc;
       this.proc = null;
-      try { p.kill('SIGTERM'); } catch {}
-      setTimeout(() => { try { p.kill('SIGKILL'); } catch {} }, 3_000);
+      try { p.kill('SIGTERM'); } catch { /* process may have already exited */ }
+      setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* already dead */ } }, 3_000);
     }
   }
 

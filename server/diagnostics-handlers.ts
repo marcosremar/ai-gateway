@@ -386,7 +386,7 @@ export async function handleDiagnosticsBenchmark(req: IncomingMessage, res: Serv
         });
         currentScore = rep?.reputationScore ?? null;
       }
-    } catch {}
+    } catch { /* best-effort reputation lookup */ }
   }
 
   res.writeHead(200, { 'Content-Type': 'application/json' });

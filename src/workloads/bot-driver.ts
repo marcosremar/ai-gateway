@@ -153,9 +153,9 @@ export class BotWorkloadDriver implements WorkloadDriver {
 
     if (podId && podId !== 'local') {
       if (flyKey && state.botState.endpoint?.includes('.fly.dev')) {
-        try { await prov.flyio.deleteInstance(podId, { apiKey: flyKey }); } catch {}
+        try { await prov.flyio.deleteInstance(podId, { apiKey: flyKey }); } catch { /* best-effort cleanup */ }
       } else if (apiKey) {
-        try { await prov.runpod.deleteInstance(podId, { apiKey }); } catch {}
+        try { await prov.runpod.deleteInstance(podId, { apiKey }); } catch { /* best-effort cleanup */ }
       }
     }
 
