@@ -322,13 +322,21 @@ export class TensordockClient extends AbstractGpuProvider {
 
       for (const candidate of candidates.slice(0, 3)) {
         // Use dedicated IP to bypass fragile NAT port-forwarding on third-party hosts
+        // Select OS image: prefer NVIDIA 570 driver image for snapgpu containers
+        // (CRIU's cuda_plugin needs driver 570+ for GPU memory checkpointing).
+        // Not all TensorDock engines support nvidia_570 images (Honeybadger does,
+        // Narwhal only has base images). We try nvidia_570 first and fallback to
+        // ubuntu2404 if the host rejects it (invalid_enum_value error).
+        const needsNvidia570 = spec.dockerImage?.includes('snapgpu-runtime') ?? false;
+        let osImage = needsNvidia570 ? 'ubuntu2404_nvidia_570' : 'ubuntu2404';
+
         const v2Body = {
           data: {
             type: 'virtualmachine',
             attributes: {
               name: instanceName,
               type: 'virtualmachine',
-              image: 'ubuntu2404',
+              image: osImage,
               resources: {
                 vcpu_count: Math.min(spec.vcpus ?? 4, candidate.maxVcpu),
                 ram_gb: Math.min(spec.ramGb ?? 16, candidate.maxRam),
@@ -363,7 +371,7 @@ export class TensordockClient extends AbstractGpuProvider {
             });
             continue;
           }
-          const data = await res.json();
+          let data = await res.json();
           if (data.error || (data.status && data.status >= 400)) {
             const errStr = JSON.stringify(data.error);
             this.log.warn(`[tensordock] create at ${candidate.city} body error: ${errStr.substring(0, 300)}`);
@@ -371,11 +379,39 @@ export class TensordockClient extends AbstractGpuProvider {
             if (errStr.includes('need at least') || errStr.includes('balance') || errStr.includes('insufficient')) {
               throw new Error(`TensorDock account balance insufficient: ${errStr.substring(0, 200)}`);
             }
-            this.emitError({
-              operation: 'createInstance', message: `Create at ${candidate.city} body error: ${errStr.substring(0, 200)}`,
-              retryable: true,
-            });
-            continue;
+            // Retry with fallback image if nvidia_570 was rejected by this engine
+            if (osImage === 'ubuntu2404_nvidia_570' && errStr.includes('invalid_enum_value')) {
+              this.log.log(`[tensordock] ${candidate.city} doesn't support nvidia_570 image, retrying with ubuntu2404`);
+              osImage = 'ubuntu2404';
+              v2Body.data.attributes.image = 'ubuntu2404';
+              // Retry same candidate with base image
+              await this.rateLimiter.wait();
+              const retryRes = await this.fetchRaw(`${TENSORDOCK_V2_BASE}/instances`, {
+                method: 'POST', headers, body: JSON.stringify(v2Body),
+              }, TIMEOUTS.create);
+              if (retryRes.ok) {
+                const retryData = await retryRes.json();
+                if (retryData.data?.id) {
+                  // eslint-disable-next-line no-param-reassign
+                  data = retryData;
+                  this.log.log(`[tensordock] Fallback to ubuntu2404 succeeded at ${candidate.city}`);
+                  // Fall through to success handling below
+                }
+              }
+              if (!data.data?.id) {
+                this.emitError({
+                  operation: 'createInstance', message: `Create at ${candidate.city} failed with both nvidia_570 and ubuntu2404`,
+                  retryable: true,
+                });
+                continue;
+              }
+            } else {
+              this.emitError({
+                operation: 'createInstance', message: `Create at ${candidate.city} body error: ${errStr.substring(0, 200)}`,
+                retryable: true,
+              });
+              continue;
+            }
           }
 
           const attrs = data.data?.attributes || data;
@@ -762,7 +798,8 @@ export class TensordockClient extends AbstractGpuProvider {
   } | null> {
     const result = await this.checkBalance(credentials);
     if (!result) return null;  // API unreachable — proceed optimistically
-    if (result.balance < 1.0) {
+    // $0.50 minimum — enough for ~2-3 hours on cheapest GPU
+    if (result.balance < 0.5) {
       return {
         canDeploy: false,
         blockReason: `TensorDock balance too low: $${result.balance.toFixed(2)} (current spend rate $${result.hourlyCost.toFixed(2)}/hr). Add credit at dashboard.tensordock.com.`,

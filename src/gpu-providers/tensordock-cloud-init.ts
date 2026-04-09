@@ -624,10 +624,18 @@ function buildDockerCloudInit(
   if (hfToken) allEnv.HF_TOKEN = hfToken;
   const envFlags = buildEnvFlags(allEnv);
 
+  // When deploying snapgpu-runtime images, add --privileged so CRIU can checkpoint/restore.
+  // CRIU needs CAP_SYS_ADMIN or CAP_CHECKPOINT_RESTORE which standard Docker doesn't grant.
+  // TensorDock gives us a full VM with root, so --privileged is safe here.
+  const needsPrivileged = dockerImage.includes('snapgpu-runtime');
+  const privilegedFlag = needsPrivileged ? '--privileged' : '';
+
   const commonArgs = [
-    '-d -p 8000:8000',
+    `-d -p 8000:8000 ${privilegedFlag}`,
     envFlags,
     '-v /root/hf-models:/root/.cache/huggingface/hub',
+    // Mount snapshot dir for persistence across container restarts
+    needsPrivileged ? '-v /root/snapgpu-snapshots:/var/snapgpu/snapshots' : '',
     '--restart unless-stopped',
     '--name parle',
     dockerImage,
