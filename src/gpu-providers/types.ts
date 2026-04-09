@@ -152,12 +152,26 @@ export interface InstanceSpec {
   env?: Record<string, string>;
   /** Vast.ai template hash ID — pre-configured image/env/ports for faster boot */
   templateHashId?: string;
+  /** Custom health check endpoint path. Defaults to '/health'. The gateway's
+   *  boot health monitor probes this path; if it returns 200 the instance is
+   *  marked ready. Setting this lets apps use /healthz, /api/status, etc. */
+  healthEndpoint?: string;
   /** Force SSH tunnel for Vast.ai instances (skip direct-port endpoint).
    *  Use this when targeting residential hosts whose NAT/firewall accepts
    *  TCP SYN packets for the mapped port even when the container app isn't
    *  listening yet — the gateway's direct-port probe gives a false positive
    *  and never falls back to the (working) SSH tunnel. */
   forceSshTunnel?: boolean;
+  /** Minimum number of direct ports the host must have. Vast.ai residential
+   *  hosts often have direct_port_count=0 (only SSH access), which forces
+   *  SSH tunneling and breaks apps that need multiple direct ports. Set to
+   *  1 to require at least one direct port (for an HTTP API like FastAPI on :8000),
+   *  or 2 to also require :22 for direct SSH. */
+  directPortRequired?: number;
+  /** Minimum inet_down (Mbps) the host must have. If not set, auto-computed
+   *  from image size: imageGb * 8 * 1024 / pullBudgetSec. Default pullBudgetSec=600
+   *  so a 15GB image requires ~200 Mbps minimum to pull within 10 minutes. */
+  minInetDownMbps?: number;
   /** Cancel creation immediately if GPU unavailable (Vast.ai fail-fast) */
   cancelUnavail?: boolean;
   /** Region filter (e.g. 'US', 'EU' for Vast; 'US-TX-3' for RunPod; city name for TensorDock) */

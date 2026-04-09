@@ -145,7 +145,9 @@ export async function findSshKey(headers: Record<string, string>): Promise<SshKe
     if (!Array.isArray(secrets)) return undefined;
 
     const sshSecrets = secrets.filter(
-      (s: { type?: string }) => (s.type || '').toUpperCase() === 'SSHKEY',
+      // TensorDock API returns type at the top level OR nested under attributes
+      (s: { type?: string; attributes?: { type?: string } }) =>
+        (s.type || s.attributes?.type || '').toUpperCase() === 'SSHKEY',
     );
     if (sshSecrets.length === 0) return undefined;
 

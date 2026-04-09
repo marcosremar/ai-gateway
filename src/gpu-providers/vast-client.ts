@@ -24,6 +24,7 @@ import type { AbstractGpuProviderOptions } from './abstract-provider';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
+import { spawn } from 'child_process';
 
 const VAST_API_BASE = process.env.VAST_API_BASE || 'https://console.vast.ai/api/v0';
 
@@ -54,6 +55,22 @@ const OFFER_CACHE_TTL_MS = parseInt(process.env.VAST_OFFER_CACHE_TTL_MS || '6000
 // ── Host reputation persistence ─────────────────────────────────────────────
 const REPUTATION_DIR = process.env.AI_GATEWAY_CONFIG_DIR || path.join(os.homedir(), '.ai-gateway');
 const REPUTATION_PATH = path.join(REPUTATION_DIR, 'vast-host-reputation.json');
+
+// ── Aggressive host blacklist (per-host failure counters + escalating bans) ─
+// Distinct from _unstableHosts (a single-level flag). This tracks repeated
+// failures so hosts that consistently break get longer bans.
+const HOST_BLACKLIST_DIR = path.join(os.homedir(), '.babelcast');
+const HOST_BLACKLIST_PATH = path.join(HOST_BLACKLIST_DIR, 'vast-host-blacklist.json');
+const HOST_BAN_1_FAILURE_MS = 5 * 60 * 1000;      // 5 min
+const HOST_BAN_2_FAILURES_MS = 30 * 60 * 1000;    // 30 min
+const HOST_BAN_3PLUS_FAILURES_MS = 60 * 60 * 1000; // 1 hour
+const HOST_FAILURE_RESET_MS = 24 * 60 * 60 * 1000; // reset counter after 24h clean
+
+interface HostFailureRecord {
+  count: number;
+  bannedUntilMs: number;
+  lastFailureMs: number;
+}
 
 /** Check if an IP address is RFC1918 private / loopback / link-local (unreachable from internet). */
 function isPrivateIp(ip: string): boolean {
@@ -142,6 +159,11 @@ export class VastClient extends AbstractGpuProvider {
   private _reputationSaveTimer: ReturnType<typeof setTimeout> | null = null;
   /** Offer search cache — avoids redundant API calls within TTL. */
   private _offerCache: OfferCacheEntry | null = null;
+  /** Aggressive per-host failure counter → escalating cooldowns (persisted). */
+  private _hostFailures = new Map<string, HostFailureRecord>();
+  private _hostFailuresPath = HOST_BLACKLIST_PATH;
+  /** Debounce timer for persisting host blacklist. */
+  private _hostFailuresSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts?: VastClientOptions) {
     super(opts);
@@ -149,6 +171,12 @@ export class VastClient extends AbstractGpuProvider {
     this._unstableHosts = loadHostReputation();
     if (this._unstableHosts.size > 0) {
       this.log.log(`[vast] Loaded ${this._unstableHosts.size} unstable hosts from disk`);
+    }
+    // Load aggressive-blacklist per-host failure counters
+    this._loadHostFailures();
+    if (this._hostFailures.size > 0) {
+      const banned = [...this._hostFailures.values()].filter(r => r.bannedUntilMs > Date.now()).length;
+      this.log.log(`[vast] Loaded ${this._hostFailures.size} host failure records from disk (${banned} currently banned)`);
     }
   }
 
@@ -190,6 +218,99 @@ export class VastClient extends AbstractGpuProvider {
       return false;
     }
     return true;
+  }
+
+  // ── Aggressive host blacklist (escalating cooldowns) ────────────────────────
+
+  /** Load per-host failure counters from disk. Drops stale/expired records. */
+  private _loadHostFailures(): void {
+    try {
+      if (!fs.existsSync(this._hostFailuresPath)) return;
+      const raw = fs.readFileSync(this._hostFailuresPath, 'utf8');
+      const data = JSON.parse(raw) as Record<string, HostFailureRecord>;
+      const now = Date.now();
+      for (const [ip, rec] of Object.entries(data)) {
+        if (!rec || typeof rec !== 'object') continue;
+        const lastFailure = Number(rec.lastFailureMs) || 0;
+        // Drop records whose last failure is older than the reset window AND
+        // whose ban has fully expired — they're no longer useful signal.
+        if (now - lastFailure > HOST_FAILURE_RESET_MS && (Number(rec.bannedUntilMs) || 0) <= now) {
+          continue;
+        }
+        this._hostFailures.set(ip, {
+          count: Number(rec.count) || 0,
+          bannedUntilMs: Number(rec.bannedUntilMs) || 0,
+          lastFailureMs: lastFailure,
+        });
+      }
+    } catch (err) {
+      this.log.debug(`[vast] _loadHostFailures failed: ${this.errMsg(err)}`);
+    }
+  }
+
+  /** Persist per-host failure counters to disk (debounced). */
+  private _persistHostFailures(): void {
+    if (this._hostFailuresSaveTimer) clearTimeout(this._hostFailuresSaveTimer);
+    this._hostFailuresSaveTimer = setTimeout(() => {
+      this._hostFailuresSaveTimer = null;
+      try {
+        if (!fs.existsSync(HOST_BLACKLIST_DIR)) fs.mkdirSync(HOST_BLACKLIST_DIR, { recursive: true });
+        const obj: Record<string, HostFailureRecord> = {};
+        for (const [ip, rec] of this._hostFailures) obj[ip] = rec;
+        fs.writeFileSync(this._hostFailuresPath, JSON.stringify(obj, null, 2));
+      } catch (err) {
+        this.log.debug(`[vast] _persistHostFailures failed: ${this.errMsg(err)}`);
+      }
+    }, 500);
+  }
+
+  /** True if the host has an active ban (ban expiry in the future). */
+  private _isHostBanned(ip: string): boolean {
+    if (!ip) return false;
+    const rec = this._hostFailures.get(ip);
+    if (!rec) return false;
+    if (rec.bannedUntilMs <= Date.now()) {
+      // Ban expired. Keep the count around so the next failure escalates;
+      // _loadHostFailures will eventually drop it after HOST_FAILURE_RESET_MS.
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Record a failure for this host — increment counter and escalate cooldown:
+   *   1 failure  → 5 min ban
+   *   2 failures → 30 min ban
+   *   3+ failures → 1 hour ban
+   */
+  private _recordHostFailure(ip: string): void {
+    if (!ip) return;
+    const now = Date.now();
+    const existing = this._hostFailures.get(ip);
+    const count = (existing?.count ?? 0) + 1;
+
+    let banMs: number;
+    if (count <= 1) banMs = HOST_BAN_1_FAILURE_MS;
+    else if (count === 2) banMs = HOST_BAN_2_FAILURES_MS;
+    else banMs = HOST_BAN_3PLUS_FAILURES_MS;
+
+    const rec: HostFailureRecord = {
+      count,
+      bannedUntilMs: now + banMs,
+      lastFailureMs: now,
+    };
+    this._hostFailures.set(ip, rec);
+    this.log.warn(`[vast] Host ${ip} failure #${count} → banned for ${Math.round(banMs / 60_000)}min`);
+    this._persistHostFailures();
+  }
+
+  /** Clear this host's failure record after a successful boot. */
+  private _recordHostSuccess(ip: string): void {
+    if (!ip) return;
+    if (!this._hostFailures.has(ip)) return;
+    this._hostFailures.delete(ip);
+    this.log.log(`[vast] Host ${ip} success → cleared failure record`);
+    this._persistHostFailures();
   }
 
   /**
@@ -472,6 +593,8 @@ export class VastClient extends AbstractGpuProvider {
       reliability2: { gte: 0.95 },      // >95% reliability score
       inet_down: { gte: 2000 },         // Minimum 2 Gb/s download (10GB image in ~40s)
       inet_up: { gte: 200 },            // Minimum 200 Mb/s upload
+      ...(spec.directPortRequired ? { direct_port_count: { gte: spec.directPortRequired } } : {}),
+      ...(spec.minInetDownMbps ? { inet_down: { gte: spec.minInetDownMbps } } : {}),
       order: [['dph_total', 'asc']],
     };
 
@@ -861,7 +984,10 @@ export class VastClient extends AbstractGpuProvider {
           }
           this.log.warn(`[vast] Instance ${contractId} no longer exists (status=${stillExists?.status ?? 'gone'}) — ${reason}.`);
           const offerIp = String(offer.public_ipaddr ?? '');
-          if (offerIp) this._markHostUnstable(offerIp);
+          if (offerIp) {
+            this._markHostUnstable(offerIp);
+            this._recordHostFailure(offerIp);
+          }
           await this._safeCleanupInstance(instanceId, apiKey, `host reclaim: ${reason}`);
           failures.push({ offerId, gpu: gpuName, reason });
           return null;
@@ -877,9 +1003,16 @@ export class VastClient extends AbstractGpuProvider {
         try {
           const { getOrCreateTunnel } = await import('../../server/ssh-tunnel');
           const tunnel = getOrCreateTunnel(sshHost, sshPort, 8000);
+          // Vast.ai propagates user SSH keys to the container at boot, but there's
+          // a ~10-15s delay between status=running and the keys being available.
+          // Sleeping here avoids the first-attempt "Permission denied" failure.
+          this.log.log(`[vast] Instance ${contractId} waiting 10s for SSH key propagation...`);
+          await new Promise(r => setTimeout(r, 10_000));
           const ok = await tunnel.open(15_000);
           if (ok) {
             this.log.log(`[vast] SSH tunnel opened: ${tunnel.endpoint} → ${sshHost}:8000`);
+            // Successful boot → clear any lingering failure record for this host
+            if (ip) this._recordHostSuccess(ip);
             return {
               instanceId,
               instanceName,
@@ -904,6 +1037,8 @@ export class VastClient extends AbstractGpuProvider {
         } catch (tunnelErr) {
           this.log.warn(`[vast] SSH tunnel error for ${contractId}: ${this.errMsg(tunnelErr)}`);
         }
+        // SSH tunnel failed → record host failure before cleanup
+        if (ip) this._recordHostFailure(ip);
         await this._safeCleanupInstance(instanceId, apiKey, 'SSH tunnel failed');
         failures.push({ offerId, gpu: gpuName, reason: 'SSH tunnel failed' });
         return null;
@@ -923,6 +1058,8 @@ export class VastClient extends AbstractGpuProvider {
           const oldest = this._recentlyUsedIps.values().next().value;
           if (oldest !== undefined) this._recentlyUsedIps.delete(oldest);
         }
+        // Successful boot → clear any lingering failure record for this host
+        this._recordHostSuccess(ip);
       }
 
       await this.persistInstance(userId, spec.machineKey || 'vastInstance', {
@@ -1086,12 +1223,48 @@ export class VastClient extends AbstractGpuProvider {
   /**
    * Fetch container logs from a Vast.ai instance for debugging.
    * Uses the Vast.ai /instances/{id}/logs/ endpoint.
+   *
+   * If the HTTP-based path yields nothing (common on hosts that have already
+   * reclaimed the container), falls back to shelling out to `ssh` and tailing
+   * likely log file locations on the host directly. This is our best chance
+   * to capture diagnostics on the #1 failure mode (host reclaim / process exit).
    */
   async getInstanceLogs(instanceId: string, credentials: ProviderCredentials, lines: number = 200): Promise<string | null> {
     const { apiKey } = credentials;
     const headers = this.jsonHeaders(apiKey);
     const { rawId } = stripPrefix(instanceId);
 
+    const httpLogs = await this._fetchContainerLogsViaHttp(rawId, headers, lines);
+    if (httpLogs && httpLogs.trim()) return httpLogs;
+
+    // HTTP path yielded nothing — try SSH tail as a fallback.
+    try {
+      const detail = await this._fetchInstanceDetail(rawId, headers);
+      const sshHost = detail?.sshHost;
+      const sshPort = detail?.sshPort;
+      if (!sshHost || !sshPort) {
+        this.log.debug(`[vast] getInstanceLogs(${instanceId}): no ssh host/port for fallback`);
+        return httpLogs; // return whatever HTTP returned (possibly empty string or null)
+      }
+      const sshLogs = await this._fetchContainerLogsViaSsh(sshHost, sshPort);
+      if (sshLogs && sshLogs.trim()) return sshLogs;
+      return httpLogs;
+    } catch (err) {
+      this.log.debug(`[vast] getInstanceLogs(${instanceId}) ssh fallback failed: ${this.errMsg(err)}`);
+      return httpLogs;
+    }
+  }
+
+  /**
+   * Internal: original HTTP log-fetch path.
+   * Uses Vast's async /instances/request_logs/{id}/ endpoint which uploads
+   * to S3, then falls back to status_msg from instance detail.
+   */
+  private async _fetchContainerLogsViaHttp(
+    rawId: string,
+    headers: Record<string, string>,
+    lines: number,
+  ): Promise<string | null> {
     try {
       // Request logs via Vast.ai async log service
       const reqRes = await this._vastFetch(
@@ -1133,9 +1306,100 @@ export class VastClient extends AbstractGpuProvider {
       const data = await logsRes.json() as Record<string, unknown>;
       return String(data.status_msg || '') || null;
     } catch (err) {
-      this.log.debug(`[vast] getInstanceLogs(${instanceId}) failed: ${this.errMsg(err)}`);
+      this.log.debug(`[vast] _fetchContainerLogsViaHttp(${rawId}) failed: ${this.errMsg(err)}`);
       return null;
     }
+  }
+
+  /**
+   * Shell out to `ssh` to tail likely log files on the host. Best-effort
+   * diagnostic path for when the Vast HTTP logs API returns nothing.
+   *
+   * Captures:
+   *   1. /var/log/app.log (if present)
+   *   2. /tmp/*.log (fallback)
+   *   3. Running python / sshd process list (so we can tell if the app crashed)
+   *
+   * Returns captured stdout (possibly containing stderr echoes) or null.
+   * 15s hard wall-clock timeout.
+   */
+  private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      if (!sshHost || !sshPort) {
+        resolve(null);
+        return;
+      }
+
+      const remoteCmd =
+        'tail -200 /var/log/app.log 2>/dev/null || ' +
+        'tail -100 /tmp/*.log 2>/dev/null || ' +
+        'echo "no log files found"; ' +
+        'echo ===; ' +
+        'pgrep -af python | head -5; ' +
+        'echo ===; ' +
+        'pgrep -af sshd | head -3';
+
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      let proc: ReturnType<typeof spawn> | null = null;
+
+      const settle = (val: string | null) => {
+        if (settled) return;
+        settled = true;
+        if (proc) {
+          try { proc.kill('SIGTERM'); } catch { /* already dead */ }
+          const p = proc;
+          setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* already dead */ } }, 1_000);
+        }
+        resolve(val);
+      };
+
+      const timer = setTimeout(() => {
+        this.log.debug(`[vast] _fetchContainerLogsViaSsh(${sshHost}:${sshPort}) timed out after 15s`);
+        settle(stdout.trim() ? stdout : null);
+      }, 15_000);
+
+      try {
+        proc = spawn('ssh', [
+          '-p', String(sshPort),
+          '-o', 'StrictHostKeyChecking=no',
+          '-o', 'UserKnownHostsFile=/dev/null',
+          '-o', 'ConnectTimeout=10',
+          '-o', 'LogLevel=ERROR',
+          `root@${sshHost}`,
+          remoteCmd,
+        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+        proc.stdout?.on('data', (chunk: Buffer) => {
+          stdout += chunk.toString('utf8');
+          // Cap buffer to avoid unbounded growth on chatty hosts
+          if (stdout.length > 64 * 1024) stdout = stdout.slice(-64 * 1024);
+        });
+        proc.stderr?.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString('utf8');
+          if (stderr.length > 8 * 1024) stderr = stderr.slice(-8 * 1024);
+        });
+
+        proc.on('error', (err) => {
+          clearTimeout(timer);
+          this.log.debug(`[vast] _fetchContainerLogsViaSsh(${sshHost}:${sshPort}) spawn error: ${err.message}`);
+          settle(stdout.trim() ? stdout : null);
+        });
+
+        proc.on('exit', (code) => {
+          clearTimeout(timer);
+          if (code !== 0 && code !== null) {
+            this.log.debug(`[vast] _fetchContainerLogsViaSsh(${sshHost}:${sshPort}) exited ${code}: ${stderr.substring(0, 200)}`);
+          }
+          settle(stdout.trim() ? stdout : null);
+        });
+      } catch (err) {
+        clearTimeout(timer);
+        this.log.debug(`[vast] _fetchContainerLogsViaSsh spawn threw: ${this.errMsg(err)}`);
+        settle(null);
+      }
+    });
   }
 
   /**
@@ -1675,19 +1939,22 @@ export class VastClient extends AbstractGpuProvider {
     // A single host can have many machine_ids/host_ids (one per GPU), but
     // they all share the same public_ipaddr. Spreading across IPs avoids
     // funneling all instances onto the same broken host.
-    // Also skip: recently used hosts (cross-call dedup) + unstable hosts (reclaimed instances).
+    // Also skip: recently used hosts (cross-call dedup), unstable hosts
+    // (single-strike flag) and banned hosts (aggressive persistent blacklist).
     const seenIps = new Set<string>(this._recentlyUsedIps);
     let unstableSkipped = 0;
+    let bannedSkipped = 0;
     const deduplicated: Array<Record<string, unknown>> = [];
     for (const offer of allOffers) {
       const ip = String(offer.public_ipaddr ?? '');
       if (ip && seenIps.has(ip)) continue;
+      if (ip && this._isHostBanned(ip)) { bannedSkipped++; continue; }
       if (ip && this._isHostUnstable(ip)) { unstableSkipped++; continue; }
       if (ip) seenIps.add(ip);
       deduplicated.push(offer);
     }
 
-    this.log.log(`[vast] Search: ${allOffers.length} offers → ${deduplicated.length} unique hosts (${this._recentlyUsedIps.size} recently used, ${unstableSkipped} unstable skipped)`);
+    this.log.log(`[vast] Search: ${allOffers.length} offers → ${deduplicated.length} unique hosts (${this._recentlyUsedIps.size} recently used, ${unstableSkipped} unstable skipped, ${bannedSkipped} banned skipped)`);
 
     // P2b: Populate cache (snapshot before mutations by callers)
     this._offerCache = {
