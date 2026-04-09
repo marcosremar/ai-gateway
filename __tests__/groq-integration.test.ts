@@ -25,7 +25,7 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq STT (Real API)', () => {
       console.log(`  Groq STT: "${result.text}" (${ms}ms)`);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   });
@@ -44,7 +44,7 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq STT (Real API)', () => {
       expect(typeof result.text).toBe('string');
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   });
@@ -72,7 +72,7 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq TTS (Real API)', () => {
       console.log(`  Groq TTS: ${result.audio.length} bytes (${ms}ms)`);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   });
@@ -110,7 +110,7 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq LLM (Real API)', () => {
       console.log(`  Groq LLM: "${result.content}" (${ms}ms, ${result.usage!.totalTokens} tokens)`);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   });
@@ -127,7 +127,7 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq LLM (Real API)', () => {
       expect(result.usage!.completionTokens).toBeLessThanOrEqual(10);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   });
@@ -149,7 +149,7 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq LLM (Real API)', () => {
       expect(parsed).toHaveProperty('age');
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   });

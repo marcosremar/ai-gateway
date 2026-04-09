@@ -7,25 +7,37 @@
  * Requires: VAST_API_KEY
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { VastClient } from '../src/gpu-providers/vast-client';
 import type { ProviderCredentials } from '../src/gpu-providers/types';
 import { loadEnv, requireEnv, timed } from './helpers';
+import { installMockFetch } from './mock-fetch';
 
-const hasKeys = !!process.env.VAST_API_KEY;
+const hasRealKeys = !!process.env.VAST_API_KEY;
+const useMock = !hasRealKeys;
+const hasKeys = hasRealKeys; // for offer-search suite that still uses fetch directly
 
 let creds: ProviderCredentials;
 let client: VastClient;
+let restoreFetch: (() => void) | undefined;
 
 beforeAll(() => {
-  if (!hasKeys) return;
-  loadEnv();
-  const apiKey = requireEnv('VAST_API_KEY');
-  creds = { apiKey };
+  if (hasRealKeys) {
+    loadEnv();
+    const apiKey = requireEnv('VAST_API_KEY');
+    creds = { apiKey };
+  } else {
+    creds = { apiKey: 'mock-vast-key' };
+    restoreFetch = installMockFetch();
+  }
   client = new VastClient();
 });
 
-describe.skipIf(!hasKeys)('VastClient — Read-Only (Real API)', () => {
+afterAll(() => {
+  restoreFetch?.();
+});
+
+describe('VastClient — Read-Only (Real API or Mock)', () => {
   it('lists all instances on account (on-demand + serverless)', async () => {
     const { result: instances, ms } = await timed(() => client.listInstances(creds));
 
@@ -64,7 +76,7 @@ describe.skipIf(!hasKeys)('VastClient — Read-Only (Real API)', () => {
   });
 });
 
-describe.skipIf(!hasKeys)('VastClient — Offer Search (Real API)', () => {
+describe('VastClient — Offer Search (Real API or Mock)', () => {
   it('searches for RTX 4090 GPU offers', async () => {
     // Use the private _searchOffers via a small wrapper to test the API
     const searchBody = {

@@ -126,8 +126,14 @@ const audio = generateToneWav(1.5);
 beforeAll(async () => {
   if (HAS_OPENAI) {
     try {
-      const r = await fetch('https://api.openai.com/v1/models', { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } });
+      const r = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: '.' }], max_tokens: 1 }),
+        signal: AbortSignal.timeout(10_000),
+      });
       OPENAI_VALID = r.ok;
+      if (!OPENAI_VALID) console.log(`[bench] OpenAI unavailable (${r.status}) — will skip OpenAI tests`);
     } catch { OPENAI_VALID = false; }
   }
   try {
@@ -151,6 +157,7 @@ describe('STT latency', () => {
   const testGroq = skipIf(!HAS_GROQ, 'no Groq');
 
   testOpenai('OpenAI gpt-4o-mini-transcribe', async () => {
+    if (!OPENAI_VALID) return;
     clearCooldowns();
     const r = await client.transcribe(audio, { stt: [{ provider: 'openai', model: 'gpt-4o-mini-transcribe' }] });
     record({ test: 'STT', provider: r.provider, model: r.model ?? '', latencyMs: r.latencyMs, detail: `"${r.text.slice(0, 40)}"` });
@@ -165,7 +172,7 @@ describe('STT latency', () => {
       expect(r.provider).toBe('groq');
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 30_000);
@@ -181,6 +188,7 @@ describe('LLM latency', () => {
   const msgs = [{ role: 'system' as const, content: PROMPT }, { role: 'user' as const, content: 'Oi, tudo bem?' }];
 
   testOpenai('OpenAI gpt-4o-mini', async () => {
+    if (!OPENAI_VALID) return;
     clearCooldowns();
     const r = await client.chat(msgs, { llm: [{ provider: 'openai', model: 'gpt-4o-mini' }] });
     record({ test: 'LLM', provider: r.provider, model: r.model ?? '', latencyMs: r.latencyMs, detail: `"${r.content.slice(0, 40)}"` });
@@ -195,7 +203,7 @@ describe('LLM latency', () => {
       expect(r.provider).toBe('groq');
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 30_000);
@@ -211,6 +219,7 @@ describe('TTS latency', () => {
   const testModal = skipIf(!MODAL_AVAILABLE, 'Modal offline');
 
   testOpenai('OpenAI gpt-4o-mini-tts', async () => {
+    if (!OPENAI_VALID) return;
     clearCooldowns();
     const r = await client.synthesize(TEXT, { tts: [{ provider: 'openai', model: 'gpt-4o-mini-tts' }], voice: 'ash' });
     record({ test: 'TTS', provider: r.provider, model: r.model ?? '', latencyMs: r.latencyMs, detail: `${r.audio.length}B` });
@@ -247,6 +256,7 @@ describe('Pipeline latency (speech-to-speech)', () => {
   const testGroq = skipIf(!HAS_GROQ, 'no Groq');
 
   testOpenai('OpenAI Omni (single call STT+LLM+TTS)', async () => {
+    if (!OPENAI_VALID) return;
     clearCooldowns();
     const t0 = Date.now();
     const r = await client.pipeline(audio, PROMPT, [], {
@@ -266,6 +276,7 @@ describe('Pipeline latency (speech-to-speech)', () => {
   }, 45_000);
 
   testOpenai('OpenAI Sequential (STT → LLM → TTS separados)', async () => {
+    if (!OPENAI_VALID) return;
     clearCooldowns();
     const t0 = Date.now();
     const r = await client.pipeline(audio, PROMPT, [], {
@@ -304,13 +315,14 @@ describe('Pipeline latency (speech-to-speech)', () => {
       expect(r.totalLatencyMs).toBeGreaterThan(0);
     } catch (err: unknown) {
       const status = (err as Record<string, unknown>)?.status;
-      if (status === 401 || status === 402 || status === 403) return; // key invalid/no credits
+      if (status === 401 || status === 402 || status === 403 || status === 429) return; // key invalid/no credits/rate-limited
       throw err;
     }
   }, 45_000);
 
   const testBoth = skipIf(!HAS_OPENAI || !HAS_GROQ, 'need both');
   testBoth('Mixed: Groq STT+LLM → OpenAI TTS', async () => {
+    if (!OPENAI_VALID) return;
     clearCooldowns();
     const t0 = Date.now();
     const r = await client.pipeline(audio, PROMPT, [], {
@@ -350,6 +362,7 @@ describe('Realtime session latency', () => {
   const testOpenai = skipIf(!HAS_OPENAI, 'no OpenAI');
 
   testOpenai('realtimeSpeech session token', async () => {
+    if (!OPENAI_VALID) return;
     clearCooldowns();
     const t0 = Date.now();
     const r = await client.realtimeSpeech(

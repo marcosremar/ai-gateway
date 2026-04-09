@@ -164,6 +164,36 @@ export function loadTestVoiceWav(): Buffer {
   return fs.readFileSync(fixture);
 }
 
+/**
+ * Check if OpenAI completions API is usable (not just key presence, but actual quota).
+ * Uses a minimal chat completion call (max_tokens=1) to detect 429 rate limits.
+ * Returns true if the API responds successfully, false on rate limit, auth error, or timeout.
+ */
+export async function checkOpenAIAvailable(apiKey: string): Promise<boolean> {
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: '.' }],
+        max_tokens: 1,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      console.log(`[checkOpenAIAvailable] OpenAI API unavailable: HTTP ${res.status}`);
+    }
+    return res.ok;
+  } catch (err) {
+    console.log(`[checkOpenAIAvailable] OpenAI API check failed: ${err}`);
+    return false;
+  }
+}
+
 /** Measure execution time */
 export async function timed<T>(fn: () => Promise<T>): Promise<{ result: T; ms: number }> {
   const start = Date.now();

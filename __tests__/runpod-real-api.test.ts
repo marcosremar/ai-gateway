@@ -11,27 +11,39 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { RunpodClient, RUNPOD_GPU_TYPE_MAP, RUNPOD_GPU_FALLBACK } from '../src/gpu-providers/runpod-client';
 import type { ProviderCredentials } from '../src/gpu-providers/types';
 import { loadEnv, requireEnv, timed } from './helpers';
+import { installMockFetch } from './mock-fetch';
 
-const hasKeys = !!process.env.RUNPOD_API_KEY && process.env.SKIP_GPU_TESTS !== '1';
+// hasRealKeys: real RunPod API key present and GPU tests not explicitly disabled
+const hasRealKeys = !!process.env.RUNPOD_API_KEY && process.env.SKIP_GPU_TESTS !== '1';
+// useMock: no real key → mock HTTP responses so read-only tests always run
+const useMock = !hasRealKeys;
+
+// hasKeys kept for lifecycle tests (must have real credentials)
+const hasKeys = hasRealKeys;
 
 let creds: ProviderCredentials;
 let client: RunpodClient;
+let restoreFetch: (() => void) | undefined;
 
 // Track pod created during test for cleanup
 let createdPodId: string | null = null;
 
 beforeAll(() => {
-  if (!hasKeys) return;
-  loadEnv();
-  const apiKey = requireEnv('RUNPOD_API_KEY');
-  creds = { apiKey };
+  if (hasRealKeys) {
+    loadEnv();
+    const apiKey = requireEnv('RUNPOD_API_KEY');
+    creds = { apiKey };
+  } else {
+    // Mock mode: fake credentials, HTTP responses intercepted
+    creds = { apiKey: 'mock-runpod-key' };
+    restoreFetch = installMockFetch();
+  }
   client = new RunpodClient();
 });
 
 afterAll(async () => {
-  if (!hasKeys) return;
-  // Cleanup: delete any pod created during tests
-  if (createdPodId) {
+  // Cleanup any pod created during lifecycle tests (real API only)
+  if (hasRealKeys && createdPodId) {
     try {
       await client.deleteInstance(createdPodId, creds);
       console.log(`  [cleanup] Deleted pod ${createdPodId}`);
@@ -39,9 +51,30 @@ afterAll(async () => {
       console.warn(`  [cleanup] Failed to delete pod ${createdPodId}:`, err);
     }
   }
+  restoreFetch?.();
 });
 
-describe.skipIf(!hasKeys)('RunpodClient — Read-Only (Real API)', () => {
+// ── Static / pure-logic tests (never need network) ──────────────────────────
+
+describe('RunpodClient — Constants', () => {
+  it('GPU_TYPE_MAP has expected mappings', () => {
+    expect(RUNPOD_GPU_TYPE_MAP['RTX 4090']).toBe('NVIDIA GeForce RTX 4090');
+    expect(RUNPOD_GPU_TYPE_MAP['A100']).toBe('NVIDIA A100 80GB PCIe');
+    expect(RUNPOD_GPU_TYPE_MAP['RTX A5000']).toBe('NVIDIA RTX A5000');
+    expect(RUNPOD_GPU_TYPE_MAP['RTX 3090']).toBe('NVIDIA GeForce RTX 3090');
+    // Legacy fallback mappings (GPUs no longer on RunPod)
+    expect(RUNPOD_GPU_TYPE_MAP['RTX 4080']).toBe('NVIDIA GeForce RTX 4090');
+  });
+
+  it('GPU_FALLBACK has at least 3 GPU types', () => {
+    expect(RUNPOD_GPU_FALLBACK.length).toBeGreaterThanOrEqual(3);
+    expect(RUNPOD_GPU_FALLBACK[0]).toContain('NVIDIA');
+  });
+});
+
+// ── Read-only tests — run with real API or mock ──────────────────────────────
+
+describe('RunpodClient — Read-Only (Real API or Mock)', () => {
   it('lists all pods on account', async () => {
     try {
       const { result: pods, ms } = await timed(() => client.listInstances(creds));
@@ -110,19 +143,6 @@ describe.skipIf(!hasKeys)('RunpodClient — Read-Only (Real API)', () => {
     }
   });
 
-  it('GPU_TYPE_MAP has expected mappings', () => {
-    expect(RUNPOD_GPU_TYPE_MAP['RTX 4090']).toBe('NVIDIA GeForce RTX 4090');
-    expect(RUNPOD_GPU_TYPE_MAP['A100']).toBe('NVIDIA A100 80GB PCIe');
-    expect(RUNPOD_GPU_TYPE_MAP['RTX A5000']).toBe('NVIDIA RTX A5000');
-    expect(RUNPOD_GPU_TYPE_MAP['RTX 3090']).toBe('NVIDIA GeForce RTX 3090');
-    // Legacy fallback mappings (GPUs no longer on RunPod)
-    expect(RUNPOD_GPU_TYPE_MAP['RTX 4080']).toBe('NVIDIA GeForce RTX 4090');
-  });
-
-  it('GPU_FALLBACK has at least 3 GPU types', () => {
-    expect(RUNPOD_GPU_FALLBACK.length).toBeGreaterThanOrEqual(3);
-    expect(RUNPOD_GPU_FALLBACK[0]).toContain('NVIDIA');
-  });
 });
 
 describe.skipIf(!hasKeys)('RunpodClient — Create & Lifecycle (Real API)', () => {

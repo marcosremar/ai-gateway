@@ -15,6 +15,11 @@
 
 import 'dotenv/config';
 import { describe, it, expect, beforeAll } from 'vitest';
+import { checkOpenAIAvailable } from './helpers';
+
+const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
+  ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY)
+  : false;
 import { TensordockClient, findCheapestLocations } from '@ai-gateway/gpu-providers/tensordock-client';
 import { RunpodClient } from '@ai-gateway/gpu-providers/runpod-client';
 import { GpuProviderRegistry } from '@ai-gateway/gpu-providers/registry';
@@ -407,7 +412,7 @@ describe('Observability Hooks — lifecycle tracking', () => {
   });
 });
 
-describe.skipIf(!process.env.OPENAI_API_KEY)('Spend Tracking — real OpenAI usage', () => {
+describe.skipIf(!OPENAI_AVAILABLE)('Spend Tracking — real OpenAI usage', () => {
   it('records real API call cost and checks budget', async () => {
     const OpenAI = (await import('openai')).default;
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
