@@ -142,16 +142,22 @@ class SnapshotManager:
         if not self.criu_available:
             return None
 
+        # Marshal snapshot_path INSIDE the session to avoid DetachedInstanceError.
+        # SQLAlchemy's expire_on_commit=True invalidates all attributes after
+        # session close, so we must read them while the session is still open.
+        raw_path: Optional[str] = None
         with get_session() as session:
             snapshot = session.exec(
                 select(SnapshotModel).where(SnapshotModel.snapshot_id == snapshot_id)
             ).first()
+            if snapshot:
+                raw_path = snapshot.snapshot_path
 
-        if not snapshot:
+        if not raw_path:
             print(f"[snapshot] Snapshot {snapshot_id} not found in DB")
             return None
 
-        snapshot_path = Path(snapshot.snapshot_path)
+        snapshot_path = Path(raw_path)
         if not snapshot_path.exists():
             print(f"[snapshot] Snapshot directory missing: {snapshot_path}")
             return None

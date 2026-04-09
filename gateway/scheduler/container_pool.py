@@ -51,6 +51,24 @@ _PORT_DIR = Path('/tmp/snapgpu-workers')
 _CALL_TIMEOUT = 60  # seconds
 
 
+# ── SnapshotInfo — plain data transfer object, avoids SQLAlchemy detached-instance errors ──
+
+@dataclass
+class SnapshotInfo:
+    """Snapshot metadata marshalled out of the DB session before it closes.
+
+    We never pass SQLModel objects across session boundaries — SQLAlchemy's
+    default expire_on_commit=True invalidates all attributes after session
+    close, making attribute access on a "detached" instance raise
+    DetachedInstanceError or silently return stale/None values.
+    """
+    snapshot_id: str
+    app_name: str
+    function_name: Optional[str]
+    class_name: Optional[str]
+    worker_port: int
+
+
 # ── ContainerInfo ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -210,14 +228,23 @@ class ContainerPool:
 
     async def restore_from_snapshot_id(self, snapshot_id: str) -> Optional[ContainerInfo]:
         """Public entry point: look up snapshot by ID and restore it."""
+        snap_info: Optional[SnapshotInfo] = None
         with get_session() as session:
             snap = session.exec(
                 select(SnapshotModel).where(SnapshotModel.snapshot_id == snapshot_id)
             ).first()
-        if not snap:
+            if snap:
+                snap_info = SnapshotInfo(
+                    snapshot_id=snap.snapshot_id,
+                    app_name=snap.app_name,
+                    function_name=snap.function_name,
+                    class_name=snap.class_name,
+                    worker_port=snap.worker_port or 0,
+                )
+        if not snap_info:
             print(f'[pool] Snapshot {snapshot_id} not found in DB', flush=True)
             return None
-        return await self._restore_from_snapshot(snap)
+        return await self._restore_from_snapshot(snap_info)
 
     async def cleanup_idle(self) -> None:
         """Stop containers that have been idle longer than idle_timeout."""
@@ -247,7 +274,12 @@ class ContainerPool:
 
     async def _find_snapshot(
         self, app_name: str, function_name: Optional[str], class_name: Optional[str]
-    ) -> Optional[SnapshotModel]:
+    ) -> Optional[SnapshotInfo]:
+        """Return the latest matching snapshot as a plain SnapshotInfo DTO.
+
+        We marshal attributes out before the session closes to avoid SQLAlchemy
+        DetachedInstanceError when the caller accesses fields later.
+        """
         with get_session() as session:
             query = select(SnapshotModel).where(SnapshotModel.app_name == app_name)
             if function_name:
@@ -258,7 +290,17 @@ class ContainerPool:
             # Use != None — SQLAlchemy rewrites this to IS NOT NULL.
             query = query.where(SnapshotModel.worker_port != None)  # noqa: E711
             query = query.order_by(SnapshotModel.created_at.desc())  # type: ignore[arg-type]
-            return session.exec(query).first()
+            snap = session.exec(query).first()
+            if snap is None:
+                return None
+            # Marshal while session is still open
+            return SnapshotInfo(
+                snapshot_id=snap.snapshot_id,
+                app_name=snap.app_name,
+                function_name=snap.function_name,
+                class_name=snap.class_name,
+                worker_port=snap.worker_port or 0,
+            )
 
     async def _cold_start(
         self, app_name: str, function_name: Optional[str], class_name: Optional[str]
@@ -304,8 +346,12 @@ class ContainerPool:
         print(f'[pool] cold-start {container_id} pid={proc.pid} port={port}', flush=True)
         return info
 
-    async def _restore_from_snapshot(self, snapshot: SnapshotModel) -> Optional[ContainerInfo]:
+    async def _restore_from_snapshot(self, snapshot: SnapshotInfo) -> Optional[ContainerInfo]:
         """CRIU-restore a worker process from a snapshot.
+
+        Accepts a SnapshotInfo DTO (not a SQLModel) so there is no risk of
+        DetachedInstanceError — all attributes were marshalled before the DB
+        session closed.
 
         The worker's TCP port is stored in snapshot.worker_port — set when the
         snapshot was created by _stop_container.  After CRIU restore the process
