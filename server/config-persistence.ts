@@ -31,6 +31,16 @@ export interface GpuDeployConfig {
   timeoutMin: number;   // deploy timeout in minutes
   raceCount?: number;   // hedged deploy: launch N in parallel, keep first healthy (1 = off)
   bootOnStartup?: boolean; // auto-boot GPU when gateway starts (Groq handles requests during boot)
+  /** Force the autoscaler to deploy via snapgpu (CRIU + cuda-checkpoint snapshots
+   *  for fast cold starts). Snapgpu wraps the underlying provider — see snapgpuBackend. */
+  useSnapgpu?: boolean;
+  /** Backend provider snapgpu sits on top of when useSnapgpu=true. */
+  snapgpuBackend?: 'vast' | 'runpod';
+  /** Snapgpu app name to preload at boot (calls @enter(snap=True) hooks). */
+  snapgpuPreloadApp?: string;
+  /** When true, the autoscaler captures a snapshot after the first successful
+   *  inference, then restores from it on subsequent cold boots. */
+  autoSnapshot?: boolean;
 }
 
 /**
@@ -130,6 +140,30 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
       gpuTypes: ['NVIDIA GeForce RTX 4090', 'NVIDIA GeForce RTX 3090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
       region: '',
       timeoutMin: 30,
+    },
+  },
+  {
+    // Snapgpu profile: same speech pipeline as babelcast-subtitle, but the
+    // autoscaler routes through SnapgpuClient → CRIU + cuda-checkpoint
+    // snapshots reduce cold boot from ~2 min to ~5 s on Vast.ai/RunPod hosts
+    // with NVIDIA driver 570+. Requires the snapgpu-runtime image to be built.
+    id: 'speech-snapgpu-fast-cold-start',
+    name: 'Speech (SnapGPU fast cold start)',
+    stt: [{ provider: 'gpu', model: 'whisper' }, { provider: 'groq', model: 'whisper-large-v3-turbo' }],
+    llm: [{ provider: 'gpu', model: 'translategemma' }, { provider: 'groq', model: 'llama-3.3-70b-versatile' }],
+    tts: [{ provider: 'groq', model: 'orpheus-v1-english' }],
+    gpuDeploy: {
+      dockerImage: `${process.env.DOCKER_IMAGE_PREFIX || 'marcosremar'}/snapgpu-runtime-babelcast:latest`,
+      // Driver 570+ required for cuda-checkpoint. Most RTX 4090/5090 hosts on
+      // Vast.ai have it; older RTX 3090 hosts may not. The autoscaler will
+      // gracefully degrade to CPU-only CRIU when the driver is too old.
+      gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090'],
+      region: '',
+      timeoutMin: 30,
+      useSnapgpu: true,
+      snapgpuBackend: 'vast',
+      snapgpuPreloadApp: 'babelcast',
+      autoSnapshot: true,
     },
   },
   {

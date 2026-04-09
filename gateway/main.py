@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .db import get_engine
-from .routes import health, apps, invoke, images
+from .routes import health, apps, invoke, images, snapshots
 
 
 @asynccontextmanager
@@ -31,6 +31,7 @@ app.include_router(health.router)
 app.include_router(apps.router)
 app.include_router(invoke.router)
 app.include_router(images.router)
+app.include_router(snapshots.router)
 
 
 @app.get("/")

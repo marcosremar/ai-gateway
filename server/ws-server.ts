@@ -1030,6 +1030,11 @@ export function startWsServer() {
       'GET /v1/gpu/readiness/status': gh.handleGetGpuReadinessStatus,
       'GET /v1/gpu/readiness/history': gh.handleGetGpuReadinessHistory,
       'POST /v1/gpu/readiness/reset': gh.handlePostResetReadiness,
+      // SnapGPU snapshot CRUD (proxied to the snapgpu-gateway in the GPU pod)
+      'POST /v1/gpu/snapshot': gh.handleSnapshotCreate,
+      'GET /v1/gpu/snapshot': gh.handleSnapshotList,
+      'POST /v1/gpu/snapshot/restore': gh.handleSnapshotRestore,  // /v1/gpu/snapshot/:id/restore handled via URL parsing
+      'DELETE /v1/gpu/snapshot': gh.handleSnapshotDelete,  // /v1/gpu/snapshot/:id handled via URL parsing
       'GET /v1/gpu/sweep': async (_req: any, res: any) => {
         try {
           const { sweepAllProviders } = await import('../src/autoscaler/gpu-sweep');

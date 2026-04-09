@@ -86,6 +86,19 @@ export interface ScalewayProviderMeta {
   [key: string]: unknown;
 }
 
+export interface SnapgpuProviderMeta {
+  provider: 'snapgpu';
+  /** Underlying provider that hosts the snapgpu container. */
+  backendProvider?: 'vast' | 'runpod';
+  /** Resolved snapgpu Docker image. */
+  snapgpuImage?: string;
+  /** ID of the snapshot used to restore this boot, if any. */
+  restoredFromSnapshotId?: string;
+  /** Most recent snapshot captured for this instance. */
+  latestSnapshotId?: string;
+  [key: string]: unknown;
+}
+
 /** Generic fallback metadata for providers that haven't been explicitly typed yet. */
 export interface GenericProviderMeta {
   provider: string;
@@ -100,6 +113,7 @@ export type ProviderMeta =
   | ModalProviderMeta
   | FlyioProviderMeta
   | ScalewayProviderMeta
+  | SnapgpuProviderMeta
   | GenericProviderMeta;
 
 export interface GpuInstance {
@@ -168,6 +182,20 @@ export interface InstanceSpec {
   /** Vast.ai-only: number of parallel deploy attempts (race). Default 2, max 5.
    *  Useful because Vast.ai hosts often reclaim/fail mid-boot — racing N hosts increases success rate. */
   raceCount?: number;
+  /** Snapgpu-only: which underlying backend provider to deploy on (vast/runpod).
+   *  Snapgpu has no hardware of its own — it's a capability layer. */
+  snapgpuBackend?: 'vast' | 'runpod';
+  /** Snapgpu-only: name of an `App` (snapgpu Python decorator) to preload at boot.
+   *  Causes the gateway to call the app's @enter(snap=True) hooks before the
+   *  first /v1/invoke request, so model load happens during cold boot, not on the request path. */
+  snapgpuPreloadApp?: string;
+  /** Snapgpu-only: snapshot ID to restore from on cold boot. If set, the gateway
+   *  skips fresh model load and resumes the captured CPU+GPU state instead.
+   *  Persisted across deploys via the autoscaler's onInstancePersist hook. */
+  snapgpuRestoreFromSnapshot?: string;
+  /** Snapgpu-only: when true, the autoscaler should snapshot the running container
+   *  after the first successful inference (so the next cold boot is fast). */
+  autoSnapshot?: boolean;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────

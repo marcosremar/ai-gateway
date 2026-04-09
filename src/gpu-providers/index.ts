@@ -56,6 +56,10 @@ export type { VastClientOptions } from './vast-client';
 export { ModalClient } from './modal-client';
 export type { ModalClientOptions, ModalDeployOptions, ModalAutoscalerParams } from './modal-client';
 
+// ── SnapGPU (CRIU + cuda-checkpoint capability layer over Vast/RunPod) ────
+export { SnapgpuClient, DEFAULT_SNAPGPU_IMAGE } from './snapgpu-client';
+export type { SnapgpuClientOptions, SnapgpuBackend, SnapshotInfo } from './snapgpu-client';
+
 // ── Deploy Orchestrator ──────────────────────────────────────────────────
 export {
   ProviderCooldownTracker,

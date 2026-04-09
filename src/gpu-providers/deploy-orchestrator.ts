@@ -9,7 +9,7 @@ import type { GpuProviderClient, ProviderCredentials } from './types';
 
 // ── Provider Name & Tier ────────────────────────────────────────────────────
 
-export type ProviderName = 'runpod' | 'vast' | 'tensordock' | 'modal';
+export type ProviderName = 'runpod' | 'vast' | 'tensordock' | 'modal' | 'snapgpu';
 
 export interface GpuTier {
   client: GpuProviderClient;
@@ -24,6 +24,7 @@ export const PROVIDER_LABELS: Record<ProviderName, string> = {
   vast: 'Vast.ai',
   tensordock: 'TensorDock',
   modal: 'Modal',
+  snapgpu: 'SnapGPU',
 };
 
 // ── Provider Cooldown Tracker ───────────────────────────────────────────────
@@ -229,4 +230,8 @@ export const DEFAULT_STORAGE_GB: Record<ProviderName, number> = {
   tensordock: 50,
   vast: 30,
   modal: 0,
+  // Snapgpu inherits the storage of its underlying backend at runtime; this
+  // value only matters when the wrapper is used directly without a backend
+  // hint, in which case 30GB matches the Vast.ai default.
+  snapgpu: 30,
 };

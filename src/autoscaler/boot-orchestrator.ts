@@ -476,6 +476,36 @@ export class BootOrchestrator {
             previousState: 'booting', newState: 'ready',
             endpoint: currentBooting.endpoint, timestamp: Date.now(),
           });
+          // ── Auto-snapshot: if this tier uses snapgpu and autoSnapshot is
+          // enabled, fire a background snapshot after the first successful boot.
+          // The snapshot captures the loaded model + warm CUDA state, so the
+          // NEXT cold boot restores in ~2-5 s instead of re-loading for ~2 min.
+          if (provider === 'snapgpu' && tierConfig?.autoSnapshot && currentBooting.endpoint) {
+            void (async () => {
+              try {
+                const { SnapgpuClient } = await import('../gpu-providers/snapgpu-client');
+                const client = this.registry.get('snapgpu');
+                if (client && client instanceof SnapgpuClient) {
+                  const appName = tierConfig?.snapgpuPreloadApp || 'default';
+                  this.logger.log(`[autoscaler] Auto-snapshot: creating snapshot for ${appName} on tier ${tierIndex}...`);
+                  const snapId = await client.createSnapshot(currentBooting.endpoint, appName);
+                  if (snapId) {
+                    this.logger.log(`[autoscaler] Auto-snapshot: ${snapId} created for ${appName}`);
+                    void this.lifecycleLogger.log({
+                      userId, tierIndex, provider,
+                      eventType: 'snapshot_created',
+                      instanceId: currentBooting.discoveredInstanceId,
+                      endpoint: currentBooting.endpoint,
+                      metadata: { snapshotId: snapId, appName, bootDurationMs },
+                    });
+                  }
+                }
+              } catch (snapErr) {
+                this.logger.warn(`[autoscaler] Auto-snapshot failed (non-fatal): ${snapErr instanceof Error ? snapErr.message : String(snapErr)}`);
+              }
+            })();
+          }
+
           void this.lifecycleLogger.log({
             userId, tierIndex, provider,
             eventType: 'boot_ok', durationMs: bootDurationMs,

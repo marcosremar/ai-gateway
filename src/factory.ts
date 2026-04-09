@@ -15,6 +15,7 @@ import { RunpodClient } from './gpu-providers/runpod-client';
 import { TensordockClient } from './gpu-providers/tensordock-client';
 import { VastClient } from './gpu-providers/vast-client';
 import { ModalClient } from './gpu-providers/modal-client';
+import { SnapgpuClient } from './gpu-providers/snapgpu-client';
 import { LatencyTracker } from './autoscaler/latency-tracker';
 import { SessionTracker } from './autoscaler/session-tracker';
 import { StatePersistence } from './autoscaler/state-persistence';
@@ -162,6 +163,16 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
   registry.register(new TensordockClient({ onInstancePersist, hooks }));
   registry.register(new ModalClient({ hooks }));
   registry.register(new VastClient({ onInstancePersist, hooks }));
+  // SnapgpuClient must be registered AFTER its backends (vast/runpod) so its
+  // constructor can resolve them via registry.get(). It delegates GPU
+  // lifecycle to the backend and adds CRIU + cuda-checkpoint snapshots
+  // on top via HTTP to the snapgpu-runtime container.
+  registry.register(new SnapgpuClient({
+    registry,
+    defaultBackend: (process.env.SNAPGPU_DEFAULT_BACKEND as 'vast' | 'runpod') ?? 'vast',
+    onInstancePersist,
+    hooks,
+  }));
 
   // Core modules
   const latencyTracker = new LatencyTracker(stateStore);

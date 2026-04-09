@@ -101,6 +101,12 @@ export interface AIProfile {
   // GPU endpoint (explicit override — skips autoscaler)
   gpuEndpoint?: string;
 
+  /** Which GPU provider manages the active instance ('vast', 'runpod', 'snapgpu', etc.).
+   *  Set by the deploy handler to help the pipeline route correctly. */
+  gpuProvider?: string;
+  /** SnapGPU app name for routing /v1/invoke/{app}/speech (default: 'babelcast'). */
+  snapgpuAppName?: string;
+
   // Fallback tuning
   fallbackOptions?: Partial<FallbackOptions>;
 

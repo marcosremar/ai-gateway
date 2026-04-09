@@ -3,7 +3,7 @@
 export type AutoScaleRoute = 'llm' | 's2s';
 export type GpuBootState = 'idle' | 'booting' | 'ready';
 export type ScaleTrigger = 'sessions' | 'latency' | 'manual' | 'predictive';
-export type GpuProvider = 'tensordock' | 'runpod' | 'vast' | 'modal' | 'skypilot';
+export type GpuProvider = 'tensordock' | 'runpod' | 'vast' | 'modal' | 'skypilot' | 'snapgpu';
 export type { GpuInstance } from './gpu-providers/types';
 
 /**
@@ -77,6 +77,12 @@ export interface GpuTierConfig {
   stageTimeouts?: StageTimeouts;
   /** Optional region filter (e.g. 'US', 'EU', 'CA' for Vast; 'US-TX-3' for RunPod; city for TensorDock) */
   region?: string;
+  /** Snapgpu-only: capture a CRIU+cuda-checkpoint snapshot after boot for fast subsequent restarts. */
+  autoSnapshot?: boolean;
+  /** Snapgpu-only: app name to preload at boot (calls @enter(snap=True) hooks). */
+  snapgpuPreloadApp?: string;
+  /** Snapgpu-only: snapshot ID to restore from instead of cold booting. */
+  snapgpuRestoreFromSnapshot?: string;
 }
 
 /**

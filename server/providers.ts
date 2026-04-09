@@ -29,6 +29,8 @@ import { RunpodClient } from '../src/gpu-providers/runpod-client';
 import { VastClient } from '../src/gpu-providers/vast-client';
 import { TensordockClient } from '../src/gpu-providers/tensordock-client';
 import { ModalClient } from '../src/gpu-providers/modal-client';
+import { SnapgpuClient } from '../src/gpu-providers/snapgpu-client';
+import { GpuProviderRegistry } from '../src/gpu-providers/registry';
 import { ScalewayClient } from '../src/cpu-providers/scaleway-client';
 import { FlyioClient } from '../src/cpu-providers/flyio-client';
 import {
@@ -386,6 +388,18 @@ export const tensordock = new TensordockClient();
 export const modal = new ModalClient({ defaultFunctionName: 'serve' });
 export const scaleway = new ScalewayClient();
 export const flyio = new FlyioClient();
+
+// SnapgpuClient needs a registry to look up its backend (vast/runpod). We
+// build a minimal registry here that wraps the singletons. The factory.ts path
+// uses its own registry; this constant is used by server/gpu-deploy.ts which
+// pre-dates that pattern.
+const _snapgpuRegistry = new GpuProviderRegistry();
+_snapgpuRegistry.register(runpod);
+_snapgpuRegistry.register(vast);
+export const snapgpu = new SnapgpuClient({
+  registry: _snapgpuRegistry,
+  defaultBackend: (process.env.SNAPGPU_DEFAULT_BACKEND as 'vast' | 'runpod') ?? 'vast',
+});
 
 // ── Centralized translationProfile mutator ───────────────────────────────────
 
