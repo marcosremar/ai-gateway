@@ -143,6 +143,29 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
     },
   },
   {
+    // HY-Motion 1.0 (Tencent): text → SMPL-H motion via DiT + flow matching.
+    // Used by avatar-engine's /api/animations/generate route — prompt goes
+    // to this GPU pod, raw SMPL-H FBX comes back, then the avatar-engine's
+    // local Blender v1.2 retarget pipeline converts to Sofia/Mixamo GLB.
+    // ~1B params + torch deps = ~16GB image, so boot is slow the first time.
+    id: 'text-to-motion-hy-motion',
+    name: 'Text-to-Motion (HY-Motion)',
+    gpuDeploy: {
+      dockerImage: `${process.env.DOCKER_IMAGE_PREFIX || 'marcosremar'}/hy-motion:latest`,
+      // HY-Motion needs ≥24GB VRAM for the DiT weights + cache. RTX 5090
+      // and A6000 fit comfortably; older cards run out of memory.
+      gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000'],
+      region: '',
+      timeoutMin: 30,
+      bootOnStartup: false,
+    },
+    latencyTargetsMs: {
+      // First inference ~180 s (model warmup). Warm inference ~5-10 s for
+      // a 3 s motion clip. We budget generously to avoid false negatives.
+      llm: 60_000,
+    },
+  },
+  {
     // Snapgpu profile: same speech pipeline as babelcast-subtitle, but the
     // autoscaler routes through SnapgpuClient → CRIU + cuda-checkpoint
     // snapshots reduce cold boot from ~2 min to ~5 s on Vast.ai/RunPod hosts
