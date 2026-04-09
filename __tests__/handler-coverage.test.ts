@@ -10,7 +10,18 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const read = (f: string) => fs.readFileSync(path.resolve(f), 'utf8');
+const read = (f: string) => {
+  if (f === 'server/gpu-handlers.ts') {
+    // Handler functions are now split across 4 modules — read them all
+    return [
+      'server/gpu-handlers.ts',
+      'server/gpu-handlers-offers.ts',
+      'server/gpu-handlers-info.ts',
+      'server/gpu-handlers-settings.ts',
+    ].map(p => fs.readFileSync(path.resolve(p), 'utf8')).join('\n');
+  }
+  return fs.readFileSync(path.resolve(f), 'utf8');
+};
 const fn = (src: string, name: string, len = 3000) => {
   const i = src.indexOf(name);
   if (i < 0) return '';
