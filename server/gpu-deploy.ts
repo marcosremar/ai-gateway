@@ -2136,6 +2136,9 @@ export async function pollHealthUntilReady(
   // it's alive but still loading — give it up to BOOT_5XX_LEEWAY_MS more.
   let firstAppResponseAt = 0;
   const BOOT_5XX_LEEWAY_MS = 60_000;
+  // One-shot SSH-based pre-flight inspection of the container. Guarded so we
+  // never spam ssh once the first attempt has run (success or failure).
+  let preflightDone = false;
 
   // ── Adaptive pull timeout ──────────────────────────────────────────────
   const { estimatePullTimeout, deriveHostKey: deriveKey } = await import('../src/gpu-providers/pull-time-estimator');
@@ -2383,6 +2386,38 @@ export async function pollHealthUntilReady(
       }
     }
 
+    // One-time SSH-based pre-flight check: confirm the container has sshd + a python process.
+    // If not, log a clear diagnostic so the user knows the container CMD/onstart_cmd is broken.
+    {
+      const sshHost = deployState.sshHost;
+      const sshPort = deployState.sshPort;
+      if (sshHost && sshPort && !preflightDone) {
+        preflightDone = true;
+        try {
+          const { spawn: sshSpawn } = await import('child_process');
+          const proc = sshSpawn('ssh', [
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'ConnectTimeout=8',
+            '-o', 'LogLevel=ERROR',
+            '-p', String(sshPort),
+            `root@${sshHost}`,
+            'pgrep -af python | head -3; echo ===; pgrep -af sshd | head -3; echo ===; ls /app/ 2>&1',
+          ], { stdio: ['ignore', 'pipe', 'pipe'] });
+          let out = '';
+          proc.stdout.on('data', (c) => { out += c.toString(); });
+          await new Promise<void>((r) => {
+            const t = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {}; r(); }, 12_000);
+            proc.on('exit', () => { clearTimeout(t); r(); });
+            proc.on('error', () => { clearTimeout(t); r(); });
+          });
+          console.log(`[gpu] [trellis-debug] preflight ssh inspection:\n${out}`);
+        } catch (e) {
+          console.log(`[gpu] [trellis-debug] preflight ssh failed: ${e instanceof Error ? e.message : e}`);
+        }
+      }
+    }
+
     // Probe health endpoint (with HTTP status tracking for crash detection)
     if (endpoint) {
       let httpStatus = 0;
@@ -2400,6 +2435,7 @@ export async function pollHealthUntilReady(
           // failures without having to SSH in.
           const body = await res.text().catch(() => '<unreadable>');
           lastErrorBody = body.substring(0, 500);
+          console.log(`[gpu] [trellis-debug] /health body (status=${res.status}, len=${body.length}): ${lastErrorBody.substring(0, 300)}`);
           const kind = httpStatus >= 500 ? '5xx (app bug or model loading)' : '4xx (wrong endpoint?)';
           console.warn(`[gpu] Health endpoint ${endpoint}${healthPath} returned ${httpStatus} ${kind}: ${lastErrorBody}`);
           // Do NOT count toward boot timeout — the container is alive,
