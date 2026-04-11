@@ -103,10 +103,10 @@ describe('handleChatCompletions', () => {
 
   it('returns usage in response', async () => {
     const res = await handleChatCompletions(makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }] }), providers);
-    const body = res.body as { usage: { promptTokens: number; completionTokens: number; totalTokens: number } };
-    expect(body.usage.promptTokens).toBe(10);
-    expect(body.usage.completionTokens).toBe(5);
-    expect(body.usage.totalTokens).toBe(15);
+    const body = res.body as { usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } };
+    expect(body.usage.prompt_tokens).toBe(10);
+    expect(body.usage.completion_tokens).toBe(5);
+    expect(body.usage.total_tokens).toBe(15);
   });
 
   it('emits onRequestStart hook', async () => {
