@@ -75,3 +75,22 @@ export {
   startPredictiveWarmupTicker,
 } from './predictive-warmup';
 export type { PredictiveWarmupConfig, PredictiveWarmupDeps } from './predictive-warmup';
+
+// ── SnapGPU Policy & Metrics ─────────────────────────────────────────────
+export {
+  shouldUseSnapshot,
+  PRIVILEGED_PROVIDERS,
+  UNPRIVILEGED_PROVIDERS,
+} from './snapgpu-policy';
+export type {
+  PersistedSnapshot,
+  SnapshotPolicyInput,
+  SnapshotPolicyDecision,
+} from './snapgpu-policy';
+
+export { SnapgpuMetrics, buildWorkloadKey } from './snapgpu-metrics';
+export type {
+  SnapgpuMetricsOptions,
+  BootPath,
+  DisableEvent,
+} from './snapgpu-metrics';

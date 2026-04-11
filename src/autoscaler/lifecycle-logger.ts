@@ -25,6 +25,10 @@ export interface GpuLifecycleLogEntry {
     | 'tier_deleted'
     | 'tier_restarted'
     | 'tier_deployed'
+    | 'snapshot_created'
+    | 'snapshot_restore_attempted'
+    | 'snapshot_restore_rejected'
+    | 'snapshot_disabled'
     | (string & {});
   instanceId?: string;
   endpoint?: string;

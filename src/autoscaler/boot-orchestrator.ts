@@ -6,6 +6,8 @@ import type { GpuLifecycleLogger } from './lifecycle-logger';
 import type { Logger } from '../deps';
 import { emitHook } from '../hooks';
 import { StageTimeoutError, withStageTimeout } from './stage-timeout';
+import { shouldUseSnapshot, type PersistedSnapshot, type SnapshotPolicyDecision } from './snapgpu-policy';
+import { SnapgpuMetrics, buildWorkloadKey } from './snapgpu-metrics';
 
 const BOOT_COOLDOWN_BASE_MS = 2 * 60_000;  // 2 min base, exponential backoff
 const BOOT_COOLDOWN_MAX_MS = 30 * 60_000;  // Max 30 min cooldown
@@ -28,6 +30,12 @@ export interface BootOrchestratorOptions {
   /** Read back a value previously written via onInstancePersist. Used to
    *  retrieve the last SnapGPU snapshot ID for a tier across restarts. */
   getPersistedData?: (userId: string, key: string) => Promise<Record<string, unknown> | null>;
+  /** Optional per-workload rolling tracker that compares cold-vs-restore
+   *  deploy latency and auto-disables the snapshot path when it's losing.
+   *  If omitted, a default instance is created — pass your own when you
+   *  need to share state across multiple orchestrators or inject fake
+   *  clocks in tests. */
+  snapgpuMetrics?: SnapgpuMetrics;
   callbacks: BootOrchestratorCallbacks;
 }
 
@@ -55,6 +63,17 @@ export class BootOrchestrator {
    */
   private bootPollers = new Map<string, { timer: ReturnType<typeof setTimeout>; cancelled: boolean }>();
 
+  /**
+   * Tracks whether the most recent triggerGpuBoot() for a given `${userId}:${tierIndex}`
+   * took the snapshot-restore path or the cold-boot path. Written in
+   * triggerGpuBoot() and consumed in the health poller when recording the
+   * boot duration into SnapgpuMetrics. Using a keyed map (not a flag on
+   * tierConfig) avoids mutating the caller's tier config and handles the
+   * case where the engine reuses the same tierConfig reference across
+   * successive boots.
+   */
+  private bootPathByTier = new Map<string, 'cold' | 'restore'>();
+
   private readonly registry: GpuProviderRegistry;
   private readonly probeHealth: (endpoint: string) => Promise<boolean>;
   private readonly hooks?: GatewayHooks;
@@ -62,6 +81,7 @@ export class BootOrchestrator {
   private readonly logger: Logger;
   private readonly onInstancePersist?: (userId: string, machineKey: string, data: Record<string, unknown>) => Promise<void>;
   private readonly getPersistedData?: (userId: string, key: string) => Promise<Record<string, unknown> | null>;
+  private readonly snapgpuMetrics: SnapgpuMetrics;
   private readonly callbacks: BootOrchestratorCallbacks;
 
   constructor(opts: BootOrchestratorOptions) {
@@ -72,7 +92,31 @@ export class BootOrchestrator {
     this.logger = opts.logger;
     this.onInstancePersist = opts.onInstancePersist;
     this.getPersistedData = opts.getPersistedData;
+    this.snapgpuMetrics = opts.snapgpuMetrics ?? new SnapgpuMetrics();
     this.callbacks = opts.callbacks;
+
+    // Surface auto-disable events through the lifecycle logger so cost-monitor
+    // dashboards can see why a workload stopped using CRIU restore.
+    this.snapgpuMetrics.onDisable((e) => {
+      void this.lifecycleLogger.log({
+        userId: e.userId,
+        tierIndex: -1,
+        provider: 'snapgpu',
+        eventType: 'snapshot_disabled',
+        error: e.reason,
+        metadata: {
+          workloadKey: e.workloadKey,
+          avgColdMs: e.avgColdMs,
+          avgRestoreMs: e.avgRestoreMs,
+          disabledUntilMs: e.disabledUntilMs,
+        },
+      });
+    });
+  }
+
+  /** Expose the metrics tracker for HTTP handlers / observability endpoints. */
+  getSnapgpuMetrics(): SnapgpuMetrics {
+    return this.snapgpuMetrics;
   }
 
   async triggerGpuBoot(
@@ -102,33 +146,76 @@ export class BootOrchestrator {
     let sshPort: number | undefined;
     let monitorUrl: string | undefined;
 
-    // ── SnapGPU: restore from last snapshot if available ───────────────────
-    // If no explicit snapgpuRestoreFromSnapshot in config, check persistent
-    // storage for a snapshot ID saved by a previous auto-snapshot run.
-    // Key uses appName (not tierIndex) so it survives tier-config reorders.
-    if (cfg.provider === 'snapgpu' && !cfg.snapgpuRestoreFromSnapshot && !this.getPersistedData) {
-      this.logger.warn(`[autoscaler] Tier ${tierIndex} (snapgpu): getPersistedData not wired — snapshot restore disabled. Pass getPersistedData in BootOrchestratorOptions to enable automatic fast cold-starts.`);
-    }
-    if (cfg.provider === 'snapgpu' && !cfg.snapgpuRestoreFromSnapshot && this.getPersistedData) {
+    // Track whether this boot used the restore path or the cold path so we
+    // can feed the observation back into SnapgpuMetrics when the boot lands
+    // (via handleBootResult + startBootHealthPoller).
+    let usedSnapshotRestore = false;
+
+    // ── SnapGPU: policy-gated snapshot restore ─────────────────────────────
+    // The old logic restored from any snapshot in the KV store. The new
+    // logic runs the snapshot through shouldUseSnapshot() first so we can
+    // reject it when the backend can't do CRIU, the workload is unsuitable,
+    // the image has drifted, or the metrics tracker has auto-disabled this
+    // workload. Rejection reasons are logged to the lifecycle stream for
+    // observability.
+    if (cfg.provider === 'snapgpu') {
       const appName = cfg.snapgpuPreloadApp || 'default';
-      const snapKey = `snapgpu_snapshot:${appName}`;
-      try {
-        const saved = await this.getPersistedData(userId, snapKey);
-        if (saved?.snapshotId && typeof saved.snapshotId === 'string') {
-          // Ignore snapshots older than 7 days — they may have been deleted
-          const age = Date.now() - (typeof saved.createdAt === 'number' ? saved.createdAt : 0);
-          const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-          if (age < SEVEN_DAYS_MS) {
-            cfg.snapgpuRestoreFromSnapshot = saved.snapshotId;
-            this.logger.log(`[autoscaler] Tier ${tierIndex} (snapgpu): will restore from snapshot ${cfg.snapgpuRestoreFromSnapshot}`);
-          } else {
-            this.logger.log(`[autoscaler] Tier ${tierIndex} (snapgpu): persisted snapshot ${saved.snapshotId} is ${Math.round(age / 86_400_000)}d old — ignoring`);
+      const workloadKey = buildWorkloadKey(cfg.dockerImage, appName);
+      let persistedSnapshot: PersistedSnapshot | null = null;
+
+      if (!cfg.snapgpuRestoreFromSnapshot && this.getPersistedData) {
+        const snapKey = `snapgpu_snapshot:${appName}`;
+        try {
+          const saved = await this.getPersistedData(userId, snapKey);
+          if (saved?.snapshotId && typeof saved.snapshotId === 'string') {
+            persistedSnapshot = {
+              snapshotId: saved.snapshotId,
+              appName,
+              createdAt: typeof saved.createdAt === 'number' ? saved.createdAt : 0,
+              imageRef: typeof saved.imageRef === 'string' ? saved.imageRef : undefined,
+              backend: typeof saved.backend === 'string' ? saved.backend : undefined,
+            };
           }
+        } catch (err) {
+          this.logger.warn(`[autoscaler] getPersistedData failed for ${snapKey}: ${err instanceof Error ? err.message : String(err)}`);
         }
-      } catch (err) {
-        this.logger.warn(`[autoscaler] getPersistedData failed for ${snapKey}: ${err instanceof Error ? err.message : String(err)}`);
+      } else if (!this.getPersistedData && !cfg.snapgpuRestoreFromSnapshot) {
+        this.logger.warn(`[autoscaler] Tier ${tierIndex} (snapgpu): getPersistedData not wired — snapshot restore disabled. Pass getPersistedData in BootOrchestratorOptions to enable automatic fast cold-starts.`);
+      }
+
+      const resolvedBackend = cfg.snapgpuBackend ?? 'vast';
+      const decision: SnapshotPolicyDecision = shouldUseSnapshot({
+        tierConfig: cfg,
+        snapshot: persistedSnapshot,
+        autoDisabled: this.snapgpuMetrics.isDisabled(userId, workloadKey),
+        resolvedBackend,
+      });
+
+      if (decision.use) {
+        cfg.snapgpuRestoreFromSnapshot = decision.snapshotId;
+        usedSnapshotRestore = true;
+        this.logger.log(`[autoscaler] Tier ${tierIndex} (snapgpu): will restore from snapshot ${decision.snapshotId} (backend=${resolvedBackend})`);
+        void this.lifecycleLogger.log({
+          userId, tierIndex, provider: 'snapgpu',
+          eventType: 'snapshot_restore_attempted',
+          metadata: { snapshotId: decision.snapshotId, workloadKey, backend: resolvedBackend },
+        });
+      } else if (persistedSnapshot) {
+        // Only log a rejection when we actually had a snapshot to reject.
+        // 'no_snapshot' is the normal first-boot case and doesn't warrant a
+        // rejection event.
+        this.logger.log(`[autoscaler] Tier ${tierIndex} (snapgpu): snapshot restore skipped (${decision.reason})`);
+        void this.lifecycleLogger.log({
+          userId, tierIndex, provider: 'snapgpu',
+          eventType: 'snapshot_restore_rejected',
+          metadata: { snapshotId: persistedSnapshot.snapshotId, workloadKey, reason: decision.reason, backend: resolvedBackend },
+        });
       }
     }
+
+    // Stash the path so the health poller can record it after boot succeeds.
+    // Overwrites any stale entry from a previous failed boot on the same tier.
+    this.bootPathByTier.set(`${userId}:${tierIndex}`, usedSnapshotRestore ? 'restore' : 'cold');
 
     const timeouts = resolveStageTimeouts(cfg.provider, cfg.stageTimeouts);
 
@@ -517,6 +604,21 @@ export class BootOrchestrator {
             previousState: 'booting', newState: 'ready',
             endpoint: currentBooting.endpoint, timestamp: Date.now(),
           });
+          // ── SnapGPU metrics: record this deploy's duration tagged with the
+          // path taken. Fed back to the policy tracker so future deploys can
+          // compare cold-vs-restore averages and auto-disable if restore
+          // stops winning. The path was stashed by triggerGpuBoot() in
+          // bootPathByTier under the key `${userId}:${tierIndex}` and is
+          // consumed (and cleared) here.
+          if (provider === 'snapgpu' && tierConfig) {
+            const appName = tierConfig.snapgpuPreloadApp || 'default';
+            const workloadKey = buildWorkloadKey(tierConfig.dockerImage, appName);
+            const tierKey = `${userId}:${tierIndex}`;
+            const path: 'cold' | 'restore' = this.bootPathByTier.get(tierKey) ?? 'cold';
+            this.bootPathByTier.delete(tierKey);
+            this.snapgpuMetrics.record(userId, workloadKey, path, bootDurationMs);
+          }
+
           // ── Auto-snapshot: if this tier uses snapgpu and autoSnapshot is
           // enabled, fire a background snapshot after the first successful boot.
           // The snapshot captures the loaded model + warm CUDA state, so the
@@ -545,12 +647,16 @@ export class BootOrchestrator {
                       metadata: { snapshotId: snapId, appName, bootDurationMs },
                     });
                     // Persist snapshot ID so next triggerGpuBoot can restore it.
-                    // Key is stable: uses appName not tierIndex.
+                    // Include imageRef + backend so shouldUseSnapshot() can
+                    // reject stale snapshots on image drift or cross-backend
+                    // attempts. Key is stable: uses appName not tierIndex.
                     if (this.onInstancePersist) {
                       void this.onInstancePersist(userId, `snapgpu_snapshot:${appName}`, {
                         snapshotId: snapId,
                         appName,
                         createdAt: Date.now(),
+                        imageRef: tierConfig.dockerImage,
+                        backend: tierConfig.snapgpuBackend ?? 'vast',
                       }).catch((e) => {
                         this.logger.warn(`[autoscaler] Failed to persist snapshot ID: ${e instanceof Error ? e.message : String(e)}`);
                       });
