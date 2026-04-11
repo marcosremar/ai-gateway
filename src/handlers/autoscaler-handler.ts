@@ -10,6 +10,7 @@ import type { AutoScalerConfig } from '../types';
 import { PROVIDER_BOOT_SECS } from '../factory';
 import { AutoscalerSettingsSchema } from './autoscaler-schemas';
 import { ModalClient } from '../gpu-providers/modal-client';
+import { VastClient } from '../gpu-providers/vast-client';
 import { runHealthCheck, runSSEBench } from '../benchmarking/bench';
 
 type LoadConfig = (userId: string) => Promise<AutoScalerConfig | null>;
@@ -501,6 +502,56 @@ export async function handleAutoscalerAction(
       return ok({ success: true, provider, instanceId, action: 'stop' });
     }
 
+    case 'instance-reboot': {
+      const { provider, instanceId } = body;
+      if (!provider || !instanceId) return err('provider and instanceId are required');
+      if (!VALID_PROVIDERS.includes(provider as string)) return err(`Invalid provider: ${provider}`);
+
+      const creds = await credentialStore.resolve(userId, provider as string);
+      if (!creds) return err(`No API key found for ${provider}`);
+
+      const client = autoscaler.registry.get(provider as string);
+      if (!client) return err(`Provider ${provider} not registered`);
+      if (!client.rebootInstance) return err(`Provider ${provider} does not support reboot`);
+
+      await client.rebootInstance(String(instanceId), creds);
+      return ok({ success: true, provider, instanceId, action: 'reboot' });
+    }
+
+    case 'instance-recycle': {
+      const { provider, instanceId } = body;
+      if (!provider || !instanceId) return err('provider and instanceId are required');
+      if (!VALID_PROVIDERS.includes(provider as string)) return err(`Invalid provider: ${provider}`);
+
+      const creds = await credentialStore.resolve(userId, provider as string);
+      if (!creds) return err(`No API key found for ${provider}`);
+
+      const client = autoscaler.registry.get(provider as string);
+      if (!client) return err(`Provider ${provider} not registered`);
+      if (!client.recycleInstance) return err(`Provider ${provider} does not support recycle`);
+
+      await client.recycleInstance(String(instanceId), creds);
+      return ok({ success: true, provider, instanceId, action: 'recycle' });
+    }
+
+    case 'instance-change-bid': {
+      const { provider, instanceId, bidPricePerHr } = body;
+      if (!provider || !instanceId || bidPricePerHr === undefined) return err('provider, instanceId, and bidPricePerHr are required');
+      if (!VALID_PROVIDERS.includes(provider as string)) return err(`Invalid provider: ${provider}`);
+      const bidPrice = Number(bidPricePerHr);
+      if (!isFinite(bidPrice) || bidPrice <= 0) return err('bidPricePerHr must be a positive number');
+
+      const creds = await credentialStore.resolve(userId, provider as string);
+      if (!creds) return err(`No API key found for ${provider}`);
+
+      const client = autoscaler.registry.get(provider as string);
+      if (!client) return err(`Provider ${provider} not registered`);
+      if (!client.changeBid) return err(`Provider ${provider} does not support changeBid`);
+
+      await client.changeBid(String(instanceId), bidPrice, creds);
+      return ok({ success: true, provider, instanceId, action: 'change-bid', bidPricePerHr: bidPrice });
+    }
+
     case 'instance-delete': {
       const { provider, instanceId } = body;
       if (!provider || !instanceId) return err('provider and instanceId are required');
@@ -754,6 +805,212 @@ export async function handleAutoscalerAction(
         sortOrder: 'desc',
       });
       return ok({ sessions });
+    }
+
+    // ── Vast.ai Template Management ─────────────────────────────────────────
+
+    case 'vast-template-list': {
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const templates = await client.listTemplates(creds);
+      return ok({ templates });
+    }
+
+    case 'vast-template-create': {
+      const { name, image, tag, envVars, exposePorts, onstartCmd, diskSpaceGb } = body;
+      if (!name || !image) return err('name and image are required');
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const result = await client.createTemplate({
+        name: String(name),
+        image: String(image),
+        tag: tag ? String(tag) : undefined,
+        envVars: envVars as Record<string, string> | undefined,
+        exposePorts: Array.isArray(exposePorts) ? exposePorts.map(Number) : undefined,
+        onstartCmd: onstartCmd ? String(onstartCmd) : undefined,
+        diskSpaceGb: diskSpaceGb ? Number(diskSpaceGb) : undefined,
+      }, creds);
+      return ok({ ...result, action: 'created' });
+    }
+
+    case 'vast-template-update': {
+      const { hashId, name, image, tag, diskSpaceGb, desc } = body;
+      if (!hashId) return err('hashId is required');
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const result = await client.updateTemplate(String(hashId), {
+        name: name ? String(name) : undefined,
+        image: image ? String(image) : undefined,
+        tag: tag ? String(tag) : undefined,
+        diskSpaceGb: diskSpaceGb ? Number(diskSpaceGb) : undefined,
+        desc: desc ? String(desc) : undefined,
+      }, creds);
+      return ok({ ...result, action: 'updated' });
+    }
+
+    case 'vast-template-delete': {
+      const { templateId } = body;
+      if (!templateId) return err('templateId (numeric) is required');
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      await client.deleteTemplate(Number(templateId), creds);
+      return ok({ success: true, templateId: Number(templateId), action: 'deleted' });
+    }
+
+    case 'vast-template-find-or-create': {
+      const { name, image, tag, envVars, exposePorts, onstartCmd, diskSpaceGb } = body;
+      if (!name || !image) return err('name and image are required');
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const result = await client.findOrCreateTemplate({
+        name: String(name),
+        image: String(image),
+        tag: tag ? String(tag) : undefined,
+        envVars: envVars as Record<string, string> | undefined,
+        exposePorts: Array.isArray(exposePorts) ? exposePorts.map(Number) : undefined,
+        onstartCmd: onstartCmd ? String(onstartCmd) : undefined,
+        diskSpaceGb: diskSpaceGb ? Number(diskSpaceGb) : undefined,
+      }, creds);
+      return ok(result);
+    }
+
+    // ── Vast.ai Serverless Endpoints ────────────────────────────────────────
+
+    case 'vast-endpoint-list': {
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const endpoints = await client.listEndpoints(creds);
+      return ok({ endpoints });
+    }
+
+    case 'vast-endpoint-create': {
+      const { name, minLoad, targetUtil, coldMult, coldWorkers, maxWorkers } = body;
+      if (!name) return err('name is required');
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const result = await client.createEndpoint({
+        name: String(name),
+        minLoad: minLoad !== undefined ? Number(minLoad) : undefined,
+        targetUtil: targetUtil !== undefined ? Number(targetUtil) : undefined,
+        coldMult: coldMult !== undefined ? Number(coldMult) : undefined,
+        coldWorkers: coldWorkers !== undefined ? Number(coldWorkers) : undefined,
+        maxWorkers: maxWorkers !== undefined ? Number(maxWorkers) : undefined,
+      }, creds);
+      return ok(result);
+    }
+
+    case 'vast-endpoint-delete': {
+      const { endpointId } = body;
+      if (!endpointId) return err('endpointId is required');
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const result = await client.deleteEndpoint(Number(endpointId), creds);
+      return ok({ success: true, endpointId: Number(endpointId), ...result });
+    }
+
+    case 'vast-endpoint-logs': {
+      const { endpointName, endpointApiKey, lines } = body;
+      if (!endpointName || !endpointApiKey) return err('endpointName and endpointApiKey are required');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const logs = await client.getEndpointLogs(String(endpointName), String(endpointApiKey), lines ? Number(lines) : 100);
+      return ok({ logs });
+    }
+
+    case 'vast-endpoint-route': {
+      const { endpointName, endpointApiKey, cost } = body;
+      if (!endpointName || !endpointApiKey) return err('endpointName and endpointApiKey are required');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const result = await client.routeRequest(String(endpointName), String(endpointApiKey), cost ? Number(cost) : 100);
+      if (!result) return ok({ available: false });
+      return ok({ available: true, ...result });
+    }
+
+    // ── Vast.ai Worker Groups ───────────────────────────────────────────────
+
+    case 'vast-workergroup-list': {
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const workerGroups = await client.listWorkerGroups(creds);
+      return ok({ workerGroups });
+    }
+
+    case 'vast-workergroup-create': {
+      const { endpointId, endpointName, templateHash, templateId, searchParams, launchArgs, gpuRamGb, minLoad, targetUtil, coldMult, coldWorkers, maxWorkers, testWorkers } = body;
+      if (!endpointId && !endpointName) return err('endpointId or endpointName is required');
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const result = await client.createWorkerGroup({
+        endpointId: endpointId ? Number(endpointId) : undefined,
+        endpointName: endpointName ? String(endpointName) : undefined,
+        templateHash: templateHash ? String(templateHash) : undefined,
+        templateId: templateId ? Number(templateId) : undefined,
+        searchParams: searchParams ? String(searchParams) : undefined,
+        launchArgs: launchArgs ? String(launchArgs) : undefined,
+        gpuRamGb: gpuRamGb ? Number(gpuRamGb) : undefined,
+        minLoad: minLoad !== undefined ? Number(minLoad) : undefined,
+        targetUtil: targetUtil !== undefined ? Number(targetUtil) : undefined,
+        coldMult: coldMult !== undefined ? Number(coldMult) : undefined,
+        coldWorkers: coldWorkers !== undefined ? Number(coldWorkers) : undefined,
+        maxWorkers: maxWorkers !== undefined ? Number(maxWorkers) : undefined,
+        testWorkers: testWorkers !== undefined ? Number(testWorkers) : undefined,
+      }, creds);
+      return ok(result);
+    }
+
+    case 'vast-workergroup-update': {
+      const { id, ...updates } = body;
+      if (!id) return err('id is required');
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      await client.updateWorkerGroup(Number(id), {
+        minLoad: updates.minLoad !== undefined ? Number(updates.minLoad) : undefined,
+        targetUtil: updates.targetUtil !== undefined ? Number(updates.targetUtil) : undefined,
+        coldMult: updates.coldMult !== undefined ? Number(updates.coldMult) : undefined,
+        testWorkers: updates.testWorkers !== undefined ? Number(updates.testWorkers) : undefined,
+        templateHash: updates.templateHash ? String(updates.templateHash) : undefined,
+        templateId: updates.templateId ? Number(updates.templateId) : undefined,
+        searchParams: updates.searchParams ? String(updates.searchParams) : undefined,
+        launchArgs: updates.launchArgs ? String(updates.launchArgs) : undefined,
+        gpuRamGb: updates.gpuRamGb ? Number(updates.gpuRamGb) : undefined,
+        endpointName: updates.endpointName ? String(updates.endpointName) : undefined,
+        endpointId: updates.endpointId ? Number(updates.endpointId) : undefined,
+      }, creds);
+      return ok({ success: true, id: Number(id) });
+    }
+
+    case 'vast-workergroup-delete': {
+      const { id } = body;
+      if (!id) return err('id is required');
+      const creds = await credentialStore.resolve(userId, 'vast');
+      if (!creds) return err('No Vast.ai API key found');
+      const client = autoscaler.registry.get('vast') as VastClient | undefined;
+      if (!client) return err('Vast.ai provider not registered');
+      const result = await client.deleteWorkerGroup(Number(id), creds);
+      return ok({ success: true, id: Number(id), ...result });
     }
 
     default:

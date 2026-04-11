@@ -1101,6 +1101,32 @@ export function startWsServer() {
         }
       },
     };
+    // Vast.ai template + serverless routes
+    try {
+      const vgh = require('./gpu-handlers-vast');
+      Object.assign(handlers, {
+        // Templates
+        'GET /v1/gpu/vast/templates': vgh.handleVastTemplates,
+        'POST /v1/gpu/vast/templates': vgh.handleVastTemplateCreate,
+        'PUT /v1/gpu/vast/templates': vgh.handleVastTemplateUpdate,
+        'DELETE /v1/gpu/vast/templates': vgh.handleVastTemplateDelete,
+        'POST /v1/gpu/vast/templates/find-or-create': vgh.handleVastTemplateFindOrCreate,
+        // Serverless endpoints
+        'GET /v1/gpu/vast/endpoints': vgh.handleVastEndpoints,
+        'POST /v1/gpu/vast/endpoints': vgh.handleVastEndpointCreate,
+        'DELETE /v1/gpu/vast/endpoints': vgh.handleVastEndpointDelete,
+        'POST /v1/gpu/vast/endpoints/logs': vgh.handleVastEndpointLogs,
+        'POST /v1/gpu/vast/endpoints/route': vgh.handleVastEndpointRoute,
+        // Worker groups
+        'GET /v1/gpu/vast/workergroups': vgh.handleVastWorkerGroups,
+        'POST /v1/gpu/vast/workergroups': vgh.handleVastWorkerGroupCreate,
+        'PUT /v1/gpu/vast/workergroups': vgh.handleVastWorkerGroupUpdate,
+        'DELETE /v1/gpu/vast/workergroups': vgh.handleVastWorkerGroupDelete,
+      });
+    } catch (e: any) {
+      console.warn(`[ws-server] Vast.ai handlers not loaded: ${e.message?.slice(0, 80)}`);
+    }
+
     // Playground
     try {
       const pg = require('./playground-handlers');
@@ -1248,6 +1274,15 @@ export function startWsServer() {
     console.log(`[ws-server] HTTP API on port ${PORT}`);
   } catch (e: any) {
     console.warn(`[ws-server] HTTP API not started: ${e.message?.slice(0, 80)}`);
+  }
+
+  // Start standby monitor — auto-deploys a warm GPU when session duration or
+  // P95 latency thresholds are exceeded (standbyEnabled controls gating inside).
+  try {
+    const { startStandbyMonitor } = require('./gpu-standby');
+    startStandbyMonitor();
+  } catch (e: any) {
+    console.warn('[ws-server] Standby monitor not started:', e?.message?.slice(0, 80));
   }
 
   return WS_PORT;

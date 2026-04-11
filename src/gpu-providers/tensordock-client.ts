@@ -433,14 +433,16 @@ export class TensordockClient extends AbstractGpuProvider {
       });
 
       for (const candidate of candidates.slice(0, 3)) {
-        // Use dedicated IP to bypass fragile NAT port-forwarding on third-party hosts
-        // Select OS image: prefer NVIDIA 570 driver image for snapgpu containers
-        // (CRIU's cuda_plugin needs driver 570+ for GPU memory checkpointing).
-        // Not all TensorDock engines support nvidia_570 images (Honeybadger does,
-        // Narwhal only has base images). We try nvidia_570 first and fallback to
-        // ubuntu2404 if the host rejects it (invalid_enum_value error).
-        const needsNvidia570 = spec.dockerImage?.includes('snapgpu-runtime') ?? false;
-        let osImage = needsNvidia570 ? 'ubuntu2404_nvidia_570' : 'ubuntu2404';
+        // TensorDock Narwhal OS images (validated 2026-04-09):
+        //   ubuntu2204, ubuntu2404, ubuntu2404_ml_everything,
+        //   ubuntu2404_ml_pytorch, ubuntu2404_ml_tensorflow, windows10
+        // NOTE: 'ubuntu2404_nvidia_570' does NOT exist — Narwhal nodes ship
+        // driver 565 baked into the host hypervisor. Driver version cannot be
+        // changed from inside the guest VM. For driver 570+ use Vast.ai.
+        // ml_pytorch image still ships driver 565 but includes CUDA/PyTorch
+        // pre-installed, which is useful for snapgpu workloads.
+        const needsMl = spec.dockerImage?.includes('snapgpu-runtime') ?? false;
+        let osImage = needsMl ? 'ubuntu2404_ml_pytorch' : 'ubuntu2404';
 
         const v2Body = {
           data: {
@@ -496,39 +498,11 @@ export class TensordockClient extends AbstractGpuProvider {
             if (errStr.includes('need at least') || errStr.includes('balance') || errStr.includes('insufficient')) {
               throw new Error(`TensorDock account balance insufficient: ${errStr.substring(0, 200)}`);
             }
-            // Retry with fallback image if nvidia_570 was rejected by this engine
-            if (osImage === 'ubuntu2404_nvidia_570' && errStr.includes('invalid_enum_value')) {
-              this.log.log(`[tensordock] ${candidate.city} doesn't support nvidia_570 image, retrying with ubuntu2404`);
-              osImage = 'ubuntu2404';
-              v2Body.data.attributes.image = 'ubuntu2404';
-              // Retry same candidate with base image
-              await this.rateLimiter.wait();
-              const retryRes = await this.fetchRaw(`${TENSORDOCK_V2_BASE}/instances`, {
-                method: 'POST', headers, body: JSON.stringify(v2Body),
-              }, TIMEOUTS.create);
-              if (retryRes.ok) {
-                const retryData = await retryRes.json();
-                if (retryData.data?.id) {
-                  // eslint-disable-next-line no-param-reassign
-                  data = retryData;
-                  this.log.log(`[tensordock] Fallback to ubuntu2404 succeeded at ${candidate.city}`);
-                  // Fall through to success handling below
-                }
-              }
-              if (!data.data?.id) {
-                this.emitError({
-                  operation: 'createInstance', message: `Create at ${candidate.city} failed with both nvidia_570 and ubuntu2404`,
-                  retryable: true,
-                });
-                continue;
-              }
-            } else {
-              this.emitError({
-                operation: 'createInstance', message: `Create at ${candidate.city} body error: ${errStr.substring(0, 200)}`,
-                retryable: true,
-              });
-              continue;
-            }
+            this.emitError({
+              operation: 'createInstance', message: `Create at ${candidate.city} body error: ${errStr.substring(0, 200)}`,
+              retryable: true,
+            });
+            continue;
           }
 
           const attrs = data.data?.attributes || data;

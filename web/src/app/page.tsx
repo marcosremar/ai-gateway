@@ -5,7 +5,7 @@ import dynamic from 'next/dynamic';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
 import { Sidebar, type SidebarItem } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
-import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon, Gauge, RefreshCw, Activity, FlaskConical } from 'lucide-react';
+import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon, Gauge, RefreshCw, Activity, FlaskConical, Layers } from 'lucide-react';
 
 // Critical above-the-fold section — loaded eagerly
 import { OverviewSection } from '@/sections/OverviewSection';
@@ -59,6 +59,10 @@ const LabsSection = dynamic(
   () => import('@/sections/LabsSection').then(m => ({ default: m.LabsSection })),
   { loading: LoadingPlaceholder },
 );
+const VastServerlessSection = dynamic(
+  () => import('@/sections/VastServerlessSection').then(m => ({ default: m.VastServerlessSection })),
+  { loading: LoadingPlaceholder },
+);
 
 const NAV_ITEMS: SidebarItem[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -67,6 +71,7 @@ const NAV_ITEMS: SidebarItem[] = [
   { id: 'config/profiles', label: 'Profiles', icon: LayoutList },
   { id: 'config/api-keys', label: 'API Keys', icon: KeyRound },
   { id: 'config/labs', label: 'Labs', icon: FlaskConical },
+  { id: 'config/vast-serverless', label: 'Vast Serverless', icon: Layers },
 
   { id: '_tools', label: 'Tools', divider: true, icon: LayoutDashboard },
   { id: 'tools/playground', label: 'Playground', icon: Sparkles },
@@ -199,6 +204,7 @@ function Dashboard() {
           {activeTab === 'overview' && <ErrorBoundary><OverviewSection /></ErrorBoundary>}
           {activeTab === 'config/api-keys' && <ErrorBoundary><ApiKeysSection /></ErrorBoundary>}
           {activeTab === 'config/labs' && <ErrorBoundary><LabsSection /></ErrorBoundary>}
+          {activeTab === 'config/vast-serverless' && <ErrorBoundary><VastServerlessSection /></ErrorBoundary>}
           {activeTab === 'tools/playground' && <ErrorBoundary><PlaygroundSection /></ErrorBoundary>}
           {activeTab === 'tools/bot' && <ErrorBoundary><BotSection /></ErrorBoundary>}
           {activeTab === 'monitor/latency' && <ErrorBoundary><LatencySection /></ErrorBoundary>}

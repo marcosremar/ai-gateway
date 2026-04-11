@@ -36,6 +36,9 @@ import type {
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 import type { GpuProviderRegistry } from './registry';
+import type { B2StoreConfig } from '../object-storage/b2-store';
+import type { R2StoreConfig } from '../object-storage/r2-store';
+import type { S3StoreConfig } from '../object-storage/s3-store';
 
 /** Default Docker image for the snapgpu-runtime base. Override per tier in spec.dockerImage. */
 export const DEFAULT_SNAPGPU_IMAGE =
@@ -44,11 +47,90 @@ export const DEFAULT_SNAPGPU_IMAGE =
 /** Backend providers snapgpu can sit on top of. */
 export type SnapgpuBackend = 'vast' | 'runpod';
 
+/**
+ * Low-level S3 config for checkpoint persistence (raw endpoint + credentials).
+ * Prefer passing a `B2StoreConfig`, `R2StoreConfig`, or `S3StoreConfig` directly
+ * — those are the native types already used by the rest of the app via
+ * `@parle/ai-gateway/object-storage`.
+ */
+export interface SnapgpuS3Config {
+  endpoint: string;
+  bucket: string;
+  accessKey: string;
+  secretKey: string;
+  region?: string;
+  keyPrefix?: string;
+}
+
+/**
+ * Any S3-compatible config accepted by `SnapgpuClientOptions.s3Config`.
+ * Accepts the native object-storage config types (B2StoreConfig, R2StoreConfig,
+ * S3StoreConfig) as well as the raw SnapgpuS3Config for manual overrides.
+ */
+export type SnapgpuS3Input =
+  | SnapgpuS3Config
+  | B2StoreConfig
+  | R2StoreConfig
+  | S3StoreConfig;
+
+/**
+ * Normalise any S3 input type to the flat SnapgpuS3Config that gets injected
+ * as env vars into the container. Detects the input shape via discriminating
+ * fields: keyId → B2, accountId → R2, accessKeyId → generic S3, otherwise
+ * treat as SnapgpuS3Config passthrough.
+ */
+export function normalizeSnapgpuS3Config(cfg: SnapgpuS3Input): SnapgpuS3Config {
+  if ('keyId' in cfg) {
+    // B2StoreConfig
+    return {
+      endpoint: cfg.endpoint ?? `https://s3.${cfg.region}.backblazeb2.com`,
+      bucket: cfg.bucket,
+      accessKey: cfg.keyId,
+      secretKey: cfg.applicationKey,
+      region: cfg.region,
+    };
+  }
+  if ('accountId' in cfg) {
+    // R2StoreConfig
+    return {
+      endpoint: cfg.endpoint ?? `https://${cfg.accountId}.r2.cloudflarestorage.com`,
+      bucket: cfg.bucket,
+      accessKey: cfg.accessKeyId,
+      secretKey: cfg.secretAccessKey,
+      region: 'auto',
+    };
+  }
+  if ('accessKeyId' in cfg) {
+    // S3StoreConfig
+    return {
+      endpoint: cfg.endpoint,
+      bucket: cfg.bucket,
+      accessKey: cfg.accessKeyId,
+      secretKey: cfg.secretAccessKey,
+      region: cfg.region,
+    };
+  }
+  // SnapgpuS3Config — already in the right shape
+  return cfg as SnapgpuS3Config;
+}
+
 export interface SnapgpuClientOptions extends AbstractGpuProviderOptions {
   /** Registry used to look up the backend provider (vast/runpod). Required. */
   registry: GpuProviderRegistry;
   /** Default backend when spec.snapgpuBackend is not set. */
   defaultBackend?: SnapgpuBackend;
+  /**
+   * S3 config for checkpoint persistence. When set, snapshots are automatically
+   * uploaded to S3 after creation and downloaded on new worker boots.
+   * Can also be provided per-instance via spec.snapgpuS3Config.
+   *
+   * Accepts the same config types used by `@parle/ai-gateway/object-storage`:
+   *   - `B2StoreConfig`  — Backblaze B2 (recommended: free egress, cheap storage)
+   *   - `R2StoreConfig`  — Cloudflare R2 (free egress)
+   *   - `S3StoreConfig`  — any S3-compatible service (AWS, MinIO, etc.)
+   *   - `SnapgpuS3Config` — raw endpoint + credentials (manual override)
+   */
+  s3Config?: SnapgpuS3Input;
 }
 
 /**
@@ -75,11 +157,13 @@ export class SnapgpuClient extends AbstractGpuProvider {
 
   private readonly registry: GpuProviderRegistry;
   private readonly defaultBackend: SnapgpuBackend;
+  private readonly s3Config?: SnapgpuS3Config;
 
   constructor(opts: SnapgpuClientOptions) {
     super(opts);
     this.registry = opts.registry;
     this.defaultBackend = opts.defaultBackend ?? 'vast';
+    this.s3Config = opts.s3Config ? normalizeSnapgpuS3Config(opts.s3Config) : undefined;
   }
 
   /**
@@ -144,9 +228,35 @@ export class SnapgpuClient extends AbstractGpuProvider {
       ...spec.env,
       SNAPGPU_PORT: '8000',
     };
-    if (spec.snapgpuPreloadApp) env.SNAPGPU_PRELOAD_APP = spec.snapgpuPreloadApp;
+    if (spec.snapgpuPreloadApp) {
+      env.SNAPGPU_PRELOAD_APP = spec.snapgpuPreloadApp;
+      env.SNAPGPU_APP_NAME = spec.snapgpuPreloadApp;
+    }
     if (spec.snapgpuRestoreFromSnapshot) {
       env.SNAPGPU_RESTORE_SNAPSHOT_ID = spec.snapgpuRestoreFromSnapshot;
+    }
+
+    // Inject S3 credentials so the container can upload/download checkpoints
+    // automatically. Priority: spec-level config > client-level config > env vars.
+    const s3 = (spec as Record<string, unknown>).snapgpuS3Config as SnapgpuS3Config | undefined
+      ?? this.s3Config
+      ?? (process.env.SNAPGPU_S3_ENDPOINT ? {
+        endpoint: process.env.SNAPGPU_S3_ENDPOINT,
+        bucket: process.env.SNAPGPU_S3_BUCKET ?? '',
+        accessKey: process.env.SNAPGPU_S3_ACCESS_KEY ?? '',
+        secretKey: process.env.SNAPGPU_S3_SECRET_KEY ?? '',
+        region: process.env.SNAPGPU_S3_REGION,
+        keyPrefix: process.env.SNAPGPU_S3_KEY_PREFIX,
+      } : undefined);
+
+    if (s3?.endpoint && s3.bucket && s3.accessKey && s3.secretKey) {
+      env.SNAPGPU_S3_ENDPOINT = s3.endpoint;
+      env.SNAPGPU_S3_BUCKET = s3.bucket;
+      env.SNAPGPU_S3_ACCESS_KEY = s3.accessKey;
+      env.SNAPGPU_S3_SECRET_KEY = s3.secretKey;
+      if (s3.region) env.SNAPGPU_S3_REGION = s3.region;
+      if (s3.keyPrefix) env.SNAPGPU_S3_KEY_PREFIX = s3.keyPrefix;
+      this.log.log(`[snapgpu] S3 checkpoint persistence enabled → ${s3.endpoint}/${s3.bucket}`);
     }
 
     // Snapgpu needs port 8000 exposed for the FastAPI control plane.
@@ -356,6 +466,77 @@ export class SnapgpuClient extends AbstractGpuProvider {
     } catch (err) {
       this.log.warn(`[snapgpu] deleteSnapshot failed: ${this.errMsg(err)}`);
       return false;
+    }
+  }
+
+  /**
+   * Trigger an S3 snapshot sync on a running gateway: downloads the latest
+   * checkpoint for `appName` from S3, extracts it, and registers it locally.
+   *
+   * Call this on a fresh worker BEFORE calling restoreSnapshot() so the restore
+   * can succeed even if the worker has no local snapshots yet.
+   *
+   * Returns the snapshot_id that was downloaded, or null if S3 is not configured,
+   * no snapshot exists for the app, or the download failed (all non-fatal).
+   */
+  async syncSnapshotFromS3(endpoint: string, appName: string): Promise<string | null> {
+    const url = `${endpoint.replace(/\/$/, '')}/v1/snapshots/s3-sync`;
+    try {
+      const res = await this.fetchRaw(
+        url,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ app_name: appName }),
+        },
+        TIMEOUTS.create,
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        this.log.warn(`[snapgpu] syncSnapshotFromS3 HTTP ${res.status}: ${text.slice(0, 200)}`);
+        return null;
+      }
+      const data = (await res.json()) as { snapshot_id?: string; found?: boolean };
+      if (data.found && data.snapshot_id) {
+        this.log.log(`[snapgpu] S3 sync complete: snapshot ${data.snapshot_id} ready for app=${appName}`);
+        return data.snapshot_id;
+      }
+      this.log.log(`[snapgpu] S3 sync: no snapshot found for app=${appName}`);
+      return null;
+    } catch (err) {
+      this.log.warn(`[snapgpu] syncSnapshotFromS3 failed: ${this.errMsg(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Check what snapshot is available on S3 for an app, without downloading it.
+   * Useful to decide whether to attempt a restore before deploying a worker.
+   */
+  async getS3Manifest(endpoint: string, appName: string): Promise<{
+    available: boolean;
+    snapshotId?: string;
+    uploadedAt?: string;
+    sizeBytes?: number;
+  }> {
+    const url = `${endpoint.replace(/\/$/, '')}/v1/snapshots/s3-manifest/${encodeURIComponent(appName)}`;
+    try {
+      const res = await this.fetchRaw(url, {}, TIMEOUTS.read);
+      if (!res.ok) return { available: false };
+      const data = (await res.json()) as {
+        available?: boolean;
+        snapshot_id?: string;
+        uploaded_at?: string;
+        size_bytes?: number;
+      };
+      return {
+        available: !!data.available,
+        snapshotId: data.snapshot_id,
+        uploadedAt: data.uploaded_at,
+        sizeBytes: data.size_bytes,
+      };
+    } catch {
+      return { available: false };
     }
   }
 

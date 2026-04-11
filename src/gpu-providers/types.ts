@@ -216,6 +216,12 @@ export interface InstanceSpec {
   /** Snapgpu-only: when true, the autoscaler should snapshot the running container
    *  after the first successful inference (so the next cold boot is fast). */
   autoSnapshot?: boolean;
+  /** Vast.ai: use an identity port (>70000) for stable, predictable external access.
+   * Maps external port 70008 → container port 8000. Because Vast.ai gives identity
+   * mapping to ports > 70000 (external == requested host port, not randomized),
+   * the service is always at ip:70008 without parsing a random port mapping.
+   * Requires the host to have at least one direct port allocated. */
+  useIdentityPort?: boolean;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────
@@ -290,12 +296,16 @@ export interface GpuProviderClient {
   checkHealth?(instanceId: string, credentials: ProviderCredentials): Promise<boolean>;
   /** Reboot instance (stop/start container) without losing GPU priority */
   rebootInstance?(instanceId: string, credentials: ProviderCredentials): Promise<void>;
+  /** Recycle instance (re-pull image + recreate container) without losing GPU priority */
+  recycleInstance?(instanceId: string, credentials: ProviderCredentials): Promise<void>;
+  /** Change bid price on an interruptible instance (Vast.ai only) */
+  changeBid?(instanceId: string, bidPricePerHr: number, credentials: ProviderCredentials): Promise<void>;
   /** Take a snapshot of a running instance and push to a container registry */
   takeSnapshot?(instanceId: string, credentials: ProviderCredentials): Promise<string | null>;
   /** Get hourly cost for a running instance, or null if not available. */
   getInstanceCost?(instanceId: string, credentials: ProviderCredentials): Promise<number | null>;
-  /** Retrieve recent container logs, or null if not supported. */
-  getInstanceLogs?(instanceId: string, credentials: ProviderCredentials, lines?: number): Promise<string | null>;
+  /** Retrieve recent container logs, or null if not supported. Pass `filter` to grep-filter lines. */
+  getInstanceLogs?(instanceId: string, credentials: ProviderCredentials, lines?: number, filter?: string): Promise<string | null>;
   /** List available GPU offers with real-time pricing and availability. */
   listOffers?(options: ListOffersOptions, credentials: ProviderCredentials): Promise<GpuOffer[]>;
 }

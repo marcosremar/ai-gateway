@@ -15,6 +15,7 @@ import { handleEmbeddings } from './routes/embeddings';
 import { handleAudioSpeech } from './routes/audio-speech';
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModels } from './routes/models';
+import { handleImageGenerate, handleImageInpaint } from './routes/images';
 import type { ProxyConfig, ProxyRequest, ProxyResponse } from './types';
 
 /** Max request body size: 100MB (audio files can be large) */
@@ -501,6 +502,10 @@ export function createProxyServer(config: ProxyConfig): Server {
         } else {
           proxyRes = await handleAudioTranscriptions(proxyReq, config.providers.stt);
         }
+      } else if (method === 'POST' && url === '/v1/images/generate') {
+        proxyRes = await handleImageGenerate(proxyReq, config.providers.image);
+      } else if (method === 'POST' && url === '/v1/images/inpaint') {
+        proxyRes = await handleImageInpaint(proxyReq, config.providers.image);
       // /health is handled before auth (line 345) — no need to match here
       } else if (method === 'GET' && config.staticDir && serveStaticFile(config.staticDir, path, res, requestId)) {
         return; // static file served

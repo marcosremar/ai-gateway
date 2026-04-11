@@ -5,7 +5,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { GatewayHooks } from '../hooks';
 import type { ResponseCache } from '../caching/response-cache';
-import type { LLMProvider, STTProvider, TTSProvider } from '../providers/types';
+import type { LLMProvider, STTProvider, TTSProvider, ImageProvider } from '../providers/types';
 import type { EmbeddingProvider } from '../providers/openai-compat/openai-compat-embedding';
 
 export interface ChatFallbackEntry {
@@ -25,6 +25,8 @@ export interface ProviderMapping {
   stt?: Record<string, STTProvider>;
   /** model name → TTS provider instance */
   tts?: Record<string, TTSProvider>;
+  /** Image generation + inpainting provider (used by POST /v1/images/generate and /v1/images/inpaint) */
+  image?: ImageProvider;
 }
 
 export interface CustomRoute {

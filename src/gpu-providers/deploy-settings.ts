@@ -19,7 +19,9 @@ const SETTINGS_PATH = path.join(configDir, 'latency-settings.json');
 // Default GPU priority — ordered by performance/cost for Whisper + 12B LLM inference.
 export const DEFAULT_GPU_PRIORITY: string[] = [
   'NVIDIA GeForce RTX 5090', // ~150 tok/s, 32GB GDDR7, Blackwell
+  'NVIDIA H200',             // 141GB HBM3e, Hopper, best for 70B+ models
   'NVIDIA L40S',             // ~114 tok/s, 48GB VRAM
+  'NVIDIA H100 80GB HBM3',   // 80GB HBM3, Hopper, data center
   'NVIDIA GeForce RTX 4090', // ~110 tok/s, 24GB VRAM, widely available
   'NVIDIA RTX A6000',        // ~102 tok/s, 48GB VRAM, stable
   'NVIDIA A100-SXM4-80GB',   // ~135 tok/s, 80GB VRAM
@@ -33,6 +35,8 @@ export const DEFAULT_GPU_PRIORITY_BY_PROVIDER: Record<string, string[]> = {
   vast: [...DEFAULT_GPU_PRIORITY], // Vast has the widest GPU selection
   runpod: [                        // RunPod Secure Cloud — data center GPUs
     'NVIDIA GeForce RTX 5090',
+    'NVIDIA H200',
+    'NVIDIA H100 80GB HBM3',
     'NVIDIA RTX A6000',
     'NVIDIA L40S',
     'NVIDIA A100-SXM4-80GB',

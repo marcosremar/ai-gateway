@@ -122,6 +122,9 @@ export { openaiImage, OpenAIImageProvider } from './openai/openai-image';
 export { fireworksSTT, fireworksLLM, fireworksImage, FireworksImageProvider } from './fireworks';
 export { FIREWORKS_STT_MODELS, FIREWORKS_LLM_MODELS, FIREWORKS_IMAGE_MODELS } from './fireworks';
 
+// ── FAL AI ────────────────────────────────────────────────────────────────
+export { falImage, FalImageProvider, FAL_IMAGE_MODELS } from './fal';
+
 // ── Modal (Qwen3-TTS — primary) ──────────────────────────────────────────
 export { ModalTTSProvider, modalTTS, MODAL_TTS_MODELS } from './modal';
 

@@ -45,6 +45,8 @@ export interface AutoscalerEngineOptions {
   cleanupInstance: (config: GpuTierConfig, registry: GpuProviderRegistry, reason: string) => Promise<void>;
   hooks?: GatewayHooks;
   onInstancePersist?: (userId: string, machineKey: string, data: Record<string, unknown>) => Promise<void>;
+  /** Read back data previously saved via onInstancePersist. Required for SnapGPU auto-snapshot restore. */
+  getPersistedData?: (userId: string, key: string) => Promise<Record<string, unknown> | null>;
   lifecycleLogger?: GpuLifecycleLogger;
   logger?: Logger;
   /** Resolve credentials for a provider (used for price monitoring). Falls back to env vars if not provided. */
@@ -67,6 +69,7 @@ export class AutoscalerEngine {
   private readonly probeHealth: (endpoint: string) => Promise<boolean>;
   private readonly cleanupInstance: (config: GpuTierConfig, registry: GpuProviderRegistry, reason: string) => Promise<void>;
   private readonly onInstancePersist?: (userId: string, machineKey: string, data: Record<string, unknown>) => Promise<void>;
+  private readonly getPersistedData?: (userId: string, key: string) => Promise<Record<string, unknown> | null>;
 
   private readonly bootOrchestrator: BootOrchestrator;
   private readonly providerMonitor: ProviderMonitor;
@@ -81,6 +84,7 @@ export class AutoscalerEngine {
     this.cleanupInstance = opts.cleanupInstance;
     this.hooks = opts.hooks;
     this.onInstancePersist = opts.onInstancePersist;
+    this.getPersistedData = opts.getPersistedData;
     this.lifecycleLogger = opts.lifecycleLogger ?? fileLifecycleLogger;
     this.logger = opts.logger ?? defaultLogger;
 
@@ -107,6 +111,7 @@ export class AutoscalerEngine {
       lifecycleLogger: this.lifecycleLogger,
       logger: this.logger,
       onInstancePersist: this.onInstancePersist,
+      getPersistedData: this.getPersistedData,
       callbacks,
     });
   }

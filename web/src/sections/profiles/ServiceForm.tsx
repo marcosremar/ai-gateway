@@ -518,6 +518,8 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
   const [autoRecoveryEnabled, setAutoRecoveryEnabled] = useState(initial?.autoRecoveryEnabled ?? true);
   const [autoRecoveryMaxRetries, setAutoRecoveryMaxRetries] = useState(initial?.autoRecoveryMaxRetries ?? 2);
   const [deployTimeoutMin, setDeployTimeoutMin] = useState(initial?.deployTimeoutMin ?? 30);
+  const [useSnapgpu, setUseSnapgpu] = useState(initial?.useSnapgpu ?? false);
+  const [autoSnapshot, setAutoSnapshot] = useState(initial?.autoSnapshot ?? true);
 
   // Auto-fill models from known Docker image (works for both new and edit)
   const knownImg = DEFAULT_DOCKER_IMAGES.find(img => img.url === dockerImage);
@@ -598,6 +600,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
         p95DemotionMultiplier: p95Multiplier, repechageMaxAttempts: repechageAttempts,
         shadowRuns: shadowRunsVal, benchmarkMaxRuns: benchmarkMaxRunsVal,
         autoRecoveryEnabled, autoRecoveryMaxRetries, deployTimeoutMin,
+        ...(useSnapgpu ? { useSnapgpu: true, autoSnapshot } : {}),
       };
     }
     onSave(s);
@@ -1013,6 +1016,43 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                 value={deployTimeoutMin} onChange={v => setDeployTimeoutMin(Number(v))}
                 customMin={3} customMax={120} unit="min"
               />
+            )}
+
+            {/* ── CRIU / SnapGPU fast cold-start (gpu-pod only) ── */}
+            {kind === 'gpu-pod' && (
+              <div className="space-y-2 pt-1 border-t" style={{ borderColor: 'var(--color-border)' }}>
+                <div className="flex items-center gap-1.5 pt-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>CRIU Fast Cold-Start</span>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium"
+                    style={{ background: 'color-mix(in srgb, #a78bfa 12%, transparent)', color: '#a78bfa' }}>
+                    SnapGPU
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-[11px] font-medium" style={{ color: 'var(--color-text)' }}>Enable CRIU checkpoint/restore</span>
+                    <p className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>
+                      Captures running model state — cold boots restore in ~5s instead of 30-60s. Requires NVIDIA driver ≥555 and Python ML server.
+                    </p>
+                  </div>
+                  <Toggle checked={useSnapgpu} onChange={setUseSnapgpu} size="sm" />
+                </div>
+                {useSnapgpu && (
+                  <div className="flex items-center justify-between pl-2">
+                    <div>
+                      <span className="text-[11px] font-medium" style={{ color: 'var(--color-text)' }}>Auto-snapshot after first boot</span>
+                      <p className="text-[9px]" style={{ color: 'var(--color-text-muted)' }}>Capture checkpoint automatically after model loads on first boot</p>
+                    </div>
+                    <Toggle checked={autoSnapshot} onChange={setAutoSnapshot} size="sm" />
+                  </div>
+                )}
+                {useSnapgpu && (
+                  <p className="text-[9px] px-2 py-1.5 rounded-md"
+                    style={{ background: 'color-mix(in srgb, #a78bfa 6%, transparent)', color: 'var(--color-text-muted)' }}>
+                    Note: CRIU adds speedup only for Python ML servers (faster-whisper, PyTorch). Not useful for llama.cpp which already cold-starts in ~3s.
+                  </p>
+                )}
+              </div>
             )}
 
             {/* ── Deploy Settings (gpu-pod only) ── */}

@@ -11,7 +11,8 @@
  * Optimizations over naive usage:
  *   - **stop** pauses (preserves data/GPU priority) instead of destroying
  *   - **reboot** uses dedicated API to restart without losing GPU priority
- *   - **GET /instances/{id}/** for single-instance lookup (fallback to list)
+ *   - **recycle** re-pulls image on same host without losing GPU priority
+ *   - **GET /instances/{id}/** for single-instance lookup (fallback to v1 filtered list)
  *   - **template_hash_id** for pre-configured fast boot
  *   - **cancel_unavail** for fail-fast when GPU unavailable
  *   - **Exponential backoff** on endpoint polling
@@ -27,6 +28,10 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 
 const VAST_API_BASE = process.env.VAST_API_BASE || 'https://console.vast.ai/api/v0';
+
+// Port > 70000 gets identity mapping on Vast.ai (external == host port, not randomized).
+// We map container:8000 → host:VAST_IDENTITY_PORT for stable, predictable access.
+const VAST_IDENTITY_PORT = 70008;
 
 // ── Polling constants ─────────────────────────────────────────────────────────
 const POLL_BASE_MS = 5_000;
@@ -147,8 +152,23 @@ export interface VastClientOptions extends AbstractGpuProviderOptions {}
 
 export class VastClient extends AbstractGpuProvider {
   readonly providerId = 'vast';
-  /** Vast.ai cold boot. 10 min base — engine uses 2× (20 min) for large images.
-   *  Override via env var VAST_BOOT_TIME_SECS for custom images. */
+  /** Vast.ai cold boot base.
+   *
+   * The boot-poller uses 3× this value as the maximum wait (= 30 min default).
+   * That matches POLL_TOTAL_MAX_MS (30 min) inside _pollForEndpoint.
+   *
+   * For large images (50 GB+) on slow hosts, raise this:
+   *   VAST_BOOT_TIME_SECS=1200  → poller waits up to 60 min
+   *
+   * Why Vast.ai deployments appear "frozen":
+   *   1. The Docker HEALTHCHECK inside the image fires before the model loads
+   *      → Vast.ai auto-destroys the instance.  Fix: remove HEALTHCHECK from
+   *      the Dockerfile (or add --start-period=600s).
+   *   2. The boot-poller timeout (bootTimeSecs × 3) expires before the 50+ GB
+   *      image finishes pulling on a slow host → tier resets to idle and the
+   *      instance is orphaned.  Fix: raise VAST_BOOT_TIME_SECS.
+   *   3. Interruptible instances are reclaimed during the pull phase.
+   *      Fix: use on-demand (spec.interruptible = false). */
   readonly bootTimeSecs = parseInt(process.env.VAST_BOOT_TIME_SECS || '600', 10);
   private _lastRequestMs = 0;
   /** IPs of hosts where we recently created instances (cross-call dedup). */
@@ -550,6 +570,386 @@ export class VastClient extends AbstractGpuProvider {
     return { ...created, created: true };
   }
 
+  /**
+   * Update an existing template's name, image tag, description, or disk space.
+   * Vast.ai regenerates the hash_id on update — the returned hashId may differ.
+   */
+  async updateTemplate(
+    hashId: string,
+    updates: {
+      name?: string;
+      image?: string;
+      tag?: string;
+      diskSpaceGb?: number;
+      desc?: string;
+    },
+    credentials: ProviderCredentials,
+  ): Promise<{ hashId: string; id: number }> {
+    const body: Record<string, unknown> = { hash_id: hashId };
+    if (updates.name !== undefined) body.name = updates.name;
+    if (updates.image !== undefined) body.image = updates.image;
+    if (updates.tag !== undefined) body.tag = updates.tag;
+    if (updates.diskSpaceGb !== undefined) body.disk_space = updates.diskSpaceGb;
+    if (updates.desc !== undefined) body.desc = updates.desc;
+
+    const res = await this._vastFetch(`${VAST_API_BASE}/template/`, {
+      method: 'PUT',
+      headers: this.jsonHeaders(credentials.apiKey),
+      body: JSON.stringify(body),
+    }, TIMEOUTS.create);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Vast.ai updateTemplate failed: HTTP ${res.status} ${errText.substring(0, 300)}`);
+    }
+    const data = (await res.json()) as { success: boolean; template?: { id: number; hash_id: string } };
+    if (!data.success) throw new Error(`Vast.ai updateTemplate returned success=false`);
+    const newHashId = data.template?.hash_id ?? hashId;
+    this.log.log(`[vast] Updated template ${hashId} → ${newHashId}`);
+    return { hashId: newHashId, id: data.template?.id ?? 0 };
+  }
+
+  /**
+   * Delete a template by its numeric ID (not hash_id).
+   * Use `listTemplates()` to find the numeric ID if you only have the hash_id.
+   */
+  async deleteTemplate(templateId: number, credentials: ProviderCredentials): Promise<void> {
+    const res = await this._vastFetch(`${VAST_API_BASE}/template/?template_id=${templateId}`, {
+      method: 'DELETE',
+      headers: this.jsonHeaders(credentials.apiKey),
+    }, TIMEOUTS.create);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Vast.ai deleteTemplate(${templateId}) failed: HTTP ${res.status} ${errText.substring(0, 300)}`);
+    }
+    this.log.log(`[vast] Deleted template id=${templateId}`);
+  }
+
+  // ── Serverless Endpoints ──────────────────────────────────────────────────
+  // Vast.ai serverless = an auto-scaling GPU cluster behind a named endpoint.
+  // You define scaling params (min_load, target_util, max_workers) on the
+  // endpoint, then attach one or more "worker groups" that each recruit from
+  // different GPU offer pools (by template + search query).
+  // Traffic is load-balanced via run.vast.ai/route/ → worker URL.
+
+  /**
+   * Create a serverless endpoint. Returns the new endpoint's numeric ID.
+   * After creation, add at least one worker group via `createWorkerGroup()`.
+   */
+  async createEndpoint(
+    spec: {
+      /** Endpoint name — also used as the routing key in routeRequest(). */
+      name: string;
+      /** Minimum load before scaling (default: 10). */
+      minLoad?: number;
+      /** Target GPU utilization 0–1 (default: 0.9). */
+      targetUtil?: number;
+      /** Cold-start overhead multiplier for scheduling (default: 2.5). */
+      coldMult?: number;
+      /** Pre-warmed (cold) workers kept alive (default: 5). */
+      coldWorkers?: number;
+      /** Hard cap on concurrent workers (default: 20). */
+      maxWorkers?: number;
+    },
+    credentials: ProviderCredentials,
+  ): Promise<{ id: number; name: string }> {
+    const body: Record<string, unknown> = { endpoint_name: spec.name };
+    if (spec.minLoad !== undefined) body.min_load = spec.minLoad;
+    if (spec.targetUtil !== undefined) body.target_util = spec.targetUtil;
+    if (spec.coldMult !== undefined) body.cold_mult = spec.coldMult;
+    if (spec.coldWorkers !== undefined) body.cold_workers = spec.coldWorkers;
+    if (spec.maxWorkers !== undefined) body.max_workers = spec.maxWorkers;
+
+    const res = await this._vastFetch(`${VAST_API_BASE}/endptjobs/`, {
+      method: 'POST',
+      headers: this.jsonHeaders(credentials.apiKey),
+      body: JSON.stringify(body),
+    }, TIMEOUTS.create);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Vast.ai createEndpoint failed: HTTP ${res.status} ${errText.substring(0, 300)}`);
+    }
+    const data = (await res.json()) as { success: boolean; result?: number };
+    if (!data.success || !data.result) {
+      throw new Error(`Vast.ai createEndpoint unexpected payload: ${JSON.stringify(data).substring(0, 200)}`);
+    }
+    this.log.log(`[vast] Created serverless endpoint "${spec.name}" → id=${data.result}`);
+    return { id: data.result, name: spec.name };
+  }
+
+  /** List all serverless endpoints on the account with their scaling config. */
+  async listEndpoints(credentials: ProviderCredentials): Promise<Array<{
+    id: number;
+    name: string;
+    /** Per-endpoint API key used for routeRequest() and getEndpointLogs(). */
+    apiKey: string;
+    state: string;
+    minLoad: number;
+    targetUtil: number;
+    coldWorkers: number;
+    maxWorkers: number;
+    createdAt: string;
+  }>> {
+    const res = await this._vastFetch(`${VAST_API_BASE}/endptjobs/`, {
+      headers: this.jsonHeaders(credentials.apiKey),
+    }, TIMEOUTS.read);
+    if (!res.ok) throw new Error(`Vast.ai listEndpoints failed: HTTP ${res.status}`);
+    const raw = (await res.json()) as Record<string, unknown>;
+    const items = (Array.isArray(raw) ? raw : (raw.results as unknown[] ?? [])) as Array<Record<string, unknown>>;
+    return items.map(ep => ({
+      id: (ep.id as number) ?? 0,
+      name: (ep.endpoint_name as string) ?? '',
+      apiKey: (ep.api_key as string) ?? '',
+      state: (ep.endpoint_state as string) ?? 'unknown',
+      minLoad: (ep.min_load as number) ?? 10,
+      targetUtil: (ep.target_util as number) ?? 0.9,
+      coldWorkers: (ep.cold_workers as number) ?? 5,
+      maxWorkers: (ep.max_workers as number) ?? 20,
+      createdAt: (ep.created_at as string) ?? '',
+    }));
+  }
+
+  /**
+   * Delete a serverless endpoint and terminate all its workers.
+   * Returns which workers were deleted vs which failed to terminate.
+   */
+  async deleteEndpoint(endpointId: number, credentials: ProviderCredentials): Promise<{
+    deletedWorkers: number[];
+    failedWorkers: number[];
+  }> {
+    const res = await this._vastFetch(`${VAST_API_BASE}/endptjobs/${endpointId}/`, {
+      method: 'DELETE',
+      headers: this.jsonHeaders(credentials.apiKey),
+    }, TIMEOUTS.create);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Vast.ai deleteEndpoint(${endpointId}) failed: HTTP ${res.status} ${errText.substring(0, 300)}`);
+    }
+    const data = (await res.json()) as { success: boolean; deleted_workers?: number[]; failed_workers?: number[]; msg?: string };
+    this.log.log(`[vast] Deleted endpoint id=${endpointId}: ${data.msg ?? 'ok'}`);
+    return { deletedWorkers: data.deleted_workers ?? [], failedWorkers: data.failed_workers ?? [] };
+  }
+
+  /**
+   * Create a worker group attached to an endpoint.
+   * A worker group defines which GPUs to recruit (via templateHash + searchParams)
+   * and its own scaling parameters. One endpoint can have multiple worker groups
+   * targeting different GPU tiers (e.g. RTX 4090 + A100 fallback).
+   */
+  async createWorkerGroup(
+    spec: {
+      endpointId?: number;
+      endpointName?: string;
+      templateHash?: string;
+      templateId?: number;
+      /** Vast.ai offer search query string, e.g. "verified=true rentable=true gpu_ram>=24" */
+      searchParams?: string;
+      /** Extra args passed to the worker container at launch. */
+      launchArgs?: string;
+      /** Minimum GPU VRAM in GB for worker offers. */
+      gpuRamGb?: number;
+      minLoad?: number;
+      targetUtil?: number;
+      coldMult?: number;
+      coldWorkers?: number;
+      maxWorkers?: number;
+      testWorkers?: number;
+    },
+    credentials: ProviderCredentials,
+  ): Promise<{ id: number }> {
+    const body: Record<string, unknown> = {};
+    if (spec.endpointId !== undefined) body.endpoint_id = spec.endpointId;
+    if (spec.endpointName !== undefined) body.endpoint_name = spec.endpointName;
+    if (spec.templateHash !== undefined) body.template_hash = spec.templateHash;
+    if (spec.templateId !== undefined) body.template_id = spec.templateId;
+    if (spec.searchParams !== undefined) body.search_params = spec.searchParams;
+    if (spec.launchArgs !== undefined) body.launch_args = spec.launchArgs;
+    if (spec.gpuRamGb !== undefined) body.gpu_ram = spec.gpuRamGb;
+    if (spec.minLoad !== undefined) body.min_load = spec.minLoad;
+    if (spec.targetUtil !== undefined) body.target_util = spec.targetUtil;
+    if (spec.coldMult !== undefined) body.cold_mult = spec.coldMult;
+    if (spec.coldWorkers !== undefined) body.cold_workers = spec.coldWorkers;
+    if (spec.maxWorkers !== undefined) body.max_workers = spec.maxWorkers;
+    if (spec.testWorkers !== undefined) body.test_workers = spec.testWorkers;
+
+    const res = await this._vastFetch(`${VAST_API_BASE}/workergroups/`, {
+      method: 'POST',
+      headers: this.jsonHeaders(credentials.apiKey),
+      body: JSON.stringify(body),
+    }, TIMEOUTS.create);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Vast.ai createWorkerGroup failed: HTTP ${res.status} ${errText.substring(0, 300)}`);
+    }
+    const data = (await res.json()) as { success: boolean; id?: number };
+    if (!data.success) throw new Error(`Vast.ai createWorkerGroup returned success=false`);
+    this.log.log(`[vast] Created worker group → id=${data.id}`);
+    return { id: data.id ?? 0 };
+  }
+
+  /** List all worker groups on the account. */
+  async listWorkerGroups(credentials: ProviderCredentials): Promise<Array<{
+    id: number;
+    endpointId: number;
+    endpointName: string;
+    templateHash: string;
+    searchQuery: Record<string, unknown>;
+    gpuRamGb: number;
+    maxWorkers: number;
+    createdAt: string;
+  }>> {
+    const res = await this._vastFetch(`${VAST_API_BASE}/workergroups/`, {
+      headers: this.jsonHeaders(credentials.apiKey),
+    }, TIMEOUTS.read);
+    if (!res.ok) throw new Error(`Vast.ai listWorkerGroups failed: HTTP ${res.status}`);
+    const raw = (await res.json()) as Record<string, unknown>;
+    const items = (Array.isArray(raw) ? raw : (raw.results as unknown[] ?? [])) as Array<Record<string, unknown>>;
+    return items.map(wg => ({
+      id: (wg.id as number) ?? 0,
+      endpointId: (wg.endpoint_id as number) ?? 0,
+      endpointName: (wg.endpoint_name as string) ?? '',
+      templateHash: (wg.template_hash as string) ?? '',
+      searchQuery: (wg.search_query as Record<string, unknown>) ?? {},
+      gpuRamGb: (wg.gpu_ram as number) ?? 0,
+      maxWorkers: (wg.max_workers as number) ?? 0,
+      createdAt: (wg.created_at as string) ?? '',
+    }));
+  }
+
+  /**
+   * Update a worker group's scaling params, GPU filter, or template.
+   * ⚠️ Vast.ai requires `endpointId` or `endpointName` even for partial updates
+   * (returns 400 "Missing endpoint ID" otherwise).
+   */
+  async updateWorkerGroup(
+    id: number,
+    updates: {
+      minLoad?: number;
+      targetUtil?: number;
+      coldMult?: number;
+      testWorkers?: number;
+      templateHash?: string;
+      templateId?: number;
+      searchParams?: string;
+      launchArgs?: string;
+      gpuRamGb?: number;
+      endpointName?: string;
+      endpointId?: number;
+    },
+    credentials: ProviderCredentials,
+  ): Promise<void> {
+    const body: Record<string, unknown> = {};
+    if (updates.minLoad !== undefined) body.min_load = updates.minLoad;
+    if (updates.targetUtil !== undefined) body.target_util = updates.targetUtil;
+    if (updates.coldMult !== undefined) body.cold_mult = updates.coldMult;
+    if (updates.testWorkers !== undefined) body.test_workers = updates.testWorkers;
+    if (updates.templateHash !== undefined) body.template_hash = updates.templateHash;
+    if (updates.templateId !== undefined) body.template_id = updates.templateId;
+    if (updates.searchParams !== undefined) body.search_params = updates.searchParams;
+    if (updates.launchArgs !== undefined) body.launch_args = updates.launchArgs;
+    if (updates.gpuRamGb !== undefined) body.gpu_ram = updates.gpuRamGb;
+    if (updates.endpointName !== undefined) body.endpoint_name = updates.endpointName;
+    if (updates.endpointId !== undefined) body.endpoint_id = updates.endpointId;
+
+    const res = await this._vastFetch(`${VAST_API_BASE}/workergroups/${id}/`, {
+      method: 'PUT',
+      headers: this.jsonHeaders(credentials.apiKey),
+      body: JSON.stringify(body),
+    }, TIMEOUTS.create);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Vast.ai updateWorkerGroup(${id}) failed: HTTP ${res.status} ${errText.substring(0, 300)}`);
+    }
+    this.log.log(`[vast] Updated worker group id=${id}`);
+  }
+
+  /** Delete a worker group and stop its workers. */
+  async deleteWorkerGroup(id: number, credentials: ProviderCredentials): Promise<{
+    deletedWorkers: number[];
+    failedWorkers: number[];
+  }> {
+    const res = await this._vastFetch(`${VAST_API_BASE}/workergroups/${id}/`, {
+      method: 'DELETE',
+      headers: this.jsonHeaders(credentials.apiKey),
+    }, TIMEOUTS.create);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Vast.ai deleteWorkerGroup(${id}) failed: HTTP ${res.status} ${errText.substring(0, 300)}`);
+    }
+    const data = (await res.json()) as { success: boolean; deleted_workers?: number[]; failed_workers?: number[]; msg?: string };
+    this.log.log(`[vast] Deleted worker group id=${id}: ${data.msg ?? 'ok'}`);
+    return { deletedWorkers: data.deleted_workers ?? [], failedWorkers: data.failed_workers ?? [] };
+  }
+
+  /**
+   * Get logs from a serverless endpoint.
+   * Uses run.vast.ai (different base URL from the management API).
+   * Requires the endpoint's own `apiKey` (from `listEndpoints()`) — NOT the account key.
+   */
+  async getEndpointLogs(
+    endpointName: string,
+    endpointApiKey: string,
+    lines: number = 100,
+  ): Promise<string | null> {
+    try {
+      const res = await this._vastFetch('https://run.vast.ai/get_endpoint_logs/', {
+        method: 'POST',
+        headers: this.jsonHeaders(endpointApiKey),
+        body: JSON.stringify({ endpoint: endpointName, tail: lines }),
+      }, TIMEOUTS.read);
+      if (!res.ok) return null;
+      const data = (await res.json()) as { logs?: string };
+      return data.logs ?? null;
+    } catch (err) {
+      this.log.debug(`[vast] getEndpointLogs("${endpointName}") failed: ${this.errMsg(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Route an inference request to the least-loaded available worker.
+   * Returns the worker's URL to direct the actual inference request to.
+   *
+   * Uses run.vast.ai (Vast.ai's inference router).
+   * Requires the endpoint's own `apiKey` from `listEndpoints()`.
+   * `cost` is an estimated compute cost hint used for load-balancing (any positive number).
+   *
+   * Returns null if no worker is currently available (cold start in progress).
+   */
+  async routeRequest(
+    endpointName: string,
+    endpointApiKey: string,
+    cost: number = 100,
+  ): Promise<{ url: string; reqnum: number; signature: string; requestId: string } | null> {
+    try {
+      const res = await this._vastFetch('https://run.vast.ai/route/', {
+        method: 'POST',
+        headers: this.jsonHeaders(endpointApiKey),
+        body: JSON.stringify({ endpoint: endpointName, cost }),
+      }, 10_000);
+      if (!res.ok) return null;
+      const data = (await res.json()) as {
+        url?: string;
+        reqnum?: number;
+        signature?: string;
+        __request_id?: string;
+        status?: string;
+      };
+      if (!data.url) {
+        this.log.log(`[vast] routeRequest("${endpointName}"): no worker available (status=${data.status ?? 'cold'})`);
+        return null;
+      }
+      return {
+        url: data.url,
+        reqnum: data.reqnum ?? 0,
+        signature: data.signature ?? '',
+        requestId: data.__request_id ?? '',
+      };
+    } catch (err) {
+      this.log.debug(`[vast] routeRequest("${endpointName}") failed: ${this.errMsg(err)}`);
+      return null;
+    }
+  }
+
   async createInstance(
     spec: InstanceSpec,
     credentials: ProviderCredentials,
@@ -656,7 +1056,12 @@ export class VastClient extends AbstractGpuProvider {
 
     // Fallback: relax network requirements to find more hosts
     if (!offers.length) {
-      this.log.warn('[vast] No offers with strict filters — relaxing to inet_down: 500, reliability: 0.9');
+      const slowPullEstSec = Math.round((diskGb * 8 * 1024) / 500);
+      this.log.warn(
+        `[vast] No offers with strict filters — relaxing to inet_down: 500, reliability: 0.9. ` +
+        `⚠ Slow hosts at 500 Mbps will take ~${Math.round(slowPullEstSec / 60)}min to pull the ${diskGb}GB image. ` +
+        `Boot poller cap raised to 30 min to compensate.`,
+      );
       searchBody.inet_down = { gte: 500 };
       searchBody.inet_up = { gte: 100 };
       searchBody.reliability2 = { gte: 0.9 };
@@ -907,7 +1312,11 @@ export class VastClient extends AbstractGpuProvider {
       env: {
         TZ: 'UTC',
         ...envVars,
-        '-p 8000:8000': '1',
+        // Identity port: host:70008 → container:8000. Vast.ai gives identity
+        // mapping for ports >70000, so external port stays 70008 (not randomized).
+        ...(spec.useIdentityPort
+          ? { [`-p ${VAST_IDENTITY_PORT}:8000`]: '1' }
+          : { '-p 8000:8000': '1' }),
         '-p 8001:8001/udp': '1',
       },
       ...(spec.templateHashId ? { template_hash_id: spec.templateHashId } : {}),
@@ -953,7 +1362,7 @@ export class VastClient extends AbstractGpuProvider {
       const inetDown = (offer.inet_down as number) || 500; // Mbps
       const pullEstimateS = (diskGb * 8 * 1024) / Math.max(inetDown, 100); // theoretical seconds
       const CREATE_POLL_MAX_MS = Math.max(
-        Math.min(Math.round(pullEstimateS * 2 * 1000), 900_000), // 2x safety, cap 15 min
+        Math.min(Math.round(pullEstimateS * 2 * 1000), 1_800_000), // 2x safety, cap 30 min (matches POLL_TOTAL_MAX_MS)
         180_000, // floor 3 min
       );
       let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS, inetDown);
@@ -1229,29 +1638,72 @@ export class VastClient extends AbstractGpuProvider {
    * likely log file locations on the host directly. This is our best chance
    * to capture diagnostics on the #1 failure mode (host reclaim / process exit).
    */
-  async getInstanceLogs(instanceId: string, credentials: ProviderCredentials, lines: number = 200): Promise<string | null> {
+  async getInstanceLogs(instanceId: string, credentials: ProviderCredentials, lines: number = 200, filter?: string): Promise<string | null> {
     const { apiKey } = credentials;
     const headers = this.jsonHeaders(apiKey);
     const { rawId } = stripPrefix(instanceId);
 
-    const httpLogs = await this._fetchContainerLogsViaHttp(rawId, headers, lines);
-    if (httpLogs && httpLogs.trim()) return httpLogs;
+    const applyFilter = (text: string | null): string | null => {
+      if (!text || !filter) return text;
+      const filtered = text.split('\n').filter(line => line.includes(filter)).join('\n');
+      return filtered || null;
+    };
 
-    // HTTP path yielded nothing — try SSH tail as a fallback.
+    const httpLogs = await this._fetchContainerLogsViaHttp(rawId, headers, lines);
+    if (httpLogs && httpLogs.trim()) return applyFilter(httpLogs) ?? httpLogs;
+
+    // Container logs empty — try Vast daemon logs (captures pre-start failures, image
+    // pull errors, OOM kills, host-side issues invisible to the container).
+    // Vast.ai docs: pass daemon_logs=true to get host daemon logs instead of container logs.
+    const daemonLogs = await this._fetchDaemonLogs(rawId, headers, lines);
+    if (daemonLogs && daemonLogs.trim()) {
+      this.log.log(`[vast] getInstanceLogs(${instanceId}): container logs empty, returning daemon logs`);
+      return applyFilter(`[daemon] ${daemonLogs}`) ?? `[daemon] ${daemonLogs}`;
+    }
+
+    // Both log paths yielded nothing — try SSH tail as a last resort.
     try {
       const detail = await this._fetchInstanceDetail(rawId, headers);
       const sshHost = detail?.sshHost;
       const sshPort = detail?.sshPort;
       if (!sshHost || !sshPort) {
         this.log.debug(`[vast] getInstanceLogs(${instanceId}): no ssh host/port for fallback`);
-        return httpLogs; // return whatever HTTP returned (possibly empty string or null)
+        return applyFilter(httpLogs) ?? httpLogs;
       }
       const sshLogs = await this._fetchContainerLogsViaSsh(sshHost, sshPort);
-      if (sshLogs && sshLogs.trim()) return sshLogs;
-      return httpLogs;
+      if (sshLogs && sshLogs.trim()) return applyFilter(sshLogs) ?? sshLogs;
+      return applyFilter(httpLogs) ?? httpLogs;
     } catch (err) {
       this.log.debug(`[vast] getInstanceLogs(${instanceId}) ssh fallback failed: ${this.errMsg(err)}`);
-      return httpLogs;
+      return applyFilter(httpLogs) ?? httpLogs;
+    }
+  }
+
+  /** Fetch Vast host daemon logs (host-side events: image pull, OOM, container exit). */
+  private async _fetchDaemonLogs(rawId: string, headers: Record<string, string>, lines: number): Promise<string | null> {
+    try {
+      const res = await this._vastFetch(
+        `${VAST_API_BASE}/instances/request_logs/${rawId}/`,
+        { method: 'PUT', headers, body: JSON.stringify({ tail: lines, daemon_logs: true }) },
+        TIMEOUTS.read,
+      );
+      if (!res.ok) return null;
+      const data = await res.json() as Record<string, unknown>;
+      const resultUrl = data.result_url as string | undefined;
+      if (!resultUrl) return null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const logRes = await fetch(resultUrl, { signal: AbortSignal.timeout(5000) });
+          if (logRes.ok) {
+            const text = await logRes.text();
+            if (text.trim()) return text;
+          }
+        } catch { /* not ready yet */ }
+      }
+      return null;
+    } catch {
+      return null;
     }
   }
 
@@ -1427,6 +1879,76 @@ export class VastClient extends AbstractGpuProvider {
       throw new Error(`Vast reboot failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
     }
     this.log.log(`[vast] rebootInstance(${instanceId}): rebooting (GPU priority preserved)`);
+  }
+
+  /**
+   * Change the bid price on an interruptible (spot) instance.
+   *
+   * Only applicable to instances created with type='bid'. On-demand instances
+   * ignore this call (bid price doesn't apply to fixed-price contracts).
+   * Price range: $0.001–$32/hr. Use to stay competitive when outbid, or to
+   * reduce cost when demand drops.
+   */
+  async changeBid(instanceId: string, bidPricePerHr: number, credentials: ProviderCredentials): Promise<void> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId, type } = stripPrefix(instanceId);
+
+    if (type === 'endpoint') {
+      this.log.warn(`[vast] changeBid(${instanceId}): endpoints don't support bid changes`);
+      return;
+    }
+    if (bidPricePerHr < 0.001 || bidPricePerHr > 32) {
+      throw new Error(`[vast] changeBid: price must be $0.001–$32/hr (got ${bidPricePerHr})`);
+    }
+
+    const res = await this._vastFetch(`${VAST_API_BASE}/instances/bid_price/${rawId}/`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ client_id: 'me', price: bidPricePerHr }),
+    }, TIMEOUTS.write);
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      this.log.warn(`[vast] changeBid(${instanceId}) failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      throw new Error(`Vast changeBid failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
+    }
+    this.log.log(`[vast] changeBid(${instanceId}): bid updated to $${bidPricePerHr.toFixed(3)}/hr`);
+  }
+
+  /**
+   * Recycle instance — destroys and recreates the container from a freshly pulled
+   * image WITHOUT losing GPU priority on the host.
+   *
+   * Use this when a new image tag is available and you want to hot-reload the
+   * container on the same host (e.g. fast-fix deploy):
+   *   - Unlike stop+create: preserves GPU allocation, no waiting for a new host
+   *   - Unlike reboot: re-pulls the Docker image so you get the latest layers
+   *
+   * Volume data IS preserved (Vast.ai docs: "pull new image, destroy and
+   * recreate instance (keeps the volumes)"). Container disk is reset.
+   */
+  async recycleInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    const { apiKey } = credentials;
+    const headers = this.jsonHeaders(apiKey);
+    const { rawId, type } = stripPrefix(instanceId);
+
+    if (type === 'endpoint') {
+      this.log.warn(`[vast] recycleInstance(${instanceId}): endpoints don't support recycle, skipping`);
+      return;
+    }
+
+    const res = await this._vastFetch(`${VAST_API_BASE}/instances/recycle/${rawId}/`, {
+      method: 'PUT',
+      headers,
+    }, TIMEOUTS.write);
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      this.log.warn(`[vast] recycleInstance(${instanceId}) failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+      throw new Error(`Vast recycle failed for ${instanceId}: HTTP ${res.status} ${body.substring(0, 300)}`);
+    }
+    this.log.log(`[vast] recycleInstance(${instanceId}): recycling (re-pulling image, GPU priority preserved)`);
   }
 
   /**
@@ -2018,6 +2540,15 @@ export class VastClient extends AbstractGpuProvider {
       return { ip, endpoint: `http://${ip}:${directPort}`, status, sshHost, sshPort };
     }
 
+    // Cloudflare tunnel fallback — Vast.ai injects a 'webpage' field with a trycloudflare.com
+    // tunnel URL per port. Additive to direct ports; useful for SSH-only hosts or when direct
+    // port is not yet available. Stable URL (doesn't change on restart like random port assignments).
+    const webpage = (inst.webpage as string | undefined)?.trim();
+    if (webpage && webpage.startsWith('https://') && webpage.includes('.trycloudflare.com')) {
+      this.log.log(`[vast] _parseInstance: using Cloudflare tunnel endpoint: ${webpage}`);
+      return { ip, endpoint: webpage, status, sshHost, sshPort };
+    }
+
     // No valid port mapping yet — instance still loading or using SSH-only access
     return { ip, endpoint: '', status, sshHost, sshPort };
   }
@@ -2064,39 +2595,63 @@ export class VastClient extends AbstractGpuProvider {
     return { canDeploy: true, blockReason: null, balance: result.balance };
   }
 
+  /** Log health warnings derived from instance fields (disk full, expiry, etc.). */
+  private _warnInstanceHealth(inst: Record<string, unknown>, rawId: string): void {
+    const diskUtil = inst.disk_util as number | undefined;
+    if (diskUtil && diskUtil > 0.90) {
+      this.log.warn(`[vast] Instance ${rawId} disk ${Math.round(diskUtil * 100)}% full — container may crash soon`);
+    }
+    const timeRemainingS = inst.time_remaining as number | undefined;
+    if (timeRemainingS !== undefined && timeRemainingS > 0 && timeRemainingS < 30 * 60) {
+      this.log.warn(`[vast] Instance ${rawId} has only ${Math.round(timeRemainingS / 60)}min remaining before expiry`);
+    }
+  }
+
   /**
    * Fetch detail for a single on-demand instance by raw Vast.ai ID.
-   * Tries GET /instances/{id}/ first (efficient), falls back to list API.
+   * Tries GET /instances/{id}/ first (efficient), falls back to v1 list with
+   * server-side ID filter if the direct endpoint is unavailable.
    */
   private async _fetchInstanceDetail(
     rawId: string,
     headers: Record<string, string>,
   ): Promise<{ ip: string; endpoint: string; status: string; sshHost?: string; sshPort?: number } | null> {
-    // Try individual instance endpoint first (most efficient)
+    // ── 1. Direct single-instance GET (most efficient) ─────────────────────
     try {
       const res = await this._vastFetch(`${VAST_API_BASE}/instances/${rawId}/`, {
         headers,
       }, 8_000);
       if (res.ok) {
         const data = (await res.json()) as Record<string, unknown>;
-        // API returns { instances: {...} } for single instance
+        // v0 API may wrap in 'instances' key (singular object) or return flat
         const inst = (data.instances ?? data) as Record<string, unknown>;
         if (inst && typeof inst === 'object' && (inst.id || inst.public_ipaddr || inst.actual_status)) {
+          this._warnInstanceHealth(inst, rawId);
           return this._parseInstance(inst);
         }
       }
-      // If response is 200 but data is null/empty, fall through to list API
+      // 200 but empty/null body → fall through to list API
     } catch (e) {
       this.log.debug(`[vast] Direct instance lookup for ${rawId} failed, trying list API: ${this.errMsg(e)}`);
     }
 
-    // Fallback: list all instances and find the one we need
+    // ── 2. Fallback: v1 list API with server-side ID filter ────────────────
+    // GET /v1/instances/?select_filters={"id":{"eq":N}}&select_cols=[...]
     try {
-      const res = await this._vastFetch(`${VAST_API_BASE}/instances/`, {
-        headers,
-      }, 8_000);
+      const v1Base = VAST_API_BASE.replace('/api/v0', '/api/v1');
+      const filterParam = encodeURIComponent(JSON.stringify({ id: { eq: Number(rawId) } }));
+      const colsParam = encodeURIComponent(JSON.stringify([
+        'id', 'actual_status', 'cur_state', 'public_ipaddr',
+        'ssh_host', 'ssh_port', 'ports', 'direct_port_start', 'direct_port_count',
+        'disk_util', 'gpu_util', 'gpu_temp', 'time_remaining', 'webpage',
+      ]));
+      const res = await this._vastFetch(
+        `${v1Base}/instances/?select_filters=${filterParam}&select_cols=${colsParam}`,
+        { headers },
+        8_000,
+      );
       if (!res.ok) {
-        this.log.warn(`[vast] _fetchInstanceDetail(${rawId}): list fallback HTTP ${res.status}`);
+        this.log.warn(`[vast] _fetchInstanceDetail(${rawId}): v1 list fallback HTTP ${res.status}`);
         return null;
       }
 
@@ -2106,12 +2661,11 @@ export class VastClient extends AbstractGpuProvider {
 
       const inst = instances.find(i => String(i.id) === rawId);
       if (!inst) {
-        // Debug: log all instance IDs to help diagnose mismatched contract/instance IDs
-        const ids = instances.map(i => String(i.id)).join(', ');
-        this.log.log(`[vast] _fetchInstanceDetail(${rawId}): not in list (${instances.length} instances: ${ids.substring(0, 200)})`);
+        this.log.log(`[vast] _fetchInstanceDetail(${rawId}): not found via v1 filter (${data.instances_found ?? 0} results)`);
         return null;
       }
 
+      this._warnInstanceHealth(inst, rawId);
       return this._parseInstance(inst);
     } catch (err) {
       this.log.warn(`[vast] _fetchInstanceDetail(${rawId}) failed: ${this.errMsg(err)}`);

@@ -1292,7 +1292,7 @@ export async function autoSelectCheapestGpu(
 
 // ── Deploy loop ─────────────────────────────────────────────────────────────
 
-export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; containerDiskInGb?: number; volumeId?: string; autoRecovery?: boolean; templateHashId?: string; forceSshTunnel?: boolean; }
+export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; containerDiskInGb?: number; volumeId?: string; autoRecovery?: boolean; templateHashId?: string; forceSshTunnel?: boolean; snapgpuPreloadApp?: string; snapgpuAutoSnapshot?: boolean; snapgpuBackend?: 'vast' | 'runpod'; }
 
 
 export async function startDeployLoop(
@@ -1423,6 +1423,10 @@ export async function startDeployLoop(
           // Vast.ai-specific options (ignored by other providers)
           ...(extra.templateHashId ? { templateHashId: extra.templateHashId } : {}),
           ...(extra.forceSshTunnel ? { forceSshTunnel: extra.forceSshTunnel } : {}),
+          // SnapGPU / CRIU options (only used when providerName === 'snapgpu')
+          ...(extra.snapgpuPreloadApp ? { snapgpuPreloadApp: extra.snapgpuPreloadApp } : {}),
+          ...(extra.snapgpuAutoSnapshot !== undefined ? { autoSnapshot: extra.snapgpuAutoSnapshot } : {}),
+          ...(extra.snapgpuBackend ? { snapgpuBackend: extra.snapgpuBackend } : {}),
         },
         credentials,
       );
@@ -1748,6 +1752,9 @@ export async function startDeployRace(
           ...(extra.volumeId ? { volumeId: extra.volumeId } : {}),
           ...(extra.templateHashId ? { templateHashId: extra.templateHashId } : {}),
           ...(extra.forceSshTunnel ? { forceSshTunnel: extra.forceSshTunnel } : {}),
+          ...(extra.snapgpuPreloadApp ? { snapgpuPreloadApp: extra.snapgpuPreloadApp } : {}),
+          ...(extra.snapgpuAutoSnapshot !== undefined ? { autoSnapshot: extra.snapgpuAutoSnapshot } : {}),
+          ...(extra.snapgpuBackend ? { snapgpuBackend: extra.snapgpuBackend } : {}),
         },
         credentials,
       ),
