@@ -5,7 +5,7 @@
  * The client never sees a 429 — the gateway absorbs rate limits internally.
  */
 
-import type { LLMProvider, ChatMessage } from '../../providers/types';
+import type { LLMProvider, ChatMessage, ChatRequest } from '../../providers/types';
 import type { ResponseCache } from '../../caching/response-cache';
 import type { GatewayHooks } from '../../hooks';
 import { emitHook } from '../../hooks';
@@ -58,20 +58,48 @@ export async function handleChatCompletions(
 
   const startTs = Date.now();
   const primaryProvider = chain[0].provider;
+  const primaryModel = chain[0].model;
+
+  const chatOpts: ChatRequest = {
+    model: primaryModel,
+    messages: body.messages,
+    temperature: body.temperature,
+    maxTokens: body.max_tokens,
+    responseFormat: body.response_format,
+  };
+
   emitHook(hooks, 'onRequestStart', {
     userId: 'proxy',
     stage: 'llm',
     provider: primaryProvider,
-    model: body.model,
+    model: primaryModel,
     timestamp: startTs,
   });
 
+  // ── Streaming path ─────────────────────────────────────────────────────────
+  if (body.stream) {
+    const instance = chain[0].instance;
+    const completionId = `chatcmpl-${Date.now()}`;
+    const stream = buildSSEStream(instance, chatOpts, primaryModel, completionId);
+    return {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
+      body: null,
+      stream,
+    };
+  }
+
+  // ── Non-streaming path ─────────────────────────────────────────────────────
   try {
     // Build cache key once (reused for get and set)
     const isDeterministic = body.temperature === undefined || body.temperature === 0;
     const cacheKey = cache && isDeterministic ? cache.buildKey({
       provider: primaryProvider,
-      model: body.model,
+      model: primaryModel,
       messages: body.messages,
       temperature: body.temperature,
     }) : null;
@@ -93,14 +121,6 @@ export async function handleChatCompletions(
       model: e.model,
     }));
 
-    const chatOpts = {
-      model: body.model,
-      messages: body.messages,
-      temperature: body.temperature,
-      maxTokens: body.max_tokens,
-      responseFormat: body.response_format,
-    };
-
     const opts: FallbackOptions = {
       logPrefix: process.env.NODE_ENV === 'production' ? '' : '[proxy:llm]',
       timeoutMs: 15_000,
@@ -118,7 +138,7 @@ export async function handleChatCompletions(
     // Request coalescing key (deduplicates identical in-flight requests)
     const coalescingKey = coalescer.buildKey({
       provider: primaryProvider,
-      model: body.model,
+      model: primaryModel,
       messages: body.messages,
       temperature: body.temperature,
     });
@@ -132,7 +152,8 @@ export async function handleChatCompletions(
           async (entry) => {
             const instance = providerMap.get(entry.provider);
             if (!instance) throw new Error(`Provider ${entry.provider} not found`);
-            return instance.chat(chatOpts);
+            // Use each entry's own model — allows transparent fallback to a different model
+            return instance.chat({ ...chatOpts, model: entry.model });
           },
           opts,
         ),
@@ -207,6 +228,58 @@ function buildChain(
   }
 
   return chain;
+}
+
+/**
+ * Wraps a provider's chatStream() generator into a ReadableStream of SSE-encoded
+ * Uint8Array chunks compatible with the OpenAI streaming format.
+ * Falls back to a single non-streaming call if chatStream is not supported.
+ */
+function buildSSEStream(
+  provider: LLMProvider,
+  opts: ChatRequest,
+  model: string,
+  id: string,
+): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+  const sse = (data: unknown) => enc.encode(`data: ${JSON.stringify(data)}\n\n`);
+  const created = Math.floor(Date.now() / 1000);
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        if (!provider.chatStream) {
+          // Provider doesn't support streaming — emit full response as one chunk
+          const res = await provider.chat(opts);
+          controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model: res.model || model,
+            choices: [{ index: 0, delta: { role: 'assistant', content: res.content }, finish_reason: 'stop' }] }));
+          controller.enqueue(enc.encode('data: [DONE]\n\n'));
+          controller.close();
+          return;
+        }
+
+        // Role delta (first chunk)
+        controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
+          choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] }));
+
+        // Content delta chunks
+        for await (const token of provider.chatStream(opts)) {
+          controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
+            choices: [{ index: 0, delta: { content: token }, finish_reason: null }] }));
+        }
+
+        // Finish chunk
+        controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }));
+        controller.enqueue(enc.encode('data: [DONE]\n\n'));
+        controller.close();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Streaming error';
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: msg, type: 'server_error' } })}\n\n`));
+        controller.close();
+      }
+    },
+  });
 }
 
 function extractStatus(err: unknown): number | null {

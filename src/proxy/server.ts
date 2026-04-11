@@ -73,6 +73,27 @@ function sendResponse(res: ServerResponse, proxyRes: ProxyResponse, requestId: s
     ...proxyRes.headers,
   };
 
+  // SSE streaming response — pipe ReadableStream to HTTP response
+  if (proxyRes.stream) {
+    res.writeHead(proxyRes.status, headers);
+    const reader = proxyRes.stream.getReader();
+    (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          // Respect backpressure
+          if (!res.write(value)) await new Promise<void>(r => res.once('drain', r));
+        }
+      } catch {
+        // Client disconnected mid-stream — not an error
+      } finally {
+        res.end();
+      }
+    })();
+    return;
+  }
+
   res.writeHead(proxyRes.status, headers);
 
   if (Buffer.isBuffer(proxyRes.body)) {
