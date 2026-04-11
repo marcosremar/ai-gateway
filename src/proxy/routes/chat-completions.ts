@@ -80,7 +80,18 @@ export async function handleChatCompletions(
   if (body.stream) {
     const instance = chain[0].instance;
     const completionId = `chatcmpl-${Date.now()}`;
-    const stream = buildSSEStream(instance, chatOpts, primaryModel, completionId);
+    const stream = buildSSEStream(instance, chatOpts, primaryModel, completionId, (latencyMs, success, error) => {
+      emitHook(hooks, 'onRequestEnd', {
+        userId: 'proxy',
+        stage: 'llm',
+        provider: primaryProvider,
+        model: primaryModel,
+        latencyMs,
+        success,
+        ...(error ? { error } : {}),
+        timestamp: Date.now(),
+      });
+    });
     return {
       status: 200,
       headers: {
@@ -230,31 +241,54 @@ function buildChain(
   return chain;
 }
 
+const STREAM_TIMEOUT_MS = 30_000;
+
 /**
  * Wraps a provider's chatStream() generator into a ReadableStream of SSE-encoded
  * Uint8Array chunks compatible with the OpenAI streaming format.
  * Falls back to a single non-streaming call if chatStream is not supported.
+ * Enforces a 30-second timeout to prevent hung connections.
  */
 function buildSSEStream(
   provider: LLMProvider,
   opts: ChatRequest,
   model: string,
   id: string,
+  onEnd?: (latencyMs: number, success: boolean, error?: string) => void,
 ): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
   const sse = (data: unknown) => enc.encode(`data: ${JSON.stringify(data)}\n\n`);
   const created = Math.floor(Date.now() / 1000);
+  const startMs = Date.now();
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      // Races any async step against the 30s wall-clock timeout
+      const withTimeout = <T>(p: Promise<T>): Promise<T> => {
+        if (timeoutId) clearTimeout(timeoutId);
+        return new Promise<T>((resolve, reject) => {
+          timeoutId = setTimeout(() => reject(new Error('Streaming timeout')), STREAM_TIMEOUT_MS);
+          p.then(v => { clearTimeout(timeoutId!); resolve(v); },
+                 e => { clearTimeout(timeoutId!); reject(e); });
+        });
+      };
+
+      const finish = (success: boolean, errorMsg?: string) => {
+        if (timeoutId) clearTimeout(timeoutId);
+        onEnd?.(Date.now() - startMs, success, errorMsg);
+      };
+
       try {
         if (!provider.chatStream) {
           // Provider doesn't support streaming — emit full response as one chunk
-          const res = await provider.chat(opts);
+          const res = await withTimeout(provider.chat(opts));
           controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model: res.model || model,
             choices: [{ index: 0, delta: { role: 'assistant', content: res.content }, finish_reason: 'stop' }] }));
           controller.enqueue(enc.encode('data: [DONE]\n\n'));
           controller.close();
+          finish(true);
           return;
         }
 
@@ -262,10 +296,13 @@ function buildSSEStream(
         controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
           choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] }));
 
-        // Content delta chunks
-        for await (const token of provider.chatStream(opts)) {
+        // Content delta chunks — each next() is raced against the timeout
+        const gen = provider.chatStream(opts);
+        for (;;) {
+          const { done, value } = await withTimeout(gen.next());
+          if (done) break;
           controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
-            choices: [{ index: 0, delta: { content: token }, finish_reason: null }] }));
+            choices: [{ index: 0, delta: { content: value }, finish_reason: null }] }));
         }
 
         // Finish chunk
@@ -273,10 +310,12 @@ function buildSSEStream(
           choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }));
         controller.enqueue(enc.encode('data: [DONE]\n\n'));
         controller.close();
+        finish(true);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Streaming error';
         controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: msg, type: 'server_error' } })}\n\n`));
         controller.close();
+        finish(false, msg);
       }
     },
   });
@@ -290,6 +329,8 @@ function extractStatus(err: unknown): number | null {
 }
 
 function formatResponse(content: string, model: string, usage?: unknown) {
+  // ChatResponse.usage uses camelCase internally; OpenAI wire format requires snake_case
+  const u = usage as { promptTokens?: number; completionTokens?: number; totalTokens?: number } | undefined;
   return {
     id: `chatcmpl-${Date.now()}`,
     object: 'chat.completion',
@@ -300,6 +341,10 @@ function formatResponse(content: string, model: string, usage?: unknown) {
       message: { role: 'assistant', content },
       finish_reason: 'stop',
     }],
-    usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    usage: {
+      prompt_tokens: u?.promptTokens ?? 0,
+      completion_tokens: u?.completionTokens ?? 0,
+      total_tokens: u?.totalTokens ?? 0,
+    },
   };
 }
