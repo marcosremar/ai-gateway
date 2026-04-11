@@ -1,4 +1,4 @@
-app = 'parle-gateway-loadtest'
+app = 'parle-ai-gateway'
 primary_region = 'cdg'
 kill_signal = 'SIGTERM'
 kill_timeout = '30s'
