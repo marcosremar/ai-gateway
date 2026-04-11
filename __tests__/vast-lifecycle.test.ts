@@ -23,7 +23,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { VastClient } from '../src/gpu-providers/vast-client';
 import type { ProviderCredentials, GpuInstance } from '../src/gpu-providers/types';
 import {
-  loadEnv, requireEnv, timed, waitFor,
+  loadEnv, timed, waitFor,
   checkHealth, testTextPipeline,
 } from './helpers';
 
@@ -58,76 +58,40 @@ afterAll(async () => {
 });
 
 // ─── Offer Search (Read-Only) ───────────────────────────────────────────────
+//
+// Uses client.listOffers() — the proper VastClient abstraction — instead of
+// raw HTTP to console.vast.ai/api (which is forbidden per CLAUDE.md).
 
 describe.skipIf(!hasVastKeys)('Vast.ai Offers — Real API', () => {
-  it('Step 1a: search RTX 3090 offers (cheapest first)', async () => {
-    const searchBody = {
-      limit: 5,
-      type: 'on-demand',
-      rentable: { eq: true },
-      rented: { eq: false },
-      num_gpus: { eq: 1 },
-      gpu_name: { in: ['RTX 3090'] },
-      order: [['dph_total', 'asc']],
-    };
+  it('Step 1a: listOffers RTX 3090 returns sorted results (cheapest first)', async () => {
+    const { result: offers, ms } = await timed(() =>
+      client.listOffers({ gpuTypes: ['RTX 3090'], limit: 5 }, creds),
+    );
 
-    const { result: res, ms } = await timed(async () => {
-      const r = await fetch('https://console.vast.ai/api/v0/bundles/', {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${creds.apiKey}`,
-        },
-        body: JSON.stringify(searchBody),
-        signal: AbortSignal.timeout(15_000),
-      });
-      expect(r.ok).toBe(true);
-      return r.json() as Promise<Record<string, unknown>>;
-    });
-
-    const offers = (res.offers || []) as Array<Record<string, unknown>>;
+    expect(Array.isArray(offers)).toBe(true);
     expect(offers.length).toBeGreaterThan(0);
 
+    // Verify sorted ascending by price
     for (let i = 1; i < offers.length; i++) {
-      expect(Number(offers[i].dph_total)).toBeGreaterThanOrEqual(Number(offers[i - 1].dph_total));
+      expect(offers[i].pricePerHr).toBeGreaterThanOrEqual(offers[i - 1].pricePerHr);
     }
 
     console.log(`  SEARCH RTX 3090: ${offers.length} offer(s) (${ms}ms)`);
     for (const o of offers) {
-      console.log(`    #${o.id}: $${Number(o.dph_total).toFixed(3)}/h — ${o.gpu_name}, ${o.gpu_ram}GB, ${o.direct_port_count || 0} direct ports`);
+      console.log(`    $${o.pricePerHr.toFixed(3)}/h — ${o.gpuType}, ${o.vram}GB VRAM, region: ${o.region}`);
     }
   });
 
-  it('Step 1b: search with multiple GPU types', async () => {
-    const searchBody = {
-      limit: 10,
-      type: 'on-demand',
-      rentable: { eq: true },
-      rented: { eq: false },
-      num_gpus: { eq: 1 },
-      gpu_name: { in: ['RTX 4090', 'RTX 3090', 'A40', 'RTX A5000'] },
-      order: [['dph_total', 'asc']],
-    };
+  it('Step 1b: listOffers with multiple GPU types returns results', async () => {
+    const { result: offers, ms } = await timed(() =>
+      client.listOffers({ gpuTypes: ['RTX 4090', 'RTX 3090', 'A40', 'RTX A5000'], limit: 10 }, creds),
+    );
 
-    const res = await fetch('https://console.vast.ai/api/v0/bundles/', {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${creds.apiKey}`,
-      },
-      body: JSON.stringify(searchBody),
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    expect(res.ok).toBe(true);
-    const data = (await res.json()) as Record<string, unknown>;
-    const offers = (data.offers || []) as Array<Record<string, unknown>>;
+    expect(Array.isArray(offers)).toBe(true);
     expect(offers.length).toBeGreaterThan(0);
 
-    const gpuTypes = new Set(offers.map((o) => o.gpu_name));
-    console.log(`  MULTI-GPU: ${offers.length} offer(s), GPU types: ${[...gpuTypes].join(', ')}`);
+    const gpuTypes = new Set(offers.map((o) => o.gpuType));
+    console.log(`  MULTI-GPU: ${offers.length} offer(s) (${ms}ms), GPU types: ${[...gpuTypes].join(', ')}`);
   });
 });
 
@@ -302,8 +266,8 @@ describe.skipIf(!hasVastKeys)('Vast.ai Lifecycle — Ultralight Inference', () =
     );
     createdInstance = null; // Don't cleanup in afterAll
 
-    await new Promise((r) => setTimeout(r, 5000));
-
+    // No sleep — Vast.ai returns null immediately for deleted instances.
+    // The assertion below already accepts null (deleted) or terminal statuses.
     const status = await client.getInstanceStatus(instanceId, creds);
     console.log(`  DELETE: ok, status after = ${status} (${ms}ms)`);
 

@@ -68,6 +68,14 @@ interface DeployConfig {
   templateHashId: string | undefined;
   /** Force SSH tunnel for Vast.ai (skip direct-port endpoint, use SSH proxy) */
   forceSshTunnel: boolean | undefined;
+  /** Enable CRIU checkpoint/restore via SnapGPU wrapper */
+  useSnapgpu: boolean;
+  /** Auto-capture checkpoint after first successful boot (only when useSnapgpu=true) */
+  autoSnapshot: boolean;
+  /** App name to preload at boot for snapshot capture */
+  snapgpuPreloadApp: string;
+  /** Underlying provider for SnapGPU (vast or runpod) */
+  snapgpuBackend: 'vast' | 'runpod';
 }
 
 /**
@@ -178,6 +186,16 @@ async function _validateDeployRequest(
     console.log(`[req=${requestId}] No GPU specified — using priority list: ${gpuTypes.join(', ')}`);
   }
 
+  // SnapGPU / CRIU — read from profile gpuDeploy or active service, body can override
+  const useSnapgpu = body.useSnapgpu === true || profileGpu?.useSnapgpu === true
+    || (activeProfile as unknown as Record<string, unknown>)?.services != null &&
+       ((activeProfile as unknown as Record<string, unknown>).services as unknown[])
+         .some((s: unknown) => (s as Record<string, unknown>)?.kind === 'gpu-pod' &&
+           (s as Record<string, unknown>)?.useSnapgpu === true);
+  const autoSnapshot = typeof body.autoSnapshot === 'boolean' ? body.autoSnapshot : (profileGpu?.autoSnapshot ?? true);
+  const snapgpuPreloadApp = (body.snapgpuPreloadApp as string) || profileGpu?.snapgpuPreloadApp || 'default';
+  const snapgpuBackend = ((body.snapgpuBackend as string) || profileGpu?.snapgpuBackend || 'vast') as 'vast' | 'runpod';
+
   return {
     apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
     dockerImage, gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
@@ -187,6 +205,10 @@ async function _validateDeployRequest(
     templateHashId: typeof body.templateHashId === 'string' && body.templateHashId.length > 0
       ? body.templateHashId : undefined,
     forceSshTunnel: body.forceSshTunnel === true ? true : undefined,
+    useSnapgpu: useSnapgpu === true,
+    autoSnapshot,
+    snapgpuPreloadApp,
+    snapgpuBackend,
   };
 }
 
@@ -303,7 +325,32 @@ async function _selectDeploymentTier(
   }
 
   // Build tier list from available API keys, optionally filtered to a specific provider
-  const allTiers = buildGpuTiers(runpodApiKey, effectiveVastApiKey || undefined, tensordockOpts, modalApiKey || undefined);
+  let allTiers = buildGpuTiers(runpodApiKey, effectiveVastApiKey || undefined, tensordockOpts, modalApiKey || undefined);
+
+  // If CRIU/SnapGPU is enabled, wrap the backend tier with the snapgpu client.
+  // The snapgpu client delegates to vast or runpod but adds checkpoint/restore capability.
+  if (config.useSnapgpu) {
+    const backendApiKey = config.snapgpuBackend === 'runpod' ? runpodApiKey : (effectiveVastApiKey || '');
+    if (backendApiKey) {
+      const { providerClients } = await import('./gpu-deploy');
+      const snapgpuTier = {
+        client: providerClients.snapgpu,
+        name: 'snapgpu' as ProviderName,
+        label: `SnapGPU (${config.snapgpuBackend})`,
+        apiKey: backendApiKey,
+        // Pass snapgpu-specific options through tier metadata
+        snapgpuBackend: config.snapgpuBackend,
+        snapgpuPreloadApp: config.snapgpuPreloadApp,
+        autoSnapshot: config.autoSnapshot,
+      };
+      // Prepend snapgpu tier — it gets first shot; falls back to regular tiers on failure
+      allTiers = [snapgpuTier, ...allTiers];
+      console.log(`[req=${requestId}] SnapGPU enabled (backend=${config.snapgpuBackend}, preloadApp=${config.snapgpuPreloadApp}, autoSnapshot=${config.autoSnapshot})`);
+    } else {
+      console.warn(`[req=${requestId}] SnapGPU requested but no API key for backend=${config.snapgpuBackend} — falling back to regular deploy`);
+    }
+  }
+
   console.log(`[req=${requestId}] providerFilter=${providerFilter ?? 'none'}, allTiers=[${allTiers.map(t => t.name).join(', ')}]`);
   const filtered = filterTiers(allTiers, providerFilter);
   if ('error' in filtered) {
@@ -407,7 +454,7 @@ function _startDeployAndRespond(
   requestId: string,
   res: ServerResponse,
 ): void {
-  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, containerDiskInGb, volumeId, templateHashId, forceSshTunnel } = config;
+  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   setDeployCancelled(false);
@@ -421,7 +468,15 @@ function _startDeployAndRespond(
     return;
   }
 
-  const extra = { region, storageGb, hfToken, env: Object.keys(deployEnv).length > 0 ? deployEnv : undefined, interruptible, ...(dockerStartCmd ? { dockerStartCmd } : {}), ...(containerDiskInGb > 0 ? { containerDiskInGb } : {}), ...(volumeId ? { volumeId } : {}), ...(templateHashId ? { templateHashId } : {}), ...(forceSshTunnel ? { forceSshTunnel } : {}) };
+  const extra = {
+    region, storageGb, hfToken, env: Object.keys(deployEnv).length > 0 ? deployEnv : undefined, interruptible,
+    ...(dockerStartCmd ? { dockerStartCmd } : {}),
+    ...(containerDiskInGb > 0 ? { containerDiskInGb } : {}),
+    ...(volumeId ? { volumeId } : {}),
+    ...(templateHashId ? { templateHashId } : {}),
+    ...(forceSshTunnel ? { forceSshTunnel } : {}),
+    ...(useSnapgpu ? { snapgpuPreloadApp, snapgpuAutoSnapshot: autoSnapshot, snapgpuBackend } : {}),
+  };
 
   const deployFn = raceCount > 1
     ? startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount)

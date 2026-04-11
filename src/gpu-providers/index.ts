@@ -57,8 +57,8 @@ export { ModalClient } from './modal-client';
 export type { ModalClientOptions, ModalDeployOptions, ModalAutoscalerParams } from './modal-client';
 
 // ── SnapGPU (CRIU + cuda-checkpoint capability layer over Vast/RunPod) ────
-export { SnapgpuClient, DEFAULT_SNAPGPU_IMAGE } from './snapgpu-client';
-export type { SnapgpuClientOptions, SnapgpuBackend, SnapshotInfo } from './snapgpu-client';
+export { SnapgpuClient, DEFAULT_SNAPGPU_IMAGE, normalizeSnapgpuS3Config } from './snapgpu-client';
+export type { SnapgpuClientOptions, SnapgpuBackend, SnapshotInfo, SnapgpuS3Config, SnapgpuS3Input } from './snapgpu-client';
 
 // ── Deploy Orchestrator ──────────────────────────────────────────────────
 export {

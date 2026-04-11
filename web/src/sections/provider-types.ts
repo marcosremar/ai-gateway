@@ -45,6 +45,10 @@ export interface ProfileService {
   autoRecoveryEnabled?: boolean   // auto-deploy replacement on condemnation (default: true)
   autoRecoveryMaxRetries?: number // max recovery attempts (default: 2)
   deployTimeoutMin?: number       // max deploy time before giving up (default: 30, uses avg boot time if available)
+  // CRIU / SnapGPU fast cold-start
+  useSnapgpu?: boolean            // enable CRIU checkpoint/restore for fast cold starts (requires driver ≥555, Python ML servers only)
+  autoSnapshot?: boolean          // auto-capture snapshot after first successful boot (default: true when useSnapgpu=true)
+  snapgpuPreloadApp?: string      // app name to preload at boot for snapshot capture
 }
 
 export interface ProviderProfile {

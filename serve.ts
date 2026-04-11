@@ -11,6 +11,7 @@
 
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
+import { falImage } from './src/providers/fal';
 import type { ProviderMapping } from './src/proxy/types';
 
 const PORT = parseInt(process.env.PORT || '4000');
@@ -33,16 +34,22 @@ const providers: ProviderMapping = {
   chat: {
     'llama-3.3-70b-versatile': groqLLM,
     'llama-3.1-8b-instant': groqLLM,
+    // Vision-capable model — multimodal content (image_url) passes through
+    // the OpenAI-compat LLM provider unchanged.
+    'meta-llama/llama-4-scout-17b-16e-instruct': groqLLM,
   },
   chatFallbackChain: [
     { providerId: 'groq', model: 'llama-3.3-70b-versatile', provider: groqLLM },
   ],
+  // FAL AI — text-to-image (FLUX.1 Schnell) + mask-based inpainting (FLUX.1 Fill Pro)
+  image: falImage,
 };
 
 console.log(`[serve] Starting AI Gateway on port ${PORT}`);
 console.log(`[serve] API keys: ${API_KEYS ? `${API_KEYS.length} configured` : 'none (localhost only)'}`);
 console.log(`[serve] Rate limit: ${RATE_LIMIT_RPM > 0 ? `${RATE_LIMIT_RPM} RPM` : 'disabled'}`);
 console.log(`[serve] Groq key: ${process.env.GROQ_API_KEY.slice(0, 6)}...`);
+console.log(`[serve] FAL key: ${process.env.FAL_KEY ? process.env.FAL_KEY.slice(0, 8) + '...' : 'not set — images/inpainting disabled'}`);
 
 const server = await startProxy({
   port: PORT,

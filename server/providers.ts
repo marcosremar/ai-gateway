@@ -396,9 +396,25 @@ export const flyio = new FlyioClient();
 const _snapgpuRegistry = new GpuProviderRegistry();
 _snapgpuRegistry.register(runpod);
 _snapgpuRegistry.register(vast);
+const _snapgpuS3Config: import('../src/gpu-providers/snapgpu-client').SnapgpuS3Config | undefined =
+  process.env.SNAPGPU_S3_ENDPOINT
+    ? {
+        endpoint: process.env.SNAPGPU_S3_ENDPOINT,
+        bucket: process.env.SNAPGPU_S3_BUCKET ?? '',
+        accessKey: process.env.SNAPGPU_S3_ACCESS_KEY ?? '',
+        secretKey: process.env.SNAPGPU_S3_SECRET_KEY ?? '',
+        region: process.env.SNAPGPU_S3_REGION,
+        keyPrefix: process.env.SNAPGPU_S3_KEY_PREFIX,
+      }
+    : undefined;
+if (_snapgpuS3Config)
+  console.log(`[snapgpu] S3 persistence: ${_snapgpuS3Config.endpoint}/${_snapgpuS3Config.bucket}`);
+else
+  console.log("[snapgpu] S3 not configured — snapshots won't persist cross-host (add SNAPGPU_S3_ENDPOINT to .env)");
 export const snapgpu = new SnapgpuClient({
   registry: _snapgpuRegistry,
   defaultBackend: (process.env.SNAPGPU_DEFAULT_BACKEND as 'vast' | 'runpod') ?? 'vast',
+  s3Config: _snapgpuS3Config,
 });
 
 // ── Centralized translationProfile mutator ───────────────────────────────────

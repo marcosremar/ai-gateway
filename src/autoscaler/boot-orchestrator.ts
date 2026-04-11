@@ -396,7 +396,12 @@ export class BootOrchestrator {
       }
 
       const bootTimeSecs = this.registry.get(provider)?.bootTimeSecs ?? 120;
-      const maxBootMs = bootTimeSecs * 2 * 1000;
+      // Vast.ai can take 20-30+ min for large images (50+ GB) on slow hosts.
+      // Use 3× for vast (= 30 min max, aligned with POLL_TOTAL_MAX_MS=30 min in
+      // vast-client) so the poller doesn't orphan a still-pulling instance.
+      // All other providers keep 2× which is well within their boot windows.
+      const maxBootMultiplier = provider === 'vast' ? 3 : 2;
+      const maxBootMs = bootTimeSecs * maxBootMultiplier * 1000;
       const elapsed = Date.now() - bootTimestamp;
       if (elapsed > maxBootMs) {
         const bootTs = ts as BootingTierState;

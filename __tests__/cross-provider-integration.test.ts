@@ -3,6 +3,11 @@
  *
  * Tests that exercise the same interface across multiple providers,
  * validating consistent behavior and type contracts.
+ *
+ * Cost minimization:
+ * - STT/TTS: 1 call per provider (shared via beforeAll per describe block)
+ * - LLM: ONE beforeAll collects all provider results; individual contract tests
+ *   AND the shape-consistency test reuse the same collected results (3 calls, not 6).
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
@@ -17,8 +22,10 @@ import { loadEnv, makeTestWav, timed } from './helpers';
 
 beforeAll(() => loadEnv());
 
-// NOTE: OpenAI direct tests require a valid OPENAI_API_KEY.
-// If the key is deactivated, OpenAI tests will throw SKIP errors.
+function skipOn(err: unknown): boolean {
+  const s = (err as Record<string, unknown>)?.status;
+  return s === 401 || s === 402 || s === 403 || s === 429;
+}
 
 // ─── STT Cross-Provider ──────────────────────────────────────────────────────
 
@@ -36,30 +43,34 @@ const sttProviders: STTTestCase[] = [
 ];
 
 describe('Cross-Provider STT', () => {
-  for (const { name, provider, model, envKey } of sttProviders) {
-    it(`${name}: transcribe returns STTResponse contract`, async () => {
-      if (!process.env[envKey]) return;
-      const audio = makeTestWav(1.0);
+  const audio = makeTestWav(1.0);
+  const results = new Map<string, Awaited<ReturnType<typeof groqSTT.transcribe>>>();
 
-      let result: Awaited<ReturnType<typeof provider.transcribe>>, ms: number;
+  // 1 call per available provider
+  beforeAll(async () => {
+    for (const { name, provider, model, envKey } of sttProviders) {
+      if (!process.env[envKey]) continue;
       try {
-        ({ result, ms } = await timed(() => provider.transcribe({ audio, model })));
+        const { result } = await timed(() => provider.transcribe({ audio, model }));
+        results.set(name, result);
       } catch (err: unknown) {
-        const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return; // key invalid / no credits
-        throw err;
+        if (!skipOn(err)) throw err;
       }
+    }
+  });
 
-      // Contract: must have text string
+  for (const { name, provider, envKey } of sttProviders) {
+    it(`${name}: transcribe returns STTResponse contract`, () => {
+      if (!process.env[envKey]) return;
+      const result = results.get(name);
+      if (!result) return; // auth/billing/rate-limit — skip gracefully
+
       expect(typeof result.text).toBe('string');
-      // providerId must match
       expect(provider.providerId).toBeTruthy();
-      // isConfigured must return true
       expect(provider.isConfigured()).toBe(true);
-      // getModels must return non-empty array
       expect(provider.getModels().length).toBeGreaterThan(0);
 
-      console.log(`  ${name} STT: "${result.text.slice(0, 50)}" (${ms}ms)`);
+      console.log(`  ${name} STT: "${result.text.slice(0, 50)}"`);
     });
   }
 });
@@ -80,34 +91,46 @@ const ttsProviders: TTSTestCase[] = [
 ];
 
 describe('Cross-Provider TTS', () => {
-  for (const { name, provider, model, voice, envKey } of ttsProviders) {
-    it(`${name}: synthesize returns TTSResponse contract`, async () => {
-      if (!process.env[envKey]) return;
+  const results = new Map<string, Awaited<ReturnType<typeof groqTTS.synthesize>>>();
 
-      let result: Awaited<ReturnType<typeof provider.synthesize>>, ms: number;
+  // 1 call per available provider
+  beforeAll(async () => {
+    for (const { name, provider, model, voice, envKey } of ttsProviders) {
+      if (!process.env[envKey]) continue;
       try {
-        ({ result, ms } = await timed(() =>
+        const { result } = await timed(() =>
           provider.synthesize({ input: 'Integration test audio.', model, voice, responseFormat: 'wav' }),
-        ));
+        );
+        results.set(name, result);
       } catch (err: unknown) {
-        const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return;
-        throw err;
+        if (!skipOn(err)) throw err;
       }
+    }
+  });
 
-      // Contract: audio Buffer, contentType string
+  for (const { name, provider, envKey } of ttsProviders) {
+    it(`${name}: synthesize returns TTSResponse contract`, () => {
+      if (!process.env[envKey]) return;
+      const result = results.get(name);
+      if (!result) return; // auth/billing/rate-limit — skip gracefully
+
       expect(result.audio).toBeInstanceOf(Buffer);
       expect(result.audio.length).toBeGreaterThan(100);
       expect(typeof result.contentType).toBe('string');
       expect(provider.providerId).toBeTruthy();
       expect(provider.getModels().length).toBeGreaterThan(0);
 
-      console.log(`  ${name} TTS: ${result.audio.length} bytes, ${result.contentType} (${ms}ms)`);
+      console.log(`  ${name} TTS: ${result.audio.length} bytes, ${result.contentType}`);
     });
   }
 });
 
 // ─── LLM Cross-Provider ─────────────────────────────────────────────────────
+//
+// KEY OPTIMIZATION: ONE beforeAll collects all results (3 calls).
+// Both individual contract tests AND shape-consistency test reuse those results.
+// Previously: 3 calls (individual loop) + 3 calls (shape test) = 6 total.
+// Now: 3 calls total — 50% reduction.
 
 interface LLMTestCase {
   name: string;
@@ -124,13 +147,14 @@ const llmProviders: LLMTestCase[] = [
 ];
 
 describe('Cross-Provider LLM', () => {
-  for (const { name, provider, model, envKey } of llmProviders) {
-    it(`${name}: chat returns ChatResponse contract`, async () => {
-      if (!process.env[envKey]) return;
+  const collected: Array<{ name: string; response: ChatResponse; ms: number }> = [];
 
-      let result: Awaited<ReturnType<typeof provider.chat>>, ms: number;
+  // Collect ALL results in ONE beforeAll — reused by every it() below
+  beforeAll(async () => {
+    for (const { name, provider, model, envKey } of llmProviders) {
+      if (!process.env[envKey]) continue;
       try {
-        ({ result, ms } = await timed(() =>
+        const { result: response, ms } = await timed(() =>
           provider.chat({
             messages: [
               { role: 'system', content: 'Reply with exactly one word.' },
@@ -140,52 +164,39 @@ describe('Cross-Provider LLM', () => {
             temperature: 0,
             maxTokens: 10,
           }),
-        ));
+        );
+        collected.push({ name, response, ms });
       } catch (err: unknown) {
-        const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) return;
-        throw err;
+        if (!skipOn(err)) throw err; // auth/billing/rate-limit — skip provider silently
       }
+    }
+  });
 
-      // Contract: content string, model string
-      expect(typeof result.content).toBe('string');
-      expect(result.content.length).toBeGreaterThan(0);
-      expect(typeof result.model).toBe('string');
-      // Usage should be present
-      expect(result.usage).toBeDefined();
-      expect(result.usage!.totalTokens).toBeGreaterThan(0);
-      expect(result.usage!.promptTokens).toBeGreaterThan(0);
-      expect(result.usage!.completionTokens).toBeGreaterThan(0);
+  // Individual contract tests — zero extra API calls
+  for (const { name, envKey } of llmProviders) {
+    it(`${name}: chat returns ChatResponse contract`, () => {
+      if (!process.env[envKey]) return;
+      const entry = collected.find(r => r.name === name);
+      if (!entry) return; // auth/billing/rate-limit — skip gracefully
 
-      console.log(`  ${name} LLM: "${result.content}" — ${result.usage!.totalTokens} tokens (${ms}ms)`);
+      const { response, ms } = entry;
+      expect(typeof response.content).toBe('string');
+      expect(response.content.length).toBeGreaterThan(0);
+      expect(typeof response.model).toBe('string');
+      expect(response.usage).toBeDefined();
+      expect(response.usage!.totalTokens).toBeGreaterThan(0);
+      expect(response.usage!.promptTokens).toBeGreaterThan(0);
+      expect(response.usage!.completionTokens).toBeGreaterThan(0);
+
+      console.log(`  ${name} LLM: "${response.content}" — ${response.usage!.totalTokens} tokens (${ms}ms)`);
     });
   }
 
-  it('all providers return consistent ChatResponse shape', async () => {
-    const results: Array<{ name: string; response: ChatResponse }> = [];
+  // Shape-consistency test — reuses same collected results, zero extra calls
+  it('all providers return consistent ChatResponse shape', () => {
+    if (collected.length < 2) return;
 
-    for (const { name, provider, model, envKey } of llmProviders) {
-      if (!process.env[envKey]) continue;
-
-      try {
-        const response = await provider.chat({
-          messages: [{ role: 'user', content: 'Say "test".' }],
-          model,
-          maxTokens: 5,
-        });
-        results.push({ name, response });
-      } catch (err: unknown) {
-        // Skip providers with auth/billing errors (deactivated keys or no credits)
-        const status = (err as Record<string, unknown>)?.status;
-        if (status === 401 || status === 402 || status === 403) continue;
-        throw err;
-      }
-    }
-
-    if (results.length < 2) return;
-
-    // All should have the same shape
-    for (const { name, response } of results) {
+    for (const { name, response } of collected) {
       expect(response).toHaveProperty('content');
       expect(response).toHaveProperty('model');
       expect(response).toHaveProperty('usage');
@@ -193,6 +204,6 @@ describe('Cross-Provider LLM', () => {
       expect(typeof response.model).toBe('string');
     }
 
-    console.log(`  Verified ${results.length} providers return consistent ChatResponse`);
+    console.log(`  Verified ${collected.length} providers return consistent ChatResponse`);
   });
 });

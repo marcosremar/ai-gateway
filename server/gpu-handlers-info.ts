@@ -538,12 +538,19 @@ export async function handleHealth(_req: IncomingMessage, res: ServerResponse): 
 
 // ── GPU logs endpoint ────────────────────────────────────────────────────────
 
-export async function handleGpuLogs(_req: IncomingMessage, res: ServerResponse) {
-  const requestId = getOrCreateRequestId(_req);
+export async function handleGpuLogs(req: IncomingMessage, res: ServerResponse) {
+  const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
 
+  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const filter = url.searchParams.get('filter') || undefined;
+
   try {
-    const logs = await fetchGpuLogs();
+    let logs = await fetchGpuLogs();
+    if (filter && logs) {
+      const filtered = logs.split('\n').filter(line => line.includes(filter)).join('\n');
+      if (filtered.trim()) logs = filtered;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       logs,

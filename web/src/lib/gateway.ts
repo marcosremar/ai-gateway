@@ -1086,6 +1086,75 @@ export async function resetVoiceProfile(): Promise<{ ok: boolean }> {
   return gwPost('/v1/voice/profile/reset');
 }
 
+// ── Vast.ai Serverless ──
+
+export interface VastEndpoint {
+  id: number;
+  name: string;
+  apiKey: string;
+  state: string;
+  minLoad: number;
+  targetUtil: number;
+  coldWorkers: number;
+  maxWorkers: number;
+  createdAt: string;
+}
+
+export interface VastWorkerGroup {
+  id: number;
+  endpointId: number;
+  endpointName: string;
+  templateHash: string;
+  gpuRamGb: number;
+  maxWorkers: number;
+  createdAt: string;
+}
+
+export async function vastListEndpoints(): Promise<{ endpoints: VastEndpoint[] }> {
+  return gwJson('/v1/gpu/vast/endpoints');
+}
+
+export async function vastCreateEndpoint(params: {
+  name: string;
+  coldWorkers?: number;
+  maxWorkers?: number;
+  minLoad?: number;
+  targetUtil?: number;
+}): Promise<{ id: number; name: string }> {
+  return gwPost('/v1/gpu/vast/endpoints', params);
+}
+
+export async function vastDeleteEndpoint(id: number): Promise<{ success: boolean }> {
+  const res = await gw(`/v1/gpu/vast/endpoints?id=${id}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`Gateway ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+export async function vastListWorkerGroups(): Promise<{ workerGroups: VastWorkerGroup[] }> {
+  return gwJson('/v1/gpu/vast/workergroups');
+}
+
+export async function vastCreateWorkerGroup(params: {
+  endpointId: number;
+  /** Docker image — backend auto-calls findOrCreateTemplate and uses the hash */
+  image?: string;
+  tag?: string;
+  searchParams?: string;
+  gpuRamGb?: number;
+  maxWorkers?: number;
+  coldWorkers?: number;
+  /** Skip auto-template and use an explicit hash directly */
+  templateHash?: string;
+}): Promise<{ id: number }> {
+  return gwPost('/v1/gpu/vast/workergroups', params);
+}
+
+export async function vastDeleteWorkerGroup(id: number): Promise<{ success: boolean }> {
+  const res = await gw(`/v1/gpu/vast/workergroups?id=${id}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`Gateway ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
 // ── Labs Feature Flags ──
 
 export interface LabsFlags {

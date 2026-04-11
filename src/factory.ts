@@ -167,11 +167,23 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
   // constructor can resolve them via registry.get(). It delegates GPU
   // lifecycle to the backend and adds CRIU + cuda-checkpoint snapshots
   // on top via HTTP to the snapgpu-runtime container.
+  const _snapgpuS3: import('./gpu-providers/snapgpu-client').SnapgpuS3Config | undefined =
+    process.env.SNAPGPU_S3_ENDPOINT
+      ? {
+          endpoint: process.env.SNAPGPU_S3_ENDPOINT,
+          bucket: process.env.SNAPGPU_S3_BUCKET ?? '',
+          accessKey: process.env.SNAPGPU_S3_ACCESS_KEY ?? '',
+          secretKey: process.env.SNAPGPU_S3_SECRET_KEY ?? '',
+          region: process.env.SNAPGPU_S3_REGION,
+          keyPrefix: process.env.SNAPGPU_S3_KEY_PREFIX,
+        }
+      : undefined;
   registry.register(new SnapgpuClient({
     registry,
     defaultBackend: (process.env.SNAPGPU_DEFAULT_BACKEND as 'vast' | 'runpod') ?? 'vast',
     onInstancePersist,
     hooks,
+    s3Config: _snapgpuS3,
   }));
 
   // Core modules
@@ -179,10 +191,29 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
   const sessionTracker = new SessionTracker(stateStore, sessionResolver);
   const persistence = new StatePersistence(stateStore);
   const loadBalancer = new LoadBalancer(stateStore);
+  // SnapGPU snapshot persist/restore via stateStore KV (fast lookup, schema-independent)
+  const _snapgpuPersistKey = (userId: string, key: string) => `snapgpu_persist:${userId}:${key}`;
+  const snapgpuOnInstancePersist = async (userId: string, machineKey: string, data: Record<string, unknown>) => {
+    if (machineKey.startsWith('snapgpu_snapshot:')) {
+      await stateStore.set(_snapgpuPersistKey(userId, machineKey), JSON.stringify({ ...data, persistedAt: Date.now() }));
+      return;
+    }
+    return onInstancePersist(userId, machineKey, data);
+  };
+  const getPersistedData = async (userId: string, key: string): Promise<Record<string, unknown> | null> => {
+    try {
+      const raw = await stateStore.get(_snapgpuPersistKey(userId, key));
+      if (!raw) return null;
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+
   const engine = new AutoscalerEngine({
     registry, sessionTracker, latencyTracker, persistence,
     probeHealth: probeGpuHealth, cleanupInstance: cleanupProviderInstance,
-    hooks, onInstancePersist, lifecycleLogger,
+    hooks, onInstancePersist: snapgpuOnInstancePersist, getPersistedData, lifecycleLogger,
   });
 
   // Reconcile deps
@@ -239,7 +270,7 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
   // Update watchdog deps to use wrapped logger
   const watchdogDeps = { engine, sessionTracker, persistence, registry, loadConfig, hooks, lifecycleLogger: wrappedLogger };
 
-  return {
+  const autoscaler: Autoscaler = {
     // Engine
     getAutoScaleDecision: (userId, config, options) => engine.getAutoScaleDecision(userId, config, options),
     triggerGpuBoot: (tierConfig, tierIndex, userId) => engine.triggerGpuBoot(tierConfig, tierIndex, userId),
@@ -319,4 +350,11 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
     loadBalancer,
     PROVIDER_BOOT_SECS,
   };
+
+  // Auto-start predictive warmup ticker (unref'd — won't block process exit).
+  // Callers can also call startPredictiveWarmupTicker() manually for custom intervals.
+  const _stopWarmup = autoscaler.startPredictiveWarmupTicker();
+  void _stopWarmup; // suppress unused warning — cleanup handled on process exit
+
+  return autoscaler;
 }

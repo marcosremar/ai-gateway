@@ -36,30 +36,40 @@ const openaiLLM = new OpenAICompatLLMProvider({
   defaultModel: 'gpt-4o-mini',
 });
 
-// ── STT ── shared audio, 2 calls (different models) ─────────────────────────
+// ── STT ── 2 calls (2 different models), results shared across assertions ────
 
 describe.skipIf(!OPENAI_AVAILABLE)('OpenAI STT (Real API)', () => {
   const stt = new OpenAISTTProvider();
-  const audio = makeTestWav(0.5); // shared — 0.5s is the minimum viable audio
+  const audio = makeTestWav(0.5); // 0.5s — minimum viable audio
+  let whisper1: { text: string } | null = null;
+  let omniTranscribe: { text: string } | null = null;
+  let ms1 = 0, ms2 = 0;
 
-  it('whisper-1 returns text string', async () => {
+  // Both models called in beforeAll — if one hits 429, the other still runs
+  beforeAll(async () => {
     try {
-      const { result, ms } = await timed(() =>
+      ({ result: whisper1, ms: ms1 } = await timed(() =>
         stt.transcribe({ audio, model: 'whisper-1' }),
-      );
-      expect(typeof result.text).toBe('string');
-      console.log(`  OpenAI STT (whisper-1): "${result.text}" (${ms}ms)`);
+      ));
+    } catch (err: unknown) { if (!skipOn(err)) throw err; }
+
+    try {
+      ({ result: omniTranscribe, ms: ms2 } = await timed(() =>
+        stt.transcribe({ audio, model: 'gpt-4o-transcribe' }),
+      ));
     } catch (err: unknown) { if (!skipOn(err)) throw err; }
   });
 
-  it('gpt-4o-transcribe returns text string', async () => {
-    try {
-      const { result, ms } = await timed(() =>
-        stt.transcribe({ audio, model: 'gpt-4o-transcribe' }),
-      );
-      expect(typeof result.text).toBe('string');
-      console.log(`  OpenAI STT (gpt-4o-transcribe): "${result.text}" (${ms}ms)`);
-    } catch (err: unknown) { if (!skipOn(err)) throw err; }
+  it('whisper-1 returns text string', () => {
+    if (!whisper1) return;
+    expect(typeof whisper1.text).toBe('string');
+    console.log(`  OpenAI STT (whisper-1): "${whisper1.text}" (${ms1}ms)`);
+  });
+
+  it('gpt-4o-transcribe returns text string', () => {
+    if (!omniTranscribe) return;
+    expect(typeof omniTranscribe.text).toBe('string');
+    console.log(`  OpenAI STT (gpt-4o-transcribe): "${omniTranscribe.text}" (${ms2}ms)`);
   });
 
   it('withApiKey returns a new isolated instance', () => {

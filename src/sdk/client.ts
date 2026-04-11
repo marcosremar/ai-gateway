@@ -340,9 +340,10 @@ export class GatewaySDK {
     return (data.instances ?? data) as GpuInstance[];
   }
 
-  /** Fetch GPU deployment logs (container stdout from running pod). */
-  async gpuLogs(): Promise<string> {
-    const res = await this.fetch('/v1/gpu/logs', { method: 'GET', timeout: this.timeouts.health });
+  /** Fetch GPU deployment logs (container stdout from running pod). Pass `filter` to grep-filter lines. */
+  async gpuLogs(filter?: string): Promise<string> {
+    const qs = filter ? `?filter=${encodeURIComponent(filter)}` : '';
+    const res = await this.fetch(`/v1/gpu/logs${qs}`, { method: 'GET', timeout: this.timeouts.health });
     const data = await this.parseJson(res, '/v1/gpu/logs');
     return (data.logs as string) ?? '';
   }
@@ -370,6 +371,144 @@ export class GatewaySDK {
     const res = await this.fetch('/v1/gpu/reputation', { method: 'GET', timeout: this.timeouts.health });
     const data = await this.parseJson(res, '/v1/gpu/reputation');
     return (data.reputations ?? data) as Record<string, unknown>[];
+  }
+
+  // ── Vast.ai Templates ──────────────────────────────────────────────────
+
+  /** List all Vast.ai templates on the account. */
+  async vastListTemplates(): Promise<Array<{ hashId: string; id: number; name: string; image: string; tag?: string }>> {
+    const res = await this.fetch('/v1/gpu/vast/templates', { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/gpu/vast/templates');
+    return (data.templates ?? []) as Array<{ hashId: string; id: number; name: string; image: string; tag?: string }>;
+  }
+
+  /** Create a Vast.ai template. Returns the template's hash_id for use in deployments. */
+  async vastCreateTemplate(spec: {
+    name: string;
+    image: string;
+    tag?: string;
+    envVars?: Record<string, string>;
+    exposePorts?: number[];
+    onstartCmd?: string;
+    diskSpaceGb?: number;
+  }): Promise<{ hashId: string; id: number }> {
+    const res = await this.fetch('/v1/gpu/vast/templates', {
+      method: 'POST', timeout: this.timeouts.deploy,
+      body: JSON.stringify(spec),
+    });
+    return await this.parseJson(res, '/v1/gpu/vast/templates') as { hashId: string; id: number };
+  }
+
+  /** Update an existing Vast.ai template. */
+  async vastUpdateTemplate(hashId: string, updates: { name?: string; image?: string; tag?: string; diskSpaceGb?: number; desc?: string }): Promise<{ hashId: string; id: number }> {
+    const res = await this.fetch('/v1/gpu/vast/templates', {
+      method: 'PUT', timeout: this.timeouts.deploy,
+      body: JSON.stringify({ hashId, ...updates }),
+    });
+    return await this.parseJson(res, '/v1/gpu/vast/templates') as { hashId: string; id: number };
+  }
+
+  /** Delete a Vast.ai template by numeric ID. */
+  async vastDeleteTemplate(templateId: number): Promise<void> {
+    await this.fetch(`/v1/gpu/vast/templates?id=${templateId}`, { method: 'DELETE', timeout: this.timeouts.deploy });
+  }
+
+  /** Idempotent: find existing template by name+image or create one. */
+  async vastFindOrCreateTemplate(spec: {
+    name: string;
+    image: string;
+    tag?: string;
+    envVars?: Record<string, string>;
+    exposePorts?: number[];
+    onstartCmd?: string;
+    diskSpaceGb?: number;
+  }): Promise<{ hashId: string; id: number; created: boolean }> {
+    const res = await this.fetch('/v1/gpu/vast/templates/find-or-create', {
+      method: 'POST', timeout: this.timeouts.deploy,
+      body: JSON.stringify(spec),
+    });
+    return await this.parseJson(res, '/v1/gpu/vast/templates/find-or-create') as { hashId: string; id: number; created: boolean };
+  }
+
+  // ── Vast.ai Serverless Endpoints ────────────────────────────────────────
+
+  /** List all serverless endpoints on the Vast.ai account. */
+  async vastListEndpoints(): Promise<Array<{ id: number; name: string; apiKey: string; state: string; minLoad: number; targetUtil: number; coldWorkers: number; maxWorkers: number; createdAt: string }>> {
+    const res = await this.fetch('/v1/gpu/vast/endpoints', { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/gpu/vast/endpoints');
+    return (data.endpoints ?? []) as Array<{ id: number; name: string; apiKey: string; state: string; minLoad: number; targetUtil: number; coldWorkers: number; maxWorkers: number; createdAt: string }>;
+  }
+
+  /** Create a Vast.ai serverless endpoint. Add worker groups via vastCreateWorkerGroup(). */
+  async vastCreateEndpoint(spec: { name: string; minLoad?: number; targetUtil?: number; coldMult?: number; coldWorkers?: number; maxWorkers?: number }): Promise<{ id: number; name: string }> {
+    const res = await this.fetch('/v1/gpu/vast/endpoints', {
+      method: 'POST', timeout: this.timeouts.deploy,
+      body: JSON.stringify(spec),
+    });
+    return await this.parseJson(res, '/v1/gpu/vast/endpoints') as { id: number; name: string };
+  }
+
+  /** Delete a Vast.ai serverless endpoint and all its workers. */
+  async vastDeleteEndpoint(endpointId: number): Promise<{ deletedWorkers: number[]; failedWorkers: number[] }> {
+    const res = await this.fetch(`/v1/gpu/vast/endpoints?id=${endpointId}`, { method: 'DELETE', timeout: this.timeouts.deploy });
+    return await this.parseJson(res, '/v1/gpu/vast/endpoints') as { deletedWorkers: number[]; failedWorkers: number[] };
+  }
+
+  /** Get logs from a Vast.ai serverless endpoint. Requires endpoint's own API key. */
+  async vastGetEndpointLogs(endpointName: string, endpointApiKey: string, lines = 100): Promise<string> {
+    const res = await this.fetch('/v1/gpu/vast/endpoints/logs', {
+      method: 'POST', timeout: this.timeouts.health,
+      body: JSON.stringify({ endpointName, endpointApiKey, lines }),
+    });
+    const data = await this.parseJson(res, '/v1/gpu/vast/endpoints/logs');
+    return (data.logs as string) ?? '';
+  }
+
+  /**
+   * Route an inference request to the least-loaded worker in a Vast.ai serverless endpoint.
+   * Returns the worker URL, or null if no worker is available (cold start in progress).
+   * Requires endpoint's own API key (from vastListEndpoints()).
+   */
+  async vastRouteRequest(endpointName: string, endpointApiKey: string, cost = 100): Promise<{ url: string; reqnum: number; signature: string; requestId: string } | null> {
+    const res = await this.fetch('/v1/gpu/vast/endpoints/route', {
+      method: 'POST', timeout: 10_000,
+      body: JSON.stringify({ endpointName, endpointApiKey, cost }),
+    });
+    const data = await this.parseJson(res, '/v1/gpu/vast/endpoints/route') as { available: boolean; url?: string; reqnum?: number; signature?: string; requestId?: string };
+    if (!data.available || !data.url) return null;
+    return { url: data.url, reqnum: data.reqnum ?? 0, signature: data.signature ?? '', requestId: data.requestId ?? '' };
+  }
+
+  // ── Vast.ai Worker Groups ───────────────────────────────────────────────
+
+  /** List all worker groups on the Vast.ai account. */
+  async vastListWorkerGroups(): Promise<Array<{ id: number; endpointId: number; endpointName: string; templateHash: string; gpuRamGb: number; maxWorkers: number; createdAt: string }>> {
+    const res = await this.fetch('/v1/gpu/vast/workergroups', { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/gpu/vast/workergroups');
+    return (data.workerGroups ?? []) as Array<{ id: number; endpointId: number; endpointName: string; templateHash: string; gpuRamGb: number; maxWorkers: number; createdAt: string }>;
+  }
+
+  /** Create a worker group for a serverless endpoint. */
+  async vastCreateWorkerGroup(spec: { endpointId?: number; endpointName?: string; templateHash?: string; searchParams?: string; gpuRamGb?: number; maxWorkers?: number; coldWorkers?: number }): Promise<{ id: number }> {
+    const res = await this.fetch('/v1/gpu/vast/workergroups', {
+      method: 'POST', timeout: this.timeouts.deploy,
+      body: JSON.stringify(spec),
+    });
+    return await this.parseJson(res, '/v1/gpu/vast/workergroups') as { id: number };
+  }
+
+  /** Update a worker group's scaling params or GPU filter. */
+  async vastUpdateWorkerGroup(id: number, updates: { minLoad?: number; targetUtil?: number; templateHash?: string; searchParams?: string; gpuRamGb?: number; maxWorkers?: number }): Promise<void> {
+    await this.fetch('/v1/gpu/vast/workergroups', {
+      method: 'PUT', timeout: this.timeouts.deploy,
+      body: JSON.stringify({ id, ...updates }),
+    });
+  }
+
+  /** Delete a worker group and stop its workers. */
+  async vastDeleteWorkerGroup(id: number): Promise<{ deletedWorkers: number[]; failedWorkers: number[] }> {
+    const res = await this.fetch(`/v1/gpu/vast/workergroups?id=${id}`, { method: 'DELETE', timeout: this.timeouts.deploy });
+    return await this.parseJson(res, '/v1/gpu/vast/workergroups') as { deletedWorkers: number[]; failedWorkers: number[] };
   }
 
   // ── Config ─────────────────────────────────────────────────────────────

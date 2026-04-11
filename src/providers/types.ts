@@ -9,7 +9,7 @@
 // Provider Identification
 // ---------------------------------------------------------------------------
 
-export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks' | 'deepgram' | 'elevenlabs' | 'modal' | 'modal-moss' | 'modal-seamless' | 'modal-qwen3asr-pipeline' | 'modal-voxtral' | 'skypilot' | 'vast-serverless' | 'runpod' | 'tensordock' | 'ollama' | 'mlx-qwen3-asr' | 'self-hosted' | 'gpu' | 'mock-stt' | 'mock-llm' | 'mock-tts';
+export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks' | 'fal' | 'deepgram' | 'elevenlabs' | 'modal' | 'modal-moss' | 'modal-seamless' | 'modal-qwen3asr-pipeline' | 'modal-voxtral' | 'skypilot' | 'vast-serverless' | 'runpod' | 'tensordock' | 'ollama' | 'mlx-qwen3-asr' | 'self-hosted' | 'gpu' | 'mock-stt' | 'mock-llm' | 'mock-tts';
 
 /** @deprecated Use ProviderId instead */
 export type AIProviderId = ProviderId;
@@ -258,6 +258,10 @@ export interface ImageRequest {
   seed?: number;
   /** Number of images to generate */
   n?: number;
+  /** Base image URL for inpainting / image-to-image */
+  imageUrl?: string;
+  /** Mask URL for inpainting (white = fill, black = keep) */
+  maskUrl?: string;
 }
 
 export interface ImageResponse {
