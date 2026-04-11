@@ -11,7 +11,7 @@
 
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
-import { falImage } from './src/providers/fal';
+import { routingImage } from './src/providers/routing-image';
 import type { ProviderMapping } from './src/proxy/types';
 
 const PORT = parseInt(process.env.PORT || '4000');
@@ -41,15 +41,20 @@ const providers: ProviderMapping = {
   chatFallbackChain: [
     { providerId: 'groq', model: 'llama-3.3-70b-versatile', provider: groqLLM },
   ],
-  // FAL AI — text-to-image (FLUX.1 Schnell) + mask-based inpainting (FLUX.1 Fill Pro)
-  image: falImage,
+  tts: {
+    'canopylabs/orpheus-v1-english': groqTTS,
+    'canopylabs/orpheus-arabic-saudi': groqTTS,
+  },
+  // Routing image provider: dit360 → local GPU 360°, fal-ai/* → fal.ai cloud
+  image: routingImage,
 };
 
 console.log(`[serve] Starting AI Gateway on port ${PORT}`);
 console.log(`[serve] API keys: ${API_KEYS ? `${API_KEYS.length} configured` : 'none (localhost only)'}`);
 console.log(`[serve] Rate limit: ${RATE_LIMIT_RPM > 0 ? `${RATE_LIMIT_RPM} RPM` : 'disabled'}`);
 console.log(`[serve] Groq key: ${process.env.GROQ_API_KEY.slice(0, 6)}...`);
-console.log(`[serve] FAL key: ${process.env.FAL_KEY ? process.env.FAL_KEY.slice(0, 8) + '...' : 'not set — images/inpainting disabled'}`);
+console.log(`[serve] TTS: groq orpheus (canopylabs/orpheus-v1-english)`);
+console.log(`[serve] Image: routing (dit360=${process.env.DIT360_URL ?? 'http://localhost:8000'}, fal=${process.env.FAL_KEY ? 'key set' : 'no key'})`);
 
 const server = await startProxy({
   port: PORT,
