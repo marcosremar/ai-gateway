@@ -46,9 +46,19 @@ export class RateLimiter {
     return `ip:${req.socket.remoteAddress || 'unknown'}`;
   }
 
-  /** Returns true if the request is allowed */
-  check(clientId: string): boolean {
-    if (this.refillRatePerMs <= 0) return true;
+  /** Result of a rate limit check, including header data for the response. */
+  check(clientId: string): {
+    allowed: boolean;
+    /** Total capacity (tokens per window). Maps to X-RateLimit-Limit. */
+    limit: number;
+    /** Tokens remaining after this request. Maps to X-RateLimit-Remaining. */
+    remaining: number;
+    /** Unix epoch second when the bucket will be full again. Maps to X-RateLimit-Reset. */
+    resetAt: number;
+  } {
+    if (this.refillRatePerMs <= 0) {
+      return { allowed: true, limit: 0, remaining: 0, resetAt: 0 };
+    }
 
     const now = Date.now();
     let bucket = this.buckets.get(clientId);
@@ -79,13 +89,24 @@ export class RateLimiter {
     }
     bucket.lastRefill = now;
 
+    // Compute reset time: how long until the bucket is full again.
+    // refillRatePerMs = capacity / 60_000, so time to full = (capacity - tokens) / refillRatePerMs ms.
+    const msToFull = this.refillRatePerMs > 0
+      ? Math.ceil((this.capacity - bucket.tokens) / this.refillRatePerMs)
+      : 0;
+    const resetAt = Math.ceil((now + msToFull) / 1000);
+
     if (bucket.tokens < 1) {
-      console.warn(`[rate-limit] Rate limit exceeded for ${clientId}`);
-      return false;
+      return { allowed: false, limit: this.capacity, remaining: 0, resetAt };
     }
 
     bucket.tokens -= 1;
-    return true;
+    return {
+      allowed: true,
+      limit: this.capacity,
+      remaining: Math.floor(bucket.tokens),
+      resetAt,
+    };
   }
 
   /** Remove buckets idle for more than 2 minutes */

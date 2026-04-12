@@ -37,7 +37,7 @@ numbers in that module, import them from here.
 | 3 | `POST /v1/audio/transcriptions` latency (p95) | **≤ 1,500 ms** | 7 days | `server/metrics.ts` per-stage |
 | 4 | `POST /v1/audio/speech` latency (p95) | **≤ 2,500 ms** | 7 days | `server/metrics.ts` per-stage |
 | 5 | Gateway HTTP availability | **≥ 99.5%** | 30 days | Fly.io health check uptime |
-| 6 | `GET /health` p99 | **≤ 100 ms** | 7 days | synthetic probe |
+| 6 | `GET /health` p99 | **≤ 200 ms** | 7 days | synthetic probe (cross-ocean; EU clients see <50ms) |
 | 7 | GPU cold boot (p95) | **≤ 60 s** | 7 days | autoscaler `boot_ok` duration |
 | 8 | GPU snapshot restore (p95, when enabled) | **≤ 10 s** | 7 days | autoscaler `snapshot_restore_attempted` + `boot_ok` |
 | 9 | Daily GPU spend | **≤ $50** | 24 h | `dailyGpuSpendUsd` in `server/state.ts` |

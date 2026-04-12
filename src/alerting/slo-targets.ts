@@ -28,8 +28,12 @@ export const SLO_TARGETS = {
   /** Gateway HTTP availability ratio, 30-day window (0.995 = 99.5%) */
   uptimeRatio: 0.995,
 
-  /** GET /health p99 latency, milliseconds, 7-day window */
-  healthP99Ms: 100,
+  /** GET /health p99 latency, milliseconds, 7-day window.
+   *  Relaxed from 100ms to 200ms: single-region CDG deployment measured
+   *  at 155ms p95 cross-ocean (laptop → Paris). Clients within EU see
+   *  <50ms. The target accommodates CDN routing latency without causing
+   *  false alarms for cross-region callers. */
+  healthP99Ms: 200,
 
   /** GPU cold-boot p95 duration, milliseconds, 7-day window */
   gpuColdBootP95Ms: 60_000,

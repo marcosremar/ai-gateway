@@ -27,29 +27,29 @@ describe('Proxy', () => {
   describe('RateLimiter', () => {
     it('allows requests within limit', () => {
       const limiter = new RateLimiter(3);
-      expect(limiter.check('1.2.3.4')).toBe(true);
-      expect(limiter.check('1.2.3.4')).toBe(true);
-      expect(limiter.check('1.2.3.4')).toBe(true);
+      expect(limiter.check('1.2.3.4').allowed).toBe(true);
+      expect(limiter.check('1.2.3.4').allowed).toBe(true);
+      expect(limiter.check('1.2.3.4').allowed).toBe(true);
     });
 
     it('blocks requests over limit', () => {
       const limiter = new RateLimiter(2);
-      expect(limiter.check('1.2.3.4')).toBe(true);
-      expect(limiter.check('1.2.3.4')).toBe(true);
-      expect(limiter.check('1.2.3.4')).toBe(false);
+      expect(limiter.check('1.2.3.4').allowed).toBe(true);
+      expect(limiter.check('1.2.3.4').allowed).toBe(true);
+      expect(limiter.check('1.2.3.4').allowed).toBe(false);
     });
 
     it('limits are per-IP', () => {
       const limiter = new RateLimiter(1);
-      expect(limiter.check('1.1.1.1')).toBe(true);
-      expect(limiter.check('2.2.2.2')).toBe(true);
-      expect(limiter.check('1.1.1.1')).toBe(false);
+      expect(limiter.check('1.1.1.1').allowed).toBe(true);
+      expect(limiter.check('2.2.2.2').allowed).toBe(true);
+      expect(limiter.check('1.1.1.1').allowed).toBe(false);
     });
 
     it('allows unlimited when rpm is 0', () => {
       const limiter = new RateLimiter(0);
       for (let i = 0; i < 100; i++) {
-        expect(limiter.check('1.1.1.1')).toBe(true);
+        expect(limiter.check('1.1.1.1').allowed).toBe(true);
       }
     });
   });
