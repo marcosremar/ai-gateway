@@ -10,7 +10,95 @@ import { shouldUseSnapshot, type PersistedSnapshot, type SnapshotPolicyDecision 
 import { SnapgpuMetrics, buildWorkloadKey } from './snapgpu-metrics';
 
 const BOOT_COOLDOWN_BASE_MS = 2 * 60_000;  // 2 min base, exponential backoff
-const BOOT_COOLDOWN_MAX_MS = 30 * 60_000;  // Max 30 min cooldown
+// Max cooldown capped at 15 min (was 30). Observed in production that
+// RunPod cooldowns reaching 57 minutes effectively blocked capacity
+// recovery — a transient 500 on one deploy locked the autoscaler out of
+// the provider for nearly an hour, wasting capacity that returned in
+// 10-15 minutes. See docs/improvement-plan.md P1-3 and
+// docs/insights/2026-04-12-first-pass.md finding #5.
+const BOOT_COOLDOWN_MAX_MS = 15 * 60_000;  // Max 15 min cooldown
+
+/**
+ * Failure category classifier and cooldown map (P2-3).
+ *
+ * Motivation: the old implementation used a single exponential backoff
+ * for every failure class, which meant a billing error (24h to self-heal)
+ * and a transient capacity error (10min to self-heal) got the same
+ * 10-minute cooldown. Splitting by category lets the autoscaler recover
+ * from capacity blips 10× faster while still backing off appropriately
+ * from persistent issues like account quota blocks.
+ *
+ * Categories:
+ *   - billing / quota: provider account blocked. Won't self-heal without
+ *     operator intervention. Long cooldown (24h) keeps us out of the way.
+ *   - no_capacity: provider has no GPUs matching our filter. Capacity
+ *     returns on the order of minutes. Short cooldown (5 min).
+ *   - ssh_tunnel / api_error: transient transport/network blip. Usually
+ *     clears in seconds. Short cooldown (2 min) to retry fast.
+ *   - docker_image: local config bug (e.g. missing modal CLI). Not
+ *     fixable via retries — long cooldown (1h) signals "don't bother".
+ *   - unknown: default bucket for the classifier's misses. 10 min gives
+ *     a sane middle ground. Observed failures should migrate out of this
+ *     bucket over time as categories get added.
+ */
+export type BootFailureCategory =
+  | 'billing'
+  | 'quota'
+  | 'no_capacity'
+  | 'ssh_tunnel'
+  | 'api_error'
+  | 'docker_image'
+  | 'timeout'
+  | 'unknown';
+
+const COOLDOWN_BY_CATEGORY: Record<BootFailureCategory, number> = {
+  billing:      24 * 60 * 60_000,  // 24h — won't self-heal
+  quota:        24 * 60 * 60_000,  // 24h — same
+  docker_image: 60 * 60_000,       // 1h — local config bug
+  no_capacity:  5 * 60_000,        // 5m — capacity churn is fast
+  ssh_tunnel:   2 * 60_000,        // 2m — transient transport
+  api_error:    2 * 60_000,        // 2m — transient
+  timeout:      5 * 60_000,        // 5m — likely slow host, retry elsewhere
+  unknown:      10 * 60_000,       // 10m — sane default
+};
+
+/**
+ * Classify a failure reason string into one of BootFailureCategory.
+ * Pattern-based — intentionally simple. Unknown reasons land in 'unknown'
+ * so they show up in metrics and can be promoted to real categories later.
+ */
+export function classifyBootFailure(reason: string | null | undefined): BootFailureCategory {
+  if (!reason) return 'unknown';
+  const r = reason.toLowerCase();
+  if (r.includes('balance') || r.includes('credit') || r.includes('payment')) return 'billing';
+  if (r.includes('quota') || r.includes('machinequota') || r.includes('abuse')) return 'quota';
+  if (r.includes('no module named') || r.includes('docker') && r.includes('fail')) return 'docker_image';
+  if (r.includes('no gpus') || r.includes('no instances') || r.includes('exhausted') || r.includes('out of capacity')) return 'no_capacity';
+  if (r.includes('ssh_tunnel') || r.includes('ssh tunnel')) return 'ssh_tunnel';
+  if (r.includes('timeout') || r.includes('timed out')) return 'timeout';
+  if (r.includes('http ') || r.includes('api ') || r.includes('rate limit') || r.includes('429') || r.includes('500') || r.includes('502') || r.includes('503')) return 'api_error';
+  return 'unknown';
+}
+
+/**
+ * Compute cooldown duration for a given failure. The categorization wins
+ * over exponential backoff for categories with explicit durations. For
+ * unknown failures, the old exponential formula applies with the 15-min cap.
+ */
+export function computeCooldownMs(category: BootFailureCategory, failCount: number): number {
+  // For categories where we have an explicit duration, use it directly.
+  // Exponential is still applied on top for unknown/api_error/ssh_tunnel
+  // so repeated failures of the same category escalate — but still capped.
+  const base = COOLDOWN_BY_CATEGORY[category];
+  if (category === 'billing' || category === 'quota' || category === 'docker_image') {
+    // These don't benefit from exponential — the first failure already
+    // says "don't retry for a long time". Return base directly.
+    return base;
+  }
+  // For transient categories, use the smaller of base × 2^(failCount-1) and BOOT_COOLDOWN_MAX_MS.
+  const expo = base * Math.pow(2, Math.max(0, failCount - 1));
+  return Math.min(expo, BOOT_COOLDOWN_MAX_MS);
+}
 
 export interface BootOrchestratorCallbacks {
   getStates(userId: string): GpuTierState[] | undefined;
@@ -838,11 +926,15 @@ export class BootOrchestrator {
           this.callbacks.recordProviderHealthEvent(tierConfig.provider, false);
           const failCount = (current.prevBootFailCount ?? 0) + 1;
           const durationMs = Date.now() - (current as BootingTierState).bootTriggeredAt;
+          // P2-3: classify the failure so cooldown length matches how fast
+          // the underlying problem self-heals. Billing=24h, no_capacity=5m, etc.
+          const category = classifyBootFailure(reason);
+          const cooldownMs = computeCooldownMs(category, failCount);
           const newIdle: IdleTierState = {
             state: 'idle',
             tierIndex: tierIndex,
             bootFailCount: failCount,
-            cooldownUntil: Date.now() + Math.min(BOOT_COOLDOWN_BASE_MS * Math.pow(2, failCount - 1), BOOT_COOLDOWN_MAX_MS),
+            cooldownUntil: Date.now() + cooldownMs,
           };
           currentStates[tierIndex] = newIdle;
           this.callbacks.setStates(userId, currentStates);
@@ -858,7 +950,7 @@ export class BootOrchestrator {
             endpoint: (current as BootingTierState).endpoint, trigger: (current as BootingTierState).trigger,
             oldState: 'booting', newState: 'idle',
             error: reason ?? 'unknown',
-            metadata: { failCount, estimatedWasteCost: +estimatedWasteCost.toFixed(4) },
+            metadata: { failCount, estimatedWasteCost: +estimatedWasteCost.toFixed(4), failureCategory: category, cooldownMs },
           });
           return;
         }
@@ -885,11 +977,15 @@ export class BootOrchestrator {
         if (currentStates?.[tierIndex]?.state === 'booting'
           && (currentStates[tierIndex] as BootingTierState).bootTriggeredAt === bootTimestamp) {
           const failCount = ((currentStates[tierIndex] as BootingTierState).prevBootFailCount ?? 0) + 1;
+          // P2-3: categorize even the unexpected-exception case so cooldown
+          // duration matches the failure class. Most unexpected errors fall
+          // into 'unknown' and get the 10m default.
+          const category = classifyBootFailure(msg);
           currentStates[tierIndex] = {
             state: 'idle',
             tierIndex: tierIndex,
             bootFailCount: failCount,
-            cooldownUntil: Date.now() + Math.min(BOOT_COOLDOWN_BASE_MS * Math.pow(2, failCount - 1), BOOT_COOLDOWN_MAX_MS),
+            cooldownUntil: Date.now() + computeCooldownMs(category, failCount),
           } satisfies IdleTierState;
           this.callbacks.setStates(userId, currentStates);
         }

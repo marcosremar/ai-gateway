@@ -127,7 +127,13 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
     tts: [{ provider: 'groq', model: 'orpheus-v1-english' }],
     gpuDeploy: {
       dockerImage: `${process.env.DOCKER_IMAGE_PREFIX || 'marcosremar'}/babelcast-subtitle:latest`,
-      gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
+      // P1-4 (docs/improvement-plan.md): removed RTX 5090 from the
+      // allowlist. Readiness history on 2026-04-11 showed STT p95=8030ms
+      // on 5090 (breaches sttP95Ms=1500 SLO 5.4x), while the same image
+      // on 4090 has p95=1024ms (within SLO). Likely cause: first-request
+      // Blackwell CUDA kernel compilation. Pinning to 4090 until a warmup
+      // phase lands in the container (P2-2).
+      gpuTypes: ['NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
       region: '',
       timeoutMin: 30,
     },

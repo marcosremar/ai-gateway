@@ -318,9 +318,9 @@ describe('Fly.io Architecture (#905-#910)', () => {
     expect(toml).toContain("auto_stop_machines = 'stop'");
   });
 
-  it('#910 min_machines_running = 0', () => {
+  it('#910 min_machines_running = 1 (P1-2: keep warm to avoid 2s cold start)', () => {
     const toml = read('fly.toml');
-    expect(toml).toContain('min_machines_running = 0');
+    expect(toml).toContain('min_machines_running = 1');
   });
 });
 

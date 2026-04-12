@@ -432,14 +432,16 @@ describe('cooldown tracker', () => {
 
   it('#215 startDeployWithTiers filters out providers in cooldown', () => {
     const fnStart = deploySource.indexOf('export async function startDeployWithTiers');
-    const fnBody = deploySource.slice(fnStart, fnStart + 1000);
+    // Budget cap + runaway detector blocks are prepended before cooldown
+    // logic. Cooldown code lands at ~offset 3315 from function start.
+    const fnBody = deploySource.slice(fnStart, fnStart + 4500);
     expect(fnBody).toContain('cooldownTracker.isCoolingDown');
     expect(fnBody).toContain('cooldown_skip');
   });
 
   it('#216 bypasses cooldown when all providers are cooling down', () => {
     const fnStart = deploySource.indexOf('export async function startDeployWithTiers');
-    const fnBody = deploySource.slice(fnStart, fnStart + 1500);
+    const fnBody = deploySource.slice(fnStart, fnStart + 5000);
     expect(fnBody).toContain('All providers in cooldown');
     expect(fnBody).toContain('cooldownTracker.pickEarliestExpiry');
   });
@@ -489,7 +491,9 @@ describe('buildGpuTiers', () => {
 describe('startDeployWithTiers — advanced', () => {
   it('#220b probes all providers in parallel before committing', () => {
     const fnStart = deploySource.indexOf('export async function startDeployWithTiers');
-    const fnBody = deploySource.slice(fnStart, fnStart + 3000);
+    // Increased from 3000 to 5500 — budget cap and runaway detector
+    // blocks now live before the provider probe section.
+    const fnBody = deploySource.slice(fnStart, fnStart + 5500);
     expect(fnBody).toContain('probeResults');
     expect(fnBody).toContain('Promise.allSettled');
     expect(fnBody).toContain('listOffers');
@@ -497,7 +501,7 @@ describe('startDeployWithTiers — advanced', () => {
 
   it('#220c reorders tiers by availability and response time', () => {
     const fnStart = deploySource.indexOf('export async function startDeployWithTiers');
-    const fnBody = deploySource.slice(fnStart, fnStart + 4000);
+    const fnBody = deploySource.slice(fnStart, fnStart + 6000);
     expect(fnBody).toContain('reorderedTiers');
     expect(fnBody).toContain('.sort(');
     expect(fnBody).toContain('available');

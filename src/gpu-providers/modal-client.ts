@@ -112,6 +112,66 @@ export class ModalClient extends AbstractGpuProvider {
     this.proxyAuthToken = options?.proxyAuthToken ?? process.env.MODAL_PROXY_SECRET ?? null;
   }
 
+  /**
+   * Cached result of `python3 -m modal --version`. Set to:
+   *   - `null` before first check
+   *   - `true` if the command succeeded
+   *   - a string error message if the command failed (permanent disable)
+   *
+   * This is set once per process lifetime. A host that doesn't have the
+   * modal CLI installed will never benefit from retries — the failure is
+   * deterministic, so we cache the negative result and every subsequent
+   * preflight returns the cached error instantly.
+   *
+   * Historical context: 2026-04-10, 35/35 Modal deploys failed with
+   * "No module named modal" on a machine where `pip3 install modal` had
+   * never been run. Each attempt wasted ~10s on retry/backoff before the
+   * error surfaced. Cumulative waste: ~355s per session. See
+   * docs/insights/2026-04-12-first-pass.md finding #1.
+   */
+  private modalCliAvailable: true | string | null = null;
+
+  /**
+   * Modal-specific preflight: verify that `python3 -m modal --version` works.
+   * If the local modal CLI isn't installed, every deploy is guaranteed to
+   * fail with "No module named modal" — catch that once at preflight and
+   * return `canDeploy: false` with a clear actionable message.
+   */
+  async preflight(_credentials: ProviderCredentials): Promise<{
+    canDeploy: boolean;
+    blockReason: string | null;
+    balance?: number;
+    quota?: number;
+  } | null> {
+    if (this.modalCliAvailable === true) {
+      return { canDeploy: true, blockReason: null };
+    }
+    if (typeof this.modalCliAvailable === 'string') {
+      return { canDeploy: false, blockReason: this.modalCliAvailable };
+    }
+
+    try {
+      const { stdout } = await (await getExecFileAsync())(
+        'python3', ['-m', 'modal', '--version'],
+        { timeout: 5_000 },
+      );
+      this.log.log(`[modal] preflight: modal CLI present (${stdout.trim()})`);
+      this.modalCliAvailable = true;
+      return { canDeploy: true, blockReason: null };
+    } catch (err) {
+      const errMsg = this.errMsg(err);
+      // The specific "No module named modal" shape is the one we're
+      // guarding against. Other errors (e.g. Python missing entirely)
+      // also fail this path — they're all equally blocking.
+      const reason = errMsg.includes('No module named modal')
+        ? 'modal CLI not installed (pip3 install modal)'
+        : `modal CLI check failed: ${errMsg.slice(0, 120)}`;
+      this.log.warn(`[modal] PREFLIGHT DISABLED: ${reason}`);
+      this.modalCliAvailable = reason;
+      return { canDeploy: false, blockReason: reason };
+    }
+  }
+
   private async getWorkspace(credentials: ProviderCredentials): Promise<string> {
     if (this.workspace) return this.workspace;
     if (this.workspacePromise) return this.workspacePromise;
@@ -173,6 +233,10 @@ export class ModalClient extends AbstractGpuProvider {
     if (!deployFile) {
       throw new Error('[modal] createInstance requires spec.dockerImage to be the path to a modal .py deploy file');
     }
+
+    // Preflight: if the local modal CLI is missing, fail fast with a
+    // clear error instead of going through 3 retries of "No module named modal".
+    await this._runPreflight(credentials);
 
     const env = buildModalEnv(credentials.apiKey);
     const args = ['-m', 'modal', 'deploy', deployFile];

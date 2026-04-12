@@ -1409,6 +1409,13 @@ export class VastClient extends AbstractGpuProvider {
       // SSH-only hosts: use SSH tunnel
       if (!endpoint && ip && sshHost && sshPort) {
         this.log.log(`[vast] Instance ${contractId} is SSH-only (no direct ports). Setting up SSH tunnel to ${sshHost}:${sshPort}...`);
+        // P2-1 (docs/improvement-plan.md): capture the full SSH tunnel error
+        // rather than the static string "SSH tunnel failed". Before this fix,
+        // the lifecycle event `deploy_failed` carried an 80-char truncation
+        // that hid the actual root cause (SSH key path, permission denied,
+        // port blocked, etc.). Insights report 2026-04-12 showed 40%+ of
+        // Vast failures with this opaque message.
+        let tunnelFailReason = 'SSH tunnel failed';
         try {
           const { getOrCreateTunnel } = await import('../../server/ssh-tunnel');
           const tunnel = getOrCreateTunnel(sshHost, sshPort, 8000);
@@ -1442,14 +1449,25 @@ export class VastClient extends AbstractGpuProvider {
               },
             };
           }
-          this.log.warn(`[vast] SSH tunnel failed for ${contractId}. Destroying...`);
+          // tunnel.open() returned false without throwing — the tunnel
+          // module reports the reason via lastError on its state. Capture
+          // whatever it exposes so the upstream failure summary is useful.
+          const tunnelLastErr = (tunnel as { lastError?: string }).lastError;
+          tunnelFailReason = tunnelLastErr
+            ? `ssh_tunnel_open_false: ${tunnelLastErr}`.slice(0, 400)
+            : `ssh_tunnel_open_returned_false (host=${sshHost}:${sshPort}, no exception thrown)`;
+          this.log.warn(`[vast] SSH tunnel failed for ${contractId}: ${tunnelFailReason}. Destroying...`);
         } catch (tunnelErr) {
-          this.log.warn(`[vast] SSH tunnel error for ${contractId}: ${this.errMsg(tunnelErr)}`);
+          const errMsg = this.errMsg(tunnelErr);
+          // Preserve the full error up to 400 chars so the upstream summary
+          // carries something diagnosable (key path, exit code, stderr).
+          tunnelFailReason = `ssh_tunnel_exception: ${errMsg}`.slice(0, 400);
+          this.log.warn(`[vast] SSH tunnel error for ${contractId}: ${tunnelFailReason}`);
         }
         // SSH tunnel failed → record host failure before cleanup
         if (ip) this._recordHostFailure(ip);
-        await this._safeCleanupInstance(instanceId, apiKey, 'SSH tunnel failed');
-        failures.push({ offerId, gpu: gpuName, reason: 'SSH tunnel failed' });
+        await this._safeCleanupInstance(instanceId, apiKey, tunnelFailReason);
+        failures.push({ offerId, gpu: gpuName, reason: tunnelFailReason });
         return null;
       }
 

@@ -21,7 +21,7 @@ These exist because one day on 2026-03-25 burned $130 vs a $6/day average.
 The spend path runs autonomously in the background; a silent regression
 here costs real dollars before anyone notices.
 
-### [ ] P0-1. Prove the daily spend cap actually enforces
+### [x] P0-1. Prove the daily spend cap actually enforces
 
 **Finding**: #4 — `cost_ledger.json` shows a single-day spike to $130.66
 even though `DAILY_BUDGET_USD=50` exists in `server/state.ts`.
@@ -46,7 +46,7 @@ error message.
 **Effort**: M (2–4 hours) — split between writing the test and finding
 where the existing cap check silently fails.
 
-### [ ] P0-2. Runaway detector for create/destroy loops
+### [x] P0-2. Runaway detector for create/destroy loops
 
 **Finding**: #4 — the $130 spike was a rapid create/destroy loop that
 also triggered RunPod's abuse flag. The budget cap alone isn't enough
@@ -69,7 +69,7 @@ on the same provider and asserts the 7th is refused. The existing
 
 **Effort**: M (3–5 hours).
 
-### [ ] P0-3. Wire cost alerts at 50% / 80% of daily cap
+### [x] P0-3. Wire cost alerts at 50% / 80% of daily cap
 
 **Finding**: #4 — `DiscordAlertChannel` exists in `src/alerting/channels/`
 but is never wired against `dailyGpuSpendUsd`. A soft alert at $25
@@ -101,7 +101,7 @@ is easier.
 These are the "why is this broken?" items where the fix is obvious once
 you look at the data. All under 1 hour of work each.
 
-### [ ] P1-1. `pip3 install modal` + preflight guard
+### [x] P1-1. `pip3 install modal` + preflight guard
 
 **Finding**: #1 — all 35 Modal deploys failed with "No module named
 modal". 100% failure, 10.15s wasted per retry, 355s total.
@@ -124,7 +124,7 @@ attempts Modal deploys for the process lifetime.
 
 **Effort**: S (30–60 min).
 
-### [ ] P1-2. `min_machines_running = 1` in fly.toml
+### [x] P1-2. `min_machines_running = 1` in fly.toml
 
 **Finding**: #6 — live `/health` first-request was 2.03s (warm was
 112ms). Breaches the `healthP99Ms=100ms` SLO by 20× on cold start.
@@ -143,7 +143,7 @@ all return in <200ms. Previously the first was >1s.
 
 **Effort**: S (5 min edit + 10 min deploy + smoke).
 
-### [ ] P1-3. Cap `BOOT_COOLDOWN_MAX_MS` at 15 minutes
+### [x] P1-3. Cap `BOOT_COOLDOWN_MAX_MS` at 15 minutes
 
 **Finding**: #5 — RunPod cooldowns reached 57 minutes, blocking the
 autoscaler from using capacity that returned in 10 minutes.
@@ -161,7 +161,7 @@ even after 10 consecutive failures.
 
 **Effort**: S (15 min).
 
-### [ ] P1-4. Pin `babelcast-subtitle:latest` to RTX 4090
+### [x] P1-4. Pin `babelcast-subtitle:latest` to RTX 4090
 
 **Finding**: #3 — same image on RTX 5090 has STT p95=8030ms (breaches
 SLO 5.4×); on RTX 4090 has STT p95=1024ms (within SLO).
@@ -205,7 +205,7 @@ document a required `TENSORDOCK_SSH_KEY_ID` env var.
 These matter because they directly shape what users experience, but
 they're less urgent than the financial safety layer.
 
-### [ ] P2-1. Investigate Vast.ai SSH tunnel failures (capture full error)
+### [x] P2-1. Investigate Vast.ai SSH tunnel failures (capture full error)
 
 **Finding**: #2 — 43% start→ready failure on Vast.ai; truncated
 "SSH tu..." errors hide the root cause.
@@ -257,7 +257,7 @@ safer.
 **Effort**: M (2–3 hours) — includes a dockers submodule commit and a
 rebuild, plus a re-run of the benchmark.
 
-### [ ] P2-3. Split cooldown by failure category
+### [x] P2-3. Split cooldown by failure category
 
 **Finding**: #5 — a single exponential cooldown treats every failure
 the same. Billing errors don't self-heal; capacity errors do.
@@ -299,7 +299,7 @@ category split both live in the same file).
 These make future digests (see `docs/insights/`) cheaper and more
 reliable. They pay off over time, not immediately.
 
-### [ ] P3-1. Declare a schema for lifecycle events
+### [x] P3-1. Declare a schema for lifecycle events
 
 **Finding**: #7 — `metadata` in `gpu.jsonl` is free-form. Different
 events use different keys. Aggregation is painful.
@@ -329,7 +329,7 @@ and asserts each conforms to its variant.
 **Effort**: L (1–2 days) — large call-site count. Can be staged: land
 the schema first, migrate call sites opportunistically.
 
-### [ ] P3-2. `bun run insights:digest` script
+### [x] P3-2. `bun run insights:digest` script
 
 **Finding**: meta — the insights report took 15 minutes of grep and
 Python. If it stays ad-hoc, it won't happen on a schedule.
@@ -355,7 +355,7 @@ doc that contains the same findings 1–7 as the first-pass report
 **Effort**: M (3–5 hours). Clean TS code that replicates the Python
 analysis in this session.
 
-### [ ] P3-3. Profile Fly.io cold start and attribute the 2s
+### [x] P3-3. Profile Fly.io cold start and attribute the 2s
 
 **Finding**: #6 — cold start is 2.03s. Suspected cause: pino module
 load. But "suspected" ≠ "known".
