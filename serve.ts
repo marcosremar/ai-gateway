@@ -12,7 +12,10 @@
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { routingImage } from './src/providers/routing-image';
+import { createLogger } from './src/logger';
 import type { ProviderMapping } from './src/proxy/types';
+
+const log = createLogger('serve');
 
 const PORT = parseInt(process.env.PORT || '4000');
 const API_KEYS = process.env.GATEWAY_API_KEYS
@@ -49,12 +52,8 @@ const providers: ProviderMapping = {
   image: routingImage,
 };
 
-console.log(`[serve] Starting AI Gateway on port ${PORT}`);
-console.log(`[serve] API keys: ${API_KEYS ? `${API_KEYS.length} configured` : 'none (localhost only)'}`);
-console.log(`[serve] Rate limit: ${RATE_LIMIT_RPM > 0 ? `${RATE_LIMIT_RPM} RPM` : 'disabled'}`);
-console.log(`[serve] Groq key: ${process.env.GROQ_API_KEY.slice(0, 6)}...`);
-console.log(`[serve] TTS: groq orpheus (canopylabs/orpheus-v1-english)`);
-console.log(`[serve] Image: routing (dit360=${process.env.DIT360_URL ?? 'http://localhost:8000'}, fal=${process.env.FAL_KEY ? 'key set' : 'no key'})`);
+log.log({ port: PORT, apiKeys: API_KEYS ? API_KEYS.length : 0, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
+log.log({ groqKey: process.env.GROQ_API_KEY.slice(0, 6) + '...', tts: 'groq/orpheus', fal: process.env.FAL_KEY ? 'key set' : 'no key' }, 'Providers configured');
 
 const server = await startProxy({
   port: PORT,
