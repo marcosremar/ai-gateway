@@ -150,12 +150,12 @@ export async function handlePipelineSSE(req: IncomingMessage, res: ServerRespons
         response: result.translation,
         timing: result.timing,
       });
-      try { res.end(); } catch {}
+      try { res.end(); } catch { /* best-effort: cleanup or optional side-effect */ }
     },
     onError(stage: string, error: Error) {
       if (clientClosed) return;
       safeSseWrite('error', { message: error.message, stage });
-      try { res.end(); } catch {}
+      try { res.end(); } catch { /* best-effort: cleanup or optional side-effect */ }
     },
   };
 

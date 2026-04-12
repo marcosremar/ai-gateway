@@ -201,7 +201,7 @@ export async function handleSetApiKeys(req: IncomingMessage, res: ServerResponse
     writeFileSync(envPath, envContent, { mode: 0o600 });
     // Belt-and-suspenders: writeFileSync mode only applies on file creation;
     // chmodSync enforces 0o600 on pre-existing files too.
-    try { chmodSync(envPath, 0o600); } catch {}
+    try { chmodSync(envPath, 0o600); } catch { /* best-effort: cleanup or optional side-effect */ }
   } catch (err) {
     console.warn('[config] Failed to persist API keys to .env:', err);
   }

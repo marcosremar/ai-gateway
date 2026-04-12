@@ -336,7 +336,7 @@ export class VastClient extends AbstractGpuProvider {
   /**
    * Best-effort cleanup of an instance that failed during creation/setup.
    *
-   * Why this exists: bare `try { deleteInstance(...) } catch {}` blocks were
+   * Why this exists: bare empty-catch cleanup blocks were
    * silently leaking instances when cleanup failed (e.g., API timeout, rate
    * limit). Each leaked instance is a $0.30-1.00/hr bill running until manual
    * intervention. This helper retries once and ALWAYS surfaces the failure

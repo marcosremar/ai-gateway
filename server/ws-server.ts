@@ -80,7 +80,7 @@ setInterval(() => {
   }
   for (const id of stale) {
     const backend = sttSessions.get(id);
-    if (backend) try { backend.close(); } catch {}
+    if (backend) try { backend.close(); } catch { /* already closed */ }
     sttSessions.delete(id);
   }
   if (stale.length) console.log(`[ws] Cleaned ${stale.length} stale STT session(s)`);
@@ -1137,7 +1137,7 @@ export function startWsServer() {
         'POST /v1/playground/tts': pg.handlePlaygroundTts,
         'POST /v1/playground/pipeline': pg.handlePlaygroundPipeline,
       });
-    } catch {}
+    } catch { /* playground handlers are optional — absent module means feature off */ }
     // AI handlers (inference endpoints) + Auto-swap
     try {
       const ai = require('./ai-handlers');
@@ -1157,7 +1157,7 @@ export function startWsServer() {
         'POST /v1/auto-swap/toggle': ai.handleAutoSwapToggle,
         'POST /v1/auto-swap/benchmark': ai.handleAutoSwapBenchmark,
       });
-    } catch {}
+    } catch { /* ai-handlers module optional — serve.ts proxy can run without them */ }
 
     // ── Initialize workload registry ────────────────────────────────────
     try {
@@ -1177,7 +1177,7 @@ export function startWsServer() {
     try {
       const wh = require('./workload-handlers');
       routeWorkloadRequest = wh.routeWorkloadRequest;
-    } catch {}
+    } catch { /* workload-handlers optional — routing falls through to 404 if absent */ }
 
     Bun.serve({
       port: PORT,

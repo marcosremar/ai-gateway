@@ -103,7 +103,7 @@ function startBotAudioPull(botEndpoint: string) {
 }
 function stopBotAudioPull() {
   if (botAudioPullWs) {
-    try { botAudioPullWs.close(); } catch {}
+    try { botAudioPullWs.close(); } catch { /* best-effort: cleanup or optional side-effect */ }
     botAudioPullWs = null;
   }
 }
@@ -573,7 +573,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
             } else {
               await runpod.deleteInstance(instance.instanceId, { apiKey });
             }
-          } catch {}
+          } catch { /* best-effort: cleanup or optional side-effect */ }
           return;
         }
 

@@ -633,7 +633,7 @@ export async function autoBootFromProfile(): Promise<void> {
         try {
           const j = JSON.parse(data);
           console.log(`[gpu] autoBootFromProfile: ${j.status} — ${j.message}`);
-        } catch {}
+        } catch { /* best-effort: cleanup or optional side-effect */ }
       },
     } as unknown as ServerResponse;
 
@@ -1066,7 +1066,7 @@ df -h / 2>&1
 
   await new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
-      try { sshProc.kill('SIGKILL'); } catch {}
+      try { sshProc.kill('SIGKILL'); } catch { /* best-effort: cleanup or optional side-effect */ }
       result.push('\nTIMEOUT after 30s\n');
       resolve();
     }, 30_000);

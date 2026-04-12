@@ -131,11 +131,14 @@ export function logGpuEvent(
     metadata?: Record<string, unknown>;
   },
 ) {
-  // Always write to file (persistent, no DB dependency)
+  // Always write to file (persistent, no DB dependency). File-logger has
+  // its own rotation and stderr fallback — a failure here means the file
+  // system is fully unwritable, which will surface elsewhere. No point
+  // double-logging it.
   try {
     const { logGpuEventToFile } = require('./file-logger');
     logGpuEventToFile(event, provider, success, opts);
-  } catch {}
+  } catch { /* file-logger self-reports on stderr */ }
 
   setPendingDbWrites(pendingDbWrites + 1);
   prisma.gpuEvent
@@ -576,10 +579,10 @@ export async function upsertHostReputation(opts: {
                 totalHosts: recentHosts.length,
                 failRate: Math.round(failRate * 100),
               });
-            } catch {}
+            } catch { /* broadcast is best-effort; no connected clients = nothing to do */ }
           }
         }
-      } catch {}
+      } catch { /* aggregation across one GPU type failed — continue to next */ }
     }
   } catch (err) {
     console.warn(`[reputation] Failed to upsert ${hostKey}:`, err);
@@ -666,7 +669,7 @@ export async function updateHostLatency(
         try {
           const { broadcastWs } = await import('./ws-state');
           broadcastWs({ type: 'host:degraded', hostKey, oldScore, newScore: reputationScore, reason: `latency=${avgLatencyMs.toFixed(0)}ms` });
-        } catch {}
+        } catch { /* broadcast best-effort; not fatal if no WS clients */ }
       }
       console.log(`[reputation] Recalc ${hostKey} after ${requestCount} requests: score=${reputationScore.toFixed(3)} (latency=${avgLatencyMs.toFixed(0)}ms, var=${latencyVariance.toFixed(0)})`);
     }
@@ -766,11 +769,16 @@ export function computePercentile(sortedArr: number[], p: number): number {
 
 // ── /metrics endpoint ───────────────────────────────────────────────────────
 
-export async function handleMetrics(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+/**
+ * Snapshot the in-memory metrics state into a plain object that both
+ * exporters (JSON and Prometheus) can read. Keeps the two formats in sync
+ * — they always see the same underlying numbers at the same instant.
+ */
+function snapshotMetrics(): Record<string, unknown> {
   const sorted = [...latencyRing].sort((a, b) => a - b);
   const uptimeSec = Math.round((Date.now() - startedAt) / 1000);
 
-  const body = {
+  return {
     requestsTotal: metricsCounters.requestsTotal,
     requestsByStage: { ...metricsCounters.byStage },
     requestsByProvider: { ...metricsCounters.byProvider },
@@ -787,7 +795,6 @@ export async function handleMetrics(_req: IncomingMessage, res: ServerResponse):
       totalTokens: metricsCounters.totalInputTokens + metricsCounters.totalOutputTokens,
     },
     translationCache: getTranslationCacheStats(),
-    // Cost tracking
     cost: {
       dailySpendUsd: dailyGpuSpendUsd,
       dailyBudgetUsd: DAILY_BUDGET_USD,
@@ -800,11 +807,101 @@ export async function handleMetrics(_req: IncomingMessage, res: ServerResponse):
         : null,
     },
   };
+}
 
-  const requestId = getOrCreateRequestId(_req);
+/**
+ * Escape a label value for Prometheus text format. Backslash, quote, and
+ * newline are the three characters that need quoting per the exposition
+ * format spec: https://prometheus.io/docs/instrumenting/exposition_formats/
+ */
+function promLabelEscape(v: string): string {
+  return v.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+}
+
+function promLine(name: string, help: string, type: 'counter' | 'gauge', value: number, labels?: Record<string, string>): string {
+  const labelStr = labels
+    ? '{' + Object.entries(labels).map(([k, v]) => `${k}="${promLabelEscape(v)}"`).join(',') + '}'
+    : '';
+  return `# HELP ${name} ${help}\n# TYPE ${name} ${type}\n${name}${labelStr} ${value}\n`;
+}
+
+/**
+ * Render the metrics snapshot in Prometheus text exposition format.
+ * Each counter/gauge gets a HELP + TYPE + sample line. Per-label metrics
+ * (by stage, by provider) emit one sample per label value under a single
+ * HELP/TYPE header.
+ */
+function renderPrometheus(snap: Record<string, unknown>): string {
+  const lines: string[] = [];
+
+  // Scalar counters / gauges
+  lines.push(promLine('gateway_requests_total', 'Total requests served by the gateway', 'counter', snap.requestsTotal as number));
+  lines.push(promLine('gateway_errors_total', 'Total errored requests', 'counter', snap.errorsTotal as number));
+  lines.push(promLine('gateway_db_log_failures_total', 'Total DB log write failures', 'counter', snap.dbLogFailures as number));
+  lines.push(promLine('gateway_uptime_seconds', 'Gateway process uptime in seconds', 'gauge', snap.uptimeSec as number));
+
+  // Latency percentiles (exposed as a single gauge per quantile — simpler than
+  // emitting a full histogram, and matches what Grafana queries typically want)
+  lines.push(promLine('gateway_latency_p50_ms', 'p50 latency across all stages', 'gauge', snap.latencyP50Ms as number));
+  lines.push(promLine('gateway_latency_p95_ms', 'p95 latency across all stages', 'gauge', snap.latencyP95Ms as number));
+  lines.push(promLine('gateway_latency_p99_ms', 'p99 latency across all stages', 'gauge', snap.latencyP99Ms as number));
+
+  // Per-stage counters
+  const byStage = snap.requestsByStage as Record<string, number>;
+  lines.push('# HELP gateway_requests_by_stage Requests served per pipeline stage\n# TYPE gateway_requests_by_stage counter\n');
+  for (const [stage, count] of Object.entries(byStage)) {
+    lines.push(`gateway_requests_by_stage{stage="${promLabelEscape(stage)}"} ${count}\n`);
+  }
+
+  // Per-provider counters
+  const byProvider = snap.requestsByProvider as Record<string, number>;
+  lines.push('# HELP gateway_requests_by_provider Requests served per provider\n# TYPE gateway_requests_by_provider counter\n');
+  for (const [provider, count] of Object.entries(byProvider)) {
+    lines.push(`gateway_requests_by_provider{provider="${promLabelEscape(provider)}"} ${count}\n`);
+  }
+
+  // Token usage
+  const tokens = snap.tokenUsage as { totalInputTokens: number; totalOutputTokens: number; totalTokens: number };
+  lines.push(promLine('gateway_tokens_input_total', 'Total input tokens consumed across all LLM providers', 'counter', tokens.totalInputTokens));
+  lines.push(promLine('gateway_tokens_output_total', 'Total output tokens emitted across all LLM providers', 'counter', tokens.totalOutputTokens));
+
+  // Cost metrics
+  const cost = snap.cost as { dailySpendUsd: number; dailyBudgetUsd: number; costPerHr: number };
+  lines.push(promLine('gateway_daily_spend_usd', 'Current day GPU spend in USD', 'gauge', cost.dailySpendUsd));
+  lines.push(promLine('gateway_daily_budget_usd', 'Daily GPU spend cap in USD', 'gauge', cost.dailyBudgetUsd));
+  lines.push(promLine('gateway_cost_per_hour_usd', 'Current GPU tier cost per hour in USD', 'gauge', cost.costPerHr));
+
+  // GPU status as a gauge (1 if ready, 0 otherwise). Label carries the string.
+  const gpuStatus = String(snap.gpuStatus ?? 'unknown');
+  const gpuReady = gpuStatus.toLowerCase() === 'ready' ? 1 : 0;
+  lines.push('# HELP gateway_gpu_ready GPU tier readiness (1 = ready, 0 = not ready)\n# TYPE gateway_gpu_ready gauge\n');
+  lines.push(`gateway_gpu_ready{status="${promLabelEscape(gpuStatus)}"} ${gpuReady}\n`);
+
+  return lines.join('');
+}
+
+/**
+ * GET /metrics handler. Default output is Prometheus text exposition format
+ * (so any standard scraper works with zero adapter code). Pass `?format=json`
+ * to get the legacy JSON shape used by the web UI dashboard.
+ */
+export async function handleMetrics(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url || '/metrics', 'http://localhost');
+  const format = url.searchParams.get('format') ?? 'prometheus';
+
+  const snap = snapshotMetrics();
+  const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(body));
+
+  if (format === 'json') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(snap));
+    return;
+  }
+
+  // Prometheus text format — Content-Type per the spec.
+  res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
+  res.end(renderPrometheus(snap));
 }
 
 // ── Request log endpoint ─────────────────────────────────────────────────────
