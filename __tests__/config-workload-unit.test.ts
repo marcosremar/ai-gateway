@@ -62,6 +62,7 @@ vi.mock('../src/gpu-providers/deploy-settings', () => ({
   setSttTargetLatencyMs: vi.fn(),
   setLlmTargetLatencyMs: vi.fn(),
   setTtsTargetLatencyMs: vi.fn(),
+  setGpuSortBy: vi.fn(),
   setDeployTimeoutMin: vi.fn(),
   setDeployRegion: vi.fn(),
   setDeployDockerImage: vi.fn(),

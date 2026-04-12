@@ -55,7 +55,7 @@ export const DEFAULT_GPU_PRIORITY_BY_PROVIDER: Record<string, string[]> = {
 
 // ── Settings Interface ───────────────────────────────────────────────────────
 
-export type GpuSortBy = 'price' | 'latency' | 'balanced';
+export type GpuSortBy = 'price' | 'latency' | 'balanced' | 'realtime';
 
 interface DeploySettings {
   intervalMin:           number;                   // latency probe interval in minutes
@@ -134,7 +134,7 @@ export function loadDeploySettings(): void {
     if (!_s.gpuPriorityByProvider || typeof _s.gpuPriorityByProvider !== 'object') {
       _s.gpuPriorityByProvider = { ...DEFAULT_GPU_PRIORITY_BY_PROVIDER };
     }
-    if (!(['price', 'latency', 'balanced'] as string[]).includes(_s.gpuSortBy)) {
+    if (!(['price', 'latency', 'balanced', 'realtime'] as string[]).includes(_s.gpuSortBy)) {
       _s.gpuSortBy = 'balanced';
     }
     if (typeof _s.deployTimeoutMin !== 'number' || _s.deployTimeoutMin < 3) {
