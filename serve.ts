@@ -14,10 +14,22 @@ import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { ProviderMapping, PrefixRoute } from './src/proxy/types';
-import { routeWorkloadRequest } from './server/workload-handlers';
-import { workloadRegistry, GpuWorkloadDriver } from './src/workloads';
 
 const log = createLogger('serve');
+
+// Workload handlers live in server/ which is NOT included in the Fly.io
+// Docker image (only src/ + serve.ts are copied). Dynamic import with
+// fallback so the proxy starts regardless.
+let routeWorkloadRequest: ((req: any, res: any, path: string, method: string) => boolean) | null = null;
+try {
+  const wh = require('./server/workload-handlers');
+  routeWorkloadRequest = wh.routeWorkloadRequest;
+  const { workloadRegistry, GpuWorkloadDriver } = require('./src/workloads');
+  workloadRegistry.registerDriver(new GpuWorkloadDriver());
+  log.log({}, 'Workload registry initialized (gpu driver)');
+} catch {
+  log.log({}, 'Workload handlers not available (server/ not bundled) — skipping');
+}
 
 const PORT = parseInt(process.env.PORT || '4000');
 const API_KEYS = process.env.GATEWAY_API_KEYS
@@ -57,21 +69,17 @@ const providers: ProviderMapping = {
 log.log({ port: PORT, apiKeys: API_KEYS ? API_KEYS.length : 0, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
 log.log({ groqKey: process.env.GROQ_API_KEY.slice(0, 6) + '...', tts: 'groq/orpheus' }, 'Providers configured');
 
-// Register GPU workload driver (enables POST /v1/workloads with type:'gpu')
-workloadRegistry.registerDriver(new GpuWorkloadDriver());
-log.log({}, 'Workload registry initialized (gpu driver)');
-
-const workloadPrefixRoute: PrefixRoute = {
-  prefix: '/v1/workloads',
-  handler: routeWorkloadRequest,
-};
+const prefixRoutes: PrefixRoute[] = [];
+if (routeWorkloadRequest) {
+  prefixRoutes.push({ prefix: '/v1/workloads', handler: routeWorkloadRequest });
+}
 
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
   apiKeys: API_KEYS,
   providers,
-  prefixRoutes: [workloadPrefixRoute],
+  ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
 
