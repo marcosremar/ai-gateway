@@ -317,12 +317,20 @@ export abstract class AbstractGpuProvider implements GpuProviderClient {
 
   /**
    * Query Docker Hub Registry API for the compressed image size in GB.
-   * Returns the decompressed estimate (compressed * 2.5) + 5GB overhead, minimum 10GB.
+   * Returns the decompressed estimate (compressed * 3) + 10GB overhead, minimum 10GB.
    * Falls back to `fallbackGb` if the API call fails (e.g. private registry).
+   *
+   * NOTE: This estimates Docker image size only — it does NOT account for models
+   * downloaded at runtime (vLLM, TGI, etc.). For runtime-download images,
+   * callers should set storageGb explicitly based on model size:
+   *   - 7B Q4: ~5GB model → 50GB total disk
+   *   - 13B Q4: ~8GB model → 80GB total disk
+   *   - 32B Q4/AWQ: ~20GB model → 120GB total disk
+   *   - 70B Q4: ~40GB model → 200GB total disk
    *
    * Supports Docker Hub images: `user/repo:tag` or `library/image:tag`.
    */
-  static async estimateImageDiskGb(dockerImage: string, fallbackGb = 20): Promise<number> {
+  static async estimateImageDiskGb(dockerImage: string, fallbackGb = 40): Promise<number> {
     try {
       // Parse image name — handle "user/repo:tag", "user/repo" (default :latest), "repo:tag" (library/)
       const [imagePart, tag = 'latest'] = dockerImage.split(':');
