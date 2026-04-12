@@ -5,6 +5,9 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
+  "bin": {
+    "ai-gateway": "./bin/ai-gateway.ts"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./*": "./src/*.ts"
