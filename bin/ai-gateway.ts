@@ -221,6 +221,99 @@ async function cmdGpuLogs() {
   console.log(typeof data === 'string' ? data : JSON.stringify(data, null, 2));
 }
 
+async function cmdGpuList() {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/v1/gpu/list`, { headers: headers(key) });
+  if (res.status === 404) {
+    console.log('GPU endpoints not available (proxy-only mode).');
+    return;
+  }
+  const data = await res.json();
+  if (!Array.isArray(data) || data.length === 0) {
+    console.log('No active GPU instances.');
+    return;
+  }
+  console.log(`${data.length} active instance(s):\n`);
+  for (const inst of data) {
+    console.log(`  ${inst.instanceId || inst.podId || '?'}`);
+    if (inst.provider) console.log(`    provider:  ${inst.provider}`);
+    if (inst.gpuType || inst.gpuName) console.log(`    gpu:       ${inst.gpuType || inst.gpuName}`);
+    if (inst.status) console.log(`    status:    ${inst.status}`);
+    if (inst.endpoint) console.log(`    endpoint:  ${inst.endpoint}`);
+    if (inst.costPerHr) console.log(`    cost/hr:   $${Number(inst.costPerHr).toFixed(2)}`);
+    console.log('');
+  }
+}
+
+async function cmdGpuTerminate(instanceId: string, opts: { provider?: string }) {
+  const { url, key } = getConfig();
+  const body: Record<string, string> = {};
+  if (opts.provider) body.provider = opts.provider;
+  const res = await fetch(`${url}/v1/gpu/terminate`, {
+    method: 'POST', headers: headers(key),
+    body: JSON.stringify({ instanceId, ...body }),
+  });
+  if (res.status === 404) {
+    console.log('GPU endpoints not available (proxy-only mode).');
+    return;
+  }
+  if (!res.ok) {
+    const err = await res.text();
+    console.error(`Error ${res.status}: ${err.slice(0, 200)}`);
+    process.exit(1);
+  }
+  console.log(`Instance ${instanceId} terminated.`);
+}
+
+async function cmdGpuResume(instanceId?: string, opts?: { provider?: string }) {
+  const { url, key } = getConfig();
+  const body: Record<string, unknown> = {};
+  if (instanceId) body.podId = instanceId;
+  if (opts?.provider) body.provider = opts.provider;
+  const res = await fetch(`${url}/v1/gpu/resume`, {
+    method: 'POST', headers: headers(key), body: JSON.stringify(body),
+  });
+  if (res.status === 404) {
+    console.log('GPU endpoints not available (proxy-only mode).');
+    return;
+  }
+  const data = await res.json();
+  console.log(data.message || 'GPU resumed.');
+}
+
+async function cmdGpuOffers(opts: { gpu?: string; limit?: number }) {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/v1/gpu/offers`, { headers: headers(key) });
+  if (res.status === 404) {
+    console.log('GPU endpoints not available (proxy-only mode).');
+    return;
+  }
+  const offers = await res.json();
+  if (!Array.isArray(offers) || offers.length === 0) {
+    console.log('No GPU offers available.');
+    return;
+  }
+  let filtered = offers;
+  if (opts.gpu) {
+    const q = opts.gpu.toLowerCase();
+    filtered = offers.filter((o: any) =>
+      (o.gpuName || o.gpuType || '').toLowerCase().includes(q));
+  }
+  const limit = opts.limit || 10;
+  console.log(`${filtered.length} offers (showing top ${Math.min(limit, filtered.length)} by price):\n`);
+  const sorted = filtered.sort((a: any, b: any) => a.pricePerHr - b.pricePerHr);
+  console.log(`  ${'GPU'.padEnd(30)} ${'$/hr'.padStart(7)} ${'VRAM'.padStart(6)} ${'Provider'.padEnd(10)} Region`);
+  console.log(`  ${'─'.repeat(30)} ${'─'.repeat(7)} ${'─'.repeat(6)} ${'─'.repeat(10)} ──────`);
+  for (const o of sorted.slice(0, limit)) {
+    const gpu = (o.gpuName || o.gpuType || '?').slice(0, 30);
+    const price = `$${Number(o.pricePerHr).toFixed(2)}`;
+    const vram = o.vram ? `${o.vram}GB` : '?';
+    const prov = (o.provider || '?').slice(0, 10);
+    const region = o.region || '';
+    console.log(`  ${gpu.padEnd(30)} ${price.padStart(7)} ${vram.padStart(6)} ${prov.padEnd(10)} ${region}`);
+  }
+}
+
 async function cmdMetrics(format: string) {
   const { url, key } = getConfig();
   const fmt = format === 'json' ? '?format=json' : '';
@@ -554,11 +647,19 @@ Usage:
 Subcommands:
   status                       Show current GPU deployment status
                                (podId, endpoint, gpuType, provider, cost/hr, health)
+  list                         List ALL active GPU instances across providers
+  offers                       Show available GPU offers with pricing
+    --gpu <filter>               Filter by GPU name (e.g. "4090", "A100")
+    -n <count>                   Number of offers to show (default: 10)
   deploy                       Deploy a new GPU instance
     --image <docker-image>       Docker image (e.g. marcosremar/babelcast-subtitle:latest)
     --gpu-types <types>          Comma-separated GPU types
                                  (e.g. "NVIDIA GeForce RTX 4090,NVIDIA RTX A6000")
   stop                         Stop (pause) the current GPU instance
+  resume [instanceId]          Resume a stopped instance
+    --provider <name>            Provider hint (runpod, vast, tensordock)
+  terminate <instanceId>       Permanently destroy a specific instance
+    --provider <name>            Provider hint (runpod, vast, tensordock)
   logs                         Fetch container stdout/stderr logs
 
 Notes:
@@ -566,12 +667,19 @@ Notes:
     lightweight proxy (serve.ts). If you see "proxy-only mode", the
     gateway was started with serve.ts which doesn't include GPU management.
   - Deploy is non-blocking — use 'gpu status' to poll until ready
+  - Terminate is permanent and cannot be undone
 
 Examples:
   ai-gateway gpu status
+  ai-gateway gpu list
+  ai-gateway gpu offers --gpu 4090 -n 5
   ai-gateway gpu deploy --image marcosremar/babelcast-subtitle:latest
   ai-gateway gpu deploy --gpu-types "NVIDIA GeForce RTX 4090"
   ai-gateway gpu stop
+  ai-gateway gpu resume
+  ai-gateway gpu resume pod-abc123
+  ai-gateway gpu terminate pod-abc123
+  ai-gateway gpu terminate inst-456 --provider vast
   ai-gateway gpu logs
 `,
     metrics: `
@@ -771,20 +879,37 @@ Examples:
         });
         break;
       }
-      case 'gpu':
-        switch (args[1]) {
+      case 'gpu': {
+        const sub = args[1];
+        if (sub === 'help' || sub === '--help') { console.log(HELP.gpu); break; }
+        switch (sub) {
           case 'status': await cmdGpuStatus(); break;
+          case 'list': await cmdGpuList(); break;
+          case 'offers': await cmdGpuOffers({
+            gpu: getArg(args, '--gpu'),
+            limit: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
+          }); break;
           case 'deploy': await cmdGpuDeploy({
             image: getArg(args, '--image'),
             gpuTypes: getArg(args, '--gpu-types'),
           }); break;
           case 'stop': await cmdGpuStop(); break;
+          case 'resume': await cmdGpuResume(args[2], {
+            provider: getArg(args, '--provider'),
+          }); break;
+          case 'terminate': {
+            const id = args[2];
+            if (!id || id.startsWith('-')) { console.error('Usage: ai-gateway gpu terminate <instanceId>'); process.exit(1); }
+            await cmdGpuTerminate(id, { provider: getArg(args, '--provider') });
+            break;
+          }
           case 'logs': await cmdGpuLogs(); break;
           default:
-            console.error('Usage: ai-gateway gpu <status|deploy|stop|logs>');
+            console.error('Usage: ai-gateway gpu <status|list|offers|deploy|stop|resume|terminate|logs>');
             process.exit(1);
         }
         break;
+      }
       case 'metrics':
         await cmdMetrics(hasFlag(args, '--json') ? 'json' : 'prometheus');
         break;
