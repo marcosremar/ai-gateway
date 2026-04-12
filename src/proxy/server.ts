@@ -16,7 +16,10 @@ import { handleAudioSpeech } from './routes/audio-speech';
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModels } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
+import { createLogger, withLogContext } from '../logger';
 import type { ProxyConfig, ProxyRequest, ProxyResponse } from './types';
+
+const log = createLogger('proxy');
 
 /** Max request body size: 100MB (audio files can be large) */
 const MAX_BODY_SIZE = 100 * 1024 * 1024;
@@ -183,14 +186,14 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
 
     // Warn on large uploads
     if (filenameMatch && partData.length > UPLOAD_WARN_THRESHOLD) {
-      console.warn(
-        `[multipart] Large upload: file "${filenameMatch[1]}" is ${(partData.length / (1024 * 1024)).toFixed(1)}MB`,
-      );
+      log.warn({ filename: filenameMatch[1], sizeMb: +(partData.length / (1024 * 1024)).toFixed(1) },
+        'Large multipart upload');
     }
 
     // Enforce size limit on non-file text fields
     if (!filenameMatch && partData.length > MAX_FIELD_SIZE) {
-      console.warn(`[multipart] Field "${nameMatch?.[1]}" exceeds ${MAX_FIELD_SIZE} byte limit, skipping`);
+      log.warn({ field: nameMatch?.[1], limitBytes: MAX_FIELD_SIZE },
+        'Multipart text field exceeded limit, skipping');
       start = nextBoundary;
       continue;
     }
@@ -330,10 +333,22 @@ export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
 
-  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const method = req.method?.toUpperCase() || 'GET';
     const url = req.url || '/';
     const requestId = (req.headers['x-request-id'] as string) || randomUUID();
+
+    // Establish an AsyncLocalStorage frame so every log emitted during this
+    // request (here AND inside any downstream async module) carries the same
+    // requestId field. Correlation becomes automatic rather than manual
+    // argument threading.
+    void withLogContext({ requestId }, () => handleRequest(req, res, method, url, requestId));
+  });
+
+  // The actual request handler runs inside the ALS frame established above.
+  // Keeping it a named function rather than inlining keeps the stack trace
+  // readable when errors are raised from deep inside a route handler.
+  const handleRequest = async (req: IncomingMessage, res: ServerResponse, method: string, url: string, requestId: string): Promise<void> => {
 
     // CORS origin validation
     const corsOriginsEnv = process.env.CORS_ORIGINS || 'http://localhost:4000,http://localhost:3000';
@@ -426,7 +441,8 @@ export function createProxyServer(config: ProxyConfig): Server {
           try {
             await route.handler(req, res);
           } catch (err) {
-            console.error(`[ai-gateway] Unhandled error in custom route ${route.method} ${route.path}:`, err);
+            log.error({ err, route: `${route.method} ${route.path}` },
+              'Unhandled error in custom route');
             if (!res.headersSent) {
               sendError(res, 500, 'Internal server error', requestId);
             }
@@ -540,10 +556,10 @@ export function createProxyServer(config: ProxyConfig): Server {
         sendError(res, 408, 'Request Timeout', requestId);
         return;
       }
-      console.error(`[ai-gateway] Internal error (${requestId}):`, err);
+      log.error({ err, requestId }, 'Internal error in proxy handler');
       sendError(res, 500, 'Internal server error', requestId);
     }
-  });
+  };
 
   // Handle all WebSocket upgrade requests — proxy HMR to Next.js dev server, block everything else with 410
   server.on('upgrade', (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => {
@@ -595,7 +611,7 @@ export function startProxy(config: ProxyConfig): Promise<Server> {
       }
     });
     server.listen(port, hostname, () => {
-      console.log(`[ai-gateway proxy] Listening on ${hostname}:${port}`);
+      log.log({ host: hostname, port }, 'Proxy listening');
       resolve(server);
     });
   });

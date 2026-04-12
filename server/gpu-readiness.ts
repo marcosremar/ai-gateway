@@ -395,7 +395,7 @@ export async function runGpuReadinessCheck(
           const { updateHostLatency } = await import('./metrics');
           await updateHostLatency(deployState.provider, deployState.gpuType, ttsResult.bestMs, 'tts', deployState.providerMeta);
           console.log(`[readiness] Fed TTS benchmark into reputation: ${ttsResult.bestMs}ms`);
-        } catch {}
+        } catch { /* best-effort: cleanup or optional side-effect */ }
       }
     })().catch(e => console.warn('[readiness:tts] Background benchmark failed:', e instanceof Error ? e.message : e));
 

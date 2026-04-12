@@ -92,6 +92,9 @@ const tts = await client.synthesize(text);
 2. No hard dependencies on Prisma, Redis, or Next.js — use DI interfaces (`AutoscalerDeps`)
 3. App-specific wiring (Prisma adapters, Next.js routes) stays in host app as thin shims
 4. New AI/GPU features go here first, then get wired via shims
+5. **`src/` is the publishable library. `server/` is the reference service.** `server/` may
+   import from `src/`; `src/` must never import from `server/`. Enforced by the CI guard in
+   `.github/workflows/ci.yml`. Full policy: `docs/architecture/lib-vs-service.md`.
 
 ## Dependency Injection Pattern
 

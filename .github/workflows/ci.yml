@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel stale PR runs when a new commit lands on the same branch.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Fail fast if the lockfile is drifted. `--frozen-lockfile` refuses to
+      # install if any package.json dep is newer than what's locked.
+      - name: Install dependencies (frozen lockfile)
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Unit tier only — fast subset (<90s) that every PR can afford to block on.
+      # Integration / live / benchmark / soak tiers run via the nightly workflow.
+      - name: Unit tests
+        env:
+          SKIP_GPU_TESTS: '1'
+          SKIP_LIVE_TESTS: '1'
+        run: bun run test:unit
+
+      - name: Build (library bundle)
+        run: bun run build
+
+      # Library/service boundary guard — src/ must never import from server/.
+      # See docs/architecture/lib-vs-service.md.
+      - name: Lib/service boundary check
+        run: |
+          if grep -rn --include='*.ts' -E "from ['\"]\\.\\./\\.\\./server/|from ['\"]\\.\\./server/" src/ 2>/dev/null; then
+            echo "::error::src/ must not import from server/. See docs/architecture/lib-vs-service.md"
+            exit 1
+          fi
+          echo "Lib/service boundary is clean"

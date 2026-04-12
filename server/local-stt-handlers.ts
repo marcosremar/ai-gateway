@@ -41,7 +41,7 @@ async function getQwenStatus(): Promise<LocalSTTStatus> {
   if (existsSync(PID_FILE)) {
     try {
       pid = parseInt(readFileSync(PID_FILE, 'utf-8').trim());
-    } catch {}
+    } catch { /* best-effort: cleanup or optional side-effect */ }
   }
 
   // Check health endpoint
@@ -57,7 +57,7 @@ async function getQwenStatus(): Promise<LocalSTTStatus> {
       dtype = data.dtype || null;
       uptime = data.uptime_seconds || null;
     }
-  } catch {}
+  } catch { /* best-effort: cleanup or optional side-effect */ }
 
   // Detect variant from model name
   let variant: string | null = null;
@@ -167,7 +167,7 @@ export async function handleLocalSttStart(req: Request): Promise<Response> {
         console.log(`[local-stt] Server ready in ${i + 1}s`);
         return Response.json({ success: true, variant, pid: child.pid, port: parseInt(port) });
       }
-    } catch {}
+    } catch { /* best-effort: cleanup or optional side-effect */ }
     await new Promise(r => setTimeout(r, 1000));
   }
 
@@ -181,11 +181,11 @@ async function stopServer(): Promise<void> {
       if (pid > 0) {
         process.kill(pid, 'SIGTERM');
         await new Promise(r => setTimeout(r, 2000));
-        try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch {}
+        try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch { /* best-effort: cleanup or optional side-effect */ }
       }
-    } catch {}
+    } catch { /* best-effort: cleanup or optional side-effect */ }
     const { unlinkSync } = await import('fs');
-    try { unlinkSync(PID_FILE); } catch {}
+    try { unlinkSync(PID_FILE); } catch { /* best-effort: cleanup or optional side-effect */ }
   }
 }
 

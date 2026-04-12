@@ -164,7 +164,7 @@ export async function handleChatCompletions(
             const instance = providerMap.get(entry.provider);
             if (!instance) throw new Error(`Provider ${entry.provider} not found`);
             // Use each entry's own model — allows transparent fallback to a different model
-            return instance.chat({ ...chatOpts, model: entry.model });
+            return instance.chat({ ...chatOpts, model: entry.model ?? chatOpts.model });
           },
           opts,
         ),

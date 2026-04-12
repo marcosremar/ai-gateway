@@ -23,8 +23,12 @@ const LOG_DIR = process.env.LOG_DIR || path.join(
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 const MAX_ROTATIONS = 3;
 
-// Ensure log directory exists
-try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch {}
+// Ensure log directory exists. If the directory already exists this throws
+// EEXIST which is fine; any other error (permission denied, disk full) also
+// gets swallowed here intentionally — if the mkdir fails, the subsequent
+// append will surface the real error on stderr. Logging the mkdir failure
+// separately would double-log the same root cause.
+try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch { /* dir exists or unwritable — append will surface it */ }
 
 // ── Rotating file writer ────────────────────────────────────────────────────
 
@@ -40,9 +44,9 @@ function rotateIfNeeded(filePath: string): void {
       try {
         if (i === MAX_ROTATIONS) fs.unlinkSync(dst);
         fs.renameSync(src, dst);
-      } catch {}
+      } catch { /* rotation slot missing — skip and continue, the next rename will still land */ }
     }
-  } catch {}
+  } catch { /* statSync failed — file doesn't exist yet, nothing to rotate */ }
 }
 
 function appendLine(filePath: string, line: string): void {
