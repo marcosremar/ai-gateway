@@ -17,7 +17,7 @@ import { readFileSync, writeFileSync, existsSync, chmodSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { getOrCreateRequestId, setRequestIdHeader, readJsonBody, handleBodyError } from './http-utils';
-import { loadProviderConfig, patchProviderConfig, saveProviderConfig } from './config-persistence';
+import { loadProviderConfig, patchProviderConfig, saveProviderConfig, applyAppLatencyTargets } from './config-persistence';
 import type { PipelineChainEntry } from './config-persistence';
 import { reloadStreamingSTTRouter } from './ws-server';
 import type { GatewayApp, ProviderConfig } from './config-persistence';
@@ -259,20 +259,30 @@ export async function handleCreateProfile(req: IncomingMessage, res: ServerRespo
 
   const config = loadProviderConfig();
   const existing = config.apps.find(p => p.id === id);
+
+  // Start from existing app (preserves services, latencyTargetsMs, loadBalanceStrategy,
+  // timestamps, and all AIProfile fields). Then overlay only explicitly-sent fields.
+  const base: Record<string, unknown> = existing ? { ...existing } : {};
   const app: GatewayApp = {
+    ...base,
     id,
     name,
     stt: Array.isArray(stt) ? stt : (existing?.stt ?? config.pipelineStt),
     llm: Array.isArray(llm) ? llm : (existing?.llm ?? config.pipelineLlm),
     tts: Array.isArray(tts) ? tts : (existing?.tts ?? config.pipelineTts),
-    ...(gpuDeploy !== undefined ? { gpuDeploy } : existing?.gpuDeploy ? { gpuDeploy: existing.gpuDeploy } : {}),
-    // Extended AIProfile fields (backward-compatible: omitted = inherited from existing/default)
-    ...(voice !== undefined ? { voice } : existing?.voice ? { voice: existing.voice } : {}),
-    ...(audioFormat !== undefined ? { audioFormat: audioFormat as GatewayApp['audioFormat'] } : existing?.audioFormat ? { audioFormat: existing.audioFormat } : {}),
-    ...(temperature !== undefined ? { temperature } : existing?.temperature !== undefined ? { temperature: existing.temperature } : {}),
-    ...(maxTokens !== undefined ? { maxTokens } : existing?.maxTokens !== undefined ? { maxTokens: existing.maxTokens } : {}),
-    ...(language !== undefined ? { language } : existing?.language ? { language: existing.language } : {}),
-  };
+    ...(gpuDeploy !== undefined ? { gpuDeploy } : {}),
+    ...(voice !== undefined ? { voice } : {}),
+    ...(audioFormat !== undefined ? { audioFormat: audioFormat as GatewayApp['audioFormat'] } : {}),
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(language !== undefined ? { language } : {}),
+    // Preserve additional fields from request body (services, latencyTargetsMs, etc.)
+    ...(body.services !== undefined ? { services: body.services } : {}),
+    ...(body.latencyTargetsMs !== undefined ? { latencyTargetsMs: body.latencyTargetsMs } : {}),
+    ...(body.loadBalanceStrategy !== undefined ? { loadBalanceStrategy: body.loadBalanceStrategy } : {}),
+    ...(body.latency !== undefined ? { latency: body.latency } : {}),
+    ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+  } as GatewayApp;
 
   // Upsert: replace existing app with same id, or append
   const idx = config.apps.findIndex(p => p.id === id);
@@ -374,6 +384,9 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
 
   saveProviderConfig(config);
 
+  // ── Apply latency targets from the activated app ──
+  applyAppLatencyTargets(id, config.apps);
+
   // ── Apply chains + extended fields to runtime translationDefaults ──
   const appPatch: Partial<AIProfile> = {
     stt: [...(app.stt ?? [])],
@@ -385,7 +398,7 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
   if (app.temperature !== undefined) appPatch.temperature = app.temperature;
   if (app.maxTokens !== undefined) appPatch.maxTokens = app.maxTokens;
   if (app.language !== undefined) appPatch.language = app.language;
-  updateActivePipeline(appPatch, `handleActivateProfile:${id}`);
+  updateActivePipeline(appPatch, `handleActivateApp:${id}`);
 
   // Rebuild streaming STT router for new STT chain
   reloadStreamingSTTRouter();

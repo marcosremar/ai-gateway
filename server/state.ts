@@ -60,7 +60,8 @@ if (process.env.DAILY_BUDGET_USD && isNaN(_parsedBudget)) {
 }
 export const DAILY_BUDGET_USD = isNaN(_parsedBudget) ? 0 : _parsedBudget; // 0 = no limit
 export let dailyGpuSpendUsd = 0;
-export let dailySpendResetDate = new Date().toDateString();
+// Use ISO date format (YYYY-MM-DD) — must match the comparison in gpu-deploy.ts monitor loop
+export let dailySpendResetDate = new Date().toISOString().slice(0, 10);
 
 /** Default estimated cost of a new deploy if the caller doesn't pass one. */
 const DEFAULT_ESTIMATED_DEPLOY_COST_USD = 2;
