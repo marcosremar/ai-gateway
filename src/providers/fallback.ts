@@ -109,6 +109,13 @@ export interface FallbackOptions {
    * Required when performanceRanker is set — used as the key dimension.
    */
   stage?: string;
+  /**
+   * Circuit breaker registry. When provided, providers whose circuit is
+   * OPEN are skipped immediately (no timeout cost). The breaker transitions
+   * to HALF_OPEN after its cooldown and allows one probe request.
+   * Inject for testability. Default: none (all providers always tried).
+   */
+  circuitBreakers?: import('./circuit-breaker').CircuitBreakerRegistry;
 }
 
 // ─── Cooldown tracking ──────────────────────────────────────────────────────
@@ -349,6 +356,7 @@ export async function withProviderFallback<T>(
     logger: log = { log: console.log, warn: console.warn, error: console.error },
     performanceRanker,
     stage: perfStage,
+    circuitBreakers,
   } = opts;
 
   // Clone so we can splice in context-window upgrades without mutating the caller's array
@@ -383,6 +391,9 @@ export async function withProviderFallback<T>(
 
   let lastError: unknown;
   const got402From: string[] = [];
+  /** Captured from the last 429 error's headers — propagated to the caller
+   *  so the proxy can set Retry-After on the response. */
+  let lastRetryAfterSec: number | null = null;
 
   // Check if ALL providers are in cooldown — if so, ignore cooldowns entirely
   // (better to retry a cooled-down provider than to fail with no attempt)
@@ -405,6 +416,21 @@ export async function withProviderFallback<T>(
         `(cooling down, ${remainingSecs}s remaining)`,
       );
       continue;
+    }
+
+    // ── Circuit breaker check ─────────────────────────────────────────────
+    // If the circuit is OPEN, skip this provider entirely — saves the full
+    // timeout cost (5-15s per attempt). When it transitions to HALF_OPEN
+    // (after resetTimeoutMs), one probe request is allowed through.
+    if (circuitBreakers) {
+      const cb = circuitBreakers.get(entry.provider);
+      if (!cb.allowRequest()) {
+        log.log(
+          `${logPrefix} ${entry.provider}/${entry.model ?? 'default'} ` +
+          `circuit OPEN — skipping (${cb.getStats().failures} consecutive failures)`,
+        );
+        continue;
+      }
     }
 
     // ── Per-provider retry loop ───────────────────────────────────────────────
@@ -458,6 +484,7 @@ export async function withProviderFallback<T>(
         const elapsed = Date.now() - t0;
 
         tracker.recordSuccess(entry);
+        if (circuitBreakers) circuitBreakers.get(entry.provider).recordSuccess();
 
         // ── Record latency for adaptive timeout ──────────────────────────────
         if (adaptiveTimeout) {
@@ -524,6 +551,7 @@ export async function withProviderFallback<T>(
             `context window exceeded (${elapsed}ms) → next`,
           );
           if (!allCooledDown) tracker.recordFailure(entry, allowedFails, cooldownMs);
+          if (circuitBreakers) circuitBreakers.get(entry.provider).recordFailure();
 
           // Optionally insert a larger-context model upgrade into the chain
           if (contextWindowFallbacks && entry.model) {
@@ -547,6 +575,7 @@ export async function withProviderFallback<T>(
         const moveOnStatus = extractStatus(err);
         if (isTimeout || MOVE_ON_STATUSES.has(moveOnStatus ?? 0)) {
           if (!allCooledDown) tracker.recordFailure(entry, allowedFails, cooldownMs);
+          if (circuitBreakers) circuitBreakers.get(entry.provider).recordFailure();
 
           // ── Record 402 in credit block tracker ──────────────────────────────
           if (moveOnStatus === 402) {
@@ -557,6 +586,18 @@ export async function withProviderFallback<T>(
               log.warn(
                 `${logPrefix} ${entry.provider} credit-blocked (402) for 5min`,
               );
+            }
+          }
+
+          // Capture Retry-After from 429 errors for upstream propagation.
+          // The OpenAI SDK's APIError exposes headers; other providers may
+          // embed it as a property on the error object.
+          if (moveOnStatus === 429) {
+            const errObj = err as { headers?: Record<string, string> };
+            const ra = errObj.headers?.['retry-after'] ?? errObj.headers?.['Retry-After'];
+            if (ra) {
+              const parsed = parseInt(ra, 10);
+              if (!isNaN(parsed) && parsed > 0) lastRetryAfterSec = parsed;
             }
           }
 
@@ -574,6 +615,7 @@ export async function withProviderFallback<T>(
 
         // ── 5xx transient error ───────────────────────────────────────────────
         if (!allCooledDown) tracker.recordFailure(entry, allowedFails, cooldownMs);
+          if (circuitBreakers) circuitBreakers.get(entry.provider).recordFailure();
 
         const isLastRetry = retryNum >= maxAttempts - 1;
         const hasNextProvider = iterChain.slice(i + 1).some((e) => !tracker.isCoolingDown(e));
@@ -619,5 +661,12 @@ export async function withProviderFallback<T>(
     throw new CreditExhaustedError([...new Set([...creditBlockedProviders, ...got402From])]);
   }
 
-  throw lastError ?? new Error('All providers in fallback chain failed');
+  // Attach the upstream Retry-After to the error so the proxy can propagate
+  // it to the client. Without this, the client has no signal about when to
+  // retry after a 429 that exhausted all fallback providers.
+  const finalErr = lastError ?? new Error('All providers in fallback chain failed');
+  if (lastRetryAfterSec && typeof finalErr === 'object' && finalErr !== null) {
+    (finalErr as { retryAfterSec?: number }).retryAfterSec = lastRetryAfterSec;
+  }
+  throw finalErr;
 }
