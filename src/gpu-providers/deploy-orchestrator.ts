@@ -47,9 +47,12 @@ export class ProviderCooldownTracker {
   private cooldowns = new Map<string, CooldownEntry>();
   private persistPath: string | null = null;
 
+  /** Maximum cooldown duration — caps exponential backoff and billing cooldowns. */
+  static readonly MAX_COOLDOWN_MS = 15 * 60_000; // 15 min hard cap
+
   constructor(
     private baseCooldownMs = 60_000,       // 1 min base (was 5 min — too slow for retries)
-    private maxCooldownMs = 5 * 60_000,   // 5 min max (was 30 min — blocked all providers)
+    private maxCooldownMs = ProviderCooldownTracker.MAX_COOLDOWN_MS,
   ) {}
 
   /** Load persisted cooldowns from a JSON file. Ignores expired entries. */
@@ -112,9 +115,9 @@ export class ProviderCooldownTracker {
     this.persist();
   }
 
-  /** Record a billing/balance failure — longer cooldown (1h) since adding funds is manual. */
+  /** Record a billing/balance failure — longer cooldown, capped at MAX_COOLDOWN_MS. */
   recordBillingFailure(name: string): void {
-    const BILLING_COOLDOWN_MS = 60 * 60_000; // 1 hour
+    const BILLING_COOLDOWN_MS = Math.min(60 * 60_000, this.maxCooldownMs); // 1h desired, capped
     const existing = this.cooldowns.get(name);
     const failCount = (existing?.failCount ?? 0) + 1;
     this.cooldowns.set(name, {
