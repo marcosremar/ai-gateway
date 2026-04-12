@@ -349,6 +349,7 @@ export function createProxyServer(config: ProxyConfig): Server {
   // Keeping it a named function rather than inlining keeps the stack trace
   // readable when errors are raised from deep inside a route handler.
   const handleRequest = async (req: IncomingMessage, res: ServerResponse, method: string, url: string, requestId: string): Promise<void> => {
+    const reqStartMs = Date.now();
 
     // CORS origin validation
     const corsOriginsEnv = process.env.CORS_ORIGINS || 'http://localhost:4000,http://localhost:3000';
@@ -419,6 +420,19 @@ export function createProxyServer(config: ProxyConfig): Server {
 
     // Block direct streaming transport routes — clients must use POST /v1/speech
     const path = url.split('?')[0];
+
+    // Request-level logging: entry + auto-wired exit on res.end(). /health
+    // is excluded to avoid flooding logs on Fly.io's 10s health probe.
+    if (path !== '/health') {
+      log.log({ method, path }, 'request received');
+      const origEnd = res.end.bind(res);
+      (res as { end: typeof res.end }).end = function (...args: Parameters<typeof res.end>) {
+        const durationMs = Date.now() - reqStartMs;
+        log.log({ method, path, statusCode: res.statusCode, durationMs }, 'request complete');
+        return origEnd(...args);
+      } as typeof res.end;
+    }
+
     if (path === '/api/stream-audio' || path === '/ws/stream') {
       sendError(res, 410, `Streaming transport ${path} is removed. Use POST /v1/speech instead.`, requestId);
       return;
