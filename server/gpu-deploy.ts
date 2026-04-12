@@ -2654,7 +2654,9 @@ export async function pollHealthUntilReady(
             };
           }
 
-          const HEALTHY_STATUSES = new Set(['healthy', 'ok', 'degraded', 'ready']);
+          // 'loading' covers servers that report loading state while the model downloads
+          // (e.g. wan-i2v returns status=loading until model_loaded=true)
+          const HEALTHY_STATUSES = new Set(['healthy', 'ok', 'degraded', 'ready', 'loading']);
           if (HEALTHY_STATUSES.has(data.status)) {
             // Track health response milestones for per-phase timeouts
             if (!healthRespondedOnce) { healthRespondedOnce = true; healthFirstResponseAt = Date.now(); }
