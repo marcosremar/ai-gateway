@@ -105,6 +105,15 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
       timeoutMin: 30,
       bootOnStartup: true,
     },
+    // Real-time speech pipeline: tight latency targets so the readiness
+    // benchmark gates GPU→production only when the pod is fast enough for
+    // live translation. Without these, the default 800/2000/1500ms targets
+    // apply which are acceptable for async but too loose for real-time.
+    latencyTargetsMs: {
+      stt: 500,   // STT must complete in 500ms for real-time subtitle overlay
+      llm: 1000,  // LLM translation under 1s for natural dubbing cadence
+      tts: 800,   // TTS under 800ms for continuous audio playback without gaps
+    },
   },
   {
     id: 'realtime-translation-dubbing',
@@ -117,6 +126,11 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
       gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
       region: '',
       timeoutMin: 30,
+    },
+    latencyTargetsMs: {
+      stt: 500,
+      llm: 800,   // TranslateGemma is faster than Mistral — tighter target
+      tts: 800,
     },
   },
   {
@@ -136,6 +150,10 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
       gpuTypes: ['NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
       region: '',
       timeoutMin: 30,
+    },
+    latencyTargetsMs: {
+      stt: 500,
+      llm: 600,   // subtitle-only: no TTS path, LLM can be tight
     },
   },
   {
