@@ -407,7 +407,7 @@ export function PipelineHealthCard({ health }: PipelineHealthCardProps) {
 
   if (!config) return null;
 
-  const profiles = config.profiles ?? [];
+  const profiles = config.apps ?? [];
   if (profiles.length === 0) return null;
 
   const activeProviders: Record<'stt' | 'llm' | 'tts', string> = {
@@ -438,11 +438,11 @@ export function PipelineHealthCard({ health }: PipelineHealthCardProps) {
             <ProfileRow
               key={profile.id}
               profile={profile}
-              isActive={profile.id === config.activeProfileId}
+              isActive={profile.id === config.activeAppId}
               activeProviders={activeProviders}
               metrics={health.providerMetrics}
               gpuPhases={gpuPhases}
-              defaultOpen={profile.id === config.activeProfileId}
+              defaultOpen={profile.id === config.activeAppId}
               configuredProviders={health.providers}
               cloudHealth={health.cloudHealth}
             />

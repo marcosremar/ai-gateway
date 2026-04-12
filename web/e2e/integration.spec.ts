@@ -152,8 +152,8 @@ test.describe('Provider config persistence', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        profiles: [profile],
-        activeProfileId: 'test-integration',
+        apps: [profile],
+        activeAppId: 'test-integration',
       }),
     });
     expect(res.ok).toBe(true);
@@ -161,10 +161,10 @@ test.describe('Provider config persistence', () => {
     // Load and verify
     const res2 = await fetch(`${GW}/v1/config/providers`);
     const config = await res2.json();
-    const saved = config.profiles.find((p: any) => p.id === 'test-integration');
+    const saved = config.apps.find((p: any) => p.id === 'test-integration');
     expect(saved).toBeDefined();
     expect(saved.name).toBe('Integration Test Profile');
-    expect(config.activeProfileId).toBe('test-integration');
+    expect(config.activeAppId).toBe('test-integration');
   });
 
   test('pipeline chains are persisted', async () => {

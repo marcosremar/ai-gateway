@@ -8,7 +8,7 @@ const MOCK = 'http://localhost:4099';
 async function seedProfiles(request: any) {
   const resp = await request.post(`${MOCK}/v1/config/providers`, {
     data: {
-      profiles: [
+      apps: [
         {
           id: 'prof-realtime',
           name: 'Realtime Translation',
@@ -44,7 +44,7 @@ async function seedProfiles(request: any) {
           services: [],
         },
       ],
-      activeProfileId: 'prof-realtime',
+      activeAppId: 'prof-realtime',
       pipelineStt: [{ provider: 'gpu', model: 'faster-whisper-large-v3' }],
       pipelineLlm: [{ provider: 'gpu', model: 'translategemma' }, { provider: 'groq', model: 'llama-3.3-70b-versatile' }],
       pipelineTts: [{ provider: 'gpu', model: 'qwen3-tts' }],
@@ -53,8 +53,8 @@ async function seedProfiles(request: any) {
   // Verify seed took effect
   const check = await request.get(`${MOCK}/v1/config/providers`);
   const data = await check.json();
-  if (data.profiles?.length !== 3) {
-    throw new Error(`seedProfiles failed: expected 3 profiles, got ${data.profiles?.length}`);
+  if (data.apps?.length !== 3) {
+    throw new Error(`seedProfiles failed: expected 3 apps, got ${data.apps?.length}`);
   }
 }
 
@@ -635,8 +635,8 @@ test.describe('Profiles — Persistence', () => {
     // Verify mock received the update
     const resp = await request.get(`${MOCK}/v1/config/providers`);
     const data = await resp.json();
-    expect(data.activeProfileId).toBe('prof-realtime');
-    expect(data.profiles.length).toBe(3);
+    expect(data.activeAppId).toBe('prof-realtime');
+    expect(data.apps.length).toBe(3);
   });
 
   test('active profile ID persists after switching profiles', async ({ page, request }) => {
@@ -652,7 +652,7 @@ test.describe('Profiles — Persistence', () => {
     // Verify active profile changed
     const resp = await request.get(`${MOCK}/v1/config/providers`);
     const data = await resp.json();
-    expect(data.activeProfileId).toBe('prof-cloud');
+    expect(data.activeAppId).toBe('prof-cloud');
   });
 });
 
@@ -792,8 +792,8 @@ test.describe('Profiles — Full Workflow', () => {
     // 5. Verify profile was saved to mock
     const resp = await request.get(`${MOCK}/v1/config/providers`);
     const data = await resp.json();
-    expect(data.profiles.length).toBeGreaterThanOrEqual(1);
-    expect(data.activeProfileId).toBeTruthy();
+    expect(data.apps.length).toBeGreaterThanOrEqual(1);
+    expect(data.activeAppId).toBeTruthy();
   });
 
   test('load seeded profiles → switch active → deploy GPU → verify', async ({ page, request }) => {
