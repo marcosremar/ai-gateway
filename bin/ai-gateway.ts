@@ -250,6 +250,142 @@ async function cmdImage(prompt: string, opts: { model?: string; output?: string 
   console.log(`Image saved to ${outPath} (${imgBuffer.length} bytes)`);
 }
 
+// ── New commands ──────────────────────────────────────────────────────────
+
+async function cmdConfig() {
+  const { url, key } = getConfig();
+  console.log(`Gateway URL:  ${url}`);
+  console.log(`API Key:      ${key ? key.slice(0, 8) + '...' + key.slice(-4) : '(not set)'}`);
+  console.log('');
+  // Test connectivity
+  try {
+    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(5000) });
+    if (res.ok) console.log(`Status:       connected ✓`);
+    else console.log(`Status:       HTTP ${res.status}`);
+  } catch {
+    console.log(`Status:       unreachable ✗`);
+  }
+}
+
+async function cmdPing(count: number) {
+  const { url } = getConfig();
+  const times: number[] = [];
+  for (let i = 1; i <= count; i++) {
+    const t0 = Date.now();
+    try {
+      await fetch(`${url}/health`, { signal: AbortSignal.timeout(10000) });
+      const ms = Date.now() - t0;
+      times.push(ms);
+      console.log(`  ${i}: ${ms}ms`);
+    } catch {
+      console.log(`  ${i}: timeout`);
+    }
+  }
+  if (times.length > 0) {
+    times.sort((a, b) => a - b);
+    const avg = Math.round(times.reduce((s, t) => s + t, 0) / times.length);
+    const p50 = times[Math.floor(times.length / 2)];
+    const p95 = times[Math.floor(times.length * 0.95)] ?? times[times.length - 1];
+    console.log(`\n  avg=${avg}ms  p50=${p50}ms  p95=${p95}ms  (${times.length}/${count} ok)`);
+  }
+}
+
+async function cmdTranslate(text: string, opts: { from?: string; to?: string; model?: string }) {
+  const { url, key } = getConfig();
+  const from = opts.from || 'auto';
+  const to = opts.to || 'en';
+  const sysPrompt = from === 'auto'
+    ? `Detect the language and translate to ${to}. Reply only with the translation.`
+    : `Translate from ${from} to ${to}. Reply only with the translation.`;
+  const body = {
+    model: opts.model || 'llama-3.3-70b-versatile',
+    messages: [
+      { role: 'system', content: sysPrompt },
+      { role: 'user', content: text },
+    ],
+    max_tokens: 1024,
+    temperature: 0.3,
+  };
+  const data = await fetchJSON(`${url}/v1/chat/completions`, {
+    method: 'POST', headers: headers(key), body: JSON.stringify(body),
+  });
+  console.log(data.choices[0].message.content);
+}
+
+async function cmdVoices() {
+  console.log('Available TTS voices:\n');
+  console.log('  canopylabs/orpheus-v1-english:');
+  console.log('    autumn   — Female');
+  console.log('    diana    — Female');
+  console.log('    hannah   — Female');
+  console.log('    austin   — Male');
+  console.log('    daniel   — Male');
+  console.log('    troy     — Male');
+  console.log('');
+  console.log('  canopylabs/orpheus-arabic-saudi:');
+  console.log('    autumn, diana, hannah, austin, daniel, troy');
+}
+
+async function cmdBenchmark(opts: { count?: number }) {
+  const { url, key } = getConfig();
+  const count = opts.count || 5;
+  console.log(`Running ${count} requests per endpoint...\n`);
+
+  const bench = async (name: string, fn: () => Promise<void>): Promise<number[]> => {
+    const times: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const t0 = Date.now();
+      try { await fn(); times.push(Date.now() - t0); }
+      catch { times.push(-1); }
+    }
+    return times;
+  };
+
+  const chatTimes = await bench('chat', async () => {
+    await fetchJSON(`${url}/v1/chat/completions`, {
+      method: 'POST', headers: headers(key),
+      body: JSON.stringify({ model: 'llama-3.1-8b-instant', messages: [{ role: 'user', content: 'hi' }], max_tokens: 3 }),
+    });
+  });
+
+  // Generate silence WAV for STT
+  const silenceWav = (() => {
+    const { execSync } = require('child_process');
+    execSync(`python3 -c "import wave,struct,io; b=io.BytesIO(); w=wave.open(b,'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(struct.pack('<'+'h'*16000,*([0]*16000))); w.close(); open('/tmp/_bench.wav','wb').write(b.getvalue())"`);
+    return readFileSync('/tmp/_bench.wav');
+  })();
+
+  const sttTimes = await bench('stt', async () => {
+    const form = new FormData();
+    form.append('file', new Blob([silenceWav]), 'audio.wav');
+    form.append('model', 'whisper-large-v3-turbo');
+    const h: Record<string, string> = {};
+    if (key) h['Authorization'] = `Bearer ${key}`;
+    await fetch(`${url}/v1/audio/transcriptions`, { method: 'POST', headers: h, body: form });
+  });
+
+  const ttsTimes = await bench('tts', async () => {
+    await fetch(`${url}/v1/audio/speech`, {
+      method: 'POST', headers: headers(key),
+      body: JSON.stringify({ model: 'canopylabs/orpheus-v1-english', input: 'test', voice: 'autumn' }),
+    });
+  });
+
+  const report = (name: string, times: number[]) => {
+    const ok = times.filter(t => t >= 0).sort((a, b) => a - b);
+    if (ok.length === 0) return `  ${name.padEnd(8)} — all failed`;
+    const p50 = ok[Math.floor(ok.length / 2)];
+    const p95 = ok[Math.floor(ok.length * 0.95)] ?? ok[ok.length - 1];
+    const avg = Math.round(ok.reduce((s, t) => s + t, 0) / ok.length);
+    const fail = times.length - ok.length;
+    return `  ${name.padEnd(8)} avg=${String(avg).padStart(5)}ms  p50=${String(p50).padStart(5)}ms  p95=${String(p95).padStart(5)}ms  ${fail > 0 ? `(${fail} failed)` : ''}`;
+  };
+
+  console.log(report('chat', chatTimes));
+  console.log(report('stt', sttTimes));
+  console.log(report('tts', ttsTimes));
+}
+
 // ── Argument parsing ──────────────────────────────────────────────────────
 
 function getArg(args: string[], flag: string): string | undefined {
@@ -279,11 +415,16 @@ Commands:
   health          Check gateway health and connection count
   models          List all available models
   chat            Chat with an LLM (streaming by default)
+  translate       Translate text between languages
   transcribe      Transcribe an audio file (speech-to-text)
   tts             Generate speech from text (text-to-speech)
+  voices          List available TTS voices
   image           Generate an image from a text prompt
   gpu             Manage GPU deployments (status, deploy, stop, logs)
   metrics         Show gateway metrics (Prometheus or JSON)
+  config          Show current configuration and test connectivity
+  ping            Measure gateway latency (like ping)
+  benchmark       Run a latency benchmark across all endpoints
 
 Environment Variables:
   AI_GATEWAY_URL  Gateway URL (default: http://localhost:4000)
@@ -494,6 +635,82 @@ Notes:
   - Proprietary models (gpt-4o, claude-3, etc.) are NOT available
     unless explicitly configured with their API keys
 `,
+    translate: `
+ai-gateway translate — Translate text between languages
+
+Usage:
+  ai-gateway translate <text> [options]
+
+Arguments:
+  <text>                       Text to translate (required)
+
+Options:
+  --from <lang>                Source language (default: auto-detect)
+  --to <lang>                  Target language (default: en)
+  -m, --model <model>          LLM model for translation
+                               Default: llama-3.3-70b-versatile
+
+Examples:
+  ai-gateway translate "Bonjour le monde"
+  ai-gateway translate "Hello world" --to fr
+  ai-gateway translate "Hola" --from es --to pt
+`,
+    voices: `
+ai-gateway voices — List available TTS voices
+
+Usage:
+  ai-gateway voices
+
+Shows all voice names for each TTS model with gender labels.
+`,
+    config: `
+ai-gateway config — Show current configuration
+
+Usage:
+  ai-gateway config
+
+Shows:
+  - Gateway URL (from AI_GATEWAY_URL env var)
+  - API key (masked, from AI_GATEWAY_KEY env var)
+  - Connection status (tests /health endpoint)
+`,
+    ping: `
+ai-gateway ping — Measure gateway latency
+
+Usage:
+  ai-gateway ping [options]
+
+Options:
+  -n, --count <n>              Number of pings (default: 5)
+
+Output:
+  Per-request latency + summary with avg/p50/p95
+
+Examples:
+  ai-gateway ping
+  ai-gateway ping -n 10
+`,
+    benchmark: `
+ai-gateway benchmark — Run latency benchmark across endpoints
+
+Usage:
+  ai-gateway benchmark [options]
+
+Options:
+  -n, --count <n>              Requests per endpoint (default: 5)
+
+Endpoints tested:
+  - POST /v1/chat/completions (3-token response)
+  - POST /v1/audio/transcriptions (1s silence)
+  - POST /v1/audio/speech (short text)
+
+Output:
+  avg/p50/p95 per endpoint
+
+Examples:
+  ai-gateway benchmark
+  ai-gateway benchmark -n 10
+`,
   };
 
   // Per-command help: `ai-gateway chat help` or `ai-gateway chat --help`
@@ -570,6 +787,30 @@ Notes:
         break;
       case 'metrics':
         await cmdMetrics(hasFlag(args, '--json') ? 'json' : 'prometheus');
+        break;
+      case 'translate': {
+        const text = args.slice(1).filter(a => !a.startsWith('-')).join(' ');
+        if (!text) { console.error('Usage: ai-gateway translate "text to translate"'); process.exit(1); }
+        await cmdTranslate(text, {
+          from: getArg(args, '--from'),
+          to: getArg(args, '--to'),
+          model: getArg(args, '-m') || getArg(args, '--model'),
+        });
+        break;
+      }
+      case 'voices':
+        await cmdVoices();
+        break;
+      case 'config':
+        await cmdConfig();
+        break;
+      case 'ping':
+        await cmdPing(getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : getArg(args, '--count') ? parseInt(getArg(args, '--count')!) : 5);
+        break;
+      case 'benchmark':
+        await cmdBenchmark({
+          count: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : getArg(args, '--count') ? parseInt(getArg(args, '--count')!) : undefined,
+        });
         break;
       default:
         console.error(`Unknown command: ${cmd}. Run 'ai-gateway help' for usage.`);
