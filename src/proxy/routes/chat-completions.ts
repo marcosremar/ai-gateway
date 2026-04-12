@@ -35,6 +35,7 @@ export async function handleChatCompletions(
     max_tokens?: number;
     stream?: boolean;
     response_format?: { type: 'json_object' | 'text' };
+    stream_options?: { include_usage?: boolean };
   };
 
   if (!body.model || typeof body.model !== 'string') {
@@ -80,7 +81,8 @@ export async function handleChatCompletions(
   if (body.stream) {
     const instance = chain[0].instance;
     const completionId = `chatcmpl-${Date.now()}`;
-    const stream = buildSSEStream(instance, chatOpts, primaryModel, completionId, (latencyMs, success, error) => {
+    const includeUsage = body.stream_options?.include_usage === true;
+    const stream = buildSSEStream(instance, chatOpts, primaryModel, completionId, includeUsage, (latencyMs, success, error) => {
       emitHook(hooks, 'onRequestEnd', {
         userId: 'proxy',
         stage: 'llm',
@@ -254,6 +256,7 @@ function buildSSEStream(
   opts: ChatRequest,
   model: string,
   id: string,
+  includeUsage: boolean,
   onEnd?: (latencyMs: number, success: boolean, error?: string) => void,
 ): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
@@ -280,12 +283,22 @@ function buildSSEStream(
         onEnd?.(Date.now() - startMs, success, errorMsg);
       };
 
+      // Usage data extracted from the __usage__: sentinel emitted by the
+      // provider's chatStream(). Kept here so we can emit it as the last
+      // chunk before [DONE] when the client requested stream_options.include_usage.
+      let usageData: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null = null;
+
       try {
         if (!provider.chatStream) {
           // Provider doesn't support streaming — emit full response as one chunk
           const res = await withTimeout(provider.chat(opts));
           controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model: res.model || model,
             choices: [{ index: 0, delta: { role: 'assistant', content: res.content }, finish_reason: 'stop' }] }));
+          // Usage chunk for non-streaming fallback
+          if (includeUsage && res.usage) {
+            controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model: res.model || model,
+              choices: [], usage: { prompt_tokens: res.usage.promptTokens, completion_tokens: res.usage.completionTokens, total_tokens: res.usage.totalTokens } }));
+          }
           controller.enqueue(enc.encode('data: [DONE]\n\n'));
           controller.close();
           finish(true);
@@ -301,6 +314,13 @@ function buildSSEStream(
         for (;;) {
           const { done, value } = await withTimeout(gen.next());
           if (done) break;
+          // Detect the __usage__: sentinel from the provider. This is how
+          // the upstream's usage data flows through the generator without
+          // changing the AsyncGenerator<string> contract.
+          if (typeof value === 'string' && value.startsWith('__usage__:')) {
+            try { usageData = JSON.parse(value.slice('__usage__:'.length)); } catch { /* malformed — skip */ }
+            continue;
+          }
           controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
             choices: [{ index: 0, delta: { content: value }, finish_reason: null }] }));
         }
@@ -308,6 +328,14 @@ function buildSSEStream(
         // Finish chunk
         controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
           choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }));
+
+        // Usage chunk — emitted after the finish_reason:stop chunk, before
+        // [DONE], matching the OpenAI spec for stream_options.include_usage.
+        if (includeUsage && usageData) {
+          controller.enqueue(sse({ id, object: 'chat.completion.chunk', created, model,
+            choices: [], usage: usageData }));
+        }
+
         controller.enqueue(enc.encode('data: [DONE]\n\n'));
         controller.close();
         finish(true);
