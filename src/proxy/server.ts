@@ -17,6 +17,7 @@ import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModels } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
 import { createLogger, withLogContext } from '../logger';
+import { ApiKeyRegistry } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
 
 const log = createLogger('proxy');
@@ -350,6 +351,9 @@ let peakConnections = 0;
 
 export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
+  // Build the API key registry for user identity resolution.
+  // Supports both legacy format ("key1,key2") and new format ("key1:user1,key2:user2").
+  const keyRegistry = new ApiKeyRegistry(apiKeys.join(','));
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -418,29 +422,37 @@ export function createProxyServer(config: ProxyConfig): Server {
       return;
     }
 
-    // Auth — when no API keys are configured, restrict to localhost-only requests
+    // Auth — resolve user identity from Bearer token.
+    // When no keys are configured, restrict to localhost. When keys are
+    // configured, validate and resolve the userId for logging + rate limiting.
     const authHeader = req.headers.authorization;
-    if (apiKeys.length === 0) {
+    let userId = 'anonymous';
+    if (keyRegistry.size === 0) {
       const remoteAddr = req.socket?.remoteAddress || '';
       const isLocal = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
       if (!isLocal) {
         sendError(res, 401, 'No GATEWAY_API_KEY configured — remote access denied. Set GATEWAY_API_KEY or connect from localhost.', requestId);
         return;
       }
-    } else if (!validateAuth(authHeader, apiKeys)) {
-      sendError(res, 401, 'Invalid or missing API key', requestId);
-      return;
-    } else if (config.onAuth && authHeader) {
-      // Authenticated — load per-user profile from DB (non-blocking, best-effort)
+      userId = 'localhost';
+    } else {
+      const token = (authHeader || '').replace(/^Bearer\s+/i, '');
+      const resolved = keyRegistry.resolve(token);
+      if (!resolved) {
+        sendError(res, 401, 'Invalid or missing API key', requestId);
+        return;
+      }
+      userId = resolved.userId;
+    }
+    if (config.onAuth && authHeader) {
       const token = authHeader.replace(/^Bearer\s+/i, '');
       config.onAuth(token).catch(() => {});
     }
 
-    // Rate limit — check and set X-RateLimit-* headers on every response so
-    // clients can implement intelligent backoff. Headers follow the IETF
-    // draft-ietf-httpapi-ratelimit-headers convention.
+    // Rate limit — keyed by userId (resolved from API key above) so each
+    // user gets their own token bucket. Falls back to IP for unauthenticated.
     if (rateLimiter) {
-      const clientId = RateLimiter.clientId(req);
+      const clientId = userId !== 'anonymous' ? `user:${userId}` : RateLimiter.clientId(req);
       const rl = rateLimiter.check(clientId);
       if (rl.limit > 0) {
         res.setHeader('X-RateLimit-Limit', rl.limit);
@@ -459,16 +471,15 @@ export function createProxyServer(config: ProxyConfig): Server {
 
     // Request-level logging: entry + auto-wired exit on res.end(). /health
     // is excluded to avoid flooding logs on Fly.io's 10s health probe.
+    // userId is included so every log line for this request is attributable.
     if (path !== '/health') {
-      log.log({ method, path }, 'request received');
+      log.log({ method, path, userId }, 'request received');
       const origEnd = res.end.bind(res);
       (res as { end: typeof res.end }).end = function (...args: Parameters<typeof res.end>) {
         const durationMs = Date.now() - reqStartMs;
-        // Route handlers can set X-Upstream-Duration-Ms to report how much
-        // time was spent waiting on the upstream provider vs our proxy code.
         const upstreamMs = parseInt(res.getHeader('x-upstream-duration-ms') as string, 10) || undefined;
         const proxyMs = upstreamMs ? durationMs - upstreamMs : undefined;
-        log.log({ method, path, statusCode: res.statusCode, durationMs, upstreamMs, proxyMs }, 'request complete');
+        log.log({ method, path, userId, statusCode: res.statusCode, durationMs, upstreamMs, proxyMs }, 'request complete');
         return origEnd(...args);
       } as typeof res.end;
     }
