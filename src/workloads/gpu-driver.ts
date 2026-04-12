@@ -57,8 +57,18 @@ export class GpuWorkloadDriver implements WorkloadDriver {
     const dockerImage = cfg.dockerImage || '';
     const gpuTypes = cfg.gpuTypes || [];
 
+    // Reset deploy state so deployCancelled=false (set by terminate/resetDeployState)
+    // doesn't abort the new deploy loop immediately.
+    state.setDeployCancelled(false);
+
+    // Build extra options — pass env vars, storage, region from config
+    const extra: Record<string, unknown> = {};
+    if (cfg.env && Object.keys(cfg.env).length > 0) extra.env = cfg.env;
+    if (cfg.storageGb) extra.storageGb = cfg.storageGb;
+    if (cfg.region) extra.region = cfg.region;
+
     // Kick off deploy (non-blocking — returns immediately)
-    deploy.startDeployWithTiers(tiers, dockerImage, gpuTypes);
+    deploy.startDeployWithTiers(tiers, dockerImage, gpuTypes, extra as any);
 
     const now = Date.now();
     return {

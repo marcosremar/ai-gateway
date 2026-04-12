@@ -227,7 +227,7 @@ export function filterTiers(
 export const DEFAULT_STORAGE_GB: Record<ProviderName, number> = {
   runpod: 20,      // RunPod default is 20GB; 100GB causes ghost machines
   tensordock: 50,
-  vast: 30,
+  vast: 80,        // 80GB: Docker image (~15GB) + 28GB Wan2.1 model + buffer
   modal: 0,
   // Snapgpu inherits the storage of its underlying backend at runtime; this
   // value only matters when the wrapper is used directly without a backend
