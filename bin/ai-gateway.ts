@@ -807,6 +807,23 @@ Usage:
 
 Shows all voice names for each TTS model with gender labels.
 `,
+    whoami: `
+ai-gateway whoami — Show which user this API key is associated with
+
+Usage:
+  ai-gateway whoami
+
+Output:
+  User:    marcos        (userId from the key format key:userId)
+  Key:     abc12345...   (masked)
+  Gateway: https://...   (current gateway URL)
+  Auth:    valid ✓       (confirms the key is accepted)
+
+Notes:
+  - API keys can carry a userId: GATEWAY_API_KEYS="key1:marcos,key2:bot"
+  - Plain keys without ":" map to userId "default"
+  - The userId is logged with every request for attribution
+`,
     config: `
 ai-gateway config — Show current configuration
 
