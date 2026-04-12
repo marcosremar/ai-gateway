@@ -19,6 +19,7 @@
     "build": "NODE_OPTIONS='--max-old-space-size=4096' tsup",
     "typecheck": "tsc --noEmit",
     "insights:digest": "bun run scripts/telemetry-digest.ts",
+    "test:cli": "vitest run __tests__/cli.test.ts",
     "test": "vitest run --config vitest.config.ts",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
