@@ -350,14 +350,49 @@ async function cmdConfig() {
   console.log(`Gateway URL:  ${url}`);
   console.log(`API Key:      ${key ? key.slice(0, 8) + '...' + key.slice(-4) : '(not set)'}`);
   console.log('');
-  // Test connectivity
+  // Test connectivity + identify user
   try {
-    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(5000) });
-    if (res.ok) console.log(`Status:       connected ✓`);
-    else console.log(`Status:       HTTP ${res.status}`);
+    const h: Record<string, string> = {};
+    if (key) h['Authorization'] = `Bearer ${key}`;
+    const res = await fetch(`${url}/health`, { headers: h, signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      console.log(`Status:       connected ✓`);
+    } else {
+      console.log(`Status:       HTTP ${res.status}`);
+    }
   } catch {
     console.log(`Status:       unreachable ✗`);
   }
+}
+
+async function cmdWhoami() {
+  const { url, key } = getConfig();
+  if (!key) {
+    console.log('No API key configured. Set AI_GATEWAY_KEY.');
+    return;
+  }
+  // Make a lightweight request and read the X-User-Id header from response
+  const res = await fetch(`${url}/v1/models`, {
+    headers: headers(key),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) {
+    console.error(`Error ${res.status}: ${(await res.text()).slice(0, 100)}`);
+    process.exit(1);
+  }
+  // The proxy sets X-User-Id on every authenticated response
+  // For now, parse the key format to show the userId
+  const keyParts = key.split(':');
+  if (keyParts.length >= 2) {
+    console.log(`User:    ${keyParts[1]}`);
+    if (keyParts.length >= 3) console.log(`Label:   ${keyParts.slice(2).join(':')}`);
+    console.log(`Key:     ${keyParts[0].slice(0, 8)}...`);
+  } else {
+    console.log(`User:    default`);
+    console.log(`Key:     ${key.slice(0, 8)}...`);
+  }
+  console.log(`Gateway: ${url}`);
+  console.log(`Auth:    valid ✓`);
 }
 
 async function cmdPing(count: number) {
@@ -516,6 +551,7 @@ Commands:
   gpu             Manage GPU deployments (status, deploy, stop, logs)
   metrics         Show gateway metrics (Prometheus or JSON)
   config          Show current configuration and test connectivity
+  whoami          Show which user this API key is associated with
   ping            Measure gateway latency (like ping)
   benchmark       Run a latency benchmark across all endpoints
 
@@ -928,6 +964,9 @@ Examples:
         break;
       case 'config':
         await cmdConfig();
+        break;
+      case 'whoami':
+        await cmdWhoami();
         break;
       case 'ping':
         await cmdPing(getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : getArg(args, '--count') ? parseInt(getArg(args, '--count')!) : 5);
