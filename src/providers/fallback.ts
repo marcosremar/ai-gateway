@@ -411,12 +411,18 @@ export async function withProviderFallback<T>(
     const maxAttempts = 1 + retriesPerProvider;
 
     for (let retryNum = 0; retryNum < maxAttempts; retryNum++) {
-      // Exponential backoff before each retry (not before the first attempt)
+      // Exponential backoff with jitter before each retry (not before the first attempt).
+      // Jitter prevents the "thundering herd" problem where multiple clients that
+      // hit the same 429 all retry at the exact same moment, causing another 429.
+      // Formula: base * 2^(attempt-1) + random(0, base). The random component
+      // ensures retries from different proxy instances spread across time.
       if (retryNum > 0) {
-        const delay = retryBaseDelayMs * Math.pow(2, retryNum - 1);
+        const baseDelay = retryBaseDelayMs * Math.pow(2, retryNum - 1);
+        const jitter = Math.random() * retryBaseDelayMs;
+        const delay = Math.round(baseDelay + jitter);
         log.log(
           `${logPrefix} ${entry.provider}/${entry.model ?? 'default'} ` +
-          `retry ${retryNum}/${retriesPerProvider} in ${delay}ms`,
+          `retry ${retryNum}/${retriesPerProvider} in ${delay}ms (jitter=${Math.round(jitter)}ms)`,
         );
         await sleep(delay);
       }

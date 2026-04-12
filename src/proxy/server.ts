@@ -76,13 +76,26 @@ function sendResponse(res: ServerResponse, proxyRes: ProxyResponse, requestId: s
     ...proxyRes.headers,
   };
 
-  // SSE streaming response — pipe ReadableStream to HTTP response
+  // SSE streaming response — pipe ReadableStream to HTTP response.
+  // Critical production concern (from LiteLLM postmortem + node-http-proxy
+  // issue #1586): if the client disconnects mid-stream, the reader must
+  // be cancelled to release the upstream connection. Without this, the
+  // provider's response stream buffers indefinitely → memory leak.
   if (proxyRes.stream) {
     res.writeHead(proxyRes.status, headers);
     const reader = proxyRes.stream.getReader();
+    let clientGone = false;
+    // Detect client disconnect — fires on TCP reset, browser tab close, etc.
+    res.on('close', () => {
+      if (!clientGone) {
+        clientGone = true;
+        reader.cancel().catch(() => { /* already closed */ });
+      }
+    });
     (async () => {
       try {
         for (;;) {
+          if (clientGone) break;
           const { done, value } = await reader.read();
           if (done) break;
           // Respect backpressure
@@ -91,7 +104,7 @@ function sendResponse(res: ServerResponse, proxyRes: ProxyResponse, requestId: s
       } catch {
         // Client disconnected mid-stream — not an error
       } finally {
-        res.end();
+        if (!clientGone) res.end();
       }
     })();
     return;
@@ -329,6 +342,12 @@ function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse
   return false;
 }
 
+/** Active connection counter. Exposed via /health so operators can detect
+ *  connection leaks without attaching a debugger. A steadily rising count
+ *  under constant load is the first signal of a stream not being cleaned up. */
+let activeConnections = 0;
+let peakConnections = 0;
+
 export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
   const rateLimiter = config.rateLimit ? new RateLimiter(config.rateLimit.rpm) : null;
@@ -350,6 +369,11 @@ export function createProxyServer(config: ProxyConfig): Server {
   // readable when errors are raised from deep inside a route handler.
   const handleRequest = async (req: IncomingMessage, res: ServerResponse, method: string, url: string, requestId: string): Promise<void> => {
     const reqStartMs = Date.now();
+
+    // Track active connections for leak detection
+    activeConnections++;
+    if (activeConnections > peakConnections) peakConnections = activeConnections;
+    res.on('close', () => { activeConnections--; });
 
     // CORS origin validation
     const corsOriginsEnv = process.env.CORS_ORIGINS || 'http://localhost:4000,http://localhost:3000';
@@ -387,7 +411,10 @@ export function createProxyServer(config: ProxyConfig): Server {
     // Skip auth for health endpoint (Fly.io health checks don't send tokens)
     const urlPath = url.split('?')[0];
     if (method === 'GET' && urlPath === '/health') {
-      sendResponse(res, { status: 200, body: { status: 'ok' } }, requestId);
+      sendResponse(res, { status: 200, body: {
+        status: 'ok',
+        connections: { active: activeConnections, peak: peakConnections },
+      } }, requestId);
       return;
     }
 
@@ -596,6 +623,17 @@ export function createProxyServer(config: ProxyConfig): Server {
       sendError(res, 500, 'Internal server error', requestId);
     }
   };
+
+  // Total request timeout — safety net that kills requests stuck longer than
+  // 60s (e.g. a hung upstream + missing per-route timeout). Without this, a
+  // single stuck request holds its connection slot forever, and under load
+  // this leads to file descriptor exhaustion. 60s is 15× our chat SLO and
+  // 2× the stream timeout — anything still alive after that is genuinely stuck.
+  const TOTAL_REQUEST_TIMEOUT_MS = parseInt(process.env.PROXY_TOTAL_TIMEOUT_MS || '60000', 10);
+  server.setTimeout(TOTAL_REQUEST_TIMEOUT_MS, (socket) => {
+    log.warn({ timeoutMs: TOTAL_REQUEST_TIMEOUT_MS }, 'Request killed by total timeout');
+    socket.destroy();
+  });
 
   // Handle all WebSocket upgrade requests — proxy HMR to Next.js dev server, block everything else with 410
   server.on('upgrade', (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => {
