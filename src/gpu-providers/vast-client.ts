@@ -1257,18 +1257,26 @@ export class VastClient extends AbstractGpuProvider {
       const settled = await Promise.race(inflight.values());
       inflight.delete(settled.idx);
       if (settled.result) {
-        // We have a winner! Mark all currently in-flight as losers.
+        // We have a winner! Collect losers and clean them up in the background.
+        // Previously `Promise.allSettled` here blocked for up to 13 minutes when
+        // losing SSH-only racers had many retries left (backoff up to 60s × 10+).
         winner = settled.result;
-        // Wait for in-flight attempts to settle so we can mark losers
-        const remaining = await Promise.allSettled(inflight.values());
-        for (const r of remaining) {
-          if (r.status === 'fulfilled' && r.value.result) {
-            losers.push({
-              instanceId: r.value.result.instanceId,
-              contractId: r.value.result.instanceId.replace(/^inst-/, ''),
-            });
+        const remainingInflight = new Map(inflight); // snapshot before clear
+        void Promise.allSettled(remainingInflight.values()).then((remaining) => {
+          for (const r of remaining) {
+            if (r.status === 'fulfilled' && r.value.result) {
+              const loser = r.value.result;
+              losers.push({
+                instanceId: loser.instanceId,
+                contractId: loser.instanceId.replace(/^inst-/, ''),
+              });
+              // Clean up immediately — caller's cleanup loop already ran (empty array)
+              this.deleteInstance(loser.instanceId, { apiKey })
+                .then(() => this.log.log(`[vast] Cleaned up async loser ${loser.instanceId}`))
+                .catch((e) => this.log.warn(`[vast] Failed to clean up async loser ${loser.instanceId}: ${this.errMsg(e)}`));
+            }
           }
-        }
+        });
         inflight.clear();
         break;
       }
