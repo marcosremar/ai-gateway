@@ -35,6 +35,12 @@ export interface CustomRoute {
   handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 }
 
+/** A route that matches any request whose path starts with `prefix`. */
+export interface PrefixRoute {
+  prefix: string;
+  handler: (req: IncomingMessage, res: ServerResponse, pathname: string, method: string) => boolean;
+}
+
 export interface ProxyConfig {
   port?: number;               // default 4000
   apiKeys?: string[];          // valid Bearer tokens
@@ -44,6 +50,7 @@ export interface ProxyConfig {
   rateLimit?: { rpm: number };
   hostname?: string;           // default '0.0.0.0'
   customRoutes?: CustomRoute[];
+  prefixRoutes?: PrefixRoute[];
   /** Directory of static files to serve (e.g. Next.js `out/` export). Falls back for non-API paths. */
   staticDir?: string;
   /** Next.js dev server URL for HMR proxy (e.g. 'http://localhost:3000'). Overrides staticDir when set. */

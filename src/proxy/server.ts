@@ -17,7 +17,7 @@ import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModels } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
 import { createLogger, withLogContext } from '../logger';
-import type { ProxyConfig, ProxyRequest, ProxyResponse } from './types';
+import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
 
 const log = createLogger('proxy');
 
@@ -498,6 +498,24 @@ export function createProxyServer(config: ProxyConfig): Server {
             }
           }
           return;
+        }
+      }
+    }
+
+    // Prefix routes (pattern-matched, handler owns routing + response)
+    if (config.prefixRoutes) {
+      for (const route of config.prefixRoutes) {
+        if (path.startsWith(route.prefix)) {
+          try {
+            const handled = route.handler(req, res, path, method);
+            if (handled) return;
+          } catch (err) {
+            log.error({ err, prefix: route.prefix }, 'Unhandled error in prefix route');
+            if (!res.headersSent) {
+              sendError(res, 500, 'Internal server error', requestId);
+            }
+            return;
+          }
         }
       }
     }

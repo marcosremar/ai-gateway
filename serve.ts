@@ -13,7 +13,9 @@ import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
-import type { ProviderMapping } from './src/proxy/types';
+import type { ProviderMapping, PrefixRoute } from './src/proxy/types';
+import { routeWorkloadRequest } from './server/workload-handlers';
+import { workloadRegistry, GpuWorkloadDriver } from './src/workloads';
 
 const log = createLogger('serve');
 
@@ -53,13 +55,23 @@ const providers: ProviderMapping = {
 };
 
 log.log({ port: PORT, apiKeys: API_KEYS ? API_KEYS.length : 0, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
-log.log({ groqKey: process.env.GROQ_API_KEY.slice(0, 6) + '...', tts: 'groq/orpheus', fal: process.env.FAL_KEY ? 'key set' : 'no key' }, 'Providers configured');
+log.log({ groqKey: process.env.GROQ_API_KEY.slice(0, 6) + '...', tts: 'groq/orpheus' }, 'Providers configured');
+
+// Register GPU workload driver (enables POST /v1/workloads with type:'gpu')
+workloadRegistry.registerDriver(new GpuWorkloadDriver());
+log.log({}, 'Workload registry initialized (gpu driver)');
+
+const workloadPrefixRoute: PrefixRoute = {
+  prefix: '/v1/workloads',
+  handler: routeWorkloadRequest,
+};
 
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
   apiKeys: API_KEYS,
   providers,
+  prefixRoutes: [workloadPrefixRoute],
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });
 
