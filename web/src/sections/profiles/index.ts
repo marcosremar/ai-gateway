@@ -8,6 +8,6 @@ export {
   uid, profileToStages, stagesToProfileFields, pMeta, fmtBootTime,
   STAGE_CATALOG, STAGE_ACCENT, DEFAULT_STAGES, DEFAULT_STT, DEFAULT_LLM, DEFAULT_TTS,
   LATENCY_OPTIONS, PROVIDER_META, IO_OPTIONS,
-  type ProfileStage, type StageCatalogEntry, type TestStageStatus, type TestResult,
+  type StageEntry, type StageCatalogEntry, type TestStageStatus, type TestResult,
   type TestTransport, type TransportLatency, type FlowStage, type RaceResult,
 } from './constants';

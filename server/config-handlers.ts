@@ -20,8 +20,8 @@ import { getOrCreateRequestId, setRequestIdHeader, readJsonBody, handleBodyError
 import { loadProviderConfig, patchProviderConfig, saveProviderConfig } from './config-persistence';
 import type { PipelineChainEntry } from './config-persistence';
 import { reloadStreamingSTTRouter } from './ws-server';
-import type { GatewayProfile, ProviderConfig } from './config-persistence';
-import { reloadProviderAvailability, translationProfile, updateTranslationProfile } from './providers';
+import type { GatewayApp, ProviderConfig } from './config-persistence';
+import { reloadProviderAvailability, translationDefaults, updateActivePipeline } from './providers';
 import type { AIProfile } from '../src/client';
 import { broadcastWs } from './ws-state';
 import { setDeployTimeoutMin, setDeployRegion, setDeployDockerImage, setDeployRaceCount } from '../src/gpu-providers/deploy-settings';
@@ -60,32 +60,32 @@ export async function handlePatchProviderConfig(req: IncomingMessage, res: Serve
       return;
     }
   }
-  if (body.profiles !== undefined && !Array.isArray(body.profiles)) {
+  if (body.apps !== undefined && !Array.isArray(body.apps)) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'profiles must be an array' }));
+    res.end(JSON.stringify({ error: 'apps must be an array' }));
     return;
   }
 
   try {
     const updated = patchProviderConfig(body as Parameters<typeof patchProviderConfig>[0]);
-    // Apply changed chains to runtime translationProfile
+    // Apply changed chains to runtime translationDefaults
     if (body.pipelineStt && Array.isArray(body.pipelineStt) && body.pipelineStt.length > 0) {
-      updateTranslationProfile({ stt: body.pipelineStt as PipelineChainEntry[] }, 'handlePatchProviderConfig:stt');
+      updateActivePipeline({ stt: body.pipelineStt as PipelineChainEntry[] }, 'handlePatchProviderConfig:stt');
       reloadStreamingSTTRouter();
     }
     if (body.pipelineLlm && Array.isArray(body.pipelineLlm) && body.pipelineLlm.length > 0) {
-      updateTranslationProfile({ llm: body.pipelineLlm as PipelineChainEntry[] }, 'handlePatchProviderConfig:llm');
+      updateActivePipeline({ llm: body.pipelineLlm as PipelineChainEntry[] }, 'handlePatchProviderConfig:llm');
     }
     if (body.pipelineTts && Array.isArray(body.pipelineTts) && body.pipelineTts.length > 0) {
-      updateTranslationProfile({ tts: body.pipelineTts as PipelineChainEntry[] }, 'handlePatchProviderConfig:tts');
+      updateActivePipeline({ tts: body.pipelineTts as PipelineChainEntry[] }, 'handlePatchProviderConfig:tts');
     }
     // Broadcast config change to all connected WS clients (Python app, other dashboards)
-    if (body.activeProfileId !== undefined || body.pipelineStt || body.pipelineLlm || body.pipelineTts) {
-      const activeProfile = updated.profiles?.find((p: any) => p.id === updated.activeProfileId);
+    if (body.activeAppId !== undefined || body.pipelineStt || body.pipelineLlm || body.pipelineTts) {
+      const activeApp = updated.apps?.find((p: any) => p.id === updated.activeAppId);
       broadcastWs({
         type: 'config:updated',
-        activeProfileId: updated.activeProfileId,
-        profileName: activeProfile?.name ?? null,
+        activeAppId: updated.activeAppId,
+        appName: activeApp?.name ?? null,
         chains: {
           stt: updated.pipelineStt,
           llm: updated.pipelineLlm,
@@ -236,8 +236,8 @@ export async function handleCreateProfile(req: IncomingMessage, res: ServerRespo
 
   const { id, name, stt, llm, tts, gpuDeploy, voice, audioFormat, temperature, maxTokens, language } = body as {
     id?: string; name?: string;
-    stt?: GatewayProfile['stt']; llm?: GatewayProfile['llm']; tts?: GatewayProfile['tts'];
-    gpuDeploy?: GatewayProfile['gpuDeploy'];
+    stt?: GatewayApp['stt']; llm?: GatewayApp['llm']; tts?: GatewayApp['tts'];
+    gpuDeploy?: GatewayApp['gpuDeploy'];
     voice?: string; audioFormat?: string; temperature?: number; maxTokens?: number; language?: string;
   };
 
@@ -258,8 +258,8 @@ export async function handleCreateProfile(req: IncomingMessage, res: ServerRespo
   }
 
   const config = loadProviderConfig();
-  const existing = config.profiles.find(p => p.id === id);
-  const profile: GatewayProfile = {
+  const existing = config.apps.find(p => p.id === id);
+  const app: GatewayApp = {
     id,
     name,
     stt: Array.isArray(stt) ? stt : (existing?.stt ?? config.pipelineStt),
@@ -268,22 +268,22 @@ export async function handleCreateProfile(req: IncomingMessage, res: ServerRespo
     ...(gpuDeploy !== undefined ? { gpuDeploy } : existing?.gpuDeploy ? { gpuDeploy: existing.gpuDeploy } : {}),
     // Extended AIProfile fields (backward-compatible: omitted = inherited from existing/default)
     ...(voice !== undefined ? { voice } : existing?.voice ? { voice: existing.voice } : {}),
-    ...(audioFormat !== undefined ? { audioFormat: audioFormat as GatewayProfile['audioFormat'] } : existing?.audioFormat ? { audioFormat: existing.audioFormat } : {}),
+    ...(audioFormat !== undefined ? { audioFormat: audioFormat as GatewayApp['audioFormat'] } : existing?.audioFormat ? { audioFormat: existing.audioFormat } : {}),
     ...(temperature !== undefined ? { temperature } : existing?.temperature !== undefined ? { temperature: existing.temperature } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : existing?.maxTokens !== undefined ? { maxTokens: existing.maxTokens } : {}),
     ...(language !== undefined ? { language } : existing?.language ? { language: existing.language } : {}),
   };
 
-  // Upsert: replace existing profile with same id, or append
-  const idx = config.profiles.findIndex(p => p.id === id);
+  // Upsert: replace existing app with same id, or append
+  const idx = config.apps.findIndex(p => p.id === id);
   if (idx >= 0) {
-    config.profiles[idx] = profile;
+    config.apps[idx] = app;
   } else {
-    config.profiles.push(profile);
+    config.apps.push(app);
   }
 
   saveProviderConfig(config);
-  console.log(`[config] Profile ${idx >= 0 ? 'updated' : 'created'}: ${id} (${name})`);
+  console.log(`[config] App ${idx >= 0 ? 'updated' : 'created'}: ${id} (${name})`);
 
   res.writeHead(idx >= 0 ? 200 : 201, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(config));
@@ -306,22 +306,22 @@ export async function handleDeleteProfile(req: IncomingMessage, res: ServerRespo
   }
 
   const config = loadProviderConfig();
-  const before = config.profiles.length;
-  config.profiles = config.profiles.filter(p => p.id !== id);
+  const before = config.apps.length;
+  config.apps = config.apps.filter(p => p.id !== id);
 
-  if (config.profiles.length === before) {
+  if (config.apps.length === before) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: `Profile not found: ${id}` }));
+    res.end(JSON.stringify({ error: `App not found: ${id}` }));
     return;
   }
 
-  // If we deleted the active profile, clear activeProfileId
-  if (config.activeProfileId === id) {
-    config.activeProfileId = null;
+  // If we deleted the active app, clear activeAppId
+  if (config.activeAppId === id) {
+    config.activeAppId = null;
   }
 
   saveProviderConfig(config);
-  console.log(`[config] Profile deleted: ${id}`);
+  console.log(`[config] App deleted: ${id}`);
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(config));
@@ -342,67 +342,67 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
 
   // Allow deactivating by passing null/empty id
   if (!id) {
-    config.activeProfileId = null;
+    config.activeAppId = null;
     saveProviderConfig(config);
-    console.log('[config] Profile deactivated (no active profile)');
+    console.log('[config] App deactivated (no active app)');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(config));
     return;
   }
 
-  const profile = config.profiles.find(p => p.id === id);
-  if (!profile) {
+  const app = config.apps.find(p => p.id === id);
+  if (!app) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: `Profile not found: ${id}` }));
+    res.end(JSON.stringify({ error: `App not found: ${id}` }));
     return;
   }
 
-  // Copy profile chains to top-level pipeline fields
-  config.activeProfileId = id;
-  config.pipelineStt = ((profile.stt || []) as unknown as PipelineChainEntry[]);
-  config.pipelineLlm = ((profile.llm || []) as unknown as PipelineChainEntry[]);
-  config.pipelineTts = ((profile.tts || []) as unknown as PipelineChainEntry[]);
+  // Copy app chains to top-level pipeline fields
+  config.activeAppId = id;
+  config.pipelineStt = ((app.stt || []) as unknown as PipelineChainEntry[]);
+  config.pipelineLlm = ((app.llm || []) as unknown as PipelineChainEntry[]);
+  config.pipelineTts = ((app.tts || []) as unknown as PipelineChainEntry[]);
 
-  // Apply profile GPU deploy settings if present
-  if (profile.gpuDeploy) {
-    if (profile.gpuDeploy.dockerImage) setDeployDockerImage(profile.gpuDeploy.dockerImage);
-    if (profile.gpuDeploy.region !== undefined) setDeployRegion(profile.gpuDeploy.region);
-    if (profile.gpuDeploy.timeoutMin) setDeployTimeoutMin(profile.gpuDeploy.timeoutMin);
-    if (typeof profile.gpuDeploy.raceCount === 'number') setDeployRaceCount(profile.gpuDeploy.raceCount);
-    console.log(`[config] Applied gpuDeploy from profile: image=${profile.gpuDeploy.dockerImage}, region=${profile.gpuDeploy.region}, timeout=${profile.gpuDeploy.timeoutMin}min, race=${profile.gpuDeploy.raceCount ?? 1}`);
+  // Apply app GPU deploy settings if present
+  if (app.gpuDeploy) {
+    if (app.gpuDeploy.dockerImage) setDeployDockerImage(app.gpuDeploy.dockerImage);
+    if (app.gpuDeploy.region !== undefined) setDeployRegion(app.gpuDeploy.region);
+    if (app.gpuDeploy.timeoutMin) setDeployTimeoutMin(app.gpuDeploy.timeoutMin);
+    if (typeof app.gpuDeploy.raceCount === 'number') setDeployRaceCount(app.gpuDeploy.raceCount);
+    console.log(`[config] Applied gpuDeploy from app: image=${app.gpuDeploy.dockerImage}, region=${app.gpuDeploy.region}, timeout=${app.gpuDeploy.timeoutMin}min, race=${app.gpuDeploy.raceCount ?? 1}`);
   }
 
   saveProviderConfig(config);
 
-  // ── Apply chains + extended fields to runtime translationProfile ──
-  const profilePatch: Partial<AIProfile> = {
-    stt: [...(profile.stt ?? [])],
-    llm: [...(profile.llm ?? [])],
-    tts: [...(profile.tts ?? [])],
+  // ── Apply chains + extended fields to runtime translationDefaults ──
+  const appPatch: Partial<AIProfile> = {
+    stt: [...(app.stt ?? [])],
+    llm: [...(app.llm ?? [])],
+    tts: [...(app.tts ?? [])],
   };
-  if (profile.voice !== undefined) profilePatch.voice = profile.voice;
-  if (profile.audioFormat !== undefined) profilePatch.audioFormat = profile.audioFormat;
-  if (profile.temperature !== undefined) profilePatch.temperature = profile.temperature;
-  if (profile.maxTokens !== undefined) profilePatch.maxTokens = profile.maxTokens;
-  if (profile.language !== undefined) profilePatch.language = profile.language;
-  updateTranslationProfile(profilePatch, `handleActivateProfile:${id}`);
+  if (app.voice !== undefined) appPatch.voice = app.voice;
+  if (app.audioFormat !== undefined) appPatch.audioFormat = app.audioFormat;
+  if (app.temperature !== undefined) appPatch.temperature = app.temperature;
+  if (app.maxTokens !== undefined) appPatch.maxTokens = app.maxTokens;
+  if (app.language !== undefined) appPatch.language = app.language;
+  updateActivePipeline(appPatch, `handleActivateProfile:${id}`);
 
   // Rebuild streaming STT router for new STT chain
   reloadStreamingSTTRouter();
 
-  // ── Broadcast profile activation to all WS clients (item #2) ──
+  // ── Broadcast app activation to all WS clients (item #2) ──
   broadcastWs({
-    type: 'profile:activated',
+    type: 'app:activated',
     id,
-    name: profile.name,
+    name: app.name,
     chains: {
-      stt: profile.stt,
-      llm: profile.llm,
-      tts: profile.tts,
+      stt: app.stt,
+      llm: app.llm,
+      tts: app.tts,
     },
   });
 
-  console.log(`[config] Profile activated: ${id} (${profile.name})`);
+  console.log(`[config] App activated: ${id} (${app.name})`);
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(config));

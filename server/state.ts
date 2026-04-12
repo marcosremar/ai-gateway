@@ -600,8 +600,8 @@ export function resetGpuReadinessState(): void {
   resetPerStageLatencyRings();
 }
 
-// These mutate translationProfile which lives in providers.ts.
-// They are defined here but import translationProfile from providers.ts.
+// These mutate translationDefaults which lives in providers.ts.
+// They are defined here but import translationDefaults from providers.ts.
 // To avoid circular deps, the actual mark functions are defined in providers.ts
 // and re-exported from there. See providers.ts for markGpuUnhealthy/markGpuHealthy.
 

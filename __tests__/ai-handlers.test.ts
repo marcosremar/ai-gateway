@@ -64,9 +64,9 @@ vi.mock('../server/providers', () => ({
     synthesize: (...args: unknown[]) => mockSynthesize(...args),
     pipeline: (...args: unknown[]) => mockPipeline(...args),
   },
-  groqProfile: { stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'groq', model: 'orpheus' }] },
-  ollamaProfile: null,
-  translationProfile: { stt: [], llm: [], tts: [] },
+  groqDefaults: { stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'groq', model: 'orpheus' }] },
+  ollamaDefaults: null,
+  translationDefaults: { stt: [], llm: [], tts: [] },
   groqAvailable: true,
   openaiAvailable: false,
   deepgramAvailable: false,
@@ -106,8 +106,8 @@ vi.mock('../server/gpu-readiness', () => ({
 
 // Mock server/config-persistence.ts
 vi.mock('../server/config-persistence', () => ({
-  loadProviderConfig: vi.fn(() => ({ activeProfileId: 'default', sttModelOverrides: {}, sttHallucinationFilter: {} })),
-  stampProfileRequest: vi.fn(),
+  loadProviderConfig: vi.fn(() => ({ activeAppId: 'default', sttModelOverrides: {}, sttHallucinationFilter: {} })),
+  stampAppRequest: vi.fn(),
 }));
 
 // Mock server/config.ts

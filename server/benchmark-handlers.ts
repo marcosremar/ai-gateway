@@ -11,7 +11,7 @@ import { readFileSync, existsSync } from 'fs';
 import { deployState, gpuModelWarmth } from './state';
 import type { GpuModelWarmth } from './state';
 import {
-  client, groqProfile, ollamaProfile,
+  client, groqDefaults, ollamaDefaults,
   groqAvailable, ollamaAvailable, openaiAvailable,
   deepgramAvailable, fireworksAvailable,
   groqSTT, openaiSTT, fireworksSTT, deepgramSTT,
@@ -508,7 +508,7 @@ async function translateForTTS(text: string, source: string, target: string): Pr
       if (r.ok) { const d = await r.json() as Record<string, string>; return d.translated_text || d.text || text; }
     } catch { /* fall through */ }
   }
-  const profile = groqProfile || ollamaProfile;
+  const profile = groqDefaults || ollamaDefaults;
   if (profile) {
     try {
       const r = await client.chat([{ role: 'system', content: sysPrompt }, { role: 'user', content: text }], profile);
@@ -521,7 +521,7 @@ async function translateForTTS(text: string, source: string, target: string): Pr
 // ── Synthesize source-language audio ─────────────────────────────────────────
 
 async function synthesizeSourceAudio(text: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
-  const profile = groqProfile || ollamaProfile;
+  const profile = groqDefaults || ollamaDefaults;
   if (!profile) return null;
   try {
     const result = await client.synthesize(text, profile);

@@ -2,7 +2,7 @@
 
 import { GripVertical, Trash2, Sparkles } from 'lucide-react';
 import { IconBox } from '@/components/ui';
-import { PIPELINE_CATALOG, type PipelineChainEntry, type ProfileService } from '../provider-types';
+import { PIPELINE_CATALOG, type PipelineChainEntry, type Service } from '../provider-types';
 import FallbackChainList from '../FallbackChainList';
 import { STAGE_CATALOG, IO_OPTIONS } from './constants';
 
@@ -18,7 +18,7 @@ export interface StageRowProps {
   enabled: boolean;
   onToggle: () => void;
   onRemove: () => void;
-  services: ProfileService[];
+  services: Service[];
 }
 
 export function StageRow({ stageKey, label, input, output, onChangeInput, onChangeOutput, chain, setChain, enabled, onToggle, onRemove, services }: StageRowProps) {

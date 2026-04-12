@@ -5,7 +5,7 @@ import Sortable from 'sortablejs';
 import { GripVertical, Plus, Trash2, ChevronDown, Cpu, Cloud, Zap, Server, Pencil, Mic2, Shuffle, Box, Globe, Flame, Rocket } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button, Toggle, DropdownList, type DropdownOption } from '@/components/ui';
-import { type PipelineChainEntry, type ProfileService, PIPELINE_CATALOG, DEFAULT_DOCKER_IMAGES } from './provider-types';
+import { type PipelineChainEntry, type Service, PIPELINE_CATALOG, DEFAULT_DOCKER_IMAGES } from './provider-types';
 
 interface Accent { iconColor: string; dot: string; }
 
@@ -43,7 +43,7 @@ interface FallbackChainListProps {
   setChain: (chain: PipelineChainEntry[]) => void;
   accent: Accent;
   /** GPU pod / cloud services from the profile */
-  services?: ProfileService[];
+  services?: Service[];
 }
 
 // Latency stats per stage::provider from /v1/metrics/service-stats
@@ -142,7 +142,7 @@ export default function FallbackChainList({ stage, chain, setChain, accent, serv
     // 2. Self-hosted services (Docker images on GPU pods)
     if (services) {
       for (const svc of services) {
-        if (svc.kind !== 'gpu-pod') continue;
+        if (svc.kind !== 'container') continue;
 
         const knownImg = svc.dockerImage
           ? DEFAULT_DOCKER_IMAGES.find(i => i.url === svc.dockerImage)

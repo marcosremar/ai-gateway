@@ -18,7 +18,7 @@ async function seedProfiles(request: any) {
           llm: [{ provider: 'gpu', model: 'translategemma' }, { provider: 'groq', model: 'llama-3.3-70b-versatile' }],
           tts: [{ provider: 'gpu', model: 'qwen3-tts' }],
           services: [
-            { id: 'svc-gpu-1', name: 'Babelcast TranslateGemma', kind: 'gpu-pod', dockerImage: 'marcosremar/babelcast-translategemma:latest', gpuTypes: ['NVIDIA GeForce RTX 4090'], gpuCloudProvider: 'vast' },
+            { id: 'svc-gpu-1', name: 'Babelcast TranslateGemma', kind: 'container', dockerImage: 'marcosremar/babelcast-translategemma:latest', gpuTypes: ['NVIDIA GeForce RTX 4090'], gpuProvider: 'vast' },
           ],
         },
         {

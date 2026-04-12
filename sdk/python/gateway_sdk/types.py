@@ -108,17 +108,21 @@ class PipelineChainEntry:
 
 
 @dataclass
-class ProviderProfile:
+class App:
     id: str
     name: str
     stt: list[PipelineChainEntry]
     llm: list[PipelineChainEntry]
     tts: list[PipelineChainEntry]
 
+# Backward-compat aliases
+Profile = App
+ProviderProfile = App
+
 
 @dataclass
 class ProviderConfigResponse:
-    profiles: list[ProviderProfile]
+    apps: list[App]
     active_profile_id: str | None
     pipeline_stt: list[PipelineChainEntry]
     pipeline_llm: list[PipelineChainEntry]

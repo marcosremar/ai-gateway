@@ -65,9 +65,9 @@ vi.mock('../server/state', () => ({
 
 vi.mock('../server/providers', () => ({
   client: mockClient,
-  groqProfile: mockGroqProfile,
-  ollamaProfile: null,
-  translationProfile: null,
+  groqDefaults: mockGroqProfile,
+  ollamaDefaults: null,
+  translationDefaults: null,
   groqAvailable: true,
   groqLLM: { chatStream: vi.fn() },
   groqLlmModel: 'llama-3.3-70b-versatile',
@@ -151,8 +151,8 @@ vi.mock('../server/metrics', () => ({
 
 // Config persistence
 vi.mock('../server/config-persistence', () => ({
-  loadProviderConfig: vi.fn(() => ({ activeProfileId: 'test' })),
-  stampProfileRequest: vi.fn(),
+  loadProviderConfig: vi.fn(() => ({ activeAppId: 'test' })),
+  stampAppRequest: vi.fn(),
 }));
 
 // Ensemble STT
@@ -339,10 +339,10 @@ describe('Pipeline runner — null baseProfile guard', () => {
   it('calls onError when no LLM provider is configured', async () => {
     // Temporarily override providers mock to return null profiles
     const providersModule = await import('../server/providers');
-    const origGroqProfile = (providersModule as any).groqProfile;
-    (providersModule as any).groqProfile = null;
-    (providersModule as any).ollamaProfile = null;
-    (providersModule as any).translationProfile = null;
+    const origGroqDefaults = (providersModule as any).groqDefaults;
+    (providersModule as any).groqDefaults = null;
+    (providersModule as any).ollamaDefaults = null;
+    (providersModule as any).translationDefaults = null;
 
     const cb = makeCallbacks();
     await runStreamingPipeline(fakeAudio, makeOpts(), cb);
@@ -351,7 +351,7 @@ describe('Pipeline runner — null baseProfile guard', () => {
     expect(cb.errors).toContain('pipeline');
 
     // Restore
-    (providersModule as any).groqProfile = origGroqProfile;
+    (providersModule as any).groqDefaults = origGroqDefaults;
   });
 });
 

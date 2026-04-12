@@ -192,11 +192,11 @@ describe('handleGpuDeploy — cancel/redeploy', () => {
     expect(fnBody).toContain('stopGpuMonitoring');
   });
 
-  it('#095 updates translation profile to remove GPU endpoint on redeploy', () => {
+  it('#095 updates active pipeline to remove GPU endpoint on redeploy', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
     const fnEnd = handlersSource.indexOf('\nexport ', fnStart + 50);
     const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
-    expect(fnBody).toContain("updateTranslationProfile({ gpuEndpoint: undefined }");
+    expect(fnBody).toContain("updateActivePipeline({ gpuEndpoint: undefined }");
   });
 
   it('#096 _startDeployAndRespond writes 202 response', () => {

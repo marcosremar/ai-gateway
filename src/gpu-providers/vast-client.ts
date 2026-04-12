@@ -2611,7 +2611,7 @@ export class VastClient extends AbstractGpuProvider {
   } | null> {
     const result = await this.checkBalance(credentials);
     if (!result) return null;  // API unreachable — proceed optimistically
-    if (result.balance < 0.5) {
+    if (result.balance < 0.35) {
       return {
         canDeploy: false,
         blockReason: `Vast.ai balance too low: $${result.balance.toFixed(4)}. Add credit at console.vast.ai/billing.`,

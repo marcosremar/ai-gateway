@@ -4,7 +4,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import { botState, deployState, isGpuAvailable } from './state';
-import { client, translationProfile } from './providers';
+import { client, translationDefaults } from './providers';
 import { readJsonBody, handleBodyError } from './http-utils';
 
 /** Derive the avatar server URL from the bot pod endpoint.
@@ -72,7 +72,7 @@ export async function handleAvatarSpeak(req: IncomingMessage, res: ServerRespons
         } else {
           console.warn(`[avatar] GPU TTS failed (${gpuRes.status}), falling back to cloud`);
           const result = await client.synthesize(text, {
-            ...translationProfile,
+            ...translationDefaults,
             gpuEndpoint: undefined,
             voice,
             audioFormat: 'wav',
@@ -82,7 +82,7 @@ export async function handleAvatarSpeak(req: IncomingMessage, res: ServerRespons
       } else {
         // Cloud TTS (Modal Kokoro → Qwen3 → OpenAI fallback chain)
         const result = await client.synthesize(text, {
-          ...translationProfile,
+          ...translationDefaults,
           gpuEndpoint: undefined,
           voice,
           audioFormat: 'wav',

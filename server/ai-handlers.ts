@@ -243,7 +243,7 @@ import {
   isGpuLatencyAcceptable,
 } from './state';
 import {
-  client, groqProfile, ollamaProfile, translationProfile,
+  client, groqDefaults, ollamaDefaults, translationDefaults,
   groqAvailable, openaiAvailable, deepgramAvailable, fireworksAvailable,
   openrouterAvailable, whisperAvailable, ollamaAvailable, whisperHost,
   ENSEMBLE_STT_PROVIDERS,
@@ -259,7 +259,7 @@ import { recordShadowRun } from './gpu-readiness';
 import {
   getSttTargetLatencyMs, getLlmTargetLatencyMs, getBenchmarkMarginPct,
 } from '../src/gpu-providers/deploy-settings';
-import { loadProviderConfig, stampProfileRequest } from './config-persistence';
+import { loadProviderConfig, stampAppRequest } from './config-persistence';
 import { filterHallucinations, DEFAULT_HALLUCINATION_FILTER_CONFIG } from '../src/stt-hallucination-filter';
 import type { STTHallucinationFilterConfig } from '../src/stt-hallucination-filter';
 import type { STTResponse } from '../src/providers/types';
@@ -586,16 +586,16 @@ export async function fetchGpuTTS(
 export function getCloudProfile(): AIProfile | null {
   // Find the first cloud provider in PROVIDER_CHAIN
   for (const p of PROVIDER_CHAIN) {
-    if (p === 'groq' && groqProfile) return groqProfile;
-    if (p === 'ollama' && ollamaProfile) return ollamaProfile;
+    if (p === 'groq' && groqDefaults) return groqDefaults;
+    if (p === 'ollama' && ollamaDefaults) return ollamaDefaults;
   }
-  return groqProfile || ollamaProfile;
+  return groqDefaults || ollamaDefaults;
 }
 
 export function getCloudProviderName(): 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid' {
   for (const p of PROVIDER_CHAIN) {
-    if (p === 'groq' && groqProfile) return 'groq';
-    if (p === 'ollama' && ollamaProfile) return 'ollama';
+    if (p === 'groq' && groqDefaults) return 'groq';
+    if (p === 'ollama' && ollamaDefaults) return 'ollama';
   }
   return 'groq';
 }
@@ -912,7 +912,7 @@ export async function handleTtsPreview(req: IncomingMessage, res: ServerResponse
     // Non-clone fallback: use cloud TTS chain (Groq Orpheus → Modal Qwen3-TTS → OpenAI)
     console.log(`[tts] preview: no GPU, using cloud fallback`);
     const result = await client.synthesize(text, {
-      ...translationProfile,
+      ...translationDefaults,
       gpuEndpoint: undefined,
       voice: speaker,
       audioFormat: 'wav',
@@ -1220,8 +1220,8 @@ async function _parsePipelineRequest(
   // Determine profile based on chain: find first cloud provider for base profile
   const firstCloudIdx = PROVIDER_CHAIN.findIndex(p => p === 'groq' || p === 'ollama');
   const gpuIdx = PROVIDER_CHAIN.findIndex(p => GPU_PROVIDERS.has(p));
-  const baseProfile = (firstCloudIdx >= 0 && PROVIDER_CHAIN[firstCloudIdx] === 'ollama' && ollamaProfile)
-    ? ollamaProfile : (groqProfile || ollamaProfile || translationProfile);
+  const baseProfile = (firstCloudIdx >= 0 && PROVIDER_CHAIN[firstCloudIdx] === 'ollama' && ollamaDefaults)
+    ? ollamaDefaults : (groqDefaults || ollamaDefaults || translationDefaults);
   const gpuBeforeCloud = gpuIdx >= 0 && (firstCloudIdx < 0 || gpuIdx < firstCloudIdx);
 
   // ── Per-stage warmth routing ──────────────────────────────────────────────
@@ -1787,7 +1787,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
       const totalMs = Date.now() - pipeT0;
       console.log(`[pipeline] ── Hybrid done: ${totalMs}ms (STT=${sttResult.latencyMs}[${sttResult.provider}] LLM=${llmResult.latencyMs}[${llmResult.provider}] TTS=${ttsResult.latencyMs}[${ttsResult.provider || '-'}]) ──`);
       logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: 'hybrid', latencyMs: totalMs, success: true, inputSize: audioBuffer.length, outputPreview: (llmResult.translatedText || '').slice(0, 80) });
-      stampProfileRequest(loadProviderConfig().activeProfileId);
+      stampAppRequest(loadProviderConfig().activeAppId);
 
       if (ttsResult.audioB64) forwardToAvatar(ttsResult.audioB64);
 
@@ -1900,7 +1900,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
         }
       }
     }
-    const pipelineProvider = result.usedGpu ? 'gpu' : (baseProfile === ollamaProfile ? 'ollama' : 'groq');
+    const pipelineProvider = result.usedGpu ? 'gpu' : (baseProfile === ollamaDefaults ? 'ollama' : 'groq');
     logRequest({
       timestamp: Date.now(), stage: 'pipeline',
       provider: pipelineProvider,
@@ -1971,7 +1971,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
 
       const fallbackMs = Date.now() - t0;
       console.log(`[pipeline] ── Fallback done (no TTS): ${fallbackMs}ms (STT=${sttMs} LLM=${llmMs}) ──`);
-      const fallbackProvider = baseProfile === ollamaProfile ? 'ollama' : 'groq' as const;
+      const fallbackProvider = baseProfile === ollamaDefaults ? 'ollama' : 'groq' as const;
       logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: fallbackProvider, latencyMs: fallbackMs, success: true, inputSize: audioBuffer.length, outputPreview: (fbTranslated || '').slice(0, 80) });
 
       const body = {
@@ -1986,7 +1986,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
     } catch (fallbackErr) {
       const message = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
       console.error(`[pipeline] Complete failure: ${message}`);
-      const errorProvider = baseProfile === ollamaProfile ? 'ollama' : 'groq' as const;
+      const errorProvider = baseProfile === ollamaDefaults ? 'ollama' : 'groq' as const;
       logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: errorProvider, latencyMs: Date.now() - pipeT0, success: false, error: message, inputSize: audioBuffer.length });
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Internal server error' }));

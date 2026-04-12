@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import {
   PIPELINE_CATALOG,
-  type PipelineChainEntry, type ProfileService, type Latency,
+  type PipelineChainEntry, type Service, type Latency,
 } from '../provider-types';
 import { PROVIDER_ICON } from '../FallbackChainList';
 import {
@@ -53,7 +53,7 @@ function ProfileFlowDiagram({
 }: {
   sttChain: PipelineChainEntry[]; llmChain: PipelineChainEntry[]; ttsChain: PipelineChainEntry[];
   sttEnabled: boolean; ttsEnabled: boolean;
-  services: ProfileService[]; latency: Latency; name?: string;
+  services: Service[]; latency: Latency; name?: string;
   onToggleEntry?: (stageKey: string, entryIdx: number) => void;
   onToggleStage?: (stageKey: string) => void;
   onAddService?: () => void;
@@ -339,7 +339,7 @@ function ProfileFlowDiagram({
     return () => el.removeEventListener('ended', onEnd);
   }, []);
 
-  const gpuService = services.find(s => s.kind === 'gpu-pod');
+  const gpuService = services.find(s => s.kind === 'container');
   const latencyOpt = LATENCY_OPTIONS.find(o => o.value === latency);
 
   const stages: FlowStage[] = [
@@ -350,7 +350,7 @@ function ProfileFlowDiagram({
 
   const entryLabel = (entry: PipelineChainEntry) => {
     if (entry.provider === 'gpu') {
-      const svc = services.find(s => s.kind === 'gpu-pod' && s.id === entry.model);
+      const svc = services.find(s => s.kind === 'container' && s.id === entry.model);
       if (svc) return svc.name;
       if (gpuService) return gpuService.name;
       return 'GPU Pod';
@@ -371,14 +371,14 @@ function ProfileFlowDiagram({
     if (fromCatalog) return fromCatalog;
     if (entry.provider === 'gpu') {
       // Look for service where entry.model === service.id (new-style pod service)
-      const svcById = services.find(s => s.kind === 'gpu-pod' && s.id === entry.model);
+      const svcById = services.find(s => s.kind === 'container' && s.id === entry.model);
       if (svcById) {
         const stageModelId = stageKey === 'stt' ? svcById.sttModel : stageKey === 'llm' ? svcById.llmModel : svcById.ttsModel;
         if (stageModelId) return gpuModels.find(m => m.id === stageModelId)?.label ?? humanizeId(stageModelId);
         if (svcById.dockerImage) return svcById.dockerImage.split('/').pop()?.replace(/:.*$/, '') ?? null;
       }
       // Fall back: look at the first GPU pod service's stage model (legacy profiles)
-      const gpuSvc = services.find(s => s.kind === 'gpu-pod');
+      const gpuSvc = services.find(s => s.kind === 'container');
       if (gpuSvc) {
         const stageModelId = stageKey === 'stt' ? gpuSvc.sttModel : stageKey === 'llm' ? gpuSvc.llmModel : gpuSvc.ttsModel;
         if (stageModelId) return gpuModels.find(m => m.id === stageModelId)?.label ?? humanizeId(stageModelId);
@@ -1537,7 +1537,7 @@ function ProfileFlowDiagram({
         const warmth = gpu?.modelWarmth?.[hoveredChip.stageKey];
         const isGpuEntry = entry.provider === 'gpu';
         const svc = isGpuEntry
-          ? (services.find(s => s.kind === 'gpu-pod' && s.id === entry.model) ?? services.find(s => s.kind === 'gpu-pod'))
+          ? (services.find(s => s.kind === 'container' && s.id === entry.model) ?? services.find(s => s.kind === 'container'))
           : null;
         const pi = PROVIDER_ICON[entry.provider];
         const entryColor = pi?.color ?? pMeta(entry.provider).color;

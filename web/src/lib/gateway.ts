@@ -624,25 +624,13 @@ export async function benchmarkPaths(opts?: BenchmarkPathsRequest): Promise<Benc
 
 // ── Provider Config ──
 
-export interface PipelineChainEntry {
-  provider: string;
-  model: string;
-}
+import type { App, PipelineChainEntry } from '@/sections/provider-types';
 
-export interface ProviderProfile {
-  id: string;
-  name: string;
-  latency?: 'realtime' | 'low' | 'batch';
-  stt: PipelineChainEntry[];
-  llm: PipelineChainEntry[];
-  tts: PipelineChainEntry[];
-  lastActivatedAt?: number;
-  lastRequestAt?: number;
-}
+export type { App, PipelineChainEntry };
 
 export interface ProviderConfigResponse {
-  profiles: ProviderProfile[];
-  activeProfileId: string | null;
+  apps: App[];
+  activeAppId: string | null;
   pipelineStt: PipelineChainEntry[];
   pipelineLlm: PipelineChainEntry[];
   pipelineTts: PipelineChainEntry[];

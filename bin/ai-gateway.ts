@@ -294,7 +294,7 @@ async function cmdLogs(opts: { limit?: number; format?: string }) {
   }
 }
 
-async function cmdProfiles(sub?: string) {
+async function cmdApps(sub?: string) {
   const { url, key } = getConfig();
   const res = await fetch(`${url}/v1/config/providers`, { headers: headers(key) });
   if (res.status === 404) {
@@ -302,21 +302,21 @@ async function cmdProfiles(sub?: string) {
     return;
   }
   const data = await res.json();
-  const profiles = data.profiles || [];
-  const active = data.activeProfileId;
+  const apps = data.apps || data.profiles || [];
+  const active = data.activeAppId || data.activeProfileId;
 
-  console.log(`${profiles.length} profiles:\n`);
-  for (const p of profiles) {
-    const isActive = p.id === active;
+  console.log(`${apps.length} apps:\n`);
+  for (const a of apps) {
+    const isActive = a.id === active;
     const marker = isActive ? `${c.green}● active${c.reset}` : `${c.dim}○${c.reset}`;
-    const name = isActive ? `${c.bold}${p.name}${c.reset}` : p.name;
-    console.log(`  ${marker}  ${name} ${c.dim}(${p.id})${c.reset}`);
-    if (p.latencyTargetsMs) {
-      const t = p.latencyTargetsMs;
+    const name = isActive ? `${c.bold}${a.name}${c.reset}` : a.name;
+    console.log(`  ${marker}  ${name} ${c.dim}(${a.id})${c.reset}`);
+    if (a.latencyTargetsMs) {
+      const t = a.latencyTargetsMs;
       console.log(`         ${c.dim}targets: STT=${t.stt || '-'}ms LLM=${t.llm || '-'}ms TTS=${t.tts || '-'}ms${c.reset}`);
     }
-    if (p.gpuDeploy) {
-      console.log(`         ${c.dim}image: ${p.gpuDeploy.dockerImage || '-'}${c.reset}`);
+    if (a.gpuDeploy) {
+      console.log(`         ${c.dim}image: ${a.gpuDeploy.dockerImage || '-'}${c.reset}`);
     }
   }
 }
@@ -598,6 +598,165 @@ async function cmdImage(prompt: string, opts: { model?: string; output?: string 
 }
 
 // ── New commands ──────────────────────────────────────────────────────────
+
+async function cmdServices(opts: { json?: boolean }) {
+  const { url, key } = getConfig();
+  const s = spinner('Fetching service status...');
+  const [healthRes, configRes] = await Promise.all([
+    fetch(`${url}/health`, { headers: headers(key), signal: AbortSignal.timeout(10000) }).catch(() => null),
+    fetch(`${url}/v1/config/providers`, { headers: headers(key), signal: AbortSignal.timeout(10000) }).catch(() => null),
+  ]);
+  s.stop();
+
+  if (!healthRes?.ok) {
+    console.error(`${c.red}✗${c.reset} Gateway unreachable at ${url}`);
+    process.exit(1);
+  }
+
+  const health = await healthRes.json();
+  const config = configRes?.ok ? await configRes.json() : null;
+
+  if (opts.json) {
+    console.log(JSON.stringify({ health, config }, null, 2));
+    return;
+  }
+
+  // ── Overall status
+  const statusColor = health.status === 'ok' ? c.green : health.status === 'degraded' ? c.yellow : c.red;
+  const statusIcon = health.status === 'ok' ? '●' : health.status === 'degraded' ? '▲' : '✗';
+  console.log(`${statusColor}${statusIcon}${c.reset} Gateway: ${c.bold}${health.status}${c.reset}  ${c.dim}uptime ${fmtSec(health.uptime_sec)}${c.reset}`);
+  if (health.reason) console.log(`  ${c.yellow}reason: ${health.reason}${c.reset}`);
+  console.log('');
+
+  // ── Pipeline components (STT, LLM, TTS)
+  console.log(`${c.bold}Pipeline${c.reset}`);
+  const components = health.components || {};
+  for (const stage of ['stt', 'llm', 'tts']) {
+    const comp = components[stage];
+    if (!comp) continue;
+    const icon = comp.status === 'ok' ? `${c.green}●${c.reset}` : `${c.yellow}▲${c.reset}`;
+    const fb = comp.fallback ? ` ${c.dim}(fallback)${c.reset}` : '';
+    console.log(`  ${icon} ${stage.toUpperCase().padEnd(4)} → ${comp.provider}${fb}`);
+  }
+  console.log('');
+
+  // ── GPU
+  const gpu = components.gpu;
+  if (gpu) {
+    console.log(`${c.bold}GPU${c.reset}`);
+    const gpuIcon = gpu.status === 'ready' ? `${c.green}●${c.reset}`
+      : gpu.status === 'idle' ? `${c.dim}○${c.reset}`
+      : gpu.status === 'stopped' ? `${c.yellow}■${c.reset}`
+      : gpu.status === 'error' ? `${c.red}✗${c.reset}`
+      : `${c.cyan}◌${c.reset}`;
+    let detail = gpu.status;
+    if (gpu.endpoint) detail += `  ${c.dim}${gpu.endpoint}${c.reset}`;
+    if (gpu.idle_sec) detail += `  ${c.dim}idle ${fmtSec(gpu.idle_sec)}${c.reset}`;
+    if (gpu.healthy === false) detail += `  ${c.red}unhealthy${c.reset}`;
+    console.log(`  ${gpuIcon} ${detail}`);
+    console.log('');
+  }
+
+  // ── AI Providers (API key status)
+  const providers = health.providers || {};
+  const providerNames = Object.keys(providers);
+  if (providerNames.length > 0) {
+    console.log(`${c.bold}AI Providers${c.reset}`);
+    for (const name of providerNames) {
+      const available = providers[name];
+      const icon = available ? `${c.green}●${c.reset}` : `${c.dim}○${c.reset}`;
+      const label = available ? 'configured' : `${c.dim}no key${c.reset}`;
+      console.log(`  ${icon} ${name.padEnd(12)} ${label}`);
+    }
+    console.log('');
+  }
+
+  // ── Provider balances
+  const balances = health.providerBalances || [];
+  if (balances.length > 0) {
+    console.log(`${c.bold}Balances${c.reset}`);
+    for (const b of balances) {
+      const icon = b.low ? `${c.red}▲${c.reset}` : `${c.green}●${c.reset}`;
+      const bal = b.balance != null ? `$${Number(b.balance).toFixed(2)}` : '?';
+      const warn = b.low ? ` ${c.red}LOW${c.reset}` : '';
+      console.log(`  ${icon} ${(b.provider || b.name || '?').padEnd(12)} ${bal}${warn}`);
+    }
+    console.log('');
+  }
+
+  // ── Provider performance
+  const perf = health.providerPerformance || {};
+  const perfNames = Object.keys(perf);
+  if (perfNames.length > 0) {
+    console.log(`${c.bold}Provider Performance${c.reset}`);
+    console.log(`  ${'Provider'.padEnd(14)} ${'Avg'.padStart(7)} ${'Reqs'.padStart(6)} ${'Errors'.padStart(7)} ${'In Tok'.padStart(8)} ${'Out Tok'.padStart(8)}`);
+    console.log(`  ${'─'.repeat(14)} ${'─'.repeat(7)} ${'─'.repeat(6)} ${'─'.repeat(7)} ${'─'.repeat(8)} ${'─'.repeat(8)}`);
+    for (const name of perfNames) {
+      const p = perf[name];
+      const avg = p.avgLatencyMs ? `${p.avgLatencyMs}ms` : '-';
+      const errPct = p.errorRate > 0 ? `${(p.errorRate * 100).toFixed(1)}%` : '0%';
+      console.log(`  ${name.padEnd(14)} ${avg.padStart(7)} ${String(p.requests || 0).padStart(6)} ${errPct.padStart(7)} ${String(p.inputTokens || 0).padStart(8)} ${String(p.outputTokens || 0).padStart(8)}`);
+    }
+    console.log('');
+  }
+
+  // ── Circuit breakers
+  const breakers = health.circuitBreakers;
+  if (breakers && typeof breakers === 'object' && Object.keys(breakers).length > 0) {
+    const openBreakers = Object.entries(breakers).filter(([_, v]: [string, any]) => v.state !== 'closed');
+    if (openBreakers.length > 0) {
+      console.log(`${c.bold}Circuit Breakers${c.reset}`);
+      for (const [name, v] of openBreakers as [string, any][]) {
+        const icon = v.state === 'open' ? `${c.red}✗${c.reset}` : `${c.yellow}▲${c.reset}`;
+        console.log(`  ${icon} ${name}: ${v.state} (failures: ${v.failures || 0})`);
+      }
+      console.log('');
+    }
+  }
+
+  // ── Fallback chains from config
+  if (config) {
+    const chains: [string, unknown[]][] = [];
+    for (const key of ['pipelineStt', 'pipelineLlm', 'pipelineTts']) {
+      const chain = config[key];
+      if (Array.isArray(chain) && chain.length > 0) chains.push([key, chain]);
+    }
+    if (chains.length > 0) {
+      console.log(`${c.bold}Fallback Chains${c.reset}`);
+      for (const [key, entries] of chains) {
+        const stage = key.replace('pipeline', '').toUpperCase();
+        const list = entries.map((e: any) => {
+          if (typeof e === 'string') return e;
+          return e.providerId || e.provider || e.id || '?';
+        });
+        console.log(`  ${stage.padEnd(4)} ${list.join(` ${c.dim}→${c.reset} `)}`);
+      }
+      console.log('');
+    }
+  }
+
+  // ── Budget
+  if (health.budget) {
+    const b = health.budget;
+    const icon = b.exceeded ? `${c.red}▲${c.reset}` : `${c.green}●${c.reset}`;
+    const limit = b.dailyLimitUsd != null ? ` / $${b.dailyLimitUsd}` : '';
+    const warn = b.exceeded ? ` ${c.red}EXCEEDED${c.reset}` : '';
+    console.log(`${c.bold}Budget${c.reset}  ${icon} $${b.dailySpendUsd} today${limit}${warn}`);
+  }
+
+  // ── Latency
+  if (health.latency && health.latency.samples > 0) {
+    const l = health.latency;
+    console.log(`${c.bold}Latency${c.reset}  p50=${l.p50_ms}ms  p95=${l.p95_ms}ms  p99=${l.p99_ms}ms  (${l.samples} samples)`);
+  }
+}
+
+function fmtSec(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+  return `${Math.floor(sec / 86400)}d ${Math.floor((sec % 86400) / 3600)}h`;
+}
 
 async function cmdConfig() {
   const { url, key } = getConfig();
@@ -934,6 +1093,7 @@ Usage:
 
 Commands:
   health          Check gateway health and connection count
+  services        Show all services, providers, and their status
   models          List all available models
   chat            Chat with an LLM (streaming by default, supports pipe)
   translate       Translate text between languages (supports pipe)
@@ -943,7 +1103,8 @@ Commands:
   voices          List available TTS voices
   image           Generate an image from a text prompt
   gpu             Manage GPU deployments (status, deploy, stop, logs)
-  profiles        List and manage deployment profiles
+  apps            List and manage app configurations
+  profiles        Alias for 'apps'
   logs            Show recent request log
   metrics         Show gateway metrics (Prometheus or JSON)
   latency         GPU host latency analysis (hosts, probe, best)
@@ -1150,6 +1311,31 @@ Examples:
   ai-gateway metrics
   ai-gateway metrics --json
 `,
+    services: `
+ai-gateway services — Show all services, providers, and their status
+
+Usage:
+  ai-gateway services [options]
+
+Options:
+  --json                       Output raw JSON (health + config combined)
+
+Shows a consolidated view of:
+  - Overall gateway status and uptime
+  - Pipeline components (STT, LLM, TTS) and which provider serves each
+  - GPU deployment status
+  - AI provider availability (which API keys are configured)
+  - Provider account balances and low-balance alerts
+  - Provider performance (latency, requests, error rate, token usage)
+  - Open circuit breakers (if any)
+  - Fallback chains (provider failover order)
+  - Daily budget spend
+  - Request latency percentiles
+
+Examples:
+  ai-gateway services
+  ai-gateway services --json
+`,
     health: `
 ai-gateway health — Check gateway health
 
@@ -1347,6 +1533,9 @@ ai-gateway server — Manage the local dev server
       case 'health':
         await cmdHealth();
         break;
+      case 'services':
+        await cmdServices({ json: hasFlag(args, '--json') });
+        break;
       case 'models':
         await cmdModels();
         break;
@@ -1365,8 +1554,9 @@ ai-gateway server — Manage the local dev server
           format: hasFlag(args, '--json') ? 'json' : undefined,
         });
         break;
-      case 'profiles':
-        await cmdProfiles(args[1]);
+      case 'apps':
+      case 'profiles':  // legacy alias
+        await cmdApps(args[1]);
         break;
       case 'chat': {
         let msg = args.slice(1).filter(a => !a.startsWith('-')).join(' ');

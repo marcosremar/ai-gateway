@@ -17,7 +17,7 @@ import {
 import { langNames } from './http-utils';
 import { deployState, isGpuAvailable, isStageWarm } from './state';
 import {
-  client, groqProfile, ollamaProfile, translationProfile,
+  client, groqDefaults, ollamaDefaults, translationDefaults,
   isStageCircuitClosed, shouldPreferGpuTts,
 } from './providers';
 import { PROVIDER_CHAIN, GPU_PROVIDERS } from './config';
@@ -50,8 +50,8 @@ export async function runMultiLangFanout(
   const llmOnGpu = !!gpuEp && isStageWarm('llm') && isStageCircuitClosed('llm');
   const ttsOnGpu = !!gpuEp && shouldPreferGpuTts() && isStageCircuitClosed('tts');
 
-  const baseProfile = (firstCloudIdx >= 0 && PROVIDER_CHAIN[firstCloudIdx] === 'ollama' && ollamaProfile)
-    ? ollamaProfile : (groqProfile || ollamaProfile || translationProfile);
+  const baseProfile = (firstCloudIdx >= 0 && PROVIDER_CHAIN[firstCloudIdx] === 'ollama' && ollamaDefaults)
+    ? ollamaDefaults : (groqDefaults || ollamaDefaults || translationDefaults);
 
   // Run all targets in parallel
   await Promise.allSettled(targets.map(async (target) => {

@@ -7,9 +7,22 @@ export const RUNPOD_ENDPOINT = process.env.RUNPOD_ENDPOINT;  // e.g. http://pod-
 /** Full-pipeline server URL for tier 2 fallback (STT + LLM + TTS, same API as GPU pod).
  *  Set MODAL_BABELCAST_URL in .env to enable. No default — not activated unless configured. */
 export const MODAL_BABELCAST_URL = process.env.MODAL_BABELCAST_URL;
+/**
+ * Provider chain — ordered fallback list parsed from PROVIDER_CHAIN env var.
+ * Contains BOTH AI providers (groq, ollama) and GPU markers (gpu, runpod, vast).
+ * Use AI_PROVIDERS / GPU_PROVIDER_IDS to filter by kind.
+ */
 export const PROVIDER_CHAIN: string[] = (process.env.PROVIDER_CHAIN || 'gpu,groq')
   .split(',').map(s => s.trim()).filter(Boolean);
-export const GPU_PROVIDERS = new Set(['runpod', 'tensordock', 'vast', 'modal', 'gpu']);
+
+/** GPU infrastructure provider IDs (deploy containers to these). */
+export const GPU_PROVIDER_IDS = new Set(['runpod', 'tensordock', 'vast', 'modal', 'gpu']);
+
+/** @deprecated Use GPU_PROVIDER_IDS */
+export const GPU_PROVIDERS = GPU_PROVIDER_IDS;
+
+/** AI cloud provider IDs (call APIs on these). */
+export const AI_PROVIDER_IDS = new Set(['groq', 'openai', 'fireworks', 'openrouter', 'deepgram', 'elevenlabs', 'ollama']);
 
 /** Balance threshold (USD) below which a low-balance alert is shown on the dashboard. */
 export const LOW_BALANCE_THRESHOLD_USD = parseFloat(process.env.LOW_BALANCE_THRESHOLD_USD || '1');

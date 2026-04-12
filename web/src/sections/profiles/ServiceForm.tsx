@@ -15,7 +15,7 @@ import {
 import {
   DEFAULT_DOCKER_IMAGES, GPU_TYPES, GPU_TYPES_BY_PROVIDER, PIPELINE_CATALOG, GPU_PROVIDERS,
   CLOUD_API_PROVIDERS, SERVERLESS_PROVIDERS,
-  type PipelineChainEntry, type ProfileService, type ServiceKind,
+  type PipelineChainEntry, type Service, type ServiceKind,
 } from '../provider-types';
 import { PROVIDER_ICON } from '../FallbackChainList';
 import { uid } from './constants';
@@ -468,15 +468,15 @@ function CloudApiKeyStatus({ provider }: { provider: string }) {
 /* ── ServiceForm ── */
 
 interface ServiceFormProps {
-  initial?: ProfileService;
-  onSave: (s: ProfileService) => void;
+  initial?: Service;
+  onSave: (s: Service) => void;
   onCancel: () => void;
 }
 
 function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
   // Derive initial kind — migrate modal-cloud → serverless
-  const deriveKind = (s?: ProfileService): ServiceKind => {
-    if (!s) return 'gpu-pod';
+  const deriveKind = (s?: Service): ServiceKind => {
+    if (!s) return 'container';
     if (s.kind === 'cloud' && s.cloudProvider === 'modal') return 'serverless';
     return s.kind;
   };
@@ -498,7 +498,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
   const [useCustom, setUseCustom] = useState(!isKnownUrl(initDockerUrl));
 
   const [gpuTypes, setGpuTypes] = useState<string[]>(initial?.gpuTypes || []);
-  const [gpuCloudProvider, setGpuCloudProvider] = useState(initial?.gpuCloudProvider || GPU_PROVIDERS[0].id);
+  const [gpuProvider, setGpuCloudProvider] = useState(initial?.gpuProvider || GPU_PROVIDERS[0].id);
 
   // Deploy settings
   const [raceCount, setRaceCount] = useState(initial?.raceCount ?? 1);
@@ -559,21 +559,21 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
   const [gpuLoading, setGpuLoading] = useState(false);
 
   useEffect(() => {
-    if (kind !== 'gpu-pod') return;
+    if (kind !== 'container') return;
     setGpuLoading(true);
     setLiveGpus([]);
-    getGpuTypes(gpuCloudProvider)
+    getGpuTypes(gpuProvider)
       .then(data => setLiveGpus(data.gpuTypes))
       .catch(() => {
         // fall back to static list
-        const ids = GPU_TYPES_BY_PROVIDER[gpuCloudProvider] ?? GPU_TYPES.map(g => g.id);
+        const ids = GPU_TYPES_BY_PROVIDER[gpuProvider] ?? GPU_TYPES.map(g => g.id);
         setLiveGpus(ids.map(id => {
           const meta = GPU_TYPES.find(g => g.id === id);
           return { name: id, shortName: meta?.label ?? id.replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, ''), vram: parseInt(meta?.vram ?? '0') };
         }));
       })
       .finally(() => setGpuLoading(false));
-  }, [gpuCloudProvider, kind]);
+  }, [gpuProvider, kind]);
 
   const toggleGpu = (id: string) =>
     setGpuTypes(prev => prev.includes(id) ? prev.filter(g => g !== id) : [...prev, id]);
@@ -587,14 +587,14 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
       ...(llmModel ? { llmModel } : {}),
       ...(ttsModel ? { ttsModel } : {}),
     };
-    let s: ProfileService;
+    let s: Service;
     if (kind === 'cloud') {
       s = { ...base, cloudProvider };
     } else if (kind === 'serverless') {
       s = { ...base, cloudProvider: serverlessProvider, dockerImage, ...modelFields };
     } else {
       s = {
-        ...base, dockerImage, gpuTypes, gpuCloudProvider, ...modelFields,
+        ...base, dockerImage, gpuTypes, gpuProvider, ...modelFields,
         raceCount, idleTimeoutMin, spotInstance, autoBenchmark, region, minVramGb, diskGb,
         sttTargetMs, llmTargetMs, ttsTargetMs,
         p95DemotionMultiplier: p95Multiplier, repechageMaxAttempts: repechageAttempts,
@@ -619,7 +619,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
         </div>
         <div className="flex gap-1.5">
           {([
-            { k: 'gpu-pod' as ServiceKind, label: 'Self-hosted', TabIcon: Server },
+            { k: 'container' as ServiceKind, label: 'Self-hosted', TabIcon: Server },
             { k: 'serverless' as ServiceKind, label: 'Serverless', TabIcon: Cloud },
             { k: 'cloud' as ServiceKind, label: 'Cloud API', TabIcon: Zap },
           ]).map(tab => {
@@ -640,7 +640,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
         </div>
       </div>
 
-      {/* ── Live Status + Lifecycle (always visible at top for gpu-pod/serverless) ── */}
+      {/* ── Live Status + Lifecycle (always visible at top for container/serverless) ── */}
       {kind !== 'cloud' && (
         <div className="px-5 pt-5 pb-4 space-y-4 border-b" style={{ borderColor: 'var(--color-border)' }}>
 
@@ -934,7 +934,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
             </div>
 
             {/* ── Infrastructure (self-hosted only) ── */}
-            {kind === 'gpu-pod' && (
+            {kind === 'container' && (
               <div>
                 <p className="text-[10px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Infrastructure</p>
 
@@ -944,7 +944,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
                     const provIcon = PROVIDER_ICON[p.id];
                     const PIcon = provIcon?.icon ?? Cpu;
                     const pColor = provIcon?.color ?? p.color;
-                    const sel = gpuCloudProvider === p.id;
+                    const sel = gpuProvider === p.id;
                     return (
                       <button key={p.id} type="button"
                         onClick={() => { setGpuCloudProvider(p.id); setGpuTypes([]); }}
@@ -1010,7 +1010,7 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
             )}
 
             {/* ── Deploy Timeout ── */}
-            {kind === 'gpu-pod' && (
+            {kind === 'container' && (
               <PillGroup label="Deploy Timeout (max)" icon={Timer} color="#ef4444"
                 presets={[{ v: 10, l: '10m' }, { v: 20, l: '20m' }, { v: 30, l: '30m' }, { v: 45, l: '45m' }, { v: 60, l: '1h' }]}
                 value={deployTimeoutMin} onChange={v => setDeployTimeoutMin(Number(v))}
@@ -1018,8 +1018,8 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
               />
             )}
 
-            {/* ── CRIU / SnapGPU fast cold-start (gpu-pod only) ── */}
-            {kind === 'gpu-pod' && (
+            {/* ── CRIU / SnapGPU fast cold-start (container only) ── */}
+            {kind === 'container' && (
               <div className="space-y-2 pt-1 border-t" style={{ borderColor: 'var(--color-border)' }}>
                 <div className="flex items-center gap-1.5 pt-1">
                   <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>CRIU Fast Cold-Start</span>
@@ -1055,8 +1055,8 @@ function ServiceForm({ initial, onSave, onCancel }: ServiceFormProps) {
               </div>
             )}
 
-            {/* ── Deploy Settings (gpu-pod only) ── */}
-            {kind === 'gpu-pod' && (
+            {/* ── Deploy Settings (container only) ── */}
+            {kind === 'container' && (
               <DeploySettings
                 raceCount={raceCount} setRaceCount={setRaceCount}
                 idleTimeoutMin={idleTimeoutMin} setIdleTimeoutMin={setIdleTimeoutMin}
