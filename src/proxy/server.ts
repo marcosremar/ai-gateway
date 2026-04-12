@@ -409,10 +409,19 @@ export function createProxyServer(config: ProxyConfig): Server {
       config.onAuth(token).catch(() => {});
     }
 
-    // Rate limit
+    // Rate limit — check and set X-RateLimit-* headers on every response so
+    // clients can implement intelligent backoff. Headers follow the IETF
+    // draft-ietf-httpapi-ratelimit-headers convention.
     if (rateLimiter) {
       const clientId = RateLimiter.clientId(req);
-      if (!rateLimiter.check(clientId)) {
+      const rl = rateLimiter.check(clientId);
+      if (rl.limit > 0) {
+        res.setHeader('X-RateLimit-Limit', rl.limit);
+        res.setHeader('X-RateLimit-Remaining', rl.remaining);
+        res.setHeader('X-RateLimit-Reset', rl.resetAt);
+      }
+      if (!rl.allowed) {
+        res.setHeader('Retry-After', Math.max(1, rl.resetAt - Math.ceil(Date.now() / 1000)));
         sendError(res, 429, 'Rate limit exceeded', requestId);
         return;
       }
@@ -475,6 +484,19 @@ export function createProxyServer(config: ProxyConfig): Server {
     // Static file serving — serve web UI assets before body parsing
     if (method === 'GET' && config.staticDir && !path.startsWith('/v1/') && path !== '/health' && path !== '/metrics') {
       if (serveStaticFile(config.staticDir, path, res, requestId)) return;
+    }
+
+    // Early Content-Length check: reject obviously oversized requests BEFORE
+    // reading the body. Without this, Fly.io resets the connection (HTTP 000)
+    // and the client gets no useful error. With this, the client gets a clean
+    // 413 Payload Too Large with a message explaining the limit.
+    // Found during production readiness testing (2026-04-12): oversized body
+    // returned connection reset instead of a structured error.
+    const declaredLength = parseInt(req.headers['content-length'] || '0', 10);
+    if (declaredLength > MAX_BODY_SIZE) {
+      sendError(res, 413, `Payload too large: ${Math.round(declaredLength / 1024 / 1024)}MB exceeds ${Math.round(MAX_BODY_SIZE / 1024 / 1024)}MB limit`, requestId);
+      req.destroy();
+      return;
     }
 
     try {

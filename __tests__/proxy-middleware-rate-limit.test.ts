@@ -6,7 +6,6 @@ describe('RateLimiter', () => {
 
   beforeEach(() => {
     limiter = new RateLimiter(60); // 60 RPM
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -14,22 +13,22 @@ describe('RateLimiter', () => {
   });
 
   it('allows first request', () => {
-    expect(limiter.check('client-1')).toBe(true);
+    expect(limiter.check('client-1').allowed).toBe(true);
   });
 
   it('rejects after exceeding capacity', () => {
     for (let i = 0; i < 60; i++) {
       limiter.check('client-1');
     }
-    expect(limiter.check('client-1')).toBe(false);
+    expect(limiter.check('client-1').allowed).toBe(false);
   });
 
   it('tracks clients independently', () => {
     for (let i = 0; i < 60; i++) {
       limiter.check('client-1');
     }
-    expect(limiter.check('client-1')).toBe(false);
-    expect(limiter.check('client-2')).toBe(true);
+    expect(limiter.check('client-1').allowed).toBe(false);
+    expect(limiter.check('client-2').allowed).toBe(true);
   });
 
   it('refills tokens over time', () => {
@@ -39,10 +38,10 @@ describe('RateLimiter', () => {
     for (let i = 0; i < 60; i++) {
       rl.check('client-1');
     }
-    expect(rl.check('client-1')).toBe(false);
+    expect(rl.check('client-1').allowed).toBe(false);
 
     vi.advanceTimersByTime(2000);
-    expect(rl.check('client-1')).toBe(true);
+    expect(rl.check('client-1').allowed).toBe(true);
 
     rl.destroy();
     vi.useRealTimers();
@@ -50,7 +49,7 @@ describe('RateLimiter', () => {
 
   it('handles zero RPM gracefully', () => {
     const zeroLimiter = new RateLimiter(0);
-    expect(zeroLimiter.check('client-1')).toBe(true);
+    expect(zeroLimiter.check('client-1').allowed).toBe(true);
     zeroLimiter.destroy();
   });
 
@@ -58,6 +57,27 @@ describe('RateLimiter', () => {
     const spy = vi.spyOn(globalThis, 'clearInterval');
     limiter.destroy();
     expect(spy).toHaveBeenCalled();
+  });
+
+  it('returns X-RateLimit-* header data', () => {
+    const result = limiter.check('client-1');
+    expect(result.limit).toBe(60);
+    expect(result.remaining).toBeGreaterThanOrEqual(0);
+    expect(result.remaining).toBeLessThanOrEqual(60);
+    expect(result.resetAt).toBeGreaterThan(0);
+  });
+
+  it('remaining decreases with each request', () => {
+    const first = limiter.check('client-1');
+    const second = limiter.check('client-1');
+    expect(second.remaining).toBeLessThan(first.remaining);
+  });
+
+  it('remaining is 0 when rejected', () => {
+    for (let i = 0; i < 60; i++) limiter.check('client-1');
+    const rejected = limiter.check('client-1');
+    expect(rejected.allowed).toBe(false);
+    expect(rejected.remaining).toBe(0);
   });
 
   describe('clientId', () => {

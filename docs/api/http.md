@@ -3,8 +3,44 @@
 All endpoints are served by the gateway server (`bun serve.ts`, default port `4000`).
 
 ::: warning Blocked transports
-SSE (`text/event-stream`), WebSocket (`/ws/stream`), and WebRTC return `410 Gone`. All client code must use the JSON endpoints below.
+WebSocket (`/ws/stream`) and WebRTC return `410 Gone`. Streaming is supported via SSE on `POST /v1/chat/completions` with `stream: true`. All other client code must use the JSON endpoints below.
 :::
+
+## Authentication
+
+All endpoints (except `GET /health`) require a Bearer token:
+
+```bash
+curl -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" ...
+```
+
+Set `GATEWAY_API_KEYS` on the server (comma-separated for multiple keys). When unset, only localhost requests are allowed.
+
+## Rate Limiting
+
+The gateway enforces a per-client token-bucket rate limit (default: **6000 RPM**, configurable via `RATE_LIMIT_RPM` env var).
+
+Every response includes standard rate-limit headers:
+
+```
+X-RateLimit-Limit: 6000          # Total capacity (requests per minute)
+X-RateLimit-Remaining: 5847      # Tokens left in your bucket
+X-RateLimit-Reset: 1775960500    # Unix epoch second when bucket is full
+```
+
+When rate-limited, the response is `429 Too Many Requests` with a `Retry-After` header:
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 3
+X-RateLimit-Remaining: 0
+```
+
+**Client best practice**: read `X-RateLimit-Remaining` and back off when it drops below 10% of `X-RateLimit-Limit`. The `Retry-After` header gives the exact number of seconds to wait before retrying.
+
+## Request Size Limit
+
+Maximum request body: **100 MB** (for audio file uploads). Requests exceeding this limit receive `413 Payload Too Large` before the body is read.
 
 ## Speech Pipeline
 
