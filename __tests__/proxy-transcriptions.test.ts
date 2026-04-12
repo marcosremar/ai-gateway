@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleAudioTranscriptions } from '../src/proxy/routes/audio-transcriptions';
+import { handleAudioTranscriptions, _resetSttCache } from '../src/proxy/routes/audio-transcriptions';
 import type { ProxyRequest } from '../src/proxy/types';
 
 function makeReq(body: Record<string, unknown>, rawBody = Buffer.from([1, 2, 3])): ProxyRequest {
@@ -18,6 +18,7 @@ const providers = { 'test-model': mockSttProvider } as any;
 describe('handleAudioTranscriptions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetSttCache(); // Clear audio hash cache between tests
   });
 
   it('returns 400 when model is missing', async () => {

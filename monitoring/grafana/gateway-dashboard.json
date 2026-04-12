@@ -1,0 +1,84 @@
+{
+  "dashboard": {
+    "title": "AI Gateway — Production",
+    "uid": "ai-gateway-prod",
+    "tags": ["ai-gateway", "production"],
+    "timezone": "utc",
+    "refresh": "30s",
+    "time": { "from": "now-6h", "to": "now" },
+    "panels": [
+      {
+        "title": "Requests / min",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+        "targets": [{ "expr": "rate(gateway_requests_total[5m]) * 60", "legendFormat": "req/min" }]
+      },
+      {
+        "title": "Error Rate",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+        "targets": [{ "expr": "rate(gateway_errors_total[5m]) / rate(gateway_requests_total[5m])", "legendFormat": "error %" }],
+        "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 0.05, "color": "yellow" }, { "value": 0.1, "color": "red" }] } } }
+      },
+      {
+        "title": "Uptime",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+        "targets": [{ "expr": "gateway_uptime_seconds / 3600", "legendFormat": "hours" }]
+      },
+      {
+        "title": "GPU Status",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+        "targets": [{ "expr": "gateway_gpu_ready", "legendFormat": "{{status}}" }],
+        "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "1": { "text": "READY", "color": "green" }, "0": { "text": "DOWN", "color": "red" } } }] } }
+      },
+      {
+        "title": "Latency (ms)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+        "targets": [
+          { "expr": "gateway_latency_p50_ms", "legendFormat": "p50" },
+          { "expr": "gateway_latency_p95_ms", "legendFormat": "p95" },
+          { "expr": "gateway_latency_p99_ms", "legendFormat": "p99" }
+        ],
+        "fieldConfig": { "defaults": { "custom": { "lineWidth": 2 }, "unit": "ms", "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 2000, "color": "red" }] } } }
+      },
+      {
+        "title": "Requests by Provider",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+        "targets": [
+          { "expr": "gateway_requests_by_provider", "legendFormat": "{{provider}}" }
+        ]
+      },
+      {
+        "title": "Requests by Stage",
+        "type": "piechart",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 12 },
+        "targets": [
+          { "expr": "gateway_requests_by_stage", "legendFormat": "{{stage}}" }
+        ]
+      },
+      {
+        "title": "Daily GPU Spend ($)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 12 },
+        "targets": [
+          { "expr": "gateway_daily_spend_usd", "legendFormat": "spend" },
+          { "expr": "gateway_daily_budget_usd", "legendFormat": "budget cap" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "currencyUSD", "custom": { "lineWidth": 2 } } }
+      },
+      {
+        "title": "Token Usage / min",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 12 },
+        "targets": [
+          { "expr": "rate(gateway_tokens_input_total[5m]) * 60", "legendFormat": "input" },
+          { "expr": "rate(gateway_tokens_output_total[5m]) * 60", "legendFormat": "output" }
+        ]
+      }
+    ]
+  }
+}

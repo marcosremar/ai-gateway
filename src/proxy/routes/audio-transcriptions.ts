@@ -1,10 +1,48 @@
 /**
  * POST /v1/audio/transcriptions — STT
+ *
+ * Includes an in-memory cache keyed by audio hash + model + language.
+ * Identical audio sent twice (common on client retry after timeout)
+ * returns the cached transcription instantly without hitting the provider.
+ * Cache TTL: 5 minutes, max 200 entries.
  */
 
+import { createHash } from 'crypto';
 import type { STTProvider } from '../../providers/types';
 import type { ProxyRequest, ProxyResponse } from '../types';
 import { withProxyRetry } from './retry';
+
+// ── STT response cache ──────────────────────────────────────────────────
+const STT_CACHE_TTL_MS = 5 * 60_000;
+const STT_CACHE_MAX_ENTRIES = 200;
+const sttCache = new Map<string, { text: string; expiresAt: number }>();
+
+function sttCacheKey(audioHash: string, model: string, language?: string): string {
+  return `${audioHash}:${model}:${language ?? '*'}`;
+}
+
+function hashAudio(buf: Buffer): string {
+  return createHash('sha256').update(buf).digest('hex').slice(0, 16);
+}
+
+function sttCacheGet(key: string): string | null {
+  const entry = sttCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { sttCache.delete(key); return null; }
+  return entry.text;
+}
+
+/** Clear the STT cache. Exported for tests. */
+export function _resetSttCache(): void { sttCache.clear(); }
+
+function sttCacheSet(key: string, text: string): void {
+  // Evict oldest if at capacity
+  if (sttCache.size >= STT_CACHE_MAX_ENTRIES) {
+    const oldest = sttCache.keys().next().value;
+    if (oldest !== undefined) sttCache.delete(oldest);
+  }
+  sttCache.set(key, { text, expiresAt: Date.now() + STT_CACHE_TTL_MS });
+}
 
 export async function handleAudioTranscriptions(
   req: ProxyRequest,
@@ -38,6 +76,18 @@ export async function handleAudioTranscriptions(
     return { status: 404, body: { error: { message: `STT model "${body.model}" not found`, type: 'invalid_request_error' } } };
   }
 
+  // Check STT cache — identical audio + model + language returns cached result
+  const audioHash = hashAudio(req.rawBody);
+  const cacheKey = sttCacheKey(audioHash, body.model, body.language);
+  const cached = sttCacheGet(cacheKey);
+  if (cached !== null) {
+    return {
+      status: 200,
+      headers: { 'X-Cache': 'HIT' },
+      body: { text: cached },
+    };
+  }
+
   try {
     const result = await withProxyRetry(
       provider.providerId,
@@ -52,8 +102,12 @@ export async function handleAudioTranscriptions(
       'STT',
     );
 
+    // Cache the result for future identical requests
+    sttCacheSet(cacheKey, result.text);
+
     return {
       status: 200,
+      headers: { 'X-Cache': 'MISS' },
       body: { text: result.text },
     };
   } catch (err) {
