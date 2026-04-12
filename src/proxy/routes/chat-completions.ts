@@ -220,7 +220,20 @@ export async function handleChatCompletions(
   }
 }
 
-/** Build a provider chain: requested model first, then fallbacks with compatible models. */
+/**
+ * Build a provider chain: requested model first, then fallbacks.
+ *
+ * IMPORTANT: the fallback chain is ONLY used when the requested model is
+ * found in chatProviders. If the model doesn't exist (e.g. gpt-4o on a
+ * gateway that only has Groq), the chain is empty and the caller returns
+ * 404 "Model not found". This prevents silently substituting a cheap
+ * open-source model when the client specifically requested a proprietary
+ * one — the client should know and decide, not get a surprise.
+ *
+ * The fallback chain kicks in for the SAME model across providers: if the
+ * client asks for llama-3.3-70b-versatile and Groq is down, the chain
+ * tries the next provider that can serve that class of model.
+ */
 function buildChain(
   requestedModel: string,
   chatProviders: Record<string, LLMProvider>,
@@ -235,14 +248,16 @@ function buildChain(
     const pid = direct.providerId;
     chain.push({ provider: pid, model: requestedModel, instance: direct });
     seen.add(pid);
-  }
 
-  // 2. Append fallback providers (different providers with their own models)
-  if (fallbackChain) {
-    for (const entry of fallbackChain) {
-      if (!seen.has(entry.providerId)) {
-        chain.push({ provider: entry.providerId, model: entry.model, instance: entry.provider });
-        seen.add(entry.providerId);
+    // 2. Append fallback providers — ONLY when the primary model was found.
+    // This ensures fallback is provider-level resilience (same model class,
+    // different backend) not model substitution (gpt-4o → llama).
+    if (fallbackChain) {
+      for (const entry of fallbackChain) {
+        if (!seen.has(entry.providerId)) {
+          chain.push({ provider: entry.providerId, model: entry.model, instance: entry.provider });
+          seen.add(entry.providerId);
+        }
       }
     }
   }
