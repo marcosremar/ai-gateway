@@ -7,7 +7,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from 'fs';
 import { setIdleTimeoutMs } from './gpu-deploy';
-import { setSttTargetLatencyMs, setLlmTargetLatencyMs, setTtsTargetLatencyMs } from '../src/gpu-providers/deploy-settings';
+import { setSttTargetLatencyMs, setLlmTargetLatencyMs, setTtsTargetLatencyMs, setGpuSortBy } from '../src/gpu-providers/deploy-settings';
 import type { AIProfile } from '../src/client';
 
 const BABELCAST_DIR = join(homedir(), '.babelcast');
@@ -404,10 +404,17 @@ export function applyProfileLatencyTargets(profileId: string | null, profiles: G
     if (llmMs !== undefined) setLlmTargetLatencyMs(llmMs);
     if (ttsMs !== undefined) setTtsTargetLatencyMs(ttsMs);
     console.log(`[config] Latency targets applied for profile "${profileId}" (custom): STT=${sttMs}ms LLM=${llmMs}ms TTS=${ttsMs}ms`);
-    return;
   }
 
-  console.log(`[config] No latency targets configured for profile "${profileId}"`);
+  // Auto-switch GPU sort mode for real-time profiles:
+  // If the profile has latencyTargetsMs with STT < 600ms, it's a real-time
+  // workload that needs the 'realtime' sort mode which filters high-latency
+  // hosts and weights TCP proximity at 60% instead of 30%.
+  const isRealtime = profile.latencyTargetsMs?.stt !== undefined && profile.latencyTargetsMs.stt < 600;
+  if (isRealtime) {
+    setGpuSortBy('realtime');
+    console.log(`[config] GPU sort mode set to 'realtime' for profile "${profileId}" (STT target < 600ms)`);
+  }
 }
 
 /** Debounced stamp: update lastRequestAt on the given profile.

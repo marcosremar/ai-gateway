@@ -1224,6 +1224,50 @@ export async function autoSelectCheapestGpu(
       const latB = getLatencyMs(b) ?? Infinity;
       return latA - latB;
     });
+  } else if (sortBy === 'realtime') {
+    // Real-time mode: optimized for minimum pipeline latency.
+    //
+    // 1. Filter out offers with TCP latency > 150ms — too far for real-time
+    //    speech translation where every 50ms matters. Unknown latency offers
+    //    are kept but deprioritized (scored as 0.3 instead of 0.5).
+    //
+    // 2. Score: latency × 0.60 + reputation × 0.30 + session × 0.10
+    //    Latency dominates because a $0.50/hr host at 30ms TCP beats a
+    //    $0.30/hr host at 200ms TCP for real-time use cases.
+    //
+    // 3. Price is tiebreaker only — among equal-quality offers, pick cheapest.
+    const REALTIME_MAX_LATENCY_MS = 150;
+    const beforeFilter = ranked.length;
+    const filtered = ranked.filter(o => {
+      const ms = getLatencyMs(o);
+      return ms === null || ms <= REALTIME_MAX_LATENCY_MS;
+    });
+    if (filtered.length === 0) {
+      log.warn(`[gpu] realtime mode: all ${beforeFilter} offers exceed ${REALTIME_MAX_LATENCY_MS}ms — using all offers with latency sort`);
+      // Keep ranked as-is, the sort below still prioritizes low latency
+    } else {
+      // Replace ranked with the filtered set
+      ranked.length = 0;
+      ranked.push(...filtered);
+    }
+
+    ranked.sort((a, b) => {
+      const tcpA = tcpLatencyScore(a);
+      const tcpB = tcpLatencyScore(b);
+      const repA = getRepScore(a);
+      const repB = getRepScore(b);
+      const sessA = sessionSuccessRates?.get(a.gpuType) ?? sessionSuccessRates?.get(a.gpuName) ?? 0.5;
+      const sessB = sessionSuccessRates?.get(b.gpuType) ?? sessionSuccessRates?.get(b.gpuName) ?? 0.5;
+      // Unknown TCP latency gets a low score (0.3) instead of neutral (0.5)
+      // to deprioritize unprobed hosts for real-time workloads.
+      const adjTcpA = getLatencyMs(a) === null ? 0.3 : tcpA;
+      const adjTcpB = getLatencyMs(b) === null ? 0.3 : tcpB;
+      const qualityA = adjTcpA * 0.60 + repA * 0.30 + sessA * 0.10;
+      const qualityB = adjTcpB * 0.60 + repB * 0.30 + sessB * 0.10;
+      // Higher quality first; price as tiebreaker
+      if (Math.abs(qualityA - qualityB) > 0.05) return qualityB - qualityA;
+      return a.pricePerHr - b.pricePerHr;
+    });
   } else {
     // Balanced (default): combine reputation, TCP latency, session history, and price.
     // qualityScore components (all 0-1 scale):
