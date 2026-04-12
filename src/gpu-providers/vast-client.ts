@@ -981,6 +981,11 @@ export class VastClient extends AbstractGpuProvider {
     }
     diskGb = Math.max(diskGb, getMinDiskGb());
 
+    // ── Docker Hub auth warning ─────────────────────────────────────────────
+    if (!(process.env.DOCKERHUB_USERNAME || process.env.DOCKER_HUB_USER) || !(process.env.DOCKERHUB_TOKEN || process.env.DOCKER_HUB_TOKEN)) {
+      this.log.warn('[vast] ⚠ No DOCKERHUB_USERNAME/DOCKERHUB_TOKEN set — Docker Hub pulls are unauthenticated (100 pulls/6hrs limit). Set these env vars to avoid rate limiting.');
+    }
+
     // ── 2. Search for cheapest available offer ─────────────────────────────
     // P0b: NOTE — direct_port_count filter intentionally REMOVED. SSH-only hosts
     // (e.g. RTX 5090 Blackwell) are now first-class citizens via SSH tunnel fallback.
@@ -2104,34 +2109,57 @@ export class VastClient extends AbstractGpuProvider {
     const headers = this.jsonHeaders(apiKey);
     const results: GpuInstance[] = [];
 
-    // ── 1. On-demand instances ─────────────────────────────────────────────
+    // ── 1. On-demand instances (paginated) ──────────────────────────────────
+    // Vast.ai will soon paginate /instances/ to 25 per page. We request 100
+    // per page and loop until the returned array is shorter than the limit
+    // (i.e. last page). Safety cap of 1000 total prevents infinite loops.
+    const PAGE_LIMIT = 100;
+    const MAX_TOTAL = 1000;
     try {
-      const res = await this._vastFetch(`${VAST_API_BASE}/instances/`, {
-        headers,
-      }, TIMEOUTS.read);
-      if (res.ok) {
+      let offset = 0;
+      let totalFetched = 0;
+      let hasMore = true;
+
+      while (hasMore && totalFetched < MAX_TOTAL) {
+        const url = `${VAST_API_BASE}/instances/?limit=${PAGE_LIMIT}&offset=${offset}`;
+        const res = await this._vastFetch(url, { headers }, TIMEOUTS.read);
+        if (!res.ok) {
+          const body = await res.text().catch(() => '');
+          this.log.warn(`[vast] listInstances /instances/ failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+          break;
+        }
+
         const data = (await res.json()) as Record<string, unknown>;
         const instances = (data.instances || data) as Array<Record<string, unknown>>;
-        if (Array.isArray(instances)) {
-          for (const inst of instances) {
-            const id = String(inst.id ?? inst.machine_id ?? '');
-            if (!id) continue;
-            const parsed = this._parseInstance(inst);
-            results.push({
-              instanceId: `inst-${id}`,
-              instanceName: inst.label as string | undefined,
-              endpoint: parsed.endpoint,
-              status: parsed.status,
-              gpuType: inst.gpu_name as string | undefined,
-              ipAddress: parsed.ip,
-              sshHost: parsed.sshHost,
-              sshPort: parsed.sshPort,
-            });
-          }
+        if (!Array.isArray(instances)) break;
+
+        for (const inst of instances) {
+          const id = String(inst.id ?? inst.machine_id ?? '');
+          if (!id) continue;
+          const parsed = this._parseInstance(inst);
+          results.push({
+            instanceId: `inst-${id}`,
+            instanceName: inst.label as string | undefined,
+            endpoint: parsed.endpoint,
+            status: parsed.status,
+            gpuType: inst.gpu_name as string | undefined,
+            ipAddress: parsed.ip,
+            sshHost: parsed.sshHost,
+            sshPort: parsed.sshPort,
+          });
         }
-      } else {
-        const body = await res.text().catch(() => '');
-        this.log.warn(`[vast] listInstances /instances/ failed: HTTP ${res.status} ${body.substring(0, 300)}`);
+
+        totalFetched += instances.length;
+        // Last page: fewer results than requested means no more pages
+        if (instances.length < PAGE_LIMIT) {
+          hasMore = false;
+        } else {
+          offset += PAGE_LIMIT;
+        }
+      }
+
+      if (totalFetched >= MAX_TOTAL) {
+        this.log.warn(`[vast] listInstances hit safety cap of ${MAX_TOTAL} instances — some may be missing`);
       }
     } catch (err) {
       this.log.warn(`[vast] listInstances /instances/ error: ${this.errMsg(err)}`);
