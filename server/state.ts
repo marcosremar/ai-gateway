@@ -459,6 +459,44 @@ export function getPerStageP95(stage: 'stt' | 'llm' | 'tts'): number | null {
   return sorted[Math.max(0, idx)];
 }
 
+/**
+ * Per-stage GPU latency check. Returns true if the GPU's P95 for this
+ * specific stage is acceptable. Used by the per-stage auto-swap routing
+ * in ai-handlers.ts to independently route STT/LLM/TTS to GPU or cloud.
+ *
+ * Target thresholds come from the active profile's latencyTargetsMs (set
+ * in config-persistence.ts). If no per-stage target is set, falls back to
+ * the global GPU_P95_THRESHOLD_MS (3000ms).
+ *
+ * Example: if GPU STT P95 = 4000ms but LLM P95 = 500ms:
+ *   isStageLatencyAcceptable('stt') → false (STT goes to cloud)
+ *   isStageLatencyAcceptable('llm') → true  (LLM stays on GPU)
+ */
+export function isStageLatencyAcceptable(stage: 'stt' | 'llm' | 'tts'): boolean {
+  const p95 = getPerStageP95(stage);
+  if (p95 === null) return true; // not enough data — give GPU a chance
+
+  // Try to read profile-specific target from deploy settings
+  let target: number;
+  try {
+    const { getSttTargetLatencyMs, getLlmTargetLatencyMs, getTtsTargetLatencyMs } =
+      require('../src/gpu-providers/deploy-settings');
+    const targets: Record<string, () => number> = {
+      stt: getSttTargetLatencyMs,
+      llm: getLlmTargetLatencyMs,
+      tts: getTtsTargetLatencyMs,
+    };
+    // Use 2× the target as the "acceptable" threshold — the target itself is
+    // for readiness gating (strict), the auto-swap threshold should be looser
+    // to avoid oscillation between GPU and cloud on small spikes.
+    target = (targets[stage]?.() ?? GPU_P95_THRESHOLD_MS) * 2;
+  } catch {
+    target = GPU_P95_THRESHOLD_MS;
+  }
+
+  return p95 < target;
+}
+
 export function resetPerStageLatencyRings(): void {
   perStageLatencyRing.stt.length = 0;
   perStageLatencyRing.llm.length = 0;

@@ -188,8 +188,10 @@ export async function handleChatCompletions(
       timestamp: Date.now(),
     });
 
+    const upstreamMs = Date.now() - startTs;
     return {
       status: 200,
+      headers: { 'X-Upstream-Duration-Ms': String(upstreamMs) },
       body: formatResponse(result.content, result.model, result.usage),
     };
   } catch (err) {
@@ -206,8 +208,13 @@ export async function handleChatCompletions(
 
     const status = extractStatus(err);
     console.error(`[chat-completions] All providers failed for model ${body.model}:`, err);
+    // Propagate upstream Retry-After if the fallback chain captured one from a 429.
+    const retryAfterSec = (err as { retryAfterSec?: number })?.retryAfterSec;
+    const headers: Record<string, string> = {};
+    if (retryAfterSec) headers['Retry-After'] = String(retryAfterSec);
     return {
       status: status || 500,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
       body: { error: { message: 'Chat completion failed', type: 'server_error' } },
     };
   }

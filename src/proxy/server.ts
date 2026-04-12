@@ -464,7 +464,11 @@ export function createProxyServer(config: ProxyConfig): Server {
       const origEnd = res.end.bind(res);
       (res as { end: typeof res.end }).end = function (...args: Parameters<typeof res.end>) {
         const durationMs = Date.now() - reqStartMs;
-        log.log({ method, path, statusCode: res.statusCode, durationMs }, 'request complete');
+        // Route handlers can set X-Upstream-Duration-Ms to report how much
+        // time was spent waiting on the upstream provider vs our proxy code.
+        const upstreamMs = parseInt(res.getHeader('x-upstream-duration-ms') as string, 10) || undefined;
+        const proxyMs = upstreamMs ? durationMs - upstreamMs : undefined;
+        log.log({ method, path, statusCode: res.statusCode, durationMs, upstreamMs, proxyMs }, 'request complete');
         return origEnd(...args);
       } as typeof res.end;
     }

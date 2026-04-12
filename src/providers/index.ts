@@ -139,3 +139,7 @@ export { Qwen3ASRPipelineSTTProvider, Qwen3ASRPipelineLLMProvider, qwen3asrPipel
 
 // ── Self-Hosted ───────────────────────────────────────────────────────────
 export { SelfHostedSTTProvider, SelfHostedTTSProvider, SelfHostedLLMProvider } from './self-hosted/self-hosted-provider';
+
+// ── Circuit Breaker ───────────────────────────────────────────────────────
+export { CircuitBreaker, CircuitBreakerRegistry } from "./circuit-breaker";
+export type { CircuitState, CircuitBreakerOptions, CircuitBreakerStats } from "./circuit-breaker";

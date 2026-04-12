@@ -61,6 +61,10 @@ export interface GatewayProfile extends AIProfile {
     llm?: number;
     tts?: number;
   };
+  /** Load balance strategy for this profile when multiple GPU tiers are ready.
+   *  Real-time profiles should use 'least-latency' to route to the fastest tier.
+   *  Default: inherits from AutoScalerConfig.loadBalanceStrategy. */
+  loadBalanceStrategy?: 'hash' | 'least-latency' | 'weighted-round-robin' | 'affinity' | 'least-busy' | 'priority';
 }
 
 
@@ -114,6 +118,8 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
       llm: 1000,  // LLM translation under 1s for natural dubbing cadence
       tts: 800,   // TTS under 800ms for continuous audio playback without gaps
     },
+    // When multiple GPU tiers are ready, route to the fastest one.
+    loadBalanceStrategy: 'least-latency',
   },
   {
     id: 'realtime-translation-dubbing',
@@ -132,6 +138,7 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
       llm: 800,   // TranslateGemma is faster than Mistral — tighter target
       tts: 800,
     },
+    loadBalanceStrategy: 'least-latency',
   },
   {
     id: 'subtitles-only',
