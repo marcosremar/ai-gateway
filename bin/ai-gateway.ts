@@ -17,7 +17,8 @@
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { resolve } from 'path';
+import { resolve, dirname } from 'path';
+import { spawn, type ChildProcess } from 'child_process';
 
 // ── Config ────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,124 @@ function getConfig(): { url: string; key: string } {
   const url = process.env.AI_GATEWAY_URL || process.env.GATEWAY_URL || DEFAULT_URL;
   const key = process.env.AI_GATEWAY_KEY || process.env.GATEWAY_API_KEY || '';
   return { url, key };
+}
+
+function isLocalUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1';
+  } catch { return false; }
+}
+
+/**
+ * Auto-start the local dev server if:
+ *   1. URL points to localhost (never auto-start for remote/production)
+ *   2. Server is not already running (health check fails)
+ *   3. serve.ts exists in the repo
+ *
+ * The server runs in the background as a detached process. Its PID is
+ * written to ~/.babelcast/gateway-cli.pid so we can track it.
+ * The process is NOT killed when the CLI exits — it stays running for
+ * subsequent CLI commands. Use `ai-gateway server stop` to kill it.
+ */
+async function ensureLocalServer(): Promise<void> {
+  const { url } = getConfig();
+  if (!isLocalUrl(url)) return; // production URL — never auto-start
+
+  // Check if already running
+  try {
+    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) return; // already running
+  } catch {
+    // Not running — start it
+  }
+
+  // Find serve.ts relative to this CLI script
+  const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), '..');
+  const servePath = resolve(repoRoot, 'serve.ts');
+  if (!existsSync(servePath)) {
+    console.error(`Cannot auto-start: serve.ts not found at ${servePath}`);
+    console.error('Start the server manually: bun run serve.ts');
+    process.exit(1);
+  }
+
+  const port = new URL(url).port || '4000';
+  console.log(`Starting local gateway on port ${port}...`);
+
+  const child: ChildProcess = spawn('bun', ['run', servePath], {
+    env: { ...process.env, PORT: port },
+    stdio: 'ignore',
+    detached: true,
+  });
+  child.unref();
+
+  // Write PID for tracking
+  const pidDir = resolve(process.env.HOME || '/tmp', '.babelcast');
+  try {
+    if (!existsSync(pidDir)) require('fs').mkdirSync(pidDir, { recursive: true });
+    writeFileSync(resolve(pidDir, 'gateway-cli.pid'), String(child.pid));
+  } catch { /* best effort */ }
+
+  // Wait for server to be ready (up to 10s)
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(1000) });
+      if (res.ok) {
+        console.log(`Gateway started (pid ${child.pid})\n`);
+        return;
+      }
+    } catch { /* not ready yet */ }
+  }
+  console.error('Gateway failed to start within 10 seconds.');
+  console.error('Check logs or start manually: bun run serve.ts');
+  process.exit(1);
+}
+
+async function cmdServerStop() {
+  const pidPath = resolve(process.env.HOME || '/tmp', '.babelcast', 'gateway-cli.pid');
+  if (!existsSync(pidPath)) {
+    console.log('No auto-started server found (no PID file).');
+    return;
+  }
+  const pid = parseInt(readFileSync(pidPath, 'utf8').trim(), 10);
+  try {
+    process.kill(pid, 'SIGTERM');
+    console.log(`Sent SIGTERM to gateway (pid ${pid}).`);
+    require('fs').unlinkSync(pidPath);
+  } catch (err: any) {
+    if (err.code === 'ESRCH') {
+      console.log(`Gateway (pid ${pid}) is not running.`);
+      require('fs').unlinkSync(pidPath);
+    } else {
+      console.error(`Failed to stop: ${err.message}`);
+    }
+  }
+}
+
+async function cmdServerStatus() {
+  const { url } = getConfig();
+  const pidPath = resolve(process.env.HOME || '/tmp', '.babelcast', 'gateway-cli.pid');
+  const hasPid = existsSync(pidPath);
+  const pid = hasPid ? parseInt(readFileSync(pidPath, 'utf8').trim(), 10) : null;
+  let running = false;
+  if (pid) {
+    try { process.kill(pid, 0); running = true; } catch { /* not running */ }
+  }
+  try {
+    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(3000) });
+    if (res.ok) {
+      const data = await res.json();
+      console.log(`Server:    running at ${url}`);
+      if (pid && running) console.log(`PID:       ${pid} (auto-started)`);
+      console.log(`Status:    ${data.status}`);
+      if (data.connections) console.log(`Conns:     active=${data.connections.active}, peak=${data.connections.peak}`);
+      return;
+    }
+  } catch { /* not reachable */ }
+  console.log(`Server:    not running at ${url}`);
+  if (pid && !running) console.log(`PID:       ${pid} (stale — process exited)`);
+  if (isLocalUrl(url)) console.log('Tip:       run any command and the server will auto-start');
 }
 
 function headers(key: string): Record<string, string> {
@@ -690,10 +809,16 @@ Commands:
   gpu             Manage GPU deployments (status, deploy, stop, logs)
   metrics         Show gateway metrics (Prometheus or JSON)
   latency         GPU host latency analysis (hosts, probe, best)
+  server          Manage local dev server (status, start, stop)
   config          Show current configuration and test connectivity
   whoami          Show which user this API key is associated with
   ping            Measure gateway latency (like ping)
   benchmark       Run a latency benchmark across all endpoints
+
+Dev mode (localhost):
+  When AI_GATEWAY_URL points to localhost, the CLI auto-starts the
+  server if it's not running. No manual 'bun run serve.ts' needed.
+  Use 'ai-gateway server stop' to shut it down.
 
 Environment Variables:
   AI_GATEWAY_URL  Gateway URL (default: http://localhost:4000)
@@ -1053,6 +1178,30 @@ Examples:
     console.log(HELP.main);
     return;
   }
+
+  // Server management commands (don't need ensureLocalServer)
+  if (cmd === 'server') {
+    const sub = args[1];
+    if (sub === 'help' || sub === '--help' || !sub) {
+      console.log(HELP.server || `
+ai-gateway server — Manage the local dev server
+
+  ai-gateway server status   Show if the server is running
+  ai-gateway server stop     Stop the auto-started server
+  ai-gateway server start    Start the server in background
+`);
+      return;
+    }
+    switch (sub) {
+      case 'status': await cmdServerStatus(); return;
+      case 'stop': await cmdServerStop(); return;
+      case 'start': await ensureLocalServer(); console.log('Server is running.'); return;
+      default: console.error('Usage: ai-gateway server <status|start|stop>'); process.exit(1);
+    }
+  }
+
+  // Auto-start local dev server if needed (only for localhost URLs)
+  await ensureLocalServer();
 
   try {
     switch (cmd) {
