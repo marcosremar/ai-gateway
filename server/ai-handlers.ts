@@ -28,34 +28,52 @@ interface RoutingDecision {
 class HybridRouter {
   private conditions: RoutingCondition[] = [
     // GPU-first strategies (highest priority)
+    // Each condition now gates on isGpuLatencyAcceptable() so that a GPU
+    // with degraded performance (P95 > 3s) automatically falls through to
+    // cloud providers. This is the "auto-swap" mechanism referenced in
+    // server/state.ts:isGpuLatencyAcceptable(). Before this change, the
+    // function existed but was never called — a GPU with 10s P95 would
+    // still be preferred over cloud. Now it's checked on every routing
+    // decision so degradation is caught at request time, not just deploy.
     {
       name: 'gpu_hot_complete',
-      evaluate: () => isGpuAvailable() && isGpuReadyForProduction() &&
+      evaluate: () => isGpuAvailable() && isGpuReadyForProduction() && isGpuLatencyAcceptable() &&
                      isStageWarm('stt') && isStageWarm('llm') && isTtsWarm(),
       weight: 0.95,
       provider: 'gpu',
-      reason: 'GPU fully warmed up and production-ready'
+      reason: 'GPU fully warmed up, production-ready, and latency OK'
     },
     {
       name: 'gpu_hot_stt_llm',
-      evaluate: () => isGpuAvailable() && isStageWarm('stt') && isStageWarm('llm') && !isTtsWarm(),
+      evaluate: () => isGpuAvailable() && isGpuLatencyAcceptable() && isStageWarm('stt') && isStageWarm('llm') && !isTtsWarm(),
       weight: 0.85,
       provider: 'gpu',
       reason: 'GPU STT+LLM warm but TTS cold'
     },
     {
       name: 'gpu_hot_partial',
-      evaluate: () => isGpuAvailable() && (isStageWarm('stt') || isStageWarm('llm') || isTtsWarm()),
+      evaluate: () => isGpuAvailable() && isGpuLatencyAcceptable() && (isStageWarm('stt') || isStageWarm('llm') || isTtsWarm()),
       weight: 0.75,
       provider: 'gpu',
       reason: 'GPU partially warm'
     },
     {
       name: 'gpu_available',
-      evaluate: () => isGpuAvailable(),
+      evaluate: () => isGpuAvailable() && isGpuLatencyAcceptable(),
       weight: 0.60,
       provider: 'gpu',
       reason: 'GPU available but cold'
+    },
+    // GPU available but latency degraded — still use it but at lower weight
+    // than full cloud. This avoids oscillation: instead of hard-cutting to
+    // cloud, we let some traffic continue to GPU so the P95 ring buffer
+    // can recover if the degradation was transient.
+    {
+      name: 'gpu_degraded',
+      evaluate: () => isGpuAvailable() && !isGpuLatencyAcceptable(),
+      weight: 0.40,
+      provider: 'gpu',
+      reason: 'GPU available but latency degraded (P95 > threshold)'
     },
 
     // Cloud fallback strategies
@@ -222,6 +240,7 @@ import {
   isTtsWarm, recordTtsTtfb, markTtsWarm, ttsWarmth, saveColdStartProfile,
   isStageWarm, gpuModelWarmth, gpuHealthy,
   isGpuReadyForProduction, recordGpuLatency, recordPerStageLatency, gpuReadyForProduction, gpuReadinessState,
+  isGpuLatencyAcceptable,
 } from './state';
 import {
   client, groqProfile, ollamaProfile, translationProfile,
