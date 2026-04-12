@@ -969,8 +969,15 @@ export class VastClient extends AbstractGpuProvider {
     const { getMinDiskGb } = await import('./deploy-settings');
     let diskGb = spec.storageGb ?? 0;
     if (diskGb <= 0) {
-      diskGb = await AbstractGpuProvider.estimateImageDiskGb(imageName, 20);
+      diskGb = await AbstractGpuProvider.estimateImageDiskGb(imageName, 40);
       this.log.log(`[vast] Auto-detected disk size for ${imageName}: ${diskGb}GB`);
+    }
+    // For runtime-download images (vLLM, TGI), the Docker image estimate is too low.
+    // Detect common inference servers and bump disk to account for model downloads.
+    const isInferenceServer = /vllm|text-generation-inference|tgi|llama\.cpp|ollama/i.test(imageName);
+    if (isInferenceServer && diskGb < 120) {
+      this.log.log(`[vast] Inference server image detected (${imageName}) — bumping disk from ${diskGb}GB to 120GB for model downloads`);
+      diskGb = 120;
     }
     diskGb = Math.max(diskGb, getMinDiskGb());
 

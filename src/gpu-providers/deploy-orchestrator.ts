@@ -220,14 +220,19 @@ export function filterTiers(
 }
 
 // ── Default Storage per Provider ────────────────────────────────────────────
-// Keep storage low to avoid ghost machines — RunPod silently fails to schedule
-// pods requesting >100GB local disk (most Secure Cloud hosts don't have it).
-// Images with pre-baked models need minimal disk; download-at-boot images
-// should set storageGb explicitly in the deploy request.
+// Keep RunPod storage low to avoid ghost machines — most Secure Cloud hosts
+// don't have >100GB local disk. Vast.ai has much more disk availability.
+//
+// For large models (32B+) that download at runtime (vLLM, TGI, etc.),
+// callers MUST set storageGb explicitly in the deploy request:
+//   - 7B model: ~50GB (image + model + buffer)
+//   - 13B model: ~80GB
+//   - 32B model: ~120GB
+//   - 70B model: ~200GB
 export const DEFAULT_STORAGE_GB: Record<ProviderName, number> = {
   runpod: 20,      // RunPod default is 20GB; 100GB causes ghost machines
   tensordock: 50,
-  vast: 80,        // 80GB: Docker image (~15GB) + 28GB Wan2.1 model + buffer
+  vast: 100,       // 100GB: covers most pre-baked images + medium models
   modal: 0,
   // Snapgpu inherits the storage of its underlying backend at runtime; this
   // value only matters when the wrapper is used directly without a backend
