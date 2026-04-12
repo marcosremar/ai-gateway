@@ -1,4 +1,7 @@
-// ── Provider types and constants adapted from Cabeção NPM ──
+// ── Service-centric types ──
+// A Service is the core concept: a capability endpoint (STT, LLM, TTS)
+// backed by a cloud API, a Docker container, or a serverless function.
+// A Docker container can provide one or more services.
 
 export interface PipelineChainEntry {
   provider: string;
@@ -9,23 +12,35 @@ export interface PipelineChainEntry {
 
 export type Latency = 'realtime' | 'low' | 'batch'
 
-export type ServiceKind = 'cloud' | 'gpu-pod' | 'serverless'
+/** Pipeline stages a service can provide */
+export type Stage = 'stt' | 'llm' | 'tts' | 'image';
 
-export interface ProfileService {
+export type ServiceKind = 'cloud' | 'container' | 'serverless'
+
+/** A deployment unit that provides one or more pipeline stages.
+ *  Can be a cloud API (Groq, OpenAI), a Docker container on a GPU provider,
+ *  or a serverless function (Modal). */
+export interface Service {
   id: string
   name: string
   kind: ServiceKind
+
+  /** Which pipeline stages this service can serve.
+   *  Set from Docker labels (com.babelcast.services) or user selection.
+   *  When empty/undefined, derived from model fields via deriveProvides(). */
+  provides?: Stage[]
+
   // if cloud:
   cloudProvider?: string   // 'groq' | 'openai' | 'modal' | 'deepgram' | 'tensordock' | etc.
-  // if gpu-pod:
+  // if container:
   dockerImage?: string
   gpuTypes?: string[]
-  gpuCloudProvider?: string  // 'vast' | 'runpod' | 'tensordock' | 'modal'
-  // models provided by this GPU pod (optional, per stage)
+  gpuProvider?: string     // 'vast' | 'runpod' | 'tensordock' | 'modal'
+  // models provided by this service (per stage)
   sttModel?: string          // e.g. 'faster-whisper-large-v3'
   llmModel?: string          // e.g. 'mistral-7b'
   ttsModel?: string          // e.g. 'qwen3-tts'
-  // deploy settings (gpu-pod / serverless)
+  // deploy settings (container / serverless)
   raceCount?: number         // hedged deploy: 1 (off) to 10
   idleTimeoutMin?: number    // auto-stop after idle: 5, 15, 30, 60, 0 = never
   spotInstance?: boolean     // preemptible/interruptible
@@ -51,7 +66,10 @@ export interface ProfileService {
   snapgpuPreloadApp?: string      // app name to preload at boot for snapshot capture
 }
 
-export interface ProviderProfile {
+/** An app configuration that binds pipeline stages to services.
+ *  Each app represents a different way to use the AI Gateway
+ *  (e.g. "Babelcast Live", "Subtitle Only", "Batch Translation"). */
+export interface App {
   id: string;
   name: string;
   latency: Latency;
@@ -59,8 +77,21 @@ export interface ProviderProfile {
   stt?: PipelineChainEntry[];
   llm: PipelineChainEntry[];
   tts?: PipelineChainEntry[];
-  services: ProfileService[];
+  services: Service[];
 }
+
+/** Derive which stages a service can serve from its model fields.
+ *  Used as fallback when provides[] is not explicitly set. */
+export function deriveProvides(s: Service): Stage[] {
+  if (s.provides?.length) return s.provides;
+  const stages: Stage[] = [];
+  if (s.sttModel) stages.push('stt');
+  if (s.llmModel) stages.push('llm');
+  if (s.ttsModel) stages.push('tts');
+  if (s.kind === 'cloud' && stages.length === 0) return ['stt', 'llm', 'tts'];
+  return stages;
+}
+
 
 // ── Provider button configs ──
 
@@ -267,3 +298,11 @@ export const GPU_TYPES_BY_PROVIDER: Record<string, string[]> = {
     'Tesla T4',
   ],
 };
+
+// ── Latency targets (shared source of truth for web + server) ──
+
+export const LATENCY_TARGETS = {
+  realtime: { sttMs: 300, llmMs: 500, ttsMs: 300 },
+  low: { sttMs: 800, llmMs: 2_000, ttsMs: 1_500 },
+  batch: { sttMs: 10_000, llmMs: 30_000, ttsMs: 15_000 },
+} as const;

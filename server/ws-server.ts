@@ -4,7 +4,7 @@
 import { botState, deployState, gpuHealthy, gpuModelWarmth, gpuReadinessState, gpuReadyForProduction, isStageWarm, isTtsWarm } from './state';
 import {
   shouldPreferGpuTts,
-  client, groqProfile, ollamaProfile, translationProfile,
+  client, groqDefaults, ollamaDefaults, translationDefaults,
 } from './providers';
 import { isGpuAvailable } from './state';
 import { broadcastWs, wsClients, startBotTranscriptPoll, stopBotTranscriptPoll, subscribeDub, unsubscribeDub, getActiveTargets } from './ws-state';

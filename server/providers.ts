@@ -317,7 +317,7 @@ let ttsChain = [
 ];
 
 // Profiles for each cloud/local provider
-export const groqProfile: AIProfile | null = groqAvailable ? {
+export const groqDefaults: AIProfile | null = groqAvailable ? {
   stt: [{ provider: 'groq', model: groqSttModel }],
   llm: [
     { provider: 'groq', model: groqLlmModel },
@@ -330,7 +330,7 @@ export const groqProfile: AIProfile | null = groqAvailable ? {
   maxTokens: 150,
 } : null;
 
-export const ollamaProfile: AIProfile | null = ollamaAvailable ? {
+export const ollamaDefaults: AIProfile | null = ollamaAvailable ? {
   stt: [{ provider: 'ollama', model: 'whisper-large-v3-turbo' }],
   llm: [{ provider: 'ollama', model: ollamaModel }],
   ...(openaiAvailable ? { tts: [{ provider: 'openai', model: 'gpt-4o-mini-tts' }] } : {}),
@@ -339,9 +339,9 @@ export const ollamaProfile: AIProfile | null = ollamaAvailable ? {
   maxTokens: 150,
 } : null;
 
-// translationProfile is used by client.pipeline() — gpuEndpoint is dynamically toggled
+// translationDefaults is used by client.pipeline() — gpuEndpoint is dynamically toggled
 // Fallback order: Local Qwen3 (fastest) → GPU → Groq (cloud) → Modal Qwen3-ASR (serverless)
-export const translationProfile: AIProfile = {
+export const translationDefaults: AIProfile = {
   gpuEndpoint: RUNPOD_ENDPOINT,
   stt: [
     // Local MLX Qwen3-ASR (Apple Silicon, fastest when available)
@@ -373,7 +373,7 @@ export const ttfacTracker = new TtfacTracker({ enabled: true, minSamples: 2 });
 
 export const client = createAIClient({
   registry,
-  defaultProfile: translationProfile,
+  defaultProfile: translationDefaults,
   performanceRanker,
   adaptiveTimeout,
   ttfacTracker,
@@ -417,18 +417,18 @@ export const snapgpu = new SnapgpuClient({
   s3Config: _snapgpuS3Config,
 });
 
-// ── Centralized translationProfile mutator ───────────────────────────────────
+// ── Centralized translationDefaults mutator ─────────────────────────────────
 
 /**
- * Apply a partial update to translationProfile with logging.
- * All mutations to translationProfile should go through this function
+ * Apply a partial update to translationDefaults with logging.
+ * All mutations to translationDefaults should go through this function
  * for traceability and consistency.
  */
-export function updateTranslationProfile(patch: Partial<AIProfile>, reason: string): void {
+export function updateActivePipeline(patch: Partial<AIProfile>, reason: string): void {
   const changes: string[] = [];
   for (const [key, value] of Object.entries(patch)) {
     if (value !== undefined) {
-      (translationProfile as any)[key] = value;
+      (translationDefaults as any)[key] = value;
       if (key === 'gpuEndpoint') {
         changes.push(`gpuEndpoint=${value || 'undefined'}`);
       } else if (Array.isArray(value)) {
@@ -445,7 +445,7 @@ export function updateTranslationProfile(patch: Partial<AIProfile>, reason: stri
   }
 }
 
-// ── GPU health state mutators (need translationProfile) ──────────────────────
+// ── GPU health state mutators (need translationDefaults) ─────────────────────
 
 /** Auto-recovery timer handle — only one pending at a time. */
 let gpuRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -456,7 +456,7 @@ let recoveryAttempt = 0;
 export function markGpuUnhealthy(reason: string): void {
   if (!gpuHealthy) return;
   setGpuHealthy(false);
-  updateTranslationProfile({ gpuEndpoint: undefined }, `markGpuUnhealthy: ${reason}`);
+  updateActivePipeline({ gpuEndpoint: undefined }, `markGpuUnhealthy: ${reason}`);
   setGpuReadyForProduction(false);
   setGpuShadowMode(false);
   resetReadinessCheck();
@@ -498,14 +498,14 @@ export function _startReadinessCheck(endpoint: string): void {
 
 /** Called when all services pass benchmark → enter shadow mode */
 export function markGpuShadowMode(endpoint: string): void {
-  // translationProfile.gpuEndpoint NOT set yet — cloud still serves
+  // translationDefaults.gpuEndpoint NOT set yet — cloud still serves
   console.log('[gpu] Shadow mode active — GPU fires in background, cloud serves users');
   broadcastProviderStatus('booting', 'cloud', 'GPU shadow mode — validating in production');
 }
 
 /** Called when shadow mode succeeds → activate production */
 export function markGpuProductionReady(endpoint: string): void {
-  updateTranslationProfile({ gpuEndpoint: endpoint }, 'markGpuProductionReady');
+  updateActivePipeline({ gpuEndpoint: endpoint }, 'markGpuProductionReady');
   setGpuReadyForProduction(true);
   console.log('[gpu] Production ready — GPU activated');
   broadcastProviderStatus('ready', 'gpu', 'GPU pipeline active');
@@ -519,7 +519,7 @@ export function markGpuWarmupFailed(stage: string, bestMs: number, targetMs: num
 
 /** Called when repechage attempts exhausted — GPU condemned */
 export function markGpuCondemned(): void {
-  updateTranslationProfile({ gpuEndpoint: undefined }, 'markGpuCondemned');
+  updateActivePipeline({ gpuEndpoint: undefined }, 'markGpuCondemned');
   setGpuReadyForProduction(false);
   console.error('[gpu] GPU condemned — repechage exhausted, routing all traffic to cloud');
   broadcastProviderStatus('error', 'cloud', 'GPU condemned — repechage exhausted');
@@ -683,7 +683,7 @@ export function cleanupProviders(): void {
 
 /**
  * Re-evaluate provider availability flags from process.env after API keys change.
- * Rebuilds the providers mapping, registry entries, ttsChain, and translationProfile keys.
+ * Rebuilds the providers mapping, registry entries, ttsChain, and translationDefaults keys.
  * Returns which providers were added or removed.
  */
 export function reloadProviderAvailability(): { added: string[]; removed: string[] } {
@@ -795,8 +795,8 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
     ...(openaiAvailable ? [{ provider: 'openai', model: 'gpt-4o-mini-tts' }] : []),
   ];
 
-  // Update translationProfile keys and chains
-  updateTranslationProfile({
+  // Update translationDefaults keys and chains
+  updateActivePipeline({
     keys: {
       groq: process.env.GROQ_API_KEY || '',
       ...(openaiAvailable ? { openai: process.env.OPENAI_API_KEY! } : {}),

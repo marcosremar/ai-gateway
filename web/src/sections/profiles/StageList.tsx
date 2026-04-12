@@ -7,17 +7,17 @@ import {
   Card, CardHeader, CardBody, Button, IconBox,
 } from '@/components/ui';
 import {
-  type PipelineChainEntry, type ProfileService,
+  type PipelineChainEntry, type Service,
 } from '../provider-types';
-import { STAGE_CATALOG, uid, type ProfileStage, type StageCatalogEntry } from './constants';
+import { STAGE_CATALOG, uid, type StageEntry, type StageCatalogEntry } from './constants';
 import { StageRow } from './StageRow';
 
 // ── Stage list with drag-reorder + add/remove ──
 
 function StageList({ stages, setStages, services }: {
-  stages: ProfileStage[];
-  setStages: React.Dispatch<React.SetStateAction<ProfileStage[]>>;
-  services: ProfileService[];
+  stages: StageEntry[];
+  setStages: React.Dispatch<React.SetStateAction<StageEntry[]>>;
+  services: Service[];
 }) {
   const [showAddStage, setShowAddStage] = useState(false);
   const sortRef = useRef<HTMLDivElement>(null);

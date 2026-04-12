@@ -25,7 +25,7 @@ import {
   perStageLatencyRing,
 } from './state';
 import {
-  translationProfile, updateTranslationProfile, runpod, vast, tensordock, modal, snapgpu, markGpuHealthy, markGpuUnhealthy,
+  translationDefaults, updateActivePipeline, runpod, vast, tensordock, modal, snapgpu, markGpuHealthy, markGpuUnhealthy,
   markGpuShadowMode, markGpuWarmupFailed, _startReadinessCheck,
 } from './providers';
 import { isReadinessCheckInProgress } from './gpu-readiness';
@@ -349,7 +349,7 @@ export function scheduleNextMonitorProbe() {
           setDeployState({ providerMeta: { ...deployState.providerMeta, gpuVramGb: Number(probeResult.data.gpu_vram_gb) } });
         }
         // Activate full GPU pipeline when STT + LLM become warm (staged boot)
-        if (isStageWarm('stt') && isStageWarm('llm') && !translationProfile.gpuEndpoint && !isReadinessCheckInProgress() && deployState.endpoint) {
+        if (isStageWarm('stt') && isStageWarm('llm') && !translationDefaults.gpuEndpoint && !isReadinessCheckInProgress() && deployState.endpoint) {
           log.log('[gpu] STT + LLM warm — running readiness benchmark via monitor');
           stopWarmthMonitor();
           const ep = deployState.endpoint;
@@ -363,7 +363,13 @@ export function scheduleNextMonitorProbe() {
         monitorBackoffMaxAlerted = false;
         // If health data indicates active training/work, treat as "not idle"
         // (prevents idle timeout from killing fine-tuning or long-running jobs)
-        if (probeResult.data && (probeResult.data as Record<string, unknown>).training) {
+        // Also: model_loaded=false means the pod is actively initializing (e.g. downloading
+        // a 28GB model from HuggingFace) — keep the idle timer fresh so it doesn't get
+        // auto-stopped before it can serve requests.
+        if (probeResult.data && (
+          (probeResult.data as Record<string, unknown>).training ||
+          (probeResult.data as Record<string, unknown>).model_loaded === false
+        )) {
           setLastRequestTime(Date.now());
         }
       } else {
@@ -614,7 +620,7 @@ export async function autoStopGpu() {
   broadcastProviderStatus('offline', 'cloud', `GPU idle → stopped (paused). Auto-destroy in ${Math.round(IDLE_DESTROY_MS / 60_000)} min.`);
   stopGpuMonitoring();
   stopWarmthMonitor();
-  updateTranslationProfile({ gpuEndpoint: undefined }, 'idleStop');
+  updateActivePipeline({ gpuEndpoint: undefined }, 'idleStop');
 
   // Transition to 'stopped' — preserves pod info for fast resume (19s vs 288s cold boot).
   // The stopped state is distinct from 'idle' so the status API, auto-resume trigger,
@@ -782,7 +788,7 @@ export async function autoTerminateGpu() {
   try { const { closeAllTunnels } = await import('./ssh-tunnel'); closeAllTunnels(); } catch { /* best-effort: cleanup or optional side-effect */ }
   stopWarmthMonitor();
   resetDeployState();
-  updateTranslationProfile({ gpuEndpoint: undefined }, 'idleTimeout');
+  updateActivePipeline({ gpuEndpoint: undefined }, 'idleTimeout');
   if (provider === 'modal' && modalKey && podId) {
     log.log(`[gpu] Modal idle → stopping app ${podId}`);
     try {

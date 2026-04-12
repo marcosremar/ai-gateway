@@ -3,7 +3,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import {
-  type PipelineChainEntry, type ProviderProfile,
+  type PipelineChainEntry, type App,
 } from '../provider-types';
 
 export function uid() {
@@ -12,7 +12,7 @@ export function uid() {
 
 // ── Stage types ──
 
-export interface ProfileStage {
+export interface StageEntry {
   id: string;
   key: string;          // 'stt' | 'llm' | 'tts' | 'eval' | custom
   label: string;
@@ -52,7 +52,7 @@ export const STAGE_ACCENT: Record<string, { color: string; Icon: LucideIcon }> =
 for (const s of STAGE_CATALOG) STAGE_ACCENT[s.key] = { color: s.color, Icon: s.icon };
 
 /** Default stages for a new profile */
-export const DEFAULT_STAGES: ProfileStage[] = [
+export const DEFAULT_STAGES: StageEntry[] = [
   { id: uid(), key: 'stt', label: 'STT', chain: [...DEFAULT_STT], enabled: true },
   { id: uid(), key: 'llm', label: 'LLM', chain: [...DEFAULT_LLM], enabled: true },
   { id: uid(), key: 'tts', label: 'TTS', chain: [...DEFAULT_TTS], enabled: true },
@@ -61,8 +61,8 @@ export const DEFAULT_STAGES: ProfileStage[] = [
 // ── Conversion helpers ──
 
 /** Convert legacy stt/llm/tts fields to stages array */
-export function profileToStages(p: ProviderProfile): ProfileStage[] {
-  const stages: ProfileStage[] = [];
+export function profileToStages(p: App): StageEntry[] {
+  const stages: StageEntry[] = [];
   if (p.stt !== undefined) stages.push({ id: uid(), key: 'stt', label: 'STT', chain: p.stt.length ? p.stt : DEFAULT_STT, enabled: true });
   stages.push({ id: uid(), key: 'llm', label: 'LLM', chain: p.llm?.length ? p.llm : DEFAULT_LLM, enabled: true });
   if (p.tts !== undefined) stages.push({ id: uid(), key: 'tts', label: 'TTS', chain: p.tts.length ? p.tts : DEFAULT_TTS, enabled: true });
@@ -76,7 +76,7 @@ export function profileToStages(p: ProviderProfile): ProfileStage[] {
 }
 
 /** Convert stages array back to profile fields */
-export function stagesToProfileFields(stages: ProfileStage[]): {
+export function stagesToProfileFields(stages: StageEntry[]): {
   stt?: PipelineChainEntry[]; llm: PipelineChainEntry[]; tts?: PipelineChainEntry[];
   customStages?: { key: string; label: string; chain: PipelineChainEntry[]; enabled: boolean }[];
 } {
@@ -95,11 +95,11 @@ export function stagesToProfileFields(stages: ProfileStage[]): {
 
 // ── Latency ──
 
-import type { Latency } from '../provider-types';
+import { LATENCY_TARGETS, type Latency } from '../provider-types';
 
 export const LATENCY_OPTIONS: { value: Latency; label: string; sub: string; color: string; Icon: typeof Clock }[] = [
-  { value: 'realtime', label: 'realtime', sub: '<300ms', color: '#10b981', Icon: Gauge },
-  { value: 'low', label: 'low', sub: '<1s', color: '#3b82f6', Icon: Timer },
+  { value: 'realtime', label: 'realtime', sub: `<${LATENCY_TARGETS.realtime.sttMs}ms`, color: '#10b981', Icon: Gauge },
+  { value: 'low', label: 'low', sub: `<${LATENCY_TARGETS.low.sttMs}ms`, color: '#3b82f6', Icon: Timer },
   { value: 'batch', label: 'batch', sub: 'no limit', color: '#6b7280', Icon: Clock },
 ];
 

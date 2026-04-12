@@ -39,6 +39,7 @@ from gateway_sdk.types import (
     MetricsResponse,
     PipelineChainEntry,
     ProviderConfigResponse,
+    Profile,
     ProviderProfile,
     RaceConfig,
     RequestLogEntry,

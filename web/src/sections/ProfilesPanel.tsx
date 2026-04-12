@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { X, Plus, Check, Trash2, Pencil, Copy, Mic, Bot, Volume2 } from 'lucide-react';
 import { Button, Toggle, ConfirmModal } from '@/components/ui';
-import type { ProviderProfile } from './provider-types';
+import type { App } from './provider-types';
 
 const LATENCY_BADGE: Record<string, { label: string; color: string }> = {
   realtime: { label: 'realtime', color: '#10b981' },
@@ -11,17 +11,17 @@ const LATENCY_BADGE: Record<string, { label: string; color: string }> = {
   batch: { label: 'batch', color: '#6b7280' },
 };
 
-// ── Profile Item ──
+// ── App Item ──
 
-const ProfileItem = memo(function ProfileItem({
+const AppItem = memo(function AppItem({
   profile, index, isActive, onApply, onDelete, onRename, onToggleEnabled, onDuplicate,
 }: {
-  profile: ProviderProfile; index: number; isActive: boolean;
-  onApply: (p: ProviderProfile) => void;
-  onDelete: (p: ProviderProfile) => void;
+  profile: App; index: number; isActive: boolean;
+  onApply: (p: App) => void;
+  onDelete: (p: App) => void;
   onRename: (id: string, name: string) => void;
   onToggleEnabled: (id: string) => void;
-  onDuplicate: (p: ProviderProfile) => void;
+  onDuplicate: (p: App) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(profile.name);
@@ -45,7 +45,7 @@ const ProfileItem = memo(function ProfileItem({
     profile.tts !== undefined ? 'tts' : null,
   ].filter(Boolean) as string[];
 
-  const gpuCount = (profile.services ?? []).filter(s => s.kind === 'gpu-pod' || s.kind === 'serverless').length;
+  const gpuCount = (profile.services ?? []).filter(s => s.kind === 'container' || s.kind === 'serverless').length;
 
   const summaryParts: string[] = [];
   if (profile.stt && profile.stt[0]) summaryParts.push(profile.stt[0].provider);
@@ -162,45 +162,45 @@ const ProfileItem = memo(function ProfileItem({
 
 // ── Panel ──
 
-interface ProfilesPanelProps {
-  profiles: ProviderProfile[];
-  setProfiles: React.Dispatch<React.SetStateAction<ProviderProfile[]>>;
-  activeProfileId: string | null;
-  setActiveProfileId: React.Dispatch<React.SetStateAction<string | null>>;
-  onApplyProfile: (profile: ProviderProfile) => void;
-  createCurrentProfile: (name: string) => ProviderProfile;
+interface AppsPanelProps {
+  apps: App[];
+  setApps: React.Dispatch<React.SetStateAction<App[]>>;
+  activeAppId: string | null;
+  setActiveAppId: React.Dispatch<React.SetStateAction<string | null>>;
+  onApplyApp: (profile: App) => void;
+  createCurrentApp: (name: string) => App;
 }
 
-export default function ProfilesPanel({
-  profiles, setProfiles, activeProfileId, setActiveProfileId, onApplyProfile, createCurrentProfile,
-}: ProfilesPanelProps) {
+export default function AppsPanel({
+  apps, setApps, activeAppId, setActiveAppId, onApplyApp, createCurrentApp,
+}: AppsPanelProps) {
   const [newName, setNewName] = useState('');
   const [showInput, setShowInput] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState<ProviderProfile | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<App | null>(null);
 
   const doDelete = () => {
     if (!confirmDelete) return;
-    const next = profiles.filter(p => p.id !== confirmDelete.id);
-    setProfiles(next);
-    if (activeProfileId === confirmDelete.id) setActiveProfileId(next[0]?.id || null);
+    const next = apps.filter(p => p.id !== confirmDelete.id);
+    setApps(next);
+    if (activeAppId === confirmDelete.id) setActiveAppId(next[0]?.id || null);
     setConfirmDelete(null);
   };
 
   const toggleEnabled = useCallback((id: string) => {
-    setProfiles(prev => prev.map(p => p.id === id ? { ...p, enabled: !(p.enabled !== false) } : p));
-  }, [setProfiles]);
+    setApps(prev => prev.map(p => p.id === id ? { ...p, enabled: !(p.enabled !== false) } : p));
+  }, [setApps]);
 
-  const duplicateProfile = useCallback((p: ProviderProfile) => {
-    const copy: ProviderProfile = { ...p, id: `${p.id}-${Date.now()}`, name: `${p.name} (copy)` };
-    setProfiles(prev => [...prev, copy]);
-  }, [setProfiles]);
+  const duplicateApp = useCallback((p: App) => {
+    const copy: App = { ...p, id: `${p.id}-${Date.now()}`, name: `${p.name} (copy)` };
+    setApps(prev => [...prev, copy]);
+  }, [setApps]);
 
   const save = () => {
     const name = newName.trim();
     if (!name) return;
-    const p = createCurrentProfile(name);
-    setProfiles(prev => [...prev, p]);
-    setActiveProfileId(p.id);
+    const p = createCurrentApp(name);
+    setApps(prev => [...prev, p]);
+    setActiveAppId(p.id);
     setNewName('');
     setShowInput(false);
   };
@@ -211,30 +211,30 @@ export default function ProfilesPanel({
         <div className="flex items-center justify-between px-4 py-2.5" style={{
           background: 'var(--color-surface)', borderBottom: '1px solid var(--color-border)',
         }}>
-          <p className="text-xs font-semibold">Profiles</p>
+          <p className="text-xs font-semibold">Apps</p>
           <p className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
-            {profiles.length > 0 ? `${profiles.length} saved · click to load · toggle to enable/disable` : 'Save current config as a profile'}
+            {apps.length > 0 ? `${apps.length} saved · click to load · toggle to enable/disable` : 'Save current config as a profile'}
           </p>
         </div>
 
-        {profiles.length > 0 ? (
+        {apps.length > 0 ? (
           <div className="p-2" style={{ background: 'var(--color-bg)' }}>
             <div className="flex flex-col gap-1.5">
-              {profiles.map((p, i) => (
-                <ProfileItem key={p.id} profile={p} index={i}
-                  isActive={activeProfileId === p.id}
-                  onApply={onApplyProfile}
+              {apps.map((p, i) => (
+                <AppItem key={p.id} profile={p} index={i}
+                  isActive={activeAppId === p.id}
+                  onApply={onApplyApp}
                   onDelete={p => setConfirmDelete(p)}
-                  onRename={(id, name) => setProfiles(prev => prev.map(x => x.id === id ? { ...x, name } : x))}
+                  onRename={(id, name) => setApps(prev => prev.map(x => x.id === id ? { ...x, name } : x))}
                   onToggleEnabled={toggleEnabled}
-                  onDuplicate={duplicateProfile}
+                  onDuplicate={duplicateApp}
                 />
               ))}
             </div>
           </div>
         ) : (
           <div className="px-4 py-5 text-center" style={{ background: 'var(--color-bg)' }}>
-            <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No profiles yet</p>
+            <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No apps yet</p>
           </div>
         )}
 
@@ -249,7 +249,7 @@ export default function ProfilesPanel({
             <div className="flex items-center gap-1.5">
               <input type="text" value={newName} onChange={e => setNewName(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { setNewName(''); setShowInput(false); } }}
-                placeholder="Profile name..." autoFocus
+                placeholder="App name..." autoFocus
                 className="flex-1 rounded-lg border px-2.5 py-1.5 text-sm"
                 style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)', color: 'var(--color-text)' }} />
               <Button variant="primary" size="sm" onClick={save} disabled={!newName.trim()}>Save</Button>

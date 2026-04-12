@@ -82,8 +82,8 @@ vi.mock('../server/ws-server', () => ({
 // Mock providers for config-handlers
 vi.mock('../server/providers', () => ({
   reloadProviderAvailability: vi.fn(() => ({})),
-  translationProfile: { stt: [], llm: [], tts: [] },
-  updateTranslationProfile: vi.fn(),
+  translationDefaults: { stt: [], llm: [], tts: [] },
+  updateActivePipeline: vi.fn(),
   runpod: { listInstances: vi.fn(() => []), deleteInstance: vi.fn(), createInstance: vi.fn() },
   vast: { listInstances: vi.fn(() => []), deleteInstance: vi.fn() },
   tensordock: { listInstances: vi.fn(() => []), deleteInstance: vi.fn() },
@@ -164,7 +164,7 @@ import {
   applyProfileLatencyTargets,
   applyUserConfig,
 } from '../server/config-persistence';
-import type { ProviderConfig, GatewayProfile } from '../server/config-persistence';
+import type { ProviderConfig, GatewayApp } from '../server/config-persistence';
 import {
   handleGetProviderConfig,
   handlePatchProviderConfig,
@@ -227,8 +227,8 @@ describe('Config persistence — loadProviderConfig', () => {
   it('returns defaults when config file does not exist', () => {
     mockFs.existsSync.mockReturnValue(false);
     const config = loadProviderConfig();
-    expect(config.profiles.length).toBeGreaterThan(0);
-    expect(config.activeProfileId).toBe('realtime-translation-dubbing-mistral');
+    expect(config.apps.length).toBeGreaterThan(0);
+    expect(config.activeAppId).toBe('realtime-translation-dubbing-mistral');
     expect(config.idleTimeoutMin).toBe(15);
   });
 
@@ -247,10 +247,10 @@ describe('Config persistence — loadProviderConfig', () => {
     mockFs.readFileSync.mockReturnValue(JSON.stringify(diskConfig));
 
     const config = loadProviderConfig();
-    expect(config.activeProfileId).toBe('custom');
+    expect(config.activeAppId).toBe('custom');
     expect(config.idleTimeoutMin).toBe(30);
-    // Should have merged in default profiles that are missing
-    expect(config.profiles.length).toBeGreaterThan(1);
+    // Should have merged in default apps that are missing
+    expect(config.apps.length).toBeGreaterThan(1);
   });
 
   // #263
@@ -270,16 +270,16 @@ describe('Config persistence — loadProviderConfig', () => {
 
     const config = loadProviderConfig();
     // Should return default config instead of crashing
-    expect(config.profiles.length).toBeGreaterThan(0);
-    expect(config.activeProfileId).toBe('realtime-translation-dubbing-mistral');
+    expect(config.apps.length).toBeGreaterThan(0);
+    expect(config.activeAppId).toBe('realtime-translation-dubbing-mistral');
   });
 
   // #265
   it('preserves extra UI fields from disk', () => {
     mockFs.existsSync.mockReturnValue(true);
     const diskConfig = {
-      profiles: DEFAULT_GPU_PROFILES,
-      activeProfileId: 'cloud-only',
+      profiles: DEFAULT_GPU_PROFILES,        // legacy field name — tests migration
+      activeProfileId: 'cloud-only',         // legacy field name — tests migration
       pipelineStt: [{ provider: 'groq', model: 'whisper' }],
       pipelineLlm: [{ provider: 'groq', model: 'llama' }],
       pipelineTts: [{ provider: 'groq', model: 'orpheus' }],
@@ -304,7 +304,7 @@ describe('Config persistence — saveProviderConfig', () => {
   // #266
   it('writes to tmp file then renames (atomic write)', () => {
     const config: ProviderConfig = {
-      profiles: [], activeProfileId: null,
+      apps: [], activeAppId: null,
       pipelineStt: [], pipelineLlm: [], pipelineTts: [],
       idleTimeoutMin: 15, updatedAt: 0,
     };
@@ -325,7 +325,7 @@ describe('Config persistence — saveProviderConfig', () => {
   it('updates updatedAt timestamp on save', () => {
     const before = Date.now();
     const config: ProviderConfig = {
-      profiles: [], activeProfileId: null,
+      apps: [], activeAppId: null,
       pipelineStt: [], pipelineLlm: [], pipelineTts: [],
       idleTimeoutMin: 15, updatedAt: 0,
     };
@@ -337,8 +337,8 @@ describe('Config persistence — saveProviderConfig', () => {
   it('updates in-memory cache after save', () => {
     mockFs.existsSync.mockReturnValue(false);
     const config: ProviderConfig = {
-      profiles: [{ id: 'saved', name: 'Saved', stt: [], llm: [], tts: [] } as GatewayProfile],
-      activeProfileId: 'saved',
+      apps: [{ id: 'saved', name: 'Saved', stt: [], llm: [], tts: [] } as GatewayApp],
+      activeAppId: 'saved',
       pipelineStt: [], pipelineLlm: [], pipelineTts: [],
       idleTimeoutMin: 15, updatedAt: 0,
     };
@@ -351,7 +351,7 @@ describe('Config persistence — saveProviderConfig', () => {
 
     // Subsequent load should return cached version without reading disk
     const loaded = loadProviderConfig();
-    expect(loaded.activeProfileId).toBe('saved');
+    expect(loaded.activeAppId).toBe('saved');
   });
 });
 
@@ -367,15 +367,15 @@ describe('Config persistence — patchProviderConfig', () => {
     const updated = patchProviderConfig({ idleTimeoutMin: 30 });
     expect(updated.idleTimeoutMin).toBe(30);
     // Other fields should remain default
-    expect(updated.activeProfileId).toBe('realtime-translation-dubbing-mistral');
+    expect(updated.activeAppId).toBe('realtime-translation-dubbing-mistral');
   });
 
   // #270
-  it('updates activeProfileId and records lastActivatedAt', () => {
-    const updated = patchProviderConfig({ activeProfileId: 'cloud-only' });
-    expect(updated.activeProfileId).toBe('cloud-only');
-    const cloudProfile = updated.profiles.find(p => p.id === 'cloud-only');
-    expect(cloudProfile?.lastActivatedAt).toBeGreaterThan(0);
+  it('updates activeAppId and records lastActivatedAt', () => {
+    const updated = patchProviderConfig({ activeAppId: 'cloud-only' });
+    expect(updated.activeAppId).toBe('cloud-only');
+    const cloudApp = updated.apps.find(p => p.id === 'cloud-only');
+    expect(cloudApp?.lastActivatedAt).toBeGreaterThan(0);
   });
 });
 
@@ -395,8 +395,8 @@ describe('Config handlers — GET /v1/config/providers', () => {
     await handleGetProviderConfig(req, res);
     expect(res._status).toBe(200);
     const body = resJson(res);
-    expect(body.profiles).toBeDefined();
-    expect(body.activeProfileId).toBeDefined();
+    expect(body.apps).toBeDefined();
+    expect(body.activeAppId).toBeDefined();
   });
 });
 
@@ -505,8 +505,8 @@ describe('Config handlers — profile CRUD', () => {
     await handleCreateProfile(req, res);
     expect(res._status).toBe(201);
     const body = resJson(res);
-    const profiles = body.profiles as Array<Record<string, unknown>>;
-    expect(profiles.find(p => p.id === 'my-profile')).toBeTruthy();
+    const apps = body.apps as Array<Record<string, unknown>>;
+    expect(apps.find(p => p.id === 'my-profile')).toBeTruthy();
   });
 
   // #278b
@@ -531,13 +531,13 @@ describe('Config handlers — profile CRUD', () => {
 
   // #279
   it('DELETE /v1/config/profiles deletes a profile', async () => {
-    // First create a profile
+    // First create an app
     applyUserConfig({
-      profiles: [
+      apps: [
         ...DEFAULT_GPU_PROFILES,
-        { id: 'deletable', name: 'Deletable', stt: [], llm: [], tts: [] } as GatewayProfile,
+        { id: 'deletable', name: 'Deletable', stt: [], llm: [], tts: [] } as GatewayApp,
       ],
-      activeProfileId: 'deletable',
+      activeAppId: 'deletable',
       pipelineStt: [], pipelineLlm: [], pipelineTts: [],
       idleTimeoutMin: 15, updatedAt: 0,
     });
@@ -548,10 +548,10 @@ describe('Config handlers — profile CRUD', () => {
     await handleDeleteProfile(req, res);
     expect(res._status).toBe(200);
     const body = resJson(res);
-    const profiles = body.profiles as Array<Record<string, unknown>>;
-    expect(profiles.find(p => p.id === 'deletable')).toBeUndefined();
-    // Active profile should be cleared since we deleted it
-    expect(body.activeProfileId).toBeNull();
+    const apps = body.apps as Array<Record<string, unknown>>;
+    expect(apps.find(p => p.id === 'deletable')).toBeUndefined();
+    // Active app should be cleared since we deleted it
+    expect(body.activeAppId).toBeNull();
   });
 
   // #279b
@@ -571,7 +571,7 @@ describe('Config handlers — profile CRUD', () => {
     await handleActivateProfile(req, res);
     expect(res._status).toBe(200);
     const body = resJson(res);
-    expect(body.activeProfileId).toBe('cloud-only');
+    expect(body.activeAppId).toBe('cloud-only');
   });
 
   // #280b
@@ -582,7 +582,7 @@ describe('Config handlers — profile CRUD', () => {
     await handleActivateProfile(req, res);
     expect(res._status).toBe(200);
     const body = resJson(res);
-    expect(body.activeProfileId).toBeNull();
+    expect(body.activeAppId).toBeNull();
   });
 
   // #280c
@@ -634,19 +634,19 @@ describe('Config persistence — applyProfileLatencyTargets', () => {
   });
 
   it('applies custom per-stage latency targets', () => {
-    const profiles: GatewayProfile[] = [{
+    const apps: GatewayApp[] = [{
       id: 'test-profile',
       name: 'Test',
       latencyTargetsMs: { stt: 200, llm: 400, tts: 300 },
     }];
-    applyProfileLatencyTargets('test-profile', profiles);
+    applyProfileLatencyTargets('test-profile', apps);
 
     expect(vi.mocked(setSttTargetLatencyMs)).toHaveBeenCalledWith(200);
     expect(vi.mocked(setLlmTargetLatencyMs)).toHaveBeenCalledWith(400);
     expect(vi.mocked(setTtsTargetLatencyMs)).toHaveBeenCalledWith(300);
   });
 
-  it('does nothing for null profileId', () => {
+  it('does nothing for null appId', () => {
     applyProfileLatencyTargets(null, []);
     expect(vi.mocked(setSttTargetLatencyMs)).not.toHaveBeenCalled();
   });

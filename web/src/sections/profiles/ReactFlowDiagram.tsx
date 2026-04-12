@@ -17,7 +17,7 @@ import {
   Cloud, Cpu, Zap, Upload, Type, Radio, Play, Square, X, Loader2,
   Image as ImageIcon,
 } from 'lucide-react';
-import { PIPELINE_CATALOG, type PipelineChainEntry, type ProfileService } from '../provider-types';
+import { PIPELINE_CATALOG, type PipelineChainEntry, type Service } from '../provider-types';
 import { PROVIDER_ICON } from '../FallbackChainList';
 import { DropdownList, type DropdownOption } from '@/components/ui';
 import { pMeta } from './constants';
@@ -420,7 +420,7 @@ interface ReactFlowDiagramProps {
   ttsChain: PipelineChainEntry[];
   sttEnabled: boolean;
   ttsEnabled: boolean;
-  services: ProfileService[];
+  services: Service[];
   onAddService?: (stageKey: string, provider: string, model: string) => void;
   onReorderChain?: (stageKey: string, newChain: PipelineChainEntry[]) => void;
   onClickProvider?: (stageKey: string, entryIdx: number) => void;
@@ -442,7 +442,7 @@ export function ReactFlowPipelineDiagram({
   const [inputType, setInputType] = useState('mic');
   const handleSelectInput = useCallback((type: string) => { setInputType(type); }, []);
 
-  const gpuService = services.find(s => s.kind === 'gpu-pod');
+  const gpuService = services.find(s => s.kind === 'container');
 
   // Stable refs for callbacks
   const onAddServiceRef = useRef(onAddService); onAddServiceRef.current = onAddService;
@@ -453,7 +453,7 @@ export function ReactFlowPipelineDiagram({
   const stableOnClickProvider = useCallback((sk: string, idx: number) => { onClickProviderRef.current?.(sk, idx); }, []);
 
   const getEntryLabel = useCallback((entry: PipelineChainEntry) => {
-    if (entry.provider === 'gpu') { const svc = services.find(s => s.kind === 'gpu-pod' && s.id === entry.model); if (svc) return svc.name; if (gpuService) return gpuService.name; return 'GPU Pod'; }
+    if (entry.provider === 'gpu') { const svc = services.find(s => s.kind === 'container' && s.id === entry.model); if (svc) return svc.name; if (gpuService) return gpuService.name; return 'GPU Pod'; }
     return pMeta(entry.provider).label;
   }, [services, gpuService]);
 
@@ -461,7 +461,7 @@ export function ReactFlowPipelineDiagram({
     const catalog = PIPELINE_CATALOG[stageKey as keyof typeof PIPELINE_CATALOG]; if (!catalog) return null;
     const provModels = (catalog.models as Record<string, { id: string; label: string }[]>)[entry.provider] ?? [];
     const fromCatalog = provModels.find(m => m.id === entry.model)?.label; if (fromCatalog) return fromCatalog;
-    if (entry.provider === 'gpu') { const gpuModels = (catalog.models as Record<string, { id: string; label: string }[]>)['gpu'] ?? []; const svc = services.find(s => s.kind === 'gpu-pod' && s.id === entry.model) ?? gpuService; if (svc) { const mid = stageKey === 'stt' ? svc.sttModel : stageKey === 'llm' ? svc.llmModel : svc.ttsModel; if (mid) return gpuModels.find(m => m.id === mid)?.label ?? mid.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()); } }
+    if (entry.provider === 'gpu') { const gpuModels = (catalog.models as Record<string, { id: string; label: string }[]>)['gpu'] ?? []; const svc = services.find(s => s.kind === 'container' && s.id === entry.model) ?? gpuService; if (svc) { const mid = stageKey === 'stt' ? svc.sttModel : stageKey === 'llm' ? svc.llmModel : svc.ttsModel; if (mid) return gpuModels.find(m => m.id === mid)?.label ?? mid.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()); } }
     return null;
   }, [services, gpuService]);
 

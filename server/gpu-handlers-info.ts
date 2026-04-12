@@ -297,20 +297,20 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
     modelWarmth: gpuModelWarmth,
     pipelineRouting: (() => {
       if (!isGpuAvailable()) return undefined;
-      // Check active profile to see which stages use GPU — avoids showing 'gpu'
-      // routing for stages that the active profile routes to cloud only.
+      // Check active app to see which stages use GPU — avoids showing 'gpu'
+      // routing for stages that the active app routes to cloud only.
       const _cfg = loadProviderConfig();
-      const _activeProfile = _cfg.activeProfileId
-        ? _cfg.profiles.find(p => p.id === _cfg.activeProfileId)
+      const _activeApp = _cfg.activeAppId
+        ? _cfg.apps.find(p => p.id === _cfg.activeAppId)
         : null;
-      const profileUsesGpu = (stage: 'stt' | 'llm' | 'tts'): boolean => {
-        if (!_activeProfile) return true;
-        const chain = (_activeProfile as unknown as Record<string, unknown>)[stage] as Array<{ provider: string }> | undefined;
+      const appUsesGpu = (stage: 'stt' | 'llm' | 'tts'): boolean => {
+        if (!_activeApp) return true;
+        const chain = (_activeApp as unknown as Record<string, unknown>)[stage] as Array<{ provider: string }> | undefined;
         return !chain || chain.some(e => e.provider === 'gpu');
       };
-      const sttGpu = profileUsesGpu('stt') && isStageWarm('stt');
-      const llmGpu = profileUsesGpu('llm') && isStageWarm('llm');
-      const ttsGpu = profileUsesGpu('tts') && shouldPreferGpuTts();
+      const sttGpu = appUsesGpu('stt') && isStageWarm('stt');
+      const llmGpu = appUsesGpu('llm') && isStageWarm('llm');
+      const ttsGpu = appUsesGpu('tts') && shouldPreferGpuTts();
       return {
         stt: sttGpu ? 'gpu' : 'cloud',
         llm: llmGpu ? 'gpu' : 'cloud',
@@ -318,15 +318,15 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
         mode: (sttGpu && llmGpu && ttsGpu) ? 'atomic-gpu'
           : (sttGpu || llmGpu || ttsGpu) ? 'hybrid'
           : 'cloud',
-        activeProfile: _cfg.activeProfileId || undefined,
+        activeApp: _cfg.activeAppId || undefined,
       };
     })(),
     ttsColdStartProfile: getColdStartProfile(deployState.gpuType, deployState.dockerImage, deployState.provider) || undefined,
     readinessState: gpuReadinessState,
     bootOnStartup: (() => {
       const _cfg = loadProviderConfig();
-      const _activeProfile = _cfg.profiles?.find(p => p.id === _cfg.activeProfileId);
-      return _activeProfile?.gpuDeploy?.bootOnStartup ?? false;
+      const _activeApp = _cfg.apps?.find(p => p.id === _cfg.activeAppId);
+      return _activeApp?.gpuDeploy?.bootOnStartup ?? false;
     })(),
     standby: {
       status: standbyDeployState.status,

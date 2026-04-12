@@ -1,5 +1,5 @@
 // ── BabelCast Gateway — Provider Config Persistence ──────────────────────────
-// Persists provider configuration (profiles, pipeline chains) to
+// Persists provider configuration (apps, pipeline chains) to
 // ~/.babelcast/provider-config.json so the BabelCast app can access it
 // via the AI Gateway SDK.
 
@@ -10,6 +10,13 @@ import { setIdleTimeoutMs } from './gpu-deploy';
 import { setSttTargetLatencyMs, setLlmTargetLatencyMs, setTtsTargetLatencyMs, setGpuSortBy } from '../src/gpu-providers/deploy-settings';
 import type { AIProfile } from '../src/client';
 
+/**
+ * Config directory layout:
+ *   ~/.babelcast/          — app config, deploy state, session data (user-facing)
+ *   ~/.ai-gateway/         — autoscaler telemetry, latency probes, perf ranker (operational)
+ *
+ * TODO: consolidate into single ~/.ai-gateway/ directory
+ */
 const BABELCAST_DIR = join(homedir(), '.babelcast');
 const CONFIG_FILE = join(BABELCAST_DIR, 'provider-config.json');
 
@@ -49,10 +56,38 @@ export interface GpuDeployConfig {
  * Old JSON files (with only stt/llm/tts/gpuDeploy) are backward-compatible since
  * all AIProfile fields are optional.
  */
-export interface GatewayProfile extends AIProfile {
+/** Service definition — persisted with profile. Matches web/src/sections/provider-types.ts Service. */
+export interface GatewayService {
+  id: string;
+  name: string;
+  kind: 'cloud' | 'container' | 'serverless';
+  provides?: ('stt' | 'llm' | 'tts' | 'image')[];
+  cloudProvider?: string;
+  dockerImage?: string;
+  gpuTypes?: string[];
+  gpuProvider?: string;
+  sttModel?: string;
+  llmModel?: string;
+  ttsModel?: string;
+  [key: string]: unknown;  // allow deploy settings (raceCount, region, etc.)
+}
+
+/**
+ * An app configuration — extends AIProfile with gateway-specific fields.
+ * Each app represents a different use case for the AI Gateway.
+ *
+ * Inherits from AIProfile: stt[], llm[], tts[], image[], voice, temperature,
+ * maxTokens, language, gpuEndpoint, fallbackOptions, etc.
+ * These inherited fields are used by AIClient for runtime pipeline execution.
+ *
+ * Gateway-specific fields below add: deployment config, services, latency targets.
+ */
+export interface GatewayApp extends AIProfile {
   id: string;
   name: string;
   gpuDeploy?: GpuDeployConfig;
+  /** Services backing this app (cloud APIs, containers, serverless). */
+  services?: GatewayService[];
   lastActivatedAt?: number;
   lastRequestAt?: number;
   /** Per-stage latency targets (ms). Overrides the tier-based defaults when set. */
@@ -61,11 +96,14 @@ export interface GatewayProfile extends AIProfile {
     llm?: number;
     tts?: number;
   };
-  /** Load balance strategy for this profile when multiple GPU tiers are ready.
-   *  Real-time profiles should use 'least-latency' to route to the fastest tier.
+  /** Load balance strategy for this app when multiple GPU tiers are ready.
+   *  Real-time apps should use 'least-latency' to route to the fastest tier.
    *  Default: inherits from AutoScalerConfig.loadBalanceStrategy. */
   loadBalanceStrategy?: 'hash' | 'least-latency' | 'weighted-round-robin' | 'affinity' | 'least-busy' | 'priority';
 }
+
+/** @deprecated Use GatewayApp */
+export type GatewayProfile = GatewayApp;
 
 
 /** STT hallucination filter thresholds (persisted with provider config). */
@@ -83,10 +121,13 @@ export interface SttHallucinationFilterSettings {
 }
 
 export interface ProviderConfig {
-  profiles: GatewayProfile[];
-  activeProfileId: string | null;
+  apps: GatewayApp[];
+  activeAppId: string | null;
+  /** Active app's STT chain (auto-synced when activeAppId changes — do NOT set independently). */
   pipelineStt: PipelineChainEntry[];
+  /** Active app's LLM chain (auto-synced when activeAppId changes — do NOT set independently). */
   pipelineLlm: PipelineChainEntry[];
+  /** Active app's TTS chain (auto-synced when activeAppId changes — do NOT set independently). */
   pipelineTts: PipelineChainEntry[];
   idleTimeoutMin: number;  // auto-terminate GPU after N minutes idle (0 = disabled)
   /** STT hallucination filter settings. */
@@ -95,7 +136,14 @@ export interface ProviderConfig {
   [key: string]: unknown;  // allow extra fields from UI (dockerImages, gpuTypes, etc.)
 }
 
-export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
+/** Get the active app, or null if none is active. */
+export function getActiveApp(config?: ProviderConfig): GatewayApp | null {
+  const cfg = config ?? loadProviderConfig();
+  if (!cfg.activeAppId) return null;
+  return cfg.apps.find(a => a.id === cfg.activeAppId) ?? null;
+}
+
+export const DEFAULT_APPS: GatewayApp[] = [
   {
     id: 'realtime-translation-dubbing-mistral',
     name: 'Real-time Translation + Dubbing (Mistral)',
@@ -230,8 +278,8 @@ export const DEFAULT_GPU_PROFILES: GatewayProfile[] = [
 ];
 
 const DEFAULT_CONFIG: ProviderConfig = {
-  profiles: [...DEFAULT_GPU_PROFILES],
-  activeProfileId: 'realtime-translation-dubbing-mistral',
+  apps: [...DEFAULT_APPS],
+  activeAppId: 'realtime-translation-dubbing-mistral',
   pipelineStt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }],
   pipelineLlm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }],
   pipelineTts: [{ provider: 'gpu', model: 'qwen3-tts' }, { provider: 'modal', model: 'qwen3-tts' }],
@@ -253,11 +301,14 @@ export function loadProviderConfig(): ProviderConfig {
       return _cachedConfig;
     }
     const raw = readFileSync(CONFIG_FILE, 'utf-8');
-    const data = JSON.parse(raw) as Partial<ProviderConfig>;
+    const data = JSON.parse(raw) as Record<string, unknown>;
+    // Migrate legacy field names: profiles → apps, activeProfileId → activeAppId
+    const rawApps = (data.apps ?? data.profiles) as GatewayApp[] | undefined;
+    const rawActiveId = (data.activeAppId ?? data.activeProfileId) as string | null | undefined;
     const config: ProviderConfig = {
-      profiles: Array.isArray(data.profiles) && data.profiles.length > 0
-        ? data.profiles : [...DEFAULT_GPU_PROFILES],
-      activeProfileId: data.activeProfileId ?? DEFAULT_CONFIG.activeProfileId,
+      apps: Array.isArray(rawApps) && rawApps.length > 0
+        ? rawApps : [...DEFAULT_APPS],
+      activeAppId: rawActiveId ?? DEFAULT_CONFIG.activeAppId,
       pipelineStt: Array.isArray(data.pipelineStt) && data.pipelineStt.length > 0
         ? data.pipelineStt : DEFAULT_CONFIG.pipelineStt,
       pipelineLlm: Array.isArray(data.pipelineLlm) && data.pipelineLlm.length > 0
@@ -267,10 +318,23 @@ export function loadProviderConfig(): ProviderConfig {
       idleTimeoutMin: typeof data.idleTimeoutMin === 'number' ? data.idleTimeoutMin : 15,
       updatedAt: data.updatedAt ?? 0,
     };
-    // Merge any default profiles that are missing (new defaults added in code updates)
-    for (const def of DEFAULT_GPU_PROFILES) {
-      if (!config.profiles.find(p => p.id === def.id)) {
-        config.profiles.push(def);
+    // Migrate legacy service fields in apps
+    for (const app of config.apps) {
+      if (!Array.isArray(app.services)) continue;
+      for (const svc of app.services) {
+        // gpu-pod → container
+        if ((svc as any).kind === 'gpu-pod') (svc as any).kind = 'container';
+        // gpuCloudProvider → gpuProvider
+        if ((svc as any).gpuCloudProvider && !svc.gpuProvider) {
+          svc.gpuProvider = (svc as any).gpuCloudProvider;
+          delete (svc as any).gpuCloudProvider;
+        }
+      }
+    }
+    // Merge any default apps that are missing (new defaults added in code updates)
+    for (const def of DEFAULT_APPS) {
+      if (!config.apps.find(a => a.id === def.id)) {
+        config.apps.push(def);
       }
     }
     // Preserve extra UI fields (dockerImages, gpuImage, gpuTypes, etc.)
@@ -325,7 +389,7 @@ export function saveProviderConfig(config: ProviderConfig): void {
     // Update cache so subsequent reads skip file I/O
     _cachedConfig = config;
     _cacheTime = Date.now();
-    console.log(`[config] Saved provider config (${config.profiles.length} profiles) to ${CONFIG_FILE}`);
+    console.log(`[config] Saved provider config (${config.apps.length} apps) to ${CONFIG_FILE}`);
   } catch (err) {
     console.warn('[config] Failed to save provider config:', err instanceof Error ? err.message : err);
   }
@@ -343,8 +407,10 @@ export function patchProviderConfig(partial: Partial<ProviderConfig>): ProviderC
   const current = loadProviderConfig();
   const updated: ProviderConfig = {
     ...current,  // preserve extra UI fields
-    profiles: partial.profiles !== undefined ? partial.profiles : current.profiles,
-    activeProfileId: partial.activeProfileId !== undefined ? partial.activeProfileId : current.activeProfileId,
+    apps: (partial as any).apps !== undefined ? (partial as any).apps
+      : (partial as any).profiles !== undefined ? (partial as any).profiles  // legacy compat
+      : current.apps,
+    activeAppId: partial.activeAppId !== undefined ? partial.activeAppId : current.activeAppId,
     pipelineStt: partial.pipelineStt !== undefined ? partial.pipelineStt : current.pipelineStt,
     pipelineLlm: partial.pipelineLlm !== undefined ? partial.pipelineLlm : current.pipelineLlm,
     pipelineTts: partial.pipelineTts !== undefined ? partial.pipelineTts : current.pipelineTts,
@@ -358,12 +424,12 @@ export function patchProviderConfig(partial: Partial<ProviderConfig>): ProviderC
     }
   }
 
-  // Track lastActivatedAt + apply latency targets when activeProfileId changes
-  if (partial.activeProfileId !== undefined && partial.activeProfileId !== current.activeProfileId) {
-    updated.profiles = updated.profiles.map(p =>
-      p.id === partial.activeProfileId ? { ...p, lastActivatedAt: Date.now() } : p
+  // Track lastActivatedAt + apply latency targets when activeAppId changes
+  if (partial.activeAppId !== undefined && partial.activeAppId !== current.activeAppId) {
+    updated.apps = updated.apps.map(a =>
+      a.id === partial.activeAppId ? { ...a, lastActivatedAt: Date.now() } : a
     );
-    applyProfileLatencyTargets(partial.activeProfileId, updated.profiles);
+    applyAppLatencyTargets(partial.activeAppId, updated.apps);
   }
 
   // Apply idle timeout to runtime
@@ -379,6 +445,7 @@ export function patchProviderConfig(partial: Partial<ProviderConfig>): ProviderC
 
 // ── Latency target mapping ─────────────────────────────────────────────────────
 
+// Must stay in sync with web/src/sections/provider-types.ts LATENCY_TARGETS
 const LATENCY_TARGETS: Record<string, { sttMs: number; llmMs: number; ttsMs: number }> = {
   realtime: { sttMs: 300,   llmMs: 500,    ttsMs: 300   },
   low:      { sttMs: 800,   llmMs: 2_000,  ttsMs: 1_500 },
@@ -389,55 +456,51 @@ const LATENCY_TARGETS: Record<string, { sttMs: number; llmMs: number; ttsMs: num
  * Apply a profile's latency field to the benchmarking thresholds.
  * Called whenever the active profile changes or on gateway startup.
  */
-export function applyProfileLatencyTargets(profileId: string | null, profiles: GatewayProfile[]): void {
-  if (!profileId) return;
-  const profile = profiles.find(p => p.id === profileId);
-  if (!profile) return;
+export function applyAppLatencyTargets(appId: string | null, apps: GatewayApp[]): void {
+  if (!appId) return;
+  const app = apps.find(a => a.id === appId);
+  if (!app) return;
 
-  // Profile-level per-stage overrides take precedence over tier defaults
-  if (profile.latencyTargetsMs) {
-    const { stt, llm, tts } = profile.latencyTargetsMs;
-    const sttMs = stt;
-    const llmMs = llm;
-    const ttsMs = tts;
-    if (sttMs !== undefined) setSttTargetLatencyMs(sttMs);
-    if (llmMs !== undefined) setLlmTargetLatencyMs(llmMs);
-    if (ttsMs !== undefined) setTtsTargetLatencyMs(ttsMs);
-    console.log(`[config] Latency targets applied for profile "${profileId}" (custom): STT=${sttMs}ms LLM=${llmMs}ms TTS=${ttsMs}ms`);
+  if (app.latencyTargetsMs) {
+    const { stt, llm, tts } = app.latencyTargetsMs;
+    if (stt !== undefined) setSttTargetLatencyMs(stt);
+    if (llm !== undefined) setLlmTargetLatencyMs(llm);
+    if (tts !== undefined) setTtsTargetLatencyMs(tts);
+    console.log(`[config] Latency targets applied for app "${appId}": STT=${stt}ms LLM=${llm}ms TTS=${tts}ms`);
   }
 
-  // Auto-switch GPU sort mode for real-time profiles:
-  // If the profile has latencyTargetsMs with STT < 600ms, it's a real-time
-  // workload that needs the 'realtime' sort mode which filters high-latency
-  // hosts and weights TCP proximity at 60% instead of 30%.
-  const isRealtime = profile.latencyTargetsMs?.stt !== undefined && profile.latencyTargetsMs.stt < 600;
+  // Auto-switch GPU sort mode for real-time apps
+  const isRealtime = app.latencyTargetsMs?.stt !== undefined && app.latencyTargetsMs.stt < 600;
   if (isRealtime) {
     setGpuSortBy('realtime');
-    console.log(`[config] GPU sort mode set to 'realtime' for profile "${profileId}" (STT target < 600ms)`);
+    console.log(`[config] GPU sort mode set to 'realtime' for app "${appId}" (STT target < 600ms)`);
   }
 }
 
-/** Debounced stamp: update lastRequestAt on the given profile.
+/** @deprecated Use applyAppLatencyTargets */
+export const applyProfileLatencyTargets = applyAppLatencyTargets;
+
+/** Debounced stamp: update lastRequestAt on the given app.
  *  Batches writes — persists at most once per 10 seconds to avoid
  *  sync file I/O on every pipeline request. */
 let _stampTimer: ReturnType<typeof setTimeout> | null = null;
 let _pendingStampId: string | null = null;
 
-function _flushStamp(profileId: string): void {
+function _flushStamp(appId: string): void {
   try {
     const config = loadProviderConfig();
     const now = Date.now();
     const updated = {
       ...config,
-      profiles: config.profiles.map(p => p.id === profileId ? { ...p, lastRequestAt: now } : p),
+      apps: config.apps.map(a => a.id === appId ? { ...a, lastRequestAt: now } : a),
     };
     saveProviderConfig(updated);
-  } catch (e) { console.warn('[config] profile lastRequestAt update failed:', e instanceof Error ? e.message : e); }
+  } catch (e) { console.warn('[config] app lastRequestAt update failed:', e instanceof Error ? e.message : e); }
 }
 
-export function stampProfileRequest(profileId: string | null): void {
-  if (!profileId) return;
-  _pendingStampId = profileId;
+export function stampAppRequest(appId: string | null): void {
+  if (!appId) return;
+  _pendingStampId = appId;
   if (!_stampTimer) {
     _stampTimer = setTimeout(() => {
       _stampTimer = null;
@@ -448,6 +511,9 @@ export function stampProfileRequest(profileId: string | null): void {
     }, 10_000);
   }
 }
+
+/** @deprecated Use stampAppRequest */
+export const stampProfileRequest = stampAppRequest;
 
 // ── User config stubs (local/desktop — no multi-user DB) ─────────────────────
 // applyUserConfig is already exported above (line 213) — no duplicate needed.

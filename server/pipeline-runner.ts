@@ -10,7 +10,7 @@ import {
   recordPerStageLatency,
 } from './state';
 import {
-  client, groqProfile, ollamaProfile, translationProfile,
+  client, groqDefaults, ollamaDefaults, translationDefaults,
   groqAvailable, groqLLM, groqLlmModel, groqTtsModel, groqTtsVoice,
   shouldPreferGpuTts,
   recordStageSuccess, recordStageFailure, isStageCircuitClosed,
@@ -26,7 +26,7 @@ import { speculativeCache } from './speculative-cache';
 import { broadcastWs, broadcastDubAudio } from './ws-state';
 import { getActiveTargets, runMultiLangFanout } from './dub-fanout';
 import { logRequest } from './metrics';
-import { loadProviderConfig, stampProfileRequest } from './config-persistence';
+import { loadProviderConfig, stampAppRequest } from './config-persistence';
 import { runEnsembleSTT } from '../src/ensemble-stt';
 import type { EnsembleSTTProviderEntry } from '../src/ensemble-stt';
 import { groqSTT } from '../src/providers/groq';
@@ -190,8 +190,8 @@ export async function runStreamingPipeline(
   // Determine routing
   const firstCloudIdx = PROVIDER_CHAIN.findIndex(p => p === 'groq' || p === 'ollama');
   const gpuIdx = PROVIDER_CHAIN.findIndex(p => GPU_PROVIDERS.has(p));
-  const baseProfile = (firstCloudIdx >= 0 && PROVIDER_CHAIN[firstCloudIdx] === 'ollama' && ollamaProfile)
-    ? ollamaProfile : (groqProfile || ollamaProfile || translationProfile);
+  const baseProfile = (firstCloudIdx >= 0 && PROVIDER_CHAIN[firstCloudIdx] === 'ollama' && ollamaDefaults)
+    ? ollamaDefaults : (groqDefaults || ollamaDefaults || translationDefaults);
   if (!baseProfile) {
     cb.onError('pipeline', new Error('No LLM provider configured (groq, ollama, or translation profile required)'));
     return;
@@ -612,7 +612,7 @@ export async function runStreamingPipeline(
     const usedAnyGpu = sttProvider === 'gpu' || llmProvider === 'gpu' || ttsProvider === 'gpu';
 
     logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: 'stream', latencyMs: totalMs, success: true, inputSize: audio.length, outputPreview: (translatedText || '').slice(0, 80) });
-    stampProfileRequest(loadProviderConfig().activeProfileId);
+    stampAppRequest(loadProviderConfig().activeAppId);
 
     console.log(`[pipeline-stream] ── Done: ${totalMs}ms (STT=${sttMs}[${sttProvider}] LLM=${llmMs}[${llmProvider}] TTS=${ttsMs}[${ttsProvider || '-'}]) ──`);
 

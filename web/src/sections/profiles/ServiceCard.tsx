@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import {
   DEFAULT_DOCKER_IMAGES, GPU_TYPES, PIPELINE_CATALOG, GPU_PROVIDERS,
-  type ProfileService,
+  type Service,
 } from '../provider-types';
 import { PROVIDER_ICON } from '../FallbackChainList';
 import { fmtBootTime } from './constants';
@@ -38,7 +38,7 @@ function categorizeDeployError(msg: string): { icon: typeof AlertTriangle; summa
 }
 
 interface ServiceCardProps {
-  service: ProfileService;
+  service: Service;
   onEdit: () => void;
   onDelete: () => void;
 }
@@ -53,7 +53,7 @@ interface RaceResult {
 
 
 function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
-  const isGpu = service.kind === 'gpu-pod';
+  const isGpu = service.kind === 'container';
   const isServerless = service.kind === 'serverless';
   const hasDockerImage = isGpu || isServerless;
   const provIcon = !hasDockerImage && service.cloudProvider ? PROVIDER_ICON[service.cloudProvider] : null;
@@ -157,7 +157,7 @@ function ServiceCard({ service, onEdit, onDelete }: ServiceCardProps) {
         setTimeoutDirty(false);
       }
       const effectiveImage = overrideImage || service.dockerImage || '';
-      const effectiveProvider = deployProvider === 'auto' ? (service.gpuCloudProvider || undefined) : deployProvider;
+      const effectiveProvider = deployProvider === 'auto' ? (service.gpuProvider || undefined) : deployProvider;
       const effectiveRegion = deployRegion === 'auto' ? undefined : deployRegion;
       await deployGpu({
         dockerImage: effectiveImage,

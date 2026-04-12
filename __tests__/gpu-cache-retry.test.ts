@@ -136,8 +136,8 @@ vi.mock('../server/providers', () => ({
   tensordock:          mockTensordock,
   modal:               mockModal,
   snapgpu:             mockRunpod,   // snapgpu shares the same mock shape
-  translationProfile:  null,
-  updateTranslationProfile: vi.fn(),
+  translationDefaults:  null,
+  updateActivePipeline: vi.fn(),
   markGpuHealthy:      vi.fn(),
   markGpuUnhealthy:    vi.fn(),
   markGpuShadowMode:   vi.fn(),

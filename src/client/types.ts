@@ -13,7 +13,17 @@ import type { Logger } from '../deps';
 // Stage Config
 // ---------------------------------------------------------------------------
 
-/** A single provider+model entry in a fallback chain */
+/**
+ * A single provider+model entry in a fallback chain (SDK layer).
+ *
+ * Related types (same concept, different layers):
+ * - PipelineChainEntry (server/config-persistence.ts, web/provider-types.ts)
+ *   — config/UI layer: adds `enabled`, `sttType`. Used for persistence & web forms.
+ * - StageConfig (this) — SDK layer: adds `selfHosted`, `endpoint`, `replicas`.
+ *   Used by AIClient for runtime pipeline execution.
+ *
+ * Both are compatible at the base level (provider + model).
+ */
 export interface StageConfig {
   provider: string;
   model?: string;

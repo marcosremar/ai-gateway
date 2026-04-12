@@ -221,8 +221,8 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
     });
 
     // Activate the new endpoint for production traffic
-    const { updateTranslationProfile } = await import('./providers');
-    updateTranslationProfile({ gpuEndpoint: standbyEndpoint }, 'standbyHandover');
+    const { updateActivePipeline } = await import('./providers');
+    updateActivePipeline({ gpuEndpoint: standbyEndpoint }, 'standbyHandover');
     setGpuShadowMode(false);
     resetGpuReadinessState(); // resets readiness phases but also gpuReadyForProduction
     setGpuReadyForProduction(true); // re-activate: standby already passed benchmark

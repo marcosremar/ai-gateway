@@ -12,15 +12,15 @@ import {
 } from 'lucide-react';
 import {
   DEFAULT_DOCKER_IMAGES,
-  type PipelineChainEntry, type ProviderProfile,
-  type Latency, type ProfileService,
+  type PipelineChainEntry, type App,
+  type Latency, type Service,
 } from './provider-types';
 import { PROVIDER_ICON } from './FallbackChainList';
 import ProfilesPanel from './ProfilesPanel';
 import {
   uid, profileToStages, stagesToProfileFields, pMeta,
   DEFAULT_STAGES, DEFAULT_LLM,
-  type ProfileStage,
+  type StageEntry,
 } from './profiles/constants';
 import { LatencySelector } from './profiles/LatencySelector';
 import { ServiceCard } from './profiles/ServiceCard';
@@ -29,63 +29,64 @@ import { StageList } from './profiles/StageList';
 import { ReactFlowPipelineDiagram } from './profiles/ReactFlowDiagram';
 import { usePipelineRunner } from './profiles/usePipelineRunner';
 
-// ── Main ProfilesSection ──
+// ── Main AppsSection ──
 
-/** Parse sub-route from URL: /config/profiles/edit/{id} or /config/profiles/new */
-function getProfileSubRoute(): { view: 'list' | 'detail'; profileId: string | null } {
-  if (typeof window === 'undefined') return { view: 'list', profileId: null };
+/** Parse sub-route from URL: /config/apps/edit/{id} or /config/apps/new */
+function getAppSubRoute(): { view: 'list' | 'detail'; appId: string | null } {
+  if (typeof window === 'undefined') return { view: 'list', appId: null };
   const path = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
-  if (path === 'config/profiles/new') return { view: 'detail', profileId: null };
-  const m = path.match(/^config\/profiles\/edit\/(.+)$/);
-  if (m) return { view: 'detail', profileId: m[1] };
-  return { view: 'list', profileId: null };
+  // Support both /config/apps and legacy /config/profiles URLs
+  if (path === 'config/apps/new' || path === 'config/profiles/new') return { view: 'detail', appId: null };
+  const m = path.match(/^config\/(?:apps|profiles)\/edit\/(.+)$/);
+  if (m) return { view: 'detail', appId: m[1] };
+  return { view: 'list', appId: null };
 }
 
-export function ProfilesSection() {
-  const initRoute = getProfileSubRoute();
+export function AppsSection() {
+  const initRoute = getAppSubRoute();
   const [view, setViewRaw] = useState<'list' | 'detail'>(initRoute.view);
-  const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
-  const [editingProfileId, setEditingProfileId] = useState<string | null>(initRoute.profileId);
+  const [apps, setApps] = useState<App[]>([]);
+  const [activeAppId, setActiveAppId] = useState<string | null>(null);
+  const [editingAppId, setEditingAppId] = useState<string | null>(initRoute.appId);
 
   /** Navigate view with URL update */
-  const setView = useCallback((v: 'list' | 'detail', profileId?: string | null) => {
+  const setView = useCallback((v: 'list' | 'detail', appId?: string | null) => {
     setViewRaw(v);
     if (v === 'list') {
-      window.history.pushState(null, '', '/config/profiles');
-    } else if (profileId) {
-      window.history.pushState(null, '', `/config/profiles/edit/${profileId}`);
+      window.history.pushState(null, '', '/config/apps');
+    } else if (appId) {
+      window.history.pushState(null, '', `/config/apps/edit/${appId}`);
     } else {
-      window.history.pushState(null, '', '/config/profiles/new');
+      window.history.pushState(null, '', '/config/apps/new');
     }
   }, []);
 
   // Handle browser back/forward
   useEffect(() => {
     const onPop = () => {
-      const r = getProfileSubRoute();
+      const r = getAppSubRoute();
       setViewRaw(r.view);
-      if (r.view === 'detail' && r.profileId) {
-        setEditingProfileId(r.profileId);
-        const p = profiles.find(x => x.id === r.profileId);
-        if (p) setProfileName(p.name);
+      if (r.view === 'detail' && r.appId) {
+        setEditingAppId(r.appId);
+        const a = apps.find(x => x.id === r.appId);
+        if (a) setAppName(a.name);
       }
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
-  }, [profiles]);
+  }, [apps]);
 
   // Detail state
-  const [stages, setStages] = useState<ProfileStage[]>(() => DEFAULT_STAGES.map(s => ({ ...s, id: uid() })));
+  const [stages, setStages] = useState<StageEntry[]>(() => DEFAULT_STAGES.map(s => ({ ...s, id: uid() })));
   const [latency, setLatency] = useState<Latency>('realtime');
-  const [services, setServices] = useState<ProfileService[]>(() =>
+  const [services, setServices] = useState<Service[]>(() =>
     DEFAULT_DOCKER_IMAGES.map(img => ({
       id: uid(),
       name: `Babelcast ${img.label}`,
-      kind: 'gpu-pod' as const,
+      kind: 'container' as const,
       dockerImage: img.url,
       gpuTypes: [],
-      gpuCloudProvider: 'vast',
+      gpuProvider: 'vast',
       ...(img.sttModel ? { sttModel: img.sttModel } : {}),
       ...(img.llmModel ? { llmModel: img.llmModel } : {}),
       ...(img.ttsModel ? { ttsModel: img.ttsModel } : {}),
@@ -110,28 +111,28 @@ export function ProfilesSection() {
     targetLang: 'en',
   });
 
-  /** Migrate old gpuDeploy/gpuImage/gpuTypes top-level fields into ProfileService entries,
+  /** Migrate old gpuDeploy/gpuImage/gpuTypes top-level fields into Service entries,
    *  and auto-derive cloud API service entries from chain providers. */
-  const migrateServices = (p: ProviderProfile & Record<string, unknown>): ProfileService[] => {
+  const migrateServices = (p: App & Record<string, unknown>): Service[] => {
     const hasExplicitServices = Array.isArray(p.services);
-    const existing: ProfileService[] = hasExplicitServices ? (p.services as ProfileService[]) : [];
-    const result: ProfileService[] = [...existing];
+    const existing: Service[] = hasExplicitServices ? (p.services as Service[]) : [];
+    const result: Service[] = [...existing];
 
     // Migrate GPU pods from legacy gpuDeploy field, OR auto-generate for profiles
     // that have NO services array at all (old format). If the profile has an explicit
     // services array (even empty), respect the user's choice — don't re-inject defaults.
-    if (!hasExplicitServices && !result.some(s => s.kind === 'gpu-pod')) {
+    if (!hasExplicitServices && !result.some(s => s.kind === 'container')) {
       const gpuDeploy = p.gpuDeploy as { dockerImage?: string; gpuTypes?: string[] } | undefined;
       const gpuTypes: string[] = gpuDeploy?.gpuTypes ?? (p.gpuTypes as string[] | undefined) ?? [];
-      const gpuCloudProvider: string = (p.gpuProvider as string | undefined) ?? 'vast';
+      const gpuProvider: string = (p.gpuProvider as string | undefined) ?? 'vast';
       for (const img of DEFAULT_DOCKER_IMAGES) {
         result.push({
           id: uid(),
           name: `Babelcast ${img.label}`,
-          kind: 'gpu-pod',
+          kind: 'container',
           dockerImage: img.url,
           gpuTypes,
-          gpuCloudProvider,
+          gpuProvider,
           ...(img.sttModel ? { sttModel: img.sttModel } : {}),
           ...(img.llmModel ? { llmModel: img.llmModel } : {}),
           ...(img.ttsModel ? { ttsModel: img.ttsModel } : {}),
@@ -161,12 +162,12 @@ export function ProfilesSection() {
 
   // Service form state
   const [showAddService, setShowAddService] = useState(false);
-  const [editingService, setEditingService] = useState<ProfileService | null>(null);
+  const [editingService, setEditingService] = useState<Service | null>(null);
 
   // Slide-in panel: shows ServiceCard from the right when clicking a provider in the diagram
-  const [slideService, setSlideService] = useState<ProfileService | null>(null);
+  const [slideService, setSlideService] = useState<Service | null>(null);
 
-  const [profileName, setProfileName] = useState('New Profile');
+  const [appName, setAppName] = useState('New App');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -174,10 +175,10 @@ export function ProfilesSection() {
   const [detailTab, setDetailTab] = useState<'pipeline' | 'services'>('pipeline');
 
   /** Load a profile into stages state */
-  const loadProfile = useCallback((p: ProviderProfile) => {
+  const loadApp = useCallback((p: App) => {
     setStages(profileToStages(p));
     setLatency(p.latency ?? 'realtime');
-    const svc = migrateServices(p as ProviderProfile & Record<string, unknown>);
+    const svc = migrateServices(p as App & Record<string, unknown>);
     setServices(svc);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -185,26 +186,27 @@ export function ProfilesSection() {
   useEffect(() => {
     getProviderConfig()
       .then((cfg: any) => {
-        if (cfg.profiles?.length) setProfiles(cfg.profiles);
-        if (cfg.activeProfileId) setActiveProfileId(cfg.activeProfileId);
+        const cfgApps = cfg.apps ?? cfg.profiles;  // compat: server may send either
+        if (cfgApps?.length) setApps(cfgApps);
+        if (cfg.activeAppId ?? cfg.activeProfileId) setActiveAppId(cfg.activeAppId ?? cfg.activeProfileId);
         // Load default stages from active pipeline config
-        const defaultStages: ProfileStage[] = [];
+        const defaultStages: StageEntry[] = [];
         if (cfg.pipelineStt?.length) defaultStages.push({ id: uid(), key: 'stt', label: 'STT', chain: cfg.pipelineStt, enabled: true });
         defaultStages.push({ id: uid(), key: 'llm', label: 'LLM', chain: cfg.pipelineLlm?.length ? cfg.pipelineLlm : DEFAULT_LLM, enabled: true });
         if (cfg.pipelineTts?.length) defaultStages.push({ id: uid(), key: 'tts', label: 'TTS', chain: cfg.pipelineTts, enabled: true });
         if (defaultStages.length > 0) setStages(defaultStages);
-        // If URL points to a specific profile, open it
-        const route = getProfileSubRoute();
-        if (route.view === 'detail' && route.profileId && cfg.profiles?.length) {
-          const p = (cfg.profiles as ProviderProfile[]).find((x: ProviderProfile) => x.id === route.profileId);
+        // If URL points to a specific app, open it
+        const route = getAppSubRoute();
+        if (route.view === 'detail' && route.appId && cfgApps?.length) {
+          const p = (cfgApps as App[]).find((x: App) => x.id === route.appId);
           if (p) {
-            setEditingProfileId(p.id);
-            setProfileName(p.name);
-            loadProfile(p);
+            setEditingAppId(p.id);
+            setAppName(p.name);
+            loadApp(p);
           }
         }
       })
-      .catch((err) => { console.error('[ProfilesSection] Failed to load config:', err); })
+      .catch((err) => { console.error('[AppsSection] Failed to load config:', err); })
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -213,19 +215,19 @@ export function ProfilesSection() {
     setStages(DEFAULT_STAGES.map(s => ({ ...s, id: uid() })));
     setLatency('realtime');
     setServices([]);
-    setEditingProfileId(null);
-    setProfileName('New Profile');
+    setEditingAppId(null);
+    setAppName('New App');
     setView('detail', null);
   };
 
-  const onApplyProfile = useCallback((profile: ProviderProfile) => {
-    setEditingProfileId(profile.id);
-    setProfileName(profile.name);
-    loadProfile(profile);
+  const onApplyApp = useCallback((profile: App) => {
+    setEditingAppId(profile.id);
+    setAppName(profile.name);
+    loadApp(profile);
     setView('detail', profile.id);
-  }, [setView, loadProfile]);
+  }, [setView, loadApp]);
 
-  const createCurrentProfile = useCallback((name: string): ProviderProfile => {
+  const createCurrentApp = useCallback((name: string): App => {
     const fields = stagesToProfileFields(stages);
     return {
       id: uid(),
@@ -238,9 +240,9 @@ export function ProfilesSection() {
 
   const handleSaveAndApply = async () => {
     // Validate: profile name must not be empty
-    const currentName = profileName || profiles.find(p => p.id === editingProfileId)?.name || '';
+    const currentName = appName || apps.find(p => p.id === editingAppId)?.name || '';
     if (!currentName?.trim()) {
-      setSaveError('Profile name cannot be empty.');
+      setSaveError('App name cannot be empty.');
       return;
     }
     // Validate: LLM chain must have at least one entry
@@ -254,45 +256,45 @@ export function ProfilesSection() {
     setSaveError(null);
 
     // Snapshot current state for rollback
-    const prevProfiles = profiles;
-    const prevActiveId = activeProfileId;
-    const prevEditingId = editingProfileId;
+    const prevApps = apps;
+    const prevActiveId = activeAppId;
+    const prevEditingId = editingAppId;
 
     try {
-      let updatedProfiles: ProviderProfile[];
+      let updatedApps: App[];
       let newActiveId: string;
 
-      if (editingProfileId) {
+      if (editingAppId) {
         const fields = stagesToProfileFields(stages);
-        updatedProfiles = profiles.map(p => {
-          if (p.id !== editingProfileId) return p;
+        updatedApps = apps.map(p => {
+          if (p.id !== editingAppId) return p;
           return { ...p, name: currentName.trim(), latency, ...fields, services };
         });
-        newActiveId = editingProfileId;
+        newActiveId = editingAppId;
       } else {
-        const p = createCurrentProfile(currentName.trim());
-        updatedProfiles = [...profiles, p];
+        const p = createCurrentApp(currentName.trim());
+        updatedApps = [...apps, p];
         newActiveId = p.id;
       }
 
       // Optimistic update
-      setProfiles(updatedProfiles);
-      setActiveProfileId(newActiveId);
-      setEditingProfileId(newActiveId);
+      setApps(updatedApps);
+      setActiveAppId(newActiveId);
+      setEditingAppId(newActiveId);
 
       const patch: Record<string, any> = {
-        profiles: updatedProfiles,
-        activeProfileId: newActiveId,
+        apps: updatedApps,
+        activeAppId: newActiveId,
         pipelineStt: sttEnabled ? sttChain : [],
         pipelineLlm: llmChain,
         pipelineTts: ttsEnabled ? ttsChain : [],
       };
 
-      const gpuService = services.find(s => s.kind === 'gpu-pod');
+      const gpuService = services.find(s => s.kind === 'container');
       if (gpuService) {
         patch.gpuImage = gpuService.dockerImage;
         patch.gpuTypes = gpuService.gpuTypes;
-        patch.gpuProvider = gpuService.gpuCloudProvider || '';
+        patch.gpuProvider = gpuService.gpuProvider || '';
       }
 
       await patchProviderConfig(patch as any);
@@ -300,9 +302,9 @@ export function ProfilesSection() {
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
       // Rollback optimistic state
-      setProfiles(prevProfiles);
-      setActiveProfileId(prevActiveId);
-      setEditingProfileId(prevEditingId);
+      setApps(prevApps);
+      setActiveAppId(prevActiveId);
+      setEditingAppId(prevEditingId);
       setSaveError(err instanceof Error ? err.message : 'Failed to save profile. Check gateway connection.');
     } finally { setSaving(false); }
   };
@@ -311,13 +313,13 @@ export function ProfilesSection() {
     return (
       <div className="p-6 space-y-5 pb-20">
         <SectionHeader
-          title="Profiles"
-          subtitle="Manage pipeline profiles"
+          title="Apps"
+          subtitle="Manage pipeline apps"
         />
 
         {loading ? (
           /* Loading skeleton */
-          <div className="space-y-3 animate-pulse" aria-busy="true" aria-label="Loading profiles">
+          <div className="space-y-3 animate-pulse" aria-busy="true" aria-label="Loading apps">
             {[1, 2, 3].map(i => (
               <div key={i} className="rounded-lg border p-3 flex items-center gap-3"
                 style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
@@ -331,16 +333,16 @@ export function ProfilesSection() {
             ))}
           </div>
         ) : (
-          <ProfilesPanel
-            profiles={profiles} setProfiles={setProfiles}
-            activeProfileId={activeProfileId} setActiveProfileId={setActiveProfileId}
-            onApplyProfile={onApplyProfile} createCurrentProfile={createCurrentProfile}
+          <AppsPanel
+            apps={apps} setApps={setApps}
+            activeAppId={activeAppId} setActiveAppId={setActiveAppId}
+            onApplyApp={onApplyApp} createCurrentApp={createCurrentApp}
           />
         )}
 
         <div className="flex items-center gap-3">
           <Button variant="outline" onClick={openNew} disabled={loading}>
-            <Mic className="w-4 h-4" /> New Profile
+            <Mic className="w-4 h-4" /> New App
           </Button>
         </div>
 
@@ -358,15 +360,15 @@ export function ProfilesSection() {
           className="flex items-center gap-1 text-sm cursor-pointer transition-opacity hover:opacity-70 flex-shrink-0"
           style={{ color: 'var(--color-text-muted)' }}
         >
-          <ChevronLeft className="w-4 h-4" /> Profiles
+          <ChevronLeft className="w-4 h-4" /> Apps
         </button>
         <span style={{ color: 'var(--color-border)' }}>/</span>
         <div className="group flex items-center gap-1.5 flex-1 min-w-0">
           <input
             type="text"
-            value={profileName || profiles.find(p => p.id === editingProfileId)?.name || ''}
-            onChange={e => setProfileName(e.target.value)}
-            placeholder="Profile name..."
+            value={appName || apps.find(p => p.id === editingAppId)?.name || ''}
+            onChange={e => setAppName(e.target.value)}
+            placeholder="App name..."
             className="flex-1 min-w-0 text-base font-bold bg-transparent border-none outline-none rounded px-1 -ml-1 transition-colors hover:bg-white/5 focus:bg-white/5"
             style={{ color: 'var(--color-text)' }}
           />
@@ -399,7 +401,7 @@ export function ProfilesSection() {
           sttChain={sttChain} llmChain={llmChain} ttsChain={ttsChain}
           sttEnabled={sttEnabled} ttsEnabled={ttsEnabled}
           services={services}
-          profileId={editingProfileId}
+          profileId={editingAppId}
           pipelineState={pipeline}
           onRunPipeline={pipeline.run}
           onResetPipeline={pipeline.reset}
@@ -413,15 +415,15 @@ export function ProfilesSection() {
             const isGpu = provider === 'gpu';
             const isServerless = provider === 'modal';
             let svc = isGpu
-              ? services.find(s => s.kind === 'gpu-pod')
+              ? services.find(s => s.kind === 'container')
               : isServerless
                 ? services.find(s => s.kind === 'serverless' && s.cloudProvider === 'modal')
                 : services.find(s => s.kind === 'cloud' && s.cloudProvider === provider);
             if (!svc) {
               // Auto-create the service entry
               const providerName = provider.charAt(0).toUpperCase() + provider.slice(1);
-              const svcKind = isGpu ? 'gpu-pod' : isServerless ? 'serverless' : 'cloud';
-              svc = { id: uid(), name: providerName, kind: svcKind, cloudProvider: isGpu ? undefined : provider } as ProfileService;
+              const svcKind = isGpu ? 'container' : isServerless ? 'serverless' : 'cloud';
+              svc = { id: uid(), name: providerName, kind: svcKind, cloudProvider: isGpu ? undefined : provider } as Service;
               setServices(prev => [...prev, svc!]);
             }
             setSlideService(svc);
@@ -437,7 +439,7 @@ export function ProfilesSection() {
             const entry = stage?.chain[entryIdx];
             if (!entry) return;
             const matchingSvc = entry.provider === 'gpu'
-              ? services.find(s => s.kind === 'gpu-pod')
+              ? services.find(s => s.kind === 'container')
               : entry.provider === 'modal'
                 ? services.find(s => s.kind === 'serverless' && s.cloudProvider === 'modal')
                 : services.find(s => s.kind === 'cloud' && s.cloudProvider === entry.provider);
@@ -478,18 +480,18 @@ export function ProfilesSection() {
                 </span>
                 <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded"
                   style={{
-                    background: slideService.kind === 'gpu-pod'
+                    background: slideService.kind === 'container'
                       ? 'color-mix(in srgb, #f59e0b 12%, transparent)'
                       : slideService.kind === 'serverless'
                         ? 'color-mix(in srgb, #a78bfa 12%, transparent)'
                         : 'color-mix(in srgb, #38bdf8 12%, transparent)',
-                    color: slideService.kind === 'gpu-pod'
+                    color: slideService.kind === 'container'
                       ? '#f59e0b'
                       : slideService.kind === 'serverless'
                         ? '#a78bfa'
                         : '#38bdf8',
                   }}>
-                  {slideService.kind === 'gpu-pod' ? 'Self-hosted' : slideService.kind === 'serverless' ? 'Serverless' : 'Cloud API'}
+                  {slideService.kind === 'container' ? 'Self-hosted' : slideService.kind === 'serverless' ? 'Serverless' : 'Cloud API'}
                 </span>
               </div>
               <button onClick={() => setSlideService(null)}

@@ -16,7 +16,7 @@ import {
 } from './state';
 import { triggerStandbyDeploy, initiateHandover, cancelStandby, startStandbyMonitor } from './gpu-standby';
 export { startStandbyMonitor };
-import { updateTranslationProfile, runpod, vast, tensordock, modal } from './providers';
+import { updateActivePipeline, runpod, vast, tensordock, modal } from './providers';
 import {
   startGpuMonitoring, stopGpuMonitoring, startDeployWithTiers, startDeployRace, buildGpuTiers, cooldownTracker,
   cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps,
@@ -111,15 +111,15 @@ async function _validateDeployRequest(
     throw { status: 400, message: 'At least one provider API key is required (apiKey, vastApiKey, or Modal tokens)' };
   }
 
-  // Resolve profile-based GPU deploy config — use active profile as defaults
-  const profileId = (body.profileId as string) || loadProviderConfig().activeProfileId;
-  const profiles = loadProviderConfig().profiles;
-  const activeProfile = profileId ? profiles.find(p => p.id === profileId) : null;
-  const profileGpu = activeProfile?.gpuDeploy;
+  // Resolve app-based GPU deploy config — use active app as defaults
+  const appId = (body.profileId as string) || loadProviderConfig().activeAppId;
+  const apps = loadProviderConfig().apps;
+  const activeApp = appId ? apps.find(p => p.id === appId) : null;
+  const appGpu = activeApp?.gpuDeploy;
 
-  const dockerImage = (body.dockerImage as string) || profileGpu?.dockerImage || '';
+  const dockerImage = (body.dockerImage as string) || appGpu?.dockerImage || '';
   if (!dockerImage) {
-    throw { status: 400, message: 'dockerImage is required — provide dockerImage, profileId, or set an active profile with gpuDeploy config' };
+    throw { status: 400, message: 'dockerImage is required — provide dockerImage, profileId, or set an active app with gpuDeploy config' };
   }
 
   const rawGpuTypes = body.gpuTypes;
@@ -127,14 +127,14 @@ async function _validateDeployRequest(
     ? rawGpuTypes
     : typeof rawGpuTypes === 'string'
       ? rawGpuTypes.split(',').map((s: string) => s.trim()).filter(Boolean)
-      : profileGpu?.gpuTypes ?? [];
+      : appGpu?.gpuTypes ?? [];
   const autoSelectGpu = body.autoSelectGpu === true;
 
-  // Region / hardware filters: profile → saved preference → request body
-  const region = (body.region as string) || profileGpu?.region || getDeployRegion();
-  // Apply profile timeout if provided (and not overridden by body)
-  if (profileGpu?.timeoutMin && typeof body.timeoutMin !== 'number') {
-    setDeployTimeoutMin(profileGpu.timeoutMin);
+  // Region / hardware filters: app → saved preference → request body
+  const region = (body.region as string) || appGpu?.region || getDeployRegion();
+  // Apply app timeout if provided (and not overridden by body)
+  if (appGpu?.timeoutMin && typeof body.timeoutMin !== 'number') {
+    setDeployTimeoutMin(appGpu.timeoutMin);
   }
   const minVramGb = typeof body.minVramGb === 'number' ? body.minVramGb : getMinVramGb();
   const preferSsd = typeof body.preferSsd === 'boolean' ? body.preferSsd : getPreferSsd();
@@ -186,15 +186,15 @@ async function _validateDeployRequest(
     console.log(`[req=${requestId}] No GPU specified — using priority list: ${gpuTypes.join(', ')}`);
   }
 
-  // SnapGPU / CRIU — read from profile gpuDeploy or active service, body can override
-  const useSnapgpu = body.useSnapgpu === true || profileGpu?.useSnapgpu === true
-    || (activeProfile as unknown as Record<string, unknown>)?.services != null &&
-       ((activeProfile as unknown as Record<string, unknown>).services as unknown[])
+  // SnapGPU / CRIU — read from app gpuDeploy or active service, body can override
+  const useSnapgpu = body.useSnapgpu === true || appGpu?.useSnapgpu === true
+    || (activeApp as unknown as Record<string, unknown>)?.services != null &&
+       ((activeApp as unknown as Record<string, unknown>).services as unknown[])
          .some((s: unknown) => (s as Record<string, unknown>)?.kind === 'gpu-pod' &&
            (s as Record<string, unknown>)?.useSnapgpu === true);
-  const autoSnapshot = typeof body.autoSnapshot === 'boolean' ? body.autoSnapshot : (profileGpu?.autoSnapshot ?? true);
-  const snapgpuPreloadApp = (body.snapgpuPreloadApp as string) || profileGpu?.snapgpuPreloadApp || 'default';
-  const snapgpuBackend = ((body.snapgpuBackend as string) || profileGpu?.snapgpuBackend || 'vast') as 'vast' | 'runpod';
+  const autoSnapshot = typeof body.autoSnapshot === 'boolean' ? body.autoSnapshot : (appGpu?.autoSnapshot ?? true);
+  const snapgpuPreloadApp = (body.snapgpuPreloadApp as string) || appGpu?.snapgpuPreloadApp || 'default';
+  const snapgpuBackend = ((body.snapgpuBackend as string) || appGpu?.snapgpuBackend || 'vast') as 'vast' | 'runpod';
 
   return {
     apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
@@ -397,7 +397,7 @@ async function _selectDeploymentTier(
   // Clean up ALL existing instances (not just the tracked one) to prevent orphans
   const oldPodId = deployState.podId;
   stopGpuMonitoring();
-  updateTranslationProfile({ gpuEndpoint: undefined }, 'handleGpuDeploy:cleanup');
+  updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuDeploy:cleanup');
   try {
     if (apiKey) {
       await cleanupAllPods(apiKey, oldPodId ? [oldPodId] : []);
@@ -532,7 +532,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   if (deployState.status === 'ready') {
     console.log(`[req=${requestId}] GPU was ready — tearing down for redeploy`);
     stopGpuMonitoring();
-    updateTranslationProfile({ gpuEndpoint: undefined }, 'handleGpuDeploy:redeploy');
+    updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuDeploy:redeploy');
     setDeployLock(false);
   }
 
@@ -598,8 +598,8 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
  */
 export async function autoBootFromProfile(): Promise<void> {
   const cfg = loadProviderConfig();
-  const activeProfile = cfg.profiles?.find(p => p.id === cfg.activeProfileId);
-  if (!activeProfile?.gpuDeploy?.bootOnStartup) return;
+  const activeApp = cfg.apps?.find(p => p.id === cfg.activeAppId);
+  if (!activeApp?.gpuDeploy?.bootOnStartup) return;
   if (deployState.status !== 'idle') {
     console.log('[gpu] autoBootFromProfile: deploy already in progress, skipping');
     return;
@@ -609,8 +609,8 @@ export async function autoBootFromProfile(): Promise<void> {
     return;
   }
 
-  const gd = activeProfile.gpuDeploy;
-  console.log(`[gpu] Auto-booting GPU for profile: ${activeProfile.name} (${gd.dockerImage})`);
+  const gd = activeApp.gpuDeploy;
+  console.log(`[gpu] Auto-booting GPU for app: ${activeApp.name} (${gd.dockerImage})`);
   const requestId = 'startup:autoboot';
 
   setDeployLock(true);
@@ -676,7 +676,7 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   setDeployLock(false);  // Release deploy lock so new deploys can proceed
   resetDeployState(); // sets deployCancelled=true, stops the deploy loop
   deploymentSM.reset();
-  updateTranslationProfile({ gpuEndpoint: undefined }, 'handleGpuTerminate');
+  updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuTerminate');
 
   // Terminate ALL instances across all providers to prevent orphans
   if (apiKey) {
@@ -759,7 +759,7 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
   try {
     await client.stopInstance(podId, credentials);
     stopGpuMonitoring();
-    updateTranslationProfile({ gpuEndpoint: undefined }, 'handleGpuStop');
+    updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuStop');
     // Transition to 'stopped' — preserves pod info for fast resume
     const gpuType = deployState.gpuType;
     const costPerHr = deployState.costPerHr;
