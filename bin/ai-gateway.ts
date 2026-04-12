@@ -514,6 +514,145 @@ async function cmdBenchmark(opts: { count?: number }) {
   console.log(report('tts', ttsTimes));
 }
 
+async function cmdLatencyHosts(opts: { gpu?: string; limit?: number; sort?: string }) {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/v1/gpu/latency/hosts`, { headers: headers(key) });
+  if (res.status === 404) {
+    console.log('Latency database not available (proxy-only mode).');
+    console.log('Requires the full server with Prisma/Neon database.');
+    return;
+  }
+  const data = await res.json();
+  const hosts: any[] = Array.isArray(data) ? data : data.hosts || [];
+  if (hosts.length === 0) {
+    console.log('No host latency data recorded yet.');
+    console.log('Run: ai-gateway gpu latency probe   to start probing.');
+    return;
+  }
+
+  let filtered = hosts;
+  if (opts.gpu) {
+    const q = opts.gpu.toLowerCase();
+    filtered = hosts.filter((h: any) =>
+      (h.gpuName || h.gpuType || '').toLowerCase().includes(q));
+  }
+
+  // Sort: latency (default), reputation, price
+  const sortField = opts.sort || 'latency';
+  filtered.sort((a: any, b: any) => {
+    if (sortField === 'reputation') return (b.reputationScore ?? 0) - (a.reputationScore ?? 0);
+    return (a.medianMs ?? Infinity) - (b.medianMs ?? Infinity);
+  });
+
+  const limit = opts.limit || 15;
+  const shown = filtered.slice(0, limit);
+
+  console.log(`${filtered.length} hosts (showing top ${shown.length} by ${sortField}):\n`);
+  console.log(`  ${'Host'.padEnd(18)} ${'GPU'.padEnd(25)} ${'Median'.padStart(8)} ${'P90'.padStart(8)} ${'Score'.padStart(6)} ${'Provider'.padEnd(10)} Region`);
+  console.log(`  ${'─'.repeat(18)} ${'─'.repeat(25)} ${'─'.repeat(8)} ${'─'.repeat(8)} ${'─'.repeat(6)} ${'─'.repeat(10)} ──────`);
+  for (const h of shown) {
+    const host = (h.hostIp || h.hostId || '?').slice(0, 18);
+    const gpu = (h.gpuName || h.gpuType || '?').slice(0, 25);
+    const med = h.medianMs != null ? `${Math.round(h.medianMs)}ms` : '?';
+    const p90 = h.p90Ms != null ? `${Math.round(h.p90Ms)}ms` : '?';
+    const score = h.reputationScore != null ? h.reputationScore.toFixed(2) : '?';
+    const prov = (h.provider || '?').slice(0, 10);
+    const region = h.geolocation || h.region || '';
+    console.log(`  ${host.padEnd(18)} ${gpu.padEnd(25)} ${med.padStart(8)} ${p90.padStart(8)} ${score.padStart(6)} ${prov.padEnd(10)} ${region}`);
+  }
+}
+
+async function cmdLatencyProbe() {
+  const { url, key } = getConfig();
+  console.log('Triggering latency probe cycle...');
+  const res = await fetch(`${url}/v1/gpu/latency/probe`, {
+    method: 'POST', headers: headers(key),
+  });
+  if (res.status === 404) {
+    console.log('Latency probing not available (proxy-only mode).');
+    return;
+  }
+  const data = await res.json();
+  console.log(typeof data === 'object' ? JSON.stringify(data, null, 2) : data);
+}
+
+async function cmdGpuBest(opts: { gpu?: string; count?: number }) {
+  const { url, key } = getConfig();
+  // Fetch offers and latency data, combine them
+  const [offersRes, latencyRes] = await Promise.all([
+    fetch(`${url}/v1/gpu/offers`, { headers: headers(key) }).catch(() => null),
+    fetch(`${url}/v1/gpu/latency/hosts`, { headers: headers(key) }).catch(() => null),
+  ]);
+
+  if (offersRes?.status === 404) {
+    console.log('GPU endpoints not available (proxy-only mode).');
+    return;
+  }
+
+  const offers: any[] = offersRes ? await offersRes.json().catch(() => []) : [];
+  const latencyData: any[] = latencyRes?.ok
+    ? (await latencyRes.json().catch(() => [])) : [];
+
+  if (offers.length === 0 && latencyData.length === 0) {
+    console.log('No GPU data available. Need the full server with GPU provider keys.');
+    return;
+  }
+
+  // Build a latency lookup by GPU name
+  const latencyByGpu = new Map<string, { medianMs: number; score: number }>();
+  for (const h of latencyData) {
+    const name = (h.gpuName || h.gpuType || '').toLowerCase().replace(/nvidia|geforce/gi, '').trim();
+    const existing = latencyByGpu.get(name);
+    if (!existing || (h.medianMs ?? Infinity) < existing.medianMs) {
+      latencyByGpu.set(name, {
+        medianMs: h.medianMs ?? Infinity,
+        score: h.reputationScore ?? 0.5,
+      });
+    }
+  }
+
+  let filtered = offers;
+  if (opts.gpu) {
+    const q = opts.gpu.toLowerCase();
+    filtered = offers.filter((o: any) =>
+      (o.gpuName || o.gpuType || '').toLowerCase().includes(q));
+  }
+
+  // Score each offer: quality = latency*0.6 + reputation*0.3 + price_rank*0.1
+  const scored = filtered.map((o: any) => {
+    const name = (o.gpuName || o.gpuType || '').toLowerCase().replace(/nvidia|geforce/gi, '').trim();
+    const lat = latencyByGpu.get(name);
+    const tcpMs = lat?.medianMs ?? null;
+    const tcpScore = tcpMs != null ? Math.max(0, Math.min(1, 1 - (tcpMs - 30) / 270)) : 0.3;
+    const repScore = lat?.score ?? 0.5;
+    const quality = tcpScore * 0.6 + repScore * 0.3 + 0.1;
+    const effectivePrice = o.pricePerHr / Math.max(quality, 0.1);
+    return { ...o, tcpMs, tcpScore, repScore, quality, effectivePrice };
+  });
+
+  scored.sort((a: any, b: any) => a.effectivePrice - b.effectivePrice);
+
+  const count = opts.count || 10;
+  const shown = scored.slice(0, count);
+
+  console.log(`Best GPU offers for real-time (${scored.length} total, top ${shown.length}):\n`);
+  console.log(`  ${'#'.padStart(2)} ${'GPU'.padEnd(28)} ${'$/hr'.padStart(6)} ${'TCP'.padStart(6)} ${'Qual'.padStart(5)} ${'Eff$'.padStart(6)} ${'Provider'.padEnd(8)} Region`);
+  console.log(`  ${'─'.repeat(2)} ${'─'.repeat(28)} ${'─'.repeat(6)} ${'─'.repeat(6)} ${'─'.repeat(5)} ${'─'.repeat(6)} ${'─'.repeat(8)} ──────`);
+  for (let i = 0; i < shown.length; i++) {
+    const o = shown[i];
+    const gpu = (o.gpuName || o.gpuType || '?').slice(0, 28);
+    const price = `$${Number(o.pricePerHr).toFixed(2)}`;
+    const tcp = o.tcpMs != null ? `${Math.round(o.tcpMs)}ms` : '?';
+    const qual = o.quality.toFixed(2);
+    const eff = `$${o.effectivePrice.toFixed(2)}`;
+    const prov = (o.provider || '?').slice(0, 8);
+    const region = o.region || '';
+    console.log(`  ${String(i + 1).padStart(2)} ${gpu.padEnd(28)} ${price.padStart(6)} ${tcp.padStart(6)} ${qual.padStart(5)} ${eff.padStart(6)} ${prov.padEnd(8)} ${region}`);
+  }
+  console.log(`\n  Scoring: quality = TCP_latency×0.6 + reputation×0.3 + base×0.1`);
+  console.log(`  Eff$ = price / quality (lower = better value for real-time)`);
+}
+
 // ── Argument parsing ──────────────────────────────────────────────────────
 
 function getArg(args: string[], flag: string): string | undefined {
@@ -550,6 +689,7 @@ Commands:
   image           Generate an image from a text prompt
   gpu             Manage GPU deployments (status, deploy, stop, logs)
   metrics         Show gateway metrics (Prometheus or JSON)
+  latency         GPU host latency analysis (hosts, probe, best)
   config          Show current configuration and test connectivity
   whoami          Show which user this API key is associated with
   ping            Measure gateway latency (like ping)
@@ -807,6 +947,32 @@ Usage:
 
 Shows all voice names for each TTS model with gender labels.
 `,
+    latency: `
+ai-gateway latency — GPU host latency analysis
+
+Usage:
+  ai-gateway latency <subcommand> [options]
+
+Subcommands:
+  hosts                        Show all measured host latencies
+    --gpu <filter>               Filter by GPU name (e.g. "4090", "A100")
+    --sort <field>               Sort by: latency (default), reputation
+    -n <count>                   Number of hosts to show (default: 15)
+  probe                        Trigger a latency probe cycle NOW
+  best                         Show best GPU offers ranked by real-time score
+    --gpu <filter>               Filter by GPU name
+    -n <count>                   Number of offers (default: 10)
+
+The "best" command combines GPU offers with latency data to rank by
+real-time suitability: quality = TCP_latency×0.6 + reputation×0.3
+
+Examples:
+  ai-gateway latency hosts
+  ai-gateway latency hosts --gpu 4090 --sort reputation
+  ai-gateway latency probe
+  ai-gateway latency best
+  ai-gateway latency best --gpu 4090 -n 5
+`,
     whoami: `
 ai-gateway whoami — Show which user this API key is associated with
 
@@ -930,6 +1096,28 @@ Examples:
         await cmdImage(prompt, {
           output: getArg(args, '-o') || getArg(args, '--output'),
         });
+        break;
+      }
+      case 'latency': {
+        const sub = args[1];
+        if (sub === 'help' || sub === '--help' || !sub) {
+          console.log(HELP.latency || ''); break;
+        }
+        switch (sub) {
+          case 'hosts': await cmdLatencyHosts({
+            gpu: getArg(args, '--gpu'),
+            limit: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
+            sort: getArg(args, '--sort'),
+          }); break;
+          case 'probe': await cmdLatencyProbe(); break;
+          case 'best': await cmdGpuBest({
+            gpu: getArg(args, '--gpu'),
+            count: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
+          }); break;
+          default:
+            console.error('Usage: ai-gateway latency <hosts|probe|best>');
+            process.exit(1);
+        }
         break;
       }
       case 'gpu': {
