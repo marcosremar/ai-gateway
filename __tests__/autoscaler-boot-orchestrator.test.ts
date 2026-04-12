@@ -704,7 +704,10 @@ describe('BootOrchestrator edge cases', () => {
     expect(client.startInstance).toHaveBeenCalledWith('existing', expect.any(Object));
   });
 
-  it('exponential cooldown increases with each boot failure', async () => {
+  it('unknown-category failure gets unknown-class cooldown (P2-3)', async () => {
+    // Generic "Provider unavailable" doesn't match any categorized pattern,
+    // so it lands in the 'unknown' bucket. computeCooldownMs('unknown', 3)
+    // = min(10min * 2^2, 15min cap) = 15min.
     const bootTimestamp = Date.now();
     const stateMap = new Map<string, GpuTierState[]>([
       ['user', [makeBootingState(0, { bootTriggeredAt: bootTimestamp, prevBootFailCount: 2 })]],
@@ -719,10 +722,72 @@ describe('BootOrchestrator edge cases', () => {
 
     const state = stateMap.get('user')?.[0] as IdleTierState;
     expect(state.state).toBe('idle');
-    // failCount = 2 + 1 = 3, cooldown = 2min * 2^(3-1) = 2min * 4 = 8min
-    const expectedCooldown = 2 * 60_000 * Math.pow(2, 2);
-    expect(state.cooldownUntil).toBeGreaterThanOrEqual(Date.now() + expectedCooldown - 1000);
-    expect(state.cooldownUntil).toBeLessThanOrEqual(Date.now() + expectedCooldown + 1000);
+    // failCount=3, unknown category → 10min * 2^2 = 40min → capped to 15min
+    expect(state.cooldownUntil).toBeGreaterThanOrEqual(Date.now() + 15 * 60_000 - 1000);
+    expect(state.cooldownUntil).toBeLessThanOrEqual(Date.now() + 15 * 60_000 + 1000);
+  });
+
+  it('billing-category failure gets 24h cooldown (P2-3)', async () => {
+    const bootTimestamp = Date.now();
+    const stateMap = new Map<string, GpuTierState[]>([
+      ['user', [makeBootingState(0, { bootTriggeredAt: bootTimestamp, prevBootFailCount: 0 })]],
+    ]);
+    const callbacks = makeCallbacks(stateMap);
+    const { orchestrator } = makeOrchestrator({ callbacks });
+
+    const bootPromise = Promise.resolve({ ok: false, reason: 'RunPod: account balance too low — add funds and retry' });
+    orchestrator.handleBootResult('user', 0, makeTierConfig(), bootTimestamp, 'sessions', bootPromise);
+    await bootPromise;
+    await new Promise<void>(r => setTimeout(r, 0));
+
+    const state = stateMap.get('user')?.[0] as IdleTierState;
+    expect(state.state).toBe('idle');
+    // Billing → 24h regardless of failCount
+    const expected24h = 24 * 60 * 60_000;
+    expect(state.cooldownUntil).toBeGreaterThanOrEqual(Date.now() + expected24h - 2000);
+    expect(state.cooldownUntil).toBeLessThanOrEqual(Date.now() + expected24h + 2000);
+  });
+
+  it('no_capacity failure gets 5-minute cooldown on first failure (P2-3)', async () => {
+    const bootTimestamp = Date.now();
+    const stateMap = new Map<string, GpuTierState[]>([
+      ['user', [makeBootingState(0, { bootTriggeredAt: bootTimestamp, prevBootFailCount: 0 })]],
+    ]);
+    const callbacks = makeCallbacks(stateMap);
+    const { orchestrator } = makeOrchestrator({ callbacks });
+
+    const bootPromise = Promise.resolve({ ok: false, reason: 'No GPUs available on Vast.ai' });
+    orchestrator.handleBootResult('user', 0, makeTierConfig(), bootTimestamp, 'sessions', bootPromise);
+    await bootPromise;
+    await new Promise<void>(r => setTimeout(r, 0));
+
+    const state = stateMap.get('user')?.[0] as IdleTierState;
+    expect(state.cooldownUntil).toBeGreaterThanOrEqual(Date.now() + 5 * 60_000 - 1000);
+    expect(state.cooldownUntil).toBeLessThanOrEqual(Date.now() + 5 * 60_000 + 1000);
+  });
+
+  it('cooldown cap enforces 15 min max after many consecutive failures (P1-3)', async () => {
+    // Before P1-3 the cap was 30 min; production showed RunPod cooldowns
+    // reaching 57 minutes and blocking capacity recovery. New cap is 15 min.
+    // With failCount=10: unbounded formula = 2min * 2^9 = 1024 min, cap truncates to 15.
+    const bootTimestamp = Date.now();
+    const stateMap = new Map<string, GpuTierState[]>([
+      ['user', [makeBootingState(0, { bootTriggeredAt: bootTimestamp, prevBootFailCount: 9 })]],
+    ]);
+    const callbacks = makeCallbacks(stateMap);
+    const { orchestrator } = makeOrchestrator({ callbacks });
+
+    const bootPromise = Promise.resolve({ ok: false, reason: 'Provider unavailable' });
+    orchestrator.handleBootResult('user', 0, makeTierConfig(), bootTimestamp, 'sessions', bootPromise);
+    await bootPromise;
+    await new Promise<void>(r => setTimeout(r, 0));
+
+    const state = stateMap.get('user')?.[0] as IdleTierState;
+    expect(state.state).toBe('idle');
+    // Cap ceiling: 15 * 60_000 ms. Allow ±1s of clock drift.
+    expect(state.cooldownUntil).toBeLessThanOrEqual(Date.now() + 15 * 60_000 + 1000);
+    // And must still be higher than 10 min to show the cap is what's limiting it.
+    expect(state.cooldownUntil).toBeGreaterThan(Date.now() + 10 * 60_000);
   });
 });
 

@@ -1965,6 +1965,75 @@ export async function startDeployRace(
 }
 
 export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>) {
+  // ── Budget cap enforcement (P0-1) ───────────────────────────────────────
+  // Hard gate: refuse to start ANY new deploy if the daily spend cap is
+  // already exceeded or would be exceeded by this deploy's projected cost.
+  // Historical gotcha: before this check existed, the cap was only enforced
+  // inside the monitor loop of an already-running pod — nothing stopped a
+  // rapid create/destroy loop from burning $130 on 2026-03-25. See
+  // docs/improvement-plan.md P0-1 and __tests__/budget-cap-enforcement.test.ts.
+  {
+    const { canAffordDeploy } = await import('./state');
+    // Use $2 as the default upper-bound estimate (roughly one hour at
+    // typical 4090 spot price). Individual tier configs could carry a
+    // priced estimate in the future — canAffordDeploy accepts one as
+    // the argument so this line is forward-compatible.
+    const decision = canAffordDeploy(2);
+    if (!decision.allowed) {
+      const msg = `[budget] Deploy refused: ${decision.reason} (spend=$${decision.currentSpend.toFixed(2)}, projected=$${decision.projected.toFixed(2)}, cap=$${decision.cap.toFixed(2)})`;
+      log.error(msg);
+      logGpuEvent('deploy_rejected', tiers[0]?.name ?? 'unknown', false, {
+        metadata: {
+          reason: decision.reason,
+          currentSpend: decision.currentSpend,
+          projected: decision.projected,
+          cap: decision.cap,
+        },
+      });
+      broadcastWs({
+        type: 'gpu:budget',
+        action: 'deploy-refused',
+        spend: decision.currentSpend,
+        projected: decision.projected,
+        budget: decision.cap,
+        reason: decision.reason,
+      });
+      return;
+    }
+  }
+
+  // ── Runaway detector (P0-2) ─────────────────────────────────────────────
+  // Separate from budget: catches the SHAPE of a create/destroy loop (6+
+  // rapid deploy_starts per provider in 2 min) independent of dollar cost.
+  // The budget cap catches overspend after the fact; the runaway detector
+  // catches the pattern that causes the overspend, stopping it within
+  // seconds rather than minutes.
+  {
+    const { getGlobalRunawayDetector } = await import('../src/autoscaler/runaway-detector');
+    const detector = getGlobalRunawayDetector();
+    const providerName = tiers[0]?.name ?? 'unknown';
+    const allowed = detector.recordDeployStart(providerName);
+    if (!allowed) {
+      const stats = detector.stats(providerName);
+      const msg = `[runaway] Deploy refused: ${providerName} has ${stats.recentStarts} recent starts (pause until ${stats.pausedUntilMs ? new Date(stats.pausedUntilMs).toISOString() : 'unknown'})`;
+      log.error(msg);
+      logGpuEvent('runaway_pause', providerName, false, {
+        metadata: {
+          recentStarts: stats.recentStarts,
+          reason: stats.pauseReason,
+          pausedUntilMs: stats.pausedUntilMs,
+        },
+      });
+      broadcastWs({
+        type: 'gpu:runaway',
+        provider: providerName,
+        recentStarts: stats.recentStarts,
+        pausedUntilMs: stats.pausedUntilMs,
+      });
+      return;
+    }
+  }
+
   // Filter out providers in cooldown
   let availableTiers = tiers.filter(t => {
     if (cooldownTracker.isCoolingDown(t.name)) {

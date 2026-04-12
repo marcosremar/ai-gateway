@@ -37,8 +37,19 @@ export type {
 } from './cost-monitor';
 
 // ── Lifecycle Logger ──────────────────────────────────────────────────────
-export { noopLifecycleLogger } from './lifecycle-logger';
-export type { GpuLifecycleLogger, GpuLifecycleLogEntry } from './lifecycle-logger';
+export {
+  noopLifecycleLogger,
+  bootStartedEvent,
+  bootOkEvent,
+  bootFailedEvent,
+  deployRejectedEvent,
+  runawayPauseEvent,
+} from './lifecycle-logger';
+export type {
+  GpuLifecycleLogger,
+  GpuLifecycleLogEntry,
+  LifecycleEventType,
+} from './lifecycle-logger';
 
 // ── File-based Lifecycle Logger (persistent JSONL — default) ─────────────
 export {
