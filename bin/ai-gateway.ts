@@ -624,13 +624,20 @@ async function cmdServices(opts: { json?: boolean }) {
   // ── Overall status
   const statusColor = health.status === 'ok' ? c.green : health.status === 'degraded' ? c.yellow : c.red;
   const statusIcon = health.status === 'ok' ? '●' : health.status === 'degraded' ? '▲' : '✗';
-  console.log(`${statusColor}${statusIcon}${c.reset} Gateway: ${c.bold}${health.status}${c.reset}  ${c.dim}uptime ${fmtSec(health.uptime_sec)}${c.reset}`);
+  const uptimeStr = health.uptime_sec != null ? `  ${c.dim}uptime ${fmtSec(health.uptime_sec)}${c.reset}` : '';
+  console.log(`${statusColor}${statusIcon}${c.reset} Gateway: ${c.bold}${health.status}${c.reset}${uptimeStr}`);
   if (health.reason) console.log(`  ${c.yellow}reason: ${health.reason}${c.reset}`);
+  if (health.connections) {
+    console.log(`  Connections: active=${health.connections.active}, peak=${health.connections.peak}`);
+  }
   console.log('');
 
   // ── Pipeline components (STT, LLM, TTS)
-  console.log(`${c.bold}Pipeline${c.reset}`);
   const components = health.components || {};
+  const hasComponents = ['stt', 'llm', 'tts'].some(s => components[s]);
+  if (hasComponents) {
+    console.log(`${c.bold}Pipeline${c.reset}`);
+  }
   for (const stage of ['stt', 'llm', 'tts']) {
     const comp = components[stage];
     if (!comp) continue;
@@ -1335,6 +1342,27 @@ Shows a consolidated view of:
 Examples:
   ai-gateway services
   ai-gateway services --json
+`,
+    apps: `
+ai-gateway apps — List and manage app configurations
+
+Usage:
+  ai-gateway apps
+
+Shows all configured apps with their active status, latency targets,
+and GPU deploy image. The active app determines which pipeline chains
+(STT → LLM → TTS) the gateway uses for requests.
+
+Each app binds services (cloud APIs, Docker containers, serverless)
+into a named pipeline configuration for a specific use case.
+
+Notes:
+  - 'ai-gateway profiles' is an alias for this command
+  - Apps are stored in ~/.babelcast/provider-config.json
+  - The active app's chains are copied to the top-level pipeline config
+
+Examples:
+  ai-gateway apps
 `,
     health: `
 ai-gateway health — Check gateway health
