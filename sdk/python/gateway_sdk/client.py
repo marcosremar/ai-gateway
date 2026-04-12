@@ -25,6 +25,7 @@ from typing import Any, Callable, Awaitable, Optional
 import httpx
 
 from gateway_sdk.types import (
+    App,
     ApiKeyEntry,
     ApiKeysResponse,
     CatalogProvider,
@@ -1046,17 +1047,17 @@ class GatewaySDK:
         self._check_response(r, "/v1/config/providers")
         data = self._parse_json(r, "/v1/config/providers")
         return ProviderConfigResponse(
-            profiles=[
-                ProviderProfile(
+            apps=[
+                App(
                     id=p["id"],
                     name=p["name"],
                     stt=[PipelineChainEntry(**s) for s in p.get("stt", [])],
                     llm=[PipelineChainEntry(**l) for l in p.get("llm", [])],
                     tts=[PipelineChainEntry(**t) for t in p.get("tts", [])],
                 )
-                for p in data.get("profiles", [])
+                for p in data.get("apps", data.get("profiles", []))
             ],
-            active_profile_id=data.get("activeProfileId"),
+            active_app_id=data.get("activeAppId", data.get("activeProfileId")),
             pipeline_stt=[PipelineChainEntry(**s) for s in data.get("pipelineStt", [])],
             pipeline_llm=[PipelineChainEntry(**l) for l in data.get("pipelineLlm", [])],
             pipeline_tts=[PipelineChainEntry(**t) for t in data.get("pipelineTts", [])],
@@ -1069,17 +1070,17 @@ class GatewaySDK:
         self._check_response(r, "/v1/config/providers")
         data = self._parse_json(r, "/v1/config/providers")
         return ProviderConfigResponse(
-            profiles=[
-                ProviderProfile(
+            apps=[
+                App(
                     id=p["id"],
                     name=p["name"],
                     stt=[PipelineChainEntry(**s) for s in p.get("stt", [])],
                     llm=[PipelineChainEntry(**l) for l in p.get("llm", [])],
                     tts=[PipelineChainEntry(**t) for t in p.get("tts", [])],
                 )
-                for p in data.get("profiles", [])
+                for p in data.get("apps", data.get("profiles", []))
             ],
-            active_profile_id=data.get("activeProfileId"),
+            active_app_id=data.get("activeAppId", data.get("activeProfileId")),
             pipeline_stt=[PipelineChainEntry(**s) for s in data.get("pipelineStt", [])],
             pipeline_llm=[PipelineChainEntry(**l) for l in data.get("pipelineLlm", [])],
             pipeline_tts=[PipelineChainEntry(**t) for t in data.get("pipelineTts", [])],

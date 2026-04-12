@@ -7,7 +7,7 @@ const MOCK = 'http://localhost:4099';
 async function seedGpuProfile(request: any) {
   await request.post(`${MOCK}/v1/config/providers`, {
     data: {
-      profiles: [
+      apps: [
         {
           id: 'prof-gpu',
           name: 'GPU Deploy Test',
@@ -28,13 +28,13 @@ async function seedGpuProfile(request: any) {
           ],
         },
       ],
-      activeProfileId: 'prof-gpu',
+      activeAppId: 'prof-gpu',
     },
   });
 }
 
 const SEEDED_PROFILE_RESPONSE = {
-  profiles: [
+  apps: [
     {
       id: 'prof-gpu',
       name: 'GPU Deploy Test',
@@ -55,7 +55,7 @@ const SEEDED_PROFILE_RESPONSE = {
       ],
     },
   ],
-  activeProfileId: 'prof-gpu',
+  activeAppId: 'prof-gpu',
 };
 
 /** Navigate to the GPU service card deploy settings panel. */

@@ -16,8 +16,8 @@ let deployCount = 0;
 let lastDeployBody: Record<string, unknown> = {};
 let pendingTimers: ReturnType<typeof setTimeout>[] = [];
 let providerConfig: Record<string, unknown> = {
-  profiles: [],
-  activeProfileId: null,
+  apps: [],
+  activeAppId: null,
   pipelineStt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }],
   pipelineLlm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }],
   pipelineTts: [{ provider: 'gpu', model: 'qwen3-tts' }],
@@ -239,31 +239,31 @@ const server = createServer(async (req, res) => {
   // ── Profile-specific endpoints ──
   if (method === 'POST' && url === '/v1/config/profiles') {
     const body = JSON.parse(await readBody(req));
-    const profiles = (providerConfig.profiles as any[]) || [];
-    const existing = profiles.findIndex((p: any) => p.id === body.id);
+    const apps = (providerConfig.apps as any[]) || [];
+    const existing = apps.findIndex((p: any) => p.id === body.id);
     if (existing >= 0) {
-      profiles[existing] = { ...profiles[existing], ...body };
+      apps[existing] = { ...apps[existing], ...body };
     } else {
-      profiles.push(body);
+      apps.push(body);
     }
-    providerConfig.profiles = profiles;
+    providerConfig.apps = apps;
     providerConfig.updatedAt = Date.now();
     return json(res, providerConfig, existing >= 0 ? 200 : 201);
   }
   if (method === 'DELETE' && url === '/v1/config/profiles') {
     const body = JSON.parse(await readBody(req));
-    const profiles = (providerConfig.profiles as any[]) || [];
-    providerConfig.profiles = profiles.filter((p: any) => p.id !== body.id);
-    if (providerConfig.activeProfileId === body.id) providerConfig.activeProfileId = null;
+    const apps = (providerConfig.apps as any[]) || [];
+    providerConfig.apps = apps.filter((p: any) => p.id !== body.id);
+    if (providerConfig.activeAppId === body.id) providerConfig.activeAppId = null;
     providerConfig.updatedAt = Date.now();
     return json(res, providerConfig);
   }
   if (method === 'POST' && url === '/v1/config/profiles/activate') {
     const body = JSON.parse(await readBody(req));
-    const profiles = (providerConfig.profiles as any[]) || [];
-    const profile = profiles.find((p: any) => p.id === body.id);
+    const apps = (providerConfig.apps as any[]) || [];
+    const profile = apps.find((p: any) => p.id === body.id);
     if (!profile) return json(res, { error: 'Profile not found' }, 404);
-    providerConfig.activeProfileId = body.id;
+    providerConfig.activeAppId = body.id;
     if (profile.stt) providerConfig.pipelineStt = profile.stt;
     if (profile.llm) providerConfig.pipelineLlm = profile.llm;
     if (profile.tts) providerConfig.pipelineTts = profile.tts;
@@ -469,8 +469,8 @@ const server = createServer(async (req, res) => {
     deployCount = 0;
     lastDeployBody = {};
     providerConfig = {
-      profiles: [],
-      activeProfileId: null,
+      apps: [],
+      activeAppId: null,
       pipelineStt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }],
       pipelineLlm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }],
       pipelineTts: [{ provider: 'gpu', model: 'qwen3-tts' }],

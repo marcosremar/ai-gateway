@@ -123,11 +123,16 @@ ProviderProfile = App
 @dataclass
 class ProviderConfigResponse:
     apps: list[App]
-    active_profile_id: str | None
+    active_app_id: str | None
     pipeline_stt: list[PipelineChainEntry]
     pipeline_llm: list[PipelineChainEntry]
     pipeline_tts: list[PipelineChainEntry]
     updated_at: int = 0
+
+    @property
+    def active_profile_id(self) -> str | None:
+        """Backward-compat alias for active_app_id."""
+        return self.active_app_id
 
 
 @dataclass

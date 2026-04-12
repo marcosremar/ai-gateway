@@ -69,8 +69,8 @@ test.describe('Overview Tab', () => {
     // Seed a profile so PipelineHealthCard renders
     await request.post(`${MOCK}/v1/config/providers`, {
       data: {
-        profiles: [{ id: 'p-ov', name: 'Default', stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'gpu', model: 'qwen3-tts' }] }],
-        activeProfileId: 'p-ov',
+        apps: [{ id: 'p-ov', name: 'Default', stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'gpu', model: 'qwen3-tts' }] }],
+        activeAppId: 'p-ov',
       },
     });
     await page.goto('/');
@@ -131,7 +131,7 @@ test.describe('Profiles Tab', () => {
 
   test('shows profiles section header', async ({ page }) => {
     await expect(page.getByRole('heading', { name: 'Profiles' })).toBeVisible();
-    await expect(page.getByText('Manage pipeline profiles')).toBeVisible();
+    await expect(page.getByText('Manage pipeline apps')).toBeVisible();
   });
 
   test('shows empty state when no profiles', async ({ page }) => {
