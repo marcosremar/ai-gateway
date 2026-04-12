@@ -20,6 +20,21 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { spawn, type ChildProcess } from 'child_process';
 
+// ── Colors (minimal, no deps) ────────────────────────────────────────────
+const isTTY = process.stdout.isTTY;
+const c = {
+  reset: isTTY ? '\x1b[0m' : '',
+  bold: isTTY ? '\x1b[1m' : '',
+  dim: isTTY ? '\x1b[2m' : '',
+  red: isTTY ? '\x1b[31m' : '',
+  green: isTTY ? '\x1b[32m' : '',
+  yellow: isTTY ? '\x1b[33m' : '',
+  blue: isTTY ? '\x1b[34m' : '',
+  cyan: isTTY ? '\x1b[36m' : '',
+};
+
+const VERSION = '0.1.0';
+
 // ── Config ────────────────────────────────────────────────────────────────
 
 const DEFAULT_URL = 'http://localhost:4000';
@@ -172,12 +187,50 @@ async function fetchJSON(url: string, opts?: RequestInit): Promise<any> {
 
 // ── Commands ──────────────────────────────────────────────────────────────
 
+/** Read stdin if piped (for: echo "hello" | ai-gateway chat) */
+async function readStdin(): Promise<string | null> {
+  if (process.stdin.isTTY) return null;
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const text = Buffer.concat(chunks).toString('utf8').trim();
+  return text || null;
+}
+
+/** Format duration nicely */
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** Spinner for long operations */
+function spinner(text: string): { stop: (msg?: string) => void } {
+  if (!isTTY) return { stop: () => {} };
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let i = 0;
+  const interval = setInterval(() => {
+    process.stderr.write(`\r${c.cyan}${frames[i++ % frames.length]}${c.reset} ${text}`);
+  }, 80);
+  return {
+    stop: (msg?: string) => {
+      clearInterval(interval);
+      process.stderr.write(`\r${' '.repeat(text.length + 4)}\r`);
+      if (msg) process.stderr.write(`${msg}\n`);
+    },
+  };
+}
+
+async function cmdVersion() {
+  console.log(`ai-gateway CLI v${VERSION}`);
+  const { url } = getConfig();
+  console.log(`Gateway: ${url}`);
+}
+
 async function cmdHealth() {
   const { url, key } = getConfig();
   const data = await fetchJSON(`${url}/health`);
-  console.log('Status:', data.status);
+  console.log(`${c.green}●${c.reset} Status: ${c.bold}${data.status}${c.reset}`);
   if (data.connections) {
-    console.log(`Connections: active=${data.connections.active}, peak=${data.connections.peak}`);
+    console.log(`  Connections: active=${data.connections.active}, peak=${data.connections.peak}`);
   }
 }
 
@@ -187,6 +240,84 @@ async function cmdModels() {
   console.log(`${data.data.length} models:\n`);
   for (const m of data.data) {
     console.log(`  ${m.id}`);
+  }
+}
+
+async function cmdDetectLanguage(text: string) {
+  const { url, key } = getConfig();
+  // Use LLM to detect language — lightweight approach without a dedicated endpoint
+  const body = {
+    model: 'llama-3.1-8b-instant',
+    messages: [
+      { role: 'system', content: 'Detect the language of the following text. Reply with ONLY the ISO 639-1 code (e.g. en, fr, pt, es, de, ja, zh). Nothing else.' },
+      { role: 'user', content: text },
+    ],
+    max_tokens: 5,
+    temperature: 0,
+  };
+  const data = await fetchJSON(`${url}/v1/chat/completions`, {
+    method: 'POST', headers: headers(key), body: JSON.stringify(body),
+  });
+  const lang = data.choices[0].message.content.trim().toLowerCase().slice(0, 5);
+  console.log(lang);
+}
+
+async function cmdLogs(opts: { limit?: number; format?: string }) {
+  const { url, key } = getConfig();
+  const limit = opts.limit || 20;
+  const res = await fetch(`${url}/v1/requests/log?limit=${limit}`, { headers: headers(key) });
+  if (res.status === 404) {
+    console.log('Request log not available (proxy-only mode).');
+    return;
+  }
+  const data = await res.json();
+  if (opts.format === 'json') {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  const entries = data.entries || [];
+  if (entries.length === 0) { console.log('No requests logged.'); return; }
+  console.log(`Last ${entries.length} requests:\n`);
+  console.log(`  ${'Time'.padEnd(12)} ${'Stage'.padEnd(6)} ${'Provider'.padEnd(10)} ${'Model'.padEnd(20)} ${'Ms'.padStart(6)} ${'OK'.padStart(4)}`);
+  console.log(`  ${'─'.repeat(12)} ${'─'.repeat(6)} ${'─'.repeat(10)} ${'─'.repeat(20)} ${'─'.repeat(6)} ${'─'.repeat(4)}`);
+  for (const e of entries) {
+    const time = new Date(e.timestamp).toISOString().slice(11, 23);
+    const stage = (e.stage || '?').slice(0, 6);
+    const prov = (e.provider || '?').slice(0, 10);
+    const model = (e.model || '?').slice(0, 20);
+    const ms = e.latencyMs != null ? String(e.latencyMs) : '?';
+    const ok = e.success ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`;
+    console.log(`  ${time.padEnd(12)} ${stage.padEnd(6)} ${prov.padEnd(10)} ${model.padEnd(20)} ${ms.padStart(6)} ${ok.padStart(4)}`);
+  }
+  if (data.stats) {
+    console.log(`\n  Total: ${data.stats.totalRequests} requests, avg ${data.stats.avgLatencyMs}ms`);
+  }
+}
+
+async function cmdProfiles(sub?: string) {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/v1/config/providers`, { headers: headers(key) });
+  if (res.status === 404) {
+    console.log('Config endpoint not available (proxy-only mode).');
+    return;
+  }
+  const data = await res.json();
+  const profiles = data.profiles || [];
+  const active = data.activeProfileId;
+
+  console.log(`${profiles.length} profiles:\n`);
+  for (const p of profiles) {
+    const isActive = p.id === active;
+    const marker = isActive ? `${c.green}● active${c.reset}` : `${c.dim}○${c.reset}`;
+    const name = isActive ? `${c.bold}${p.name}${c.reset}` : p.name;
+    console.log(`  ${marker}  ${name} ${c.dim}(${p.id})${c.reset}`);
+    if (p.latencyTargetsMs) {
+      const t = p.latencyTargetsMs;
+      console.log(`         ${c.dim}targets: STT=${t.stt || '-'}ms LLM=${t.llm || '-'}ms TTS=${t.tts || '-'}ms${c.reset}`);
+    }
+    if (p.gpuDeploy) {
+      console.log(`         ${c.dim}image: ${p.gpuDeploy.dockerImage || '-'}${c.reset}`);
+    }
   }
 }
 
@@ -282,18 +413,20 @@ async function cmdTTS(text: string, opts: { model?: string; voice?: string; outp
     input: text,
     voice: opts.voice || 'autumn',
   };
+  const s = spinner('Generating audio...');
   const res = await fetch(`${url}/v1/audio/speech`, {
     method: 'POST', headers: headers(key), body: JSON.stringify(body),
   });
+  s.stop();
   if (!res.ok) {
     const err = await res.text();
-    console.error(`Error ${res.status}: ${err.slice(0, 200)}`);
+    console.error(`${c.red}Error ${res.status}${c.reset}: ${err.slice(0, 200)}`);
     process.exit(1);
   }
   const audioBuffer = Buffer.from(await res.arrayBuffer());
   const outPath = opts.output || 'output.wav';
   writeFileSync(outPath, audioBuffer);
-  console.log(`Audio saved to ${outPath} (${audioBuffer.length} bytes)`);
+  console.log(`${c.green}✓${c.reset} Audio saved to ${c.bold}${outPath}${c.reset} (${(audioBuffer.length / 1024).toFixed(0)} KB)`);
 }
 
 async function cmdGpuStatus() {
@@ -448,18 +581,20 @@ async function cmdMetrics(format: string) {
 async function cmdImage(prompt: string, opts: { model?: string; output?: string }) {
   const { url, key } = getConfig();
   const body = { prompt, model: opts.model || 'fal-ai/flux/schnell' };
+  const s = spinner('Generating image...');
   const res = await fetch(`${url}/v1/images/generate`, {
     method: 'POST', headers: headers(key), body: JSON.stringify(body),
   });
+  s.stop();
   if (!res.ok) {
     const err = await res.text();
-    console.error(`Error ${res.status}: ${err.slice(0, 200)}`);
+    console.error(`${c.red}Error ${res.status}${c.reset}: ${err.slice(0, 200)}`);
     process.exit(1);
   }
   const imgBuffer = Buffer.from(await res.arrayBuffer());
   const outPath = opts.output || 'output.jpg';
   writeFileSync(outPath, imgBuffer);
-  console.log(`Image saved to ${outPath} (${imgBuffer.length} bytes)`);
+  console.log(`${c.green}✓${c.reset} Image saved to ${c.bold}${outPath}${c.reset} (${(imgBuffer.length / 1024).toFixed(0)} KB)`);
 }
 
 // ── New commands ──────────────────────────────────────────────────────────
@@ -800,18 +935,22 @@ Usage:
 Commands:
   health          Check gateway health and connection count
   models          List all available models
-  chat            Chat with an LLM (streaming by default)
-  translate       Translate text between languages
+  chat            Chat with an LLM (streaming by default, supports pipe)
+  translate       Translate text between languages (supports pipe)
+  detect-language Detect the language of a text
   transcribe      Transcribe an audio file (speech-to-text)
   tts             Generate speech from text (text-to-speech)
   voices          List available TTS voices
   image           Generate an image from a text prompt
   gpu             Manage GPU deployments (status, deploy, stop, logs)
+  profiles        List and manage deployment profiles
+  logs            Show recent request log
   metrics         Show gateway metrics (Prometheus or JSON)
   latency         GPU host latency analysis (hosts, probe, best)
   server          Manage local dev server (status, start, stop)
   config          Show current configuration and test connectivity
   whoami          Show which user this API key is associated with
+  version         Show CLI version
   ping            Measure gateway latency (like ping)
   benchmark       Run a latency benchmark across all endpoints
 
@@ -1211,9 +1350,29 @@ ai-gateway server — Manage the local dev server
       case 'models':
         await cmdModels();
         break;
+      case 'version':
+        await cmdVersion();
+        break;
+      case 'detect-language': {
+        const text = args.slice(1).filter(a => !a.startsWith('-')).join(' ') || await readStdin();
+        if (!text) { console.error('Usage: ai-gateway detect-language "text" or echo "text" | ai-gateway detect-language'); process.exit(1); }
+        await cmdDetectLanguage(text);
+        break;
+      }
+      case 'logs':
+        await cmdLogs({
+          limit: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
+          format: hasFlag(args, '--json') ? 'json' : undefined,
+        });
+        break;
+      case 'profiles':
+        await cmdProfiles(args[1]);
+        break;
       case 'chat': {
-        const msg = args.slice(1).filter(a => !a.startsWith('-')).join(' ');
-        if (!msg) { console.error('Usage: ai-gateway chat "your message"'); process.exit(1); }
+        let msg = args.slice(1).filter(a => !a.startsWith('-')).join(' ');
+        // Support piped input: echo "hello" | ai-gateway chat
+        if (!msg) msg = (await readStdin()) || '';
+        if (!msg) { console.error('Usage: ai-gateway chat "your message" or echo "msg" | ai-gateway chat'); process.exit(1); }
         await cmdChat(msg, {
           model: getArg(args, '-m') || getArg(args, '--model'),
           stream: !hasFlag(args, '--no-stream'),
@@ -1304,8 +1463,9 @@ ai-gateway server — Manage the local dev server
         await cmdMetrics(hasFlag(args, '--json') ? 'json' : 'prometheus');
         break;
       case 'translate': {
-        const text = args.slice(1).filter(a => !a.startsWith('-')).join(' ');
-        if (!text) { console.error('Usage: ai-gateway translate "text to translate"'); process.exit(1); }
+        let text = args.slice(1).filter(a => !a.startsWith('-')).join(' ');
+        if (!text) text = (await readStdin()) || '';
+        if (!text) { console.error('Usage: ai-gateway translate "text" or echo "text" | ai-gateway translate'); process.exit(1); }
         await cmdTranslate(text, {
           from: getArg(args, '--from'),
           to: getArg(args, '--to'),
