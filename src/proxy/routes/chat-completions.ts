@@ -212,10 +212,16 @@ export async function handleChatCompletions(
     const retryAfterSec = (err as { retryAfterSec?: number })?.retryAfterSec;
     const headers: Record<string, string> = {};
     if (retryAfterSec) headers['Retry-After'] = String(retryAfterSec);
+    // Propagate the upstream provider's error message so clients can understand
+    // what went wrong (e.g. "invalid role 'hacker'", "context length exceeded").
+    // Redact URLs to avoid leaking internal endpoints.
+    const errMsg = err instanceof Error
+      ? err.message.replace(/https?:\/\/[^\s]+/g, '[url]').slice(0, 200)
+      : 'Chat completion failed';
     return {
       status: status || 500,
       headers: Object.keys(headers).length > 0 ? headers : undefined,
-      body: { error: { message: 'Chat completion failed', type: 'server_error' } },
+      body: { error: { message: errMsg, type: status && status < 500 ? 'invalid_request_error' : 'server_error' } },
     };
   }
 }

@@ -574,14 +574,20 @@ export function createProxyServer(config: ProxyConfig): Server {
             }
             const parts = parseMultipart(rawBody, boundary);
             const fields: Record<string, string> = {};
+            let hasFile = false;
             for (const part of parts) {
               if (part.filename) {
                 // File part — use its content as rawBody for the route handler
                 rawBody = part.data;
+                hasFile = true;
               } else if (part.name) {
                 fields[part.name] = part.data.toString();
               }
             }
+            // If no file part found, clear rawBody so downstream handlers
+            // see length=0 and return 400 "audio data is required" instead
+            // of trying to transcribe multipart boundary markers → 500.
+            if (!hasFile) rawBody = Buffer.alloc(0);
             body = fields;
           }
         }
