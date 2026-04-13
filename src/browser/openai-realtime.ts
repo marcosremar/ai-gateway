@@ -122,6 +122,7 @@ const DEFAULT_MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_BASE_DELAY_MS = 2_000;
 const STATS_POLL_INTERVAL_MS = 5_000;
 const MAX_TRANSCRIPT_LENGTH = 10_000;
+const MAX_RESPONSE_LENGTH = 50_000;
 
 // ---------------------------------------------------------------------------
 // Instruction builder (standalone — no framework/app dependencies)
@@ -487,7 +488,7 @@ export class OpenAIRealtimeClient extends TypedEmitter<OpenAIRealtimeEventMap> {
 
       // 9. Connection timeout
       this._connectionTimeoutId = setTimeout(() => {
-        if (!this._didConnect) {
+        if (!this._didConnect && !this._isConnected) {
           this._error = 'Connection timeout. WebRTC handshake succeeded but data channel did not open.';
           this.emit('error', { message: this._error });
           this._setPhase('failed');
@@ -543,7 +544,9 @@ export class OpenAIRealtimeClient extends TypedEmitter<OpenAIRealtimeEventMap> {
       case 'response.output_text.delta':
       case 'response.text.delta': {
         const delta = (serverEvent.delta as string) || '';
-        this._pendingResponseText += delta;
+        if (this._pendingResponseText.length < MAX_RESPONSE_LENGTH) {
+          this._pendingResponseText += delta;
+        }
         break;
       }
 
@@ -716,6 +719,12 @@ export class OpenAIRealtimeClient extends TypedEmitter<OpenAIRealtimeEventMap> {
       this._reconnectTimeoutId = null;
     }
     this._stopStatsMonitoring();
+
+    // Clear event handlers first to prevent stale callbacks after cleanup
+    if (this._pc) {
+      this._pc.oniceconnectionstatechange = null;
+      this._pc.onconnectionstatechange = null;
+    }
 
     // Close data channel
     if (this._dc) {
