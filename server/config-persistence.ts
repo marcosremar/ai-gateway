@@ -300,7 +300,35 @@ export function loadProviderConfig(): ProviderConfig {
       _cacheTime = now;
       return _cachedConfig;
     }
-    const raw = readFileSync(CONFIG_FILE, 'utf-8');
+    let raw: string;
+    let source = 'primary';
+    try {
+      raw = readFileSync(CONFIG_FILE, 'utf-8');
+      JSON.parse(raw); // validate JSON
+    } catch (parseErr) {
+      // Primary file corrupted — try backup
+      console.error(`[config] Primary config corrupted: ${parseErr instanceof Error ? parseErr.message : parseErr}`);
+      const bakFile = CONFIG_FILE + '.bak';
+      if (existsSync(bakFile)) {
+        try {
+          raw = readFileSync(bakFile, 'utf-8');
+          JSON.parse(raw); // validate backup JSON
+          source = 'backup';
+          console.warn(`[config] Recovered from backup: ${bakFile}`);
+        } catch {
+          console.error('[config] Backup also corrupted — using defaults');
+          _cachedConfig = { ...DEFAULT_CONFIG };
+          _cacheTime = now;
+          return _cachedConfig;
+        }
+      } else {
+        console.error('[config] No backup available — using defaults');
+        _cachedConfig = { ...DEFAULT_CONFIG };
+        _cacheTime = now;
+        return _cachedConfig;
+      }
+    }
+    if (source !== 'primary') console.log(`[config] Loaded from ${source}`);
     const data = JSON.parse(raw) as Record<string, unknown>;
     // Migrate legacy field names: profiles → apps, activeProfileId → activeAppId
     const rawApps = (data.apps ?? data.profiles) as GatewayApp[] | undefined;
@@ -382,6 +410,10 @@ export function saveProviderConfig(config: ProviderConfig): void {
   try {
     mkdirSync(BABELCAST_DIR, { recursive: true });
     config.updatedAt = Date.now();
+    // Backup current file before overwriting (corruption recovery)
+    if (existsSync(CONFIG_FILE)) {
+      try { writeFileSync(CONFIG_FILE + '.bak', readFileSync(CONFIG_FILE)); } catch { /* best-effort backup */ }
+    }
     // Atomic write: write to temp file then rename (prevents corruption on crash)
     const tmpFile = CONFIG_FILE + '.tmp';
     writeFileSync(tmpFile, JSON.stringify(config, null, 2));
