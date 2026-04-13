@@ -421,8 +421,8 @@ export function recordGpuLatency(ms: number): void {
     latencyRing.push(ms);
   } else {
     latencyRing[latencyRingIdx] = ms;
+    setLatencyRingIdx((latencyRingIdx + 1) % LATENCY_RING_SIZE);
   }
-  setLatencyRingIdx((latencyRingIdx + 1) % LATENCY_RING_SIZE);
 }
 
 // ── Per-Stage P95 Ring Buffers ────────────────────────────────────────────────

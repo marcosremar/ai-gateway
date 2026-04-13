@@ -420,15 +420,17 @@ export function scheduleNextMonitorProbe() {
         }
         // If TensorDock, check balance — low balance causes VMs to be reclaimed
         if (activeProvider === 'tensordock' && deployTensordockApiKey && deployTensordockAuthId) {
-          const bal = await tensordock.checkBalance({ apiKey: deployTensordockApiKey, authId: deployTensordockAuthId });
-          if (bal) {
-            log.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly: $${bal.hourlyCost.toFixed(3)})`);
-            if (bal.balance < 1.0) {
-              const msg = `TensorDock balance low: $${bal.balance.toFixed(2)} — VM may have been reclaimed. Add funds: https://${BILLING_URLS.tensordock}`;
-              log.warn(`[gpu] ${msg}`);
-              setDeployState({ alert: msg });
+          try {
+            const bal = await tensordock.checkBalance({ apiKey: deployTensordockApiKey, authId: deployTensordockAuthId });
+            if (bal) {
+              log.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly: $${bal.hourlyCost.toFixed(3)})`);
+              if (bal.balance < 1.0) {
+                const msg = `TensorDock balance low: $${bal.balance.toFixed(2)} — VM may have been reclaimed. Add funds: https://${BILLING_URLS.tensordock}`;
+                log.warn(`[gpu] ${msg}`);
+                setDeployState({ alert: msg });
+              }
             }
-          }
+          } catch { /* balance check is best-effort */ }
         }
       }
 
