@@ -146,6 +146,8 @@ export class FlyioClient extends AbstractGpuProvider {
       this.log.log(`[flyio] Machine ${machine.id} is running`);
     } catch (e) {
       this.log.log(`[flyio] Wait for start failed: ${e instanceof Error ? e.message : e}`);
+      // Don't return a "running" instance if the machine failed to start
+      throw new Error(`Fly.io machine failed to start: ${e instanceof Error ? e.message : e}`);
     }
 
     // Resolve endpoint — try fly.dev DNS first, fall back to allocated IPv4
@@ -340,31 +342,43 @@ export class FlyioClient extends AbstractGpuProvider {
 
   /** Resolve the app's allocated shared IPv4 address. */
   private async resolveAppIp(app: string, token: string): Promise<string | null> {
+    let proc: ReturnType<typeof Bun.spawn> | null = null;
     try {
       // Use flyctl CLI which has the auth context
-      const proc = Bun.spawn(['flyctl', 'ips', 'list', '--app', app, '--json'], {
+      proc = Bun.spawn(['flyctl', 'ips', 'list', '--app', app, '--json'], {
         stdout: 'pipe', stderr: 'pipe',
       });
       await proc.exited;
       const out = await new Response(proc.stdout).text();
-      const ips = JSON.parse(out) as Array<{ Address: string; Type: string }>;
+      const parsed = JSON.parse(out);
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed)) {
+        return null;
+      }
+      const ips = parsed as Array<{ Address?: string; Type?: string }>;
       const v4 = ips.find(ip => ip.Type === 'shared_v4' || ip.Type === 'v4');
       return v4?.Address?.replace('/32', '') || null;
     } catch (e) {
       this.log.log(`[flyio] Resolve app IP failed: ${e instanceof Error ? e.message : e}`);
       // Fallback: allocate a shared IPv4 via CLI
       try {
-        const proc = Bun.spawn(['flyctl', 'ips', 'allocate-v4', '--shared', '--app', app, '--json'], {
+        proc = Bun.spawn(['flyctl', 'ips', 'allocate-v4', '--shared', '--app', app, '--json'], {
           stdout: 'pipe', stderr: 'pipe',
         });
         await proc.exited;
         const out = await new Response(proc.stdout).text();
-        const data = JSON.parse(out);
+        const parsed = JSON.parse(out);
+        if (!parsed || typeof parsed !== 'object') {
+          return null;
+        }
+        const data = parsed as { Address?: string };
         return data?.Address?.replace('/32', '') || null;
       } catch (e2) {
         this.log.log(`[flyio] Allocate IPv4 failed: ${e2 instanceof Error ? e2.message : e2}`);
         return null;
       }
+    } finally {
+      proc?.stdout?.close();
+      proc?.stderr?.close();
     }
   }
 
@@ -383,9 +397,28 @@ export class FlyioClient extends AbstractGpuProvider {
         signal: AbortSignal.timeout((timeoutSecs + 10) * 1000),
       },
     );
+    // Non-2xx means the machine didn't reach the desired state
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`Wait for ${state} failed (${res.status}): ${text.slice(0, 200)}`);
+    }
+    // Even on 200, verify the machine is actually in the expected state
+    const machine = await this.getMachine(app, machineId, token);
+    if (machine && machine.state !== state) {
+      throw new Error(`Machine state is ${machine.state}, expected ${state}`);
+    }
+  }
+
+  private async getMachine(app: string, machineId: string, token: string): Promise<FlyMachine | null> {
+    try {
+      const res = await fetch(`${FLY_API}/apps/${app}/machines/${machineId}`, {
+        headers: this.headers(token),
+        signal: AbortSignal.timeout(TIMEOUTS.read),
+      });
+      if (!res.ok) return null;
+      return res.json() as Promise<FlyMachine>;
+    } catch {
+      return null;
     }
   }
 
@@ -434,19 +467,37 @@ export class FlyioClient extends AbstractGpuProvider {
 
   /** Resolve the org slug from the token's existing apps. */
   private orgSlugCache: string | null = null;
+  private orgSlugPromise: Promise<string> | null = null;
   private async resolveOrgSlug(token: string): Promise<string> {
+    // Return cached value if available
     if (this.orgSlugCache) return this.orgSlugCache;
+    // Return in-flight promise to avoid concurrent resolution (race condition fix)
+    if (this.orgSlugPromise) return this.orgSlugPromise;
+    // Start new resolution
+    this.orgSlugPromise = this.resolveOrgSlugImpl(token);
+    try {
+      const result = await this.orgSlugPromise;
+      this.orgSlugCache = result;
+      return result;
+    } finally {
+      this.orgSlugPromise = null;
+    }
+  }
+
+  private async resolveOrgSlugImpl(token: string): Promise<string> {
     try {
       const res = await fetch(`${FLY_API}/apps?org_slug=personal`, {
         headers: this.headers(token),
         signal: AbortSignal.timeout(10_000),
       });
       if (res.ok) {
-        const data = await res.json() as { apps?: Array<{ organization?: { slug?: string } }> };
-        const slug = data.apps?.[0]?.organization?.slug;
-        if (slug) {
-          this.orgSlugCache = slug;
-          return slug;
+        const data = await res.json();
+        if (data && typeof data === 'object' && Array.isArray(data.apps)) {
+          const apps = data.apps as Array<{ organization?: { slug?: string } }>;
+          const slug = apps[0]?.organization?.slug;
+          if (slug && typeof slug === 'string') {
+            return slug;
+          }
         }
       }
     } catch { /* fallback */ }
