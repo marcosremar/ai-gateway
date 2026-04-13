@@ -1,0 +1,53 @@
+# Dependencies & build output
+node_modules/
+dist/
+bun.lock
+*.tsbuildinfo
+*.d.ts
+
+# Test output & snapshots
+web/test-results/
+**/__snapshots__/
+coverage/
+.nyc_output/
+stryker-tmp/
+
+# Generated / tooling configs
+typedoc.json
+stryker.config.json
+turbo.json
+workspace.json
+tsconfig.tsbuildinfo
+
+# Large reference docs (bench data, runbooks — use grep/read when needed)
+docs/
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+SECURITY.md
+
+# Infrastructure-as-code (read only when working on infra)
+terraform/
+monitoring/
+load-testing/
+
+# Public assets
+public/
+
+# Python build artifacts
+__pycache__/
+*.pyc
+.venv/
+pyproject.toml
+
+# Docker build contexts (large binary/model files)
+dockers/*/models/
+dockers/*/*.bin
+dockers/*/*.gguf
+dockers/*/*.safetensors
+
+# Lock & snapshot files
+*.snap
+fly.toml
+docker-compose.dev.yml
+docker-compose.snapgpu.yml
