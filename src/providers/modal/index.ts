@@ -66,6 +66,7 @@ export class ModalTTSProvider implements TTSProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...buildProxyAuthHeaders() },
       body: JSON.stringify(ttsBody),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!res.ok) {

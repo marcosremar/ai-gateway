@@ -85,6 +85,7 @@ export class FalImageProvider implements ImageProvider {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
     });
 
     if (!res.ok) {
@@ -121,6 +122,7 @@ export class FalImageProvider implements ImageProvider {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
     });
 
     if (!res.ok) {
@@ -153,7 +155,7 @@ export class FalImageProvider implements ImageProvider {
     const first = data.images?.[0];
     if (!first?.url) throw new Error('[FAL] No image in response');
 
-    const imgRes = await fetch(first.url);
+    const imgRes = await fetch(first.url, { signal: AbortSignal.timeout(60_000) });
     if (!imgRes.ok) throw new Error(`[FAL] Failed to download result image: ${imgRes.status}`);
 
     const arrayBuffer = await imgRes.arrayBuffer();

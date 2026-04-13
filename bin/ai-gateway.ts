@@ -481,12 +481,13 @@ async function cmdGpuList() {
     return;
   }
   const data = await res.json();
-  if (!Array.isArray(data) || data.length === 0) {
+  const instances = Array.isArray(data) ? data : (data.instances || []);
+  if (instances.length === 0) {
     console.log('No active GPU instances.');
     return;
   }
-  console.log(`${data.length} active instance(s):\n`);
-  for (const inst of data) {
+  console.log(`${instances.length} active instance(s):\n`);
+  for (const inst of instances) {
     console.log(`  ${inst.instanceId || inst.podId || '?'}`);
     if (inst.provider) console.log(`    provider:  ${inst.provider}`);
     if (inst.gpuType || inst.gpuName) console.log(`    gpu:       ${inst.gpuType || inst.gpuName}`);
@@ -1608,11 +1609,13 @@ ai-gateway server — Manage the local dev server
         break;
       }
       case 'tts': {
-        const text = args.slice(1).filter(a => !a.startsWith('-')).join(' ');
-        if (!text) { console.error('Usage: ai-gateway tts "your text"'); process.exit(1); }
+        let text = args.slice(1).filter(a => !a.startsWith('-')).join(' ');
+        if (!text) text = (await readStdin()) || '';
+        if (!text) { console.error('Usage: ai-gateway tts "your text" or echo "text" | ai-gateway tts'); process.exit(1); }
         await cmdTTS(text, {
           voice: getArg(args, '-v') || getArg(args, '--voice'),
           output: getArg(args, '-o') || getArg(args, '--output'),
+          model: getArg(args, '-m') || getArg(args, '--model'),
         });
         break;
       }
@@ -1621,6 +1624,7 @@ ai-gateway server — Manage the local dev server
         if (!prompt) { console.error('Usage: ai-gateway image "your prompt"'); process.exit(1); }
         await cmdImage(prompt, {
           output: getArg(args, '-o') || getArg(args, '--output'),
+          model: getArg(args, '-m') || getArg(args, '--model'),
         });
         break;
       }

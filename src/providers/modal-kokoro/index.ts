@@ -64,6 +64,7 @@ export class ModalKokoroTTSProvider implements TTSProvider {
         speed: request.speed ?? 1.0,
         response_format: 'wav',
       }),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!res.ok) {

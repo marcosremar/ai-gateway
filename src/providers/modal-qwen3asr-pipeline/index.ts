@@ -62,6 +62,7 @@ export class Qwen3ASRPipelineSTTProvider implements STTProvider {
       method: 'POST',
       headers: buildProxyAuthHeaders(),
       body: formData,
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!res.ok) {
@@ -120,6 +121,7 @@ export class Qwen3ASRPipelineLLMProvider implements LLMProvider {
       method: 'POST',
       headers: { ...buildProxyAuthHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, source_lang: sourceLang, target_lang: targetLang }),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!res.ok) {

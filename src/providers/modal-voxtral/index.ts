@@ -56,6 +56,7 @@ export class ModalVoxtralSTTProvider implements STTProvider {
       method: 'POST',
       body: formData,
       headers: buildProxyAuthHeaders(),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!res.ok) {
