@@ -169,6 +169,26 @@ async function fetchOffersWithBalances(
   return { allOffers, providerResults, providerBalances };
 }
 
+/**
+ * Handle GET /v1/gpu/offers — fetch available GPU offers from all configured providers.
+ *
+ * Queries RunPod, Vast.ai, TensorDock, and Modal for current GPU availability
+ * and pricing. Optionally filters by GPU types, region, provider, and minimum
+ * VRAM. Checks provider balances and annotates each offer with `canDeploy` status.
+ *
+ * Credentials must come from environment variables — API keys in query params
+ * are rejected for security.
+ *
+ * @param req - Incoming HTTP request; query params: gpuTypes, region, provider, limit, minVramGb, preferSsd
+ * @param res - Outgoing HTTP response; returns 200 with { offers, providers, balances }
+ * @returns Promise<void>
+ *
+ * @example
+ * ```bash
+ * GET /v1/gpu/offers?gpuTypes=RTX+4090&region=EU&limit=50
+ * # → { offers: [{ provider: "vast", gpuType: "RTX 4090", pricePerHr: 0.42, ... }], ... }
+ * ```
+ */
 export async function handleGpuOffers(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
@@ -277,7 +297,23 @@ export async function handleGpuOffers(req: IncomingMessage, res: ServerResponse)
   }));
 }
 
-/** Return cached GPU types from DB (populated by periodic refresh). */
+/**
+ * Handle GET /v1/gpu/types — return cached GPU type information from the database.
+ *
+ * Returns GPU types previously discovered and cached by the periodic
+ * `refreshGpuTypeCache()` background job. Much faster than querying
+ * provider APIs in real time. Optionally filters by provider.
+ *
+ * @param _req - Incoming HTTP request; optional query param: provider
+ * @param res - Outgoing HTTP response; returns 200 with { types, count }
+ * @returns Promise<void>
+ *
+ * @example
+ * ```bash
+ * GET /v1/gpu/types?provider=vast
+ * # → { types: [{ provider: "vast", gpuName: "RTX 4090", pricePerHr: 0.42, vram: 24, ... }], count: 12 }
+ * ```
+ */
 export async function handleGpuTypes(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(_req.url || '/', `http://localhost:${PORT}`);
   const providerFilter = url.searchParams.get('provider') || undefined;

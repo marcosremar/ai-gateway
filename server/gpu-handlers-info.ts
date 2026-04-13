@@ -24,7 +24,11 @@ import { getCloudProbeResults, getCloudProbeAt } from './provider-warmup';
 import { getSttTargetLatencyMs, getLlmTargetLatencyMs, getTtsTargetLatencyMs, getP95DemotionMultiplier, getRepechageMaxAttempts } from '../src/gpu-providers/deploy-settings';
 import { buildProviderQueries } from './gpu-handlers-offers';
 import { getDeployTimeoutMin } from '../src/gpu-providers/deploy-settings';
+import { runPreFlightChecks } from '../src/preflight-checks';
+import { analyzeDockerImage } from '../src/gpu-compat';
 import { loadProviderConfig } from './config-persistence';
+import { errorSummary } from '../src/error-summary';
+import { getMemoryStats, getOperationStats } from '../src/performance-profiler';
 
 // ── Friendly error message cleanup ──────────────────────────────────────────
 
@@ -227,6 +231,27 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
 
 // ── GPU status endpoint ─────────────────────────────────────────────────────
 
+/**
+ * Handle GET /v1/gpu/status — return the current GPU deployment state.
+ *
+ * Returns comprehensive information including deploy status, elapsed time,
+ * provider details, machine specs (RAM, VRAM, disk, CPU), GPU hardware
+ * metrics (temperature, utilization, memory), provider cooldowns, balance
+ * info, IP geolocation, deployment state machine, model warmth, and
+ * pipeline routing configuration.
+ *
+ * Omits full logs from this endpoint (use `/v1/gpu/logs` for that).
+ *
+ * @param _req - Incoming HTTP request (no body needed)
+ * @param res - Outgoing HTTP response; returns 200 with full deploy state JSON
+ * @returns Promise<void>
+ *
+ * @example
+ * ```bash
+ * GET /v1/gpu/status
+ * # → { status: "ready", provider: "vast", podId: "...", costPerHr: 0.45, ... }
+ * ```
+ */
 export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(_req);
   setRequestIdHeader(res, requestId);
@@ -698,3 +723,207 @@ export async function handleGpuReputation(req: IncomingMessage, res: ServerRespo
     res.end(JSON.stringify({ error: `Failed to fetch reputations: ${err}` }));
   }
 }
+
+// ── Pre-flight check endpoint ────────────────────────────────────────────────
+
+/**
+ * POST /v1/gpu/preflight — run pre-flight checks without starting a deploy.
+ * Request body: { image?, provider?, apiKey?, gpuTypes?, quotedPricePerHr?, templateId? }
+ */
+export async function handlePreflightCheck(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const requestId = getOrCreateRequestId(req);
+  setRequestIdHeader(res, requestId);
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const body = Buffer.concat(chunks).toString();
+
+  let config: {
+    image?: string;
+    provider?: string;
+    apiKey?: string;
+    gpuTypes?: string[];
+    quotedPricePerHr?: number;
+    templateId?: string;
+  };
+  try {
+    config = JSON.parse(body);
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+    return;
+  }
+
+  if (!config.image) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Missing "image" field' }));
+    return;
+  }
+
+  const result = await runPreFlightChecks({
+    imageName: config.image,
+    provider: config.provider || 'vast',
+    apiKey: config.apiKey || process.env.VAST_API_KEY || '',
+    gpuTypes: config.gpuTypes || [],
+    quotedPricePerHr: config.quotedPricePerHr,
+    dockerhubUser: process.env.DOCKERHUB_USERNAME,
+    dockerhubToken: process.env.DOCKERHUB_TOKEN,
+    templateId: config.templateId,
+  });
+
+  res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(result));
+}
+
+// ── Error Summary endpoint ────────────────────────────────────────────────────
+
+/**
+ * GET /v1/errors/summary — return error summary statistics.
+ * Query param: hours (default 24) — time window for the summary.
+ */
+export async function handleErrorSummary(req: IncomingMessage, res: ServerResponse) {
+  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const hours = parseInt(url.searchParams.get('hours') || '24', 10);
+
+  const summary = errorSummary.getSummary(hours);
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(summary));
+}
+
+/**
+ * GET /v1/errors/alerts — return active error alerts.
+ * POST /v1/errors/alerts/acknowledge — acknowledge an alert by type.
+ */
+export async function handleErrorAlerts(req: IncomingMessage, res: ServerResponse) {
+  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+
+  if (req.method === 'GET') {
+    const alerts = errorSummary.getAlerts();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ alerts }));
+  } else if (req.method === 'POST') {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+
+    if (!body.type) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing "type" field' }));
+      return;
+    }
+
+    errorSummary.acknowledgeAlert(body.type);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ acknowledged: true }));
+  }
+}
+
+// ── Canary Status endpoint ───────────────────────────────────────────────────
+
+/**
+ * GET /v1/canary/status?deployId=xxx — return canary deployment status.
+ * Returns current canary stats, traffic percentage, and evaluation decision.
+ */
+export async function handleCanaryStatus(_req: IncomingMessage, res: ServerResponse) {
+  const url = new URL(_req.url || '/', `http://${_req.headers.host || 'localhost'}`);
+  const deployId = url.searchParams.get('deployId');
+
+  // If deployId specified, check it matches current deploy
+  if (deployId && deployState.deployId && deployState.deployId !== deployId) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'No canary deployment found' }));
+    return;
+  }
+
+  if (!deployState.canary) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'No canary deployment found' }));
+    return;
+  }
+
+  const canary = deployState.canary as {
+    getStats: () => unknown;
+    evaluate: () => unknown;
+    currentVersion?: string;
+    canaryVersion?: string;
+  };
+  const stats = canary.getStats();
+  const decision = canary.evaluate();
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    deployId: deployState.deployId,
+    currentVersion: (canary as Record<string, unknown>).currentVersion,
+    canaryVersion: (canary as Record<string, unknown>).canaryVersion,
+    trafficPercentage: (stats as Record<string, unknown>).trafficPercentage,
+    status: (stats as Record<string, unknown>).status,
+    evaluation: decision,
+    stats,
+  }));
+}
+
+// ── Performance Stats endpoint ───────────────────────────────────────────────
+
+/**
+ * GET /v1/performance — return memory and operation performance stats.
+ * Useful for monitoring deploy performance and identifying bottlenecks.
+ */
+export async function handlePerformanceStats(_req: IncomingMessage, res: ServerResponse) {
+  const memoryStats = getMemoryStats();
+  const operationStats = getOperationStats();
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    memory: memoryStats,
+    operations: operationStats,
+    uptime: process.uptime(),
+    nodeVersion: process.version,
+  }));
+}
+
+// ── GPU Compatibility endpoint ───────────────────────────────────────────────
+
+/**
+ * GET /v1/gpu/compatibility?image=...&env=...&cmd=...
+ * Analyzes a Docker image and returns compatible GPUs.
+ */
+export async function handleGpuCompatibility(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url || '/', 'http://localhost');
+  const imageName = url.searchParams.get('image') || '';
+  const envStr = url.searchParams.get('env') || '{}';
+  const cmdStr = url.searchParams.get('cmd') || '';
+
+  if (!imageName) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Missing "image" parameter' }));
+    return;
+  }
+
+  let envVars: Record<string, string> = {};
+  try { envVars = JSON.parse(envStr); } catch { /* ignore */ }
+
+  const analysis = analyzeDockerImage(imageName, envVars, cmdStr);
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    image: imageName,
+    cudaVersion: analysis.detectedCudaVersion,
+    architecture: analysis.detectedArchitecture,
+    estimatedVramGb: analysis.estimatedVramGb,
+    modelHint: analysis.modelHint,
+    compatibleGpus: analysis.compatibleGpus.map(c => ({
+      name: c.gpu.name,
+      vramGb: c.gpu.vramGb,
+      architecture: c.gpu.architecture,
+      confidence: c.confidence,
+      reason: c.reason,
+    })),
+    incompatibleGpus: analysis.incompatibleGpus.map(i => ({
+      name: i.gpu.name,
+      reason: i.reason,
+    })),
+    warnings: analysis.warnings,
+  }));
+}
+

@@ -6,6 +6,9 @@
 //              real routing decisions, latency convergence, and GPU warmth over time
 //   Phase 4:   Analysis — all path combinations, best TTFAC, recommendation
 
+import { createLogger } from '../src/logger';
+const log = createLogger('benchmark-handlers');
+
 import type { IncomingMessage, ServerResponse } from 'http';
 import { readFileSync, existsSync } from 'fs';
 import { deployState, gpuModelWarmth } from './state';
@@ -529,7 +532,7 @@ async function synthesizeSourceAudio(text: string): Promise<{ buffer: Buffer; mi
       return { buffer: result.audio, mimeType: result.contentType || 'audio/wav' };
     }
   } catch (e) {
-    console.log(`[bench] Could not synthesize test audio: ${e instanceof Error ? e.message : e}`);
+    log.log(`[bench] Could not synthesize test audio: ${e instanceof Error ? e.message : e}`);
   }
   return null;
 }
@@ -579,13 +582,13 @@ async function runPipelineProgression(
   for (let i = 0; i < warmupCount; i++) {
     const r = await callPipeline(i);
     warmupIterations.push(r);
-    console.log(`[bench-pipe] warmup ${i + 1}/${warmupCount}: ${r.totalMs}ms gpu=${r.usedGpu} ${r.error || ''}`);
+    log.log(`[bench-pipe] warmup ${i + 1}/${warmupCount}: ${r.totalMs}ms gpu=${r.usedGpu} ${r.error || ''}`);
   }
 
   for (let i = 0; i < measureCount; i++) {
     const r = await callPipeline(i);
     measuredIterations.push(r);
-    console.log(`[bench-pipe] measure ${i + 1}/${measureCount}: ${r.totalMs}ms (stt=${r.sttMs} llm=${r.llmMs} tts=${r.ttsMs} ttfac~${r.ttfacMs}) gpu=${r.usedGpu} ${r.error || ''}`);
+    log.log(`[bench-pipe] measure ${i + 1}/${measureCount}: ${r.totalMs}ms (stt=${r.sttMs} llm=${r.llmMs} tts=${r.ttsMs} ttfac~${r.ttfacMs}) gpu=${r.usedGpu} ${r.error || ''}`);
   }
 
   const successful = measuredIterations.filter(it => !it.error);
@@ -640,7 +643,7 @@ export async function handleRealtimeTTFCBenchmark(req: IncomingMessage, res: Ser
   const requestCount = Math.min(body?.requestCount || 10, 50); // Max 50 requests
   const intervalMs = body?.intervalMs || 2000; // Default 2s between requests
 
-  console.log(`[rt-bench] Starting realtime TTFC benchmark: ${requestCount} requests @ ${intervalMs}ms intervals`);
+  log.log(`[rt-bench] Starting realtime TTFC benchmark: ${requestCount} requests @ ${intervalMs}ms intervals`);
 
   const { globalTracer } = await import('../src/observability/distributed-tracer');
 
@@ -672,7 +675,7 @@ export async function handleRealtimeTTFCBenchmark(req: IncomingMessage, res: Ser
     }));
 
   } catch (error) {
-    console.warn(`[rt-bench] Failed: ${error instanceof Error ? error.message : error}`);
+    log.warn(`[rt-bench] Failed: ${error instanceof Error ? error.message : error}`);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: false,
@@ -721,7 +724,7 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
     if (fireworksAvailable) providerList.push('fireworks');
     providerList.push('modal');
   }
-  console.log(`[bench] ══ Full benchmark ═══ providers: [${providerList.join(',')}] stages: ${iterations}it, pipeline: ${warmupIterations}w+${pipelineIterations}m`);
+  log.log(`[bench] ══ Full benchmark ═══ providers: [${providerList.join(',')}] stages: ${iterations}it, pipeline: ${warmupIterations}w+${pipelineIterations}m`);
 
   // ── GPU snapshot ──
   const gpuStatus = {
@@ -751,7 +754,7 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
         results[s.value.name] = s.value.result;
       } else {
         // Should not happen, but handle gracefully
-        console.error(`[bench] Provider failed:`, s.reason);
+        log.error(`[bench] Provider failed:`, s.reason);
       }
     }
     return results;
@@ -773,7 +776,7 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
     const targets = sttTargets(audio.buffer, audio.mimeType, audio.fileName, source);
     const providers = await benchStage(targets);
     stages.stt = { providers, fastest: findFastest(providers), fastestWarm: findFastest(providers, 'warmAvg') };
-    console.log(`[bench] STT: tested ${Object.keys(providers).length} providers — fastest: ${stages.stt.fastest}`);
+    log.log(`[bench] STT: tested ${Object.keys(providers).length} providers — fastest: ${stages.stt.fastest}`);
   } else {
     stages.stt = { providers: {}, fastest: null, fastestWarm: null };
     notes.push('STT skipped: no test audio file found');
@@ -784,7 +787,7 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
     const targets = llmTargets(testText, source, target);
     const providers = await benchStage(targets);
     stages.llm = { providers, fastest: findFastest(providers), fastestWarm: findFastest(providers, 'warmAvg') };
-    console.log(`[bench] LLM: tested ${Object.keys(providers).length} providers — fastest: ${stages.llm.fastest}`);
+    log.log(`[bench] LLM: tested ${Object.keys(providers).length} providers — fastest: ${stages.llm.fastest}`);
   }
 
   // ── TTS ──
@@ -796,7 +799,7 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
     const targets = ttsTargets(ttsText, target, speaker);
     const providers = await benchStage(targets);
     stages.tts = { providers, fastest: findFastest(providers), fastestWarm: findFastest(providers, 'warmAvg') };
-    console.log(`[bench] TTS: tested ${Object.keys(providers).length} providers — fastest: ${stages.tts.fastest}`);
+    log.log(`[bench] TTS: tested ${Object.keys(providers).length} providers — fastest: ${stages.tts.fastest}`);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -815,16 +818,16 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
   let progression: ProgressionResult | null = null;
   if (pipelineIterations > 0) {
     let pipeAudio: { buffer: Buffer; mimeType: string } | null = null;
-    console.log(`[bench] Synthesizing ${source}-language test audio...`);
+    log.log(`[bench] Synthesizing ${source}-language test audio...`);
     pipeAudio = await synthesizeSourceAudio(testText);
     if (pipeAudio) {
-      console.log(`[bench] Using synthesized audio (${pipeAudio.buffer.length} bytes, ${pipeAudio.mimeType})`);
+      log.log(`[bench] Using synthesized audio (${pipeAudio.buffer.length} bytes, ${pipeAudio.mimeType})`);
     } else if (audio) {
       pipeAudio = { buffer: audio.buffer, mimeType: audio.mimeType };
       notes.push('Could not synthesize source-language audio; using file audio');
     }
     if (pipeAudio) {
-      console.log(`[bench] ── Pipeline progression: ${warmupIterations}w + ${pipelineIterations}m (TTS TTFAC ratio: ${ttsTtfacRatio.toFixed(2)}) ──`);
+      log.log(`[bench] ── Pipeline progression: ${warmupIterations}w + ${pipelineIterations}m (TTS TTFAC ratio: ${ttsTtfacRatio.toFixed(2)}) ──`);
       progression = await runPipelineProgression(pipeAudio.buffer, pipeAudio.mimeType, source, target, speaker, warmupIterations, pipelineIterations, ttsTtfacRatio);
     } else {
       notes.push('Pipeline progression skipped: no audio available');
@@ -864,7 +867,7 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
     return r && r.available && r.latencies.length > 0;
   });
 
-  console.log(`[bench] Path combinations: ${sttProviders.length} STT × ${llmProviders.length} LLM × ${ttsProviders.length} TTS = ${sttProviders.length * llmProviders.length * ttsProviders.length} paths`);
+  log.log(`[bench] Path combinations: ${sttProviders.length} STT × ${llmProviders.length} LLM × ${ttsProviders.length} TTS = ${sttProviders.length * llmProviders.length * ttsProviders.length} paths`);
 
   // Generate all valid combinations
   for (const stt of sttProviders) {
@@ -913,7 +916,7 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
   };
 
   const durationMs = Date.now() - benchStart;
-  console.log(`[bench] ══ Done in ${durationMs}ms — best: ${bestPath} (warm TTFAC ${bestWarmTtfac}ms) ══`);
+  log.log(`[bench] ══ Done in ${durationMs}ms — best: ${bestPath} (warm TTFAC ${bestWarmTtfac}ms) ══`);
 
   // ── Seed intelligence modules from benchmark results ─────────────────────
   const providerModelMap: Record<string, string> = {
@@ -938,7 +941,7 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
   }
   if (ttfacSeeds.length > 0) {
     ttfacTracker.seedFromBenchmark(ttfacSeeds);
-    console.log(`[bench] Seeded TTFAC tracker with ${ttfacSeeds.length} samples from ${Object.keys(stages.tts?.providers ?? {}).length} TTS providers`);
+    log.log(`[bench] Seeded TTFAC tracker with ${ttfacSeeds.length} samples from ${Object.keys(stages.tts?.providers ?? {}).length} TTS providers`);
   }
 
   // Seed performance ranker with per-stage latency data
@@ -951,7 +954,7 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
       }
     }
   }
-  console.log(`[bench] Seeded performance ranker from all benchmark stages`);
+  log.log(`[bench] Seeded performance ranker from all benchmark stages`);
 
   const response: FullBenchmarkResponse = {
     timestamp: new Date().toISOString(),

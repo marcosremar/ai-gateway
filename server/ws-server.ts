@@ -1,6 +1,9 @@
 // ── BabelCast Gateway — WebSocket Server ─────────────────────────────────────
 // handleWsCommand, startWsServer() — Bun native WS on PORT+1.
 
+import { createLogger } from '../src/logger';
+const log = createLogger('ws-server');
+
 import { timingSafeEqual } from 'crypto';
 import { botState, deployState, gpuHealthy, gpuModelWarmth, gpuReadinessState, gpuReadyForProduction, isStageWarm, isTtsWarm } from './state';
 import {
@@ -32,7 +35,7 @@ function buildStreamingProviderOrder(): string[] {
       .filter(e => e.sttType === 'streaming' || (!e.sttType && STREAMING_PROVIDERS.has(e.provider)))
       .map(e => e.provider);
     if (order.length > 0) return order;
-  } catch (e) { console.warn('[ws] streaming provider order parse failed:', e instanceof Error ? e.message : e); }
+  } catch (e) { log.warn('[ws] streaming provider order parse failed:', e instanceof Error ? e.message : e); }
   // Default: GPU first (lowest latency), then Qwen3-ASR (best accuracy), then Fireworks
   return ['gpu', 'qwen3-asr', 'fireworks'];
 }
@@ -63,7 +66,7 @@ export function reloadStreamingSTTRouter(): void {
     get fireworksApiKey() { return process.env.FIREWORKS_API_KEY ?? ''; },
     providerOrder: order,
   });
-  console.log(`[ws] Streaming STT router reloaded: order=[${order.join(',')}]`);
+  log.log(`[ws] Streaming STT router reloaded: order=[${order.join(',')}]`);
 }
 
 // Active STT sessions: client WS id → upstream backend
@@ -84,7 +87,7 @@ setInterval(() => {
     if (backend) try { backend.close(); } catch { /* already closed */ }
     sttSessions.delete(id);
   }
-  if (stale.length) console.log(`[ws] Cleaned ${stale.length} stale STT session(s)`);
+  if (stale.length) log.log(`[ws] Cleaned ${stale.length} stale STT session(s)`);
 }, 60_000); // check every minute
 
 // Bot audio relay state
@@ -127,7 +130,7 @@ function isMeaningfulTranscription(text: string): boolean {
 /** Force-flush bot audio buffer (called on disconnect or when buffer is too large) */
 function flushBotAudioBuffer(): void {
   if (botAudioBufferBytes > 0 && botAudioBufferBytes >= 16000) { // at least 0.5s of audio
-    processBotAudioBuffer().catch(e => console.warn('[bot-audio] Flush failed:', e instanceof Error ? e.message : e));
+    processBotAudioBuffer().catch(e => log.warn('[bot-audio] Flush failed:', e instanceof Error ? e.message : e));
   } else {
     botAudioBuffer = [];
     botAudioBufferBytes = 0;
@@ -157,7 +160,7 @@ async function processBotAudioBuffer(): Promise<void> {
     // Convert Int16 PCM to WAV — prepend held audio from previous short segment
     let pcmData: Buffer = Buffer.concat(chunks);
     if (botAudioHeldPcm) {
-      console.log(`[bot-audio] Merging held audio (${(botAudioHeldPcm.length / 32000).toFixed(1)}s) with new chunk (${(pcmData.length / 32000).toFixed(1)}s)`);
+      log.log(`[bot-audio] Merging held audio (${(botAudioHeldPcm.length / 32000).toFixed(1)}s) with new chunk (${(pcmData.length / 32000).toFixed(1)}s)`);
       pcmData = Buffer.concat([botAudioHeldPcm, pcmData]);
       botAudioHeldPcm = null;
     }
@@ -181,7 +184,7 @@ async function processBotAudioBuffer(): Promise<void> {
     const wavBuffer = Buffer.concat([wavHeader, pcmData]);
 
     const { source, target } = getBotSourceTarget();
-    console.log(`[bot-audio] Processing ${(pcmData.length / 1024).toFixed(0)}KB audio (${(pcmData.length / 32000).toFixed(1)}s) ${source}→${target}`);
+    log.log(`[bot-audio] Processing ${(pcmData.length / 1024).toFixed(0)}KB audio (${(pcmData.length / 32000).toFixed(1)}s) ${source}→${target}`);
 
     const callbacks: PipelineCallbacks = {
       onStageStart() {},
@@ -205,7 +208,7 @@ async function processBotAudioBuffer(): Promise<void> {
         ) {
           botAudioHeldPcm = pcmData;
           botAudioHeldMergeCount++;
-          console.log(`[bot-audio] Short segment "${transcription.slice(0, 30)}" — holding audio for merge #${botAudioHeldMergeCount}`);
+          log.log(`[bot-audio] Short segment "${transcription.slice(0, 30)}" — holding audio for merge #${botAudioHeldMergeCount}`);
           return;
         }
 
@@ -213,7 +216,7 @@ async function processBotAudioBuffer(): Promise<void> {
         botAudioHeldPcm = null;
         botAudioHeldMergeCount = 0;
 
-        console.log(`[bot-audio] Pipeline: "${transcription.slice(0, 40)}" → "${result.translation?.slice(0, 40)}"`);
+        log.log(`[bot-audio] Pipeline: "${transcription.slice(0, 40)}" → "${result.translation?.slice(0, 40)}"`);
         // Broadcast as subtitle:early — this is what the website listens for
         broadcastWs({
           type: 'subtitle:early',
@@ -230,7 +233,7 @@ async function processBotAudioBuffer(): Promise<void> {
         });
       },
       onError(stage: string, error: Error) {
-        console.error(`[bot-audio] Pipeline error at ${stage}: ${error.message}`);
+        log.error(`[bot-audio] Pipeline error at ${stage}: ${error.message}`);
       },
     };
 
@@ -238,7 +241,7 @@ async function processBotAudioBuffer(): Promise<void> {
       source, target,
     }, callbacks);
   } catch (err) {
-    console.error(`[bot-audio] Pipeline error:`, err instanceof Error ? err.message : err);
+    log.error(`[bot-audio] Pipeline error:`, err instanceof Error ? err.message : err);
   } finally {
     botAudioProcessing = false;
   }
@@ -264,11 +267,11 @@ export function startParecCapture(): void {
 
   const containerName = botState.podId === 'local' ? BOT_LOCAL_CONTAINER : '';
   if (!containerName) {
-    console.log('[parec] Skipping parec capture — not a local Docker bot');
+    log.log('[parec] Skipping parec capture — not a local Docker bot');
     return;
   }
 
-  console.log(`[parec] Starting PulseAudio capture from container ${containerName}...`);
+  log.log(`[parec] Starting PulseAudio capture from container ${containerName}...`);
   parecProc = Bun.spawn([
     'docker', 'exec', containerName,
     'parec', '--format=s16le', '--channels=1', '--rate=48000',
@@ -287,7 +290,7 @@ export function startParecCapture(): void {
         const { done, value } = await reader.read();
         if (done) break;
         const text = new TextDecoder().decode(value).trim();
-        if (text) console.warn(`[parec] stderr: ${text}`);
+        if (text) log.warn(`[parec] stderr: ${text}`);
       }
     } catch { /* ignore */ }
   })();
@@ -317,7 +320,7 @@ export function startParecCapture(): void {
 
           parecChunks++;
           if (parecChunks === 1 || parecChunks % 500 === 0) {
-            console.log(`[parec] Relaying chunk #${parecChunks} (${chunk.length} bytes) to ${wsClients.size} clients`);
+            log.log(`[parec] Relaying chunk #${parecChunks} (${chunk.length} bytes) to ${wsClients.size} clients`);
           }
 
           for (const client of wsClients) {
@@ -334,16 +337,16 @@ export function startParecCapture(): void {
         }
       }
     } catch (err) {
-      console.warn(`[parec] Read error: ${err}`);
+      log.warn(`[parec] Read error: ${err}`);
     }
-    console.log(`[parec] Capture ended (${parecChunks} chunks sent)`);
+    log.log(`[parec] Capture ended (${parecChunks} chunks sent)`);
     parecProc = null;
   })();
 }
 
 export function stopParecCapture(): void {
   if (parecProc) {
-    console.log(`[parec] Stopping PulseAudio capture (${parecChunks} chunks sent)...`);
+    log.log(`[parec] Stopping PulseAudio capture (${parecChunks} chunks sent)...`);
     const proc = parecProc;
     parecProc = null; // null before kill so reader loop stops trying to read
     parecChunks = 0;
@@ -374,7 +377,7 @@ function buildSpeculativeTranslateFn(source: string, target: string, style: stri
 
 export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unknown>): Promise<void> {
   const type = cmd.type as string;
-  console.log(`[ws] Command from client: ${type}`);
+  log.log(`[ws] Command from client: ${type}`);
 
   try {
 
@@ -520,7 +523,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     if (!sessionId || !text.trim()) return;
 
     const translateFn = buildSpeculativeTranslateFn(source, target, style);
-    try { speculativeCache.speculate(sessionId, text, translateFn); } catch (e) { console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e); }
+    try { speculativeCache.speculate(sessionId, text, translateFn); } catch (e) { log.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e); }
 
   } else if (type === 'ping') {
     ws.send(JSON.stringify({ type: 'pong' }));
@@ -583,20 +586,20 @@ export function startWsServer() {
     const { installConsoleCapture } = require('./file-logger');
     installConsoleCapture();
   } catch (err) {
-    console.warn('[ws-server] Failed to install file logger:', err);
+    log.warn('[ws-server] Failed to install file logger:', err);
   }
 
   // ── Startup config validation ─────────────────────────────────────────────
   const configWarnings = validateStartupConfig();
   if (configWarnings.length > 0) {
-    console.warn('='.repeat(70));
-    console.warn('[startup] Configuration warnings:');
+    log.warn('='.repeat(70));
+    log.warn('[startup] Configuration warnings:');
     for (const w of configWarnings) {
-      console.warn(`  - ${w}`);
+      log.warn(`  - ${w}`);
     }
-    console.warn('='.repeat(70));
+    log.warn('='.repeat(70));
   } else {
-    console.log('[startup] Configuration validated — all critical env vars present.');
+    log.log('[startup] Configuration validated — all critical env vars present.');
   }
 
   /** Constant-time string comparison to prevent timing attacks on auth tokens. */
@@ -684,7 +687,7 @@ export function startWsServer() {
         if (ws.data.type === 'speech') {
           // ── Speech pipeline session ────────────────────────────────
           ws.send(JSON.stringify({ type: 'connected', message: 'Speech pipeline ready. Send config JSON then binary WAV.' }));
-          console.log(`[speech-ws] Client connected id=${ws.data.id}`);
+          log.log(`[speech-ws] Client connected id=${ws.data.id}`);
         } else if (ws.data.type === 'stt') {
           // ── Streaming STT session (with auto-fallback) ─────────────
           const language = ws.data.language;
@@ -699,7 +702,7 @@ export function startWsServer() {
             }
             const t0 = Date.now();
             backend.onConnected = () => {
-              console.log(`[stt-ws] Backend connected: ${backend.provider} id=${ws.data.id}`);
+              log.log(`[stt-ws] Backend connected: ${backend.provider} id=${ws.data.id}`);
               ws.send(JSON.stringify({ type: 'connected', provider: backend.provider }));
             };
             // Text accumulator: the STT backend emits the FULL running text on each
@@ -735,7 +738,7 @@ export function startWsServer() {
                 const srcLang = ws.data.language || 'fr';
                 const tgtLang = ws.data.speculateTarget;
                 const translateFn = buildSpeculativeTranslateFn(srcLang, tgtLang, 'default');
-                try { speculativeCache.speculate(ws.data.id, text, translateFn); } catch (e) { console.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e); }
+                try { speculativeCache.speculate(ws.data.id, text, translateFn); } catch (e) { log.warn('[ws] speculative translate failed:', e instanceof Error ? e.message : e); }
               }
             };
 
@@ -773,7 +776,7 @@ export function startWsServer() {
               if (!sttAccumStartTime) sttAccumStartTime = Date.now();
               const accumAge = Date.now() - sttAccumStartTime;
               if (accumAge >= STT_MAX_ACCUM_MS && pending.split(/\s+/).length >= STT_MIN_FLUSH_WORDS) {
-                console.log(`[stt-ws] Max accum timeout (${accumAge}ms, ${pending.split(/\s+/).length}w) — forcing flush id=${ws.data.id}`);
+                log.log(`[stt-ws] Max accum timeout (${accumAge}ms, ${pending.split(/\s+/).length}w) — forcing flush id=${ws.data.id}`);
                 flushSttAccum();
                 return;
               }
@@ -800,18 +803,18 @@ export function startWsServer() {
               }
             };
             backend.onDisconnected = (reason) => {
-              console.log(`[stt-ws] Backend ${backend.provider} disconnected: ${reason} id=${ws.data.id}`);
+              log.log(`[stt-ws] Backend ${backend.provider} disconnected: ${reason} id=${ws.data.id}`);
               sttSessions.delete(ws.data.id);
               if (ws.readyState !== 1 /* OPEN */) return; // client already gone
               // Always try to reconnect with next available provider (only when ws.readyState === 1).
               // connectBackend() handles the "no provider" case by closing the client WS.
               if (ws.readyState === 1) {
                 excluded.add(backend.provider);
-                console.log(`[stt-ws] Reconnecting (excluded: ${[...excluded].join(',')}) id=${ws.data.id}`);
+                log.log(`[stt-ws] Reconnecting (excluded: ${[...excluded].join(',')}) id=${ws.data.id}`);
                 try {
                   connectBackend();
                 } catch (e) {
-                  console.warn(`[stt-ws] Reconnect failed — closing client WS:`, e instanceof Error ? e.message : e);
+                  log.warn(`[stt-ws] Reconnect failed — closing client WS:`, e instanceof Error ? e.message : e);
                   ws.close(1001, 'STT backend reconnect failed');
                 }
               }
@@ -821,16 +824,16 @@ export function startWsServer() {
             // Expose accumulation timer via backend so the close handler can clear it
             (backend as any)._sttAccumTimer = () => sttAccumTimer;
             (backend as any)._clearSttAccumTimer = () => { if (sttAccumTimer) { clearTimeout(sttAccumTimer); sttAccumTimer = null; } };
-            console.log(`[stt-ws] Client connected id=${ws.data.id} lang=${language || 'auto'} provider=${backend.provider}`);
+            log.log(`[stt-ws] Client connected id=${ws.data.id} lang=${language || 'auto'} provider=${backend.provider}`);
           };
           connectBackend();
         } else if (ws.data.type === 'bot-audio') {
           // ── Bot audio relay — meeting bot streams raw PCM here ──────
-          console.log(`[bot-audio] Bot audio source connected id=${ws.data.id}`);
+          log.log(`[bot-audio] Bot audio source connected id=${ws.data.id}`);
           botAudioSource = ws as unknown as BabelCastWS;
         } else if (ws.data.type === 'recall-audio') {
           // ── Recall.ai audio receiver — Recall bot connects here ──────
-          console.log(`[recall-audio] Recall bot connected id=${ws.data.id}`);
+          log.log(`[recall-audio] Recall bot connected id=${ws.data.id}`);
           import('./recall-handlers').then(({ setRecallState }) => {
             setRecallState({ wsConnected: true, status: 'in_meeting', message: 'Recall bot streaming audio' });
           }).catch(() => {});
@@ -838,7 +841,7 @@ export function startWsServer() {
           // ── Bot events session ─────────────────────────────────────
           const MAX_WS_CLIENTS = 500;
           if (wsClients.size >= MAX_WS_CLIENTS) {
-            console.warn(`[ws] Connection limit reached (${MAX_WS_CLIENTS}) — rejecting`);
+            log.warn(`[ws] Connection limit reached (${MAX_WS_CLIENTS}) — rejecting`);
             ws.close(1013, 'Too many connections');
             return;
           }
@@ -883,7 +886,7 @@ export function startWsServer() {
           }));
           // Also send legacy provider:status for Python app backward compat
           ws.send(JSON.stringify({ type: 'provider:status', gpu: _gpuStatus, tier: _tier, reason: deployState.message || 'Current status' }));
-          console.log(`[ws] Client connected id=${ws.data.id} (total=${wsClients.size}), sent gpu:status gpu=${_gpuStatus} tier=${_tier}`);
+          log.log(`[ws] Client connected id=${ws.data.id} (total=${wsClients.size}), sent gpu:status gpu=${_gpuStatus} tier=${_tier}`);
         }
       },
       message(ws, msg) {
@@ -987,7 +990,7 @@ export function startWsServer() {
           if (typeof msg === 'string') {
             try {
               const meta = JSON.parse(msg) as Record<string, unknown>;
-              console.log(`[recall-audio] Metadata: bot_id=${meta.bot_id} recording_id=${meta.recording_id}`);
+              log.log(`[recall-audio] Metadata: bot_id=${meta.bot_id} recording_id=${meta.recording_id}`);
             } catch { /* ignore */ }
             return;
           }
@@ -1004,7 +1007,7 @@ export function startWsServer() {
             try {
               const parsed = JSON.parse(msg);
               if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.protocol_version) {
-                console.log(`[bot-audio] Handshake: sample_rate=${parsed.sample_rate} bot_id=${parsed.bot_id}`);
+                log.log(`[bot-audio] Handshake: sample_rate=${parsed.sample_rate} bot_id=${parsed.bot_id}`);
                 botAudioSampleRate = parsed.sample_rate ?? 16000;
               }
               // Speaker state updates (arrays) — ignore, not audio
@@ -1014,7 +1017,7 @@ export function startWsServer() {
           // Relay binary audio to all connected Python clients
           botAudioChunks++;
           if (botAudioChunks === 1 || botAudioChunks % 500 === 0) {
-            console.log(`[bot-audio] Relaying audio chunk #${botAudioChunks} (${msg.byteLength} bytes) to ${wsClients.size} clients`);
+            log.log(`[bot-audio] Relaying audio chunk #${botAudioChunks} (${msg.byteLength} bytes) to ${wsClients.size} clients`);
           }
           for (const client of wsClients) {
             try { client.send(msg); } catch { wsClients.delete(client); }
@@ -1025,7 +1028,7 @@ export function startWsServer() {
           botAudioBufferBytes += audioChunk.length;
           // Cap buffer to prevent OOM on runaway audio streams
           if (botAudioBufferBytes > BOT_AUDIO_MAX_BUFFER_BYTES) {
-            console.warn(`[bot-audio] Buffer exceeded ${BOT_AUDIO_MAX_BUFFER_BYTES / 1024 / 1024}MB — dropping oldest chunks`);
+            log.warn(`[bot-audio] Buffer exceeded ${BOT_AUDIO_MAX_BUFFER_BYTES / 1024 / 1024}MB — dropping oldest chunks`);
             while (botAudioBufferBytes > BOT_AUDIO_CHUNK_THRESHOLD && botAudioBuffer.length > 1) {
               botAudioBufferBytes -= botAudioBuffer.shift()!.length;
             }
@@ -1047,16 +1050,16 @@ export function startWsServer() {
         speculativeCache.clear(ws.data.id);
 
         if (ws.data.type === 'speech') {
-          console.log(`[speech-ws] Client disconnected id=${ws.data.id}`);
+          log.log(`[speech-ws] Client disconnected id=${ws.data.id}`);
         } else if (ws.data.type === 'stt') {
           const backend = sttSessions.get(ws.data.id);
           // Clear the STT accumulation timer (trapped in connectBackend closure)
           (backend as any)?._clearSttAccumTimer?.();
           backend?.close();
           sttSessions.delete(ws.data.id);
-          console.log(`[stt-ws] Client disconnected id=${ws.data.id}`);
+          log.log(`[stt-ws] Client disconnected id=${ws.data.id}`);
         } else if (ws.data.type === 'recall-audio') {
-          console.log(`[recall-audio] Recall bot disconnected id=${ws.data.id}`);
+          log.log(`[recall-audio] Recall bot disconnected id=${ws.data.id}`);
           import('./recall-handlers').then(({ recallState, setRecallState }) => {
             if (recallState.wsConnected) {
               setRecallState({ wsConnected: false, status: 'ended', message: 'Recall bot disconnected' });
@@ -1067,7 +1070,7 @@ export function startWsServer() {
           }).catch(() => {});
         } else if (ws.data.type === 'bot-audio') {
           if (botAudioSource === ws) botAudioSource = null;
-          console.log(`[bot-audio] Bot audio source disconnected id=${ws.data.id} (${botAudioChunks} chunks relayed, ${botAudioBufferBytes} bytes buffered)`);
+          log.log(`[bot-audio] Bot audio source disconnected id=${ws.data.id} (${botAudioChunks} chunks relayed, ${botAudioBufferBytes} bytes buffered)`);
           // Flush remaining audio, then clear (processBotAudioBuffer grabs+clears the buffer atomically)
           if (botAudioBufferBytes >= 16000) {
             processBotAudioBuffer().catch(e => console.warn('[bot-audio] final buffer flush failed:', e instanceof Error ? e.message : e));
@@ -1084,7 +1087,7 @@ export function startWsServer() {
         } else {
           unsubscribeDub(ws.data.id);
           wsClients.delete(ws as unknown as BabelCastWS);
-          console.log(`[ws] Client disconnected id=${ws.data.id} (total=${wsClients.size})`);
+          log.log(`[ws] Client disconnected id=${ws.data.id} (total=${wsClients.size})`);
         }
       },
     },
@@ -1097,10 +1100,10 @@ export function startWsServer() {
       const { initPrisma } = require('./prisma-init');
       initPrisma().catch((e: any) => console.warn('[ws-server] DB init failed:', e?.message?.slice(0, 80)));
     } catch {
-      console.warn('[ws-server] prisma-init not available — running without DB');
+      log.warn('[ws-server] prisma-init not available — running without DB');
     }
   } else {
-    console.warn('[ws-server] DATABASE_URL not set — running without DB');
+    log.warn('[ws-server] DATABASE_URL not set — running without DB');
   }
 
   // ── HTTP API server on PORT (REST endpoints for GPU handlers) ──────────
@@ -1128,9 +1131,14 @@ export function startWsServer() {
       'GET /v1/gpu/my-location': gh.handleGpuMyLocation,
       'GET /v1/gpu/reputation': gh.handleGpuReputation,
       'POST /v1/gpu/preflight': gh.handlePreflightCheck,
+      'GET /v1/gpu/compatibility': gh.handleGpuCompatibility,
       'GET /v1/gpu/readiness/status': gh.handleGetGpuReadinessStatus,
       'GET /v1/gpu/readiness/history': gh.handleGetGpuReadinessHistory,
       'POST /v1/gpu/readiness/reset': gh.handlePostResetReadiness,
+      // Canary deployment status
+      'GET /v1/canary/status': gh.handleCanaryStatus,
+      // Performance profiling
+      'GET /v1/performance': gh.handlePerformanceStats,
       // SnapGPU snapshot CRUD (proxied to the snapgpu-gateway in the GPU pod)
       'POST /v1/gpu/snapshot': gh.handleSnapshotCreate,
       'GET /v1/gpu/snapshot': gh.handleSnapshotList,
@@ -1161,6 +1169,10 @@ export function startWsServer() {
         }
       },
       'GET /health': gh.handleHealth,
+      // Error summary
+      'GET /v1/errors/summary': gh.handleErrorSummary,
+      'GET /v1/errors/alerts': gh.handleErrorAlerts,
+      'POST /v1/errors/alerts/acknowledge': gh.handleErrorAlerts,
       // Config
       'GET /v1/config/providers': ch.handleGetProviderConfig,
       'POST /v1/config/providers': ch.handlePatchProviderConfig,
@@ -1223,7 +1235,7 @@ export function startWsServer() {
         'DELETE /v1/gpu/vast/workergroups': vgh.handleVastWorkerGroupDelete,
       });
     } catch (e: any) {
-      console.warn(`[ws-server] Vast.ai handlers not loaded: ${e.message?.slice(0, 80)}`);
+      log.warn(`[ws-server] Vast.ai handlers not loaded: ${e.message?.slice(0, 80)}`);
     }
 
     // Playground
@@ -1258,6 +1270,16 @@ export function startWsServer() {
       });
     } catch { /* ai-handlers module optional — serve.ts proxy can run without them */ }
 
+    // Video generation (wan-i2v GPU)
+    try {
+      const vh = require('./video-handlers');
+      Object.assign(handlers, {
+        'POST /v1/video/generate': vh.handleVideoGenerate,
+      });
+    } catch (e: any) {
+      log.warn(`[ws-server] video-handlers not loaded: ${e.message?.slice(0, 80)}`);
+    }
+
     // ── Initialize workload registry ────────────────────────────────────
     try {
       const { workloadRegistry } = require('../src/workloads/registry');
@@ -1267,9 +1289,9 @@ export function startWsServer() {
       workloadRegistry.registerDriver(new GpuWorkloadDriver());
       workloadRegistry.registerDriver(new BotWorkloadDriver());
       workloadRegistry.registerDriver(new DbWorkloadDriver());
-      console.log('[ws-server] Workload registry initialized (gpu, bot, db drivers)');
+      log.log('[ws-server] Workload registry initialized (gpu, bot, db drivers)');
     } catch (e: any) {
-      console.warn(`[ws-server] Workload registry not available: ${e.message?.slice(0, 80)}`);
+      log.warn(`[ws-server] Workload registry not available: ${e.message?.slice(0, 80)}`);
     }
 
     let routeWorkloadRequest: ((req: any, res: any, pathname: string, method: string) => boolean) | null = null;
@@ -1287,7 +1309,7 @@ export function startWsServer() {
       matchDockerDynamic = ib.matchDockerDynamicRoute;
       Object.assign(handlers, dockerRoutes);
     } catch (e: any) {
-      console.warn(`[ws-server] image-build-handlers not loaded: ${e.message?.slice(0, 80)}`);
+      log.warn(`[ws-server] image-build-handlers not loaded: ${e.message?.slice(0, 80)}`);
     }
 
     Bun.serve({
@@ -1418,9 +1440,9 @@ export function startWsServer() {
         });
       },
     });
-    console.log(`[ws-server] HTTP API on port ${PORT}`);
+    log.log(`[ws-server] HTTP API on port ${PORT}`);
   } catch (e: any) {
-    console.warn(`[ws-server] HTTP API not started: ${e.message?.slice(0, 80)}`);
+    log.warn(`[ws-server] HTTP API not started: ${e.message?.slice(0, 80)}`);
   }
 
   // ── Startup tasks ─────────────────────────────────────────────────────────
@@ -1429,7 +1451,7 @@ export function startWsServer() {
     const { loadPersistedDailySpend } = require('./state');
     loadPersistedDailySpend();
   } catch (e: any) {
-    console.warn(`[ws-server] loadPersistedDailySpend failed: ${e.message?.slice(0, 80)}`);
+    log.warn(`[ws-server] loadPersistedDailySpend failed: ${e.message?.slice(0, 80)}`);
   }
 
   // 1. Restore persisted config (idle timeout, deploy settings, latency targets)
@@ -1437,27 +1459,27 @@ export function startWsServer() {
     const { applyRuntimeConfig } = require('./config-persistence');
     applyRuntimeConfig();
   } catch (e: any) {
-    console.warn(`[ws-server] applyRuntimeConfig failed: ${e.message?.slice(0, 80)}`);
+    log.warn(`[ws-server] applyRuntimeConfig failed: ${e.message?.slice(0, 80)}`);
   }
 
   // 2. Terminate any stopped pod overdue for auto-destroy (timer lost on restart)
   try {
     const { terminateStaleStoppedPodOnStartup } = require('./gpu-deploy');
     terminateStaleStoppedPodOnStartup().catch((e: any) =>
-      console.warn(`[ws-server] terminateStaleStoppedPodOnStartup failed: ${e.message?.slice(0, 80)}`)
+      log.warn(`[ws-server] terminateStaleStoppedPodOnStartup failed: ${e.message?.slice(0, 80)}`)
     );
   } catch (e: any) {
-    console.warn(`[ws-server] terminateStaleStoppedPodOnStartup not loaded: ${e.message?.slice(0, 80)}`);
+    log.warn(`[ws-server] terminateStaleStoppedPodOnStartup not loaded: ${e.message?.slice(0, 80)}`);
   }
 
   // 3. Reconnect to any pod that was healthy before restart
   try {
     const { tryRecoverActiveDeploy } = require('./gpu-deploy');
     tryRecoverActiveDeploy().catch((e: any) =>
-      console.warn(`[ws-server] tryRecoverActiveDeploy failed: ${e.message?.slice(0, 80)}`)
+      log.warn(`[ws-server] tryRecoverActiveDeploy failed: ${e.message?.slice(0, 80)}`)
     );
   } catch (e: any) {
-    console.warn(`[ws-server] tryRecoverActiveDeploy not loaded: ${e.message?.slice(0, 80)}`);
+    log.warn(`[ws-server] tryRecoverActiveDeploy not loaded: ${e.message?.slice(0, 80)}`);
   }
 
   // 4. Auto-boot GPU if profile has bootOnStartup=true
@@ -1465,11 +1487,11 @@ export function startWsServer() {
     const gh = require('./gpu-handlers');
     if (gh.autoBootFromProfile) {
       gh.autoBootFromProfile().catch((e: any) =>
-        console.warn(`[ws-server] autoBootFromProfile failed: ${e.message?.slice(0, 80)}`)
+        log.warn(`[ws-server] autoBootFromProfile failed: ${e.message?.slice(0, 80)}`)
       );
     }
   } catch (e: any) {
-    console.warn(`[ws-server] autoBootFromProfile not loaded: ${e.message?.slice(0, 80)}`);
+    log.warn(`[ws-server] autoBootFromProfile not loaded: ${e.message?.slice(0, 80)}`);
   }
 
   // Start standby monitor — auto-deploys a warm GPU when session duration or
@@ -1478,7 +1500,7 @@ export function startWsServer() {
     const { startStandbyMonitor } = require('./gpu-standby');
     startStandbyMonitor();
   } catch (e: any) {
-    console.warn('[ws-server] Standby monitor not started:', e?.message?.slice(0, 80));
+    log.warn('[ws-server] Standby monitor not started:', e?.message?.slice(0, 80));
   }
 
   return WS_PORT;

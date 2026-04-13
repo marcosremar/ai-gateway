@@ -4,7 +4,7 @@
  * (mlx-qwen3-asr on Apple Silicon).
  */
 
-import { exec, spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 
@@ -13,6 +13,39 @@ const SCRIPTS_DIR = path.join(PROJECT_ROOT, 'scripts');
 const PID_FILE = '/tmp/babelcast-mlx-qwen3-asr.pid';
 const LOG_FILE = path.join(PROJECT_ROOT, 'logs', 'mlx-qwen3-asr.log');
 const VENV_DIR = path.join(PROJECT_ROOT, '.venv-mlx-qwen3-asr');
+
+const ALLOWED_VARIANTS = ['4bit', 'fp16', '1.7b'];
+// eslint-disable-next-line no-control-regex, no-useless-escape
+const SHELL_META_CHARS = /[;|&$`\\!#<>{}\[\]()*?~\n\r]/;
+
+function validateScriptPath(scriptPath: string): string | null {
+  if (!scriptPath || typeof scriptPath !== 'string') {
+    return 'Script path is required';
+  }
+  if (SHELL_META_CHARS.test(scriptPath)) {
+    return 'Invalid characters in script path';
+  }
+  if (!path.isAbsolute(scriptPath)) {
+    return 'Script path must be absolute';
+  }
+  if (!existsSync(scriptPath)) {
+    return `Script not found: ${scriptPath}`;
+  }
+  return null;
+}
+
+function validateVariant(variant: string): string | null {
+  if (!variant || typeof variant !== 'string') {
+    return 'Variant is required';
+  }
+  if (SHELL_META_CHARS.test(variant)) {
+    return 'Invalid characters in variant';
+  }
+  if (!ALLOWED_VARIANTS.includes(variant)) {
+    return `Invalid variant: ${variant}. Allowed: ${ALLOWED_VARIANTS.join(', ')}`;
+  }
+  return null;
+}
 
 interface LocalSTTStatus {
   installed: boolean;
@@ -79,17 +112,19 @@ export async function handleLocalSttInstall(req: Request): Promise<Response> {
   const body = await req.json() as { variant?: string };
   const variant = body.variant || '4bit';
 
-  if (!['4bit', 'fp16', '1.7b'].includes(variant)) {
-    return Response.json({ error: `Invalid variant: ${variant}. Use: 4bit, fp16, 1.7b` }, { status: 400 });
+  const variantError = validateVariant(variant);
+  if (variantError) {
+    return Response.json({ error: variantError }, { status: 400 });
   }
 
   const script = path.join(SCRIPTS_DIR, 'setup-mlx-qwen3-asr.sh');
-  if (!existsSync(script)) {
-    return Response.json({ error: 'Setup script not found' }, { status: 500 });
+  const scriptError = validateScriptPath(script);
+  if (scriptError) {
+    return Response.json({ error: scriptError }, { status: 500 });
   }
 
   return new Promise((resolve) => {
-    const child = exec(`bash "${script}" "${variant}"`, {
+    execFile('bash', [script, variant], {
       cwd: PROJECT_ROOT,
       timeout: 300_000,  // 5 min max
       env: { ...process.env, MLX_QWEN3_ASR_PORT: process.env.MLX_QWEN3_ASR_PORT || '8765' },

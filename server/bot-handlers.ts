@@ -2,6 +2,9 @@
 // setBotState, cleanupBotPods, handleBotDeploy, handleBotStatus,
 // handleBotJoin, handleBotLeave, handleBotTerminate.
 
+import { createLogger } from '../src/logger';
+const log = createLogger('bot-handlers');
+
 import type { IncomingMessage, ServerResponse } from 'http';
 import {
   botState, setBotStateVar, botDeployLock, setBotDeployLock, setBotApiKey,
@@ -62,11 +65,11 @@ function clearBotIdleTimer() {
 
 function scheduleBotIdleShutdown() {
   clearBotIdleTimer();
-  console.log(`[bot] Meeting ended — auto-terminate in ${BOT_IDLE_SHUTDOWN_MS / 60_000} min if not rejoined`);
+  log.log(`[bot] Meeting ended — auto-terminate in ${BOT_IDLE_SHUTDOWN_MS / 60_000} min if not rejoined`);
   botIdleTimer = setTimeout(async () => {
     botIdleTimer = null;
     if (botState.status !== 'ready') return; // already terminated or reused
-    console.log(`[bot] Auto-terminating idle bot pod after ${BOT_IDLE_SHUTDOWN_MS / 60_000} min`);
+    log.log(`[bot] Auto-terminating idle bot pod after ${BOT_IDLE_SHUTDOWN_MS / 60_000} min`);
     try {
       const podId = botState.podId;
       const apiKey = botApiKey || deployApiKey || process.env.RUNPOD_API_KEY || '';
@@ -81,7 +84,7 @@ function scheduleBotIdleShutdown() {
         }
       }
     } catch (e) {
-      console.warn('[bot] Auto-terminate failed:', e instanceof Error ? e.message : e);
+      log.warn('[bot] Auto-terminate failed:', e instanceof Error ? e.message : e);
     }
   }, BOT_IDLE_SHUTDOWN_MS) as unknown as Timer;
 }
@@ -94,7 +97,7 @@ function startBotAudioPull(botEndpoint: string) {
   const appName = process.env.BOT_FLY_APP_NAME || 'babelcast-bot';
   const baseUrl = flyHost ? `wss://${flyHost}` : `wss://${appName}.fly.dev`;
   const wsUrl = baseUrl + '/ws/audio-out';
-  console.log(`[bot-audio-pull] Connecting to ${wsUrl}`);
+  log.log(`[bot-audio-pull] Connecting to ${wsUrl}`);
   import('ws').then(({ WebSocket }) => {
     const headers: Record<string, string> = {};
     if (botPodApiKey) headers['Authorization'] = `Bearer ${botPodApiKey}`;
@@ -105,11 +108,11 @@ function startBotAudioPull(botEndpoint: string) {
     const ws = new WebSocket(wsUrl, { headers, handshakeTimeout: 15_000 });
     botAudioPullWs = ws;
     let chunks = 0;
-    ws.on('open', () => console.log('[bot-audio-pull] Connected — receiving audio'));
+    ws.on('open', () => log.log('[bot-audio-pull] Connected — receiving audio'));
     ws.on('message', (data) => {
       chunks++;
       if (chunks === 1 || chunks % 5000 === 0) {
-        console.log(`[bot-audio-pull] chunk #${chunks} → ${wsClients.size} client(s)`);
+        log.log(`[bot-audio-pull] chunk #${chunks} → ${wsClients.size} client(s)`);
       }
       // Normalize RawData (Buffer | ArrayBuffer | Buffer[]) to a Buffer so it
       // matches Bun ServerWebSocket.send's BufferSource parameter.
@@ -127,7 +130,7 @@ function startBotAudioPull(botEndpoint: string) {
       for (const c of dead) wsClients.delete(c);
     });
     ws.on('close', () => {
-      console.log(`[bot-audio-pull] Disconnected (${chunks} chunks received)`);
+      log.log(`[bot-audio-pull] Disconnected (${chunks} chunks received)`);
       botAudioPullWs = null;
       // Auto-reconnect if bot is still joined
       if (botState.status === 'joined') {
@@ -135,7 +138,7 @@ function startBotAudioPull(botEndpoint: string) {
       }
     });
     ws.on('error', (err) => {
-      console.warn(`[bot-audio-pull] Error: ${err.message}`);
+      log.warn(`[bot-audio-pull] Error: ${err.message}`);
     });
   });
 }
@@ -148,7 +151,7 @@ function stopBotAudioPull() {
 
 export function setBotState(patch: Partial<BotDeploymentState>) {
   Object.assign(botState, patch);
-  console.log(`[bot] ${botState.status}: ${botState.message}`);
+  log.log(`[bot] ${botState.status}: ${botState.message}`);
 }
 
 export async function cleanupBotPods(apiKey: string): Promise<void> {
@@ -159,20 +162,20 @@ export async function cleanupBotPods(apiKey: string): Promise<void> {
       (inst.instanceName || '').startsWith(BOT_POD_PREFIX) && inst.status !== 'EXITED'
     );
     if (toTerminate.length > 0) {
-      console.log(`[bot] Cleaning up ${toTerminate.length} RunPod bot pod(s)...`);
+      log.log(`[bot] Cleaning up ${toTerminate.length} RunPod bot pod(s)...`);
       await Promise.allSettled(
         toTerminate.map(async (inst) => {
           try {
             await runpod.deleteInstance(inst.instanceId, { apiKey });
-            console.log(`[bot] Terminated RunPod bot pod ${inst.instanceId}`);
+            log.log(`[bot] Terminated RunPod bot pod ${inst.instanceId}`);
           } catch (err) {
-            console.warn(`[bot] Failed to terminate RunPod bot pod ${inst.instanceId}: ${err}`);
+            log.warn(`[bot] Failed to terminate RunPod bot pod ${inst.instanceId}: ${err}`);
           }
         })
       );
     }
   } catch (err) {
-    console.warn(`[bot] Failed to list RunPod pods for bot cleanup: ${err}`);
+    log.warn(`[bot] Failed to list RunPod pods for bot cleanup: ${err}`);
   }
   // Clean up Scaleway bot instances
   const scwKey = process.env.SCALEWAY_SECRET_KEY || '';
@@ -181,20 +184,20 @@ export async function cleanupBotPods(apiKey: string): Promise<void> {
       const scwInstances = await scaleway.listInstances({ apiKey: scwKey });
       const scwToTerminate = scwInstances.filter(inst => inst.status === 'running');
       if (scwToTerminate.length > 0) {
-        console.log(`[bot] Cleaning up ${scwToTerminate.length} Scaleway bot instance(s)...`);
+        log.log(`[bot] Cleaning up ${scwToTerminate.length} Scaleway bot instance(s)...`);
         await Promise.allSettled(
           scwToTerminate.map(async (inst) => {
             try {
               await scaleway.deleteInstance(inst.instanceId, { apiKey: scwKey });
-              console.log(`[bot] Terminated Scaleway bot ${inst.instanceId}`);
+              log.log(`[bot] Terminated Scaleway bot ${inst.instanceId}`);
             } catch (err) {
-              console.warn(`[bot] Failed to terminate Scaleway bot ${inst.instanceId}: ${err}`);
+              log.warn(`[bot] Failed to terminate Scaleway bot ${inst.instanceId}: ${err}`);
             }
           })
         );
       }
     } catch (err) {
-      console.warn(`[bot] Failed to list Scaleway instances for cleanup: ${err}`);
+      log.warn(`[bot] Failed to list Scaleway instances for cleanup: ${err}`);
     }
   }
   // Clean up Fly.io bot machines
@@ -204,20 +207,20 @@ export async function cleanupBotPods(apiKey: string): Promise<void> {
       const flyInstances = await flyio.listInstances({ apiKey: flyKey });
       const flyToTerminate = flyInstances.filter(inst => inst.status === 'running');
       if (flyToTerminate.length > 0) {
-        console.log(`[bot] Cleaning up ${flyToTerminate.length} Fly.io bot machine(s)...`);
+        log.log(`[bot] Cleaning up ${flyToTerminate.length} Fly.io bot machine(s)...`);
         await Promise.allSettled(
           flyToTerminate.map(async (inst) => {
             try {
               await flyio.deleteInstance(inst.instanceId, { apiKey: flyKey });
-              console.log(`[bot] Terminated Fly.io bot machine ${inst.instanceId}`);
+              log.log(`[bot] Terminated Fly.io bot machine ${inst.instanceId}`);
             } catch (err) {
-              console.warn(`[bot] Failed to terminate Fly.io bot ${inst.instanceId}: ${err}`);
+              log.warn(`[bot] Failed to terminate Fly.io bot ${inst.instanceId}: ${err}`);
             }
           })
         );
       }
     } catch (err) {
-      console.warn(`[bot] Failed to list Fly.io machines for cleanup: ${err}`);
+      log.warn(`[bot] Failed to list Fly.io machines for cleanup: ${err}`);
     }
   }
 }
@@ -272,7 +275,7 @@ async function deployLocalDocker(dockerImage: string, envVars?: Record<string, s
     if (!isRunning) {
       throw new Error(`Docker run failed (exit ${exitCode}): ${stderr.slice(0, 200)}`);
     }
-    console.log(`[bot] Docker exited ${exitCode} but container is running (platform warning)`);
+    log.log(`[bot] Docker exited ${exitCode} but container is running (platform warning)`);
   }
 
   const endpoint = `http://localhost:${LOCAL_BOT_PORT}`;
@@ -310,12 +313,12 @@ async function deployLocalDocker(dockerImage: string, envVars?: Record<string, s
  */
 export async function autoDeployBot(): Promise<void> {
   if (botState.status !== 'idle' && botState.status !== 'error') {
-    console.log(`[bot] Auto-boot: bot already deployed (status=${botState.status}), skipping`);
+    log.log(`[bot] Auto-boot: bot already deployed (status=${botState.status}), skipping`);
     return;
   }
   const flyKey = process.env.FLY_API_TOKEN || '';
   if (!flyKey) {
-    console.log('[bot] Auto-boot: FLY_API_TOKEN not set — bot will not auto-deploy');
+    log.log('[bot] Auto-boot: FLY_API_TOKEN not set — bot will not auto-deploy');
     return;
   }
 
@@ -333,7 +336,7 @@ export async function autoDeployBot(): Promise<void> {
   });
 
   try {
-    console.log('[bot] Auto-boot: starting Fly.io bot deploy...');
+    log.log('[bot] Auto-boot: starting Fly.io bot deploy...');
     const instance = await flyio.createInstance(
       { dockerImage: BOT_DOCKER_IMAGE, ramGb: 8, vcpus: 4, env: podEnv },
       { apiKey: flyKey },
@@ -363,7 +366,7 @@ export async function autoDeployBot(): Promise<void> {
         if (resp.ok) {
           const bootSec = Math.round((Date.now() - bootStartMs) / 1000);
           setBotState({ status: 'ready', message: `Auto-boot: bot ready in ${bootSec}s (Fly.io)`, webcamRtmpUrl: '', sshHost: '', sshPort: 0 });
-          console.log(`[bot] Auto-boot: Fly.io bot ready in ${bootSec}s — endpoint: ${endpoint}`);
+          log.log(`[bot] Auto-boot: Fly.io bot ready in ${bootSec}s — endpoint: ${endpoint}`);
           return;
         }
       } catch { /* not ready yet */ }
@@ -374,7 +377,7 @@ export async function autoDeployBot(): Promise<void> {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[bot] Auto-boot: Fly.io deploy failed — ${msg}`);
+    log.error(`[bot] Auto-boot: Fly.io deploy failed — ${msg}`);
     setBotState({ status: 'error', message: `Auto-boot failed: ${msg}` });
   } finally {
     setBotDeployLock(false);
@@ -411,14 +414,14 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
         await deployLocalDocker(botDockerImage, localEnv);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[bot] Local deploy failed: ${msg}`);
+        log.error(`[bot] Local deploy failed: ${msg}`);
         setBotState({ status: 'error', message: `Local deploy failed: ${msg}` });
       } finally {
         setBotDeployLock(false);  // always released exactly once here
       }
     })().catch(err => {
       // Only log — lock already released in finally
-      console.error('[bot] Unexpected error escaping local deploy task:', err);
+      log.error('[bot] Unexpected error escaping local deploy task:', err);
     });
 
     res.writeHead(202, { 'Content-Type': 'application/json' });
@@ -469,7 +472,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
       // ── Fly.io (default when FLY_API_TOKEN is set) ──
       if (preferFlyio) {
         try {
-          console.log('[bot] Deploying on Fly.io (default)...');
+          log.log('[bot] Deploying on Fly.io (default)...');
           isFlyioPod = true;
           isCpuPod = true;
           instance = await flyio.createInstance(
@@ -482,11 +485,11 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
             { apiKey: flyKey },
           );
         } catch (flyErr) {
-          console.warn(`[bot] Fly.io failed: ${flyErr instanceof Error ? flyErr.message : flyErr}`);
+          log.warn(`[bot] Fly.io failed: ${flyErr instanceof Error ? flyErr.message : flyErr}`);
           isFlyioPod = false;
           instance = null;
           if (!apiKey) throw flyErr; // no RunPod fallback available
-          console.log('[bot] Falling back to RunPod...');
+          log.log('[bot] Falling back to RunPod...');
           setBotState({ message: 'Fly.io failed, trying RunPod...' });
         }
       }
@@ -509,7 +512,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
             { apiKey },
           );
         } catch {
-          console.log('[bot] GPU pods exhausted, trying CPU pod...');
+          log.log('[bot] GPU pods exhausted, trying CPU pod...');
           isCpuPod = true;
         }
       }
@@ -533,14 +536,14 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
             { apiKey },
           );
         } catch (runpodErr) {
-          console.warn(`[bot] RunPod CPU failed: ${runpodErr instanceof Error ? runpodErr.message : runpodErr}`);
+          log.warn(`[bot] RunPod CPU failed: ${runpodErr instanceof Error ? runpodErr.message : runpodErr}`);
           // Fallback to Scaleway if RunPod fails (e.g. insufficient balance)
           // Fallback chain: Scaleway → Fly.io
           const scwKey = process.env.SCALEWAY_SECRET_KEY || '';
           const flyKey = process.env.FLY_API_TOKEN || '';
           if (scwKey) {
             try {
-              console.log('[bot] Trying Scaleway fallback...');
+              log.log('[bot] Trying Scaleway fallback...');
               setBotState({ message: 'RunPod unavailable, deploying on Scaleway...' });
               isScalewayPod = true;
               instance = await scaleway.createInstance(
@@ -553,10 +556,10 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
                 { apiKey: scwKey },
               );
             } catch (scwErr) {
-              console.warn(`[bot] Scaleway failed: ${scwErr instanceof Error ? scwErr.message : scwErr}`);
+              log.warn(`[bot] Scaleway failed: ${scwErr instanceof Error ? scwErr.message : scwErr}`);
               isScalewayPod = false;
               if (flyKey) {
-                console.log('[bot] Trying Fly.io fallback...');
+                log.log('[bot] Trying Fly.io fallback...');
                 setBotState({ message: 'Scaleway unavailable, deploying on Fly.io...' });
                 isFlyioPod = true;
                 instance = await flyio.createInstance(
@@ -573,7 +576,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
               }
             }
           } else if (flyKey) {
-            console.log('[bot] Trying Fly.io fallback...');
+            log.log('[bot] Trying Fly.io fallback...');
             setBotState({ message: 'RunPod unavailable, deploying on Fly.io...' });
             isFlyioPod = true;
             instance = await flyio.createInstance(
@@ -626,7 +629,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
             // Scaleway: endpoint is stored in instance when created (already in botState)
             if (botState.endpoint) {
               endpoint = botState.endpoint;
-              console.log(`[bot] Scaleway endpoint from state: ${endpoint}`);
+              log.log(`[bot] Scaleway endpoint from state: ${endpoint}`);
             }
           } else if (isCpuPod) {
             // CPU pods: build proxy URL directly from pod ID (RunPod doesn't expose runtime/IP)
@@ -664,7 +667,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
 
               if (isFlyioPod || isCpuPod) {
                 // Fly.io + CPU pods: no direct IP/TCP ports — only HTTP(S) URLs available
-                console.log(`[bot] ${isFlyioPod ? 'Fly.io' : 'CPU'} pod ready (HTTPS only — no RTMP/SSH)`);
+                log.log(`[bot] ${isFlyioPod ? 'Fly.io' : 'CPU'} pod ready (HTTPS only — no RTMP/SSH)`);
               } else {
                 // GPU pods: resolve direct IP + port mappings for RTMP/SSH via RunpodClient
                 try {
@@ -677,19 +680,19 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
                         const rtmpPort = runtimePorts.find(p => p.privatePort === 1936);
                         if (rtmpPort?.publicPort) {
                           webcamRtmpUrl = `rtmp://${publicIp}:${rtmpPort.publicPort}/live`;
-                          console.log(`[bot] RTMP webcam URL: ${webcamRtmpUrl}`);
+                          log.log(`[bot] RTMP webcam URL: ${webcamRtmpUrl}`);
                         }
                         const sshPort_ = runtimePorts.find(p => p.privatePort === 22);
                         if (sshPort_?.publicPort) {
                           sshHost = publicIp;
                           sshPort = sshPort_.publicPort as number;
-                          console.log(`[bot] SSH: ${sshHost}:${sshPort}`);
+                          log.log(`[bot] SSH: ${sshHost}:${sshPort}`);
                         }
                       }
                     }
                   }
                 } catch (err) {
-                  console.warn(`[bot] Failed to resolve ports: ${err}`);
+                  log.warn(`[bot] Failed to resolve ports: ${err}`);
                 }
               }
               setBotState({ status: 'ready', message: `Bot pod ready: ${endpoint}`, webcamRtmpUrl, sshHost, sshPort });
@@ -704,14 +707,14 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[bot] Deploy failed: ${msg}`);
+      log.error(`[bot] Deploy failed: ${msg}`);
       setBotState({ status: 'error', message: `Bot deploy failed: ${msg}` });
     } finally {
       setBotDeployLock(false);
     }
   })().catch(err => {
     // Only log — lock already released in finally
-    console.error('[bot] Unexpected error escaping deploy task:', err);
+    log.error('[bot] Unexpected error escaping deploy task:', err);
   });
 
   res.writeHead(202, { 'Content-Type': 'application/json' });
@@ -833,10 +836,10 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
       : await joinRes.text().catch(() => '');
     if (!joinRes.ok) {
       const errDetail = typeof joinBody === 'string' ? joinBody : JSON.stringify(joinBody);
-      console.warn(`[bot] /join returned ${joinRes.status}: ${errDetail}`);
+      log.warn(`[bot] /join returned ${joinRes.status}: ${errDetail}`);
       setBotState({ status: 'ready', message: `Bot /join failed (HTTP ${joinRes.status}): ${errDetail.slice(0, 100)}` });
     } else {
-      console.log(`[bot] /join OK: ${JSON.stringify(joinBody)}`);
+      log.log(`[bot] /join OK: ${JSON.stringify(joinBody)}`);
       setBotState({ status: 'joined' });
       broadcastWs({ type: 'bot:status', status: 'joining', message: 'Bot connecting to meeting...' });
       // Wait for bot to actually enter the meeting by checking if audio chunks arrive.
@@ -850,7 +853,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
           if (botState.status !== 'joined') break;
           if (getBotAudioChunks() > startChunks + 5) {
             broadcastWs({ type: 'bot:status', status: 'in_meeting', message: 'Bot joined meeting' });
-            console.log(`[bot] Bot confirmed in meeting (audio chunks: ${getBotAudioChunks() - startChunks})`);
+            log.log(`[bot] Bot confirmed in meeting (audio chunks: ${getBotAudioChunks() - startChunks})`);
             break;
           }
         }
@@ -870,7 +873,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
         if (!flyHost && botEndpoint.includes('https://')) {
           (probeFetchOpts as any).tls = { rejectUnauthorized: false };
         }
-        console.log(`[bot-watchdog] Probing ${probeUrl} every 10s (machine-id=${botState.podId ?? 'n/a'})`);
+        log.log(`[bot-watchdog] Probing ${probeUrl} every 10s (machine-id=${botState.podId ?? 'n/a'})`);
 
         // Cancel previous watchdog loop (if user re-joined quickly)
         const myGen = ++botWatchdogGen;
@@ -896,7 +899,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
               } else if (data.status === 'idle' && wasInMeeting && reconnectAttempts < MAX_RECONNECTS) {
                 // Bot left the meeting — auto-rejoin
                 reconnectAttempts++;
-                console.log(`[bot] Bot dropped from meeting — auto-rejoin attempt ${reconnectAttempts}/${MAX_RECONNECTS}`);
+                log.log(`[bot] Bot dropped from meeting — auto-rejoin attempt ${reconnectAttempts}/${MAX_RECONNECTS}`);
                 broadcastWs({ type: 'bot:status', status: 'joining', message: `Bot reconnecting (${reconnectAttempts}/${MAX_RECONNECTS})...` });
                 try {
                   const rejoinRes = await fetch(`${botEndpoint}/join`, {
@@ -906,16 +909,16 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
                     signal: AbortSignal.timeout(30_000),
                   });
                   if (rejoinRes.ok) {
-                    console.log(`[bot] Auto-rejoin sent successfully`);
+                    log.log(`[bot] Auto-rejoin sent successfully`);
                     // Keep wasInMeeting=true so next idle check continues counting reconnect attempts
                   } else {
-                    console.warn(`[bot] Auto-rejoin failed: HTTP ${rejoinRes.status}`);
+                    log.warn(`[bot] Auto-rejoin failed: HTTP ${rejoinRes.status}`);
                   }
                 } catch (e) {
-                  console.warn(`[bot] Auto-rejoin error: ${e instanceof Error ? e.message : e}`);
+                  log.warn(`[bot] Auto-rejoin error: ${e instanceof Error ? e.message : e}`);
                 }
               } else if (data.status === 'idle' && wasInMeeting && reconnectAttempts >= MAX_RECONNECTS) {
-                console.log(`[bot] Bot left meeting after ${MAX_RECONNECTS} reconnect attempts — giving up`);
+                log.log(`[bot] Bot left meeting after ${MAX_RECONNECTS} reconnect attempts — giving up`);
                 broadcastWs({ type: 'bot:status', status: 'ended', message: 'Bot disconnected from meeting' });
                 setBotState({ status: 'ready', message: 'Bot disconnected — pod still running' });
                 scheduleBotIdleShutdown();
@@ -925,7 +928,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
           } catch {
             consecutiveProbeFailures++;
             if (consecutiveProbeFailures >= MAX_PROBE_FAILURES) {
-              console.warn(`[bot] Machine unreachable for ${consecutiveProbeFailures} consecutive probes — declaring crashed`);
+              log.warn(`[bot] Machine unreachable for ${consecutiveProbeFailures} consecutive probes — declaring crashed`);
               broadcastWs({ type: 'bot:status', status: 'ended', message: 'Bot machine crashed' });
               setBotState({ status: 'idle', message: 'Bot machine crashed — redeploy to reconnect' });
               scheduleBotIdleShutdown();
@@ -938,7 +941,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
       // Predictive warmup: warm all GPU models for minimal first-request latency
       if (deployState.status === 'ready' && deployState.endpoint) {
         warmupAllGpuModels(deployState.endpoint).catch(err =>
-          console.warn('[warmup] Predictive warmup failed:', err instanceof Error ? err.message : err)
+          log.warn('[warmup] Predictive warmup failed:', err instanceof Error ? err.message : err)
         );
       }
       // Start audio capture from bot
@@ -951,7 +954,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
       }
     }
   } catch (err) {
-    console.warn(`[bot] Failed to POST /join: ${err}`);
+    log.warn(`[bot] Failed to POST /join: ${err}`);
     setBotState({ status: 'ready', message: 'Bot /join error — pod still running' });
   }
 
@@ -959,14 +962,14 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
   if (streamKey && botState.sshHost && botState.sshPort) {
     // Validate streamKey to prevent command injection (alphanumeric + hyphens + underscores only)
     if (!/^[\w\-]{1,128}$/.test(streamKey)) {
-      console.warn(`[bot] Rejected invalid YouTube stream key format`);
+      log.warn(`[bot] Rejected invalid YouTube stream key format`);
     } else {
       // Validate SSH host — block private/internal network addresses
       const sshHostBlocked = /^localhost$/i.test(botState.sshHost) || /^127\./.test(botState.sshHost) ||
         /^10\./.test(botState.sshHost) || /^192\.168\./.test(botState.sshHost) ||
         /^169\.254\./.test(botState.sshHost) || /^172\.(1[6-9]|2\d|3[01])\./.test(botState.sshHost);
       if (sshHostBlocked) {
-        console.warn(`[bot] Blocked SSH to private IP: ${botState.sshHost}`);
+        log.warn(`[bot] Blocked SSH to private IP: ${botState.sshHost}`);
       } else {
         try {
           // Use Bun.spawn with array args to avoid shell injection.
@@ -987,13 +990,13 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
             try { proc.kill(); } catch { /* ignore */ }
           }, 30_000);
           proc.exited.then(code => {
-            if (code !== 0) console.warn(`[bot] YouTube stream SSH launch exited with code ${code}`);
+            if (code !== 0) log.warn(`[bot] YouTube stream SSH launch exited with code ${code}`);
           }).catch(err => {
-            console.warn(`[bot] YouTube stream SSH launch warning: ${err}`);
+            log.warn(`[bot] YouTube stream SSH launch warning: ${err}`);
           });
-          console.log(`[bot] YouTube stream started with key ${maskKey(streamKey)}`);
+          log.log(`[bot] YouTube stream started with key ${maskKey(streamKey)}`);
         } catch (err) {
-          console.warn(`[bot] Failed to launch YouTube stream via SSH: ${err}`);
+          log.warn(`[bot] Failed to launch YouTube stream via SSH: ${err}`);
         }
       }
     }
@@ -1035,7 +1038,7 @@ export async function handleBotLeave(req: IncomingMessage, res: ServerResponse):
     res.end(JSON.stringify({ ok: true, ...data as Record<string, unknown> }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[bot] Leave failed: ${msg}`);
+    log.error(`[bot] Leave failed: ${msg}`);
     // Still reset state — bot has attempted to leave regardless
     stopBotTranscriptPoll();
     setBotState({ status: 'ready', message: 'Bot leave errored — state reset', meetingUrl: '', botId: '' });
@@ -1063,23 +1066,23 @@ export async function handleBotTerminate(req: IncomingMessage, res: ServerRespon
   // Clean up the bot pod/machine based on provider
   if (podId === 'local') {
     await cleanupLocalDocker();
-    console.log(`[bot] Stopped local Docker container`);
+    log.log(`[bot] Stopped local Docker container`);
   } else if (podId) {
     // Try Fly.io first (if endpoint looks like fly.dev or we have a fly token)
     const flyKey = process.env.FLY_API_TOKEN || '';
     if (flyKey && (botState.endpoint?.includes('.fly.dev') || botState.endpoint?.includes('66.'))) {
       try {
         await flyio.deleteInstance(podId, { apiKey: flyKey });
-        console.log(`[bot] Terminated Fly.io bot machine ${podId}`);
+        log.log(`[bot] Terminated Fly.io bot machine ${podId}`);
       } catch (err) {
-        console.warn(`[bot] Failed to terminate Fly.io bot ${podId}: ${err}`);
+        log.warn(`[bot] Failed to terminate Fly.io bot ${podId}: ${err}`);
       }
     } else if (apiKey) {
       try {
         await runpod.deleteInstance(podId, { apiKey });
-        console.log(`[bot] Terminated RunPod bot pod ${podId}`);
+        log.log(`[bot] Terminated RunPod bot pod ${podId}`);
       } catch (err) {
-        console.warn(`[bot] Failed to terminate RunPod pod ${podId}: ${err}`);
+        log.warn(`[bot] Failed to terminate RunPod pod ${podId}: ${err}`);
       }
     }
   }

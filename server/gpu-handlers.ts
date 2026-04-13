@@ -2,6 +2,9 @@
 // Deploy, lifecycle (stop/resume/terminate), standby, snapshots.
 // Status, health, offers, latency, settings are in gpu-handlers-{info,offers,settings}.ts
 
+import { createLogger } from '../src/logger';
+const log = createLogger('gpu-handlers');
+
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { GpuProviderClient, GpuOffer, ProviderCredentials } from '../src/gpu-providers/types';
 import { filterTiers } from '../src/gpu-providers/deploy-orchestrator';
@@ -36,6 +39,9 @@ import {
   getDeployRaceCount, getLatencyMaxMs,
 } from '../src/gpu-providers/deploy-settings';
 import { getBestLatencyByGpuModel, sortGpuTypesByLatency } from './latency-db';
+import { runPreFlightChecks } from '../src/preflight-checks';
+import { categorizeDeployError } from '../src/errors/deploy-errors';
+import { errorSummary } from '../src/error-summary';
 
 // ── GPU management endpoints ────────────────────────────────────────────────
 
@@ -137,7 +143,7 @@ function gpuTypesWithSufficientVram(gpuTypes: string[], requiredVramGb: number):
     const vram = GPU_VRAM_GB[gpu];
     // FIX: Unknown GPUs fail validation — must be explicitly mapped
     if (vram === undefined) {
-      console.warn(`[VRAM] Unknown GPU type "${gpu}" — failing validation. Add to GPU_VRAM_GB map.`);
+      log.warn(`[VRAM] Unknown GPU type "${gpu}" — failing validation. Add to GPU_VRAM_GB map.`);
       return false;
     }
     return vram >= requiredVramGb;
@@ -193,7 +199,7 @@ function validateVramForModel(
   }
 
   const removed = insufficient.map(g => `${g.gpu} (${g.vram}GB)`).join(', ');
-  console.warn(`[req=${requestId}] VRAM filter: removed ${removed} -- ${hint} needs ${requiredVram}GB. Keeping: ${sufficient.join(', ')}`);
+  log.warn(`[req=${requestId}] VRAM filter: removed ${removed} -- ${hint} needs ${requiredVram}GB. Keeping: ${sufficient.join(', ')}`);
   return sufficient;
 }
 
@@ -238,6 +244,14 @@ interface DeployConfig {
   /** Maximum total cost in USD for this deploy. If set, deploy is rejected when estimated
    *  hourly cost exceeds the cap, and the monitor auto-stops when cumulative cost exceeds it. */
   maxCostUsd: number | undefined;
+  /** Enable canary deployment after successful deploy */
+  canary: boolean;
+  /** Initial traffic percentage to canary (0-100) */
+  canaryInitialTraffic: number;
+  /** Max error rate before rollback (0-1) */
+  canaryMaxErrorRate: number;
+  /** Step size for traffic increase */
+  canaryTrafficStep: number;
 }
 
 /**
@@ -360,7 +374,7 @@ async function _validateDeployRequest(
     const effectiveAllowed = new Set(getGpuPriorityList());
     const rejected = gpuTypes.filter(g => !effectiveAllowed.has(g));
     if (rejected.length > 0) {
-      console.warn(`[req=${requestId}] Rejected non-tested GPU(s): ${rejected.join(', ')}`);
+      log.warn(`[req=${requestId}] Rejected non-tested GPU(s): ${rejected.join(', ')}`);
     }
     gpuTypes = gpuTypes.filter(g => effectiveAllowed.has(g));
     if (gpuTypes.length === 0) {
@@ -370,7 +384,7 @@ async function _validateDeployRequest(
     // No GPU specified and no auto-select — use user-configured priority list from settings
     const userList = getGpuPriorityList();
     gpuTypes = userList.length > 0 ? userList : await getVerifiedGpuTypes(dockerImage);
-    console.log(`[req=${requestId}] No GPU specified — using priority list: ${gpuTypes.join(', ')}`);
+    log.log(`[req=${requestId}] No GPU specified — using priority list: ${gpuTypes.join(', ')}`);
   }
 
   // SnapGPU / CRIU — read from app gpuDeploy or active service, body can override
@@ -386,6 +400,12 @@ async function _validateDeployRequest(
   // Per-deploy cost cap
   const maxCostUsd = typeof body.maxCostUsd === 'number' && body.maxCostUsd > 0 ? body.maxCostUsd : undefined;
 
+  // Canary deployment options
+  const canary = body.canary === true;
+  const canaryInitialTraffic = typeof body.canaryInitialTraffic === 'number' ? body.canaryInitialTraffic : 5;
+  const canaryMaxErrorRate = typeof body.canaryMaxErrorRate === 'number' ? body.canaryMaxErrorRate : 0.05;
+  const canaryTrafficStep = typeof body.canaryTrafficStep === 'number' ? body.canaryTrafficStep : 10;
+
   return {
     apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
     dockerImage, gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
@@ -400,6 +420,10 @@ async function _validateDeployRequest(
     snapgpuPreloadApp,
     snapgpuBackend,
     maxCostUsd,
+    canary,
+    canaryInitialTraffic,
+    canaryMaxErrorRate,
+    canaryTrafficStep,
   };
 }
 
@@ -441,10 +465,10 @@ async function _selectDeploymentTier(
     try {
       const runpodBal = await runpod.checkBalance({ apiKey: runpodApiKey });
       if (runpodBal !== null) {
-        console.log(`[gpu] RunPod balance: $${runpodBal.balance.toFixed(2)}`);
+        log.log(`[gpu] RunPod balance: $${runpodBal.balance.toFixed(2)}`);
         totalBalance += runpodBal.balance;
         if (runpodBal.balance < 1.0) {
-          console.warn(`[gpu] RunPod balance too low ($${runpodBal.balance.toFixed(2)}) — skipping provider`);
+          log.warn(`[gpu] RunPod balance too low ($${runpodBal.balance.toFixed(2)}) — skipping provider`);
           runpodApiKey = '';  // exclude from tier list
         }
       }
@@ -453,7 +477,7 @@ async function _selectDeploymentTier(
       if (/401|403|unauthorized|invalid/i.test(msg)) {
         throw { status: 401, message: 'RunPod API key is invalid' };
       }
-      console.warn(`[gpu] RunPod balance check failed: ${msg} — proceeding anyway`);
+      log.warn(`[gpu] RunPod balance check failed: ${msg} — proceeding anyway`);
     }
   }
 
@@ -463,10 +487,10 @@ async function _selectDeploymentTier(
     try {
       const bal = await tensordock.checkBalance({ apiKey: tensordockApiKey, authId: tensordockAuthId });
       if (bal !== null) {
-        console.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly cost: $${bal.hourlyCost.toFixed(3)})`);
+        log.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly cost: $${bal.hourlyCost.toFixed(3)})`);
         totalBalance += bal.balance;
         if (bal.balance < 0.5) {
-          console.warn(`[gpu] TensorDock balance too low ($${bal.balance.toFixed(2)}) — skipping provider`);
+          log.warn(`[gpu] TensorDock balance too low ($${bal.balance.toFixed(2)}) — skipping provider`);
           tensordockOpts = undefined;  // exclude from tier list
         }
       }
@@ -475,7 +499,7 @@ async function _selectDeploymentTier(
       if (/401|403|unauthorized|invalid/i.test(msg)) {
         throw { status: 401, message: 'TensorDock credentials are invalid' };
       }
-      console.warn(`[gpu] TensorDock balance check failed: ${msg} — proceeding anyway`);
+      log.warn(`[gpu] TensorDock balance check failed: ${msg} — proceeding anyway`);
     }
   }
 
@@ -485,13 +509,13 @@ async function _selectDeploymentTier(
     try {
       const bal = await vast.checkBalance({ apiKey: effectiveVastApiKey });
       if (bal !== null) {
-        console.log(`[gpu] Vast.ai balance: $${bal.balance.toFixed(2)}`);
+        log.log(`[gpu] Vast.ai balance: $${bal.balance.toFixed(2)}`);
         totalBalance += bal.balance;
         if (bal.balance <= 0) {
-          console.warn(`[gpu] Vast.ai balance is $${bal.balance.toFixed(2)} — skipping provider`);
+          log.warn(`[gpu] Vast.ai balance is $${bal.balance.toFixed(2)} — skipping provider`);
           effectiveVastApiKey = '';  // exclude from tier list
         } else if (bal.balance < LOW_BALANCE_THRESHOLD_USD) {
-          console.warn(`[gpu] Vast.ai balance low ($${bal.balance.toFixed(2)}) — skipping provider`);
+          log.warn(`[gpu] Vast.ai balance low ($${bal.balance.toFixed(2)}) — skipping provider`);
           effectiveVastApiKey = '';  // exclude from tier list
         }
       }
@@ -500,7 +524,7 @@ async function _selectDeploymentTier(
       if (/401|403|unauthorized|invalid/i.test(msg)) {
         throw { status: 401, message: 'Vast.ai API key is invalid' };
       }
-      console.warn(`[gpu] Vast.ai balance check failed: ${msg} — proceeding anyway`);
+      log.warn(`[gpu] Vast.ai balance check failed: ${msg} — proceeding anyway`);
     }
   }
 
@@ -510,7 +534,7 @@ async function _selectDeploymentTier(
   if ((tensordockApiKey && tensordockAuthId) && !tensordockOpts) balanceExcluded.push('TensorDock');
   if (vastApiKey && !effectiveVastApiKey) balanceExcluded.push('Vast.ai');
   if (balanceExcluded.length > 0) {
-    console.warn(`[gpu] Providers excluded (balance < $${LOW_BALANCE_THRESHOLD_USD}): ${balanceExcluded.join(', ')}`);
+    log.warn(`[gpu] Providers excluded (balance < $${LOW_BALANCE_THRESHOLD_USD}): ${balanceExcluded.join(', ')}`);
   }
 
   // If ALL configured providers were excluded due to insufficient balance, reject the deploy
@@ -546,13 +570,13 @@ async function _selectDeploymentTier(
       };
       // Prepend snapgpu tier — it gets first shot; falls back to regular tiers on failure
       allTiers = [snapgpuTier, ...allTiers];
-      console.log(`[req=${requestId}] SnapGPU enabled (backend=${config.snapgpuBackend}, preloadApp=${config.snapgpuPreloadApp}, autoSnapshot=${config.autoSnapshot})`);
+      log.log(`[req=${requestId}] SnapGPU enabled (backend=${config.snapgpuBackend}, preloadApp=${config.snapgpuPreloadApp}, autoSnapshot=${config.autoSnapshot})`);
     } else {
-      console.warn(`[req=${requestId}] SnapGPU requested but no API key for backend=${config.snapgpuBackend} — falling back to regular deploy`);
+      log.warn(`[req=${requestId}] SnapGPU requested but no API key for backend=${config.snapgpuBackend} — falling back to regular deploy`);
     }
   }
 
-  console.log(`[req=${requestId}] providerFilter=${providerFilter ?? 'none'}, allTiers=[${allTiers.map(t => t.name).join(', ')}]`);
+  log.log(`[req=${requestId}] providerFilter=${providerFilter ?? 'none'}, allTiers=[${allTiers.map(t => t.name).join(', ')}]`);
   const filtered = filterTiers(allTiers, providerFilter);
   if ('error' in filtered) {
     const balanceHint = balanceExcluded.length > 0
@@ -567,9 +591,9 @@ async function _selectDeploymentTier(
     const selectedGpus = await autoSelectCheapestGpu(tiers, { region, minVramGb: minVramGbReq, preferSsd: preferSsdReq });
     if (selectedGpus.length > 0) {
       gpuTypes = selectedGpus;
-      console.log(`[gpu] Auto-selected ${gpuTypes.length} GPU types: ${gpuTypes.join(', ')}`);
+      log.log(`[gpu] Auto-selected ${gpuTypes.length} GPU types: ${gpuTypes.join(', ')}`);
     } else {
-      console.warn(`[gpu] autoSelectGpu: no suitable GPU found (>=${getMinVramGb()}GB VRAM), falling back to verified GPU list`);
+      log.warn(`[gpu] autoSelectGpu: no suitable GPU found (>=${getMinVramGb()}GB VRAM), falling back to verified GPU list`);
       gpuTypes = await getVerifiedGpuTypes(dockerImage);
     }
   }
@@ -590,7 +614,7 @@ async function _selectDeploymentTier(
   if (maxLatencyMs > 0 && gpuTypes.length > 1) {
     const sorted = await sortGpuTypesByLatency(gpuTypes, maxLatencyMs);
     if (sorted.join(',') !== gpuTypes.join(',')) {
-      console.log(`[gpu] Latency filter (threshold=${maxLatencyMs}ms): ${gpuTypes.join(', ')} → ${sorted.join(', ')}`);
+      log.log(`[gpu] Latency filter (threshold=${maxLatencyMs}ms): ${gpuTypes.join(', ')} → ${sorted.join(', ')}`);
     }
     gpuTypes = sorted;
   }
@@ -602,7 +626,7 @@ async function _selectDeploymentTier(
   if (gpuTypes.length > 0) {
     const gpuTypeError = await validateGpuTypesFromCache(gpuTypes);
     if (gpuTypeError) {
-      console.warn(`[req=${requestId}] GPU type validation warning: ${gpuTypeError}`);
+      log.warn(`[req=${requestId}] GPU type validation warning: ${gpuTypeError}`);
     }
   }
 
@@ -624,7 +648,12 @@ async function _selectDeploymentTier(
       await cleanupModalApps(modalApiKey);
     }
   } catch (cleanupErr) {
-    console.error(`[req=${requestId}] Pre-deploy cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)} — proceeding with deploy but orphaned instances may exist`);
+    const deployErr = categorizeDeployError(cleanupErr, {
+      deployId: deployState.deployId,
+      provider: 'cleanup',
+    });
+    errorSummary.record(deployErr, deployState.deployId);
+    log.error({ code: deployErr.code, category: deployErr.category }, `Pre-deploy cleanup failed: ${deployErr.message} — proceeding with deploy but orphaned instances may exist`);
     // Don't fail the deploy, but warn the user
   }
 
@@ -647,7 +676,7 @@ async function _selectDeploymentTier(
     for (const p of Object.keys(gpuPriorityByProvider)) {
       gpuPriorityByProvider[p] = sortByLatency(gpuPriorityByProvider[p]);
     }
-    console.log(`[gpu] deploy sort=latency → ${gpuTypes.map(g => `${g.replace('NVIDIA ','').replace('GeForce ','')}(${getLatMs(g) === Infinity ? '?' : getLatMs(g) + 'ms'})`).join(', ')}`);
+    log.log(`[gpu] deploy sort=latency → ${gpuTypes.map(g => `${g.replace('NVIDIA ','').replace('GeForce ','')}(${getLatMs(g) === Infinity ? '?' : getLatMs(g) + 'ms'})`).join(', ')}`);
   } else if (sortBy === 'price') {
     // Price sorting is handled inside autoSelectCheapestGpu / provider clients — nothing to reorder here.
   }
@@ -701,13 +730,25 @@ function generateDeployId(): string {
   return `deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
+/**
+ * Start an asynchronous GPU deployment and write a 202 response immediately.
+ *
+ * Takes ownership of the deploy lock (released in the deploy promise's `.finally()`).
+ * Launches either a hedged race deploy (raceCount > 1) or a tiered cascade deploy.
+ * The deploy runs in the background; callers should poll `/v1/gpu/status` for progress.
+ *
+ * @param config - Validated deployment configuration from `_validateDeployRequest`
+ * @param tierResult - Selected deployment tiers, GPU types, and resolved Docker image
+ * @param requestId - Unique request identifier for tracing
+ * @param res - HTTP response object; sent a 202 with deployId and status
+ */
 function _startDeployAndRespond(
   config: DeployConfig,
   tierResult: TierSelectionResult,
   requestId: string,
   res: ServerResponse,
 ): void {
-  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd } = config;
+  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   // Reset cancel flag FIRST so setDeployState won't be blocked by the guard
@@ -721,7 +762,11 @@ function _startDeployAndRespond(
   try {
     deploymentSM.startDeploying();
   } catch (smErr) {
-    console.error(`[gpu] State machine error: ${smErr}`);
+    const deployErr = categorizeDeployError(smErr, {
+      deployId: deployState.deployId,
+    });
+    errorSummary.record(deployErr, deployState.deployId);
+    log.error({ code: deployErr.code, category: deployErr.category }, `State machine error: ${deployErr.message}`);
     setDeployLock(false);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'Internal server error', type: 'server_error' } }));
@@ -737,6 +782,7 @@ function _startDeployAndRespond(
     ...(templateHashId ? { templateHashId } : {}),
     ...(forceSshTunnel ? { forceSshTunnel } : {}),
     ...(useSnapgpu ? { snapgpuPreloadApp, snapgpuAutoSnapshot: autoSnapshot, snapgpuBackend } : {}),
+    ...(canary ? { canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep } : {}),
   };
 
   const deployFn = raceCount > 1
@@ -745,21 +791,28 @@ function _startDeployAndRespond(
   setDeployPromise(
     deployFn
       .catch(err => {
-        console.error(`[gpu] Deploy failed unexpectedly: ${err}`);
-        setDeployState({ status: 'error', message: `Deploy failed: ${err instanceof Error ? err.message : err}` });
+        const deployErr = categorizeDeployError(err, {
+          deployId: deployState.deployId,
+          provider: tiers[0]?.name,
+          gpuType: gpuTypes[0],
+          imageName: resolvedDockerImage,
+        });
+        errorSummary.record(deployErr, deployState.deployId);
+        log.error(`[gpu] Deploy failed unexpectedly: ${deployErr.message}`);
+        setDeployState({ status: 'error', message: `Deploy failed: ${deployErr.message}` });
       })
       .finally(() => { setDeployLock(false); setDeployPromise(null); })
   );
 
   const modeLabel = raceCount > 1 ? `race×${raceCount}` : `${tiers.length} tier(s): ${tiers.map(t => t.label).join(' → ')}`;
-  console.log(`[req=${requestId}] GPU deploy started: ${modeLabel}`);
+  log.log(`[req=${requestId}] GPU deploy started: ${modeLabel}`);
   res.writeHead(202, { 'Content-Type': 'application/json' });
   const responseBody: Record<string, unknown> = { deployId, status: 'creating', message: `Deploy started (${modeLabel})` };
   if (tierResult.balanceWarnings.length > 0) {
     responseBody.balanceWarnings = tierResult.balanceWarnings.map(p =>
       `${p} excluded — balance below $${LOW_BALANCE_THRESHOLD_USD}`
     );
-    console.warn(`[req=${requestId}] Deploy balance warnings: ${tierResult.balanceWarnings.join(', ')} excluded (low balance)`);
+    log.warn(`[req=${requestId}] Deploy balance warnings: ${tierResult.balanceWarnings.join(', ')} excluded (low balance)`);
   }
 
   // Pre-deploy cost warning: include estimated cost and max runtime in response
@@ -772,7 +825,7 @@ function _startDeployAndRespond(
       // Warn if balance covers less than 2 hours of runtime
       if (tierResult.totalBalance < 2 * tierResult.estimatedCostPerHr) {
         responseBody.balanceWarning = `Low balance warning: $${tierResult.totalBalance.toFixed(2)} covers less than 2 hours at $${tierResult.estimatedCostPerHr.toFixed(2)}/hr. Add funds to avoid auto-termination.`;
-        console.warn(`[req=${requestId}] Balance warning: $${tierResult.totalBalance.toFixed(2)} < 2 * $${tierResult.estimatedCostPerHr.toFixed(2)}/hr`);
+        log.warn(`[req=${requestId}] Balance warning: $${tierResult.totalBalance.toFixed(2)} < 2 * $${tierResult.estimatedCostPerHr.toFixed(2)}/hr`);
       }
     }
   }
@@ -787,6 +840,28 @@ function _startDeployAndRespond(
 
 // ── Main deploy handler (orchestrator) ───────────────────────────────────────
 
+/**
+ * Handle POST /v1/gpu/deploy — create a new GPU deployment.
+ *
+ * Validates the request body, selects deployment tiers based on provider
+ * balances and GPU availability, runs pre-flight checks, and starts the
+ * async deployment loop. Returns 202 immediately; poll `/v1/gpu/status`
+ * for progress.
+ *
+ * Supports idempotent retries (identical request within 5s returns existing
+ * deployId) and cancel-and-redeploy when a deploy is already in progress.
+ *
+ * @param req - Incoming HTTP request with JSON body containing deploy params
+ * @param res - Outgoing HTTP response; returns 202 with deployId on success
+ * @returns Promise<void>
+ * @throws {Error} With { status, message } on validation failure
+ *
+ * @example
+ * ```bash
+ * POST /v1/gpu/deploy
+ * { "dockerImage": "my-image:latest", "gpuTypes": ["RTX 4090"] }
+ * ```
+ */
 export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
@@ -799,7 +874,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   // ── Idempotency: prevent double-deploy when user clicks twice rapidly ──
   const requestHash = JSON.stringify({ dockerImage: body.dockerImage, gpuTypes: body.gpuTypes });
   if (lastDeployRequest && lastDeployRequest.hash === requestHash && Date.now() - lastDeployRequest.ts < 5000) {
-    console.log(`[req=${requestId}] Idempotent deploy — returning existing deployId=${lastDeployRequest.deployId}`);
+    log.log(`[req=${requestId}] Idempotent deploy — returning existing deployId=${lastDeployRequest.deployId}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ deployId: lastDeployRequest.deployId, status: 'creating', message: 'Deploy already in progress (idempotent)', idempotent: true }));
     return;
@@ -807,7 +882,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
 
   // If a deploy is already in progress (creating/booting/installing), cancel it first for redeploy
   if (deployState.status !== 'idle' && deployState.status !== 'stopped' && deployState.status !== 'error' && deployState.status !== 'ready') {
-    console.log(`[req=${requestId}] Cancelling in-progress deploy (status=${deployState.status}) for redeploy`);
+    log.log(`[req=${requestId}] Cancelling in-progress deploy (status=${deployState.status}) for redeploy`);
     setDeployCancelled(true);
     stopGpuMonitoring();
     // Wait for the deploy loop to actually finish (up to 10s) instead of a fixed delay
@@ -818,7 +893,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     const stillRunning = deployState.status === 'creating' || deployState.status === 'booting' || deployState.status === 'installing';
     if (stillRunning) {
       // Deploy timed out waiting — it's already been cancelled above; release lock so redeploy can proceed
-      console.log(`[req=${requestId}] Deploy still in-flight after 10s wait (status=${deployState.status}) — releasing lock after cancel`);
+      log.log(`[req=${requestId}] Deploy still in-flight after 10s wait (status=${deployState.status}) — releasing lock after cancel`);
       setDeployCancelled(true);
     }
     setDeployLock(false);
@@ -826,7 +901,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
 
   // If GPU is ready, stop monitoring and reset for new deploy
   if (deployState.status === 'ready') {
-    console.log(`[req=${requestId}] GPU was ready — tearing down for redeploy`);
+    log.log(`[req=${requestId}] GPU was ready — tearing down for redeploy`);
     stopGpuMonitoring();
     updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuDeploy:redeploy');
     setDeployLock(false);
@@ -836,7 +911,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   // is no `await` between the check and the set. No other code can interleave.
   // Do NOT insert any async operation between these two lines.
   if (deployLock) {
-    console.log(`[req=${requestId}] GPU deploy rejected: lock held`);
+    log.log(`[req=${requestId}] GPU deploy rejected: lock held`);
     res.writeHead(409, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
     return;
@@ -888,6 +963,38 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
       }
     }
 
+    // Step 2.6: Run pre-flight checks (image, DNS, CUDA, cost, template)
+    const preflightResult = await runPreFlightChecks({
+      imageName: config.dockerImage,
+      provider: tierResult.tiers[0]?.name || 'vast',
+      apiKey: config.vastApiKey || process.env.VAST_API_KEY || '',
+      gpuTypes: config.gpuTypes,
+      quotedPricePerHr: tierResult.estimatedCostPerHr,
+      dockerhubUser: process.env.DOCKERHUB_USERNAME,
+      dockerhubToken: process.env.DOCKERHUB_TOKEN,
+      templateId: config.templateHashId,
+    });
+
+    if (!preflightResult.ok) {
+      log.error(`[req=${requestId}] Pre-flight checks FAILED:`, preflightResult.errors);
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: {
+          message: `Deploy aborted — pre-flight checks failed:\n${preflightResult.errors.join('\n')}`,
+          type: 'preflight_error',
+        },
+        checks: preflightResult.checks,
+        warnings: preflightResult.warnings,
+      }));
+      return;
+    }
+
+    // Log warnings (non-blocking)
+    if (preflightResult.warnings.length > 0) {
+      log.warn(`[req=${requestId}] Pre-flight warnings:`, preflightResult.warnings);
+      config.deployEnv._PREFLIGHT_WARNINGS = JSON.stringify(preflightResult.warnings);
+    }
+
     // Step 3: Start the deploy and send the 202 response.
     // _startDeployAndRespond takes ownership of the lock (released in .finally()).
     lockTransferred = true;
@@ -909,16 +1016,16 @@ export async function autoBootFromProfile(): Promise<void> {
   const activeApp = cfg.apps?.find(p => p.id === cfg.activeAppId);
   if (!activeApp?.gpuDeploy?.bootOnStartup) return;
   if (deployState.status !== 'idle') {
-    console.log('[gpu] autoBootFromProfile: deploy already in progress, skipping');
+    log.log('[gpu] autoBootFromProfile: deploy already in progress, skipping');
     return;
   }
   if (deployLock) {
-    console.log('[gpu] autoBootFromProfile: deploy lock held, skipping');
+    log.log('[gpu] autoBootFromProfile: deploy lock held, skipping');
     return;
   }
 
   const gd = activeApp.gpuDeploy;
-  console.log(`[gpu] Auto-booting GPU for app: ${activeApp.name} (${gd.dockerImage})`);
+  log.log(`[gpu] Auto-booting GPU for app: ${activeApp.name} (${gd.dockerImage})`);
   const requestId = 'startup:autoboot';
 
   setDeployLock(true);
@@ -940,7 +1047,7 @@ export async function autoBootFromProfile(): Promise<void> {
       end: (data: string) => {
         try {
           const j = JSON.parse(data);
-          console.log(`[gpu] autoBootFromProfile: ${j.status} — ${j.message}`);
+          log.log(`[gpu] autoBootFromProfile: ${j.status} — ${j.message}`);
         } catch { /* best-effort: cleanup or optional side-effect */ }
       },
     } as unknown as ServerResponse;
@@ -949,7 +1056,7 @@ export async function autoBootFromProfile(): Promise<void> {
     _startDeployAndRespond(config, tierResult, requestId, stubRes);
   } catch (err: unknown) {
     const msg = (err as { message?: string })?.message ?? String(err);
-    console.warn(`[gpu] autoBootFromProfile failed: ${msg}`);
+    log.warn(`[gpu] autoBootFromProfile failed: ${msg}`);
   } finally {
     if (!lockTransferred) setDeployLock(false);
   }
@@ -957,9 +1064,30 @@ export async function autoBootFromProfile(): Promise<void> {
 
 // ── GPU lifecycle handlers (stop/resume/terminate) ────────────────────────────
 
+/**
+ * Handle POST /v1/gpu/terminate — permanently destroy the active GPU deployment.
+ *
+ * Terminates ALL instances across all configured providers (RunPod, Vast.ai,
+ * TensorDock, Modal) to prevent orphaned resources from accruing cost.
+ * Resets deploy state, stops monitoring, and updates the active pipeline.
+ *
+ * Idempotent: returns 200 if already idle with no active pod.
+ * Supports deploy ID safety check to avoid terminating the wrong deployment.
+ *
+ * @param req - Incoming HTTP request; optional JSON body with { deployId, apiKey, ... }
+ * @param res - Outgoing HTTP response; returns 200 with { ok, deployId }
+ * @returns Promise<void>
+ *
+ * @example
+ * ```bash
+ * POST /v1/gpu/terminate
+ * { "deployId": "deploy-abc123" }
+ * ```
+ */
 export async function handleGpuTerminate(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
+<<<<<<< Updated upstream
   console.log(`[req=${requestId}] GPU terminate requested`);
   
   // Acquire lock to prevent concurrent lifecycle operations
@@ -970,14 +1098,21 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   }
   setDeployLock(true);
   
+=======
+  log.log(`[req=${requestId}] GPU terminate requested`);
+>>>>>>> Stashed changes
   let body: Record<string, unknown>;
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); setDeployLock(false); return; }
 
   // Idempotent: if already idle (nothing running), return 200 instead of error
   if (deployState.status === 'idle' && !deployState.podId) {
+<<<<<<< Updated upstream
     console.log(`[req=${requestId}] GPU already idle — idempotent 200`);
     setDeployLock(false);
+=======
+    log.log(`[req=${requestId}] GPU already idle — idempotent 200`);
+>>>>>>> Stashed changes
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, message: 'No active deployment to terminate.', idempotent: true }));
     return;
@@ -1062,7 +1197,7 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
 export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
-  console.log(`[req=${requestId}] GPU stop (pause) requested`);
+  log.log(`[req=${requestId}] GPU stop (pause) requested`);
 
   // Read optional body for deployId safety check
   let body: Record<string, unknown> = {};
@@ -1077,21 +1212,21 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
 
   // Idempotent: if already stopped or idle, return 200 instead of error
   if (deployState.status === 'stopped') {
-    console.log(`[req=${requestId}] GPU already stopped — idempotent 200`);
+    log.log(`[req=${requestId}] GPU already stopped — idempotent 200`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, deployId: deployState.deployId || undefined, podId: deployState.podId, provider: deployState.provider, message: 'Pod already stopped.', idempotent: true }));
     return;
   }
   if (deployState.status === 'idle') {
-    console.log(`[req=${requestId}] GPU idle (nothing to stop) — idempotent 200`);
+    log.log(`[req=${requestId}] GPU idle (nothing to stop) — idempotent 200`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, message: 'No active pod (idle).', idempotent: true }));
     return;
   }
 
   // Cancel any in-progress deploy/race so background tasks don't overwrite the stopped state
-  if (deployState.status === 'deploying' || deployState.status === 'booting') {
-    console.log(`[req=${requestId}] Deploy in progress (${deployState.status}) — cancelling before stop`);
+  if (deployState.status === 'creating' || deployState.status === 'booting' || deployState.status === 'installing') {
+    log.log(`[req=${requestId}] Deploy in progress (${deployState.status}) — cancelling before stop`);
     setDeployCancelled(true);
   }
 
@@ -1143,14 +1278,14 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
       provider,
     });
 
-    console.log(`[req=${requestId}] Pod ${podId} stopped on ${provider} (was ${prevStatus})`);
+    log.log(`[req=${requestId}] Pod ${podId} stopped on ${provider} (was ${prevStatus})`);
     logGpuEvent('instance_stopped', 'manual', true, { metadata: { reason: 'manual_stop', provider } });
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, deployId: deployState.deployId || undefined, podId, provider, message: 'Pod stopped (paused). Data preserved. Use /v1/gpu/resume to restart.' }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[req=${requestId}] GPU stop failed: ${msg}`);
+    log.error(`[req=${requestId}] GPU stop failed: ${msg}`);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `Stop failed: ${msg}` }));
   } finally {
@@ -1168,7 +1303,7 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
 export async function handleGpuResume(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
-  console.log(`[req=${requestId}] GPU resume requested`);
+  log.log(`[req=${requestId}] GPU resume requested`);
 
   if (deployLock) {
     res.writeHead(409, { 'Content-Type': 'application/json' });
@@ -1223,7 +1358,7 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   } catch (err) {
     // Both resume AND fallback deploy failed
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[req=${requestId}] GPU resume + fallback deploy failed: ${msg}`);
+    log.error(`[req=${requestId}] GPU resume + fallback deploy failed: ${msg}`);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `Resume and fallback deploy both failed: ${msg}` }));
   } finally {
@@ -1519,6 +1654,7 @@ export {
 export {
   handleGpuStatus, handleGpuList, handleHealth, handleGpuLogs, handleGpuEventLogs,
   handleGpuCatalog, handleGpuMyLocation, handleGpuReputation, handleGpuLatencyProbe,
+  handlePreflightCheck, handleErrorSummary, handleCanaryStatus,
 } from './gpu-handlers-info';
 export {
   handleGetLatencySettings, handlePatchLatencySettings, handleGetGpuDefaults,

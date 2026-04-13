@@ -101,7 +101,7 @@ describe('handleGpuDeploy — structure & flow', () => {
 
   it('#083 handleGpuDeploy calls setDeployLock(true) to acquire the lock', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 4000);
     expect(fnBody).toContain('setDeployLock(true)');
   });
 
@@ -148,13 +148,13 @@ describe('handleGpuDeploy — validation', () => {
     const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
     expect(fnBody).toContain('profileId');
     expect(fnBody).toContain('loadProviderConfig');
-    expect(fnBody).toContain('activeProfile');
+    expect(fnBody).toContain('activeApp');
   });
 
   it('#090 _validateDeployRequest caps raceCount at 10', () => {
     const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 4000);
-    expect(fnBody).toContain('Math.min(Math.floor(body.raceCount), 10)');
+    const fnBody = handlersSource.slice(fnStart, fnStart + 5000);
+    expect(fnBody).toContain('Math.min(Math.floor(raceCountRaw), 10)');
   });
 });
 
@@ -180,14 +180,14 @@ describe('handleGpuDeploy — cancel/redeploy', () => {
 
   it('#093 releases lock if deploy still running after 10s wait', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 2500);
     expect(fnBody).toContain('releasing lock after cancel');
     expect(fnBody).toContain('setDeployLock(false)');
   });
 
   it('#094 tears down ready GPU before redeploy', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
     expect(fnBody).toContain('GPU was ready — tearing down for redeploy');
     expect(fnBody).toContain('stopGpuMonitoring');
   });
@@ -409,14 +409,18 @@ describe('handleGpuStop', () => {
 
   it('#122 returns 400 when no active pod', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuStop');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+<<<<<<< Updated upstream
+    const fnBody = handlersSource.slice(fnStart, fnStart + 2600);
+=======
+    const fnBody = handlersSource.slice(fnStart, fnStart + 2500);
+>>>>>>> Stashed changes
     expect(fnBody).toContain('No active pod to stop');
     expect(fnBody).toContain('400');
   });
 
   it('#123 resolves provider client based on deployState.provider', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuStop');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 3500);
     expect(fnBody).toContain("provider === 'runpod'");
     expect(fnBody).toContain("provider === 'vast'");
     expect(fnBody).toContain("provider === 'tensordock'");
@@ -424,7 +428,11 @@ describe('handleGpuStop', () => {
 
   it('#124 returns 400 when no credentials for provider', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuStop');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+<<<<<<< Updated upstream
+    const fnBody = handlersSource.slice(fnStart, fnStart + 4000);
+=======
+    const fnBody = handlersSource.slice(fnStart, fnStart + 3500);
+>>>>>>> Stashed changes
     expect(fnBody).toContain('Cannot stop: no credentials');
     expect(fnBody).toContain('400');
   });
@@ -467,7 +475,11 @@ describe('handleGpuResume', () => {
 
   it('#129 uses body.podId or falls back to deployState.podId', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuResume');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1000);
+<<<<<<< Updated upstream
+    const fnBody = handlersSource.slice(fnStart, fnStart + 1600);
+=======
+    const fnBody = handlersSource.slice(fnStart, fnStart + 1500);
+>>>>>>> Stashed changes
     expect(fnBody).toContain('body.podId');
     expect(fnBody).toContain('deployState.podId');
   });
@@ -528,13 +540,17 @@ describe('handleGpuTerminate', () => {
 
   it('#136 releases deploy lock', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuTerminate');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
     expect(fnBody).toContain('setDeployLock(false)');
   });
 
   it('#137 resets deploy state and state machine', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuTerminate');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+<<<<<<< Updated upstream
+    const fnBody = handlersSource.slice(fnStart, fnStart + 3500);
+=======
+    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+>>>>>>> Stashed changes
     expect(fnBody).toContain('resetDeployState()');
     expect(fnBody).toContain('deploymentSM.reset()');
   });
