@@ -271,6 +271,11 @@ export function setDeployTimeoutMin(min: number): void {
   saveDeploySettings();
 }
 
+/** Per-provider deploy timeout (currently same value for all providers). */
+export function getDeployTimeoutMinForProvider(_provider: string): number {
+  return _s.deployTimeoutMin;
+}
+
 // ── Deploy Region ─────────────────────────────────────────────────────────────
 
 export function getDeployRegion(): string {

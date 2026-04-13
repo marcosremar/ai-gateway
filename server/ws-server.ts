@@ -669,7 +669,6 @@ export function startWsServer() {
     },
     websocket: {
       maxPayloadLength: 4 * 1024 * 1024, // 4MB — enough for audio chunks
-      backpressure: 2 * 1024 * 1024,     // 2MB
       closeOnBackpressureLimit: true,
       idleTimeout: 120,                   // seconds
       open(ws) {
@@ -1116,6 +1115,7 @@ export function startWsServer() {
       'GET /v1/gpu/catalog': gh.handleGpuCatalog,
       'GET /v1/gpu/my-location': gh.handleGpuMyLocation,
       'GET /v1/gpu/reputation': gh.handleGpuReputation,
+      'POST /v1/gpu/preflight': gh.handlePreflightCheck,
       'GET /v1/gpu/readiness/status': gh.handleGetGpuReadinessStatus,
       'GET /v1/gpu/readiness/history': gh.handleGetGpuReadinessHistory,
       'POST /v1/gpu/readiness/reset': gh.handlePostResetReadiness,
