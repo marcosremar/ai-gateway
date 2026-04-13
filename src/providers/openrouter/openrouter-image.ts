@@ -49,6 +49,7 @@ export class OpenRouterImageProvider implements ImageProvider {
         messages: [{ role: 'user', content: request.prompt }],
         modalities: ['image', 'text'],
       }),
+      signal: AbortSignal.timeout(60_000),
     });
 
     if (!response.ok) {

@@ -82,6 +82,7 @@ export class ModalSeamlessSTTProvider implements STTProvider {
         method: 'POST',
         headers: buildProxyAuthHeaders(),
         body: formData,
+        signal: AbortSignal.timeout(30_000),
       });
 
       if (!res.ok) {
@@ -107,6 +108,7 @@ export class ModalSeamlessSTTProvider implements STTProvider {
         method: 'POST',
         headers: buildProxyAuthHeaders(),
         body: formData,
+        signal: AbortSignal.timeout(30_000),
       });
 
       if (!res.ok) {
@@ -178,6 +180,7 @@ export class ModalSeamlessLLMProvider implements LLMProvider {
         source_lang: sourceLang,
         target_lang: targetLang,
       }),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!res.ok) {

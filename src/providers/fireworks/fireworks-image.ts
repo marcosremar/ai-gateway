@@ -50,6 +50,7 @@ export class FireworksImageProvider implements ImageProvider {
         num_inference_steps: request.steps ?? 25,
         seed: request.seed ?? Math.floor(Math.random() * 2147483647),
       }),
+      signal: AbortSignal.timeout(60_000),
     });
 
     if (!response.ok) {

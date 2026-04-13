@@ -69,6 +69,7 @@ export class ModalMossTTSProvider implements TTSProvider {
         ...(request.referenceAudio && { reference_audio: request.referenceAudio }),
         ...(request.refText && { ref_text: request.refText }),
       }),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!res.ok) {
