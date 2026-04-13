@@ -72,6 +72,12 @@ export async function runVerifiedSTT(
     throw new Error('[stt-verifier] No STT providers configured');
   }
 
+  if (deps.timeoutMs !== undefined) {
+    if (!Number.isFinite(deps.timeoutMs) || deps.timeoutMs <= 0) {
+      throw new Error(`[stt-verifier] timeoutMs must be a positive number, got ${deps.timeoutMs}`);
+    }
+  }
+
   interface ProviderResult {
     name: string;
     text: string;
@@ -81,7 +87,8 @@ export async function runVerifiedSTT(
     no_speech_prob?: number;
   }
 
-  // Track deadline timers so we can clean them up after the race
+  // AbortController to cancel abandoned requests when race completes
+  const abortController = new AbortController();
   const deadlineTimers: ReturnType<typeof setTimeout>[] = [];
 
   const races = deps.providers.map(({ name, provider }) => {
@@ -91,7 +98,7 @@ export async function runVerifiedSTT(
     }
 
     let p: Promise<ProviderResult> = provider
-      .transcribe({ audio, model: modelId, language, prompt })
+      .transcribe({ audio, model: modelId, language, prompt, signal: abortController.signal })
       .then((r): ProviderResult => {
         if (!r.text.trim()) throw new Error(`${name}: empty response`);
         return {
@@ -122,7 +129,8 @@ export async function runVerifiedSTT(
     const total = deps.providers.length;
     throw new Error(`[stt-verifier] All ${total} provider${total !== 1 ? 's' : ''} failed or timed out`);
   } finally {
-    // Clear all deadline timers to prevent leaks (winner found or all failed)
+    // Cancel any pending requests and clear deadline timers to prevent leaks
+    abortController.abort();
     for (const t of deadlineTimers) clearTimeout(t);
   }
 
