@@ -50,7 +50,16 @@ export function readJsonBody(req: IncomingMessage): Promise<Record<string, unkno
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString();
       if (!raw.trim()) { resolve({}); return; }  // empty body is OK (optional JSON)
-      try { resolve(JSON.parse(raw)); }
+      try {
+        const parsed = JSON.parse(raw);
+        // Sanitize prototype pollution keys (OWASP recommendation)
+        if (typeof parsed === 'object' && parsed !== null) {
+          delete parsed.__proto__;
+          delete parsed.constructor;
+          delete parsed.prototype;
+        }
+        resolve(parsed);
+      }
       catch (e) { reject(new JsonParseError(e)); }
     });
     req.on('error', reject);
