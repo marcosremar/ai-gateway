@@ -268,14 +268,34 @@ export class ScalewayClient extends AbstractGpuProvider {
     const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
     if (!secretKey) throw new Error('Scaleway secret key required');
     const { zone, serverId } = this.decodeId(instanceId);
-    await this.serverAction(zone, serverId, 'poweron', secretKey);
+    try {
+      await this.serverAction(zone, serverId, 'poweron', secretKey);
+    } catch (err) {
+      const msg = this.errMsg(err);
+      // 404 = already started, ignore; re-throw others
+      if (msg.includes('404') || msg.includes('not found')) {
+        this.log.log(`[scaleway] Server ${instanceId} already running or not found`);
+        return;
+      }
+      throw err;
+    }
   }
 
   async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
     if (!secretKey) throw new Error('Scaleway secret key required');
     const { zone, serverId } = this.decodeId(instanceId);
-    await this.serverAction(zone, serverId, 'poweroff', secretKey);
+    try {
+      await this.serverAction(zone, serverId, 'poweroff', secretKey);
+    } catch (err) {
+      const msg = this.errMsg(err);
+      // 404 = already stopped, ignore; re-throw others
+      if (msg.includes('404') || msg.includes('not found')) {
+        this.log.log(`[scaleway] Server ${instanceId} already stopped or not found`);
+        return;
+      }
+      throw err;
+    }
   }
 
   async deleteInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
