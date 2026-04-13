@@ -152,13 +152,25 @@ export class DatabaseService {
 
   async close(): Promise<void> {
     if (this._prisma) {
-      await (this._prisma as { $disconnect(): Promise<void> }).$disconnect();
+      try {
+        await (this._prisma as { $disconnect(): Promise<void> }).$disconnect();
+      } catch (err) {
+        console.warn('[database] Prisma disconnect error:', err);
+      }
       this._prisma = undefined;
     }
     if (this._driver) {
-      await this._driver.close();
+      try {
+        await this._driver.close();
+      } catch (err) {
+        console.warn('[database] Driver close error:', err);
+      }
       this._driver = undefined;
     }
+    // Management client has no close method - just clear reference
+    this._management = undefined;
+    // Backup service has no close method - just clear reference
+    this._backup = undefined;
   }
 
   // ── Environment info ──────────────────────────────────────────────────────

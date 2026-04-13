@@ -51,20 +51,32 @@ export class Vault {
   }
 
   /** Decrypt EncryptedBlob → plaintext */
-  decrypt(blob: EncryptedBlob): string {
-    const iv = Buffer.from(blob.iv, 'hex');
-    const ciphertext = Buffer.from(blob.ciphertext, 'hex');
-    const tag = Buffer.from(blob.tag, 'hex');
+  decrypt(blob: EncryptedBlob): string | null {
+    try {
+      const iv = Buffer.from(blob.iv, 'hex');
+      const ciphertext = Buffer.from(blob.ciphertext, 'hex');
+      const tag = Buffer.from(blob.tag, 'hex');
 
-    const decipher = createDecipheriv(ALGORITHM, this.key, iv, { authTagLength: TAG_LENGTH });
-    decipher.setAuthTag(tag);
-    return decipher.update(ciphertext) + decipher.final('utf8');
+      const decipher = createDecipheriv(ALGORITHM, this.key, iv, { authTagLength: TAG_LENGTH });
+      decipher.setAuthTag(tag);
+      return decipher.update(ciphertext) + decipher.final('utf8');
+    } catch (err) {
+      console.warn('[Vault] Decrypt failed for secret, may be corrupted:', err);
+      return null;
+    }
   }
 
   /** Store an encrypted secret */
   async storeSecret(name: string, plaintext: string): Promise<void> {
+    if (!plaintext || typeof plaintext !== 'string') {
+      throw new Error('[Vault] plaintext must be a non-empty string');
+    }
     const blob = this.encrypt(plaintext);
-    await this._store.set(name, JSON.stringify(blob));
+    const serialized = JSON.stringify(blob);
+    if (!serialized) {
+      throw new Error('[Vault] Failed to serialize encrypted blob');
+    }
+    await this._store.set(name, serialized);
   }
 
   /** Retrieve and decrypt a secret */
@@ -72,7 +84,9 @@ export class Vault {
     const raw = await this._store.get(name);
     if (!raw) throw new Error(`[Vault] Secret "${name}" not found`);
     const blob: EncryptedBlob = JSON.parse(raw);
-    return this.decrypt(blob);
+    const decrypted = this.decrypt(blob);
+    if (decrypted === null) throw new Error(`[Vault] Failed to decrypt secret "${name}"`);
+    return decrypted;
   }
 
   /** Delete a secret */
@@ -123,7 +137,7 @@ export class Vault {
           decipher.setAuthTag(Buffer.from(blob.tag, 'hex'));
           const plaintext = decipher.update(Buffer.from(blob.ciphertext, 'hex')) + decipher.final('utf8');
 
-          // Re-encrypt with the original (old) key
+          // Re-encrypt with the original (old) key - use this.key (old key before failed rotation)
           const iv = randomBytes(IV_LENGTH);
           const cipher = createCipheriv(ALGORITHM, this.key, iv, { authTagLength: TAG_LENGTH });
           const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
@@ -136,8 +150,8 @@ export class Vault {
             version: this.keyVersion,
           };
           await this._store.set(name, JSON.stringify(rolledBack));
-        } catch {
-          // Best-effort rollback — log but don't mask original error
+        } catch (rollbackErr) {
+          console.error('[Vault] Rollback failed, data may be corrupted:', rollbackErr);
         }
       }
       throw err;

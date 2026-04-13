@@ -3,11 +3,42 @@
  *
  * Tracks pipeline stages, latencies, and provider decisions
  * with OpenTelemetry-style spans and metrics.
+ * Automatically redacts sensitive fields in logs and traces.
  */
 
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import type { TraceContext, PipelineMetrics } from './types';
 import { defaultLogger as log } from '../logger';
+
+const SENSITIVE_KEYS = new Set([
+  'apiKey', 'secret', 'token', 'password', 'credential',
+  'authorization', 'bearer', 'accessToken', 'refreshToken',
+  'privateKey', 'hfToken', 'authId',
+]);
+
+function isSensitiveKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  return SENSITIVE_KEYS.has(lower) || lower.includes('secret') || lower.includes('key');
+}
+
+function redactValue(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(redactValue);
+  if (typeof value === 'string') return '[redacted]';
+  
+  const result: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    if (isSensitiveKey(key)) {
+      result[key] = '[redacted]';
+    } else if (typeof v === 'object' && v !== null) {
+      result[key] = redactValue(v);
+    } else {
+      result[key] = v;
+    }
+  }
+  return result;
+}
 
 export class DistributedTracer {
   private spans = new Map<string, TraceContext>();
@@ -38,17 +69,21 @@ export class DistributedTracer {
   addTag(spanId: string, key: string, value: unknown): void {
     const span = this.spans.get(spanId);
     if (span) {
-      span.tags[key] = value;
+      span.tags[key] = isSensitiveKey(key) ? '[redacted]' : value;
     }
   }
 
   addEvent(spanId: string, name: string, attributes: Record<string, unknown> = {}): void {
     const span = this.spans.get(spanId);
     if (span) {
+      const safeAttrs: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(attributes)) {
+        safeAttrs[k] = isSensitiveKey(k) ? '[redacted]' : v;
+      }
       span.events.push({
         timestamp: Date.now(),
         name,
-        attributes
+        attributes: safeAttrs
       });
     }
   }
@@ -267,7 +302,10 @@ export class DistributedTracer {
         this.endSpan(span.spanId);
 
       } catch (error) {
-        log.error(`[tracer] Request ${i+1} failed:`, error);
+        const safeError = error instanceof Error 
+          ? { message: error.message, name: error.name }
+          : error;
+        log.error(`[tracer] Request ${i+1} failed:`, safeError);
       }
     }
 

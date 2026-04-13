@@ -9,6 +9,8 @@ export interface WithCacheOptions {
   ttlMs?: number;
   /** Only cache if condition returns true. Default: cache when temperature is 0 or undefined. */
   condition?: (req: ChatRequest) => boolean;
+  /** Logger for cache errors */
+  logger?: { log?: (...args: unknown[]) => void; warn?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void };
 }
 
 /**
@@ -23,6 +25,7 @@ export function withCache(
   const shouldCache = opts?.condition ?? ((req: ChatRequest) =>
     req.temperature === undefined || req.temperature === 0
   );
+  const log = opts?.logger ?? { log: () => {}, warn: () => {} };
 
   return {
     providerId: provider.providerId,
@@ -42,12 +45,26 @@ export function withCache(
         temperature: request.temperature,
       });
 
-      const cached = await cache.get<ChatResponse>(key);
-      if (cached) return cached;
+      try {
+        const cached = await cache.get<ChatResponse>(key);
+        if (cached) return cached;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.warn?.(`[withCache] cache.get failed: ${msg}`);
+      }
 
-      const response = await provider.chat(request);
-      await cache.set(key, response, opts?.ttlMs);
-      return response;
+      try {
+        const response = await provider.chat(request);
+        try {
+          await cache.set(key, response, opts?.ttlMs);
+        } catch (setErr) {
+          const msg = setErr instanceof Error ? setErr.message : String(setErr);
+          log.warn?.(`[withCache] cache.set failed: ${msg}`);
+        }
+        return response;
+      } catch (err) {
+        throw err;
+      }
     },
   };
 }

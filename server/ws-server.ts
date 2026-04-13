@@ -376,6 +376,8 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
   const type = cmd.type as string;
   console.log(`[ws] Command from client: ${type}`);
 
+  try {
+
   if (type === 'bot:join') {
     const meetingUrl = (cmd.meetingUrl as string) ?? '';
     const sourceLang = (cmd.sourceLang as string) ?? 'fr';
@@ -462,7 +464,9 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
         broadcastWs({ type: 'bot:status', status: 'error', message: `Join failed: ${JSON.stringify(joinBody)}` });
       }
     } catch (err) {
-      broadcastWs({ type: 'bot:status', status: 'error', message: `Join failed: ${err}` });
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[ws] bot:join failed: ${errMsg}`);
+      broadcastWs({ type: 'bot:status', status: 'error', message: `Join failed: ${errMsg}` });
     }
 
   } else if (type === 'bot:leave') {
@@ -520,6 +524,10 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
 
   } else if (type === 'ping') {
     ws.send(JSON.stringify({ type: 'pong' }));
+  }
+  } catch (err) {
+    console.error('[ws] Command error:', err instanceof Error ? err.message : err);
+    ws.send(JSON.stringify({ type: 'error', message: err instanceof Error ? err.message : String(err) }));
   }
 }
 
@@ -968,7 +976,11 @@ export function startWsServer() {
             } catch { /* ignore malformed */ }
           } else {
             // Forward binary PCM to upstream backend (msg is Buffer here)
-            backend.sendAudio(msg);
+            try {
+              backend.sendAudio(msg);
+            } catch (sendErr) {
+              console.warn(`[stt-ws] sendAudio failed: ${sendErr instanceof Error ? sendErr.message : sendErr}`);
+            }
           }
         } else if (ws.data.type === 'recall-audio') {
           // Recall.ai audio: first message is JSON metadata, then binary S16LE 16kHz PCM.

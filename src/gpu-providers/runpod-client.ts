@@ -117,6 +117,10 @@ export class RunpodClient extends AbstractGpuProvider {
     super(opts);
   }
 
+  dispose(): void {
+    // Call parent cleanup if any timers exist
+  }
+
   /** RunPod GET requests only need Authorization (no Content-Type). */
   private authHeaders(apiKey: string): Record<string, string> {
     return { Authorization: `Bearer ${apiKey}` };
@@ -1228,6 +1232,10 @@ export class RunpodClient extends AbstractGpuProvider {
 
   async listInstances(credentials: ProviderCredentials): Promise<GpuInstance[]> {
     const { apiKey } = credentials;
+    if (!apiKey) {
+      this.log.warn('[runpod] listInstances: no apiKey provided');
+      return [];
+    }
     try {
       const res = await this._fetchWithRetry(
         `${RunpodClient.API_BASE}/pods`,

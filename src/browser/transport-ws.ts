@@ -126,7 +126,7 @@ export class WebSocketTransport implements Transport {
 
     this.log.debug('sending audio,', data.length, 'samples');
     const wavBuffer = float32ToWavBuffer(data);
-    this.ws!.send(wavBuffer);
+    this.ws?.send(wavBuffer);
   }
 
   async sendText(text: string): Promise<void> {
@@ -149,7 +149,7 @@ export class WebSocketTransport implements Transport {
     this.currentResponse = '';
 
     this.log.debug('sending text:', trimmed.slice(0, 50));
-    this.ws!.send(JSON.stringify({ type: 'text', text: trimmed }));
+    this.ws?.send(JSON.stringify({ type: 'text', text: trimmed }));
   }
 
   /** Update the auth token (used after token refresh). */

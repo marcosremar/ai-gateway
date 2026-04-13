@@ -310,6 +310,8 @@ export interface GpuProviderClient {
   getInstanceLogs?(instanceId: string, credentials: ProviderCredentials, lines?: number, filter?: string): Promise<string | null>;
   /** List available GPU offers with real-time pricing and availability. */
   listOffers?(options: ListOffersOptions, credentials: ProviderCredentials): Promise<GpuOffer[]>;
+  /** Dispose of provider resources (timers, connections, etc.). */
+  dispose?(): void;
 }
 
 /**

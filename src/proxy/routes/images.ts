@@ -40,19 +40,24 @@ export async function handleImageGenerate(
     return { status: 503, body: { error: { message: 'Image provider is not configured (missing API key)', type: 'service_unavailable' } } };
   }
 
-  const body = req.body as GenerateBody;
-  if (!body?.prompt) {
+  if (!req.body || typeof req.body !== 'object') {
+    return { status: 400, body: { error: { message: 'request body is required', type: 'invalid_request_error' } } };
+  }
+  const body = req.body as Record<string, unknown>;
+
+  const prompt = typeof body.prompt === 'string' ? body.prompt : null;
+  if (!prompt) {
     return { status: 400, body: { error: { message: '`prompt` is required', type: 'invalid_request_error' } } };
   }
 
   try {
     const result = await provider.generate({
-      prompt: body.prompt,
-      model: body.model,
-      width: body.width,
-      height: body.height,
-      steps: body.steps,
-      seed: body.seed,
+      prompt,
+      model: body.model as string | undefined,
+      width: body.width as number | undefined,
+      height: body.height as number | undefined,
+      steps: body.steps as number | undefined,
+      seed: body.seed as number | undefined,
     });
 
     return {
@@ -62,7 +67,7 @@ export async function handleImageGenerate(
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    const status = (err as { status?: number }).status ?? 500;
+    const status = typeof err === 'object' && err !== null && 'status' in err ? (err as { status: number }).status : 500;
     return { status, body: { error: { message: msg, type: 'provider_error' } } };
   }
 }
@@ -78,24 +83,31 @@ export async function handleImageInpaint(
     return { status: 503, body: { error: { message: 'Image provider is not configured (missing API key)', type: 'service_unavailable' } } };
   }
 
-  const body = req.body as InpaintBody;
-  if (!body?.prompt) {
+  if (!req.body || typeof req.body !== 'object') {
+    return { status: 400, body: { error: { message: 'request body is required', type: 'invalid_request_error' } } };
+  }
+  const body = req.body as Record<string, unknown>;
+
+  const prompt = typeof body.prompt === 'string' ? body.prompt : null;
+  if (!prompt) {
     return { status: 400, body: { error: { message: '`prompt` is required', type: 'invalid_request_error' } } };
   }
-  if (!body.imageUrl || !body.maskUrl) {
+  const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl : null;
+  const maskUrl = typeof body.maskUrl === 'string' ? body.maskUrl : null;
+  if (!imageUrl || !maskUrl) {
     return { status: 400, body: { error: { message: '`imageUrl` and `maskUrl` are required for inpainting', type: 'invalid_request_error' } } };
   }
 
   try {
     const result = await provider.generate({
-      prompt: body.prompt,
-      model: body.model,
-      width: body.width,
-      height: body.height,
-      steps: body.steps,
-      seed: body.seed,
-      imageUrl: body.imageUrl,
-      maskUrl: body.maskUrl,
+      prompt,
+      model: body.model as string | undefined,
+      width: body.width as number | undefined,
+      height: body.height as number | undefined,
+      steps: body.steps as number | undefined,
+      seed: body.seed as number | undefined,
+      imageUrl,
+      maskUrl,
     });
 
     return {
@@ -105,7 +117,7 @@ export async function handleImageInpaint(
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    const status = (err as { status?: number }).status ?? 500;
+    const status = typeof err === 'object' && err !== null && 'status' in err ? (err as { status: number }).status : 500;
     return { status, body: { error: { message: msg, type: 'provider_error' } } };
   }
 }

@@ -28,33 +28,41 @@ export async function handleChatCompletions(
   hooks?: GatewayHooks,
   fallbackChain?: ChatFallbackEntry[],
 ): Promise<ProxyResponse> {
-  const body = req.body as {
-    model: string;
-    messages: ChatMessage[];
-    temperature?: number;
-    max_tokens?: number;
-    stream?: boolean;
-    response_format?: { type: 'json_object' | 'text' };
-    stream_options?: { include_usage?: boolean };
-  };
+  if (!req.body || typeof req.body !== 'object') {
+    return { status: 400, body: { error: { message: 'request body is required', type: 'invalid_request_error' } } };
+  }
+  const body = req.body as Record<string, unknown>;
+  const model = typeof body.model === 'string' ? body.model : null;
+  const messages = Array.isArray(body.messages) ? body.messages : null;
+  const temperature = typeof body.temperature === 'number' && !Number.isNaN(body.temperature) ? body.temperature : undefined;
+  const max_tokens = typeof body.max_tokens === 'number' && !Number.isNaN(body.max_tokens) ? body.max_tokens : undefined;
+  const stream = body.stream === true;
+  const response_format = typeof body.response_format === 'object' && body.response_format !== null ? body.response_format : undefined;
+  const stream_options = typeof body.stream_options === 'object' && body.stream_options !== null ? body.stream_options : undefined;
 
-  if (!body.model || typeof body.model !== 'string') {
+  if (!model) {
     return { status: 400, body: { error: { message: 'model is required', type: 'invalid_request_error' } } };
   }
-  if (!Array.isArray(body.messages) || body.messages.length === 0) {
+  if (!messages || messages.length === 0) {
     return { status: 400, body: { error: { message: 'messages array is required', type: 'invalid_request_error' } } };
   }
-  if (body.temperature !== undefined && (typeof body.temperature !== 'number' || body.temperature < 0 || body.temperature > 2)) {
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!msg || typeof msg !== 'object' || typeof msg.role !== 'string' || typeof msg.content !== 'string') {
+      return { status: 400, body: { error: { message: `messages[${i}] must have non-empty string role and content`, type: 'invalid_request_error' } } };
+    }
+  }
+  if (temperature !== undefined && (temperature < 0 || temperature > 2)) {
     return { status: 400, body: { error: { message: 'temperature must be between 0 and 2', type: 'invalid_request_error' } } };
   }
-  if (body.max_tokens !== undefined && (typeof body.max_tokens !== 'number' || body.max_tokens < 1 || body.max_tokens > 128000)) {
+  if (max_tokens !== undefined && (max_tokens < 1 || max_tokens > 128000)) {
     return { status: 400, body: { error: { message: 'max_tokens must be between 1 and 128000', type: 'invalid_request_error' } } };
   }
 
   // Build fallback chain: use the configured chain, or fall back to single-provider lookup
-  const chain = buildChain(body.model, chatProviders, fallbackChain);
+  const chain = buildChain(model, chatProviders, fallbackChain);
   if (chain.length === 0) {
-    return { status: 404, body: { error: { message: `Model "${body.model}" not found`, type: 'invalid_request_error' } } };
+    return { status: 404, body: { error: { message: `Model "${model}" not found`, type: 'invalid_request_error' } } };
   }
 
   const startTs = Date.now();
@@ -63,10 +71,10 @@ export async function handleChatCompletions(
 
   const chatOpts: ChatRequest = {
     model: primaryModel,
-    messages: body.messages,
-    temperature: body.temperature,
-    maxTokens: body.max_tokens,
-    responseFormat: body.response_format,
+    messages: messages as ChatMessage[],
+    temperature,
+    maxTokens: max_tokens,
+    responseFormat: response_format as { type: 'json_object' | 'text' } | undefined,
   };
 
   emitHook(hooks, 'onRequestStart', {
@@ -78,10 +86,10 @@ export async function handleChatCompletions(
   });
 
   // ── Streaming path ─────────────────────────────────────────────────────────
-  if (body.stream) {
+  if (stream) {
     const instance = chain[0].instance;
     const completionId = `chatcmpl-${Date.now()}`;
-    const includeUsage = body.stream_options?.include_usage === true;
+    const includeUsage = stream_options && typeof stream_options === 'object' && 'include_usage' in stream_options && stream_options.include_usage === true;
     const stream = buildSSEStream(instance, chatOpts, primaryModel, completionId, includeUsage, (latencyMs, success, error) => {
       emitHook(hooks, 'onRequestEnd', {
         userId: 'proxy',
@@ -109,17 +117,17 @@ export async function handleChatCompletions(
   // ── Non-streaming path ─────────────────────────────────────────────────────
   try {
     // Build cache key once (reused for get and set)
-    const isDeterministic = body.temperature === undefined || body.temperature === 0;
+    const isDeterministic = temperature === undefined || temperature === 0;
     const cacheKey = cache && isDeterministic ? cache.buildKey({
       provider: primaryProvider,
       model: primaryModel,
-      messages: body.messages,
-      temperature: body.temperature,
+      messages: messages as ChatMessage[],
+      temperature,
     }) : null;
 
     // Check cache
     if (cacheKey) {
-      const cached = await cache!.get<{ content: string; model: string; usage?: unknown }>(cacheKey);
+      const cached = await cache.get<{ content: string; model: string; usage?: unknown }>(cacheKey);
       if (cached) {
         return {
           status: 200,
@@ -152,8 +160,8 @@ export async function handleChatCompletions(
     const coalescingKey = coalescer.buildKey({
       provider: primaryProvider,
       model: primaryModel,
-      messages: body.messages,
-      temperature: body.temperature,
+      messages: messages as ChatMessage[],
+      temperature,
     });
 
     // Execute with coalescing + per-provider semaphore
@@ -175,14 +183,14 @@ export async function handleChatCompletions(
 
     // Store in cache (key already computed above)
     if (cacheKey) {
-      await cache!.set(cacheKey, result);
+      await cache.set(cacheKey, result);
     }
 
     emitHook(hooks, 'onRequestEnd', {
       userId: 'proxy',
       stage: 'llm',
       provider: usedProvider,
-      model: usedModel || body.model,
+      model: usedModel || model,
       latencyMs: Date.now() - startTs,
       success: true,
       timestamp: Date.now(),
@@ -199,7 +207,7 @@ export async function handleChatCompletions(
       userId: 'proxy',
       stage: 'llm',
       provider: primaryProvider,
-      model: body.model,
+      model: model,
       latencyMs: Date.now() - startTs,
       success: false,
       error: err instanceof Error ? err.message.replace(/https?:\/\/[^\s]+/g, '[redacted-url]') : 'Internal error',
@@ -207,7 +215,7 @@ export async function handleChatCompletions(
     });
 
     const status = extractStatus(err);
-    console.error(`[chat-completions] All providers failed for model ${body.model}:`, err);
+    console.error(`[chat-completions] All providers failed for model ${model}:`, err);
     // Propagate upstream Retry-After if the fallback chain captured one from a 429.
     const retryAfterSec = (err as { retryAfterSec?: number })?.retryAfterSec;
     const headers: Record<string, string> = {};
@@ -294,20 +302,20 @@ function buildSSEStream(
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
       // Races any async step against the 30s wall-clock timeout
+      let currentTimeoutId: ReturnType<typeof setTimeout> | null = null;
       const withTimeout = <T>(p: Promise<T>): Promise<T> => {
-        if (timeoutId) clearTimeout(timeoutId);
+        if (currentTimeoutId) clearTimeout(currentTimeoutId);
         return new Promise<T>((resolve, reject) => {
-          timeoutId = setTimeout(() => reject(new Error('Streaming timeout')), STREAM_TIMEOUT_MS);
-          p.then(v => { clearTimeout(timeoutId!); resolve(v); },
-                 e => { clearTimeout(timeoutId!); reject(e); });
+          currentTimeoutId = setTimeout(() => reject(new Error('Streaming timeout')), STREAM_TIMEOUT_MS);
+          p.then(v => { if (currentTimeoutId) clearTimeout(currentTimeoutId); resolve(v); },
+                 e => { if (currentTimeoutId) clearTimeout(currentTimeoutId); reject(e); });
         });
       };
 
       const finish = (success: boolean, errorMsg?: string) => {
-        if (timeoutId) clearTimeout(timeoutId);
+        if (currentTimeoutId) clearTimeout(currentTimeoutId);
         onEnd?.(Date.now() - startMs, success, errorMsg);
       };
 

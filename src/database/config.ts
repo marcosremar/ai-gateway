@@ -25,8 +25,16 @@ export function buildConnectionConfig(overrides?: Partial<DatabaseConfig>): Data
   const environment = overrides?.environment ?? detectEnvironment(databaseUrl);
   const projectId = overrides?.projectId ?? process.env.NEON_PROJECT_ID;
   const apiKey = overrides?.apiKey ?? process.env.NEON_API_KEY;
-  const connectionLimit = overrides?.connectionLimit ?? Number(process.env.DB_CONNECTION_LIMIT ?? '20');
-  const poolTimeout = overrides?.poolTimeout ?? Number(process.env.DB_POOL_TIMEOUT ?? '20');
+  const connectionLimit = overrides?.connectionLimit ?? (() => {
+    const val = process.env.DB_CONNECTION_LIMIT;
+    const parsed = val ? parseInt(val, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
+  })();
+  const poolTimeout = overrides?.poolTimeout ?? (() => {
+    const val = process.env.DB_POOL_TIMEOUT;
+    const parsed = val ? parseInt(val, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
+  })();
 
   return { databaseUrl, environment, projectId, apiKey, connectionLimit, poolTimeout };
 }

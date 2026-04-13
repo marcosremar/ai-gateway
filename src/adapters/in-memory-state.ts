@@ -56,13 +56,24 @@ export class InMemoryStateAdapter implements StateStore {
     this.lists.delete(key);
   }
 
-  async scan(pattern: string): Promise<string[]> {
+  async scan(pattern: string, callback?: (keys: string[]) => boolean | void, limit: number = 1000): Promise<number> {
     this.sweep();
     const now = Date.now();
     const prefix = pattern.replace('*', '');
-    return [...this.kv.entries()]
-      .filter(([k, e]) => k.startsWith(prefix) && e.expiresAt >= now)
-      .map(([k]) => k);
+    const allKeys: string[] = [];
+    for (const [k, e] of this.kv) {
+      if (k.startsWith(prefix) && e.expiresAt >= now) {
+        allKeys.push(k);
+        if (limit && allKeys.length >= limit) break;
+      }
+    }
+    if (callback && allKeys.length > 0) {
+      const shouldContinue = callback(allKeys);
+      if (shouldContinue === false) {
+        return allKeys.length;
+      }
+    }
+    return allKeys.length;
   }
 
   async rpush(key: string, value: string): Promise<void> {
@@ -98,7 +109,7 @@ export class InMemoryStateAdapter implements StateStore {
     this.hashes.get(key)?.delete(field);
   }
 
-  async hgetall(key: string): Promise<Record<string, string>> {
+  async hgetall(key: string, limit: number = 1000): Promise<Record<string, string>> {
     const exp = this.hashExpiry.get(key);
     if (exp && exp < Date.now()) {
       this.hashes.delete(key);
@@ -107,6 +118,17 @@ export class InMemoryStateAdapter implements StateStore {
     }
     const hash = this.hashes.get(key);
     if (!hash) return {};
-    return Object.fromEntries(hash);
+    const entries = Array.from(hash).slice(0, limit);
+    return Object.fromEntries(entries);
+  }
+
+  async hincrby(key: string, field: string, increment: number): Promise<void> {
+    const hash = this.hashes.get(key);
+    if (!hash) {
+      this.hashes.set(key, new Map([[field, String(increment)]]));
+    } else {
+      const current = parseFloat(hash.get(field) || '0');
+      hash.set(field, String(current + increment));
+    }
   }
 }

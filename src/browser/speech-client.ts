@@ -372,7 +372,7 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
     }
 
     this.startResponseTimeout();
-    await this.transport!.sendAudio(data);
+    await this.transport?.sendAudio(data);
   }
 
   /**
@@ -387,7 +387,7 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
     }
 
     this.startResponseTimeout();
-    await this.transport!.sendText(text);
+    await this.transport?.sendText(text);
   }
 
   // ── Service status & health polling ────────────────────────────────────
@@ -533,13 +533,18 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
     const delay = Math.min(BACKOFF_BASE_MS * Math.pow(2, this.reconnectCount - 1), BACKOFF_MAX_MS);
     this.log.info(`reconnecting in ${delay}ms (attempt ${this.reconnectCount}/${maxAttempts})`);
 
-    // Clear any existing reconnect timer to prevent duplicate reconnect attempts
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
-    }
-    this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect().catch(e => console.warn('[speech] reconnect failed:', e instanceof Error ? e.message : e));
+    }
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      if (this.destroyed) return;
+      try {
+        await this.connect();
+      } catch (e) {
+        console.warn('[speech] reconnect failed:', e instanceof Error ? e.message : e);
+      }
     }, delay);
   }
 

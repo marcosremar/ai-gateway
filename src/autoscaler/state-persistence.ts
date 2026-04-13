@@ -147,8 +147,15 @@ export class StatePersistence {
    */
   async findUsersWithActiveGpus(): Promise<string[]> {
     try {
-      const keys = await this.stateStore.scan(`${KEY_PREFIX}*`);
-      return keys.map((key) => key.slice(KEY_PREFIX.length)).filter(Boolean);
+      const userIds = new Set<string>();
+      await this.stateStore.scan(`${KEY_PREFIX}*`, (keys) => {
+        for (const key of keys) {
+          const userId = key.slice(KEY_PREFIX.length);
+          if (userId) userIds.add(userId);
+        }
+        return true;
+      });
+      return Array.from(userIds);
     } catch (err) {
       this.logger.warn('[state-persistence] Failed to find users with active GPUs:', err);
       return [];
