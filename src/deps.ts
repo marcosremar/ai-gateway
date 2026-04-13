@@ -6,13 +6,22 @@
 
 /** Reads/writes user-level AI provider settings (backed by Prisma, KV, etc.) */
 export interface SettingsStore {
+  /** Get settings for a user. Returns empty object if user has no settings yet.
+   *  @throws Error on transient failures (network, timeout) — caller should retry
+   */
   get(userId: string): Promise<Record<string, unknown>>;
+  /** Merge-patch user settings (shallow merge).
+   *  @throws Error on transient failures; does NOT roll back partial updates
+   */
   patch(userId: string, partial: Record<string, unknown>): Promise<void>;
 }
 
 /** Key/value operations (used by StatePersistence) */
 export interface KvStore {
   get(key: string): Promise<string | null>;
+  /** Set key-value pair with optional TTL.
+   *  @param ttlSecs If 0 or negative, should be treated as no expiration (implementation may ignore or throw)
+   */
   set(key: string, value: string, ttlSecs?: number): Promise<void>;
   del(key: string): Promise<void>;
   /** SCAN keys matching a pattern using cursor-based iteration.
@@ -21,6 +30,7 @@ export interface KvStore {
    *  @param callback Called for each batch of keys; return false to stop iteration early
    *  @param limit Maximum number of keys to return (default 1000, max 10000)
    *  @returns Total number of keys found (may be approximate for large keyspaces)
+   *  @throws Error if limit is 0 or negative
    */
   scan(pattern: string, callback?: (keys: string[]) => boolean | void, limit?: number): Promise<number>;
 }
@@ -31,8 +41,13 @@ export interface ListStore {
   rpush(key: string, value: string): Promise<void>;
   /** Trim list to keep only elements in [start, stop] range */
   ltrim(key: string, start: number, stop: number): Promise<void>;
-  /** Get list elements in [start, stop] range */
-  lrange(key: string, start: number, stop: number): Promise<string[]>;
+  /** Get list elements in [start, stop] range.
+   *  @param start Start index (0-based, negative = from end)
+   *  @param stop Stop index (inclusive, -1 = all remaining)
+   *  @param maxElements Maximum elements to return (prevent unbounded memory)
+   *  @throws Error if range exceeds maxElements
+   */
+  lrange(key: string, start: number, stop: number, maxElements?: number): Promise<string[]>;
 }
 
 /** Hash operations (used by SessionTracker) */
