@@ -478,11 +478,21 @@ async function cmdGpuStatus() {
   if (data.gpuHealthy !== undefined) console.log(`  healthy:   ${data.gpuHealthy}`);
 }
 
-async function cmdGpuDeploy(opts: { image?: string; gpuTypes?: string }) {
+async function cmdGpuDeploy(opts: { image?: string; gpuTypes?: string; onstart?: string; storageGb?: number; env?: string }) {
   const { url, key } = getConfig();
   const body: Record<string, unknown> = {};
   if (opts.image) body.dockerImage = opts.image;
   if (opts.gpuTypes) body.gpuTypes = opts.gpuTypes.split(',');
+  if (opts.onstart) body.onstart = opts.onstart;
+  if (opts.storageGb) body.storageGb = opts.storageGb;
+  if (opts.env) {
+    const envMap: Record<string, string> = {};
+    for (const pair of opts.env.split(',')) {
+      const [k, ...v] = pair.split('=');
+      if (k) envMap[k.trim()] = v.join('=').trim();
+    }
+    body.env = envMap;
+  }
   const data = await fetchJSON(`${url}/v1/gpu/deploy`, {
     method: 'POST', headers: headers(key), body: JSON.stringify(body),
   });
@@ -1751,6 +1761,9 @@ ai-gateway server — Manage the local dev server
           case 'deploy': await cmdGpuDeploy({
             image: getArg(args, '--image'),
             gpuTypes: getArg(args, '--gpu-types'),
+            onstart: getArg(args, '--onstart'),
+            storageGb: getArg(args, '--storage') ? parseInt(getArg(args, '--storage')!) : undefined,
+            env: getArg(args, '--env'),
           }); break;
           case 'stop': await cmdGpuStop(); break;
           case 'resume': await cmdGpuResume(args[2], {
