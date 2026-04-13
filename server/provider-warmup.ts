@@ -224,6 +224,53 @@ export async function warmupAllGpuModels(endpoint: string): Promise<void> {
   }
 }
 
+// ─── Predictive Stage Warmup ─────────────────────────────────────────────────
+// After one pipeline stage completes, pre-warm the NEXT stage's provider.
+// Pipeline always goes STT -> LLM -> TTS, so:
+//   STT done -> warm LLM provider
+//   LLM done -> warm TTS provider
+//   TTS done -> no-op (pipeline complete)
+
+const NEXT_STAGE: Record<string, 'llm' | 'tts' | null> = {
+  stt: 'llm',
+  llm: 'tts',
+  tts: null,
+};
+
+/**
+ * Trigger predictive warmup for the next pipeline stage.
+ * Call this after a stage completes to reduce cold-start latency on the next stage.
+ * This is a no-op if the GPU endpoint is not available or the next stage is already warm.
+ */
+export function triggerPredictiveWarmup(completedStage: 'stt' | 'llm' | 'tts'): void {
+  const nextStage = NEXT_STAGE[completedStage];
+  if (!nextStage) return; // pipeline complete, nothing to warm
+
+  // Only relevant when GPU pod is deployed
+  if (deployState.status !== 'ready' || !deployState.endpoint) return;
+
+  // Skip if already warm
+  if (isStageWarm(nextStage)) return;
+
+  const endpoint = deployState.endpoint;
+  console.log(`[warmup] Predictive: ${completedStage} done, pre-warming ${nextStage}...`);
+
+  // Fire-and-forget: don't block the pipeline
+  if (nextStage === 'llm') {
+    // Warm LLM with a short translation request
+    fetch(`${endpoint}/v1/translate/text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'warmup', source_lang: 'en', target_lang: 'fr' }),
+      signal: AbortSignal.timeout(15_000),
+    }).catch(() => { /* best-effort */ });
+  } else if (nextStage === 'tts') {
+    // Warm TTS (reuses existing warmup path)
+    warmupGpuTts(endpoint, deployState.gpuType, deployState.dockerImage, deployState.provider)
+      .catch(() => { /* best-effort */ });
+  }
+}
+
 /**
  * Start periodic cloud provider health checks.
  * Call at gateway startup.

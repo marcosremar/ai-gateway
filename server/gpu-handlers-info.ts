@@ -289,6 +289,12 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
       inetUpMbps: (deployState.providerMeta?.inetUp as number) || null,
       cpuCores: (deployState.providerMeta?.cpuCores as number) || null,
     },
+    gpuMetrics: deployState.gpuTemp > 0 || deployState.gpuUtil >= 0 || deployState.gpuMemUsed > 0 ? {
+      tempC: deployState.gpuTemp || undefined,
+      utilPct: deployState.gpuUtil >= 0 ? deployState.gpuUtil : undefined,
+      memUsedGb: deployState.gpuMemUsed || undefined,
+      memTotalGb: deployState.gpuMemTotal || undefined,
+    } : undefined,
     hasRemoteLogs: !!lastLogs,
     providerCooldowns: Object.keys(cooldowns).length > 0 ? cooldowns : undefined,
     providerBalance,
