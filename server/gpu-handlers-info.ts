@@ -391,6 +391,7 @@ export async function handleGpuList(_req: IncomingMessage, res: ServerResponse):
     const elapsed = deployState.startedAt > 0 ? Math.round((Date.now() - deployState.startedAt) / 1000) : 0;
     instances.push({
       provider: deployState.provider,
+      deployId: deployState.deployId || undefined,
       instanceId: deployState.podId,
       instanceName: deployState.podId,
       endpoint: deployState.endpoint,
@@ -444,6 +445,7 @@ export async function handleHealth(_req: IncomingMessage, res: ServerResponse): 
     const idleSec = lastRequestTime > 0 ? Math.round((Date.now() - lastRequestTime) / 1000) : 0;
     components.gpu = {
       status: 'ready',
+      deployId: deployState.deployId || undefined,
       endpoint: deployState.endpoint,
       healthy: gpuHealthy,
       idle_sec: idleSec,
@@ -451,9 +453,9 @@ export async function handleHealth(_req: IncomingMessage, res: ServerResponse): 
   } else if (deployState.status === 'idle') {
     components.gpu = { status: 'idle' };
   } else if (deployState.status === 'stopped') {
-    components.gpu = { status: 'stopped', podId: deployState.podId, provider: deployState.provider };
+    components.gpu = { status: 'stopped', deployId: deployState.deployId || undefined, podId: deployState.podId, provider: deployState.provider };
   } else {
-    components.gpu = { status: deployState.status, step: deployState.step };
+    components.gpu = { status: deployState.status, deployId: deployState.deployId || undefined, step: deployState.step };
   }
 
   const providersStatus: Record<string, boolean> = {

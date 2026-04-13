@@ -49,15 +49,20 @@ const GPU_VRAM_GB: Record<string, number> = {
   'NVIDIA GeForce RTX 5070': 12,
   'NVIDIA GeForce RTX 4090': 24,
   'NVIDIA GeForce RTX 4080': 16,
+  'NVIDIA GeForce RTX 4080 SUPER': 16,
   'NVIDIA GeForce RTX 4070 Ti': 12,
+  'NVIDIA GeForce RTX 4070 Ti SUPER': 16,
   'NVIDIA GeForce RTX 3090': 24,
   'NVIDIA GeForce RTX 3080': 10,
+  'NVIDIA GeForce RTX 3070': 8,
   'NVIDIA RTX A6000': 48,
   'NVIDIA RTX A5000': 24,
   'NVIDIA RTX A4000': 16,
   'NVIDIA L40S': 48,
   'NVIDIA L40': 48,
+  'NVIDIA L4': 24,
   'NVIDIA A40': 48,
+  'NVIDIA A10G': 24,
   'NVIDIA A100-SXM4-80GB': 80,
   'NVIDIA A100 80GB PCIe': 80,
   'NVIDIA A100-SXM4-40GB': 40,
@@ -65,6 +70,7 @@ const GPU_VRAM_GB: Record<string, number> = {
   'NVIDIA H100 80GB HBM3': 80,
   'NVIDIA H200': 141,
   'NVIDIA V100': 16,
+  'NVIDIA T4': 16,
 };
 
 /**
@@ -75,20 +81,66 @@ const GPU_VRAM_GB: Record<string, number> = {
 function estimateModelVramGb(dockerImage: string, dockerStartCmd: string, env: Record<string, string>, llmModel: string): { vramGb: number; hint: string } {
   const haystack = `${dockerImage} ${dockerStartCmd} ${JSON.stringify(env)} ${llmModel}`.toLowerCase();
 
-  if (/\b(70b|65b|72b)\b/.test(haystack)) return { vramGb: 48, hint: '70B-class model (~48GB VRAM)' };
-  if (/\b(32b|33b|34b|35b)\b/.test(haystack)) return { vramGb: 24, hint: '32B-class model (~24GB VRAM)' };
-  if (/\b(13b|14b|15b)\b/.test(haystack)) return { vramGb: 16, hint: '13B-class model (~16GB VRAM)' };
-  if (/\b(7b|8b)\b/.test(haystack)) return { vramGb: 8, hint: '7B-class model (~8GB VRAM)' };
-  if (/\b(3b|4b)\b/.test(haystack)) return { vramGb: 4, hint: '3-4B model (~4GB VRAM)' };
+  // Check for quantization hints to refine estimation
+  const isQ2 = /\b(q2|2bit)\b/.test(haystack);
+  const isQ3 = /\b(q3|3bit)\b/.test(haystack);
+  const isQ4 = /\b(q4|4bit)\b/.test(haystack);
+  const isQ5 = /\b(q5|5bit)\b/.test(haystack);
+  const isQ8 = /\b(q8|8bit)\b/.test(haystack);
+  const isFp16 = /\b(fp16|half)\b/.test(haystack);
+  const isGguf = /\b(gguf|llama\.cpp)\b/.test(haystack);
+
+  // KV cache overhead for long context (adds 5-20GB depending on context length)
+  const hasLongContext = /\b(32k|64k|128k|long.context)\b/.test(haystack);
+  const kvCacheOverhead = hasLongContext ? 15 : 5;
+
+  // CUDA context overhead (~2-4GB)
+  const cudaOverhead = 3;
+
+  // Multi-model setup (STT + LLM + TTS simultaneously)
+  const isMultiModel = /\b(multi|pipeline|stt.*llm|llm.*tts)\b/.test(haystack);
+  const multiModelMultiplier = isMultiModel ? 1.5 : 1;
+
+  if (/\b(200b|175b)\b/.test(haystack)) {
+    let base = isQ4 ? 110 : isQ8 ? 180 : isFp16 ? 350 : 400;
+    return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '200B-class model' };
+  }
+  if (/\b(70b|65b|72b)\b/.test(haystack)) {
+    let base = isQ4 ? 40 : isQ5 ? 50 : isQ8 ? 75 : isFp16 ? 140 : isGguf ? 42 : 48;
+    return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '70B-class model' };
+  }
+  if (/\b(32b|33b|34b|35b)\b/.test(haystack)) {
+    let base = isQ4 ? 20 : isQ8 ? 36 : isFp16 ? 68 : isGguf ? 22 : 24;
+    return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '32B-class model' };
+  }
+  if (/\b(13b|14b|15b)\b/.test(haystack)) {
+    let base = isQ4 ? 10 : isQ8 ? 16 : isFp16 ? 28 : isGguf ? 11 : 16;
+    return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '13B-class model' };
+  }
+  if (/\b(7b|8b)\b/.test(haystack)) {
+    let base = isQ4 ? 5 : isQ8 ? 8 : isFp16 ? 16 : isGguf ? 6 : 8;
+    return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '7B-class model' };
+  }
+  if (/\b(3b|4b)\b/.test(haystack)) {
+    let base = isQ4 ? 3 : isQ8 ? 4 : isFp16 ? 8 : isGguf ? 3 : 4;
+    return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '3-4B model' };
+  }
 
   return { vramGb: 0, hint: '' };
 }
 
-/** GPU types with enough VRAM for the given requirement. */
+/** GPU types with enough VRAM for the given requirement.
+ * FIX #1: Unknown GPU types now FAIL validation instead of passing.
+ * Unknown GPUs must be explicitly added to GPU_VRAM_GB map first. */
 function gpuTypesWithSufficientVram(gpuTypes: string[], requiredVramGb: number): string[] {
   return gpuTypes.filter(gpu => {
     const vram = GPU_VRAM_GB[gpu];
-    return vram === undefined || vram >= requiredVramGb;
+    // FIX: Unknown GPUs fail validation — must be explicitly mapped
+    if (vram === undefined) {
+      console.warn(`[VRAM] Unknown GPU type "${gpu}" — failing validation. Add to GPU_VRAM_GB map.`);
+      return false;
+    }
+    return vram >= requiredVramGb;
   });
 }
 
@@ -608,6 +660,11 @@ async function _selectDeploymentTier(
 /**
  * Start the async deploy, set up the deploy promise, and write the 202 response.
  */
+/** Generate a unique deploy ID: deploy-{base36-timestamp}-{random-4-chars} */
+function generateDeployId(): string {
+  return `deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
 function _startDeployAndRespond(
   config: DeployConfig,
   tierResult: TierSelectionResult,
@@ -616,6 +673,10 @@ function _startDeployAndRespond(
 ): void {
   const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
+
+  // Generate a unique deploy ID for tracking this deploy through its lifecycle
+  const deployId = generateDeployId();
+  setDeployState({ deployId });
 
   setDeployCancelled(false);
   try {
@@ -654,7 +715,7 @@ function _startDeployAndRespond(
   const modeLabel = raceCount > 1 ? `race×${raceCount}` : `${tiers.length} tier(s): ${tiers.map(t => t.label).join(' → ')}`;
   console.log(`[req=${requestId}] GPU deploy started: ${modeLabel}`);
   res.writeHead(202, { 'Content-Type': 'application/json' });
-  const responseBody: Record<string, unknown> = { status: 'creating', message: `Deploy started (${modeLabel})` };
+  const responseBody: Record<string, unknown> = { deployId, status: 'creating', message: `Deploy started (${modeLabel})` };
   if (tierResult.balanceWarnings.length > 0) {
     responseBody.balanceWarnings = tierResult.balanceWarnings.map(p =>
       `${p} excluded — balance below $${LOW_BALANCE_THRESHOLD_USD}`
@@ -833,6 +894,14 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   let body: Record<string, unknown>;
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
+
+  // Deploy ID safety check: if caller provides deployId, verify it matches the active deploy
+  if (body.deployId && deployState.deployId && body.deployId !== deployState.deployId) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Deploy ID mismatch — this deploy may have been replaced', expected: deployState.deployId, received: body.deployId }));
+    return;
+  }
+
   const apiKey = body.apiKey as string;
   const vastKey = deployVastApiKey || (body.vastApiKey as string) || process.env.VAST_API_KEY || '';
   const tdKey = deployTensordockApiKey || (body.tensordockApiKey as string) || process.env.TENSORDOCK_API_KEY || '';
@@ -841,7 +910,8 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   const modalTokenSecret = (body.modalTokenSecret as string) || process.env.MODAL_TOKEN_SECRET || '';
   const modalKey = deployModalApiKey || (modalTokenId && modalTokenSecret ? `${modalTokenId}:${modalTokenSecret}` : '');
 
-  // Capture deploy state before reset for reputation tracking
+  // Capture deploy state before reset for reputation tracking and response
+  const prevDeployId = deployState.deployId;
   const prevProvider = deployState.provider;
   const prevGpuType = deployState.gpuType;
   const prevMeta = { ...deployState.providerMeta };
@@ -887,7 +957,7 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   }
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ok: true }));
+  res.end(JSON.stringify({ ok: true, deployId: prevDeployId || undefined }));
 }
 
 // ── GPU Stop (pause without destroying) ──────────────────────────────────────
@@ -901,6 +971,17 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
   console.log(`[req=${requestId}] GPU stop (pause) requested`);
+
+  // Read optional body for deployId safety check
+  let body: Record<string, unknown> = {};
+  try { body = await readJsonBody(req); } catch { /* empty body is fine */ }
+
+  // Deploy ID safety check: if caller provides deployId, verify it matches the active deploy
+  if (body.deployId && deployState.deployId && body.deployId !== deployState.deployId) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Deploy ID mismatch — this deploy may have been replaced', expected: deployState.deployId, received: body.deployId }));
+    return;
+  }
 
   // Cancel any in-progress deploy/race so background tasks don't overwrite the stopped state
   if (deployState.status === 'deploying' || deployState.status === 'booting') {
@@ -959,7 +1040,7 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
     logGpuEvent('instance_stopped', 'manual', true, { metadata: { reason: 'manual_stop', provider } });
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, podId, provider, message: 'Pod stopped (paused). Data preserved. Use /v1/gpu/resume to restart.' }));
+    res.end(JSON.stringify({ ok: true, deployId: deployState.deployId || undefined, podId, provider, message: 'Pod stopped (paused). Data preserved. Use /v1/gpu/resume to restart.' }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[req=${requestId}] GPU stop failed: ${msg}`);
@@ -984,6 +1065,13 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   try { body = await readJsonBody(req); }
   catch { /* empty body is fine */ }
 
+  // Deploy ID safety check: if caller provides deployId, verify it matches the active deploy
+  if (body.deployId && deployState.deployId && body.deployId !== deployState.deployId) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Deploy ID mismatch — this deploy may have been replaced', expected: deployState.deployId, received: body.deployId }));
+    return;
+  }
+
   // Allow explicit podId/provider override from body (backward compat)
   if (body.podId) {
     setDeployState({ podId: body.podId as string, ...(body.provider ? { provider: body.provider as ProviderName } : {}) });
@@ -1003,6 +1091,7 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       ok: true,
+      deployId: deployState.deployId || undefined,
       method: result.method, // 'resumed' or 'fresh_deploy'
       podId: result.podId,
       provider: result.provider,

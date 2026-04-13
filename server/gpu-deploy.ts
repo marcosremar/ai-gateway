@@ -320,7 +320,10 @@ function startBackgroundWarmthMonitor(endpoint: string) {
       return;
     }
     try {
-      const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(6000) });
+      // FIX #10: Increased health probe timeout from 6s to 60s
+      // Large models (70B+) can take minutes to load, and /health may be unresponsive
+      // during model initialization. 60s gives enough time for model loading.
+      const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(60_000) });
       if (res.ok) {
         const data = await res.json() as Record<string, unknown>;
         updateGpuModelWarmth(data);
@@ -493,6 +496,7 @@ export function scheduleNextMonitorProbe() {
               log.warn(`[gpu] Auto-recovery: redeploying on different provider after crash on ${crashedProvider} (attempt ${monitorCrashRecoveryAttempts}/${maxRetries})`);
               broadcastWs({
                 type: 'gpu:deploy', phase: 'crash_recovery',
+                deployId: deployState.deployId,
                 crashedProvider,
                 attempt: monitorCrashRecoveryAttempts,
                 maxAttempts: maxRetries,
@@ -505,13 +509,13 @@ export function scheduleNextMonitorProbe() {
                 log.log(`[gpu] Auto-recovery deploy initiated (attempt ${monitorCrashRecoveryAttempts}) — crashed provider: ${crashedProvider}`);
               } catch (recoveryErr) {
                 log.error(`[gpu] Auto-recovery deploy failed: ${recoveryErr instanceof Error ? recoveryErr.message : recoveryErr}`);
-                broadcastWs({ type: 'gpu:deploy', phase: 'crash_recovery_failed', error: recoveryErr instanceof Error ? recoveryErr.message : 'unknown' });
+                broadcastWs({ type: 'gpu:deploy', phase: 'crash_recovery_failed', deployId: deployState.deployId, error: recoveryErr instanceof Error ? recoveryErr.message : 'unknown' });
               }
               monitorRunning = false;
               return; // Stop monitoring — the new deploy will start its own monitor
             } else {
               log.error(`[gpu] Auto-recovery exhausted (${monitorCrashRecoveryAttempts}/${maxRetries} attempts) — giving up`);
-              broadcastWs({ type: 'gpu:deploy', phase: 'crash_recovery_exhausted', attempts: monitorCrashRecoveryAttempts });
+              broadcastWs({ type: 'gpu:deploy', phase: 'crash_recovery_exhausted', deployId: deployState.deployId, attempts: monitorCrashRecoveryAttempts });
             }
           }
         }
@@ -644,7 +648,7 @@ export function scheduleNextMonitorProbe() {
         if (idleMs >= IDLE_TIMEOUT_MS) {
           const idleMin = Math.round(idleMs / 60_000);
           log.log(`[gpu] Idle ${idleMin} min (no model requests) — auto-stopping (pausing) to save costs`);
-          broadcastWs({ type: 'gpu:idle', idleMs, timeoutMs: IDLE_TIMEOUT_MS, action: 'stop' });
+          broadcastWs({ type: 'gpu:idle', deployId: deployState.deployId, idleMs, timeoutMs: IDLE_TIMEOUT_MS, action: 'stop' });
           await autoStopGpu();
           return;
         }
@@ -653,7 +657,7 @@ export function scheduleNextMonitorProbe() {
           idleWarned = true;
           const remainingSec = Math.round((IDLE_TIMEOUT_MS - idleMs) / 1000);
           log.log(`[gpu] Idle warning: ${remainingSec}s until auto-terminate`);
-          broadcastWs({ type: 'gpu:idle', idleMs, timeoutMs: IDLE_TIMEOUT_MS, action: 'warning', remainingSec });
+          broadcastWs({ type: 'gpu:idle', deployId: deployState.deployId, idleMs, timeoutMs: IDLE_TIMEOUT_MS, action: 'warning', remainingSec });
         }
         // Adaptive monitor frequency during idle: slow down polling to save overhead
         if (idleMs > 60_000 && monitorDelayMs < 60_000) {
@@ -687,7 +691,7 @@ function scheduleAutoDestroy(delayMs: number) {
   log.log(`[gpu] Auto-destroy scheduled in ${Math.round(delayMs / 60_000)} min for ${provider} pod ${podId}`);
   destroyTimer = setTimeout(async () => {
     log.log(`[gpu] Auto-destroy triggered — deleting stopped pod ${podId} (${provider})`);
-    broadcastWs({ type: 'gpu:idle', action: 'destroy', provider, podId });
+    broadcastWs({ type: 'gpu:idle', action: 'destroy', deployId: deployState.deployId, provider, podId });
     await autoTerminateGpu();
   }, delayMs) as unknown as Timer;
 }
@@ -804,7 +808,7 @@ export async function resumeOrDeploy(opts: {
 
   // ── Attempt resume ──────────────────────────────────────────────────────
   clearAutoDestroyTimer();
-  broadcastWs({ type: 'gpu:resume', action: 'attempting', podId, provider, reason: opts.reason });
+  broadcastWs({ type: 'gpu:resume', action: 'attempting', deployId: deployState.deployId, podId, provider, reason: opts.reason });
   log.log(`[gpu] resumeOrDeploy: attempting resume of ${provider} pod ${podId} (reason=${opts.reason})`);
 
   try {
@@ -831,14 +835,14 @@ export async function resumeOrDeploy(opts: {
     deploymentSM.startBooting(podId);
     startGpuMonitoring();
     logGpuEvent('instance_resumed', provider, true, { metadata: { podId, reason: opts.reason } });
-    broadcastWs({ type: 'gpu:resume', action: 'success', podId, provider });
+    broadcastWs({ type: 'gpu:resume', action: 'success', deployId: deployState.deployId, podId, provider });
 
     return { method: 'resumed', podId, provider };
   } catch (resumeErr) {
     const msg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
     log.warn(`[gpu] Resume failed for ${provider} pod ${podId}: ${msg} — falling back to fresh deploy`);
     logGpuEvent('resume_failed', provider, false, { metadata: { podId, reason: opts.reason, error: msg } });
-    broadcastWs({ type: 'gpu:resume', action: 'fallback', podId, provider, error: msg });
+    broadcastWs({ type: 'gpu:resume', action: 'fallback', deployId: deployState.deployId, podId, provider, error: msg });
 
     // ── Clean up the orphaned stopped pod ──────────────────────────────
     try {
@@ -1489,7 +1493,7 @@ export async function startDeployLoop(
     message: `Searching for GPU on ${label}...`, step: 'searching_offers', stepDetail: gpuTypes.join(', '), provider: providerName,
     dockerImage,
   });
-  broadcastWs({ type: 'gpu:deploy', phase: 'searching', provider: providerName, gpuTypes });
+  broadcastWs({ type: 'gpu:deploy', phase: 'searching', deployId: deployState.deployId, provider: providerName, gpuTypes });
 
   // TensorDock: try to discover and resume a stopped instance first (fast restart)
   if (providerName === 'tensordock') {
@@ -1584,7 +1588,7 @@ export async function startDeployLoop(
     try {
       // Transition: searching → creating (found offers, now creating instance)
       setDeployState({ status: 'creating', step: 'creating_pod', message: `Creating ${label} instance...` });
-      broadcastWs({ type: 'gpu:deploy', phase: 'creating', provider: providerName });
+      broadcastWs({ type: 'gpu:deploy', phase: 'creating', deployId: deployState.deployId, provider: providerName });
 
       const defaultStorage = DEFAULT_STORAGE_GB[providerName];
       const storageGb = Math.max(extra.storageGb || defaultStorage, defaultStorage);
@@ -1728,7 +1732,7 @@ export async function startDeployLoop(
       const isNoOffers = lowerMsg.includes('no gpus available') || lowerMsg.includes('0 offers') || lowerMsg.includes('no offers');
       if (isNoOffers) {
         setDeployState({ step: 'no_offers', message: `${label}: no GPUs available — trying next provider` });
-        broadcastWs({ type: 'gpu:deploy', phase: 'no_offers', provider: providerName, gpuTypes });
+        broadcastWs({ type: 'gpu:deploy', phase: 'no_offers', deployId: deployState.deployId, provider: providerName, gpuTypes });
       }
       const nonRetryable = isBilling || isAuth || isNoOffers;
       if (nonRetryable || attempt >= MAX_DEPLOY_RETRIES) {
@@ -2050,7 +2054,7 @@ export async function startDeployRace(
                 deploymentSM.markReady(c.instanceId, localEndpoint, c.gpuType, c.costPerHr);
                 startGpuMonitoring();
                 startBackgroundWarmthMonitor(localEndpoint);
-                log.log(`[race] Slot ${idx} won! (${c.tier.label}, gpu=${c.gpuType}, t=${Math.round(durationMs / 1000)}s)`);
+                log.log(`[race] Winner: deployId=${deployState.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} provider=${c.tier.name} gpu=${c.gpuType} t=${Math.round(durationMs / 1000)}s`);
                 logGpuEvent('deploy_ready', c.tier.name, true, { durationMs, metadata: { endpoint: localEndpoint, gpuType: c.gpuType, raceCount: candidates.length } });
                 upsertHostReputation({ provider: c.tier.name, gpuType: c.gpuType, providerMeta: c.providerMeta, success: true, bootTimeS: Math.round(durationMs / 1000), dockerImage });
                 if (cooldownTracker.recordSuccess(c.tier.name)) {
@@ -2085,9 +2089,10 @@ export async function startDeployRace(
           new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${c.tier.name} deleteInstance timed out`)), 15_000)),
         ]);
         log.log(
-          `[race] Slot ${idx} terminated (${reason}): ${c.instanceId.slice(0, 8)}, ` +
+          `[race] Loser destroyed: deployId=${deployState.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} ` +
+          `provider=${c.tier.name} gpu=${c.gpuType || '-'} reason=${reason} ` +
           `alive=${Math.round(aliveMs / 1000)}s` +
-          (wastedUsd > 0 ? `, wasted≈$${wastedUsd.toFixed(3)}` : ''),
+          (wastedUsd > 0 ? ` wasted≈$${wastedUsd.toFixed(3)}` : ''),
         );
       } catch (err) {
         log.warn(`[race] Failed to terminate slot ${idx} (${reason}): ${err}`);
@@ -2493,7 +2498,7 @@ export async function pollHealthUntilReady(
       const pullSec = Math.round((Date.now() - pullStartedAt) / 1000);
       const timeoutMsg = `Image pull timeout (${pullSec}s pulling) — machine too slow, trying next`;
       log.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
-      broadcastWs({ type: 'gpu:deploy', phase: 'pull_timeout', provider: providerName, elapsedMs: totalElapsedMs });
+      broadcastWs({ type: 'gpu:deploy', phase: 'pull_timeout', deployId: deployState.deployId, provider: providerName, elapsedMs: totalElapsedMs });
       setDeployState({ status: 'error', step: 'pulling_image', message: timeoutMsg });
       return { result: 'timeout', pullTimeS: actualPullTimeS };
     }
@@ -2512,7 +2517,7 @@ export async function pollHealthUntilReady(
           : ` (TCP refused — ${consecutiveConnectionRefused} consecutive failures)`;
         const timeoutMsg = `Boot timeout (${bootSec}s) — container up but /health not responding${leewayNote}`;
         log.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
-        broadcastWs({ type: 'gpu:deploy', phase: 'boot_timeout', provider: providerName });
+        broadcastWs({ type: 'gpu:deploy', phase: 'boot_timeout', deployId: deployState.deployId, provider: providerName });
         setDeployState({ status: 'error', step: 'waiting_health', message: timeoutMsg });
         return { result: 'timeout', pullTimeS: actualPullTimeS };
       }
@@ -2523,7 +2528,7 @@ export async function pollHealthUntilReady(
       const modelSec = Math.round((Date.now() - (healthFirstResponseAt || Date.now())) / 1000);
       const timeoutMsg = `Model loading timeout (${modelSec}s) — services still downloading`;
       log.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
-      broadcastWs({ type: 'gpu:deploy', phase: 'model_timeout', provider: providerName });
+      broadcastWs({ type: 'gpu:deploy', phase: 'model_timeout', deployId: deployState.deployId, provider: providerName });
       setDeployState({ status: 'error', step: 'downloading_models', message: timeoutMsg });
       return { result: 'timeout', pullTimeS: actualPullTimeS };
     }
@@ -2541,7 +2546,7 @@ export async function pollHealthUntilReady(
           if (detail?.ghostMachine) {
             const ghostMsg = `Ghost machine — pod created but no physical machine assigned after ${Math.round(totalElapsedMs / 1000)}s. RunPod silently failed to schedule (check storage size, GPU availability).`;
             log.error(`[gpu] ${providerName} pod ${podId}: ${ghostMsg}`);
-            broadcastWs({ type: 'gpu:deploy', phase: 'ghost_machine', provider: providerName, elapsedMs: totalElapsedMs });
+            broadcastWs({ type: 'gpu:deploy', phase: 'ghost_machine', deployId: deployState.deployId, provider: providerName, elapsedMs: totalElapsedMs });
             setDeployState({ status: 'error', step: 'ghost_machine', message: ghostMsg });
             // Clean up the ghost pod
             try { await providerClient.deleteInstance(podId, credentials); } catch { /* best effort */ }
@@ -2789,7 +2794,7 @@ export async function pollHealthUntilReady(
               const crashLine = logOut.split('\n').find(l => pat.test(l)) || logOut.slice(-200);
               const crashMsg = `Container crashed: ${crashLine.trim().slice(0, 200)}`;
               log.error(`[gpu] ${providerName} pod ${podId}: FATAL in logs → ${crashMsg}`);
-              broadcastWs({ type: 'gpu:deploy', phase: 'container_crash', provider: providerName, error: crashMsg });
+              broadcastWs({ type: 'gpu:deploy', phase: 'container_crash', deployId: deployState.deployId, provider: providerName, error: crashMsg });
               setDeployState({ status: 'error', step: 'container_crash', message: crashMsg });
               return { result: 'crashed', pullTimeS: actualPullTimeS };
             }
@@ -2840,7 +2845,7 @@ export async function pollHealthUntilReady(
               stalledWarned = true;
               const stalledSec = identicalHealthCount * 30; // approximate, since poll is ~30s
               log.warn(`[gpu] Download appears stalled — same /health response for ${stalledSec}s (${identicalHealthCount} checks)`);
-              broadcastWs({ type: 'gpu:deploy', phase: 'stalled', provider: providerName, stalledSeconds: stalledSec, identicalChecks: identicalHealthCount });
+              broadcastWs({ type: 'gpu:deploy', phase: 'stalled', deployId: deployState.deployId, provider: providerName, stalledSeconds: stalledSec, identicalChecks: identicalHealthCount });
               setDeployState({ alert: `Download may be stalled — no progress for ${stalledSec}s` });
             } else if (identicalHealthCount === 3) {
               log.log(`[gpu] Possible stall — identical /health response for 3 consecutive checks`);
@@ -2878,6 +2883,7 @@ export async function pollHealthUntilReady(
             broadcastWs({
               type: 'gpu:deploy',
               phase: 'app_error',
+              deployId: deployState.deployId,
               provider: providerName,
               error: appErrMsg,
             });
@@ -3158,6 +3164,7 @@ export async function tryRecoverActiveDeploy(): Promise<boolean> {
     setDeployCancelled(false);
     setDeployState({
       status: 'ready',
+      deployId: persisted.deployId || '',
       podId: persisted.podId,
       endpoint: persisted.endpoint,
       gpuType: persisted.gpuType,

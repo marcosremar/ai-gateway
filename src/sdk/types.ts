@@ -88,6 +88,7 @@ export interface ListVoicesResponse {
 
 export interface GpuStatus {
   status: 'idle' | 'creating' | 'booting' | 'installing' | 'ready' | 'error';
+  deployId: string;
   podId: string;
   endpoint: string;
   gpuType: string;
@@ -110,6 +111,7 @@ export interface DeployOptions {
 }
 
 export interface DeployResponse {
+  deployId: string;
   status: string;
   message: string;
 }
@@ -167,6 +169,7 @@ export interface GpuEventLog {
 
 export interface StopResumeResponse {
   ok: boolean;
+  deployId?: string;
   podId?: string;
   provider?: string;
   message?: string;

@@ -125,6 +125,8 @@ export const providerMetrics: Record<string, {
 
 export interface DeploymentState {
   status: 'idle' | 'stopped' | 'searching' | 'queued' | 'creating' | 'booting' | 'installing' | 'ready' | 'error';
+  /** Unique deploy ID for tracking, e.g. "deploy-m1abc2d3-x9f2". Generated at deploy start, persists across restarts. */
+  deployId: string;
   podId: string;
   endpoint: string;
   gpuType: string;
@@ -152,7 +154,7 @@ export interface DeploymentState {
 }
 
 export let deployState: DeploymentState = {
-  status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0,
+  status: 'idle', deployId: '', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0,
 };
 export let deployCancelled = false;
 export let deployLock = false;
@@ -213,6 +215,7 @@ const BABELCAST_DIR = join(homedir(), '.babelcast');
 const ACTIVE_DEPLOY_FILE = join(BABELCAST_DIR, 'active_deploy.json');
 
 interface PersistedDeploy {
+  deployId: string;
   podId: string;
   endpoint: string;
   gpuType: string;
@@ -238,6 +241,7 @@ function persistDeployState(): void {
   try {
     mkdirSync(BABELCAST_DIR, { recursive: true });
     const data: PersistedDeploy = {
+      deployId: deployState.deployId,
       podId: deployState.podId,
       endpoint: deployState.endpoint,
       gpuType: deployState.gpuType,
@@ -328,6 +332,7 @@ export function setDeployState(patch: Partial<DeploymentState>) {
     const elapsed = deployState.startedAt > 0 ? Math.round((Date.now() - deployState.startedAt) / 1000) : 0;
     const transition = {
       status: newStatus, step: newStep,
+      deployId: deployState.deployId || '',
       provider: deployState.provider || '',
       gpuType: deployState.gpuType || '',
       dockerImage: deployState.dockerImage || '',
@@ -347,13 +352,13 @@ export function setDeployState(patch: Partial<DeploymentState>) {
       bws?.({ type: 'gpu:transition', ...transition });
     } catch (e) { console.warn('[state] broadcastWs failed:', e instanceof Error ? e.message : e); }
     // Structured log line: status change with full context
-    console.log(`[gpu:transition] ${prevStatus}→${newStatus} step=${newStep || '-'} provider=${transition.provider || '-'} gpu=${transition.gpuType || '-'} image=${transition.dockerImage?.split('/').pop() || '-'} pod=${transition.podId || '-'} cost=$${transition.costPerHr.toFixed(3)}/hr elapsed=${elapsed}s`);
+    console.log(`[gpu:transition] ${prevStatus}→${newStatus} deployId=${deployState.deployId || '-'} step=${newStep || '-'} provider=${transition.provider || '-'} gpu=${transition.gpuType || '-'} image=${transition.dockerImage?.split('/').pop() || '-'} pod=${transition.podId || '-'} cost=$${transition.costPerHr.toFixed(3)}/hr elapsed=${elapsed}s`);
     // Persist to GPU event log (JSONL file + DB) for historical analysis
     try {
       const { logGpuEvent } = require('./metrics');
       logGpuEvent?.(`status:${prevStatus}→${newStatus}`, transition.provider || 'unknown', true, {
         metadata: {
-          step: newStep, gpuType: transition.gpuType, dockerImage: transition.dockerImage,
+          deployId: deployState.deployId, step: newStep, gpuType: transition.gpuType, dockerImage: transition.dockerImage,
           podId: transition.podId, endpoint: transition.endpoint, costPerHr: transition.costPerHr,
           elapsed, prevStatus, prevStep: transition.prevStep,
         },
@@ -375,7 +380,7 @@ export function resetDeployState() {
   deployTensordockAuthId = '';
   deployModalApiKey = '';
   activeProvider = '';
-  deployState = { status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0 };
+  deployState = { status: 'idle', deployId: '', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0 };
   clearPersistedDeploy();
   resetTtsWarmth(); // new pod = cold TTS
   resetGpuReadinessState();

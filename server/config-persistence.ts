@@ -7,7 +7,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from 'fs';
 import { setIdleTimeoutMs } from './gpu-deploy';
-import { setSttTargetLatencyMs, setLlmTargetLatencyMs, setTtsTargetLatencyMs, setGpuSortBy } from '../src/gpu-providers/deploy-settings';
+import { setSttTargetLatencyMs, setLlmTargetLatencyMs, setTtsTargetLatencyMs, setGpuSortBy, loadDeploySettings } from '../src/gpu-providers/deploy-settings';
 import type { AIProfile } from '../src/client';
 
 /**
@@ -480,6 +480,36 @@ export function applyAppLatencyTargets(appId: string | null, apps: GatewayApp[])
 
 /** @deprecated Use applyAppLatencyTargets */
 export const applyProfileLatencyTargets = applyAppLatencyTargets;
+
+/**
+ * Restore all persisted config values to the in-memory runtime on server startup.
+ * Must be called once after the server loads — config values like idleTimeoutMin
+ * are only applied to the runtime inside patchProviderConfig() (API-driven updates),
+ * so without this call they revert to hardcoded defaults after every restart.
+ */
+export function applyRuntimeConfig(): void {
+  const config = loadProviderConfig();
+
+  // Restore idle timeout
+  const ms = config.idleTimeoutMin <= 0 ? Infinity : config.idleTimeoutMin * 60_000;
+  setIdleTimeoutMs(ms);
+  if (config.idleTimeoutMin <= 0) {
+    console.log('[config] Startup: idle timeout disabled (idleTimeoutMin=0)');
+  } else if (config.idleTimeoutMin !== 15) {
+    console.log(`[config] Startup: idle timeout restored to ${config.idleTimeoutMin} min from persisted config`);
+  }
+
+  // Restore active app latency targets
+  if (config.activeAppId && config.apps?.length) {
+    applyAppLatencyTargets(config.activeAppId, config.apps);
+  }
+
+  // Restore deploy settings (deployTimeoutMin, minVramGb, gpuSortBy, raceCount, etc.)
+  // loadDeploySettings() reads ~/.ai-gateway/latency-settings.json directly into the
+  // in-memory _s object — all getters (getDeployTimeoutMin, getMinVramGb, …) then
+  // return the persisted values instead of hardcoded defaults.
+  loadDeploySettings();
+}
 
 /** Debounced stamp: update lastRequestAt on the given app.
  *  Batches writes — persists at most once per 10 seconds to avoid
