@@ -273,6 +273,20 @@ export interface WorkloadDeployOptions {
   config?: Record<string, unknown>;
 }
 
+export interface PaginationOptions {
+  /** Max items to return (default: 100) */
+  limit?: number;
+  /** Offset for pagination (default: 0) */
+  offset?: number;
+}
+
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 export class GatewayError extends Error {
