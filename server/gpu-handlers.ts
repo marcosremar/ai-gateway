@@ -725,6 +725,12 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
   setRequestIdHeader(res, requestId);
   console.log(`[req=${requestId}] GPU stop (pause) requested`);
 
+  // Cancel any in-progress deploy/race so background tasks don't overwrite the stopped state
+  if (deployState.status === 'deploying' || deployState.status === 'booting') {
+    console.log(`[req=${requestId}] Deploy in progress (${deployState.status}) — cancelling before stop`);
+    setDeployCancelled(true);
+  }
+
   if (!deployState.podId) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'No active pod to stop' }));
