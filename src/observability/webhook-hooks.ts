@@ -2,8 +2,11 @@
  * Webhook hooks — POST events to arbitrary webhook URL with batching.
  */
 
+import { createLogger } from '../logger';
 import type { GatewayHooks } from '../hooks';
 import type { WebhookConfig } from './types';
+
+const log = createLogger('webhook-hooks');
 
 type HookName = keyof GatewayHooks;
 
@@ -32,7 +35,13 @@ export function createWebhookHooks(config: WebhookConfig): Partial<GatewayHooks>
         },
         body: JSON.stringify({ events: batch }),
       });
-    } catch { /* fire-and-forget */ }
+    } catch (err) {
+      log.error('Failed to deliver webhook batch', {
+        url: config.url,
+        batchSize: batch.length,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   const MAX_QUEUE_SIZE = 500;

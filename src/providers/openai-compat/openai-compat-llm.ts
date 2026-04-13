@@ -59,14 +59,19 @@ export class OpenAICompatLLMProvider implements LLMProvider {
 
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const client = this.getClient();
+    const timeoutMs = request.timeoutMs || 120_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+    try {
     const completion = await client.chat.completions.create({
       model: request.model || this.config.defaultModel || '',
       messages: request.messages as OpenAI.ChatCompletionMessageParam[],
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
       ...(request.responseFormat && { response_format: request.responseFormat }),
-    });
+      ...(request.stream && { stream: request.stream }),
+    }, { signal: controller.signal });
 
     return {
       content: completion.choices[0]?.message?.content || '',
@@ -78,6 +83,14 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       } : undefined,
       raw: completion,
     };
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`[openai-compat] chat() timed out after ${timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**

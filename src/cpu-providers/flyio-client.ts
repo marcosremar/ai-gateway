@@ -198,7 +198,9 @@ export class FlyioClient extends AbstractGpuProvider {
         headers: this.headers(token),
         signal: AbortSignal.timeout(TIMEOUTS.write),
       });
-      await this.waitForState(app, instanceId, token, 'stopped', 30).catch(() => {});
+      await this.waitForState(app, instanceId, token, 'stopped', 30).catch((e) => {
+        this.log.log(`[flyio] Wait for stopped state failed during cleanup: ${e instanceof Error ? e.message : e}`);
+      });
     } catch { /* might already be stopped */ }
 
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}?force=true`, {
