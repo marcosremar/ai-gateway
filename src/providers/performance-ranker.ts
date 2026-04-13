@@ -117,7 +117,11 @@ export class PerformanceRanker {
       const intervalMs = config.persistIntervalMs ?? 60_000;
       this.persistTimer = setInterval(() => this.saveToDisk(), intervalMs);
       // Don't prevent process exit
-      if (this.persistTimer && typeof this.persistTimer === 'object' && 'unref' in this.persistTimer) {
+      if (
+        this.persistTimer &&
+        typeof this.persistTimer === 'object' &&
+        'unref' in this.persistTimer
+      ) {
         this.persistTimer.unref();
       }
     }
@@ -228,8 +232,14 @@ export class PerformanceRanker {
     if (successful.length < 4) return 'stable'; // need at least 2 per half
 
     const mid = Math.floor(successful.length / 2);
-    const firstHalf = successful.slice(0, mid).map((s) => s.latencyMs).sort((a, b) => a - b);
-    const secondHalf = successful.slice(mid).map((s) => s.latencyMs).sort((a, b) => a - b);
+    const firstHalf = successful
+      .slice(0, mid)
+      .map((s) => s.latencyMs)
+      .sort((a, b) => a - b);
+    const secondHalf = successful
+      .slice(mid)
+      .map((s) => s.latencyMs)
+      .sort((a, b) => a - b);
 
     const baselineP50 = percentile(firstHalf, 50);
     const currentP50 = percentile(secondHalf, 50);
@@ -285,7 +295,8 @@ export class PerformanceRanker {
     if (samples.length > 0) {
       const newestTs = samples[samples.length - 1].timestamp;
       const ageFraction = (Date.now() - newestTs) / this.windowTimeMs;
-      if (ageFraction > 0.1) { // only apply after 10% of window has passed
+      if (ageFraction > 0.1) {
+        // only apply after 10% of window has passed
         const NEUTRAL_SCORE = 500; // ms — a "mediocre" latency as neutral anchor
         const decayFactor = Math.exp(-ageFraction * 1.5); // τ ≈ 67% of windowTimeMs
         score = score * decayFactor + NEUTRAL_SCORE * (1 - decayFactor);
@@ -293,6 +304,21 @@ export class PerformanceRanker {
     }
 
     return score;
+  }
+
+  /**
+   * Score that accounts for provider cost -- cheaper providers with same latency rank higher.
+   * Returns a cost-efficiency score where higher = better (unlike scoreEntry where lower = better).
+   * When costPerRequest is not provided, returns a normalized latency score (0-1 range).
+   */
+  getCostEfficiencyScore(stage: string, provider: string, model: string, costPerRequest?: number): number {
+    const rawScore = this.scoreEntry(stage, provider, model);
+    // Normalize raw score to 0-1 range: lower raw = better, so invert
+    // Use 1000ms as the reference point: 500ms raw -> 0.67, 1000ms -> 0.5, 2000ms -> 0.33
+    const latencyScore = rawScore !== null ? 1 / (1 + rawScore / 1000) : 0.5;
+    if (!costPerRequest) return latencyScore;
+    // Normalize: lower cost = higher score
+    return latencyScore / (1 + costPerRequest * 10);
   }
 
   /**
@@ -347,7 +373,7 @@ export class PerformanceRanker {
     const cutoff = Date.now() - this.windowTimeMs;
     for (const [key, samples] of Object.entries(snapshot.buffers)) {
       // Only restore samples that are still within the time window
-      const valid = samples.filter(s => s.timestamp >= cutoff);
+      const valid = samples.filter((s) => s.timestamp >= cutoff);
       if (valid.length > 0) {
         this.buffers.set(key, valid.slice(-this.windowSize));
       }
@@ -392,6 +418,60 @@ export class PerformanceRanker {
       this.persistTimer = null;
     }
     this.saveToDisk();
+  }
+
+  /**
+   * Check if a provider recently recovered (was failing, now succeeding).
+   *
+   * Analyzes the last N samples to determine health timeline:
+   *   - 'healthy':    all recent samples succeeded
+   *   - 'recovering': last 3 are success but previous 5 had failures
+   *   - 'degraded':   mixed success/failure in recent window
+   *   - 'down':       all recent samples failed
+   */
+  getRecoveryStatus(
+    stage: string,
+    provider: string,
+    model: string = '*',
+  ): 'healthy' | 'degraded' | 'recovering' | 'down' {
+    const key = sampleKey(stage, provider, model);
+    const samples = this.getActiveSamples(key);
+
+    if (samples.length === 0) return 'healthy'; // no data = assume healthy
+
+    // Need at least 3 samples to make any determination
+    if (samples.length < 3) {
+      const allOk = samples.every((s) => s.success);
+      const allBad = samples.every((s) => !s.success);
+      if (allBad) return 'down';
+      if (allOk) return 'healthy';
+      return 'degraded';
+    }
+
+    // Check the last 3 samples (most recent)
+    const recent3 = samples.slice(-3);
+    const recent3AllSuccess = recent3.every((s) => s.success);
+    const recent3AllFail = recent3.every((s) => !s.success);
+
+    // All recent failed → down
+    if (recent3AllFail) return 'down';
+
+    // If all recent are success, check older samples for recovery pattern
+    if (recent3AllSuccess) {
+      // Look at the 5 samples before the recent 3
+      const olderWindow = samples.slice(Math.max(0, samples.length - 8), Math.max(0, samples.length - 3));
+      if (olderWindow.length > 0) {
+        const olderFailCount = olderWindow.filter((s) => !s.success).length;
+        // If majority of older samples failed, we're recovering
+        if (olderFailCount >= Math.ceil(olderWindow.length / 2)) {
+          return 'recovering';
+        }
+      }
+      return 'healthy';
+    }
+
+    // Mixed results → degraded
+    return 'degraded';
   }
 
   /**

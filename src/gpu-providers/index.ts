@@ -23,7 +23,13 @@ export type {
 } from './types';
 
 // ── Abstract Base Class ──────────────────────────────────────────────────
-export { AbstractGpuProvider, FetchError, RateLimiter, TIMEOUTS, DEFAULT_RATE_LIMIT_MS } from './abstract-provider';
+export {
+  AbstractGpuProvider,
+  FetchError,
+  RateLimiter,
+  TIMEOUTS,
+  DEFAULT_RATE_LIMIT_MS,
+} from './abstract-provider';
 export type { AbstractGpuProviderOptions } from './abstract-provider';
 
 // ── Registry ──────────────────────────────────────────────────────────────
@@ -46,7 +52,13 @@ export {
   buildMonitorScript,
   getDefaultSshPubKey,
 } from './tensordock-client';
-export type { CloudInitSpec, DockerSetupPhase, GitCloneSetupPhase, TensordockBalance, TensordockInstanceDetail } from './tensordock-client';
+export type {
+  CloudInitSpec,
+  DockerSetupPhase,
+  GitCloneSetupPhase,
+  TensordockBalance,
+  TensordockInstanceDetail,
+} from './tensordock-client';
 
 // ── Vast.ai ───────────────────────────────────────────────────────────────
 export { VastClient } from './vast-client';
@@ -58,7 +70,13 @@ export type { ModalClientOptions, ModalDeployOptions, ModalAutoscalerParams } fr
 
 // ── SnapGPU (CRIU + cuda-checkpoint capability layer over Vast/RunPod) ────
 export { SnapgpuClient, DEFAULT_SNAPGPU_IMAGE, normalizeSnapgpuS3Config } from './snapgpu-client';
-export type { SnapgpuClientOptions, SnapgpuBackend, SnapshotInfo, SnapgpuS3Config, SnapgpuS3Input } from './snapgpu-client';
+export type {
+  SnapgpuClientOptions,
+  SnapgpuBackend,
+  SnapshotInfo,
+  SnapgpuS3Config,
+  SnapgpuS3Input,
+} from './snapgpu-client';
 
 // ── Deploy Orchestrator ──────────────────────────────────────────────────
 export {
@@ -69,3 +87,15 @@ export {
   DEFAULT_STORAGE_GB,
 } from './deploy-orchestrator';
 export type { ProviderName, GpuTier, CooldownInfo } from './deploy-orchestrator';
+
+// ── Deploy Settings ──────────────────────────────────────────────────────
+export { checkDeployWarnings } from './deploy-settings';
+export type { DeployWarning } from './deploy-settings';
+
+// ── Pull Time Estimator ─────────────────────────────────────────────────
+export {
+  estimateRemainingMs,
+  recordDownloadSpeed,
+  getHostDownloadSpeed,
+} from './pull-time-estimator';
+export type { DeployPhase } from './pull-time-estimator';
