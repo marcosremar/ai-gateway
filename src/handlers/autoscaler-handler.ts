@@ -13,11 +13,10 @@ import { ModalClient } from '../gpu-providers/modal-client';
 import { VastClient } from '../gpu-providers/vast-client';
 import { runHealthCheck, runSSEBench } from '../benchmarking/bench';
 import { createLogger } from '../logger';
-import type { AutoScalerConfig } from '../types';
 
 const log = createLogger('autoscaler-handler');
 
-export type LoadConfig = (userId: string) => Promise<AutoScalerConfig | undefined>;
+export type LoadConfig = (userId: string) => Promise<AutoScalerConfig | null | undefined>;
 
 const VALID_PROVIDERS = ['tensordock', 'runpod', 'vast', 'modal'];
 
