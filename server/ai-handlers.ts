@@ -797,7 +797,7 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
   const useAll = requestedProviders.includes('all');
   const wants = (name: string): boolean => useAll || requestedProviders.includes(name);
 
-  const activeProviders: EnsembleSTTProviderEntry[] = [];
+  const activeProviders: STTRaceProvider[] = [];
   if (groqAvailable && wants('groq')) activeProviders.push({ name: 'groq', provider: groqSTT });
   if (openaiAvailable && wants('openai')) activeProviders.push({ name: 'openai', provider: openaiSTT });
   if (deepgramAvailable && wants('deepgram')) activeProviders.push({ name: 'deepgram', provider: deepgramSTT });
@@ -811,11 +811,12 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
     if (openrouterAvailable) embeddingFallbacks.push(openrouterQwen3Embedding);
     if (openaiAvailable) embeddingFallbacks.push(openaiEmbedding);
 
-    const result = await runEnsembleSTT(audio, language, prompt, {
+    const result = await sttRace(audio, language, prompt, {
       providers: activeProviders,
-      embeddingFallbacks,
       timeoutMs,
     });
+
+    let finalText = result.text;
 
     // Apply hallucination filter (metadata + blocklist)
     const config = loadProviderConfig();
@@ -831,27 +832,29 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
 
     // Build a synthetic STTResponse for the filter
     const sttResponse: STTResponse = {
-      text: result.consensus,
+      text: finalText,
       segments: result.segments,
-      avg_logprob: result.avg_logprob,
-      compression_ratio: result.compression_ratio,
-      no_speech_prob: result.no_speech_prob,
+      avg_logprob: result.avgLogprob,
+      compression_ratio: result.compressionRatio,
+      no_speech_prob: result.noSpeechProb,
     };
     const filterResult = filterHallucinations(sttResponse, language, filterConfig);
 
     if (filterResult.filtered) {
-      console.log(`[ensemble] Hallucination filter: "${result.consensus.slice(0, 60)}" → "${filterResult.text.slice(0, 60)}" [${filterResult.reasons.join('; ')}]`);
-      result.consensus = filterResult.text;
+      console.log(`[stt-race] Hallucination filter: "${finalText.slice(0, 60)}" → "${filterResult.text.slice(0, 60)}" [${filterResult.reasons.join('; ')}]`);
+      finalText = filterResult.text;
     }
 
-    const methodTag = result.similarity_method === 'embedding'
-      ? `embed(${result.embedding_provider ?? '?'})`
-      : 'jaccard';
-    console.log(`[ensemble] ${Object.keys(result.providers).join('+')} [${methodTag}] → ${result.latency_ms}ms: "${result.consensus.slice(0, 80)}"`);
-    logRequest({ timestamp: Date.now(), stage: 'stt', provider: 'ensemble', latencyMs: result.latency_ms, success: true, inputSize: audio.length, outputPreview: result.consensus.slice(0, 80) });
+    console.log(`[stt-race] ${result.provider} → ${result.latencyMs}ms: "${finalText.slice(0, 80)}"`);
+    logRequest({ timestamp: Date.now(), stage: 'stt', provider: result.provider, latencyMs: result.latencyMs, success: true, inputSize: audio.length, outputPreview: finalText.slice(0, 80) });
 
     // Include filter metadata in response for Python client
-    const responseBody: Record<string, unknown> = { ...result };
+    const responseBody = {
+      text: finalText,
+      provider: result.provider,
+      latencyMs: result.latencyMs,
+      segments: result.segments,
+    } as Record<string, unknown>;
     if (filterResult.metrics) responseBody.hallucinationMetrics = filterResult.metrics;
     if (filterResult.filtered) responseBody.hallucinationFiltered = true;
 
