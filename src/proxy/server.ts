@@ -256,6 +256,8 @@ function proxyToNextDev(nextDevUrl: string, req: IncomingMessage, res: ServerRes
       res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
       proxyRes.on('error', () => { if (!res.writableEnded) res.end(); });
       proxyRes.pipe(res);
+      // Clean up upstream if client disconnects mid-stream
+      res.on('close', () => { proxyRes.destroy(); proxyReq.destroy(); });
     },
   );
   proxyReq.on('error', () => {
@@ -674,6 +676,10 @@ export function createProxyServer(config: ProxyConfig): Server {
     socket.destroy();
   });
 
+  // Slowloris protection: limit time to receive headers and full request
+  server.headersTimeout = 10_000;   // 10s — blocks slowloris
+  server.requestTimeout = 30_000;   // 30s — total request limit
+
   // Handle all WebSocket upgrade requests — proxy HMR to Next.js dev server, block everything else with 410
   server.on('upgrade', (req: IncomingMessage, socket: import('net').Socket, head: Buffer) => {
     const path = req.url || '/';
@@ -693,6 +699,9 @@ export function createProxyServer(config: ProxyConfig): Server {
         socket.on('error', () => proxySocket.destroy());
         proxySocket.pipe(socket);
         socket.pipe(proxySocket);
+        // Clean up both sides if either disconnects mid-stream
+        socket.on('close', () => { proxySocket.destroy(); });
+        proxySocket.on('close', () => { socket.destroy(); });
       });
       proxyReq.on('error', () => socket.destroy());
       proxyReq.end();

@@ -529,6 +529,10 @@ type WsData = {
   speechConfig?: { source: string; target: string; speaker?: string };
 };
 
+/** Global WebSocket connection limit — prevents resource exhaustion from unlimited connections. */
+const MAX_WS_TOTAL = 200;
+let wsConnectionCount = 0;
+
 export function startWsServer() {
   // Install persistent file logging — captures all console output + GPU events
   try {
@@ -551,6 +555,11 @@ export function startWsServer() {
     port: WS_PORT,
     fetch(req, server) {
       const url = new URL(req.url);
+
+      // ── Global WS connection limit — reject before any per-session upgrade ──
+      if (wsConnectionCount >= MAX_WS_TOTAL) {
+        return new Response('Too many connections', { status: 429 });
+      }
 
       // ── Recall.ai audio endpoint — uses its own secret, checked before gateway auth ──
       if (url.pathname === '/recall/audio') {
@@ -610,7 +619,12 @@ export function startWsServer() {
       );
     },
     websocket: {
+      maxPayloadLength: 4 * 1024 * 1024, // 4MB — enough for audio chunks
+      backpressure: 2 * 1024 * 1024,     // 2MB
+      closeOnBackpressureLimit: true,
+      idleTimeout: 120,                   // seconds
       open(ws) {
+        wsConnectionCount++;
         if (ws.data.type === 'speech') {
           // ── Speech pipeline session ────────────────────────────────
           ws.send(JSON.stringify({ type: 'connected', message: 'Speech pipeline ready. Send config JSON then binary WAV.' }));
@@ -968,6 +982,7 @@ export function startWsServer() {
         }
       },
       close(ws) {
+        wsConnectionCount--;
         // Clean up speculative cache on disconnect
         speculativeCache.clear(ws.data.id);
 
