@@ -270,6 +270,10 @@ export class TensordockClient extends AbstractGpuProvider {
     super(opts);
   }
 
+  dispose(): void {
+    // No timers to clean up currently
+  }
+
   /**
    * Override fetchRaw with exponential backoff retry for timeout errors.
    * TensorDock API frequently times out; retries with 2s/4s/8s delays.
@@ -710,6 +714,10 @@ export class TensordockClient extends AbstractGpuProvider {
 
   async listInstances(credentials: ProviderCredentials): Promise<GpuInstance[]> {
     const { apiKey } = credentials;
+    if (!apiKey) {
+      this.log.warn('[tensordock] listInstances: no apiKey provided');
+      return [];
+    }
     const instances: GpuInstance[] = [];
     try {
       // v2 API only — v0 is deprecated

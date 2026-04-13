@@ -98,7 +98,9 @@ const MAX_RECENTLY_USED_IPS = 200;
 
 /** Normalize short GPU type names (e.g. 'RTX3090') to Vast.ai search names (e.g. 'RTX 3090') */
 function normalizeGpuNames(gpuTypes: string[]): string[] {
+  if (!gpuTypes || !Array.isArray(gpuTypes)) return [];
   return gpuTypes.map((t) => {
+    if (!t || typeof t !== 'string') return '';
     // Replace underscores with spaces (e.g. 'RTX_3090' → 'RTX 3090')
     let name = t.replace(/_/g, ' ');
     // Strip NVIDIA prefix — Vast.ai uses short names like "RTX A6000", not "NVIDIA RTX A6000"
@@ -106,7 +108,7 @@ function normalizeGpuNames(gpuTypes: string[]): string[] {
     // Add space before digits if missing (e.g. 'RTX3090' → 'RTX 3090', 'RTXA5000' → 'RTX A5000')
     name = name.replace(/^(RTX)(\d)/, '$1 $2').replace(/^(RTX)(A)/, '$1 $2');
     return name;
-  });
+  }).filter(Boolean);
 }
 
 /** Strip inst- / endpt- prefix to get the raw Vast.ai numeric ID */
@@ -184,6 +186,17 @@ export class VastClient extends AbstractGpuProvider {
   private _hostFailuresPath = HOST_BLACKLIST_PATH;
   /** Debounce timer for persisting host blacklist. */
   private _hostFailuresSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  dispose(): void {
+    if (this._reputationSaveTimer) {
+      clearTimeout(this._reputationSaveTimer);
+      this._reputationSaveTimer = null;
+    }
+    if (this._hostFailuresSaveTimer) {
+      clearTimeout(this._hostFailuresSaveTimer);
+      this._hostFailuresSaveTimer = null;
+    }
+  }
 
   constructor(opts?: VastClientOptions) {
     super(opts);
@@ -999,8 +1012,9 @@ export class VastClient extends AbstractGpuProvider {
     };
 
     // Filter by GPU type if specified
-    if (spec.gpuTypes?.length) {
-      searchBody.gpu_name = { in: normalizeGpuNames(spec.gpuTypes) };
+    const gpuTypes = spec.gpuTypes?.filter(t => t && t.length > 0 && t.length <= 50);
+    if (gpuTypes?.length) {
+      searchBody.gpu_name = { in: normalizeGpuNames(gpuTypes) };
     }
 
     // Filter by minimum RAM if specified
@@ -1141,8 +1155,9 @@ export class VastClient extends AbstractGpuProvider {
 
     // ── 2. Build env vars ──────────────────────────────────────────────────
     const envVars: Record<string, string> = {};
-    if (credentials.hfToken || spec.hfToken) {
-      envVars.HF_TOKEN = (credentials.hfToken || spec.hfToken)!;
+    const hfToken = credentials.hfToken ?? spec.hfToken ?? undefined;
+    if (hfToken) {
+      envVars.HF_TOKEN = hfToken;
     }
     // Auto-inject CONF_GROQ_API_KEY for ultralight/API-based images
     // (container expects CONF_ prefix via Pydantic Settings env_prefix)
@@ -1821,10 +1836,12 @@ export class VastClient extends AbstractGpuProvider {
       let stderr = '';
       let settled = false;
       let proc: ReturnType<typeof spawn> | null = null;
+      const timer = setTimeout(() => {}, 15_000); // placeholder, will be replaced
 
       const settle = (val: string | null) => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         if (proc) {
           try { proc.kill('SIGTERM'); } catch { /* already dead */ }
           const p = proc;
@@ -1833,7 +1850,7 @@ export class VastClient extends AbstractGpuProvider {
         resolve(val);
       };
 
-      const timer = setTimeout(() => {
+      const timeout = setTimeout(() => {
         this.log.debug(`[vast] _fetchContainerLogsViaSsh(${sshHost}:${sshPort}) timed out after 15s`);
         settle(stdout.trim() ? stdout : null);
       }, 15_000);
@@ -1851,7 +1868,6 @@ export class VastClient extends AbstractGpuProvider {
 
         proc.stdout?.on('data', (chunk: Buffer) => {
           stdout += chunk.toString('utf8');
-          // Cap buffer to avoid unbounded growth on chatty hosts
           if (stdout.length > 64 * 1024) stdout = stdout.slice(-64 * 1024);
         });
         proc.stderr?.on('data', (chunk: Buffer) => {
@@ -1860,20 +1876,17 @@ export class VastClient extends AbstractGpuProvider {
         });
 
         proc.on('error', (err) => {
-          clearTimeout(timer);
           this.log.debug(`[vast] _fetchContainerLogsViaSsh(${sshHost}:${sshPort}) spawn error: ${err.message}`);
           settle(stdout.trim() ? stdout : null);
         });
 
         proc.on('exit', (code) => {
-          clearTimeout(timer);
           if (code !== 0 && code !== null) {
             this.log.debug(`[vast] _fetchContainerLogsViaSsh(${sshHost}:${sshPort}) exited ${code}: ${stderr.substring(0, 200)}`);
           }
           settle(stdout.trim() ? stdout : null);
         });
       } catch (err) {
-        clearTimeout(timer);
         this.log.debug(`[vast] _fetchContainerLogsViaSsh spawn threw: ${this.errMsg(err)}`);
         settle(null);
       }
