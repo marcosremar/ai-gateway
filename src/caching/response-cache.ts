@@ -21,6 +21,10 @@ export class ResponseCache {
   private _hits = 0;
   private _misses = 0;
   private _total = 0;
+  private _size = 0;
+  private _evictions = 0;
+  private maxSize: number;
+  private accessOrder: string[] = [];
 
   constructor(store: KvStore, opts?: CacheConfig) {
     this.store = store;
@@ -28,6 +32,8 @@ export class ResponseCache {
     this.prefix = opts?.prefix ?? 'cache:';
     this.semanticEnabled = opts?.semantic ?? false;
     this.similarityThreshold = opts?.similarityThreshold ?? 0.9;
+    this.maxSize = opts?.maxSize ?? 10000;
+    this._evictions = 0;
   }
 
   /** Build a deterministic cache key from request params */
@@ -81,8 +87,16 @@ export class ResponseCache {
         await this.store.del(key);
         this._misses++;
         this._hits--;
+        this._removeFromAccessOrder(key);
         return null;
       }
+
+      const idx = this.accessOrder.indexOf(key);
+      if (idx !== -1) {
+        this.accessOrder.splice(idx, 1);
+      }
+      this.accessOrder.push(key);
+
       return envelope.data;
     } catch {
       return null;
@@ -94,7 +108,20 @@ export class ResponseCache {
    * Similar to Cloudflare's cf-aig-cache-ttl header.
    */
   async set<T>(key: string, value: T, ttlMs?: number, metadata?: Partial<CacheMetadata>): Promise<void> {
-    // Use request-specific TTL if provided, otherwise fall back to global default
+    if (this._size >= this.maxSize && !this.accessOrder.includes(key)) {
+      while (this.accessOrder.length > 0 && this._size >= this.maxSize) {
+        const oldestKey = this.accessOrder.shift();
+        if (oldestKey) {
+          await this.store.del(oldestKey);
+          this._size--;
+          this._evictions++;
+        }
+      }
+    }
+
+    this.accessOrder.push(key);
+    this._size++;
+
     const ttl = ttlMs ?? this.defaultTtlMs;
     const now = Date.now();
     const envelope = {
@@ -107,6 +134,22 @@ export class ResponseCache {
     };
     const ttlSecs = Math.ceil(ttl / 1000);
     await this.store.set(key, JSON.stringify(envelope), ttlSecs);
+  }
+
+  private _removeFromAccessOrder(key: string): void {
+    const idx = this.accessOrder.indexOf(key);
+    if (idx !== -1) {
+      this.accessOrder.splice(idx, 1);
+      this._size--;
+    }
+  }
+
+  /**
+   * Invalidate a specific key
+   */
+  async invalidateKey(key: string): Promise<void> {
+    await this.store.del(key);
+    this._removeFromAccessOrder(key);
   }
 
   /**
@@ -149,6 +192,8 @@ export class ResponseCache {
       misses: this._misses,
       hitRate: total > 0 ? (this._hits / total) * 100 : 0,
       total,
+      size: this._size,
+      evictions: this._evictions,
     };
   }
 
@@ -157,5 +202,6 @@ export class ResponseCache {
     this._hits = 0;
     this._misses = 0;
     this._total = 0;
+    this._evictions = 0;
   }
 }

@@ -91,18 +91,26 @@ export class AdaptiveTimeoutCalculator {
 
     if (!buffer) return defaultTimeoutMs;
 
-    // Evict stale samples
-    const cutoff = Date.now() - this.windowMs;
-    const valid = buffer.filter((s) => s.timestamp >= cutoff);
+    const now = Date.now();
+    const cutoff = now - this.windowMs;
+    const valid: LatencySample[] = [];
 
-    // Update buffer in-place after eviction
+    for (let i = buffer.length - 1; i >= 0; i--) {
+      if (buffer[i].timestamp >= cutoff) {
+        valid.unshift(buffer[i]);
+      }
+    }
+
     if (valid.length !== buffer.length) {
-      this.buffers.set(key, valid);
+      if (valid.length === 0) {
+        this.buffers.delete(key);
+      } else {
+        this.buffers.set(key, valid);
+      }
     }
 
     if (valid.length < this.minSamples) return defaultTimeoutMs;
 
-    // Sort for percentile calculation
     const latencies = valid.map((s) => s.latencyMs).sort((a, b) => a - b);
     const p95 = percentile(latencies, 95);
     const adaptive = Math.round(p95 * this.marginMultiplier);
@@ -118,14 +126,25 @@ export class AdaptiveTimeoutCalculator {
     const key = bufferKey(provider, model);
     let buffer = this.buffers.get(key);
 
+    const now = Date.now();
+    const cutoff = now - this.windowMs;
+
     if (!buffer) {
       buffer = [];
       this.buffers.set(key, buffer);
+    } else {
+      const valid: LatencySample[] = [];
+      for (let i = buffer.length - 1; i >= 0; i--) {
+        if (buffer[i].timestamp >= cutoff) {
+          valid.unshift(buffer[i]);
+        }
+      }
+      buffer.length = 0;
+      buffer.push(...valid);
     }
 
-    buffer.push({ latencyMs, timestamp: Date.now() });
+    buffer.push({ latencyMs, timestamp: now });
 
-    // Circular eviction: drop oldest when exceeding capacity
     if (buffer.length > MAX_BUFFER_SIZE) {
       buffer.splice(0, buffer.length - MAX_BUFFER_SIZE);
     }
@@ -138,7 +157,11 @@ export class AdaptiveTimeoutCalculator {
     if (!buffer) return 0;
 
     const cutoff = Date.now() - this.windowMs;
-    return buffer.filter((s) => s.timestamp >= cutoff).length;
+    let count = 0;
+    for (let i = buffer.length - 1; i >= 0; i--) {
+      if (buffer[i].timestamp >= cutoff) count++;
+    }
+    return count;
   }
 
   /** Clear all recorded samples (useful for testing). */

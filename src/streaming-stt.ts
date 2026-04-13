@@ -65,6 +65,7 @@ export interface StreamingSTTEvent {
 export class StreamingSTTBackend {
   private ws: WebSocket | null = null;
   private _open = false;
+  private _aborted = false;
 
   onResult?: (event: StreamingSTTEvent) => void;
   onConnected?: () => void;
@@ -81,6 +82,7 @@ export class StreamingSTTBackend {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const ws = new WebSocket(this.url, { headers: this.headers } as any);
     this.ws = ws;
+    this._aborted = false;
 
     ws.onopen = () => {
       this._open = true;
@@ -88,6 +90,7 @@ export class StreamingSTTBackend {
     };
 
     ws.onmessage = (evt) => {
+      if (this._aborted) return;
       try {
         const raw = typeof evt.data === 'string'
           ? evt.data
@@ -114,14 +117,30 @@ export class StreamingSTTBackend {
   }
 
   sendAudio(pcm: ArrayBuffer | Buffer): void {
-    if (this._open && this.ws?.readyState === WebSocket.OPEN) {
+    if (this._open && this.ws?.readyState === WebSocket.OPEN && !this._aborted) {
       this.ws.send(pcm as ArrayBuffer);
     }
   }
 
   close(): void {
-    this.ws?.close();
+    this._aborted = true;
+    if (this.ws) {
+      this.ws.onopen = null;
+      this.ws.onmessage = null;
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      this.ws.close();
+      this.ws = null;
+    }
     this._open = false;
+    this.onResult = undefined;
+    this.onConnected = undefined;
+    this.onDisconnected = undefined;
+  }
+
+  abort(): void {
+    this._aborted = true;
+    this.close();
   }
 
   get isOpen(): boolean {
