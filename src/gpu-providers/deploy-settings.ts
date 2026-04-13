@@ -26,6 +26,9 @@ export const DEFAULT_GPU_PRIORITY: string[] = [
   'NVIDIA RTX A6000', // ~102 tok/s, 48GB VRAM, stable
   'NVIDIA A100-SXM4-80GB', // ~135 tok/s, 80GB VRAM
   'NVIDIA A100 80GB PCIe', // tested — 80GB VRAM
+  'NVIDIA A800 80GB PCIe', // A100 variant for Chinese market — 80GB VRAM
+  'NVIDIA H100 NVL', // 94GB HBM3, NVLink variant
+  'NVIDIA H200 NVL', // 141GB HBM3e, NVLink variant
   // RTX 5080 removed — Blackwell hosts consistently have direct_port_end: -1 (no NAT forwarding)
   'NVIDIA A40', // 48GB VRAM, backup
 ];
