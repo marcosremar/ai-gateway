@@ -112,21 +112,44 @@ export class ScalewayClient extends AbstractGpuProvider {
 
   /** Resolve the default project ID from the API key metadata. Cached after first call. */
   private projectIdCache: string | null = null;
+  private projectIdPromise: Promise<string> | null = null;
   private async resolveProjectId(credentials: ProviderCredentials): Promise<string> {
+    // Return cached value if available
     if (this.projectIdCache) return this.projectIdCache;
-
+    // Prevent concurrent resolution (race condition)
+    if (this.projectIdPromise) return this.projectIdPromise;
+    // Validate credentials
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) {
+      throw new Error('Scaleway secret key required (set apiKey or SCALEWAY_SECRET_KEY)');
+    }
     // authId holds the access key (SCWxxxxx), apiKey holds the secret key
     const accessKey = credentials.authId || process.env.SCALEWAY_ACCESS_KEY || '';
     if (!accessKey) throw new Error('Scaleway access key required (set authId or SCALEWAY_ACCESS_KEY)');
 
-    const res = await this.fetchJson<{ default_project_id: string }>(
+    // Start new resolution
+    this.projectIdPromise = this.resolveProjectIdImpl(secretKey, accessKey);
+    try {
+      const result = await this.projectIdPromise;
+      this.projectIdCache = result;
+      return result;
+    } finally {
+      this.projectIdPromise = null;
+    }
+  }
+
+  private async resolveProjectIdImpl(secretKey: string, accessKey: string): Promise<string> {
+    const res = await this.fetchJson<{ default_project_id?: string }>(
       `${SCW_IAM_API}/api-keys/${accessKey}`,
-      { headers: this.scwHeaders(credentials.apiKey) },
+      { headers: this.scwHeaders(secretKey) },
       TIMEOUTS.read,
       'scaleway',
     );
-    this.projectIdCache = res.default_project_id;
-    return res.default_project_id;
+    const projectId = res.default_project_id;
+    if (!projectId || typeof projectId !== 'string') {
+      throw new Error('Scaleway: no default_project_id in API response');
+    }
+    return projectId;
   }
 
   // ── Instance lifecycle ─────────────────────────────────────────────────
@@ -136,11 +159,15 @@ export class ScalewayClient extends AbstractGpuProvider {
     credentials: ProviderCredentials,
     _userId?: string,
   ): Promise<GpuInstance> {
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) {
+      throw new Error('Scaleway secret key required (set apiKey or SCALEWAY_SECRET_KEY)');
+    }
     if (!spec.region) {
       this.log.log(`[scaleway] WARNING: no region specified, falling back to ${FALLBACK_ZONE}. Pass spec.region to deploy in a specific zone.`);
     }
     const zone = spec.region || FALLBACK_ZONE;
-    const headers = this.scwHeaders(credentials.apiKey);
+    const headers = this.scwHeaders(secretKey);
 
     // Pick the best type that meets RAM requirements, with quota fallback
     const minRam = spec.ramGb ?? 12;
@@ -148,14 +175,18 @@ export class ScalewayClient extends AbstractGpuProvider {
     const candidates = COMMERCIAL_TYPES
       .filter(t => t.ramGb >= Math.min(minRam, 8)) // at least 8GB
       .sort((a, b) => b.ramGb - a.ramGb);
-    if (candidates.length === 0) candidates.push(COMMERCIAL_TYPES.find(t => t.type === DEFAULT_BOT_TYPE)!);
+    if (candidates.length === 0) {
+      const defaultType = COMMERCIAL_TYPES.find(t => t.type === DEFAULT_BOT_TYPE);
+      if (!defaultType) throw new Error('No Scaleway instance type available');
+      candidates.push(defaultType);
+    }
     const ct = candidates[0];
 
     const name = `babelcast-bot-${Date.now()}`;
     const tags = ['babelcast', 'bot'];
 
     // Find the Docker InstantApp image or use Ubuntu
-    const imageId = await this.findUbuntuImage(zone, credentials.apiKey);
+    const imageId = await this.findUbuntuImage(zone, secretKey);
 
     // Resolve the project ID from the API key
     const projectId = await this.resolveProjectId(credentials);
@@ -202,15 +233,15 @@ export class ScalewayClient extends AbstractGpuProvider {
     // Step 2: Set user_data (cloud-init) to pull and run the Docker image
     if (spec.dockerImage) {
       const userData = this.buildUserData(spec);
-      await this.setUserData(zone, server.id, credentials.apiKey, userData);
+      await this.setUserData(zone, server.id, secretKey, userData);
     }
 
     // Step 3: Power on the server
-    await this.serverAction(zone, server.id, 'poweron', credentials.apiKey);
+    await this.serverAction(zone, server.id, 'poweron', secretKey);
     this.log.log(`[scaleway] Server ${server.id} powering on...`);
 
     // Step 4: Wait for public IP
-    const ip = await this.waitForIp(zone, server.id, credentials.apiKey);
+    const ip = await this.waitForIp(zone, server.id, secretKey);
     const endpoint = ip ? `http://${ip}:8080` : '';
 
     this.log.log(`[scaleway] Server ready: ${server.id} at ${ip || 'no-ip'} (€${usedType.pricePerHr}/hr)`);
@@ -234,22 +265,28 @@ export class ScalewayClient extends AbstractGpuProvider {
   }
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) throw new Error('Scaleway secret key required');
     const { zone, serverId } = this.decodeId(instanceId);
-    await this.serverAction(zone, serverId, 'poweron', credentials.apiKey);
+    await this.serverAction(zone, serverId, 'poweron', secretKey);
   }
 
   async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) throw new Error('Scaleway secret key required');
     const { zone, serverId } = this.decodeId(instanceId);
-    await this.serverAction(zone, serverId, 'poweroff', credentials.apiKey);
+    await this.serverAction(zone, serverId, 'poweroff', secretKey);
   }
 
   async deleteInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) throw new Error('Scaleway secret key required');
     const { zone, serverId } = this.decodeId(instanceId);
-    const headers = this.scwHeaders(credentials.apiKey);
+    const headers = this.scwHeaders(secretKey);
 
     // Try to terminate first (force poweroff + delete)
     try {
-      await this.serverAction(zone, serverId, 'terminate', credentials.apiKey);
+      await this.serverAction(zone, serverId, 'terminate', secretKey);
       this.log.log(`[scaleway] Terminated server ${serverId} in ${zone}`);
       return;
     } catch {
@@ -258,7 +295,7 @@ export class ScalewayClient extends AbstractGpuProvider {
 
     // Fallback: poweroff then delete
     try {
-      await this.serverAction(zone, serverId, 'poweroff', credentials.apiKey);
+      await this.serverAction(zone, serverId, 'poweroff', secretKey);
       // Wait briefly for poweroff
       await new Promise(r => setTimeout(r, 5000));
     } catch {
@@ -274,11 +311,13 @@ export class ScalewayClient extends AbstractGpuProvider {
   }
 
   async getInstanceStatus(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) return null;
     const { zone, serverId } = this.decodeId(instanceId);
     try {
       const res = await this.fetchJson<ScwGetResponse>(
         `${this.zoneUrl(zone)}/servers/${serverId}`,
-        { headers: this.scwHeaders(credentials.apiKey) },
+        { headers: this.scwHeaders(secretKey) },
         TIMEOUTS.read,
         'scaleway',
       );
@@ -289,7 +328,9 @@ export class ScalewayClient extends AbstractGpuProvider {
   }
 
   async listInstances(credentials: ProviderCredentials): Promise<GpuInstance[]> {
-    const headers = this.scwHeaders(credentials.apiKey);
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) return [];
+    const headers = this.scwHeaders(secretKey);
 
     // Query all known zones in parallel
     const results = await Promise.allSettled(
@@ -308,11 +349,13 @@ export class ScalewayClient extends AbstractGpuProvider {
   }
 
   async resolveInstanceEndpoint(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) return null;
     const { zone, serverId } = this.decodeId(instanceId);
     try {
       const res = await this.fetchJson<ScwGetResponse>(
         `${this.zoneUrl(zone)}/servers/${serverId}`,
-        { headers: this.scwHeaders(credentials.apiKey) },
+        { headers: this.scwHeaders(secretKey) },
         TIMEOUTS.read,
         'scaleway',
       );

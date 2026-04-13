@@ -61,13 +61,13 @@ export class ApiKeyRegistry {
 
   /** Check if a Bearer token is valid. Timing-safe. */
   validate(token: string): boolean {
-    if (this.entries.length === 0) return true; // no keys configured
+    if (this.entries.length === 0) return false; // no keys configured = deny all
     return this.entries.some(e => safeEqual(token, e.key));
   }
 
   /** Resolve a Bearer token to its user identity. Returns null if invalid. */
   resolve(token: string): ApiKeyEntry | null {
-    if (this.entries.length === 0) return { key: '', userId: 'anonymous', label: 'no auth' };
+    if (this.entries.length === 0) return null; // no keys = deny, don't default to anonymous
     for (const entry of this.entries) {
       if (safeEqual(token, entry.key)) return entry;
     }

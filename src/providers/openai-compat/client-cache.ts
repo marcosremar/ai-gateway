@@ -15,8 +15,17 @@
 import OpenAI from 'openai';
 import { createHash } from 'crypto';
 
-const cache = new Map<string, OpenAI>();
+interface CacheEntry {
+  client: OpenAI;
+  lastAccess: number;
+}
+
+const cache = new Map<string, CacheEntry>();
 const MAX_CACHE_SIZE = 50;
+const CLEANUP_INTERVAL_MS = 60_000;
+const MAX_ENTRY_AGE_MS = 30 * 60 * 1000; // 30 minutes
+
+let lastCleanup = 0;
 
 /**
  * Get or create a shared OpenAI SDK client for the given config.
@@ -28,27 +37,60 @@ export function getOrCreateClient(
   apiKey: string,
   defaultHeaders?: Record<string, string>,
 ): OpenAI {
-  // Include headers in cache key so providers with different headers get their own client
-  const headersKey = defaultHeaders ? JSON.stringify(defaultHeaders) : '';
+  const headersKey = defaultHeaders && Object.keys(defaultHeaders).length > 0
+    ? JSON.stringify(defaultHeaders)
+    : '\0';
   const keyHash = apiKey ? createHash('sha256').update(apiKey).digest('hex').slice(0, 16) : '';
   const key = `${baseURL}\0${keyHash}\0${headersKey}`;
 
+  const now = Date.now();
+
+  if (lastCleanup + CLEANUP_INTERVAL_MS < now) {
+    lastCleanup = now;
+    for (const [k, entry] of cache) {
+      if (now - entry.lastAccess > MAX_ENTRY_AGE_MS) {
+        cache.delete(k);
+      }
+    }
+  }
+
   const existing = cache.get(key);
-  if (existing) return existing;
+  if (existing) {
+    existing.lastAccess = now;
+    return existing.client;
+  }
 
   const client = new OpenAI({
     apiKey,
     baseURL,
-    ...(defaultHeaders && { defaultHeaders }),
+    ...(defaultHeaders && Object.keys(defaultHeaders).length > 0 && { defaultHeaders }),
   });
-  // Evict oldest entry if cache is full (FIFO)
+
   if (cache.size >= MAX_CACHE_SIZE) {
-    const oldest = cache.keys().next().value;
-    if (oldest !== undefined) {
-      cache.delete(oldest);
-      // Note: OpenAI SDK client connections will be GC'd with the client
+    let oldestKey: string | undefined;
+    let oldestTime = Infinity;
+    for (const [k, entry] of cache) {
+      if (entry.lastAccess < oldestTime) {
+        oldestTime = entry.lastAccess;
+        oldestKey = k;
+      }
     }
+    if (oldestKey) cache.delete(oldestKey);
   }
-  cache.set(key, client);
+
+  cache.set(key, { client, lastAccess: now });
   return client;
+}
+
+/** Expose cache size for monitoring */
+export function getCacheStats(): { size: number; keys: string[] } {
+  return {
+    size: cache.size,
+    keys: [...cache.keys()],
+  };
+}
+
+/** Clear the entire client cache */
+export function clearClientCache(): void {
+  cache.clear();
 }

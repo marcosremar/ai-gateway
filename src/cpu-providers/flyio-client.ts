@@ -68,7 +68,12 @@ export class FlyioClient extends AbstractGpuProvider {
     spec: InstanceSpec,
     credentials: ProviderCredentials,
   ): Promise<GpuInstance> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) {
+      throw new Error('Fly.io API token required (set apiKey or FLY_API_TOKEN)');
+    }
+    // Reset flyHost for new instance
+    this.flyHost = '';
     const app = this.appName();
     const region = spec.region || process.env.FLY_REGION || DEFAULT_REGION;
 
@@ -146,6 +151,8 @@ export class FlyioClient extends AbstractGpuProvider {
       this.log.log(`[flyio] Machine ${machine.id} is running`);
     } catch (e) {
       this.log.log(`[flyio] Wait for start failed: ${e instanceof Error ? e.message : e}`);
+      // Don't return a "running" instance if the machine failed to start
+      throw new Error(`Fly.io machine failed to start: ${e instanceof Error ? e.message : e}`);
     }
 
     // Resolve endpoint — try fly.dev DNS first, fall back to allocated IPv4
@@ -154,7 +161,9 @@ export class FlyioClient extends AbstractGpuProvider {
     try {
       const dnsCheck = await fetch(`${endpoint}/version`, { signal: AbortSignal.timeout(5_000) });
       if (dnsCheck.ok) dnsReady = true;
-    } catch { /* DNS not propagated yet */ }
+    } catch (e) {
+      this.log.log(`[flyio] DNS not propagated yet: ${e instanceof Error ? e.message : e}`);
+    }
 
     if (!dnsReady) {
       // DNS not ready — resolve IPv4 and connect directly
@@ -186,7 +195,10 @@ export class FlyioClient extends AbstractGpuProvider {
     instanceId: string,
     credentials: ProviderCredentials,
   ): Promise<void> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) {
+      throw new Error('Fly.io API token required (set apiKey or FLY_API_TOKEN)');
+    }
     const app = this.appName();
 
     this.log.log(`[flyio] Destroying machine ${instanceId}`);
@@ -198,8 +210,12 @@ export class FlyioClient extends AbstractGpuProvider {
         headers: this.headers(token),
         signal: AbortSignal.timeout(TIMEOUTS.write),
       });
-      await this.waitForState(app, instanceId, token, 'stopped', 30).catch(() => {});
-    } catch { /* might already be stopped */ }
+      await this.waitForState(app, instanceId, token, 'stopped', 30).catch((e) => {
+        this.log.log(`[flyio] Wait for stopped state failed during cleanup: ${e instanceof Error ? e.message : e}`);
+      });
+    } catch (e) {
+      this.log.log(`[flyio] Stop failed, might already be stopped: ${e instanceof Error ? e.message : e}`);
+    }
 
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}?force=true`, {
       method: 'DELETE',
@@ -224,7 +240,10 @@ export class FlyioClient extends AbstractGpuProvider {
   }
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) {
+      throw new Error('Fly.io API token required (set apiKey or FLY_API_TOKEN)');
+    }
     const app = this.appName();
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}/start`, {
       method: 'POST',
@@ -239,7 +258,10 @@ export class FlyioClient extends AbstractGpuProvider {
   }
 
   async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) {
+      throw new Error('Fly.io API token required (set apiKey or FLY_API_TOKEN)');
+    }
     const app = this.appName();
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}/stop`, {
       method: 'POST',
@@ -253,7 +275,8 @@ export class FlyioClient extends AbstractGpuProvider {
   }
 
   async getInstanceStatus(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) return null;
     const app = this.appName();
     try {
       const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}`, {
@@ -268,13 +291,15 @@ export class FlyioClient extends AbstractGpuProvider {
       if (machine.state === 'starting' || machine.state === 'created') return 'booting';
       if (machine.state === 'stopping' || machine.state === 'destroying' || machine.state === 'destroyed') return 'terminated';
       return machine.state;
-    } catch {
+    } catch (e) {
+      this.log.log(`[flyio] getInstanceStatus failed: ${e instanceof Error ? e.message : e}`);
       return null;
     }
   }
 
   async listInstances(credentials: ProviderCredentials): Promise<GpuInstance[]> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) return [];
     const app = this.appName();
 
     try {
@@ -309,7 +334,10 @@ export class FlyioClient extends AbstractGpuProvider {
     instanceId: string,
     credentials: ProviderCredentials,
   ): Promise<Record<string, unknown>> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) {
+      throw new Error('Fly.io API token required (set apiKey or FLY_API_TOKEN)');
+    }
     const app = this.appName();
 
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}`, {
@@ -333,29 +361,43 @@ export class FlyioClient extends AbstractGpuProvider {
 
   /** Resolve the app's allocated shared IPv4 address. */
   private async resolveAppIp(app: string, token: string): Promise<string | null> {
+    let proc: ReturnType<typeof Bun.spawn> | null = null;
     try {
       // Use flyctl CLI which has the auth context
-      const proc = Bun.spawn(['flyctl', 'ips', 'list', '--app', app, '--json'], {
+      proc = Bun.spawn(['flyctl', 'ips', 'list', '--app', app, '--json'], {
         stdout: 'pipe', stderr: 'pipe',
       });
       await proc.exited;
       const out = await new Response(proc.stdout).text();
-      const ips = JSON.parse(out) as Array<{ Address: string; Type: string }>;
+      const parsed = JSON.parse(out);
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed)) {
+        return null;
+      }
+      const ips = parsed as Array<{ Address?: string; Type?: string }>;
       const v4 = ips.find(ip => ip.Type === 'shared_v4' || ip.Type === 'v4');
       return v4?.Address?.replace('/32', '') || null;
-    } catch {
+    } catch (e) {
+      this.log.log(`[flyio] Resolve app IP failed: ${e instanceof Error ? e.message : e}`);
       // Fallback: allocate a shared IPv4 via CLI
       try {
-        const proc = Bun.spawn(['flyctl', 'ips', 'allocate-v4', '--shared', '--app', app, '--json'], {
+        proc = Bun.spawn(['flyctl', 'ips', 'allocate-v4', '--shared', '--app', app, '--json'], {
           stdout: 'pipe', stderr: 'pipe',
         });
         await proc.exited;
         const out = await new Response(proc.stdout).text();
-        const data = JSON.parse(out);
+        const parsed = JSON.parse(out);
+        if (!parsed || typeof parsed !== 'object') {
+          return null;
+        }
+        const data = parsed as { Address?: string };
         return data?.Address?.replace('/32', '') || null;
-      } catch {
+      } catch (e2) {
+        this.log.log(`[flyio] Allocate IPv4 failed: ${e2 instanceof Error ? e2.message : e2}`);
         return null;
       }
+    } finally {
+      proc?.stdout?.close();
+      proc?.stderr?.close();
     }
   }
 
@@ -374,9 +416,28 @@ export class FlyioClient extends AbstractGpuProvider {
         signal: AbortSignal.timeout((timeoutSecs + 10) * 1000),
       },
     );
+    // Non-2xx means the machine didn't reach the desired state
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`Wait for ${state} failed (${res.status}): ${text.slice(0, 200)}`);
+    }
+    // Even on 200, verify the machine is actually in the expected state
+    const machine = await this.getMachine(app, machineId, token);
+    if (machine && machine.state !== state) {
+      throw new Error(`Machine state is ${machine.state}, expected ${state}`);
+    }
+  }
+
+  private async getMachine(app: string, machineId: string, token: string): Promise<FlyMachine | null> {
+    try {
+      const res = await fetch(`${FLY_API}/apps/${app}/machines/${machineId}`, {
+        headers: this.headers(token),
+        signal: AbortSignal.timeout(TIMEOUTS.read),
+      });
+      if (!res.ok) return null;
+      return res.json() as Promise<FlyMachine>;
+    } catch {
+      return null;
     }
   }
 
@@ -425,19 +486,37 @@ export class FlyioClient extends AbstractGpuProvider {
 
   /** Resolve the org slug from the token's existing apps. */
   private orgSlugCache: string | null = null;
+  private orgSlugPromise: Promise<string> | null = null;
   private async resolveOrgSlug(token: string): Promise<string> {
+    // Return cached value if available
     if (this.orgSlugCache) return this.orgSlugCache;
+    // Return in-flight promise to avoid concurrent resolution (race condition fix)
+    if (this.orgSlugPromise) return this.orgSlugPromise;
+    // Start new resolution
+    this.orgSlugPromise = this.resolveOrgSlugImpl(token);
+    try {
+      const result = await this.orgSlugPromise;
+      this.orgSlugCache = result;
+      return result;
+    } finally {
+      this.orgSlugPromise = null;
+    }
+  }
+
+  private async resolveOrgSlugImpl(token: string): Promise<string> {
     try {
       const res = await fetch(`${FLY_API}/apps?org_slug=personal`, {
         headers: this.headers(token),
         signal: AbortSignal.timeout(10_000),
       });
       if (res.ok) {
-        const data = await res.json() as { apps?: Array<{ organization?: { slug?: string } }> };
-        const slug = data.apps?.[0]?.organization?.slug;
-        if (slug) {
-          this.orgSlugCache = slug;
-          return slug;
+        const data = await res.json();
+        if (data && typeof data === 'object' && Array.isArray(data.apps)) {
+          const apps = data.apps as Array<{ organization?: { slug?: string } }>;
+          const slug = apps[0]?.organization?.slug;
+          if (slug && typeof slug === 'string') {
+            return slug;
+          }
         }
       }
     } catch { /* fallback */ }

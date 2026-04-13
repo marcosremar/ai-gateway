@@ -33,10 +33,15 @@ export async function raceSTT(
   model: string,
   providers: STTProvider[],
   opts?: { language?: string; prompt?: string; timeoutMs?: number },
+  signal?: AbortSignal,
 ): Promise<{ result: STTResponse; provider: string; latencyMs: number }> {
   if (providers.length === 0) throw new Error('No STT providers to race');
+
+  if (signal?.aborted) {
+    throw new Error('Aborted');
+  }
+
   if (providers.length === 1) {
-    // Single provider — no race needed, call directly
     const t0 = Date.now();
     const result = await providers[0].transcribe({
       audio, model,
@@ -48,6 +53,16 @@ export async function raceSTT(
 
   const t0 = Date.now();
   const deadlines: ReturnType<typeof setTimeout>[] = [];
+  const controller = new AbortController();
+
+  const cleanup = () => {
+    for (const t of deadlines) clearTimeout(t);
+    if (!controller.signal.aborted) controller.abort();
+  };
+
+  if (signal) {
+    signal.addEventListener('abort', cleanup, { once: true });
+  }
 
   const races = providers.map((provider) => {
     let p: Promise<{ result: STTResponse; provider: string }> = provider
@@ -65,15 +80,15 @@ export async function raceSTT(
       p = Promise.race([p, deadline]);
     }
 
-    return p;
+    return Promise.race([p, new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('Aborted'))))]);
   });
 
   try {
     const winner = await Promise.any(races);
+    cleanup();
     return { ...winner, latencyMs: Date.now() - t0 };
-  } catch {
-    throw new Error(`All ${providers.length} STT providers failed in race mode`);
-  } finally {
-    for (const t of deadlines) clearTimeout(t);
+  } catch (err) {
+    cleanup();
+    throw err;
   }
 }

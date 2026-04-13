@@ -130,6 +130,13 @@ function maskKey(key: string): string {
   return key.substring(0, 3) + '***' + key.substring(key.length - 3);
 }
 
+function escapeEnvValue(value: string): string {
+  if (value.includes('\n') || value.includes('\r') || value.includes('"') || value.includes(' ') || value.includes('#')) {
+    return `"${value.replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
+  }
+  return value;
+}
+
 function getEnvFilePath(): string {
   const __dir = dirname(fileURLToPath(import.meta.url));
   return resolve(__dir, '..', '.env');
@@ -191,6 +198,7 @@ export async function handleSetApiKeys(req: IncomingMessage, res: ServerResponse
   }
 
   // Persist to .env file
+  let saveFailed = false;
   try {
     const envPath = getEnvFilePath();
     let envContent = existsSync(envPath) ? readFileSync(envPath, 'utf8') : '';
@@ -202,9 +210,9 @@ export async function handleSetApiKeys(req: IncomingMessage, res: ServerResponse
       const regex = new RegExp(`^${escapedVar}=.*$`, 'm');
       envContent = envContent.replace(regex, '').replace(/\n{3,}/g, '\n\n');
 
-      // Add new line if value is non-empty
+      // Add new line if value is non-empty (escape special chars)
       if (value) {
-        envContent = envContent.trimEnd() + `\n${envVar}=${value}\n`;
+        envContent = envContent.trimEnd() + `\n${envVar}=${escapeEnvValue(value)}\n`;
       }
     }
 
@@ -213,7 +221,8 @@ export async function handleSetApiKeys(req: IncomingMessage, res: ServerResponse
     // chmodSync enforces 0o600 on pre-existing files too.
     try { chmodSync(envPath, 0o600); } catch { /* best-effort: cleanup or optional side-effect */ }
   } catch (err) {
-    console.warn('[config] Failed to persist API keys to .env:', err);
+    console.error('[config] Failed to persist API keys to .env:', err);
+    saveFailed = true;
   }
 
   // Reload provider availability flags so changes take effect without restart
@@ -229,7 +238,11 @@ export async function handleSetApiKeys(req: IncomingMessage, res: ServerResponse
     masked: maskKey(process.env[def.envVar] || ''),
   }));
 
-  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.writeHead(saveFailed ? 500 : 200, { 'Content-Type': 'application/json' });
+  if (saveFailed) {
+    res.end(JSON.stringify({ error: 'Failed to persist API keys to .env file' }));
+    return;
+  }
   res.end(JSON.stringify({ keys, saved: true, providerChanges }));
 }
 
@@ -377,11 +390,11 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
     return;
   }
 
-  // Copy app chains to top-level pipeline fields
+  // Copy app chains to top-level pipeline fields (use copies to avoid mutating cached config)
   config.activeAppId = id;
-  config.pipelineStt = ((app.stt || []) as unknown as PipelineChainEntry[]);
-  config.pipelineLlm = ((app.llm || []) as unknown as PipelineChainEntry[]);
-  config.pipelineTts = ((app.tts || []) as unknown as PipelineChainEntry[]);
+  config.pipelineStt = [...(app.stt || [])] as unknown as PipelineChainEntry[];
+  config.pipelineLlm = [...(app.llm || [])] as unknown as PipelineChainEntry[];
+  config.pipelineTts = [...(app.tts || [])] as unknown as PipelineChainEntry[];
 
   // Apply app GPU deploy settings if present
   if (app.gpuDeploy) {

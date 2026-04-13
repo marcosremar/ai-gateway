@@ -42,6 +42,7 @@ export interface STTRequest {
   responseFormat?: 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt';
   temperature?: number;
   wordTimestamps?: boolean;
+  signal?: AbortSignal;
 }
 
 /** Per-segment metadata returned by Whisper (verbose_json). */
@@ -146,6 +147,7 @@ export interface ChatRequest {
   maxTokens?: number;
   responseFormat?: { type: 'json_object' | 'text' };
   stream?: boolean;
+  timeoutMs?: number;
 }
 
 export interface ChatResponse {

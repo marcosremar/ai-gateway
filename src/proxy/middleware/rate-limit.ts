@@ -7,10 +7,15 @@
  */
 
 import type { IncomingMessage } from 'http';
+import { createHash } from 'crypto';
 
 interface Bucket {
   tokens: number;
   lastRefill: number;
+}
+
+function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex').slice(0, 16);
 }
 
 export class RateLimiter {
@@ -33,14 +38,14 @@ export class RateLimiter {
 
   /**
    * Extract a stable client identifier.
-   * Prefers API key (partial hash) over IP to avoid x-forwarded-for spoofing.
+   * Uses SHA-256 hash of API key to prevent rate limit evasion via key prefix guessing.
    */
   static clientId(req: IncomingMessage): string {
     const auth = req.headers.authorization;
     if (auth) {
       const token = auth.replace(/^Bearer\s+/i, '');
       if (token.length >= 8) {
-        return `key:${token.substring(0, 8)}`;
+        return `key:${hashToken(token)}`;
       }
     }
     return `ip:${req.socket.remoteAddress || 'unknown'}`;
@@ -57,6 +62,7 @@ export class RateLimiter {
     resetAt: number;
   } {
     if (this.refillRatePerMs <= 0) {
+      console.warn(`[rate-limit] refillRatePerMs <= 0 (${this.refillRatePerMs}), rate limiting disabled for ${clientId}`);
       return { allowed: true, limit: 0, remaining: 0, resetAt: 0 };
     }
 

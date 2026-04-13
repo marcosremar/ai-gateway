@@ -6,17 +6,33 @@
 
 /** Reads/writes user-level AI provider settings (backed by Prisma, KV, etc.) */
 export interface SettingsStore {
+  /** Get settings for a user. Returns empty object if user has no settings yet.
+   *  @throws Error on transient failures (network, timeout) — caller should retry
+   */
   get(userId: string): Promise<Record<string, unknown>>;
+  /** Merge-patch user settings (shallow merge).
+   *  @throws Error on transient failures; does NOT roll back partial updates
+   */
   patch(userId: string, partial: Record<string, unknown>): Promise<void>;
 }
 
 /** Key/value operations (used by StatePersistence) */
 export interface KvStore {
   get(key: string): Promise<string | null>;
+  /** Set key-value pair with optional TTL.
+   *  @param ttlSecs If 0 or negative, should be treated as no expiration (implementation may ignore or throw)
+   */
   set(key: string, value: string, ttlSecs?: number): Promise<void>;
   del(key: string): Promise<void>;
-  /** SCAN keys matching a pattern. Returns all matching keys. */
-  scan(pattern: string): Promise<string[]>;
+  /** SCAN keys matching a pattern using cursor-based iteration.
+   *  For large keyspaces, prefer using the callback for memory efficiency.
+   *  @param pattern Glob pattern (e.g., "cache:*")
+   *  @param callback Called for each batch of keys; return false to stop iteration early
+   *  @param limit Maximum number of keys to return (default 1000, max 10000)
+   *  @returns Total number of keys found (may be approximate for large keyspaces)
+   *  @throws Error if limit is 0 or negative
+   */
+  scan(pattern: string, callback?: (keys: string[]) => boolean | void, limit?: number): Promise<number>;
 }
 
 /** List operations (used by LatencyTracker) */
@@ -25,18 +41,25 @@ export interface ListStore {
   rpush(key: string, value: string): Promise<void>;
   /** Trim list to keep only elements in [start, stop] range */
   ltrim(key: string, start: number, stop: number): Promise<void>;
-  /** Get list elements in [start, stop] range */
-  lrange(key: string, start: number, stop: number): Promise<string[]>;
+  /** Get list elements in [start, stop] range.
+   *  @param start Start index (0-based, negative = from end)
+   *  @param stop Stop index (inclusive, -1 = all remaining)
+   *  @param maxElements Maximum elements to return (prevent unbounded memory)
+   *  @throws Error if range exceeds maxElements
+   */
+  lrange(key: string, start: number, stop: number, maxElements?: number): Promise<string[]>;
 }
 
 /** Hash operations (used by SessionTracker) */
 export interface HashStore {
   /** Set hash field */
-  hset(key: string, field: string, value: string): Promise<void>;
+  hset(key: string, field: string, value: string, ttlSecs?: number): Promise<void>;
   /** Delete hash field */
   hdel(key: string, field: string): Promise<void>;
-  /** Get all hash fields */
-  hgetall(key: string): Promise<Record<string, string>>;
+  /** Get all hash fields up to limit (default 1000). Use limit param with cursor for large hashes. */
+  hgetall(key: string, limit?: number): Promise<Record<string, string>>;
+  /** Increment a hash field by a number */
+  hincrby(key: string, field: string, increment: number): Promise<void>;
 }
 
 /**

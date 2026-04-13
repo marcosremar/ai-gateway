@@ -9,6 +9,8 @@ export interface CacheConfig {
   semantic?: boolean;
   /** Similarity threshold for semantic cache (0-1) */
   similarityThreshold?: number;
+  /** Maximum number of entries (LRU eviction when full). Default: 10000 */
+  maxSize?: number;
 }
 
 export interface CacheStats {
@@ -18,6 +20,10 @@ export interface CacheStats {
   hitRate: number;
   /** Total requests processed */
   total: number;
+  /** Current cache size (entry count) */
+  size: number;
+  /** Evictions performed */
+  evictions: number;
 }
 
 /**

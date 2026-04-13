@@ -65,12 +65,25 @@ export async function createPgDriver(connectionString: string): Promise<SqlDrive
   }
 
   const client = new PgClient({ connectionString });
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (err) {
+    await client.end().catch(() => {});
+    throw err;
+  }
 
   return {
     async query<T>(sql: string, params: unknown[] = []): Promise<QueryResult<T>> {
-      const result = await client.query<T>(sql, params);
-      return { rows: result.rows, rowCount: result.rowCount ?? result.rows.length, fields: result.fields };
+      try {
+        const result = await client.query<T>(sql, params);
+        return { rows: result.rows, rowCount: result.rowCount ?? result.rows.length, fields: result.fields };
+      } catch (err) {
+        const dbErr = err as NodeJS.ErrnoException;
+        if (dbErr.code === 'ECONNRESET' || dbErr.code === 'ENOTCONN' || dbErr.code === 'ECONNREFUSED') {
+          await client.end().catch(() => {});
+        }
+        throw err;
+      }
     },
     async close() {
       await client.end();

@@ -36,10 +36,13 @@ function sttCacheGet(key: string): string | null {
 export function _resetSttCache(): void { sttCache.clear(); }
 
 function sttCacheSet(key: string, text: string): void {
-  // Evict oldest if at capacity
   if (sttCache.size >= STT_CACHE_MAX_ENTRIES) {
-    const oldest = sttCache.keys().next().value;
-    if (oldest !== undefined) sttCache.delete(oldest);
+    const now = Date.now();
+    for (const [k, v] of sttCache) {
+      if (v.expiresAt < now) { sttCache.delete(k); return; }
+    }
+    const oldestKey = sttCache.keys().next().value;
+    if (oldestKey !== undefined) sttCache.delete(oldestKey);
   }
   sttCache.set(key, { text, expiresAt: Date.now() + STT_CACHE_TTL_MS });
 }
@@ -48,14 +51,10 @@ export async function handleAudioTranscriptions(
   req: ProxyRequest,
   sttProviders: Record<string, STTProvider>,
 ): Promise<ProxyResponse> {
-  // For multipart/form-data, the body should already be parsed
-  // In practice, audio transcriptions need raw binary + model field
-  const body = req.body as {
-    model: string;
-    language?: string;
-    prompt?: string;
-    response_format?: string;
-  };
+  if (!req.body || typeof req.body !== 'object') {
+    return { status: 400, body: { error: { message: 'request body is required', type: 'invalid_request_error' } } };
+  }
+  const body = req.body as Record<string, unknown>;
 
   if (!body.model || typeof body.model !== 'string') {
     return { status: 400, body: { error: { message: 'model is required', type: 'invalid_request_error' } } };
@@ -95,9 +94,9 @@ export async function handleAudioTranscriptions(
       () => provider.transcribe({
         audio: req.rawBody,
         model: body.model,
-        language: body.language,
-        prompt: body.prompt,
-        responseFormat: body.response_format as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt',
+        language: body.language as string | undefined,
+        prompt: body.prompt as string | undefined,
+        responseFormat: (body.response_format as string) as 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt' | undefined,
       }),
       'STT',
     );

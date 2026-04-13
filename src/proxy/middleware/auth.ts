@@ -18,7 +18,7 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 export function validateAuth(authHeader: string | undefined, validKeys: string[]): boolean {
-  if (validKeys.length === 0) return true; // no auth configured
+  if (validKeys.length === 0) return false; // no auth configured = deny all
   if (!authHeader) {
     console.warn('[auth] Missing Authorization header');
     return false;

@@ -112,13 +112,14 @@ export class UnifiedSpeechClient extends TypedEmitter<UnifiedSpeechClientEventMa
     if (strategy === 'realtime-first' && this.config.realtime) {
       try {
         await this.connectRealtime();
+        if (this._destroyed) return;
         return;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.emit('error', { message: msg, transport: 'realtime', fatal: false });
         this.emit('fallback', { from: 'realtime', to: 'pipeline', reason: msg });
-        // Fall through to pipeline
       }
+      if (this._destroyed) return;
     }
 
     if (this.config.pipeline) {

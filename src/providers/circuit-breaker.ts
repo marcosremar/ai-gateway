@@ -49,6 +49,7 @@ export class CircuitBreaker {
   private lastFailureAt: number | null = null;
   private lastSuccessAt: number | null = null;
   private openedAt: number | null = null;
+  private probeInFlight = false;
 
   private readonly failureThreshold: number;
   private readonly resetTimeoutMs: number;
@@ -73,12 +74,17 @@ export class CircuitBreaker {
       const elapsed = this.now() - (this.openedAt ?? 0);
       if (elapsed >= this.resetTimeoutMs) {
         this.state = 'half_open';
+        this.probeInFlight = true;
         return true; // allow one probe
       }
       return false; // still in cooldown
     }
 
-    // half_open — allow the probe request
+    // half_open — allow the probe request only if one isn't already in flight
+    if (this.probeInFlight) {
+      return false;
+    }
+    this.probeInFlight = true;
     return true;
   }
 
@@ -87,6 +93,7 @@ export class CircuitBreaker {
     this.consecutiveFailures = 0;
     this.consecutiveSuccesses++;
     this.lastSuccessAt = this.now();
+    this.probeInFlight = false;
 
     if (this.state === 'half_open') {
       this.state = 'closed';
@@ -99,6 +106,8 @@ export class CircuitBreaker {
     this.consecutiveFailures++;
     this.consecutiveSuccesses = 0;
     this.lastFailureAt = this.now();
+    const wasProbeInFlight = this.probeInFlight;
+    this.probeInFlight = false;
 
     if (this.state === 'half_open') {
       // Probe failed — re-open with fresh cooldown
@@ -115,13 +124,7 @@ export class CircuitBreaker {
 
   /** Current state for observability. */
   getStats(): CircuitBreakerStats {
-    // Auto-transition open→half_open for accurate reporting
-    if (this.state === 'open' && this.openedAt) {
-      const elapsed = this.now() - this.openedAt;
-      if (elapsed >= this.resetTimeoutMs) {
-        this.state = 'half_open';
-      }
-    }
+    // Return current state without auto-transition to avoid mutation side effects
     return {
       state: this.state,
       failures: this.consecutiveFailures,
@@ -138,6 +141,7 @@ export class CircuitBreaker {
     this.consecutiveFailures = 0;
     this.consecutiveSuccesses = 0;
     this.openedAt = null;
+    this.probeInFlight = false;
   }
 }
 
