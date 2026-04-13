@@ -1,6 +1,10 @@
 // ── BabelCast Gateway — Configuration ───────────────────────────────────────
 // Env vars, GPU allowlists, image catalog, startup validation.
 
+import { createLogger } from '../src/logger';
+
+const log = createLogger('config');
+
 export const PORT = parseInt(process.env.PORT || '4000');
 export const PROVIDER = process.env.PROVIDER || 'groq';
 export const RUNPOD_ENDPOINT = process.env.RUNPOD_ENDPOINT;  // e.g. http://pod-ip:8000
@@ -76,7 +80,7 @@ export function resolveDockerImageForGpus(dockerImage: string, gpuTypes: string[
   if (isPrimaryBlackwell) {
     const blackwellImage = STANDARD_TO_BLACKWELL[dockerImage];
     if (blackwellImage) {
-      console.log(`[gpu] Blackwell primary GPU (${primary}) — swapping image: ${dockerImage} → ${blackwellImage}`);
+      log.log('Blackwell primary GPU (%s) — swapping image: %s → %s', primary, dockerImage, blackwellImage);
       return blackwellImage;
     }
   }
@@ -95,17 +99,17 @@ export function getImageCatalog() {
 /** Validate startup configuration. Exits process on fatal errors. */
 export function validateStartupConfig() {
   if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
-    console.error(`[gateway] Invalid PORT: ${process.env.PORT}. Must be 1-65535.`);
+    log.error('Invalid PORT: %s. Must be 1-65535.', process.env.PORT);
     process.exit(1);
   }
 
   if (PROVIDER === 'ollama') {
     const ollamaHost = process.env.OLLAMA_HOST || 'http://localhost:11434/v1';
     try { new URL(ollamaHost); }
-    catch { console.warn(`[gateway] Warning: OLLAMA_HOST "${ollamaHost}" is not a valid URL`); }
+    catch { log.warn('OLLAMA_HOST "%s" is not a valid URL', ollamaHost); }
   }
 
   if (RUNPOD_ENDPOINT && !process.env.RUNPOD_API_KEY) {
-    console.warn('[gateway] Warning: RUNPOD_ENDPOINT set but RUNPOD_API_KEY is missing');
+    log.warn('RUNPOD_ENDPOINT set but RUNPOD_API_KEY is missing');
   }
 }

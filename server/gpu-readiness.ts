@@ -11,6 +11,9 @@
 // WS events:
 //   { type: 'gpu:readiness', stage: 'llm'|'stt'|'tts'|'all', phase, run?, totalRuns?, latencyMs?, targetMs, passed?, medianLatencyMs? }
 
+import { createLogger } from '../src/logger';
+const log = createLogger('gpu-readiness');
+
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -217,7 +220,7 @@ async function benchmarkService(
       }
       reqOk = true;
     } catch (err) {
-      console.warn(`[readiness:${stage}] Run ${i + 1} failed: ${err instanceof Error ? err.message : err}`);
+      log.warn(`[readiness:${stage}] Run ${i + 1} failed: ${err instanceof Error ? err.message : err}`);
     }
 
     const ms = Date.now() - t0;
@@ -232,10 +235,10 @@ async function benchmarkService(
     if (i === 0 || (i + 1) % 3 === 0 || i === maxRuns - 1) {
       broadcastWs({ type: 'gpu:readiness', stage, phase: 'benchmarking', run: i + 1, totalRuns: maxRuns, latencyMs: ms, bestLatencyMs: bestMs, targetMs });
     }
-    console.log(`[readiness:${stage}] Run ${i + 1}/${maxRuns}: ${ms}ms (best: ${bestMs}ms, target: ${targetMs}ms)`);
+    log.log(`[readiness:${stage}] Run ${i + 1}/${maxRuns}: ${ms}ms (best: ${bestMs}ms, target: ${targetMs}ms)`);
 
     if (bestMs <= targetMs) {
-      console.log(`[readiness:${stage}] Target hit on run ${i + 1} — PASS ✓`);
+      log.log(`[readiness:${stage}] Target hit on run ${i + 1} — PASS ✓`);
       return { passed: true, bestMs, samples };
     }
   }
@@ -271,7 +274,7 @@ export async function runGpuReadinessCheck(
       const { prisma } = await import('./state');
       const rep = await prisma.hostReputation.findUnique({ where: { hostKey } });
       if (rep && rep.successCount >= 5 && rep.reputationScore >= 0.8 && rep.crashCount === 0) {
-        console.log(`[readiness] Fast-track: host ${hostKey} has ${rep.successCount} successes, score=${rep.reputationScore.toFixed(2)} — skipping benchmark, entering shadow mode`);
+        log.log(`[readiness] Fast-track: host ${hostKey} has ${rep.successCount} successes, score=${rep.reputationScore.toFixed(2)} — skipping benchmark, entering shadow mode`);
         for (const stage of ['stt', 'llm', 'tts'] as const) {
           setServiceReadiness(stage, { phase: 'ready', bestLatencyMs: rep.avgLatencyMs, targetMs: targets[stage] });
         }
@@ -281,9 +284,9 @@ export async function runGpuReadinessCheck(
         return;
       }
     }
-  } catch (e) { console.warn('[readiness] Fast-track check failed:', e instanceof Error ? e.message : e); }
+  } catch (e) { log.warn('[readiness] Fast-track check failed:', e instanceof Error ? e.message : e); }
 
-  console.log(`[readiness] Starting per-service benchmark (max ${maxRuns} runs, ${marginPct}% margin):`,
+  log.log(`[readiness] Starting per-service benchmark (max ${maxRuns} runs, ${marginPct}% margin):`,
     `STT<${targets.stt}ms LLM<${targets.llm}ms TTS<${targets.tts}ms`);
 
   broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'benchmarking', targets, maxRuns });
@@ -320,19 +323,19 @@ export async function runGpuReadinessCheck(
         if (llmResult.passed && llmResult.bestMs < Infinity) {
           await updateHostLatency(deployState.provider, deployState.gpuType, llmResult.bestMs, 'llm', deployState.providerMeta);
         }
-        console.log(`[readiness] Fed benchmark results into reputation: STT=${sttResult.bestMs}ms LLM=${llmResult.bestMs}ms`);
-      } catch (e) { console.warn('[readiness] Reputation update failed:', e instanceof Error ? e.message : e); }
+        log.log(`[readiness] Fed benchmark results into reputation: STT=${sttResult.bestMs}ms LLM=${llmResult.bestMs}ms`);
+      } catch (e) { log.warn('[readiness] Reputation update failed:', e instanceof Error ? e.message : e); }
     }
 
     // Progressive relaxation: try 15% more lenient target before repechage
     if (!sttResult.passed && sttResult.bestMs <= targets.stt * 1.15) {
       const relaxedTarget = Math.round(targets.stt * 1.15);
-      console.log(`[readiness:stt] Relaxing target ${targets.stt}ms → ${relaxedTarget}ms (best was ${sttResult.bestMs}ms)`);
+      log.log(`[readiness:stt] Relaxing target ${targets.stt}ms → ${relaxedTarget}ms (best was ${sttResult.bestMs}ms)`);
       setServiceReadiness('stt', { phase: 'ready', bestLatencyMs: sttResult.bestMs });
       broadcastWs({ type: 'gpu:readiness', stage: 'stt', phase: 'ready', bestLatencyMs: sttResult.bestMs, targetMs: relaxedTarget, passed: true, runsUsed: sttResult.samples.length });
       // Continue to LLM check instead of repechage
     } else if (!sttResult.passed) {
-      console.warn(`[readiness:stt] FAIL — best=${sttResult.bestMs}ms target=${targets.stt}ms`);
+      log.warn(`[readiness:stt] FAIL — best=${sttResult.bestMs}ms target=${targets.stt}ms`);
       if (deployState.endpoint === endpoint) {
         scheduleRepechage(endpoint, onPass, onFail);
         onFail('stt', sttResult.bestMs, targets.stt);
@@ -344,12 +347,12 @@ export async function runGpuReadinessCheck(
     // Progressive relaxation: try 15% more lenient target before repechage
     if (!llmResult.passed && llmResult.bestMs <= targets.llm * 1.15) {
       const relaxedTarget = Math.round(targets.llm * 1.15);
-      console.log(`[readiness:llm] Relaxing target ${targets.llm}ms → ${relaxedTarget}ms (best was ${llmResult.bestMs}ms)`);
+      log.log(`[readiness:llm] Relaxing target ${targets.llm}ms → ${relaxedTarget}ms (best was ${llmResult.bestMs}ms)`);
       setServiceReadiness('llm', { phase: 'ready', bestLatencyMs: llmResult.bestMs });
       broadcastWs({ type: 'gpu:readiness', stage: 'llm', phase: 'ready', bestLatencyMs: llmResult.bestMs, targetMs: relaxedTarget, passed: true, runsUsed: llmResult.samples.length });
       // Continue to TTS check instead of repechage
     } else if (!llmResult.passed) {
-      console.warn(`[readiness:llm] FAIL — best=${llmResult.bestMs}ms target=${targets.llm}ms`);
+      log.warn(`[readiness:llm] FAIL — best=${llmResult.bestMs}ms target=${targets.llm}ms`);
       if (deployState.endpoint === endpoint) {
         scheduleRepechage(endpoint, onPass, onFail);
         onFail('llm', llmResult.bestMs, targets.llm);
@@ -363,7 +366,7 @@ export async function runGpuReadinessCheck(
       // Pre-warm TTS: absorb CUDA graph compilation (~11-30s) before the latency benchmark.
       // Without this, the first TTS inference always misses the target (300ms vs 11s cold start).
       if (!isStageWarm('tts')) {
-        console.log('[readiness:tts] Pre-warming TTS (CUDA graph compilation)...');
+        log.log('[readiness:tts] Pre-warming TTS (CUDA graph compilation)...');
         broadcastWs({ type: 'gpu:readiness', stage: 'tts', phase: 'warming' });
         const warmStart = Date.now();
         try {
@@ -374,12 +377,12 @@ export async function runGpuReadinessCheck(
             signal: AbortSignal.timeout(60_000),
           });
           if (res.ok) {
-            console.log(`[readiness:tts] TTS pre-warm done in ${Date.now() - warmStart}ms`);
+            log.log(`[readiness:tts] TTS pre-warm done in ${Date.now() - warmStart}ms`);
           } else {
-            console.warn(`[readiness:tts] TTS pre-warm HTTP ${res.status} — benchmark may fail`);
+            log.warn(`[readiness:tts] TTS pre-warm HTTP ${res.status} — benchmark may fail`);
           }
         } catch (e) {
-          console.warn(`[readiness:tts] TTS pre-warm failed: ${e instanceof Error ? e.message : e}`);
+          log.warn(`[readiness:tts] TTS pre-warm failed: ${e instanceof Error ? e.message : e}`);
         }
       }
 
@@ -394,26 +397,26 @@ export async function runGpuReadinessCheck(
         try {
           const { updateHostLatency } = await import('./metrics');
           await updateHostLatency(deployState.provider, deployState.gpuType, ttsResult.bestMs, 'tts', deployState.providerMeta);
-          console.log(`[readiness] Fed TTS benchmark into reputation: ${ttsResult.bestMs}ms`);
+          log.log(`[readiness] Fed TTS benchmark into reputation: ${ttsResult.bestMs}ms`);
         } catch { /* best-effort: cleanup or optional side-effect */ }
       }
-    })().catch(e => console.warn('[readiness:tts] Background benchmark failed:', e instanceof Error ? e.message : e));
+    })().catch(e => log.warn('[readiness:tts] Background benchmark failed:', e instanceof Error ? e.message : e));
 
     // Don't await ttsBenchmarkPromise — proceed to shadow mode immediately
     // STT + LLM passed — enter shadow mode. Restore persisted shadow progress (survives gateway restart).
     const restoredRuns = loadShadowRuns();
     const initialShadowRuns = restoredRuns > 0 ? restoredRuns : 0;
     if (restoredRuns > 0) {
-      console.log(`[readiness] Restored ${restoredRuns}/${getShadowRuns()} shadow runs from disk`);
+      log.log(`[readiness] Restored ${restoredRuns}/${getShadowRuns()} shadow runs from disk`);
     }
-    console.log(`[readiness] STT + LLM passed → entering shadow mode (${getShadowRuns()} rounds, starting at ${initialShadowRuns})`);
+    log.log(`[readiness] STT + LLM passed → entering shadow mode (${getShadowRuns()} rounds, starting at ${initialShadowRuns})`);
     setGpuShadowMode(true);
     setGpuReadinessState({ shadowPhase: true, shadowCompletedRuns: initialShadowRuns });
     broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'shadow', shadowRuns: getShadowRuns(), shadowCompletedRuns: initialShadowRuns });
     onPass(); // caller (providers.ts) calls markGpuShadowMode()
 
   } catch (err) {
-    console.error('[readiness] Unexpected error:', err instanceof Error ? err.message : err);
+    log.error('[readiness] Unexpected error:', err instanceof Error ? err.message : err);
     broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'failed', error: err instanceof Error ? err.message : String(err) });
   } finally {
     checkInProgress = false;
@@ -434,7 +437,7 @@ function scheduleRepechage(
   // Check max repechage attempts — condemn GPU if exhausted
   const max = getRepechageMaxAttempts();
   if (attempts >= max) {
-    console.warn(`[readiness] Repechage exhausted (${attempts}/${max}) — GPU condemned`);
+    log.warn(`[readiness] Repechage exhausted (${attempts}/${max}) — GPU condemned`);
     for (const stage of ['stt', 'llm', 'tts'] as const) {
       if (gpuReadinessState[stage].phase === 'failed' || gpuReadinessState[stage].phase === 'repechage' || gpuReadinessState[stage].phase === 'degraded') {
         setServiceReadiness(stage, { phase: 'condemned' });
@@ -443,7 +446,7 @@ function scheduleRepechage(
     setGpuReadinessState({ condemned: true });
     broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'condemned', attempts });
     // Condemn GPU — route all traffic to cloud
-    import('./providers').then(p => p.markGpuCondemned()).catch(e => console.warn('[readiness] markGpuCondemned failed:', e instanceof Error ? e.message : e));
+    import('./providers').then(p => p.markGpuCondemned()).catch(e => log.warn('[readiness] markGpuCondemned failed:', e instanceof Error ? e.message : e));
 
     // Auto-recovery: deploy a replacement machine if enabled
     if (getAutoRecoveryEnabled()) {
@@ -453,19 +456,19 @@ function scheduleRepechage(
         const delaySec = getAutoRecoveryDelaySec();
         setGpuReadinessState({ autoRecoveryAttempt: recoveryAttempt + 1 });
         broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery', attempt: recoveryAttempt + 1, maxAttempts: maxRecovery, retryInMs: delaySec * 1000 });
-        console.log(`[readiness] Auto-recovery: deploying replacement in ${delaySec}s (attempt ${recoveryAttempt + 1}/${maxRecovery})`);
+        log.log(`[readiness] Auto-recovery: deploying replacement in ${delaySec}s (attempt ${recoveryAttempt + 1}/${maxRecovery})`);
         autoRecoveryTimer = setTimeout(async () => {
           autoRecoveryTimer = null;
           try {
             const { startAutoRecoveryDeploy } = await import('./gpu-deploy');
             await startAutoRecoveryDeploy();
           } catch (e) {
-            console.error('[readiness] Auto-recovery deploy failed:', e instanceof Error ? e.message : e);
+            log.error('[readiness] Auto-recovery deploy failed:', e instanceof Error ? e.message : e);
             broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery-failed', error: e instanceof Error ? e.message : 'unknown' });
           }
         }, delaySec * 1000);
       } else {
-        console.warn(`[readiness] Auto-recovery exhausted (${recoveryAttempt}/${maxRecovery}) — staying on cloud`);
+        log.warn(`[readiness] Auto-recovery exhausted (${recoveryAttempt}/${maxRecovery}) — staying on cloud`);
         broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery-exhausted', attempts: recoveryAttempt });
       }
     }
@@ -484,7 +487,7 @@ function scheduleRepechage(
 
   const REPECHAGE_DELAY_MS = 120_000; // 2 minutes between retries
   broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'repechage', attempts, retryInMs: REPECHAGE_DELAY_MS });
-  console.log(`[readiness] Entering repechage (attempt ${attempts}/${max}) — retry in ${REPECHAGE_DELAY_MS / 1000}s`);
+  log.log(`[readiness] Entering repechage (attempt ${attempts}/${max}) — retry in ${REPECHAGE_DELAY_MS / 1000}s`);
 
   // Capture pod identity at scheduling time to detect pod replacement
   const podId = deployState.podId;
@@ -493,11 +496,11 @@ function scheduleRepechage(
     repechageTimer = null;
     // Validate both endpoint AND podId to avoid retrying on a different pod
     if (deployState.endpoint !== endpoint || deployState.status !== 'ready' || deployState.podId !== podId) {
-      console.log('[readiness] Repechage cancelled — pod changed');
+      log.log('[readiness] Repechage cancelled — pod changed');
       return;
     }
-    console.log(`[readiness] Repechage retry ${attempts}`);
-    runGpuReadinessCheck(endpoint, onPass, onFail).catch(e => console.warn('[readiness] repechage retry failed:', e instanceof Error ? e.message : e));
+    log.log(`[readiness] Repechage retry ${attempts}`);
+    runGpuReadinessCheck(endpoint, onPass, onFail).catch(e => log.warn('[readiness] repechage retry failed:', e instanceof Error ? e.message : e));
   }, REPECHAGE_DELAY_MS);
 }
 
@@ -532,7 +535,7 @@ export async function runStandbyReadinessCheck(
   const llmTarget = Math.round(getLlmTargetLatencyMs() * margin);
   const sttTarget = Math.round(getSttTargetLatencyMs() * margin);
 
-  console.log(`[standby:readiness] Starting benchmark (max ${maxRuns} runs): LLM<${llmTarget}ms STT<${sttTarget}ms`);
+  log.log(`[standby:readiness] Starting benchmark (max ${maxRuns} runs): LLM<${llmTarget}ms STT<${sttTarget}ms`);
   broadcastWs({ type: 'gpu:standby', status: 'benchmarking', llmTarget, sttTarget });
 
   try {
@@ -552,11 +555,11 @@ export async function runStandbyReadinessCheck(
       return;
     }
 
-    console.log('[standby:readiness] LLM + STT passed — standby ready');
+    log.log('[standby:readiness] LLM + STT passed — standby ready');
     onPass();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error('[standby:readiness] Error:', msg);
+    log.error('[standby:readiness] Error:', msg);
     onFail('internal', 0, 0);
   } finally {
     standbyCheckInProgress = false;
@@ -601,20 +604,20 @@ async function benchmarkStandbyService(
         await res.json();
       }
     } catch (err) {
-      console.warn(`[standby:readiness:${stage}] Run ${i + 1} failed: ${err instanceof Error ? err.message : err}`);
+      log.warn(`[standby:readiness:${stage}] Run ${i + 1} failed: ${err instanceof Error ? err.message : err}`);
     }
 
     const ms = Date.now() - t0;
     if (ms < bestMs) bestMs = ms;
-    console.log(`[standby:readiness:${stage}] Run ${i + 1}/${maxRuns}: ${ms}ms (best: ${bestMs}ms, target: ${targetMs}ms)`);
+    log.log(`[standby:readiness:${stage}] Run ${i + 1}/${maxRuns}: ${ms}ms (best: ${bestMs}ms, target: ${targetMs}ms)`);
 
     if (bestMs <= targetMs) {
-      console.log(`[standby:readiness:${stage}] Target hit on run ${i + 1} — PASS`);
+      log.log(`[standby:readiness:${stage}] Target hit on run ${i + 1} — PASS`);
       return true;
     }
   }
 
-  console.warn(`[standby:readiness:${stage}] FAIL — best=${bestMs}ms target=${targetMs}ms`);
+  log.warn(`[standby:readiness:${stage}] FAIL — best=${bestMs}ms target=${targetMs}ms`);
   return false;
 }
 
@@ -627,7 +630,7 @@ let shadowStartedAt = 0;
 export function recordShadowRun(latencyMs: number, targetMs: number, onProductionReady: () => void): void {
   // Guard: don't mutate shadow state while a readiness check is re-running (race condition fix)
   if (checkInProgress) {
-    console.warn('[readiness] Shadow run skipped: readiness check in progress');
+    log.warn('[readiness] Shadow run skipped: readiness check in progress');
     return;
   }
 
@@ -636,13 +639,13 @@ export function recordShadowRun(latencyMs: number, targetMs: number, onProductio
 
   // Timeout: if shadow mode has been running > 1 hour, reset and re-benchmark
   if (Date.now() - shadowStartedAt > SHADOW_TIMEOUT_MS) {
-    console.warn('[readiness] Shadow mode timeout (>1h) — resetting, will re-benchmark');
+    log.warn('[readiness] Shadow mode timeout (>1h) — resetting, will re-benchmark');
     setGpuShadowMode(false);
     setGpuReadinessState({ shadowPhase: false, shadowCompletedRuns: 0 });
     clearShadowRuns();
     resetPerStageLatencyRings();
     shadowStartedAt = 0;
-    import('./providers').then(p => p._startReadinessCheck(deployState.endpoint)).catch(e => console.error('[readiness] Shadow timeout re-benchmark failed:', e instanceof Error ? e.message : e));
+    import('./providers').then(p => p._startReadinessCheck(deployState.endpoint)).catch(e => log.error('[readiness] Shadow timeout re-benchmark failed:', e instanceof Error ? e.message : e));
     return;
   }
 
@@ -658,10 +661,10 @@ export function recordShadowRun(latencyMs: number, targetMs: number, onProductio
   saveShadowRuns(next); // persist across gateway restarts
 
   broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'shadow', shadowCompletedRuns: next, shadowTotalRuns: targetRuns, latencyMs, passed });
-  console.log(`[readiness] Shadow run ${next}/${targetRuns}: ${latencyMs}ms ${passed ? '✓' : '✗ (reset)'}`);
+  log.log(`[readiness] Shadow run ${next}/${targetRuns}: ${latencyMs}ms ${passed ? '✓' : '✗ (reset)'}`);
 
   if (next >= targetRuns) {
-    console.log('[readiness] Shadow mode complete — GPU activated for production');
+    log.log('[readiness] Shadow mode complete — GPU activated for production');
     setGpuShadowMode(false);
     setGpuReadinessState({ shadowPhase: false });
     clearShadowRuns(); // done — clear persisted state

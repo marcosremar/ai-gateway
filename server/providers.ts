@@ -2,6 +2,7 @@
 // Provider availability flags, instances, registry, profiles, client.
 // gateway-server.ts sets these at startup.
 
+import { createLogger } from '../src/logger';
 import { groqSTT, groqLLM, groqTTS } from '../src/providers/groq';
 import { ollamaSTT, ollamaLLM, OllamaLLMProvider, OllamaSTTProvider } from '../src/providers/ollama';
 import { openaiSTT } from '../src/providers/openai';
@@ -43,6 +44,8 @@ import {
 import { runGpuReadinessCheck, resetReadinessCheck, isReadinessCheckInProgress } from './gpu-readiness';
 import { RUNPOD_ENDPOINT, PROVIDER_CHAIN } from './config';
 import { broadcastProviderStatus } from './ws-state';
+
+const log = createLogger('providers');
 
 // ── Per-provider latency tracking for adaptive routing ─────────────────────
 const providerLatencyTracker: Record<string, { samples: number[]; lastDemotedAt: number }> = {};
@@ -107,7 +110,7 @@ if (groqAvailable) {
   providers.stt!['whisper-large-v3-turbo'] = groqSTT;
   providers.chat!['llama-3.3-70b-versatile'] = groqLLM;
   providers.chat!['llama-3.1-8b-instant'] = groqLLM;
-  console.log(`[gateway] Groq key: ${maskKey(process.env.GROQ_API_KEY!)}`);
+  log.log(`Groq key: ${maskKey(process.env.GROQ_API_KEY!)}`);
 }
 
 export let ollamaLLMProvider: OllamaLLMProvider | null = null;
@@ -120,8 +123,8 @@ if (ollamaAvailable) {
   providers.chat![ollamaModel] = ollamaLLMProvider;
   providers.chat!['llama-3.3-70b-versatile'] = providers.chat!['llama-3.3-70b-versatile'] || ollamaLLMProvider;
   providers.chat!['llama-3.1-8b-instant'] = providers.chat!['llama-3.1-8b-instant'] || ollamaLLMProvider;
-  console.log(`[gateway] Ollama LLM: ${ollamaHost} (model: ${ollamaModel})`);
-  console.log(`[gateway] Whisper STT: ${whisperHost}`);
+  log.log(`Ollama LLM: ${ollamaHost} (model: ${ollamaModel})`);
+  log.log(`Whisper STT: ${whisperHost}`);
 }
 
 // MLX Qwen3-ASR local STT
@@ -132,20 +135,20 @@ if (mlxQwenAvailable) {
   providers.stt!['qwen3-asr'] = mlxQwenProvider;
   providers.stt!['qwen3-asr-0.6b-4bit'] = mlxQwenProvider;
   providers.stt!['qwen3-asr-0.6b'] = mlxQwenProvider;
-  console.log(`[gateway] MLX Qwen3-ASR: ${mlxQwenHost} (local Apple Silicon STT)`);
+  log.log(`MLX Qwen3-ASR: ${mlxQwenHost} (local Apple Silicon STT)`);
 }
 
-if (elevenlabsAvailable) console.log(`[gateway] ElevenLabs key: ${maskKey(process.env.ELEVENLABS_API_KEY!)} (STT: scribe_v2)`);
-if (openaiAvailable) console.log(`[gateway] OpenAI key: ${maskKey(process.env.OPENAI_API_KEY!)} (ensemble STT: gpt-4o-transcribe, embedding fallback: text-embedding-3-small)`);
-if (deepgramAvailable) console.log(`[gateway] Deepgram key: ${maskKey(process.env.DEEPGRAM_API_KEY!)} (ensemble STT: nova-3)`);
-if (fireworksAvailable) console.log(`[gateway] Fireworks key: ${maskKey(process.env.FIREWORKS_API_KEY!)} (ensemble STT: whisper-v3)`);
-if (openrouterAvailable) console.log(`[gateway] OpenRouter key: ${maskKey(process.env.OPENROUTER_API_KEY!)} (embedding fallback 1: qwen3-embedding-0.6b)`);
-if (whisperAvailable && !ollamaAvailable) console.log(`[gateway] Whisper STT (ensemble): ${whisperHost}`);
-console.log(`[gateway] Ensemble STT providers: ${ENSEMBLE_STT_PROVIDERS.join(',') || 'all'}`);
+if (elevenlabsAvailable) log.log(`ElevenLabs key: ${maskKey(process.env.ELEVENLABS_API_KEY!)} (STT: scribe_v2)`);
+if (openaiAvailable) log.log(`OpenAI key: ${maskKey(process.env.OPENAI_API_KEY!)} (ensemble STT: gpt-4o-transcribe, embedding fallback: text-embedding-3-small)`);
+if (deepgramAvailable) log.log(`Deepgram key: ${maskKey(process.env.DEEPGRAM_API_KEY!)} (ensemble STT: nova-3)`);
+if (fireworksAvailable) log.log(`Fireworks key: ${maskKey(process.env.FIREWORKS_API_KEY!)} (ensemble STT: whisper-v3)`);
+if (openrouterAvailable) log.log(`OpenRouter key: ${maskKey(process.env.OPENROUTER_API_KEY!)} (embedding fallback 1: qwen3-embedding-0.6b)`);
+if (whisperAvailable && !ollamaAvailable) log.log(`Whisper STT (ensemble): ${whisperHost}`);
+log.log(`Ensemble STT providers: ${ENSEMBLE_STT_PROVIDERS.join(',') || 'all'}`);
 
 if (!groqAvailable && !ollamaAvailable && !fireworksAvailable) {
   // Must have at least one cloud/local LLM provider
-  console.error('[gateway] No LLM provider configured. Set GROQ_API_KEY, FIREWORKS_API_KEY, or OLLAMA_HOST+PROVIDER_CHAIN=ollama');
+  log.error('No LLM provider configured. Set GROQ_API_KEY, FIREWORKS_API_KEY, or OLLAMA_HOST+PROVIDER_CHAIN=ollama');
   process.exit(1);
 }
 
@@ -168,7 +171,7 @@ if (ollamaAvailable && ollamaLLMProvider) {
   chatFallbackChain.push({ providerId: 'ollama', model: ollamaModel, provider: ollamaLLMProvider });
 }
 providers.chatFallbackChain = chatFallbackChain;
-console.log(`[gateway] LLM fallback chain: ${chatFallbackChain.map(e => e.providerId).join(' → ') || 'none'}`);
+log.log(`LLM fallback chain: ${chatFallbackChain.map(e => e.providerId).join(' → ') || 'none'}`);
 
 // ── AIClient for voice dubbing pipeline ─────────────────────────────────────
 
@@ -205,7 +208,7 @@ registry.register({
   requiresApiKey: false,
   tts: modalTTS,
 });
-console.log('[gateway] Modal TTS registered (Qwen3-TTS, no API key needed)');
+log.log('Modal TTS registered (Qwen3-TTS, no API key needed)');
 
 // Modal SeamlessM4T v2 — ASR + speech/text translation (no API key, serverless GPU)
 registry.register({
@@ -217,7 +220,7 @@ registry.register({
   stt: modalSeamlessSTT,
   llm: modalSeamlessLLM,
 });
-console.log('[gateway] Modal SeamlessM4T v2 registered (STT + translation, no API key needed)');
+log.log('Modal SeamlessM4T v2 registered (STT + translation, no API key needed)');
 
 // Modal Qwen3-ASR + TranslateGemma pipeline — best ASR + translation (no API key)
 registry.register({
@@ -229,7 +232,7 @@ registry.register({
   stt: qwen3asrPipelineSTT,
   llm: qwen3asrPipelineLLM,
 });
-console.log('[gateway] Modal Qwen3-ASR Pipeline registered (STT + LLM translation, no API key needed)');
+log.log('Modal Qwen3-ASR Pipeline registered (STT + LLM translation, no API key needed)');
 
 // Modal Voxtral — Mistral open-weights ASR (no API key, 13 languages, Apache 2.0)
 registry.register({
@@ -240,7 +243,7 @@ registry.register({
   requiresApiKey: false,
   stt: modalVoxtralSTT,
 });
-console.log('[gateway] Modal Voxtral registered (STT, no API key needed)');
+log.log('Modal Voxtral registered (STT, no API key needed)');
 
 // MLX Qwen3-ASR — local Apple Silicon STT (4-bit or fp16, no API key needed)
 if (mlxQwenAvailable && mlxQwenProvider) {
@@ -252,7 +255,7 @@ if (mlxQwenAvailable && mlxQwenProvider) {
     requiresApiKey: false,
     stt: mlxQwenProvider,
   });
-  console.log('[gateway] MLX Qwen3-ASR registered (local STT, Apple Silicon Metal GPU)');
+  log.log('MLX Qwen3-ASR registered (local STT, Apple Silicon Metal GPU)');
 }
 
 // Fireworks AI — STT (ensemble) + LLM (primary when Groq absent)
@@ -266,7 +269,7 @@ if (fireworksAvailable) {
     stt: fireworksSTT,
     llm: fireworksLLM,
   });
-  console.log(`[gateway] Fireworks registered (STT + LLM${groqAvailable ? ', Groq is primary LLM' : ' — Groq absent, Fireworks is primary LLM'})`);
+  log.log(`Fireworks registered (STT + LLM${groqAvailable ? ', Groq is primary LLM' : ' — Groq absent, Fireworks is primary LLM'})`);
 }
 
 // OpenAI STT + TTS
@@ -291,7 +294,7 @@ if (openaiAvailable) {
       ...(openaiTTS ? { tts: openaiTTS } : {}),
     });
   }
-  console.log('[gateway] OpenAI registered (STT: gpt-4o-transcribe, TTS: fallback)');
+  log.log('OpenAI registered (STT: gpt-4o-transcribe, TTS: fallback)');
 }
 
 // ElevenLabs Scribe STT — highest accuracy (2.3% WER)
@@ -304,7 +307,7 @@ if (elevenlabsAvailable) {
     requiresApiKey: true,
     stt: elevenlabsSTT,
   });
-  console.log('[gateway] ElevenLabs Scribe registered (STT)');
+  log.log('ElevenLabs Scribe registered (STT)');
 }
 
 // TTS fallback chain: Modal Qwen3-TTS first (multilingual + voice cloning), Groq fallback, OpenAI backup
@@ -408,9 +411,9 @@ const _snapgpuS3Config: import('../src/gpu-providers/snapgpu-client').SnapgpuS3C
       }
     : undefined;
 if (_snapgpuS3Config)
-  console.log(`[snapgpu] S3 persistence: ${_snapgpuS3Config.endpoint}/${_snapgpuS3Config.bucket}`);
+  log.log(`S3 persistence: ${_snapgpuS3Config.endpoint}/${_snapgpuS3Config.bucket}`);
 else
-  console.log("[snapgpu] S3 not configured — snapshots won't persist cross-host (add SNAPGPU_S3_ENDPOINT to .env)");
+  log.log("S3 not configured — snapshots won't persist cross-host (add SNAPGPU_S3_ENDPOINT to .env)");
 export const snapgpu = new SnapgpuClient({
   registry: _snapgpuRegistry,
   defaultBackend: (process.env.SNAPGPU_DEFAULT_BACKEND as 'vast' | 'runpod') ?? 'vast',
@@ -441,7 +444,7 @@ export function updateActivePipeline(patch: Partial<AIProfile>, reason: string):
     }
   }
   if (changes.length > 0) {
-    console.log(`[profile] ${reason}: ${changes.join(', ')}`);
+    log.log(`${reason}: ${changes.join(', ')}`);
   }
 }
 
@@ -461,7 +464,7 @@ export function markGpuUnhealthy(reason: string): void {
   setGpuShadowMode(false);
   resetReadinessCheck();
   latencyRing.length = 0; setLatencyRingIdx(0); // reset latency data on tier change
-  console.log(`[gpu] Unhealthy: ${reason}`);
+  log.log(`Unhealthy: ${reason}`);
   broadcastProviderStatus('offline', 'cloud', reason);
 
   // Schedule auto-recovery probe (if pod endpoint still exists)
@@ -477,11 +480,11 @@ export function markGpuHealthy(): void {
   const hasWarmthData = gpuModelWarmth.updatedAt > 0;
   // Avoid launching duplicate readiness checks (race condition fix)
   if (isReadinessCheckInProgress()) {
-    console.log('[gpu] Health recovered but readiness check already running — skipping');
+    log.log('Health recovered but readiness check already running — skipping');
   } else if (!hasWarmthData || (isStageWarm('stt') && isStageWarm('llm'))) {
     _startReadinessCheck(deployState.endpoint);
   } else {
-    console.log(`[gpu] Health recovered — STT=${isStageWarm('stt')} LLM=${isStageWarm('llm')}, waiting for warmth`);
+    log.log(`Health recovered — STT=${isStageWarm('stt')} LLM=${isStageWarm('llm')}, waiting for warmth`);
     broadcastProviderStatus('booting', 'cloud', 'GPU ready — waiting for model warmup');
   }
 }
@@ -493,13 +496,13 @@ export function _startReadinessCheck(endpoint: string): void {
     endpoint,
     () => markGpuShadowMode(endpoint), // onPass → shadow mode
     (stage, bestMs, targetMs) => markGpuWarmupFailed(stage, bestMs, targetMs), // onFail → repechage
-  ).catch(err => console.error('[gpu] Readiness check error:', err instanceof Error ? err.message : err));
+  ).catch(err => log.error('Readiness check error: %s', err instanceof Error ? err.message : err));
 }
 
 /** Called when all services pass benchmark → enter shadow mode */
 export function markGpuShadowMode(endpoint: string): void {
   // translationDefaults.gpuEndpoint NOT set yet — cloud still serves
-  console.log('[gpu] Shadow mode active — GPU fires in background, cloud serves users');
+  log.log('Shadow mode active — GPU fires in background, cloud serves users');
   broadcastProviderStatus('booting', 'cloud', 'GPU shadow mode — validating in production');
 }
 
@@ -507,13 +510,13 @@ export function markGpuShadowMode(endpoint: string): void {
 export function markGpuProductionReady(endpoint: string): void {
   updateActivePipeline({ gpuEndpoint: endpoint }, 'markGpuProductionReady');
   setGpuReadyForProduction(true);
-  console.log('[gpu] Production ready — GPU activated');
+  log.log('Production ready — GPU activated');
   broadcastProviderStatus('ready', 'gpu', 'GPU pipeline active');
 }
 
 /** Called when repechage kicks in */
 export function markGpuWarmupFailed(stage: string, bestMs: number, targetMs: number): void {
-  console.warn(`[gpu] Readiness FAIL: ${stage} best=${bestMs}ms target=${targetMs}ms — entering repechage`);
+  log.warn(`Readiness FAIL: ${stage} best=${bestMs}ms target=${targetMs}ms — entering repechage`);
   broadcastProviderStatus('booting', 'cloud', `GPU ${stage} latency ${bestMs}ms > target ${targetMs}ms — repechage`);
 }
 
@@ -521,7 +524,7 @@ export function markGpuWarmupFailed(stage: string, bestMs: number, targetMs: num
 export function markGpuCondemned(): void {
   updateActivePipeline({ gpuEndpoint: undefined }, 'markGpuCondemned');
   setGpuReadyForProduction(false);
-  console.error('[gpu] GPU condemned — repechage exhausted, routing all traffic to cloud');
+  log.error('GPU condemned — repechage exhausted, routing all traffic to cloud');
   broadcastProviderStatus('error', 'cloud', 'GPU condemned — repechage exhausted');
 }
 
@@ -530,7 +533,7 @@ function scheduleGpuRecoveryProbe(): void {
   if (!deployState.endpoint || deployState.status !== 'ready') return;
 
   const delayMs = RECOVERY_INTERVALS_MS[Math.min(recoveryAttempt, RECOVERY_INTERVALS_MS.length - 1)];
-  console.log(`[gpu] Recovery probe scheduled in ${delayMs / 1000}s (attempt ${recoveryAttempt + 1})`);
+  log.log(`Recovery probe scheduled in ${delayMs / 1000}s (attempt ${recoveryAttempt + 1})`);
 
   gpuRecoveryTimer = setTimeout(async () => {
     gpuRecoveryTimer = null;
@@ -542,13 +545,13 @@ function scheduleGpuRecoveryProbe(): void {
         signal: AbortSignal.timeout(3_000),
       });
       if (res.ok) {
-        console.log('[gpu] Recovery probe succeeded — marking healthy');
+        log.log('Recovery probe succeeded — marking healthy');
         markGpuHealthy();
         return;
       }
-      console.log(`[gpu] Recovery probe failed: HTTP ${res.status}`);
+      log.log(`Recovery probe failed: HTTP ${res.status}`);
     } catch (err) {
-      console.log(`[gpu] Recovery probe failed: ${err instanceof Error ? err.message : err}`);
+      log.log(`Recovery probe failed: ${err instanceof Error ? err.message : err}`);
     }
 
     // Schedule next attempt with backoff
@@ -617,7 +620,7 @@ export function recordStageFailure(stage: 'stt' | 'llm' | 'tts'): void {
   b.failures++;
   if (b.failures >= BREAKER_FAILURE_THRESHOLD) {
     b.openUntil = Date.now() + BREAKER_RECOVERY_MS;
-    console.warn(`[breaker] GPU ${stage} circuit OPEN — ${b.failures} consecutive failures, skipping for ${BREAKER_RECOVERY_MS / 1000}s`);
+    log.warn(`GPU ${stage} circuit OPEN — ${b.failures} consecutive failures, skipping for ${BREAKER_RECOVERY_MS / 1000}s`);
   }
 }
 
@@ -628,7 +631,7 @@ export function isStageCircuitClosed(stage: 'stt' | 'llm' | 'tts'): boolean {
     // Recovery timeout elapsed — allow one probe (half-open)
     b.openUntil = 0;
     b.failures = 0;
-    console.log(`[breaker] GPU ${stage} circuit CLOSED (recovery timeout elapsed)`);
+    log.log(`GPU ${stage} circuit CLOSED (recovery timeout elapsed)`);
     return true;
   }
   return false;
@@ -827,7 +830,7 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
   }
 
   if (added.length || removed.length) {
-    console.log(`[providers] Reloaded: +${added.join(',') || 'none'} -${removed.join(',') || 'none'}`);
+    log.log(`Reloaded: +${added.join(',') || 'none'} -${removed.join(',') || 'none'}`);
   }
 
   return { added, removed };

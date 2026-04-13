@@ -346,7 +346,7 @@ export function loadProviderConfig(): ProviderConfig {
       pipelineTts: Array.isArray(data.pipelineTts) && data.pipelineTts.length > 0
         ? [...data.pipelineTts] : [...DEFAULT_CONFIG.pipelineTts],
       idleTimeoutMin: typeof data.idleTimeoutMin === 'number' ? data.idleTimeoutMin : 15,
-      updatedAt: data.updatedAt ?? 0,
+      updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : 0,
     };
     // Migrate legacy service fields in apps
     for (const app of config.apps) {

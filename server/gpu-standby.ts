@@ -7,6 +7,9 @@
 // Flow: trigger → deploy standby → readiness benchmark → ready → handover
 // Handover: drain primary (wait activeRequests=0, max 30s) → promote standby → terminate old
 
+import { createLogger } from '../src/logger';
+const log = createLogger('gpu-standby');
+
 import {
   deployState,
   standbyDeployState, setStandbyDeployState, resetStandbyDeployState,
@@ -38,7 +41,7 @@ const STANDBY_MONITOR_INTERVAL_MS = 60_000; // check every 60s
 export function startStandbyMonitor(): void {
   stopStandbyMonitor();
   standbyMonitorTimer = setInterval(checkStandbyTriggers, STANDBY_MONITOR_INTERVAL_MS);
-  console.log('[standby] Monitor started');
+  log.log('[standby] Monitor started');
 }
 
 export function stopStandbyMonitor(): void {
@@ -53,9 +56,9 @@ function checkStandbyTriggers(): void {
   // Trigger 1: session duration
   const sessionHours = (Date.now() - deployState.startedAt) / 3_600_000;
   if (sessionHours >= getStandbyTriggerHours()) {
-    console.log(`[standby] Auto-trigger: session running ${sessionHours.toFixed(1)}h (threshold ${getStandbyTriggerHours()}h)`);
+    log.log(`[standby] Auto-trigger: session running ${sessionHours.toFixed(1)}h (threshold ${getStandbyTriggerHours()}h)`);
     triggerStandbyDeploy('session_duration').catch(err =>
-      console.error('[standby] Auto-trigger failed:', err instanceof Error ? err.message : err),
+      log.error('[standby] Auto-trigger failed:', err instanceof Error ? err.message : err),
     );
     return;
   }
@@ -64,9 +67,9 @@ function checkStandbyTriggers(): void {
   const p95 = getP95Latency();
   const targetMs = getLlmTargetLatencyMs();
   if (p95 !== null && p95 > targetMs * 2) {
-    console.log(`[standby] Auto-trigger: P95=${p95}ms > 2× target (${targetMs * 2}ms)`);
+    log.log(`[standby] Auto-trigger: P95=${p95}ms > 2× target (${targetMs * 2}ms)`);
     triggerStandbyDeploy('latency_degradation').catch(err =>
-      console.error('[standby] Auto-trigger failed:', err instanceof Error ? err.message : err),
+      log.error('[standby] Auto-trigger failed:', err instanceof Error ? err.message : err),
     );
   }
 }
@@ -82,7 +85,7 @@ export async function triggerStandbyDeploy(reason: 'manual' | 'session_duration'
   standbyDeployInProgress = true;
   setStandbyDeployState({ status: 'deploying', triggeredReason: reason, startedAt: Date.now(), message: 'Starting standby deploy...' });
   broadcastWs({ type: 'gpu:standby', status: 'deploying', reason });
-  console.log(`[standby] Deploy triggered: reason=${reason}, image=${deployState.dockerImage}, gpu=${deployState.gpuType}`);
+  log.log(`[standby] Deploy triggered: reason=${reason}, image=${deployState.dockerImage}, gpu=${deployState.gpuType}`);
 
   try {
     // Temporarily route setDeployState writes to standbyDeployState
@@ -118,7 +121,7 @@ export async function triggerStandbyDeploy(reason: 'manual' | 'session_duration'
       throw new Error('Deploy completed but no endpoint in standby state');
     }
 
-    console.log(`[standby] Pod deployed at ${standbyEndpoint} — running readiness benchmark`);
+    log.log(`[standby] Pod deployed at ${standbyEndpoint} — running readiness benchmark`);
     setStandbyDeployState({ status: 'benchmarking', message: 'Running readiness benchmark...' });
     broadcastWs({ type: 'gpu:standby', status: 'benchmarking', endpoint: standbyEndpoint });
 
@@ -130,7 +133,7 @@ export async function triggerStandbyDeploy(reason: 'manual' | 'session_duration'
         setStandbyDeployState({ status: 'ready', message: 'Ready for handover' });
         setStandbyReadyForHandover(true);
         setStandbyGpuHealthy(true);
-        console.log('[standby] Benchmark PASSED — standby ready for handover');
+        log.log('[standby] Benchmark PASSED — standby ready for handover');
         broadcastWs({ type: 'gpu:standby', status: 'ready', endpoint: standbyEndpoint });
       },
       (stage, bestMs, targetMs) => {
@@ -138,13 +141,13 @@ export async function triggerStandbyDeploy(reason: 'manual' | 'session_duration'
         setStandbyReadyForHandover(false);
         setStandbyGpuHealthy(false);
         broadcastWs({ type: 'gpu:standby', status: 'error', reason: `Readiness failed: ${stage}` });
-        console.warn(`[standby] Benchmark FAILED: ${stage} ${bestMs}ms > ${targetMs}ms`);
+        log.warn(`[standby] Benchmark FAILED: ${stage} ${bestMs}ms > ${targetMs}ms`);
       },
     );
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error('[standby] Deploy failed:', msg);
+    log.error('[standby] Deploy failed:', msg);
     setStandbyDeployState({ status: 'error', message: msg });
     broadcastWs({ type: 'gpu:standby', status: 'error', reason: msg });
     // Reset to idle after 30s so deploys aren't permanently blocked
@@ -183,7 +186,7 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
   const oldProvider = deployState.provider;
   const standbyEndpoint = standbyDeployState.endpoint;
 
-  console.log(`[standby] Handover initiated: ${oldEndpoint} → ${standbyEndpoint}`);
+  log.log(`[standby] Handover initiated: ${oldEndpoint} → ${standbyEndpoint}`);
   setStandbyDeployState({ status: 'handover', message: 'Handover in progress — draining primary...' });
   broadcastWs({ type: 'gpu:standby', status: 'handover', from: oldEndpoint, to: standbyEndpoint });
 
@@ -203,9 +206,9 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
       await new Promise(r => setTimeout(r, 200));
     }
     if (activeRequests > 0) {
-      console.warn(`[standby] Drain timeout after ${drainTimeout}ms (${activeRequests} requests still active) — force switching`);
+      log.warn(`[standby] Drain timeout after ${drainTimeout}ms (${activeRequests} requests still active) — force switching`);
     } else {
-      console.log(`[standby] Primary drained (${Date.now() - drainStart}ms)`);
+      log.log(`[standby] Primary drained (${Date.now() - drainStart}ms)`);
     }
 
     // Promote standby to primary
@@ -229,15 +232,15 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
     setStandbyGpuHealthy(false);
     setStandbyReadyForHandover(false);
 
-    console.log('[standby] Primary promoted from standby — terminating old pod');
+    log.log('[standby] Primary promoted from standby — terminating old pod');
     broadcastWs({ type: 'gpu:standby', status: 'idle', message: 'Handover complete' });
 
     // Terminate old pod with retry to prevent dual billing
     terminateOldPod(oldPodId, oldProvider).catch(async (err) => {
-      console.warn('[standby] Old pod termination failed, retrying in 10s:', err instanceof Error ? err.message : err);
+      log.warn('[standby] Old pod termination failed, retrying in 10s:', err instanceof Error ? err.message : err);
       await new Promise(r => setTimeout(r, 10_000));
       terminateOldPod(oldPodId, oldProvider).catch(err2 =>
-        console.error('[standby] Old pod termination retry failed — MANUAL CLEANUP NEEDED:', oldPodId, err2 instanceof Error ? err2.message : err2),
+        log.error('[standby] Old pod termination retry failed — MANUAL CLEANUP NEEDED:', oldPodId, err2 instanceof Error ? err2.message : err2),
       );
     });
 
@@ -245,7 +248,7 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
     return { ok: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error('[standby] Handover failed:', msg);
+    log.error('[standby] Handover failed:', msg);
     setStandbyDeployState({ status: 'error', message: `Handover failed: ${msg}` });
     broadcastWs({ type: 'gpu:standby', status: 'error', reason: msg });
     return { ok: false, error: msg };
@@ -265,9 +268,9 @@ async function terminateOldPod(podId: string, provider: string): Promise<void> {
     } else if (provider === 'tensordock' && deployTensordockApiKey) {
       await tensordock.deleteInstance(podId, { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId });
     }
-    console.log(`[standby] Old pod ${podId} terminated`);
+    log.log(`[standby] Old pod ${podId} terminated`);
   } catch (err) {
-    console.warn(`[standby] Failed to terminate old pod ${podId}:`, err instanceof Error ? err.message : err);
+    log.warn(`[standby] Failed to terminate old pod ${podId}:`, err instanceof Error ? err.message : err);
   }
 }
 
@@ -282,8 +285,8 @@ export async function cancelStandby(): Promise<void> {
   setDeployTarget('primary'); // ensure primary target is restored
   standbyDeployInProgress = false;
   broadcastWs({ type: 'gpu:standby', status: 'idle', message: 'Standby cancelled' });
-  console.log('[standby] Cancelled');
+  log.log('[standby] Cancelled');
   if (podId) {
-    terminateOldPod(podId, provider).catch(e => console.warn('[standby] old pod termination failed:', e instanceof Error ? e.message : e));
+    terminateOldPod(podId, provider).catch(e => log.warn('[standby] old pod termination failed:', e instanceof Error ? e.message : e));
   }
 }

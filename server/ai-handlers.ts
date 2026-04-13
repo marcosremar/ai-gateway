@@ -6,6 +6,9 @@
 // parallel and take the fastest response. This eliminates the 5-30s worst-case
 // latency from sequential GPU→cloud fallback.
 
+import { createLogger } from '../src/logger';
+const log = createLogger('ai-handlers');
+
 // ── Hybrid Routing Engine ──────────────────────────────────────────────────
 interface RoutingCondition {
   name: string;
@@ -155,7 +158,7 @@ class HybridRouter {
       costEstimate: this.estimateCost(best.provider)
     };
 
-    console.log(`[hybrid-router] ${pipelineType} → ${decision.provider}/${decision.model} (${decision.confidence.toFixed(2)}) - ${decision.reason}`);
+    log.log(`[hybrid-router] ${pipelineType} → ${decision.provider}/${decision.model} (${decision.confidence.toFixed(2)}) - ${decision.reason}`);
     return decision;
   }
 
@@ -219,7 +222,7 @@ class HybridRouter {
       (latencyMs < 500 ? 'excellent' : latencyMs < 1500 ? 'good' : 'slow') :
       'failed';
 
-    console.log(`[hybrid-router] Performance update: ${provider} ${performance} (${latencyMs}ms) for ${pipelineType}`);
+    log.log(`[hybrid-router] Performance update: ${provider} ${performance} (${latencyMs}ms) for ${pipelineType}`);
 
     // Future enhancement: reinforcement learning to adjust weights dynamically
     // For now, simply log for monitoring and manual optimization
@@ -399,7 +402,7 @@ setInterval(() => {
       swept++;
     }
   }
-  if (swept > 0) console.log(`[cache] Swept ${swept} expired translation entries`);
+  if (swept > 0) log.log(`[cache] Swept ${swept} expired translation entries`);
 }, 5 * 60_000);
 
 export function getCachedTranslation(text: string, srcLang: string, tgtLang: string, style = 'default'): string | null {
@@ -457,10 +460,10 @@ export function forwardToAvatar(audioBase64: string): void {
     body: JSON.stringify({ audio: audioBase64 }),
     signal: AbortSignal.timeout(3_000),
   }).then(res => {
-    if (!res.ok) console.warn(`[avatar] speak failed: ${res.status}`);
+    if (!res.ok) log.warn(`[avatar] speak failed: ${res.status}`);
   }).catch(err => {
     // Silently ignore — avatar may not be running
-    console.debug?.(`[avatar] forward failed: ${(err as Error).message}`);
+    log.debug(`[avatar] forward failed: ${(err as Error).message}`);
   });
 }
 
@@ -478,7 +481,7 @@ function logRouteDecision(stage: string, candidates: { name: string }[], gpuEndp
     const p95 = getP95Latency();
     note = ` [gpu:backup,p95=${p95 !== null ? p95 + 'ms' : 'no-data'}]`;
   }
-  console.log(`[${stage}] route: ${names}${note}`);
+  log.log(`[${stage}] route: ${names}${note}`);
 }
 
 // ── GPU fetch helpers (shared by hedging candidates) ─────────────────────────
@@ -513,7 +516,7 @@ export async function fetchGpuSTT(
     });
     if (!gpuRes.ok) {
       const errBody = await gpuRes.text().catch(() => '');
-      console.warn(`[gpu:stt] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
+      log.warn(`[gpu:stt] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
       throw new Error(`GPU STT HTTP ${gpuRes.status}`);
     }
     const data = await gpuRes.json() as Record<string, unknown>;
@@ -556,7 +559,7 @@ export async function fetchGpuLLM(
     });
     if (!gpuRes.ok) {
       const errBody = await gpuRes.text().catch(() => '');
-      console.warn(`[gpu:llm] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
+      log.warn(`[gpu:llm] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
       throw new Error(`GPU LLM HTTP ${gpuRes.status}`);
     }
     const data = await gpuRes.json() as Record<string, unknown>;
@@ -597,7 +600,7 @@ export async function fetchGpuTTS(
     });
     if (!gpuRes.ok) {
       const errBody = await gpuRes.text().catch(() => '');
-      console.warn(`[gpu:tts] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
+      log.warn(`[gpu:tts] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
       throw new Error(`GPU TTS HTTP ${gpuRes.status}`);
     }
     const audio = Buffer.from(await gpuRes.arrayBuffer());
@@ -669,7 +672,7 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
         recordPerStageLatency('stt', ms);
         recordShadowRun(ms, shadowTarget, () => markGpuProductionReady(shadowEndpoint));
       })
-      .catch(e => console.warn('[shadow] STT run failed:', e instanceof Error ? e.message : e)); // ignore shadow errors
+      .catch(e => log.warn('[shadow] STT run failed:', e instanceof Error ? e.message : e)); // ignore shadow errors
   }
 
   // Build race candidates: GPU (if available) + cloud providers
@@ -739,7 +742,7 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
     });
 
     if (provider === 'gpu') { recordGpuLatency(latencyMs); recordPerStageLatency('stt', latencyMs); }
-    if (result.text) console.log(`[${provider}] STT: ${result.text.slice(0, 100)}`);
+    if (result.text) log.log(`[${provider}] STT: ${result.text.slice(0, 100)}`);
     logRequest({ timestamp: Date.now(), stage: 'stt', provider: provider as 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid', latencyMs, success: true, inputSize: audio.length, outputPreview: result.text.slice(0, 80) });
 
     const resp: Record<string, unknown> = { text: result.text, language: result.language, used_gpu: result.used_gpu, avg_logprob: result.avg_logprob };
@@ -749,7 +752,7 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
     res.end(JSON.stringify(resp));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[gateway] All STT providers failed: ${msg}`);
+    log.error(`[gateway] All STT providers failed: ${msg}`);
     logRequest({ timestamp: Date.now(), stage: 'stt', provider: getCloudProviderName(), latencyMs: Date.now() - t0, success: false, error: msg, inputSize: audio.length });
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'All providers failed for STT', text: '' }));
@@ -781,7 +784,7 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
   catch (e) {
     if (e instanceof BodyTimeoutError) { res.writeHead(408, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Request Timeout' })); return; }
     const msg = e instanceof Error ? e.message : String(e);
-    console.error('[ensemble] Body read error:', msg);
+    log.error('[ensemble] Body read error:', msg);
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Invalid request body' }));
     return;
@@ -843,14 +846,14 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
     const filterResult = filterHallucinations(sttResponse, language, filterConfig);
 
     if (filterResult.filtered) {
-      console.log(`[ensemble] Hallucination filter: "${result.consensus.slice(0, 60)}" → "${filterResult.text.slice(0, 60)}" [${filterResult.reasons.join('; ')}]`);
+      log.log(`[ensemble] Hallucination filter: "${result.consensus.slice(0, 60)}" → "${filterResult.text.slice(0, 60)}" [${filterResult.reasons.join('; ')}]`);
       result.consensus = filterResult.text;
     }
 
     const methodTag = result.similarity_method === 'embedding'
       ? `embed(${result.embedding_provider ?? '?'})`
       : 'jaccard';
-    console.log(`[ensemble] ${Object.keys(result.providers).join('+')} [${methodTag}] → ${result.latency_ms}ms: "${result.consensus.slice(0, 80)}"`);
+    log.log(`[ensemble] ${Object.keys(result.providers).join('+')} [${methodTag}] → ${result.latency_ms}ms: "${result.consensus.slice(0, 80)}"`);
     logRequest({ timestamp: Date.now(), stage: 'stt', provider: 'ensemble', latencyMs: result.latency_ms, success: true, inputSize: audio.length, outputPreview: result.consensus.slice(0, 80) });
 
     // Include filter metadata in response for Python client
@@ -863,7 +866,7 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const latencyMs = Date.now() - t0;
-    console.error(`[ensemble] Failed (${latencyMs}ms):`, msg);
+    log.error(`[ensemble] Failed (${latencyMs}ms):`, msg);
     logRequest({ timestamp: Date.now(), stage: 'stt', provider: 'ensemble', latencyMs, success: false, error: msg, inputSize: audio.length });
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Internal server error', providers: {} }));
@@ -880,7 +883,7 @@ export async function handleTtsPreview(req: IncomingMessage, res: ServerResponse
 
   let body: { text?: string; speaker?: string; language?: string; reference_audio?: string; ref_text?: string };
   try { body = await readJsonBody(req) as typeof body; }
-  catch (err) { console.warn('[tts-preview] Invalid JSON body:', err instanceof Error ? err.message : err); res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
+  catch (err) { log.warn('[tts-preview] Invalid JSON body:', err instanceof Error ? err.message : err); res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
 
   const text = body.text?.trim() || '';
   if (!text) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'text is required' })); return; }
@@ -908,12 +911,12 @@ export async function handleTtsPreview(req: IncomingMessage, res: ServerResponse
       });
       if (!gpuRes.ok) {
         const errText = await gpuRes.text().catch(() => '');
-        console.warn(`[tts] preview GPU failed (${gpuRes.status}): ${errText.slice(0, 120)}, falling back to Modal`);
+        log.warn(`[tts] preview GPU failed (${gpuRes.status}): ${errText.slice(0, 120)}, falling back to Modal`);
         // Fall through to Modal fallback below
       } else {
         const audio = Buffer.from(await gpuRes.arrayBuffer());
         const latencyMs = Date.now() - t0;
-        console.log(`[tts] preview [gpu${isCloneRequest ? '/clone' : ''}]: speaker=${speaker} lang=${language} ${audio.length}B ${latencyMs}ms`);
+        log.log(`[tts] preview [gpu${isCloneRequest ? '/clone' : ''}]: speaker=${speaker} lang=${language} ${audio.length}B ${latencyMs}ms`);
         res.writeHead(200, { 'Content-Type': 'audio/wav' });
         res.end(audio);
         return;
@@ -922,7 +925,7 @@ export async function handleTtsPreview(req: IncomingMessage, res: ServerResponse
 
     // Clone requests: route to Modal Qwen3-TTS via ai-gateway provider (only one that supports cloning)
     if (isCloneRequest) {
-      console.log(`[tts] voice clone → Modal Qwen3-TTS (ref_text="${refText.slice(0, 40)}...")`);
+      log.log(`[tts] voice clone → Modal Qwen3-TTS (ref_text="${refText.slice(0, 40)}...")`);
       const result = await modalTTS.synthesize({
         input: text,
         model: 'qwen3-tts',
@@ -931,14 +934,14 @@ export async function handleTtsPreview(req: IncomingMessage, res: ServerResponse
         refText: refText,
       });
       const latencyMs = Date.now() - t0;
-      console.log(`[tts] preview [modal/clone]: speaker=${speaker} lang=${language} ${result.audio.length}B ${latencyMs}ms`);
+      log.log(`[tts] preview [modal/clone]: speaker=${speaker} lang=${language} ${result.audio.length}B ${latencyMs}ms`);
       res.writeHead(200, { 'Content-Type': result.contentType || 'audio/wav' });
       res.end(result.audio);
       return;
     }
 
     // Non-clone fallback: use cloud TTS chain (Groq Orpheus → Modal Qwen3-TTS → OpenAI)
-    console.log(`[tts] preview: no GPU, using cloud fallback`);
+    log.log(`[tts] preview: no GPU, using cloud fallback`);
     const result = await client.synthesize(text, {
       ...translationDefaults,
       gpuEndpoint: undefined,
@@ -946,11 +949,11 @@ export async function handleTtsPreview(req: IncomingMessage, res: ServerResponse
       audioFormat: 'wav',
     });
     const latencyMs = Date.now() - t0;
-    console.log(`[tts] preview [cloud]: speaker=${speaker} lang=${language} ${result.audio.length}B ${latencyMs}ms`);
+    log.log(`[tts] preview [cloud]: speaker=${speaker} lang=${language} ${result.audio.length}B ${latencyMs}ms`);
     res.writeHead(200, { 'Content-Type': result.contentType || 'audio/wav' });
     res.end(result.audio);
   } catch (err) {
-    console.error('[tts] preview error:', err instanceof Error ? err.message : err);
+    log.error('[tts] preview error:', err instanceof Error ? err.message : err);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Internal server error' }));
   }
@@ -982,7 +985,7 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
   // Check translation cache first (avoids redundant LLM calls for repeated phrases)
   const cached = getCachedTranslation(text, sourceLang, targetLang, style);
   if (cached !== null) {
-    console.log(`[llm] Cache hit: '${text.slice(0, 50)}' -> '${cached.slice(0, 50)}'`);
+    log.log(`[llm] Cache hit: '${text.slice(0, 50)}' -> '${cached.slice(0, 50)}'`);
     logRequest({ timestamp: Date.now(), stage: 'llm', provider: 'cache', latencyMs: 0, success: true, inputSize: text.length, outputPreview: cached.slice(0, 80) });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ translated_text: cached, used_gpu: false }));
@@ -1021,7 +1024,7 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
         recordPerStageLatency('llm', ms);
         recordShadowRun(ms, shadowTarget, () => markGpuProductionReady(shadowEndpoint));
       })
-      .catch(e => console.warn('[shadow] LLM run failed:', e instanceof Error ? e.message : e)); // ignore shadow errors
+      .catch(e => log.warn('[shadow] LLM run failed:', e instanceof Error ? e.message : e)); // ignore shadow errors
   }
 
   // Build race candidates: GPU (if available) + cloud providers
@@ -1078,14 +1081,14 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
     // Cache the result for future identical requests
     if (result.translated_text) {
       setCachedTranslation(text, sourceLang, targetLang, result.translated_text, style);
-      console.log(`[${provider}] Translate: '${text.slice(0, 50)}' -> '${result.translated_text.slice(0, 50)}'`);
+      log.log(`[${provider}] Translate: '${text.slice(0, 50)}' -> '${result.translated_text.slice(0, 50)}'`);
     }
     logRequest({ timestamp: Date.now(), stage: 'llm', provider: provider as 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid', latencyMs, success: true, inputSize: text.length, outputPreview: result.translated_text.slice(0, 80) });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ translated_text: result.translated_text, used_gpu: result.used_gpu }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[gateway] All translation providers failed: ${msg}`);
+    log.error(`[gateway] All translation providers failed: ${msg}`);
     logRequest({ timestamp: Date.now(), stage: 'llm', provider: getCloudProviderName(), latencyMs: Date.now() - t0, success: false, error: msg, inputSize: text.length });
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'All providers failed for translation', translated_text: '' }));
@@ -1203,7 +1206,7 @@ async function _parsePipelineRequest(
     if (cached) {
       referenceAudio = cached.audio;
       refText = cached.text;
-      console.log(`[pipeline] Using cached voice ref ${refId} (${(cached.audio.length/1024).toFixed(0)}KB)`);
+      log.log(`[pipeline] Using cached voice ref ${refId} (${(cached.audio.length/1024).toFixed(0)}KB)`);
     }
   }
   if (!referenceAudio) {
@@ -1218,7 +1221,7 @@ async function _parsePipelineRequest(
   // GPU pod handles cloning directly in the hybrid race (fetchGpuTTS passes reference_audio/ref_text)
   const isCloneRequest = Boolean(referenceAudio && refText);
   if (isCloneRequest) {
-    console.log(`[pipeline] Voice cloning active — TTS: GPU direct + Modal fallback (ref_text='${refText?.slice(0, 50)}...')`);
+    log.log(`[pipeline] Voice cloning active — TTS: GPU direct + Modal fallback (ref_text='${refText?.slice(0, 50)}...')`);
     touchModalKeepalive();
   }
   // Clone-aware TTS chain: Modal first (supports cloning), Groq as fallback (no cloning but has audio)
@@ -1337,7 +1340,7 @@ async function _runSttStage(params: PipelineParams): Promise<SttStageResult> {
   const sttTiming = (sttRace.result as unknown as Record<string, unknown>)['_sttTiming'] as { total_ms: number; server_ms?: number; network_ms?: number } | undefined;
   const sttNetworkMs = sttTiming?.network_ms;
   const sttServerMs = sttTiming?.server_ms;
-  console.log(`[pipeline] STT [${sttRace.provider}] (${sttRace.latencyMs}ms${sttNetworkMs !== undefined ? ` net=${sttNetworkMs}ms srv=${sttServerMs}ms` : ''}): "${(sttRace.result.text || '').substring(0, 80)}"`);
+  log.log(`[pipeline] STT [${sttRace.provider}] (${sttRace.latencyMs}ms${sttNetworkMs !== undefined ? ` net=${sttNetworkMs}ms srv=${sttServerMs}ms` : ''}): "${(sttRace.result.text || '').substring(0, 80)}"`);
 
   return {
     text: sttRace.result.text,
@@ -1360,7 +1363,7 @@ async function _runLlmStage(params: PipelineParams, sttResult: SttStageResult): 
   const cached = getCachedTranslation(sttText, source, target, style);
 
   if (cached !== null) {
-    console.log(`[pipeline] LLM [cache] (0ms): "${cached.substring(0, 80)}"`);
+    log.log(`[pipeline] LLM [cache] (0ms): "${cached.substring(0, 80)}"`);
     // [3] Early subtitle push — send text to WS clients before TTS
     if (cached.trim()) {
       broadcastWs({
@@ -1404,7 +1407,7 @@ async function _runLlmStage(params: PipelineParams, sttResult: SttStageResult): 
   const translatedText = llmRace.result.translated_text;
   const llmProvider = llmRace.provider;
   const llmMs = llmRace.latencyMs;
-  console.log(`[pipeline] LLM [${llmProvider}] (${llmMs}ms): "${(translatedText || '').substring(0, 80)}"`);
+  log.log(`[pipeline] LLM [${llmProvider}] (${llmMs}ms): "${(translatedText || '').substring(0, 80)}"`);
 
   // [2] Cache the translation for future requests
   if (translatedText) {
@@ -1445,10 +1448,10 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
   // GPU TTS: only when circuit is closed AND endpoint exists
   const gpuTtsUsable = ttsGpuEp && isStageCircuitClosed('tts');
   const ttsCircuitOpen = ttsGpuEp && !isStageCircuitClosed('tts');
-  console.log(`[pipeline-tts] Decision: clone=${isCloneRequest} gpuEp=${!!ttsGpuEp} gpuUsable=${!!gpuTtsUsable} circuitOpen=${!!ttsCircuitOpen} ttsOnGpu=${ttsOnGpu}`);
+  log.log(`[pipeline-tts] Decision: clone=${isCloneRequest} gpuEp=${!!ttsGpuEp} gpuUsable=${!!gpuTtsUsable} circuitOpen=${!!ttsCircuitOpen} ttsOnGpu=${ttsOnGpu}`);
 
   if (ttsOnGpu || (isCloneRequest && gpuTtsUsable)) {
-    console.log(`[pipeline-tts] Adding GPU candidate (endpoint=${ttsGpuEp})`);
+    log.log(`[pipeline-tts] Adding GPU candidate (endpoint=${ttsGpuEp})`);
     ttsCandidates.push({
       name: 'gpu', timeoutMs: ttsTimeout,
       run: (signal) => fetchGpuTTS(ttsGpuEp!, translatedText, targetName, speaker || 'Ryan', signal, referenceAudio, refText, requestId),
@@ -1456,12 +1459,12 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
   }
   // Voice cloning: ALWAYS add Modal as candidate (GPU may be dead/circuit-open)
   if (isCloneRequest) {
-    console.log(`[pipeline-tts] Adding Modal clone candidate (ref_audio=${referenceAudio ? `${(referenceAudio.length/1024).toFixed(0)}KB` : 'none'} ref_text=${refText?.length || 0} chars)`);
+    log.log(`[pipeline-tts] Adding Modal clone candidate (ref_audio=${referenceAudio ? `${(referenceAudio.length/1024).toFixed(0)}KB` : 'none'} ref_text=${refText?.length || 0} chars)`);
     ttsCandidates.push({
       name: 'modal', timeoutMs: ttsTimeout,
       run: async (signal) => {
         if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-        console.log(`[pipeline-tts] Modal clone START: "${translatedText.slice(0, 50)}..."`);
+        log.log(`[pipeline-tts] Modal clone START: "${translatedText.slice(0, 50)}..."`);
         try {
           const r = await modalTTS.synthesize({
             input: translatedText,
@@ -1470,10 +1473,10 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
             referenceAudio: referenceAudio,
             refText: refText,
           });
-          console.log(`[pipeline-tts] Modal clone OK: ${r.audio.length} bytes (${r.contentType})`);
+          log.log(`[pipeline-tts] Modal clone OK: ${r.audio.length} bytes (${r.contentType})`);
           return { audio: r.audio, contentType: r.contentType, used_gpu: false };
         } catch (err) {
-          console.error(`[pipeline-tts] Modal clone FAILED: ${err instanceof Error ? err.message : err}`);
+          log.error(`[pipeline-tts] Modal clone FAILED: ${err instanceof Error ? err.message : err}`);
           throw err;
         }
       },
@@ -1486,7 +1489,7 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
         run: (signal) => fetchGpuTTS(MODAL_BABELCAST_URL!, translatedText, targetName, speaker || 'Ryan', signal, undefined, undefined, requestId),
       });
     }
-    console.log(`[pipeline-tts] Adding cloud TTS candidate (${getCloudProviderName()})`);
+    log.log(`[pipeline-tts] Adding cloud TTS candidate (${getCloudProviderName()})`);
     ttsCandidates.push({
       name: getCloudProviderName(), timeoutMs: 8_000,
       run: async (signal) => {
@@ -1503,7 +1506,7 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
   let ttsMs = 0;
   let ttsProvider = '';
 
-  console.log(`[pipeline-tts] Racing ${ttsCandidates.length} candidates: ${ttsCandidates.map(c => c.name).join(', ')}`);
+  log.log(`[pipeline-tts] Racing ${ttsCandidates.length} candidates: ${ttsCandidates.map(c => c.name).join(', ')}`);
   try {
     const ttsRace = await raceProviders(ttsCandidates, { logPrefix: '[pipeline-tts]', headstartMs: 0 });
     audioRaw = Buffer.isBuffer(ttsRace.result.audio) ? ttsRace.result.audio : Buffer.from(ttsRace.result.audio);
@@ -1511,13 +1514,13 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
     contentType = ttsRace.result.contentType;
     ttsProvider = ttsRace.provider;
     ttsMs = ttsRace.latencyMs;
-    console.log(`[pipeline-tts] Winner: ${ttsProvider} (${ttsMs}ms, ${audioB64.length} bytes b64)`);
+    log.log(`[pipeline-tts] Winner: ${ttsProvider} (${ttsMs}ms, ${audioB64.length} bytes b64)`);
   } catch (ttsErr) {
-    console.error(`[pipeline-tts] ALL clone candidates failed: ${ttsErr instanceof Error ? ttsErr.message : ttsErr}`);
+    log.error(`[pipeline-tts] ALL clone candidates failed: ${ttsErr instanceof Error ? ttsErr.message : ttsErr}`);
     // Fallback: use cloud TTS with preset voice (better than silence)
     if (isCloneRequest) {
       try {
-        console.log(`[pipeline-tts] Clone failed — falling back to Groq preset voice`);
+        log.log(`[pipeline-tts] Clone failed — falling back to Groq preset voice`);
         const fallbackT0 = Date.now();
         const r = await client.synthesize(translatedText, { ...cloudProfile, referenceAudio: undefined, refText: undefined, tts: undefined });
         audioRaw = Buffer.isBuffer(r.audio) ? r.audio : Buffer.from(r.audio);
@@ -1525,14 +1528,14 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
         contentType = r.contentType;
         ttsProvider = `${r.provider}/preset-fallback`;
         ttsMs = Date.now() - fallbackT0;
-        console.log(`[pipeline-tts] Fallback OK: ${ttsProvider} (${ttsMs}ms, ${audioB64.length} bytes b64)`);
+        log.log(`[pipeline-tts] Fallback OK: ${ttsProvider} (${ttsMs}ms, ${audioB64.length} bytes b64)`);
       } catch (fbErr) {
-        console.error(`[pipeline-tts] Fallback also failed: ${fbErr instanceof Error ? fbErr.message : fbErr}`);
+        log.error(`[pipeline-tts] Fallback also failed: ${fbErr instanceof Error ? fbErr.message : fbErr}`);
       }
     }
     // TTS optional — subtitles still work without audio
   }
-  console.log(`[pipeline] TTS [${ttsProvider || 'none'}] (${ttsMs}ms): ${audioB64 ? `${audioB64.length} bytes b64` : 'NO AUDIO'}`);
+  log.log(`[pipeline] TTS [${ttsProvider || 'none'}] (${ttsMs}ms): ${audioB64 ? `${audioB64.length} bytes b64` : 'NO AUDIO'}`);
 
   // Track GPU TTS warmth
   if (ttsProvider === 'gpu' && ttsMs > 0) {
@@ -1615,7 +1618,7 @@ async function getRoutingAdvice(url: URL): Promise<RoutingDecision | null> {
 
   // Get routing advice for speech pipeline
   const advice = await pipelineRouter.route('speech');
-  console.log(`[pipeline] Hybrid routing advice: ${advice.reason} (${advice.confidence.toFixed(2)} confidence)`);
+  log.log(`[pipeline] Hybrid routing advice: ${advice.reason} (${advice.confidence.toFixed(2)} confidence)`);
   return advice;
 }
 
@@ -1717,7 +1720,7 @@ export async function handleSystemAnalytics(req: IncomingMessage, res: ServerRes
     res.end(JSON.stringify(response, null, 2));
 
   } catch (error) {
-    console.warn(`[analytics] Failed: ${error}`);
+    log.warn(`[analytics] Failed: ${error}`);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: false,
@@ -1767,7 +1770,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
     ? `STT=${sttOnGpu ? 'gpu' : 'cloud'} LLM=${llmOnGpu ? 'gpu' : 'cloud'} TTS=${ttsOnGpu ? 'gpu' : 'cloud'}${isCloneRequest ? ' (clone→hybrid)' : ''}`
     : 'all=cloud';
   const mode = allOnGpu ? 'atomic-gpu' : anyOnGpu ? 'hybrid' : 'cloud';
-  console.log(`[pipeline] ── Incoming [req=${requestId.slice(0, 8)}]: ${audioDur}s audio (${audioBuffer.length} bytes) ${source}->${target}${speaker ? ` speaker=${speaker}` : ''} mode=${mode} ${stageRoutes} ──`);
+  log.log(`[pipeline] ── Incoming [req=${requestId.slice(0, 8)}]: ${audioDur}s audio (${audioBuffer.length} bytes) ${source}->${target}${speaker ? ` speaker=${speaker}` : ''} mode=${mode} ${stageRoutes} ──`);
 
   // ── Hybrid per-stage pipeline ─────────────────────────────────────────────
   // Optimizations applied:
@@ -1788,9 +1791,9 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
   if ((anyOnGpu && !allOnGpu && gpuEp) || forceHybridForClone || hasModalFallback) {
     // [4] Pre-warm GPU + cloud connections in parallel (via ai-gateway)
     const effectiveGpuEp = gpuEp || cloneGpuEndpoint!;
-    probeGpuHealth(effectiveGpuEp).catch(e => console.warn('[probe] GPU health failed:', e instanceof Error ? e.message : e));
+    probeGpuHealth(effectiveGpuEp).catch(e => log.warn('[probe] GPU health failed:', e instanceof Error ? e.message : e));
     if (groqAvailable && process.env.GROQ_API_KEY) {
-      probeCloudProvider('groq', process.env.GROQ_API_KEY, 2000).catch(e => console.warn('[probe] Groq warmup failed:', e instanceof Error ? e.message : e));
+      probeCloudProvider('groq', process.env.GROQ_API_KEY, 2000).catch(e => log.warn('[probe] Groq warmup failed:', e instanceof Error ? e.message : e));
     }
 
     try {
@@ -1813,7 +1816,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
 
       // ── Build and send response ─────────────────────────────────────────
       const totalMs = Date.now() - pipeT0;
-      console.log(`[pipeline] ── Hybrid done: ${totalMs}ms (STT=${sttResult.latencyMs}[${sttResult.provider}] LLM=${llmResult.latencyMs}[${llmResult.provider}] TTS=${ttsResult.latencyMs}[${ttsResult.provider || '-'}]) ──`);
+      log.log(`[pipeline] ── Hybrid done: ${totalMs}ms (STT=${sttResult.latencyMs}[${sttResult.provider}] LLM=${llmResult.latencyMs}[${llmResult.provider}] TTS=${ttsResult.latencyMs}[${ttsResult.provider || '-'}]) ──`);
       logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: 'hybrid', latencyMs: totalMs, success: true, inputSize: audioBuffer.length, outputPreview: (llmResult.translatedText || '').slice(0, 80) });
       stampAppRequest(loadProviderConfig().activeAppId);
 
@@ -1849,7 +1852,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
       globalTracer.endSpan(traceSpan.spanId);
       return;
     } catch (err) {
-      console.warn(`[pipeline] Hybrid pipeline failed: ${err instanceof Error ? err.message : err}`);
+      log.warn(`[pipeline] Hybrid pipeline failed: ${err instanceof Error ? err.message : err}`);
 
       // Record failure in tracing
       globalTracer.addTag(traceSpan.spanId, 'pipeline.success', false);
@@ -1866,7 +1869,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
 
   // Guard: if hybrid already sent headers (partial response), don't send again
   if (res.headersSent) {
-    console.warn('[pipeline] Headers already sent by hybrid path — cannot fall through to atomic');
+    log.warn('[pipeline] Headers already sent by hybrid path — cannot fall through to atomic');
     if (!res.writableEnded) res.end();
     return;
   }
@@ -1875,7 +1878,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
   const effectiveGpuEndpoint = allOnGpu ? gpuEp : undefined;
   const resolvedVoice = speaker ? resolveVoiceForProfile(speaker, !!effectiveGpuEndpoint) : undefined;
   const ttsChainNames = cloneTtsChain ? cloneTtsChain.map(c => c.provider).join('→') : 'default';
-  console.log(`[pipeline] Atomic path: gpu=${!!effectiveGpuEndpoint} clone=${isCloneRequest} ttsChain=${ttsChainNames} refAudio=${referenceAudio ? `${(referenceAudio.length/1024).toFixed(0)}KB` : 'none'} refText=${refText?.length || 0}ch`);
+  log.log(`[pipeline] Atomic path: gpu=${!!effectiveGpuEndpoint} clone=${isCloneRequest} ttsChain=${ttsChainNames} refAudio=${referenceAudio ? `${(referenceAudio.length/1024).toFixed(0)}KB` : 'none'} refText=${refText?.length || 0}ch`);
   const profile: AIProfile = {
     ...baseProfile,
     gpuEndpoint: effectiveGpuEndpoint,
@@ -1890,7 +1893,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
   // Warm GPU connection while preparing pipeline call (TCP/TLS handshake overlaps)
   if (effectiveGpuEndpoint) {
     validateRemoteEndpoint(effectiveGpuEndpoint);
-    fetch(`${effectiveGpuEndpoint}/health`, { signal: AbortSignal.timeout(2000) }).catch(e => console.warn('[probe] GPU pre-warm failed:', e instanceof Error ? e.message : e));
+    fetch(`${effectiveGpuEndpoint}/health`, { signal: AbortSignal.timeout(2000) }).catch(e => log.warn('[probe] GPU pre-warm failed:', e instanceof Error ? e.message : e));
   }
 
   try {
@@ -1905,10 +1908,10 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
     const serverTotalMs = sttMs + llmMs + ttsMs;
     const networkMs = result.usedGpu ? Math.max(0, result.totalLatencyMs - serverTotalMs) : undefined;
 
-    console.log(`[pipeline] STT (${sttMs}ms): "${(result.stt.text || '').substring(0, 80)}"`);
-    console.log(`[pipeline] LLM (${llmMs}ms): "${(result.chat.content || '').substring(0, 80)}"`);
-    console.log(`[pipeline] TTS (${ttsMs}ms): ${ttsBytes > 0 ? `${ttsBytes} bytes ${result.tts?.contentType || ''}` : 'NO AUDIO'}`);
-    console.log(`[pipeline] ── Done: ${result.totalLatencyMs}ms (STT=${sttMs} LLM=${llmMs} TTS=${ttsMs}${networkMs !== undefined ? ` NET=${networkMs}` : ''}) gpu=${result.usedGpu} ──`);
+    log.log(`[pipeline] STT (${sttMs}ms): "${(result.stt.text || '').substring(0, 80)}"`);
+    log.log(`[pipeline] LLM (${llmMs}ms): "${(result.chat.content || '').substring(0, 80)}"`);
+    log.log(`[pipeline] TTS (${ttsMs}ms): ${ttsBytes > 0 ? `${ttsBytes} bytes ${result.tts?.contentType || ''}` : 'NO AUDIO'}`);
+    log.log(`[pipeline] ── Done: ${result.totalLatencyMs}ms (STT=${sttMs} LLM=${llmMs} TTS=${ttsMs}${networkMs !== undefined ? ` NET=${networkMs}` : ''}) gpu=${result.usedGpu} ──`);
 
     // Track GPU TTS warmth: if GPU handled TTS, record the latency and mark warm
     if (result.usedGpu && ttsMs > 0) {
@@ -1970,13 +1973,13 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
 
     _sendPipelineResponse(req, res, body, atomicAudioRaw);
   } catch (err) {
-    console.warn(`[pipeline] Full pipeline failed: ${err instanceof Error ? err.message : err}`);
+    log.warn(`[pipeline] Full pipeline failed: ${err instanceof Error ? err.message : err}`);
     // If pipeline fails (e.g. no TTS provider), try STT + LLM only (subtitles still work)
     try {
       const t0 = Date.now();
       const stt = await client.transcribe(audioBuffer, cloudProfile);
       const sttMs = Date.now() - t0;
-      console.log(`[pipeline] STT fallback (${sttMs}ms): "${(stt.text || '').substring(0, 80)}"`);
+      log.log(`[pipeline] STT fallback (${sttMs}ms): "${(stt.text || '').substring(0, 80)}"`);
 
       // [2] Check translation cache
       const fbCached = stt.text ? getCachedTranslation(stt.text, source, target) : null;
@@ -1985,7 +1988,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
       if (fbCached !== null) {
         fbTranslated = fbCached;
         llmMs = 0;
-        console.log(`[pipeline] LLM fallback [cache] (0ms): "${fbCached.substring(0, 80)}"`);
+        log.log(`[pipeline] LLM fallback [cache] (0ms): "${fbCached.substring(0, 80)}"`);
       } else {
         const tLlm = Date.now();
         const messages = [
@@ -1995,7 +1998,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
         const chat = await client.chat(messages, cloudProfile);
         fbTranslated = chat.content;
         llmMs = Date.now() - tLlm;
-        console.log(`[pipeline] LLM fallback (${llmMs}ms): "${(fbTranslated || '').substring(0, 80)}"`);
+        log.log(`[pipeline] LLM fallback (${llmMs}ms): "${(fbTranslated || '').substring(0, 80)}"`);
         if (fbTranslated) setCachedTranslation(stt.text, source, target, fbTranslated);
       }
 
@@ -2005,7 +2008,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
       }
 
       const fallbackMs = Date.now() - t0;
-      console.log(`[pipeline] ── Fallback done (no TTS): ${fallbackMs}ms (STT=${sttMs} LLM=${llmMs}) ──`);
+      log.log(`[pipeline] ── Fallback done (no TTS): ${fallbackMs}ms (STT=${sttMs} LLM=${llmMs}) ──`);
       const fallbackProvider = baseProfile === ollamaDefaults ? 'ollama' : 'groq' as const;
       logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: fallbackProvider, latencyMs: fallbackMs, success: true, inputSize: audioBuffer.length, outputPreview: (fbTranslated || '').slice(0, 80) });
 
@@ -2020,7 +2023,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
       _sendPipelineResponse(req, res, body);
     } catch (fallbackErr) {
       const message = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-      console.error(`[pipeline] Complete failure: ${message}`);
+      log.error(`[pipeline] Complete failure: ${message}`);
       const errorProvider = baseProfile === ollamaDefaults ? 'ollama' : 'groq' as const;
       logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: errorProvider, latencyMs: Date.now() - pipeT0, success: false, error: message, inputSize: audioBuffer.length });
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -2045,7 +2048,7 @@ export async function handleVoiceProfileStatus(_req: IncomingMessage, res: Serve
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ state: 'available', ...data }));
   } catch (err) {
-    console.error(`[voice-profile] Status fetch error: ${err instanceof Error ? err.message : err}`);
+    log.error(`[voice-profile] Status fetch error: ${err instanceof Error ? err.message : err}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ state: 'error', hasProfile: false, samplesCount: 0, totalDurationSec: 0, ready: false, minDurationSec: 15, speakerId: null, gender: null }));
   }
@@ -2065,7 +2068,7 @@ export async function handleVoiceProfileReset(req: IncomingMessage, res: ServerR
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(data));
   } catch (err) {
-    console.error(`[voice-profile] Reset error: ${err instanceof Error ? err.message : err}`);
+    log.error(`[voice-profile] Reset error: ${err instanceof Error ? err.message : err}`);
     res.writeHead(502, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: false, error: 'Failed to reach GPU pod' }));
   }
@@ -2321,7 +2324,7 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
   } catch (err) {
     const status = (err as any)?.status || 500;
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[chat] ${model} failed: ${msg}`);
+    log.error(`[chat] ${model} failed: ${msg}`);
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'Internal server error' } }));
   }
@@ -2358,7 +2361,7 @@ export async function handleUploadVoiceReference(req: IncomingMessage, res: Serv
     for (let i = 0; i < oldest.length - 5; i++) voiceRefCache.delete(oldest[i][0]);
   }
 
-  console.log(`[voice-ref] Cached ref_id=${refId} audio=${(audio.length/1024).toFixed(0)}KB text=${text.length} chars`);
+  log.log(`[voice-ref] Cached ref_id=${refId} audio=${(audio.length/1024).toFixed(0)}KB text=${text.length} chars`);
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ref_id: refId }));
 }
@@ -2383,11 +2386,11 @@ export function stopModalKeepalive(): void {
 export function touchModalKeepalive(): void {
   lastCloneRequestAt = Date.now();
   if (!modalKeepaliveTimer) {
-    console.log('[modal-keepalive] Starting keepalive (ping every 4min while clone active)');
+    log.log('[modal-keepalive] Starting keepalive (ping every 4min while clone active)');
     modalKeepaliveTimer = setInterval(async () => {
       // Stop if no clone request in last 20 minutes
       if (Date.now() - lastCloneRequestAt > 20 * 60_000) {
-        console.log('[modal-keepalive] No clone requests in 20min — stopping keepalive');
+        log.log('[modal-keepalive] No clone requests in 20min — stopping keepalive');
         clearInterval(modalKeepaliveTimer!);
         modalKeepaliveTimer = null;
         return;
@@ -2397,12 +2400,12 @@ export function touchModalKeepalive(): void {
         const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(30_000) });
         if (res.ok) {
           const data = await res.json() as Record<string, unknown>;
-          console.log(`[modal-keepalive] OK (uptime=${data.uptime_s}s, clone=${data.clone})`);
+          log.log(`[modal-keepalive] OK (uptime=${data.uptime_s}s, clone=${data.clone})`);
         } else {
-          console.warn(`[modal-keepalive] HTTP ${res.status}`);
+          log.warn(`[modal-keepalive] HTTP ${res.status}`);
         }
       } catch (err) {
-        console.warn(`[modal-keepalive] Failed: ${err instanceof Error ? err.message : err}`);
+        log.warn(`[modal-keepalive] Failed: ${err instanceof Error ? err.message : err}`);
       }
     }, 4 * 60_000); // every 4 minutes
   }

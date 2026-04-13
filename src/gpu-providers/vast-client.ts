@@ -28,6 +28,7 @@ import type {
 } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
+import { categorizeDeployError } from '../errors/deploy-errors';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -1109,6 +1110,26 @@ export class VastClient extends AbstractGpuProvider {
     }
   }
 
+  /**
+   * Create a new Vast.ai on-demand instance by searching for the cheapest
+   * available GPU, then provisioning it with the specified Docker image and config.
+   *
+   * Steps:
+   * 1. Runs preflight balance check
+   * 2. Auto-detects disk size from Docker image (bumps for inference servers)
+   * 3. Searches for cheapest rentable on-demand offer matching GPU/disk criteria
+   * 4. Creates the instance with env vars, ports, SSH, and optional template
+   * 5. Polls until the instance has a reachable IP:port endpoint
+   *
+   * Hosts marked as unstable (previous reclaim during loading) are blacklisted.
+   * Per-host aggressive failure tracking escalates ban durations.
+   *
+   * @param spec - Instance specification (dockerImage, gpuCount, storageGb, env, onstart, etc.)
+   * @param credentials - Provider credentials ({ apiKey })
+   * @param userId - Optional user identifier for tracking
+   * @returns Promise resolving to the created GpuInstance with instanceId and endpoint
+   * @throws {Error} If no GPU is available, balance is insufficient, or creation fails
+   */
   async createInstance(
     spec: InstanceSpec,
     credentials: ProviderCredentials,
@@ -1898,8 +1919,14 @@ export class VastClient extends AbstractGpuProvider {
         },
       };
     } catch (e) {
-      this.log.warn(`[vast] Create on offer ${offerId} error: ${this.errMsg(e)}`);
-      failures.push({ offerId, gpu: gpuName, reason: this.errMsg(e) });
+      const deployErr = categorizeDeployError(e, {
+        provider: 'vast',
+        gpuType: gpuName,
+        imageName: imageName,
+        detail: `offer ${offerId}`,
+      });
+      this.log.error({ code: deployErr.code, category: deployErr.category }, `Create on offer ${offerId} error: ${deployErr.message}`);
+      failures.push({ offerId, gpu: gpuName, reason: deployErr.message });
       return null;
     }
   }
@@ -1937,9 +1964,17 @@ export class VastClient extends AbstractGpuProvider {
   }
 
   /**
-   * Stop (pause) an instance — preserves data, stops GPU billing.
-   * The instance can be restarted later with startInstance().
-   * For permanent deletion, use deleteInstance().
+   * Stop (pause) a Vast.ai on-demand instance, preserving disk and data.
+   * For serverless endpoints, this deletes them (no pause available).
+   *
+   * Stopped instances can be resumed with `startInstance()` — resume is
+   * much faster (~19s) than a cold boot (~288s). No hourly charges while stopped.
+   *
+   * Idempotent: returns silently if instance is already stopped or not found.
+   *
+   * @param instanceId - Instance ID (with optional `inst-` or `endpt-` prefix)
+   * @param credentials - Provider credentials ({ apiKey })
+   * @throws {Error} If the stop API call fails (non-retryable HTTP error)
    */
   async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const { apiKey } = credentials;
@@ -2011,8 +2046,16 @@ export class VastClient extends AbstractGpuProvider {
   }
 
   /**
-   * Permanently destroy an instance and all its data.
-   * This is irreversible — use stopInstance() to pause instead.
+   * Permanently destroy a Vast.ai instance or serverless endpoint.
+   *
+   * This is irreversible — all data is lost. Use `stopInstance()` to pause
+   * instead if you may want to resume later.
+   *
+   * Idempotent: returns silently if the instance is already destroyed (HTTP 404).
+   *
+   * @param instanceId - Instance ID (with optional `inst-` or `endpt-` prefix)
+   * @param credentials - Provider credentials ({ apiKey })
+   * @throws {Error} If the delete API call fails (non-retryable HTTP error)
    */
   async deleteInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const { apiKey } = credentials;
@@ -2500,6 +2543,21 @@ export class VastClient extends AbstractGpuProvider {
     return resultUrl;
   }
 
+  /**
+   * Get the current status of a Vast.ai instance or serverless endpoint.
+   *
+   * For on-demand instances, returns status strings like "running", "stopped",
+   * "exited", "loading", etc. For serverless endpoints, returns "running" if
+   * there are active workers, or "idle" otherwise.
+   *
+   * Tries the single-instance GET endpoint first, falling back to the
+   * filtered list API. Returns null if the instance is not found or the
+   * API call fails.
+   *
+   * @param instanceId - Instance ID (with optional `inst-` or `endpt-` prefix)
+   * @param credentials - Provider credentials ({ apiKey })
+   * @returns Promise resolving to the status string, or null if unavailable
+   */
   async getInstanceStatus(
     instanceId: string,
     credentials: ProviderCredentials,
@@ -2715,7 +2773,21 @@ export class VastClient extends AbstractGpuProvider {
     return results;
   }
 
-  /** List available GPU offers with real-time pricing from Vast.ai marketplace. */
+  /**
+   * List available GPU offers from Vast.ai's on-demand marketplace.
+   *
+   * Searches for rentable, non-rented, verified GPUs ordered by price (ascending).
+   * Results are grouped by GPU name with aggregated availability counts and
+   * the cheapest price per type.
+   *
+   * Supports optional filtering by GPU types and region (with EU/country
+   * code expansion). Uses offer caching to avoid redundant API calls
+   * within the TTL window.
+   *
+   * @param options - Query options: gpuTypes[], region, limit (default 100)
+   * @param credentials - Provider credentials ({ apiKey })
+   * @returns Promise resolving to a sorted list of GpuOffer objects
+   */
   async listOffers(
     options: ListOffersOptions,
     credentials: ProviderCredentials,
@@ -3000,9 +3072,11 @@ export class VastClient extends AbstractGpuProvider {
           }
         }
       } catch (err) {
-        this.log.warn(
-          `[vast] Polling instance ${contractId} attempt ${attempt} failed: ${this.errMsg(err)}`,
-        );
+        const deployErr = categorizeDeployError(err, {
+          provider: 'vast',
+          detail: `polling instance ${contractId} attempt ${attempt}`,
+        });
+        this.log.error({ code: deployErr.code, category: deployErr.category }, `Polling instance ${contractId} attempt ${attempt} failed: ${deployErr.message}`);
       }
     }
 

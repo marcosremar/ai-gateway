@@ -2,6 +2,7 @@
 // logRequest, logGpuEvent, deploy session tracking, handleMetrics,
 // handleRequestLog, computePercentile.
 
+import { createLogger } from '../src/logger';
 import type { IncomingMessage, ServerResponse } from 'http';
 import {
   prisma, latencyRing, latencyRingIdx, setLatencyRingIdx, LATENCY_RING_SIZE,
@@ -19,6 +20,8 @@ let _pendingWrites = 0;
 let _consecutiveFailures = 0;
 import { getOrCreateRequestId, setRequestIdHeader } from './http-utils';
 import { getTranslationCacheStats } from './ai-handlers';
+
+const log = createLogger('metrics');
 
 // ── Request Log (Prisma + SQLite) ────────────────────────────────────────────
 
@@ -78,9 +81,9 @@ export function logRequest(entry: RequestLogInput & { requestId?: string }) {
       const isTransient = e.includes('timeout') || e.includes('econnrefused') || e.includes('fetch failed') ||
         e.includes('502') || e.includes('503') || e.includes('504');
       const errorType = isTransient ? 'transient' : 'permanent';
-      console.log(`[req=${entry.requestId.slice(0, 8)}] ${entry.stage} ${entry.provider} ${entry.latencyMs}ms ERR errorType=${errorType}`);
+      log.log('req=%s %s %s %dms ERR errorType=%s', entry.requestId.slice(0, 8), entry.stage, entry.provider, entry.latencyMs, errorType);
     } else {
-      console.log(`[req=${entry.requestId.slice(0, 8)}] ${entry.stage} ${entry.provider} ${entry.latencyMs}ms ${entry.success ? 'OK' : 'ERR'}`);
+      log.log('req=%s %s %s %dms %s', entry.requestId.slice(0, 8), entry.stage, entry.provider, entry.latencyMs, entry.success ? 'OK' : 'ERR');
     }
   }
 
@@ -121,9 +124,9 @@ export function logRequest(entry: RequestLogInput & { requestId?: string }) {
         _consecutiveFailures++;
         setConsecutiveDbFailures(_consecutiveFailures);
         if (_consecutiveFailures === DB_FAILURE_WARN_THRESHOLD) {
-          console.error(`[db] WARN: ${DB_FAILURE_WARN_THRESHOLD} consecutive DB write failures — database may be unavailable`);
+          log.error('%d consecutive DB write failures — database may be unavailable', DB_FAILURE_WARN_THRESHOLD);
         }
-        console.warn('[db] Failed to log request (attempt %d):', attempt + 1, err);
+        log.warn('Failed to log request (attempt %d): %s', attempt + 1, err instanceof Error ? err.message : err);
       });
   };
   tryWrite(0);
@@ -179,9 +182,9 @@ export function logGpuEvent(
       _consecutiveFailures++;
       setConsecutiveDbFailures(_consecutiveFailures);
       if (_consecutiveFailures === DB_FAILURE_WARN_THRESHOLD) {
-        console.error(`[db] WARN: ${DB_FAILURE_WARN_THRESHOLD} consecutive DB write failures — database may be unavailable`);
+        log.error('%d consecutive DB write failures — database may be unavailable', DB_FAILURE_WARN_THRESHOLD);
       }
-      console.warn('[db] Failed to log GPU event:', err);
+      log.warn('Failed to log GPU event: %s', err instanceof Error ? err.message : err);
     });
 }
 
@@ -193,7 +196,7 @@ export function startDeploySession(provider: string, dockerImage: string, gpuTyp
   prisma.gpuDeploySession
     .create({ data: { provider, dockerImage, gpuType, status: 'deploying' } })
     .then((row: { id: number }) => { setActiveDeploySessionId(row.id); })
-    .catch((err: unknown) => console.warn('[db] Failed to create deploy session:', err));
+    .catch((err: unknown) => log.warn('Failed to create deploy session: %s', err instanceof Error ? err.message : err));
 }
 
 export function updateDeploySession(patch: {
@@ -214,7 +217,7 @@ export function updateDeploySession(patch: {
   }
   prisma.gpuDeploySession
     .update({ where: { id }, data: patch })
-    .catch((err: unknown) => console.warn('[db] Failed to update deploy session:', err));
+    .catch((err: unknown) => log.warn('Failed to update deploy session: %s', err instanceof Error ? err.message : err));
 }
 
 // ── Host Reputation ─────────────────────────────────────────────────────────
@@ -456,7 +459,7 @@ export async function upsertHostReputation(opts: {
       const failCount = (isCrash || skipCounting) ? existing.failCount : existing.failCount + (opts.success ? 0 : 1);
       const crashCount = existing.crashCount + (isCrash ? 1 : 0);
       if (skipCounting) {
-        console.log(`[reputation] ${hostKey}: skipping fail count for non-host error (${opts.failureCategory})`);
+        log.log('%s: skipping fail count for non-host error (%s)', hostKey, opts.failureCategory);
       }
       const avgBootTimeS = opts.bootTimeS != null
         ? emaUpdate(existing.avgBootTimeS, opts.bootTimeS)
@@ -516,7 +519,7 @@ export async function upsertHostReputation(opts: {
         },
       });
       const extra = isCrash ? ` CRASH #${crashCount}` : '';
-      console.log(`[reputation] Updated ${hostKey}: score=${reputationScore.toFixed(3)} (${successCount}/${deployCount} success, ${crashCount} crashes, boot=${avgBootTimeS.toFixed(0)}s, latency=${avgLatencyMs.toFixed(0)}ms)${extra}`);
+      log.log('Updated %s: score=%.3f (%d/%d success, %d crashes, boot=%.0fs, latency=%.0fms)%s', hostKey, reputationScore, successCount, deployCount, crashCount, avgBootTimeS, avgLatencyMs, extra);
     } else {
       // Create new record
       const bootTimeS = opts.bootTimeS ?? 0;
@@ -567,7 +570,7 @@ export async function upsertHostReputation(opts: {
         },
       });
       const outcomeLabel = isCrash ? 'crash' : opts.success ? 'success' : skipCounting ? `ignored:${opts.failureCategory}` : 'fail';
-      console.log(`[reputation] Created ${hostKey}: score=${reputationScore.toFixed(3)} (${outcomeLabel}, boot=${bootTimeS}s)`);
+      log.log('Created %s: score=%.3f (%s, boot=%ds)', hostKey, reputationScore, outcomeLabel, bootTimeS);
     }
 
     // ── GPU type failure alert: check if >50% of hosts for this GPU type failed recently
@@ -586,7 +589,7 @@ export async function upsertHostReputation(opts: {
           const failedHosts = recentHosts.filter((h: { failCount: number; crashCount: number; successCount: number }) => (h.failCount + h.crashCount) > h.successCount);
           const failRate = failedHosts.length / recentHosts.length;
           if (failRate > 0.5) {
-            console.warn(`[reputation] ALERT: GPU type "${gpuType}" failing globally — ${failedHosts.length}/${recentHosts.length} hosts failed (${(failRate * 100).toFixed(0)}%) in last 24h`);
+            log.warn('ALERT: GPU type "%s" failing globally — %d/%d hosts failed (%d%%) in last 24h', gpuType, failedHosts.length, recentHosts.length, Math.round(failRate * 100));
             try {
               const { broadcastWs } = await import('./ws-state');
               broadcastWs({
@@ -602,7 +605,7 @@ export async function upsertHostReputation(opts: {
       } catch { /* aggregation across one GPU type failed — continue to next */ }
     }
   } catch (err) {
-    console.warn(`[reputation] Failed to upsert ${hostKey}:`, err);
+    log.warn('Failed to upsert %s: %s', hostKey, err instanceof Error ? err.message : err);
   }
 }
 
@@ -741,13 +744,13 @@ export async function updateHostLatency(
       scoreUpdate = { reputationScore };
       // P2.2: Alert on reputation cliff drop (>0.2 in one recalc)
       if (oldScore - reputationScore > 0.2) {
-        console.warn(`[reputation] WARNING: ${hostKey} score dropped ${oldScore.toFixed(3)} → ${reputationScore.toFixed(3)} (Δ=${(oldScore - reputationScore).toFixed(3)})`);
+        log.warn('%s score dropped %.3f → %.3f (Δ=%.3f)', hostKey, oldScore, reputationScore, oldScore - reputationScore);
         try {
           const { broadcastWs } = await import('./ws-state');
           broadcastWs({ type: 'host:degraded', hostKey, oldScore, newScore: reputationScore, reason: `latency=${avgLatencyMs.toFixed(0)}ms` });
         } catch { /* broadcast best-effort; not fatal if no WS clients */ }
       }
-      console.log(`[reputation] Recalc ${hostKey} after ${requestCount} requests: score=${reputationScore.toFixed(3)} (latency=${avgLatencyMs.toFixed(0)}ms, var=${latencyVariance.toFixed(0)})`);
+      log.log('Recalc %s after %d requests: score=%.3f (latency=%.0fms, var=%.0f)', hostKey, requestCount, reputationScore, avgLatencyMs, latencyVariance);
     }
 
     await prisma.hostReputation.update({
@@ -775,7 +778,7 @@ export async function loadReputations(hostKeys: string[]): Promise<Map<string, n
       map.set(row.hostKey, row.reputationScore);
     }
   } catch (err) {
-    console.warn('[reputation] Failed to load reputations:', err);
+    log.warn('Failed to load reputations: %s', err instanceof Error ? err.message : err);
   }
   return map;
 }
@@ -816,7 +819,7 @@ export async function loadReputationsByGpuType(): Promise<Map<string, { avgScore
       });
     }
   } catch (err) {
-    console.warn('[reputation] Failed to load GPU type reputations:', err);
+    log.warn('Failed to load GPU type reputations: %s', err instanceof Error ? err.message : err);
   }
   return map;
 }
@@ -830,7 +833,7 @@ export async function getAllReputations(): Promise<unknown[]> {
       orderBy: { reputationScore: 'desc' },
     });
   } catch (err) {
-    console.warn('[reputation] Failed to load all reputations:', err);
+    log.warn('Failed to load all reputations: %s', err instanceof Error ? err.message : err);
     return [];
   }
 }
@@ -1047,7 +1050,7 @@ export async function handleRequestLog(req: IncomingMessage, res: ServerResponse
       },
     }));
   } catch (err) {
-    console.error('[db] Request log query failed:', err);
+    log.error('Request log query failed: %s', err instanceof Error ? err.message : err);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       entries: [],
@@ -1110,7 +1113,7 @@ export async function handleServiceStats(_req: IncomingMessage, res: ServerRespo
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ stats, coldStart, warmth }));
   } catch (err) {
-    console.error('[db] Service stats query failed:', err);
+    log.error('Service stats query failed: %s', err instanceof Error ? err.message : err);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ stats: {}, coldStart: null, warmth: null }));
   }
@@ -1208,10 +1211,10 @@ export async function aggregateRequestLogsToReputation(): Promise<{ processed: n
       },
     });
 
-    console.log(`[reputation-batch] ${hostKey}: aggregated ${logs.length} requests, score=${reputationScore.toFixed(3)} (latency=${avgLatencyMs.toFixed(0)}ms)`);
+    log.log('%s: aggregated %d requests, score=%.3f (latency=%.0fms)', hostKey, logs.length, reputationScore, avgLatencyMs);
     return { processed: logs.length, hostKey };
   } catch (err) {
-    console.warn('[reputation-batch] Aggregation failed:', err);
+    log.warn('Aggregation failed: %s', err instanceof Error ? err.message : err);
     return { processed: 0, hostKey };
   }
 }
@@ -1229,7 +1232,7 @@ export function startReputationAggregation(): void {
   if (aggregationTimer && typeof aggregationTimer === 'object' && 'unref' in aggregationTimer) {
     aggregationTimer.unref();
   }
-  console.log('[reputation-batch] Started periodic aggregation (every 5min)');
+  log.log('Started periodic aggregation (every 5min)');
 }
 
 /** Stop periodic aggregation. */

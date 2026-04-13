@@ -6,9 +6,13 @@ import { homedir } from 'os';
 import { join } from 'path';
 import type { GpuProviderClient, GpuOffer, ProviderCredentials } from '../src/gpu-providers/types';
 import { RunpodClient } from '../src/gpu-providers/runpod-client';
-import { ProviderCooldownTracker, cleanupProviderInstances, filterTiers, PROVIDER_LABELS, DEFAULT_STORAGE_GB } from '../src/gpu-providers/deploy-orchestrator';
+import { ProviderCooldownTracker, cleanupProviderInstances, PROVIDER_LABELS, DEFAULT_STORAGE_GB } from '../src/gpu-providers/deploy-orchestrator';
 import type { ProviderName, GpuTier } from '../src/gpu-providers/deploy-orchestrator';
 import { probeGpuHealth } from '../src/autoscaler/health';
+import { categorizeDeployError } from '../src/errors/deploy-errors';
+import { errorSummary } from '../src/error-summary';
+import { tryAutoRemediation } from '../src/auto-remediation';
+import { runPreFlightChecks } from '../src/preflight-checks';
 import {
   prisma,
   deployState, setDeployState, deployCancelled, setDeployApiKey, setDeployVastApiKey,
@@ -35,6 +39,8 @@ import {
 } from '../src/gpu-providers/deploy-settings';
 import { logGpuEvent, startDeploySession, updateDeploySession, upsertHostReputation, loadReputations, loadReputationsByGpuType, deriveHostKey, recordHostCrash, updateHostLatency } from './metrics';
 import { createLogger } from '../src/logger';
+import { createCanaryDeploy, type CanaryConfig } from '../src/canary';
+import { profileOperation, recordOperationTiming } from '../src/performance-profiler';
 
 const log = createLogger('gpu-deploy');
 import { getBestLatencyByGpuModel } from './latency-db';
@@ -64,6 +70,65 @@ export let gpuTypeCacheRefreshTimer: Timer | null = null;
 /** Track consecutive zero-utilization probes to detect idle GPU (5+ min at 0% = warning). */
 let consecutiveZeroUtilProbes = 0;
 const ZERO_UTIL_WARNING_THRESHOLD = 10; // 10 probes * 30s = 5 min
+
+// ── Canary deployment helper ────────────────────────────────────────────────
+
+/**
+ * Start canary deployment cycle after a successful deploy.
+ * Called from each deploy success path. Evaluates canary health every 60s
+ * and promotes/rollbacks based on error rate and latency thresholds.
+ */
+export function startCanaryIfEnabled(
+  deployConfig: { canary?: boolean; canaryInitialTraffic?: number; canaryMaxErrorRate?: number; canaryTrafficStep?: number },
+  dockerImage: string,
+  gpuType: string,
+): void {
+  const canaryEnabled = process.env.CANARY_DEPLOY === '1' || deployConfig.canary === true;
+  if (!canaryEnabled) return;
+
+  const canaryConfig: CanaryConfig = {
+    currentVersion: `stable-${dockerImage}`,
+    canaryVersion: `canary-${dockerImage}`,
+    initialTrafficPercentage: deployConfig.canaryInitialTraffic || 5,
+    maxErrorRate: deployConfig.canaryMaxErrorRate || 0.05,
+    trafficStep: deployConfig.canaryTrafficStep || 10,
+  };
+
+  const canary = createCanaryDeploy(canaryConfig);
+
+  // Store canary controller in deploy state for monitoring
+  setDeployState({ canary, canaryEvalTimer: null });
+
+  log.log({ canaryConfig }, 'Canary deployment started');
+
+  // Set up periodic evaluation
+  const evalInterval = setInterval(async () => {
+    const decision = canary.evaluate();
+    if (decision.action === 'promote') {
+      await canary.promote();
+      log.log('Canary promoted to 100%');
+      clearInterval(evalInterval);
+      setDeployState({ canaryEvalTimer: null });
+    } else if (decision.action === 'rollback') {
+      await canary.rollback();
+      log.error('Canary rolled back — errors exceeded threshold');
+      clearInterval(evalInterval);
+      setDeployState({ canaryEvalTimer: null });
+    }
+  }, 60_000); // Evaluate every minute
+
+  setDeployState({ canaryEvalTimer: evalInterval });
+}
+
+/**
+ * Clear canary evaluation timer and reset canary state.
+ */
+export function stopCanary(): void {
+  if (deployState.canaryEvalTimer) {
+    clearInterval(deployState.canaryEvalTimer as ReturnType<typeof setInterval>);
+    setDeployState({ canaryEvalTimer: null });
+  }
+}
 
 /**
  * Parse GPU hardware metrics from the /health response and store in deployState.
@@ -361,7 +426,7 @@ function startBackgroundWarmthMonitor(endpoint: string) {
       log.debug(`[gpu] Warmth poll failed: ${err instanceof Error ? err.message : err}`);
       consecutiveFailures++;
       if (consecutiveFailures >= 10) {
-        console.warn(`[gpu] Health check failed 10 consecutive times — marking unhealthy`);
+        log.warn('Health check failed 10 consecutive times — marking unhealthy');
         updateGpuModelWarmth({ stt_ready: false, llm_ready: false });
       }
     }
@@ -733,8 +798,16 @@ export type DeleteReason =
   | 'auto_destroy';
 
 /**
- * Auto-stop (pause) GPU when idle — preserves disk, no hourly charges.
- * Schedules auto-destroy after IDLE_DESTROY_MS (default 2h).
+ * Automatically stop (pause) the active GPU pod when idle or on a trigger.
+ *
+ * Preserves disk/data — the pod can be resumed quickly (~19s on Vast.ai)
+ * instead of a full cold boot (~288s). No hourly charges while stopped.
+ * After stopping, schedules an auto-destroy timer (IDLE_DESTROY_MS) to
+ * permanently terminate the pod if not resumed.
+ *
+ * Falls back to `autoTerminateGpu` if stop fails or no credentials are available.
+ *
+ * @param reason - Why the stop was triggered (e.g. 'idle_timeout', 'budget_exceeded')
  */
 export async function autoStopGpu(reason: DeleteReason = 'idle_timeout') {
   const provider = activeProvider;
@@ -771,7 +844,18 @@ export async function autoStopGpu(reason: DeleteReason = 'idle_timeout') {
     logGpuEvent('instance_stopped', provider, true, { metadata: { podId, reason } });
     emitGatewayEvent('gpu.stopped', { deployId: deployState.deployId, podId, provider, reason });
   } catch (err) {
-    log.warn(`[gpu] Stop failed for ${provider} pod ${podId}: ${err instanceof Error ? err.message : err} — falling back to terminate`);
+    const deployErr = categorizeDeployError(err, {
+      deployId: deployState.deployId,
+      provider,
+      gpuType: deployState.gpuType,
+      imageName: deployState.dockerImage,
+    });
+    errorSummary.record(deployErr, deployState.deployId);
+    const remediation = await tryAutoRemediation(deployErr);
+    if (remediation) {
+      log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
+    }
+    log.error({ code: deployErr.code, category: deployErr.category }, deployErr.message);
     await autoTerminateGpu(reason);
     return;
   }
@@ -872,10 +956,20 @@ export async function resumeOrDeploy(opts: {
 
     return { method: 'resumed', podId, provider };
   } catch (resumeErr) {
-    const msg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
-    log.warn(`[gpu] Resume failed for ${provider} pod ${podId}: ${msg} — falling back to fresh deploy`);
-    logGpuEvent('resume_failed', provider, false, { metadata: { podId, reason: opts.reason, error: msg } });
-    broadcastWs({ type: 'gpu:resume', action: 'fallback', deployId: deployState.deployId, podId, provider, error: msg });
+    const deployErr = categorizeDeployError(resumeErr, {
+      deployId: deployState.deployId,
+      provider,
+      gpuType: deployState.gpuType,
+      imageName: dockerImage,
+    });
+    errorSummary.record(deployErr, deployState.deployId);
+    const remediation = await tryAutoRemediation(deployErr);
+    if (remediation) {
+      log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
+    }
+    log.error({ code: deployErr.code, category: deployErr.category }, deployErr.message);
+    logGpuEvent('resume_failed', provider, false, { metadata: { podId, reason: opts.reason, error: deployErr.message } });
+    broadcastWs({ type: 'gpu:resume', action: 'fallback', deployId: deployState.deployId, podId, provider, error: deployErr.message });
 
     // ── Clean up the orphaned stopped pod ──────────────────────────────
     try {
@@ -883,7 +977,17 @@ export async function resumeOrDeploy(opts: {
       log.log(`[gpu] Cleaned up orphaned pod ${podId} on ${provider}`);
     } catch (cleanupErr) {
       // Non-fatal — pod may already be gone (which is why resume failed)
-      log.warn(`[gpu] Orphan cleanup failed (non-fatal): ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`);
+      const cleanupDeployErr = categorizeDeployError(cleanupErr, {
+        deployId: deployState.deployId,
+        provider,
+        gpuType: deployState.gpuType,
+      });
+      errorSummary.record(cleanupDeployErr, deployState.deployId);
+      const remediation = await tryAutoRemediation(cleanupDeployErr);
+      if (remediation) {
+        log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
+      }
+      log.error({ code: cleanupDeployErr.code, category: cleanupDeployErr.category }, cleanupDeployErr.message);
     }
 
     // ── Fall back to fresh deploy ─────────────────────────────────────
@@ -932,6 +1036,18 @@ export async function resumeOrDeploy(opts: {
   }
 }
 
+/**
+ * Permanently terminate the active GPU instance across all providers.
+ *
+ * Stops monitoring, closes SSH tunnels, resets deploy state, and cleans up
+ * provider resources (RunPod pods, Vast.ai instances, TensorDock instances,
+ * Modal apps). Broadcasts the termination event and updates the deploy session.
+ *
+ * Unlike `autoStopGpu`, this destroys the instance permanently — data is lost
+ * and a full cold boot is required to restart.
+ *
+ * @param reason - Why the termination was triggered (e.g. 'idle_timeout', 'budget_exceeded', 'manual')
+ */
 export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
   clearAutoDestroyTimer();
   const rpKey = deployApiKey;
@@ -955,7 +1071,17 @@ export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
       log.log(`[gpu] Modal app ${podId} stopped`);
       logGpuEvent('instance_stopped', 'modal', true, { metadata: { podId, reason } });
     } catch (err) {
-      log.warn(`[gpu] Modal stop failed for app ${podId}: ${err instanceof Error ? err.message : err}`);
+      const deployErr = categorizeDeployError(err, {
+        deployId: deployState.deployId,
+        provider: 'modal',
+        gpuType: deployState.gpuType,
+      });
+      errorSummary.record(deployErr, deployState.deployId);
+      const remediation = await tryAutoRemediation(deployErr);
+      if (remediation) {
+        log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
+      }
+      log.error({ code: deployErr.code, category: deployErr.category }, deployErr.message);
       await cleanupModalApps(modalKey);
     }
   } else if (provider === 'tensordock' && tdKey && podId) {
@@ -966,7 +1092,17 @@ export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
       log.log(`[gpu] TensorDock instance ${podId} stopped (paused, disk preserved)`);
       logGpuEvent('instance_stopped', 'tensordock', true, { metadata: { podId, reason } });
     } catch (err) {
-      log.warn(`[gpu] TensorDock stop failed for instance ${podId}: ${err instanceof Error ? err.message : err} — falling back to full cleanup`);
+      const deployErr = categorizeDeployError(err, {
+        deployId: deployState.deployId,
+        provider: 'tensordock',
+        gpuType: deployState.gpuType,
+      });
+      errorSummary.record(deployErr, deployState.deployId);
+      const remediation = await tryAutoRemediation(deployErr);
+      if (remediation) {
+        log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
+      }
+      log.error({ code: deployErr.code, category: deployErr.category }, deployErr.message);
       await cleanupTensordockInstances(tdKey, tdAuthId);
     }
   } else if (provider === 'vast' && vastKey) {
@@ -1505,7 +1641,7 @@ export async function autoSelectCheapestGpu(
 
 // ── Deploy loop ─────────────────────────────────────────────────────────────
 
-export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; onstart?: string; containerDiskInGb?: number; volumeId?: string; autoRecovery?: boolean; templateHashId?: string; forceSshTunnel?: boolean; snapgpuPreloadApp?: string; snapgpuAutoSnapshot?: boolean; snapgpuBackend?: 'vast' | 'runpod'; }
+export interface DeployExtra { region?: string; storageGb?: number; hfToken?: string; env?: Record<string, string>; interruptible?: boolean; dockerStartCmd?: string; onstart?: string; containerDiskInGb?: number; volumeId?: string; autoRecovery?: boolean; templateHashId?: string; forceSshTunnel?: boolean; snapgpuPreloadApp?: string; snapgpuAutoSnapshot?: boolean; snapgpuBackend?: 'vast' | 'runpod'; canary?: boolean; canaryInitialTraffic?: number; canaryMaxErrorRate?: number; canaryTrafficStep?: number; }
 
 
 export async function startDeployLoop(
@@ -1571,6 +1707,7 @@ export async function startDeployLoop(
             }
             startGpuMonitoring();
             startBackgroundWarmthMonitor(deployState.endpoint);
+            startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
             return;
           }
           if (res1 === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
@@ -1598,6 +1735,7 @@ export async function startDeployLoop(
             }
             startGpuMonitoring();
             startBackgroundWarmthMonitor(deployState.endpoint);
+            startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
             return;
           }
           if (res2 === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
@@ -1689,6 +1827,7 @@ export async function startDeployLoop(
         }
         startGpuMonitoring();
         startBackgroundWarmthMonitor(deployState.endpoint);
+        startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
         return;
       }
 
@@ -1754,12 +1893,22 @@ export async function startDeployLoop(
 
       continue;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.error(`[gpu] ${label} create attempt ${attempt + 1}/${MAX_DEPLOY_RETRIES + 1} failed: ${msg}`);
-      setDeployState({ message: `${label} create failed (attempt ${attempt + 1}): ${msg}` });
+      const deployErr = categorizeDeployError(err, {
+        deployId: deployState.deployId,
+        provider: providerName,
+        gpuType: deployState.gpuType || gpuTypes[0],
+        imageName: dockerImage,
+      });
+      errorSummary.record(deployErr, deployState.deployId);
+      const remediation = await tryAutoRemediation(deployErr);
+      if (remediation) {
+        log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
+      }
+      log.error({ code: deployErr.code, category: deployErr.category }, `${label} create attempt ${attempt + 1}/${MAX_DEPLOY_RETRIES + 1} failed: ${deployErr.message}`);
+      setDeployState({ message: `${label} create failed (attempt ${attempt + 1}): ${deployErr.message}` });
 
       // Non-retryable errors — fail immediately without wasting retries
-      const lowerMsg = msg.toLowerCase();
+      const lowerMsg = deployErr.message.toLowerCase();
       const isBilling = lowerMsg.includes('balance') || lowerMsg.includes('funds') || lowerMsg.includes('insufficient');
       const isAuth = lowerMsg.includes('authentication') || lowerMsg.includes('unauthorized')
         || lowerMsg.includes('forbidden') || lowerMsg.includes('api key') || lowerMsg.includes('invalid key');
@@ -1776,9 +1925,9 @@ export async function startDeployLoop(
         } else if (isAuth) {
           errMsg = `${label}: authentication failed — check API key in .env`;
         } else {
-          errMsg = `${label} failed after ${MAX_DEPLOY_RETRIES + 1} attempts: ${msg}`;
+          errMsg = `${label} failed after ${MAX_DEPLOY_RETRIES + 1} attempts: ${deployErr.message}`;
         }
-        log.error(`[gpu] ${label} deploy failed (non_retryable=${nonRetryable}, attempt=${attempt + 1}): ${msg}`);
+        log.error({ code: deployErr.code, category: deployErr.category }, `${label} deploy failed (non_retryable=${nonRetryable}, attempt=${attempt + 1}): ${deployErr.message}`);
         setDeployState({ status: 'error', message: errMsg });
         deploymentSM.markError(errMsg);
         return;
@@ -2130,6 +2279,7 @@ export async function startDeployRace(
                 deploymentSM.markReady(c.instanceId, localEndpoint, c.gpuType, c.costPerHr);
                 startGpuMonitoring();
                 startBackgroundWarmthMonitor(localEndpoint);
+                startCanaryIfEnabled(extra, dockerImage, c.gpuType);
                 log.log(`[race] Winner: deployId=${deployState.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} provider=${c.tier.name} gpu=${c.gpuType} t=${Math.round(durationMs / 1000)}s`);
                 logGpuEvent('deploy_ready', c.tier.name, true, { durationMs, metadata: { endpoint: localEndpoint, gpuType: c.gpuType, raceCount: candidates.length } });
                 upsertHostReputation({ provider: c.tier.name, gpuType: c.gpuType, providerMeta: c.providerMeta, success: true, bootTimeS: Math.round(durationMs / 1000), dockerImage });
@@ -2191,7 +2341,18 @@ export async function startDeployRace(
   } catch (raceErr) {
     // Promise.all threw — some slots may not have cleaned up their pods.
     // Force-terminate any non-winner instances that are still alive.
-    log.error(`[race] Promise.all exception — force-cleaning ${candidates.length} race instances:`, raceErr);
+    const deployErr = categorizeDeployError(raceErr, {
+      deployId: deployState.deployId,
+      provider: 'race',
+      gpuType: deployState.gpuType,
+      imageName: deployState.dockerImage,
+    });
+    errorSummary.record(deployErr, deployState.deployId);
+    const remediation = await tryAutoRemediation(deployErr);
+    if (remediation) {
+      log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
+    }
+    log.error({ code: deployErr.code, category: deployErr.category }, `Race deploy exception: ${deployErr.message}`);
     // TS narrows `winner` to `never` in this catch block because all assignments
     // live inside Promise callbacks. Re-cast to match the declared type.
     const winnerCandidate = winner as RaceCandidate | null;
@@ -2241,7 +2402,70 @@ export async function startDeployRace(
   }
 }
 
+/**
+ * Execute a GPU deployment through a prioritized list of provider tiers.
+ *
+ * Attempts deployment on each tier in order (e.g. Vast.ai → RunPod → TensorDock),
+ * falling back to the next tier if the current one fails. Runs pre-flight checks,
+ * enforces budget caps and runaway-deploy detection, and profiles the operation
+ * for performance analysis.
+ *
+ * On success, updates global deploy state with the running instance and starts
+ * the GPU health monitoring loop.
+ *
+ * @param tiers - Ordered list of provider tiers to attempt (cheapest/preferred first)
+ * @param dockerImage - Docker image to deploy
+ * @param gpuTypes - Acceptable GPU type names for the deployment
+ * @param extra - Optional params: region, storageGb, hfToken, env, interruptible, dockerStartCmd, etc.
+ * @param gpuTypesByProvider - Optional per-provider GPU type overrides
+ * @returns Promise that resolves when deployment succeeds or all tiers fail
+ */
 export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>) {
+  const deployId = `deploy-${Date.now()}`;
+  const { result, profile } = await profileOperation(
+    deployId,
+    async () => {
+      return await _executeDeploy(tiers, dockerImage, gpuTypes, extra, gpuTypesByProvider);
+    },
+    { cpuProfileThresholdMs: 60_000, heapSnapshotThresholdMb: 200 },
+  );
+
+  if (profile) {
+    recordOperationTiming(profile.operation, profile.durationMs);
+  }
+
+  return result;
+}
+
+async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>) {
+  // ── Pre-flight checks ───────────────────────────────────────────────────
+  // Validate image, DNS, CUDA compatibility, and cost BEFORE attempting any
+  // provider deploy. Catches common failure scenarios early (Fixes #6, #13,
+  // #15, #17, #19, #24, #25, #27).
+  for (const tier of tiers) {
+    const preflightResult = await runPreFlightChecks({
+      imageName: dockerImage,
+      provider: tier.name,
+      apiKey: tier.apiKey,
+      gpuTypes,
+      dockerhubUser: process.env.DOCKERHUB_USERNAME,
+      dockerhubToken: process.env.DOCKERHUB_TOKEN,
+      templateId: deployState.templateHashId,
+    });
+
+    if (!preflightResult.ok) {
+      log.error({ provider: tier.name, errors: preflightResult.errors }, 'Pre-flight checks failed');
+      logGpuEvent('preflight_failed', tier.name, false, {
+        metadata: { errors: preflightResult.errors, warnings: preflightResult.warnings },
+      });
+      throw new Error(`Pre-flight checks failed for ${PROVIDER_LABELS[tier.name] ?? tier.name}: ${preflightResult.errors.join(', ')}`);
+    }
+
+    if (preflightResult.warnings.length > 0) {
+      log.warn({ provider: tier.name, warnings: preflightResult.warnings }, 'Pre-flight warnings');
+    }
+  }
+
   // ── Budget cap enforcement (P0-1) ───────────────────────────────────────
   // Hard gate: refuse to start ANY new deploy if the daily spend cap is
   // already exceeded or would be exceeded by this deploy's projected cost.
@@ -2429,10 +2653,20 @@ export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string
       }
     } catch (err) {
       const durationMs = Date.now() - tierStartedAt;
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log.error(`[gpu] ✗ ${tier.label} deploy failed after ${Math.round(durationMs / 1000)}s: ${errMsg}`);
+      const deployErr = categorizeDeployError(err, {
+        deployId: deployState.deployId,
+        provider: tier.name,
+        gpuType: deployState.gpuType,
+        imageName: deployState.dockerImage,
+      });
+      errorSummary.record(deployErr, deployState.deployId);
+      const remediation = await tryAutoRemediation(deployErr);
+      if (remediation) {
+        log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
+      }
+      log.error({ code: deployErr.code, category: deployErr.category }, `${tier.label} deploy failed after ${Math.round(durationMs / 1000)}s: ${deployErr.message}`);
       if (deployState.status !== 'error') {
-        setDeployState({ status: 'error', message: `${tier.label} deploy failed: ${errMsg}` });
+        setDeployState({ status: 'error', message: `${tier.label} deploy failed: ${deployErr.message}` });
       }
     }
 

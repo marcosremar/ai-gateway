@@ -7,6 +7,7 @@ import type {
 } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
+import { categorizeDeployError } from '../errors/deploy-errors';
 
 /** GPU types to try in order of preference.
  *  Must match RunPod's REST API enum values exactly.
@@ -148,9 +149,11 @@ export class RunpodClient extends AbstractGpuProvider {
         );
       } catch (err) {
         if (attempt >= maxRetries) throw err;
-        this.log.warn(
-          `[runpod] _fetchWithRetry: network error on attempt ${attempt + 1}/${maxRetries + 1} (${this.errMsg(err)}), retrying in ${RETRY_DELAY_MS}ms...`,
-        );
+        const deployErr = categorizeDeployError(err, {
+          provider: 'runpod',
+          detail: `_fetchWithRetry attempt ${attempt + 1}`,
+        });
+        this.log.error({ code: deployErr.code, category: deployErr.category }, `_fetchWithRetry: network error on attempt ${attempt + 1}/${maxRetries + 1}: ${deployErr.message}, retrying in ${RETRY_DELAY_MS}ms...`);
       }
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     }
@@ -529,7 +532,11 @@ export class RunpodClient extends AbstractGpuProvider {
       );
       return rows;
     } catch (err) {
-      this.log.warn(`[runpod] discoverNetworkVolumeDCs failed: ${this.errMsg(err)}`);
+      const deployErr = categorizeDeployError(err, {
+        provider: 'runpod',
+        detail: 'discoverNetworkVolumeDCs',
+      });
+      this.log.error({ code: deployErr.code, category: deployErr.category }, `discoverNetworkVolumeDCs failed: ${deployErr.message}`);
       return [];
     }
   }
@@ -589,16 +596,39 @@ export class RunpodClient extends AbstractGpuProvider {
         status: (running.desiredStatus as string) || 'RUNNING',
       };
     } catch (err) {
-      this.log.warn(`[runpod] discoverInstance failed: ${this.errMsg(err)}`);
+      const deployErr = categorizeDeployError(err, {
+        provider: 'runpod',
+        detail: 'discoverInstance',
+      });
+      this.log.error({ code: deployErr.code, category: deployErr.category }, `discoverInstance failed: ${deployErr.message}`);
       this.emitError({
         operation: 'discoverInstance',
-        message: this.errMsg(err),
+        message: deployErr.message,
         retryable: true,
       });
       return null;
     }
   }
 
+  /**
+   * Create a new RunPod pod with the specified GPU type, Docker image, and config.
+   *
+   * Steps:
+   * 1. Runs preflight account quota/balance check
+   * 2. Builds environment variables (HF_TOKEN, GROQ_API_KEY, cache redirects)
+   * 3. Auto-detects container disk size from Docker image (bumps for inference servers)
+   * 4. Auto-restricts datacenter if a network volume ID is specified
+   * 5. Creates the pod via REST API with GPU type, region, and container config
+   * 6. Polls until the pod has a reachable proxy endpoint
+   *
+   * Uses secure (RunPod-hosted) machines only — never community (third-party) hardware.
+   *
+   * @param spec - Instance specification (dockerImage, gpuCount, storageGb, env, volumeId, etc.)
+   * @param credentials - Provider credentials ({ apiKey, hfToken })
+   * @param userId - Optional user identifier for tracking
+   * @returns Promise resolving to the created GpuInstance with instanceId and endpoint
+   * @throws {Error} If pod creation fails (quota exceeded, no machines available, etc.)
+   */
   async createInstance(
     spec: InstanceSpec,
     credentials: ProviderCredentials,
@@ -1095,6 +1125,14 @@ export class RunpodClient extends AbstractGpuProvider {
     }
   }
 
+  /**
+   * Stop (pause) a RunPod pod. The pod's desiredStatus is set to STOPPED.
+   * Container data is preserved — the pod can be restarted with `startInstance()`.
+   *
+   * @param instanceId - Pod ID to stop
+   * @param credentials - Provider credentials ({ apiKey })
+   * @throws {Error} If the stop API call fails
+   */
   async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const { apiKey } = credentials;
     await this.rateLimiter.wait();
@@ -1112,6 +1150,13 @@ export class RunpodClient extends AbstractGpuProvider {
     }
   }
 
+  /**
+   * Permanently delete a RunPod pod. All container data is lost.
+   *
+   * @param instanceId - Pod ID to delete
+   * @param credentials - Provider credentials ({ apiKey })
+   * @throws {Error} If the delete API call fails
+   */
   async deleteInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
     const { apiKey } = credentials;
     await this.rateLimiter.wait();
@@ -1280,6 +1325,20 @@ export class RunpodClient extends AbstractGpuProvider {
     }
   }
 
+  /**
+   * Get the current status of a RunPod pod.
+   *
+   * Returns the pod's `desiredStatus` from the REST API (e.g. "RUNNING",
+   * "EXITED", "STOPPED"). Note: RUNNING means "pod is scheduled to run" —
+   * the container may still be booting. For actual container readiness,
+   * use HTTP health checks on the proxy URL.
+   *
+   * Returns null if the pod is not found (404) or the API call fails.
+   *
+   * @param instanceId - Pod ID to check
+   * @param credentials - Provider credentials ({ apiKey })
+   * @returns Promise resolving to the desiredStatus string, or null if unavailable
+   */
   async getInstanceStatus(
     instanceId: string,
     credentials: ProviderCredentials,
@@ -1484,7 +1543,20 @@ export class RunpodClient extends AbstractGpuProvider {
     }
   }
 
-  /** List available GPU types with real-time pricing from RunPod GraphQL API. */
+  /**
+   * List available GPU offers from RunPod's secure cloud marketplace.
+   *
+   * Queries RunPod's GraphQL API for all GPU types with pricing and availability.
+   * Only returns Secure Cloud offers (never community/third-party hardware).
+   * Results are sorted by price ascending and limited to the specified count.
+   *
+   * Falls back to a static offer list if the GraphQL API is unreachable.
+   * Supports optional filtering by GPU types.
+   *
+   * @param options - Query options: gpuTypes[], limit (default 100)
+   * @param credentials - Provider credentials ({ apiKey })
+   * @returns Promise resolving to a sorted list of GpuOffer objects
+   */
   async listOffers(
     options: ListOffersOptions,
     credentials: ProviderCredentials,
