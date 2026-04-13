@@ -483,7 +483,6 @@ export async function fetchGpuSTT(
     if (!gpuRes.ok) {
       const errBody = await gpuRes.text().catch(() => '');
       console.warn(`[gpu:stt] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
-      recordStageFailure('stt');
       throw new Error(`GPU STT HTTP ${gpuRes.status}`);
     }
     const data = await gpuRes.json() as Record<string, unknown>;
@@ -527,7 +526,6 @@ export async function fetchGpuLLM(
     if (!gpuRes.ok) {
       const errBody = await gpuRes.text().catch(() => '');
       console.warn(`[gpu:llm] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
-      recordStageFailure('llm');
       throw new Error(`GPU LLM HTTP ${gpuRes.status}`);
     }
     const data = await gpuRes.json() as Record<string, unknown>;
@@ -569,7 +567,6 @@ export async function fetchGpuTTS(
     if (!gpuRes.ok) {
       const errBody = await gpuRes.text().catch(() => '');
       console.warn(`[gpu:tts] HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
-      recordStageFailure('tts');
       throw new Error(`GPU TTS HTTP ${gpuRes.status}`);
     }
     const audio = Buffer.from(await gpuRes.arrayBuffer());

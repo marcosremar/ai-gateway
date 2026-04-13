@@ -1,6 +1,7 @@
 // ── BabelCast Gateway — WebSocket Server ─────────────────────────────────────
 // handleWsCommand, startWsServer() — Bun native WS on PORT+1.
 
+import { timingSafeEqual } from 'crypto';
 import { botState, deployState, gpuHealthy, gpuModelWarmth, gpuReadinessState, gpuReadyForProduction, isStageWarm, isTtsWarm } from './state';
 import {
   shouldPreferGpuTts,
@@ -537,6 +538,14 @@ export function startWsServer() {
     console.warn('[ws-server] Failed to install file logger:', err);
   }
 
+  /** Constant-time string comparison to prevent timing attacks on auth tokens. */
+  function safeCompare(a: string, b: string): boolean {
+    if (a.length !== b.length) return false;
+    try {
+      return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+    } catch { return false; }
+  }
+
   const WS_PORT = PORT + 1;
   Bun.serve<WsData>({
     port: WS_PORT,
@@ -548,7 +557,7 @@ export function startWsServer() {
         const recallSecret = process.env.RECALL_WS_SECRET;
         if (recallSecret) {
           const token = url.searchParams.get('token') || req.headers.get('authorization')?.replace('Bearer ', '');
-          if (token !== recallSecret) {
+          if (!token || !safeCompare(token, recallSecret)) {
             return new Response('Unauthorized', { status: 401 });
           }
         }
@@ -563,7 +572,7 @@ export function startWsServer() {
       const authToken = url.searchParams.get('token') || req.headers.get('authorization')?.replace('Bearer ', '');
       if (expectedToken) {
         // API key is configured — always require valid token
-        if (authToken !== expectedToken) {
+        if (!authToken || !safeCompare(authToken, expectedToken)) {
           return new Response('Unauthorized', { status: 401 });
         }
       } else {
@@ -739,6 +748,9 @@ export function startWsServer() {
             };
             backend.connect();
             sttSessions.set(ws.data.id, backend);
+            // Expose accumulation timer via backend so the close handler can clear it
+            (backend as any)._sttAccumTimer = () => sttAccumTimer;
+            (backend as any)._clearSttAccumTimer = () => { if (sttAccumTimer) { clearTimeout(sttAccumTimer); sttAccumTimer = null; } };
             console.log(`[stt-ws] Client connected id=${ws.data.id} lang=${language || 'auto'} provider=${backend.provider}`);
           };
           connectBackend();
@@ -843,19 +855,23 @@ export function startWsServer() {
             const config = ws.data.speechConfig || { source: 'fr', target: 'en' };
             const callbacks: PipelineCallbacks = {
               onStageStart(stage: string) {
+                if (ws.readyState !== 1) return;
                 ws.send(JSON.stringify({ status: 'processing', stage }));
               },
               onStageDone(stage: string, result) {
+                if (ws.readyState !== 1) return;
                 const data: Record<string, unknown> = { status: 'processing', stage, latencyMs: result.latencyMs, provider: result.provider };
                 if (stage === 'stt' && result.text) data.transcript = result.text;
                 if (stage === 'llm' && result.text) data.response = result.text;
                 ws.send(JSON.stringify(data));
               },
               onAudioChunk(chunk: Buffer, _isFirst: boolean) {
+                if (ws.readyState !== 1) return;
                 // Send binary audio frame
                 ws.send(chunk);
               },
               onComplete(result: PipelineResult) {
+                if (ws.readyState !== 1) return;
                 ws.send(JSON.stringify({
                   status: 'complete',
                   transcript: result.transcription,
@@ -864,6 +880,7 @@ export function startWsServer() {
                 }));
               },
               onError(stage: string, error: Error) {
+                if (ws.readyState !== 1) return;
                 ws.send(JSON.stringify({ status: 'error', stage, message: error.message }));
               },
             };
@@ -871,6 +888,7 @@ export function startWsServer() {
               source: config.source, target: config.target, speaker: config.speaker,
               sessionId: ws.data.id,
             }, callbacks).catch(err => {
+              if (ws.readyState !== 1) return;
               ws.send(JSON.stringify({ status: 'error', message: err instanceof Error ? err.message : String(err) }));
             });
           }
@@ -957,6 +975,8 @@ export function startWsServer() {
           console.log(`[speech-ws] Client disconnected id=${ws.data.id}`);
         } else if (ws.data.type === 'stt') {
           const backend = sttSessions.get(ws.data.id);
+          // Clear the STT accumulation timer (trapped in connectBackend closure)
+          (backend as any)?._clearSttAccumTimer?.();
           backend?.close();
           sttSessions.delete(ws.data.id);
           console.log(`[stt-ws] Client disconnected id=${ws.data.id}`);
@@ -983,6 +1003,9 @@ export function startWsServer() {
           }
           botAudioChunks = 0;
           botAudioProcessing = false;
+          // Reset held PCM state so a new bot-audio session doesn't inherit stale data
+          botAudioHeldPcm = null;
+          botAudioHeldMergeCount = 0;
         } else {
           unsubscribeDub(ws.data.id);
           wsClients.delete(ws as unknown as BabelCastWS);
