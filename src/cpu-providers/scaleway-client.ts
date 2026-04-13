@@ -112,21 +112,44 @@ export class ScalewayClient extends AbstractGpuProvider {
 
   /** Resolve the default project ID from the API key metadata. Cached after first call. */
   private projectIdCache: string | null = null;
+  private projectIdPromise: Promise<string> | null = null;
   private async resolveProjectId(credentials: ProviderCredentials): Promise<string> {
+    // Return cached value if available
     if (this.projectIdCache) return this.projectIdCache;
-
+    // Prevent concurrent resolution (race condition)
+    if (this.projectIdPromise) return this.projectIdPromise;
+    // Validate credentials
+    const secretKey = credentials.apiKey || process.env.SCALEWAY_SECRET_KEY;
+    if (!secretKey) {
+      throw new Error('Scaleway secret key required (set apiKey or SCALEWAY_SECRET_KEY)');
+    }
     // authId holds the access key (SCWxxxxx), apiKey holds the secret key
     const accessKey = credentials.authId || process.env.SCALEWAY_ACCESS_KEY || '';
     if (!accessKey) throw new Error('Scaleway access key required (set authId or SCALEWAY_ACCESS_KEY)');
 
-    const res = await this.fetchJson<{ default_project_id: string }>(
+    // Start new resolution
+    this.projectIdPromise = this.resolveProjectIdImpl(secretKey, accessKey);
+    try {
+      const result = await this.projectIdPromise;
+      this.projectIdCache = result;
+      return result;
+    } finally {
+      this.projectIdPromise = null;
+    }
+  }
+
+  private async resolveProjectIdImpl(secretKey: string, accessKey: string): Promise<string> {
+    const res = await this.fetchJson<{ default_project_id?: string }>(
       `${SCW_IAM_API}/api-keys/${accessKey}`,
-      { headers: this.scwHeaders(credentials.apiKey) },
+      { headers: this.scwHeaders(secretKey) },
       TIMEOUTS.read,
       'scaleway',
     );
-    this.projectIdCache = res.default_project_id;
-    return res.default_project_id;
+    const projectId = res.default_project_id;
+    if (!projectId || typeof projectId !== 'string') {
+      throw new Error('Scaleway: no default_project_id in API response');
+    }
+    return projectId;
   }
 
   // ── Instance lifecycle ─────────────────────────────────────────────────

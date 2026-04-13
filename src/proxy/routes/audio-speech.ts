@@ -45,11 +45,11 @@ export async function handleAudioSpeech(
       provider.providerId,
       body.model,
       () => provider.synthesize({
-        model: body.model,
-        input: body.input,
-        voice: body.voice,
-        responseFormat: (body.response_format as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm') || 'mp3',
-        speed: body.speed,
+        model: body.model as string,
+        input: body.input as string,
+        voice: body.voice as string,
+        responseFormat: (body.response_format as string) as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm' | undefined || 'mp3',
+        speed: body.speed as number | undefined,
       }),
       'TTS',
     );
