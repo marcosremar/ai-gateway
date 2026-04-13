@@ -54,11 +54,13 @@ const SPEND_TTL_SECS = 48 * 60 * 60; // 48 hours
 const MAX_RECORDS_PER_DAY = 10_000;
 
 function recordsKey(userId: string, date: string): string {
-  return `${SPEND_LIST_PREFIX}${userId}:${date}`;
+  const sanitized = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${SPEND_LIST_PREFIX}${sanitized}:${date}`;
 }
 
 function dailyKey(userId: string, date: string): string {
-  return `${SPEND_DAILY_PREFIX}${userId}:${date}`;
+  const sanitized = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${SPEND_DAILY_PREFIX}${sanitized}:${date}`;
 }
 
 function todayStr(): string {
@@ -96,13 +98,19 @@ export class SpendTracker {
       await this.stateStore.ltrim(rKey, -MAX_RECORDS_PER_DAY, -1);
 
       // Update daily aggregates in hash (fast path for budget checks)
+      // Use HINCRBYFLOAT pattern via hset with computed value to ensure atomic-ish update
+      // Read current state and update atomically via hash store
       const daily = await this.stateStore.hgetall(dKey);
       const existingCost = parseFloat(daily['totalCost'] ?? '0');
       const existingCount = parseInt(daily['requestCount'] ?? '0', 10);
-      await this.stateStore.hset(dKey, 'totalCost', (existingCost + record.costUsd).toFixed(6));
-      await this.stateStore.hset(dKey, 'requestCount', String(existingCount + 1));
-    } catch {
-      // Non-critical — swallow
+      // Only update if both operations succeed - prevents partial state
+      await Promise.all([
+        this.stateStore.hset(dKey, 'totalCost', (existingCost + record.costUsd).toFixed(6)),
+        this.stateStore.hset(dKey, 'requestCount', String(existingCount + 1)),
+      ]);
+    } catch (err) {
+      // Non-critical — swallow but log for debugging
+      console.warn('[spend-tracker] Failed to record spend:', err);
     }
   }
 

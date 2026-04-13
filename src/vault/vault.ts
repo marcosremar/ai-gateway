@@ -68,8 +68,15 @@ export class Vault {
 
   /** Store an encrypted secret */
   async storeSecret(name: string, plaintext: string): Promise<void> {
+    if (!plaintext || typeof plaintext !== 'string') {
+      throw new Error('[Vault] plaintext must be a non-empty string');
+    }
     const blob = this.encrypt(plaintext);
-    await this._store.set(name, JSON.stringify(blob));
+    const serialized = JSON.stringify(blob);
+    if (!serialized) {
+      throw new Error('[Vault] Failed to serialize encrypted blob');
+    }
+    await this._store.set(name, serialized);
   }
 
   /** Retrieve and decrypt a secret */
@@ -130,7 +137,7 @@ export class Vault {
           decipher.setAuthTag(Buffer.from(blob.tag, 'hex'));
           const plaintext = decipher.update(Buffer.from(blob.ciphertext, 'hex')) + decipher.final('utf8');
 
-          // Re-encrypt with the original (old) key
+          // Re-encrypt with the original (old) key - use this.key (old key before failed rotation)
           const iv = randomBytes(IV_LENGTH);
           const cipher = createCipheriv(ALGORITHM, this.key, iv, { authTagLength: TAG_LENGTH });
           const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
