@@ -37,6 +37,8 @@ export interface HashStore {
   hdel(key: string, field: string): Promise<void>;
   /** Get all hash fields */
   hgetall(key: string): Promise<Record<string, string>>;
+  /** Increment a hash field by a number */
+  hincrby(key: string, field: string, increment: number): Promise<void>;
 }
 
 /**

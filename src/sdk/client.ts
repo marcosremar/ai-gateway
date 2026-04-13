@@ -302,7 +302,7 @@ export class GatewaySDK {
   /** Stop (pause) the GPU pod — preserves disk, no charges. */
   async stopGpu(): Promise<StopResumeResponse> {
     const res = await this.fetch('/v1/gpu/stop', { method: 'POST', timeout: this.timeouts.deploy });
-    return await this.parseJson(res, '/v1/gpu/stop') as StopResumeResponse;
+    return await this.parseJson(res, '/v1/gpu/stop') as unknown as StopResumeResponse;
   }
 
   /** Resume a previously stopped GPU pod. */
@@ -316,7 +316,7 @@ export class GatewaySDK {
       body: JSON.stringify(body),
       timeout: this.timeouts.deploy,
     });
-    return await this.parseJson(res, '/v1/gpu/resume') as StopResumeResponse;
+    return await this.parseJson(res, '/v1/gpu/resume') as unknown as StopResumeResponse;
   }
 
   /** List available GPU offers from providers (sorted by price). */
@@ -351,7 +351,7 @@ export class GatewaySDK {
   /** Fetch persistent GPU event logs (JSONL file-based). */
   async gpuEventLogs(lines = 100): Promise<GpuEventLog> {
     const res = await this.fetch(`/v1/gpu/logs/events?lines=${lines}`, { method: 'GET', timeout: this.timeouts.health });
-    return await this.parseJson(res, '/v1/gpu/logs/events') as GpuEventLog;
+    return await this.parseJson(res, '/v1/gpu/logs/events') as unknown as GpuEventLog;
   }
 
   /** Get GPU catalog (available Docker images). */
@@ -608,7 +608,7 @@ export class GatewaySDK {
   /** Get GPU readiness history (state transitions over time). */
   async gpuReadinessHistory(): Promise<GpuReadinessHistory> {
     const res = await this.fetch('/v1/gpu/readiness/history', { method: 'GET', timeout: this.timeouts.health });
-    return await this.parseJson(res, '/v1/gpu/readiness/history') as GpuReadinessHistory;
+    return await this.parseJson(res, '/v1/gpu/readiness/history') as unknown as GpuReadinessHistory;
   }
 
   /** Reset GPU readiness tracking (clears benchmarks, restarts readiness check). */
@@ -701,25 +701,25 @@ export class GatewaySDK {
       timeout: this.timeouts.deploy,
       allowedStatuses: [201],
     });
-    return await this.parseJson(res, '/v1/workloads') as WorkloadInfo;
+    return await this.parseJson(res, '/v1/workloads') as unknown as WorkloadInfo;
   }
 
   /** Get status of a specific workload. */
   async workloadStatus(id: string): Promise<WorkloadInfo> {
     const res = await this.fetch(`/v1/workloads/${id}`, { method: 'GET', timeout: this.timeouts.health });
-    return await this.parseJson(res, `/v1/workloads/${id}`) as WorkloadInfo;
+    return await this.parseJson(res, `/v1/workloads/${id}`) as unknown as WorkloadInfo;
   }
 
   /** Stop (pause) a workload. */
   async stopWorkload(id: string): Promise<WorkloadInfo> {
     const res = await this.fetch(`/v1/workloads/${id}/stop`, { method: 'POST', timeout: this.timeouts.deploy });
-    return await this.parseJson(res, `/v1/workloads/${id}/stop`) as WorkloadInfo;
+    return await this.parseJson(res, `/v1/workloads/${id}/stop`) as unknown as WorkloadInfo;
   }
 
   /** Start / resume a stopped workload. */
   async startWorkload(id: string): Promise<WorkloadInfo> {
     const res = await this.fetch(`/v1/workloads/${id}/start`, { method: 'POST', timeout: this.timeouts.deploy });
-    return await this.parseJson(res, `/v1/workloads/${id}/start`) as WorkloadInfo;
+    return await this.parseJson(res, `/v1/workloads/${id}/start`) as unknown as WorkloadInfo;
   }
 
   /** Terminate (destroy) a workload permanently. */
