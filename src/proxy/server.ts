@@ -191,6 +191,15 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
     const nameMatch = headerStr.match(/name="([^"]+)"/);
     const filenameMatch = headerStr.match(/filename="([^"]+)"/);
 
+    // Bounds check for field names (prevent DoS via memory exhaustion)
+    if (nameMatch && nameMatch[1].length > MAX_FIELD_NAME_LENGTH) {
+      throw new Error(`Field name too long (max ${MAX_FIELD_NAME_LENGTH} chars)`);
+    }
+    // Bounds check for filenames (prevent path traversal via oversized names)
+    if (filenameMatch && filenameMatch[1].length > MAX_FILENAME_LENGTH) {
+      throw new Error(`Filename too long (max ${MAX_FILENAME_LENGTH} chars)`);
+    }
+
     // Enforce max upload file size
     if (filenameMatch && partData.length > MAX_UPLOAD_SIZE_BYTES) {
       throw new Error(
@@ -231,6 +240,14 @@ function parseMultipart(body: Buffer, boundary: string): MultipartPart[] {
 
   return parts;
 }
+
+/** Validate boundary per RFC 2046 (1-70 chars, alphanumeric + special chars). */
+const MULTIPART_BOUNDARY_RE = /^[\w\-'()+,./:=? ]{1,70}$/;
+
+/** Max length for a single field name in multipart (prevent memory exhaustion). */
+const MAX_FIELD_NAME_LENGTH = 256;
+/** Max length for a single filename in multipart (prevent path traversal). */
+const MAX_FILENAME_LENGTH = 256;
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -581,7 +598,7 @@ export function createProxyServer(config: ProxyConfig): Server {
           if (boundaryMatch) {
             const boundary = boundaryMatch[1];
             // Validate boundary to prevent injection attacks (RFC 2046: up to 70 chars, alphanumeric + some symbols)
-            if (!/^[\w\-'()+,./:=? ]{1,70}$/.test(boundary)) {
+            if (!MULTIPART_BOUNDARY_RE.test(boundary)) {
               sendError(res, 400, 'Invalid multipart boundary', requestId);
               return;
             }
