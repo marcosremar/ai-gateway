@@ -349,6 +349,11 @@ export function resetDeployState() {
   clearPersistedDeploy();
   resetTtsWarmth(); // new pod = cold TTS
   resetGpuReadinessState();
+  // Reset idle timer so the new deploy starts with a fresh 15-min window.
+  // Without this, lastRequestTime carries over from the previous deploy session
+  // and the idle timeout can fire immediately on redeploy.
+  lastRequestTime = Date.now();
+  lastModelRequestTime = 0;
 }
 
 export function touchRequest() {
