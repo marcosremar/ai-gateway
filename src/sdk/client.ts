@@ -246,7 +246,7 @@ export class GatewaySDK {
       allowedStatuses: [202, 409], // 409 = deploy already in progress
     });
     const data = await this.parseJson(res, '/v1/gpu/deploy');
-    return { status: (data.status as string) ?? '', message: (data.message as string) ?? '' };
+    return { deployId: (data.deployId as string) ?? '', status: (data.status as string) ?? '', message: (data.message as string) ?? '' };
   }
 
   /** Get current GPU deployment status, health, and active tier. */
@@ -258,6 +258,7 @@ export class GatewaySDK {
     const d = await this.parseJson(res, '/v1/gpu/status');
     return {
       status: (d.status as GpuStatus['status']) ?? 'idle',
+      deployId: (d.deployId as string) ?? '',
       podId: (d.podId as string) ?? '',
       endpoint: (d.endpoint as string) ?? '',
       gpuType: (d.gpuType as string) ?? '',

@@ -470,6 +470,7 @@ async function cmdGpuStatus() {
   if (data.error) { console.error(data.error.message); process.exit(1); }
   console.log('GPU Status:');
   console.log(`  status:    ${data.status}`);
+  if (data.deployId) console.log(`  deployId:  ${data.deployId}`);
   if (data.podId) console.log(`  podId:     ${data.podId}`);
   if (data.endpoint) console.log(`  endpoint:  ${data.endpoint}`);
   if (data.gpuType) console.log(`  gpuType:   ${data.gpuType}`);
@@ -498,6 +499,7 @@ async function cmdGpuDeploy(opts: { image?: string; gpuTypes?: string; onstart?:
     method: 'POST', headers: headers(key), body: JSON.stringify(body),
   });
   console.log('Deploy started:');
+  if (data.deployId) console.log(`  deployId: ${data.deployId}`);
   console.log(JSON.stringify(data, null, 2));
 
   // Poll /v1/gpu/status every 3s and show progress until ready, error, or timeout (~10 min)
@@ -539,9 +541,11 @@ async function cmdGpuDeploy(opts: { image?: string; gpuTypes?: string; onstart?:
   }
 }
 
-async function cmdGpuStop() {
+async function cmdGpuStop(opts?: { deployId?: string }) {
   const { url, key } = getConfig();
-  await fetchJSON(`${url}/v1/gpu/stop`, { method: 'POST', headers: headers(key) });
+  const body: Record<string, unknown> = {};
+  if (opts?.deployId) body.deployId = opts.deployId;
+  await fetchJSON(`${url}/v1/gpu/stop`, { method: 'POST', headers: headers(key), body: JSON.stringify(body) });
   console.log('GPU stopped.');
 }
 
@@ -567,19 +571,22 @@ async function cmdGpuList() {
   console.log(`${instances.length} active instance(s):\n`);
   for (const inst of instances) {
     console.log(`  ${inst.instanceId || inst.podId || '?'}`);
+    if (inst.deployId) console.log(`    deployId:  ${inst.deployId}`);
     if (inst.provider) console.log(`    provider:  ${inst.provider}`);
     if (inst.gpuType || inst.gpuName) console.log(`    gpu:       ${inst.gpuType || inst.gpuName}`);
     if (inst.status) console.log(`    status:    ${inst.status}`);
     if (inst.endpoint) console.log(`    endpoint:  ${inst.endpoint}`);
     if (inst.costPerHr) console.log(`    cost/hr:   $${Number(inst.costPerHr).toFixed(2)}`);
+    if (inst.dockerImage) console.log(`    image:     ${inst.dockerImage}`);
     console.log('');
   }
 }
 
-async function cmdGpuTerminate(instanceId: string, opts: { provider?: string }) {
+async function cmdGpuTerminate(instanceId: string, opts: { provider?: string; deployId?: string }) {
   const { url, key } = getConfig();
   const body: Record<string, string> = {};
   if (opts.provider) body.provider = opts.provider;
+  if (opts.deployId) body.deployId = opts.deployId;
   const res = await fetch(`${url}/v1/gpu/terminate`, {
     method: 'POST', headers: headers(key),
     body: JSON.stringify({ instanceId, ...body }),
@@ -596,11 +603,12 @@ async function cmdGpuTerminate(instanceId: string, opts: { provider?: string }) 
   console.log(`Instance ${instanceId} terminated.`);
 }
 
-async function cmdGpuResume(instanceId?: string, opts?: { provider?: string }) {
+async function cmdGpuResume(instanceId?: string, opts?: { provider?: string; deployId?: string }) {
   const { url, key } = getConfig();
   const body: Record<string, unknown> = {};
   if (instanceId) body.podId = instanceId;
   if (opts?.provider) body.provider = opts.provider;
+  if (opts?.deployId) body.deployId = opts.deployId;
   const res = await fetch(`${url}/v1/gpu/resume`, {
     method: 'POST', headers: headers(key), body: JSON.stringify(body),
   });
@@ -1767,14 +1775,17 @@ ai-gateway server — Manage the local dev server
             numGpus: getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : undefined,
             env: getArg(args, '--env'),
           }); break;
-          case 'stop': await cmdGpuStop(); break;
+          case 'stop': await cmdGpuStop({
+            deployId: getArg(args, '--deploy-id'),
+          }); break;
           case 'resume': await cmdGpuResume(args[2], {
             provider: getArg(args, '--provider'),
+            deployId: getArg(args, '--deploy-id'),
           }); break;
           case 'terminate': {
             const id = args[2];
             if (!id || id.startsWith('-')) { console.error('Usage: ai-gateway gpu terminate <instanceId>'); process.exit(1); }
-            await cmdGpuTerminate(id, { provider: getArg(args, '--provider') });
+            await cmdGpuTerminate(id, { provider: getArg(args, '--provider'), deployId: getArg(args, '--deploy-id') });
             break;
           }
           case 'logs': await cmdGpuLogs(); break;
