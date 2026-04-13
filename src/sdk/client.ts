@@ -351,12 +351,13 @@ export class GatewaySDK {
     return (data.instances ?? data) as GpuInstance[];
   }
 
-  /** Fetch GPU deployment logs (container stdout from running pod). Pass `filter` to grep-filter lines. */
-  async gpuLogs(filter?: string): Promise<string> {
+  /** Fetch GPU deployment logs (container stdout from running pod). Pass `filter` to grep-filter lines. Default max 512KB response. */
+  async gpuLogs(filter?: string, maxBytes = 512 * 1024): Promise<string> {
     const qs = filter ? `?filter=${encodeURIComponent(filter)}` : '';
     const res = await this.fetch(`/v1/gpu/logs${qs}`, { method: 'GET', timeout: this.timeouts.health });
     const data = await this.parseJson(res, '/v1/gpu/logs');
-    return (data.logs as string) ?? '';
+    const logs = (data.logs as string) ?? '';
+    return logs.slice(0, maxBytes);
   }
 
   /** Fetch persistent GPU event logs (JSONL file-based). */
@@ -766,10 +767,11 @@ export class GatewaySDK {
     return (data.requests ?? data) as Record<string, unknown>[];
   }
 
-  /** Get Prometheus-style metrics. */
-  async metrics(): Promise<string> {
+  /** Get Prometheus-style metrics. Default max 1MB response. */
+  async metrics(maxBytes = 1024 * 1024): Promise<string> {
     const res = await this.fetch('/metrics', { method: 'GET', timeout: this.timeouts.health });
-    return await res.text();
+    const text = await res.text();
+    return text.slice(0, maxBytes);
   }
 
   /** Get service statistics. */
