@@ -289,6 +289,13 @@ const SSRF_BLOCKED_PATTERNS = [
   /^\[?::\]?$/,                     // IPv6 unspecified
   /^\[?fe80:/i,                     // IPv6 link-local
   /^\[?fd[0-9a-f]{2}:/i,            // IPv6 unique-local (ULA)
+  // IPv6-mapped IPv4 addresses (bypass prevention)
+  /^::ffff:127\./,                  // ::ffff:127.0.0.1 etc.
+  /^::ffff:10\./,                   // ::ffff:10.x.x.x
+  /^::ffff:172\.(1[6-9]|2\d|3[01])\./,  // ::ffff:172.16-31.x.x
+  /^::ffff:192\.168\./,             // ::ffff:192.168.x.x
+  /^::ffff:169\.254\./,             // ::ffff:169.254.x.x (link-local mapped)
+  /^::ffff:0\.0\.0\.0$/,            // ::ffff:0.0.0.0
 ];
 
 /** Return true if the URL points to a private/internal/metadata address. */
@@ -301,7 +308,9 @@ export function isPrivateUrl(urlStr: string): boolean {
 
 /** Block fetches to private/internal IP addresses (SSRF protection). Throws on match. */
 function validateEndpointUrl(urlStr: string): void {
-  const host = new URL(urlStr).hostname;
+  let host: string;
+  try { host = new URL(urlStr).hostname; }
+  catch { throw new Error(`Invalid endpoint URL: ${urlStr}`); }
   if (SSRF_BLOCKED_PATTERNS.some(re => re.test(host))) {
     throw new Error(`SSRF blocked: ${host} is a private/internal address`);
   }
@@ -1831,6 +1840,13 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
 
       // Fall through to atomic pipeline as last resort
     }
+  }
+
+  // Guard: if hybrid already sent headers (partial response), don't send again
+  if (res.headersSent) {
+    console.warn('[pipeline] Headers already sent by hybrid path — cannot fall through to atomic');
+    if (!res.writableEnded) res.end();
+    return;
   }
 
   // ── Atomic pipeline (all-GPU or all-cloud) ────────────────────────────────

@@ -809,8 +809,7 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
 
   // Allow explicit podId/provider override from body (backward compat)
   if (body.podId) {
-    deployState.podId = body.podId as string;
-    if (body.provider) deployState.provider = body.provider as ProviderName;
+    setDeployState({ podId: body.podId as string, ...(body.provider ? { provider: body.provider as ProviderName } : {}) });
   }
 
   if (!deployState.podId) {

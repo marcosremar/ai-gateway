@@ -118,7 +118,7 @@ function ewmaRaceOpts(
   const best = ewmaTracker.pickBest(names);
   if (!best) return { headstartMs: 0 };
 
-  // Adjust timeouts based on EWMA data (clone timeoutMs to avoid mutating originals)
+  // Adjust timeouts in-place based on EWMA data (candidates are per-request, not shared)
   for (const c of candidates) {
     const ewma = ewmaTracker.getLatency(c.name);
     if (ewma !== null && c.timeoutMs) {
