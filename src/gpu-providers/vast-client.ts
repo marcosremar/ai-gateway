@@ -1816,7 +1816,7 @@ export class VastClient extends AbstractGpuProvider {
    * Returns captured stdout (possibly containing stderr echoes) or null.
    * 15s hard wall-clock timeout.
    */
-  private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<string | null> {
+private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<string | null> {
     return new Promise<string | null>((resolve) => {
       if (!sshHost || !sshPort) {
         resolve(null);
@@ -1836,12 +1836,12 @@ export class VastClient extends AbstractGpuProvider {
       let stderr = '';
       let settled = false;
       let proc: ReturnType<typeof spawn> | null = null;
-      const timer = setTimeout(() => {}, 15_000); // placeholder, will be replaced
+      let timer: ReturnType<typeof setTimeout> | null = null;
 
       const settle = (val: string | null) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         if (proc) {
           try { proc.kill('SIGTERM'); } catch { /* already dead */ }
           const p = proc;
@@ -1850,7 +1850,7 @@ export class VastClient extends AbstractGpuProvider {
         resolve(val);
       };
 
-      const timeout = setTimeout(() => {
+      timer = setTimeout(() => {
         this.log.debug(`[vast] _fetchContainerLogsViaSsh(${sshHost}:${sshPort}) timed out after 15s`);
         settle(stdout.trim() ? stdout : null);
       }, 15_000);
