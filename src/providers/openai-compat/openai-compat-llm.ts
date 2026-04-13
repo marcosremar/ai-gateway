@@ -107,26 +107,30 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
       ...(request.responseFormat && { response_format: request.responseFormat }),
       stream: true,
-      // Request usage in the final stream chunk so the proxy can forward it
-      // to clients that set stream_options.include_usage=true. The OpenAI SDK
-      // automatically includes a final chunk with usage when this is set.
       stream_options: { include_usage: true },
     });
 
-    for await (const chunk of stream) {
-      // Usage chunk: the last chunk from the upstream has usage data and
-      // empty choices. We emit it as a special __usage__ sentinel that
-      // buildSSEStream can detect and re-serialize into the OpenAI format.
-      if (chunk.usage) {
-        yield `__usage__:${JSON.stringify({
-          prompt_tokens: chunk.usage.prompt_tokens,
-          completion_tokens: chunk.usage.completion_tokens,
-          total_tokens: chunk.usage.total_tokens,
-        })}`;
-        continue;
+    try {
+      for await (const chunk of stream) {
+        if (chunk.usage) {
+          yield `__usage__:${JSON.stringify({
+            prompt_tokens: chunk.usage.prompt_tokens,
+            completion_tokens: chunk.usage.completion_tokens,
+            total_tokens: chunk.usage.total_tokens,
+          })}`;
+          continue;
+        }
+        const delta = chunk.choices[0]?.delta?.content;
+        if (delta) yield delta;
       }
-      const delta = chunk.choices[0]?.delta?.content;
-      if (delta) yield delta;
+    } finally {
+      if (stream.controller && typeof stream.controller.close === 'function') {
+        try {
+          stream.controller.close();
+        } catch {
+          // ignore close errors
+        }
+      }
     }
   }
 }
