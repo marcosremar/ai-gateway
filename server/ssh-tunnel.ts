@@ -20,8 +20,10 @@ let nextLocalPort = 19000; // start range for local tunnel ports
 // container's docker image finishes pulling and the in-container sshd
 // becomes reachable. 20 attempts with progressive backoff ≈ 12 min total.
 const DEFAULT_OPEN_RETRIES = 20;
-const RECONNECT_BACKOFF_MS = [2_000, 5_000, 10_000, 20_000, 30_000, 30_000, 45_000, 45_000, 60_000];
-const MAX_RECONNECT_ATTEMPTS = 10;
+// Progressive backoff: 2s → 5s → 10s → 20s → 30s → then stays at 30s
+// Total budget with 30 attempts ≈ 15 min (enough for 70B model load)
+const RECONNECT_BACKOFF_MS = [2_000, 5_000, 10_000, 20_000, 30_000, 30_000, 30_000, 30_000, 30_000, 30_000];
+const MAX_RECONNECT_ATTEMPTS = 30; // was 10 — need more for large model loads (10-15 min)
 
 export class SshTunnel {
   private proc: ChildProcess | null = null;
@@ -93,9 +95,10 @@ export class SshTunnel {
           '-p', String(this.sshPort),
           '-o', 'StrictHostKeyChecking=no',
           '-o', 'UserKnownHostsFile=/dev/null',
-          '-o', 'ConnectTimeout=8',
-          '-o', 'ServerAliveInterval=30',
-          '-o', 'ServerAliveCountMax=3',
+          '-o', 'ConnectTimeout=15',           // was 8s — Vast.ai SSH can be slow to handshake
+          '-o', 'ServerAliveInterval=60',      // was 30s — keep-alive every 60s (less aggressive)
+          '-o', 'ServerAliveCountMax=5',       // was 3 — allow 5 missed keep-alives (5 min grace)
+          '-o', 'TCPKeepAlive=yes',            // OS-level keepalive for network stability
           '-o', 'LogLevel=ERROR',
           '-o', 'ExitOnForwardFailure=yes',
           `root@${this.sshHost}`,
@@ -165,7 +168,11 @@ export class SshTunnel {
     this._reconnectTimer = setTimeout(async () => {
       this._reconnectTimer = null;
       if (this._closed) return;
-      await this._spawnOnce(10_000);
+      const ok = await this._spawnOnce(15_000); // was 10s — give more time for SSH handshake
+      if (ok) {
+        console.log(`[ssh-tunnel] Reconnected after ${this._reconnectAttempts} attempt(s): localhost:${this._localPort} → ${this.sshHost}:${this.sshPort}`);
+        this._reconnectAttempts = 0; // reset counter on successful reconnect
+      }
     }, backoff);
   }
 
@@ -197,9 +204,14 @@ const activeTunnels = new Map<string, SshTunnel>();
 
 export function getOrCreateTunnel(sshHost: string, sshPort: number, remotePort = 8000): SshTunnel {
   const key = `${sshHost}:${sshPort}:${remotePort}`;
-  let tunnel = activeTunnels.get(key);
-  if (tunnel && tunnel.isOpen) return tunnel;
-  tunnel = new SshTunnel(sshHost, sshPort, remotePort);
+  const existing = activeTunnels.get(key);
+  if (existing && existing.isOpen) return existing;
+  // Close stale tunnel before creating a new one
+  if (existing) {
+    existing.close();
+    activeTunnels.delete(key);
+  }
+  const tunnel = new SshTunnel(sshHost, sshPort, remotePort);
   activeTunnels.set(key, tunnel);
   return tunnel;
 }
