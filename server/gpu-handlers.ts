@@ -167,6 +167,7 @@ interface DeployConfig {
   raceCount: number;
   deployEnv: Record<string, string>;
   dockerStartCmd: string;
+  onstart: string;
   containerDiskInGb: number;
   volumeId: string;
   providerFilter: ProviderName | undefined;
@@ -268,6 +269,7 @@ async function _validateDeployRequest(
   const customEnv = (typeof body.env === 'object' && body.env !== null && !Array.isArray(body.env))
     ? body.env as Record<string, string> : {};
   const dockerStartCmd = (body.dockerStartCmd as string) || '';
+  const onstart = (body.onstart as string) || '';
   const containerDiskInGb = typeof body.containerDiskInGb === 'number' ? body.containerDiskInGb : 0;
   // RunPod Network Volume ID — attach existing volume for persistent LLM GGUF cache
   const volumeId = (body.volumeId as string) || '';
@@ -306,7 +308,7 @@ async function _validateDeployRequest(
     apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
     dockerImage, gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
     storageGb, hfToken, llmModel, interruptible, raceCount, deployEnv,
-    dockerStartCmd, containerDiskInGb, volumeId,
+    dockerStartCmd, onstart, containerDiskInGb, volumeId,
     providerFilter: body.provider as ProviderName | undefined,
     templateHashId: typeof body.templateHashId === 'string' && body.templateHashId.length > 0
       ? body.templateHashId : undefined,
@@ -494,7 +496,7 @@ async function _selectDeploymentTier(
   gpuTypes = validateVramForModel(
     gpuTypes,
     config.dockerImage,
-    config.dockerStartCmd,
+    `${config.dockerStartCmd} ${config.onstart}`,
     config.deployEnv,
     config.llmModel,
     requestId,
@@ -612,7 +614,7 @@ function _startDeployAndRespond(
   requestId: string,
   res: ServerResponse,
 ): void {
-  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend } = config;
+  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   setDeployCancelled(false);
@@ -629,6 +631,7 @@ function _startDeployAndRespond(
   const extra = {
     region, storageGb, hfToken, env: Object.keys(deployEnv).length > 0 ? deployEnv : undefined, interruptible,
     ...(dockerStartCmd ? { dockerStartCmd } : {}),
+    ...(onstart ? { onstart } : {}),
     ...(containerDiskInGb > 0 ? { containerDiskInGb } : {}),
     ...(volumeId ? { volumeId } : {}),
     ...(templateHashId ? { templateHashId } : {}),
