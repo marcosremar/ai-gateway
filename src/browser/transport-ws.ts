@@ -198,16 +198,17 @@ export class WebSocketTransport implements Transport {
         });
 
         this.onStageChange?.('complete');
-        this.audioChunks = [];
         this.currentTranscript = '';
         this.currentResponse = '';
         this.sending = false;
       }
+      this.audioChunks = [];
 
       if (msg.status === 'error') {
         this.log.error('server error:', msg.message);
         this.onError?.(msg.message || 'Unknown error');
         this.onStageChange?.('idle');
+        this.audioChunks = [];
         this.sending = false;
       }
     } catch {
