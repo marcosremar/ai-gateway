@@ -123,11 +123,19 @@ async function _validateDeployRequest(
   }
 
   const rawGpuTypes = body.gpuTypes;
-  let gpuTypes: string[] = Array.isArray(rawGpuTypes)
-    ? rawGpuTypes
-    : typeof rawGpuTypes === 'string'
-      ? rawGpuTypes.split(',').map((s: string) => s.trim()).filter(Boolean)
-      : profileGpu?.gpuTypes ?? [];
+  let gpuTypes: string[] = [];
+  if (Array.isArray(rawGpuTypes)) {
+    gpuTypes = rawGpuTypes.filter((g): g is string => typeof g === 'string' && g.trim().length > 0 && g.length <= 100);
+    if (rawGpuTypes.length !== gpuTypes.length) {
+      console.warn(`[req=${requestId}] gpuTypes contains invalid entries, filtering out`);
+    }
+  } else if (typeof rawGpuTypes === 'string' && rawGpuTypes.trim()) {
+    gpuTypes = rawGpuTypes.split(',').map((s: string) => s.trim()).filter(Boolean);
+  } else if (rawGpuTypes !== undefined) {
+    throw { status: 400, message: 'gpuTypes must be a string or array of strings' };
+  } else {
+    gpuTypes = profileGpu?.gpuTypes ?? [];
+  }
   const autoSelectGpu = body.autoSelectGpu === true;
 
   // Region / hardware filters: profile → saved preference → request body
@@ -136,9 +144,17 @@ async function _validateDeployRequest(
   if (profileGpu?.timeoutMin && typeof body.timeoutMin !== 'number') {
     setDeployTimeoutMin(profileGpu.timeoutMin);
   }
-  const minVramGb = typeof body.minVramGb === 'number' ? body.minVramGb : getMinVramGb();
+  const minVramGbRaw = body.minVramGb;
+  let minVramGb: number;
+  if (typeof minVramGbRaw === 'number' && minVramGbRaw >= 0 && Number.isFinite(minVramGbRaw)) {
+    minVramGb = Math.min(Math.max(minVramGbRaw, 0), 100);
+  } else if (typeof minVramGbRaw !== 'undefined') {
+    throw { status: 400, message: 'minVramGb must be a non-negative number (0-100)' };
+  } else {
+    minVramGb = getMinVramGb();
+  }
   const preferSsd = typeof body.preferSsd === 'boolean' ? body.preferSsd : getPreferSsd();
-  const storageGb = (body.storageGb as number) || 0;
+  const storageGb = typeof body.storageGb === 'number' ? Math.min(Math.max(body.storageGb, 0), 1000) : 0;
   // HuggingFace token has FOUR canonical env-var spellings depending on
   // which library is reading it (transformers, diffusers, datasets, hub).
   // Accept any of them so the operator does not have to remember which one
@@ -154,15 +170,23 @@ async function _validateDeployRequest(
   const interruptible = body.interruptible === true ? true : undefined;
 
   // Hedged deploy: launch raceCount instances in parallel, keep first healthy
-  const raceCount = typeof body.raceCount === 'number' && body.raceCount >= 1
-    ? Math.min(Math.floor(body.raceCount), 10)
-    : getDeployRaceCount();
+  const raceCountRaw = body.raceCount;
+  let raceCount: number;
+  if (typeof raceCountRaw === 'number' && raceCountRaw >= 1 && Number.isFinite(raceCountRaw)) {
+    raceCount = Math.min(Math.floor(raceCountRaw), 10);
+  } else if (typeof raceCountRaw !== 'undefined') {
+    throw { status: 400, message: 'raceCount must be a positive number between 1 and 10' };
+  } else {
+    raceCount = getDeployRaceCount();
+  }
 
   // Custom env vars, Docker start command, and container disk
   const customEnv = (typeof body.env === 'object' && body.env !== null && !Array.isArray(body.env))
     ? body.env as Record<string, string> : {};
   const dockerStartCmd = (body.dockerStartCmd as string) || '';
-  const containerDiskInGb = typeof body.containerDiskInGb === 'number' ? body.containerDiskInGb : 0;
+  const containerDiskInGb = typeof body.containerDiskInGb === 'number' 
+    ? Math.min(Math.max(body.containerDiskInGb, 0), 100) 
+    : 0;
   // RunPod Network Volume ID — attach existing volume for persistent LLM GGUF cache
   const volumeId = (body.volumeId as string) || '';
   const deployEnv: Record<string, string> = { ...customEnv };
@@ -653,9 +677,18 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
   console.log(`[req=${requestId}] GPU terminate requested`);
+  
+  // Acquire lock to prevent concurrent lifecycle operations
+  if (deployLock) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
+    return;
+  }
+  setDeployLock(true);
+  
   let body: Record<string, unknown>;
   try { body = await readJsonBody(req); }
-  catch (e) { handleBodyError(res, e); return; }
+  catch (e) { handleBodyError(res, e); setDeployLock(false); return; }
   const apiKey = body.apiKey as string;
   const vastKey = deployVastApiKey || (body.vastApiKey as string) || process.env.VAST_API_KEY || '';
   const tdKey = deployTensordockApiKey || (body.tensordockApiKey as string) || process.env.TENSORDOCK_API_KEY || '';
@@ -672,45 +705,48 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   const prevCostPerHr = deployState.costPerHr;
   const wasReady = deployState.status === 'ready';
 
-  stopGpuMonitoring();
-  setDeployLock(false);  // Release deploy lock so new deploys can proceed
-  resetDeployState(); // sets deployCancelled=true, stops the deploy loop
-  deploymentSM.reset();
-  updateTranslationProfile({ gpuEndpoint: undefined }, 'handleGpuTerminate');
+  try {
+    stopGpuMonitoring();
+    resetDeployState(); // sets deployCancelled=true, stops the deploy loop
+    deploymentSM.reset();
+    updateTranslationProfile({ gpuEndpoint: undefined }, 'handleGpuTerminate');
 
-  // Terminate ALL instances across all providers to prevent orphans
-  if (apiKey) {
-    await cleanupAllPods(apiKey);
-  }
-  if (vastKey) {
-    await cleanupVastInstances(vastKey);
-  }
-  if (tdKey) {
-    await cleanupTensordockInstances(tdKey, tdAuthId);
-  }
-  if (modalKey) {
-    await cleanupModalApps(modalKey);
-  }
+    // Terminate ALL instances across all providers to prevent orphans
+    if (apiKey) {
+      await cleanupAllPods(apiKey);
+    }
+    if (vastKey) {
+      await cleanupVastInstances(vastKey);
+    }
+    if (tdKey) {
+      await cleanupTensordockInstances(tdKey, tdAuthId);
+    }
+    if (modalKey) {
+      await cleanupModalApps(modalKey);
+    }
 
-  logGpuEvent('instance_terminated', 'manual', true, { metadata: { reason: 'manual_terminate' } });
-  updateDeploySession({ status: 'stopped', stoppedAt: new Date() });
+    logGpuEvent('instance_terminated', 'manual', true, { metadata: { reason: 'manual_terminate' } });
+    updateDeploySession({ status: 'stopped', stoppedAt: new Date() });
 
-  // Record session uptime + cost in host reputation (if deploy was ready)
-  if (wasReady && prevStartedAt > 0 && prevProvider) {
-    const uptimeS = Math.round((Date.now() - prevStartedAt) / 1000);
-    const costUsd = prevCostPerHr > 0 ? prevCostPerHr * (uptimeS / 3600) : undefined;
-    upsertHostReputation({
-      provider: prevProvider,
-      gpuType: prevGpuType,
-      providerMeta: prevMeta,
-      success: true,
-      uptimeS,
-      costUsd,
-    });
+    // Record session uptime + cost in host reputation (if deploy was ready)
+    if (wasReady && prevStartedAt > 0 && prevProvider) {
+      const uptimeS = Math.round((Date.now() - prevStartedAt) / 1000);
+      const costUsd = prevCostPerHr > 0 ? prevCostPerHr * (uptimeS / 3600) : undefined;
+      upsertHostReputation({
+        provider: prevProvider,
+        gpuType: prevGpuType,
+        providerMeta: prevMeta,
+        success: true,
+        uptimeS,
+        costUsd,
+      });
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  } finally {
+    setDeployLock(false);
   }
-
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ok: true }));
 }
 
 // ── GPU Stop (pause without destroying) ──────────────────────────────────────
@@ -725,9 +761,18 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
   setRequestIdHeader(res, requestId);
   console.log(`[req=${requestId}] GPU stop (pause) requested`);
 
+  // Acquire lock to prevent concurrent lifecycle operations
+  if (deployLock) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
+    return;
+  }
+  setDeployLock(true);
+
   if (!deployState.podId) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'No active pod to stop' }));
+    setDeployLock(false);
     return;
   }
 
@@ -782,6 +827,8 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
     console.error(`[req=${requestId}] GPU stop failed: ${msg}`);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `Stop failed: ${msg}` }));
+  } finally {
+    setDeployLock(false);
   }
 }
 
@@ -797,6 +844,13 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   setRequestIdHeader(res, requestId);
   console.log(`[req=${requestId}] GPU resume requested`);
 
+  if (deployLock) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment', status: deployState.status }));
+    return;
+  }
+  setDeployLock(true);
+
   let body: Record<string, unknown> = {};
   try { body = await readJsonBody(req); }
   catch { /* empty body is fine */ }
@@ -810,6 +864,7 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   if (!deployState.podId) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'No pod to resume. Provide { podId } or stop a pod first.' }));
+    setDeployLock(false);
     return;
   }
 
@@ -834,6 +889,8 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
     console.error(`[req=${requestId}] GPU resume + fallback deploy failed: ${msg}`);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `Resume and fallback deploy both failed: ${msg}` }));
+  } finally {
+    setDeployLock(false);
   }
 }
 
