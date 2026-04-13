@@ -13,8 +13,11 @@ import { ModalClient } from '../gpu-providers/modal-client';
 import { VastClient } from '../gpu-providers/vast-client';
 import { runHealthCheck, runSSEBench } from '../benchmarking/bench';
 import { createLogger } from '../logger';
+import type { AutoScalerConfig } from '../types';
 
 const log = createLogger('autoscaler-handler');
+
+export type LoadConfig = (userId: string) => Promise<AutoScalerConfig | undefined>;
 
 const VALID_PROVIDERS = ['tensordock', 'runpod', 'vast', 'modal'];
 
@@ -132,7 +135,7 @@ export async function handleAutoscalerAction(
           maxLatencyMs: config.maxLatencyMs,
           totalTiers: config.tiers?.length ?? 0,
           providerBootSecs: Object.fromEntries(
-            [...new Set((config.tiers ?? []).map(t => t.provider))].map(p => [p, PROVIDER_BOOT_SECS[p] ?? 120])
+            [...new Set((config.tiers ?? []).map(t => t.provider))].map(p => [p as string, PROVIDER_BOOT_SECS[p as string] ?? 120])
           ),
         } : null,
       });

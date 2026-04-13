@@ -71,7 +71,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
       ...(request.responseFormat && { response_format: request.responseFormat }),
       ...(request.stream && { stream: request.stream }),
-    }, { signal: controller.signal });
+    }, { signal: controller.signal }) as OpenAI.ChatCompletion;
 
     return {
       content: completion.choices[0]?.message?.content || '',

@@ -115,7 +115,7 @@ export class StreamingSTTBackend {
 
   sendAudio(pcm: ArrayBuffer | Buffer): void {
     if (this._open && this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(pcm);
+      this.ws.send(pcm as ArrayBuffer);
     }
   }
 
