@@ -317,7 +317,12 @@ export function isPrivateUrl(urlStr: string): boolean {
 
 /** Block fetches to private/internal IP addresses (SSRF protection). Throws on match. */
 function validateEndpointUrl(urlStr: string): void {
-  const url = new URL(urlStr);
+  let url: URL;
+  try {
+    url = new URL(urlStr);
+  } catch {
+    throw new Error(`Invalid URL: ${urlStr}`);
+  }
   const host = url.hostname.toLowerCase();
   if (SSRF_BLOCKED_HOSTS.includes(host)) {
     throw new Error(`SSRF blocked: ${host} is a reserved hostname`);

@@ -240,7 +240,9 @@ const DEFAULT_CONFIG: ProviderConfig = {
 };
 
 /** Load provider config from disk. Returns defaults if file doesn't exist.
- *  Uses in-memory cache with 5s TTL to avoid sync file I/O on the hot path. */
+ *  Uses in-memory cache with 5s TTL to avoid sync file I/O on the hot path.
+ *  Note: Returns a shallow copy to prevent accidental mutation, but nested
+ *  arrays/objects are NOT deep-cloned. Caller must not mutate returned arrays. */
 export function loadProviderConfig(): ProviderConfig {
   const now = Date.now();
   if (_cachedConfig && (now - _cacheTime) < CONFIG_CACHE_TTL_MS) {
@@ -256,14 +258,14 @@ export function loadProviderConfig(): ProviderConfig {
     const data = JSON.parse(raw) as Partial<ProviderConfig>;
     const config: ProviderConfig = {
       profiles: Array.isArray(data.profiles) && data.profiles.length > 0
-        ? data.profiles : [...DEFAULT_GPU_PROFILES],
+        ? [...data.profiles] : [...DEFAULT_GPU_PROFILES],
       activeProfileId: data.activeProfileId ?? DEFAULT_CONFIG.activeProfileId,
       pipelineStt: Array.isArray(data.pipelineStt) && data.pipelineStt.length > 0
-        ? data.pipelineStt : DEFAULT_CONFIG.pipelineStt,
+        ? [...data.pipelineStt] : [...DEFAULT_CONFIG.pipelineStt],
       pipelineLlm: Array.isArray(data.pipelineLlm) && data.pipelineLlm.length > 0
-        ? data.pipelineLlm : DEFAULT_CONFIG.pipelineLlm,
+        ? [...data.pipelineLlm] : [...DEFAULT_CONFIG.pipelineLlm],
       pipelineTts: Array.isArray(data.pipelineTts) && data.pipelineTts.length > 0
-        ? data.pipelineTts : DEFAULT_CONFIG.pipelineTts,
+        ? [...data.pipelineTts] : [...DEFAULT_CONFIG.pipelineTts],
       idleTimeoutMin: typeof data.idleTimeoutMin === 'number' ? data.idleTimeoutMin : 15,
       updatedAt: data.updatedAt ?? 0,
     };
@@ -279,7 +281,7 @@ export function loadProviderConfig(): ProviderConfig {
     }
     _cachedConfig = config;
     _cacheTime = now;
-    return config;
+    return _cachedConfig;
   } catch (err) {
     console.warn('[config] Failed to load provider config:', err instanceof Error ? err.message : err);
     _cachedConfig = { ...DEFAULT_CONFIG };
@@ -333,8 +335,12 @@ export function saveProviderConfig(config: ProviderConfig): void {
   if (_currentUserApiKey) {
     const apiKey = _currentUserApiKey;
     import('./user-profiles').then(({ saveUserConfig }) => {
-      saveUserConfig(apiKey, 'Default', config).catch(() => {});
-    }).catch(() => {});
+      saveUserConfig(apiKey, 'Default', config).catch((err) => {
+        console.warn('[config] Failed to persist user config to DB:', err instanceof Error ? err.message : err);
+      });
+    }).catch((err) => {
+      console.warn('[config] Failed to load user-profiles module for DB sync:', err instanceof Error ? err.message : err);
+    });
   }
 }
 
@@ -343,11 +349,11 @@ export function patchProviderConfig(partial: Partial<ProviderConfig>): ProviderC
   const current = loadProviderConfig();
   const updated: ProviderConfig = {
     ...current,  // preserve extra UI fields
-    profiles: partial.profiles !== undefined ? partial.profiles : current.profiles,
+    profiles: partial.profiles !== undefined ? [...partial.profiles] : [...current.profiles],
     activeProfileId: partial.activeProfileId !== undefined ? partial.activeProfileId : current.activeProfileId,
-    pipelineStt: partial.pipelineStt !== undefined ? partial.pipelineStt : current.pipelineStt,
-    pipelineLlm: partial.pipelineLlm !== undefined ? partial.pipelineLlm : current.pipelineLlm,
-    pipelineTts: partial.pipelineTts !== undefined ? partial.pipelineTts : current.pipelineTts,
+    pipelineStt: partial.pipelineStt !== undefined ? [...partial.pipelineStt] : [...current.pipelineStt],
+    pipelineLlm: partial.pipelineLlm !== undefined ? [...partial.pipelineLlm] : [...current.pipelineLlm],
+    pipelineTts: partial.pipelineTts !== undefined ? [...partial.pipelineTts] : [...current.pipelineTts],
     idleTimeoutMin: partial.idleTimeoutMin !== undefined ? partial.idleTimeoutMin : current.idleTimeoutMin,
     updatedAt: Date.now(),
   };
@@ -437,15 +443,18 @@ function _flushStamp(profileId: string): void {
 
 export function stampProfileRequest(profileId: string | null): void {
   if (!profileId) return;
-  _pendingStampId = profileId;
   if (!_stampTimer) {
+    _pendingStampId = profileId;
     _stampTimer = setTimeout(() => {
       _stampTimer = null;
-      if (_pendingStampId) {
-        _flushStamp(_pendingStampId);
-        _pendingStampId = null;
+      const pending = _pendingStampId;
+      _pendingStampId = null;
+      if (pending) {
+        _flushStamp(pending);
       }
     }, 10_000);
+  } else {
+    _pendingStampId = profileId;
   }
 }
 
