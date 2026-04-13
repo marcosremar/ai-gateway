@@ -2054,8 +2054,11 @@ export async function startDeployRace(
                 if (cooldownTracker.recordSuccess(c.tier.name)) {
                   logGpuEvent('cooldown_cleared', c.tier.name, true, { durationMs });
                 }
+                return; // winner exits cleanly — no cleanup needed
               }
-              return; // exit this slot's polling loop
+              // Another slot already won while this fetch was in flight.
+              // Break to loser-cleanup code below so this instance gets terminated.
+              break;
             }
           }
         } catch { /* health probe failed — keep trying */ }
@@ -2467,10 +2470,20 @@ export async function pollHealthUntilReady(
     }
 
     // ── Per-phase timeouts (fail fast, try next machine) ──
+    // Adaptive boot timeout: inference servers (vLLM, TGI) download models BEFORE
+    // opening the health port, so the entire download+load counts as "boot" time.
+    // 70B FP16 = ~140GB download = 5-10 min at datacenter speeds.
+    const isInfServer = /vllm|text-generation-inference|tgi|llama\.cpp|ollama/i.test(dockerImage || '');
+    const modelHint = `${dockerImage || ''} ${deployState.message || ''}`;
+    const bootMs = isInfServer
+      ? (/70b|65b|72b/i.test(modelHint) ? 15 * 60_000   // 15 min for 70B+
+        : /32b|34b|33b/i.test(modelHint) ? 10 * 60_000  // 10 min for 32B
+        : 7 * 60_000)                                     // 7 min default inference
+      : 5 * 60_000;                                        // 5 min for pre-baked images
     const PHASE_TIMEOUTS = {
       IMAGE_PULL:  pullEstimate.timeoutMs,  // ADAPTIVE — based on image size + host speed
-      BOOT:        5 * 60_000,   // 5 min — models download before uvicorn starts on some images
-      MODELS:     10 * 60_000,   // 10 min — HuggingFace model download + load after /health
+      BOOT:        bootMs,                  // ADAPTIVE — 5-15 min based on model size
+      MODELS:     10 * 60_000,              // 10 min — HuggingFace model download + load after /health
     };
 
     // Image pull timeout — track from when pull actually started, not deploy start
@@ -2648,6 +2661,10 @@ export async function pollHealthUntilReady(
               message: `Container running, waiting for /health... [${elapsed}s, up ${appElapsed}s]`,
               stepDetail: deployState.gpuType || '',
             });
+            // Container is running but health hasn't responded yet (e.g. 28GB model downloading
+            // before server starts). Reset idle timer so the idle timeout doesn't fire while
+            // we wait for the health endpoint to come up.
+            setLastRequestTime(Date.now());
           }
         }
       } catch (err) {
