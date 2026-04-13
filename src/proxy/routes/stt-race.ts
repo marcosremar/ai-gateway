@@ -54,14 +54,20 @@ export async function raceSTT(
   const t0 = Date.now();
   const deadlines: ReturnType<typeof setTimeout>[] = [];
   const controller = new AbortController();
+  let finished = false;
 
   const cleanup = () => {
+    if (finished) return;
+    finished = true;
     for (const t of deadlines) clearTimeout(t);
     if (!controller.signal.aborted) controller.abort();
+    if (signal) {
+      signal.removeEventListener('abort', cleanup);
+    }
   };
 
-  if (signal) {
-    signal.addEventListener('abort', cleanup, { once: true });
+  if (signal?.aborted) {
+    throw new Error('Aborted');
   }
 
   const races = providers.map((provider) => {
@@ -70,6 +76,12 @@ export async function raceSTT(
       .then((result) => {
         if (!result.text.trim()) throw new Error(`${provider.providerId}: empty`);
         return { result, provider: provider.providerId };
+      })
+      .catch((err) => {
+        if (finished && err instanceof Error && err.message === 'Aborted') {
+          return Promise.reject(err);
+        }
+        throw err;
       });
 
     if (opts?.timeoutMs) {
@@ -80,8 +92,16 @@ export async function raceSTT(
       p = Promise.race([p, deadline]);
     }
 
-    return Promise.race([p, new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('Aborted'))))]);
+    const abortPromise = new Promise<never>((_, reject) => {
+      const handler = () => reject(new Error('Aborted'));
+      controller.signal.addEventListener('abort', handler, { once: true });
+    });
+    return Promise.race([p, abortPromise]);
   });
+
+  if (signal) {
+    signal.addEventListener('abort', cleanup, { once: true });
+  }
 
   try {
     const winner = await Promise.any(races);

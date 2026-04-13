@@ -10,7 +10,7 @@ import {
   recordPerStageLatency,
 } from './state';
 import {
-  client, groqDefaults, ollamaDefaults, translationDefaults,
+  client, groqProfile, ollamaProfile, translationProfile,
   groqAvailable, groqLLM, groqLlmModel, groqTtsModel, groqTtsVoice,
   shouldPreferGpuTts,
   recordStageSuccess, recordStageFailure, isStageCircuitClosed,
@@ -26,9 +26,9 @@ import { speculativeCache } from './speculative-cache';
 import { broadcastWs, broadcastDubAudio } from './ws-state';
 import { getActiveTargets, runMultiLangFanout } from './dub-fanout';
 import { logRequest } from './metrics';
-import { loadProviderConfig, stampAppRequest } from './config-persistence';
-import { runEnsembleSTT } from '../src/ensemble-stt';
-import type { EnsembleSTTProviderEntry } from '../src/ensemble-stt';
+import { loadProviderConfig, stampProfileRequest } from './config-persistence';
+import { sttRace } from '../src/stt-race';
+import type { STTRaceProvider } from '../src/stt-race';
 import { groqSTT } from '../src/providers/groq';
 import { langNames } from './http-utils';
 import { probeCloudProvider, probeGpuHealth } from '../src';
@@ -118,7 +118,7 @@ function ewmaRaceOpts(
   const best = ewmaTracker.pickBest(names);
   if (!best) return { headstartMs: 0 };
 
-  // Adjust timeouts in-place based on EWMA data (candidates are per-request, not shared)
+  // Adjust timeouts based on EWMA data (clone timeoutMs to avoid mutating originals)
   for (const c of candidates) {
     const ewma = ewmaTracker.getLatency(c.name);
     if (ewma !== null && c.timeoutMs) {
@@ -190,8 +190,8 @@ export async function runStreamingPipeline(
   // Determine routing
   const firstCloudIdx = PROVIDER_CHAIN.findIndex(p => p === 'groq' || p === 'ollama');
   const gpuIdx = PROVIDER_CHAIN.findIndex(p => GPU_PROVIDERS.has(p));
-  const baseProfile = (firstCloudIdx >= 0 && PROVIDER_CHAIN[firstCloudIdx] === 'ollama' && ollamaDefaults)
-    ? ollamaDefaults : (groqDefaults || ollamaDefaults || translationDefaults);
+  const baseProfile = (firstCloudIdx >= 0 && PROVIDER_CHAIN[firstCloudIdx] === 'ollama' && ollamaProfile)
+    ? ollamaProfile : (groqProfile || ollamaProfile || translationProfile);
   if (!baseProfile) {
     cb.onError('pipeline', new Error('No LLM provider configured (groq, ollama, or translation profile required)'));
     return;
@@ -269,11 +269,11 @@ export async function runStreamingPipeline(
         name: 'ensemble-fallback', timeoutMs: 3_000,
         run: async (signal) => {
           if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-          const ensembleProviders: EnsembleSTTProviderEntry[] = [{ name: 'groq', provider: groqSTT }];
-          const result = await runEnsembleSTT(audio, source, sttPrompt, {
-            providers: ensembleProviders, timeoutMs: 2500,
+          const providers: STTRaceProvider[] = [{ name: 'groq', provider: groqSTT }];
+          const result = await sttRace(audio, source, sttPrompt, {
+            providers, timeoutMs: 2500,
           });
-          return { text: result.consensus, language: '', used_gpu: false, avg_logprob: result.avg_logprob ?? 0 };
+          return { text: result.text, language: '', used_gpu: false, avg_logprob: result.avgLogprob ?? 0 };
         },
       });
     }
@@ -612,7 +612,7 @@ export async function runStreamingPipeline(
     const usedAnyGpu = sttProvider === 'gpu' || llmProvider === 'gpu' || ttsProvider === 'gpu';
 
     logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: 'stream', latencyMs: totalMs, success: true, inputSize: audio.length, outputPreview: (translatedText || '').slice(0, 80) });
-    stampAppRequest(loadProviderConfig().activeAppId);
+    stampProfileRequest(loadProviderConfig().activeProfileId);
 
     console.log(`[pipeline-stream] ── Done: ${totalMs}ms (STT=${sttMs}[${sttProvider}] LLM=${llmMs}[${llmProvider}] TTS=${ttsMs}[${ttsProvider || '-'}]) ──`);
 

@@ -101,20 +101,19 @@ export async function pollUntilReady<T>(
   let attempt = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
-  try {
-    while (elapsed < maxWaitMs) {
-      const delay = Math.min(baseIntervalMs * Math.pow(growth, attempt), maxIntervalMs);
-      timer = setTimeout(() => {}, delay); // reserve timer slot
-      await new Promise(r => setTimeout(r, delay));
-      elapsed += delay;
-      attempt++;
+  while (elapsed < maxWaitMs) {
+    const delay = Math.min(baseIntervalMs * Math.pow(growth, attempt), maxIntervalMs);
+    await new Promise(r => setTimeout(r, delay));
+    elapsed += delay;
+    attempt++;
 
-      const result = await checkFn(attempt, elapsed);
-      if (result) return result;
-    }
-  } finally {
+    const result = await checkFn(attempt, elapsed);
+    if (result) return result;
+    // Clear previous timer to avoid leak on early return
     if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {}, 0); // reserve slot for next iteration
   }
+  if (timer) clearTimeout(timer);
 
   return null;
 }
