@@ -38,7 +38,7 @@ import { createLogger } from '../src/logger';
 
 const log = createLogger('gpu-deploy');
 import { getBestLatencyByGpuModel } from './latency-db';
-import { getGpuSortBy, getDeployTimeoutMin, getGpuPriorityList, DEFAULT_GPU_PRIORITY, getAutoRecoveryEnabled, getAutoRecoveryMaxRetries } from '../src/gpu-providers/deploy-settings';
+import { getGpuSortBy, getDeployTimeoutMin, getDeployTimeoutMinForProvider, getGpuPriorityList, DEFAULT_GPU_PRIORITY, getAutoRecoveryEnabled, getAutoRecoveryMaxRetries } from '../src/gpu-providers/deploy-settings';
 import {
   BLACKWELL_TO_STANDARD, STANDARD_TO_BLACKWELL,
   PROVIDER_CHAIN,
@@ -1860,6 +1860,10 @@ export async function startDeployRace(
   const deployStartedAt = Date.now();
   const raceN = Math.min(raceCount, 10); // cap at 10
 
+  if (raceN > 1) {
+    log.log(`[race] WARNING: race deploy with ${raceN} parallel instances — ${raceN - 1} loser(s) will be billed for boot time (~${getDeployTimeoutMinForProvider('vast')} min max). Cost = (raceCount-1) × costPerHr × boot_min/60.`);
+  }
+
   // Build (tier, gpuType) pair list using provider-interleaved ordering:
   // Prefer diversity across providers before repeating the same provider.
   // e.g. [Vast×4090, TDock×4090, Vast×A6000, TDock×A6000, Vast×4090 ...]
@@ -2003,7 +2007,7 @@ export async function startDeployRace(
   await Promise.all(candidates.map(async (c, idx) => {
     const credentials = { apiKey: c.tier.apiKey, authId: c.tier.authId };
     let localEndpoint = c.endpoint;
-    const timeoutMs = getDeployTimeoutMin() * 60_000;
+    const timeoutMs = getDeployTimeoutMinForProvider(c.tier.name) * 60_000;
 
     while (!raceDone && !deployCancelled) {
       if (Date.now() - deployStartedAt > timeoutMs) {
@@ -2094,6 +2098,10 @@ export async function startDeployRace(
           `alive=${Math.round(aliveMs / 1000)}s` +
           (wastedUsd > 0 ? ` wasted≈$${wastedUsd.toFixed(3)}` : ''),
         );
+        logGpuEvent('race_loser_destroyed', c.tier.name, true, {
+          durationMs: aliveMs,
+          metadata: { instanceId: c.instanceId, gpuType: c.gpuType, reason, wastedUsd: +wastedUsd.toFixed(4), raceCount: candidates.length },
+        });
       } catch (err) {
         log.warn(`[race] Failed to terminate slot ${idx} (${reason}): ${err}`);
       }
@@ -2468,7 +2476,7 @@ export async function pollHealthUntilReady(
 
   while (true) {
     if (deployCancelled) return { result: 'cancelled' };
-    const deployTimeoutMs = getDeployTimeoutMin() * 60_000;
+    const deployTimeoutMs = getDeployTimeoutMinForProvider(providerName) * 60_000;
     const totalElapsedMs = Date.now() - deployStartedAt;
 
     // ── Global deploy timeout guard ──

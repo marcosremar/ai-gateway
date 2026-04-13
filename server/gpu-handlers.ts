@@ -674,11 +674,12 @@ function _startDeployAndRespond(
   const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
+  // Reset cancel flag FIRST so setDeployState won't be blocked by the guard
+  setDeployCancelled(false);
+
   // Generate a unique deploy ID for tracking this deploy through its lifecycle
   const deployId = generateDeployId();
   setDeployState({ deployId });
-
-  setDeployCancelled(false);
   try {
     deploymentSM.startDeploying();
   } catch (smErr) {
