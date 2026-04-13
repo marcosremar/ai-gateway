@@ -321,6 +321,35 @@ async function cmdApps(sub?: string) {
   }
 }
 
+async function cmdBalance() {
+  const { url, key } = getConfig();
+  const s = spinner('Checking balances...');
+  const res = await fetch(`${url}/health`, { headers: headers(key), signal: AbortSignal.timeout(10000) });
+  s.stop();
+  if (!res.ok) { console.error('Gateway unreachable'); process.exit(1); }
+  const data = await res.json();
+  const balances = data.providerBalances || [];
+  if (balances.length === 0) {
+    console.log('No provider balances available (proxy-only mode or no keys configured).');
+    return;
+  }
+  console.log(`${c.bold}Provider Balances${c.reset}\n`);
+  for (const b of balances) {
+    const name = (b.provider || b.name || '?').padEnd(14);
+    const bal = b.balance != null ? `$${Number(b.balance).toFixed(2)}` : 'N/A';
+    const icon = b.low ? `${c.red}▲${c.reset}` : b.balance != null ? `${c.green}●${c.reset}` : `${c.dim}○${c.reset}`;
+    const warn = b.low ? ` ${c.red}LOW${c.reset}` : '';
+    console.log(`  ${icon} ${name} ${bal}${warn}`);
+  }
+  // Budget
+  if (data.budget) {
+    const b = data.budget;
+    const limit = b.dailyLimitUsd != null ? ` / $${b.dailyLimitUsd}` : '';
+    const warn = b.exceeded ? ` ${c.red}EXCEEDED${c.reset}` : '';
+    console.log(`\n${c.bold}Daily GPU Spend${c.reset}  $${b.dailySpendUsd}${limit}${warn}`);
+  }
+}
+
 async function cmdChat(message: string, opts: { model?: string; stream?: boolean; maxTokens?: number }) {
   const { url, key } = getConfig();
   const model = opts.model || 'llama-3.1-8b-instant';
@@ -1113,6 +1142,7 @@ Commands:
   gpu             Manage GPU deployments (status, deploy, stop, logs)
   apps            List and manage app configurations
   profiles        Alias for 'apps'
+  balance         Show provider account balances and daily GPU spend
   logs            Show recent request log
   metrics         Show gateway metrics (Prometheus or JSON)
   latency         GPU host latency analysis (hosts, probe, best)
@@ -1557,6 +1587,23 @@ ai-gateway server — Manage the local dev server
   // Auto-start local dev server if needed (only for localhost URLs)
   await ensureLocalServer();
 
+  // ── Low balance warning ($5 threshold) ──
+  // Check on every command so the user is always aware of billing risks.
+  try {
+    const { url: gwUrl } = getConfig();
+    const hRes = await fetch(`${gwUrl}/health`, { signal: AbortSignal.timeout(3000) }).catch(() => null);
+    if (hRes?.ok) {
+      const hData = await hRes.json().catch(() => null);
+      const balances = hData?.providerBalances || [];
+      const low = balances.filter((b: any) => b.balance != null && b.balance < 5 && b.balance >= 0);
+      if (low.length > 0) {
+        const names = low.map((b: any) => `${b.provider || b.name}: $${Number(b.balance).toFixed(2)}`).join(', ');
+        console.error(`\n${c.red}${c.bold}⚠ LOW BALANCE WARNING${c.reset}${c.red} — ${names}`);
+        console.error(`  Providers with <$5 may fail to deploy or auto-stop machines.${c.reset}\n`);
+      }
+    }
+  } catch { /* best effort — don't block commands */ }
+
   try {
     switch (cmd) {
       case 'health':
@@ -1586,6 +1633,9 @@ ai-gateway server — Manage the local dev server
       case 'apps':
       case 'profiles':  // legacy alias
         await cmdApps(args[1]);
+        break;
+      case 'balance':
+        await cmdBalance();
         break;
       case 'chat': {
         let msg = args.slice(1).filter(a => !a.startsWith('-')).join(' ');
