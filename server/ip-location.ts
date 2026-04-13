@@ -54,9 +54,9 @@ export async function fetchIpLocation(ip: string): Promise<IpLocation | null> {
       `https://ipapi.co/${encodeURIComponent(ip)}/json/`,
       { signal: AbortSignal.timeout(4000) },
     );
-    if (!res.ok) { _cache.set(ip, null); return null; }
+    if (!res.ok) { return null; }  // don't cache failures — allow retry
     const d = await res.json() as Record<string, unknown>;
-    if (d.error) { _cache.set(ip, null); return null; }
+    if (d.error) { return null; }  // don't cache API errors — allow retry
 
     const loc: IpLocation = {
       country: String(d.country_name || ''),
@@ -72,8 +72,7 @@ export async function fetchIpLocation(ip: string): Promise<IpLocation | null> {
     _cache.set(ip, loc);
     return loc;
   } catch {
-    _cache.set(ip, null);
-    return null;
+    return null;  // don't cache network errors — allow retry
   }
 }
 
@@ -131,7 +130,7 @@ export async function fetchRunPodDatacenter(podId: string, apiKey: string): Prom
       body: JSON.stringify({ query: gql }),
       signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) { _cache.set(cacheKey, null); return null; }
+    if (!res.ok) { return null; }  // don't cache failures — allow retry
 
     const json = await res.json() as Record<string, unknown>;
     const dcId = (json?.data as Record<string, unknown>)?.pod as Record<string, unknown>;
@@ -140,14 +139,13 @@ export async function fetchRunPodDatacenter(podId: string, apiKey: string): Prom
     );
 
     const dc = RUNPOD_DC[dataCenterId];
-    if (!dc) { _cache.set(cacheKey, null); return null; }
+    if (!dc) { return null; }  // unknown DC — don't cache, API might add it later
 
     const loc: IpLocation = { ...dc, flag: codeToFlag(dc.countryCode) };
     _cache.set(cacheKey, loc);
     return loc;
   } catch {
-    _cache.set(cacheKey, null);
-    return null;
+    return null;  // don't cache network errors — allow retry
   }
 }
 

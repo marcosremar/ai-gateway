@@ -5,11 +5,18 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import {
   prisma, latencyRing, latencyRingIdx, setLatencyRingIdx, LATENCY_RING_SIZE,
-  metricsCounters, providerMetrics, pendingDbWrites, setPendingDbWrites,
-  consecutiveDbFailures, setConsecutiveDbFailures, DB_FAILURE_WARN_THRESHOLD,
+  metricsCounters, providerMetrics, setPendingDbWrites,
+  setConsecutiveDbFailures, DB_FAILURE_WARN_THRESHOLD,
   activeDeploySessionId, setActiveDeploySessionId, startedAt, deployState,
   dailyGpuSpendUsd, DAILY_BUDGET_USD,
 } from './state';
+
+// Module-level counters for pending DB writes and consecutive failures.
+// These are read directly inside async closures (.then/.catch), so they must
+// be module-scoped variables — never captured-by-value imports.  The setter
+// functions in state.ts are still called to keep the exported values in sync.
+let _pendingWrites = 0;
+let _consecutiveFailures = 0;
 import { getOrCreateRequestId, setRequestIdHeader } from './http-utils';
 import { getTranslationCacheStats } from './ai-handlers';
 
@@ -90,13 +97,16 @@ export function logRequest(entry: RequestLogInput & { requestId?: string }) {
     outputPreview: entry.outputPreview ?? null,
   };
 
-  setPendingDbWrites(pendingDbWrites + 1);
+  _pendingWrites++;
+  setPendingDbWrites(_pendingWrites);
 
   const tryWrite = (attempt: number) => {
     prisma.requestLog
       .create({ data: dbData })
       .then(() => {
-        setPendingDbWrites(pendingDbWrites - 1);
+        _pendingWrites = Math.max(0, _pendingWrites - 1);
+        setPendingDbWrites(_pendingWrites);
+        _consecutiveFailures = 0;
         setConsecutiveDbFailures(0);
       })
       .catch((err: unknown) => {
@@ -105,10 +115,12 @@ export function logRequest(entry: RequestLogInput & { requestId?: string }) {
           setTimeout(() => tryWrite(attempt + 1), 500);
           return;
         }
-        setPendingDbWrites(pendingDbWrites - 1);
+        _pendingWrites = Math.max(0, _pendingWrites - 1);
+        setPendingDbWrites(_pendingWrites);
         metricsCounters.dbLogFailures++;
-        setConsecutiveDbFailures(consecutiveDbFailures + 1);
-        if (consecutiveDbFailures === DB_FAILURE_WARN_THRESHOLD) {
+        _consecutiveFailures++;
+        setConsecutiveDbFailures(_consecutiveFailures);
+        if (_consecutiveFailures === DB_FAILURE_WARN_THRESHOLD) {
           console.error(`[db] WARN: ${DB_FAILURE_WARN_THRESHOLD} consecutive DB write failures — database may be unavailable`);
         }
         console.warn('[db] Failed to log request (attempt %d):', attempt + 1, err);
@@ -140,7 +152,8 @@ export function logGpuEvent(
     logGpuEventToFile(event, provider, success, opts);
   } catch { /* file-logger self-reports on stderr */ }
 
-  setPendingDbWrites(pendingDbWrites + 1);
+  _pendingWrites++;
+  setPendingDbWrites(_pendingWrites);
   prisma.gpuEvent
     .create({
       data: {
@@ -155,13 +168,17 @@ export function logGpuEvent(
       },
     })
     .then(() => {
-      setPendingDbWrites(pendingDbWrites - 1);
+      _pendingWrites = Math.max(0, _pendingWrites - 1);
+      setPendingDbWrites(_pendingWrites);
+      _consecutiveFailures = 0;
       setConsecutiveDbFailures(0);
     })
     .catch((err: unknown) => {
-      setPendingDbWrites(pendingDbWrites - 1);
-      setConsecutiveDbFailures(consecutiveDbFailures + 1);
-      if (consecutiveDbFailures === DB_FAILURE_WARN_THRESHOLD) {
+      _pendingWrites = Math.max(0, _pendingWrites - 1);
+      setPendingDbWrites(_pendingWrites);
+      _consecutiveFailures++;
+      setConsecutiveDbFailures(_consecutiveFailures);
+      if (_consecutiveFailures === DB_FAILURE_WARN_THRESHOLD) {
         console.error(`[db] WARN: ${DB_FAILURE_WARN_THRESHOLD} consecutive DB write failures — database may be unavailable`);
       }
       console.warn('[db] Failed to log GPU event:', err);

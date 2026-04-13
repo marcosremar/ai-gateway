@@ -47,6 +47,8 @@ function botHeaders(extra: Record<string, string> = {}): Record<string, string> 
 
 /** Connect to the cloud bot's /ws/audio-out to pull audio (no tunnel needed). */
 let botAudioPullWs: import('ws').WebSocket | null = null;
+/** Watchdog generation counter — incremented on each join to cancel previous watchdog loops. */
+let botWatchdogGen = 0;
 function startBotAudioPull(botEndpoint: string) {
   stopBotAudioPull();
   // Use fly.dev hostname (not IP) for valid TLS certificate
@@ -834,13 +836,16 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
         }
         console.log(`[bot-watchdog] Probing ${probeUrl} every 10s (machine-id=${botState.podId ?? 'n/a'})`);
 
+        // Cancel previous watchdog loop (if user re-joined quickly)
+        const myGen = ++botWatchdogGen;
+
         let wasInMeeting = false;
         let reconnectAttempts = 0;
         let consecutiveProbeFailures = 0;
         const MAX_RECONNECTS = 3;
         const MAX_PROBE_FAILURES = 6; // 6 × 10s = 60s of unreachable machine → declare crashed
 
-        while (botState.status === 'joined' && botState.meetingUrl) {
+        while (botState.status === 'joined' && botState.meetingUrl && myGen === botWatchdogGen) {
           await new Promise(r => setTimeout(r, 10_000)); // check every 10s
           if (botState.status !== 'joined') break;
 
@@ -861,7 +866,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
                   const rejoinRes = await fetch(`${botEndpoint}/join`, {
                     method: 'POST',
                     headers: botHeaders(),
-                    body: JSON.stringify(joinBody),
+                    body: JSON.stringify(config),
                     signal: AbortSignal.timeout(30_000),
                   });
                   if (rejoinRes.ok) {
