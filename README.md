@@ -271,4 +271,3 @@ Ground truth: professional human subtitles (TEDx manual captions). WER-sem = WER
 ## License
 
 Private — Part of the Parle ecosystem.
-# Test edit by Alice
