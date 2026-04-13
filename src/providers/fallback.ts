@@ -467,6 +467,7 @@ export async function withProviderFallback<T>(
 
         if (effectiveTimeout) {
           let timeoutHandle: ReturnType<typeof setTimeout>;
+          let cleanedUp = false;
           const timeoutRace = new Promise<never>((_, reject) => {
             timeoutHandle = setTimeout(() => {
               const err = new Error(
@@ -475,9 +476,12 @@ export async function withProviderFallback<T>(
               reject(markAsTimeout(err));
             }, effectiveTimeout);
           });
-          call = Promise.race([call, timeoutRace]).finally(() =>
-            clearTimeout(timeoutHandle!),
-          );
+          call = Promise.race([call, timeoutRace]).finally(() => {
+            if (!cleanedUp) {
+              cleanedUp = true;
+              clearTimeout(timeoutHandle!);
+            }
+          });
         }
 
         const result = await call;
@@ -566,6 +570,7 @@ export async function withProviderFallback<T>(
                 `${entry.provider}/${upgradedModel}`,
               );
               iterChain.splice(i + 1, 0, upgradeEntry);
+              i--; // process the inserted entry on next iteration
             }
           }
           break; // stop retrying this entry, move to next in iterChain
