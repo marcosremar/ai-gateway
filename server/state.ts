@@ -144,10 +144,15 @@ export interface DeploymentState {
   providerMeta: Record<string, unknown>;  // host-level metadata for reputation tracking
   /** Ordered log of state transitions with timestamps — for UI timeline and debugging */
   transitions: Array<{ status: string; step: string; provider: string; ts: number; elapsed: number; detail?: string }>;
+  /** GPU hardware metrics from /health endpoint (updated by monitor probe) */
+  gpuTemp: number;           // GPU temperature in Celsius (0 = unknown)
+  gpuUtil: number;           // GPU utilization % (0-100, -1 = unknown)
+  gpuMemUsed: number;        // GPU memory used in GB (0 = unknown)
+  gpuMemTotal: number;       // GPU memory total in GB (0 = unknown)
 }
 
 export let deployState: DeploymentState = {
-  status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [],
+  status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0,
 };
 export let deployCancelled = false;
 export let deployLock = false;
@@ -345,7 +350,7 @@ export function resetDeployState() {
   deployTensordockAuthId = '';
   deployModalApiKey = '';
   activeProvider = '';
-  deployState = { status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [] };
+  deployState = { status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0 };
   clearPersistedDeploy();
   resetTtsWarmth(); // new pod = cold TTS
   resetGpuReadinessState();
@@ -510,6 +515,26 @@ export function resetPerStageLatencyRings(): void {
   perStageRingIdx.stt = 0;
   perStageRingIdx.llm = 0;
   perStageRingIdx.tts = 0;
+}
+
+/**
+ * Detect latency degradation trend early (before P95 threshold is hit).
+ * Compares the average of the last 10 samples vs the average of the previous 10.
+ * If increasing by >20%, returns 'degrading'. If decreasing by >20%, returns 'improving'.
+ */
+export function getLatencyTrend(): { trend: 'stable' | 'degrading' | 'improving'; slopeMs: number; samples: number } {
+  if (latencyRing.length < 20) return { trend: 'stable', slopeMs: 0, samples: latencyRing.length };
+
+  const recent = latencyRing.slice(-10);
+  const previous = latencyRing.slice(-20, -10);
+  const avgRecent = recent.reduce((s, v) => s + v, 0) / recent.length;
+  const avgPrevious = previous.reduce((s, v) => s + v, 0) / previous.length;
+  const slopeMs = Math.round((avgRecent - avgPrevious) * 100) / 100;
+  const pctChange = avgPrevious > 0 ? (slopeMs / avgPrevious) * 100 : 0;
+
+  if (pctChange > 20) return { trend: 'degrading', slopeMs, samples: 20 };
+  if (pctChange < -20) return { trend: 'improving', slopeMs, samples: 20 };
+  return { trend: 'stable', slopeMs, samples: 20 };
 }
 
 /**

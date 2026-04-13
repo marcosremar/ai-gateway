@@ -488,6 +488,44 @@ async function cmdGpuDeploy(opts: { image?: string; gpuTypes?: string }) {
   });
   console.log('Deploy started:');
   console.log(JSON.stringify(data, null, 2));
+
+  // Poll /v1/gpu/status every 3s and show progress until ready, error, or timeout (~10 min)
+  console.log('\nMonitoring progress...\n');
+  let lastPhase = '';
+  for (let i = 0; i < 200; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const status = await fetchJSON(`${url}/v1/gpu/status`, { headers: headers(key) });
+      const phase = status.step || status.status || '?';
+      const msg = status.message || '';
+      const gpu = status.gpuType || '';
+      const line = `  ${phase} ${gpu} ${msg}`.padEnd(80);
+      // Print a new line when phase changes, otherwise overwrite
+      if (phase !== lastPhase) {
+        if (lastPhase) process.stderr.write('\n');
+        process.stderr.write(line);
+        lastPhase = phase;
+      } else {
+        process.stderr.write(`\r${line}`);
+      }
+      if (status.status === 'ready') {
+        console.log('\n\nGPU ready: ' + (status.endpoint || '(no endpoint)'));
+        break;
+      }
+      if (status.status === 'error') {
+        console.log('\n\nDeploy error: ' + (status.message || 'unknown'));
+        break;
+      }
+      if (status.status === 'idle' && i > 2) {
+        console.log('\n\nDeploy stopped.');
+        break;
+      }
+    } catch {
+      // Server unreachable or non-JSON response — stop polling
+      console.log('\n\nLost connection to server.');
+      break;
+    }
+  }
 }
 
 async function cmdGpuStop() {

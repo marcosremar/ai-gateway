@@ -38,7 +38,7 @@ import { createLogger } from '../src/logger';
 
 const log = createLogger('gpu-deploy');
 import { getBestLatencyByGpuModel } from './latency-db';
-import { getGpuSortBy, getDeployTimeoutMin, getGpuPriorityList, DEFAULT_GPU_PRIORITY } from '../src/gpu-providers/deploy-settings';
+import { getGpuSortBy, getDeployTimeoutMin, getGpuPriorityList, DEFAULT_GPU_PRIORITY, getAutoRecoveryEnabled, getAutoRecoveryMaxRetries } from '../src/gpu-providers/deploy-settings';
 import {
   BLACKWELL_TO_STANDARD, STANDARD_TO_BLACKWELL,
   PROVIDER_CHAIN,
@@ -57,6 +57,70 @@ export function setIdleDestroyMs(ms: number) { IDLE_DESTROY_MS = ms; }
 
 export const GPU_TYPE_CACHE_TTL_MS = 30 * 60_000; // refresh GPU type cache every 30 min
 export let gpuTypeCacheRefreshTimer: Timer | null = null;
+
+// ── GPU Health Metrics Parsing ─────────────────────────────────────────────
+
+/** Track consecutive zero-utilization probes to detect idle GPU (5+ min at 0% = warning). */
+let consecutiveZeroUtilProbes = 0;
+const ZERO_UTIL_WARNING_THRESHOLD = 10; // 10 probes * 30s = 5 min
+
+/**
+ * Parse GPU hardware metrics from the /health response and store in deployState.
+ * Logs warnings for thermal throttling (>85C), idle GPU (0% util for 5+ min),
+ * and near-OOM memory usage (>95%).
+ */
+function parseAndStoreGpuMetrics(data: Record<string, unknown>): void {
+  const temp = typeof data.gpu_temp_c === 'number' ? data.gpu_temp_c
+    : typeof data.gpu_temperature === 'number' ? data.gpu_temperature
+    : typeof data.temperature === 'number' ? data.temperature : 0;
+
+  const util = typeof data.gpu_util_pct === 'number' ? data.gpu_util_pct
+    : typeof data.gpu_utilization === 'number' ? data.gpu_utilization
+    : typeof data.utilization === 'number' ? data.utilization : -1;
+
+  const memUsed = typeof data.gpu_mem_used_gb === 'number' ? data.gpu_mem_used_gb
+    : typeof data.gpu_memory_used === 'number' ? data.gpu_memory_used
+    : typeof data.vram_used_gb === 'number' ? data.vram_used_gb : 0;
+
+  const memTotal = typeof data.gpu_mem_total_gb === 'number' ? data.gpu_mem_total_gb
+    : typeof data.gpu_memory_total === 'number' ? data.gpu_memory_total
+    : typeof data.vram_total_gb === 'number' ? data.vram_total_gb : 0;
+
+  // Only update state if we got at least one metric
+  if (temp > 0 || util >= 0 || memUsed > 0 || memTotal > 0) {
+    setDeployState({
+      gpuTemp: temp,
+      gpuUtil: util,
+      gpuMemUsed: memUsed,
+      gpuMemTotal: memTotal,
+    });
+  }
+
+  // Thermal warning: >85C indicates throttling risk
+  if (temp > 85) {
+    log.warn(`[gpu] HIGH TEMPERATURE: ${temp}C — GPU may be thermal throttling`);
+    setDeployState({ alert: `GPU temperature high: ${temp}C (throttling risk above 85C)` });
+  }
+
+  // Idle GPU warning: 0% utilization for 5+ minutes (10 consecutive probes at 30s interval)
+  if (util === 0) {
+    consecutiveZeroUtilProbes++;
+    if (consecutiveZeroUtilProbes === ZERO_UTIL_WARNING_THRESHOLD) {
+      log.warn(`[gpu] GPU utilization 0% for ~${Math.round(ZERO_UTIL_WARNING_THRESHOLD * GPU_MONITOR_INTERVAL_MS / 60_000)}min — GPU idle (wasting compute)`);
+    }
+  } else if (util > 0) {
+    consecutiveZeroUtilProbes = 0;
+  }
+
+  // Near-OOM warning: memory usage >95%
+  if (memTotal > 0 && memUsed > 0) {
+    const memPct = (memUsed / memTotal) * 100;
+    if (memPct > 95) {
+      log.warn(`[gpu] HIGH MEMORY: ${memUsed.toFixed(1)}/${memTotal.toFixed(1)}GB (${memPct.toFixed(0)}%) — OOM risk`);
+      setDeployState({ alert: `GPU memory critical: ${memUsed.toFixed(1)}/${memTotal.toFixed(1)}GB (${memPct.toFixed(0)}%)` });
+    }
+  }
+}
 
 /** Refresh GPU type cache from all providers and save to DB. */
 export async function refreshGpuTypeCache(): Promise<void> {
@@ -219,9 +283,13 @@ let p95ViolationCount: Record<string, number> = { stt: 0, llm: 0, tts: 0 };
 let budgetSoftWarned = false;
 let lastBudgetCalcTime = 0;
 
+// Crash auto-recovery: redeploy on different provider after crash (max 2 attempts)
+let monitorCrashRecoveryAttempts = 0;
+const MAX_MONITOR_CRASH_RECOVERY = 2;
+
 // Idle warning: warn once before auto-terminate, reset on activity
 let idleWarned = false;
-export function resetIdleState() { idleWarned = false; monitorDelayMs = GPU_MONITOR_INTERVAL_MS; }
+export function resetIdleState() { idleWarned = false; monitorDelayMs = GPU_MONITOR_INTERVAL_MS; monitorCrashRecoveryAttempts = 0; }
 
 // ── Staged Warmth Monitor ────────────────────────────────────────────────────
 // After initial deploy, TTS loads first and pod becomes healthy ("degraded").
@@ -295,6 +363,7 @@ export function startGpuMonitoring() {
   monitorConsecFails = 0;
   monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
   monitorBackoffMaxAlerted = false;
+  monitorCrashRecoveryAttempts = 0;
   // Reset idle clock so the timer starts fresh from GPU-ready, not from last session's request.
   // Without this, a pod that boots 12 min after the previous session's last request immediately
   // hits the 10-min idle timeout and self-terminates.
@@ -348,6 +417,10 @@ export function scheduleNextMonitorProbe() {
         if (probeResult.data.gpu_vram_gb && !deployState.providerMeta?.gpuVramGb) {
           setDeployState({ providerMeta: { ...deployState.providerMeta, gpuVramGb: Number(probeResult.data.gpu_vram_gb) } });
         }
+
+        // ── GPU hardware metrics parsing (temperature, utilization, memory) ──
+        parseAndStoreGpuMetrics(probeResult.data);
+
         // Activate full GPU pipeline when STT + LLM become warm (staged boot)
         if (isStageWarm('stt') && isStageWarm('llm') && !translationDefaults.gpuEndpoint && !isReadinessCheckInProgress() && deployState.endpoint) {
           log.log('[gpu] STT + LLM warm — running readiness benchmark via monitor');
@@ -409,6 +482,38 @@ export function scheduleNextMonitorProbe() {
               }
             }
           }
+
+          // Auto-redeploy on crash with different provider: after 10 consecutive failures
+          // (restart at 5 didn't help), try redeploying on a different provider
+          if (monitorConsecFails === 10 && getAutoRecoveryEnabled()) {
+            const maxRetries = getAutoRecoveryMaxRetries() || MAX_MONITOR_CRASH_RECOVERY;
+            if (monitorCrashRecoveryAttempts < maxRetries) {
+              const crashedProvider = deployState.provider;
+              monitorCrashRecoveryAttempts++;
+              log.warn(`[gpu] Auto-recovery: redeploying on different provider after crash on ${crashedProvider} (attempt ${monitorCrashRecoveryAttempts}/${maxRetries})`);
+              broadcastWs({
+                type: 'gpu:deploy', phase: 'crash_recovery',
+                crashedProvider,
+                attempt: monitorCrashRecoveryAttempts,
+                maxAttempts: maxRetries,
+              });
+
+              // Terminate the crashed pod and redeploy via the existing auto-recovery flow
+              try {
+                await autoTerminateGpu();
+                await startAutoRecoveryDeploy();
+                log.log(`[gpu] Auto-recovery deploy initiated (attempt ${monitorCrashRecoveryAttempts}) — crashed provider: ${crashedProvider}`);
+              } catch (recoveryErr) {
+                log.error(`[gpu] Auto-recovery deploy failed: ${recoveryErr instanceof Error ? recoveryErr.message : recoveryErr}`);
+                broadcastWs({ type: 'gpu:deploy', phase: 'crash_recovery_failed', error: recoveryErr instanceof Error ? recoveryErr.message : 'unknown' });
+              }
+              monitorRunning = false;
+              return; // Stop monitoring — the new deploy will start its own monitor
+            } else {
+              log.error(`[gpu] Auto-recovery exhausted (${monitorCrashRecoveryAttempts}/${maxRetries} attempts) — giving up`);
+              broadcastWs({ type: 'gpu:deploy', phase: 'crash_recovery_exhausted', attempts: monitorCrashRecoveryAttempts });
+            }
+          }
         }
         // Balance check for RunPod — low balance causes pods to be auto-terminated
         if (activeProvider === 'runpod' && deployApiKey && monitorConsecFails >= 2) {
@@ -462,6 +567,21 @@ export function scheduleNextMonitorProbe() {
             budgetSoftWarned = true;
             log.warn(`[budget] SOFT LIMIT: $${dailyGpuSpendUsd.toFixed(2)} (${Math.round(pct * 100)}% of $${DAILY_BUDGET_USD.toFixed(2)}) — new deploys blocked`);
             broadcastWs({ type: 'gpu:budget', action: 'soft-limit', spend: dailyGpuSpendUsd, budget: DAILY_BUDGET_USD, forecast });
+          }
+
+          // Continuous spend forecast: warn early when projected EOD spend will exceed budget
+          const hoursRemainingToday = 24 - new Date().getUTCHours() - (new Date().getUTCMinutes() / 60);
+          const forecastEod = dailyGpuSpendUsd + (deployState.costPerHr * hoursRemainingToday);
+          const forecastPct = forecastEod / DAILY_BUDGET_USD;
+          if (forecastPct > 0.8 && pct < 0.5) {
+            log.warn(`[budget] Forecast: $${forecastEod.toFixed(2)} by EOD (budget: $${DAILY_BUDGET_USD.toFixed(2)}) — current spend only ${Math.round(pct * 100)}%`);
+            broadcastWs({
+              type: 'gpu:budget_forecast',
+              forecastEod: Math.round(forecastEod * 100) / 100,
+              budget: DAILY_BUDGET_USD,
+              pct: Math.round(forecastPct * 100),
+              currentSpend: Math.round(dailyGpuSpendUsd * 100) / 100,
+            });
           }
         }
       }
@@ -2299,6 +2419,11 @@ export async function pollHealthUntilReady(
   let firstNonTransientErrorAt = 0;        // timestamp when non-transient HTTP errors started
   let consecutiveNonTransient = 0;         // consecutive 4xx responses from /health
 
+  // Stalled download detection: track identical health responses during boot
+  let lastHealthBody = '';
+  let identicalHealthCount = 0;
+  let stalledWarned = false;
+
   // TODO: pipe spec.healthEndpoint through pollHealthUntilReady() signature so
   // apps can override this (e.g. '/healthz', '/api/status'). For now we default
   // to '/health' since all gateway-managed images expose that path.
@@ -2685,6 +2810,27 @@ export async function pollHealthUntilReady(
           const data = await res.json();
           // Update per-stage warmth from health response (services.tts/whisper/llama_cpp)
           updateGpuModelWarmth(data);
+
+          // ── Stalled download detection ────────────────────────────────
+          // During boot, if the health response body is identical for
+          // multiple consecutive checks, the download/load may be stalled.
+          const healthBodyStr = JSON.stringify(data);
+          if (healthBodyStr === lastHealthBody) {
+            identicalHealthCount++;
+            if (identicalHealthCount >= 5 && !stalledWarned) {
+              stalledWarned = true;
+              const stalledSec = identicalHealthCount * 30; // approximate, since poll is ~30s
+              log.warn(`[gpu] Download appears stalled — same /health response for ${stalledSec}s (${identicalHealthCount} checks)`);
+              broadcastWs({ type: 'gpu:deploy', phase: 'stalled', provider: providerName, stalledSeconds: stalledSec, identicalChecks: identicalHealthCount });
+              setDeployState({ alert: `Download may be stalled — no progress for ${stalledSec}s` });
+            } else if (identicalHealthCount === 3) {
+              log.log(`[gpu] Possible stall — identical /health response for 3 consecutive checks`);
+            }
+          } else {
+            identicalHealthCount = 0;
+            lastHealthBody = healthBodyStr;
+            stalledWarned = false;
+          }
 
           // ── Fail-fast on app-reported error ──────────────────────────
           // The container's /health is HTTP 200 (healthy from a TCP/HTTP

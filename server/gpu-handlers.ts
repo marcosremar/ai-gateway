@@ -39,6 +39,112 @@ import { getBestLatencyByGpuModel, sortGpuTypesByLatency } from './latency-db';
 
 // ── GPU management endpoints ────────────────────────────────────────────────
 
+// ── VRAM vs Model Size Pre-Deploy Validation ────────────────────────────────
+
+/** Known VRAM (GB) per GPU type name. Used for pre-deploy model-size validation. */
+const GPU_VRAM_GB: Record<string, number> = {
+  'NVIDIA GeForce RTX 5090': 32,
+  'NVIDIA GeForce RTX 5080': 16,
+  'NVIDIA GeForce RTX 5070 Ti': 16,
+  'NVIDIA GeForce RTX 5070': 12,
+  'NVIDIA GeForce RTX 4090': 24,
+  'NVIDIA GeForce RTX 4080': 16,
+  'NVIDIA GeForce RTX 4070 Ti': 12,
+  'NVIDIA GeForce RTX 3090': 24,
+  'NVIDIA GeForce RTX 3080': 10,
+  'NVIDIA RTX A6000': 48,
+  'NVIDIA RTX A5000': 24,
+  'NVIDIA RTX A4000': 16,
+  'NVIDIA L40S': 48,
+  'NVIDIA L40': 48,
+  'NVIDIA A40': 48,
+  'NVIDIA A100-SXM4-80GB': 80,
+  'NVIDIA A100 80GB PCIe': 80,
+  'NVIDIA A100-SXM4-40GB': 40,
+  'NVIDIA A100 40GB PCIe': 40,
+  'NVIDIA H100 80GB HBM3': 80,
+  'NVIDIA H200': 141,
+  'NVIDIA V100': 16,
+};
+
+/**
+ * Estimate the minimum VRAM (GB) a model needs based on size hints in
+ * the Docker image name, onstart command, env vars, or llmModel field.
+ * Returns 0 if no model size hint is detected.
+ */
+function estimateModelVramGb(dockerImage: string, dockerStartCmd: string, env: Record<string, string>, llmModel: string): { vramGb: number; hint: string } {
+  const haystack = `${dockerImage} ${dockerStartCmd} ${JSON.stringify(env)} ${llmModel}`.toLowerCase();
+
+  if (/\b(70b|65b|72b)\b/.test(haystack)) return { vramGb: 48, hint: '70B-class model (~48GB VRAM)' };
+  if (/\b(32b|33b|34b|35b)\b/.test(haystack)) return { vramGb: 24, hint: '32B-class model (~24GB VRAM)' };
+  if (/\b(13b|14b|15b)\b/.test(haystack)) return { vramGb: 16, hint: '13B-class model (~16GB VRAM)' };
+  if (/\b(7b|8b)\b/.test(haystack)) return { vramGb: 8, hint: '7B-class model (~8GB VRAM)' };
+  if (/\b(3b|4b)\b/.test(haystack)) return { vramGb: 4, hint: '3-4B model (~4GB VRAM)' };
+
+  return { vramGb: 0, hint: '' };
+}
+
+/** GPU types with enough VRAM for the given requirement. */
+function gpuTypesWithSufficientVram(gpuTypes: string[], requiredVramGb: number): string[] {
+  return gpuTypes.filter(gpu => {
+    const vram = GPU_VRAM_GB[gpu];
+    return vram === undefined || vram >= requiredVramGb;
+  });
+}
+
+/** GPU names that are known to have insufficient VRAM. */
+function gpuTypesWithInsufficientVram(gpuTypes: string[], requiredVramGb: number): Array<{ gpu: string; vram: number }> {
+  return gpuTypes
+    .filter(gpu => {
+      const vram = GPU_VRAM_GB[gpu];
+      return vram !== undefined && vram < requiredVramGb;
+    })
+    .map(gpu => ({ gpu, vram: GPU_VRAM_GB[gpu] }));
+}
+
+/**
+ * Validate that requested GPU types have enough VRAM for the detected model.
+ * Throws { status: 400, message } if ALL requested GPUs are too small.
+ * Logs a warning and filters out insufficient GPUs if some are adequate.
+ * Returns the (possibly filtered) GPU types list.
+ */
+function validateVramForModel(
+  gpuTypes: string[],
+  dockerImage: string,
+  dockerStartCmd: string,
+  env: Record<string, string>,
+  llmModel: string,
+  requestId: string,
+): string[] {
+  if (gpuTypes.length === 0) return gpuTypes;
+
+  const { vramGb: requiredVram, hint } = estimateModelVramGb(dockerImage, dockerStartCmd, env, llmModel);
+  if (requiredVram === 0) return gpuTypes;
+
+  const insufficient = gpuTypesWithInsufficientVram(gpuTypes, requiredVram);
+  if (insufficient.length === 0) return gpuTypes;
+
+  const sufficient = gpuTypesWithSufficientVram(gpuTypes, requiredVram);
+
+  if (sufficient.length === 0) {
+    const gpuList = insufficient.map(g => `${g.gpu} (${g.vram}GB)`).join(', ');
+    const suggestions = Object.entries(GPU_VRAM_GB)
+      .filter(([, v]) => v >= requiredVram)
+      .sort((a, b) => a[1] - b[1])
+      .slice(0, 4)
+      .map(([name, v]) => `${name} (${v}GB)`)
+      .join(', ');
+    throw {
+      status: 400,
+      message: `Model requires ~${requiredVram}GB VRAM (${hint}) but all requested GPUs are too small: ${gpuList}. Use: ${suggestions}`,
+    };
+  }
+
+  const removed = insufficient.map(g => `${g.gpu} (${g.vram}GB)`).join(', ');
+  console.warn(`[req=${requestId}] VRAM filter: removed ${removed} -- ${hint} needs ${requiredVram}GB. Keeping: ${sufficient.join(', ')}`);
+  return sufficient;
+}
+
 // ── Deploy request validation & config types ─────────────────────────────────
 
 /** Validated deploy configuration produced by _validateDeployRequest. */
@@ -222,6 +328,10 @@ interface TierSelectionResult {
   gpuPriorityByProvider: Record<string, string[]>;
   /** Providers excluded from this deploy due to low balance. */
   balanceWarnings: string[];
+  /** Estimated cheapest cost per hour from available offers (if known). */
+  estimatedCostPerHr?: number;
+  /** Total available balance across all providers (sum of checked balances). */
+  totalBalance?: number;
 }
 
 /**
@@ -237,6 +347,9 @@ async function _selectDeploymentTier(
     dockerImage, autoSelectGpu, region, minVramGb: minVramGbReq, preferSsd: preferSsdReq,
     providerFilter } = config;
 
+  // Accumulate provider balances for cost estimate in deploy response
+  let totalBalance = 0;
+
   // Pre-flight: validate RunPod key + check balance via RunpodClient
   let runpodApiKey = apiKey;
   if (runpodApiKey) {
@@ -244,6 +357,7 @@ async function _selectDeploymentTier(
       const runpodBal = await runpod.checkBalance({ apiKey: runpodApiKey });
       if (runpodBal !== null) {
         console.log(`[gpu] RunPod balance: $${runpodBal.balance.toFixed(2)}`);
+        totalBalance += runpodBal.balance;
         if (runpodBal.balance < 1.0) {
           console.warn(`[gpu] RunPod balance too low ($${runpodBal.balance.toFixed(2)}) — skipping provider`);
           runpodApiKey = '';  // exclude from tier list
@@ -265,6 +379,7 @@ async function _selectDeploymentTier(
       const bal = await tensordock.checkBalance({ apiKey: tensordockApiKey, authId: tensordockAuthId });
       if (bal !== null) {
         console.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly cost: $${bal.hourlyCost.toFixed(3)})`);
+        totalBalance += bal.balance;
         if (bal.balance < 0.5) {
           console.warn(`[gpu] TensorDock balance too low ($${bal.balance.toFixed(2)}) — skipping provider`);
           tensordockOpts = undefined;  // exclude from tier list
@@ -286,6 +401,7 @@ async function _selectDeploymentTier(
       const bal = await vast.checkBalance({ apiKey: effectiveVastApiKey });
       if (bal !== null) {
         console.log(`[gpu] Vast.ai balance: $${bal.balance.toFixed(2)}`);
+        totalBalance += bal.balance;
         if (bal.balance <= 0) {
           console.warn(`[gpu] Vast.ai balance is $${bal.balance.toFixed(2)} — skipping provider`);
           effectiveVastApiKey = '';  // exclude from tier list
@@ -373,6 +489,17 @@ async function _selectDeploymentTier(
     }
   }
 
+  // VRAM validation: filter out GPUs that are too small for the detected model size.
+  // Runs after GPU type resolution so we validate the final list (including auto-selected types).
+  gpuTypes = validateVramForModel(
+    gpuTypes,
+    config.dockerImage,
+    config.dockerStartCmd,
+    config.deployEnv,
+    config.llmModel,
+    requestId,
+  );
+
   // Latency-aware GPU type ordering: deprioritise types where ALL known hosts exceed threshold.
   const maxLatencyMs = getLatencyMaxMs();
   if (maxLatencyMs > 0 && gpuTypes.length > 1) {
@@ -440,7 +567,38 @@ async function _selectDeploymentTier(
   }
   // balanced: keep existing order (user priority list already incorporates reputation/latency balance)
 
-  return { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider, balanceWarnings: balanceExcluded };
+  // Estimate cost by querying cheapest offer matching the selected GPU types
+  let estimatedCostPerHr: number | undefined;
+  try {
+    const allOffers: GpuOffer[] = [];
+    await Promise.allSettled(
+      tiers.map(async (tier) => {
+        if (!tier.client.listOffers) return;
+        const offers = await Promise.race([
+          tier.client.listOffers(
+            { region, limit: 20 },
+            { apiKey: tier.apiKey, authId: tier.authId },
+          ),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 10_000)),
+        ]);
+        allOffers.push(...offers);
+      }),
+    );
+    const matchingOffers = allOffers.filter(o =>
+      o.pricePerHr > 0 && o.available !== 0 &&
+      (gpuTypes.length === 0 || gpuTypes.includes(o.gpuType)),
+    );
+    if (matchingOffers.length > 0) {
+      estimatedCostPerHr = Math.min(...matchingOffers.map(o => o.pricePerHr));
+    }
+  } catch { /* cost estimate is best-effort */ }
+
+  return {
+    tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider,
+    balanceWarnings: balanceExcluded,
+    estimatedCostPerHr,
+    totalBalance: totalBalance > 0 ? totalBalance : undefined,
+  };
 }
 
 // ── Deploy kickoff: launch the deploy promise and send HTTP response ──────────
@@ -500,6 +658,22 @@ function _startDeployAndRespond(
     );
     console.warn(`[req=${requestId}] Deploy balance warnings: ${tierResult.balanceWarnings.join(', ')} excluded (low balance)`);
   }
+
+  // Pre-deploy cost warning: include estimated cost and max runtime in response
+  if (tierResult.estimatedCostPerHr) {
+    responseBody.estimatedCostPerHr = Math.round(tierResult.estimatedCostPerHr * 1000) / 1000;
+    if (tierResult.totalBalance) {
+      const maxRuntimeHours = Math.round((tierResult.totalBalance / tierResult.estimatedCostPerHr) * 10) / 10;
+      responseBody.maxRuntimeHours = maxRuntimeHours;
+      responseBody.costEstimate = `This deploy will cost approximately $${tierResult.estimatedCostPerHr.toFixed(2)}/hr. With your $${tierResult.totalBalance.toFixed(2)} balance, maximum runtime is ${maxRuntimeHours} hours.`;
+      // Warn if balance covers less than 2 hours of runtime
+      if (tierResult.totalBalance < 2 * tierResult.estimatedCostPerHr) {
+        responseBody.balanceWarning = `Low balance warning: $${tierResult.totalBalance.toFixed(2)} covers less than 2 hours at $${tierResult.estimatedCostPerHr.toFixed(2)}/hr. Add funds to avoid auto-termination.`;
+        console.warn(`[req=${requestId}] Balance warning: $${tierResult.totalBalance.toFixed(2)} < 2 * $${tierResult.estimatedCostPerHr.toFixed(2)}/hr`);
+      }
+    }
+  }
+
   res.end(JSON.stringify(responseBody));
 }
 
