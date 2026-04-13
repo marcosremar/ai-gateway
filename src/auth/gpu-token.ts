@@ -11,6 +11,7 @@ const TTL_SECONDS = 60;
 function getSecret(): string {
   const secret = process.env.GPU_ACCESS_SECRET;
   if (!secret) throw new Error('GPU_ACCESS_SECRET not set');
+  if (secret.length < 32) throw new Error('GPU_ACCESS_SECRET must be at least 32 characters');
   return secret;
 }
 

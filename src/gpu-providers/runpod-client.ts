@@ -131,12 +131,13 @@ export class RunpodClient extends AbstractGpuProvider {
     init: RequestInit,
     timeoutMs: number,
     maxRetries = 2,
+    traceId?: string,
   ): Promise<Response> {
     const RETRY_DELAY_MS = parseInt(process.env.RUNPOD_RETRY_DELAY_MS || '2000', 10);
     for (let attempt = 0; ; attempt++) {
       try {
         await this.rateLimiter.wait();
-        const res = await this.fetchRaw(url, init, timeoutMs);
+        const res = await this.fetchRaw(url, init, timeoutMs, traceId);
         if (res.status < 500 || attempt >= maxRetries) return res;
         this.log.warn(
           `[runpod] _fetchWithRetry: HTTP ${res.status} on attempt ${attempt + 1}/${maxRetries + 1}, retrying in ${RETRY_DELAY_MS}ms...`,

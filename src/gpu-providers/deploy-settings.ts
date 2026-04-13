@@ -100,7 +100,7 @@ const DEFAULTS: DeploySettings = {
   gpuPriorityList: [...DEFAULT_GPU_PRIORITY],
   gpuPriorityByProvider: { ...DEFAULT_GPU_PRIORITY_BY_PROVIDER },
   gpuSortBy: 'balanced',
-  deployTimeoutMin: 30,
+  deployTimeoutMin: 45,
   deployRegion: '',
   deployDockerImage: '',
   minVramGb: 16,
@@ -147,7 +147,7 @@ export function loadDeploySettings(): void {
       _s.gpuSortBy = 'balanced';
     }
     if (typeof _s.deployTimeoutMin !== 'number' || _s.deployTimeoutMin < 3) {
-      _s.deployTimeoutMin = 30;
+      _s.deployTimeoutMin = 45;
     }
   } catch {
     /* use defaults */

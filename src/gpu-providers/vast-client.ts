@@ -403,6 +403,7 @@ export class VastClient extends AbstractGpuProvider {
     url: string,
     init?: RequestInit,
     timeout = TIMEOUTS.read,
+    traceId?: string,
   ): Promise<Response> {
     // Enforce minimum interval between requests (~3 req/s)
     const now = Date.now();
@@ -415,7 +416,7 @@ export class VastClient extends AbstractGpuProvider {
     // Fetch with 429 retry
     let lastRes: Response | undefined;
     for (let attempt = 0; attempt <= RATE_LIMIT_429_MAX_RETRIES; attempt++) {
-      lastRes = await this.fetchRaw(url, init, timeout);
+      lastRes = await this.fetchRaw(url, init, timeout, traceId);
       if (lastRes.status !== 429) return lastRes;
 
       if (attempt < RATE_LIMIT_429_MAX_RETRIES) {
@@ -1769,8 +1770,9 @@ export class VastClient extends AbstractGpuProvider {
           // Vast.ai propagates user SSH keys to the container at boot, but there's
           // a ~10-15s delay between status=running and the keys being available.
           // Sleeping here avoids the first-attempt "Permission denied" failure.
-          this.log.log(`[vast] Instance ${contractId} waiting 10s for SSH key propagation...`);
-          await new Promise((r) => setTimeout(r, 10_000));
+          // FIX: Increased from 10s to 20s — some Vast.ai hosts take 15+ seconds for SSH key propagation
+          this.log.log(`[vast] Instance ${contractId} waiting 20s for SSH key propagation...`);
+          await new Promise((r) => setTimeout(r, 20_000));
           const ok = await tunnel.open(15_000);
           if (ok) {
             this.log.log(`[vast] SSH tunnel opened: ${tunnel.endpoint} → ${sshHost}:8000`);

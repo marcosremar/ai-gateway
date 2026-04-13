@@ -14,7 +14,7 @@ COPY sdk/ sdk/
 COPY serve.ts .
 COPY tsconfig.json .
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
   CMD wget -qO- http://localhost:${PORT:-4000}/health || exit 1
 
 EXPOSE ${PORT:-4000}
