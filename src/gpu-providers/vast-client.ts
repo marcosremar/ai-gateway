@@ -1143,6 +1143,18 @@ export class VastClient extends AbstractGpuProvider {
     }
     diskGb = Math.max(diskGb, getMinDiskGb());
 
+    // ── 1b. VRAM validation: estimate model VRAM need from onstart/env/image hints ──
+    const vramHints = `${spec.onstart ?? ''} ${JSON.stringify(spec.env ?? {})} ${imageName}`.toLowerCase();
+    let estimatedVramGb = 0;
+    let vramHint = '';
+    if (/\b(70b|65b|72b)\b/.test(vramHints)) { estimatedVramGb = 48; vramHint = '70B-class model'; }
+    else if (/\b(32b|33b|34b|35b)\b/.test(vramHints)) { estimatedVramGb = 24; vramHint = '32B-class model'; }
+    else if (/\b(13b|14b|15b)\b/.test(vramHints)) { estimatedVramGb = 16; vramHint = '13B-class model'; }
+    else if (/\b(7b|8b)\b/.test(vramHints)) { estimatedVramGb = 8; vramHint = '7B-class model'; }
+    if (estimatedVramGb > 0) {
+      this.log.log(`[vast] VRAM estimate: ${vramHint} needs ~${estimatedVramGb}GB VRAM`);
+    }
+
     // ── Docker Hub auth warning ─────────────────────────────────────────────
     if (
       !(process.env.DOCKERHUB_USERNAME || process.env.DOCKER_HUB_USER) ||
@@ -1185,6 +1197,11 @@ export class VastClient extends AbstractGpuProvider {
     // Filter by minimum RAM if specified
     if (spec.ramGb) {
       searchBody.cpu_ram = { gte: spec.ramGb * 1024 }; // Vast.ai uses MB
+    }
+
+    // Filter by minimum GPU VRAM if model-size hint was detected
+    if (estimatedVramGb > 0) {
+      searchBody.gpu_ram = { gte: estimatedVramGb * 1024 }; // Vast.ai gpu_ram is in MB
     }
 
     // Merge extra search filters (e.g. { direct_port_count: { gte: 1 } })
