@@ -235,6 +235,9 @@ interface DeployConfig {
   snapgpuPreloadApp: string;
   /** Underlying provider for SnapGPU (vast or runpod) */
   snapgpuBackend: 'vast' | 'runpod';
+  /** Maximum total cost in USD for this deploy. If set, deploy is rejected when estimated
+   *  hourly cost exceeds the cap, and the monitor auto-stops when cumulative cost exceeds it. */
+  maxCostUsd: number | undefined;
 }
 
 /**
@@ -356,6 +359,9 @@ async function _validateDeployRequest(
   const snapgpuPreloadApp = (body.snapgpuPreloadApp as string) || appGpu?.snapgpuPreloadApp || 'default';
   const snapgpuBackend = ((body.snapgpuBackend as string) || appGpu?.snapgpuBackend || 'vast') as 'vast' | 'runpod';
 
+  // Per-deploy cost cap
+  const maxCostUsd = typeof body.maxCostUsd === 'number' && body.maxCostUsd > 0 ? body.maxCostUsd : undefined;
+
   return {
     apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
     dockerImage, gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
@@ -369,6 +375,7 @@ async function _validateDeployRequest(
     autoSnapshot,
     snapgpuPreloadApp,
     snapgpuBackend,
+    maxCostUsd,
   };
 }
 
@@ -593,7 +600,8 @@ async function _selectDeploymentTier(
       await cleanupModalApps(modalApiKey);
     }
   } catch (cleanupErr) {
-    console.warn(`[gpu] Pre-deploy cleanup error (non-fatal): ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`);
+    console.error(`[req=${requestId}] Pre-deploy cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)} — proceeding with deploy but orphaned instances may exist`);
+    // Don't fail the deploy, but warn the user
   }
 
   // Build per-provider GPU type map (provider's own priority list, filtered to the selected types)
@@ -657,6 +665,10 @@ async function _selectDeploymentTier(
 
 // ── Deploy kickoff: launch the deploy promise and send HTTP response ──────────
 
+// ── Idempotency guard for rapid double-deploys ─────────────────────────────
+
+let lastDeployRequest: { hash: string; deployId: string; ts: number } | null = null;
+
 /**
  * Start the async deploy, set up the deploy promise, and write the 202 response.
  */
@@ -671,7 +683,7 @@ function _startDeployAndRespond(
   requestId: string,
   res: ServerResponse,
 ): void {
-  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend } = config;
+  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   // Reset cancel flag FIRST so setDeployState won't be blocked by the guard
@@ -679,6 +691,8 @@ function _startDeployAndRespond(
 
   // Generate a unique deploy ID for tracking this deploy through its lifecycle
   const deployId = generateDeployId();
+  // Record for idempotency — subsequent identical requests within 5s return this deployId
+  lastDeployRequest = { hash: JSON.stringify({ dockerImage: tierResult.resolvedDockerImage, gpuTypes: tierResult.gpuTypes }), deployId, ts: Date.now() };
   setDeployState({ deployId });
   try {
     deploymentSM.startDeploying();
@@ -739,6 +753,11 @@ function _startDeployAndRespond(
     }
   }
 
+  // Include cost cap in response if set
+  if (maxCostUsd !== undefined) {
+    responseBody.maxCostUsd = maxCostUsd;
+  }
+
   res.end(JSON.stringify(responseBody));
 }
 
@@ -747,6 +766,20 @@ function _startDeployAndRespond(
 export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
+
+  // Read body once upfront — consumed stream cannot be re-read
+  let body: Record<string, unknown>;
+  try { body = await readJsonBody(req); }
+  catch (e) { handleBodyError(res, e); return; }
+
+  // ── Idempotency: prevent double-deploy when user clicks twice rapidly ──
+  const requestHash = JSON.stringify({ dockerImage: body.dockerImage, gpuTypes: body.gpuTypes });
+  if (lastDeployRequest && lastDeployRequest.hash === requestHash && Date.now() - lastDeployRequest.ts < 5000) {
+    console.log(`[req=${requestId}] Idempotent deploy — returning existing deployId=${lastDeployRequest.deployId}`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ deployId: lastDeployRequest.deployId, status: 'creating', message: 'Deploy already in progress (idempotent)', idempotent: true }));
+    return;
+  }
 
   // If a deploy is already in progress (creating/booting/installing), cancel it first for redeploy
   if (deployState.status !== 'idle' && deployState.status !== 'stopped' && deployState.status !== 'error' && deployState.status !== 'ready') {
@@ -791,10 +824,6 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   // release the lock in our finally block if ownership was NOT transferred.
   let lockTransferred = false;
   try {
-    let body: Record<string, unknown>;
-    try { body = await readJsonBody(req); }
-    catch (e) { handleBodyError(res, e); return; }
-
     // Step 1: Validate request and build typed config
     let config: DeployConfig;
     try {
@@ -817,6 +846,22 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
       return;
+    }
+
+    // Step 2.5: Per-deploy cost cap — reject if estimated hourly cost exceeds maxCostUsd
+    if (config.maxCostUsd !== undefined && tierResult.estimatedCostPerHr) {
+      if (tierResult.estimatedCostPerHr > config.maxCostUsd) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: {
+            message: `Estimated cost ($${tierResult.estimatedCostPerHr.toFixed(2)}/hr) exceeds your maxCostUsd ($${config.maxCostUsd.toFixed(2)})`,
+            type: 'cost_cap_exceeded',
+          },
+          estimatedCostPerHr: tierResult.estimatedCostPerHr,
+          maxCostUsd: config.maxCostUsd,
+        }));
+        return;
+      }
     }
 
     // Step 3: Start the deploy and send the 202 response.
@@ -895,6 +940,14 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   let body: Record<string, unknown>;
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
+
+  // Idempotent: if already idle (nothing running), return 200 instead of error
+  if (deployState.status === 'idle' && !deployState.podId) {
+    console.log(`[req=${requestId}] GPU already idle — idempotent 200`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, message: 'No active deployment to terminate.', idempotent: true }));
+    return;
+  }
 
   // Deploy ID safety check: if caller provides deployId, verify it matches the active deploy
   if (body.deployId && deployState.deployId && body.deployId !== deployState.deployId) {
@@ -981,6 +1034,20 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
   if (body.deployId && deployState.deployId && body.deployId !== deployState.deployId) {
     res.writeHead(409, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Deploy ID mismatch — this deploy may have been replaced', expected: deployState.deployId, received: body.deployId }));
+    return;
+  }
+
+  // Idempotent: if already stopped or idle, return 200 instead of error
+  if (deployState.status === 'stopped') {
+    console.log(`[req=${requestId}] GPU already stopped — idempotent 200`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, deployId: deployState.deployId || undefined, podId: deployState.podId, provider: deployState.provider, message: 'Pod already stopped.', idempotent: true }));
+    return;
+  }
+  if (deployState.status === 'idle') {
+    console.log(`[req=${requestId}] GPU idle (nothing to stop) — idempotent 200`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, message: 'No active pod (idle).', idempotent: true }));
     return;
   }
 

@@ -14,7 +14,7 @@
 export interface ColdStartRacerConfig {
   /** Only race if estimated GPU ready time < this threshold (ms). Default: 30_000 */
   maxEstimatedReadyMs?: number;
-  /** How long to wait for GPU health check before giving up. Default: 5_000 */
+  /** How long to wait for GPU health check before giving up. Default: 30_000 */
   healthProbeTimeoutMs?: number;
   /** Min boot progress (0-1) before racing. Default: 0.5 */
   minBootProgress?: number;
@@ -42,7 +42,7 @@ interface RaceLogger {
 
 const DEFAULT_CONFIG: Required<ColdStartRacerConfig> = {
   maxEstimatedReadyMs: 30_000,
-  healthProbeTimeoutMs: 5_000,
+  healthProbeTimeoutMs: 30_000,
   minBootProgress: 0.5,
 };
 

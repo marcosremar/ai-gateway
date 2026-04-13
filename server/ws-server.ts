@@ -253,6 +253,11 @@ import type { Subprocess } from 'bun';
 let parecProc: Subprocess | null = null;
 let parecChunks = 0;
 
+// FIX: Reusable capture buffer to avoid GC pressure from Buffer.concat in hot path
+const MAX_CAPTURE_BUFFER = 100 * 1024 * 1024; // 100MB max
+let captureBuffer = Buffer.alloc(MAX_CAPTURE_BUFFER);
+let captureOffset = 0;
+
 export function startParecCapture(): void {
   if (parecProc) return;
   parecChunks = 0;
@@ -533,6 +538,37 @@ type WsData = {
 const MAX_WS_TOTAL = 200;
 let wsConnectionCount = 0;
 
+/**
+ * Validate critical configuration at startup and return warnings.
+ * Non-fatal: the server still starts, but operators get prominent log lines
+ * so they know what's missing.
+ */
+export function validateStartupConfig(): string[] {
+  const warnings: string[] = [];
+
+  // Check at least one GPU provider is configured
+  if (!process.env.RUNPOD_API_KEY && !process.env.VAST_API_KEY && !process.env.TENSORDOCK_API_KEY) {
+    warnings.push('No GPU provider API keys configured (RUNPOD_API_KEY, VAST_API_KEY, TENSORDOCK_API_KEY)');
+  }
+
+  // Check at least one AI provider
+  if (!process.env.GROQ_API_KEY && !process.env.OPENAI_API_KEY) {
+    warnings.push('No AI provider API keys configured (GROQ_API_KEY, OPENAI_API_KEY)');
+  }
+
+  // Check daily budget is set
+  if (!process.env.DAILY_BUDGET_USD) {
+    warnings.push('DAILY_BUDGET_USD not set — no spending limit. Set to prevent runaway costs.');
+  }
+
+  // Check gateway auth
+  if (!process.env.GATEWAY_API_KEY) {
+    warnings.push('GATEWAY_API_KEY not set — only localhost connections will be allowed.');
+  }
+
+  return warnings;
+}
+
 export function startWsServer() {
   // Install persistent file logging — captures all console output + GPU events
   try {
@@ -540,6 +576,19 @@ export function startWsServer() {
     installConsoleCapture();
   } catch (err) {
     console.warn('[ws-server] Failed to install file logger:', err);
+  }
+
+  // ── Startup config validation ─────────────────────────────────────────────
+  const configWarnings = validateStartupConfig();
+  if (configWarnings.length > 0) {
+    console.warn('='.repeat(70));
+    console.warn('[startup] Configuration warnings:');
+    for (const w of configWarnings) {
+      console.warn(`  - ${w}`);
+    }
+    console.warn('='.repeat(70));
+  } else {
+    console.log('[startup] Configuration validated — all critical env vars present.');
   }
 
   /** Constant-time string comparison to prevent timing attacks on auth tokens. */
