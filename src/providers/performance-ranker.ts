@@ -362,8 +362,8 @@ export class PerformanceRanker {
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(this.persistPath, JSON.stringify(this.toJSON()), 'utf-8');
       this.dirty = false;
-    } catch {
-      // non-critical — persistence is best-effort
+    } catch (e) {
+      console.warn('[perf-ranker] saveToDisk failed:', e instanceof Error ? e.message : e);
     }
   }
 
@@ -380,8 +380,8 @@ export class PerformanceRanker {
       if (keys > 0) {
         console.log(`[perf-ranker] Restored ${samples} samples across ${keys} keys from disk`);
       }
-    } catch {
-      // corrupt or missing file — start fresh
+    } catch (e) {
+      console.warn('[perf-ranker] loadFromDisk failed, starting fresh:', e instanceof Error ? e.message : e);
     }
   }
 

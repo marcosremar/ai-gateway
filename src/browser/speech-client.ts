@@ -372,7 +372,7 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
     }
 
     this.startResponseTimeout();
-    await this.transport!.sendAudio(data);
+    await this.transport?.sendAudio(data);
   }
 
   /**
@@ -387,7 +387,7 @@ export class SpeechClient extends TypedEmitter<SpeechClientEventMap> {
     }
 
     this.startResponseTimeout();
-    await this.transport!.sendText(text);
+    await this.transport?.sendText(text);
   }
 
   // ── Service status & health polling ────────────────────────────────────

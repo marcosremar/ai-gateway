@@ -60,7 +60,8 @@ export class Vault {
       const decipher = createDecipheriv(ALGORITHM, this.key, iv, { authTagLength: TAG_LENGTH });
       decipher.setAuthTag(tag);
       return decipher.update(ciphertext) + decipher.final('utf8');
-    } catch {
+    } catch (err) {
+      console.warn('[Vault] Decrypt failed for secret, may be corrupted:', err);
       return null;
     }
   }
@@ -142,8 +143,8 @@ export class Vault {
             version: this.keyVersion,
           };
           await this._store.set(name, JSON.stringify(rolledBack));
-        } catch {
-          // Best-effort rollback — log but don't mask original error
+        } catch (rollbackErr) {
+          console.error('[Vault] Rollback failed, data may be corrupted:', rollbackErr);
         }
       }
       throw err;

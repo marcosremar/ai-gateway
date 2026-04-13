@@ -154,7 +154,9 @@ export class FlyioClient extends AbstractGpuProvider {
     try {
       const dnsCheck = await fetch(`${endpoint}/version`, { signal: AbortSignal.timeout(5_000) });
       if (dnsCheck.ok) dnsReady = true;
-    } catch { /* DNS not propagated yet */ }
+    } catch (e) {
+      this.log.log(`[flyio] DNS not propagated yet: ${e instanceof Error ? e.message : e}`);
+    }
 
     if (!dnsReady) {
       // DNS not ready — resolve IPv4 and connect directly
@@ -201,7 +203,9 @@ export class FlyioClient extends AbstractGpuProvider {
       await this.waitForState(app, instanceId, token, 'stopped', 30).catch((e) => {
         this.log.log(`[flyio] Wait for stopped state failed during cleanup: ${e instanceof Error ? e.message : e}`);
       });
-    } catch { /* might already be stopped */ }
+    } catch (e) {
+      this.log.log(`[flyio] Stop failed, might already be stopped: ${e instanceof Error ? e.message : e}`);
+    }
 
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}?force=true`, {
       method: 'DELETE',
@@ -270,7 +274,8 @@ export class FlyioClient extends AbstractGpuProvider {
       if (machine.state === 'starting' || machine.state === 'created') return 'booting';
       if (machine.state === 'stopping' || machine.state === 'destroying' || machine.state === 'destroyed') return 'terminated';
       return machine.state;
-    } catch {
+    } catch (e) {
+      this.log.log(`[flyio] getInstanceStatus failed: ${e instanceof Error ? e.message : e}`);
       return null;
     }
   }
@@ -345,7 +350,8 @@ export class FlyioClient extends AbstractGpuProvider {
       const ips = JSON.parse(out) as Array<{ Address: string; Type: string }>;
       const v4 = ips.find(ip => ip.Type === 'shared_v4' || ip.Type === 'v4');
       return v4?.Address?.replace('/32', '') || null;
-    } catch {
+    } catch (e) {
+      this.log.log(`[flyio] Resolve app IP failed: ${e instanceof Error ? e.message : e}`);
       // Fallback: allocate a shared IPv4 via CLI
       try {
         const proc = Bun.spawn(['flyctl', 'ips', 'allocate-v4', '--shared', '--app', app, '--json'], {
@@ -355,7 +361,8 @@ export class FlyioClient extends AbstractGpuProvider {
         const out = await new Response(proc.stdout).text();
         const data = JSON.parse(out);
         return data?.Address?.replace('/32', '') || null;
-      } catch {
+      } catch (e2) {
+        this.log.log(`[flyio] Allocate IPv4 failed: ${e2 instanceof Error ? e2.message : e2}`);
         return null;
       }
     }
