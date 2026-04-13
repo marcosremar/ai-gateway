@@ -12,8 +12,9 @@ import { AutoscalerSettingsSchema } from './autoscaler-schemas';
 import { ModalClient } from '../gpu-providers/modal-client';
 import { VastClient } from '../gpu-providers/vast-client';
 import { runHealthCheck, runSSEBench } from '../benchmarking/bench';
+import { createLogger } from '../logger';
 
-type LoadConfig = (userId: string) => Promise<AutoScalerConfig | null>;
+const log = createLogger('autoscaler-handler');
 
 const VALID_PROVIDERS = ['tensordock', 'runpod', 'vast', 'modal'];
 
@@ -62,7 +63,9 @@ export async function handleAutoscalerGet(
     if (decision.route === 's2s' && decision.endpoint && signGpuToken) {
       gpuToken = signGpuToken(userId);
     }
-  } catch { /* GPU_ACCESS_SECRET not set — skip token */ }
+  } catch (err) {
+    log.warn('[autoscaler-handler] Failed to sign GPU token:', err);
+  }
 
   return ok({
     ...decision,
@@ -183,7 +186,9 @@ export async function handleAutoscalerAction(
       let tok: string | undefined;
       try {
         if (dec.route === 's2s' && dec.endpoint && deps.signGpuToken) tok = deps.signGpuToken(userId);
-      } catch { /* GPU_ACCESS_SECRET not set */ }
+      } catch (err) {
+        log.warn('[autoscaler-handler] Failed to sign GPU token in get-decision:', err);
+      }
       return ok({ ...dec, ...(tok ? { gpuToken: tok } : {}) });
     }
 
@@ -583,7 +588,9 @@ export async function handleAutoscalerAction(
       if (client.resolveInstanceEndpoint) {
         try {
           endpoint = await client.resolveInstanceEndpoint(String(instanceId), creds);
-        } catch { /* endpoint resolution failed */ }
+        } catch (err) {
+          log.warn('[autoscaler-handler] Endpoint resolution failed:', err);
+        }
       }
       return ok({ provider, instanceId, status, endpoint });
     }
@@ -708,7 +715,9 @@ export async function handleAutoscalerAction(
             healthLatency = h.latency_ms;
             break;
           }
-        } catch { /* continue polling */ }
+        } catch (err) {
+          log.warn('[autoscaler-handler] Health check during boot poll failed:', err);
+        }
       }
 
       const bootMs = Date.now() - bootStart;
@@ -732,7 +741,9 @@ export async function handleAutoscalerAction(
         try {
           await client.stopInstance(instance.instanceId, creds);
           await client.deleteInstance(instance.instanceId, creds);
-        } catch { /* best-effort cleanup */ }
+        } catch (err) {
+          log.warn('[autoscaler-handler] Best-effort cleanup of instance failed:', err);
+        }
       }
 
       return ok({

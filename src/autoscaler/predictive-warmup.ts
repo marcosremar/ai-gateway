@@ -59,9 +59,7 @@ export async function recordUsageForPrediction(
   const field = String(bucket);
 
   try {
-    const raw = await stateStore.hgetall(key);
-    const currentCount = raw[field] ? parseFloat(raw[field]) : 0;
-    await stateStore.hset(key, field, String(currentCount + 1));
+    await stateStore.hincrby(key, field, 1);
   } catch (err) {
     log.warn('[predictive-warmup] Failed to record usage:', err);
   }

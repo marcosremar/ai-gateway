@@ -6,6 +6,8 @@
  */
 
 import type { StateStore } from '../deps';
+import { defaultLogger } from '../logger';
+import type { Logger } from '../deps';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -103,9 +105,11 @@ function computeStats(values: number[]): BenchmarkStats | null {
 
 export class BenchmarkTracker {
   private stateStore: StateStore;
+  private logger: Logger;
 
-  constructor(stateStore: StateStore) {
+  constructor(stateStore: StateStore, logger?: Logger) {
     this.stateStore = stateStore;
+    this.logger = logger ?? defaultLogger;
   }
 
   /** Record a boot benchmark (typically auto-recorded from boot_ok lifecycle events). */
@@ -115,8 +119,8 @@ export class BenchmarkTracker {
     try {
       await this.stateStore.rpush(key, JSON.stringify(record));
       await this.stateStore.ltrim(key, -MAX_RECORDS_PER_DAY, -1);
-    } catch {
-      // Non-critical — swallow
+    } catch (err) {
+      this.logger.warn('[benchmark-tracker] Failed to record boot benchmark:', err);
     }
   }
 
@@ -127,8 +131,8 @@ export class BenchmarkTracker {
     try {
       await this.stateStore.rpush(key, JSON.stringify(record));
       await this.stateStore.ltrim(key, -MAX_RECORDS_PER_DAY, -1);
-    } catch {
-      // Non-critical — swallow
+    } catch (err) {
+      this.logger.warn('[benchmark-tracker] Failed to record inference benchmark:', err);
     }
   }
 
