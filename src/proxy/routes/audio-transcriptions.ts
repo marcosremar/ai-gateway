@@ -36,13 +36,21 @@ function sttCacheGet(key: string): string | null {
 export function _resetSttCache(): void { sttCache.clear(); }
 
 function sttCacheSet(key: string, text: string): void {
-  if (sttCache.size >= STT_CACHE_MAX_ENTRIES) {
+  while (sttCache.size >= STT_CACHE_MAX_ENTRIES) {
     const now = Date.now();
+    let removedAny = false;
     for (const [k, v] of sttCache) {
-      if (v.expiresAt < now) { sttCache.delete(k); return; }
+      if (v.expiresAt < now) {
+        sttCache.delete(k);
+        removedAny = true;
+        break;
+      }
     }
-    const oldestKey = sttCache.keys().next().value;
-    if (oldestKey !== undefined) sttCache.delete(oldestKey);
+    if (!removedAny) {
+      const oldestKey = sttCache.keys().next().value;
+      if (oldestKey !== undefined) sttCache.delete(oldestKey);
+      else break;
+    }
   }
   sttCache.set(key, { text, expiresAt: Date.now() + STT_CACHE_TTL_MS });
 }

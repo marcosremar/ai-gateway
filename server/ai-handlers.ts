@@ -230,9 +230,9 @@ class HybridRouter {
 export const pipelineRouter = new HybridRouter();
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import { runEnsembleSTT } from '../src/ensemble-stt';
+import { sttRace } from '../src/stt-race';
 import { globalTracer } from '../src/observability/distributed-tracer';
-import type { EnsembleSTTProviderEntry } from '../src/ensemble-stt';
+import type { STTRaceProvider } from '../src/stt-race';
 import type { AIProfile } from '../src/client';
 import { OllamaSTTProvider } from '../src/providers/ollama';
 import {
