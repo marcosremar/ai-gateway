@@ -426,15 +426,17 @@ export function scheduleNextMonitorProbe() {
         }
         // If TensorDock, check balance — low balance causes VMs to be reclaimed
         if (activeProvider === 'tensordock' && deployTensordockApiKey && deployTensordockAuthId) {
-          const bal = await tensordock.checkBalance({ apiKey: deployTensordockApiKey, authId: deployTensordockAuthId });
-          if (bal) {
-            log.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly: $${bal.hourlyCost.toFixed(3)})`);
-            if (bal.balance < 1.0) {
-              const msg = `TensorDock balance low: $${bal.balance.toFixed(2)} — VM may have been reclaimed. Add funds: https://${BILLING_URLS.tensordock}`;
-              log.warn(`[gpu] ${msg}`);
-              setDeployState({ alert: msg });
+          try {
+            const bal = await tensordock.checkBalance({ apiKey: deployTensordockApiKey, authId: deployTensordockAuthId });
+            if (bal) {
+              log.log(`[gpu] TensorDock balance: $${bal.balance.toFixed(2)} (hourly: $${bal.hourlyCost.toFixed(3)})`);
+              if (bal.balance < 1.0) {
+                const msg = `TensorDock balance low: $${bal.balance.toFixed(2)} — VM may have been reclaimed. Add funds: https://${BILLING_URLS.tensordock}`;
+                log.warn(`[gpu] ${msg}`);
+                setDeployState({ alert: msg });
+              }
             }
-          }
+          } catch { /* balance check is best-effort */ }
         }
       }
 
@@ -448,7 +450,7 @@ export function scheduleNextMonitorProbe() {
         setDailyGpuSpendUsd(dailyGpuSpendUsd + deployState.costPerHr * (actualElapsedMs / 1000 / 3600));
         if (DAILY_BUDGET_USD > 0) {
           const pct = dailyGpuSpendUsd / DAILY_BUDGET_USD;
-          const forecast = dailyGpuSpendUsd + (deployState.costPerHr * ((24 - new Date().getUTCHours()) / 24));
+          const forecast = dailyGpuSpendUsd + (deployState.costPerHr * (24 - new Date().getUTCHours()));
           if (pct >= 1.0) {
             // HARD BUDGET: auto-terminate to prevent overspend
             log.error(`[budget] HARD LIMIT: $${dailyGpuSpendUsd.toFixed(2)} >= $${DAILY_BUDGET_USD.toFixed(2)} — auto-terminating GPU`);
@@ -2333,6 +2335,11 @@ export async function pollHealthUntilReady(
     if (deployCancelled) return { result: 'cancelled' };
     const deployTimeoutMs = getDeployTimeoutMin() * 60_000;
     const totalElapsedMs = Date.now() - deployStartedAt;
+
+    // ── Global deploy timeout guard ──
+    if (totalElapsedMs > deployTimeoutMs) {
+      throw new Error(`Deploy timed out after ${Math.round(deployTimeoutMs / 60000)} minutes (total elapsed: ${Math.round(totalElapsedMs / 1000)}s)`);
+    }
 
     // ── Per-phase timeouts (fail fast, try next machine) ──
     const PHASE_TIMEOUTS = {
