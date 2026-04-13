@@ -68,7 +68,12 @@ export class FlyioClient extends AbstractGpuProvider {
     spec: InstanceSpec,
     credentials: ProviderCredentials,
   ): Promise<GpuInstance> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) {
+      throw new Error('Fly.io API token required (set apiKey or FLY_API_TOKEN)');
+    }
+    // Reset flyHost for new instance
+    this.flyHost = '';
     const app = this.appName();
     const region = spec.region || process.env.FLY_REGION || DEFAULT_REGION;
 
@@ -190,7 +195,10 @@ export class FlyioClient extends AbstractGpuProvider {
     instanceId: string,
     credentials: ProviderCredentials,
   ): Promise<void> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) {
+      throw new Error('Fly.io API token required (set apiKey or FLY_API_TOKEN)');
+    }
     const app = this.appName();
 
     this.log.log(`[flyio] Destroying machine ${instanceId}`);
@@ -232,7 +240,10 @@ export class FlyioClient extends AbstractGpuProvider {
   }
 
   async startInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) {
+      throw new Error('Fly.io API token required (set apiKey or FLY_API_TOKEN)');
+    }
     const app = this.appName();
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}/start`, {
       method: 'POST',
@@ -247,7 +258,10 @@ export class FlyioClient extends AbstractGpuProvider {
   }
 
   async stopInstance(instanceId: string, credentials: ProviderCredentials): Promise<void> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) {
+      throw new Error('Fly.io API token required (set apiKey or FLY_API_TOKEN)');
+    }
     const app = this.appName();
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}/stop`, {
       method: 'POST',
@@ -261,7 +275,8 @@ export class FlyioClient extends AbstractGpuProvider {
   }
 
   async getInstanceStatus(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) return null;
     const app = this.appName();
     try {
       const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}`, {
@@ -283,7 +298,8 @@ export class FlyioClient extends AbstractGpuProvider {
   }
 
   async listInstances(credentials: ProviderCredentials): Promise<GpuInstance[]> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) return [];
     const app = this.appName();
 
     try {
@@ -318,7 +334,10 @@ export class FlyioClient extends AbstractGpuProvider {
     instanceId: string,
     credentials: ProviderCredentials,
   ): Promise<Record<string, unknown>> {
-    const token = credentials.apiKey;
+    const token = credentials.apiKey || process.env.FLY_API_TOKEN;
+    if (!token) {
+      throw new Error('Fly.io API token required (set apiKey or FLY_API_TOKEN)');
+    }
     const app = this.appName();
 
     const res = await fetch(`${FLY_API}/apps/${app}/machines/${instanceId}`, {

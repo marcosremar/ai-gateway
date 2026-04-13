@@ -216,7 +216,17 @@ export class GatewaySDK {
       body: JSON.stringify(body),
       timeout: this.timeouts.tts,
     });
-    const audio = new Uint8Array(await res.arrayBuffer());
+    let audio: Uint8Array;
+    try {
+      const buf = await res.arrayBuffer();
+      audio = new Uint8Array(buf);
+    } catch (err) {
+      throw new GatewayError(
+        `Failed to read audio response: ${err instanceof Error ? err.message : String(err)}`,
+        res.status,
+        '/v1/tts',
+      );
+    }
     return { audio, contentType: 'audio/wav', usedGpu: true };
   }
 
@@ -628,7 +638,17 @@ export class GatewaySDK {
       body: JSON.stringify(body),
       timeout: this.timeouts.tts,
     });
-    const audio = new Uint8Array(await res.arrayBuffer());
+    let audio: Uint8Array;
+    try {
+      const buf = await res.arrayBuffer();
+      audio = new Uint8Array(buf);
+    } catch (err) {
+      throw new GatewayError(
+        `Failed to read audio response: ${err instanceof Error ? err.message : String(err)}`,
+        res.status,
+        '/v1/tts/preview',
+      );
+    }
     return { audio, contentType: 'audio/wav', usedGpu: true };
   }
 
@@ -684,12 +704,21 @@ export class GatewaySDK {
 
   // ── Workloads ──────────────────────────────────────────────────────────
 
-  /** List all workloads, optionally filtered by type. */
-  async listWorkloads(type?: WorkloadInfo['type']): Promise<WorkloadInfo[]> {
-    const qs = type ? `?type=${type}` : '';
-    const res = await this.fetch(`/v1/workloads${qs}`, { method: 'GET', timeout: this.timeouts.health });
+  /** List all workloads, optionally filtered by type and paginated. */
+  async listWorkloads(options?: { type?: WorkloadInfo['type']; limit?: number; offset?: number }): Promise<{ workloads: WorkloadInfo[]; total: number; limit: number; offset: number }> {
+    const params = new URLSearchParams();
+    if (options?.type) params.set('type', options.type);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    const qs = params.toString();
+    const res = await this.fetch(`/v1/workloads${qs ? `?${qs}` : ''}`, { method: 'GET', timeout: this.timeouts.health });
     const data = await this.parseJson(res, '/v1/workloads');
-    return (data.workloads ?? []) as WorkloadInfo[];
+    return {
+      workloads: (data.workloads ?? []) as WorkloadInfo[],
+      total: (data.total as number) ?? 0,
+      limit: (data.limit as number) ?? 100,
+      offset: (data.offset as number) ?? 0,
+    };
   }
 
   /** Deploy a new workload (GPU, bot, or database). */
@@ -867,10 +896,17 @@ export class GatewaySDK {
       body?: BodyInit | Uint8Array;
       timeout: number;
       allowedStatuses?: number[];
+      signal?: AbortSignal;
     },
   ): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
     let lastError: unknown;
+    const controller = new AbortController();
+    const timeoutSignal = AbortSignal.timeout(options.timeout);
+
+    const combinedSignal = options.signal
+      ? AbortSignal.any([options.signal, timeoutSignal])
+      : timeoutSignal;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
@@ -883,7 +919,7 @@ export class GatewaySDK {
           method: options.method,
           headers: { ...this.headers, ...options.headers },
           body: options.body as BodyInit,
-          signal: AbortSignal.timeout(options.timeout),
+          signal: combinedSignal,
         });
 
         const allowed = options.allowedStatuses ?? [];
@@ -902,6 +938,10 @@ export class GatewaySDK {
 
         // Timeout errors are NOT retried
         if (err instanceof Error && err.name === 'AbortError') {
+          const reason = (err as Error & { cause?: unknown }).cause;
+          if (reason instanceof Error && reason.name === 'AbortError') {
+            throw err;
+          }
           throw new GatewayError(
             `${options.method} ${path} timed out (${options.timeout}ms)`,
             0,
@@ -943,7 +983,17 @@ export class GatewaySDK {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async parseJson(res: Response, path: string): Promise<Record<string, unknown>> {
     try {
-      const parsed = await res.json();
+      const text = await res.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        throw new GatewayError(
+          `${path}: invalid JSON: "${text.slice(0, 100)}"`,
+          res.status,
+          path,
+        );
+      }
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
         throw new GatewayError(
           `${path}: invalid JSON response: expected object, got ${parsed === null ? 'null' : Array.isArray(parsed) ? 'array' : typeof parsed}`,
