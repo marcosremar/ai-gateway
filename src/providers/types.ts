@@ -146,6 +146,7 @@ export interface ChatRequest {
   maxTokens?: number;
   responseFormat?: { type: 'json_object' | 'text' };
   stream?: boolean;
+  timeoutMs?: number;
 }
 
 export interface ChatResponse {

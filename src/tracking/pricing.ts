@@ -79,6 +79,9 @@ export function estimateRequestCost(
   pricingTable?: Record<string, ModelPricing>,
 ): number {
   const pricing = lookupPricing(provider, model, pricingTable);
-  if (!pricing) return 0;
+  if (!pricing) {
+    console.warn(`[spend-tracker] No pricing found for ${provider}/${model}, cost estimate will be 0`);
+    return 0;
+  }
   return (inputTokens * pricing.inputPer1M + outputTokens * pricing.outputPer1M) / 1_000_000;
 }

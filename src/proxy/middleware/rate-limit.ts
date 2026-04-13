@@ -57,6 +57,7 @@ export class RateLimiter {
     resetAt: number;
   } {
     if (this.refillRatePerMs <= 0) {
+      console.warn(`[rate-limit] refillRatePerMs <= 0 (${this.refillRatePerMs}), rate limiting disabled for ${clientId}`);
       return { allowed: true, limit: 0, remaining: 0, resetAt: 0 };
     }
 

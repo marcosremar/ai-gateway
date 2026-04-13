@@ -446,7 +446,9 @@ export function createProxyServer(config: ProxyConfig): Server {
     }
     if (config.onAuth && authHeader) {
       const token = authHeader.replace(/^Bearer\s+/i, '');
-      config.onAuth(token).catch(() => {});
+      config.onAuth(token).catch((err) => {
+        log.error('Auth callback failed', { error: err instanceof Error ? err.message : String(err) });
+      });
     }
 
     // Rate limit — keyed by userId (resolved from API key above) so each

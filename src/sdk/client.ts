@@ -941,10 +941,19 @@ export class GatewaySDK {
 
   /** Parse JSON from response, throwing GatewayError on invalid JSON. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async parseJson(res: Response, path: string): Promise<any> {
+  private async parseJson(res: Response, path: string): Promise<Record<string, unknown>> {
     try {
-      return await res.json();
+      const parsed = await res.json();
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new GatewayError(
+          `${path}: invalid JSON response: expected object, got ${parsed === null ? 'null' : Array.isArray(parsed) ? 'array' : typeof parsed}`,
+          res.status,
+          path,
+        );
+      }
+      return parsed as Record<string, unknown>;
     } catch (err: unknown) {
+      if (err instanceof GatewayError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       throw new GatewayError(
         `${path}: invalid JSON response: ${msg}`,
