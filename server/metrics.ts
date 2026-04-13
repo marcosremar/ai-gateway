@@ -611,6 +611,9 @@ export async function upsertHostReputation(opts: {
  * Called from the GPU monitor when consecutive health failures indicate a crash.
  */
 export async function recordHostCrash(provider: string, gpuType: string, providerMeta?: Record<string, unknown>): Promise<void> {
+  const hostKey = deriveHostKey(provider, providerMeta);
+  trackCrashTimestamp(hostKey);
+
   await upsertHostReputation({
     provider,
     gpuType,
@@ -618,6 +621,62 @@ export async function recordHostCrash(provider: string, gpuType: string, provide
     success: false,
     crash: true,
   });
+}
+
+// ── Host Crash Pattern Detection ────────────────────────────────────────────
+// In-memory ring of recent crash timestamps per host IP/key.
+// Detects repeated crashes that indicate a fundamentally broken host.
+
+/** Map of hostKey → array of crash timestamps (ms) */
+const crashTimestamps = new Map<string, number[]>();
+const MAX_CRASH_HISTORY_PER_HOST = 20;
+const CRASH_PATTERN_WINDOW_MS = 4 * 3600_000; // 4 hours
+const CRASH_PATTERN_THRESHOLD = 3; // 3+ crashes in window → pattern detected
+
+/** Record a crash timestamp for a host. */
+function trackCrashTimestamp(hostKey: string): void {
+  let timestamps = crashTimestamps.get(hostKey);
+  if (!timestamps) {
+    timestamps = [];
+    crashTimestamps.set(hostKey, timestamps);
+  }
+  timestamps.push(Date.now());
+  while (timestamps.length > MAX_CRASH_HISTORY_PER_HOST) timestamps.shift();
+}
+
+/**
+ * Check if a host shows a crash pattern (3+ crashes in last 4 hours).
+ * Use this before deploying to the same host to avoid repeated failures.
+ */
+export function isHostCrashPattern(hostKey: string): boolean {
+  const timestamps = crashTimestamps.get(hostKey);
+  if (!timestamps) return false;
+  const cutoff = Date.now() - CRASH_PATTERN_WINDOW_MS;
+  const recentCrashes = timestamps.filter((ts) => ts >= cutoff);
+  return recentCrashes.length >= CRASH_PATTERN_THRESHOLD;
+}
+
+/**
+ * Get crash pattern details for a host (for diagnostics).
+ */
+export function getHostCrashInfo(hostKey: string): {
+  recentCrashes: number;
+  windowHours: number;
+  isPattern: boolean;
+  lastCrashAt: number | null;
+} {
+  const timestamps = crashTimestamps.get(hostKey);
+  if (!timestamps || timestamps.length === 0) {
+    return { recentCrashes: 0, windowHours: 4, isPattern: false, lastCrashAt: null };
+  }
+  const cutoff = Date.now() - CRASH_PATTERN_WINDOW_MS;
+  const recentCrashes = timestamps.filter((ts) => ts >= cutoff).length;
+  return {
+    recentCrashes,
+    windowHours: 4,
+    isPattern: recentCrashes >= CRASH_PATTERN_THRESHOLD,
+    lastCrashAt: timestamps[timestamps.length - 1],
+  };
 }
 
 /**
