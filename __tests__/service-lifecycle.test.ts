@@ -79,15 +79,15 @@ describe('Service Lifecycle States', () => {
     it('setDeployState should record transitions on status/step change', () => {
       const source = readSource('server/state.ts');
       const setIdx = source.indexOf('function setDeployState');
-      const body = source.slice(setIdx, setIdx + 2500);
+      const body = source.slice(setIdx, setIdx + 3500); // 3500 chars to capture full function body
       expect(body).toContain('transitions.push');
       expect(body).toContain('gpu:transition');
     });
 
-    it('should keep last 30 transitions', () => {
+    it('should keep last 50 transitions', () => {
       const source = readSource('server/state.ts');
-      expect(source).toContain('transitions.length > 30');
-      expect(source).toContain('transitions.length - 30');
+      expect(source).toContain('transitions.length > 50');
+      expect(source).toContain('transitions.length - 50');
     });
 
     it('resetDeployState should clear transitions', () => {
