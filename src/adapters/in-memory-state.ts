@@ -109,4 +109,14 @@ export class InMemoryStateAdapter implements StateStore {
     if (!hash) return {};
     return Object.fromEntries(hash);
   }
+
+  async hincrby(key: string, field: string, increment: number): Promise<void> {
+    const hash = this.hashes.get(key);
+    if (!hash) {
+      this.hashes.set(key, new Map([[field, String(increment)]]));
+    } else {
+      const current = parseFloat(hash.get(field) || '0');
+      hash.set(field, String(current + increment));
+    }
+  }
 }

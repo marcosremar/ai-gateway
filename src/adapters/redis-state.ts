@@ -20,6 +20,7 @@ export interface RedisLike {
   hset(key: string, ...args: unknown[]): Promise<unknown>;
   hdel(key: string, ...fields: unknown[]): Promise<unknown>;
   hgetall(key: string): Promise<Record<string, string>>;
+  hincrby(key: string, field: string, increment: number): Promise<number>;
 }
 
 /** StateStore backed by Redis (or any RedisLike client). */
@@ -75,5 +76,9 @@ export class RedisStateAdapter implements StateStore {
 
   async hgetall(key: string): Promise<Record<string, string>> {
     return this.redis.hgetall(key);
+  }
+
+  async hincrby(key: string, field: string, increment: number): Promise<void> {
+    await this.redis.hincrby(key, field, increment);
   }
 }
