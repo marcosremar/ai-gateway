@@ -1266,6 +1266,18 @@ export function startWsServer() {
       routeWorkloadRequest = wh.routeWorkloadRequest;
     } catch { /* workload-handlers optional — routing falls through to 404 if absent */ }
 
+    // ── Docker image builder routes ───────────────────────────────────────
+    let dockerRoutes: Record<string, Function> = {};
+    let matchDockerDynamic: ((method: string, pathname: string) => [Function, string[]] | null) | null = null;
+    try {
+      const ib = require('./image-build-handlers');
+      dockerRoutes = ib.getDockerRoutes();
+      matchDockerDynamic = ib.matchDockerDynamicRoute;
+      Object.assign(handlers, dockerRoutes);
+    } catch (e: any) {
+      console.warn(`[ws-server] image-build-handlers not loaded: ${e.message?.slice(0, 80)}`);
+    }
+
     Bun.serve({
       port: PORT,
       fetch: async (req) => {
@@ -1316,6 +1328,42 @@ export function startWsServer() {
               }));
             }
           });
+        }
+
+        // Docker dynamic routes (e.g. /v1/docker/builds/:id)
+        if (matchDockerDynamic && url.pathname.startsWith('/v1/docker/')) {
+          const match = matchDockerDynamic(method, url.pathname);
+          if (match) {
+            const [dynHandler, params] = match;
+            const bodyBuf2 = method !== 'GET' && method !== 'HEAD' ? Buffer.from(await req.arrayBuffer()) : null;
+            const listeners2: Record<string, Function[]> = {};
+            const fakeReq2: any = {
+              method, url: url.pathname + url.search,
+              headers: (() => { const h: Record<string, string> = {}; req.headers.forEach((v, k) => { h[k] = v; }); return h; })(),
+              on: (ev: string, cb: Function) => { (listeners2[ev] = listeners2[ev] || []).push(cb); return fakeReq2; },
+            };
+            queueMicrotask(() => {
+              if (bodyBuf2 && bodyBuf2.length) (listeners2['data'] || []).forEach(cb => cb(bodyBuf2));
+              (listeners2['end'] || []).forEach(cb => cb());
+            });
+            return new Promise<Response>((resolve) => {
+              let statusCode2 = 200;
+              const resHeaders2: Record<string, string> = {};
+              const chunks2: string[] = [];
+              const fakeRes2: any = {
+                writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode2 = code; fakeRes2.statusCode = code; if (hdrs) Object.assign(resHeaders2, hdrs); },
+                setHeader: (k: string, v: string) => { resHeaders2[k] = v; },
+                end: (data?: string) => { if (data) chunks2.push(data); resolve(new Response(chunks2.join(''), {
+                  status: statusCode2,
+                  headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders2 },
+                })); },
+                write: (data: string) => { chunks2.push(data); },
+                getHeader: (k: string) => resHeaders2[k],
+                statusCode: 200,
+              };
+              dynHandler(fakeReq2, fakeRes2, ...params);
+            });
+          }
         }
 
         const key = `${method} ${url.pathname}`;

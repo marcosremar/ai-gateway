@@ -1160,6 +1160,237 @@ async function cmdGpuBest(opts: { gpu?: string; count?: number }) {
   console.log(`  Eff$ = price / quality (lower = better value for real-time)`);
 }
 
+// ── Docker image builder commands ─────────────────────────────────────────────
+
+async function cmdDockerAuth() {
+  const { url, key } = getConfig();
+  // Start device flow via gateway
+  const s = spinner('Connecting to GitHub...');
+  const res = await fetch(`${url}/v1/docker/auth`, { method: 'POST', headers: headers(key) });
+  s.stop();
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as any;
+    const msg = err?.error?.message ?? err?.error ?? await res.text();
+    if (msg.includes('GITHUB_CLIENT_ID')) {
+      console.error(`${c.red}✗${c.reset} GitHub Client ID not configured on the server.`);
+      console.error(`\nTo set it up:`);
+      console.error(`  1. Register an OAuth App at https://github.com/settings/applications/new`);
+      console.error(`     (Authorization callback URL: http://localhost)`);
+      console.error(`  2. Set AI_GATEWAY_GITHUB_CLIENT_ID=<client-id> in the server's .env`);
+    } else {
+      console.error(`${c.red}✗${c.reset} ${msg}`);
+    }
+    process.exit(1);
+  }
+
+  const data = await res.json() as any;
+  console.log(`\n${c.bold}Connect your GitHub account${c.reset}`);
+  console.log(`\n  1. Visit: ${c.cyan}${c.bold}${data.verificationUri}${c.reset}`);
+  console.log(`  2. Enter code: ${c.bold}${c.yellow}${data.userCode}${c.reset}`);
+  console.log(`\nWaiting for authorization (expires in ${Math.round(data.expiresIn / 60)} min)...`);
+
+  // Poll
+  const sessionId = data.sessionId;
+  const pollInterval = (data.interval + 1) * 1000;
+  const deadline = Date.now() + data.expiresIn * 1000;
+
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, pollInterval));
+    const pollRes = await fetch(`${url}/v1/docker/auth/status?sessionId=${sessionId}`, { headers: headers(key) });
+    if (!pollRes.ok) continue;
+    const pollData = await pollRes.json() as any;
+
+    if (pollData.status === 'complete') {
+      console.log(`\n${c.green}✓${c.reset} Connected as ${c.bold}${pollData.username}${c.reset}`);
+      console.log(`  Scopes: ${pollData.scope ?? 'repo, workflow, write:packages'}`);
+      return;
+    }
+    if (pollData.status === 'expired') {
+      console.error(`${c.red}✗${c.reset} Code expired — run auth again.`);
+      process.exit(1);
+    }
+    if (pollData.status === 'error') {
+      console.error(`${c.red}✗${c.reset} Auth error: ${pollData.error}`);
+      process.exit(1);
+    }
+    process.stdout.write('.');
+  }
+
+  console.error(`\n${c.red}✗${c.reset} Timed out waiting for authorization.`);
+  process.exit(1);
+}
+
+async function cmdDockerAuthStatus() {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/v1/docker/auth/me`, { headers: headers(key) });
+  if (!res.ok) { console.error('Error checking auth status'); process.exit(1); }
+  const data = await res.json() as any;
+  if (!data.authenticated) {
+    console.log(`GitHub: ${c.dim}not connected${c.reset}`);
+    console.log(`  Run: ai-gateway docker auth`);
+  } else {
+    console.log(`GitHub: ${c.green}connected${c.reset} as ${c.bold}${data.username}${c.reset}`);
+    if (data.savedAt) console.log(`  Connected: ${new Date(data.savedAt).toLocaleString()}`);
+  }
+}
+
+async function cmdDockerAuthLogout() {
+  const { url, key } = getConfig();
+  await fetch(`${url}/v1/docker/auth`, { method: 'DELETE', headers: headers(key) });
+  console.log(`${c.green}✓${c.reset} GitHub account disconnected`);
+}
+
+async function cmdDockerBuild(dir: string, opts: {
+  name?: string; tag?: string; repo?: string; public?: boolean;
+  platforms?: string; wait?: boolean;
+}) {
+  const { url, key } = getConfig();
+  const body = {
+    dirPath: dir,
+    ...(opts.name ? { name: opts.name } : {}),
+    ...(opts.tag ? { tag: opts.tag } : {}),
+    ...(opts.repo ? { repoName: opts.repo } : {}),
+    ...(opts.platforms ? { platforms: opts.platforms } : {}),
+    isPublic: opts.public ?? false,
+  };
+
+  const s = spinner('Starting build...');
+  const res = await fetch(`${url}/v1/docker/build`, {
+    method: 'POST',
+    headers: { ...headers(key), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  s.stop();
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as any;
+    const msg = err?.error?.message ?? err?.error ?? String(res.status);
+    if (res.status === 401) {
+      console.error(`${c.red}✗${c.reset} Not authenticated. Run: ai-gateway docker auth`);
+    } else {
+      console.error(`${c.red}✗${c.reset} ${msg}`);
+    }
+    process.exit(1);
+  }
+
+  const data = await res.json() as any;
+  const buildId = data.buildId;
+
+  console.log(`${c.green}✓${c.reset} Build started`);
+  console.log(`  Build ID: ${c.bold}${buildId}${c.reset}`);
+  console.log(`  Repo:     ${c.cyan}${data.repoUrl}${c.reset}`);
+
+  if (!opts.wait) {
+    console.log(`\nTrack progress:`);
+    console.log(`  ai-gateway docker status ${buildId}`);
+    return;
+  }
+
+  console.log(`\nWaiting for build to complete...`);
+  const deadline = Date.now() + 50 * 60_000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 10_000));
+    const sr = await fetch(`${url}/v1/docker/builds/${buildId}`, { headers: headers(key) });
+    if (!sr.ok) continue;
+    const sd = await sr.json() as any;
+    const build = sd.build;
+    process.stdout.write(`  Status: ${build.status}${build.workflowRunUrl ? '' : ' (queuing...)'}       \r`);
+
+    if (build.status === 'success') {
+      console.log(`\n${c.green}✓${c.reset} Build complete!`);
+      console.log(`  Image: ${c.bold}${build.image}${c.reset}`);
+      console.log(`  Run:   ai-gateway gpu deploy --image ${build.image}`);
+      return;
+    }
+    if (build.status === 'failed') {
+      console.error(`\n${c.red}✗${c.reset} Build failed: ${build.error}`);
+      if (build.workflowRunUrl) console.error(`  Logs: ${build.workflowRunUrl}`);
+      process.exit(1);
+    }
+  }
+  console.error(`\n${c.yellow}!${c.reset} Timed out — check: ai-gateway docker status ${buildId}`);
+}
+
+async function cmdDockerList() {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/v1/docker/builds`, { headers: headers(key) });
+  if (!res.ok) { console.error('Failed to fetch builds'); process.exit(1); }
+  const data = await res.json() as any;
+  const builds: any[] = data.builds ?? [];
+
+  if (builds.length === 0) {
+    console.log('No builds yet. Run: ai-gateway docker build <dir>');
+    return;
+  }
+
+  const statusColor = (s: string) => {
+    if (s === 'success') return c.green + s + c.reset;
+    if (s === 'failed') return c.red + s + c.reset;
+    if (s === 'building' || s === 'queued') return c.yellow + s + c.reset;
+    return c.dim + s + c.reset;
+  };
+
+  console.log(`\nDocker image builds (${builds.length}):\n`);
+  for (const b of builds) {
+    const age = Math.round((Date.now() - b.createdAt) / 60_000);
+    const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
+    console.log(`  ${c.bold}${b.id}${c.reset}  ${statusColor(b.status)}  ${ageStr}`);
+    console.log(`    name: ${b.name}:${b.tag}   repo: ${b.repoUrl}`);
+    if (b.image) console.log(`    image: ${c.cyan}${b.image}${c.reset}`);
+    if (b.workflowRunUrl) console.log(`    build: ${b.workflowRunUrl}`);
+    if (b.error) console.log(`    error: ${c.red}${b.error}${c.reset}`);
+  }
+}
+
+async function cmdDockerImages() {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/v1/docker/images`, { headers: headers(key) });
+  if (!res.ok) { console.error('Failed to fetch images'); process.exit(1); }
+  const data = await res.json() as any;
+  const images: any[] = data.images ?? [];
+
+  if (images.length === 0) {
+    console.log('No successfully built images yet.');
+    return;
+  }
+
+  console.log(`\nBuilt Docker images (${images.length}):\n`);
+  for (const img of images) {
+    const age = Math.round((Date.now() - (img.completedAt ?? img.createdAt)) / 60_000);
+    const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
+    console.log(`  ${c.bold}${img.image}${c.reset}  ${c.dim}${ageStr}${c.reset}`);
+    console.log(`    repo: ${img.repoUrl}`);
+  }
+  console.log(`\nTo deploy:`);
+  console.log(`  ai-gateway gpu deploy --image <image>`);
+}
+
+async function cmdDockerStatus(buildId: string) {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/v1/docker/builds/${buildId}`, { headers: headers(key) });
+  if (res.status === 404) { console.error(`Build ${buildId} not found`); process.exit(1); }
+  if (!res.ok) { console.error('Failed to fetch build'); process.exit(1); }
+  const data = await res.json() as any;
+  const b = data.build;
+
+  const statusLine =
+    b.status === 'success' ? `${c.green}✓ success${c.reset}` :
+    b.status === 'failed'  ? `${c.red}✗ failed${c.reset}` :
+    b.status === 'building' ? `${c.yellow}⟳ building${c.reset}` :
+    b.status === 'queued'  ? `${c.yellow}… queued${c.reset}` :
+    c.dim + b.status + c.reset;
+
+  console.log(`\nBuild ${c.bold}${b.id}${c.reset}: ${statusLine}`);
+  console.log(`  name:      ${b.name}:${b.tag}`);
+  console.log(`  repo:      ${b.repoUrl}`);
+  if (b.image) console.log(`  image:     ${c.cyan}${b.image}${c.reset}`);
+  if (b.workflowRunUrl) console.log(`  workflow:  ${b.workflowRunUrl}`);
+  if (b.error) console.log(`  error:     ${c.red}${b.error}${c.reset}`);
+  console.log(`  created:   ${new Date(b.createdAt).toLocaleString()}`);
+  if (b.completedAt) console.log(`  completed: ${new Date(b.completedAt).toLocaleString()}`);
+}
+
 // ── Argument parsing ──────────────────────────────────────────────────────
 
 function getArg(args: string[], flag: string): string | undefined {
@@ -1196,6 +1427,7 @@ Commands:
   tts             Generate speech from text (text-to-speech)
   voices          List available TTS voices
   image           Generate an image from a text prompt
+  docker          Build Docker images via GitHub Actions and GHCR (auth, build, list)
   gpu             Manage GPU deployments (status, deploy, stop, logs)
   apps            List and manage app configurations
   profiles        Alias for 'apps'
@@ -1333,6 +1565,44 @@ Notes:
 Examples:
   ai-gateway image "a sunset over mountains"
   ai-gateway image "logo design, minimal, blue" -o logo.jpg
+`,
+    docker: `
+ai-gateway docker — Build Docker images via GitHub Actions and GHCR
+
+Usage:
+  ai-gateway docker <subcommand> [options]
+
+Subcommands:
+  auth                         Connect your GitHub account (OAuth device flow)
+  auth logout                  Disconnect GitHub account
+  auth status                  Show connected GitHub user
+  build <dir>                  Build a Docker image from a local directory
+    --name <name>                Image name (default: directory name)
+    --tag <tag>                  Docker tag (default: latest)
+    --repo <repo>                GitHub repo name (default: ai-gateway-img-<name>)
+    --public                     Create the GitHub repo as public (default: private)
+    --platforms <platforms>      Build platforms (default: linux/amd64)
+    --wait                       Wait for build to complete
+  list                         List all Docker image builds
+  images                       List successfully built images (ready to deploy)
+  status <buildId>             Show status of a specific build
+
+Setup:
+  1. Register a GitHub OAuth App at https://github.com/settings/applications/new
+     (Authorization callback URL: http://localhost — device flow doesn't need it)
+  2. Set env var: AI_GATEWAY_GITHUB_CLIENT_ID=<your-app-client-id>
+  3. Run: ai-gateway docker auth
+  4. Follow the link and enter the shown code in your browser
+
+After auth, built images are available at:
+  ghcr.io/<your-github-username>/<repo>:latest
+
+Examples:
+  ai-gateway docker auth
+  ai-gateway docker build ./my-whisper-app --name whisper-custom --wait
+  ai-gateway docker build ./my-llm --public --platforms linux/amd64,linux/arm64
+  ai-gateway docker list
+  ai-gateway gpu deploy --image ghcr.io/alice/ai-gateway-img-whisper:latest
 `,
     gpu: `
 ai-gateway gpu — Manage GPU deployments
@@ -1733,6 +2003,49 @@ ai-gateway server — Manage the local dev server
           output: getArg(args, '-o') || getArg(args, '--output'),
           model: getArg(args, '-m') || getArg(args, '--model'),
         });
+        break;
+      }
+      case 'docker': {
+        const sub = args[1];
+        if (!sub || sub === 'help' || sub === '--help') {
+          console.log(HELP.docker || ''); break;
+        }
+        switch (sub) {
+          case 'auth': {
+            const authSub = args[2];
+            if (authSub === 'logout' || authSub === 'revoke') { await cmdDockerAuthLogout(); break; }
+            if (authSub === 'status' || authSub === 'me') { await cmdDockerAuthStatus(); break; }
+            await cmdDockerAuth();
+            break;
+          }
+          case 'build': {
+            const dir = args[2];
+            if (!dir || dir.startsWith('-')) {
+              console.error('Usage: ai-gateway docker build <directory> [options]');
+              process.exit(1);
+            }
+            await cmdDockerBuild(dir, {
+              name: getArg(args, '--name'),
+              tag: getArg(args, '--tag'),
+              repo: getArg(args, '--repo'),
+              platforms: getArg(args, '--platforms'),
+              public: hasFlag(args, '--public'),
+              wait: hasFlag(args, '--wait'),
+            });
+            break;
+          }
+          case 'list': await cmdDockerList(); break;
+          case 'images': await cmdDockerImages(); break;
+          case 'status': {
+            const buildId = args[2];
+            if (!buildId) { console.error('Usage: ai-gateway docker status <buildId>'); process.exit(1); }
+            await cmdDockerStatus(buildId);
+            break;
+          }
+          default:
+            console.error(`Unknown docker subcommand: ${sub}`);
+            console.log(HELP.docker || '');
+        }
         break;
       }
       case 'latency': {
