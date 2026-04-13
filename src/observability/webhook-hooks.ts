@@ -22,6 +22,7 @@ export function createWebhookHooks(config: WebhookConfig): Partial<GatewayHooks>
   const allowedEvents = config.events ? new Set(config.events) : null;
   let queue: QueuedEvent[] = [];
   let timer: ReturnType<typeof setInterval> | null = null;
+  let timerRunning = false;
 
   async function flush(): Promise<void> {
     if (queue.length === 0) return;
@@ -48,19 +49,24 @@ export function createWebhookHooks(config: WebhookConfig): Partial<GatewayHooks>
 
   function enqueue(hookName: string, data: unknown): void {
     if (allowedEvents && !allowedEvents.has(hookName)) return;
-    // Drop oldest events if queue is too large (webhook endpoint may be down)
     if (queue.length >= MAX_QUEUE_SIZE) queue.splice(0, queue.length - MAX_QUEUE_SIZE + 1);
     queue.push({ hookName, data, timestamp: new Date().toISOString() });
-    if (queue.length >= batchSize) flush().catch(() => {}); // async flush, errors handled inside
+    if (queue.length >= batchSize) flush().catch(() => {});
     if (!timer) {
-      timer = setInterval(() => {
-        flush().catch(() => {}); // errors handled inside flush()
-        if (queue.length === 0 && timer) {
-          clearInterval(timer);
-          timer = null;
+      timerRunning = false;
+      timer = setInterval(async () => {
+        if (timerRunning) return;
+        timerRunning = true;
+        try {
+          await flush();
+          if (queue.length === 0 && timer) {
+            clearInterval(timer);
+            timer = null;
+          }
+        } finally {
+          timerRunning = false;
         }
       }, flushInterval);
-      // Allow process to exit without waiting for flush timer
       if (typeof timer === 'object' && 'unref' in timer) timer.unref();
     }
   }
