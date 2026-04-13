@@ -124,6 +124,10 @@ interface CooldownState {
   failures: number;
   windowStart: number; // when the current failure window started
   coolUntil: number;   // 0 if not cooling down
+  /** Last applied cooldown duration in ms (for adaptive escalation) */
+  lastCooldownMs?: number;
+  /** How many times cooldown has been applied consecutively without a success reset */
+  cooldownStreak?: number;
 }
 
 const COOLDOWN_WINDOW_MS = 60_000; // rolling window for counting failures
@@ -153,11 +157,18 @@ export class CooldownTracker {
     this.reputationLookup = fn;
   }
 
+  /** Maximum cooldown duration after repeated escalation (5 minutes) */
+  private static readonly MAX_COOLDOWN_MS = 300_000;
+
   isCoolingDown(entry: FallbackEntry): boolean {
     const state = this.map.get(cooldownKey(entry));
     if (!state || state.coolUntil === 0) return false;
     if (state.coolUntil > Date.now()) return true;
-    this.map.delete(cooldownKey(entry));
+    // Cooldown expired: reset failure count but preserve cooldownStreak
+    // so the next failure can escalate the cooldown duration.
+    state.failures = 0;
+    state.coolUntil = 0;
+    state.windowStart = Date.now();
     return false;
   }
 
@@ -174,23 +185,35 @@ export class CooldownTracker {
     state.failures += 1;
 
     if (state.failures >= allowedFails) {
+      // Adaptive escalation: if this provider just came off cooldown and failed
+      // again immediately, double the cooldown duration (up to MAX_COOLDOWN_MS).
+      // This prevents repeatedly hammering a provider that keeps failing after
+      // each cooldown expires.
+      const streak = (state.cooldownStreak ?? 0) + 1;
+      const baseCooldown = cooldownMs * Math.pow(2, Math.min(streak - 1, 5));
+
       // Scale cooldown by reputation: poor hosts (score 0.2) get 3x cooldown, good hosts (0.8+) get 1x
-      let effectiveCooldown = cooldownMs;
+      let effectiveCooldown = baseCooldown;
       if (this.reputationLookup) {
         const score = this.reputationLookup(entry.provider);
         if (score !== null && score < 0.7) {
           // Multiplier: score=0.2 → 3x, score=0.5 → 1.6x, score=0.7 → 1x
           const multiplier = 1 + (0.7 - Math.max(score, 0.1)) * 4;
-          effectiveCooldown = Math.round(cooldownMs * multiplier);
+          effectiveCooldown = Math.round(baseCooldown * multiplier);
         }
       }
+
+      effectiveCooldown = Math.min(effectiveCooldown, CooldownTracker.MAX_COOLDOWN_MS);
       state.coolUntil = now + effectiveCooldown;
+      state.lastCooldownMs = effectiveCooldown;
+      state.cooldownStreak = streak;
     }
 
     this.map.set(key, state);
   }
 
   recordSuccess(entry: FallbackEntry): void {
+    // Full reset on success: clears failure count, cooldown, and escalation streak
     this.map.delete(cooldownKey(entry));
   }
 

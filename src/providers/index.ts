@@ -36,7 +36,15 @@ export type {
 } from './types';
 
 // ── Fallback ──────────────────────────────────────────────────────────────
-export { withProviderFallback, isRetryableError, isContextWindowError, isTimeoutError, getCooldownState } from './fallback';
+export {
+  withProviderFallback,
+  isRetryableError,
+  isContextWindowError,
+  isTimeoutError,
+  getCooldownState,
+  CooldownTracker,
+  defaultCooldownTracker,
+} from './fallback';
 export type { FallbackEntry, FallbackOptions } from './fallback';
 
 // ── Chain Builder ─────────────────────────────────────────────────────────
@@ -143,3 +151,10 @@ export { SelfHostedSTTProvider, SelfHostedTTSProvider, SelfHostedLLMProvider } f
 // ── Circuit Breaker ───────────────────────────────────────────────────────
 export { CircuitBreaker, CircuitBreakerRegistry } from "./circuit-breaker";
 export type { CircuitState, CircuitBreakerOptions, CircuitBreakerStats } from "./circuit-breaker";
+
+// ── Batch Detector ──────────────────────────────────────��───────────────
+export {
+  recordSttRequest,
+  getBatchOpportunityCount,
+  resetBatchDetector,
+} from './batch-detector';

@@ -50,6 +50,14 @@ export class ProviderCooldownTracker {
   /** Maximum cooldown duration — caps exponential backoff and billing cooldowns. */
   static readonly MAX_COOLDOWN_MS = 15 * 60_000; // 15 min hard cap
 
+  /** Auto-blacklist: if a provider has N+ failures in WINDOW_MS, extend cooldown to BLACKLIST_MS. */
+  private static readonly AUTO_BLACKLIST_THRESHOLD = 5;
+  private static readonly AUTO_BLACKLIST_WINDOW_MS = 60 * 60_000; // 1 hour
+  private static readonly AUTO_BLACKLIST_DURATION_MS = 60 * 60_000; // 1 hour blacklist
+
+  /** Rolling failure history per provider — timestamps of recent failures. */
+  private failureHistory = new Map<string, number[]>();
+
   constructor(
     private baseCooldownMs = 60_000,       // 1 min base (was 5 min — too slow for retries)
     private maxCooldownMs = ProviderCooldownTracker.MAX_COOLDOWN_MS,
@@ -104,12 +112,33 @@ export class ProviderCooldownTracker {
   }
 
   recordFailure(name: string): void {
+    const now = Date.now();
     const existing = this.cooldowns.get(name);
     const failCount = (existing?.failCount ?? 0) + 1;
-    const cooldownMs = Math.min(this.baseCooldownMs * Math.pow(2, failCount - 1), this.maxCooldownMs);
+
+    // Track rolling failure history for auto-blacklist detection
+    const history = this.failureHistory.get(name) ?? [];
+    history.push(now);
+    // Prune entries older than the blacklist window
+    const windowStart = now - ProviderCooldownTracker.AUTO_BLACKLIST_WINDOW_MS;
+    const recent = history.filter(ts => ts >= windowStart);
+    this.failureHistory.set(name, recent);
+
+    // Check auto-blacklist: if N+ failures in the window, extend cooldown significantly
+    let cooldownMs: number;
+    if (recent.length >= ProviderCooldownTracker.AUTO_BLACKLIST_THRESHOLD) {
+      cooldownMs = ProviderCooldownTracker.AUTO_BLACKLIST_DURATION_MS;
+      console.warn(
+        `[cooldown] Auto-blacklisting provider '${name}' for ${Math.round(cooldownMs / 60_000)}min ` +
+        `(${recent.length} failures in the last ${Math.round(ProviderCooldownTracker.AUTO_BLACKLIST_WINDOW_MS / 60_000)}min)`
+      );
+    } else {
+      cooldownMs = Math.min(this.baseCooldownMs * Math.pow(2, failCount - 1), this.maxCooldownMs);
+    }
+
     this.cooldowns.set(name, {
-      failedAt: Date.now(),
-      cooldownUntilMs: Date.now() + cooldownMs,
+      failedAt: now,
+      cooldownUntilMs: now + cooldownMs,
       failCount,
     });
     this.persist();
@@ -131,8 +160,28 @@ export class ProviderCooldownTracker {
   recordSuccess(name: string): boolean {
     const had = this.cooldowns.has(name);
     this.cooldowns.delete(name);
+    this.failureHistory.delete(name); // Clear rolling failure history on success
     if (had) this.persist();
     return had;
+  }
+
+  /** Check if a provider is auto-blacklisted (5+ failures in the last hour). */
+  isBlacklisted(name: string): boolean {
+    const now = Date.now();
+    const history = this.failureHistory.get(name);
+    if (!history) return false;
+    const windowStart = now - ProviderCooldownTracker.AUTO_BLACKLIST_WINDOW_MS;
+    const recent = history.filter(ts => ts >= windowStart);
+    return recent.length >= ProviderCooldownTracker.AUTO_BLACKLIST_THRESHOLD;
+  }
+
+  /** Get rolling failure count in the blacklist window for a provider. */
+  getRecentFailureCount(name: string): number {
+    const now = Date.now();
+    const history = this.failureHistory.get(name);
+    if (!history) return 0;
+    const windowStart = now - ProviderCooldownTracker.AUTO_BLACKLIST_WINDOW_MS;
+    return history.filter(ts => ts >= windowStart).length;
   }
 
   /** Get all active cooldowns for status reporting. */
