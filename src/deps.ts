@@ -15,8 +15,14 @@ export interface KvStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, ttlSecs?: number): Promise<void>;
   del(key: string): Promise<void>;
-  /** SCAN keys matching a pattern. Returns all matching keys. */
-  scan(pattern: string): Promise<string[]>;
+  /** SCAN keys matching a pattern using cursor-based iteration.
+   *  For large keyspaces, prefer using the callback for memory efficiency.
+   *  @param pattern Glob pattern (e.g., "cache:*")
+   *  @param callback Called for each batch of keys; return false to stop iteration early
+   *  @param limit Maximum number of keys to return (default 1000, max 10000)
+   *  @returns Total number of keys found (may be approximate for large keyspaces)
+   */
+  scan(pattern: string, callback?: (keys: string[]) => boolean | void, limit?: number): Promise<number>;
 }
 
 /** List operations (used by LatencyTracker) */
@@ -32,11 +38,11 @@ export interface ListStore {
 /** Hash operations (used by SessionTracker) */
 export interface HashStore {
   /** Set hash field */
-  hset(key: string, field: string, value: string): Promise<void>;
+  hset(key: string, field: string, value: string, ttlSecs?: number): Promise<void>;
   /** Delete hash field */
   hdel(key: string, field: string): Promise<void>;
-  /** Get all hash fields */
-  hgetall(key: string): Promise<Record<string, string>>;
+  /** Get all hash fields up to limit (default 1000). Use limit param with cursor for large hashes. */
+  hgetall(key: string, limit?: number): Promise<Record<string, string>>;
   /** Increment a hash field by a number */
   hincrby(key: string, field: string, increment: number): Promise<void>;
 }

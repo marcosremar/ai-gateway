@@ -17,9 +17,13 @@ function makeKvStore() {
     async get(key) { return kvs.get(key) ?? null; },
     async set(key, value, _ttl) { kvs.set(key, value); },
     async del(key) { kvs.delete(key); },
-    async scan(pattern) {
+    async scan(pattern, callback) {
       const prefix = pattern.replace('*', '');
-      return [...kvs.keys()].filter(k => k.startsWith(prefix));
+      const matching = [...kvs.keys()].filter(k => k.startsWith(prefix));
+      if (callback) {
+        callback(matching);
+      }
+      return matching.length;
     },
   };
   return store;
