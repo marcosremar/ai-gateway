@@ -127,7 +127,7 @@ export async function handleChatCompletions(
 
     // Check cache
     if (cacheKey) {
-      const cached = await cache!.get<{ content: string; model: string; usage?: unknown }>(cacheKey);
+      const cached = await cache.get<{ content: string; model: string; usage?: unknown }>(cacheKey);
       if (cached) {
         return {
           status: 200,
@@ -183,7 +183,7 @@ export async function handleChatCompletions(
 
     // Store in cache (key already computed above)
     if (cacheKey) {
-      await cache!.set(cacheKey, result);
+      await cache.set(cacheKey, result);
     }
 
     emitHook(hooks, 'onRequestEnd', {
@@ -302,20 +302,20 @@ function buildSSEStream(
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
       // Races any async step against the 30s wall-clock timeout
+      let currentTimeoutId: ReturnType<typeof setTimeout> | null = null;
       const withTimeout = <T>(p: Promise<T>): Promise<T> => {
-        if (timeoutId) clearTimeout(timeoutId);
+        if (currentTimeoutId) clearTimeout(currentTimeoutId);
         return new Promise<T>((resolve, reject) => {
-          timeoutId = setTimeout(() => reject(new Error('Streaming timeout')), STREAM_TIMEOUT_MS);
-          p.then(v => { clearTimeout(timeoutId!); resolve(v); },
-                 e => { clearTimeout(timeoutId!); reject(e); });
+          currentTimeoutId = setTimeout(() => reject(new Error('Streaming timeout')), STREAM_TIMEOUT_MS);
+          p.then(v => { if (currentTimeoutId) clearTimeout(currentTimeoutId); resolve(v); },
+                 e => { if (currentTimeoutId) clearTimeout(currentTimeoutId); reject(e); });
         });
       };
 
       const finish = (success: boolean, errorMsg?: string) => {
-        if (timeoutId) clearTimeout(timeoutId);
+        if (currentTimeoutId) clearTimeout(currentTimeoutId);
         onEnd?.(Date.now() - startMs, success, errorMsg);
       };
 
