@@ -269,11 +269,11 @@ export async function runStreamingPipeline(
         name: 'ensemble-fallback', timeoutMs: 3_000,
         run: async (signal) => {
           if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-          const ensembleProviders: EnsembleSTTProviderEntry[] = [{ name: 'groq', provider: groqSTT }];
-          const result = await runEnsembleSTT(audio, source, sttPrompt, {
-            providers: ensembleProviders, timeoutMs: 2500,
+          const providers: STTRaceProvider[] = [{ name: 'groq', provider: groqSTT }];
+          const result = await sttRace(audio, source, sttPrompt, {
+            providers, timeoutMs: 2500,
           });
-          return { text: result.consensus, language: '', used_gpu: false, avg_logprob: result.avg_logprob ?? 0 };
+          return { text: result.text, language: '', used_gpu: false, avg_logprob: result.avgLogprob ?? 0 };
         },
       });
     }

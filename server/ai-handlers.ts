@@ -753,7 +753,7 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
   }
 }
 
-// ── Ensemble STT endpoint — thin shim, logic lives in ai-gateway/src/ensemble-stt.ts ──
+// ── STT Race endpoint — fires all providers in parallel, returns the fastest ──
 
 export async function handleEnsembleTranscribe(req: IncomingMessage, res: ServerResponse): Promise<void> {
   touchRequest(); touchModelRequest();
@@ -805,12 +805,6 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
   if (whisperAvailable && wants('whisper')) activeProviders.push({ name: 'whisper', provider: new OllamaSTTProvider(whisperHost) });
 
   try {
-    // Embedding fallbacks: Qwen3-0.6b (OpenRouter) → OpenAI 3-small
-    // Triggered automatically when Jaccard agreement < 0.3 (language divergence etc.)
-    const embeddingFallbacks: import('../src/providers/openai-compat/openai-compat-embedding').EmbeddingProvider[] = [];
-    if (openrouterAvailable) embeddingFallbacks.push(openrouterQwen3Embedding);
-    if (openaiAvailable) embeddingFallbacks.push(openaiEmbedding);
-
     const result = await sttRace(audio, language, prompt, {
       providers: activeProviders,
       timeoutMs,
