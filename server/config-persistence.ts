@@ -415,6 +415,7 @@ export function patchProviderConfig(partial: Partial<ProviderConfig>): ProviderC
     pipelineLlm: partial.pipelineLlm !== undefined ? partial.pipelineLlm : current.pipelineLlm,
     pipelineTts: partial.pipelineTts !== undefined ? partial.pipelineTts : current.pipelineTts,
     idleTimeoutMin: partial.idleTimeoutMin !== undefined ? partial.idleTimeoutMin : current.idleTimeoutMin,
+    sttHallucinationFilter: partial.sttHallucinationFilter !== undefined ? partial.sttHallucinationFilter : current.sttHallucinationFilter,
     updatedAt: Date.now(),
   };
   // Copy any extra fields from partial (dockerImages, gpuImage, etc.)
