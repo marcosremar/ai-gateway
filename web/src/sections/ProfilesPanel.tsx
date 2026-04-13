@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { X, Plus, Check, Trash2, Pencil, Copy, Mic, Bot, Volume2 } from 'lucide-react';
 import { Button, Toggle, ConfirmModal } from '@/components/ui';
+import { patchProviderConfig } from '@/lib/gateway';
 import type { App } from './provider-types';
 
 const LATENCY_BADGE: Record<string, { label: string; color: string }> = {
@@ -184,14 +185,27 @@ export default function AppsPanel({
     setApps(next);
     if (activeAppId === confirmDelete.id) setActiveAppId(next[0]?.id || null);
     setConfirmDelete(null);
+    patchProviderConfig({ apps: next } as any).catch(console.error);
   };
 
   const toggleEnabled = useCallback((id: string) => {
-    setApps(prev => prev.map(p => p.id === id ? { ...p, enabled: !(p.enabled !== false) } : p));
+    setApps(prev => {
+      const next = prev.map(p => p.id === id ? { ...p, enabled: !(p.enabled !== false) } : p);
+      patchProviderConfig({ apps: next } as any).catch(console.error);
+      return next;
+    });
   }, [setApps]);
 
   const duplicateApp = useCallback((p: App) => {
-    const copy: App = { ...p, id: `${p.id}-${Date.now()}`, name: `${p.name} (copy)` };
+    const copy: App = {
+      ...p,
+      id: `${p.id}-${Date.now()}`,
+      name: `${p.name} (copy)`,
+      stt: p.stt ? [...p.stt] : undefined,
+      llm: [...p.llm],
+      tts: p.tts ? [...p.tts] : undefined,
+      services: p.services ? p.services.map(s => ({ ...s })) : [],
+    };
     setApps(prev => [...prev, copy]);
   }, [setApps]);
 
@@ -225,7 +239,11 @@ export default function AppsPanel({
                   isActive={activeAppId === p.id}
                   onApply={onApplyApp}
                   onDelete={p => setConfirmDelete(p)}
-                  onRename={(id, name) => setApps(prev => prev.map(x => x.id === id ? { ...x, name } : x))}
+                  onRename={(id, name) => setApps(prev => {
+                    const next = prev.map(x => x.id === id ? { ...x, name } : x);
+                    patchProviderConfig({ apps: next } as any).catch(console.error);
+                    return next;
+                  })}
                   onToggleEnabled={toggleEnabled}
                   onDuplicate={duplicateApp}
                 />
