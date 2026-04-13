@@ -50,6 +50,7 @@ export class StreamingAudioPlayer {
 
   /** Web Worker for off-main-thread PCM decoding. */
   private decodeWorker: Worker | null = null;
+  private workerBlobUrl: string | null = null;
   private workerMsgId = 0;
   private workerCallbacks = new Map<number, (float32: Float32Array) => void>();
 
@@ -93,7 +94,9 @@ export class StreamingAudioPlayer {
     try {
       const code = `self.onmessage=function(e){var d=e.data,p=d.pcm,b=d.bitsPerSample,bs=d.bytesPerSample,id=d.id;var v=new DataView(p.buffer,p.byteOffset,p.byteLength);var n=Math.floor(p.length/bs);var f=new Float32Array(n);if(b===16){for(var i=0;i<n;i++)f[i]=v.getInt16(i*2,true)/32768}else if(b===24){for(var i=0;i<n;i++){var o=i*3;f[i]=(v.getUint8(o)|(v.getUint8(o+1)<<8)|(v.getInt8(o+2)<<16))/8388608}}else if(b===32){for(var i=0;i<n;i++)f[i]=v.getFloat32(i*4,true)}self.postMessage({float32:f,id:id},[f.buffer])}`;
       const blob = new Blob([code], { type: 'application/javascript' });
-      this.decodeWorker = new Worker(URL.createObjectURL(blob));
+      const blobUrl = URL.createObjectURL(blob);
+      this.workerBlobUrl = blobUrl;
+      this.decodeWorker = new Worker(blobUrl);
       this.decodeWorker.onmessage = (e: MessageEvent) => {
         const { float32, id } = e.data as { float32: Float32Array; id: number };
         const cb = this.workerCallbacks.get(id);
@@ -264,6 +267,10 @@ export class StreamingAudioPlayer {
       this.decodeWorker.terminate();
       this.decodeWorker = null;
       this.workerCallbacks.clear();
+    }
+    if (this.workerBlobUrl) {
+      URL.revokeObjectURL(this.workerBlobUrl);
+      this.workerBlobUrl = null;
     }
   }
 
