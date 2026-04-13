@@ -3,6 +3,8 @@ export interface ProviderCredentials {
   /** TensorDock marketplace v0 Authorization ID */
   authId?: string;
   hfToken?: string;
+  /** Trace ID for correlating gateway requests with provider-side logs. */
+  traceId?: string;
 }
 
 // ── Provider-specific metadata interfaces ──────────────────────────────────

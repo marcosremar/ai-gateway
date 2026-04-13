@@ -97,12 +97,19 @@ process.on('unhandledRejection', (reason) => {
 // ── Graceful shutdown with request draining ──────────────────────────────────
 
 let shuttingDown = false;
+let activeRequests = 0;
+
+// Track in-flight requests for graceful drain
+server.on('request', (_req: import('http').IncomingMessage, res: import('http').ServerResponse) => {
+  activeRequests++;
+  res.on('finish', () => { activeRequests--; });
+});
 
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`[serve] Received ${signal}, draining connections...`);
+    console.log(`[serve] Received ${signal}, draining ${activeRequests} active request(s)...`);
 
     // Stop accepting new connections
     server.close(() => {
@@ -110,9 +117,20 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
       process.exit(0);
     });
 
+    // Poll active requests — exit early if all drained
+    const drainCheck = setInterval(() => {
+      if (activeRequests <= 0) {
+        clearInterval(drainCheck);
+        console.log('[serve] All requests completed. Exiting.');
+        process.exit(0);
+      }
+      console.log(`[serve] Waiting for ${activeRequests} request(s) to complete...`);
+    }, 1000);
+
     // Force exit after 25s (before Fly's 30s kill_timeout)
     setTimeout(() => {
-      console.error('[serve] Drain timeout — forcing exit');
+      clearInterval(drainCheck);
+      console.error(`[serve] Drain timeout — forcing exit (${activeRequests} requests abandoned)`);
       process.exit(1);
     }, 25_000).unref();
   });

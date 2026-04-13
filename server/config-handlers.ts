@@ -17,6 +17,14 @@ import { readFileSync, writeFileSync, existsSync, chmodSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { getOrCreateRequestId, setRequestIdHeader, readJsonBody, handleBodyError } from './http-utils';
+import { logGpuEvent } from './metrics';
+
+/** Audit log for config changes — logs to console + persists to GPU event log */
+function auditLog(action: string, requestId: string, details: Record<string, unknown>): void {
+  const userId = details.userId || 'unknown';
+  console.log(`[audit] ${action} by=${userId} req=${requestId} ${JSON.stringify(details).slice(0, 200)}`);
+  try { logGpuEvent(`config:${action}`, 'gateway', true, { metadata: { requestId, ...details } }); } catch { /* best-effort */ }
+}
 import { loadProviderConfig, patchProviderConfig, saveProviderConfig, applyAppLatencyTargets } from './config-persistence';
 import type { PipelineChainEntry } from './config-persistence';
 import { reloadStreamingSTTRouter } from './ws-server';
@@ -67,6 +75,8 @@ export async function handlePatchProviderConfig(req: IncomingMessage, res: Serve
   }
 
   try {
+    const changedKeys = Object.keys(body).filter(k => body[k] !== undefined);
+    auditLog('patch_config', requestId, { changedKeys, appCount: (body as any).apps?.length });
     const updated = patchProviderConfig(body as Parameters<typeof patchProviderConfig>[0]);
     // Apply changed chains to runtime translationDefaults
     if (body.pipelineStt && Array.isArray(body.pipelineStt) && body.pipelineStt.length > 0) {

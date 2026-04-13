@@ -351,6 +351,10 @@ function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse
 let activeConnections = 0;
 let peakConnections = 0;
 
+/** Per-user concurrency limiter -- prevents a single user from monopolizing connections. */
+const userConcurrency = new Map<string, number>();
+const MAX_CONCURRENT_PER_USER = parseInt(process.env.MAX_CONCURRENT_PER_USER || '20', 10);
+
 export function createProxyServer(config: ProxyConfig): Server {
   const apiKeys = config.apiKeys || [];
   // Build the API key registry for user identity resolution.
@@ -449,6 +453,21 @@ export function createProxyServer(config: ProxyConfig): Server {
     if (config.onAuth && authHeader) {
       const token = authHeader.replace(/^Bearer\s+/i, '');
       config.onAuth(token).catch(() => {});
+    }
+
+    // Per-user concurrent request limit
+    if (userId !== 'anonymous') {
+      const currentConcurrent = userConcurrency.get(userId) || 0;
+      if (currentConcurrent >= MAX_CONCURRENT_PER_USER) {
+        sendError(res, 429, `Too many concurrent requests (limit: ${MAX_CONCURRENT_PER_USER})`, requestId);
+        return;
+      }
+      userConcurrency.set(userId, currentConcurrent + 1);
+      res.on('finish', () => {
+        const c = userConcurrency.get(userId) || 1;
+        if (c <= 1) userConcurrency.delete(userId);
+        else userConcurrency.set(userId, c - 1);
+      });
     }
 
     // Rate limit — keyed by userId (resolved from API key above) so each

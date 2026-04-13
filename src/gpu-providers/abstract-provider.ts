@@ -271,8 +271,9 @@ export abstract class AbstractGpuProvider implements GpuProviderClient {
     init?: RequestInit,
     timeout = TIMEOUTS.read,
     label?: string,
+    traceId?: string,
   ): Promise<T> {
-    const res = await this.fetchRaw(url, init, timeout);
+    const res = await this.fetchRaw(url, init, timeout, traceId);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new FetchError(
@@ -293,10 +294,14 @@ export abstract class AbstractGpuProvider implements GpuProviderClient {
     }
   }
 
-  /** Fetch a URL and return the raw Response (for status-code branching like 404 = not found). */
-  protected async fetchRaw(url: string, init?: RequestInit, timeout = TIMEOUTS.read): Promise<Response> {
+  /** Fetch a URL and return the raw Response (for status-code branching like 404 = not found).
+   *  Automatically injects X-Trace-Id header when `traceId` is provided. */
+  protected async fetchRaw(url: string, init?: RequestInit, timeout = TIMEOUTS.read, traceId?: string): Promise<Response> {
+    const mergedInit = traceId
+      ? { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), 'X-Trace-Id': traceId } }
+      : init;
     return fetch(url, {
-      ...init,
+      ...mergedInit,
       signal: init?.signal ?? AbortSignal.timeout(timeout),
     });
   }

@@ -274,12 +274,12 @@ export class TensordockClient extends AbstractGpuProvider {
    * Override fetchRaw with exponential backoff retry for timeout errors.
    * TensorDock API frequently times out; retries with 2s/4s/8s delays.
    */
-  protected override async fetchRaw(url: string, init?: RequestInit, timeout = TIMEOUTS.read): Promise<Response> {
+  protected override async fetchRaw(url: string, init?: RequestInit, timeout = TIMEOUTS.read, traceId?: string): Promise<Response> {
     const MAX_RETRIES = 3;
     let lastErr: unknown;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        return await super.fetchRaw(url, init, timeout);
+        return await super.fetchRaw(url, init, timeout, traceId);
       } catch (err) {
         lastErr = err;
         const isTimeout = err instanceof Error && (

@@ -45,10 +45,11 @@ import {
 } from './config';
 import { BILLING_URLS } from '../src/providers/errors';
 import { broadcastProviderStatus, broadcastWs } from './ws-state';
+import { emitGatewayEvent } from './event-bus';
 
 export const MAX_DEPLOY_RETRIES = 2;
 export const HEALTH_POLL_INTERVAL_MS = 10_000;
-export const DEPLOY_TIMEOUT_MS = 30 * 60_000; // 30 min total (pods need ~10 min to download models)
+export const DEPLOY_TIMEOUT_MS = 45 * 60_000; // 45 min — large images (52GB) + models (70B) can take 30-40 min
 export const GPU_MONITOR_INTERVAL_MS = 30_000; // health check every 30s
 export let IDLE_TIMEOUT_MS = 15 * 60_000;    // auto-STOP (pause) after 15 min idle (configurable via API)
 export function setIdleTimeoutMs(ms: number) { IDLE_TIMEOUT_MS = ms; }
@@ -281,6 +282,7 @@ let p95ViolationCount: Record<string, number> = { stt: 0, llm: 0, tts: 0 };
 
 // Budget enforcement: soft warn once per day, hard terminate at 100%
 let budgetSoftWarned = false;
+let budgetWarned50 = false;
 let lastBudgetCalcTime = 0;
 
 // Crash auto-recovery: redeploy on different provider after crash (max 2 attempts)
@@ -312,6 +314,7 @@ function startBackgroundWarmthMonitor(endpoint: string) {
   log.log('[gpu] Staged boot: TTS warm — polling until STT + LLM ready before activating full pipeline');
 
   let warmthPollCount = 0;
+  let consecutiveFailures = 0;
 
   const poll = async () => {
     if (deployState.status !== 'ready' || deployState.endpoint !== endpoint) {
@@ -327,6 +330,7 @@ function startBackgroundWarmthMonitor(endpoint: string) {
       if (res.ok) {
         const data = await res.json() as Record<string, unknown>;
         updateGpuModelWarmth(data);
+        consecutiveFailures = 0; // reset on success
         // Populate GPU hardware info from /health if not already known (e.g. Modal)
         if (!deployState.gpuType && data.gpu_type) {
           setDeployState({ gpuType: String(data.gpu_type) });
@@ -351,6 +355,11 @@ function startBackgroundWarmthMonitor(endpoint: string) {
       }
     } catch (err) {
       log.debug(`[gpu] Warmth poll failed: ${err instanceof Error ? err.message : err}`);
+      consecutiveFailures++;
+      if (consecutiveFailures >= 10) {
+        console.warn(`[gpu] Health check failed 10 consecutive times — marking unhealthy`);
+        updateGpuModelWarmth({ stt_ready: false, llm_ready: false });
+      }
     }
     warmthPollCount++;
     // Adaptive warmth polling: 10s for first 5 checks, then 20s
@@ -380,7 +389,7 @@ export function scheduleNextMonitorProbe() {
     // If status is 'error' but a pod exists, clean up the orphaned pod
     if (deployState.status === 'error' && deployState.podId) {
       log.warn(`[gpu] Monitor: deploy in error state but pod ${deployState.podId} exists on ${deployState.provider} — cleaning up orphaned pod`);
-      try { await autoTerminateGpu(); } catch (e) { log.warn('[gpu] Orphan cleanup failed:', e); }
+      try { await autoTerminateGpu('orphan_cleanup'); } catch (e) { log.warn('[gpu] Orphan cleanup failed:', e); }
       return; // Don't reschedule — pod is gone
     }
     if (deployState.status !== 'ready' || !deployState.endpoint) { scheduleNextMonitorProbe(); return; }
@@ -504,7 +513,7 @@ export function scheduleNextMonitorProbe() {
 
               // Terminate the crashed pod and redeploy via the existing auto-recovery flow
               try {
-                await autoTerminateGpu();
+                await autoTerminateGpu('crash_recovery');
                 await startAutoRecoveryDeploy();
                 log.log(`[gpu] Auto-recovery deploy initiated (attempt ${monitorCrashRecoveryAttempts}) — crashed provider: ${crashedProvider}`);
               } catch (recoveryErr) {
@@ -552,7 +561,7 @@ export function scheduleNextMonitorProbe() {
       // Budget tracking: accumulate GPU spend with enforcement
       if (deployState.costPerHr > 0) {
         const today = new Date().toISOString().slice(0, 10);
-        if (today !== dailySpendResetDate) { setDailyGpuSpendUsd(0); setDailySpendResetDate(today); budgetSoftWarned = false; }
+        if (today !== dailySpendResetDate) { setDailyGpuSpendUsd(0); setDailySpendResetDate(today); budgetSoftWarned = false; budgetWarned50 = false; }
         // Use actual elapsed time since last probe instead of assuming monitorDelayMs
         const actualElapsedMs = lastBudgetCalcTime > 0 ? Date.now() - lastBudgetCalcTime : monitorDelayMs;
         lastBudgetCalcTime = Date.now();
@@ -564,13 +573,19 @@ export function scheduleNextMonitorProbe() {
             // HARD BUDGET: auto-terminate to prevent overspend
             log.error(`[budget] HARD LIMIT: $${dailyGpuSpendUsd.toFixed(2)} >= $${DAILY_BUDGET_USD.toFixed(2)} — auto-terminating GPU`);
             broadcastWs({ type: 'gpu:budget', action: 'hard-limit', spend: dailyGpuSpendUsd, budget: DAILY_BUDGET_USD });
-            await autoTerminateGpu();
+            emitGatewayEvent('budget.exceeded', { spend: +dailyGpuSpendUsd.toFixed(2), budget: DAILY_BUDGET_USD });
+            await autoTerminateGpu('budget_exceeded');
             return;
           } else if (pct >= 0.8 && !budgetSoftWarned) {
             // SOFT BUDGET: warn + block new deploys
             budgetSoftWarned = true;
             log.warn(`[budget] SOFT LIMIT: $${dailyGpuSpendUsd.toFixed(2)} (${Math.round(pct * 100)}% of $${DAILY_BUDGET_USD.toFixed(2)}) — new deploys blocked`);
             broadcastWs({ type: 'gpu:budget', action: 'soft-limit', spend: dailyGpuSpendUsd, budget: DAILY_BUDGET_USD, forecast });
+            emitGatewayEvent('budget.critical', { pct: 80, spend: +dailyGpuSpendUsd.toFixed(2), budget: DAILY_BUDGET_USD });
+          } else if (pct >= 0.5 && !budgetWarned50) {
+            // 50% warning: informational alert
+            budgetWarned50 = true;
+            emitGatewayEvent('budget.warning', { pct: 50, spend: +dailyGpuSpendUsd.toFixed(2), budget: DAILY_BUDGET_USD });
           }
 
           // Continuous spend forecast: warn early when projected EOD spend will exceed budget
@@ -692,7 +707,7 @@ function scheduleAutoDestroy(delayMs: number) {
   destroyTimer = setTimeout(async () => {
     log.log(`[gpu] Auto-destroy triggered — deleting stopped pod ${podId} (${provider})`);
     broadcastWs({ type: 'gpu:idle', action: 'destroy', deployId: deployState.deployId, provider, podId });
-    await autoTerminateGpu();
+    await autoTerminateGpu('auto_destroy');
   }, delayMs) as unknown as Timer;
 }
 
@@ -700,17 +715,30 @@ export function clearAutoDestroyTimer() {
   if (destroyTimer) { clearTimeout(destroyTimer as unknown as ReturnType<typeof setTimeout>); destroyTimer = null; }
 }
 
+/** Reason why a GPU instance was stopped or terminated. */
+export type DeleteReason =
+  | 'idle_timeout'
+  | 'manual_stop'
+  | 'manual_terminate'
+  | 'health_failed'
+  | 'budget_exceeded'
+  | 'crash_recovery'
+  | 'race_loser'
+  | 'deploy_cancelled'
+  | 'orphan_cleanup'
+  | 'auto_destroy';
+
 /**
  * Auto-stop (pause) GPU when idle — preserves disk, no hourly charges.
  * Schedules auto-destroy after IDLE_DESTROY_MS (default 2h).
  */
-export async function autoStopGpu() {
+export async function autoStopGpu(reason: DeleteReason = 'idle_timeout') {
   const provider = activeProvider;
   const podId = deployState.podId;
 
   if (!podId || !provider) {
     log.warn('[gpu] autoStopGpu: no active pod to stop');
-    await autoTerminateGpu();
+    await autoTerminateGpu(reason);
     return;
   }
 
@@ -729,17 +757,18 @@ export async function autoStopGpu() {
 
   if (!client) {
     log.warn(`[gpu] autoStopGpu: no client for ${provider} — falling back to terminate`);
-    await autoTerminateGpu();
+    await autoTerminateGpu(reason);
     return;
   }
 
   try {
     await client.stopInstance(podId, credentials);
     log.log(`[gpu] Pod ${podId} stopped (paused) on ${provider} — disk preserved, no charges`);
-    logGpuEvent('instance_stopped', provider, true, { metadata: { podId, reason: 'idle_timeout' } });
+    logGpuEvent('instance_stopped', provider, true, { metadata: { podId, reason } });
+    emitGatewayEvent('gpu.stopped', { deployId: deployState.deployId, podId, provider, reason });
   } catch (err) {
     log.warn(`[gpu] Stop failed for ${provider} pod ${podId}: ${err instanceof Error ? err.message : err} — falling back to terminate`);
-    await autoTerminateGpu();
+    await autoTerminateGpu(reason);
     return;
   }
 
@@ -899,7 +928,7 @@ export async function resumeOrDeploy(opts: {
   }
 }
 
-export async function autoTerminateGpu() {
+export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
   clearAutoDestroyTimer();
   const rpKey = deployApiKey;
   const vastKey = deployVastApiKey;
@@ -908,41 +937,42 @@ export async function autoTerminateGpu() {
   const modalKey = deployModalApiKey;
   const provider = activeProvider;
   const podId = deployState.podId;
-  broadcastProviderStatus('offline', 'cloud', 'GPU idle timeout — terminated');
+  broadcastProviderStatus('offline', 'cloud', `GPU terminated (${reason})`);
   stopGpuMonitoring();
   // Close all SSH tunnels to prevent orphaned ssh processes
   try { const { closeAllTunnels } = await import('./ssh-tunnel'); closeAllTunnels(); } catch { /* best-effort: cleanup or optional side-effect */ }
   stopWarmthMonitor();
   resetDeployState();
-  updateActivePipeline({ gpuEndpoint: undefined }, 'idleTimeout');
+  updateActivePipeline({ gpuEndpoint: undefined }, reason);
   if (provider === 'modal' && modalKey && podId) {
-    log.log(`[gpu] Modal idle → stopping app ${podId}`);
+    log.log(`[gpu] Modal ${reason} → stopping app ${podId}`);
     try {
       await modal.stopInstance(podId, { apiKey: modalKey });
       log.log(`[gpu] Modal app ${podId} stopped`);
-      logGpuEvent('instance_stopped', 'modal', true, { metadata: { podId, reason: 'idle_timeout' } });
+      logGpuEvent('instance_stopped', 'modal', true, { metadata: { podId, reason } });
     } catch (err) {
       log.warn(`[gpu] Modal stop failed for app ${podId}: ${err instanceof Error ? err.message : err}`);
       await cleanupModalApps(modalKey);
     }
   } else if (provider === 'tensordock' && tdKey && podId) {
     // TensorDock: STOP (pause) instead of delete — preserves disk, fast restart
-    log.log(`[gpu] TensorDock idle → stopping (pausing) instance ${podId}`);
+    log.log(`[gpu] TensorDock ${reason} → stopping (pausing) instance ${podId}`);
     try {
       await tensordock.stopInstance(podId, { apiKey: tdKey, authId: tdAuthId });
       log.log(`[gpu] TensorDock instance ${podId} stopped (paused, disk preserved)`);
-      logGpuEvent('instance_stopped', 'tensordock', true, { metadata: { podId, reason: 'idle_timeout' } });
+      logGpuEvent('instance_stopped', 'tensordock', true, { metadata: { podId, reason } });
     } catch (err) {
       log.warn(`[gpu] TensorDock stop failed for instance ${podId}: ${err instanceof Error ? err.message : err} — falling back to full cleanup`);
       await cleanupTensordockInstances(tdKey, tdAuthId);
     }
   } else if (provider === 'vast' && vastKey) {
     await cleanupVastInstances(vastKey);
-    logGpuEvent('instance_stopped', 'vast', true, { metadata: { reason: 'idle_timeout' } });
+    logGpuEvent('instance_stopped', 'vast', true, { metadata: { reason } });
   } else if (rpKey) {
     await cleanupAllPods(rpKey);
-    logGpuEvent('instance_stopped', 'runpod', true, { metadata: { podId, reason: 'idle_timeout' } });
+    logGpuEvent('instance_stopped', 'runpod', true, { metadata: { podId, reason } });
   }
+  emitGatewayEvent('gpu.terminated', { deployId: deployState.deployId, podId, provider, reason });
   updateDeploySession({ status: 'stopped', stoppedAt: new Date() });
 }
 
@@ -2064,6 +2094,15 @@ export async function startDeployRace(
                 if (cooldownTracker.recordSuccess(c.tier.name)) {
                   logGpuEvent('cooldown_cleared', c.tier.name, true, { durationMs });
                 }
+                emitGatewayEvent('gpu.deployed', {
+                  deployId: deployState.deployId,
+                  provider: c.tier.name,
+                  gpuType: c.gpuType,
+                  endpoint: localEndpoint,
+                  costPerHr: c.costPerHr,
+                  durationMs,
+                  raceCount: candidates.length,
+                });
                 return; // winner exits cleanly — no cleanup needed
               }
               // Another slot already won while this fetch was in flight.
@@ -2151,6 +2190,12 @@ export async function startDeployRace(
     const msg = deployCancelled ? 'Deploy cancelled' : 'All race candidates failed to become healthy';
     setDeployState({ status: 'error', message: msg });
     deploymentSM.markError(msg);
+    emitGatewayEvent('gpu.failed', {
+      deployId: deployState.deployId,
+      error: msg,
+      durationMs: Date.now() - deployStartedAt,
+      raceCount: candidates.length,
+    });
   }
 }
 
@@ -2324,6 +2369,14 @@ export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string
         if (cooldownTracker.recordSuccess(tier.name)) {
           logGpuEvent('cooldown_cleared', tier.name, true, { durationMs });
         }
+        emitGatewayEvent('gpu.deployed', {
+          deployId: deployState.deployId,
+          provider: tier.name,
+          gpuType: deployState.gpuType,
+          endpoint: deployState.endpoint,
+          costPerHr: deployState.costPerHr,
+          durationMs,
+        });
         return;
       }
       // Deploy loop returned without reaching 'ready' or 'error' — treat as failure
@@ -2353,6 +2406,13 @@ export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string
       const failureCategory = categorizeDeployFailure(deployState.message ?? '');
       logGpuEvent('deploy_failed', tier.name, false, { durationMs, error: deployState.message, metadata: { failureCategory } });
       updateDeploySession({ status: 'failed', errorMessage: deployState.message ?? '' });
+      emitGatewayEvent('gpu.failed', {
+        deployId: deployState.deployId,
+        provider: tier.name,
+        error: deployState.message,
+        durationMs,
+        failureCategory,
+      });
       // Record failed deploy in host reputation
       // Non-host failures (billing, docker_image, api_error) don't penalize the host's score
       upsertHostReputation({
