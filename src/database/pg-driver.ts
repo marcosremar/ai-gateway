@@ -65,7 +65,12 @@ export async function createPgDriver(connectionString: string): Promise<SqlDrive
   }
 
   const client = new PgClient({ connectionString });
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (err) {
+    await client.end().catch(() => {});
+    throw err;
+  }
 
   return {
     async query<T>(sql: string, params: unknown[] = []): Promise<QueryResult<T>> {
