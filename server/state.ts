@@ -365,15 +365,15 @@ export function touchModelRequest() {
   // Auto-resume: if a stopped GPU pod exists, transparently resume it (or fall
   // back to fresh deploy) when a new AI request arrives. Fire-and-forget —
   // the caller gets a "booting" status and retries on the next poll.
-  try {
-    const { deploymentSM } = require('./deployment-state-machine');
-    if (deploymentSM.isStopped) {
-      const { resumeOrDeploy } = require('./gpu-deploy');
-      resumeOrDeploy({ reason: 'autoscaler' }).catch((err: unknown) =>
-        console.error(`[gpu] Auto-resume failed: ${err instanceof Error ? err.message : err}`)
-      );
-    }
-  } catch (e) { console.warn('[state] auto-resume failed:', e instanceof Error ? e.message : e); }
+  (async () => {
+    try {
+      const { deploymentSM } = require('./deployment-state-machine');
+      if (deploymentSM.isStopped) {
+        const { resumeOrDeploy } = require('./gpu-deploy');
+        await resumeOrDeploy({ reason: 'autoscaler' });
+      }
+    } catch (e) { console.warn('[state] auto-resume failed:', e instanceof Error ? e.message : e); }
+  })();
 }
 export function setLastModelRequestTime(v: number) { lastModelRequestTime = v; }
 

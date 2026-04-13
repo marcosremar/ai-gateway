@@ -855,10 +855,12 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   try { body = await readJsonBody(req); }
   catch { /* empty body is fine */ }
 
-  // Allow explicit podId/provider override from body (backward compat)
-  if (body.podId) {
-    deployState.podId = body.podId as string;
-    if (body.provider) deployState.provider = body.provider as ProviderName;
+  // Allow explicit podId/provider override from body (backward compat) with validation
+  if (body.podId && typeof body.podId === 'string' && body.podId.length > 0 && body.podId.length <= 200) {
+    deployState.podId = body.podId;
+  }
+  if (body.provider && typeof body.provider === 'string' && body.provider.length > 0 && body.provider.length <= 50) {
+    deployState.provider = body.provider as ProviderName;
   }
 
   if (!deployState.podId) {
