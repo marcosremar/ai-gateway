@@ -2601,6 +2601,62 @@ export async function pollHealthUntilReady(
       }
     }
 
+    // ── Periodic SSH log inspection for early crash detection ──
+    // After container starts, check logs every 30s for fatal errors (OOM, RuntimeError,
+    // CUDA error, etc.) to fail fast instead of waiting for the full health timeout.
+    {
+      const sshHost = deployState.sshHost;
+      const sshPort = deployState.sshPort;
+      const containerUp = containerStartedAt > 0;
+      const timeSinceContainerStart = containerUp ? Date.now() - containerStartedAt : 0;
+      // Check every 30s after container has been up for at least 20s
+      const shouldCheckLogs = containerUp && sshHost && sshPort && !healthRespondedOnce
+        && timeSinceContainerStart > 20_000
+        && timeSinceContainerStart % 30_000 < 8_000; // ~every 30s (within polling window)
+      if (shouldCheckLogs) {
+        try {
+          const { spawn: sshSpawn } = await import('child_process');
+          const logProc = sshSpawn('ssh', [
+            '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'ConnectTimeout=5', '-o', 'LogLevel=ERROR',
+            '-p', String(sshPort), `root@${sshHost}`,
+            'tail -20 /var/log/app.log 2>/dev/null || tail -20 /root/.log 2>/dev/null || echo NO_LOGS',
+          ], { stdio: ['ignore', 'pipe', 'pipe'] });
+          let logOut = '';
+          logProc.stdout.on('data', (c: Buffer) => { logOut += c.toString(); });
+          await new Promise<void>((r) => {
+            const t = setTimeout(() => { try { logProc.kill('SIGKILL'); } catch {} r(); }, 8_000);
+            logProc.on('exit', () => { clearTimeout(t); r(); });
+            logProc.on('error', () => { clearTimeout(t); r(); });
+          });
+          // Detect fatal crash patterns in the last log lines
+          const FATAL_PATTERNS = [
+            /RuntimeError.*failed/i,
+            /CUDA out of memory/i,
+            /torch\.cuda\.OutOfMemoryError/i,
+            /OOM|OutOfMemory/i,
+            /Killed.*signal 9/i,
+            /Engine core initialization failed/i,
+            /Cannot allocate memory/i,
+          ];
+          const logLower = logOut.toLowerCase();
+          for (const pat of FATAL_PATTERNS) {
+            if (pat.test(logOut)) {
+              const crashLine = logOut.split('\n').find(l => pat.test(l)) || logOut.slice(-200);
+              const crashMsg = `Container crashed: ${crashLine.trim().slice(0, 200)}`;
+              log.error(`[gpu] ${providerName} pod ${podId}: FATAL in logs → ${crashMsg}`);
+              broadcastWs({ type: 'gpu:deploy', phase: 'container_crash', provider: providerName, error: crashMsg });
+              setDeployState({ status: 'error', step: 'container_crash', message: crashMsg });
+              return { result: 'crashed', pullTimeS: actualPullTimeS };
+            }
+          }
+          if (logOut && !logOut.includes('NO_LOGS')) {
+            log.log(`[gpu] [log-check] ${providerName} ${podId} (${Math.round(timeSinceContainerStart/1000)}s): ${logOut.split('\n').filter(Boolean).slice(-2).join(' | ').slice(0, 200)}`);
+          }
+        } catch { /* SSH log check is best-effort */ }
+      }
+    }
+
     // Probe health endpoint (with HTTP status tracking for crash detection)
     if (endpoint) {
       let httpStatus = 0;
