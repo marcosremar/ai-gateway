@@ -291,7 +291,11 @@ const MAX_MONITOR_CRASH_RECOVERY = 2;
 
 // Idle warning: warn once before auto-terminate, reset on activity
 let idleWarned = false;
-export function resetIdleState() { idleWarned = false; monitorDelayMs = GPU_MONITOR_INTERVAL_MS; monitorCrashRecoveryAttempts = 0; }
+// NOTE: monitorCrashRecoveryAttempts is intentionally NOT reset by resetIdleState —
+// resetting it on every model request would bypass the crash-loop protection (max 2
+// auto-recovery attempts), allowing infinite crash → request → reset → crash cycles.
+// It is only reset when startGpuMonitoring() is called (fresh deploy or recovery).
+export function resetIdleState() { idleWarned = false; monitorDelayMs = GPU_MONITOR_INTERVAL_MS; }
 
 // ── Staged Warmth Monitor ────────────────────────────────────────────────────
 // After initial deploy, TTS loads first and pod becomes healthy ("degraded").
@@ -1889,6 +1893,44 @@ export async function startDeployRace(
 ): Promise<void> {
   const deployStartedAt = Date.now();
   const raceN = Math.min(raceCount, 10); // cap at 10
+
+  // ── Budget gate (same as startDeployWithTiers) ──────────────────────────
+  // Race deploys bypass startDeployWithTiers, so we must guard here too.
+  // Estimate: $2 per instance (N instances run simultaneously during boot).
+  {
+    const { canAffordDeploy } = await import('./state');
+    const estimatedCost = Math.max(2, raceN * 2);
+    const decision = canAffordDeploy(estimatedCost);
+    if (!decision.allowed) {
+      const msg = `[budget] Race deploy refused: ${decision.reason} (spend=$${decision.currentSpend.toFixed(2)}, projected=$${decision.projected.toFixed(2)}, cap=$${decision.cap.toFixed(2)}, raceN=${raceN})`;
+      log.error(msg);
+      logGpuEvent('deploy_rejected', tiers[0]?.name ?? 'unknown', false, {
+        metadata: { reason: decision.reason, currentSpend: decision.currentSpend, projected: decision.projected, cap: decision.cap, raceN },
+      });
+      broadcastWs({ type: 'gpu:budget', action: 'deploy-refused', spend: decision.currentSpend, projected: decision.projected, budget: decision.cap, reason: decision.reason });
+      setDeployState({ status: 'error', message: msg });
+      deploymentSM.markError(msg);
+      return;
+    }
+  }
+
+  // ── Runaway detector (same as startDeployWithTiers) ─────────────────────
+  {
+    const { getGlobalRunawayDetector } = await import('../src/autoscaler/runaway-detector');
+    const detector = getGlobalRunawayDetector();
+    const providerName = tiers[0]?.name ?? 'unknown';
+    const allowed = detector.recordDeployStart(providerName);
+    if (!allowed) {
+      const stats = detector.stats(providerName);
+      const msg = `[runaway] Race deploy refused: ${providerName} has ${stats.recentStarts} recent starts`;
+      log.error(msg);
+      logGpuEvent('runaway_pause', providerName, false, { metadata: { recentStarts: stats.recentStarts, raceN } });
+      broadcastWs({ type: 'gpu:runaway', action: 'deploy-refused', provider: providerName, recentStarts: stats.recentStarts });
+      setDeployState({ status: 'error', message: msg });
+      deploymentSM.markError(msg);
+      return;
+    }
+  }
 
   if (raceN > 1) {
     log.log(`[race] WARNING: race deploy with ${raceN} parallel instances — ${raceN - 1} loser(s) will be billed for boot time (~${getDeployTimeoutMinForProvider('vast')} min max). Cost = (raceCount-1) × costPerHr × boot_min/60.`);

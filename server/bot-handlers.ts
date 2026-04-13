@@ -49,6 +49,42 @@ function botHeaders(extra: Record<string, string> = {}): Record<string, string> 
 let botAudioPullWs: import('ws').WebSocket | null = null;
 /** Watchdog generation counter — incremented on each join to cancel previous watchdog loops. */
 let botWatchdogGen = 0;
+
+// ── Bot idle auto-terminate ─────────────────────────────────────────────────
+// After a meeting ends (or the machine crashes), auto-terminate the bot pod
+// after BOT_IDLE_SHUTDOWN_MS to prevent overnight cost accumulation.
+const BOT_IDLE_SHUTDOWN_MS = 30 * 60_000; // 30 min
+let botIdleTimer: Timer | null = null;
+
+function clearBotIdleTimer() {
+  if (botIdleTimer) { clearTimeout(botIdleTimer); botIdleTimer = null; }
+}
+
+function scheduleBotIdleShutdown() {
+  clearBotIdleTimer();
+  console.log(`[bot] Meeting ended — auto-terminate in ${BOT_IDLE_SHUTDOWN_MS / 60_000} min if not rejoined`);
+  botIdleTimer = setTimeout(async () => {
+    botIdleTimer = null;
+    if (botState.status !== 'ready') return; // already terminated or reused
+    console.log(`[bot] Auto-terminating idle bot pod after ${BOT_IDLE_SHUTDOWN_MS / 60_000} min`);
+    try {
+      const podId = botState.podId;
+      const apiKey = botApiKey || deployApiKey || process.env.RUNPOD_API_KEY || '';
+      const flyKey = process.env.FLY_API_TOKEN || '';
+      setBotStateVar({ status: 'idle', podId: '', endpoint: '', sshHost: '', sshPort: 0, message: '', startedAt: 0, botId: '', meetingUrl: '', webcamRtmpUrl: '', youtubeStreamKey: '' });
+      setBotDeployLock(false);
+      if (podId && podId !== 'local') {
+        if (flyKey && botState.endpoint?.includes('.fly.dev')) {
+          await flyio.deleteInstance(podId, { apiKey: flyKey }).catch(() => {});
+        } else if (apiKey) {
+          await runpod.deleteInstance(podId, { apiKey }).catch(() => {});
+        }
+      }
+    } catch (e) {
+      console.warn('[bot] Auto-terminate failed:', e instanceof Error ? e.message : e);
+    }
+  }, BOT_IDLE_SHUTDOWN_MS) as unknown as Timer;
+}
 function startBotAudioPull(botEndpoint: string) {
   stopBotAudioPull();
   // Use fly.dev hostname (not IP) for valid TLS certificate
@@ -882,6 +918,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
                 console.log(`[bot] Bot left meeting after ${MAX_RECONNECTS} reconnect attempts — giving up`);
                 broadcastWs({ type: 'bot:status', status: 'ended', message: 'Bot disconnected from meeting' });
                 setBotState({ status: 'ready', message: 'Bot disconnected — pod still running' });
+                scheduleBotIdleShutdown();
                 break;
               }
             }
@@ -891,6 +928,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
               console.warn(`[bot] Machine unreachable for ${consecutiveProbeFailures} consecutive probes — declaring crashed`);
               broadcastWs({ type: 'bot:status', status: 'ended', message: 'Bot machine crashed' });
               setBotState({ status: 'idle', message: 'Bot machine crashed — redeploy to reconnect' });
+              scheduleBotIdleShutdown();
               break;
             }
           }
@@ -1010,6 +1048,7 @@ export async function handleBotTerminate(req: IncomingMessage, res: ServerRespon
   const apiKey = botApiKey || deployApiKey || process.env.RUNPOD_API_KEY || '';
   const podId = botState.podId;
 
+  clearBotIdleTimer();
   stopBotTranscriptPoll();
   const { stopParecCapture } = await import('./ws-server');
   stopParecCapture();

@@ -1363,6 +1363,55 @@ export function startWsServer() {
     console.warn(`[ws-server] HTTP API not started: ${e.message?.slice(0, 80)}`);
   }
 
+  // ── Startup tasks ─────────────────────────────────────────────────────────
+  // 0. Restore persisted daily spend counter (must run before any budget checks)
+  try {
+    const { loadPersistedDailySpend } = require('./state');
+    loadPersistedDailySpend();
+  } catch (e: any) {
+    console.warn(`[ws-server] loadPersistedDailySpend failed: ${e.message?.slice(0, 80)}`);
+  }
+
+  // 1. Restore persisted config (idle timeout, deploy settings, latency targets)
+  try {
+    const { applyRuntimeConfig } = require('./config-persistence');
+    applyRuntimeConfig();
+  } catch (e: any) {
+    console.warn(`[ws-server] applyRuntimeConfig failed: ${e.message?.slice(0, 80)}`);
+  }
+
+  // 2. Terminate any stopped pod overdue for auto-destroy (timer lost on restart)
+  try {
+    const { terminateStaleStoppedPodOnStartup } = require('./gpu-deploy');
+    terminateStaleStoppedPodOnStartup().catch((e: any) =>
+      console.warn(`[ws-server] terminateStaleStoppedPodOnStartup failed: ${e.message?.slice(0, 80)}`)
+    );
+  } catch (e: any) {
+    console.warn(`[ws-server] terminateStaleStoppedPodOnStartup not loaded: ${e.message?.slice(0, 80)}`);
+  }
+
+  // 3. Reconnect to any pod that was healthy before restart
+  try {
+    const { tryRecoverActiveDeploy } = require('./gpu-deploy');
+    tryRecoverActiveDeploy().catch((e: any) =>
+      console.warn(`[ws-server] tryRecoverActiveDeploy failed: ${e.message?.slice(0, 80)}`)
+    );
+  } catch (e: any) {
+    console.warn(`[ws-server] tryRecoverActiveDeploy not loaded: ${e.message?.slice(0, 80)}`);
+  }
+
+  // 4. Auto-boot GPU if profile has bootOnStartup=true
+  try {
+    const gh = require('./gpu-handlers');
+    if (gh.autoBootFromProfile) {
+      gh.autoBootFromProfile().catch((e: any) =>
+        console.warn(`[ws-server] autoBootFromProfile failed: ${e.message?.slice(0, 80)}`)
+      );
+    }
+  } catch (e: any) {
+    console.warn(`[ws-server] autoBootFromProfile not loaded: ${e.message?.slice(0, 80)}`);
+  }
+
   // Start standby monitor — auto-deploys a warm GPU when session duration or
   // P95 latency thresholds are exceeded (standbyEnabled controls gating inside).
   try {

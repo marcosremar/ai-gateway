@@ -213,6 +213,7 @@ export let monitorInterval: Timer | null = null;
 
 const BABELCAST_DIR = join(homedir(), '.babelcast');
 const ACTIVE_DEPLOY_FILE = join(BABELCAST_DIR, 'active_deploy.json');
+const DAILY_SPEND_FILE = join(BABELCAST_DIR, 'daily_spend.json');
 
 interface PersistedDeploy {
   deployId: string;
@@ -934,8 +935,64 @@ export function setGatewayServer(v: Server | null) { gatewayServer = v; }
 export function setLatencyRingIdx(v: number) { latencyRingIdx = v; }
 export function setPendingDbWrites(v: number) { pendingDbWrites = v; }
 export function setConsecutiveDbFailures(v: number) { consecutiveDbFailures = v; }
-export function setDailyGpuSpendUsd(v: number) { dailyGpuSpendUsd = v; }
-export function setDailySpendResetDate(v: string) { dailySpendResetDate = v; }
+// ── Daily spend persistence ──────────────────────────────────────────────────
+// Persists the daily GPU spend counter to disk so the budget cap survives
+// gateway restarts. Without this, the counter resets to 0 on every restart
+// and the budget cap is completely bypassed.
+
+let _spendFlushTimer: Timer | null = null;
+
+function _flushDailySpend(): void {
+  try {
+    mkdirSync(BABELCAST_DIR, { recursive: true });
+    const data = { date: dailySpendResetDate, spendUsd: dailyGpuSpendUsd, savedAt: Date.now() };
+    const tmp = DAILY_SPEND_FILE + '.tmp';
+    writeFileSync(tmp, JSON.stringify(data));
+    renameSync(tmp, DAILY_SPEND_FILE);
+  } catch (e) {
+    console.warn('[budget] Failed to persist daily spend:', e instanceof Error ? e.message : e);
+  }
+}
+
+export function setDailyGpuSpendUsd(v: number) {
+  dailyGpuSpendUsd = v;
+  // Debounce: flush at most once per 10s to avoid hammering disk on every monitor tick
+  if (_spendFlushTimer) return;
+  _spendFlushTimer = setTimeout(() => {
+    _spendFlushTimer = null;
+    _flushDailySpend();
+  }, 10_000);
+}
+
+export function setDailySpendResetDate(v: string) {
+  dailySpendResetDate = v;
+  // Date rolled over — flush immediately so new date is persisted
+  _flushDailySpend();
+}
+
+/**
+ * Load persisted daily spend from disk. Call once on startup before any
+ * budget checks. Resets the counter if the persisted date is not today.
+ */
+export function loadPersistedDailySpend(): void {
+  try {
+    if (!existsSync(DAILY_SPEND_FILE)) return;
+    const raw = readFileSync(DAILY_SPEND_FILE, 'utf-8');
+    const data = JSON.parse(raw) as { date: string; spendUsd: number; savedAt: number };
+    const today = new Date().toISOString().slice(0, 10);
+    if (data.date !== today) {
+      console.log(`[budget] Persisted spend is from ${data.date}, today is ${today} — resetting to $0`);
+      return;
+    }
+    if (typeof data.spendUsd === 'number' && isFinite(data.spendUsd) && data.spendUsd >= 0) {
+      dailyGpuSpendUsd = data.spendUsd;
+      dailySpendResetDate = data.date;
+      console.log(`[budget] Restored daily spend: $${data.spendUsd.toFixed(2)} (cap: $${DAILY_BUDGET_USD > 0 ? DAILY_BUDGET_USD.toFixed(2) : 'none'})`);
+    }
+  } catch (e) {
+    console.warn('[budget] Failed to load persisted daily spend:', e instanceof Error ? e.message : e);
+  }
+}
 export function setDeployCancelled(v: boolean) { deployCancelled = v; }
 export function setDeployLock(v: boolean) { deployLock = v; }
 export function setDeployPromise(v: Promise<void> | null) { deployPromise = v; }
