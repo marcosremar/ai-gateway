@@ -26,6 +26,8 @@ export interface STTVerifierDeps {
    * Default: no timeout.
    */
   timeoutMs?: number;
+  /** Max audio size in bytes to prevent unbounded memory usage. Default: 100MB */
+  maxAudioSizeBytes?: number;
   /** Ignored — kept for backward compatibility. */
   embeddingFallbacks?: EmbeddingProvider[];
   /** Ignored — kept for backward compatibility. */
