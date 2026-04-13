@@ -9,6 +9,32 @@
 
 import { createHash } from 'crypto';
 
+// ─── Lightweight standalone coalescer ────────────────────────────────────────
+// Simple function-based coalescer for use outside the proxy (e.g. in pipelines).
+// If two identical requests (by key) arrive while the first is still in-flight,
+// the second gets the same promise instead of making a duplicate API call.
+
+const inflightRequests = new Map<string, Promise<unknown>>();
+
+/**
+ * In-flight request deduplication: if two identical requests arrive while the
+ * first is still pending, return the same promise for both.
+ */
+export function coalesce<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = inflightRequests.get(key);
+  if (existing) return existing as Promise<T>;
+  const p = fn().finally(() => inflightRequests.delete(key));
+  inflightRequests.set(key, p);
+  return p;
+}
+
+/** Number of in-flight coalesced requests (for monitoring) */
+export function coalesceInflightCount(): number {
+  return inflightRequests.size;
+}
+
+// ─── Class-based coalescer (for proxy routes) ────────────────────────────────
+
 export class RequestCoalescer {
   private inflight = new Map<string, { promise: Promise<unknown>; timestamp: number }>();
   private static readonly STALE_MS = 30_000; // Clean up entries older than 30s
