@@ -109,6 +109,7 @@ export class StreamingSTTBackend {
   private _maxBufferBytes: number;
   private _connectTimer: ReturnType<typeof setTimeout> | undefined;
   private _closedIntentionally = false;
+  private _textDecoder: TextDecoder | null = null;
 
   onResult?: (event: StreamingSTTEvent) => void;
   onConnected?: () => void;
@@ -128,7 +129,8 @@ export class StreamingSTTBackend {
     this._logger = options?.logger;
     this._connectTimeoutMs = options?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this._maxTextLength = options?.maxTextLength ?? DEFAULT_MAX_TEXT_LENGTH;
-    this._maxBufferBytes = options?.maxBufferBytes ?? DEFAULT_MAX_AUDIO_BUFFER_BYTES;
+    this._maxBufferBytes = options?.maxAudioBufferBytes ?? DEFAULT_MAX_AUDIO_BUFFER_BYTES;
+    this._textDecoder = new TextDecoder();
   }
 
   private _clearConnectTimer(): void {
@@ -210,16 +212,20 @@ export class StreamingSTTBackend {
     ws.onmessage = (evt) => {
       if (this._aborted) return;
       try {
+        let raw: string;
         if (evt.data instanceof ArrayBuffer) {
           if (evt.data.byteLength > this._maxTextLength) {
             logError(this._logger, '[StreamingSTT] Oversized message: %s bytes', evt.data.byteLength);
             return;
           }
+          raw = this._textDecoder!.decode(evt.data);
+        } else if (typeof evt.data === 'string') {
+          raw = evt.data;
+        } else {
+          logError(this._logger, '[StreamingSTT] Unsupported message type');
+          return;
         }
 
-        const raw = typeof evt.data === 'string'
-          ? evt.data
-          : new TextDecoder().decode(evt.data);
         if (raw.length > this._maxTextLength) {
           logError(this._logger, '[StreamingSTT] Oversized text: %s chars', raw.length);
           return;
@@ -265,6 +271,9 @@ export class StreamingSTTBackend {
   sendAudio(pcm: ArrayBuffer | Buffer): void {
     if (!this._open || this._aborted) return;
 
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
     let buffer: ArrayBuffer;
     if (pcm instanceof ArrayBuffer) {
       buffer = pcm;
@@ -285,12 +294,10 @@ export class StreamingSTTBackend {
       return;
     }
 
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(buffer);
-      } catch (e) {
-        logError(this._logger, '[StreamingSTT] Send error: %s', e);
-      }
+    try {
+      ws.send(buffer);
+    } catch (e) {
+      logError(this._logger, '[StreamingSTT] Send error: %s', e);
     }
   }
 
