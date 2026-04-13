@@ -166,23 +166,30 @@ export class ResponseCache {
     return this.similarityThreshold;
   }
 
-  async invalidate(pattern: string): Promise<void> {
-    const keys = await this.store.scan(`${this.prefix}${pattern}`);
-    await Promise.all(keys.map((k) => this.store.del(k)));
+  async invalidate(pattern: string): Promise<number> {
+    let count = 0;
+    await this.store.scan(`${this.prefix}${pattern}`, async (keys) => {
+      await Promise.all(keys.map((k) => this.store.del(k)));
+      count += keys.length;
+      return true;
+    });
+    return count;
   }
 
   /**
    * Invalidate all cache entries for a specific provider
+   * @returns Number of keys invalidated
    */
-  async invalidateProvider(provider: string): Promise<void> {
-    await this.invalidate(`p:${provider}*`);
+  async invalidateProvider(provider: string): Promise<number> {
+    return this.invalidate(`p:${provider}*`);
   }
 
   /**
    * Invalidate all cache entries for a specific model
+   * @returns Number of keys invalidated
    */
-  async invalidateModel(provider: string, model: string): Promise<void> {
-    await this.invalidate(`p:${provider}:m:${model}*`);
+  async invalidateModel(provider: string, model: string): Promise<number> {
+    return this.invalidate(`p:${provider}:m:${model}*`);
   }
 
   stats(): CacheStats {

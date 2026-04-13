@@ -43,15 +43,21 @@ export class RedisStateAdapter implements StateStore {
     await this.redis.del(key);
   }
 
-  async scan(pattern: string): Promise<string[]> {
-    const keys: string[] = [];
+  async scan(pattern: string, callback?: (keys: string[]) => boolean | void, limit: number = 1000): Promise<number> {
     let cursor = '0';
+    let totalKeys = 0;
     do {
-      const [nextCursor, batch] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      const batchSize = Math.min(100, limit - totalKeys);
+      if (batchSize <= 0) break;
+      const [nextCursor, batch] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', batchSize);
       cursor = nextCursor;
-      keys.push(...batch);
-    } while (cursor !== '0');
-    return keys;
+      totalKeys += batch.length;
+      if (callback && batch.length > 0) {
+        const shouldContinue = callback(batch);
+        if (shouldContinue === false) break;
+      }
+    } while (cursor !== '0' && totalKeys < limit);
+    return totalKeys;
   }
 
   async rpush(key: string, value: string): Promise<void> {
@@ -66,7 +72,7 @@ export class RedisStateAdapter implements StateStore {
     return this.redis.lrange(key, start, stop);
   }
 
-  async hset(key: string, field: string, value: string): Promise<void> {
+  async hset(key: string, field: string, value: string, _ttlSecs?: number): Promise<void> {
     await this.redis.hset(key, field, value);
   }
 
@@ -74,8 +80,10 @@ export class RedisStateAdapter implements StateStore {
     await this.redis.hdel(key, field);
   }
 
-  async hgetall(key: string): Promise<Record<string, string>> {
-    return this.redis.hgetall(key);
+  async hgetall(key: string, limit: number = 1000): Promise<Record<string, string>> {
+    const all = await this.redis.hgetall(key);
+    const entries = Object.entries(all).slice(0, limit);
+    return Object.fromEntries(entries);
   }
 
   async hincrby(key: string, field: string, increment: number): Promise<void> {

@@ -59,14 +59,24 @@ export class QueueDepthTracker {
 
   /** Get total queue depth across all tiers. */
   async getTotalDepth(): Promise<number> {
-    const keys = await this.store.scan('queue-depth:*');
     let total = 0;
-    for (const key of keys) {
-      const raw = await this.store.get(key);
-      if (raw) {
-        const n = parseInt(raw, 10);
-        if (!isNaN(n) && n > 0) total += n;
-      }
+    try {
+      await this.store.scan('queue-depth:*', async (keys) => {
+        for (const key of keys) {
+          try {
+            const raw = await this.store.get(key);
+            if (raw) {
+              const n = parseInt(raw, 10);
+              if (!isNaN(n) && n > 0) total += n;
+            }
+          } catch {
+            // Skip keys that fail to fetch - don't fail entire operation
+          }
+        }
+        return true;
+      });
+    } catch {
+      // Return partial result if scan fails
     }
     return total;
   }
