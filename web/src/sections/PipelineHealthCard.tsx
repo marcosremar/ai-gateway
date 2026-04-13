@@ -173,7 +173,7 @@ function InlineChain({
 function ProfileRow({
   profile, isActive, activeProviders, metrics, gpuPhases, defaultOpen, configuredProviders, cloudHealth,
 }: {
-  profile: ProviderConfigResponse['profiles'][0];
+  profile: ProviderConfigResponse['apps'][0];
   isActive: boolean;
   activeProviders: Record<'stt' | 'llm' | 'tts', string>;
   metrics: HealthResponse['providerMetrics'];
@@ -252,7 +252,7 @@ function ProfileRow({
           className="text-xs font-semibold flex-1 text-left truncate cursor-pointer hover:underline"
           style={{ color: isActive ? 'var(--color-text)' : 'var(--color-text-secondary)' }}
           onClick={() => {
-            window.history.pushState(null, '', `/config/profiles/edit/${profile.id}`);
+            window.history.pushState(null, '', `/config/apps/edit/${profile.id}`);
             window.dispatchEvent(new PopStateEvent('popstate'));
           }}
         >
@@ -319,7 +319,7 @@ function ProfileRow({
             className="flex-shrink-0 cursor-pointer opacity-40 hover:opacity-100 transition-opacity"
             title="Edit profile"
             onClick={() => {
-              window.history.pushState(null, '', '/config/profiles');
+              window.history.pushState(null, '', '/config/apps');
               window.dispatchEvent(new PopStateEvent('popstate'));
             }}
           >
