@@ -10,13 +10,10 @@ export async function handleAudioSpeech(
   req: ProxyRequest,
   ttsProviders: Record<string, TTSProvider>,
 ): Promise<ProxyResponse> {
-  const body = req.body as {
-    model: string;
-    input: string;
-    voice: string;
-    response_format?: string;
-    speed?: number;
-  };
+  if (!req.body || typeof req.body !== 'object') {
+    return { status: 400, body: { error: { message: 'request body is required', type: 'invalid_request_error' } } };
+  }
+  const body = req.body as Record<string, unknown>;
 
   if (!body.model || typeof body.model !== 'string') {
     return { status: 400, body: { error: { message: 'model is required', type: 'invalid_request_error' } } };

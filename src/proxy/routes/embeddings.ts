@@ -33,7 +33,7 @@ export async function handleEmbeddings(
     const cacheKey = cache ? cache.buildKey({ provider: provider.providerId, model: body.model, input: body.input, dimensions: body.dimensions }) : null;
 
     if (cacheKey) {
-      const cached = await cache!.get<{ embeddings: number[][]; model: string; usage: { promptTokens: number; totalTokens: number } }>(cacheKey);
+      const cached = await cache.get<{ embeddings: number[][]; model: string; usage: { promptTokens: number; totalTokens: number } }>(cacheKey);
       if (cached) {
         return {
           status: 200,
@@ -58,7 +58,7 @@ export async function handleEmbeddings(
     );
 
     if (cacheKey) {
-      await cache!.set(cacheKey, result);
+      await cache.set(cacheKey, result);
     }
 
     return {
