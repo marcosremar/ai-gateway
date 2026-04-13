@@ -326,18 +326,43 @@ export function setDeployState(patch: Partial<DeploymentState>) {
   const newStep = deployState.step;
   if (newStatus !== prevStatus || newStep !== prevStep) {
     const elapsed = deployState.startedAt > 0 ? Math.round((Date.now() - deployState.startedAt) / 1000) : 0;
-    deployState.transitions.push({
-      status: newStatus, step: newStep, provider: deployState.provider || '',
+    const transition = {
+      status: newStatus, step: newStep,
+      provider: deployState.provider || '',
+      gpuType: deployState.gpuType || '',
+      dockerImage: deployState.dockerImage || '',
+      podId: deployState.podId || '',
+      endpoint: deployState.endpoint || '',
+      costPerHr: deployState.costPerHr || 0,
       ts: Date.now(), elapsed,
-      detail: deployState.gpuType || deployState.message?.slice(0, 60),
-    });
-    // Keep last 30 transitions (splice in-place instead of allocating new array)
-    if (deployState.transitions.length > 30) deployState.transitions.splice(0, deployState.transitions.length - 30);
-    // Broadcast transition for real-time UI
-    try { const { broadcastWs: bws } = require('./ws-state'); bws?.({ type: 'gpu:transition', status: newStatus, step: newStep, provider: deployState.provider, elapsed, gpuType: deployState.gpuType, detail: deployState.message?.slice(0, 80) }); } catch (e) { console.warn('[state] broadcastWs failed:', e instanceof Error ? e.message : e); }
+      detail: deployState.message?.slice(0, 120) || '',
+      prevStatus, prevStep: prevStep || '',
+    };
+    deployState.transitions.push(transition);
+    // Keep last 50 transitions
+    if (deployState.transitions.length > 50) deployState.transitions.splice(0, deployState.transitions.length - 50);
+    // Broadcast enriched transition for real-time UI
+    try {
+      const { broadcastWs: bws } = require('./ws-state');
+      bws?.({ type: 'gpu:transition', ...transition });
+    } catch (e) { console.warn('[state] broadcastWs failed:', e instanceof Error ? e.message : e); }
+    // Structured log line: status change with full context
+    console.log(`[gpu:transition] ${prevStatus}→${newStatus} step=${newStep || '-'} provider=${transition.provider || '-'} gpu=${transition.gpuType || '-'} image=${transition.dockerImage?.split('/').pop() || '-'} pod=${transition.podId || '-'} cost=$${transition.costPerHr.toFixed(3)}/hr elapsed=${elapsed}s`);
+    // Persist to GPU event log (JSONL file + DB) for historical analysis
+    try {
+      const { logGpuEvent } = require('./metrics');
+      logGpuEvent?.(`status:${prevStatus}→${newStatus}`, transition.provider || 'unknown', true, {
+        metadata: {
+          step: newStep, gpuType: transition.gpuType, dockerImage: transition.dockerImage,
+          podId: transition.podId, endpoint: transition.endpoint, costPerHr: transition.costPerHr,
+          elapsed, prevStatus, prevStep: transition.prevStep,
+        },
+      });
+    } catch { /* best-effort */ }
+  } else {
+    // Non-transition log (same status, different message)
+    if (patch.message) console.log(`[gpu] ${deployState.status}: ${deployState.message}`);
   }
-
-  console.log(`[gpu] ${deployState.status}: ${deployState.message}`);
   // Persist to disk so we can reconnect after restart
   persistDeployState();
 }
