@@ -12,9 +12,11 @@ export default defineConfig({
       { find: '@ai-gateway', replacement: path.resolve(root, 'src/index.ts') },
       { find: '@prisma/client', replacement: tests('__mocks__/prisma-client-mock.ts') },
 
-      // src/ path reorganizations (DDD migration)
-      // Only alias the ones that actually moved from src/ → src/gateway/
-      // server/ files still exist as shims/re-exports — no aliasing needed
+      // ── SDK paths ──────────────────────────────────────────────────────
+      { find: /^(\.\.\/)+sdk\/node\/audio$/, replacement: src('sdk/node/audio.ts') },
+      { find: /^(\.\.\/)+sdk\/node$/, replacement: src('sdk/node/index.ts') },
+
+      // ── src/ path reorganizations (DDD migration) ──────────────────────
       { find: /^(\.\.\/)+(src\/)?database\/pg-driver$/, replacement: src('database/pg-driver.ts') },
       { find: /^(\.\.\/)+(src\/)?gpu-providers\/deploy-settings$/, replacement: src('config/index.ts') },
       { find: /^(\.\.\/)+(src\/)?workloads\/registry$/, replacement: src('compute/workloads/index.ts') },
@@ -22,6 +24,16 @@ export default defineConfig({
       { find: /^(\.\.\/)+(src\/)?vault\/vault$/, replacement: src('auth/vault/vault.ts') },
       { find: /^(\.\.\/)+(src\/)?providers\/openai-compat\/openai-compat-embedding$/, replacement: src('gateway/providers/cloud/openai-compat/openai-compat-embedding.ts') },
       { find: /^(\.\.\/)+(src\/)?providers\/openai-compat\/client-cache$/, replacement: src('gateway/providers/cloud/openai-compat/client-cache.ts') },
+      { find: /^(\.\.\/)+(src\/)?providers\/openai-compat\/audio-utils$/, replacement: src('gateway/providers/cloud/openai-compat/audio-utils.ts') },
+      { find: /^(\.\.\/)+(src\/)?providers\/groq\/models$/, replacement: src('gateway/providers/cloud/groq/models.ts') },
+      { find: /^(\.\.\/)+(src\/)?providers\/rerank\/openrouter-rerank$/, replacement: src('gateway/providers/cloud/rerank/openrouter-rerank.ts') },
+      { find: /^(\.\.\/)+(src\/)?providers\/rerank\/fireworks-rerank$/, replacement: src('gateway/providers/cloud/rerank/fireworks-rerank.ts') },
+      { find: /^(\.\.\/)+(src\/)?observability\/merge-hooks$/, replacement: src('platform/observability/merge-hooks.ts') },
+      { find: /^(\.\.\/)+(src\/)?observability\/langfuse-hooks$/, replacement: src('platform/observability/langfuse-hooks.ts') },
+      { find: /^(\.\.\/)+(src\/)?infra\/gpu-backend$/, replacement: src('infra/gpu-backend.ts') },
+      { find: /^(\.\.\/)+(src\/)?index$/, replacement: src('index.ts') },
+      { find: /^(\.\.\/)+(src\/)?browser\/openai-realtime$/, replacement: src('browser/openai-realtime.ts') },
+      { find: /^(\.\.\/)+(src\/)?contracts$/, replacement: src('contracts/index.ts') },
       { find: /^(\.\.\/)+(src\/)?language-detect$/, replacement: src('language-detect.ts') },
       { find: /^(\.\.\/)+(src\/)?caching\/response-cache$/, replacement: src('caching/response-cache.ts') },
       { find: /^(\.\.\/)+(src\/)?browser\/speech-client$/, replacement: src('browser/speech-client.ts') },

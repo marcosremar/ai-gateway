@@ -106,7 +106,7 @@ describe('Edge Cases: Input validation (#725-#750)', () => {
   });
 
   it('#733 GPU deploy validates GPU type names', () => {
-    const src = read('src/gpu-providers/runpod-client.ts');
+    const src = read('src/gateway/providers/gpu/runpod-client.ts');
     expect(src).toContain('RUNPOD_GPU_TYPE_MAP');
   });
 
@@ -161,12 +161,12 @@ describe('Provider Edge Cases (#751-#770)', () => {
   });
 
   it('#758 Vast.ai Docker Hub auth injected', () => {
-    const src = read('src/gpu-providers/vast-client.ts');
+    const src = read('src/gateway/providers/gpu/vast-client.ts');
     expect(src).toMatch(/DOCKERHUB|image_login|docker/i);
   });
 
   it('#759 Vast.ai port mapping extraction', () => {
-    const src = read('src/gpu-providers/vast-client.ts');
+    const src = read('src/gateway/providers/gpu/vast-client.ts');
     expect(src).toMatch(/port|ports|8000/);
   });
 
@@ -176,7 +176,7 @@ describe('Provider Edge Cases (#751-#770)', () => {
   });
 
   it('#767 Groq credit exhaustion (402)', () => {
-    const src = read('src/providers/fallback.ts');
+    const src = read('src/gateway/providers/cloud/fallback.ts');
     expect(src).toContain('402');
     expect(src).toContain('creditTracker');
   });
@@ -384,20 +384,20 @@ describe('Cross-Provider Architecture (#875-#884)', () => {
   });
 
   it('#879 credit exhaustion triggers next provider', () => {
-    const src = read('src/providers/fallback.ts');
+    const src = read('src/gateway/providers/cloud/fallback.ts');
     expect(src).toContain('402');
     expect(src).toContain('creditTracker');
     expect(src).toContain('break');
   });
 
   it('#880 rate limit triggers next provider', () => {
-    const src = read('src/providers/fallback.ts');
+    const src = read('src/gateway/providers/cloud/fallback.ts');
     expect(src).toContain('429');
     expect(src).toContain('break');
   });
 
   it('#881 all providers fail returns error', () => {
-    const src = read('src/providers/fallback.ts');
+    const src = read('src/gateway/providers/cloud/fallback.ts');
     expect(src).toMatch(/throw.*last|throw.*error/i);
   });
 });
@@ -476,7 +476,7 @@ describe('Final coverage: Structural guarantees (#964-#1000)', () => {
   });
 
   it('#977 external API calls have timeout', () => {
-    const src = read('src/gpu-providers/vast-client.ts');
+    const src = read('src/gateway/providers/gpu/vast-client.ts');
     expect(src).toMatch(/timeout|AbortSignal/);
   });
 

@@ -338,7 +338,7 @@ describe('Pipeline runner — null baseProfile guard', () => {
   // #250
   it('calls onError when no LLM provider is configured', async () => {
     // Temporarily override providers mock to return null profiles
-    const providersModule = await import('../server/providers');
+    const providersModule = await import('../../server/providers');
     const origGroqDefaults = (providersModule as any).groqDefaults;
     (providersModule as any).groqDefaults = null;
     (providersModule as any).ollamaDefaults = null;
@@ -462,7 +462,7 @@ describe('Pipeline runner — error handling', () => {
   // #256
   it('calls onError when STT throws', async () => {
     // Make raceProviders throw
-    const raceModule = await import('../server/race-providers');
+    const raceModule = await import('../../server/race-providers');
     vi.mocked(raceModule.raceProviders).mockRejectedValueOnce(new Error('STT failed'));
 
     const cb = makeCallbacks();
@@ -475,7 +475,7 @@ describe('Pipeline runner — error handling', () => {
   // #257
   it('calls onError when LLM throws', async () => {
     // STT succeeds, but LLM race fails
-    const raceModule = await import('../server/race-providers');
+    const raceModule = await import('../../server/race-providers');
     let callCount = 0;
     vi.mocked(raceModule.raceProviders).mockImplementation(async (candidates: any[]) => {
       callCount++;
@@ -551,7 +551,7 @@ describe('Pipeline runner — cached translation', () => {
 
   // #260
   it('uses cached translation when available (llm_provider = cache)', async () => {
-    const aiHandlers = await import('../server/ai-handlers');
+    const aiHandlers = await import('../../server/ai-handlers');
     vi.mocked(aiHandlers.getCachedTranslation).mockReturnValueOnce('cached hello');
 
     const cb = makeCallbacks();

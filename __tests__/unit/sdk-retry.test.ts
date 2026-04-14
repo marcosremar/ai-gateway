@@ -14,7 +14,7 @@ import { GatewaySDK } from '../../src/sdk/client';
 import { GatewayError } from '../../src/sdk/types';
 
 // ── Node SDK (sdk/node/index.ts) ────────────────────────────────────────────
-import { GatewayHttpClient, GatewayHttpError, CircuitOpenError } from '../sdk/node';
+import { GatewayHttpClient, GatewayHttpError, CircuitOpenError } from '../../sdk/node';
 
 const mockFetch = vi.fn();
 
