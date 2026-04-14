@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   checkDeployWarnings,
   getGpuFallbacks,
-} from '../../src/gpu-providers/deploy-settings';
+} from '../../src/gateway/providers/gpu/deploy-settings';
 
 describe('Group 1: Pre-deploy validation — checkDeployWarnings', () => {
   it('returns error for 70B model on RTX 3090 (24GB VRAM insufficient)', () => {
@@ -225,7 +225,7 @@ describe('Group 4: GPU type fallback — getGpuFallbacks', () => {
 // Group 5: Provider intelligence — PerformanceRanker
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { PerformanceRanker } from '../../src/providers/performance-ranker';
+import { PerformanceRanker } from '../../src/gateway/providers/cloud/performance-ranker';
 
 describe('Group 5: Provider intelligence — PerformanceRanker', () => {
   let ranker: PerformanceRanker;
@@ -331,7 +331,7 @@ describe('Group 5: Provider intelligence — PerformanceRanker', () => {
 // Group 6: Request coalescing
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { coalesce, coalesceInflightCount } from '../../src/proxy/middleware/request-coalescer';
+import { coalesce, coalesceInflightCount } from '../../src/gateway/proxy/middleware/request-coalescer';
 
 describe('Group 6: Request coalescing', () => {
   it('coalesce returns same promise for same key while in-flight', async () => {

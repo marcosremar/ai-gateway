@@ -154,7 +154,7 @@ async function createInstance(offerId: number): Promise<{ id: number }> {
     client_id: 'me',
     image: 'nvidia/cuda:12.8.1-devel-ubuntu24.04',
     disk: 20,
-    runtype: 'ssh_direc',
+    runtype: 'ssh_direct',
     ssh: true,
     direct: true,
     onstart: '',

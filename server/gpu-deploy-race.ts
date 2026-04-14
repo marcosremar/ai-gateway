@@ -343,6 +343,7 @@ export async function startDeployRace(
           metadata: { instanceId: c.instanceId, gpuType: c.gpuType, reason, wastedUsd: +wastedUsd.toFixed(4), raceCount: candidates.length },
         });
       } catch (err) {
+        // Orphan sweep will eventually terminate this stray instance when race completes
         log.warn(`[race] Failed to terminate slot ${idx} (${reason}): ${err}`);
       }
     }
@@ -383,13 +384,12 @@ export async function startDeployRace(
   // Phase 3: Final state / race summary
   if (winner) {
     const w = winner as RaceCandidate;
-    const winnerBootMs = w.costPerHr > 0
-      ? candidates.find(c => c.instanceId === w.instanceId)
-        ? Date.now() - deployStartedAt : 0
-      : 0;
+    // winnerBootMs is simply the time since deploy started (all candidates started at same time)
+    // The costPerHr check is just a safety guard — if costPerHr is 0, something is wrong
+    const winnerBootMs = w.costPerHr > 0 ? Date.now() - deployStartedAt : 0;
     const loserCount = candidates.length - 1;
     if (loserCount > 0) {
-      const w = winner as RaceCandidate;
+      // w is already declared above — no need to redeclare
       const totalWastedUsd = candidates
         .filter(c => c.instanceId !== w.instanceId)
         .reduce((sum, c) => sum + (c.costPerHr > 0 ? c.costPerHr * (Date.now() - deployStartedAt) / 3_600_000 : 0), 0);

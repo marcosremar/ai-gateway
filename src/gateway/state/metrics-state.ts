@@ -82,6 +82,45 @@ export function isGpuLatencyAcceptable(): boolean {
   return p95 < GPU_P95_THRESHOLD_MS;
 }
 
+// ── Latency trend detection ─────────────────────────────────────────────────
+
+const TREND_MIN_SAMPLES = 20;
+
+/**
+ * Compute linear regression slope on the latency ring buffer.
+ * Returns trend based on whether recent half is >20% different from first half.
+ */
+export function getLatencyTrend(): { trend: 'stable' | 'degrading' | 'improving'; slopeMs: number; samples: number } {
+  const n = latencyRing.length;
+  if (n < TREND_MIN_SAMPLES) {
+    return { trend: 'stable', slopeMs: 0, samples: n };
+  }
+
+  const half = Math.floor(n / 2);
+  const firstHalf = latencyRing.slice(0, half);
+  const secondHalf = latencyRing.slice(half);
+
+  const firstAvg = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
+  const secondAvg = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
+
+  const changePct = (secondAvg - firstAvg) / firstAvg;
+
+  // Simple linear regression for slopeMs (ms per sample)
+  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  for (let i = 0; i < n; i++) {
+    sumX += i;
+    sumY += latencyRing[i];
+    sumXY += i * latencyRing[i];
+    sumXX += i * i;
+  }
+  const slopeMs = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+
+  if (Math.abs(changePct) < 0.2) {
+    return { trend: 'stable', slopeMs, samples: n };
+  }
+  return { trend: changePct > 0 ? 'degrading' : 'improving', slopeMs, samples: n };
+}
+
 // ── Setters ─────────────────────────────────────────────────────────────────
 
 export function setLatencyRingIdx(v: number) { latencyRingIdx = v; }
