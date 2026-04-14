@@ -53,6 +53,39 @@ export interface NeonEndpoint {
   updatedAt: string;
 }
 
+/** Options when provisioning a new Neon project via createProject(). */
+export interface NeonProjectCreateOptions {
+  /** Project display name (Neon generates one if omitted) */
+  name?: string;
+  /** Region ID, e.g. "aws-us-east-1", "aws-eu-central-1". Defaults to Neon's default. */
+  regionId?: string;
+  /** PostgreSQL major version (e.g. 15, 16, 17). Defaults to Neon's current default. */
+  pgVersion?: number;
+  /** Autoscaling lower bound (Compute Units). 0.25 = min on free tier. */
+  autoscalingMinCu?: number;
+  /** Autoscaling upper bound (Compute Units). */
+  autoscalingMaxCu?: number;
+  /** Seconds of idle before compute suspends. 0 = immediate, required on free tier. */
+  suspendTimeoutSeconds?: number;
+}
+
+/** Result of a successful createProject() call. */
+export interface NeonProjectCreateResult {
+  project: NeonProject;
+  /** Full postgresql:// connection URI for the default role+database */
+  connectionUri: string;
+  /** Default role name (e.g. "neondb_owner") */
+  roleName: string;
+  /** Default role password (returned ONLY on creation — not retrievable later) */
+  rolePassword: string;
+  /** Default database name (typically "neondb") */
+  databaseName: string;
+  /** Primary read-write endpoint, if returned */
+  endpoint?: NeonEndpoint;
+  /** Primary branch, if returned */
+  branch?: NeonBranch;
+}
+
 // ── Backup / Restore ─────────────────────────────────────────────────────────
 
 export type BackupType = 'branch' | 'dump';

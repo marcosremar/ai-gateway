@@ -43,12 +43,28 @@ export interface BotWorkloadConfig {
 
 export interface DbWorkloadConfig {
   type: 'db';
-  /** Neon project ID (if connecting to existing) */
-  projectId?: string;
-  /** Neon API key */
+  /** Neon API key (or set NEON_API_KEY env var) */
   apiKey?: string;
-  /** Direct connection string override */
+
+  // ── ADOPT mode — track an existing Neon project ────────────────────────
+  /** If provided, the driver adopts this existing Neon project instead of creating a new one. */
+  projectId?: string;
+  /** Optional fallback connection string when adopting (used if no endpoint is returned) */
   connectionString?: string;
+
+  // ── CREATE mode — provision a new Neon project ─────────────────────────
+  /** Display name for the new Neon project (defaults to workload name) */
+  projectName?: string;
+  /** Region, e.g. "aws-us-east-1", "aws-eu-central-1" */
+  regionId?: string;
+  /** PostgreSQL major version (15, 16, 17). Defaults to Neon's current default. */
+  pgVersion?: number;
+  /** Autoscaling lower bound in CU. Default: 0.25 (free-tier minimum). */
+  autoscalingMinCu?: number;
+  /** Autoscaling upper bound in CU. Default: 2. */
+  autoscalingMaxCu?: number;
+  /** Idle seconds before compute suspends. Default: 0 (immediate, free-tier friendly). */
+  suspendTimeoutSeconds?: number;
 }
 
 // ── Core Workload ───────────────────────────────────────────────────────────
