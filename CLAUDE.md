@@ -5,6 +5,7 @@
 Before implementing any feature, read:
 - [`docs/domain-model.md`](docs/domain-model.md) — ubiquitous language, bounded contexts, states, events
 - [`docs/sdd.md`](docs/sdd.md) — architectural decisions, module responsibilities, what NOT to do
+- [`docs/adr/`](docs/adr/) — Architecture Decision Records (ADRs)
 
 Use the vocabulary from `domain-model.md` in all code and prompts. Respect the boundaries in `sdd.md`.
 
@@ -354,6 +355,43 @@ bun run test:groq / test:openai / test:vast-lifecycle / test:runpod-lifecycle
 2. **All GPU ops go through the gateway API** — never call RunPod/Vast.ai/TensorDock directly. Bypasses watchdog, cost tracking, ghost detection.
 3. **No Prisma/Redis/Next.js in `src/`** — use DI interfaces (`AutoscalerDeps`, `StateStore`, `SettingsStore`).
 4. **All new UI uses `web/src/components/ui/`** — `IconBox`, `StatusDot`, `KV`, `DropdownList`, `Button`, `Toggle`, `Card`, `SaveBar`, `ConfirmModal`, etc. Never inline equivalents.
+
+## Vibe Coding Guidelines
+
+When using AI to generate code (vibe coding), follow these guidelines:
+
+### Before Generating Code
+1. **Check existing ADRs** — For any significant architectural decision, check [`docs/adr/`](docs/adr/) first
+   - GPU cascade order? → ADR-001
+   - Caching strategy? → ADR-002
+   - Circuit breakers? → ADR-003
+   - GPU vs cloud routing? → ADR-008
+2. **Check [`docs/sdd.md`](docs/sdd.md)** — Understand module boundaries and what NOT to do
+3. **Check [`CONTRIBUTING.md`](CONTRIBUTING.md)** — Code conventions, naming, error handling patterns
+
+### While Generating Code
+- **Stay within boundaries** — Don't suggest changes that violate the hard rules
+- **Use the vocabulary** — Use terms from `docs/domain-model.md` (e.g., "tier", "warmth", "circuit breaker")
+- **Follow conventions** — camelCase for functions, PascalCase for types, SCREAMING_SNAKE_CASE for constants
+
+### After Generating Code
+- **Create ADR for new decisions** — If the change introduces a new architectural pattern, create an ADR using [`docs/adr/TEMPLATE.md`](docs/adr/TEMPLATE.md)
+- **Run tests** — Always run `bun test` after AI-generated changes
+- **Architecture review** — For changes >500 lines, use [`docs/architecture-review-checklist.md`](docs/architecture-review-checklist.md)
+
+### Quick ADR Lookup
+
+| Concern | ADR |
+|---------|-----|
+| Provider cascade order | [ADR-001](docs/adr/ADR-001-gpu-cascade-order.md) |
+| Translation caching | [ADR-002](docs/adr/ADR-002-lru-translation-cache.md) |
+| Failure handling | [ADR-003](docs/adr/ADR-003-per-stage-circuit-breakers.md) |
+| GPU+cloud race | [ADR-004](docs/adr/ADR-004-request-racing-gpu-cloud.md) |
+| Fast boot (SnapGPU) | [ADR-005](docs/adr/ADR-005-snapgpu-criu-policy.md) |
+| Warmth tracking | [ADR-006](docs/adr/ADR-006-per-stage-warmth-tracking.md) |
+| Latency demotion | [ADR-007](docs/adr/ADR-007-p95-latency-demotion.md) |
+| Hybrid routing | [ADR-008](docs/adr/ADR-008-hybrid-routing-gpu-cloud.md) |
+| Provider cooldown | [ADR-009](docs/adr/ADR-009-provider-cooldown-tracking.md) |
 
 ## HTTP server pattern
 

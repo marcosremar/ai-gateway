@@ -6,6 +6,15 @@ This directory contains Architecture Decision Records for the AI Gateway project
 
 An ADR is a document that captures an important architectural decision made along with its context and consequences. ADRs are immutable — once accepted, they are not modified. If a decision changes, a new ADR is created that supersedes the old one.
 
+## For AI Coding Agents (Vibe Coding)
+
+When making architectural decisions during AI-assisted development:
+
+1. **Check first** — Before suggesting major changes, verify if an ADR already exists for the concern
+2. **Query by keyword** — Use `grep -l "keyword" docs/adr/*.md` to find relevant ADRs
+3. **Create if missing** — If no ADR exists for a significant decision, create one using `TEMPLATE.md`
+4. **Index below** — Use the quick lookup table to find relevant ADRs for common concerns
+
 ## Index
 
 | ID | Title | Status | Date |
