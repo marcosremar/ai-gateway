@@ -57,7 +57,7 @@ import {
   INTERVAL_STABLE_MS,
   INTERVAL_UNSTABLE_MS,
   INTERVAL_FAILING_MS,
-} from '../server/latency-db';
+} from '../../server/latency-db';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

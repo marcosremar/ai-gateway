@@ -124,13 +124,7 @@ export class OpenAICompatLLMProvider implements LLMProvider {
         if (delta) yield delta;
       }
     } finally {
-      if (stream.controller && typeof stream.controller.close === 'function') {
-        try {
-          stream.controller.close();
-        } catch {
-          // ignore close errors
-        }
-      }
+      // Cleanup is handled automatically by the for await loop
     }
   }
 }

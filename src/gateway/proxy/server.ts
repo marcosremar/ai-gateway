@@ -726,8 +726,9 @@ export function createProxyServer(config: ProxyConfig): Server {
         headers: { ...req.headers, host: target.host },
       });
       proxyReq.on('upgrade', (_: unknown, proxySocket: import('net').Socket, proxyHead: Buffer) => {
+        const reqHeaders = (proxyReq as unknown as { headers?: Record<string, string> }).headers || {};
         socket.write('HTTP/1.1 101 Switching Protocols\r\n' +
-          Object.entries(proxyReq.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\r\n') +
+          Object.entries(reqHeaders).map(([k, v]) => `${k}: ${v}`).join('\r\n') +
           '\r\n\r\n');
         if (proxyHead.length) socket.write(proxyHead);
         proxySocket.on('error', () => socket.destroy());

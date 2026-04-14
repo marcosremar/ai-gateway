@@ -3,8 +3,8 @@
  * Covers: NeonManagementClient CRUD operations (projects, branches, databases, endpoints).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { NeonManagementClient } from '../src/database/neon-management';
-import { DatabaseError } from '../src/database/types';
+import { NeonManagementClient } from '../../src/database/neon-management';
+import { DatabaseError } from '../../src/database/types';
 
 afterEach(() => vi.unstubAllGlobals());
 

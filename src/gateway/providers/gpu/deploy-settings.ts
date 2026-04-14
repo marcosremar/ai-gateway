@@ -146,7 +146,7 @@ export async function loadDeploySettings(): Promise<void> {
   const numFields: (keyof DeploySettings)[] = ['intervalMin','lastRunAt','maxLatencyMs','deployTimeoutMin','minVramGb','minDiskGb','sttTargetLatencyMs','llmTargetLatencyMs','ttsTargetLatencyMs','benchmarkMaxRuns','benchmarkMarginPct','shadowRuns','p95DemotionMultiplier','p95IdleWindowSec','repechageMaxAttempts','standbyTriggerHours','standbyDrainTimeoutMs','deployRaceCount','autoRecoveryDelaySec','autoRecoveryMaxRetries'];
   for (const k of numFields) {
     if (typeof _s[k] !== 'number' || Number.isNaN(_s[k] as number)) {
-      (_s as Record<string, unknown>)[k] = (DEFAULTS as Record<string, unknown>)[k];
+      (_s as unknown as Record<string, unknown>)[k] = (DEFAULTS as unknown as Record<string, unknown>)[k];
     }
   }
 }
@@ -411,4 +411,88 @@ export function getAutoRecoveryMaxRetries(): number { return _s.autoRecoveryMaxR
 export function setAutoRecoveryMaxRetries(v: number): void {
   _s.autoRecoveryMaxRetries = Math.max(0, Math.min(10, v));
   saveDeploySettings();
+}
+
+// ── GPU Type Fallback Chain ──────────────────────────────────────────────
+
+/**
+ * Get fallback GPU types when the primary GPU type is unavailable or fails.
+ *
+ * Returns alternatives ordered by similarity (VRAM, performance tier).
+ * Used by the deploy orchestrator to retry with different GPU types
+ * when the preferred type is out of stock or has persistent failures.
+ */
+export function getGpuFallbacks(failedGpuType: string): string[] {
+  const FALLBACK_MAP: Record<string, string[]> = {
+    'NVIDIA GeForce RTX 4090': ['NVIDIA RTX A6000', 'NVIDIA L40S', 'NVIDIA A40'],
+    'NVIDIA RTX A6000': ['NVIDIA L40S', 'NVIDIA A40', 'NVIDIA GeForce RTX 4090'],
+    'NVIDIA L40S': ['NVIDIA RTX A6000', 'NVIDIA A40'],
+    'NVIDIA A40': ['NVIDIA RTX A6000', 'NVIDIA L40S'],
+    'NVIDIA GeForce RTX 3090': ['NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000'],
+    'NVIDIA GeForce RTX 5090': ['NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000'],
+    'NVIDIA H100 80GB HBM3': ['NVIDIA H200', 'NVIDIA A100-SXM4-80GB', 'NVIDIA A100 80GB PCIe'],
+    'NVIDIA H200': ['NVIDIA H100 80GB HBM3', 'NVIDIA A100-SXM4-80GB'],
+    'NVIDIA A100-SXM4-80GB': ['NVIDIA A100 80GB PCIe', 'NVIDIA H100 80GB HBM3', 'NVIDIA L40S'],
+    'NVIDIA A100 80GB PCIe': ['NVIDIA A100-SXM4-80GB', 'NVIDIA H100 80GB HBM3', 'NVIDIA L40S'],
+  };
+  return FALLBACK_MAP[failedGpuType] || [];
+}
+
+// ── Known-Bad Configuration Warnings ─────────────────────────────────────────
+
+export interface DeployWarning {
+  level: 'warn' | 'error';
+  message: string;
+}
+
+/**
+ * Check deploy configuration for known-bad combinations that are likely
+ * to cause failures (OOM, CUDA incompatibility, disk exhaustion, etc.).
+ *
+ * Returns an array of warnings/errors. Empty array = no issues detected.
+ */
+export function checkDeployWarnings(opts: {
+  dockerImage?: string;
+  gpuTypes?: string[];
+  onstart?: string;
+  storageGb?: number;
+}): DeployWarning[] {
+  const warnings: DeployWarning[] = [];
+  const img = (opts.dockerImage || '').toLowerCase();
+  const onstart = (opts.onstart || '').toLowerCase();
+  const hints = img + ' ' + onstart;
+
+  // Blackwell GPUs need CUDA 12.8+
+  if (opts.gpuTypes?.some(g => /5090|5080/i.test(g)) && /cuda.?12\.[0-4]/i.test(img)) {
+    warnings.push({
+      level: 'error',
+      message: 'Blackwell GPUs (5090/5080) require CUDA 12.8+ but image appears to use older CUDA',
+    });
+  }
+
+  // vLLM with large models on small GPUs (24GB VRAM)
+  if (/70b|65b|72b/i.test(hints) && opts.gpuTypes?.every(g => /3090|4090|3080|4080|3070/i.test(g))) {
+    warnings.push({
+      level: 'error',
+      message: '70B+ models need 48GB+ VRAM. RTX 3090/4090 (24GB) will OOM. Use A6000, L40S, or A100.',
+    });
+  }
+
+  // 32B+ models on GPUs with <24GB VRAM
+  if (/32b|34b|33b/i.test(hints) && opts.gpuTypes?.every(g => /3080|4080|3070|3060|4070/i.test(g))) {
+    warnings.push({
+      level: 'error',
+      message: '32B models need 24GB+ VRAM. This GPU has insufficient VRAM.',
+    });
+  }
+
+  // Low disk for large models
+  if (/70b/i.test(hints) && (opts.storageGb || 0) > 0 && (opts.storageGb || 0) < 150) {
+    warnings.push({
+      level: 'warn',
+      message: '70B models need ~200GB disk. Consider increasing storageGb.',
+    });
+  }
+
+  return warnings;
 }

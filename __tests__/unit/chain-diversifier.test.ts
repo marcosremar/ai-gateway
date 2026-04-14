@@ -6,9 +6,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { diversifyChain } from '../src/providers/chain-diversifier';
-import type { DiversifyConfig } from '../src/providers/chain-diversifier';
-import type { FallbackEntry } from '../src/providers/fallback';
+import { diversifyChain } from '../../src/providers/chain-diversifier';
+import type { DiversifyConfig } from '../../src/providers/chain-diversifier';
+import type { FallbackEntry } from '../../src/providers/fallback';
 
 // Helpers
 const available = (...providers: string[]): Set<string> => new Set(providers);

@@ -21,6 +21,10 @@ import { readFileSync } from 'fs';
 // ── Source code (read once) ──────────────────────────────────────────────────
 const deploySource = readFileSync('server/gpu-deploy.ts', 'utf8');
 const stateSource = readFileSync('server/state.ts', 'utf8');
+const healthMonitorSource = readFileSync('server/gpu-health-monitor.ts', 'utf8');
+const standbySource = readFileSync('server/gpu-standby.ts', 'utf8');
+const deployRaceSource = readFileSync('server/gpu-deploy-race.ts', 'utf8');
+const orphanCleanupSource = readFileSync('server/gpu-orphan-cleanup.ts', 'utf8');
 
 // ──────────────────────────────────────────────────────────────────────────────
 // #167-#176: Deploy Loop — startDeployLoop
@@ -161,21 +165,21 @@ describe('startDeployLoop — error handling', () => {
 
 describe('health monitoring', () => {
   it('#183 startGpuMonitoring resets consecutive failures', () => {
-    const fnStart = deploySource.indexOf('export function startGpuMonitoring');
-    const fnBody = deploySource.slice(fnStart, fnStart + 500);
+    const fnStart = healthMonitorSource.indexOf('export function startGpuMonitoring');
+    const fnBody = healthMonitorSource.slice(fnStart, fnStart + 500);
     expect(fnBody).toContain('monitorConsecFails = 0');
   });
 
   it('#184 startGpuMonitoring resets lastModelRequestTime to now', () => {
-    const fnStart = deploySource.indexOf('export function startGpuMonitoring');
-    const fnBody = deploySource.slice(fnStart, fnStart + 500);
+    const fnStart = healthMonitorSource.indexOf('export function startGpuMonitoring');
+    const fnBody = healthMonitorSource.slice(fnStart, fnStart + 500);
     expect(fnBody).toContain('setLastModelRequestTime(Date.now())');
   });
 
   it('#185 scheduleNextMonitorProbe reschedules in finally block', () => {
-    const fnStart = deploySource.indexOf('export function scheduleNextMonitorProbe');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 50);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
+    const fnStart = healthMonitorSource.indexOf('export function scheduleNextMonitorProbe');
+    const fnEnd = healthMonitorSource.indexOf('\nexport ', fnStart + 50);
+    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
     const finallyIdx = fnBody.indexOf('} finally {');
     expect(finallyIdx).toBeGreaterThan(0);
     const finallyBlock = fnBody.slice(finallyIdx, finallyIdx + 200);
@@ -184,34 +188,34 @@ describe('health monitoring', () => {
   });
 
   it('#186 marks unhealthy only after 2+ consecutive failures', () => {
-    const fnStart = deploySource.indexOf('export function scheduleNextMonitorProbe');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 50);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
+    const fnStart = healthMonitorSource.indexOf('export function scheduleNextMonitorProbe');
+    const fnEnd = healthMonitorSource.indexOf('\nexport ', fnStart + 50);
+    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
     expect(fnBody).toContain('monitorConsecFails >= 2');
     expect(fnBody).toContain('markGpuUnhealthy');
   });
 
   it('#187 exponential backoff on consecutive health failures', () => {
-    const fnStart = deploySource.indexOf('export function scheduleNextMonitorProbe');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 50);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
+    const fnStart = healthMonitorSource.indexOf('export function scheduleNextMonitorProbe');
+    const fnEnd = healthMonitorSource.indexOf('\nexport ', fnStart + 50);
+    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
     expect(fnBody).toContain('monitorDelayMs * 2');
     expect(fnBody).toContain('120_000');
   });
 
   it('#188 attempts auto-restart after 5 consecutive failures', () => {
-    const fnStart = deploySource.indexOf('export function scheduleNextMonitorProbe');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 50);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
+    const fnStart = healthMonitorSource.indexOf('export function scheduleNextMonitorProbe');
+    const fnEnd = healthMonitorSource.indexOf('\nexport ', fnStart + 50);
+    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
     expect(fnBody).toContain('monitorConsecFails === 5');
     expect(fnBody).toContain('Auto-restart attempt');
     expect(fnBody).toContain('restartProvider.startInstance');
   });
 
   it('#189 records host crash in reputation at 5 consecutive failures', () => {
-    const fnStart = deploySource.indexOf('export function scheduleNextMonitorProbe');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 50);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
+    const fnStart = healthMonitorSource.indexOf('export function scheduleNextMonitorProbe');
+    const fnEnd = healthMonitorSource.indexOf('\nexport ', fnStart + 50);
+    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
     expect(fnBody).toContain('recordHostCrash');
     expect(fnBody).toContain('monitorConsecFails === 5');
   });
@@ -223,50 +227,49 @@ describe('health monitoring', () => {
 
 describe('idle watchdog', () => {
   it('#190 IDLE_TIMEOUT_MS defaults to 15 minutes', () => {
-    expect(deploySource).toContain('IDLE_TIMEOUT_MS = 15 * 60_000');
+    expect(healthMonitorSource).toContain('IDLE_TIMEOUT_MS = 15 * 60_000');
   });
 
   it('#191 IDLE_DESTROY_MS defaults to 2 hours', () => {
-    expect(deploySource).toContain('IDLE_DESTROY_MS = 2 * 60 * 60_000');
+    expect(healthMonitorSource).toContain('IDLE_DESTROY_MS = 2 * 60 * 60_000');
   });
 
   it('#192 idle check uses lastModelRequestTime (not lastRequestTime)', () => {
-    const fnStart = deploySource.indexOf('export function scheduleNextMonitorProbe');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 50);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
+    const fnStart = healthMonitorSource.indexOf('export function scheduleNextMonitorProbe');
+    const fnEnd = healthMonitorSource.indexOf('\nexport ', fnStart + 50);
+    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
     expect(fnBody).toContain('lastModelRequestTime');
     expect(fnBody).toContain('Idle check');
   });
 
   it('#193 auto-stop calls autoStopGpu (not terminate) on idle', () => {
-    const fnStart = deploySource.indexOf('Idle check');
-    const fnBody = deploySource.slice(fnStart, fnStart + 1000);
+    const fnStart = healthMonitorSource.indexOf('Idle check');
+    const fnBody = healthMonitorSource.slice(fnStart, fnStart + 1000);
     expect(fnBody).toContain('autoStopGpu');
     expect(fnBody).toContain('auto-stopping (pausing)');
   });
 
   it('#194 warns at 75% of idle timeout before stopping', () => {
-    const fnStart = deploySource.indexOf('Warn at 75% of idle');
-    const fnBody = deploySource.slice(fnStart, fnStart + 500);
+    const fnStart = healthMonitorSource.indexOf('Warn at 75% of idle');
+    const fnBody = healthMonitorSource.slice(fnStart, fnStart + 500);
     expect(fnBody).toContain('IDLE_TIMEOUT_MS * 0.75');
     expect(fnBody).toContain('idleWarned');
     expect(fnBody).toContain('Idle warning');
   });
 
   it('#195 autoStopGpu transitions to stopped state for resume', () => {
-    const fnStart = deploySource.indexOf('export async function autoStopGpu');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 50);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 3000);
+    const fnStart = healthMonitorSource.indexOf('export async function autoStopGpu');
+    const fnEnd = healthMonitorSource.indexOf('\nexport ', fnStart + 50);
+    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 3000);
     expect(fnBody).toContain('client.stopInstance');
-    // After stop, transitions to 'stopped' state with podId preserved via setDeployState
     expect(fnBody).toContain("status: 'stopped'");
     expect(fnBody).toContain('deploymentSM.markStopped(');
   });
 
   it('#196 autoStopGpu schedules auto-destroy after IDLE_DESTROY_MS', () => {
-    const fnStart = deploySource.indexOf('export async function autoStopGpu');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 50);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 3000);
+    const fnStart = healthMonitorSource.indexOf('export async function autoStopGpu');
+    const fnEnd = healthMonitorSource.indexOf('\nexport ', fnStart + 50);
+    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 3000);
     expect(fnBody).toContain('scheduleAutoDestroy(IDLE_DESTROY_MS)');
   });
 });
@@ -277,49 +280,49 @@ describe('idle watchdog', () => {
 
 describe('race deploy — startDeployRace', () => {
   it('#197 startDeployRace is an exported async function', () => {
-    expect(deploySource).toContain('export async function startDeployRace');
+    expect(deployRaceSource).toContain('export async function startDeployRace');
   });
 
   it('#198 caps raceCount at 10', () => {
-    const fnStart = deploySource.indexOf('export async function startDeployRace');
-    const fnBody = deploySource.slice(fnStart, fnStart + 500);
+    const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
+    const fnBody = deployRaceSource.slice(fnStart, fnStart + 500);
     expect(fnBody).toContain('Math.min(raceCount, 10)');
   });
 
   it('#199 creates all instances in parallel with Promise.allSettled', () => {
-    const fnStart = deploySource.indexOf('export async function startDeployRace');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 100);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
+    const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
+    const fnEnd = deployRaceSource.indexOf('\nexport ', fnStart + 100);
+    const fnBody = deployRaceSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
     expect(fnBody).toContain('Promise.allSettled(slots.map');
   });
 
   it('#200 registers race candidates in activeRaceInstanceIds', () => {
-    const fnStart = deploySource.indexOf('export async function startDeployRace');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 100);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
+    const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
+    const fnEnd = deployRaceSource.indexOf('\nexport ', fnStart + 100);
+    const fnBody = deployRaceSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
     expect(fnBody).toContain('activeRaceInstanceIds.add(c.instanceId)');
   });
 
   it('#201 winner aborts all other slots via AbortController', () => {
-    const fnStart = deploySource.indexOf('export async function startDeployRace');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 100);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
+    const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
+    const fnEnd = deployRaceSource.indexOf('\nexport ', fnStart + 100);
+    const fnBody = deployRaceSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
     expect(fnBody).toContain('raceAbort.abort()');
     expect(fnBody).toContain('AbortController');
   });
 
   it('#202 losers are terminated with wasted cost logging', () => {
-    const fnStart = deploySource.indexOf('export async function startDeployRace');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 100);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
+    const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
+    const fnEnd = deployRaceSource.indexOf('\nexport ', fnStart + 100);
+    const fnBody = deployRaceSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
     expect(fnBody).toContain('wastedUsd');
     expect(fnBody).toContain('deleteInstance');
   });
 
   it('#203 wraps Promise.all in try/finally for guaranteed cleanup', () => {
-    const fnStart = deploySource.indexOf('export async function startDeployRace');
-    const fnEnd = deploySource.indexOf('\nexport ', fnStart + 100);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
+    const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
+    const fnEnd = deployRaceSource.indexOf('\nexport ', fnStart + 100);
+    const fnBody = deployRaceSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
     expect(fnBody).toContain('try {');
     expect(fnBody).toContain('await Promise.all(candidates.map');
     expect(fnBody).toContain('Force-clean');
@@ -334,19 +337,19 @@ describe('race deploy — startDeployRace', () => {
 
 describe('orphan sweep', () => {
   it('#204 POD_NAME_PREFIX is used for orphan detection', () => {
-    expect(deploySource).toContain("export const POD_NAME_PREFIX = 'parle-autoscale-'");
+    expect(orphanCleanupSource).toContain("export const POD_NAME_PREFIX = 'parle-autoscale-'");
   });
 
   it('#205 cleanupAllPods filters by prefix and non-EXITED status', () => {
-    const fnStart = deploySource.indexOf('export async function cleanupAllPods');
-    const fnBody = deploySource.slice(fnStart, fnStart + 2000);
+    const fnStart = orphanCleanupSource.indexOf('export async function cleanupAllPods');
+    const fnBody = orphanCleanupSource.slice(fnStart, fnStart + 2000);
     expect(fnBody).toContain('startsWith(POD_NAME_PREFIX)');
     expect(fnBody).toContain("inst.status !== 'EXITED'");
   });
 
   it('#206 sweepOrphanInstances excludes tracked pods and race candidates', () => {
-    const fnStart = deploySource.indexOf('export async function sweepOrphanInstances');
-    const fnBody = deploySource.slice(fnStart, fnStart + 1000);
+    const fnStart = orphanCleanupSource.indexOf('export async function sweepOrphanInstances');
+    const fnBody = orphanCleanupSource.slice(fnStart, fnStart + 1000);
     expect(fnBody).toContain('tracked.add(deployState.podId)');
     expect(fnBody).toContain('standbyDeployState.podId');
     expect(fnBody).toContain('activeRaceInstanceIds');
@@ -354,16 +357,16 @@ describe('orphan sweep', () => {
   });
 
   it('#207 startOrphanSweep guards against double-scheduling', () => {
-    const fnStart = deploySource.indexOf('export function startOrphanSweep');
-    const fnBody = deploySource.slice(fnStart, fnStart + 400);
+    const fnStart = orphanCleanupSource.indexOf('export function startOrphanSweep');
+    const fnBody = orphanCleanupSource.slice(fnStart, fnStart + 400);
     expect(fnBody).toContain('orphanSweepInitialTimer');
     expect(fnBody).toContain('orphanSweepTimer');
     expect(fnBody).toContain('return');
   });
 
   it('#208 stopOrphanSweep clears both initial and periodic timers', () => {
-    const fnStart = deploySource.indexOf('export function stopOrphanSweep');
-    const fnBody = deploySource.slice(fnStart, fnStart + 300);
+    const fnStart = orphanCleanupSource.indexOf('export function stopOrphanSweep');
+    const fnBody = orphanCleanupSource.slice(fnStart, fnStart + 300);
     expect(fnBody).toContain('clearTimeout(orphanSweepInitialTimer)');
     expect(fnBody).toContain('clearInterval(orphanSweepTimer)');
   });

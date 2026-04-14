@@ -198,11 +198,11 @@ vi.mock('../src', () => ({
 }));
 
 // Import after all mocks
-import { runStreamingPipeline } from '../server/pipeline-runner';
-import type { PipelineCallbacks, PipelineOpts } from '../server/pipeline-runner';
-import { speculativeCache } from '../server/speculative-cache';
-import { getLabsFlags } from '../server/labs-settings';
-import { raceProviders } from '../server/race-providers';
+import { runStreamingPipeline } from '../../server/pipeline-runner';
+import type { PipelineCallbacks, PipelineOpts } from '../../server/pipeline-runner';
+import { speculativeCache } from '../../server/speculative-cache';
+import { getLabsFlags } from '../../server/labs-settings';
+import { raceProviders } from '../../server/race-providers';
 
 // Initialize mockClient functions (after vi is fully initialized)
 mockClient.transcribe = vi.fn().mockResolvedValue({ text: 'bonjour', language: 'fr' });

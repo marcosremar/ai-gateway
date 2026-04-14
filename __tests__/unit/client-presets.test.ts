@@ -11,7 +11,7 @@ import {
   SYSTEM_PROFILE,
   SPEECH_TO_SPEECH_PROFILE,
   OPENAI_REALTIME_PROFILE,
-} from '../src/client/presets';
+} from '../../src/client/presets';
 
 describe('resolveProfile()', () => {
   it('should return VOICE_PROFILE for preset "voice"', () => {

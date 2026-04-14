@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mergeHooks } from '../src/observability/merge-hooks';
-import { createConsoleHooks } from '../src/observability/console-hooks';
-import { createWebhookHooks } from '../src/observability/webhook-hooks';
-import type { GatewayHooks, RequestStartEvent } from '../src/hooks';
+import { mergeHooks } from '../../src/observability/merge-hooks';
+import { createConsoleHooks } from '../../src/observability/console-hooks';
+import { createWebhookHooks } from '../../src/observability/webhook-hooks';
+import type { GatewayHooks, RequestStartEvent } from '../../src/hooks';
 
 describe('Observability', () => {
   describe('mergeHooks', () => {
