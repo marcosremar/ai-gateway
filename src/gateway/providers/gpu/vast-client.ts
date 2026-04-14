@@ -58,7 +58,9 @@ const RATE_LIMIT_429_RETRY_MS = parseInt(process.env.VAST_RATE_LIMIT_429_RETRY_M
 const RATE_LIMIT_429_MAX_RETRIES = 3;
 
 // ── Offer cache ─────────────────────────────────────────────────────────────
-const OFFER_CACHE_TTL_MS = parseInt(process.env.VAST_OFFER_CACHE_TTL_MS || '60000', 10); // 60s
+// Reduced from 60s to 10s because GPU availability changes rapidly.
+// A stale cache could cause deploy failures when all GPUs get rented between requests.
+const OFFER_CACHE_TTL_MS = parseInt(process.env.VAST_OFFER_CACHE_TTL_MS || '10000', 10); // 10s
 
 // ── Host reputation persistence ─────────────────────────────────────────────
 const REPUTATION_DIR = process.env.AI_GATEWAY_CONFIG_DIR || path.join(os.homedir(), '.ai-gateway');
@@ -98,6 +100,20 @@ function isPrivateIp(ip: string): boolean {
 
 /** Max IPs to track in _recentlyUsedIps before pruning (prevents memory leak). */
 const MAX_RECENTLY_USED_IPS = 200;
+
+/**
+ * Check if a geolocation string matches a country code.
+ * Handles both "France, FR" and bare "FR" formats from Vast.ai.
+ */
+function geoMatchesCountryCode(geo: string, cc: string): boolean {
+  if (!geo || !cc) return false;
+  const upperCc = cc.toUpperCase();
+  // Format "Country, CC" — check both ends
+  if (geo.endsWith(`, ${upperCc}`) || geo.toUpperCase().startsWith(`${upperCc},`)) return true;
+  // Format bare "CC" — exact match (case-insensitive)
+  if (geo.toUpperCase() === upperCc) return true;
+  return false;
+}
 
 /** Normalize short GPU type names (e.g. 'RTX3090') to Vast.ai search names (e.g. 'RTX 3090') */
 function normalizeGpuNames(gpuTypes: string[]): string[] {
@@ -1099,7 +1115,7 @@ export class VastClient extends AbstractGpuProvider {
       const before = offers.length;
       offers = offers.filter(o => {
         const geo = String(o.geolocation || '');
-        return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`) || geo.toUpperCase().startsWith(`${cc},`));
+        return createGeoFilter!.some(cc => geoMatchesCountryCode(geo, cc));
       });
       this.log.log(`[vast] Geo filter (create): ${before} → ${offers.length} offers matching [${createGeoFilter.join(',')}]`);
     }
@@ -1120,7 +1136,7 @@ export class VastClient extends AbstractGpuProvider {
         if (createGeoFilter && offers.length) {
           offers = offers.filter(o => {
             const geo = String(o.geolocation || '');
-            return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`) || geo.toUpperCase().startsWith(`${cc},`));
+            return createGeoFilter!.some(cc => geoMatchesCountryCode(geo, cc));
           });
         }
       } catch (retryErr) {
@@ -1142,7 +1158,7 @@ export class VastClient extends AbstractGpuProvider {
         if (createGeoFilter && filtered.length) {
           filtered = filtered.filter(o => {
             const geo = String(o.geolocation || '');
-            return createGeoFilter!.some(cc => geo.endsWith(`, ${cc}`) || geo.toUpperCase().startsWith(`${cc},`));
+            return createGeoFilter!.some(cc => geoMatchesCountryCode(geo, cc));
           });
         }
         // Mark SSH-only offers and merge (dedupe by id)
@@ -2272,7 +2288,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
         const before = offers.length;
         offers = offers.filter(o => {
           const geo = String(o.geolocation || '');
-          return listGeoFilter!.some(cc => geo.endsWith(`, ${cc}`) || geo.toUpperCase().startsWith(`${cc},`));
+          return listGeoFilter!.some(cc => geoMatchesCountryCode(geo, cc));
         });
         this.log.log(`[vast] Geo filter: ${before} → ${offers.length} offers matching [${listGeoFilter.join(',')}]`);
       }
