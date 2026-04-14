@@ -1,18 +1,46 @@
 /**
  * Docker image builder routes — GitHub OAuth + GHCR via Actions
  *
- * Routes (currently registered in ws-server.ts via getDockerRoutes):
+ * Routes (flat):
  *   POST   /v1/docker/auth                — Start GitHub OAuth device flow
  *   GET    /v1/docker/auth/status         — Poll device flow status
  *   GET    /v1/docker/auth/me             — Current GitHub user
  *   DELETE /v1/docker/auth                — Revoke / log out
  *   POST   /v1/docker/build               — Start a Docker image build
  *   GET    /v1/docker/builds              — List all builds
- *   GET    /v1/docker/builds/:id          — Get build status (dynamic)
  *   GET    /v1/docker/images              — List successfully built images
  *
- * TODO: These routes are currently defined in ws-server.ts (via image-build-handlers.ts).
- * This file will own their registration once ws-server.ts is refactored.
+ * Dynamic routes (handled separately from flat lookup):
+ *   GET    /v1/docker/builds/:id          — Get build status
+ *
+ * Note: Dynamic docker routes (/v1/docker/builds/:id) still need special
+ * handling in ws-server.ts via matchDockerDynamicRoute. This function only
+ * registers the flat (non-parameterized) routes.
  */
 
-export const routes = {};
+import { createLogger } from '../../../src/logger';
+const log = createLogger('routes/images');
+
+/** Register flat docker routes into the handler map. */
+export function registerImageRoutes(handlers: Record<string, Function>): void {
+  try {
+    const ib = require('../../image-build-handlers');
+    const dockerRoutes: Record<string, Function> = ib.getDockerRoutes();
+    Object.assign(handlers, dockerRoutes);
+  } catch (e: any) {
+    log.warn(`[routes/images] image-build-handlers not loaded: ${e.message?.slice(0, 80)}`);
+  }
+}
+
+/**
+ * Get the dynamic route matcher for docker routes (e.g. /v1/docker/builds/:id).
+ * Returns null if image-build-handlers is not available.
+ */
+export function getDockerDynamicMatcher(): ((method: string, pathname: string) => [Function, string[]] | null) | null {
+  try {
+    const ib = require('../../image-build-handlers');
+    return ib.matchDockerDynamicRoute || null;
+  } catch {
+    return null;
+  }
+}

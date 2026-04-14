@@ -1,0 +1,168 @@
+// ── BabelCast Gateway — Fan-Out Orchestrator (Pure Domain Logic) ──────────────
+// Core multi-language parallel translation + TTS logic extracted from
+// server/dub-fanout.ts. This module contains ZERO server/ imports — all
+// server-bound state and I/O are injected via the FanoutDeps interface.
+
+import { createLogger } from '../../logger';
+import type { RaceCandidate } from '../routing/provider-racer';
+import { raceProviders } from '../routing/provider-racer';
+import type { GpuLLMResult, GpuTTSResult } from './gpu-fetch';
+
+const log = createLogger('fanout-orchestrator');
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+export interface FanoutOpts {
+  speaker?: string;
+  style?: string;
+  targets: string[];
+}
+
+/**
+ * Routing snapshot for the fanout — pre-computed by the server layer.
+ */
+export interface FanoutRouting {
+  gpuEndpoint?: string;
+  llmOnGpu: boolean;
+  ttsOnGpu: boolean;
+  cloudProviderName: string;
+}
+
+/**
+ * Server-bound side-effect callbacks for the fanout.
+ */
+export interface FanoutSideEffects {
+  /** Broadcast subtitle for a target language. */
+  broadcastSubtitle(data: {
+    transcription: string; translation: string;
+    source: string; target: string;
+    timing: { stt_ms: number; llm_ms: number };
+  }): void;
+  /** Broadcast dub audio to subscribed WebSocket clients. */
+  broadcastDubAudio(target: string, data: {
+    type: 'dub:audio'; target: string;
+    audio: string; transcription: string; translation: string;
+    timing: { stt_ms: number; llm_ms: number; tts_ms: number; total_ms: number };
+  }, audioBuffer: Buffer): void;
+}
+
+/**
+ * Stage execution functions for the fanout.
+ */
+export interface FanoutStageExecutors {
+  /** Get cached translation, or null if not cached. */
+  getCachedTranslation(text: string, source: string, target: string, style: string): string | null;
+  /** Store a translation in the cache. */
+  setCachedTranslation(text: string, source: string, target: string, translated: string, style: string): void;
+  /** Build a system prompt for source → target translation. */
+  buildSystemPrompt(sourceName: string, targetName: string, style: string): string;
+
+  /** Build LLM race candidates for a single target. */
+  buildLlmCandidates(routing: FanoutRouting, sttText: string, source: string, target: string,
+    systemPrompt: string): RaceCandidate<GpuLLMResult>[];
+
+  /** Build TTS race candidates for a single target. */
+  buildTtsCandidates(routing: FanoutRouting, translatedText: string, targetName: string,
+    speaker: string): RaceCandidate<GpuTTSResult>[];
+}
+
+/** All dependencies injected into the fanout orchestrator. */
+export interface FanoutDeps {
+  routing: FanoutRouting;
+  sideEffects: FanoutSideEffects;
+  executors: FanoutStageExecutors;
+  langNames: Record<string, string>;
+}
+
+// ── Fan-Out Orchestrator ─────────────────────────────────────────────────────
+
+/**
+ * Run parallel LLM+TTS for multiple target languages after a single STT pass.
+ *
+ * This is the pure fan-out logic — all server-bound state and I/O are injected
+ * via `deps`. For each target language:
+ *   1. Check translation cache → skip LLM if cached
+ *   2. Race LLM candidates → get translated text
+ *   3. Broadcast subtitle
+ *   4. Race TTS candidates → get audio
+ *   5. Broadcast dub:audio
+ *
+ * All targets run in parallel (Promise.allSettled). Individual failures
+ * are logged but do not propagate.
+ */
+export async function runFanoutOrchestrator(
+  sttText: string,
+  source: string,
+  sttMs: number,
+  _sttProvider: string,
+  opts: FanoutOpts,
+  deps: FanoutDeps,
+): Promise<void> {
+  const { targets, speaker, style = 'default' } = opts;
+  if (targets.length === 0) return;
+
+  const { routing, sideEffects: fx, executors: ex, langNames: langs } = deps;
+
+  log.log(`Fan-out for ${targets.length} targets: [${targets.join(',')}]`);
+
+  await Promise.allSettled(targets.map(async (target) => {
+    const t0 = Date.now();
+    const sourceName = langs[source] || source;
+    const targetName = langs[target] || target;
+
+    try {
+      // ── LLM Translation ──
+      const cached = ex.getCachedTranslation(sttText, source, target, style);
+      let translatedText = '';
+      let llmProvider = '';
+      let llmMs = 0;
+
+      if (cached !== null) {
+        translatedText = cached;
+        llmProvider = 'cache';
+      } else {
+        const systemPrompt = ex.buildSystemPrompt(sourceName, targetName, style);
+        const llmCandidates = ex.buildLlmCandidates(routing, sttText, source, target, systemPrompt);
+        const llmRace = await raceProviders(llmCandidates, { logPrefix: `[dub-llm:${target}]` });
+        translatedText = llmRace.result.translated_text;
+        llmProvider = llmRace.provider;
+        llmMs = Date.now() - t0;
+
+        if (translatedText) ex.setCachedTranslation(sttText, source, target, translatedText, style);
+      }
+
+      if (!translatedText.trim()) return;
+
+      // Broadcast subtitle for this target language
+      fx.broadcastSubtitle({
+        transcription: sttText,
+        translation: translatedText,
+        source, target,
+        timing: { stt_ms: sttMs, llm_ms: llmMs },
+      });
+
+      // ── TTS Synthesis ──
+      const ttsT0 = Date.now();
+      const ttsCandidates = ex.buildTtsCandidates(routing, translatedText, targetName, speaker || 'Ryan');
+      const ttsRace = await raceProviders(ttsCandidates, { logPrefix: `[dub-tts:${target}]` });
+      const ttsMs = Date.now() - ttsT0;
+      const ttsAudioBuffer = ttsRace.result.audio;
+      const audioB64 = ttsAudioBuffer.toString('base64');
+      const totalMs = Date.now() - t0;
+
+      // Send dubbed audio only to clients subscribed to this target
+      fx.broadcastDubAudio(target, {
+        type: 'dub:audio',
+        target,
+        audio: audioB64,
+        transcription: sttText,
+        translation: translatedText,
+        timing: { stt_ms: sttMs, llm_ms: llmMs, tts_ms: ttsMs, total_ms: totalMs },
+      }, ttsAudioBuffer);
+
+      log.log(`${target}: ${totalMs}ms (LLM=${llmMs}ms[${llmProvider}] TTS=${ttsMs}ms[${ttsRace.provider}])`);
+    } catch (err) {
+      log.warn(`${target} failed:`, err instanceof Error ? err.message : err);
+    }
+  }));
+}

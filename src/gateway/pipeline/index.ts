@@ -64,3 +64,24 @@ export {
 export { SpeculativeCache, speculativeCache } from './speculative-cache';
 export { StreamingOverlap } from './streaming-overlap';
 export type { OverlapStats } from './streaming-overlap';
+
+export { runPipelineOrchestrator, ewmaRaceOpts } from './pipeline-orchestrator';
+export type {
+  PipelineCallbacks,
+  PipelineOpts,
+  PipelineResult,
+  PipelineLabsFlags,
+  PipelineRouting,
+  PipelineSideEffects,
+  PipelineStageExecutors,
+  PipelineDeps,
+} from './pipeline-orchestrator';
+
+export { runFanoutOrchestrator } from './fanout-orchestrator';
+export type {
+  FanoutOpts,
+  FanoutRouting,
+  FanoutSideEffects,
+  FanoutStageExecutors,
+  FanoutDeps,
+} from './fanout-orchestrator';

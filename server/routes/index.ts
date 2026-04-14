@@ -1,28 +1,65 @@
 /**
- * Route modules index — re-exports all route registration modules.
+ * Route modules index — re-exports all route registration functions.
  *
  * Directory structure:
  *   gateway/     — Core AI gateway endpoints (inference, pipeline, GPU, config)
  *   compute/     — Compute resource management (workloads, bots, images)
  *   diagnostics/ — Observability (health, metrics)
  *
- * TODO: Once ws-server.ts is refactored, each module will export a
- * registerRoutes(handlers) function that populates the route table.
+ * Usage in ws-server.ts:
+ *   import { registerAllRoutes } from './routes';
+ *   registerAllRoutes(handlers);
  */
 
-// Gateway routes
-export * as inference from './gateway/inference';
-export * as pipeline from './gateway/pipeline';
-export * as gpu from './gateway/gpu';
-export * as gpuInfo from './gateway/gpu-info';
-export * as gpuSettings from './gateway/gpu-settings';
-export * as config from './gateway/config';
+import { registerInferenceRoutes } from './gateway/inference';
+import { registerPipelineRoutes } from './gateway/pipeline';
+import { registerGpuRoutes } from './gateway/gpu';
+import { registerGpuInfoRoutes } from './gateway/gpu-info';
+import { registerGpuSettingsRoutes } from './gateway/gpu-settings';
+import { registerConfigRoutes } from './gateway/config';
+import { registerWorkloadRoutes } from './compute/workloads';
+import { registerBotRoutes } from './compute/bots';
+import { registerImageRoutes, getDockerDynamicMatcher } from './compute/images';
+import { registerHealthRoutes } from './diagnostics/health';
+import { registerMetricsRoutes } from './diagnostics/metrics';
 
-// Compute routes
-export * as workloads from './compute/workloads';
-export * as bots from './compute/bots';
-export * as images from './compute/images';
+// Re-export individual register functions for selective use
+export {
+  registerInferenceRoutes,
+  registerPipelineRoutes,
+  registerGpuRoutes,
+  registerGpuInfoRoutes,
+  registerGpuSettingsRoutes,
+  registerConfigRoutes,
+  registerWorkloadRoutes,
+  registerBotRoutes,
+  registerImageRoutes,
+  getDockerDynamicMatcher,
+  registerHealthRoutes,
+  registerMetricsRoutes,
+};
 
-// Diagnostics routes
-export * as health from './diagnostics/health';
-export * as metrics from './diagnostics/metrics';
+/**
+ * Register all HTTP routes into the handler map.
+ * Called by ws-server.ts to populate the flat route table.
+ */
+export function registerAllRoutes(handlers: Record<string, Function>): void {
+  // Gateway
+  registerGpuRoutes(handlers);
+  registerGpuInfoRoutes(handlers);
+  registerGpuSettingsRoutes(handlers);
+  registerConfigRoutes(handlers);
+  registerInferenceRoutes(handlers);
+
+  // Compute
+  registerBotRoutes(handlers);
+  registerImageRoutes(handlers);
+  registerWorkloadRoutes(handlers);
+
+  // Diagnostics
+  registerHealthRoutes(handlers);
+  registerMetricsRoutes(handlers);
+
+  // Pipeline (WebSocket — no HTTP routes)
+  registerPipelineRoutes(handlers);
+}
