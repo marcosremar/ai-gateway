@@ -237,7 +237,7 @@ describe('WebSocket Server (#783-#796)', () => {
   });
   it('#791 STT streaming session created', () => { expect(sttLifecycle).toContain('sttSessions.set'); });
   it('#792 STT streaming session cleaned', () => { expect(sttLifecycle).toContain('sttSessions.delete'); });
-  it('#793 STT handles binary audio', () => { expect(streamingStt).toContain('sendAudio'); });
+  it('#793 STT handles binary audio', () => { expect(src).toContain('sendAudio'); });
   it('#794 Malformed message handling', () => { expect(src).toMatch(/catch|try|error/); });
   it('#796 STT session periodic cleanup', () => { expect(streamingStt).toContain('stale STT session'); });
 });
@@ -453,12 +453,12 @@ describe('API Contracts (#941-#950)', () => {
 
 describe('Final coverage: Structural guarantees (#964-#1000)', () => {
   it('#971 every timer tracked', () => {
-    const src = read('server/gpu-deploy.ts');
     const orphan = read('server/gpu-orphan-cleanup.ts');
+    const warmth = read('server/gpu-warmth-monitor.ts');
     const monitorLoop = read('server/gpu-monitor-loop.ts');
     expect(orphan).toContain('orphanSweepInitialTimer');
-    expect(monitorLoop).toContain('warmthMonitorTimer');
-    expect(src).toContain('monitorInterval');
+    expect(warmth).toContain('warmthMonitorTimer');
+    expect(monitorLoop).toContain('monitorInterval');
   });
 
   it('#972 every Map/Set bounded', () => {

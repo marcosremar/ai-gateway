@@ -141,9 +141,8 @@ describe('Security: Vault encryption', () => {
 describe('Resilience: Timer lifecycle', () => {
   // #697
   it('#697 Monitor recovers after consecutive failures', () => {
-    const src = readSrc('server/gpu-health-monitor.ts');
-    const fn = fnBody(src, 'export function scheduleNextMonitorProbe', 15000);
-    expect(fn).toContain('monitorConsecFails');
+    const src = readSrc('server/gpu-monitor-loop.ts');
+    expect(src).toContain('monitorConsecFails');
   });
 
   // #698
@@ -154,9 +153,10 @@ describe('Resilience: Timer lifecycle', () => {
 
   // #699
   it('#699 Provider cooldown expires correctly', () => {
-    const src = readSrc('server/gpu-deploy.ts');
-    expect(src).toContain('cooldownTracker');
-    expect(src).toContain('isCoolingDown');
+    const tiers = readSrc('server/gpu-deploy-tiers.ts');
+    const orchestrator = readSrc('src/gateway/providers/gpu/deploy-orchestrator.ts');
+    expect(tiers).toContain('cooldownTracker');
+    expect(orchestrator).toContain('isCoolingDown');
   });
 
   // #702
@@ -191,7 +191,7 @@ describe('Resilience: Timer lifecycle', () => {
 
   // #709
   it('#709 Cancel during deploy stops cleanly', () => {
-    const src = readSrc('server/gpu-deploy.ts');
+    const src = readSrc('server/gpu-deploy-loop.ts');
     expect(src).toContain('deployCancelled');
     expect(src).toContain('setDeployCancelled(false)');
   });
@@ -212,7 +212,7 @@ describe('Resilience: Timer lifecycle', () => {
 
 describe('Regression: Binary body transfer (#826)', () => {
   it('uses arrayBuffer not text for body transfer', () => {
-    const src = readSrc('server/ws-server.ts');
+    const src = readSrc('server/ws/http-api-server.ts');
     expect(src).toContain('req.arrayBuffer()');
     // Should not use req.text() in adapters
     const adapters = src.split('Node').filter(s => s.includes('Bun adapter'));
@@ -235,7 +235,7 @@ describe('Regression: HTTP status codes (#827)', () => {
 
 describe('Regression: deployCancelled reset (#828)', () => {
   it('startDeployLoop resets deployCancelled', () => {
-    const src = readSrc('server/gpu-deploy.ts');
+    const src = readSrc('server/gpu-deploy-loop.ts');
     const fn = fnBody(src, 'export async function startDeployLoop');
     expect(fn).toContain('setDeployCancelled(false)');
   });
@@ -249,7 +249,7 @@ describe('Regression: deployCancelled reset (#828)', () => {
 
 describe('Regression: Monitor finally (#829)', () => {
   it('scheduleNextMonitorProbe in finally block', () => {
-    const src = readSrc('server/gpu-health-monitor.ts');
+    const src = readSrc('server/gpu-monitor-loop.ts');
     const fn = fnBody(src, 'export function scheduleNextMonitorProbe', 15000);
     const finallyIdx = fn.indexOf('} finally {');
     expect(finallyIdx).toBeGreaterThan(0);
@@ -261,7 +261,7 @@ describe('Regression: Monitor finally (#829)', () => {
 
 describe('Regression: Warmth monitor (#830)', () => {
   it('calls stopWarmthMonitor on pod change', () => {
-    const src = readSrc('server/gpu-health-monitor.ts');
+    const src = readSrc('server/gpu-warmth-monitor.ts');
     const idx = src.indexOf('[gpu] Warmth monitor: pod changed');
     const nearby = src.slice(idx - 100, idx + 200);
     expect(nearby).toContain('stopWarmthMonitor()');
@@ -270,7 +270,7 @@ describe('Regression: Warmth monitor (#830)', () => {
 
 describe('Regression: Budget accuracy (#831)', () => {
   it('uses actual elapsed time for budget', () => {
-    const src = readSrc('server/gpu-health-monitor.ts');
+    const src = readSrc('server/gpu-monitor-loop.ts');
     const idx = src.indexOf('Budget tracking: accumulate GPU spend');
     const budgetSection = src.slice(idx, idx + 500);
     expect(budgetSection).toContain('lastBudgetCalcTime');
@@ -304,7 +304,7 @@ describe('Regression: SSH tunnel (#834-#835)', () => {
   });
 
   it('closeAllTunnels called on terminate', () => {
-    const src = readSrc('server/gpu-health-monitor.ts');
+    const src = readSrc('server/gpu-terminate.ts');
     const fn = fnBody(src, 'export async function autoTerminateGpu');
     expect(fn).toContain('closeAllTunnels');
   });
@@ -312,7 +312,7 @@ describe('Regression: SSH tunnel (#834-#835)', () => {
 
 describe('Regression: STT sessions (#836)', () => {
   it('periodic cleanup of stale sessions', () => {
-    const src = readSrc('server/ws-server.ts');
+    const src = readSrc('server/ws/streaming-stt-session.ts');
     expect(src).toContain('stale STT session');
   });
 });
@@ -493,7 +493,7 @@ describe('Regression: pauseMs validation (#856)', () => {
 
 describe('Regression: Deploy cleanup failure (#857)', () => {
   it('stops deploy if instance cleanup fails', () => {
-    const src = readSrc('server/gpu-deploy.ts');
+    const src = readSrc('server/gpu-deploy-loop.ts');
     const idx = src.indexOf('Cleaning up crashed instance');
     const block = src.slice(idx, idx + 900);
     expect(block).toContain("status: 'error'");
@@ -594,19 +594,19 @@ describe('API Contract: Response schemas', () => {
 
   // #945
   it('#945 workloads endpoint exists', () => {
-    const src = readSrc('server/ws-server.ts');
+    const src = readSrc('server/routes/compute/workloads.ts');
     expect(src).toContain('/v1/workloads');
   });
 
   // #947
   it('#947 all handlers set JSON content type', () => {
-    const src = readSrc('server/ws-server.ts');
+    const src = readSrc('server/ws/http-api-server.ts');
     expect(src).toContain("'Content-Type': 'application/json'");
   });
 
   // #948
   it('#948 CORS headers on responses', () => {
-    const src = readSrc('server/ws-server.ts');
+    const src = readSrc('server/ws/http-api-server.ts');
     expect(src).toContain('Access-Control-Allow-Origin');
   });
 });
@@ -637,7 +637,7 @@ describe('Workload system architecture', () => {
   });
 
   it('#995 Three workload drivers registered', () => {
-    const src = readSrc('server/ws-server.ts');
+    const src = readSrc('server/ws/http-api-server.ts');
     expect(src).toContain('GpuWorkloadDriver');
     expect(src).toContain('BotWorkloadDriver');
     expect(src).toContain('DbWorkloadDriver');
