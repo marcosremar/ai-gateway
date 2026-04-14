@@ -2,9 +2,15 @@
 // Daily GPU spend tracking and budget gate logic.
 // Extracted from server/state.ts — Phase 5 DDD migration.
 
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 import { createLogger } from '../../platform/logger';
 
 const log = createLogger('cost-state');
+
+const BABELCAST_DIR = join(homedir(), '.babelcast');
+const DAILY_SPEND_FILE = join(BABELCAST_DIR, 'daily_spend.json');
 
 // ── Budget tracking ──────────────────────────────────────────────────────────
 //
@@ -78,3 +84,44 @@ export function canAffordDeploy(estimatedCostUsd: number = DEFAULT_ESTIMATED_DEP
 
 export function setDailyGpuSpendUsd(v: number) { dailyGpuSpendUsd = v; }
 export function setDailySpendResetDate(v: string) { dailySpendResetDate = v; }
+
+// ── Persistence (daily_spend.json) ──────────────────────────────────────────
+
+/**
+ * Restore daily spend counter from disk on server startup so the budget gate
+ * survives process restarts. Resets to $0 if the persisted date is not today.
+ */
+export function loadPersistedDailySpend(): void {
+  try {
+    if (!existsSync(DAILY_SPEND_FILE)) return;
+    const raw = readFileSync(DAILY_SPEND_FILE, 'utf-8');
+    const data = JSON.parse(raw) as { date: string; spendUsd: number; savedAt: number };
+    const today = new Date().toISOString().slice(0, 10);
+    if (data.date !== today) {
+      log.log(`[budget] Persisted spend is from ${data.date}, today is ${today} — resetting to $0`);
+      return;
+    }
+    if (typeof data.spendUsd === 'number' && isFinite(data.spendUsd) && data.spendUsd >= 0) {
+      dailyGpuSpendUsd = data.spendUsd;
+      dailySpendResetDate = data.date;
+      log.log(`[budget] Restored daily spend: $${data.spendUsd.toFixed(2)} (cap: $${DAILY_BUDGET_USD > 0 ? DAILY_BUDGET_USD.toFixed(2) : 'none'})`);
+    }
+  } catch (e) {
+    log.warn('[budget] Failed to load persisted daily spend: ' + (e instanceof Error ? e.message : String(e)));
+  }
+}
+
+/**
+ * Persist the current daily spend to disk. Called on every mutation via
+ * setDailyGpuSpendUsd but debounced at the caller side if needed.
+ */
+export function persistDailySpend(): void {
+  try {
+    if (!existsSync(BABELCAST_DIR)) mkdirSync(BABELCAST_DIR, { recursive: true });
+    const today = new Date().toISOString().slice(0, 10);
+    const data = { date: today, spendUsd: dailyGpuSpendUsd, savedAt: Date.now() };
+    writeFileSync(DAILY_SPEND_FILE, JSON.stringify(data));
+  } catch (e) {
+    log.warn('[budget] Failed to persist daily spend: ' + (e instanceof Error ? e.message : String(e)));
+  }
+}
