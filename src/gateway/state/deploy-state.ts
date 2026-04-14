@@ -33,12 +33,25 @@ export interface DeploymentState {
   providerMeta: Record<string, unknown>;  // host-level metadata for reputation tracking
   /** Ordered log of state transitions with timestamps — for UI timeline and debugging */
   transitions: Array<{ status: string; step: string; provider: string; ts: number; elapsed: number; detail?: string }>;
+  /** Unique deploy correlation ID — set by startDeployLoop, used for idempotency and orphan detection */
+  deployId: string;
+  /** Live GPU telemetry from /health — 0 means unknown, -1 means unknown (for gpuUtil) */
+  gpuTemp: number;
+  gpuUtil: number;
+  gpuMemUsed: number;
+  gpuMemTotal: number;
+  /** Vast.ai template hash (tracks current template for snapshot/recreate) */
+  templateHashId: string;
+  /** Canary deployment controller (when canary mode is enabled) */
+  canary?: unknown;
+  /** Timer ID for canary evaluation interval (for cleanup) */
+  canaryEvalTimer?: ReturnType<typeof setInterval> | null;
 }
 
 // ── Mutable deploy state ────────────────────────────────────────────────────
 
 export let deployState: DeploymentState = {
-  status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [],
+  status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], deployId: '', gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0, templateHashId: '',
 };
 export let deployCancelled = false;
 export let deployLock = false;
@@ -87,6 +100,8 @@ export interface PersistedDeploy {
   savedAt: number;
   /** When set, indicates this is a stopped (paused) pod that can be resumed. */
   stoppedAt?: number;
+  /** Deploy correlation ID — used to match persisted pods to their deploy session. */
+  deployId?: string;
 }
 
 export function persistDeployState(): void {
