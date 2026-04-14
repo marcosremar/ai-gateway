@@ -6,6 +6,9 @@ import type { EmbeddingProvider } from '../../providers/openai-compat/openai-com
 import type { ResponseCache } from '../../caching/response-cache';
 import type { ProxyRequest, ProxyResponse } from '../types';
 import { withProxyRetry } from './retry';
+import { createLogger } from '../../logger';
+
+const log = createLogger('embeddings');
 
 const MAX_EMBEDDING_INPUTS = 100;
 const MAX_INPUT_LENGTH = 8192;
@@ -84,7 +87,7 @@ export async function handleEmbeddings(
       try {
         await cache!.set(cacheKey, result);
       } catch (cacheErr) {
-        console.error(`[embeddings] Cache set failed:`, cacheErr);
+        log.error(`Cache set failed:`, cacheErr);
       }
     }
 
@@ -105,7 +108,7 @@ export async function handleEmbeddings(
       },
     };
   } catch (err) {
-    console.error(`[embeddings] Error for model ${model}:`, err);
+    log.error(`Error for model ${model}:`, err);
     const safeMessage = err instanceof Error ? err.message.replace(/https?:\/\/[^\s]+/g, '[redacted-url]') : 'Internal error';
     return {
       status: 500,

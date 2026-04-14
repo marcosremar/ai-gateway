@@ -3,6 +3,10 @@
 // If the final ASR result is similar enough to the speculated partial,
 // the cached translation is reused — saving the full LLM round-trip latency.
 
+import { createLogger } from '../src/logger';
+
+const log = createLogger('speculative-cache');
+
 const MAX_SPECULATIONS = 20;
 const EXPIRY_MS = 10_000; // auto-expire after 10s
 
@@ -78,7 +82,7 @@ export class SpeculativeCache {
       const oldestKey = this.pending.keys().next().value;
       if (oldestKey) {
         this.pending.delete(oldestKey);
-        console.log(`[speculation] Evicted oldest entry (sessionId=${oldestKey})`);
+        log.log(`Evicted oldest entry (sessionId=${oldestKey})`);
       }
     }
 
@@ -90,7 +94,7 @@ export class SpeculativeCache {
         entry.resolved = true;
         return result;
       }).catch(err => {
-        console.warn(`[speculation] Background translation failed: ${err instanceof Error ? err.message : err}`);
+        log.warn(`Background translation failed: ${err instanceof Error ? err.message : err}`);
         entry.resolved = true;
         return '';
       }),
@@ -99,7 +103,7 @@ export class SpeculativeCache {
     };
 
     this.pending.set(sessionId, entry);
-    console.log(`[speculation] Started for session=${sessionId} partial="${trimmed.slice(0, 60)}"`);
+    log.log(`Started for session=${sessionId} partial="${trimmed.slice(0, 60)}"`);
   }
 
   /**
@@ -129,7 +133,7 @@ export class SpeculativeCache {
     // Skip if partial is empty or too short to be meaningful
     if (normalizedPartial.length < 3) {
       this._misses++;
-      console.log(`[speculation] MISS — partial too short (${normalizedPartial.length} chars) session=${sessionId}`);
+      log.log(`MISS — partial too short (${normalizedPartial.length} chars) session=${sessionId}`);
       return null;
     }
 
@@ -138,7 +142,7 @@ export class SpeculativeCache {
 
     if (!isSimilar) {
       this._misses++;
-      console.log(`[speculation] MISS — partial="${entry.partialText.slice(0, 40)}" final="${finalText.slice(0, 40)}" session=${sessionId}`);
+      log.log(`MISS — partial="${entry.partialText.slice(0, 40)}" final="${finalText.slice(0, 40)}" session=${sessionId}`);
       return null;
     }
 
@@ -148,14 +152,14 @@ export class SpeculativeCache {
       const translation = await entry.translationPromise;
       if (!translation) {
         this._misses++;
-        console.log(`[speculation] MISS — translation was empty session=${sessionId}`);
+        log.log(`MISS — translation was empty session=${sessionId}`);
         return null;
       }
 
       const savedMs = Date.now() - t0;
       const totalMs = Date.now() - entry.startedAt;
       this._hits++;
-      console.log(`[speculation] HIT — saved ${savedMs}ms (speculation ran ${totalMs}ms) session=${sessionId} partial="${entry.partialText.slice(0, 40)}" final="${finalText.slice(0, 40)}"`);
+      log.log(`HIT — saved ${savedMs}ms (speculation ran ${totalMs}ms) session=${sessionId} partial="${entry.partialText.slice(0, 40)}" final="${finalText.slice(0, 40)}"`);
       return translation;
     } catch {
       this._misses++;

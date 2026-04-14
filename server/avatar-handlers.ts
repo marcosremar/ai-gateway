@@ -6,6 +6,9 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { botState, deployState, isGpuAvailable } from './state';
 import { client, translationDefaults } from './providers';
 import { readJsonBody, handleBodyError } from './http-utils';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('avatar-handlers');
 
 /** Derive the avatar server URL from the bot pod endpoint.
  *  Bot endpoint: https://<podId>-8080.proxy.runpod.net or http://localhost:8085
@@ -54,7 +57,7 @@ export async function handleAvatarSpeak(req: IncomingMessage, res: ServerRespons
       const voice = (body.voice as string) || 'af_heart';
       const t0 = Date.now();
 
-      console.log(`[avatar] Generating TTS for: "${text.slice(0, 60)}..." voice=${voice}`);
+      log.log(`Generating TTS for: "${text.slice(0, 60)}..." voice=${voice}`);
 
       const gpuEndpoint = isGpuAvailable() ? deployState.endpoint : null;
       let audioBuffer: Buffer;
@@ -70,7 +73,7 @@ export async function handleAvatarSpeak(req: IncomingMessage, res: ServerRespons
         if (gpuRes.ok) {
           audioBuffer = Buffer.from(await gpuRes.arrayBuffer());
         } else {
-          console.warn(`[avatar] GPU TTS failed (${gpuRes.status}), falling back to cloud`);
+          log.warn(`GPU TTS failed (${gpuRes.status}), falling back to cloud`);
           const result = await client.synthesize(text, {
             ...translationDefaults,
             gpuEndpoint: undefined,
@@ -91,7 +94,7 @@ export async function handleAvatarSpeak(req: IncomingMessage, res: ServerRespons
       }
 
       const latencyMs = Date.now() - t0;
-      console.log(`[avatar] TTS generated: ${audioBuffer.length}B in ${latencyMs}ms`);
+      log.log(`TTS generated: ${audioBuffer.length}B in ${latencyMs}ms`);
 
       // Send base64 audio + text to avatar for lip-synced playback
       avatarPayload = {
@@ -114,7 +117,7 @@ export async function handleAvatarSpeak(req: IncomingMessage, res: ServerRespons
     res.writeHead(apiRes.status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
   } catch (err) {
-    console.error('[avatar] speak error:', err instanceof Error ? err.message : err);
+    log.error('speak error:', err instanceof Error ? err.message : err);
     res.writeHead(502, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `Avatar speak failed: ${(err as Error).message}` }));
   }

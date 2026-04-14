@@ -8,6 +8,9 @@
 
 import type { IncomingMessage } from 'http';
 import { createHash } from 'crypto';
+import { createLogger } from '../../logger';
+
+const log = createLogger('rate-limit');
 
 interface Bucket {
   tokens: number;
@@ -62,7 +65,7 @@ export class RateLimiter {
     resetAt: number;
   } {
     if (this.refillRatePerMs <= 0) {
-      console.warn(`[rate-limit] refillRatePerMs <= 0 (${this.refillRatePerMs}), rate limiting disabled for ${clientId}`);
+      log.warn(`refillRatePerMs <= 0 (${this.refillRatePerMs}), rate limiting disabled for ${clientId}`);
       return { allowed: true, limit: 0, remaining: 0, resetAt: 0 };
     }
 

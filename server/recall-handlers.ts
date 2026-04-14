@@ -5,6 +5,9 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { readJsonBody, handleBodyError } from './http-utils';
 import { broadcastWs } from './ws-state';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('recall-handlers');
 
 // ── Module State ─────────────────────────────────────────────────────────────
 
@@ -127,7 +130,7 @@ export async function handleRecallJoin(req: IncomingMessage, res: ServerResponse
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => 'unknown error');
-      console.error(`[recall] Recall.ai API error ${resp.status}: ${errText.slice(0, 200)}`);
+      log.error(`Recall.ai API error ${resp.status}: ${errText.slice(0, 200)}`);
       jsonResponse(res, 502, { error: `Recall.ai API error: ${resp.status}` });
       return;
     }
@@ -138,11 +141,11 @@ export async function handleRecallJoin(req: IncomingMessage, res: ServerResponse
     recallBotMeetingUrl = meetingUrl;
 
     broadcastWs({ type: 'recall:status', status: 'joining', message: 'Bot joining meeting...' });
-    console.log(`[recall] Bot created: id=${recallBotId?.slice(0, 8) ?? '?'} url=${meetingUrl.slice(0, 40)}`);
+    log.log(`Bot created: id=${recallBotId?.slice(0, 8) ?? '?'} url=${meetingUrl.slice(0, 40)}`);
 
     jsonResponse(res, 201, { botId: recallBotId, status: 'joining' });
   } catch (err) {
-    console.error('[recall] Failed to create bot:', err);
+    log.error('Failed to create bot:', err);
     jsonResponse(res, 502, { error: `Failed to reach Recall.ai API: ${(err as Error).message}` });
   }
 }
@@ -170,11 +173,11 @@ export async function handleRecallLeave(_req: IncomingMessage, res: ServerRespon
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => 'unknown error');
-      console.error(`[recall] Recall.ai leave error ${resp.status}: ${errText.slice(0, 200)}`);
+      log.error(`Recall.ai leave error ${resp.status}: ${errText.slice(0, 200)}`);
       // Still reset state — bot may be gone
     }
   } catch (err) {
-    console.error('[recall] Failed to stop bot:', err);
+    log.error('Failed to stop bot:', err);
     // Still reset state
   }
 
@@ -183,7 +186,7 @@ export async function handleRecallLeave(_req: IncomingMessage, res: ServerRespon
   recallBotMeetingUrl = '';
 
   broadcastWs({ type: 'recall:status', status: 'idle', message: 'Bot stopped' });
-  console.log(`[recall] Bot stopped: id=${botId.slice(0, 8)}`);
+  log.log(`Bot stopped: id=${botId.slice(0, 8)}`);
 
   jsonResponse(res, 200, { status: 'idle', message: 'Bot stopped' });
 }
@@ -208,7 +211,7 @@ export async function handleRecallWebhook(req: IncomingMessage, res: ServerRespo
   const event = typeof body.event === 'string' ? body.event : '';
   const data = (body.data ?? {}) as Record<string, unknown>;
 
-  console.log(`[recall-webhook] event=${event} bot_id=${data.bot_id ?? '?'}`);
+  log.log(`event=${event} bot_id=${data.bot_id ?? '?'}`);
 
   // Map Recall.ai webhook events to our status
   const statusCode = ((data.status ?? {}) as Record<string, unknown>).code as string | undefined;

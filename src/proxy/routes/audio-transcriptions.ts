@@ -8,6 +8,9 @@
  */
 
 import { createHash } from 'crypto';
+import { createLogger } from '../../logger';
+
+const log = createLogger('audio-transcriptions');
 import type { STTProvider } from '../../providers/types';
 import type { ProxyRequest, ProxyResponse } from '../types';
 import { withProxyRetry } from './retry';
@@ -119,7 +122,7 @@ export async function handleAudioTranscriptions(
       body: { text: result.text },
     };
   } catch (err) {
-    console.error(`[audio-transcriptions] STT error for model ${body.model}:`, err);
+    log.error(`STT error for model ${body.model}:`, err);
     return {
       status: 500,
       body: { error: { message: 'Transcription failed', type: 'server_error' } },

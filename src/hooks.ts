@@ -120,10 +120,28 @@ type HookPayloadMap = {
 };
 
 /**
- * Safe fire-and-forget hook emitter.
- * - If the hook is not defined, this is a no-op.
- * - If the hook throws (sync or async), the error is caught and logged.
- * - Never blocks the caller.
+ * Emit a gateway event hook.
+ *
+ * Hooks allow external systems to react to gateway events like GPU deployment,
+ * provider failures, and budget alerts. All hooks are optional and fire-and-forget —
+ * errors thrown by hook callbacks are caught and logged so they never break the hot path.
+ *
+ * @param hooks - The gateway hooks configuration (may be undefined)
+ * @param event - The hook event name to emit (e.g., 'onScaleUp', 'onError')
+ * @param data - Event payload specific to the event type
+ *
+ * @example
+ * ```typescript
+ * // Emit a scale-up event
+ * emitHook(hooks, 'onScaleUp', {
+ *   userId: 'user-123',
+ *   tierIndex: 0,
+ *   provider: 'runpod',
+ *   trigger: 'session_threshold',
+ *   activeSessions: 5,
+ *   timestamp: Date.now(),
+ * });
+ * ```
  */
 export function emitHook<K extends HookName>(
   hooks: GatewayHooks | undefined,

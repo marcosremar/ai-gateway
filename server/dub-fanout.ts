@@ -5,6 +5,9 @@
 import { raceProviders } from './race-providers';
 import type { RaceCandidate } from './race-providers';
 import { broadcastWs, broadcastDubAudio, getActiveTargets } from './ws-state';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('dub-fanout');
 import {
   getCachedTranslation, setCachedTranslation,
   buildSystemPrompt, getCloudProviderName,
@@ -40,7 +43,7 @@ export async function runMultiLangFanout(
   const { targets, speaker, style = 'default' } = opts;
   if (targets.length === 0) return;
 
-  console.log(`[dub-fanout] Fan-out for ${targets.length} targets: [${targets.join(',')}]`);
+  log.log(`Fan-out for ${targets.length} targets: [${targets.join(',')}]`);
 
   // Resolve GPU/cloud routing once (shared across all targets)
   const firstCloudIdx = PROVIDER_CHAIN.findIndex(p => p === 'groq' || p === 'ollama');
@@ -151,9 +154,9 @@ export async function runMultiLangFanout(
         timing: { stt_ms: sttMs, llm_ms: llmMs, tts_ms: ttsMs, total_ms: totalMs },
       }, ttsAudioBuffer);
 
-      console.log(`[dub-fanout] ${target}: ${totalMs}ms (LLM=${llmMs}ms[${llmProvider}] TTS=${ttsMs}ms[${ttsRace.provider}])`);
+      log.log(`${target}: ${totalMs}ms (LLM=${llmMs}ms[${llmProvider}] TTS=${ttsMs}ms[${ttsRace.provider}])`);
     } catch (err) {
-      console.warn(`[dub-fanout] ${target} failed:`, err instanceof Error ? err.message : err);
+      log.warn(`${target} failed:`, err instanceof Error ? err.message : err);
     }
   }));
 }

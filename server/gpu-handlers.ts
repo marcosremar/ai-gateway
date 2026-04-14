@@ -304,7 +304,7 @@ async function _validateDeployRequest(
   if (Array.isArray(rawGpuTypes)) {
     gpuTypes = rawGpuTypes.filter((g): g is string => typeof g === 'string' && g.trim().length > 0 && g.length <= 100);
     if (rawGpuTypes.length !== gpuTypes.length) {
-      console.warn(`[req=${requestId}] gpuTypes contains invalid entries, filtering out`);
+      log.warn(`gpuTypes contains invalid entries, filtering out`);
     }
   } else if (typeof rawGpuTypes === 'string' && rawGpuTypes.trim()) {
     gpuTypes = rawGpuTypes.split(',').map((s: string) => s.trim()).filter(Boolean);
@@ -1088,7 +1088,7 @@ export async function autoBootFromProfile(): Promise<void> {
 export async function handleGpuTerminate(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
-  console.log(`[req=${requestId}] GPU terminate requested`);
+  log.log(`GPU terminate requested`);
 
   // Acquire lock to prevent concurrent lifecycle operations
   if (deployLock) {
@@ -1104,7 +1104,7 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
 
   // Idempotent: if already idle (nothing running), return 200 instead of error
   if (deployState.status === 'idle' && !deployState.podId) {
-    console.log(`[req=${requestId}] GPU already idle — idempotent 200`);
+    log.log(`GPU already idle — idempotent 200`);
     setDeployLock(false);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, message: 'No active deployment to terminate.', idempotent: true }));

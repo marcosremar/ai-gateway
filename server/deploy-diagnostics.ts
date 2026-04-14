@@ -11,6 +11,9 @@
 import { homedir } from 'os';
 import { join } from 'path';
 import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, statSync } from 'fs';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('deploy-diagnostics');
 
 const BABELCAST_DIR = join(homedir(), '.babelcast');
 const DEPLOYS_DIR = join(BABELCAST_DIR, 'deploys');
@@ -48,7 +51,7 @@ function ensureDir(): void {
     // Directory creation failures are non-fatal — we'll just lose this
     // bundle. The deploy itself should never be aborted by a logging
     // problem.
-    console.warn(`[deploy-diag] mkdir ${DEPLOYS_DIR} failed: ${e instanceof Error ? e.message : e}`);
+    log.warn(`mkdir ${DEPLOYS_DIR} failed: ${e instanceof Error ? e.message : e}`);
   }
 }
 
@@ -77,9 +80,9 @@ export async function persistDeployDiagnostics(
   const path = join(DEPLOYS_DIR, `${id}.json`);
   try {
     writeFileSync(path, JSON.stringify(record, null, 2), 'utf-8');
-    console.log(`[deploy-diag] Saved ${input.result} diagnostics → ${path}`);
+    log.log(`Saved ${input.result} diagnostics → ${path}`);
   } catch (e) {
-    console.warn(`[deploy-diag] writeFile ${path} failed: ${e instanceof Error ? e.message : e}`);
+    log.warn(`writeFile ${path} failed: ${e instanceof Error ? e.message : e}`);
   }
   return id;
 }

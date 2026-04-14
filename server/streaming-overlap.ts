@@ -3,6 +3,10 @@
 // available at a sentence/clause boundary. This lets TTS start producing audio
 // while the LLM is still generating the rest of the translation.
 
+import { createLogger } from '../src/logger';
+
+const log = createLogger('streaming-overlap');
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface OverlapStats {
@@ -106,7 +110,7 @@ export class StreamingOverlap {
             .then(audio => { completedChunks.set(idx, audio); emitReady(); })
             .catch(err => {
               failedChunks.add(idx); emitReady();
-              console.warn(`[overlap] TTS chunk ${idx} failed: ${err instanceof Error ? err.message : err}`);
+              log.warn(`TTS chunk ${idx} failed: ${err instanceof Error ? err.message : err}`);
             });
           ttsPromises.push(p);
         }
@@ -124,7 +128,7 @@ export class StreamingOverlap {
       const p = ttsFn(remaining)
         .then(audio => { completedChunks.set(idx, audio); emitReady(); })
         .catch(err => {
-          console.warn(`[overlap] TTS chunk ${idx} (final) failed: ${err instanceof Error ? err.message : err}`);
+          log.warn(`TTS chunk ${idx} (final) failed: ${err instanceof Error ? err.message : err}`);
         });
       ttsPromises.push(p);
     }
@@ -145,8 +149,8 @@ export class StreamingOverlap {
         this._totalLatencySavedMs += savedMs;
         const totalTokens = fullText.split(/\s+/).filter(Boolean).length;
         const firstChunkTokens = this.minTokens;
-        console.log(
-          `[overlap] First TTS chunk at LLM token ~${firstChunkTokens}/${totalTokens}` +
+        log.log(
+          `First TTS chunk at LLM token ~${firstChunkTokens}/${totalTokens}` +
           ` — saved ~${savedMs}ms (${chunkIndex} chunks, total LLM time ${llmDoneAt - t0}ms)`,
         );
       }

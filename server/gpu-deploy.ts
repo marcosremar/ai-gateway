@@ -2164,7 +2164,7 @@ export async function startDeployRace(
         },
         credentials,
       ),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${slot.tier.name} createInstance timed out`)), 60_000)),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${slot.tier.name} createInstance timed out`)), getDeployTimeoutMinForProvider(slot.tier.name) * 60_000)),
     ]);
     log.log(`[race] Slot ${slot.index}: created ${instance.instanceId.slice(0, 8)} (gpu=${instance.gpuType}, tier=${slot.tier.label})`);
     return { slot, instance };

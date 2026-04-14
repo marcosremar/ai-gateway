@@ -4,6 +4,9 @@
 
 import type { ServerWebSocket } from 'bun';
 import { botState } from './state';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('ws-state');
 
 export type BabelCastWS = ServerWebSocket<{ id: string }>;
 export const wsClients = new Set<BabelCastWS>();
@@ -38,7 +41,7 @@ export function broadcastProviderStatus(
   broadcastWs({ type: 'provider:status', gpu, tier, reason });
   // Richer event with routing + warmth info (new clients + web UI)
   broadcastGpuStatusEvent(gpu, tier, reason);
-  console.log(`[ws] provider:status → gpu=${gpu} tier=${tier} (${reason})`);
+  log.log(`provider:status → gpu=${gpu} tier=${tier} (${reason})`);
 }
 
 /**
@@ -81,7 +84,7 @@ export function broadcastGpuStatusEvent(
         shadowRuns: gpuReadinessState.shadowCompletedRuns,
       },
     });
-  }).catch(e => { console.warn('[ws] broadcastGpuStatusEvent failed:', e instanceof Error ? e.message : e); });
+  }).catch(e => { log.warn('broadcastGpuStatusEvent failed:', e instanceof Error ? e.message : e); });
 }
 
 export function startBotTranscriptPoll(): void {
@@ -105,7 +108,7 @@ export function startBotTranscriptPoll(): void {
       for (const item of newItems) {
         if (item.text?.trim()) {
           broadcastWs({ type: 'transcript', text: item.text.trim(), speaker: item.speaker ?? '' });
-          console.log(`[ws] Transcript broadcast: ${item.text.slice(0, 60)}`);
+          log.log(`Transcript broadcast: ${item.text.slice(0, 60)}`);
         }
       }
       botTranscriptCursor += newItems.length;
@@ -113,7 +116,7 @@ export function startBotTranscriptPoll(): void {
       // bot pod not reachable or endpoint missing — ignore silently
     }
   }, 1500);
-  console.log('[ws] Bot transcript polling started');
+  log.log('Bot transcript polling started');
 }
 
 export function stopBotTranscriptPoll(): void {
@@ -121,7 +124,7 @@ export function stopBotTranscriptPoll(): void {
     clearInterval(botTranscriptPollTimer);
     botTranscriptPollTimer = null;
     botTranscriptCursor = 0;
-    console.log('[ws] Bot transcript polling stopped');
+    log.log('[ws] Bot transcript polling stopped');
   }
 }
 
@@ -141,7 +144,7 @@ export function subscribeDub(clientId: string, ws: BabelCastWS, target: string, 
   if (binaryAudio) dubBinaryClients.add(clientId);
   if (!dubTargetClients.has(target)) dubTargetClients.set(target, new Set());
   dubTargetClients.get(target)!.add(ws);
-  console.log(`[ws] dub:subscribe client=${clientId} target=${target} binary=${!!binaryAudio} (${dubTargetClients.get(target)!.size} subscribers)`);
+  log.log(`dub:subscribe client=${clientId} target=${target} binary=${!!binaryAudio} (${dubTargetClients.get(target)!.size} subscribers)`);
 }
 
 export function unsubscribeDub(clientId: string): void {

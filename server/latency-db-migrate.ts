@@ -14,6 +14,9 @@ import { existsSync, renameSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { prisma } from './state';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('latency-db-migrate');
 
 const DB_PATH      = join(homedir(), '.babelcast', 'latency.db');
 const DONE_MARKER  = DB_PATH + '.migrated';
@@ -48,7 +51,7 @@ interface SqliteHistoryRow {
 export async function migrateLatencyDbIfNeeded(): Promise<void> {
   if (!existsSync(DB_PATH) || existsSync(DONE_MARKER)) return;
 
-  console.log('[latency-migrate] Found legacy SQLite latency.db — migrating to Neon...');
+  log.log('Found legacy SQLite latency.db — migrating to Neon...');
 
   let hostRows: SqliteHostRow[]        = [];
   let historyRows: SqliteHistoryRow[]  = [];
@@ -61,11 +64,11 @@ export async function migrateLatencyDbIfNeeded(): Promise<void> {
     historyRows = db.query('SELECT * FROM host_latency_history').all() as SqliteHistoryRow[];
     db.close();
   } catch (err) {
-    console.warn('[latency-migrate] Could not read SQLite DB (bun:sqlite unavailable or corrupt):', err instanceof Error ? err.message : err);
+    log.warn('Could not read SQLite DB (bun:sqlite unavailable or corrupt):', err instanceof Error ? err.message : err);
     return;
   }
 
-  console.log(`[latency-migrate] Importing ${hostRows.length} hosts, ${historyRows.length} history rows...`);
+  log.log(`Importing ${hostRows.length} hosts, ${historyRows.length} history rows...`);
 
   let hostsDone    = 0;
   let historyDone  = 0;
@@ -112,7 +115,7 @@ export async function migrateLatencyDbIfNeeded(): Promise<void> {
       hostsDone++;
     } catch (err) {
       hostsSkipped++;
-      console.warn(`[latency-migrate] Skipped host ${row.host_id}: ${err instanceof Error ? err.message : err}`);
+      log.warn(`Skipped host ${row.host_id}: ${err instanceof Error ? err.message : err}`);
     }
   }
 
@@ -136,13 +139,13 @@ export async function migrateLatencyDbIfNeeded(): Promise<void> {
     }
   }
 
-  console.log(`[latency-migrate] Done: ${hostsDone} hosts (${hostsSkipped} skipped), ${historyDone} history rows imported.`);
+  log.log(`Done: ${hostsDone} hosts (${hostsSkipped} skipped), ${historyDone} history rows imported.`);
 
   // Mark as migrated
   try {
     renameSync(DB_PATH, DONE_MARKER);
-    console.log('[latency-migrate] SQLite file renamed to latency.db.migrated');
+    log.log('SQLite file renamed to latency.db.migrated');
   } catch (err) {
-    console.warn('[latency-migrate] Could not rename SQLite file:', err instanceof Error ? err.message : err);
+    log.warn('Could not rename SQLite file:', err instanceof Error ? err.message : err);
   }
 }

@@ -5,6 +5,9 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import {
   gpuReadinessState, gpuReadyForProduction, gpuShadowMode, getPerStageP95,
 } from './state';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('gpu-handlers-settings');
 import {
   getLatencySchedulerStatus, setLatencyIntervalMin, setLatencyMaxMs, getLatencyMaxMs,
   triggerLatencyRun, isLatencyRunning,
@@ -218,7 +221,7 @@ export async function handlePostResetReadiness(_req: IncomingMessage, res: Serve
       ep,
       () => markGpuShadowMode(ep),
       (stage, bestMs, targetMs) => markGpuWarmupFailed(stage, bestMs, targetMs),
-    ).catch(err => { console.warn(`[readiness] GPU readiness check failed after reset: ${err instanceof Error ? err.message : err}`); });
+    ).catch(err => { log.warn(`GPU readiness check failed after reset: ${err instanceof Error ? err.message : err}`); });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, message: 'Readiness check restarted' }));
   } else {

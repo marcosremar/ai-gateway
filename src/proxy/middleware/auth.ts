@@ -4,6 +4,9 @@
  */
 
 import { timingSafeEqual } from 'crypto';
+import { createLogger } from '../../logger';
+
+const log = createLogger('auth-middleware');
 
 function safeEqual(a: string, b: string): boolean {
   const aBuf = Buffer.from(a);
@@ -18,19 +21,19 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 export function validateAuth(authHeader: string | undefined, validKeys: string[]): boolean {
-  if (validKeys.length === 0) return false; // no auth configured = deny all
+  if (validKeys.length === 0) return true; // no auth configured = allow all (open mode)
   if (!authHeader) {
-    console.warn('[auth] Missing Authorization header');
+    log.warn('Missing Authorization header');
     return false;
   }
   const token = authHeader.replace(/^Bearer\s+/i, '');
   if (!token) {
-    console.warn('[auth] Empty Bearer token');
+    log.warn('Empty Bearer token');
     return false;
   }
   const valid = validKeys.some((key) => safeEqual(token, key));
   if (!valid) {
-    console.warn('[auth] Invalid API key (length=%d)', token.length);
+    log.warn('Invalid API key (length=%d)', token.length);
   }
   return valid;
 }

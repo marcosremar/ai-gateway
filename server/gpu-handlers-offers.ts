@@ -7,6 +7,9 @@ import { PORT, LOW_BALANCE_THRESHOLD_USD } from './config';
 import { fetchMyLocation } from './ip-location';
 import { rankOffers, scheduleBackgroundProbes, probeAndSaveOffers } from './gpu-latency';
 import { upsertHostMeta, getHostRttMap, getBestLatencyByGpuModel } from './latency-db';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('gpu-handlers-offers');
 
 /** Build provider query list from API keys, optionally filtered to a single provider. */
 export function buildProviderQueries(opts: {
@@ -78,7 +81,7 @@ async function refreshProviderBalance(
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${name} checkBalance timed out`)), 10_000)),
     ]);
     if (result === null) {
-      console.warn(`[balance-cache] ${name} returned null — keeping previous cache`);
+      log.warn(`${name} returned null — keeping previous cache`);
       return;
     }
     _offerBalanceCache.set(name, {
@@ -86,9 +89,9 @@ async function refreshProviderBalance(
       canDeploy: result.balance >= LOW_BALANCE_THRESHOLD_USD,
       cachedAt: Date.now(),
     });
-    console.log(`[balance-cache] ${name}: $${result.balance.toFixed(2)} canDeploy=${result.balance >= LOW_BALANCE_THRESHOLD_USD}`);
+    log.log(`${name}: $${result.balance.toFixed(2)} canDeploy=${result.balance >= LOW_BALANCE_THRESHOLD_USD}`);
   } catch (e) {
-    console.warn(`[balance-cache] ${name} check failed: ${e instanceof Error ? e.message : e}`);
+    log.warn(`${name} check failed: ${e instanceof Error ? e.message : e}`);
   }
 }
 
@@ -192,14 +195,14 @@ async function fetchOffersWithBalances(
 export async function handleGpuOffers(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
-  console.log(`[req=${requestId}] GPU offers query`);
+  log.log(`GPU offers query`);
   const url = new URL(req.url || '/', `http://localhost:${PORT}`);
 
   // Reject API keys in query params — credentials must come from env vars or POST body
   const sensitiveParams = ['runpodApiKey', 'vastApiKey', 'tensordockApiKey', 'tensordockAuthId', 'modalTokenId', 'modalTokenSecret'];
   const foundInQuery = sensitiveParams.filter(p => url.searchParams.has(p));
   if (foundInQuery.length > 0) {
-    console.warn(`[security] Rejected request with API keys in query params: ${foundInQuery.join(', ')}`);
+    log.warn(`Rejected request with API keys in query params: ${foundInQuery.join(', ')}`);
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `API keys must not be passed via query params (found: ${foundInQuery.join(', ')}). Use environment variables instead.` }));
     return;
@@ -464,7 +467,7 @@ export async function handleGetGpuTypes(req: IncomingMessage, res: ServerRespons
           byType.set(name, { name, vram: offer.vram ?? 0, count: 1, minPrice: offer.pricePerHr ?? 0 });
         }
       }
-    } catch (err) { console.warn(`[gpu-types] Provider offer fetch failed: ${err instanceof Error ? err.message : err}`); }
+    } catch (err) { log.warn(`Provider offer fetch failed: ${err instanceof Error ? err.message : err}`); }
   }));
 
   const gpuTypes = [...byType.values()]

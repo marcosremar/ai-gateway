@@ -8,6 +8,9 @@ import { join } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { defaultCooldownTracker } from '../src/providers/fallback';
 import { defaultCreditBlockTracker } from '../src/providers/credit-block';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('cooldown-persistence');
 
 const BABELCAST_DIR = join(homedir(), '.babelcast');
 const COOLDOWNS_FILE = join(BABELCAST_DIR, 'cooldowns.json');
@@ -30,7 +33,7 @@ export function loadCooldownState(): void {
 
     // Reject if too old (>10 minutes — all cooldowns would have expired)
     if (Date.now() - data.savedAt > 10 * 60 * 1000) {
-      console.log('[cooldowns] Persisted state too old (>10min), ignoring');
+      log.log('Persisted state too old (>10min), ignoring');
       return;
     }
 
@@ -45,10 +48,10 @@ export function loadCooldownState(): void {
     }
 
     if (loaded > 0) {
-      console.log(`[cooldowns] Loaded ${loaded} persisted entries from ${COOLDOWNS_FILE}`);
+      log.log(`Loaded ${loaded} persisted entries from ${COOLDOWNS_FILE}`);
     }
   } catch (err) {
-    console.warn('[cooldowns] Failed to load persisted state:', err instanceof Error ? err.message : err);
+    log.warn('Failed to load persisted state:', err instanceof Error ? err.message : err);
   }
 }
 
@@ -69,8 +72,8 @@ export function saveCooldownState(): void {
 
     mkdirSync(BABELCAST_DIR, { recursive: true });
     writeFileSync(COOLDOWNS_FILE, JSON.stringify(data, null, 2));
-    console.log(`[cooldowns] Saved ${totalEntries} entries to ${COOLDOWNS_FILE}`);
+    log.log(`Saved ${totalEntries} entries to ${COOLDOWNS_FILE}`);
   } catch (err) {
-    console.warn('[cooldowns] Failed to save state:', err instanceof Error ? err.message : err);
+    log.warn('Failed to save state:', err instanceof Error ? err.message : err);
   }
 }

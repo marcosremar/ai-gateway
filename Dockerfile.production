@@ -20,11 +20,13 @@ RUN bun install --frozen-lockfile
 
 # Copy source code
 COPY src/ src/
+COPY server/ server/
 COPY sdk/ sdk/
 COPY serve.ts tsconfig.json tsup.config.ts ./
 
-# Build the library bundle
+# Build the library bundle AND compile serve.ts
 RUN bun run build
+RUN bun build --compile --minify --target=bun --outfile serve-compiled serve.ts
 
 # ── Stage 3: Production ─────────────────────────────────────────────────────
 FROM oven/bun:1-alpine AS production
@@ -37,10 +39,9 @@ RUN apk add --no-cache wget ca-certificates && \
 # Copy production dependencies from stage 1
 COPY --from=deps /app/node_modules ./node_modules
 
-# Copy built output from stage 2
+# Copy compiled binary and dist from builder
+COPY --from=builder /app/serve-compiled ./serve-compiled
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/serve.ts ./
-COPY --from=builder /app/tsconfig.json ./
 
 # Non-root user for security
 RUN addgroup -g 1001 -S appgroup && \
@@ -55,4 +56,4 @@ EXPOSE ${PORT:-4000}
 
 ENV NODE_ENV=production
 
-CMD ["bun", "run", "serve.ts"]
+CMD ["./serve-compiled"]

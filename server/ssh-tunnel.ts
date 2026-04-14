@@ -12,6 +12,9 @@
  */
 
 import { spawn, type ChildProcess } from 'child_process';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('ssh-tunnel');
 
 let nextLocalPort = 19000; // start range for local tunnel ports
 
@@ -56,7 +59,7 @@ export class SshTunnel {
     for (let attempt = 0; attempt < retries; attempt++) {
       if (attempt > 0) {
         const backoff = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
-        console.log(`[ssh-tunnel] Retry ${attempt + 1}/${retries} for ${this.sshHost}:${this.sshPort} after ${backoff}ms backoff`);
+        log.log(`Retry ${attempt + 1}/${retries} for ${this.sshHost}:${this.sshPort} after ${backoff}ms backoff`);
         await new Promise(r => setTimeout(r, backoff));
       }
       const ok = await this._spawnOnce(timeoutMs);
@@ -74,7 +77,7 @@ export class SshTunnel {
 
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
-        console.warn(`[ssh-tunnel] Timeout connecting to ${this.sshHost}:${this.sshPort}`);
+        log.warn(`Timeout connecting to ${this.sshHost}:${this.sshPort}`);
         this._killProc();
         resolve(false);
       }, timeoutMs);
@@ -105,7 +108,7 @@ export class SshTunnel {
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
         this.proc.on('error', (err) => {
-          console.warn(`[ssh-tunnel] Process error: ${err.message}`);
+          log.warn(`Process error: ${err.message}`);
           this._open = false;
           finish(false);
         });
@@ -115,7 +118,7 @@ export class SshTunnel {
           const wasOpen = this._open;
           this._open = false;
           if (code !== 0 && code !== null) {
-            console.warn(`[ssh-tunnel] Exited with code ${code}`);
+            log.warn(`Exited with code ${code}`);
           }
           // P2a: Auto-reconnect if it died after being open and user didn't close it
           if (wasOpen && !this._closed) {
@@ -134,13 +137,13 @@ export class SshTunnel {
             if (testRes) {
               this._open = true;
               this._reconnectAttempts = 0; // reset on successful open
-              console.log(`[ssh-tunnel] Connected: localhost:${this._localPort} → ${this.sshHost}:${this.sshPort}:${this.remotePort}`);
+              log.log(`Connected: localhost:${this._localPort} → ${this.sshHost}:${this.sshPort}:${this.remotePort}`);
               finish(true);
             } else {
               // Tunnel process started but health not responding yet — still mark as open
               this._open = true;
               this._reconnectAttempts = 0;
-              console.log(`[ssh-tunnel] Tunnel open (health not yet responding): localhost:${this._localPort} → ${this.sshHost}:${this.sshPort}`);
+              log.log(`Tunnel open (health not yet responding): localhost:${this._localPort} → ${this.sshHost}:${this.sshPort}`);
               finish(true);
             }
           } catch {
@@ -148,7 +151,7 @@ export class SshTunnel {
           }
         }, 3000);
       } catch (err) {
-        console.warn(`[ssh-tunnel] Failed to spawn: ${err}`);
+        log.warn(`Failed to spawn: ${err}`);
         finish(false);
       }
     });
@@ -158,19 +161,19 @@ export class SshTunnel {
   private _scheduleReconnect(): void {
     if (this._closed) return;
     if (this._reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      console.warn(`[ssh-tunnel] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached for ${this.sshHost}:${this.sshPort} — giving up`);
+      log.warn(`Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached for ${this.sshHost}:${this.sshPort} — giving up`);
       return;
     }
     const idx = Math.min(this._reconnectAttempts, RECONNECT_BACKOFF_MS.length - 1);
     const backoff = RECONNECT_BACKOFF_MS[idx];
     this._reconnectAttempts++;
-    console.log(`[ssh-tunnel] Auto-reconnect ${this._reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} for ${this.sshHost}:${this.sshPort} in ${backoff}ms`);
+    log.log(`Auto-reconnect ${this._reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} for ${this.sshHost}:${this.sshPort} in ${backoff}ms`);
     this._reconnectTimer = setTimeout(async () => {
       this._reconnectTimer = null;
       if (this._closed) return;
       const ok = await this._spawnOnce(15_000); // was 10s — give more time for SSH handshake
       if (ok) {
-        console.log(`[ssh-tunnel] Reconnected after ${this._reconnectAttempts} attempt(s): localhost:${this._localPort} → ${this.sshHost}:${this.sshPort}`);
+        log.log(`Reconnected after ${this._reconnectAttempts} attempt(s): localhost:${this._localPort} → ${this.sshHost}:${this.sshPort}`);
         this._reconnectAttempts = 0; // reset counter on successful reconnect
       }
     }, backoff);

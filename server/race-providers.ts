@@ -6,6 +6,10 @@
 // instead of waiting 5s for a GPU timeout before trying cloud (200ms),
 // we fire both simultaneously and take the fastest response.
 
+import { createLogger } from '../src/logger';
+
+const log = createLogger('race-providers');
+
 export interface RaceCandidate<T> {
   /** Human label for logging */
   name: string;
@@ -108,7 +112,7 @@ export async function raceProviders<T>(
       if (i !== winnerIdx) controllers[i].abort();
     }
 
-    console.log(`${logPrefix} winner: ${winner.provider} (${winner.latencyMs}ms)`);
+    log.log(`${logPrefix} winner: ${winner.provider} (${winner.latencyMs}ms)`);
     return winner;
   } catch (err) {
     // All candidates failed (AggregateError from Promise.any)
@@ -118,7 +122,7 @@ export async function raceProviders<T>(
         const e = err.errors[i];
         const name = candidates[i]?.name ?? `candidate-${i}`;
         const msg = e instanceof Error ? e.message : String(e);
-        console.warn(`${logPrefix} ${name} failed: ${msg}`);
+        log.warn(`${logPrefix} ${name} failed: ${msg}`);
       }
       // Throw the last non-abort error, or the first error
       const realErrors = err.errors.filter(

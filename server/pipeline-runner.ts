@@ -3,6 +3,9 @@
 // Runs STT → LLM → TTS with per-stage callbacks for real-time streaming.
 
 import type { AIProfile } from '../src/client';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('pipeline-runner');
 import {
   botState, deployState, isGpuAvailable, touchRequest, touchModelRequest,
   isTtsWarm, recordTtsTtfb, markTtsWarm, ttsWarmth, saveColdStartProfile,
@@ -140,7 +143,7 @@ function ewmaRaceOpts(
   const secondEntry = ranking.find(r => r.provider !== best);
 
   if (bestEntry && secondEntry) {
-    console.log(`[ewma] Routing ${stage} to ${best} (ewma=${bestEntry.ewmaMs}ms) over ${secondEntry.provider} (ewma=${secondEntry.ewmaMs}ms)`);
+    log.log(`Routing ${stage} to ${best} (ewma=${bestEntry.ewmaMs}ms) over ${secondEntry.provider} (ewma=${secondEntry.ewmaMs}ms)`);
   }
 
   return { headstartMs: 50 };
@@ -226,13 +229,13 @@ export async function runStreamingPipeline(
   // Pre-warm connections
   const effectiveGpuEp = gpuEp || cloneGpuEndpoint;
   if (effectiveGpuEp) {
-    probeGpuHealth(effectiveGpuEp).catch(e => console.warn('[pipeline] GPU health probe failed:', e instanceof Error ? e.message : e));
+    probeGpuHealth(effectiveGpuEp).catch(e => log.warn('GPU health probe failed:', e instanceof Error ? e.message : e));
     if (groqAvailable && process.env.GROQ_API_KEY) {
-      probeCloudProvider('groq', process.env.GROQ_API_KEY, 2000).catch(e => console.warn('[pipeline] Groq warmup failed:', e instanceof Error ? e.message : e));
+      probeCloudProvider('groq', process.env.GROQ_API_KEY, 2000).catch(e => log.warn('Groq warmup failed:', e instanceof Error ? e.message : e));
     }
   }
 
-  console.log(`[pipeline-stream] ── Incoming: ${audioDur}s audio ${source}->${target} ──`);
+  log.log(`── Incoming: ${audioDur}s audio ${source}->${target} ──`);
 
   try {
     // ── Stage 1: STT ─────────────────────────────────────────────────────────
@@ -303,7 +306,7 @@ export async function runStreamingPipeline(
     if (otherDubTargets.length > 0) {
       runMultiLangFanout(sttText, source, sttMs, sttProvider, {
         speaker, style, targets: otherDubTargets,
-      }).catch(err => console.warn('[dub-fanout]', err));
+      }).catch(err => log.warn('dub-fanout', err));
     }
 
     // ── Stage 2: LLM Translation ─────────────────────────────────────────────
@@ -360,7 +363,7 @@ export async function runStreamingPipeline(
           // ── Streaming Overlap Path: LLM → TTS interleaved ─────────────
           ttsHandled = true;
           streamingOverlap.setMinTokens(labs.overlapMinTokens);
-          console.log('[pipeline-stream] Using streaming overlap (LLM+TTS interleaved)');
+          log.log('Using streaming overlap (LLM+TTS interleaved)');
 
           cb.onStageStart('tts'); // TTS starts alongside LLM in overlap mode
 
@@ -614,7 +617,7 @@ export async function runStreamingPipeline(
     logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: 'stream', latencyMs: totalMs, success: true, inputSize: audio.length, outputPreview: (translatedText || '').slice(0, 80) });
     stampProfileRequest((await loadProviderConfig()).activeAppId);
 
-    console.log(`[pipeline-stream] ── Done: ${totalMs}ms (STT=${sttMs}[${sttProvider}] LLM=${llmMs}[${llmProvider}] TTS=${ttsMs}[${ttsProvider || '-'}]) ──`);
+    log.log(`── Done: ${totalMs}ms (STT=${sttMs}[${sttProvider}] LLM=${llmMs}[${llmProvider}] TTS=${ttsMs}[${ttsProvider || '-'}]) ──`);
 
     cb.onComplete({
       transcription: sttText,
@@ -635,7 +638,7 @@ export async function runStreamingPipeline(
     });
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
-    console.error(`[pipeline-stream] Error: ${error.message}`);
+    log.error(`Error: ${error.message}`);
     cb.onError('pipeline', error);
   }
 }

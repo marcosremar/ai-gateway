@@ -111,6 +111,26 @@ export interface CreateAutoscalerOptions extends AutoscalerDeps {
  * Create a fully wired Autoscaler instance.
  * The host application provides all external dependencies (Prisma, Redis, etc.)
  * via the deps parameter.
+ *
+ * The autoscaler manages GPU instances across multiple providers (RunPod, Vast.ai,
+ * TensorDock, Modal, Snapgpu) with automatic scaling, health checking, and cost monitoring.
+ *
+ * @param opts - Dependencies and configuration including settings store, state store,
+ *               session resolver, and optional hooks and lifecycle logger
+ * @returns Configured autoscaler instance with methods for scaling decisions,
+ *          GPU lifecycle management, session tracking, load balancing, and benchmarking
+ *
+ * @example
+ * ```typescript
+ * const autoscaler = createAutoscaler({
+ *   settingsStore: mySettingsStore,
+ *   stateStore: myStateStore,
+ *   sessionResolver: mySessionResolver,
+ *   hooks: {
+ *     onScaleUp: (event) => console.log('Scaling up:', event),
+ *   },
+ * });
+ * ```
  */
 export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
   const { settingsStore, stateStore, sessionResolver, hooks } = opts;
