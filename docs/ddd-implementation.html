@@ -620,9 +620,14 @@ graph LR
   <h2>Métricas: Antes vs Depois</h2>
   <div class="metric-grid">
     <div class="metric">
-      <div class="value">182 → 43 KB</div>
+      <div class="value">182 → 3.9 KB</div>
       <div class="label">gpu-deploy.ts</div>
-      <div class="delta">−76%</div>
+      <div class="delta">−98%, decomposto em 11 módulos</div>
+    </div>
+    <div class="metric">
+      <div class="value">44 → 1.3 KB</div>
+      <div class="label">gpu-health-monitor.ts</div>
+      <div class="delta">−97%, re-export hub</div>
     </div>
     <div class="metric">
       <div class="value">916 → 226</div>
@@ -630,19 +635,24 @@ graph LR
       <div class="delta">−75%, god object eliminado</div>
     </div>
     <div class="metric">
-      <div class="value">108 → 93 KB</div>
+      <div class="value">97 → 70 KB</div>
       <div class="label">ai-handlers.ts</div>
-      <div class="delta">pipeline logic em src/</div>
+      <div class="delta">−28%, 10 módulos em src/</div>
     </div>
     <div class="metric">
-      <div class="value">72 → 62 KB</div>
+      <div class="value">72 → 17 KB</div>
       <div class="label">ws-server.ts</div>
-      <div class="delta">85 rotas extraídas</div>
+      <div class="delta">−76%, 85 rotas + 8 ws modules</div>
     </div>
     <div class="metric">
       <div class="value">6</div>
       <div class="label">Bounded Contexts</div>
       <div class="delta">estruturados em src/</div>
+    </div>
+    <div class="metric">
+      <div class="value">7</div>
+      <div class="label">Commits</div>
+      <div class="delta">migração incremental</div>
     </div>
     <div class="metric">
       <div class="value">0</div>
