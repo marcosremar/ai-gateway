@@ -1388,8 +1388,8 @@ export async function startWsServer(): Promise<number> {
               let statusCode2 = 200;
               const resHeaders2: Record<string, string> = {};
               const chunks2: (string | Buffer | Uint8Array)[] = [];
-              const fakeRes2: any = {
-                writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode2 = code; fakeRes2.statusCode = code; if (hdrs) Object.assign(resHeaders2, hdrs); },
+const fakeRes: any = {
+                writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode2 = code; fakeRes.statusCode = code; if (hdrs) Object.assign(resHeaders2, hdrs); },
                 setHeader: (k: string, v: string) => { resHeaders2[k] = v; },
                 end: (data?: string | Buffer | Uint8Array) => {
                   if (data) chunks2.push(data);
@@ -1403,7 +1403,7 @@ export async function startWsServer(): Promise<number> {
                 getHeader: (k: string) => resHeaders2[k],
                 statusCode: 200,
               };
-              dynHandler(fakeReq2, fakeRes2, ...params);
+              dynHandler(fakeReq2, fakeRes, ...params);
             });
           }
         }

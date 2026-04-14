@@ -128,6 +128,7 @@ export class StreamingOverlap {
       const p = ttsFn(remaining)
         .then(audio => { completedChunks.set(idx, audio); emitReady(); })
         .catch(err => {
+failedChunks.add(idx); emitReady();
           log.warn(`TTS chunk ${idx} (final) failed: ${err instanceof Error ? err.message : err}`);
         });
       ttsPromises.push(p);

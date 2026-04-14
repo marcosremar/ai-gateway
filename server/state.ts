@@ -328,8 +328,8 @@ export function setDeployState(patch: Partial<DeploymentState>) {
       ts: Date.now(), elapsed,
       detail: deployState.gpuType || deployState.message?.slice(0, 60),
     });
-    // Keep last 30 transitions (splice in-place instead of allocating new array)
-    if (deployState.transitions.length > 30) deployState.transitions.splice(0, deployState.transitions.length - 30);
+    // Keep last 50 transitions (splice in-place instead of allocating new array)
+    if (deployState.transitions.length > 50) deployState.transitions.splice(0, deployState.transitions.length - 50);
     // Broadcast transition for real-time UI
     try { const { broadcastWs: bws } = require('./ws-state'); bws?.({ type: 'gpu:transition', status: newStatus, step: newStep, provider: deployState.provider, elapsed, gpuType: deployState.gpuType, detail: deployState.message?.slice(0, 80) }); } catch (e) { log.warn('broadcastWs failed:', e instanceof Error ? e.message : e); }
   }
