@@ -15,6 +15,9 @@ export default defineConfig({
       // ── SDK paths ──────────────────────────────────────────────────────
       { find: /^(\.\.\/)+sdk\/node\/audio$/, replacement: src('sdk/node/audio.ts') },
       { find: /^(\.\.?\/)+sdk\/node$/, replacement: path.resolve(root, 'sdk/node/index.ts') },
+      // Specific file-level aliases for local imports
+      { find: './gpu-deploy', replacement: path.resolve(root, 'server/gpu-deploy.ts') },
+      { find: './deployment-state-machine', replacement: path.resolve(root, 'server/deployment-state-machine.ts') },
 
       // ── src/ path reorganizations (DDD migration) ──────────────────────
       { find: /^(\.\.\/)+(src\/)?observability\/console-hooks$/, replacement: src('platform/observability/console-hooks.ts') },

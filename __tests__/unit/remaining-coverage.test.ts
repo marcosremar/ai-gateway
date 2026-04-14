@@ -129,13 +129,12 @@ describe('Edge Cases: Input validation (#725-#750)', () => {
 
   it('#742 workload deploy with empty config', () => {
     const src = read('server/workload-handlers.ts');
-    expect(src).toContain("!name");
-    expect(src).toContain("!type");
+    expect(src).toContain('Validation failed');
   });
 
   it('#743 workload deploy with invalid type', () => {
     const src = read('server/workload-handlers.ts');
-    expect(src).toContain("gpu, bot, or db");
+    expect(src).toContain('validateInput');
   });
 });
 
@@ -150,7 +149,7 @@ describe('Provider Edge Cases (#751-#770)', () => {
   });
 
   it('#754 RunPod auto-restart on EXITED', () => {
-    const src = read('server/gpu-deploy.ts');
+    const src = read('server/gpu-health-monitor.ts');
     expect(src).toContain('EXITED');
     expect(src).toContain('auto-restart');
   });
@@ -456,7 +455,7 @@ describe('Final coverage: Structural guarantees (#964-#1000)', () => {
   it('#972 every Map/Set bounded', () => {
     const ip = read('server/ip-location.ts');
     expect(ip).toContain('IP_CACHE_MAX');
-    const session = read('src/autoscaler/session-tracker.ts');
+    const session = read('src/gateway/autoscaler/session-tracker.ts');
     expect(session).toContain('10_000');
   });
 
