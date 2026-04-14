@@ -10,6 +10,7 @@ import type { EWMATracker } from '../routing/ewma-tracker';
 import type { GpuSTTResult, GpuLLMResult, GpuTTSResult } from './gpu-fetch';
 import type { SpeculativeCache } from './speculative-cache';
 import type { StreamingOverlap } from './streaming-overlap';
+import type { PipelinePluginRegistry, PluginContext } from './plugin-registry';
 import { GPU_STT_TIMEOUT_MS, GPU_LLM_TIMEOUT_MS, GPU_TTS_TIMEOUT_MS, GPU_PIPELINE_TIMEOUT_MS } from './timeouts';
 
 const log = createLogger('pipeline-orchestrator');
@@ -195,6 +196,8 @@ export interface PipelineDeps {
   langNames: Record<string, string>;
   /** Adaptive stage timeout calculator. */
   adaptiveStageTimeout: (stage: 'stt' | 'llm' | 'tts', baseMs: number) => number;
+  /** Pipeline plugin registry for pre/post hooks. */
+  plugins?: PipelinePluginRegistry;
 }
 
 // ── EWMA Race Options ────────────────────────────────────────────────────────
@@ -281,6 +284,15 @@ export async function runPipelineOrchestrator(
   const style = opts.style || 'default';
   const sttPrompt = opts.sttPrompt || '';
 
+  const pluginCtx: PluginContext = {
+    source,
+    target,
+    style,
+    speaker,
+    sessionId: opts.sessionId,
+    requestId: opts.sessionId,
+  };
+
   // Voice cloning: ref_id (cached) takes priority over inline reference_audio
   let referenceAudio = opts.referenceAudio;
   let refText = opts.refText;
@@ -307,14 +319,26 @@ export async function runPipelineOrchestrator(
   log.log(`── Incoming: ${audioDur}s audio ${source}->${target} ──`);
 
   try {
+    // ── Plugin: pre-pipeline ────────────────────────────────────────────────
+    if (deps.plugins) await deps.plugins.runPrePipelineStart(pluginCtx);
+
     // ── Stage 1: STT ─────────────────────────────────────────────────────────
     cb.onStageStart('stt');
     const sttT0 = Date.now();
 
-    const sttCandidates = ex.buildSttCandidates(routing, audio, source, sttPrompt, deps.adaptiveStageTimeout);
+    // Plugin pre-STT hook
+    let processedAudio = audio;
+    if (deps.plugins) processedAudio = await deps.plugins.runPreSTT(audio, pluginCtx);
+
+    const sttCandidates = ex.buildSttCandidates(routing, processedAudio, source, sttPrompt, deps.adaptiveStageTimeout);
     const sttEwmaOpts = ewmaRaceOpts(sttCandidates as RaceCandidate<unknown>[], 'STT', labs, ewma);
     const sttRaceResult = await raceProviders(sttCandidates, { logPrefix: '[stream-stt]', headstartMs: sttEwmaOpts.headstartMs });
-    const sttText = sttRaceResult.result.text;
+    let sttResult = sttRaceResult.result;
+
+    // Plugin post-STT hook
+    if (deps.plugins) sttResult = await deps.plugins.runPostSTT(sttResult, pluginCtx);
+
+    const sttText = sttResult.text;
     const sttProvider = sttRaceResult.provider;
     const sttMs = Date.now() - sttT0;
 
@@ -456,16 +480,36 @@ export async function runPipelineOrchestrator(
 
         } else {
           // ── Sequential LLM ───────────────────────────────────────────────
-          const llmCandidates = ex.buildLlmCandidates(routing, sttText, source, target, systemPrompt, deps.adaptiveStageTimeout);
-          const llmEwmaOpts = ewmaRaceOpts(llmCandidates as RaceCandidate<unknown>[], 'LLM', labs, ewma);
-          const llmRaceResult = await raceProviders(llmCandidates, { logPrefix: '[stream-llm]', headstartMs: llmEwmaOpts.headstartMs });
-          translatedText = llmRaceResult.result.translated_text;
-          llmProvider = llmRaceResult.provider;
-          llmMs = Date.now() - llmT0;
+          // Plugin pre-LLM hook
+          let llmInput = sttText;
+          if (deps.plugins) {
+            const preResult = await deps.plugins.runPreLLM(sttText, pluginCtx);
+            if (preResult.skip) {
+              translatedText = sttText;
+              llmProvider = 'plugin-skipped';
+              llmMs = 0;
+            } else {
+              llmInput = preResult.text;
+            }
+          }
 
-          ewma.record(llmProvider, llmMs);
+          if (llmProvider !== 'plugin-skipped') {
+            const llmCandidates = ex.buildLlmCandidates(routing, llmInput, source, target, systemPrompt, deps.adaptiveStageTimeout);
+            const llmEwmaOpts = ewmaRaceOpts(llmCandidates as RaceCandidate<unknown>[], 'LLM', labs, ewma);
+            const llmRaceResult = await raceProviders(llmCandidates, { logPrefix: '[stream-llm]', headstartMs: llmEwmaOpts.headstartMs });
+            let llmResult = llmRaceResult.result;
 
-          if (translatedText) ex.setCachedTranslation(sttText, source, target, translatedText, style);
+            // Plugin post-LLM hook
+            if (deps.plugins) llmResult = await deps.plugins.runPostLLM(llmResult, pluginCtx);
+
+            translatedText = llmResult.translated_text;
+            llmProvider = llmRaceResult.provider;
+            llmMs = Date.now() - llmT0;
+
+            ewma.record(llmProvider, llmMs);
+
+            if (translatedText) ex.setCachedTranslation(sttText, source, target, translatedText, style);
+          }
         }
       }
     }
@@ -486,16 +530,40 @@ export async function runPipelineOrchestrator(
       const seqTtsT0 = Date.now();
 
       if (translatedText.trim()) {
-        const ttsCandidates = ex.buildTtsCandidates(routing, translatedText, targetName, speaker || 'Ryan', referenceAudio, refText, deps.adaptiveStageTimeout);
+        // Plugin pre-TTS hook
+        let ttsInput = translatedText;
+        let ttsSkipped = false;
+        if (deps.plugins) {
+          const preResult = await deps.plugins.runPreTTS(translatedText, pluginCtx);
+          if (preResult.skip) {
+            ttsSkipped = true;
+          } else {
+            ttsInput = preResult.text;
+          }
+        }
+
+        const ttsCandidates = ttsSkipped
+          ? []
+          : ex.buildTtsCandidates(routing, ttsInput, targetName, speaker || 'Ryan', referenceAudio, refText, deps.adaptiveStageTimeout);
 
         try {
-          const ttsEwmaOpts = ewmaRaceOpts(ttsCandidates as RaceCandidate<unknown>[], 'TTS', labs, ewma);
-          const ttsRaceResult = await raceProviders(ttsCandidates, { logPrefix: '[stream-tts]', headstartMs: ttsEwmaOpts.headstartMs });
+          let audioBuffer = Buffer.alloc(0);
+          if (!ttsSkipped) {
+            const ttsEwmaOpts = ewmaRaceOpts(ttsCandidates as RaceCandidate<unknown>[], 'TTS', labs, ewma);
+            const ttsRaceResult = await raceProviders(ttsCandidates, { logPrefix: '[stream-tts]', headstartMs: ttsEwmaOpts.headstartMs });
+            let ttsResult = ttsRaceResult.result;
+
+            // Plugin post-TTS hook
+            if (deps.plugins) ttsResult = await deps.plugins.runPostTTS(ttsResult, pluginCtx);
+
+            audioBuffer = ttsResult.audio;
+            contentType = ttsResult.contentType;
+            ttsProvider = ttsRaceResult.provider;
+          } else {
+            ttsProvider = 'plugin-skipped';
+          }
           ttsMs = Date.now() - seqTtsT0;
           ttfacMs = ttsMs;
-          const audioBuffer = ttsRaceResult.result.audio;
-          contentType = ttsRaceResult.result.contentType;
-          ttsProvider = ttsRaceResult.provider;
           audioB64 = audioBuffer.toString('base64');
 
           ewma.record(ttsProvider, ttsMs);
@@ -547,6 +615,11 @@ export async function runPipelineOrchestrator(
     fx.stampProfile();
 
     log.log(`── Done: ${totalMs}ms (STT=${sttMs}[${sttProvider}] LLM=${llmMs}[${llmProvider}] TTS=${ttsMs}[${ttsProvider || '-'}]) ──`);
+
+    // Plugin post-pipeline hook
+    if (deps.plugins) {
+      await deps.plugins.runPostPipelineEnd(pluginCtx, { transcription: sttText, translation: translatedText });
+    }
 
     cb.onComplete({
       transcription: sttText,
