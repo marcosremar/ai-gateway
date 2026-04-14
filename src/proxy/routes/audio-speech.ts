@@ -5,6 +5,9 @@
 import type { TTSProvider } from '../../providers/types';
 import type { ProxyRequest, ProxyResponse } from '../types';
 import { withProxyRetry } from './retry';
+import { createLogger } from '../../logger';
+
+const log = createLogger('audio-speech');
 
 export async function handleAudioSpeech(
   req: ProxyRequest,
@@ -60,7 +63,7 @@ export async function handleAudioSpeech(
       body: result.audio,
     };
   } catch (err) {
-    console.error(`[audio-speech] TTS error for model ${body.model}:`, err);
+    log.error(`TTS error for model ${body.model}:`, err);
     return {
       status: 500,
       body: { error: { message: 'Speech synthesis failed', type: 'server_error' } },

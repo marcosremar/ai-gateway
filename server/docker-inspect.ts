@@ -2,6 +2,10 @@
 // Reads image labels from Docker Hub registry API (no image pull needed).
 // Looks for `com.babelcast.*` labels to auto-discover service capabilities.
 
+import { createLogger } from '../src/logger';
+
+const log = createLogger('docker-inspect');
+
 export interface BabelcastDockerManifest {
   image: string;
   /** Services declared by the image: 'stt', 'llm', 'tts' */
@@ -145,7 +149,7 @@ export async function handleDockerInspect(
     res.end(JSON.stringify(manifest));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[docker-inspect] Failed for "${image}": ${msg}`);
+    log.warn(`Failed for "${image}": ${msg}`);
     res.writeHead(502, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: msg }));
   }

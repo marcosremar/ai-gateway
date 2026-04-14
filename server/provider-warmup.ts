@@ -15,6 +15,9 @@ import {
 import { groqAvailable, openaiAvailable, markGpuHealthy, markGpuUnhealthy } from './providers';
 import { probeAllCloudProviders, probeGpuHealth } from '../src';
 import type { CloudProbeResult } from '../src';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('provider-warmup');
 
 const WARMUP_INTERVAL_MS = 60_000; // 60s between probes
 let warmupTimer: ReturnType<typeof setInterval> | null = null;
@@ -91,12 +94,12 @@ async function runWarmupCycle(): Promise<void> {
   }
 
   if (failures.length > 0) {
-    console.warn(`[warmup] Provider issues: ${failures.join(', ')}`);
+    log.warn(`Provider issues: ${failures.join(', ')}`);
   }
 
   // Auto-warmup GPU TTS if pod is ready but TTS is cold
   if (deployState.status === 'ready' && deployState.endpoint && isGpuAvailable() && !isTtsWarm()) {
-    warmupGpuTts(deployState.endpoint, deployState.gpuType, deployState.dockerImage, deployState.provider).catch(e => console.warn('[warmup] GPU TTS warmup failed:', e instanceof Error ? e.message : e));
+    warmupGpuTts(deployState.endpoint, deployState.gpuType, deployState.dockerImage, deployState.provider).catch(e => log.warn('GPU TTS warmup failed:', e instanceof Error ? e.message : e));
   }
 }
 
@@ -111,7 +114,7 @@ async function warmupGpuTts(endpoint: string, gpuType: string, dockerImage: stri
   if (ttsWarmupInProgress || isTtsWarm()) return;
   ttsWarmupInProgress = true;
 
-  console.log('[warmup] Starting GPU TTS warmup (CUDA graph compilation)...');
+  log.log('Starting GPU TTS warmup (CUDA graph compilation)...');
   const t0 = Date.now();
 
   try {
@@ -132,7 +135,7 @@ async function warmupGpuTts(endpoint: string, gpuType: string, dockerImage: stri
 
     if (res.ok) {
       markTtsWarm(coldMs);
-      console.log(`[warmup] GPU TTS warm in ${coldMs}ms (CUDA graphs compiled)`);
+      log.log(`GPU TTS warm in ${coldMs}ms (CUDA graphs compiled)`);
 
       // Save cold start profile for this config (gpu + image + provider)
       saveColdStartProfile({
@@ -146,10 +149,10 @@ async function warmupGpuTts(endpoint: string, gpuType: string, dockerImage: stri
         sampleCount: 0,
       });
     } else {
-      console.warn(`[warmup] GPU TTS warmup failed: HTTP ${res.status}`);
+      log.warn(`GPU TTS warmup failed: HTTP ${res.status}`);
     }
   } catch (err) {
-    console.warn(`[warmup] GPU TTS warmup failed: ${err instanceof Error ? err.message : err}`);
+    log.warn(`GPU TTS warmup failed: ${err instanceof Error ? err.message : err}`);
   } finally {
     ttsWarmupInProgress = false;
   }
@@ -162,7 +165,7 @@ async function warmupGpuTts(endpoint: string, gpuType: string, dockerImage: stri
  */
 export async function warmupAllGpuModels(endpoint: string): Promise<void> {
   if (!endpoint) return;
-  console.log('[warmup] Predictive warmup — warming all GPU models...');
+  log.log('Predictive warmup — warming all GPU models...');
 
   const results = await Promise.allSettled([
     // STT warmup: 1-second silence WAV (16kHz, 16-bit mono)
@@ -186,7 +189,7 @@ export async function warmupAllGpuModels(endpoint: string): Promise<void> {
         method: 'POST', body: form, signal: AbortSignal.timeout(30_000),
       });
       if (!res.ok) throw new Error(`STT warmup HTTP ${res.status}`);
-      console.log(`[warmup] STT warm in ${Date.now() - t0}ms`);
+      log.log(`STT warm in ${Date.now() - t0}ms`);
       return 'warmed';
     })(),
 
@@ -203,7 +206,7 @@ export async function warmupAllGpuModels(endpoint: string): Promise<void> {
         signal: AbortSignal.timeout(30_000),
       });
       if (!res.ok) throw new Error(`LLM warmup HTTP ${res.status}`);
-      console.log(`[warmup] LLM warm in ${Date.now() - t0}ms`);
+      log.log(`LLM warm in ${Date.now() - t0}ms`);
       return 'warmed';
     })(),
 
@@ -219,7 +222,7 @@ export async function warmupAllGpuModels(endpoint: string): Promise<void> {
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r.status === 'rejected') {
-      console.warn(`[warmup] ${labels[i]} warmup failed: ${r.reason instanceof Error ? r.reason.message : r.reason}`);
+      log.warn(`${labels[i]} warmup failed: ${r.reason instanceof Error ? r.reason.message : r.reason}`);
     }
   }
 }
@@ -253,7 +256,7 @@ export function triggerPredictiveWarmup(completedStage: 'stt' | 'llm' | 'tts'): 
   if (isStageWarm(nextStage)) return;
 
   const endpoint = deployState.endpoint;
-  console.log(`[warmup] Predictive: ${completedStage} done, pre-warming ${nextStage}...`);
+  log.log(`Predictive: ${completedStage} done, pre-warming ${nextStage}...`);
 
   // Fire-and-forget: don't block the pipeline
   if (nextStage === 'llm') {
@@ -280,16 +283,16 @@ export function startProviderWarmup(): void {
 
   // Run first cycle immediately (non-blocking)
   runWarmupCycle().catch(err =>
-    console.warn('[warmup] Initial cycle failed:', err instanceof Error ? err.message : err),
+    log.warn('Initial cycle failed:', err instanceof Error ? err.message : err),
   );
 
   warmupTimer = setInterval(() => {
     runWarmupCycle().catch(err =>
-      console.warn('[warmup] Cycle failed:', err instanceof Error ? err.message : err),
+      log.warn('Cycle failed:', err instanceof Error ? err.message : err),
     );
   }, WARMUP_INTERVAL_MS);
 
-  console.log(`[warmup] Provider health checks started (every ${WARMUP_INTERVAL_MS / 1000}s)`);
+  log.log(`Provider health checks started (every ${WARMUP_INTERVAL_MS / 1000}s)`);
 }
 
 /**

@@ -8,6 +8,9 @@
 
 import type { GatewayStorage } from './storage';
 import type { Gateway } from './gateway-api';
+import { createLogger } from './logger';
+
+const log = createLogger('create-gateway');
 import type { StateStore } from './deps';
 import type { GatewayHooks } from './hooks';
 import type { AutoScalerConfig } from './types';
@@ -40,10 +43,38 @@ export interface GatewayConfig {
 }
 
 /**
- * Create a fully wired Gateway instance.
+ * Create a new AI Gateway instance.
  *
- * The host app calls this once at startup and reuses the returned object
- * for all route handlers.
+ * This is the main entry point for programmatic gateway usage.
+ * It configures the autoscaler, providers, and event handling, wiring
+ * together all internal components (credential resolver, lifecycle logger,
+ * cost monitor, health checker) into a single cohesive facade.
+ *
+ * The host app should call this once at startup and reuse the returned
+ * object for all route handlers and background tasks.
+ *
+ * @param config - Gateway configuration including storage adapter,
+ *                 optional state store, hooks, and config loader override
+ * @returns Fully configured gateway instance with route handlers,
+ *          autoscaler methods, utilities, and background ticker management
+ *
+ * @example
+ * ```typescript
+ * import { createGateway } from '@ai-gateway/create-gateway';
+ *
+ * const gateway = createGateway({
+ *   storage: myPrismaStorage,
+ *   stateStore: redisStateStore,
+ *   hooks: {
+ *     onScaleUp: (event) => console.log('Scaling up:', event),
+ *     onError: (event) => reportError(event),
+ *   },
+ * });
+ *
+ * // Start background watchdog
+ * gateway.startWatchdog();
+ * gateway.startCostMonitor();
+ * ```
  */
 export function createGateway(config: GatewayConfig): Gateway {
   const { storage, hooks } = config;
@@ -190,7 +221,7 @@ export function createGateway(config: GatewayConfig): Gateway {
     },
     startCostMonitor: (intervalMs) => {
       if (!storage.loadAllAccounts) {
-        console.warn('[gateway] Cannot start cost monitor: storage.loadAllAccounts not implemented');
+        log.warn('Cannot start cost monitor: storage.loadAllAccounts not implemented');
         return () => {};
       }
       const loadAllAccounts = () => storage.loadAllAccounts!();
@@ -209,7 +240,7 @@ export function createGateway(config: GatewayConfig): Gateway {
           const type = orphan.isZombieStopped ? 'ZOMBIE STOPPED' : orphan.isStaleRunning ? 'STALE' : 'ORPHAN';
           const action = orphan.actionTaken === 'deleted' ? 'AUTO-DELETING' :
             orphan.actionTaken === 'stopped' ? 'AUTO-STOPPING' : 'REPORT-ONLY';
-          console.warn(
+          log.warn(
             `[cost-monitor] ${type}: ${orphan.provider} ${orphan.instance.instanceId}` +
             (orphan.instance.instanceName ? ` (${orphan.instance.instanceName})` : '') +
             ` — user: ${orphan.userId} — ${action}`,

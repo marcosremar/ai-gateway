@@ -13,6 +13,9 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { getOrCreateRequestId, setRequestIdHeader, readJsonBody, handleBodyError } from './http-utils';
 import { workloadRegistry } from '../src/workloads/registry';
 import type { WorkloadConfig, WorkloadType } from '../src/workloads/types';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('workload-handlers');
 
 // ── List all workloads ──────────────────────────────────────────────────────
 
@@ -57,12 +60,12 @@ export async function handleWorkloadDeploy(req: IncomingMessage, res: ServerResp
 
   try {
     const workload = await workloadRegistry.deploy(name, config);
-    console.log(`[req=${requestId}] Workload deployed: ${workload.type}/${workload.name} (${workload.id})`);
+    log.log(`Workload deployed: ${workload.type}/${workload.name} (${workload.id})`);
     res.writeHead(201, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(workload));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[req=${requestId}] Workload deploy failed: ${msg}`);
+    log.error(`Workload deploy failed: ${msg}`);
     res.writeHead(409, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: msg }));
   }
@@ -99,7 +102,7 @@ export async function handleWorkloadStop(req: IncomingMessage, res: ServerRespon
 
   try {
     const workload = await workloadRegistry.stop(id);
-    console.log(`[req=${requestId}] Workload stopped: ${workload.type}/${workload.name}`);
+    log.log(`Workload stopped: ${workload.type}/${workload.name}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(workload));
   } catch (err) {
@@ -117,7 +120,7 @@ export async function handleWorkloadStart(req: IncomingMessage, res: ServerRespo
 
   try {
     const workload = await workloadRegistry.start(id);
-    console.log(`[req=${requestId}] Workload started: ${workload.type}/${workload.name}`);
+    log.log(`Workload started: ${workload.type}/${workload.name}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(workload));
   } catch (err) {
@@ -135,7 +138,7 @@ export async function handleWorkloadTerminate(req: IncomingMessage, res: ServerR
 
   try {
     await workloadRegistry.terminate(id);
-    console.log(`[req=${requestId}] Workload terminated: ${id}`);
+    log.log(`Workload terminated: ${id}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
   } catch (err) {

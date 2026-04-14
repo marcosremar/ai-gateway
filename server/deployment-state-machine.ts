@@ -6,6 +6,10 @@
  * Emits events via simple callbacks so handlers can react to transitions.
  */
 
+import { createLogger } from '../src/logger';
+
+const log = createLogger('deployment-state-machine');
+
 export type DeployPhase =
   | { phase: 'idle' }
   | { phase: 'stopped'; podId: string; provider: string; gpuType: string; costPerHr: number; stoppedAt: number; dockerImage: string }
@@ -40,7 +44,7 @@ export class DeploymentStateMachine {
 
   startDeploying(podId?: string): void {
     if (this._state.phase !== 'idle' && this._state.phase !== 'error' && this._state.phase !== 'stopped') {
-      console.warn(`[deploy-sm] Invalid transition ${this._state.phase} → deploying`);
+      log.warn(`Invalid transition ${this._state.phase} → deploying`);
     }
     this._transition({ phase: 'deploying', startedAt: Date.now(), podId });
   }
@@ -65,7 +69,7 @@ export class DeploymentStateMachine {
     const prev = this._state;
     this._state = next;
     for (const h of this._handlers) {
-      try { h(next, prev); } catch (e) { console.error('[deploy-sm] handler error', e); }
+      try { h(next, prev); } catch (e) { log.error('handler error', e); }
     }
   }
 

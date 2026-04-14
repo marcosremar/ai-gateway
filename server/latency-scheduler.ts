@@ -11,6 +11,9 @@
 
 import { getHostsToProbe, saveProbeResult, upsertHostMeta } from './latency-db';
 import { probeHostFull } from './gpu-latency';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('latency-scheduler');
 import {
   loadDeploySettings, saveDeploySettings, getDeploySettingsSnapshot, setLastRunAt,
   getLatencyIntervalMin, setLatencyIntervalMin,
@@ -80,8 +83,8 @@ export async function startLatencyScheduler(): Promise<void> {
   await loadDeploySettings();
   const intervalMin = getLatencyIntervalMin();
   const gpuList = getGpuPriorityList();
-  console.log(`[latency] Scheduler started (check every 30min, discovery every ${intervalMin}min)`);
-  console.log(`[latency] GPU priority: ${gpuList.map(g => g.replace('NVIDIA ', '').replace('GeForce ', '')).join(' → ')}`);
+  log.log(`Scheduler started (check every 30min, discovery every ${intervalMin}min)`);
+  log.log(`GPU priority: ${gpuList.map(g => g.replace('NVIDIA ', '').replace('GeForce ', '')).join(' → ')}`);
   setTimeout(() => void runCycle(), 10_000); // short delay on startup
   _timer = setInterval(() => void runCycle(), CHECK_INTERVAL_MS);
 }
@@ -117,7 +120,7 @@ async function runCycle(forceDiscovery = false): Promise<void> {
     const hosts = await getHostsToProbe(Date.now(), stableIntervalMs);
     if (hosts.length === 0) return;
 
-    console.log(`[latency] Probing ${hosts.length} stale host(s)`);
+    log.log(`Probing ${hosts.length} stale host(s)`);
     const t = Date.now();
     await Promise.all(hosts.map(async host => {
       try {
@@ -126,7 +129,7 @@ async function runCycle(forceDiscovery = false): Promise<void> {
         await saveProbeResult(host.host_id, result);
       } catch { /* ignore individual probe failures */ }
     }));
-    console.log(`[latency] Probed ${hosts.length} host(s) in ${Date.now() - t}ms`);
+    log.log(`Probed ${hosts.length} host(s) in ${Date.now() - t}ms`);
   } finally {
     _running = false;
   }
@@ -158,8 +161,8 @@ async function discoverHosts(): Promise<void> {
       }).catch(() => {});
       count++;
     }
-    console.log(`[latency] Discovery: ${count} hosts with IPs from ${offers.length} offers`);
+    log.log(`Discovery: ${count} hosts with IPs from ${offers.length} offers`);
   } catch (err) {
-    console.warn('[latency] Discovery failed:', err instanceof Error ? err.message : String(err));
+    log.warn('Discovery failed:', err instanceof Error ? err.message : String(err));
   }
 }

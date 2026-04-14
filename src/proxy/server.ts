@@ -330,10 +330,11 @@ function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse
       });
       res.end(content);
       return true;
-  // Log error for debugging — silent catch hides socket issues
-  } catch (err) {
-    log.warn({ err, requestId, filePath }, 'Static file serve error');
-    continue;
+    // Log error for debugging — silent catch hides socket issues
+    } catch (err) {
+      log.warn({ err, requestId, filePath }, 'Static file serve error');
+      continue;
+    }
   }
 
   // SPA fallback: serve index.html for non-file paths (client-side routing)

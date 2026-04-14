@@ -18,11 +18,14 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { getOrCreateRequestId, setRequestIdHeader, readJsonBody, handleBodyError } from './http-utils';
 import { logGpuEvent } from './metrics';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('config-handlers');
 
 /** Audit log for config changes — logs to console + persists to GPU event log */
 function auditLog(action: string, requestId: string, details: Record<string, unknown>): void {
   const userId = details.userId || 'unknown';
-  console.log(`[audit] ${action} by=${userId} req=${requestId} ${JSON.stringify(details).slice(0, 200)}`);
+  log.log(`${action} by=${userId} req=${requestId} ${JSON.stringify(details).slice(0, 200)}`);
   try { logGpuEvent(`config:${action}`, 'gateway', true, { metadata: { requestId, ...details } }); } catch { /* best-effort */ }
 }
 import { loadProviderConfig, patchProviderConfig, saveProviderConfig, applyAppLatencyTargets } from './config-persistence';
@@ -221,7 +224,7 @@ export async function handleSetApiKeys(req: IncomingMessage, res: ServerResponse
     // chmodSync enforces 0o600 on pre-existing files too.
     try { chmodSync(envPath, 0o600); } catch { /* best-effort: cleanup or optional side-effect */ }
   } catch (err) {
-    console.error('[config] Failed to persist API keys to .env:', err);
+    log.error('Failed to persist API keys to .env:', err);
     saveFailed = true;
   }
 
@@ -316,7 +319,7 @@ export async function handleCreateProfile(req: IncomingMessage, res: ServerRespo
   }
 
   await saveProviderConfig(config);
-  console.log(`[config] App ${idx >= 0 ? 'updated' : 'created'}: ${id} (${name})`);
+  log.log(`App ${idx >= 0 ? 'updated' : 'created'}: ${id} (${name})`);
 
   res.writeHead(idx >= 0 ? 200 : 201, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(config));
@@ -354,7 +357,7 @@ export async function handleDeleteProfile(req: IncomingMessage, res: ServerRespo
   }
 
   await saveProviderConfig(config);
-  console.log(`[config] App deleted: ${id}`);
+  log.log(`App deleted: ${id}`);
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(config));
@@ -377,7 +380,7 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
   if (!id) {
     config.activeAppId = null;
     await saveProviderConfig(config);
-    console.log('[config] App deactivated (no active app)');
+    log.log('App deactivated (no active app)');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(config));
     return;
@@ -402,7 +405,7 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
     if (app.gpuDeploy.region !== undefined) setDeployRegion(app.gpuDeploy.region);
     if (app.gpuDeploy.timeoutMin) setDeployTimeoutMin(app.gpuDeploy.timeoutMin);
     if (typeof app.gpuDeploy.raceCount === 'number') setDeployRaceCount(app.gpuDeploy.raceCount);
-    console.log(`[config] Applied gpuDeploy from app: image=${app.gpuDeploy.dockerImage}, region=${app.gpuDeploy.region}, timeout=${app.gpuDeploy.timeoutMin}min, race=${app.gpuDeploy.raceCount ?? 1}`);
+    log.log(`Applied gpuDeploy from app: image=${app.gpuDeploy.dockerImage}, region=${app.gpuDeploy.region}, timeout=${app.gpuDeploy.timeoutMin}min, race=${app.gpuDeploy.raceCount ?? 1}`);
   }
 
   await saveProviderConfig(config);
@@ -436,7 +439,7 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
     },
   });
 
-  console.log(`[config] App activated: ${id} (${app.name})`);
+  log.log(`App activated: ${id} (${app.name})`);
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(config));
@@ -471,7 +474,7 @@ export async function handlePatchLabsFlags(req: IncomingMessage, res: ServerResp
 
   try {
     const updated = await setLabsFlags(body as Parameters<typeof setLabsFlags>[0]);
-    console.log(`[config] Labs flags updated:`, JSON.stringify(updated));
+    log.log(`Labs flags updated:`, JSON.stringify(updated));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(updated));
   } catch (err) {

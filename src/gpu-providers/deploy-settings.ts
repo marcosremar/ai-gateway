@@ -264,6 +264,9 @@ export function setGpuSortBy(sortBy: GpuSortBy): void {
 
 export function getDeployTimeoutMin(): number { return _s.deployTimeoutMin; }
 
+/** Per-provider timeout — defaults to the global deploy timeout setting. */
+export function getDeployTimeoutMinForProvider(_provider: string): number { return _s.deployTimeoutMin; }
+
 export function setDeployTimeoutMin(min: number): void {
   _s.deployTimeoutMin = Math.max(3, Math.min(60, min));
   saveDeploySettings();

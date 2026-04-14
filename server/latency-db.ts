@@ -7,6 +7,9 @@
  */
 
 import { prisma } from './state';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('latency-db');
 
 const HISTORY_SIZE = 24;
 
@@ -285,7 +288,7 @@ export async function sortGpuTypesByLatency(gpuTypes: string[], thresholdMs: num
 
   if (allBad.length > 0) {
     const names = allBad.map(g => g.replace(/nvidia\s*/gi, '').replace(/geforce\s*/gi, '').trim());
-    console.log(`[latency] GPU types deprioritised (all hosts > ${thresholdMs}ms): ${names.join(', ')}`);
+    log.log(`GPU types deprioritised (all hosts > ${thresholdMs}ms): ${names.join(', ')}`);
   }
 
   return [...good, ...unknown, ...allBad];

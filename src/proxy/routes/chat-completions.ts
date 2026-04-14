@@ -8,6 +8,9 @@
 import type { LLMProvider, ChatMessage, ChatRequest } from '../../providers/types';
 import type { ResponseCache } from '../../caching/response-cache';
 import type { GatewayHooks } from '../../hooks';
+import { createLogger } from '../../logger';
+
+const log = createLogger('chat-completions');
 import { emitHook } from '../../hooks';
 import type { ProxyRequest, ProxyResponse, ChatFallbackEntry } from '../types';
 import { withProviderFallback, type FallbackEntry, type FallbackOptions, CooldownTracker } from '../../providers/fallback';
@@ -215,7 +218,7 @@ export async function handleChatCompletions(
     });
 
     const status = extractStatus(err);
-    console.error(`[chat-completions] All providers failed for model ${model}:`, err);
+    log.error(`All providers failed for model ${model}:`, err);
     // Propagate upstream Retry-After if the fallback chain captured one from a 429.
     const retryAfterSec = (err as { retryAfterSec?: number })?.retryAfterSec;
     const headers: Record<string, string> = {};

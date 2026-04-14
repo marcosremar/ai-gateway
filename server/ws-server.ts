@@ -1344,15 +1344,19 @@ export async function startWsServer(): Promise<number> {
           return new Promise<Response>((resolve) => {
             let statusCode = 200;
             const resHeaders: Record<string, string> = {};
-            const chunks: string[] = [];
+            const chunks: (string | Buffer | Uint8Array)[] = [];
             const fakeRes: any = {
               writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode = code; fakeRes.statusCode = code; if (hdrs) Object.assign(resHeaders, hdrs); },
               setHeader: (k: string, v: string) => { resHeaders[k] = v; },
-              end: (data?: string) => { if (data) chunks.push(data); resolve(new Response(chunks.join(''), {
-                status: statusCode,
-                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders },
-              })); },
-              write: (data: string) => { chunks.push(data); },
+              end: (data?: string | Buffer | Uint8Array) => {
+                if (data) chunks.push(data);
+                const body = Buffer.concat(chunks.map(c => Buffer.isBuffer(c) ? c : c instanceof Uint8Array ? Buffer.from(c) : Buffer.from(c as string)));
+                resolve(new Response(body, {
+                  status: statusCode,
+                  headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders },
+                }));
+              },
+              write: (data: string | Buffer | Uint8Array) => { chunks.push(data); },
               getHeader: (k: string) => resHeaders[k],
               statusCode: 200,
             };
@@ -1383,15 +1387,19 @@ export async function startWsServer(): Promise<number> {
             return new Promise<Response>((resolve) => {
               let statusCode2 = 200;
               const resHeaders2: Record<string, string> = {};
-              const chunks2: string[] = [];
+              const chunks2: (string | Buffer | Uint8Array)[] = [];
               const fakeRes2: any = {
                 writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode2 = code; fakeRes2.statusCode = code; if (hdrs) Object.assign(resHeaders2, hdrs); },
                 setHeader: (k: string, v: string) => { resHeaders2[k] = v; },
-                end: (data?: string) => { if (data) chunks2.push(data); resolve(new Response(chunks2.join(''), {
-                  status: statusCode2,
-                  headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders2 },
-                })); },
-                write: (data: string) => { chunks2.push(data); },
+                end: (data?: string | Buffer | Uint8Array) => {
+                  if (data) chunks2.push(data);
+                  const body2 = Buffer.concat(chunks2.map(c => Buffer.isBuffer(c) ? c : c instanceof Uint8Array ? Buffer.from(c) : Buffer.from(c as string)));
+                  resolve(new Response(body2, {
+                    status: statusCode2,
+                    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders2 },
+                  }));
+                },
+                write: (data: string | Buffer | Uint8Array) => { chunks2.push(data); },
                 getHeader: (k: string) => resHeaders2[k],
                 statusCode: 200,
               };
@@ -1424,15 +1432,19 @@ export async function startWsServer(): Promise<number> {
         return new Promise<Response>((resolve) => {
           let statusCode = 200;
           const resHeaders: Record<string, string> = {};
-          const chunks: string[] = [];
+          const chunks: (string | Buffer | Uint8Array)[] = [];
           const fakeRes: any = {
             writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode = code; fakeRes.statusCode = code; if (hdrs) Object.assign(resHeaders, hdrs); },
             setHeader: (k: string, v: string) => { resHeaders[k] = v; },
-            end: (data?: string) => { if (data) chunks.push(data); resolve(new Response(chunks.join(''), {
-              status: statusCode,
-              headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders },
-            })); },
-            write: (data: string) => { chunks.push(data); },
+            end: (data?: string | Buffer | Uint8Array) => {
+              if (data) chunks.push(data);
+              const body = Buffer.concat(chunks.map(c => Buffer.isBuffer(c) ? c : c instanceof Uint8Array ? Buffer.from(c) : Buffer.from(c as string)));
+              resolve(new Response(body, {
+                status: statusCode,
+                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders },
+              }));
+            },
+            write: (data: string | Buffer | Uint8Array) => { chunks.push(data); },
             getHeader: (k: string) => resHeaders[k],
             statusCode: 200,
           };

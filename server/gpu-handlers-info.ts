@@ -4,6 +4,9 @@
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { GpuProviderClient, ProviderCredentials } from '../src/gpu-providers/types';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('gpu-handlers-info');
 import {
   deployState, deployApiKey, deployVastApiKey, deployTensordockApiKey, deployTensordockAuthId,
   deployModalApiKey, gpuHealthy, lastRequestTime, latencyRing, startedAt, pendingDbWrites,
@@ -94,7 +97,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
           entry.spendPerDay = entry.spendPerHr * 24;
           entry.low = bal.balance < threshold;
         }
-      }).catch(err => { console.warn(`[balance] RunPod balance check failed: ${err instanceof Error ? err.message : err}`); }),
+      }).catch(err => { log.warn(`RunPod balance check failed: ${err instanceof Error ? err.message : err}`); }),
     );
   }
 
@@ -116,7 +119,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
           entry.spendPerDay = entry.spendPerHr * 24;
           entry.low = bal.balance < threshold;
         }
-      }).catch(err => { console.warn(`[balance] TensorDock balance check failed: ${err instanceof Error ? err.message : err}`); }),
+      }).catch(err => { log.warn(`TensorDock balance check failed: ${err instanceof Error ? err.message : err}`); }),
     );
   }
 
@@ -137,7 +140,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
           entry.spendPerDay = entry.spendPerHr * 24;
           entry.low = bal.balance < threshold;
         }
-      }).catch(err => { console.warn(`[balance] Vast.ai balance check failed: ${err instanceof Error ? err.message : err}`); }),
+      }).catch(err => { log.warn(`Vast.ai balance check failed: ${err instanceof Error ? err.message : err}`); }),
     );
   }
 
@@ -162,7 +165,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
           entry.balance = Math.round(pct); // show as % remaining
           entry.low = pct < 10;
         }
-      }).catch(err => { console.warn(`[balance] ElevenLabs balance check failed: ${err instanceof Error ? err.message : err}`); }),
+      }).catch(err => { log.warn(`ElevenLabs balance check failed: ${err instanceof Error ? err.message : err}`); }),
     );
   }
 
@@ -194,7 +197,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
           const totalBal = (balData.balances || []).reduce((s, b) => s + (b.amount || 0), 0);
           entry.balance = totalBal;
           entry.low = totalBal < threshold;
-        } catch (err) { console.warn(`[balance] Deepgram balance check failed: ${err instanceof Error ? err.message : err}`); }
+        } catch (err) { log.warn(`Deepgram balance check failed: ${err instanceof Error ? err.message : err}`); }
       })(),
     );
   }
@@ -255,7 +258,7 @@ async function getCachedProviderBalances(): Promise<ProviderBalance[]> {
 export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(_req);
   setRequestIdHeader(res, requestId);
-  console.log(`[req=${requestId}] GPU status query`);
+  log.log(`GPU status query`);
   const cfg = await loadProviderConfig();
   const elapsed = deployState.startedAt > 0 ? Math.round((Date.now() - deployState.startedAt) / 1000) : 0;
   const activeTier = isGpuAvailable() ? 'gpu' : 'cloud';

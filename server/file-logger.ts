@@ -10,6 +10,10 @@
  * Files rotate at 50MB (keeps 3 rotated copies).
  */
 
+import { createLogger } from '../src/logger';
+
+const log = createLogger('file-logger');
+
 import * as fs from 'fs';
 import * as path from 'path';
 import type { GpuLifecycleLogger, GpuLifecycleLogEntry } from '../src/autoscaler/lifecycle-logger';
@@ -131,9 +135,9 @@ export function installConsoleCapture(): void {
   console.log = (...args: unknown[]) => capturedLog('INFO', _origLog, ...args);
   console.warn = (...args: unknown[]) => capturedLog('WARN', _origWarn, ...args);
   console.error = (...args: unknown[]) => capturedLog('ERROR', _origError, ...args);
-  console.log(`[file-logger] Console capture installed — writing to ${SERVER_FILE}`);
-  console.log(`[file-logger] Events: ${EVENTS_FILE}`);
-  console.log(`[file-logger] GPU events: ${GPU_FILE}`);
+  log.log(`Console capture installed — writing to ${SERVER_FILE}`);
+  log.log(`Events: ${EVENTS_FILE}`);
+  log.log(`GPU events: ${GPU_FILE}`);
 }
 
 // ── Utility: read recent log entries ────────────────────────────────────────

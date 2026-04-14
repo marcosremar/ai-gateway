@@ -5,6 +5,9 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import {
   prisma, deployState, latencyRing, metricsCounters, providerMetrics,
 } from './state';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('diagnostics-handlers');
 import {
   getAllReputations, loadReputationsByGpuType,
   aggregateRequestLogsToReputation, computeReputationScore,
@@ -238,7 +241,7 @@ export async function handleDiagnosticsCleanup(req: IncomingMessage, res: Server
         deleted.failOnlyHosts = fhResult.count;
       }
 
-      console.log(`[cleanup] Deleted: ${deleted.requestLog} request logs, ${deleted.gpuEvent} GPU events, ${deleted.staleHosts} stale hosts, ${deleted.failOnlyHosts} fail-only hosts`);
+      log.log(`Deleted: ${deleted.requestLog} request logs, ${deleted.gpuEvent} GPU events, ${deleted.staleHosts} stale hosts, ${deleted.failOnlyHosts} fail-only hosts`);
     }
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -458,10 +461,10 @@ async function runDailyCleanup(): Promise<void> {
     });
 
     if (rl.count > 0 || ge.count > 0 || sh.count > 0) {
-      console.log(`[cleanup] Daily: ${rl.count} request logs, ${ge.count} GPU events, ${sh.count} stale hosts removed`);
+      log.log(`Daily: ${rl.count} request logs, ${ge.count} GPU events, ${sh.count} stale hosts removed`);
     }
   } catch (err) {
-    console.warn('[cleanup] Daily cleanup failed:', err);
+    log.warn('Daily cleanup failed:', err);
   }
 }
 
@@ -475,7 +478,7 @@ export function startDailyCleanup(): void {
       cleanupTimer.unref();
     }
   }, 3600_000).unref?.();
-  console.log('[cleanup] Daily cleanup scheduled (first run in 1h, then every 24h)');
+  log.log('Daily cleanup scheduled (first run in 1h, then every 24h)');
 }
 
 export function stopDailyCleanup(): void {

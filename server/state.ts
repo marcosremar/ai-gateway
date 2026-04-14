@@ -8,6 +8,9 @@ export { deploymentSM };
 import type { Server } from 'http';
 import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import { homedir } from 'os';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('state');
 import { join } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, renameSync } from 'fs';
 
@@ -56,7 +59,7 @@ export const DB_FAILURE_WARN_THRESHOLD = 10;
 
 const _parsedBudget = process.env.DAILY_BUDGET_USD ? parseFloat(process.env.DAILY_BUDGET_USD) : 0;
 if (process.env.DAILY_BUDGET_USD && isNaN(_parsedBudget)) {
-  console.warn(`[gateway] Warning: DAILY_BUDGET_USD="${process.env.DAILY_BUDGET_USD}" is not a valid number, defaulting to 0 (no limit)`);
+  log.warn(`Warning: DAILY_BUDGET_USD="${process.env.DAILY_BUDGET_USD}" is not a valid number, defaulting to 0 (no limit)`);
 }
 export const DAILY_BUDGET_USD = isNaN(_parsedBudget) ? 0 : _parsedBudget; // 0 = no limit
 export let dailyGpuSpendUsd = 0;
@@ -251,7 +254,7 @@ function persistDeployState(): void {
     writeFileSync(tmpFile, JSON.stringify(data, null, 2));
     renameSync(tmpFile, ACTIVE_DEPLOY_FILE);
   } catch (e) {
-    console.warn('[gpu] Failed to persist deploy state:', e instanceof Error ? e.message : e);
+    log.warn('Failed to persist deploy state:', e instanceof Error ? e.message : e);
   }
 }
 
@@ -262,7 +265,7 @@ export function clearPersistedDeploy(): void {
     const tmpFile = ACTIVE_DEPLOY_FILE + '.tmp';
     if (existsSync(tmpFile)) unlinkSync(tmpFile);
   } catch (e) {
-    console.warn('[gpu] Failed to clear persisted deploy:', e instanceof Error ? e.message : e);
+    log.warn('Failed to clear persisted deploy:', e instanceof Error ? e.message : e);
   }
 }
 
@@ -275,14 +278,14 @@ export function loadPersistedDeploy(): PersistedDeploy | null {
     // running pods expire after 6h.
     const maxAgeMs = data.stoppedAt ? 2 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000;
     if (Date.now() - data.savedAt > maxAgeMs) {
-      console.log(`[gpu] Persisted deploy too old (>${data.stoppedAt ? '2h stopped' : '6h running'}), ignoring`);
+      log.log(`Persisted deploy too old (>${data.stoppedAt ? '2h stopped' : '6h running'}), ignoring`);
       clearPersistedDeploy();
       return null;
     }
     if (!data.podId || !data.endpoint) return null;
     return data;
   } catch (e) {
-    console.warn('[gpu] Failed to load persisted deploy:', e instanceof Error ? e.message : e);
+    log.warn('Failed to load persisted deploy:', e instanceof Error ? e.message : e);
     return null;
   }
 }
@@ -328,10 +331,10 @@ export function setDeployState(patch: Partial<DeploymentState>) {
     // Keep last 30 transitions (splice in-place instead of allocating new array)
     if (deployState.transitions.length > 30) deployState.transitions.splice(0, deployState.transitions.length - 30);
     // Broadcast transition for real-time UI
-    try { const { broadcastWs: bws } = require('./ws-state'); bws?.({ type: 'gpu:transition', status: newStatus, step: newStep, provider: deployState.provider, elapsed, gpuType: deployState.gpuType, detail: deployState.message?.slice(0, 80) }); } catch (e) { console.warn('[state] broadcastWs failed:', e instanceof Error ? e.message : e); }
+    try { const { broadcastWs: bws } = require('./ws-state'); bws?.({ type: 'gpu:transition', status: newStatus, step: newStep, provider: deployState.provider, elapsed, gpuType: deployState.gpuType, detail: deployState.message?.slice(0, 80) }); } catch (e) { log.warn('broadcastWs failed:', e instanceof Error ? e.message : e); }
   }
 
-  console.log(`[gpu] ${deployState.status}: ${deployState.message}`);
+  log.log(`${deployState.status}: ${deployState.message}`);
   // Persist to disk so we can reconnect after restart
   persistDeployState();
 }
@@ -363,7 +366,7 @@ let autoResumeInFlight = false;
 export function touchModelRequest() {
   lastModelRequestTime = Date.now();
   // Reset idle-related state in gpu-deploy (lazy import to avoid circular deps)
-  try { const { resetIdleState } = require('./gpu-deploy'); resetIdleState?.(); } catch (e) { console.warn('[state] resetIdleState failed:', e instanceof Error ? e.message : e); }
+  try { const { resetIdleState } = require('./gpu-deploy'); resetIdleState?.(); } catch (e) { log.warn('resetIdleState failed:', e instanceof Error ? e.message : e); }
   // Auto-resume: if a stopped GPU pod exists, transparently resume it (or fall
   // back to fresh deploy) when a new AI request arrives. Fire-and-forget —
   // the caller gets a "booting" status and retries on the next poll.
@@ -377,7 +380,7 @@ export function touchModelRequest() {
         const { resumeOrDeploy } = require('./gpu-deploy');
         await resumeOrDeploy({ reason: 'autoscaler' });
       }
-    } catch (e) { console.warn('[state] auto-resume failed:', e instanceof Error ? e.message : e); } finally {
+    } catch (e) { log.warn('auto-resume failed:', e instanceof Error ? e.message : e); } finally {
       autoResumeInFlight = false;
     }
   })();
@@ -659,7 +662,7 @@ export function updateGpuModelWarmth(healthData: Record<string, any>): void {
     gpuModelWarmth.updatedAt = Date.now();
     const warmStages = (['stt', 'llm', 'tts'] as const).filter(s => gpuModelWarmth[s].warm);
     if (warmStages.length > 0) {
-      console.log(`[warmth] GPU models warm: ${warmStages.join(', ')} (${warmStages.length}/3)`);
+      log.log(`GPU models warm: ${warmStages.join(', ')} (${warmStages.length}/3)`);
     }
   } else if (healthData?.services) {
     // Derive warmth from services status (e.g. {whisper: "loaded", llama_cpp: "ready", tts: "loaded"})
@@ -706,7 +709,7 @@ export function updateGpuModelWarmth(healthData: Record<string, any>): void {
     gpuModelWarmth.updatedAt = Date.now();
     const warmStages = (['stt', 'llm', 'tts'] as const).filter(s => gpuModelWarmth[s].warm);
     if (warmStages.length > 0) {
-      console.log(`[warmth] GPU models warm: ${warmStages.join(', ')} (${warmStages.length}/3)`);
+      log.log(`GPU models warm: ${warmStages.join(', ')} (${warmStages.length}/3)`);
     }
   }
 }
@@ -749,7 +752,7 @@ export function markTtsWarm(coldTtfbMs?: number): void {
   if (coldTtfbMs !== undefined) ttsWarmth.coldTtfbMs = coldTtfbMs;
   gpuModelWarmth.tts.warm = true;
   gpuModelWarmth.tts.firstLatencyMs = coldTtfbMs ?? null;
-  console.log(`[tts-warmth] GPU TTS warm (cold TTFB was ${coldTtfbMs ?? '?'}ms)`);
+  log.log(`GPU TTS warm (cold TTFB was ${coldTtfbMs ?? '?'}ms)`);
 }
 
 export function recordTtsTtfb(ttfbMs: number): void {
@@ -809,9 +812,9 @@ export function saveColdStartProfile(profile: ColdStartProfile): void {
       profiles.push(profile);
     }
     writeFileSync(COLD_START_PROFILES_FILE, JSON.stringify(profiles, null, 2));
-    console.log(`[tts-warmth] Saved profile: ${profile.provider}/${profile.gpuType} (${profile.dockerImage}) — cold=${profile.coldTtfbMs}ms warm=${profile.warmTtfbAvgMs}ms`);
+    log.log(`Saved profile: ${profile.provider}/${profile.gpuType} (${profile.dockerImage}) — cold=${profile.coldTtfbMs}ms warm=${profile.warmTtfbAvgMs}ms`);
   } catch (err) {
-    console.warn(`[tts-warmth] Failed to save profile: ${err instanceof Error ? err.message : err}`);
+    log.warn(`Failed to save profile: ${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -908,5 +911,5 @@ export let autoSwapEnabled = true;  // on by default
 
 export function setAutoSwapEnabled(v: boolean) {
   autoSwapEnabled = v;
-  console.log(`[auto-swap] ${v ? 'enabled' : 'disabled'}`);
+  log.log(`${v ? 'enabled' : 'disabled'}`);
 }

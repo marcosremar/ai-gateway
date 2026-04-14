@@ -3,6 +3,9 @@
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import { readJsonBody, handleBodyError } from './http-utils';
+import { createLogger } from '../src/logger';
+
+const log = createLogger('relay-handlers');
 
 // ── Relay state ─────────────────────────────────────────────────────────────
 
@@ -84,7 +87,7 @@ export async function handleRelayStart(_req: IncomingMessage, res: ServerRespons
     }
 
     await scwAction('poweron');
-    console.log('[relay] Scaleway instance powering on...');
+    log.log('Scaleway instance powering on...');
 
     // Poll until running (max ~2 min)
     let ip: string | null = null;
@@ -108,11 +111,11 @@ export async function handleRelayStart(_req: IncomingMessage, res: ServerRespons
     relayState.instanceId = scwInstanceId();
     relayState.startedAt = Date.now();
 
-    console.log(`[relay] Scaleway instance ready at ${ip}`);
+    log.log(`Scaleway instance ready at ${ip}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ active: true, ip, hlsUrl: hlsUrl(ip) }));
   } catch (e) {
-    console.error('[relay] Start failed:', e);
+    log.error('Start failed:', e);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: String(e) }));
   }
@@ -127,7 +130,7 @@ export async function handleRelayStop(_req: IncomingMessage, res: ServerResponse
     }
 
     await scwAction('poweroff');
-    console.log('[relay] Scaleway instance powering off...');
+    log.log('Scaleway instance powering off...');
 
     relayState.active = false;
     relayState.ip = null;
@@ -136,7 +139,7 @@ export async function handleRelayStop(_req: IncomingMessage, res: ServerResponse
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
   } catch (e) {
-    console.error('[relay] Stop failed:', e);
+    log.error('Stop failed:', e);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: String(e) }));
   }

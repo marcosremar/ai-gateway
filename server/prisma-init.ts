@@ -8,9 +8,13 @@
  * Called by ws-server.ts after Bun.serve() is already listening.
  */
 
+import { createLogger } from '../src/logger';
+
+const log = createLogger('prisma-init');
+
 export async function initPrisma(): Promise<void> {
   if (!process.env.DATABASE_URL) {
-    console.warn('[prisma] DATABASE_URL not set — running without DB');
+    log.warn('DATABASE_URL not set — running without DB');
     return;
   }
   try {
@@ -22,8 +26,8 @@ export async function initPrisma(): Promise<void> {
     const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
     const adapter = new PrismaPg(pool);
     setPrisma(new PrismaClient({ adapter }));
-    console.log('[prisma] Connected to PostgreSQL');
+    log.log('Connected to PostgreSQL');
   } catch (e: any) {
-    console.warn(`[prisma] Unavailable: ${e.message?.slice(0, 100)} — running without DB`);
+    log.warn(`Unavailable: ${e.message?.slice(0, 100)} — running without DB`);
   }
 }

@@ -1,9 +1,38 @@
 /**
- * GatewayStorage — single interface the host app implements to wire
- * the ai-gateway to its persistence layer (Prisma, Drizzle, etc.).
+ * Gateway storage interface.
  *
- * Replaces 6 separate DI interfaces (SettingsStore, SessionResolver,
- * LifecycleLogStore, UserRoleResolver, BenchmarkStore, CredentialStore).
+ * Defines the storage contract for persisting gateway state including
+ * deployment status, provider configuration, and metrics.
+ *
+ * Implement this interface to use custom storage backends (PostgreSQL
+ * via Prisma or Drizzle, Redis, filesystem, etc.)
+ *
+ * Only `getSettings`, `patchSettings`, `countSessions`, and `resolveTeacher`
+ * are required. All other methods are optional — implement only what your
+ * application needs (lifecycle logging, benchmarking, deploy sessions, etc.)
+ *
+ * @example
+ * ```typescript
+ * import { GatewayStorage } from '@ai-gateway/storage';
+ *
+ * class PrismaStorage implements GatewayStorage {
+ *   constructor(private prisma: PrismaClient) {}
+ *
+ *   async getSettings(userId: string) {
+ *     const user = await this.prisma.user.findUnique({ where: { id: userId } });
+ *     return user?.aiSettings ?? {};
+ *   }
+ *
+ *   async patchSettings(userId: string, partial: Record<string, unknown>) {
+ *     await this.prisma.user.update({
+ *       where: { id: userId },
+ *       data: { aiSettings: partial },
+ *     });
+ *   }
+ *
+ *   // ... implement remaining methods
+ * }
+ * ```
  */
 
 import type { ProviderCredentials } from './gpu-providers/types';
