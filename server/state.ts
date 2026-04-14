@@ -2,7 +2,6 @@
 // All shared mutable state + state mutation helpers.
 // Other modules import and directly mutate these variables.
 
-import { createLogger } from '../src/logger';
 import { deploymentSM } from './deployment-state-machine';
 export { deploymentSM };
 
@@ -11,8 +10,6 @@ import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import { homedir } from 'os';
 import { join } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, renameSync } from 'fs';
-
-const log = createLogger('state');
 
 // PostgreSQL via DATABASE_URL (Neon serverless pooler)
 // Optional: gateway works without DB (GPU events logged to file instead).
@@ -59,12 +56,11 @@ export const DB_FAILURE_WARN_THRESHOLD = 10;
 
 const _parsedBudget = process.env.DAILY_BUDGET_USD ? parseFloat(process.env.DAILY_BUDGET_USD) : 0;
 if (process.env.DAILY_BUDGET_USD && isNaN(_parsedBudget)) {
-  log.warn('DAILY_BUDGET_USD="%s" is not a valid number, defaulting to 0 (no limit)', process.env.DAILY_BUDGET_USD);
+  console.warn(`[gateway] Warning: DAILY_BUDGET_USD="${process.env.DAILY_BUDGET_USD}" is not a valid number, defaulting to 0 (no limit)`);
 }
 export const DAILY_BUDGET_USD = isNaN(_parsedBudget) ? 0 : _parsedBudget; // 0 = no limit
 export let dailyGpuSpendUsd = 0;
-// Use ISO date format (YYYY-MM-DD) — must match the comparison in gpu-deploy.ts monitor loop
-export let dailySpendResetDate = new Date().toISOString().slice(0, 10);
+export let dailySpendResetDate = new Date().toDateString();
 
 /** Default estimated cost of a new deploy if the caller doesn't pass one. */
 const DEFAULT_ESTIMATED_DEPLOY_COST_USD = 2;
@@ -128,8 +124,6 @@ export const providerMetrics: Record<string, {
 
 export interface DeploymentState {
   status: 'idle' | 'stopped' | 'searching' | 'queued' | 'creating' | 'booting' | 'installing' | 'ready' | 'error';
-  /** Unique deploy ID for tracking, e.g. "deploy-m1abc2d3-x9f2". Generated at deploy start, persists across restarts. */
-  deployId: string;
   podId: string;
   endpoint: string;
   gpuType: string;
@@ -149,21 +143,10 @@ export interface DeploymentState {
   providerMeta: Record<string, unknown>;  // host-level metadata for reputation tracking
   /** Ordered log of state transitions with timestamps — for UI timeline and debugging */
   transitions: Array<{ status: string; step: string; provider: string; ts: number; elapsed: number; detail?: string }>;
-  /** GPU hardware metrics from /health endpoint (updated by monitor probe) */
-  gpuTemp: number;           // GPU temperature in Celsius (0 = unknown)
-  gpuUtil: number;           // GPU utilization % (0-100, -1 = unknown)
-  gpuMemUsed: number;        // GPU memory used in GB (0 = unknown)
-  gpuMemTotal: number;       // GPU memory total in GB (0 = unknown)
-  /** Canary deployment controller — set when canary mode is enabled for a deploy */
-  canary: unknown;           // ReturnType<typeof createCanaryDeploy> from src/canary
-  /** Timer ID for canary evaluation interval (for cleanup) */
-  canaryEvalTimer: unknown;  // ReturnType<typeof setInterval>
-  /** Vast.ai template hash ID — pre-configured image/env/ports for faster boot */
-  templateHashId?: string;
 }
 
 export let deployState: DeploymentState = {
-  status: 'idle', deployId: '', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0, canary: null, canaryEvalTimer: null, templateHashId: undefined,
+  status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [],
 };
 export let deployCancelled = false;
 export let deployLock = false;
@@ -222,10 +205,8 @@ export let monitorInterval: Timer | null = null;
 
 const BABELCAST_DIR = join(homedir(), '.babelcast');
 const ACTIVE_DEPLOY_FILE = join(BABELCAST_DIR, 'active_deploy.json');
-const DAILY_SPEND_FILE = join(BABELCAST_DIR, 'daily_spend.json');
 
 interface PersistedDeploy {
-  deployId: string;
   podId: string;
   endpoint: string;
   gpuType: string;
@@ -251,7 +232,6 @@ function persistDeployState(): void {
   try {
     mkdirSync(BABELCAST_DIR, { recursive: true });
     const data: PersistedDeploy = {
-      deployId: deployState.deployId,
       podId: deployState.podId,
       endpoint: deployState.endpoint,
       gpuType: deployState.gpuType,
@@ -271,7 +251,7 @@ function persistDeployState(): void {
     writeFileSync(tmpFile, JSON.stringify(data, null, 2));
     renameSync(tmpFile, ACTIVE_DEPLOY_FILE);
   } catch (e) {
-    log.warn('Failed to persist deploy state: %s', e instanceof Error ? e.message : e);
+    console.warn('[gpu] Failed to persist deploy state:', e instanceof Error ? e.message : e);
   }
 }
 
@@ -282,7 +262,7 @@ export function clearPersistedDeploy(): void {
     const tmpFile = ACTIVE_DEPLOY_FILE + '.tmp';
     if (existsSync(tmpFile)) unlinkSync(tmpFile);
   } catch (e) {
-    log.warn('Failed to clear persisted deploy: %s', e instanceof Error ? e.message : e);
+    console.warn('[gpu] Failed to clear persisted deploy:', e instanceof Error ? e.message : e);
   }
 }
 
@@ -295,14 +275,14 @@ export function loadPersistedDeploy(): PersistedDeploy | null {
     // running pods expire after 6h.
     const maxAgeMs = data.stoppedAt ? 2 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000;
     if (Date.now() - data.savedAt > maxAgeMs) {
-      log.warn(`Persisted deploy too old (>${data.stoppedAt ? '2h stopped' : '6h running'}), ignoring`);
+      console.log(`[gpu] Persisted deploy too old (>${data.stoppedAt ? '2h stopped' : '6h running'}), ignoring`);
       clearPersistedDeploy();
       return null;
     }
     if (!data.podId || !data.endpoint) return null;
     return data;
   } catch (e) {
-    log.warn('Failed to load persisted deploy: %s', e instanceof Error ? e.message : e);
+    console.warn('[gpu] Failed to load persisted deploy:', e instanceof Error ? e.message : e);
     return null;
   }
 }
@@ -340,44 +320,18 @@ export function setDeployState(patch: Partial<DeploymentState>) {
   const newStep = deployState.step;
   if (newStatus !== prevStatus || newStep !== prevStep) {
     const elapsed = deployState.startedAt > 0 ? Math.round((Date.now() - deployState.startedAt) / 1000) : 0;
-    const transition = {
-      status: newStatus, step: newStep,
-      deployId: deployState.deployId || '',
-      provider: deployState.provider || '',
-      gpuType: deployState.gpuType || '',
-      dockerImage: deployState.dockerImage || '',
-      podId: deployState.podId || '',
-      endpoint: deployState.endpoint || '',
-      costPerHr: deployState.costPerHr || 0,
+    deployState.transitions.push({
+      status: newStatus, step: newStep, provider: deployState.provider || '',
       ts: Date.now(), elapsed,
-      detail: deployState.message?.slice(0, 120) || '',
-      prevStatus, prevStep: prevStep || '',
-    };
-    deployState.transitions.push(transition);
-    // Keep last 50 transitions
-    if (deployState.transitions.length > 50) deployState.transitions.splice(0, deployState.transitions.length - 50);
-    // Broadcast enriched transition for real-time UI
-    try {
-      const { broadcastWs: bws } = require('./ws-state');
-      bws?.({ type: 'gpu:transition', ...transition });
-    } catch (e) { log.warn('broadcastWs failed: %s', e instanceof Error ? e.message : e); }
-    // Structured log line: status change with full context
-    log.log('%s→%s deployId=%s step=%s provider=%s gpu=%s image=%s pod=%s cost=$%.3f/hr elapsed=%ds', prevStatus, newStatus, deployState.deployId || '-', newStep || '-', transition.provider || '-', transition.gpuType || '-', transition.dockerImage?.split('/').pop() || '-', transition.podId || '-', transition.costPerHr.toFixed(3), elapsed);
-    // Persist to GPU event log (JSONL file + DB) for historical analysis
-    try {
-      const { logGpuEvent } = require('./metrics');
-      logGpuEvent?.(`status:${prevStatus}→${newStatus}`, transition.provider || 'unknown', true, {
-        metadata: {
-          deployId: deployState.deployId, step: newStep, gpuType: transition.gpuType, dockerImage: transition.dockerImage,
-          podId: transition.podId, endpoint: transition.endpoint, costPerHr: transition.costPerHr,
-          elapsed, prevStatus, prevStep: transition.prevStep,
-        },
-      });
-    } catch { /* best-effort */ }
-  } else {
-    // Non-transition log (same status, different message)
-    if (patch.message) log.log('%s: %s', deployState.status, deployState.message);
+      detail: deployState.gpuType || deployState.message?.slice(0, 60),
+    });
+    // Keep last 30 transitions (splice in-place instead of allocating new array)
+    if (deployState.transitions.length > 30) deployState.transitions.splice(0, deployState.transitions.length - 30);
+    // Broadcast transition for real-time UI
+    try { const { broadcastWs: bws } = require('./ws-state'); bws?.({ type: 'gpu:transition', status: newStatus, step: newStep, provider: deployState.provider, elapsed, gpuType: deployState.gpuType, detail: deployState.message?.slice(0, 80) }); } catch (e) { console.warn('[state] broadcastWs failed:', e instanceof Error ? e.message : e); }
   }
+
+  console.log(`[gpu] ${deployState.status}: ${deployState.message}`);
   // Persist to disk so we can reconnect after restart
   persistDeployState();
 }
@@ -390,15 +344,10 @@ export function resetDeployState() {
   deployTensordockAuthId = '';
   deployModalApiKey = '';
   activeProvider = '';
-  deployState = { status: 'idle', deployId: '', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0, canary: null, canaryEvalTimer: null, templateHashId: undefined };
+  deployState = { status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [] };
   clearPersistedDeploy();
   resetTtsWarmth(); // new pod = cold TTS
   resetGpuReadinessState();
-  // Reset idle timer so the new deploy starts with a fresh 15-min window.
-  // Without this, lastRequestTime carries over from the previous deploy session
-  // and the idle timeout can fire immediately on redeploy.
-  lastRequestTime = Date.now();
-  lastModelRequestTime = 0;
 }
 
 export function touchRequest() {
@@ -409,21 +358,28 @@ export function touchRequest() {
 // Only updated when actual AI work happens (STT / LLM / TTS / pipeline).
 // Health checks, status polls, and admin endpoints do NOT count.
 export let lastModelRequestTime = 0;
+let autoResumeInFlight = false;
+
 export function touchModelRequest() {
   lastModelRequestTime = Date.now();
   // Reset idle-related state in gpu-deploy (lazy import to avoid circular deps)
-  try { const { resetIdleState } = require('./gpu-deploy'); resetIdleState?.(); } catch (e) { log.warn('resetIdleState failed: %s', e instanceof Error ? e.message : e); }
+  try { const { resetIdleState } = require('./gpu-deploy'); resetIdleState?.(); } catch (e) { console.warn('[state] resetIdleState failed:', e instanceof Error ? e.message : e); }
   // Auto-resume: if a stopped GPU pod exists, transparently resume it (or fall
   // back to fresh deploy) when a new AI request arrives. Fire-and-forget —
   // the caller gets a "booting" status and retries on the next poll.
+  // Guard against concurrent auto-resume attempts (race condition fix)
+  if (autoResumeInFlight) return;
   (async () => {
     try {
       const { deploymentSM } = require('./deployment-state-machine');
       if (deploymentSM.isStopped) {
+        autoResumeInFlight = true;
         const { resumeOrDeploy } = require('./gpu-deploy');
         await resumeOrDeploy({ reason: 'autoscaler' });
       }
-    } catch (e) { log.warn('auto-resume failed: %s', e instanceof Error ? e.message : e); }
+    } catch (e) { console.warn('[state] auto-resume failed:', e instanceof Error ? e.message : e); } finally {
+      autoResumeInFlight = false;
+    }
   })();
 }
 export function setLastModelRequestTime(v: number) { lastModelRequestTime = v; }
@@ -558,26 +514,6 @@ export function resetPerStageLatencyRings(): void {
 }
 
 /**
- * Detect latency degradation trend early (before P95 threshold is hit).
- * Compares the average of the last 10 samples vs the average of the previous 10.
- * If increasing by >20%, returns 'degrading'. If decreasing by >20%, returns 'improving'.
- */
-export function getLatencyTrend(): { trend: 'stable' | 'degrading' | 'improving'; slopeMs: number; samples: number } {
-  if (latencyRing.length < 20) return { trend: 'stable', slopeMs: 0, samples: latencyRing.length };
-
-  const recent = latencyRing.slice(-10);
-  const previous = latencyRing.slice(-20, -10);
-  const avgRecent = recent.reduce((s, v) => s + v, 0) / recent.length;
-  const avgPrevious = previous.reduce((s, v) => s + v, 0) / previous.length;
-  const slopeMs = Math.round((avgRecent - avgPrevious) * 100) / 100;
-  const pctChange = avgPrevious > 0 ? (slopeMs / avgPrevious) * 100 : 0;
-
-  if (pctChange > 20) return { trend: 'degrading', slopeMs, samples: 20 };
-  if (pctChange < -20) return { trend: 'improving', slopeMs, samples: 20 };
-  return { trend: 'stable', slopeMs, samples: 20 };
-}
-
-/**
  * Whether GPU should be preferred over cloud based on recent latency.
  * Returns true if: GPU is available AND (not enough data OR P95 is under threshold).
  */
@@ -671,8 +607,8 @@ export function resetGpuReadinessState(): void {
   resetPerStageLatencyRings();
 }
 
-// These mutate translationDefaults which lives in providers.ts.
-// They are defined here but import translationDefaults from providers.ts.
+// These mutate translationProfile which lives in providers.ts.
+// They are defined here but import translationProfile from providers.ts.
 // To avoid circular deps, the actual mark functions are defined in providers.ts
 // and re-exported from there. See providers.ts for markGpuUnhealthy/markGpuHealthy.
 
@@ -723,7 +659,7 @@ export function updateGpuModelWarmth(healthData: Record<string, any>): void {
     gpuModelWarmth.updatedAt = Date.now();
     const warmStages = (['stt', 'llm', 'tts'] as const).filter(s => gpuModelWarmth[s].warm);
     if (warmStages.length > 0) {
-      log.log(`GPU models warm: ${warmStages.join(', ')} (${warmStages.length}/3)`);
+      console.log(`[warmth] GPU models warm: ${warmStages.join(', ')} (${warmStages.length}/3)`);
     }
   } else if (healthData?.services) {
     // Derive warmth from services status (e.g. {whisper: "loaded", llama_cpp: "ready", tts: "loaded"})
@@ -770,7 +706,7 @@ export function updateGpuModelWarmth(healthData: Record<string, any>): void {
     gpuModelWarmth.updatedAt = Date.now();
     const warmStages = (['stt', 'llm', 'tts'] as const).filter(s => gpuModelWarmth[s].warm);
     if (warmStages.length > 0) {
-      log.log(`GPU models warm: ${warmStages.join(', ')} (${warmStages.length}/3)`);
+      console.log(`[warmth] GPU models warm: ${warmStages.join(', ')} (${warmStages.length}/3)`);
     }
   }
 }
@@ -813,7 +749,7 @@ export function markTtsWarm(coldTtfbMs?: number): void {
   if (coldTtfbMs !== undefined) ttsWarmth.coldTtfbMs = coldTtfbMs;
   gpuModelWarmth.tts.warm = true;
   gpuModelWarmth.tts.firstLatencyMs = coldTtfbMs ?? null;
-  log.log(`GPU TTS warm (cold TTFB was ${coldTtfbMs ?? '?'}ms)`);
+  console.log(`[tts-warmth] GPU TTS warm (cold TTFB was ${coldTtfbMs ?? '?'}ms)`);
 }
 
 export function recordTtsTtfb(ttfbMs: number): void {
@@ -873,9 +809,9 @@ export function saveColdStartProfile(profile: ColdStartProfile): void {
       profiles.push(profile);
     }
     writeFileSync(COLD_START_PROFILES_FILE, JSON.stringify(profiles, null, 2));
-    log.log(`Saved profile: ${profile.provider}/${profile.gpuType} (${profile.dockerImage}) — cold=${profile.coldTtfbMs}ms warm=${profile.warmTtfbAvgMs}ms`);
+    console.log(`[tts-warmth] Saved profile: ${profile.provider}/${profile.gpuType} (${profile.dockerImage}) — cold=${profile.coldTtfbMs}ms warm=${profile.warmTtfbAvgMs}ms`);
   } catch (err) {
-    log.warn('Failed to save profile: %s', err instanceof Error ? err.message : err);
+    console.warn(`[tts-warmth] Failed to save profile: ${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -944,64 +880,8 @@ export function setGatewayServer(v: Server | null) { gatewayServer = v; }
 export function setLatencyRingIdx(v: number) { latencyRingIdx = v; }
 export function setPendingDbWrites(v: number) { pendingDbWrites = v; }
 export function setConsecutiveDbFailures(v: number) { consecutiveDbFailures = v; }
-// ── Daily spend persistence ──────────────────────────────────────────────────
-// Persists the daily GPU spend counter to disk so the budget cap survives
-// gateway restarts. Without this, the counter resets to 0 on every restart
-// and the budget cap is completely bypassed.
-
-let _spendFlushTimer: Timer | null = null;
-
-function _flushDailySpend(): void {
-  try {
-    mkdirSync(BABELCAST_DIR, { recursive: true });
-    const data = { date: dailySpendResetDate, spendUsd: dailyGpuSpendUsd, savedAt: Date.now() };
-    const tmp = DAILY_SPEND_FILE + '.tmp';
-    writeFileSync(tmp, JSON.stringify(data));
-    renameSync(tmp, DAILY_SPEND_FILE);
-  } catch (e) {
-    log.warn('Failed to persist daily spend: %s', e instanceof Error ? e.message : e);
-  }
-}
-
-export function setDailyGpuSpendUsd(v: number) {
-  dailyGpuSpendUsd = v;
-  // Debounce: flush at most once per 10s to avoid hammering disk on every monitor tick
-  if (_spendFlushTimer) return;
-  _spendFlushTimer = setTimeout(() => {
-    _spendFlushTimer = null;
-    _flushDailySpend();
-  }, 10_000);
-}
-
-export function setDailySpendResetDate(v: string) {
-  dailySpendResetDate = v;
-  // Date rolled over — flush immediately so new date is persisted
-  _flushDailySpend();
-}
-
-/**
- * Load persisted daily spend from disk. Call once on startup before any
- * budget checks. Resets the counter if the persisted date is not today.
- */
-export function loadPersistedDailySpend(): void {
-  try {
-    if (!existsSync(DAILY_SPEND_FILE)) return;
-    const raw = readFileSync(DAILY_SPEND_FILE, 'utf-8');
-    const data = JSON.parse(raw) as { date: string; spendUsd: number; savedAt: number };
-    const today = new Date().toISOString().slice(0, 10);
-    if (data.date !== today) {
-      log.warn(`Persisted spend is from ${data.date}, today is ${today} — resetting to $0`);
-      return;
-    }
-    if (typeof data.spendUsd === 'number' && isFinite(data.spendUsd) && data.spendUsd >= 0) {
-      dailyGpuSpendUsd = data.spendUsd;
-      dailySpendResetDate = data.date;
-      log.warn(`Restored daily spend: $${data.spendUsd.toFixed(2)} (cap: $${DAILY_BUDGET_USD > 0 ? DAILY_BUDGET_USD.toFixed(2) : 'none'})`);
-    }
-  } catch (e) {
-    log.warn('Failed to load persisted daily spend: %s', e instanceof Error ? e.message : e);
-  }
-}
+export function setDailyGpuSpendUsd(v: number) { dailyGpuSpendUsd = v; }
+export function setDailySpendResetDate(v: string) { dailySpendResetDate = v; }
 export function setDeployCancelled(v: boolean) { deployCancelled = v; }
 export function setDeployLock(v: boolean) { deployLock = v; }
 export function setDeployPromise(v: Promise<void> | null) { deployPromise = v; }
@@ -1028,5 +908,5 @@ export let autoSwapEnabled = true;  // on by default
 
 export function setAutoSwapEnabled(v: boolean) {
   autoSwapEnabled = v;
-  log.log('%s', v ? 'enabled' : 'disabled');
+  console.log(`[auto-swap] ${v ? 'enabled' : 'disabled'}`);
 }

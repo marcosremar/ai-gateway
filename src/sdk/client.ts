@@ -69,7 +69,13 @@ function isRetryableError(err: unknown): boolean {
   // TypeError = network failure (ECONNREFUSED, DNS, etc.)
   if (err instanceof TypeError) return true;
   const msg = err instanceof Error ? err.message : String(err);
-  return /ECONNREFUSED|ENOTFOUND|ECONNRESET|fetch failed|network/i.test(msg);
+  // Match broader set of network error patterns case-insensitively
+  return /ECONNREFUSED|ENOTFOUND|ECONNRESET|fetch failed|network|failed to fetch/i.test(msg);
+}
+
+function validatePositiveInt(value: number, name: string, defaultVal: number, max = Infinity): number {
+  if (!Number.isFinite(value) || value <= 0 || value > max) return defaultVal;
+  return Math.floor(value);
 }
 
 export class GatewaySDK {
@@ -482,9 +488,10 @@ export class GatewaySDK {
    * Requires endpoint's own API key (from vastListEndpoints()).
    */
   async vastRouteRequest(endpointName: string, endpointApiKey: string, cost = 100): Promise<{ url: string; reqnum: number; signature: string; requestId: string } | null> {
+    const validatedCost = validatePositiveInt(cost, 'cost', 100, 100000);
     const res = await this.fetch('/v1/gpu/vast/endpoints/route', {
       method: 'POST', timeout: 10_000,
-      body: JSON.stringify({ endpointName, endpointApiKey, cost }),
+      body: JSON.stringify({ endpointName, endpointApiKey, cost: validatedCost }),
     });
     const data = await this.parseJson(res, '/v1/gpu/vast/endpoints/route') as { available: boolean; url?: string; reqnum?: number; signature?: string; requestId?: string };
     if (!data.available || !data.url) return null;
@@ -904,18 +911,19 @@ export class GatewaySDK {
   ): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
     let lastError: unknown;
-    const controller = new AbortController();
-    const timeoutSignal = AbortSignal.timeout(options.timeout);
-
-    const combinedSignal = options.signal
-      ? AbortSignal.any([options.signal, timeoutSignal])
-      : timeoutSignal;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
         const delay = RETRY_BACKOFF_MS[Math.min(attempt - 1, RETRY_BACKOFF_MS.length - 1)];
         await new Promise(r => setTimeout(r, delay));
       }
+
+      const controller = new AbortController();
+      const timeoutSignal = AbortSignal.timeout(options.timeout);
+
+      const combinedSignal = options.signal
+        ? AbortSignal.any([options.signal, timeoutSignal])
+        : timeoutSignal;
 
       try {
         const res = await fetch(url, {
@@ -924,6 +932,8 @@ export class GatewaySDK {
           body: options.body as BodyInit,
           signal: combinedSignal,
         });
+
+        controller.abort();
 
         const allowed = options.allowedStatuses ?? [];
         if (!res.ok && !allowed.includes(res.status)) {
@@ -936,6 +946,7 @@ export class GatewaySDK {
         }
         return res;
       } catch (err: unknown) {
+        controller.abort();
         // HTTP errors (GatewayError with status code) are NOT retried
         if (err instanceof GatewayError && err.statusCode > 0) throw err;
 
