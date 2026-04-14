@@ -2,6 +2,7 @@
  * Inference routes — AI pipeline endpoints
  *
  * Routes:
+ *   GET  /v1/models                  — OpenAI-compatible model catalog
  *   POST /v1/transcribe              — Speech-to-text
  *   POST /v1/transcribe/ensemble     — Ensemble transcription
  *   POST /v1/chat/completions        — LLM chat completions
@@ -20,10 +21,45 @@
  *   POST /v1/playground/pipeline     — Playground full pipeline
  */
 
+import type { IncomingMessage, ServerResponse } from 'http';
 import { createLogger } from '../../../src/logger';
 const log = createLogger('routes/inference');
 
+/**
+ * GET /v1/models — OpenAI-compatible model list derived from active app's pipeline chain.
+ */
+async function handleModels(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  const models = new Map<string, { id: string; object: 'model'; created: number; owned_by: string; capability: string }>();
+
+  try {
+    const cfg = require('../../config-persistence');
+    const app = await cfg.getActiveApp?.();
+    const add = (capability: string, providers: Array<{ provider?: string; model?: string }> | undefined) => {
+      if (!Array.isArray(providers)) return;
+      for (const p of providers) {
+        const id = p?.model;
+        if (!id || models.has(id)) continue;
+        models.set(id, { id, object: 'model', created: now, owned_by: p.provider || 'ai-gateway', capability });
+      }
+    };
+    if (app) {
+      add('stt', app.stt);
+      add('llm', app.llm);
+      add('tts', app.tts);
+    }
+  } catch (e: any) {
+    log.warn(`[/v1/models] config read failed: ${e?.message?.slice(0, 80)}`);
+  }
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ object: 'list', data: Array.from(models.values()) }));
+}
+
 export function registerInferenceRoutes(handlers: Record<string, Function>): void {
+  // OpenAI-compatible model catalog
+  handlers['GET /v1/models'] = handleModels;
+
   // AI handlers (inference endpoints) + Auto-swap
   try {
     const ai = require('../../ai-handlers');

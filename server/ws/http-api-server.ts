@@ -84,6 +84,10 @@ export function startHttpApiServer(): void {
 
     Bun.serve({
       port: PORT,
+      // GPU offers/catalog queries fan out to multiple cloud providers and can
+      // exceed the default 10s. Bump to 120s so long-running admin endpoints
+      // finish without empty-reply hangups.
+      idleTimeout: 120,
       fetch: async (req) => {
         const url = new URL(req.url);
         const method = req.method;
