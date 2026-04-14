@@ -330,34 +330,34 @@ describe('Smoke: Critical imports (#865-#874)', () => {
   });
 
   it('#867 workloads/registry imports', async () => {
-    const mod = await import('../src/workloads/registry');
+    const mod = await import('../../src/workloads/registry');
     expect(mod.workloadRegistry).toBeDefined();
     expect(mod.WorkloadRegistry).toBeDefined();
   });
 
   it('#868 workloads/types exports', async () => {
-    const mod = await import('../src/workloads/types');
+    const mod = await import('../../src/workloads/types');
     expect(mod).toBeDefined();
   });
 
   it('#869 vault imports', async () => {
-    const mod = await import('../src/vault/vault');
+    const mod = await import('../../src/vault/vault');
     expect(mod.Vault).toBeDefined();
   });
 
   it('#870 auth imports', async () => {
-    const mod = await import('../src/auth/gpu-token');
+    const mod = await import('../../src/auth/gpu-token');
     expect(mod.signGpuToken).toBeInstanceOf(Function);
     expect(mod.verifyGpuToken).toBeInstanceOf(Function);
   });
 
   it('#871 caching imports', async () => {
-    const mod = await import('../src/caching/response-cache');
+    const mod = await import('../../src/caching/response-cache');
     expect(mod.ResponseCache).toBeDefined();
   });
 
   it('#872 language-detect imports', async () => {
-    const mod = await import('../src/language-detect');
+    const mod = await import('../../src/language-detect');
     expect(mod).toBeDefined();
   });
 });
@@ -407,21 +407,24 @@ describe('Cross-Provider Architecture (#875-#884)', () => {
 
 describe('API Contracts (#941-#950)', () => {
   const ws = read('server/ws-server.ts');
+  const routes = read('server/routes/gateway/gpu.ts');
+  const inference = read('server/routes/gateway/inference.ts');
+  const workloads = read('server/routes/compute/workloads.ts');
 
   it('#941 /v1/chat/completions registered', () => {
-    expect(ws).toContain('/v1/chat/completions');
+    expect(inference).toContain('/v1/chat/completions');
   });
 
   it('#942 /v1/transcribe registered', () => {
-    expect(ws).toContain('/v1/transcribe');
+    expect(inference).toContain('/v1/transcribe');
   });
 
   it('#944 /v1/gpu/status registered', () => {
-    expect(ws).toContain('/v1/gpu/status');
+    expect(routes).toContain('/v1/gpu/status');
   });
 
   it('#945 /v1/workloads registered', () => {
-    expect(ws).toContain('/v1/workloads');
+    expect(workloads).toContain('/v1/workloads');
   });
 
   it('#946 error response format consistent', () => {
@@ -447,8 +450,10 @@ describe('API Contracts (#941-#950)', () => {
 describe('Final coverage: Structural guarantees (#964-#1000)', () => {
   it('#971 every timer tracked', () => {
     const src = read('server/gpu-deploy.ts');
-    expect(src).toContain('orphanSweepInitialTimer');
-    expect(src).toContain('warmthMonitorTimer');
+    const orphan = read('server/gpu-orphan-cleanup.ts');
+    const health = read('server/gpu-health-monitor.ts');
+    expect(orphan).toContain('orphanSweepInitialTimer');
+    expect(health).toContain('warmthMonitorTimer');
     expect(src).toContain('monitorInterval');
   });
 

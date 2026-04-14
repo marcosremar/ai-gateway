@@ -1,0 +1,91 @@
+// ── Startup tasks (run after WS + HTTP servers are listening) ────────────────
+// Order matters: daily spend must load before any budget check, persisted
+// config before GPU recovery, pod recovery before auto-boot.
+
+import { createLogger } from '../../src/logger';
+
+const log = createLogger('startup-tasks');
+
+/** Optional Prisma DB init — silently skipped when DATABASE_URL is missing. */
+export function initDatabase(): void {
+  if (process.env.DATABASE_URL) {
+    try {
+      const { initPrisma } = require('../prisma-init');
+      initPrisma().catch((e: any) => log.warn('DB init failed: %s', e?.message?.slice(0, 80)));
+    } catch {
+      log.warn('[ws-server] prisma-init not available — running without DB');
+    }
+  } else {
+    log.warn('[ws-server] DATABASE_URL not set — running without DB');
+  }
+}
+
+/** Fire-and-forget startup sequence (persisted spend, config, recovery, auto-boot). */
+export async function runStartupTasks(): Promise<void> {
+  // 0. Restore persisted daily spend counter (must run before any budget checks)
+  try {
+    const { loadPersistedDailySpend } = require('../state');
+    loadPersistedDailySpend();
+  } catch (e: any) {
+    log.warn(`[ws-server] loadPersistedDailySpend failed: ${e.message?.slice(0, 80)}`);
+  }
+
+  // 1. Restore persisted config (idle timeout, deploy settings, latency targets)
+  try {
+    const { applyRuntimeConfig } = require('../config-persistence');
+    await applyRuntimeConfig();
+  } catch (e: any) {
+    log.warn(`[ws-server] applyRuntimeConfig failed: ${e.message?.slice(0, 80)}`);
+  }
+
+  // 2. Terminate any stopped pod overdue for auto-destroy (timer lost on restart)
+  try {
+    const { terminateStaleStoppedPodOnStartup } = require('../gpu-deploy');
+    terminateStaleStoppedPodOnStartup().catch((e: any) =>
+      log.warn(`[ws-server] terminateStaleStoppedPodOnStartup failed: ${e.message?.slice(0, 80)}`)
+    );
+  } catch (e: any) {
+    log.warn(`[ws-server] terminateStaleStoppedPodOnStartup not loaded: ${e.message?.slice(0, 80)}`);
+  }
+
+  // 3. Reconnect to any pod that was healthy before restart
+  try {
+    const { tryRecoverActiveDeploy } = require('../gpu-deploy');
+    tryRecoverActiveDeploy().catch((e: any) =>
+      log.warn(`[ws-server] tryRecoverActiveDeploy failed: ${e.message?.slice(0, 80)}`)
+    );
+  } catch (e: any) {
+    log.warn(`[ws-server] tryRecoverActiveDeploy not loaded: ${e.message?.slice(0, 80)}`);
+  }
+
+  // 4. Auto-boot GPU if profile has bootOnStartup=true
+  try {
+    const gh = require('../gpu-handlers');
+    if (gh.autoBootFromProfile) {
+      gh.autoBootFromProfile().catch((e: any) =>
+        log.warn(`[ws-server] autoBootFromProfile failed: ${e.message?.slice(0, 80)}`)
+      );
+    }
+  } catch (e: any) {
+    log.warn(`[ws-server] autoBootFromProfile not loaded: ${e.message?.slice(0, 80)}`);
+  }
+
+  // 5. Start standby monitor — auto-deploys a warm GPU when session duration or
+  // P95 latency thresholds are exceeded (standbyEnabled controls gating inside).
+  try {
+    const { startStandbyMonitor } = require('../gpu-standby');
+    startStandbyMonitor();
+  } catch (e: any) {
+    log.warn('[ws-server] Standby monitor not started:', e?.message?.slice(0, 80));
+  }
+}
+
+/** Install persistent file logging — captures all console output + GPU events. */
+export function installFileLogger(): void {
+  try {
+    const { installConsoleCapture } = require('../file-logger');
+    installConsoleCapture();
+  } catch (err) {
+    log.warn('[ws-server] Failed to install file logger:', err);
+  }
+}

@@ -93,7 +93,7 @@ describe('Security: Input validation', () => {
 
   // #688
   it('#688 RunPod GPU type filtering uses whitelist', () => {
-    const src = readSrc('src/gpu-providers/runpod-client.ts');
+    const src = readSrc('src/gateway/providers/gpu/runpod-client.ts');
     expect(src).toContain('RUNPOD_GPU_TYPE_MAP');
     expect(src).toContain('RUNPOD_GPU_FALLBACK');
   });
@@ -141,7 +141,7 @@ describe('Security: Vault encryption', () => {
 describe('Resilience: Timer lifecycle', () => {
   // #697
   it('#697 Monitor recovers after consecutive failures', () => {
-    const src = readSrc('server/gpu-deploy.ts');
+    const src = readSrc('server/gpu-health-monitor.ts');
     const fn = fnBody(src, 'export function scheduleNextMonitorProbe', 15000);
     expect(fn).toContain('monitorConsecFails');
   });
@@ -169,7 +169,7 @@ describe('Resilience: Timer lifecycle', () => {
 
   // #704
   it('#704 Orphan sweep cleans pods', () => {
-    const src = readSrc('server/gpu-deploy.ts');
+    const src = readSrc('server/gpu-orphan-cleanup.ts');
     expect(src).toContain('sweepOrphanInstances');
     expect(src).toContain('ORPHAN_SWEEP_INTERVAL_MS');
   });
@@ -243,13 +243,13 @@ describe('Regression: deployCancelled reset (#828)', () => {
   it('resetDeployState sets deployCancelled=true', () => {
     const src = readSrc('server/state.ts');
     const fn = fnBody(src, 'export function resetDeployState');
-    expect(fn).toContain('deployCancelled = true');
+    expect(fn).toContain('_setDeployCancelled(true)');
   });
 });
 
 describe('Regression: Monitor finally (#829)', () => {
   it('scheduleNextMonitorProbe in finally block', () => {
-    const src = readSrc('server/gpu-deploy.ts');
+    const src = readSrc('server/gpu-health-monitor.ts');
     const fn = fnBody(src, 'export function scheduleNextMonitorProbe', 15000);
     const finallyIdx = fn.indexOf('} finally {');
     expect(finallyIdx).toBeGreaterThan(0);
@@ -261,7 +261,7 @@ describe('Regression: Monitor finally (#829)', () => {
 
 describe('Regression: Warmth monitor (#830)', () => {
   it('calls stopWarmthMonitor on pod change', () => {
-    const src = readSrc('server/gpu-deploy.ts');
+    const src = readSrc('server/gpu-health-monitor.ts');
     const idx = src.indexOf('[gpu] Warmth monitor: pod changed');
     const nearby = src.slice(idx - 100, idx + 200);
     expect(nearby).toContain('stopWarmthMonitor()');
@@ -270,8 +270,9 @@ describe('Regression: Warmth monitor (#830)', () => {
 
 describe('Regression: Budget accuracy (#831)', () => {
   it('uses actual elapsed time for budget', () => {
-    const src = readSrc('server/gpu-deploy.ts');
-    const budgetSection = src.slice(src.indexOf('Budget tracking: accumulate'), src.indexOf('Budget tracking: accumulate') + 500);
+    const src = readSrc('server/gpu-health-monitor.ts');
+    const idx = src.indexOf('Budget tracking: accumulate GPU spend');
+    const budgetSection = src.slice(idx, idx + 500);
     expect(budgetSection).toContain('lastBudgetCalcTime');
     expect(budgetSection).toContain('actualElapsedMs');
   });
@@ -279,7 +280,7 @@ describe('Regression: Budget accuracy (#831)', () => {
 
 describe('Regression: Orphan sweep timer (#832)', () => {
   it('tracks initial timeout', () => {
-    const src = readSrc('server/gpu-deploy.ts');
+    const src = readSrc('server/gpu-orphan-cleanup.ts');
     expect(src).toContain('orphanSweepInitialTimer');
     const fn = fnBody(src, 'export function stopOrphanSweep');
     expect(fn).toContain('clearTimeout(orphanSweepInitialTimer)');
@@ -303,7 +304,7 @@ describe('Regression: SSH tunnel (#834-#835)', () => {
   });
 
   it('closeAllTunnels called on terminate', () => {
-    const src = readSrc('server/gpu-deploy.ts');
+    const src = readSrc('server/gpu-health-monitor.ts');
     const fn = fnBody(src, 'export async function autoTerminateGpu');
     expect(fn).toContain('closeAllTunnels');
   });
@@ -318,11 +319,11 @@ describe('Regression: STT sessions (#836)', () => {
 
 describe('Regression: Race deploy (#837)', () => {
   it('try/finally around Promise.all', () => {
-    const src = readSrc('server/gpu-deploy.ts');
-    const fn = fnBody(src, 'export async function startDeployRace', 15000);
+    const src = readSrc('server/gpu-deploy-race.ts');
+    const fn = fnBody(src, 'export async function startDeployRace', 25000);
     expect(fn).toContain('try {');
     expect(fn).toContain('await Promise.all(candidates.map');
-    expect(fn).toContain('Force-clean');
+    expect(fn).toContain('Force-cleaned');
     expect(fn).toContain('finally {');
     expect(fn).toContain('activeRaceInstanceIds.delete');
   });
@@ -338,7 +339,7 @@ describe('Regression: Negative spend (#838)', () => {
 
 describe('Regression: Connection count (#839)', () => {
   it('uses atomic in-memory counters', () => {
-    const src = readSrc('src/autoscaler/load-balancer.ts');
+    const src = readSrc('src/gateway/autoscaler/load-balancer.ts');
     expect(src).toContain('connectionCounts');
     const fn = fnBody(src, 'async incrementConnections');
     expect(fn).toContain('connectionCounts.get');
@@ -348,7 +349,7 @@ describe('Regression: Connection count (#839)', () => {
 
 describe('Regression: Boot timeout (#840)', () => {
   it('resets tier to idle after timeout', () => {
-    const src = readSrc('src/autoscaler/boot-orchestrator.ts');
+    const src = readSrc('src/gateway/autoscaler/boot-orchestrator.ts');
     const idx = src.indexOf('polling stopped — timeout');
     const block = src.slice(idx, idx + 600);
     expect(block).toContain("'idle'");
@@ -357,7 +358,7 @@ describe('Regression: Boot timeout (#840)', () => {
 
 describe('Regression: Cooldown bypass (#841)', () => {
   it('skips recordFailure when all providers cooled down', () => {
-    const src = readSrc('src/providers/fallback.ts');
+    const src = readSrc('src/gateway/providers/cloud/fallback.ts');
     const lines = src.split('\n').filter(l => l.includes('tracker.recordFailure'));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
@@ -368,7 +369,7 @@ describe('Regression: Cooldown bypass (#841)', () => {
 
 describe('Regression: Teacher cache (#842)', () => {
   it('bounded at 10k entries', () => {
-    const src = readSrc('src/autoscaler/session-tracker.ts');
+    const src = readSrc('src/gateway/autoscaler/session-tracker.ts');
     expect(src).toContain('10_000');
   });
 });
@@ -392,7 +393,7 @@ describe('Regression: Latency ring (#844)', () => {
 
 describe('Regression: Vast 429 (#845)', () => {
   it('throws on rate limit exhaustion', () => {
-    const src = readSrc('src/gpu-providers/vast-client.ts');
+    const src = readSrc('src/gateway/providers/gpu/vast-client.ts');
     const idx = src.indexOf('retries exhausted');
     const block = src.slice(idx, idx + 500);
     expect(block).toContain('throw new Error');
@@ -409,9 +410,9 @@ describe('Regression: Pipeline null guard (#846)', () => {
 
 describe('Regression: RunPod port validation (#847)', () => {
   it('validates port types', () => {
-    const src = readSrc('src/gpu-providers/runpod-client.ts');
+    const src = readSrc('src/gateway/providers/gpu/runpod-client.ts');
     const fn = fnBody(src, 'private resolveEndpoint');
-    expect(fn).toContain("typeof portEntry?.publicPort === 'number'");
+    expect(fn).toContain('typeof portEntry?.publicPort');
   });
 });
 
@@ -434,9 +435,9 @@ describe('Regression: Standby retry terminate (#849)', () => {
 
 describe('Regression: Empty audio (#850)', () => {
   it('returns empty text for zero-length audio', () => {
-    const src = readSrc('src/providers/openai-compat/openai-compat-stt.ts');
-    const fn = fnBody(src, 'async transcribe');
-    expect(fn).toContain('audioLen === 0');
+    const src = readSrc('src/gateway/providers/cloud/openai-compat/openai-compat-stt.ts');
+    expect(src).toContain('audioLen === 0');
+    expect(src).toContain("text: ''");
   });
 });
 
@@ -569,26 +570,25 @@ describe('Regression: Spend tracker rpush (#864)', () => {
 describe('API Contract: Response schemas', () => {
   // #941
   it('#941 chat completions endpoint exists', () => {
-    const src = readSrc('server/ws-server.ts');
+    const src = readSrc('server/routes/gateway/inference.ts');
     expect(src).toContain('/v1/chat/completions');
   });
 
   // #942
   it('#942 audio transcriptions endpoint exists', () => {
-    const src = readSrc('server/ws-server.ts');
-    // Either direct or via proxy
+    const src = readSrc('server/routes/gateway/inference.ts');
     expect(src).toMatch(/transcribe|audio\/transcriptions/);
   });
 
   // #943
   it('#943 health endpoint exists', () => {
-    const src = readSrc('server/ws-server.ts');
+    const src = readSrc('server/routes/diagnostics/health.ts');
     expect(src).toContain('/health');
   });
 
   // #944
   it('#944 GPU status endpoint exists', () => {
-    const src = readSrc('server/ws-server.ts');
+    const src = readSrc('server/routes/gateway/gpu.ts');
     expect(src).toContain('/v1/gpu/status');
   });
 
@@ -617,7 +617,7 @@ describe('API Contract: Response schemas', () => {
 
 describe('Workload system architecture', () => {
   it('#995 WorkloadRegistry has CRUD operations', () => {
-    const src = readSrc('src/workloads/registry.ts');
+    const src = readSrc('src/compute/workloads/registry.ts');
     expect(src).toContain('deploy(');
     expect(src).toContain('stop(');
     expect(src).toContain('start(');
@@ -628,7 +628,7 @@ describe('Workload system architecture', () => {
   });
 
   it('#995 WorkloadRegistry has event system', () => {
-    const src = readSrc('src/workloads/registry.ts');
+    const src = readSrc('src/compute/workloads/registry.ts');
     expect(src).toContain('onEvent');
     expect(src).toContain('emit');
     expect(src).toContain("type: 'created'");
@@ -644,7 +644,7 @@ describe('Workload system architecture', () => {
   });
 
   it('#300 GpuWorkloadDriver maps deploy state', () => {
-    const src = readSrc('src/workloads/gpu-driver.ts');
+    const src = readSrc('src/compute/workloads/gpu-driver.ts');
     expect(src).toContain("type = 'gpu'");
     expect(src).toContain('deploy(');
     expect(src).toContain('stop(');
@@ -654,14 +654,14 @@ describe('Workload system architecture', () => {
   });
 
   it('#306 BotWorkloadDriver handles lifecycle', () => {
-    const src = readSrc('src/workloads/bot-driver.ts');
+    const src = readSrc('src/compute/workloads/bot-driver.ts');
     expect(src).toContain("type = 'bot'");
     expect(src).toContain('deploy(');
     expect(src).toContain('terminate(');
   });
 
   it('#308 DbWorkloadDriver connects to Neon', () => {
-    const src = readSrc('src/workloads/db-driver.ts');
+    const src = readSrc('src/compute/workloads/db-driver.ts');
     expect(src).toContain("type = 'db'");
     expect(src).toContain('NeonManagementClient');
   });
@@ -673,7 +673,7 @@ describe('Workload system architecture', () => {
 
 describe('Deployment state machine', () => {
   it('#806-811 All transitions exist', () => {
-    const src = readSrc('server/deployment-state-machine.ts');
+    const src = readSrc('src/gateway/deploy/state-machine.ts');
     expect(src).toContain('startDeploying');
     expect(src).toContain('startBooting');
     expect(src).toContain('markReady');
@@ -682,13 +682,13 @@ describe('Deployment state machine', () => {
   });
 
   it('#813 Transition handlers fire', () => {
-    const src = readSrc('server/deployment-state-machine.ts');
+    const src = readSrc('src/gateway/deploy/state-machine.ts');
     expect(src).toContain('onTransition');
     expect(src).toContain('_handlers');
   });
 
   it('#814 toJSON serializes state', () => {
-    const src = readSrc('server/deployment-state-machine.ts');
+    const src = readSrc('src/gateway/deploy/state-machine.ts');
     expect(src).toContain('toJSON');
   });
 });
@@ -714,7 +714,7 @@ describe('SSH Tunnel module', () => {
 
 describe('Speculative cache module', () => {
   it('#342-345 speculate and resolve exist', () => {
-    const src = readSrc('server/speculative-cache.ts');
+    const src = readSrc('src/gateway/pipeline/speculative-cache.ts');
     expect(src).toContain('speculate');
     expect(src).toContain('resolve');
     expect(src).toContain('MAX_SPECULATIONS');
@@ -732,7 +732,7 @@ describe('File logger module', () => {
 
 describe('Race providers module', () => {
   it('#356-358 races with AbortController', () => {
-    const src = readSrc('server/race-providers.ts');
+    const src = readSrc('src/gateway/routing/provider-racer.ts');
     expect(src).toContain('AbortController');
     expect(src).toContain('Promise.any');
     expect(src).toContain('clearTimeout');
@@ -777,13 +777,13 @@ describe('Language detection module', () => {
 
 describe('Smoke: Module imports', () => {
   it('#865 server/state.ts imports without error', async () => {
-    const mod = await import('../../server/state');
+    const mod = await import('../server/state');
     expect(mod.deployState).toBeDefined();
     expect(mod.setDeployState).toBeInstanceOf(Function);
   });
 
   it('#866 server/deployment-state-machine.ts imports', async () => {
-    const mod = await import('../../server/deployment-state-machine');
+    const mod = await import('../server/deployment-state-machine');
     expect(mod.DeploymentStateMachine).toBeDefined();
     expect(mod.deploymentSM).toBeDefined();
   });

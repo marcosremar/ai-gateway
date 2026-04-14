@@ -77,6 +77,29 @@ export type {
   PipelineDeps,
 } from './pipeline-orchestrator';
 
+export { runSttStage, runLlmStage, runTtsStage } from './hybrid-stages';
+export type {
+  HybridStagesDeps, HybridStagesClient, HybridStagesModalTTS, PipelineStageParams,
+} from './hybrid-stages';
+
+export { generateTtsPreview } from './tts-preview';
+export type { TtsPreviewInput, TtsPreviewResult, TtsPreviewDeps } from './tts-preview';
+
+export { resolveChatProvider, buildOpenAiChatResponse } from './chat-completions-service';
+export type { ChatProviderAdapter, ChatCompletionsDeps, OpenAiChatResponse } from './chat-completions-service';
+
+export { buildAtomicResponseBody, computeNetworkMs, extractAtomicAudio } from './atomic-response';
+export type { AtomicPipelineResult, AtomicResponseBody } from './atomic-response';
+
+export { runTranslateRace, buildTranslatePrompt } from './translate-service';
+export type { TranslateServiceInput, TranslateServiceDeps, TranslateServiceResult } from './translate-service';
+
+export { runShadowStage } from './shadow-mode';
+export type { ShadowRunDeps } from './shadow-mode';
+
+export { ModalKeepalive } from './modal-keepalive';
+export type { ModalKeepaliveOptions } from './modal-keepalive';
+
 export { runFanoutOrchestrator } from './fanout-orchestrator';
 export type {
   FanoutOpts,
