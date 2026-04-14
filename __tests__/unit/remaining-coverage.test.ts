@@ -149,7 +149,7 @@ describe('Provider Edge Cases (#751-#770)', () => {
   });
 
   it('#754 RunPod auto-restart on EXITED', () => {
-    const src = read('server/gpu-health-monitor.ts');
+    const src = read('server/gpu-monitor-loop.ts');
     expect(src).toContain('EXITED');
     expect(src).toContain('auto-restart');
   });
@@ -224,6 +224,8 @@ describe('Config Profiles (#771-#782)', () => {
 
 describe('WebSocket Server (#783-#796)', () => {
   const src = read('server/ws-server.ts');
+  const sttLifecycle = read('server/ws/stt-lifecycle.ts');
+  const streamingStt = read('server/ws/streaming-stt-session.ts');
 
   it('#783 WS connect assigns unique ID', () => { expect(src).toContain('randomUUID'); });
   it('#784 WS receives gpu:status on connect', () => { expect(src).toContain('gpu:status'); });
@@ -233,11 +235,11 @@ describe('WebSocket Server (#783-#796)', () => {
     const state = read('server/ws-state.ts');
     expect(state).toContain('dead.push');
   });
-  it('#791 STT streaming session created', () => { expect(src).toContain('sttSessions.set'); });
-  it('#792 STT streaming session cleaned', () => { expect(src).toContain('sttSessions.delete'); });
-  it('#793 STT handles binary audio', () => { expect(src).toContain('arrayBuffer'); });
+  it('#791 STT streaming session created', () => { expect(sttLifecycle).toContain('sttSessions.set'); });
+  it('#792 STT streaming session cleaned', () => { expect(sttLifecycle).toContain('sttSessions.delete'); });
+  it('#793 STT handles binary audio', () => { expect(streamingStt).toContain('sendAudio'); });
   it('#794 Malformed message handling', () => { expect(src).toMatch(/catch|try|error/); });
-  it('#796 STT session periodic cleanup', () => { expect(src).toContain('stale STT session'); });
+  it('#796 STT session periodic cleanup', () => { expect(streamingStt).toContain('stale STT session'); });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
