@@ -14,7 +14,7 @@ export default defineConfig({
 
       // ── SDK paths ──────────────────────────────────────────────────────
       { find: /^(\.\.\/)+sdk\/node\/audio$/, replacement: src('sdk/node/audio.ts') },
-      { find: /^(\.\.\/)+sdk\/node$/, replacement: src('sdk/node/index.ts') },
+      { find: /^(\.\.?\/)+sdk\/node$/, replacement: path.resolve(root, 'sdk/node/index.ts') },
 
       // ── src/ path reorganizations (DDD migration) ──────────────────────
       { find: /^(\.\.\/)+(src\/)?database\/pg-driver$/, replacement: src('database/pg-driver.ts') },
