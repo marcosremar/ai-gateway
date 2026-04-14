@@ -13,7 +13,7 @@ export default defineConfig({
       { find: '@prisma/client', replacement: tests('__mocks__/prisma-client-mock.ts') },
 
       // ── SDK paths ──────────────────────────────────────────────────────
-      { find: /^(\.\.\/)+sdk\/node\/audio$/, replacement: src('sdk/node/audio.ts') },
+      { find: 'sdk/node/audio', replacement: src('sdk/node/audio.ts') },
       { find: /^(\.\.?\/)+sdk\/node$/, replacement: path.resolve(root, 'sdk/node/index.ts') },
       // Specific file-level aliases for local imports
       { find: './gpu-deploy', replacement: path.resolve(root, 'server/gpu-deploy.ts') },
