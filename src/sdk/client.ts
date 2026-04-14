@@ -85,7 +85,14 @@ export class GatewaySDK {
   private readonly groqApiKey: string;
 
   constructor(config: GatewayConfig) {
-    this.baseUrl = config.baseUrl.replace(/\/+$/, '');
+    if (!config.baseUrl) {
+      throw new TypeError('GatewaySDK: baseUrl is required');
+    }
+    let baseUrl = config.baseUrl.trim();
+    if (!/^https?:\\/\\/[^/\\s]+/i.test(baseUrl)) {
+      throw new TypeError(`GatewaySDK: invalid baseUrl "${baseUrl}" - must be a valid HTTP(S) URL`);
+    }
+    this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.headers = config.apiKey
       ? { Authorization: `Bearer ${config.apiKey}` }
       : {};
