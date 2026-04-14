@@ -110,7 +110,7 @@ describe('PipelinePluginRegistry', () => {
       const ctx: PluginContext = { source: 'en', target: 'es' };
       const result = await registry.runPreSTT(Buffer.from('original'), ctx);
 
-      expect(calls).toEqual(['plugin-a', 'plugin-b']);
+      expect(calls).toEqual(['a', 'b']);
       expect(result.toString()).toBe('original');
     });
 
