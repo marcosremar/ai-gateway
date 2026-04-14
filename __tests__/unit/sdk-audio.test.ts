@@ -5,8 +5,8 @@
  * Validates all 6 robustness techniques work through the SDK's public API.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { AudioSegmenter, VAD_WINDOW_SAMPLES } from '../../sdk/node/audio';
-import type { AudioSegment, AudioSegmenterConfig } from '../../sdk/node/audio';
+import { AudioSegmenter, VAD_WINDOW_SAMPLES } from '../../../sdk/node/audio';
+import type { AudioSegment, AudioSegmenterConfig } from '../../../sdk/node/audio';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
