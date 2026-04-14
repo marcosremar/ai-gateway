@@ -6,9 +6,9 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { StatePersistence } from '../src/autoscaler/state-persistence';
-import type { KvStore } from '../src/deps';
-import type { GpuTierState, IdleTierState, BootingTierState, ReadyTierState } from '../src/types';
+import { StatePersistence } from '../../src/autoscaler/state-persistence';
+import type { KvStore } from '../../src/deps';
+import type { GpuTierState, IdleTierState, BootingTierState, ReadyTierState } from '../../src/types';
 
 function makeKvStore() {
   const kvs = new Map<string, string>();

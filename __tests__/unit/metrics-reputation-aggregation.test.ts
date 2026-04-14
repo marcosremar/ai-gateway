@@ -90,7 +90,7 @@ import {
   aggregateRequestLogsToReputation,
   startReputationAggregation,
   stopReputationAggregation,
-} from '../server/metrics';
+} from '../../server/metrics';
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 

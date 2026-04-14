@@ -39,7 +39,7 @@ function redactObject(obj: unknown): unknown {
   return result;
 }
 
-function redactEvent(event: unknown): unknown {
+function redactEvent<T extends object>(event: T): T {
   if (!event || typeof event !== 'object') return event;
   const e = event as Record<string, unknown>;
   const safe: Record<string, unknown> = {};
@@ -50,7 +50,7 @@ function redactEvent(event: unknown): unknown {
       safe[key] = value;
     }
   }
-  return safe;
+  return safe as T;
 }
 
 export function createLangfuseHooks(config: LangfuseConfig): Partial<GatewayHooks> {

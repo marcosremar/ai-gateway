@@ -113,12 +113,12 @@ import {
   isPrivateUrl,
   BOT_POD_PREFIX,
   BOT_DOCKER_IMAGE,
-} from '../server/bot-handlers';
+} from '../../server/bot-handlers';
 import {
   botState, setBotDeployLock, setBotStateVar, botDeployLock,
   deployState,
-} from '../server/state';
-import { readJsonBody } from '../server/http-utils';
+} from '../../server/state';
+import { readJsonBody } from '../../server/http-utils';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

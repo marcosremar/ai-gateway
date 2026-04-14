@@ -11,8 +11,8 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { VastClient } from '../src/gpu-providers/vast-client';
-import type { ProviderCredentials, GpuInstance } from '../src/gpu-providers/types';
+import { VastClient } from '../../src/gpu-providers/vast-client';
+import type { ProviderCredentials, GpuInstance } from '../../src/gpu-providers/types';
 import { loadEnv } from './helpers';
 
 describe('Tiered ranking — live API', () => {

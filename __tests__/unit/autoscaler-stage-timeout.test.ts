@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { StageTimeoutError, withStageTimeout } from '../src/autoscaler/stage-timeout';
+import { StageTimeoutError, withStageTimeout } from '../../src/autoscaler/stage-timeout';
 
 describe('StageTimeoutError', () => {
   it('extends Error', () => {

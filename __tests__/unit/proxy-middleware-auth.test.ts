@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { validateAuth } from '../src/proxy/middleware/auth';
+import { validateAuth } from '../../src/proxy/middleware/auth';
 
 describe('validateAuth', () => {
   beforeEach(() => {

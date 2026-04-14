@@ -11,7 +11,7 @@ import {
   lookupPricing,
   estimateRequestCost,
   type ModelPricing,
-} from '../src/tracking/pricing';
+} from '../../src/tracking/pricing';
 
 describe('DEFAULT_PRICING_TABLE', () => {
   it('contains OpenAI models', () => {

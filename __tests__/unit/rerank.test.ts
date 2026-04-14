@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OpenRouterRerankProvider } from '../src/providers/rerank/openrouter-rerank';
-import { FireworksRerankProvider } from '../src/providers/rerank/fireworks-rerank';
+import { OpenRouterRerankProvider } from '../../src/providers/rerank/openrouter-rerank';
+import { FireworksRerankProvider } from '../../src/providers/rerank/fireworks-rerank';
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);

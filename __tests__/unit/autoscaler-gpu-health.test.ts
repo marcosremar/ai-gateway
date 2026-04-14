@@ -3,7 +3,7 @@
  * Covers: probeGpuHealth (boolean + returnData overloads), SSH health probe.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { probeGpuHealth } from '../src/autoscaler/health';
+import { probeGpuHealth } from '../../src/autoscaler/health';
 
 afterEach(() => vi.unstubAllGlobals());
 

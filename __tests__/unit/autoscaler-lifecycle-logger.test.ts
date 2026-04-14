@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { noopLifecycleLogger, type GpuLifecycleLogEntry, type GpuLifecycleLogger } from '../src/autoscaler/lifecycle-logger';
+import { noopLifecycleLogger, type GpuLifecycleLogEntry, type GpuLifecycleLogger } from '../../src/autoscaler/lifecycle-logger';
 
 describe('noopLifecycleLogger', () => {
   it('is defined', () => {

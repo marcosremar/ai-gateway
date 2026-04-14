@@ -7,8 +7,8 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { SessionTracker } from '../src/autoscaler/session-tracker';
-import type { HashStore, SessionResolver, Logger } from '../src/deps';
+import { SessionTracker } from '../../src/autoscaler/session-tracker';
+import type { HashStore, SessionResolver, Logger } from '../../src/deps';
 
 function makeHashStore() {
   const hashes = new Map<string, Record<string, string>>();

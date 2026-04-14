@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ScalewayClient } from '../src/cpu-providers/scaleway-client';
+import { ScalewayClient } from '../../src/cpu-providers/scaleway-client';
 
 const FAKE_SECRET = 'scw-secret-xxxxxxxxxxxxxxxxxx';
 

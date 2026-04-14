@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TierSelector } from '../src/autoscaler/tier-selector';
-import type { GpuTierConfig, GpuTierState, IdleTierState } from '../src/types';
-import type { GpuProviderRegistry } from '../src/gpu-providers/registry';
-import type { Logger } from '../src/deps';
-import type { ProviderMonitor } from '../src/autoscaler/provider-monitor';
+import { TierSelector } from '../../src/autoscaler/tier-selector';
+import type { GpuTierConfig, GpuTierState, IdleTierState } from '../../src/types';
+import type { GpuProviderRegistry } from '../../src/gpu-providers/registry';
+import type { Logger } from '../../src/deps';
+import type { ProviderMonitor } from '../../src/autoscaler/provider-monitor';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
