@@ -89,7 +89,7 @@ export class GatewaySDK {
       throw new TypeError('GatewaySDK: baseUrl is required');
     }
     let baseUrl = config.baseUrl.trim();
-    if (!/^https?:\\/\\/[^/\\s]+/i.test(baseUrl)) {
+    if (!/^https?:\/\/[^/\s]+/i.test(baseUrl)) {
       throw new TypeError(`GatewaySDK: invalid baseUrl "${baseUrl}" - must be a valid HTTP(S) URL`);
     }
     this.baseUrl = baseUrl.replace(/\/+$/, '');

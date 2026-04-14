@@ -383,8 +383,10 @@ let cacheHits = 0;
 let cacheMisses = 0;
 export function getTranslationCacheStats() { return { cacheHits, cacheMisses, cacheSize: translationCache.size }; }
 
+let translationCacheSweepTimer: ReturnType<typeof setInterval> | null = null;
+
 // Periodic sweep: remove expired entries every 5 minutes
-setInterval(() => {
+translationCacheSweepTimer = setInterval(() => {
   const now = Date.now();
   let swept = 0;
   for (const [key, entry] of translationCache) {
