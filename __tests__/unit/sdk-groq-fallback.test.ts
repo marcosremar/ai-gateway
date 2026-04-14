@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { GatewayHttpClient, GatewayHttpError } from '../sdk/node';
+import { GatewayHttpClient, GatewayHttpError } from '../../sdk/node';
 
 const mockFetch = vi.fn();
 const FAKE_GROQ_KEY = 'gsk_test_fake_key';
