@@ -636,30 +636,29 @@ async function cmdGpuResume(instanceId?: string, opts?: { provider?: string; dep
   console.log(data.message || 'GPU resumed.');
 }
 
-async function cmdGpuOffers(opts: { gpu?: string; limit?: number }) {
+async function cmdGpuOffers(opts: { gpu?: string; limit?: number; provider?: string }) {
   const { url, key } = getConfig();
-  const res = await fetch(`${url}/v1/gpu/offers`, { headers: headers(key) });
+  const params = new URLSearchParams();
+  if (opts.gpu) params.set('gpuTypes', opts.gpu);
+  if (opts.provider) params.set('provider', opts.provider);
+  if (opts.limit) params.set('limit', String(opts.limit));
+  const query = params.toString();
+  const res = await fetch(`${url}/v1/gpu/offers${query ? `?${query}` : ''}`, { headers: headers(key) });
   if (res.status === 404) {
     console.log('GPU endpoints not available (proxy-only mode).');
     return;
   }
-  const offers = await res.json();
-  if (!Array.isArray(offers) || offers.length === 0) {
+  const data = await res.json();
+  const offers: any[] = data.offers ?? [];
+  if (offers.length === 0) {
     console.log('No GPU offers available.');
     return;
   }
-  let filtered = offers;
-  if (opts.gpu) {
-    const q = opts.gpu.toLowerCase();
-    filtered = offers.filter((o: any) =>
-      (o.gpuName || o.gpuType || '').toLowerCase().includes(q));
-  }
-  const limit = opts.limit || 10;
-  console.log(`${filtered.length} offers (showing top ${Math.min(limit, filtered.length)} by price):\n`);
-  const sorted = filtered.sort((a: any, b: any) => a.pricePerHr - b.pricePerHr);
+  console.log(`${offers.length} offers (showing top ${Math.min(opts.limit || 10, offers.length)} by price):\n`);
+  const sorted = [...offers].sort((a: any, b: any) => a.pricePerHr - b.pricePerHr);
   console.log(`  ${'GPU'.padEnd(30)} ${'$/hr'.padStart(7)} ${'VRAM'.padStart(6)} ${'Provider'.padEnd(10)} Region`);
   console.log(`  ${'─'.repeat(30)} ${'─'.repeat(7)} ${'─'.repeat(6)} ${'─'.repeat(10)} ──────`);
-  for (const o of sorted.slice(0, limit)) {
+  for (const o of sorted.slice(0, opts.limit || 10)) {
     const gpu = (o.gpuName || o.gpuType || '?').slice(0, 30);
     const price = `$${Number(o.pricePerHr).toFixed(2)}`;
     const vram = o.vram ? `${o.vram}GB` : '?';
@@ -1637,7 +1636,8 @@ Subcommands:
                                (podId, endpoint, gpuType, provider, cost/hr, health)
   list                         List ALL active GPU instances across providers
   offers                       Show available GPU offers with pricing
-    --gpu <filter>               Filter by GPU name (e.g. "4090", "A100")
+    --gpu <filter>               GPU type filter (e.g. "4090", "A100", "RTX 5090")
+    --provider <name>             Provider filter: runpod, vast, tensordock, modal
     -n <count>                   Number of offers to show (default: 10)
   deploy                       Deploy a new GPU instance
     --image <docker-image>       Docker image (e.g. marcosremar/babelcast-subtitle:latest)
@@ -2101,6 +2101,7 @@ ai-gateway server — Manage the local dev server
           case 'offers': await cmdGpuOffers({
             gpu: getArg(args, '--gpu'),
             limit: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
+            provider: getArg(args, '--provider'),
           }); break;
           case 'deploy': await cmdGpuDeploy({
             image: getArg(args, '--image'),
