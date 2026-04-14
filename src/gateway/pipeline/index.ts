@@ -108,3 +108,16 @@ export type {
   FanoutStageExecutors,
   FanoutDeps,
 } from './fanout-orchestrator';
+
+export { PipelinePluginRegistry, pipelinePlugins } from './plugin-registry';
+export type {
+  PipelinePlugin,
+  PluginContext,
+  PipelineStage,
+  PluginPreSTTHook,
+  PluginPostSTTHook,
+  PluginPreLLMHook,
+  PluginPostLLMHook,
+  PluginPreTTSHook,
+  PluginPostTTSHook,
+} from './plugin-registry';
