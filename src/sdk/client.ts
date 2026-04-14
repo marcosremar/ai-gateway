@@ -257,6 +257,9 @@ export class GatewaySDK {
 
   /** Deploy a GPU pod (non-blocking — returns immediately, poll gpuStatus()). */
   async deployGpu(options: DeployOptions): Promise<DeployResponse> {
+    if (!options.apiKey?.trim()) {
+      throw new TypeError('deployGpu: options.apiKey is required');
+    }
     const res = await this.fetch('/v1/gpu/deploy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
