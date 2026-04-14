@@ -2249,7 +2249,6 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
       type: 'on-demand',
       rentable: { eq: true },
       rented: { eq: false },
-      num_gpus: { eq: 1 },
       verified: { eq: true },
       reliability2: { gte: 0.9 },
       order: [['dph_total', 'asc']],
@@ -2281,7 +2280,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     }
 
     try {
-      let offers = await this._searchOffers(searchBody, headers);
+      let offers = await this._searchOffers(searchBody, headers, false);
 
       // Client-side geo filter
       if (listGeoFilter && offers.length) {
@@ -2293,43 +2292,28 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
         this.log.log(`[vast] Geo filter: ${before} → ${offers.length} offers matching [${listGeoFilter.join(',')}]`);
       }
 
-      // Group by gpu_name — aggregate availability, keep cheapest price
-      const grouped = new Map<string, { count: number; cheapest: Record<string, unknown> }>();
-      for (const offer of offers) {
-        const name = (offer.gpu_name || 'unknown') as string;
-        const existing = grouped.get(name);
-        if (existing) {
-          existing.count++;
-        } else {
-          grouped.set(name, { count: 1, cheapest: offer });
-        }
-      }
-
-      const result: GpuOffer[] = [];
-      for (const [gpuName, { count, cheapest }] of grouped) {
-        result.push({
-          provider: 'vast',
-          gpuType: gpuName,
-          gpuName,
-          available: count,
-          pricePerHr: (cheapest.dph_total || 0) as number,
-          region: (cheapest.geolocation || '') as string,
-          vram: ((cheapest.gpu_ram || 0) as number) / 1024, // MB → GB
-          offerId: String(cheapest.id ?? ''),
-          // Extended fields from Vast.ai bundle response
-          geolocation: (cheapest.geolocation || undefined) as string | undefined,
-          reliability: (cheapest.reliability2 || undefined) as number | undefined,
-          inetDown: (cheapest.inet_down || undefined) as number | undefined,
-          inetUp: (cheapest.inet_up || undefined) as number | undefined,
-          hostId: cheapest.host_id != null ? String(cheapest.host_id) : undefined,
-          cpuName: (cheapest.cpu_name || undefined) as string | undefined,
-          cpuCores: (cheapest.cpu_cores_effective || undefined) as number | undefined,
-          ramGb: cheapest.cpu_ram ? ((cheapest.cpu_ram as number) / 1024) : undefined, // MB → GB
-          diskGb: (cheapest.disk_space || undefined) as number | undefined,
-          numGpus: (cheapest.num_gpus || undefined) as number | undefined,
-          totalFlops: (cheapest.total_flops || undefined) as number | undefined,
-        });
-      }
+      // Map to GpuOffer format — do NOT group, show all offers
+      const result: GpuOffer[] = offers.map(offer => ({
+        provider: 'vast',
+        gpuType: (offer.gpu_name || 'unknown') as string,
+        gpuName: (offer.gpu_name || 'unknown') as string,
+        available: 1,
+        pricePerHr: (offer.dph_total || 0) as number,
+        region: (offer.geolocation || '') as string,
+        vram: ((offer.gpu_ram || 0) as number) / 1024, // MB → GB
+        offerId: String(offer.id ?? ''),
+        geolocation: (offer.geolocation || undefined) as string | undefined,
+        reliability: (offer.reliability2 || undefined) as number | undefined,
+        inetDown: (offer.inet_down || undefined) as number | undefined,
+        inetUp: (offer.inet_up || undefined) as number | undefined,
+        hostId: offer.host_id != null ? String(offer.host_id) : undefined,
+        cpuName: (offer.cpu_name || undefined) as string | undefined,
+        cpuCores: (offer.cpu_cores_effective || undefined) as number | undefined,
+        ramGb: offer.cpu_ram ? ((offer.cpu_ram as number) / 1024) : undefined,
+        diskGb: (offer.disk_space || undefined) as number | undefined,
+        numGpus: (offer.num_gpus || undefined) as number | undefined,
+        totalFlops: (offer.total_flops || undefined) as number | undefined,
+      }));
 
       return result.sort((a, b) => a.pricePerHr - b.pricePerHr || (a.gpuType ?? '').localeCompare(b.gpuType ?? ''));
     } catch (err) {
@@ -2518,12 +2502,14 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
    * Deduplicates by machine_id so we spread across different physical hosts
    * (avoids funneling all instances onto the same broken host).
    *
-   * P2b: Caches results with OFFER_CACHE_TTL_MS TTL. Cache key = stringified searchBody.
-   * Cache is invalidated when createInstance fails on all offers.
-   */
+    * P2b: Caches results with OFFER_CACHE_TTL_MS TTL. Cache key = stringified searchBody.
+    * Cache is invalidated when createInstance fails on all offers.
+    * @param deduplicateByIp - If true, keep only one offer per IP (for deploy). If false, keep all (for listing).
+    */
   private async _searchOffers(
     searchBody: Record<string, unknown>,
     headers: Record<string, string>,
+    deduplicateByIp = true,
   ): Promise<Array<Record<string, unknown>>> {
     // P2b: Check cache first
     const cacheKey = JSON.stringify(searchBody);
@@ -2554,20 +2540,29 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     // funneling all instances onto the same broken host.
     // Also skip: recently used hosts (cross-call dedup), unstable hosts
     // (single-strike flag) and banned hosts (aggressive persistent blacklist).
-    const seenIps = new Set<string>(this._recentlyUsedIps);
+    // When deduplicateByIp=false (listOffers), keep all offers — only filter bad hosts.
+    const seenIps = deduplicateByIp ? new Set<string>(this._recentlyUsedIps) : new Set<string>();
     let unstableSkipped = 0;
     let bannedSkipped = 0;
+    let recentlyUsedSkipped = 0;
     const deduplicated: Array<Record<string, unknown>> = [];
     for (const offer of allOffers) {
       const ip = String(offer.public_ipaddr ?? '');
-      if (ip && seenIps.has(ip)) continue;
-      if (ip && this._isHostBanned(ip)) { bannedSkipped++; continue; }
-      if (ip && this._isHostUnstable(ip)) { unstableSkipped++; continue; }
-      if (ip) seenIps.add(ip);
+      if (deduplicateByIp) {
+        if (ip && seenIps.has(ip)) continue;
+        if (ip && this._isHostBanned(ip)) { bannedSkipped++; continue; }
+        if (ip && this._isHostUnstable(ip)) { unstableSkipped++; continue; }
+        if (ip) { seenIps.add(ip); }
+      } else {
+        if (ip && this._isHostBanned(ip)) { bannedSkipped++; continue; }
+        if (ip && this._isHostUnstable(ip)) { unstableSkipped++; continue; }
+        if (ip && this._recentlyUsedIps.has(ip)) { recentlyUsedSkipped++; continue; }
+      }
       deduplicated.push(offer);
     }
 
-    this.log.log(`[vast] Search: ${allOffers.length} offers → ${deduplicated.length} unique hosts (${this._recentlyUsedIps.size} recently used, ${unstableSkipped} unstable skipped, ${bannedSkipped} banned skipped)`);
+    const dedupType = deduplicateByIp ? 'unique hosts' : 'offers';
+    this.log.log(`[vast] Search: ${allOffers.length} offers → ${deduplicated.length} ${dedupType} (${deduplicateByIp ? `${this._recentlyUsedIps.size} recently used, ` : ''}${unstableSkipped} unstable skipped, ${bannedSkipped} banned skipped)${!deduplicateByIp ? `, ${recentlyUsedSkipped} recently used (not excluded for listing)` : ''}`);
 
     // P2b: Populate cache (snapshot before mutations by callers)
     this._offerCache = {
