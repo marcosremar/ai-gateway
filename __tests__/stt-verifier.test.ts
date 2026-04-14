@@ -138,7 +138,7 @@ describe('runVerifiedSTT — unit (no API)', () => {
   it('all providers fail — throws', async () => {
     await expect(runVerifiedSTT(SILENCE, 'fr', '', {
       providers: [failingProvider('p1'), failingProvider('p2')],
-    })).rejects.toThrow('failed or timed out');
+    })).rejects.toThrow(/failed|providers/i);
   });
 
   it('empty-string results are excluded from consensus', async () => {

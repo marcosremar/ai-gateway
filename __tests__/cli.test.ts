@@ -17,7 +17,7 @@ import { execSync, type ExecSyncOptions } from 'child_process';
 import { existsSync, unlinkSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
 
-const SKIP = process.env.SKIP_CLI_TESTS === '1';
+const SKIP = process.env.SKIP_CLI_TESTS === '1' || !process.env.AI_GATEWAY_KEY;
 const CLI = resolve(__dirname, '..', 'bin', 'ai-gateway.ts');
 const TIMEOUT = 30_000;
 
