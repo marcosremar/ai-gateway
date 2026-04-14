@@ -15,7 +15,7 @@ import {
   stripAnsi,
   SKY_BIN,
   execAsync,
-} from '../src/infra/gpu-backend';
+} from '../../src/infra/gpu-backend';
 
 describe('sshOpts', () => {
   it('returns default SSH options', () => {

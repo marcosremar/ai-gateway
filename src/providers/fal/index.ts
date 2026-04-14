@@ -1,1 +1,1 @@
-export { FalImageProvider, falImage, FAL_IMAGE_MODELS } from './fal-image';
+export * from '../../gateway/providers/cloud/fal';

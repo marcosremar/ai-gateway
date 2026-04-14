@@ -4,7 +4,7 @@
  * discovery, health polling, sendAudio/sendText validation, metrics.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpeechSDKError } from '../src/browser/errors';
+import { SpeechSDKError } from '../../src/browser/errors';
 
 // ── Mock transports ───────────────────────────────────────────────────────────
 
@@ -62,8 +62,8 @@ vi.mock('../src/browser/transport-sse', () => ({
 }));
 
 // Import after mocks
-import { SpeechClient } from '../src/browser/speech-client';
-import { setLogLevel } from '../src/browser/logger';
+import { SpeechClient } from '../../src/browser/speech-client';
+import { setLogLevel } from '../../src/browser/logger';
 
 beforeEach(() => {
   setLogLevel('silent');

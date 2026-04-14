@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { Vault } from '../src/vault/vault';
-import type { VaultStore } from '../src/vault/types';
+import { Vault } from '../../src/vault/vault';
+import type { VaultStore } from '../../src/vault/types';
 import { randomBytes } from 'crypto';
 
 /** Simple in-memory VaultStore for tests */

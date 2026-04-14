@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { SpeechSDKError } from '../src/browser/errors';
-import type { SpeechErrorCode } from '../src/browser/errors';
+import { SpeechSDKError } from '../../src/browser/errors';
+import type { SpeechErrorCode } from '../../src/browser/errors';
 
 describe('SpeechSDKError', () => {
   describe('construction', () => {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { handleModels } from '../src/proxy/routes/models';
-import type { ProviderMapping } from '../src/proxy/types';
+import { handleModels } from '../../src/proxy/routes/models';
+import type { ProviderMapping } from '../../src/proxy/types';
 
 describe('handleModels', () => {
   it('returns 200 with empty list when no providers', () => {

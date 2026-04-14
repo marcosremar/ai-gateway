@@ -4,7 +4,7 @@ import {
   checkPromptAndResponse,
   createGuardrailMiddleware,
   DEFAULT_GUARDRAIL_CONFIG,
-} from '../src/providers/guardrails';
+} from '../../src/providers/guardrails';
 
 const enabledConfig: typeof DEFAULT_GUARDRAIL_CONFIG = {
   ...DEFAULT_GUARDRAIL_CONFIG,

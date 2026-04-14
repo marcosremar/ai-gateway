@@ -371,6 +371,22 @@ async function cmdChat(message: string, opts: { model?: string; stream?: boolean
       console.error(`Error ${res.status}: ${err.slice(0, 200)}`);
       process.exit(1);
     }
+
+    // Detect whether the server returned SSE or a single JSON body.
+    // Some gateway endpoints ignore `stream:true` and return the full response.
+    const contentType = res.headers.get('content-type') || '';
+    const isSSE = contentType.includes('text/event-stream');
+
+    if (!isSSE) {
+      // Server returned a non-streamed JSON response despite stream:true
+      const data = await res.json();
+      console.log(data.choices?.[0]?.message?.content ?? '');
+      if (data.usage) {
+        console.log(`\n[tokens: ${data.usage.prompt_tokens}+${data.usage.completion_tokens}=${data.usage.total_tokens}]`);
+      }
+      return;
+    }
+
     // Stream SSE chunks
     const reader = res.body?.getReader();
     if (!reader) { console.error('No response body'); process.exit(1); }
@@ -1096,9 +1112,15 @@ async function cmdGpuBest(opts: { gpu?: string; count?: number }) {
     return;
   }
 
-  const offers: any[] = offersRes ? await offersRes.json().catch(() => []) : [];
-  const latencyData: any[] = latencyRes?.ok
-    ? (await latencyRes.json().catch(() => [])) : [];
+  const offersRaw = offersRes ? await offersRes.json().catch(() => null) : null;
+  const offers: any[] = Array.isArray(offersRaw)
+    ? offersRaw
+    : Array.isArray(offersRaw?.offers) ? offersRaw.offers : [];
+
+  const latencyRaw = latencyRes?.ok ? await latencyRes.json().catch(() => null) : null;
+  const latencyData: any[] = Array.isArray(latencyRaw)
+    ? latencyRaw
+    : Array.isArray(latencyRaw?.hosts) ? latencyRaw.hosts : [];
 
   if (offers.length === 0 && latencyData.length === 0) {
     console.log('No GPU data available. Need the full server with GPU provider keys.');

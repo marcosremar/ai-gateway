@@ -187,7 +187,7 @@ vi.mock('../src/autoscaler/health', () => ({
 
 // ── Import after mocks ────────────────────────────────────────────────────────
 
-import { refreshGpuTypeCache } from '../server/gpu-deploy';
+import { refreshGpuTypeCache } from '../../server/gpu-deploy';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

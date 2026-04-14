@@ -8,7 +8,7 @@ import {
   GatewayHttpError,
   CircuitBreaker,
   CircuitOpenError,
-} from '../sdk/node';
+} from '../../sdk/node';
 
 // ── Mock fetch ──────────────────────────────────────────────────────────────
 

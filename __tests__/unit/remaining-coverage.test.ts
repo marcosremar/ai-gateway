@@ -106,7 +106,7 @@ describe('Edge Cases: Input validation (#725-#750)', () => {
   });
 
   it('#733 GPU deploy validates GPU type names', () => {
-    const src = read('src/gpu-providers/runpod-client.ts');
+    const src = read('src/gateway/providers/gpu/runpod-client.ts');
     expect(src).toContain('RUNPOD_GPU_TYPE_MAP');
   });
 
@@ -129,13 +129,12 @@ describe('Edge Cases: Input validation (#725-#750)', () => {
 
   it('#742 workload deploy with empty config', () => {
     const src = read('server/workload-handlers.ts');
-    expect(src).toContain("!name");
-    expect(src).toContain("!type");
+    expect(src).toContain('Validation failed');
   });
 
   it('#743 workload deploy with invalid type', () => {
     const src = read('server/workload-handlers.ts');
-    expect(src).toContain("gpu, bot, or db");
+    expect(src).toContain('validateInput');
   });
 });
 
@@ -150,7 +149,7 @@ describe('Provider Edge Cases (#751-#770)', () => {
   });
 
   it('#754 RunPod auto-restart on EXITED', () => {
-    const src = read('server/gpu-deploy.ts');
+    const src = read('server/gpu-monitor-loop.ts');
     expect(src).toContain('EXITED');
     expect(src).toContain('auto-restart');
   });
@@ -161,12 +160,12 @@ describe('Provider Edge Cases (#751-#770)', () => {
   });
 
   it('#758 Vast.ai Docker Hub auth injected', () => {
-    const src = read('src/gpu-providers/vast-client.ts');
+    const src = read('src/gateway/providers/gpu/vast-client.ts');
     expect(src).toMatch(/DOCKERHUB|image_login|docker/i);
   });
 
   it('#759 Vast.ai port mapping extraction', () => {
-    const src = read('src/gpu-providers/vast-client.ts');
+    const src = read('src/gateway/providers/gpu/vast-client.ts');
     expect(src).toMatch(/port|ports|8000/);
   });
 
@@ -176,7 +175,7 @@ describe('Provider Edge Cases (#751-#770)', () => {
   });
 
   it('#767 Groq credit exhaustion (402)', () => {
-    const src = read('src/providers/fallback.ts');
+    const src = read('src/gateway/providers/cloud/fallback.ts');
     expect(src).toContain('402');
     expect(src).toContain('creditTracker');
   });
@@ -225,6 +224,8 @@ describe('Config Profiles (#771-#782)', () => {
 
 describe('WebSocket Server (#783-#796)', () => {
   const src = read('server/ws-server.ts');
+  const sttLifecycle = read('server/ws/stt-lifecycle.ts');
+  const streamingStt = read('server/ws/streaming-stt-session.ts');
 
   it('#783 WS connect assigns unique ID', () => { expect(src).toContain('randomUUID'); });
   it('#784 WS receives gpu:status on connect', () => { expect(src).toContain('gpu:status'); });
@@ -234,11 +235,11 @@ describe('WebSocket Server (#783-#796)', () => {
     const state = read('server/ws-state.ts');
     expect(state).toContain('dead.push');
   });
-  it('#791 STT streaming session created', () => { expect(src).toContain('sttSessions.set'); });
-  it('#792 STT streaming session cleaned', () => { expect(src).toContain('sttSessions.delete'); });
-  it('#793 STT handles binary audio', () => { expect(src).toContain('arrayBuffer'); });
+  it('#791 STT streaming session created', () => { expect(sttLifecycle).toContain('sttSessions.set'); });
+  it('#792 STT streaming session cleaned', () => { expect(sttLifecycle).toContain('sttSessions.delete'); });
+  it('#793 STT handles binary audio', () => { expect(src).toContain('sendAudio'); });
   it('#794 Malformed message handling', () => { expect(src).toMatch(/catch|try|error/); });
-  it('#796 STT session periodic cleanup', () => { expect(src).toContain('stale STT session'); });
+  it('#796 STT session periodic cleanup', () => { expect(streamingStt).toContain('stale STT session'); });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -263,7 +264,7 @@ describe('Docker Image Catalog (#797-#805)', () => {
 
 describe('Deployment State Machine (#806-#815)', () => {
   it('#806-#811 all transitions', async () => {
-    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     expect(sm.phase).toBe('idle');
     sm.startDeploying();
@@ -278,7 +279,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#812 error transition from any state', async () => {
-    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     sm.startDeploying();
     sm.markError('test error');
@@ -286,7 +287,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#813 onTransition fires', async () => {
-    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     const transitions: string[] = [];
     sm.onTransition((next) => transitions.push(next.phase));
@@ -296,7 +297,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#814 toJSON serializes', async () => {
-    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     sm.markReady('pod-1', 'http://ep', 'RTX 4090', 0.5);
     const json = sm.toJSON();
@@ -306,7 +307,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#815 singleton exported', async () => {
-    const { deploymentSM } = await import('../server/deployment-state-machine');
+    const { deploymentSM } = await import('../../server/deployment-state-machine');
     expect(deploymentSM).toBeDefined();
     expect(deploymentSM.phase).toBeDefined();
   });
@@ -318,7 +319,7 @@ describe('Deployment State Machine (#806-#815)', () => {
 
 describe('Smoke: Critical imports (#865-#874)', () => {
   it('#865 server/state imports', async () => {
-    const mod = await import('../server/state');
+    const mod = await import('../../server/state');
     expect(mod.deployState).toBeDefined();
     expect(mod.botState).toBeDefined();
     expect(mod.setDeployState).toBeInstanceOf(Function);
@@ -326,39 +327,39 @@ describe('Smoke: Critical imports (#865-#874)', () => {
   });
 
   it('#866 deployment-state-machine imports', async () => {
-    const mod = await import('../server/deployment-state-machine');
+    const mod = await import('../../server/deployment-state-machine');
     expect(mod.deploymentSM).toBeDefined();
   });
 
   it('#867 workloads/registry imports', async () => {
-    const mod = await import('../src/workloads/registry');
+    const mod = await import('../../src/workloads/registry');
     expect(mod.workloadRegistry).toBeDefined();
     expect(mod.WorkloadRegistry).toBeDefined();
   });
 
   it('#868 workloads/types exports', async () => {
-    const mod = await import('../src/workloads/types');
+    const mod = await import('../../src/workloads/types');
     expect(mod).toBeDefined();
   });
 
   it('#869 vault imports', async () => {
-    const mod = await import('../src/vault/vault');
+    const mod = await import('../../src/vault/vault');
     expect(mod.Vault).toBeDefined();
   });
 
   it('#870 auth imports', async () => {
-    const mod = await import('../src/auth/gpu-token');
+    const mod = await import('../../src/auth/gpu-token');
     expect(mod.signGpuToken).toBeInstanceOf(Function);
     expect(mod.verifyGpuToken).toBeInstanceOf(Function);
   });
 
   it('#871 caching imports', async () => {
-    const mod = await import('../src/caching/response-cache');
+    const mod = await import('../../src/caching/response-cache');
     expect(mod.ResponseCache).toBeDefined();
   });
 
   it('#872 language-detect imports', async () => {
-    const mod = await import('../src/language-detect');
+    const mod = await import('../../src/language-detect');
     expect(mod).toBeDefined();
   });
 });
@@ -384,20 +385,20 @@ describe('Cross-Provider Architecture (#875-#884)', () => {
   });
 
   it('#879 credit exhaustion triggers next provider', () => {
-    const src = read('src/providers/fallback.ts');
+    const src = read('src/gateway/providers/cloud/fallback.ts');
     expect(src).toContain('402');
     expect(src).toContain('creditTracker');
     expect(src).toContain('break');
   });
 
   it('#880 rate limit triggers next provider', () => {
-    const src = read('src/providers/fallback.ts');
+    const src = read('src/gateway/providers/cloud/fallback.ts');
     expect(src).toContain('429');
     expect(src).toContain('break');
   });
 
   it('#881 all providers fail returns error', () => {
-    const src = read('src/providers/fallback.ts');
+    const src = read('src/gateway/providers/cloud/fallback.ts');
     expect(src).toMatch(/throw.*last|throw.*error/i);
   });
 });
@@ -408,21 +409,24 @@ describe('Cross-Provider Architecture (#875-#884)', () => {
 
 describe('API Contracts (#941-#950)', () => {
   const ws = read('server/ws-server.ts');
+  const routes = read('server/routes/gateway/gpu.ts');
+  const inference = read('server/routes/gateway/inference.ts');
+  const workloads = read('server/routes/compute/workloads.ts');
 
   it('#941 /v1/chat/completions registered', () => {
-    expect(ws).toContain('/v1/chat/completions');
+    expect(inference).toContain('/v1/chat/completions');
   });
 
   it('#942 /v1/transcribe registered', () => {
-    expect(ws).toContain('/v1/transcribe');
+    expect(inference).toContain('/v1/transcribe');
   });
 
   it('#944 /v1/gpu/status registered', () => {
-    expect(ws).toContain('/v1/gpu/status');
+    expect(routes).toContain('/v1/gpu/status');
   });
 
   it('#945 /v1/workloads registered', () => {
-    expect(ws).toContain('/v1/workloads');
+    expect(workloads).toContain('/v1/workloads');
   });
 
   it('#946 error response format consistent', () => {
@@ -432,12 +436,14 @@ describe('API Contracts (#941-#950)', () => {
   });
 
   it('#947 JSON Content-Type on responses', () => {
-    expect(ws).toContain("'Content-Type': 'application/json'");
+    const httpApi = read('server/ws/http-api-server.ts');
+    expect(httpApi).toContain("'Content-Type': 'application/json'");
   });
 
   it('#948 CORS headers present', () => {
-    expect(ws).toContain('Access-Control-Allow-Origin');
-    expect(ws).toContain('Access-Control-Allow-Methods');
+    const httpApi = read('server/ws/http-api-server.ts');
+    expect(httpApi).toContain('Access-Control-Allow-Origin');
+    expect(httpApi).toContain('Access-Control-Allow-Methods');
   });
 });
 
@@ -447,16 +453,18 @@ describe('API Contracts (#941-#950)', () => {
 
 describe('Final coverage: Structural guarantees (#964-#1000)', () => {
   it('#971 every timer tracked', () => {
-    const src = read('server/gpu-deploy.ts');
-    expect(src).toContain('orphanSweepInitialTimer');
-    expect(src).toContain('warmthMonitorTimer');
-    expect(src).toContain('monitorInterval');
+    const orphan = read('server/gpu-orphan-cleanup.ts');
+    const warmth = read('server/gpu-warmth-monitor.ts');
+    const monitorLoop = read('server/gpu-monitor-loop.ts');
+    expect(orphan).toContain('orphanSweepInitialTimer');
+    expect(warmth).toContain('warmthMonitorTimer');
+    expect(monitorLoop).toContain('monitorInterval');
   });
 
   it('#972 every Map/Set bounded', () => {
     const ip = read('server/ip-location.ts');
     expect(ip).toContain('IP_CACHE_MAX');
-    const session = read('src/autoscaler/session-tracker.ts');
+    const session = read('src/gateway/autoscaler/session-tracker.ts');
     expect(session).toContain('10_000');
   });
 
@@ -476,7 +484,7 @@ describe('Final coverage: Structural guarantees (#964-#1000)', () => {
   });
 
   it('#977 external API calls have timeout', () => {
-    const src = read('src/gpu-providers/vast-client.ts');
+    const src = read('src/gateway/providers/gpu/vast-client.ts');
     expect(src).toMatch(/timeout|AbortSignal/);
   });
 

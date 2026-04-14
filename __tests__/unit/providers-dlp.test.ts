@@ -6,7 +6,7 @@ import {
   createComplianceConfig,
   DEFAULT_DLP_CONFIG,
   COMPLIANCE_PATTERNS,
-} from '../src/providers/dlp';
+} from '../../src/providers/dlp';
 
 const enabledConfig: typeof DEFAULT_DLP_CONFIG = {
   ...DEFAULT_DLP_CONFIG,

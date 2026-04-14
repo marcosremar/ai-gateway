@@ -1,5 +1,2 @@
-// Barrel file for @parle/ai-gateway/adapters
-
-export { InMemoryStateAdapter } from './in-memory-state';
-export { RedisStateAdapter } from './redis-state';
-export type { RedisLike } from './redis-state';
+// Barrel re-export for backwards compatibility — real implementation is in src/platform/adapters/
+export * from '../platform/adapters';
