@@ -17,6 +17,11 @@ export default defineConfig({
       { find: /^(\.\.?\/)+sdk\/node$/, replacement: path.resolve(root, 'sdk/node/index.ts') },
 
       // ── src/ path reorganizations (DDD migration) ──────────────────────
+      { find: /^(\.\.\/)+(src\/)?observability\/console-hooks$/, replacement: src('platform/observability/console-hooks.ts') },
+      { find: /^(\.\.\/)+(src\/)?observability\/webhook-hooks$/, replacement: src('platform/observability/webhook-hooks.ts') },
+      { find: /^(\.\.?\/)+src\/logger$/, replacement: src('logger.ts') },
+      { find: /^(\.\.\/)+src\/logger$/, replacement: src('logger.ts') },
+      { find: /src\/logger$/, replacement: src('logger.ts') },
       { find: /^(\.\.\/)+(src\/)?database\/pg-driver$/, replacement: src('database/pg-driver.ts') },
       { find: /^(\.\.\/)+(src\/)?gpu-providers\/deploy-settings$/, replacement: src('config/index.ts') },
       { find: /^(\.\.\/)+(src\/)?workloads\/registry$/, replacement: src('compute/workloads/index.ts') },

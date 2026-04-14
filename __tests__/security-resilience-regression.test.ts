@@ -777,13 +777,13 @@ describe('Language detection module', () => {
 
 describe('Smoke: Module imports', () => {
   it('#865 server/state.ts imports without error', async () => {
-    const mod = await import('../server/state');
+    const mod = await import('../../server/state');
     expect(mod.deployState).toBeDefined();
     expect(mod.setDeployState).toBeInstanceOf(Function);
   });
 
   it('#866 server/deployment-state-machine.ts imports', async () => {
-    const mod = await import('../server/deployment-state-machine');
+    const mod = await import('../../server/deployment-state-machine');
     expect(mod.DeploymentStateMachine).toBeDefined();
     expect(mod.deploymentSM).toBeDefined();
   });

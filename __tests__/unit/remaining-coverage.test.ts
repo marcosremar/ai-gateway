@@ -263,7 +263,7 @@ describe('Docker Image Catalog (#797-#805)', () => {
 
 describe('Deployment State Machine (#806-#815)', () => {
   it('#806-#811 all transitions', async () => {
-    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     expect(sm.phase).toBe('idle');
     sm.startDeploying();
@@ -278,7 +278,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#812 error transition from any state', async () => {
-    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     sm.startDeploying();
     sm.markError('test error');
@@ -286,7 +286,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#813 onTransition fires', async () => {
-    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     const transitions: string[] = [];
     sm.onTransition((next) => transitions.push(next.phase));
@@ -296,7 +296,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#814 toJSON serializes', async () => {
-    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     sm.markReady('pod-1', 'http://ep', 'RTX 4090', 0.5);
     const json = sm.toJSON();
@@ -306,7 +306,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#815 singleton exported', async () => {
-    const { deploymentSM } = await import('../server/deployment-state-machine');
+    const { deploymentSM } = await import('../../server/deployment-state-machine');
     expect(deploymentSM).toBeDefined();
     expect(deploymentSM.phase).toBeDefined();
   });
@@ -318,7 +318,7 @@ describe('Deployment State Machine (#806-#815)', () => {
 
 describe('Smoke: Critical imports (#865-#874)', () => {
   it('#865 server/state imports', async () => {
-    const mod = await import('../server/state');
+    const mod = await import('../../server/state');
     expect(mod.deployState).toBeDefined();
     expect(mod.botState).toBeDefined();
     expect(mod.setDeployState).toBeInstanceOf(Function);
@@ -326,7 +326,7 @@ describe('Smoke: Critical imports (#865-#874)', () => {
   });
 
   it('#866 deployment-state-machine imports', async () => {
-    const mod = await import('../server/deployment-state-machine');
+    const mod = await import('../../server/deployment-state-machine');
     expect(mod.deploymentSM).toBeDefined();
   });
 
