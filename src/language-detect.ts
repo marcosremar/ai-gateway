@@ -26,17 +26,21 @@ const ISO3_TO_ISO1: Record<string, string> = {
   glg: 'gl', cym: 'cy', gle: 'ga', isl: 'is', lat: 'la',
 };
 
-// Supported languages (ISO 639-1 codes)
+// Supported languages (ISO 639-1 codes) — the set of all languages that
+// `franc` can return via the ISO3_TO_ISO1 mapping.
 export const SUPPORTED_LANGUAGES = new Set(Object.values(ISO3_TO_ISO1));
 
 // ── Confidence estimation ────────────────────────────────────────────────────
 // franc doesn't return confidence directly, but we can estimate it by comparing
 // the probability gap between the top two candidates.
 
+/**
+ * Result of a language detection operation.
+ */
 export interface LanguageDetectResult {
   /** Detected ISO 639-1 language code (e.g. "fr", "en"), or "" if undetermined */
   language: string;
-  /** Confidence score 0-1. Higher = more confident. */
+  /** Confidence score 0–1. Higher = more confident. Values below 0.65 are generally unreliable. */
   confidence: number;
 }
 
@@ -44,12 +48,28 @@ export interface LanguageDetectResult {
 const MIN_WORDS = 4;
 
 /**
- * Detect language of text, restricted to source and target languages.
+ * Detect the language of a text, restricted to a source and target language.
+ *
+ * Uses `franc` (trigram-based, pure JS) to classify the text. The detection
+ * is restricted to only the two candidate languages to avoid false positives.
+ * Confidence is estimated by comparing restricted vs. unrestricted results.
+ *
+ * Texts shorter than 4 words return `{ language: '', confidence: 0 }` because
+ * short texts are unreliable for trigram-based detection.
  *
  * @param text - Text to classify
- * @param source - Expected source language (ISO 639-1, e.g. "fr")
- * @param target - Expected target language (ISO 639-1, e.g. "en")
- * @returns Detection result with language code and confidence
+ * @param source - Expected source language ISO 639-1 code (e.g. "fr")
+ * @param target - Expected target language ISO 639-1 code (e.g. "en")
+ * @returns Detection result with language code and confidence (0–1)
+ *
+ * @example
+ * ```typescript
+ * const result = detectLanguage("Bonjour le monde", "fr", "en");
+ * // result: { language: "fr", confidence: 0.9 }
+ *
+ * const short = detectLanguage("Hi", "fr", "en");
+ * // short: { language: "", confidence: 0 }  // too short
+ * ```
  */
 export function detectLanguage(text: string, source: string, target: string): LanguageDetectResult {
   if (!text || text.trim().split(/\s+/).length < MIN_WORDS) {
@@ -110,13 +130,27 @@ export function detectLanguage(text: string, source: string, target: string): La
 }
 
 /**
- * Detect language with swap recommendation.
- * Returns whether the detected language suggests a swap is needed.
+ * Detect language and recommend whether to swap source and target.
  *
- * @param text - Transcribed text
- * @param source - Expected source language
- * @param target - Expected target language
- * @param minConfidence - Minimum confidence to trust detection (default: 0.65)
+ * Useful for speech-to-text pipelines where the speaker may have used the
+ * wrong language. If the detected language matches the *target* language
+ * (not the source), this function recommends a swap.
+ *
+ * @param text - Transcribed text to analyze
+ * @param source - Expected source language ISO 639-1 code
+ * @param target - Expected target language ISO 639-1 code
+ * @param minConfidence - Minimum confidence threshold to trust the detection (default: 0.65)
+ * @returns Object with detection result and a `shouldSwap` boolean
+ *
+ * @example
+ * ```typescript
+ * const { detected, shouldSwap } = detectLanguageWithSwap(
+ *   "Hello world, how are you?",
+ *   "fr", // expected French
+ *   "en"  // expected English
+ * );
+ * // shouldSwap: true — the speaker used English, not French
+ * ```
  */
 export function detectLanguageWithSwap(
   text: string,

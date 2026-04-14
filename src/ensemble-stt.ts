@@ -11,35 +11,72 @@ import type { STTProvider, STTResponse } from './providers/types';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+/**
+ * Embedding provider used as a fallback for semantic similarity comparison
+ * when Jaccard similarity is insufficient.
+ */
 export interface EmbeddingProvider {
+  /** Human-readable provider name */
   name: string;
+  /** Unique identifier for this provider */
   providerId: string;
+  /** Whether the provider has valid credentials and configuration */
   isConfigured(): boolean;
+  /** Generate embedding vectors for a list of texts. */
   embed(texts: string[]): Promise<number[][]>;
 }
 
+/** A single STT provider entry in the ensemble configuration. */
 export interface STTProviderEntry {
+  /** Human-readable name (e.g. "openai-whisper", "deepgram") */
   name: string;
+  /** The STT provider instance */
   provider: STTProvider;
 }
 
+/**
+ * Dependencies injected into the ensemble STT runner.
+ *
+ * This interface keeps the function pure and testable — all external
+ * dependencies (providers, thresholds, timeouts) are passed in.
+ */
 export interface STTVerifierDeps {
+  /** List of STT providers to race against each other */
   providers: STTProviderEntry[];
+  /** Jaccard similarity threshold for outlier detection (default: 0.3) */
   outlierThreshold?: number;
+  /** Per-provider timeout in milliseconds. If 0 or unset, no timeout is applied. */
   timeoutMs?: number;
+  /** Fallback embedding providers for semantic similarity scoring */
   embeddingFallbacks?: EmbeddingProvider[];
+  /** Minimum embedding similarity to consider a result valid */
   embeddingFallbackThreshold?: number;
 }
 
+/**
+ * Result returned after running the ensemble STT verification.
+ *
+ * Contains the consensus text, per-provider results, similarity scores,
+ * and latency metrics.
+ */
 export interface STTVerifierResult {
+  /** The winning transcription text */
   consensus: string;
+  /** Similarity method used ("jaccard" or "embedding") */
   similarity_method: 'jaccard' | 'embedding';
+  /** Number of providers that participated */
   used_providers: number;
+  /** Per-provider transcription results */
   providers: Record<string, string>;
+  /** Per-provider similarity scores */
   scores: Record<string, number>;
+  /** Provider names identified as outliers */
   outliers: string[];
+  /** Total elapsed time in milliseconds */
   latency_ms: number;
+  /** Word-level segments from the winning provider (if available) */
   segments?: STTResponse['segments'];
+  /** Average log probability from the winning provider (if available) */
   avg_logprob?: number;
 }
 
@@ -66,13 +103,26 @@ function jaccardSimilarity(a: string, b: string): number {
 /**
  * Race all configured STT providers and return the first successful result.
  *
- * Tracks deadline timers that are always cleared in a finally block to avoid
- * memory/timer leaks.
+ * Uses `Promise.any` to race providers. Deadline timers are tracked and
+ * always cleared in a `finally` block to prevent orphaned `setTimeout` handles.
  *
- * @param audio     Raw audio buffer
- * @param language  BCP-47 language code (e.g. 'en', 'fr')
- * @param prompt    Optional system prompt for transcription
+ * @param audio     Raw audio buffer to transcribe
+ * @param language  BCP-47 language code (e.g. "en", "fr")
+ * @param prompt    Optional system prompt to guide transcription
  * @param deps      Injected providers and settings
+ * @returns Result containing the winning transcription, scores, and latency
+ * @throws Error if no STT providers are configured or all providers fail
+ *
+ * @example
+ * ```typescript
+ * const result = await runVerifiedSTT(
+ *   audioBuffer,
+ *   'en',
+ *   'This is a medical consultation',
+ *   { providers: [{ name: 'openai', provider: openaiStt }] }
+ * );
+ * console.log(result.consensus); // winning transcription
+ * ```
  */
 export async function runVerifiedSTT(
   audio: Buffer,
@@ -165,5 +215,5 @@ export async function runVerifiedSTT(
   }
 }
 
-/** Alias for runVerifiedSTT — exported for backward compatibility. */
+/** Alias for `runVerifiedSTT` — exported for backward compatibility. */
 export const runEnsembleSTT = runVerifiedSTT;

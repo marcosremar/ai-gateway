@@ -20,6 +20,8 @@ import { PORT } from './config';
 // Re-export consolidated SSRF check from ai-handlers (single source of truth)
 import { isPrivateUrl } from './ai-handlers';
 export { isPrivateUrl };
+import { validateInput } from '../src/input-validator';
+import { BotDeployRequestSchema, BotJoinRequestSchema, BotStreamPageRequestSchema } from '../src/contracts';
 
 /** Redact meeting URL for logging — show only protocol + domain, hide path/query. */
 function redactMeetingUrl(url: string): string {
@@ -396,9 +398,18 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
   try { body = await readJsonBody(req); }
   catch (e) { setBotDeployLock(false); handleBodyError(res, e); return; }
 
-  const isLocal = !!(body.local);
-  const botDockerImage = (body.dockerImage as string) || BOT_DOCKER_IMAGE;
-  const enableAvatar = !!(body.enableAvatar || body.avatar);
+  const deployResult = validateInput(body, BotDeployRequestSchema);
+  if (!deployResult.ok) {
+    setBotDeployLock(false);
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: deployResult.details }));
+    return;
+  }
+  const deployData = deployResult.data;
+
+  const isLocal = !!(deployData.local);
+  const botDockerImage = deployData.dockerImage || BOT_DOCKER_IMAGE;
+  const enableAvatar = !!(deployData.enableAvatar || deployData.avatar);
 
   // ── Local Docker deploy ──
   if (isLocal) {
@@ -431,7 +442,7 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
 
   // ── Cloud deploy (Fly.io preferred, RunPod fallback) ──
   const flyKey = process.env.FLY_API_TOKEN || '';
-  const apiKey = (body.apiKey as string) || deployApiKey || process.env.RUNPOD_API_KEY || '';
+  const apiKey = deployData.apiKey || deployApiKey || process.env.RUNPOD_API_KEY || '';
   if (!flyKey && !apiKey) {
     setBotDeployLock(false);
     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -439,8 +450,8 @@ export async function handleBotDeploy(req: IncomingMessage, res: ServerResponse)
     return;
   }
   if (apiKey) setBotApiKey(apiKey);
-  const forceCpu = !!(body.cpuOnly || body.cpu);
-  const preferFlyio = !!flyKey && !body.runpod; // Fly.io is default when token available
+  const forceCpu = !!(deployData.cpuOnly || deployData.cpu);
+  const preferFlyio = !!flyKey && !deployData.runpod; // Fly.io is default when token available
 
   // Generate a random API key for bot pod HTTP auth
   const podApiKey = crypto.randomUUID();
@@ -737,11 +748,19 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
-  const meetingUrl = (body.meetingUrl as string) || '';
-  const botName = (body.botName as string) || 'BabelCast Bot';
-  const sourceLang = (body.source as string) || 'fr';
-  const targetLang = (body.target as string) || 'en';
-  const streamKey = (body.streamKey as string) || '';
+  const joinResult = validateInput(body, BotJoinRequestSchema);
+  if (!joinResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: joinResult.details }));
+    return;
+  }
+  const joinData = joinResult.data;
+
+  const meetingUrl = joinData.meetingUrl;
+  const botName = joinData.botName || 'BabelCast Bot';
+  const sourceLang = joinData.source || 'fr';
+  const targetLang = joinData.target || 'en';
+  const streamKey = joinData.streamKey || '';
 
   if (!meetingUrl) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1105,6 +1124,13 @@ export async function handleBotStreamPage(req: IncomingMessage, res: ServerRespo
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
+  const streamResult = validateInput(body, BotStreamPageRequestSchema);
+  if (!streamResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: streamResult.details }));
+    return;
+  }
+
   if (botState.status !== 'joined') {
     res.writeHead(409, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `Bot not in a meeting (status: ${botState.status})` }));
@@ -1122,7 +1148,7 @@ export async function handleBotStreamPage(req: IncomingMessage, res: ServerRespo
     const apiRes = await fetch(`${ep}/stream-page`, {
       method: 'POST',
       headers: botHeaders(),
-      body: JSON.stringify(body),
+      body: JSON.stringify(streamResult.data),
       signal: AbortSignal.timeout(60_000),
     });
     const isJson = (apiRes.headers.get('content-type') ?? '').includes('application/json');

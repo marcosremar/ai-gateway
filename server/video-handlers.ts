@@ -8,7 +8,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { deployState } from './state';
 import { readJsonBody, handleBodyError } from './http-utils';
 
-const GENERATE_TIMEOUT_MS = 600_000; // 10 min — large models can be slow
+const GENERATE_TIMEOUT_MS = 1_200_000; // 20 min — long videos need more time
 
 export async function handleVideoGenerate(req: IncomingMessage, res: ServerResponse): Promise<void> {
   let body: Record<string, unknown>;

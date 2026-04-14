@@ -14,6 +14,8 @@ import { getOrCreateRequestId, setRequestIdHeader, readJsonBody, handleBodyError
 import { workloadRegistry } from '../src/workloads/registry';
 import type { WorkloadConfig, WorkloadType } from '../src/workloads/types';
 import { createLogger } from '../src/logger';
+import { validateInput } from '../src/input-validator';
+import { WorkloadDeployRequestSchema } from '../src/contracts';
 
 const log = createLogger('workload-handlers');
 
@@ -40,23 +42,19 @@ export async function handleWorkloadDeploy(req: IncomingMessage, res: ServerResp
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
-  const name = body.name as string;
-  const type = body.type as WorkloadType;
-
-  if (!name || !type) {
+  const validationResult = validateInput(body, WorkloadDeployRequestSchema);
+  if (!validationResult.ok) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'name and type are required' }));
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
     return;
   }
+  const validated = validationResult.data;
 
-  if (!['gpu', 'bot', 'db'].includes(type)) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: `Invalid workload type: ${type}. Must be gpu, bot, or db` }));
-    return;
-  }
+  const name = validated.name;
+  const type = validated.type;
 
-  // Build typed config from body
-  const config = { ...body.config as Record<string, unknown> || {}, type } as WorkloadConfig;
+  // Build typed config from validated data
+  const config = { ...validated.config || {}, type } as WorkloadConfig;
 
   try {
     const workload = await workloadRegistry.deploy(name, config);

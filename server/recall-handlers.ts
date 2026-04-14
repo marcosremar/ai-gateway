@@ -6,6 +6,8 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { readJsonBody, handleBodyError } from './http-utils';
 import { broadcastWs } from './ws-state';
 import { createLogger } from '../src/logger';
+import { validateInput } from '../src/input-validator';
+import { RecallJoinRequestSchema, RecallWebhookRequestSchema } from '../src/contracts';
 
 const log = createLogger('recall-handlers');
 
@@ -94,8 +96,15 @@ export async function handleRecallJoin(req: IncomingMessage, res: ServerResponse
     return;
   }
 
-  const meetingUrl = typeof body.meetingUrl === 'string' ? body.meetingUrl.trim() : '';
-  const botName = typeof body.botName === 'string' ? body.botName.trim() : 'BabelCast';
+  const validationResult = validateInput(body, RecallJoinRequestSchema);
+  if (!validationResult.ok) {
+    jsonResponse(res, 400, { error: 'Validation failed', details: validationResult.details });
+    return;
+  }
+  const validated = validationResult.data;
+
+  const meetingUrl = validated.meetingUrl;
+  const botName = validated.botName || 'BabelCast';
 
   if (!meetingUrl) {
     jsonResponse(res, 400, { error: 'meetingUrl is required' });
@@ -208,8 +217,15 @@ export async function handleRecallWebhook(req: IncomingMessage, res: ServerRespo
     return;
   }
 
-  const event = typeof body.event === 'string' ? body.event : '';
-  const data = (body.data ?? {}) as Record<string, unknown>;
+  const validationResult = validateInput(body, RecallWebhookRequestSchema);
+  if (!validationResult.ok) {
+    jsonResponse(res, 400, { error: 'Validation failed', details: validationResult.details });
+    return;
+  }
+  const validated = validationResult.data;
+
+  const event = validated.event || '';
+  const data = validated.data || {};
 
   log.log(`event=${event} bot_id=${data.bot_id ?? '?'}`);
 

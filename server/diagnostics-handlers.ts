@@ -16,6 +16,8 @@ import { getOrCreateRequestId, setRequestIdHeader, readJsonBody } from './http-u
 import { getLatencyDbStats, getAllHostLatencies } from './latency-db';
 import { defaultPerformanceRanker } from '../src/providers/performance-ranker';
 import { PORT } from './config';
+import { validateInput } from '../src/input-validator';
+import { DiagnosticsCleanupRequestSchema, DiagnosticsBenchmarkRequestSchema } from '../src/contracts';
 
 // ── GET /v1/diagnostics/scores ─────────────────────────────────────────────
 
@@ -173,10 +175,17 @@ export async function handleDiagnosticsCleanup(req: IncomingMessage, res: Server
   setRequestIdHeader(res, requestId);
 
   const body = await readJsonBody(req).catch(() => ({})) as Record<string, unknown>;
-  const requestLogDays = typeof body.requestLogDays === 'number' ? body.requestLogDays : 30;
-  const gpuEventDays = typeof body.gpuEventDays === 'number' ? body.gpuEventDays : 90;
-  const staleHostDays = typeof body.staleHostDays === 'number' ? body.staleHostDays : 60;
-  const dryRun = body.dryRun !== false; // default true for safety
+  const validationResult = validateInput(body, DiagnosticsCleanupRequestSchema);
+  if (!validationResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
+    return;
+  }
+  const validated = validationResult.data;
+  const requestLogDays = validated.requestLogDays ?? 30;
+  const gpuEventDays = validated.gpuEventDays ?? 90;
+  const staleHostDays = validated.staleHostDays ?? 60;
+  const dryRun = validated.dryRun !== false; // default true for safety
 
   try {
     const now = new Date();
@@ -291,8 +300,15 @@ export async function handleDiagnosticsBenchmark(req: IncomingMessage, res: Serv
   }
 
   const body = await readJsonBody(req).catch(() => ({})) as Record<string, unknown>;
-  const rounds = Math.min(typeof body.rounds === 'number' ? body.rounds : 3, 10);
-  const testText = typeof body.text === 'string' ? body.text : 'This is a benchmark test for latency measurement.';
+  const validationResult = validateInput(body, DiagnosticsBenchmarkRequestSchema);
+  if (!validationResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
+    return;
+  }
+  const validated = validationResult.data;
+  const rounds = Math.min(validated.rounds ?? 3, 10);
+  const testText = validated.text || 'This is a benchmark test for latency measurement.';
 
   const endpoint = deployState.endpoint;
   const results: Array<{

@@ -15,10 +15,21 @@ import { defaultLogger } from '../logger';
 /** Rate-limit per-user watchdog to 2 min */
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS || String(2 * 60 * 1000), 10);
 
+/**
+ * Dependencies required by the watchdog functions.
+ *
+ * The watchdog iterates over users with active GPU state and stops idle
+ * tiers. It needs access to the autoscaler engine, session tracker,
+ * persistence layer, and GPU provider registry.
+ */
 export interface WatchdogDeps {
+  /** The autoscaler engine that manages tier states */
   engine: AutoscalerEngine;
+  /** Tracks active sessions per user */
   sessionTracker: SessionTracker;
+  /** Persists tier state to durable storage */
   persistence: StatePersistence;
+  /** Registry of GPU provider clients */
   registry: GpuProviderRegistry;
   /** Load config for a given user. Provided by host app. */
   loadConfig: (userId: string) => Promise<AutoScalerConfig | null>;
@@ -31,9 +42,25 @@ export interface WatchdogDeps {
 }
 
 /**
- * Pure function: run one watchdog cycle.
- * Iterates all users with active GPU state and stops idle tiers.
- * Designed to be called from an external cron job or background ticker.
+ * Run one complete watchdog cycle.
+ *
+ * Iterates all users with active GPU state and stops idle tiers. On the
+ * first call, preloads from the database to catch orphaned GPUs. Also
+ * evicts idle users to prevent unbounded state map growth.
+ *
+ * Designed to be called from an external cron job or via `startBackgroundTicker`.
+ *
+ * @param deps - Watchdog dependencies (engine, session tracker, persistence, etc.)
+ *
+ * @example
+ * ```typescript
+ * // Run as a one-off cycle
+ * await runWatchdogCycle({ engine, sessionTracker, persistence, registry, loadConfig });
+ *
+ * // Or set up a background ticker
+ * const stop = startBackgroundTicker(deps);
+ * // ... later: stop();
+ * ```
  */
 export async function runWatchdogCycle(deps: WatchdogDeps): Promise<void> {
   const { engine, persistence, loadConfig } = deps;
@@ -75,8 +102,25 @@ export async function runWatchdogCycle(deps: WatchdogDeps): Promise<void> {
 }
 
 /**
- * Rate-limited per-user watchdog trigger (called from request handlers).
- * Returns whether the watchdog actually ran.
+ * Schedule a rate-limited per-user watchdog run.
+ *
+ * Runs the watchdog for a specific user, but only if the cooldown interval
+ * has elapsed since the last run for that user. The actual work happens
+ * asynchronously (fire-and-forget).
+ *
+ * @param deps - Watchdog dependencies
+ * @param userId - User whose GPU tiers should be checked
+ * @param config - User's autoscaler configuration
+ * @param lastWatchdogMap - Map tracking the last run time per user (shared across calls)
+ *
+ * @example
+ * ```typescript
+ * const lastRunMap = new Map<string, number>();
+ *
+ * // Called from a request handler
+ * scheduleWatchdog(deps, userId, config, lastRunMap);
+ * // Runs at most once every 2 minutes per user
+ * ```
  */
 export function scheduleWatchdog(
   deps: WatchdogDeps,
@@ -94,9 +138,29 @@ export function scheduleWatchdog(
 }
 
 /**
- * Optionally start a background ticker that calls runWatchdogCycle periodically.
- * For apps that still want setInterval behavior (e.g., long-running processes).
- * Returns a cleanup function to stop the ticker.
+ * Start a background ticker that runs `runWatchdogCycle` at a fixed interval.
+ *
+ * Useful for long-running processes that want `setInterval`-style periodic
+ * execution without an external cron scheduler. The returned cleanup
+ * function stops the timer.
+ *
+ * @param deps - Watchdog dependencies
+ * @param intervalMs - Interval between cycles in milliseconds (default: 2 minutes, or `WATCHDOG_INTERVAL_MS` env var)
+ * @returns A cleanup function to stop the ticker
+ *
+ * @example
+ * ```typescript
+ * // Start the ticker
+ * const stopTicker = startBackgroundTicker(deps);
+ *
+ * // Or with a custom interval (every 30 seconds)
+ * const stop = startBackgroundTicker(deps, 30_000);
+ *
+ * // Stop when shutting down
+ * process.on('SIGTERM', () => {
+ *   stopTicker();
+ * });
+ * ```
  */
 export function startBackgroundTicker(deps: WatchdogDeps, intervalMs: number = WATCHDOG_INTERVAL_MS): () => void {
   const log = deps.logger ?? defaultLogger;

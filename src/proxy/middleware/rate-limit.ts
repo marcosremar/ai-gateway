@@ -21,6 +21,26 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex').slice(0, 16);
 }
 
+/**
+ * Token bucket rate limiter with burst allowance.
+ *
+ * Identifies clients by API key (hashed) when available, falling back to
+ * socket IP. Each client gets its own bucket that refills at a steady rate.
+ * Expired buckets are periodically cleaned up to prevent memory leaks.
+ *
+ * @example
+ * ```typescript
+ * const limiter = new RateLimiter(60); // 60 RPM
+ * const result = limiter.check('client-123');
+ * if (!result.allowed) {
+ *   res.writeHead(429, {
+ *     'X-RateLimit-Limit': String(result.limit),
+ *     'X-RateLimit-Remaining': String(result.remaining),
+ *     'X-RateLimit-Reset': String(result.resetAt),
+ *   });
+ * }
+ * ```
+ */
 export class RateLimiter {
   private buckets = new Map<string, Bucket>();
   /** Maximum tokens (burst capacity = 1.5x per-second rate) */
@@ -30,6 +50,12 @@ export class RateLimiter {
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private static readonly MAX_BUCKETS = 10_000;
 
+  /**
+   * Create a rate limiter with the specified request rate.
+   *
+   * @param rpm - Maximum requests per minute. The bucket capacity equals this value,
+   *              and tokens refill at `rpm / 60,000` tokens per millisecond.
+   */
   constructor(rpm: number) {
     // Token bucket: capacity = RPM (allows full minute burst), refills at RPM/60s rate
     this.capacity = Math.max(1, rpm);
@@ -40,8 +66,20 @@ export class RateLimiter {
   }
 
   /**
-   * Extract a stable client identifier.
-   * Uses SHA-256 hash of API key to prevent rate limit evasion via key prefix guessing.
+   * Extract a stable client identifier from an incoming HTTP request.
+   *
+   * Uses a SHA-256 hash of the API key (first 16 hex chars) to prevent rate
+   * limit evasion via key prefix guessing. Falls back to the socket's
+   * remote IP address if no API key is present.
+   *
+   * @param req - Incoming HTTP request
+   * @returns A client identifier string prefixed with "key:" or "ip:"
+   *
+   * @example
+   * ```typescript
+   * const clientId = RateLimiter.clientId(req);
+   * // "key:a1b2c3d4e5f6a7b8" or "ip:192.168.1.1"
+   * ```
    */
   static clientId(req: IncomingMessage): string {
     const auth = req.headers.authorization;
@@ -54,7 +92,23 @@ export class RateLimiter {
     return `ip:${req.socket.remoteAddress || 'unknown'}`;
   }
 
-  /** Result of a rate limit check, including header data for the response. */
+  /**
+   * Check whether a client is allowed to make a request and consume one token.
+   *
+   * Refills tokens based on elapsed time since the last check. Returns
+   * rate limit header values suitable for `X-RateLimit-*` headers.
+   *
+   * @param clientId - Client identifier (from `RateLimiter.clientId()` or custom)
+   * @returns Result indicating whether the request is allowed, along with rate limit metadata
+   *
+   * @example
+   * ```typescript
+   * const result = limiter.check('key:a1b2c3d4');
+ * res.setHeader('X-RateLimit-Limit', String(result.limit));
+   * res.setHeader('X-RateLimit-Remaining', String(result.remaining));
+   * res.setHeader('X-RateLimit-Reset', String(result.resetAt));
+   * ```
+   */
   check(clientId: string): {
     allowed: boolean;
     /** Total capacity (tokens per window). Maps to X-RateLimit-Limit. */
@@ -128,6 +182,12 @@ export class RateLimiter {
     }
   }
 
+  /**
+   * Stop the cleanup timer and release resources.
+   *
+   * Call this when shutting down the server to prevent the Node.js event
+   * loop from staying alive due to the unref'd interval timer.
+   */
   destroy(): void {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);

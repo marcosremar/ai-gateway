@@ -25,6 +25,8 @@ import {
 import type { AIProfile } from '../src/client';
 import type { STTProvider, LLMProvider, TTSProvider } from '../src/providers/types';
 import { readJsonBody, getOrCreateRequestId, setRequestIdHeader, langNames } from './http-utils';
+import { validateInput } from '../src/input-validator';
+import { BenchmarkRealtimeRequestSchema, BenchmarkPathsRequestSchema } from '../src/contracts';
 import { PORT } from './config';
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -640,8 +642,16 @@ export async function handleRealtimeTTFCBenchmark(req: IncomingMessage, res: Ser
     intervalMs?: number;
   } | undefined;
 
-  const requestCount = Math.min(body?.requestCount || 10, 50); // Max 50 requests
-  const intervalMs = body?.intervalMs || 2000; // Default 2s between requests
+  const validationResult = validateInput(body || {}, BenchmarkRealtimeRequestSchema);
+  if (!validationResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
+    return;
+  }
+  const validated = validationResult.data;
+
+  const requestCount = Math.min(validated.requestCount || 10, 50); // Max 50 requests
+  const intervalMs = validated.intervalMs || 2000; // Default 2s between requests
 
   log.log(`[rt-bench] Starting realtime TTFC benchmark: ${requestCount} requests @ ${intervalMs}ms intervals`);
 
@@ -701,15 +711,23 @@ export async function handleBenchmarkPaths(req: IncomingMessage, res: ServerResp
     return;
   }
 
-  const iterations = Math.min(Math.max(Number(body.iterations) || 3, 1), 20);
-  const pipelineIterations = Math.min(Math.max(Number(body.pipelineIterations) || 5, 0), 30);
-  const warmupIterations = Math.min(Math.max(Number(body.warmupIterations) || 2, 0), 5);
-  const source = (body.source as string) || 'fr';
-  const target = (body.target as string) || 'en';
-  const speaker = (body.speaker as string) || 'Ryan';
-  const testText = (body.testText as string) || "Bonjour, comment allez-vous aujourd'hui? Je suis content de vous voir ici.";
-  const includeGpu = body.includeGpu !== false;
-  const includeCloud = body.includeCloud !== false;
+  const validationResult = validateInput(body, BenchmarkPathsRequestSchema);
+  if (!validationResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
+    return;
+  }
+  const validated = validationResult.data;
+
+  const iterations = Math.min(Math.max(validated.iterations || 3, 1), 20);
+  const pipelineIterations = Math.min(Math.max(validated.pipelineIterations || 5, 0), 30);
+  const warmupIterations = Math.min(Math.max(validated.warmupIterations || 2, 0), 5);
+  const source = validated.source || 'fr';
+  const target = validated.target || 'en';
+  const speaker = validated.speaker || 'Ryan';
+  const testText = validated.testText || "Bonjour, comment allez-vous aujourd'hui? Je suis content de vous voir ici.";
+  const includeGpu = validated.includeGpu !== false;
+  const includeCloud = validated.includeCloud !== false;
 
   const notes: string[] = [];
   const gpuAvail = hasGpuEndpoint();

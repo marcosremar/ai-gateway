@@ -64,6 +64,9 @@ vi.mock('../server/providers', () => ({
     synthesize: (...args: unknown[]) => mockSynthesize(...args),
     pipeline: (...args: unknown[]) => mockPipeline(...args),
   },
+  groqProfile: { stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'groq', model: 'orpheus' }] },
+  ollamaProfile: null,
+  translationProfile: { stt: [], llm: [], tts: [] },
   groqDefaults: { stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'groq', model: 'orpheus' }] },
   ollamaDefaults: null,
   translationDefaults: { stt: [], llm: [], tts: [] },
@@ -76,10 +79,10 @@ vi.mock('../server/providers', () => ({
   ollamaAvailable: false,
   whisperHost: '',
   ENSEMBLE_STT_PROVIDERS: ['all'],
-  groqSTT: { transcribe: vi.fn() },
-  openaiSTT: { transcribe: vi.fn() },
-  deepgramSTT: { transcribe: vi.fn() },
-  fireworksSTT: { transcribe: vi.fn() },
+  groqSTT: { transcribe: vi.fn(), getModels: () => [{ id: 'whisper-large-v3-turbo', name: 'Whisper', capability: 'stt' }] },
+  openaiSTT: { transcribe: vi.fn(), getModels: () => [{ id: 'gpt-4o-transcribe', name: 'GPT-4o Transcribe', capability: 'stt' }] },
+  deepgramSTT: { transcribe: vi.fn(), getModels: () => [{ id: 'nova-3', name: 'Nova 3', capability: 'stt' }] },
+  fireworksSTT: { transcribe: vi.fn(), getModels: () => [{ id: 'whisper-v3', name: 'Whisper v3', capability: 'stt' }] },
   groqLLM: mockChatProvider,
   fireworksLLM: null,
   groqLlmModel: 'llama-3.3-70b-versatile',
@@ -135,6 +138,11 @@ vi.mock('../server/ws-state', () => ({
 // Mock src/ensemble-stt.ts
 vi.mock('../src/ensemble-stt', () => ({
   runEnsembleSTT: vi.fn(),
+}));
+
+// Mock src/stt-race.ts
+vi.mock('../src/stt-race', () => ({
+  sttRace: vi.fn(),
 }));
 
 // Mock src/observability/distributed-tracer.ts
@@ -707,17 +715,15 @@ describe('handleEnsembleTranscribe', () => {
 
   // #022: Returns ensemble result from multiple providers
   it('#022 returns ensemble consensus result', async () => {
-    const { runEnsembleSTT } = await import('../src/ensemble-stt');
-    vi.mocked(runEnsembleSTT).mockResolvedValueOnce({
-      consensus: 'Bonjour le monde',
-      providers: { groq: { text: 'Bonjour le monde', latency_ms: 100 } },
-      latency_ms: 120,
-      similarity_method: 'jaccard',
-      embedding_provider: undefined,
+    const { sttRace } = await import('../src/stt-race');
+    vi.mocked(sttRace).mockResolvedValueOnce({
+      text: 'Bonjour le monde',
+      provider: 'groq',
+      latencyMs: 120,
       segments: [],
-      avg_logprob: -0.3,
-      compression_ratio: 1.2,
-      no_speech_prob: 0.01,
+      avgLogprob: -0.3,
+      compressionRatio: 1.2,
+      noSpeechProb: 0.01,
     });
 
     const audio = fakeAudio(2000);
@@ -725,22 +731,20 @@ describe('handleEnsembleTranscribe', () => {
     const res = fakeRes();
     await handleEnsembleTranscribe(req, res);
     expect(res.statusCode).toBe(200);
-    expect(res.json.consensus).toBe('Bonjour le monde');
+    expect(res.json.text).toBe('Bonjour le monde');
   });
 
   // #023: Respects timeout_ms query parameter
   it('#023 respects timeout_ms query parameter', async () => {
-    const { runEnsembleSTT } = await import('../src/ensemble-stt');
-    vi.mocked(runEnsembleSTT).mockResolvedValueOnce({
-      consensus: 'Test',
-      providers: { groq: { text: 'Test', latency_ms: 50 } },
-      latency_ms: 60,
-      similarity_method: 'jaccard',
-      embedding_provider: undefined,
+    const { sttRace } = await import('../src/stt-race');
+    vi.mocked(sttRace).mockResolvedValueOnce({
+      text: 'Test',
+      provider: 'groq',
+      latencyMs: 60,
       segments: [],
-      avg_logprob: 0,
-      compression_ratio: 1.0,
-      no_speech_prob: 0,
+      avgLogprob: 0,
+      compressionRatio: 1.0,
+      noSpeechProb: 0,
     });
 
     const audio = fakeAudio();
@@ -748,8 +752,8 @@ describe('handleEnsembleTranscribe', () => {
     const res = fakeRes();
     await handleEnsembleTranscribe(req, res);
     expect(res.statusCode).toBe(200);
-    // Verify runEnsembleSTT was called with the 2000ms timeout
-    expect(runEnsembleSTT).toHaveBeenCalledWith(
+    // Verify sttRace was called with the 2000ms timeout
+    expect(sttRace).toHaveBeenCalledWith(
       expect.any(Buffer),
       expect.any(String),
       expect.any(String),
@@ -759,23 +763,21 @@ describe('handleEnsembleTranscribe', () => {
 
   // #024: Caps timeout_ms at 10_000
   it('#024 caps timeout_ms at 10000ms', async () => {
-    const { runEnsembleSTT } = await import('../src/ensemble-stt');
-    vi.mocked(runEnsembleSTT).mockResolvedValueOnce({
-      consensus: 'Test',
-      providers: {},
-      latency_ms: 50,
-      similarity_method: 'jaccard',
-      embedding_provider: undefined,
+    const { sttRace } = await import('../src/stt-race');
+    vi.mocked(sttRace).mockResolvedValueOnce({
+      text: 'Test',
+      provider: 'groq',
+      latencyMs: 50,
       segments: [],
-      avg_logprob: 0,
-      compression_ratio: 1.0,
-      no_speech_prob: 0,
+      avgLogprob: 0,
+      compressionRatio: 1.0,
+      noSpeechProb: 0,
     });
     const audio = fakeAudio();
     const req = fakeReq('POST', '/v1/transcribe/ensemble?timeout_ms=60000', audio, { 'content-type': 'audio/wav' });
     const res = fakeRes();
     await handleEnsembleTranscribe(req, res);
-    expect(runEnsembleSTT).toHaveBeenCalledWith(
+    expect(sttRace).toHaveBeenCalledWith(
       expect.any(Buffer), expect.any(String), expect.any(String),
       expect.objectContaining({ timeoutMs: 10_000 }),
     );
@@ -783,8 +785,8 @@ describe('handleEnsembleTranscribe', () => {
 
   // #025: Returns 500 on internal error
   it('#025 returns 500 when ensemble engine throws', async () => {
-    const { runEnsembleSTT } = await import('../src/ensemble-stt');
-    vi.mocked(runEnsembleSTT).mockRejectedValueOnce(new Error('Ensemble failed'));
+    const { sttRace } = await import('../src/stt-race');
+    vi.mocked(sttRace).mockRejectedValueOnce(new Error('Ensemble failed'));
     const audio = fakeAudio();
     const req = fakeReq('POST', '/v1/transcribe/ensemble', audio, { 'content-type': 'audio/wav' });
     const res = fakeRes();
