@@ -37,7 +37,7 @@ export function getOrCreateClient(
   apiKey: string,
   defaultHeaders?: Record<string, string>,
 ): OpenAI {
-  const headersKey = defaultHeaders && Object.keys(defaultHeaders).length > 0
+  const headersKey = defaultHeaders !== undefined
     ? JSON.stringify(defaultHeaders)
     : '\0';
   const keyHash = apiKey ? createHash('sha256').update(apiKey).digest('hex').slice(0, 16) : '';

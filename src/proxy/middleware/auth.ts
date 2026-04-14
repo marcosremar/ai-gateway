@@ -20,6 +20,26 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(aBuf, bBuf);
 }
 
+/**
+ * Validate a Bearer token against the configured API keys using a timing-safe comparison.
+ *
+ * Uses `crypto.timingSafeEqual` to prevent timing attacks that could leak
+ * partial key information. When `validKeys` is empty, auth is disabled
+ * (open mode) and all requests are allowed through.
+ *
+ * @param authHeader - The `Authorization` header value from the incoming request (e.g. "Bearer abc123")
+ * @param validKeys - Array of valid API keys to check against
+ * @returns `true` if the token matches any key, or if no keys are configured (open mode)
+ *
+ * @example
+ * ```typescript
+ * const isValid = validateAuth(req.headers.authorization, config.apiKeys);
+ * if (!isValid) {
+ *   res.writeHead(401);
+ *   res.end('Unauthorized');
+ * }
+ * ```
+ */
 export function validateAuth(authHeader: string | undefined, validKeys: string[]): boolean {
   if (validKeys.length === 0) return true; // no auth configured = allow all (open mode)
   if (!authHeader) {

@@ -1,5 +1,13 @@
 # AI Gateway — Claude Code Guidelines
 
+## Domain model & design docs
+
+Before implementing any feature, read:
+- [`docs/domain-model.md`](docs/domain-model.md) — ubiquitous language, bounded contexts, states, events
+- [`docs/sdd.md`](docs/sdd.md) — architectural decisions, module responsibilities, what NOT to do
+
+Use the vocabulary from `domain-model.md` in all code and prompts. Respect the boundaries in `sdd.md`.
+
 ## What this is
 
 Real-time multilingual speech-to-speech translation service. Pipeline: **STT → LLM → TTS**.

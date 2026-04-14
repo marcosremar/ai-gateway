@@ -7,6 +7,8 @@ import { botState, deployState, isGpuAvailable } from './state';
 import { client, translationDefaults } from './providers';
 import { readJsonBody, handleBodyError } from './http-utils';
 import { createLogger } from '../src/logger';
+import { validateInput } from '../src/input-validator';
+import { AvatarSpeakRequestSchema, AvatarAnimateWordRequestSchema, AvatarMoodRequestSchema } from '../src/contracts';
 
 const log = createLogger('avatar-handlers');
 
@@ -41,6 +43,14 @@ export async function handleAvatarSpeak(req: IncomingMessage, res: ServerRespons
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
+  const validationResult = validateInput(body, AvatarSpeakRequestSchema);
+  if (!validationResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
+    return;
+  }
+  const validated = validationResult.data;
+
   const avatarUrl = getAvatarEndpoint();
   if (!avatarUrl) {
     res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -51,10 +61,10 @@ export async function handleAvatarSpeak(req: IncomingMessage, res: ServerRespons
   try {
     let avatarPayload: Record<string, unknown>;
 
-    if (typeof body.text === 'string' && body.text.trim() && !body.audio) {
+    if (validated.text && !validated.audio) {
       // Generate TTS audio from text, then send to avatar
-      const text = (body.text as string).trim();
-      const voice = (body.voice as string) || 'af_heart';
+      const text = validated.text.trim();
+      const voice = validated.voice || 'af_heart';
       const t0 = Date.now();
 
       log.log(`Generating TTS for: "${text.slice(0, 60)}..." voice=${voice}`);
@@ -102,8 +112,8 @@ export async function handleAvatarSpeak(req: IncomingMessage, res: ServerRespons
         text, // avatar page uses this to generate word-level lip-sync
       };
     } else {
-      // Pre-generated audio or other payload — pass through
-      avatarPayload = body;
+      // Pre-generated audio or other payload — pass through validated data
+      avatarPayload = validated;
     }
 
     const apiRes = await fetch(`${avatarUrl}/api/speak`, {
@@ -129,6 +139,13 @@ export async function handleAvatarAnimateWord(req: IncomingMessage, res: ServerR
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
+  const validationResult = validateInput(body, AvatarAnimateWordRequestSchema);
+  if (!validationResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
+    return;
+  }
+
   const avatarUrl = getAvatarEndpoint();
   if (!avatarUrl) {
     res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -140,7 +157,7 @@ export async function handleAvatarAnimateWord(req: IncomingMessage, res: ServerR
     const apiRes = await fetch(`${avatarUrl}/api/animate-word`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(validationResult.data),
       signal: AbortSignal.timeout(5_000),
     });
 
@@ -159,6 +176,13 @@ export async function handleAvatarMood(req: IncomingMessage, res: ServerResponse
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
+  const validationResult = validateInput(body, AvatarMoodRequestSchema);
+  if (!validationResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
+    return;
+  }
+
   const avatarUrl = getAvatarEndpoint();
   if (!avatarUrl) {
     res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -170,7 +194,7 @@ export async function handleAvatarMood(req: IncomingMessage, res: ServerResponse
     const apiRes = await fetch(`${avatarUrl}/api/mood`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(validationResult.data),
       signal: AbortSignal.timeout(5_000),
     });
 

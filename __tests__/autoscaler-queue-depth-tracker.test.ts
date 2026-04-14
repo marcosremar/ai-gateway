@@ -9,9 +9,11 @@ function makeStore(): KvStore & ListStore & HashStore & { data: Map<string, stri
     get: vi.fn(async (key: string) => data.get(key) ?? null),
     set: vi.fn(async (key: string, value: string) => { data.set(key, value); }),
     del: vi.fn(async (key: string) => { data.delete(key); }),
-    scan: vi.fn(async (pattern: string) => {
+    scan: vi.fn(async (pattern: string, callback?: (keys: string[]) => boolean | void) => {
       const prefix = pattern.replace('*', '');
-      return [...data.keys()].filter((k) => k.startsWith(prefix));
+      const keys = [...data.keys()].filter((k) => k.startsWith(prefix));
+      if (callback) callback(keys);
+      return keys.length;
     }),
     rpush: vi.fn(async () => {}),
     ltrim: vi.fn(async () => {}),

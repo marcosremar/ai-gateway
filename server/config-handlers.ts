@@ -22,6 +22,16 @@ import { createLogger } from '../src/logger';
 
 const log = createLogger('config-handlers');
 
+import { validateInput } from '../src/input-validator';
+import {
+  ProviderConfigSchema,
+  ApiKeysUpdateRequestSchema,
+  ProfileRequestSchema,
+  ProfileDeleteRequestSchema,
+  ProfileActivateRequestSchema,
+  LabsFlagsRequestSchema,
+} from '../src/contracts';
+
 /** Audit log for config changes — logs to console + persists to GPU event log */
 function auditLog(action: string, requestId: string, details: Record<string, unknown>): void {
   const userId = details.userId || 'unknown';
@@ -63,37 +73,31 @@ export async function handlePatchProviderConfig(req: IncomingMessage, res: Serve
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
-  // Validate arrays if provided
-  for (const key of ['pipelineStt', 'pipelineLlm', 'pipelineTts'] as const) {
-    if (body[key] !== undefined && !Array.isArray(body[key])) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: `${key} must be an array` }));
-      return;
-    }
-  }
-  if (body.apps !== undefined && !Array.isArray(body.apps)) {
+  const validationResult = validateInput(body, ProviderConfigSchema);
+  if (!validationResult.ok) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'apps must be an array' }));
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
     return;
   }
+  const validated = validationResult.data;
 
   try {
-    const changedKeys = Object.keys(body).filter(k => body[k] !== undefined);
-    auditLog('patch_config', requestId, { changedKeys, appCount: (body as any).apps?.length });
-    const updated = await patchProviderConfig(body as Parameters<typeof patchProviderConfig>[0]);
+    const changedKeys = Object.keys(validated).filter(k => (validated as any)[k] !== undefined);
+    auditLog('patch_config', requestId, { changedKeys, appCount: (validated as any).apps?.length });
+    const updated = await patchProviderConfig(validated as Parameters<typeof patchProviderConfig>[0]);
     // Apply changed chains to runtime translationDefaults
-    if (body.pipelineStt && Array.isArray(body.pipelineStt) && body.pipelineStt.length > 0) {
-      updateActivePipeline({ stt: body.pipelineStt as PipelineChainEntry[] }, 'handlePatchProviderConfig:stt');
+    if (validated.pipelineStt && Array.isArray(validated.pipelineStt) && validated.pipelineStt.length > 0) {
+      updateActivePipeline({ stt: validated.pipelineStt as unknown as PipelineChainEntry[] }, 'handlePatchProviderConfig:stt');
       await reloadStreamingSTTRouter();
     }
-    if (body.pipelineLlm && Array.isArray(body.pipelineLlm) && body.pipelineLlm.length > 0) {
-      updateActivePipeline({ llm: body.pipelineLlm as PipelineChainEntry[] }, 'handlePatchProviderConfig:llm');
+    if (validated.pipelineLlm && Array.isArray(validated.pipelineLlm) && validated.pipelineLlm.length > 0) {
+      updateActivePipeline({ llm: validated.pipelineLlm as unknown as PipelineChainEntry[] }, 'handlePatchProviderConfig:llm');
     }
-    if (body.pipelineTts && Array.isArray(body.pipelineTts) && body.pipelineTts.length > 0) {
-      updateActivePipeline({ tts: body.pipelineTts as PipelineChainEntry[] }, 'handlePatchProviderConfig:tts');
+    if (validated.pipelineTts && Array.isArray(validated.pipelineTts) && validated.pipelineTts.length > 0) {
+      updateActivePipeline({ tts: validated.pipelineTts as unknown as PipelineChainEntry[] }, 'handlePatchProviderConfig:tts');
     }
     // Broadcast config change to all connected WS clients (Python app, other dashboards)
-    if (body.activeAppId !== undefined || body.pipelineStt || body.pipelineLlm || body.pipelineTts) {
+    if (validated.activeAppId !== undefined || validated.pipelineStt || validated.pipelineLlm || validated.pipelineTts) {
       const activeApp = updated.apps?.find((p: any) => p.id === updated.activeAppId);
       broadcastWs({
         type: 'config:updated',
@@ -172,12 +176,15 @@ export async function handleSetApiKeys(req: IncomingMessage, res: ServerResponse
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
-  const updates = body.keys as Record<string, string> | undefined;
-  if (!updates || typeof updates !== 'object') {
+  const validationResult = validateInput(body, ApiKeysUpdateRequestSchema);
+  if (!validationResult.ok) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'body.keys must be an object mapping envVar -> value' }));
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
     return;
   }
+  const validated = validationResult.data;
+
+  const updates = validated.keys;
 
   // Validate: only allow known env vars
   const validEnvVars = new Set(API_KEY_DEFS.map(d => d.envVar) as string[]);
@@ -260,28 +267,15 @@ export async function handleCreateProfile(req: IncomingMessage, res: ServerRespo
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
-  const { id, name, stt, llm, tts, gpuDeploy, voice, audioFormat, temperature, maxTokens, language } = body as {
-    id?: string; name?: string;
-    stt?: GatewayApp['stt']; llm?: GatewayApp['llm']; tts?: GatewayApp['tts'];
-    gpuDeploy?: GatewayApp['gpuDeploy'];
-    voice?: string; audioFormat?: string; temperature?: number; maxTokens?: number; language?: string;
-  };
+  const validationResult = validateInput(body, ProfileRequestSchema);
+  if (!validationResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
+    return;
+  }
+  const profileData = validationResult.data;
 
-  if (!id || typeof id !== 'string') {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'id is required and must be a string' }));
-    return;
-  }
-  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id)) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Invalid profile id. Use alphanumeric, dash, underscore. Max 64 chars.' }));
-    return;
-  }
-  if (!name || typeof name !== 'string') {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'name is required and must be a string' }));
-    return;
-  }
+  const { id, name, stt, llm, tts, gpuDeploy, voice, audioFormat, temperature, maxTokens, language } = profileData;
 
   const config = await loadProviderConfig();
   const existing = config.apps.find(p => p.id === id);
@@ -334,12 +328,13 @@ export async function handleDeleteProfile(req: IncomingMessage, res: ServerRespo
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
-  const { id } = body as { id?: string };
-  if (!id || typeof id !== 'string') {
+  const validationResult = validateInput(body, ProfileDeleteRequestSchema);
+  if (!validationResult.ok) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'id is required and must be a string' }));
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
     return;
   }
+  const { id } = validationResult.data;
 
   const config = await loadProviderConfig();
   const before = config.apps.length;
@@ -372,7 +367,13 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
-  const { id } = body as { id?: string | null };
+  const validationResult = validateInput(body, ProfileActivateRequestSchema);
+  if (!validationResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
+    return;
+  }
+  const { id } = validationResult.data;
 
   const config = await loadProviderConfig();
 
@@ -472,8 +473,15 @@ export async function handlePatchLabsFlags(req: IncomingMessage, res: ServerResp
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
+  const validationResult = validateInput(body, LabsFlagsRequestSchema);
+  if (!validationResult.ok) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Validation failed', details: validationResult.details }));
+    return;
+  }
+
   try {
-    const updated = await setLabsFlags(body as Parameters<typeof setLabsFlags>[0]);
+    const updated = await setLabsFlags(validationResult.data as Parameters<typeof setLabsFlags>[0]);
     log.log(`Labs flags updated:`, JSON.stringify(updated));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(updated));

@@ -27,25 +27,71 @@ import pino from 'pino';
 import { AsyncLocalStorage } from 'async_hooks';
 import type { Logger } from './deps';
 
+/**
+ * Contextual fields attached to every log line within an `AsyncLocalStorage` frame.
+ *
+ * These fields are automatically merged into every log emitted while inside
+ * `withLogContext()`, enabling correlation IDs to flow through async code
+ * without threading them as arguments.
+ */
 export interface LogContext {
+  /** Unique request identifier for tracing across services */
   requestId?: string;
+  /** Authenticated user identifier */
   userId?: string;
+  /** Provider tier index in a fallback chain */
   tierIndex?: number;
+  /** Provider name (e.g. "openai", "groq") */
   provider?: string;
+  /** Module or subsystem name */
   module?: string;
+  /** Any additional custom fields */
   [k: string]: unknown;
 }
 
 const als = new AsyncLocalStorage<LogContext>();
 
-/** Run `fn` with the given log context merged into the current ALS frame.
- *  Nested calls merge — inner context overrides outer. */
+/**
+ * Run `fn` with the given log context merged into the current AsyncLocalStorage frame.
+ *
+ * Nested calls merge — the inner context overrides the outer one. Every log
+ * emitted inside `fn` (or any async descendant) will automatically include
+ * the fields from `ctx`.
+ *
+ * @param ctx - Key-value pairs to attach to log lines (requestId, userId, etc.)
+ * @param fn - Function to execute within the log context scope
+ * @returns The return value of `fn`
+ *
+ * @example
+ * ```typescript
+ * const result = withLogContext({ requestId: 'abc-123' }, () => {
+ *   logger.log('processing request'); // includes requestId: 'abc-123'
+ *   return doWork();
+ * });
+ * ```
+ */
 export function withLogContext<T>(ctx: LogContext, fn: () => T): T {
   const parent = als.getStore() ?? {};
   return als.run({ ...parent, ...ctx }, fn);
 }
 
-/** Read the current ALS context (mostly for debugging / tests). */
+/**
+ * Read the current AsyncLocalStorage context.
+ *
+ * Useful for debugging or tests that need to inspect what correlation IDs
+ * are currently active. Returns `undefined` when called outside any
+ * `withLogContext()` scope.
+ *
+ * @returns The current log context, or `undefined` if no context is active
+ *
+ * @example
+ * ```typescript
+ * const ctx = getLogContext();
+ * if (ctx?.requestId) {
+ *   console.log('Current request:', ctx.requestId);
+ * }
+ * ```
+ */
 export function getLogContext(): LogContext | undefined {
   return als.getStore();
 }
@@ -136,7 +182,29 @@ function wrap(method: 'debug' | 'info' | 'warn' | 'error', moduleName: string) {
   };
 }
 
-/** Create a namespaced logger. Every line emitted carries `module=<name>`. */
+/**
+ * Create a namespaced logger backed by pino (production) or console (test mode).
+ *
+ * Every log line emitted by the returned logger carries `module=<moduleName>`
+ * as a structured field. The logger supports multiple call shapes:
+ * - `logger.log('message')` — simple text
+ * - `logger.log({ field: value }, 'message')` — structured with extra fields
+ * - `logger.error(err)` — error with stack trace
+ *
+ * In test mode (`VITEST=true` or `NODE_ENV=test`), output goes to `console.*`
+ * so that `vi.spyOn(console)` assertions work. In production/dev, pino emits
+ * structured JSON.
+ *
+ * @param moduleName - Name of the module or subsystem (e.g., "proxy", "auth-middleware")
+ * @returns A `Logger` instance with `debug`, `log`, `warn`, and `error` methods
+ *
+ * @example
+ * ```typescript
+ * const log = createLogger('my-service');
+ * log.log('Server started on port', 4000);
+ * log.log({ port: 4000, env: 'production' }, 'Server started');
+ * ```
+ */
 export function createLogger(moduleName: string): Logger {
   return {
     debug: wrap('debug', moduleName),
@@ -146,6 +214,16 @@ export function createLogger(moduleName: string): Logger {
   };
 }
 
-/** Default logger used by code that hasn't yet adopted a module name.
- *  Kept for backward compatibility with the previous `defaultLogger` export. */
+/**
+ * Default logger used by code that hasn't adopted a module-scoped logger.
+ *
+ * Equivalent to `createLogger('app')`. Kept for backward compatibility
+ * with the previous `defaultLogger` export.
+ *
+ * @example
+ * ```typescript
+ * import { defaultLogger } from './logger';
+ * defaultLogger.log('Application starting');
+ * ```
+ */
 export const defaultLogger: Logger = createLogger('app');

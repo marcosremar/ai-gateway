@@ -10,7 +10,28 @@ import { defaultLogger } from '../logger';
  */
 const GPU_HEALTH_SKIP_TLS = !!process.env.GPU_HEALTH_SKIP_TLS;
 
-/** Probe a GPU endpoint's /health to check if it's serving. */
+/**
+ * Probe a GPU endpoint's `/health` endpoint to check if it's serving.
+ *
+ * Sends an HTTP GET to `{endpoint}/health` and checks the response's
+ * `status` field. Accepts "healthy", "ok", "degraded", and "ready".
+ *
+ * @param endpoint - Base URL of the GPU service (e.g. "http://localhost:8000")
+ * @param returnData - If `true`, returns detailed result including response data (default: `false`)
+ * @param timeoutMs - Request timeout in milliseconds (default: 15000, or `GPU_HEALTH_TIMEOUT_MS` env var)
+ * @returns When `returnData` is false: `true` if healthy, `false` otherwise.
+ *          When `returnData` is true: object with `ok`, optional `timedOut`, and optional `data`.
+ *
+ * @example
+ * ```typescript
+ * const healthy = await probeGpuHealth('http://localhost:8000');
+ *
+ * const { ok, data } = await probeGpuHealth('http://localhost:8000', true);
+ * if (ok && data) {
+ *   console.log('GPU models:', data.models);
+ * }
+ * ```
+ */
 export async function probeGpuHealth(endpoint: string, returnData?: false, timeoutMs?: number): Promise<boolean>;
 export async function probeGpuHealth(endpoint: string, returnData: true, timeoutMs?: number): Promise<{ ok: boolean; timedOut?: boolean; data?: Record<string, any> }>;
 export async function probeGpuHealth(endpoint: string, returnData?: boolean, timeoutMs = parseInt(process.env.GPU_HEALTH_TIMEOUT_MS || '15000', 10)): Promise<boolean | { ok: boolean; timedOut?: boolean; data?: Record<string, any> }> {
@@ -38,9 +59,23 @@ export async function probeGpuHealth(endpoint: string, returnData?: boolean, tim
 }
 
 /**
- * Probe health via SSH — for providers where HTTP is unreachable (Vast.ai without direct ports).
- * Retries up to SSH_MAX_RETRIES times with a short delay between attempts to handle
+ * Probe GPU health via SSH — for providers where HTTP is unreachable directly.
+ *
+ * Connects via SSH to the host and runs a local `curl` to `http://localhost:8000/health`.
+ * Retries up to 3 times with a 3-second delay between attempts to handle
  * transient SSH connection failures (host key issues, connection resets during boot).
+ *
+ * @param sshHost - SSH hostname or IP address
+ * @param sshPort - SSH port number (typically 22 or a provider-assigned port)
+ * @returns `true` if the GPU service is healthy, `false` otherwise
+ *
+ * @example
+ * ```typescript
+ * const healthy = await probeGpuHealthSsh('192.168.1.100', 48291);
+ * if (healthy) {
+ *   console.log('GPU is serving on localhost:8000');
+ * }
+ * ```
  */
 export async function probeGpuHealthSsh(sshHost: string, sshPort: number): Promise<boolean> {
   if (!sshHost || !sshPort || sshPort <= 0) return false;

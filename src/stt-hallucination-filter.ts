@@ -17,6 +17,12 @@ import hallucinations from './data/whisper-hallucinations.json';
 // Configuration
 // ---------------------------------------------------------------------------
 
+/**
+ * Configuration for the STT hallucination filter.
+ *
+ * Controls both metadata-based signal filtering and blocklist-based
+ * phrase filtering. Both layers can be toggled independently.
+ */
 export interface STTHallucinationFilterConfig {
   /** Maximum no_speech_prob before a segment is considered hallucinated. Default: 0.6 */
   noSpeechProbThreshold: number;
@@ -30,6 +36,12 @@ export interface STTHallucinationFilterConfig {
   blocklistFilterEnabled: boolean;
 }
 
+/**
+ * Default configuration for the hallucination filter.
+ *
+ * Sensible thresholds based on Whisper's metadata signals. Override individual
+ * fields to tune sensitivity for your use case.
+ */
 export const DEFAULT_HALLUCINATION_FILTER_CONFIG: STTHallucinationFilterConfig = {
   noSpeechProbThreshold: 0.6,
   compressionRatioThreshold: 2.4,
@@ -74,12 +86,18 @@ function isBlocklisted(text: string, language?: string): boolean {
 // Metadata filter
 // ---------------------------------------------------------------------------
 
+/**
+ * Result of metadata-based segment filtering.
+ *
+ * Contains the segments that passed, those that were rejected, and the
+ * rejection reasons keyed by segment ID.
+ */
 export interface SegmentFilterResult {
-  /** Segments that passed the filter. */
+  /** Segments that passed the metadata filter. */
   kept: STTSegment[];
-  /** Segments that were rejected. */
+  /** Segments that were rejected as likely hallucinations. */
   rejected: STTSegment[];
-  /** Reason for each rejected segment. */
+  /** Human-readable rejection reason for each rejected segment, keyed by segment ID. */
   reasons: Map<number, string>;
 }
 
@@ -114,20 +132,26 @@ function filterSegmentsByMetadata(
 // Main export
 // ---------------------------------------------------------------------------
 
+/**
+ * Result returned by `filterHallucinations`.
+ *
+ * Contains the filtered text along with metadata about what was removed
+ * and aggregate metrics from the original STT response.
+ */
 export interface HallucinationFilterResult {
-  /** Filtered text (segments that passed all filters, concatenated). */
+  /** Filtered text (segments that passed all filters, concatenated). Empty if all rejected. */
   text: string;
-  /** Original text before filtering. */
+  /** Original text before any filtering was applied. */
   originalText: string;
-  /** Whether any filtering was applied. */
+  /** Whether any filtering was applied (i.e., the text changed). */
   filtered: boolean;
-  /** Number of segments rejected by metadata filter. */
+  /** Number of segments rejected by the metadata filter. */
   metadataRejected: number;
-  /** Whether the entire text was rejected by blocklist. */
+  /** Whether the entire text was rejected by the blocklist. */
   blocklistRejected: boolean;
-  /** Human-readable filter reasons (for logging). */
+  /** Human-readable descriptions of why segments or text were rejected. */
   reasons: string[];
-  /** Aggregate metrics from the response (for logging/debugging). */
+  /** Aggregate metrics from the STT response (for logging/debugging). */
   metrics?: {
     avg_logprob: number;
     compression_ratio: number;
@@ -137,7 +161,26 @@ export interface HallucinationFilterResult {
 
 /**
  * Apply hallucination filtering to an STT response.
- * Returns filtered text and metadata about what was removed.
+ *
+ * Two complementary filtering layers are applied in sequence:
+ * 1. **Metadata filter** — rejects individual segments based on Whisper's
+ *    `no_speech_prob`, `compression_ratio`, and `avg_logprob` signals.
+ * 2. **Blocklist filter** — rejects the entire text if it matches a known
+ *    hallucination phrase from the `sachaarbonel/whisper-hallucinations` dataset.
+ *
+ * @param response - The STT response to filter (requires `segments` for metadata filtering)
+ * @param language - ISO 639-1 language code for blocklist lookup (e.g. "en", "fr")
+ * @param config - Filter thresholds and toggle flags (defaults to `DEFAULT_HALLUCINATION_FILTER_CONFIG`)
+ * @returns Filtered text with metadata about what was removed
+ *
+ * @example
+ * ```typescript
+ * const result = filterHallucinations(sttResponse, 'en');
+ * if (result.filtered) {
+ *   console.log('Filtered out hallucinations:', result.reasons);
+ * }
+ * console.log('Clean text:', result.text);
+ * ```
  */
 export function filterHallucinations(
   response: STTResponse,
