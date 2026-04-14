@@ -16,6 +16,7 @@ import { withProxyRetry } from './retry';
 const STT_CACHE_TTL_MS = 5 * 60_000;
 const STT_CACHE_MAX_ENTRIES = 200;
 const sttCache = new Map<string, { text: string; expiresAt: number }>();
+let cacheWriteInProgress = false;
 
 function sttCacheKey(audioHash: string, model: string, language?: string): string {
   return `${audioHash}:${model}:${language ?? '*'}`;
