@@ -149,7 +149,7 @@ describe('Provider Edge Cases (#751-#770)', () => {
   });
 
   it('#754 RunPod auto-restart on EXITED', () => {
-    const src = read('server/gpu-health-monitor.ts');
+    const src = read('server/gpu-monitor-loop.ts');
     expect(src).toContain('EXITED');
     expect(src).toContain('auto-restart');
   });
