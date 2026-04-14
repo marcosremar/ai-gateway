@@ -1,244 +1,216 @@
 # Domain Model — AI Gateway
 
 > Vocabulário compartilhado entre desenvolvedores e o AI. Todo prompt deve usar estes termos.
-> Baseado em DDD (Domain-Driven Design). Atualizar quando o domínio evoluir.
+> A visão do sistema é ser um **Firebase for AI** — Backend-as-a-Service para aplicações de inteligência artificial.
 
 ---
 
-## O que este sistema faz (visão real)
+## Core Domain: AI Gateway
 
-Este é uma **plataforma de inferência AI full-stack**. Não é só um autoscaler de GPU.
+O core é **fornecer acesso unificado a inteligência artificial**, independente de onde ela roda.
 
-Ele faz quatro coisas grandes:
+Cloud API (Groq, OpenAI, Fireworks) e GPU self-hosted (RunPod, Vast.ai, TensorDock) são **variantes do mesmo conceito** — um Provider que executa inferência. O gateway abstrai isso.
 
-1. **Pipeline speech-to-speech em tempo real** — STT → LLM → TTS com latência <100ms, multi-idioma, voice cloning
-2. **Gerenciamento de infraestrutura GPU** — provisiona, monitora, otimiza e destrói instâncias em 5+ provedores cloud
-3. **Proxy OpenAI-compatível** — substitui a OpenAI API com fallback transparente entre provedores
-4. **Orquestração de workloads** — gerencia GPU deploys, meeting bots (Zoom/Teams/Meet) e database jobs com API unificada
+O pipeline speech-to-speech é a feature de maior valor construída sobre esse core, mas o core é o acesso.
 
 ---
 
 ## Ubiquitous Language
 
-Termos canônicos do projeto. Use exatamente como escritos em código e prompts.
-
 | Termo | Definição |
 |-------|-----------|
-| **Pipeline** | Sequência STT → LLM → TTS executada por turno de fala |
-| **Stage** | Uma etapa do pipeline: `stt`, `llm`, `tts` |
-| **Fanout** | Uma transcrição → N traduções + TTS em paralelo para múltiplos idiomas |
-| **Dub** | Saída de áudio dublado para um idioma-alvo específico |
-| **Voice Clone** | TTS condicionado por áudio de referência + texto do usuário |
-| **Warmth** | Estado de uma instância GPU: `cold` (primeiro request) ou `warm` (modelo já carregado) |
-| **Speculative Translation** | Cache de traduções previstas dentro de uma sessão para reduzir latência |
-| **Deploy** | Processo de provisionar uma instância GPU em um provedor cloud |
-| **Tier** | Uma configuração de GPU dentro de uma cascade (ex: tier[0]=RunPod, tier[1]=Vast.ai) |
-| **Tier Cascade** | Sequência de tiers tentados em ordem até um subir com sucesso |
-| **Instance** | Máquina GPU criada num provedor cloud |
-| **Snapshot** | Checkpoint do estado de modelo + cache para boot rápido (<30s) |
-| **Offer** | GPU disponível para contratar num provedor (tipo, preço, região, VRAM) |
-| **Provider Race** | N candidatos disparados em paralelo; primeiro a responder vence |
-| **EWMA** | Exponential Weighted Moving Average — média de latência adaptativa por provedor |
-| **Headstart** | Vantagem de tempo dada ao provider com menor EWMA no race |
-| **Cooldown** | Período de bloqueio de um provedor após falha (rate limit, timeout) |
-| **Orphan** | Instância GPU ativa no provedor sem referência no estado local |
-| **Watchdog** | Processo background que verifica saúde e para instâncias idle |
-| **Budget Gate** | `canAffordDeploy()` — verificação de saldo antes de qualquer deploy |
-| **Session** | Conexão ativa de usuário usando o pipeline (WebSocket ou REST) |
-| **Workload** | Unidade orquestrável: pode ser `gpu`, `bot`, ou `db` |
-| **Bot** | Meeting bot (Recall.ai) implantado em Zoom / Google Meet / Teams |
-| **Relay** | Instância de media server Scaleway para streaming HLS sob demanda |
-| **Latency DB** | Banco PostgreSQL com histórico de RTT por host GPU |
-| **Probe** | HTTP GET `/health` ou RTT measurement para validar disponibilidade |
-| **Coalescing** | Requests LLM idênticos concorrentes compartilham uma única chamada upstream |
-| **Profile** | Configuração de pipeline salva pelo usuário (cadeia de providers, GPU settings) |
+| **Gateway** | O sistema como um todo — ponto de acesso unificado a IA |
+| **Provider** | Qualquer fonte de inferência: cloud API (Groq) ou GPU (RunPod). Mesmo conceito, transports diferentes |
+| **Cloud Provider** | Provider acessado via API HTTP pública (Groq, OpenAI, Fireworks, OpenRouter, Deepgram, ElevenLabs) |
+| **GPU Provider** | Provider acessado via GPU self-hosted (RunPod, Vast.ai, TensorDock, Modal, SnapGPU) |
+| **Chain** | Sequência ordenada de providers para uma capability. Fallback automático |
+| **Race** | N providers disparados em paralelo; primeiro a responder vence, outros cancelados |
+| **EWMA** | Exponential Weighted Moving Average — latência adaptativa por provider para decidir headstart |
+| **Headstart** | Vantagem de tempo para o provider com menor EWMA no race |
+| **Cooldown** | Bloqueio temporário de um provider após rate limit (429) ou falha |
+| **Coalescing** | Requests idênticos concorrentes compartilham uma única chamada upstream |
+| **Pipeline** | Execução STT → LLM → TTS por turno de fala |
+| **Stage** | Etapa do pipeline: `stt`, `llm`, `tts` |
+| **Overlap** | TTS começa em tokens parciais do LLM (não espera resposta completa) |
+| **Fanout** | 1 transcrição → N traduções + TTS em paralelo para múltiplos idiomas |
+| **Dub** | Saída de áudio dublado para um idioma-alvo |
+| **Voice Clone** | TTS condicionado por áudio de referência + texto |
+| **Speculative Translation** | Cache de traduções previstas na sessão |
+| **Warmth** | Estado de instância GPU: `cold` (primeiro request) ou `warm` (modelo carregado) |
+| **Deploy** | Provisionar uma instância GPU num provider |
+| **Tier** | Uma configuração de GPU numa cascade |
+| **Tier Cascade** | Sequência de tiers tentados em ordem até um funcionar |
+| **Instance** | Máquina GPU provisionada (pod, machine, container) |
+| **Snapshot** | Checkpoint de modelo para boot rápido (<30s) |
+| **Offer** | GPU disponível no mercado (tipo, preço, região, VRAM) |
+| **Probe** | Health check — HTTP GET /health |
+| **Watchdog** | Processo background que monitora saúde e para instâncias idle |
+| **Orphan** | Instância ativa no provider sem referência no estado local |
+| **Budget Gate** | `canAffordDeploy()` — verificação de saldo antes de deploy |
+| **Workload** | Unidade deployável pelo usuário: `gpu`, `bot`, ou `db` |
+| **Bot** | Meeting bot (Recall.ai) em Zoom / Teams / Meet |
+| **Relay** | Media server Scaleway para HLS streaming |
+| **App / Profile** | Configuração salva: chain de providers, GPU settings, targets de latência |
+| **Session** | Conexão ativa usando o gateway (WebSocket ou REST) |
+| **Latency DB** | PostgreSQL com histórico de RTT por host GPU |
 
 ---
 
 ## Bounded Contexts
 
-### 1. Real-Time Speech Pipeline (core)
+### 1. Gateway (Core)
 
-**Arquivos:** `server/pipeline-runner.ts`, `server/ai-handlers.ts`, `server/dub-fanout.ts`, `server/race-providers.ts`
+**Responsabilidade:** fornecer acesso inteligente a IA via cloud ou GPU.
 
-**Responsabilidade:** executar STT → LLM → TTS com mínima latência, suporte a múltiplos idiomas e voice cloning.
+**Sub-módulos:**
 
-**Entidades:**
-- `PipelineRun` — execução de uma fala: input WAV → transcription → translation → output WAV
-- `Stage` — etapa individual (stt / llm / tts) com provider, latência, warmth
-- `DubFanout` — execução paralela de N `(llm + tts)` para idiomas-alvo diferentes
-- `VoiceClone` — par (áudio de referência + texto) para condicionar TTS
+**Providers** — acesso a modelos de IA
+- Cloud providers: Groq, OpenAI, Fireworks, OpenRouter, Ollama, Deepgram, ElevenLabs, Modal
+- GPU providers: RunPod, Vast.ai, TensorDock, Modal, SnapGPU
+- Registry unificado por capability (STT, LLM, TTS, Embeddings, Images, Reranking)
 
-**Serviços de domínio:**
-- `PipelineRunner` — orquestra as 3 stages com streaming overlap e circuit breaker por stage
-- `DubFanout` — dispara fanout de idiomas, broadcast de áudio/subtitles por WebSocket
-- `RaceProviders` — hedged request com EWMA e headstart
-- `SpeculativeCache` — prediz e armazena traduções da sessão
+**Routing** — decisão de qual provider usar
+- FallbackChain: tenta em ordem, pula cooldowns
+- ProviderRacer: hedged requests com EWMA
+- RequestCoalescer: dedup de requests idênticos em voo
+- ResponseCache: cache de respostas determinísticas
+- CircuitBreaker: abre após N falhas consecutivas
 
-**Value Objects:**
-- `StageResult` — latência, provider usado, warmth, erro se falhou
-- `PipelineResult` — soma dos stages com timing breakdown completo
+**Pipeline** — STT→LLM→TTS em tempo real
+- PipelineRunner: orquestra 3 stages com streaming overlap
+- DubFanout: 1→N idiomas paralelos
+- SpeculativeCache: predição de traduções
+- VoiceClone: conditioning de TTS por referência
+- StreamingSTT: transcrição contínua
 
-**Invariantes:**
-- Overlap começa TTS em tokens parciais do LLM — não esperar resposta completa
-- Voice clone: prioridade GPU → Modal → cloud fallback
-- Circuit breaker por stage — muitas falhas abre o circuito e faz fallback para cloud
-- Speculative cache usa confidence threshold antes de servir resultado previsto
+**Deploy** — provisioning de GPUs para o gateway
+- DeployOrchestrator: tier cascade + deploy race
+- DeployStateMachine: `idle → deploying → booting → ready | error | stopped`
+- HealthMonitor: probes periódicos
+- AutoRecovery: replace de instância falhada
+- OrphanCleanup: sweep de instâncias órfãs
 
----
+**Proxy** — API OpenAI-compatível
+- Drop-in replacement para OpenAI API
+- Rate limit, auth, CORS, concurrency limit
 
-### 2. GPU Infrastructure (core)
-
-**Arquivos:** `src/gpu-providers/`, `src/autoscaler/`, `server/gpu-handlers.ts`, `server/gpu-deploy.ts`, `server/latency-db.ts`
-
-**Responsabilidade:** provisionar, monitorar, otimizar latência e destruir instâncias GPU em 5+ provedores.
-
-**Entidades:**
-- `GpuInstance` — instância criada, com id, endpoint, provider, status
-- `GpuTierConfig` — spec de um tier: provider, GPU types, imagem Docker, região, timeouts
-- `GpuTierState` — estado runtime de um tier: `IdleTierState | BootingTierState | ReadyTierState`
-- `DeploySettings` — preferências do usuário (GPU priority, filtros, sort strategy)
-- `Snapshot` — checkpoint de modelo + cache para boot rápido
-- `HostLatency` — medições persistidas de RTT por host GPU (Prisma/PostgreSQL)
-
-**Serviços de domínio:**
-- `AutoscalerEngine` — decide quando bootar/parar tiers com base em sessions e latência
-- `BootOrchestrator` — executa race de boot entre providers na cascade
-- `Watchdog` — background: verifica saúde, para instâncias idle, detecta orphans
-- `Reconciler` — elimina orphans
-- `LatencyScheduler` — agenda probes adaptativas (estável: 2h, instável: 30m, falhando: 6h)
-
-**Agregados:**
-- `DeploymentStateMachine` — máquina de estado do deploy ativo: `idle → deploying → booting → ready | error | stopped`
-- `TierCascade` — conjunto de GpuTierConfigs + GpuTierStates para um usuário
-
-**Invariantes:**
-- Budget Gate verificado antes de qualquer boot (em `startDeployWithTiers` E `startDeployRace`)
-- Tier só vira `ready` após Health Probe retornar 200
-- `monitorCrashRecoveryAttempts` NÃO é resetado por `resetIdleState()` — intencional
-- Nenhum código fora de `src/gpu-providers/` conhece detalhes de API dos provedores
-- Todas as ops GPU passam pela gateway API — nunca chamar RunPod/Vast.ai/TensorDock direto
-
-**Estados do Deploy:**
-```
-idle → deploying → booting → ready
-                          → error
-                          → stopped → [destruído após 2h]
-```
+**Invariantes do Gateway:**
+- Budget Gate verificado antes de qualquer deploy
+- Tier só vira `ready` após Probe retornar 200
+- Cooldown impede retry imediato no mesmo provider
+- Coalescing garante 1 chamada upstream por hash de request
+- Race cancela perdedores via AbortController
+- Pipeline overlap inicia TTS antes do LLM terminar
 
 ---
 
-### 3. OpenAI-Compatible Proxy (core)
+### 2. Compute (Supporting)
 
-**Arquivos:** `src/proxy/server.ts`, `src/proxy/routes/`, `src/proxy/middleware/`
+**Responsabilidade:** deploy de workloads do usuário em infra remota.
 
-**Responsabilidade:** substituir a OpenAI API com roteamento inteligente, fallback transparente e otimizações de throughput.
+**Tipos de workload:**
+- `gpu` — inference pods (RunPod, Vast.ai, etc.)
+- `bot` — meeting bots (Fly.io, RunPod)
+- `db` — managed PostgreSQL (Neon)
 
-**Entidades:**
-- `ProviderChain` — lista ordenada de providers para fallback
-- `CooldownTracker` — providers bloqueados após rate limit (429)
-- `RequestCoalescer` — requests LLM idênticos concorrentes em voo
-- `ResponseCache` — cache de respostas determinísticas (temp=0)
+**Ciclo de vida:** `idle → deploying → running → stopped → terminated`
 
-**Endpoints expostos:**
-- `POST /v1/chat/completions` — LLM com streaming SSE e fallback
-- `POST /v1/audio/transcriptions` — STT multipart
-- `POST /v1/audio/speech` — TTS
-- `POST /v1/embeddings` — embeddings
-- `GET /v1/models` — catálogo de modelos disponíveis
-
-**Invariantes:**
-- Rate limit por usuário via token buckets
-- Concurrency limit por usuário
-- Cooldown entra após 429 — não retenta o mesmo provider imediatamente
-- Coalescing: requests com mesmo hash compartilham uma única chamada upstream
-- Erros retornam no formato OpenAI (`{ error: { message, type, code } }`)
+**Meeting Bots (sub-módulo):**
+- RecallAdapter: ACL para Recall.ai
+- BotLifecycle: join, leave, monitor
+- AudioBridge: stream áudio do bot para o pipeline
 
 ---
 
-### 4. Workload Orchestration (supporting)
+### 3. Database (Supporting)
 
-**Arquivos:** `server/workload-handlers.ts`, `server/recall-handlers.ts`, `server/relay-handlers.ts`
+**Responsabilidade:** persistência e queries.
 
-**Responsabilidade:** ciclo de vida unificado para três tipos de workload.
-
-**Tipos de Workload:**
-
-| Tipo | O que é | Provedor |
-|------|---------|---------|
-| `gpu` | Instância GPU para inferência | RunPod, Vast.ai, TensorDock, Modal |
-| `bot` | Meeting bot que grava e transmite áudio | Recall.ai (Zoom, Teams, Meet) |
-| `db` | Job de database / migração | interno |
-
-**Entidades:**
-- `Workload` — unidade com id, tipo, estado, config
-- `Bot` — meeting bot com meeting URL, estado, stream de áudio
-- `Relay` — instância Scaleway de media server com HLS URL
-
-**Ciclo de vida unificado:**
-```
-POST /v1/workloads         → criar
-GET  /v1/workloads/:id     → status
-POST /v1/workloads/:id/start   → retomar
-POST /v1/workloads/:id/stop    → pausar
-DELETE /v1/workloads/:id       → destruir
-```
+- DatabaseService: Prisma + raw SQL + Neon management
+- LatencyDB: RTT por host GPU com probe scheduling adaptativo
+- Backup/restore: Neon snapshots ou pg_dump
 
 ---
 
-### 5. Persistence & State (infrastructure)
+### 4. Storage (Supporting)
 
-**Arquivos:** `src/storage.ts`, `src/adapters/`, `src/deps.ts`, `server/latency-db.ts`, `server/cooldown-persistence.ts`
+**Responsabilidade:** object storage para blobs.
 
-**Responsabilidade:** abstrair storage para que a lógica de domínio não dependa de implementação.
+- S3-compatible: R2, B2, AWS, MinIO, DigitalOcean Spaces
+- Operações: put, get, getStream, head, presign, delete, list
 
-**Interfaces:**
-- `StateStore` (KV + List + Hash) — estado de tiers, sessions, latências
-- `SettingsStore` — configuração por usuário (provider chain, perfis)
-- `Storage` — adapter completo: settings, sessions, benchmarks, lifecycle logs, deploy history
+---
 
-**Implementações:**
-- `InMemoryStateAdapter` — testes e dev single-node
-- `RedisStateAdapter` — produção multi-instância
-- Prisma/PostgreSQL — `HostLatency`, deploy history, benchmarks, snapshots
+### 5. Auth (Supporting)
 
-**Arquivos locais `~/.babelcast/`:**
-- `active_deploy.json` — pod ativo (sobrevive restart)
-- `daily_spend.json` — gasto acumulado (atomic write, debounced 10s)
-- `cooldowns.json` — cooldowns por provedor
-- `provider-config.json` — configuração de chains e perfis
+**Responsabilidade:** autenticação, tokens, secrets.
+
+- HMAC-SHA256 tokens (60s TTL para GPU pods)
+- API key validation
+- Vault: AES-256-GCM encrypted secret storage
+
+---
+
+### 6. Realtime (Supporting)
+
+**Responsabilidade:** WebSocket broadcasting e streaming.
+
+- Broadcast por tipo de evento (gpu:status, transcript, dub)
+- Binary frames: metadata JSON + audio buffer
+- Subscriptions por idioma-alvo
+
+---
+
+### 7. Events (Supporting)
+
+**Responsabilidade:** pub/sub + hooks.
+
+- Event bus tipado com histórico (últimos 1000)
+- Hooks fire-and-forget: onRequestEnd, onScaleUp, onCostAlert, onHealthChange, onError
+- Canais: GPU, Provider, Pipeline, Auth, Cost, System
+
+---
+
+### 8. Platform (Generic)
+
+**Responsabilidade:** infraestrutura compartilhada.
+
+- Adapters: InMemoryStateAdapter, RedisStateAdapter
+- DI contracts: StateStore, SettingsStore, SessionResolver
+- Logger, tracing, alerting (Slack, Discord, webhook)
 
 ---
 
 ## Eventos de Domínio
 
-| Evento | Origem | Consumidores |
-|--------|--------|--------------|
-| `DeployStarted` | AutoscalerEngine | Watchdog, WS broadcast |
-| `TierReady` | BootOrchestrator | LoadBalancer, WS broadcast |
-| `TierError` | BootOrchestrator | Cascade fallback para próximo tier |
-| `InstanceStopped` | Watchdog | StateStore, WS broadcast |
-| `CostAlert` | CostMonitor | Hooks externos |
-| `LatencyBreach` | LatencyTracker | AutoscalerEngine (scale-up) |
-| `SessionStarted/Ended` | SessionTracker | AutoscalerEngine (idle detection) |
-| `StageStart/Done` | PipelineRunner | Analytics, WS broadcast |
-| `AudioChunk` | TTS stage | WS broadcast por idioma |
-| `BotJoined/Left` | RecallHandlers | WS broadcast |
+| Evento | Origem (BC) | Consumidores |
+|--------|-------------|--------------|
+| ProviderSelected | Gateway/Routing | Events (logging) |
+| ProviderFailed | Gateway/Routing | Gateway/Routing (cooldown) |
+| StageCompleted | Gateway/Pipeline | Realtime (broadcast), Events |
+| AudioChunk | Gateway/Pipeline | Realtime (broadcast por idioma) |
+| DeployStarted | Gateway/Deploy | Events, Realtime |
+| TierReady | Gateway/Deploy | Gateway/Routing (novo endpoint) |
+| InstanceStopped | Gateway/Deploy | Events, Realtime |
+| CostAlert | Gateway/Deploy | Events (alert channels) |
+| WorkloadCreated | Compute | Events |
+| BotJoined | Compute/Bots | Realtime (broadcast) |
 
 ---
 
-## Fluxo principal (speech-to-speech)
+## Fluxo principal: speech-to-speech
 
 ```
-WebSocket /v1/speech/ws  (áudio do usuário)
+WebSocket /v1/speech/ws
   ↓
-PipelineRunner.run()
-  ├── Stage STT  →  RaceProviders(GPU, Groq, ...)  →  transcrição
-  ├── Stage LLM  →  RaceProviders(GPU, Fireworks, ...) → tradução (inicia TTS em paralelo se streaming overlap ativo)
-  └── Stage TTS  →  RaceProviders(GPU, Modal, ...) → áudio
+Gateway/Pipeline: PipelineRunner.run()
+  ├── Stage STT → Gateway/Routing: Race(GPU, Groq, Fireworks)
+  ├── Stage LLM → Gateway/Routing: Race(GPU, Fireworks, OpenRouter)
+  │   └── Overlap: inicia TTS com tokens parciais
+  └── Stage TTS → Gateway/Routing: Race(GPU, Modal, ElevenLabs)
   ↓
-DubFanout (se multi-idioma)
-  └── N × (LLM + TTS) em paralelo → broadcast por idioma via WS
+Gateway/Pipeline: DubFanout (se multi-idioma)
+  └── N × (LLM + TTS) em paralelo
   ↓
-WebSocket broadcast → clientes subscritos
+Realtime: broadcast áudio por idioma via WebSocket
 ```

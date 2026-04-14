@@ -121,9 +121,10 @@ describe('RedisStateAdapter', () => {
     await adapter.set('user:2', 'b');
     await adapter.set('session:1', 'c');
 
-    const keys = await adapter.scan('user:*');
-    expect(keys).toHaveLength(2);
-    expect(keys.sort()).toEqual(['user:1', 'user:2']);
+    let foundKeys: string[] = [];
+    const count = await adapter.scan('user:*', (keys) => { foundKeys = keys; });
+    expect(count).toBe(2);
+    expect(foundKeys.sort()).toEqual(['user:1', 'user:2']);
   });
 
   it('rpush + lrange list operations', async () => {

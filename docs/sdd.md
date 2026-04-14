@@ -1,181 +1,158 @@
 # Software Design Document — AI Gateway
 
 > Decisões arquiteturais já tomadas. O AI deve respeitá-las em vez de reinventá-las.
-> Atualizar quando uma decisão for revisada — não quando o código mudar.
+> Visão: **Firebase for AI** — Backend-as-a-Service para aplicações de inteligência artificial.
 
 ---
 
 ## O que é este sistema
 
-**Plataforma de inferência AI full-stack** com quatro responsabilidades:
+Plataforma que fornece **acesso unificado a inteligência artificial** independente de onde ela roda (cloud API ou GPU self-hosted), com serviços de plataforma (database, storage, auth, compute, realtime) ao redor.
 
-1. **Speech-to-speech em tempo real** — STT → LLM → TTS <100ms, multi-idioma, voice cloning
-2. **Gestão de GPU cloud** — provisionamento, ciclo de vida, snapshots, latency DB em 5+ provedores
-3. **Proxy OpenAI-compatível** — drop-in replacement com fallback, coalescing, cache
-4. **Orquestração de workloads** — GPU deploys, meeting bots (Recall.ai) e database jobs com API unificada
+Analogia: o Firebase fornece auth + database + storage + functions para apps web/mobile. O AI Gateway fornece o equivalente para apps de IA.
 
 ---
 
-## Mapa de módulos
+## Serviços da plataforma
 
-```
-src/                        Lib publicável (tree-shakeable, 12 entry points)
-  proxy/                    Proxy OpenAI-compatível (rate limit, auth, fallback)
-  autoscaler/               Decisões de boot/stop, watchdog, reconciler
-  gpu-providers/            Clientes cloud (RunPod, Vast.ai, TensorDock, Modal, SnapGPU)
-  providers/                Clientes AI (Groq, OpenAI, Fireworks, OpenRouter, self-hosted)
-  adapters/                 InMemoryStateAdapter, RedisStateAdapter
-  storage.ts                Interface de storage (adapter pattern)
-  deps.ts                   Contratos DI (AutoscalerDeps, StateStore, SettingsStore)
-  create-gateway.ts         Entry point público — wiring de todos os componentes
-
-server/                     Servidor de referência (importa src/, nunca o contrário — CI enforced)
-  ws-server.ts              HTTP + WebSocket server (Bun.serve) + registro de rotas
-  pipeline-runner.ts        Engine do pipeline STT→LLM→TTS com streaming overlap
-  ai-handlers.ts            Handlers /v1/transcribe, /v1/translate, /v1/chat, /v1/speech
-  gpu-handlers.ts           Handlers /v1/gpu/* (28 endpoints)
-  gpu-deploy.ts             Deploy orchestration (startDeployWithTiers, startDeployRace)
-  deployment-state-machine.ts  Estado do deploy ativo (máquina de estados)
-  workload-handlers.ts      API unificada /v1/workloads (gpu, bot, db)
-  recall-handlers.ts        Meeting bots via Recall.ai
-  relay-handlers.ts         Media relay Scaleway para HLS
-  dub-fanout.ts             Fanout multi-idioma após STT
-  race-providers.ts         Hedged requests com EWMA
-  latency-db.ts             Banco PostgreSQL de RTT por host GPU
-  latency-scheduler.ts      Agendamento adaptativo de probes
-```
+| Serviço | O que faz | Implementação |
+|---------|-----------|---------------|
+| **Gateway** (core) | Acesso a IA: routing, fallback, racing, pipeline STT→LLM→TTS, GPU deploy | src/gateway/ |
+| **Compute** | Deploy de workloads do usuário (GPU, bots, DB) | src/compute/ |
+| **Database** | PostgreSQL (Neon) + latency DB | src/database/ |
+| **Storage** | Object storage S3-compatível | src/storage/ |
+| **Auth** | Tokens + API keys + vault de secrets | src/auth/ |
+| **Realtime** | WebSocket broadcast + streaming | src/realtime/ |
+| **Events** | Pub/sub + hooks de observabilidade | src/events/ |
+| **Platform** | Adapters, DI, logger | src/platform/ |
 
 ---
 
 ## Decisões arquiteturais
 
-### 1. src/ não importa server/ (lei, CI enforced)
+### 1. Cloud e GPU são variantes do mesmo conceito
 
-`src/` é a lib publicável. Nunca depende do servidor de referência.
+**Decisão:** `CloudProvider` e `GpuProvider` implementam a mesma interface e vivem no mesmo registry.
 
-**Impacto:** toda lógica reutilizável vai em `src/`; o servidor apenas compõe.
+**Por quê:** o gateway abstrai de onde a IA vem. O caller não precisa saber se um request foi para Groq (cloud) ou para um pod RunPod (GPU). São transports diferentes para o mesmo serviço.
 
 ---
 
-### 2. DI via interfaces, sem acoplamento a banco ou framework
+### 2. src/ é a lib publicável, server/ é thin delivery layer
 
-`src/` não conhece Prisma, Redis nem Next.js. Tudo injetado via `AutoscalerDeps` e `Storage`:
+**Decisão:** toda lógica de negócio em `src/`. `server/` apenas recebe HTTP, autentica, delega para src/, serializa resposta.
 
-```typescript
-interface AutoscalerDeps {
-  settingsStore: SettingsStore;
-  stateStore: StateStore;       // KV + List + Hash
-  sessionResolver: SessionResolver;
-  logger?: Logger;
-}
-```
+**Por quê:** qualquer consumidor da lib deve levar junto o gateway, pipeline, routing, deploy — sem precisar do servidor HTTP específico.
 
-**Impacto:** testes usam `InMemoryStateAdapter`; produção usa Redis. Trocar sem mudar lógica.
+**CI enforced:** `src/` não importa `server/`.
 
 ---
 
 ### 3. HTTP server sem framework (Bun native)
 
-Rotas registradas como flat object:
+**Decisão:** `Bun.serve()` + flat object de rotas. Sem Express/Hono/Fastify.
+
+**Por quê:** zero overhead, sem magic de framework para debugar.
+
+---
+
+### 4. DI via interfaces, sem acoplamento a banco
+
+**Decisão:** `src/` não conhece Prisma, Redis nem Next.js. Tudo injetado via contratos:
 ```typescript
-handlers['POST /v1/gpu/deploy'] = gh.handleGpuDeploy;
+interface StateStore { get, set, del, rpush, ltrim, lrange, hset, hdel, hgetall }
+interface SettingsStore { getSettings, patchSettings }
 ```
 
-Zero Express/Hono/Fastify.
-
-**Impacto:** sem magic de framework para debugar; overhead mínimo.
+**Por quê:** testes usam InMemory, prod usa Redis. Trocar sem mudar lógica.
 
 ---
 
-### 4. Tier cascade como estratégia de resiliência GPU
+### 5. Provider racing com EWMA
 
-Provedores tentados em ordem: **RunPod → Vast.ai → TensorDock → Modal**.
+**Decisão:** para toda stage do pipeline, disparar GPU + cloud em paralelo. Timeout adaptativo baseado em EWMA. Provider com menor EWMA recebe headstart.
 
-Cada tier tem GPU types, imagem Docker, região e timeouts próprios.
-
-**Impacto:** SLA mantido mesmo com falha parcial de provedores.
+**Por quê:** latência de pipeline P95 melhora progressivamente com uso.
 
 ---
 
-### 5. Deploy race para reduzir cold start
+### 6. Tier cascade para resiliência GPU
 
-`startDeployRace` dispara N deploys em paralelo, usa o primeiro pronto, cancela os demais.
+**Decisão:** providers tentados em ordem: RunPod → Vast.ai → TensorDock → Modal. Cada tier com seus próprios timeouts e GPU types.
 
-**Impacto:** P99 de cold start reduzido significativamente.
-
----
-
-### 6. Provider race com EWMA para todas as stages do pipeline
-
-`RaceProviders` dispara GPU + cloud em paralelo. Timeout adaptativo baseado em EWMA de latência histórica. Provider com menor EWMA recebe headstart de 50ms.
-
-**Impacto:** latência de pipeline P95 melhora progressivamente com uso.
+**Por quê:** nenhum provider tem 100% de disponibilidade. Cascade garante SLA.
 
 ---
 
-### 7. Streaming overlap LLM → TTS
+### 7. Deploy race para cold start
 
-TTS começa em tokens parciais do LLM antes da resposta completa.
+**Decisão:** `startDeployRace` dispara N deploys em paralelo, usa o primeiro pronto, cancela os demais.
 
-**Impacto:** ~100-200ms de redução de latência percebida no primeiro chunk de áudio.
-
----
-
-### 8. Modelos pré-baked na imagem Docker, nunca lazy download
-
-Modelos baixados no `docker build`, não no startup.
-
-**Impacto:** benchmark real mostrou +63% vs lazy download (Vast.ai RTX 4090 + NVMe). Layer cache domina.
+**Por quê:** P99 de cold start reduzido significativamente.
 
 ---
 
-### 9. Budget Gate obrigatório antes de qualquer deploy
+### 8. Streaming overlap LLM → TTS
 
-`canAffordDeploy()` verificado em `startDeployWithTiers` E `startDeployRace`.
+**Decisão:** TTS começa em tokens parciais do LLM.
 
-**Impacto:** fail-fast; sem gasto não intencional.
-
----
-
-### 10. Latency DB para seleção inteligente de GPU
-
-PostgreSQL (Neon) com histórico de RTT por host. Probe scheduling adaptativo:
-- Host estável → probe a cada 2h
-- Host instável → probe a cada 30min
-- Host falhando → probe a cada 6h
-
-**Impacto:** `sortGpuTypesByLatency()` usa dados reais para selecionar o host mais rápido.
+**Por quê:** ~100-200ms de redução na latência percebida.
 
 ---
 
-### 11. Estado persistido em ~/.babelcast/ (local) ou Redis (cloud)
+### 9. Modelos pré-baked na imagem Docker
 
-`active_deploy.json`, `daily_spend.json`, `cooldowns.json`, `provider-config.json`.
+**Decisão:** modelos baixados no docker build, nunca no startup.
 
-**Impacto:** servidor é stateful por design; Redis é opcional para single-node.
+**Por quê:** +63% vs lazy download em benchmark real (Vast.ai RTX 4090 + NVMe).
 
 ---
 
-## Fronteiras que o AI deve respeitar
+### 10. Budget Gate obrigatório
+
+**Decisão:** `canAffordDeploy()` verificado antes de qualquer boot.
+
+**Por quê:** fail-fast; sem gasto não intencional.
+
+---
+
+### 11. Latency DB com probe scheduling adaptativo
+
+**Decisão:** PostgreSQL com RTT por host. Estável: probe 2h. Instável: 30min. Falhando: 6h.
+
+**Por quê:** `sortGpuTypesByLatency()` usa dados reais para selecionar melhor host.
+
+---
+
+### 12. Estado persistido localmente em ~/.babelcast/
+
+**Decisão:** `active_deploy.json`, `daily_spend.json`, `cooldowns.json`, `provider-config.json`.
+
+**Por quê:** servidor é stateful por design; Redis é opcional para single-node.
+
+---
+
+## Fronteiras
 
 | Fronteira | Regra |
 |-----------|-------|
-| `src/` vs `server/` | `src/` nunca importa `server/` |
-| GPU ops | Sempre via gateway API — nunca direto no provedor |
-| Prisma/Redis/Next.js | Somente em `server/` ou via adapter interface |
-| Clientes GPU | Sempre via `GpuProviderClient` interface |
-| UI components | Sempre `web/src/components/ui/` — nunca reinventar |
+| `src/` vs `server/` | src/ nunca importa server/ |
+| Gateway vs Compute | Compute pode usar Gateway (provisionar GPU). Gateway não conhece Compute. |
+| Cross-context state | Cada BC gerencia seu próprio estado. Nada de god object compartilhado. |
+| Comunicação entre BCs | Via Events (hooks), nunca imports diretos entre BCs |
+| Providers cloud vs GPU | Mesma interface, mesmo registry. Diferença é transport, não domínio. |
 
 ---
 
 ## O que NÃO fazer
 
-- **Não** chamar RunPod/Vast.ai/TensorDock direto — bypassa watchdog e cost tracking
-- **Não** adicionar Prisma em `src/` — quebra a lib publicável
-- **Não** resetar `monitorCrashRecoveryAttempts` em `resetIdleState()` — intencional
-- **Não** usar volumes de rede com imagens pre-baked — zero benefício
+- **Não** chamar RunPod/Vast.ai direto — sempre via gateway/deploy
+- **Não** adicionar Prisma em src/ — usar interface DI
+- **Não** centralizar estado em god object — estado pertence ao BC
+- **Não** colocar lógica de negócio em server/ — server/ é thin delivery
+- **Não** separar providers cloud e GPU como domínios diferentes — são o mesmo
 - **Não** usar `HF_HUB_ENABLE_HF_TRANSFER` — deprecated; usar `hf-xet`
-- **Não** benchmarkar cold start em Mac/laptop — números enganosos vs. GPU real
+- **Não** benchmarkar cold start em Mac/laptop — números enganosos
 - **Não** usar R2/B2 para servir pesos de modelo — 8x mais lento que HF CloudFront
 
 ---
@@ -189,11 +166,12 @@ PostgreSQL (Neon) com histórico de RTT por host. Probe scheduling adaptativo:
 | Testes | Vitest (sequential) |
 | Build | tsup (ESM + CJS + .d.ts) |
 | HTTP/WS | Bun.serve() nativo |
-| DB (server) | Prisma + PostgreSQL (Neon) |
-| Estado (prod) | Redis via `RedisStateAdapter` |
-| Estado (dev/test) | `InMemoryStateAdapter` |
+| DB | Prisma + PostgreSQL (Neon) |
+| State (prod) | Redis via RedisStateAdapter |
+| State (dev/test) | InMemoryStateAdapter |
 | UI | Next.js + Tailwind |
+| Object storage | S3-compatible (R2/B2/AWS/MinIO) |
 | GPU providers | RunPod, Vast.ai, TensorDock, Modal, SnapGPU |
-| AI providers | Groq, OpenAI, Fireworks, OpenRouter, self-hosted |
-| Meeting bots | Recall.ai |
-| Media relay | Scaleway |
+| AI providers | Groq, OpenAI, Fireworks, OpenRouter, Ollama, Deepgram, ElevenLabs |
+| Meeting bots | Recall.ai (via Fly.io / RunPod) |
+| Secrets | AES-256-GCM vault |

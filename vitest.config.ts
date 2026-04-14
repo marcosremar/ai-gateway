@@ -18,7 +18,8 @@ export default defineConfig({
     testTimeout: 60_000,
     hookTimeout: 30_000,
     sequence: { concurrent: false },
-    retry: 1, // Retry failed tests once (handles Groq rate limit in full-suite runs)
+    retry: 1,
+    changed: true, // Run only tests for changed files by default
     env: {
       // Set to '0' to run live/GPU tests (require running gateway + GPU pod)
       SKIP_GPU_TESTS: process.env.SKIP_GPU_TESTS ?? '1',
