@@ -1,0 +1,262 @@
+// ── GPU Auto-Recovery — reconnect, recover, fetch logs, verified types ────────
+
+import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
+import { probeGpuHealth } from '../src/autoscaler/health';
+import { getGpuPriorityList, DEFAULT_GPU_PRIORITY } from '../src/gpu-providers/deploy-settings';
+import { createLogger } from '../src/logger';
+import {
+  prisma, deployState, setDeployState,
+  deployApiKey, deployVastApiKey, deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey,
+  setDeployApiKey, setDeployVastApiKey, setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey,
+  setActiveProvider, setDeployCancelled,
+  deploymentSM,
+  loadPersistedDeploy, clearPersistedDeploy,
+  resetDeployState,
+  updateGpuModelWarmth,
+} from './state';
+import { markGpuHealthy } from './providers';
+import { broadcastWs } from './ws-state';
+import { BLACKWELL_TO_STANDARD, STANDARD_TO_BLACKWELL } from './config';
+
+const log = createLogger('gpu-deploy');
+
+export async function fetchGpuLogs(sshHost?: string, sshPort?: number, endpoint?: string): Promise<string> {
+  const host = sshHost || deployState.sshHost;
+  const port = sshPort || deployState.sshPort;
+  const gpuEndpoint = endpoint || deployState.endpoint;
+  const lines: string[] = [];
+
+  // Method 1: Try HTTP /logs endpoint on the GPU (if start.sh exposes one)
+  if (gpuEndpoint) {
+    try {
+      const logsUrl = `${gpuEndpoint.replace(/\/$/, '')}/logs`;
+      const resp = await fetch(logsUrl, { signal: AbortSignal.timeout(5_000) });
+      if (resp.ok) {
+        const text = await resp.text();
+        lines.push('── HTTP /logs ──', text.slice(-8000));
+      }
+    } catch (e) { log.debug(`[gpu] HTTP /logs not available at ${gpuEndpoint}: ${e instanceof Error ? e.message : e}`); }
+  }
+
+  // Method 2: SSH into the machine and grab logs
+  if (host && port) {
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) return lines.join('\n') || '(no logs)';
+    const { execSync } = await import('child_process');
+    const sshCmd = `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o UserKnownHostsFile=/dev/null -p ${port} root@${host}`;
+    const logCommands = [
+      'tail -200 /var/log/babelcast.log 2>/dev/null || tail -200 /app/logs/*.log 2>/dev/null || echo "(no app log found)"',
+      'tail -50 /var/log/start.log 2>/dev/null || echo "(no start.log)"',
+      'docker logs --tail 100 babelcast 2>/dev/null || echo "(no docker container)"',
+      'nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || echo "(no GPU info)"',
+      'ps aux | grep -E "uvicorn|python|llama" | grep -v grep || echo "(no processes)"',
+    ];
+    for (const cmd of logCommands) {
+      try {
+        const out = execSync(`${sshCmd} '${cmd}'`, { timeout: 10_000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+        if (out.trim() && !out.includes('(no ')) {
+          lines.push(`── ${cmd.split(' ')[0]} ──`, out.trim().slice(-4000));
+        }
+      } catch (sshErr) { log.debug(`[gpu] SSH log fetch failed (${cmd.split(' ')[0]}): ${sshErr instanceof Error ? sshErr.message : sshErr}`); }
+    }
+  }
+
+  if (lines.length === 0) {
+    return '(no logs available — no SSH or HTTP access to GPU)';
+  }
+  const result = lines.join('\n');
+  deployState.lastLogs = result;
+  return result;
+}
+
+/**
+ * Return GPU types ordered by benchmark results (best median latency first).
+ * Only includes GPU types that have at least one passing test for any image
+ * compatible with `dockerImage` (after Blackwell auto-swap).
+ * Falls back to the AI Gateway priority list (deploy-settings.ts)
+ * if no benchmark data exists yet.
+ */
+export async function getVerifiedGpuTypes(dockerImage: string): Promise<string[]> {
+  try {
+    // Resolve the canonical standard image name for comparison
+    const canonicalImage = BLACKWELL_TO_STANDARD[dockerImage] ?? dockerImage;
+
+    // Get all passing tests for this image (or its Blackwell variant)
+    const rows = await prisma.gpuCompatibilityTest.findMany({
+      where: {
+        passed: true,
+        dockerImage: { in: [canonicalImage, STANDARD_TO_BLACKWELL[canonicalImage] ?? canonicalImage, dockerImage] },
+      },
+      select: { gpuType: true, translateMedianMs: true },
+      orderBy: [{ translateMedianMs: 'asc' }, { testedAt: 'desc' }],
+    });
+
+    if (rows.length === 0) {
+      // No benchmark data yet — use hardcoded allowlist
+      return getGpuPriorityList().length > 0 ? getGpuPriorityList() : [...DEFAULT_GPU_PRIORITY];
+    }
+
+    // Deduplicate, preserving latency order (lowest median first, nulls last)
+    const seen = new Set<string>();
+    const sorted: string[] = [];
+    const nullLatency: string[] = [];
+    for (const r of rows) {
+      if (seen.has(r.gpuType)) continue;
+      seen.add(r.gpuType);
+      if (r.translateMedianMs != null) sorted.push(r.gpuType);
+      else nullLatency.push(r.gpuType);
+    }
+    const verified = [...sorted, ...nullLatency];
+    log.log(`[gpu] Verified GPU types from benchmarks (${verified.length}): ${verified.join(', ')}`);
+    return verified;
+  } catch (err) {
+    log.warn(`[gpu] Failed to load verified GPU types from DB, using ai-gateway priority list: ${err instanceof Error ? err.message : err}`);
+    return getGpuPriorityList().length > 0 ? getGpuPriorityList() : [...DEFAULT_GPU_PRIORITY];
+  }
+}
+
+/**
+ * Attempt to reconnect to a GPU pod that was running before gateway restart.
+ * Loads persisted deploy state from disk, probes health, and restores monitoring if alive.
+ * Called once at gateway startup.
+ */
+export async function tryRecoverActiveDeploy(): Promise<boolean> {
+  const persisted = loadPersistedDeploy();
+  if (!persisted) return false;
+
+  log.log(`[gpu] Found persisted deploy: ${persisted.provider}/${persisted.gpuType} pod=${persisted.podId} endpoint=${persisted.endpoint}`);
+  log.log(`[gpu] Probing health to check if pod is still alive...`);
+
+  try {
+    const probeResult = await probeGpuHealth(persisted.endpoint, true);
+    const healthy = probeResult.ok;
+    if (probeResult.data) updateGpuModelWarmth(probeResult.data);
+    if (!healthy) {
+      log.log(`[gpu] Persisted pod is not healthy — discarding`);
+      clearPersistedDeploy();
+      return false;
+    }
+
+    // Pod is alive! Restore state
+    log.log(`[gpu] Pod is still healthy! Reconnecting...`);
+    setDeployCancelled(false);
+    setDeployState({
+      status: 'ready',
+      deployId: persisted.deployId || '',
+      podId: persisted.podId,
+      endpoint: persisted.endpoint,
+      gpuType: persisted.gpuType,
+      dockerImage: persisted.dockerImage || '',
+      provider: persisted.provider as ProviderName,
+      costPerHr: persisted.costPerHr,
+      startedAt: persisted.startedAt,
+      sshHost: persisted.sshHost,
+      sshPort: persisted.sshPort,
+      providerMeta: persisted.providerMeta,
+      message: `Reconnected after restart (${persisted.provider}/${persisted.gpuType})`,
+      step: 'ready',
+      stepDetail: '',
+    });
+
+    // Restore provider credentials from env (needed for terminate)
+    if (persisted.provider === 'vast') {
+      setDeployVastApiKey(process.env.VAST_API_KEY || '');
+    } else if (persisted.provider === 'tensordock') {
+      setDeployTensordockApiKey(process.env.TENSORDOCK_API_KEY || '');
+      setDeployTensordockAuthId(process.env.TENSORDOCK_AUTH_ID || '');
+    } else if (persisted.provider === 'runpod') {
+      setDeployApiKey(process.env.RUNPOD_API_KEY || '');
+    } else if (persisted.provider === 'modal') {
+      const modalId = process.env.MODAL_TOKEN_ID || '';
+      const modalSecret = process.env.MODAL_TOKEN_SECRET || '';
+      setDeployModalApiKey(modalId && modalSecret ? `${modalId}:${modalSecret}` : '');
+    }
+    setActiveProvider(persisted.provider as ProviderName);
+
+    // Mark GPU healthy and set up translation routing
+    markGpuHealthy();
+    deploymentSM.markReady(persisted.podId, persisted.endpoint, persisted.gpuType, persisted.costPerHr);
+
+    // Start monitoring
+    const { startGpuMonitoring } = await import('./gpu-health-monitor');
+    startGpuMonitoring();
+
+    log.log(`[gpu] Successfully reconnected to ${persisted.provider} pod ${persisted.podId} (${persisted.gpuType} @ $${persisted.costPerHr}/hr)`);
+    return true;
+  } catch (err) {
+    log.warn(`[gpu] Recovery probe failed: ${err instanceof Error ? err.message : err}`);
+    clearPersistedDeploy();
+    return false;
+  }
+}
+
+// ── Auto-Recovery Deploy ──────────────────────────────────────────────────────
+// Called when GPU is condemned — deploys a replacement with the same config.
+// If the current machine has some services working, the new machine gets
+// the full config so all services are tested. Once the replacement passes
+// readiness, it becomes the active machine (handled by the normal deploy flow).
+
+export async function startAutoRecoveryDeploy(): Promise<void> {
+  // Prevent concurrent deploys — bail if another deploy is in progress
+  if (deployState.status === 'creating' || deployState.status === 'booting' || deployState.step === 'waiting_health') {
+    log.warn('[gpu] Auto-recovery: deploy already in progress — skipping');
+    return;
+  }
+
+  const lastImage = deployState.dockerImage;
+  const lastGpuType = deployState.gpuType;
+  const lastProvider = deployState.provider;
+
+  if (!lastImage) {
+    log.warn('[gpu] Auto-recovery: no Docker image from last deploy — skipping');
+    return;
+  }
+
+  // Save API keys BEFORE reset (resetDeployState clears them)
+  const savedKeys = {
+    runpod: deployApiKey,
+    vast: deployVastApiKey,
+    tensordock: deployTensordockApiKey ? { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId } : undefined,
+    modal: deployModalApiKey,
+  };
+
+  log.log(`[gpu] Auto-recovery: deploying replacement (image=${lastImage}, lastGpu=${lastGpuType}, lastProvider=${lastProvider})`);
+  broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery', message: `Deploying replacement (${lastImage})...` });
+
+  // Reset deploy state for a fresh deploy
+  resetDeployState();
+
+  // Restore API keys after reset
+  if (savedKeys.runpod) setDeployApiKey(savedKeys.runpod);
+  if (savedKeys.vast) setDeployVastApiKey(savedKeys.vast);
+  if (savedKeys.tensordock) {
+    setDeployTensordockApiKey(savedKeys.tensordock.apiKey);
+    setDeployTensordockAuthId(savedKeys.tensordock.authId);
+  }
+  if (savedKeys.modal) setDeployModalApiKey(savedKeys.modal);
+
+  // Build tiers from saved credentials
+  const { buildGpuTiers, startDeployWithTiers } = await import('./gpu-deploy');
+  const tiers = buildGpuTiers(
+    savedKeys.runpod,
+    savedKeys.vast || undefined,
+    savedKeys.tensordock,
+    savedKeys.modal || undefined,
+  );
+
+  if (tiers.length === 0) {
+    log.error('[gpu] Auto-recovery: no provider tiers available — staying on cloud');
+    broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery-failed', error: 'No provider credentials' });
+    return;
+  }
+
+  // Use the same GPU types from the priority list, or fallback to the last used type
+  const gpuTypes = lastGpuType ? [lastGpuType] : getGpuPriorityList();
+
+  try {
+    await startDeployWithTiers(tiers, lastImage, gpuTypes, { autoRecovery: true });
+    log.log('[gpu] Auto-recovery: deploy started — readiness check will run automatically');
+  } catch (err) {
+    log.error(`[gpu] Auto-recovery deploy failed: ${err instanceof Error ? err.message : err}`);
+    broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery-failed', error: err instanceof Error ? err.message : 'Deploy failed' });
+  }
+}

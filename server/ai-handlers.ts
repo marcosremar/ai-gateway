@@ -236,6 +236,31 @@ import type { STTRaceProvider } from '../src/stt-race';
 import type { AIProfile } from '../src/client';
 import { OllamaSTTProvider } from '../src/providers/ollama';
 import { createLogger } from '../src/logger';
+// ── Domain logic extracted to src/gateway/pipeline/ ─────────────────────────
+import {
+  // SSRF protection
+  isPrivateUrl as _isPrivateUrl,
+  validateRemoteEndpoint,
+  // Translation cache
+  getCachedTranslation, setCachedTranslation, getTranslationCacheStats as _getTranslationCacheStats,
+  adaptiveMaxTokens,
+  // System prompt
+  TRANSLATION_STYLES, buildSystemPrompt, resolveVoiceForProfile,
+  // GPU fetch (DI version)
+  fetchGpuSTT as _fetchGpuSTTCore,
+  fetchGpuLLM as _fetchGpuLLMCore,
+  fetchGpuTTS as _fetchGpuTTSCore,
+  // Pipeline response
+  encodePipelineResponse as _encodePipelineResponse, wantsBinaryAudio,
+  // Timeouts
+  GPU_STT_TIMEOUT_MS, GPU_LLM_TIMEOUT_MS, GPU_TTS_TIMEOUT_MS, GPU_PIPELINE_TIMEOUT_MS,
+  // Voice reference cache
+  storeVoiceReference, getVoiceReference,
+} from '../src/gateway/pipeline';
+import type {
+  GpuSTTResult, GpuLLMResult, GpuTTSResult, StageRecorder,
+  SttStageResult, LlmStageResult, TtsStageResult, PipelineResponseBody,
+} from '../src/gateway/pipeline';
 
 const log = createLogger('ai-handlers');
 import {
@@ -277,79 +302,14 @@ import { probeCloudProvider, probeGpuHealth } from '../src';
 import type { RaceCandidate } from './race-providers';
 import { broadcastWs } from './ws-state';
 
-// ── SSRF protection — block fetches to private/internal IP addresses ─────────
+// ── SSRF protection — imported from src/gateway/pipeline/ssrf-protection.ts ──
+// Re-export for backward compatibility (other server/ modules may import from here)
+export const isPrivateUrl = _isPrivateUrl;
+export const getTranslationCacheStats = _getTranslationCacheStats;
 
-/** Patterns that match private/internal/metadata IP addresses.
- * Compiled once at module load for performance.
- */
-const SSRF_BLOCKED_IP_PATTERNS = [
-  { pattern: /^127\./, label: 'localhost' },
-  { pattern: /^10\./, label: 'private-10' },
-  { pattern: /^192\.168\./, label: 'private-192' },
-  { pattern: /^172\.(1[6-9]|2\d|3[01])\./, label: 'private-172' },
-  { pattern: /^169\.254\./, label: 'link-local' },
-  { pattern: /^0\.0\.0\.0$/, label: 'any' },
-  { pattern: /^::1$/, label: 'ipv6-loopback' },
-  { pattern: /^::$/, label: 'ipv6-unspecified' },
-  { pattern: /^fe80:/i, label: 'ipv6-link-local' },
-  { pattern: /^fc00:/i, label: 'ipv6-ula' },
-  { pattern: /^fd[0-9a-f]{2}:/i, label: 'ipv6-ula-c' },
-  { pattern: /^2001:db8:/i, label: 'ipv6-documentation' },
-  { pattern: /^169\.254\.169\.254$/, label: 'cloud-metadata' },
-];
-const SSRF_BLOCKED_HOSTS = [
-  'localhost',
-  'metadata.google.internal',
-  'metadata.google',
-  'kubernetes.default.svc',
-  'kubernetes.default',
-  'etcd-client',
-  'etcd.observer',
-];
-
-/** Return true if the URL points to a private/internal/metadata address. */
-export function isPrivateUrl(urlStr: string): boolean {
-  try {
-    const url = new URL(urlStr);
-    if (url.protocol === 'file:') return true;
-    const host = url.hostname.toLowerCase();
-    if (SSRF_BLOCKED_HOSTS.includes(host)) return true;
-    return SSRF_BLOCKED_IP_PATTERNS.some(({ pattern }) => pattern.test(host));
-  } catch { return true; }
-}
-
-/** Block fetches to private/internal IP addresses (SSRF protection). Throws on match. */
-function validateEndpointUrl(urlStr: string): void {
-  let url: URL;
-  try {
-    url = new URL(urlStr);
-  } catch {
-    throw new Error(`Invalid URL: ${urlStr}`);
-  }
-  const host = url.hostname.toLowerCase();
-  if (SSRF_BLOCKED_HOSTS.includes(host)) {
-    throw new Error(`SSRF blocked: ${host} is a reserved hostname`);
-  }
-  if (SSRF_BLOCKED_IP_PATTERNS.some(({ pattern }) => pattern.test(host))) {
-    throw new Error(`SSRF blocked: ${host} is a private/internal address`);
-  }
-}
-
-/** Validate a GPU/remote endpoint URL, skipping localhost (valid for local dev). */
-function validateRemoteEndpoint(endpoint: string): void {
-  if (endpoint.includes('localhost') || endpoint.includes('127.0.0.1')) return;
-  validateEndpointUrl(endpoint);
-}
-
-// ── Real-time timeout constants ──────────────────────────────────────────────
-// Tuned for subtitle pipeline: anything above these thresholds has lost its
-// utility for real-time display and should yield to the next provider.
-// STT needs extra headroom: auto-swap sends 3 parallel requests that queue
-// on the GPU (serialized by GPU semaphore), so worst-case is ~3× single latency.
-export const GPU_STT_TIMEOUT_MS = 5_000;
-export const GPU_LLM_TIMEOUT_MS = 3_000;
-export const GPU_TTS_TIMEOUT_MS = 5_000;
-export const GPU_PIPELINE_TIMEOUT_MS = 6_000;
+// ── Real-time timeout constants — imported from src/gateway/pipeline/timeouts.ts
+// Re-exported for backward compatibility via named import at top
+export { GPU_STT_TIMEOUT_MS, GPU_LLM_TIMEOUT_MS, GPU_TTS_TIMEOUT_MS, GPU_PIPELINE_TIMEOUT_MS };
 
 /** Adaptive GPU timeout: P95 × 2 with floor/ceiling guards. */
 function adaptiveGpuTimeout(baseMs: number): number {
@@ -374,109 +334,9 @@ export function adaptiveStageTimeout(stage: 'stt' | 'llm' | 'tts', baseMs: numbe
   return adaptiveGpuTimeout(baseMs);
 }
 
-// ── Translation LRU cache ──────────────────────────────────────────────────
-// Meetings have many repeated phrases ("thank you", "can you hear me?").
-// Cache avoids redundant LLM calls for identical text+lang pairs.
-const TRANSLATION_CACHE_MAX = 256;
-const TRANSLATION_CACHE_TTL_MS = 30 * 60_000; // 30 minutes — meetings last hours
-
-class LRUCache {
-  private cache = new Map<string, { text: string; ts: number }>();
-  private readonly maxSize: number;
-
-  constructor(maxSize: number) {
-    this.maxSize = maxSize;
-  }
-
-  get(key: string): { text: string; ts: number } | undefined {
-    if (!this.cache.has(key)) return undefined;
-    const value = this.cache.get(key)!;
-    // Move to end (mark as most recently used)
-    this.cache.delete(key);
-    this.cache.set(key, value);
-    return value;
-  }
-
-  set(key: string, value: { text: string; ts: number }): void {
-    if (this.cache.has(key)) {
-      this.cache.delete(key);
-    } else if (this.cache.size >= this.maxSize) {
-      // Delete least recently used (first key in Map)
-      const firstKey = this.cache.keys().next().value!;
-      this.cache.delete(firstKey);
-    }
-    this.cache.set(key, value);
-  }
-
-  has(key: string): boolean {
-    return this.cache.has(key);
-  }
-
-  get size(): number {
-    return this.cache.size;
-  }
-
-  delete(key: string): boolean {
-    return this.cache.delete(key);
-  }
-
-  clear(): void {
-    this.cache.clear();
-  }
-
-  entries(): IterableIterator<[string, { text: string; ts: number }]> {
-    return this.cache.entries();
-  }
-}
-
-const translationCache = new LRUCache(TRANSLATION_CACHE_MAX);
-
-// Cache hit/miss counters for metrics
-let cacheHits = 0;
-let cacheMisses = 0;
-export function getTranslationCacheStats() { return { cacheHits, cacheMisses, cacheSize: translationCache.size }; }
-
-let translationCacheSweepTimer: ReturnType<typeof setInterval> | null = null;
-
-// Periodic sweep: remove expired entries every 5 minutes
-translationCacheSweepTimer = setInterval(() => {
-  const now = Date.now();
-  let swept = 0;
-  for (const [key, entry] of translationCache.entries()) {
-    if (now - entry.ts > TRANSLATION_CACHE_TTL_MS) {
-      translationCache.delete(key);
-      swept++;
-    }
-  }
-  if (swept > 0) log.log(`Swept ${swept} expired translation entries`);
-}, 5 * 60_000);
-
-export function getCachedTranslation(text: string, srcLang: string, tgtLang: string, style = 'default'): string | null {
-  const key = `${srcLang}|${tgtLang}|${style}|${text}`;
-  const entry = translationCache.get(key);
-  if (!entry) { cacheMisses++; return null; }
-  if (Date.now() - entry.ts > TRANSLATION_CACHE_TTL_MS) {
-    translationCache.delete(key);
-    cacheMisses++;
-    return null;
-  }
-  cacheHits++;
-  return entry.text;
-}
-
-export function setCachedTranslation(text: string, srcLang: string, tgtLang: string, translated: string, style = 'default'): void {
-  const key = `${srcLang}|${tgtLang}|${style}|${text}`;
-  translationCache.set(key, { text: translated, ts: Date.now() });
-}
-
-/** Adaptive maxTokens: short inputs need fewer tokens, saving LLM generation time. */
-function adaptiveMaxTokens(inputText: string): number {
-  const len = inputText.length;
-  if (len < 20) return 60;
-  if (len < 50) return 100;
-  if (len < 150) return 150;
-  return 200;
-}
+// ── Translation LRU cache — imported from src/gateway/pipeline/translation-cache.ts
+// Re-exported for backward compatibility (other server/ modules import from here)
+export { getCachedTranslation, setCachedTranslation, adaptiveMaxTokens, getVoiceReference };
 
 // ── Avatar TTS forwarding ────────────────────────────────────────────────────
 
@@ -522,60 +382,23 @@ function logRouteDecision(stage: string, candidates: { name: string }[], gpuEndp
   log.log(`${stage} route: ${names}${note}`);
 }
 
-// ── GPU fetch helpers (shared by hedging candidates) ─────────────────────────
+// ── GPU fetch helpers — thin wrappers around src/gateway/pipeline/gpu-fetch.ts
+// Inject the server-side stage recorder (recordStageSuccess/recordStageFailure)
+// so the core logic remains independent of server/ modules.
 
-export interface GpuSTTResult {
-  text: string;
-  language: string;
-  used_gpu: boolean;
-  avg_logprob: number;
-  segments?: unknown[];
-  words?: unknown[];
-}
+const stageRecorder: StageRecorder = {
+  recordSuccess: (stage) => recordStageSuccess(stage),
+  recordFailure: (stage) => recordStageFailure(stage),
+};
+
+export { GpuSTTResult, GpuLLMResult, GpuTTSResult };
 
 export async function fetchGpuSTT(
   gpuEndpoint: string, audio: Buffer, language: string, prompt: string,
   hotwords: string, wordTimestamps: boolean, signal: AbortSignal,
   requestId?: string,
 ): Promise<GpuSTTResult> {
-  validateRemoteEndpoint(gpuEndpoint);
-  const form = new FormData();
-  form.append('file', new Blob([audio as BlobPart], { type: 'audio/wav' }), 'audio.wav');
-  const params = new URLSearchParams();
-  if (language) params.set('language', language);
-  if (prompt) params.set('prompt', prompt);
-  if (hotwords) params.set('hotwords', hotwords);
-  if (wordTimestamps) params.set('word_timestamps', 'true');
-  try {
-    const headers: Record<string, string> = {};
-    if (requestId) headers['X-Request-Id'] = requestId;
-    const gpuRes = await fetch(`${gpuEndpoint}/v1/transcribe?${params}`, {
-      method: 'POST', body: form, signal, headers,
-    });
-    if (!gpuRes.ok) {
-      const errBody = await gpuRes.text().catch(() => '');
-      log.warn(`HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
-      recordStageFailure('stt');
-      throw new Error(`GPU STT HTTP ${gpuRes.status}`);
-    }
-    const data = await gpuRes.json() as Record<string, unknown>;
-    recordStageSuccess('stt');
-    return {
-      text: (data.text as string) || '',
-      language: (data.language as string) || '',
-      used_gpu: true,
-      avg_logprob: typeof data.avg_logprob === 'number' ? data.avg_logprob : 0,
-      ...(Array.isArray(data.segments) ? { segments: data.segments } : {}),
-    };
-  } catch (err) {
-    if (!(err instanceof DOMException && err.name === 'AbortError')) recordStageFailure('stt');
-    throw err;
-  }
-}
-
-export interface GpuLLMResult {
-  translated_text: string;
-  used_gpu: boolean;
+  return _fetchGpuSTTCore(gpuEndpoint, audio, language, prompt, hotwords, wordTimestamps, signal, stageRecorder, requestId);
 }
 
 export async function fetchGpuLLM(
@@ -583,41 +406,7 @@ export async function fetchGpuLLM(
   glossary: string, context: string, signal: AbortSignal,
   requestId?: string,
 ): Promise<GpuLLMResult> {
-  validateRemoteEndpoint(gpuEndpoint);
-  const body: Record<string, string> = { text, source_lang: sourceLang, target_lang: targetLang };
-  if (glossary) body.glossary = glossary;
-  if (context) body.context = context;
-  try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (requestId) headers['X-Request-Id'] = requestId;
-    const gpuRes = await fetch(`${gpuEndpoint}/v1/translate/text`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
-    if (!gpuRes.ok) {
-      const errBody = await gpuRes.text().catch(() => '');
-      log.warn(`HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
-      recordStageFailure('llm');
-      throw new Error(`GPU LLM HTTP ${gpuRes.status}`);
-    }
-    const data = await gpuRes.json() as Record<string, unknown>;
-    recordStageSuccess('llm');
-    return {
-      translated_text: (data.translated_text as string) || '',
-      used_gpu: true,
-    };
-  } catch (err) {
-    if (!(err instanceof DOMException && err.name === 'AbortError')) recordStageFailure('llm');
-    throw err;
-  }
-}
-
-export interface GpuTTSResult {
-  audio: Buffer;
-  contentType: string;
-  used_gpu: boolean;
+  return _fetchGpuLLMCore(gpuEndpoint, text, sourceLang, targetLang, glossary, context, signal, stageRecorder, requestId);
 }
 
 export async function fetchGpuTTS(
@@ -625,32 +414,7 @@ export async function fetchGpuTTS(
   signal: AbortSignal, refAudio?: string, refText?: string,
   requestId?: string,
 ): Promise<GpuTTSResult> {
-  validateRemoteEndpoint(gpuEndpoint);
-  try {
-    const body: Record<string, string> = { text, language, speaker };
-    if (refAudio) body.reference_audio = refAudio;
-    if (refText) body.ref_text = refText;
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (requestId) headers['X-Request-Id'] = requestId;
-    const gpuRes = await fetch(`${gpuEndpoint}/v1/tts`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
-    if (!gpuRes.ok) {
-      const errBody = await gpuRes.text().catch(() => '');
-      log.warn(`HTTP ${gpuRes.status}: ${errBody.slice(0, 200)}`);
-      recordStageFailure('tts');
-      throw new Error(`GPU TTS HTTP ${gpuRes.status}`);
-    }
-    const audio = Buffer.from(await gpuRes.arrayBuffer());
-    recordStageSuccess('tts');
-    return { audio, contentType: gpuRes.headers.get('content-type') || 'audio/wav', used_gpu: true };
-  } catch (err) {
-    if (!(err instanceof DOMException && err.name === 'AbortError')) recordStageFailure('tts');
-    throw err;
-  }
+  return _fetchGpuTTSCore(gpuEndpoint, text, language, speaker, signal, stageRecorder, refAudio, refText, requestId);
 }
 
 // ── Resolve cloud profile for a request ──────────────────────────────────────
@@ -1135,26 +899,9 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
 
 // ── Full pipeline route (STT + LLM + TTS) ──────────────────────────────────
 
-const TRANSLATION_STYLES: Record<string, string> = {
-  default:  'You are a real-time translator. Translate the following text accurately and naturally. Output ONLY the translation, nothing else.',
-  academic: 'You are a real-time translator for an academic conference. Translate the following text into formal, scholarly English suitable for a scientific seminar or lecture presentation. Use precise academic vocabulary, complete sentences, formal register (no contractions, no slang), and natural academic discourse markers (therefore, furthermore, consequently, it is noteworthy that…). Output ONLY the translation, nothing else.',
-  casual:   'You are a real-time translator. Translate the following text in a natural, conversational tone — as if two friends were talking. Keep it relaxed and colloquial. Output ONLY the translation, nothing else.',
-  news:     'You are a real-time translator for broadcast journalism. Translate with the clarity and authority of a TV news anchor — concise, neutral, professional. Output ONLY the translation, nothing else.',
-};
-
-export function buildSystemPrompt(source: string, target: string, style: string = 'default'): string {
-  const prompt = TRANSLATION_STYLES[style] ?? TRANSLATION_STYLES.default;
-  return `${prompt}\nTranslate from ${source} to ${target}.`;
-}
-
-/** Resolve a speaker/voice name to one valid for the active TTS provider.
- * Now that Modal Qwen3-TTS is the primary cloud fallback, we keep the original
- * Qwen3-TTS name (Ryan, Vivian etc.) — Modal accepts them natively.
- * Each downstream provider (Groq, OpenAI) has its own resolveVoice() that maps
- * unknown names to their own defaults automatically. */
-export function resolveVoiceForProfile(speaker: string, _hasGpu: boolean): string {
-  return speaker;
-}
+// TRANSLATION_STYLES, buildSystemPrompt, resolveVoiceForProfile — imported from src/gateway/pipeline/system-prompt.ts
+// Re-exported for backward compatibility via named import at top
+export { TRANSLATION_STYLES, buildSystemPrompt, resolveVoiceForProfile };
 
 // ── Pipeline sub-function types ─────────────────────────────────────────────
 
@@ -1187,39 +934,8 @@ interface PipelineParams {
   requestId: string;
 }
 
-/** STT stage result. */
-interface SttStageResult {
-  text: string;
-  provider: string;
-  latencyMs: number;
-  serverMs: number | undefined;
-  networkMs: number | undefined;
-}
-
-/** LLM stage result. */
-interface LlmStageResult {
-  translatedText: string;
-  provider: string;
-  latencyMs: number;
-}
-
-/** TTS stage result. */
-interface TtsStageResult {
-  audioB64: string;
-  audioRaw?: Buffer;       // raw audio bytes (kept for binary HTTP responses)
-  contentType: string;
-  provider: string;
-  latencyMs: number;
-}
-
-/** Full pipeline response body. */
-interface PipelineResponseBody {
-  transcription: string;
-  response: string;
-  audio_base64: string;
-  content_type: string;
-  timing: Record<string, unknown>;
-}
+// SttStageResult, LlmStageResult, TtsStageResult, PipelineResponseBody
+// — types imported from src/gateway/pipeline/pipeline-response.ts
 
 // ── Pipeline sub-functions ──────────────────────────────────────────────────
 
@@ -1590,36 +1306,8 @@ async function _runTtsStage(params: PipelineParams, translatedText: string): Pro
   return { audioB64, audioRaw, contentType, provider: ttsProvider, latencyMs: ttsMs };
 }
 
-/**
- * Build the final pipeline JSON response body.
- */
-function _encodePipelineResponse(
-  stt: SttStageResult, llm: LlmStageResult, tts: TtsStageResult,
-  totalMs: number, isCloneRequest: boolean,
-): PipelineResponseBody {
-  const usedAnyGpu = stt.provider === 'gpu' || llm.provider === 'gpu' || tts.provider === 'gpu';
-  return {
-    transcription: stt.text,
-    response: llm.translatedText,
-    audio_base64: tts.audioB64,
-    content_type: tts.contentType,
-    timing: {
-      total_ms: totalMs, stt_ms: stt.latencyMs, llm_ms: llm.latencyMs, tts_ms: tts.latencyMs,
-      used_gpu: usedAnyGpu,
-      stt_provider: stt.provider, llm_provider: llm.provider, tts_provider: tts.provider || 'none',
-      clone: isCloneRequest,
-      ...(stt.serverMs !== undefined && { stt_server_ms: stt.serverMs, stt_network_ms: stt.networkMs }),
-    },
-  };
-}
-
-/**
- * Check whether the client wants raw binary audio (Accept: audio/wav or application/octet-stream).
- */
-function _wantsBinaryAudio(req: IncomingMessage): boolean {
-  const accept = req.headers['accept'] || '';
-  return accept.includes('audio/wav') || accept.includes('application/octet-stream');
-}
+// _encodePipelineResponse — uses encodePipelineResponse from src/gateway/pipeline
+// _wantsBinaryAudio — uses wantsBinaryAudio from src/gateway/pipeline
 
 /**
  * Send the pipeline response — either raw binary audio with metadata in headers
@@ -1630,7 +1318,7 @@ function _sendPipelineResponse(
   body: PipelineResponseBody,
   audioRaw?: Buffer,
 ): void {
-  if (_wantsBinaryAudio(req) && audioRaw && audioRaw.length > 0) {
+  if (wantsBinaryAudio(req.headers['accept'] || '') && audioRaw && audioRaw.length > 0) {
     res.writeHead(200, {
       'Content-Type': 'audio/wav',
       'X-Transcription': encodeURIComponent(body.transcription || ''),
@@ -2361,11 +2049,8 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
   }
 }
 
-// ── Voice Reference Cache (for voice cloning) ────────────────────────────────
-// Stores uploaded reference audio + text in memory. Pipeline reads from cache
-// using ref_id instead of sending 500KB on every request.
-
-const voiceRefCache = new Map<string, { audio: string; text: string; createdAt: number }>();
+// ── Voice Reference Cache — uses storeVoiceReference/getVoiceReference from src/gateway/pipeline
+// The HTTP handler remains here (depends on server/ http-utils) but the cache itself is in src/.
 
 export async function handleUploadVoiceReference(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
@@ -2383,23 +2068,9 @@ export async function handleUploadVoiceReference(req: IncomingMessage, res: Serv
     return;
   }
 
-  const refId = `ref_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  voiceRefCache.set(refId, { audio, text, createdAt: Date.now() });
-
-  // Clean old entries (keep last 5)
-  if (voiceRefCache.size > 5) {
-    const oldest = [...voiceRefCache.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt);
-    for (let i = 0; i < oldest.length - 5; i++) voiceRefCache.delete(oldest[i][0]);
-  }
-
-  log.log(`Cached ref_id=${refId} audio=${(audio.length/1024).toFixed(0)}KB text=${text.length} chars`);
+  const refId = storeVoiceReference(audio, text);
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ref_id: refId }));
-}
-
-/** Get cached voice reference by ID (used by pipeline). */
-export function getVoiceReference(refId: string): { audio: string; text: string } | null {
-  return voiceRefCache.get(refId) || null;
 }
 
 // ── Modal TTS Keepalive ─────────────────────────────────────────────────────
