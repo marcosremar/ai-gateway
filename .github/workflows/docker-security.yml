@@ -1,0 +1,41 @@
+name: Docker Security Scan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+  schedule:
+    - cron: '0 9 * * 1'
+
+jobs:
+  trivy-scan:
+    name: Trivy Docker Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t ai-gateway:scan -f Dockerfile .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ai-gateway:scan'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'

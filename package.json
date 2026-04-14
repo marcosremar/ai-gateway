@@ -71,12 +71,8 @@
     "dotenv": "^17.3.1",
     "eslint": "^9.20.0",
     "tsup": "^8.5.1",
-<<<<<<< Updated upstream
-    "typescript": "^6.0.2",
-=======
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.58.2",
->>>>>>> Stashed changes
     "vitepress": "^1.6.3",
     "vitest": "^4.0.18"
   },

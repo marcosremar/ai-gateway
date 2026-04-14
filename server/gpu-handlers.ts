@@ -288,8 +288,9 @@ async function _validateDeployRequest(
   }
 
   // Resolve app-based GPU deploy config — use active app as defaults
-  const appId = (body.profileId as string) || loadProviderConfig().activeAppId;
-  const apps = loadProviderConfig().apps;
+  const config = await loadProviderConfig();
+  const appId = (body.profileId as string) || config.activeAppId;
+  const apps = config.apps;
   const activeApp = appId ? apps.find(p => p.id === appId) : null;
   const appGpu = activeApp?.gpuDeploy;
 
@@ -1012,7 +1013,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
  * Fires-and-forgets: deploy runs in background, gateway starts regardless.
  */
 export async function autoBootFromProfile(): Promise<void> {
-  const cfg = loadProviderConfig();
+  const cfg = await loadProviderConfig();
   const activeApp = cfg.apps?.find(p => p.id === cfg.activeAppId);
   if (!activeApp?.gpuDeploy?.bootOnStartup) return;
   if (deployState.status !== 'idle') {
@@ -1087,9 +1088,8 @@ export async function autoBootFromProfile(): Promise<void> {
 export async function handleGpuTerminate(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
-<<<<<<< Updated upstream
   console.log(`[req=${requestId}] GPU terminate requested`);
-  
+
   // Acquire lock to prevent concurrent lifecycle operations
   if (deployLock) {
     res.writeHead(409, { 'Content-Type': 'application/json' });
@@ -1097,22 +1097,15 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
     return;
   }
   setDeployLock(true);
-  
-=======
-  log.log(`[req=${requestId}] GPU terminate requested`);
->>>>>>> Stashed changes
+
   let body: Record<string, unknown>;
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); setDeployLock(false); return; }
 
   // Idempotent: if already idle (nothing running), return 200 instead of error
   if (deployState.status === 'idle' && !deployState.podId) {
-<<<<<<< Updated upstream
     console.log(`[req=${requestId}] GPU already idle — idempotent 200`);
     setDeployLock(false);
-=======
-    log.log(`[req=${requestId}] GPU already idle — idempotent 200`);
->>>>>>> Stashed changes
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, message: 'No active deployment to terminate.', idempotent: true }));
     return;

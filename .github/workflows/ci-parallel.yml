@@ -1,0 +1,159 @@
+name: CI (Parallel)
+
+# Parallel CI job — sharded across multiple runners for faster feedback.
+# Runs on every PR and push to main.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-parallel-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ── Shard 1: Typecheck + Lint ───────────────────────────────────────────
+  typecheck:
+    name: Typecheck & Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+  # ── Shard 2: Unit Tests ─────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Unit tests
+        env:
+          SKIP_GPU_TESTS: '1'
+          SKIP_LIVE_TESTS: '1'
+        run: bun run test:unit
+
+  # ── Shard 3: Build ──────────────────────────────────────────────────────
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Build (library bundle)
+        run: bun run build
+
+  # ── Shard 4: Lib/Service Boundary ───────────────────────────────────────
+  boundary:
+    name: Lib/Service Boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Check boundary
+        run: |
+          if grep -rn --include='*.ts' -E "from ['\"]\\.\\./\\.\\./server/|from ['\"]\\.\\./server/" src/ 2>/dev/null; then
+            echo "::error::src/ must not import from server/. See docs/architecture/lib-vs-service.md"
+            exit 1
+          fi
+          echo "✅ Lib/service boundary is clean"
+
+  # ── Shard 5: Bundle Size Budget ─────────────────────────────────────────
+  bundle-budget:
+    name: Bundle Size Budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Check bundle size
+        run: |
+          # Budget: 500KB gzipped for main bundle
+          MAX_SIZE_KB=512
+          for file in dist/index.js; do
+            if [ -f "$file" ]; then
+              SIZE=$(wc -c < "$file")
+              SIZE_KB=$((SIZE / 1024))
+              if [ "$SIZE_KB" -gt "$MAX_SIZE_KB" ]; then
+                echo "::error::$file is ${SIZE_KB}KB (budget: ${MAX_SIZE_KB}KB)"
+                exit 1
+              fi
+              echo "✅ $file: ${SIZE_KB}KB (budget: ${MAX_SIZE_KB}KB)"
+            fi
+          done
+          echo "✅ All bundles within size budget"
+
+  # ── Shard 6: Dependency Audit ───────────────────────────────────────────
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Audit dependencies
+        run: |
+          AUDIT_OUTPUT=$(bun audit 2>&1 || true)
+          echo "$AUDIT_OUTPUT"
+          CRITICAL=$(echo "$AUDIT_OUTPUT" | grep -c "critical" || true)
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "::warning::Found $CRITICAL critical vulnerability(ies)"
+          else
+            echo "✅ No critical vulnerabilities"
+          fi

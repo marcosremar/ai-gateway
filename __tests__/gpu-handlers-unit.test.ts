@@ -409,11 +409,7 @@ describe('handleGpuStop', () => {
 
   it('#122 returns 400 when no active pod', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuStop');
-<<<<<<< Updated upstream
     const fnBody = handlersSource.slice(fnStart, fnStart + 2600);
-=======
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2500);
->>>>>>> Stashed changes
     expect(fnBody).toContain('No active pod to stop');
     expect(fnBody).toContain('400');
   });
@@ -428,11 +424,7 @@ describe('handleGpuStop', () => {
 
   it('#124 returns 400 when no credentials for provider', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuStop');
-<<<<<<< Updated upstream
     const fnBody = handlersSource.slice(fnStart, fnStart + 4000);
-=======
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3500);
->>>>>>> Stashed changes
     expect(fnBody).toContain('Cannot stop: no credentials');
     expect(fnBody).toContain('400');
   });
@@ -475,11 +467,7 @@ describe('handleGpuResume', () => {
 
   it('#129 uses body.podId or falls back to deployState.podId', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuResume');
-<<<<<<< Updated upstream
     const fnBody = handlersSource.slice(fnStart, fnStart + 1600);
-=======
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1500);
->>>>>>> Stashed changes
     expect(fnBody).toContain('body.podId');
     expect(fnBody).toContain('deployState.podId');
   });
@@ -546,11 +534,7 @@ describe('handleGpuTerminate', () => {
 
   it('#137 resets deploy state and state machine', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuTerminate');
-<<<<<<< Updated upstream
     const fnBody = handlersSource.slice(fnStart, fnStart + 3500);
-=======
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
->>>>>>> Stashed changes
     expect(fnBody).toContain('resetDeployState()');
     expect(fnBody).toContain('deploymentSM.reset()');
   });

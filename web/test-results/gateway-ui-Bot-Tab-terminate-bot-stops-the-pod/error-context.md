@@ -1,0 +1,125 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e6]: AI
+        - generic [ref=e7]:
+          - heading "AI Gateway Settings" [level=1] [ref=e8]
+          - generic [ref=e11]: Offline
+      - navigation [ref=e12]:
+        - generic [ref=e13]:
+          - button "Overview" [ref=e14] [cursor=pointer]:
+            - img [ref=e15]
+            - generic [ref=e20]: Overview
+          - generic [ref=e21]: Config
+          - button "Profiles" [ref=e22] [cursor=pointer]:
+            - img [ref=e23]
+            - generic [ref=e26]: Profiles
+          - button "API Keys" [ref=e27] [cursor=pointer]:
+            - img [ref=e28]
+            - generic [ref=e31]: API Keys
+          - button "Labs" [ref=e32] [cursor=pointer]:
+            - img [ref=e33]
+            - generic [ref=e35]: Labs
+          - button "Vast Serverless" [ref=e36] [cursor=pointer]:
+            - img [ref=e37]
+            - generic [ref=e41]: Vast Serverless
+          - generic [ref=e42]: Tools
+          - button "Playground" [ref=e43] [cursor=pointer]:
+            - img [ref=e44]
+            - generic [ref=e46]: Playground
+          - button "Bot" [active] [ref=e47] [cursor=pointer]:
+            - img [ref=e48]
+            - generic [ref=e51]: Bot
+          - button "Auto-Swap" [ref=e52] [cursor=pointer]:
+            - img [ref=e53]
+            - generic [ref=e58]: Auto-Swap
+          - button "GPU Standby" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+            - generic [ref=e62]: GPU Standby
+          - generic [ref=e63]: Monitor
+          - button "Latency" [ref=e64] [cursor=pointer]:
+            - img [ref=e65]
+            - generic [ref=e67]: Latency
+          - button "Reputation" [ref=e68] [cursor=pointer]:
+            - img [ref=e69]
+            - generic [ref=e71]: Reputation
+          - button "Logs & Metrics" [ref=e72] [cursor=pointer]:
+            - img [ref=e73]
+            - generic [ref=e76]: Logs & Metrics
+          - button "Readiness" [ref=e77] [cursor=pointer]:
+            - img [ref=e78]
+            - generic [ref=e81]: Readiness
+      - button "Collapse" [ref=e83] [cursor=pointer]:
+        - img [ref=e84]
+        - generic [ref=e86]: Collapse
+    - main [ref=e87]:
+      - generic [ref=e88]:
+        - generic [ref=e90]: Bot
+        - generic [ref=e91]:
+          - button "Switch to light" [ref=e92] [cursor=pointer]:
+            - img [ref=e93]
+          - generic [ref=e100]: Offline
+      - generic [ref=e102]:
+        - generic [ref=e103]:
+          - img [ref=e104]
+          - generic [ref=e106]: Cannot fetch bot status
+        - generic [ref=e107]:
+          - generic [ref=e110]:
+            - img [ref=e112]
+            - generic [ref=e115]:
+              - heading "Bot Pod" [level=3] [ref=e116]
+              - paragraph [ref=e117]: Deploy a Meeting BaaS bot pod
+          - generic [ref=e118]:
+            - generic [ref=e119]:
+              - generic [ref=e120]: Deployment Target
+              - generic [ref=e121]:
+                - button "CPU Pod RunPod CPU — ~60s boot" [ref=e122]:
+                  - img [ref=e124]
+                  - generic [ref=e127]: CPU Pod
+                  - generic [ref=e128]: RunPod CPU — ~60s boot
+                - button "GPU Pod RunPod GPU — more RAM" [ref=e129]:
+                  - img [ref=e131]
+                  - generic [ref=e134]: GPU Pod
+                  - generic [ref=e135]: RunPod GPU — more RAM
+                - button "Cloud Docker Local Docker daemon" [ref=e136]:
+                  - img [ref=e138]
+                  - generic [ref=e140]: Cloud Docker
+                  - generic [ref=e141]: Local Docker daemon
+            - generic [ref=e142]:
+              - img [ref=e143]
+              - generic [ref=e146]:
+                - generic [ref=e147]: No bot deployed
+                - generic [ref=e148]: Deploy a CPU pod to get started
+          - generic [ref=e150]:
+            - button "Deploy Bot" [ref=e151] [cursor=pointer]:
+              - img [ref=e152]
+              - text: Deploy Bot
+            - button "Terminate" [disabled] [ref=e154]:
+              - img [ref=e155]
+              - text: Terminate
+        - generic [ref=e157]:
+          - generic [ref=e160]:
+            - img [ref=e162]
+            - generic [ref=e165]:
+              - heading "Join Meeting" [level=3] [ref=e166]
+              - paragraph [ref=e167]: Send bot to a meeting
+          - generic [ref=e168]:
+            - generic [ref=e169]:
+              - text: Meeting URL
+              - textbox "https://teams.microsoft.com/l/meetup-join/..." [ref=e171]
+            - generic [ref=e172]:
+              - generic [ref=e173]: Bot Name
+              - textbox [ref=e175]: BabelCast Bot
+          - generic [ref=e177]:
+            - button "Join" [disabled] [ref=e178]:
+              - img [ref=e179]
+              - text: Join
+            - button "Leave" [disabled] [ref=e182]:
+              - img [ref=e183]
+              - text: Leave
+  - alert [ref=e186]
+```

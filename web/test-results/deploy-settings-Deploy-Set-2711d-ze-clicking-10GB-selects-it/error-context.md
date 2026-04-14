@@ -1,0 +1,192 @@
+# Page snapshot
+
+```yaml
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e6]: AI
+        - generic [ref=e7]:
+          - heading "AI Gateway Settings" [level=1] [ref=e8]
+          - generic [ref=e11]: Offline
+      - navigation [ref=e12]:
+        - generic [ref=e13]:
+          - button "Overview" [ref=e14] [cursor=pointer]:
+            - img [ref=e15]
+            - generic [ref=e20]: Overview
+          - generic [ref=e21]: Config
+          - button "Profiles" [ref=e22] [cursor=pointer]:
+            - img [ref=e23]
+            - generic [ref=e26]: Profiles
+          - button "API Keys" [ref=e27] [cursor=pointer]:
+            - img [ref=e28]
+            - generic [ref=e31]: API Keys
+          - button "Labs" [ref=e32] [cursor=pointer]:
+            - img [ref=e33]
+            - generic [ref=e35]: Labs
+          - button "Vast Serverless" [ref=e36] [cursor=pointer]:
+            - img [ref=e37]
+            - generic [ref=e41]: Vast Serverless
+          - generic [ref=e42]: Tools
+          - button "Playground" [ref=e43] [cursor=pointer]:
+            - img [ref=e44]
+            - generic [ref=e46]: Playground
+          - button "Bot" [ref=e47] [cursor=pointer]:
+            - img [ref=e48]
+            - generic [ref=e51]: Bot
+          - button "Auto-Swap" [ref=e52] [cursor=pointer]:
+            - img [ref=e53]
+            - generic [ref=e58]: Auto-Swap
+          - button "GPU Standby" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+            - generic [ref=e62]: GPU Standby
+          - generic [ref=e63]: Monitor
+          - button "Latency" [ref=e64] [cursor=pointer]:
+            - img [ref=e65]
+            - generic [ref=e67]: Latency
+          - button "Reputation" [ref=e68] [cursor=pointer]:
+            - img [ref=e69]
+            - generic [ref=e71]: Reputation
+          - button "Logs & Metrics" [ref=e72] [cursor=pointer]:
+            - img [ref=e73]
+            - generic [ref=e76]: Logs & Metrics
+          - button "Readiness" [ref=e77] [cursor=pointer]:
+            - img [ref=e78]
+            - generic [ref=e81]: Readiness
+      - button "Collapse" [ref=e83] [cursor=pointer]:
+        - img [ref=e84]
+        - generic [ref=e86]: Collapse
+    - main [ref=e87]:
+      - generic [ref=e89]:
+        - generic [ref=e90]:
+          - button "Profiles" [ref=e91] [cursor=pointer]:
+            - img [ref=e92]
+            - text: Profiles
+          - generic [ref=e94]: /
+          - generic [ref=e95]:
+            - textbox "Profile name..." [ref=e96]: GPU Deploy Test
+            - img [ref=e97]
+          - button "Save & Apply" [ref=e101] [cursor=pointer]:
+            - img [ref=e102]
+            - text: Save & Apply
+        - application [ref=e106]:
+          - generic [ref=e108]:
+            - generic:
+              - generic:
+                - img
+                - img:
+                  - group "Edge from input to stage-stt" [ref=e109] [cursor=pointer]:
+                    - generic [ref=e112]:
+                      - generic: AUDIO
+                - img:
+                  - group "Edge from stage-stt to stage-llm" [ref=e114] [cursor=pointer]:
+                    - generic [ref=e115]:
+                      - generic: TEXT
+                - img:
+                  - group "Edge from stage-llm to stage-tts" [ref=e117] [cursor=pointer]:
+                    - generic [ref=e118]:
+                      - generic: TEXT
+                - img:
+                  - group "Edge from stage-tts to output" [ref=e120] [cursor=pointer]:
+                    - generic [ref=e123]:
+                      - generic: AUDIO
+              - generic:
+                - generic [ref=e126]:
+                  - generic [ref=e129]:
+                    - img [ref=e131]
+                    - generic [ref=e134]: STT
+                    - generic [ref=e135]: Speech → Text
+                  - generic [ref=e136]:
+                    - generic [ref=e137]: audio
+                    - generic [ref=e138]: →
+                    - generic [ref=e139]: text
+                  - generic [ref=e140]:
+                    - generic [ref=e143] [cursor=pointer]:
+                      - generic "Drag to reorder" [ref=e144]:
+                        - img [ref=e145]
+                      - generic [ref=e152]:
+                        - img [ref=e154]
+                        - generic [ref=e157]:
+                          - generic [ref=e158]:
+                            - generic "Babelcast Groq Cloud" [ref=e159]
+                            - generic [ref=e160]: 1st
+                          - generic "Faster Whisper Large v3" [ref=e161]
+                    - generic [ref=e162]:
+                      - img [ref=e164]
+                      - button "Add Fallback" [ref=e166] [cursor=pointer]:
+                        - img [ref=e167]
+                        - text: Add Fallback
+                - generic [ref=e169]:
+                  - generic [ref=e172]:
+                    - img [ref=e174]
+                    - generic [ref=e177]: LLM
+                    - generic [ref=e178]: Translation
+                  - generic [ref=e179]:
+                    - generic [ref=e180]: text
+                    - generic [ref=e181]: →
+                    - generic [ref=e182]: text
+                  - generic [ref=e183]:
+                    - generic [ref=e186] [cursor=pointer]:
+                      - generic "Drag to reorder" [ref=e187]:
+                        - img [ref=e188]
+                      - generic [ref=e195]:
+                        - img [ref=e197]
+                        - generic [ref=e200]:
+                          - generic [ref=e201]:
+                            - generic "Babelcast Groq Cloud" [ref=e202]
+                            - generic [ref=e203]: 1st
+                          - generic "TranslateGemma 12B" [ref=e204]
+                    - generic [ref=e205]:
+                      - img [ref=e207]
+                      - button "Add Fallback" [ref=e209] [cursor=pointer]:
+                        - img [ref=e210]
+                        - text: Add Fallback
+                - generic [ref=e212]:
+                  - generic [ref=e215]:
+                    - img [ref=e217]
+                    - generic [ref=e221]: TTS
+                    - generic [ref=e222]: Text → Speech
+                  - generic [ref=e223]:
+                    - generic [ref=e224]: text
+                    - generic [ref=e225]: →
+                    - generic [ref=e226]: audio
+                  - generic [ref=e227]:
+                    - generic [ref=e230] [cursor=pointer]:
+                      - generic "Drag to reorder" [ref=e231]:
+                        - img [ref=e232]
+                      - generic [ref=e239]:
+                        - img [ref=e241]
+                        - generic [ref=e244]:
+                          - generic [ref=e245]:
+                            - generic "Babelcast Groq Cloud" [ref=e246]
+                            - generic [ref=e247]: 1st
+                          - generic "Qwen3 TTS 0.6B" [ref=e248]
+                    - generic [ref=e249]:
+                      - img [ref=e251]
+                      - button "Add Fallback" [ref=e253] [cursor=pointer]:
+                        - img [ref=e254]
+                        - text: Add Fallback
+                - generic [ref=e256]:
+                  - generic [ref=e258]:
+                    - img [ref=e260]
+                    - generic [ref=e263]: Input
+                    - generic [ref=e264]: audio
+                  - button "Mic" [ref=e267] [cursor=pointer]:
+                    - img [ref=e269]
+                    - generic [ref=e272]: Mic
+                    - img [ref=e273]
+                  - button "Record Audio" [ref=e276] [cursor=pointer]:
+                    - img [ref=e277]
+                    - text: Record Audio
+                  - button "Run Pipeline" [disabled] [ref=e281]:
+                    - img [ref=e282]
+                    - text: Run Pipeline
+                - generic [ref=e285]:
+                  - generic [ref=e287]:
+                    - img [ref=e289]
+                    - generic [ref=e291]: Output
+                    - generic [ref=e292]: audio
+                  - generic [ref=e294]: Run the pipeline to see output
+          - img
+  - alert [ref=e297]
+```

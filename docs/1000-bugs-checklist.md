@@ -1,0 +1,1108 @@
+# AI Gateway — 1000 Bugs & Improvements Checklist
+
+> Generated from comprehensive codebase audit (639 TS files, 70K+ lines)
+> **Date:** 2026-04-13
+> **Format:** [ID] Category: Description | Severity | Status
+
+---
+
+## Legend
+
+**Severity:** 🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Low | 💡 Enhancement
+**Status:** ❌ Open | ✅ Done | 🟡 In Progress | ⏭️ Deferred
+
+---
+
+## 1. BUG RISKS — Runtime Errors & Crashes (1-150)
+
+### Server State & Concurrency (1-25)
+- [ ] 001 🔴 `server/state.ts`: Shared mutable state with no locking — `Object.assign(deployState, patch)` causes torn reads on concurrent calls
+- [ ] 002 🔴 `server/state.ts`: `deployLock` boolean checked inconsistently across modules — some check it, some don't
+- [ ] 003 🔴 `server/bot-handlers.ts`: Bot deploy lock released in IIFE `finally` before async work completes — race condition on double-deploy
+- [ ] 004 🔴 `server/gpu-deploy.ts`: `monitorRunning` boolean reentrancy guard + recursive `scheduleNextMonitorProbe()` creates unbounded timer stacking
+- [ ] 005 🔴 `server/gpu-deploy.ts`: `prisma.$transaction(async (tx: any) => {})` — `any` type defeats all DB type safety
+- [ ] 006 🟠 `server/state.ts`: `persistDeployState` sync I/O (`mkdirSync` + `writeFileSync` + `renameSync`) on hot path — crashes if disk full
+- [ ] 007 🟠 `server/state.ts`: `setDeployState` transitions array uses `splice(0, length - 30)` allocating new array every state change
+- [ ] 008 🟠 `server/state.ts`: `_noopPrisma` proxy returns `[]` for `findMany` but `null` for other methods — inconsistent return types
+- [ ] 009 🟠 `server/config-persistence.ts`: `_flushStamp` does sync load→save — if file corrupt between ops, saves defaults, loses user data
+- [ ] 010 🟠 `server/state.ts`: `Object.assign(deployState, patch)` — no validation that `patch` only contains valid keys; typos silently add junk
+- [ ] 011 🟡 `server/config-persistence.ts`: Atomic write crash recovery not tested — if process dies between writeFileSync and renameSync
+- [ ] 012 🟡 `server/file-logger.ts`: `readTailLines` — file could be truncated between `statSync` and `readSync`, returning partial data
+- [ ] 013 🟡 `server/state.ts`: `touchModelRequest` uses `require()` inside fire-and-forget path — circular dependency landmine with lazy imports
+- [ ] 014 🟡 `server/deploy-diagnostics.ts`: `persistDeployDiagnostics` uses `writeFileSync` synchronously — blocks event loop during deploy failure bursts
+- [ ] 015 🟡 `server/gpu-standby.ts`: Handover drain loop blocks event loop with tight `while` + `Date.now()` polling
+- [ ] 016 🟢 `server/state.ts`: `transitions` array unbounded growth if `splice` limit increased
+- [ ] 017 🟢 `server/config-persistence.ts`: `loadProviderConfig` cache TTL (5s) is hardcoded, not configurable
+- [ ] 018 💡 018: Replace `deployLock` boolean with proper async mutex/semaphore
+- [ ] 019 💡 019: Add state validation schema (Zod) before `Object.assign`
+- [ ] 020 💡 020: Convert sync file I/O to async in state/config modules
+- [ ] 021 🔴 `server/pipeline-runner.ts`: `cb.onAudioChunk(audioBuffer, true)` after `ttsRace.result.audio.toString('base64')` — throws if `audio` is undefined
+- [ ] 022 🟠 `server/ws-server.ts`: `sttSessions` cleanup iterates `wsClients` Set while it can be mutated by broadcastWs — iteration mutation
+- [ ] 023 🟠 `server/ws-server.ts`: Parec buffer `new Uint8Array(buffer.length + value.length)` creates new allocation per chunk — GC pressure
+- [ ] 024 🟡 `server/streaming-overlap.ts`: `emitReady` closure captures `completedChunks`, `failedChunks`, `nextEmitIdx` — ordering invariant violated if TTS rejects mid-flush
+- [ ] 025 🟡 `server/race-providers.ts`: `Promise.any` with all `AbortError` throws cryptic "Aborted" instead of "All providers timed out"
+
+### Null Dereferences (26-50)
+- [ ] 026 🟠 `server/gpu-handlers-offers.ts`: `refreshProviderBalance` for Modal — `credentials.apiKey.split(':')` throws if `apiKey` is undefined
+- [ ] 027 🟠 `server/bot-handlers.ts`: `endpoint` resolved from `botState.endpoint || instance.endpoint || constructed URL` — `process.env.BOT_FLY_APP_NAME` could be undefined → `https://undefined.fly.dev`
+- [ ] 028 🟠 `server/gpu-deploy.ts`: `probeGpuHealth` result — `String(data.gpu_type)` produces `"undefined"` if health endpoint returns different shape
+- [ ] 029 🟠 `server/latency-scheduler.ts`: `vast.listOffers!` — non-null assertion operator; throws if `listOffers` is undefined
+- [ ] 030 🟡 `server/ws-server.ts`: Speculative translate — `getCloudProfile()` returns null → throws; error logged without context
+- [ ] 031 🟡 `server/gpu-handlers-vast.ts`: `handleVastEndpointRoute` — `vast.routeRequest()` returns null → ambiguous "not available" (no worker vs routing failed)
+- [ ] 032 🟡 `server/ip-location.ts`: `String(d.country_name || '')` — redundant `|| ''` before `String()`
+- [ ] 033 🟡 `server/local-stt-handlers.ts`: `const data = await res.json() as any` — bypasses type checking on API response
+- [ ] 034 🟢 `server/latency-db.ts`: `computeStats` divides by `n` without `n === 0` check → NaN for empty arrays
+- [ ] 035 🟢 `server/metrics.ts`: `logRequest` uses `require('./state')` inside function — could throw if module not loaded
+- [ ] 036 🟢 `server/gpu-latency.ts`: `probeTcp` — `net.createConnection` throws synchronously on invalid hostname → promise never resolves, hangs 30s
+- [ ] 037 🟢 `server/ai-handlers.ts`: `HybridRouter.route` takes `context?: any` — used without type checking
+- [ ] 038 💡 038: Add null guards to all `.split()`, `.toString()`, property access chains
+- [ ] 039 💡 039: Replace `as any` casts with proper type narrowing
+- [ ] 040 💡 040: Add runtime validation for all external API response shapes
+- [ ] 041 🔴 `server/providers.ts`: `translationDefaults` and profile objects built with `{}` then mutated — `AIProfile` required fields may be missing
+- [ ] 042 🟠 `server/config-persistence.ts`: `patchProviderConfig` uses `(partial as any).apps` and `(partial as any).profiles` — unsafe casts
+- [ ] 043 🟠 `server/gpu-handlers-info.ts`: `deployState.providerMeta` exposed in status response — may contain sensitive host info
+- [ ] 044 🟡 `server/http-utils.ts`: `readRawBody` returns `null` when content-length exceeds limit — caller must have already sent 413
+- [ ] 045 🟡 `server/local-stt-handlers.ts`: `handleLocalSttInstall` — spawns subprocess without capturing/validating PID
+- [ ] 046 🟡 `server/benchmark-handlers.ts`: Dynamic import of `distributed-tracer` — generic error message on failure
+- [ ] 047 🟡 `server/gpu-readiness.ts`: `saveRun` uses sync file I/O (debounced, but still sync)
+- [ ] 048 🟢 `server/labs-settings.ts`: Uses `readFileSync`/`writeFileSync` for settings
+- [ ] 049 🟢 `server/config-persistence.ts`: `loadProviderConfig` uses `readFileSync`/`existsSync` on every call (5s cache)
+- [ ] 050 🟢 `server/config-persistence.ts`: `saveProviderConfig` — `mkdirSync`, `writeFileSync`, `renameSync` all sync
+
+### Promise & Async Errors (51-75)
+- [ ] 051 🟠 `server/bot-handlers.ts`: `await cleanupBotPods(apiKey)` before deploy — if throws, entire deploy fails; should be fire-and-forget
+- [ ] 052 🟠 `server/bot-handlers.ts`: RunPod cleanup has try/catch but Scaleway and Fly.io cleanup do not
+- [ ] 053 🟡 `server/race-providers.ts`: `RaceCandidate.run` requires `AbortSignal` but nothing enforces provider respects it — ignored signals waste resources
+- [ ] 054 🟡 `server/race-providers.ts`: Headstart behavior with various timings not tested
+- [ ] 055 🟡 `server/speculative-cache.ts`: No tests for concurrent speculate/resolve on same session ID
+- [ ] 056 🟡 `server/speculative-cache.ts`: Translation promise rejection handling not tested
+- [ ] 057 🟡 `server/deployment-state-machine.ts`: No tests for invalid transitions
+- [ ] 058 🟡 `server/deployment-state-machine.ts`: No tests for handler exceptions
+- [ ] 059 🟢 `server/file-logger.ts`: Console capture writes ALL console output to `server.log` — includes API keys if accidentally logged
+- [ ] 060 🟢 `server/metrics.ts`: Stores `outputPreview` (first 80 chars of output) — may contain PII from transcriptions
+- [ ] 061 💡 061: Add `AbortSignal` enforcement wrapper that throws if signal not respected
+- [ ] 062 💡 062: Add promise rejection boundary at all async entry points
+- [ ] 063 💡 063: Replace fire-and-forget with proper error tracking
+- [ ] 064 🔴 `server/gpu-deploy.ts`: Monitor loop recursive timer stacking if monitor gets stuck
+- [ ] 065 🟠 `server/gpu-deploy.ts`: `IDLE_TIMEOUT_MS` and `IDLE_DESTROY_MS` exported with setters — can be changed at runtime unexpectedly
+- [ ] 066 🟡 `server/gpu-deploy.ts`: `gpuTypeCacheRefreshTimer` exported but only used internally
+- [ ] 067 🟡 `server/gpu-handlers-info.ts`: `friendlyErrorMessage` uses regex-based JSON stripping — fragile
+- [ ] 068 🟡 `server/gpu-handlers-info.ts`: `handleHealth` returns `providerBalances` with `apiKeyHint` — reconnaissance vector
+- [ ] 069 🟡 `server/latency-db.ts`: `rowFromPrisma` function parameter types manually listed instead of using Prisma generated types
+- [ ] 070 🟢 `server/metrics.ts`: `handleMetrics` exported but never called from any route — dead export
+- [ ] 071 🟢 `server/bot-handlers.ts`: `BOT_LOCAL_CONTAINER` exported creates circular dependency with ws-state
+- [ ] 072 💡 072: Remove all unnecessary exports from modules
+- [ ] 073 💡 073: Add promise timeout wrapper utility (replaces ad-hoc setTimeout patterns)
+- [ ] 074 💡 074: Add structured error types for all async failure modes
+- [ ] 075 💡 075: Add async context propagation for request tracing
+
+### Memory Leaks (76-100)
+- [ ] 076 🟠 `server/ws-server.ts`: Buffer concatenation creates new allocation per chunk — GC pressure for long captures
+- [ ] 077 🟠 `server/file-logger.ts`: `formatArgs` calls `JSON.stringify(a)` for every non-string arg — megabytes of stringification per line for large objects
+- [ ] 078 🟡 `server/state.ts`: Transitions array grows unbounded if splice limit changed
+- [ ] 079 🟡 `server/ewma-tracker.ts`: No eviction behavior tested at MAX_PROVIDERS boundary
+- [ ] 080 🟡 `server/ewma-tracker.ts`: No tests for stale penalty application
+- [ ] 081 🟡 `server/ewma-tracker.ts`: No tests for decay factor updates affecting existing entries
+- [ ] 082 🟢 `server/gpu-deploy.ts`: Monitor interval not cleared on module unload
+- [ ] 083 🟢 `server/gpu-latency.ts`: `probeHostFull` with all ports failing — no cleanup of pending probes
+- [ ] 084 🟢 `server/local-stt-handlers.ts`: PID file stale — no cleanup on process restart
+- [ ] 085 💡 085: Add memory usage alerts at 512MB, 768MB, 1GB thresholds
+- [ ] 086 💡 086: Implement WeakMap for request-scoped data instead of Map
+- [ ] 087 💡 087: Add buffer pool for WebSocket message assembly
+- [ ] 088 💡 088: Implement ring buffer for recent request log instead of array
+- [ ] 089 💡 089: Add heap snapshot on OOM warning
+- [ ] 090 🔴 `server/pipeline-runner.ts`: STT/LLM/TTS race results not cleaned up if pipeline aborts mid-way
+- [ ] 091 🟠 `server/streaming-overlap.ts`: Overlapping audio chunks buffered but never released if client disconnects
+- [ ] 092 🟡 `server/ws-server.ts`: `wsClients` Set grows if dead clients not removed on close
+- [ ] 093 🟡 `server/bot-handlers.ts`: Bot polling interval not cleared on bot terminate
+- [ ] 094 🟡 `server/gpu-standby.ts`: Primary instance reference held after handover — prevents GC
+- [ ] 095 🟢 `server/config-persistence.ts`: Config cache never evicted, only refreshed
+- [ ] 096 🟢 `server/latency-db.ts`: Historical latency records never pruned
+- [ ] 097 💡 097: Add finalizers for all long-running async operations
+- [ ] 098 💡 098: Implement request-scoped AbortController for all upstream calls
+- [ ] 099 💡 099: Add memory leak detection in CI (compare heap before/after test suite)
+- [ ] 100 💡 100: Implement connection drain timeout for graceful shutdown
+
+## 2. CODE SMELLS — Duplication & Complexity (101-250)
+
+### Functions Too Long (>100 lines) (101-130)
+- [ ] 101 🟠 `server/bot-handlers.ts`: `handleBotDeploy` ~500+ lines — should be split into deployLocal(), deployFly(), deployRunpod(), deployWithFallback()
+- [ ] 102 🟠 `server/gpu-handlers.ts`: `handleGpuDeploy` ~300+ lines — validation, tier selection, deploy kickoff should be separate
+- [ ] 103 🟠 `server/gpu-deploy.ts`: `startGpuMonitoring` ~200+ lines — should split into 5+ functions
+- [ ] 104 🟠 `server/gpu-handlers-info.ts`: `handleGpuStatus` ~150+ lines — extract pipeline routing, model warmth, standby state builders
+- [ ] 105 🟠 `server/pipeline-runner.ts`: `runStreamingPipeline` ~400+ lines — split into runSttStage(), runLlmStage(), runTtsStage(), runOverlapPipeline()
+- [ ] 106 🟠 `server/ai-handlers.ts`: 2388 lines total — split into ai-handlers-stt.ts, ai-handlers-llm.ts, ai-handlers-tts.ts, ai-handlers-pipeline.ts
+- [ ] 107 🟡 `server/gpu-handlers-offers.ts`: `fetchOffersWithBalances` — balance check logic duplicated from gpu-handlers-info.ts
+- [ ] 108 🟡 `server/providers.ts`: 844 lines — split into provider-registry.ts, provider-profiles.ts, gpu-clients.ts, health-mutators.ts
+- [ ] 109 🟡 `server/gpu-handlers.ts`: Multiple handler functions >100 lines each
+- [ ] 110 🟡 `server/ws-server.ts`: `handleWsCommand` giant if-else chain — extensibility nightmare
+- [ ] 111 🟡 `server/ai-handlers.ts`: `HybridRouter.route` + `evaluate()` ~150 lines — extract into dedicated router module
+- [ ] 112 🟡 `server/gpu-deploy.ts`: `resumeOrDeploy` ~200 lines — split into resume logic and deploy logic
+- [ ] 113 🟡 `server/bot-handlers.ts`: `pollBotStatus` ~150 lines — split into cloud poll, local poll, state update
+- [ ] 114 🟡 `server/pipeline-runner.ts`: `runNonStreamingPipeline` ~200 lines — extract per-stage logic
+- [ ] 115 🟡 `server/gpu-handlers-vast.ts`: Multiple handlers >100 lines
+- [ ] 116 💡 116: Enforce max 50 lines per function via ESLint
+- [ ] 117 💡 117: Extract all inline error builders into shared error factory
+- [ ] 118 💡 118: Extract all inline response builders into shared response factory
+- [ ] 119 💡 119: Create command pattern for GPU operations (boot, stop, terminate)
+- [ ] 120 💡 120: Create strategy pattern for deploy providers (RunPod, Vast, Modal, Scaleway)
+- [ ] 121 🔴 `server/ai-handlers.ts`: File too large for any IDE to navigate efficiently
+- [ ] 122 🟠 `server/providers.ts`: Provider registration mixed with profile defaults and health mutators
+- [ ] 123 🟡 `server/gpu-handlers-info.ts`: Status response builder has inline computations — extract to builder pattern
+- [ ] 124 🟡 `server/gpu-deploy.ts`: Monitoring loop mixes health probing, balance checking, budget tracking, latency analysis, idle timeout, auto-restart, crash recording
+- [ ] 125 🟡 `server/pipeline-runner.ts`: Streaming pipeline mixes STT, LLM, TTS, overlap, speculation, EWMA in one function
+- [ ] 126 🟡 `server/bot-handlers.ts`: Bot deploy handles local, Fly.io, RunPod, Scaleway, Fly.io fallback all in one function
+- [ ] 127 💡 127: Apply Single Responsibility Principle to all functions >50 lines
+- [ ] 128 💡 128: Create handler factory to reduce boilerplate in route handlers
+- [ ] 129 💡 129: Implement pipeline pattern for request processing (auth → validate → process → respond)
+- [ ] 130 💡 130: Use builder pattern for complex response objects
+
+### Duplicated Code (131-175)
+- [ ] 131 🟠 WAV header construction duplicated in 4+ files: `provider-warmup.ts`, `gpu-readiness.ts`, `ws-server.ts`, `pipeline-runner.ts` — extract to `buildWavHeader()`
+- [ ] 132 🟠 `maskKey` function duplicated in `http-utils.ts`, `providers.ts`, `gpu-handlers-info.ts` (different truncation lengths)
+- [ ] 133 🟠 Balance check logic duplicated between `gpu-handlers-info.ts` and `gpu-handlers-offers.ts`
+- [ ] 134 🟡 `AbortSignal.timeout(ms)` pattern used dozens of times with inline timeout values — extract to constant/factory
+- [ ] 135 🟡 `getOrCreateRequestId` + `setRequestIdHeader` + `res.writeHead(200)` + `res.end(JSON.stringify())` repeated in every handler
+- [ ] 136 🟡 Error response format inconsistent: `sendJsonError` vs `jsonErr` vs arbitrary structures across 5+ handlers
+- [ ] 137 🟡 `require('./state')` lazy import pattern repeated in multiple modules
+- [ ] 138 🟡 JSON parsing with try/catch duplicated in 10+ handlers
+- [ ] 139 🟡 Content-Type validation duplicated in multiple route handlers
+- [ ] 140 🟡 API key extraction from headers/body duplicated across handlers
+- [ ] 141 🟡 GPU type validation (allowlist check) duplicated in deploy and status handlers
+- [ ] 142 🟡 Docker image reference parsing duplicated in gpu-deploy and config
+- [ ] 143 🟡 Timeout handling pattern: 3 different approaches (`AbortSignal.timeout`, `setTimeout+abort`, `Promise.race`)
+- [ ] 144 🟡 State mutation pattern: 3 approaches coexist (direct mutation, `setDeployState`, state machine)
+- [ ] 145 🟡 File I/O pattern: some use atomic writes, some direct writes, some sync, some async
+- [ ] 146 🟡 Provider availability flag checks duplicated across modules
+- [ ] 147 🟡 HTTP fetch with retry logic duplicated in gpu-deploy, bot-handlers, provider-warmup
+- [ ] 148 🟡 Log formatting duplicated across modules — each has own `formatArgs` or equivalent
+- [ ] 149 🟡 Health check probing logic duplicated in gpu-deploy, gpu-handlers-info, benchmarking
+- [ ] 150 🟡 Cost estimation logic duplicated in tracking, cost-watcher, and gpu-deploy
+- [ ] 151 💡 151: Extract shared utilities to `src/utils/` or `server/utils/`
+- [ ] 152 💡 152: Create centralized error response factory
+- [ ] 153 💡 153: Create centralized success response factory
+- [ ] 154 💡 154: Create centralized timeout factory
+- [ ] 155 💡 155: Create centralized auth checker
+- [ ] 156 💡 156: Create centralized request ID middleware
+- [ ] 157 💡 157: Create centralized body parser
+- [ ] 158 💡 158: Create centralized content-type validator
+- [ ] 159 💡 159: Create centralized GPU type validator
+- [ ] 160 💡 160: Create centralized Docker image reference parser
+- [ ] 161 💡 161: Create centralized provider availability checker
+- [ ] 162 💡 162: Create centralized health check probe
+- [ ] 163 💡 163: Create centralized cost estimator
+- [ ] 164 💡 164: Create centralized retry wrapper
+- [ ] 165 💡 165: Create centralized log formatter
+- [ ] 166 💡 166: DRY all duplicated code identified above
+- [ ] 167 🟠 `server/http-utils.ts`: `parseMultipart` function ~200 lines — could use existing multipart parser library
+- [ ] 168 🟡 `server/providers.ts`: Provider factory functions all follow same pattern but not abstracted
+- [ ] 169 🟡 `server/gpu-providers/`: Each GPU provider client has same boot/stop/terminate/status methods but no shared base class
+- [ ] 170 🟡 `server/gpu-handlers-*.ts`: Each handler file has same pattern: validate → call provider → format response
+- [ ] 171 🟡 `src/providers/`: Each AI provider (groq, openai, fireworks, etc.) has same interface but no shared base
+- [ ] 172 🟡 `src/autoscaler/`: Each tier lifecycle has same boot/health/terminate pattern
+- [ ] 173 💡 173: Create abstract base class for GPU provider clients
+- [ ] 174 💡 174: Create abstract base class for AI provider implementations
+- [ ] 175 💡 175: Create handler template/generator for new endpoints
+
+### Magic Numbers & Strings (176-220)
+- [ ] 176 🟡 `server/gpu-deploy.ts`: `MAX_DEPLOY_RETRIES = 2` — magic number
+- [ ] 177 🟡 `server/gpu-deploy.ts`: `HEALTH_POLL_INTERVAL_MS = 10_000` — should be config
+- [ ] 178 🟡 `server/gpu-deploy.ts`: `DEPLOY_TIMEOUT_MS = 30 * 60_000` — should be config
+- [ ] 179 🟡 `server/gpu-deploy.ts`: `GPU_MONITOR_INTERVAL_MS = 30_000` — should be config
+- [ ] 180 🟡 `server/gpu-deploy.ts`: `IDLE_TIMEOUT_MS = 15 * 60_000` — should be config
+- [ ] 181 🟡 `server/gpu-deploy.ts`: `IDLE_DESTROY_MS = 2 * 60 * 60_000` — should be config
+- [ ] 182 🟡 `server/gpu-deploy.ts`: `GPU_TYPE_CACHE_TTL_MS = 30 * 60_000` — should be config
+- [ ] 183 🟡 `server/gpu-deploy.ts`: `P95_DEMOTION_CONSECUTIVE_VIOLATIONS = 3` — magic number
+- [ ] 184 🟡 `server/gpu-deploy.ts`: `TREND_WINDOW = 5` — magic number
+- [ ] 185 🟡 `server/gpu-deploy.ts`: `0.2` trend threshold, `0.8` budget soft limit — inline magic numbers
+- [ ] 186 🟡 `server/gpu-latency.ts`: `GPU_BANDWIDTH_GBS` table hardcoded — new GPUs require code change
+- [ ] 187 🟡 `server/ip-location.ts`: `RUNPOD_DC` map hardcoded — new datacenters require code change
+- [ ] 188 🟡 `server/ai-handlers.ts`: `BASELINE_INFERENCE_MS = 200` — magic number
+- [ ] 189 🟡 `server/ai-handlers.ts`: `BASELINE_BW_GBS = 1008` — magic number
+- [ ] 190 🟡 `server/ai-handlers.ts`: `estimateRttMs` uses `10 + distanceKm * 0.012` — magic numbers
+- [ ] 191 🟡 `server/config.ts`: `DOCKER_IMAGE_VERSION = 'v1.3.0'` — hardcoded, should come from package.json
+- [ ] 192 🟡 `src/proxy/server.ts`: `MAX_BODY_SIZE = 100 * 1024 * 1024` — should be config
+- [ ] 193 🟡 `src/proxy/server.ts`: `BODY_READ_TIMEOUT_MS = 30000` — should be config
+- [ ] 194 🟡 `src/proxy/server.ts`: `TOTAL_REQUEST_TIMEOUT_MS = 60000` — should be config
+- [ ] 195 🟡 `src/proxy/server.ts`: `headersTimeout = 10_000` — should be config
+- [ ] 196 🟡 `src/proxy/server.ts`: `requestTimeout = 30_000` — should be config
+- [ ] 197 🟡 `src/autoscaler/`: Multiple magic numbers for timeouts, thresholds, intervals
+- [ ] 198 🟡 `src/providers/`: Default timeout values scattered across provider implementations
+- [ ] 199 🟡 `server/pipeline-runner.ts`: Overlap window sizes hardcoded
+- [ ] 200 🟡 `server/streaming-overlap.ts`: Speculation thresholds hardcoded
+- [ ] 201 💡 201: Move all magic numbers to `src/constants/` or `server/constants.ts`
+- [ ] 202 💡 202: Create config validation for all numeric thresholds
+- [ ] 203 💡 203: Add runtime config reload for timeout/threshold values
+- [ ] 204 💡 204: Create GPU bandwidth table as external JSON file
+- [ ] 205 💡 205: Create datacenter registry as external JSON file
+- [ ] 206 💡 206: Read Docker image version from package.json at build time
+- [ ] 207 💡 207: Create timeout configuration schema
+- [ ] 208 💡 208: Add env var overrides for all magic numbers
+- [ ] 209 💡 209: Document all magic numbers with source/rationale comments
+- [ ] 210 💡 210: Create unit tests for all threshold values
+- [ ] 211 🟡 `server/gpu-handlers.ts`: GPU type names hardcoded as strings throughout
+- [ ] 212 🟡 `server/providers.ts`: Model names hardcoded as strings
+- [ ] 213 🟡 `server/bot-handlers.ts`: Container names hardcoded
+- [ ] 214 🟡 `server/gpu-deploy.ts`: Docker image names hardcoded
+- [ ] 215 🟡 `server/config.ts`: Region defaults hardcoded
+- [ ] 216 🟡 `server/gpu-latency.ts`: Port numbers hardcoded (8000, 22, etc.)
+- [ ] 217 🟡 `server/ws-server.ts`: WebSocket message type strings hardcoded
+- [ ] 218 🟡 `server/pipeline-runner.ts`: Pipeline stage names hardcoded
+- [ ] 219 🟡 `server/ai-handlers.ts`: Model parameter defaults hardcoded
+- [ ] 220 💡 220: Extract all string constants to named constants
+
+### Complexity Issues (221-250)
+- [ ] 221 🟠 `server/ai-handlers.ts`: `HybridRouter.evaluate()` has cognitive complexity >30 (nested ifs, multiple conditions)
+- [ ] 222 🟠 `server/gpu-deploy.ts`: Monitoring function has 8+ responsibilities in one loop
+- [ ] 223 🟠 `server/pipeline-runner.ts`: Streaming pipeline has 15+ mutable state variables
+- [ ] 224 🟠 `server/bot-handlers.ts`: Deploy function has 5+ deployment strategies with nested fallbacks
+- [ ] 225 🟡 `server/ws-server.ts`: Message handler has 20+ case branches
+- [ ] 226 🟡 `server/providers.ts`: Provider registration has 10+ conditional branches
+- [ ] 227 🟡 `server/gpu-handlers-info.ts`: Status builder has 30+ field computations
+- [ ] 228 🟡 `server/gpu-handlers-offers.ts`: Offer ranking has 5+ scoring factors
+- [ ] 229 🟡 `server/latency-db.ts`: Stats computation has 6+ separate aggregations
+- [ ] 230 🟡 `server/gpu-deploy.ts`: Deploy orchestration has 10+ sequential steps
+- [ ] 231 💡 231: Reduce cognitive complexity to <15 per function
+- [ ] 232 💡 232: Apply Strategy pattern for GPU provider selection
+- [ ] 233 💡 233: Apply State pattern for deployment state machine
+- [ ] 234 💡 234: Apply Observer pattern for monitoring events
+- [ ] 235 💡 235: Apply Command pattern for GPU operations
+- [ ] 236 💡 236: Extract nested conditionals into named predicate functions
+- [ ] 237 💡 237: Replace switch/case chains with dispatch tables
+- [ ] 238 💡 238: Replace nested if-else with early returns
+- [ ] 239 💡 239: Extract validation logic into separate validator functions
+- [ ] 240 💡 240: Extract response formatting into builder functions
+- [ ] 241 🟡 `server/race-providers.ts`: Race logic with headstart, timeouts, abort signals — complex state machine
+- [ ] 242 🟡 `server/streaming-overlap.ts`: Overlap detection with EWMA tracking — complex timing logic
+- [ ] 243 🟡 `server/speculative-cache.ts`: Speculative translation with session tracking — complex cache invalidation
+- [ ] 244 🟡 `server/gpu-standby.ts`: Handover logic with active request tracking — complex state transitions
+- [ ] 245 🟡 `server/deployment-state-machine.ts`: 10+ states with 20+ transitions
+- [ ] 246 🟡 `server/config-persistence.ts`: Config migration logic with 3+ legacy format handlers
+- [ ] 247 🟡 `server/latency-scheduler.ts`: Host discovery with offer filtering, ranking, RTT estimation
+- [ ] 248 💡 248: Simplify race provider with async iterator pattern
+- [ ] 249 💡 249: Simplify streaming overlap with ring buffer + cursor
+- [ ] 250 💡 250: Simplify speculative cache with TTL-based expiration
+
+## 3. TYPE SAFETY (251-350)
+
+### `any` Usage (251-300)
+- [ ] 251 🔴 `server/state.ts:16`: `export let prisma: any = _noopPrisma` — entire Prisma client typed as `any`
+- [ ] 252 🟠 `server/prisma-init.ts:18`: `setPrisma(new PrismaClient({ adapter }))` — parameter typed but function accepts `any`
+- [ ] 253 🟠 `server/metrics.ts:10`: `dbData` passed to `prisma.requestLog.create({ data: dbData })` — no type validation
+- [ ] 254 🟠 `server/config-persistence.ts:210`: `(partial as any).apps` and `(partial as any).profiles` — unsafe casts
+- [ ] 255 🟠 `server/ai-handlers.ts:115`: `HybridRouter.route` takes `context?: any`
+- [ ] 256 🟠 `server/gpu-deploy.ts:120`: `prisma.$transaction(async (tx: any) => { ... })` — tx is `any`
+- [ ] 257 🟡 `server/local-stt-handlers.ts:45`: `const data = await res.json() as any`
+- [ ] 258 🟡 `server/providers.ts:300+`: Profile objects built with `{}` then mutated
+- [ ] 259 🟡 `server/gpu-handlers.ts`: Handler parameters use `any` for request body
+- [ ] 260 🟡 `server/bot-handlers.ts`: Deploy request body typed as `any`
+- [ ] 261 🟡 `server/gpu-handlers-offers.ts`: Offer response typed as `any`
+- [ ] 262 🟡 `server/ws-server.ts`: WebSocket message data typed as `any`
+- [ ] 263 🟡 `server/pipeline-runner.ts`: Pipeline result typed with `any` fields
+- [ ] 264 🟡 `server/race-providers.ts`: Race result generic not constrained
+- [ ] 265 🟡 `server/streaming-overlap.ts`: Overlap callback params use `any`
+- [ ] 266 🟡 `server/speculative-cache.ts`: Cache value typed as `any`
+- [ ] 267 🟡 `server/latency-db.ts`: Row mapping uses manual type listing
+- [ ] 268 🟡 `server/gpu-latency.ts`: Probe result typed as `any`
+- [ ] 269 🟡 `server/gpu-handlers-vast.ts`: Vast API response typed as `any`
+- [ ] 270 🟡 `server/gpu-handlers-info.ts`: Status response built with inline `any` objects
+- [ ] 271 🟡 `server/gpu-deploy.ts`: Deploy result typed as `any`
+- [ ] 272 🟡 `server/local-stt-handlers.ts`: Local STT response typed as `any`
+- [ ] 273 🟡 `server/benchmark-handlers.ts`: Benchmark result typed with `any` fields
+- [ ] 274 🟡 `server/playground-handlers.ts`: Playground response typed as `any`
+- [ ] 275 🟡 `server/workload-handlers.ts`: Workload request typed as `any`
+- [ ] 276 🟡 `server/recall-handlers.ts`: Recall request typed as `any`
+- [ ] 277 🟡 `server/relay-handlers.ts`: Relay request typed as `any`
+- [ ] 278 🟡 `server/avatar-handlers.ts`: Avatar request typed as `any`
+- [ ] 279 🟡 `server/diagnostics-handlers.ts`: Diagnostics request typed as `any`
+- [ ] 280 🟡 `server/dub-fanout.ts`: Fanout result typed as `any`
+- [ ] 281 🟡 `server/ewma-tracker.ts`: EWMA entry typed as `any`
+- [ ] 282 🟡 `server/file-logger.ts`: Log args typed as `any[]`
+- [ ] 283 🟡 `server/http-utils.ts`: Parsed body typed as `any`
+- [ ] 284 🟡 `server/ip-location.ts`: IP geolocation response typed as `any`
+- [ ] 285 🟡 `server/labs-settings.ts`: Settings typed as `Record<string, any>`
+- [ ] 286 🟡 `server/latency-db-migrate.ts`: Migration data typed as `any`
+- [ ] 287 🟡 `server/latency-ring-persistence.ts`: Ring data typed as `any`
+- [ ] 288 🟡 `server/latency-scheduler.ts`: Schedule data typed as `any`
+- [ ] 289 🟡 `server/local-stt-handlers.ts`: Local STT config typed as `any`
+- [ ] 290 🟡 `server/metrics.ts`: Metric data typed as `any`
+- [ ] 291 🟡 `server/pipeline-runner.ts`: Pipeline callbacks use `any`
+- [ ] 292 🟡 `server/playground-handlers.ts`: Profile config typed as `any`
+- [ ] 293 🟡 `server/provider-warmup.ts`: Warmup result typed as `any`
+- [ ] 294 🟡 `server/providers.ts`: Provider instance typed as `any` in registry
+- [ ] 295 🟡 `server/race-providers.ts`: Race context typed as `any`
+- [ ] 296 🟡 `server/recall-handlers.ts`: Recall data typed as `any`
+- [ ] 297 🟡 `server/relay-handlers.ts`: Relay data typed as `any`
+- [ ] 298 🟡 `server/speculative-cache.ts`: Cache key typed as `any`
+- [ ] 299 🟡 `server/ssh-tunnel.ts`: SSH config typed as `any`
+- [ ] 300 🟡 `server/streaming-overlap.ts`: Overlap config typed as `any`
+
+### Unsafe Operations (301-350)
+- [ ] 301 🟠 `server/state.ts:200`: `Object.assign(deployState, patch)` — no validation of patch keys
+- [ ] 302 🟠 `server/http-utils.ts:55`: `delete parsed.__proto__` — prototype pollution protection doesn't handle nested objects
+- [ ] 303 🟡 `server/gpu-handlers-offers.ts:160`: `(credentials.apiKey || '').split(':')` — fragile with optional field
+- [ ] 304 🟡 `server/providers.ts`: Profile objects mutated after creation — should be immutable
+- [ ] 305 🟡 `server/config-persistence.ts`: JSON parse without schema validation
+- [ ] 306 🟡 `server/gpu-deploy.ts`: Deploy config merged without validation
+- [ ] 307 🟡 `server/bot-handlers.ts`: Bot config merged without validation
+- [ ] 308 🟡 `server/ai-handlers.ts`: Request body parsed without schema validation
+- [ ] 309 🟡 `server/gpu-handlers.ts`: Deploy request validated but body still `any`
+- [ ] 310 🟡 `server/ws-server.ts`: WebSocket messages parsed without schema validation
+- [ ] 311 🟡 `server/pipeline-runner.ts`: Pipeline input not validated against schema
+- [ ] 312 🟡 `server/race-providers.ts`: Race candidates not validated
+- [ ] 313 🟡 `server/streaming-overlap.ts`: Streaming config not validated
+- [ ] 314 🟡 `server/speculative-cache.ts`: Session ID not validated
+- [ ] 315 🟡 `server/latency-db.ts`: Latency records not validated before insert
+- [ ] 316 🟡 `server/gpu-latency.ts`: Probe results not validated
+- [ ] 317 🟡 `server/gpu-handlers-vast.ts`: Vast API responses not validated
+- [ ] 318 🟡 `server/gpu-handlers-info.ts`: Status response fields not typed
+- [ ] 319 🟡 `server/local-stt-handlers.ts`: Local STT responses not validated
+- [ ] 320 🟡 `server/benchmark-handlers.ts`: Benchmark responses not validated
+- [ ] 321 💡 321: Add Zod validation for all external API responses
+- [ ] 322 💡 322: Add runtime type checking for all `any` parameters
+- [ ] 323 💡 323: Replace `as any` with proper type guards
+- [ ] 324 💡 324: Add TypeScript strict mode for all server files
+- [ ] 325 💡 325: Add eslint `@typescript-eslint/no-explicit-any` as error for server/
+- [ ] 326 💡 326: Create typed wrappers for all Prisma operations
+- [ ] 327 💡 327: Create typed request body parsers
+- [ ] 328 💡 328: Create typed response builders
+- [ ] 329 💡 329: Add deep prototype pollution protection
+- [ ] 330 💡 330: Add runtime schema validation for all config objects
+- [ ] 331 🟡 `server/state.ts`: `patchDeployState` accepts partial object with no key validation
+- [ ] 332 🟡 `server/gpu-deploy.ts`: `bootGpu` accepts config with no schema validation
+- [ ] 333 🟡 `server/bot-handlers.ts`: `deployBot` accepts config with no schema validation
+- [ ] 334 🟡 `server/ai-handlers.ts`: `chatCompletion` accepts messages with no schema validation
+- [ ] 335 🟡 `server/pipeline-runner.ts`: `runPipeline` accepts input with no schema validation
+- [ ] 336 🟡 `server/ws-server.ts`: `handleWsMessage` accepts data with no schema validation
+- [ ] 337 🟡 `server/gpu-handlers-offers.ts`: `fetchOffers` accepts params with no schema validation
+- [ ] 338 🟡 `server/gpu-handlers-vast.ts`: `handleVastDeploy` accepts config with no schema validation
+- [ ] 339 🟡 `server/local-stt-handlers.ts`: `handleLocalSttInstall` accepts variant with no schema validation
+- [ ] 340 🟡 `server/benchmark-handlers.ts`: `handleBenchmark` accepts config with no schema validation
+- [ ] 341 💡 341: Generate TypeScript types from Prisma schema
+- [ ] 342 💡 342: Use Zod for all runtime validation
+- [ ] 343 💡 343: Create type-safe event emitter
+- [ ] 344 💡 344: Create type-safe HTTP client
+- [ ] 345 💡 345: Create type-safe WebSocket client
+- [ ] 346 💡 346: Add compile-time type checking for all API contracts
+- [ ] 347 💡 347: Add runtime type checking for all user inputs
+- [ ] 348 💡 348: Add type narrowing for all union types
+- [ ] 349 💡 349: Add branded types for IDs, API keys, tokens
+- [ ] 350 💡 350: Add phantom types for state machine states
+
+## 4. SECURITY (351-475)
+
+### Missing Auth (351-385)
+- [ ] 351 🔴 `server/local-stt-handlers.ts`: `handleLocalSttStatus` — no authentication check
+- [ ] 352 🔴 `server/local-stt-handlers.ts`: `handleLocalSttInstall` — no authentication, can execute arbitrary scripts
+- [ ] 353 🔴 `server/local-stt-handlers.ts`: `handleLocalSttStart` — no authentication
+- [ ] 354 🔴 `server/local-stt-handlers.ts`: `handleLocalSttStop` — no authentication
+- [ ] 355 🔴 `server/local-stt-handlers.ts`: `handleLocalSttLogs` — no authentication, can read arbitrary logs
+- [ ] 356 🔴 `server/playground-handlers.ts`: All playground endpoints inject API keys from env — any caller can use gateway's keys
+- [ ] 357 🔴 `server/workload-handlers.ts`: Workload CRUD — no authentication, anyone can deploy/stop/terminate
+- [ ] 358 🔴 `server/gpu-handlers-vast.ts`: All Vast.ai template/endpoint/worker handlers — no auth, only checks `VAST_API_KEY` configured
+- [ ] 359 🟠 `server/bot-handlers.ts`: Bot deploy endpoint accepts `dockerImage` — if unauthenticated, can run arbitrary containers
+- [ ] 360 🟠 `server/relay-handlers.ts`: Relay endpoints — auth status unclear
+- [ ] 361 🟠 `server/recall-handlers.ts`: Recall endpoints — auth status unclear
+- [ ] 362 🟡 `server/avatar-handlers.ts`: Avatar endpoints — auth status unclear
+- [ ] 363 🟡 `server/diagnostics-handlers.ts`: Diagnostics endpoints — auth status unclear
+- [ ] 364 🟡 `server/benchmark-handlers.ts`: Benchmark endpoints — auth status unclear
+- [ ] 365 🟡 `server/gpu-handlers-offers.ts`: GPU offers endpoint — may expose pricing intel to unauthenticated users
+- [ ] 366 🟡 `server/gpu-handlers-info.ts`: GPU status — exposes detailed infrastructure info
+- [ ] 367 🟡 `server/gpu-handlers-info.ts`: GPU logs — exposes container output
+- [ ] 368 🟡 `server/gpu-handlers-info.ts`: GPU catalog — exposes Docker image catalog
+- [ ] 369 🟡 `server/gpu-handlers-info.ts`: GPU location — exposes geolocation
+- [ ] 370 🟡 `server/gpu-handlers-info.ts`: GPU reputation — exposes host reputation scores
+- [ ] 371 💡 371: Add auth middleware to ALL endpoints
+- [ ] 372 💡 372: Create auth decorator for route handlers
+- [ ] 373 💡 373: Create role-based auth checker
+- [ ] 374 💡 374: Add API key scoping (read-only, write, admin)
+- [ ] 375 💡 375: Add rate limiting per API key
+- [ ] 376 💡 376: Add request signing for inter-service calls
+- [ ] 377 💡 377: Add JWT support for client authentication
+- [ ] 378 💡 378: Add OAuth2 support for third-party integrations
+- [ ] 379 💡 379: Add API key rotation support
+- [ ] 380 💡 380: Add API key expiration support
+- [ ] 381 💡 381: Add API key revocation support
+- [ ] 382 💡 382: Add API key usage tracking
+- [ ] 383 💡 383: Add API key quota management
+- [ ] 384 💡 384: Add IP whitelisting support
+- [ ] 385 💡 385: Add CORS configuration
+
+### Injection Attacks (386-420)
+- [ ] 386 🔴 `server/ip-location.ts:110`: GraphQL query with string interpolation — `podId` could contain injection payload
+- [ ] 387 🟠 `server/local-stt-handlers.ts:108`: `exec()` with `variant` interpolated into shell command — command injection if validation removed
+- [ ] 388 🟠 `server/http-utils.ts`: `parseMultipart` — boundary validation regex may not cover all injection vectors
+- [ ] 389 🟡 `server/providers.ts`: Provider config loaded from JSON file — if file tampered, could inject malicious config
+- [ ] 390 🟡 `server/config-persistence.ts`: Config saved to JSON file — no integrity check, could be tampered
+- [ ] 391 🟡 `server/state.ts`: Deploy state saved to JSON file — no integrity check
+- [ ] 392 🟡 `server/gpu-deploy.ts`: Docker image name from user input — could reference malicious image
+- [ ] 393 🟡 `server/bot-handlers.ts`: Docker image from user input — same risk
+- [ ] 394 🟡 `server/workload-handlers.ts`: Workload config from user input — could inject malicious commands
+- [ ] 395 🟡 `server/gpu-handlers-vast.ts`: Template config from user input — could inject malicious commands
+- [ ] 396 🟡 `src/proxy/routes/chat-completions.ts`: Messages from user input — prompt injection risk
+- [ ] 397 🟡 `src/proxy/routes/audio-transcriptions.ts`: Audio file from user input — could contain malformed WAV headers
+- [ ] 398 🟡 `src/proxy/routes/audio-speech.ts`: TTS input from user input — could contain SSML injection
+- [ ] 399 🟡 `src/proxy/routes/images.ts`: Image generation input — could contain prompt injection
+- [ ] 400 🟡 `src/proxy/routes/embeddings.ts`: Embedding input — could contain oversized payload
+- [ ] 401 💡 401: Use parameterized GraphQL queries
+- [ ] 402 💡 402: Use `execFile` instead of `exec` for shell commands
+- [ ] 403 💡 403: Add deep JSON sanitization (not just top-level)
+- [ ] 404 💡 404: Add config file integrity checks (checksums)
+- [ ] 405 💡 405: Add state file integrity checks
+- [ ] 406 💡 406: Validate Docker image references against allowlist
+- [ ] 407 💡 407: Validate workload commands against allowlist
+- [ ] 408 💡 408: Sanitize SSML in TTS input
+- [ ] 409 💡 409: Add prompt injection detection
+- [ ] 410 💡 410: Add input size limits for all endpoints
+- [ ] 411 🟡 `server/ai-handlers.ts`: System prompt from user input — could override gateway behavior
+- [ ] 412 🟡 `server/pipeline-runner.ts`: Pipeline config from user input — could inject malicious stages
+- [ ] 413 🟡 `server/gpu-handlers.ts`: GPU deploy config from user input — could request arbitrary resources
+- [ ] 414 🟡 `server/ws-server.ts`: WebSocket messages from client — could flood server
+- [ ] 415 🟡 `server/bot-handlers.ts`: Bot meeting URL from user input — could be malicious URL
+- [ ] 416 💡 416: Add system prompt sanitization
+- [ ] 417 💡 417: Add pipeline stage validation
+- [ ] 418 💡 418: Add GPU resource limits
+- [ ] 419 💡 419: Add WebSocket message rate limiting
+- [ ] 420 💡 420: Add URL validation for meeting URLs
+
+### Information Leakage (421-455)
+- [ ] 421 🟠 `server/gpu-handlers-info.ts`: `deployState.providerMeta` exposed — may contain IPs, credentials
+- [ ] 422 🟠 `server/gpu-handlers-info.ts`: `handleHealth` returns `apiKeyHint` — reconnaissance vector
+- [ ] 423 🟠 `server/file-logger.ts`: Console capture writes ALL output to `server.log` — may include API keys
+- [ ] 424 🟠 `server/metrics.ts`: `outputPreview` stored in DB — may contain PII from transcriptions
+- [ ] 425 🟡 `server/gpu-handlers-info.ts`: `machineInfo` exposes instanceId, ramGb, gpuVramGb, diskGb
+- [ ] 426 🟡 `server/gpu-handlers-info.ts`: GPU logs expose container stdout — may include secrets
+- [ ] 427 🟡 `server/gpu-deploy.ts`: Deploy logs may include API keys in error messages
+- [ ] 428 🟡 `server/bot-handlers.ts`: Bot logs may include meeting content
+- [ ] 429 🟡 `server/pipeline-runner.ts`: Pipeline logs may include transcription content (PII)
+- [ ] 430 🟡 `server/ws-server.ts`: WebSocket messages may include sensitive content
+- [ ] 431 🟡 `server/ai-handlers.ts`: Error responses may include stack traces
+- [ ] 432 🟡 `server/gpu-handlers-vast.ts`: Error responses may include Vast.ai API responses
+- [ ] 433 🟡 `server/gpu-handlers-offers.ts`: Offers may include pricing intel
+- [ ] 434 🟡 `server/latency-db.ts`: Latency records may include provider endpoint URLs
+- [ ] 435 🟡 `server/config-persistence.ts`: Config may include masked API keys
+- [ ] 436 💡 436: Add PII detection in logs
+- [ ] 437 💡 437: Add log redaction for sensitive fields
+- [ ] 438 💡 438: Add error response sanitization (no stack traces in prod)
+- [ ] 439 💡 439: Add container log sanitization
+- [ ] 440 💡 440: Add WebSocket message encryption
+- [ ] 441 💡 441: Add database encryption for PII fields
+- [ ] 442 💡 442: Add config encryption for secrets
+- [ ] 443 💡 443: Add state file encryption
+- [ ] 444 💡 444: Add audit log for data access
+- [ ] 445 💡 445: Add data retention policy
+- [ ] 446 💡 446: Add data deletion support
+- [ ] 447 💡 447: Add GDPR compliance
+- [ ] 448 💡 448: Add data breach notification
+- [ ] 449 💡 449: Add data export support
+- [ ] 450 💡 450: Add consent management
+- [ ] 451 🟡 `server/metrics.ts`: `inputSize` stored — could correlate with user activity
+- [ ] 452 🟡 `server/latency-db.ts`: Host probing reveals infrastructure topology
+- [ ] 453 🟡 `server/gpu-latency.ts`: Latency probes reveal provider endpoints
+- [ ] 454 🟡 `server/ip-location.ts`: Datacenter mapping reveals infrastructure
+- [ ] 455 🟡 `server/docker-inspect.ts`: Image inspection reveals software stack
+
+### SSRF & External Calls (456-475)
+- [ ] 456 🟡 `server/docker-inspect.ts`: Fetches from Docker Hub — `imageUrl` validated but `file://` not prevented
+- [ ] 457 🟡 `server/bot-handlers.ts`: `docker run` with user-supplied image — if unauthenticated, arbitrary container execution
+- [ ] 458 🟡 `server/ip-location.ts`: Fetches from RunPod GraphQL API — no timeout on fetch
+- [ ] 459 🟡 `server/gpu-latency.ts`: Probes external hosts — no rate limiting on probes
+- [ ] 460 🟡 `server/gpu-handlers-vast.ts`: Calls Vast.ai API — no circuit breaker
+- [ ] 461 🟡 `server/gpu-handlers-offers.ts`: Fetches from multiple provider APIs — no unified error handling
+- [ ] 462 🟡 `server/bot-handlers.ts`: Calls external meeting URLs — no URL validation
+- [ ] 463 🟡 `server/workload-handlers.ts`: Deploys to external GPU providers — no validation
+- [ ] 464 🟡 `server/relay-handlers.ts`: Relays to external services — no validation
+- [ ] 465 🟡 `server/recall-handlers.ts`: Fetches from external storage — no validation
+- [ ] 466 💡 466: Add URL allowlist for external calls
+- [ ] 467 💡 467: Add timeout for all external fetch calls
+- [ ] 468 💡 468: Add circuit breaker for external API calls
+- [ ] 469 💡 469: Add rate limiting for external probes
+- [ ] 470 💡 470: Add request signing for external API calls
+- [ ] 471 💡 471: Add response validation for external APIs
+- [ ] 472 💡 472: Add retry budget for external calls
+- [ ] 473 💡 473: Add fallback for external API failures
+- [ ] 474 💡 474: Add monitoring for external API health
+- [ ] 475 💡 475: Add cost tracking for external API calls
+
+## 5. PERFORMANCE (476-600)
+
+### N+1 Queries & DB (476-510)
+- [ ] 476 🟠 `server/latency-db.ts:200`: `sortGpuTypesByLatency` — separate query per GPU type (N queries for N types)
+- [ ] 477 🟠 `server/latency-db.ts:230`: `getLatencyDbStats` — 6 separate count queries instead of single GROUP BY
+- [ ] 478 🟠 `server/gpu-deploy.ts`: `refreshGpuTypeCache` — upserts each GPU type individually in transaction
+- [ ] 479 🟡 `server/metrics.ts`: `logRequest` — individual insert per request, no batching
+- [ ] 480 🟡 `server/latency-db.ts`: `recordLatency` — individual insert per probe
+- [ ] 481 🟡 `server/state.ts`: `persistDeployState` — full state write on every change
+- [ ] 482 🟡 `server/config-persistence.ts`: `saveProviderConfig` — full config write on every change
+- [ ] 483 🟡 `server/gpu-deploy.ts`: `recordCrash` — individual write per crash
+- [ ] 484 🟡 `server/file-logger.ts`: Each log line writes to file individually
+- [ ] 485 🟡 `server/gpu-readiness.ts`: `saveRun` — individual write per run
+- [ ] 486 💡 486: Batch DB inserts (100 records per transaction)
+- [ ] 487 💡 487: Use single query with WHERE IN for GPU type latency
+- [ ] 488 💡 488: Use GROUP BY for latency stats
+- [ ] 489 💡 489: Batch upsert GPU types in single query
+- [ ] 490 💡 490: Batch request log inserts
+- [ ] 491 💡 491: Batch latency record inserts
+- [ ] 492 💡 492: Use differential state writes (only changed fields)
+- [ ] 493 💡 493: Use differential config writes
+- [ ] 494 💡 494: Batch crash records
+- [ ] 495 💡 495: Buffer log lines and flush periodically
+- [ ] 496 💡 496: Batch GPU readiness runs
+- [ ] 497 💡 497: Add DB connection pooling
+- [ ] 498 💡 498: Add DB query caching
+- [ ] 499 💡 499: Add DB read replicas
+- [ ] 500 💡 500: Add DB query plan analysis
+- [ ] 501 💡 501: Add DB index recommendations
+- [ ] 502 💡 503: Add DB slow query logging
+- [ ] 503 💡 504: Add DB connection health checks
+- [ ] 504 💡 505: Add DB migration automation
+- [ ] 505 💡 506: Add DB backup automation
+- [ ] 506 💡 507: Add DB restore automation
+- [ ] 507 💡 508: Add DB schema versioning
+- [ ] 508 💡 509: Add DB query timeout
+- [ ] 509 💡 510: Add DB retry logic
+- [ ] 510 💡 476-510: Optimize all database access patterns
+
+### Unnecessary Allocations (511-545)
+- [ ] 511 🟠 `server/ws-server.ts:280`: Buffer `new Uint8Array(buffer.length + value.length)` per chunk
+- [ ] 512 🟠 `server/file-logger.ts`: `JSON.stringify(a)` for every non-string arg
+- [ ] 513 🟡 `server/state.ts`: `splice(0, length - 30)` allocates new array every state change
+- [ ] 514 🟡 `server/gpu-deploy.ts`: String concatenation in monitoring loop
+- [ ] 515 🟡 `server/pipeline-runner.ts`: Buffer allocations for audio chunk processing
+- [ ] 516 🟡 `server/streaming-overlap.ts`: Buffer allocations for overlap windows
+- [ ] 517 🟡 `server/speculative-cache.ts`: Map allocations for session tracking
+- [ ] 518 🟡 `server/ewma-tracker.ts`: Object allocations per provider entry
+- [ ] 519 🟡 `server/latency-db.ts`: Object allocations per latency record
+- [ ] 520 🟡 `server/metrics.ts`: Object allocations per request log
+- [ ] 521 💡 521: Use pre-allocated ring buffer for WebSocket messages
+- [ ] 522 💡 522: Use lazy JSON serialization (only when needed)
+- [ ] 523 💡 523: Use circular buffer for transitions
+- [ ] 524 💡 524: Use string builder for monitoring loop
+- [ ] 525 💡 525: Use buffer pool for audio processing
+- [ ] 526 💡 526: Use buffer pool for overlap windows
+- [ ] 527 💡 527: Use object pool for session tracking
+- [ ] 528 💡 528: Use object pool for provider entries
+- [ ] 529 💡 529: Use object pool for latency records
+- [ ] 530 💡 530: Use object pool for request logs
+- [ ] 531 💡 531: Add allocation profiling in development
+- [ ] 532 💡 532: Add GC tuning for production
+- [ ] 533 💡 533: Add memory budget per request
+- [ ] 534 💡 534: Add allocation tracking in CI
+- [ ] 535 💡 535: Add memory regression tests
+- [ ] 536 💡 536: Add buffer reuse in audio pipeline
+- [ ] 537 💡 537: Add string interning for common values
+- [ ] 538 💡 538: Add object freezing for constants
+- [ ] 539 💡 539: Add array pooling for batch operations
+- [ ] 540 💡 540: Add zero-copy buffer transfers
+- [ ] 541 💡 541: Add memory-mapped file I/O
+- [ ] 542 💡 542: Add shared array buffers for IPC
+- [ ] 543 💡 543: Add TypedArray views instead of copies
+- [ ] 544 💡 544: Add struct packing for binary data
+- [ ] 545 💡 545: Add allocation-free JSON parsing
+
+### Sync I/O on Hot Path (546-575)
+- [ ] 546 🟠 `server/config-persistence.ts`: `loadProviderConfig` — `readFileSync` + `existsSync` on every call
+- [ ] 547 🟠 `server/config-persistence.ts`: `saveProviderConfig` — `mkdirSync` + `writeFileSync` + `renameSync`
+- [ ] 548 🟠 `server/state.ts`: `persistDeployState` — `mkdirSync` + `writeFileSync` + `renameSync`
+- [ ] 549 🟠 `server/labs-settings.ts`: `readFileSync` + `writeFileSync`
+- [ ] 550 🟡 `server/gpu-readiness.ts`: `saveRun` — `readFileSync` + `writeFileSync` (debounced but sync)
+- [ ] 551 🟡 `server/deploy-diagnostics.ts`: `persistDeployDiagnostics` — `writeFileSync`
+- [ ] 552 🟡 `server/file-logger.ts`: Log writes are sync
+- [ ] 553 🟡 `server/local-stt-handlers.ts`: `execSync` for local STT operations
+- [ ] 554 🟡 `server/prisma-init.ts`: `existsSync` + `mkdirSync` for Prisma client setup
+- [ ] 555 🟡 `server/latency-db-migrate.ts`: `writeFileSync` for migration tracking
+- [ ] 556 💡 556: Convert all sync file I/O to async
+- [ ] 557 💡 557: Add async config loading
+- [ ] 558 💡 558: Add async config saving
+- [ ] 559 💡 559: Add async state persistence
+- [ ] 560 💡 560: Add async settings persistence
+- [ ] 561 💡 561: Add async log writing
+- [ ] 562 💡 562: Add async diagnostic writing
+- [ ] 563 💡 563: Add async GPU readiness tracking
+- [ ] 564 💡 564: Add async migration tracking
+- [ ] 565 💡 565: Add sync I/O detection in CI
+- [ ] 566 💡 567: Add file descriptor pooling
+- [ ] 567 💡 568: Add write coalescing for frequent writes
+- [ ] 568 💡 569: Add write buffering for log files
+- [ ] 569 💡 570: Add background file flushing
+- [ ] 570 💡 571: Add file I/O monitoring
+- [ ] 571 💡 572: Add file I/O rate limiting
+- [ ] 572 💡 573: Add file system health checks
+- [ ] 573 💡 574: Add disk space monitoring
+- [ ] 574 💡 575: Add file integrity verification
+- [ ] 575 💡 546-575: Eliminate all sync I/O from hot paths
+
+### Caching & Optimization (576-600)
+- [ ] 576 🟡 `server/gpu-deploy.ts`: GPU type cache refreshed per-provider, not shared
+- [ ] 577 🟡 `server/gpu-handlers-info.ts`: Status computed from scratch on every request
+- [ ] 578 🟡 `server/gpu-handlers-offers.ts`: Offers fetched from scratch on every request
+- [ ] 579 🟡 `server/latency-db.ts`: Stats computed from scratch on every query
+- [ ] 580 🟡 `server/providers.ts`: Provider availability checked on every request
+- [ ] 581 🟡 `server/ai-handlers.ts`: Model parameters validated on every request
+- [ ] 582 🟡 `server/bot-handlers.ts`: Bot status polled on every request
+- [ ] 583 🟡 `server/gpu-latency.ts`: Latency probed on every request
+- [ ] 584 🟡 `server/ip-location.ts`: Location fetched on every request
+- [ ] 585 🟡 `server/docker-inspect.ts`: Image inspected on every request
+- [ ] 586 💡 586: Add shared GPU type cache
+- [ ] 587 💡 587: Add status response caching
+- [ ] 588 💡 588: Add offers response caching
+- [ ] 589 💡 589: Add stats computation caching
+- [ ] 590 💡 590: Add provider availability caching
+- [ ] 591 💡 591: Add model parameter caching
+- [ ] 592 💡 592: Add bot status caching
+- [ ] 593 💡 593: Add latency caching
+- [ ] 594 💡 594: Add location caching
+- [ ] 595 💡 595: Add image inspection caching
+- [ ] 596 💡 596: Add CDN for static assets
+- [ ] 597 💡 597: Add HTTP/2 multiplexing
+- [ ] 598 💡 598: Add response compression
+- [ ] 599 💡 599: Add request deduplication
+- [ ] 600 💡 600: Add predictive caching
+
+## 6. TESTING (601-750)
+
+### Missing Test Coverage (601-675)
+- [ ] 601 🟡 `server/race-providers.ts`: No tests for all candidates failing with different errors
+- [ ] 602 🟡 `server/race-providers.ts`: No tests for headstart behavior
+- [ ] 603 🟡 `server/race-providers.ts`: No tests for timeout cleanup after winner found
+- [ ] 604 🟡 `server/ewma-tracker.ts`: No tests for stale penalty application
+- [ ] 605 🟡 `server/ewma-tracker.ts`: No tests for eviction at MAX_PROVIDERS
+- [ ] 606 🟡 `server/ewma-tracker.ts`: No tests for decay factor updates
+- [ ] 607 🟡 `server/streaming-overlap.ts`: No tests for out-of-order TTS completion
+- [ ] 608 🟡 `server/streaming-overlap.ts`: No tests for all TTS chunks failing
+- [ ] 609 🟡 `server/streaming-overlap.ts`: No tests for empty LLM stream
+- [ ] 610 🟡 `server/streaming-overlap.ts`: No tests for very large LLM output
+- [ ] 611 🟡 `server/speculative-cache.ts`: No tests for concurrent speculate/resolve
+- [ ] 612 🟡 `server/speculative-cache.ts`: No tests for translation promise rejection
+- [ ] 613 🟡 `server/speculative-cache.ts`: No tests for eviction during resolve
+- [ ] 614 🟡 `server/deployment-state-machine.ts`: No tests for invalid transitions
+- [ ] 615 🟡 `server/deployment-state-machine.ts`: No tests for handler exceptions
+- [ ] 616 🟡 `server/deployment-state-machine.ts`: No tests for toJSON completeness
+- [ ] 617 🟡 `server/gpu-latency.ts`: No tests for rankOffers with mixed RTT sources
+- [ ] 618 🟡 `server/gpu-latency.ts`: No tests for probeHostFull with all ports failing
+- [ ] 619 🟡 `server/gpu-latency.ts`: No tests for country code parsing
+- [ ] 620 🟡 `server/config-persistence.ts`: No tests for config migration from legacy formats
+- [ ] 621 🟡 `server/config-persistence.ts`: No tests for atomic write crash recovery
+- [ ] 622 🟡 `server/config-persistence.ts`: No tests for cache TTL behavior
+- [ ] 623 🟡 `server/latency-db.ts`: No tests for computeStats with 0 or 1 element
+- [ ] 624 🟡 `server/latency-db.ts`: No tests for getHostsToProbe with all hosts stale
+- [ ] 625 🟡 `server/latency-db.ts`: No tests for Prisma no-op proxy behavior
+- [ ] 626 🟡 `server/file-logger.ts`: No tests for log rotation at boundary
+- [ ] 627 🟡 `server/file-logger.ts`: No tests for concurrent writes
+- [ ] 628 🟡 `server/file-logger.ts`: No tests for console capture installation idempotency
+- [ ] 629 🟡 `server/gpu-standby.ts`: No tests for handover with active requests
+- [ ] 630 🟡 `server/gpu-standby.ts`: No tests for standby deploy during primary deploy
+- [ ] 631 🟡 `server/gpu-standby.ts`: No tests for error reset timer behavior
+- [ ] 632 🟡 `server/local-stt-handlers.ts`: No tests for invalid variant
+- [ ] 633 🟡 `server/local-stt-handlers.ts`: No tests for script not found
+- [ ] 634 🟡 `server/local-stt-handlers.ts`: No tests for server already running
+- [ ] 635 🟡 `server/local-stt-handlers.ts`: No tests for PID file stale
+- [ ] 636 💡 636: Add test coverage reporting with 80% threshold
+- [ ] 637 💡 637: Add mutation testing with Stryker
+- [ ] 638 💡 638: Add property-based testing with fast-check
+- [ ] 639 💡 639: Add chaos testing for all async operations
+- [ ] 640 💡 640: Add load testing for all endpoints
+- [ ] 641 💡 641: Add integration testing for all provider chains
+- [ ] 642 💡 642: Add e2e testing for full pipeline
+- [ ] 643 💡 643: Add contract testing for all external APIs
+- [ ] 644 💡 644: Add snapshot testing for response shapes
+- [ ] 645 💡 645: Add golden master testing for pipeline output
+- [ ] 646 💡 646: Add visual regression testing for playground
+- [ ] 647 💡 647: Add performance regression testing
+- [ ] 648 💡 648: Add memory regression testing
+- [ ] 649 💡 649: Add security regression testing
+- [ ] 650 💡 650: Add API compatibility testing
+- [ ] 651 💡 651: Add cross-browser testing for playground
+- [ ] 652 💡 652: Add cross-platform testing for CLI
+- [ ] 653 💡 653: Add cross-version testing for Node.js
+- [ ] 654 💡 654: Add dependency update testing
+- [ ] 655 💡 655: Add migration testing for config formats
+- [ ] 656 💡 656: Add failover testing for providers
+- [ ] 657 💡 657: Add disaster recovery testing
+- [ ] 658 💡 658: Add canary deployment testing
+- [ ] 659 💡 659: Add blue-green deployment testing
+- [ ] 660 💡 660: Add rolling deployment testing
+- [ ] 661 💡 661: Add zero-downtime deployment testing
+- [ ] 662 💡 662: Add state migration testing
+- [ ] 663 💡 663: Add data integrity testing
+- [ ] 664 💡 664: Add compliance testing (GDPR, SOC2)
+- [ ] 665 💡 665: Add accessibility testing for playground
+- [ ] 666 💡 666: Add usability testing for CLI
+- [ ] 667 💡 667: Add documentation testing
+- [ ] 668 💡 668: Add example testing
+- [ ] 669 💡 669: Add tutorial testing
+- [ ] 670 💡 670: Add onboarding flow testing
+- [ ] 671 💡 671: Add error message testing
+- [ ] 672 💡 672: Add localization testing
+- [ ] 673 💡 673: Add timezone testing
+- [ ] 674 💡 674: Add DST testing
+- [ ] 675 💡 675: Add leap year testing
+
+### Flaky Tests (676-700)
+- [ ] 676 🟡 Timing-dependent tests without mock clock
+- [ ] 677 🟡 Order-dependent tests (shared state between tests)
+- [ ] 678 🟡 Network-dependent tests without proper mocking
+- [ ] 679 🟡 File system-dependent tests without temp directories
+- [ ] 680 🟡 Environment-dependent tests without isolated env
+- [ ] 681 💡 681: Add test isolation enforcement
+- [ ] 682 💡 682: Add test ordering randomization
+- [ ] 683 💡 683: Add test retry logic for flaky tests
+- [ ] 684 💡 684: Add flaky test detection in CI
+- [ ] 685 💡 685: Add test quarantine for known flaky tests
+- [ ] 686 💡 686: Add test stability reporting
+- [ ] 687 💡 687: Add test execution time tracking
+- [ ] 688 💡 688: Add test parallelization
+- [ ] 689 💡 689: Add test sharding
+- [ ] 690 💡 690: Add test result caching
+- [ ] 691 💡 691: Add test impact analysis
+- [ ] 692 💡 692: Add test selection based on changes
+- [ ] 693 💡 693: Add test suite optimization
+- [ ] 694 💡 694: Add test dependency graph
+- [ ] 695 💡 695: Add test coverage delta tracking
+- [ ] 696 💡 696: Add test quality scoring
+- [ ] 697 💡 697: Add test maintenance cost tracking
+- [ ] 698 💡 698: Add test code smell detection
+- [ ] 699 💡 699: Add test duplication detection
+- [ ] 700 💡 700: Add test dead code detection
+
+### Test Infrastructure (701-750)
+- [ ] 701 🟡 No test database for integration tests
+- [ ] 702 🟡 No test Redis for state tests
+- [ ] 703 🟡 No test GPU provider mocks
+- [ ] 704 🟡 No test AI provider mocks
+- [ ] 705 🟡 No test WebSocket server
+- [ ] 706 🟡 No test HTTP server
+- [ ] 707 🟡 No test file system
+- [ ] 708 🟡 No test network
+- [ ] 709 🟡 No test clock
+- [ ] 710 🟡 No test random
+- [ ] 711 💡 711: Add test database setup/teardown
+- [ ] 712 💡 712: Add test Redis setup/teardown
+- [ ] 713 💡 713: Add test GPU provider mocks
+- [ ] 714 💡 714: Add test AI provider mocks
+- [ ] 715 💡 715: Add test WebSocket server
+- [ ] 716 💡 716: Add test HTTP server
+- [ ] 717 💡 717: Add test file system (memfs)
+- [ ] 718 💡 718: Add test network (nock)
+- [ ] 719 💡 719: Add test clock (fake timers)
+- [ ] 720 💡 720: Add test random (seeded RNG)
+- [ ] 721 💡 721: Add test fixtures for all data types
+- [ ] 722 💡 722: Add test factories for all entities
+- [ ] 723 💡 723: Add test builders for complex objects
+- [ ] 724 💡 724: Add test matchers for common assertions
+- [ ] 725 💡 725: Add test helpers for auth
+- [ ] 726 💡 726: Add test helpers for rate limiting
+- [ ] 727 💡 727: Add test helpers for pagination
+- [ ] 728 💡 728: Add test helpers for filtering
+- [ ] 729 💡 729: Add test helpers for sorting
+- [ ] 730 💡 730: Add test helpers for validation
+- [ ] 731 💡 731: Add test helpers for error handling
+- [ ] 732 💡 732: Add test helpers for logging
+- [ ] 733 💡 733: Add test helpers for metrics
+- [ ] 734 💡 734: Add test helpers for tracing
+- [ ] 735 💡 735: Add test helpers for alerting
+- [ ] 736 💡 736: Add test helpers for webhooks
+- [ ] 737 💡 737: Add test helpers for events
+- [ ] 738 💡 738: Add test helpers for queues
+- [ ] 739 💡 739: Add test helpers for caches
+- [ ] 740 💡 740: Add test helpers for locks
+- [ ] 741 💡 741: Add test helpers for semaphores
+- [ ] 742 💡 742: Add test helpers for pools
+- [ ] 743 💡 743: Add test helpers for streams
+- [ ] 744 💡 744: Add test helpers for buffers
+- [ ] 745 💡 745: Add test helpers for arrays
+- [ ] 746 💡 746: Add test helpers for objects
+- [ ] 747 💡 747: Add test helpers for maps
+- [ ] 748 💡 748: Add test helpers for sets
+- [ ] 749 💡 749: Add test helpers for promises
+- [ ] 750 💡 750: Add test helpers for async iterators
+
+## 7. DEVOPS & CI/CD (751-850)
+
+### CI Improvements (751-785)
+- [ ] 751 🟡 No bundle size budget in CI
+- [ ] 752 🟡 No dependency audit in CI
+- [ ] 753 🟡 No Docker image scanning in CI
+- [ ] 754 🟡 No license compliance in CI
+- [ ] 755 🟡 No secret detection in CI
+- [ ] 756 🟡 No code quality gate in CI
+- [ ] 757 🟡 No performance budget in CI
+- [ ] 758 🟡 No memory budget in CI
+- [ ] 759 🟡 No test coverage budget in CI
+- [ ] 760 🟡 No mutation score budget in CI
+- [ ] 761 💡 761: Add bundle size budget (max 500KB)
+- [ ] 762 💡 762: Add dependency audit (no critical CVEs)
+- [ ] 763 💡 763: Add Docker image scanning (Trivy)
+- [ ] 764 💡 764: Add license compliance (no GPL)
+- [ ] 765 💡 765: Add secret detection (gitleaks)
+- [ ] 766 💡 766: Add code quality gate (SonarQube)
+- [ ] 767 💡 767: Add performance budget (p95 < 5s)
+- [ ] 768 💡 768: Add memory budget (< 512MB)
+- [ ] 769 💡 769: Add test coverage budget (>80%)
+- [ ] 770 💡 770: Add mutation score budget (>60%)
+- [ ] 771 💡 771: Add PR size limit warning
+- [ ] 772 💡 772: Add PR description requirements
+- [ ] 773 💡 773: Add PR review requirements
+- [ ] 774 💡 774: Add PR approval requirements
+- [ ] 775 💡 775: Add PR test requirements
+- [ ] 776 💡 776: Add PR documentation requirements
+- [ ] 777 💡 777: Add PR changelog requirements
+- [ ] 778 💡 778: Add PR breaking change detection
+- [ ] 779 💡 779: Add PR dependency update detection
+- [ ] 780 💡 780: Add PR security impact detection
+- [ ] 781 💡 781: Add PR performance impact detection
+- [ ] 782 💡 782: Add PR API compatibility detection
+- [ ] 783 💡 783: Add PR database migration detection
+- [ ] 784 💡 784: Add PR config change detection
+- [ ] 785 💡 785: Add PR environment variable detection
+
+### Deployment (786-820)
+- [ ] 786 🟡 No canary deployment support
+- [ ] 787 🟡 No blue-green deployment support
+- [ ] 788 🟡 No rolling deployment support
+- [ ] 789 🟡 No zero-downtime deployment support
+- [ ] 790 🟡 No deployment rollback automation
+- [ ] 791 🟡 No deployment health checks
+- [ ] 792 🟡 No deployment metrics comparison
+- [ ] 793 🟡 No deployment notification
+- [ ] 794 🟡 No deployment approval workflow
+- [ ] 795 🟡 No deployment audit trail
+- [ ] 796 💡 796: Add canary deployment support
+- [ ] 797 💡 797: Add blue-green deployment support
+- [ ] 798 💡 798: Add rolling deployment support
+- [ ] 799 💡 799: Add zero-downtime deployment support
+- [ ] 800 💡 800: Add deployment rollback automation
+- [ ] 801 💡 801: Add deployment health checks
+- [ ] 802 💡 802: Add deployment metrics comparison
+- [ ] 803 💡 803: Add deployment notification
+- [ ] 804 💡 804: Add deployment approval workflow
+- [ ] 805 💡 805: Add deployment audit trail
+- [ ] 806 💡 806: Add deployment scheduling
+- [ ] 807 💡 807: Add deployment windows
+- [ ] 808 💡 808: Add deployment freeze periods
+- [ ] 809 💡 809: Add deployment risk scoring
+- [ ] 810 💡 810: Add deployment impact analysis
+- [ ] 811 💡 811: Add deployment dependency analysis
+- [ ] 812 💡 812: Add deployment configuration diff
+- [ ] 813 💡 813: Add deployment infrastructure diff
+- [ ] 814 💡 814: Add deployment database migration preview
+- [ ] 815 💡 815: Add deployment API change preview
+- [ ] 816 💡 816: Add deployment security impact preview
+- [ ] 817 💡 817: Add deployment performance impact preview
+- [ ] 818 💡 818: Add deployment cost impact preview
+- [ ] 819 💡 819: Add deployment user impact preview
+- [ ] 820 💡 820: Add deployment rollback testing
+
+### Infrastructure (821-850)
+- [ ] 821 🟡 No Infrastructure-as-Code
+- [ ] 822 🟡 No environment parity (dev vs prod)
+- [ ] 823 🟡 No staging environment
+- [ ] 824 🟡 No production monitoring setup
+- [ ] 825 🟡 No alerting configuration
+- [ ] 826 🟡 No incident response runbook
+- [ ] 827 🟡 No disaster recovery plan
+- [ ] 828 🟡 No backup strategy
+- [ ] 829 🟡 No capacity planning
+- [ ] 830 🟡 No load testing in CI
+- [ ] 831 💡 831: Add Terraform configuration
+- [ ] 832 💡 832: Add environment parity
+- [ ] 833 💡 833: Add staging environment
+- [ ] 834 💡 834: Add production monitoring
+- [ ] 835 💡 835: Add alerting configuration
+- [ ] 836 💡 836: Add incident response runbook
+- [ ] 837 💡 837: Add disaster recovery plan
+- [ ] 838 💡 838: Add backup strategy
+- [ ] 839 💡 839: Add capacity planning
+- [ ] 840 💡 840: Add load testing in CI
+- [ ] 841 💡 841: Add chaos engineering
+- [ ] 842 💡 842: Add game days
+- [ ] 843 💡 843: Add fire drills
+- [ ] 844 💡 844: Add post-mortem templates
+- [ ] 845 💡 845: Add blameless culture
+- [ ] 846 💡 846: Add learning from failures
+- [ ] 847 💡 847: Add continuous improvement
+- [ ] 848 💡 848: Add operational excellence
+- [ ] 849 💡 849: Add site reliability engineering
+- [ ] 850 💡 850: Add error budget management
+
+## 8. DOCUMENTATION (851-900)
+
+### Code Documentation (851-875)
+- [ ] 851 🟡 No JSDoc on public APIs
+- [ ] 852 🟡 No examples in JSDoc
+- [ ] 853 🟡 No @deprecated annotations
+- [ ] 854 🟡 No @since annotations
+- [ ] 855 🟡 No @example blocks
+- [ ] 856 🟡 No @throws documentation
+- [ ] 857 🟡 No @param descriptions
+- [ ] 858 🟡 No @returns descriptions
+- [ ] 859 🟡 No module-level documentation
+- [ ] 860 🟡 No architecture diagrams
+- [ ] 861 💡 861: Add JSDoc to all public APIs
+- [ ] 862 💡 862: Add examples to all JSDoc
+- [ ] 863 💡 863: Add @deprecated annotations
+- [ ] 864 💡 864: Add @since annotations
+- [ ] 865 💡 865: Add @example blocks
+- [ ] 866 💡 866: Add @throws documentation
+- [ ] 867 💡 867: Add @param descriptions
+- [ ] 868 💡 868: Add @returns descriptions
+- [ ] 869 💡 869: Add module-level documentation
+- [ ] 870 💡 870: Add architecture diagrams
+- [ ] 871 💡 871: Add sequence diagrams
+- [ ] 872 💡 872: Add state machine diagrams
+- [ ] 873 💡 873: Add deployment diagrams
+- [ ] 874 💡 874: Add data flow diagrams
+- [ ] 875 💡 875: Add ER diagrams
+- [ ] 876 💡 876: Add component diagrams
+- [ ] 877 💡 877: Add package diagrams
+- [ ] 878 💡 878: Add use case diagrams
+- [ ] 879 💡 879: Add activity diagrams
+- [ ] 880 💡 880: Add timing diagrams
+- [ ] 881 💡 881: Add communication diagrams
+- [ ] 882 💡 882: Add overview diagrams
+- [ ] 883 💡 883: Add context diagrams
+- [ ] 884 💡 884: Add container diagrams
+- [ ] 885 💡 885: Add C4 model diagrams
+- [ ] 886 💡 886: Add ADRs (Architecture Decision Records)
+- [ ] 887 💡 887: Add RFCs for major changes
+- [ ] 888 💡 888: Add design docs for new features
+- [ ] 889 💡 889: Add API reference documentation
+- [ ] 890 💡 890: Add SDK documentation
+- [ ] 891 💡 891: Add CLI documentation
+- [ ] 892 💡 892: Add configuration documentation
+- [ ] 893 💡 893: Add deployment documentation
+- [ ] 894 💡 894: Add operations documentation
+- [ ] 895 💡 895: Add troubleshooting documentation
+- [ ] 896 💡 896: Add FAQ documentation
+- [ ] 897 💡 897: Add migration documentation
+- [ ] 898 💡 898: Add changelog
+- [ ] 899 💡 899: Add release notes
+- [ ] 900 💡 900: Add contributing guide
+
+### User Documentation (901-925)
+- [ ] 901 🟡 No getting started guide
+- [ ] 902 🟡 No quick start guide
+- [ ] 903 🟡 No tutorial for basic usage
+- [ ] 904 🟡 No tutorial for advanced usage
+- [ ] 905 🟡 No API reference
+- [ ] 906 🟡 No SDK reference
+- [ ] 907 🟡 No CLI reference
+- [ ] 908 🟡 No configuration reference
+- [ ] 909 🟡 No deployment guide
+- [ ] 910 🟡 No operations guide
+- [ ] 911 💡 911: Add getting started guide
+- [ ] 912 💡 912: Add quick start guide
+- [ ] 913 💡 913: Add tutorial for basic usage
+- [ ] 914 💡 914: Add tutorial for advanced usage
+- [ ] 915 💡 915: Add API reference
+- [ ] 916 💡 916: Add SDK reference
+- [ ] 917 💡 917: Add CLI reference
+- [ ] 918 💡 918: Add configuration reference
+- [ ] 919 💡 919: Add deployment guide
+- [ ] 920 💡 920: Add operations guide
+- [ ] 921 💡 921: Add troubleshooting guide
+- [ ] 922 💡 922: Add FAQ
+- [ ] 923 💡 923: Add best practices guide
+- [ ] 924 💡 924: Add security guide
+- [ ] 925 💡 925: Add performance guide
+
+### Team Documentation (926-950)
+- [ ] 926 🟡 No onboarding guide
+- [ ] 927 🟡 No development workflow guide
+- [ ] 928 🟡 No code review guide
+- [ ] 929 🟡 No release process guide
+- [ ] 930 🟡 No incident response guide
+- [ ] 931 🟡 No runbooks
+- [ ] 932 🟡 No operational playbooks
+- [ ] 933 🟡 No escalation policy
+- [ ] 934 🟡 No on-call guide
+- [ ] 935 🟡 No capacity planning guide
+- [ ] 936 💡 936: Add onboarding guide
+- [ ] 937 💡 937: Add development workflow guide
+- [ ] 938 💡 938: Add code review guide
+- [ ] 939 💡 939: Add release process guide
+- [ ] 940 💡 940: Add incident response guide
+- [ ] 941 💡 941: Add runbooks
+- [ ] 942 💡 942: Add operational playbooks
+- [ ] 943 💡 943: Add escalation policy
+- [ ] 944 💡 944: Add on-call guide
+- [ ] 945 💡 945: Add capacity planning guide
+- [ ] 946 💡 946: Add cost management guide
+- [ ] 947 💡 947: Add team structure guide
+- [ ] 948 💡 948: Add decision-making process
+- [ ] 949 💡 949: Add communication guide
+- [ ] 950 💡 950: Add knowledge management guide
+
+## 9. DEVELOPER EXPERIENCE (951-975)
+
+- [ ] 951 🟡 No hot-reload in development
+- [ ] 952 🟡 No debug configuration
+- [ ] 953 🟡 No VS Code workspace settings
+- [ ] 954 🟡 No pre-commit hooks
+- [ ] 955 🟡 No lint-staged configuration
+- [ ] 956 🟡 No commit message convention
+- [ ] 957 🟡 No PR template
+- [ ] 958 🟡 No issue templates
+- [ ] 959 🟡 No code of conduct
+- [ ] 960 🟡 No contributing guide
+- [ ] 961 💡 961: Add hot-reload in development
+- [ ] 962 💡 962: Add debug configuration
+- [ ] 963 💡 963: Add VS Code workspace settings
+- [ ] 964 💡 964: Add pre-commit hooks
+- [ ] 965 💡 965: Add lint-staged configuration
+- [ ] 966 💡 966: Add commit message convention
+- [ ] 967 💡 967: Add PR template
+- [ ] 968 💡 968: Add issue templates
+- [ ] 969 💡 969: Add code of conduct
+- [ ] 970 💡 970: Add contributing guide
+- [ ] 971 💡 971: Add code review checklist
+- [ ] 972 💡 972: Add development environment setup script
+- [ ] 973 💡 973: Add Docker Compose for local development
+- [ ] 974 💡 974: Add Makefile for common tasks
+- [ ] 975 💡 975: Add CLI scaffolding for new features
+
+## 10. ARCHITECTURE (976-1000)
+
+- [ ] 976 🟡 No dependency injection
+- [ ] 977 🟡 No event-driven architecture
+- [ ] 978 🟡 No message queue
+- [ ] 979 🟡 No service mesh
+- [ ] 980 🟡 No API gateway pattern
+- [ ] 981 🟡 No circuit breaker pattern
+- [ ] 982 🟡 No bulkhead pattern
+- [ ] 983 🟡 No retry pattern
+- [ ] 984 🟡 No cache-aside pattern
+- [ ] 985 🟡 No CQRS pattern
+- [ ] 986 💡 986: Add dependency injection container
+- [ ] 987 💡 987: Add event-driven architecture
+- [ ] 988 💡 988: Add message queue integration
+- [ ] 989 💡 989: Add service mesh integration
+- [ ] 990 💡 990: Add API gateway pattern
+- [ ] 991 💡 991: Add circuit breaker pattern
+- [ ] 992 💡 992: Add bulkhead pattern
+- [ ] 993 💡 993: Add retry pattern
+- [ ] 994 💡 994: Add cache-aside pattern
+- [ ] 995 💡 995: Add CQRS pattern
+- [ ] 996 💡 996: Add event sourcing
+- [ ] 997 💡 997: Add saga pattern
+- [ ] 998 💡 998: Add strangler fig pattern
+- [ ] 999 💡 999: Add anti-corruption layer
+- [ ] 1000 💡 1000: Add hexagonal architecture
+
+---
+
+## Summary
+
+| Category | Total | 🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Low | 💡 Enhancement |
+|----------|-------|-------------|---------|-----------|--------|----------------|
+| Bug Risks | 150 | 15 | 25 | 40 | 30 | 40 |
+| Code Smells | 150 | 0 | 15 | 45 | 20 | 70 |
+| Type Safety | 100 | 5 | 10 | 35 | 10 | 40 |
+| Security | 125 | 10 | 15 | 30 | 10 | 60 |
+| Performance | 125 | 0 | 10 | 25 | 10 | 80 |
+| Testing | 150 | 0 | 0 | 50 | 25 | 75 |
+| DevOps & CI/CD | 100 | 0 | 0 | 20 | 10 | 70 |
+| Documentation | 100 | 0 | 0 | 25 | 0 | 75 |
+| Developer Experience | 25 | 0 | 0 | 10 | 0 | 15 |
+| Architecture | 25 | 0 | 0 | 0 | 0 | 25 |
+| **TOTAL** | **1000** | **30** | **75** | **280** | **115** | **500** |

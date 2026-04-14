@@ -168,11 +168,12 @@ export class ResponseCache {
 
   async invalidate(pattern: string): Promise<number> {
     let count = 0;
-    await this.store.scan(`${this.prefix}${pattern}`, async (keys) => {
+    const keys: string[] = [];
+    this.store.scan(`${this.prefix}${pattern}`, (k) => { keys.push(...k); });
+    if (keys.length > 0) {
       await Promise.all(keys.map((k) => this.store.del(k)));
-      count += keys.length;
-      return true;
-    });
+      count = keys.length;
+    }
     return count;
   }
 

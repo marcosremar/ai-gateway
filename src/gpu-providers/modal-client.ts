@@ -185,7 +185,8 @@ export class ModalClient extends AbstractGpuProvider {
         );
         this.workspace = stdout.trim();
         return this.workspace;
-      } catch {
+      } catch (err) {
+        this.log.debug({ error: err instanceof Error ? err.message : String(err) }, 'modal profile current failed, deriving workspace from token');
         const { tokenId } = splitModalKey(credentials.apiKey);
         this.workspace = tokenId.replace(/^ak-/, '');
         return this.workspace;
@@ -328,8 +329,9 @@ export class ModalClient extends AbstractGpuProvider {
           this.log.log(`[modal] warmup probe ${path} → ${res.status} (container warmed)`);
           return;
         }
-      } catch {
-        // Try next path
+      } catch (err) {
+        // Intentionally ignored — try next health path
+        this.log.debug({ error: err instanceof Error ? err.message : String(err) }, 'warmup probe path failed (intentionally ignored)');
       }
     }
     this.log.warn(`[modal] warmup probe failed for ${endpoint} — first request may have cold start`);
@@ -418,8 +420,9 @@ export class ModalClient extends AbstractGpuProvider {
         if (Array.isArray(apps)) {
           return apps.map((app) => this.parseApp(app, workspace));
         }
-      } catch {
-        // --json not supported, fall through to table parsing
+      } catch (err) {
+        // Intentionally ignored -- --json not supported by this Modal CLI version, fall through to table parsing
+        this.log.debug({ error: err instanceof Error ? err.message : String(err) }, 'JSON parse of modal app list failed (intentionally ignored)');
       }
 
       const { stdout } = await (await getExecFileAsync())(

@@ -1,0 +1,124 @@
+name: 'Performance Budget'
+
+# Fail PRs that increase bundle size by >5% or add >10 new dependencies
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**/*.ts'
+      - 'package.json'
+      - 'tsup.config.ts'
+
+jobs:
+  bundle-budget:
+    name: Bundle Size Budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build current branch
+        run: bun run build
+
+      - name: Measure bundle size
+        id: current
+        run: |
+          MAIN_SIZE=$(wc -c < dist/index.js)
+          echo "size=$MAIN_SIZE" >> $GITHUB_OUTPUT
+          echo "Current bundle size: $((MAIN_SIZE / 1024)) KB"
+
+      - name: Build main branch for comparison
+        run: |
+          git stash
+          git checkout main
+          bun install --frozen-lockfile
+          bun run build
+          git checkout -
+
+      - name: Measure main bundle size
+        id: main
+        run: |
+          MAIN_SIZE=$(wc -c < dist/index.js)
+          echo "size=$MAIN_SIZE" >> $GITHUB_OUTPUT
+          echo "Main bundle size: $((MAIN_SIZE / 1024)) KB"
+
+      - name: Check bundle size budget
+        run: |
+          CURRENT_SIZE=${{ steps.current.outputs.size }}
+          MAIN_SIZE=${{ steps.main.outputs.size }}
+          MAX_SIZE=$((MAIN_SIZE * 105 / 100))  # 5% budget
+
+          echo "Main: $((MAIN_SIZE / 1024)) KB"
+          echo "Current: $((CURRENT_SIZE / 1024)) KB"
+          echo "Max allowed: $((MAX_SIZE / 1024)) KB"
+
+          if [ "$CURRENT_SIZE" -gt "$MAX_SIZE" ]; then
+            echo "::error::Bundle size increased by more than 5% ($((CURRENT_SIZE / 1024))KB > $((MAX_SIZE / 1024))KB)"
+            exit 1
+          fi
+
+          echo "✅ Bundle size within budget"
+
+  dependency-budget:
+    name: Dependency Count Budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Count dependencies
+        run: |
+          PROD_DEPS=$(cat package.json | jq '.dependencies | length')
+          DEV_DEPS=$(cat package.json | jq '.devDependencies | length')
+          TOTAL=$((PROD_DEPS + DEV_DEPS))
+
+          echo "Production deps: $PROD_DEPS"
+          echo "Dev deps: $DEV_DEPS"
+          echo "Total: $TOTAL"
+
+          if [ "$PROD_DEPS" -gt 30 ]; then
+            echo "::warning::Production dependency count is high: $PROD_DEPS (budget: 30)"
+          fi
+
+          if [ "$TOTAL" -gt 60 ]; then
+            echo "::warning::Total dependency count is high: $TOTAL (budget: 60)"
+          fi
+
+  test-budget:
+    name: Test Budget Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run unit tests
+        env:
+          SKIP_GPU_TESTS: '1'
+          SKIP_LIVE_TESTS: '1'
+        run: bun run test:unit
+
+      - name: Check test count
+        run: |
+          TEST_COUNT=$(find __tests__/unit -name "*.test.ts" | wc -l)
+          echo "Unit tests: $TEST_COUNT"
+
+          if [ "$TEST_COUNT" -lt 100 ]; then
+            echo "::warning::Low unit test count: $TEST_COUNT (minimum: 100)"
+          fi

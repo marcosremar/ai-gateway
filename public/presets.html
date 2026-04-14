@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Gateway Playground — Presets</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+    header { text-align: center; padding: 40px 0; border-bottom: 1px solid #334155; margin-bottom: 30px; }
+    header h1 { font-size: 2rem; margin-bottom: 8px; background: linear-gradient(135deg, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    header p { color: #94a3b8; }
+    .presets-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; margin-top: 30px; }
+    .preset-card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; cursor: pointer; transition: all 0.2s; }
+    .preset-card:hover { border-color: #3b82f6; transform: translateY(-2px); }
+    .preset-card h3 { margin-bottom: 8px; font-size: 1.1rem; }
+    .preset-card p { color: #94a3b8; font-size: 0.875rem; margin-bottom: 12px; }
+    .preset-card .tag { display: inline-block; padding: 2px 8px; background: #334155; border-radius: 999px; font-size: 0.75rem; margin-right: 4px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🚀 AI Gateway Playground — Presets</h1>
+      <p>Quick-start testing scenarios</p>
+    </header>
+
+    <div class="presets-grid">
+      <div class="preset-card" onclick="loadPreset('stt-french')">
+        <h3>🇫🇷 French STT Test</h3>
+        <p>Test Whisper transcription with French audio</p>
+        <span class="tag">STT</span><span class="tag">French</span>
+      </div>
+
+      <div class="preset-card" onclick="loadPreset('stt-arabic')">
+        <h3>🇸🇦 Arabic STT Test</h3>
+        <p>Test Whisper transcription with Arabic audio</p>
+        <span class="tag">STT</span><span class="tag">Arabic</span>
+      </div>
+
+      <div class="preset-card" onclick="loadPreset('translate-fr-en')">
+        <h3>🇫🇷→🇬🇧 FR→EN Translation</h3>
+        <p>Full pipeline: French audio → English audio</p>
+        <span class="tag">Pipeline</span><span class="tag">Translation</span>
+      </div>
+
+      <div class="preset-card" onclick="loadPreset('translate-en-fr')">
+        <h3>🇬🇧→🇫🇷 EN→FR Translation</h3>
+        <p>Full pipeline: English audio → French audio</p>
+        <span class="tag">Pipeline</span><span class="tag">Translation</span>
+      </div>
+
+      <div class="preset-card" onclick="loadPreset('chat-llama')">
+        <h3>💬 LLaMA Chat Test</h3>
+        <p>Test LLaMA 70B chat completion</p>
+        <span class="tag">LLM</span><span class="tag">Groq</span>
+      </div>
+
+      <div class="preset-card" onclick="loadPreset('tts-english')">
+        <h3>🔊 English TTS Test</h3>
+        <p>Test Orpheus English TTS</p>
+        <span class="tag">TTS</span><span class="tag">English</span>
+      </div>
+
+      <div class="preset-card" onclick="loadPreset('gpu-status')">
+        <h3>🎮 GPU Status Check</h3>
+        <p>Check current GPU deployment status</p>
+        <span class="tag">GPU</span><span class="tag">Status</span>
+      </div>
+
+      <div class="preset-card" onclick="loadPreset('health-check')">
+        <h3>💚 Health Check</h3>
+        <p>Verify all providers are healthy</p>
+        <span class="tag">Health</span><span class="tag">Diagnostics</span>
+      </div>
+
+      <div class="preset-card" onclick="loadPreset('stress-test')">
+        <h3>⚡ Stress Test</h3>
+        <p>Run 10 concurrent requests to test resilience</p>
+        <span class="tag">Load</span><span class="tag">Stress</span>
+      </div>
+
+      <div class="preset-card" onclick="loadPreset('fallback-chain')">
+        <h3>🔄 Fallback Chain Test</h3>
+        <p>Test provider fallback by forcing primary failure</p>
+        <span class="tag">Fallback</span><span class="tag">Resilience</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const PRESETS = {
+      'stt-french': {
+        url: '/v1/audio/transcriptions',
+        method: 'POST',
+        body: { model: 'whisper-large-v3', language: 'fr' },
+        description: 'French ST transcription',
+      },
+      'stt-arabic': {
+        url: '/v1/audio/transcriptions',
+        method: 'POST',
+        body: { model: 'whisper-large-v3', language: 'ar' },
+        description: 'Arabic ST transcription',
+      },
+      'translate-fr-en': {
+        url: '/v1/speech',
+        method: 'POST',
+        params: { source: 'fr', target: 'en', speaker: 'Ryan' },
+        description: 'French to English translation pipeline',
+      },
+      'translate-en-fr': {
+        url: '/v1/speech',
+        method: 'POST',
+        params: { source: 'en', target: 'fr', speaker: 'Sarah' },
+        description: 'English to French translation pipeline',
+      },
+      'chat-llama': {
+        url: '/v1/chat/completions',
+        method: 'POST',
+        body: {
+          model: 'llama-3.3-70b-versatile',
+          messages: [{ role: 'user', content: 'Explain quantum computing in 3 sentences.' }],
+          temperature: 0.7,
+        },
+        description: 'LLaMA 70B chat test',
+      },
+      'tts-english': {
+        url: '/v1/audio/speech',
+        method: 'POST',
+        body: {
+          input: 'Hello world, this is a test of the text-to-speech system.',
+          voice: 'canopylabs/orpheus-v1-english',
+        },
+        description: 'English TTS test',
+      },
+      'gpu-status': {
+        url: '/v1/gpu/status',
+        method: 'GET',
+        description: 'Check GPU status',
+      },
+      'health-check': {
+        url: '/health/detail',
+        method: 'GET',
+        description: 'Detailed health check',
+      },
+      'stress-test': {
+        url: '/v1/chat/completions',
+        method: 'POST',
+        body: {
+          model: 'llama-3.1-8b-instant',
+          messages: [{ role: 'user', content: 'Say hello.' }],
+        },
+        concurrent: 10,
+        description: 'Concurrent stress test',
+      },
+      'fallback-chain': {
+        url: '/v1/chat/completions',
+        method: 'POST',
+        body: {
+          model: 'nonexistent-model', // Force fallback
+          messages: [{ role: 'user', content: 'Test fallback.' }],
+        },
+        description: 'Fallback chain test',
+      },
+    };
+
+    function loadPreset(name) {
+      const preset = PRESETS[name];
+      if (!preset) return;
+
+      console.log(`Loading preset: ${name}`, preset);
+      alert(`Loading preset: ${preset.description}\n\nEndpoint: ${preset.method} ${preset.url}`);
+    }
+  </script>
+</body>
+</html>

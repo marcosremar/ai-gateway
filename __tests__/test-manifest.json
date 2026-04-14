@@ -1,0 +1,1441 @@
+{
+  "generatedAt": "2026-04-13T04:38:36.936Z",
+  "totalFiles": 287,
+  "files": [
+    {
+      "name": "auto-recovery.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "coalescer-effectiveness.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "stt-hallucination-filter.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "performance-ranker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "load-balancer-real.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "create-gateway-e2e.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "ewma-tracker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "http-security.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-resilience.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "backend-transports-e2e.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "ai-handlers.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "proxy-server-extended.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "vast-template-ssh-tunnel.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-reconcile.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "openai-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "autoscaler-state-persistence.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "e2e-concurrency.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "autoscaler-latency-tracker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-handlers-unit.test.ts",
+      "category": "unit",
+      "confidence": 95
+    },
+    {
+      "name": "providers-chain-builder.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "ttfac-tracker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-config-loader.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "ai-client-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "snapgpu-sdk.test.ts",
+      "category": "e2e",
+      "confidence": 60
+    },
+    {
+      "name": "load-balancer.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "browser-audio.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "alerting.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "browser-audio-decode.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "proxy-audio-speech.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "runpod-lifecycle.test.ts",
+      "category": "integration",
+      "confidence": 60
+    },
+    {
+      "name": "sdk-tracking-cache-auth-vault.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "handler-types.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "ai-gateway-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "observability.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "config-workload-unit.test.ts",
+      "category": "unit",
+      "confidence": 95
+    },
+    {
+      "name": "modal-tts-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "autoscaler-unit.test.ts",
+      "category": "unit",
+      "confidence": 95
+    },
+    {
+      "name": "service-lifecycle.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "proxy-models.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "snapgpu-client.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "word-timestamps-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "cpu-provider-scaleway.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "providers-individual-unit.test.ts",
+      "category": "unit",
+      "confidence": 95
+    },
+    {
+      "name": "browser-logger.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "modal-providers.test.ts",
+      "category": "e2e",
+      "confidence": 60
+    },
+    {
+      "name": "providers-fallback.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-providers-unit.test.ts",
+      "category": "unit",
+      "confidence": 95
+    },
+    {
+      "name": "ws-reliability.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "load-balancer-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "fireworks-embedding.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "budget-guard.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "database-config-backup.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "browser-openai-realtime.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "vast-real-api.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "providers-voice-catalog.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-e2e-real.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "streaming-overlap.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "chain-diversifier.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "ai-client.test.ts",
+      "category": "integration",
+      "confidence": 60
+    },
+    {
+      "name": "database-neon-management.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "playground-handlers.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "resilience-concurrency-db.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "cost-anomaly-detector.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-provider-registry.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "benchmarking-cli.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "adaptive-timeout.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-composition-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "vault-vault-singleton.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-health-checker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "embedding.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-lifecycle-logger.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "vast-image-login.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "vast-lifecycle.test.ts",
+      "category": "integration",
+      "confidence": 60
+    },
+    {
+      "name": "ai-provider-registry.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "e2e-provider-readiness.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "rate-limit-eviction.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-schemas.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "proxy-middleware-auth.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "speculative-cache.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "provider-fallback-unit.test.ts",
+      "category": "unit",
+      "confidence": 95
+    },
+    {
+      "name": "sdk-retry.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "zero-downtime-deploy.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "e2e-graceful-degradation.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "providers-credit-block.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "vast-10-machines.test.ts",
+      "category": "integration",
+      "confidence": 60
+    },
+    {
+      "name": "providers-ttfac-tracker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "browser-streaming-audio.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "sdk-pipeline-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "security-resilience-regression.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "e2e-live-pipeline.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "rate-limit-lru.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "stt-verifier.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-provider-monitor.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "providers-models.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "sse-frame-parser.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-stale-cleanup.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "http-client.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "tensordock-cloud-init.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "cold-start-racer.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "auth-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "e2e-sdk-transport.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "bot-handlers-arm.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "runaway-detector.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-circuit-breaker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "providers-errors.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "fireworks-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "load-balancer-extended.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "circuit-breaker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-deploy-unit.test.ts",
+      "category": "unit",
+      "confidence": 95
+    },
+    {
+      "name": "resource-lifecycle.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-provider-tensordock.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-optimizations.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gateway-hooks.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-cache-retry.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "pull-time-estimator.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "autoscaler-boot-orchestrator.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "config-docker-images.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-provisioning-improvements.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "latency-db-migrate.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "hooks-emit-hook.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "vault-vault.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "breaking-point.test.ts",
+      "category": "load",
+      "confidence": 85
+    },
+    {
+      "name": "gateway-singleton.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "budget-cap-enforcement.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "chain-pipeline.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "browser-speech-client.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-cost-monitor.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "adapters-redis.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "golden-master.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "benchmarking-ws-bench.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "latency-db-neon.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "voice-catalog.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-deploy-ranking.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "database.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "e2e-fallback-chain.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "caching.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "providers-openai-compat.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "gpu-providers-registry-enhanced.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "providers-percentage-routing.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "pipeline-runner-unit.test.ts",
+      "category": "unit",
+      "confidence": 95
+    },
+    {
+      "name": "adapters-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "vault.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "proxy-middleware-rate-limit.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "boot-failure-categorization.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-scaling.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "provider-contracts.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-handler.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "remaining-coverage.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "metrics-reputation-aggregation.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "object-storage-r2-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "proxy-chat-completions.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-predictive-warmup.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-tier-selector.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-provider-modal.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "cost-watcher.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-deploy-settings.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "browser-transport-sse-full.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "keepalive-investigation.test.ts",
+      "category": "e2e",
+      "confidence": 60
+    },
+    {
+      "name": "proxy-middleware-request-coalescer.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "latency-ring-noop.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "load-live.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "browser-unified-client.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "database-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "providers-dlp.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-cleanup.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "tracking-pricing.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "cold-start.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "autoscaler-decision-builder.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-tier-lifecycle.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-session-tracker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "database-service.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "cross-provider-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "backend-transports.test.ts",
+      "category": "e2e",
+      "confidence": 60
+    },
+    {
+      "name": "autoscaler-request-batcher.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "abstract-provider-utils.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gateway-live.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "runpod-real-api.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "autoscaler-gpu-health.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-boot-timeout.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-queue-depth-tracker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "e2e-pipeline.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "ai-client-latency-bench.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "providers-audio-utils.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "request-batcher-mismatch.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "client-presets.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "stress-compat-edge.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "vast-client-extended.test.ts",
+      "category": "integration",
+      "confidence": 60
+    },
+    {
+      "name": "stt-load.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "create-gateway.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "observability-langfuse.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "modal-handler.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-error-handling.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "observability-tracer.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "tracking-benchmark-tracker.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "gpu-provider-edge-cases.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "workloads-registry.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "recall-handlers.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "mlx-qwen3-asr.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "benchmarking-bench.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "autoscaler-engine.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "vast-tiered-ranking-live.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "rerank.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "cpu-provider-flyio.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "ensemble-stt.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "deepgram-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "autoscaler-factory.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-lifecycle-e2e.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "autoscaler-watchdog.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-degradation-manager.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "robustness-improvements.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "benchmark-tracker.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "proxy.test.ts",
+      "category": "e2e",
+      "confidence": 60
+    },
+    {
+      "name": "http2-check.test.ts",
+      "category": "e2e",
+      "confidence": 60
+    },
+    {
+      "name": "browser-transport-webrtc.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "workloads-drivers.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "sdk-groq-fallback.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-resume-fallback.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "vault-file-store.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "groq-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "self-hosted-warmup.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "streaming-stt-router.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "stt-verifier-benchmark.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "client-pipeline-events.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "fallback-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "providers-classification.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "load-balancer-hash.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "vault-singleton.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "providers-self-hosted.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-resilience-real.test.ts",
+      "category": "integration",
+      "confidence": 60
+    },
+    {
+      "name": "sdk-audio.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "graceful-shutdown.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "browser-realtime-lipsync.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "providers-performance-ranker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "cache-effectiveness.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "providers-rerank.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "browser-errors.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "e2e-autoscaler-lifecycle.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "language-detect.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "runpod-gpu-normalize.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "handler-coverage.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "modal-provider-units.test.ts",
+      "category": "unit",
+      "confidence": 95
+    },
+    {
+      "name": "snapgpu-benchmark.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "memory-soak.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "streaming-stt.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "tracking-spend-tracker.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "bot-handlers-unit.test.ts",
+      "category": "unit",
+      "confidence": 95
+    },
+    {
+      "name": "gpu-provider-runpod.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "snapgpu-policy.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "providers-guardrails.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "openai-client-cache.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-credit-block.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-provider-vast.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "database-backup.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "abstract-provider.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "babelcast-subtitle-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "database-pg-driver.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "browser-transports.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "autoscaler-stage-timeout.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "performance-regression.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "proxy-embeddings.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "proxy-middleware-semaphore.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "elevenlabs-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "snapgpu-metrics.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "openrouter-integration.test.ts",
+      "category": "integration",
+      "confidence": 95
+    },
+    {
+      "name": "latency-investigation.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "proxy-transcriptions.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-readiness.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-providers.test.ts",
+      "category": "integration",
+      "confidence": 60
+    },
+    {
+      "name": "soak-live.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "modal-real-api.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "cli.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "browser-emitter.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "ai-gateway-real-api.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "handlers-credential-resolver.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "providers-cloud-health.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "database-config.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "proxy-retry.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-autoscaler-token-flow.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "health.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "providers-declarative-chain.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "deploy-orchestrator.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "gpu-readiness-real-api.test.ts",
+      "category": "e2e",
+      "confidence": 90
+    },
+    {
+      "name": "self-hosted-real.test.ts",
+      "category": "integration",
+      "confidence": 70
+    },
+    {
+      "name": "vast-improvements.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "network-stress.test.ts",
+      "category": "load",
+      "confidence": 90
+    },
+    {
+      "name": "distributed-tracer.test.ts",
+      "category": "unit",
+      "confidence": 50
+    },
+    {
+      "name": "infra-gpu-backend.test.ts",
+      "category": "unit",
+      "confidence": 50
+    }
+  ]
+}

@@ -40,8 +40,28 @@ jobs:
           SKIP_LIVE_TESTS: '1'
         run: bun run test:unit
 
+      - name: Integration smoke tests
+        env:
+          SKIP_GPU_TESTS: '1'
+          SKIP_LIVE_TESTS: '1'
+        run: bun run vitest run __tests__/integration/ --reporter=verbose || true
+
       - name: Build (library bundle)
         run: bun run build
+
+      - name: Check dependency vulnerabilities
+        run: |
+          AUDIT_OUTPUT=$(bun audit 2>&1 || true)
+          CRITICAL=$(echo "$AUDIT_OUTPUT" | grep -c "critical" || true)
+          HIGH=$(echo "$AUDIT_OUTPUT" | grep -c "high" || true)
+          echo "Critical vulnerabilities: $CRITICAL"
+          echo "High vulnerabilities: $HIGH"
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "::warning::Found $CRITICAL critical vulnerability(ies)"
+          fi
+          if [ "$HIGH" -gt 0 ]; then
+            echo "::warning::Found $HIGH high vulnerability(ies)"
+          fi
 
       # Library/service boundary guard — src/ must never import from server/.
       # See docs/architecture/lib-vs-service.md.

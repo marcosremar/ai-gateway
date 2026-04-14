@@ -1,0 +1,60 @@
+# Release automation for AI Gateway
+#
+# This workflow creates GitHub Releases when a version tag is pushed.
+# It requires changesets to be merged to main first.
+#
+# Usage:
+#   1. PRs include changesets (bunx changeset)
+#   2. Merge to main triggers version packages PR
+#   3. Merge version PR → tag created → this workflow fires
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Generate release notes from CHANGELOG
+        id: notes
+        run: |
+          TAG=${GITHUB_REF_NAME#v}
+          NOTES=$(awk "/^## $TAG/,/^## /" CHANGELOG.md | tail -n +2 | head -n -1)
+          echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.notes.outputs.NOTES }}
+          files: |
+            dist/*.js
+            dist/*.d.ts
+            dist/*.map
+          generate_release_notes: true
+          draft: false
+          prerelease: false

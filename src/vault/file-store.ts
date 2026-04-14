@@ -45,7 +45,7 @@ export class FileVaultStore implements VaultStore {
     const tempPath = join(dir, `.vault-${randomBytes(8).toString('hex')}.tmp`);
     const data = JSON.stringify(this.load(), null, 2);
     try {
-      writeFileSync(tempPath, data, { encoding: 'utf-8', fsync: true });
+      writeFileSync(tempPath, data, { encoding: 'utf-8' });
       renameSync(tempPath, this.filePath);
     } catch (err) {
       // Clean up temp file if it exists

@@ -9,7 +9,7 @@
 
 import os from 'os';
 import path from 'path';
-import fs from 'fs';
+import { readFile, writeFile, mkdir, access } from 'fs/promises';
 
 const configDir = process.env.AI_GATEWAY_CONFIG_DIR || path.join(os.homedir(), '.ai-gateway');
 const SETTINGS_PATH = path.join(configDir, 'latency-settings.json');
@@ -132,9 +132,9 @@ let _s: DeploySettings = {
 
 // ── Persistence ──────────────────────────────────────────────────────────────
 
-export function loadDeploySettings(): void {
+export async function loadDeploySettings(): Promise<void> {
   try {
-    const raw = fs.readFileSync(SETTINGS_PATH, 'utf8');
+    const raw = await readFile(SETTINGS_PATH, 'utf8');
     const parsed = JSON.parse(raw) as Partial<DeploySettings>;
     _s = { ..._s, ...parsed };
     if (!Array.isArray(_s.gpuPriorityList) || _s.gpuPriorityList.length === 0) {
@@ -157,14 +157,21 @@ export function loadDeploySettings(): void {
 // Debounced save — batches rapid config changes (e.g. slider drags) into one disk write
 let _settingsSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function saveDeploySettings(): void {
+export async function saveDeploySettings(): Promise<void> {
   if (_settingsSaveTimer) clearTimeout(_settingsSaveTimer);
-  _settingsSaveTimer = setTimeout(() => {
+  _settingsSaveTimer = setTimeout(async () => {
     _settingsSaveTimer = null;
     try {
       const dir = path.dirname(SETTINGS_PATH);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(SETTINGS_PATH, JSON.stringify(_s, null, 2));
+      let dirExists: boolean;
+      try {
+        await access(dir);
+        dirExists = true;
+      } catch {
+        dirExists = false;
+      }
+      if (!dirExists) await mkdir(dir, { recursive: true });
+      await writeFile(SETTINGS_PATH, JSON.stringify(_s, null, 2));
     } catch {
       /* ignore */
     }
@@ -172,15 +179,22 @@ export function saveDeploySettings(): void {
 }
 
 /** Force immediate save (for shutdown hooks) */
-export function flushDeploySettings(): void {
+export async function flushDeploySettings(): Promise<void> {
   if (_settingsSaveTimer) {
     clearTimeout(_settingsSaveTimer);
     _settingsSaveTimer = null;
   }
   try {
     const dir = path.dirname(SETTINGS_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(_s, null, 2));
+    let dirExists: boolean;
+    try {
+      await access(dir);
+      dirExists = true;
+    } catch {
+      dirExists = false;
+    }
+    if (!dirExists) await mkdir(dir, { recursive: true });
+    await writeFile(SETTINGS_PATH, JSON.stringify(_s, null, 2));
   } catch {
     /* ignore */
   }

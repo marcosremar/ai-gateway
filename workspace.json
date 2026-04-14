@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/workspace",
+  "workspaces": [
+    "packages/ai-gateway",
+    "packages/ai-gateway-service"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "test": {
+      "dependsOn": []
+    },
+    "typecheck": {
+      "dependsOn": []
+    },
+    "lint": {
+      "dependsOn": []
+    }
+  }
+}

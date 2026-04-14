@@ -912,8 +912,8 @@ export class RunpodClient extends AbstractGpuProvider {
                 );
                 ghostDetected = true;
               }
-            } catch {
-              // Network error during check — don't treat as ghost, proceed normally
+            } catch (err) {
+              this.log.debug({ error: err instanceof Error ? err.message : String(err) }, 'Post-create check network error');
               ghostDetected = false;
               break;
             }
@@ -945,8 +945,8 @@ export class RunpodClient extends AbstractGpuProvider {
                 },
                 TIMEOUTS.write,
               );
-            } catch {
-              /* best effort cleanup */
+            } catch (err) {
+              this.log.debug({ error: err instanceof Error ? err.message : String(err) }, 'Ghost pod cleanup failed (best effort)');
             }
             gpuFailures.push({
               gpu: gpuType,

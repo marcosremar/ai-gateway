@@ -686,7 +686,7 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
   if (cloudProfile) {
     const cloudName = getCloudProviderName();
     // Per-language STT model override from persisted config
-    const sttOverrides = (loadProviderConfig() as Record<string, unknown>).sttModelOverrides as Record<string, { provider: string; model: string }> | undefined;
+    const sttOverrides = (await loadProviderConfig() as Record<string, unknown>).sttModelOverrides as Record<string, { provider: string; model: string }> | undefined;
     const langOverride = language && sttOverrides?.[language];
     candidates.push({
       name: cloudName,
@@ -813,7 +813,7 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
     let finalText = result.text;
 
     // Apply hallucination filter (metadata + blocklist)
-    const config = loadProviderConfig();
+    const config = await loadProviderConfig();
     const filterSettings = config.sttHallucinationFilter;
     const filterConfig: STTHallucinationFilterConfig = {
       ...DEFAULT_HALLUCINATION_FILTER_CONFIG,
@@ -1809,7 +1809,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
       const totalMs = Date.now() - pipeT0;
       console.log(`[pipeline] ── Hybrid done: ${totalMs}ms (STT=${sttResult.latencyMs}[${sttResult.provider}] LLM=${llmResult.latencyMs}[${llmResult.provider}] TTS=${ttsResult.latencyMs}[${ttsResult.provider || '-'}]) ──`);
       logRequest({ timestamp: Date.now(), stage: 'pipeline', provider: 'hybrid', latencyMs: totalMs, success: true, inputSize: audioBuffer.length, outputPreview: (llmResult.translatedText || '').slice(0, 80) });
-      stampProfileRequest(loadProviderConfig().activeProfileId);
+      stampProfileRequest((await loadProviderConfig()).activeAppId);
 
       if (ttsResult.audioB64) forwardToAvatar(ttsResult.audioB64);
 

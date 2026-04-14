@@ -1,0 +1,66 @@
+name: 'Feature Request'
+description: 'Suggest a new feature or improvement'
+title: '[Feature]: '
+labels: ['enhancement', 'triage']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a new feature! Please be as specific as possible.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem does this feature solve?
+      placeholder: I'm always frustrated when ...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like. Include code examples if possible.
+      placeholder: |
+        I'd like to be able to...
+        ```typescript
+        // Example usage
+        ```
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What alternative solutions have you considered?
+  - type: dropdown
+    id: module
+    attributes:
+      label: Affected Module
+      description: Where would this feature live?
+      options:
+        - Proxy Server
+        - AI Providers
+        - GPU Autoscaler
+        - Speech Pipeline
+        - Client SDK
+        - CLI
+        - Documentation
+        - Testing
+        - DevOps / CI
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Breaking change (requires major version bump)
+        - New feature (minor version bump)
+        - Enhancement (patch)
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any other context, links, or screenshots.

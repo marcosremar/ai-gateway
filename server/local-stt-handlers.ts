@@ -4,9 +4,12 @@
  * (mlx-qwen3-asr on Apple Silicon).
  */
 
+import { createLogger } from '../src/logger';
 import { execFile, spawn } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
+
+const log = createLogger('local-stt');
 
 const PROJECT_ROOT = path.resolve(__dirname, '../..');
 const SCRIPTS_DIR = path.join(PROJECT_ROOT, 'scripts');
@@ -130,14 +133,14 @@ export async function handleLocalSttInstall(req: Request): Promise<Response> {
       env: { ...process.env, MLX_QWEN3_ASR_PORT: process.env.MLX_QWEN3_ASR_PORT || '8765' },
     }, (error, stdout, stderr) => {
       if (error) {
-        console.error('[local-stt] Install failed:', error.message);
+        log.error('Install failed: %s', error.message);
         resolve(Response.json({
           success: false,
           error: error.message,
           output: stdout + stderr,
         }, { status: 500 }));
       } else {
-        console.log('[local-stt] Install completed for variant:', variant);
+        log.log('Install completed for variant: %s', variant);
         resolve(Response.json({
           success: true,
           variant,
@@ -175,7 +178,7 @@ export async function handleLocalSttStart(req: Request): Promise<Response> {
   const apiKey = process.env.MLX_QWEN3_ASR_API_KEY || 'babelcast-qwen3';
   const host = `http://localhost:${port}`;
 
-  console.log(`[local-stt] Starting mlx-qwen3-asr: model=${model} port=${port}`);
+  log.log('Starting mlx-qwen3-asr: model=%s port=%d', model, port);
 
   const child = spawn(binary, ['serve', '--model', model, '--port', port, '--api-key', apiKey], {
     cwd: PROJECT_ROOT,
@@ -199,7 +202,7 @@ export async function handleLocalSttStart(req: Request): Promise<Response> {
       const res = await fetch(`${host}/health`, { signal: controller.signal });
       clearTimeout(timeout);
       if (res.ok) {
-        console.log(`[local-stt] Server ready in ${i + 1}s`);
+        log.log('Server ready in %ds', i + 1);
         return Response.json({ success: true, variant, pid: child.pid, port: parseInt(port) });
       }
     } catch { /* best-effort: cleanup or optional side-effect */ }
@@ -226,7 +229,7 @@ async function stopServer(): Promise<void> {
 
 export async function handleLocalSttStop(_req: Request): Promise<Response> {
   await stopServer();
-  console.log('[local-stt] Server stopped');
+  log.log('Server stopped');
   return Response.json({ success: true });
 }
 

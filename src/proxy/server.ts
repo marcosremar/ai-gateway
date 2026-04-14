@@ -10,6 +10,7 @@ import { existsSync, readFileSync, statSync } from 'fs';
 import { join, extname, resolve } from 'path';
 import { validateAuth } from './middleware/auth';
 import { RateLimiter } from './middleware/rate-limit';
+import { SECURITY_HEADERS, applySecurityHeaders } from '../../server/middleware/security-headers';
 import { handleChatCompletions } from './routes/chat-completions';
 import { handleEmbeddings } from './routes/embeddings';
 import { handleAudioSpeech } from './routes/audio-speech';
@@ -59,13 +60,6 @@ function readBody(req: IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer
   });
   return Promise.race([inner, timeoutPromise]).finally(() => clearTimeout(timeoutHandle));
 }
-
-/** Security headers applied to all responses */
-const SECURITY_HEADERS: Record<string, string> = {
-  'X-Content-Type-Options': 'nosniff',
-  'X-Frame-Options': 'DENY',
-  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
-};
 
 function sendResponse(res: ServerResponse, proxyRes: ProxyResponse, requestId: string): void {
   const existingCors = res.getHeader('Access-Control-Allow-Origin');
@@ -270,6 +264,7 @@ function proxyToNextDev(nextDevUrl: string, req: IncomingMessage, res: ServerRes
     target,
     { method: req.method, headers: { ...req.headers, host: target.host } },
     (proxyRes: IncomingMessage) => {
+      applySecurityHeaders(res);
       res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
       proxyRes.on('error', () => { if (!res.writableEnded) res.end(); });
       proxyRes.pipe(res);

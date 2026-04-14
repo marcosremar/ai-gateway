@@ -1,0 +1,70 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e6]: AI
+        - generic [ref=e7]:
+          - heading "AI Gateway Settings" [level=1] [ref=e8]
+          - generic [ref=e11]: Offline
+      - navigation [ref=e12]:
+        - generic [ref=e13]:
+          - button "Overview" [ref=e14] [cursor=pointer]:
+            - img [ref=e15]
+            - generic [ref=e20]: Overview
+          - generic [ref=e21]: Config
+          - button "Profiles" [ref=e22] [cursor=pointer]:
+            - img [ref=e23]
+            - generic [ref=e26]: Profiles
+          - button "API Keys" [ref=e27] [cursor=pointer]:
+            - img [ref=e28]
+            - generic [ref=e31]: API Keys
+          - button "Labs" [ref=e32] [cursor=pointer]:
+            - img [ref=e33]
+            - generic [ref=e35]: Labs
+          - button "Vast Serverless" [ref=e36] [cursor=pointer]:
+            - img [ref=e37]
+            - generic [ref=e41]: Vast Serverless
+          - generic [ref=e42]: Tools
+          - button "Playground" [ref=e43] [cursor=pointer]:
+            - img [ref=e44]
+            - generic [ref=e46]: Playground
+          - button "Bot" [ref=e47] [cursor=pointer]:
+            - img [ref=e48]
+            - generic [ref=e51]: Bot
+          - button "Auto-Swap" [ref=e52] [cursor=pointer]:
+            - img [ref=e53]
+            - generic [ref=e58]: Auto-Swap
+          - button "GPU Standby" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+            - generic [ref=e62]: GPU Standby
+          - generic [ref=e63]: Monitor
+          - button "Latency" [ref=e64] [cursor=pointer]:
+            - img [ref=e65]
+            - generic [ref=e67]: Latency
+          - button "Reputation" [active] [ref=e68] [cursor=pointer]:
+            - img [ref=e69]
+            - generic [ref=e71]: Reputation
+          - button "Logs & Metrics" [ref=e72] [cursor=pointer]:
+            - img [ref=e73]
+            - generic [ref=e76]: Logs & Metrics
+          - button "Readiness" [ref=e77] [cursor=pointer]:
+            - img [ref=e78]
+            - generic [ref=e81]: Readiness
+      - button "Collapse" [ref=e83] [cursor=pointer]:
+        - img [ref=e84]
+        - generic [ref=e86]: Collapse
+    - main [ref=e87]:
+      - generic [ref=e88]:
+        - generic [ref=e90]: Reputation
+        - generic [ref=e91]:
+          - button "Switch to light" [ref=e92] [cursor=pointer]:
+            - img [ref=e93]
+          - generic [ref=e100]: Offline
+      - generic [ref=e102]:
+        - img [ref=e103]
+        - generic [ref=e105]: Unexpected token '<', "<!DOCTYPE "... is not valid JSON
+  - alert [ref=e106]
+```

@@ -25,9 +25,9 @@ import { buildSystemPrompt, getCloudProviderName, getCloudProfile } from './ai-h
 import { langNames } from './http-utils';
 
 // ── Streaming STT router — reads provider order from config, filters for streaming-capable ──
-function buildStreamingProviderOrder(): string[] {
+async function buildStreamingProviderOrder(): Promise<string[]> {
   try {
-    const config = loadProviderConfig();
+    const config = await loadProviderConfig();
     const sttChain = config.pipelineStt || [];
     // Filter: only providers with sttType === 'streaming' (or gpu/fireworks which are streaming by default)
     const STREAMING_PROVIDERS = new Set(['gpu', 'fireworks', 'qwen3-asr', 'mlx-qwen3-asr']);
@@ -50,16 +50,17 @@ function getQwen3AsrUrl(): string | null {
     || MODAL_QWEN3ASR_DEFAULT;
 }
 
+// Streaming STT router — initialized with defaults, then set up asynchronously after config loads
 let sttRouter = new StreamingSTTRouter({
   getGpuUrl: () => deployState.status === 'ready' && deployState.endpoint ? deployState.endpoint : null,
   getQwen3AsrUrl,
   get fireworksApiKey() { return process.env.FIREWORKS_API_KEY ?? ''; },
-  providerOrder: buildStreamingProviderOrder(),
+  providerOrder: ['gpu', 'fireworks', 'qwen3-asr'], // default order, updated after config loads
 });
 
 /** Rebuild the streaming STT router from config (call after config changes). */
-export function reloadStreamingSTTRouter(): void {
-  const order = buildStreamingProviderOrder();
+export async function reloadStreamingSTTRouter(): Promise<void> {
+  const order = await buildStreamingProviderOrder();
   sttRouter = new StreamingSTTRouter({
     getGpuUrl: () => deployState.status === 'ready' && deployState.endpoint ? deployState.endpoint : null,
     getQwen3AsrUrl,
@@ -468,7 +469,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[ws] bot:join failed: ${errMsg}`);
+      log.error('bot:join failed: %s', errMsg);
       broadcastWs({ type: 'bot:status', status: 'error', message: `Join failed: ${errMsg}` });
     }
 
@@ -529,7 +530,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     ws.send(JSON.stringify({ type: 'pong' }));
   }
   } catch (err) {
-    console.error('[ws] Command error:', err instanceof Error ? err.message : err);
+    log.error('Command error: %s', err instanceof Error ? err.message : err);
     ws.send(JSON.stringify({ type: 'error', message: err instanceof Error ? err.message : String(err) }));
   }
 }
@@ -580,7 +581,7 @@ export function validateStartupConfig(): string[] {
   return warnings;
 }
 
-export function startWsServer() {
+export async function startWsServer(): Promise<number> {
   // Install persistent file logging — captures all console output + GPU events
   try {
     const { installConsoleCapture } = require('./file-logger');
@@ -982,7 +983,7 @@ export function startWsServer() {
             try {
               backend.sendAudio(msg);
             } catch (sendErr) {
-              console.warn(`[stt-ws] sendAudio failed: ${sendErr instanceof Error ? sendErr.message : sendErr}`);
+              log.warn('sendAudio failed: %s', sendErr instanceof Error ? sendErr.message : sendErr);
             }
           }
         } else if (ws.data.type === 'recall-audio') {
@@ -1034,13 +1035,13 @@ export function startWsServer() {
             }
           }
           if (botAudioBufferBytes >= BOT_AUDIO_CHUNK_THRESHOLD) {
-            processBotAudioBuffer().catch(e => console.warn('[bot-audio] buffer processing failed:', e instanceof Error ? e.message : e));
+            processBotAudioBuffer().catch(e => log.warn('buffer processing failed: %s', e instanceof Error ? e.message : e));
           }
         } else {
           try {
             const raw = typeof msg === 'string' ? msg : (Buffer.isBuffer(msg) ? msg : Buffer.from(msg)).toString();
             const cmd = JSON.parse(raw) as Record<string, unknown>;
-            handleWsCommand(ws as unknown as BabelCastWS, cmd).catch(err => console.error('[ws] Command error:', err));
+            handleWsCommand(ws as unknown as BabelCastWS, cmd).catch(err => log.error('Command error: %s', err instanceof Error ? err.message : err));
           } catch { /* ignore parse errors */ }
         }
       },
@@ -1073,7 +1074,7 @@ export function startWsServer() {
           log.log(`[bot-audio] Bot audio source disconnected id=${ws.data.id} (${botAudioChunks} chunks relayed, ${botAudioBufferBytes} bytes buffered)`);
           // Flush remaining audio, then clear (processBotAudioBuffer grabs+clears the buffer atomically)
           if (botAudioBufferBytes >= 16000) {
-            processBotAudioBuffer().catch(e => console.warn('[bot-audio] final buffer flush failed:', e instanceof Error ? e.message : e));
+            processBotAudioBuffer().catch(e => log.warn('final buffer flush failed: %s', e instanceof Error ? e.message : e));
           } else {
             // Not enough audio to process — just discard
             botAudioBuffer = [];
@@ -1098,7 +1099,7 @@ export function startWsServer() {
   if (process.env.DATABASE_URL) {
     try {
       const { initPrisma } = require('./prisma-init');
-      initPrisma().catch((e: any) => console.warn('[ws-server] DB init failed:', e?.message?.slice(0, 80)));
+      initPrisma().catch((e: any) => log.warn('DB init failed: %s', e?.message?.slice(0, 80)));
     } catch {
       log.warn('[ws-server] prisma-init not available — running without DB');
     }
@@ -1457,7 +1458,7 @@ export function startWsServer() {
   // 1. Restore persisted config (idle timeout, deploy settings, latency targets)
   try {
     const { applyRuntimeConfig } = require('./config-persistence');
-    applyRuntimeConfig();
+    await applyRuntimeConfig();
   } catch (e: any) {
     log.warn(`[ws-server] applyRuntimeConfig failed: ${e.message?.slice(0, 80)}`);
   }
@@ -1508,6 +1509,7 @@ export function startWsServer() {
 
 // Auto-start when run directly (bun server/ws-server.ts)
 if (typeof Bun !== 'undefined' && Bun.main === import.meta.path) {
-  const port = startWsServer();
-  console.log(`[ws-server] Listening on WS port ${port}, HTTP port ${PORT}`);
+  startWsServer().then((port) => {
+    log.log('Listening on WS port %d, HTTP port %d', port, PORT);
+  });
 }
