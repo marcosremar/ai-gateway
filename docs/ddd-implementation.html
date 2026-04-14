@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>DDD Implementation — AI Gateway</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #12161c;
+    --panel-2: #1a1f27;
+    --border: #262d38;
+    --text: #e6e9ef;
+    --muted: #8b95a5;
+    --accent: #7dd3fc;
+    --accent-2: #a78bfa;
+    --success: #4ade80;
+    --danger: #f87171;
+    --warning: #fbbf24;
+    --core: #fb7185;
+    --supporting: #60a5fa;
+    --generic: #a3a3a3;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 15px;
+  }
+
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 3rem 2rem;
+  }
+
+  header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 2rem;
+    margin-bottom: 3rem;
+  }
+
+  h1 {
+    font-size: 2.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.5rem;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  header .subtitle {
+    color: var(--muted);
+    font-size: 1.1rem;
+  }
+
+  header .meta {
+    margin-top: 1rem;
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .tag {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.85rem;
+    color: var(--muted);
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+
+  section {
+    margin-bottom: 3.5rem;
+  }
+
+  h2 {
+    font-size: 1.6rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  h2::before {
+    content: '';
+    display: inline-block;
+    width: 4px;
+    height: 24px;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+
+  h3 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    margin: 1.5rem 0 0.75rem;
+    color: var(--text);
+  }
+
+  p { margin-bottom: 1rem; color: #c9d1db; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .mermaid-container {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 2rem;
+    margin: 1.5rem 0;
+    overflow-x: auto;
+  }
+
+  .mermaid-container svg {
+    display: block;
+    margin: 0 auto;
+  }
+
+  .grid {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .grid-2 { grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); }
+  .grid-3 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    transition: border-color 0.15s;
+  }
+
+  .card:hover {
+    border-color: var(--muted);
+  }
+
+  .card.core {
+    border-left: 4px solid var(--core);
+  }
+
+  .card.supporting {
+    border-left: 4px solid var(--supporting);
+  }
+
+  .card.generic {
+    border-left: 4px solid var(--generic);
+  }
+
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+
+  .card-header h3 {
+    margin: 0;
+    font-size: 1.05rem;
+  }
+
+  .badge {
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .badge.core { background: rgba(251, 113, 133, 0.2); color: var(--core); }
+  .badge.supporting { background: rgba(96, 165, 250, 0.2); color: var(--supporting); }
+  .badge.generic { background: rgba(163, 163, 163, 0.2); color: var(--generic); }
+
+  .card p {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .file-count {
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 0.8rem;
+    color: var(--accent);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  th, td {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+
+  th {
+    background: var(--panel-2);
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  td.numeric { font-family: 'SF Mono', Menlo, monospace; }
+  td.before { color: var(--danger); }
+  td.after { color: var(--success); }
+  td.check { color: var(--success); font-size: 1.2rem; }
+
+  .code-path {
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 0.85rem;
+    background: var(--panel-2);
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    color: var(--accent);
+  }
+
+  code {
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 0.85rem;
+    background: var(--panel-2);
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    color: var(--accent);
+  }
+
+  .metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin: 1.5rem 0;
+  }
+
+  .metric {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    text-align: center;
+  }
+
+  .metric .value {
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--accent);
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+
+  .metric .label {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-top: 0.25rem;
+  }
+
+  .metric .delta {
+    font-size: 0.75rem;
+    color: var(--success);
+    margin-top: 0.5rem;
+  }
+
+  .phase-list {
+    list-style: none;
+    counter-reset: phase;
+  }
+
+  .phase-list li {
+    counter-increment: phase;
+    padding: 1rem 1rem 1rem 3rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 0.75rem;
+    position: relative;
+  }
+
+  .phase-list li::before {
+    content: counter(phase);
+    position: absolute;
+    left: 1rem;
+    top: 1rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    background: var(--accent);
+    color: var(--bg);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+  }
+
+  .phase-list li strong {
+    display: block;
+    color: var(--text);
+    margin-bottom: 0.25rem;
+  }
+
+  .phase-list li span {
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+
+  .callout {
+    background: linear-gradient(135deg, rgba(125, 211, 252, 0.1), rgba(167, 139, 250, 0.1));
+    border: 1px solid rgba(125, 211, 252, 0.3);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin: 1.5rem 0;
+  }
+
+  .callout strong { color: var(--accent); }
+
+  footer {
+    margin-top: 4rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>DDD Implementation</h1>
+  <div class="subtitle">Como o Domain-Driven Design foi aplicado no AI Gateway</div>
+  <div class="meta">
+    <span class="tag">Firebase-for-AI</span>
+    <span class="tag">6 Bounded Contexts</span>
+    <span class="tag">8 Fases</span>
+    <span class="tag">6 Commits</span>
+    <span class="tag">Zero breaking changes</span>
+  </div>
+</header>
+
+<section>
+  <h2>A visão: Firebase-for-AI</h2>
+  <p>
+    O AI Gateway é um <strong>Backend-as-a-Service para aplicações de IA</strong>. Assim como o Firebase fornece
+    auth, database, storage e compute para apps web/mobile, este sistema fornece os mesmos primitivos,
+    mas especializados para workloads de inteligência artificial.
+  </p>
+
+  <div class="grid grid-2">
+    <div class="panel">
+      <h3>Firebase (apps web/mobile)</h3>
+      <ul style="list-style: none; margin-top: 0.5rem;">
+        <li>• Authentication</li>
+        <li>• Cloud Firestore</li>
+        <li>• Cloud Storage</li>
+        <li>• Cloud Functions</li>
+        <li>• Realtime Database</li>
+        <li>• Pub/Sub</li>
+        <li>• Firebase SDK</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>AI Gateway (apps de IA)</h3>
+      <ul style="list-style: none; margin-top: 0.5rem;">
+        <li>• Auth + API keys + Vault</li>
+        <li>• Neon PostgreSQL + Latency DB</li>
+        <li>• Object Storage (S3/R2/B2)</li>
+        <li>• Compute (GPU, Bots, DB workloads)</li>
+        <li>• State Store + WebSocket</li>
+        <li>• Event Bus</li>
+        <li>• Browser/TypeScript/Python SDK</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>O Core Domain</h2>
+  <p>
+    O coração do produto é <strong>fornecer acesso unificado a inteligência artificial</strong>.
+    Não importa se a inferência roda numa API cloud (Groq, OpenAI, Fireworks) ou numa GPU self-hosted
+    (RunPod, Vast.ai, TensorDock, Modal). O gateway abstrai isso.
+  </p>
+
+  <div class="callout">
+    <strong>Insight chave:</strong> Cloud providers e GPU providers <strong>não são domínios separados</strong> —
+    são variantes do mesmo conceito. Ambos implementam a interface <code>Provider</code> e vivem no mesmo registry.
+    A diferença é apenas o transport (API HTTP pública vs GPU provisionada).
+  </div>
+</section>
+
+<section>
+  <h2>Context Map</h2>
+  <p>Como os bounded contexts se relacionam:</p>
+
+  <div class="mermaid-container">
+    <pre class="mermaid">
+graph TB
+    subgraph Core["Core Domain"]
+        GW[Gateway<br/>providers + routing + pipeline + deploy + proxy]
+    end
+
+    subgraph Supporting["Supporting Subdomains"]
+        CP[Compute<br/>workloads + bots + images]
+        DB[Database<br/>PostgreSQL + Latency DB]
+        ST[Storage<br/>S3/R2/B2]
+        AU[Auth<br/>tokens + vault]
+        RT[Realtime<br/>WebSocket broadcast]
+        EV[Events<br/>pub/sub + hooks]
+    end
+
+    subgraph Generic["Generic Subdomains"]
+        PL[Platform<br/>adapters + logger + DI]
+    end
+
+    AU -->|valida tokens| GW
+    CP -->|provisiona GPU| GW
+    GW -->|emite eventos| EV
+    GW -->|persiste| DB
+    GW -->|broadcast| RT
+    GW -->|blobs| ST
+    GW -->|usa| PL
+    CP -->|usa| PL
+    DB -->|usa| PL
+    EV -->|usa| PL
+
+    style GW fill:#fb7185,stroke:#e11d48,color:#fff
+    style CP fill:#60a5fa,stroke:#2563eb,color:#fff
+    style DB fill:#60a5fa,stroke:#2563eb,color:#fff
+    style ST fill:#60a5fa,stroke:#2563eb,color:#fff
+    style AU fill:#60a5fa,stroke:#2563eb,color:#fff
+    style RT fill:#60a5fa,stroke:#2563eb,color:#fff
+    style EV fill:#60a5fa,stroke:#2563eb,color:#fff
+    style PL fill:#a3a3a3,stroke:#525252,color:#fff
+    </pre>
+  </div>
+</section>
+
+<section>
+  <h2>Bounded Contexts</h2>
+  <div class="grid grid-2">
+    <div class="card core">
+      <div class="card-header">
+        <h3>Gateway</h3>
+        <span class="badge core">Core</span>
+      </div>
+      <p>Acesso unificado a IA via cloud ou GPU. Contém providers (cloud + GPU), routing (fallback, racing, cache), pipeline (STT→LLM→TTS), deploy, autoscaler e proxy OpenAI-compatível.</p>
+      <span class="code-path">src/gateway/</span>
+      <div class="file-count">151 arquivos</div>
+    </div>
+
+    <div class="card supporting">
+      <div class="card-header">
+        <h3>Compute</h3>
+        <span class="badge supporting">Supporting</span>
+      </div>
+      <p>Deploy de workloads do usuário em infra remota: GPU pods, meeting bots (Recall.ai), databases (Neon) e image builder para imagens Docker customizadas.</p>
+      <span class="code-path">src/compute/</span>
+      <div class="file-count">12 arquivos</div>
+    </div>
+
+    <div class="card supporting">
+      <div class="card-header">
+        <h3>Events</h3>
+        <span class="badge supporting">Supporting</span>
+      </div>
+      <p>Event bus tipado + hooks de observabilidade. Permite comunicação entre contextos sem acoplamento direto. <code>onRequestEnd</code>, <code>onScaleUp</code>, <code>onCostAlert</code>.</p>
+      <span class="code-path">src/events/</span>
+      <div class="file-count">2 arquivos</div>
+    </div>
+
+    <div class="card supporting">
+      <div class="card-header">
+        <h3>Storage</h3>
+        <span class="badge supporting">Supporting</span>
+      </div>
+      <p>Object storage S3-compatible. Adapters para AWS, Cloudflare R2, Backblaze B2, MinIO e DigitalOcean Spaces. Usado para pesos de modelos, recordings, exports.</p>
+      <span class="code-path">src/storage/</span>
+      <div class="file-count">5 arquivos</div>
+    </div>
+
+    <div class="card supporting">
+      <div class="card-header">
+        <h3>Auth</h3>
+        <span class="badge supporting">Supporting</span>
+      </div>
+      <p>Autenticação via tokens HMAC-SHA256 e vault AES-256-GCM para secrets. Tokens de 60s para GPU pods e vault com rotação de chave master.</p>
+      <span class="code-path">src/auth/</span>
+      <div class="file-count">7 arquivos</div>
+    </div>
+
+    <div class="card generic">
+      <div class="card-header">
+        <h3>Platform</h3>
+        <span class="badge generic">Generic</span>
+      </div>
+      <p>Infraestrutura compartilhada: adapters (in-memory, Redis), DI contracts (<code>StateStore</code>, <code>SettingsStore</code>), logger, observability (tracing, metrics).</p>
+      <span class="code-path">src/platform/</span>
+      <div class="file-count">14 arquivos</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Fluxo principal: speech-to-speech</h2>
+  <p>Como uma request de tradução ao vivo atravessa os bounded contexts:</p>
+
+  <div class="mermaid-container">
+    <pre class="mermaid">
+sequenceDiagram
+    participant Cliente
+    participant WS as WebSocket<br/>(server/)
+    participant Pipeline as Gateway/Pipeline
+    participant Routing as Gateway/Routing
+    participant Providers as Gateway/Providers
+    participant Realtime
+
+    Cliente->>WS: áudio via /v1/speech/ws
+    WS->>Pipeline: PipelineRunner.run()
+
+    Note over Pipeline,Providers: Stage STT (paralelo)
+    Pipeline->>Routing: Race(GPU, Groq, Fireworks)
+    Routing->>Providers: fetch STT
+    Providers-->>Routing: transcrição
+    Routing-->>Pipeline: primeiro a responder
+
+    Note over Pipeline,Providers: Stage LLM (com overlap)
+    Pipeline->>Routing: Race(GPU, Fireworks, OpenRouter)
+    Routing-->>Pipeline: tokens streamando
+
+    Note over Pipeline,Realtime: Overlap: TTS começa antes do LLM terminar
+    Pipeline->>Routing: Race TTS com tokens parciais
+    Routing->>Providers: fetch TTS
+    Providers-->>Pipeline: chunks de áudio
+    Pipeline->>Realtime: broadcast por idioma
+    Realtime->>Cliente: áudio WebSocket
+    </pre>
+  </div>
+</section>
+
+<section>
+  <h2>Estrutura de arquivos (após migração)</h2>
+  <div class="mermaid-container">
+    <pre class="mermaid">
+graph LR
+    subgraph SRC["src/ (lib publicável)"]
+        GW["gateway/<br/>151 files"]
+        CP["compute/<br/>12 files"]
+        PL["platform/<br/>14 files"]
+        EV["events/<br/>2 files"]
+        ST["storage/<br/>5 files"]
+        AU["auth/<br/>7 files"]
+        DB["database/"]
+    end
+
+    subgraph SERVER["server/ (delivery)"]
+        WS["ws-server.ts<br/>setup + composition"]
+        R["routes/<br/>12 files"]
+        H["handlers/<br/>(ai, gpu, bot)"]
+        S["state.ts<br/>server-only state"]
+    end
+
+    subgraph GATEWAY_INT["gateway/ interno"]
+        P1["providers/cloud/<br/>(Groq, OpenAI, ...)"]
+        P2["providers/gpu/<br/>(RunPod, Vast, ...)"]
+        RT["routing/"]
+        PIP["pipeline/"]
+        DEP["deploy/"]
+        AS["autoscaler/"]
+        PRX["proxy/"]
+        STATE["state/"]
+    end
+
+    GW --> P1
+    GW --> P2
+    GW --> RT
+    GW --> PIP
+    GW --> DEP
+    GW --> AS
+    GW --> PRX
+    GW --> STATE
+
+    SERVER --> SRC
+
+    style GW fill:#fb7185,stroke:#e11d48,color:#fff
+    style CP fill:#60a5fa,stroke:#2563eb,color:#fff
+    style PL fill:#a3a3a3,stroke:#525252,color:#fff
+    style EV fill:#60a5fa,stroke:#2563eb,color:#fff
+    style ST fill:#60a5fa,stroke:#2563eb,color:#fff
+    style AU fill:#60a5fa,stroke:#2563eb,color:#fff
+    </pre>
+  </div>
+</section>
+
+<section>
+  <h2>Métricas: Antes vs Depois</h2>
+  <div class="metric-grid">
+    <div class="metric">
+      <div class="value">182 → 3.9 KB</div>
+      <div class="label">gpu-deploy.ts</div>
+      <div class="delta">−98%, decomposto em 11 módulos</div>
+    </div>
+    <div class="metric">
+      <div class="value">44 → 1.3 KB</div>
+      <div class="label">gpu-health-monitor.ts</div>
+      <div class="delta">−97%, re-export hub</div>
+    </div>
+    <div class="metric">
+      <div class="value">916 → 226</div>
+      <div class="label">state.ts (linhas)</div>
+      <div class="delta">−75%, god object eliminado</div>
+    </div>
+    <div class="metric">
+      <div class="value">97 → 70 KB</div>
+      <div class="label">ai-handlers.ts</div>
+      <div class="delta">−28%, 10 módulos em src/</div>
+    </div>
+    <div class="metric">
+      <div class="value">72 → 17 KB</div>
+      <div class="label">ws-server.ts</div>
+      <div class="delta">−76%, 85 rotas + 8 ws modules</div>
+    </div>
+    <div class="metric">
+      <div class="value">6</div>
+      <div class="label">Bounded Contexts</div>
+      <div class="delta">estruturados em src/</div>
+    </div>
+    <div class="metric">
+      <div class="value">7</div>
+      <div class="label">Commits</div>
+      <div class="delta">migração incremental</div>
+    </div>
+    <div class="metric">
+      <div class="value">0</div>
+      <div class="label">TypeScript errors</div>
+      <div class="delta">zero breaking changes</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Visualização: god files antes/depois</h2>
+  <div class="mermaid-container">
+    <pre class="mermaid">
+graph TB
+    subgraph Before["Antes"]
+        direction TB
+        B1["gpu-deploy.ts<br/>182 KB"]
+        B2["ai-handlers.ts<br/>108 KB"]
+        B3["ws-server.ts<br/>72 KB"]
+        B4["state.ts<br/>916 linhas"]
+    end
+
+    subgraph After["Depois"]
+        direction TB
+        subgraph A1["gpu-deploy.ts + 7 módulos"]
+            A1a["deploy 43KB"]
+            A1b["health-monitor 44KB"]
+            A1c["poll-health 29KB"]
+            A1d["deploy-race 20KB"]
+            A1e["auto-select 15KB"]
+            A1f["+ 3 mais"]
+        end
+        subgraph A2["ai-handlers + 7 módulos em src/gateway/pipeline/"]
+            A2a["translation-cache"]
+            A2b["system-prompt"]
+            A2c["gpu-fetch"]
+            A2d["pipeline-response"]
+            A2e["ssrf-protection"]
+            A2f["pipeline-orchestrator"]
+            A2g["fanout-orchestrator"]
+        end
+        subgraph A3["ws-server + 11 route modules"]
+            A3a["routes/gateway/"]
+            A3b["routes/compute/"]
+            A3c["routes/diagnostics/"]
+        end
+        subgraph A4["state.ts + 5 state modules em src/gateway/state/"]
+            A4a["deploy-state"]
+            A4b["readiness-state"]
+            A4c["standby-state"]
+            A4d["cost-state"]
+            A4e["metrics-state"]
+        end
+    end
+
+    Before -.refactor.-> After
+
+    style B1 fill:#f87171,color:#fff
+    style B2 fill:#f87171,color:#fff
+    style B3 fill:#f87171,color:#fff
+    style B4 fill:#f87171,color:#fff
+    </pre>
+  </div>
+</section>
+
+<section>
+  <h2>As 8 fases da migração</h2>
+  <ol class="phase-list">
+    <li><strong>Preparação</strong><span>Auditoria de thin wrappers, remoção de módulos não usados (secrets-rotation, gpu-state), correção da violação proxy→server.</span></li>
+    <li><strong>Extrair Platform</strong><span>Mover adapters, observability, deps, logger para <code>src/platform/</code>.</span></li>
+    <li><strong>Organizar serviços</strong><span>Renomear event-bus→events, object-storage→storage, consolidar vault em auth.</span></li>
+    <li><strong>Unificar Gateway</strong><span>Mover providers, gpu-providers, proxy, autoscaler para dentro de <code>src/gateway/</code>.</span></li>
+    <li><strong>Core domain em src/</strong><span>Extrair race-providers, ewma-tracker, speculative-cache, streaming-overlap de server/ para <code>src/gateway/</code>.</span></li>
+    <li><strong>Quebrar state.ts</strong><span>Decompor god object em 5 módulos domain-specific (deploy, readiness, standby, cost, metrics).</span></li>
+    <li><strong>Delivery layer</strong><span>Scaffolding de <code>server/routes/</code> + extração de 85 rotas de ws-server.ts.</span></li>
+    <li><strong>Compute</strong><span>Reorganizar workloads e image-builder em <code>src/compute/</code>.</span></li>
+  </ol>
+</section>
+
+<section>
+  <h2>Princípios mantidos</h2>
+  <div class="grid grid-3">
+    <div class="card">
+      <h3>Zero breaking changes</h3>
+      <p>Todos os caminhos antigos são preservados como <strong>barrel re-exports</strong>. Código consumidor nunca precisou ser atualizado.</p>
+    </div>
+    <div class="card">
+      <h3>src/ não importa server/</h3>
+      <p>Regra mantida via CI. Lógica que depende de server/ usa <strong>Dependency Injection</strong> para receber deps.</p>
+    </div>
+    <div class="card">
+      <h3>Incremental, sem big bang</h3>
+      <p>Migração em 6 commits, fase por fase. Cada commit compilava e mantinha o sistema funcional.</p>
+    </div>
+    <div class="card">
+      <h3>Monorepo preservado</h3>
+      <p>Sem separação em múltiplos repositórios. Fronteiras explícitas em pastas e interfaces.</p>
+    </div>
+    <div class="card">
+      <h3>Ubiquitous Language</h3>
+      <p>Vocabulário documentado em <code>docs/domain-model.md</code>. Toda entidade e evento tem nome canônico.</p>
+    </div>
+    <div class="card">
+      <h3>Context Map explícito</h3>
+      <p>Regras de dependência entre contextos documentadas em <code>docs/sdd.md</code>.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Comunicação entre Bounded Contexts</h2>
+  <div class="mermaid-container">
+    <pre class="mermaid">
+flowchart LR
+    subgraph Direct["Via Dependency Injection"]
+        CP2[Compute] -->|provisiona GPU| GW2[Gateway]
+        GW2 -->|query| DB2[Database]
+        GW2 -->|broadcast| RT2[Realtime]
+    end
+
+    subgraph EventDriven["Via Domain Events"]
+        GW3[Gateway] -.emit.-> EV3[(Event Bus)]
+        EV3 -.subscribe.-> OBS[Observability]
+        EV3 -.subscribe.-> COST[Cost Monitor]
+        EV3 -.subscribe.-> ALERT[Alerting]
+    end
+
+    style GW2 fill:#fb7185,color:#fff
+    style GW3 fill:#fb7185,color:#fff
+    style EV3 fill:#a78bfa,color:#fff
+    </pre>
+  </div>
+
+  <p>
+    Comunicação <strong>síncrona</strong> entre contextos usa DI (o contexto consumidor recebe o contrato do fornecedor).
+    Comunicação <strong>assíncrona</strong> usa o Event Bus — o emissor nem sabe quem está escutando.
+  </p>
+</section>
+
+<section>
+  <h2>Stack técnica</h2>
+  <table>
+    <thead>
+      <tr><th>Camada</th><th>Tecnologia</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Runtime</td><td>Bun</td></tr>
+      <tr><td>Linguagem</td><td>TypeScript</td></tr>
+      <tr><td>Testes</td><td>Vitest (sequential)</td></tr>
+      <tr><td>Build</td><td>tsup (ESM + CJS + .d.ts)</td></tr>
+      <tr><td>HTTP/WS</td><td>Bun.serve() nativo</td></tr>
+      <tr><td>Database</td><td>Prisma + PostgreSQL (Neon)</td></tr>
+      <tr><td>State (prod)</td><td>Redis via RedisStateAdapter</td></tr>
+      <tr><td>State (dev/test)</td><td>InMemoryStateAdapter</td></tr>
+      <tr><td>UI</td><td>Next.js + Tailwind</td></tr>
+      <tr><td>Object storage</td><td>S3-compatible (R2/B2/AWS/MinIO)</td></tr>
+      <tr><td>GPU providers</td><td>RunPod, Vast.ai, TensorDock, Modal, SnapGPU</td></tr>
+      <tr><td>AI providers</td><td>Groq, OpenAI, Fireworks, OpenRouter, Ollama, Deepgram, ElevenLabs</td></tr>
+      <tr><td>Meeting bots</td><td>Recall.ai (via Fly.io / RunPod)</td></tr>
+      <tr><td>Secrets</td><td>AES-256-GCM vault</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  Generated by Claude Code · AI Gateway DDD Migration · 2026-04-14
+</footer>
+
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      background: '#12161c',
+      primaryColor: '#1a1f27',
+      primaryTextColor: '#e6e9ef',
+      primaryBorderColor: '#262d38',
+      lineColor: '#8b95a5',
+      secondaryColor: '#262d38',
+      tertiaryColor: '#1a1f27',
+      fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
+      fontSize: '14px'
+    },
+    flowchart: { curve: 'basis', padding: 20 },
+    sequence: { actorMargin: 60, boxMargin: 10, messageMargin: 40 }
+  });
+</script>
+
+</body>
+</html>

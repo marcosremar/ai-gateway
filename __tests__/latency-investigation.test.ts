@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { GatewayHttpClient } from '../sdk/node';
+import { GatewayHttpClient } from '../../sdk/node';
 
 const GATEWAY_URL = process.env.GATEWAY_URL || process.env.GATEWAY_URL || 'http://localhost:4000';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_loadtest_2026';

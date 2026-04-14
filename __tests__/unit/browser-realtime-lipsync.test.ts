@@ -3,7 +3,7 @@
  * Mocks browser APIs (AudioContext, AnalyserNode, MediaStream).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { RealtimeLipsyncAnalyser } from '../src/browser/realtime-lipsync';
+import { RealtimeLipsyncAnalyser } from '../../src/browser/realtime-lipsync';
 
 // ── Browser API mocks ─────────────────────────────────────────────────────────
 

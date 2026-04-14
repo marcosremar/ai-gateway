@@ -163,8 +163,8 @@ import {
   DEFAULT_GPU_PROFILES,
   applyProfileLatencyTargets,
   applyUserConfig,
-} from '../server/config-persistence';
-import type { ProviderConfig, GatewayApp } from '../server/config-persistence';
+} from '../../server/config-persistence';
+import type { ProviderConfig, GatewayApp } from '../../server/config-persistence';
 import {
   handleGetProviderConfig,
   handlePatchProviderConfig,
@@ -175,8 +175,8 @@ import {
   handleActivateProfile,
   handleGetLabsFlags,
   handlePatchLabsFlags,
-} from '../server/config-handlers';
-import { readJsonBody } from '../server/http-utils';
+} from '../../server/config-handlers';
+import { readJsonBody } from '../../server/http-utils';
 
 // ── HTTP Helpers ────────────────────────────────────────────────────────────
 
@@ -626,7 +626,7 @@ import {
   setSttTargetLatencyMs,
   setLlmTargetLatencyMs,
   setTtsTargetLatencyMs,
-} from '../src/gpu-providers/deploy-settings';
+} from '../../src/gpu-providers/deploy-settings';
 
 describe('Config persistence — applyProfileLatencyTargets', () => {
   beforeEach(() => {
@@ -656,14 +656,14 @@ describe('Config persistence — applyProfileLatencyTargets', () => {
 // PART 2: WORKLOAD REGISTRY + HANDLERS (#281-#310)
 // ═════════════════════════════════════════════════════════════════════════════
 
-import { WorkloadRegistry } from '../src/workloads/registry';
+import { WorkloadRegistry } from '../../src/workloads/registry';
 import type {
   Workload,
   WorkloadDriver,
   WorkloadConfig,
   WorkloadEvent,
   WorkloadType,
-} from '../src/workloads/types';
+} from '../../src/workloads/types';
 
 // ── Fake Driver ─────────────────────────────────────────────────────────────
 
@@ -1003,8 +1003,8 @@ import {
   handleWorkloadStart,
   handleWorkloadTerminate,
   routeWorkloadRequest,
-} from '../server/workload-handlers';
-import { workloadRegistry } from '../src/workloads/registry';
+} from '../../server/workload-handlers';
+import { workloadRegistry } from '../../src/workloads/registry';
 
 describe('Workload handlers — list', () => {
   beforeEach(() => {

@@ -62,7 +62,7 @@ describe('Standby Deploy Error Recovery', () => {
   });
 
   it('should export isHandoverDraining', () => {
-    const source = readSource('server/gpu-standby.ts');
+    const source = readSource('../../../server/gpu-standby.ts');
     expect(source).toContain('export function isHandoverDraining');
   });
 });

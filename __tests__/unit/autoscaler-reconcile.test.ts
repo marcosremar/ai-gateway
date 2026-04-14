@@ -6,10 +6,10 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { scheduleReconcile } from '../src/autoscaler/reconcile';
-import type { SettingsStore, Logger } from '../src/deps';
-import { GpuProviderRegistry } from '../src/gpu-providers/registry';
-import type { GpuProviderClient } from '../src/gpu-providers/types';
+import { scheduleReconcile } from '../../src/autoscaler/reconcile';
+import type { SettingsStore, Logger } from '../../src/deps';
+import { GpuProviderRegistry } from '../../src/gpu-providers/registry';
+import type { GpuProviderClient } from '../../src/gpu-providers/types';
 
 const silentLogger: Logger = { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 

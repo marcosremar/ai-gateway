@@ -482,20 +482,20 @@ describe('handleGpuResume', () => {
   });
 
   it('#131 resumeOrDeploy in gpu-deploy calls startInstance and clears timer', () => {
-    // The logic moved from handler to gpu-deploy.ts resumeOrDeploy()
-    const deploySource = readFileSync(join(__dirname, '../server/gpu-deploy.ts'), 'utf-8');
-    const fnStart = deploySource.indexOf('export async function resumeOrDeploy');
-    const fnEnd = deploySource.indexOf('\nexport async function autoTerminateGpu', fnStart);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
+    // The logic moved from handler to gpu-health-monitor.ts resumeOrDeploy()
+    const healthMonitorSource = readFileSync(join(__dirname, '../server/gpu-health-monitor.ts'), 'utf-8');
+    const fnStart = healthMonitorSource.indexOf('export async function resumeOrDeploy');
+    const fnEnd = healthMonitorSource.indexOf('\nexport async function autoTerminateGpu', fnStart);
+    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
     expect(fnBody).toContain('client.startInstance(podId, credentials)');
     expect(fnBody).toContain('clearAutoDestroyTimer()');
   });
 
   it('#132 resumeOrDeploy sets booting state and starts monitoring on success', () => {
-    const deploySource = readFileSync(join(__dirname, '../server/gpu-deploy.ts'), 'utf-8');
-    const fnStart = deploySource.indexOf('export async function resumeOrDeploy');
-    const fnEnd = deploySource.indexOf('\nexport async function autoTerminateGpu', fnStart);
-    const fnBody = deploySource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
+    const healthMonitorSource = readFileSync(join(__dirname, '../server/gpu-health-monitor.ts'), 'utf-8');
+    const fnStart = healthMonitorSource.indexOf('export async function resumeOrDeploy');
+    const fnEnd = healthMonitorSource.indexOf('\nexport async function autoTerminateGpu', fnStart);
+    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
     expect(fnBody).toContain("status: 'booting'");
     expect(fnBody).toContain('startGpuMonitoring()');
   });

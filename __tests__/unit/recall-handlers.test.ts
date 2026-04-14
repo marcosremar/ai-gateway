@@ -15,8 +15,8 @@ import {
   handleRecallWebhook,
   getRecallState,
   resetRecallState,
-} from '../server/recall-handlers';
-import { broadcastWs } from '../server/ws-state';
+} from '../../server/recall-handlers';
+import { broadcastWs } from '../../server/ws-state';
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);

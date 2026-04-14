@@ -3,7 +3,7 @@
  * Docs: https://api-docs.neon.tech/reference/getting-started-with-neon-api
  */
 
-import type { NeonProject, NeonBranch, NeonDatabase, NeonEndpoint } from './types';
+import type { NeonProject, NeonBranch, NeonDatabase, NeonEndpoint, NeonProjectCreateOptions, NeonProjectCreateResult } from './types';
 import { DatabaseError } from './types';
 
 const NEON_API_BASE = 'https://console.neon.tech/api/v2';
@@ -12,9 +12,19 @@ export class NeonManagementClient {
   private apiKey: string;
   private projectId: string;
 
-  constructor(apiKey: string, projectId: string) {
+  /**
+   * Construct a client. projectId is required for project-scoped operations
+   * (branches, databases, endpoints) but can be empty for account-scoped
+   * operations (createProject, listProjects).
+   */
+  constructor(apiKey: string, projectId: string = '') {
     this.apiKey = apiKey;
     this.projectId = projectId;
+  }
+
+  /** Returns a new client scoped to the given projectId, reusing the same API key. */
+  forProject(projectId: string): NeonManagementClient {
+    return new NeonManagementClient(this.apiKey, projectId);
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -48,8 +58,66 @@ export class NeonManagementClient {
   }
 
   async getProject(): Promise<NeonProject> {
+    if (!this.projectId) {
+      throw new DatabaseError('getProject() requires a projectId on the client', 'NEON_MISSING_PROJECT_ID');
+    }
     const data = await this.request<{ project: RawProject }>('GET', `/projects/${this.projectId}`);
     return toProject(data.project);
+  }
+
+  /**
+   * Create a new Neon project (the database).
+   * Returns the project plus the connection_uri for the default database.
+   *
+   * Docs: https://api-docs.neon.tech/reference/createproject
+   *
+   * Defaults (when options omitted):
+   * - pgVersion: Neon default (17 at time of writing)
+   * - regionId: aws-us-east-1
+   * - autoscaling: 0.25 → 2 CU
+   * - suspendTimeoutSeconds: 0 (immediate suspend on idle — free tier friendly)
+   */
+  async createProject(options: NeonProjectCreateOptions = {}): Promise<NeonProjectCreateResult> {
+    const projectSpec: Record<string, unknown> = {};
+    if (options.name) projectSpec.name = options.name;
+    if (options.regionId) projectSpec.region_id = options.regionId;
+    if (options.pgVersion !== undefined) projectSpec.pg_version = options.pgVersion;
+
+    // Autoscaling & suspend defaults tuned for free tier
+    const endpointSettings: Record<string, unknown> = {};
+    if (options.autoscalingMinCu !== undefined) endpointSettings.autoscaling_limit_min_cu = options.autoscalingMinCu;
+    if (options.autoscalingMaxCu !== undefined) endpointSettings.autoscaling_limit_max_cu = options.autoscalingMaxCu;
+    if (options.suspendTimeoutSeconds !== undefined) endpointSettings.suspend_timeout_seconds = options.suspendTimeoutSeconds;
+    if (Object.keys(endpointSettings).length > 0) {
+      projectSpec.default_endpoint_settings = endpointSettings;
+    }
+
+    const data = await this.request<{
+      project: RawProject;
+      connection_uris?: Array<{ connection_uri: string; connection_parameters?: Record<string, string> }>;
+      roles?: Array<{ name: string; password?: string }>;
+      databases?: RawDatabase[];
+      endpoints?: RawEndpoint[];
+      branch?: RawBranch;
+    }>('POST', '/projects', { project: projectSpec });
+
+    const project = toProject(data.project);
+    const connectionUri = data.connection_uris?.[0]?.connection_uri ?? '';
+    const roleName = data.roles?.[0]?.name ?? '';
+    const rolePassword = data.roles?.[0]?.password ?? '';
+    const databaseName = data.databases?.[0]?.name ?? 'neondb';
+    const endpoint = data.endpoints?.[0] ? toEndpoint(data.endpoints[0]) : undefined;
+    const branch = data.branch ? toBranch(data.branch) : undefined;
+
+    return { project, connectionUri, roleName, rolePassword, databaseName, endpoint, branch };
+  }
+
+  /**
+   * Permanently delete a Neon project. Irreversible.
+   * Operates on a given projectId (does NOT require the client to be scoped to one).
+   */
+  async deleteProject(projectId: string): Promise<void> {
+    await this.request('DELETE', `/projects/${projectId}`);
   }
 
   // ── Branches ──────────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { RateLimiter } from '../src/proxy/middleware/rate-limit';
+import { RateLimiter } from '../../src/proxy/middleware/rate-limit';
 
 describe('RateLimiter — LRU eviction', () => {
   let limiter: RateLimiter;

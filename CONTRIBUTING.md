@@ -1,263 +1,347 @@
 # Contributing to AI Gateway
 
-Thank you for your interest in contributing to `@parle/ai-gateway`! This document provides guidelines and instructions for contributing.
+Thank you for contributing! This guide covers everything you need to know to work effectively on this codebase.
 
-## Table of Contents
+## Quick Links
 
-- [Code of Conduct](#code-of-conduct)
-- [Getting Started](#getting-started)
-- [Development Setup](#development-setup)
-- [Making Changes](#making-changes)
-- [Testing](#testing)
-- [Submitting Changes](#submitting-changes)
-- [Commit Messages](#commit-messages)
-- [Architecture](#architecture)
-
-## Code of Conduct
-
-This project follows the [Contributor Covenant](https://www.contributor-covenant.org/). Be respectful, inclusive, and constructive in all interactions.
+- [CLAUDE.md](./CLAUDE.md) — Full project overview and feature list
+- [docs/domain-model.md](./docs/domain-model.md) — Ubiquitous language and domain model
+- [docs/sdd.md](./docs/sdd.md) — Architecture decisions and module responsibilities
+- [docs/adr/](./docs/adr/) — Architecture Decision Records
 
 ## Getting Started
 
-### Prerequisites
-
-- **Bun** (latest stable) — `bun install`
-- **Node.js** 20+ (if not using Bun)
-- **TypeScript** 5+ (included)
-- **Docker** (optional, for local GPU testing)
-
-### First-time Setup
-
 ```bash
-# Clone the repository
-git clone https://github.com/marcosremar/ai-gateway.git
-cd ai-gateway
-
 # Install dependencies
 bun install
 
-# Verify setup
-bun run typecheck
-bun run test:unit
+# Run all tests
+bun test
+
+# Build library
+bun run build
+
+# Start dev server
+bun run server
 ```
 
-### Project Structure
+## Code Conventions
 
-```
-ai-gateway/
-├── src/              # Library code (publishable)
-├── server/           # Reference service (can import from src/)
-├── sdk/              # Client SDKs (TypeScript + Python)
-├── __tests__/        # Test files
-├── docs/             # Documentation
-├── scripts/          # Utility scripts
-└── examples/         # Example usage
-```
+### Naming
 
-**Golden Rule**: `src/` must never import from `server/`. Enforced by CI.
+| Thing | Convention | Example |
+|-------|-----------|---------|
+| Functions | `camelCase` | `startTranslationCacheSweep` |
+| Variables | `camelCase` | `cooldownTracker` |
+| Types/Interfaces/Classes | `PascalCase` | `DeploymentState`, `AIProviderRegistry` |
+| Constants | `SCREAMING_SNAKE_CASE` | `IDLE_TIMEOUT_MS`, `MAX_DEPLOY_RETRIES` |
+| Enums and values | `PascalCase` | `PipelineStage.Complete` |
+| Files | `kebab-case.ts` | `translation-cache.ts`, `gpu-deploy.ts` |
 
-## Development Setup
+### File Header
 
-### Commands
+Every file should have a header comment with section dividers:
 
-```bash
-bun run typecheck    # Type check only
-bun run build        # Build library bundle
-bun run test         # Run all tests
-bun run test:unit    # Unit tests only (fast)
-bun run serve.ts     # Start dev server
-```
+```typescript
+// ── BabelCast Gateway — Translation LRU Cache ───────────────────────────────
+// Meetings have many repeated phrases ("thank you", "can you hear me?").
+// Cache avoids redundant LLM calls for identical text+lang pairs.
 
-### VS Code
+import { createLogger } from '../src/logger';
+const log = createLogger('translation-cache');
 
-We provide workspace settings in `.vscode/`. Install recommended extensions for the best experience:
-- ESLint
-- Prettier
-- TypeScript
-
-## Making Changes
-
-### 1. Find an Issue
-
-- Look for [good first issue](https://github.com/marcosremar/ai-gateway/labels/good%20first%20issue) labels
-- Check the [improvement checklist](docs/improvement-checklist.md)
-- Or open a new issue describing your idea
-
-### 2. Create a Branch
-
-```bash
-git checkout main
-git pull
-git checkout -b feature/your-feature-name
-# or: git checkout -b fix/issue-description
+// ── LRU Cache ───────────────────────────────────────────────────────────────
 ```
 
-### 3. Write Code
+### Imports
 
-- Follow existing patterns in the codebase
-- Use TypeScript strict mode (no `any`)
-- Add JSDoc to public APIs
-- Write tests for new functionality
+Group imports with section comments:
 
-### 4. Run Checks
+```typescript
+// External
+import { createLogger } from '../src/logger';
+import { homedir } from 'os';
+import { join } from 'path';
 
-Before committing:
+// ── State ───────────────────────────────────────────────────────────────────
+import { deployState, setDeployState } from './state';
 
-```bash
-bun run typecheck     # Must pass
-bun run lint          # Fix any warnings
-bun run test:unit     # Unit tests must pass
+// ── Providers ────────────────────────────────────────────────────────────────
+import { groqSTT, groqTTS, groqLLM } from './groq';
 ```
+
+Type-only imports use `import type`:
+
+```typescript
+import type { GpuProviderClient } from '../src/gpu-providers/types';
+import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
+```
+
+### Types and Interfaces
+
+```typescript
+// Interface for object shapes
+export interface CacheEntry {
+  text: string;
+  ts: number;
+}
+
+// Type alias for unions
+export type ProviderId = 'openai' | 'groq' | 'openrouter' | 'fireworks';
+
+// Readonly const objects for configuration groups
+export const GPU = {
+  MAX_DEPLOY_RETRIES: 2,
+  HEALTH_POLL_INTERVAL_MS: 10_000,
+  DEPLOY_TIMEOUT_MS: 30 * 60_000,
+  IDLE_TIMEOUT_MS: 15 * 60_000,
+} as const;
+```
+
+### Error Handling
+
+Custom error classes with status codes:
+
+```typescript
+export class CreditExhaustedError extends Error {
+  readonly status = 402;
+  readonly providers: string[];
+
+  constructor(providers: string[]) {
+    super(`Credit exhausted: ${providers.join(', ')}`);
+    this.name = 'CreditExhaustedError';
+  }
+}
+```
+
+Error helper functions:
+
+```typescript
+export function buildProviderError(
+  providerId: string,
+  status: number | undefined,
+  rawMessage: string,
+): { message: string; status: number }
+
+export function isTimeoutError(err: unknown): boolean
+export function isRetryableError(err: unknown): boolean
+```
+
+Try/catch with logging:
+
+```typescript
+try {
+  const { broadcastWs: bws } = require('./ws-state');
+  bws?.({ type: 'gpu:transition', ... });
+} catch (e) { 
+  log.warn('broadcastWs failed:', e instanceof Error ? e.message : e); 
+}
+```
+
+### Logging
+
+Use `createLogger` with the module name:
+
+```typescript
+import { createLogger } from '../src/logger';
+const log = createLogger('translation-cache');
+
+log.log('Cache hit', { key, value });
+log.warn('Cache miss', { key });
+log.error(err, 'Failed to persist');
+```
+
+Log levels: `log.log()` (info), `log.warn()`, `log.error()`, `log.debug()` (test mode).
+
+### Functions
+
+Factory functions for object creation:
+
+```typescript
+export function createGateway({ storage, stateStore?, hooks? }: GatewayOptions): Gateway {
+  return new GatewayImpl(storage, stateStore, hooks);
+}
+
+export function buildGpuTiers(config: GpuTierConfig): GpuTier[] { ... }
+```
+
+### Exports
+
+Named exports, grouped by feature:
+
+```typescript
+// ── Cache operations ───────────────────────────────────────────────────────
+export const translationCache = new LRUCache<TranslationEntry>(MAX_ENTRIES);
+export function getTranslationCacheStats(): CacheStats { ... }
+
+// ── Re-exports ─────────────────────────────────────────────────────────────
+export { AIProviderRegistry } from './registry';
+export type { FallbackEntry, FallbackOptions } from './fallback';
+```
+
+## Architecture Rules
+
+### Hard Rules (enforced by CI)
+
+1. **`src/` never imports from `server/`** — The library is publishable and must not depend on the server. CI enforces this.
+2. **All GPU ops go through the gateway API** — Never call RunPod/Vast.ai/TensorDock directly. Bypasses watchdog, cost tracking, ghost detection.
+3. **No Prisma/Redis/Next.js in `src/`** — Use DI interfaces (`AutoscalerDeps`, `StateStore`, `SettingsStore`).
+4. **All new UI uses `web/src/components/ui/`** — Never re-implement shared components (`IconBox`, `Button`, `Card`, etc.).
+
+### Adding a New Provider
+
+1. Create `src/providers/<provider-name>.ts` with provider implementation
+2. Register in `src/providers/index.ts`
+3. Add tests in `__tests__/providers/`
+4. Update `docs/domain-model.md` with provider details
+5. Consider creating an ADR in `docs/adr/`
+
+### Adding a New Pipeline Stage
+
+1. Add stage to `PipelineStage` type in `src/autoscaler/types.ts`
+2. Implement stage handlers in appropriate module
+3. Add warmth tracking in `gpu-warmth-monitor.ts`
+4. Add circuit breaker support in `circuit-breaker.ts`
+5. Update routing logic in `hybrid-stages.ts`
+
+### Adding a New GPU Provider
+
+1. Implement `GpuProviderClient` interface in `src/gpu-providers/`
+2. Add to `PREFERRED_GPU_TYPES` in `server/config.ts`
+3. Add to cascade order documentation in `docs/adr/ADR-001-gpu-cascade-order.md`
+4. Consider creating a new ADR if cascade order changes
 
 ## Testing
 
-### Test Categories
-
-- **Unit tests** — `__tests__/*-unit.test.ts` (fast, no external deps)
-- **Integration tests** — `__tests__/*-integration.test.ts` (require mock services)
-- **Live tests** — `__tests__/*-real-api.test.ts` (require API keys)
-- **Load tests** — `__tests__/load-*.test.ts` and `load-testing/`
-
-### Writing Tests
+### Test Structure
 
 ```typescript
-import { describe, it, expect, vi } from 'vitest';
-import { yourFunction } from '../src/your-module';
+import { describe, it, expect } from 'vitest';
 
-describe('yourFunction', () => {
-  it('should do something specific', () => {
-    const result = yourFunction(input);
-    expect(result).toEqual(expected);
-  });
-
-  it('should handle edge case', () => {
-    expect(() => yourFunction(invalidInput)).toThrow(ExpectedError);
+describe('feature name', () => {
+  it('should do thing', () => {
+    expect(result).toBe(expected);
   });
 });
 ```
 
-### Skipping External Dependencies
+### Test Patterns
+
+**Unit tests for pure functions:**
 
 ```typescript
-// Skip if no GPU/credentials available
-describe.skipIf(process.env.SKIP_GPU_TESTS === '1')('GPU tests', () => {
-  it('should boot a GPU', async () => {
-    // ...
-  });
+it('correctly computes latency trend', () => {
+  const samples = [100, 110, 105, 120, 130];
+  const trend = computeLatencyTrend(samples);
+  expect(trend).toBeGreaterThan(0.2);
 });
 ```
 
-## Submitting Changes
+**Contract tests for interfaces:**
 
-### 1. Create a Changeset (for versioned changes)
-
-```bash
-bunx changeset
+```typescript
+it('satisfies GpuProviderClient contract', () => {
+  const client = createTestClient();
+  expect(typeof client.deploy).toBe('function');
+  expect(typeof client.stop).toBe('function');
+  expect(typeof client.health).toBe('function');
+});
 ```
 
-Select the packages changed, choose semver type (patch/minor/major), and write a summary.
+**Property-based tests for transformations:**
 
-### 2. Push and Open PR
+```typescript
+it('cache key is deterministic', () => {
+  const key1 = buildCacheKey('en', 'es', 'formal', 'hello');
+  const key2 = buildCacheKey('en', 'es', 'formal', 'hello');
+  expect(key1).toBe(key2);
+});
 
-```bash
-git add .
-git commit -m "feat: add your feature"
-git push origin feature/your-feature-name
+it('different languages produce different keys', () => {
+  const key1 = buildCacheKey('en', 'es', 'formal', 'hello');
+  const key2 = buildCacheKey('en', 'fr', 'formal', 'hello');
+  expect(key1).not.toBe(key2);
+});
 ```
 
-Then open a Pull Request on GitHub.
+### Running Tests
 
-### 3. PR Checklist
+```bash
+# All tests
+bun test
 
-- [ ] `bun run typecheck` passes
-- [ ] `bun run test:unit` passes
+# Unit tests only
+bun test __tests__/unit/
+
+# Integration tests
+bun test __tests__/integration/
+
+# Specific file
+bun test __tests__/gpu-deploy-unit.test.ts
+
+# Watch mode
+bun run test:watch
+```
+
+## Architecture Decisions
+
+When making significant architectural changes, document the decision:
+
+1. **Create an ADR** in `docs/adr/` using the template
+2. **Get review** from at least one maintainer
+3. **Plan migration** if changing existing behavior
+4. **Plan rollback** in case something goes wrong
+
+### When to Create an ADR
+
+- Adding a new provider or GPU backend
+- Changing routing or fallback logic
+- Modifying the pipeline stages
+- Changing how state is persisted
+- Any decision that affects multiple modules
+
+### ADR Format
+
+See `docs/adr/TEMPLATE.md` for the template.
+
+## Pull Request Process
+
+### Before Submitting
+
+1. Run `bun test` — all tests must pass
+2. Run `bun run build` — no type errors
+3. Update documentation if needed
+
+### PR Checklist
+
 - [ ] `bun run build` succeeds
-- [ ] Changeset added (if user-facing)
-- [ ] Documentation updated (if API changes)
-- [ ] No `console.log` (use logger)
-- [ ] No `any` types
+- [ ] `bun test` passes
+- [ ] No `src/` → `server/` imports
+- [ ] No `any` types without justification
+- [ ] No hardcoded secrets
+- [ ] Logging is meaningful (not noisy)
+- [ ] Tests cover happy path and error cases
+- [ ] Documentation updated if API changes
+- [ ] ADR created if architecture change
 
-### 4. CI Checks
+### Commit Messages
 
-All PRs run:
-- Type check
-- Unit tests
-- Build
-- Lib/service boundary check
-
-### 5. Review Process
-
-- At least 1 maintainer must approve
-- Address review comments promptly
-- Keep PRs focused and small (< 400 lines ideal)
-
-## Commit Messages
-
-We follow [Conventional Commits](https://www.conventionalcommits.org/):
+Format: `type: description`
 
 ```
-<type>[optional scope]: <description>
-
-[optional body]
-
-[optional footer(s)]
+feat: add SnapGPU checkpoint support
+fix: race condition in GPU monitoring
+docs: add ADR-010 for request coalescing
+refactor: extract cooldown tracker to separate module
+test: add property-based tests for translation cache
 ```
 
-### Types
+Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 
-- `feat:` — New feature
-- `fix:` — Bug fix
-- `docs:` — Documentation only
-- `style:` — Formatting, no code change
-- `refactor:` — Code change, no feature behavior change
-- `perf:` — Performance improvement
-- `test:` — Adding or fixing tests
-- `chore:` — Maintenance, build process, dependencies
+## Getting Help
 
-### Examples
+- Open an issue for bugs or feature requests
+- Check existing issues before creating new ones
+- Ask in the PR if you're unsure about anything
 
-```
-feat(autoscaler): add predictive warmup for GPU tiers
-fix(proxy): handle streaming timeout on slow providers
-docs: add troubleshooting guide for RunPod failures
-perf(caching): reduce memory footprint by 30%
-test(auth): add HMAC token verification edge cases
-```
-
-## Architecture
-
-### Key Design Decisions
-
-1. **Framework-agnostic** — No hard dependencies on Prisma, Redis, or Next.js
-2. **Dependency injection** — All external dependencies injected via interfaces
-3. **Modular exports** — Each subpath independently importable
-4. **Tier cascade** — GPU autoscaler walks through tiers (cheapest first)
-5. **Provider fallback** — AI providers fail over automatically with cooldown
-
-See [docs/architecture/](docs/architecture/) for detailed decisions.
-
-### Module Boundaries
-
-- `src/` — Publishable library, zero framework dependencies
-- `server/` — Reference service implementation, can import from `src/`
-- `src/proxy/` — HTTP proxy server (pure Node.js)
-- `src/providers/` — AI provider implementations
-- `src/autoscaler/` — GPU autoscaling engine
-- `src/adapters/` — State persistence adapters
-
-### Adding New Features
-
-1. **New AI provider** → `src/providers/<name>.ts` + register in `src/providers/index.ts`
-2. **New GPU provider** → `src/gpu-providers/<name>.ts`
-3. **New endpoint** → `src/proxy/routes/<name>.ts` + wire in `src/proxy/server.ts`
-4. **New autoscaler feature** → `src/autoscaler/<name>.ts` + wire in factory
-5. **New adapter** → `src/adapters/<name>.ts` + export in `src/adapters/index.ts`
-
-## Questions?
-
-- Check [CLAUDE.md](CLAUDE.md) for AI assistant guidelines
-- Check [README.md](README.md) for overview
-- Check [docs/](docs/) for detailed guides
-- Open an issue for architecture questions
-
-Thank you for contributing! 🙏
+Thank you for contributing!

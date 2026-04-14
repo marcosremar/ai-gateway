@@ -27,13 +27,13 @@ import { describe, it, expect } from 'vitest';
  */
 describe('Error Hierarchy — JSDoc Examples', () => {
   it('should create GatewayError', () => {
-    const { GatewayError } = require('../../src/errors');
+    const { GatewayError } = require('../../src/errors/index.ts');
     const error = new GatewayError('Test', 500, 'TEST');
     expect(error.statusCode).toBe(500);
   });
 
   it('should create ProviderError with context', () => {
-    const { ProviderError } = require('../../src/errors');
+    const { ProviderError } = require('../../src/errors/index.ts');
     const error = new ProviderError('Failed', 'groq', { userId: 'abc' });
     expect(error.context.userId).toBe('abc');
   });
@@ -58,12 +58,12 @@ describe('Error Hierarchy — JSDoc Examples', () => {
  */
 describe('Constants — JSDoc Examples', () => {
   it('should export GPU types', () => {
-    const { GPU_TYPES } = require('../../src/constants');
+    const { GPU_TYPES } = require('../../src/constants/index.ts');
     expect(GPU_TYPES.RTX_4090).toBeDefined();
   });
 
   it('should export model names', () => {
-    const { MODELS } = require('../../src/constants');
+    const { MODELS } = require('../../src/constants/index.ts');
     expect(MODELS.LLM_LLAMA_70B).toBeDefined();
   });
 });
@@ -90,14 +90,14 @@ describe('Constants — JSDoc Examples', () => {
  */
 describe('Utils — JSDoc Examples', () => {
   it('should retry with backoff', async () => {
-    const { withRetry } = require('../../src/utils');
+    const { withRetry } = require('../../src/utils/index.ts');
     const fn = vi.fn().mockResolvedValue('success');
     const result = await withRetry(fn, { baseDelayMs: 10 });
     expect(result).toBe('success');
   });
 
   it('should generate UUIDs', async () => {
-    const { uuid } = require('../../src/utils');
+    const { uuid } = require('../../src/utils/index.ts');
     const id = uuid();
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
@@ -119,7 +119,7 @@ describe('Utils — JSDoc Examples', () => {
  */
 describe('Contracts — JSDoc Examples', () => {
   it('should validate chat request', () => {
-    const { ChatCompletionRequestSchema } = require('../../src/contracts');
+    const { ChatCompletionRequestSchema } = require('../../src/contracts/index.ts');
     const valid = {
       model: 'llama-3.3-70b',
       messages: [{ role: 'user', content: 'Hi' }],

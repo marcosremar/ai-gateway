@@ -10,7 +10,7 @@ const readSource = (file: string) => readFileSync(join(__dirname, '..', file), '
 
 describe('HTTP Body Size Limits', () => {
   it('should define per-route limits for text endpoints', () => {
-    const source = readSource('server/http-utils.ts');
+    const source = readSource('../../../server/http-utils.ts');
     expect(source).toContain('ROUTE_MAX_BYTES');
     expect(source).toContain('/v1/translate');
     expect(source).toContain('/v1/chat/completions');
@@ -19,13 +19,13 @@ describe('HTTP Body Size Limits', () => {
   });
 
   it('should use route-specific limit in readRawBody', () => {
-    const source = readSource('server/http-utils.ts');
+    const source = readSource('../../../server/http-utils.ts');
     expect(source).toContain('routeLimit');
     expect(source).toContain("req.url?.split('?')[0]");
   });
 
   it('should have RAW_BODY_TIMEOUT >= 60 seconds', () => {
-    const source = readSource('server/http-utils.ts');
+    const source = readSource('../../../server/http-utils.ts');
     // Match RAW_BODY_TIMEOUT_MS = 120_000 (supports underscore separator)
     const match = source.match(/RAW_BODY_TIMEOUT_MS\s*=\s*([\d_]+)/);
     expect(match).not.toBeNull();

@@ -8,10 +8,10 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { BudgetGuard, BudgetExceededError } from '../src/tracking/budget-guard';
-import type { SpendTracker } from '../src/tracking/spend-tracker';
-import type { SpendSummary } from '../src/tracking/spend-tracker';
-import type { FallbackEntry } from '../src/providers/fallback';
+import { BudgetGuard, BudgetExceededError } from '../../src/tracking/budget-guard';
+import type { SpendTracker } from '../../src/tracking/spend-tracker';
+import type { SpendSummary } from '../../src/tracking/spend-tracker';
+import type { FallbackEntry } from '../../src/providers/fallback';
 
 // ── Mock SpendTracker ────────────────────────────────────────────────────────
 

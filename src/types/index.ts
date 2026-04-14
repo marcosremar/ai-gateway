@@ -79,7 +79,7 @@ export {
   GpuDeployRequestSchema,
   GpuStatusResponseSchema,
   ProviderConfigSchema,
-  ApiKeysRequestSchema,
+  ApiKeysUpdateRequestSchema,
   ErrorResponseSchema,
 } from '../contracts';
 

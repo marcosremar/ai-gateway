@@ -9,8 +9,8 @@ import {
   type STTHallucinationFilterConfig,
   type HallucinationFilterResult,
   type SegmentFilterResult,
-} from '../src/stt-hallucination-filter';
-import type { STTResponse, STTSegment } from '../src/providers/types';
+} from '../../src/stt-hallucination-filter';
+import type { STTResponse, STTSegment } from '../../src/providers/types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

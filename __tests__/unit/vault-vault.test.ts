@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { Vault } from '../src/vault/vault';
-import type { VaultStore } from '../src/vault/types';
+import { Vault } from '../../src/vault/vault';
+import type { VaultStore } from '../../src/vault/types';
 
 const MASTER_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { PerformanceRanker } from '../src/providers/performance-ranker';
-import type { FallbackEntry } from '../src/providers/fallback';
+import { PerformanceRanker } from '../../src/providers/performance-ranker';
+import type { FallbackEntry } from '../../src/providers/fallback';
 
 describe('PerformanceRanker', () => {
   describe('record + getStats', () => {

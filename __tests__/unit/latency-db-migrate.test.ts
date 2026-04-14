@@ -71,7 +71,7 @@ vi.mock('../server/state', () => ({
 // ── Import after mocks ────────────────────────────────────────────────────────
 
 import { existsSync, renameSync } from 'fs';
-import { migrateLatencyDbIfNeeded } from '../server/latency-db-migrate';
+import { migrateLatencyDbIfNeeded } from '../../server/latency-db-migrate';
 
 const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
 const mockRenameSync = renameSync as ReturnType<typeof vi.fn>;

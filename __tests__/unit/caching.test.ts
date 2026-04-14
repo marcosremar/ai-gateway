@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ResponseCache } from '../src/caching/response-cache';
-import { withCache } from '../src/caching/with-cache';
-import type { KvStore } from '../src/deps';
-import type { LLMProvider, ChatRequest, ChatResponse } from '../src/providers/types';
+import { ResponseCache } from '../../src/caching/response-cache';
+import { withCache } from '../../src/caching/with-cache';
+import type { KvStore } from '../../src/deps';
+import type { LLMProvider, ChatRequest, ChatResponse } from '../../src/providers/types';
 
 function createMemoryKvStore(): KvStore {
   const data = new Map<string, { value: string; expiry?: number }>();

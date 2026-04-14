@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   checkDeployWarnings,
   getGpuFallbacks,
-} from '../src/gpu-providers/deploy-settings';
+} from '../../src/gpu-providers/deploy-settings';
 
 describe('Group 1: Pre-deploy validation — checkDeployWarnings', () => {
   it('returns error for 70B model on RTX 3090 (24GB VRAM insufficient)', () => {
@@ -86,7 +86,7 @@ import {
   estimateRemainingMs,
   recordDownloadSpeed,
   getHostDownloadSpeed,
-} from '../src/gpu-providers/pull-time-estimator';
+} from '../../src/gpu-providers/pull-time-estimator';
 
 describe('Group 2: Deploy progress — pull time estimator', () => {
   it('estimateRemainingMs returns positive ETA for pulling phase', () => {
@@ -138,7 +138,7 @@ import {
   recordInferenceCost,
   getInferenceCostStats,
   resetDailyInferenceCost,
-} from '../server/cost-tracker';
+} from '../../server/cost-tracker';
 
 describe('Group 3: Cost tracking', () => {
   beforeEach(() => {
@@ -225,7 +225,7 @@ describe('Group 4: GPU type fallback — getGpuFallbacks', () => {
 // Group 5: Provider intelligence — PerformanceRanker
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { PerformanceRanker } from '../src/providers/performance-ranker';
+import { PerformanceRanker } from '../../src/providers/performance-ranker';
 
 describe('Group 5: Provider intelligence — PerformanceRanker', () => {
   let ranker: PerformanceRanker;
@@ -331,7 +331,7 @@ describe('Group 5: Provider intelligence — PerformanceRanker', () => {
 // Group 6: Request coalescing
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { coalesce, coalesceInflightCount } from '../src/proxy/middleware/request-coalescer';
+import { coalesce, coalesceInflightCount } from '../../src/proxy/middleware/request-coalescer';
 
 describe('Group 6: Request coalescing', () => {
   it('coalesce returns same promise for same key while in-flight', async () => {
@@ -412,7 +412,7 @@ import {
   recordSttRequest,
   getBatchOpportunityCount,
   resetBatchDetector,
-} from '../src/providers/batch-detector';
+} from '../../src/providers/batch-detector';
 
 describe('Group 7: Batch detector', () => {
   beforeEach(() => {
@@ -474,7 +474,7 @@ describe('Group 7: Batch detector', () => {
 import {
   CircuitBreakerRegistry,
   CircuitBreaker,
-} from '../src/providers/circuit-breaker';
+} from '../../src/providers/circuit-breaker';
 
 describe('Group 8: Network split detection', () => {
   let registry: CircuitBreakerRegistry;
@@ -568,7 +568,7 @@ describe('Group 8: Network split detection', () => {
 // Group 9: Latency trend detection
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { getLatencyTrend, latencyRing } from '../server/state';
+import { getLatencyTrend, latencyRing } from '../../server/state';
 
 describe('Group 9: Latency trend detection', () => {
   beforeEach(() => {
@@ -632,7 +632,7 @@ import {
   isHostCrashPattern,
   getHostCrashInfo,
   recordHostCrash,
-} from '../server/metrics';
+} from '../../server/metrics';
 
 describe('Group 10: Host crash patterns', () => {
   it('isHostCrashPattern returns false for a host with no crash history', () => {

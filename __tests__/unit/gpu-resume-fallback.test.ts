@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { DeploymentStateMachine } from '../server/deployment-state-machine';
+import { DeploymentStateMachine } from '../../server/deployment-state-machine';
 
 // ── 1. State Machine tests (import directly, no mocks needed) ──────────────
 

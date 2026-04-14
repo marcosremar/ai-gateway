@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { hashApiKey, CreditBlockTracker } from '../src/providers/credit-block';
+import { hashApiKey, CreditBlockTracker } from '../../src/providers/credit-block';
 
 describe('hashApiKey()', () => {
   it('should return a 32-char hex string', () => {
