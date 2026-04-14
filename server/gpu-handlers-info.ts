@@ -256,6 +256,7 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
   const requestId = getOrCreateRequestId(_req);
   setRequestIdHeader(res, requestId);
   console.log(`[req=${requestId}] GPU status query`);
+  const cfg = await loadProviderConfig();
   const elapsed = deployState.startedAt > 0 ? Math.round((Date.now() - deployState.startedAt) / 1000) : 0;
   const activeTier = isGpuAvailable() ? 'gpu' : 'cloud';
   const idleSec = lastRequestTime > 0 ? Math.round((Date.now() - lastRequestTime) / 1000) : 0;
@@ -330,7 +331,7 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
       if (!isGpuAvailable()) return undefined;
       // Check active app to see which stages use GPU — avoids showing 'gpu'
       // routing for stages that the active app routes to cloud only.
-      const _cfg = loadProviderConfig();
+      const _cfg = cfg;
       const _activeApp = _cfg.activeAppId
         ? _cfg.apps.find(p => p.id === _cfg.activeAppId)
         : null;
@@ -355,8 +356,7 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
     ttsColdStartProfile: getColdStartProfile(deployState.gpuType, deployState.dockerImage, deployState.provider) || undefined,
     readinessState: gpuReadinessState,
     bootOnStartup: (() => {
-      const _cfg = loadProviderConfig();
-      const _activeApp = _cfg.apps?.find(p => p.id === _cfg.activeAppId);
+      const _activeApp = cfg.apps?.find(p => p.id === cfg.activeAppId);
       return _activeApp?.gpuDeploy?.bootOnStartup ?? false;
     })(),
     standby: {

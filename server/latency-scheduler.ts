@@ -75,9 +75,9 @@ export function getLatencySchedulerStatus(): {
   };
 }
 
-export function startLatencyScheduler(): void {
+export async function startLatencyScheduler(): Promise<void> {
   if (_timer) return;
-  loadDeploySettings();
+  await loadDeploySettings();
   const intervalMin = getLatencyIntervalMin();
   const gpuList = getGpuPriorityList();
   console.log(`[latency] Scheduler started (check every 30min, discovery every ${intervalMin}min)`);

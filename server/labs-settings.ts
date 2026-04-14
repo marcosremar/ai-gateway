@@ -9,7 +9,7 @@
 
 import os from 'os';
 import path from 'path';
-import fs from 'fs';
+import { readFile, writeFile, mkdir, access } from 'fs/promises';
 
 const SETTINGS_PATH = path.join(os.homedir(), '.babelcast', 'labs-settings.json');
 
@@ -47,9 +47,9 @@ let _s: Readonly<LabsFlags> = Object.freeze({ ...DEFAULTS });
 
 // ── Persistence ──────────────────────────────────────────────────────────────
 
-export function loadLabsSettings(): void {
+export async function loadLabsSettings(): Promise<void> {
   try {
-    const raw = fs.readFileSync(SETTINGS_PATH, 'utf8');
+    const raw = await readFile(SETTINGS_PATH, 'utf8');
     const parsed = JSON.parse(raw) as Partial<LabsFlags>;
     const merged: LabsFlags = { ..._s, ...parsed };
     // Validate booleans
@@ -77,11 +77,18 @@ export function loadLabsSettings(): void {
   } catch { /* use defaults */ }
 }
 
-export function saveLabsSettings(): void {
+export async function saveLabsSettings(): Promise<void> {
   try {
     const dir = path.dirname(SETTINGS_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(_s, null, 2));
+    let dirExists: boolean;
+    try {
+      await access(dir);
+      dirExists = true;
+    } catch {
+      dirExists = false;
+    }
+    if (!dirExists) await mkdir(dir, { recursive: true });
+    await writeFile(SETTINGS_PATH, JSON.stringify(_s, null, 2));
   } catch { /* ignore */ }
 }
 
@@ -93,7 +100,7 @@ export function getLabsFlags(): Readonly<LabsFlags> {
   return _s;
 }
 
-export function setLabsFlags(partial: Partial<LabsFlags>): Readonly<LabsFlags> {
+export async function setLabsFlags(partial: Partial<LabsFlags>): Promise<Readonly<LabsFlags>> {
   const updated: LabsFlags = { ..._s };
   // Merge booleans
   if (typeof partial.peakEwma === 'boolean') updated.peakEwma = partial.peakEwma;
@@ -120,6 +127,6 @@ export function setLabsFlags(partial: Partial<LabsFlags>): Readonly<LabsFlags> {
 
   updated.updatedAt = Date.now();
   _s = Object.freeze(updated);
-  saveLabsSettings();
+  await saveLabsSettings();
   return _s;
 }

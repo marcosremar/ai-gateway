@@ -61,20 +61,19 @@ export class QueueDepthTracker {
   async getTotalDepth(): Promise<number> {
     let total = 0;
     try {
-      await this.store.scan('queue-depth:*', async (keys) => {
-        for (const key of keys) {
-          try {
-            const raw = await this.store.get(key);
-            if (raw) {
-              const n = parseInt(raw, 10);
-              if (!isNaN(n) && n > 0) total += n;
-            }
-          } catch {
-            // Skip keys that fail to fetch - don't fail entire operation
+      const keys: string[] = [];
+      this.store.scan('queue-depth:*', (k) => { keys.push(...k); });
+      for (const key of keys) {
+        try {
+          const raw = await this.store.get(key);
+          if (raw) {
+            const n = parseInt(raw, 10);
+            if (!isNaN(n) && n > 0) total += n;
           }
+        } catch {
+          // Skip keys that fail to fetch
         }
-        return true;
-      });
+      }
     } catch {
       // Return partial result if scan fails
     }

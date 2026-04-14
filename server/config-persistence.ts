@@ -3,9 +3,10 @@
 // ~/.babelcast/provider-config.json so the BabelCast app can access it
 // via the AI Gateway SDK.
 
+import { createLogger } from '../src/logger';
 import { homedir } from 'os';
 import { join } from 'path';
-import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from 'fs';
+import { mkdir, writeFile, readFile, rename, access } from 'fs/promises';
 import { setIdleTimeoutMs } from './gpu-deploy';
 import { setSttTargetLatencyMs, setLlmTargetLatencyMs, setTtsTargetLatencyMs, setGpuSortBy, loadDeploySettings } from '../src/gpu-providers/deploy-settings';
 import type { AIProfile } from '../src/client';
@@ -19,6 +20,8 @@ import type { AIProfile } from '../src/client';
  */
 const BABELCAST_DIR = join(homedir(), '.babelcast');
 const CONFIG_FILE = join(BABELCAST_DIR, 'provider-config.json');
+
+const log = createLogger('config-persistence');
 
 // ── In-memory config cache (avoids sync file I/O on every pipeline request) ──
 let _cachedConfig: ProviderConfig | null = null;
@@ -137,8 +140,8 @@ export interface ProviderConfig {
 }
 
 /** Get the active app, or null if none is active. */
-export function getActiveApp(config?: ProviderConfig): GatewayApp | null {
-  const cfg = config ?? loadProviderConfig();
+export async function getActiveApp(config?: ProviderConfig): Promise<GatewayApp | null> {
+  const cfg = config ?? await loadProviderConfig();
   if (!cfg.activeAppId) return null;
   return cfg.apps.find(a => a.id === cfg.activeAppId) ?? null;
 }
@@ -291,13 +294,20 @@ const DEFAULT_CONFIG: ProviderConfig = {
  *  Uses in-memory cache with 5s TTL to avoid sync file I/O on the hot path.
  *  Note: Returns a shallow copy to prevent accidental mutation, but nested
  *  arrays/objects are NOT deep-cloned. Caller must not mutate returned arrays. */
-export function loadProviderConfig(): ProviderConfig {
+export async function loadProviderConfig(): Promise<ProviderConfig> {
   const now = Date.now();
   if (_cachedConfig && (now - _cacheTime) < CONFIG_CACHE_TTL_MS) {
     return _cachedConfig;
   }
   try {
-    if (!existsSync(CONFIG_FILE)) {
+    let fileExists: boolean;
+    try {
+      await access(CONFIG_FILE);
+      fileExists = true;
+    } catch {
+      fileExists = false;
+    }
+    if (!fileExists) {
       _cachedConfig = { ...DEFAULT_CONFIG };
       _cacheTime = now;
       return _cachedConfig;
@@ -305,32 +315,39 @@ export function loadProviderConfig(): ProviderConfig {
     let raw: string;
     let source = 'primary';
     try {
-      raw = readFileSync(CONFIG_FILE, 'utf-8');
+      raw = await readFile(CONFIG_FILE, 'utf-8');
       JSON.parse(raw); // validate JSON
     } catch (parseErr) {
       // Primary file corrupted — try backup
-      console.error(`[config] Primary config corrupted: ${parseErr instanceof Error ? parseErr.message : parseErr}`);
+      log.error('Primary config corrupted: %s', parseErr instanceof Error ? parseErr.message : parseErr);
       const bakFile = CONFIG_FILE + '.bak';
-      if (existsSync(bakFile)) {
+      let bakExists: boolean;
+      try {
+        await access(bakFile);
+        bakExists = true;
+      } catch {
+        bakExists = false;
+      }
+      if (bakExists) {
         try {
-          raw = readFileSync(bakFile, 'utf-8');
+          raw = await readFile(bakFile, 'utf-8');
           JSON.parse(raw); // validate backup JSON
           source = 'backup';
-          console.warn(`[config] Recovered from backup: ${bakFile}`);
+          log.warn('Recovered from backup: %s', bakFile);
         } catch {
-          console.error('[config] Backup also corrupted — using defaults');
+          log.error('Backup also corrupted — using defaults');
           _cachedConfig = { ...DEFAULT_CONFIG };
           _cacheTime = now;
           return _cachedConfig;
         }
       } else {
-        console.error('[config] No backup available — using defaults');
+        log.error('No backup available — using defaults');
         _cachedConfig = { ...DEFAULT_CONFIG };
         _cacheTime = now;
         return _cachedConfig;
       }
     }
-    if (source !== 'primary') console.log(`[config] Loaded from ${source}`);
+    if (source !== 'primary') log.log('Loaded from %s', source);
     const data = JSON.parse(raw) as Record<string, unknown>;
     // Migrate legacy field names: profiles → apps, activeProfileId → activeAppId
     const rawApps = (data.apps ?? data.profiles) as GatewayApp[] | undefined;
@@ -375,7 +392,7 @@ export function loadProviderConfig(): ProviderConfig {
     _cacheTime = now;
     return _cachedConfig;
   } catch (err) {
-    console.warn('[config] Failed to load provider config:', err instanceof Error ? err.message : err);
+    log.warn('Failed to load provider config: %s', err instanceof Error ? err.message : err);
     _cachedConfig = { ...DEFAULT_CONFIG };
     _cacheTime = now;
     return _cachedConfig;
@@ -408,41 +425,48 @@ export function applyUserConfig(config: ProviderConfig): void {
 }
 
 /** Save provider config to disk + DB (if a user API key is active). Also updates the in-memory cache. */
-export function saveProviderConfig(config: ProviderConfig): void {
+export async function saveProviderConfig(config: ProviderConfig): Promise<void> {
   try {
-    mkdirSync(BABELCAST_DIR, { recursive: true });
+    await mkdir(BABELCAST_DIR, { recursive: true });
     config.updatedAt = Date.now();
     // Backup current file before overwriting (corruption recovery)
-    if (existsSync(CONFIG_FILE)) {
-      try { writeFileSync(CONFIG_FILE + '.bak', readFileSync(CONFIG_FILE)); } catch { /* best-effort backup */ }
+    let configFileExists: boolean;
+    try {
+      await access(CONFIG_FILE);
+      configFileExists = true;
+    } catch {
+      configFileExists = false;
+    }
+    if (configFileExists) {
+      try { await writeFile(CONFIG_FILE + '.bak', await readFile(CONFIG_FILE)); } catch { /* best-effort backup */ }
     }
     // Atomic write: write to temp file then rename (prevents corruption on crash)
     const tmpFile = CONFIG_FILE + '.tmp';
-    writeFileSync(tmpFile, JSON.stringify(config, null, 2));
-    renameSync(tmpFile, CONFIG_FILE);
+    await writeFile(tmpFile, JSON.stringify(config, null, 2));
+    await rename(tmpFile, CONFIG_FILE);
     // Update cache so subsequent reads skip file I/O
     _cachedConfig = config;
     _cacheTime = Date.now();
-    console.log(`[config] Saved provider config (${config.apps.length} apps) to ${CONFIG_FILE}`);
+    log.log('Saved provider config (%d apps) to %s', config.apps.length, CONFIG_FILE);
   } catch (err) {
-    console.warn('[config] Failed to save provider config:', err instanceof Error ? err.message : err);
+    log.warn('Failed to save provider config: %s', err instanceof Error ? err.message : err);
   }
   // Also persist to the AI Gateway user DB if there is an authenticated user (fire-and-forget)
   if (_currentUserApiKey) {
     const apiKey = _currentUserApiKey;
     import('./user-profiles').then(({ saveUserConfig }) => {
       saveUserConfig(apiKey, 'Default', config).catch((err) => {
-        console.warn('[config] Failed to persist user config to DB:', err instanceof Error ? err.message : err);
+        log.warn('Failed to persist user config to DB: %s', err instanceof Error ? err.message : err);
       });
     }).catch((err) => {
-      console.warn('[config] Failed to load user-profiles module for DB sync:', err instanceof Error ? err.message : err);
+      log.warn('Failed to load user-profiles module for DB sync: %s', err instanceof Error ? err.message : err);
     });
   }
 }
 
 /** Patch provider config — merges partial update into existing config. */
-export function patchProviderConfig(partial: Partial<ProviderConfig>): ProviderConfig {
-  const current = loadProviderConfig();
+export async function patchProviderConfig(partial: Partial<ProviderConfig>): Promise<ProviderConfig> {
+  const current = await loadProviderConfig();
   const updated: ProviderConfig = {
     ...current,  // preserve extra UI fields
     apps: (partial as any).apps !== undefined ? (partial as any).apps
@@ -475,10 +499,10 @@ export function patchProviderConfig(partial: Partial<ProviderConfig>): ProviderC
   if (partial.idleTimeoutMin !== undefined) {
     const ms = partial.idleTimeoutMin <= 0 ? Infinity : partial.idleTimeoutMin * 60_000;
     setIdleTimeoutMs(ms);
-    console.log(`[config] Idle timeout set to ${partial.idleTimeoutMin} min${partial.idleTimeoutMin <= 0 ? ' (disabled)' : ''}`);
+    log.log('Idle timeout set to %d min%s', partial.idleTimeoutMin, partial.idleTimeoutMin <= 0 ? ' (disabled)' : '');
   }
 
-  saveProviderConfig(updated);
+  await saveProviderConfig(updated);
   return updated;
 }
 
@@ -505,14 +529,14 @@ export function applyAppLatencyTargets(appId: string | null, apps: GatewayApp[])
     if (stt !== undefined) setSttTargetLatencyMs(stt);
     if (llm !== undefined) setLlmTargetLatencyMs(llm);
     if (tts !== undefined) setTtsTargetLatencyMs(tts);
-    console.log(`[config] Latency targets applied for app "${appId}": STT=${stt}ms LLM=${llm}ms TTS=${tts}ms`);
+    log.log('Latency targets applied for app "%s": STT=%dms LLM=%dms TTS=%dms', appId, stt, llm, tts);
   }
 
   // Auto-switch GPU sort mode for real-time apps
   const isRealtime = app.latencyTargetsMs?.stt !== undefined && app.latencyTargetsMs.stt < 600;
   if (isRealtime) {
     setGpuSortBy('realtime');
-    console.log(`[config] GPU sort mode set to 'realtime' for app "${appId}" (STT target < 600ms)`);
+    log.log("GPU sort mode set to 'realtime' for app \"%s\" (STT target < 600ms)", appId);
   }
 }
 
@@ -525,16 +549,16 @@ export const applyProfileLatencyTargets = applyAppLatencyTargets;
  * are only applied to the runtime inside patchProviderConfig() (API-driven updates),
  * so without this call they revert to hardcoded defaults after every restart.
  */
-export function applyRuntimeConfig(): void {
-  const config = loadProviderConfig();
+export async function applyRuntimeConfig(): Promise<void> {
+  const config = await loadProviderConfig();
 
   // Restore idle timeout
   const ms = config.idleTimeoutMin <= 0 ? Infinity : config.idleTimeoutMin * 60_000;
   setIdleTimeoutMs(ms);
   if (config.idleTimeoutMin <= 0) {
-    console.log('[config] Startup: idle timeout disabled (idleTimeoutMin=0)');
+    log.log('Startup: idle timeout disabled (idleTimeoutMin=0)');
   } else if (config.idleTimeoutMin !== 15) {
-    console.log(`[config] Startup: idle timeout restored to ${config.idleTimeoutMin} min from persisted config`);
+    log.log('Startup: idle timeout restored to %d min from persisted config', config.idleTimeoutMin);
   }
 
   // Restore active app latency targets
@@ -546,7 +570,7 @@ export function applyRuntimeConfig(): void {
   // loadDeploySettings() reads ~/.ai-gateway/latency-settings.json directly into the
   // in-memory _s object — all getters (getDeployTimeoutMin, getMinVramGb, …) then
   // return the persisted values instead of hardcoded defaults.
-  loadDeploySettings();
+  await loadDeploySettings();
 }
 
 /** Debounced stamp: update lastRequestAt on the given app.
@@ -555,16 +579,16 @@ export function applyRuntimeConfig(): void {
 let _stampTimer: ReturnType<typeof setTimeout> | null = null;
 let _pendingStampId: string | null = null;
 
-function _flushStamp(appId: string): void {
+async function _flushStamp(appId: string): Promise<void> {
   try {
-    const config = loadProviderConfig();
+    const config = await loadProviderConfig();
     const now = Date.now();
     const updated = {
       ...config,
       apps: config.apps.map(a => a.id === appId ? { ...a, lastRequestAt: now } : a),
     };
-    saveProviderConfig(updated);
-  } catch (e) { console.warn('[config] app lastRequestAt update failed:', e instanceof Error ? e.message : e); }
+    await saveProviderConfig(updated);
+  } catch (e) { log.warn('app lastRequestAt update failed: %s', e instanceof Error ? e.message : e); }
 }
 
 export function stampAppRequest(appId: string | null): void {

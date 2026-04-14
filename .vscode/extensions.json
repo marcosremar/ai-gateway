@@ -1,0 +1,14 @@
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "ms-vscode.vscode-typescript-next",
+    "orta.vscode-jest",
+    "bradlc.vscode-tailwindcss",
+    "ms-python.python",
+    "ms-python.black-formatter",
+    "streetsidesoftware.code-spell-checker",
+    "github.copilot",
+    "github.vscode-github-actions"
+  ]
+}

@@ -1,0 +1,37 @@
+name: 'Performance Issue'
+description: 'Report a performance degradation, slow endpoint, or resource leak'
+title: '[Perf]: '
+labels: ['performance', 'triage']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report performance issues with concrete metrics when possible.
+  - type: input
+    id: endpoint
+    attributes:
+      label: Affected Endpoint
+      description: Which endpoint or function is slow?
+      placeholder: 'POST /v1/speech, client.pipeline(), etc.'
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Metrics
+      description: Include latency numbers, throughput, memory usage, or CPU.
+      placeholder: |
+        - p50: X ms
+        - p95: Y ms
+        - Memory: Z MB
+        - Under load: ...
+    validations:
+      required: true
+  - type: textarea
+    id: benchmark
+    attributes:
+      label: Reproduction Steps
+      description: How can we measure this ourselves?
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Performance
+      description: What latency/memory targets should we hit?

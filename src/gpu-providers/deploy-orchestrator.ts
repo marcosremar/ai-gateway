@@ -5,7 +5,7 @@
  * in ai-gateway. The gateway-server.ts imports these and wires them to HTTP endpoints.
  */
 
-import fs from 'fs';
+import { readFile, writeFile, mkdir, access } from 'fs/promises';
 import path from 'path';
 import type { GpuProviderClient, ProviderCredentials } from './types';
 
@@ -64,11 +64,18 @@ export class ProviderCooldownTracker {
   ) {}
 
   /** Load persisted cooldowns from a JSON file. Ignores expired entries. */
-  loadFromFile(filePath: string): void {
+  async loadFromFile(filePath: string): Promise<void> {
     this.persistPath = filePath;
     try {
-      if (!fs.existsSync(filePath)) return;
-      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, CooldownEntry>;
+      let fileExists: boolean;
+      try {
+        await access(filePath);
+        fileExists = true;
+      } catch {
+        fileExists = false;
+      }
+      if (!fileExists) return;
+      const data = JSON.parse(await readFile(filePath, 'utf-8')) as Record<string, CooldownEntry>;
       const now = Date.now();
       for (const [name, cd] of Object.entries(data)) {
         if (cd.cooldownUntilMs > now) {
@@ -79,15 +86,15 @@ export class ProviderCooldownTracker {
   }
 
   /** Persist current cooldowns to the configured file. */
-  private persist(): void {
+  private async persist(): Promise<void> {
     if (!this.persistPath) return;
     try {
-      fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
+      await mkdir(path.dirname(this.persistPath), { recursive: true });
       const obj: Record<string, CooldownEntry> = {};
       for (const [name, cd] of this.cooldowns) {
         obj[name] = cd;
       }
-      fs.writeFileSync(this.persistPath, JSON.stringify(obj, null, 2));
+      await writeFile(this.persistPath, JSON.stringify(obj, null, 2));
     } catch { /* best-effort */ }
   }
 
@@ -111,7 +118,7 @@ export class ProviderCooldownTracker {
     return this.cooldowns.get(name)?.failCount ?? 0;
   }
 
-  recordFailure(name: string): void {
+  async recordFailure(name: string): Promise<void> {
     const now = Date.now();
     const existing = this.cooldowns.get(name);
     const failCount = (existing?.failCount ?? 0) + 1;
@@ -141,11 +148,11 @@ export class ProviderCooldownTracker {
       cooldownUntilMs: now + cooldownMs,
       failCount,
     });
-    this.persist();
+    await this.persist();
   }
 
   /** Record a billing/balance failure — longer cooldown, capped at MAX_COOLDOWN_MS. */
-  recordBillingFailure(name: string): void {
+  async recordBillingFailure(name: string): Promise<void> {
     const BILLING_COOLDOWN_MS = Math.min(60 * 60_000, this.maxCooldownMs); // 1h desired, capped
     const existing = this.cooldowns.get(name);
     const failCount = (existing?.failCount ?? 0) + 1;
@@ -154,14 +161,14 @@ export class ProviderCooldownTracker {
       cooldownUntilMs: Date.now() + BILLING_COOLDOWN_MS,
       failCount,
     });
-    this.persist();
+    await this.persist();
   }
 
-  recordSuccess(name: string): boolean {
+  async recordSuccess(name: string): Promise<boolean> {
     const had = this.cooldowns.has(name);
     this.cooldowns.delete(name);
     this.failureHistory.delete(name); // Clear rolling failure history on success
-    if (had) this.persist();
+    if (had) await this.persist();
     return had;
   }
 

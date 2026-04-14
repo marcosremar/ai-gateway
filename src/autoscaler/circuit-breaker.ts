@@ -174,15 +174,16 @@ export class TierCircuitBreaker {
   /** Get circuit states for all tracked tiers. */
   async getAll(): Promise<Map<number, CircuitState>> {
     const result = new Map<number, CircuitState>();
-    await this.store.scan('circuit:*', async (keys) => {
-      for (const key of keys) {
-        const idx = parseInt(key.replace('circuit:', ''), 10);
-        if (!isNaN(idx)) {
-          result.set(idx, await this.getState(idx));
-        }
+    const keys: string[] = [];
+    // Collect keys synchronously
+    this.store.scan('circuit:*', (k) => { keys.push(...k); });
+    // Process asynchronously
+    for (const key of keys) {
+      const idx = parseInt(key.replace('circuit:', ''), 10);
+      if (!isNaN(idx)) {
+        result.set(idx, await this.getState(idx));
       }
-      return true;
-    });
+    }
     return result;
   }
 

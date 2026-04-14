@@ -1946,7 +1946,7 @@ export async function startDeployLoop(
 
 // ── Provider Cooldown (persisted to ~/.babelcast/cooldowns.json) ─────────────
 export const cooldownTracker = new ProviderCooldownTracker();
-cooldownTracker.loadFromFile(join(homedir(), '.babelcast', 'cooldowns.json'));
+void cooldownTracker.loadFromFile(join(homedir(), '.babelcast', 'cooldowns.json'));
 {
   const active = cooldownTracker.getActiveCooldowns();
   const names = Object.keys(active);
@@ -2283,7 +2283,7 @@ export async function startDeployRace(
                 log.log(`[race] Winner: deployId=${deployState.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} provider=${c.tier.name} gpu=${c.gpuType} t=${Math.round(durationMs / 1000)}s`);
                 logGpuEvent('deploy_ready', c.tier.name, true, { durationMs, metadata: { endpoint: localEndpoint, gpuType: c.gpuType, raceCount: candidates.length } });
                 upsertHostReputation({ provider: c.tier.name, gpuType: c.gpuType, providerMeta: c.providerMeta, success: true, bootTimeS: Math.round(durationMs / 1000), dockerImage });
-                if (cooldownTracker.recordSuccess(c.tier.name)) {
+                if (await cooldownTracker.recordSuccess(c.tier.name)) {
                   logGpuEvent('cooldown_cleared', c.tier.name, true, { durationMs });
                 }
                 emitGatewayEvent('gpu.deployed', {
@@ -2632,7 +2632,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
           dockerImage,
           costUsd: deployState.costPerHr > 0 ? deployState.costPerHr * (durationMs / 1000 / 3600) : undefined,
         });
-        if (cooldownTracker.recordSuccess(tier.name)) {
+        if (await cooldownTracker.recordSuccess(tier.name)) {
           logGpuEvent('cooldown_cleared', tier.name, true, { durationMs });
         }
         emitGatewayEvent('gpu.deployed', {
@@ -2701,10 +2701,10 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
         failureCategory,
       });
       if (failureCategory === 'billing') {
-        cooldownTracker.recordBillingFailure(tier.name);
+        await cooldownTracker.recordBillingFailure(tier.name);
         log.log(`[gpu] ${tier.name} billing cooldown set: ${cooldownTracker.getRemainingSeconds(tier.name)}s — add funds to resume`);
       } else {
-        cooldownTracker.recordFailure(tier.name);
+        await cooldownTracker.recordFailure(tier.name);
         log.log(`[gpu] ${tier.name} cooldown set: ${cooldownTracker.getRemainingSeconds(tier.name)}s (fail #${cooldownTracker.getFailCount(tier.name)})`);
       }
     }

@@ -1,0 +1,61 @@
+# Default values for AI Gateway
+replicaCount: 1
+
+image:
+  repository: marcosremar/ai-gateway
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 4000
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: ai-gateway.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+env:
+  NODE_ENV: "production"
+  PORT: "4000"
+  CORS_ORIGINS: "*"
+  RATE_LIMIT_RPM: "6000"
+  CANARY_DEPLOY: "1"
+  LOG_LEVEL: "warn"
+
+secrets:
+  groqApiKey: ""
+  gatewayApiKeys: []
+
+healthCheck:
+  path: /health
+  intervalSeconds: 10
+  timeoutSeconds: 5
+  initialDelaySeconds: 30
+
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 15s

@@ -1,0 +1,78 @@
+/**
+ * TypeDoc Configuration for AI Gateway
+ *
+ * Generates API reference documentation from TypeScript source code.
+ *
+ * Usage:
+ *   bunx typedoc
+ *   bun run docs:api  # via package.json script
+ *
+ * Output: docs/api/ (static HTML site)
+ */
+
+/** @type {import('typedoc').TypeDocOptions} */
+export default {
+  // Input
+  entryPoints: [
+    'src/index.ts',
+    'src/errors/index.ts',
+    'src/constants/index.ts',
+    'src/contracts/index.ts',
+    'src/config/index.ts',
+    'src/utils/index.ts',
+    'src/audit/index.ts',
+    'src/webhooks/index.ts',
+    'src/memory-watcher/index.ts',
+    'src/connection-pool/index.ts',
+    'src/lazy-provider/index.ts',
+    'src/chaos/index.ts',
+    'src/profiler/index.ts',
+    'src/di-container/index.ts',
+    'src/middleware/rbac.ts',
+    'src/middleware/sanitization.ts',
+    'src/middleware/status-page.ts',
+    'src/middleware/api-versioning.ts',
+    'src/middleware/compression.ts',
+    'src/middleware/per-key-rate-limit.ts',
+    'src/observability/otel.ts',
+    'src/proxy/routes/status.ts',
+    'src/types/index.ts',
+  ],
+
+  // Output
+  out: 'docs/api',
+  name: 'AI Gateway API Reference',
+  readme: 'README.md',
+
+  // Theme
+  theme: 'default',
+  lightHighlightTheme: 'light-plus',
+  darkHighlightTheme: 'dark-plus',
+
+  // Behavior
+  excludePrivate: true,
+  excludeProtected: true,
+  excludeInternal: true,
+  excludeExternals: true,
+  excludeNotDocumented: false,
+
+  // Validation
+  validation: {
+    notDocumented: true,
+    invalidLink: true,
+    notExported: false,
+  },
+
+  // Plugin
+  plugin: ['typedoc-plugin-markdown'],
+
+  // Markdown output for VitePress integration
+  githubPages: false,
+  hideGenerator: true,
+  sort: ['source-order', 'alphabetical'],
+  categorizeByGroup: true,
+
+  // Custom
+  includeVersion: true,
+  sourceLinkTemplate: 'https://github.com/marcosremar/ai-gateway/blob/main/{path}#L{line}',
+};

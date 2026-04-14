@@ -1,0 +1,21 @@
+apiVersion: v2
+name: ai-gateway
+description: AI Gateway for GPU autoscaling and AI provider orchestration
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+maintainers:
+  - name: AI Gateway Team
+    email: team@ai-gateway.dev
+
+keywords:
+  - ai
+  - gpu
+  - autoscaling
+  - llm
+  - speech-to-text
+  - text-to-speech
+
+sources:
+  - https://github.com/marcosremar/ai-gateway

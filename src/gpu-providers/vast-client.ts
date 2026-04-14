@@ -24,8 +24,11 @@ import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
 import os from 'os';
 import path from 'path';
-import fs from 'fs';
+import { readFile, writeFile, mkdir, access } from 'fs/promises';
 import { spawn } from 'child_process';
+import { createLogger } from '../logger';
+
+const log = createLogger('vast-client');
 
 const VAST_API_BASE = process.env.VAST_API_BASE || 'https://console.vast.ai/api/v0';
 
@@ -119,9 +122,17 @@ function stripPrefix(id: string): { rawId: string; type: 'instance' | 'endpoint'
 }
 
 /** Load persisted unstable hosts from disk. */
-function loadHostReputation(): Map<string, number> {
+async function loadHostReputation(): Promise<Map<string, number>> {
   try {
-    const raw = fs.readFileSync(REPUTATION_PATH, 'utf8');
+    let fileExists: boolean;
+    try {
+      await access(REPUTATION_PATH);
+      fileExists = true;
+    } catch {
+      fileExists = false;
+    }
+    if (!fileExists) return new Map();
+    const raw = await readFile(REPUTATION_PATH, 'utf8');
     const data = JSON.parse(raw) as Record<string, number>;
     const map = new Map<string, number>();
     const now = Date.now();
@@ -130,17 +141,24 @@ function loadHostReputation(): Map<string, number> {
       if (now - ts < UNSTABLE_HOST_COOLDOWN_MS) map.set(ip, ts);
     }
     return map;
-  } catch { return new Map(); }
+  } catch (err) { log.debug({ error: err instanceof Error ? err.message : String(err) }, 'loadHostReputation failed (intentionally ignored)'); return new Map(); }
 }
 
 /** Save unstable hosts to disk (debounced by caller). */
-function saveHostReputation(hosts: Map<string, number>): void {
+async function saveHostReputation(hosts: Map<string, number>): Promise<void> {
   try {
-    if (!fs.existsSync(REPUTATION_DIR)) fs.mkdirSync(REPUTATION_DIR, { recursive: true });
+    let dirExists: boolean;
+    try {
+      await access(REPUTATION_DIR);
+      dirExists = true;
+    } catch {
+      dirExists = false;
+    }
+    if (!dirExists) await mkdir(REPUTATION_DIR, { recursive: true });
     const obj: Record<string, number> = {};
     for (const [ip, ts] of hosts) obj[ip] = ts;
-    fs.writeFileSync(REPUTATION_PATH, JSON.stringify(obj, null, 2));
-  } catch { /* ignore write errors */ }
+    await writeFile(REPUTATION_PATH, JSON.stringify(obj, null, 2));
+  } catch (err) { log.debug({ error: err instanceof Error ? err.message : String(err) }, 'saveHostReputation failed (intentionally ignored)'); }
 }
 
 /** Offer cache entry */
@@ -200,17 +218,21 @@ export class VastClient extends AbstractGpuProvider {
 
   constructor(opts?: VastClientOptions) {
     super(opts);
-    // P1b: Load persisted host reputation from disk
-    this._unstableHosts = loadHostReputation();
-    if (this._unstableHosts.size > 0) {
-      this.log.log(`[vast] Loaded ${this._unstableHosts.size} unstable hosts from disk`);
-    }
-    // Load aggressive-blacklist per-host failure counters
-    this._loadHostFailures();
-    if (this._hostFailures.size > 0) {
-      const banned = [...this._hostFailures.values()].filter(r => r.bannedUntilMs > Date.now()).length;
-      this.log.log(`[vast] Loaded ${this._hostFailures.size} host failure records from disk (${banned} currently banned)`);
-    }
+    // P1b: Load persisted host reputation from disk (fire-and-forget)
+    this._unstableHosts = new Map();
+    loadHostReputation().then((map) => {
+      this._unstableHosts = map;
+      if (map.size > 0) {
+        this.log.log(`[vast] Loaded ${map.size} unstable hosts from disk`);
+      }
+    }).catch(() => { /* ignore */ });
+    // Load aggressive-blacklist per-host failure counters (fire-and-forget)
+    this._loadHostFailures().then(() => {
+      if (this._hostFailures.size > 0) {
+        const banned = [...this._hostFailures.values()].filter(r => r.bannedUntilMs > Date.now()).length;
+        this.log.log(`[vast] Loaded ${this._hostFailures.size} host failure records from disk (${banned} currently banned)`);
+      }
+    }).catch(() => { /* ignore */ });
   }
 
   /** Check if any requested GPU type requires Blackwell CUDA (12.8+). */
@@ -236,9 +258,9 @@ export class VastClient extends AbstractGpuProvider {
   /** Debounced save of host reputation to disk. */
   private _persistReputation(): void {
     if (this._reputationSaveTimer) clearTimeout(this._reputationSaveTimer);
-    this._reputationSaveTimer = setTimeout(() => {
+    this._reputationSaveTimer = setTimeout(async () => {
       this._reputationSaveTimer = null;
-      saveHostReputation(this._unstableHosts);
+      await saveHostReputation(this._unstableHosts);
     }, 500);
   }
 
@@ -256,10 +278,17 @@ export class VastClient extends AbstractGpuProvider {
   // ── Aggressive host blacklist (escalating cooldowns) ────────────────────────
 
   /** Load per-host failure counters from disk. Drops stale/expired records. */
-  private _loadHostFailures(): void {
+  private async _loadHostFailures(): Promise<void> {
     try {
-      if (!fs.existsSync(this._hostFailuresPath)) return;
-      const raw = fs.readFileSync(this._hostFailuresPath, 'utf8');
+      let fileExists: boolean;
+      try {
+        await access(this._hostFailuresPath);
+        fileExists = true;
+      } catch {
+        fileExists = false;
+      }
+      if (!fileExists) return;
+      const raw = await readFile(this._hostFailuresPath, 'utf8');
       const data = JSON.parse(raw) as Record<string, HostFailureRecord>;
       const now = Date.now();
       for (const [ip, rec] of Object.entries(data)) {
@@ -284,13 +313,20 @@ export class VastClient extends AbstractGpuProvider {
   /** Persist per-host failure counters to disk (debounced). */
   private _persistHostFailures(): void {
     if (this._hostFailuresSaveTimer) clearTimeout(this._hostFailuresSaveTimer);
-    this._hostFailuresSaveTimer = setTimeout(() => {
+    this._hostFailuresSaveTimer = setTimeout(async () => {
       this._hostFailuresSaveTimer = null;
       try {
-        if (!fs.existsSync(HOST_BLACKLIST_DIR)) fs.mkdirSync(HOST_BLACKLIST_DIR, { recursive: true });
+        let dirExists: boolean;
+        try {
+          await access(HOST_BLACKLIST_DIR);
+          dirExists = true;
+        } catch {
+          dirExists = false;
+        }
+        if (!dirExists) await mkdir(HOST_BLACKLIST_DIR, { recursive: true });
         const obj: Record<string, HostFailureRecord> = {};
         for (const [ip, rec] of this._hostFailures) obj[ip] = rec;
-        fs.writeFileSync(this._hostFailuresPath, JSON.stringify(obj, null, 2));
+        await writeFile(this._hostFailuresPath, JSON.stringify(obj, null, 2));
       } catch (err) {
         this.log.debug(`[vast] _persistHostFailures failed: ${this.errMsg(err)}`);
       }
@@ -1740,12 +1776,10 @@ export class VastClient extends AbstractGpuProvider {
             const text = await logRes.text();
             if (text.trim()) return text;
           }
-        } catch { /* not ready yet */ }
+        } catch (err) { this.log.debug({ error: err instanceof Error ? err.message : String(err) }, 'S3 log fetch not ready yet'); }
       }
       return null;
-    } catch {
-      return null;
-    }
+    } catch (err) { this.log.debug({ error: err instanceof Error ? err.message : String(err) }, '_fetchContainerLogsViaSsh failed'); return null; }
   }
 
   /**
@@ -1784,7 +1818,7 @@ export class VastClient extends AbstractGpuProvider {
               const text = await logRes.text();
               if (text.trim()) return text;
             }
-          } catch { /* S3 not ready yet, retry */ }
+          } catch (err) { this.log.debug({ error: err instanceof Error ? err.message : String(err), attempt }, 'S3 not ready yet, retry'); }
         }
       }
 
@@ -1843,9 +1877,15 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
         settled = true;
         if (timer) clearTimeout(timer);
         if (proc) {
-          try { proc.kill('SIGTERM'); } catch { /* already dead */ }
+          try { proc.kill('SIGTERM'); } catch (err) {
+            // Intentionally ignored — process already dead or not our child
+            log.debug({ error: err instanceof Error ? err.message : String(err) }, 'SIGTERM kill failed (intentionally ignored)');
+          }
           const p = proc;
-          setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* already dead */ } }, 1_000);
+          setTimeout(() => { try { p.kill('SIGKILL'); } catch (err) {
+            // Intentionally ignored — process already dead or not our child
+            log.debug({ error: err instanceof Error ? err.message : String(err) }, 'SIGKILL kill failed (intentionally ignored)');
+          } }, 1_000);
         }
         resolve(val);
       };
@@ -2453,12 +2493,8 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
         const res2 = await fetch(endpoint, { method: 'GET', signal: ctl2.signal }).catch(() => null);
         clearTimeout(t2);
         return res2 !== null;
-      } catch {
-        return false;
-      }
-    } catch {
-      return false;
-    }
+      } catch (err) { this.log.debug({ error: err instanceof Error ? err.message : String(err) }, 'L7 health check HTTP failed'); return false; }
+    } catch (err) { this.log.debug({ error: err instanceof Error ? err.message : String(err) }, 'L7 health check failed'); return false; }
   }
 
   /**
@@ -2604,9 +2640,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
       const balance = typeof data.credit === 'number' ? data.credit : null;
       if (balance === null) return null;
       return { balance };
-    } catch {
-      return null;
-    }
+    } catch (err) { this.log.debug({ error: err instanceof Error ? err.message : String(err) }, '_getBalance failed'); return null; }
   }
 
   /**

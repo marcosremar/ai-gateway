@@ -76,7 +76,7 @@ export interface StreamingSTTConfig {
   /** Max text length allowed in transcription response (default 10000). */
   maxTextLength?: number;
   /** Max audio buffer size in bytes (default 10MB). */
-  maxAudioBufferBytes?: number;
+  maxBufferBytes?: number;
 }
 
 export type StreamingSTTProvider = 'gpu' | 'qwen3-asr' | 'fireworks';
@@ -129,7 +129,7 @@ export class StreamingSTTBackend {
     this._logger = options?.logger;
     this._connectTimeoutMs = options?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this._maxTextLength = options?.maxTextLength ?? DEFAULT_MAX_TEXT_LENGTH;
-    this._maxBufferBytes = options?.maxAudioBufferBytes ?? DEFAULT_MAX_AUDIO_BUFFER_BYTES;
+    this._maxBufferBytes = options?.maxBufferBytes ?? DEFAULT_MAX_AUDIO_BUFFER_BYTES;
     this._textDecoder = new TextDecoder();
   }
 
@@ -372,7 +372,7 @@ export class StreamingSTTRouter {
       logger: this.config.logger,
       connectTimeoutMs: this.config.connectTimeoutMs,
       maxTextLength: this.config.maxTextLength,
-      maxBufferBytes: this.config.maxAudioBufferBytes,
+      maxBufferBytes: this.config.maxBufferBytes,
     };
 
     for (const id of this.order) {

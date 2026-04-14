@@ -369,6 +369,11 @@ export const translationDefaults: AIProfile = {
   maxTokens: 150,
 };
 
+// Backward-compat aliases — renamed in service-centric refactor but still imported by ai-handlers/pipeline-runner
+export const groqProfile = groqDefaults;
+export const ollamaProfile = ollamaDefaults;
+export const translationProfile = translationDefaults;
+
 // ── Intelligence modules ────────────────────────────────────────────────────
 export const performanceRanker = new PerformanceRanker();
 export const adaptiveTimeout = new AdaptiveTimeoutCalculator();

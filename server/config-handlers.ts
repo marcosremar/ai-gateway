@@ -42,7 +42,7 @@ export async function handleGetProviderConfig(req: IncomingMessage, res: ServerR
   setRequestIdHeader(res, requestId);
 
   try {
-    const config = loadProviderConfig();
+    const config = await loadProviderConfig();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(config));
   } catch (err) {
@@ -77,11 +77,11 @@ export async function handlePatchProviderConfig(req: IncomingMessage, res: Serve
   try {
     const changedKeys = Object.keys(body).filter(k => body[k] !== undefined);
     auditLog('patch_config', requestId, { changedKeys, appCount: (body as any).apps?.length });
-    const updated = patchProviderConfig(body as Parameters<typeof patchProviderConfig>[0]);
+    const updated = await patchProviderConfig(body as Parameters<typeof patchProviderConfig>[0]);
     // Apply changed chains to runtime translationDefaults
     if (body.pipelineStt && Array.isArray(body.pipelineStt) && body.pipelineStt.length > 0) {
       updateActivePipeline({ stt: body.pipelineStt as PipelineChainEntry[] }, 'handlePatchProviderConfig:stt');
-      reloadStreamingSTTRouter();
+      await reloadStreamingSTTRouter();
     }
     if (body.pipelineLlm && Array.isArray(body.pipelineLlm) && body.pipelineLlm.length > 0) {
       updateActivePipeline({ llm: body.pipelineLlm as PipelineChainEntry[] }, 'handlePatchProviderConfig:llm');
@@ -280,7 +280,7 @@ export async function handleCreateProfile(req: IncomingMessage, res: ServerRespo
     return;
   }
 
-  const config = loadProviderConfig();
+  const config = await loadProviderConfig();
   const existing = config.apps.find(p => p.id === id);
 
   // Start from existing app (preserves services, latencyTargetsMs, loadBalanceStrategy,
@@ -315,7 +315,7 @@ export async function handleCreateProfile(req: IncomingMessage, res: ServerRespo
     config.apps.push(app);
   }
 
-  saveProviderConfig(config);
+  await saveProviderConfig(config);
   console.log(`[config] App ${idx >= 0 ? 'updated' : 'created'}: ${id} (${name})`);
 
   res.writeHead(idx >= 0 ? 200 : 201, { 'Content-Type': 'application/json' });
@@ -338,7 +338,7 @@ export async function handleDeleteProfile(req: IncomingMessage, res: ServerRespo
     return;
   }
 
-  const config = loadProviderConfig();
+  const config = await loadProviderConfig();
   const before = config.apps.length;
   config.apps = config.apps.filter(p => p.id !== id);
 
@@ -353,7 +353,7 @@ export async function handleDeleteProfile(req: IncomingMessage, res: ServerRespo
     config.activeAppId = null;
   }
 
-  saveProviderConfig(config);
+  await saveProviderConfig(config);
   console.log(`[config] App deleted: ${id}`);
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -371,12 +371,12 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
 
   const { id } = body as { id?: string | null };
 
-  const config = loadProviderConfig();
+  const config = await loadProviderConfig();
 
   // Allow deactivating by passing null/empty id
   if (!id) {
     config.activeAppId = null;
-    saveProviderConfig(config);
+    await saveProviderConfig(config);
     console.log('[config] App deactivated (no active app)');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(config));
@@ -405,9 +405,7 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
     console.log(`[config] Applied gpuDeploy from app: image=${app.gpuDeploy.dockerImage}, region=${app.gpuDeploy.region}, timeout=${app.gpuDeploy.timeoutMin}min, race=${app.gpuDeploy.raceCount ?? 1}`);
   }
 
-  saveProviderConfig(config);
-
-  // ── Apply latency targets from the activated app ──
+  await saveProviderConfig(config);
   applyAppLatencyTargets(id, config.apps);
 
   // ── Apply chains + extended fields to runtime translationDefaults ──
@@ -424,7 +422,7 @@ export async function handleActivateProfile(req: IncomingMessage, res: ServerRes
   updateActivePipeline(appPatch, `handleActivateApp:${id}`);
 
   // Rebuild streaming STT router for new STT chain
-  reloadStreamingSTTRouter();
+  await reloadStreamingSTTRouter();
 
   // ── Broadcast app activation to all WS clients (item #2) ──
   broadcastWs({
@@ -472,7 +470,7 @@ export async function handlePatchLabsFlags(req: IncomingMessage, res: ServerResp
   catch (e) { handleBodyError(res, e); return; }
 
   try {
-    const updated = setLabsFlags(body as Parameters<typeof setLabsFlags>[0]);
+    const updated = await setLabsFlags(body as Parameters<typeof setLabsFlags>[0]);
     console.log(`[config] Labs flags updated:`, JSON.stringify(updated));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(updated));

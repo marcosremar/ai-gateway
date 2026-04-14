@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Gateway Playground</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+    header { text-align: center; padding: 40px 0; border-bottom: 1px solid #334155; margin-bottom: 30px; }
+    header h1 { font-size: 2rem; margin-bottom: 8px; background: linear-gradient(135deg, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    header p { color: #94a3b8; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+    .card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
+    .card h2 { font-size: 1.1rem; margin-bottom: 16px; color: #f1f5f9; display: flex; align-items: center; gap: 8px; }
+    .card h2 .icon { font-size: 1.2rem; }
+    label { display: block; font-size: 0.875rem; color: #94a3b8; margin-bottom: 4px; }
+    input, textarea, select { width: 100%; padding: 8px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; font-size: 0.875rem; margin-bottom: 12px; }
+    textarea { min-height: 80px; resize: vertical; font-family: 'SF Mono', Monaco, monospace; }
+    button { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 0.875rem; cursor: pointer; transition: background 0.2s; }
+    button:hover { background: #2563eb; }
+    button:disabled { background: #475569; cursor: not-allowed; }
+    button.secondary { background: #475569; }
+    button.secondary:hover { background: #334155; }
+    .response { background: #0f172a; border-radius: 6px; padding: 12px; font-family: 'SF Mono', Monaco, monospace; font-size: 0.8rem; max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; margin-top: 12px; }
+    .response.success { border-left: 3px solid #22c55e; }
+    .response.error { border-left: 3px solid #ef4444; }
+    .response.loading { border-left: 3px solid #f59e0b; color: #f59e0b; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .status-dot.healthy { background: #22c55e; }
+    .status-dot.unhealthy { background: #ef4444; }
+    .status-dot.unknown { background: #f59e0b; }
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
+    .metric { text-align: center; padding: 12px; background: #0f172a; border-radius: 6px; }
+    .metric-value { font-size: 1.5rem; font-weight: 600; color: #3b82f6; }
+    .metric-label { font-size: 0.75rem; color: #94a3b8; margin-top: 4px; }
+    .presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .preset { padding: 4px 12px; background: #334155; border-radius: 999px; font-size: 0.75rem; cursor: pointer; }
+    .preset:hover { background: #475569; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🚀 AI Gateway Playground</h1>
+      <p>Test all gateway features interactively</p>
+    </header>
+
+    <div class="grid">
+      <!-- Health Status -->
+      <div class="card">
+        <h2><span class="icon">💚</span> System Health</h2>
+        <div id="health-status">
+          <p>Loading...</p>
+        </div>
+        <div class="metrics" id="metrics"></div>
+      </div>
+
+      <!-- Speech Pipeline -->
+      <div class="card">
+        <h2><span class="icon">🎙️</span> Speech Pipeline</h2>
+        <div class="presets">
+          <span class="preset" onclick="setPreset('fr-en')">FR → EN</span>
+          <span class="preset" onclick="setPreset('en-fr')">EN → FR</span>
+          <span class="preset" onclick="setPreset('es-en')">ES → EN</span>
+        </div>
+        <label>Source Language</label>
+        <input type="text" id="source-lang" value="fr" placeholder="fr">
+        <label>Target Language</label>
+        <input type="text" id="target-lang" value="en" placeholder="en">
+        <label>Speaker</label>
+        <select id="speaker">
+          <option value="Ryan">Ryan</option>
+          <option value="Sarah">Sarah</option>
+        </select>
+        <label>Audio File</label>
+        <input type="file" id="audio-file" accept="audio/*">
+        <button onclick="testSpeech()" id="speech-btn">Test Speech Pipeline</button>
+        <div class="response" id="speech-response"></div>
+      </div>
+
+      <!-- Chat/LLM -->
+      <div class="card">
+        <h2><span class="icon">💬</span> Chat / LLM</h2>
+        <label>System Prompt</label>
+        <textarea id="system-prompt" placeholder="You are a helpful assistant.">You are a helpful assistant.</textarea>
+        <label>Message</label>
+        <textarea id="user-message" placeholder="Hello, how are you?">Hello, how are you?</textarea>
+        <label>Model</label>
+        <select id="model">
+          <option value="llama-3.3-70b-versatile">Llama 3.3 70B</option>
+          <option value="llama-3.1-8b-instant">Llama 3.1 8B</option>
+        </select>
+        <button onclick="testChat()" id="chat-btn">Test Chat</button>
+        <div class="response" id="chat-response"></div>
+      </div>
+
+      <!-- STT -->
+      <div class="card">
+        <h2><span class="icon">📝</span> Speech-to-Text</h2>
+        <label>Audio File</label>
+        <input type="file" id="stt-file" accept="audio/*">
+        <label>Language (optional)</label>
+        <input type="text" id="stt-lang" placeholder="fr">
+        <button onclick="testSTT()" id="stt-btn">Test STT</button>
+        <div class="response" id="stt-response"></div>
+      </div>
+
+      <!-- TTS -->
+      <div class="card">
+        <h2><span class="icon">🔊</span> Text-to-Speech</h2>
+        <label>Text</label>
+        <textarea id="tts-text" placeholder="Hello world">Hello world, this is a test of the text-to-speech system.</textarea>
+        <label>Voice</label>
+        <input type="text" id="tts-voice" value="canopylabs/orpheus-v1-english">
+        <button onclick="testTTS()" id="tts-btn">Test TTS</button>
+        <div class="response" id="tts-response"></div>
+      </div>
+
+      <!-- GPU Status -->
+      <div class="card">
+        <h2><span class="icon">🎮</span> GPU Management</h2>
+        <div id="gpu-status">
+          <p>Loading...</p>
+        </div>
+        <div style="margin-top: 12px; display: flex; gap: 8px;">
+          <button onclick="testGpuStatus()" class="secondary">Refresh GPU Status</button>
+          <button onclick="testGpuOffers()" class="secondary">Check Offers</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const BASE_URL = window.location.origin;
+
+    async function api(path, options = {}) {
+      const responseEl = options.responseEl;
+      if (responseEl) {
+        responseEl.textContent = 'Loading...';
+        responseEl.className = 'response loading';
+      }
+
+      try {
+        const res = await fetch(`${BASE_URL}${path}`, options);
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.error?.message || `HTTP ${res.status}`);
+        }
+
+        if (responseEl) {
+          responseEl.textContent = JSON.stringify(data, null, 2);
+          responseEl.className = 'response success';
+        }
+
+        return data;
+      } catch (err) {
+        if (responseEl) {
+          responseEl.textContent = `Error: ${err.message}`;
+          responseEl.className = 'response error';
+        }
+        throw err;
+      }
+    }
+
+    async function loadHealth() {
+      try {
+        const data = await api('/health');
+        const healthEl = document.getElementById('health-status');
+        healthEl.innerHTML = `
+          <p><span class="status-dot ${data.healthy ? 'healthy' : 'unhealthy'}"></span> ${data.healthy ? 'Healthy' : 'Unhealthy'}</p>
+        `;
+      } catch {
+        document.getElementById('health-status').innerHTML = '<p><span class="status-dot unhealthy"></span> Unreachable</p>';
+      }
+    }
+
+    async function testSpeech() {
+      const file = document.getElementById('audio-file').files[0];
+      if (!file) {
+        alert('Please select an audio file');
+        return;
+      }
+
+      const sourceLang = document.getElementById('source-lang').value;
+      const targetLang = document.getElementById('target-lang').value;
+      const speaker = document.getElementById('speaker').value;
+
+      try {
+        const data = await api(
+          `/v1/speech?source=${sourceLang}&target=${targetLang}&speaker=${speaker}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'audio/wav' },
+            body: file,
+            responseEl: document.getElementById('speech-response'),
+          }
+        );
+
+        document.getElementById('speech-btn').disabled = false;
+        document.getElementById('speech-btn').textContent = 'Test Speech Pipeline';
+      } catch (err) {
+        document.getElementById('speech-btn').disabled = false;
+      }
+    }
+
+    async function testChat() {
+      const systemPrompt = document.getElementById('system-prompt').value;
+      const userMessage = document.getElementById('user-message').value;
+      const model = document.getElementById('model').value;
+
+      document.getElementById('chat-btn').disabled = true;
+      document.getElementById('chat-btn').textContent = 'Loading...';
+
+      try {
+        await api('/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userMessage },
+            ],
+            temperature: 0.7,
+          }),
+          responseEl: document.getElementById('chat-response'),
+        });
+      } finally {
+        document.getElementById('chat-btn').disabled = false;
+        document.getElementById('chat-btn').textContent = 'Test Chat';
+      }
+    }
+
+    async function testSTT() {
+      const file = document.getElementById('stt-file').files[0];
+      if (!file) {
+        alert('Please select an audio file');
+        return;
+      }
+
+      const lang = document.getElementById('stt-lang').value;
+      const url = `/v1/audio/transcriptions${lang ? `?language=${lang}` : ''}`;
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('model', 'whisper-large-v3');
+
+      try {
+        await fetch(`${BASE_URL}${url}`, {
+          method: 'POST',
+          body: formData,
+        }).then(async (res) => {
+          const data = await res.json();
+          const el = document.getElementById('stt-response');
+          el.textContent = JSON.stringify(data, null, 2);
+          el.className = res.ok ? 'response success' : 'response error';
+        });
+      } finally {
+        document.getElementById('stt-btn').disabled = false;
+      }
+    }
+
+    async function testTTS() {
+      const text = document.getElementById('tts-text').value;
+      const voice = document.getElementById('tts-voice').value;
+
+      try {
+        await api('/v1/audio/speech', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ input: text, voice }),
+          responseEl: document.getElementById('tts-response'),
+        });
+      } finally {
+        document.getElementById('tts-btn').disabled = false;
+      }
+    }
+
+    async function testGpuStatus() {
+      try {
+        const data = await api('/v1/gpu/status');
+        const el = document.getElementById('gpu-status');
+        el.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+      } catch {
+        document.getElementById('gpu-status').innerHTML = '<p>GPU not available</p>';
+      }
+    }
+
+    async function testGpuOffers() {
+      try {
+        const data = await api('/v1/gpu/offers');
+        alert(`GPU Offers: ${JSON.stringify(data, null, 2)}`);
+      } catch {
+        alert('Failed to fetch GPU offers');
+      }
+    }
+
+    function setPreset(preset) {
+      const presets = {
+        'fr-en': { source: 'fr', target: 'en' },
+        'en-fr': { source: 'en', target: 'fr' },
+        'es-en': { source: 'es', target: 'en' },
+      };
+      const p = presets[preset];
+      if (p) {
+        document.getElementById('source-lang').value = p.source;
+        document.getElementById('target-lang').value = p.target;
+      }
+    }
+
+    // Load health on page load
+    loadHealth();
+    setInterval(loadHealth, 30_000); // Refresh every 30s
+  </script>
+</body>
+</html>
