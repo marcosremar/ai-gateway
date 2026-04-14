@@ -47,6 +47,20 @@ export async function sttRace(
     throw new Error('[stt-race] No STT providers configured');
   }
 
+  const maxAudioSizeBytes = options.maxAudioSizeBytes ?? 100 * 1024 * 1024;
+  if (!Number.isFinite(maxAudioSizeBytes) || maxAudioSizeBytes <= 0) {
+    throw new Error(`[stt-race] maxAudioSizeBytes must be positive, got ${maxAudioSizeBytes}`);
+  }
+  if (audio.byteLength > maxAudioSizeBytes) {
+    throw new Error(`[stt-race] Audio too large: ${audio.byteLength} > ${maxAudioSizeBytes}`);
+  }
+
+  if (options.timeoutMs !== undefined) {
+    if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
+      throw new Error(`[stt-race] timeoutMs must be positive, got ${options.timeoutMs}`);
+    }
+  }
+
   const t0 = Date.now();
   const abort = new AbortController();
   const timers: ReturnType<typeof setTimeout>[] = [];

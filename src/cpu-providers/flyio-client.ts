@@ -435,7 +435,7 @@ export class FlyioClient extends AbstractGpuProvider {
         signal: AbortSignal.timeout(TIMEOUTS.read),
       });
       if (!res.ok) return null;
-      return res.json() as Promise<FlyMachine>;
+      return (await res.json()) as FlyMachine;
     } catch {
       return null;
     }

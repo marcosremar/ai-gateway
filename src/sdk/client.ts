@@ -69,7 +69,13 @@ function isRetryableError(err: unknown): boolean {
   // TypeError = network failure (ECONNREFUSED, DNS, etc.)
   if (err instanceof TypeError) return true;
   const msg = err instanceof Error ? err.message : String(err);
-  return /ECONNREFUSED|ENOTFOUND|ECONNRESET|fetch failed|network/i.test(msg);
+  // Match broader set of network error patterns case-insensitively
+  return /ECONNREFUSED|ENOTFOUND|ECONNRESET|fetch failed|network|failed to fetch/i.test(msg);
+}
+
+function validatePositiveInt(value: number, name: string, defaultVal: number, max = Infinity): number {
+  if (!Number.isFinite(value) || value <= 0 || value > max) return defaultVal;
+  return Math.floor(value);
 }
 
 export class GatewaySDK {
@@ -79,7 +85,14 @@ export class GatewaySDK {
   private readonly groqApiKey: string;
 
   constructor(config: GatewayConfig) {
-    this.baseUrl = config.baseUrl.replace(/\/+$/, '');
+    if (!config.baseUrl) {
+      throw new TypeError('GatewaySDK: baseUrl is required');
+    }
+    let baseUrl = config.baseUrl.trim();
+    if (!/^https?:\/\/[^/\s]+/i.test(baseUrl)) {
+      throw new TypeError(`GatewaySDK: invalid baseUrl "${baseUrl}" - must be a valid HTTP(S) URL`);
+    }
+    this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.headers = config.apiKey
       ? { Authorization: `Bearer ${config.apiKey}` }
       : {};
@@ -244,6 +257,9 @@ export class GatewaySDK {
 
   /** Deploy a GPU pod (non-blocking — returns immediately, poll gpuStatus()). */
   async deployGpu(options: DeployOptions): Promise<DeployResponse> {
+    if (!options.apiKey?.trim()) {
+      throw new TypeError('deployGpu: options.apiKey is required');
+    }
     const res = await this.fetch('/v1/gpu/deploy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -351,12 +367,13 @@ export class GatewaySDK {
     return (data.instances ?? data) as GpuInstance[];
   }
 
-  /** Fetch GPU deployment logs (container stdout from running pod). Pass `filter` to grep-filter lines. */
-  async gpuLogs(filter?: string): Promise<string> {
+  /** Fetch GPU deployment logs (container stdout from running pod). Pass `filter` to grep-filter lines. Default max 512KB response. */
+  async gpuLogs(filter?: string, maxBytes = 512 * 1024): Promise<string> {
     const qs = filter ? `?filter=${encodeURIComponent(filter)}` : '';
     const res = await this.fetch(`/v1/gpu/logs${qs}`, { method: 'GET', timeout: this.timeouts.health });
     const data = await this.parseJson(res, '/v1/gpu/logs');
-    return (data.logs as string) ?? '';
+    const logs = (data.logs as string) ?? '';
+    return logs.slice(0, maxBytes);
   }
 
   /** Fetch persistent GPU event logs (JSONL file-based). */
@@ -481,9 +498,10 @@ export class GatewaySDK {
    * Requires endpoint's own API key (from vastListEndpoints()).
    */
   async vastRouteRequest(endpointName: string, endpointApiKey: string, cost = 100): Promise<{ url: string; reqnum: number; signature: string; requestId: string } | null> {
+    const validatedCost = validatePositiveInt(cost, 'cost', 100, 100000);
     const res = await this.fetch('/v1/gpu/vast/endpoints/route', {
       method: 'POST', timeout: 10_000,
-      body: JSON.stringify({ endpointName, endpointApiKey, cost }),
+      body: JSON.stringify({ endpointName, endpointApiKey, cost: validatedCost }),
     });
     const data = await this.parseJson(res, '/v1/gpu/vast/endpoints/route') as { available: boolean; url?: string; reqnum?: number; signature?: string; requestId?: string };
     if (!data.available || !data.url) return null;
@@ -766,10 +784,11 @@ export class GatewaySDK {
     return (data.requests ?? data) as Record<string, unknown>[];
   }
 
-  /** Get Prometheus-style metrics. */
-  async metrics(): Promise<string> {
+  /** Get Prometheus-style metrics. Default max 1MB response. */
+  async metrics(maxBytes = 1024 * 1024): Promise<string> {
     const res = await this.fetch('/metrics', { method: 'GET', timeout: this.timeouts.health });
-    return await res.text();
+    const text = await res.text();
+    return text.slice(0, maxBytes);
   }
 
   /** Get service statistics. */
@@ -902,18 +921,19 @@ export class GatewaySDK {
   ): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
     let lastError: unknown;
-    const controller = new AbortController();
-    const timeoutSignal = AbortSignal.timeout(options.timeout);
-
-    const combinedSignal = options.signal
-      ? AbortSignal.any([options.signal, timeoutSignal])
-      : timeoutSignal;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
         const delay = RETRY_BACKOFF_MS[Math.min(attempt - 1, RETRY_BACKOFF_MS.length - 1)];
         await new Promise(r => setTimeout(r, delay));
       }
+
+      const controller = new AbortController();
+      const timeoutSignal = AbortSignal.timeout(options.timeout);
+
+      const combinedSignal = options.signal
+        ? AbortSignal.any([options.signal, timeoutSignal])
+        : timeoutSignal;
 
       try {
         const res = await fetch(url, {
@@ -922,6 +942,8 @@ export class GatewaySDK {
           body: options.body as BodyInit,
           signal: combinedSignal,
         });
+
+        controller.abort();
 
         const allowed = options.allowedStatuses ?? [];
         if (!res.ok && !allowed.includes(res.status)) {
@@ -934,6 +956,7 @@ export class GatewaySDK {
         }
         return res;
       } catch (err: unknown) {
+        controller.abort();
         // HTTP errors (GatewayError with status code) are NOT retried
         if (err instanceof GatewayError && err.statusCode > 0) throw err;
 
