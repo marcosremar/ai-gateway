@@ -6,7 +6,8 @@
 import { createLogger } from '../src/logger';
 import { homedir } from 'os';
 import { join } from 'path';
-import { mkdir, writeFile, readFile, rename, access } from 'fs/promises';
+import { mkdir, writeFile, readFile, access } from 'fs/promises';
+import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync } from 'fs';
 import { setIdleTimeoutMs } from './gpu-deploy';
 import { setSttTargetLatencyMs, setLlmTargetLatencyMs, setTtsTargetLatencyMs, setGpuSortBy, loadDeploySettings } from '../src/gpu-providers/deploy-settings';
 import type { AIProfile } from '../src/client';
@@ -280,6 +281,9 @@ export const DEFAULT_APPS: GatewayApp[] = [
   },
 ];
 
+/** Alias for DEFAULT_APPS — used by tests and external tooling. */
+export const DEFAULT_GPU_PROFILES = DEFAULT_APPS;
+
 const DEFAULT_CONFIG: ProviderConfig = {
   apps: [...DEFAULT_APPS],
   activeAppId: 'realtime-translation-dubbing-mistral',
@@ -425,43 +429,39 @@ export function applyUserConfig(config: ProviderConfig): void {
 }
 
 /** Save provider config to disk + DB (if a user API key is active). Also updates the in-memory cache. */
-export async function saveProviderConfig(config: ProviderConfig): Promise<void> {
-  try {
-    await mkdir(BABELCAST_DIR, { recursive: true });
-    config.updatedAt = Date.now();
-    // Backup current file before overwriting (corruption recovery)
-    let configFileExists: boolean;
+export function saveProviderConfig(config: ProviderConfig): Promise<void> {
+  return new Promise<void>((resolve) => {
     try {
-      await access(CONFIG_FILE);
-      configFileExists = true;
-    } catch {
-      configFileExists = false;
+      mkdirSync(BABELCAST_DIR, { recursive: true });
+      config.updatedAt = Date.now();
+      // Backup current file before overwriting (corruption recovery)
+      if (existsSync(CONFIG_FILE)) {
+        try { writeFileSync(CONFIG_FILE + '.bak', readFileSync(CONFIG_FILE)); } catch { /* best-effort backup */ }
+      }
+      // Atomic write: write to temp file then renameSync (prevents corruption on crash)
+      const tmpFile = CONFIG_FILE + '.tmp';
+      writeFileSync(tmpFile, JSON.stringify(config, null, 2));
+      renameSync(tmpFile, CONFIG_FILE);
+      // Update cache so subsequent reads skip file I/O
+      _cachedConfig = config;
+      _cacheTime = Date.now();
+      log.log('Saved provider config (%d apps) to %s', config.apps.length, CONFIG_FILE);
+    } catch (err) {
+      log.warn('Failed to save provider config: %s', err instanceof Error ? err.message : err);
     }
-    if (configFileExists) {
-      try { await writeFile(CONFIG_FILE + '.bak', await readFile(CONFIG_FILE)); } catch { /* best-effort backup */ }
-    }
-    // Atomic write: write to temp file then rename (prevents corruption on crash)
-    const tmpFile = CONFIG_FILE + '.tmp';
-    await writeFile(tmpFile, JSON.stringify(config, null, 2));
-    await rename(tmpFile, CONFIG_FILE);
-    // Update cache so subsequent reads skip file I/O
-    _cachedConfig = config;
-    _cacheTime = Date.now();
-    log.log('Saved provider config (%d apps) to %s', config.apps.length, CONFIG_FILE);
-  } catch (err) {
-    log.warn('Failed to save provider config: %s', err instanceof Error ? err.message : err);
-  }
-  // Also persist to the AI Gateway user DB if there is an authenticated user (fire-and-forget)
-  if (_currentUserApiKey) {
-    const apiKey = _currentUserApiKey;
-    import('./user-profiles').then(({ saveUserConfig }) => {
-      saveUserConfig(apiKey, 'Default', config).catch((err) => {
-        log.warn('Failed to persist user config to DB: %s', err instanceof Error ? err.message : err);
+    // Also persist to the AI Gateway user DB if there is an authenticated user (fire-and-forget)
+    if (_currentUserApiKey) {
+      const apiKey = _currentUserApiKey;
+      import('./user-profiles').then(({ saveUserConfig }) => {
+        saveUserConfig(apiKey, 'Default', config).catch((err) => {
+          log.warn('Failed to persist user config to DB: %s', err instanceof Error ? err.message : err);
+        });
+      }).catch((err) => {
+        log.warn('Failed to load user-profiles module for DB sync: %s', err instanceof Error ? err.message : err);
       });
-    }).catch((err) => {
-      log.warn('Failed to load user-profiles module for DB sync: %s', err instanceof Error ? err.message : err);
-    });
-  }
+    }
+    resolve();
+  });
 }
 
 /** Patch provider config — merges partial update into existing config. */

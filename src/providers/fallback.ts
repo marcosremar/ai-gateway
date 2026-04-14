@@ -642,10 +642,7 @@ export async function withProviderFallback<T>(
         }
 
         // ── 5xx transient error ───────────────────────────────────────────────
-        if (!allCooledDown) {
-          tracker.recordFailure(entry, allowedFails, cooldownMs);
-          if (circuitBreakers) circuitBreakers.get(entry.provider).recordFailure();
-        }
+        if (!allCooledDown) { tracker.recordFailure(entry, allowedFails, cooldownMs); if (circuitBreakers) circuitBreakers.get(entry.provider).recordFailure(); }
 
         const isLastRetry = retryNum >= maxAttempts - 1;
         const hasNextProvider = iterChain.slice(i + 1).some((e) => !tracker.isCoolingDown(e));

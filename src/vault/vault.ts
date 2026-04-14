@@ -50,20 +50,15 @@ export class Vault {
     };
   }
 
-  /** Decrypt EncryptedBlob → plaintext */
-  decrypt(blob: EncryptedBlob): string | null {
-    try {
-      const iv = Buffer.from(blob.iv, 'hex');
-      const ciphertext = Buffer.from(blob.ciphertext, 'hex');
-      const tag = Buffer.from(blob.tag, 'hex');
+  /** Decrypt EncryptedBlob → plaintext. Throws on tampered ciphertext/tag or wrong key. */
+  decrypt(blob: EncryptedBlob): string {
+    const iv = Buffer.from(blob.iv, 'hex');
+    const ciphertext = Buffer.from(blob.ciphertext, 'hex');
+    const tag = Buffer.from(blob.tag, 'hex');
 
-      const decipher = createDecipheriv(ALGORITHM, this.key, iv, { authTagLength: TAG_LENGTH });
-      decipher.setAuthTag(tag);
-      return decipher.update(ciphertext) + decipher.final('utf8');
-    } catch (err) {
-      console.warn('[Vault] Decrypt failed for secret, may be corrupted:', err);
-      return null;
-    }
+    const decipher = createDecipheriv(ALGORITHM, this.key, iv, { authTagLength: TAG_LENGTH });
+    decipher.setAuthTag(tag);
+    return decipher.update(ciphertext) + decipher.final('utf8');
   }
 
   /** Store an encrypted secret */
@@ -84,9 +79,7 @@ export class Vault {
     const raw = await this._store.get(name);
     if (!raw) throw new Error(`[Vault] Secret "${name}" not found`);
     const blob: EncryptedBlob = JSON.parse(raw);
-    const decrypted = this.decrypt(blob);
-    if (decrypted === null) throw new Error(`[Vault] Failed to decrypt secret "${name}"`);
-    return decrypted;
+    return this.decrypt(blob);
   }
 
   /** Delete a secret */
