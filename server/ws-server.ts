@@ -72,8 +72,7 @@ export function reloadStreamingSTTRouter(): void {
 // Active STT sessions: client WS id → upstream backend
 const sttSessions = new Map<string, import('../src/streaming-stt').StreamingSTTBackend>();
 
-// Periodic cleanup of stale STT sessions (clients that disconnected ungracefully)
-setInterval(() => {
+export const sttCleanupTimer: ReturnType<typeof setInterval> = setInterval(() => {
   if (sttSessions.size === 0) return;
   const stale: string[] = [];
   for (const [id] of sttSessions) {
