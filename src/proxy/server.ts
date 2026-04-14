@@ -330,9 +330,10 @@ function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse
       });
       res.end(content);
       return true;
-    } catch {
-      continue;
-    }
+  // Log error for debugging — silent catch hides socket issues
+  } catch (err) {
+    log.warn({ err, requestId, filePath }, 'Static file serve error');
+    continue;
   }
 
   // SPA fallback: serve index.html for non-file paths (client-side routing)
@@ -725,7 +726,7 @@ export function createProxyServer(config: ProxyConfig): Server {
       });
       proxyReq.on('upgrade', (_: unknown, proxySocket: import('net').Socket, proxyHead: Buffer) => {
         socket.write('HTTP/1.1 101 Switching Protocols\r\n' +
-          Object.entries((_ as any).headers || {}).map(([k, v]: [string, any]) => `${k}: ${v}`).join('\r\n') +
+          Object.entries(proxyReq.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\r\n') +
           '\r\n\r\n');
         if (proxyHead.length) socket.write(proxyHead);
         proxySocket.on('error', () => socket.destroy());

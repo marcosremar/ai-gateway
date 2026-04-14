@@ -201,8 +201,8 @@ export class WebSocketTransport implements Transport {
         this.currentTranscript = '';
         this.currentResponse = '';
         this.sending = false;
+        this.audioChunks = [];
       }
-      this.audioChunks = [];
 
       if (msg.status === 'error') {
         this.log.error('server error:', msg.message);

@@ -77,8 +77,9 @@ export function createCredentialResolver(store: CredentialVault | SettingsStore)
 
         try {
           hfToken = (await vault.retrieve('hfToken')) ?? undefined;
-        } catch {
-          hfToken = process.env['HF_TOKEN'] ?? undefined;
+        } catch (err) {
+          // vault error — fall through to env var below
+          console.warn('[credential-resolver] vault hfToken read failed:', err);
         }
 
         if (!hfToken) hfToken = process.env['HF_TOKEN'] ?? undefined;
