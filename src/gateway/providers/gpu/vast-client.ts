@@ -1440,7 +1440,7 @@ export class VastClient extends AbstractGpuProvider {
         Math.min(Math.round(pullEstimateS * 2 * 1000), 1_800_000), // 2x safety, cap 30 min (matches POLL_TOTAL_MAX_MS)
         180_000, // floor 3 min
       );
-      let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS, inetDown);
+      let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS, inetDown, spec.onPollProgress);
 
       // forceSshTunnel: skip the direct endpoint even if it looks reachable.
       // Use this on residential hosts where the direct port is unreliable but
@@ -2333,6 +2333,7 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     headers: Record<string, string>,
     maxWaitMs: number = POLL_TOTAL_MAX_MS,
     inetDownMbps?: number,
+    onPollProgress?: (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => void,
   ): Promise<{ endpoint: string; ip: string; sshHost?: string; sshPort?: number }> {
     let endpoint = '';
     let ip = '';
@@ -2374,6 +2375,11 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
           endpoint = detail.endpoint;
           sshHost = detail.sshHost;
           sshPort = detail.sshPort;
+
+          // Invoke progress callback so the caller can broadcast status updates
+          if (onPollProgress) {
+            onPollProgress({ elapsedS: Math.round(elapsed / 1000), status: detail.status ?? 'unknown', instanceId: `inst-${contractId}`, ip, sshHost, sshPort });
+          }
 
           // Bail early on terminal statuses — instance won't recover
           if (TERMINAL_STATUSES.has(detail.status?.toLowerCase())) {

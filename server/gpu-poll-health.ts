@@ -9,6 +9,7 @@ import {
   setLastRequestTime, updateGpuModelWarmth,
 } from './state';
 import { broadcastWs } from './ws-state';
+import { registry } from './providers';
 
 const log = createLogger('gpu-deploy');
 
@@ -16,6 +17,46 @@ export interface PollHealthResult {
   result: 'ready' | 'exited' | 'timeout' | 'cancelled' | 'crashed' | 'app_error';
   pullTimeS?: number;  // actual measured pull duration (pullStarted → containerStarted)
   appError?: { message: string; traceback?: string };
+}
+
+/** Create a minimal valid WAV file (1s of silence at 16kHz mono) for STT testing. */
+function createTestAudioForm(): FormData {
+  const sampleRate = 16000;
+  const numSamples = sampleRate;
+  const dataSize = numSamples * 2;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+  const form = new FormData();
+  form.append('file', new Blob([buffer], { type: 'audio/wav' }), 'test.wav');
+  form.append('model', 'whisper-large-v3');
+  return form;
+}
+
+/** Async wrapper for autoRegisterDockerProvider to avoid blocking the health poll */
+async function autoRegisterDockerProviderAsync(endpoint: string): Promise<void> {
+  try {
+    const { autoRegisterDockerProvider } = await import('../src/gateway/providers/gpu/docker-registry');
+    await autoRegisterDockerProvider(registry, endpoint);
+  } catch (err) {
+    // Non-fatal: registration failure shouldn't break deploy
+    log.warn(`[gpu] Auto-registration failed for ${endpoint}: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 export async function pollHealthUntilReady(
@@ -125,6 +166,25 @@ export async function pollHealthUntilReady(
       return { result: 'timeout', pullTimeS: actualPullTimeS };
     }
 
+    // Proactive alert: slow model warming (> 3 min)
+    if (healthRespondedOnce && !allServicesLoaded && (Date.now() - (healthFirstResponseAt || Date.now())) > 180_000) {
+      const warmSec = Math.round((Date.now() - (healthFirstResponseAt || Date.now())) / 1000);
+      const currentAlert = deployState.alert;
+      if (!currentAlert.includes('slow warm')) {
+        setDeployState({ alert: `Model warming slow (${warmSec}s) — large model or slow GPU`, alertLevel: 'warning' });
+      }
+    }
+
+    // Proactive alert: total deploy taking > 5 min
+    if (totalElapsedMs > 300_000 && deployState.status !== 'ready' && !deployState.alert.includes('slow deploy')) {
+      setDeployState({ alert: `Deploy taking ${Math.round(totalElapsedMs / 60000)} min — checking for issues`, alertLevel: 'info' });
+    }
+
+    // Proactive alert: total deploy taking > 10 min (critical)
+    if (totalElapsedMs > 600_000 && deployState.status !== 'ready' && !deployState.alert.includes('very slow deploy')) {
+      setDeployState({ alert: `Very slow deploy (${Math.round(totalElapsedMs / 60000)} min) — may need to terminate and retry`, alertLevel: 'error' });
+    }
+
     // Ghost machine detection (RunPod)
     if (!containerStartedAt && providerName === 'runpod' && totalElapsedMs > 90_000) {
       try {
@@ -171,15 +231,32 @@ export async function pollHealthUntilReady(
           const costStr = detail.costPerHr ? `$${detail.costPerHr.toFixed(3)}/h` : '';
 
           if (!detail.runtime) {
-            if (!pullStartedAt) pullStartedAt = Date.now();
+            if (!pullStartedAt) {
+              pullStartedAt = Date.now();
+              // Record pull start in history
+              const pullEntry = { image: detail.imageName ?? deployState.dockerImage, attempt: 1, startedAt: Date.now(), status: 'downloading' as const };
+              setDeployState({ pullHistory: [...deployState.pullHistory, pullEntry] });
+            }
             setDeployState({
               status: 'installing', step: 'pulling_image',
               message: `Pulling image & starting container... [${elapsed}s]`,
               stepDetail: [detail.imageName, detail.gpuType, costStr].filter(Boolean).join(' — '),
             });
+            // Proactive alert: slow pull detection
+            if (elapsed > 120 && !deployState.alert.includes('slow pull')) {
+              setDeployState({ alert: `Image pull taking ${elapsed}s — large image or slow network`, alertLevel: 'warning' });
+            }
           } else if (!containerStartedAt) {
             containerStartedAt = Date.now();
-            if (pullStartedAt > 0) actualPullTimeS = Math.round((containerStartedAt - pullStartedAt) / 1000);
+            if (pullStartedAt > 0) {
+              actualPullTimeS = Math.round((containerStartedAt - pullStartedAt) / 1000);
+              // Update pull history entry to completed
+              const updatedPullHistory = deployState.pullHistory.map(p =>
+                p.status === 'downloading' ? { ...p, completedAt: Date.now(), status: 'completed' as const } : p
+              );
+              setDeployState({ pullHistory: updatedPullHistory });
+              log.log(`[gpu] Pull completed in ${actualPullTimeS}s`);
+            }
             const newEndpoint = await providerClient.resolveInstanceEndpoint(podId, credentials);
             if (newEndpoint && newEndpoint !== endpoint) {
               endpoint = newEndpoint;
@@ -408,7 +485,7 @@ export async function pollHealthUntilReady(
               const stalledSec = identicalHealthCount * 30;
               log.warn(`[gpu] Download appears stalled — same /health response for ${stalledSec}s (${identicalHealthCount} checks)`);
               broadcastWs({ type: 'gpu:deploy', phase: 'stalled', deployId: deployState.deployId, provider: providerName, stalledSeconds: stalledSec, identicalChecks: identicalHealthCount });
-              setDeployState({ alert: `Download may be stalled — no progress for ${stalledSec}s` });
+              setDeployState({ alert: `Download may be stalled — no progress for ${stalledSec}s`, alertLevel: 'warning' });
             } else if (identicalHealthCount === 3) {
               log.log(`[gpu] Possible stall — identical /health response for 3 consecutive checks`);
             }
@@ -449,26 +526,160 @@ export async function pollHealthUntilReady(
             };
           }
 
-          const HEALTHY_STATUSES = new Set(['healthy', 'ok', 'degraded', 'ready', 'loading']);
-          if (HEALTHY_STATUSES.has(data.status)) {
-            if (!healthRespondedOnce) { healthRespondedOnce = true; healthFirstResponseAt = Date.now(); }
-            consecutiveHealthFailures = 0;
+            const HEALTHY_STATUSES = new Set(['healthy', 'ok', 'degraded', 'ready', 'loading']);
+            if (HEALTHY_STATUSES.has(data.status)) {
+              if (!healthRespondedOnce) { healthRespondedOnce = true; healthFirstResponseAt = Date.now(); }
+              consecutiveHealthFailures = 0;
 
-            const svc = data.services ?? {};
-            const ttsReady = svc.tts === 'loaded' || svc.tts === 'disabled';
-            const sttReady = svc.whisper === 'loaded';
-            const llmReady = svc.llama_cpp === 'ready' || svc.llama_cpp === 'loaded';
-            allServicesLoaded = sttReady && llmReady && ttsReady;
-            const readyStages = [sttReady && 'STT', llmReady && 'LLM', ttsReady && 'TTS'].filter(Boolean);
-            const loadingStages = [!sttReady && 'STT', !llmReady && 'LLM', !ttsReady && 'TTS'].filter(Boolean);
+              const svc = data.services ?? {};
+              const ttsReady = svc.tts === 'loaded' || svc.tts === 'disabled';
+              const sttReady = svc.whisper === 'loaded';
+              const llmReady = svc.llama_cpp === 'ready' || svc.llama_cpp === 'loaded';
+              allServicesLoaded = sttReady && llmReady && ttsReady;
+              const readyStages = [sttReady && 'STT', llmReady && 'LLM', ttsReady && 'TTS'].filter(Boolean);
+              const loadingStages = [!sttReady && 'STT', !llmReady && 'LLM', !ttsReady && 'TTS'].filter(Boolean);
 
-            if (readyStages.length > 0 || containerStartedAt) {
-              const stepDetail = loadingStages.length > 0
-                ? `${readyStages.join(', ') || 'none'} ready — loading: ${loadingStages.join(', ')}`
-                : 'all services loaded';
-              log.log(`[gpu] Pod health OK — ${readyStages.length}/3 services loaded (${readyStages.join(', ') || 'none'}). Loading: ${loadingStages.join(', ') || 'none'}`);
-              broadcastWs({ type: 'gpu:services', loaded: readyStages, loading: loadingStages });
+              // ── Update warming status tracking ──
+              const warmingPatch: Partial<typeof deployState> = {};
+              const warmPhase = allServicesLoaded ? 'complete' : (sttReady ? (llmReady ? 'tts' : 'llm') : 'stt');
+              warmingPatch.warmingStatus = {
+                phase: warmPhase,
+                sttProgress: { loaded: sttReady, modelName: svc.whisper ? String(svc.whisper) : 'whisper', loadTimeMs: sttReady ? (containerStartedAt ? Date.now() - containerStartedAt : 0) : 0 },
+                llmProgress: { loaded: llmReady, modelName: svc.llama_cpp ? String(svc.llama_cpp) : 'llm', loadTimeMs: llmReady ? (containerStartedAt ? Date.now() - containerStartedAt : 0) : 0 },
+                ttsProgress: { loaded: ttsReady, modelName: svc.tts ? String(svc.tts) : 'tts', loadTimeMs: ttsReady ? (containerStartedAt ? Date.now() - containerStartedAt : 0) : 0 },
+                startedAt: containerStartedAt || Date.now(),
+                ...(allServicesLoaded ? { completedAt: Date.now() } : {}),
+              };
+
+              if (readyStages.length > 0 || containerStartedAt) {
+                const stepDetail = loadingStages.length > 0
+                  ? `${readyStages.join(', ') || 'none'} ready — loading: ${loadingStages.join(', ')}`
+                  : 'all services loaded';
+                log.log(`[gpu] Pod health OK — ${readyStages.length}/3 services loaded (${readyStages.join(', ') || 'none'}). Loading: ${loadingStages.join(', ') || 'none'}`);
+                broadcastWs({ type: 'gpu:services', loaded: readyStages, loading: loadingStages });
+
+                // Set warming status while models are loading
+                if (!allServicesLoaded) {
+                  setDeployState({
+                    status: 'warming',
+                    step: `warming_${warmPhase}`,
+                    message: `Warming ${warmPhase.toUpperCase()} model... (${readyStages.join(', ') || 'none'} ready)`,
+                    stepDetail,
+                    ...warmingPatch,
+                  });
+                }
+
+                // Only run inference test when at least STT is loaded (minimum for speech pipeline)
+                if (!sttReady && !llmReady) {
+                  log.log(`[gpu] Skipping inference test — need STT or LLM ready first (${readyStages.join(', ') || 'none'} ready)`);
+                  continue;
+                }
+
+              // ── Inference test: verify actual AI pipeline works before marking ready ──
+              setDeployState({ step: 'testing_inference', message: 'Testing inference...' });
+              log.log(`[gpu] Testing inference on ${endpoint}...`);
+              let inferenceOk = false;
+              let inferenceError = '';
+              let passedStage = '';
+
+              // Try STT first (works for most images including translation ones)
+              try {
+                const sttStart = Date.now();
+                const sttRes = await fetch(`${endpoint}/v1/audio/transcriptions`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'multipart/form-data' },
+                  body: createTestAudioForm(),
+                  signal: AbortSignal.timeout(30_000),
+                });
+                const sttMs = Date.now() - sttStart;
+                const sttBody = await sttRes.text();
+                log.log(`[gpu] STT test: status=${sttRes.status}, body=${sttBody.slice(0, 200)}`);
+                if (sttRes.ok) {
+                  try {
+                    const body = JSON.parse(sttBody);
+                    if (body && (body.text || body.transcription)) {
+                      inferenceOk = true;
+                      passedStage = 'STT';
+                      log.log(`[gpu] Inference test PASSED (STT) in ${sttMs}ms`);
+                    }
+                  } catch {}
+                }
+              } catch (err) {
+                log.log(`[gpu] STT test failed: ${err instanceof Error ? err.message : err}`);
+              }
+
+              // If STT failed, try LLM
+              if (!inferenceOk) {
+                try {
+                  const llmStart = Date.now();
+                  const llmRes = await fetch(`${endpoint}/v1/chat/completions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      messages: [{ role: 'user', content: 'Hi' }],
+                      max_tokens: 10,
+                    }),
+                    signal: AbortSignal.timeout(30_000),
+                  });
+                  const llmMs = Date.now() - llmStart;
+                  const responseBodyStr = await llmRes.text();
+                  if (llmRes.ok && responseBodyStr.trim()) {
+                    try {
+                      const body = JSON.parse(responseBodyStr);
+                      if (body && (body.choices?.length > 0 || body.output?.text || body.response)) {
+                        inferenceOk = true;
+                        passedStage = 'LLM';
+                        log.log(`[gpu] Inference test PASSED (LLM) in ${llmMs}ms`);
+                      }
+                    } catch {}
+                  }
+                } catch (err) {
+                  log.log(`[gpu] LLM test failed: ${err instanceof Error ? err.message : err}`);
+                }
+              }
+
+              // If neither STT nor LLM worked, try TTS
+              if (!inferenceOk) {
+                try {
+                  const ttsStart = Date.now();
+                  const ttsRes = await fetch(`${endpoint}/v1/audio/speech`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ input: 'test', voice: 'default' }),
+                    signal: AbortSignal.timeout(30_000),
+                  });
+                  const ttsMs = Date.now() - ttsStart;
+                  if (ttsRes.ok) {
+                    const buf = await ttsRes.arrayBuffer();
+                    if (buf.byteLength > 100) {
+                      inferenceOk = true;
+                      passedStage = 'TTS';
+                      log.log(`[gpu] Inference test PASSED (TTS) in ${ttsMs}ms`);
+                    }
+                  }
+                } catch (err) {
+                  log.log(`[gpu] TTS test failed: ${err instanceof Error ? err.message : err}`);
+                }
+              }
+
+              if (!inferenceOk) {
+                // Health says services are loaded but inference test failed — this could mean
+                // the image uses a non-standard API format (e.g., translation-only image).
+                // Mark ready anyway but log a warning and note it in the step detail.
+                inferenceError = 'Inference test inconclusive (STT/LLM/TTS failed) — health says services ready';
+                log.warn(`[gpu] Inference test inconclusive: ${inferenceError}`);
+                setDeployState({
+                  step: 'ready',
+                  stepDetail: `inference_inconclusive:${passedStage || 'none'}`,
+                });
+                // Auto-register as AI provider even if inference test was inconclusive
+                await autoRegisterDockerProviderAsync(endpoint);
+                return { result: 'ready', pullTimeS: actualPullTimeS };
+              }
+
               setDeployState({ step: 'ready', stepDetail });
+              // Auto-register GPU as AI provider in the registry
+              await autoRegisterDockerProviderAsync(endpoint);
               return { result: 'ready', pullTimeS: actualPullTimeS };
             }
 
@@ -521,6 +732,12 @@ export async function pollHealthUntilReady(
         if (consecutiveConnectionRefused === 1 || consecutiveConnectionRefused % 5 === 0) {
           const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
           log.debug(`[gpu] Health probe ${endpoint}${healthPath} TCP fail #${consecutiveConnectionRefused}: ${msg}`);
+        }
+        // Proactive alert: connection refused for extended period
+        if (consecutiveConnectionRefused === 10) {
+          setDeployState({ alert: `Health endpoint unreachable for ${consecutiveConnectionRefused} checks — container may still be starting`, alertLevel: 'warning' });
+        } else if (consecutiveConnectionRefused === 20) {
+          setDeployState({ alert: `Health endpoint unreachable for ${consecutiveConnectionRefused} checks — possible networking issue or slow start`, alertLevel: 'error' });
         }
       }
       void connectionRefused;

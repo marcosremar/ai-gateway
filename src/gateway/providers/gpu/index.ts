@@ -99,3 +99,20 @@ export {
   getHostDownloadSpeed,
 } from './pull-time-estimator';
 export type { DeployPhase } from './pull-time-estimator';
+
+// ── Docker Manifest & Registry ─────────────────────────────────────────
+export type {
+  DockerManifest,
+  DockerCapability,
+  DockerApiEndpoint,
+} from './docker-manifest';
+export {
+  validateManifest,
+  getLatencyTarget,
+  DEFAULT_LATENCY_TARGETS,
+} from './docker-manifest';
+export {
+  fetchDockerManifest,
+  registerDockerImageProvider,
+  autoRegisterDockerProvider,
+} from './docker-registry';
