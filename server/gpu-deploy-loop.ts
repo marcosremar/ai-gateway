@@ -170,6 +170,14 @@ export async function startDeployLoop(
 
       const defaultStorage = DEFAULT_STORAGE_GB[providerName];
       const storageGb = Math.max(extra.storageGb || defaultStorage, defaultStorage);
+
+      // Progress callback: broadcast every poll update so CLI shows "Creating... 45s"
+      const onPollProgress = (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => {
+        const sshInfo = info.sshHost ? ` (ssh ${info.sshHost}:${info.sshPort})` : '';
+        setDeployState({ message: `Creating ${label} instance... ${info.elapsedS}s (${info.status})${sshInfo}` });
+        broadcastWs({ type: 'gpu:deploy', phase: 'creating', deployId: deployState.deployId, provider: providerName, message: `Creating ${label} instance... ${info.elapsedS}s (${info.status})` });
+      };
+
       const instance = await providerClient.createInstance(
         { gpuTypes, dockerImage, storageGb, region: extra.region, hfToken: extra.hfToken, env: extra.env, bareMetal: providerName === 'tensordock', interruptible: extra.interruptible,
           // IMPORTANT: RunPod must ALWAYS use SECURE cloud — NEVER COMMUNITY (unreliable third-party machines)
@@ -185,6 +193,7 @@ export async function startDeployLoop(
           ...(extra.snapgpuPreloadApp ? { snapgpuPreloadApp: extra.snapgpuPreloadApp } : {}),
           ...(extra.snapgpuAutoSnapshot !== undefined ? { autoSnapshot: extra.snapgpuAutoSnapshot } : {}),
           ...(extra.snapgpuBackend ? { snapgpuBackend: extra.snapgpuBackend } : {}),
+          onPollProgress,
         },
         credentials,
       );

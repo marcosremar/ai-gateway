@@ -13,18 +13,20 @@ const log = createLogger('deploy-state');
 // ── Deploy state types ──────────────────────────────────────────────────────
 
 export interface DeploymentState {
-  status: 'idle' | 'stopped' | 'searching' | 'queued' | 'creating' | 'booting' | 'installing' | 'ready' | 'error';
+  status: 'idle' | 'stopped' | 'searching' | 'queued' | 'creating' | 'booting' | 'installing' | 'warming' | 'ready' | 'error';
   podId: string;
   endpoint: string;
   gpuType: string;
   dockerImage: string;  // e.g. "marcosremar/babelcast-mistral:latest"
   message: string;
-  step: string;       // structured step: 'searching_offers' | 'no_offers' | 'queued' | 'creating_pod' | 'pulling_image' | 'starting_container' | 'downloading_models' | 'loading_stt' | 'loading_llm' | 'loading_tts' | 'compiling_tts' | 'waiting_health' | 'draining' | 'ready'
+  step: string;       // structured step: 'searching_offers' | 'no_offers' | 'queued' | 'creating_pod' | 'pulling_image' | 'starting_container' | 'downloading_models' | 'warming_stt' | 'warming_llm' | 'warming_tts' | 'waiting_health' | 'testing_inference' | 'draining' | 'ready'
   stepDetail: string;  // e.g. image name, GPU type, cost
   startedAt: number;
   retryCount: number;
   provider: ProviderName | '';
   alert: string;       // e.g. "RunPod blocked, using Vast.ai fallback"
+  alertLevel: 'info' | 'warning' | 'error' | 'critical';  // severity level for UI coloring
+  alertHistory: Array<{ level: 'info' | 'warning' | 'error' | 'critical'; message: string; ts: number }>;
   sshHost: string;
   sshPort: number;
   lastLogs: string;    // last fetched remote logs (persisted across status changes)
@@ -33,6 +35,27 @@ export interface DeploymentState {
   providerMeta: Record<string, unknown>;  // host-level metadata for reputation tracking
   /** Ordered log of state transitions with timestamps — for UI timeline and debugging */
   transitions: Array<{ status: string; step: string; provider: string; ts: number; elapsed: number; detail?: string }>;
+  /** Pull/download history with attempts and progress tracking */
+  pullHistory: Array<{
+    image: string;
+    attempt: number;
+    startedAt: number;
+    completedAt?: number;
+    bytesDownloaded?: number;
+    totalBytes?: number;
+    speedMbps?: number;
+    status: 'pending' | 'downloading' | 'completed' | 'failed';
+    error?: string;
+  }>;
+  /** Model warming phases tracking */
+  warmingStatus: {
+    phase: 'idle' | 'stt' | 'llm' | 'tts' | 'complete';
+    sttProgress?: { loaded: boolean; modelName: string; loadTimeMs: number };
+    llmProgress?: { loaded: boolean; modelName: string; loadTimeMs: number };
+    ttsProgress?: { loaded: boolean; modelName: string; loadTimeMs: number };
+    startedAt: number;
+    completedAt?: number;
+  };
   /** Unique deploy correlation ID — set by startDeployLoop, used for idempotency and orphan detection */
   deployId: string;
   /** Live GPU telemetry from /health — 0 means unknown, -1 means unknown (for gpuUtil) */
@@ -51,7 +74,7 @@ export interface DeploymentState {
 // ── Mutable deploy state ────────────────────────────────────────────────────
 
 export let deployState: DeploymentState = {
-  status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], deployId: '', gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0, templateHashId: '',
+  status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', alertLevel: 'info', alertHistory: [], sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], pullHistory: [], warmingStatus: { phase: 'idle', startedAt: 0 }, deployId: '', gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0, templateHashId: '',
 };
 export let deployCancelled = false;
 export let deployLock = false;

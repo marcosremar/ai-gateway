@@ -1264,7 +1264,7 @@ async function cmdDockerAuthLogout() {
 
 async function cmdDockerBuild(dir: string, opts: {
   name?: string; tag?: string; repo?: string; public?: boolean;
-  platforms?: string; wait?: boolean;
+  platforms?: string; wait?: boolean; deploy?: boolean; gpuTypes?: string;
 }) {
   const { url, key } = getConfig();
   const body = {
@@ -1302,7 +1302,10 @@ async function cmdDockerBuild(dir: string, opts: {
   console.log(`  Build ID: ${c.bold}${buildId}${c.reset}`);
   console.log(`  Repo:     ${c.cyan}${data.repoUrl}${c.reset}`);
 
-  if (!opts.wait) {
+  // If deploy flag is set, we must wait for build to complete
+  const shouldWait = opts.wait || opts.deploy;
+  
+  if (!shouldWait) {
     console.log(`\nTrack progress:`);
     console.log(`  ai-gateway docker status ${buildId}`);
     return;
@@ -1310,6 +1313,8 @@ async function cmdDockerBuild(dir: string, opts: {
 
   console.log(`\nWaiting for build to complete...`);
   const deadline = Date.now() + 50 * 60_000;
+  let builtImage: string | null = null;
+  
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 10_000));
     const sr = await fetch(`${url}/v1/docker/builds/${buildId}`, { headers: headers(key) });
@@ -1321,8 +1326,8 @@ async function cmdDockerBuild(dir: string, opts: {
     if (build.status === 'success') {
       console.log(`\n${c.green}✓${c.reset} Build complete!`);
       console.log(`  Image: ${c.bold}${build.image}${c.reset}`);
-      console.log(`  Run:   ai-gateway gpu deploy --image ${build.image}`);
-      return;
+      builtImage = build.image;
+      break;
     }
     if (build.status === 'failed') {
       console.error(`\n${c.red}✗${c.reset} Build failed: ${build.error}`);
@@ -1330,7 +1335,23 @@ async function cmdDockerBuild(dir: string, opts: {
       process.exit(1);
     }
   }
-  console.error(`\n${c.yellow}!${c.reset} Timed out — check: ai-gateway docker status ${buildId}`);
+  
+  if (!builtImage) {
+    console.error(`\n${c.yellow}!${c.reset} Timed out — check: ai-gateway docker status ${buildId}`);
+    process.exit(1);
+  }
+  
+  // Auto-deploy if --deploy flag is set
+  if (opts.deploy && builtImage) {
+    console.log(`\n${c.cyan}→${c.reset} Auto-deploying image...`);
+    await cmdGpuDeploy({
+      image: builtImage,
+      gpuTypes: opts.gpuTypes,
+      onstart: undefined,
+    });
+  } else {
+    console.log(`  Run:   ai-gateway gpu deploy --image ${builtImage}`);
+  }
 }
 
 async function cmdDockerList() {
@@ -1604,6 +1625,8 @@ Subcommands:
     --public                     Create the GitHub repo as public (default: private)
     --platforms <platforms>      Build platforms (default: linux/amd64)
     --wait                       Wait for build to complete
+    --deploy                     Auto-deploy after build succeeds
+    --gpu-types <types>          GPU types for auto-deploy (e.g., "RTX 4090,A6000")
   list                         List all Docker image builds
   images                       List successfully built images (ready to deploy)
   status <buildId>             Show status of a specific build
@@ -1622,6 +1645,7 @@ Examples:
   ai-gateway docker auth
   ai-gateway docker build ./my-whisper-app --name whisper-custom --wait
   ai-gateway docker build ./my-llm --public --platforms linux/amd64,linux/arm64
+  ai-gateway docker build ./babelcast-subtitle --deploy --gpu-types "NVIDIA GeForce RTX 4090"
   ai-gateway docker list
   ai-gateway gpu deploy --image ghcr.io/alice/ai-gateway-img-whisper:latest
 `,
@@ -2046,13 +2070,16 @@ ai-gateway server — Manage the local dev server
               console.error('Usage: ai-gateway docker build <directory> [options]');
               process.exit(1);
             }
+            const deployFlag = hasFlag(args, '--deploy');
             await cmdDockerBuild(dir, {
               name: getArg(args, '--name'),
               tag: getArg(args, '--tag'),
               repo: getArg(args, '--repo'),
               platforms: getArg(args, '--platforms'),
               public: hasFlag(args, '--public'),
-              wait: hasFlag(args, '--wait'),
+              wait: hasFlag(args, '--wait') || deployFlag, // --deploy implies --wait
+              deploy: deployFlag,
+              gpuTypes: getArg(args, '--gpu-types'),
             });
             break;
           }

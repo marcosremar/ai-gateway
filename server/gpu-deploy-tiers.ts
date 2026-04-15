@@ -36,7 +36,8 @@ export function buildGpuTiers(runpodApiKey: string, vastApiKey?: string, tensord
     modal: modalApiKey ? { client: modal, name: 'modal', label: PROVIDER_LABELS.modal, apiKey: modalApiKey } : null,
   };
 
-  // Respect PROVIDER_CHAIN order for GPU providers
+  // GPU provider cascade order: Vast.ai → RunPod → Modal
+  // (TensorDock excluded by default due to balance constraints and reliability issues)
   const tiers: GpuTier[] = [];
   const added = new Set<string>();
   const gpuInChain = PROVIDER_CHAIN.filter(p => p === 'runpod' || p === 'tensordock' || p === 'vast' || p === 'modal');
@@ -49,6 +50,16 @@ export function buildGpuTiers(runpodApiKey: string, vastApiKey?: string, tensord
         tiers.push(tier);
         added.add(name);
       }
+    }
+  }
+
+  // Default GPU provider order: Vast.ai → RunPod → Modal (skip TensorDock unless explicitly in chain)
+  const defaultGpuOrder = ['vast', 'runpod', 'modal'];
+  for (const name of defaultGpuOrder) {
+    const tier = available[name];
+    if (tier && !added.has(name)) {
+      tiers.push(tier);
+      added.add(name);
     }
   }
 

@@ -88,6 +88,7 @@ export function setDeployState(patch: Partial<DeploymentState>) {
       if (patch.status === 'ready') mapped.status = 'benchmarking';
       else if (patch.status === 'error') mapped.status = 'error';
       else if (patch.status === 'idle') mapped.status = 'idle';
+      else if (patch.status === 'warming') mapped.status = 'deploying';
       else mapped.status = 'deploying';
     }
     if (patch.podId !== undefined) mapped.podId = patch.podId;
@@ -103,6 +104,13 @@ export function setDeployState(patch: Partial<DeploymentState>) {
     return; // don't update primary deployState or persist
   }
   if (deployCancelled && patch.status !== 'idle') return; // don't update after cancel
+
+  // Track alert history
+  if (patch.alert && patch.alert !== deployState.alert) {
+    const level = patch.alertLevel ?? (patch.status === 'error' ? 'error' : 'warning');
+    deployState.alertHistory.push({ level, message: patch.alert, ts: Date.now() });
+    if (deployState.alertHistory.length > 30) deployState.alertHistory.splice(0, deployState.alertHistory.length - 30);
+  }
 
   // Record state transition when status or step changes
   const prevStatus = deployState.status;
@@ -121,7 +129,7 @@ export function setDeployState(patch: Partial<DeploymentState>) {
     // Keep last 50 transitions (splice in-place instead of allocating new array)
     if (deployState.transitions.length > 50) deployState.transitions.splice(0, deployState.transitions.length - 50);
     // Broadcast transition for real-time UI
-    try { const { broadcastWs: bws } = require('./ws-state'); bws?.({ type: 'gpu:transition', status: newStatus, step: newStep, provider: deployState.provider, elapsed, gpuType: deployState.gpuType, detail: deployState.message?.slice(0, 80) }); } catch (e) { log.warn('broadcastWs failed:', e instanceof Error ? e.message : e); }
+    try { const { broadcastWs: bws } = require('./ws-state'); bws?.({ type: 'gpu:transition', status: newStatus, step: newStep, provider: deployState.provider, elapsed, gpuType: deployState.gpuType, detail: deployState.message?.slice(0, 80), pullHistory: deployState.pullHistory, warmingStatus: deployState.warmingStatus }); } catch (e) { log.warn('broadcastWs failed:', e instanceof Error ? e.message : e); }
   }
 
   log.log(`${deployState.status}: ${deployState.message}`);
@@ -137,7 +145,7 @@ export function resetDeployState() {
   _setDeployTensordockAuthId('');
   _setDeployModalApiKey('');
   _setActiveProvider('');
-  Object.assign(deployState, { status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], deployId: '', gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0, templateHashId: '', canary: undefined, canaryEvalTimer: null });
+  Object.assign(deployState, { status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', alertLevel: 'info' as const, alertHistory: [], sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], pullHistory: [], warmingStatus: { phase: 'idle' as const, startedAt: 0 }, deployId: '', gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0, templateHashId: '', canary: undefined, canaryEvalTimer: null });
   clearPersistedDeploy();
   resetTtsWarmth(); // new pod = cold TTS
   resetGpuReadinessState();

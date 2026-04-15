@@ -146,7 +146,10 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     availableTiers = [earliest];
   }
 
-  // Probe all providers in parallel (20s timeout) to check availability before committing
+  // Probe all providers in parallel (20s timeout) to check availability and log results.
+  // DO NOT reorder - preserve the configured cascade order (Vast.ai → RunPod → Modal).
+  // Reordering by response time breaks the intended priority and can cause Modal (0ms, non-working)
+  // to be tried before Vast.ai.
   if (availableTiers.length > 1) {
     const probeResults = await Promise.allSettled(
       availableTiers.map(async (tier) => {
@@ -164,17 +167,12 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
       }),
     );
 
-    // Reorder tiers: available first, then by response time
+    // Log probe results for debugging but keep original tier order
     const probed = probeResults
       .filter((r): r is PromiseFulfilledResult<{tier: GpuTier; available: boolean; ms: number; offerCount: number}> => r.status === 'fulfilled')
-      .map(r => r.value)
-      .sort((a, b) => (b.available ? 1 : 0) - (a.available ? 1 : 0) || a.ms - b.ms);
-
-    const reorderedTiers = probed.map(p => p.tier);
-    if (reorderedTiers.length > 0) {
-      log.log(`[gpu] Provider probe: ${probed.map(p => `${p.tier.label}(${p.available ? p.offerCount + ' offers' : 'unavailable'}, ${p.ms}ms)`).join(', ')}`);
-      availableTiers = reorderedTiers;
-    }
+      .map(r => r.value);
+    log.log(`[gpu] Provider probe: ${probed.map(p => `${p.tier.label}(${p.available ? p.offerCount + ' offers' : 'unavailable'}, ${p.ms}ms)`).join(', ')}`);
+    // availableTiers stays in original order - do NOT reorder
   }
 
   for (let i = 0; i < availableTiers.length; i++) {

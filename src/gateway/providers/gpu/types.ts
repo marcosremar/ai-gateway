@@ -224,6 +224,11 @@ export interface InstanceSpec {
    * the service is always at ip:70008 without parsing a random port mapping.
    * Requires the host to have at least one direct port allocated. */
   useIdentityPort?: boolean;
+  /** Optional callback invoked periodically during instance creation polling.
+   *  Receives ({elapsedS, status, instanceId, ip, sshHost, sshPort}).
+   *  Allows callers to broadcast progress updates to show the user
+   *  that creation is still in progress (e.g., "Pulling image... 45s"). */
+  onPollProgress?: (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => void;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────
