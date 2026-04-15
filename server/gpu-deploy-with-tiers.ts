@@ -47,6 +47,10 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
   // Validate image, DNS, CUDA compatibility, and cost BEFORE attempting any
   // provider deploy. Catches common failure scenarios early (Fixes #6, #13,
   // #15, #17, #19, #24, #25, #27).
+  // SKIP tiers that fail preflight instead of aborting — allows cascade to
+  // continue to the next provider.
+  const preflightOk: GpuTier[] = [];
+  const preflightSkip: string[] = [];
   for (const tier of tiers) {
     const preflightResult = await runPreFlightChecks({
       imageName: dockerImage,
@@ -59,17 +63,33 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     });
 
     if (!preflightResult.ok) {
-      log.error({ provider: tier.name, errors: preflightResult.errors }, 'Pre-flight checks failed');
+      log.warn(`[gpu] ${tier.label} preflight failed: ${preflightResult.errors.join(', ')} — skipping`);
       logGpuEvent('preflight_failed', tier.name, false, {
         metadata: { errors: preflightResult.errors, warnings: preflightResult.warnings },
       });
-      throw new Error(`Pre-flight checks failed for ${PROVIDER_LABELS[tier.name] ?? tier.name}: ${preflightResult.errors.join(', ')}`);
+      preflightSkip.push(tier.name);
+      continue; // skip this tier, try next
     }
 
     if (preflightResult.warnings.length > 0) {
       log.warn({ provider: tier.name, warnings: preflightResult.warnings }, 'Pre-flight warnings');
     }
+    preflightOk.push(tier);
   }
+
+  if (preflightOk.length === 0) {
+    const msg = `All providers failed preflight: ${preflightSkip.join(', ')}`;
+    log.error(msg);
+    setDeployState({ status: 'error', message: msg });
+    return;
+  }
+
+  if (preflightSkip.length > 0) {
+    log.log(`[gpu] Preflight: ${preflightOk.map(t => t.label).join(', ')} OK — skipped ${preflightSkip.join(', ')}`);
+  }
+
+  // Use only tiers that passed preflight
+  tiers = preflightOk;
 
   // ── Budget cap enforcement (P0-1) ───────────────────────────────────────
   {
