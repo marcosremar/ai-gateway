@@ -28,7 +28,7 @@ This document tracks known technical debt, TODOs, and areas for improvement in t
 **Files to Split:**
 - ✅ `src/gateway/providers/gpu/vast-client.ts` (2,765 lines) → **Completed**
 - ✅ `src/gateway/providers/gpu/runpod-client.ts` (1,661 lines) → **Completed**
-- `server/gpu-handlers.ts` (1,656 lines) → Not Started
+- ✅ `server/gpu-handlers.ts` (1,656 lines) → **Completed**
 - `server/ai-handlers.ts` (1,422 lines) → Not Started
 - `server/bot-handlers.ts` (1,271 lines) → Not Started
 - `src/errors/deploy-errors.ts` (1,028 lines) → Not Started
@@ -120,12 +120,19 @@ const [a, b] = await Promise.all([fetchA(), fetchB()]);
 **Tests:** 22 new tests
 **Impact:** Improved maintainability and testability
 
-### ✅ Modularized runpod-client.ts  
+### ✅ Modularized runpod-client.ts
 **Date:** 2026-04-15
 **Changes:** Split 1,661 lines into 6 modules
 - `types.ts`, `constants.ts`, `utils.ts`, `instances.ts`, `volumes.ts`, `offers.ts`
 **Tests:** 16 new tests
 **Impact:** Reduced complexity, better separation of concerns
+
+### ✅ Modularized gpu-handlers.ts
+**Date:** 2026-04-15
+**Changes:** Split 1,656 lines into 5 modules
+- `types.ts`, `vram.ts`, `deploy-utils.ts`, `lifecycle.ts`, `snapshots.ts`
+**Tests:** 22 new tests
+**Impact:** Better separation of concerns, easier testing
 
 ### ✅ Created Safe Catch Module
 **Date:** 2026-04-15
