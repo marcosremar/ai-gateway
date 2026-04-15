@@ -26,7 +26,8 @@ This document tracks known technical debt, TODOs, and areas for improvement in t
 
 #### 3. Modularize Large Files
 **Files to Split:**
-- `src/gateway/providers/gpu/runpod-client.ts` (1,661 lines) → In Progress
+- ✅ `src/gateway/providers/gpu/vast-client.ts` (2,765 lines) → **Completed**
+- ✅ `src/gateway/providers/gpu/runpod-client.ts` (1,661 lines) → **Completed**
 - `server/gpu-handlers.ts` (1,656 lines) → Not Started
 - `server/ai-handlers.ts` (1,422 lines) → Not Started
 - `server/bot-handlers.ts` (1,271 lines) → Not Started
@@ -117,21 +118,32 @@ const [a, b] = await Promise.all([fetchA(), fetchB()]);
 **Changes:** Split 2,765 lines into 5 modules
 - `types.ts`, `utils.ts`, `instances.ts`, `offers.ts`, `templates.ts`
 **Tests:** 22 new tests
+**Impact:** Improved maintainability and testability
+
+### ✅ Modularized runpod-client.ts  
+**Date:** 2026-04-15
+**Changes:** Split 1,661 lines into 6 modules
+- `types.ts`, `constants.ts`, `utils.ts`, `instances.ts`, `volumes.ts`, `offers.ts`
+**Tests:** 16 new tests
+**Impact:** Reduced complexity, better separation of concerns
 
 ### ✅ Created Safe Catch Module
 **Date:** 2026-04-15
 **Changes:** Added `src/safe-catch.ts` with error handling utilities
 **Tests:** 17 new tests
+**Impact:** Replaces empty catch blocks with proper logging
 
 ### ✅ Created Common Types
 **Date:** 2026-04-15
 **Changes:** Added `src/types/common.ts` with shared TypeScript types
 **Tests:** 12 new tests
+**Impact:** Reduces usage of `any` type across codebase
 
 ### ✅ Created Timer Manager
 **Date:** 2026-04-15
 **Changes:** Added `src/timer-manager.ts` for centralized timer management
 **Tests:** 17 new tests
+**Impact:** Prevents memory leaks from orphaned timers
 
 ## How to Add New TODOs
 
