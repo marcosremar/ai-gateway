@@ -6,6 +6,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends wget && rm 
 
 # Install dependencies
 COPY package.json bun.lock ./
+COPY scripts/ scripts/
 RUN bun install --frozen-lockfile --production
 
 # Copy source

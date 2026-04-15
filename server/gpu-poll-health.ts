@@ -597,10 +597,11 @@ export async function pollHealthUntilReady(
                 if (sttRes.ok) {
                   try {
                     const body = JSON.parse(sttBody);
-                    if (body && (body.text || body.transcription)) {
+                    // text can be "" (silence) — that's still a valid response
+                    if (body && (typeof body.text === 'string' || body.transcription)) {
                       inferenceOk = true;
                       passedStage = 'STT';
-                      log.log(`[gpu] Inference test PASSED (STT) in ${sttMs}ms`);
+                      log.log(`[gpu] Inference test PASSED (STT, text="${(body.text || '').slice(0, 30)}") in ${sttMs}ms`);
                     }
                   } catch {}
                 }
@@ -608,7 +609,35 @@ export async function pollHealthUntilReady(
                 log.log(`[gpu] STT test failed: ${err instanceof Error ? err.message : err}`);
               }
 
-              // If STT failed, try LLM
+              // If STT failed, try translation endpoint (babelcast-subtitle and similar)
+              if (!inferenceOk) {
+                try {
+                  const transStart = Date.now();
+                  const transRes = await fetch(`${endpoint}/v1/translate/text`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: 'Hello', source_lang: 'en', target_lang: 'pt' }),
+                    signal: AbortSignal.timeout(30_000),
+                  });
+                  const transMs = Date.now() - transStart;
+                  const transBody = await transRes.text();
+                  log.log(`[gpu] Translation test: status=${transRes.status}, body=${transBody.slice(0, 200)}`);
+                  if (transRes.ok && transBody.trim()) {
+                    try {
+                      const body = JSON.parse(transBody);
+                      if (body && (body.text || body.translation || body.output)) {
+                        inferenceOk = true;
+                        passedStage = 'LLM(translate)';
+                        log.log(`[gpu] Inference test PASSED (translation) in ${transMs}ms`);
+                      }
+                    } catch {}
+                  }
+                } catch (err) {
+                  log.log(`[gpu] Translation test failed: ${err instanceof Error ? err.message : err}`);
+                }
+              }
+
+              // If translation failed, try chat completions
               if (!inferenceOk) {
                 try {
                   const llmStart = Date.now();

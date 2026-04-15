@@ -33,4 +33,5 @@ kill_timeout = '30s'
 
 [[vm]]
   size = 'shared-cpu-2x'
-  memory = '1024mb'
+  memory = '2048mb'
+  swap_size_mb = 2048
