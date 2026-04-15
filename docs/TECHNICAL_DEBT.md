@@ -29,8 +29,8 @@ This document tracks known technical debt, TODOs, and areas for improvement in t
 - ✅ `src/gateway/providers/gpu/vast-client.ts` (2,765 lines) → **Completed**
 - ✅ `src/gateway/providers/gpu/runpod-client.ts` (1,661 lines) → **Completed**
 - ✅ `server/gpu-handlers.ts` (1,656 lines) → **Completed**
-- `server/ai-handlers.ts` (1,422 lines) → Not Started
-- `server/bot-handlers.ts` (1,271 lines) → Not Started
+- ✅ `server/ai-handlers.ts` (1,422 lines) → **Completed**
+- `server/bot-handlers.ts` (1,271 lines) → In Progress
 - `src/errors/deploy-errors.ts` (1,028 lines) → Not Started
 
 **Strategy:**
@@ -54,7 +54,7 @@ await safeClose(client, 'context');
 
 **Files to Update:**
 - `src/database/pg-driver.ts` (2 instances)
-- `server/bot-handlers.ts` (3 instances)
+- `server/bot-handlers.ts` (12 instances — best-effort cleanup, probe failures, polling)
 - `server/diagnostics-handlers.ts` (3 instances)
 - `server/gpu-handlers-offers.ts` (2 instances)
 - `server/gpu-handlers.ts` (2 instances)
@@ -133,6 +133,13 @@ const [a, b] = await Promise.all([fetchA(), fetchB()]);
 - `types.ts`, `vram.ts`, `deploy-utils.ts`, `lifecycle.ts`, `snapshots.ts`
 **Tests:** 22 new tests
 **Impact:** Better separation of concerns, easier testing
+
+### ✅ Modularized ai-handlers.ts
+**Date:** 2026-04-15
+**Changes:** Split 1,422 lines into 6 modules
+- `types.ts`, `config.ts`, `utils.ts`, `stt-handlers.ts`, `tts-translate-handlers.ts`, `index.ts`
+**Tests:** 34 new tests
+**Impact:** Better separation of concerns for AI pipeline stages
 
 ### ✅ Created Safe Catch Module
 **Date:** 2026-04-15
