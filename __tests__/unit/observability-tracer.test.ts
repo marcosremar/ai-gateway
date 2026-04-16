@@ -39,9 +39,10 @@ describe('DistributedTracer', () => {
 
   it('addTag adds tag to span', () => {
     const span = tracer.startSpan('op');
-    tracer.addTag(span.spanId, 'key1', 'value1');
+    // Note: use non-sensitive tag names — "key" / "secret" / "token" etc. are auto-redacted
+    tracer.addTag(span.spanId, 'tag1', 'value1');
     tracer.addTag(span.spanId, 'num', 42);
-    expect(span.tags['key1']).toBe('value1');
+    expect(span.tags['tag1']).toBe('value1');
     expect(span.tags['num']).toBe(42);
   });
 

@@ -482,22 +482,16 @@ describe('handleGpuResume', () => {
   });
 
   it('#131 resumeOrDeploy in gpu-deploy calls startInstance and clears timer', () => {
-    // The logic moved from handler to gpu-health-monitor.ts resumeOrDeploy()
-    const healthMonitorSource = readFileSync(join(__dirname, '../server/gpu-health-monitor.ts'), 'utf-8');
-    const fnStart = healthMonitorSource.indexOf('export async function resumeOrDeploy');
-    const fnEnd = healthMonitorSource.indexOf('\nexport async function autoTerminateGpu', fnStart);
-    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
-    expect(fnBody).toContain('client.startInstance(podId, credentials)');
-    expect(fnBody).toContain('clearAutoDestroyTimer()');
+    // After DDD split, resumeOrDeploy lives in gpu-resume-manager.ts
+    const resumeSource = readFileSync(join(__dirname, '../server/gpu-resume-manager.ts'), 'utf-8');
+    expect(resumeSource).toContain('client.startInstance(podId, credentials)');
+    expect(resumeSource).toContain('clearAutoDestroyTimer');
   });
 
   it('#132 resumeOrDeploy sets booting state and starts monitoring on success', () => {
-    const healthMonitorSource = readFileSync(join(__dirname, '../server/gpu-health-monitor.ts'), 'utf-8');
-    const fnStart = healthMonitorSource.indexOf('export async function resumeOrDeploy');
-    const fnEnd = healthMonitorSource.indexOf('\nexport async function autoTerminateGpu', fnStart);
-    const fnBody = healthMonitorSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
-    expect(fnBody).toContain("status: 'booting'");
-    expect(fnBody).toContain('startGpuMonitoring()');
+    const resumeSource = readFileSync(join(__dirname, '../server/gpu-resume-manager.ts'), 'utf-8');
+    expect(resumeSource).toContain("status: 'booting'");
+    expect(resumeSource).toContain('startGpuMonitoring');
   });
 
   it('#133 returns 200 with ok:true and method field', () => {

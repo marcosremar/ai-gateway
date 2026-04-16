@@ -10,13 +10,14 @@ import {
   setDeployApiKey, setDeployVastApiKey, setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey,
   setActiveProvider, setDeployCancelled,
   deploymentSM,
-  loadPersistedDeploy, clearPersistedDeploy,
+  loadPersistedDeploy, clearPersistedDeploy, persistDeployState,
   resetDeployState,
   updateGpuModelWarmth,
 } from './state';
-import { markGpuHealthy } from './providers';
+import { markGpuHealthy, runpod, vast, tensordock, modal } from './providers';
 import { broadcastWs } from './ws-state';
 import { BLACKWELL_TO_STANDARD, STANDARD_TO_BLACKWELL } from './config';
+import { POD_NAME_PREFIX } from './gpu-orphan-cleanup';
 
 const log = createLogger('gpu-deploy');
 
@@ -155,6 +156,7 @@ export async function tryRecoverActiveDeploy(): Promise<boolean> {
       message: `Reconnected after restart (${persisted.provider}/${persisted.gpuType})`,
       step: 'ready',
       stepDetail: '',
+      ...(persisted.devMode ? { devMode: true } : {}),
     });
 
     // Restore provider credentials from env (needed for terminate)
@@ -187,6 +189,167 @@ export async function tryRecoverActiveDeploy(): Promise<boolean> {
     clearPersistedDeploy();
     return false;
   }
+}
+
+/**
+ * Scan all configured providers for running pods matching our naming prefix
+ * that we have NOT recovered from `active_deploy.json`, probe their /health,
+ * and reconnect to the first healthy one instead of letting orphan-sweep
+ * terminate it.
+ *
+ * Called at startup AFTER tryRecoverActiveDeploy returns false, so it acts as
+ * a fallback for cases where active_deploy.json is missing/stale but a pod is
+ * still running (e.g. hard crash before persistDeployState, or file was hand-deleted).
+ */
+export async function tryReconnectOrphanDeploy(): Promise<boolean> {
+  if (deployState.status === 'ready' || deployState.status === 'booting' || deployState.status === 'installing') {
+    return false; // already active or reconnecting
+  }
+
+  type Candidate = {
+    provider: 'runpod' | 'vast' | 'tensordock' | 'modal';
+    instanceId: string;
+    endpoint: string;
+    gpuType: string;
+    sshHost: string;
+    sshPort: number;
+    providerMeta: Record<string, unknown>;
+    apiKey: string;
+    authId?: string;
+    costPerHr?: number;
+  };
+  const candidates: Candidate[] = [];
+
+  const rpKey = process.env.RUNPOD_API_KEY || deployApiKey;
+  if (rpKey) {
+    try {
+      const instances = await runpod.listInstances({ apiKey: rpKey });
+      for (const i of instances) {
+        if (!(i.instanceName || '').startsWith(POD_NAME_PREFIX)) continue;
+        if (!['RUNNING', 'running', 'active'].includes(i.status)) continue;
+        if (!i.endpoint) continue;
+        candidates.push({
+          provider: 'runpod', instanceId: i.instanceId, endpoint: i.endpoint,
+          gpuType: i.gpuType ?? '', sshHost: i.sshHost ?? '', sshPort: i.sshPort ?? 0,
+          providerMeta: (i.providerMeta as Record<string, unknown>) ?? {}, apiKey: rpKey,
+        });
+      }
+    } catch (err) {
+      log.warn(`[gpu] orphan-reconnect: RunPod list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  const vastKey = process.env.VAST_API_KEY || deployVastApiKey;
+  if (vastKey) {
+    try {
+      const instances = await vast.listInstances({ apiKey: vastKey });
+      for (const i of instances) {
+        const st = (i.status ?? '').toLowerCase();
+        if (!['running', 'active'].includes(st)) continue;
+        if (!i.endpoint) continue;
+        candidates.push({
+          provider: 'vast', instanceId: i.instanceId, endpoint: i.endpoint,
+          gpuType: i.gpuType ?? '', sshHost: i.sshHost ?? '', sshPort: i.sshPort ?? 0,
+          providerMeta: (i.providerMeta as Record<string, unknown>) ?? {}, apiKey: vastKey,
+        });
+      }
+    } catch (err) {
+      log.warn(`[gpu] orphan-reconnect: Vast list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  const tdKey = process.env.TENSORDOCK_API_KEY || deployTensordockApiKey;
+  const tdAuth = process.env.TENSORDOCK_AUTH_ID || deployTensordockAuthId;
+  if (tdKey) {
+    try {
+      const instances = await tensordock.listInstances({ apiKey: tdKey, authId: tdAuth });
+      for (const i of instances) {
+        const st = (i.status ?? '').toLowerCase();
+        if (!['running', 'active'].includes(st)) continue;
+        if (!i.endpoint) continue;
+        candidates.push({
+          provider: 'tensordock', instanceId: i.instanceId, endpoint: i.endpoint,
+          gpuType: i.gpuType ?? '', sshHost: i.sshHost ?? '', sshPort: i.sshPort ?? 0,
+          providerMeta: (i.providerMeta as Record<string, unknown>) ?? {}, apiKey: tdKey, authId: tdAuth,
+        });
+      }
+    } catch (err) {
+      log.warn(`[gpu] orphan-reconnect: TensorDock list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  const modalKey = process.env.MODAL_TOKEN_ID || deployModalApiKey;
+  if (modalKey) {
+    try {
+      const instances = await modal.listInstances({ apiKey: modalKey });
+      for (const i of instances) {
+        const st = (i.status ?? '').toLowerCase();
+        if (!['running', 'deployed', 'active'].includes(st)) continue;
+        if (!i.endpoint) continue;
+        candidates.push({
+          provider: 'modal', instanceId: i.instanceId, endpoint: i.endpoint,
+          gpuType: i.gpuType ?? '', sshHost: i.sshHost ?? '', sshPort: i.sshPort ?? 0,
+          providerMeta: (i.providerMeta as Record<string, unknown>) ?? {}, apiKey: modalKey,
+        });
+      }
+    } catch (err) {
+      log.warn(`[gpu] orphan-reconnect: Modal list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  if (candidates.length === 0) return false;
+
+  log.log(`[gpu] orphan-reconnect: found ${candidates.length} running pod(s) — probing health to reconnect`);
+
+  for (const c of candidates) {
+    try {
+      const probe = await probeGpuHealth(c.endpoint, true);
+      if (!probe.ok) {
+        log.log(`[gpu] orphan-reconnect: ${c.provider}/${c.instanceId} not healthy — skipping`);
+        continue;
+      }
+      log.log(`[gpu] orphan-reconnect: reconnecting to ${c.provider}/${c.instanceId} @ ${c.endpoint}`);
+
+      setDeployCancelled(false);
+      if (c.provider === 'runpod') setDeployApiKey(c.apiKey);
+      else if (c.provider === 'vast') setDeployVastApiKey(c.apiKey);
+      else if (c.provider === 'tensordock') {
+        setDeployTensordockApiKey(c.apiKey);
+        if (c.authId) setDeployTensordockAuthId(c.authId);
+      } else if (c.provider === 'modal') setDeployModalApiKey(c.apiKey);
+      setActiveProvider(c.provider as ProviderName);
+
+      if (probe.data) updateGpuModelWarmth(probe.data);
+      setDeployState({
+        status: 'ready',
+        podId: c.instanceId,
+        endpoint: c.endpoint,
+        gpuType: c.gpuType,
+        provider: c.provider as ProviderName,
+        sshHost: c.sshHost,
+        sshPort: c.sshPort,
+        providerMeta: c.providerMeta,
+        costPerHr: c.costPerHr ?? 0,
+        startedAt: Date.now(),
+        message: `Reconnected to orphan pod after restart (${c.provider}/${c.gpuType})`,
+        step: 'ready',
+        stepDetail: '',
+        alert: 'Reconnected to running pod discovered via provider scan',
+        alertLevel: 'info',
+      });
+      persistDeployState();
+      markGpuHealthy();
+      deploymentSM.markReady(c.instanceId, c.endpoint, c.gpuType, c.costPerHr ?? 0);
+
+      const { startGpuMonitoring } = await import('./gpu-health-monitor');
+      startGpuMonitoring();
+      broadcastWs({ type: 'gpu:orphan_reconnect', provider: c.provider, podId: c.instanceId, endpoint: c.endpoint });
+      return true;
+    } catch (err) {
+      log.warn(`[gpu] orphan-reconnect: ${c.provider}/${c.instanceId} probe failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  return false;
 }
 
 // ── Auto-Recovery Deploy ──────────────────────────────────────────────────────

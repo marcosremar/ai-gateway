@@ -2,7 +2,7 @@
  * Tests for types module.
  */
 
-import { describe, it } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import type { GatewayConfig } from '../../src/config';
 
 describe('Types', () => {

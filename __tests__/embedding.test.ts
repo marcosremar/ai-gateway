@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { OpenAICompatEmbeddingProvider } from '../src/providers/openai-compat/openai-compat-embedding';
+import { OpenAICompatEmbeddingProvider } from '../src/gateway/providers/cloud/openai-compat/openai-compat-embedding';
 
 // Mock OpenAI
 vi.mock('openai', () => {

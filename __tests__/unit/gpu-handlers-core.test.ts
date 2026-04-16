@@ -367,6 +367,48 @@ describe('GPU Handlers - Core Logic', () => {
       expect(responseBody.deployId).toBeDefined();
     });
 
+    it('devMode=true in body lands in deployState via setDeployState', async () => {
+      const img = uniqueImage();
+      const body = {
+        dockerImage: img,
+        gpuTypes: ['NVIDIA GeForce RTX 4090'],
+        apiKey: 'rpa_valid-key-1234567890abcdefghij',
+        devMode: true,
+      };
+      vi.mocked(httpUtilsMock.readJsonBody).mockResolvedValue(body);
+      vi.mocked(httpUtilsMock.validateGpuCredentials).mockReturnValue(null);
+
+      const res = createMockRes();
+      await gpuHandlers.handleGpuDeploy(createMockReq(body), res);
+
+      expect(res.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
+      // Verify setDeployState was called with devMode: true
+      const setStateCalls = vi.mocked(stateMock.setDeployState).mock.calls;
+      const devModeCall = setStateCalls.find(([patch]) => (patch as any)?.devMode === true);
+      expect(devModeCall, `setDeployState never received devMode:true. calls=${JSON.stringify(setStateCalls.map(c => c[0]))}`).toBeDefined();
+    });
+
+    it('devMode absent (normal deploy) does not set devMode:true', async () => {
+      const img = uniqueImage();
+      const body = {
+        dockerImage: img,
+        gpuTypes: ['NVIDIA GeForce RTX 4090'],
+        apiKey: 'rpa_valid-key-1234567890abcdefghij',
+        // no devMode
+      };
+      vi.mocked(httpUtilsMock.readJsonBody).mockResolvedValue(body);
+      vi.mocked(httpUtilsMock.validateGpuCredentials).mockReturnValue(null);
+
+      const res = createMockRes();
+      await gpuHandlers.handleGpuDeploy(createMockReq(body), res);
+
+      expect(res.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
+      // setDeployState must NOT be called with devMode:true
+      const setStateCalls = vi.mocked(stateMock.setDeployState).mock.calls;
+      const devModeCall = setStateCalls.find(([patch]) => (patch as any)?.devMode === true);
+      expect(devModeCall).toBeUndefined();
+    });
+
     it('should reject unreasonable storage requests (storageGb > 500 is capped)', async () => {
       const img = uniqueImage();
       vi.mocked(httpUtilsMock.readJsonBody).mockResolvedValue({

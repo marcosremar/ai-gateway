@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { DeploymentStateMachine } from '../server/deployment-state-machine';
+import { DeploymentStateMachine } from '../../server/deployment-state-machine';
 
 // ── 1. State Machine tests (import directly, no mocks needed) ──────────────
 
@@ -86,7 +86,7 @@ describe('DeploymentStateMachine — stopped phase', () => {
 // needing to mock the entire runtime.
 
 describe('resumeOrDeploy source inspection', () => {
-  const gpuDeploySrc = readFileSync(join(__dirname, '../server/gpu-resume-manager.ts'), 'utf-8');
+  const gpuDeploySrc = readFileSync(join(__dirname, '../../server/gpu-resume-manager.ts'), 'utf-8');
 
   it('resumeOrDeploy calls deleteInstance for orphan cleanup', () => {
     expect(gpuDeploySrc).toContain('client.deleteInstance(podId, credentials)');
@@ -117,7 +117,7 @@ describe('resumeOrDeploy source inspection', () => {
 });
 
 describe('handleGpuResume source inspection', () => {
-  const handlersSrc = readFileSync(join(__dirname, '../server/gpu-handlers.ts'), 'utf-8');
+  const handlersSrc = readFileSync(join(__dirname, '../../server/gpu-handlers.ts'), 'utf-8');
 
   it('handleGpuResume delegates to resumeOrDeploy', () => {
     expect(handlersSrc).toContain("resumeOrDeploy({ reason: 'manual'");
@@ -129,7 +129,7 @@ describe('handleGpuResume source inspection', () => {
 });
 
 describe('handleGpuStop source inspection', () => {
-  const handlersSrc = readFileSync(join(__dirname, '../server/gpu-handlers.ts'), 'utf-8');
+  const handlersSrc = readFileSync(join(__dirname, '../../server/gpu-handlers.ts'), 'utf-8');
 
   it('handleGpuStop uses stopped status instead of idle', () => {
     // After stop, should set status to 'stopped' (not 'idle')
@@ -139,7 +139,7 @@ describe('handleGpuStop source inspection', () => {
 });
 
 describe('autoStopGpu source inspection', () => {
-  const gpuDeploySrc = readFileSync(join(__dirname, '../server/gpu-idle-manager.ts'), 'utf-8');
+  const gpuDeploySrc = readFileSync(join(__dirname, '../../server/gpu-idle-manager.ts'), 'utf-8');
 
   it('autoStopGpu transitions to stopped state', () => {
     expect(gpuDeploySrc).toContain("deploymentSM.markStopped(podId, provider, gpuType, costPerHr, dockerImage)");
@@ -148,7 +148,7 @@ describe('autoStopGpu source inspection', () => {
 });
 
 describe('touchModelRequest auto-resume source inspection', () => {
-  const stateSrc = readFileSync(join(__dirname, '../server/state.ts'), 'utf-8');
+  const stateSrc = readFileSync(join(__dirname, '../../server/state.ts'), 'utf-8');
 
   it('touchModelRequest checks deploymentSM.isStopped', () => {
     expect(stateSrc).toContain('sm.isStopped');
@@ -160,7 +160,7 @@ describe('touchModelRequest auto-resume source inspection', () => {
 });
 
 describe('DeploymentState type includes stopped', () => {
-  const stateSrc = readFileSync(join(__dirname, '../src/gateway/state/deploy-state.ts'), 'utf-8');
+  const stateSrc = readFileSync(join(__dirname, '../../src/gateway/state/deploy-state.ts'), 'utf-8');
 
   it('DeploymentState.status union includes stopped', () => {
     expect(stateSrc).toContain("'stopped'");
@@ -170,7 +170,7 @@ describe('DeploymentState type includes stopped', () => {
 });
 
 describe('Persistence includes stopped state', () => {
-  const stateSrc = readFileSync(join(__dirname, '../src/gateway/state/deploy-state.ts'), 'utf-8');
+  const stateSrc = readFileSync(join(__dirname, '../../src/gateway/state/deploy-state.ts'), 'utf-8');
 
   it('PersistedDeploy has stoppedAt field', () => {
     expect(stateSrc).toContain('stoppedAt?: number');

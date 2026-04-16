@@ -22,8 +22,8 @@ const fn = (src: string, name: string, len = 3000) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Groq Provider (#389-#398)', () => {
-  const src = read('src/providers/groq/index.ts');
-  const models = read('src/providers/groq/models.ts');
+  const src = read('src/gateway/providers/cloud/groq/index.ts');
+  const models = read('src/gateway/providers/cloud/groq/models.ts');
 
   it('#389 groqSTT provider exported', () => { expect(src).toMatch(/export.*groqSTT|groqSTT.*=/); });
   it('#390 groqLLM provider exported', () => { expect(src).toMatch(/export.*groqLLM|groqLLM.*=/); });
@@ -45,11 +45,11 @@ describe('Groq Provider (#389-#398)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('OpenAI Provider (#399-#404)', () => {
-  const src = read('src/providers/openai/index.ts');
-  const models = read('src/providers/openai/models.ts');
+  const src = read('src/gateway/providers/cloud/openai/index.ts');
+  const models = read('src/gateway/providers/cloud/openai/models.ts');
 
   it('#399 openaiSTT provider exported', () => { expect(src).toMatch(/openaiSTT|openai.*stt/i); });
-  it('#400 TTS provider file exists', () => { expect(fs.existsSync('src/providers/openai/openai-stt.ts')).toBe(true); });
+  it('#400 TTS provider file exists', () => { expect(fs.existsSync('src/gateway/providers/cloud/openai/openai-stt.ts')).toBe(true); });
   it('#401 LLM capabilities', () => { expect(models).toMatch(/gpt|chat/i); });
   it('#402 uses OpenAI SDK (handles 401/429 internally)', () => { expect(src).toMatch(/OpenAI|openai|client/i); });
   it('#403 uses OpenAI-compat layer (error handling delegated)', () => { expect(src).toMatch(/OpenAICompat|import.*openai/i); });
@@ -61,8 +61,8 @@ describe('OpenAI Provider (#399-#404)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Fireworks Provider (#405-#408)', () => {
-  const src = read('src/providers/fireworks/index.ts');
-  const models = read('src/providers/fireworks/models.ts');
+  const src = read('src/gateway/providers/cloud/fireworks/index.ts');
+  const models = read('src/gateway/providers/cloud/fireworks/models.ts');
 
   it('#405 fireworksSTT exported', () => { expect(src).toMatch(/fireworks.*STT|stt/i); });
   it('#406 fireworksLLM exported', () => { expect(src).toMatch(/fireworks.*LLM|llm|chat/i); });
@@ -75,7 +75,7 @@ describe('Fireworks Provider (#405-#408)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('OpenRouter Provider (#409-#410)', () => {
-  const src = read('src/providers/openrouter/index.ts');
+  const src = read('src/gateway/providers/cloud/openrouter/index.ts');
 
   it('#409 openrouterLLM exported', () => { expect(src).toMatch(/openrouter|LLM|chat/i); });
   it('#410 routes to model', () => { expect(src).toMatch(/model|route/i); });
@@ -86,7 +86,7 @@ describe('OpenRouter Provider (#409-#410)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Ollama Provider (#411-#413)', () => {
-  const src = read('src/providers/ollama/index.ts');
+  const src = read('src/gateway/providers/cloud/ollama/index.ts');
 
   it('#411 ollamaSTT exported', () => { expect(src).toMatch(/ollama.*STT|stt|transcri/i); });
   it('#412 ollamaLLM exported', () => { expect(src).toMatch(/ollama.*LLM|llm|chat/i); });
@@ -104,7 +104,7 @@ describe('Modal Providers (#414-#418)', () => {
   });
 
   it('#415 Modal Seamless STT exists', () => {
-    expect(fs.existsSync('src/providers/modal-seamless/index.ts')).toBe(true);
+    expect(fs.existsSync('src/gateway/providers/cloud/modal-seamless/index.ts')).toBe(true);
   });
 
   it('#416 Modal Qwen3ASR Pipeline exists', () => {
@@ -116,7 +116,7 @@ describe('Modal Providers (#414-#418)', () => {
   });
 
   it('#418 Modal has error handling', () => {
-    const src = read('src/providers/modal-seamless/index.ts');
+    const src = read('src/gateway/providers/cloud/modal-seamless/index.ts');
     expect(src).toMatch(/catch|error|status|throw/i);
   });
 });
@@ -126,14 +126,14 @@ describe('Modal Providers (#414-#418)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('ElevenLabs Provider (#419-#420)', () => {
-  const src = read('src/providers/elevenlabs/index.ts');
+  const src = read('src/gateway/providers/cloud/elevenlabs/index.ts');
 
   it('#419 ElevenLabs STT (Scribe) exists', () => { expect(src).toMatch(/scribe|stt|transcri/i); });
   it('#420 handles quota exceeded', () => { expect(src).toMatch(/error|status|catch/i); });
 });
 
 describe('Deepgram Provider (#421-#422)', () => {
-  const src = read('src/providers/deepgram/index.ts');
+  const src = read('src/gateway/providers/cloud/deepgram/index.ts');
 
   it('#421 Deepgram STT exists', () => { expect(src).toMatch(/deepgram|stt|transcri|nova/i); });
   it('#422 word timestamps supported', () => { expect(src).toMatch(/word|timestamp|utterance/i); });
@@ -144,8 +144,8 @@ describe('Deepgram Provider (#421-#422)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('OpenAI-Compat STT (#434-#438)', () => {
-  const utils = read('src/providers/openai-compat/audio-utils.ts');
-  const stt = read('src/providers/openai-compat/openai-compat-stt.ts');
+  const utils = read('src/gateway/providers/cloud/openai-compat/audio-utils.ts');
+  const stt = read('src/gateway/providers/cloud/openai-compat/openai-compat-stt.ts');
 
   it('#434 detects WAV format', () => {
     expect(utils).toContain('0x52'); // R
@@ -164,7 +164,7 @@ describe('OpenAI-Compat STT (#434-#438)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Provider type system', () => {
-  const types = read('src/providers/types.ts');
+  const types = read('src/gateway/providers/cloud/types.ts');
 
   it('STTProvider interface defined', () => { expect(types).toContain('STTProvider'); });
   it('LLMProvider interface defined', () => { expect(types).toMatch(/LLMProvider|ChatProvider/); });

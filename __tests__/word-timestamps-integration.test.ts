@@ -25,17 +25,24 @@ const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
   ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY)
   : false;
 
+/** Track whether real speech audio was generated. If false, skip word-assertion
+ *  tests — sine waves don't reliably produce words from most STT providers. */
+let realSpeechAvailable = false;
+
 /** Generate real speech WAV via macOS say + ffmpeg for reliable STT testing. */
 function makeSpeechWav(): Buffer {
-  const aiff = '/tmp/word_ts_test.aiff';
-  const wav = '/tmp/word_ts_test.wav';
+  // Use unique tmp paths so parallel test runs don't collide.
+  const suffix = `${process.pid}-${Date.now()}`;
+  const aiff = `/tmp/word_ts_test_${suffix}.aiff`;
+  const wav = `/tmp/word_ts_test_${suffix}.wav`;
   try {
     execSync(`say -o ${aiff} "Hello world, this is a test of speech recognition"`, { timeout: 10_000 });
     execSync(`ffmpeg -y -i ${aiff} -ar 16000 -ac 1 -sample_fmt s16 ${wav} 2>/dev/null`, { timeout: 10_000 });
+    realSpeechAvailable = true;
     return Buffer.from(readFileSync(wav));
   } catch {
-    // Fallback: sine wave (may not produce words on all providers)
-    console.warn('  [warn] say/ffmpeg not available, falling back to sine wave');
+    // Fallback: sine wave (won't produce words from most providers).
+    console.warn('  [warn] say/ffmpeg not available, falling back to sine wave — word-timestamp tests will be skipped');
     return makeTestWav(1.5);
   } finally {
     try { if (existsSync(aiff)) unlinkSync(aiff); } catch {}
@@ -65,7 +72,7 @@ function assertWordTimestamps(response: STTResponse): void {
 
 // ── Groq ──────────────────────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.GROQ_API_KEY)('Groq word timestamps (Real API)', () => {
+describe.skipIf(!realSpeechAvailable || (!process.env.GROQ_API_KEY))('Groq word timestamps (Real API)', () => {
   it('returns word timestamps with whisper-large-v3-turbo', async () => {
     try {
       const { result, ms } = await timed(() =>
@@ -85,7 +92,7 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq word timestamps (Real API)', ()
 
 // ── OpenAI ────────────────────────────────────────────────────────────────────
 
-describe.skipIf(!OPENAI_AVAILABLE)('OpenAI word timestamps (Real API)', () => {
+describe.skipIf(!realSpeechAvailable || (!OPENAI_AVAILABLE))('OpenAI word timestamps (Real API)', () => {
   // Use native OpenAISTTProvider which handles whisper-1 vs gpt-4o format differences
   const nativeOpenai = new OpenAISTTProvider();
 
@@ -111,7 +118,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('OpenAI word timestamps (Real API)', () => {
 
 // ── Deepgram ──────────────────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.DEEPGRAM_API_KEY)('Deepgram word timestamps (Real API)', () => {
+describe.skipIf(!realSpeechAvailable || (!process.env.DEEPGRAM_API_KEY))('Deepgram word timestamps (Real API)', () => {
   it('always returns words (no flag needed)', async () => {
     const { result, ms } = await timed(() =>
       deepgramSTT.transcribe({ audio, model: 'nova-3' }),
@@ -125,7 +132,7 @@ describe.skipIf(!process.env.DEEPGRAM_API_KEY)('Deepgram word timestamps (Real A
 
 // ── Fireworks ─────────────────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks word timestamps (Real API)', () => {
+describe.skipIf(!realSpeechAvailable || (!process.env.FIREWORKS_API_KEY))('Fireworks word timestamps (Real API)', () => {
   it('returns word timestamps with whisper-v3', async () => {
     const { result, ms } = await timed(() =>
       fireworksSTT.transcribe({ audio, model: 'whisper-v3', wordTimestamps: true }),

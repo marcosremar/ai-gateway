@@ -17,7 +17,7 @@ import {
   GROQ_TTS_MODELS,
   GROQ_TTS_VOICES,
   GROQ_LLM_MODELS,
-} from '../src/providers/groq/models';
+} from '../../src/gateway/providers/cloud/groq/models';
 
 // Fireworks models
 import {

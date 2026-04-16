@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { EWMATracker, type EWMARanking } from '../server/ewma-tracker';
+import { EWMATracker, type EWMARanking } from '../../server/ewma-tracker';
 
 describe('EWMATracker', () => {
   let tracker: EWMATracker;

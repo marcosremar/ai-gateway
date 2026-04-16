@@ -24,7 +24,7 @@ describe('Load Testing Scenarios', () => {
     expect(success).toBe(concurrent);
   });
 
-  it('should handle 1000 requests per minute', async () => {
+  it('should handle 1000 requests per minute', { timeout: 70_000 }, async () => {
     const rpm = 1000;
     const intervalMs = 60_000 / rpm;
     const results: number[] = [];

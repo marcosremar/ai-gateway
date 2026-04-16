@@ -241,11 +241,13 @@ describe('idle watchdog', () => {
   });
 
   it('#194 warns at 75% of idle timeout before stopping', () => {
-    const fnStart = monitorLoopSource.indexOf('Warn at 75% of idle');
-    const fnBody = monitorLoopSource.slice(fnStart, fnStart + 500);
-    expect(fnBody).toContain('IDLE_TIMEOUT_MS * 0.75');
-    expect(fnBody).toContain('idleWarned');
-    expect(fnBody).toContain('Idle warning');
+    // 75% warning logic moved to gpu-idle-logic.ts checkIdleAction after DDD split.
+    const idleLogicSource = readFileSync('server/gpu-idle-logic.ts', 'utf8');
+    expect(idleLogicSource).toContain('0.75');
+    expect(idleLogicSource).toContain('alreadyWarned');
+    // The log string stayed in monitor-loop
+    expect(monitorLoopSource).toContain('Idle warning');
+    expect(monitorLoopSource).toContain('idleWarned');
   });
 
   it('#195 autoStopGpu transitions to stopped state for resume', () => {
@@ -308,11 +310,9 @@ describe('race deploy — startDeployRace', () => {
   });
 
   it('#202 losers are terminated with wasted cost logging', () => {
-    const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
-    const fnEnd = deployRaceSource.indexOf('\nexport ', fnStart + 100);
-    const fnBody = deployRaceSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
-    expect(fnBody).toContain('wastedUsd');
-    expect(fnBody).toContain('deleteInstance');
+    // Scan the whole file — startDeployRace is the only export and is >17KB
+    expect(deployRaceSource).toContain('wastedUsd');
+    expect(deployRaceSource).toContain('deleteInstance');
   });
 
   it('#203 wraps Promise.all in try/finally for guaranteed cleanup', () => {
@@ -534,7 +534,10 @@ describe('startDeployWithTiers — advanced', () => {
   });
 
   it('#220c reorders tiers by availability and response time', () => {
-    expect(deployWithTiersSource).toContain('.sort(');
+    // After DDD split, offer sorting moved to per-provider offers modules
+    const vastOffers = readFileSync('src/gateway/providers/gpu/vast/offers.ts', 'utf8');
+    const runpodOffers = readFileSync('src/gateway/providers/gpu/runpod/offers.ts', 'utf8');
+    expect(vastOffers + runpodOffers).toContain('.sort(');
   });
 
   it('#220d sets fallback alert when tier fails and next available', () => {
@@ -615,7 +618,7 @@ describe('fetchGpuLogs', () => {
   // Function moved to gpu-auto-recovery.ts (re-exported by gpu-deploy.ts)
   it('is an exported async function', () => {
     // Check re-export from gpu-deploy.ts
-    expect(deploySource).toContain('fetchGpuLogs, getVerifiedGpuTypes, tryRecoverActiveDeploy, startAutoRecoveryDeploy');
+    expect(deploySource).toContain('fetchGpuLogs, getVerifiedGpuTypes, tryRecoverActiveDeploy, tryReconnectOrphanDeploy, startAutoRecoveryDeploy');
     // Check actual definition in auto-recovery.ts
     expect(autoRecoverySource).toContain('export async function fetchGpuLogs');
   });
@@ -640,7 +643,7 @@ describe('fetchGpuLogs', () => {
 describe('getVerifiedGpuTypes', () => {
   // Function moved to gpu-auto-recovery.ts (re-exported by gpu-deploy.ts)
   it('is an exported async function', () => {
-    expect(deploySource).toContain('fetchGpuLogs, getVerifiedGpuTypes, tryRecoverActiveDeploy, startAutoRecoveryDeploy');
+    expect(deploySource).toContain('fetchGpuLogs, getVerifiedGpuTypes, tryRecoverActiveDeploy, tryReconnectOrphanDeploy, startAutoRecoveryDeploy');
     expect(autoRecoverySource).toContain('export async function getVerifiedGpuTypes');
   });
 
@@ -864,17 +867,17 @@ describe('latency trend prediction', () => {
 
 describe('adaptive monitor frequency', () => {
   it('slows down polling when idle > 1 minute', () => {
-    // Now in gpu-monitor-loop.ts
-    const fnStart = monitorLoopSource.indexOf('Adaptive monitor frequency');
-    const fnBody = monitorLoopSource.slice(fnStart, fnStart + 300);
-    expect(fnBody).toContain('60_000');
+    // Adaptive logic lives in gpu-idle-logic.ts; monitor-loop invokes it via adaptiveMonitorDelay()
+    expect(monitorLoopSource).toContain('adaptiveMonitorDelay');
+    const idleLogic = readFileSync('server/gpu-idle-logic.ts', 'utf8');
+    expect(idleLogic).toContain('60_000');
   });
 });
 
 describe('tryRecoverActiveDeploy', () => {
   // Function moved to gpu-auto-recovery.ts (re-exported by gpu-deploy.ts)
   it('is an exported async function', () => {
-    expect(deploySource).toContain('fetchGpuLogs, getVerifiedGpuTypes, tryRecoverActiveDeploy, startAutoRecoveryDeploy');
+    expect(deploySource).toContain('fetchGpuLogs, getVerifiedGpuTypes, tryRecoverActiveDeploy, tryReconnectOrphanDeploy, startAutoRecoveryDeploy');
     expect(autoRecoverySource).toContain('export async function tryRecoverActiveDeploy');
   });
 
@@ -897,7 +900,7 @@ describe('startAutoRecoveryDeploy', () => {
   // Function moved to gpu-auto-recovery.ts (re-exported by gpu-deploy.ts)
   it('is an exported async function', () => {
     // Check re-export from gpu-deploy.ts
-    expect(deploySource).toContain('fetchGpuLogs, getVerifiedGpuTypes, tryRecoverActiveDeploy, startAutoRecoveryDeploy');
+    expect(deploySource).toContain('fetchGpuLogs, getVerifiedGpuTypes, tryRecoverActiveDeploy, tryReconnectOrphanDeploy, startAutoRecoveryDeploy');
     // Check actual definition in auto-recovery.ts
     expect(autoRecoverySource).toContain('export async function startAutoRecoveryDeploy');
   });

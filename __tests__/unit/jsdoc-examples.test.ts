@@ -6,7 +6,7 @@
  * This file serves as both test and documentation reference.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 // ── Error Hierarchy ──────────────────────────────────────────────────────────
 
@@ -64,7 +64,7 @@ describe('Constants — JSDoc Examples', () => {
 
   it('should export model names', () => {
     const { MODELS } = require('../../src/constants/index.ts');
-    expect(MODELS.LLM_LLAMA_70B).toBeDefined();
+    expect(MODELS.LLAMA_3_3_70B).toBeDefined();
   });
 });
 
@@ -90,14 +90,14 @@ describe('Constants — JSDoc Examples', () => {
  */
 describe('Utils — JSDoc Examples', () => {
   it('should retry with backoff', async () => {
-    const { withRetry } = require('../../src/utils/index.ts');
+    const { withRetry } = await import('../../src/utils');
     const fn = vi.fn().mockResolvedValue('success');
     const result = await withRetry(fn, { baseDelayMs: 10 });
     expect(result).toBe('success');
   });
 
   it('should generate UUIDs', async () => {
-    const { uuid } = require('../../src/utils/index.ts');
+    const { uuid } = await import('../../src/utils');
     const id = uuid();
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });

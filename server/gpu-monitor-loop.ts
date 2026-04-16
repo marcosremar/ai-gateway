@@ -66,11 +66,18 @@ const MAX_MONITOR_CRASH_RECOVERY = 2;
 
 // Idle warning: warn once before auto-terminate, reset on activity
 let idleWarned = false;
+
+// Session-cost idle alert (#12 — real-time cost alerting)
+// Fires periodically when the pod is sitting idle but still billing,
+// telling the user exactly how much they've spent and suggesting a stop.
+const SESSION_COST_ALERT_IDLE_MIN_MS = 5 * 60_000;   // start nagging after 5 min idle
+const SESSION_COST_ALERT_INTERVAL_MS = 5 * 60_000;   // repeat every 5 min while idle
+let lastSessionCostAlertAt = 0;
 // NOTE: monitorCrashRecoveryAttempts is intentionally NOT reset by resetIdleState —
 // resetting it on every model request would bypass the crash-loop protection (max 2
 // auto-recovery attempts), allowing infinite crash → request → reset → crash cycles.
 // It is only reset when startGpuMonitoring() is called (fresh deploy or recovery).
-export function resetIdleState() { idleWarned = false; monitorDelayMs = GPU_MONITOR_INTERVAL_MS; }
+export function resetIdleState() { idleWarned = false; lastSessionCostAlertAt = 0; monitorDelayMs = GPU_MONITOR_INTERVAL_MS; }
 
 export function startGpuMonitoring() {
   stopGpuMonitoring();
@@ -365,6 +372,48 @@ export function scheduleNextMonitorProbe() {
         }
       }
 
+      // ── Session-cost idle alert (#12) ──
+      // Fire when the pod is still billing but has been idle for a while, so the user
+      // sees the running meter and gets a clear "stop?" suggestion before auto-stop.
+      if (deployState.costPerHr > 0 && deployState.startedAt > 0) {
+        const lastActivity = Math.max(lastModelRequestTime, lastRequestTime);
+        const idleMs = lastActivity > 0 ? Date.now() - lastActivity : 0;
+        const shouldAlert = idleMs >= SESSION_COST_ALERT_IDLE_MIN_MS
+          && (Date.now() - lastSessionCostAlertAt) >= SESSION_COST_ALERT_INTERVAL_MS;
+        if (shouldAlert) {
+          const sessionHours = (Date.now() - deployState.startedAt) / 3_600_000;
+          const sessionSpend = deployState.costPerHr * sessionHours;
+          const idleMin = Math.round(idleMs / 60_000);
+          const hoursStr = sessionHours < 1
+            ? `${Math.round(sessionHours * 60)} min`
+            : `${sessionHours.toFixed(1)}h`;
+          const alertMsg = `Spending $${deployState.costPerHr.toFixed(3)}/hr for ${hoursStr} ($${sessionSpend.toFixed(2)} total). GPU idle ${idleMin} min — stop?`;
+          log.log(`[gpu] session-cost-alert: ${alertMsg}`);
+          setDeployState({ alert: alertMsg, alertLevel: 'warning' });
+          broadcastWs({
+            type: 'gpu:cost_idle',
+            deployId: deployState.deployId,
+            provider: deployState.provider,
+            costPerHr: deployState.costPerHr,
+            sessionSpend: Math.round(sessionSpend * 100) / 100,
+            sessionHours: Math.round(sessionHours * 100) / 100,
+            idleMin,
+            suggestion: 'stop',
+            message: alertMsg,
+          });
+          emitGatewayEvent('gpu.cost_idle', {
+            spend: +sessionSpend.toFixed(2),
+            hours: +sessionHours.toFixed(2),
+            idleMin,
+            costPerHr: deployState.costPerHr,
+          });
+          lastSessionCostAlertAt = Date.now();
+        } else if (idleMs < SESSION_COST_ALERT_IDLE_MIN_MS && lastSessionCostAlertAt > 0) {
+          // Activity resumed — reset so next idle period triggers a fresh alert
+          lastSessionCostAlertAt = 0;
+        }
+      }
+
       // Idle check — compute adaptive timeout based on boot cost + history
       const effectiveTimeout = computeAdaptiveIdleTimeout({
         lastBootDurationMs: deployState.deployDurationMs || 0,
@@ -374,7 +423,7 @@ export function scheduleNextMonitorProbe() {
       });
       const idleResult = checkIdleAction(lastModelRequestTime, lastRequestTime, Date.now(), effectiveTimeout, idleWarned);
       if (idleResult.action === 'stop') {
-        log.log(`[gpu] Idle ${idleResult.idleMin} min (timeout=${Math.round(effectiveTimeout / 60_000)}min, boot=${Math.round((deployState.deployDurationMs || 0) / 1000)}s) — auto-stopping`);
+        log.log(`[gpu] Idle ${idleResult.idleMin} min (timeout=${Math.round(effectiveTimeout / 60_000)}min, boot=${Math.round((deployState.deployDurationMs || 0) / 1000)}s) — auto-stopping (pausing)`);
         broadcastWs({ type: 'gpu:idle', deployId: deployState.deployId, idleMs: idleResult.idleMs, timeoutMs: effectiveTimeout, action: 'stop' });
         const { autoStopGpu } = await import('./gpu-idle-manager');
         await autoStopGpu();
