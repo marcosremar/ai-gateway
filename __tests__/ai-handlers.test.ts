@@ -13,57 +13,26 @@ if (!(vi as any).mocked) { (vi as any).mocked = (fn: unknown) => fn; }
 // Note: vi.mock factories are hoisted, so they cannot reference variables
 // defined in the test file scope. Use vi.hoisted() for shared mock functions.
 
-const mockTranscribe = vi.fn();
-const mockChat = vi.fn();
-const mockSynthesize = vi.fn();
-const mockPipeline = vi.fn();
-const mockChatProvider = { chat: vi.fn(), providerId: 'groq' };
+const {
+  mockTranscribe, mockChat, mockSynthesize, mockPipeline, mockChatProvider,
+} = vi.hoisted(() => ({
+  mockTranscribe: vi.fn(),
+  mockChat: vi.fn(),
+  mockSynthesize: vi.fn(),
+  mockPipeline: vi.fn(),
+  mockChatProvider: { chat: vi.fn(), providerId: 'groq' },
+}));
 
-// Mutable backing vars for mock properties that tests need to override.
-// ESM module namespace exports are read-only, so we use getters that delegate
-// to these variables instead of plain values that can't be reassigned.
+const { mockRaceProviders } = vi.hoisted(() => ({
+  mockRaceProviders: vi.fn(),
+}));
+
+const { mockFetch } = vi.hoisted(() => ({
+  mockFetch: vi.fn(),
+}));
+
+// Mutable backing var for gpuShadowMode — accessed via getter in mock
 let _gpuShadowMode = false;
-
-vi.mock('../server/providers', () => ({
-  client: {
-    transcribe: (...args: unknown[]) => mockTranscribe(...args),
-    chat: (...args: unknown[]) => mockChat(...args),
-    synthesize: (...args: unknown[]) => mockSynthesize(...args),
-    pipeline: (...args: unknown[]) => mockPipeline(...args),
-  },
-  groqProfile: { stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'groq', model: 'orpheus' }] },
-  ollamaProfile: null,
-  translationProfile: { stt: [], llm: [], tts: [] },
-  groqDefaults: { stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'groq', model: 'orpheus' }] },
-  ollamaDefaults: null,
-  translationDefaults: { stt: [], llm: [], tts: [] },
-  groqAvailable: true,
-  openaiAvailable: false,
-  deepgramAvailable: false,
-  fireworksAvailable: false,
-  openrouterAvailable: false,
-  whisperAvailable: false,
-  ollamaAvailable: false,
-  ENSEMBLE_STT_PROVIDERS: ['all'],
-  markGpuUnhealthy: vi.fn(),
-  shouldPreferGpu: vi.fn(() => false),
-  shouldPreferGpuTts: vi.fn(() => false),
-  recordStageSuccess: vi.fn(),
-  recordStageFailure: vi.fn(),
-  isStageCircuitClosed: vi.fn(() => true),
-  providers: { chat: {}, stt: {} },
-  modalTTS: { synthesize: vi.fn() },
-  get gpuShadowMode() { return _gpuShadowMode; },
-  markGpuProductionReady: vi.fn(),
-}));
-
-const mockRaceProviders = vi.fn();
-vi.mock('../server/race-providers', () => ({
-  raceProviders: (...args: unknown[]) => mockRaceProviders(...args),
-}));
-
-const mockFetch = vi.fn();
-global.fetch = mockFetch;
 
 // Mock server/state.ts
 vi.mock('../server/state', () => ({
@@ -243,6 +212,9 @@ vi.mock('../src/gateway/pipeline/local-kokoro', () => ({
   startLocalKokoro: vi.fn(),
   stopLocalKokoro: vi.fn(),
 }));
+
+// Global fetch mock
+vi.stubGlobal('fetch', mockFetch);
 
 // ── Imports (after mocks) ─────────────────────────────────────────────────
 

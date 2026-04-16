@@ -26,6 +26,8 @@ export default defineConfig({
       { find: /^\.\/test-config$/, replacement: tests('test-config.ts') },
       // Specific moved-path aliases must come BEFORE the general ../src/* catch-all
       { find: /^\.\.\/src\/providers\/openai-compat\/openai-compat-llm$/, replacement: src('gateway/providers/cloud/openai-compat/openai-compat-llm.ts') },
+      // ../src (bare — no trailing path) → src/index.ts
+      { find: /^\.\.\/src$/, replacement: src('index.ts') },
       // ../src/X from __tests__/integration/ or __tests__/unit/ → src/X
       // (../src/ from __tests__/sub/ resolves to __tests__/src/ which doesn't exist)
       { find: /^\.\.\/src\/(.*)$/, replacement: src('$1') },
