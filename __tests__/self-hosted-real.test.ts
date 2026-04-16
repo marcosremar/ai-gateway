@@ -23,13 +23,21 @@ import type { LLMProvider, ChatRequest, ChatResponse } from '@ai-gateway/provide
 // ── Detect Ollama (top-level await — resolved before describe.skipIf) ───────
 
 let ollamaAvailable = false;
+let ollamaModel = 'llama3.2';
 try {
   const res = await fetch('http://localhost:11434/api/tags', {
     signal: AbortSignal.timeout(3_000),
   });
   if (res.ok) {
     const data = (await res.json()) as { models?: Array<{ name: string }> };
-    ollamaAvailable = !!data.models?.some((m) => m.name.includes('llama3.2'));
+    // Prefer exact 'llama3.2', fall back to any llama3.2 variant (e.g. llama3.2:1b)
+    const exact = data.models?.find((m) => m.name === 'llama3.2' || m.name === 'llama3.2:latest');
+    const variant = data.models?.find((m) => m.name.startsWith('llama3.2'));
+    const match = exact || variant;
+    if (match) {
+      ollamaAvailable = true;
+      ollamaModel = match.name;
+    }
   }
 } catch {
   // Ollama not running
@@ -124,7 +132,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -155,7 +163,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -188,7 +196,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -247,7 +255,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -262,7 +270,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
 
     expect(result.content).toBeTruthy();
     expect(result.provider).toBe('ollama');
-    expect(result.model).toContain('llama3.2');
+    expect(result.model).toContain('llama3.2'); // matches llama3.2, llama3.2:1b, etc.
     expect(result.latencyMs).toBeGreaterThan(0);
     expect(result.fallbackUsed).toBe(false);
 
@@ -313,7 +321,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -373,7 +381,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,

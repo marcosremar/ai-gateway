@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { detectLanguage, detectLanguageWithSwap, SUPPORTED_LANGUAGES } from '../../src/language-detect';
+import { detectLanguage, detectLanguageWithSwap, SUPPORTED_LANGUAGES } from '../src/language-detect';
 
 describe('Language Detection Module', () => {
   describe('detectLanguage', () => {

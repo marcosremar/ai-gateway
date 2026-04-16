@@ -93,7 +93,7 @@ let healthyEndpoints = new Set<string>();
 // Test constants
 // ──────────────────────────────────────────────────────────────────────────────
 const TEST_USER = 'user-test-autoscaler';
-const GPU_SECRET = 'integration-test-gpu-secret-key';
+const GPU_SECRET = 'integration-test-gpu-secret-key-x';
 const GPU_ENDPOINT = 'http://10.0.0.1:8000';
 
 const BASE_CONFIG: AutoScalerConfig = {

@@ -180,13 +180,13 @@ describe('GatewayHttpClient — transcribe() Groq fallback', () => {
 
 describe('GatewayHttpClient — chat() Groq fallback', () => {
   it('falls back to Groq LLM when gateway is unreachable', async () => {
-    mockFetch.mockRejectedValueOnce(new TypeError('fetch failed')).mockResolvedValueOnce(
-      jsonResponse({
+    mockFetch
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(jsonResponse({
         model: 'llama-3.3-70b-versatile',
         choices: [{ message: { content: 'Translated via Groq' } }],
         usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-      }),
-    );
+      }));
 
     const gw = makeClient();
     const result = await gw.chat([{ role: 'user', content: 'Translate: Bonjour' }]);
@@ -213,19 +213,16 @@ describe('GatewayHttpClient — chat() Groq fallback', () => {
   });
 
   it('sends correct model and messages to Groq', async () => {
-    mockFetch.mockRejectedValueOnce(new TypeError('fetch failed')).mockResolvedValueOnce(
-      jsonResponse({
+    mockFetch
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(jsonResponse({
         model: 'llama-3.3-70b-versatile',
         choices: [{ message: { content: 'reply' } }],
-      }),
-    );
+      }));
 
     const gw = makeClient();
     await gw.chat(
-      [
-        { role: 'system', content: 'You are a translator.' },
-        { role: 'user', content: 'Translate' },
-      ],
+      [{ role: 'system', content: 'You are a translator.' }, { role: 'user', content: 'Translate' }],
       'llama-3.3-70b-versatile',
       { temperature: 0.3, maxTokens: 512 },
     );
@@ -240,12 +237,12 @@ describe('GatewayHttpClient — chat() Groq fallback', () => {
   });
 
   it('handles Groq returning empty choices', async () => {
-    mockFetch.mockRejectedValueOnce(new TypeError('fetch failed')).mockResolvedValueOnce(
-      jsonResponse({
+    mockFetch
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(jsonResponse({
         model: 'llama-3.3-70b-versatile',
         choices: [],
-      }),
-    );
+      }));
 
     const gw = makeClient();
     const result = await gw.chat([{ role: 'user', content: 'Hi' }]);
@@ -263,8 +260,8 @@ describe('GatewayHttpClient — chat() Groq fallback', () => {
 
   it('propagates Groq network error', async () => {
     mockFetch
-      .mockRejectedValueOnce(new TypeError('fetch failed')) // gateway
-      .mockRejectedValueOnce(new TypeError('Groq also failed')); // groq
+      .mockRejectedValueOnce(new TypeError('fetch failed'))           // gateway
+      .mockRejectedValueOnce(new TypeError('Groq also failed'));      // groq
 
     const gw = makeClient();
     await expect(gw.chat([{ role: 'user', content: 'Hi' }])).rejects.toThrow('Groq also failed');
@@ -277,12 +274,12 @@ describe('GatewayHttpClient — chat() Groq fallback', () => {
 
 describe('GatewayHttpClient — translate() Groq fallback', () => {
   it('falls back to Groq LLM for translation', async () => {
-    mockFetch.mockRejectedValueOnce(new TypeError('fetch failed')).mockResolvedValueOnce(
-      jsonResponse({
+    mockFetch
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(jsonResponse({
         model: 'llama-3.3-70b-versatile',
         choices: [{ message: { content: 'Hello world' } }],
-      }),
-    );
+      }));
 
     const gw = makeClient();
     const result = await gw.translate('Bonjour le monde', 'fr', 'en');
@@ -300,12 +297,12 @@ describe('GatewayHttpClient — translate() Groq fallback', () => {
   });
 
   it('includes source and target language in Groq prompt', async () => {
-    mockFetch.mockRejectedValueOnce(new TypeError('fetch failed')).mockResolvedValueOnce(
-      jsonResponse({
+    mockFetch
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(jsonResponse({
         model: 'llama-3.3-70b-versatile',
         choices: [{ message: { content: 'Hola mundo' } }],
-      }),
-    );
+      }));
 
     const gw = makeClient();
     await gw.translate('Hello world', 'en', 'es');

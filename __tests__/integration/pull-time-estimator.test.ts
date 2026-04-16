@@ -210,16 +210,20 @@ describe('Pull Time Learning — Gateway Integration', () => {
 
   beforeAll(async () => {
     try {
-      const res = await fetch('http://localhost:4000/v1/gpu/latency/settings', { signal: AbortSignal.timeout(2000) });
+      const res = await fetch('http://localhost:4000/v1/gpu/latency/settings', {
+        signal: AbortSignal.timeout(2000),
+      });
       gatewayAvailable = res.ok;
-    } catch { gatewayAvailable = false; }
+    } catch {
+      gatewayAvailable = false;
+    }
   });
 
   it('GET /v1/gpu/latency/settings returns pullTimeLearning', async () => {
     if (!gatewayAvailable) return;
     const res = await fetch('http://localhost:4000/v1/gpu/latency/settings');
     if (!res.ok) return;
-    const data = await res.json() as Record<string, unknown>;
+    const data = (await res.json()) as Record<string, unknown>;
 
     expect(data).toHaveProperty('pullTimeLearning');
     const ptl = data.pullTimeLearning as Record<string, unknown>;
@@ -248,7 +252,7 @@ describe('Pull Time Learning — Gateway Integration', () => {
     if (!gatewayAvailable) return;
     const res = await fetch('http://localhost:4000/v1/gpu/latency/settings');
     if (!res.ok) return;
-    const data = await res.json() as Record<string, unknown>;
+    const data = (await res.json()) as Record<string, unknown>;
     const ptl = data.pullTimeLearning as Record<string, unknown>;
     const images = ptl.images as Record<string, Record<string, unknown>>;
 

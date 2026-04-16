@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { FileVaultStore } from '../../src/vault/file-store';
+import { FileVaultStore } from '../src/vault/file-store';
 import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import os from 'os';

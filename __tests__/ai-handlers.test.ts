@@ -5,27 +5,65 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'http';
 
+// Bun's vitest compat layer omits vi.mocked (it's a TypeScript cast helper only).
+// Polyfill: return the argument unchanged, preserving mock methods.
+if (!(vi as any).mocked) { (vi as any).mocked = (fn: unknown) => fn; }
+
 // ── Module mocks — must be declared before any handler imports ─────────────
 // Note: vi.mock factories are hoisted, so they cannot reference variables
 // defined in the test file scope. Use vi.hoisted() for shared mock functions.
 
-const {
-  mockTranscribe, mockChat, mockSynthesize, mockPipeline, mockChatProvider,
-} = vi.hoisted(() => ({
-  mockTranscribe: vi.fn(),
-  mockChat: vi.fn(),
-  mockSynthesize: vi.fn(),
-  mockPipeline: vi.fn(),
-  mockChatProvider: { chat: vi.fn(), providerId: 'groq' },
+const mockTranscribe = vi.fn();
+const mockChat = vi.fn();
+const mockSynthesize = vi.fn();
+const mockPipeline = vi.fn();
+const mockChatProvider = { chat: vi.fn(), providerId: 'groq' };
+
+// Mutable backing vars for mock properties that tests need to override.
+// ESM module namespace exports are read-only, so we use getters that delegate
+// to these variables instead of plain values that can't be reassigned.
+let _gpuShadowMode = false;
+
+vi.mock('../server/providers', () => ({
+  client: {
+    transcribe: (...args: unknown[]) => mockTranscribe(...args),
+    chat: (...args: unknown[]) => mockChat(...args),
+    synthesize: (...args: unknown[]) => mockSynthesize(...args),
+    pipeline: (...args: unknown[]) => mockPipeline(...args),
+  },
+  groqProfile: { stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'groq', model: 'orpheus' }] },
+  ollamaProfile: null,
+  translationProfile: { stt: [], llm: [], tts: [] },
+  groqDefaults: { stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }], llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }], tts: [{ provider: 'groq', model: 'orpheus' }] },
+  ollamaDefaults: null,
+  translationDefaults: { stt: [], llm: [], tts: [] },
+  groqAvailable: true,
+  openaiAvailable: false,
+  deepgramAvailable: false,
+  fireworksAvailable: false,
+  openrouterAvailable: false,
+  whisperAvailable: false,
+  ollamaAvailable: false,
+  ENSEMBLE_STT_PROVIDERS: ['all'],
+  markGpuUnhealthy: vi.fn(),
+  shouldPreferGpu: vi.fn(() => false),
+  shouldPreferGpuTts: vi.fn(() => false),
+  recordStageSuccess: vi.fn(),
+  recordStageFailure: vi.fn(),
+  isStageCircuitClosed: vi.fn(() => true),
+  providers: { chat: {}, stt: {} },
+  modalTTS: { synthesize: vi.fn() },
+  get gpuShadowMode() { return _gpuShadowMode; },
+  markGpuProductionReady: vi.fn(),
 }));
 
-const { mockRaceProviders } = vi.hoisted(() => ({
-  mockRaceProviders: vi.fn(),
+const mockRaceProviders = vi.fn();
+vi.mock('../server/race-providers', () => ({
+  raceProviders: (...args: unknown[]) => mockRaceProviders(...args),
 }));
 
-const { mockFetch } = vi.hoisted(() => ({
-  mockFetch: vi.fn(),
-}));
+const mockFetch = vi.fn();
+global.fetch = mockFetch;
 
 // Mock server/state.ts
 vi.mock('../server/state', () => ({
@@ -54,6 +92,7 @@ vi.mock('../server/state', () => ({
   recordPerStageLatency: vi.fn(),
   autoSwapEnabled: false,
   setAutoSwapEnabled: vi.fn(),
+  isGpuLatencyAcceptable: vi.fn(() => false),
 }));
 
 // Mock server/providers.ts
@@ -98,7 +137,7 @@ vi.mock('../server/providers', () => ({
   isStageCircuitClosed: vi.fn(() => true),
   providers: { chat: {}, stt: {} },
   modalTTS: { synthesize: vi.fn() },
-  gpuShadowMode: false,
+  get gpuShadowMode() { return _gpuShadowMode; },
   markGpuProductionReady: vi.fn(),
 }));
 
@@ -198,8 +237,12 @@ vi.mock('../src/providers/ollama', () => ({
   OllamaSTTProvider: vi.fn(),
 }));
 
-// Global fetch mock
-vi.stubGlobal('fetch', mockFetch);
+// Mock src/gateway/pipeline/local-kokoro.ts — imports 'bun' which is unavailable in Vitest
+vi.mock('../src/gateway/pipeline/local-kokoro', () => ({
+  getLocalKokoroUrl: vi.fn(() => null),
+  startLocalKokoro: vi.fn(),
+  stopLocalKokoro: vi.fn(),
+}));
 
 // ── Imports (after mocks) ─────────────────────────────────────────────────
 
@@ -616,10 +659,9 @@ describe('handleTranscribe', () => {
 
   // #017: Shadow mode fires background GPU request
   it('#017 fires shadow GPU request in background when shadow mode is enabled', async () => {
-    // Override gpuShadowMode via the mock
-    const providersMod = await import('../server/providers');
+    // Set gpuShadowMode via the backing variable (ESM exports are read-only).
+    _gpuShadowMode = true;
     const stateMod = await import('../server/state');
-    (providersMod as any).gpuShadowMode = true;
     (stateMod.deployState as any).endpoint = 'https://gpu-pod.test:8000';
 
     const audio = fakeAudio();
@@ -642,7 +684,7 @@ describe('handleTranscribe', () => {
     // Shadow fetch was fired (may be async, just verify handler didn't crash)
 
     // Cleanup
-    (providersMod as any).gpuShadowMode = false;
+    _gpuShadowMode = false;
     (stateMod.deployState as any).endpoint = '';
   });
 

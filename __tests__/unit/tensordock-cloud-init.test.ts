@@ -5,7 +5,7 @@ import {
   buildEnvFlags,
   buildExportLines,
   buildMonitorScript,
-} from '@ai-gateway/gpu-providers/tensordock-cloud-init';
+} from '@ai-gateway/gpu-providers';
 
 /** Decode base64 content from a write_files entry */
 function decodeFile(config: Record<string, unknown>, filePath: string): string {

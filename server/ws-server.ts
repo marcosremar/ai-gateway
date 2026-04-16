@@ -3,6 +3,7 @@
 // lives in server/ws/* and server/routes/*. This file wires them together.
 
 import { createLogger } from '../src/logger';
+import { safeCatch } from '../src/safe-catch';
 const log = createLogger('ws-server');
 
 import { timingSafeEqual } from 'crypto';
@@ -235,7 +236,7 @@ export async function startWsServer(): Promise<number> {
           log.log(`[recall-audio] Recall bot connected id=${ws.data.id}`);
           import('./recall-handlers').then(({ setRecallState }) => {
             setRecallState({ wsConnected: true, status: 'in_meeting', message: 'Recall bot streaming audio' });
-          }).catch(() => {});
+          }).catch(safeCatch('ws-recall-setstate'));
         } else {
           // ── Bot events session ─────────────────────────────────────
           const MAX_WS_CLIENTS = 500;
@@ -348,7 +349,7 @@ export async function startWsServer(): Promise<number> {
                 if (recallState.status === 'ended') setRecallState({ status: 'idle', message: '' });
               }, 5_000);
             }
-          }).catch(() => {});
+          }).catch(safeCatch('ws-recall-disconnect'));
         } else if (ws.data.type === 'bot-audio') {
           if (botAudioSource === ws) setBotAudioSource(null);
           log.log(`[bot-audio] Bot audio source disconnected id=${ws.data.id} (${_getBotAudioChunks()} chunks relayed, ${getBotAudioBufferBytes()} bytes buffered)`);

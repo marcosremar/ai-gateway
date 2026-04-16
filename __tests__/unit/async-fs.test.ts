@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { safeJsonParse, safeJsonStringify } from '../../src/async-fs';
+import { safeJsonParse, safeJsonStringify } from '../../src/null-safety';
 
 describe('AsyncFS', () => {
   it('should parse JSON safely', () => {

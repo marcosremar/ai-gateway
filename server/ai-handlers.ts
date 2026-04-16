@@ -53,6 +53,7 @@ import type {
   GpuSTTResult, GpuLLMResult, GpuTTSResult, StageRecorder,
   SttStageResult, LlmStageResult, TtsStageResult, PipelineResponseBody,
 } from '../src/gateway/pipeline';
+import { getLocalKokoroUrl } from '../src/gateway/pipeline/local-kokoro';
 
 const log = createLogger('ai-handlers');
 import {
@@ -520,6 +521,7 @@ export async function handleTtsPreview(req: IncomingMessage, res: ServerResponse
       },
       {
         gpuEndpoint: isGpuAvailable() ? deployState.endpoint : null,
+        localKokoroUrl: getLocalKokoroUrl(),
         client, modalTTS, translationProfile,
       },
     );

@@ -6,6 +6,7 @@ import {
   prisma, deployState, latencyRing, metricsCounters, providerMetrics,
 } from './state';
 import { createLogger } from '../src/logger';
+import { safeCatch } from '../src/safe-catch';
 
 const log = createLogger('diagnostics-handlers');
 import {
@@ -488,8 +489,8 @@ export function startDailyCleanup(): void {
   if (cleanupTimer) return;
   // Run first cleanup 1 hour after startup (avoid heavy I/O at boot)
   setTimeout(() => {
-    runDailyCleanup().catch(() => {});
-    cleanupTimer = setInterval(() => runDailyCleanup().catch(() => {}), CLEANUP_INTERVAL_MS);
+    runDailyCleanup().catch(safeCatch('daily-cleanup'));
+    cleanupTimer = setInterval(() => runDailyCleanup().catch(safeCatch('daily-cleanup-interval')), CLEANUP_INTERVAL_MS);
     if (cleanupTimer && typeof cleanupTimer === 'object' && 'unref' in cleanupTimer) {
       cleanupTimer.unref();
     }

@@ -3,6 +3,7 @@
 // handleRequestLog, computePercentile.
 
 import { createLogger } from '../src/logger';
+import { safeCatch } from '../src/safe-catch';
 import type { IncomingMessage, ServerResponse } from 'http';
 import {
   prisma, latencyRing, latencyRingIdx, setLatencyRingIdx, LATENCY_RING_SIZE,
@@ -1226,7 +1227,7 @@ let aggregationTimer: ReturnType<typeof setInterval> | null = null;
 export function startReputationAggregation(): void {
   if (aggregationTimer) return; // already running
   aggregationTimer = setInterval(() => {
-    aggregateRequestLogsToReputation().catch(() => {});
+    aggregateRequestLogsToReputation().catch(safeCatch('reputation-aggregation'));
   }, AGGREGATION_INTERVAL_MS);
   // Don't prevent process exit
   if (aggregationTimer && typeof aggregationTimer === 'object' && 'unref' in aggregationTimer) {

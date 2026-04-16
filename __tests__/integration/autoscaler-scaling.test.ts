@@ -24,19 +24,12 @@ class MemoryStateStore implements StateStore {
   private hashes = new Map<string, Map<string, string>>();
   private lists = new Map<string, string[]>();
 
-  async get(key: string) {
-    return this.kv.get(key) ?? null;
-  }
-  async set(key: string, value: string) {
-    this.kv.set(key, value);
-  }
-  async del(key: string) {
-    this.kv.delete(key);
-    this.hashes.delete(key);
-  }
+  async get(key: string) { return this.kv.get(key) ?? null; }
+  async set(key: string, value: string) { this.kv.set(key, value); }
+  async del(key: string) { this.kv.delete(key); this.hashes.delete(key); }
   async scan(pattern: string) {
     const prefix = pattern.replace('*', '');
-    return [...this.kv.keys()].filter((k) => k.startsWith(prefix));
+    return [...this.kv.keys()].filter(k => k.startsWith(prefix));
   }
   async rpush(key: string, value: string) {
     if (!this.lists.has(key)) this.lists.set(key, []);
@@ -59,9 +52,7 @@ class MemoryStateStore implements StateStore {
     if (!this.hashes.has(key)) this.hashes.set(key, new Map());
     this.hashes.get(key)!.set(field, value);
   }
-  async hdel(key: string, field: string) {
-    this.hashes.get(key)?.delete(field);
-  }
+  async hdel(key: string, field: string) { this.hashes.get(key)?.delete(field); }
   async hgetall(key: string) {
     const hash = this.hashes.get(key);
     if (!hash) return {};
@@ -92,12 +83,8 @@ class MockSettingsStore implements SettingsStore {
 // ──────────────────────────────────────────────────────────────────────────────
 class MockSessionResolver implements SessionResolver {
   dbSessionCount = 0;
-  async countDbSessions(): Promise<number> {
-    return this.dbSessionCount;
-  }
-  async resolveTeacher(): Promise<string | null> {
-    return null;
-  }
+  async countDbSessions(): Promise<number> { return this.dbSessionCount; }
+  async resolveTeacher(): Promise<string | null> { return null; }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -106,8 +93,7 @@ class MockSessionResolver implements SessionResolver {
 const healthyEndpoints = new Set<string>();
 
 function mockFetch(input: string | URL | Request): Promise<Response> {
-  const url =
-    typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
   if (url.endsWith('/health')) {
     const endpoint = url.replace('/health', '');
     if (healthyEndpoints.has(endpoint)) {
@@ -232,10 +218,10 @@ describe('loadAutoscalerConfig: profiles → tiers mapping', () => {
     settingsStore.setData(userId, {
       autoscaler: { enabled: true, threshold: 1, tiers: [] },
       profiles: [
-        { id: 'p1', pipelineMode: 'pipeline', provider: 'openai' }, // skipped: not omni
-        { id: 'p2', pipelineMode: 'omni', provider: 'modal' }, // → tier (GPU provider)
-        { id: 'p3', pipelineMode: 'omni', provider: 'tensordock' }, // → tier
-        { id: 'p4', pipelineMode: 'omni', provider: 'runpod' }, // → tier
+        { id: 'p1', pipelineMode: 'pipeline', provider: 'openai' },           // skipped: not omni
+        { id: 'p2', pipelineMode: 'omni', provider: 'modal' },               // → tier (GPU provider)
+        { id: 'p3', pipelineMode: 'omni', provider: 'tensordock' },          // → tier
+        { id: 'p4', pipelineMode: 'omni', provider: 'runpod' },              // → tier
       ],
       tensordockInstance: { instanceId: 'td-123', endpoint: 'http://1.2.3.4:8000' },
       runpodPod: { podId: 'rp-456', directUrl: 'http://5.6.7.8:8000' },
@@ -253,7 +239,7 @@ describe('loadAutoscalerConfig: profiles → tiers mapping', () => {
     // One tier per GPU omni profile (openai skipped — not omni)
     expect(config!.tiers.length).toBeGreaterThanOrEqual(2);
 
-    const providers = config!.tiers.map((t) => t.provider);
+    const providers = config!.tiers.map(t => t.provider);
     expect(providers).toContain('tensordock');
     expect(providers).toContain('runpod');
 
@@ -299,8 +285,8 @@ describe('loadAutoscalerConfig: profiles → tiers mapping', () => {
     settingsStore.setData(userId, {
       autoscaler: { enabled: true, threshold: 1, tiers: [] },
       profiles: [
-        { id: 'p1', pipelineMode: 'omni', provider: 'runpod' }, // → tier 0
-        { id: 'p2', pipelineMode: 'omni', provider: 'tensordock' }, // → tier 1
+        { id: 'p1', pipelineMode: 'omni', provider: 'runpod' },              // → tier 0
+        { id: 'p2', pipelineMode: 'omni', provider: 'tensordock' },          // → tier 1
       ],
       tensordockInstance: { instanceId: 'td-1' },
       runpodPod: { podId: 'rp-1' },
@@ -477,7 +463,7 @@ describe('Fallback chain: tier 0 → tier 1 on failure (Task #10)', () => {
 
     // Check that it's tier 1 (runpod) booting, not tier 0
     const pool = autoscaler.getPoolStatus(USER);
-    const bootingTier = pool.find((t) => t.state === 'booting');
+    const bootingTier = pool.find(t => t.state === 'booting');
     expect(bootingTier).toBeDefined();
     expect(bootingTier!.tierIndex).toBe(1);
   });
@@ -493,7 +479,7 @@ describe('Fallback chain: tier 0 → tier 1 on failure (Task #10)', () => {
     await autoscaler.getAutoScaleDecision(USER, config);
     // Engine picks the best tier by score (price/reliability), not necessarily tier 0
     const pool2 = autoscaler.getPoolStatus(USER);
-    const bootingTier = pool2.find((t) => t.state === 'booting');
+    const bootingTier = pool2.find(t => t.state === 'booting');
     expect(bootingTier).toBeDefined();
   });
 
@@ -519,8 +505,8 @@ describe('Fallback chain: tier 0 → tier 1 on failure (Task #10)', () => {
     const decision = await autoscaler.getAutoScaleDecision(USER, config);
     expect(decision.bootingTiers).toBe(1);
     const pool = autoscaler.getPoolStatus(USER);
-    expect(pool.filter((t) => t.state === 'booting').length).toBe(1);
-    expect(pool.filter((t) => t.state === 'idle').length).toBe(1);
+    expect(pool.filter(t => t.state === 'booting').length).toBe(1);
+    expect(pool.filter(t => t.state === 'idle').length).toBe(1);
   });
 
   it('should keep using ready tier even after sessions increase', async () => {
@@ -532,7 +518,7 @@ describe('Fallback chain: tier 0 → tier 1 on failure (Task #10)', () => {
     sessionResolver.dbSessionCount = 1;
     await autoscaler.getAutoScaleDecision(USER, config);
     // Add all endpoints so the booting tier's health probe succeeds
-    tiers.forEach((t) => healthyEndpoints.add(t.endpoint!));
+    tiers.forEach(t => healthyEndpoints.add(t.endpoint!));
     await autoscaler.getAutoScaleDecision(USER, config);
 
     // Sessions jump to 10 — should still use the single ready tier, NOT boot more
@@ -692,13 +678,12 @@ describe('Server restart recovery', () => {
       tiers: [makeTier('runpod', 0), makeTier('runpod', 1)],
     });
 
-    const makeAutoscaler = () =>
-      createAutoscaler({
-        settingsStore,
-        stateStore,
-        sessionResolver: sessionRes,
-        loadConfig: async () => config,
-      });
+    const makeAutoscaler = () => createAutoscaler({
+      settingsStore,
+      stateStore,
+      sessionResolver: sessionRes,
+      loadConfig: async () => config,
+    });
 
     return { stateStore, settingsStore, config, makeAutoscaler };
   }
@@ -731,7 +716,7 @@ describe('Server restart recovery', () => {
 
     // Should be booting tier 0 again (not stuck on unhealthy)
     const pool2 = autoscaler2.getPoolStatus(USER);
-    const bootingTier = pool2.find((t) => t.state === 'booting');
+    const bootingTier = pool2.find(t => t.state === 'booting');
     expect(bootingTier).toBeDefined();
     expect(bootingTier!.tierIndex).toBe(0);
   });

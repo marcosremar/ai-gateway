@@ -48,9 +48,10 @@ describe('handleChatCompletions', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 400 when temperature is not a number', async () => {
+  it('ignores non-numeric temperature (treated as undefined)', async () => {
     const res = await handleChatCompletions(makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }], temperature: 'hot' }), providers);
-    expect(res.status).toBe(400);
+    // Non-number temperature is silently ignored (coerced to undefined), so the request succeeds
+    expect(res.status).toBe(200);
   });
 
   it('returns 400 when max_tokens is 0', async () => {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 import base64
 import hashlib
+import os
 import pickle
 from typing import Any, Callable
 
@@ -11,6 +12,8 @@ try:
     _PICKLE = cloudpickle
 except ImportError:
     _PICKLE = pickle  # type: ignore
+
+MAX_SERIALIZED_BYTES = int(os.environ.get('SNAPGPU_MAX_SERIALIZED_BYTES', str(8 * 1024 * 1024)))
 
 
 def serialize_function(fn: Callable) -> bytes:
@@ -56,4 +59,7 @@ def encode_b64(data: bytes) -> str:
 
 def decode_b64(s: str) -> bytes:
     """Decode base64 string to bytes."""
-    return base64.b64decode(s)
+    decoded = base64.b64decode(s, validate=True)
+    if len(decoded) > MAX_SERIALIZED_BYTES:
+        raise ValueError(f'serialized payload exceeds {MAX_SERIALIZED_BYTES} bytes')
+    return decoded

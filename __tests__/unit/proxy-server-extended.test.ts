@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createProxyServer, startProxy } from '../../src/proxy/server';
+import { createProxyServer, startProxy } from '../src/proxy/server';
 import type { Server, IncomingMessage } from 'http';
-import type { ProxyConfig } from '../../src/proxy/types';
+import type { ProxyConfig } from '../src/proxy/types';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -43,18 +43,16 @@ describe('Proxy Server — multipart upload security', () => {
 
   beforeEach(async () => {
     server = createProxyServer(makeConfig());
-    await new Promise<void>((res) => {
-      server.listen(0, '127.0.0.1', () => res());
-    });
+    await new Promise<void>((res) => { server.listen(0, '127.0.0.1', () => res()); });
     port = (server.address() as any).port;
   });
 
-  afterEach(() => {
-    server.close();
-  });
+  afterEach(() => { server.close(); });
 
   it('rejects multipart with invalid boundary characters', async () => {
-    const { body } = buildMultipart([{ name: 'file', filename: 'a.wav', data: 'audio-data' }]);
+    const { body } = buildMultipart([
+      { name: 'file', filename: 'a.wav', data: 'audio-data' },
+    ]);
     const res = await fetch(`http://127.0.0.1:${port}/v1/audio/transcriptions`, {
       method: 'POST',
       headers: {
@@ -69,7 +67,9 @@ describe('Proxy Server — multipart upload security', () => {
   });
 
   it('rejects truncated multipart body (no closing boundary)', async () => {
-    const { body, boundary } = buildMultipart([{ name: 'file', filename: 'a.wav', data: 'audio' }]);
+    const { body, boundary } = buildMultipart([
+      { name: 'file', filename: 'a.wav', data: 'audio' },
+    ]);
     const truncated = body.slice(0, body.length - 30);
     const res = await fetch(`http://127.0.0.1:${port}/v1/audio/transcriptions`, {
       method: 'POST',
@@ -105,15 +105,11 @@ describe('Proxy Server — blocked streaming routes (410 Gone)', () => {
 
   beforeEach(async () => {
     server = createProxyServer(makeConfig());
-    await new Promise<void>((res) => {
-      server.listen(0, '127.0.0.1', () => res());
-    });
+    await new Promise<void>((res) => { server.listen(0, '127.0.0.1', () => res()); });
     port = (server.address() as any).port;
   });
 
-  afterEach(() => {
-    server.close();
-  });
+  afterEach(() => { server.close(); });
 
   it('returns 410 for /api/stream-audio', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/stream-audio`, {
@@ -135,7 +131,7 @@ describe('Proxy Server — blocked streaming routes (410 Gone)', () => {
     // Bun routes ALL Upgrade: websocket requests to the 'upgrade' event (not 'request')
     // and socket.write in bun's upgrade handler doesn't transmit data — runtime testing
     // of this is not feasible in bun. Verify the correct handler is present via source.
-    const serverSource = readFileSync(join(__dirname, '../src/proxy/server.ts'), 'utf-8');
+    const serverSource = readFileSync(join(__dirname, '../src/gateway/proxy/server.ts'), 'utf-8');
     const fnStart = serverSource.indexOf("server.on('upgrade'");
     const fnEnd = serverSource.indexOf('\n  return server;', fnStart);
     const fnBody = serverSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 3000);
@@ -158,9 +154,7 @@ describe('Proxy Server — CORS origin validation', () => {
   async function startWithCors(cors: string) {
     process.env.CORS_ORIGINS = cors;
     server = createProxyServer(makeConfig());
-    await new Promise<void>((res) => {
-      server.listen(0, '127.0.0.1', () => res());
-    });
+    await new Promise<void>((res) => { server.listen(0, '127.0.0.1', () => res()); });
     port = (server.address() as any).port;
   }
 
@@ -230,9 +224,7 @@ describe('Proxy Server — static files and path traversal', () => {
     writeFileSync(join(tmpDir, 'sub', 'page.html'), '<html>sub</html>');
 
     server = createProxyServer(makeConfig({ staticDir: tmpDir }));
-    await new Promise<void>((res) => {
-      server.listen(0, '127.0.0.1', () => res());
-    });
+    await new Promise<void>((res) => { server.listen(0, '127.0.0.1', () => res()); });
     port = (server.address() as any).port;
   });
 
@@ -252,10 +244,7 @@ describe('Proxy Server — static files and path traversal', () => {
       socket.on('data', (chunk) => {
         data += chunk.toString();
         const match = data.match(/HTTP\/1\.\d (\d+)/);
-        if (match) {
-          resolve(parseInt(match[1]));
-          socket.destroy();
-        }
+        if (match) { resolve(parseInt(match[1])); socket.destroy(); }
       });
       socket.on('error', () => resolve(0));
       socket.on('end', () => {
@@ -327,9 +316,7 @@ describe('Proxy Server — startProxy EADDRINUSE', () => {
 
   it('rejects with descriptive error on port conflict', async () => {
     server1 = createProxyServer(makeConfig());
-    await new Promise<void>((res) => {
-      server1.listen(0, '127.0.0.1', () => res());
-    });
+    await new Promise<void>((res) => { server1.listen(0, '127.0.0.1', () => res()); });
     const usedPort = (server1.address() as any).port;
 
     await expect(startProxy(makeConfig({ port: usedPort }))).rejects.toThrow(/already in use/);

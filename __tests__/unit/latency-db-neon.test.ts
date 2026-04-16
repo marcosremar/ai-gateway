@@ -25,7 +25,7 @@ const { mockPrisma } = vi.hoisted(() => {
   return { mockPrisma };
 });
 
-vi.mock('../server/state', () => ({
+vi.mock('../../server/state', () => ({
   prisma: mockPrisma,
   // other exports gpu-deploy / providers may pull in — stubs only
   deployState:          { status: 'idle' },

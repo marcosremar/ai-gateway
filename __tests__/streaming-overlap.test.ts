@@ -384,7 +384,7 @@ describe('StreamingOverlap', () => {
       );
 
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[overlap] TTS chunk 0 failed'),
+        expect.stringContaining('TTS chunk 0 failed'),
       );
 
       warnSpy.mockRestore();

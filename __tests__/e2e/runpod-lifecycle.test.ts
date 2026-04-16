@@ -23,20 +23,12 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { RunpodClient, RUNPOD_GPU_TYPE_MAP, RUNPOD_GPU_FALLBACK } from '../src/gpu-providers/runpod-client';
+import type { ProviderCredentials, GpuInstance } from '../src/gpu-providers/types';
 import {
-  RunpodClient,
-  RUNPOD_GPU_TYPE_MAP,
-  RUNPOD_GPU_FALLBACK,
-} from '../../src/gpu-providers/runpod-client';
-import type { ProviderCredentials, GpuInstance } from '../../src/gpu-providers/types';
-import {
-  loadEnv,
-  timed,
-  waitFor,
-  checkHealth,
-  testTextPipeline,
-  testAudioPipeline,
-} from '../helpers';
+  loadEnv, timed, waitFor,
+  checkHealth, testTextPipeline, testAudioPipeline,
+} from './helpers';
 
 const ULTRALIGHT_IMAGE = 'marcosremar/parle-s2s-ultralight:latest';
 
@@ -154,11 +146,7 @@ describe.skipIf(!HAS_KEYS)('RunPod Lifecycle — Ultralight Inference', () => {
     await waitFor(
       async () => {
         const health = await checkHealth(createdPod!.endpoint!);
-        lastResult = health.ok
-          ? 'healthy'
-          : health.data
-            ? JSON.stringify(health.data)
-            : 'unreachable/502';
+        lastResult = health.ok ? 'healthy' : health.data ? JSON.stringify(health.data) : 'unreachable/502';
         return health.ok;
       },
       { intervalMs: 5000, timeoutMs: 300_000, label: '/health healthy' },
@@ -196,9 +184,7 @@ describe.skipIf(!HAS_KEYS)('RunPod Lifecycle — Ultralight Inference', () => {
 
     console.log(`  TEXT PIPELINE (${ms}ms):`);
     console.log(`    Transcript: ${result.hasTranscript ? 'YES' : 'no'}`);
-    console.log(
-      `    Response: ${result.hasResponse ? 'YES' : 'no'} — "${result.responseText?.substring(0, 80)}"`,
-    );
+    console.log(`    Response: ${result.hasResponse ? 'YES' : 'no'} — "${result.responseText?.substring(0, 80)}"`);
     console.log(`    Audio: ${result.hasAudio ? 'YES' : 'no'}`);
     console.log(`    Complete: ${result.hasComplete ? 'YES' : 'no'}`);
     if (result.totalMs) console.log(`    Server time: ${result.totalMs}ms`);
@@ -208,7 +194,9 @@ describe.skipIf(!HAS_KEYS)('RunPod Lifecycle — Ultralight Inference', () => {
   it('Step 8: test audio pipeline — /api/stream-audio SSE', async () => {
     expect(createdPod).not.toBeNull();
 
-    const { result, ms } = await timed(() => testAudioPipeline(createdPod!.endpoint!));
+    const { result, ms } = await timed(() =>
+      testAudioPipeline(createdPod!.endpoint!),
+    );
 
     // Audio pipeline may fail with silence (Whisper returns empty transcript)
     // so we only require a response from the server, not necessarily all events
@@ -216,9 +204,7 @@ describe.skipIf(!HAS_KEYS)('RunPod Lifecycle — Ultralight Inference', () => {
 
     console.log(`  AUDIO PIPELINE (${ms}ms):`);
     console.log(`    Transcript: ${result.hasTranscript ? 'YES' : 'no'}`);
-    console.log(
-      `    Response: ${result.hasResponse ? 'YES' : 'no'} — "${result.responseText?.substring(0, 80) || '(none)'}"`,
-    );
+    console.log(`    Response: ${result.hasResponse ? 'YES' : 'no'} — "${result.responseText?.substring(0, 80) || '(none)'}"`);
     console.log(`    Audio: ${result.hasAudio ? 'YES' : 'no'}`);
     console.log(`    Complete: ${result.hasComplete ? 'YES' : 'no'}`);
     if (result.error) console.log(`    Error: ${result.error}`);
@@ -228,7 +214,9 @@ describe.skipIf(!HAS_KEYS)('RunPod Lifecycle — Ultralight Inference', () => {
   it('Step 9: stopInstance — stops the pod', async () => {
     expect(createdPod).not.toBeNull();
 
-    const { ms } = await timed(() => client.stopInstance(createdPod!.instanceId, creds));
+    const { ms } = await timed(() =>
+      client.stopInstance(createdPod!.instanceId, creds),
+    );
 
     await new Promise((r) => setTimeout(r, 2000));
 
@@ -241,7 +229,9 @@ describe.skipIf(!HAS_KEYS)('RunPod Lifecycle — Ultralight Inference', () => {
   it('Step 10: startInstance — restarts the pod', async () => {
     expect(createdPod).not.toBeNull();
 
-    const { ms } = await timed(() => client.startInstance(createdPod!.instanceId, creds));
+    const { ms } = await timed(() =>
+      client.startInstance(createdPod!.instanceId, creds),
+    );
 
     await new Promise((r) => setTimeout(r, 3000));
 
@@ -286,7 +276,9 @@ describe.skipIf(!HAS_KEYS)('RunPod Lifecycle — Ultralight Inference', () => {
     expect(createdPod).not.toBeNull();
     const podId = createdPod!.instanceId;
 
-    const { ms } = await timed(() => client.deleteInstance(podId, creds));
+    const { ms } = await timed(() =>
+      client.deleteInstance(podId, creds),
+    );
     createdPod = null; // Don't cleanup in afterAll
 
     await new Promise((r) => setTimeout(r, 2000));
@@ -408,6 +400,8 @@ describe.skipIf(!RUNPOD_API_KEY)('RunPod — Edge Cases (real API)', () => {
   });
 
   it('deleteInstance throws for non-existent pod', async () => {
-    await expect(client.deleteInstance('fake-pod-xyz-99999', creds)).rejects.toThrow();
+    await expect(
+      client.deleteInstance('fake-pod-xyz-99999', creds),
+    ).rejects.toThrow();
   });
 });

@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AlertRouter } from '../../src/alerting/alert-router';
-import { SlackAlertChannel } from '../../src/alerting/channels/slack';
-import { DiscordAlertChannel } from '../../src/alerting/channels/discord';
-import { GenericWebhookAlertChannel } from '../../src/alerting/channels/webhook';
-import { createAlertingHooks } from '../../src/alerting/hooks-adapter';
-import type { AlertPayload } from '../../src/alerting/types';
+import { AlertRouter } from '../src/alerting/alert-router';
+import { SlackAlertChannel } from '../src/alerting/channels/slack';
+import { DiscordAlertChannel } from '../src/alerting/channels/discord';
+import { GenericWebhookAlertChannel } from '../src/alerting/channels/webhook';
+import { createAlertingHooks } from '../src/alerting/hooks-adapter';
+import type { AlertPayload } from '../src/alerting/types';
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);

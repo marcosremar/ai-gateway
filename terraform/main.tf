@@ -66,13 +66,15 @@ locals {
     PROFILE         = "0"
   }
 
-  secrets = {
-    GROQ_API_KEY       = var.groq_api_key
-    GATEWAY_API_KEYS   = join(",", var.gateway_api_keys)
-    DOCKERHUB_USERNAME = ""
-    DOCKERHUB_TOKEN    = ""
-    VAST_API_KEY       = ""
-    RUNPOD_API_KEY     = ""
+  optional_secrets = {
+    DOCKERHUB_USERNAME = var.dockerhub_username
+    DOCKERHUB_TOKEN    = var.dockerhub_token
+    VAST_API_KEY       = var.vast_api_key
+    RUNPOD_API_KEY     = var.runpod_api_key
+  }
+
+  non_empty_optional_secrets = {
+    for k, v in local.optional_secrets : k => v if v != null && trim(v) != ""
   }
 }
 
@@ -131,6 +133,13 @@ resource "fly_secret" "gateway_api_keys" {
   app_id = fly_app.gateway.id
   key    = "GATEWAY_API_KEYS"
   value  = join(",", var.gateway_api_keys)
+}
+
+resource "fly_secret" "optional" {
+  for_each = local.non_empty_optional_secrets
+  app_id   = fly_app.gateway.id
+  key      = each.key
+  value    = each.value
 }
 
 # Outputs

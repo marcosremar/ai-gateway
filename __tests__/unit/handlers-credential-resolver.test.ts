@@ -4,8 +4,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createCredentialResolver } from '../../src/handlers/credential-resolver';
-import type { Vault } from '../../src/vault/vault';
+import { createCredentialResolver } from '../src/handlers/credential-resolver';
+import type { Vault } from '../src/vault/vault';
 
 function makeVault(secrets: Record<string, string | Error> = {}): Vault {
   return {

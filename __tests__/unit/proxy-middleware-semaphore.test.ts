@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { Semaphore, SemaphoreFullError, ProviderSemaphores } from '../../src/proxy/middleware/semaphore';
+import { Semaphore, SemaphoreFullError, ProviderSemaphores } from '../src/proxy/middleware/semaphore';
 
 describe('Semaphore', () => {
   it('allows up to max concurrent', async () => {

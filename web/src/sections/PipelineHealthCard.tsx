@@ -426,9 +426,9 @@ export function PipelineHealthCard({ health }: PipelineHealthCardProps) {
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Profiles</h3>
+          <h3 className="text-sm font-semibold">Apps</h3>
           <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>
-            {profiles.length} profile{profiles.length !== 1 ? 's' : ''}
+            {profiles.length} app{profiles.length !== 1 ? 's' : ''}
           </span>
         </div>
       </CardHeader>

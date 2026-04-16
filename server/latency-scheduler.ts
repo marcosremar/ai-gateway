@@ -12,6 +12,7 @@
 import { getHostsToProbe, saveProbeResult, upsertHostMeta } from './latency-db';
 import { probeHostFull } from './gpu-latency';
 import { createLogger } from '../src/logger';
+import { safeCatch } from '../src/safe-catch';
 
 const log = createLogger('latency-scheduler');
 import {
@@ -158,7 +159,7 @@ async function discoverHosts(): Promise<void> {
         geolocation: offer.geolocation ?? '',
         priceUsd:    offer.pricePerHr  ?? 0,
         directPort:  offer.hostDirectPort,
-      }).catch(() => {});
+      }).catch(safeCatch('scheduler-upsert-host'));
       count++;
     }
     log.log(`Discovery: ${count} hosts with IPs from ${offers.length} offers`);

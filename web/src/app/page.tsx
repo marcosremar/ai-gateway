@@ -5,10 +5,12 @@ import dynamic from 'next/dynamic';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
 import { Sidebar, type SidebarItem } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
-import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon, Gauge, RefreshCw, Activity, FlaskConical, Layers } from 'lucide-react';
+import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon, Gauge, RefreshCw, Activity, FlaskConical, Layers, Server, AppWindow } from 'lucide-react';
 
 // Critical above-the-fold section — loaded eagerly
 import { OverviewSection } from '@/sections/OverviewSection';
+import { GuardrailsSection } from '@/sections/GuardrailsSection';
+import { ServicesSection } from '@/sections/ServicesSection';
 
 // Lazy-load sections that aren't visible on initial page load
 const LoadingPlaceholder = () => (
@@ -32,7 +34,7 @@ const ApiKeysSection = dynamic(
   { loading: LoadingPlaceholder },
 );
 const ProfilesSection = dynamic(
-  () => import('@/sections/ProfilesSection').then(m => ({ default: m.ProfilesSection })),
+  () => import('@/sections/ProfilesSection').then(m => ({ default: m.AppsSection })),
   { loading: LoadingPlaceholder },
 );
 const PlaygroundSection = dynamic(
@@ -68,7 +70,9 @@ const NAV_ITEMS: SidebarItem[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
 
   { id: '_config', label: 'Config', divider: true, icon: LayoutDashboard },
-  { id: 'config/profiles', label: 'Profiles', icon: LayoutList },
+  { id: 'config/services', label: 'Services', icon: Server },
+  { id: 'config/apps', label: 'Apps', icon: AppWindow },
+  { id: 'config/guardrails', label: 'Guardrails', icon: Shield },
   { id: 'config/api-keys', label: 'API Keys', icon: KeyRound },
   { id: 'config/labs', label: 'Labs', icon: FlaskConical },
   { id: 'config/vast-serverless', label: 'Vast Serverless', icon: Layers },
@@ -96,10 +100,11 @@ function getRouteFromPath(): string {
   // Pathname: /config/providers or sub-routes like /config/profiles/edit/xxx
   const path = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
   if (VALID_ROUTES.has(path)) return path;
-  // Redirect removed pages
-  if (path === 'config/providers' || path === 'config/deploy') return 'config/profiles';
+  // Redirect removed/renamed pages
+  if (path === 'config/profiles') return 'config/apps';
+  if (path === 'config/providers' || path === 'config/deploy') return 'config/apps';
   if (path === 'tools/pipeline') return 'tools/playground';
-  if (path === 'tools/pathbench') return 'config/profiles';
+  if (path === 'tools/pathbench') return 'config/apps';
   // Match sub-routes: /config/profiles/edit/xxx → config/profiles
   for (const route of VALID_ROUTES) {
     if (path.startsWith(route + '/')) return route;
@@ -160,9 +165,9 @@ function Dashboard() {
       />
 
       {/* Main content */}
-      <main className={`flex-1 ${activeTab === 'config/profiles' ? 'overflow-hidden flex flex-col' : 'overflow-auto'}`} style={{ background: 'var(--color-bg)' }}>
+      <main className={`flex-1 ${activeTab === 'config/apps' ? 'overflow-hidden flex flex-col' : 'overflow-auto'}`} style={{ background: 'var(--color-bg)' }}>
         {/* Top bar — hidden for profiles (has its own breadcrumb bar) */}
-        {activeTab !== 'config/profiles' && (
+        {activeTab !== 'config/apps' && (
           <div
             className="sticky top-0 z-10 flex items-center justify-between px-6 h-14 border-b backdrop-blur-sm"
             style={{
@@ -196,12 +201,14 @@ function Dashboard() {
           </div>
         )}
 
-        {/* Profiles — full width, no max-w constraint, own top bar */}
-        {activeTab === 'config/profiles' && <ErrorBoundary><div className="flex-1 min-h-0 flex flex-col"><ProfilesSection /></div></ErrorBoundary>}
+        {/* Apps — full width, no max-w constraint, own top bar */}
+        {activeTab === 'config/apps' && <ErrorBoundary><div className="flex-1 min-h-0 flex flex-col"><ProfilesSection /></div></ErrorBoundary>}
 
         {/* Page content */}
-        {activeTab !== 'config/profiles' && <div className="max-w-6xl mx-auto" style={{ minHeight: 'calc(100vh - 3.5rem)' }}>
+        {activeTab !== 'config/apps' && <div className="max-w-6xl mx-auto" style={{ minHeight: 'calc(100vh - 3.5rem)' }}>
           {activeTab === 'overview' && <ErrorBoundary><OverviewSection /></ErrorBoundary>}
+          {activeTab === 'config/services' && <ErrorBoundary><ServicesSection /></ErrorBoundary>}
+          {activeTab === 'config/guardrails' && <ErrorBoundary><GuardrailsSection /></ErrorBoundary>}
           {activeTab === 'config/api-keys' && <ErrorBoundary><ApiKeysSection /></ErrorBoundary>}
           {activeTab === 'config/labs' && <ErrorBoundary><LabsSection /></ErrorBoundary>}
           {activeTab === 'config/vast-serverless' && <ErrorBoundary><VastServerlessSection /></ErrorBoundary>}
@@ -219,10 +226,17 @@ function Dashboard() {
   );
 }
 
-export default function Home() {
+export function DashboardApp() {
   return (
     <GatewayProvider>
       <Dashboard />
     </GatewayProvider>
   );
+}
+
+export default function Home() {
+  useEffect(() => {
+    window.location.replace('/dashboard');
+  }, []);
+  return null;
 }

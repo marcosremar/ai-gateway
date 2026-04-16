@@ -80,9 +80,9 @@ function scheduleBotIdleShutdown() {
       setBotDeployLock(false);
       if (podId && podId !== 'local') {
         if (flyKey && botState.endpoint?.includes('.fly.dev')) {
-          await flyio.deleteInstance(podId, { apiKey: flyKey }).catch(() => {});
+          await flyio.deleteInstance(podId, { apiKey: flyKey }).catch((err) => log.debug('[bot] Fly.io delete failed (benign): %s', err instanceof Error ? err.message : err));
         } else if (apiKey) {
-          await runpod.deleteInstance(podId, { apiKey }).catch(() => {});
+          await runpod.deleteInstance(podId, { apiKey }).catch((err) => log.debug('[bot] RunPod delete failed (benign): %s', err instanceof Error ? err.message : err));
         }
       }
     } catch (e) {
@@ -355,7 +355,7 @@ export async function autoDeployBot(): Promise<void> {
     while (true) {
       if (Date.now() - bootStartMs > BOT_TIMEOUT_MS) {
         setBotState({ status: 'error', message: 'Auto-boot: bot timed out waiting for startup' });
-        await flyio.deleteInstance(instance.instanceId, { apiKey: flyKey }).catch(() => {});
+        await flyio.deleteInstance(instance.instanceId, { apiKey: flyKey }).catch((err) => log.debug('[bot] Timeout cleanup delete failed (benign): %s', err instanceof Error ? err.message : err));
         return;
       }
 
@@ -876,7 +876,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
             break;
           }
         }
-      })().catch(() => {});
+      })().catch((err) => log.warn('[bot] Background meeting check failed: %s', err instanceof Error ? err.message : err));
       // Watchdog: detect if bot leaves/crashes and auto-rejoin
       (async () => {
         const flyHost = flyio.getFlyHost();
@@ -955,7 +955,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
             }
           }
         }
-      })().catch(() => {});
+      })().catch((err) => log.warn('[bot] Watchdog check failed: %s', err instanceof Error ? err.message : err));
 
       // Predictive warmup: warm all GPU models for minimal first-request latency
       if (deployState.status === 'ready' && deployState.endpoint) {

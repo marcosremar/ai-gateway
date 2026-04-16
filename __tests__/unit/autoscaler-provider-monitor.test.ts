@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ProviderMonitor } from '../../src/autoscaler/provider-monitor';
-import type { GpuProviderRegistry } from '../../src/gpu-providers/registry';
-import type { Logger } from '../../src/deps';
+import { ProviderMonitor } from '../src/autoscaler/provider-monitor';
+import type { GpuProviderRegistry } from '../src/gpu-providers/registry';
+import type { Logger } from '../src/deps';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { shouldUseSnapshot, type PersistedSnapshot } from '../../src/autoscaler/snapgpu-policy';
-import type { GpuTierConfig } from '../../src/types';
+import { shouldUseSnapshot, type PersistedSnapshot } from '../src/autoscaler/snapgpu-policy';
+import type { GpuTierConfig } from '../src/types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { retryWithBackoff, pollUntilReady, RateLimiter } from '../../src/gpu-providers/abstract-provider';
+import { retryWithBackoff, pollUntilReady, RateLimiter } from '../src/gpu-providers/abstract-provider';
 
 describe('retryWithBackoff', () => {
   beforeEach(() => { vi.useFakeTimers(); });

@@ -74,7 +74,7 @@ import {
   setAutoRecoveryMaxRetries,
   flushDeploySettings,
   type GpuSortBy,
-} from '../../src/gpu-providers/deploy-settings';
+} from '../src/gpu-providers/deploy-settings';
 
 describe('deploy-settings', () => {
   describe('DEFAULT_GPU_PRIORITY', () => {

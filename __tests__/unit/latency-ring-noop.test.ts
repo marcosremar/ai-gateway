@@ -3,7 +3,7 @@
  * Both exports are no-ops; tests verify they don't throw or have side effects.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { loadLatencyRing, saveLatencyRing } from '../../server/latency-ring-persistence';
+import { loadLatencyRing, saveLatencyRing } from '../server/latency-ring-persistence';
 
 describe('latency-ring-persistence no-ops', () => {
   it('loadLatencyRing() does not throw', () => {

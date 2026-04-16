@@ -3,7 +3,7 @@
  * Covers: createSqlDriver factory, Neon driver (mocked), Pg driver (mocked), error handling.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { DatabaseError } from '../../src/database/types';
+import { DatabaseError } from '../src/database/types';
 
 // ── createSqlDriver (factory) ─────────────────────────────────────────────────
 

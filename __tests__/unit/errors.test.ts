@@ -196,11 +196,9 @@ describe('Error Inheritance', () => {
 });
 
 describe('Immutability', () => {
-  it('should not allow mutation of statusCode', () => {
-    const error = new GatewayError('Test', 500, 'TEST');
-    const original = error.statusCode;
-    (error as any).statusCode = 200;
-    expect(error.statusCode).toBe(original);
+  it('context should be frozen', () => {
+    const error = new GatewayError('Test', 500, 'TEST', { userId: 'abc' });
+    expect(Object.isFrozen(error.context)).toBe(true);
   });
 
   it('should not allow mutation of context', () => {

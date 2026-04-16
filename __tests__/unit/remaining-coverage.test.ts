@@ -165,7 +165,7 @@ describe('Provider Edge Cases (#751-#770)', () => {
   });
 
   it('#759 Vast.ai port mapping extraction', () => {
-    const src = read('src/gateway/providers/gpu/vast-client.ts');
+    const src = read('src/gpu-providers/vast-client.ts');
     expect(src).toMatch(/port|ports|8000/);
   });
 
@@ -264,7 +264,7 @@ describe('Docker Image Catalog (#797-#805)', () => {
 
 describe('Deployment State Machine (#806-#815)', () => {
   it('#806-#811 all transitions', async () => {
-    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     expect(sm.phase).toBe('idle');
     sm.startDeploying();
@@ -279,7 +279,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#812 error transition from any state', async () => {
-    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     sm.startDeploying();
     sm.markError('test error');
@@ -287,7 +287,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#813 onTransition fires', async () => {
-    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     const transitions: string[] = [];
     sm.onTransition((next) => transitions.push(next.phase));
@@ -297,7 +297,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#814 toJSON serializes', async () => {
-    const { DeploymentStateMachine } = await import('../../server/deployment-state-machine');
+    const { DeploymentStateMachine } = await import('../server/deployment-state-machine');
     const sm = new DeploymentStateMachine();
     sm.markReady('pod-1', 'http://ep', 'RTX 4090', 0.5);
     const json = sm.toJSON();
@@ -307,7 +307,7 @@ describe('Deployment State Machine (#806-#815)', () => {
   });
 
   it('#815 singleton exported', async () => {
-    const { deploymentSM } = await import('../../server/deployment-state-machine');
+    const { deploymentSM } = await import('../server/deployment-state-machine');
     expect(deploymentSM).toBeDefined();
     expect(deploymentSM.phase).toBeDefined();
   });
@@ -319,7 +319,7 @@ describe('Deployment State Machine (#806-#815)', () => {
 
 describe('Smoke: Critical imports (#865-#874)', () => {
   it('#865 server/state imports', async () => {
-    const mod = await import('../../server/state');
+    const mod = await import('../server/state');
     expect(mod.deployState).toBeDefined();
     expect(mod.botState).toBeDefined();
     expect(mod.setDeployState).toBeInstanceOf(Function);
@@ -327,39 +327,39 @@ describe('Smoke: Critical imports (#865-#874)', () => {
   });
 
   it('#866 deployment-state-machine imports', async () => {
-    const mod = await import('../../server/deployment-state-machine');
+    const mod = await import('../server/deployment-state-machine');
     expect(mod.deploymentSM).toBeDefined();
   });
 
   it('#867 workloads/registry imports', async () => {
-    const mod = await import('../../src/workloads/registry');
+    const mod = await import('../src/workloads/registry');
     expect(mod.workloadRegistry).toBeDefined();
     expect(mod.WorkloadRegistry).toBeDefined();
   });
 
   it('#868 workloads/types exports', async () => {
-    const mod = await import('../../src/workloads/types');
+    const mod = await import('../src/workloads/types');
     expect(mod).toBeDefined();
   });
 
   it('#869 vault imports', async () => {
-    const mod = await import('../../src/vault/vault');
+    const mod = await import('../src/vault/vault');
     expect(mod.Vault).toBeDefined();
   });
 
   it('#870 auth imports', async () => {
-    const mod = await import('../../src/auth/gpu-token');
+    const mod = await import('../src/auth/gpu-token');
     expect(mod.signGpuToken).toBeInstanceOf(Function);
     expect(mod.verifyGpuToken).toBeInstanceOf(Function);
   });
 
   it('#871 caching imports', async () => {
-    const mod = await import('../../src/caching/response-cache');
+    const mod = await import('../src/caching/response-cache');
     expect(mod.ResponseCache).toBeDefined();
   });
 
   it('#872 language-detect imports', async () => {
-    const mod = await import('../../src/language-detect');
+    const mod = await import('../src/language-detect');
     expect(mod).toBeDefined();
   });
 });
@@ -411,7 +411,6 @@ describe('API Contracts (#941-#950)', () => {
   const ws = read('server/ws-server.ts');
   const routes = read('server/routes/gateway/gpu.ts');
   const inference = read('server/routes/gateway/inference.ts');
-  const workloads = read('server/routes/compute/workloads.ts');
 
   it('#941 /v1/chat/completions registered', () => {
     expect(inference).toContain('/v1/chat/completions');
@@ -426,6 +425,7 @@ describe('API Contracts (#941-#950)', () => {
   });
 
   it('#945 /v1/workloads registered', () => {
+    const workloads = read('server/routes/compute/workloads.ts');
     expect(workloads).toContain('/v1/workloads');
   });
 

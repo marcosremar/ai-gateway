@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-const readSource = (file: string) => readFileSync(join(__dirname, '..', file), 'utf-8');
+const readSource = (file: string) => readFileSync(join(__dirname, '../..', file), 'utf-8');
 
 describe('HTTP Body Size Limits', () => {
   it('should define per-route limits for text endpoints', () => {

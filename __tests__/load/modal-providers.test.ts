@@ -1,26 +1,32 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { makeTestWav } from '../../src/benchmarking/bench';
+import { makeTestWav } from '../src/benchmarking/bench';
 
 import {
   ModalKokoroTTSProvider,
   MODAL_KOKORO_MODELS,
-} from '../../src/providers/modal-kokoro/index';
+} from '../src/providers/modal-kokoro/index';
 
-import { ModalMossTTSProvider, MODAL_MOSS_TTS_MODELS } from '../../src/providers/modal-moss/index';
+import {
+  ModalMossTTSProvider,
+  MODAL_MOSS_TTS_MODELS,
+} from '../src/providers/modal-moss/index';
 
-import { ModalVoxtralSTTProvider, VOXTRAL_MODELS } from '../../src/providers/modal-voxtral/index';
+import {
+  ModalVoxtralSTTProvider,
+  VOXTRAL_MODELS,
+} from '../src/providers/modal-voxtral/index';
 
 import {
   ModalSeamlessSTTProvider,
   ModalSeamlessLLMProvider,
   SEAMLESS_MODELS,
-} from '../../src/providers/modal-seamless/index';
+} from '../src/providers/modal-seamless/index';
 
 import {
   Qwen3ASRPipelineSTTProvider,
   Qwen3ASRPipelineLLMProvider,
   QWEN3ASR_PIPELINE_MODELS,
-} from '../../src/providers/modal-qwen3asr-pipeline/index';
+} from '../src/providers/modal-qwen3asr-pipeline/index';
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -245,8 +251,8 @@ describe('Modal SeamlessM4T', () => {
 
   it('exports SEAMLESS_MODELS with correct structure', () => {
     expect(SEAMLESS_MODELS.length).toBeGreaterThanOrEqual(2);
-    const sttModel = SEAMLESS_MODELS.find((m) => m.capability === 'stt');
-    const llmModel = SEAMLESS_MODELS.find((m) => m.capability === 'llm');
+    const sttModel = SEAMLESS_MODELS.find(m => m.capability === 'stt');
+    const llmModel = SEAMLESS_MODELS.find(m => m.capability === 'llm');
     expect(sttModel).toBeTruthy();
     expect(sttModel!.id).toBe('seamless-m4t-v2-large');
     expect(llmModel).toBeTruthy();
@@ -310,8 +316,8 @@ describe('Modal Qwen3-ASR Pipeline', () => {
 
   it('exports QWEN3ASR_PIPELINE_MODELS with correct structure', () => {
     expect(QWEN3ASR_PIPELINE_MODELS.length).toBeGreaterThanOrEqual(2);
-    const sttModel = QWEN3ASR_PIPELINE_MODELS.find((m) => m.capability === 'stt');
-    const llmModel = QWEN3ASR_PIPELINE_MODELS.find((m) => m.capability === 'llm');
+    const sttModel = QWEN3ASR_PIPELINE_MODELS.find(m => m.capability === 'stt');
+    const llmModel = QWEN3ASR_PIPELINE_MODELS.find(m => m.capability === 'llm');
     expect(sttModel).toBeTruthy();
     expect(sttModel!.id).toBe('qwen3-asr-1.7b');
     expect(sttModel!.isDefault).toBe(true);

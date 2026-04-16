@@ -7,7 +7,7 @@ import {
   classifyBootFailure,
   computeCooldownMs,
   type BootFailureCategory,
-} from '../../src/autoscaler/boot-orchestrator';
+} from '../src/autoscaler/boot-orchestrator';
 
 describe('classifyBootFailure', () => {
   const cases: Array<[string, BootFailureCategory]> = [

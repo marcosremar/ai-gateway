@@ -15,23 +15,17 @@
 
 import 'dotenv/config';
 import { describe, it, expect, beforeAll } from 'vitest';
-import { checkOpenAIAvailable } from '../helpers';
+import { checkOpenAIAvailable } from './helpers';
 
 const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
   ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY)
   : false;
-import {
-  TensordockClient,
-  findCheapestLocations,
-} from '@ai-gateway/gpu-providers/tensordock-client';
+import { TensordockClient, findCheapestLocations } from '@ai-gateway/gpu-providers/tensordock-client';
 import { RunpodClient } from '@ai-gateway/gpu-providers/runpod-client';
 import { GpuProviderRegistry } from '@ai-gateway/gpu-providers/registry';
 import { probeGpuHealth } from '@ai-gateway/autoscaler/health';
 import { emitHook } from '@ai-gateway/hooks';
-import {
-  resolveDeclarativeChain,
-  findChainForStage,
-} from '@ai-gateway/providers/declarative-chain';
+import { resolveDeclarativeChain, findChainForStage } from '@ai-gateway/providers/declarative-chain';
 import { LoadBalancer } from '@ai-gateway/autoscaler/load-balancer';
 import { SpendTracker } from '@ai-gateway/tracking/spend-tracker';
 import { estimateRequestCost } from '@ai-gateway/tracking/pricing';
@@ -46,19 +40,12 @@ class MemoryStateStore implements StateStore {
   private hashes = new Map<string, Map<string, string>>();
   private lists = new Map<string, string[]>();
 
-  async get(key: string) {
-    return this.kv.get(key) ?? null;
-  }
-  async set(key: string, value: string) {
-    this.kv.set(key, value);
-  }
-  async del(key: string) {
-    this.kv.delete(key);
-    this.hashes.delete(key);
-  }
+  async get(key: string) { return this.kv.get(key) ?? null; }
+  async set(key: string, value: string) { this.kv.set(key, value); }
+  async del(key: string) { this.kv.delete(key); this.hashes.delete(key); }
   async scan(pattern: string) {
     const prefix = pattern.replace('*', '');
-    return [...this.kv.keys()].filter((k) => k.startsWith(prefix));
+    return [...this.kv.keys()].filter(k => k.startsWith(prefix));
   }
   async rpush(key: string, value: string) {
     if (!this.lists.has(key)) this.lists.set(key, []);
@@ -75,9 +62,7 @@ class MemoryStateStore implements StateStore {
     if (!this.hashes.has(key)) this.hashes.set(key, new Map());
     this.hashes.get(key)!.set(field, value);
   }
-  async hdel(key: string, field: string) {
-    this.hashes.get(key)?.delete(field);
-  }
+  async hdel(key: string, field: string) { this.hashes.get(key)?.delete(field); }
   async hgetall(key: string) {
     const hash = this.hashes.get(key);
     if (!hash) return {};
@@ -91,7 +76,7 @@ class MemoryStateStore implements StateStore {
 async function discoverRunpodEndpoint(creds: ProviderCredentials): Promise<string | null> {
   const client = new RunpodClient();
   const instances = await client.listInstances(creds);
-  const running = instances.find((i) => i.status === 'RUNNING');
+  const running = instances.find(i => i.status === 'RUNNING');
   if (!running) return null;
 
   // Prefer direct IP (faster, no proxy overhead)
@@ -100,7 +85,7 @@ async function discoverRunpodEndpoint(creds: ProviderCredentials): Promise<strin
     signal: AbortSignal.timeout(10_000),
   });
   if (res.ok) {
-    const pod = (await res.json()) as Record<string, unknown>;
+    const pod = await res.json() as Record<string, unknown>;
     const ip = pod.publicIp as string | undefined;
     const portMap = pod.portMappings as Record<string, number> | undefined;
     if (ip && portMap?.['8000']) {
@@ -128,9 +113,7 @@ describe.skipIf(!process.env.TENSORDOCK_API_TOKEN)('TensorDock — real API', ()
     const instances = await client.listInstances(creds);
     console.log(`[tensordock] ${instances.length} instances`);
     for (const i of instances) {
-      console.log(
-        `  ${i.instanceId.substring(0, 8)} [${i.status}] ${i.endpoint || '(no endpoint)'}`,
-      );
+      console.log(`  ${i.instanceId.substring(0, 8)} [${i.status}] ${i.endpoint || '(no endpoint)'}`);
     }
     expect(Array.isArray(instances)).toBe(true);
   }, 20_000);
@@ -150,301 +133,243 @@ describe.skipIf(!process.env.TENSORDOCK_API_TOKEN)('TensorDock — real API', ()
   }, 20_000);
 });
 
-describe.skipIf(!process.env.RUNPOD_API_KEY || process.env.SKIP_GPU_TESTS === '1')(
-  'RunPod — real API',
-  () => {
-    let client: RunpodClient;
-    let creds: ProviderCredentials;
+describe.skipIf(!process.env.RUNPOD_API_KEY || process.env.SKIP_GPU_TESTS === '1')('RunPod — real API', () => {
+  let client: RunpodClient;
+  let creds: ProviderCredentials;
 
-    beforeAll(() => {
-      client = new RunpodClient();
-      creds = { apiKey: process.env.RUNPOD_API_KEY! };
+  beforeAll(() => {
+    client = new RunpodClient();
+    creds = { apiKey: process.env.RUNPOD_API_KEY! };
+  });
+
+  it('lists pods with GPU info', async () => {
+    const instances = await client.listInstances(creds);
+    console.log(`[runpod] ${instances.length} pods`);
+    for (const i of instances) {
+      console.log(`  ${i.instanceId} [${i.status}] ${i.endpoint || '(no endpoint)'} gpu=${i.gpuType || '?'}`);
+    }
+    expect(Array.isArray(instances)).toBe(true);
+  }, 20_000);
+
+  it('discovers running GPU instance', async () => {
+    const instance = await client.discoverInstance(creds, ['NVIDIA GeForce RTX 4090', 'NVIDIA GeForce RTX 3090']);
+    if (instance) {
+      console.log(`[runpod] Discovered: ${instance.instanceId} [${instance.status}]`);
+      expect(instance.endpoint).toBeTruthy();
+    } else {
+      console.log('[runpod] No running instances');
+    }
+  }, 15_000);
+
+  it('gets pod details via REST API', async () => {
+    const res = await fetch('https://rest.runpod.io/v1/pods', {
+      headers: { Accept: 'application/json', Authorization: `Bearer ${creds.apiKey}` },
+      signal: AbortSignal.timeout(15_000),
     });
-
-    it('lists pods with GPU info', async () => {
-      const instances = await client.listInstances(creds);
-      console.log(`[runpod] ${instances.length} pods`);
-      for (const i of instances) {
-        console.log(
-          `  ${i.instanceId} [${i.status}] ${i.endpoint || '(no endpoint)'} gpu=${i.gpuType || '?'}`,
-        );
-      }
-      expect(Array.isArray(instances)).toBe(true);
-    }, 20_000);
-
-    it('discovers running GPU instance', async () => {
-      const instance = await client.discoverInstance(creds, [
-        'NVIDIA GeForce RTX 4090',
-        'NVIDIA GeForce RTX 3090',
-      ]);
-      if (instance) {
-        console.log(`[runpod] Discovered: ${instance.instanceId} [${instance.status}]`);
-        expect(instance.endpoint).toBeTruthy();
-      } else {
-        console.log('[runpod] No running instances');
-      }
-    }, 15_000);
-
-    it('gets pod details via REST API', async () => {
-      const res = await fetch('https://rest.runpod.io/v1/pods', {
-        headers: { Accept: 'application/json', Authorization: `Bearer ${creds.apiKey}` },
-        signal: AbortSignal.timeout(15_000),
-      });
-      expect(res.ok).toBe(true);
-      const data = await res.json();
-      const pods = Array.isArray(data) ? data : data.pods || data;
-      console.log(`[runpod] REST: ${Array.isArray(pods) ? pods.length : 0} pods`);
-      for (const p of Array.isArray(pods) ? pods : []) {
-        console.log(`  ${p.id} "${p.name}" [${p.desiredStatus}] cost=$${p.costPerHr ?? '?'}/hr`);
-      }
-    }, 15_000);
-  },
-);
+    expect(res.ok).toBe(true);
+    const data = await res.json();
+    const pods = Array.isArray(data) ? data : (data.pods || data);
+    console.log(`[runpod] REST: ${Array.isArray(pods) ? pods.length : 0} pods`);
+    for (const p of (Array.isArray(pods) ? pods : [])) {
+      console.log(`  ${p.id} "${p.name}" [${p.desiredStatus}] cost=$${p.costPerHr ?? '?'}/hr`);
+    }
+  }, 15_000);
+});
 
 describe.skipIf(!process.env.VAST_API_KEY)('Vast.ai — real API', () => {
   let headers: Record<string, string>;
 
   beforeAll(() => {
-    headers = {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.VAST_API_KEY}`,
-    };
+    headers = { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.VAST_API_KEY}` };
   });
 
   it('lists serverless endpoints', async () => {
-    const res = await fetch('https://console.vast.ai/api/v0/endptjobs/', {
-      headers,
-      signal: AbortSignal.timeout(15_000),
-    });
+    const res = await fetch('https://console.vast.ai/api/v0/endptjobs/', { headers, signal: AbortSignal.timeout(15_000) });
     expect(res.ok).toBe(true);
     const text = await res.text();
     const data = text ? JSON.parse(text) : {};
-    const endpoints = Array.isArray(data) ? data : data.results || data.endpoints || [];
+    const endpoints = Array.isArray(data) ? data : (data.results || data.endpoints || []);
     console.log(`[vast] ${endpoints.length} serverless endpoints`);
-    for (const ep of endpoints)
-      console.log(`  ${ep.id}: ${ep.endpoint_name || '(unnamed)'} [${ep.status || '?'}]`);
+    for (const ep of endpoints) console.log(`  ${ep.id}: ${ep.endpoint_name || '(unnamed)'} [${ep.status || '?'}]`);
   }, 15_000);
 
   it('finds RTX3090 GPU offers with pricing', async () => {
-    const q = encodeURIComponent(
-      '{"rentable":{"eq":true},"gpu_name":{"eq":"RTX 3090"},"num_gpus":{"eq":1}}',
-    );
-    const res = await fetch(`https://console.vast.ai/api/v0/bundles?q=${q}&limit=10`, {
-      headers,
-      signal: AbortSignal.timeout(15_000),
-    });
+    const q = encodeURIComponent('{"rentable":{"eq":true},"gpu_name":{"eq":"RTX 3090"},"num_gpus":{"eq":1}}');
+    const res = await fetch(`https://console.vast.ai/api/v0/bundles?q=${q}&limit=10`, { headers, signal: AbortSignal.timeout(15_000) });
     expect(res.ok).toBe(true);
     const text = await res.text();
     const data = text ? JSON.parse(text) : {};
-    const offers = Array.isArray(data) ? data : data.offers || data.results || [];
+    const offers = Array.isArray(data) ? data : (data.offers || data.results || []);
     console.log(`[vast] ${offers.length} RTX3090 offers`);
     for (const o of offers.slice(0, 5)) {
-      console.log(
-        `  $${(o.dph_total || 0).toFixed(3)}/hr | ${o.gpu_name} | ${o.geolocation || '?'} | ${o.gpu_ram || '?'}MB VRAM`,
-      );
+      console.log(`  $${(o.dph_total || 0).toFixed(3)}/hr | ${o.gpu_name} | ${o.geolocation || '?'} | ${o.gpu_ram || '?'}MB VRAM`);
     }
     expect(offers.length).toBeGreaterThan(0);
   }, 15_000);
 
   it('lists active instances', async () => {
-    const res = await fetch('https://console.vast.ai/api/v0/instances/', {
-      headers,
-      signal: AbortSignal.timeout(15_000),
-    });
+    const res = await fetch('https://console.vast.ai/api/v0/instances/', { headers, signal: AbortSignal.timeout(15_000) });
     expect(res.ok).toBe(true);
     const text = await res.text();
     const data = text ? JSON.parse(text) : {};
-    const instances = Array.isArray(data) ? data : data.instances || data.results || [];
+    const instances = Array.isArray(data) ? data : (data.instances || data.results || []);
     console.log(`[vast] ${instances.length} active instances`);
     for (const i of instances) {
-      console.log(
-        `  ${i.id}: ${i.gpu_name || '?'} [${i.actual_status || '?'}] $${(i.dph_total || 0).toFixed(3)}/hr ip=${i.public_ipaddr || '?'}`,
-      );
+      console.log(`  ${i.id}: ${i.gpu_name || '?'} [${i.actual_status || '?'}] $${(i.dph_total || 0).toFixed(3)}/hr ip=${i.public_ipaddr || '?'}`);
     }
   }, 15_000);
 });
 
-describe.skipIf(!process.env.MODAL_TOKEN_ID || !process.env.MODAL_TOKEN_SECRET)(
-  'Modal — real API',
-  () => {
-    let credentials: string;
+describe.skipIf(!process.env.MODAL_TOKEN_ID || !process.env.MODAL_TOKEN_SECRET)('Modal — real API', () => {
+  let credentials: string;
 
-    beforeAll(() => {
-      credentials = Buffer.from(
-        `${process.env.MODAL_TOKEN_ID}:${process.env.MODAL_TOKEN_SECRET}`,
-      ).toString('base64');
+  beforeAll(() => {
+    credentials = Buffer.from(`${process.env.MODAL_TOKEN_ID}:${process.env.MODAL_TOKEN_SECRET}`).toString('base64');
+  });
+
+  it('authenticates and lists apps', async () => {
+    const res = await fetch('https://api.modal.com/v1/apps', {
+      headers: { Authorization: `Basic ${credentials}`, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(15_000),
     });
-
-    it('authenticates and lists apps', async () => {
-      const res = await fetch('https://api.modal.com/v1/apps', {
-        headers: { Authorization: `Basic ${credentials}`, 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(15_000),
-      });
-      console.log(`[modal] HTTP ${res.status}`);
-      expect(res.status).toBeLessThan(500); // API is reachable
-      const text = await res.text();
-      if (text) {
-        const data = JSON.parse(text) as { apps?: Array<{ name: string; state: number }> };
-        const apps = data.apps ?? [];
-        console.log(`[modal] ${apps.length} apps`);
-        for (const a of apps.slice(0, 5)) console.log(`  "${a.name}" [state=${a.state}]`);
-      }
-    }, 15_000);
-  },
-);
+    console.log(`[modal] HTTP ${res.status}`);
+    expect(res.status).toBeLessThan(500); // API is reachable
+    const text = await res.text();
+    if (text) {
+      const data = JSON.parse(text) as { apps?: Array<{ name: string; state: number }> };
+      const apps = data.apps ?? [];
+      console.log(`[modal] ${apps.length} apps`);
+      for (const a of apps.slice(0, 5)) console.log(`  "${a.name}" [state=${a.state}]`);
+    }
+  }, 15_000);
+});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 2. GPU INFERENCE TESTS (real speech pipeline on RunPod)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!process.env.RUNPOD_API_KEY || process.env.SKIP_GPU_TESTS === '1')(
-  'GPU Inference — RunPod live pod',
-  () => {
-    let endpoint: string;
+describe.skipIf(!process.env.RUNPOD_API_KEY || process.env.SKIP_GPU_TESTS === '1')('GPU Inference — RunPod live pod', () => {
+  let endpoint: string;
 
-    beforeAll(async () => {
-      const ep = await discoverRunpodEndpoint({ apiKey: process.env.RUNPOD_API_KEY! });
-      if (!ep) throw new Error('No running RunPod pod found — cannot test inference');
-      endpoint = ep;
-      console.log(`[gpu] Using endpoint: ${endpoint}`);
+  beforeAll(async () => {
+    const ep = await discoverRunpodEndpoint({ apiKey: process.env.RUNPOD_API_KEY! });
+    if (!ep) throw new Error('No running RunPod pod found — cannot test inference');
+    endpoint = ep;
+    console.log(`[gpu] Using endpoint: ${endpoint}`);
+  });
+
+  it('health probe returns healthy with loaded models', async () => {
+    const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(10_000) });
+    expect(res.ok).toBe(true);
+    const data = await res.json() as Record<string, unknown>;
+    expect(data.status).toBe('healthy');
+    console.log(`[gpu] Models: STT=${(data.models as any)?.stt}, LLM=${(data.models as any)?.llm}, TTS=${(data.models as any)?.tts}`);
+    console.log(`[gpu] VRAM: ${data.vram_gb}GB, Streaming: ${data.streaming}`);
+  }, 15_000);
+
+  it('probeGpuHealth() returns true for live endpoint', async () => {
+    const healthy = await probeGpuHealth(endpoint);
+    expect(healthy).toBe(true);
+  }, 10_000);
+
+  it('LLM+TTS inference via /api/text (text → speech)', async () => {
+    const start = Date.now();
+    const res = await fetch(`${endpoint}/api/text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'Olá, como você está hoje?' }),
+      signal: AbortSignal.timeout(60_000),
     });
 
-    it('health probe returns healthy with loaded models', async () => {
-      const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(10_000) });
-      expect(res.ok).toBe(true);
-      const data = (await res.json()) as Record<string, unknown>;
-      expect(data.status).toBe('healthy');
-      console.log(
-        `[gpu] Models: STT=${(data.models as any)?.stt}, LLM=${(data.models as any)?.llm}, TTS=${(data.models as any)?.tts}`,
-      );
-      console.log(`[gpu] VRAM: ${data.vram_gb}GB, Streaming: ${data.streaming}`);
-    }, 15_000);
+    expect(res.ok).toBe(true);
+    const data = await res.json() as Record<string, any>;
+    const latencyMs = Date.now() - start;
 
-    it('probeGpuHealth() returns true for live endpoint', async () => {
-      const healthy = await probeGpuHealth(endpoint);
-      expect(healthy).toBe(true);
-    }, 10_000);
+    // Validate LLM response
+    expect(data.response?.text).toBeTruthy();
+    expect(data.response.text.length).toBeGreaterThan(5);
+    console.log(`[gpu] LLM response: "${data.response.text.substring(0, 100)}"`);
 
-    it('LLM+TTS inference via /api/text (text → speech)', async () => {
-      const start = Date.now();
-      const res = await fetch(`${endpoint}/api/text`, {
+    // Validate TTS audio
+    expect(data.speech?.audio).toBeTruthy();
+    const audioBytes = Buffer.from(data.speech.audio, 'base64');
+    expect(audioBytes.length).toBeGreaterThan(1000); // WAV header + samples
+    console.log(`[gpu] Audio: ${audioBytes.length} bytes, ${data.speech.format || 'wav'}, ${data.speech.sample_rate || '?'}Hz`);
+
+    // Validate timing
+    expect(data.timing?.llm_ms).toBeGreaterThan(0);
+    expect(data.timing?.tts_ms).toBeGreaterThan(0);
+    expect(data.timing?.total_ms).toBeGreaterThan(0);
+    console.log(`[gpu] Timing: LLM=${data.timing.llm_ms}ms TTS=${data.timing.tts_ms}ms Total=${data.timing.total_ms}ms (e2e=${latencyMs}ms)`);
+  }, 60_000);
+
+  it('handles conversation context (multi-turn)', async () => {
+    const res = await fetch(`${endpoint}/api/text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: 'Meu nome é Marcos.',
+        history: [
+          { role: 'system', content: 'Você é um professor de português brasileiro. Responda sempre em português.' },
+        ],
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    expect(res.ok).toBe(true);
+    const data = await res.json() as Record<string, any>;
+    expect(data.response?.text).toBeTruthy();
+    console.log(`[gpu] Multi-turn: "${data.response.text.substring(0, 120)}"`);
+
+    // Second turn — should reference the name
+    const res2 = await fetch(`${endpoint}/api/text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: 'Qual é o meu nome?',
+        history: [
+          { role: 'system', content: 'Você é um professor de português brasileiro.' },
+          { role: 'user', content: 'Meu nome é Marcos.' },
+          { role: 'assistant', content: data.response.text },
+        ],
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    expect(res2.ok).toBe(true);
+    const data2 = await res2.json() as Record<string, any>;
+    expect(data2.response?.text).toBeTruthy();
+    console.log(`[gpu] Follow-up: "${data2.response.text.substring(0, 120)}"`);
+    // The model should remember the name
+    expect(data2.response.text.toLowerCase()).toContain('marcos');
+  }, 120_000);
+
+  it('concurrent requests are handled', async () => {
+    const requests = Array.from({ length: 3 }, (_, i) =>
+      fetch(`${endpoint}/api/text`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: 'Olá, como você está hoje?' }),
+        body: JSON.stringify({ text: `Diga apenas o número ${i + 1}.` }),
         signal: AbortSignal.timeout(60_000),
-      });
+      }).then(async r => ({ ok: r.ok, data: await r.json() as Record<string, any>, idx: i, error: null as string | null }))
+        .catch(err => ({ ok: false, data: {} as Record<string, any>, idx: i, error: err.message as string }))
+    );
 
-      expect(res.ok).toBe(true);
-      const data = (await res.json()) as Record<string, any>;
-      const latencyMs = Date.now() - start;
+    const results = await Promise.all(requests);
+    const succeeded = results.filter(r => r.ok && r.data.response?.text);
+    const failed = results.filter(r => !r.ok);
 
-      // Validate LLM response
-      expect(data.response?.text).toBeTruthy();
-      expect(data.response.text.length).toBeGreaterThan(5);
-      console.log(`[gpu] LLM response: "${data.response.text.substring(0, 100)}"`);
+    for (const r of succeeded) {
+      console.log(`[gpu] Concurrent #${r.idx}: "${r.data.response.text.substring(0, 60)}" (${r.data.timing?.total_ms}ms)`);
+    }
+    for (const r of failed) {
+      console.log(`[gpu] Concurrent #${r.idx}: FAILED — ${r.error || 'non-ok response'}`);
+    }
 
-      // Validate TTS audio
-      expect(data.speech?.audio).toBeTruthy();
-      const audioBytes = Buffer.from(data.speech.audio, 'base64');
-      expect(audioBytes.length).toBeGreaterThan(1000); // WAV header + samples
-      console.log(
-        `[gpu] Audio: ${audioBytes.length} bytes, ${data.speech.format || 'wav'}, ${data.speech.sample_rate || '?'}Hz`,
-      );
-
-      // Validate timing
-      expect(data.timing?.llm_ms).toBeGreaterThan(0);
-      expect(data.timing?.tts_ms).toBeGreaterThan(0);
-      expect(data.timing?.total_ms).toBeGreaterThan(0);
-      console.log(
-        `[gpu] Timing: LLM=${data.timing.llm_ms}ms TTS=${data.timing.tts_ms}ms Total=${data.timing.total_ms}ms (e2e=${latencyMs}ms)`,
-      );
-    }, 60_000);
-
-    it('handles conversation context (multi-turn)', async () => {
-      const res = await fetch(`${endpoint}/api/text`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: 'Meu nome é Marcos.',
-          history: [
-            {
-              role: 'system',
-              content: 'Você é um professor de português brasileiro. Responda sempre em português.',
-            },
-          ],
-        }),
-        signal: AbortSignal.timeout(60_000),
-      });
-
-      expect(res.ok).toBe(true);
-      const data = (await res.json()) as Record<string, any>;
-      expect(data.response?.text).toBeTruthy();
-      console.log(`[gpu] Multi-turn: "${data.response.text.substring(0, 120)}"`);
-
-      // Second turn — should reference the name
-      const res2 = await fetch(`${endpoint}/api/text`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: 'Qual é o meu nome?',
-          history: [
-            { role: 'system', content: 'Você é um professor de português brasileiro.' },
-            { role: 'user', content: 'Meu nome é Marcos.' },
-            { role: 'assistant', content: data.response.text },
-          ],
-        }),
-        signal: AbortSignal.timeout(60_000),
-      });
-
-      expect(res2.ok).toBe(true);
-      const data2 = (await res2.json()) as Record<string, any>;
-      expect(data2.response?.text).toBeTruthy();
-      console.log(`[gpu] Follow-up: "${data2.response.text.substring(0, 120)}"`);
-      // The model should remember the name
-      expect(data2.response.text.toLowerCase()).toContain('marcos');
-    }, 120_000);
-
-    it('concurrent requests are handled', async () => {
-      const requests = Array.from({ length: 3 }, (_, i) =>
-        fetch(`${endpoint}/api/text`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: `Diga apenas o número ${i + 1}.` }),
-          signal: AbortSignal.timeout(60_000),
-        })
-          .then(async (r) => ({
-            ok: r.ok,
-            data: (await r.json()) as Record<string, any>,
-            idx: i,
-            error: null as string | null,
-          }))
-          .catch((err) => ({
-            ok: false,
-            data: {} as Record<string, any>,
-            idx: i,
-            error: err.message as string,
-          })),
-      );
-
-      const results = await Promise.all(requests);
-      const succeeded = results.filter((r) => r.ok && r.data.response?.text);
-      const failed = results.filter((r) => !r.ok);
-
-      for (const r of succeeded) {
-        console.log(
-          `[gpu] Concurrent #${r.idx}: "${r.data.response.text.substring(0, 60)}" (${r.data.timing?.total_ms}ms)`,
-        );
-      }
-      for (const r of failed) {
-        console.log(`[gpu] Concurrent #${r.idx}: FAILED — ${r.error || 'non-ok response'}`);
-      }
-
-      // At least 2 of 3 must succeed (single-worker GPU may drop one connection under load)
-      expect(succeeded.length).toBeGreaterThanOrEqual(2);
-    }, 120_000);
-  },
-);
+    // At least 2 of 3 must succeed (single-worker GPU may drop one connection under load)
+    expect(succeeded.length).toBeGreaterThanOrEqual(2);
+  }, 120_000);
+});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 3. AI-GATEWAY FEATURES WITH REAL DATA
@@ -454,77 +379,23 @@ describe('Observability Hooks — lifecycle tracking', () => {
   it('tracks full request lifecycle with hooks', async () => {
     const events: Array<{ hook: string; data: Record<string, any> }> = [];
     const hooks: GatewayHooks = {
-      onRequestStart: (e) => {
-        events.push({ hook: 'start', data: e });
-      },
-      onRequestEnd: (e) => {
-        events.push({ hook: 'end', data: e });
-      },
-      onScaleUp: (e) => {
-        events.push({ hook: 'scaleUp', data: e });
-      },
-      onScaleDown: (e) => {
-        events.push({ hook: 'scaleDown', data: e });
-      },
-      onHealthChange: (e) => {
-        events.push({ hook: 'healthChange', data: e });
-      },
-      onCostAlert: (e) => {
-        events.push({ hook: 'costAlert', data: e });
-      },
+      onRequestStart: (e) => { events.push({ hook: 'start', data: e }); },
+      onRequestEnd: (e) => { events.push({ hook: 'end', data: e }); },
+      onScaleUp: (e) => { events.push({ hook: 'scaleUp', data: e }); },
+      onScaleDown: (e) => { events.push({ hook: 'scaleDown', data: e }); },
+      onHealthChange: (e) => { events.push({ hook: 'healthChange', data: e }); },
+      onCostAlert: (e) => { events.push({ hook: 'costAlert', data: e }); },
     };
 
     // Simulate a real request flow
-    emitHook(hooks, 'onRequestStart', {
-      userId: 'u1',
-      provider: 'openai',
-      stage: 'llm',
-      model: 'gpt-4o-mini',
-      timestamp: Date.now(),
-    });
-    emitHook(hooks, 'onRequestEnd', {
-      userId: 'u1',
-      provider: 'openai',
-      stage: 'llm',
-      model: 'gpt-4o-mini',
-      latencyMs: 450,
-      success: true,
-      timestamp: Date.now(),
-    });
-    emitHook(hooks, 'onScaleUp', {
-      userId: 'u1',
-      tierIndex: 0,
-      provider: 'runpod',
-      trigger: 'sessions',
-      activeSessions: 6,
-      timestamp: Date.now(),
-    });
-    emitHook(hooks, 'onHealthChange', {
-      userId: 'u1',
-      tierIndex: 0,
-      provider: 'runpod',
-      previousState: 'booting',
-      newState: 'ready',
-      endpoint: 'http://gpu:8000',
-      timestamp: Date.now(),
-    });
-    emitHook(hooks, 'onScaleDown', {
-      userId: 'u1',
-      tierIndex: 0,
-      provider: 'runpod',
-      reason: 'idle',
-      idleMinutes: 15,
-      timestamp: Date.now(),
-    });
+    emitHook(hooks, 'onRequestStart', { userId: 'u1', provider: 'openai', stage: 'llm', model: 'gpt-4o-mini', timestamp: Date.now() });
+    emitHook(hooks, 'onRequestEnd', { userId: 'u1', provider: 'openai', stage: 'llm', model: 'gpt-4o-mini', latencyMs: 450, success: true, timestamp: Date.now() });
+    emitHook(hooks, 'onScaleUp', { userId: 'u1', tierIndex: 0, provider: 'runpod', trigger: 'sessions', activeSessions: 6, timestamp: Date.now() });
+    emitHook(hooks, 'onHealthChange', { userId: 'u1', tierIndex: 0, provider: 'runpod', previousState: 'booting', newState: 'ready', endpoint: 'http://gpu:8000', timestamp: Date.now() });
+    emitHook(hooks, 'onScaleDown', { userId: 'u1', tierIndex: 0, provider: 'runpod', reason: 'idle', idleMinutes: 15, timestamp: Date.now() });
 
     expect(events).toHaveLength(5);
-    expect(events.map((e) => e.hook)).toEqual([
-      'start',
-      'end',
-      'scaleUp',
-      'healthChange',
-      'scaleDown',
-    ]);
+    expect(events.map(e => e.hook)).toEqual(['start', 'end', 'scaleUp', 'healthChange', 'scaleDown']);
     expect(events[0].data.provider).toBe('openai');
     expect(events[2].data.activeSessions).toBe(6);
     expect(events[3].data.newState).toBe('ready');
@@ -532,20 +403,12 @@ describe('Observability Hooks — lifecycle tracking', () => {
 
   it('async hook errors are swallowed', async () => {
     const hooks: GatewayHooks = {
-      onRequestStart: async () => {
-        throw new Error('hook crash');
-      },
+      onRequestStart: async () => { throw new Error('hook crash'); },
     };
     // Should not throw
-    emitHook(hooks, 'onRequestStart', {
-      userId: 'u1',
-      provider: 'x',
-      stage: 'llm',
-      model: 'y',
-      timestamp: Date.now(),
-    });
+    emitHook(hooks, 'onRequestStart', { userId: 'u1', provider: 'x', stage: 'llm', model: 'y', timestamp: Date.now() });
     // Give async error time to be caught
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 50));
   });
 });
 
@@ -565,16 +428,9 @@ describe.skipIf(!OPENAI_AVAILABLE)('Spend Tracking — real OpenAI usage', () =>
     });
 
     const usage = response.usage!;
-    const cost = estimateRequestCost(
-      'openai',
-      'gpt-4o-mini',
-      usage.prompt_tokens,
-      usage.completion_tokens,
-    );
+    const cost = estimateRequestCost('openai', 'gpt-4o-mini', usage.prompt_tokens, usage.completion_tokens);
 
-    console.log(
-      `[spend] ${usage.prompt_tokens} in + ${usage.completion_tokens} out = $${cost.toFixed(6)}`,
-    );
+    console.log(`[spend] ${usage.prompt_tokens} in + ${usage.completion_tokens} out = $${cost.toFixed(6)}`);
     expect(cost).toBeGreaterThan(0);
     expect(cost).toBeLessThan(0.01);
 
@@ -605,9 +461,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('Spend Tracking — real OpenAI usage', () =>
     expect(budget.over).toBe(false);
     expect(budget.pct).toBeLessThan(0.01);
     expect(budget.currentUsd).toBeCloseTo(cost, 6);
-    console.log(
-      `[spend] Budget: $${budget.currentUsd.toFixed(6)} / $${budget.limitUsd} (${(budget.pct * 100).toFixed(4)}%)`,
-    );
+    console.log(`[spend] Budget: $${budget.currentUsd.toFixed(6)} / $${budget.limitUsd} (${(budget.pct * 100).toFixed(4)}%)`);
   }, 15_000);
 
   it('tracks multi-provider spend across pipeline stages', async () => {
@@ -616,36 +470,9 @@ describe.skipIf(!OPENAI_AVAILABLE)('Spend Tracking — real OpenAI usage', () =>
     const now = Date.now();
 
     // Simulate a full pipeline: STT (OpenAI) → LLM (Groq) → TTS (OpenAI)
-    await tracker.record({
-      userId: 'u1',
-      provider: 'openai',
-      model: 'whisper-1',
-      stage: 'stt',
-      inputTokens: 0,
-      outputTokens: 0,
-      costUsd: 0.006,
-      timestamp: now,
-    });
-    await tracker.record({
-      userId: 'u1',
-      provider: 'groq',
-      model: 'llama-3.3-70b',
-      stage: 'llm',
-      inputTokens: 500,
-      outputTokens: 100,
-      costUsd: 0.00035,
-      timestamp: now + 1,
-    });
-    await tracker.record({
-      userId: 'u1',
-      provider: 'openai',
-      model: 'tts-1',
-      stage: 'tts',
-      inputTokens: 0,
-      outputTokens: 0,
-      costUsd: 0.015,
-      timestamp: now + 2,
-    });
+    await tracker.record({ userId: 'u1', provider: 'openai', model: 'whisper-1', stage: 'stt', inputTokens: 0, outputTokens: 0, costUsd: 0.006, timestamp: now });
+    await tracker.record({ userId: 'u1', provider: 'groq', model: 'llama-3.3-70b', stage: 'llm', inputTokens: 500, outputTokens: 100, costUsd: 0.00035, timestamp: now + 1 });
+    await tracker.record({ userId: 'u1', provider: 'openai', model: 'tts-1', stage: 'tts', inputTokens: 0, outputTokens: 0, costUsd: 0.015, timestamp: now + 2 });
 
     const summary = await tracker.getDailySummary('u1');
     expect(summary.requestCount).toBe(3);
@@ -657,9 +484,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('Spend Tracking — real OpenAI usage', () =>
     expect(summary.byStage.tts.requests).toBe(1);
 
     console.log(`[spend] Pipeline total: $${summary.totalCostUsd.toFixed(5)}`);
-    console.log(
-      `[spend] By provider: openai=$${summary.byProvider.openai.costUsd.toFixed(5)}, groq=$${summary.byProvider.groq.costUsd.toFixed(5)}`,
-    );
+    console.log(`[spend] By provider: openai=$${summary.byProvider.openai.costUsd.toFixed(5)}, groq=$${summary.byProvider.groq.costUsd.toFixed(5)}`);
   });
 });
 
@@ -679,7 +504,9 @@ describe('Declarative Fallback Chains', () => {
       },
       {
         stage: 'stt' as const,
-        chain: [{ provider: 'openai', model: 'whisper-1', priority: 1 }],
+        chain: [
+          { provider: 'openai', model: 'whisper-1', priority: 1 },
+        ],
       },
       {
         stage: 'tts' as const,
@@ -723,24 +550,9 @@ describe('Health-Aware Load Balancer', () => {
 
   it('least-latency selects fastest tier', async () => {
     const tiers = [
-      {
-        state: 'ready' as const,
-        endpoint: 'http://gpu-0:8000',
-        tierIndex: 0,
-        lastHealthyAt: Date.now(),
-      },
-      {
-        state: 'ready' as const,
-        endpoint: 'http://gpu-1:8000',
-        tierIndex: 1,
-        lastHealthyAt: Date.now(),
-      },
-      {
-        state: 'ready' as const,
-        endpoint: 'http://gpu-2:8000',
-        tierIndex: 2,
-        lastHealthyAt: Date.now(),
-      },
+      { state: 'ready' as const, endpoint: 'http://gpu-0:8000', tierIndex: 0, lastHealthyAt: Date.now() },
+      { state: 'ready' as const, endpoint: 'http://gpu-1:8000', tierIndex: 1, lastHealthyAt: Date.now() },
+      { state: 'ready' as const, endpoint: 'http://gpu-2:8000', tierIndex: 2, lastHealthyAt: Date.now() },
     ];
 
     // Report latencies
@@ -759,18 +571,8 @@ describe('Health-Aware Load Balancer', () => {
 
   it('weighted-round-robin cycles evenly', async () => {
     const tiers = [
-      {
-        state: 'ready' as const,
-        endpoint: 'http://a:8000',
-        tierIndex: 0,
-        lastHealthyAt: Date.now(),
-      },
-      {
-        state: 'ready' as const,
-        endpoint: 'http://b:8000',
-        tierIndex: 1,
-        lastHealthyAt: Date.now(),
-      },
+      { state: 'ready' as const, endpoint: 'http://a:8000', tierIndex: 0, lastHealthyAt: Date.now() },
+      { state: 'ready' as const, endpoint: 'http://b:8000', tierIndex: 1, lastHealthyAt: Date.now() },
     ];
 
     const results: number[] = [];
@@ -782,24 +584,9 @@ describe('Health-Aware Load Balancer', () => {
 
   it('affinity sticks to same tier', async () => {
     const tiers = [
-      {
-        state: 'ready' as const,
-        endpoint: 'http://a:8000',
-        tierIndex: 0,
-        lastHealthyAt: Date.now(),
-      },
-      {
-        state: 'ready' as const,
-        endpoint: 'http://b:8000',
-        tierIndex: 1,
-        lastHealthyAt: Date.now(),
-      },
-      {
-        state: 'ready' as const,
-        endpoint: 'http://c:8000',
-        tierIndex: 2,
-        lastHealthyAt: Date.now(),
-      },
+      { state: 'ready' as const, endpoint: 'http://a:8000', tierIndex: 0, lastHealthyAt: Date.now() },
+      { state: 'ready' as const, endpoint: 'http://b:8000', tierIndex: 1, lastHealthyAt: Date.now() },
+      { state: 'ready' as const, endpoint: 'http://c:8000', tierIndex: 2, lastHealthyAt: Date.now() },
     ];
 
     const first = await lb.selectTier('sticky-user', tiers, 'affinity');
@@ -810,24 +597,9 @@ describe('Health-Aware Load Balancer', () => {
 
   it('hash distributes deterministically', async () => {
     const tiers = [
-      {
-        state: 'ready' as const,
-        endpoint: 'http://a:8000',
-        tierIndex: 0,
-        lastHealthyAt: Date.now(),
-      },
-      {
-        state: 'ready' as const,
-        endpoint: 'http://b:8000',
-        tierIndex: 1,
-        lastHealthyAt: Date.now(),
-      },
-      {
-        state: 'ready' as const,
-        endpoint: 'http://c:8000',
-        tierIndex: 2,
-        lastHealthyAt: Date.now(),
-      },
+      { state: 'ready' as const, endpoint: 'http://a:8000', tierIndex: 0, lastHealthyAt: Date.now() },
+      { state: 'ready' as const, endpoint: 'http://b:8000', tierIndex: 1, lastHealthyAt: Date.now() },
+      { state: 'ready' as const, endpoint: 'http://c:8000', tierIndex: 2, lastHealthyAt: Date.now() },
     ];
 
     // Same user always gets same tier
@@ -873,47 +645,27 @@ describe('E2E: Gateway decision flow', () => {
     const events: string[] = [];
 
     const hooks: GatewayHooks = {
-      onRequestStart: (e) => {
-        events.push(`start:${e.stage}:${e.provider}`);
-      },
-      onRequestEnd: (e) => {
-        events.push(`end:${e.stage}:${e.success ? 'ok' : 'fail'}`);
-      },
-      onScaleUp: (e) => {
-        events.push(`scaleUp:tier${e.tierIndex}`);
-      },
-      onHealthChange: (e) => {
-        events.push(`health:${e.previousState}→${e.newState}`);
-      },
+      onRequestStart: (e) => { events.push(`start:${e.stage}:${e.provider}`); },
+      onRequestEnd: (e) => { events.push(`end:${e.stage}:${e.success ? 'ok' : 'fail'}`); },
+      onScaleUp: (e) => { events.push(`scaleUp:tier${e.tierIndex}`); },
+      onHealthChange: (e) => { events.push(`health:${e.previousState}→${e.newState}`); },
     };
 
     // Step 1: Resolve fallback chain
-    const chains = [
-      {
-        stage: 'llm' as const,
-        chain: [
-          { provider: 'groq', model: 'llama-3.3-70b', priority: 1 },
-          { provider: 'openai', model: 'gpt-4o-mini', priority: 2 },
-        ],
-      },
-    ];
+    const chains = [{
+      stage: 'llm' as const,
+      chain: [
+        { provider: 'groq', model: 'llama-3.3-70b', priority: 1 },
+        { provider: 'openai', model: 'gpt-4o-mini', priority: 2 },
+      ],
+    }];
     const llmChain = resolveDeclarativeChain(findChainForStage(chains, 'llm')!);
     expect(llmChain.chain[0].provider).toBe('groq');
 
     // Step 3: Select tier via load balancer
     const tiers = [
-      {
-        state: 'ready' as const,
-        endpoint: 'http://gpu-0:8000',
-        tierIndex: 0,
-        lastHealthyAt: Date.now(),
-      },
-      {
-        state: 'ready' as const,
-        endpoint: 'http://gpu-1:8000',
-        tierIndex: 1,
-        lastHealthyAt: Date.now(),
-      },
+      { state: 'ready' as const, endpoint: 'http://gpu-0:8000', tierIndex: 0, lastHealthyAt: Date.now() },
+      { state: 'ready' as const, endpoint: 'http://gpu-1:8000', tierIndex: 1, lastHealthyAt: Date.now() },
     ];
     await lb.reportTierLatency('e2e-user', 0, 200);
     await lb.reportTierLatency('e2e-user', 1, 150);
@@ -922,22 +674,8 @@ describe('E2E: Gateway decision flow', () => {
     console.log(`[e2e] Selected tier: ${selectedTier} (${tiers[selectedTier].endpoint})`);
 
     // Step 4: Fire hooks
-    emitHook(hooks, 'onRequestStart', {
-      userId: 'e2e-user',
-      provider: 'groq',
-      stage: 'llm',
-      model: 'llama-3.3-70b',
-      timestamp: Date.now(),
-    });
-    emitHook(hooks, 'onRequestEnd', {
-      userId: 'e2e-user',
-      provider: 'groq',
-      stage: 'llm',
-      model: 'llama-3.3-70b',
-      latencyMs: 350,
-      success: true,
-      timestamp: Date.now(),
-    });
+    emitHook(hooks, 'onRequestStart', { userId: 'e2e-user', provider: 'groq', stage: 'llm', model: 'llama-3.3-70b', timestamp: Date.now() });
+    emitHook(hooks, 'onRequestEnd', { userId: 'e2e-user', provider: 'groq', stage: 'llm', model: 'llama-3.3-70b', latencyMs: 350, success: true, timestamp: Date.now() });
 
     // Step 5: Track spend
     await tracker.record({
@@ -956,23 +694,8 @@ describe('E2E: Gateway decision flow', () => {
     expect(summary.byProvider.groq.requests).toBe(1);
 
     // Step 6: Simulate scale-up event
-    emitHook(hooks, 'onScaleUp', {
-      userId: 'e2e-user',
-      tierIndex: 0,
-      provider: 'runpod',
-      trigger: 'sessions',
-      activeSessions: 6,
-      timestamp: Date.now(),
-    });
-    emitHook(hooks, 'onHealthChange', {
-      userId: 'e2e-user',
-      tierIndex: 0,
-      provider: 'runpod',
-      previousState: 'booting',
-      newState: 'ready',
-      endpoint: 'http://gpu-0:8000',
-      timestamp: Date.now(),
-    });
+    emitHook(hooks, 'onScaleUp', { userId: 'e2e-user', tierIndex: 0, provider: 'runpod', trigger: 'sessions', activeSessions: 6, timestamp: Date.now() });
+    emitHook(hooks, 'onHealthChange', { userId: 'e2e-user', tierIndex: 0, provider: 'runpod', previousState: 'booting', newState: 'ready', endpoint: 'http://gpu-0:8000', timestamp: Date.now() });
 
     expect(events).toEqual([
       'start:llm:groq',
@@ -982,9 +705,7 @@ describe('E2E: Gateway decision flow', () => {
     ]);
 
     console.log(`[e2e] Events: ${events.join(' → ')}`);
-    console.log(
-      `[e2e] Spend: $${summary.totalCostUsd.toFixed(6)} across ${summary.requestCount} request(s)`,
-    );
+    console.log(`[e2e] Spend: $${summary.totalCostUsd.toFixed(6)} across ${summary.requestCount} request(s)`);
   });
 });
 
@@ -992,269 +713,235 @@ describe('E2E: Gateway decision flow', () => {
 // 5. FULL BOOT CYCLE: Stop → Boot → Wait → Inference
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!process.env.RUNPOD_API_KEY || process.env.SKIP_GPU_TESTS === '1')(
-  'E2E: GPU Boot Cycle — stop, boot, wait, inference',
-  () => {
-    let client: RunpodClient;
-    let creds: ProviderCredentials;
-    let bootedEndpoint: string;
-    let bootedPodId: string;
+describe.skipIf(!process.env.RUNPOD_API_KEY || process.env.SKIP_GPU_TESTS === '1')('E2E: GPU Boot Cycle — stop, boot, wait, inference', () => {
+  let client: RunpodClient;
+  let creds: ProviderCredentials;
+  let bootedEndpoint: string;
+  let bootedPodId: string;
 
-    beforeAll(() => {
-      client = new RunpodClient();
-      creds = { apiKey: process.env.RUNPOD_API_KEY! };
+  beforeAll(() => {
+    client = new RunpodClient();
+    creds = { apiKey: process.env.RUNPOD_API_KEY! };
+  });
+
+  it('stops all existing RunPod pods', async () => {
+    const pods = await client.listInstances(creds);
+    const running = pods.filter(p => p.status === 'RUNNING' || p.status === 'STARTING');
+    console.log(`[boot-cycle] Found ${running.length} active pod(s) to stop`);
+
+    for (const pod of running) {
+      console.log(`[boot-cycle] Stopping ${pod.instanceId}...`);
+      await client.stopInstance(pod.instanceId, creds);
+    }
+
+    if (running.length > 0) {
+      // Wait for pods to actually stop
+      let attempts = 0;
+      while (attempts < 12) {
+        await new Promise(r => setTimeout(r, 5_000));
+        const current = await client.listInstances(creds);
+        const stillRunning = current.filter(p => p.status === 'RUNNING');
+        if (stillRunning.length === 0) {
+          console.log(`[boot-cycle] All pods stopped after ${(attempts + 1) * 5}s`);
+          break;
+        }
+        attempts++;
+      }
+    }
+
+    const final = await client.listInstances(creds);
+    const stillActive = final.filter(p => p.status === 'RUNNING');
+    expect(stillActive.length).toBe(0);
+    console.log('[boot-cycle] All pods stopped');
+  }, 120_000);
+
+  it('boots a new GPU via autoscaler triggerGpuBoot()', async () => {
+    const registry = new GpuProviderRegistry();
+    registry.register(client);
+
+    // Use the autoscaler engine to boot
+    const { AutoscalerEngine } = await import('@ai-gateway/autoscaler/engine');
+    const { SessionTracker } = await import('@ai-gateway/autoscaler/session-tracker');
+    const { LatencyTracker } = await import('@ai-gateway/autoscaler/latency-tracker');
+    const { StatePersistence } = await import('@ai-gateway/autoscaler/state-persistence');
+
+    const store = new MemoryStateStore();
+    const sessionTracker = new SessionTracker(store, { getActiveSessionCount: async () => 0 } as any);
+    const latencyTracker = new LatencyTracker(store);
+    const persistence = new StatePersistence(store);
+    const noop = async () => {};
+
+    const engine = new AutoscalerEngine({
+      registry, sessionTracker, latencyTracker, persistence,
+      probeHealth: probeGpuHealth, cleanupInstance: async () => {},
+    } as any);
+
+    const tierConfig = {
+      provider: 'runpod' as const,
+      apiKey: process.env.RUNPOD_API_KEY!,
+      gpuTypes: ['NVIDIA GeForce RTX 4090', 'NVIDIA GeForce RTX 3090', 'NVIDIA RTX A5000'],
+      dockerImage: 'marcosremar/parle-s2s:latest',
+      hfToken: process.env.HF_TOKEN,
+    };
+
+    console.log('[boot-cycle] Triggering GPU boot via autoscaler...');
+    const bootStart = Date.now();
+    const result = await engine.triggerGpuBoot(tierConfig, 0, 'boot-test-user');
+
+    expect(result.ok).toBe(true);
+    console.log(`[boot-cycle] Boot triggered: instanceId=${result.instanceId}, endpoint=${result.endpoint}`);
+    console.log(`[boot-cycle] Boot trigger took ${((Date.now() - bootStart) / 1000).toFixed(1)}s`);
+
+    bootedPodId = result.instanceId!;
+    expect(bootedPodId).toBeTruthy();
+  }, 120_000);
+
+  it('waits for GPU to become healthy (polls every 15s, max 10min)', async () => {
+    expect(bootedPodId).toBeTruthy();
+
+    // Get the direct endpoint
+    const res = await fetch(`https://rest.runpod.io/v1/pods/${bootedPodId}`, {
+      headers: { Authorization: `Bearer ${process.env.RUNPOD_API_KEY!}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
     });
 
-    it('stops all existing RunPod pods', async () => {
-      const pods = await client.listInstances(creds);
-      const running = pods.filter((p) => p.status === 'RUNNING' || p.status === 'STARTING');
-      console.log(`[boot-cycle] Found ${running.length} active pod(s) to stop`);
+    let endpoint: string | null = null;
 
-      for (const pod of running) {
-        console.log(`[boot-cycle] Stopping ${pod.instanceId}...`);
-        await client.stopInstance(pod.instanceId, creds);
+    if (res.ok) {
+      const pod = await res.json() as Record<string, any>;
+      const ip = pod.publicIp;
+      const portMap = pod.portMappings as Record<string, number> | undefined;
+      if (ip && portMap?.['8000']) {
+        endpoint = `http://${ip}:${portMap['8000']}`;
       }
+    }
 
-      if (running.length > 0) {
-        // Wait for pods to actually stop
-        let attempts = 0;
-        while (attempts < 12) {
-          await new Promise((r) => setTimeout(r, 5_000));
-          const current = await client.listInstances(creds);
-          const stillRunning = current.filter((p) => p.status === 'RUNNING');
-          if (stillRunning.length === 0) {
-            console.log(`[boot-cycle] All pods stopped after ${(attempts + 1) * 5}s`);
+    // Fallback to proxy
+    if (!endpoint) {
+      endpoint = `https://${bootedPodId}-8000.proxy.runpod.net`;
+    }
+
+    console.log(`[boot-cycle] Polling health at: ${endpoint}`);
+    const pollStart = Date.now();
+    const maxWaitMs = 10 * 60 * 1000; // 10 minutes
+    const pollIntervalMs = 15_000;
+    let healthy = false;
+    let lastStatus = '';
+
+    while (Date.now() - pollStart < maxWaitMs) {
+      const elapsed = ((Date.now() - pollStart) / 1000).toFixed(0);
+      try {
+        // Re-discover endpoint (IP/port may change as pod starts)
+        const podRes = await fetch(`https://rest.runpod.io/v1/pods/${bootedPodId}`, {
+          headers: { Authorization: `Bearer ${process.env.RUNPOD_API_KEY!}`, Accept: 'application/json' },
+          signal: AbortSignal.timeout(5_000),
+        }).catch(() => null);
+
+        if (podRes?.ok) {
+          const pod = await podRes.json() as Record<string, any>;
+          const ip = pod.publicIp;
+          const portMap = pod.portMappings as Record<string, number> | undefined;
+          if (ip && portMap?.['8000']) {
+            const newEndpoint = `http://${ip}:${portMap['8000']}`;
+            if (newEndpoint !== endpoint) {
+              console.log(`[boot-cycle] [${elapsed}s] Endpoint updated: ${endpoint} → ${newEndpoint}`);
+              endpoint = newEndpoint;
+            }
+          }
+          const status = pod.desiredStatus || pod.status || '?';
+          if (status !== lastStatus) {
+            console.log(`[boot-cycle] [${elapsed}s] Pod status: ${status}`);
+            lastStatus = status;
+          }
+        }
+
+        const healthRes = await fetch(`${endpoint}/health`, {
+          signal: AbortSignal.timeout(5_000),
+        });
+
+        if (healthRes.ok) {
+          const data = await healthRes.json() as Record<string, any>;
+          if (data.status === 'healthy') {
+            healthy = true;
+            bootedEndpoint = endpoint;
+            const totalSecs = ((Date.now() - pollStart) / 1000).toFixed(1);
+            console.log(`[boot-cycle] [${elapsed}s] GPU HEALTHY after ${totalSecs}s`);
+            console.log(`[boot-cycle] Models: STT=${data.models?.stt}, LLM=${data.models?.llm}, TTS=${data.models?.tts}`);
+            console.log(`[boot-cycle] VRAM: ${data.vram_gb}GB`);
             break;
-          }
-          attempts++;
-        }
-      }
-
-      const final = await client.listInstances(creds);
-      const stillActive = final.filter((p) => p.status === 'RUNNING');
-      expect(stillActive.length).toBe(0);
-      console.log('[boot-cycle] All pods stopped');
-    }, 120_000);
-
-    it('boots a new GPU via autoscaler triggerGpuBoot()', async () => {
-      const registry = new GpuProviderRegistry();
-      registry.register(client);
-
-      // Use the autoscaler engine to boot
-      const { AutoscalerEngine } = await import('@ai-gateway/autoscaler/engine');
-      const { SessionTracker } = await import('@ai-gateway/autoscaler/session-tracker');
-      const { LatencyTracker } = await import('@ai-gateway/autoscaler/latency-tracker');
-      const { StatePersistence } = await import('@ai-gateway/autoscaler/state-persistence');
-
-      const store = new MemoryStateStore();
-      const sessionTracker = new SessionTracker(store, {
-        getActiveSessionCount: async () => 0,
-      } as any);
-      const latencyTracker = new LatencyTracker(store);
-      const persistence = new StatePersistence(store);
-      const noop = async () => {};
-
-      const engine = new AutoscalerEngine({
-        registry,
-        sessionTracker,
-        latencyTracker,
-        persistence,
-        probeHealth: probeGpuHealth,
-        cleanupInstance: async () => {},
-      } as any);
-
-      const tierConfig = {
-        provider: 'runpod' as const,
-        apiKey: process.env.RUNPOD_API_KEY!,
-        gpuTypes: ['NVIDIA GeForce RTX 4090', 'NVIDIA GeForce RTX 3090', 'NVIDIA RTX A5000'],
-        dockerImage: 'marcosremar/parle-s2s:latest',
-        hfToken: process.env.HF_TOKEN,
-      };
-
-      console.log('[boot-cycle] Triggering GPU boot via autoscaler...');
-      const bootStart = Date.now();
-      const result = await engine.triggerGpuBoot(tierConfig, 0, 'boot-test-user');
-
-      expect(result.ok).toBe(true);
-      console.log(
-        `[boot-cycle] Boot triggered: instanceId=${result.instanceId}, endpoint=${result.endpoint}`,
-      );
-      console.log(
-        `[boot-cycle] Boot trigger took ${((Date.now() - bootStart) / 1000).toFixed(1)}s`,
-      );
-
-      bootedPodId = result.instanceId!;
-      expect(bootedPodId).toBeTruthy();
-    }, 120_000);
-
-    it('waits for GPU to become healthy (polls every 15s, max 10min)', async () => {
-      expect(bootedPodId).toBeTruthy();
-
-      // Get the direct endpoint
-      const res = await fetch(`https://rest.runpod.io/v1/pods/${bootedPodId}`, {
-        headers: {
-          Authorization: `Bearer ${process.env.RUNPOD_API_KEY!}`,
-          Accept: 'application/json',
-        },
-        signal: AbortSignal.timeout(10_000),
-      });
-
-      let endpoint: string | null = null;
-
-      if (res.ok) {
-        const pod = (await res.json()) as Record<string, any>;
-        const ip = pod.publicIp;
-        const portMap = pod.portMappings as Record<string, number> | undefined;
-        if (ip && portMap?.['8000']) {
-          endpoint = `http://${ip}:${portMap['8000']}`;
-        }
-      }
-
-      // Fallback to proxy
-      if (!endpoint) {
-        endpoint = `https://${bootedPodId}-8000.proxy.runpod.net`;
-      }
-
-      console.log(`[boot-cycle] Polling health at: ${endpoint}`);
-      const pollStart = Date.now();
-      const maxWaitMs = 10 * 60 * 1000; // 10 minutes
-      const pollIntervalMs = 15_000;
-      let healthy = false;
-      let lastStatus = '';
-
-      while (Date.now() - pollStart < maxWaitMs) {
-        const elapsed = ((Date.now() - pollStart) / 1000).toFixed(0);
-        try {
-          // Re-discover endpoint (IP/port may change as pod starts)
-          const podRes = await fetch(`https://rest.runpod.io/v1/pods/${bootedPodId}`, {
-            headers: {
-              Authorization: `Bearer ${process.env.RUNPOD_API_KEY!}`,
-              Accept: 'application/json',
-            },
-            signal: AbortSignal.timeout(5_000),
-          }).catch(() => null);
-
-          if (podRes?.ok) {
-            const pod = (await podRes.json()) as Record<string, any>;
-            const ip = pod.publicIp;
-            const portMap = pod.portMappings as Record<string, number> | undefined;
-            if (ip && portMap?.['8000']) {
-              const newEndpoint = `http://${ip}:${portMap['8000']}`;
-              if (newEndpoint !== endpoint) {
-                console.log(
-                  `[boot-cycle] [${elapsed}s] Endpoint updated: ${endpoint} → ${newEndpoint}`,
-                );
-                endpoint = newEndpoint;
-              }
-            }
-            const status = pod.desiredStatus || pod.status || '?';
-            if (status !== lastStatus) {
-              console.log(`[boot-cycle] [${elapsed}s] Pod status: ${status}`);
-              lastStatus = status;
-            }
-          }
-
-          const healthRes = await fetch(`${endpoint}/health`, {
-            signal: AbortSignal.timeout(5_000),
-          });
-
-          if (healthRes.ok) {
-            const data = (await healthRes.json()) as Record<string, any>;
-            if (data.status === 'healthy') {
-              healthy = true;
-              bootedEndpoint = endpoint;
-              const totalSecs = ((Date.now() - pollStart) / 1000).toFixed(1);
-              console.log(`[boot-cycle] [${elapsed}s] GPU HEALTHY after ${totalSecs}s`);
-              console.log(
-                `[boot-cycle] Models: STT=${data.models?.stt}, LLM=${data.models?.llm}, TTS=${data.models?.tts}`,
-              );
-              console.log(`[boot-cycle] VRAM: ${data.vram_gb}GB`);
-              break;
-            } else {
-              console.log(
-                `[boot-cycle] [${elapsed}s] Health response: ${data.status || 'loading...'}`,
-              );
-            }
           } else {
-            console.log(`[boot-cycle] [${elapsed}s] Health HTTP ${healthRes.status}`);
+            console.log(`[boot-cycle] [${elapsed}s] Health response: ${data.status || 'loading...'}`);
           }
-        } catch (err: any) {
-          const msg = err.message?.includes('timeout')
-            ? 'timeout'
-            : err.message?.includes('ECONNREFUSED')
-              ? 'connection refused'
-              : err.message?.includes('fetch failed')
-                ? 'unreachable'
-                : err.message?.substring(0, 50) || 'error';
-          console.log(`[boot-cycle] [${elapsed}s] ${msg}`);
+        } else {
+          console.log(`[boot-cycle] [${elapsed}s] Health HTTP ${healthRes.status}`);
         }
-
-        await new Promise((r) => setTimeout(r, pollIntervalMs));
+      } catch (err: any) {
+        const msg = err.message?.includes('timeout') ? 'timeout'
+          : err.message?.includes('ECONNREFUSED') ? 'connection refused'
+          : err.message?.includes('fetch failed') ? 'unreachable'
+          : err.message?.substring(0, 50) || 'error';
+        console.log(`[boot-cycle] [${elapsed}s] ${msg}`);
       }
 
-      expect(healthy).toBe(true);
-    }, 660_000); // 11 min timeout
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+    }
 
-    it('runs inference on freshly booted GPU', async () => {
-      expect(bootedEndpoint).toBeTruthy();
+    expect(healthy).toBe(true);
+  }, 660_000); // 11 min timeout
 
-      // Health check
-      const healthOk = await probeGpuHealth(bootedEndpoint);
-      expect(healthOk).toBe(true);
+  it('runs inference on freshly booted GPU', async () => {
+    expect(bootedEndpoint).toBeTruthy();
 
-      // LLM + TTS inference
-      const start = Date.now();
-      const res = await fetch(`${bootedEndpoint}/api/text`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: 'Olá! Me fale sobre o Brasil em uma frase.',
-          history: [
-            {
-              role: 'system',
-              content:
-                'Você é um professor de português brasileiro. Responda em português, de forma concisa.',
-            },
-          ],
-        }),
-        signal: AbortSignal.timeout(60_000),
-      });
+    // Health check
+    const healthOk = await probeGpuHealth(bootedEndpoint);
+    expect(healthOk).toBe(true);
 
-      expect(res.ok).toBe(true);
-      const data = (await res.json()) as Record<string, any>;
-      const latency = Date.now() - start;
+    // LLM + TTS inference
+    const start = Date.now();
+    const res = await fetch(`${bootedEndpoint}/api/text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: 'Olá! Me fale sobre o Brasil em uma frase.',
+        history: [
+          { role: 'system', content: 'Você é um professor de português brasileiro. Responda em português, de forma concisa.' },
+        ],
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
 
-      // LLM response
-      expect(data.response?.text).toBeTruthy();
-      expect(data.response.text.length).toBeGreaterThan(10);
-      console.log(`[boot-cycle] LLM: "${data.response.text.substring(0, 120)}"`);
+    expect(res.ok).toBe(true);
+    const data = await res.json() as Record<string, any>;
+    const latency = Date.now() - start;
 
-      // TTS audio
-      expect(data.speech?.audio).toBeTruthy();
-      const audioBytes = Buffer.from(data.speech.audio, 'base64');
-      expect(audioBytes.length).toBeGreaterThan(1000);
-      console.log(`[boot-cycle] Audio: ${audioBytes.length} bytes, ${data.speech.format || 'wav'}`);
+    // LLM response
+    expect(data.response?.text).toBeTruthy();
+    expect(data.response.text.length).toBeGreaterThan(10);
+    console.log(`[boot-cycle] LLM: "${data.response.text.substring(0, 120)}"`);
 
-      // Timing
-      console.log(
-        `[boot-cycle] Timing: LLM=${data.timing?.llm_ms}ms TTS=${data.timing?.tts_ms}ms Total=${data.timing?.total_ms}ms (e2e=${latency}ms)`,
-      );
+    // TTS audio
+    expect(data.speech?.audio).toBeTruthy();
+    const audioBytes = Buffer.from(data.speech.audio, 'base64');
+    expect(audioBytes.length).toBeGreaterThan(1000);
+    console.log(`[boot-cycle] Audio: ${audioBytes.length} bytes, ${data.speech.format || 'wav'}`);
 
-      // Multi-turn test
-      const res2 = await fetch(`${bootedEndpoint}/api/text`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: 'Repita exatamente: "O teste de boot funcionou!"',
-        }),
-        signal: AbortSignal.timeout(30_000),
-      });
+    // Timing
+    console.log(`[boot-cycle] Timing: LLM=${data.timing?.llm_ms}ms TTS=${data.timing?.tts_ms}ms Total=${data.timing?.total_ms}ms (e2e=${latency}ms)`);
 
-      expect(res2.ok).toBe(true);
-      const data2 = (await res2.json()) as Record<string, any>;
-      expect(data2.response?.text).toBeTruthy();
-      console.log(`[boot-cycle] Verification: "${data2.response.text.substring(0, 100)}"`);
-      console.log('[boot-cycle] FULL BOOT CYCLE COMPLETE — GPU operational');
-    }, 120_000);
-  },
-);
+    // Multi-turn test
+    const res2 = await fetch(`${bootedEndpoint}/api/text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: 'Repita exatamente: "O teste de boot funcionou!"',
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    expect(res2.ok).toBe(true);
+    const data2 = await res2.json() as Record<string, any>;
+    expect(data2.response?.text).toBeTruthy();
+    console.log(`[boot-cycle] Verification: "${data2.response.text.substring(0, 100)}"`);
+    console.log('[boot-cycle] FULL BOOT CYCLE COMPLETE — GPU operational');
+  }, 120_000);
+});

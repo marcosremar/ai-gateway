@@ -9,18 +9,18 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-const readSource = (file: string) => readFileSync(join(__dirname, '..', file), 'utf-8');
+const readSource = (file: string) => readFileSync(join(__dirname, '../..', file), 'utf-8');
 
 describe('GPU Readiness State Machine', () => {
 
   describe('GpuReadinessState interface', () => {
     it('should include autoRecoveryAttempt field in interface', () => {
-      const source = readSource('../../../server/state.ts');
+      const source = readSource('server/state.ts');
       expect(source).toContain('autoRecoveryAttempt: number');
     });
 
     it('should initialize autoRecoveryAttempt to 0 in default state', () => {
-      const source = readSource('../../../server/state.ts');
+      const source = readSource('server/state.ts');
       // The default state object should include autoRecoveryAttempt: 0
       const defaultIdx = source.indexOf('gpuReadinessState: GpuReadinessState = {');
       const defaultBlock = source.slice(defaultIdx, defaultIdx + 300);
@@ -28,14 +28,14 @@ describe('GPU Readiness State Machine', () => {
     });
 
     it('resetGpuReadinessState should include autoRecoveryAttempt: 0', () => {
-      const source = readSource('../../../server/state.ts');
+      const source = readSource('server/state.ts');
       const resetIdx = source.indexOf('function resetGpuReadinessState');
       const resetBlock = source.slice(resetIdx, resetIdx + 400);
       expect(resetBlock).toContain('autoRecoveryAttempt: 0');
     });
 
     it('resetGpuReadinessState should clear latency rings', () => {
-      const source = readSource('../../../server/state.ts');
+      const source = readSource('server/state.ts');
       const resetIdx = source.indexOf('function resetGpuReadinessState');
       const resetBlock = source.slice(resetIdx, resetIdx + 400);
       expect(resetBlock).toContain('resetPerStageLatencyRings');
@@ -44,12 +44,12 @@ describe('GPU Readiness State Machine', () => {
 
   describe('Per-stage latency ring', () => {
     it('should have bounded ring size', () => {
-      const source = readSource('../../../server/state.ts');
+      const source = readSource('server/state.ts');
       expect(source).toContain('PER_STAGE_RING_SIZE');
     });
 
     it('should implement circular buffer correctly', () => {
-      const source = readSource('../../../server/state.ts');
+      const source = readSource('server/state.ts');
       expect(source).toContain('ring.length < PER_STAGE_RING_SIZE');
       expect(source).toContain('% PER_STAGE_RING_SIZE');
     });
@@ -57,21 +57,21 @@ describe('GPU Readiness State Machine', () => {
 
   describe('resetReadinessCheck', () => {
     it('should cancel repechage timer', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       const resetIdx = source.indexOf('function resetReadinessCheck');
       const body = source.slice(resetIdx, resetIdx + 300);
       expect(body).toContain('clearTimeout(repechageTimer)');
     });
 
     it('should cancel auto-recovery timer', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       const resetIdx = source.indexOf('function resetReadinessCheck');
       const body = source.slice(resetIdx, resetIdx + 300);
       expect(body).toContain('clearTimeout(autoRecoveryTimer)');
     });
 
     it('should reset shadowStartedAt', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       // shadowStartedAt = 0 should appear in resetReadinessCheck
       const resetIdx = source.indexOf('function resetReadinessCheck');
       const body = source.slice(resetIdx, resetIdx + 500);
@@ -79,7 +79,7 @@ describe('GPU Readiness State Machine', () => {
     });
 
     it('should reset autoRecoveryAttempt', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       const resetIdx = source.indexOf('function resetReadinessCheck');
       const body = source.slice(resetIdx, resetIdx + 500);
       expect(body).toContain('autoRecoveryAttempt');
@@ -88,7 +88,7 @@ describe('GPU Readiness State Machine', () => {
 
   describe('recordShadowRun guards', () => {
     it('should guard against concurrent readiness check', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       const fnIdx = source.indexOf('function recordShadowRun');
       const body = source.slice(fnIdx, fnIdx + 500);
       expect(body).toContain('if (checkInProgress)');
@@ -96,13 +96,13 @@ describe('GPU Readiness State Machine', () => {
     });
 
     it('should have shadow timeout constant (1 hour)', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       expect(source).toContain('SHADOW_TIMEOUT_MS');
       expect(source).toContain('60 * 60 * 1000');
     });
 
     it('should reset shadowStartedAt on completion', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       const fnIdx = source.indexOf('function recordShadowRun');
       const body = source.slice(fnIdx, fnIdx + 3000);
       expect(body).toContain('shadowStartedAt');
@@ -110,7 +110,7 @@ describe('GPU Readiness State Machine', () => {
     });
 
     it('should support early activation for fast GPUs', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       expect(source).toContain('earlyActivationThreshold');
       expect(source).toContain('proven fast GPU');
     });
@@ -118,12 +118,12 @@ describe('GPU Readiness State Machine', () => {
 
   describe('STT benchmark WAV reuse', () => {
     it('should create WAV buffer once at module level', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       expect(source).toContain('const STT_BENCH_WAV');
     });
 
     it('should use pre-built WAV in benchmarkService', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       const fnIdx = source.indexOf('async function benchmarkService');
       const body = source.slice(fnIdx, fnIdx + 2000);
       expect(body).toContain('STT_BENCH_WAV');
@@ -133,7 +133,7 @@ describe('GPU Readiness State Machine', () => {
 
   describe('WS broadcast batching', () => {
     it('should batch broadcasts during benchmark', () => {
-      const source = readSource('../../../server/gpu-readiness.ts');
+      const source = readSource('server/gpu-readiness.ts');
       // Should broadcast every 3rd run, plus first and last
       expect(source).toContain('% 3 === 0');
     });
@@ -160,7 +160,7 @@ describe('Deploy Settings', () => {
   });
 
   it('should have debounced save', () => {
-    const source = readSource('../../src/gpu-providers/deploy-settings.ts');
+    const source = readSource('src/gpu-providers/deploy-settings.ts');
     expect(source).toContain('_settingsSaveTimer');
     expect(source).toContain('flushDeploySettings');
   });

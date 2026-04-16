@@ -106,11 +106,10 @@ describe('GPU provider edge cases', () => {
   describe('credential edge cases', () => {
     it('RunPod works with empty string apiKey', async () => {
       const client = new RunpodClient();
-      fetchSpy.mockResolvedValueOnce(jsonResponse({ data: [] }));
 
       const result = await client.listInstances({ apiKey: '' });
-      // Should still make the request (API will reject, but client doesn't pre-validate)
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      // Empty string is falsy — implementation short-circuits and returns [] without calling fetch
+      expect(fetchSpy).toHaveBeenCalledTimes(0);
       expect(result).toEqual([]);
     });
 

@@ -7,6 +7,7 @@ import type { GatewayHooks } from '../../hooks';
 import type { ResponseCache } from '../../caching/response-cache';
 import type { LLMProvider, STTProvider, TTSProvider, ImageProvider } from '../providers/cloud/types';
 import type { EmbeddingProvider } from '../providers/cloud/openai-compat/openai-compat-embedding';
+import type { GuardrailEngine } from '../guardrails';
 
 /**
  * A single entry in the LLM provider fallback chain.
@@ -107,6 +108,11 @@ export interface ProxyConfig {
    * in-memory config cache (e.g. via applyUserConfig() from config-persistence).
    */
   onAuth?: (apiKey: string) => Promise<void>;
+  /**
+   * Rule-based guardrail engine for validating requests and responses.
+   * Runs beforeRequest and afterResponse hooks on /v1/chat/completions.
+   */
+  guardrails?: GuardrailEngine;
 }
 
 /**

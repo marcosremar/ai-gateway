@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AlertRouter } from '../../src/alerting/alert-router';
-import { SlackAlertChannel } from '../../src/alerting/channels/slack';
-import { DiscordAlertChannel } from '../../src/alerting/channels/discord';
-import { GenericWebhookAlertChannel } from '../../src/alerting/channels/webhook';
-import { createAlertingHooks } from '../../src/alerting/hooks-adapter';
-import type { AlertPayload } from '../../src/alerting/types';
+import { AlertRouter } from '../src/alerting/alert-router';
+import { SlackAlertChannel } from '../src/alerting/channels/slack';
+import { DiscordAlertChannel } from '../src/alerting/channels/discord';
+import { GenericWebhookAlertChannel } from '../src/alerting/channels/webhook';
+import { createAlertingHooks } from '../src/alerting/hooks-adapter';
+import type { AlertPayload } from '../src/alerting/types';
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
@@ -54,16 +54,10 @@ describe('Alerting', () => {
       const router = new AlertRouter([ch]);
 
       await router.route({
-        severity: 'warning',
-        title: 'A',
-        message: 'msg1',
-        timestamp: new Date(),
+        severity: 'warning', title: 'A', message: 'msg1', timestamp: new Date(),
       });
       await router.route({
-        severity: 'critical',
-        title: 'B',
-        message: 'msg2',
-        timestamp: new Date(),
+        severity: 'critical', title: 'B', message: 'msg2', timestamp: new Date(),
       });
 
       expect(ch.send).toHaveBeenCalledTimes(2);
@@ -75,10 +69,7 @@ describe('Alerting', () => {
 
       for (let i = 0; i < 5; i++) {
         await router.route({
-          severity: 'info',
-          title: `Alert ${i}`,
-          message: `msg ${i}`,
-          timestamp: new Date(),
+          severity: 'info', title: `Alert ${i}`, message: `msg ${i}`, timestamp: new Date(),
         });
       }
 

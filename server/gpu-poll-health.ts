@@ -426,7 +426,7 @@ export async function pollHealthUntilReady(
           let logOut = '';
           logProc.stdout.on('data', (c: Buffer) => { logOut += c.toString(); });
           await new Promise<void>((r) => {
-            const t = setTimeout(() => { try { logProc.kill('SIGKILL'); } catch {} r(); }, 8_000);
+            const t = setTimeout(() => { try { logProc.kill('SIGKILL'); } catch { /* process already exited */ } r(); }, 8_000);
             logProc.on('exit', () => { clearTimeout(t); r(); });
             logProc.on('error', () => { clearTimeout(t); r(); });
           });
@@ -603,7 +603,7 @@ export async function pollHealthUntilReady(
                       passedStage = 'STT';
                       log.log(`[gpu] Inference test PASSED (STT, text="${(body.text || '').slice(0, 30)}") in ${sttMs}ms`);
                     }
-                  } catch {}
+                  } catch { /* JSON parse failed — response not valid JSON */ }
                 }
               } catch (err) {
                 log.log(`[gpu] STT test failed: ${err instanceof Error ? err.message : err}`);
@@ -630,7 +630,7 @@ export async function pollHealthUntilReady(
                         passedStage = 'LLM(translate)';
                         log.log(`[gpu] Inference test PASSED (translation) in ${transMs}ms`);
                       }
-                    } catch {}
+                    } catch { /* JSON parse failed — translation response not valid JSON */ }
                   }
                 } catch (err) {
                   log.log(`[gpu] Translation test failed: ${err instanceof Error ? err.message : err}`);
@@ -660,7 +660,7 @@ export async function pollHealthUntilReady(
                         passedStage = 'LLM';
                         log.log(`[gpu] Inference test PASSED (LLM) in ${llmMs}ms`);
                       }
-                    } catch {}
+                    } catch { /* JSON parse failed — LLM response not valid JSON */ }
                   }
                 } catch (err) {
                   log.log(`[gpu] LLM test failed: ${err instanceof Error ? err.message : err}`);

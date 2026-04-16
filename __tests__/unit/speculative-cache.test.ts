@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { SpeculativeCache } from '../../server/speculative-cache';
+import { SpeculativeCache } from '../server/speculative-cache';
 
 describe('SpeculativeCache', () => {
   let cache: SpeculativeCache;

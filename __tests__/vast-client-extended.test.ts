@@ -976,14 +976,17 @@ describe('VastClient — extended unit tests', () => {
       }));
 
       const offers = await client.listOffers({}, creds);
-      expect(offers).toHaveLength(2);
-      // Sorted by price
+      // listOffers returns individual offers (no grouping), sorted by price
+      expect(offers).toHaveLength(3);
       expect(offers[0].gpuType).toBe('RTX 3090');
       expect(offers[0].pricePerHr).toBe(0.30);
       expect(offers[0].available).toBe(1);
       expect(offers[1].gpuType).toBe('RTX 4090');
       expect(offers[1].pricePerHr).toBe(0.50);
-      expect(offers[1].available).toBe(2);
+      expect(offers[1].available).toBe(1);
+      expect(offers[2].gpuType).toBe('RTX 4090');
+      expect(offers[2].pricePerHr).toBe(0.60);
+      expect(offers[2].available).toBe(1);
     });
 
     it('returns empty array on error', async () => {

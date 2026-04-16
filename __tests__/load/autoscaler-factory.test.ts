@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createAutoscaler, PROVIDER_BOOT_SECS } from '../../src/factory';
-import type { CreateAutoscalerOptions } from '../../src/factory';
-import type { AutoScalerConfig } from '../../src/types';
-import type { StateStore, SettingsStore, SessionResolver } from '../../src/deps';
+import { createAutoscaler, PROVIDER_BOOT_SECS } from '../src/factory';
+import type { CreateAutoscalerOptions } from '../src/factory';
+import type { AutoScalerConfig } from '../src/types';
+import type { StateStore, SettingsStore, SessionResolver } from '../src/deps';
 
 // ── Minimal mocks ─────────────────────────────────────────────────────────────
 
@@ -13,19 +13,11 @@ function makeStateStore(): StateStore {
   return {
     // KvStore
     get: vi.fn(async (k: string) => kvStore.get(k) ?? null),
-    set: vi.fn(async (k: string, v: string) => {
-      kvStore.set(k, v);
-    }),
-    del: vi.fn(async (k: string) => {
-      kvStore.delete(k);
-    }),
+    set: vi.fn(async (k: string, v: string) => { kvStore.set(k, v); }),
+    del: vi.fn(async (k: string) => { kvStore.delete(k); }),
     scan: vi.fn(async () => []),
     // ListStore
-    rpush: vi.fn(async (k: string, v: string) => {
-      const l = listStore.get(k) ?? [];
-      l.push(v);
-      listStore.set(k, l);
-    }),
+    rpush: vi.fn(async (k: string, v: string) => { const l = listStore.get(k) ?? []; l.push(v); listStore.set(k, l); }),
     ltrim: vi.fn(async () => {}),
     lrange: vi.fn(async (k: string) => listStore.get(k) ?? []),
     // HashStore
@@ -224,15 +216,13 @@ describe('createAutoscaler()', () => {
     });
 
     it('reportInferenceBenchmark() should resolve', async () => {
-      await expect(
-        autoscaler.reportInferenceBenchmark({
-          userId: 'user1',
-          provider: 'runpod',
-          endpoint: 'http://1.2.3.4:8000',
-          totalMs: 500,
-          timestamp: Date.now(),
-        }),
-      ).resolves.toBeUndefined();
+      await expect(autoscaler.reportInferenceBenchmark({
+        userId: 'user1',
+        provider: 'runpod',
+        endpoint: 'http://1.2.3.4:8000',
+        totalMs: 500,
+        timestamp: Date.now(),
+      })).resolves.toBeUndefined();
     });
   });
 
@@ -307,15 +297,13 @@ describe('createAutoscaler()', () => {
         ...BASE_CONFIG,
         enabled: true,
         threshold: 0, // trigger immediately
-        tiers: [
-          {
-            provider: 'runpod',
-            gpuTypes: ['RTX3090'],
-            dockerImage: 'test:latest',
-            apiKey: 'test-key',
-            endpoint: 'http://example.com',
-          },
-        ],
+        tiers: [{
+          provider: 'runpod',
+          gpuTypes: ['RTX3090'],
+          dockerImage: 'test:latest',
+          apiKey: 'test-key',
+          endpoint: 'http://example.com',
+        }],
       };
       const decision = await autoscaler.getAutoScaleDecision('user1', config, { dryRun: true });
       expect(decision).toBeDefined();

@@ -13,6 +13,7 @@ import { BOT_LOCAL_CONTAINER } from '../bot-handlers';
 import { buildSystemPrompt, getCloudProfile } from '../ai-handlers';
 import { client } from '../providers';
 import { langNames } from '../http-utils';
+import { safeCatch } from '../../src/safe-catch';
 
 const log = createLogger('ws-bot-audio');
 
@@ -284,7 +285,7 @@ export function startParecCapture(): void {
           const buf = Buffer.from(chunk);
           appendBotAudioChunk(buf);
           if (shouldProcessBotAudio()) {
-            processBotAudioBuffer().catch(() => {});
+            processBotAudioBuffer().catch(safeCatch('bot-audio-process'));
           }
         }
       }
@@ -303,7 +304,7 @@ export function stopParecCapture(): void {
     parecProc = null; // null before kill so reader loop stops trying to read
     parecChunks = 0;
     try { proc.kill(); } catch { /* ignore */ }
-    proc.exited.catch(() => {}); // fire-and-forget await — ensures process cleanup
+    proc.exited.catch(safeCatch('parec-proc-exit')); // fire-and-forget await — ensures process cleanup
   }
 }
 

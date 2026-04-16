@@ -3,8 +3,8 @@
  * Covers: span lifecycle, tags, events, pipeline tracing, analytics, cleanup.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DistributedTracer } from '../../src/observability/distributed-tracer';
-import type { PipelineMetrics } from '../../src/observability/types';
+import { DistributedTracer } from '../src/observability/distributed-tracer';
+import type { PipelineMetrics } from '../src/observability/types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -139,10 +139,10 @@ describe('DistributedTracer', () => {
     it('adds event to existing span', () => {
       const tracer = makeTracer();
       const span = tracer.startSpan('op');
-      tracer.addEvent(span.spanId, 'cache_hit', { key: 'abc' });
+      tracer.addEvent(span.spanId, 'cache_hit', { cacheId: 'abc' });
       expect(span.events).toHaveLength(1);
       expect(span.events[0].name).toBe('cache_hit');
-      expect(span.events[0].attributes).toEqual({ key: 'abc' });
+      expect(span.events[0].attributes).toEqual({ cacheId: 'abc' });
       expect(span.events[0].timestamp).toBeGreaterThan(0);
     });
 

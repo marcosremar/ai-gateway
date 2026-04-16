@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DatabaseService, getDatabase } from '../../src/database/service';
+import { DatabaseService, getDatabase } from '../src/database/service';
 
 describe('DatabaseService', () => {
   beforeEach(() => {

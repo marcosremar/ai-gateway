@@ -24,6 +24,8 @@ import { BILLING_URLS } from '../src/providers/errors';
 import { fetchIpLocation, extractIp, fetchRunPodDatacenter, parseProviderRegion, fetchMyLocation } from './ip-location';
 import { getAllHostLatencies, getLatencyDbStats } from './latency-db';
 import { getCloudProbeResults, getCloudProbeAt } from './provider-warmup';
+import { getTranslationCacheStats } from '../src/gateway/pipeline/translation-cache';
+import { getGuardrailStats } from '../src/gateway/guardrails';
 import { getSttTargetLatencyMs, getLlmTargetLatencyMs, getTtsTargetLatencyMs, getP95DemotionMultiplier, getRepechageMaxAttempts } from '../src/gpu-providers/deploy-settings';
 import { buildProviderQueries } from './gpu-handlers-offers';
 import { getDeployTimeoutMin } from '../src/gpu-providers/deploy-settings';
@@ -558,6 +560,17 @@ export async function handleHealth(_req: IncomingMessage, res: ServerResponse): 
     totalTokens: metricsCounters.totalInputTokens + metricsCounters.totalOutputTokens,
   };
   body.pendingDbWrites = pendingDbWrites;
+  // Translation cache stats
+  const cacheStats = getTranslationCacheStats();
+  const cacheTotal = cacheStats.cacheHits + cacheStats.cacheMisses;
+  body.translationCache = {
+    hits: cacheStats.cacheHits,
+    misses: cacheStats.cacheMisses,
+    size: cacheStats.cacheSize,
+    hitRate: cacheTotal > 0 ? Math.round((cacheStats.cacheHits / cacheTotal) * 10000) / 10000 : 0,
+  };
+  // Guardrail stats (rule-based request/response filtering)
+  body.guardrails = getGuardrailStats();
   // Cloud provider probe results (from periodic warmup cycle)
   const cloudProbe = getCloudProbeResults();
   if (cloudProbe.length > 0) {

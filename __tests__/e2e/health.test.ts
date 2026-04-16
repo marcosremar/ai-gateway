@@ -43,8 +43,7 @@ describe.skipIf(!hasTarget)('GET /health', () => {
   it('includes uptime or system info', async () => {
     const data = await fetchHealth();
     // Gateway returns uptime_sec, GPU pod returns system info
-    const hasInfo =
-      data.uptime_sec !== undefined || data.system !== undefined || data.status !== undefined;
+    const hasInfo = data.uptime_sec !== undefined || data.system !== undefined || data.status !== undefined;
     expect(hasInfo).toBe(true);
   });
 });

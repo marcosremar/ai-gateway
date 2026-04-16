@@ -23,13 +23,21 @@ import type { LLMProvider, ChatRequest, ChatResponse } from '@ai-gateway/provide
 // ── Detect Ollama (top-level await — resolved before describe.skipIf) ───────
 
 let ollamaAvailable = false;
+let ollamaModel = 'llama3.2';
 try {
   const res = await fetch('http://localhost:11434/api/tags', {
     signal: AbortSignal.timeout(3_000),
   });
   if (res.ok) {
     const data = (await res.json()) as { models?: Array<{ name: string }> };
-    ollamaAvailable = !!data.models?.some((m) => m.name.includes('llama3.2'));
+    // Prefer exact 'llama3.2', fall back to any llama3.2 variant (e.g. llama3.2:1b)
+    const exact = data.models?.find((m) => m.name === 'llama3.2' || m.name === 'llama3.2:latest');
+    const variant = data.models?.find((m) => m.name.startsWith('llama3.2'));
+    const match = exact || variant;
+    if (match) {
+      ollamaAvailable = true;
+      ollamaModel = match.name;
+    }
   }
 } catch {
   // Ollama not running
@@ -45,19 +53,12 @@ class FakeCloudLLM implements LLMProvider {
   readonly providerId = 'fake-cloud';
   calls = 0;
 
-  isConfigured() {
-    return true;
-  }
-  withApiKey() {
-    return this;
-  }
+  isConfigured() { return true; }
+  withApiKey() { return this; }
 
   async chat(request: ChatRequest): Promise<ChatResponse> {
     this.calls++;
-    return {
-      content: `[cloud fallback] echo: ${request.messages.at(-1)?.content}`,
-      model: 'fake-cloud-v1',
-    };
+    return { content: `[cloud fallback] echo: ${request.messages.at(-1)?.content}`, model: 'fake-cloud-v1' };
   }
 }
 
@@ -67,12 +68,8 @@ class BrokenLLM implements LLMProvider {
   readonly providerId = 'broken-local';
   calls = 0;
 
-  isConfigured() {
-    return true;
-  }
-  withApiKey() {
-    return this;
-  }
+  isConfigured() { return true; }
+  withApiKey() { return this; }
 
   async chat(): Promise<ChatResponse> {
     this.calls++;
@@ -123,6 +120,7 @@ function buildRegistry() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
+
   // ── 1. warmup() health-checks Ollama ──────────────────────────────────────
 
   it('warmup() reports ok for Ollama on localhost:11434', async () => {
@@ -134,7 +132,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -165,7 +163,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -198,7 +196,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -243,9 +241,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
     expect(result.entries[0].status).toBe('error');
     expect(result.entries[0].error).toContain('not reachable');
 
-    console.log(
-      `  WARMUP unreachable: ${result.entries[0].error} (${result.entries[0].latencyMs}ms)`,
-    );
+    console.log(`  WARMUP unreachable: ${result.entries[0].error} (${result.entries[0].latencyMs}ms)`);
   }, 15_000);
 
   // ── 5. chat() through real Ollama (alwaysActive self-hosted) ──────────────
@@ -259,7 +255,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -274,7 +270,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
 
     expect(result.content).toBeTruthy();
     expect(result.provider).toBe('ollama');
-    expect(result.model).toContain('llama3.2');
+    expect(result.model).toContain('llama3.2'); // matches llama3.2, llama3.2:1b, etc.
     expect(result.latencyMs).toBeGreaterThan(0);
     expect(result.fallbackUsed).toBe(false);
 
@@ -302,7 +298,9 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
       },
     });
 
-    const result = await client.chat([{ role: 'user', content: 'teste de fallback' }]);
+    const result = await client.chat([
+      { role: 'user', content: 'teste de fallback' },
+    ]);
 
     expect(result.content).toContain('[cloud fallback]');
     expect(result.provider).toBe('fake-cloud');
@@ -323,7 +321,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -335,15 +333,15 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
     });
 
     // Should succeed on first Ollama replica, never touching cloud
-    const result = await client.chat([{ role: 'user', content: 'Diga apenas "sim".' }]);
+    const result = await client.chat([
+      { role: 'user', content: 'Diga apenas "sim".' },
+    ]);
 
     expect(result.provider).toBe('ollama');
     expect(result.fallbackUsed).toBe(false);
     expect(fakeCloud.calls).toBe(0);
 
-    console.log(
-      `  REPLICAS: chat via first replica, cloud untouched: "${result.content.substring(0, 60)}"`,
-    );
+    console.log(`  REPLICAS: chat via first replica, cloud untouched: "${result.content.substring(0, 60)}"`);
   }, 30_000);
 
   // ── 8. Cloud provider ignores replicas ────────────────────────────────────
@@ -354,11 +352,15 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
     const client = new AIClient({
       registry,
       defaultProfile: {
-        llm: [{ provider: 'fake-cloud', model: 'fake-cloud-v1', replicas: 5 }],
+        llm: [
+          { provider: 'fake-cloud', model: 'fake-cloud-v1', replicas: 5 },
+        ],
       },
     });
 
-    const result = await client.chat([{ role: 'user', content: 'test' }]);
+    const result = await client.chat([
+      { role: 'user', content: 'test' },
+    ]);
 
     // Cloud should not expand replicas — only 1 call
     expect(result.provider).toBe('fake-cloud');
@@ -379,7 +381,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
         llm: [
           {
             provider: 'ollama',
-            model: 'llama3.2',
+            model: ollamaModel,
             selfHosted: true,
             endpoint: 'http://localhost:11434',
             alwaysActive: true,
@@ -405,8 +407,6 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
     expect(result.provider).toBe('ollama');
     expect(result.latencyMs).toBeGreaterThan(0);
 
-    console.log(
-      `  LIFECYCLE: warmup ok → chat "${result.content.substring(0, 80)}" (${result.latencyMs}ms)`,
-    );
+    console.log(`  LIFECYCLE: warmup ok → chat "${result.content.substring(0, 80)}" (${result.latencyMs}ms)`);
   }, 45_000);
 });

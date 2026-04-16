@@ -9,9 +9,10 @@ const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_loadtest_2026';
 const SKIP = process.env.SKIP_LIVE_TESTS === '1';
 
 describe.skipIf(SKIP)('HTTP/2 Check', { timeout: 30_000 }, () => {
+
   it('check fetch() HTTP version via response headers', { timeout: 15_000 }, async () => {
     const res = await fetch(`${GATEWAY_URL}/health`, {
-      headers: { Authorization: `Bearer ${GATEWAY_API_KEY}` },
+      headers: { 'Authorization': `Bearer ${GATEWAY_API_KEY}` },
     });
 
     console.log('\n── HTTP Protocol Check ──');
@@ -41,42 +42,35 @@ describe.skipIf(SKIP)('HTTP/2 Check', { timeout: 30_000 }, () => {
       const http2 = await import('node:http2');
       const url = new URL(`${GATEWAY_URL}/health`);
 
-      const result = await new Promise<{ protocol: string; status: number; latencyMs: number }>(
-        (resolve, reject) => {
-          const start = performance.now();
-          const client = http2.connect(url.origin);
+      const result = await new Promise<{ protocol: string; status: number; latencyMs: number }>((resolve, reject) => {
+        const start = performance.now();
+        const client = http2.connect(url.origin);
 
-          client.on('error', reject);
+        client.on('error', reject);
 
-          const req = client.request({
-            ':method': 'GET',
-            ':path': url.pathname,
-            authorization: `Bearer ${GATEWAY_API_KEY}`,
-          });
+        const req = client.request({
+          ':method': 'GET',
+          ':path': url.pathname,
+          'authorization': `Bearer ${GATEWAY_API_KEY}`,
+        });
 
-          let data = '';
-          req.on('response', (headers) => {
-            const status = headers[':status'] as number;
-            req.on('data', (chunk: Buffer) => {
-              data += chunk;
-            });
-            req.on('end', () => {
-              client.close();
-              resolve({
-                protocol: 'h2',
-                status,
-                latencyMs: performance.now() - start,
-              });
-            });
-          });
-          req.end();
-
-          setTimeout(() => {
+        let data = '';
+        req.on('response', (headers) => {
+          const status = headers[':status'] as number;
+          req.on('data', (chunk: Buffer) => { data += chunk; });
+          req.on('end', () => {
             client.close();
-            reject(new Error('timeout'));
-          }, 10_000);
-        },
-      );
+            resolve({
+              protocol: 'h2',
+              status,
+              latencyMs: performance.now() - start,
+            });
+          });
+        });
+        req.end();
+
+        setTimeout(() => { client.close(); reject(new Error('timeout')); }, 10_000);
+      });
 
       console.log(`  Protocol: ${result.protocol}`);
       console.log(`  Status: ${result.status}`);
@@ -99,7 +93,7 @@ describe.skipIf(SKIP)('HTTP/2 Check', { timeout: 30_000 }, () => {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              Authorization: `Bearer ${GATEWAY_API_KEY}`,
+              'Authorization': `Bearer ${GATEWAY_API_KEY}`,
             },
             body: JSON.stringify({
               model: 'llama-3.3-70b-versatile',
@@ -112,18 +106,16 @@ describe.skipIf(SKIP)('HTTP/2 Check', { timeout: 30_000 }, () => {
         } catch {
           return { ok: false, latencyMs: performance.now() - s };
         }
-      }),
+      })
     );
     const fetchWall = performance.now() - fetchStart;
-    const fetchOk = fetchResults.filter((r) => r.ok);
-    const fetchLatencies = fetchOk.map((r) => r.latencyMs).sort((a, b) => a - b);
+    const fetchOk = fetchResults.filter(r => r.ok);
+    const fetchLatencies = fetchOk.map(r => r.latencyMs).sort((a, b) => a - b);
     const fetchP50 = fetchLatencies[Math.floor(fetchLatencies.length * 0.5)] || 0;
     const fetchP95 = fetchLatencies[Math.floor(fetchLatencies.length * 0.95)] || 0;
-    console.log(
-      `  fetch():  ${fetchOk.length}/100 OK | p50=${fetchP50.toFixed(0)}ms p95=${fetchP95.toFixed(0)}ms | wall=${fetchWall.toFixed(0)}ms`,
-    );
+    console.log(`  fetch():  ${fetchOk.length}/100 OK | p50=${fetchP50.toFixed(0)}ms p95=${fetchP95.toFixed(0)}ms | wall=${fetchWall.toFixed(0)}ms`);
 
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 2000));
 
     // 2. HTTP/2 multiplexed — single connection, all requests multiplexed
     try {
@@ -141,7 +133,7 @@ describe.skipIf(SKIP)('HTTP/2 Check', { timeout: 30_000 }, () => {
               ':method': 'POST',
               ':path': '/v1/chat/completions',
               'content-type': 'application/json',
-              authorization: `Bearer ${GATEWAY_API_KEY}`,
+              'authorization': `Bearer ${GATEWAY_API_KEY}`,
             });
 
             const body = JSON.stringify({
@@ -153,9 +145,7 @@ describe.skipIf(SKIP)('HTTP/2 Check', { timeout: 30_000 }, () => {
             let data = '';
             req.on('response', (headers) => {
               const status = headers[':status'] as number;
-              req.on('data', (chunk: Buffer) => {
-                data += chunk;
-              });
+              req.on('data', (chunk: Buffer) => { data += chunk; });
               req.on('end', () => {
                 resolve({ ok: status === 200, latencyMs: performance.now() - s });
               });
@@ -164,24 +154,20 @@ describe.skipIf(SKIP)('HTTP/2 Check', { timeout: 30_000 }, () => {
             req.write(body);
             req.end();
           });
-        }),
+        })
       );
 
       client.close();
 
       const h2Wall = performance.now() - h2Start;
-      const h2Ok = h2Results.filter((r) => r.ok);
-      const h2Latencies = h2Ok.map((r) => r.latencyMs).sort((a, b) => a - b);
+      const h2Ok = h2Results.filter(r => r.ok);
+      const h2Latencies = h2Ok.map(r => r.latencyMs).sort((a, b) => a - b);
       const h2P50 = h2Latencies[Math.floor(h2Latencies.length * 0.5)] || 0;
       const h2P95 = h2Latencies[Math.floor(h2Latencies.length * 0.95)] || 0;
-      console.log(
-        `  HTTP/2:   ${h2Ok.length}/100 OK | p50=${h2P50.toFixed(0)}ms p95=${h2P95.toFixed(0)}ms | wall=${h2Wall.toFixed(0)}ms`,
-      );
+      console.log(`  HTTP/2:   ${h2Ok.length}/100 OK | p50=${h2P50.toFixed(0)}ms p95=${h2P95.toFixed(0)}ms | wall=${h2Wall.toFixed(0)}ms`);
 
       const diff = fetchP50 - h2P50;
-      console.log(
-        `\n  Difference: fetch p50 is ${diff > 0 ? diff.toFixed(0) + 'ms SLOWER' : Math.abs(diff).toFixed(0) + 'ms FASTER'} than HTTP/2`,
-      );
+      console.log(`\n  Difference: fetch p50 is ${diff > 0 ? diff.toFixed(0) + 'ms SLOWER' : Math.abs(diff).toFixed(0) + 'ms FASTER'} than HTTP/2`);
     } catch (err: any) {
       console.log(`  HTTP/2 test failed: ${err.message}`);
     }

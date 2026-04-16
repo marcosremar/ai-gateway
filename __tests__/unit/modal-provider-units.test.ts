@@ -9,19 +9,19 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-import { ModalVoxtralSTTProvider, VOXTRAL_MODELS } from '../../src/providers/modal-voxtral';
-import { ModalKokoroTTSProvider, MODAL_KOKORO_MODELS } from '../../src/providers/modal-kokoro';
+import { ModalVoxtralSTTProvider, VOXTRAL_MODELS } from '../src/providers/modal-voxtral';
+import { ModalKokoroTTSProvider, MODAL_KOKORO_MODELS } from '../src/providers/modal-kokoro';
 import {
   ModalSeamlessSTTProvider,
   ModalSeamlessLLMProvider,
   SEAMLESS_MODELS,
-} from '../../src/providers/modal-seamless';
+} from '../src/providers/modal-seamless';
 import {
   Qwen3ASRPipelineSTTProvider,
   Qwen3ASRPipelineLLMProvider,
   QWEN3ASR_PIPELINE_MODELS,
-} from '../../src/providers/modal-qwen3asr-pipeline';
-import { ModalMossTTSProvider, MODAL_MOSS_TTS_MODELS } from '../../src/providers/modal-moss';
+} from '../src/providers/modal-qwen3asr-pipeline';
+import { ModalMossTTSProvider, MODAL_MOSS_TTS_MODELS } from '../src/providers/modal-moss';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

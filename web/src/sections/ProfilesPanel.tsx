@@ -129,8 +129,16 @@ const AppItem = memo(function AppItem({
           <div className="flex items-center gap-1.5">
             {isActive && <Check className="w-3.5 h-3.5 flex-shrink-0" style={{ color: accentColor }} />}
             <span className={`text-sm font-semibold truncate ${!isEnabled ? 'line-through' : ''}`}>{profile.name}</span>
+            <code className="text-[9px] font-mono px-1 py-0.5 rounded flex-shrink-0 opacity-40"
+              style={{ background: 'var(--color-surface)', color: 'var(--color-text-muted)' }}>
+              {profile.id.slice(0, 8)}
+            </code>
           </div>
-          <span className="text-[11px] truncate block" style={{ color: 'var(--color-text-muted)' }}>{summary}</span>
+          {profile.description ? (
+            <span className="text-[11px] truncate block" style={{ color: 'var(--color-text-secondary)' }}>{profile.description}</span>
+          ) : (
+            <span className="text-[11px] truncate block" style={{ color: 'var(--color-text-muted)' }}>{summary}</span>
+          )}
         </div>
       )}
 

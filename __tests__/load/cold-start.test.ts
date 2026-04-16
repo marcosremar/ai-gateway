@@ -20,13 +20,10 @@ const SKIP = process.env.SKIP_LIVE_TESTS === '1';
 
 const headers = {
   'Content-Type': 'application/json',
-  Authorization: `Bearer ${GATEWAY_API_KEY}`,
+  'Authorization': `Bearer ${GATEWAY_API_KEY}`,
 };
 
-async function timedRequest(
-  path: string,
-  body?: string,
-): Promise<{ ok: boolean; latencyMs: number; status: number }> {
+async function timedRequest(path: string, body?: string): Promise<{ ok: boolean; latencyMs: number; status: number }> {
   const start = performance.now();
   try {
     const res = await fetch(`${GATEWAY_URL}${path}`, {
@@ -43,17 +40,13 @@ async function timedRequest(
 
 function stopAllMachines(): boolean {
   try {
-    const output = execSync(`flyctl machines list -a ${FLY_APP} --json 2>/dev/null`, {
-      encoding: 'utf-8',
-    });
+    const output = execSync(`flyctl machines list -a ${FLY_APP} --json 2>/dev/null`, { encoding: 'utf-8' });
     const machines = JSON.parse(output) as Array<{ id: string; state: string }>;
-    const running = machines.filter((m) => m.state === 'started' || m.state === 'starting');
+    const running = machines.filter(m => m.state === 'started' || m.state === 'starting');
 
     for (const machine of running) {
       console.log(`  Stopping machine ${machine.id}...`);
-      execSync(`flyctl machines stop ${machine.id} -a ${FLY_APP} 2>/dev/null`, {
-        encoding: 'utf-8',
-      });
+      execSync(`flyctl machines stop ${machine.id} -a ${FLY_APP} 2>/dev/null`, { encoding: 'utf-8' });
     }
     return running.length > 0;
   } catch (err: any) {
@@ -64,9 +57,7 @@ function stopAllMachines(): boolean {
 
 function getMachineStates(): Array<{ id: string; state: string }> {
   try {
-    const output = execSync(`flyctl machines list -a ${FLY_APP} --json 2>/dev/null`, {
-      encoding: 'utf-8',
-    });
+    const output = execSync(`flyctl machines list -a ${FLY_APP} --json 2>/dev/null`, { encoding: 'utf-8' });
     return JSON.parse(output) as Array<{ id: string; state: string }>;
   } catch {
     return [];
@@ -74,6 +65,7 @@ function getMachineStates(): Array<{ id: string; state: string }> {
 }
 
 describe.skipIf(SKIP)('Cold Start — Scale to Zero', { timeout: 300_000 }, () => {
+
   it('measures cold start latency (health endpoint)', { timeout: 120_000 }, async () => {
     console.log('\n── Cold Start: /health ──');
 
@@ -83,20 +75,16 @@ describe.skipIf(SKIP)('Cold Start — Scale to Zero', { timeout: 300_000 }, () =
 
     // 2. Wait for machines to fully stop
     console.log('  Waiting 10s for machines to stop...');
-    await new Promise((r) => setTimeout(r, 10_000));
+    await new Promise(r => setTimeout(r, 10_000));
 
     const states = getMachineStates();
-    console.log(
-      `  Machine states: ${states.map((m) => `${m.id.slice(0, 6)}=${m.state}`).join(', ')}`,
-    );
+    console.log(`  Machine states: ${states.map(m => `${m.id.slice(0, 6)}=${m.state}`).join(', ')}`);
 
     // 3. Send request and measure total cold start time
     console.log('  Sending cold request...');
     const result = await timedRequest('/health');
 
-    console.log(
-      `  Cold start health: status=${result.status} latency=${result.latencyMs.toFixed(0)}ms`,
-    );
+    console.log(`  Cold start health: status=${result.status} latency=${result.latencyMs.toFixed(0)}ms`);
     expect(result.ok).toBe(true);
 
     // Cold start should be under 10 seconds (Fly VM boot + Bun startup)
@@ -109,7 +97,7 @@ describe.skipIf(SKIP)('Cold Start — Scale to Zero', { timeout: 300_000 }, () =
 
     // Stop all machines
     stopAllMachines();
-    await new Promise((r) => setTimeout(r, 10_000));
+    await new Promise(r => setTimeout(r, 10_000));
 
     const chatBody = JSON.stringify({
       model: 'llama-3.3-70b-versatile',
@@ -119,9 +107,7 @@ describe.skipIf(SKIP)('Cold Start — Scale to Zero', { timeout: 300_000 }, () =
 
     console.log('  Sending cold chat request...');
     const result = await timedRequest('/v1/chat/completions', chatBody);
-    console.log(
-      `  Cold start chat: status=${result.status} latency=${result.latencyMs.toFixed(0)}ms`,
-    );
+    console.log(`  Cold start chat: status=${result.status} latency=${result.latencyMs.toFixed(0)}ms`);
     expect(result.ok).toBe(true);
 
     // Includes Fly boot + Bun start + Groq API call
@@ -133,7 +119,7 @@ describe.skipIf(SKIP)('Cold Start — Scale to Zero', { timeout: 300_000 }, () =
     console.log('\n── Cold Start → Immediate 50-request burst ──');
 
     stopAllMachines();
-    await new Promise((r) => setTimeout(r, 10_000));
+    await new Promise(r => setTimeout(r, 10_000));
 
     const chatBody = JSON.stringify({
       model: 'llama-3.3-70b-versatile',
@@ -145,21 +131,17 @@ describe.skipIf(SKIP)('Cold Start — Scale to Zero', { timeout: 300_000 }, () =
     console.log('  Firing 50 requests at stopped machine...');
     const start = performance.now();
     const results = await Promise.all(
-      Array.from({ length: 50 }, () => timedRequest('/v1/chat/completions', chatBody)),
+      Array.from({ length: 50 }, () => timedRequest('/v1/chat/completions', chatBody))
     );
     const wallTime = performance.now() - start;
 
-    const ok = results.filter((r) => r.ok);
-    const latencies = ok.map((r) => r.latencyMs).sort((a, b) => a - b);
+    const ok = results.filter(r => r.ok);
+    const latencies = ok.map(r => r.latencyMs).sort((a, b) => a - b);
     const p50 = latencies.length ? latencies[Math.floor(latencies.length * 0.5)] : 0;
     const p95 = latencies.length ? latencies[Math.floor(latencies.length * 0.95)] : 0;
 
-    console.log(
-      `  ${ok.length}/50 OK | p50=${p50.toFixed(0)}ms p95=${p95.toFixed(0)}ms | wall=${wallTime.toFixed(0)}ms`,
-    );
-    console.log(
-      `  First response: ${latencies[0]?.toFixed(0)}ms | Last: ${latencies.at(-1)?.toFixed(0)}ms`,
-    );
+    console.log(`  ${ok.length}/50 OK | p50=${p50.toFixed(0)}ms p95=${p95.toFixed(0)}ms | wall=${wallTime.toFixed(0)}ms`);
+    console.log(`  First response: ${latencies[0]?.toFixed(0)}ms | Last: ${latencies.at(-1)?.toFixed(0)}ms`);
 
     // Most should succeed even with cold start
     expect(ok.length).toBeGreaterThan(25);
@@ -169,40 +151,31 @@ describe.skipIf(SKIP)('Cold Start — Scale to Zero', { timeout: 300_000 }, () =
     console.log('\n── Restart Penalty: warm → stop → warm ──');
 
     // 1. Warm request
-    const warm1 = await timedRequest(
-      '/v1/chat/completions',
-      JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: 'warm1' }],
-        max_tokens: 5,
-      }),
-    );
+    const warm1 = await timedRequest('/v1/chat/completions', JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: 'warm1' }],
+      max_tokens: 5,
+    }));
     console.log(`  Warm request: ${warm1.latencyMs.toFixed(0)}ms`);
 
     // 2. Stop
     stopAllMachines();
-    await new Promise((r) => setTimeout(r, 10_000));
+    await new Promise(r => setTimeout(r, 10_000));
 
     // 3. Cold request
-    const cold = await timedRequest(
-      '/v1/chat/completions',
-      JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: 'cold' }],
-        max_tokens: 5,
-      }),
-    );
+    const cold = await timedRequest('/v1/chat/completions', JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: 'cold' }],
+      max_tokens: 5,
+    }));
     console.log(`  Cold request: ${cold.latencyMs.toFixed(0)}ms`);
 
     // 4. Warm again
-    const warm2 = await timedRequest(
-      '/v1/chat/completions',
-      JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: 'warm2' }],
-        max_tokens: 5,
-      }),
-    );
+    const warm2 = await timedRequest('/v1/chat/completions', JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: 'warm2' }],
+      max_tokens: 5,
+    }));
     console.log(`  Re-warm request: ${warm2.latencyMs.toFixed(0)}ms`);
 
     const penalty = cold.latencyMs - warm1.latencyMs;

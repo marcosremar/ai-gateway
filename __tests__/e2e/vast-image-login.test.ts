@@ -13,10 +13,7 @@ import { AbstractGpuProvider } from '@ai-gateway/gpu-providers/abstract-provider
 import type { ProviderCredentials, InstanceSpec } from '@ai-gateway/gpu-providers/types';
 
 const creds: ProviderCredentials = { apiKey: 'vast-test-key' };
-const baseSpec: InstanceSpec = {
-  gpuTypes: ['RTX 3090'],
-  dockerImage: 'marcosremar/babelcast-subtitle:latest',
-};
+const baseSpec: InstanceSpec = { gpuTypes: ['RTX 3090'], dockerImage: 'marcosremar/babelcast-subtitle:latest' };
 
 function mockFetchResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -53,17 +50,11 @@ describe('VastClient image_login', () => {
     // Without this, _pollForEndpoint waits 5s initial + does TCP probes on
     // fake IPs that time out, causing 60s test timeouts.
     vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({
-      endpoint: 'http://1.2.3.4:8000',
-      ip: '1.2.3.4',
+      endpoint: 'http://1.2.3.4:8000', ip: '1.2.3.4',
     });
 
     // Backup and clear Docker env vars
-    for (const key of [
-      'DOCKERHUB_USERNAME',
-      'DOCKERHUB_TOKEN',
-      'DOCKER_HUB_USER',
-      'DOCKER_HUB_TOKEN',
-    ]) {
+    for (const key of ['DOCKERHUB_USERNAME', 'DOCKERHUB_TOKEN', 'DOCKER_HUB_USER', 'DOCKER_HUB_TOKEN']) {
       envBackup[key] = process.env[key];
       delete process.env[key];
     }
@@ -84,25 +75,14 @@ describe('VastClient image_login', () => {
   /** Setup fetch mock for a successful create flow (preflight → search → create → poll). */
   function setupSuccessfulCreate() {
     fetchSpy
-      .mockResolvedValueOnce(mockPreflight()) // preflight balance check
-      .mockResolvedValueOnce(
-        mockFetchResponse({
-          // search offers
-          offers: [{ id: 'offer-1', gpu_name: 'RTX 3090', dph_total: 0.5 }],
-        }),
-      )
+      .mockResolvedValueOnce(mockPreflight())                                  // preflight balance check
+      .mockResolvedValueOnce(mockFetchResponse({                               // search offers
+        offers: [{ id: 'offer-1', gpu_name: 'RTX 3090', dph_total: 0.50 }],
+      }))
       .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '999' })) // create
-      .mockResolvedValueOnce(
-        mockFetchResponse({
-          // poll endpoint
-          instances: {
-            id: '999',
-            actual_status: 'running',
-            public_ipaddr: '1.2.3.4',
-            direct_port_start: 8000,
-          },
-        }),
-      );
+      .mockResolvedValueOnce(mockFetchResponse({                                         // poll endpoint
+        instances: { id: '999', actual_status: 'running', public_ipaddr: '1.2.3.4', direct_port_start: 8000 },
+      }));
   }
 
   // ── DOCKERHUB_USERNAME / DOCKERHUB_TOKEN (primary env vars) ─────────────

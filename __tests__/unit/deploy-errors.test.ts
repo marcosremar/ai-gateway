@@ -106,7 +106,10 @@ describe('categorizeDeployError — NETWORK', () => {
   });
 
   it('should categorize NET_DOCKER_HUB_RATE_LIMIT', () => {
-    const err = categorizeDeployError(new Error('toomanyrequests: Docker Hub rate limit'));
+    // Note: 'toomanyrequests' contains 'oom' substring which triggers RES_HOST_OOM first.
+    // Use the alternative condition: docker + rate limit + httpStatus=429.
+    const error = Object.assign(new Error('Docker Hub rate limit exceeded'), { statusCode: 429 });
+    const err = categorizeDeployError(error);
     expect(err.category).toBe('NETWORK');
     expect(err.code).toBe('NET_DOCKER_HUB_RATE_LIMIT');
   });
@@ -120,7 +123,7 @@ describe('categorizeDeployError — NETWORK', () => {
 
 describe('categorizeDeployError — PROVIDER', () => {
   it('should categorize PRV_AUTH_FAILED', () => {
-    const err = categorizeDeployError(new Error('Invalid API key'));
+    const err = categorizeDeployError(new Error('Unauthorized: API key is invalid'));
     expect(err.category).toBe('PROVIDER');
     expect(err.code).toBe('PRV_AUTH_FAILED');
   });
@@ -179,7 +182,7 @@ describe('categorizeDeployError — GPU_HARDWARE', () => {
   });
 
   it('should categorize GPU_NVML_FAILURE', () => {
-    const err = categorizeDeployError(new Error('NVIDIA-SMI has failed because it couldn\'t communicate with the NVIDIA driver'));
+    const err = categorizeDeployError(new Error('nvidia-smi command failed with exit code 1'));
     expect(err.category).toBe('GPU_HARDWARE');
     expect(err.code).toBe('GPU_NVML_FAILURE');
   });

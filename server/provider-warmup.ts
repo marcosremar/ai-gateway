@@ -16,6 +16,7 @@ import { groqAvailable, openaiAvailable, markGpuHealthy, markGpuUnhealthy } from
 import { probeAllCloudProviders, probeGpuHealth } from '../src';
 import type { CloudProbeResult } from '../src';
 import { createLogger } from '../src/logger';
+import { safeCatch } from '../src/safe-catch';
 
 const log = createLogger('provider-warmup');
 
@@ -266,11 +267,10 @@ export function triggerPredictiveWarmup(completedStage: 'stt' | 'llm' | 'tts'): 
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: 'warmup', source_lang: 'en', target_lang: 'fr' }),
       signal: AbortSignal.timeout(15_000),
-    }).catch(() => { /* best-effort */ });
+    }).catch(safeCatch('warmup-gpu-llm'));
   } else if (nextStage === 'tts') {
-    // Warm TTS (reuses existing warmup path)
     warmupGpuTts(endpoint, deployState.gpuType, deployState.dockerImage, deployState.provider)
-      .catch(() => { /* best-effort */ });
+      .catch(safeCatch('warmup-gpu-tts'));
   }
 }
 

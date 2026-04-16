@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initVaultFromEnv, getVault, setVault, resetVault } from '../../src/vault/vault-singleton';
-import { Vault } from '../../src/vault/vault';
-import { FileVaultStore } from '../../src/vault/file-store';
+import { initVaultFromEnv, getVault, setVault, resetVault } from '../src/vault/vault-singleton';
+import { Vault } from '../src/vault/vault';
+import { FileVaultStore } from '../src/vault/file-store';
 import { mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import os from 'os';

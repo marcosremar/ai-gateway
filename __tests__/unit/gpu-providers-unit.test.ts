@@ -6,10 +6,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { RunpodClient, RUNPOD_GPU_FALLBACK, RUNPOD_GPU_TYPE_MAP } from '../../src/gpu-providers/runpod-client';
-import { VastClient } from '../../src/gpu-providers/vast-client';
-import { TensordockClient, GPU_ID_MAP } from '../../src/gpu-providers/tensordock-client';
-import type { ProviderCredentials, InstanceSpec, GpuInstance } from '../../src/gpu-providers/types';
+import { RunpodClient, RUNPOD_GPU_FALLBACK, RUNPOD_GPU_TYPE_MAP } from '../src/gpu-providers/runpod-client';
+import { VastClient } from '../src/gpu-providers/vast-client';
+import { TensordockClient, GPU_ID_MAP } from '../src/gpu-providers/tensordock-client';
+import type { ProviderCredentials, InstanceSpec, GpuInstance } from '../src/gpu-providers/types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

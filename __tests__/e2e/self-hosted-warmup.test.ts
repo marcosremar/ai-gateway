@@ -9,27 +9,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AIClient } from '../../src/client/ai-client';
-import { AIProviderRegistry } from '../../src/providers/registry';
-import type { AIProfile, StageConfig } from '../../src/client/types';
-import type {
-  LLMProvider,
-  ChatRequest,
-  ChatResponse,
-  STTProvider,
-  STTRequest,
-  STTResponse,
-  ModelInfo,
-  ProviderId,
-} from '../../src/providers/types';
-import { runWatchdogCycle } from '../../src/autoscaler/watchdog';
-import type { WatchdogDeps } from '../../src/autoscaler/watchdog';
-import type {
-  AutoScalerConfig,
-  ReadyTierState,
-  GpuTierState,
-  IdleTierState,
-} from '../../src/types';
+import { AIClient } from '../src/client/ai-client';
+import { AIProviderRegistry } from '../src/providers/registry';
+import type { AIProfile, StageConfig } from '../src/client/types';
+import type { LLMProvider, ChatRequest, ChatResponse, STTProvider, STTRequest, STTResponse, ModelInfo, ProviderId } from '../src/providers/types';
+import { runWatchdogCycle } from '../src/autoscaler/watchdog';
+import type { WatchdogDeps } from '../src/autoscaler/watchdog';
+import type { AutoScalerConfig, ReadyTierState, GpuTierState, IdleTierState } from '../src/types';
 
 // ── Mock providers ─────────────────────────────────────────────────────────
 
@@ -37,12 +23,8 @@ class MockLLMProvider implements LLMProvider {
   readonly providerId = 'mock-llm';
   calls = 0;
 
-  isConfigured() {
-    return true;
-  }
-  withApiKey() {
-    return this;
-  }
+  isConfigured() { return true; }
+  withApiKey() { return this; }
 
   async chat(request: ChatRequest): Promise<ChatResponse> {
     this.calls++;
@@ -53,23 +35,15 @@ class MockLLMProvider implements LLMProvider {
 class MockSTTProvider {
   readonly providerId: ProviderId = 'groq';
 
-  isConfigured() {
-    return true;
-  }
-  getModels(): ModelInfo[] {
-    return [];
-  }
+  isConfigured() { return true; }
+  getModels(): ModelInfo[] { return []; }
 
   async transcribe(request: STTRequest): Promise<STTResponse> {
     return { text: 'mock transcription' };
   }
 }
 
-function makeRegistry(): {
-  registry: AIProviderRegistry;
-  llm: MockLLMProvider;
-  stt: MockSTTProvider;
-} {
+function makeRegistry(): { registry: AIProviderRegistry; llm: MockLLMProvider; stt: MockSTTProvider } {
   const registry = new AIProviderRegistry();
   const llm = new MockLLMProvider();
   const stt = new MockSTTProvider();
@@ -120,13 +94,7 @@ describe('AIClient.warmup() — self-hosted', () => {
       registry,
       defaultProfile: {
         llm: [
-          {
-            provider: 'ollama',
-            model: 'llama3.2',
-            selfHosted: true,
-            endpoint: 'http://localhost:11434',
-            alwaysActive: true,
-          },
+          { provider: 'ollama', model: 'llama3.2', selfHosted: true, endpoint: 'http://localhost:11434', alwaysActive: true },
         ],
         stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }],
       },
@@ -152,13 +120,7 @@ describe('AIClient.warmup() — self-hosted', () => {
       defaultProfile: {
         llm: [
           { provider: 'groq', model: 'llama-3.3-70b-versatile', alwaysActive: true },
-          {
-            provider: 'ollama',
-            model: 'llama3.2',
-            selfHosted: true,
-            endpoint: 'http://localhost:11434',
-            alwaysActive: true,
-          },
+          { provider: 'ollama', model: 'llama3.2', selfHosted: true, endpoint: 'http://localhost:11434', alwaysActive: true },
         ],
         stt: [{ provider: 'groq' }],
       },
@@ -182,14 +144,7 @@ describe('AIClient.warmup() — self-hosted', () => {
       registry,
       defaultProfile: {
         llm: [
-          {
-            provider: 'ollama',
-            model: 'llama3.2',
-            selfHosted: true,
-            endpoint: 'http://localhost:11434',
-            alwaysActive: true,
-            replicas: 3,
-          },
+          { provider: 'ollama', model: 'llama3.2', selfHosted: true, endpoint: 'http://localhost:11434', alwaysActive: true, replicas: 3 },
         ],
         stt: [{ provider: 'groq' }],
       },
@@ -198,7 +153,7 @@ describe('AIClient.warmup() — self-hosted', () => {
     const result = await client.warmup();
 
     expect(result.entries).toHaveLength(3);
-    expect(result.entries.every((e) => e.status === 'ok')).toBe(true);
+    expect(result.entries.every(e => e.status === 'ok')).toBe(true);
     // fetch should have been called 3 times (one per replica)
     expect(fetchSpy).toHaveBeenCalledTimes(3);
   });
@@ -212,13 +167,7 @@ describe('AIClient.warmup() — self-hosted', () => {
       registry,
       defaultProfile: {
         llm: [
-          {
-            provider: 'ollama',
-            model: 'llama3.2',
-            selfHosted: true,
-            endpoint: 'http://localhost:11434',
-            alwaysActive: true,
-          },
+          { provider: 'ollama', model: 'llama3.2', selfHosted: true, endpoint: 'http://localhost:11434', alwaysActive: true },
         ],
         stt: [{ provider: 'groq' }],
       },
@@ -239,7 +188,9 @@ describe('AIClient.warmup() — self-hosted', () => {
     const client = new AIClient({
       registry,
       defaultProfile: {
-        llm: [{ provider: 'ollama', model: 'llama3.2', selfHosted: true, alwaysActive: true }],
+        llm: [
+          { provider: 'ollama', model: 'llama3.2', selfHosted: true, alwaysActive: true },
+        ],
         stt: [{ provider: 'groq' }],
       },
       logger,
@@ -272,13 +223,7 @@ describe('AIClient.warmup() — self-hosted', () => {
       registry,
       defaultProfile: {
         llm: [
-          {
-            provider: 'ollama',
-            model: 'llama3.2',
-            selfHosted: true,
-            endpoint: 'http://localhost:11434',
-            alwaysActive: true,
-          },
+          { provider: 'ollama', model: 'llama3.2', selfHosted: true, endpoint: 'http://localhost:11434', alwaysActive: true },
         ],
         stt: [{ provider: 'groq' }],
       },
@@ -310,7 +255,10 @@ describe('AIClient.warmup() — self-hosted', () => {
 
     expect(result.entries).toHaveLength(1);
     expect(result.entries[0].stage).toBe('gpu');
-    expect(fetchSpy).toHaveBeenCalledWith('http://runpod-gpu:8000/health', expect.any(Object));
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://runpod-gpu:8000/health',
+      expect.any(Object),
+    );
   });
 });
 
@@ -324,13 +272,7 @@ describe('buildChain — replica expansion for self-hosted', () => {
       registry,
       defaultProfile: {
         llm: [
-          {
-            provider: 'ollama',
-            model: 'llama3.2',
-            selfHosted: true,
-            alwaysActive: true,
-            replicas: 2,
-          },
+          { provider: 'ollama', model: 'llama3.2', selfHosted: true, alwaysActive: true, replicas: 2 },
           { provider: 'groq', model: 'llama-3.3-70b-versatile' },
         ],
         stt: [{ provider: 'groq' }],
@@ -350,7 +292,9 @@ describe('buildChain — replica expansion for self-hosted', () => {
     const client = new AIClient({
       registry,
       defaultProfile: {
-        llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile', replicas: 3 }],
+        llm: [
+          { provider: 'groq', model: 'llama-3.3-70b-versatile', replicas: 3 },
+        ],
         stt: [{ provider: 'groq' }],
       },
     });
@@ -419,7 +363,9 @@ describe('watchdog — respects alwaysActive on GpuTierConfig', () => {
 
   it('does NOT stop idle tier when alwaysActive is true', async () => {
     const idleMs = 30 * 60_000; // 30 min — well past grace period
-    const stateMap = new Map([['user-1', [makeReadyState(0, idleMs)]]]);
+    const stateMap = new Map([
+      ['user-1', [makeReadyState(0, idleMs)]],
+    ]);
 
     const config: AutoScalerConfig = {
       enabled: true,
@@ -427,7 +373,9 @@ describe('watchdog — respects alwaysActive on GpuTierConfig', () => {
       windowMinutes: 30,
       maxLatencyMs: 1500,
       idleGraceMinutes: 15,
-      tiers: [{ provider: 'runpod', instanceId: 'pod-1', apiKey: 'key-1', alwaysActive: true }],
+      tiers: [
+        { provider: 'runpod', instanceId: 'pod-1', apiKey: 'key-1', alwaysActive: true },
+      ],
     };
 
     const deps = makeDeps(stateMap, config);
@@ -440,7 +388,9 @@ describe('watchdog — respects alwaysActive on GpuTierConfig', () => {
 
   it('DOES stop idle tier when alwaysActive is false/undefined', async () => {
     const idleMs = 30 * 60_000;
-    const stateMap = new Map([['user-1', [makeReadyState(0, idleMs)]]]);
+    const stateMap = new Map([
+      ['user-1', [makeReadyState(0, idleMs)]],
+    ]);
 
     const config: AutoScalerConfig = {
       enabled: true,
@@ -457,15 +407,14 @@ describe('watchdog — respects alwaysActive on GpuTierConfig', () => {
     await runWatchdogCycle(deps);
 
     const client = deps.registry.get('runpod')!;
-    expect(client.stopInstance).toHaveBeenCalledWith(
-      'pod-1',
-      expect.objectContaining({ apiKey: 'key-1' }),
-    );
+    expect(client.stopInstance).toHaveBeenCalledWith('pod-1', expect.objectContaining({ apiKey: 'key-1' }));
   });
 
   it('mixed tiers: stops non-alwaysActive, keeps alwaysActive', async () => {
     const idleMs = 30 * 60_000;
-    const stateMap = new Map([['user-1', [makeReadyState(0, idleMs), makeReadyState(1, idleMs)]]]);
+    const stateMap = new Map([
+      ['user-1', [makeReadyState(0, idleMs), makeReadyState(1, idleMs)]],
+    ]);
 
     const config: AutoScalerConfig = {
       enabled: true,
@@ -485,11 +434,8 @@ describe('watchdog — respects alwaysActive on GpuTierConfig', () => {
     const client = deps.registry.get('runpod')!;
     // Should stop pod-2 but NOT pod-1
     expect(client.stopInstance).toHaveBeenCalledTimes(1);
-    expect(client.stopInstance).toHaveBeenCalledWith(
-      'pod-2',
-      expect.objectContaining({ apiKey: 'key-2' }),
-    );
-    expect(stateMap.get('user-1')![0].state).toBe('ready'); // pod-1 stays ready
-    expect(stateMap.get('user-1')![1].state).toBe('idle'); // pod-2 stopped
+    expect(client.stopInstance).toHaveBeenCalledWith('pod-2', expect.objectContaining({ apiKey: 'key-2' }));
+    expect(stateMap.get('user-1')![0].state).toBe('ready');  // pod-1 stays ready
+    expect(stateMap.get('user-1')![1].state).toBe('idle');   // pod-2 stopped
   });
 });

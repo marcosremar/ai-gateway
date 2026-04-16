@@ -3,7 +3,7 @@ import {
   selectPercentageRoute,
   selectRandomRoute,
   buildPercentageRoutes,
-} from '../../src/providers/percentage-routing';
+} from '../src/providers/percentage-routing';
 
 describe('selectPercentageRoute', () => {
   it('empty routes → null', () => {

@@ -25,8 +25,8 @@ describe('Graceful Shutdown', () => {
     });
 
     it('flushDeploySettings should be exported from deploy-settings', () => {
-      const source = readSource('src/gpu-providers/deploy-settings.ts');
-      expect(source).toContain('export function flushDeploySettings');
+      const source = readSource('src/gateway/providers/gpu/deploy-settings.ts');
+      expect(source).toContain('export async function flushDeploySettings');
     });
 
     it('stopStandbyMonitor should be exported from gpu-standby', () => {

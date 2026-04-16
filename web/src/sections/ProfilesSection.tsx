@@ -17,6 +17,7 @@ import {
 } from './provider-types';
 import { PROVIDER_ICON } from './FallbackChainList';
 import ProfilesPanel from './ProfilesPanel';
+const AppsPanel = ProfilesPanel;
 import {
   uid, profileToStages, stagesToProfileFields, pMeta,
   DEFAULT_STAGES, DEFAULT_LLM,
@@ -168,6 +169,7 @@ export function AppsSection() {
   const [slideService, setSlideService] = useState<Service | null>(null);
 
   const [appName, setAppName] = useState('New App');
+  const [appDescription, setAppDescription] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -202,6 +204,7 @@ export function AppsSection() {
           if (p) {
             setEditingAppId(p.id);
             setAppName(p.name);
+            setAppDescription(p.description ?? '');
             loadApp(p);
           }
         }
@@ -217,12 +220,14 @@ export function AppsSection() {
     setServices([]);
     setEditingAppId(null);
     setAppName('New App');
+    setAppDescription('');
     setView('detail', null);
   };
 
   const onApplyApp = useCallback((profile: App) => {
     setEditingAppId(profile.id);
     setAppName(profile.name);
+    setAppDescription(profile.description ?? '');
     loadApp(profile);
     setView('detail', profile.id);
   }, [setView, loadApp]);
@@ -268,11 +273,11 @@ export function AppsSection() {
         const fields = stagesToProfileFields(stages);
         updatedApps = apps.map(p => {
           if (p.id !== editingAppId) return p;
-          return { ...p, name: currentName.trim(), latency, ...fields, services };
+          return { ...p, name: currentName.trim(), description: appDescription.trim() || undefined, latency, ...fields, services };
         });
         newActiveId = editingAppId;
       } else {
-        const p = createCurrentApp(currentName.trim());
+        const p = { ...createCurrentApp(currentName.trim()), description: appDescription.trim() || undefined };
         updatedApps = [...apps, p];
         newActiveId = p.id;
       }
@@ -363,16 +368,32 @@ export function AppsSection() {
           <ChevronLeft className="w-4 h-4" /> Apps
         </button>
         <span style={{ color: 'var(--color-border)' }}>/</span>
-        <div className="group flex items-center gap-1.5 flex-1 min-w-0">
+        <div className="flex-1 min-w-0">
+          <div className="group flex items-center gap-1.5">
+            <input
+              type="text"
+              value={appName || apps.find(p => p.id === editingAppId)?.name || ''}
+              onChange={e => setAppName(e.target.value)}
+              placeholder="App name..."
+              className="flex-1 min-w-0 text-base font-bold bg-transparent border-none outline-none rounded px-1 -ml-1 transition-colors hover:bg-white/5 focus:bg-white/5"
+              style={{ color: 'var(--color-text)' }}
+            />
+            <Pencil className="w-3 h-3 flex-shrink-0 opacity-0 group-hover:opacity-40 transition-opacity" style={{ color: 'var(--color-text-muted)' }} />
+            {editingAppId && (
+              <code className="text-[10px] font-mono flex-shrink-0 px-1.5 py-0.5 rounded"
+                style={{ background: 'var(--color-surface)', color: 'var(--color-text-muted)', border: '1px solid var(--color-border)' }}>
+                {editingAppId}
+              </code>
+            )}
+          </div>
           <input
             type="text"
-            value={appName || apps.find(p => p.id === editingAppId)?.name || ''}
-            onChange={e => setAppName(e.target.value)}
-            placeholder="App name..."
-            className="flex-1 min-w-0 text-base font-bold bg-transparent border-none outline-none rounded px-1 -ml-1 transition-colors hover:bg-white/5 focus:bg-white/5"
-            style={{ color: 'var(--color-text)' }}
+            value={appDescription}
+            onChange={e => setAppDescription(e.target.value)}
+            placeholder="Description (opcional)..."
+            className="w-full text-xs bg-transparent border-none outline-none rounded px-1 -ml-1 mt-0.5 transition-colors hover:bg-white/5 focus:bg-white/5"
+            style={{ color: 'var(--color-text-muted)' }}
           />
-          <Pencil className="w-3 h-3 flex-shrink-0 opacity-0 group-hover:opacity-40 transition-opacity" style={{ color: 'var(--color-text-muted)' }} />
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <Button variant="primary" onClick={handleSaveAndApply} isLoading={saving} loadingText="Saving...">

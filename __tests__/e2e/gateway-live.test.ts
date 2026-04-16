@@ -14,11 +14,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer } from 'http';
 import type { AddressInfo } from 'net';
-import { loadTestVoiceWav } from '../helpers';
-import { GATEWAY_HANDLERS } from '../mock-fetch';
+import { loadTestVoiceWav } from './helpers';
+import { GATEWAY_HANDLERS } from './mock-fetch';
 
-const GATEWAY_API_KEY =
-  process.env.GATEWAY_API_KEY || 'gw_a7970fa694c2f381390fbd12962a2fe915c8d0a24406b28b';
+const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_a7970fa694c2f381390fbd12962a2fe915c8d0a24406b28b';
 const SKIP = process.env.SKIP_LIVE_TESTS === '1';
 
 // Resolve gateway URL: explicit env var → localhost:4000 → start mock server
@@ -45,16 +44,13 @@ if (!SKIP) {
       for (const route of GATEWAY_HANDLERS) {
         if (route.match(url, method)) {
           const mockRes = route.handle(url);
-          mockRes
-            .text()
-            .then((body) => {
-              res.writeHead(mockRes.status, { 'Content-Type': 'application/json' });
-              res.end(body);
-            })
-            .catch(() => {
-              res.writeHead(500);
-              res.end('{}');
-            });
+          mockRes.text().then((body) => {
+            res.writeHead(mockRes.status, { 'Content-Type': 'application/json' });
+            res.end(body);
+          }).catch(() => {
+            res.writeHead(500);
+            res.end('{}');
+          });
           return;
         }
       }
@@ -79,7 +75,7 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 async function gw<T = Record<string, unknown>>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${GATEWAY_URL}${path}`, {
     ...init,
-    headers: { ...headers(), ...(init?.headers as Record<string, string>) },
+    headers: { ...headers(), ...init?.headers as Record<string, string> },
     signal: AbortSignal.timeout(15_000),
   });
   return res.json() as Promise<T>;
@@ -175,13 +171,7 @@ describe.skipIf(SKIP)('Gateway Live', () => {
       let res = await fetch(`${GATEWAY_URL}/v1/audio/transcriptions`, {
         method: 'POST',
         headers: headers(),
-        body: (() => {
-          const f = new FormData();
-          f.append('file', new Blob([wav], { type: 'audio/wav' }), 'test.wav');
-          f.append('model', 'whisper-large-v3-turbo');
-          f.append('language', 'en');
-          return f;
-        })(),
+        body: (() => { const f = new FormData(); f.append('file', new Blob([wav], { type: 'audio/wav' }), 'test.wav'); f.append('model', 'whisper-large-v3-turbo'); f.append('language', 'en'); return f; })(),
         signal: AbortSignal.timeout(15_000),
       });
 
@@ -195,7 +185,7 @@ describe.skipIf(SKIP)('Gateway Live', () => {
         });
       }
 
-      const d = (await res.json()) as { text?: string };
+      const d = await res.json() as { text?: string };
       expect(typeof d.text).toBe('string');
       expect(d.text!.length).toBeGreaterThan(5);
     });
@@ -211,11 +201,7 @@ describe.skipIf(SKIP)('Gateway Live', () => {
         body: JSON.stringify({
           model: 'llama-3.3-70b-versatile',
           messages: [
-            {
-              role: 'system',
-              content:
-                'Translate the following French text to English. Reply ONLY with the translation.',
-            },
+            { role: 'system', content: 'Translate the following French text to English. Reply ONLY with the translation.' },
             { role: 'user', content: 'Bonjour le monde' },
           ],
           max_tokens: 20,
@@ -238,7 +224,7 @@ describe.skipIf(SKIP)('Gateway Live', () => {
       // serve.ts proxy may not expose /v1/gpu/status — accept both
       expect([200, 404]).toContain(res.status);
       if (res.status === 200) {
-        const d = (await res.json()) as Record<string, unknown>;
+        const d = await res.json() as Record<string, unknown>;
         expect(d.status).toBeDefined();
       }
     });
@@ -254,7 +240,7 @@ describe.skipIf(SKIP)('Gateway Live', () => {
       });
       // Workloads may not be available on proxy — accept both
       if (res.status === 200) {
-        const d = (await res.json()) as { workloads?: unknown[] };
+        const d = await res.json() as { workloads?: unknown[] };
         expect(Array.isArray(d.workloads)).toBe(true);
       } else {
         expect([404, 401]).toContain(res.status);
@@ -272,11 +258,7 @@ describe.skipIf(SKIP)('Gateway Live', () => {
         body: JSON.stringify({
           model: 'llama-3.3-70b-versatile',
           messages: [
-            {
-              role: 'system',
-              content:
-                'You are a subtitle translator. Translate the following French text to English. Reply ONLY with the translation, nothing else.',
-            },
+            { role: 'system', content: 'You are a subtitle translator. Translate the following French text to English. Reply ONLY with the translation, nothing else.' },
             { role: 'user', content: "Bonjour, comment allez-vous aujourd'hui?" },
           ],
           max_tokens: 50,

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { FireworksRerankProvider } from '../../src/providers/rerank/fireworks-rerank';
-import { OpenRouterRerankProvider } from '../../src/providers/rerank/openrouter-rerank';
-import type { RerankRequest } from '../../src/providers/rerank/types';
+import { FireworksRerankProvider } from '../src/providers/rerank/fireworks-rerank';
+import { OpenRouterRerankProvider } from '../src/providers/rerank/openrouter-rerank';
+import type { RerankRequest } from '../src/providers/rerank/types';
 
 describe.each([
   { Provider: FireworksRerankProvider, name: 'FireworksRerankProvider', envKey: 'FIREWORKS_API_KEY', url: 'https://api.fireworks.ai/inference/v1/rerank' },

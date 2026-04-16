@@ -14,7 +14,7 @@ import {
   getSystemSttEntryFromSettings,
   type UserProviderSettings,
   type SavedProfile,
-} from '../../src/providers/chain-builder';
+} from '../src/providers/chain-builder';
 
 const savedEnv: Record<string, string | undefined> = {};
 

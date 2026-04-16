@@ -74,18 +74,18 @@ import {
   setAutoRecoveryMaxRetries,
   flushDeploySettings,
   type GpuSortBy,
-} from '../../src/gpu-providers/deploy-settings';
+} from '../src/gpu-providers/deploy-settings';
 
 describe('deploy-settings', () => {
   describe('DEFAULT_GPU_PRIORITY', () => {
     it('is a non-empty array of strings', () => {
       expect(DEFAULT_GPU_PRIORITY).toBeInstanceOf(Array);
       expect(DEFAULT_GPU_PRIORITY.length).toBeGreaterThan(0);
-      expect(DEFAULT_GPU_PRIORITY.every((g) => typeof g === 'string')).toBe(true);
+      expect(DEFAULT_GPU_PRIORITY.every(g => typeof g === 'string')).toBe(true);
     });
 
     it('includes RTX 4090', () => {
-      expect(DEFAULT_GPU_PRIORITY.some((g) => g.includes('4090'))).toBe(true);
+      expect(DEFAULT_GPU_PRIORITY.some(g => g.includes('4090'))).toBe(true);
     });
 
     it('getDefaultGpuPriority returns a copy (not reference)', () => {

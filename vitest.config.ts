@@ -19,6 +19,28 @@ export default defineConfig({
       { find: './gpu-deploy', replacement: path.resolve(root, 'server/gpu-deploy.ts') },
       { find: './deployment-state-machine', replacement: path.resolve(root, 'server/deployment-state-machine.ts') },
 
+      // ── Test path fixes (tests in subdirs need extra ../ to reach project root) ─
+      // ./helpers, ./mock-fetch, ./test-config from any __tests__ subdirectory → __tests__/*.ts
+      { find: /^\.\/helpers$/, replacement: tests('helpers.ts') },
+      { find: /^\.\/mock-fetch$/, replacement: tests('mock-fetch.ts') },
+      { find: /^\.\/test-config$/, replacement: tests('test-config.ts') },
+      // Specific moved-path aliases must come BEFORE the general ../src/* catch-all
+      { find: /^\.\.\/src\/providers\/openai-compat\/openai-compat-llm$/, replacement: src('gateway/providers/cloud/openai-compat/openai-compat-llm.ts') },
+      // ../src/X from __tests__/integration/ or __tests__/unit/ → src/X
+      // (../src/ from __tests__/sub/ resolves to __tests__/src/ which doesn't exist)
+      { find: /^\.\.\/src\/(.*)$/, replacement: src('$1') },
+      // ../../src/X from deeper nesting
+      { find: /^\.\.\/\.\.\/src\/(.*)$/, replacement: src('$1') },
+      // __tests__/server/X → server/X (dynamic imports from integration tests)
+      { find: /^\/__tests__\/server\/(.*)$/, replacement: path.resolve(root, 'server/$1') },
+      // __tests__/src/X → src/X
+      { find: /^\/__tests__\/src\/(.*)$/, replacement: src('$1') },
+      // providers/openai-compat/openai-compat-llm moved to gateway/providers/cloud/
+      { find: /^(\.\.\/)+(src\/)?providers\/openai-compat\/openai-compat-llm$/, replacement: src('gateway/providers/cloud/openai-compat/openai-compat-llm.ts') },
+      // providers/modal → gpu-providers/modal-client (re-export exists at providers/modal/index.ts)
+      // providers/openai/openai-stt
+      { find: /^(\.\.\/)+(src\/)?providers\/openai\/openai-stt$/, replacement: src('providers/openai/openai-stt.ts') },
+
       // ── src/ path reorganizations (DDD migration) ──────────────────────
       { find: /^(\.\.\/)+(src\/)?observability\/console-hooks$/, replacement: src('platform/observability/console-hooks.ts') },
       { find: /^(\.\.\/)+(src\/)?observability\/webhook-hooks$/, replacement: src('platform/observability/webhook-hooks.ts') },

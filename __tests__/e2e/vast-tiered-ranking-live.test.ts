@@ -11,9 +11,9 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { VastClient } from '../../src/gpu-providers/vast-client';
-import type { ProviderCredentials, GpuInstance } from '../../src/gpu-providers/types';
-import { loadEnv } from '../helpers';
+import { VastClient } from '../src/gpu-providers/vast-client';
+import type { ProviderCredentials, GpuInstance } from '../src/gpu-providers/types';
+import { loadEnv } from './helpers';
 
 describe('Tiered ranking — live API', () => {
   let client: VastClient;
@@ -34,9 +34,7 @@ describe('Tiered ranking — live API', () => {
   afterAll(async () => {
     if (createdInstance) {
       console.log(`  Cleanup: destroying ${createdInstance.instanceId}...`);
-      try {
-        await client.deleteInstance(createdInstance.instanceId, creds);
-      } catch {}
+      try { await client.deleteInstance(createdInstance.instanceId, creds); } catch {}
     }
   });
 
@@ -49,9 +47,7 @@ describe('Tiered ranking — live API', () => {
     expect(offers.length).toBeGreaterThan(0);
 
     for (const o of offers.slice(0, 5)) {
-      console.log(
-        `  ${o.gpuType}: $${o.pricePerHr.toFixed(3)}/hr, ${o.available} avail, ${o.inetDown ?? '?'} Mbps, ${o.region}`,
-      );
+      console.log(`  ${o.gpuType}: $${o.pricePerHr.toFixed(3)}/hr, ${o.available} avail, ${o.inetDown ?? '?'} Mbps, ${o.region}`);
     }
   });
 
@@ -77,9 +73,7 @@ describe('Tiered ranking — live API', () => {
     console.log(`  GPU:      ${instance.gpuType}`);
     console.log(`  Endpoint: ${instance.endpoint || '(pending)'}`);
     console.log(`  IP:       ${instance.ipAddress || 'N/A'}`);
-    console.log(
-      `  SSH:      ${instance.sshHost ? `${instance.sshHost}:${instance.sshPort}` : 'N/A'}`,
-    );
+    console.log(`  SSH:      ${instance.sshHost ? `${instance.sshHost}:${instance.sshPort}` : 'N/A'}`);
 
     const meta = instance.providerMeta as Record<string, unknown> | undefined;
     if (meta) {

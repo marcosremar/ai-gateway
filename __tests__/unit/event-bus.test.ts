@@ -2,93 +2,93 @@
  * Tests for event-bus module.
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { EventBus, EVENTS } from '../../src/event-bus';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { eventBus, EVENTS } from '../../src/events';
 
 describe('EventBus', () => {
+  beforeEach(() => {
+    // Clear all handlers and history between tests
+    eventBus.offAll();
+    eventBus.clearHistory();
+    eventBus.resume(); // ensure not paused from previous test
+  });
+
   it('should deliver events to subscribers', async () => {
-    const bus = new EventBus();
     const handler = vi.fn();
 
-    bus.on('test.event', handler);
-    await bus.emit('test.event', { data: 'value' });
+    eventBus.on('test.event', handler);
+    await eventBus.emit('test.event', { data: 'value' });
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith({ data: 'value' }, expect.any(String));
   });
 
   it('should deliver to multiple handlers', async () => {
-    const bus = new EventBus();
     const h1 = vi.fn();
     const h2 = vi.fn();
 
-    bus.on('test.event', h1);
-    bus.on('test.event', h2);
-    await bus.emit('test.event', {});
+    eventBus.on('test.event', h1);
+    eventBus.on('test.event', h2);
+    await eventBus.emit('test.event', {});
 
     expect(h1).toHaveBeenCalledTimes(1);
     expect(h2).toHaveBeenCalledTimes(1);
   });
 
   it('should unsubscribe handlers', async () => {
-    const bus = new EventBus();
     const handler = vi.fn();
 
-    bus.on('test.event', handler);
-    bus.off('test.event', handler);
-    await bus.emit('test.event', {});
+    eventBus.on('test.event', handler);
+    eventBus.off('test.event', handler);
+    await eventBus.emit('test.event', {});
 
     expect(handler).not.toHaveBeenCalled();
   });
 
   it('should fire once handlers', async () => {
-    const bus = new EventBus();
     const handler = vi.fn();
 
-    bus.once('test.event', handler);
-    await bus.emit('test.event', {});
-    await bus.emit('test.event', {});
+    eventBus.once('test.event', handler);
+    await eventBus.emit('test.event', {});
+    await eventBus.emit('test.event', {});
 
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
   it('should store history', async () => {
-    const bus = new EventBus();
-    await bus.emit('test.event', { value: 1 });
-    await bus.emit('test.event', { value: 2 });
+    await eventBus.emit('test.event', { value: 1 });
+    await eventBus.emit('test.event', { value: 2 });
 
-    const history = bus.getHistory('test.event');
+    const history = eventBus.getHistory('test.event');
     expect(history.length).toBe(2);
   });
 
   it('should limit history size', async () => {
-    const bus = new EventBus();
     for (let i = 0; i < 100; i++) {
-      await bus.emit('test.event', { i });
+      await eventBus.emit('test.event', { i });
     }
 
-    expect(bus.getHistory('test.event').length).toBeLessThanOrEqual(100);
+    expect(eventBus.getHistory('test.event').length).toBeLessThanOrEqual(100);
   });
 
   it('should pause/resume events', async () => {
-    const bus = new EventBus();
     const handler = vi.fn();
 
-    bus.on('test.event', handler);
-    bus.pause();
-    await bus.emit('test.event', {});
+    eventBus.on('test.event', handler);
+    eventBus.pause();
+    await eventBus.emit('test.event', {});
     expect(handler).not.toHaveBeenCalled();
 
-    bus.resume();
-    await bus.emit('test.event', {});
+    eventBus.resume();
+    await eventBus.emit('test.event', {});
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
   it('should report stats', async () => {
-    const bus = new EventBus();
-    await bus.emit('test.event', {});
+    eventBus.on('test.event', vi.fn());
+    await eventBus.emit('test.event', {});
 
-    const stats = bus.getStats();
+    const stats = eventBus.getStats();
     expect(stats.eventTypes).toBeGreaterThanOrEqual(1);
   });
 });

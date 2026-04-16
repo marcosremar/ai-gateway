@@ -32,6 +32,7 @@ import { recordHostCrash } from './metrics';
 import { broadcastProviderStatus, broadcastWs } from './ws-state';
 import { emitGatewayEvent } from './event-bus';
 import { GPU_MONITOR_INTERVAL_MS, parseAndStoreGpuMetrics } from './gpu-health-metrics';
+import { checkIdleAction, shouldResetIdleFromHealth, adaptiveMonitorDelay, computeAdaptiveIdleTimeout } from './gpu-idle-logic';
 import { stopWarmthMonitor } from './gpu-warmth-monitor';
 
 const log = createLogger('gpu-deploy');
@@ -152,14 +153,15 @@ export function scheduleNextMonitorProbe() {
         monitorBackoffMaxAlerted = false;
         // If health data indicates active training/work, treat as "not idle"
         // (prevents idle timeout from killing fine-tuning or long-running jobs)
-        // Also: model_loaded=false means the pod is actively initializing (e.g. downloading
-        // a 28GB model from HuggingFace) — keep the idle timer fresh so it doesn't get
-        // auto-stopped before it can serve requests.
-        if (probeResult.data && (
-          (probeResult.data as Record<string, unknown>).training ||
-          (probeResult.data as Record<string, unknown>).model_loaded === false
-        )) {
-          setLastRequestTime(Date.now());
+        // Compute effective timeout for health-based idle check (same context as idle check below)
+        const healthCheckTimeout = computeAdaptiveIdleTimeout({
+          lastBootDurationMs: deployState.deployDurationMs || 0,
+          avgBootTimeS: (deployState.providerMeta as Record<string, unknown>)?.avgBootTimeS as number || 0,
+          dockerImage: deployState.dockerImage || '',
+          isBooting: false,
+        });
+        if (shouldResetIdleFromHealth(probeResult.data as Record<string, unknown>, deployState.gpuUtil, healthCheckTimeout)) {
+          setLastModelRequestTime(Date.now());
         }
       } else {
         monitorConsecFails++;
@@ -363,30 +365,28 @@ export function scheduleNextMonitorProbe() {
         }
       }
 
-      // Idle check — only model requests (STT/LLM/TTS/pipeline) count, not status polls
-      const _idleBase = lastModelRequestTime > 0 ? lastModelRequestTime : lastRequestTime;
-      if (_idleBase > 0) {
-        const idleMs = Date.now() - _idleBase;
-        if (idleMs >= IDLE_TIMEOUT_MS) {
-          const idleMin = Math.round(idleMs / 60_000);
-          log.log(`[gpu] Idle ${idleMin} min (no model requests) — auto-stopping (pausing) to save costs`);
-          broadcastWs({ type: 'gpu:idle', deployId: deployState.deployId, idleMs, timeoutMs: IDLE_TIMEOUT_MS, action: 'stop' });
-          const { autoStopGpu } = await import('./gpu-idle-manager');
-          await autoStopGpu();
-          return;
-        }
-        // Warn at 75% of idle timeout (gives user chance to send a request)
-        if (idleMs >= IDLE_TIMEOUT_MS * 0.75 && !idleWarned) {
-          idleWarned = true;
-          const remainingSec = Math.round((IDLE_TIMEOUT_MS - idleMs) / 1000);
-          log.log(`[gpu] Idle warning: ${remainingSec}s until auto-terminate`);
-          broadcastWs({ type: 'gpu:idle', deployId: deployState.deployId, idleMs, timeoutMs: IDLE_TIMEOUT_MS, action: 'warning', remainingSec });
-        }
-        // Adaptive monitor frequency during idle: slow down polling to save overhead
-        if (idleMs > 60_000 && monitorDelayMs < 60_000) {
-          monitorDelayMs = 60_000; // idle > 1min → check every 60s instead of 30s
-        }
+      // Idle check — compute adaptive timeout based on boot cost + history
+      const effectiveTimeout = computeAdaptiveIdleTimeout({
+        lastBootDurationMs: deployState.deployDurationMs || 0,
+        avgBootTimeS: (deployState.providerMeta as Record<string, unknown>)?.avgBootTimeS as number || 0,
+        dockerImage: deployState.dockerImage || '',
+        isBooting: false, // we're in ready state here
+      });
+      const idleResult = checkIdleAction(lastModelRequestTime, lastRequestTime, Date.now(), effectiveTimeout, idleWarned);
+      if (idleResult.action === 'stop') {
+        log.log(`[gpu] Idle ${idleResult.idleMin} min (timeout=${Math.round(effectiveTimeout / 60_000)}min, boot=${Math.round((deployState.deployDurationMs || 0) / 1000)}s) — auto-stopping`);
+        broadcastWs({ type: 'gpu:idle', deployId: deployState.deployId, idleMs: idleResult.idleMs, timeoutMs: effectiveTimeout, action: 'stop' });
+        const { autoStopGpu } = await import('./gpu-idle-manager');
+        await autoStopGpu();
+        return;
+      } else if (idleResult.action === 'warning') {
+        idleWarned = true;
+        log.log(`[gpu] Idle warning: ${idleResult.remainingSec}s until auto-terminate`);
+        broadcastWs({ type: 'gpu:idle', deployId: deployState.deployId, idleMs: idleResult.idleMs, timeoutMs: effectiveTimeout, action: 'warning', remainingSec: idleResult.remainingSec });
       }
+      // Adaptive monitor frequency during idle
+      const idleMs = idleResult.action !== 'none' ? idleResult.idleMs : (Math.max(lastModelRequestTime, lastRequestTime) > 0 ? Date.now() - Math.max(lastModelRequestTime, lastRequestTime) : 0);
+      monitorDelayMs = adaptiveMonitorDelay(idleMs, monitorDelayMs, GPU_MONITOR_INTERVAL_MS);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(`[gpu] Monitor probe failed (provider=${activeProvider}, pod=${deployState.podId}): ${msg}`);

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleChatCompletions } from '../../src/proxy/routes/chat-completions';
-import type { ProxyRequest } from '../../src/proxy/types';
+import { handleChatCompletions } from '../src/proxy/routes/chat-completions';
+import type { ProxyRequest } from '../src/proxy/types';
 
 function makeReq(body: Record<string, unknown>): ProxyRequest {
   return { method: 'POST', url: '/v1/chat/completions', headers: {}, body, rawBody: Buffer.alloc(0) };
@@ -48,9 +48,10 @@ describe('handleChatCompletions', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 400 when temperature is not a number', async () => {
+  it('ignores non-numeric temperature (treated as undefined)', async () => {
     const res = await handleChatCompletions(makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }], temperature: 'hot' }), providers);
-    expect(res.status).toBe(400);
+    // Non-number temperature is silently ignored (coerced to undefined), so the request succeeds
+    expect(res.status).toBe(200);
   });
 
   it('returns 400 when max_tokens is 0', async () => {

@@ -3,6 +3,7 @@ import type { GpuProviderClient, GpuOffer, ListOffersOptions, ProviderCredential
 import { prisma } from './state';
 import { runpod, vast, tensordock, modal } from './providers';
 import { getOrCreateRequestId, setRequestIdHeader, validateGpuCredentials } from './http-utils';
+import { safeCatch } from '../src/safe-catch';
 import { PORT, LOW_BALANCE_THRESHOLD_USD } from './config';
 import { fetchMyLocation } from './ip-location';
 import { rankOffers, scheduleBackgroundProbes, probeAndSaveOffers } from './gpu-latency';
@@ -388,7 +389,7 @@ export async function handleGpuOffersRanked(req: IncomingMessage, res: ServerRes
         gpuName:     offer.gpuName     ?? '',
         geolocation: offer.geolocation ?? '',
         priceUsd:    offer.pricePerHr  ?? 0,
-      }).catch(() => {});
+      }).catch(safeCatch('save-offer-latency'));
     }
   }
 

@@ -17,14 +17,11 @@ import { execSync, type ExecSyncOptions } from 'child_process';
 import { existsSync, unlinkSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
 
-const SKIP = process.env.SKIP_CLI_TESTS === '1';
+const SKIP = process.env.SKIP_CLI_TESTS === '1' || !process.env.AI_GATEWAY_KEY;
 const CLI = resolve(__dirname, '..', 'bin', 'ai-gateway.ts');
 const TIMEOUT = 30_000;
 
-function cli(
-  args: string,
-  opts?: { env?: Record<string, string>; timeout?: number },
-): { stdout: string; exitCode: number } {
+function cli(args: string, opts?: { env?: Record<string, string>; timeout?: number }): { stdout: string; exitCode: number } {
   const env = {
     ...process.env,
     AI_GATEWAY_URL: process.env.AI_GATEWAY_URL || 'https://parle-ai-gateway.fly.dev',
@@ -67,24 +64,9 @@ describe.skipIf(SKIP)('CLI — help system', () => {
     expect(r.stdout).toContain('Commands:');
   });
 
-  const commands = [
-    'chat',
-    'transcribe',
-    'tts',
-    'image',
-    'gpu',
-    'metrics',
-    'health',
-    'models',
-    'translate',
-    'voices',
-    'config',
-    'whoami',
-    'ping',
-    'benchmark',
-    'latency',
-    'server',
-  ];
+  const commands = ['chat', 'transcribe', 'tts', 'image', 'gpu', 'metrics',
+    'health', 'models', 'translate', 'voices', 'config', 'whoami', 'ping',
+    'benchmark', 'latency', 'server'];
 
   for (const cmd of commands) {
     it(`shows help for '${cmd}'`, () => {
@@ -246,11 +228,7 @@ describe.skipIf(SKIP)('CLI — TTS', () => {
   const outPath = '/tmp/cli-test-tts.wav';
 
   afterAll(() => {
-    try {
-      unlinkSync(outPath);
-    } catch {
-      /* ok */
-    }
+    try { unlinkSync(outPath); } catch { /* ok */ }
   });
 
   it('generates audio file', () => {
@@ -282,11 +260,7 @@ describe.skipIf(SKIP)('CLI — image', () => {
   const outPath = '/tmp/cli-test-img.jpg';
 
   afterAll(() => {
-    try {
-      unlinkSync(outPath);
-    } catch {
-      /* ok */
-    }
+    try { unlinkSync(outPath); } catch { /* ok */ }
   });
 
   it('generates an image', () => {

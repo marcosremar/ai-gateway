@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { withProxyRetry } from '../../src/proxy/routes/retry';
+import { withProxyRetry } from '../src/proxy/routes/retry';
 
 function makeError(status: number, message?: string): Error {
   const err = new Error(message ?? `HTTP ${status}`);

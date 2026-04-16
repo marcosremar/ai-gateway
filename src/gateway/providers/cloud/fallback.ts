@@ -593,7 +593,6 @@ export async function withProviderFallback<T>(
                 `${entry.provider}/${upgradedModel}`,
               );
               iterChain.splice(i + 1, 0, upgradeEntry);
-              i--; // process the inserted entry on next iteration
             }
           }
           break; // stop retrying this entry, move to next in iterChain

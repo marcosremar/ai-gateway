@@ -3,7 +3,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { featureFlags, defineStandardFlags, EVENTS } from '../../src/feature-flags';
+import { featureFlags, defineStandardFlags } from '../../src/feature-flags';
+import { EVENTS } from '../../src/events';
 
 describe('Feature Flags', () => {
   it('should define and check flags', () => {

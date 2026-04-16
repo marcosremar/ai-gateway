@@ -20,9 +20,12 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { VastClient } from '../../src/gpu-providers/vast-client';
-import type { ProviderCredentials, GpuInstance } from '../../src/gpu-providers/types';
-import { loadEnv, timed, waitFor, checkHealth, testTextPipeline } from '../helpers';
+import { VastClient } from '../src/gpu-providers/vast-client';
+import type { ProviderCredentials, GpuInstance } from '../src/gpu-providers/types';
+import {
+  loadEnv, timed, waitFor,
+  checkHealth, testTextPipeline,
+} from './helpers';
 
 const ULTRALIGHT_IMAGE = 'marcosremar/parle-s2s-ultralight:latest';
 
@@ -75,27 +78,20 @@ describe.skipIf(!hasVastKeys)('Vast.ai Offers — Real API', () => {
 
     console.log(`  SEARCH RTX 3090: ${offers.length} offer(s) (${ms}ms)`);
     for (const o of offers) {
-      console.log(
-        `    $${o.pricePerHr.toFixed(3)}/h — ${o.gpuType}, ${o.vram}GB VRAM, region: ${o.region}`,
-      );
+      console.log(`    $${o.pricePerHr.toFixed(3)}/h — ${o.gpuType}, ${o.vram}GB VRAM, region: ${o.region}`);
     }
   });
 
   it('Step 1b: listOffers with multiple GPU types returns results', async () => {
     const { result: offers, ms } = await timed(() =>
-      client.listOffers(
-        { gpuTypes: ['RTX 4090', 'RTX 3090', 'A40', 'RTX A5000'], limit: 10 },
-        creds,
-      ),
+      client.listOffers({ gpuTypes: ['RTX 4090', 'RTX 3090', 'A40', 'RTX A5000'], limit: 10 }, creds),
     );
 
     expect(Array.isArray(offers)).toBe(true);
     expect(offers.length).toBeGreaterThan(0);
 
     const gpuTypes = new Set(offers.map((o) => o.gpuType));
-    console.log(
-      `  MULTI-GPU: ${offers.length} offer(s) (${ms}ms), GPU types: ${[...gpuTypes].join(', ')}`,
-    );
+    console.log(`  MULTI-GPU: ${offers.length} offer(s) (${ms}ms), GPU types: ${[...gpuTypes].join(', ')}`);
   });
 });
 
@@ -166,17 +162,16 @@ describe.skipIf(!hasVastKeys)('Vast.ai Lifecycle — Ultralight Inference', () =
     expect(Array.isArray(instances)).toBe(true);
 
     const rawId = createdInstance!.instanceId.replace(/^inst-/, '').replace(/^endpt-/, '');
-    const ourInstance = instances.find(
-      (i) => i.instanceId === createdInstance!.instanceId || i.instanceId.includes(rawId),
+    const ourInstance = instances.find((i) =>
+      i.instanceId === createdInstance!.instanceId ||
+      i.instanceId.includes(rawId),
     );
     expect(ourInstance).toBeDefined();
 
     console.log(`  LIST: ${instances.length} instance(s), ours found (${ms}ms)`);
     for (const inst of instances) {
       const prefix = inst.instanceId.startsWith('endpt-') ? 'endpoint' : 'instance';
-      console.log(
-        `    ${prefix}: ${inst.instanceId} — ${inst.status} — ${inst.gpuType || 'unknown'} — ${inst.endpoint || '(pending)'}`,
-      );
+      console.log(`    ${prefix}: ${inst.instanceId} — ${inst.status} — ${inst.gpuType || 'unknown'} — ${inst.endpoint || '(pending)'}`);
     }
   }, 15_000);
 
@@ -196,9 +191,7 @@ describe.skipIf(!hasVastKeys)('Vast.ai Lifecycle — Ultralight Inference', () =
     );
 
     const elapsed = Date.now() - start;
-    console.log(
-      `  RUNNING: instance ready in ${(elapsed / 1000).toFixed(1)}s (status: ${finalStatus})`,
-    );
+    console.log(`  RUNNING: instance ready in ${(elapsed / 1000).toFixed(1)}s (status: ${finalStatus})`);
 
     // Re-resolve endpoint after boot
     const endpoint = await client.resolveInstanceEndpoint!(createdInstance!.instanceId, creds);
@@ -221,20 +214,18 @@ describe.skipIf(!hasVastKeys)('Vast.ai Lifecycle — Ultralight Inference', () =
     // Try health check first
     const health = await checkHealth(endpoint);
     if (!health.ok) {
-      console.log(
-        `  INFERENCE: SKIPPED — /health unreachable (expected: Vast.ai SSH proxy blocks HTTP)`,
-      );
+      console.log(`  INFERENCE: SKIPPED — /health unreachable (expected: Vast.ai SSH proxy blocks HTTP)`);
       console.log(`    This is a known limitation of Vast.ai on-demand instances.`);
-      console.log(
-        `    API lifecycle tests (create/list/delete) still verify provider functionality.`,
-      );
+      console.log(`    API lifecycle tests (create/list/delete) still verify provider functionality.`);
       return;
     }
 
     console.log(`  HEALTH: ${JSON.stringify(health.data)}`);
 
     // If health works, try full inference!
-    const { result, ms } = await timed(() => testTextPipeline(endpoint, 'Olá, como você está?'));
+    const { result, ms } = await timed(() =>
+      testTextPipeline(endpoint, 'Olá, como você está?'),
+    );
 
     if (result.ok) {
       console.log(`  TEXT PIPELINE (${ms}ms):`);
@@ -252,8 +243,9 @@ describe.skipIf(!hasVastKeys)('Vast.ai Lifecycle — Ultralight Inference', () =
 
     const instances = await client.listInstances(creds);
     const rawId = createdInstance!.instanceId.replace(/^inst-/, '');
-    const ourInstance = instances.find(
-      (i) => i.instanceId === createdInstance!.instanceId || i.instanceId.includes(rawId),
+    const ourInstance = instances.find((i) =>
+      i.instanceId === createdInstance!.instanceId ||
+      i.instanceId.includes(rawId),
     );
 
     expect(ourInstance).toBeDefined();
@@ -269,7 +261,9 @@ describe.skipIf(!hasVastKeys)('Vast.ai Lifecycle — Ultralight Inference', () =
     expect(createdInstance).not.toBeNull();
     const instanceId = createdInstance!.instanceId;
 
-    const { ms } = await timed(() => client.deleteInstance(instanceId, creds));
+    const { ms } = await timed(() =>
+      client.deleteInstance(instanceId, creds),
+    );
     createdInstance = null; // Don't cleanup in afterAll
 
     // No sleep — Vast.ai returns null immediately for deleted instances.
@@ -308,9 +302,7 @@ describe.skipIf(!hasVastKeys)('Vast.ai — Edge Cases', () => {
     if (instance !== null) {
       expect(instance.status).toBeDefined();
       expect(instance.instanceId).toBeTruthy();
-      console.log(
-        `  discoverInstance: found non-matching instance ${instance.instanceId} (${instance.status})`,
-      );
+      console.log(`  discoverInstance: found non-matching instance ${instance.instanceId} (${instance.status})`);
     }
   });
 });

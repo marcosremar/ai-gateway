@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { StreamingOverlap, type OverlapStats } from '../../server/streaming-overlap';
+import { StreamingOverlap, type OverlapStats } from '../server/streaming-overlap';
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -384,7 +384,7 @@ describe('StreamingOverlap', () => {
       );
 
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[overlap] TTS chunk 0 failed'),
+        expect.stringContaining('TTS chunk 0 failed'),
       );
 
       warnSpy.mockRestore();

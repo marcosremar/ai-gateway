@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { StreamingAudioPlayer } from '../../src/browser/streaming-audio';
+import { StreamingAudioPlayer } from '../src/browser/streaming-audio';
 
 // ── Web Audio API Mock ────────────────────────────────────────────────────────
 

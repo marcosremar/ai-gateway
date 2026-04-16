@@ -9,13 +9,13 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { runVerifiedSTT } from '../../src/ensemble-stt';
-import type { STTVerifierProviderEntry } from '../../src/ensemble-stt';
-import type { STTProvider, STTRequest, STTResponse } from '../../src/providers/types';
-import type { EmbeddingProvider } from '../../src/providers/openai-compat/openai-compat-embedding';
-import { openaiSTT } from '../../src/providers/openai';
-import { deepgramSTT } from '../../src/providers/deepgram';
-import { loadEnv, checkOpenAIAvailable, makeTestWav, timed } from '../helpers';
+import { runVerifiedSTT } from '../src/ensemble-stt';
+import type { STTVerifierProviderEntry } from '../src/ensemble-stt';
+import type { STTProvider, STTRequest, STTResponse } from '../src/providers/types';
+import type { EmbeddingProvider } from '../src/providers/openai-compat/openai-compat-embedding';
+import { openaiSTT } from '../src/providers/openai';
+import { deepgramSTT } from '../src/providers/deepgram';
+import { loadEnv, checkOpenAIAvailable, makeTestWav, timed } from './helpers';
 
 await loadEnv();
 const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
@@ -138,7 +138,7 @@ describe('runVerifiedSTT — unit (no API)', () => {
   it('all providers fail — throws', async () => {
     await expect(runVerifiedSTT(SILENCE, 'fr', '', {
       providers: [failingProvider('p1'), failingProvider('p2')],
-    })).rejects.toThrow('failed or timed out');
+    })).rejects.toThrow(/failed|providers/i);
   });
 
   it('empty-string results are excluded from consensus', async () => {

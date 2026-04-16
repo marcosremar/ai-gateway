@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { ProviderClassification } from '../../src/providers/classification';
+import { ProviderClassification } from '../src/providers/classification';
 
 describe('ProviderClassification', () => {
   describe('cloud providers', () => {

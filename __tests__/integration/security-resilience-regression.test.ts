@@ -777,35 +777,35 @@ describe('Language detection module', () => {
 
 describe('Smoke: Module imports', () => {
   it('#865 server/state.ts imports without error', async () => {
-    const mod = await import('../../server/state');
+    const mod = await import('../server/state');
     expect(mod.deployState).toBeDefined();
     expect(mod.setDeployState).toBeInstanceOf(Function);
   });
 
   it('#866 server/deployment-state-machine.ts imports', async () => {
-    const mod = await import('../../server/deployment-state-machine');
+    const mod = await import('../server/deployment-state-machine');
     expect(mod.DeploymentStateMachine).toBeDefined();
     expect(mod.deploymentSM).toBeDefined();
   });
 
   it('#870 src/workloads/registry.ts imports', async () => {
-    const mod = await import('../../src/workloads/registry');
+    const mod = await import('../src/workloads/registry');
     expect(mod.WorkloadRegistry).toBeDefined();
     expect(mod.workloadRegistry).toBeDefined();
   });
 
   it('#871 src/workloads/types.ts exports types', async () => {
-    const mod = await import('../../src/workloads/types');
+    const mod = await import('../src/workloads/types');
     expect(mod).toBeDefined();
   });
 
   it('#990 src/vault/vault.ts imports', async () => {
-    const mod = await import('../../src/vault/vault');
+    const mod = await import('../src/vault/vault');
     expect(mod.Vault).toBeDefined();
   });
 
   it('#991 src/auth/gpu-token.ts imports', async () => {
-    const mod = await import('../../src/auth/gpu-token');
+    const mod = await import('../src/auth/gpu-token');
     expect(mod.signGpuToken).toBeInstanceOf(Function);
     expect(mod.verifyGpuToken).toBeInstanceOf(Function);
   });

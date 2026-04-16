@@ -13,12 +13,14 @@ import {
   deployState, setDeployState, deployApiKey, deployVastApiKey,
   deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey,
   resetDeployState, deploymentSM,
+  setGpuHealthy, setLastRequestTime,
 } from './state';
 import { runpod, vast, tensordock, modal } from './providers';
 import { logGpuEvent } from './metrics';
-import { broadcastWs } from './ws-state';
+import { broadcastWs, broadcastProviderStatus } from './ws-state';
 import { startGpuMonitoring } from './gpu-monitor-loop';
 import { clearAutoDestroyTimer } from './gpu-destroy-timer';
+import { probeGpuHealth } from '../src/autoscaler/health';
 
 const log = createLogger('gpu-deploy');
 
@@ -80,18 +82,51 @@ export async function resumeOrDeploy(opts: {
     if (!endpoint) endpoint = deployState.endpoint; // fallback to last known
 
     // Transition to booting
+    const resumeStartedAt = Date.now();
     setDeployState({
       status: 'booting',
       podId,
       endpoint,
       provider,
       message: 'Pod resumed — waiting for health check',
-      startedAt: Date.now(),
+      startedAt: resumeStartedAt,
     });
     deploymentSM.startBooting(podId);
-    startGpuMonitoring();
     logGpuEvent('instance_resumed', provider, true, { metadata: { podId, reason: opts.reason } });
     broadcastWs({ type: 'gpu:resume', action: 'success', deployId: deployState.deployId, podId, provider });
+
+    // Poll health until ready (resumed pods typically boot in ~19s)
+    const RESUME_TIMEOUT_MS = 120_000; // 2 min max for resume
+    const RESUME_POLL_INTERVAL_MS = 3_000;
+    let healthy = false;
+    while (Date.now() - resumeStartedAt < RESUME_TIMEOUT_MS) {
+      const probe = await probeGpuHealth(endpoint, true);
+      if (probe.ok) {
+        healthy = true;
+        break;
+      }
+      const elapsedS = Math.round((Date.now() - resumeStartedAt) / 1000);
+      setDeployState({ message: `Pod resumed — waiting for health (${elapsedS}s)` });
+      await new Promise(r => setTimeout(r, RESUME_POLL_INTERVAL_MS));
+    }
+
+    if (!healthy) {
+      log.warn(`[gpu] Resume health timeout after ${Math.round(RESUME_TIMEOUT_MS / 1000)}s — falling back to fresh deploy`);
+      throw new Error(`Resume health check timed out after ${Math.round(RESUME_TIMEOUT_MS / 1000)}s`);
+    }
+
+    // Transition to ready — idle timer starts NOW
+    const durationMs = Date.now() - resumeStartedAt;
+    setGpuHealthy(true);
+    setLastRequestTime(Date.now());
+    setDeployState({
+      status: 'ready',
+      message: `GPU ready (resumed in ${Math.round(durationMs / 1000)}s): ${endpoint}`,
+      step: 'ready', stepDetail: '', deployDurationMs: durationMs,
+    });
+    broadcastProviderStatus('booting', 'cloud', 'GPU resumed — warming up models');
+    deploymentSM.markReady(podId, endpoint, deployState.gpuType, deployState.costPerHr);
+    startGpuMonitoring();
 
     return { method: 'resumed', podId, provider };
   } catch (resumeErr) {

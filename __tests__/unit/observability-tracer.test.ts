@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DistributedTracer } from '../../src/observability/distributed-tracer';
+import { DistributedTracer } from '../src/observability/distributed-tracer';
 
 describe('DistributedTracer', () => {
   let tracer: DistributedTracer;

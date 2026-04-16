@@ -16,6 +16,7 @@ import type { ProxyRequest, ProxyResponse, ChatFallbackEntry } from '../types';
 import { withProviderFallback, type FallbackEntry, type FallbackOptions, CooldownTracker } from '../../providers/cloud/fallback';
 import { RequestCoalescer } from '../middleware/request-coalescer';
 import { ProviderSemaphores } from '../middleware/semaphore';
+import type { GuardrailEngine } from '../../guardrails';
 
 /** Shared cooldown tracker for LLM proxy route */
 const llmCooldownTracker = new CooldownTracker();
@@ -30,6 +31,7 @@ export async function handleChatCompletions(
   cache?: ResponseCache,
   hooks?: GatewayHooks,
   fallbackChain?: ChatFallbackEntry[],
+  guardrails?: GuardrailEngine,
 ): Promise<ProxyResponse> {
   if (!req.body || typeof req.body !== 'object') {
     return { status: 400, body: { error: { message: 'request body is required', type: 'invalid_request_error' } } };
@@ -60,6 +62,21 @@ export async function handleChatCompletions(
   }
   if (max_tokens !== undefined && (max_tokens < 1 || max_tokens > 128000)) {
     return { status: 400, body: { error: { message: 'max_tokens must be between 1 and 128000', type: 'invalid_request_error' } } };
+  }
+
+  // ── beforeRequest guardrails ───────────────────────────────────────────────
+  if (guardrails) {
+    const gr = await guardrails.runBeforeRequest(body, model);
+    if (!gr.pass) {
+      if (guardrails.action === 'block') {
+        return {
+          status: 400,
+          body: { error: { message: gr.reason ?? 'Request blocked by guardrail', type: 'invalid_request_error' } },
+        };
+      }
+      // audit — log and continue
+      log.warn({ rule: gr.failedRule, reason: gr.reason, model }, 'guardrail audit (beforeRequest)');
+    }
   }
 
   // Build fallback chain: use the configured chain, or fall back to single-provider lookup
@@ -183,6 +200,21 @@ export async function handleChatCompletions(
         ),
       ),
     );
+
+    // ── afterResponse guardrails ─────────────────────────────────────────────
+    if (guardrails) {
+      const responseBody = formatResponse(result.content, result.model, result.usage);
+      const gr = await guardrails.runAfterResponse(responseBody, result.model || model);
+      if (!gr.pass) {
+        if (guardrails.action === 'block') {
+          return {
+            status: 400,
+            body: { error: { message: gr.reason ?? 'Response blocked by guardrail', type: 'invalid_request_error' } },
+          };
+        }
+        log.warn({ rule: gr.failedRule, reason: gr.reason, model }, 'guardrail audit (afterResponse)');
+      }
+    }
 
     // Store in cache (key already computed above)
     if (cacheKey) {
