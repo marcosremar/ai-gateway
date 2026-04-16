@@ -16,7 +16,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { VastClient } from '@ai-gateway/gpu-providers/vast-client';
 import { AbstractGpuProvider } from '@ai-gateway/gpu-providers/abstract-provider';
-import { SshTunnel } from '../server/ssh-tunnel';
+import { SshTunnel } from '../../server/ssh-tunnel';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
