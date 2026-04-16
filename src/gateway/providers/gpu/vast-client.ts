@@ -1434,11 +1434,16 @@ export class VastClient extends AbstractGpuProvider {
 
       // P3: Adaptive polling — base timeout on host's actual download speed.
       // Faster hosts get tighter timeouts; slower hosts get more headroom.
+      // Note: Docker pull is slower than raw bandwidth due to layer extraction,
+      // decompression, and filesystem writes. Use 3x safety factor (was 2x, too tight
+      // for 20GB+ images like smplest-x which timed out at 14 min on 25GB).
       const inetDown = (offer.inet_down as number) || 500; // Mbps
       const pullEstimateS = (diskGb * 8 * 1024) / Math.max(inetDown, 100); // theoretical seconds
+      const isLargeImage = diskGb > 15;
+      const safetyMultiplier = isLargeImage ? 3 : 2; // large images need more headroom (decompression overhead)
       const CREATE_POLL_MAX_MS = Math.max(
-        Math.min(Math.round(pullEstimateS * 2 * 1000), 1_800_000), // 2x safety, cap 30 min (matches POLL_TOTAL_MAX_MS)
-        180_000, // floor 3 min
+        Math.min(Math.round(pullEstimateS * safetyMultiplier * 1000), 1_800_000), // cap 30 min (matches POLL_TOTAL_MAX_MS)
+        isLargeImage ? 600_000 : 180_000, // floor: 10 min for large images, 3 min otherwise
       );
       let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS, inetDown, spec.onPollProgress);
 

@@ -1181,6 +1181,516 @@ async function cmdGpuBest(opts: { gpu?: string; count?: number }) {
   console.log(`  Eff$ = price / quality (lower = better value for real-time)`);
 }
 
+// ── GPU Dev Mode Commands ──────────────────────────────────────────────────
+
+/** Options for targeting a specific GPU instance in multi-GPU setups. */
+interface GpuTargetOpts {
+  instance?: string;   // --instance <id>
+  image?: string;      // --image <name> (partial match on dockerImage)
+}
+
+type GpuInstanceInfo = { instanceId: string; sshHost: string; sshPort: number; endpoint: string; status: string; dockerImage: string };
+
+/** Prompt user to pick from a numbered list. Returns 0-based index. */
+async function promptChoice(prompt: string, count: number): Promise<number> {
+  process.stdout.write(`\n${prompt} `);
+  const answer = await new Promise<string>((resolve) => {
+    process.stdin.setEncoding('utf8');
+    process.stdin.once('data', (d: string) => resolve(d.trim()));
+    setTimeout(() => { console.error('\nTimeout — no selection made.'); process.exit(1); }, 30_000);
+  });
+  const idx = parseInt(answer, 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= count) {
+    console.error('Invalid selection.');
+    process.exit(1);
+  }
+  return idx;
+}
+
+/** Prompt user for a yes/no confirmation. Returns true if yes. */
+async function promptYesNo(prompt: string): Promise<boolean> {
+  process.stdout.write(`${prompt} `);
+  const answer = await new Promise<string>((resolve) => {
+    process.stdin.setEncoding('utf8');
+    process.stdin.once('data', (d: string) => resolve(d.trim().toLowerCase()));
+    setTimeout(() => resolve('n'), 30_000);
+  });
+  return answer === 'y' || answer === 'yes';
+}
+
+/** Prompt user for free-text input. Returns trimmed string. */
+async function promptInput(prompt: string): Promise<string> {
+  process.stdout.write(`${prompt} `);
+  const answer = await new Promise<string>((resolve) => {
+    process.stdin.setEncoding('utf8');
+    process.stdin.once('data', (d: string) => resolve(d.trim()));
+    setTimeout(() => resolve(''), 60_000);
+  });
+  return answer;
+}
+
+/**
+ * Resolve which GPU instance to target for dev-mode commands (ssh/patch/commit).
+ *
+ * Resolution order:
+ *   1. --instance <id>  → exact match by instanceId
+ *   2. --image <name>   → partial match on dockerImage
+ *   3. If 1 running instance → auto-select
+ *   4. If multiple → list and prompt user to pick
+ *   5. If 0 → fall back to legacy /v1/gpu/status single-instance endpoint
+ */
+async function resolveGpuInstance(opts?: GpuTargetOpts): Promise<GpuInstanceInfo> {
+  const { url, key } = getConfig();
+
+  // Try to fetch the full list first
+  let instances: any[] = [];
+  try {
+    const listRes = await fetch(`${url}/v1/gpu/list`, { headers: headers(key), signal: AbortSignal.timeout(5000) });
+    if (listRes.ok) {
+      const listData = await listRes.json() as any;
+      const all = Array.isArray(listData) ? listData : (listData.instances || []);
+      // Filter to running instances only
+      instances = all.filter((i: any) => i.status === 'ready' || i.status === 'warming' || i.status === 'running');
+    }
+  } catch { /* list endpoint may not exist — fall back below */ }
+
+  // If we have instances from the list, do multi-GPU resolution
+  if (instances.length > 0) {
+    let selected: any;
+
+    if (opts?.instance) {
+      // Exact match by instanceId
+      selected = instances.find((i: any) =>
+        (i.instanceId || i.podId || '') === opts.instance
+      );
+      if (!selected) {
+        console.error(`No running instance with ID "${opts.instance}".`);
+        console.error('Running instances:');
+        for (const i of instances) console.error(`  ${i.instanceId || i.podId}  ${i.dockerImage || ''}`);
+        process.exit(1);
+      }
+    } else if (opts?.image) {
+      // Partial match on dockerImage
+      const needle = opts.image.toLowerCase();
+      const matches = instances.filter((i: any) =>
+        (i.dockerImage || '').toLowerCase().includes(needle)
+      );
+      if (matches.length === 0) {
+        console.error(`No running instance matching image "${opts.image}".`);
+        console.error('Running instances:');
+        for (const i of instances) console.error(`  ${i.instanceId || i.podId}  ${i.dockerImage || ''}`);
+        process.exit(1);
+      }
+      if (matches.length === 1) {
+        selected = matches[0];
+      } else {
+        console.log(`Multiple instances match image "${opts.image}":\n`);
+        for (let idx = 0; idx < matches.length; idx++) {
+          const m = matches[idx];
+          console.log(`  ${c.bold}${idx + 1}${c.reset}) ${m.instanceId || m.podId}  ${c.dim}${m.dockerImage}${c.reset}  [${m.status}]`);
+        }
+        const pick = await promptChoice('Select instance [number]:', matches.length);
+        selected = matches[pick];
+      }
+    } else if (instances.length === 1) {
+      // Auto-select the only running instance
+      selected = instances[0];
+    } else {
+      // Multiple instances, no filter — prompt
+      console.log(`${c.yellow}Multiple GPU instances running:${c.reset}\n`);
+      for (let idx = 0; idx < instances.length; idx++) {
+        const i = instances[idx];
+        const id = i.instanceId || i.podId || '?';
+        const img = i.dockerImage || '(unknown image)';
+        const gpu = i.gpuType || i.gpuName || '';
+        console.log(`  ${c.bold}${idx + 1}${c.reset}) ${id}  ${c.cyan}${img}${c.reset}  ${c.dim}${gpu}${c.reset}  [${i.status}]`);
+      }
+      console.log(`\n${c.dim}Tip: use --instance <id> or --image <name> to skip this prompt.${c.reset}`);
+      const pick = await promptChoice('Select instance [number]:', instances.length);
+      selected = instances[pick];
+    }
+
+    // Validate SSH info
+    const sshHost = selected.sshHost;
+    const sshPort = selected.sshPort;
+    if (!sshHost || !sshPort) {
+      console.error('SSH connection info not available for this instance.');
+      console.error(`  instanceId: ${selected.instanceId || selected.podId}`);
+      console.error(`  sshHost: ${sshHost || '(none)'}`);
+      console.error(`  sshPort: ${sshPort || '(none)'}`);
+      process.exit(1);
+    }
+
+    return {
+      instanceId: selected.instanceId || selected.podId || '',
+      sshHost,
+      sshPort,
+      endpoint: selected.endpoint || '',
+      status: selected.status || '',
+      dockerImage: selected.dockerImage || '',
+    };
+  }
+
+  // Fallback: use legacy single-instance /v1/gpu/status endpoint
+  const res = await fetch(`${url}/v1/gpu/status`, { headers: headers(key), signal: AbortSignal.timeout(5000) });
+  if (res.status === 404) {
+    console.error('GPU endpoints not available (proxy-only mode).');
+    console.error('GPU management requires the full server (server/ws-server.ts).');
+    process.exit(1);
+  }
+  const data = await res.json() as any;
+  if (data.status !== 'ready' && data.status !== 'warming') {
+    console.error(`GPU is not running (status: ${data.status || 'idle'}).`);
+    console.error('Deploy a GPU first: ai-gateway gpu deploy');
+    process.exit(1);
+  }
+  if (!data.sshHost || !data.sshPort) {
+    console.error('SSH connection info not available for this deployment.');
+    console.error(`  sshHost: ${data.sshHost || '(none)'}`);
+    console.error(`  sshPort: ${data.sshPort || '(none)'}`);
+    process.exit(1);
+  }
+  return {
+    instanceId: data.instanceId || data.podId || '',
+    sshHost: data.sshHost,
+    sshPort: data.sshPort,
+    endpoint: data.endpoint || '',
+    status: data.status,
+    dockerImage: data.dockerImage || '',
+  };
+}
+
+/** Build common SSH args for connecting to the GPU container. */
+function sshArgs(sshHost: string, sshPort: number): string[] {
+  return [
+    '-p', String(sshPort),
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'UserKnownHostsFile=/dev/null',
+    '-o', 'ConnectTimeout=10',
+    '-o', 'LogLevel=ERROR',
+    `root@${sshHost}`,
+  ];
+}
+
+/**
+ * gpu ssh [command] — Open interactive SSH or run a remote command.
+ * Supports --instance <id> and --image <name> for multi-GPU targeting.
+ */
+async function cmdGpuSsh(command?: string, target?: GpuTargetOpts) {
+  const info = await resolveGpuInstance(target);
+  console.log(`${c.cyan}SSH${c.reset} → ${info.sshHost}:${info.sshPort}`);
+
+  if (command) {
+    // Non-interactive: run command and return output
+    const proc = spawn('ssh', [...sshArgs(info.sshHost, info.sshPort), command], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+    await new Promise<void>((resolve) => {
+      proc.on('exit', (code) => {
+        if (stdout) process.stdout.write(stdout);
+        if (stderr) process.stderr.write(stderr);
+        if (code !== 0) {
+          console.error(`\n${c.red}SSH exited with code ${code}${c.reset}`);
+          process.exit(code || 1);
+        }
+        resolve();
+      });
+      proc.on('error', (err) => {
+        console.error(`SSH error: ${err.message}`);
+        process.exit(1);
+      });
+    });
+  } else {
+    // Interactive SSH session — pass through stdio
+    const proc = spawn('ssh', sshArgs(info.sshHost, info.sshPort), {
+      stdio: 'inherit',
+    });
+    await new Promise<void>((resolve) => {
+      proc.on('exit', (code) => {
+        if (code !== 0 && code !== null) {
+          process.exit(code);
+        }
+        resolve();
+      });
+      proc.on('error', (err) => {
+        console.error(`SSH error: ${err.message}`);
+        process.exit(1);
+      });
+    });
+  }
+}
+
+/**
+ * gpu patch <local-file> [remote-path] — Copy a file to the running container
+ * and restart the server process.
+ * Supports --instance <id> and --image <name> for multi-GPU targeting.
+ */
+async function cmdGpuPatch(localFile: string, remotePath?: string, opts?: { noRestart?: boolean }, target?: GpuTargetOpts) {
+  const info = await resolveGpuInstance(target);
+
+  // Validate local file exists
+  if (!existsSync(localFile)) {
+    console.error(`Local file not found: ${localFile}`);
+    process.exit(1);
+  }
+
+  // Default remote path: same as local file name, placed in /app/
+  const resolvedRemote = remotePath || `/app/${resolve(localFile).split('/').pop()}`;
+  console.log(`${c.cyan}PATCH${c.reset} ${localFile} → ${info.sshHost}:${resolvedRemote}`);
+
+  // Step 1: SCP the file
+  const spin = spinner('Copying file...');
+  const scpProc = spawn('scp', [
+    '-P', String(info.sshPort),
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'UserKnownHostsFile=/dev/null',
+    '-o', 'ConnectTimeout=10',
+    '-o', 'LogLevel=ERROR',
+    localFile,
+    `root@${info.sshHost}:${resolvedRemote}`,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  let scpErr = '';
+  scpProc.stderr?.on('data', (d: Buffer) => { scpErr += d.toString(); });
+  const scpOk = await new Promise<boolean>((resolve) => {
+    scpProc.on('exit', (code) => resolve(code === 0));
+    scpProc.on('error', () => resolve(false));
+  });
+  spin.stop();
+
+  if (!scpOk) {
+    console.error(`${c.red}SCP failed${c.reset}: ${scpErr || 'unknown error'}`);
+    process.exit(1);
+  }
+  console.log(`${c.green}✓${c.reset} File copied.`);
+
+  if (opts?.noRestart) {
+    console.log(`${c.dim}Skipping server restart (--no-restart).${c.reset}`);
+    return;
+  }
+
+  // Step 2: Restart the server (kill python3 processes, re-run onstart)
+  console.log(`${c.yellow}Restarting server...${c.reset}`);
+  const restartCmd = `bash -c 'pkill -f "python3.*server" 2>/dev/null; pkill -f "python3.*app" 2>/dev/null; if [ -f /onstart.sh ]; then nohup bash /onstart.sh > /var/log/onstart.log 2>&1 & elif [ -f /start.sh ]; then nohup bash /start.sh > /var/log/start.log 2>&1 & elif [ -f /app/start.sh ]; then nohup bash /app/start.sh > /var/log/start.log 2>&1 & else echo "No startup script found — killed processes but could not restart."; fi; echo "restart-initiated"'`;
+  const restartProc = spawn('ssh', [...sshArgs(info.sshHost, info.sshPort), restartCmd], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let restartOut = '';
+  restartProc.stdout?.on('data', (d: Buffer) => { restartOut += d.toString(); });
+  restartProc.stderr?.on('data', (d: Buffer) => { /* suppress SSH warnings */ });
+  await new Promise<void>((resolve) => {
+    restartProc.on('exit', () => resolve());
+    restartProc.on('error', () => resolve());
+  });
+
+  if (!restartOut.includes('restart-initiated')) {
+    console.error(`${c.yellow}Warning: restart command may not have run correctly.${c.reset}`);
+  }
+
+  // Step 3: Wait for /health to respond (skip for SSH-only hosts with no HTTP endpoint)
+  if (!info.endpoint) {
+    console.log(`${c.yellow}No HTTP endpoint available (SSH-only host).${c.reset}`);
+    console.log(`Skipping health check. Verify manually: ai-gateway gpu ssh "curl -s localhost:8000/health"`);
+    return;
+  }
+  const healthUrl = info.endpoint.replace(/\/$/, '') + '/health';
+  console.log(`Waiting for ${healthUrl} ...`);
+  const healthSpin = spinner('Waiting for health...');
+  let healthy = false;
+  for (let i = 0; i < 60; i++) { // up to 60s
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const hRes = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) });
+      if (hRes.ok) { healthy = true; break; }
+    } catch { /* not ready yet */ }
+  }
+  healthSpin.stop();
+
+  if (healthy) {
+    console.log(`${c.green}✓${c.reset} Server is healthy. Patch applied successfully.`);
+  } else {
+    console.error(`${c.yellow}Warning: /health did not respond within 60s.${c.reset}`);
+    console.error('  The server may still be starting. Check with: ai-gateway gpu ssh "cat /var/log/onstart.log"');
+  }
+}
+
+/** Run a shell command and return { stdout, stderr, code }. */
+function execCmd(cmd: string, args: string[], opts?: { cwd?: string }): Promise<{ stdout: string; stderr: string; code: number }> {
+  return new Promise((resolve) => {
+    const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd: opts?.cwd });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.on('exit', (code) => resolve({ stdout, stderr, code: code ?? 1 }));
+    proc.on('error', (err) => resolve({ stdout, stderr: err.message, code: 1 }));
+  });
+}
+
+/**
+ * gpu commit — Show modified files on the running container (vs Docker image layer),
+ * download them locally, git add + git commit, and optionally push.
+ * Supports --instance <id>, --image <name> for multi-GPU targeting.
+ * Supports -m "message" for the commit message.
+ */
+async function cmdGpuCommit(target?: GpuTargetOpts, opts?: { message?: string }) {
+  const info = await resolveGpuInstance(target);
+  console.log(`${c.cyan}COMMIT${c.reset} — inspecting changes on ${info.sshHost}:${info.sshPort}`);
+  console.log(`${c.dim}Docker image: ${info.dockerImage || '(unknown)'}${c.reset}\n`);
+
+  // Step 1: Find modified files in /app (comparing overlay filesystem timestamps)
+  // Use find to list recently modified files (modified after container creation).
+  // On Vast.ai containers, /app is the usual working directory.
+  const findCmd = `find /app -type f -newer /proc/1/cmdline -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/__pycache__/*' -not -path '*.pyc' -not -name '*.log' 2>/dev/null | head -50`;
+
+  const findProc = spawn('ssh', [...sshArgs(info.sshHost, info.sshPort), findCmd], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let findOut = '';
+  findProc.stdout?.on('data', (d: Buffer) => { findOut += d.toString(); });
+  await new Promise<void>((resolve) => {
+    findProc.on('exit', () => resolve());
+    findProc.on('error', () => resolve());
+  });
+
+  const files = findOut.trim().split('\n').filter(f => f.trim());
+
+  if (files.length === 0) {
+    console.log('No modified files detected in /app.');
+    console.log(`${c.dim}Tip: This detection uses file timestamps. If you patched before the container process started, files may not appear.${c.reset}`);
+    return;
+  }
+
+  console.log(`Modified files (${files.length}):\n`);
+  for (const f of files) {
+    console.log(`  ${c.yellow}M${c.reset} ${f}`);
+  }
+
+  // Step 2: Ask for confirmation
+  console.log('');
+  if (isTTY) {
+    const proceed = await promptYesNo(`Download ${files.length} file(s) to ./gpu-commit/ ? [y/N]`);
+    if (!proceed) {
+      console.log('Aborted.');
+      return;
+    }
+  } else {
+    console.log(`${c.dim}Non-interactive mode — downloading automatically.${c.reset}`);
+  }
+
+  // Step 3: Download files
+  const outDir = resolve(process.cwd(), 'gpu-commit');
+  require('fs').mkdirSync(outDir, { recursive: true });
+
+  let downloaded = 0;
+  const downloadedPaths: string[] = [];
+  for (const remoteFile of files) {
+    // Preserve directory structure under gpu-commit/
+    const relativePath = remoteFile.startsWith('/app/') ? remoteFile.slice(5) : remoteFile.slice(1);
+    const localDest = resolve(outDir, relativePath);
+    const localDir = dirname(localDest);
+    require('fs').mkdirSync(localDir, { recursive: true });
+
+    const dl = spawn('scp', [
+      '-P', String(info.sshPort),
+      '-o', 'StrictHostKeyChecking=no',
+      '-o', 'UserKnownHostsFile=/dev/null',
+      '-o', 'LogLevel=ERROR',
+      `root@${info.sshHost}:${remoteFile}`,
+      localDest,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    const ok = await new Promise<boolean>((resolve) => {
+      dl.on('exit', (code) => resolve(code === 0));
+      dl.on('error', () => resolve(false));
+    });
+
+    if (ok) {
+      downloaded++;
+      downloadedPaths.push(localDest);
+      console.log(`  ${c.green}✓${c.reset} ${relativePath}`);
+    } else {
+      console.log(`  ${c.red}✗${c.reset} ${relativePath} (download failed)`);
+    }
+  }
+
+  console.log(`\n${c.green}${downloaded}/${files.length}${c.reset} files saved to ${c.bold}gpu-commit/${c.reset}`);
+
+  if (downloaded === 0) {
+    console.log('No files downloaded — skipping git operations.');
+    return;
+  }
+
+  // Step 4: Git add + commit
+  // Determine commit message
+  let commitMsg = opts?.message || '';
+  if (!commitMsg && isTTY) {
+    commitMsg = await promptInput(`\n${c.bold}Commit message:${c.reset}`);
+  }
+  if (!commitMsg) {
+    // Build a default message from the image name
+    const imgShort = info.dockerImage ? info.dockerImage.split('/').pop()?.split(':')[0] || 'gpu' : 'gpu';
+    commitMsg = `fix(${imgShort}): update ${downloaded} file(s) from GPU container`;
+  }
+
+  // Determine git repo root (look upward from cwd)
+  const gitRootResult = await execCmd('git', ['rev-parse', '--show-toplevel']);
+  if (gitRootResult.code !== 0) {
+    console.log(`\n${c.dim}Not a git repository — skipping git operations.`);
+    console.log(`Next steps:`);
+    console.log(`  1. Review the files in gpu-commit/`);
+    console.log(`  2. Copy them to your Docker source directory`);
+    console.log(`  3. Rebuild: ai-gateway docker build <dir> --name <image>${c.reset}`);
+    return;
+  }
+  const gitRoot = gitRootResult.stdout.trim();
+
+  // git add the downloaded files
+  console.log(`\n${c.cyan}git add${c.reset} ${downloaded} file(s)...`);
+  const addResult = await execCmd('git', ['add', ...downloadedPaths], { cwd: gitRoot });
+  if (addResult.code !== 0) {
+    console.error(`${c.red}git add failed:${c.reset} ${addResult.stderr}`);
+    return;
+  }
+  console.log(`${c.green}✓${c.reset} Files staged.`);
+
+  // git commit
+  console.log(`${c.cyan}git commit${c.reset} -m "${commitMsg}"`);
+  const commitResult = await execCmd('git', ['commit', '-m', commitMsg], { cwd: gitRoot });
+  if (commitResult.code !== 0) {
+    console.error(`${c.red}git commit failed:${c.reset} ${commitResult.stderr || commitResult.stdout}`);
+    return;
+  }
+  console.log(`${c.green}✓${c.reset} Committed.`);
+  if (commitResult.stdout) process.stdout.write(commitResult.stdout);
+
+  // Step 5: Ask to push
+  if (isTTY) {
+    const shouldPush = await promptYesNo(`\nPush to origin/main? [y/N]`);
+    if (shouldPush) {
+      console.log(`${c.cyan}git push${c.reset} origin main...`);
+      const pushResult = await execCmd('git', ['push', 'origin', 'main'], { cwd: gitRoot });
+      if (pushResult.code !== 0) {
+        console.error(`${c.red}git push failed:${c.reset} ${pushResult.stderr || pushResult.stdout}`);
+      } else {
+        console.log(`${c.green}✓${c.reset} Pushed to origin/main.`);
+        // Check if Docker image has a CI workflow that will rebuild
+        if (info.dockerImage) {
+          const imgShort = info.dockerImage.split('/').pop()?.split(':')[0] || '';
+          console.log(`\n${c.dim}If "${imgShort}" has a CI workflow, the Docker image will rebuild automatically.`);
+          console.log(`Check: https://github.com/<org>/<repo>/actions${c.reset}`);
+        }
+      }
+    } else {
+      console.log(`${c.dim}Skipped push. You can push later with: git push origin main${c.reset}`);
+    }
+  }
+}
+
 // ── Docker image builder commands ─────────────────────────────────────────────
 
 async function cmdDockerAuth() {
@@ -1470,7 +1980,7 @@ Commands:
   voices          List available TTS voices
   image           Generate an image from a text prompt
   docker          Build Docker images via GitHub Actions and GHCR (auth, build, list)
-  gpu             Manage GPU deployments (status, deploy, stop, logs)
+  gpu             Manage GPU deployments (status, deploy, stop, logs, ssh, patch, commit)
   apps            List and manage app configurations
   profiles        Alias for 'apps'
   balance         Show provider account balances and daily GPU spend
@@ -1674,12 +2184,29 @@ Subcommands:
     --provider <name>            Provider hint (runpod, vast, tensordock)
   logs                         Fetch container stdout/stderr logs
 
+Dev Mode (fast iteration on running containers):
+  ssh [command]                Open interactive SSH to the container
+                               If command given, run non-interactively
+  patch <file> [remote-path]   Copy local file to container, restart server
+    --no-restart                 Copy only, don't restart the server
+  commit                       Download modified files, git add + commit + push
+    -m "message"                 Commit message (prompted if omitted)
+
+  Multi-GPU targeting (applies to ssh, patch, commit):
+    --instance <id>              Target a specific instance by ID
+    --image <name>               Target by Docker image name (partial match)
+                                 If multiple GPUs running and no flag given,
+                                 you'll be prompted to pick one.
+
 Notes:
   - GPU commands require the full server (server/ws-server.ts), not the
     lightweight proxy (serve.ts). If you see "proxy-only mode", the
     gateway was started with serve.ts which doesn't include GPU management.
   - Deploy is non-blocking — use 'gpu status' to poll until ready
   - Terminate is permanent and cannot be undone
+  - Dev mode commands (ssh, patch, commit) use SSH to connect directly
+    to the running container. SSH info is auto-discovered from deploy state.
+  - When multiple GPUs are running, use --instance or --image to target one.
 
 Examples:
   ai-gateway gpu status
@@ -1693,6 +2220,19 @@ Examples:
   ai-gateway gpu terminate pod-abc123
   ai-gateway gpu terminate inst-456 --provider vast
   ai-gateway gpu logs
+
+Dev mode examples:
+  ai-gateway gpu ssh                              Open interactive shell
+  ai-gateway gpu ssh "tail -20 /var/log/app.log"  Run a command remotely
+  ai-gateway gpu ssh "nvidia-smi"                 Check GPU usage
+  ai-gateway gpu ssh --image smplest-x "nvidia-smi"  Target specific GPU
+  ai-gateway gpu patch server.py /app/server.py   Patch and restart
+  ai-gateway gpu patch model.py                   Patches to /app/model.py
+  ai-gateway gpu patch config.json --no-restart   Copy without restart
+  ai-gateway gpu patch model.py --image wham      Patch specific GPU
+  ai-gateway gpu commit                           Download + git commit
+  ai-gateway gpu commit -m "fix: arm accuracy"    With commit message
+  ai-gateway gpu commit --instance inst-123 -m "feat: add VPoser"
 `,
     metrics: `
 ai-gateway metrics — Show gateway metrics
@@ -2152,8 +2692,64 @@ ai-gateway server — Manage the local dev server
             break;
           }
           case 'logs': await cmdGpuLogs(); break;
+          case 'ssh': {
+            // Parse --instance and --image flags for multi-GPU targeting,
+            // then treat everything else after 'gpu ssh' as the remote command.
+            const gpuSshTarget: GpuTargetOpts = {
+              instance: getArg(args, '--instance'),
+              image: getArg(args, '--image'),
+            };
+            // Strip our flags from the args to build the remote command
+            const sshParts: string[] = [];
+            const sshSlice = args.slice(2);
+            for (let si = 0; si < sshSlice.length; si++) {
+              if ((sshSlice[si] === '--instance' || sshSlice[si] === '--image') && si + 1 < sshSlice.length) {
+                si++; // skip flag and its value
+              } else {
+                sshParts.push(sshSlice[si]);
+              }
+            }
+            const sshCmd = sshParts.join(' ') || undefined;
+            await cmdGpuSsh(sshCmd, gpuSshTarget);
+            break;
+          }
+          case 'patch': {
+            const gpuPatchTarget: GpuTargetOpts = {
+              instance: getArg(args, '--instance'),
+              image: getArg(args, '--image'),
+            };
+            // Find the local file arg: first positional arg after 'gpu patch' that is not a flag or flag value
+            const patchSlice = args.slice(2);
+            const patchPositional: string[] = [];
+            for (let pi = 0; pi < patchSlice.length; pi++) {
+              if (patchSlice[pi] === '--instance' || patchSlice[pi] === '--image') {
+                pi++; // skip flag and its value
+              } else if (patchSlice[pi] === '--no-restart') {
+                // skip boolean flag
+              } else {
+                patchPositional.push(patchSlice[pi]);
+              }
+            }
+            const patchFile = patchPositional[0];
+            if (!patchFile) {
+              console.error('Usage: ai-gateway gpu patch <local-file> [remote-path] [--no-restart] [--instance <id>] [--image <name>]');
+              process.exit(1);
+            }
+            const patchRemote = patchPositional[1] || undefined;
+            await cmdGpuPatch(patchFile, patchRemote, { noRestart: hasFlag(args, '--no-restart') }, gpuPatchTarget);
+            break;
+          }
+          case 'commit': {
+            const gpuCommitTarget: GpuTargetOpts = {
+              instance: getArg(args, '--instance'),
+              image: getArg(args, '--image'),
+            };
+            const commitMessage = getArg(args, '-m') || getArg(args, '--message');
+            await cmdGpuCommit(gpuCommitTarget, { message: commitMessage });
+            break;
+          }
           default:
-            console.error('Usage: ai-gateway gpu <status|list|offers|deploy|stop|resume|terminate|logs>');
+            console.error('Usage: ai-gateway gpu <status|list|offers|deploy|stop|resume|terminate|logs|ssh|patch|commit>');
             process.exit(1);
         }
         break;

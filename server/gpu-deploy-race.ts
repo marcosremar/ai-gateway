@@ -152,6 +152,28 @@ export async function startDeployRace(
     const credentials = { apiKey: slot.tier.apiKey, authId: slot.tier.authId };
     const defaultStorage = DEFAULT_STORAGE_GB[slot.tier.name] || 50;
     const storageGb = Math.max(extra.storageGb || defaultStorage, defaultStorage);
+
+    // Progress callback: update deploy state during image pull so the UI
+    // shows "pulling_image" instead of being stuck at "creating_pod".
+    const onPollProgress = (info: { elapsedS: number; status: string; instanceId: string; ip: string }) => {
+      const vastStatus = info.status?.toLowerCase();
+      if (vastStatus === 'loading' || vastStatus === 'pulling') {
+        setDeployState({
+          step: 'pulling_image',
+          stepDetail: `${info.instanceId.slice(0, 12)} pulling image (${info.elapsedS}s)`,
+          message: `Pulling Docker image on ${slot.tier.label}... (${info.elapsedS}s)`,
+          podId: info.instanceId,
+        });
+      } else if (vastStatus === 'running') {
+        setDeployState({
+          step: 'waiting_health',
+          stepDetail: `${info.instanceId.slice(0, 12)} running, waiting for endpoint`,
+          message: `Instance running, resolving endpoint... (${info.elapsedS}s)`,
+          podId: info.instanceId,
+        });
+      }
+    };
+
     const instance = await Promise.race([
       slot.tier.client.createInstance(
         {
@@ -168,6 +190,7 @@ export async function startDeployRace(
           ...(extra.snapgpuPreloadApp ? { snapgpuPreloadApp: extra.snapgpuPreloadApp } : {}),
           ...(extra.snapgpuAutoSnapshot !== undefined ? { autoSnapshot: extra.snapgpuAutoSnapshot } : {}),
           ...(extra.snapgpuBackend ? { snapgpuBackend: extra.snapgpuBackend } : {}),
+          onPollProgress,
         },
         credentials,
       ),
