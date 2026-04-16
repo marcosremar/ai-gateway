@@ -81,6 +81,9 @@ export async function probeGpuHealthSsh(sshHost: string, sshPort: number): Promi
   if (!sshHost || !sshPort || sshPort <= 0) return false;
   const SSH_MAX_RETRIES = 3;
   const SSH_RETRY_DELAY_MS = 3_000;
+  const insecureSsh = process.env.GPU_SSH_INSECURE === '1';
+  const strictHostKeyChecking = insecureSsh ? 'no' : 'accept-new';
+  const knownHostsFile = insecureSsh ? '/dev/null' : (process.env.GPU_SSH_KNOWN_HOSTS_FILE || `${process.env.HOME || ''}/.ssh/known_hosts`);
 
   for (let attempt = 1; attempt <= SSH_MAX_RETRIES; attempt++) {
     try {
@@ -88,8 +91,8 @@ export async function probeGpuHealthSsh(sshHost: string, sshPort: number): Promi
       const { promisify } = await import('util');
       const execFileAsync = promisify(execFile);
       const { stdout } = await execFileAsync('ssh', [
-        '-o', 'StrictHostKeyChecking=no',
-        '-o', 'UserKnownHostsFile=/dev/null',  // avoid stale host key errors
+        '-o', `StrictHostKeyChecking=${strictHostKeyChecking}`,
+        '-o', `UserKnownHostsFile=${knownHostsFile}`,
         '-o', 'ConnectTimeout=5',
         '-o', 'ServerAliveInterval=5',
         '-o', 'ServerAliveCountMax=2',
@@ -118,6 +121,9 @@ export async function probeGpuHealthSsh(sshHost: string, sshPort: number): Promi
       if (!isSshRefused) {
         // Unexpected error (e.g. JSON parse) — log it for debugging
         defaultLogger.warn(`[ssh-health] ${sshHost}:${sshPort} attempt ${attempt} failed: ${msg}`);
+      }
+      if (insecureSsh) {
+        defaultLogger.warn('[ssh-health] GPU_SSH_INSECURE=1 enables weak SSH host-key verification');
       }
       return false;
     }

@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createProxyServer } from '../../src/proxy/server';
-import { validateAuth } from '../../src/proxy/middleware/auth';
-import { RateLimiter } from '../../src/proxy/middleware/rate-limit';
-import type { LLMProvider, ChatResponse } from '../../src/providers/types';
+import { createProxyServer } from '../src/proxy/server';
+import { validateAuth } from '../src/proxy/middleware/auth';
+import { RateLimiter } from '../src/proxy/middleware/rate-limit';
+import type { LLMProvider, ChatResponse } from '../src/providers/types';
 import type { Server } from 'http';
 
 describe('Proxy', () => {
@@ -98,7 +98,7 @@ describe('Proxy', () => {
     it('GET /v1/models lists models', async () => {
       const res = await fetch(`http://127.0.0.1:${port}/v1/models`);
       expect(res.status).toBe(200);
-      const body = (await res.json()) as { data: Array<{ id: string }> };
+      const body = await res.json() as { data: Array<{ id: string }> };
       expect(body.data).toHaveLength(1);
       expect(body.data[0].id).toBe('test-model');
     });
@@ -114,7 +114,7 @@ describe('Proxy', () => {
       });
 
       expect(res.status).toBe(200);
-      const body = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+      const body = await res.json() as { choices: Array<{ message: { content: string } }> };
       expect(body.choices[0].message.content).toBe('Hello!');
     });
 
@@ -171,7 +171,7 @@ describe('Proxy', () => {
 
     it('accepts request with valid auth', async () => {
       const res = await fetch(`http://127.0.0.1:${port}/health`, {
-        headers: { Authorization: 'Bearer valid-key' },
+        headers: { 'Authorization': 'Bearer valid-key' },
       });
       expect(res.status).toBe(200);
     });

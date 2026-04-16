@@ -28,19 +28,12 @@ class MemoryStateStore implements StateStore {
   private hashes = new Map<string, Map<string, string>>();
   private lists = new Map<string, string[]>();
 
-  async get(key: string) {
-    return this.kv.get(key) ?? null;
-  }
-  async set(key: string, value: string) {
-    this.kv.set(key, value);
-  }
-  async del(key: string) {
-    this.kv.delete(key);
-    this.hashes.delete(key);
-  }
+  async get(key: string) { return this.kv.get(key) ?? null; }
+  async set(key: string, value: string) { this.kv.set(key, value); }
+  async del(key: string) { this.kv.delete(key); this.hashes.delete(key); }
   async scan(pattern: string) {
     const prefix = pattern.replace('*', '');
-    return [...this.kv.keys()].filter((k) => k.startsWith(prefix));
+    return [...this.kv.keys()].filter(k => k.startsWith(prefix));
   }
   async rpush(key: string, value: string) {
     if (!this.lists.has(key)) this.lists.set(key, []);
@@ -79,21 +72,15 @@ class MemoryStateStore implements StateStore {
 // Mock SessionResolver (no DB)
 // ──────────────────────────────────────────────────────────────────────────────
 class MockSessionResolver implements SessionResolver {
-  async countDbSessions() {
-    return 0;
-  }
-  async resolveTeacher() {
-    return null;
-  }
+  async countDbSessions() { return 0; }
+  async resolveTeacher() { return null; }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Mock SettingsStore
 // ──────────────────────────────────────────────────────────────────────────────
 class MockSettingsStore implements SettingsStore {
-  async get() {
-    return {};
-  }
+  async get() { return {}; }
   async patch() {}
 }
 
@@ -106,7 +93,7 @@ let healthyEndpoints = new Set<string>();
 // Test constants
 // ──────────────────────────────────────────────────────────────────────────────
 const TEST_USER = 'user-test-autoscaler';
-const GPU_SECRET = 'integration-test-gpu-secret-key';
+const GPU_SECRET = 'integration-test-gpu-secret-key-x';
 const GPU_ENDPOINT = 'http://10.0.0.1:8000';
 
 const BASE_CONFIG: AutoScalerConfig = {
@@ -134,25 +121,16 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
     process.env.GPU_ACCESS_SECRET = GPU_SECRET;
 
     // Mock global fetch for health probes
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) => {
-        const urlStr = url;
-        // Check if this endpoint is in our healthy set
-        for (const ep of healthyEndpoints) {
-          if (urlStr.startsWith(ep)) {
-            return new Response(
-              JSON.stringify({
-                status: 'healthy',
-                models: { whisper: true, llm: true, tts: true },
-              }),
-              { status: 200 },
-            );
-          }
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const urlStr = url;
+      // Check if this endpoint is in our healthy set
+      for (const ep of healthyEndpoints) {
+        if (urlStr.startsWith(ep)) {
+          return new Response(JSON.stringify({ status: 'healthy', models: { whisper: true, llm: true, tts: true } }), { status: 200 });
         }
-        return new Response('unhealthy', { status: 503 });
-      }),
-    );
+      }
+      return new Response('unhealthy', { status: 503 });
+    }));
 
     autoscaler = createAutoscaler({
       settingsStore: new MockSettingsStore(),
@@ -238,8 +216,9 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
     expect(decision.endpoint).toBe(GPU_ENDPOINT);
 
     // Simulate what the route handler does: sign token when route=gpu + endpoint
-    const gpuToken =
-      decision.route === 's2s' && decision.endpoint ? signGpuToken(TEST_USER) : undefined;
+    const gpuToken = decision.route === 's2s' && decision.endpoint
+      ? signGpuToken(TEST_USER)
+      : undefined;
 
     expect(gpuToken).toBeDefined();
     expect(typeof gpuToken).toBe('string');
@@ -261,8 +240,9 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
     const decision = await autoscaler.getAutoScaleDecision(TEST_USER, BASE_CONFIG);
     expect(decision.route).toBe('llm');
 
-    const gpuToken =
-      decision.route === 's2s' && decision.endpoint ? signGpuToken(TEST_USER) : undefined;
+    const gpuToken = decision.route === 's2s' && decision.endpoint
+      ? signGpuToken(TEST_USER)
+      : undefined;
 
     expect(gpuToken).toBeUndefined();
   });
@@ -278,7 +258,7 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
     const token1 = signGpuToken(TEST_USER);
 
     // Tiny delay to ensure timestamp differs
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise(r => setTimeout(r, 10));
 
     const decision2 = await autoscaler.getAutoScaleDecision(TEST_USER, BASE_CONFIG);
     const token2 = signGpuToken(TEST_USER);
@@ -328,7 +308,7 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
     // Directly manipulate state to simulate 20 min idle (past 15 min grace)
     const states = autoscaler.getPoolStatus(TEST_USER);
     expect(states.length).toBeGreaterThan(0);
-    const readyTier = states.find((s) => s.state === 'ready');
+    const readyTier = states.find(s => s.state === 'ready');
     expect(readyTier).toBeDefined();
     readyTier!.lastHealthyAt = Date.now() - 20 * 60_000; // 20 min ago
 
@@ -377,7 +357,7 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
 
     // Simulate boot timeout: set bootTriggeredAt to a long time ago
     const states = autoscaler.getPoolStatus(TEST_USER);
-    const bootingTier = states.find((s) => s.state === 'booting');
+    const bootingTier = states.find(s => s.state === 'booting');
     expect(bootingTier).toBeDefined();
 
     // TensorDock timeout = 2 × bootTimeSecs(1200) = 2400s = 40 min; use 42 min to be safely past threshold
@@ -392,7 +372,7 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
 
     // Verify tier is in cooldown (won't re-boot immediately)
     const refreshedStates = autoscaler.getPoolStatus(TEST_USER);
-    const idleTier = refreshedStates.find((s) => s.tierIndex === 0);
+    const idleTier = refreshedStates.find(s => s.tierIndex === 0);
     expect(idleTier).toBeDefined();
     expect(idleTier!.state).toBe('idle');
     const idleTs = idleTier as IdleTierState;
@@ -538,9 +518,7 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
     let token1: string | undefined;
     try {
       if (d1.route === 's2s' && d1.endpoint) token1 = signGpuToken(TEST_USER);
-    } catch {
-      /* no secret in dev */
-    }
+    } catch { /* no secret in dev */ }
 
     expect(d1.route).toBe('llm');
     expect(d1.gpuState).toBe('booting');
@@ -554,9 +532,7 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
     let token2: string | undefined;
     try {
       if (d2.route === 's2s' && d2.endpoint) token2 = signGpuToken(TEST_USER);
-    } catch {
-      /* no secret */
-    }
+    } catch { /* no secret */ }
 
     expect(d2.route).toBe('s2s');
     expect(d2.gpuState).toBe('ready');
@@ -573,9 +549,7 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
     let token3: string | undefined;
     try {
       if (d3.route === 's2s' && d3.endpoint) token3 = signGpuToken(TEST_USER);
-    } catch {
-      /* */
-    }
+    } catch { /* */ }
 
     expect(d3.route).toBe('s2s');
     expect(token3).toBeDefined();
@@ -589,9 +563,7 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
     let token4: string | undefined;
     try {
       if (d4.route === 's2s' && d4.endpoint) token4 = signGpuToken(TEST_USER);
-    } catch {
-      /* */
-    }
+    } catch { /* */ }
 
     // GPU unhealthy → reverts to idle with unhealthy=true → skips re-boot
     // (unhealthy tiers are skipped to avoid boot-crash loops)

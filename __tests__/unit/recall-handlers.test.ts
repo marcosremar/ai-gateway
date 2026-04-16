@@ -3,7 +3,7 @@ import { PassThrough } from 'stream';
 import type { IncomingMessage, ServerResponse } from 'http';
 
 // Mock ws-state before importing handlers
-vi.mock('../server/ws-state', () => ({
+vi.mock('../../server/ws-state', () => ({
   broadcastWs: vi.fn(),
   wsClients: new Set(),
 }));
@@ -77,14 +77,16 @@ describe('Recall handlers', () => {
       const res = mockRes();
       await handleRecallJoin(mockReq({}), res);
       expect(res._status).toBe(400);
-      expect(resJson(res).error).toBe('meetingUrl is required');
+      // Missing meetingUrl fails Zod schema validation before reaching manual check
+      expect(resJson(res).error).toBe('Validation failed');
     });
 
     it('returns 400 when meetingUrl is empty string', async () => {
       const res = mockRes();
       await handleRecallJoin(mockReq({ meetingUrl: '  ' }), res);
       expect(res._status).toBe(400);
-      expect(resJson(res).error).toBe('meetingUrl is required');
+      // Whitespace-only meetingUrl fails Zod .url() validation before reaching manual check
+      expect(resJson(res).error).toBe('Validation failed');
     });
 
     it('returns 500 when RECALL_API_KEY is not set', async () => {

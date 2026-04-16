@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { CircuitBreaker, CircuitBreakerRegistry } from '../../src/providers/circuit-breaker';
+import { CircuitBreaker, CircuitBreakerRegistry } from '../src/providers/circuit-breaker';
 
 describe('CircuitBreaker', () => {
   it('starts closed and allows requests', () => {

@@ -9,7 +9,7 @@ import {
   resolveDeclarativeChain,
   findChainForStage,
   type FallbackChainConfig,
-} from '../../src/providers/declarative-chain';
+} from '../src/providers/declarative-chain';
 
 describe('resolveDeclarativeChain', () => {
   it('returns chain sorted by priority', () => {

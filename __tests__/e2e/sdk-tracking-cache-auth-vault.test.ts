@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-import type { StateStore, KvStore, ListStore, HashStore } from '../../src/deps';
+import type { StateStore, KvStore, ListStore, HashStore } from '../src/deps';
 
 function createMemoryStateStore(): StateStore {
   const kv = new Map<string, { value: string; expiry?: number }>();
@@ -20,18 +20,13 @@ function createMemoryStateStore(): StateStore {
     get: async (key) => {
       const entry = kv.get(key);
       if (!entry) return null;
-      if (entry.expiry && Date.now() > entry.expiry) {
-        kv.delete(key);
-        return null;
-      }
+      if (entry.expiry && Date.now() > entry.expiry) { kv.delete(key); return null; }
       return entry.value;
     },
     set: async (key, value, ttlSecs?) => {
       kv.set(key, { value, expiry: ttlSecs ? Date.now() + ttlSecs * 1000 : undefined });
     },
-    del: async (key) => {
-      kv.delete(key);
-    },
+    del: async (key) => { kv.delete(key); },
     scan: async (pattern) => {
       const prefix = pattern.replace(/\*/g, '');
       return [...kv.keys()].filter((k) => k.startsWith(prefix));
@@ -76,18 +71,13 @@ function createMemoryKvStore(): KvStore {
     get: async (key) => {
       const entry = data.get(key);
       if (!entry) return null;
-      if (entry.expiry && Date.now() > entry.expiry) {
-        data.delete(key);
-        return null;
-      }
+      if (entry.expiry && Date.now() > entry.expiry) { data.delete(key); return null; }
       return entry.value;
     },
     set: async (key, value, ttlSecs?) => {
       data.set(key, { value, expiry: ttlSecs ? Date.now() + ttlSecs * 1000 : undefined });
     },
-    del: async (key) => {
-      data.delete(key);
-    },
+    del: async (key) => { data.delete(key); },
     scan: async (pattern) => {
       const prefix = pattern.replace(/\*/g, '');
       return [...data.keys()].filter((k) => k.startsWith(prefix));
@@ -166,11 +156,11 @@ describe('SpendTracker', () => {
   // #510 — budget check: under budget
   it('checkBudget returns over=false when under limit', async () => {
     const tracker = await createTracker();
-    await tracker.record(makeRecord({ costUsd: 0.5 }));
+    await tracker.record(makeRecord({ costUsd: 0.50 }));
     const status = await tracker.checkBudget('user-1', { dailyLimitUsd: 10.0 });
     expect(status.over).toBe(false);
     expect(status.pct).toBeLessThan(1);
-    expect(status.currentUsd).toBeCloseTo(0.5);
+    expect(status.currentUsd).toBeCloseTo(0.50);
   });
 
   // #511 — budget check: over budget
@@ -205,7 +195,7 @@ describe('SpendTracker', () => {
     }
     const summary = await tracker.getDailySummary('user-1');
     expect(summary.requestCount).toBe(10);
-    expect(summary.totalCostUsd).toBeCloseTo(0.1);
+    expect(summary.totalCostUsd).toBeCloseTo(0.10);
   });
 
   // #515 — estimateCost returns number
@@ -241,11 +231,7 @@ describe('ResponseCache', () => {
   // #522 — set and get
   it('cache hit after set', async () => {
     const cache = await createCache();
-    const key = cache.buildKey({
-      provider: 'openai',
-      model: 'gpt-4',
-      messages: [{ role: 'user', content: 'hi' }],
-    });
+    const key = cache.buildKey({ provider: 'openai', model: 'gpt-4', messages: [{ role: 'user', content: 'hi' }] });
     await cache.set(key, { content: 'hello', model: 'gpt-4' });
     const result = await cache.get<{ content: string }>(key);
     expect(result?.content).toBe('hello');
@@ -264,32 +250,16 @@ describe('ResponseCache', () => {
   // #524 — key determinism
   it('same params produce same key', async () => {
     const cache = await createCache();
-    const key1 = cache.buildKey({
-      provider: 'openai',
-      model: 'gpt-4',
-      messages: [{ role: 'user', content: 'test' }],
-    });
-    const key2 = cache.buildKey({
-      provider: 'openai',
-      model: 'gpt-4',
-      messages: [{ role: 'user', content: 'test' }],
-    });
+    const key1 = cache.buildKey({ provider: 'openai', model: 'gpt-4', messages: [{ role: 'user', content: 'test' }] });
+    const key2 = cache.buildKey({ provider: 'openai', model: 'gpt-4', messages: [{ role: 'user', content: 'test' }] });
     expect(key1).toBe(key2);
   });
 
   // #525 — different params produce different keys
   it('different params produce different keys', async () => {
     const cache = await createCache();
-    const key1 = cache.buildKey({
-      provider: 'openai',
-      model: 'gpt-4',
-      messages: [{ role: 'user', content: 'A' }],
-    });
-    const key2 = cache.buildKey({
-      provider: 'openai',
-      model: 'gpt-4',
-      messages: [{ role: 'user', content: 'B' }],
-    });
+    const key1 = cache.buildKey({ provider: 'openai', model: 'gpt-4', messages: [{ role: 'user', content: 'A' }] });
+    const key2 = cache.buildKey({ provider: 'openai', model: 'gpt-4', messages: [{ role: 'user', content: 'B' }] });
     expect(key1).not.toBe(key2);
   });
 
@@ -402,10 +372,8 @@ describe('Auth — signGpuToken / verifyGpuToken', () => {
     const crypto = await import('crypto');
     const payload = { uid: 'user-1', iat: 1000, exp: 1060 }; // epoch 1060 = long ago
     const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
-    const sig = crypto
-      .createHmac('sha256', process.env.GPU_ACCESS_SECRET!)
-      .update(payloadB64)
-      .digest('base64url');
+    const sig = crypto.createHmac('sha256', process.env.GPU_ACCESS_SECRET!)
+      .update(payloadB64).digest('base64url');
     const token = `${payloadB64}.${sig}`;
     expect(() => verifyGpuToken(token)).toThrow('Token expired');
   });
@@ -423,9 +391,7 @@ describe('Auth — signGpuToken / verifyGpuToken', () => {
     const { signGpuToken, verifyGpuToken } = await import('../src/auth/gpu-token');
     const token = signGpuToken('user-1');
     const parts = token.split('.');
-    const tamperedPayload = Buffer.from(
-      JSON.stringify({ uid: 'hacker', iat: 999999999, exp: 9999999999 }),
-    ).toString('base64url');
+    const tamperedPayload = Buffer.from(JSON.stringify({ uid: 'hacker', iat: 999999999, exp: 9999999999 })).toString('base64url');
     expect(() => verifyGpuToken(`${tamperedPayload}.${parts[1]}`)).toThrow('Invalid signature');
   });
 
@@ -456,12 +422,8 @@ describe('Vault', () => {
     const data = new Map<string, string>();
     return {
       get: async (name: string) => data.get(name) ?? null,
-      set: async (name: string, value: string) => {
-        data.set(name, value);
-      },
-      delete: async (name: string) => {
-        data.delete(name);
-      },
+      set: async (name: string, value: string) => { data.set(name, value); },
+      delete: async (name: string) => { data.delete(name); },
       list: async () => [...data.keys()],
       _data: data,
     };
@@ -606,9 +568,7 @@ describe('GatewaySDK', () => {
       text: async () => JSON.stringify(data),
       headers: new Headers({ 'content-type': 'application/json' }),
       arrayBuffer: async () => new TextEncoder().encode(JSON.stringify(data)).buffer,
-      clone() {
-        return this;
-      },
+      clone() { return this; },
     } as unknown as Response;
   }
 
@@ -645,9 +605,7 @@ describe('GatewaySDK', () => {
 
   // #578 — translate sends text
   it('translate sends POST to /v1/translate', async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockJsonResponse({ translated_text: 'hello', used_gpu: false }),
-    );
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ translated_text: 'hello', used_gpu: false }));
     const sdk = await createSDK();
     const result = await sdk.translate('bonjour', 'fr', 'en');
     expect(result.translatedText).toBe('hello');
@@ -663,15 +621,13 @@ describe('GatewaySDK', () => {
 
   // #580 — pipeline sends audio
   it('pipeline sends POST to /v1/speech', async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockJsonResponse({
-        transcription: 'bonjour',
-        response: 'hello',
-        audio_base64: 'AAAA',
-        content_type: 'audio/wav',
-        timing: { total_ms: 500, used_gpu: true },
-      }),
-    );
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({
+      transcription: 'bonjour',
+      response: 'hello',
+      audio_base64: 'AAAA',
+      content_type: 'audio/wav',
+      timing: { total_ms: 500, used_gpu: true },
+    }));
     const sdk = await createSDK();
     const result = await sdk.pipeline(new Uint8Array([1, 2, 3]), { source: 'fr', target: 'en' });
     expect(result.transcription).toBe('bonjour');
@@ -710,15 +666,13 @@ describe('GatewaySDK', () => {
 
   // #584 — gpuStatus
   it('gpuStatus returns status object', async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockJsonResponse({
-        status: 'ready',
-        podId: 'pod-1',
-        endpoint: 'http://test:8000',
-        gpuType: 'RTX 4090',
-        gpuHealthy: true,
-      }),
-    );
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({
+      status: 'ready',
+      podId: 'pod-1',
+      endpoint: 'http://test:8000',
+      gpuType: 'RTX 4090',
+      gpuHealthy: true,
+    }));
     const sdk = await createSDK();
     const result = await sdk.gpuStatus();
     expect(result.status).toBe('ready');
@@ -754,9 +708,7 @@ describe('GatewaySDK', () => {
 
   // #588 — gpuOffers
   it('gpuOffers returns offers array', async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockJsonResponse({ offers: [{ id: '1', gpuName: 'RTX 4090' }] }),
-    );
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ offers: [{ id: '1', gpuName: 'RTX 4090' }] }));
     const sdk = await createSDK();
     const result = await sdk.gpuOffers();
     expect(Array.isArray(result)).toBe(true);
@@ -807,13 +759,11 @@ describe('GatewaySDK', () => {
 
   // #594 — chat sends messages
   it('chat sends POST to /v1/chat/completions', async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockJsonResponse({
-        choices: [{ message: { content: 'Hi there!' } }],
-        model: 'llama-3.3-70b',
-        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-      }),
-    );
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({
+      choices: [{ message: { content: 'Hi there!' } }],
+      model: 'llama-3.3-70b',
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    }));
     const sdk = await createSDK();
     const result = await sdk.chat([{ role: 'user', content: 'Hello' }]);
     expect(result.content).toBe('Hi there!');
@@ -831,8 +781,7 @@ describe('GatewaySDK', () => {
   // #596 — metrics returns prometheus string
   it('metrics returns string', async () => {
     fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
+      ok: true, status: 200,
       text: async () => '# HELP gateway_requests Total requests\ngateway_requests 42',
       headers: new Headers(),
     } as unknown as Response);
@@ -852,9 +801,7 @@ describe('GatewaySDK', () => {
 
   // #598 — gpuEventLogs
   it('gpuEventLogs returns entries', async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockJsonResponse({ type: 'jsonl', lines: 1, entries: [{ event: 'boot' }] }),
-    );
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ type: 'jsonl', lines: 1, entries: [{ event: 'boot' }] }));
     const sdk = await createSDK();
     const result = await sdk.gpuEventLogs(10);
     expect(result.entries).toHaveLength(1);
@@ -862,9 +809,7 @@ describe('GatewaySDK', () => {
 
   // #599 — getApiKeys
   it('getApiKeys returns keys array', async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockJsonResponse({ keys: [{ provider: 'groq', hint: 'gsk_...', set: true }] }),
-    );
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ keys: [{ provider: 'groq', hint: 'gsk_...', set: true }] }));
     const sdk = await createSDK();
     const result = await sdk.getApiKeys();
     expect(result).toHaveLength(1);
@@ -924,8 +869,7 @@ describe('GatewaySDK — HTTP Client internals', () => {
       .mockRejectedValueOnce(new TypeError('fetch failed'))
       .mockRejectedValueOnce(new TypeError('fetch failed'))
       .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
+        ok: true, status: 200,
         json: async () => ({ text: 'ok', used_gpu: false }),
         headers: new Headers(),
       } as unknown as Response);
@@ -939,8 +883,7 @@ describe('GatewaySDK — HTTP Client internals', () => {
   // #604 — does not retry HTTP errors
   it('does not retry HTTP 4xx/5xx errors', async () => {
     fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
+      ok: false, status: 400,
       text: async () => 'Bad Request',
       headers: new Headers(),
     } as unknown as Response);
@@ -954,8 +897,7 @@ describe('GatewaySDK — HTTP Client internals', () => {
   // #605 — throws GatewayError with statusCode
   it('throws GatewayError with correct statusCode', async () => {
     fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 404,
+      ok: false, status: 404,
       text: async () => 'Not Found',
       headers: new Headers(),
     } as unknown as Response);
@@ -987,8 +929,7 @@ describe('GatewaySDK — HTTP Client internals', () => {
   // #607 — authorization header set when apiKey provided
   it('sends Authorization header when apiKey is provided', async () => {
     fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
+      ok: true, status: 200,
       json: async () => ({ status: 'ok' }),
       headers: new Headers(),
     } as unknown as Response);
@@ -1002,8 +943,7 @@ describe('GatewaySDK — HTTP Client internals', () => {
   // #608 — no authorization when no apiKey
   it('does not send Authorization when no apiKey', async () => {
     fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
+      ok: true, status: 200,
       json: async () => ({ status: 'ok' }),
       headers: new Headers(),
     } as unknown as Response);
@@ -1037,8 +977,7 @@ describe('GatewaySDK — HTTP Client internals', () => {
       .mockRejectedValueOnce(new TypeError('fetch failed'))
       // Groq direct fallback
       .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
+        ok: true, status: 200,
         json: async () => ({ text: 'groq-result' }),
         headers: new Headers(),
       } as unknown as Response);
@@ -1059,8 +998,7 @@ describe('GatewaySDK — HTTP Client internals', () => {
   // #612 — allowedStatuses for deploy (202, 409)
   it('allows 202 and 409 for deployGpu', async () => {
     fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 409,
+      ok: false, status: 409,
       json: async () => ({ status: 'in-progress', message: 'Deploy already running' }),
       text: async () => JSON.stringify({ status: 'in-progress' }),
       headers: new Headers(),
@@ -1085,14 +1023,9 @@ describe('Ensemble STT (runVerifiedSTT)', () => {
     };
     const slowProvider = {
       getModels: () => [{ id: 'whisper-slow' }],
-      transcribe: vi
-        .fn()
-        .mockImplementation(
-          () =>
-            new Promise((resolve) =>
-              setTimeout(() => resolve({ text: 'slow result', segments: [] }), 500),
-            ),
-        ),
+      transcribe: vi.fn().mockImplementation(() => new Promise((resolve) =>
+        setTimeout(() => resolve({ text: 'slow result', segments: [] }), 500),
+      )),
     };
 
     const result = await runVerifiedSTT(Buffer.from([1, 2, 3]), 'fr', '', {
@@ -1117,22 +1050,20 @@ describe('Ensemble STT (runVerifiedSTT)', () => {
       transcribe: vi.fn().mockRejectedValue(new Error('transcription failed')),
     };
 
-    await expect(
-      runVerifiedSTT(Buffer.from([1]), 'fr', '', {
-        providers: [
-          { name: 'p1', provider: failProvider as any },
-          { name: 'p2', provider: failProvider as any },
-        ],
-      }),
-    ).rejects.toThrow('All 2 providers failed');
+    await expect(runVerifiedSTT(Buffer.from([1]), 'fr', '', {
+      providers: [
+        { name: 'p1', provider: failProvider as any },
+        { name: 'p2', provider: failProvider as any },
+      ],
+    })).rejects.toThrow('All 2 providers failed');
   });
 
   // #615 — throws on empty providers
   it('throws when no providers configured', async () => {
     const { runVerifiedSTT } = await import('../src/ensemble-stt');
-    await expect(runVerifiedSTT(Buffer.from([1]), 'fr', '', { providers: [] })).rejects.toThrow(
-      'No STT providers configured',
-    );
+    await expect(
+      runVerifiedSTT(Buffer.from([1]), 'fr', '', { providers: [] }),
+    ).rejects.toThrow('No STT providers configured');
   });
 
   // #616 — timeout drops slow providers
@@ -1141,14 +1072,9 @@ describe('Ensemble STT (runVerifiedSTT)', () => {
 
     const slowProvider = {
       getModels: () => [{ id: 'whisper' }],
-      transcribe: vi
-        .fn()
-        .mockImplementation(
-          () =>
-            new Promise((resolve) =>
-              setTimeout(() => resolve({ text: 'late', segments: [] }), 2000),
-            ),
-        ),
+      transcribe: vi.fn().mockImplementation(() => new Promise((resolve) =>
+        setTimeout(() => resolve({ text: 'late', segments: [] }), 2000),
+      )),
     };
     const fastProvider = {
       getModels: () => [{ id: 'whisper-fast' }],
@@ -1199,11 +1125,11 @@ describe('Ensemble STT (runVerifiedSTT)', () => {
       transcribe: vi.fn(),
     };
 
-    await expect(
-      runVerifiedSTT(Buffer.from([1]), 'fr', '', {
-        providers: [{ name: 'nomodel', provider: noModelProvider as any }],
-      }),
-    ).rejects.toThrow(/failed/i);
+    await expect(runVerifiedSTT(Buffer.from([1]), 'fr', '', {
+      providers: [
+        { name: 'nomodel', provider: noModelProvider as any },
+      ],
+    })).rejects.toThrow(/failed/i);
   });
 
   // #619 — clears deadline timers after race

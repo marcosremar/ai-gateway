@@ -1,21 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
-  stopTier,
-  startTier,
-  deleteTier,
-  restartTier,
-  deployTier,
-  getTierDetail,
-  getAllTierDetails,
+  stopTier, startTier, deleteTier, restartTier, deployTier,
+  getTierDetail, getAllTierDetails,
 } from '@ai-gateway/autoscaler/tier-lifecycle';
 import type { TierLifecycleDeps } from '@ai-gateway/autoscaler/tier-lifecycle';
-import type {
-  AutoScalerConfig,
-  GpuTierState,
-  IdleTierState,
-  ReadyTierState,
-  BootingTierState,
-} from '@ai-gateway';
+import type { AutoScalerConfig, GpuTierState, IdleTierState, ReadyTierState, BootingTierState } from '@ai-gateway';
 
 const defaultConfig: AutoScalerConfig = {
   enabled: true,
@@ -23,13 +12,7 @@ const defaultConfig: AutoScalerConfig = {
   windowMinutes: 30,
   maxLatencyMs: 1500,
   tiers: [
-    {
-      provider: 'runpod',
-      instanceId: 'pod-1',
-      apiKey: 'key-1',
-      authId: 'auth-1',
-      endpoint: 'http://gpu0:8000',
-    },
+    { provider: 'runpod', instanceId: 'pod-1', apiKey: 'key-1', authId: 'auth-1', endpoint: 'http://gpu0:8000' },
     { provider: 'runpod', instanceId: 'pod-2', apiKey: 'key-2', endpoint: 'http://gpu1:8000' },
   ],
 };
@@ -39,9 +22,7 @@ function makeMockClient() {
     providerId: 'runpod',
     bootTimeSecs: 120,
     discoverInstance: vi.fn(),
-    createInstance: vi
-      .fn()
-      .mockResolvedValue({ instanceId: 'new-pod', endpoint: 'http://new:8000' }),
+    createInstance: vi.fn().mockResolvedValue({ instanceId: 'new-pod', endpoint: 'http://new:8000' }),
     startInstance: vi.fn().mockResolvedValue(undefined),
     stopInstance: vi.fn().mockResolvedValue(undefined),
     deleteInstance: vi.fn().mockResolvedValue(undefined),
@@ -75,13 +56,7 @@ function makeDeps(overrides?: Partial<TierLifecycleDeps>): TierLifecycleDeps {
 describe('stopTier', () => {
   beforeEach(() => {
     poolStatus = [
-      {
-        state: 'ready',
-        tierIndex: 0,
-        endpoint: 'http://gpu0:8000',
-        lastHealthyAt: Date.now(),
-        bootedAt: Date.now(),
-      } as ReadyTierState,
+      { state: 'ready', tierIndex: 0, endpoint: 'http://gpu0:8000', lastHealthyAt: Date.now(), bootedAt: Date.now() } as ReadyTierState,
     ];
   });
 
@@ -91,10 +66,7 @@ describe('stopTier', () => {
     expect(result.ok).toBe(true);
     expect(result.previousState).toBe('ready');
     expect(result.newState).toBe('idle');
-    expect(mockClient.stopInstance).toHaveBeenCalledWith('pod-1', {
-      apiKey: 'key-1',
-      authId: 'auth-1',
-    });
+    expect(mockClient.stopInstance).toHaveBeenCalledWith('pod-1', { apiKey: 'key-1', authId: 'auth-1' });
   });
 
   it('returns success for already-idle tier', async () => {
@@ -134,14 +106,7 @@ describe('stopTier', () => {
 
   it('cancels boot poller', async () => {
     poolStatus = [
-      {
-        state: 'booting',
-        tierIndex: 0,
-        endpoint: '',
-        bootTriggeredAt: Date.now(),
-        trigger: 'manual',
-        prevBootFailCount: 0,
-      } as BootingTierState,
+      { state: 'booting', tierIndex: 0, endpoint: '', bootTriggeredAt: Date.now(), trigger: 'manual', prevBootFailCount: 0 } as BootingTierState,
     ];
     const deps = makeDeps();
     await stopTier(deps, 'user-1', 0);
@@ -160,22 +125,12 @@ describe('startTier', () => {
     expect(result.ok).toBe(true);
     expect(result.previousState).toBe('idle');
     expect(result.newState).toBe('booting');
-    expect(mockClient.startInstance).toHaveBeenCalledWith('pod-1', {
-      apiKey: 'key-1',
-      authId: 'auth-1',
-    });
+    expect(mockClient.startInstance).toHaveBeenCalledWith('pod-1', { apiKey: 'key-1', authId: 'auth-1' });
   });
 
   it('returns success if already booting', async () => {
     poolStatus = [
-      {
-        state: 'booting',
-        tierIndex: 0,
-        endpoint: '',
-        bootTriggeredAt: Date.now(),
-        trigger: 'manual',
-        prevBootFailCount: 0,
-      } as BootingTierState,
+      { state: 'booting', tierIndex: 0, endpoint: '', bootTriggeredAt: Date.now(), trigger: 'manual', prevBootFailCount: 0 } as BootingTierState,
     ];
     const deps = makeDeps();
     const result = await startTier(deps, 'user-1', 0);
@@ -199,12 +154,7 @@ describe('startTier', () => {
 describe('deleteTier', () => {
   beforeEach(() => {
     poolStatus = [
-      {
-        state: 'ready',
-        tierIndex: 0,
-        endpoint: 'http://gpu0:8000',
-        lastHealthyAt: Date.now(),
-      } as ReadyTierState,
+      { state: 'ready', tierIndex: 0, endpoint: 'http://gpu0:8000', lastHealthyAt: Date.now() } as ReadyTierState,
     ];
   });
 
@@ -239,12 +189,7 @@ describe('deleteTier', () => {
 describe('restartTier', () => {
   beforeEach(() => {
     poolStatus = [
-      {
-        state: 'ready',
-        tierIndex: 0,
-        endpoint: 'http://gpu0:8000',
-        lastHealthyAt: Date.now(),
-      } as ReadyTierState,
+      { state: 'ready', tierIndex: 0, endpoint: 'http://gpu0:8000', lastHealthyAt: Date.now() } as ReadyTierState,
     ];
   });
 
@@ -281,12 +226,7 @@ describe('deployTier', () => {
 
   it('deletes existing instance first if not idle', async () => {
     poolStatus = [
-      {
-        state: 'ready',
-        tierIndex: 0,
-        endpoint: 'http://gpu0:8000',
-        lastHealthyAt: Date.now(),
-      } as ReadyTierState,
+      { state: 'ready', tierIndex: 0, endpoint: 'http://gpu0:8000', lastHealthyAt: Date.now() } as ReadyTierState,
     ];
     const deps = makeDeps();
     const result = await deployTier(deps, 'user-1', 0);
@@ -308,13 +248,7 @@ describe('deployTier', () => {
 describe('getTierDetail', () => {
   it('returns detail for a ready tier', async () => {
     poolStatus = [
-      {
-        state: 'ready',
-        tierIndex: 0,
-        endpoint: 'http://gpu0:8000',
-        lastHealthyAt: 1000,
-        bootedAt: 500,
-      } as ReadyTierState,
+      { state: 'ready', tierIndex: 0, endpoint: 'http://gpu0:8000', lastHealthyAt: 1000, bootedAt: 500 } as ReadyTierState,
     ];
     const deps = makeDeps();
     const detail = await getTierDetail(deps, 'user-1', 0);
@@ -325,9 +259,7 @@ describe('getTierDetail', () => {
   });
 
   it('returns detail for an idle tier', async () => {
-    poolStatus = [
-      { state: 'idle', tierIndex: 0, unhealthy: true, bootFailCount: 2 } as IdleTierState,
-    ];
+    poolStatus = [{ state: 'idle', tierIndex: 0, unhealthy: true, bootFailCount: 2 } as IdleTierState];
     const deps = makeDeps();
     const detail = await getTierDetail(deps, 'user-1', 0);
     expect(detail!.state).toBe('idle');
@@ -346,12 +278,7 @@ describe('getTierDetail', () => {
 describe('getAllTierDetails', () => {
   it('returns details for all tiers', async () => {
     poolStatus = [
-      {
-        state: 'ready',
-        tierIndex: 0,
-        endpoint: 'http://gpu0:8000',
-        lastHealthyAt: 1000,
-      } as ReadyTierState,
+      { state: 'ready', tierIndex: 0, endpoint: 'http://gpu0:8000', lastHealthyAt: 1000 } as ReadyTierState,
       { state: 'idle', tierIndex: 1 } as IdleTierState,
     ];
     const deps = makeDeps();

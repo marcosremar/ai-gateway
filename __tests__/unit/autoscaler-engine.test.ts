@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AutoscalerEngine, MAX_BOOT_FAILURES, BOOT_COOLDOWN_BASE_MS, BOOT_COOLDOWN_MAX_MS } from '../../src/autoscaler/engine';
-import type { AutoscalerEngineOptions } from '../../src/autoscaler/engine';
-import type { AutoScalerConfig, GpuTierConfig } from '../../src/types';
-import type { GpuProviderRegistry } from '../../src/gpu-providers/registry';
-import type { SessionTracker } from '../../src/autoscaler/session-tracker';
-import type { LatencyTracker } from '../../src/autoscaler/latency-tracker';
-import type { StatePersistence } from '../../src/autoscaler/state-persistence';
+import { AutoscalerEngine, MAX_BOOT_FAILURES, BOOT_COOLDOWN_BASE_MS, BOOT_COOLDOWN_MAX_MS } from '../src/autoscaler/engine';
+import type { AutoscalerEngineOptions } from '../src/autoscaler/engine';
+import type { AutoScalerConfig, GpuTierConfig } from '../src/types';
+import type { GpuProviderRegistry } from '../src/gpu-providers/registry';
+import type { SessionTracker } from '../src/autoscaler/session-tracker';
+import type { LatencyTracker } from '../src/autoscaler/latency-tracker';
+import type { StatePersistence } from '../src/autoscaler/state-persistence';
 
 // ── Mock helpers ──────────────────────────────────────────────────────────────
 

@@ -14,19 +14,12 @@ import {
   getSystemSttEntryFromSettings,
   type UserProviderSettings,
   type SavedProfile,
-} from '../../src/providers/chain-builder';
+} from '../src/providers/chain-builder';
 
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
-  for (const k of [
-    'OPENAI_API_KEY',
-    'GROQ_API_KEY',
-    'OPENROUTER_API_KEY',
-    'FIREWORKS_API_KEY',
-    'MODAL_API_KEY',
-    'VAST_API_KEY',
-  ]) {
+  for (const k of ['OPENAI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'MODAL_API_KEY', 'VAST_API_KEY']) {
     savedEnv[k] = process.env[k];
     delete process.env[k];
   }
@@ -92,10 +85,7 @@ describe('resolveApiKey', () => {
 });
 
 describe('buildFallbackChain', () => {
-  function makeSettings(
-    profiles: SavedProfile[],
-    overrides: Partial<UserProviderSettings> = {},
-  ): UserProviderSettings {
+  function makeSettings(profiles: SavedProfile[], overrides: Partial<UserProviderSettings> = {}): UserProviderSettings {
     return {
       activeProvider: 'openai',
       keys: {},
@@ -170,8 +160,8 @@ describe('buildFallbackChain', () => {
     ]);
 
     const chain = buildFallbackChain(settings, 'llm');
-    expect(chain.some((e) => e.provider === 'runpod')).toBe(false);
-    expect(chain.some((e) => e.provider === 'openai')).toBe(true);
+    expect(chain.some(e => e.provider === 'runpod')).toBe(false);
+    expect(chain.some(e => e.provider === 'openai')).toBe(true);
   });
 
   it('allows vast-serverless provider', () => {
@@ -180,7 +170,7 @@ describe('buildFallbackChain', () => {
     ]);
 
     const chain = buildFallbackChain(settings, 'llm');
-    expect(chain.some((e) => e.provider === 'vast-serverless')).toBe(true);
+    expect(chain.some(e => e.provider === 'vast-serverless')).toBe(true);
   });
 
   it('handles null settings', () => {

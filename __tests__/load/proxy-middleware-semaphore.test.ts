@@ -1,9 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  Semaphore,
-  SemaphoreFullError,
-  ProviderSemaphores,
-} from '../../src/proxy/middleware/semaphore';
+import { Semaphore, SemaphoreFullError, ProviderSemaphores } from '../src/proxy/middleware/semaphore';
 
 describe('Semaphore', () => {
   it('allows up to max concurrent', async () => {
@@ -21,9 +17,7 @@ describe('Semaphore', () => {
     await sem.acquire();
 
     let resolved = false;
-    const p = sem.acquire().then(() => {
-      resolved = true;
-    });
+    const p = sem.acquire().then(() => { resolved = true; });
     expect(resolved).toBe(false);
 
     sem.release();
@@ -61,14 +55,8 @@ describe('Semaphore', () => {
     await sem.acquire();
 
     const order: number[] = [];
-    const p1 = sem.acquire().then(() => {
-      order.push(1);
-      sem.release();
-    });
-    const p2 = sem.acquire().then(() => {
-      order.push(2);
-      sem.release();
-    });
+    const p1 = sem.acquire().then(() => { order.push(1); sem.release(); });
+    const p2 = sem.acquire().then(() => { order.push(2); sem.release(); });
 
     sem.release();
     await p1;
@@ -101,12 +89,8 @@ describe('ProviderSemaphores', () => {
     const order: string[] = [];
 
     await Promise.all([
-      ps.withLimit('groq', async () => {
-        order.push('groq');
-      }),
-      ps.withLimit('openai', async () => {
-        order.push('openai');
-      }),
+      ps.withLimit('groq', async () => { order.push('groq'); }),
+      ps.withLimit('openai', async () => { order.push('openai'); }),
     ]);
 
     expect(order).toContain('groq');
@@ -124,9 +108,7 @@ describe('ProviderSemaphores', () => {
     const ps = new ProviderSemaphores(1);
 
     await expect(
-      ps.withLimit('test', async () => {
-        throw new Error('boom');
-      }),
+      ps.withLimit('test', async () => { throw new Error('boom'); }),
     ).rejects.toThrow('boom');
 
     const result = await ps.withLimit('test', async () => 'ok');

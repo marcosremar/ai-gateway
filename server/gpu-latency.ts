@@ -14,6 +14,7 @@ import net from 'net';
 import type { GpuOffer } from '../src/gpu-providers/types';
 import { upsertHostMeta, saveProbeResult, getHostRttMap } from './latency-db';
 import type { ProbeResult } from './latency-db';
+import { safeCatch } from '../src/safe-catch';
 
 // ── Datacenter coordinates (capital / main hub per country) ──────────────────
 
@@ -172,7 +173,7 @@ export function scheduleBackgroundProbes(offers: GpuOffer[]): void {
       geolocation: geolocation ?? '',
       priceUsd:    pricePerHr  ?? 0,
       directPort:  hostDirectPort,
-    }).catch(() => {});
+    }).catch(safeCatch('upsert-host-meta'));
 
     const extraPorts = hostDirectPort ? [hostDirectPort] : [];
     _probing.add(hostId);

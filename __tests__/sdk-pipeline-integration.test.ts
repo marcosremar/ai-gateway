@@ -3,7 +3,7 @@ import { AIClient } from '../src/client/ai-client';
 import { AIProviderRegistry } from '../src/providers/registry';
 import { OpenAISTTProvider } from '../src/providers/openai/openai-stt';
 import { OpenAITTSProvider } from '../src/providers/openai/openai-tts';
-import { OpenAICompatLLMProvider } from '../src/providers/openai-compat/openai-compat-llm';
+import { OpenAICompatLLMProvider } from '../src/providers/openai-compat';
 import { loadEnv, checkOpenAIAvailable } from './helpers';
 
 await loadEnv();

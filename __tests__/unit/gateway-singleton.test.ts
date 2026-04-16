@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { initGateway, getGateway, resetGateway } from '../../src/gateway';
+import { initGateway, getGateway, resetGateway } from '../src/gateway';
 
 const GATEWAY_KEY = Symbol.for('__parle_ai_gateway_instance');
 

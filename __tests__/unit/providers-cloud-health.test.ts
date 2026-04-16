@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { probeCloudProvider, probeAllCloudProviders } from '../../src/providers/cloud-health';
+import { probeCloudProvider, probeAllCloudProviders } from '../src/providers/cloud-health';
 
 describe('probeCloudProvider', () => {
   const originalFetch = globalThis.fetch;

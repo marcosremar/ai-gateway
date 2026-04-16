@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createLogger, setLogLevel, setLogHandler } from '../../src/browser/logger';
-import type { LogLevel } from '../../src/browser/logger';
+import { createLogger, setLogLevel, setLogHandler } from '../src/browser/logger';
+import type { LogLevel } from '../src/browser/logger';
 
 describe('browser logger', () => {
   // Reset global state between tests

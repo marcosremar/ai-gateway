@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ResponseCache } from '../../src/caching/response-cache';
-import { withCache } from '../../src/caching/with-cache';
-import type { KvStore } from '../../src/deps';
-import type { LLMProvider, ChatRequest, ChatResponse } from '../../src/providers/types';
+import { ResponseCache } from '../src/caching/response-cache';
+import { withCache } from '../src/caching/with-cache';
+import type { KvStore } from '../src/deps';
+import type { LLMProvider, ChatRequest, ChatResponse } from '../src/providers/types';
 
 function createMemoryKvStore(): KvStore {
   const data = new Map<string, { value: string; expiry?: number }>();
@@ -17,9 +17,13 @@ function createMemoryKvStore(): KvStore {
       data.set(key, { value, expiry: ttlSecs ? Date.now() + ttlSecs * 1000 : undefined });
     },
     del: async (key) => { data.delete(key); },
-    scan: async (pattern) => {
+    scan: async (pattern, callback) => {
       const prefix = pattern.replace(/\*/g, '');
-      return [...data.keys()].filter((k) => k.startsWith(prefix));
+      const matchingKeys = [...data.keys()].filter((k) => k.startsWith(prefix));
+      if (callback) {
+        callback(matchingKeys);
+      }
+      return matchingKeys.length;
     },
   };
 }
@@ -74,7 +78,8 @@ describe('ResponseCache', () => {
     await cache.set(key1, 'data1');
     await cache.set(key2, 'data2');
 
-    await cache.invalidate('*'); // all cache keys
+    const invalidated = await cache.invalidate('*'); // all cache keys
+    expect(invalidated).toBeGreaterThanOrEqual(0);
     expect(await cache.get(key1)).toBeNull();
     expect(await cache.get(key2)).toBeNull();
   });

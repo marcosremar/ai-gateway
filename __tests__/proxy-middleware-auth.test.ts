@@ -43,9 +43,6 @@ describe('validateAuth', () => {
 
   it('logs warning on invalid key', () => {
     validateAuth('Bearer wrong', ['correct']);
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('[auth]'),
-      expect.anything(),
-    );
+    expect(console.warn).toHaveBeenCalledWith('Invalid API key');
   });
 });

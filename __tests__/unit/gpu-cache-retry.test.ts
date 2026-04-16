@@ -57,7 +57,7 @@ vi.mock('@prisma/adapter-pg', () => ({
 }));
 
 // Mock server/state
-vi.mock('../server/state', () => ({
+vi.mock('../../server/state', () => ({
   prisma:               mockPrisma,
   deployState:          { status: 'idle', podId: null, endpoint: null, gpuType: null, dockerImage: null, message: '', step: 'idle', stepDetail: '', startedAt: 0, retryCount: 0, provider: null, alert: '', sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: null, transitions: [] },
   deploymentSM:         { state: 'idle', send: vi.fn() },
@@ -130,7 +130,7 @@ vi.mock('../server/state', () => ({
 }));
 
 // Mock server/providers to inject our mock clients
-vi.mock('../server/providers', () => ({
+vi.mock('../../server/providers', () => ({
   runpod:              mockRunpod,
   vast:                mockVast,
   tensordock:          mockTensordock,
@@ -146,12 +146,12 @@ vi.mock('../server/providers', () => ({
 }));
 
 // Mock gpu-readiness
-vi.mock('../server/gpu-readiness', () => ({
+vi.mock('../../server/gpu-readiness', () => ({
   isReadinessCheckInProgress: vi.fn(() => false),
 }));
 
 // Mock heavy deps
-vi.mock('../server/metrics', () => ({
+vi.mock('../../server/metrics', () => ({
   logGpuEvent:           vi.fn(),
   startDeploySession:    vi.fn(),
   updateDeploySession:   vi.fn(),
@@ -163,7 +163,7 @@ vi.mock('../server/metrics', () => ({
   updateHostLatency:     vi.fn(),
 }));
 
-vi.mock('../server/latency-db', () => ({
+vi.mock('../../server/latency-db', () => ({
   getBestLatencyByGpuModel: vi.fn(async () => ({})),
   upsertHostMeta:        vi.fn(),
   saveProbeResult:       vi.fn(),
@@ -176,7 +176,7 @@ vi.mock('../server/latency-db', () => ({
   closeLatencyDb:        vi.fn(),
 }));
 
-vi.mock('../server/ws-state', () => ({
+vi.mock('../../server/ws-state', () => ({
   broadcastProviderStatus: vi.fn(),
   broadcastWs:             vi.fn(),
 }));

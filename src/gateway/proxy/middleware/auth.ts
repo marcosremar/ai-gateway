@@ -53,7 +53,7 @@ export function validateAuth(authHeader: string | undefined, validKeys: string[]
   }
   const valid = validKeys.some((key) => safeEqual(token, key));
   if (!valid) {
-    log.warn('Invalid API key (length=%d)', token.length);
+    log.warn('Invalid API key');
   }
   return valid;
 }

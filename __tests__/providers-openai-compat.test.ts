@@ -1,7 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OpenAICompatLLMProvider } from '../src/providers/openai-compat/openai-compat-llm';
-import { OpenAICompatSTTProvider } from '../src/providers/openai-compat/openai-compat-stt';
-import { OpenAICompatTTSProvider } from '../src/providers/openai-compat/openai-compat-tts';
+import { OpenAICompatLLMProvider, OpenAICompatSTTProvider, OpenAICompatTTSProvider } from '../src/providers/openai-compat';
 
 // ── Shared test configs ───────────────────────────────────────────────────────
 

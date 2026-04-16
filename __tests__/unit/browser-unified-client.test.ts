@@ -3,7 +3,7 @@
  * Uses vi.mock to intercept dynamic imports of openai-realtime and speech-client.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TypedEmitter } from '../../src/browser/emitter';
+import { TypedEmitter } from '../src/browser/emitter';
 
 // ── Mock dynamic imports ─────────────────────────────────────────────────────
 
@@ -49,8 +49,8 @@ vi.mock('../src/browser/speech-client', () => ({
 
 // ── Import after mocking ─────────────────────────────────────────────────────
 
-import { UnifiedSpeechClient } from '../../src/browser/unified-client';
-import type { UnifiedSpeechClientConfig } from '../../src/browser/unified-client';
+import { UnifiedSpeechClient } from '../src/browser/unified-client';
+import type { UnifiedSpeechClientConfig } from '../src/browser/unified-client';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

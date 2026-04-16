@@ -4,9 +4,9 @@
  * timeout, failure modes, outlier detection, metadata propagation.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { runVerifiedSTT, runEnsembleSTT } from '../../src/ensemble-stt';
-import type { STTVerifierDeps } from '../../src/ensemble-stt';
-import type { STTProvider, STTResponse } from '../../src/providers/types';
+import { runVerifiedSTT, runEnsembleSTT } from '../src/ensemble-stt';
+import type { STTVerifierDeps } from '../src/ensemble-stt';
+import type { STTProvider, STTResponse } from '../src/providers/types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

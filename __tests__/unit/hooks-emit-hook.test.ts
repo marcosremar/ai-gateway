@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { emitHook } from '../../src/hooks';
-import type { GatewayHooks, RequestStartEvent } from '../../src/hooks';
+import { emitHook } from '../src/hooks';
+import type { GatewayHooks, RequestStartEvent } from '../src/hooks';
 
 describe('emitHook()', () => {
   it('should do nothing when hooks is undefined', () => {

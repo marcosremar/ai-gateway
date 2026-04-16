@@ -4,6 +4,7 @@
 
 import type { DatabaseConfig, QueryResult } from './types';
 import { DatabaseError } from './types';
+import { safeClose } from '../safe-catch';
 
 export interface SqlDriver {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<QueryResult<T>>;
@@ -68,7 +69,7 @@ export async function createPgDriver(connectionString: string): Promise<SqlDrive
   try {
     await client.connect();
   } catch (err) {
-    await client.end().catch(() => {});
+          await safeClose(client, 'pg-query-reconnect');
     throw err;
   }
 
@@ -80,7 +81,7 @@ export async function createPgDriver(connectionString: string): Promise<SqlDrive
       } catch (err) {
         const dbErr = err as NodeJS.ErrnoException;
         if (dbErr.code === 'ECONNRESET' || dbErr.code === 'ENOTCONN' || dbErr.code === 'ECONNREFUSED') {
-          await client.end().catch(() => {});
+    await safeClose(client, 'pg-connect-fallback');
         }
         throw err;
       }

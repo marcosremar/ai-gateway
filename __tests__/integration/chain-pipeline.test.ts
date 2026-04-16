@@ -12,21 +12,14 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { Server } from 'node:http';
-import { AIClient } from '../../src/client/ai-client';
-import { AIProviderRegistry } from '../../src/providers/registry';
-import type { AIProfile } from '../../src/client/types';
+import { AIClient } from '../src/client/ai-client';
+import { AIProviderRegistry } from '../src/providers/registry';
+import type { AIProfile } from '../src/client/types';
 import type {
-  LLMProvider,
-  ChatRequest,
-  ChatResponse,
-  STTProvider,
-  STTRequest,
-  STTResponse,
-  ModelInfo,
-  TTSProvider,
-  TTSRequest,
-  TTSResponse,
-} from '../../src/providers/types';
+  LLMProvider, ChatRequest, ChatResponse,
+  STTProvider, STTRequest, STTResponse, ModelInfo,
+  TTSProvider, TTSRequest, TTSResponse,
+} from '../src/providers/types';
 
 // ── Minimal mock providers (cloud fallback, never used when chain succeeds) ──
 
@@ -34,12 +27,8 @@ class MockSTT implements STTProvider {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   readonly providerId: any = 'mock-stt';
   calls = 0;
-  isConfigured() {
-    return true;
-  }
-  getModels(): ModelInfo[] {
-    return [];
-  }
+  isConfigured() { return true; }
+  getModels(): ModelInfo[] { return []; }
   async transcribe(_r: STTRequest): Promise<STTResponse> {
     this.calls++;
     return { text: 'cloud-stt-fallback' };
@@ -50,12 +39,8 @@ class MockLLM implements LLMProvider {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   readonly providerId: any = 'mock-llm';
   calls = 0;
-  isConfigured() {
-    return true;
-  }
-  withApiKey() {
-    return this;
-  }
+  isConfigured() { return true; }
+  withApiKey() { return this; }
   async chat(_r: ChatRequest): Promise<ChatResponse> {
     this.calls++;
     return { content: 'cloud-llm-fallback', model: 'mock' };
@@ -66,19 +51,13 @@ class MockTTS implements TTSProvider {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   readonly providerId: any = 'mock-tts';
   calls = 0;
-  isConfigured() {
-    return true;
-  }
-  getModels(): ModelInfo[] {
-    return [];
-  }
+  isConfigured() { return true; }
+  getModels(): ModelInfo[] { return []; }
   async synthesize(_r: TTSRequest): Promise<TTSResponse> {
     this.calls++;
     return { audio: Buffer.from('cloud-tts-fallback'), contentType: 'audio/wav' };
   }
-  getVoices(): import('../src/providers/types').VoiceInfo[] {
-    return [];
-  }
+  getVoices(): import('../src/providers/types').VoiceInfo[] { return []; }
   synthesizeStream(_r: TTSRequest): Promise<ReadableStream<Uint8Array>> {
     return Promise.resolve(new ReadableStream());
   }
@@ -89,12 +68,10 @@ class MockTTS implements TTSProvider {
 type Handler = (body: any) => any;
 
 function makePodServer(routes: Record<string, Handler>): Promise<{ server: Server; url: string }> {
-  return new Promise((resolve) => {
+  return new Promise(resolve => {
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       let raw = '';
-      req.on('data', (chunk: Buffer) => {
-        raw += chunk.toString();
-      });
+      req.on('data', (chunk: Buffer) => { raw += chunk.toString(); });
       req.on('end', () => {
         const handler = routes[req.url ?? ''];
         if (!handler) {
@@ -121,7 +98,7 @@ function makePodServer(routes: Record<string, Handler>): Promise<{ server: Serve
 }
 
 function stopServer(server: Server): Promise<void> {
-  return new Promise((resolve) => server.close(() => resolve()));
+  return new Promise(resolve => server.close(() => resolve()));
 }
 
 // ── Fixture: minimal silent WAV buffer ───────────────────────────────────────
@@ -130,19 +107,12 @@ function silentWav(sampleRate = 16000, durationMs = 100): Buffer {
   const numSamples = Math.floor((sampleRate * durationMs) / 1000);
   const dataSize = numSamples * 2;
   const buf = Buffer.alloc(44 + dataSize);
-  buf.write('RIFF', 0);
-  buf.writeUInt32LE(36 + dataSize, 4);
-  buf.write('WAVE', 8);
-  buf.write('fmt ', 12);
-  buf.writeUInt32LE(16, 16);
-  buf.writeUInt16LE(1, 20);
-  buf.writeUInt16LE(1, 22);
-  buf.writeUInt32LE(sampleRate, 24);
-  buf.writeUInt32LE(sampleRate * 2, 28);
-  buf.writeUInt16LE(2, 32);
-  buf.writeUInt16LE(16, 34);
-  buf.write('data', 36);
-  buf.writeUInt32LE(dataSize, 40);
+  buf.write('RIFF', 0);  buf.writeUInt32LE(36 + dataSize, 4);
+  buf.write('WAVE', 8);  buf.write('fmt ', 12);
+  buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(sampleRate, 24); buf.writeUInt32LE(sampleRate * 2, 28);
+  buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34);
+  buf.write('data', 36); buf.writeUInt32LE(dataSize, 40);
   return buf;
 }
 
@@ -151,14 +121,9 @@ function silentWav(sampleRate = 16000, durationMs = 100): Buffer {
 describe('resolvePerStageEndpoints', () => {
   const registry = new AIProviderRegistry();
   registry.register({
-    id: 'gpu',
-    name: 'GPU',
-    description: '',
-    capabilities: ['stt', 'llm', 'tts'],
+    id: 'gpu', name: 'GPU', description: '', capabilities: ['stt', 'llm', 'tts'],
     requiresApiKey: false,
-    stt: new MockSTT(),
-    llm: new MockLLM(),
-    tts: new MockTTS(),
+    stt: new MockSTT(), llm: new MockLLM(), tts: new MockTTS(),
   });
   const client = new AIClient({ registry });
 
@@ -272,14 +237,9 @@ describe('tryChainPipeline — full 3-pod chain', () => {
   it('calls STT pod /v1/chain/pipeline with audio_b64 and chain config', async () => {
     const registry = new AIProviderRegistry();
     registry.register({
-      id: 'gpu',
-      name: 'GPU',
-      description: '',
-      capabilities: ['stt', 'llm', 'tts'],
+      id: 'gpu', name: 'GPU', description: '', capabilities: ['stt', 'llm', 'tts'],
       requiresApiKey: false,
-      stt: new MockSTT(),
-      llm: new MockLLM(),
-      tts: new MockTTS(),
+      stt: new MockSTT(), llm: new MockLLM(), tts: new MockTTS(),
     });
     const client = new AIClient({ registry });
 
@@ -310,22 +270,14 @@ describe('tryChainPipeline — full 3-pod chain', () => {
   it('returns timing from all stages', async () => {
     const registry = new AIProviderRegistry();
     registry.register({
-      id: 'gpu',
-      name: 'GPU',
-      description: '',
-      capabilities: ['stt', 'llm', 'tts'],
-      requiresApiKey: false,
-      stt: new MockSTT(),
-      llm: new MockLLM(),
-      tts: new MockTTS(),
+      id: 'gpu', name: 'GPU', description: '', capabilities: ['stt', 'llm', 'tts'],
+      requiresApiKey: false, stt: new MockSTT(), llm: new MockLLM(), tts: new MockTTS(),
     });
     const client = new AIClient({ registry });
 
     const result = await (client as any).tryChainPipeline(
       { stt: sttServer.url, llm: null, tts: null },
-      silentWav(),
-      'test',
-      {},
+      silentWav(), 'test', {},
     );
 
     expect(result.stt.latencyMs).toBe(80);
@@ -337,21 +289,13 @@ describe('tryChainPipeline — full 3-pod chain', () => {
 describe('tryChainPipeline — error handling', () => {
   it('throws when STT pod returns non-200', async () => {
     const { server, url } = await makePodServer({
-      '/v1/chain/pipeline': () => {
-        throw new Error('intentional failure');
-      },
+      '/v1/chain/pipeline': () => { throw new Error('intentional failure'); },
     });
 
     const registry = new AIProviderRegistry();
     registry.register({
-      id: 'gpu',
-      name: 'GPU',
-      description: '',
-      capabilities: ['stt'],
-      requiresApiKey: false,
-      stt: new MockSTT(),
-      llm: new MockLLM(),
-      tts: new MockTTS(),
+      id: 'gpu', name: 'GPU', description: '', capabilities: ['stt'],
+      requiresApiKey: false, stt: new MockSTT(), llm: new MockLLM(), tts: new MockTTS(),
     });
     const client = new AIClient({ registry });
 
@@ -365,23 +309,15 @@ describe('tryChainPipeline — error handling', () => {
   it('throws when STT pod is unreachable', async () => {
     const registry = new AIProviderRegistry();
     registry.register({
-      id: 'gpu',
-      name: 'GPU',
-      description: '',
-      capabilities: ['stt'],
-      requiresApiKey: false,
-      stt: new MockSTT(),
-      llm: new MockLLM(),
-      tts: new MockTTS(),
+      id: 'gpu', name: 'GPU', description: '', capabilities: ['stt'],
+      requiresApiKey: false, stt: new MockSTT(), llm: new MockLLM(), tts: new MockTTS(),
     });
     const client = new AIClient({ registry });
 
     await expect(
       (client as any).tryChainPipeline(
         { stt: 'http://127.0.0.1:1', llm: null, tts: null },
-        silentWav(),
-        '',
-        {},
+        silentWav(), '', {},
       ),
     ).rejects.toThrow();
   });
@@ -415,28 +351,16 @@ describe('pipeline() — chain selected when per-stage endpoints present', () =>
 
     const registry = new AIProviderRegistry();
     registry.register({
-      id: 'mock-stt',
-      name: 'MockSTT',
-      description: '',
-      capabilities: ['stt'],
-      requiresApiKey: false,
-      stt: mockStt,
+      id: 'mock-stt', name: 'MockSTT', description: '', capabilities: ['stt'],
+      requiresApiKey: false, stt: mockStt,
     });
     registry.register({
-      id: 'mock-llm',
-      name: 'MockLLM',
-      description: '',
-      capabilities: ['llm'],
-      requiresApiKey: false,
-      llm: mockLlm,
+      id: 'mock-llm', name: 'MockLLM', description: '', capabilities: ['llm'],
+      requiresApiKey: false, llm: mockLlm,
     });
     registry.register({
-      id: 'mock-tts',
-      name: 'MockTTS',
-      description: '',
-      capabilities: ['tts'],
-      requiresApiKey: false,
-      tts: mockTts,
+      id: 'mock-tts', name: 'MockTTS', description: '', capabilities: ['tts'],
+      requiresApiKey: false, tts: mockTts,
     });
 
     const profile: AIProfile = {

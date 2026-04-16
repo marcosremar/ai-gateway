@@ -8,9 +8,9 @@ import {
   isContextWindowError,
   withProviderFallback,
   type FallbackEntry,
-} from '../../src/providers/fallback';
-import { CreditBlockTracker, hashApiKey } from '../../src/providers/credit-block';
-import { CreditExhaustedError } from '../../src/providers/errors';
+} from '../src/providers/fallback';
+import { CreditBlockTracker, hashApiKey } from '../src/providers/credit-block';
+import { CreditExhaustedError } from '../src/providers/errors';
 // ── CooldownTracker ──────────────────────────────────────────────────
 
 describe('CooldownTracker', () => {

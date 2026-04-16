@@ -28,43 +28,43 @@ describe('TimerManager', () => {
   });
 
   describe('setTimeout', () => {
-    it('should create a tracked timeout', (done) => {
+    it('should create a tracked timeout', () => new Promise<void>((resolve) => {
       const callback = vi.fn();
       const key = manager.setTimeout('test-timeout', callback, 10);
-      
+
       expect(key).toContain('test-timeout');
-      
+
       setTimeout(() => {
         expect(callback).toHaveBeenCalled();
-        done();
+        resolve();
       }, 20);
-    });
+    }));
 
-    it('should log callback errors', (done) => {
+    it('should log callback errors', () => new Promise<void>((resolve) => {
       const callback = () => { throw new Error('Test error'); };
       manager.setTimeout('test-error', callback, 10);
-      
+
       setTimeout(() => {
         // Should not throw, error is logged
         expect(true).toBe(true);
-        done();
+        resolve();
       }, 20);
-    });
+    }));
   });
 
   describe('setInterval', () => {
-    it('should create a tracked interval', (done) => {
+    it('should create a tracked interval', () => new Promise<void>((resolve) => {
       const callback = vi.fn();
       const key = manager.setInterval('test-interval', callback, 10);
-      
+
       expect(key).toContain('test-interval');
-      
+
       setTimeout(() => {
         expect(callback.mock.calls.length).toBeGreaterThanOrEqual(2);
         manager.clear(key);
-        done();
+        resolve();
       }, 40);
-    });
+    }));
   });
 
   describe('clear', () => {
@@ -163,59 +163,59 @@ describe('TimerManager', () => {
 });
 
 describe('debounce', () => {
-  it('should delay function execution', (done) => {
+  it('should delay function execution', () => new Promise<void>((resolve) => {
     const fn = vi.fn();
     const debounced = debounce('test-debounce', fn, 50);
-    
+
     debounced();
     debounced();
     debounced();
-    
+
     expect(fn).not.toHaveBeenCalled();
-    
+
     setTimeout(() => {
       expect(fn).toHaveBeenCalledTimes(1);
-      done();
+      resolve();
     }, 70);
-  });
+  }));
 
-  it('should reset timer on subsequent calls', (done) => {
+  it('should reset timer on subsequent calls', () => new Promise<void>((resolve) => {
     const fn = vi.fn();
     const debounced = debounce('test-debounce', fn, 50);
-    
+
     debounced();
-    
+
     setTimeout(() => {
       debounced(); // Reset timer
-      
+
       setTimeout(() => {
         expect(fn).not.toHaveBeenCalled();
       }, 40);
-      
+
       setTimeout(() => {
         expect(fn).toHaveBeenCalledTimes(1);
-        done();
+        resolve();
       }, 60);
     }, 30);
-  });
+  }));
 });
 
 describe('throttle', () => {
-  it('should limit execution rate', (done) => {
+  it('should limit execution rate', () => new Promise<void>((resolve) => {
     const fn = vi.fn();
     const throttled = throttle('test-throttle', fn, 100);
-    
+
     throttled();
     throttled();
     throttled();
-    
+
     expect(fn).toHaveBeenCalledTimes(1);
-    
+
     setTimeout(() => {
       expect(fn).toHaveBeenCalledTimes(2);
-      done();
+      resolve();
     }, 150);
-  });
+  }));
 
   it('should execute immediately if enough time passed', () => {
     const fn = vi.fn();

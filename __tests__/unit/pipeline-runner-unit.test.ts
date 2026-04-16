@@ -46,7 +46,7 @@ const {
 }));
 
 // State — mock all exported functions + vars
-vi.mock('../server/state', () => ({
+vi.mock('../../server/state', () => ({
   botState: { status: 'idle', podId: '', endpoint: '' },
   deployState: mockDeployState,
   isGpuAvailable: vi.fn(() => false),
@@ -63,7 +63,7 @@ vi.mock('../server/state', () => ({
   recordPerStageLatency: vi.fn(),
 }));
 
-vi.mock('../server/providers', () => ({
+vi.mock('../../server/providers', () => ({
   client: mockClient,
   groqDefaults: mockGroqProfile,
   ollamaDefaults: null,
@@ -81,19 +81,19 @@ vi.mock('../server/providers', () => ({
   modalTTS: { synthesize: vi.fn() },
 }));
 
-vi.mock('../server/config', () => ({
+vi.mock('../../server/config', () => ({
   PROVIDER_CHAIN: ['groq'],
   GPU_PROVIDERS: new Set(['gpu']),
   MODAL_BABELCAST_URL: undefined,
 }));
 
 // Race providers — always returns first candidate result
-vi.mock('../server/race-providers', () => ({
+vi.mock('../../server/race-providers', () => ({
   raceProviders: vi.fn(defaultRaceImpl),
 }));
 
 // EWMA tracker
-vi.mock('../server/ewma-tracker', () => ({
+vi.mock('../../server/ewma-tracker', () => ({
   EWMATracker: class {
     record() {}
     getLatency() { return null; }
@@ -104,7 +104,7 @@ vi.mock('../server/ewma-tracker', () => ({
 }));
 
 // Labs settings
-vi.mock('../server/labs-settings', () => ({
+vi.mock('../../server/labs-settings', () => ({
   getLabsFlags: vi.fn(() => ({
     peakEwma: false,
     speculativeTranslation: false,
@@ -117,7 +117,7 @@ vi.mock('../server/labs-settings', () => ({
 }));
 
 // Streaming overlap
-vi.mock('../server/streaming-overlap', () => ({
+vi.mock('../../server/streaming-overlap', () => ({
   StreamingOverlap: class {
     setMinTokens() {}
     processWithOverlap() { return Promise.resolve(''); }
@@ -125,7 +125,7 @@ vi.mock('../server/streaming-overlap', () => ({
 }));
 
 // Speculative cache
-vi.mock('../server/speculative-cache', () => ({
+vi.mock('../../server/speculative-cache', () => ({
   speculativeCache: {
     resolve: vi.fn().mockResolvedValue(null),
     stats: vi.fn(() => ({})),
@@ -133,24 +133,24 @@ vi.mock('../server/speculative-cache', () => ({
 }));
 
 // WS state
-vi.mock('../server/ws-state', () => ({
+vi.mock('../../server/ws-state', () => ({
   broadcastWs: vi.fn(),
   broadcastDubAudio: vi.fn(),
 }));
 
 // Dub fanout
-vi.mock('../server/dub-fanout', () => ({
+vi.mock('../../server/dub-fanout', () => ({
   getActiveTargets: vi.fn(() => []),
   runMultiLangFanout: vi.fn(() => Promise.resolve()),
 }));
 
 // Metrics
-vi.mock('../server/metrics', () => ({
+vi.mock('../../server/metrics', () => ({
   logRequest: vi.fn(),
 }));
 
 // Config persistence
-vi.mock('../server/config-persistence', () => ({
+vi.mock('../../server/config-persistence', () => ({
   loadProviderConfig: vi.fn(() => ({ activeAppId: 'test' })),
   stampAppRequest: vi.fn(),
 }));
@@ -166,12 +166,12 @@ vi.mock('../src/providers/groq', () => ({
 }));
 
 // HTTP utils
-vi.mock('../server/http-utils', () => ({
+vi.mock('../../server/http-utils', () => ({
   langNames: { fr: 'French', en: 'English' },
 }));
 
 // AI handlers
-vi.mock('../server/ai-handlers', () => ({
+vi.mock('../../server/ai-handlers', () => ({
   fetchGpuSTT: vi.fn(),
   fetchGpuLLM: vi.fn(),
   fetchGpuTTS: vi.fn(),
@@ -338,7 +338,7 @@ describe('Pipeline runner — null baseProfile guard', () => {
   // #250
   it('calls onError when no LLM provider is configured', async () => {
     // Temporarily override providers mock to return null profiles
-    const providersModule = await import('../../server/providers');
+    const providersModule = await import('../server/providers');
     const origGroqDefaults = (providersModule as any).groqDefaults;
     (providersModule as any).groqDefaults = null;
     (providersModule as any).ollamaDefaults = null;
@@ -462,7 +462,7 @@ describe('Pipeline runner — error handling', () => {
   // #256
   it('calls onError when STT throws', async () => {
     // Make raceProviders throw
-    const raceModule = await import('../../server/race-providers');
+    const raceModule = await import('../server/race-providers');
     vi.mocked(raceModule.raceProviders).mockRejectedValueOnce(new Error('STT failed'));
 
     const cb = makeCallbacks();
@@ -475,7 +475,7 @@ describe('Pipeline runner — error handling', () => {
   // #257
   it('calls onError when LLM throws', async () => {
     // STT succeeds, but LLM race fails
-    const raceModule = await import('../../server/race-providers');
+    const raceModule = await import('../server/race-providers');
     let callCount = 0;
     vi.mocked(raceModule.raceProviders).mockImplementation(async (candidates: any[]) => {
       callCount++;
@@ -551,7 +551,7 @@ describe('Pipeline runner — cached translation', () => {
 
   // #260
   it('uses cached translation when available (llm_provider = cache)', async () => {
-    const aiHandlers = await import('../../server/ai-handlers');
+    const aiHandlers = await import('../server/ai-handlers');
     vi.mocked(aiHandlers.getCachedTranslation).mockReturnValueOnce('cached hello');
 
     const cb = makeCallbacks();

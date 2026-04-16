@@ -3,6 +3,7 @@
  *
  * Fixes: #722-750 (test factories, builders, helpers)
  */
+import { vi } from 'vitest';
 
 // ── Provider Factories ───────────────────────────────────────────────────────
 

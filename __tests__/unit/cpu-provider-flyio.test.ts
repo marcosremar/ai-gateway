@@ -3,8 +3,8 @@
  * Uses fetch mocking to avoid real Fly.io API calls.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { FlyioClient } from '../../src/cpu-providers/flyio-client';
-import type { ProviderCredentials, InstanceSpec } from '../../src/gpu-providers/types';
+import { FlyioClient } from '../src/cpu-providers/flyio-client';
+import type { ProviderCredentials, InstanceSpec } from '../src/gpu-providers/types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -240,8 +240,13 @@ describe('FlyioClient', () => {
           };
         }
         if (url.includes('/wait')) {
-          // waitForState
+          // waitForState long-poll
           return { ok: true, json: async () => ({}), text: async () => '' };
+        }
+        if (url.includes('/machines/') && !url.includes('/wait') && (!opts?.method || opts.method === 'GET')) {
+          // getMachine — called by waitForState after the wait to verify state
+          const m = makeMachine();
+          return { ok: true, json: async () => m, text: async () => JSON.stringify(m) };
         }
         if (url.includes('/version')) {
           // DNS check

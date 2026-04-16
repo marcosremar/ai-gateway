@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createAutoscaler, PROVIDER_BOOT_SECS } from '../../src/factory';
-import type { CreateAutoscalerOptions } from '../../src/factory';
-import type { AutoScalerConfig } from '../../src/types';
-import type { StateStore, SettingsStore, SessionResolver } from '../../src/deps';
+import { createAutoscaler, PROVIDER_BOOT_SECS } from '../src/factory';
+import type { CreateAutoscalerOptions } from '../src/factory';
+import type { AutoScalerConfig } from '../src/types';
+import type { StateStore, SettingsStore, SessionResolver } from '../src/deps';
 
 // ── Minimal mocks ─────────────────────────────────────────────────────────────
 

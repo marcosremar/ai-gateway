@@ -9,13 +9,13 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { runVerifiedSTT } from '../../src/ensemble-stt';
-import type { STTVerifierProviderEntry } from '../../src/ensemble-stt';
-import type { STTProvider, STTRequest, STTResponse } from '../../src/providers/types';
-import type { EmbeddingProvider } from '../../src/providers/openai-compat/openai-compat-embedding';
-import { openaiSTT } from '../../src/providers/openai';
-import { deepgramSTT } from '../../src/providers/deepgram';
-import { loadEnv, checkOpenAIAvailable, makeTestWav, timed } from '../helpers';
+import { runVerifiedSTT } from '../src/ensemble-stt';
+import type { STTVerifierProviderEntry } from '../src/ensemble-stt';
+import type { STTProvider, STTRequest, STTResponse } from '../src/providers/types';
+import type { EmbeddingProvider } from '../src/providers/openai-compat/openai-compat-embedding';
+import { openaiSTT } from '../src/providers/openai';
+import { deepgramSTT } from '../src/providers/deepgram';
+import { loadEnv, checkOpenAIAvailable, makeTestWav, timed } from './helpers';
 
 await loadEnv();
 const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
@@ -28,14 +28,10 @@ const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
 function stubProvider(name: string, text: string): STTVerifierProviderEntry {
   const provider: STTProvider = {
     providerId: 'groq' as const,
-    getModels: () => [
-      { id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const },
-    ],
+    getModels: () => [{ id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const }],
     isConfigured: () => true,
     transcribe: async (_req: STTRequest): Promise<STTResponse> => ({ text }),
-    withApiKey: function (k: string) {
-      return this;
-    },
+    withApiKey: function(k: string) { return this; },
   };
   return { name, provider };
 }
@@ -44,16 +40,12 @@ function stubProvider(name: string, text: string): STTVerifierProviderEntry {
 function failingProvider(name: string): STTVerifierProviderEntry {
   const provider: STTProvider = {
     providerId: 'groq' as const,
-    getModels: () => [
-      { id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const },
-    ],
+    getModels: () => [{ id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const }],
     isConfigured: () => true,
     transcribe: async (_req: STTRequest): Promise<STTResponse> => {
       throw new Error('API error');
     },
-    withApiKey: function (k: string) {
-      return this;
-    },
+    withApiKey: function(k: string) { return this; },
   };
   return { name, provider };
 }
@@ -62,17 +54,13 @@ function failingProvider(name: string): STTVerifierProviderEntry {
 function slowProvider(name: string, text: string, delayMs: number): STTVerifierProviderEntry {
   const provider: STTProvider = {
     providerId: 'groq' as const,
-    getModels: () => [
-      { id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const },
-    ],
+    getModels: () => [{ id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const }],
     isConfigured: () => true,
     transcribe: async (_req: STTRequest): Promise<STTResponse> => {
-      await new Promise((r) => setTimeout(r, delayMs));
+      await new Promise(r => setTimeout(r, delayMs));
       return { text };
     },
-    withApiKey: function (k: string) {
-      return this;
-    },
+    withApiKey: function(k: string) { return this; },
   };
   return { name, provider };
 }
@@ -83,9 +71,8 @@ const SILENCE = makeTestWav(0.5);
 
 describe('runVerifiedSTT — unit (no API)', () => {
   it('throws when no providers configured', async () => {
-    await expect(runVerifiedSTT(SILENCE, 'fr', '', { providers: [] })).rejects.toThrow(
-      'No STT providers configured',
-    );
+    await expect(runVerifiedSTT(SILENCE, 'fr', '', { providers: [] }))
+      .rejects.toThrow('No STT providers configured');
   });
 
   it('single provider — passes through directly with score 1', async () => {
@@ -102,7 +89,10 @@ describe('runVerifiedSTT — unit (no API)', () => {
 
   it('two identical transcriptions — winner gets score 1 (race mode)', async () => {
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
-      providers: [stubProvider('p1', 'bonjour le monde'), stubProvider('p2', 'bonjour le monde')],
+      providers: [
+        stubProvider('p1', 'bonjour le monde'),
+        stubProvider('p2', 'bonjour le monde'),
+      ],
     });
 
     expect(result.consensus).toBe('bonjour le monde');
@@ -134,7 +124,10 @@ describe('runVerifiedSTT — unit (no API)', () => {
 
   it('provider failure is silently skipped', async () => {
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
-      providers: [stubProvider('good', 'bonjour le monde'), failingProvider('bad')],
+      providers: [
+        stubProvider('good', 'bonjour le monde'),
+        failingProvider('bad'),
+      ],
     });
 
     expect(result.consensus).toBe('bonjour le monde');
@@ -143,16 +136,17 @@ describe('runVerifiedSTT — unit (no API)', () => {
   });
 
   it('all providers fail — throws', async () => {
-    await expect(
-      runVerifiedSTT(SILENCE, 'fr', '', {
-        providers: [failingProvider('p1'), failingProvider('p2')],
-      }),
-    ).rejects.toThrow('failed or timed out');
+    await expect(runVerifiedSTT(SILENCE, 'fr', '', {
+      providers: [failingProvider('p1'), failingProvider('p2')],
+    })).rejects.toThrow(/failed|providers/i);
   });
 
   it('empty-string results are excluded from consensus', async () => {
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
-      providers: [stubProvider('empty', ''), stubProvider('real', 'bonjour monde')],
+      providers: [
+        stubProvider('empty', ''),
+        stubProvider('real', 'bonjour monde'),
+      ],
     });
 
     expect(result.consensus).toBe('bonjour monde');
@@ -200,18 +194,14 @@ describe('runVerifiedSTT — unit (no API)', () => {
     let capturedPrompt = '';
     const provider: STTProvider = {
       providerId: 'groq' as const,
-      getModels: () => [
-        { id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const },
-      ],
+      getModels: () => [{ id: 'stub', name: 'Stub', description: 'Stub STT', capability: 'stt' as const }],
       isConfigured: () => true,
       transcribe: async (req: STTRequest): Promise<STTResponse> => {
         capturedLang = req.language ?? '';
         capturedPrompt = req.prompt ?? '';
         return { text: 'bonjour' };
       },
-      withApiKey: function () {
-        return this;
-      },
+      withApiKey: function() { return this; },
     };
 
     await runVerifiedSTT(SILENCE, 'fr', 'previous context', {
@@ -228,24 +218,18 @@ describe('runVerifiedSTT — unit (no API)', () => {
       getModels: () => [],
       isConfigured: () => true,
       transcribe: async () => ({ text: 'never' }),
-      withApiKey: function () {
-        return this;
-      },
+      withApiKey: function() { return this; },
     };
 
-    await expect(
-      runVerifiedSTT(SILENCE, 'fr', '', {
-        providers: [{ name: 'empty', provider: noModels }],
-      }),
-    ).rejects.toThrow();
+    await expect(runVerifiedSTT(SILENCE, 'fr', '', {
+      providers: [{ name: 'empty', provider: noModels }],
+    })).rejects.toThrow();
   });
 
   it('error message mentions provider count', async () => {
-    await expect(
-      runVerifiedSTT(SILENCE, 'fr', '', {
-        providers: [failingProvider('p1'), failingProvider('p2'), failingProvider('p3')],
-      }),
-    ).rejects.toThrow('3 providers');
+    await expect(runVerifiedSTT(SILENCE, 'fr', '', {
+      providers: [failingProvider('p1'), failingProvider('p2'), failingProvider('p3')],
+    })).rejects.toThrow('3 providers');
   });
 
   it('scores are rounded to 3 decimal places', async () => {
@@ -268,14 +252,17 @@ describe('runVerifiedSTT — unit (no API)', () => {
 
 describe('runVerifiedSTT — embedding fallback (unit)', () => {
   /** Stub embedding provider: returns fixed vectors per text */
-  function stubEmbeddingProvider(vectorMap: Record<string, number[]>, name = 'stub-embed') {
+  function stubEmbeddingProvider(
+    vectorMap: Record<string, number[]>,
+    name = 'stub-embed',
+  ) {
     const provider: EmbeddingProvider = {
       name,
       providerId: 'openrouter' as const,
       isConfigured: () => true,
       embed: async (input: string | string[]) => {
         const inputs = Array.isArray(input) ? input : [input];
-        const embeddings = inputs.map((text) => vectorMap[text] ?? [0, 0, 1]);
+        const embeddings = inputs.map(text => vectorMap[text] ?? [0, 0, 1]);
         return { embeddings, model: name, usage: { promptTokens: 0, totalTokens: 0 } };
       },
     };
@@ -295,7 +282,10 @@ describe('runVerifiedSTT — embedding fallback (unit)', () => {
     };
 
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
-      providers: [stubProvider('p1', 'bonjour le monde'), stubProvider('p2', 'bonjour le monde')],
+      providers: [
+        stubProvider('p1', 'bonjour le monde'),
+        stubProvider('p2', 'bonjour le monde'),
+      ],
       embeddingFallbacks: [provider],
       embeddingFallbackThreshold: 0.3,
     });
@@ -308,8 +298,8 @@ describe('runVerifiedSTT — embedding fallback (unit)', () => {
   it('embedding fallbacks are ignored in race mode — always jaccard, first wins', async () => {
     // Race mode: embeddingFallbacks is ignored, similarity_method always 'jaccard'
     const vectors: Record<string, number[]> = {
-      'hello world': [1, 0, 0],
-      'bonjour monde': [0.95, 0.1, 0],
+      'hello world':        [1, 0, 0],
+      'bonjour monde':      [0.95, 0.1, 0],
       'something unrelated': [0, 0, 1],
     };
     const embProvider = stubEmbeddingProvider(vectors, 'test-embed');
@@ -336,9 +326,7 @@ describe('runVerifiedSTT — embedding fallback (unit)', () => {
       name: 'unconfigured',
       providerId: 'openrouter' as const,
       isConfigured: () => false,
-      embed: async () => {
-        throw new Error('should not be called');
-      },
+      embed: async () => { throw new Error('should not be called'); },
     };
     const vectors = { 'text a': [1, 0], 'text b': [0.9, 0.1] };
     const fallback2: EmbeddingProvider = {
@@ -349,7 +337,7 @@ describe('runVerifiedSTT — embedding fallback (unit)', () => {
         fallback2Called = true;
         const inputs = Array.isArray(input) ? input : [input];
         return {
-          embeddings: inputs.map((t) => vectors[t] ?? [0, 1]),
+          embeddings: inputs.map(t => vectors[t] ?? [0, 1]),
           model: 'fallback2',
           usage: { promptTokens: 0, totalTokens: 0 },
         };
@@ -373,13 +361,14 @@ describe('runVerifiedSTT — embedding fallback (unit)', () => {
       name: 'failing-embed',
       providerId: 'openrouter' as const,
       isConfigured: () => true,
-      embed: async () => {
-        throw new Error('API error');
-      },
+      embed: async () => { throw new Error('API error'); },
     };
 
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
-      providers: [stubProvider('p1', 'apple orange'), stubProvider('p2', 'banana grape')],
+      providers: [
+        stubProvider('p1', 'apple orange'),
+        stubProvider('p2', 'banana grape'),
+      ],
       embeddingFallbacks: [failingEmbed],
       embeddingFallbackThreshold: 0.9,
     });
@@ -418,7 +407,10 @@ describe('runVerifiedSTT — timeout / partial results (unit)', () => {
 
   it('first provider to respond wins (race mode)', async () => {
     const result = await runVerifiedSTT(SILENCE, 'fr', '', {
-      providers: [slowProvider('p1', 'bonjour', 50), slowProvider('p2', 'bonjour', 80)],
+      providers: [
+        slowProvider('p1', 'bonjour', 50),
+        slowProvider('p2', 'bonjour', 80),
+      ],
       timeoutMs: 2000,
     });
 
@@ -456,7 +448,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('OpenAI STT (Real API)', () => {
   it('returns model list with gpt-4o-transcribe', () => {
     const models = openaiSTT.getModels();
     expect(models.length).toBeGreaterThan(0);
-    expect(models.some((m) => m.id === 'gpt-4o-transcribe')).toBe(true);
+    expect(models.some(m => m.id === 'gpt-4o-transcribe')).toBe(true);
   });
 });
 

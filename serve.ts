@@ -67,7 +67,7 @@ const providers: ProviderMapping = {
 };
 
 log.log({ port: PORT, apiKeys: API_KEYS ? API_KEYS.length : 0, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
-log.log({ groqKey: process.env.GROQ_API_KEY.slice(0, 6) + '...', tts: 'groq/orpheus' }, 'Providers configured');
+log.log({ groqConfigured: Boolean(process.env.GROQ_API_KEY), tts: 'groq/orpheus' }, 'Providers configured');
 
 const prefixRoutes: PrefixRoute[] = [];
 if (routeWorkloadRequest) {

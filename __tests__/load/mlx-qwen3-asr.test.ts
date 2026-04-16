@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { makeTestWav } from '../../src/benchmarking/bench';
-import { MlxQwen3AsrProvider, MLX_QWEN3_ASR_MODELS } from '../../src/providers/mlx-qwen3-asr/index';
+import { makeTestWav } from '../src/benchmarking/bench';
+import { MlxQwen3AsrProvider, MLX_QWEN3_ASR_MODELS } from '../src/providers/mlx-qwen3-asr/index';
 
 const DEFAULT_BASE_URL = 'http://localhost:8765/v1';
 const provider = new MlxQwen3AsrProvider();
@@ -20,7 +20,7 @@ describe('MLX Qwen3-ASR Provider', () => {
   it('exports MLX_QWEN3_ASR_MODELS with correct structure', () => {
     expect(MLX_QWEN3_ASR_MODELS.length).toBeGreaterThanOrEqual(3);
 
-    const ids = MLX_QWEN3_ASR_MODELS.map((m) => m.id);
+    const ids = MLX_QWEN3_ASR_MODELS.map(m => m.id);
     expect(ids).toContain('qwen3-asr-0.6b-4bit');
     expect(ids).toContain('qwen3-asr-0.6b');
     expect(ids).toContain('qwen3-asr-1.7b');
@@ -29,7 +29,7 @@ describe('MLX Qwen3-ASR Provider', () => {
       expect(model.capability).toBe('stt');
     }
 
-    const defaultModel = MLX_QWEN3_ASR_MODELS.find((m) => m.isDefault);
+    const defaultModel = MLX_QWEN3_ASR_MODELS.find(m => m.isDefault);
     expect(defaultModel).toBeTruthy();
     expect(defaultModel!.id).toBe('qwen3-asr-0.6b-4bit');
   });
@@ -76,6 +76,8 @@ describe('MLX Qwen3-ASR Provider', () => {
   it('transcribe() throws when server is unreachable', async () => {
     const offlineProvider = new MlxQwen3AsrProvider('http://localhost:19999/v1');
 
-    await expect(offlineProvider.transcribe({ audio: makeTestWav(0.5) })).rejects.toThrow();
+    await expect(
+      offlineProvider.transcribe({ audio: makeTestWav(0.5) }),
+    ).rejects.toThrow();
   }, 10_000);
 });

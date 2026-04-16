@@ -14,8 +14,8 @@ import {
   startPredictiveWarmupTicker,
   type PredictiveWarmupConfig,
   type PredictiveWarmupDeps,
-} from '../../src/autoscaler/predictive-warmup';
-import type { StateStore } from '../../src/deps';
+} from '../src/autoscaler/predictive-warmup';
+import type { StateStore } from '../src/deps';
 
 function makeStore() {
   const hashes = new Map<string, Record<string, string>>();
@@ -33,6 +33,12 @@ function makeStore() {
     },
     async hdel(key, field) { delete hashes.get(key)?.[field]; },
     async hgetall(key) { return hashes.get(key) ?? {}; },
+    async hincrby(key, field, increment) {
+      if (!hashes.has(key)) hashes.set(key, {});
+      const h = hashes.get(key)!;
+      const current = parseInt(h[field] || '0', 10);
+      h[field] = String(current + increment);
+    },
   };
   return { store, hashes };
 }

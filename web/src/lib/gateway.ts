@@ -45,6 +45,20 @@ export interface HealthResponse {
   reason?: string;
   cloudHealth?: CloudHealthEntry[];
   cloudHealthAt?: number;
+  translationCache?: {
+    hits: number;
+    misses: number;
+    size: number;
+    hitRate: number;
+  };
+  guardrails?: {
+    passed: number;
+    blocked: number;
+    audited: number;
+    ruleHits: Record<string, number>;
+    totalEvaluations: number;
+    lastBlockedAt: number | null;
+  };
 }
 
 export async function getHealth(): Promise<HealthResponse> {

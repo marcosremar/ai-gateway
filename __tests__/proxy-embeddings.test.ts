@@ -52,8 +52,9 @@ describe('handleEmbeddings', () => {
 
   it('calls provider.embed with input and options', async () => {
     await handleEmbeddings(makeReq({ model: 'test-model', input: 'hello', dimensions: 256 }), providers);
+    // String input is normalized to an array before being passed to the provider
     expect(mockEmbeddingProvider.embed).toHaveBeenCalledWith(
-      'hello',
+      ['hello'],
       { model: 'test-model', dimensions: 256 },
     );
   });

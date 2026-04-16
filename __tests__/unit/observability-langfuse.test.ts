@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createLangfuseHooks } from '../../src/observability/langfuse-hooks';
+import { createLangfuseHooks } from '../src/observability/langfuse-hooks';
 
 describe('createLangfuseHooks', () => {
   const originalFetch = globalThis.fetch;

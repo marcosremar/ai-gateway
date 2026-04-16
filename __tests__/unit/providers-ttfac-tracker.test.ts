@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { TtfacTracker } from '../../src/providers/ttfac-tracker';
-import type { FallbackEntry } from '../../src/providers/fallback';
+import { TtfacTracker } from '../src/providers/ttfac-tracker';
+import type { FallbackEntry } from '../src/providers/fallback';
 
 describe('TtfacTracker', () => {
   describe('constructor', () => {

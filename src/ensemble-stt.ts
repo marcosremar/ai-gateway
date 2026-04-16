@@ -78,6 +78,10 @@ export interface STTVerifierResult {
   segments?: STTResponse['segments'];
   /** Average log probability from the winning provider (if available) */
   avg_logprob?: number;
+  /** Compression ratio from the winning provider (if available) */
+  compression_ratio?: number;
+  /** No-speech probability from the winning provider (if available) */
+  no_speech_prob?: number;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -206,6 +210,8 @@ export async function runVerifiedSTT(
       latency_ms,
       segments: winnerResponse.segments,
       avg_logprob: winnerResponse.avg_logprob,
+      compression_ratio: winnerResponse.compression_ratio,
+      no_speech_prob: winnerResponse.no_speech_prob,
     };
   } finally {
     // Always clear all deadline timers to prevent orphaned handles

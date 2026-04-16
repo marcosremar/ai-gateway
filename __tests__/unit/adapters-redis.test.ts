@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { RedisStateAdapter } from '../../src/adapters/redis-state';
-import type { RedisLike } from '../../src/adapters/redis-state';
+import { RedisStateAdapter } from '../src/adapters/redis-state';
+import type { RedisLike } from '../src/adapters/redis-state';
 
 function createMockRedis(): RedisLike & { _store: Record<string, string>; _lists: Record<string, string[]>; _hashes: Record<string, Record<string, string>> } {
   const store: Record<string, string> = {};
@@ -121,9 +121,10 @@ describe('RedisStateAdapter', () => {
     await adapter.set('user:2', 'b');
     await adapter.set('session:1', 'c');
 
-    const keys = await adapter.scan('user:*');
-    expect(keys).toHaveLength(2);
-    expect(keys.sort()).toEqual(['user:1', 'user:2']);
+    let foundKeys: string[] = [];
+    const count = await adapter.scan('user:*', (keys) => { foundKeys = keys; });
+    expect(count).toBe(2);
+    expect(foundKeys.sort()).toEqual(['user:1', 'user:2']);
   });
 
   it('rpush + lrange list operations', async () => {

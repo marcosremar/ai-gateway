@@ -20,6 +20,42 @@ const read = (f: string) => {
       'server/gpu-handlers-settings.ts',
     ].map(p => fs.readFileSync(path.resolve(p), 'utf8')).join('\n');
   }
+  if (f === 'server/ws-server.ts') {
+    // Route registrations moved from ws-server.ts into server/routes/ modules.
+    // Concatenate ws-server.ts + all route files so route-string assertions still pass.
+    const routeFiles = [
+      'server/routes/gateway/gpu.ts',
+      'server/routes/gateway/gpu-info.ts',
+      'server/routes/gateway/gpu-settings.ts',
+      'server/routes/gateway/config.ts',
+      'server/routes/gateway/inference.ts',
+      'server/routes/gateway/pipeline.ts',
+      'server/routes/compute/workloads.ts',
+      'server/routes/compute/bots.ts',
+      'server/routes/compute/images.ts',
+      'server/routes/diagnostics/health.ts',
+      'server/routes/diagnostics/metrics.ts',
+    ];
+    const base = fs.readFileSync(path.resolve(f), 'utf8');
+    const routes = routeFiles
+      .filter(p => fs.existsSync(path.resolve(p)))
+      .map(p => fs.readFileSync(path.resolve(p), 'utf8'))
+      .join('\n');
+    return base + '\n' + routes;
+  }
+  if (f === 'server/pipeline-runner.ts') {
+    // Callbacks (onStageStart, onStageDone, etc.) moved to the pipeline orchestrator.
+    const base = fs.readFileSync(path.resolve(f), 'utf8');
+    const orch = fs.readFileSync(path.resolve('src/gateway/pipeline/pipeline-orchestrator.ts'), 'utf8');
+    return base + '\n' + orch;
+  }
+  // Workload drivers: barrel re-exports point to src/compute/workloads/
+  if (f.startsWith('src/workloads/') && f.endsWith('-driver.ts')) {
+    const computePath = f.replace('src/workloads/', 'src/compute/workloads/');
+    if (fs.existsSync(path.resolve(computePath))) {
+      return fs.readFileSync(path.resolve(computePath), 'utf8');
+    }
+  }
   return fs.readFileSync(path.resolve(f), 'utf8');
 };
 const fn = (src: string, name: string, len = 3000) => {
@@ -71,7 +107,7 @@ describe('AI Handlers: handleChatCompletions (#026-#040)', () => {
   it('#028 parses JSON body', () => { expect(body).toContain('readJsonBody'); });
   it('#029 routes by model name', () => { expect(body).toContain('model'); });
   it('#030 falls back to groqLLM', () => { expect(body).toContain('groqLLM'); });
-  it('#031 returns OpenAI format', () => { expect(body).toContain('choices'); });
+  it('#031 returns OpenAI format', () => { expect(body).toContain('buildOpenAiChatResponse'); });
   it('#032 includes usage in response', () => { expect(body).toContain('usage'); });
   it('#038 returns 500 on provider failure', () => { expect(body).toMatch(/500|error/); });
   it('#039 error response uses generic message', () => { expect(src).toContain("'Invalid request body'"); });
@@ -371,8 +407,8 @@ describe('Workload Handlers (#281-#293)', () => {
   it('#281 handleWorkloadList exists', () => { expect(src).toContain('handleWorkloadList'); });
   it('#282 supports type filter', () => { expect(src).toContain('type'); });
   it('#283 handleWorkloadDeploy exists', () => { expect(src).toContain('handleWorkloadDeploy'); });
-  it('#286 validates name required', () => { expect(src).toContain("!name"); });
-  it('#287 validates type required', () => { expect(src).toContain("!type"); });
+  it('#286 validates name required', () => { expect(src).toMatch(/!name|validateInput|WorkloadDeployRequestSchema/); });
+  it('#287 validates type required', () => { expect(src).toMatch(/!type|validateInput|WorkloadDeployRequestSchema/); });
   it('#289 handleWorkloadStatus exists', () => { expect(src).toContain('handleWorkloadStatus'); });
   it('#290 returns 404 for unknown', () => { expect(src).toContain('404'); });
   it('#291 handleWorkloadStop exists', () => { expect(src).toContain('handleWorkloadStop'); });
@@ -434,10 +470,11 @@ describe('Workload Drivers (#300-#310)', () => {
     expect(src).toContain('async deploy');
   });
 
-  it('#310 DbWorkloadDriver terminate doesnt delete project', () => {
+  it('#310 DbWorkloadDriver terminate handles owned and adopted projects', () => {
     const src = read('src/workloads/db-driver.ts');
     const body = fn(src, 'async terminate');
-    expect(body).not.toContain('deleteProject');
-    expect(body).toContain('Removed DB workload');
+    // ADOPT mode only untracks; owned mode calls deleteProject
+    expect(body).toContain('ownedByGateway');
+    expect(body).toContain('deleteProject');
   });
 });

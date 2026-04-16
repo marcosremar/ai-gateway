@@ -4,7 +4,8 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from .db import get_engine
 from .pool_singleton import get_pool
@@ -86,6 +87,30 @@ app = FastAPI(
     version='0.1.0',
     lifespan=lifespan,
 )
+
+
+def _is_public_path(path: str) -> bool:
+    return path in {'/', '/health'} or path.startswith('/docs') or path.startswith('/openapi')
+
+
+@app.middleware('http')
+async def require_api_key(request: Request, call_next):
+    """Protect SnapGPU control plane routes with an API key when configured."""
+    configured_key = os.environ.get('SNAPGPU_API_KEY', '').strip()
+    if not configured_key or _is_public_path(request.url.path):
+        return await call_next(request)
+
+    auth_header = request.headers.get('authorization', '')
+    bearer_token = ''
+    if auth_header.lower().startswith('bearer '):
+        bearer_token = auth_header[7:].strip()
+    header_key = request.headers.get('x-api-key', '').strip()
+    provided = bearer_token or header_key
+
+    if provided != configured_key:
+        return JSONResponse(status_code=401, content={'detail': 'Unauthorized'})
+
+    return await call_next(request)
 
 app.include_router(health.router)
 app.include_router(apps.router)

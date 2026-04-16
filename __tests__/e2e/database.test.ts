@@ -23,9 +23,7 @@ import {
 
 describe('detectEnvironment', () => {
   it('returns neon for Neon connection strings', () => {
-    expect(detectEnvironment('postgresql://user:pass@ep-xyz.us-east-2.aws.neon.tech/dbname')).toBe(
-      'neon',
-    );
+    expect(detectEnvironment('postgresql://user:pass@ep-xyz.us-east-2.aws.neon.tech/dbname')).toBe('neon');
   });
 
   it('returns local for local PostgreSQL', () => {
@@ -42,9 +40,7 @@ describe('detectEnvironment', () => {
 
 describe('isPooledUrl', () => {
   it('detects pooled Neon URL', () => {
-    expect(isPooledUrl('postgresql://user:pass@ep-xyz-pooler.us-east-2.aws.neon.tech/db')).toBe(
-      true,
-    );
+    expect(isPooledUrl('postgresql://user:pass@ep-xyz-pooler.us-east-2.aws.neon.tech/db')).toBe(true);
   });
 
   it('returns false for unpooled URL', () => {
@@ -215,13 +211,7 @@ describe('NeonManagementClient', () => {
   it('listProjects makes GET /projects', async () => {
     mockResponse({
       projects: [
-        {
-          id: 'p1',
-          name: 'My Project',
-          region_id: 'us-east-2',
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-        },
+        { id: 'p1', name: 'My Project', region_id: 'us-east-2', created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z' },
       ],
     });
 
@@ -231,23 +221,13 @@ describe('NeonManagementClient', () => {
     expect(projects[0].regionId).toBe('us-east-2');
     expect(mockFetch).toHaveBeenCalledWith(
       'https://console.neon.tech/api/v2/projects',
-      expect.objectContaining({
-        method: 'GET',
-        headers: expect.objectContaining({ Authorization: 'Bearer test-api-key' }),
-      }),
+      expect.objectContaining({ method: 'GET', headers: expect.objectContaining({ Authorization: 'Bearer test-api-key' }) }),
     );
   });
 
   it('createBranch makes POST /projects/:id/branches', async () => {
     mockResponse({
-      branch: {
-        id: 'br-1',
-        project_id: 'proj-abc',
-        name: 'test-branch',
-        primary: false,
-        created_at: '2024-01-01T00:00:00Z',
-        updated_at: '2024-01-01T00:00:00Z',
-      },
+      branch: { id: 'br-1', project_id: 'proj-abc', name: 'test-branch', primary: false, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z' },
     });
 
     const branch = await client.createBranch('test-branch');
@@ -285,14 +265,7 @@ describe('NeonManagementClient', () => {
   it('listDatabases maps snake_case to camelCase', async () => {
     mockResponse({
       databases: [
-        {
-          id: 1,
-          branch_id: 'br-1',
-          name: 'neondb',
-          owner_name: 'neondb_owner',
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-        },
+        { id: 1, branch_id: 'br-1', name: 'neondb', owner_name: 'neondb_owner', created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z' },
       ],
     });
 
@@ -393,9 +366,7 @@ describe('parseConnectionString', () => {
   });
 
   it('parses a Neon URL', () => {
-    const result = parseConnectionString(
-      'postgresql://neondb_owner:npg_key@ep-floral-wind-pooler.neon.tech/neondb?sslmode=require',
-    );
+    const result = parseConnectionString('postgresql://neondb_owner:npg_key@ep-floral-wind-pooler.neon.tech/neondb?sslmode=require');
     expect(result.host).toBe('ep-floral-wind-pooler.neon.tech');
     expect(result.user).toBe('neondb_owner');
     expect(result.database).toBe('neondb');
@@ -453,9 +424,7 @@ describe('DatabaseService.prisma', () => {
     vi.stubEnv('DATABASE_URL', 'postgresql://user:pass@localhost:5432/db');
     const svc = new DatabaseService();
     expect(() => svc.prisma).toThrow(DatabaseError);
-    try {
-      svc.prisma;
-    } catch (e) {
+    try { svc.prisma; } catch (e) {
       expect((e as DatabaseError).code).toBe('MISSING_DEPENDENCY');
     }
   });

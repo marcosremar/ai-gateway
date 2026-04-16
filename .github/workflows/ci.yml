@@ -12,7 +12,31 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  ci:
+  # ── Shard 1: Typecheck + Lint ───────────────────────────────────────────
+  typecheck:
+    name: Typecheck & Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+  # ── Shard 2: Unit Tests ─────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -24,30 +48,135 @@ jobs:
         with:
           bun-version: latest
 
-      # Fail fast if the lockfile is drifted. `--frozen-lockfile` refuses to
-      # install if any package.json dep is newer than what's locked.
-      - name: Install dependencies (frozen lockfile)
-        run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
 
-      - name: Typecheck
-        run: bun run typecheck
-
-      # Unit tier only — fast subset (<90s) that every PR can afford to block on.
-      # Integration / live / benchmark / soak tiers run via the nightly workflow.
       - name: Unit tests
         env:
           SKIP_GPU_TESTS: '1'
           SKIP_LIVE_TESTS: '1'
         run: bun run test:unit
 
+  # ── Shard 3: Integration Tests ──────────────────────────────────────────
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
       - name: Integration smoke tests
         env:
           SKIP_GPU_TESTS: '1'
           SKIP_LIVE_TESTS: '1'
-        run: bun run vitest run __tests__/integration/ --reporter=verbose || true
+        run: bun run vitest run __tests__/integration/ --reporter=verbose
+
+  # ── Shard 4: Build ──────────────────────────────────────────────────────
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
 
       - name: Build (library bundle)
         run: bun run build
+
+  # ── Shard 5: Lib/Service Boundary ───────────────────────────────────────
+  boundary:
+    name: Lib/Service Boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Check boundary
+        run: |
+          if grep -rn --include='*.ts' -E "from ['\"]\\.\\./\\.\\./server/|from ['\"]\\.\\./server/" src/ 2>/dev/null; then
+            echo "::error::src/ must not import from server/. See docs/architecture/lib-vs-service.md"
+            exit 1
+          fi
+          echo "Lib/service boundary is clean"
+
+  # ── Shard 6: Bundle Size Budget ─────────────────────────────────────────
+  bundle-budget:
+    name: Bundle Size Budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Check bundle size (uncompressed)
+        run: |
+          # Budget: 512KB uncompressed for main bundle
+          # Note: gzipped size will be significantly smaller
+          MAX_SIZE_KB=512
+          for file in dist/index.js; do
+            if [ -f "$file" ]; then
+              SIZE=$(wc -c < "$file")
+              SIZE_KB=$((SIZE / 1024))
+              if [ "$SIZE_KB" -gt "$MAX_SIZE_KB" ]; then
+                echo "::error::$file is ${SIZE_KB}KB (budget: ${MAX_SIZE_KB}KB)"
+                exit 1
+              fi
+              echo "$file: ${SIZE_KB}KB (budget: ${MAX_SIZE_KB}KB)"
+            fi
+          done
+          echo "All bundles within size budget"
+
+      - name: Check gzip size (informational)
+        run: |
+          # Report gzip size for visibility (not enforced)
+          if [ -f "dist/index.js" ]; then
+            GZIP_SIZE=$(gzip -c dist/index.js | wc -c)
+            GZIP_KB=$((GZIP_SIZE / 1024))
+            echo "Gzip size: ${GZIP_KB}KB"
+          fi
+
+  # ── Shard 7: Dependency Audit ───────────────────────────────────────────
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
 
       - name: Check dependency vulnerabilities
         run: |
@@ -57,18 +186,9 @@ jobs:
           echo "Critical vulnerabilities: $CRITICAL"
           echo "High vulnerabilities: $HIGH"
           if [ "$CRITICAL" -gt 0 ]; then
-            echo "::warning::Found $CRITICAL critical vulnerability(ies)"
+            echo "::error::Found $CRITICAL critical vulnerability(ies) — must fix before merging"
+            exit 1
           fi
           if [ "$HIGH" -gt 0 ]; then
             echo "::warning::Found $HIGH high vulnerability(ies)"
           fi
-
-      # Library/service boundary guard — src/ must never import from server/.
-      # See docs/architecture/lib-vs-service.md.
-      - name: Lib/service boundary check
-        run: |
-          if grep -rn --include='*.ts' -E "from ['\"]\\.\\./\\.\\./server/|from ['\"]\\.\\./server/" src/ 2>/dev/null; then
-            echo "::error::src/ must not import from server/. See docs/architecture/lib-vs-service.md"
-            exit 1
-          fi
-          echo "Lib/service boundary is clean"

@@ -3,12 +3,12 @@ import {
   BootOrchestrator,
   type BootOrchestratorCallbacks,
   type BootOrchestratorOptions,
-} from '../../src/autoscaler/boot-orchestrator';
-import type { GpuTierConfig, GpuTierState, BootingTierState, IdleTierState } from '../../src/types';
-import type { GpuProviderRegistry } from '../../src/gpu-providers/registry';
-import type { Logger } from '../../src/deps';
-import type { GpuLifecycleLogger } from '../../src/autoscaler/lifecycle-logger';
-import { StageTimeoutError } from '../../src/autoscaler/stage-timeout';
+} from '../src/autoscaler/boot-orchestrator';
+import type { GpuTierConfig, GpuTierState, BootingTierState, IdleTierState } from '../src/types';
+import type { GpuProviderRegistry } from '../src/gpu-providers/registry';
+import type { Logger } from '../src/deps';
+import type { GpuLifecycleLogger } from '../src/autoscaler/lifecycle-logger';
+import { StageTimeoutError } from '../src/autoscaler/stage-timeout';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -798,7 +798,7 @@ describe('BootOrchestrator edge cases', () => {
 // whether snapgpuRestoreFromSnapshot gets populated on the cfg passed to
 // the backend.
 
-import { SnapgpuMetrics } from '../../src/autoscaler/snapgpu-metrics';
+import { SnapgpuMetrics } from '../src/autoscaler/snapgpu-metrics';
 
 function makeSnapgpuClient(): ReturnType<typeof makeClient> {
   // Mimics SnapgpuClient: delegates createInstance to a backend. We capture

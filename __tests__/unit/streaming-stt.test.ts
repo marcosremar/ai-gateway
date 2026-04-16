@@ -5,7 +5,7 @@ import {
   type StreamingSTTConfig,
   type StreamingSTTStatus,
   type StreamingSTTProvider,
-} from '../../src/streaming-stt';
+} from '../src/streaming-stt';
 
 const makeConfig = (overrides: Partial<StreamingSTTConfig> = {}): StreamingSTTConfig => ({
   getGpuUrl: () => null,

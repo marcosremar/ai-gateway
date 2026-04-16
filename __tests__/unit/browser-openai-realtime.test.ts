@@ -4,7 +4,7 @@
  * reset, DataChannel event processing, and RTCStats quality assessment.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OpenAIRealtimeClient } from '../../src/browser/openai-realtime';
+import { OpenAIRealtimeClient } from '../src/browser/openai-realtime';
 
 // ── Mock browser APIs ─────────────────────────────────────────────────────────
 

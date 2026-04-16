@@ -240,8 +240,13 @@ describe('FlyioClient', () => {
           };
         }
         if (url.includes('/wait')) {
-          // waitForState
+          // waitForState long-poll
           return { ok: true, json: async () => ({}), text: async () => '' };
+        }
+        if (url.includes('/machines/') && !url.includes('/wait') && (!opts?.method || opts.method === 'GET')) {
+          // getMachine — called by waitForState after the wait to verify state
+          const m = makeMachine();
+          return { ok: true, json: async () => m, text: async () => JSON.stringify(m) };
         }
         if (url.includes('/version')) {
           // DNS check

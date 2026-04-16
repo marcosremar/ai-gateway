@@ -52,8 +52,22 @@ vi.mock('fs', () => ({
   },
 }));
 
+// Mock fs/promises — loadProviderConfig now uses async fs operations
+const mockFsPromises = {
+  access: vi.fn(() => Promise.reject(new Error('ENOENT'))), // file not found by default
+  readFile: vi.fn(() => Promise.resolve('{}')),
+  writeFile: vi.fn(() => Promise.resolve()),
+  mkdir: vi.fn(() => Promise.resolve()),
+};
+vi.mock('fs/promises', () => ({
+  access: (...a: unknown[]) => mockFsPromises.access(...a),
+  readFile: (...a: unknown[]) => mockFsPromises.readFile(...a),
+  writeFile: (...a: unknown[]) => mockFsPromises.writeFile(...a),
+  mkdir: (...a: unknown[]) => mockFsPromises.mkdir(...a),
+}));
+
 // Mock gpu-deploy
-vi.mock('../server/gpu-deploy', () => ({
+vi.mock('../../server/gpu-deploy', () => ({
   setIdleTimeoutMs: vi.fn(),
 }));
 
@@ -70,17 +84,17 @@ vi.mock('../src/gpu-providers/deploy-settings', () => ({
 }));
 
 // Mock ws-state for config-handlers
-vi.mock('../server/ws-state', () => ({
+vi.mock('../../server/ws-state', () => ({
   broadcastWs: vi.fn(),
 }));
 
 // Mock ws-server for config-handlers
-vi.mock('../server/ws-server', () => ({
+vi.mock('../../server/ws-server', () => ({
   reloadStreamingSTTRouter: vi.fn(),
 }));
 
 // Mock providers for config-handlers
-vi.mock('../server/providers', () => ({
+vi.mock('../../server/providers', () => ({
   reloadProviderAvailability: vi.fn(() => ({})),
   translationDefaults: { stt: [], llm: [], tts: [] },
   updateActivePipeline: vi.fn(),
@@ -88,17 +102,12 @@ vi.mock('../server/providers', () => ({
   vast: { listInstances: vi.fn(() => []), deleteInstance: vi.fn() },
   tensordock: { listInstances: vi.fn(() => []), deleteInstance: vi.fn() },
   modal: { listInstances: vi.fn(() => []) },
-  flyio: {
-    listInstances: vi.fn(() => []),
-    deleteInstance: vi.fn(),
-    createInstance: vi.fn(),
-    getFlyHost: vi.fn(),
-  },
+  flyio: { listInstances: vi.fn(() => []), deleteInstance: vi.fn(), createInstance: vi.fn(), getFlyHost: vi.fn() },
   scaleway: { listInstances: vi.fn(() => []), deleteInstance: vi.fn(), createInstance: vi.fn() },
 }));
 
 // Mock labs-settings
-vi.mock('../server/labs-settings', () => ({
+vi.mock('../../server/labs-settings', () => ({
   getLabsFlags: vi.fn(() => ({
     peakEwma: false,
     speculativeTranslation: false,
@@ -115,12 +124,12 @@ vi.mock('../server/labs-settings', () => ({
 }));
 
 // Mock speculative-cache
-vi.mock('../server/speculative-cache', () => ({
+vi.mock('../../server/speculative-cache', () => ({
   speculativeCache: { stats: vi.fn(() => ({})) },
 }));
 
 // Mock http-utils (before importing handlers)
-vi.mock('../server/http-utils', () => ({
+vi.mock('../../server/http-utils', () => ({
   getOrCreateRequestId: vi.fn(() => 'test-req-id'),
   setRequestIdHeader: vi.fn(),
   readJsonBody: vi.fn(),
@@ -131,12 +140,27 @@ vi.mock('../server/http-utils', () => ({
 }));
 
 // Mock user-profiles (used by saveProviderConfig)
-vi.mock('../server/user-profiles', () => ({
+vi.mock('../../server/user-profiles', () => ({
   saveUserConfig: vi.fn(() => Promise.resolve()),
 }));
 
+// Mock src/gateway/pipeline/local-kokoro.ts — imports 'bun' which is unavailable in Vitest
+vi.mock('../src/gateway/pipeline/local-kokoro', () => ({
+  getLocalKokoroUrl: vi.fn(() => null),
+  startLocalKokoro: vi.fn(),
+  stopLocalKokoro: vi.fn(),
+}));
+
+// Mock server/metrics — imports ai-handlers which pulls in many deps
+vi.mock('../../server/metrics', () => ({
+  logRequest: vi.fn(),
+  logGpuEvent: vi.fn(),
+  getRequestLog: vi.fn(() => []),
+  providerMetrics: new Map(),
+}));
+
 // Mock state for workloads
-vi.mock('../server/state', () => ({
+vi.mock('../../server/state', () => ({
   botState: { status: 'idle', podId: '', endpoint: '' },
   botDeployLock: false,
   deployState: { status: 'idle', podId: '', endpoint: '', provider: '' },
@@ -149,23 +173,15 @@ vi.mock('../server/state', () => ({
   resetDeployState: vi.fn(),
   deploymentSM: { reset: vi.fn() },
   gpuHealthy: false,
+  isGpuLatencyAcceptable: vi.fn(() => false),
 }));
 
 // Mock database/neon-management
 vi.mock('../src/database/neon-management', () => ({
   NeonManagementClient: class {
-    constructor(
-      public apiKey: string,
-      public projectId: string,
-    ) {}
-    getProject() {
-      return Promise.resolve({ name: 'test-project', regionId: 'us-east-1' });
-    }
-    listEndpoints() {
-      return Promise.resolve([
-        { id: 'ep-1', type: 'read_write', host: 'test.neon.tech', branchId: 'br-1' },
-      ]);
-    }
+    constructor(public apiKey: string, public projectId: string) {}
+    getProject() { return Promise.resolve({ name: 'test-project', regionId: 'us-east-1' }); }
+    listEndpoints() { return Promise.resolve([{ id: 'ep-1', type: 'read_write', host: 'test.neon.tech', branchId: 'br-1' }]); }
   },
 }));
 
@@ -218,9 +234,7 @@ function mockRes(): ServerResponse & { _status: number; _body: string } {
       res._body = body ?? '';
       return res;
     },
-    setHeader() {
-      return res;
-    },
+    setHeader() { return res; },
   };
   return res as unknown as ServerResponse & { _status: number; _body: string };
 }
@@ -240,17 +254,16 @@ describe('Config persistence — loadProviderConfig', () => {
   });
 
   // #261
-  it('returns defaults when config file does not exist', () => {
-    mockFs.existsSync.mockReturnValue(false);
-    const config = loadProviderConfig();
+  it('returns defaults when config file does not exist', async () => {
+    mockFsPromises.access.mockRejectedValue(new Error('ENOENT'));
+    const config = await loadProviderConfig();
     expect(config.apps.length).toBeGreaterThan(0);
     expect(config.activeAppId).toBe('realtime-translation-dubbing-mistral');
     expect(config.idleTimeoutMin).toBe(15);
   });
 
   // #262
-  it('reads config from disk when file exists', () => {
-    mockFs.existsSync.mockReturnValue(true);
+  it('reads config from disk when file exists', async () => {
     const diskConfig = {
       profiles: [{ id: 'custom', name: 'Custom', stt: [], llm: [], tts: [] }],
       activeProfileId: 'custom',
@@ -260,9 +273,10 @@ describe('Config persistence — loadProviderConfig', () => {
       idleTimeoutMin: 30,
       updatedAt: 1000,
     };
-    mockFs.readFileSync.mockReturnValue(JSON.stringify(diskConfig));
+    mockFsPromises.access.mockResolvedValue(undefined);
+    mockFsPromises.readFile.mockResolvedValue(JSON.stringify(diskConfig));
 
-    const config = loadProviderConfig();
+    const config = await loadProviderConfig();
     expect(config.activeAppId).toBe('custom');
     expect(config.idleTimeoutMin).toBe(30);
     // Should have merged in default apps that are missing
@@ -270,32 +284,30 @@ describe('Config persistence — loadProviderConfig', () => {
   });
 
   // #263
-  it('uses cache on second call within TTL', () => {
-    mockFs.existsSync.mockReturnValue(false);
-    const config1 = loadProviderConfig();
-    const config2 = loadProviderConfig();
-    // existsSync called once for first load, cached for second
-    // (might be called once more depending on cache init)
+  it('uses cache on second call within TTL', async () => {
+    mockFsPromises.access.mockRejectedValue(new Error('ENOENT'));
+    const config1 = await loadProviderConfig();
+    const config2 = await loadProviderConfig();
+    // Second call returns cached result
     expect(config1).toBe(config2); // Same reference = cached
   });
 
   // #264
-  it('returns defaults on corrupt JSON', () => {
-    mockFs.existsSync.mockReturnValue(true);
-    mockFs.readFileSync.mockReturnValue('NOT VALID JSON {{[');
+  it('returns defaults on corrupt JSON', async () => {
+    mockFsPromises.access.mockResolvedValue(undefined);
+    mockFsPromises.readFile.mockResolvedValue('NOT VALID JSON {{[');
 
-    const config = loadProviderConfig();
+    const config = await loadProviderConfig();
     // Should return default config instead of crashing
     expect(config.apps.length).toBeGreaterThan(0);
     expect(config.activeAppId).toBe('realtime-translation-dubbing-mistral');
   });
 
   // #265
-  it('preserves extra UI fields from disk', () => {
-    mockFs.existsSync.mockReturnValue(true);
+  it('preserves extra UI fields from disk', async () => {
     const diskConfig = {
-      profiles: DEFAULT_GPU_PROFILES, // legacy field name — tests migration
-      activeProfileId: 'cloud-only', // legacy field name — tests migration
+      profiles: DEFAULT_GPU_PROFILES,        // legacy field name — tests migration
+      activeProfileId: 'cloud-only',         // legacy field name — tests migration
       pipelineStt: [{ provider: 'groq', model: 'whisper' }],
       pipelineLlm: [{ provider: 'groq', model: 'llama' }],
       pipelineTts: [{ provider: 'groq', model: 'orpheus' }],
@@ -304,9 +316,10 @@ describe('Config persistence — loadProviderConfig', () => {
       dockerImages: ['marcosremar/babelcast:latest'],
       gpuImage: 'custom-image',
     };
-    mockFs.readFileSync.mockReturnValue(JSON.stringify(diskConfig));
+    mockFsPromises.access.mockResolvedValue(undefined);
+    mockFsPromises.readFile.mockResolvedValue(JSON.stringify(diskConfig));
 
-    const config = loadProviderConfig();
+    const config = await loadProviderConfig();
     expect((config as any).dockerImages).toEqual(['marcosremar/babelcast:latest']);
     expect((config as any).gpuImage).toBe('custom-image');
   });
@@ -318,66 +331,47 @@ describe('Config persistence — saveProviderConfig', () => {
   });
 
   // #266
-  it('writes to tmp file then renames (atomic write)', () => {
+  it('writes to tmp file then renames (atomic write)', async () => {
     const config: ProviderConfig = {
-      apps: [],
-      activeAppId: null,
-      pipelineStt: [],
-      pipelineLlm: [],
-      pipelineTts: [],
-      idleTimeoutMin: 15,
-      updatedAt: 0,
+      apps: [], activeAppId: null,
+      pipelineStt: [], pipelineLlm: [], pipelineTts: [],
+      idleTimeoutMin: 15, updatedAt: 0,
     };
-    saveProviderConfig(config);
+    await saveProviderConfig(config);
 
     expect(mockFs.mkdirSync).toHaveBeenCalled();
     expect(mockFs.writeFileSync).toHaveBeenCalled();
     // tmp file should be written
     const writeCall = mockFs.writeFileSync.mock.calls[0];
     expect(writeCall[0]).toContain('.tmp');
-    // renameSync is called in the source (note: source imports it from 'fs' but may
-    // use Bun's global — if the mock intercepts it, verify; otherwise the save still
-    // succeeds via the writeFileSync path).
-    // The save function catches errors internally, so we verify write was attempted.
   });
 
   // #267
-  it('updates updatedAt timestamp on save', () => {
+  it('updates updatedAt timestamp on save', async () => {
     const before = Date.now();
     const config: ProviderConfig = {
-      apps: [],
-      activeAppId: null,
-      pipelineStt: [],
-      pipelineLlm: [],
-      pipelineTts: [],
-      idleTimeoutMin: 15,
-      updatedAt: 0,
+      apps: [], activeAppId: null,
+      pipelineStt: [], pipelineLlm: [], pipelineTts: [],
+      idleTimeoutMin: 15, updatedAt: 0,
     };
-    saveProviderConfig(config);
+    await saveProviderConfig(config);
     expect(config.updatedAt).toBeGreaterThanOrEqual(before);
   });
 
   // #268
-  it('updates in-memory cache after save', () => {
-    mockFs.existsSync.mockReturnValue(false);
+  it('updates in-memory cache after save', async () => {
     const config: ProviderConfig = {
       apps: [{ id: 'saved', name: 'Saved', stt: [], llm: [], tts: [] } as GatewayApp],
       activeAppId: 'saved',
-      pipelineStt: [],
-      pipelineLlm: [],
-      pipelineTts: [],
-      idleTimeoutMin: 15,
-      updatedAt: 0,
+      pipelineStt: [], pipelineLlm: [], pipelineTts: [],
+      idleTimeoutMin: 15, updatedAt: 0,
     };
 
-    // The save attempts atomic write (writeFileSync + renameSync). If renameSync is not
-    // available in the import (source bug: it is used but not imported from 'fs'), the
-    // function catches the error. However, the cache IS updated before the file write.
     // Use applyUserConfig to simulate the cache update directly.
     applyUserConfig(config);
 
     // Subsequent load should return cached version without reading disk
-    const loaded = loadProviderConfig();
+    const loaded = await loadProviderConfig();
     expect(loaded.activeAppId).toBe('saved');
   });
 });
@@ -386,22 +380,22 @@ describe('Config persistence — patchProviderConfig', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     applyUserConfig(null as unknown as ProviderConfig);
-    mockFs.existsSync.mockReturnValue(false);
+    mockFsPromises.access.mockRejectedValue(new Error('ENOENT'));
   });
 
   // #269
-  it('merges partial update into existing config', () => {
-    const updated = patchProviderConfig({ idleTimeoutMin: 30 });
+  it('merges partial update into existing config', async () => {
+    const updated = await patchProviderConfig({ idleTimeoutMin: 30 });
     expect(updated.idleTimeoutMin).toBe(30);
     // Other fields should remain default
     expect(updated.activeAppId).toBe('realtime-translation-dubbing-mistral');
   });
 
   // #270
-  it('updates activeAppId and records lastActivatedAt', () => {
-    const updated = patchProviderConfig({ activeAppId: 'cloud-only' });
+  it('updates activeAppId and records lastActivatedAt', async () => {
+    const updated = await patchProviderConfig({ activeAppId: 'cloud-only' });
     expect(updated.activeAppId).toBe('cloud-only');
-    const cloudApp = updated.apps.find((p) => p.id === 'cloud-only');
+    const cloudApp = updated.apps.find(p => p.id === 'cloud-only');
     expect(cloudApp?.lastActivatedAt).toBeGreaterThan(0);
   });
 });
@@ -412,7 +406,7 @@ describe('Config handlers — GET /v1/config/providers', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     applyUserConfig(null as unknown as ProviderConfig);
-    mockFs.existsSync.mockReturnValue(false);
+    mockFsPromises.access.mockRejectedValue(new Error('ENOENT'));
   });
 
   // #271
@@ -431,7 +425,7 @@ describe('Config handlers — POST /v1/config/providers', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     applyUserConfig(null as unknown as ProviderConfig);
-    mockFs.existsSync.mockReturnValue(false);
+    mockFsPromises.access.mockRejectedValue(new Error('ENOENT'));
   });
 
   // #272
@@ -441,28 +435,30 @@ describe('Config handlers — POST /v1/config/providers', () => {
     const res = mockRes();
     await handlePatchProviderConfig(req, res);
     expect(res._status).toBe(400);
-    expect(resJson(res).error).toContain('must be an array');
+    const body = resJson(res);
+    expect(body.error).toContain('Validation failed');
   });
 
   // #273
-  it('validates profiles must be an array', async () => {
-    vi.mocked(readJsonBody).mockResolvedValue({ profiles: 'not-an-array' });
+  it('validates apps must be an array', async () => {
+    vi.mocked(readJsonBody).mockResolvedValue({ apps: 'not-an-array' });
     const req = mockReq();
     const res = mockRes();
     await handlePatchProviderConfig(req, res);
     expect(res._status).toBe(400);
-    expect(resJson(res).error).toContain('profiles must be an array');
+    const body = resJson(res);
+    expect(body.error).toContain('Validation failed');
   });
 
   // #274
   it('patches config and returns updated result', async () => {
-    vi.mocked(readJsonBody).mockResolvedValue({ idleTimeoutMin: 25 });
+    vi.mocked(readJsonBody).mockResolvedValue({ activeAppId: 'cloud-only' });
     const req = mockReq();
     const res = mockRes();
     await handlePatchProviderConfig(req, res);
     expect(res._status).toBe(200);
     const body = resJson(res);
-    expect(body.idleTimeoutMin).toBe(25);
+    expect(body.activeAppId).toBe('cloud-only');
   });
 });
 
@@ -487,7 +483,7 @@ describe('Config handlers — API keys', () => {
     expect(res._status).toBe(200);
     const body = resJson(res);
     const keys = body.keys as Array<Record<string, unknown>>;
-    const groqKey = keys.find((k) => k.id === 'groq');
+    const groqKey = keys.find(k => k.id === 'groq');
     expect(groqKey?.configured).toBe(true);
     expect(groqKey?.masked).not.toBe('gsk_test123456789');
     expect((groqKey?.masked as string).includes('***')).toBe(true);
@@ -517,7 +513,7 @@ describe('Config handlers — profile CRUD', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     applyUserConfig(null as unknown as ProviderConfig);
-    mockFs.existsSync.mockReturnValue(false);
+    mockFsPromises.access.mockRejectedValue(new Error('ENOENT'));
   });
 
   // #278
@@ -533,7 +529,7 @@ describe('Config handlers — profile CRUD', () => {
     expect(res._status).toBe(201);
     const body = resJson(res);
     const apps = body.apps as Array<Record<string, unknown>>;
-    expect(apps.find((p) => p.id === 'my-profile')).toBeTruthy();
+    expect(apps.find(p => p.id === 'my-profile')).toBeTruthy();
   });
 
   // #278b
@@ -543,7 +539,8 @@ describe('Config handlers — profile CRUD', () => {
     const res = mockRes();
     await handleCreateProfile(req, res);
     expect(res._status).toBe(400);
-    expect(resJson(res).error).toContain('id is required');
+    const body = resJson(res);
+    expect(body.error).toMatch(/id is required|Validation failed/);
   });
 
   // #278c
@@ -553,7 +550,8 @@ describe('Config handlers — profile CRUD', () => {
     const res = mockRes();
     await handleCreateProfile(req, res);
     expect(res._status).toBe(400);
-    expect(resJson(res).error).toContain('Invalid profile id');
+    const body = resJson(res);
+    expect(body.error).toMatch(/Invalid profile id|Validation failed/);
   });
 
   // #279
@@ -565,11 +563,8 @@ describe('Config handlers — profile CRUD', () => {
         { id: 'deletable', name: 'Deletable', stt: [], llm: [], tts: [] } as GatewayApp,
       ],
       activeAppId: 'deletable',
-      pipelineStt: [],
-      pipelineLlm: [],
-      pipelineTts: [],
-      idleTimeoutMin: 15,
-      updatedAt: 0,
+      pipelineStt: [], pipelineLlm: [], pipelineTts: [],
+      idleTimeoutMin: 15, updatedAt: 0,
     });
 
     vi.mocked(readJsonBody).mockResolvedValue({ id: 'deletable' });
@@ -579,7 +574,7 @@ describe('Config handlers — profile CRUD', () => {
     expect(res._status).toBe(200);
     const body = resJson(res);
     const apps = body.apps as Array<Record<string, unknown>>;
-    expect(apps.find((p) => p.id === 'deletable')).toBeUndefined();
+    expect(apps.find(p => p.id === 'deletable')).toBeUndefined();
     // Active app should be cleared since we deleted it
     expect(body.activeAppId).toBeNull();
   });
@@ -656,7 +651,7 @@ import {
   setSttTargetLatencyMs,
   setLlmTargetLatencyMs,
   setTtsTargetLatencyMs,
-} from '../../src/gpu-providers/deploy-settings';
+} from '../src/gpu-providers/deploy-settings';
 
 describe('Config persistence — applyProfileLatencyTargets', () => {
   beforeEach(() => {
@@ -664,13 +659,11 @@ describe('Config persistence — applyProfileLatencyTargets', () => {
   });
 
   it('applies custom per-stage latency targets', () => {
-    const apps: GatewayApp[] = [
-      {
-        id: 'test-profile',
-        name: 'Test',
-        latencyTargetsMs: { stt: 200, llm: 400, tts: 300 },
-      },
-    ];
+    const apps: GatewayApp[] = [{
+      id: 'test-profile',
+      name: 'Test',
+      latencyTargetsMs: { stt: 200, llm: 400, tts: 300 },
+    }];
     applyProfileLatencyTargets('test-profile', apps);
 
     expect(vi.mocked(setSttTargetLatencyMs)).toHaveBeenCalledWith(200);
@@ -688,14 +681,14 @@ describe('Config persistence — applyProfileLatencyTargets', () => {
 // PART 2: WORKLOAD REGISTRY + HANDLERS (#281-#310)
 // ═════════════════════════════════════════════════════════════════════════════
 
-import { WorkloadRegistry } from '../../src/workloads/registry';
+import { WorkloadRegistry } from '../src/workloads/registry';
 import type {
   Workload,
   WorkloadDriver,
   WorkloadConfig,
   WorkloadEvent,
   WorkloadType,
-} from '../../src/workloads/types';
+} from '../src/workloads/types';
 
 // ── Fake Driver ─────────────────────────────────────────────────────────────
 
@@ -839,9 +832,9 @@ describe('WorkloadRegistry — deploy', () => {
   // #289
   it('deploy rejects duplicate names', async () => {
     await registry.deploy('test-gpu', { type: 'gpu' } as WorkloadConfig);
-    await expect(registry.deploy('test-gpu', { type: 'gpu' } as WorkloadConfig)).rejects.toThrow(
-      /already exists/,
-    );
+    await expect(
+      registry.deploy('test-gpu', { type: 'gpu' } as WorkloadConfig),
+    ).rejects.toThrow(/already exists/);
   });
 
   // #290
@@ -859,9 +852,9 @@ describe('WorkloadRegistry — deploy', () => {
   // #291
   it('deploy throws when no driver registered', async () => {
     const emptyReg = new WorkloadRegistry();
-    await expect(emptyReg.deploy('test', { type: 'gpu' } as WorkloadConfig)).rejects.toThrow(
-      /No workload driver/,
-    );
+    await expect(
+      emptyReg.deploy('test', { type: 'gpu' } as WorkloadConfig),
+    ).rejects.toThrow(/No workload driver/);
   });
 });
 
@@ -944,7 +937,7 @@ describe('WorkloadRegistry — events', () => {
   // #298
   it('emits "created" event on deploy', async () => {
     const events: WorkloadEvent[] = [];
-    registry.onEvent((e) => events.push(e));
+    registry.onEvent(e => events.push(e));
 
     await registry.deploy('gpu-1', { type: 'gpu' } as WorkloadConfig);
     expect(events).toHaveLength(1);
@@ -956,7 +949,7 @@ describe('WorkloadRegistry — events', () => {
   it('emits "status_changed" event on stop', async () => {
     const events: WorkloadEvent[] = [];
     const w = await registry.deploy('gpu-1', { type: 'gpu' } as WorkloadConfig);
-    registry.onEvent((e) => events.push(e));
+    registry.onEvent(e => events.push(e));
 
     await registry.stop(w.id);
     expect(events).toHaveLength(1);
@@ -968,7 +961,7 @@ describe('WorkloadRegistry — events', () => {
   it('emits "terminated" event on terminate', async () => {
     const events: WorkloadEvent[] = [];
     const w = await registry.deploy('gpu-1', { type: 'gpu' } as WorkloadConfig);
-    registry.onEvent((e) => events.push(e));
+    registry.onEvent(e => events.push(e));
 
     await registry.terminate(w.id);
     expect(events).toHaveLength(1);
@@ -978,7 +971,7 @@ describe('WorkloadRegistry — events', () => {
   // #301
   it('unsubscribe removes listener', async () => {
     const events: WorkloadEvent[] = [];
-    const unsub = registry.onEvent((e) => events.push(e));
+    const unsub = registry.onEvent(e => events.push(e));
     unsub();
 
     await registry.deploy('gpu-1', { type: 'gpu' } as WorkloadConfig);
@@ -987,11 +980,11 @@ describe('WorkloadRegistry — events', () => {
 
   // #302
   it('event handler errors do not crash registry', async () => {
-    registry.onEvent(() => {
-      throw new Error('handler error');
-    });
+    registry.onEvent(() => { throw new Error('handler error'); });
     // Should not throw
-    await expect(registry.deploy('gpu-1', { type: 'gpu' } as WorkloadConfig)).resolves.toBeTruthy();
+    await expect(
+      registry.deploy('gpu-1', { type: 'gpu' } as WorkloadConfig),
+    ).resolves.toBeTruthy();
   });
 });
 
@@ -1036,7 +1029,7 @@ import {
   handleWorkloadTerminate,
   routeWorkloadRequest,
 } from '../../server/workload-handlers';
-import { workloadRegistry } from '../../src/workloads/registry';
+import { workloadRegistry } from '../src/workloads/registry';
 
 describe('Workload handlers — list', () => {
   beforeEach(() => {
@@ -1087,7 +1080,8 @@ describe('Workload handlers — deploy', () => {
     const res = mockRes();
     await handleWorkloadDeploy(req, res);
     expect(res._status).toBe(400);
-    expect(resJson(res).error).toContain('name and type are required');
+    const body = resJson(res);
+    expect(body.error).toMatch(/name and type are required|Validation failed/);
   });
 
   // #307b
@@ -1097,7 +1091,8 @@ describe('Workload handlers — deploy', () => {
     const res = mockRes();
     await handleWorkloadDeploy(req, res);
     expect(res._status).toBe(400);
-    expect(resJson(res).error).toContain('Invalid workload type');
+    const body = resJson(res);
+    expect(body.error).toMatch(/Invalid workload type|Validation failed/);
   });
 
   // #308

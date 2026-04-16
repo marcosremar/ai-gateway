@@ -1638,6 +1638,55 @@ export async function handleGpuDeployHistory(req: IncomingMessage, res: ServerRe
   res.end(JSON.stringify({ count: summaries.length, items: summaries }, null, 2));
 }
 
+// ── GPU Heartbeat — external workload keepalive ─────────────────────────────
+
+/**
+ * POST /v1/gpu/heartbeat — Reset the idle timer from an external workload.
+ *
+ * When the GPU pod is accessed directly (not through the gateway), the idle
+ * timer isn't reset because requests don't flow through ai-handlers.ts.
+ * The GPU server (e.g. HybrIK) or a wrapper script can POST to this endpoint
+ * to signal "I'm still in use, don't auto-stop me".
+ *
+ * The GPU pod just needs to know the gateway URL and optionally the API key:
+ *   curl -X POST http://gateway:3017/v1/gpu/heartbeat
+ *   curl -X POST http://gateway:3017/v1/gpu/heartbeat -d '{"source":"hybrik","activeRequests":1}'
+ *
+ * Lightweight: no body required, 200 OK with updated idle state.
+ */
+export async function handleGpuHeartbeat(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const { setLastModelRequestTime, lastModelRequestTime } = await import('./state');
+  const { resetIdleState, IDLE_TIMEOUT_MS } = await import('./gpu-monitor-loop');
+
+  setLastModelRequestTime(Date.now());
+  resetIdleState();
+
+  // Parse optional body for logging (fire-and-forget, never fail on bad body)
+  let source = 'unknown';
+  let activeRequests: number | undefined;
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    if (chunks.length > 0) {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      if (body.source) source = String(body.source);
+      if (typeof body.activeRequests === 'number') activeRequests = body.activeRequests;
+      if (typeof body.active_requests === 'number') activeRequests = body.active_requests;
+    }
+  } catch { /* body is optional */ }
+
+  const idleResetMs = Date.now() - lastModelRequestTime;
+  log.log(`[gpu] Heartbeat received (source=${source}${activeRequests !== undefined ? `, active=${activeRequests}` : ''}) — idle timer reset`);
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    ok: true,
+    idleTimeoutMs: IDLE_TIMEOUT_MS,
+    lastModelRequestAt: lastModelRequestTime,
+    source,
+  }));
+}
+
 // ── Re-exports from split modules ────────────────────────────────────────────
 
 export {

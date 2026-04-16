@@ -44,10 +44,10 @@ export function scheduleBotIdleShutdown() {
       setBotDeployLock(false);
       if (podId && podId !== 'local') {
         if (flyKey && botState.endpoint?.includes('.fly.dev')) {
-          await flyio.deleteInstance(podId, { apiKey: flyKey }).catch(() => {});
+          await flyio.deleteInstance(podId, { apiKey: flyKey }).catch((err) => log.debug('[bot] Fly.io delete failed (benign): %s', err instanceof Error ? err.message : err));
         } else if (apiKey) {
           const { runpod } = await import('../../providers');
-          await runpod.deleteInstance(podId, { apiKey }).catch(() => {});
+          await runpod.deleteInstance(podId, { apiKey }).catch((err) => log.debug('[bot] RunPod delete failed (benign): %s', err instanceof Error ? err.message : err));
         }
       }
     } catch (e) {
@@ -179,7 +179,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
             break;
           }
         }
-      })().catch(() => {});
+      })().catch((err) => log.warn('[bot] Background meeting check failed: %s', err instanceof Error ? err.message : err));
 
       (async () => {
         const flyHost = flyio.getFlyHost();
@@ -253,7 +253,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
             }
           }
         }
-      })().catch(() => {});
+      })().catch((err) => log.warn('[bot] Watchdog check failed: %s', err instanceof Error ? err.message : err));
 
       if (deployState.status === 'ready' && deployState.endpoint) {
         warmupAllGpuModels(deployState.endpoint).catch(err =>

@@ -14,7 +14,7 @@ import {
   filterVoicesByLanguage,
   getDefaultVoiceMappings,
   resolveVoiceSlot,
-} from '../../src/providers/voice-catalog';
+} from '../src/providers/voice-catalog';
 
 describe('Voice Catalog', () => {
   describe('VOICE_SLOTS', () => {

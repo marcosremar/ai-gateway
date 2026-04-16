@@ -78,6 +78,19 @@ export async function runStartupTasks(): Promise<void> {
   } catch (e: any) {
     log.warn('[ws-server] Standby monitor not started:', e?.message?.slice(0, 80));
   }
+
+  // 6. Start local Kokoro TTS server (CPU-based, always available as fallback)
+  try {
+    const { startLocalKokoro } = require('../../src/gateway/pipeline/local-kokoro');
+    startLocalKokoro().then((url: string | null) => {
+      if (url) log.log(`[startup] Local Kokoro TTS running at ${url}`);
+      else log.log('[startup] Local Kokoro TTS not available (no venv found, set LOCAL_KOKORO_URL or create .venv-kokoro)');
+    }).catch((e: any) => {
+      log.warn(`[startup] Local Kokoro TTS failed: ${e?.message?.slice(0, 80)}`);
+    });
+  } catch (e: any) {
+    log.warn(`[startup] Local Kokoro module not loaded: ${e?.message?.slice(0, 80)}`);
+  }
 }
 
 /** Install persistent file logging — captures all console output + GPU events. */

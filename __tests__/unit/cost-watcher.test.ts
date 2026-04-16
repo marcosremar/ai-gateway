@@ -3,9 +3,9 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { CostWatcher, type CostAlertEvent } from '../../src/alerting/cost-watcher';
-import type { AlertRouter } from '../../src/alerting/alert-router';
-import type { AlertPayload } from '../../src/alerting/types';
+import { CostWatcher, type CostAlertEvent } from '../src/alerting/cost-watcher';
+import type { AlertRouter } from '../src/alerting/alert-router';
+import type { AlertPayload } from '../src/alerting/types';
 
 function makeFakeRouter() {
   const sent: AlertPayload[] = [];

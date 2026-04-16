@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { AutoscalerEngine } from '../../src/autoscaler/engine';
-import { GpuProviderRegistry } from '../../src/gpu-providers/registry';
-import type { GpuProviderClient } from '../../src/gpu-providers/types';
+import { AutoscalerEngine } from '../src/autoscaler/engine';
+import { GpuProviderRegistry } from '../src/gpu-providers/registry';
+import type { GpuProviderClient } from '../src/gpu-providers/types';
 
 describe('GPU Provisioning Improvements', () => {
   let registry: GpuProviderRegistry;

@@ -101,7 +101,7 @@ describe('truncate', () => {
   });
 
   it('should use custom suffix', () => {
-    expect(truncate('long string', 8, '--')).toBe('long --');
+    expect(truncate('long string', 8, '--')).toBe('long s--');
   });
 });
 

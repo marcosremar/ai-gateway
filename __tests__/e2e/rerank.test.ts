@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OpenRouterRerankProvider } from '../../src/providers/rerank/openrouter-rerank';
-import { FireworksRerankProvider } from '../../src/providers/rerank/fireworks-rerank';
+import { OpenRouterRerankProvider, FireworksRerankProvider } from '../src/providers/rerank';
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
@@ -66,7 +65,8 @@ describe('Reranking Providers', () => {
       });
 
       const provider = new OpenRouterRerankProvider();
-      await expect(provider.rerank({ query: 'test', documents: ['a'] })).rejects.toThrow('401');
+      await expect(provider.rerank({ query: 'test', documents: ['a'] }))
+        .rejects.toThrow('401');
     });
 
     it('isConfigured reflects env key', () => {
@@ -103,9 +103,8 @@ describe('Reranking Providers', () => {
     it('throws when API key missing', async () => {
       delete process.env.FIREWORKS_API_KEY;
       const provider = new FireworksRerankProvider();
-      await expect(provider.rerank({ query: 'test', documents: ['a'] })).rejects.toThrow(
-        'FIREWORKS_API_KEY is not set',
-      );
+      await expect(provider.rerank({ query: 'test', documents: ['a'] }))
+        .rejects.toThrow('FIREWORKS_API_KEY is not set');
     });
   });
 });

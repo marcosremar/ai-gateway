@@ -4,11 +4,13 @@ kill_signal = 'SIGTERM'
 kill_timeout = '30s'
 
 [build]
-  dockerfile = 'Dockerfile'
+  dockerfile = 'Dockerfile.production'
 
 [env]
   PORT = '4000'
-  CORS_ORIGINS = '*'
+  # CORS_ORIGINS should be set per-environment via fly secrets or fly.toml override
+  # Development default: '*' (wildcard)
+  # Production recommended: 'https://yourdomain.com'
   RATE_LIMIT_RPM = '6000'
   NODE_ENV = 'production'
 
@@ -34,4 +36,4 @@ kill_timeout = '30s'
 [[vm]]
   size = 'shared-cpu-2x'
   memory = '2048mb'
-  swap_size_mb = 2048
+  # Removed swap_size_mb — swap on Fly.io causes noisy-neighbor latency spikes

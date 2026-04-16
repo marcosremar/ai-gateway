@@ -401,6 +401,23 @@ export { createProxyServer, startProxy } from './proxy';
 export { RateLimiter } from './proxy';
 export type { ProxyConfig, ProviderMapping, ProxyRequest, ProxyResponse } from './proxy';
 
+// ── Rule-Based Guardrails ─────────────────────────────────────────────
+export { GuardrailEngine } from './gateway/guardrails';
+export type {
+  GuardrailEngineConfig,
+  GuardrailRule,
+  GuardrailAction,
+  GuardrailHook,
+  EngineResult,
+  RuleResult,
+  RegexMatchRule,
+  JsonSchemaRule,
+  ContainsCodeRule,
+  WebhookRule,
+  NotNullRule,
+  ModelWhitelistRule,
+} from './gateway/guardrails';
+
 // ── HTTP SDK (typed client for consuming the REST API) ────────────────
 export { GatewaySDK } from './sdk';
 export {

@@ -631,6 +631,114 @@ export function OverviewSection() {
         </div>
       )}
 
+      {/* ── Cache + Guardrails row ── */}
+      <div className="grid grid-cols-2 gap-3">
+        {/* Translation Cache */}
+        <div className="rounded-xl border overflow-hidden"
+          style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
+          <div className="flex items-center gap-2 px-4 py-2.5 border-b"
+            style={{ borderColor: 'var(--color-border)' }}>
+            <div className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0"
+              style={{ background: 'rgba(99,102,241,0.15)' }}>
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#818cf8" strokeWidth="1.5" strokeLinecap="round">
+                <ellipse cx="8" cy="5" rx="6" ry="2.5"/><path d="M2 5v6c0 1.38 2.69 2.5 6 2.5s6-1.12 6-2.5V5"/><path d="M2 8c0 1.38 2.69 2.5 6 2.5s6-1.12 6-2.5"/>
+              </svg>
+            </div>
+            <span className="text-[12px] font-semibold">Translation Cache</span>
+          </div>
+          <div className="p-4">
+            {health.translationCache ? (() => {
+              const c = health.translationCache!;
+              const total = c.hits + c.misses;
+              return (
+                <div className="space-y-3">
+                  <div className="flex items-end gap-1">
+                    <span className="font-mono text-2xl font-bold" style={{ color: '#818cf8' }}>
+                      {total > 0 ? `${Math.round(c.hitRate * 100)}%` : '—'}
+                    </span>
+                    <span className="text-[10px] mb-1" style={{ color: 'var(--color-text-muted)' }}>hit rate</span>
+                  </div>
+                  {total > 0 && (
+                    <div className="w-full h-1.5 rounded-full" style={{ background: 'var(--color-border)' }}>
+                      <div className="h-1.5 rounded-full transition-all" style={{ width: `${Math.round(c.hitRate * 100)}%`, background: '#818cf8' }} />
+                    </div>
+                  )}
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    {[
+                      { label: 'hits', value: c.hits, color: '#4ade80' },
+                      { label: 'misses', value: c.misses, color: '#f87171' },
+                      { label: 'size', value: c.size, color: '#818cf8' },
+                    ].map(({ label, value, color }) => (
+                      <div key={label} className="text-center">
+                        <div className="font-mono text-sm font-bold" style={{ color }}>{value}</div>
+                        <div className="text-[9px] uppercase" style={{ color: 'var(--color-text-muted)', letterSpacing: '0.08em' }}>{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })() : (
+              <div className="flex flex-col items-center justify-center py-4 gap-1">
+                <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>No cache data yet</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Guardrails */}
+        <div className="rounded-xl border overflow-hidden"
+          style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
+          <div className="flex items-center gap-2 px-4 py-2.5 border-b"
+            style={{ borderColor: 'var(--color-border)' }}>
+            <div className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0"
+              style={{ background: 'rgba(16,185,129,0.15)' }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              </svg>
+            </div>
+            <span className="text-[12px] font-semibold">Guardrails</span>
+          </div>
+          <div className="p-4">
+            {health.guardrails && health.guardrails.totalEvaluations > 0 ? (() => {
+              const g = health.guardrails!;
+              return (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { label: 'passed', value: g.passed, color: '#4ade80' },
+                      { label: 'blocked', value: g.blocked, color: '#f87171' },
+                      { label: 'audited', value: g.audited, color: '#fbbf24' },
+                    ].map(({ label, value, color }) => (
+                      <div key={label} className="rounded-lg p-2 text-center border"
+                        style={{ borderColor: `color-mix(in srgb, ${color} 20%, var(--color-border))`, background: `color-mix(in srgb, ${color} 6%, var(--color-surface))` }}>
+                        <div className="font-mono text-lg font-bold" style={{ color }}>{value}</div>
+                        <div className="text-[9px] uppercase" style={{ color: 'var(--color-text-muted)', letterSpacing: '0.08em' }}>{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {Object.keys(g.ruleHits).length > 0 && (
+                    <div className="space-y-1 pt-1">
+                      <div className="text-[9px] uppercase font-semibold" style={{ color: 'var(--color-text-muted)', letterSpacing: '0.1em' }}>rule triggers</div>
+                      {Object.entries(g.ruleHits).map(([rule, count]) => (
+                        <div key={rule} className="flex items-center justify-between text-[11px]">
+                          <span className="font-mono" style={{ color: 'var(--color-text-secondary)' }}>{rule}</span>
+                          <span className="font-mono font-bold" style={{ color: '#f87171' }}>{count}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })() : (
+              <div className="flex flex-col items-center justify-center py-4 gap-1">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-muted)" strokeWidth="1.5" strokeLinecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>No rules active</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* ── Provider Performance ── */}
       {providerEntries.length > 0 && (
         <div className="rounded-xl border overflow-hidden"

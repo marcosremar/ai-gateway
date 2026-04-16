@@ -53,11 +53,12 @@ describe('ScalewayClient', () => {
       const client = new ScalewayClient();
       const creds = { apiKey: FAKE_SECRET };
 
-      mockFetch.mockResolvedValueOnce(
-        mockJsonResponse({ default_project_id: 'proj-123' }),
-      );
+      // Mock responses in call order: findUbuntuImage, then resolveProjectId (which may fail without authId)
       mockFetch.mockResolvedValueOnce(
         mockJsonResponse({ images: [{ id: 'img-uuid', name: 'Ubuntu 24.04' }] }),
+      );
+      mockFetch.mockResolvedValueOnce(
+        mockJsonResponse({ default_project_id: 'proj-123' }),
       );
       mockFetch.mockResolvedValueOnce(
         mockJsonResponse({ server: { id: 'srv-1', name: 'test', state: 'running', commercial_type: 'DEV1-L' } }),
@@ -90,11 +91,12 @@ describe('ScalewayClient', () => {
       const client = new ScalewayClient();
       const creds = { apiKey: FAKE_SECRET, authId: 'SCW-access-key' };
 
-      mockFetch.mockResolvedValueOnce(
-        mockJsonResponse({ default_project_id: 'proj-123' }),
-      );
+      // Mock responses in call order: findUbuntuImage, resolveProjectId, create, poweron, waitForIp
       mockFetch.mockResolvedValueOnce(
         mockJsonResponse({ images: [{ id: 'img-uuid', name: 'Ubuntu 24.04' }] }),
+      );
+      mockFetch.mockResolvedValueOnce(
+        mockJsonResponse({ default_project_id: 'proj-123' }),
       );
       mockFetch.mockResolvedValueOnce(
         mockJsonResponse({ server: { id: 'srv-1', name: 'test', state: 'running', commercial_type: 'DEV1-XL' } }),
@@ -119,11 +121,12 @@ describe('ScalewayClient', () => {
       const client = new ScalewayClient();
       const creds = { apiKey: FAKE_SECRET, authId: 'SCW-access-key' };
 
-      mockFetch.mockResolvedValueOnce(
-        mockJsonResponse({ default_project_id: 'proj-123' }),
-      );
+      // Mock responses in call order: findUbuntuImage, resolveProjectId, create (error)
       mockFetch.mockResolvedValueOnce(
         mockJsonResponse({ images: [{ id: 'img-uuid', name: 'Ubuntu 24.04' }] }),
+      );
+      mockFetch.mockResolvedValueOnce(
+        mockJsonResponse({ default_project_id: 'proj-123' }),
       );
       mockFetch.mockResolvedValueOnce(
         mockErrorResponse(400, 'Bad request'),

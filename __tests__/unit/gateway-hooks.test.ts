@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { emitHook } from '../../src/hooks';
-import type { GatewayHooks, RequestStartEvent, RequestEndEvent, FallbackEvent, ScaleUpEvent, ScaleDownEvent, CostAlertEvent, HealthChangeEvent } from '../../src/hooks';
+import { emitHook } from '../src/hooks';
+import type { GatewayHooks, RequestStartEvent, RequestEndEvent, FallbackEvent, ScaleUpEvent, ScaleDownEvent, CostAlertEvent, HealthChangeEvent } from '../src/hooks';
 
 describe('emitHook()', () => {
   describe('basic behavior', () => {

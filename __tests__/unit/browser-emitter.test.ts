@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TypedEmitter } from '../../src/browser/emitter';
+import { TypedEmitter } from '../src/browser/emitter';
 
 interface TestEvents {
   message: string;

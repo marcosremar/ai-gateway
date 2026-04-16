@@ -23,6 +23,8 @@ import struct
 import threading
 from pathlib import Path
 
+MAX_WIRE_BYTES = int(os.environ.get('SNAPGPU_MAX_WIRE_BYTES', str(8 * 1024 * 1024)))
+
 
 # ── Wire protocol: 4-byte big-endian length + pickle payload ────────────────
 
@@ -34,13 +36,18 @@ def _recv(conn: socket.socket) -> dict | None:
             return None
         header += chunk
     (length,) = struct.unpack('>I', header)
+    if length <= 0 or length > MAX_WIRE_BYTES:
+        raise ValueError(f'invalid frame length {length} (max {MAX_WIRE_BYTES})')
     data = b''
     while len(data) < length:
         chunk = conn.recv(length - len(data))
         if not chunk:
             return None
         data += chunk
-    return pickle.loads(data)  # type: ignore[no-any-return]
+    msg = pickle.loads(data)  # type: ignore[no-any-return]
+    if not isinstance(msg, dict):
+        raise TypeError('worker message must be a dict')
+    return msg
 
 
 def _send(conn: socket.socket, obj: object) -> None:
@@ -57,6 +64,10 @@ def _handle(conn: socket.socket) -> None:
             return
         fn_bytes: bytes = msg['fn_data']
         args_bytes: bytes | None = msg.get('args_data')
+        if not isinstance(fn_bytes, (bytes, bytearray)):
+            raise TypeError('fn_data must be bytes')
+        if args_bytes is not None and not isinstance(args_bytes, (bytes, bytearray)):
+            raise TypeError('args_data must be bytes when provided')
 
         fn = pickle.loads(fn_bytes)
         args, kwargs = pickle.loads(args_bytes) if args_bytes else ((), {})

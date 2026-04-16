@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { StreamingAudioPlayer } from '../../src/browser/streaming-audio';
+import { StreamingAudioPlayer } from '../src/browser/streaming-audio';
 
 // ── Web Audio API Mock ────────────────────────────────────────────────────────
 
@@ -23,13 +23,8 @@ function makeMockSource() {
   // Capture onended setter
   let _onended: (() => void) | null = null;
   Object.defineProperty(src, 'onended', {
-    set(fn: () => void) {
-      _onended = fn;
-      mockSourceOnEnded = fn;
-    },
-    get() {
-      return _onended;
-    },
+    set(fn: () => void) { _onended = fn; mockSourceOnEnded = fn; },
+    get() { return _onended; },
   });
   return src;
 }
@@ -46,10 +41,7 @@ const mockCreateBuffer = vi.fn((channels: number, length: number, sampleRate: nu
 const mockLinearRampToValueAtTime = vi.fn();
 
 const mockGainNode = {
-  gain: {
-    setValueAtTime: mockSetValueAtTime,
-    linearRampToValueAtTime: mockLinearRampToValueAtTime,
-  },
+  gain: { setValueAtTime: mockSetValueAtTime, linearRampToValueAtTime: mockLinearRampToValueAtTime },
   connect: mockConnect,
   disconnect: mockDisconnect,
 };
@@ -66,26 +58,16 @@ let mockCurrentTime = 0;
 
 // Use a class for the mock so `new AudioContext()` works
 class MockAudioContext {
-  get currentTime() {
-    return mockCurrentTime;
-  }
+  get currentTime() { return mockCurrentTime; }
   sampleRate = 44100;
   destination = {};
-  createGain() {
-    return mockGainNode;
-  }
-  createMediaStreamDestination() {
-    return mockDestinationNode;
-  }
-  createBufferSource() {
-    return mockCreateBufferSource();
-  }
+  createGain() { return mockGainNode; }
+  createMediaStreamDestination() { return mockDestinationNode; }
+  createBufferSource() { return mockCreateBufferSource(); }
   createBuffer(channels: number, length: number, sampleRate: number) {
     return mockCreateBuffer(channels, length, sampleRate);
   }
-  close() {
-    return mockClose();
-  }
+  close() { return mockClose(); }
 }
 
 // Install global mock
@@ -93,16 +75,9 @@ vi.stubGlobal('AudioContext', MockAudioContext);
 
 // Disable Worker so StreamingAudioPlayer falls back to synchronous main-thread PCM decode.
 // In bun's test runtime, real Workers don't flush in time for setTimeout(0).
-vi.stubGlobal(
-  'Worker',
-  class {
-    constructor() {
-      throw new Error('no Worker in test');
-    }
-  },
-);
+vi.stubGlobal('Worker', class { constructor() { throw new Error('no Worker in test'); } });
 
-const flushMicrotasks = () => new Promise((resolve) => setTimeout(resolve, 0));
+const flushMicrotasks = () => new Promise(resolve => setTimeout(resolve, 0));
 
 // ── Helper: create a minimal WAV chunk ───────────────────────────────────────
 
@@ -119,21 +94,12 @@ function makeWavChunk(
   const uint8 = new Uint8Array(buffer);
 
   // RIFF header
-  uint8[0] = 0x52;
-  uint8[1] = 0x49;
-  uint8[2] = 0x46;
-  uint8[3] = 0x46; // 'RIFF'
+  uint8[0] = 0x52; uint8[1] = 0x49; uint8[2] = 0x46; uint8[3] = 0x46; // 'RIFF'
   view.setUint32(4, 36 + dataSize, true);
-  uint8[8] = 0x57;
-  uint8[9] = 0x41;
-  uint8[10] = 0x56;
-  uint8[11] = 0x45; // 'WAVE'
+  uint8[8] = 0x57; uint8[9] = 0x41; uint8[10] = 0x56; uint8[11] = 0x45; // 'WAVE'
 
   // fmt chunk
-  uint8[12] = 0x66;
-  uint8[13] = 0x6d;
-  uint8[14] = 0x74;
-  uint8[15] = 0x20; // 'fmt '
+  uint8[12] = 0x66; uint8[13] = 0x6D; uint8[14] = 0x74; uint8[15] = 0x20; // 'fmt '
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true); // PCM
   view.setUint16(22, numChannels, true);
@@ -143,10 +109,7 @@ function makeWavChunk(
   view.setUint16(34, bitsPerSample, true);
 
   // data chunk
-  uint8[36] = 0x64;
-  uint8[37] = 0x61;
-  uint8[38] = 0x74;
-  uint8[39] = 0x61; // 'data'
+  uint8[36] = 0x64; uint8[37] = 0x61; uint8[38] = 0x74; uint8[39] = 0x61; // 'data'
   view.setUint32(40, dataSize, true);
 
   // Fill with 16-bit PCM data
@@ -173,11 +136,7 @@ describe('StreamingAudioPlayer', () => {
   });
 
   afterEach(() => {
-    try {
-      player.destroy();
-    } catch {
-      /* already destroyed */
-    }
+    try { player.destroy(); } catch { /* already destroyed */ }
   });
 
   describe('init()', () => {

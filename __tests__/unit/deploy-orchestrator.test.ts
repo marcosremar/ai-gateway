@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { ProviderCooldownTracker, PROVIDER_LABELS } from '../../src/gpu-providers/deploy-orchestrator';
+import { ProviderCooldownTracker, PROVIDER_LABELS } from '../src/gpu-providers/deploy-orchestrator';
 
 describe('ProviderCooldownTracker', () => {
   let tracker: ProviderCooldownTracker;
@@ -17,36 +17,36 @@ describe('ProviderCooldownTracker', () => {
     expect(tracker.isCoolingDown('runpod')).toBe(false);
   });
 
-  it('recordFailure → isInCooldown returns true', () => {
-    tracker.recordFailure('runpod');
+  it('recordFailure → isInCooldown returns true', async () => {
+    await tracker.recordFailure('runpod');
     expect(tracker.isCoolingDown('runpod')).toBe(true);
     expect(tracker.getFailCount('runpod')).toBe(1);
   });
 
-  it('markSuccess resets fail count and clears cooldown', () => {
-    tracker.recordFailure('runpod');
-    tracker.recordFailure('runpod');
+  it('markSuccess resets fail count and clears cooldown', async () => {
+    await tracker.recordFailure('runpod');
+    await tracker.recordFailure('runpod');
     expect(tracker.isCoolingDown('runpod')).toBe(true);
 
-    tracker.recordSuccess('runpod');
+    await tracker.recordSuccess('runpod');
     expect(tracker.isCoolingDown('runpod')).toBe(false);
     expect(tracker.getFailCount('runpod')).toBe(0);
   });
 
-  it('exponential backoff increases cooldown with fail count', () => {
+  it('exponential backoff increases cooldown with fail count', async () => {
     const base = 60_000;
-    const max = 5 * 60_000;
+    const max = 15 * 60_000; // MAX_COOLDOWN_MS is 15 min
 
-    tracker.recordFailure('vast');
+    await tracker.recordFailure('vast');
     const t1 = tracker.getRemainingSeconds('vast');
     expect(t1).toBeGreaterThan(0);
 
-    tracker.recordFailure('vast');
+    await tracker.recordFailure('vast');
     const t2 = tracker.getRemainingSeconds('vast');
     expect(t2).toBeGreaterThan(t1);
 
-    tracker.recordFailure('vast');
-    tracker.recordFailure('vast');
+    await tracker.recordFailure('vast');
+    await tracker.recordFailure('vast');
     const t4 = tracker.getRemainingSeconds('vast');
     expect(t4).toBeLessThanOrEqual(Math.round(max / 1000));
   });
@@ -62,20 +62,20 @@ describe('ProviderCooldownTracker', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it('persists and reloads cooldowns', () => {
+    it('persists and reloads cooldowns', async () => {
       const filePath = path.join(tmpDir, 'cooldowns.json');
-      tracker.recordFailure('tensordock');
-      tracker.loadFromFile(filePath);
-      tracker.recordFailure('modal');
+      await tracker.recordFailure('tensordock');
+      await tracker.loadFromFile(filePath);
+      await tracker.recordFailure('modal');
 
       const tracker2 = new ProviderCooldownTracker();
-      tracker2.loadFromFile(filePath);
+      await tracker2.loadFromFile(filePath);
       expect(tracker2.getFailCount('tensordock')).toBe(1);
       expect(tracker2.getFailCount('modal')).toBe(1);
       expect(tracker2.isCoolingDown('tensordock')).toBe(true);
     });
 
-    it('ignores expired entries on load', () => {
+    it('ignores expired entries on load', async () => {
       const filePath = path.join(tmpDir, 'expired.json');
       const data = {
         old: {
@@ -92,15 +92,15 @@ describe('ProviderCooldownTracker', () => {
       fs.writeFileSync(filePath, JSON.stringify(data));
 
       const tracker2 = new ProviderCooldownTracker();
-      tracker2.loadFromFile(filePath);
+      await tracker2.loadFromFile(filePath);
       expect(tracker2.isCoolingDown('old')).toBe(false);
       expect(tracker2.isCoolingDown('active')).toBe(true);
     });
 
-    it('does not crash on non-existent file', () => {
-      expect(() => {
-        tracker.loadFromFile(path.join(tmpDir, 'nope.json'));
-      }).not.toThrow();
+    it('does not crash on non-existent file', async () => {
+      await expect(
+        tracker.loadFromFile(path.join(tmpDir, 'nope.json'))
+      ).resolves.not.toThrow();
     });
   });
 
@@ -110,8 +110,8 @@ describe('ProviderCooldownTracker', () => {
       expect(info['vast']).toBeUndefined();
     });
 
-    it('returns cooldown info for active cooldown', () => {
-      tracker.recordFailure('runpod');
+    it('returns cooldown info for active cooldown', async () => {
+      await tracker.recordFailure('runpod');
       const info = tracker.getActiveCooldowns();
       expect(info['runpod']).toBeDefined();
       expect(typeof info['runpod'].until).toBe('number');

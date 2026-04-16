@@ -37,21 +37,24 @@ describe('InMemoryStateAdapter', () => {
       expect(await store.get('key3')).toBe('new');
     });
 
-    it('scan matches prefix pattern', async () => {
+it('scan matches prefix pattern', async () => {
       await store.set('user:1:name', 'Alice');
       await store.set('user:2:name', 'Bob');
-      await store.set('session:1', 'active');
-
-      const userKeys = await store.scan('user:*');
-      expect(userKeys).toContain('user:1:name');
-      expect(userKeys).toContain('user:2:name');
-      expect(userKeys).not.toContain('session:1');
+      await store.set('session:1', 'xyz');
+      let foundKeys: string[] = [];
+      const count = await store.scan('user:*', (keys) => { foundKeys = keys; });
+      expect(count).toBe(2);
+      expect(foundKeys).toContain('user:1:name');
+      expect(foundKeys).toContain('user:2:name');
+      expect(foundKeys).not.toContain('session:1');
     });
 
     it('scan returns empty for no matches', async () => {
       await store.set('foo', 'bar');
-      const result = await store.scan('nope:*');
-      expect(result).toEqual([]);
+      let foundKeys: string[] = [];
+      const count = await store.scan('nope:*', (keys) => { foundKeys = keys; });
+      expect(count).toBe(0);
+      expect(foundKeys).toEqual([]);
     });
   });
 

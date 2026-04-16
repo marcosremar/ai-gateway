@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { validateAuth } from '../../src/proxy/middleware/auth';
+import { validateAuth } from '../src/proxy/middleware/auth';
 
 describe('validateAuth', () => {
   beforeEach(() => {
@@ -43,9 +43,6 @@ describe('validateAuth', () => {
 
   it('logs warning on invalid key', () => {
     validateAuth('Bearer wrong', ['correct']);
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('[auth]'),
-      expect.anything(),
-    );
+    expect(console.warn).toHaveBeenCalledWith('Invalid API key');
   });
 });

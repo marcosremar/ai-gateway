@@ -15,6 +15,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { PassThrough } from 'stream';
 import type { IncomingMessage, ServerResponse } from 'http';
 
+// Bun compat: vi.mocked is a TS-only cast helper — polyfill as identity fn.
+if (!(vi as any).mocked) { (vi as any).mocked = (fn: unknown) => fn; }
+
+// Saved fetch — restored in afterEach so each test starts clean.
+let _savedFetch: typeof global.fetch;
+
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
 // Mock ws-state
@@ -165,6 +171,7 @@ const ORIGINAL_ENV = { ...process.env };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  _savedFetch = global.fetch;
   // Reset bot state
   setBotStateVar({
     status: 'idle', podId: '', endpoint: '', sshHost: '', sshPort: 0,
@@ -176,6 +183,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  global.fetch = _savedFetch;
   process.env = ORIGINAL_ENV;
 });
 
@@ -431,7 +439,7 @@ describe('Bot handlers — join', () => {
       headers: { get: () => 'application/json' },
       json: () => Promise.resolve({ status: 'ok' }),
     });
-    vi.stubGlobal('fetch', mockFetch);
+    global.fetch = mockFetch;
 
     const req = mockReq({});
     const res = mockRes();
@@ -439,8 +447,6 @@ describe('Bot handlers — join', () => {
     expect(res._status).toBe(200);
     expect(resJson(res).ok).toBe(true);
     expect(resJson(res).meetingUrl).toBe('https://meet.google.com/abc-def-ghi');
-
-    vi.unstubAllGlobals();
   });
 
   // #240
@@ -482,7 +488,7 @@ describe('Bot handlers — leave', () => {
       headers: { get: () => 'application/json' },
       json: () => Promise.resolve({ ok: true }),
     });
-    vi.stubGlobal('fetch', mockFetch);
+    global.fetch = mockFetch;
 
     const req = mockReq();
     const res = mockRes();
@@ -492,8 +498,6 @@ describe('Bot handlers — leave', () => {
       expect.stringContaining('/stop_record'),
       expect.objectContaining({ method: 'POST' }),
     );
-
-    vi.unstubAllGlobals();
   });
 });
 

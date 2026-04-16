@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { detectAudioFormat } from '../../src/providers/openai-compat/audio-utils';
+import { detectAudioFormat } from '../src/providers/openai-compat/audio-utils';
 
 function makeBuffer(bytes: number[]): Buffer {
   return Buffer.from(bytes);

@@ -9,7 +9,7 @@ import {
   OPENAI_IMAGE_MODELS,
   OPENAI_VOICES,
   getVoicesForModel,
-} from '../../src/providers/openai/models';
+} from '../src/providers/openai/models';
 
 // Groq models
 import {
@@ -17,20 +17,20 @@ import {
   GROQ_TTS_MODELS,
   GROQ_TTS_VOICES,
   GROQ_LLM_MODELS,
-} from '../../src/providers/groq/models';
+} from '../src/providers/groq/models';
 
 // Fireworks models
 import {
   FIREWORKS_STT_MODELS,
   FIREWORKS_LLM_MODELS,
   FIREWORKS_IMAGE_MODELS,
-} from '../../src/providers/fireworks/models';
+} from '../src/providers/fireworks/models';
 
 // OpenRouter models
 import {
   OPENROUTER_IMAGE_MODELS,
   OPENROUTER_LLM_MODELS,
-} from '../../src/providers/openrouter/models';
+} from '../src/providers/openrouter/models';
 
 // ── Shared model validation helpers ──────────────────────────────────────────
 

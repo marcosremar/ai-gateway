@@ -197,7 +197,7 @@ describe('Migration / Compatibility (#959-#963)', () => {
   });
 
   it('#960 cooldown persistence file format', () => {
-    const src = read('server/gpu-deploy.ts');
+    const src = read('server/cooldown-persistence.ts');
     expect(src).toMatch(/cooldown.*json|cooldowns\.json/i);
   });
 
@@ -235,12 +235,12 @@ describe('Edge Cases: Input boundary testing (#725-#750)', () => {
   });
 
   it('#734 GPU deploy with empty gpuTypes uses fallback', () => {
-    const src = read('src/gpu-providers/runpod-client.ts');
+    const src = read('src/gateway/providers/gpu/runpod/constants.ts');
     expect(src).toContain('RUNPOD_GPU_FALLBACK');
   });
 
   it('#735 Docker image non-existent handled', () => {
-    const src = read('server/gpu-deploy.ts');
+    const src = read('server/gpu-deploy-tiers.ts');
     expect(src).toMatch(/docker.*image|image.*pull|image.*not found/i);
   });
 
@@ -272,7 +272,7 @@ describe('Edge Cases: Input boundary testing (#725-#750)', () => {
   });
 
   it('#748 monitor skips probe when not ready', () => {
-    const src = read('server/gpu-deploy.ts');
+    const src = read('server/gpu-monitor-loop.ts');
     expect(src).toContain("deployState.status !== 'ready'");
   });
 

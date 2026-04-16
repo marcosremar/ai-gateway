@@ -73,16 +73,14 @@ describe('withTimeoutResult', () => {
 
 describe('firstSuccess', () => {
   it('should return first successful result', async () => {
+    // firstSuccess is sequential — returns first success in array order
     const result = await firstSuccess([
-      async () => {
-        await new Promise((r) => setTimeout(r, 100));
-        return 'slow';
-      },
-      async () => 'fast',
+      async () => 'first',
+      async () => 'second',
     ]);
 
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.data).toBe('fast');
+    if (result.ok) expect(result.data).toBe('first');
   });
 
   it('should return error if all fail', async () => {

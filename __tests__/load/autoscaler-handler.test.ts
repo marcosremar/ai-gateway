@@ -1,8 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import {
-  handleAutoscalerGet,
-  handleAutoscalerAction,
-} from '@ai-gateway/handlers/autoscaler-handler';
+import { handleAutoscalerGet, handleAutoscalerAction } from '@ai-gateway/handlers/autoscaler-handler';
 import type { HandlerDeps } from '@ai-gateway/handlers/types';
 import type { AutoScalerConfig } from '@ai-gateway/types';
 import type { GpuProviderClient, MonitorableProvider } from '@ai-gateway/gpu-providers/types';
@@ -10,16 +7,12 @@ import { GpuProviderRegistry } from '@ai-gateway/gpu-providers/registry';
 
 // ── Mock autoscaler deps ────────────────────────────────────────────────
 
-function makeMockClient(
-  providerId: string,
-): GpuProviderClient & { listInstances: ReturnType<typeof vi.fn> } {
+function makeMockClient(providerId: string): GpuProviderClient & { listInstances: ReturnType<typeof vi.fn> } {
   return {
     providerId,
     bootTimeSecs: 120,
     discoverInstance: vi.fn().mockResolvedValue(null),
-    createInstance: vi
-      .fn()
-      .mockResolvedValue({ instanceId: 'i-1', endpoint: 'http://x', status: 'running' }),
+    createInstance: vi.fn().mockResolvedValue({ instanceId: 'i-1', endpoint: 'http://x', status: 'running' }),
     startInstance: vi.fn().mockResolvedValue(undefined),
     stopInstance: vi.fn().mockResolvedValue(undefined),
     deleteInstance: vi.fn().mockResolvedValue(undefined),
@@ -64,15 +57,8 @@ function createDeps(overrides: Partial<HandlerDeps> = {}): HandlerDeps {
       getTierDetail: vi.fn().mockResolvedValue({ tierIndex: 0, state: 'idle' }),
       getAllTierDetails: vi.fn().mockResolvedValue([]),
       reportInferenceBenchmark: vi.fn().mockResolvedValue(undefined),
-      getBenchmarkSummary: vi.fn().mockResolvedValue({
-        date: '2026-03-03',
-        boot: null,
-        inference: { total: null, stt: null, llm: null, tts: null, ttfa: null },
-        byProvider: {},
-      }),
-      getBenchmarkTrend: vi
-        .fn()
-        .mockResolvedValue({ dates: [], bootP95: [], inferP95: [], inferMean: [] }),
+      getBenchmarkSummary: vi.fn().mockResolvedValue({ date: '2026-03-03', boot: null, inference: { total: null, stt: null, llm: null, tts: null, ttfa: null }, byProvider: {} }),
+      getBenchmarkTrend: vi.fn().mockResolvedValue({ dates: [], bootP95: [], inferP95: [], inferMean: [] }),
       getReadyEndpoints: vi.fn().mockReturnValue([]),
       removeSession: vi.fn(),
       registry,
@@ -176,88 +162,48 @@ describe('autoscaler-handler', () => {
 
   describe('save-config', () => {
     it('saves valid config and resets state', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'save-config',
-        {
-          enabled: true,
-          threshold: 5,
-          windowMinutes: 10,
-          maxLatencyMs: 1500,
-          gpuProvider: 'tensordock',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'save-config', {
+        enabled: true,
+        threshold: 5,
+        windowMinutes: 10,
+        maxLatencyMs: 1500,
+        gpuProvider: 'tensordock',
+      }, loadConfigEnabled);
 
       expect(result.status).toBe(200);
-      expect(deps.settingsStore.patch).toHaveBeenCalledWith(
-        userId,
-        expect.objectContaining({
-          autoscaler: expect.objectContaining({ enabled: true, threshold: 5 }),
-        }),
-      );
+      expect(deps.settingsStore.patch).toHaveBeenCalledWith(userId, expect.objectContaining({
+        autoscaler: expect.objectContaining({ enabled: true, threshold: 5 }),
+      }));
       expect(deps.autoscaler.resetGpuState).toHaveBeenCalledWith(userId);
     });
 
     it('rejects threshold < 1', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'save-config',
-        {
-          threshold: 0,
-          windowMinutes: 10,
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'save-config', {
+        threshold: 0, windowMinutes: 10,
+      }, loadConfigEnabled);
       expect(result.status).toBe(400);
       expect((result.body as Record<string, unknown>).error).toContain('threshold');
     });
 
     it('rejects threshold > 100', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'save-config',
-        {
-          threshold: 101,
-          windowMinutes: 10,
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'save-config', {
+        threshold: 101, windowMinutes: 10,
+      }, loadConfigEnabled);
       expect(result.status).toBe(400);
     });
 
     it('rejects maxLatencyMs < 500', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'save-config',
-        {
-          threshold: 5,
-          windowMinutes: 10,
-          maxLatencyMs: 100,
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'save-config', {
+        threshold: 5, windowMinutes: 10, maxLatencyMs: 100,
+      }, loadConfigEnabled);
       expect(result.status).toBe(400);
       expect((result.body as Record<string, unknown>).error).toContain('maxLatencyMs');
     });
 
     it('accepts maxLatencyMs = 500 (boundary)', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'save-config',
-        {
-          enabled: true,
-          threshold: 5,
-          windowMinutes: 10,
-          maxLatencyMs: 500,
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'save-config', {
+        enabled: true, threshold: 5, windowMinutes: 10, maxLatencyMs: 500,
+      }, loadConfigEnabled);
       expect(result.status).toBe(200);
     });
   });
@@ -270,16 +216,7 @@ describe('autoscaler-handler', () => {
         { state: 'ready', endpoint: 'http://gpu:8000' },
       ] as any);
 
-      const config = makeConfig({
-        tiers: [
-          {
-            provider: 'runpod',
-            instanceId: 'pod-1',
-            endpoint: 'http://gpu:8000',
-            gpuTypes: ['RTX 4090'],
-          },
-        ],
-      });
+      const config = makeConfig({ tiers: [{ provider: 'runpod', instanceId: 'pod-1', endpoint: 'http://gpu:8000', gpuTypes: ['RTX 4090'] }] });
       const loadCfg = vi.fn().mockResolvedValue(config);
 
       const result = await handleAutoscalerAction(deps, userId, 'pool-status', {}, loadCfg);
@@ -291,13 +228,7 @@ describe('autoscaler-handler', () => {
     });
 
     it('returns config metadata', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'pool-status',
-        {},
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'pool-status', {}, loadConfigEnabled);
       const body = result.body as Record<string, unknown>;
       expect(body.config).not.toBeNull();
       expect((body.config as Record<string, unknown>).enabled).toBe(true);
@@ -308,57 +239,33 @@ describe('autoscaler-handler', () => {
 
   describe('report-session', () => {
     it('calls reportSessionHeartbeat', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'report-session',
-        {
-          sessionKey: 'session-abc',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'report-session', {
+        sessionKey: 'session-abc',
+      }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect(deps.autoscaler.reportSessionHeartbeat).toHaveBeenCalledWith(userId, 'session-abc');
     });
 
     it('ignores empty sessionKey', async () => {
-      await handleAutoscalerAction(
-        deps,
-        userId,
-        'report-session',
-        {
-          sessionKey: '',
-        },
-        loadConfigEnabled,
-      );
+      await handleAutoscalerAction(deps, userId, 'report-session', {
+        sessionKey: '',
+      }, loadConfigEnabled);
       expect(deps.autoscaler.reportSessionHeartbeat).not.toHaveBeenCalled();
     });
   });
 
   describe('report-latency', () => {
     it('calls reportLatency with valid totalMs', async () => {
-      await handleAutoscalerAction(
-        deps,
-        userId,
-        'report-latency',
-        {
-          totalMs: 1200,
-        },
-        loadConfigEnabled,
-      );
+      await handleAutoscalerAction(deps, userId, 'report-latency', {
+        totalMs: 1200,
+      }, loadConfigEnabled);
       expect(deps.autoscaler.reportLatency).toHaveBeenCalledWith(userId, 1200);
     });
 
     it('ignores invalid totalMs', async () => {
-      await handleAutoscalerAction(
-        deps,
-        userId,
-        'report-latency',
-        {
-          totalMs: -1,
-        },
-        loadConfigEnabled,
-      );
+      await handleAutoscalerAction(deps, userId, 'report-latency', {
+        totalMs: -1,
+      }, loadConfigEnabled);
       expect(deps.autoscaler.reportLatency).not.toHaveBeenCalled();
     });
   });
@@ -375,27 +282,15 @@ describe('autoscaler-handler', () => {
 
   describe('force-ready', () => {
     it('marks GPU as ready with endpoint', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'force-ready',
-        {
-          endpoint: 'http://gpu:8000',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'force-ready', {
+        endpoint: 'http://gpu:8000',
+      }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect(deps.autoscaler.forceGpuReady).toHaveBeenCalledWith(userId, 'http://gpu:8000');
     });
 
     it('returns error when endpoint missing', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'force-ready',
-        {},
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'force-ready', {}, loadConfigEnabled);
       expect(result.status).toBe(400);
       expect((result.body as Record<string, unknown>).error).toContain('endpoint');
     });
@@ -405,13 +300,7 @@ describe('autoscaler-handler', () => {
 
   describe('get-decision', () => {
     it('returns decision when config exists', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'get-decision',
-        {},
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'get-decision', {}, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect((result.body as Record<string, unknown>).enabled).toBe(true);
     });
@@ -427,51 +316,29 @@ describe('autoscaler-handler', () => {
 
   describe('lifecycle-logs', () => {
     it('queries with userRoleResolver and limit', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'lifecycle-logs',
-        {
-          limit: 100,
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'lifecycle-logs', {
+        limit: 100,
+      }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect(deps.userRoleResolver!.resolveVisibleUserIds).toHaveBeenCalledWith(userId);
-      expect(deps.lifecycleLogStore!.query).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userIds: ['user-1'],
-          limit: 100,
-        }),
-      );
+      expect(deps.lifecycleLogStore!.query).toHaveBeenCalledWith(expect.objectContaining({
+        userIds: ['user-1'],
+        limit: 100,
+      }));
     });
 
     it('caps limit at 200', async () => {
-      await handleAutoscalerAction(
-        deps,
-        userId,
-        'lifecycle-logs',
-        {
-          limit: 500,
-        },
-        loadConfigEnabled,
-      );
-      expect(deps.lifecycleLogStore!.query).toHaveBeenCalledWith(
-        expect.objectContaining({
-          limit: 200,
-        }),
-      );
+      await handleAutoscalerAction(deps, userId, 'lifecycle-logs', {
+        limit: 500,
+      }, loadConfigEnabled);
+      expect(deps.lifecycleLogStore!.query).toHaveBeenCalledWith(expect.objectContaining({
+        limit: 200,
+      }));
     });
 
     it('returns error when lifecycleLogStore not configured', async () => {
       const depsNoLog = createDeps({ lifecycleLogStore: undefined });
-      const result = await handleAutoscalerAction(
-        depsNoLog,
-        userId,
-        'lifecycle-logs',
-        {},
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(depsNoLog, userId, 'lifecycle-logs', {}, loadConfigEnabled);
       expect(result.status).toBe(500);
     });
   });
@@ -480,12 +347,10 @@ describe('autoscaler-handler', () => {
 
   describe('destroy-all', () => {
     it('deletes all tiers and resets', async () => {
-      const config = makeConfig({
-        tiers: [
-          { provider: 'runpod', gpuTypes: [] },
-          { provider: 'tensordock', gpuTypes: [] },
-        ],
-      });
+      const config = makeConfig({ tiers: [
+        { provider: 'runpod', gpuTypes: [] },
+        { provider: 'tensordock', gpuTypes: [] },
+      ] });
       const loadCfg = vi.fn().mockResolvedValue(config);
 
       const result = await handleAutoscalerAction(deps, userId, 'destroy-all', {}, loadCfg);
@@ -504,61 +369,31 @@ describe('autoscaler-handler', () => {
     });
 
     it('stop-tier calls stopTier', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'stop-tier',
-        { tierIndex: 0 },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'stop-tier', { tierIndex: 0 }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect(deps.autoscaler.stopTier).toHaveBeenCalledWith(userId, 0);
     });
 
     it('start-tier calls startTier', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'start-tier',
-        { tierIndex: 1 },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'start-tier', { tierIndex: 1 }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect(deps.autoscaler.startTier).toHaveBeenCalledWith(userId, 1);
     });
 
     it('delete-tier calls deleteTier', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'delete-tier',
-        { tierIndex: 0 },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'delete-tier', { tierIndex: 0 }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect(deps.autoscaler.deleteTier).toHaveBeenCalledWith(userId, 0);
     });
 
     it('restart-tier calls restartTier', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'restart-tier',
-        { tierIndex: 0 },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'restart-tier', { tierIndex: 0 }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect(deps.autoscaler.restartTier).toHaveBeenCalledWith(userId, 0);
     });
 
     it('deploy-tier calls deployTier', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'deploy-tier',
-        { tierIndex: 0 },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'deploy-tier', { tierIndex: 0 }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect(deps.autoscaler.deployTier).toHaveBeenCalledWith(userId, 0);
     });
@@ -568,38 +403,20 @@ describe('autoscaler-handler', () => {
 
   describe('tier-detail', () => {
     it('returns tier detail', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'tier-detail',
-        { tierIndex: 0 },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'tier-detail', { tierIndex: 0 }, loadConfigEnabled);
       expect(result.status).toBe(200);
     });
 
     it('returns error for not found', async () => {
       vi.mocked(deps.autoscaler.getTierDetail).mockResolvedValueOnce(null);
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'tier-detail',
-        { tierIndex: 99 },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'tier-detail', { tierIndex: 99 }, loadConfigEnabled);
       expect(result.status).toBe(400);
     });
   });
 
   describe('all-tier-details', () => {
     it('returns all details', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'all-tier-details',
-        {},
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'all-tier-details', {}, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect((result.body as Record<string, unknown>).tiers).toBeDefined();
     });
@@ -609,60 +426,36 @@ describe('autoscaler-handler', () => {
 
   describe('report-inference-benchmark', () => {
     it('records benchmark with valid totalMs', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'report-inference-benchmark',
-        {
-          provider: 'runpod',
-          endpoint: 'http://gpu:8000',
-          totalMs: 1500,
-          sttMs: 200,
-          llmMs: 800,
-          ttsMs: 500,
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'report-inference-benchmark', {
+        provider: 'runpod',
+        endpoint: 'http://gpu:8000',
+        totalMs: 1500,
+        sttMs: 200,
+        llmMs: 800,
+        ttsMs: 500,
+      }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect(deps.autoscaler.reportInferenceBenchmark).toHaveBeenCalled();
     });
 
     it('rejects missing totalMs', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'report-inference-benchmark',
-        {
-          provider: 'runpod',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'report-inference-benchmark', {
+        provider: 'runpod',
+      }, loadConfigEnabled);
       expect(result.status).toBe(400);
     });
   });
 
   describe('benchmark-summary', () => {
     it('returns summary', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'benchmark-summary',
-        {},
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'benchmark-summary', {}, loadConfigEnabled);
       expect(result.status).toBe(200);
     });
   });
 
   describe('benchmark-trend', () => {
     it('returns trend data', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'benchmark-trend',
-        { days: 7 },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'benchmark-trend', { days: 7 }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect(deps.autoscaler.getBenchmarkTrend).toHaveBeenCalledWith(userId, 7);
     });
@@ -672,27 +465,15 @@ describe('autoscaler-handler', () => {
 
   describe('modal-stop', () => {
     it('requires appId', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'modal-stop',
-        {},
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'modal-stop', {}, loadConfigEnabled);
       expect(result.status).toBe(400);
     });
 
     it('returns error when no credentials', async () => {
       vi.mocked(deps.credentialStore.resolve).mockResolvedValueOnce(null);
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'modal-stop',
-        {
-          appId: 'ap-1',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'modal-stop', {
+        appId: 'ap-1',
+      }, loadConfigEnabled);
       expect(result.status).toBe(400);
       expect((result.body as Record<string, unknown>).error).toContain('Modal API key');
     });
@@ -701,13 +482,7 @@ describe('autoscaler-handler', () => {
   describe('modal-status', () => {
     it('returns error when no credentials', async () => {
       vi.mocked(deps.credentialStore.resolve).mockResolvedValueOnce(null);
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'modal-status',
-        {},
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'modal-status', {}, loadConfigEnabled);
       expect(result.status).toBe(400);
     });
   });
@@ -716,42 +491,24 @@ describe('autoscaler-handler', () => {
 
   describe('instance-list', () => {
     it('validates provider', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'instance-list',
-        {
-          provider: 'invalid',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'instance-list', {
+        provider: 'invalid',
+      }, loadConfigEnabled);
       expect(result.status).toBe(400);
     });
 
     it('returns error when no credentials', async () => {
       vi.mocked(deps.credentialStore.resolve).mockResolvedValueOnce(null);
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'instance-list',
-        {
-          provider: 'runpod',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'instance-list', {
+        provider: 'runpod',
+      }, loadConfigEnabled);
       expect(result.status).toBe(400);
     });
 
     it('lists instances for valid provider', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'instance-list',
-        {
-          provider: 'runpod',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'instance-list', {
+        provider: 'runpod',
+      }, loadConfigEnabled);
       expect(result.status).toBe(200);
       expect((result.body as Record<string, unknown>).provider).toBe('runpod');
     });
@@ -759,86 +516,50 @@ describe('autoscaler-handler', () => {
 
   describe('instance-create', () => {
     it('validates provider', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'instance-create',
-        {
-          provider: 'bogus',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'instance-create', {
+        provider: 'bogus',
+      }, loadConfigEnabled);
       expect(result.status).toBe(400);
     });
 
     it('creates instance for valid provider', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'instance-create',
-        {
-          provider: 'runpod',
-          gpuTypes: ['RTX 4090'],
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'instance-create', {
+        provider: 'runpod',
+        gpuTypes: ['RTX 4090'],
+      }, loadConfigEnabled);
       expect(result.status).toBe(200);
     });
   });
 
   describe('instance-start/stop/delete/status', () => {
     it('instance-start requires provider and instanceId', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'instance-start',
-        {
-          provider: 'runpod',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'instance-start', {
+        provider: 'runpod',
+      }, loadConfigEnabled);
       expect(result.status).toBe(400);
     });
 
     it('instance-stop works with valid params', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'instance-stop',
-        {
-          provider: 'runpod',
-          instanceId: 'pod-1',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'instance-stop', {
+        provider: 'runpod',
+        instanceId: 'pod-1',
+      }, loadConfigEnabled);
       expect(result.status).toBe(200);
     });
 
     it('instance-delete works', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'instance-delete',
-        {
-          provider: 'runpod',
-          instanceId: 'pod-1',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'instance-delete', {
+        provider: 'runpod',
+        instanceId: 'pod-1',
+      }, loadConfigEnabled);
       expect(result.status).toBe(200);
     });
 
     it('instance-status returns status + endpoint', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'instance-status',
-        {
-          provider: 'runpod',
-          instanceId: 'pod-1',
-        },
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'instance-status', {
+        provider: 'runpod',
+        instanceId: 'pod-1',
+      }, loadConfigEnabled);
       expect(result.status).toBe(200);
       const body = result.body as Record<string, unknown>;
       expect(body.status).toBe('running');
@@ -849,13 +570,7 @@ describe('autoscaler-handler', () => {
 
   describe('unknown action', () => {
     it('returns error for unknown action', async () => {
-      const result = await handleAutoscalerAction(
-        deps,
-        userId,
-        'does-not-exist',
-        {},
-        loadConfigEnabled,
-      );
+      const result = await handleAutoscalerAction(deps, userId, 'does-not-exist', {}, loadConfigEnabled);
       expect(result.status).toBe(400);
       expect((result.body as Record<string, unknown>).error).toContain('desconhecida');
     });

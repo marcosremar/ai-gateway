@@ -23,12 +23,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 describe('canAffordDeploy — budget cap enforcement', () => {
   describe('with cap = $50', () => {
-    let state: typeof import('../../server/state');
+    let state: typeof import('../server/state');
 
     beforeEach(async () => {
       process.env.DAILY_BUDGET_USD = '50';
       vi.resetModules();
-      state = await import('../../server/state');
+      state = await import('../server/state');
       state.setDailyGpuSpendUsd(0);
     });
 
@@ -109,12 +109,12 @@ describe('canAffordDeploy — budget cap enforcement', () => {
   });
 
   describe('with cap = 0 (no limit)', () => {
-    let state: typeof import('../../server/state');
+    let state: typeof import('../server/state');
 
     beforeEach(async () => {
       delete process.env.DAILY_BUDGET_USD;
       vi.resetModules();
-      state = await import('../../server/state');
+      state = await import('../server/state');
       state.setDailyGpuSpendUsd(0);
     });
 
@@ -128,12 +128,12 @@ describe('canAffordDeploy — budget cap enforcement', () => {
   });
 
   describe('with cap = $10 — tight budget edge cases', () => {
-    let state: typeof import('../../server/state');
+    let state: typeof import('../server/state');
 
     beforeEach(async () => {
       process.env.DAILY_BUDGET_USD = '10';
       vi.resetModules();
-      state = await import('../../server/state');
+      state = await import('../server/state');
       state.setDailyGpuSpendUsd(0);
     });
 

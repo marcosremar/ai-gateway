@@ -218,7 +218,10 @@ describe('TtfacTracker', () => {
       tracker.record('a', '*', 200, 400);
       tracker.record('b', '*', 50, 100);
 
-      const entries: FallbackEntry[] = [{ provider: 'a' }, { provider: 'b' }];
+      const entries: FallbackEntry[] = [
+        { provider: 'a' },
+        { provider: 'b' },
+      ];
 
       const ranked = tracker.rankByTtfac(entries);
       expect(ranked[0].provider).toBe('b');

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { StreamingSTTBackend, StreamingSTTRouter } from '../../src/streaming-stt';
-import type { StreamingSTTEvent } from '../../src/streaming-stt';
+import { StreamingSTTBackend, StreamingSTTRouter } from '../src/streaming-stt';
+import type { StreamingSTTEvent } from '../src/streaming-stt';
 
 describe('StreamingSTTRouter', () => {
   it('getActiveProvider returns gpu when available', () => {

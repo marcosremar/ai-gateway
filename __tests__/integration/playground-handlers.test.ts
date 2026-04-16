@@ -8,19 +8,27 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 // Stub process.exit BEFORE any dynamic imports that might trigger it
-vi.spyOn(process, 'exit').mockImplementation(() => {
-  throw new Error('process.exit called');
-});
+vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('process.exit called'); });
 
 // Mock bun:sqlite — not available in Vitest's Node.js runtime
 vi.mock('bun:sqlite', () => ({
   Database: class MockDatabase {
     exec() {}
-    prepare() {
-      return { all: () => [], get: () => null, run: () => {} };
-    }
+    prepare() { return { all: () => [], get: () => null, run: () => {} }; }
     close() {}
   },
+}));
+
+// Mock bun — not available in Vitest's Node.js runtime
+vi.mock('bun', () => ({
+  spawn: vi.fn(),
+}));
+
+// Mock src/gateway/pipeline/local-kokoro.ts — imports 'bun' which is unavailable in Vitest
+vi.mock('../../src/gateway/pipeline/local-kokoro', () => ({
+  getLocalKokoroUrl: vi.fn(() => null),
+  startLocalKokoro: vi.fn(),
+  stopLocalKokoro: vi.fn(),
 }));
 
 // Mock @prisma/client — not installed in this package (server/state.ts imports it statically)
@@ -41,9 +49,7 @@ vi.mock('@prisma/adapter-pg', () => ({
 describe('playground-handlers exports', () => {
   afterEach(() => {
     vi.restoreAllMocks();
-    vi.spyOn(process, 'exit').mockImplementation(() => {
-      throw new Error('process.exit called');
-    });
+    vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('process.exit called'); });
   });
 
   it('should export all handler functions', async () => {

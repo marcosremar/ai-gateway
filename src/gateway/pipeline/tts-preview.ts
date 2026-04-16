@@ -1,8 +1,11 @@
 // ── BabelCast Gateway — TTS Preview Service ──────────────────────────────────
-// Extracted from server/ai-handlers.ts:handleTtsPreview. Single "generate a
-// preview of this voice" flow: GPU pod (preset or clone) → Modal (clone only)
-// → cloud TTS chain. Side effects (state touches, HTTP parsing) stay in the
-// server adapter; this module is a pure computation.
+// Single "generate a preview of this voice" flow:
+//   1. GPU pod (preset or clone)
+//   2. Local Kokoro TTS (CPU, always available)
+//   3. Modal (clone only)
+//   4. Cloud TTS chain
+// Side effects (state touches, HTTP parsing) stay in the server adapter;
+// this module is a pure computation.
 
 import { createLogger } from '../../logger';
 import type { AIProfile } from '../../client';
@@ -22,7 +25,7 @@ export interface TtsPreviewInput {
 export interface TtsPreviewResult {
   audio: Buffer;
   contentType: string;
-  source: 'gpu' | 'modal-clone' | 'cloud';
+  source: 'gpu' | 'local-kokoro' | 'modal-clone' | 'cloud';
   latencyMs: number;
 }
 
@@ -42,9 +45,9 @@ export interface TtsPreviewModalTTS {
 
 export interface TtsPreviewDeps {
   gpuEndpoint: string | null;
+  localKokoroUrl: string | null;
   client: TtsPreviewClient;
   modalTTS: TtsPreviewModalTTS;
-  /** Base profile used for the cloud fallback synthesis. */
   translationProfile: AIProfile;
 }
 
@@ -79,11 +82,31 @@ export async function generateTtsPreview(
       return { audio, contentType: 'audio/wav', source: 'gpu', latencyMs };
     }
     const errText = await gpuRes.text().catch(() => '');
-    log.warn(`preview GPU failed (${gpuRes.status}): ${errText.slice(0, 120)}, falling back to Modal`);
-    // fall through
+    log.warn(`preview GPU failed (${gpuRes.status}): ${errText.slice(0, 120)}, falling back`);
   }
 
-  // 2) Modal for clone requests (only provider that supports cloning off-GPU)
+  // 2) Local Kokoro TTS (CPU, always available, no GPU/cloud needed)
+  if (deps.localKokoroUrl && !isCloneRequest) {
+    try {
+      const localRes = await fetch(`${deps.localKokoroUrl}/v1/audio/speech`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'kokoro-82m', input: text, voice: speaker, speed: 1.0, response_format: 'wav' }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (localRes.ok) {
+        const audio = Buffer.from(await localRes.arrayBuffer());
+        const latencyMs = Date.now() - t0;
+        log.log(`preview [local-kokoro]: speaker=${speaker} lang=${language} ${audio.length}B ${latencyMs}ms`);
+        return { audio, contentType: 'audio/wav', source: 'local-kokoro', latencyMs };
+      }
+      log.warn(`preview local Kokoro failed (${localRes.status}), falling back`);
+    } catch (e) {
+      log.warn(`preview local Kokoro error: ${e instanceof Error ? e.message : e}, falling back`);
+    }
+  }
+
+  // 3) Modal for clone requests (only provider that supports cloning off-GPU)
   if (isCloneRequest) {
     log.log(`voice clone → Modal Qwen3-TTS (ref_text="${refText.slice(0, 40)}...")`);
     const result = await deps.modalTTS.synthesize({
@@ -100,8 +123,8 @@ export async function generateTtsPreview(
     };
   }
 
-  // 3) Cloud fallback (Groq Orpheus → Modal Qwen3-TTS → OpenAI)
-  log.log('preview: no GPU, using cloud fallback');
+  // 4) Cloud fallback (Groq Orpheus → Modal Qwen3-TTS → OpenAI)
+  log.log('preview: no GPU/local, using cloud fallback');
   const result = await deps.client.synthesize(text, {
     ...deps.translationProfile,
     gpuEndpoint: undefined,

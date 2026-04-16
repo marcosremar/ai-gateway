@@ -9,9 +9,10 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-const readSource = (file: string) => readFileSync(join(__dirname, '..', file), 'utf-8');
+const readSource = (file: string) => readFileSync(join(__dirname, '../..', file), 'utf-8');
 
 describe('GPU Readiness State Machine', () => {
+
   describe('GpuReadinessState interface', () => {
     it('should include autoRecoveryAttempt field in interface', () => {
       const source = readSource('server/state.ts');
@@ -141,16 +142,16 @@ describe('GPU Readiness State Machine', () => {
 
 describe('Deploy Settings', () => {
   it('should have auto-recovery settings with correct defaults', async () => {
-    const { getAutoRecoveryEnabled, getAutoRecoveryDelaySec, getAutoRecoveryMaxRetries } =
-      await import('../src/gpu-providers/deploy-settings');
+    const {
+      getAutoRecoveryEnabled, getAutoRecoveryDelaySec, getAutoRecoveryMaxRetries,
+    } = await import('../src/gpu-providers/deploy-settings');
     expect(getAutoRecoveryEnabled()).toBe(true);
     expect(getAutoRecoveryDelaySec()).toBeGreaterThanOrEqual(5);
     expect(getAutoRecoveryMaxRetries()).toBeGreaterThanOrEqual(1);
   });
 
   it('should clamp auto-recovery delay to valid range', async () => {
-    const { setAutoRecoveryDelaySec, getAutoRecoveryDelaySec } =
-      await import('../src/gpu-providers/deploy-settings');
+    const { setAutoRecoveryDelaySec, getAutoRecoveryDelaySec } = await import('../src/gpu-providers/deploy-settings');
     setAutoRecoveryDelaySec(1);
     expect(getAutoRecoveryDelaySec()).toBe(5);
     setAutoRecoveryDelaySec(999);
@@ -165,8 +166,9 @@ describe('Deploy Settings', () => {
   });
 
   it('should have latency target getters', async () => {
-    const { getSttTargetLatencyMs, getLlmTargetLatencyMs, getTtsTargetLatencyMs } =
-      await import('../src/gpu-providers/deploy-settings');
+    const {
+      getSttTargetLatencyMs, getLlmTargetLatencyMs, getTtsTargetLatencyMs,
+    } = await import('../src/gpu-providers/deploy-settings');
     expect(getSttTargetLatencyMs()).toBe(800);
     expect(getLlmTargetLatencyMs()).toBe(2000);
     expect(getTtsTargetLatencyMs()).toBe(1500);

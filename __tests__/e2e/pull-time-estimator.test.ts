@@ -11,15 +11,15 @@
 import { describe, it, expect, beforeEach, beforeAll } from 'vitest';
 
 // Reset module state between tests
-let estimatePullTimeout: typeof import('../../src/gpu-providers/pull-time-estimator').estimatePullTimeout;
-let recordPullTime: typeof import('../../src/gpu-providers/pull-time-estimator').recordPullTime;
-let getObservationCount: typeof import('../../src/gpu-providers/pull-time-estimator').getObservationCount;
-let deriveHostKey: typeof import('../../src/gpu-providers/pull-time-estimator').deriveHostKey;
+let estimatePullTimeout: typeof import('../src/gpu-providers/pull-time-estimator').estimatePullTimeout;
+let recordPullTime: typeof import('../src/gpu-providers/pull-time-estimator').recordPullTime;
+let getObservationCount: typeof import('../src/gpu-providers/pull-time-estimator').getObservationCount;
+let deriveHostKey: typeof import('../src/gpu-providers/pull-time-estimator').deriveHostKey;
 
 describe('Pull Time Estimator', () => {
   beforeEach(async () => {
     // Re-import to get fresh module (vitest module caching)
-    const mod = await import('../../src/gpu-providers/pull-time-estimator');
+    const mod = await import('../src/gpu-providers/pull-time-estimator');
     estimatePullTimeout = mod.estimatePullTimeout;
     recordPullTime = mod.recordPullTime;
     getObservationCount = mod.getObservationCount;

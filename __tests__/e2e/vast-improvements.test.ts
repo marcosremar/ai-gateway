@@ -16,7 +16,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { VastClient } from '@ai-gateway/gpu-providers/vast-client';
 import { AbstractGpuProvider } from '@ai-gateway/gpu-providers/abstract-provider';
-import { SshTunnel } from '../../server/ssh-tunnel';
+import { SshTunnel } from '../server/ssh-tunnel';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -55,19 +55,9 @@ describe('Vast.ai reliability improvements', () => {
     it('caches offer search results within TTL window', async () => {
       const client = new VastClient();
       // Both calls hit the same search body — second should be cached
-      fetchSpy.mockResolvedValueOnce(
-        mockResp({
-          offers: [
-            {
-              id: 'o1',
-              gpu_name: 'RTX 4090',
-              dph_total: 0.5,
-              public_ipaddr: '10.0.0.1' /* private → rejected by _parseInstance */,
-              num_gpus: 1,
-            },
-          ],
-        }),
-      );
+      fetchSpy.mockResolvedValueOnce(mockResp({
+        offers: [{ id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5, public_ipaddr: '10.0.0.1' /* private → rejected by _parseInstance */, num_gpus: 1 }],
+      }));
 
       // Use listOffers which calls _searchOffers
       const r1 = await client.listOffers({ gpuTypes: ['RTX 4090'], limit: 50 }, { apiKey: 'k' });
@@ -85,12 +75,8 @@ describe('Vast.ai reliability improvements', () => {
     it('cache miss when search body differs', async () => {
       const client = new VastClient();
       fetchSpy
-        .mockResolvedValueOnce(
-          mockResp({ offers: [{ id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5, num_gpus: 1 }] }),
-        )
-        .mockResolvedValueOnce(
-          mockResp({ offers: [{ id: 'o2', gpu_name: 'RTX 5090', dph_total: 0.7, num_gpus: 1 }] }),
-        );
+        .mockResolvedValueOnce(mockResp({ offers: [{ id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5, num_gpus: 1 }] }))
+        .mockResolvedValueOnce(mockResp({ offers: [{ id: 'o2', gpu_name: 'RTX 5090', dph_total: 0.7, num_gpus: 1 }] }));
 
       await client.listOffers({ gpuTypes: ['RTX 4090'], limit: 50 }, { apiKey: 'k' });
       await client.listOffers({ gpuTypes: ['RTX 5090'], limit: 50 }, { apiKey: 'k' });
@@ -107,16 +93,12 @@ describe('Vast.ai reliability improvements', () => {
 
     beforeEach(() => {
       process.env.AI_GATEWAY_CONFIG_DIR = TMP_DIR;
-      try {
-        fs.rmSync(TMP_DIR, { recursive: true });
-      } catch {}
+      try { fs.rmSync(TMP_DIR, { recursive: true }); } catch {}
     });
 
     afterEach(() => {
       delete process.env.AI_GATEWAY_CONFIG_DIR;
-      try {
-        fs.rmSync(TMP_DIR, { recursive: true });
-      } catch {}
+      try { fs.rmSync(TMP_DIR, { recursive: true }); } catch {}
     });
 
     it('loads empty reputation map when file does not exist', () => {
@@ -143,7 +125,7 @@ describe('Vast.ai reliability improvements', () => {
 
     it('skips expired reputation entries on load', async () => {
       fs.mkdirSync(TMP_DIR, { recursive: true });
-      const oldTs = Date.now() - 60 * 60 * 1000; // 1 hour ago — expired
+      const oldTs = Date.now() - (60 * 60 * 1000); // 1 hour ago — expired
       fs.writeFileSync(REP_PATH, JSON.stringify({ '5.6.7.8': oldTs }));
 
       vi.resetModules();
@@ -253,10 +235,7 @@ describe('Vast.ai reliability improvements', () => {
         .mockResolvedValueOnce(mockResp({ offers: [] })); // Phase-2 SSH-only
 
       await expect(
-        client.createInstance(
-          { gpuTypes: ['RTX 5090'], dockerImage: 'test/image:latest' },
-          { apiKey: 'k' },
-        ),
+        client.createInstance({ gpuTypes: ['RTX 5090'], dockerImage: 'test/image:latest' }, { apiKey: 'k' }),
       ).rejects.toThrow();
 
       // 4 fetches: preflight + Phase-1 strict + Phase-1 relaxed + Phase-2 SSH-only
@@ -273,19 +252,14 @@ describe('Vast.ai reliability improvements', () => {
       // Phase-1 returns 1 offer; create fails immediately
       fetchSpy
         .mockResolvedValueOnce(mockPreflight()) // balance check
-        .mockResolvedValueOnce(
-          mockResp({
-            offers: [{ id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 }],
-          }),
-        )
+        .mockResolvedValueOnce(mockResp({
+          offers: [{ id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 }],
+        }))
         // Hedged deploy launches the create attempt (fails 'not available')
         .mockResolvedValueOnce(mockText('not available', 400));
 
       await expect(
-        client.createInstance(
-          { gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest' },
-          { apiKey: 'k' },
-        ),
+        client.createInstance({ gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest' }, { apiKey: 'k' }),
       ).rejects.toThrow();
 
       // Should be exactly 3 fetches: preflight + search + 1 create attempt (no Phase-2)
@@ -301,15 +275,13 @@ describe('Vast.ai reliability improvements', () => {
       // 3 offers, race=2 — all 3 fail (so we can count attempts)
       fetchSpy
         .mockResolvedValueOnce(mockPreflight()) // balance check
-        .mockResolvedValueOnce(
-          mockResp({
-            offers: [
-              { id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 },
-              { id: 'o2', gpu_name: 'RTX 4090', dph_total: 0.6 },
-              { id: 'o3', gpu_name: 'RTX 4090', dph_total: 0.7 },
-            ],
-          }),
-        )
+        .mockResolvedValueOnce(mockResp({
+          offers: [
+            { id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 },
+            { id: 'o2', gpu_name: 'RTX 4090', dph_total: 0.6 },
+            { id: 'o3', gpu_name: 'RTX 4090', dph_total: 0.7 },
+          ],
+        }))
         .mockResolvedValue(mockText('not available', 400));
 
       await expect(
@@ -320,7 +292,7 @@ describe('Vast.ai reliability improvements', () => {
       ).rejects.toThrow();
 
       // search + 3 create attempts (all 3 offers tried)
-      const createCalls = fetchSpy.mock.calls.filter((c) => String(c[0]).includes('/asks/'));
+      const createCalls = fetchSpy.mock.calls.filter(c => String(c[0]).includes('/asks/'));
       expect(createCalls.length).toBe(3);
     });
 
@@ -329,14 +301,12 @@ describe('Vast.ai reliability improvements', () => {
 
       fetchSpy
         .mockResolvedValueOnce(mockPreflight()) // balance check
-        .mockResolvedValueOnce(
-          mockResp({
-            offers: [
-              { id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 },
-              { id: 'o2', gpu_name: 'RTX 4090', dph_total: 0.6 },
-            ],
-          }),
-        )
+        .mockResolvedValueOnce(mockResp({
+          offers: [
+            { id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 },
+            { id: 'o2', gpu_name: 'RTX 4090', dph_total: 0.6 },
+          ],
+        }))
         .mockResolvedValue(mockText('not available', 400));
 
       await expect(
@@ -347,7 +317,7 @@ describe('Vast.ai reliability improvements', () => {
       ).rejects.toThrow();
 
       // Both offers should be tried sequentially
-      const createCalls = fetchSpy.mock.calls.filter((c) => String(c[0]).includes('/asks/'));
+      const createCalls = fetchSpy.mock.calls.filter(c => String(c[0]).includes('/asks/'));
       expect(createCalls.length).toBe(2);
     });
 
@@ -356,15 +326,11 @@ describe('Vast.ai reliability improvements', () => {
 
       fetchSpy
         .mockResolvedValueOnce(mockPreflight()) // balance check
-        .mockResolvedValueOnce(
-          mockResp({
-            offers: Array.from({ length: 10 }, (_, i) => ({
-              id: `o${i}`,
-              gpu_name: 'RTX 4090',
-              dph_total: 0.5 + i * 0.1,
-            })),
-          }),
-        )
+        .mockResolvedValueOnce(mockResp({
+          offers: Array.from({ length: 10 }, (_, i) => ({
+            id: `o${i}`, gpu_name: 'RTX 4090', dph_total: 0.5 + i * 0.1,
+          })),
+        }))
         .mockResolvedValue(mockText('not available', 400));
 
       await expect(
@@ -375,7 +341,7 @@ describe('Vast.ai reliability improvements', () => {
       ).rejects.toThrow();
 
       // All 10 offers tried (raceCount caps internally but doesn't limit total attempts)
-      const createCalls = fetchSpy.mock.calls.filter((c) => String(c[0]).includes('/asks/'));
+      const createCalls = fetchSpy.mock.calls.filter(c => String(c[0]).includes('/asks/'));
       expect(createCalls.length).toBe(10);
     });
   });

@@ -1,9 +1,18 @@
 #!/bin/bash
-# AI Gateway Bug Fix Loop v3 — cada round é processo separado
+# AI Gateway Bug Fix Loop v4 — SAFETY: Never pushes to main directly
+# Creates feature branches for review instead of direct main pushes
 # Para: touch /tmp/bug-loop-stop
 
 export PATH="$HOME/.opencode/bin:$HOME/.bun/bin:$PATH"
 cd /data/ai-gateway
+
+# SAFETY CHECK: Never operate on main branch directly
+CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
+if [ "$CURRENT_BRANCH" = "main" ] || [ "$CURRENT_BRANCH" = "master" ]; then
+  echo "ERROR: bug-loop.sh cannot run on main/master branch for safety reasons."
+  echo "Please create a feature branch first: git checkout -b bugfix/ai-audit"
+  exit 1
+fi
 
 # Detecta último round
 LAST=$(git log --oneline -1 --grep="round" 2>/dev/null | grep -oP 'round \K\d+')
@@ -12,6 +21,11 @@ ROUND=$((ROUND + 1))
 
 MODULES=("src/proxy/routes/" "src/cpu-providers/" "src/gpu-providers/" "src/browser/" "src/sdk/" "server/" "src/streaming-stt.ts" "src/ensemble-stt.ts" "src/config/" "src/deps.ts")
 MODCOUNT=${#MODULES[@]}
+
+echo "SAFETY MODE: Changes will be committed to current branch ($CURRENT_BRANCH)"
+echo "SAFETY MODE: Push to main is DISABLED. Push to feature branch instead."
+echo "SAFETY MODE: To stop: touch /tmp/bug-loop-stop"
+echo ""
 
 while [ ! -f /tmp/bug-loop-stop ]; do
   MOD=${MODULES[$((ROUND % MODCOUNT))]}
@@ -26,8 +40,10 @@ while [ ! -f /tmp/bug-loop-stop ]; do
     DESC=$(git diff --cached --stat | tail -1)
     git commit -m "fix: round $ROUND — $DESC" 2>&1 | tail -1
     HASH=$(git log --oneline -1 | cut -d' ' -f1)
-    git push origin main 2>&1 | tail -1
-    echo ">>> COMMIT $HASH: round $ROUND"
+
+    # SAFETY: Push to current branch (NOT main) for review
+    git push origin "$CURRENT_BRANCH" 2>&1 | tail -1
+    echo ">>> COMMIT $HASH: round $ROUND (pushed to $CURRENT_BRANCH, NOT main)"
   else
     echo ">>> NO CHANGES round $ROUND"
   fi
@@ -36,3 +52,4 @@ while [ ! -f /tmp/bug-loop-stop ]; do
 done
 
 echo "=== LOOP STOPPED at round $ROUND ==="
+echo "Next step: Create a PR from $CURRENT_BRANCH to main for review"

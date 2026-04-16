@@ -131,7 +131,7 @@ describe('Proxy Server — blocked streaming routes (410 Gone)', () => {
     // Bun routes ALL Upgrade: websocket requests to the 'upgrade' event (not 'request')
     // and socket.write in bun's upgrade handler doesn't transmit data — runtime testing
     // of this is not feasible in bun. Verify the correct handler is present via source.
-    const serverSource = readFileSync(join(__dirname, '../src/proxy/server.ts'), 'utf-8');
+    const serverSource = readFileSync(join(__dirname, '../src/gateway/proxy/server.ts'), 'utf-8');
     const fnStart = serverSource.indexOf("server.on('upgrade'");
     const fnEnd = serverSource.indexOf('\n  return server;', fnStart);
     const fnBody = serverSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 3000);

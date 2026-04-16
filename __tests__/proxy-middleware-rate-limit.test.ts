@@ -86,7 +86,8 @@ describe('RateLimiter', () => {
         headers: { authorization: 'Bearer sk-12345678-abc' },
         socket: { remoteAddress: '1.2.3.4' },
       } as any;
-      expect(RateLimiter.clientId(req)).toBe('key:sk-12345');
+      const id = RateLimiter.clientId(req);
+      expect(id).toMatch(/^key:[0-9a-f]{16}$/);
     });
 
     it('falls back to IP when no auth', () => {

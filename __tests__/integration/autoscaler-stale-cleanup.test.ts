@@ -26,19 +26,12 @@ class MemoryStateStore implements StateStore {
   private hashes = new Map<string, Map<string, string>>();
   private lists = new Map<string, string[]>();
 
-  async get(key: string) {
-    return this.kv.get(key) ?? null;
-  }
-  async set(key: string, value: string) {
-    this.kv.set(key, value);
-  }
-  async del(key: string) {
-    this.kv.delete(key);
-    this.hashes.delete(key);
-  }
+  async get(key: string) { return this.kv.get(key) ?? null; }
+  async set(key: string, value: string) { this.kv.set(key, value); }
+  async del(key: string) { this.kv.delete(key); this.hashes.delete(key); }
   async scan(pattern: string) {
     const prefix = pattern.replace('*', '');
-    return [...this.kv.keys()].filter((k) => k.startsWith(prefix));
+    return [...this.kv.keys()].filter(k => k.startsWith(prefix));
   }
   async rpush(key: string, value: string) {
     if (!this.lists.has(key)) this.lists.set(key, []);
@@ -74,18 +67,12 @@ class MemoryStateStore implements StateStore {
 }
 
 class MockSessionResolver implements SessionResolver {
-  async countDbSessions() {
-    return 0;
-  }
-  async resolveTeacher() {
-    return null;
-  }
+  async countDbSessions() { return 0; }
+  async resolveTeacher() { return null; }
 }
 
 class MockSettingsStore implements SettingsStore {
-  async get() {
-    return {};
-  }
+  async get() { return {}; }
   async patch() {}
 }
 
@@ -151,18 +138,15 @@ describe('Autoscaler Stale/Failed GPU Cleanup', () => {
     mockStartInstance = vi.fn().mockResolvedValue(undefined);
 
     // Mock global fetch for health probes
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) => {
-        const urlStr = url;
-        for (const ep of healthyEndpoints) {
-          if (urlStr.startsWith(ep)) {
-            return new Response(JSON.stringify({ status: 'healthy' }), { status: 200 });
-          }
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const urlStr = url;
+      for (const ep of healthyEndpoints) {
+        if (urlStr.startsWith(ep)) {
+          return new Response(JSON.stringify({ status: 'healthy' }), { status: 200 });
         }
-        return new Response('unhealthy', { status: 503 });
-      }),
-    );
+      }
+      return new Response('unhealthy', { status: 503 });
+    }));
 
     autoscaler = createAutoscaler({
       settingsStore: new MockSettingsStore(),
@@ -251,10 +235,7 @@ describe('Autoscaler Stale/Failed GPU Cleanup', () => {
       const tiers = autoscaler.getPoolStatus(TEST_USER);
       const existing = tiers[0];
       if (existing) {
-        const prevBootFailCount =
-          existing.state === 'idle'
-            ? (existing.bootFailCount ?? 0)
-            : ((existing as BootingTierState).prevBootFailCount ?? 0);
+        const prevBootFailCount = existing.state === 'idle' ? (existing.bootFailCount ?? 0) : (existing as BootingTierState).prevBootFailCount ?? 0;
         tiers[0] = {
           state: 'idle',
           tierIndex: existing.tierIndex,
@@ -293,7 +274,7 @@ describe('Autoscaler Stale/Failed GPU Cleanup', () => {
     await autoscaler.getAutoScaleDecision(TEST_USER, BASE_CONFIG);
 
     // Allow the fire-and-forget cleanup to run
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 50));
 
     expect(mockStopInstance).toHaveBeenCalledWith(
       'td-instance-001',
@@ -319,7 +300,7 @@ describe('Autoscaler Stale/Failed GPU Cleanup', () => {
     await autoscaler.getAutoScaleDecision(TEST_USER, BASE_CONFIG);
 
     // Allow fire-and-forget cleanup
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 50));
 
     expect(mockStopInstance).toHaveBeenCalledWith(
       'td-instance-001',
@@ -372,11 +353,7 @@ describe('Autoscaler Stale/Failed GPU Cleanup', () => {
     const tiers = autoscaler.getPoolStatus(TEST_USER);
     const existing = tiers[0];
     if (existing) {
-      tiers[0] = {
-        state: 'idle',
-        tierIndex: existing.tierIndex,
-        unhealthy: true,
-      } satisfies IdleTierState;
+      tiers[0] = { state: 'idle', tierIndex: existing.tierIndex, unhealthy: true } satisfies IdleTierState;
     }
 
     await autoscaler.reportSessionHeartbeat(TEST_USER, 'session-1');
@@ -442,9 +419,9 @@ describe('Autoscaler Stale/Failed GPU Cleanup', () => {
   // ────────────────────────────────────────────────────────────────────────
   it('should calculate escalating cooldown: 2m, 4m, 8m...', async () => {
     const expectedDurations = [
-      2 * 60_000, // 1st failure: 2 min
-      4 * 60_000, // 2nd failure: 4 min
-      8 * 60_000, // 3rd failure: 8 min
+      2 * 60_000,   // 1st failure: 2 min
+      4 * 60_000,   // 2nd failure: 4 min
+      8 * 60_000,   // 3rd failure: 8 min
     ];
 
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -521,12 +498,9 @@ describe('Watchdog Stuck Booting Cleanup', () => {
     healthyEndpoints = new Set();
     mockStopInstance = vi.fn().mockResolvedValue(undefined);
 
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        return new Response('unhealthy', { status: 503 });
-      }),
-    );
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      return new Response('unhealthy', { status: 503 });
+    }));
 
     autoscaler = createAutoscaler({
       settingsStore: new MockSettingsStore(),
@@ -637,6 +611,6 @@ describe('Watchdog Stuck Booting Cleanup', () => {
     expect(decision).toBeDefined();
 
     // Allow fire-and-forget cleanup to settle
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 50));
   });
 });

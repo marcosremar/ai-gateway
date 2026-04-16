@@ -27,20 +27,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { StateStore, SessionResolver, SettingsStore } from '@ai-gateway';
 import { createAutoscaler, type Autoscaler } from '@ai-gateway';
-import type {
-  AutoScalerConfig,
-  GpuTierConfig,
-  GpuTierState,
-  IdleTierState,
-  BootingTierState,
-  ReadyTierState,
-} from '@ai-gateway';
+import type { AutoScalerConfig, GpuTierConfig, GpuTierState, IdleTierState, BootingTierState, ReadyTierState } from '@ai-gateway';
 import { runWatchdogCycle, type WatchdogDeps } from '@ai-gateway/autoscaler/watchdog';
-import {
-  runCostMonitorCycle,
-  type CostMonitorDeps,
-  type ProviderAccount,
-} from '@ai-gateway/autoscaler/cost-monitor';
+import { runCostMonitorCycle, type CostMonitorDeps, type ProviderAccount } from '@ai-gateway/autoscaler/cost-monitor';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // In-memory StateStore (replaces Redis)
@@ -50,19 +39,12 @@ class MemoryStateStore implements StateStore {
   private hashes = new Map<string, Map<string, string>>();
   private lists = new Map<string, string[]>();
 
-  async get(key: string) {
-    return this.kv.get(key) ?? null;
-  }
-  async set(key: string, value: string) {
-    this.kv.set(key, value);
-  }
-  async del(key: string) {
-    this.kv.delete(key);
-    this.hashes.delete(key);
-  }
+  async get(key: string) { return this.kv.get(key) ?? null; }
+  async set(key: string, value: string) { this.kv.set(key, value); }
+  async del(key: string) { this.kv.delete(key); this.hashes.delete(key); }
   async scan(pattern: string) {
     const prefix = pattern.replace('*', '');
-    return [...this.kv.keys()].filter((k) => k.startsWith(prefix));
+    return [...this.kv.keys()].filter(k => k.startsWith(prefix));
   }
   async rpush(key: string, value: string) {
     if (!this.lists.has(key)) this.lists.set(key, []);
@@ -85,9 +67,7 @@ class MemoryStateStore implements StateStore {
     if (!this.hashes.has(key)) this.hashes.set(key, new Map());
     this.hashes.get(key)!.set(field, value);
   }
-  async hdel(key: string, field: string) {
-    this.hashes.get(key)?.delete(field);
-  }
+  async hdel(key: string, field: string) { this.hashes.get(key)?.delete(field); }
   async hgetall(key: string) {
     const hash = this.hashes.get(key);
     if (!hash) return {};
@@ -117,12 +97,8 @@ class MockSettingsStore implements SettingsStore {
 // ──────────────────────────────────────────────────────────────────────────────
 class MockSessionResolver implements SessionResolver {
   dbSessionCount = 0;
-  async countDbSessions(): Promise<number> {
-    return this.dbSessionCount;
-  }
-  async resolveTeacher(): Promise<string | null> {
-    return null;
-  }
+  async countDbSessions(): Promise<number> { return this.dbSessionCount; }
+  async resolveTeacher(): Promise<string | null> { return null; }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -143,15 +119,12 @@ const faultRules = new Map<string, FaultRule>();
 function injectFault(pattern: string, status: number, remaining = -1, body = '') {
   faultRules.set(pattern, { status, body, remaining });
 }
-function clearFaults() {
-  faultRules.clear();
-}
+function clearFaults() { faultRules.clear(); }
 
 let podCounter = 0;
 
 function mockFetch(input: string | URL | Request): Promise<Response> {
-  const url =
-    typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
 
   // Check fault injection FIRST
   for (const [pattern, rule] of faultRules) {
@@ -159,18 +132,15 @@ function mockFetch(input: string | URL | Request): Promise<Response> {
       if (rule.remaining === -1 || rule.remaining > 0) {
         if (rule.remaining > 0) rule.remaining--;
         if (rule.status === 429) {
-          return Promise.resolve(
-            new Response(JSON.stringify({ error: 'Rate limited' }), {
-              status: 429,
-              headers: { 'Retry-After': '5' },
-            }),
-          );
+          return Promise.resolve(new Response(
+            JSON.stringify({ error: 'Rate limited' }),
+            { status: 429, headers: { 'Retry-After': '5' } },
+          ));
         }
-        return Promise.resolve(
-          new Response(rule.body || JSON.stringify({ error: `Injected fault ${rule.status}` }), {
-            status: rule.status,
-          }),
-        );
+        return Promise.resolve(new Response(
+          rule.body || JSON.stringify({ error: `Injected fault ${rule.status}` }),
+          { status: rule.status },
+        ));
       }
       // Rule exhausted — remove and proceed normally
       faultRules.delete(pattern);
@@ -181,12 +151,10 @@ function mockFetch(input: string | URL | Request): Promise<Response> {
   if (url.endsWith('/health')) {
     const endpoint = url.replace('/health', '');
     if (healthyEndpoints.has(endpoint)) {
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({ status: 'healthy', gpu_type: 'RTX 4090', models_loaded: true }),
-          { status: 200 },
-        ),
-      );
+      return Promise.resolve(new Response(
+        JSON.stringify({ status: 'healthy', gpu_type: 'RTX 4090', models_loaded: true }),
+        { status: 200 },
+      ));
     }
     return Promise.reject(new Error('Connection refused'));
   }
@@ -194,16 +162,10 @@ function mockFetch(input: string | URL | Request): Promise<Response> {
   // RunPod API — create pod
   if (url.includes('api.runpod.io') && url.includes('/pods')) {
     const podId = `pod-resilience-${++podCounter}`;
-    return Promise.resolve(
-      new Response(
-        JSON.stringify({
-          id: podId,
-          desiredStatus: 'RUNNING',
-          machine: { gpu: 'NVIDIA GeForce RTX 4090' },
-        }),
-        { status: 200 },
-      ),
-    );
+    return Promise.resolve(new Response(
+      JSON.stringify({ id: podId, desiredStatus: 'RUNNING', machine: { gpu: 'NVIDIA GeForce RTX 4090' } }),
+      { status: 200 },
+    ));
   }
 
   // RunPod API — get/start/stop
@@ -214,24 +176,30 @@ function mockFetch(input: string | URL | Request): Promise<Response> {
   // TensorDock API
   if (url.includes('tensordock.com')) {
     if (url.includes('/deploy')) {
-      return Promise.resolve(
-        new Response(JSON.stringify({ server: { id: `td-${++podCounter}` } }), { status: 200 }),
-      );
+      return Promise.resolve(new Response(
+        JSON.stringify({ server: { id: `td-${++podCounter}` } }),
+        { status: 200 },
+      ));
     }
-    return Promise.resolve(new Response(JSON.stringify({ success: true }), { status: 200 }));
+    return Promise.resolve(new Response(
+      JSON.stringify({ success: true }),
+      { status: 200 },
+    ));
   }
 
   // Vast.ai API
   if (url.includes('vast.ai') || url.includes('cloud.vast.ai')) {
     if (url.includes('/asks/') || url.includes('/create/')) {
-      return Promise.resolve(
-        new Response(JSON.stringify({ new_contract: `vast-${++podCounter}`, success: true }), {
-          status: 200,
-        }),
-      );
+      return Promise.resolve(new Response(
+        JSON.stringify({ new_contract: `vast-${++podCounter}`, success: true }),
+        { status: 200 },
+      ));
     }
     if (url.includes('/instances/')) {
-      return Promise.resolve(new Response(JSON.stringify({ instances: [] }), { status: 200 }));
+      return Promise.resolve(new Response(
+        JSON.stringify({ instances: [] }),
+        { status: 200 },
+      ));
     }
     return Promise.resolve(new Response('{}', { status: 200 }));
   }
@@ -245,11 +213,7 @@ function mockFetch(input: string | URL | Request): Promise<Response> {
 // ──────────────────────────────────────────────────────────────────────────────
 const USER = 'user-resilience';
 
-function makeTier(
-  provider: 'runpod' | 'tensordock' | 'vast',
-  idx: number,
-  extra?: Partial<GpuTierConfig>,
-): GpuTierConfig {
+function makeTier(provider: 'runpod' | 'tensordock' | 'vast', idx: number, extra?: Partial<GpuTierConfig>): GpuTierConfig {
   return {
     provider,
     instanceId: `instance-${provider}-${idx}`,
@@ -316,8 +280,8 @@ describe('1. Provider API 500 → fallback to next tier', () => {
     const config = makeConfig({
       threshold: 1,
       tiers: [
-        makeTier('runpod', 0), // Will fail (500 injected)
-        makeTier('runpod', 1), // Should succeed
+        makeTier('runpod', 0),      // Will fail (500 injected)
+        makeTier('runpod', 1),      // Should succeed
       ],
     });
     const { autoscaler } = setup(config);
@@ -332,7 +296,7 @@ describe('1. Provider API 500 → fallback to next tier', () => {
     expect(d1.gpuState).toBe('booting');
 
     // Wait for async boot failure
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 500));
 
     // Clear faults so tier 1 can succeed
     clearFaults();
@@ -407,9 +371,7 @@ describe('2. Health check flapping', () => {
 
     // === SERVER RESTART === (new autoscaler, same state store)
     const a2 = createAutoscaler({
-      settingsStore,
-      stateStore,
-      sessionResolver,
+      settingsStore, stateStore, sessionResolver,
       loadConfig: async () => config,
     });
 
@@ -440,7 +402,7 @@ describe('2. Health check flapping', () => {
     // Next decision: tier 1 boots as fallback
     const d = await autoscaler.getAutoScaleDecision(USER, config);
     const pool = autoscaler.getPoolStatus(USER);
-    const bootingTier = pool.find((t) => t.state === 'booting');
+    const bootingTier = pool.find(t => t.state === 'booting');
     expect(bootingTier).toBeDefined();
     expect(bootingTier!.tierIndex).toBe(1);
 
@@ -467,7 +429,7 @@ describe('3. Boot timeout + cooldown', () => {
 
     // Each decision attempts boot → fails → increments bootFailCount
     await autoscaler.getAutoScaleDecision(USER, config);
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 100));
 
     const pool = autoscaler.getPoolStatus(USER);
     const t0 = pool[0] as IdleTierState;
@@ -485,9 +447,9 @@ describe('4. Cascading failures → all tiers → LLM fallback', () => {
     const config = makeConfig({
       threshold: 1,
       tiers: [
-        makeTier('runpod', 0, { apiKey: undefined }), // Fail: no key
-        makeTier('tensordock', 1, { apiKey: undefined }), // Fail: no key
-        makeTier('runpod', 2, { apiKey: undefined }), // Fail: no key
+        makeTier('runpod', 0, { apiKey: undefined }),       // Fail: no key
+        makeTier('tensordock', 1, { apiKey: undefined }),    // Fail: no key
+        makeTier('runpod', 2, { apiKey: undefined }),        // Fail: no key
       ],
     });
     const { autoscaler } = setup(config);
@@ -497,7 +459,7 @@ describe('4. Cascading failures → all tiers → LLM fallback', () => {
     // Each decision tries the next available tier, which instantly fails
     for (let i = 0; i < 6; i++) {
       await autoscaler.getAutoScaleDecision(USER, config);
-      await new Promise((r) => setTimeout(r, 50));
+      await new Promise(r => setTimeout(r, 50));
     }
 
     const pool = autoscaler.getPoolStatus(USER);
@@ -521,8 +483,8 @@ describe('5. Latency breach triggers scale-up', () => {
   it('boots GPU when latency exceeds threshold even with few sessions', async () => {
     const tier = makeTier('runpod', 0);
     const config = makeConfig({
-      threshold: 10, // High session threshold — NOT met
-      maxLatencyMs: 1000, // But latency breach threshold
+      threshold: 10,         // High session threshold — NOT met
+      maxLatencyMs: 1000,    // But latency breach threshold
       tiers: [tier],
     });
     const { autoscaler } = setup(config);
@@ -582,10 +544,7 @@ describe('6. Watchdog stops idle GPU', () => {
     const watchdogDeps: WatchdogDeps = {
       engine: autoscaler.engine,
       sessionTracker: { countActiveSessions: async () => 0 } as any,
-      persistence: {
-        findUsersWithActiveGpus: async () => [],
-        persistTierStates: vi.fn(async () => {}),
-      } as any,
+      persistence: { findUsersWithActiveGpus: async () => [], persistTierStates: vi.fn(async () => {}) } as any,
       registry: autoscaler.registry,
       loadConfig: async () => config,
     };
@@ -621,10 +580,7 @@ describe('7. Watchdog cleans stuck booting tier', () => {
     const watchdogDeps: WatchdogDeps = {
       engine: autoscaler.engine,
       sessionTracker: { countActiveSessions: async () => 0 } as any,
-      persistence: {
-        findUsersWithActiveGpus: async () => [],
-        persistTierStates: vi.fn(async () => {}),
-      } as any,
+      persistence: { findUsersWithActiveGpus: async () => [], persistTierStates: vi.fn(async () => {}) } as any,
       registry: autoscaler.registry,
       loadConfig: async () => config,
     };
@@ -704,7 +660,7 @@ describe('9. Concurrent decisions — no double-boot', () => {
 
     // Only 1 tier should be booting (not 5)
     const pool = autoscaler.getPoolStatus(USER);
-    const bootingCount = pool.filter((t) => t.state === 'booting').length;
+    const bootingCount = pool.filter(t => t.state === 'booting').length;
     expect(bootingCount).toBeLessThanOrEqual(1);
   });
 });
@@ -728,7 +684,7 @@ describe('10. Provider 429 rate-limit', () => {
 
     // First decision: boot attempt hits 429
     const d1 = await autoscaler.getAutoScaleDecision(USER, config);
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise(r => setTimeout(r, 200));
 
     // Fault exhausted → normal path
     // Next decision should retry boot
@@ -760,7 +716,7 @@ describe('11. Server restart mid-boot recovery', () => {
     // === SERVER RESTART === (same state store, new autoscaler)
     const a2 = createAutoscaler({
       settingsStore,
-      stateStore, // <-- shared state
+      stateStore,        // <-- shared state
       sessionResolver,
       loadConfig: async () => config,
     });
@@ -815,18 +771,8 @@ describe('12. Cost monitor — waste detection', () => {
       providerId: 'runpod',
       bootTimeSecs: 120,
       listInstances: vi.fn(async () => [
-        {
-          instanceId: 'orphan-1',
-          status: 'running',
-          endpoint: 'http://orphan1:8000',
-          gpuType: 'RTX 4090',
-        },
-        {
-          instanceId: 'orphan-2',
-          status: 'running',
-          endpoint: 'http://orphan2:8000',
-          gpuType: 'RTX 3090',
-        },
+        { instanceId: 'orphan-1', status: 'running', endpoint: 'http://orphan1:8000', gpuType: 'RTX 4090' },
+        { instanceId: 'orphan-2', status: 'running', endpoint: 'http://orphan2:8000', gpuType: 'RTX 3090' },
       ]),
       stopInstance: vi.fn(async () => {}),
       deleteInstance: vi.fn(async () => {}),
@@ -838,7 +784,7 @@ describe('12. Cost monitor — waste detection', () => {
     };
 
     const mockRegistry = {
-      get: (p: string) => (p === 'runpod' ? mockProvider : null),
+      get: (p: string) => p === 'runpod' ? mockProvider : null,
       getAll: () => [mockProvider],
       register: vi.fn(),
     } as any;
@@ -851,14 +797,12 @@ describe('12. Cost monitor — waste detection', () => {
         persistTierStates: vi.fn(async () => {}),
         clearPersistedTierStates: vi.fn(async () => {}),
       } as any,
-      loadAllAccounts: async () => [
-        {
-          userId: USER,
-          provider: 'runpod',
-          credentials: { apiKey: 'key' },
-          trackedInstanceIds: [], // Empty = all are orphaned
-        },
-      ],
+      loadAllAccounts: async () => [{
+        userId: USER,
+        provider: 'runpod',
+        credentials: { apiKey: 'key' },
+        trackedInstanceIds: [], // Empty = all are orphaned
+      }],
       autoStop: false, // Report-only mode
     };
 
@@ -874,12 +818,7 @@ describe('12. Cost monitor — waste detection', () => {
       providerId: 'runpod',
       bootTimeSecs: 120,
       listInstances: vi.fn(async () => [
-        {
-          instanceId: 'orphan-1',
-          status: 'running',
-          endpoint: 'http://orphan1:8000',
-          gpuType: 'RTX 4090',
-        },
+        { instanceId: 'orphan-1', status: 'running', endpoint: 'http://orphan1:8000', gpuType: 'RTX 4090' },
       ]),
       stopInstance: stopFn,
       deleteInstance: vi.fn(async () => {}),
@@ -892,7 +831,7 @@ describe('12. Cost monitor — waste detection', () => {
 
     const costDeps: CostMonitorDeps = {
       registry: {
-        get: (p: string) => (p === 'runpod' ? mockProvider : null),
+        get: (p: string) => p === 'runpod' ? mockProvider : null,
         getAll: () => [mockProvider],
         register: vi.fn(),
       } as any,
@@ -902,14 +841,12 @@ describe('12. Cost monitor — waste detection', () => {
         persistTierStates: vi.fn(async () => {}),
         clearPersistedTierStates: vi.fn(async () => {}),
       } as any,
-      loadAllAccounts: async () => [
-        {
-          userId: USER,
-          provider: 'runpod',
-          credentials: { apiKey: 'key' },
-          trackedInstanceIds: [],
-        },
-      ],
+      loadAllAccounts: async () => [{
+        userId: USER,
+        provider: 'runpod',
+        credentials: { apiKey: 'key' },
+        trackedInstanceIds: [],
+      }],
       autoStop: true, // Enable auto-stop
     };
 
@@ -993,7 +930,11 @@ describe('13. Rapid health flapping — no thrashing', () => {
 
 describe('14. Full lifecycle — multi-tier failover and recovery', () => {
   it('exercises the complete autoscaler flow with 3 tiers', async () => {
-    const tiers = [makeTier('runpod', 0), makeTier('runpod', 1), makeTier('runpod', 2)];
+    const tiers = [
+      makeTier('runpod', 0),
+      makeTier('runpod', 1),
+      makeTier('runpod', 2),
+    ];
     const config = makeConfig({ threshold: 1, tiers });
     const { autoscaler } = setup(config);
 
@@ -1021,7 +962,7 @@ describe('14. Full lifecycle — multi-tier failover and recovery', () => {
     // ── Phase 4: Tier 1 boots as fallback ──
     const d4 = await autoscaler.getAutoScaleDecision(USER, config);
     const pool4 = autoscaler.getPoolStatus(USER);
-    const bootingTier = pool4.find((t) => t.state === 'booting');
+    const bootingTier = pool4.find(t => t.state === 'booting');
     expect(bootingTier).toBeDefined();
     // Should be tier 1 (tier 0 is unhealthy/cooldown)
     expect(bootingTier!.tierIndex).toBe(1);
@@ -1039,7 +980,7 @@ describe('14. Full lifecycle — multi-tier failover and recovery', () => {
     const d6 = await autoscaler.getAutoScaleDecision(USER, config);
 
     const pool6 = autoscaler.getPoolStatus(USER);
-    const lastBooting = pool6.find((t) => t.state === 'booting');
+    const lastBooting = pool6.find(t => t.state === 'booting');
     if (lastBooting) {
       expect(lastBooting.tierIndex).toBe(2); // Tier 2 is the last fallback
     }
@@ -1103,7 +1044,11 @@ describe('16. Session heartbeat tracking', () => {
 
 describe('17. Mixed provider health states', () => {
   it('routes to first ready tier even when other tiers are in various states', async () => {
-    const tiers = [makeTier('runpod', 0), makeTier('tensordock', 1), makeTier('runpod', 2)];
+    const tiers = [
+      makeTier('runpod', 0),
+      makeTier('tensordock', 1),
+      makeTier('runpod', 2),
+    ];
     const config = makeConfig({ threshold: 1, tiers });
     const { autoscaler } = setup(config);
 

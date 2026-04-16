@@ -6,22 +6,24 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+const gpuDeploySource = ['server/gpu-deploy.ts','server/gpu-deploy-loop.ts','server/gpu-monitor-loop.ts','server/gpu-idle-manager.ts','server/gpu-idle-logic.ts','server/gpu-deploy-race.ts','server/gpu-orphan-cleanup.ts','server/gpu-type-cache.ts','server/gpu-auto-select.ts','server/gpu-auto-recovery.ts','server/gpu-deploy-tiers.ts','server/gpu-deploy-with-tiers.ts','server/gpu-terminate.ts','server/gpu-health-metrics.ts','server/gpu-destroy-timer.ts','server/gpu-standby.ts','server/gpu-poll-health.ts','server/gpu-warmth-monitor.ts'].map(f => readFileSync(join(__dirname, '../..', f), 'utf8')).join('\n');
 
 // ── 1. deployCancelled reset ────────────────────────────────────────────────
 
 describe('deployCancelled lifecycle', () => {
   it('resetDeployState sets deployCancelled to true', async () => {
     const source = (await import('fs')).readFileSync('server/state.ts', 'utf8');
-    const resetFn = source.slice(
-      source.indexOf('export function resetDeployState'),
-      source.indexOf('export function resetDeployState') + 300,
-    );
+    const resetFn = source.slice(source.indexOf('export function resetDeployState'), source.indexOf('export function resetDeployState') + 300);
     // resetDeployState must set deployCancelled = true to signal old deploy to stop
-    expect(resetFn).toContain('deployCancelled = true');
+    // (after modularization, calls _setDeployCancelled(true) instead of direct assignment)
+    expect(resetFn).toMatch(/deployCancelled.*true|_setDeployCancelled\(true\)/);
   });
 
   it('startDeployLoop resets deployCancelled to false', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     // The fix: startDeployLoop must call setDeployCancelled(false) before starting
     const loopStart = source.indexOf('export async function startDeployLoop');
     const loopBody = source.slice(loopStart, loopStart + 500);
@@ -33,7 +35,7 @@ describe('deployCancelled lifecycle', () => {
 
 describe('monitor timer lifecycle', () => {
   it('scheduleNextMonitorProbe reschedules inside finally block', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     const fnStart = source.indexOf('export function scheduleNextMonitorProbe');
     const fnEnd = source.indexOf('\nexport ', fnStart + 50);
     const fnBody = source.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
@@ -46,7 +48,7 @@ describe('monitor timer lifecycle', () => {
   });
 
   it('orphaned pod cleanup triggers when status=error and podId exists', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     const fnStart = source.indexOf('export function scheduleNextMonitorProbe');
     const fnBody = source.slice(fnStart, fnStart + 800);
     // Must check for error state with existing pod
@@ -60,7 +62,7 @@ describe('monitor timer lifecycle', () => {
 
 describe('warmth monitor lifecycle', () => {
   it('calls stopWarmthMonitor when pod changes (not just null assignment)', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     const pollIdx = source.indexOf("'[gpu] Warmth monitor: pod changed or offline");
     expect(pollIdx).toBeGreaterThan(0);
     // Should call stopWarmthMonitor(), not just set warmthMonitorTimer = null
@@ -74,7 +76,7 @@ describe('warmth monitor lifecycle', () => {
 
 describe('budget tracking', () => {
   it('uses actual elapsed time instead of assumed monitorDelayMs', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     const budgetSection = source.slice(
       source.indexOf('Budget tracking: accumulate'),
       source.indexOf('Budget tracking: accumulate') + 500,
@@ -91,7 +93,7 @@ describe('budget tracking', () => {
 
 describe('orphan sweep lifecycle', () => {
   it('tracks initial sweep timeout to prevent double-scheduling', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     // Must have orphanSweepInitialTimer variable
     expect(source).toContain('orphanSweepInitialTimer');
     // startOrphanSweep must check both timers
@@ -102,7 +104,7 @@ describe('orphan sweep lifecycle', () => {
   });
 
   it('stopOrphanSweep clears both timers', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     const fnStart = source.indexOf('export function stopOrphanSweep');
     const fnBody = source.slice(fnStart, fnStart + 300);
     expect(fnBody).toContain('clearTimeout(orphanSweepInitialTimer)');
@@ -135,16 +137,13 @@ describe('SSH tunnel lifecycle', () => {
     // close() delegates to _killProc() which does SIGTERM then SIGKILL
     const closeFn = source.slice(source.indexOf('close():'), source.indexOf('close():') + 300);
     expect(closeFn).toContain('_killProc');
-    const killProc = source.slice(
-      source.indexOf('_killProc():'),
-      source.indexOf('_killProc():') + 300,
-    );
+    const killProc = source.slice(source.indexOf('_killProc():'), source.indexOf('_killProc():') + 300);
     expect(killProc).toContain('SIGTERM');
     expect(killProc).toContain('SIGKILL');
   });
 
   it('closeAllTunnels is called during autoTerminateGpu', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     const terminateFn = source.slice(
       source.indexOf('export async function autoTerminateGpu'),
       source.indexOf('export async function autoTerminateGpu') + 600,
@@ -157,7 +156,14 @@ describe('SSH tunnel lifecycle', () => {
 
 describe('STT session cleanup', () => {
   it('has periodic cleanup interval for stale sessions', async () => {
-    const source = (await import('fs')).readFileSync('server/ws-server.ts', 'utf8');
+    // ws-server.ts was modularized — STT session cleanup moved to ws/streaming-stt-session.ts
+    const fs = await import('fs');
+    const path = await import('path');
+    const source = [
+      'server/ws-server.ts',
+      'server/ws/streaming-stt-session.ts',
+      'server/ws/stt-lifecycle.ts',
+    ].map(f => fs.readFileSync(path.join(__dirname, '../..', f), 'utf8')).join('\n');
     // Should have a setInterval that cleans up stale STT sessions
     expect(source).toContain('stale STT session');
     expect(source).toContain('sttSessions.delete');
@@ -168,7 +174,7 @@ describe('STT session cleanup', () => {
 
 describe('race deploy cleanup', () => {
   it('wraps Promise.all in try/finally for guaranteed cleanup', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     const raceStart = source.indexOf('export async function startDeployRace');
     const raceEnd = source.indexOf('\nexport ', raceStart + 100);
     const raceBody = source.slice(raceStart, raceEnd > 0 ? raceEnd : raceStart + 20000);
@@ -199,7 +205,13 @@ describe('transitions array management', () => {
 
 describe('Bun adapter binary safety', () => {
   it('uses arrayBuffer instead of text for body transfer', async () => {
-    const source = (await import('fs')).readFileSync('server/ws-server.ts', 'utf8');
+    // ws-server.ts was modularized — HTTP adapter moved to ws/http-api-server.ts
+    const fs = await import('fs');
+    const path = await import('path');
+    const source = [
+      'server/ws-server.ts',
+      'server/ws/http-api-server.ts',
+    ].map(f => fs.readFileSync(path.join(__dirname, '../..', f), 'utf8')).join('\n');
     // The main handler adapter must use arrayBuffer (binary-safe)
     expect(source).toContain('req.arrayBuffer()');
     // Should NOT use req.text() for body (corrupts binary data)
@@ -214,13 +226,17 @@ describe('Bun adapter binary safety', () => {
 
 describe('HTTP status code propagation', () => {
   it('writeHead updates statusCode used by end()', async () => {
-    const source = (await import('fs')).readFileSync('server/ws-server.ts', 'utf8');
+    // ws-server.ts was modularized — fakeRes adapter moved to ws/http-api-server.ts
+    const fs = await import('fs');
+    const path = await import('path');
+    const source = [
+      'server/ws-server.ts',
+      'server/ws/http-api-server.ts',
+    ].map(f => fs.readFileSync(path.join(__dirname, '../..', f), 'utf8')).join('\n');
     // All fakeRes adapters must use statusCode directly (not fakeRes.statusCode || statusCode)
     expect(source).not.toContain('fakeRes.statusCode || statusCode');
     // writeHead must sync fakeRes.statusCode (check full lines, not just the arrow)
-    const writeHeadLines = source
-      .split('\n')
-      .filter((l) => l.includes('writeHead:') && l.includes('=>'));
+    const writeHeadLines = source.split('\n').filter(l => l.includes('writeHead:') && l.includes('=>'));
     expect(writeHeadLines.length).toBeGreaterThan(0);
     for (const line of writeHeadLines) {
       expect(line).toContain('fakeRes.statusCode = code');
@@ -281,10 +297,8 @@ describe('File logger safe reads', () => {
 describe('Config persistence atomic writes', () => {
   it('uses temp file + rename for atomic write', async () => {
     const source = (await import('fs')).readFileSync('server/config-persistence.ts', 'utf8');
-    const saveFn = source.slice(
-      source.indexOf('export function saveProviderConfig'),
-      source.indexOf('export function saveProviderConfig') + 400,
-    );
+    // Increased slice length: backup logic added before atomic write made the function longer
+    const saveFn = source.slice(source.indexOf('export function saveProviderConfig'), source.indexOf('export function saveProviderConfig') + 600);
     expect(saveFn).toContain('.tmp');
     expect(saveFn).toContain('renameSync');
   });
@@ -295,10 +309,7 @@ describe('Config persistence atomic writes', () => {
 describe('Spend tracker validation', () => {
   it('rejects negative costs', async () => {
     const source = (await import('fs')).readFileSync('src/tracking/spend-tracker.ts', 'utf8');
-    const recordFn = source.slice(
-      source.indexOf('async record('),
-      source.indexOf('async record(') + 300,
-    );
+    const recordFn = source.slice(source.indexOf('async record('), source.indexOf('async record(') + 300);
     expect(recordFn).toContain('costUsd < 0');
   });
 
@@ -316,13 +327,11 @@ describe('Spend tracker validation', () => {
 
 describe('Load balancer atomic connections', () => {
   it('uses in-memory counters instead of get-parse-set', async () => {
-    const source = (await import('fs')).readFileSync('src/autoscaler/load-balancer.ts', 'utf8');
+    // load-balancer.ts is now a re-export stub; read the actual implementation
+    const source = (await import('fs')).readFileSync('src/gateway/autoscaler/load-balancer.ts', 'utf8');
     expect(source).toContain('connectionCounts');
     // incrementConnections should use connectionCounts.get/set directly
-    const incFn = source.slice(
-      source.indexOf('async incrementConnections'),
-      source.indexOf('async incrementConnections') + 300,
-    );
+    const incFn = source.slice(source.indexOf('async incrementConnections'), source.indexOf('async incrementConnections') + 300);
     expect(incFn).toContain('connectionCounts.get');
     expect(incFn).toContain('connectionCounts.set');
   });
@@ -332,7 +341,8 @@ describe('Load balancer atomic connections', () => {
 
 describe('Boot orchestrator timeout', () => {
   it('resets tier to idle after boot timeout', async () => {
-    const source = (await import('fs')).readFileSync('src/autoscaler/boot-orchestrator.ts', 'utf8');
+    // boot-orchestrator.ts is now a re-export stub; read the actual implementation
+    const source = (await import('fs')).readFileSync('src/gateway/autoscaler/boot-orchestrator.ts', 'utf8');
     const idx = source.indexOf('polling stopped — timeout');
     const timeoutBlock = source.slice(idx, idx + 600);
     expect(timeoutBlock).toContain("'idle'");
@@ -344,9 +354,10 @@ describe('Boot orchestrator timeout', () => {
 
 describe('Provider cooldown bypass', () => {
   it('does not record failures when all providers are in cooldown', async () => {
-    const source = (await import('fs')).readFileSync('src/providers/fallback.ts', 'utf8');
+    // fallback.ts is now a re-export stub; read the actual implementation
+    const source = (await import('fs')).readFileSync('src/gateway/providers/cloud/fallback.ts', 'utf8');
     // All recordFailure calls should be guarded by !allCooledDown
-    const recordCalls = source.split('\n').filter((l) => l.includes('tracker.recordFailure'));
+    const recordCalls = source.split('\n').filter(l => l.includes('tracker.recordFailure'));
     expect(recordCalls.length).toBeGreaterThan(0);
     for (const line of recordCalls) {
       expect(line).toContain('allCooledDown');
@@ -358,7 +369,8 @@ describe('Provider cooldown bypass', () => {
 
 describe('Vast.ai rate limit handling', () => {
   it('throws on 429 exhaustion instead of returning response', async () => {
-    const source = (await import('fs')).readFileSync('src/gpu-providers/vast-client.ts', 'utf8');
+    // vast-client.ts is now a re-export stub; read the actual implementation
+    const source = (await import('fs')).readFileSync('src/gateway/providers/gpu/vast-client.ts', 'utf8');
     const idx = source.indexOf('retries exhausted');
     const exhaustionBlock = source.slice(idx, idx + 500);
     expect(exhaustionBlock).toContain('throw new Error');
@@ -393,9 +405,7 @@ describe('Error message sanitization', () => {
 describe('WebSocket pauseMs validation', () => {
   it('clamps pauseMs to safe range', async () => {
     const source = (await import('fs')).readFileSync('server/ws-server.ts', 'utf8');
-    const pauseLine = source
-      .split('\n')
-      .find((l) => l.includes('pause_ms') && l.includes('Math.max'));
+    const pauseLine = source.split('\n').find(l => l.includes('pause_ms') && l.includes('Math.max'));
     expect(pauseLine).toBeTruthy();
     expect(pauseLine).toContain('Math.min');
   });
@@ -411,7 +421,7 @@ describe('SSH tunnel full lifecycle', () => {
   });
 
   it('closeAllTunnels is called during GPU termination', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     expect(source).toContain('closeAllTunnels');
   });
 });
@@ -441,10 +451,7 @@ describe('Bot pod cleanup', () => {
 
   it('uses collect-then-delete for audio relay broadcast', async () => {
     const source = (await import('fs')).readFileSync('server/bot-handlers.ts', 'utf8');
-    const relaySection = source.slice(
-      source.indexOf('Relay binary audio'),
-      source.indexOf('Relay binary audio') + 300,
-    );
+    const relaySection = source.slice(source.indexOf('Relay binary audio'), source.indexOf('Relay binary audio') + 300);
     expect(relaySection).toContain('dead');
     expect(relaySection).not.toMatch(/for.*wsClients.*\{[^}]*wsClients\.delete/s);
   });
@@ -454,7 +461,7 @@ describe('Bot pod cleanup', () => {
 
 describe('GPU deploy instance cleanup failure handling', () => {
   it('stops deploy if crashed instance cleanup fails', async () => {
-    const source = (await import('fs')).readFileSync('server/gpu-deploy.ts', 'utf8');
+    const source = gpuDeploySource;
     const idx = source.indexOf('Cleaning up crashed instance');
     const cleanupSection = source.slice(idx, idx + 900);
     expect(cleanupSection).toContain("status: 'error'");

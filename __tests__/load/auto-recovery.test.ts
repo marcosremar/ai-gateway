@@ -6,9 +6,12 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-const readSource = (file: string) => readFileSync(join(__dirname, '..', file), 'utf-8');
+const readSource = (file: string) => readFileSync(join(__dirname, '../..', file), 'utf-8');
+
+const gpuDeploySource = ['server/gpu-deploy.ts','server/gpu-deploy-loop.ts','server/gpu-monitor-loop.ts','server/gpu-idle-manager.ts','server/gpu-idle-logic.ts','server/gpu-deploy-race.ts','server/gpu-orphan-cleanup.ts','server/gpu-type-cache.ts','server/gpu-auto-select.ts','server/gpu-auto-recovery.ts','server/gpu-deploy-tiers.ts','server/gpu-deploy-with-tiers.ts','server/gpu-terminate.ts','server/gpu-health-metrics.ts','server/gpu-destroy-timer.ts','server/gpu-standby.ts','server/gpu-poll-health.ts','server/gpu-warmth-monitor.ts'].map(f => readFileSync(join(__dirname, '../..', f), 'utf8')).join('\n');
 
 describe('Auto-Recovery System', () => {
+
   describe('Timer management', () => {
     it('should store auto-recovery timer handle', () => {
       const source = readSource('server/gpu-readiness.ts');
@@ -25,14 +28,14 @@ describe('Auto-Recovery System', () => {
 
   describe('Deploy lock protection', () => {
     it('should check for active deploys before auto-recovery', () => {
-      const source = readSource('server/gpu-deploy.ts');
+      const source = gpuDeploySource;
       const fnIdx = source.indexOf('async function startAutoRecoveryDeploy');
       const fnBody = source.slice(fnIdx, fnIdx + 500);
       expect(fnBody).toContain('deploy already in progress');
     });
 
     it('should save API keys before resetDeployState', () => {
-      const source = readSource('server/gpu-deploy.ts');
+      const source = gpuDeploySource;
       const fnIdx = source.indexOf('async function startAutoRecoveryDeploy');
       const fnBody = source.slice(fnIdx, fnIdx + 2000);
       expect(fnBody).toContain('savedKeys');
@@ -83,18 +86,18 @@ describe('Auto-Recovery System', () => {
 
 describe('P95 Demotion Cooldown', () => {
   it('should require consecutive violations before demoting', () => {
-    const source = readSource('server/gpu-deploy.ts');
+    const source = gpuDeploySource;
     expect(source).toContain('P95_DEMOTION_CONSECUTIVE_VIOLATIONS');
     expect(source).toContain('p95ViolationCount');
   });
 
   it('should log intermediate warnings', () => {
-    const source = readSource('server/gpu-deploy.ts');
+    const source = gpuDeploySource;
     expect(source).toContain('P95 warning:');
   });
 
   it('should reset counter on healthy P95', () => {
-    const source = readSource('server/gpu-deploy.ts');
+    const source = gpuDeploySource;
     // When P95 is within threshold, reset the counter
     const p95Idx = source.indexOf('P95 demotion check');
     const p95Block = source.slice(p95Idx, p95Idx + 2000);

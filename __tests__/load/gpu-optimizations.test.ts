@@ -2,12 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-const readSource = (file: string) => readFileSync(join(__dirname, '..', file), 'utf-8');
+const readSource = (file: string) => readFileSync(join(__dirname, '../..', file), 'utf-8');
+
+const gpuDeploySource = ['server/gpu-deploy.ts','server/gpu-deploy-loop.ts','server/gpu-monitor-loop.ts','server/gpu-idle-manager.ts','server/gpu-idle-logic.ts','server/gpu-deploy-race.ts','server/gpu-orphan-cleanup.ts','server/gpu-type-cache.ts','server/gpu-auto-select.ts','server/gpu-auto-recovery.ts','server/gpu-deploy-tiers.ts','server/gpu-deploy-with-tiers.ts','server/gpu-terminate.ts','server/gpu-health-metrics.ts','server/gpu-destroy-timer.ts','server/gpu-standby.ts','server/gpu-poll-health.ts','server/gpu-warmth-monitor.ts'].map(f => readFileSync(join(__dirname, '../..', f), 'utf8')).join('\n');
 
 describe('GPU Optimizations', () => {
   describe('Host reputation blacklist', () => {
     it('should filter blacklisted hosts in autoSelectCheapestGpu', () => {
-      const source = readSource('server/gpu-deploy.ts');
+      const source = gpuDeploySource;
       expect(source).toContain('blacklistedHosts');
       expect(source).toContain('crashCount');
       expect(source).toContain('3+ crashes');
@@ -32,7 +34,7 @@ describe('GPU Optimizations', () => {
 
   describe('Parallel provider probe', () => {
     it('should probe providers before sequential deploy', () => {
-      const source = readSource('server/gpu-deploy.ts');
+      const source = gpuDeploySource;
       expect(source).toContain('Provider probe');
       expect(source).toContain('probeResults');
     });
@@ -49,7 +51,7 @@ describe('GPU Optimizations', () => {
 
   describe('Latency trend prediction', () => {
     it('should detect latency trend increases', () => {
-      const source = readSource('server/gpu-deploy.ts');
+      const source = gpuDeploySource;
       expect(source).toContain('Latency trend warning');
       expect(source).toContain('gpu:latency-trend');
     });

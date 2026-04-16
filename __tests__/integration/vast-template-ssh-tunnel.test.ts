@@ -13,9 +13,9 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { VastClient } from '../../src/gpu-providers/vast-client';
-import type { ProviderCredentials } from '../../src/gpu-providers/types';
-import { loadEnv } from '../helpers';
+import { VastClient } from '../src/gpu-providers/vast-client';
+import type { ProviderCredentials } from '../src/gpu-providers/types';
+import { loadEnv } from './helpers';
 import { createServer, type Server } from 'net';
 import { createServer as createHttpServer, type Server as HttpServer } from 'http';
 
@@ -115,9 +115,8 @@ describe('VastClient — _probeEndpoint two-stage probe', () => {
   let httpPort = 0;
   // Access the private method via cast for testing
   const probe = (endpoint: string, timeout = 3_000) =>
-    (
-      new VastClient() as unknown as { _probeEndpoint: (e: string, t: number) => Promise<boolean> }
-    )._probeEndpoint(endpoint, timeout);
+    (new VastClient() as unknown as { _probeEndpoint: (e: string, t: number) => Promise<boolean> })
+      ._probeEndpoint(endpoint, timeout);
 
   beforeAll(async () => {
     // Server 1: TCP-only — accepts the connect but never sends HTTP. This

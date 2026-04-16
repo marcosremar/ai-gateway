@@ -1,10 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import {
-  computeP95,
-  countRecentBreaches,
-  LATENCY_BREACH_COUNT,
-  LatencyTracker,
-} from '@ai-gateway/autoscaler/latency-tracker';
+import { computeP95, countRecentBreaches, LATENCY_BREACH_COUNT, LatencyTracker } from '@ai-gateway/autoscaler/latency-tracker';
 
 describe('computeP95', () => {
   it('returns null for empty array', () => {
@@ -53,9 +48,7 @@ describe('countRecentBreaches', () => {
 
   it('only considers last LATENCY_BREACH_COUNT samples', () => {
     // First 5 samples are low, last 3 are high
-    expect(countRecentBreaches([100, 200, 300, 400, 500, 2000, 3000, 4000], 1000)).toBe(
-      LATENCY_BREACH_COUNT,
-    );
+    expect(countRecentBreaches([100, 200, 300, 400, 500, 2000, 3000, 4000], 1000)).toBe(LATENCY_BREACH_COUNT);
   });
 
   it('counts mixed recent breaches correctly', () => {

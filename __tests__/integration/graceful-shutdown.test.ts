@@ -9,9 +9,10 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-const readSource = (file: string) => readFileSync(join(__dirname, '..', file), 'utf-8');
+const readSource = (file: string) => readFileSync(join(__dirname, '../..', file), 'utf-8');
 
 describe('Graceful Shutdown', () => {
+
   describe('Exported cleanup functions', () => {
     it('stopModalKeepalive should be exported from ai-handlers', () => {
       const source = readSource('server/ai-handlers.ts');
@@ -24,8 +25,8 @@ describe('Graceful Shutdown', () => {
     });
 
     it('flushDeploySettings should be exported from deploy-settings', () => {
-      const source = readSource('src/gpu-providers/deploy-settings.ts');
-      expect(source).toContain('export function flushDeploySettings');
+      const source = readSource('src/gateway/providers/gpu/deploy-settings.ts');
+      expect(source).toContain('export async function flushDeploySettings');
     });
 
     it('stopStandbyMonitor should be exported from gpu-standby', () => {

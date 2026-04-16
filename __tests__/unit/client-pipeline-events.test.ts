@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { PipelineEvent, PipelineStage } from '../../src/client/pipeline-events';
+import type { PipelineEvent, PipelineStage } from '../src/client/pipeline-events';
 
 describe('PipelineEvent types', () => {
   it('stage event has correct shape', () => {

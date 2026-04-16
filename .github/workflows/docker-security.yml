@@ -6,31 +6,41 @@ on:
     paths:
       - 'Dockerfile*'
       - 'docker-compose*.yml'
+      - 'dockers/**/Dockerfile*'
   push:
     branches: [main]
     paths:
       - 'Dockerfile*'
       - 'docker-compose*.yml'
+      - 'dockers/**/Dockerfile*'
   schedule:
     - cron: '0 9 * * 1'
 
 jobs:
-  trivy-scan:
-    name: Trivy Docker Scan
+  # Scan main project Dockerfiles
+  trivy-main:
+    name: Trivy Scan - Main (${{ matrix.dockerfile }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        dockerfile:
+          - Dockerfile
+          - Dockerfile.production
+          - Dockerfile.worker
+      fail-fast: false
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Docker image
-        run: docker build -t ai-gateway:scan -f Dockerfile .
+      - name: Build Docker image (${{ matrix.dockerfile }})
+        run: docker build -t ai-gateway-${{ matrix.dockerfile }}:scan -f ${{ matrix.dockerfile }} .
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'ai-gateway:scan'
+          image-ref: 'ai-gateway-${{ matrix.dockerfile }}:scan'
           format: 'sarif'
-          output: 'trivy-results.sarif'
+          output: 'trivy-results-${{ matrix.dockerfile }}.sarif'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
 
@@ -38,4 +48,47 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          sarif_file: 'trivy-results.sarif'
+          sarif_file: 'trivy-results-${{ matrix.dockerfile }}.sarif'
+
+  # Scan dockers/ subproject images (only on schedule or if changed)
+  trivy-subprojects:
+    name: Trivy Scan - Subprojects (${{ matrix.subproject }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'schedule' || github.event_name == 'push'
+    strategy:
+      matrix:
+        subproject:
+          - babelcast-subtitle
+          - dit360
+          - hamer
+          - hy-motion
+          - hybrik-x
+          - kokoro-tts
+          - lam
+          - parle-gateway
+          - snapgpu-runtime
+          - trellis2
+          - ultravox-s2s
+          - wilor
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image (${{ matrix.subproject }})
+        run: docker build -t ai-gateway-${{ matrix.subproject }}:scan -f dockers/${{ matrix.subproject }}/Dockerfile dockers/${{ matrix.subproject }}/
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ai-gateway-${{ matrix.subproject }}:scan'
+          format: 'sarif'
+          output: 'trivy-results-${{ matrix.subproject }}.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results-${{ matrix.subproject }}.sarif'

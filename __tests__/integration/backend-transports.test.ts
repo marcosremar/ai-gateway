@@ -18,8 +18,7 @@ let RTCPeerConnection: any, RTCSessionDescription: any, useOPUS: any, MediaStrea
 let WebSocket: any;
 let hasWerift = false;
 try {
-  ({ RTCPeerConnection, RTCSessionDescription, useOPUS, MediaStreamTrack } =
-    await import('werift'));
+  ({ RTCPeerConnection, RTCSessionDescription, useOPUS, MediaStreamTrack } = await import('werift'));
   WebSocket = (await import('ws')).default;
   hasWerift = true;
 } catch {
@@ -51,9 +50,7 @@ async function waitForHealth(url: string, timeoutMs = 15_000): Promise<boolean> 
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
       if (res.ok) return true;
-    } catch {
-      /* not ready yet */
-    }
+    } catch { /* not ready yet */ }
     await sleep(300);
   }
   return false;
@@ -80,7 +77,7 @@ function createTestWav(durationSec = 0.5, sampleRate = 16000): Buffer {
   buf.writeUInt32LE(dataSize, 40);
 
   for (let i = 0; i < numSamples; i++) {
-    const sample = Math.round(Math.sin((2 * Math.PI * 440 * i) / sampleRate) * 16000);
+    const sample = Math.round(Math.sin(2 * Math.PI * 440 * i / sampleRate) * 16000);
     buf.writeInt16LE(sample, 44 + i * 2);
   }
 
@@ -95,14 +92,8 @@ function connectWS(url: string, timeoutMs = 5000): Promise<any> {
       ws.close();
       reject(new Error('WS connect timeout'));
     }, timeoutMs);
-    ws.on('open', () => {
-      clearTimeout(timer);
-      resolve(ws);
-    });
-    ws.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
+    ws.on('open', () => { clearTimeout(timer); resolve(ws); });
+    ws.on('error', (err) => { clearTimeout(timer); reject(err); });
   });
 }
 
@@ -116,9 +107,7 @@ function sendAndWaitJSON(ws: any, msg: unknown, timeoutMs = 5000): Promise<any> 
         clearTimeout(timer);
         ws.off('message', handler);
         resolve(parsed);
-      } catch {
-        /* not JSON — ignore binary */
-      }
+      } catch { /* not JSON — ignore binary */ }
     };
     ws.on('message', handler);
     ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
@@ -167,6 +156,7 @@ afterAll(() => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe.skipIf(!hasWerift || !hasBackendServers)('WebSocket backend server', () => {
+
   // ── Health ──────────────────────────────────────────────────────────────
 
   describe('GET /health', () => {
@@ -174,7 +164,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebSocket backend server', ()
       const res = await fetch(`http://127.0.0.1:${WS_PORT}/health`);
       expect(res.status).toBe(200);
 
-      const json = (await res.json()) as any;
+      const json = await res.json() as any;
       expect(json.status).toBe('ok');
       expect(json.transport).toBe('websocket');
       expect(json.port).toBe(WS_PORT);
@@ -208,16 +198,14 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebSocket backend server', ()
       const ws = await connectWS(`ws://127.0.0.1:${WS_PORT}/ws/stream`);
 
       // Config should be accepted silently
-      ws.send(
-        JSON.stringify({
-          type: 'config',
-          systemPrompt: 'You are a Portuguese tutor.',
-          history: [
-            { role: 'user', content: 'Olá' },
-            { role: 'assistant', content: 'Olá! Tudo bem?' },
-          ],
-        }),
-      );
+      ws.send(JSON.stringify({
+        type: 'config',
+        systemPrompt: 'You are a Portuguese tutor.',
+        history: [
+          { role: 'user', content: 'Olá' },
+          { role: 'assistant', content: 'Olá! Tudo bem?' },
+        ],
+      }));
 
       await sleep(200);
 
@@ -276,9 +264,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebSocket backend server', ()
               clearTimeout(timer);
               resolve();
             }
-          } catch {
-            /* binary audio chunk — expected */
-          }
+          } catch { /* binary audio chunk — expected */ }
         });
       });
 
@@ -314,13 +300,17 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebSocket backend server', ()
 
       // Connect all clients in parallel
       const sockets = await Promise.all(
-        Array.from({ length: NUM }, () => connectWS(`ws://127.0.0.1:${WS_PORT}/ws/stream`)),
+        Array.from({ length: NUM }, () =>
+          connectWS(`ws://127.0.0.1:${WS_PORT}/ws/stream`),
+        ),
       );
 
       expect(sockets).toHaveLength(NUM);
 
       // All should respond to ping independently
-      const pongs = await Promise.all(sockets.map((ws) => sendAndWaitJSON(ws, { type: 'ping' })));
+      const pongs = await Promise.all(
+        sockets.map((ws) => sendAndWaitJSON(ws, { type: 'ping' })),
+      );
 
       for (const pong of pongs) {
         expect(pong?.type).toBe('pong');
@@ -347,6 +337,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebSocket backend server', ()
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () => {
+
   // ── Health ──────────────────────────────────────────────────────────────
 
   describe('GET /health', () => {
@@ -354,7 +345,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () =>
       const res = await fetch(`http://127.0.0.1:${RTC_PORT}/health`);
       expect(res.status).toBe(200);
 
-      const json = (await res.json()) as any;
+      const json = await res.json() as any;
       expect(json.status).toBe('ok');
       expect(json.transport).toBe('webrtc');
       expect(json.port).toBe(RTC_PORT);
@@ -370,7 +361,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () =>
       const res = await fetch(`http://127.0.0.1:${RTC_PORT}/api/ice-servers`);
       expect(res.status).toBe(200);
 
-      const json = (await res.json()) as any;
+      const json = await res.json() as any;
       expect(json.iceServers).toBeInstanceOf(Array);
       expect(json.iceServers.length).toBeGreaterThanOrEqual(1);
       expect(json.iceServers[0].urls).toContain('stun:stun.l.google.com:19302');
@@ -414,7 +405,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () =>
         body: JSON.stringify({ type: 'offer' }),
       });
       expect(res.status).toBe(400);
-      const json = (await res.json()) as any;
+      const json = await res.json() as any;
       expect(json.error).toContain('Missing');
     });
 
@@ -443,7 +434,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () =>
 
       expect(res.status).toBe(200);
 
-      const answer = (await res.json()) as { sdp: string; type: string };
+      const answer = await res.json() as { sdp: string; type: string };
       expect(answer.type).toBe('answer');
       expect(typeof answer.sdp).toBe('string');
       expect(answer.sdp.length).toBeGreaterThan(100);
@@ -474,7 +465,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () =>
         }),
       });
 
-      const answer = (await res.json()) as { sdp: string };
+      const answer = await res.json() as { sdp: string };
       // OPUS should be negotiated in the answer SDP
       expect(answer.sdp.toLowerCase()).toContain('opus');
 
@@ -502,7 +493,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () =>
             }),
           });
 
-          const answer = (await res.json()) as { sdp: string; type: string };
+          const answer = await res.json() as { sdp: string; type: string };
           await pc.close();
 
           return { status: res.status, hasAnswer: !!answer.sdp, type: answer.type };
@@ -517,9 +508,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () =>
     }, 20_000);
 
     it('increments activePeers on offer', async () => {
-      const healthBefore = (await (
-        await fetch(`http://127.0.0.1:${RTC_PORT}/health`)
-      ).json()) as any;
+      const healthBefore = await (await fetch(`http://127.0.0.1:${RTC_PORT}/health`)).json() as any;
       const peersBefore = healthBefore.activePeers;
 
       const pc = new RTCPeerConnection({ codecs: { audio: [useOPUS()] } });
@@ -537,9 +526,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () =>
         }),
       });
 
-      const healthAfter = (await (
-        await fetch(`http://127.0.0.1:${RTC_PORT}/health`)
-      ).json()) as any;
+      const healthAfter = await (await fetch(`http://127.0.0.1:${RTC_PORT}/health`)).json() as any;
       expect(healthAfter.activePeers).toBeGreaterThan(peersBefore);
 
       await pc.close();
@@ -591,11 +578,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('Discovery probing', () => {
     ]);
 
     if (wsOk) transports.websocket = { url: `ws://${host}:${WS_PORT}/ws/stream` };
-    if (rtcOk)
-      transports.webrtc = {
-        signalingUrl: `http://${host}:${RTC_PORT}/api/offer`,
-        clusterName: 'backend',
-      };
+    if (rtcOk) transports.webrtc = { signalingUrl: `http://${host}:${RTC_PORT}/api/offer`, clusterName: 'backend' };
 
     // All 3 should be present
     expect(transports.sse).toBeDefined();

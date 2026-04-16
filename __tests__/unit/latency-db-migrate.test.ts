@@ -56,7 +56,7 @@ vi.mock('bun:sqlite', () => {
   return { Database: MockDatabase };
 });
 
-vi.mock('../server/state', () => ({
+vi.mock('../../server/state', () => ({
   prisma: mockPrisma,
   deployState:          { status: 'idle' },
   deploymentSM:         {},

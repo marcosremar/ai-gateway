@@ -16,12 +16,10 @@ const SKIP = process.env.SKIP_LIVE_TESTS === '1';
 
 const headers = {
   'Content-Type': 'application/json',
-  Authorization: `Bearer ${GATEWAY_API_KEY}`,
+  'Authorization': `Bearer ${GATEWAY_API_KEY}`,
 };
 
-async function timedChat(
-  body: string,
-): Promise<{ ok: boolean; latencyMs: number; content?: string }> {
+async function timedChat(body: string): Promise<{ ok: boolean; latencyMs: number; content?: string }> {
   const start = performance.now();
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
@@ -31,18 +29,15 @@ async function timedChat(
       signal: AbortSignal.timeout(15_000),
     });
     if (res.status !== 200) return { ok: false, latencyMs: performance.now() - start };
-    const json = (await res.json()) as any;
-    return {
-      ok: true,
-      latencyMs: performance.now() - start,
-      content: json.choices?.[0]?.message?.content,
-    };
+    const json = await res.json() as any;
+    return { ok: true, latencyMs: performance.now() - start, content: json.choices?.[0]?.message?.content };
   } catch {
     return { ok: false, latencyMs: performance.now() - start };
   }
 }
 
 describe.skipIf(SKIP)('Cache Effectiveness', { timeout: 120_000 }, () => {
+
   it('second identical request is faster (cache hit)', { timeout: 30_000 }, async () => {
     console.log('\n── Cache Hit Test: sequential identical requests ──');
 
@@ -124,22 +119,20 @@ describe.skipIf(SKIP)('Cache Effectiveness', { timeout: 120_000 }, () => {
     console.log(`  Prime request: ${prime.latencyMs.toFixed(0)}ms`);
 
     // Wait a moment for cache to persist
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 500));
 
     // Then: 100 requests that should all hit cache
     const results = await Promise.all(Array.from({ length: 100 }, () => timedChat(body)));
-    const ok = results.filter((r) => r.ok);
-    const latencies = ok.map((r) => r.latencyMs).sort((a, b) => a - b);
+    const ok = results.filter(r => r.ok);
+    const latencies = ok.map(r => r.latencyMs).sort((a, b) => a - b);
 
     const p50 = latencies.length ? latencies[Math.floor(latencies.length * 0.5)] : 0;
     const p95 = latencies.length ? latencies[Math.floor(latencies.length * 0.95)] : 0;
-    console.log(
-      `  100 requests: ${ok.length}/100 OK | p50=${p50.toFixed(0)}ms p95=${p95.toFixed(0)}ms`,
-    );
+    console.log(`  100 requests: ${ok.length}/100 OK | p50=${p50.toFixed(0)}ms p95=${p95.toFixed(0)}ms`);
 
     // If cache is working, these should be much faster than the prime request
     if (p50 < prime.latencyMs * 0.3) {
-      const fast = ok.filter((r) => r.latencyMs < prime.latencyMs * 0.5).length;
+      const fast = ok.filter(r => r.latencyMs < prime.latencyMs * 0.5).length;
       console.log(`  ✓ Cache working: ${fast}/100 were >2x faster than prime`);
       console.log(`  Estimated hit rate: ${((fast / ok.length) * 100).toFixed(0)}%`);
     } else {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleAudioTranscriptions, _resetSttCache } from '../../src/proxy/routes/audio-transcriptions';
-import type { ProxyRequest } from '../../src/proxy/types';
+import { handleAudioTranscriptions, _resetSttCache } from '../src/proxy/routes/audio-transcriptions';
+import type { ProxyRequest } from '../src/proxy/types';
 
 function makeReq(body: Record<string, unknown>, rawBody = Buffer.from([1, 2, 3])): ProxyRequest {
   return { method: 'POST', url: '/v1/audio/transcriptions', headers: {}, body, rawBody };

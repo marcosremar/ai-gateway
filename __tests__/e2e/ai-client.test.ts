@@ -29,9 +29,7 @@ class OpenAILLMProvider implements LLMProvider {
     this.client = new OpenAI({ apiKey: apiKey || process.env.OPENAI_API_KEY });
   }
 
-  isConfigured() {
-    return !!process.env.OPENAI_API_KEY;
-  }
+  isConfigured() { return !!process.env.OPENAI_API_KEY; }
 
   withApiKey(apiKey: string): LLMProvider {
     return new OpenAILLMProvider(apiKey);
@@ -50,13 +48,11 @@ class OpenAILLMProvider implements LLMProvider {
     return {
       content: choice.message.content || '',
       model: response.model,
-      usage: response.usage
-        ? {
-            promptTokens: response.usage.prompt_tokens,
-            completionTokens: response.usage.completion_tokens,
-            totalTokens: response.usage.total_tokens,
-          }
-        : undefined,
+      usage: response.usage ? {
+        promptTokens: response.usage.prompt_tokens,
+        completionTokens: response.usage.completion_tokens,
+        totalTokens: response.usage.total_tokens,
+      } : undefined,
     };
   }
 }
@@ -72,9 +68,7 @@ class GroqLLMProvider implements LLMProvider {
     });
   }
 
-  isConfigured() {
-    return !!process.env.GROQ_API_KEY;
-  }
+  isConfigured() { return !!process.env.GROQ_API_KEY; }
 
   withApiKey(apiKey: string): LLMProvider {
     return new GroqLLMProvider(apiKey);
@@ -92,13 +86,11 @@ class GroqLLMProvider implements LLMProvider {
     return {
       content: choice.message.content || '',
       model: response.model,
-      usage: response.usage
-        ? {
-            promptTokens: response.usage.prompt_tokens,
-            completionTokens: response.usage.completion_tokens,
-            totalTokens: response.usage.total_tokens,
-          }
-        : undefined,
+      usage: response.usage ? {
+        promptTokens: response.usage.prompt_tokens,
+        completionTokens: response.usage.completion_tokens,
+        totalTokens: response.usage.total_tokens,
+      } : undefined,
     };
   }
 }
@@ -138,6 +130,7 @@ beforeAll(() => {
 const hasKeys = !!process.env.OPENAI_API_KEY && !!process.env.GROQ_API_KEY;
 
 describe.skipIf(!hasKeys)('AIClient — real API calls', () => {
+
   it('chat() with OpenAI gpt-4o-mini', async () => {
     const client = new AIClient({
       registry,
@@ -230,9 +223,10 @@ describe.skipIf(!hasKeys)('AIClient — real API calls', () => {
     });
 
     try {
-      const result = await client.chat([{ role: 'user', content: 'Responda apenas "ok".' }], {
-        llm: [{ provider: 'openai', model: 'gpt-4o-mini' }],
-      });
+      const result = await client.chat(
+        [{ role: 'user', content: 'Responda apenas "ok".' }],
+        { llm: [{ provider: 'openai', model: 'gpt-4o-mini' }] },
+      );
 
       expect(result.provider).toBe('openai');
     } catch (err: unknown) {

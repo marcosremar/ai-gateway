@@ -1,7 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OpenAICompatLLMProvider } from '../../src/providers/openai-compat/openai-compat-llm';
-import { OpenAICompatSTTProvider } from '../../src/providers/openai-compat/openai-compat-stt';
-import { OpenAICompatTTSProvider } from '../../src/providers/openai-compat/openai-compat-tts';
+import { OpenAICompatLLMProvider, OpenAICompatSTTProvider, OpenAICompatTTSProvider } from '../src/providers/openai-compat';
 
 // ── Shared test configs ───────────────────────────────────────────────────────
 
@@ -17,19 +15,8 @@ const STT_CONFIG = {
   baseURL: 'https://api.groq.com/openai/v1',
   envKey: 'GROQ_API_KEY',
   models: [
-    {
-      id: 'whisper-large-v3-turbo',
-      name: 'Whisper V3 Turbo',
-      description: 'Fast',
-      capability: 'stt' as const,
-      isDefault: true,
-    },
-    {
-      id: 'whisper-large-v3',
-      name: 'Whisper V3',
-      description: 'Accurate',
-      capability: 'stt' as const,
-    },
+    { id: 'whisper-large-v3-turbo', name: 'Whisper V3 Turbo', description: 'Fast', capability: 'stt' as const, isDefault: true },
+    { id: 'whisper-large-v3', name: 'Whisper V3', description: 'Accurate', capability: 'stt' as const },
   ],
   defaultModel: 'whisper-large-v3-turbo',
 };
@@ -39,13 +26,7 @@ const TTS_CONFIG = {
   baseURL: 'https://api.groq.com/openai/v1',
   envKey: 'GROQ_API_KEY',
   models: [
-    {
-      id: 'orpheus-v1',
-      name: 'Orpheus',
-      description: 'HQ TTS',
-      capability: 'tts' as const,
-      isDefault: true,
-    },
+    { id: 'orpheus-v1', name: 'Orpheus', description: 'HQ TTS', capability: 'tts' as const, isDefault: true },
   ],
   voices: [
     { id: 'autumn', name: 'Autumn', description: 'Female' },

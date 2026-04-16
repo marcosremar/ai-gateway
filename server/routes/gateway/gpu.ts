@@ -68,6 +68,8 @@ export function registerGpuRoutes(handlers: Record<string, Function>): void {
     'GET /v1/gpu/snapshot': gh.handleSnapshotList,
     'POST /v1/gpu/snapshot/restore': gh.handleSnapshotRestore,
     'DELETE /v1/gpu/snapshot': gh.handleSnapshotDelete,
+    // GPU heartbeat — external workload keepalive (resets idle timer)
+    'POST /v1/gpu/heartbeat': gh.handleGpuHeartbeat,
     // Canary deployment status
     'GET /v1/canary/status': gh.handleCanaryStatus,
     // Performance profiling

@@ -15,7 +15,7 @@ export type Latency = 'realtime' | 'low' | 'batch'
 /** Pipeline stages a service can provide */
 export type Stage = 'stt' | 'llm' | 'tts' | 'image';
 
-export type ServiceKind = 'cloud' | 'container' | 'serverless'
+export type ServiceKind = 'cloud' | 'container' | 'serverless' | 'cpu'
 
 /** A deployment unit that provides one or more pipeline stages.
  *  Can be a cloud API (Groq, OpenAI), a Docker container on a GPU provider,
@@ -32,10 +32,12 @@ export interface Service {
 
   // if cloud:
   cloudProvider?: string   // 'groq' | 'openai' | 'modal' | 'deepgram' | 'tensordock' | etc.
-  // if container:
+  // if container (GPU):
   dockerImage?: string
   gpuTypes?: string[]
   gpuProvider?: string     // 'vast' | 'runpod' | 'tensordock' | 'modal'
+  // if cpu:
+  cpuProvider?: string     // 'flyio' | 'scaleway'
   // models provided by this service (per stage)
   sttModel?: string          // e.g. 'faster-whisper-large-v3'
   llmModel?: string          // e.g. 'mistral-7b'
@@ -72,6 +74,8 @@ export interface Service {
 export interface App {
   id: string;
   name: string;
+  /** Short description of what this app does / when to use it */
+  description?: string;
   latency: Latency;
   enabled?: boolean;
   stt?: PipelineChainEntry[];
@@ -110,6 +114,12 @@ export const GPU_PROVIDERS = [
 
 export const SERVERLESS_PROVIDERS = [
   { id: 'modal', name: 'Modal', iconName: 'CloudLightning', color: '#22c55e' },
+] as const;
+
+/** CPU-only machine providers — no GPU, but cheap and fast boot */
+export const CPU_PROVIDERS = [
+  { id: 'flyio',    name: 'Fly.io',    iconName: 'Cpu', color: '#a855f7' },
+  { id: 'scaleway', name: 'Scaleway',  iconName: 'Cpu', color: '#3b82f6' },
 ] as const;
 
 // ── Pipeline catalog — models/providers per stage ──

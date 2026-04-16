@@ -19,6 +19,18 @@ vi.mock('bun:sqlite', () => ({
   },
 }));
 
+// Mock bun — not available in Vitest's Node.js runtime
+vi.mock('bun', () => ({
+  spawn: vi.fn(),
+}));
+
+// Mock src/gateway/pipeline/local-kokoro.ts — imports 'bun' which is unavailable in Vitest
+vi.mock('../../src/gateway/pipeline/local-kokoro', () => ({
+  getLocalKokoroUrl: vi.fn(() => null),
+  startLocalKokoro: vi.fn(),
+  stopLocalKokoro: vi.fn(),
+}));
+
 // Mock @prisma/client — not installed in this package (server/state.ts imports it statically)
 vi.mock('@prisma/client', () => ({
   PrismaClient: class MockPrismaClient {
