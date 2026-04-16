@@ -78,9 +78,11 @@ function createMemoryKvStore(): KvStore {
       data.set(key, { value, expiry: ttlSecs ? Date.now() + ttlSecs * 1000 : undefined });
     },
     del: async (key) => { data.delete(key); },
-    scan: async (pattern) => {
+    scan: async (pattern, callback) => {
       const prefix = pattern.replace(/\*/g, '');
-      return [...data.keys()].filter((k) => k.startsWith(prefix));
+      const keys = [...data.keys()].filter((k) => k.startsWith(prefix));
+      if (callback && keys.length > 0) callback(keys);
+      return keys.length;
     },
   };
 }
@@ -870,6 +872,8 @@ describe('GatewaySDK — HTTP Client internals', () => {
       .mockRejectedValueOnce(new TypeError('fetch failed'))
       .mockResolvedValueOnce({
         ok: true, status: 200,
+        // parseJson reads .text() then JSON.parses — SDK no longer calls .json()
+        text: async () => JSON.stringify({ text: 'ok', used_gpu: false }),
         json: async () => ({ text: 'ok', used_gpu: false }),
         headers: new Headers(),
       } as unknown as Response);

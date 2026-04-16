@@ -46,8 +46,8 @@ const hasBackendServers =
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const WS_PORT = 19_481;
-const RTC_PORT = 19_482;
+const WS_PORT = 19_581;
+const RTC_PORT = 19_582;
 
 let wsProc: ChildProcess | null = null;
 let rtcProc: ChildProcess | null = null;

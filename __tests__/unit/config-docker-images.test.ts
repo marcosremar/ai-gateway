@@ -14,7 +14,7 @@ import {
   DOCKER_IMAGE_VERSION,
   STANDARD_TO_BLACKWELL,
   BLACKWELL_TO_STANDARD,
-} from '../server/config';
+} from '../../server/config';
 
 // ── resolveDockerImageForGpus ───────────────────────────────────────────────
 

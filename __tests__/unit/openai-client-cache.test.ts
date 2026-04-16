@@ -5,12 +5,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Reset module cache between tests
-let getOrCreateClient: typeof import('../src/providers/openai-compat/client-cache').getOrCreateClient;
+let getOrCreateClient: typeof import('../../src/gateway/providers/cloud/openai-compat/client-cache').getOrCreateClient;
 
 beforeEach(async () => {
   // Reimport to get a fresh module state (cache is module-level)
   vi.resetModules();
-  const mod = await import('../src/providers/openai-compat/client-cache');
+  const mod = await import('../../src/gateway/providers/cloud/openai-compat/client-cache');
   getOrCreateClient = mod.getOrCreateClient;
 });
 
@@ -81,7 +81,7 @@ describe('getOrCreateClient', () => {
     // Add one more - cache should evict oldest
     getOrCreateClient('https://new-host.example.com/v1', 'new-key');
     // Verify cache size stays at MAX_CACHE_SIZE (50)
-    const { size } = await import('../src/providers/openai-compat').then(m => m.getCacheStats());
+    const { size } = await import('../../src/gateway/providers/cloud/openai-compat/client-cache').then(m => m.getCacheStats());
     expect(size).toBeLessThanOrEqual(50);
   });
 });

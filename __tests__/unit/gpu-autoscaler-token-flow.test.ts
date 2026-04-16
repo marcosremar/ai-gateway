@@ -14,7 +14,7 @@
  * Uses in-memory mocks — no Redis, no Prisma, no network needed.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { StateStore, SessionResolver, SettingsStore, IdleTierState } from '@ai-gateway';
 import { createAutoscaler, type Autoscaler } from '@ai-gateway';
 import type { AutoScalerConfig } from '@ai-gateway';
@@ -141,6 +141,13 @@ describe('GPU Autoscaler Decision Flow + Token', () => {
 
     // Reset GPU state
     autoscaler.resetGpuState(TEST_USER);
+  });
+
+  afterEach(() => {
+    // Cancel boot pollers (setTimeout chains) so they don't fire after the
+    // worker tears down — otherwise vitest reports "Closing rpc while
+    // onUserConsoleLog was pending" as an unhandled rejection.
+    try { autoscaler?.engine.destroy(); } catch { /* ignore */ }
   });
 
   // ──────────────────────────────────────────────────────────────────────────

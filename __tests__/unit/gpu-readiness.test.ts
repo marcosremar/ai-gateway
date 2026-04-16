@@ -15,12 +15,12 @@ describe('GPU Readiness State Machine', () => {
 
   describe('GpuReadinessState interface', () => {
     it('should include autoRecoveryAttempt field in interface', () => {
-      const source = readSource('server/state.ts');
+      const source = readSource('src/gateway/state/readiness-state.ts');
       expect(source).toContain('autoRecoveryAttempt: number');
     });
 
     it('should initialize autoRecoveryAttempt to 0 in default state', () => {
-      const source = readSource('server/state.ts');
+      const source = readSource('src/gateway/state/readiness-state.ts');
       // The default state object should include autoRecoveryAttempt: 0
       const defaultIdx = source.indexOf('gpuReadinessState: GpuReadinessState = {');
       const defaultBlock = source.slice(defaultIdx, defaultIdx + 300);
@@ -28,14 +28,14 @@ describe('GPU Readiness State Machine', () => {
     });
 
     it('resetGpuReadinessState should include autoRecoveryAttempt: 0', () => {
-      const source = readSource('server/state.ts');
+      const source = readSource('src/gateway/state/readiness-state.ts');
       const resetIdx = source.indexOf('function resetGpuReadinessState');
       const resetBlock = source.slice(resetIdx, resetIdx + 400);
       expect(resetBlock).toContain('autoRecoveryAttempt: 0');
     });
 
     it('resetGpuReadinessState should clear latency rings', () => {
-      const source = readSource('server/state.ts');
+      const source = readSource('src/gateway/state/readiness-state.ts');
       const resetIdx = source.indexOf('function resetGpuReadinessState');
       const resetBlock = source.slice(resetIdx, resetIdx + 400);
       expect(resetBlock).toContain('resetPerStageLatencyRings');
@@ -44,12 +44,12 @@ describe('GPU Readiness State Machine', () => {
 
   describe('Per-stage latency ring', () => {
     it('should have bounded ring size', () => {
-      const source = readSource('server/state.ts');
+      const source = readSource('src/gateway/state/readiness-state.ts');
       expect(source).toContain('PER_STAGE_RING_SIZE');
     });
 
     it('should implement circular buffer correctly', () => {
-      const source = readSource('server/state.ts');
+      const source = readSource('src/gateway/state/readiness-state.ts');
       expect(source).toContain('ring.length < PER_STAGE_RING_SIZE');
       expect(source).toContain('% PER_STAGE_RING_SIZE');
     });
@@ -160,7 +160,7 @@ describe('Deploy Settings', () => {
   });
 
   it('should have debounced save', () => {
-    const source = readSource('src/gpu-providers/deploy-settings.ts');
+    const source = readSource('src/gateway/providers/gpu/deploy-settings.ts');
     expect(source).toContain('_settingsSaveTimer');
     expect(source).toContain('flushDeploySettings');
   });

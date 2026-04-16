@@ -86,7 +86,11 @@ export async function autoStopGpu(reason: DeleteReason = 'idle_timeout') {
     return;
   }
 
-  broadcastProviderStatus('offline', 'cloud', `GPU idle → stopped (paused). Auto-destroy in ${Math.round(IDLE_DESTROY_MS / 60_000)} min.`);
+  const isDev = deployState.devMode === true;
+  const destroyMsg = isDev
+    ? 'Will stay stopped until resumed (dev mode — auto-destroy disabled).'
+    : `Will be destroyed in ${Math.round(IDLE_DESTROY_MS / 60_000)} min if not resumed.`;
+  broadcastProviderStatus('offline', 'cloud', `GPU idle → stopped (paused). ${destroyMsg}`);
   stopGpuMonitoring();
   stopWarmthMonitor();
   updateActivePipeline({ gpuEndpoint: undefined }, 'idleStop');
@@ -100,11 +104,15 @@ export async function autoStopGpu(reason: DeleteReason = 'idle_timeout') {
   deploymentSM.markStopped(podId, provider, gpuType, costPerHr, dockerImage);
   setDeployState({
     status: 'stopped',
-    message: `Pod stopped (idle ${Math.round(IDLE_TIMEOUT_MS / 60_000)} min). Will be destroyed in ${Math.round(IDLE_DESTROY_MS / 60_000)} min if not resumed.`,
+    message: `Pod stopped (idle ${Math.round(IDLE_TIMEOUT_MS / 60_000)} min). ${destroyMsg}`,
     podId,
     provider,
   });
 
-  // Schedule auto-destroy
-  scheduleAutoDestroy(IDLE_DESTROY_MS);
+  // Schedule auto-destroy unless this is a dev deploy (user explicitly opted out)
+  if (isDev) {
+    log.log(`[gpu] Auto-destroy skipped for dev pod ${podId} — will remain stopped until manually resumed or terminated`);
+  } else {
+    scheduleAutoDestroy(IDLE_DESTROY_MS);
+  }
 }

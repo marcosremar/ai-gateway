@@ -35,8 +35,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ── Test ports (ephemeral, unlikely to collide) ─────────────────────────────
 
-const WS_PORT = 19_381;
-const RTC_PORT = 19_382;
+const WS_PORT = 19_385;
+const RTC_PORT = 19_386;
 
 // ── Server processes ────────────────────────────────────────────────────────
 

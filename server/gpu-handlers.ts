@@ -252,6 +252,8 @@ interface DeployConfig {
   canaryMaxErrorRate: number;
   /** Step size for traffic increase */
   canaryTrafficStep: number;
+  /** Dev mode: pause on idle but skip the auto-destroy timer (user resumes manually). */
+  devMode?: boolean;
 }
 
 /**
@@ -407,6 +409,9 @@ async function _validateDeployRequest(
   const canaryMaxErrorRate = typeof body.canaryMaxErrorRate === 'number' ? body.canaryMaxErrorRate : 0.05;
   const canaryTrafficStep = typeof body.canaryTrafficStep === 'number' ? body.canaryTrafficStep : 10;
 
+  // Dev mode: skip auto-destroy after idle-stop (pod stays paused until manually resumed)
+  const devMode = body.devMode === true;
+
   return {
     apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
     dockerImage, gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
@@ -425,6 +430,7 @@ async function _validateDeployRequest(
     canaryInitialTraffic,
     canaryMaxErrorRate,
     canaryTrafficStep,
+    devMode,
   };
 }
 
@@ -759,7 +765,7 @@ function _startDeployAndRespond(
   const deployId = generateDeployId();
   // Record for idempotency — subsequent identical requests within 5s return this deployId
   lastDeployRequest = { hash: JSON.stringify({ dockerImage: tierResult.resolvedDockerImage, gpuTypes: tierResult.gpuTypes }), deployId, ts: Date.now() };
-  setDeployState({ deployId });
+  setDeployState({ deployId, devMode: config.devMode === true });
   try {
     deploymentSM.startDeploying();
   } catch (smErr) {

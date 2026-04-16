@@ -17,7 +17,7 @@ import { describe, it, expect } from 'vitest';
 
 describe('STT Provider Contract', () => {
   const sttContract = {
-    transcribe: expect.any(Function),
+    transcribe: () => {},
   };
 
   it('should have the required methods', () => {
@@ -92,9 +92,9 @@ describe('LLM Provider Contract', () => {
     // Contract: If stream=true, response should be iterable or callback-based
     const streamConfig = {
       stream: true,
-      onChunk: expect.any(Function),
-      onDone: expect.any(Function),
-      onError: expect.any(Function),
+      onChunk: () => {},
+      onDone: () => {},
+      onError: () => {},
     };
 
     expect(streamConfig.stream).toBe(true);

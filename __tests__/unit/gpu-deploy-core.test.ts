@@ -474,6 +474,31 @@ describe('GPU Deploy - Core Logic', () => {
 
       expect(stopMock).toHaveBeenCalledWith('td-pod-id', { apiKey: 'td-key', authId: 'td-auth' });
     });
+
+    it('dev mode: stops pod but skips auto-destroy scheduling', async () => {
+      (stateMock as any).activeProvider = 'vast';
+      (stateMock as any).deployVastApiKey = 'vast-key';
+      getState().podId = 'dev-pod-id';
+      getState().provider = 'vast';
+      getState().devMode = true;  // dev deploy — pause but don't destroy
+
+      const stopMock = vi.fn().mockResolvedValue({});
+      vi.mocked(providersMock.vast.stopInstance).mockImplementation(stopMock);
+
+      await gpuDeploy.autoStopGpu('idle_timeout');
+
+      // Pod should still be stopped
+      expect(stopMock).toHaveBeenCalledWith('dev-pod-id', { apiKey: 'vast-key' });
+
+      // Status message should indicate dev mode (no auto-destroy countdown)
+      const stateCall = vi.mocked(stateMock.setDeployState).mock.calls.find(
+        ([patch]) => (patch as any).status === 'stopped'
+      );
+      expect(stateCall).toBeDefined();
+      const msg = (stateCall![0] as any).message as string;
+      expect(msg).toMatch(/auto-destroy disabled|dev mode/i);
+      expect(msg).not.toMatch(/destroyed in \d+ min/);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────

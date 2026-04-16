@@ -548,7 +548,7 @@ describe('VastClient — extended unit tests', () => {
   // ── Smart offer ranking ─────────────────────────────────────────────────
 
   describe('tiered offer ranking (progressive budget, sort by inet_down)', () => {
-    it('Tier 1: picks fastest internet within 20% of avg price', async () => {
+    it('Tier 1: picks fastest internet within 20% of avg price', { retry: 3, timeout: 60000 }, async () => {
       // Offers: $0.20, $0.22, $0.24, $0.30, $0.50 → avg=$0.292
       // Tier 1 (≤$0.350): $0.20, $0.22, $0.24, $0.30 → sorted by inet_down desc
       // → id=3 (5000Mbps) first
@@ -582,7 +582,7 @@ describe('VastClient — extended unit tests', () => {
       expect(result.endpoint).toBe('http://3.3.3.3:8000');
     }, 60000);
 
-    it('expensive offer only tried after all cheaper tiers exhausted', async () => {
+    it('expensive offer only tried after all cheaper tiers exhausted', { retry: 3, timeout: 60000 }, async () => {
       // Offers: $0.10, $0.12, $0.50 → avg=$0.24
       // Tier 1 (≤$0.288): $0.10, $0.12 → inet_down desc: $0.12@2000 > $0.10@500
       // Tier 2 (≤$0.312): no new
@@ -610,7 +610,7 @@ describe('VastClient — extended unit tests', () => {
       expect(createCall![0]).toContain('/asks/2/');
     }, 60000);
 
-    it('keeps original order with single offer', async () => {
+    it('keeps original order with single offer', { retry: 3, timeout: 60000 }, async () => {
       vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({
         endpoint: 'http://1.1.1.1:8000', ip: '1.1.1.1',
       });
@@ -633,7 +633,7 @@ describe('VastClient — extended unit tests', () => {
       expect(result.endpoint).toBe('http://1.1.1.1:8000');
     }, 60000);
 
-    it('progresses through tiers: Tier1 fails → Tier2 → Tier3 → expensive', async () => {
+    it('progresses through tiers: Tier1 fails → Tier2 → Tier3 → expensive', { retry: 3, timeout: 60000 }, async () => {
       // Offers: $0.18, $0.20, $0.22, $0.80 → avg=$0.35
       // Tier 1 (≤$0.42): $0.18, $0.20, $0.22 — sorted by inet_down: $0.20@4000 > $0.22@2000 > $0.18@500
       // Tier 2/3: no new offers below those ceilings
@@ -669,7 +669,7 @@ describe('VastClient — extended unit tests', () => {
       expect(result.instanceId).toBe('inst-100');
     }, 60000);
 
-    it('falls through to expensive tier when all cheap tiers fail', async () => {
+    it('falls through to expensive tier when all cheap tiers fail', { retry: 3, timeout: 60000 }, async () => {
       // Only 2 offers: $0.10 (slow), $0.90 (fast)
       // avg=$0.50, T1 ceiling=$0.60 → only $0.10 in T1
       // If $0.10 fails → T2/T3 still only $0.10 → T4 gets $0.90

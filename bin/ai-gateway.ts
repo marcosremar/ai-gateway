@@ -486,6 +486,7 @@ async function cmdGpuStatus() {
   if (data.error) { console.error(data.error.message); process.exit(1); }
   console.log('GPU Status:');
   console.log(`  status:    ${data.status}`);
+  if (data.devMode) console.log(`  mode:      ${c.cyan}dev${c.reset} (auto-destroy disabled)`);
   if (data.deployId) console.log(`  deployId:  ${data.deployId}`);
   if (data.podId) console.log(`  podId:     ${data.podId}`);
   if (data.endpoint) console.log(`  endpoint:  ${data.endpoint}`);
@@ -495,7 +496,7 @@ async function cmdGpuStatus() {
   if (data.gpuHealthy !== undefined) console.log(`  healthy:   ${data.gpuHealthy}`);
 }
 
-async function cmdGpuDeploy(opts: { image?: string; gpuTypes?: string; onstart?: string; storageGb?: number; env?: string; numGpus?: number }) {
+async function cmdGpuDeploy(opts: { image?: string; gpuTypes?: string; onstart?: string; storageGb?: number; env?: string; numGpus?: number; devMode?: boolean }) {
   const { url, key } = getConfig();
   const body: Record<string, unknown> = {};
   if (opts.image) body.dockerImage = opts.image;
@@ -503,6 +504,7 @@ async function cmdGpuDeploy(opts: { image?: string; gpuTypes?: string; onstart?:
   if (opts.onstart) body.onstart = opts.onstart;
   if (opts.storageGb) body.storageGb = opts.storageGb;
   if (opts.numGpus) body.gpuCount = opts.numGpus;
+  if (opts.devMode) body.devMode = true;
   if (opts.env) {
     const envMap: Record<string, string> = {};
     for (const pair of opts.env.split(',')) {
@@ -1691,6 +1693,292 @@ async function cmdGpuCommit(target?: GpuTargetOpts, opts?: { message?: string })
   }
 }
 
+// ── GPU dev mode — scratch machine for fast iteration ────────────────────────
+// Deploys a minimal CUDA + Python + SSH image, then `exec`/`push`/`pull`/`snapshot`.
+// Auto-pauses on idle (configurable via `ai-gateway gpu stop` — preserves state).
+
+const GPU_DEV_DEFAULT_IMAGE = 'marcosremar/gpu-dev:latest';
+
+const GPU_DEV_HELP = `
+ai-gateway gpu dev — Scratch GPU machine for fast iteration
+
+Deploys a minimal base image (CUDA + Python + SSH) so you can iterate on
+commands/scripts without rebuilding a full Docker image every time. When
+you're satisfied, 'snapshot' captures the state into a named image.
+
+Usage:
+  ai-gateway gpu dev <subcommand> [options]
+
+Subcommands:
+  start                        Deploy the dev base image (${GPU_DEV_DEFAULT_IMAGE})
+    --base-image <image>         Override the base image
+    --gpu-types <types>          Comma-separated GPU type filter
+    --storage <gb>               Disk size (default: provider default)
+    --env K=V,K2=V2              Env vars
+  stop                         Pause the dev machine (preserves state)
+  status                       Show dev machine status
+  info                         Show python/torch/cuda info (via /info endpoint)
+
+  sh                           Open interactive SSH shell
+  exec "<command>"             Run a shell command over SSH
+
+  push <local> [remote]        Upload a file to the container
+    --no-restart                 Don't restart the server after upload
+  pull <remote> [local]        Download a file from the container
+
+  snapshot [-m "msg"]          Download modified files + git commit + push
+                               (alias for 'gpu commit')
+
+  serve <remote-port>          Open local SSH tunnel for preview
+    --local <port>               Local port (defaults to remote port)
+    --bind <host>                Bind address (default: 127.0.0.1)
+
+Multi-GPU targeting (applies to sh/exec/push/pull/snapshot/serve):
+  --instance <id>              Target a specific instance by ID
+  --image <name>               Target by Docker image name (partial match)
+
+Typical workflow:
+  ai-gateway gpu dev start                   # deploy scratch machine
+  ai-gateway gpu dev info                    # verify GPU + torch work
+  ai-gateway gpu dev exec "git clone https://github.com/org/repo /app/proj"
+  ai-gateway gpu dev exec "cd /app/proj && pip install -r requirements.txt"
+  ai-gateway gpu dev push test_script.py /app/test_script.py
+  ai-gateway gpu dev exec "cd /app && python3 test_script.py"
+  ai-gateway gpu dev pull /app/output.json ./output.json
+  ai-gateway gpu dev serve 8080              # preview a web server at http://localhost:8080
+  ai-gateway gpu dev snapshot -m "feat(foo): working prototype"
+  ai-gateway gpu stop                        # pause — resume is fast (~20s)
+
+Notes:
+  - The dev machine auto-pauses after 15 min of HTTP inactivity (default).
+  - 'stop' preserves state — 'resume' brings it back without re-pulling.
+  - Install your own dependencies via 'exec "pip install ..."' etc.
+  - To promote to a real Docker image, use 'snapshot' (commits source changes)
+    or build a Dockerfile and push via CI.
+`;
+
+async function cmdGpuDevStart(opts: { image?: string; gpuTypes?: string; storageGb?: number; env?: string }) {
+  const image = opts.image || GPU_DEV_DEFAULT_IMAGE;
+  console.log(`${c.cyan}Dev deploy${c.reset} — image: ${c.bold}${image}${c.reset}`);
+  console.log(`${c.dim}Mode: pause-on-idle, auto-destroy disabled. Iterate with: exec / sh / push / pull / snapshot${c.reset}\n`);
+  await cmdGpuDeploy({
+    image,
+    gpuTypes: opts.gpuTypes,
+    storageGb: opts.storageGb,
+    env: opts.env,
+    devMode: true,
+  });
+}
+
+/** Download a file from the running GPU container via scp. */
+async function cmdGpuPull(remotePath: string, localPath?: string, target?: GpuTargetOpts) {
+  const info = await resolveGpuInstance(target);
+  const resolvedLocal = localPath || remotePath.split('/').pop() || 'downloaded';
+  console.log(`${c.cyan}PULL${c.reset} ${info.sshHost}:${remotePath} → ${resolvedLocal}`);
+
+  const spin = spinner('Downloading...');
+  const scpProc = spawn('scp', [
+    '-P', String(info.sshPort),
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'UserKnownHostsFile=/dev/null',
+    '-o', 'ConnectTimeout=10',
+    '-o', 'LogLevel=ERROR',
+    `root@${info.sshHost}:${remotePath}`,
+    resolvedLocal,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  let scpErr = '';
+  scpProc.stderr?.on('data', (d: Buffer) => { scpErr += d.toString(); });
+  const scpOk = await new Promise<boolean>((resolve) => {
+    scpProc.on('exit', (code) => resolve(code === 0));
+    scpProc.on('error', () => resolve(false));
+  });
+  spin.stop();
+
+  if (!scpOk) {
+    console.error(`${c.red}SCP failed${c.reset}: ${scpErr || 'unknown error'}`);
+    process.exit(1);
+  }
+  console.log(`${c.green}✓${c.reset} File saved to ${resolvedLocal}`);
+}
+
+/**
+ * Open a local SSH tunnel forwarding a local port to a remote port on the GPU.
+ * Runs in foreground until Ctrl+C, printing the local URL.
+ */
+async function cmdGpuDevServe(
+  remotePort: number,
+  opts: { localPort?: number; bind?: string },
+  target?: GpuTargetOpts,
+) {
+  const info = await resolveGpuInstance(target);
+  const localPort = opts.localPort || remotePort;
+  const bind = opts.bind || '127.0.0.1';
+
+  console.log(`${c.cyan}SSH tunnel${c.reset} ${bind}:${localPort} → ${info.sshHost}:${remotePort}`);
+  console.log(`${c.dim}Local preview: ${c.reset}${c.bold}http://${bind}:${localPort}${c.reset}`);
+  console.log(`${c.dim}Press Ctrl+C to stop.${c.reset}\n`);
+
+  const tunnelProc = spawn('ssh', [
+    '-N',  // no remote command
+    '-L', `${bind}:${localPort}:localhost:${remotePort}`,
+    ...sshArgs(info.sshHost, info.sshPort),
+  ], { stdio: ['ignore', 'inherit', 'inherit'] });
+
+  // Forward SIGINT/SIGTERM to child so Ctrl+C closes tunnel cleanly
+  const onSignal = () => { tunnelProc.kill('SIGTERM'); };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+
+  await new Promise<void>((resolve) => {
+    tunnelProc.on('exit', (code) => {
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
+      if (code !== 0 && code !== 130 && code !== null) {
+        console.error(`${c.red}SSH tunnel exited with code ${code}${c.reset}`);
+      }
+      resolve();
+    });
+  });
+}
+
+/** Show GPU /info endpoint (python/torch/cuda). */
+async function cmdGpuDevInfo(target?: GpuTargetOpts) {
+  const info = await resolveGpuInstance(target);
+  if (!info.endpoint) {
+    console.error('No HTTP endpoint available on this instance.');
+    process.exit(1);
+  }
+  const infoUrl = info.endpoint.replace(/\/$/, '') + '/info';
+  try {
+    const res = await fetch(infoUrl, { signal: AbortSignal.timeout(5000) });
+    const body = await res.json();
+    console.log(JSON.stringify(body, null, 2));
+  } catch (err) {
+    console.error(`Failed to reach ${infoUrl}: ${(err as Error).message}`);
+    process.exit(1);
+  }
+}
+
+async function cmdGpuDev(args: string[]) {
+  const sub = args[2];
+  const target: GpuTargetOpts = {
+    instance: getArg(args, '--instance'),
+    image: getArg(args, '--image'),
+  };
+
+  switch (sub) {
+    case 'start': {
+      await cmdGpuDevStart({
+        image: getArg(args, '--base-image'),
+        gpuTypes: getArg(args, '--gpu-types'),
+        storageGb: getArg(args, '--storage') ? parseInt(getArg(args, '--storage')!) : undefined,
+        env: getArg(args, '--env'),
+      });
+      break;
+    }
+    case 'stop':
+      await cmdGpuStop({ deployId: getArg(args, '--deploy-id') });
+      break;
+    case 'status':
+      await cmdGpuStatus();
+      break;
+    case 'sh':
+    case 'shell':
+      await cmdGpuSsh(undefined, target);
+      break;
+    case 'exec': {
+      // Everything after 'gpu dev exec' (excluding --instance/--image flags) is the command
+      const execSlice = args.slice(3);
+      const execParts: string[] = [];
+      for (let i = 0; i < execSlice.length; i++) {
+        if ((execSlice[i] === '--instance' || execSlice[i] === '--image') && i + 1 < execSlice.length) {
+          i++;
+        } else {
+          execParts.push(execSlice[i]);
+        }
+      }
+      if (execParts.length === 0) {
+        console.error('Usage: ai-gateway gpu dev exec "<command>"');
+        process.exit(1);
+      }
+      await cmdGpuSsh(execParts.join(' '), target);
+      break;
+    }
+    case 'push': {
+      // gpu dev push <local> [remote]
+      const pushSlice = args.slice(3);
+      const pushPos: string[] = [];
+      for (let i = 0; i < pushSlice.length; i++) {
+        if (pushSlice[i] === '--instance' || pushSlice[i] === '--image') { i++; }
+        else if (pushSlice[i] === '--no-restart') { /* skip */ }
+        else { pushPos.push(pushSlice[i]); }
+      }
+      const localFile = pushPos[0];
+      if (!localFile) {
+        console.error('Usage: ai-gateway gpu dev push <local-file> [remote-path] [--no-restart]');
+        process.exit(1);
+      }
+      await cmdGpuPatch(localFile, pushPos[1], { noRestart: hasFlag(args, '--no-restart') }, target);
+      break;
+    }
+    case 'pull': {
+      const pullSlice = args.slice(3);
+      const pullPos: string[] = [];
+      for (let i = 0; i < pullSlice.length; i++) {
+        if (pullSlice[i] === '--instance' || pullSlice[i] === '--image') { i++; }
+        else { pullPos.push(pullSlice[i]); }
+      }
+      const remoteFile = pullPos[0];
+      if (!remoteFile) {
+        console.error('Usage: ai-gateway gpu dev pull <remote-file> [local-path]');
+        process.exit(1);
+      }
+      await cmdGpuPull(remoteFile, pullPos[1], target);
+      break;
+    }
+    case 'snapshot':
+    case 'commit': {
+      const message = getArg(args, '-m') || getArg(args, '--message');
+      await cmdGpuCommit(target, { message });
+      break;
+    }
+    case 'info':
+      await cmdGpuDevInfo(target);
+      break;
+    case 'serve': {
+      // gpu dev serve <remote-port> [--local <n>] [--bind <host>]
+      const serveSlice = args.slice(3);
+      const servePos: string[] = [];
+      let localPort: number | undefined;
+      let bind: string | undefined;
+      for (let i = 0; i < serveSlice.length; i++) {
+        const a = serveSlice[i];
+        if (a === '--instance' || a === '--image') { i++; }
+        else if (a === '--local' && i + 1 < serveSlice.length) { localPort = parseInt(serveSlice[++i]); }
+        else if (a === '--bind' && i + 1 < serveSlice.length) { bind = serveSlice[++i]; }
+        else { servePos.push(a); }
+      }
+      const remotePort = parseInt(servePos[0] || '');
+      if (!remotePort || Number.isNaN(remotePort)) {
+        console.error('Usage: ai-gateway gpu dev serve <remote-port> [--local <n>] [--bind <host>]');
+        process.exit(1);
+      }
+      await cmdGpuDevServe(remotePort, { localPort, bind }, target);
+      break;
+    }
+    case undefined:
+    case 'help':
+    case '--help':
+      console.log(GPU_DEV_HELP);
+      break;
+    default:
+      console.error(`Unknown 'gpu dev' subcommand: ${sub}`);
+      console.error(`Usage: ai-gateway gpu dev <start|sh|exec|push|pull|snapshot|info|serve|stop|status>`);
+      process.exit(1);
+  }
+}
+
 // ── Docker image builder commands ─────────────────────────────────────────────
 
 async function cmdDockerAuth() {
@@ -2191,8 +2479,15 @@ Dev Mode (fast iteration on running containers):
     --no-restart                 Copy only, don't restart the server
   commit                       Download modified files, git add + commit + push
     -m "message"                 Commit message (prompted if omitted)
+  pull <remote> [local]        Download a file from the container
 
-  Multi-GPU targeting (applies to ssh, patch, commit):
+Scratch dev machine (deploy minimal base + iterate):
+  dev start                    Deploy a bare CUDA+Python+SSH image for iteration
+  dev exec "<cmd>"             Run a command on the dev machine
+  dev sh                       Interactive SSH shell
+  dev push/pull/snapshot/info  See 'ai-gateway gpu dev help' for full list
+
+  Multi-GPU targeting (applies to ssh, patch, pull, commit, dev):
     --instance <id>              Target a specific instance by ID
     --image <name>               Target by Docker image name (partial match)
                                  If multiple GPUs running and no flag given,
@@ -2230,9 +2525,13 @@ Dev mode examples:
   ai-gateway gpu patch model.py                   Patches to /app/model.py
   ai-gateway gpu patch config.json --no-restart   Copy without restart
   ai-gateway gpu patch model.py --image wham      Patch specific GPU
+  ai-gateway gpu pull /app/out.json ./out.json    Download file from container
   ai-gateway gpu commit                           Download + git commit
   ai-gateway gpu commit -m "fix: arm accuracy"    With commit message
   ai-gateway gpu commit --instance inst-123 -m "feat: add VPoser"
+  ai-gateway gpu dev start                        Launch scratch dev machine
+  ai-gateway gpu dev exec "nvidia-smi"            Run command in dev machine
+  ai-gateway gpu dev help                         Full dev mode help
 `,
     metrics: `
 ai-gateway metrics — Show gateway metrics
@@ -2748,8 +3047,30 @@ ai-gateway server — Manage the local dev server
             await cmdGpuCommit(gpuCommitTarget, { message: commitMessage });
             break;
           }
+          case 'pull': {
+            const gpuPullTarget: GpuTargetOpts = {
+              instance: getArg(args, '--instance'),
+              image: getArg(args, '--image'),
+            };
+            const pullSlice = args.slice(2);
+            const pullPos: string[] = [];
+            for (let pi = 0; pi < pullSlice.length; pi++) {
+              if (pullSlice[pi] === '--instance' || pullSlice[pi] === '--image') { pi++; }
+              else { pullPos.push(pullSlice[pi]); }
+            }
+            const remoteFile = pullPos[0];
+            if (!remoteFile) {
+              console.error('Usage: ai-gateway gpu pull <remote-file> [local-path] [--instance <id>] [--image <name>]');
+              process.exit(1);
+            }
+            await cmdGpuPull(remoteFile, pullPos[1], gpuPullTarget);
+            break;
+          }
+          case 'dev':
+            await cmdGpuDev(args);
+            break;
           default:
-            console.error('Usage: ai-gateway gpu <status|list|offers|deploy|stop|resume|terminate|logs|ssh|patch|commit>');
+            console.error('Usage: ai-gateway gpu <status|list|offers|deploy|stop|resume|terminate|logs|ssh|patch|pull|commit|dev>');
             process.exit(1);
         }
         break;

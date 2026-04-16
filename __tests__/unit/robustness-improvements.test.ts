@@ -138,7 +138,7 @@ import {
   recordInferenceCost,
   getInferenceCostStats,
   resetDailyInferenceCost,
-} from '../server/cost-tracker';
+} from '../../server/cost-tracker';
 
 describe('Group 3: Cost tracking', () => {
   beforeEach(() => {
@@ -568,7 +568,7 @@ describe('Group 8: Network split detection', () => {
 // Group 9: Latency trend detection
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { getLatencyTrend, latencyRing } from '../server/state';
+import { getLatencyTrend, latencyRing } from '../../server/state';
 
 describe('Group 9: Latency trend detection', () => {
   beforeEach(() => {
@@ -632,7 +632,7 @@ import {
   isHostCrashPattern,
   getHostCrashInfo,
   recordHostCrash,
-} from '../server/metrics';
+} from '../../server/metrics';
 
 describe('Group 10: Host crash patterns', () => {
   it('isHostCrashPattern returns false for a host with no crash history', () => {

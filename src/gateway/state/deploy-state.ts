@@ -69,6 +69,8 @@ export interface DeploymentState {
   canary?: unknown;
   /** Timer ID for canary evaluation interval (for cleanup) */
   canaryEvalTimer?: ReturnType<typeof setInterval> | null;
+  /** Dev mode: pause on idle but never auto-destroy. Set by `gpu dev start`. */
+  devMode?: boolean;
 }
 
 // ── Mutable deploy state ────────────────────────────────────────────────────
@@ -125,6 +127,8 @@ export interface PersistedDeploy {
   stoppedAt?: number;
   /** Deploy correlation ID — used to match persisted pods to their deploy session. */
   deployId?: string;
+  /** Dev mode: pause on idle but skip auto-destroy. */
+  devMode?: boolean;
 }
 
 export function persistDeployState(): void {
@@ -149,6 +153,7 @@ export function persistDeployState(): void {
       providerMeta: deployState.providerMeta ?? {},
       savedAt: Date.now(),
       ...(isStopped ? { stoppedAt: Date.now() } : {}),
+      ...(deployState.devMode ? { devMode: true } : {}),
     };
     // Atomic write: write to temp file then rename, so a crash mid-write
     // never corrupts the active deploy file.

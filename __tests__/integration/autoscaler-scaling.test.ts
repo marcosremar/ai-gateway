@@ -11,7 +11,7 @@
  * Uses in-memory mocks — no Redis, no Prisma, no network needed.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { StateStore, SessionResolver, SettingsStore } from '@ai-gateway';
 import { createAutoscaler, loadAutoscalerConfig, type Autoscaler } from '@ai-gateway';
 import type { AutoScalerConfig, GpuTierConfig } from '@ai-gateway';
@@ -142,6 +142,13 @@ function makeConfig(overrides?: Partial<AutoScalerConfig>): AutoScalerConfig {
   };
 }
 
+// Track every autoscaler instance the tests create so we can destroy them
+// in afterEach. Without this, boot pollers (setTimeout chains) keep firing
+// after the test ends, racing the vitest worker teardown and producing
+// "Closing rpc while onUserConsoleLog was pending" warnings that fail the
+// pre-commit hook even when every test passes.
+const _liveAutoscalers: Autoscaler[] = [];
+
 function setupAutoscaler(sessionResolver: MockSessionResolver) {
   const stateStore = new MemoryStateStore();
   const settingsStore = new MockSettingsStore();
@@ -153,8 +160,16 @@ function setupAutoscaler(sessionResolver: MockSessionResolver) {
     sessionResolver,
     loadConfig: async () => config,
   });
+  _liveAutoscalers.push(autoscaler);
 
   return { autoscaler, stateStore, settingsStore, config };
+}
+
+function destroyLiveAutoscalers() {
+  while (_liveAutoscalers.length > 0) {
+    const a = _liveAutoscalers.pop();
+    try { a?.engine.destroy(); } catch { /* ignore */ }
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -169,6 +184,8 @@ describe('Config Sync: DB profiles → config-loader → autoscaler (Task #8)', 
     healthyEndpoints.clear();
     vi.stubGlobal('fetch', vi.fn(mockFetch));
   });
+
+  afterEach(() => destroyLiveAutoscalers());
 
   it('should use tiers from config-loader when profiles have GPU providers', async () => {
     const tier = makeTier('runpod', 0);
@@ -331,6 +348,8 @@ describe('E2E Routing: serverless → GPU boot → GPU ready (Task #9)', () => {
     vi.stubGlobal('fetch', vi.fn(mockFetch));
   });
 
+  afterEach(() => destroyLiveAutoscalers());
+
   it('should route to serverless when sessions below threshold', async () => {
     const config = makeConfig({ threshold: 5 });
     const { autoscaler } = setupAutoscaler(sessionResolver);
@@ -417,6 +436,8 @@ describe('Fallback chain: tier 0 → tier 1 on failure (Task #10)', () => {
     healthyEndpoints.clear();
     vi.stubGlobal('fetch', vi.fn(mockFetch));
   });
+
+  afterEach(() => destroyLiveAutoscalers());
 
   it('should boot only tier 0 (first in fallback chain) when sessions >= threshold', async () => {
     const tiers = [makeTier('tensordock', 0), makeTier('runpod', 1)];
@@ -550,6 +571,8 @@ describe('AIClient routing: autoscaler decision drives pipeline (Task #11)', () 
     vi.stubGlobal('fetch', vi.fn(mockFetch));
   });
 
+  afterEach(() => destroyLiveAutoscalers());
+
   it('should return route=gpu and endpoint when GPU is ready', async () => {
     const tier = makeTier('runpod', 0);
     const config = makeConfig({ threshold: 1, tiers: [tier] });
@@ -606,6 +629,8 @@ describe('Frontend hook behavior: polling intervals (Task #12)', () => {
     healthyEndpoints.clear();
     vi.stubGlobal('fetch', vi.fn(mockFetch));
   });
+
+  afterEach(() => destroyLiveAutoscalers());
 
   it('should return gpuState=idle when no sessions active', async () => {
     const config = makeConfig({ threshold: 5 });
@@ -669,6 +694,8 @@ describe('Server restart recovery', () => {
     healthyEndpoints.clear();
     vi.stubGlobal('fetch', vi.fn(mockFetch));
   });
+
+  afterEach(() => destroyLiveAutoscalers());
 
   function setupWithSharedStore(sessionRes: MockSessionResolver) {
     const stateStore = new MemoryStateStore();
