@@ -99,9 +99,9 @@ describe('E2E SDK Transport', () => {
     }
   });
 
-  afterAll((done) => {
-    server.close(done);
-  });
+  afterAll(() => new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  }));
 
   it('GET /v1/models returns model list', async () => {
     const res = await fetch(`${baseUrl}/v1/models`);
@@ -290,9 +290,9 @@ describe('E2E SDK Transport — Auth middleware', () => {
     }
   });
 
-  afterAll((done) => {
-    server.close(done);
-  });
+  afterAll(() => new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  }));
 
   it('rejects request without auth header', async () => {
     const res = await fetch(`${baseUrl}/v1/chat/completions`, {

@@ -510,16 +510,13 @@ describe('Bot handlers — terminate', () => {
     });
     process.env.FLY_API_TOKEN = 'test-fly-token';
 
-    const mockFetch = vi.fn();
-    vi.stubGlobal('fetch', mockFetch);
+    global.fetch = vi.fn();
 
     const req = mockReq();
     const res = mockRes();
     await handleBotTerminate(req, res);
     expect(res._status).toBe(200);
     expect(botState.status).toBe('idle');
-
-    vi.unstubAllGlobals();
   });
 });
 

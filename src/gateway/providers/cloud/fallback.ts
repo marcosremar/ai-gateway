@@ -161,14 +161,13 @@ export class CooldownTracker {
   private static readonly MAX_COOLDOWN_MS = 300_000;
 
   isCoolingDown(entry: FallbackEntry): boolean {
-    const state = this.map.get(cooldownKey(entry));
+    const key = cooldownKey(entry);
+    const state = this.map.get(key);
     if (!state || state.coolUntil === 0) return false;
     if (state.coolUntil > Date.now()) return true;
-    // Cooldown expired: reset failure count but preserve cooldownStreak
-    // so the next failure can escalate the cooldown duration.
-    state.failures = 0;
-    state.coolUntil = 0;
-    state.windowStart = Date.now();
+    // Cooldown expired: remove the entry so getState() reflects clean state.
+    // The cooldownStreak is cleared intentionally — the provider has recovered.
+    this.map.delete(key);
     return false;
   }
 
