@@ -18,8 +18,29 @@ import { logGpuEvent } from './metrics';
 import { broadcastProviderStatus, broadcastWs } from './ws-state';
 import { pollHealthUntilReady } from './gpu-poll-health';
 import { startCanaryIfEnabled } from './gpu-deploy-canary';
+import { recordTierLatency } from './tier-ranking';
 
 const log = createLogger('gpu-deploy');
+
+/** Best-effort tier-ranking recorder — never throws, logs on failure. */
+function recordTierLatencySafe(
+  providerName: ProviderName,
+  totalMs: number,
+  pullTimeS: number | undefined | null,
+): void {
+  try {
+    const pullMs = pullTimeS != null ? pullTimeS * 1000 : undefined;
+    recordTierLatency(providerName, {
+      totalMs,
+      pullMs,
+      // bootMs/modelLoadMs would require deeper hooks in pollHealthUntilReady.
+      // Total is the primary signal the plan calls for; breakdown is optional.
+      recordedAt: Date.now(),
+    });
+  } catch (err) {
+    log.warn(`[gpu] recordTierLatency failed for ${providerName}: ${err instanceof Error ? err.message : err}`);
+  }
+}
 
 export const MAX_DEPLOY_RETRIES = 2;
 export const HEALTH_POLL_INTERVAL_MS = 10_000;
@@ -111,6 +132,8 @@ export async function startDeployLoop(
               dk(providerName, existing.providerMeta as Record<string, unknown>);
               recordPullTime(dockerImage, pt1, undefined, dk(providerName, existing.providerMeta as Record<string, unknown>), Math.round(durationMs / 1000));
             }
+            // Record cold-start latency for dynamic tier reordering (A2).
+            recordTierLatencySafe(providerName, durationMs, pt1);
             startGpuMonitoring();
             startBackgroundWarmthMonitor(deployState.endpoint);
             startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
@@ -139,6 +162,8 @@ export async function startDeployLoop(
               const { recordPullTime, deriveHostKey: dk } = await import('../src/gpu-providers/pull-time-estimator');
               recordPullTime(dockerImage, pt2, undefined, dk(providerName, existing.providerMeta as Record<string, unknown>), Math.round(durationMs / 1000));
             }
+            // Record cold-start latency for dynamic tier reordering (A2).
+            recordTierLatencySafe(providerName, durationMs, pt2);
             startGpuMonitoring();
             startBackgroundWarmthMonitor(deployState.endpoint);
             startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
@@ -240,6 +265,8 @@ export async function startDeployLoop(
           const bootTimeS = Math.round(durationMs / 1000);
           recordPullTime(dockerImage, pullTimeS, inetDown, hk, bootTimeS);
         }
+        // Record cold-start latency for dynamic tier reordering (A2).
+        recordTierLatencySafe(providerName, durationMs, pullTimeS);
         startGpuMonitoring();
         startBackgroundWarmthMonitor(deployState.endpoint);
         startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
