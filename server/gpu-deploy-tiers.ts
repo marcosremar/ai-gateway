@@ -10,6 +10,7 @@ import type { ProviderName, GpuTier } from '../src/gpu-providers/deploy-orchestr
 import { createLogger } from '../src/logger';
 import { runpod, vast, tensordock, modal, snapgpu } from './providers';
 import { PROVIDER_CHAIN } from './config';
+import { reorderByLatency } from './tier-ranking';
 
 const log = createLogger('gpu-deploy');
 
@@ -71,7 +72,19 @@ export function buildGpuTiers(runpodApiKey: string, vastApiKey?: string, tensord
     }
   }
 
-  return tiers;
+  // Dynamic reorder by observed P50 cold-start latency (cold-start plan A2).
+  // Providers with no observations keep their static-cascade relative order;
+  // providers with data move up/down based on rolling 7-day EWMA of total
+  // (pull + boot + model-load) time. Cost remains as tiebreaker (±10% P50).
+  // NOTE: cooldown filtering (ADR-009) happens later in the deploy loop —
+  // this only reorders who is attempted FIRST among healthy providers.
+  const reordered = reorderByLatency(tiers);
+  const staticOrder = tiers.map(t => t.name).join(' → ');
+  const dynamicOrder = reordered.map(t => t.name).join(' → ');
+  if (staticOrder !== dynamicOrder) {
+    log.log(`[gateway] Tier reorder by latency: ${staticOrder}  =>  ${dynamicOrder}`);
+  }
+  return reordered;
 }
 
 /**
