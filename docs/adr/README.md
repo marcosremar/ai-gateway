@@ -28,6 +28,11 @@ When making architectural decisions during AI-assisted development:
 | [ADR-007](ADR-007-p95-latency-demotion.md) | P95 Latency Demotion | Accepted | 2024-07-20 |
 | [ADR-008](ADR-008-hybrid-routing-gpu-cloud.md) | Hybrid Routing (GPU + Cloud) | Accepted | 2024-08-15 |
 | [ADR-009](ADR-009-provider-cooldown-tracking.md) | Provider Cooldown Tracking | Accepted | 2024-09-01 |
+| [ADR-010](ADR-010-persistent-pull-history-and-dynamic-tier-ranking.md) | Persistent Pull History + Dynamic Tier Ranking | Accepted | 2026-04-17 |
+| [ADR-011](ADR-011-idle-stop-not-destroy-policy.md) | Idle Policy — Stop, Not Destroy; 5-min Floor | Accepted | 2026-04-17 |
+| [ADR-012](ADR-012-criugpu-snapshot-lifecycle.md) | CRIUgpu Snapshot Lifecycle — Capture, Restore, Catalog | Accepted | 2026-04-17 |
+| [ADR-013](ADR-013-standby-pool-policy.md) | Standby Pool Policy | Accepted | 2026-04-17 |
+| [ADR-014](ADR-014-snapshot-capable-provider-landscape-2026.md) | Snapshot-Capable Provider Landscape (2026) | Accepted | 2026-04-17 |
 
 ## Creating a New ADR
 
