@@ -64,6 +64,14 @@ export type {
 export { VastClient } from './vast-client';
 export type { VastClientOptions } from './vast-client';
 
+// ── Vast.ai VM mode (KVM — snapshot-capable) ──────────────────────────────
+export { VastVmClient } from './vast-vm-client';
+export type { VastVmClientOptions } from './vast-vm-client';
+
+// ── Hyperstack (H100 VMs with driver 570+) ────────────────────────────────
+export { HyperstackClient } from './hyperstack-client';
+export type { HyperstackClientOptions } from './hyperstack-client';
+
 // ── Modal ─────────────────────────────────────────────────────────────────
 export { ModalClient } from './modal-client';
 export type { ModalClientOptions, ModalDeployOptions, ModalAutoscalerParams } from './modal-client';

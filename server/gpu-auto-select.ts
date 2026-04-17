@@ -16,12 +16,26 @@ const log = createLogger('gpu-deploy');
  */
 export async function autoSelectCheapestGpu(
   tiers: GpuTier[],
-  opts: { region?: string; minVramGb?: number; preferSsd?: boolean; maxResults?: number; allowedTypes?: Set<string> } = {},
+  opts: {
+    region?: string;
+    minVramGb?: number;
+    preferSsd?: boolean;
+    maxResults?: number;
+    allowedTypes?: Set<string>;
+    /**
+     * Minimum NVIDIA driver major version. When snapshot-eligible deploys
+     * are requested, pass `570` so only hosts with CRIUgpu-capable drivers
+     * survive. Offers that don't report a driver version are kept (we can't
+     * prove they fail) unless stricter gating is needed at a higher layer.
+     */
+    minDriverVersion?: number;
+  } = {},
 ): Promise<string[]> {
   const minVram = opts.minVramGb ?? 16;
   const preferSsd = opts.preferSsd ?? false;
   const maxResults = opts.maxResults ?? 8;
   const allowed = opts.allowedTypes ?? new Set(getGpuPriorityList());
+  const minDriverMajor = opts.minDriverVersion ?? 0;
   const allOffers: GpuOffer[] = [];
 
   await Promise.allSettled(
@@ -45,7 +59,23 @@ export async function autoSelectCheapestGpu(
   // Filter by minimum VRAM
   // Note: available === -1 means "unknown" (e.g. RunPod GraphQL doesn't report stock)
   // so we treat -1 as "probably available" and only exclude available === 0
-  const base = allOffers.filter((o) => o.vram >= minVram && o.available !== 0 && o.pricePerHr > 0);
+  let base = allOffers.filter((o) => o.vram >= minVram && o.available !== 0 && o.pricePerHr > 0);
+
+  // Driver pinning — drop offers whose reported driver major is below the
+  // requested minimum. Offers that don't report a driver are kept (can't prove
+  // exclusion). Used by snapshot-eligible deploys (CRIUgpu needs 570+).
+  if (minDriverMajor > 0) {
+    const before = base.length;
+    base = base.filter((o) => {
+      const driver = (o as unknown as Record<string, unknown>).driverVersion as string | undefined;
+      if (!driver) return true;
+      const major = parseInt(String(driver).split('.')[0] ?? '0', 10);
+      return Number.isFinite(major) && major >= minDriverMajor;
+    });
+    if (before !== base.length) {
+      log.log(`[gpu] autoSelectGpu: driver pin ${minDriverMajor}+ filtered ${before - base.length} offers`);
+    }
+  }
 
   // Internet speed filter: prefer machines with fast download (>500 Mbps) for quick image pulls.
   // Fall back to all offers if none qualify (some providers don't report speed).

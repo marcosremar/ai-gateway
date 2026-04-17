@@ -187,7 +187,13 @@ interface OfferCacheEntry {
 export interface VastClientOptions extends AbstractGpuProviderOptions {}
 
 export class VastClient extends AbstractGpuProvider {
-  readonly providerId = 'vast';
+  readonly providerId: string = 'vast';
+  /**
+   * runtype passed to PUT /asks/{id}/. Overridden by VastVmClient to 'vm'
+   * for KVM-mode deploys (required for CRIU/snapshot capture — containers
+   * strip CAP_SYS_ADMIN even with --privileged).
+   */
+  protected readonly _runtype: 'ssh_direct' | 'vm' = 'ssh_direct';
   /** Vast.ai cold boot base.
    *
    * The boot-poller uses 3× this value as the maximum wait (= 30 min default).
@@ -249,6 +255,15 @@ export class VastClient extends AbstractGpuProvider {
         this.log.log(`[vast] Loaded ${this._hostFailures.size} host failure records from disk (${banned} currently banned)`);
       }
     }).catch(() => { /* ignore */ });
+  }
+
+  /**
+   * Hook for subclasses to further constrain the offer search. The default
+   * VastClient implementation is a no-op. VastVmClient overrides to require
+   * KVM-capable hosts (vms_enabled == true).
+   */
+  protected _augmentOfferSearch(_searchBody: Record<string, unknown>, _spec: InstanceSpec): void {
+    // no-op in base class
   }
 
   /** Check if any requested GPU type requires Blackwell CUDA (12.8+). */
@@ -1079,6 +1094,9 @@ export class VastClient extends AbstractGpuProvider {
       Object.assign(searchBody, spec.extraSearch);
     }
 
+    // Subclasses (e.g. VastVmClient) may further narrow the offer search.
+    this._augmentOfferSearch(searchBody, spec);
+
     // Filter by region/geolocation if specified (e.g. 'US', 'EU', 'FR', 'DE', 'France,Spain')
     // Vast.ai geolocation format: "France, FR" — client-side endsWith(', CC') is the only
     // reliable filter. Server-side geolocation eq filter does not work for country codes.
@@ -1382,7 +1400,7 @@ export class VastClient extends AbstractGpuProvider {
       client_id: 'me',
       image: imageName,
       disk: diskGb + 15,
-      runtype: 'ssh_direct',
+      runtype: this._runtype,
       onstart: `nohup bash -c ${JSON.stringify(onstart)} > /var/log/app.log 2>&1 &`,
       env: {
         TZ: 'UTC',
