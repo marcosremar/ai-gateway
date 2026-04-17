@@ -820,10 +820,35 @@ export async function pollHealthUntilReady(
       }
     }
 
-    // Adaptive polling
-    const pollMs = containerStartedAt && (Date.now() - containerStartedAt) < 60_000
-      ? 3_000
-      : 8_000;
+    // Adaptive polling (cold-start plan A4).
+    //
+    // Modal's <2s cold-start works partly because its health probe
+    // interval is sub-second during boot. We can't match that without
+    // hammering the providers, but tightening to 2s during active
+    // boot/model-load is a safe win: the pod's /health is a cheap
+    // static read, and detecting "ready" 6-8s earlier saves the user
+    // a request-queued moment.
+    //
+    //   Phase                                            poll
+    //   ─────────────────────────────────────────────   ─────
+    //   pre-container (long image pull, no /health yet)   8s
+    //   container just started (< 60s)                    2s
+    //   /health responding but services loading           2s
+    //   all services loaded (about to return 'ready')    30s
+    //
+    // The "all services loaded" branch rarely fires because the main
+    // loop exits in the same iteration — it exists only so we don't
+    // busy-wait in the unlikely case the inference test loops back.
+    let pollMs: number;
+    if (healthRespondedOnce && allServicesLoaded) {
+      pollMs = 30_000;
+    } else if (healthRespondedOnce) {
+      pollMs = 2_000;
+    } else if (containerStartedAt && (Date.now() - containerStartedAt) < 60_000) {
+      pollMs = 2_000;
+    } else {
+      pollMs = 8_000;
+    }
     await new Promise(r => setTimeout(r, pollMs));
   }
 }
