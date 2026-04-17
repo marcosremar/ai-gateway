@@ -67,6 +67,71 @@ interface PullRecord {
 const pullHistory: PullRecord[] = [];
 const MAX_HISTORY = 500;
 
+// ── Persistence hooks (optional — wired from server/pull-history-persistence.ts) ──
+// The `src/` package MUST NOT depend on `fs` directly. The host (server/) is
+// responsible for loading persisted state on startup and registering a debounced
+// write-back via `setPullHistoryPersistHook`. Mirrors the cooldown-persistence
+// pattern (ADR-009): toJSON/fromJSON + a host-owned debounced writer.
+
+let _persistHook: (() => void) | null = null;
+
+/**
+ * Register a persist hook. Called by the server after it has set up the
+ * debounced writer. Invoked (fire-and-forget) on every mutation to pull history.
+ */
+export function setPullHistoryPersistHook(hook: (() => void) | null): void {
+  _persistHook = hook;
+}
+
+/**
+ * Dump the in-memory pull history as a JSON-serializable array.
+ * Used by host persistence to write to `~/.babelcast/pull-history.json`.
+ */
+export function toJSON(): PullRecord[] {
+  return pullHistory.map((r) => ({ ...r }));
+}
+
+/**
+ * Load pull history from an array produced by `toJSON()`.
+ * Replaces any in-memory history (idempotent — safe to call multiple times).
+ * Invalid entries are silently dropped.
+ */
+export function fromJSON(records: unknown): number {
+  if (!Array.isArray(records)) return 0;
+  pullHistory.length = 0;
+  let loaded = 0;
+  for (const r of records) {
+    if (
+      r && typeof r === 'object'
+      && typeof (r as PullRecord).dockerImage === 'string'
+      && typeof (r as PullRecord).hostKey === 'string'
+      && typeof (r as PullRecord).pullTimeS === 'number'
+      && typeof (r as PullRecord).recordedAt === 'number'
+    ) {
+      const rec = r as PullRecord;
+      pullHistory.push({
+        dockerImage: rec.dockerImage,
+        hostKey: rec.hostKey,
+        inetDownMbps: typeof rec.inetDownMbps === 'number' ? rec.inetDownMbps : 500,
+        pullTimeS: rec.pullTimeS,
+        bootTimeS: typeof rec.bootTimeS === 'number' ? rec.bootTimeS : rec.pullTimeS,
+        recordedAt: rec.recordedAt,
+      });
+      loaded++;
+    }
+  }
+  while (pullHistory.length > MAX_HISTORY) pullHistory.shift();
+  return loaded;
+}
+
+/**
+ * Count of records currently in the in-memory history.
+ * Useful for tests and the settings UI.
+ */
+export function getHistorySize(): number {
+  return pullHistory.length;
+}
+
 /**
  * Derive a stable host key from provider metadata.
  * This identifies the physical machine across deploys.
@@ -101,6 +166,10 @@ export function recordPullTime(
   log.log(
     `[pull-estimator] Recorded: ${dockerImage} on ${hostKey || '?'} — pull=${pullTimeS}s boot=${bootTimeS || '?'}s inet=${inetDownMbps || '?'}Mbps`,
   );
+  // Trigger debounced persist — set by the host on startup.
+  if (_persistHook) {
+    try { _persistHook(); } catch { /* best-effort */ }
+  }
 }
 
 /**
