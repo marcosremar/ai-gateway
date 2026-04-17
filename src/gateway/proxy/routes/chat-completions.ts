@@ -53,8 +53,17 @@ export async function handleChatCompletions(
   }
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
-    if (!msg || typeof msg !== 'object' || typeof msg.role !== 'string' || typeof msg.content !== 'string') {
-      return { status: 400, body: { error: { message: `messages[${i}] must have non-empty string role and content`, type: 'invalid_request_error' } } };
+    if (!msg || typeof msg !== 'object' || typeof msg.role !== 'string') {
+      return { status: 400, body: { error: { message: `messages[${i}] must have a string role`, type: 'invalid_request_error' } } };
+    }
+    // Content may be a plain string OR an array of parts (OpenAI multimodal
+    // format: { type: 'text' | 'image_url', ... }). Anything else is invalid.
+    const validString = typeof msg.content === 'string';
+    const validArray = Array.isArray(msg.content) && msg.content.every((p: unknown) =>
+      p !== null && typeof p === 'object' && typeof (p as { type?: unknown }).type === 'string'
+    );
+    if (!validString && !validArray) {
+      return { status: 400, body: { error: { message: `messages[${i}].content must be a string or an array of content parts`, type: 'invalid_request_error' } } };
     }
   }
   if (temperature !== undefined && (temperature < 0 || temperature > 2)) {
