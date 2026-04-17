@@ -106,12 +106,22 @@ that defeats the purpose.
 
 ## Notes
 
-Implemented in Phase B (commit `122cfcf`) + wiring commit `3e6fbe5`.
+Implemented in Phase B (commit `122cfcf`) + wiring commits `3e6fbe5`
+(monitor init) and the follow-up adapter commit (`server/standby-pool-adapter.ts`).
 
-**Deferred — not in initial rollout:**
-- Adapter implementations (`PoolDeployFn` bridging to `startDeployLoop`;
-  `PoolTerminateFn`). Without these, the monitor is running but inactive.
-  This is intentional — rollout plan is (1) land the module, (2) ship
-  admin UI for pool config, (3) wire adapters and ship with a default
-  cap on total pool spend.
-- Pool config persistence (currently in-memory only).
+Adapter semantics:
+- `PoolDeployFn` calls the right provider client's `createInstance` (vast-vm
+  or hyperstack), waits for `/health 200`, returns a `StandbyPodRecord`.
+  Deploy uses the snapshot restore path automatically via
+  `gpu-deploy-loop.ts` when a catalog match exists (ADR-012).
+- `PoolTerminateFn` calls `deleteInstance` on the same client.
+- Adapter install is gated on API-key presence: `VAST_API_KEY` enables
+  `vast-vm`, `HYPERSTACK_API_KEY` enables `hyperstack`. No keys → no
+  install, registration becomes a no-op.
+- `STANDBY_POOL_GLOBAL_MAX` (default 4) caps total pods across all
+  profiles — blast-radius protection against a misconfigured `maxStandby`.
+
+**Still deferred:**
+- Pool config persistence (currently in-memory). Registration via admin UI
+  or API must re-register after restart.
+- Release path for checked-out pods (optional, pool doesn't rely on it).
