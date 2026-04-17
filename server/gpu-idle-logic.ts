@@ -115,7 +115,7 @@ export function shouldResetIdleFromHealth(
  */
 
 /** Minimum idle timeout regardless of model size. */
-const MIN_IDLE_TIMEOUT_MS = 10 * 60_000; // 10 min floor
+const MIN_IDLE_TIMEOUT_MS = 5 * 60_000; // 5 min floor — aligns with A3 (docs/compete-with-modal.md)
 /** Maximum idle timeout cap. */
 const MAX_IDLE_TIMEOUT_MS = 60 * 60_000; // 60 min ceiling
 /** Multiplier: idle timeout = boot time * this factor. */
