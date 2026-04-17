@@ -222,6 +222,59 @@ export async function startDeployLoop(
       });
       deploymentSM.startBooting(instance.instanceId);
 
+      // ── Snapshot restore path (Phase B2) ──────────────────────────────
+      // Only vast-vm / hyperstack are snapshot-eligible; everything else
+      // falls through to the cold path immediately. Failure is transparent
+      // and the metric tracks for auto-disable (ADR-005).
+      if (providerName === 'vast-vm' || providerName === 'hyperstack') {
+        try {
+          const { maybeRestoreSnapshot } = await import('./gpu-snapshot');
+          if (instance.sshHost && instance.sshPort) {
+            const restore = await maybeRestoreSnapshot({
+              provider: providerName,
+              ssh: { host: instance.sshHost, port: instance.sshPort },
+              imageRef: dockerImage,
+              models: [],
+            });
+            if (restore.restored) {
+              // Quick health probe — if ready, short-circuit to ready.
+              const endpoint = instance.endpoint;
+              if (endpoint) {
+                try {
+                  const probe = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(5_000) });
+                  if (probe.ok) {
+                    const durationMs = Date.now() - deployState.startedAt;
+                    setGpuHealthy(true);
+                    setLastRequestTime(Date.now());
+                    setDeployState({
+                      status: 'ready',
+                      message: `GPU ready via snapshot restore (${label}): ${endpoint} — ${restore.durationMs}ms`,
+                      step: 'ready',
+                      stepDetail: `snapshot:${restore.entry?.r2Key ?? '?'}`,
+                      deployDurationMs: durationMs,
+                    });
+                    broadcastProviderStatus('booting', 'cloud', `GPU deployed via snapshot (${restore.durationMs}ms)`);
+                    deploymentSM.markReady(deployState.podId, endpoint, deployState.gpuType, deployState.costPerHr);
+                    log.log(`[gpu] Snapshot restore succeeded in ${restore.durationMs}ms (${label})`);
+                    startGpuMonitoring();
+                    startBackgroundWarmthMonitor(endpoint);
+                    startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
+                    return;
+                  }
+                } catch (probeErr) {
+                  log.warn(`[gpu] Snapshot restored but health probe failed: ${probeErr instanceof Error ? probeErr.message : probeErr}`);
+                }
+              }
+            } else if (restore.reason && restore.reason !== 'no matching snapshot' && restore.reason !== 'provider not snapshot-eligible' && restore.reason !== 'no snapshot bucket configured') {
+              log.warn(`[gpu] Snapshot restore not used: ${restore.reason}`);
+            }
+          }
+        } catch (err) {
+          // Never let snapshot restore failure abort the cold path.
+          log.warn(`[gpu] Snapshot restore threw, falling back to cold path: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+
       const pollResult = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt, dockerImage, instance.providerMeta);
       const { result, pullTimeS } = pollResult;
       if (result === 'ready') {
