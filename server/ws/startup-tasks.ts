@@ -38,6 +38,16 @@ export async function runStartupTasks(): Promise<void> {
     log.warn(`[ws-server] applyRuntimeConfig failed: ${e.message?.slice(0, 80)}`);
   }
 
+  // 1b. Restore persisted pull-time-estimator history (adaptive image-pull
+  // timeouts survive gateway restarts — without this every first deploy
+  // post-restart falls back to the conservative 30-min default).
+  try {
+    const { initPullHistoryPersistence } = require('../pull-history-persistence');
+    initPullHistoryPersistence();
+  } catch (e: any) {
+    log.warn(`[ws-server] initPullHistoryPersistence failed: ${e.message?.slice(0, 80)}`);
+  }
+
   // 2. Terminate any stopped pod overdue for auto-destroy (timer lost on restart)
   try {
     const { terminateStaleStoppedPodOnStartup } = require('../gpu-deploy');
