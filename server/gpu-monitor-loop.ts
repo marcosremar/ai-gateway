@@ -39,7 +39,14 @@ const log = createLogger('gpu-deploy');
 
 export { GPU_MONITOR_INTERVAL_MS } from './gpu-health-metrics';
 
-export let IDLE_TIMEOUT_MS = 15 * 60_000;    // auto-STOP (pause) after 15 min idle (configurable via API)
+// Cold-start plan A3 — 15 → 5 min idle timeout. Resume of a stopped pod is
+// ~19s on Vast.ai vs ~288s for a fresh deploy, so pausing aggressively after
+// 5 min of no activity costs a few extra resume events but saves ~$32k/yr in
+// "just-ready-then-left-running" waste. The pod keeps its disk while stopped
+// (no hourly billing), then auto-destroys after IDLE_DESTROY_MS (2h) if not
+// resumed — preserving the option for the user to come back without waiting
+// for a cold boot.
+export let IDLE_TIMEOUT_MS = 5 * 60_000;    // auto-STOP (pause) after 5 min idle (configurable via API)
 export function setIdleTimeoutMs(ms: number) { IDLE_TIMEOUT_MS = ms; }
 export let IDLE_DESTROY_MS = 2 * 60 * 60_000; // auto-DESTROY 2 hours after stop (configurable)
 export function setIdleDestroyMs(ms: number) { IDLE_DESTROY_MS = ms; }

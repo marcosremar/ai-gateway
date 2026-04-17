@@ -290,7 +290,7 @@ const DEFAULT_CONFIG: ProviderConfig = {
   pipelineStt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }],
   pipelineLlm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }],
   pipelineTts: [{ provider: 'gpu', model: 'qwen3-tts' }, { provider: 'modal', model: 'qwen3-tts' }],
-  idleTimeoutMin: 15,
+  idleTimeoutMin: 5, // cold-start plan A3: was 15; stop→resume is cheaper than idle billing
   updatedAt: 0,
 };
 
@@ -366,7 +366,7 @@ export async function loadProviderConfig(): Promise<ProviderConfig> {
         ? [...data.pipelineLlm] : [...DEFAULT_CONFIG.pipelineLlm],
       pipelineTts: Array.isArray(data.pipelineTts) && data.pipelineTts.length > 0
         ? [...data.pipelineTts] : [...DEFAULT_CONFIG.pipelineTts],
-      idleTimeoutMin: typeof data.idleTimeoutMin === 'number' ? data.idleTimeoutMin : 15,
+      idleTimeoutMin: typeof data.idleTimeoutMin === 'number' ? data.idleTimeoutMin : DEFAULT_CONFIG.idleTimeoutMin,
       updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : 0,
     };
     // Migrate legacy service fields in apps
@@ -557,7 +557,7 @@ export async function applyRuntimeConfig(): Promise<void> {
   setIdleTimeoutMs(ms);
   if (config.idleTimeoutMin <= 0) {
     log.log('Startup: idle timeout disabled (idleTimeoutMin=0)');
-  } else if (config.idleTimeoutMin !== 15) {
+  } else if (config.idleTimeoutMin !== DEFAULT_CONFIG.idleTimeoutMin) {
     log.log('Startup: idle timeout restored to %d min from persisted config', config.idleTimeoutMin);
   }
 
