@@ -8,7 +8,7 @@ import type { GpuProviderClient } from '../src/gpu-providers/types';
 import { ProviderCooldownTracker, PROVIDER_LABELS } from '../src/gpu-providers/deploy-orchestrator';
 import type { ProviderName, GpuTier } from '../src/gpu-providers/deploy-orchestrator';
 import { createLogger } from '../src/logger';
-import { runpod, vast, tensordock, modal, snapgpu } from './providers';
+import { runpod, vast, vastVm, tensordock, modal, snapgpu, hyperstack } from './providers';
 import { PROVIDER_CHAIN } from './config';
 
 const log = createLogger('gpu-deploy');
@@ -25,22 +25,48 @@ void cooldownTracker.loadFromFile(join(homedir(), '.babelcast', 'cooldowns.json'
 }
 
 /** Map of provider name → client instance for tier building. */
-export const providerClients: Record<ProviderName, GpuProviderClient> = { runpod, vast, tensordock, modal, snapgpu };
+export const providerClients: Record<ProviderName, GpuProviderClient> = {
+  runpod,
+  vast,
+  'vast-vm': vastVm,
+  tensordock,
+  modal,
+  snapgpu,
+  hyperstack,
+};
 
-export function buildGpuTiers(runpodApiKey: string, vastApiKey?: string, tensordockOpts?: { apiKey: string; authId: string }, modalApiKey?: string): GpuTier[] {
+export function buildGpuTiers(
+  runpodApiKey: string,
+  vastApiKey?: string,
+  tensordockOpts?: { apiKey: string; authId: string },
+  modalApiKey?: string,
+  hyperstackApiKey?: string,
+): GpuTier[] {
   // Build a map of available providers
   const available: Record<string, GpuTier | null> = {
     runpod: runpodApiKey ? { client: runpod, name: 'runpod', label: PROVIDER_LABELS.runpod, apiKey: runpodApiKey } : null,
     tensordock: tensordockOpts ? { client: tensordock, name: 'tensordock', label: PROVIDER_LABELS.tensordock, apiKey: tensordockOpts.apiKey, authId: tensordockOpts.authId } : null,
     vast: vastApiKey ? { client: vast, name: 'vast', label: PROVIDER_LABELS.vast, apiKey: vastApiKey } : null,
+    // Vast.ai VM mode shares the same API key as containers — treated as a
+    // distinct tier so the cascade can prefer it (or fall back to it)
+    // independently. Only activated when callers opt in via PROVIDER_CHAIN.
+    'vast-vm': vastApiKey ? { client: vastVm, name: 'vast-vm', label: PROVIDER_LABELS['vast-vm'], apiKey: vastApiKey } : null,
     modal: modalApiKey ? { client: modal, name: 'modal', label: PROVIDER_LABELS.modal, apiKey: modalApiKey } : null,
+    hyperstack: hyperstackApiKey ? { client: hyperstack, name: 'hyperstack', label: PROVIDER_LABELS.hyperstack, apiKey: hyperstackApiKey } : null,
   };
 
   // GPU provider cascade order: Vast.ai → RunPod → Modal
   // (TensorDock excluded by default due to balance constraints and reliability issues)
   const tiers: GpuTier[] = [];
   const added = new Set<string>();
-  const gpuInChain = PROVIDER_CHAIN.filter(p => p === 'runpod' || p === 'tensordock' || p === 'vast' || p === 'modal');
+  const gpuInChain = PROVIDER_CHAIN.filter(p =>
+    p === 'runpod' ||
+    p === 'tensordock' ||
+    p === 'vast' ||
+    p === 'vast-vm' ||
+    p === 'modal' ||
+    p === 'hyperstack',
+  );
 
   // If chain has individual GPU providers, use their order
   if (gpuInChain.length > 0) {

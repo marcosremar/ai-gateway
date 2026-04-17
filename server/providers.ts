@@ -28,9 +28,11 @@ import type { ProviderMapping } from '../src/proxy/types';
 import type { ProviderId } from '../src/providers/types';
 import { RunpodClient } from '../src/gpu-providers/runpod-client';
 import { VastClient } from '../src/gpu-providers/vast-client';
+import { VastVmClient } from '../src/gpu-providers/vast-vm';
 import { TensordockClient } from '../src/gpu-providers/tensordock-client';
 import { ModalClient } from '../src/gpu-providers/modal-client';
 import { SnapgpuClient } from '../src/gpu-providers/snapgpu-client';
+import { HyperstackClient } from '../src/gpu-providers/hyperstack';
 import { GpuProviderRegistry } from '../src/gpu-providers/registry';
 import { ScalewayClient } from '../src/cpu-providers/scaleway-client';
 import { FlyioClient } from '../src/cpu-providers/flyio-client';
@@ -392,10 +394,18 @@ export const client = createAIClient({
 
 export const runpod = new RunpodClient();
 export const vast = new VastClient();
+/**
+ * Vast.ai KVM-mode client. Required for snapshot capture path (CRIU/
+ * cuda-checkpoint need CAP_SYS_ADMIN which Vast.ai containers strip).
+ * Same API key as `vast`.
+ */
+export const vastVm = new VastVmClient();
 export const tensordock = new TensordockClient();
 export const modal = new ModalClient({ defaultFunctionName: 'serve' });
 export const scaleway = new ScalewayClient();
 export const flyio = new FlyioClient();
+/** Hyperstack (NexGen Cloud) — H100 VMs with driver 570+ out of the box. */
+export const hyperstack = new HyperstackClient();
 
 // SnapgpuClient needs a registry to look up its backend (vast/runpod). We
 // build a minimal registry here that wraps the singletons. The factory.ts path

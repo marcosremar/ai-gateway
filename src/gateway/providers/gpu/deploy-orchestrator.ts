@@ -11,7 +11,14 @@ import type { GpuProviderClient, ProviderCredentials } from './types';
 
 // ── Provider Name & Tier ────────────────────────────────────────────────────
 
-export type ProviderName = 'runpod' | 'vast' | 'tensordock' | 'modal' | 'snapgpu';
+export type ProviderName =
+  | 'runpod'
+  | 'vast'
+  | 'vast-vm'
+  | 'tensordock'
+  | 'modal'
+  | 'snapgpu'
+  | 'hyperstack';
 
 export interface GpuTier {
   client: GpuProviderClient;
@@ -24,9 +31,11 @@ export interface GpuTier {
 export const PROVIDER_LABELS: Record<ProviderName, string> = {
   runpod: 'RunPod',
   vast: 'Vast.ai',
+  'vast-vm': 'Vast.ai (VM)',
   tensordock: 'TensorDock',
   modal: 'Modal',
   snapgpu: 'SnapGPU',
+  hyperstack: 'Hyperstack',
 };
 
 // ── Provider Cooldown Tracker ───────────────────────────────────────────────
@@ -292,9 +301,14 @@ export const DEFAULT_STORAGE_GB: Record<ProviderName, number> = {
   runpod: 20,      // RunPod default is 20GB; 100GB causes ghost machines
   tensordock: 50,
   vast: 100,       // 100GB: covers most pre-baked images + medium models
+  // VM mode gets the same Vast.ai disk envelope. Larger images need
+  // callers to bump storageGb explicitly.
+  'vast-vm': 100,
   modal: 0,
   // Snapgpu inherits the storage of its underlying backend at runtime; this
   // value only matters when the wrapper is used directly without a backend
   // hint, in which case 30GB matches the Vast.ai default.
   snapgpu: 30,
+  // Hyperstack VMs ship with Ubuntu + 100GB root disk; 0 means "use provider default".
+  hyperstack: 0,
 };
