@@ -99,6 +99,19 @@ export async function runStartupTasks(): Promise<void> {
     log.warn('[ws-server] Standby monitor not started:', e?.message?.slice(0, 80));
   }
 
+  // 5b. Start standby-pool monitor (Phase B4). Monitor is a no-op until profiles
+  // are registered via setStandbyPoolConfig() and adapters are installed via
+  // setPoolAdapters(). We start the monitor here so that any later config
+  // registration (e.g. via admin UI) takes effect without a restart. Adapter
+  // wiring (deploy/terminate fns) is intentionally left to a follow-up —
+  // without it, registration logs a warning and no GPU is spawned.
+  try {
+    const { startStandbyPoolMonitor } = require('../standby-pool');
+    startStandbyPoolMonitor();
+  } catch (e: any) {
+    log.warn('[ws-server] Standby pool monitor not started:', e?.message?.slice(0, 80));
+  }
+
   // 6. Start local Kokoro TTS server (CPU-based, always available as fallback)
   try {
     const { startLocalKokoro } = require('../../src/gateway/pipeline/local-kokoro');
