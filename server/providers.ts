@@ -17,6 +17,7 @@ import { qwen3asrPipelineSTT, qwen3asrPipelineLLM } from '../src/providers/modal
 import { modalVoxtralSTT } from '../src/providers/modal-voxtral';
 import { MlxQwen3AsrProvider, mlxQwen3AsrSTT } from '../src/providers/mlx-qwen3-asr';
 import { openrouterQwen3Embedding } from '../src/providers/openrouter/openrouter-embedding';
+import { openrouterLLM } from '../src/providers/openrouter';
 import { openaiEmbedding } from '../src/providers/openai/openai-embedding';
 import { AIProviderRegistry } from '../src/providers/registry';
 import { createAIClient } from '../src/client';
@@ -142,7 +143,25 @@ if (elevenlabsAvailable) log.log(`ElevenLabs key: ${maskKey(process.env.ELEVENLA
 if (openaiAvailable) log.log(`OpenAI key: ${maskKey(process.env.OPENAI_API_KEY!)} (ensemble STT: gpt-4o-transcribe, embedding fallback: text-embedding-3-small)`);
 if (deepgramAvailable) log.log(`Deepgram key: ${maskKey(process.env.DEEPGRAM_API_KEY!)} (ensemble STT: nova-3)`);
 if (fireworksAvailable) log.log(`Fireworks key: ${maskKey(process.env.FIREWORKS_API_KEY!)} (ensemble STT: whisper-v3)`);
-if (openrouterAvailable) log.log(`OpenRouter key: ${maskKey(process.env.OPENROUTER_API_KEY!)} (embedding fallback 1: qwen3-embedding-0.6b)`);
+if (openrouterAvailable) {
+  // Vision-capable chat models reachable via OpenRouter — exposed by id so
+  // clients can route directly (`POST /v1/chat/completions` with
+  // `model: "google/gemini-2.5-flash"` etc.). Used by avatar-engine's shot
+  // verification pipeline (Gemini 2.5 Flash → 2.0 Flash-Lite → GPT-4o-mini).
+  const OPENROUTER_VISION_CHAT_MODELS = [
+    'google/gemini-2.5-flash',
+    'google/gemini-2.5-flash-lite',
+    'google/gemini-2.0-flash-001',
+    'google/gemini-2.0-flash-lite-001',
+    'openai/gpt-4o-mini',
+    'anthropic/claude-3.5-sonnet',
+    'meta-llama/llama-3.2-11b-vision-instruct',
+  ];
+  for (const modelId of OPENROUTER_VISION_CHAT_MODELS) {
+    providers.chat![modelId] = openrouterLLM;
+  }
+  log.log(`OpenRouter key: ${maskKey(process.env.OPENROUTER_API_KEY!)} (embedding fallback 1: qwen3-embedding-0.6b; chat: ${OPENROUTER_VISION_CHAT_MODELS.length} vision models)`);
+}
 if (whisperAvailable && !ollamaAvailable) log.log(`Whisper STT (ensemble): ${whisperHost}`);
 log.log(`Ensemble STT providers: ${ENSEMBLE_STT_PROVIDERS.join(',') || 'all'}`);
 

@@ -15,7 +15,7 @@ import {
   standbyDeployState, standbyReadyForHandover,
   gpuReadinessState, gpuReadyForProduction, gpuShadowMode, getPerStageP95,
 } from './state';
-import { runpod, vast, tensordock, ollamaAvailable, groqAvailable, openaiAvailable, shouldPreferGpuTts, getStageBreakersSnapshot } from './providers';
+import { runpod, vast, tensordock, ollamaAvailable, groqAvailable, openaiAvailable, openrouterAvailable, shouldPreferGpuTts, getStageBreakersSnapshot } from './providers';
 import { cooldownTracker, fetchGpuLogs, IDLE_TIMEOUT_MS } from './gpu-deploy';
 import { logGpuEvent, computePercentile, getAllReputations } from './metrics';
 import { getOrCreateRequestId, setRequestIdHeader } from './http-utils';
@@ -491,6 +491,7 @@ export async function handleHealth(_req: IncomingMessage, res: ServerResponse): 
   const providersStatus: Record<string, boolean> = {
     groq: groqAvailable,
     openai: openaiAvailable,
+    openrouter: openrouterAvailable,
   };
   const noApiKeys = !groqAvailable && !ollamaAvailable;
 
