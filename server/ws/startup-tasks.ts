@@ -48,6 +48,16 @@ export async function runStartupTasks(): Promise<void> {
     log.warn(`[ws-server] initPullHistoryPersistence failed: ${e.message?.slice(0, 80)}`);
   }
 
+  // 1c. Restore persisted tier-ranking (dynamic provider cascade by observed
+  // P50 cold-start latency — cold-start plan A2). Must load before any deploy
+  // so the first cascade reflects previous observations.
+  try {
+    const { loadTierRanking } = require('../tier-ranking');
+    loadTierRanking();
+  } catch (e: any) {
+    log.warn(`[ws-server] loadTierRanking failed: ${e.message?.slice(0, 80)}`);
+  }
+
   // 2. Terminate any stopped pod overdue for auto-destroy (timer lost on restart)
   try {
     const { terminateStaleStoppedPodOnStartup } = require('../gpu-deploy');
