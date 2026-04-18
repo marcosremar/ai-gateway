@@ -71,6 +71,8 @@ export interface DeploymentState {
   canaryEvalTimer?: ReturnType<typeof setInterval> | null;
   /** Dev mode: pause on idle but never auto-destroy. Set by `gpu dev start`. */
   devMode?: boolean;
+  /** Readiness probe mode. 'health' (default) polls HTTP /health; 'ssh' polls TCP port 22. */
+  readinessProbe?: 'health' | 'ssh';
 }
 
 // ── Mutable deploy state ────────────────────────────────────────────────────
@@ -88,6 +90,7 @@ export let deployVastApiKey = '';
 export let deployTensordockApiKey = '';
 export let deployTensordockAuthId = '';
 export let deployModalApiKey = '';
+export let deployHyperstackApiKey = '';
 export let activeProvider: ProviderName | '' = '';
 export let gpuHealthy = false;
 
@@ -101,6 +104,7 @@ export function setDeployVastApiKey(v: string) { deployVastApiKey = v; }
 export function setDeployTensordockApiKey(v: string) { deployTensordockApiKey = v; }
 export function setDeployTensordockAuthId(v: string) { deployTensordockAuthId = v; }
 export function setDeployModalApiKey(v: string) { deployModalApiKey = v; }
+export function setDeployHyperstackApiKey(v: string) { deployHyperstackApiKey = v; }
 export function setActiveProvider(v: ProviderName | '') { activeProvider = v; }
 export function setGpuHealthy(v: boolean) { gpuHealthy = v; }
 
@@ -123,6 +127,10 @@ export interface PersistedDeploy {
   sshPort: number;
   providerMeta: Record<string, unknown>;
   savedAt: number;
+  /** Deploy status at the time of persistence — used by startup orphan detection
+   * to distinguish "mid-deploy crash" (booting/installing) from "restart a healthy
+   * pod" (ready). Not historically present; older files will be missing this. */
+  status?: DeploymentState['status'];
   /** When set, indicates this is a stopped (paused) pod that can be resumed. */
   stoppedAt?: number;
   /** Deploy correlation ID — used to match persisted pods to their deploy session. */
@@ -152,6 +160,7 @@ export function persistDeployState(): void {
       sshPort: deployState.sshPort,
       providerMeta: deployState.providerMeta ?? {},
       savedAt: Date.now(),
+      status: deployState.status,
       ...(isStopped ? { stoppedAt: Date.now() } : {}),
       ...(deployState.devMode ? { devMode: true } : {}),
     };

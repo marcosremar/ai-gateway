@@ -53,6 +53,7 @@ vi.mock('../../server/state', () => {
     deployTensordockApiKey: '',
     deployTensordockAuthId: '',
     deployModalApiKey: '',
+    deployHyperstackApiKey: '',
     deployApiKey: '',
     prisma: {
       gpuTypeCache: { findMany: vi.fn(() => Promise.resolve([])) },
@@ -87,6 +88,7 @@ vi.mock('../../server/state', () => {
     setDeployTensordockApiKey: vi.fn((v: string) => { state._tdKey = v; }),
     setDeployTensordockAuthId: vi.fn((v: string) => { state._tdAuth = v; }),
     setDeployModalApiKey: vi.fn((v: string) => { state._modalKey = v; }),
+    setDeployHyperstackApiKey: vi.fn(),
     setActiveProvider: vi.fn((v: string) => { state._activeProvider = v; }),
     setGpuHealthy: vi.fn(),
     setMonitorInterval: vi.fn(),
@@ -166,6 +168,24 @@ vi.mock('../../server/providers', () => ({
     resolveInstanceEndpoint: vi.fn(() => Promise.resolve({ endpoint: 'http://test-endpoint:8000' })),
   },
   snapgpu: { listOffers: vi.fn(() => Promise.resolve([])) },
+  hyperstack: {
+    listOffers: vi.fn(() => Promise.resolve([])),
+    createInstance: vi.fn(() => Promise.resolve({ id: 'test-pod-id' })),
+    startInstance: vi.fn(() => Promise.resolve({})),
+    stopInstance: vi.fn(() => Promise.resolve({})),
+    deleteInstance: vi.fn(() => Promise.resolve({})),
+    checkBalance: vi.fn(() => Promise.resolve(null)),
+    resolveInstanceEndpoint: vi.fn(() => Promise.resolve({ endpoint: 'http://test-endpoint:8000' })),
+  },
+  vastVm: {
+    listOffers: vi.fn(() => Promise.resolve([])),
+    createInstance: vi.fn(() => Promise.resolve({ id: 'test-pod-id' })),
+    startInstance: vi.fn(() => Promise.resolve({})),
+    stopInstance: vi.fn(() => Promise.resolve({})),
+    deleteInstance: vi.fn(() => Promise.resolve({})),
+    checkBalance: vi.fn(() => Promise.resolve(null)),
+    resolveInstanceEndpoint: vi.fn(() => Promise.resolve({ endpoint: 'http://test-endpoint:8000' })),
+  },
   updateActivePipeline: vi.fn(),
   translationDefaults: {},
   markGpuHealthy: vi.fn(),
@@ -1039,7 +1059,7 @@ describe('GPU Deploy - Core Logic', () => {
     });
 
     it('should export IDLE_TIMEOUT_MS', () => {
-      expect(gpuDeploy.IDLE_TIMEOUT_MS).toBe(15 * 60_000);
+      expect(gpuDeploy.IDLE_TIMEOUT_MS).toBe(5 * 60_000);
     });
 
     it('should export IDLE_DESTROY_MS', () => {

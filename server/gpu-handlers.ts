@@ -12,17 +12,17 @@ import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import {
   deployState, setDeployState, deployCancelled, setDeployCancelled, deployLock, setDeployLock,
   deployPromise, setDeployPromise,
-  deployVastApiKey, deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey, deployApiKey,
+  deployVastApiKey, deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey, deployHyperstackApiKey, deployApiKey,
   isGpuAvailable, resetDeployState, prisma,
   deploymentSM,
   standbyDeployState, standbyReadyForHandover,
 } from './state';
 import { triggerStandbyDeploy, initiateHandover, cancelStandby, startStandbyMonitor } from './gpu-standby';
 export { startStandbyMonitor };
-import { updateActivePipeline, runpod, vast, tensordock, modal } from './providers';
+import { updateActivePipeline, runpod, vast, tensordock, modal, hyperstack } from './providers';
 import {
   startGpuMonitoring, stopGpuMonitoring, startDeployWithTiers, startDeployRace, buildGpuTiers, cooldownTracker,
-  cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps,
+  cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps, cleanupHyperstackInstances,
   autoSelectCheapestGpu, getVerifiedGpuTypes, validateGpuTypesFromCache,
   IDLE_TIMEOUT_MS, clearAutoDestroyTimer, resumeOrDeploy,
 } from './gpu-deploy';
@@ -209,6 +209,7 @@ function validateVramForModel(
 interface DeployConfig {
   apiKey: string;              // RunPod API key (may be empty)
   vastApiKey: string;
+  hyperstackApiKey: string;
   tensordockApiKey: string;
   tensordockAuthId: string;
   modalApiKey: string;
@@ -266,6 +267,7 @@ async function _validateDeployRequest(
 ): Promise<DeployConfig> {
   const apiKey = (body.apiKey as string) || process.env.RUNPOD_API_KEY || '';
   const vastApiKey = (body.vastApiKey as string) || process.env.VAST_API_KEY || '';
+  const hyperstackApiKey = (body.hyperstackApiKey as string) || process.env.HYPERSTACK_API_KEY || '';
   const tensordockApiKey = (body.tensordockApiKey as string) || process.env.TENSORDOCK_API_KEY || '';
   const tensordockAuthId = (body.tensordockAuthId as string) || process.env.TENSORDOCK_AUTH_ID || '';
   const modalTokenId = (body.modalTokenId as string) || process.env.MODAL_TOKEN_ID || '';
@@ -276,6 +278,7 @@ async function _validateDeployRequest(
   const credError = validateGpuCredentials({
     runpodApiKey: apiKey,
     vastApiKey,
+    hyperstackApiKey,
     tensordockApiKey,
     tensordockAuthId,
     modalTokenId,
@@ -285,8 +288,8 @@ async function _validateDeployRequest(
     throw { status: 400, message: credError };
   }
 
-  if (!apiKey && !vastApiKey && !tensordockApiKey && !modalApiKey) {
-    throw { status: 400, message: 'At least one provider API key is required (apiKey, vastApiKey, or Modal tokens)' };
+  if (!apiKey && !vastApiKey && !hyperstackApiKey && !tensordockApiKey && !modalApiKey) {
+    throw { status: 400, message: 'At least one provider API key is required (apiKey, vastApiKey, hyperstackApiKey, or Modal tokens)' };
   }
 
   // Resolve app-based GPU deploy config — use active app as defaults
@@ -413,7 +416,7 @@ async function _validateDeployRequest(
   const devMode = body.devMode === true;
 
   return {
-    apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
+    apiKey, vastApiKey, hyperstackApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
     dockerImage, gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
     storageGb, hfToken, llmModel, interruptible, raceCount, deployEnv,
     dockerStartCmd, onstart, containerDiskInGb, volumeId,
@@ -459,7 +462,7 @@ async function _selectDeploymentTier(
   requestId: string,
 ): Promise<TierSelectionResult> {
   let { gpuTypes } = config;
-  const { apiKey, vastApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
+  const { apiKey, vastApiKey, hyperstackApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
     dockerImage, autoSelectGpu, region, minVramGb: minVramGbReq, preferSsd: preferSsdReq,
     providerFilter } = config;
 
@@ -557,7 +560,13 @@ async function _selectDeploymentTier(
   }
 
   // Build tier list from available API keys, optionally filtered to a specific provider
-  let allTiers = buildGpuTiers(runpodApiKey, effectiveVastApiKey || undefined, tensordockOpts, modalApiKey || undefined);
+  let allTiers = buildGpuTiers(
+    runpodApiKey,
+    effectiveVastApiKey || undefined,
+    tensordockOpts,
+    modalApiKey || undefined,
+    hyperstackApiKey || undefined,
+  );
 
   // If CRIU/SnapGPU is enabled, wrap the backend tier with the snapgpu client.
   // The snapgpu client delegates to vast or runpod but adds checkpoint/restore capability.
@@ -653,6 +662,9 @@ async function _selectDeploymentTier(
     }
     if (modalApiKey) {
       await cleanupModalApps(modalApiKey);
+    }
+    if (hyperstackApiKey) {
+      await cleanupHyperstackInstances(hyperstackApiKey);
     }
   } catch (cleanupErr) {
     const deployErr = categorizeDeployError(cleanupErr, {
@@ -878,6 +890,8 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
+  const readinessProbe: 'health' | 'ssh' = body.readinessProbe === 'ssh' ? 'ssh' : 'health';
+
   // ── Idempotency: prevent double-deploy when user clicks twice rapidly ──
   const requestHash = JSON.stringify({ dockerImage: body.dockerImage, gpuTypes: body.gpuTypes });
   if (lastDeployRequest && lastDeployRequest.hash === requestHash && Date.now() - lastDeployRequest.ts < 5000) {
@@ -1005,6 +1019,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     // Step 3: Start the deploy and send the 202 response.
     // _startDeployAndRespond takes ownership of the lock (released in .finally()).
     lockTransferred = true;
+    setDeployState({ readinessProbe });
     _startDeployAndRespond(config, tierResult, requestId, res);
   } finally {
     if (!lockTransferred) {
@@ -1132,6 +1147,7 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   const modalTokenId = (body.modalTokenId as string) || process.env.MODAL_TOKEN_ID || '';
   const modalTokenSecret = (body.modalTokenSecret as string) || process.env.MODAL_TOKEN_SECRET || '';
   const modalKey = deployModalApiKey || (modalTokenId && modalTokenSecret ? `${modalTokenId}:${modalTokenSecret}` : '');
+  const hyperstackKey = deployHyperstackApiKey || (body.hyperstackApiKey as string) || process.env.HYPERSTACK_API_KEY || '';
 
   // Capture deploy state before reset for reputation tracking and response
   const prevDeployId = deployState.deployId;
@@ -1160,6 +1176,9 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
     }
     if (modalKey) {
       await cleanupModalApps(modalKey);
+    }
+    if (hyperstackKey) {
+      await cleanupHyperstackInstances(hyperstackKey);
     }
 
     logGpuEvent('instance_terminated', 'manual', true, { metadata: { reason: 'manual_terminate' } });
@@ -1253,6 +1272,9 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
   } else if (provider === 'tensordock' && (deployTensordockApiKey || process.env.TENSORDOCK_API_KEY)) {
     client = tensordock;
     credentials = { apiKey: deployTensordockApiKey || process.env.TENSORDOCK_API_KEY || '', authId: deployTensordockAuthId || process.env.TENSORDOCK_AUTH_ID || '' };
+  } else if (provider === 'hyperstack' && (deployHyperstackApiKey || process.env.HYPERSTACK_API_KEY)) {
+    client = hyperstack;
+    credentials = { apiKey: deployHyperstackApiKey || process.env.HYPERSTACK_API_KEY || '' };
   }
 
   if (!client) {

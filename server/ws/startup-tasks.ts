@@ -78,6 +78,18 @@ export async function runStartupTasks(): Promise<void> {
     log.warn(`[ws-server] tryRecoverActiveDeploy not loaded: ${e.message?.slice(0, 80)}`);
   }
 
+  // 3b. If no active deploy was recovered, scan for orphaned pods (deploy
+  // improvement #11) and reconnect to one if found. Must run after
+  // tryRecoverActiveDeploy so it only fires when the active-deploy path missed.
+  try {
+    const { tryReconnectOrphanDeploy } = require('../gpu-deploy');
+    tryReconnectOrphanDeploy().catch((e: any) =>
+      log.warn(`[ws-server] tryReconnectOrphanDeploy failed: ${e.message?.slice(0, 80)}`)
+    );
+  } catch (e: any) {
+    log.warn(`[ws-server] tryReconnectOrphanDeploy not loaded: ${e.message?.slice(0, 80)}`);
+  }
+
   // 4. Auto-boot GPU if profile has bootOnStartup=true
   try {
     const gh = require('../gpu-handlers');

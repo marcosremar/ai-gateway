@@ -235,6 +235,17 @@ export class ProviderCooldownTracker {
 /**
  * List all instances from a provider and delete those matching the active status filter.
  * Used to clean up orphaned instances across all providers.
+ *
+ * IMPORTANT: when `namePrefixes` is provided, only instances whose name starts
+ * with one of those prefixes are considered for deletion. This is the safety
+ * net that prevents the gateway from nuking VMs in the same provider account
+ * that belong to other projects / manual experiments. The gateway creates
+ * instances with well-known prefixes (`parle-autoscale-`, `ai-gateway-`);
+ * anything outside those is treated as third-party and left alone.
+ *
+ * Callers that legitimately need to clear ALL instances (e.g. a nuke-all
+ * test cleanup) can omit `namePrefixes` or pass `[]`, but this should be
+ * reserved for tests — the production paths must always pass a prefix list.
  */
 export async function cleanupProviderInstances(
   client: GpuProviderClient,
@@ -243,20 +254,26 @@ export async function cleanupProviderInstances(
   label: string,
   log: (msg: string) => void = console.log,
   warn: (msg: string) => void = console.warn,
+  namePrefixes?: string[],
 ): Promise<void> {
   try {
     const instances = await client.listInstances(credentials);
     const statusSet = new Set(activeStatuses.map(s => s.toLowerCase()));
-    const active = instances.filter(i =>
-      statusSet.has(i.status?.toLowerCase() ?? '')
-    );
+    const prefixes = namePrefixes && namePrefixes.length > 0 ? namePrefixes : null;
+    const active = instances.filter(i => {
+      const statusMatch = statusSet.has(i.status?.toLowerCase() ?? '');
+      if (!statusMatch) return false;
+      if (!prefixes) return true;
+      const name = i.instanceName || '';
+      return prefixes.some(p => name.startsWith(p));
+    });
     if (active.length === 0) return;
-    log(`[gpu] Cleaning up ${active.length} ${label} instance(s)...`);
+    log(`[gpu] Cleaning up ${active.length} ${label} instance(s)${prefixes ? ` matching prefixes [${prefixes.join(', ')}]` : ''}...`);
     await Promise.allSettled(
       active.map(async (inst) => {
         try {
           await client.deleteInstance(inst.instanceId, credentials);
-          log(`[gpu] Terminated ${label} instance ${inst.instanceId}`);
+          log(`[gpu] Terminated ${label} instance ${inst.instanceId} (${inst.instanceName ?? 'unnamed'})`);
         } catch (err) {
           warn(`[gpu] Failed to terminate ${label} instance ${inst.instanceId}: ${err}`);
         }

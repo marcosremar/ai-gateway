@@ -217,8 +217,8 @@ describe('health monitoring', () => {
 // ──────────────────────────────────────────────────────────────────────────────
 
 describe('idle watchdog', () => {
-  it('#190 IDLE_TIMEOUT_MS defaults to 15 minutes', () => {
-    expect(monitorLoopSource).toContain('IDLE_TIMEOUT_MS = 15 * 60_000');
+  it('#190 IDLE_TIMEOUT_MS defaults to 5 minutes (A3 cold-start optimization)', () => {
+    expect(monitorLoopSource).toContain('IDLE_TIMEOUT_MS = 5 * 60_000');
   });
 
   it('#191 IDLE_DESTROY_MS defaults to 2 hours', () => {
@@ -733,7 +733,7 @@ describe('autoSelectCheapestGpu', () => {
 
   it('deduplicates GPU types in result', () => {
     const fnStart = autoSelectSource.indexOf('export async function autoSelectCheapestGpu');
-    const fnBody = autoSelectSource.slice(fnStart, fnStart + 15000);
+    const fnBody = autoSelectSource.slice(fnStart, fnStart + 20000);
     expect(fnBody).toContain('uniqueTypes');
     expect(fnBody).toContain('seen.has(key)');
     expect(fnBody).toContain('maxResults');
@@ -806,7 +806,7 @@ describe('TensorDock discover & resume fast path', () => {
 
   it('falls through to create new instance if discover/resume fails', () => {
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
-    const fnBody = deployLoopSource.slice(fnStart, fnStart + 7000);
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('will create new instance');
     expect(fnBody).toContain('creating new');
   });
@@ -930,8 +930,13 @@ describe('cleanupProviderInstances delegates', () => {
 });
 
 describe('providerClients export', () => {
-  it('maps all four provider names to client instances', () => {
+  it('maps all provider names to client instances', () => {
     expect(gpuTiersSource).toContain("export const providerClients: Record<ProviderName, GpuProviderClient>");
-    expect(gpuTiersSource).toContain('runpod, vast, tensordock, modal');
+    // Source maps include: runpod, vast, vast-vm, tensordock, modal, snapgpu, hyperstack
+    expect(gpuTiersSource).toContain('runpod');
+    expect(gpuTiersSource).toContain('vast');
+    expect(gpuTiersSource).toContain('tensordock');
+    expect(gpuTiersSource).toContain('modal');
+    expect(gpuTiersSource).toContain('hyperstack');
   });
 });

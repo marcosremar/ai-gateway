@@ -541,8 +541,8 @@ describe('gpu-monitor-loop.ts — idle wiring', () => {
     expect(resetBody).not.toContain('monitorCrashRecoveryAttempts');
   });
 
-  it('IDLE_TIMEOUT_MS defaults to 15 minutes', () => {
-    expect(src).toContain('IDLE_TIMEOUT_MS = 15 * 60_000');
+  it('IDLE_TIMEOUT_MS defaults to 5 minutes (A3 cold-start optimization)', () => {
+    expect(src).toContain('IDLE_TIMEOUT_MS = 5 * 60_000');
   });
 
   it('IDLE_DESTROY_MS defaults to 2 hours', () => {
@@ -807,14 +807,15 @@ describe('computeAdaptiveIdleTimeout — post-ready idle', () => {
   });
 
   it('falls back to avgBootTimeS when no lastBootDuration', () => {
-    // Historical avg: 200s → idle timeout = 200 * 2 = 400s
+    // Historical avg: 200s → idle timeout = 200 * 2 = 400s = 6.67 min
+    // Min floor is 5 min (A3), so 6.67 min is kept as-is.
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 0,
       avgBootTimeS: 200,
       dockerImage: '',
       isBooting: false,
     });
-    expect(timeout).toBe(10 * 60_000); // 6.67 min → clamped to 10 min minimum
+    expect(timeout).toBe(400_000); // 6.67 min (above 5 min floor)
   });
 
   it('falls back to image-based estimate when no history', () => {
@@ -840,25 +841,25 @@ describe('computeAdaptiveIdleTimeout — post-ready idle', () => {
   });
 
   it('small model (7B) gets shorter idle timeout', () => {
-    // 7B → 180s estimate → 180 * 2 = 360s = 6 min → clamped to 10 min minimum
+    // 7B → 180s estimate → 180 * 2 = 360s = 6 min (above 5 min floor)
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 0,
       avgBootTimeS: 0,
       dockerImage: 'marcosremar/gemma-4b:latest',
       isBooting: false,
     });
-    expect(timeout).toBe(10 * 60_000); // 10 min (minimum floor)
+    expect(timeout).toBe(360_000); // 6 min
   });
 
-  it('enforces minimum idle timeout (10 min)', () => {
-    // Very fast boot: 30s → 30 * 2 = 60s, but minimum = 10 min
+  it('enforces minimum idle timeout (5 min, A3)', () => {
+    // Very fast boot: 30s → 30 * 2 = 60s, but minimum = 5 min (A3 cold-start)
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 30_000,
       avgBootTimeS: 0,
       dockerImage: '',
       isBooting: false,
     });
-    expect(timeout).toBe(10 * 60_000);
+    expect(timeout).toBe(5 * 60_000);
   });
 
   it('enforces maximum idle timeout (60 min)', () => {
@@ -961,7 +962,7 @@ describe('adaptive idle + checkIdleAction integration', () => {
     expect(idleAt27min.action).toBe('stop'); // stopped at 27 min
   });
 
-  it('fast-boot model (2 min) → idle timeout = 10 min (minimum)', () => {
+  it('fast-boot model (2 min) → idle timeout = 5 min (minimum, A3)', () => {
     const bootMs = 2 * 60_000;
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: bootMs,
@@ -969,14 +970,14 @@ describe('adaptive idle + checkIdleAction integration', () => {
       dockerImage: 'marcosremar/gemma-4b:latest',
       isBooting: false,
     });
-    expect(timeout).toBe(10 * 60_000); // minimum floor
+    expect(timeout).toBe(5 * 60_000); // minimum floor (A3)
 
     const T0 = Date.now();
-    const idleAt9min = checkIdleAction(T0, 0, T0 + 9 * 60_000, timeout, false);
-    expect(idleAt9min.action).not.toBe('stop');
+    const idleAt4min = checkIdleAction(T0, 0, T0 + 4 * 60_000, timeout, false);
+    expect(idleAt4min.action).not.toBe('stop');
 
-    const idleAt11min = checkIdleAction(T0, 0, T0 + 11 * 60_000, timeout, false);
-    expect(idleAt11min.action).toBe('stop');
+    const idleAt6min = checkIdleAction(T0, 0, T0 + 6 * 60_000, timeout, false);
+    expect(idleAt6min.action).toBe('stop');
   });
 
   it('70B model (10 min boot) → idle timeout = 20 min', () => {

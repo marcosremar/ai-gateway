@@ -259,7 +259,7 @@ describe('Config persistence — loadProviderConfig', () => {
     const config = await loadProviderConfig();
     expect(config.apps.length).toBeGreaterThan(0);
     expect(config.activeAppId).toBe('realtime-translation-dubbing-mistral');
-    expect(config.idleTimeoutMin).toBe(15);
+    expect(config.idleTimeoutMin).toBe(5);
   });
 
   // #262
@@ -477,6 +477,7 @@ describe('Config handlers — API keys', () => {
   // #275
   it('GET /v1/config/api-keys returns masked keys', async () => {
     process.env.GROQ_API_KEY = 'gsk_test123456789';
+    process.env.HYPERSTACK_API_KEY = 'hs_test123456789';
     const req = mockReq();
     const res = mockRes();
     await handleGetApiKeys(req, res);
@@ -484,9 +485,12 @@ describe('Config handlers — API keys', () => {
     const body = resJson(res);
     const keys = body.keys as Array<Record<string, unknown>>;
     const groqKey = keys.find(k => k.id === 'groq');
+    const hyperstackKey = keys.find(k => k.id === 'hyperstack');
     expect(groqKey?.configured).toBe(true);
     expect(groqKey?.masked).not.toBe('gsk_test123456789');
     expect((groqKey?.masked as string).includes('***')).toBe(true);
+    expect(hyperstackKey?.configured).toBe(true);
+    expect((hyperstackKey?.masked as string).includes('***')).toBe(true);
   });
 
   // #276

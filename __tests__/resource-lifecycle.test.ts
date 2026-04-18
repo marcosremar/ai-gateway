@@ -146,7 +146,7 @@ describe('SSH tunnel lifecycle', () => {
     const source = gpuDeploySource;
     const terminateFn = source.slice(
       source.indexOf('export async function autoTerminateGpu'),
-      source.indexOf('export async function autoTerminateGpu') + 600,
+      source.indexOf('export async function autoTerminateGpu') + 1200,
     );
     expect(terminateFn).toContain('closeAllTunnels');
   });
