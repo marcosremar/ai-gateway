@@ -76,7 +76,8 @@ describe.skipIf(SKIP)('Stress: Concurrent requests (#816-#825)', { timeout: 120_
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('GPU Image Compatibility (#911-#918)', () => {
-  const config = read('server/config.ts');
+  // Image names moved from config.ts to the dynamic app-registry.ts; grep both.
+  const config = read('server/config.ts') + '\n' + read('server/app-registry.ts');
   const providerTypes = fs.existsSync('web/src/sections/provider-types.ts')
     ? read('web/src/sections/provider-types.ts') : '';
 

@@ -142,8 +142,29 @@ const IMAGE_BOOT_ESTIMATES: { pattern: RegExp; estimateS: number }[] = [
 
 /**
  * Estimate boot time from docker image name when no historical data exists.
+ *
+ * Resolution order:
+ *  1. App registry (`server/app-registry.ts`) — operator-declared per image.
+ *     This is the canonical source after the registry refactor.
+ *  2. Regex heuristics in IMAGE_BOOT_ESTIMATES — covers generic model-size
+ *     patterns (70B / 32B / 7B / etc.) when the image isn't registered.
+ *  3. 250s fallback.
  */
 export function estimateBootTimeFromImage(imageName: string): number {
+  // 1) Registry (dynamic, per-operator).
+  try {
+    // Lazy import so this pure-logic module stays importable from tests
+    // without pulling the file-backed registry + prisma state.
+    const { bootEstimateForImage, getImage } = require('./app-registry') as typeof import('./app-registry');
+    const base = imageName.includes(':') ? imageName.split(':')[0]! : imageName;
+    if (getImage(base) || getImage(base.split('/').pop() || '')) {
+      return bootEstimateForImage(base);
+    }
+  } catch {
+    // registry import failure shouldn't break idle logic — fall through
+  }
+
+  // 2) Regex heuristics.
   for (const entry of IMAGE_BOOT_ESTIMATES) {
     if (entry.pattern.test(imageName)) return entry.estimateS;
   }

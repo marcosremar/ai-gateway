@@ -817,7 +817,8 @@ describe('Smoke: Module imports', () => {
 
 describe('Docker image catalog', () => {
   it('#797-800 all babelcast images in catalog', () => {
-    const src = readSrc('server/config.ts');
+    // Image names moved from config.ts to the dynamic app-registry.ts; grep both.
+    const src = readSrc('server/config.ts') + '\n' + readSrc('server/app-registry.ts');
     expect(src).toContain('babelcast-subtitle');
     expect(src).toContain('babelcast-translategemma');
     expect(src).toContain('babelcast-mistral');
