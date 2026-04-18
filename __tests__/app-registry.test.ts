@@ -94,6 +94,64 @@ describe('app-registry', () => {
     expect(matches[0]!.bootEstimateS).toBe(60);
   });
 
+  it('blackwellImageFor resolves registered variants with and without tags', async () => {
+    const { blackwellImageFor, registerImage } = await import('../server/app-registry');
+
+    // Seeded: babelcast-mistral → babelcast-blackwell-mistral
+    expect(blackwellImageFor('marcosremar/babelcast-mistral')).toBe('marcosremar/babelcast-blackwell-mistral');
+    expect(blackwellImageFor('marcosremar/babelcast-mistral:v1.3.0')).toBe('marcosremar/babelcast-blackwell-mistral:v1.3.0');
+    expect(blackwellImageFor('marcosremar/babelcast-mistral:latest')).toBe('marcosremar/babelcast-blackwell-mistral:latest');
+
+    // Unregistered variant returns null (caller keeps standard image)
+    expect(blackwellImageFor('marcosremar/wan-i2v')).toBeNull();
+
+    // Register a new Blackwell variant at runtime — no code change needed
+    await registerImage({
+      name: 'custom-app',
+      image: 'acme/custom-app',
+      blackwellImage: 'acme/custom-app-blackwell',
+      bootEstimateS: 120,
+    });
+    expect(blackwellImageFor('acme/custom-app')).toBe('acme/custom-app-blackwell');
+    expect(blackwellImageFor('acme/custom-app:latest')).toBe('acme/custom-app-blackwell:latest');
+  });
+
+  it('forward-migrates old apps.json: missing blackwellImage from seed gets patched in', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    // Simulate an older apps.json saved before blackwellImage existed.
+    const oldFile = path.join(tempDir, 'apps.json');
+    fs.writeFileSync(oldFile, JSON.stringify([
+      { name: 'babelcast-mistral', image: 'marcosremar/babelcast-mistral', bootEstimateS: 180 },
+      // operator override: a custom app NOT in the seed
+      { name: 'my-custom-app',    image: 'acme/custom',                   bootEstimateS: 60 },
+    ], null, 2));
+
+    const { getImage } = await import('../server/app-registry');
+
+    // The seed declared blackwellImage — migration should patch it in.
+    const mistral = getImage('babelcast-mistral');
+    expect(mistral?.blackwellImage).toBe('marcosremar/babelcast-blackwell-mistral');
+
+    // Operator-added entries survive untouched.
+    const custom = getImage('my-custom-app');
+    expect(custom?.image).toBe('acme/custom');
+    expect(custom?.bootEstimateS).toBe(60);
+  });
+
+  it('operator edits to bootEstimateS are preserved on migration', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const oldFile = path.join(tempDir, 'apps.json');
+    // Operator set a non-default bootEstimateS; migration must NOT overwrite it.
+    fs.writeFileSync(oldFile, JSON.stringify([
+      { name: 'musetalk', image: 'marcosremar/musetalk', bootEstimateS: 999 },
+    ], null, 2));
+
+    const { getImage } = await import('../server/app-registry');
+    expect(getImage('musetalk')?.bootEstimateS).toBe(999);
+  });
+
   it('getImageCatalogDynamic exposes the catalog in the legacy shape', async () => {
     const { getImageCatalogDynamic } = await import('../server/app-registry');
     const cat = getImageCatalogDynamic('v9.9.9');

@@ -37,6 +37,11 @@ export interface AppRegistryEntry {
   /** Docker image WITHOUT tag (e.g. "marcosremar/musetalk"). Tag is appended
    *  from DOCKER_IMAGE_VERSION env by the deploy layer. */
   image: string;
+  /** Alternate image to use when the primary GPU is Blackwell architecture
+   *  (RTX 5090/5080/5070/etc). Some apps ship a separate build linked against
+   *  CUDA 12.8 / sm_120 — declaring it here is enough; the deploy layer
+   *  resolves it via resolveDockerImageForGpus() in config.ts. */
+  blackwellImage?: string;
   /** Estimated boot time in seconds (cold-start heuristic for idle timeout).
    *  Default 250s — overridden per-image when the operator has better data. */
   bootEstimateS?: number;
@@ -64,7 +69,7 @@ export const SEED_ENTRIES: AppRegistryEntry[] = [
   { name: 'babelcast-subtitle',                      image: `${IMAGE_PREFIX}/babelcast-subtitle`,                      bootEstimateS: 180, tags: ['speech','subtitle'] },
   { name: 'babelcast-translategemma',                image: `${IMAGE_PREFIX}/babelcast-translategemma`,                bootEstimateS: 180, tags: ['speech','translation'] },
   { name: 'babelcast-translategemma-only-subtitles', image: `${IMAGE_PREFIX}/babelcast-translategemma-only-subtitles`, bootEstimateS: 180, tags: ['speech','translation','subtitle'] },
-  { name: 'babelcast-mistral',                       image: `${IMAGE_PREFIX}/babelcast-mistral`,                       bootEstimateS: 180, tags: ['llm','translation'] },
+  { name: 'babelcast-mistral',                       image: `${IMAGE_PREFIX}/babelcast-mistral`,                       bootEstimateS: 180, tags: ['llm','translation'], blackwellImage: `${IMAGE_PREFIX}/babelcast-blackwell-mistral` },
   { name: 'babelcast-groq',                          image: `${IMAGE_PREFIX}/babelcast-groq`,                          bootEstimateS: 120, tags: ['speech','cloud-relay'] },
   { name: 'babelcast-qwen3-tts',                     image: `${IMAGE_PREFIX}/babelcast-qwen3-tts`,                     bootEstimateS: 180, tags: ['tts'] },
   { name: 'hybrik-x',                                image: `${IMAGE_PREFIX}/hybrik-x`,                                bootEstimateS: 300, tags: ['vision','pose'] },
@@ -92,7 +97,38 @@ function loadFromDisk(): Map<string, AppRegistryEntry> {
   try {
     const raw = readFileSync(REGISTRY_FILE, 'utf8');
     const entries = JSON.parse(raw) as AppRegistryEntry[];
-    return new Map(entries.map(e => [e.name, e]));
+    const map = new Map(entries.map(e => [e.name, e]));
+
+    // Forward-migration: for every seed entry missing on disk or missing a
+    // field we now care about, patch it in without overwriting operator
+    // edits. This lets a new release add fields (e.g. blackwellImage) and
+    // have existing apps.json files pick them up on next boot.
+    let migrated = false;
+    for (const seed of SEED_ENTRIES) {
+      const existing = map.get(seed.name);
+      if (!existing) { map.set(seed.name, seed); migrated = true; continue; }
+      const merged = { ...seed, ...existing };
+      // Missing fields from older on-disk entries — fill from seed only
+      // when the current on-disk value is undefined (preserve operator edits).
+      if (existing.blackwellImage === undefined && seed.blackwellImage) {
+        merged.blackwellImage = seed.blackwellImage;
+        migrated = true;
+      }
+      if (existing.bootEstimateS === undefined && seed.bootEstimateS) {
+        merged.bootEstimateS = seed.bootEstimateS;
+        migrated = true;
+      }
+      if (!existing.tags && seed.tags) {
+        merged.tags = seed.tags;
+        migrated = true;
+      }
+      map.set(seed.name, merged);
+    }
+    if (migrated) {
+      try { saveToDisk(map); log.log('Registry auto-migrated — new seed fields merged'); }
+      catch (e) { log.warn(`Registry migration save failed: ${(e as Error).message}`); }
+    }
+    return map;
   } catch (err) {
     log.warn(`Failed to parse ${REGISTRY_FILE}: ${(err as Error).message} — falling back to seed`);
     return new Map(SEED_ENTRIES.map(e => [e.name, e]));
@@ -118,6 +154,22 @@ export function listImages(): AppRegistryEntry[] {
 
 export function getImage(name: string): AppRegistryEntry | undefined {
   return ensureLoaded().get(name);
+}
+
+/** Resolve the Blackwell-variant image for a given base image, or null
+ *  when no variant is declared. Used by resolveDockerImageForGpus() to
+ *  swap images when the primary GPU is a Blackwell card. Takes an
+ *  image WITH or WITHOUT tag — the tag is preserved in the return. */
+export function blackwellImageFor(imageWithOptionalTag: string): string | null {
+  const [base, tag] = imageWithOptionalTag.includes(':')
+    ? [imageWithOptionalTag.split(':')[0]!, imageWithOptionalTag.split(':')[1]!]
+    : [imageWithOptionalTag, undefined];
+  for (const entry of ensureLoaded().values()) {
+    if (entry.image === base && entry.blackwellImage) {
+      return tag ? `${entry.blackwellImage}:${tag}` : entry.blackwellImage;
+    }
+  }
+  return null;
 }
 
 /** Resolve boot estimate for a given docker image name. Checks registry
