@@ -133,9 +133,11 @@ vi.mock('../../server/state', () => ({
 vi.mock('../../server/providers', () => ({
   runpod:              mockRunpod,
   vast:                mockVast,
+  vastVm:              mockVast,     // vastVm shares the same mock shape
   tensordock:          mockTensordock,
   modal:               mockModal,
   snapgpu:             mockRunpod,   // snapgpu shares the same mock shape
+  hyperstack:          mockRunpod,   // hyperstack shares the same mock shape
   translationDefaults:  null,
   updateActivePipeline: vi.fn(),
   markGpuHealthy:      vi.fn(),

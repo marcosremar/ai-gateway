@@ -59,6 +59,78 @@ async function autoRegisterDockerProviderAsync(endpoint: string): Promise<void> 
   }
 }
 
+/** Minimal TCP reachability check — resolves true once a TCP connection to host:port
+ * opens within the timeout. Used by the SSH-only readiness branch. */
+async function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  const net = await import('node:net');
+  return new Promise<boolean>((resolve) => {
+    const socket = new net.Socket();
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      try { socket.destroy(); } catch {}
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+    socket.connect(port, host);
+  });
+}
+
+/** Wait for SSH (TCP :22) on the instance. Polls provider for liveness and
+ * returns 'ready' once the socket opens. No HTTP /health required. */
+async function pollSshUntilReady(
+  providerClient: GpuProviderClient,
+  providerName: string,
+  credentials: ProviderCredentials,
+  podId: string,
+  endpoint: string,
+  deployStartedAt: number,
+): Promise<PollHealthResult> {
+  const deployTimeoutMs = getDeployTimeoutMinForProvider(providerName) * 60_000;
+  // Extract host from `endpoint` (e.g. "http://1.2.3.4:8000") — fall back to the raw string.
+  let host = endpoint;
+  try {
+    host = new URL(endpoint).hostname;
+  } catch {
+    host = endpoint.replace(/^https?:\/\//, '').split(':')[0].split('/')[0];
+  }
+  log.log(`[gpu] ${providerName} pod ${podId}: SSH-only readiness probe against ${host}:22`);
+  setDeployState({ status: 'booting', step: 'waiting_ssh', stepDetail: `${host}:22` });
+
+  while (true) {
+    if (deployCancelled) return { result: 'cancelled' };
+    const elapsed = Date.now() - deployStartedAt;
+    if (elapsed > deployTimeoutMs) {
+      const msg = `SSH readiness timeout after ${Math.round(elapsed / 1000)}s — :22 never answered on ${host}`;
+      log.warn(`[gpu] ${msg}`);
+      setDeployState({ status: 'error', step: 'waiting_ssh', message: msg });
+      return { result: 'timeout' };
+    }
+    // Check provider says instance is still alive — bail fast if it died.
+    try {
+      const status = await providerClient.getInstanceStatus(podId, credentials);
+      if (status === 'exited' || status === 'deleted' || status === 'terminated') {
+        setDeployState({ status: 'error', step: 'waiting_ssh', message: `Instance ${status} before SSH came up` });
+        return { result: 'exited' };
+      }
+    } catch (err) {
+      log.debug(`[gpu] provider status check failed during SSH wait: ${err instanceof Error ? err.message : err}`);
+    }
+    if (await tcpReachable(host, 22, 3000)) {
+      const durationMs = Date.now() - deployStartedAt;
+      log.log(`[gpu] ${providerName} pod ${podId}: SSH reachable after ${Math.round(durationMs / 1000)}s`);
+      setLastRequestTime(Date.now());
+      setDeployState({ status: 'ready', step: 'ready', message: 'SSH reachable', deployDurationMs: durationMs });
+      return { result: 'ready' };
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+}
+
 export async function pollHealthUntilReady(
   providerClient: GpuProviderClient,
   providerName: string,
@@ -70,6 +142,14 @@ export async function pollHealthUntilReady(
   providerMeta?: Record<string, unknown>,
 ): Promise<PollHealthResult> {
   const credentials: ProviderCredentials = { apiKey };
+
+  // SSH-only readiness mode: skip HTTP /health polling entirely and just wait
+  // for TCP :22 to answer on the endpoint host. Used for experiments that only
+  // need shell access (e.g. CRIU on a plain CPU process, cold-boot benchmarks).
+  if (deployState.readinessProbe === 'ssh') {
+    return pollSshUntilReady(providerClient, providerName, credentials, podId, endpoint, deployStartedAt);
+  }
+
   let consecutiveExited = 0;
   let containerStartedAt = 0;
   let healthRespondedOnce = false;
@@ -85,6 +165,21 @@ export async function pollHealthUntilReady(
   let lastHealthBody = '';
   let identicalHealthCount = 0;
   let stalledWarned = false;
+
+  // Progress-aware timeout extension (smart retry — #10)
+  // Each phase can be extended ONCE if progress was observed in the last 120s.
+  let lastProgressAt = Date.now();
+  let pullTimeoutExtendedOnce = false;
+  let bootTimeoutExtendedOnce = false;
+  let modelsTimeoutExtendedOnce = false;
+  const PROGRESS_WINDOW_MS = 120_000;
+  const markProgress = (kind: string) => {
+    lastProgressAt = Date.now();
+    log.debug(`[gpu] progress: ${kind}`);
+  };
+  let lastProviderStatus = '';
+  let lastServicesSnapshot = '';
+  let lastSshLogDigest = '';
 
   const healthPath = '/health';
   let consecutiveConnectionRefused = 0;
@@ -130,40 +225,75 @@ export async function pollHealthUntilReady(
       MODELS:     10 * 60_000,
     };
 
-    // Image pull timeout
+    // Image pull timeout — smart retry: extend once if progress observed recently (#10)
     if (!containerStartedAt && pullStartedAt > 0 && (Date.now() - pullStartedAt) > PHASE_TIMEOUTS.IMAGE_PULL) {
       const pullSec = Math.round((Date.now() - pullStartedAt) / 1000);
-      const timeoutMsg = `Image pull timeout (${pullSec}s pulling) — machine too slow, trying next`;
-      log.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
-      broadcastWs({ type: 'gpu:deploy', phase: 'pull_timeout', deployId: deployState.deployId, provider: providerName, elapsedMs: totalElapsedMs });
-      setDeployState({ status: 'error', step: 'pulling_image', message: timeoutMsg });
-      return { result: 'timeout', pullTimeS: actualPullTimeS };
-    }
-
-    // Boot timeout
-    if (containerStartedAt && !healthRespondedOnce && (Date.now() - containerStartedAt) > PHASE_TIMEOUTS.BOOT) {
-      const inLeeway = firstAppResponseAt > 0 && (Date.now() - firstAppResponseAt) < BOOT_5XX_LEEWAY_MS;
-      if (!inLeeway) {
-        const bootSec = Math.round((Date.now() - containerStartedAt) / 1000);
-        const leewayNote = firstAppResponseAt > 0
-          ? ` (app was returning errors, last body: ${lastErrorBody.slice(0, 120)})`
-          : ` (TCP refused — ${consecutiveConnectionRefused} consecutive failures)`;
-        const timeoutMsg = `Boot timeout (${bootSec}s) — container up but /health not responding${leewayNote}`;
+      const sinceProgress = Date.now() - lastProgressAt;
+      if (!pullTimeoutExtendedOnce && sinceProgress < PROGRESS_WINDOW_MS) {
+        pullTimeoutExtendedOnce = true;
+        PHASE_TIMEOUTS.IMAGE_PULL = Math.round(PHASE_TIMEOUTS.IMAGE_PULL * 1.5);
+        const extMsg = `Image pull slow but progressing (${pullSec}s, last signal ${Math.round(sinceProgress / 1000)}s ago) — extending timeout by 50%`;
+        log.warn(`[gpu] ${providerName} pod ${podId}: ${extMsg}`);
+        broadcastWs({ type: 'gpu:deploy', phase: 'pull_extended', deployId: deployState.deployId, provider: providerName, elapsedMs: totalElapsedMs, newTimeoutMs: PHASE_TIMEOUTS.IMAGE_PULL });
+        setDeployState({ alert: extMsg, alertLevel: 'info' });
+      } else {
+        const reason = pullTimeoutExtendedOnce ? 'after extension' : `no progress for ${Math.round(sinceProgress / 1000)}s`;
+        const timeoutMsg = `Image pull timeout (${pullSec}s, ${reason}) — machine too slow, trying next`;
         log.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
-        broadcastWs({ type: 'gpu:deploy', phase: 'boot_timeout', deployId: deployState.deployId, provider: providerName });
-        setDeployState({ status: 'error', step: 'waiting_health', message: timeoutMsg });
+        broadcastWs({ type: 'gpu:deploy', phase: 'pull_timeout', deployId: deployState.deployId, provider: providerName, elapsedMs: totalElapsedMs });
+        setDeployState({ status: 'error', step: 'pulling_image', message: timeoutMsg });
         return { result: 'timeout', pullTimeS: actualPullTimeS };
       }
     }
 
-    // Model loading timeout
+    // Boot timeout — smart retry (#10)
+    if (containerStartedAt && !healthRespondedOnce && (Date.now() - containerStartedAt) > PHASE_TIMEOUTS.BOOT) {
+      const inLeeway = firstAppResponseAt > 0 && (Date.now() - firstAppResponseAt) < BOOT_5XX_LEEWAY_MS;
+      if (!inLeeway) {
+        const bootSec = Math.round((Date.now() - containerStartedAt) / 1000);
+        const sinceProgress = Date.now() - lastProgressAt;
+        if (!bootTimeoutExtendedOnce && sinceProgress < PROGRESS_WINDOW_MS) {
+          bootTimeoutExtendedOnce = true;
+          PHASE_TIMEOUTS.BOOT = Math.round(PHASE_TIMEOUTS.BOOT * 1.5);
+          const extMsg = `Boot slow but progressing (${bootSec}s, last signal ${Math.round(sinceProgress / 1000)}s ago) — extending boot timeout by 50%`;
+          log.warn(`[gpu] ${providerName} pod ${podId}: ${extMsg}`);
+          broadcastWs({ type: 'gpu:deploy', phase: 'boot_extended', deployId: deployState.deployId, provider: providerName, newTimeoutMs: PHASE_TIMEOUTS.BOOT });
+          setDeployState({ alert: extMsg, alertLevel: 'info' });
+        } else {
+          const leewayNote = firstAppResponseAt > 0
+            ? ` (app was returning errors, last body: ${lastErrorBody.slice(0, 120)})`
+            : ` (TCP refused — ${consecutiveConnectionRefused} consecutive failures)`;
+          const reason = bootTimeoutExtendedOnce ? 'after extension' : `no progress for ${Math.round(sinceProgress / 1000)}s`;
+          const timeoutMsg = `Boot timeout (${bootSec}s, ${reason}) — container up but /health not responding${leewayNote}`;
+          log.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
+          broadcastWs({ type: 'gpu:deploy', phase: 'boot_timeout', deployId: deployState.deployId, provider: providerName });
+          setDeployState({ status: 'error', step: 'waiting_health', message: timeoutMsg });
+          return { result: 'timeout', pullTimeS: actualPullTimeS };
+        }
+      }
+    }
+
+    // Model loading timeout — smart retry (#10)
     if (healthRespondedOnce && !allServicesLoaded && (Date.now() - (healthFirstResponseAt || Date.now())) > PHASE_TIMEOUTS.MODELS) {
       const modelSec = Math.round((Date.now() - (healthFirstResponseAt || Date.now())) / 1000);
-      const timeoutMsg = `Model loading timeout (${modelSec}s) — services still downloading`;
-      log.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
-      broadcastWs({ type: 'gpu:deploy', phase: 'model_timeout', deployId: deployState.deployId, provider: providerName });
-      setDeployState({ status: 'error', step: 'downloading_models', message: timeoutMsg });
-      return { result: 'timeout', pullTimeS: actualPullTimeS };
+      const sinceProgress = Date.now() - lastProgressAt;
+      // Specifically require that /health body wasn't identical for long — models phase tracks identicalHealthCount
+      const stalledInHealth = identicalHealthCount >= 5;
+      if (!modelsTimeoutExtendedOnce && sinceProgress < PROGRESS_WINDOW_MS && !stalledInHealth) {
+        modelsTimeoutExtendedOnce = true;
+        PHASE_TIMEOUTS.MODELS = Math.round(PHASE_TIMEOUTS.MODELS * 1.5);
+        const extMsg = `Model loading slow but progressing (${modelSec}s, last signal ${Math.round(sinceProgress / 1000)}s ago) — extending timeout by 50%`;
+        log.warn(`[gpu] ${providerName} pod ${podId}: ${extMsg}`);
+        broadcastWs({ type: 'gpu:deploy', phase: 'model_extended', deployId: deployState.deployId, provider: providerName, newTimeoutMs: PHASE_TIMEOUTS.MODELS });
+        setDeployState({ alert: extMsg, alertLevel: 'info' });
+      } else {
+        const reason = modelsTimeoutExtendedOnce ? 'after extension' : stalledInHealth ? 'health body stuck' : `no progress for ${Math.round(sinceProgress / 1000)}s`;
+        const timeoutMsg = `Model loading timeout (${modelSec}s, ${reason}) — services still downloading`;
+        log.warn(`[gpu] ${providerName} pod ${podId}: ${timeoutMsg}`);
+        broadcastWs({ type: 'gpu:deploy', phase: 'model_timeout', deployId: deployState.deployId, provider: providerName });
+        setDeployState({ status: 'error', step: 'downloading_models', message: timeoutMsg });
+        return { result: 'timeout', pullTimeS: actualPullTimeS };
+      }
     }
 
     // Proactive alert: slow model warming (> 3 min)
@@ -219,6 +349,9 @@ export async function pollHealthUntilReady(
       try {
         const detail = await (providerClient as RunpodClient).getInstanceDetail(podId, credentials);
         if (detail) {
+          // Progress signal: RunPod status fields changed
+          const statusSnap = `${detail.desiredStatus}|${detail.runtime ? 'running' : 'pre'}|${detail.imageName || ''}`;
+          if (statusSnap !== lastProviderStatus) { markProgress(`runpod status → ${statusSnap}`); lastProviderStatus = statusSnap; }
           if (detail.desiredStatus === 'EXITED') {
             consecutiveExited++;
             if (consecutiveExited >= 2) return { result: 'exited', pullTimeS: actualPullTimeS };
@@ -285,6 +418,8 @@ export async function pollHealthUntilReady(
         const status = await providerClient.getInstanceStatus(podId, credentials);
         if (status) {
           const statusLower = status.toLowerCase();
+          // Progress signal: status string changed
+          if (status !== lastProviderStatus) { markProgress(`${providerName} status → ${status}`); lastProviderStatus = status; }
           const TERMINAL = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted']);
           const DISASSOCIATED = statusLower === 'stoppeddisassociated' || statusLower === 'stopped_disassociated';
           if (TERMINAL.has(statusLower) || DISASSOCIATED) {
@@ -450,6 +585,9 @@ export async function pollHealthUntilReady(
             }
           }
           if (logOut && !logOut.includes('NO_LOGS')) {
+            // Progress signal: SSH logs changed (download bytes, load progress)
+            const digest = logOut.slice(-400);
+            if (digest !== lastSshLogDigest) { markProgress('ssh logs changed'); lastSshLogDigest = digest; }
             log.log(`[gpu] [log-check] ${providerName} ${podId} (${Math.round(timeSinceContainerStart/1000)}s): ${logOut.split('\n').filter(Boolean).slice(-2).join(' | ').slice(0, 200)}`);
           }
         } catch { /* SSH log check is best-effort */ }
@@ -464,7 +602,7 @@ export async function pollHealthUntilReady(
         const res = await fetch(`${endpoint}${healthPath}`, { signal: AbortSignal.timeout(8000) });
         httpStatus = res.status;
         consecutiveConnectionRefused = 0;
-        if (!firstAppResponseAt) firstAppResponseAt = Date.now();
+        if (!firstAppResponseAt) { firstAppResponseAt = Date.now(); markProgress('first TCP/app response'); }
         if (!res.ok) {
           const body = await res.text().catch(() => '<unreadable>');
           lastErrorBody = body.substring(0, 500);
@@ -493,6 +631,16 @@ export async function pollHealthUntilReady(
             identicalHealthCount = 0;
             lastHealthBody = healthBodyStr;
             stalledWarned = false;
+            markProgress('/health body changed');
+          }
+
+          // Progress signal: per-service status snapshot changed (download → load → ready)
+          const svcSnapshot = data && typeof data === 'object' && data.services
+            ? JSON.stringify(data.services)
+            : '';
+          if (svcSnapshot && svcSnapshot !== lastServicesSnapshot) {
+            markProgress(`services snapshot changed`);
+            lastServicesSnapshot = svcSnapshot;
           }
 
           // ── Fail-fast on app-reported error ──────────────────────────

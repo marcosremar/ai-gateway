@@ -140,6 +140,13 @@ function sendInitialGpuStatus(ws: import('bun').ServerWebSocket<WsData>): void {
 export async function startWsServer(): Promise<number> {
   installFileLogger();
 
+  // ── Single-instance PID lock + orphan deploy detection ────────────────────
+  // Protects ~/.babelcast/ state from concurrent writes when the operator is
+  // iterating on the dev repo and restarting the server mid-deploy.
+  const { acquirePidLock, detectOrphanDeployOnBoot } = await import('./ws/pid-lock');
+  acquirePidLock();
+  detectOrphanDeployOnBoot();
+
   // ── Startup config validation ─────────────────────────────────────────────
   const configWarnings = validateStartupConfig();
   if (configWarnings.length > 0) {

@@ -130,6 +130,8 @@ export const GpuDeployRequestSchema = z.object({
   region: z.string().optional(),
   storageGb: z.number().optional(),
   minVramGb: z.number().optional(),
+  /** Readiness probe mode. 'health' (default) polls /health; 'ssh' only waits for SSH :22 — useful for SSH-only experiments (e.g. CRIU). */
+  readinessProbe: z.enum(['health', 'ssh']).optional(),
 });
 
 export const GpuStatusResponseSchema = z.object({

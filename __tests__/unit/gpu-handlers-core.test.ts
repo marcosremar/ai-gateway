@@ -466,6 +466,7 @@ describe('GPU Handlers - Core Logic', () => {
       delete process.env.TENSORDOCK_API_KEY;
       delete process.env.MODAL_TOKEN_ID;
       delete process.env.MODAL_TOKEN_SECRET;
+      delete process.env.HYPERSTACK_API_KEY;
 
       const res = createMockRes();
       await gpuHandlers.handleGpuDeploy(createMockReq({

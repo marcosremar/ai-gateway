@@ -4,13 +4,25 @@ import { cleanupProviderInstances } from '../src/gpu-providers/deploy-orchestrat
 import { createLogger } from '../src/logger';
 import {
   deployState, deployApiKey, deployVastApiKey, deployTensordockApiKey,
-  deployTensordockAuthId, deployModalApiKey,
+  deployTensordockAuthId, deployModalApiKey, deployHyperstackApiKey,
 } from './state';
-import { runpod, vast, tensordock, modal } from './providers';
+import { runpod, vast, tensordock, modal, hyperstack } from './providers';
 
 const log = createLogger('gpu-deploy');
 
 export const POD_NAME_PREFIX = 'parle-autoscale-';
+
+/**
+ * Name prefixes that identify instances created by this gateway across all
+ * GPU providers. Cleanup / orphan-sweep logic must only touch instances
+ * matching one of these — anything else is a third-party VM in the same
+ * provider account and MUST be left alone.
+ *
+ * - `parle-autoscale-` — legacy prefix used by RunPod/TensorDock/Vast clients
+ * - `ai-gateway-`      — current prefix used by the Hyperstack client
+ *                        (see hyperstack-client.ts createInstance)
+ */
+export const GATEWAY_NAME_PREFIXES: string[] = [POD_NAME_PREFIX, 'ai-gateway-'];
 
 /**
  * Instance IDs that are currently part of an active race deploy.
@@ -60,13 +72,16 @@ export async function cleanupAllPods(apiKey: string, knownPodIds: string[] = [])
 
 
 export const cleanupVastInstances = (apiKey: string) =>
-  cleanupProviderInstances(vast, { apiKey }, ['running', 'active', 'loading', 'creating', 'created'], 'Vast.ai');
+  cleanupProviderInstances(vast, { apiKey }, ['running', 'active', 'loading', 'creating', 'created'], 'Vast.ai', console.log, console.warn, GATEWAY_NAME_PREFIXES);
 
 export const cleanupTensordockInstances = (apiKey: string, authId?: string) =>
-  cleanupProviderInstances(tensordock, { apiKey, authId }, ['running', 'active', 'deploying', 'creating'], 'TensorDock');
+  cleanupProviderInstances(tensordock, { apiKey, authId }, ['running', 'active', 'deploying', 'creating'], 'TensorDock', console.log, console.warn, GATEWAY_NAME_PREFIXES);
 
 export const cleanupModalApps = (apiKey: string) =>
-  cleanupProviderInstances(modal, { apiKey }, ['running', 'deployed', 'active'], 'Modal');
+  cleanupProviderInstances(modal, { apiKey }, ['running', 'deployed', 'active'], 'Modal', console.log, console.warn, GATEWAY_NAME_PREFIXES);
+
+export const cleanupHyperstackInstances = (apiKey: string) =>
+  cleanupProviderInstances(hyperstack, { apiKey }, ['running', 'active', 'creating', 'booting'], 'Hyperstack', console.log, console.warn, GATEWAY_NAME_PREFIXES);
 
 // ── Orphan instance sweep ─────────────────────────────────────────────────
 
@@ -121,7 +136,9 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
       const instances = await vast.listInstances({ apiKey: vastKey });
       const orphans = instances.filter(i => {
         const st = i.status?.toLowerCase() ?? '';
-        return ['running', 'active', 'loading', 'creating', 'created'].includes(st)
+        const nameMatch = GATEWAY_NAME_PREFIXES.some(p => (i.instanceName || '').startsWith(p));
+        return nameMatch
+          && ['running', 'active', 'loading', 'creating', 'created'].includes(st)
           && !tracked.has(i.instanceId);
       });
       found += orphans.length;
@@ -147,7 +164,9 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
       const instances = await tensordock.listInstances({ apiKey: tdKey, authId: tdAuth });
       const orphans = instances.filter(i => {
         const st = i.status?.toLowerCase() ?? '';
-        return ['running', 'active', 'deploying', 'creating'].includes(st)
+        const nameMatch = GATEWAY_NAME_PREFIXES.some(p => (i.instanceName || '').startsWith(p));
+        return nameMatch
+          && ['running', 'active', 'deploying', 'creating'].includes(st)
           && !tracked.has(i.instanceId);
       });
       found += orphans.length;
@@ -172,7 +191,9 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
       const instances = await modal.listInstances({ apiKey: modalKey });
       const orphans = instances.filter(i => {
         const st = i.status?.toLowerCase() ?? '';
-        return ['running', 'deployed', 'active'].includes(st)
+        const nameMatch = GATEWAY_NAME_PREFIXES.some(p => (i.instanceName || '').startsWith(p));
+        return nameMatch
+          && ['running', 'deployed', 'active'].includes(st)
           && !tracked.has(i.instanceId);
       });
       found += orphans.length;
@@ -187,6 +208,33 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
       }
     } catch (err) {
       log.warn(`[orphan-sweep] Modal list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // ── Hyperstack ──
+  const hyperstackKey = deployHyperstackApiKey || process.env.HYPERSTACK_API_KEY || '';
+  if (hyperstackKey) {
+    try {
+      const instances = await hyperstack.listInstances({ apiKey: hyperstackKey });
+      const orphans = instances.filter(i => {
+        const st = i.status?.toLowerCase() ?? '';
+        const nameMatch = GATEWAY_NAME_PREFIXES.some(p => (i.instanceName || '').startsWith(p));
+        return nameMatch
+          && ['running', 'active', 'creating', 'booting'].includes(st)
+          && !tracked.has(i.instanceId);
+      });
+      found += orphans.length;
+      for (const inst of orphans) {
+        try {
+          await hyperstack.deleteInstance(inst.instanceId, { apiKey: hyperstackKey });
+          terminated++;
+          log.log(`[orphan-sweep] Hyperstack ${inst.instanceId} terminated`);
+        } catch (err) {
+          log.warn(`[orphan-sweep] Hyperstack ${inst.instanceId} delete failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    } catch (err) {
+      log.warn(`[orphan-sweep] Hyperstack list failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 

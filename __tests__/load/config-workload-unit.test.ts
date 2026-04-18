@@ -259,7 +259,7 @@ describe('Config persistence — loadProviderConfig', () => {
     const config = await loadProviderConfig();
     expect(config.apps.length).toBeGreaterThan(0);
     expect(config.activeAppId).toBe('realtime-translation-dubbing-mistral');
-    expect(config.idleTimeoutMin).toBe(15);
+    expect(config.idleTimeoutMin).toBe(5);
   });
 
   // #262
