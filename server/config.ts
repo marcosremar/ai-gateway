@@ -5,6 +5,7 @@ import { createLogger } from '../src/logger';
 import {
   listImages as _listImages,
   getImageCatalogDynamic as _getImageCatalogDynamic,
+  blackwellImageFor as _blackwellImageFor,
 } from './app-registry';
 
 const log = createLogger('config');
@@ -76,15 +77,45 @@ export const DOCKER_IMAGE_NAMES: readonly string[] = new Proxy([] as string[], {
 // resolveDockerImageForGpus is kept as a pass-through for backward compat.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Blackwell ↔ standard image maps (kept for gpu-deploy.ts backward compat)
-export const STANDARD_TO_BLACKWELL: Record<string, string> = {
-  [`${IMAGE_PREFIX}/babelcast-mistral:latest`]: `${IMAGE_PREFIX}/babelcast-blackwell-mistral:latest`,
-  [`${IMAGE_PREFIX}/babelcast-mistral:${DOCKER_IMAGE_VERSION}`]: `${IMAGE_PREFIX}/babelcast-blackwell-mistral:${DOCKER_IMAGE_VERSION}`,
-};
-export const BLACKWELL_TO_STANDARD: Record<string, string> = {};
-for (const [std, bw] of Object.entries(STANDARD_TO_BLACKWELL)) {
-  BLACKWELL_TO_STANDARD[bw] = std;
-}
+/**
+ * Blackwell ↔ standard image maps.
+ *
+ * DEPRECATED STATIC FORM. The canonical source of Blackwell-variant images
+ * is now `AppRegistryEntry.blackwellImage` in app-registry.ts — declare it
+ * on the app's seed entry (or via `POST /v1/apps`) and it shows up here
+ * automatically. These maps remain as read-only views into the registry so
+ * downstream callers (gpu-deploy.ts, tests) keep working.
+ */
+export const STANDARD_TO_BLACKWELL: Record<string, string> = new Proxy({}, {
+  get(_t, key: string) {
+    if (typeof key !== 'string') return undefined;
+    return _blackwellImageFor(key) ?? undefined;
+  },
+  ownKeys() {
+    const out: string[] = [];
+    for (const e of _listImages()) {
+      if (e.blackwellImage) {
+        out.push(`${e.image}:latest`, `${e.image}:${DOCKER_IMAGE_VERSION}`);
+      }
+    }
+    return out;
+  },
+  getOwnPropertyDescriptor(_t, key: string) {
+    const v = _blackwellImageFor(key);
+    return v ? { value: v, writable: false, enumerable: true, configurable: true } : undefined;
+  },
+}) as Record<string, string>;
+
+export const BLACKWELL_TO_STANDARD: Record<string, string> = new Proxy({}, {
+  get(_t, key: string) {
+    if (typeof key !== 'string') return undefined;
+    const [base, tag] = key.includes(':') ? [key.split(':')[0]!, key.split(':')[1]!] : [key, undefined];
+    for (const e of _listImages()) {
+      if (e.blackwellImage === base) return tag ? `${e.image}:${tag}` : e.image;
+    }
+    return undefined;
+  },
+}) as Record<string, string>;
 
 const BLACKWELL_GPU_NAMES = ['RTX 5090', 'RTX 5080', 'RTX 5070 Ti', 'RTX 5070', 'RTX 5060 Ti', 'RTX 5060'];
 
@@ -95,7 +126,7 @@ export function resolveDockerImageForGpus(dockerImage: string, gpuTypes: string[
   const primary = gpuTypes[0] ?? '';
   const isPrimaryBlackwell = BLACKWELL_GPU_NAMES.some(b => primary.includes(b));
   if (isPrimaryBlackwell) {
-    const blackwellImage = STANDARD_TO_BLACKWELL[dockerImage];
+    const blackwellImage = _blackwellImageFor(dockerImage);
     if (blackwellImage) {
       log.log('Blackwell primary GPU (%s) — swapping image: %s → %s', primary, dockerImage, blackwellImage);
       return blackwellImage;
