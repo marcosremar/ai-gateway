@@ -247,7 +247,8 @@ describe('WebSocket Server (#783-#796)', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Docker Image Catalog (#797-#805)', () => {
-  const src = read('server/config.ts');
+  // Image names moved from config.ts to the dynamic app-registry.ts; grep both.
+  const src = read('server/config.ts') + '\n' + read('server/app-registry.ts');
 
   it('#797 babelcast-subtitle in catalog', () => { expect(src).toContain('babelcast-subtitle'); });
   it('#798 babelcast-translategemma in catalog', () => { expect(src).toContain('babelcast-translategemma'); });

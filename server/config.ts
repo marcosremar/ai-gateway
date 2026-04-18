@@ -2,6 +2,10 @@
 // Env vars, GPU allowlists, image catalog, startup validation.
 
 import { createLogger } from '../src/logger';
+import {
+  listImages as _listImages,
+  getImageCatalogDynamic as _getImageCatalogDynamic,
+} from './app-registry';
 
 const log = createLogger('config');
 
@@ -40,18 +44,31 @@ export const DOCKER_IMAGE_VERSION = process.env.DOCKER_IMAGE_VERSION || 'v1.3.0'
 
 const IMAGE_PREFIX = process.env.DOCKER_IMAGE_PREFIX || 'marcosremar';
 
-/** All known Docker image base names (without tag). */
-export const DOCKER_IMAGE_NAMES = [
-  `${IMAGE_PREFIX}/babelcast-subtitle`,
-  `${IMAGE_PREFIX}/babelcast-translategemma`,
-  `${IMAGE_PREFIX}/babelcast-translategemma-only-subtitles`,
-  `${IMAGE_PREFIX}/babelcast-mistral`,
-  `${IMAGE_PREFIX}/babelcast-groq`,
-  `${IMAGE_PREFIX}/babelcast-qwen3-tts`,
-  `${IMAGE_PREFIX}/hybrik-x`,
-  `${IMAGE_PREFIX}/hy-motion`,
-  `${IMAGE_PREFIX}/wan-i2v`,
-] as const;
+/** All known Docker image base names (without tag).
+ *
+ *  DEPRECATED STATIC FORM. The canonical source is now `server/app-registry.ts`,
+ *  which reads from `$HOME/.ai-gateway/apps.json` (seeded on first boot) and
+ *  optionally mirrors to `prisma.appRegistry`. Operators can add or remove
+ *  entries at runtime via `POST/DELETE /v1/apps` without a code change.
+ *
+ *  Still exported as a getter for backward compatibility — anything that
+ *  imported the old `as const` array now gets a dynamic array of the same
+ *  shape. Callers that need the metadata (boot estimate, tags) should
+ *  import `listImages()` from `./app-registry` instead. */
+export function getDockerImageNames(): string[] {
+  return _listImages().map(e => e.image);
+}
+
+/** @deprecated kept for call sites that pattern-match this name; reads from
+ *  the dynamic registry under the hood. */
+export const DOCKER_IMAGE_NAMES: readonly string[] = new Proxy([] as string[], {
+  get(_t, prop) {
+    const arr = getDockerImageNames();
+    // Delegate every array-ish access to the fresh snapshot
+    const v = (arr as any)[prop];
+    return typeof v === 'function' ? v.bind(arr) : v;
+  },
+});
 
 // ── GPU × Image compatibility ────────────────────────────────────────────────
 // All images now use ARG BASE_IMAGE / CUDA_INDEX at build time.
@@ -87,13 +104,11 @@ export function resolveDockerImageForGpus(dockerImage: string, gpuTypes: string[
   return dockerImage;
 }
 
-/** Expose catalog via /v1/gpu/catalog endpoint for UI and debugging. */
+/** Expose catalog via /v1/gpu/catalog endpoint for UI and debugging.
+ *  Delegates to the dynamic registry so the catalog reflects runtime
+ *  additions (via /v1/apps) without a redeploy. */
 export function getImageCatalog() {
-  return {
-    version: DOCKER_IMAGE_VERSION,
-    images: DOCKER_IMAGE_NAMES.map(name => `${name}:${DOCKER_IMAGE_VERSION}`),
-    latestImages: DOCKER_IMAGE_NAMES.map(name => `${name}:latest`),
-  };
+  return _getImageCatalogDynamic(DOCKER_IMAGE_VERSION);
 }
 
 /** Validate startup configuration. Exits process on fatal errors. */
