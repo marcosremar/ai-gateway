@@ -429,12 +429,13 @@ describe('handleGpuStop', () => {
     expect(fnBody).toContain('400');
   });
 
-  it('#125 calls client.stopInstance and transitions to stopped state', () => {
+  it('#125 pauses instance (via pauseInstanceForIdle) and transitions to stopped state', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuStop');
     const fnEnd = handlersSource.indexOf('\n// ──', fnStart + 100);
     const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
-    expect(fnBody).toContain('client.stopInstance');
-    // After stop, transitions to 'stopped' state with podId preserved via setDeployState
+    // The provider-level pause was extracted into pauseInstanceForIdle()
+    // which dispatches to client.stopInstance or client.hibernate internally.
+    expect(fnBody).toContain('pauseInstanceForIdle(');
     expect(fnBody).toContain("status: 'stopped'");
     expect(fnBody).toContain('deploymentSM.markStopped(');
   });
@@ -481,10 +482,13 @@ describe('handleGpuResume', () => {
     expect(fnBody).toContain("reason: 'manual'");
   });
 
-  it('#131 resumeOrDeploy in gpu-deploy calls startInstance and clears timer', () => {
-    // After DDD split, resumeOrDeploy lives in gpu-resume-manager.ts
+  it('#131 resumeOrDeploy resumes paused instance and clears destroy timer', () => {
+    // After DDD split, resumeOrDeploy lives in gpu-resume-manager.ts.
+    // After the idle-pause refactor the resume call goes through
+    // resumeInstanceFromIdle() which internally calls client.startInstance
+    // or client.hibernateRestore depending on pausedMode.
     const resumeSource = readFileSync(join(__dirname, '../../server/gpu-resume-manager.ts'), 'utf-8');
-    expect(resumeSource).toContain('client.startInstance(podId, credentials)');
+    expect(resumeSource).toContain('resumeInstanceFromIdle(');
     expect(resumeSource).toContain('clearAutoDestroyTimer');
   });
 

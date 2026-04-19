@@ -211,14 +211,14 @@ describe('Resilience: Timer lifecycle', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Regression: Binary body transfer (#826)', () => {
-  it('uses arrayBuffer not text for body transfer', () => {
+  it('body uses binary-safe path (streaming reader or arrayBuffer, NOT text)', () => {
     const src = readSrc('server/ws/http-api-server.ts');
-    expect(src).toContain('req.arrayBuffer()');
-    // Should not use req.text() in adapters
-    const adapters = src.split('Node').filter(s => s.includes('Bun adapter'));
-    for (const a of adapters) {
-      expect(a).not.toContain('req.text()');
-    }
+    const hasArrayBuffer = src.includes('req.arrayBuffer()');
+    const hasStreaming = src.includes('pumpRequestBody') && src.includes('req.body.getReader()');
+    expect(hasArrayBuffer || hasStreaming).toBe(true);
+    // req.text() is unsafe for binary payloads
+    expect(src).not.toContain('const body = await req.text()');
+    expect(src).not.toContain('await req.text();');
   });
 });
 

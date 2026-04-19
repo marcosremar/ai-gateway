@@ -86,6 +86,35 @@ export function registerGpuRoutes(handlers: Record<string, Function>): void {
         res.end(JSON.stringify({ error: e.message }));
       }
     },
+    // Destructive orphan sweep — terminates every untracked instance now.
+    // On Vast.ai: no prefix filter (account is gateway-owned), includes `exited`.
+    'POST /v1/gpu/orphan-sweep': async (_req: any, res: any) => {
+      try {
+        const { sweepOrphanInstances } = await import('../../gpu-orphan-cleanup');
+        const result = await sweepOrphanInstances();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    },
+    // GPU cost audit — reports non-instance money leaks (volumes, stopped pods).
+    // Read-only by default. Pass ?destroyOrphans=1 AND set RUNPOD_VOLUME_SWEEP_DESTROY=1
+    // in env to actually delete orphan RunPod volumes.
+    'GET /v1/gpu/cost-audit': async (req: any, res: any) => {
+      try {
+        const { auditGpuCosts } = await import('../../gpu-cost-audit');
+        const url = new URL(req.url, 'http://localhost');
+        const destroyOrphans = url.searchParams.get('destroyOrphans') === '1';
+        const report = await auditGpuCosts({ destroyOrphans });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(report));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    },
     // GPU lifecycle logs
     'GET /v1/gpu/lifecycle-logs': async (req: any, res: any) => {
       try {

@@ -38,7 +38,12 @@ describe('VastClient', () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Let any pending console.log calls from in-flight mocked fetches drain
+    // before the worker tears down — otherwise vitest emits an
+    // EnvironmentTeardownError "Closing rpc while onUserConsoleLog was pending"
+    // that fails the process exit code even though all assertions passed.
+    await new Promise(r => setImmediate(r));
     vi.restoreAllMocks();
   });
 

@@ -58,6 +58,39 @@ export async function runStartupTasks(): Promise<void> {
     log.warn(`[ws-server] loadTierRanking failed: ${e.message?.slice(0, 80)}`);
   }
 
+  // 1d. Hydrate snapshot-store env from the vault so operators can keep
+  // Hyperstack/R2 credentials in one place (~/.vault.json) instead of .env.
+  // Env values already set take precedence — vault is a fallback.
+  try {
+    const { initVaultFromEnv } = require('../../src/vault/vault-singleton');
+    const vault = initVaultFromEnv();
+    if (vault) {
+      const mapping: Record<string, string> = {
+        'hyperstack:snapshotsBucket':    'HYPERSTACK_SNAPSHOTS_BUCKET',
+        'hyperstack:snapshotsEndpoint':  'HYPERSTACK_SNAPSHOTS_ENDPOINT',
+        'hyperstack:snapshotsAccessKey': 'HYPERSTACK_SNAPSHOTS_ACCESS_KEY',
+        'hyperstack:snapshotsSecretKey': 'HYPERSTACK_SNAPSHOTS_SECRET_KEY',
+        'hyperstack:snapshotsRegion':    'HYPERSTACK_SNAPSHOTS_REGION',
+        // Pre-baked Custom OS Image id/name (see `gpu hyperstack build-bench-image`).
+        // When set, the Hyperstack deploy path boots from this image instead of
+        // vanilla Ubuntu — zero tool-install overhead, ~60s boot vs 5-7min.
+        'hyperstack:benchImageId':       'HYPERSTACK_BENCH_IMAGE_ID',
+        'hyperstack:benchImageName':     'HYPERSTACK_BENCH_IMAGE_NAME',
+      };
+      let hydrated = 0;
+      for (const [secretName, envName] of Object.entries(mapping)) {
+        if (process.env[envName]) continue;
+        try {
+          const v = await vault.retrieve(secretName);
+          if (v) { process.env[envName] = v; hydrated++; }
+        } catch { /* missing → leave env unset */ }
+      }
+      if (hydrated > 0) log.log(`[startup] hydrated ${hydrated} Hyperstack snapshot env vars from vault`);
+    }
+  } catch (e: any) {
+    log.warn(`[ws-server] vault hydration failed: ${e.message?.slice(0, 80)}`);
+  }
+
   // 2. Terminate any stopped pod overdue for auto-destroy (timer lost on restart)
   try {
     const { terminateStaleStoppedPodOnStartup } = require('../gpu-deploy');
@@ -121,8 +154,37 @@ export async function runStartupTasks(): Promise<void> {
     const { installPoolAdaptersIfEnabled } = require('../standby-pool-adapter');
     startStandbyPoolMonitor();
     installPoolAdaptersIfEnabled();
+    try {
+      const { registerFastServeProfile } = require('../fast-serve-init');
+      registerFastServeProfile();
+    } catch (e: any) {
+      log.warn('[ws-server] fast-serve profile init failed:', e?.message?.slice(0, 80));
+    }
   } catch (e: any) {
     log.warn('[ws-server] Standby pool init failed:', e?.message?.slice(0, 80));
+  }
+
+  // 5b. Start orphan sweep — periodic destruction of untracked instances.
+  // Fires initial sweep after 15s and every 10min thereafter. Critical for
+  // gateway-owned accounts (see *_ACCOUNT_OWNED env flags) where any
+  // untracked VM is a cost leak.
+  try {
+    const { startOrphanSweep } = require('../gpu-orphan-cleanup');
+    startOrphanSweep();
+  } catch (e: any) {
+    log.warn(`[startup] startOrphanSweep failed: ${e?.message?.slice(0, 80)}`);
+  }
+
+  // 5c. Recover persisted auto-destroy timer for stopped pods.
+  // Without this, a gateway restart orphans every stopped pod (they never get
+  // destroyed on schedule and quietly accumulate storage costs).
+  try {
+    const { recoverPersistedDestroyTimer } = require('../gpu-destroy-timer');
+    recoverPersistedDestroyTimer().catch((e: any) =>
+      log.warn(`[startup] recoverPersistedDestroyTimer: ${e?.message?.slice(0, 80)}`),
+    );
+  } catch (e: any) {
+    log.warn(`[startup] recoverPersistedDestroyTimer load failed: ${e?.message?.slice(0, 80)}`);
   }
 
   // 6. Start local Kokoro TTS server (CPU-based, always available as fallback)

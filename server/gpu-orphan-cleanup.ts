@@ -32,6 +32,32 @@ export const GATEWAY_NAME_PREFIXES: string[] = [POD_NAME_PREFIX, 'ai-gateway-'];
 export const activeRaceInstanceIds = new Set<string>();
 
 /**
+ * Per-provider "gateway-owned account" flag. When set, the orphan sweep
+ * ignores the GATEWAY_NAME_PREFIXES safety filter for that provider and
+ * terminates EVERY untracked instance, regardless of name.
+ *
+ * Use this ONLY when the provider account is dedicated to ai-gateway and
+ * contains no other workloads. Otherwise you will nuke third-party VMs.
+ *
+ * Vast.ai defaults to `true` based on explicit user instruction; the others
+ * default to `false` (safety-first) and must be opted in via env var.
+ */
+export function isAccountOwned(provider: 'vast' | 'runpod' | 'tensordock' | 'modal' | 'hyperstack'): boolean {
+  switch (provider) {
+    case 'vast':       return (process.env.VAST_ACCOUNT_OWNED ?? '1') !== '0';
+    case 'runpod':     return process.env.RUNPOD_ACCOUNT_OWNED === '1';
+    case 'tensordock': return process.env.TENSORDOCK_ACCOUNT_OWNED === '1';
+    case 'modal':      return process.env.MODAL_ACCOUNT_OWNED === '1';
+    case 'hyperstack': return process.env.HYPERSTACK_ACCOUNT_OWNED === '1';
+  }
+}
+
+/** Prefix list to apply for a provider (empty array = no filter = kill-all). */
+export function prefixesForProvider(provider: 'vast' | 'runpod' | 'tensordock' | 'modal' | 'hyperstack'): string[] {
+  return isAccountOwned(provider) ? [] : GATEWAY_NAME_PREFIXES;
+}
+
+/**
  * Find and terminate ALL pods matching our naming prefix.
  * This prevents orphaned pods from accumulating costs when the gateway restarts
  * or when deploy requests race.
@@ -71,8 +97,12 @@ export async function cleanupAllPods(apiKey: string, knownPodIds: string[] = [])
 
 
 
+// Vast.ai account is treated as gateway-owned: no name-prefix filter,
+// and every lifecycle state (including `exited`, which still charges storage)
+// is swept. Every instance in the account is the gateway's responsibility.
+const VAST_SWEEP_STATUSES = ['running', 'active', 'loading', 'creating', 'created', 'exited', 'stopped'];
 export const cleanupVastInstances = (apiKey: string) =>
-  cleanupProviderInstances(vast, { apiKey }, ['running', 'active', 'loading', 'creating', 'created'], 'Vast.ai', console.log, console.warn, GATEWAY_NAME_PREFIXES);
+  cleanupProviderInstances(vast, { apiKey }, VAST_SWEEP_STATUSES, 'Vast.ai', console.log, console.warn, []);
 
 export const cleanupTensordockInstances = (apiKey: string, authId?: string) =>
   cleanupProviderInstances(tensordock, { apiKey, authId }, ['running', 'active', 'deploying', 'creating'], 'TensorDock', console.log, console.warn, GATEWAY_NAME_PREFIXES);
@@ -109,11 +139,13 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
   if (rpKey) {
     try {
       const instances = await runpod.listInstances({ apiKey: rpKey });
-      const orphans = instances.filter(i =>
-        (i.instanceName || '').startsWith(POD_NAME_PREFIX) &&
-        i.status !== 'EXITED' &&
-        !tracked.has(i.instanceId),
-      );
+      const rpPrefixes = prefixesForProvider('runpod');
+      const orphans = instances.filter(i => {
+        if (i.status === 'EXITED') return false;
+        if (tracked.has(i.instanceId)) return false;
+        if (rpPrefixes.length === 0) return true; // account-owned → everything
+        return rpPrefixes.some(p => (i.instanceName || '').startsWith(p));
+      });
       found += orphans.length;
       for (const inst of orphans) {
         try {
@@ -134,12 +166,11 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
   if (vastKey) {
     try {
       const instances = await vast.listInstances({ apiKey: vastKey });
+      // Vast.ai account is gateway-owned — every untracked instance is an orphan,
+      // regardless of name prefix OR status (exited VMs still charge storage).
       const orphans = instances.filter(i => {
         const st = i.status?.toLowerCase() ?? '';
-        const nameMatch = GATEWAY_NAME_PREFIXES.some(p => (i.instanceName || '').startsWith(p));
-        return nameMatch
-          && ['running', 'active', 'loading', 'creating', 'created'].includes(st)
-          && !tracked.has(i.instanceId);
+        return VAST_SWEEP_STATUSES.includes(st) && !tracked.has(i.instanceId);
       });
       found += orphans.length;
       for (const inst of orphans) {
@@ -162,12 +193,13 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
   if (tdKey) {
     try {
       const instances = await tensordock.listInstances({ apiKey: tdKey, authId: tdAuth });
+      const tdPrefixes = prefixesForProvider('tensordock');
       const orphans = instances.filter(i => {
         const st = i.status?.toLowerCase() ?? '';
-        const nameMatch = GATEWAY_NAME_PREFIXES.some(p => (i.instanceName || '').startsWith(p));
-        return nameMatch
-          && ['running', 'active', 'deploying', 'creating'].includes(st)
-          && !tracked.has(i.instanceId);
+        if (!['running', 'active', 'deploying', 'creating'].includes(st)) return false;
+        if (tracked.has(i.instanceId)) return false;
+        if (tdPrefixes.length === 0) return true;
+        return tdPrefixes.some(p => (i.instanceName || '').startsWith(p));
       });
       found += orphans.length;
       for (const inst of orphans) {
@@ -189,12 +221,13 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
   if (modalKey) {
     try {
       const instances = await modal.listInstances({ apiKey: modalKey });
+      const mPrefixes = prefixesForProvider('modal');
       const orphans = instances.filter(i => {
         const st = i.status?.toLowerCase() ?? '';
-        const nameMatch = GATEWAY_NAME_PREFIXES.some(p => (i.instanceName || '').startsWith(p));
-        return nameMatch
-          && ['running', 'deployed', 'active'].includes(st)
-          && !tracked.has(i.instanceId);
+        if (!['running', 'deployed', 'active'].includes(st)) return false;
+        if (tracked.has(i.instanceId)) return false;
+        if (mPrefixes.length === 0) return true;
+        return mPrefixes.some(p => (i.instanceName || '').startsWith(p));
       });
       found += orphans.length;
       for (const inst of orphans) {
@@ -216,12 +249,13 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
   if (hyperstackKey) {
     try {
       const instances = await hyperstack.listInstances({ apiKey: hyperstackKey });
+      const hPrefixes = prefixesForProvider('hyperstack');
       const orphans = instances.filter(i => {
         const st = i.status?.toLowerCase() ?? '';
-        const nameMatch = GATEWAY_NAME_PREFIXES.some(p => (i.instanceName || '').startsWith(p));
-        return nameMatch
-          && ['running', 'active', 'creating', 'booting'].includes(st)
-          && !tracked.has(i.instanceId);
+        if (!['running', 'active', 'creating', 'booting'].includes(st)) return false;
+        if (tracked.has(i.instanceId)) return false;
+        if (hPrefixes.length === 0) return true;
+        return hPrefixes.some(p => (i.instanceName || '').startsWith(p));
       });
       found += orphans.length;
       for (const inst of orphans) {

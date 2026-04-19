@@ -235,9 +235,11 @@ describe('idle watchdog', () => {
 
   it('#193 auto-stop calls autoStopGpu (not terminate) on idle', () => {
     const fnStart = monitorLoopSource.indexOf('Idle check');
-    const fnBody = monitorLoopSource.slice(fnStart, fnStart + 1000);
+    const fnBody = monitorLoopSource.slice(fnStart, fnStart + 1500);
     expect(fnBody).toContain('autoStopGpu');
-    expect(fnBody).toContain('auto-stopping (pausing)');
+    // Log wording was refactored — the test only cares that the monitor
+    // branches to autoStop (not terminate) when idle.
+    expect(fnBody).not.toMatch(/autoTerminateGpu\s*\(/);
   });
 
   it('#194 warns at 75% of idle timeout before stopping', () => {
@@ -254,7 +256,11 @@ describe('idle watchdog', () => {
     const fnStart = idleManagerSource.indexOf('export async function autoStopGpu');
     const fnEnd = idleManagerSource.indexOf('\n}', fnStart);
     const fnBody = idleManagerSource.slice(fnStart, fnEnd > 0 ? fnEnd + 2 : fnStart + 3000);
-    expect(fnBody).toContain('client.stopInstance');
+    // After the idle-pause refactor the provider-level stop is dispatched
+    // through pauseInstanceForIdle() rather than calling client.stopInstance
+    // directly. The contract is: pod is paused (disk preserved) and
+    // transitions into the "stopped" state machine slot.
+    expect(fnBody).toContain('pauseInstanceForIdle(');
     expect(fnBody).toContain("status: 'stopped'");
     expect(fnBody).toContain('deploymentSM.markStopped(');
   });

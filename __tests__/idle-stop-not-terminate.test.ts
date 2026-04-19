@@ -46,10 +46,11 @@ describe('Idle Stop (not Terminate) — cold-start plan A3', () => {
 
   it('autoStopGpu schedules auto-destroy after IDLE_DESTROY_MS (not sync terminate)', () => {
     const src = read('server/gpu-idle-manager.ts');
-    // Must call stopInstance (provider-level pause), not deleteInstance.
-    expect(src).toMatch(/client\.stopInstance\(/);
-    // Must schedule a 2h auto-destroy timer — that's the "stop → destroy
-    // after 2h unresumed" flow.
+    // After the idle-pause refactor the provider-level stop happens inside
+    // pauseInstanceForIdle (which internally calls client.stopInstance or
+    // client.hibernate). The contract here is: the manager pauses rather
+    // than deletes, and schedules a 2h auto-destroy.
+    expect(src).toMatch(/pauseInstanceForIdle\(/);
     expect(src).toContain('scheduleAutoDestroy(IDLE_DESTROY_MS)');
   });
 

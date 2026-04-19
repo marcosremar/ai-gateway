@@ -144,6 +144,7 @@ vi.mock('../../server/providers', () => ({
   },
   vast: {
     listOffers: vi.fn(() => Promise.resolve([])),
+    listInstances: vi.fn(() => Promise.resolve([])),
     createInstance: vi.fn(() => Promise.resolve({ id: 'test-pod-id' })),
     startInstance: vi.fn(() => Promise.resolve({})),
     stopInstance: vi.fn(() => Promise.resolve({})),
@@ -727,6 +728,47 @@ describe('GPU Deploy - Core Logic', () => {
 
       expect(result.found).toBe(0);
       expect(result.terminated).toBe(0);
+    });
+
+    it('Vast.ai: terminates every untracked running instance regardless of name prefix', async () => {
+      // The gateway owns the Vast.ai account — any running instance not trackedo
+      // is an orphan and must be terminated, even without the gateway name prefix.
+      (stateMock as any).deployVastApiKey = 'vast-key';
+      getState().podId = '';
+
+      vi.mocked(providersMock.vast.listInstances).mockResolvedValue([
+        { instanceId: 'vast-foreign-1', instanceName: 'my-manual-vm', status: 'running' },
+        { instanceId: 'vast-unnamed', instanceName: '', status: 'running' },
+        { instanceId: 'vast-gateway', instanceName: 'parle-autoscale-x', status: 'running' },
+      ] as any);
+
+      const result = await gpuDeploy.sweepOrphanInstances();
+
+      expect(result.found).toBe(3);
+      expect(result.terminated).toBe(3);
+      expect(providersMock.vast.deleteInstance).toHaveBeenCalledWith('vast-foreign-1', expect.any(Object));
+      expect(providersMock.vast.deleteInstance).toHaveBeenCalledWith('vast-unnamed', expect.any(Object));
+      expect(providersMock.vast.deleteInstance).toHaveBeenCalledWith('vast-gateway', expect.any(Object));
+
+      (stateMock as any).deployVastApiKey = '';
+    });
+
+    it('Vast.ai: still skips the tracked active pod', async () => {
+      (stateMock as any).deployVastApiKey = 'vast-key';
+      getState().podId = 'vast-active';
+
+      vi.mocked(providersMock.vast.listInstances).mockResolvedValue([
+        { instanceId: 'vast-active', instanceName: 'anything', status: 'running' },
+        { instanceId: 'vast-other', instanceName: 'anything-else', status: 'running' },
+      ] as any);
+
+      const result = await gpuDeploy.sweepOrphanInstances();
+
+      expect(result.terminated).toBe(1);
+      expect(providersMock.vast.deleteInstance).toHaveBeenCalledWith('vast-other', expect.any(Object));
+      expect(providersMock.vast.deleteInstance).not.toHaveBeenCalledWith('vast-active', expect.any(Object));
+
+      (stateMock as any).deployVastApiKey = '';
     });
   });
 

@@ -204,21 +204,24 @@ describe('transitions array management', () => {
 // ── 11. Binary-safe body transfer ───────────────────────────────────────────
 
 describe('Bun adapter binary safety', () => {
-  it('uses arrayBuffer instead of text for body transfer', async () => {
-    // ws-server.ts was modularized — HTTP adapter moved to ws/http-api-server.ts
+  it('body is transferred via binary-safe path (streaming reader, NOT req.text)', async () => {
+    // Adapter evolved past the original arrayBuffer() approach — it now
+    // streams via pumpRequestBody(req, fakeReq) using getReader(), which
+    // is binary-safe AND enforces the size cap. The contract for this
+    // test is: body transfer MUST NOT use req.text() (which corrupts
+    // binary payloads). Either arrayBuffer OR streaming reader is OK.
     const fs = await import('fs');
     const path = await import('path');
     const source = [
       'server/ws-server.ts',
       'server/ws/http-api-server.ts',
     ].map(f => fs.readFileSync(path.join(__dirname, '../..', f), 'utf8')).join('\n');
-    // The main handler adapter must use arrayBuffer (binary-safe)
-    expect(source).toContain('req.arrayBuffer()');
-    // Should NOT use req.text() for body (corrupts binary data)
-    const adapters = source.match(/Node.*Bun adapter[\s\S]{0,200}/g) || [];
-    for (const adapter of adapters) {
-      expect(adapter).not.toContain('req.text()');
-    }
+    const hasArrayBuffer = source.includes('req.arrayBuffer()');
+    const hasStreamingReader = source.includes('pumpRequestBody') && source.includes('req.body.getReader()');
+    expect(hasArrayBuffer || hasStreamingReader).toBe(true);
+    // req.text() is unsafe for binary; must never be used for body transfer
+    expect(source).not.toContain('const body = await req.text()');
+    expect(source).not.toContain('await req.text();');
   });
 });
 
@@ -226,20 +229,24 @@ describe('Bun adapter binary safety', () => {
 
 describe('HTTP status code propagation', () => {
   it('writeHead updates statusCode used by end()', async () => {
-    // ws-server.ts was modularized — fakeRes adapter moved to ws/http-api-server.ts
+    // ws-server.ts was modularized — fakeRes adapter moved to ws/http-api-server.ts.
+    // The adapter was rewritten to multi-line form; the old single-line
+    // arrow writeHead was replaced with a block body. The invariant is:
+    // every writeHead implementation must assign fakeRes.statusCode = code
+    // so later end() reads the correct status.
     const fs = await import('fs');
     const path = await import('path');
     const source = [
       'server/ws-server.ts',
       'server/ws/http-api-server.ts',
     ].map(f => fs.readFileSync(path.join(__dirname, '../..', f), 'utf8')).join('\n');
-    // All fakeRes adapters must use statusCode directly (not fakeRes.statusCode || statusCode)
     expect(source).not.toContain('fakeRes.statusCode || statusCode');
-    // writeHead must sync fakeRes.statusCode (check full lines, not just the arrow)
-    const writeHeadLines = source.split('\n').filter(l => l.includes('writeHead:') && l.includes('=>'));
-    expect(writeHeadLines.length).toBeGreaterThan(0);
-    for (const line of writeHeadLines) {
-      expect(line).toContain('fakeRes.statusCode = code');
+    // For every writeHead arrow body, the adjacent lines must contain the
+    // statusCode assignment.
+    const writeHeadBlocks = source.match(/writeHead:[\s\S]{0,300}?\n\s*\}/g) || [];
+    expect(writeHeadBlocks.length).toBeGreaterThan(0);
+    for (const block of writeHeadBlocks) {
+      expect(block).toMatch(/fakeRes\.statusCode\s*=\s*code/);
     }
   });
 });
