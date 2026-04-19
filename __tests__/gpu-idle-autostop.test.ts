@@ -568,8 +568,10 @@ describe('gpu-idle-manager.ts — stop flow', () => {
     expect(src).toContain("provider === 'modal'");
   });
 
-  it('calls client.stopInstance (not deleteInstance) to preserve disk', () => {
-    expect(src).toContain('client.stopInstance(podId, credentials)');
+  it('calls stop (via pauseInstanceForIdle) not deleteInstance to preserve disk', () => {
+    // The stop logic was extracted into pauseInstanceForIdle() which
+    // internally calls client.stopInstance. gpu-idle-manager stays high-level.
+    expect(src).toContain('pauseInstanceForIdle(');
     // Should NOT call deleteInstance in the happy path
     const stopFnStart = src.indexOf('export async function autoStopGpu');
     const stopFnBody = src.slice(stopFnStart, src.indexOf('\n}', stopFnStart) + 2);
@@ -1276,9 +1278,13 @@ describe('full auto-stop lifecycle — source wiring', () => {
 
   it('resume manager clears destroy timer before resume attempt', () => {
     const src = readSource('server/gpu-resume-manager.ts');
-    const clearIdx = src.indexOf('clearAutoDestroyTimer');
-    const startIdx = src.indexOf('client.startInstance');
-    expect(clearIdx).toBeLessThan(startIdx);
+    // The first call to clearAutoDestroyTimer() must appear before the
+    // first CALL (not import) to resumeInstanceFromIdle(...).
+    const clearIdx = src.indexOf('clearAutoDestroyTimer()');
+    const resumeCallIdx = src.indexOf('await resumeInstanceFromIdle(');
+    expect(clearIdx).toBeGreaterThan(-1);
+    expect(resumeCallIdx).toBeGreaterThan(-1);
+    expect(clearIdx).toBeLessThan(resumeCallIdx);
   });
 
   it('touchModelRequest is called from ai-handlers (gateway-routed requests)', () => {

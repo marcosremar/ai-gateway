@@ -83,7 +83,8 @@ vi.mock('../../server/providers', () => ({
   },
 }));
 
-// Mock ai-handlers for isPrivateUrl
+// Mock ai-handlers for isPrivateUrl + isPrivateUrlResolved (added after
+// SSRF hardening — resolver step that verifies DNS target isn't private).
 vi.mock('../../server/ai-handlers', () => ({
   isPrivateUrl: (url: string) => {
     try {
@@ -91,6 +92,7 @@ vi.mock('../../server/ai-handlers', () => ({
       return /^(localhost|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
     } catch { return true; }
   },
+  isPrivateUrlResolved: async (_url: string) => false,
 }));
 
 // Mock http-utils
