@@ -92,8 +92,10 @@ export function shouldResetIdleFromHealth(
     if (ageMs >= 0 && ageMs < idleTimeoutMs) return true;
   }
 
-  // active_requests: count of currently in-flight requests on the GPU
-  const activeReqs = healthData.active_requests ?? healthData.activeRequests;
+  // active_requests / active_streams: count of in-flight requests/sessions on the GPU.
+  // active_streams is used by streaming workloads (e.g. MuseTalk WS sessions).
+  const activeReqs = healthData.active_requests ?? healthData.activeRequests
+                  ?? healthData.active_streams ?? healthData.activeStreams;
   if (typeof activeReqs === 'number' && activeReqs > 0) return true;
 
   return false;
