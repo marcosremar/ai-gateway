@@ -377,10 +377,18 @@ export class DistributedTracer {
 // Global tracer instance
 export const globalTracer = new DistributedTracer();
 
-// Auto-cleanup every 5 minutes
-setInterval(() => {
-  const removed = globalTracer.cleanup();
-  if (removed > 0) {
-    log.log(`[tracer] Cleaned up ${removed} old traces`);
-  }
-}, 5 * 60 * 1000);
+// Auto-cleanup every 5 minutes. Skipped in vitest/test environments —
+// a module-level setInterval that logs through the shared logger would
+// otherwise fire during worker teardown and surface as
+// `EnvironmentTeardownError: Closing rpc while onUserConsoleLog was pending`,
+// turning a benign housekeeping tick into a failed test run. Production
+// servers keep the cleanup; tests don't need it.
+if (!(typeof process !== 'undefined' && (process.env.VITEST || process.env.NODE_ENV === 'test'))) {
+  const _tracerCleanup = setInterval(() => {
+    const removed = globalTracer.cleanup();
+    if (removed > 0) {
+      log.log(`[tracer] Cleaned up ${removed} old traces`);
+    }
+  }, 5 * 60 * 1000);
+  if (_tracerCleanup.unref) _tracerCleanup.unref();
+}

@@ -31,6 +31,7 @@ describe('app-registry', () => {
     const names = images.map(e => e.name);
     expect(names).toContain('wan-i2v');
     expect(names).toContain('musetalk');
+    expect(names).toContain('fbx2glb');
     expect(names).toContain('babelcast-mistral');
     // Each seed entry must carry a boot estimate and image name.
     for (const e of images) {
