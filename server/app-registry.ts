@@ -76,7 +76,7 @@ export const SEED_ENTRIES: AppRegistryEntry[] = [
   { name: 'hy-motion',                               image: `${IMAGE_PREFIX}/hy-motion`,                               bootEstimateS: 300, tags: ['vision','motion'] },
   { name: 'wan-i2v',                                 image: `${IMAGE_PREFIX}/wan-i2v`,                                 bootEstimateS: 300, tags: ['video','i2v'] },
   { name: 'musetalk',                                image: `${IMAGE_PREFIX}/musetalk`,                                bootEstimateS: 300, tags: ['video','lipsync','realtime'] },
-  { name: 'fbx2glb',                                 image: `${IMAGE_PREFIX}/fbx2glb`,                                 bootEstimateS:  60, tags: ['3d','conversion','fbx','glb'] },
+  { name: 'fbx2glb',                                 image: `${IMAGE_PREFIX}/fbx2glb`,                                 bootEstimateS: 120, tags: ['3d','conversion','fbx','glb'] },
 ];
 
 // ── In-memory state ───────────────────────────────────────────────────────
