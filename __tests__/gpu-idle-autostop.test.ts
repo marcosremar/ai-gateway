@@ -162,13 +162,18 @@ describe('shouldResetIdleFromHealth — external workload detection', () => {
     expect(shouldResetIdleFromHealth({ model_loaded: true }, 0)).toBe(false);
   });
 
-  it('returns true when GPU utilization > 0', () => {
+  it('returns true when GPU utilization exceeds the 5% noise threshold', () => {
+    // shouldResetIdleFromHealth filters out the ~0-5% background noise
+    // nvidia-smi reports from an idle card. Anything above 5% counts as
+    // active work and resets the idle clock.
     expect(shouldResetIdleFromHealth({}, 50)).toBe(true);
-    expect(shouldResetIdleFromHealth({}, 1)).toBe(true);
+    expect(shouldResetIdleFromHealth({}, 6)).toBe(true);
   });
 
-  it('returns false when GPU utilization is 0', () => {
+  it('returns false when GPU utilization is at or below the 5% noise threshold', () => {
     expect(shouldResetIdleFromHealth({}, 0)).toBe(false);
+    expect(shouldResetIdleFromHealth({}, 1)).toBe(false);
+    expect(shouldResetIdleFromHealth({}, 5)).toBe(false);
   });
 
   it('returns false when GPU utilization is -1 (unknown)', () => {
@@ -753,8 +758,8 @@ describe('edge cases — health-based idle reset', () => {
     expect(shouldResetIdleFromHealth({}, 0.0)).toBe(false);
   });
 
-  it('GPU util at 0.1% triggers reset', () => {
-    expect(shouldResetIdleFromHealth({}, 0.1)).toBe(true);
+  it('GPU util at 0.1% stays below the 5% noise threshold and does NOT trigger reset', () => {
+    expect(shouldResetIdleFromHealth({}, 0.1)).toBe(false);
   });
 
   it('multiple signals: last_request_at + active_requests both trigger', () => {
@@ -797,103 +802,119 @@ describe('estimateBootTimeFromImage — model size heuristic', () => {
 });
 
 describe('computeAdaptiveIdleTimeout — post-ready idle', () => {
-  it('uses actual boot duration when available (2x multiplier)', () => {
-    // Boot took 5 min (300s) → idle timeout = 300 * 2 = 600s = 10 min
+  // The post-ready idle timeout was widened to 4h MIN / 8h MAX to support
+  // long-running bypass workloads (3h+ MuseTalk frame-by-frame generation
+  // hits the pod directly, skipping the gateway's last_request tracking).
+  // Any boot cost under ~2h is dominated by the 4h floor.
+  const MIN_MS = 240 * 60_000; // 4h
+  const MAX_MS = 480 * 60_000; // 8h
+
+  it('uses actual boot duration when available (2x multiplier, floor-clamped)', () => {
+    // Boot took 5 min (300s); 2x = 10 min, below 4h floor → clamps to floor.
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 300_000,
       avgBootTimeS: 0,
       dockerImage: '',
       isBooting: false,
     });
-    expect(timeout).toBe(600_000); // 10 min
+    expect(timeout).toBe(MIN_MS);
   });
 
-  it('falls back to avgBootTimeS when no lastBootDuration', () => {
-    // Historical avg: 200s → idle timeout = 200 * 2 = 400s = 6.67 min
-    // Min floor is 5 min (A3), so 6.67 min is kept as-is.
+  it('falls back to avgBootTimeS when no lastBootDuration (floor-clamped)', () => {
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 0,
       avgBootTimeS: 200,
       dockerImage: '',
       isBooting: false,
     });
-    expect(timeout).toBe(400_000); // 6.67 min (above 5 min floor)
+    expect(timeout).toBe(MIN_MS);
   });
 
-  it('falls back to image-based estimate when no history', () => {
-    // hybrik-x → 300s estimate → 300 * 2 = 600s = 10 min
+  it('falls back to image-based estimate when no history (floor-clamped)', () => {
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 0,
       avgBootTimeS: 0,
       dockerImage: 'marcosremar/hybrik-x:latest',
       isBooting: false,
     });
-    expect(timeout).toBe(600_000); // 10 min
+    expect(timeout).toBe(MIN_MS);
   });
 
-  it('large model (70B) gets longer idle timeout', () => {
-    // 70B → 600s estimate → 600 * 2 = 1200s = 20 min
+  it('70B model still clamps to 4h floor (boot 10 min x 2 = 20 min < 4h)', () => {
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 0,
       avgBootTimeS: 0,
       dockerImage: 'marcosremar/llama-70b:latest',
       isBooting: false,
     });
-    expect(timeout).toBe(1200_000); // 20 min
+    expect(timeout).toBe(MIN_MS);
   });
 
-  it('small model (7B) gets shorter idle timeout', () => {
-    // 7B → 180s estimate → 180 * 2 = 360s = 6 min (above 5 min floor)
+  it('7B model clamps to 4h floor (boot 3 min x 2 = 6 min < 4h)', () => {
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 0,
       avgBootTimeS: 0,
       dockerImage: 'marcosremar/gemma-4b:latest',
       isBooting: false,
     });
-    expect(timeout).toBe(360_000); // 6 min
+    expect(timeout).toBe(MIN_MS);
   });
 
-  it('enforces minimum idle timeout (5 min, A3)', () => {
-    // Very fast boot: 30s → 30 * 2 = 60s, but minimum = 5 min (A3 cold-start)
+  it('enforces the 4h minimum idle timeout for fast-boot pods', () => {
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 30_000,
       avgBootTimeS: 0,
       dockerImage: '',
       isBooting: false,
     });
-    expect(timeout).toBe(5 * 60_000);
+    expect(timeout).toBe(MIN_MS);
   });
 
-  it('enforces maximum idle timeout (60 min)', () => {
-    // Extremely long boot: 45 min → 45 * 2 = 90 min → capped at 60 min
+  it('adaptive 2x multiplier takes over once boot cost exceeds the 4h floor', () => {
+    // Boot 3h30m → 2x = 7h, above 4h floor but under 8h ceiling.
     const timeout = computeAdaptiveIdleTimeout({
-      lastBootDurationMs: 45 * 60_000,
+      lastBootDurationMs: 210 * 60_000,
       avgBootTimeS: 0,
       dockerImage: '',
       isBooting: false,
     });
-    expect(timeout).toBe(60 * 60_000);
+    expect(timeout).toBe(420 * 60_000); // 7h
   });
 
-  it('actual boot time takes priority over history and image estimate', () => {
-    // All three sources available — lastBootDurationMs wins
+  it('enforces the 8h maximum idle timeout for very long boots', () => {
+    // Boot 10h → 2x = 20h → capped at 8h ceiling.
     const timeout = computeAdaptiveIdleTimeout({
-      lastBootDurationMs: 600_000, // 10 min actual → 20 min timeout
-      avgBootTimeS: 200,           // would give 6.67 min
-      dockerImage: 'marcosremar/gemma-4b:latest', // would give 6 min
+      lastBootDurationMs: 600 * 60_000,
+      avgBootTimeS: 0,
+      dockerImage: '',
       isBooting: false,
     });
-    expect(timeout).toBe(1200_000); // 20 min from actual boot time
+    expect(timeout).toBe(MAX_MS);
   });
 
-  it('history takes priority over image estimate', () => {
+  it('actual boot time wins over history and image when the floor does NOT dominate', () => {
+    // Actual boot 5h → 2x = 10h → capped at 8h. History + image would
+    // produce sub-4h values that clamp back up to 4h. Distinct outputs
+    // prove the source-priority order is honoured.
+    const timeout = computeAdaptiveIdleTimeout({
+      lastBootDurationMs: 300 * 60_000,
+      avgBootTimeS: 200,
+      dockerImage: 'marcosremar/gemma-4b:latest',
+      isBooting: false,
+    });
+    expect(timeout).toBe(MAX_MS); // capped at ceiling
+  });
+
+  it('history wins over image estimate when the floor does NOT dominate', () => {
+    // Historical avg 4h → 2x = 8h. Image estimate for 7B would give 6 min,
+    // which would clamp to 4h floor. Distinct outputs prove priority order.
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 0,
-      avgBootTimeS: 400, // 400s → 800s = 13.3 min
-      dockerImage: 'marcosremar/gemma-4b:latest', // would give 6 min
+      avgBootTimeS: 4 * 3600,
+      dockerImage: 'marcosremar/gemma-4b:latest',
       isBooting: false,
     });
-    expect(timeout).toBe(800_000); // 13.3 min from history
+    expect(timeout).toBe(MAX_MS); // 8h
   });
 });
 
@@ -945,51 +966,47 @@ describe('computeAdaptiveIdleTimeout — boot grace (during init)', () => {
 });
 
 describe('adaptive idle + checkIdleAction integration', () => {
-  it('HybrIK machine: boot 13 min → idle timeout = 26 min (not 15)', () => {
-    const bootMs = 13 * 60_000;
+  // Under the current 4h floor / 8h ceiling, any boot cost under ~2h
+  // produces the same 4h idle window. These integration tests now
+  // exercise the stop-action boundary at the floor itself.
+  const FLOOR_MS = 240 * 60_000; // 4h
+
+  it('HybrIK boot (13 min) → idle timeout clamps to 4h floor', () => {
     const timeout = computeAdaptiveIdleTimeout({
-      lastBootDurationMs: bootMs,
+      lastBootDurationMs: 13 * 60_000,
       avgBootTimeS: 0,
       dockerImage: 'marcosremar/hybrik-x:latest',
       isBooting: false,
     });
-    expect(timeout).toBe(26 * 60_000); // 2x boot time
+    expect(timeout).toBe(FLOOR_MS);
 
-    // With 26-min timeout, the machine survives between jobs
     const T0 = Date.now();
-    const idleAt20min = checkIdleAction(T0, 0, T0 + 20 * 60_000, timeout, false);
-    expect(idleAt20min.action).not.toBe('stop'); // NOT stopped at 20 min
-
-    const idleAt27min = checkIdleAction(T0, 0, T0 + 27 * 60_000, timeout, false);
-    expect(idleAt27min.action).toBe('stop'); // stopped at 27 min
+    // Well inside the 4h window — do NOT stop.
+    const mid = checkIdleAction(T0, 0, T0 + 180 * 60_000, timeout, false);
+    expect(mid.action).not.toBe('stop');
+    // Past the 4h window — stop.
+    const past = checkIdleAction(T0, 0, T0 + 260 * 60_000, timeout, false);
+    expect(past.action).toBe('stop');
   });
 
-  it('fast-boot model (2 min) → idle timeout = 5 min (minimum, A3)', () => {
-    const bootMs = 2 * 60_000;
+  it('fast-boot model (2 min) → idle timeout clamps to 4h floor', () => {
     const timeout = computeAdaptiveIdleTimeout({
-      lastBootDurationMs: bootMs,
+      lastBootDurationMs: 2 * 60_000,
       avgBootTimeS: 0,
       dockerImage: 'marcosremar/gemma-4b:latest',
       isBooting: false,
     });
-    expect(timeout).toBe(5 * 60_000); // minimum floor (A3)
-
-    const T0 = Date.now();
-    const idleAt4min = checkIdleAction(T0, 0, T0 + 4 * 60_000, timeout, false);
-    expect(idleAt4min.action).not.toBe('stop');
-
-    const idleAt6min = checkIdleAction(T0, 0, T0 + 6 * 60_000, timeout, false);
-    expect(idleAt6min.action).toBe('stop');
+    expect(timeout).toBe(FLOOR_MS);
   });
 
-  it('70B model (10 min boot) → idle timeout = 20 min', () => {
+  it('70B model (10 min boot) → idle timeout clamps to 4h floor', () => {
     const timeout = computeAdaptiveIdleTimeout({
       lastBootDurationMs: 10 * 60_000,
       avgBootTimeS: 0,
       dockerImage: 'marcosremar/llama-70b:latest',
       isBooting: false,
     });
-    expect(timeout).toBe(20 * 60_000);
+    expect(timeout).toBe(FLOOR_MS);
   });
 });
 
