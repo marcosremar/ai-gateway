@@ -10,7 +10,7 @@
  */
 
 // Shared constants and utilities
-export { isPrivateUrl } from '../../ai-handlers';
+export { isPrivateUrl, isPrivateUrlResolved } from '../../ai-handlers';
 export {
   BOT_POD_PREFIX,
   BOT_DOCKER_IMAGE,

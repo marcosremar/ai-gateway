@@ -32,7 +32,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
 const JSON_BODY_TIMEOUT_MS = 15_000;
 const RAW_BODY_TIMEOUT_MS = 120_000; // 2 min — allows large audio uploads on slow connections
 
-const JSON_BODY_MAX_BYTES = 2 * 1024 * 1024; // 2 MB hard cap for JSON bodies
+export const JSON_BODY_MAX_BYTES = 2 * 1024 * 1024; // 2 MB hard cap for JSON bodies
 
 export function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   const inner = new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -67,20 +67,28 @@ export function readJsonBody(req: IncomingMessage): Promise<Record<string, unkno
   return withTimeout(inner, JSON_BODY_TIMEOUT_MS, 'readJsonBody');
 }
 
-const MAX_BODY_BYTES = 50 * 1024 * 1024; // 50 MB (audio uploads)
+export const MAX_BODY_BYTES = 50 * 1024 * 1024; // 50 MB (audio uploads)
 
 /** Per-route body size limits — prevents abuse on text-only endpoints */
-const ROUTE_MAX_BYTES: Record<string, number> = {
+export const ROUTE_MAX_BYTES: Record<string, number> = {
   '/v1/translate': 1 * 1024 * 1024,        // 1 MB
   '/v1/chat/completions': 1 * 1024 * 1024,  // 1 MB
   '/v1/playground/llm': 1 * 1024 * 1024,    // 1 MB
   '/v1/config/providers': 512 * 1024,       // 512 KB
   '/v1/config/api-keys': 64 * 1024,         // 64 KB
   '/v1/config/labs': 64 * 1024,             // 64 KB
+  '/v1/docker/build': 64 * 1024,            // 64 KB
+  '/v1/gpu/preflight': 64 * 1024,           // 64 KB
+  '/v1/errors/alerts/acknowledge': 16 * 1024, // 16 KB
+  '/v1/gpu/heartbeat': 16 * 1024,           // 16 KB
 };
 
+export function getRouteBodyLimit(pathname: string): number {
+  return ROUTE_MAX_BYTES[pathname] ?? MAX_BODY_BYTES;
+}
+
 export function readRawBody(req: IncomingMessage, res?: ServerResponse): Promise<Buffer> | null {
-  const routeLimit = ROUTE_MAX_BYTES[req.url?.split('?')[0] ?? ''] ?? MAX_BODY_BYTES;
+  const routeLimit = getRouteBodyLimit(req.url?.split('?')[0] ?? '');
   const contentLength = req.headers['content-length'];
   if (contentLength) {
     const cl = parseInt(contentLength, 10);
@@ -161,6 +169,7 @@ export function validateCredential(
 export function validateGpuCredentials(creds: {
   runpodApiKey?: string;
   vastApiKey?: string;
+  hyperstackApiKey?: string;
   tensordockApiKey?: string;
   tensordockAuthId?: string;
   modalTokenId?: string;
@@ -169,6 +178,7 @@ export function validateGpuCredentials(creds: {
   return (
     validateCredential(creds.runpodApiKey || '', 'RunPod API key', { prefix: 'rpa_', minLen: 20, maxLen: 100 }) ||
     validateCredential(creds.vastApiKey || '', 'Vast.ai API key', { pattern: /^[0-9a-fA-F]+$/, minLen: 20, maxLen: 100 }) ||
+    validateCredential(creds.hyperstackApiKey || '', 'Hyperstack API key', { pattern: /^[a-zA-Z0-9-]+$/, minLen: 20, maxLen: 100 }) ||
     validateCredential(creds.tensordockApiKey || '', 'TensorDock API key', { pattern: /^[a-zA-Z0-9]+$/, minLen: 10, maxLen: 100 }) ||
     validateCredential(creds.tensordockAuthId || '', 'TensorDock Auth ID', { pattern: /^[a-zA-Z0-9-]+$/, minLen: 5, maxLen: 100 }) ||
     validateCredential(creds.modalTokenId || '', 'Modal Token ID', { minLen: 5, maxLen: 100 }) ||

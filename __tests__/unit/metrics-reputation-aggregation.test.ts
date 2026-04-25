@@ -305,7 +305,7 @@ describe('metrics-reputation-aggregation', () => {
   describe('aggregateRequestLogsToReputation', () => {
     it('returns {processed: 0} when no deployState.provider', async () => {
       // Temporarily override the dynamic import to return empty provider
-      const stateModule = await import('../server/state');
+      const stateModule = await import('../../server/state');
       const origProvider = stateModule.deployState.provider;
       (stateModule.deployState as any).provider = '';
 
@@ -458,7 +458,7 @@ describe('metrics-reputation-aggregation', () => {
     });
 
     it('returns correct hostKey even when no gpuType', async () => {
-      const stateModule = await import('../server/state');
+      const stateModule = await import('../../server/state');
       const origGpuType = stateModule.deployState.gpuType;
       (stateModule.deployState as any).gpuType = '';
 

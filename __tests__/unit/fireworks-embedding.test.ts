@@ -3,7 +3,7 @@
  * Covers: singleton export configuration.
  */
 import { describe, it, expect } from 'vitest';
-import { fireworksEmbedding } from '../src/providers/fireworks/fireworks-embedding';
+import { fireworksEmbedding } from '../../src/providers/fireworks/fireworks-embedding';
 
 describe('fireworksEmbedding', () => {
   it('is exported as a singleton', () => {

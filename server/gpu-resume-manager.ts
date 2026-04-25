@@ -5,17 +5,18 @@
 
 import type { GpuProviderClient, ProviderCredentials } from '../src/gpu-providers/types';
 import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
+import { resumeInstanceFromIdle } from '../src/gateway/providers/gpu/idle-pause';
 import { createLogger } from '../src/logger';
 import { categorizeDeployError } from '../src/errors/deploy-errors';
 import { errorSummary } from '../src/error-summary';
 import { tryAutoRemediation } from '../src/auto-remediation';
 import {
   deployState, setDeployState, deployApiKey, deployVastApiKey,
-  deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey,
+  deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey, deployHyperstackApiKey,
   resetDeployState, deploymentSM,
   setGpuHealthy, setLastRequestTime,
 } from './state';
-import { runpod, vast, tensordock, modal } from './providers';
+import { runpod, vast, tensordock, modal, hyperstack } from './providers';
 import { logGpuEvent } from './metrics';
 import { broadcastWs, broadcastProviderStatus } from './ws-state';
 import { startGpuMonitoring } from './gpu-monitor-loop';
@@ -58,6 +59,8 @@ export async function resumeOrDeploy(opts: {
     client = tensordock; credentials.apiKey = deployTensordockApiKey; credentials.authId = deployTensordockAuthId;
   } else if (provider === 'modal' && deployModalApiKey) {
     client = modal; credentials.apiKey = deployModalApiKey;
+  } else if (provider === 'hyperstack' && deployHyperstackApiKey) {
+    client = hyperstack; credentials.apiKey = deployHyperstackApiKey;
   }
 
   if (!client) {
@@ -70,18 +73,23 @@ export async function resumeOrDeploy(opts: {
   log.log(`[gpu] resumeOrDeploy: attempting resume of ${provider} pod ${podId} (reason=${opts.reason})`);
 
   try {
-    await client.startInstance(podId, credentials);
-    log.log(`[gpu] Resume succeeded: ${provider} pod ${podId}`);
+    const pausedMode = deployState.pausedMode;
+    await resumeInstanceFromIdle(provider, podId, credentials, client, pausedMode);
+    log.log(
+      `[gpu] Resume succeeded: ${provider} pod ${podId}` +
+      (pausedMode === 'hibernate' ? ' (hibernate-restore)' : ''),
+    );
 
     // Resolve endpoint
     let endpoint = '';
     try {
       const info = await (client as any).resolveInstanceEndpoint?.(podId, credentials);
-      if (info?.endpoint) endpoint = info.endpoint;
+      if (typeof info === 'string') endpoint = info;
+      else if (info?.endpoint) endpoint = info.endpoint;
     } catch { /* best-effort: cleanup or optional side-effect */ }
     if (!endpoint) endpoint = deployState.endpoint; // fallback to last known
 
-    // Transition to booting
+    // Transition to booting — clear pausedMode so subsequent pauses start fresh
     const resumeStartedAt = Date.now();
     setDeployState({
       status: 'booting',
@@ -90,13 +98,17 @@ export async function resumeOrDeploy(opts: {
       provider,
       message: 'Pod resumed — waiting for health check',
       startedAt: resumeStartedAt,
+      pausedMode: undefined,
     });
     deploymentSM.startBooting(podId);
     logGpuEvent('instance_resumed', provider, true, { metadata: { podId, reason: opts.reason } });
     broadcastWs({ type: 'gpu:resume', action: 'success', deployId: deployState.deployId, podId, provider });
 
-    // Poll health until ready (resumed pods typically boot in ~19s)
-    const RESUME_TIMEOUT_MS = 120_000; // 2 min max for resume
+    // Poll health until ready. Lightweight containers come back in ~19s, but
+    // ML workloads (MuseTalk, ultravox, etc.) reload several GB of weights on
+    // restart and routinely take 2-5 min. Default raised to 5 min; override
+    // via RESUME_TIMEOUT_MS env var if your image is even slower.
+    const RESUME_TIMEOUT_MS = Number.parseInt(process.env.RESUME_TIMEOUT_MS ?? '300000', 10);
     const RESUME_POLL_INTERVAL_MS = 3_000;
     let healthy = false;
     while (Date.now() - resumeStartedAt < RESUME_TIMEOUT_MS) {
@@ -170,7 +182,7 @@ export async function resumeOrDeploy(opts: {
     const {
       setDeployApiKey: _setDeployApiKey, setDeployVastApiKey: _setDeployVastApiKey,
       setDeployTensordockApiKey: _setDeployTensordockApiKey, setDeployTensordockAuthId: _setDeployTensordockAuthId,
-      setDeployModalApiKey: _setDeployModalApiKey,
+      setDeployModalApiKey: _setDeployModalApiKey, setDeployHyperstackApiKey: _setDeployHyperstackApiKey,
     } = await import('./state');
 
     // Save API keys BEFORE reset (resetDeployState clears them)
@@ -179,6 +191,7 @@ export async function resumeOrDeploy(opts: {
       vast: deployVastApiKey,
       tensordock: deployTensordockApiKey ? { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId } : undefined,
       modal: deployModalApiKey,
+      hyperstack: deployHyperstackApiKey,
     };
 
     resetDeployState();
@@ -191,6 +204,7 @@ export async function resumeOrDeploy(opts: {
       _setDeployTensordockAuthId(savedKeys.tensordock.authId);
     }
     if (savedKeys.modal) _setDeployModalApiKey(savedKeys.modal);
+    if (savedKeys.hyperstack) _setDeployHyperstackApiKey(savedKeys.hyperstack);
 
     // Build tiers from saved credentials
     const tiers = buildGpuTiers(
@@ -198,6 +212,7 @@ export async function resumeOrDeploy(opts: {
       savedKeys.vast || undefined,
       savedKeys.tensordock,
       savedKeys.modal || undefined,
+      savedKeys.hyperstack || undefined,
     );
 
     if (tiers.length === 0) {

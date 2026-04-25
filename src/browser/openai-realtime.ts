@@ -204,7 +204,6 @@ export class OpenAIRealtimeClient extends TypedEmitter<OpenAIRealtimeEventMap> {
   private _dc: RTCDataChannel | null = null;
   private _audioEl: HTMLAudioElement | null = null;
   private _micStream: MediaStream | null = null;
-  private _remoteStream: MediaStream | null = null;
 
   // Timers
   private _connectionTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -319,7 +318,6 @@ export class OpenAIRealtimeClient extends TypedEmitter<OpenAIRealtimeEventMap> {
 
       pc.ontrack = (e) => {
         audioEl.srcObject = e.streams[0];
-        this._remoteStream = e.streams[0];
         this.emit('audio-stream', e.streams[0]);
       };
 
@@ -748,7 +746,6 @@ export class OpenAIRealtimeClient extends TypedEmitter<OpenAIRealtimeEventMap> {
     }
 
     this._didConnect = false;
-    this._remoteStream = null;
     this.emit('audio-stream', null);
   }
 

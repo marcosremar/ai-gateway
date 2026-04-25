@@ -14,9 +14,11 @@
 import { registerInferenceRoutes } from './gateway/inference';
 import { registerPipelineRoutes } from './gateway/pipeline';
 import { registerGpuRoutes } from './gateway/gpu';
+import { matchGpuDynamicRoute } from './gateway/gpu';
 import { registerGpuInfoRoutes } from './gateway/gpu-info';
 import { registerGpuSettingsRoutes } from './gateway/gpu-settings';
 import { registerConfigRoutes } from './gateway/config';
+import { registerAppRoutes, matchAppDynamicRoute } from './gateway/apps';
 import { registerWorkloadRoutes } from './compute/workloads';
 import { registerBotRoutes } from './compute/bots';
 import { registerImageRoutes, getDockerDynamicMatcher } from './compute/images';
@@ -28,9 +30,12 @@ export {
   registerInferenceRoutes,
   registerPipelineRoutes,
   registerGpuRoutes,
+  matchGpuDynamicRoute,
   registerGpuInfoRoutes,
   registerGpuSettingsRoutes,
   registerConfigRoutes,
+  registerAppRoutes,
+  matchAppDynamicRoute,
   registerWorkloadRoutes,
   registerBotRoutes,
   registerImageRoutes,
@@ -49,6 +54,7 @@ export function registerAllRoutes(handlers: Record<string, Function>): void {
   registerGpuInfoRoutes(handlers);
   registerGpuSettingsRoutes(handlers);
   registerConfigRoutes(handlers);
+  registerAppRoutes(handlers);
   registerInferenceRoutes(handlers);
 
   // Compute
@@ -62,4 +68,12 @@ export function registerAllRoutes(handlers: Record<string, Function>): void {
 
   // Pipeline (WebSocket — no HTTP routes)
   registerPipelineRoutes(handlers);
+}
+
+export function getGpuDynamicMatcher(): typeof matchGpuDynamicRoute {
+  return matchGpuDynamicRoute;
+}
+
+export function getAppDynamicMatcher(): typeof matchAppDynamicRoute {
+  return matchAppDynamicRoute;
 }

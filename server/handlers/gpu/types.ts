@@ -20,6 +20,7 @@ export interface DeployRequest {
   skipIfRunning?: boolean;
   force?: boolean;
   race?: boolean;
+  raceCount?: number;
   maxCostUsd?: number;
 }
 

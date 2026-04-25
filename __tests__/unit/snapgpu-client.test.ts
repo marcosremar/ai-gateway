@@ -6,10 +6,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SnapgpuClient, DEFAULT_SNAPGPU_IMAGE } from '../src/gpu-providers/snapgpu-client';
-import { GpuProviderRegistry } from '../src/gpu-providers/registry';
-import { AbstractGpuProvider } from '../src/gpu-providers/abstract-provider';
-import type { GpuInstance, InstanceSpec, ProviderCredentials } from '../src/gpu-providers/types';
+import { SnapgpuClient, DEFAULT_SNAPGPU_IMAGE } from '../../src/gpu-providers/snapgpu-client';
+import { GpuProviderRegistry } from '../../src/gpu-providers/registry';
+import { AbstractGpuProvider } from '../../src/gpu-providers/abstract-provider';
+import type { GpuInstance, InstanceSpec, ProviderCredentials } from '../../src/gpu-providers/types';
 
 // ── Stubs ───────────────────────────────────────────────────────────────────
 
@@ -57,7 +57,7 @@ beforeEach(() => {
 
   vastMock = createMockBackend('vast');
   registry = new GpuProviderRegistry();
-  registry.register(vastMock as unknown as import('../src/gpu-providers/types').GpuProviderClient);
+  registry.register(vastMock as unknown as import('../../src/gpu-providers/types').GpuProviderClient);
 });
 
 afterEach(() => {

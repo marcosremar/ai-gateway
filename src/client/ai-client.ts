@@ -1015,6 +1015,8 @@ export class AIClient {
     switch (providerId) {
       case 'vast':
         return process.env.VAST_API_KEY ? { apiKey: process.env.VAST_API_KEY } : null;
+      case 'hyperstack':
+        return process.env.HYPERSTACK_API_KEY ? { apiKey: process.env.HYPERSTACK_API_KEY } : null;
       case 'runpod':
         return process.env.RUNPOD_API_KEY ? { apiKey: process.env.RUNPOD_API_KEY } : null;
       case 'tensordock':

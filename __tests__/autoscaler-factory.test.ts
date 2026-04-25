@@ -76,6 +76,7 @@ describe('PROVIDER_BOOT_SECS', () => {
     expect(PROVIDER_BOOT_SECS.tensordock).toBeGreaterThan(0);
     expect(PROVIDER_BOOT_SECS.runpod).toBeGreaterThan(0);
     expect(PROVIDER_BOOT_SECS.vast).toBeGreaterThan(0);
+    expect(PROVIDER_BOOT_SECS.hyperstack).toBeGreaterThan(0);
     expect(PROVIDER_BOOT_SECS.modal).toBeGreaterThan(0);
   });
 
@@ -92,6 +93,10 @@ describe('createAutoscaler()', () => {
   });
 
   describe('returned object structure', () => {
+    it('should register the hyperstack provider', () => {
+      expect(autoscaler.registry.get('hyperstack')).toBeDefined();
+    });
+
     it('should expose registry', () => {
       expect(autoscaler.registry).toBeDefined();
     });

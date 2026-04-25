@@ -39,6 +39,48 @@ export interface StandbyProfileConfig {
   maxStandby: number;
   dockerImage: string;
   gpuTypes: string[];
+  /**
+   * Opt in to cuda-checkpoint drain/re-materialize around CRIU dump/restore.
+   * Required for any CUDA-resident workload (LLM, STT, TTS inference). When
+   * false (default) snapshots capture non-CUDA processes only — existing
+   * behavior is preserved for back-compat.
+   */
+  useCudaCheckpoint?: boolean;
+  /**
+   * When true AND the tier's provider supports hibernate (currently only
+   * Hyperstack), idle pool slots are hibernated instead of terminated. This
+   * drops billing to ~10–15% of the running rate (IP + disk only) while
+   * preserving the VM so it can be restored in ~60–90s without a full cold
+   * boot. Falls back to the normal terminate path on any other provider.
+   *
+   * Default: false — explicit opt-in, so existing profiles keep their
+   * destructive-terminate semantics.
+   */
+  hibernateOnIdle?: boolean;
+  /**
+   * When true, the next request to the profile triggers `hibernateRestore`
+   * automatically (paired with `hibernateOnIdle`). When false/absent, the
+   * caller is responsible for waking the VM (e.g. via POST /v1/gpu/resume).
+   */
+  hibernateWakeOnRequest?: boolean;
+  /**
+   * When true AND the tier's provider supports it (currently Hyperstack), idle
+   * pool slots call the SSH offload signal (touching /tmp/bench.offload)
+   * instead of hibernate/terminate. The VM stays running so the next request
+   * can wake it in ~2-5s via /tmp/bench.onload, far faster than hibernate
+   * restore (~60-90s) or cold deploy (~10+ min).
+   *
+   * Cost warning — Hyperstack bills per-VM, so offloadOnIdle saves NO money
+   * (the VM keeps billing at the full running rate). Use hibernateOnIdle or
+   * terminate paths when cost is the priority; use offloadOnIdle when
+   * sub-5s wake-on-request latency matters more than billing.
+   *
+   * Default: false — explicit opt-in.
+   */
+  offloadOnIdle?: boolean;
+  /** Remote VM SSH coordinates — required when offloadOnIdle is true. */
+  sshHost?: string;
+  sshPort?: number;
 }
 
 export interface StandbyPodRecord {
@@ -50,6 +92,11 @@ export interface StandbyPodRecord {
   /** true = in pool, available for checkout; false = checked out. */
   inPool: boolean;
   lastCheckedAt: number;
+  /** Optional SSH coordinates — populated when the provider exposes them.
+   *  Used by offloadOnIdle to issue /tmp/bench.offload touches without
+   *  having to re-resolve the endpoint. */
+  sshHost?: string;
+  sshPort?: number;
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -72,6 +119,13 @@ export function removeStandbyPoolConfig(profile: string): void {
   profiles.delete(profile);
   // Leave existing pods running — the monitor will scale them down as part
   // of maxStandby=0 sweeps if the profile is re-registered with 0.
+}
+
+/** Look up the registered config for a profile. Returns undefined if the
+ *  profile has been deregistered. Used by the adapter to read flags like
+ *  `hibernateOnIdle` that must survive a pod record. */
+export function getStandbyPoolConfig(profile: string): StandbyProfileConfig | undefined {
+  return profiles.get(profile);
 }
 
 export function getStandbyPoolStatus(): {

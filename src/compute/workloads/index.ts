@@ -22,6 +22,8 @@
  */
 
 export * from './types';
+export { registerWorkloadServerRuntime } from './server-runtime';
+export type { WorkloadServerRuntime } from './server-runtime';
 export { WorkloadRegistry, workloadRegistry } from './registry';
 export { GpuWorkloadDriver } from './gpu-driver';
 export { BotWorkloadDriver } from './bot-driver';

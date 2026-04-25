@@ -75,9 +75,13 @@ export function shouldResetIdleFromHealth(
   // Model still loading (e.g. downloading from HuggingFace)
   if (healthData.model_loaded === false) return true;
 
-  // GPU utilization > 0% from health probe data
-  // This catches external workloads calling the pod directly
-  if (deployedGpuUtil > 0) return true;
+  // GPU utilization > 5% from health probe data — pega processamento ativo
+  // mesmo via bypass do gateway (chamadas diretas ao pod). Aceitamos tanto
+  // deployedGpuUtil (do polling externo) quanto gpu_util reportado pelo pod
+  // no body do /health (mais confiável — vem do nvidia-smi local).
+  if (deployedGpuUtil > 5) return true;
+  const reportedUtil = healthData.gpu_util ?? healthData.gpuUtil;
+  if (typeof reportedUtil === 'number' && reportedUtil > 5) return true;
 
   // last_request_at: timestamp (epoch seconds or ms) of last request processed by GPU.
   // This is the primary fix for the "probe gap" bug — even if GPU utilization
@@ -116,10 +120,11 @@ export function shouldResetIdleFromHealth(
  *   Formula: max(MIN_IDLE_MS, bootDurationMs * BOOT_COST_MULTIPLIER)
  */
 
-/** Minimum idle timeout regardless of model size. */
-const MIN_IDLE_TIMEOUT_MS = 5 * 60_000; // 5 min floor — aligns with A3 (docs/compete-with-modal.md)
+/** Minimum idle timeout: 4h pra suportar long-running bypass workloads
+ *  (3h+ de geração de library MuseTalk frame-a-frame). */
+const MIN_IDLE_TIMEOUT_MS = 240 * 60_000;
 /** Maximum idle timeout cap. */
-const MAX_IDLE_TIMEOUT_MS = 60 * 60_000; // 60 min ceiling
+const MAX_IDLE_TIMEOUT_MS = 480 * 60_000; // 8 h ceiling
 /** Multiplier: idle timeout = boot time * this factor. */
 const BOOT_COST_MULTIPLIER = 2.0;
 /** Minimum boot grace period (don't kill during init). */

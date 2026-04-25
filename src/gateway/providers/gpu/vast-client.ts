@@ -1515,7 +1515,7 @@ export class VastClient extends AbstractGpuProvider {
         // Vast failures with this opaque message.
         let tunnelFailReason = 'SSH tunnel failed';
         try {
-          const { getOrCreateTunnel } = await import('../../../../server/ssh-tunnel');
+          const { getOrCreateTunnel } = await import('./ssh-tunnel');
           const tunnel = getOrCreateTunnel(sshHost, sshPort, 8000);
           // Vast.ai propagates user SSH keys to the container at boot, but there's
           // a ~10-15s delay between status=running and the keys being available.

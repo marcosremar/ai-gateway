@@ -160,12 +160,12 @@ vi.mock('../../server/config-persistence', () => ({
 }));
 
 // Ensemble STT
-vi.mock('../src/ensemble-stt', () => ({
+vi.mock('../../src/ensemble-stt', () => ({
   runEnsembleSTT: vi.fn(),
 }));
 
 // Groq STT provider
-vi.mock('../src/providers/groq', () => ({
+vi.mock('../../src/providers/groq', () => ({
   groqSTT: {},
 }));
 

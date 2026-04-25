@@ -1,34 +1,25 @@
 /**
- * GpuWorkloadDriver — bridges the existing GPU deploy/stop/resume/terminate
- * logic (server/gpu-handlers.ts + server/state.ts) into the WorkloadDriver interface.
- *
- * This is a thin adapter — all real logic stays in the existing handler modules.
+ * GpuWorkloadDriver — bridges GPU deploy/stop/resume/terminate runtime
+ * operations into the WorkloadDriver interface.
  */
 
 import type { Workload, WorkloadConfig, WorkloadDriver, GpuWorkloadConfig } from './types';
 import { WorkloadRegistry } from './registry';
+import { getWorkloadServerRuntime } from './server-runtime';
 
 export class GpuWorkloadDriver implements WorkloadDriver {
   readonly type = 'gpu' as const;
 
-  /**
-   * Lazy-import server modules to avoid circular deps
-   * (the workloads module is in src/, but GPU logic is in server/).
-   */
   private async serverState() {
-    return import('../../../server/state');
-  }
-
-  private async gpuHandlers() {
-    return import('../../../server/gpu-handlers');
+    return getWorkloadServerRuntime().state();
   }
 
   private async gpuDeploy() {
-    return import('../../../server/gpu-deploy');
+    return getWorkloadServerRuntime().gpuDeploy();
   }
 
   private async providers() {
-    return import('../../../server/providers');
+    return getWorkloadServerRuntime().providers();
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -37,11 +28,11 @@ export class GpuWorkloadDriver implements WorkloadDriver {
     const cfg = config as GpuWorkloadConfig;
     const state = await this.serverState();
     const deploy = await this.gpuDeploy();
-    const prov = await this.providers();
 
     // Build tiers from config
     const runpodKey = cfg.apiKey || process.env.RUNPOD_API_KEY || '';
     const vastKey = process.env.VAST_API_KEY || '';
+    const hyperstackKey = process.env.HYPERSTACK_API_KEY || '';
     const tdKey = process.env.TENSORDOCK_API_KEY || '';
     const tdAuthId = process.env.TENSORDOCK_AUTH_ID || '';
     const modalKey = process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET
@@ -52,6 +43,7 @@ export class GpuWorkloadDriver implements WorkloadDriver {
       vastKey || undefined,
       tdKey ? { apiKey: tdKey, authId: tdAuthId } : undefined,
       modalKey || undefined,
+      hyperstackKey || undefined,
     );
 
     const dockerImage = cfg.dockerImage || '';
@@ -90,7 +82,6 @@ export class GpuWorkloadDriver implements WorkloadDriver {
   async stop(workload: Workload): Promise<Workload> {
     const state = await this.serverState();
     const deploy = await this.gpuDeploy();
-    const prov = await this.providers();
 
     const provider = state.deployState.provider || 'runpod';
     const podId = state.deployState.podId;
@@ -143,6 +134,7 @@ export class GpuWorkloadDriver implements WorkloadDriver {
   async terminate(workload: Workload): Promise<void> {
     const state = await this.serverState();
     const deploy = await this.gpuDeploy();
+    const prov = await this.providers();
 
     deploy.stopGpuMonitoring();
     state.setDeployLock(false);
@@ -151,11 +143,20 @@ export class GpuWorkloadDriver implements WorkloadDriver {
 
     const apiKey = process.env.RUNPOD_API_KEY || '';
     const vastKey = process.env.VAST_API_KEY || '';
+    const hyperstackKey = process.env.HYPERSTACK_API_KEY || '';
     const tdKey = process.env.TENSORDOCK_API_KEY || '';
     const tdAuthId = process.env.TENSORDOCK_AUTH_ID || '';
 
     if (apiKey) await deploy.cleanupAllPods(apiKey);
     if (vastKey) await deploy.cleanupVastInstances(vastKey);
+    if (hyperstackKey) {
+      const instances = await prov.hyperstack.listInstances({ apiKey: hyperstackKey }) as Array<{ status: string; instanceId: string }>;
+      await Promise.allSettled(
+        instances
+          .filter((instance) => ['running', 'active', 'creating', 'booting'].includes(instance.status.toLowerCase()))
+          .map((instance) => prov.hyperstack.deleteInstance(instance.instanceId, { apiKey: hyperstackKey })),
+      );
+    }
     if (tdKey) await deploy.cleanupTensordockInstances(tdKey, tdAuthId);
   }
 
@@ -209,6 +210,10 @@ export class GpuWorkloadDriver implements WorkloadDriver {
       case 'vast':
         client = prov.vast;
         credentials = { apiKey: process.env.VAST_API_KEY || '' };
+        break;
+      case 'hyperstack':
+        client = prov.hyperstack;
+        credentials = { apiKey: process.env.HYPERSTACK_API_KEY || '' };
         break;
       case 'tensordock':
         client = prov.tensordock;

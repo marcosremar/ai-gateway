@@ -347,7 +347,7 @@ export class LoadBalancer {
     // Check queue size - if too full, escalate to urgent
     if (tier) {
       const connections = await this.getTierConnections(tier.tierIndex);
-      const loadFactor = (connections?.activeConnections ?? 0) / Math.max(1, readyTiers.length);
+      const loadFactor = (connections?.activeConnections ?? 0) / Math.max(1, this.priorityQueueConfig.maxQueueSize);
       
       // If load > 70%, use least-busy instead
       if (loadFactor > 0.7) {

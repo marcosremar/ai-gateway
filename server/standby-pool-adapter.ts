@@ -19,9 +19,12 @@
 
 import { createLogger } from '../src/logger';
 import type { GpuProviderClient, ProviderCredentials } from '../src/gpu-providers/types';
+import { pauseInstanceForIdle } from '../src/gateway/providers/gpu/idle-pause';
+import { offloadVm } from '../src/gateway/providers/gpu/vm-offload';
 import {
   setPoolAdapters,
   getStandbyPoolStatus,
+  getStandbyPoolConfig,
   type StandbyProfileConfig,
   type StandbyPodRecord,
   type StandbyTier,
@@ -141,6 +144,30 @@ async function poolDeploy(cfg: StandbyProfileConfig): Promise<StandbyPodRecord |
     viaPool: true,
   });
 
+  // Best-effort snapshot capture for this pool pod. Uses the per-profile
+  // cuda-checkpoint opt-in so CUDA-resident workloads drain VRAM via
+  // cuda-checkpoint --toggle before CRIU dumps the process tree. Fire-and-
+  // forget: pool membership does not depend on a successful capture.
+  if (instance.sshHost && instance.sshPort) {
+    const sshTarget = { host: instance.sshHost, port: instance.sshPort };
+    import('./gpu-snapshot')
+      .then(({ captureSnapshot }) =>
+        captureSnapshot({
+          deployId: instance.instanceId,
+          provider: cfg.tier,
+          ssh: sshTarget,
+          imageRef: cfg.dockerImage,
+          models: [],
+          useCudaCheckpoint: cfg.useCudaCheckpoint ?? false,
+        }),
+      )
+      .catch((err) =>
+        log.warn(
+          `[pool] capture failed for ${instance.instanceId}: ${err instanceof Error ? err.message : err}`,
+        ),
+      );
+  }
+
   return {
     podId: instance.instanceId,
     endpoint: instance.endpoint,
@@ -149,12 +176,91 @@ async function poolDeploy(cfg: StandbyProfileConfig): Promise<StandbyPodRecord |
     deployedAt: Date.now(),
     inPool: true,
     lastCheckedAt: Date.now(),
+    sshHost: instance.sshHost,
+    sshPort: instance.sshPort,
   };
 }
 
 async function poolTerminate(pod: StandbyPodRecord): Promise<void> {
   const binding = resolveTier(pod.tier);
   if (!binding) return;
+
+  // If the owning profile opted into hibernateOnIdle, pause the VM via
+  // provider-native hibernate instead of destroying it. Billing drops to
+  // ~10–15% of the running rate on Hyperstack while the disk is preserved
+  // for sub-90s restore. Profiles without the flag keep the existing
+  // destructive-terminate path.
+  const cfg = getStandbyPoolConfig(pod.profile);
+  const hibernateOpt = cfg?.hibernateOnIdle === true;
+  const offloadOpt = cfg?.offloadOnIdle === true;
+
+  // offloadOnIdle short-circuits both hibernate and terminate: the VM keeps
+  // running and the loader drops the model off the GPU via the bench-file
+  // protocol. Wake-on-request is ~2-5s (touch /tmp/bench.onload + poll
+  // /tmp/bench.ready) vs ~60-90s for hibernate restore or ~10min for a
+  // fresh deploy. Only valid when we have SSH coords for the pod — without
+  // them there's no way to issue the touch, so fall through to hibernate/
+  // terminate.
+  if (offloadOpt && pod.sshHost && pod.sshPort) {
+    try {
+      const ok = await offloadVm({ host: pod.sshHost, port: pod.sshPort });
+      if (ok) {
+        log.log(`[pool] offloaded ${pod.podId} (${pod.profile}) — VM still running`);
+        emitGatewayEvent('gpu.stopped', {
+          podId: pod.podId,
+          provider: pod.tier,
+          profile: pod.profile,
+          viaPool: true,
+          pausedMode: 'offload',
+          wakeOnRequest: true,
+        });
+        return;
+      }
+      log.warn(
+        `[pool] offload timed out for ${pod.podId} — falling through to hibernate/terminate`,
+      );
+    } catch (err) {
+      log.warn(
+        `[pool] offload failed for ${pod.podId} — falling through: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+  // Tier-to-provider mapping: the pool's tier ids are also used as provider
+  // names in the existing `gpu.*` events, so 'hyperstack' passes through and
+  // 'vast-vm' does not support hibernate — pauseInstanceForIdle falls back to
+  // stopInstance, which keeps vast-vm unchanged.
+  const providerName = pod.tier;
+  if (hibernateOpt) {
+    try {
+      const pausedMode = await pauseInstanceForIdle(
+        providerName,
+        pod.podId,
+        binding.credentials,
+        binding.client,
+        { allowHibernate: true },
+      );
+      log.log(
+        `[pool] ${pausedMode === 'hibernate' ? 'hibernated' : 'stopped'} ${pod.podId} (${pod.profile})` +
+          (pausedMode === 'hibernate' ? ' — billing paused' : ''),
+      );
+      emitGatewayEvent('gpu.stopped', {
+        podId: pod.podId,
+        provider: pod.tier,
+        profile: pod.profile,
+        viaPool: true,
+        pausedMode,
+        wakeOnRequest: cfg?.hibernateWakeOnRequest === true,
+      });
+      return;
+    } catch (err) {
+      log.warn(
+        `[pool] hibernate failed for ${pod.podId} — falling through to terminate: ${err instanceof Error ? err.message : err}`,
+      );
+      // Fall through to destructive terminate so a broken hibernate never
+      // pins a billable VM forever.
+    }
+  }
+
   try {
     await binding.client.deleteInstance(pod.podId, binding.credentials);
     log.log(`[pool] terminated ${pod.podId} (${pod.profile})`);

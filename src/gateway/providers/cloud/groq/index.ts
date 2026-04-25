@@ -6,7 +6,7 @@
 import { OpenAICompatSTTProvider } from '../openai-compat/openai-compat-stt';
 import { OpenAICompatTTSProvider } from '../openai-compat/openai-compat-tts';
 import { OpenAICompatLLMProvider } from '../openai-compat/openai-compat-llm';
-import { GROQ_STT_MODELS, GROQ_TTS_MODELS, GROQ_TTS_VOICES, GROQ_LLM_MODELS } from './models';
+import { GROQ_STT_MODELS, GROQ_TTS_MODELS, GROQ_TTS_VOICES } from './models';
 
 const BASE_URL = process.env.GROQ_API_BASE || 'https://api.groq.com/openai/v1';
 const ENV_KEY = 'GROQ_API_KEY';

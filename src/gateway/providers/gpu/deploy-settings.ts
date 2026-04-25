@@ -28,6 +28,7 @@ export const DEFAULT_GPU_PRIORITY: string[] = [
   'NVIDIA A100 80GB PCIe',   // tested — 80GB VRAM
   // RTX 5080 removed — Blackwell hosts consistently have direct_port_end: -1 (no NAT forwarding)
   'NVIDIA A40',              // 48GB VRAM, backup
+  'NVIDIA GeForce RTX 3090', // 24GB VRAM, Ampere — budget option for small models (e.g. EmoTalk)
 ];
 
 // Per-provider defaults — each provider has different GPU availability.

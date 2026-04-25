@@ -418,25 +418,25 @@ describe('Workload Handlers (#281-#293)', () => {
 
 describe('WorkloadRegistry (#294-#299)', () => {
   it('#294 list returns all workloads', async () => {
-    const { WorkloadRegistry } = await import('../src/workloads/registry');
+    const { WorkloadRegistry } = await import('../../src/workloads/registry');
     const reg = new WorkloadRegistry();
     expect(reg.list()).toEqual([]);
   });
 
   it('#295 getByName finds by name', async () => {
-    const { WorkloadRegistry } = await import('../src/workloads/registry');
+    const { WorkloadRegistry } = await import('../../src/workloads/registry');
     const reg = new WorkloadRegistry();
     expect(reg.getByName('test')).toBeUndefined();
   });
 
   it('#296 listByType filters correctly', async () => {
-    const { WorkloadRegistry } = await import('../src/workloads/registry');
+    const { WorkloadRegistry } = await import('../../src/workloads/registry');
     const reg = new WorkloadRegistry();
     expect(reg.listByType('gpu')).toEqual([]);
   });
 
   it('#297-299 event system exists', async () => {
-    const { WorkloadRegistry } = await import('../src/workloads/registry');
+    const { WorkloadRegistry } = await import('../../src/workloads/registry');
     const reg = new WorkloadRegistry();
     const events: unknown[] = [];
     const unsub = reg.onEvent(e => events.push(e));

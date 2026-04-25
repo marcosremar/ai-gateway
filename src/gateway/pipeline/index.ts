@@ -20,8 +20,11 @@ export {
   SSRF_BLOCKED_IP_PATTERNS,
   SSRF_BLOCKED_HOSTS,
   isPrivateUrl,
+  isPrivateUrlResolved,
   validateEndpointUrl,
+  validateEndpointUrlResolved,
   validateRemoteEndpoint,
+  validateRemoteEndpointResolved,
 } from './ssrf-protection';
 
 export {

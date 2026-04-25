@@ -3,7 +3,7 @@
  * Uses vi.mock to intercept dynamic imports of openai-realtime and speech-client.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TypedEmitter } from '../src/browser/emitter';
+import { TypedEmitter } from '../../src/browser/emitter';
 
 // ── Mock dynamic imports ─────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ class MockSpeechClient extends TypedEmitter<any> {
 let mockRealtimeInstance: MockRealtimeClient;
 let mockSpeechInstance: MockSpeechClient;
 
-vi.mock('../src/browser/openai-realtime', () => ({
+vi.mock('../../src/browser/openai-realtime', () => ({
   OpenAIRealtimeClient: class {
     constructor(opts: any) {
       mockRealtimeInstance = new MockRealtimeClient();
@@ -38,7 +38,7 @@ vi.mock('../src/browser/openai-realtime', () => ({
   },
 }));
 
-vi.mock('../src/browser/speech-client', () => ({
+vi.mock('../../src/browser/speech-client', () => ({
   SpeechClient: class {
     constructor(config: any) {
       mockSpeechInstance = new MockSpeechClient();
@@ -49,8 +49,8 @@ vi.mock('../src/browser/speech-client', () => ({
 
 // ── Import after mocking ─────────────────────────────────────────────────────
 
-import { UnifiedSpeechClient } from '../src/browser/unified-client';
-import type { UnifiedSpeechClientConfig } from '../src/browser/unified-client';
+import { UnifiedSpeechClient } from '../../src/browser/unified-client';
+import type { UnifiedSpeechClientConfig } from '../../src/browser/unified-client';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -134,7 +134,7 @@ describe('UnifiedSpeechClient', () => {
 
       // Need to wait for connect which triggers dynamic import
       // Override the dynamic mock behavior via a fresh mock instance
-      const mockModule = await import('../src/browser/openai-realtime');
+      const mockModule = await import('../../src/browser/openai-realtime');
       // @ts-ignore
       mockModule.OpenAIRealtimeClient = class {
         connect = vi.fn(async () => { throw new Error('WebRTC failed'); });

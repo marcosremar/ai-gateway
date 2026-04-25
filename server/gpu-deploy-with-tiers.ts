@@ -4,6 +4,8 @@
 
 import type { GpuTier } from '../src/gpu-providers/deploy-orchestrator';
 import { PROVIDER_LABELS } from '../src/gpu-providers/deploy-orchestrator';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 import { categorizeDeployError } from '../src/errors/deploy-errors';
 import { errorSummary } from '../src/error-summary';
 import { tryAutoRemediation } from '../src/auto-remediation';
@@ -13,7 +15,7 @@ import { profileOperation, recordOperationTiming } from '../src/performance-prof
 import {
   deployState, setDeployState, deployCancelled, deploymentSM,
   setDeployApiKey, setDeployVastApiKey,
-  setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey,
+  setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey, setDeployHyperstackApiKey,
 } from './state';
 import {
   logGpuEvent, startDeploySession, updateDeploySession, upsertHostReputation,
@@ -24,6 +26,8 @@ import { cooldownTracker, categorizeDeployFailure } from './gpu-deploy-tiers';
 import { startDeployLoop, type DeployExtra } from './gpu-deploy-loop';
 
 const log = createLogger('gpu-deploy');
+const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
+const MODAL_DEPLOY_SCRIPT = resolve(SERVER_DIR, '..', 'docker', 'modal', 'babelcast.py');
 
 export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>) {
   const deployId = `deploy-${Date.now()}`;
@@ -204,6 +208,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     else if (tier.name === 'vast') setDeployVastApiKey(tier.apiKey);
     else if (tier.name === 'tensordock') { setDeployTensordockApiKey(tier.apiKey); setDeployTensordockAuthId(tier.authId ?? ''); }
     else if (tier.name === 'modal') setDeployModalApiKey(tier.apiKey);
+    else if (tier.name === 'hyperstack') setDeployHyperstackApiKey(tier.apiKey);
 
     const tierStartedAt = Date.now();
     logGpuEvent('deploy_started', tier.name, true);
@@ -212,7 +217,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     try {
       // Modal uses a deploy script, not a Docker image — resolve to absolute path
       const tierDockerImage = tier.name === 'modal'
-        ? `${import.meta.dir}/../../docker/modal/babelcast.py`
+        ? MODAL_DEPLOY_SCRIPT
         : dockerImage;
       const tierGpuTypes = gpuTypesByProvider?.[tier.name] ?? gpuTypes;
       log.log(`[gpu] Starting ${tier.label} deploy loop (tier ${i + 1}/${availableTiers.length}, GPUs: ${tierGpuTypes.slice(0,3).map(g=>g.replace('NVIDIA ','').replace('GeForce ','')).join(', ')}...)`);

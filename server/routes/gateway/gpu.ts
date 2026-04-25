@@ -157,3 +157,16 @@ export function registerGpuRoutes(handlers: Record<string, Function>): void {
     log.warn(`[routes/gpu] Vast.ai handlers not loaded: ${e.message?.slice(0, 80)}`);
   }
 }
+
+export function matchGpuDynamicRoute(method: string, pathname: string): [Function, string[]] | null {
+  const upper = method.toUpperCase();
+  const gh = require('../../gpu-handlers');
+
+  if (upper === 'POST' && /^\/v1\/gpu\/snapshot\/[^/]+\/restore$/.test(pathname)) {
+    return [gh.handleSnapshotRestore, []];
+  }
+  if (upper === 'DELETE' && /^\/v1\/gpu\/snapshot\/[^/]+$/.test(pathname)) {
+    return [gh.handleSnapshotDelete, []];
+  }
+  return null;
+}

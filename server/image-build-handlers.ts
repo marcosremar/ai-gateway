@@ -18,7 +18,7 @@
  *   (Authorization callback URL: http://localhost — device flow doesn't use it)
  */
 
-import { sendJsonError } from './http-utils';
+import { handleBodyError, readJsonBody, sendJsonError } from './http-utils';
 import type { IncomingMessage, ServerResponse } from 'http';
 
 // Local response helpers
@@ -186,14 +186,9 @@ export async function handleDockerBuildStart(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
-  let body: Record<string, unknown> = {};
-  try {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
-    if (chunks.length > 0) body = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
-  } catch {
-    return badRequest(res, 'Invalid JSON body');
-  }
+  let body: Record<string, unknown>;
+  try { body = await readJsonBody(req); }
+  catch (err) { handleBodyError(res, err); return; }
 
   const dirPath = body.dirPath as string | undefined;
   if (!dirPath) return badRequest(res, 'Missing required field: dirPath');

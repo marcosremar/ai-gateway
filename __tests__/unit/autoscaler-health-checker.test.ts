@@ -5,11 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { probeAllTiers, processHealthResults, type HealthCheckResult, type ProcessHealthOpts } from '../src/autoscaler/health-checker';
-import { GpuProviderRegistry } from '../src/gpu-providers/registry';
-import type { GpuTierState, GpuTierConfig, IdleTierState, BootingTierState, ReadyTierState } from '../src/types';
-import type { GpuLifecycleLogger } from '../src/autoscaler/lifecycle-logger';
-import type { Logger } from '../src/deps';
+import { probeAllTiers, processHealthResults, type HealthCheckResult, type ProcessHealthOpts } from '../../src/autoscaler/health-checker';
+import { GpuProviderRegistry } from '../../src/gpu-providers/registry';
+import type { GpuTierState, GpuTierConfig, IdleTierState, BootingTierState, ReadyTierState } from '../../src/types';
+import type { GpuLifecycleLogger } from '../../src/autoscaler/lifecycle-logger';
+import type { Logger } from '../../src/deps';
 
 const silentLogger: Logger = { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 const noopLogger: GpuLifecycleLogger = { log: () => {} };

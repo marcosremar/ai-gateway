@@ -88,35 +88,96 @@ export function getSnapshotMetrics(): Readonly<SnapshotMetrics> {
 
 // ── R2/S3 helpers ───────────────────────────────────────────────────────────
 
+/** Resolve the snapshot store provider from env. Pure — returns a descriptor
+ * or null when required config is missing. Exported for unit tests so we can
+ * exercise the routing rules without pulling in the Bun S3 SDK. */
+export type SnapshotStoreConfig =
+  | { kind: 'hyperstack-s3'; bucket: string; endpoint: string; accessKeyId: string; secretAccessKey: string; region: string }
+  | { kind: 'r2'; bucket: string; accountId: string; accessKeyId: string; secretAccessKey: string; endpoint?: string }
+  | { kind: 's3'; bucket: string; endpoint: string; accessKeyId: string; secretAccessKey: string; region: string }
+  | { kind: 'disabled'; reason: string };
+
+export function resolveSnapshotStoreConfig(env: NodeJS.ProcessEnv = process.env): SnapshotStoreConfig {
+  // Prefer Hyperstack Object Storage — co-located with Hyperstack GPU pods
+  // (CANADA-1), so restore downloads stay in-DC.
+  const hsBucket = env.HYPERSTACK_SNAPSHOTS_BUCKET;
+  if (hsBucket) {
+    const endpoint = env.HYPERSTACK_SNAPSHOTS_ENDPOINT;
+    const accessKeyId = env.HYPERSTACK_SNAPSHOTS_ACCESS_KEY;
+    const secretAccessKey = env.HYPERSTACK_SNAPSHOTS_SECRET_KEY;
+    if (!endpoint || !accessKeyId || !secretAccessKey) {
+      return { kind: 'disabled', reason: 'HYPERSTACK_SNAPSHOTS_BUCKET set but ENDPOINT/ACCESS_KEY/SECRET_KEY missing' };
+    }
+    return {
+      kind: 'hyperstack-s3',
+      bucket: hsBucket,
+      endpoint,
+      accessKeyId,
+      secretAccessKey,
+      region: env.HYPERSTACK_SNAPSHOTS_REGION ?? 'CANADA-1',
+    };
+  }
+
+  const bucket = env.R2_SNAPSHOTS_BUCKET;
+  if (!bucket) return { kind: 'disabled', reason: 'no bucket configured' };
+
+  const endpoint = env.R2_SNAPSHOTS_ENDPOINT;
+  const accessKeyId = env.R2_SNAPSHOTS_ACCESS_KEY;
+  const secretAccessKey = env.R2_SNAPSHOTS_SECRET_KEY;
+  if (!accessKeyId || !secretAccessKey) {
+    return { kind: 'disabled', reason: 'R2_SNAPSHOTS_BUCKET set but ACCESS_KEY/SECRET_KEY missing' };
+  }
+
+  // R2 when endpoint matches *.r2.cloudflarestorage.com or is empty; generic
+  // S3 (MinIO, DigitalOcean Spaces, etc.) otherwise.
+  if (!endpoint || /r2\.cloudflarestorage\.com$/i.test(endpoint)) {
+    const accountId = endpoint
+      ? (endpoint.match(/^https?:\/\/([^.]+)\./)?.[1] ?? '')
+      : (env.R2_ACCOUNT_ID ?? '');
+    return { kind: 'r2', bucket, accountId, accessKeyId, secretAccessKey, endpoint };
+  }
+
+  return {
+    kind: 's3', bucket, endpoint, accessKeyId, secretAccessKey,
+    region: env.R2_SNAPSHOTS_REGION ?? 'auto',
+  };
+}
+
 /** Singleton snapshot bucket client. Returns null if config not provided. */
 let _store: ObjectStore | null | undefined;
 function getSnapshotStore(): ObjectStore | null {
   if (_store !== undefined) return _store;
-  const bucket = process.env.R2_SNAPSHOTS_BUCKET;
-  if (!bucket) {
-    _store = null;
-    return null;
+  const cfg = resolveSnapshotStoreConfig();
+  switch (cfg.kind) {
+    case 'disabled':
+      if (cfg.reason !== 'no bucket configured') log.warn(`[snapshot] ${cfg.reason} — disabling`);
+      _store = null;
+      return null;
+    case 'hyperstack-s3':
+      _store = createS3Store({
+        bucket: cfg.bucket, endpoint: cfg.endpoint,
+        accessKeyId: cfg.accessKeyId, secretAccessKey: cfg.secretAccessKey,
+        region: cfg.region,
+      });
+      log.log(`[snapshot] Hyperstack bucket configured: ${cfg.bucket} @ ${cfg.endpoint}`);
+      return _store;
+    case 'r2':
+      _store = createR2Store({
+        bucket: cfg.bucket, accountId: cfg.accountId,
+        accessKeyId: cfg.accessKeyId, secretAccessKey: cfg.secretAccessKey,
+        endpoint: cfg.endpoint,
+      });
+      log.log(`[snapshot] R2 bucket configured: ${cfg.bucket}${cfg.endpoint ? ` @ ${cfg.endpoint}` : ''}`);
+      return _store;
+    case 's3':
+      _store = createS3Store({
+        bucket: cfg.bucket, endpoint: cfg.endpoint,
+        accessKeyId: cfg.accessKeyId, secretAccessKey: cfg.secretAccessKey,
+        region: cfg.region,
+      });
+      log.log(`[snapshot] S3 bucket configured: ${cfg.bucket} @ ${cfg.endpoint}`);
+      return _store;
   }
-  const endpoint = process.env.R2_SNAPSHOTS_ENDPOINT;
-  const accessKey = process.env.R2_SNAPSHOTS_ACCESS_KEY;
-  const secretKey = process.env.R2_SNAPSHOTS_SECRET_KEY;
-  if (!accessKey || !secretKey) {
-    log.warn(`[snapshot] R2_SNAPSHOTS_BUCKET set but R2_SNAPSHOTS_ACCESS_KEY/SECRET_KEY missing — disabling`);
-    _store = null;
-    return null;
-  }
-  // Prefer R2 when endpoint matches *.r2.cloudflarestorage.com; fall back to
-  // generic S3 for MinIO or custom endpoints.
-  if (!endpoint || /r2\.cloudflarestorage\.com$/i.test(endpoint)) {
-    const accountId = endpoint
-      ? (endpoint.match(/^https?:\/\/([^.]+)\./)?.[1] ?? '')
-      : (process.env.R2_ACCOUNT_ID ?? '');
-    _store = createR2Store({ bucket, accountId, accessKeyId: accessKey, secretAccessKey: secretKey, endpoint });
-  } else {
-    _store = createS3Store({ bucket, endpoint, accessKeyId: accessKey, secretAccessKey: secretKey, region: process.env.R2_SNAPSHOTS_REGION ?? 'auto' });
-  }
-  log.log(`[snapshot] Bucket configured: ${bucket}${endpoint ? ` @ ${endpoint}` : ''}`);
-  return _store;
 }
 
 /** Exposed for tests — reset the cached client. */
@@ -246,6 +307,19 @@ export interface SshTarget {
   keyPath?: string;
 }
 
+export type SshExecFn = (
+  tgt: SshTarget,
+  cmd: string,
+  opts?: { timeoutMs?: number },
+) => Promise<{ code: number; stdout: string; stderr: string }>;
+
+/** Test injection hook — when set, captureSnapshot/maybeRestoreSnapshot use it
+ * instead of the real ssh binary. Not exported from index.ts. */
+let _sshExecOverride: SshExecFn | null = null;
+export function _setSshExecForTests(fn: SshExecFn | null): void {
+  _sshExecOverride = fn;
+}
+
 /**
  * Run an SSH command and return { code, stdout, stderr }. NEVER passes
  * user-controlled data through shell interpolation. `cmd` is a literal
@@ -257,6 +331,7 @@ export async function sshExec(
   cmd: string,
   opts: { timeoutMs?: number } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
+  if (_sshExecOverride) return _sshExecOverride(tgt, cmd, opts);
   const timeoutMs = opts.timeoutMs ?? 30_000;
   assertSafe(tgt.host, 'host');
   if (!Number.isFinite(tgt.port) || tgt.port <= 0 || tgt.port > 65535) {
@@ -327,6 +402,55 @@ export async function snapshotPreCheck(
   return { ok: true, driverMajor };
 }
 
+// ── cuda-checkpoint bootstrap ───────────────────────────────────────────────
+
+/** Canonical install path for the cuda-checkpoint helper on the remote VM. */
+export const CUDA_CHECKPOINT_PATH = '/usr/local/bin/cuda-checkpoint';
+// Pin to a specific commit SHA rather than `main` so a tampered or moved
+// upstream tip can't silently substitute the binary we install with sudo.
+// Bump via CUDA_CHECKPOINT_COMMIT env var without a code change if needed.
+const CUDA_CHECKPOINT_COMMIT =
+  process.env.CUDA_CHECKPOINT_COMMIT?.trim() || 'main';
+const CUDA_CHECKPOINT_URL =
+  `https://raw.githubusercontent.com/NVIDIA/cuda-checkpoint/${CUDA_CHECKPOINT_COMMIT}/bin/x86_64_Linux/cuda-checkpoint`;
+// Optional integrity check: set CUDA_CHECKPOINT_SHA256 to the expected hex
+// digest of the binary. When unset we fall back to a sanity check that the
+// downloaded file is a real ELF of plausible size.
+const CUDA_CHECKPOINT_SHA256 = process.env.CUDA_CHECKPOINT_SHA256?.trim() || '';
+const CUDA_CHECKPOINT_MIN_BYTES = 50_000;
+const CUDA_CHECKPOINT_MAX_BYTES = 50_000_000;
+
+/**
+ * Ensure `cuda-checkpoint` is installed at {@link CUDA_CHECKPOINT_PATH} on the
+ * remote VM. Idempotent — runs a single SSH command that (1) probes `-h` and
+ * (2) only downloads when the probe fails. The download lands in a temp file,
+ * is verified, and only then atomically moved into the canonical path.
+ * Returns true if the binary is usable after the call, false otherwise.
+ */
+export async function ensureCudaCheckpointInstalled(tgt: SshTarget): Promise<boolean> {
+  const expectedSha = CUDA_CHECKPOINT_SHA256;
+  const shaCheck = expectedSha
+    ? `echo "${expectedSha}  $TMP" | sha256sum -c --status`
+    : `
+       size=$(stat -c%s "$TMP") &&
+       [ "$size" -ge ${CUDA_CHECKPOINT_MIN_BYTES} ] &&
+       [ "$size" -le ${CUDA_CHECKPOINT_MAX_BYTES} ] &&
+       head -c4 "$TMP" | od -An -c | grep -q 'E   L   F'
+      `.replace(/\s+/g, ' ');
+  const probeAndInstall =
+    `if ${CUDA_CHECKPOINT_PATH} -h >/dev/null 2>&1; then echo ok; else ` +
+    `TMP=$(mktemp) && ` +
+    `curl -fsSL -o "$TMP" ${CUDA_CHECKPOINT_URL} && ` +
+    `${shaCheck} && ` +
+    `sudo install -m 0755 -o root -g root "$TMP" ${CUDA_CHECKPOINT_PATH} && ` +
+    `rm -f "$TMP" && ` +
+    `${CUDA_CHECKPOINT_PATH} -h >/dev/null 2>&1 && echo installed || echo failed; fi`;
+  const res = await sshExec(tgt, probeAndInstall, { timeoutMs: 60_000 });
+  if (res.code !== 0) return false;
+  const out = res.stdout.trim();
+  return out.endsWith('ok') || out.endsWith('installed');
+}
+
 // ── Capture (B1) ────────────────────────────────────────────────────────────
 
 export interface CaptureInput {
@@ -338,6 +462,13 @@ export interface CaptureInput {
   models: readonly string[];
   /** Main process PID inside the pod that should be dumped. */
   mainPid?: number;
+  /**
+   * When true, drain VRAM via `cuda-checkpoint --toggle` before `criu dump`
+   * (required for any CUDA-using process) and add `--tcp-established` to the
+   * dump (HF Hub fetches leave outbound TCP sockets). Default false preserves
+   * existing non-CUDA behavior.
+   */
+  useCudaCheckpoint?: boolean;
 }
 
 export interface CaptureResult {
@@ -373,6 +504,29 @@ export async function captureSnapshot(input: CaptureInput): Promise<CaptureResul
   // gateway.
   assertSafe(input.deployId, 'deployId');
   const pid = input.mainPid && Number.isFinite(input.mainPid) ? input.mainPid : 1;
+
+  // When the target process is CUDA-resident, VRAM must be drained to host
+  // memory before CRIU can see a consistent process tree. cuda-checkpoint
+  // `--toggle` performs exactly that drain on its first invocation (and the
+  // inverse re-materialization after restore).
+  if (input.useCudaCheckpoint) {
+    const installed = await ensureCudaCheckpointInstalled(input.ssh);
+    if (!installed) {
+      metrics.captureFail++;
+      return { captured: false, reason: 'cuda-checkpoint install failed' };
+    }
+    const drain = await sshExec(
+      input.ssh,
+      `sudo ${CUDA_CHECKPOINT_PATH} --toggle --pid ${pid}`,
+      { timeoutMs: 60_000 },
+    );
+    if (drain.code !== 0) {
+      metrics.captureFail++;
+      log.warn(`[snapshot] cuda-checkpoint drain failed: ${drain.stderr.slice(0, 300)}`);
+      return { captured: false, reason: `cuda-checkpoint drain rc=${drain.code}` };
+    }
+  }
+
   const dumpCmd =
     `set -e && sudo rm -rf /tmp/snapshot && sudo mkdir -p /tmp/snapshot ` +
     `&& sudo criu dump --tree ${pid} --images-dir /tmp/snapshot --leave-running ` +
@@ -432,6 +586,12 @@ export interface RestoreInput {
   imageRef: string;
   imageDigest?: string;
   models: readonly string[];
+  /**
+   * When true, after `criu restore` toggle cuda-checkpoint again to
+   * re-materialize VRAM in the restored process. Must match the value used
+   * at capture time.
+   */
+  useCudaCheckpoint?: boolean;
 }
 
 export interface RestoreResult {
@@ -467,14 +627,25 @@ export async function maybeRestoreSnapshot(input: RestoreInput): Promise<Restore
 
   const start = Date.now();
   try {
+    if (input.useCudaCheckpoint) {
+      const installed = await ensureCudaCheckpointInstalled(input.ssh);
+      if (!installed) {
+        metrics.restoreFail++;
+        metrics.coldFallback++;
+        return { restored: false, reason: 'cuda-checkpoint install failed' };
+      }
+    }
+
     // Download tarball on the gateway side; pipe into pod via SSH stdin.
     const tarball = await store.get(match.r2Key);
     const b64 = Buffer.from(tarball).toString('base64');
+    // `--pidfile` lets us recover the restored process's PID for the post-
+    // restore cuda-checkpoint toggle. Harmless when toggle is off.
     const prep =
-      `set -e && sudo rm -rf /tmp/snapshot /tmp/snapshot.tar.zst ` +
+      `set -e && sudo rm -rf /tmp/snapshot /tmp/snapshot.tar.zst /tmp/snapshot.pid ` +
       `&& sudo mkdir -p /tmp/snapshot_in && printf %s ${shellQuote(b64)} | base64 -d > /tmp/snapshot.tar.zst ` +
       `&& sudo tar --zstd -xf /tmp/snapshot.tar.zst -C /tmp && sudo criu restore --images-dir /tmp/snapshot ` +
-      `--tcp-established --ext-unix-sk --file-locks -d 2>&1 | tail -50`;
+      `--tcp-established --ext-unix-sk --file-locks --restore-detached --pidfile /tmp/snapshot.pid 2>&1 | tail -50`;
     const restore = await sshExec(input.ssh, prep, { timeoutMs: 180_000 });
     if (restore.code !== 0) {
       metrics.restoreFail++;
@@ -483,6 +654,24 @@ export async function maybeRestoreSnapshot(input: RestoreInput): Promise<Restore
       metrics.autoDisableCount++;
       return { restored: false, reason: `criu restore rc=${restore.code}: ${restore.stderr.slice(0, 200)}` };
     }
+
+    if (input.useCudaCheckpoint) {
+      // Read the restored PID and toggle cuda-checkpoint again to re-materialize
+      // VRAM. A dedicated shell step so we surface failures distinctly from
+      // the restore itself.
+      const toggle = await sshExec(
+        input.ssh,
+        `set -e && NEW_PID=$(sudo cat /tmp/snapshot.pid) ` +
+          `&& sudo ${CUDA_CHECKPOINT_PATH} --toggle --pid "$NEW_PID"`,
+        { timeoutMs: 60_000 },
+      );
+      if (toggle.code !== 0) {
+        metrics.restoreFail++;
+        metrics.coldFallback++;
+        return { restored: false, reason: `cuda-checkpoint re-materialize rc=${toggle.code}: ${toggle.stderr.slice(0, 200)}` };
+      }
+    }
+
     const durationMs = Date.now() - start;
     metrics.restoreOk++;
     metrics.lastRestoreDurationMs = durationMs;

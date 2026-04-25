@@ -2,7 +2,7 @@
  * AIClient Types — Profile-based unified client for STT, LLM, TTS, and pipeline.
  */
 
-import type { TTSAudioFormat, ChatMessage, ProviderId } from '../providers/types';
+import type { TTSAudioFormat } from '../providers/types';
 import type { AIProviderRegistry } from '../providers/registry';
 import type { FallbackOptions } from '../providers/fallback';
 import type { Autoscaler } from '../factory';

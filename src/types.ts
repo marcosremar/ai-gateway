@@ -3,7 +3,7 @@
 export type AutoScaleRoute = 'llm' | 's2s';
 export type GpuBootState = 'idle' | 'booting' | 'ready';
 export type ScaleTrigger = 'sessions' | 'latency' | 'manual' | 'predictive';
-export type GpuProvider = 'tensordock' | 'runpod' | 'vast' | 'modal' | 'skypilot' | 'snapgpu';
+export type GpuProvider = 'tensordock' | 'runpod' | 'vast' | 'hyperstack' | 'modal' | 'skypilot' | 'snapgpu';
 export type { GpuInstance } from './gpu-providers/types';
 
 /**
@@ -23,6 +23,7 @@ export interface StageTimeouts {
 /** Default stage timeouts per provider (ms) */
 export const DEFAULT_STAGE_TIMEOUTS: Record<string, Required<StageTimeouts>> = {
   vast:       { discoverMs: 30_000, createMs: 120_000, startMs: 30_000 },
+  hyperstack: { discoverMs: 30_000, createMs: 120_000, startMs: 30_000 },
   runpod:     { discoverMs: 30_000, createMs: 90_000,  startMs: 30_000 },
   tensordock: { discoverMs: 30_000, createMs: 120_000, startMs: 30_000 },
   modal:      { discoverMs: 15_000, createMs: 60_000,  startMs: 15_000 },

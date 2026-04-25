@@ -3,7 +3,7 @@
  * Covers: createSqlDriver factory, Neon driver (mocked), Pg driver (mocked), error handling.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { DatabaseError } from '../src/database/types';
+import { DatabaseError } from '../../src/database/types';
 
 // ── createSqlDriver (factory) ─────────────────────────────────────────────────
 
@@ -23,7 +23,7 @@ describe('createSqlDriver()', () => {
       },
     }));
 
-    const { createSqlDriver } = await import('../src/database/pg-driver');
+    const { createSqlDriver } = await import('../../src/database/pg-driver');
     const driver = await createSqlDriver({
       environment: 'neon',
       databaseUrl: 'postgresql://user:pass@host/db',
@@ -45,7 +45,7 @@ describe('createSqlDriver()', () => {
       },
     }));
 
-    const { createSqlDriver } = await import('../src/database/pg-driver');
+    const { createSqlDriver } = await import('../../src/database/pg-driver');
     const driver = await createSqlDriver({
       environment: 'local',
       databaseUrl: 'postgresql://user:pass@localhost/db',
@@ -73,7 +73,7 @@ describe('createNeonDriver()', () => {
       neon: undefined,
     }));
 
-    const { createNeonDriver } = await import('../src/database/pg-driver');
+    const { createNeonDriver } = await import('../../src/database/pg-driver');
     await expect(createNeonDriver('postgresql://host/db')).rejects.toMatchObject({
       code: 'MISSING_DEPENDENCY',
     });
@@ -86,7 +86,7 @@ describe('createNeonDriver()', () => {
       neon: undefined, // export present but undefined
     }));
 
-    const { createNeonDriver } = await import('../src/database/pg-driver');
+    const { createNeonDriver } = await import('../../src/database/pg-driver');
     await expect(createNeonDriver('postgresql://host/db')).rejects.toMatchObject({
       code: 'MISSING_DEPENDENCY',
     });
@@ -100,7 +100,7 @@ describe('createNeonDriver()', () => {
       neon: (_connStr: string) => async (_sql: string, ...params: unknown[]) => mockRows,
     }));
 
-    const { createNeonDriver } = await import('../src/database/pg-driver');
+    const { createNeonDriver } = await import('../../src/database/pg-driver');
     const driver = await createNeonDriver('postgresql://host/db');
     const result = await driver.query('SELECT * FROM users');
     expect(result.rows).toEqual(mockRows);
@@ -114,7 +114,7 @@ describe('createNeonDriver()', () => {
       neon: (_connStr: string) => async () => [],
     }));
 
-    const { createNeonDriver } = await import('../src/database/pg-driver');
+    const { createNeonDriver } = await import('../../src/database/pg-driver');
     const driver = await createNeonDriver('postgresql://host/db');
     // Should not throw
     await expect(driver.close()).resolves.not.toThrow();
@@ -128,7 +128,7 @@ describe('createNeonDriver()', () => {
       neon: (_connStr: string) => sqlFn,
     }));
 
-    const { createNeonDriver } = await import('../src/database/pg-driver');
+    const { createNeonDriver } = await import('../../src/database/pg-driver');
     const driver = await createNeonDriver('postgresql://host/db');
     await driver.query('SELECT $1', ['hello']);
     expect(sqlFn).toHaveBeenCalledWith('SELECT $1', 'hello');
@@ -151,7 +151,7 @@ describe('createPgDriver()', () => {
       default: { Client: undefined },
     }));
 
-    const { createPgDriver } = await import('../src/database/pg-driver');
+    const { createPgDriver } = await import('../../src/database/pg-driver');
     // When Client is undefined, the driver throws 'Client export not found' (plain Error)
     await expect(createPgDriver('postgresql://host/db')).rejects.toThrow('Client export not found');
 
@@ -175,7 +175,7 @@ describe('createPgDriver()', () => {
       },
     }));
 
-    const { createPgDriver } = await import('../src/database/pg-driver');
+    const { createPgDriver } = await import('../../src/database/pg-driver');
     const driver = await createPgDriver('postgresql://host/db');
 
     expect(mockConnect).toHaveBeenCalled();
@@ -204,7 +204,7 @@ describe('createPgDriver()', () => {
       },
     }));
 
-    const { createPgDriver } = await import('../src/database/pg-driver');
+    const { createPgDriver } = await import('../../src/database/pg-driver');
     const driver = await createPgDriver('postgresql://host/db');
     const result = await driver.query('SELECT * FROM users');
     expect(result.rowCount).toBe(2); // fallback to rows.length
@@ -223,7 +223,7 @@ describe('createPgDriver()', () => {
       },
     }));
 
-    const { createPgDriver } = await import('../src/database/pg-driver');
+    const { createPgDriver } = await import('../../src/database/pg-driver');
     const driver = await createPgDriver('postgresql://host/db');
     await driver.query('SELECT $1', ['test-val']);
     expect(mockQuery).toHaveBeenCalledWith('SELECT $1', ['test-val']);
@@ -244,7 +244,7 @@ describe('createPgDriver()', () => {
       default: { Client: MockClient },
     }));
 
-    const { createPgDriver } = await import('../src/database/pg-driver');
+    const { createPgDriver } = await import('../../src/database/pg-driver');
     const driver = await createPgDriver('postgresql://host/db');
     expect(mockConnect).toHaveBeenCalled();
 

@@ -24,10 +24,7 @@ export interface PredictiveWarmupConfig {
   leadTimeMinutes?: number;
 }
 
-// 168 = 7 days * 24 hours
-const TOTAL_BUCKETS = 168;
 const USAGE_KEY_PREFIX = 'predictive:usage:';
-const USAGE_TTL_SECS = 30 * 24 * 60 * 60; // 30 days
 
 function usageKey(userId: string): string {
   return `${USAGE_KEY_PREFIX}${userId}`;

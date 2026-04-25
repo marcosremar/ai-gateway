@@ -18,8 +18,8 @@ import { readJsonBody, handleBodyError } from './http-utils';
 import { broadcastWs, wsClients, startBotTranscriptPoll, stopBotTranscriptPoll } from './ws-state';
 import { PORT } from './config';
 // Re-export consolidated SSRF check from ai-handlers (single source of truth)
-import { isPrivateUrl } from './ai-handlers';
-export { isPrivateUrl };
+import { isPrivateUrl, isPrivateUrlResolved } from './ai-handlers';
+export { isPrivateUrl, isPrivateUrlResolved };
 import { validateInput } from '../src/input-validator';
 import { BotDeployRequestSchema, BotJoinRequestSchema, BotStreamPageRequestSchema } from '../src/contracts';
 
@@ -783,7 +783,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
   }
 
   // SSRF protection — block private/internal network URLs
-  if (isPrivateUrl(meetingUrl)) {
+  if (isPrivateUrl(meetingUrl) || await isPrivateUrlResolved(meetingUrl)) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Meeting URL must not point to private/internal networks' }));
     return;

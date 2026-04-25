@@ -127,6 +127,7 @@ const API_KEY_DEFS = [
   { envVar: 'FIREWORKS_API_KEY', id: 'fireworks', name: 'Fireworks', category: 'cloud' },
   { envVar: 'OPENROUTER_API_KEY', id: 'openrouter', name: 'OpenRouter', category: 'cloud' },
   { envVar: 'VAST_API_KEY', id: 'vast', name: 'Vast.ai', category: 'gpu' },
+  { envVar: 'HYPERSTACK_API_KEY', id: 'hyperstack', name: 'Hyperstack', category: 'gpu' },
   { envVar: 'TENSORDOCK_API_KEY', id: 'tensordock', name: 'TensorDock', category: 'gpu' },
   { envVar: 'TENSORDOCK_AUTH_ID', id: 'tensordock_auth', name: 'TensorDock Auth ID', category: 'gpu' },
   { envVar: 'RUNPOD_API_KEY', id: 'runpod', name: 'RunPod', category: 'gpu' },

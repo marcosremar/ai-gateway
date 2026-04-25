@@ -66,8 +66,6 @@ import type {
 } from './types';
 import { WebSocketTransport } from './transport-ws';
 import { SSETransport } from './transport-sse';
-// WebRTC imported lazily to avoid pulling in @pipecat-ai/small-webrtc-transport at build time
-type WebRTCTransportType = import('./transport-webrtc').WebRTCTransport;
 
 const DEFAULT_FALLBACK_ORDER: ProtocolId[] = ['webrtc', 'websocket', 'sse'];
 const DEFAULT_FALLBACK_TIMEOUT = 10_000;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SSEFrameParser, type SSEFrame } from '../src/browser/sse-frame-parser';
+import { SSEFrameParser, type SSEFrame } from '../../src/browser/sse-frame-parser';
 
 const encoder = new TextEncoder();
 

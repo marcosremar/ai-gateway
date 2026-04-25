@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { RunawayDetector } from '../src/autoscaler/runaway-detector';
+import { RunawayDetector } from '../../src/autoscaler/runaway-detector';
 
 describe('RunawayDetector', () => {
   describe('with default config (6 starts / 2 min / 15 min pause)', () => {

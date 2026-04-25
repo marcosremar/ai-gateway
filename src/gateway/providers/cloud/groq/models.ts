@@ -43,6 +43,18 @@ export const GROQ_TTS_VOICES: VoiceInfo[] = [
 
 export const GROQ_LLM_MODELS: ModelInfo[] = [
   {
+    id: 'openai/gpt-oss-120b',
+    name: 'GPT-OSS 120B',
+    description: 'OpenAI open-weights 120B — best instruction following',
+    capability: 'llm',
+  },
+  {
+    id: 'qwen/qwen3-32b',
+    name: 'Qwen 3 32B',
+    description: 'Alibaba Qwen 3, strong multilingual reasoning',
+    capability: 'llm',
+  },
+  {
     id: 'llama-3.3-70b-versatile',
     name: 'Llama 3.3 70B Versatile',
     description: 'High-quality general-purpose model',

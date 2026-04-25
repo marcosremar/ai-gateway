@@ -64,6 +64,7 @@ export const API_KEYS = {
   openrouter: !!process.env.OPENROUTER_API_KEY,
   runpod: !!process.env.RUNPOD_API_KEY,
   vast: !!process.env.VAST_API_KEY,
+  hyperstack: !!process.env.HYPERSTACK_API_KEY,
   tensordock: !!process.env.TENSORDOCK_API_KEY,
   modal: !!process.env.MODAL_TOKEN_ID,
   neon: !!process.env.NEON_API_KEY,

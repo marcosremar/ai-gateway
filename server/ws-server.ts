@@ -86,6 +86,9 @@ export function validateStartupConfig(): string[] {
   if (!process.env.GATEWAY_API_KEY) {
     warnings.push('GATEWAY_API_KEY not set — only localhost connections will be allowed.');
   }
+  if (process.env.RECALL_API_KEY && !process.env.RECALL_WS_SECRET) {
+    warnings.push('RECALL_API_KEY is set but RECALL_WS_SECRET is missing — Recall audio ingress will fall back to gateway auth only.');
+  }
 
   return warnings;
 }
@@ -96,6 +99,24 @@ function safeCompare(a: string, b: string): boolean {
   try {
     return timingSafeEqual(Buffer.from(a), Buffer.from(b));
   } catch { return false; }
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
+function isGatewayWsAuthorized(
+  req: Request,
+  server: import('bun').Server<WsData>,
+  overrideToken?: string | null,
+): boolean {
+  const expectedToken = process.env.GATEWAY_API_KEY;
+  const authToken = overrideToken ?? req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';
+  if (expectedToken) {
+    return Boolean(authToken) && safeCompare(authToken, expectedToken);
+  }
+  const remoteAddr = server.requestIP(req)?.address || '';
+  return isLoopbackAddress(remoteAddr);
 }
 
 /** Send the initial gpu:status snapshot on a fresh bot events connection. */
@@ -173,12 +194,13 @@ export async function startWsServer(): Promise<number> {
 
       // ── Recall.ai audio endpoint — uses its own secret, checked before gateway auth ──
       if (url.pathname === '/recall/audio') {
-        const recallSecret = process.env.RECALL_WS_SECRET;
-        if (recallSecret) {
-          const token = url.searchParams.get('token') || req.headers.get('authorization')?.replace('Bearer ', '');
-          if (!token || !safeCompare(token, recallSecret)) {
-            return new Response('Unauthorized', { status: 401 });
-          }
+        const recallSecret = process.env.RECALL_WS_SECRET?.trim() ?? '';
+        const recallToken = url.searchParams.get('token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+        const recallAuthorized = recallSecret.length > 0
+          ? Boolean(recallToken) && safeCompare(recallToken ?? '', recallSecret)
+          : false;
+        if (!recallAuthorized && !isGatewayWsAuthorized(req, server, recallToken)) {
+          return new Response('Unauthorized', { status: 401 });
         }
         const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'recall-audio' } });
         if (upgraded) return;
@@ -187,18 +209,12 @@ export async function startWsServer(): Promise<number> {
 
       // WebSocket authentication.
       // Localhost exemption: if no GATEWAY_API_KEY is set AND connection is from localhost, allow it.
-      const expectedToken = process.env.GATEWAY_API_KEY;
-      const authToken = url.searchParams.get('token') || req.headers.get('authorization')?.replace('Bearer ', '');
-      if (expectedToken) {
-        if (!authToken || !safeCompare(authToken, expectedToken)) {
-          return new Response('Unauthorized', { status: 401 });
-        }
-      } else {
-        const remoteAddr = server.requestIP(req)?.address || '';
-        const isLocalhost = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
-        if (!isLocalhost) {
+      const authToken = url.searchParams.get('token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+      if (!isGatewayWsAuthorized(req, server, authToken)) {
+        if (!process.env.GATEWAY_API_KEY) {
           return new Response('Unauthorized — no GATEWAY_API_KEY configured, only localhost allowed', { status: 401 });
         }
+        return new Response('Unauthorized', { status: 401 });
       }
 
       if (url.pathname === '/v1/speech/ws') {

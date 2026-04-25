@@ -1,21 +1,19 @@
-import type { AutoscalerDeps, SettingsStore } from './deps';
+import type { AutoscalerDeps } from './deps';
 import type { AutoScalerConfig, AutoScaleDecision, GpuTierState } from './types';
-import type { GatewayHooks } from './hooks';
-import type { LoadBalanceStrategy, TierLatencyMetrics } from './autoscaler/load-balancer';
 import type { SpendTracker } from './tracking/spend-tracker';
-import type { PredictiveWarmupConfig } from './autoscaler/predictive-warmup';
 import type { GpuLifecycleLogger } from './autoscaler/lifecycle-logger';
 import { noopLifecycleLogger } from './autoscaler/lifecycle-logger';
 import type { TierActionResult, TierDetail } from './autoscaler/tier-lifecycle';
 import * as tierLifecycle from './autoscaler/tier-lifecycle';
 import { BenchmarkTracker } from './tracking/benchmark-tracker';
-import type { BootBenchmark, InferenceBenchmark, BenchmarkSummary, BenchmarkTrend } from './tracking/benchmark-tracker';
+import type { InferenceBenchmark, BenchmarkSummary, BenchmarkTrend } from './tracking/benchmark-tracker';
 import { GpuProviderRegistry } from './gpu-providers/registry';
 import { RunpodClient } from './gpu-providers/runpod-client';
 import { TensordockClient } from './gpu-providers/tensordock-client';
 import { VastClient } from './gpu-providers/vast-client';
 import { ModalClient } from './gpu-providers/modal-client';
 import { SnapgpuClient } from './gpu-providers/snapgpu-client';
+import { HyperstackClient } from './gpu-providers/hyperstack';
 import { LatencyTracker } from './autoscaler/latency-tracker';
 import { SessionTracker } from './autoscaler/session-tracker';
 import { StatePersistence } from './autoscaler/state-persistence';
@@ -29,6 +27,7 @@ export const PROVIDER_BOOT_SECS: Record<string, number> = {
   tensordock: 1200,
   runpod: 1200,
   vast: 900,
+  hyperstack: 90,
   modal: 60,
 };
 import { LoadBalancer } from './autoscaler/load-balancer';
@@ -113,7 +112,8 @@ export interface CreateAutoscalerOptions extends AutoscalerDeps {
  * via the deps parameter.
  *
  * The autoscaler manages GPU instances across multiple providers (RunPod, Vast.ai,
- * TensorDock, Modal, Snapgpu) with automatic scaling, health checking, and cost monitoring.
+ * TensorDock, Hyperstack, Modal, Snapgpu) with automatic scaling, health checking,
+ * and cost monitoring.
  *
  * @param opts - Dependencies and configuration including settings store, state store,
  *               session resolver, and optional hooks and lifecycle logger
@@ -183,6 +183,7 @@ export function createAutoscaler(opts: CreateAutoscalerOptions): Autoscaler {
   registry.register(new TensordockClient({ onInstancePersist, hooks }));
   registry.register(new ModalClient({ hooks }));
   registry.register(new VastClient({ onInstancePersist, hooks }));
+  registry.register(new HyperstackClient({ onInstancePersist, hooks }));
   // SnapgpuClient must be registered AFTER its backends (vast/runpod) so its
   // constructor can resolve them via registry.get(). It delegates GPU
   // lifecycle to the backend and adds CRIU + cuda-checkpoint snapshots

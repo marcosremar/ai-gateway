@@ -11,6 +11,7 @@ export const PROVIDER_KEY_MAP: Record<string, { apiKeyField: string; authIdField
   tensordock: { apiKeyField: 'tensordockApiKey', authIdField: 'tensordockAuthId' },
   runpod: { apiKeyField: 'runpodApiKey' },
   vast: { apiKeyField: 'vastApiKey' },
+  hyperstack: { apiKeyField: 'hyperstackApiKey' },
   modal: { apiKeyField: 'modalApiKey' },
 };
 
@@ -19,6 +20,7 @@ export const PROVIDER_ENV_MAP: Record<string, { apiKeyEnv: string; authIdEnv?: s
   tensordock: { apiKeyEnv: 'TENSORDOCK_API_KEY', authIdEnv: 'TENSORDOCK_AUTH_ID' },
   runpod: { apiKeyEnv: 'RUNPOD_API_KEY' },
   vast: { apiKeyEnv: 'VAST_API_KEY' },
+  hyperstack: { apiKeyEnv: 'HYPERSTACK_API_KEY' },
   modal: { apiKeyEnv: 'MODAL_API_KEY' },
 };
 

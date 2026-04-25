@@ -13,7 +13,6 @@
  *   pytorch/pytorch (~3GB compressed): 500Mbps → ~50s, 1Gbps → ~25s
  */
 
-import { AbstractGpuProvider } from './abstract-provider';
 import { defaultLogger as log } from '../../../logger';
 
 export interface PullTimeEstimate {
@@ -29,9 +28,6 @@ const MIN_TIMEOUT_MS = 120_000; // 2 min
 const MAX_TIMEOUT_MS = 1_800_000; // 30 min
 /** First-run timeout — no data yet, let it run long to collect baseline. */
 const FIRST_RUN_TIMEOUT_MS = 1_800_000; // 30 min
-/** Default safety multiplier applied to estimated pull time. */
-const DEFAULT_SAFETY = 2.0;
-
 // ── In-memory image size cache (avoids repeated Docker Hub API calls) ──────
 
 interface ImageSizeEntry {
@@ -276,7 +272,7 @@ export async function estimatePullTimeout(opts: {
   diskGb?: number;
   hostKey?: string;
 }): Promise<PullTimeEstimate> {
-  const { dockerImage, inetDownMbps = 500, diskGb = 20, hostKey } = opts;
+  const { dockerImage, inetDownMbps = 500, hostKey } = opts;
 
   // ── Priority 1: Host-specific history for this image ────────────────────
   if (hostKey) {

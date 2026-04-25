@@ -3,6 +3,7 @@
 // Looks for `com.babelcast.*` labels to auto-discover service capabilities.
 
 import { createLogger } from '../src/logger';
+import { readJsonBody } from './http-utils';
 
 const log = createLogger('docker-inspect');
 
@@ -139,9 +140,21 @@ export async function handleDockerInspect(
   res: import('http').ServerResponse,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
-  const image = url.searchParams.get('image');
+  let image = url.searchParams.get('image') || '';
+  if (!image && req.method === 'POST') {
+    try {
+      const body = await readJsonBody(req);
+      image = typeof body.image === 'string' ? body.image : '';
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'invalid JSON body' }));
+      return;
+    }
+  }
   if (!image) {
-    res.writeHead(400); res.end(JSON.stringify({ error: 'missing ?image= parameter' })); return;
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'missing image parameter' }));
+    return;
   }
   try {
     const manifest = await inspectDockerImage(image);

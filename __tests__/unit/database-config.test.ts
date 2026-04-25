@@ -6,7 +6,7 @@ import {
   buildPrismaUrl,
   getUnpooledUrl,
   getPooledUrl,
-} from '../src/database/config';
+} from '../../src/database/config';
 
 describe('detectEnvironment', () => {
   it('detects neon from URL', () => {

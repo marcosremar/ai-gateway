@@ -144,14 +144,14 @@ describe('Deploy Settings', () => {
   it('should have auto-recovery settings with correct defaults', async () => {
     const {
       getAutoRecoveryEnabled, getAutoRecoveryDelaySec, getAutoRecoveryMaxRetries,
-    } = await import('../src/gpu-providers/deploy-settings');
+    } = await import('../../src/gpu-providers/deploy-settings');
     expect(getAutoRecoveryEnabled()).toBe(true);
     expect(getAutoRecoveryDelaySec()).toBeGreaterThanOrEqual(5);
     expect(getAutoRecoveryMaxRetries()).toBeGreaterThanOrEqual(1);
   });
 
   it('should clamp auto-recovery delay to valid range', async () => {
-    const { setAutoRecoveryDelaySec, getAutoRecoveryDelaySec } = await import('../src/gpu-providers/deploy-settings');
+    const { setAutoRecoveryDelaySec, getAutoRecoveryDelaySec } = await import('../../src/gpu-providers/deploy-settings');
     setAutoRecoveryDelaySec(1);
     expect(getAutoRecoveryDelaySec()).toBe(5);
     setAutoRecoveryDelaySec(999);
@@ -168,7 +168,7 @@ describe('Deploy Settings', () => {
   it('should have latency target getters', async () => {
     const {
       getSttTargetLatencyMs, getLlmTargetLatencyMs, getTtsTargetLatencyMs,
-    } = await import('../src/gpu-providers/deploy-settings');
+    } = await import('../../src/gpu-providers/deploy-settings');
     expect(getSttTargetLatencyMs()).toBe(800);
     expect(getLlmTargetLatencyMs()).toBe(2000);
     expect(getTtsTargetLatencyMs()).toBe(1500);

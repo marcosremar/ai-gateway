@@ -229,6 +229,14 @@ export interface InstanceSpec {
    *  Allows callers to broadcast progress updates to show the user
    *  that creation is still in progress (e.g., "Pulling image... 45s"). */
   onPollProgress?: (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => void;
+  /** Hyperstack-only: pin the VM create to a specific Custom OS Image by id
+   *  (promoted from a snapshot via `createImageFromSnapshot`). Preferred over
+   *  `imageName` since it sidesteps name-collisions in region-scoped listings.
+   *  When both are set, `imageId` wins. Other providers ignore this field. */
+  imageId?: number;
+  /** Hyperstack-only: pin the VM create to a specific image by name. Useful
+   *  for ad-hoc testing; most deploys should use `imageId` instead. */
+  imageName?: string;
 }
 
 // ── GPU Offer Discovery ───────────────────────────────────────────────────

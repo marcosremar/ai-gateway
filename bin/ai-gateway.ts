@@ -1363,12 +1363,36 @@ async function resolveGpuInstance(opts?: GpuTargetOpts): Promise<GpuInstanceInfo
   };
 }
 
+/**
+ * Persistent known_hosts file used by all `ai-gateway` SSH/SCP invocations.
+ * Trust-on-first-use with `accept-new` is a meaningful improvement over the
+ * old `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` pair, which
+ * silently accepted any key on every connection. When an ephemeral cloud IP
+ * gets recycled the operator will see a mismatch and must prune the stale
+ * entry manually — intentional, since that mismatch is the only signal of a
+ * potential MITM.
+ */
+const SSH_KNOWN_HOSTS = resolve(
+  process.env.HOME || '.',
+  '.babelcast',
+  'known_hosts',
+);
+
+/** Ensure ~/.babelcast/ exists so ssh can persist accepted host keys. */
+function ensureKnownHostsDir(): void {
+  try {
+    const dir = dirname(SSH_KNOWN_HOSTS);
+    if (!existsSync(dir)) require('fs').mkdirSync(dir, { recursive: true });
+  } catch { /* best effort */ }
+}
+
 /** Build common SSH args for connecting to the GPU container. */
 function sshArgs(sshHost: string, sshPort: number): string[] {
+  ensureKnownHostsDir();
   return [
     '-p', String(sshPort),
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
+    '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', `UserKnownHostsFile=${SSH_KNOWN_HOSTS}`,
     '-o', 'ConnectTimeout=10',
     '-o', 'LogLevel=ERROR',
     `root@${sshHost}`,
@@ -1446,11 +1470,12 @@ async function cmdGpuPatch(localFile: string, remotePath?: string, opts?: { noRe
   console.log(`${c.cyan}PATCH${c.reset} ${localFile} → ${info.sshHost}:${resolvedRemote}`);
 
   // Step 1: SCP the file
+  ensureKnownHostsDir();
   const spin = spinner('Copying file...');
   const scpProc = spawn('scp', [
     '-P', String(info.sshPort),
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
+    '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', `UserKnownHostsFile=${SSH_KNOWN_HOSTS}`,
     '-o', 'ConnectTimeout=10',
     '-o', 'LogLevel=ERROR',
     localFile,
@@ -1589,6 +1614,7 @@ async function cmdGpuCommit(target?: GpuTargetOpts, opts?: { message?: string })
   const outDir = resolve(process.cwd(), 'gpu-commit');
   require('fs').mkdirSync(outDir, { recursive: true });
 
+  ensureKnownHostsDir();
   let downloaded = 0;
   const downloadedPaths: string[] = [];
   for (const remoteFile of files) {
@@ -1600,8 +1626,8 @@ async function cmdGpuCommit(target?: GpuTargetOpts, opts?: { message?: string })
 
     const dl = spawn('scp', [
       '-P', String(info.sshPort),
-      '-o', 'StrictHostKeyChecking=no',
-      '-o', 'UserKnownHostsFile=/dev/null',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', `UserKnownHostsFile=${SSH_KNOWN_HOSTS}`,
       '-o', 'LogLevel=ERROR',
       `root@${info.sshHost}:${remoteFile}`,
       localDest,
@@ -1777,11 +1803,12 @@ async function cmdGpuPull(remotePath: string, localPath?: string, target?: GpuTa
   const resolvedLocal = localPath || remotePath.split('/').pop() || 'downloaded';
   console.log(`${c.cyan}PULL${c.reset} ${info.sshHost}:${remotePath} → ${resolvedLocal}`);
 
+  ensureKnownHostsDir();
   const spin = spinner('Downloading...');
   const scpProc = spawn('scp', [
     '-P', String(info.sshPort),
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null',
+    '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', `UserKnownHostsFile=${SSH_KNOWN_HOSTS}`,
     '-o', 'ConnectTimeout=10',
     '-o', 'LogLevel=ERROR',
     `root@${info.sshHost}:${remotePath}`,
@@ -1978,6 +2005,404 @@ async function cmdGpuDev(args: string[]) {
       console.error(`Usage: ai-gateway gpu dev <start|sh|exec|push|pull|snapshot|info|serve|stop|status>`);
       process.exit(1);
   }
+}
+
+// ── Hyperstack-specific commands (custom OS images + hibernate) ──────────────
+// These talk directly to the Hyperstack API using HYPERSTACK_API_KEY; they
+// are Hyperstack-only operations that don't fit the provider-agnostic
+// `gpu <verb>` surface. The composite `build-bench-image` command uses the
+// gateway's HTTP API for deploy/terminate and raw SSH for bootstrap.
+
+const HYPERSTACK_IMAGES_CATALOG = resolve(
+  process.env.HOME || '.',
+  '.babelcast',
+  'hyperstack-images.json',
+);
+
+function requireHyperstackKey(): string {
+  const k = process.env.HYPERSTACK_API_KEY;
+  if (!k) {
+    console.error('HYPERSTACK_API_KEY is not set (required by `gpu hyperstack *`).');
+    process.exit(1);
+  }
+  return k;
+}
+
+async function getHyperstackClient() {
+  const { HyperstackClient } = await import('../src/gateway/providers/gpu/hyperstack-client');
+  return new HyperstackClient();
+}
+
+function saveCustomImage(img: { id: number; name: string; region?: string; createdAt?: string }) {
+  const path = HYPERSTACK_IMAGES_CATALOG;
+  const dir = resolve(path, '..');
+  try { require('fs').mkdirSync(dir, { recursive: true }); } catch {}
+  let catalog: Record<string, unknown> = { images: [] as unknown[] };
+  if (existsSync(path)) {
+    try { catalog = JSON.parse(readFileSync(path, 'utf8')); } catch { /* ignore */ }
+  }
+  const images = Array.isArray((catalog as any).images) ? (catalog as any).images : [];
+  images.push({ ...img, savedAt: new Date().toISOString() });
+  (catalog as any).images = images;
+  (catalog as any).latest = { id: img.id, name: img.name, region: img.region };
+  writeFileSync(path, JSON.stringify(catalog, null, 2));
+  console.log(`${c.green}✓${c.reset} saved to ${path}`);
+}
+
+async function cmdGpuHyperstack(args: string[]) {
+  const sub = args[0];
+  if (!sub || sub === 'help' || sub === '--help') {
+    console.log(`
+ai-gateway gpu hyperstack — Hyperstack Custom OS Images + VM hibernation
+
+Usage:
+  ai-gateway gpu hyperstack images list
+  ai-gateway gpu hyperstack snapshots list
+  ai-gateway gpu hyperstack snapshot create --vm-id <id> --name <name> [--description <d>]
+  ai-gateway gpu hyperstack snapshot delete --id <id>
+  ai-gateway gpu hyperstack image create-from-snapshot --snapshot-id <id> --name <name>
+  ai-gateway gpu hyperstack hibernate --vm-id <id>
+  ai-gateway gpu hyperstack resume --vm-id <id>
+  ai-gateway gpu hyperstack build-bench-image [--gpu <flavor>] [--name <img>] [--region CANADA-1]
+
+The composite \`build-bench-image\` command does the full flow end-to-end:
+  1. Deploys a seed VM (cheapest GPU by default).
+  2. SSH-bootstraps it with CRIU + cuda-checkpoint + /tmp/bench-venv
+     (same script used by scripts/snapshot-bench/run-cross-vm-bench.ts).
+  3. Stops the VM, snapshots it, promotes that snapshot to a Custom OS Image,
+     writes the id+name to ~/.babelcast/hyperstack-images.json, terminates
+     the seed VM.
+
+Once you have a custom image, set HYPERSTACK_BENCH_IMAGE_ID=<id> in your
+gateway env and future deploys skip the ~140s tool install (zero → ready in
+~60s vs 5-7min from vanilla Ubuntu).
+
+Requires HYPERSTACK_API_KEY in env.
+`);
+    return;
+  }
+
+  const apiKey = requireHyperstackKey();
+  const client = await getHyperstackClient();
+  const creds = { apiKey };
+
+  switch (sub) {
+    case 'images': {
+      const verb = args[1];
+      if (verb === 'list') {
+        const images = await client.listImages(creds);
+        for (const img of images) {
+          const tag = img.type ? ` [${img.type}]` : '';
+          const reg = img.region ? ` (${img.region})` : '';
+          console.log(`${String(img.id).padStart(6)}  ${img.name}${reg}${tag}`);
+        }
+        console.log(`\n${images.length} image(s)`);
+      } else {
+        console.error('Usage: ai-gateway gpu hyperstack images list');
+        process.exit(1);
+      }
+      break;
+    }
+    case 'snapshots': {
+      const verb = args[1];
+      if (verb === 'list') {
+        const snaps = await client.listSnapshots(creds);
+        for (const s of snaps) {
+          const reg = s.region ? ` (${s.region})` : '';
+          console.log(`${String(s.id).padStart(6)}  ${s.name}  status=${s.status}${reg}`);
+        }
+        console.log(`\n${snaps.length} snapshot(s)`);
+      } else {
+        console.error('Usage: ai-gateway gpu hyperstack snapshots list');
+        process.exit(1);
+      }
+      break;
+    }
+    case 'snapshot': {
+      const verb = args[1];
+      if (verb === 'create') {
+        const vmId = getArg(args, '--vm-id');
+        const name = getArg(args, '--name');
+        const description = getArg(args, '--description');
+        if (!vmId || !name) {
+          console.error('Usage: ai-gateway gpu hyperstack snapshot create --vm-id <id> --name <name> [--description <d>]');
+          process.exit(1);
+        }
+        const snap = await client.createSnapshot(vmId, name, creds, description);
+        console.log(JSON.stringify(snap, null, 2));
+      } else if (verb === 'delete') {
+        const id = getArg(args, '--id');
+        if (!id) { console.error('Usage: ai-gateway gpu hyperstack snapshot delete --id <id>'); process.exit(1); }
+        await client.deleteSnapshot(id, creds);
+        console.log(`${c.green}✓${c.reset} deleted snapshot ${id}`);
+      } else {
+        console.error('Usage: ai-gateway gpu hyperstack snapshot <create|delete>');
+        process.exit(1);
+      }
+      break;
+    }
+    case 'image': {
+      const verb = args[1];
+      if (verb === 'create-from-snapshot') {
+        const snapshotId = getArg(args, '--snapshot-id');
+        const name = getArg(args, '--name');
+        if (!snapshotId || !name) {
+          console.error('Usage: ai-gateway gpu hyperstack image create-from-snapshot --snapshot-id <id> --name <name>');
+          process.exit(1);
+        }
+        const img = await client.createImageFromSnapshot(snapshotId, name, creds);
+        console.log(JSON.stringify(img, null, 2));
+        saveCustomImage(img);
+      } else {
+        console.error('Usage: ai-gateway gpu hyperstack image create-from-snapshot --snapshot-id <id> --name <name>');
+        process.exit(1);
+      }
+      break;
+    }
+    case 'hibernate': {
+      const vmId = getArg(args, '--vm-id');
+      if (!vmId) { console.error('Usage: ai-gateway gpu hyperstack hibernate --vm-id <id>'); process.exit(1); }
+      await client.hibernate(vmId, creds);
+      console.log(`${c.green}✓${c.reset} hibernate requested for VM ${vmId}`);
+      break;
+    }
+    case 'resume': {
+      const vmId = getArg(args, '--vm-id');
+      if (!vmId) { console.error('Usage: ai-gateway gpu hyperstack resume --vm-id <id>'); process.exit(1); }
+      await client.hibernateRestore(vmId, creds);
+      console.log(`${c.green}✓${c.reset} hibernate-restore requested for VM ${vmId}`);
+      break;
+    }
+    case 'build-bench-image':
+      await cmdGpuHyperstackBuildBenchImage({
+        gpu: getArg(args, '--gpu'),
+        name: getArg(args, '--name'),
+        region: getArg(args, '--region'),
+        preloadModels: getArg(args, '--preload-models'),
+        noPreload: hasFlag(args, '--no-preload'),
+      });
+      break;
+    default:
+      console.error(`Unknown 'gpu hyperstack' subcommand: ${sub}`);
+      console.error('Usage: ai-gateway gpu hyperstack <images|snapshots|snapshot|image|hibernate|resume|build-bench-image>');
+      process.exit(1);
+  }
+}
+
+async function cmdGpuHyperstackBuildBenchImage(opts: { gpu?: string; name?: string; region?: string; preloadModels?: string; noPreload?: boolean }) {
+  const apiKey = requireHyperstackKey();
+  const client = await getHyperstackClient();
+  const creds = { apiKey };
+
+  const region = opts.region ?? 'CANADA-1';
+  const gpuTypes = opts.gpu ? [opts.gpu] : ['NVIDIA RTX A4000', 'NVIDIA L40'];
+  const dateTag = new Date().toISOString().slice(0, 10);
+  const imageName = opts.name ?? `ai-gateway-bench-${dateTag}`;
+
+  console.log(`${c.bold}Building Hyperstack bench image${c.reset}`);
+  console.log(`  gpu types:  ${gpuTypes.join(', ')}`);
+  console.log(`  region:     ${region}`);
+  console.log(`  image name: ${imageName}`);
+  console.log('  mode:       direct Hyperstack API (bypasses gateway idle watchdog + auto-recovery)');
+  console.log('');
+
+  // Step 1 — deploy seed VM directly via HyperstackClient. We bypass the
+  // gateway here on purpose: the gateway's idle watchdog auto-stops VMs
+  // after 5 min of inactivity, which races with our install-then-snapshot
+  // flow. This is a one-off tooling op; cost/state machinery is irrelevant
+  // because we immediately terminate the seed after the snapshot.
+  console.log(`${c.cyan}[1/6]${c.reset} deploying seed VM via Hyperstack API…`);
+  const deployedAt = Date.now();
+  const created = await client.createInstance(
+    {
+      gpuTypes,
+      region,
+      numGpus: 1,
+      storageGb: 40,
+      dockerImage: process.env.BENCH_IMAGE || 'marcosremar/babelcast-subtitle:latest',
+      hfToken: process.env.HF_TOKEN || '',
+      interruptible: false,
+      deployEnv: {},
+      dockerStartCmd: '',
+      onstart: '',
+      containerDiskInGb: 40,
+      volumeId: '',
+      preferSsd: false,
+    } as any,
+    creds,
+  );
+  const vmId: string = String(created.instanceId ?? created.id ?? '');
+  if (!vmId) { console.error(`createInstance returned no id: ${JSON.stringify(created)}`); process.exit(1); }
+  console.log(`  created vmId=${vmId}`);
+
+  console.log(`${c.cyan}[2/6]${c.reset} waiting for VM ACTIVE + SSH :22 (up to 20 min)…`);
+  const deadline = Date.now() + 20 * 60_000;
+  let sshHost: string | undefined;
+  let sshPort = 22;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 8_000));
+    const st = await client.getInstanceStatus(vmId, creds).catch(() => null);
+    if (st === 'running') {
+      const endpoint = await client.resolveInstanceEndpoint(vmId, creds).catch(() => null);
+      if (endpoint) {
+        try {
+          const u = new URL(endpoint);
+          sshHost = u.hostname;
+          sshPort = 22;
+        } catch {
+          sshHost = endpoint.replace(/^https?:\/\//, '').split(':')[0].split('/')[0];
+        }
+        if (sshHost) break;
+      }
+    }
+    if (st === 'deleted' || st === 'terminated' || st === 'error') {
+      console.error(`\ndeploy failed, provider status=${st}`);
+      process.exit(1);
+    }
+    process.stdout.write('.');
+  }
+  if (!sshHost) { console.error('\ntimed out waiting for VM/SSH'); process.exit(1); }
+  console.log(`\n  vmId=${vmId} ssh=${sshHost}:${sshPort} (elapsed ${Math.round((Date.now()-deployedAt)/1000)}s)`);
+
+  // Step 2 — bootstrap via the shared BOOTSTRAP_SCRIPT (same exact script the
+  // bench driver uses per-VM). Keeping them in one module is the whole point.
+  console.log(`${c.cyan}[3/6]${c.reset} SSH bootstrap (CRIU + cuda-checkpoint + bench-venv, ~2-3 min)…`);
+  const { BOOTSTRAP_SCRIPT } = await import('../scripts/snapshot-bench/bootstrap');
+  const { execFileSync } = await import('child_process');
+  ensureKnownHostsDir();
+  execFileSync('ssh', [
+    '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', `UserKnownHostsFile=${SSH_KNOWN_HOSTS}`,
+    '-o', 'ConnectTimeout=30',
+    '-p', String(sshPort),
+    `ubuntu@${sshHost}`,
+    'bash', '-s',
+  ], { input: BOOTSTRAP_SCRIPT, stdio: ['pipe', 'inherit', 'inherit'], timeout: 20 * 60_000 });
+
+  // Step 3b — pre-download model weights into the custom image so future
+  // deploys start with the full HF cache already on disk. Cuts first-request
+  // cold load from ~4 min (download + shard + CUDA copy) down to ~20s
+  // (cached read + CUDA copy). Also converts to sllm-store format when
+  // serverless-llm-store is installed, so BENCH_LOADER=sllm works out of the
+  // box. Opt-out via --no-preload for debugging / bootstrap-only image bakes.
+  if (!opts.noPreload) {
+    const defaultPreloads = ['microsoft/Phi-3.5-mini-instruct', 'openai/whisper-large-v3'];
+    const models = opts.preloadModels
+      ? opts.preloadModels.split(',').map((m) => m.trim()).filter((m) => m.length > 0)
+      : defaultPreloads;
+    if (models.length === 0) {
+      console.log(`${c.cyan}[3b/6]${c.reset} preload skipped (empty --preload-models)`);
+    } else {
+      console.log(`${c.cyan}[3b/6]${c.reset} preloading model weights into image cache: ${models.join(', ')}…`);
+      // Guard against shell metacharacters in HF ids — same policy as the
+      // bench driver. HF ids are [a-zA-Z0-9/_.-] which is inherently safe.
+      for (const m of models) {
+        if (!/^[A-Za-z0-9/_.-]+$/.test(m)) {
+          console.error(`  invalid HF id: ${m}`);
+          process.exit(1);
+        }
+      }
+      const listPy = models.map((m) => `"${m}"`).join(', ');
+      const preloadScript = `
+set -euo pipefail
+# HF download — store in ~/.cache/huggingface so the image-level disk snapshot
+# captures the weights at /home/ubuntu/.cache/huggingface/.
+/home/ubuntu/bench-venv/bin/python -c "from huggingface_hub import snapshot_download; [snapshot_download(m, cache_dir='/home/ubuntu/.cache/huggingface') for m in [${listPy}]]"
+
+# sllm-store conversion — soft failure. If serverless-llm-store isn't in the
+# venv (PyPI transient, network hiccup), we keep building the image so the
+# transformers path still works. BENCH_LOADER=sllm callers will notice.
+export SLLM_STORE_DIR=/home/ubuntu/sllm-store
+mkdir -p "$SLLM_STORE_DIR"
+for MODEL in ${models.map((m) => `"${m}"`).join(' ')}; do
+  SLUG="$(echo "$MODEL" | sed 's#/#__#g')"
+  /home/ubuntu/bench-venv/bin/sllm-store convert --model "$MODEL" \\
+    --output "$SLLM_STORE_DIR/$SLUG" || true
+done
+`;
+      execFileSync('ssh', [
+        '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', `UserKnownHostsFile=${SSH_KNOWN_HOSTS}`,
+        '-o', 'ConnectTimeout=30',
+        '-p', String(sshPort),
+        `ubuntu@${sshHost}`,
+        'bash', '-s',
+      ], { input: preloadScript, stdio: ['pipe', 'inherit', 'inherit'], timeout: 45 * 60_000 });
+    }
+  } else {
+    console.log(`${c.cyan}[3b/6]${c.reset} preload skipped (--no-preload)`);
+  }
+
+  // Step 3 — stop the VM before snapshotting. Hyperstack snapshots are
+  // storage-level (disk image), so running state would yield dirty pages.
+  console.log(`${c.cyan}[4/6]${c.reset} stopping VM (required before snapshot)…`);
+  try {
+    await client.stopInstance(vmId, creds);
+  } catch (e) {
+    console.warn(`  stopInstance failed: ${e instanceof Error ? e.message : e} — continuing anyway`);
+  }
+  // Wait until the VM has fully stopped. Hyperstack's createSnapshot only
+  // accepts ACTIVE or SHUTOFF — a VM still in `stopping` is rejected with
+  // HTTP 400. `getInstanceStatus` returns `'stopped'` once shutdown is done.
+  const stopDeadline = Date.now() + 5 * 60_000;
+  let stopStatus: string | null = null;
+  while (Date.now() < stopDeadline) {
+    await new Promise(r => setTimeout(r, 5_000));
+    stopStatus = await client.getInstanceStatus(vmId, creds).catch(() => null);
+    if (stopStatus === 'stopped') break;
+  }
+  if (stopStatus !== 'stopped') {
+    console.warn(`  VM status=${stopStatus} after 5 min — snapshot may fail`);
+  } else {
+    console.log(`  VM fully stopped.`);
+  }
+
+  // Step 4 — capture snapshot.
+  console.log(`${c.cyan}[5/6]${c.reset} creating snapshot…`);
+  const snap = await client.createSnapshot(
+    vmId,
+    `${imageName}-snap`,
+    creds,
+    `ai-gateway bench bootstrap (criu + cuda-checkpoint + venv) ${dateTag}`,
+  );
+  console.log(`  snapshot id=${snap.id} status=${snap.status}`);
+
+  // Poll until the snapshot reaches a terminal non-creating state before
+  // promoting. Hyperstack returns 4xx if you promote a still-creating snapshot.
+  const snapDeadline = Date.now() + 20 * 60_000;
+  while (Date.now() < snapDeadline) {
+    await new Promise(r => setTimeout(r, 10_000));
+    const all = await client.listSnapshots(creds).catch(() => []);
+    const current = all.find((s) => s.id === snap.id);
+    if (!current) break;
+    const st = (current.status || '').toUpperCase();
+    if (st === 'ACTIVE' || st === 'COMPLETED' || st === 'AVAILABLE') break;
+    if (st === 'ERROR' || st === 'FAILED') {
+      console.error(`snapshot failed: ${JSON.stringify(current)}`);
+      process.exit(1);
+    }
+    process.stdout.write('.');
+  }
+  console.log('');
+
+  // Step 5 — promote snapshot to custom image.
+  console.log(`${c.cyan}[6/6]${c.reset} promoting snapshot to Custom OS Image…`);
+  const img = await client.createImageFromSnapshot(snap.id, imageName, creds);
+  console.log(`  image id=${img.id} name=${img.name}`);
+  saveCustomImage({ id: img.id, name: img.name, region: img.region, createdAt: new Date().toISOString() });
+
+  // Step 6 — terminate seed VM via Hyperstack API directly. Best-effort;
+  // we prefer a dangling VM over losing the image we just built.
+  console.log(`[cleanup] terminating seed VM ${vmId}…`);
+  await client.deleteInstance(vmId, creds).catch((e) => {
+    console.warn(`  terminate failed: ${e instanceof Error ? e.message : e}`);
+  });
+
+  console.log('');
+  console.log(`${c.green}✓ Done.${c.reset}`);
+  console.log(`  Set HYPERSTACK_BENCH_IMAGE_ID=${img.id} in your gateway env`);
+  console.log(`  (or HYPERSTACK_BENCH_IMAGE_NAME=${img.name}) to use this image`);
+  console.log(`  for all future Hyperstack deploys.`);
 }
 
 // ── Docker image builder commands ─────────────────────────────────────────────
@@ -2487,6 +2912,19 @@ Scratch dev machine (deploy minimal base + iterate):
   dev exec "<cmd>"             Run a command on the dev machine
   dev sh                       Interactive SSH shell
   dev push/pull/snapshot/info  See 'ai-gateway gpu dev help' for full list
+
+Hyperstack-specific (Custom OS Images + hibernation):
+  hyperstack images list              List stock + custom OS images
+  hyperstack snapshots list           List VM snapshots
+  hyperstack snapshot create --vm-id <id> --name <n>   Create a snapshot
+  hyperstack snapshot delete --id <id>                 Delete a snapshot
+  hyperstack image create-from-snapshot --snapshot-id <id> --name <n>
+                                      Promote snapshot to reusable image
+  hyperstack hibernate --vm-id <id>   Hibernate a VM (suspend-to-disk)
+  hyperstack resume --vm-id <id>      Resume a hibernated VM
+  hyperstack build-bench-image        Deploy seed VM → bootstrap → snapshot →
+                                      promote to Custom OS Image (one-shot).
+                                      Set HYPERSTACK_BENCH_IMAGE_ID to use it.
 
   Multi-GPU targeting (applies to ssh, patch, pull, commit, dev):
     --instance <id>              Target a specific instance by ID
@@ -3071,8 +3509,11 @@ ai-gateway server — Manage the local dev server
           case 'dev':
             await cmdGpuDev(args);
             break;
+          case 'hyperstack':
+            await cmdGpuHyperstack(args.slice(2));
+            break;
           default:
-            console.error('Usage: ai-gateway gpu <status|list|offers|deploy|stop|resume|terminate|logs|ssh|patch|pull|commit|dev>');
+            console.error('Usage: ai-gateway gpu <status|list|offers|deploy|stop|resume|terminate|logs|ssh|patch|pull|commit|dev|hyperstack>');
             process.exit(1);
         }
         break;

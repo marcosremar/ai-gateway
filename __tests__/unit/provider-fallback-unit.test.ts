@@ -13,9 +13,9 @@ import {
   isRetryableError,
   type FallbackEntry,
   type FallbackOptions,
-} from '../src/providers/fallback';
-import { CreditBlockTracker } from '../src/providers/credit-block';
-import { CreditExhaustedError } from '../src/providers/errors';
+} from '../../src/providers/fallback';
+import { CreditBlockTracker } from '../../src/providers/credit-block';
+import { CreditExhaustedError } from '../../src/providers/errors';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

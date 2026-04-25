@@ -11,6 +11,7 @@
 
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
+import { openrouterLLM } from './src/gateway/providers/cloud/openrouter';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { ProviderMapping, PrefixRoute } from './src/proxy/types';
@@ -51,9 +52,16 @@ const providers: ProviderMapping = {
   chat: {
     'llama-3.3-70b-versatile': groqLLM,
     'llama-3.1-8b-instant': groqLLM,
-    // Vision-capable model — multimodal content (image_url) passes through
-    // the OpenAI-compat LLM provider unchanged.
     'meta-llama/llama-4-scout-17b-16e-instruct': groqLLM,
+    'openai/gpt-oss-120b': groqLLM,
+    'openai/gpt-oss-20b': groqLLM,
+    'qwen/qwen3-32b': groqLLM,
+    'groq/compound': groqLLM,
+    // OpenRouter — Kimi K2 family
+    'moonshotai/kimi-k2': openrouterLLM,
+    'moonshotai/kimi-k2-0905': openrouterLLM,
+    'moonshotai/kimi-k2-thinking': openrouterLLM,
+    'moonshotai/kimi-k2.5': openrouterLLM,
   },
   chatFallbackChain: [
     { providerId: 'groq', model: 'llama-3.3-70b-versatile', provider: groqLLM },

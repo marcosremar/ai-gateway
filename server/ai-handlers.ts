@@ -21,7 +21,8 @@ import { createLogger } from '../src/logger';
 import {
   // SSRF protection
   isPrivateUrl as _isPrivateUrl,
-  validateRemoteEndpoint,
+  isPrivateUrlResolved as _isPrivateUrlResolved,
+  validateRemoteEndpointResolved,
   // Translation cache
   getCachedTranslation, setCachedTranslation, getTranslationCacheStats as _getTranslationCacheStats,
   adaptiveMaxTokens,
@@ -123,6 +124,7 @@ export const pipelineRouter = new HybridRouter({
 // ── SSRF protection — imported from src/gateway/pipeline/ssrf-protection.ts ──
 // Re-export for backward compatibility (other server/ modules may import from here)
 export const isPrivateUrl = _isPrivateUrl;
+export const isPrivateUrlResolved = _isPrivateUrlResolved;
 export const getTranslationCacheStats = _getTranslationCacheStats;
 
 // ── Real-time timeout constants — imported from src/gateway/pipeline/timeouts.ts
@@ -1037,7 +1039,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
 
   // Warm GPU connection while preparing pipeline call (TCP/TLS handshake overlaps)
   if (effectiveGpuEndpoint) {
-    validateRemoteEndpoint(effectiveGpuEndpoint);
+    await validateRemoteEndpointResolved(effectiveGpuEndpoint);
     fetch(`${effectiveGpuEndpoint}/health`, { signal: AbortSignal.timeout(2000) }).catch(e => log.warn('GPU pre-warm failed:', e instanceof Error ? e.message : e));
   }
 
@@ -1161,7 +1163,7 @@ export async function handleVoiceProfileStatus(_req: IncomingMessage, res: Serve
     return;
   }
   try {
-    validateRemoteEndpoint(gpuEndpoint);
+    await validateRemoteEndpointResolved(gpuEndpoint);
     const gpuRes = await fetch(`${gpuEndpoint}/v1/voice-profile/status`, { signal: AbortSignal.timeout(15_000) });
     const data = await gpuRes.json();
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1181,7 +1183,7 @@ export async function handleVoiceProfileReset(req: IncomingMessage, res: ServerR
     return;
   }
   try {
-    validateRemoteEndpoint(gpuEndpoint);
+    await validateRemoteEndpointResolved(gpuEndpoint);
     const gpuRes = await fetch(`${gpuEndpoint}/v1/voice-profile/reset`, { method: 'POST', signal: AbortSignal.timeout(15_000) });
     const data = await gpuRes.json();
     res.writeHead(200, { 'Content-Type': 'application/json' });

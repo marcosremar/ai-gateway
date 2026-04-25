@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { SnapgpuMetrics, buildWorkloadKey } from '../src/autoscaler/snapgpu-metrics';
+import { SnapgpuMetrics, buildWorkloadKey } from '../../src/autoscaler/snapgpu-metrics';
 
 // ── buildWorkloadKey ────────────────────────────────────────────────────────
 

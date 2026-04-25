@@ -4,7 +4,6 @@
  */
 
 import { OpenAICompatLLMProvider } from '../openai-compat/openai-compat-llm';
-import { OPENROUTER_LLM_MODELS } from './models';
 
 const BASE_URL = process.env.OPENROUTER_API_BASE || 'https://openrouter.ai/api/v1';
 

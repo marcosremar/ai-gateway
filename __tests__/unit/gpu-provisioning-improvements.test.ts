@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { AutoscalerEngine } from '../src/autoscaler/engine';
-import { GpuProviderRegistry } from '../src/gpu-providers/registry';
-import type { GpuProviderClient } from '../src/gpu-providers/types';
+import { AutoscalerEngine } from '../../src/autoscaler/engine';
+import { GpuProviderRegistry } from '../../src/gpu-providers/registry';
+import type { GpuProviderClient } from '../../src/gpu-providers/types';
 
 describe('GPU Provisioning Improvements', () => {
   let registry: GpuProviderRegistry;
@@ -87,7 +87,7 @@ describe('GPU Provisioning Improvements', () => {
   
   describe('Provider boot time scoring', () => {
     it('should have boot time constants exported', async () => {
-      const { PROVIDER_BOOT_SECS } = await import('../src/index');
+      const { PROVIDER_BOOT_SECS } = await import('../../src/index');
       
       expect(PROVIDER_BOOT_SECS.tensordock).toBe(1200);
       expect(PROVIDER_BOOT_SECS.runpod).toBe(1200);

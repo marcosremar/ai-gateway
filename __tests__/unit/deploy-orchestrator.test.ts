@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { ProviderCooldownTracker, PROVIDER_LABELS } from '../src/gpu-providers/deploy-orchestrator';
+import { ProviderCooldownTracker, PROVIDER_LABELS } from '../../src/gpu-providers/deploy-orchestrator';
 
 describe('ProviderCooldownTracker', () => {
   let tracker: ProviderCooldownTracker;

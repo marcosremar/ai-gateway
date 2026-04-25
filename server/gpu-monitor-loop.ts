@@ -430,10 +430,21 @@ export function scheduleNextMonitorProbe() {
       });
       const idleResult = checkIdleAction(lastModelRequestTime, lastRequestTime, Date.now(), effectiveTimeout, idleWarned);
       if (idleResult.action === 'stop') {
-        log.log(`[gpu] Idle ${idleResult.idleMin} min (timeout=${Math.round(effectiveTimeout / 60_000)}min, boot=${Math.round((deployState.deployDurationMs || 0) / 1000)}s) — auto-stopping (pausing)`);
-        broadcastWs({ type: 'gpu:idle', deployId: deployState.deployId, idleMs: idleResult.idleMs, timeoutMs: effectiveTimeout, action: 'stop' });
+        // Read the active app's `gpuDeploy.hibernateOnIdle` flag and thread it
+        // through to autoStopGpu. When true AND provider supports hibernation
+        // (Hyperstack today), the VM is hibernated instead of shut off — cuts
+        // idle billing to ~10-15% (IP + storage only).
+        let allowHibernate = false;
+        try {
+          const { getActiveApp } = await import('./config-persistence');
+          const activeApp = await getActiveApp();
+          allowHibernate = activeApp?.gpuDeploy?.hibernateOnIdle === true;
+        } catch { /* default to stop on config error */ }
+        const label = allowHibernate ? 'hibernating' : 'pausing';
+        log.log(`[gpu] Idle ${idleResult.idleMin} min (timeout=${Math.round(effectiveTimeout / 60_000)}min, boot=${Math.round((deployState.deployDurationMs || 0) / 1000)}s) — auto-stopping (${label})`);
+        broadcastWs({ type: 'gpu:idle', deployId: deployState.deployId, idleMs: idleResult.idleMs, timeoutMs: effectiveTimeout, action: 'stop', mode: allowHibernate ? 'hibernate' : 'stop' });
         const { autoStopGpu } = await import('./gpu-idle-manager');
-        await autoStopGpu();
+        await autoStopGpu(undefined, { allowHibernate });
         return;
       } else if (idleResult.action === 'warning') {
         idleWarned = true;

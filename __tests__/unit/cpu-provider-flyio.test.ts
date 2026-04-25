@@ -3,8 +3,8 @@
  * Uses fetch mocking to avoid real Fly.io API calls.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { FlyioClient } from '../src/cpu-providers/flyio-client';
-import type { ProviderCredentials, InstanceSpec } from '../src/gpu-providers/types';
+import { FlyioClient } from '../../src/cpu-providers/flyio-client';
+import type { ProviderCredentials, InstanceSpec } from '../../src/gpu-providers/types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

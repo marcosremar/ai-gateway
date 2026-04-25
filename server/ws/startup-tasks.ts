@@ -76,6 +76,14 @@ export async function runStartupTasks(): Promise<void> {
         // vanilla Ubuntu — zero tool-install overhead, ~60s boot vs 5-7min.
         'hyperstack:benchImageId':       'HYPERSTACK_BENCH_IMAGE_ID',
         'hyperstack:benchImageName':     'HYPERSTACK_BENCH_IMAGE_NAME',
+        // Pod-agent workspace backup creds (provisioned via SSH em cada pod —
+        // ver server/pod-agent/). Mapeia pra B2_* (rclone-compatible). Funciona
+        // pra qualquer S3: Cloudflare R2, Backblaze B2, AWS S3, MinIO.
+        'aigw:agentAccessKey':           'B2_ACCOUNT_ID',
+        'aigw:agentSecretKey':           'B2_APPLICATION_KEY',
+        'aigw:agentEndpoint':            'B2_ENDPOINT',
+        'aigw:agentRegion':              'B2_REGION',
+        'aigw:agentBucket':              'B2_BUCKET',
       };
       let hydrated = 0;
       for (const [secretName, envName] of Object.entries(mapping)) {
@@ -89,6 +97,17 @@ export async function runStartupTasks(): Promise<void> {
     }
   } catch (e: any) {
     log.warn(`[ws-server] vault hydration failed: ${e.message?.slice(0, 80)}`);
+  }
+
+  // 1e. Register pod-provisioner handler — runs aigw-agent install via SSH on
+  // every transition into 'ready'. Replaces hand-baked backup/restore/heartbeat
+  // scripts in each Docker image (see server/pod-agent/). Idempotent: re-running
+  // install.sh re-uses existing PID files and just refreshes background loops.
+  try {
+    const { registerPodProvisioner } = require('../pod-provisioner-hook');
+    registerPodProvisioner();
+  } catch (e: any) {
+    log.warn(`[ws-server] registerPodProvisioner failed: ${e.message?.slice(0, 80)}`);
   }
 
   // 2. Terminate any stopped pod overdue for auto-destroy (timer lost on restart)

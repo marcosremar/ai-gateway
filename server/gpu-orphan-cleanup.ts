@@ -124,12 +124,53 @@ const ORPHAN_SWEEP_INTERVAL_MS = 10 * 60_000; // every 10 minutes
  * deploy or standby deploy podId.
  */
 export async function sweepOrphanInstances(): Promise<{ found: number; terminated: number }> {
+  // Kill switch — set AIGW_ORPHAN_SWEEP_DISABLED=1 in dev/test sessions to
+  // prevent the periodic sweep from accidentally killing pods (known false-
+  // positive when deployState.podId desyncs after race-resolution edge cases).
+  if (process.env.AIGW_ORPHAN_SWEEP_DISABLED === '1') {
+    return { found: 0, terminated: 0 };
+  }
+
   const tracked = new Set<string>();
   if (deployState.podId) tracked.add(deployState.podId);
   const { standbyDeployState } = await import('./state');
   if (standbyDeployState.podId) tracked.add(standbyDeployState.podId);
   // Include all active race candidates — they are legitimately booting, not orphans
   for (const id of activeRaceInstanceIds) tracked.add(id);
+
+  // Defense-in-depth: if there's a "ready" deploy but the podId field is
+  // empty (the desync bug), refuse to sweep — better to leak than to nuke an
+  // active pod the user is working with.
+  if (deployState.status === 'ready' && !deployState.podId) {
+    log.warn(`[orphan-sweep] deployState.status=ready but podId='' — aborting sweep to avoid killing active pod`);
+    return { found: 0, terminated: 0 };
+  }
+
+  // Defense-in-depth #2: skip sweep for 3 minutes after any transition.
+  // Race-winner resolution can leave deployState.podId pointing at the WRONG
+  // instance when 2 candidates become healthy nearly simultaneously. Giving
+  // time for state to stabilize prevents killing the true winner.
+  const TRANSITION_GRACE_MS = 3 * 60_000;
+  const lastTransition = deployState.transitions?.[deployState.transitions.length - 1];
+  if (lastTransition && Date.now() - lastTransition.ts < TRANSITION_GRACE_MS) {
+    log.log(`[orphan-sweep] skipping — last transition ${Math.round((Date.now() - lastTransition.ts) / 1000)}s ago (grace ${TRANSITION_GRACE_MS / 1000}s)`);
+    return { found: 0, terminated: 0 };
+  }
+
+  // Defense-in-depth #3: also track recent podIds from persisted deploys.
+  // If a pod was recently the active deploy (even if replaced), don't nuke it
+  // until the operator explicitly terminates. This avoids the case where the
+  // winner's ID got overwritten by a loser.
+  try {
+    const { deployState: ds } = await import('./state');
+    // If the race recently completed, check transitions for any podId mentioned
+    for (const t of (ds.transitions || []).slice(-10)) {
+      const detail = t.detail || '';
+      // Detail strings sometimes contain instance IDs; be permissive
+      const match = detail.match(/inst-\d+/g);
+      if (match) for (const id of match) tracked.add(id);
+    }
+  } catch { /* best effort */ }
 
   let found = 0;
   let terminated = 0;

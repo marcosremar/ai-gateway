@@ -32,10 +32,10 @@ export type { DeleteReason } from './gpu-health-monitor';
 
 // ── Re-exports from specialized modules ──────────────────────────────────────
 export { GPU_TYPE_CACHE_TTL_MS, gpuTypeCacheRefreshTimer, refreshGpuTypeCache, validateGpuTypesFromCache, startGpuTypeCacheRefresh } from './gpu-type-cache';
-export { POD_NAME_PREFIX, activeRaceInstanceIds, cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps, sweepOrphanInstances, startOrphanSweep, stopOrphanSweep } from './gpu-orphan-cleanup';
+export { POD_NAME_PREFIX, activeRaceInstanceIds, cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps, cleanupHyperstackInstances, sweepOrphanInstances, startOrphanSweep, stopOrphanSweep } from './gpu-orphan-cleanup';
 export { autoSelectCheapestGpu } from './gpu-auto-select';
 export { startDeployRace } from './gpu-deploy-race';
-export { fetchGpuLogs, getVerifiedGpuTypes, tryRecoverActiveDeploy, startAutoRecoveryDeploy } from './gpu-auto-recovery';
+export { fetchGpuLogs, getVerifiedGpuTypes, tryRecoverActiveDeploy, tryReconnectOrphanDeploy, startAutoRecoveryDeploy } from './gpu-auto-recovery';
 export { pollHealthUntilReady, type PollHealthResult } from './gpu-poll-health';
 
 // ── Canary deployment ────────────────────────────────────────────────────────

@@ -52,6 +52,19 @@ export interface GpuDeployConfig {
   /** When true, the autoscaler captures a snapshot after the first successful
    *  inference, then restores from it on subsequent cold boots. */
   autoSnapshot?: boolean;
+  /** When true AND provider supports it (Hyperstack today), idle auto-stop
+   *  hibernates the VM instead of shutting it off — billing drops to ~10-15%
+   *  (IP + storage only) while compute resources are deallocated. Resume via
+   *  the normal `/v1/gpu/resume` path. */
+  hibernateOnIdle?: boolean;
+  /** When true AND the profile's standby-pool tier supports SSH signalling,
+   *  idle pool slots drop the model off the GPU via the /tmp/bench.offload
+   *  protocol instead of hibernate/terminate. Wake-on-request is 2-5s vs
+   *  60-90s for hibernate. NOTE: on Hyperstack, billing is per-VM so the
+   *  VM keeps billing at the full running rate while offloaded — this
+   *  trades cost for latency. Use hibernateOnIdle or terminate when cost
+   *  is the priority. */
+  offloadOnIdle?: boolean;
 }
 
 /**
@@ -271,6 +284,25 @@ export const DEFAULT_APPS: GatewayApp[] = [
       snapgpuPreloadApp: 'babelcast',
       autoSnapshot: true,
     },
+  },
+  {
+    id: 'fast-serve',
+    name: 'Fast-serve (Modal-style warm pool)',
+    stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }],
+    llm: [{ provider: 'groq', model: 'llama-3.3-70b-versatile' }],
+    tts: [{ provider: 'modal', model: 'qwen3-tts' }],
+    gpuDeploy: {
+      dockerImage: 'marcosremar/babelcast-subtitle:latest',
+      gpuTypes: ['NVIDIA L40'],
+      region: 'CANADA-1',
+      timeoutMin: 30,
+      raceCount: 1,
+      offloadOnIdle: true,
+      hibernateOnIdle: false,
+      bootOnStartup: false,
+    },
+    latencyTargetsMs: { stt: 500, llm: 1000, tts: 800 },
+    loadBalanceStrategy: 'least-latency',
   },
   {
     id: 'cloud-only',

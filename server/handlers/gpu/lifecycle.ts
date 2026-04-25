@@ -127,19 +127,29 @@ export async function handleGpuDeploy(
 
     // Build tiers and start deploy
     const gpuTypes = body.gpuTypes || ['NVIDIA GeForce RTX 4090'];
-    
+    const tiers = buildGpuTiers(
+      process.env.RUNPOD_API_KEY || '',
+      process.env.VAST_API_KEY || undefined,
+      (process.env.TENSORDOCK_API_KEY && process.env.TENSORDOCK_AUTH_ID)
+        ? { apiKey: process.env.TENSORDOCK_API_KEY, authId: process.env.TENSORDOCK_AUTH_ID }
+        : undefined,
+      (process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET)
+        ? `${process.env.MODAL_TOKEN_ID}:${process.env.MODAL_TOKEN_SECRET}`
+        : undefined,
+      process.env.HYPERSTACK_API_KEY || undefined,
+    );
+
     if (body.race) {
       // Race deploy across multiple providers
-      const racePromise = startDeployRace(body.dockerImage, gpuTypes, {
+      const racePromise = startDeployRace(tiers, body.dockerImage, gpuTypes, {
         env: body.env,
         onstart: body.onstart,
         diskGb: body.diskGb,
         region: body.region,
-      });
+      }, body.raceCount ?? 2);
       setDeployPromise(racePromise);
     } else {
       // Sequential tier deploy
-      const tiers = buildGpuTiers();
       const tierPromise = startDeployWithTiers(
         tiers,
         body.dockerImage,

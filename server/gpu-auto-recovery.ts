@@ -6,15 +6,15 @@ import { getGpuPriorityList, DEFAULT_GPU_PRIORITY } from '../src/gpu-providers/d
 import { createLogger } from '../src/logger';
 import {
   prisma, deployState, setDeployState,
-  deployApiKey, deployVastApiKey, deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey,
-  setDeployApiKey, setDeployVastApiKey, setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey,
+  deployApiKey, deployVastApiKey, deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey, deployHyperstackApiKey,
+  setDeployApiKey, setDeployVastApiKey, setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey, setDeployHyperstackApiKey,
   setActiveProvider, setDeployCancelled,
   deploymentSM,
   loadPersistedDeploy, clearPersistedDeploy, persistDeployState,
   resetDeployState,
   updateGpuModelWarmth,
 } from './state';
-import { markGpuHealthy, runpod, vast, tensordock, modal } from './providers';
+import { markGpuHealthy, runpod, vast, tensordock, modal, hyperstack } from './providers';
 import { broadcastWs } from './ws-state';
 import { BLACKWELL_TO_STANDARD, STANDARD_TO_BLACKWELL } from './config';
 import { POD_NAME_PREFIX } from './gpu-orphan-cleanup';
@@ -171,6 +171,8 @@ export async function tryRecoverActiveDeploy(): Promise<boolean> {
       const modalId = process.env.MODAL_TOKEN_ID || '';
       const modalSecret = process.env.MODAL_TOKEN_SECRET || '';
       setDeployModalApiKey(modalId && modalSecret ? `${modalId}:${modalSecret}` : '');
+    } else if (persisted.provider === 'hyperstack') {
+      setDeployHyperstackApiKey(process.env.HYPERSTACK_API_KEY || '');
     }
     setActiveProvider(persisted.provider as ProviderName);
 
@@ -297,6 +299,25 @@ export async function tryReconnectOrphanDeploy(): Promise<boolean> {
     }
   }
 
+  const hyperstackKey = process.env.HYPERSTACK_API_KEY || deployHyperstackApiKey;
+  if (hyperstackKey) {
+    try {
+      const instances = await hyperstack.listInstances({ apiKey: hyperstackKey });
+      for (const i of instances) {
+        const st = (i.status ?? '').toLowerCase();
+        if (!['running', 'active'].includes(st)) continue;
+        if (!i.endpoint) continue;
+        candidates.push({
+          provider: 'hyperstack', instanceId: i.instanceId, endpoint: i.endpoint,
+          gpuType: i.gpuType ?? '', sshHost: i.sshHost ?? '', sshPort: i.sshPort ?? 0,
+          providerMeta: (i.providerMeta as Record<string, unknown>) ?? {}, apiKey: hyperstackKey,
+        });
+      }
+    } catch (err) {
+      log.warn(`[gpu] orphan-reconnect: Hyperstack list failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
   if (candidates.length === 0) return false;
 
   log.log(`[gpu] orphan-reconnect: found ${candidates.length} running pod(s) — probing health to reconnect`);
@@ -317,6 +338,7 @@ export async function tryReconnectOrphanDeploy(): Promise<boolean> {
         setDeployTensordockApiKey(c.apiKey);
         if (c.authId) setDeployTensordockAuthId(c.authId);
       } else if (c.provider === 'modal') setDeployModalApiKey(c.apiKey);
+      else if (c.provider === 'hyperstack') setDeployHyperstackApiKey(c.apiKey);
       setActiveProvider(c.provider as ProviderName);
 
       if (probe.data) updateGpuModelWarmth(probe.data);
@@ -380,6 +402,7 @@ export async function startAutoRecoveryDeploy(): Promise<void> {
     vast: deployVastApiKey,
     tensordock: deployTensordockApiKey ? { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId } : undefined,
     modal: deployModalApiKey,
+    hyperstack: deployHyperstackApiKey,
   };
 
   log.log(`[gpu] Auto-recovery: deploying replacement (image=${lastImage}, lastGpu=${lastGpuType}, lastProvider=${lastProvider})`);
@@ -396,6 +419,7 @@ export async function startAutoRecoveryDeploy(): Promise<void> {
     setDeployTensordockAuthId(savedKeys.tensordock.authId);
   }
   if (savedKeys.modal) setDeployModalApiKey(savedKeys.modal);
+  if (savedKeys.hyperstack) setDeployHyperstackApiKey(savedKeys.hyperstack);
 
   // Build tiers from saved credentials
   const { buildGpuTiers, startDeployWithTiers } = await import('./gpu-deploy');
@@ -404,6 +428,7 @@ export async function startAutoRecoveryDeploy(): Promise<void> {
     savedKeys.vast || undefined,
     savedKeys.tensordock,
     savedKeys.modal || undefined,
+    savedKeys.hyperstack || undefined,
   );
 
   if (tiers.length === 0) {

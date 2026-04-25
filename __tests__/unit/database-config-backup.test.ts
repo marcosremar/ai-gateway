@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { parseConnectionString } from '../src/database/backup';
-import { detectEnvironment, isPooledUrl, buildPrismaUrl, getUnpooledUrl, getPooledUrl } from '../src/database/config';
-import type { DatabaseConfig } from '../src/database/types';
-import { DatabaseError } from '../src/database/types';
+import { parseConnectionString } from '../../src/database/backup';
+import { detectEnvironment, isPooledUrl, buildPrismaUrl, getUnpooledUrl, getPooledUrl } from '../../src/database/config';
+import type { DatabaseConfig } from '../../src/database/types';
+import { DatabaseError } from '../../src/database/types';
 
 describe('database/backup', () => {
   describe('parseConnectionString', () => {

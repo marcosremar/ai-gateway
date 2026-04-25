@@ -16,6 +16,9 @@ describe('HTTP Body Size Limits', () => {
     expect(source).toContain('/v1/chat/completions');
     expect(source).toContain('/v1/config/providers');
     expect(source).toContain('/v1/config/api-keys');
+    expect(source).toContain('/v1/docker/build');
+    expect(source).toContain('/v1/gpu/preflight');
+    expect(source).toContain('/v1/gpu/heartbeat');
   });
 
   it('should use route-specific limit in readRawBody', () => {
@@ -31,5 +34,17 @@ describe('HTTP Body Size Limits', () => {
     expect(match).not.toBeNull();
     const timeout = parseInt(match![1].replace(/_/g, ''), 10);
     expect(timeout).toBeGreaterThanOrEqual(60_000);
+  });
+
+  it('should stream HTTP bodies instead of using req.arrayBuffer in the adapter', () => {
+    const source = readSource('server/ws/http-api-server.ts');
+    expect(source).toContain('pumpRequestBody');
+    expect(source).not.toContain('req.arrayBuffer()');
+  });
+
+  it('should not default admin HTTP CORS to wildcard reflection', () => {
+    const source = readSource('server/ws/http-api-server.ts');
+    expect(source).toContain('resolveHttpCorsOrigin');
+    expect(source).not.toContain("req.headers.get('origin') || '*'");
   });
 });

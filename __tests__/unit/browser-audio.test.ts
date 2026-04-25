@@ -12,7 +12,7 @@ import {
   float32ToWavBuffer,
   combineWavChunksToBase64,
   buildSilentWav,
-} from '../src/browser/audio';
+} from '../../src/browser/audio';
 
 // Helper to build a minimal WAV Uint8Array with PCM data
 function makeWavChunk(pcmSamples: Int16Array, sampleRate = 16000): Uint8Array {
