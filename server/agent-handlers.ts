@@ -12,6 +12,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
+import { timingSafeEqual } from 'crypto';
 import { createLogger } from '../src/logger';
 
 const log = createLogger('agent-handlers');
@@ -44,6 +45,15 @@ const snapshots = new Map<string, AgentSnapshot>();
 
 const TOKEN = process.env.AIGW_AGENT_TOKEN || '';
 const STALE_AFTER_MS = 5 * 60_000;
+/** Evict snapshots that haven't reported for this long — prevents unbounded
+ * map growth from pods that vanish without a clean shutdown. */
+const EVICT_AFTER_MS = 60 * 60_000;
+
+function pruneStaleSnapshots(now: number = Date.now()): void {
+  for (const [podId, snap] of snapshots) {
+    if (now - snap.received_at > EVICT_AFTER_MS) snapshots.delete(podId);
+  }
+}
 
 function readBody(req: IncomingMessage, maxBytes = 256 * 1024): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -73,7 +83,13 @@ function checkAuth(req: IncomingMessage): boolean {
   const auth = req.headers['authorization'];
   if (!auth || typeof auth !== 'string') return false;
   const match = auth.match(/^Bearer\s+(.+)$/i);
-  return !!match && match[1].trim() === TOKEN;
+  if (!match) return false;
+  const supplied = Buffer.from(match[1].trim(), 'utf8');
+  const expected = Buffer.from(TOKEN, 'utf8');
+  // Length check first — timingSafeEqual throws on mismatched buffer sizes
+  // and a same-length compare alone leaks the secret length anyway.
+  if (supplied.length !== expected.length) return false;
+  return timingSafeEqual(supplied, expected);
 }
 
 export async function handleAgentHeartbeat(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -117,6 +133,7 @@ export async function handleAgentHeartbeat(req: IncomingMessage, res: ServerResp
     log_tail: Array.isArray(data.log_tail) ? data.log_tail.slice(-50) : [],
   };
   snapshots.set(podId, snap);
+  pruneStaleSnapshots(snap.received_at);
 
   // Reset idle counter em 3 condições:
   //   1. GPU em uso (util > 5%) — trabalho de inferência ativo

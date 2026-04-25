@@ -2495,9 +2495,14 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
       const url = new URL(endpoint);
       const { createConnection } = await import('net');
       // Stage 1: TCP connect
+      // url.port is "" when the scheme uses the default port — pick 443 for
+      // https and 80 for http rather than passing NaN to createConnection,
+      // which would otherwise reject the probe before the TCP attempt fires.
+      const portStr = url.port || (url.protocol === 'https:' ? '443' : '80');
+      const port = parseInt(portStr, 10);
       const tcpOk = await new Promise<boolean>((resolve) => {
         const socket = createConnection(
-          { host: url.hostname, port: parseInt(url.port), timeout: timeoutMs },
+          { host: url.hostname, port, timeout: timeoutMs },
           () => { socket.destroy(); resolve(true); }
         );
         socket.on('error', () => { socket.destroy(); resolve(false); });
