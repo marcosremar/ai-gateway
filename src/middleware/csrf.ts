@@ -17,24 +17,46 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import { randomBytes, createHash } from 'crypto';
+import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
 
 const CSRF_HEADER = 'X-CSRF-Token';
 const CSRF_COOKIE = 'csrf-token';
 
-/**
- * Generate a CSRF token.
- */
-export function generateCsrfToken(): string {
-  return randomBytes(32).toString('base64url');
+function signNonce(nonce: string, secret: string): string {
+  return createHmac('sha256', secret).update(nonce).digest('base64url');
 }
 
 /**
- * Verify a CSRF token.
+ * Generate a CSRF token bound to `secret`. Format: `<nonce>.<hmac>` so
+ * verifyCsrfToken can recompute and compare without a server-side store.
+ *
+ * The previous implementation returned an opaque random string and the
+ * verify function compared `token === sha256(secret+token)` — a check that
+ * could never succeed. Anyone using the old verify path was effectively
+ * rejecting every request.
+ */
+export function generateCsrfToken(secret: string): string {
+  if (!secret) throw new Error('generateCsrfToken: secret is required');
+  const nonce = randomBytes(32).toString('base64url');
+  return `${nonce}.${signNonce(nonce, secret)}`;
+}
+
+/**
+ * Verify a CSRF token. Returns true iff the embedded HMAC matches the one
+ * we recompute from `secret` over the token's nonce. Constant-time compare
+ * to avoid signature-length / byte-by-byte timing leaks.
  */
 export function verifyCsrfToken(token: string, secret: string): boolean {
-  const expected = createHash('sha256').update(secret + token).digest('base64url');
-  return token === expected;
+  if (!token || !secret) return false;
+  const dot = token.indexOf('.');
+  if (dot <= 0 || dot === token.length - 1) return false;
+  const nonce = token.slice(0, dot);
+  const supplied = token.slice(dot + 1);
+  const expected = signNonce(nonce, secret);
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 /**

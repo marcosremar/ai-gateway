@@ -24,7 +24,12 @@ export async function prepareAudioFile(audio: Buffer | Blob): Promise<ReturnType
   const arrayBuffer = await audio.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
   if (audio.type) {
-    const ext = audio.type.split('/')[1] || 'wav';
+    // MIME types may carry parameters like "audio/webm;codecs=opus" — strip
+    // anything past the semicolon and any whitespace before using the
+    // subtype as a filename extension. Without this, OpenAI's multipart
+    // upload sees `audio.webm;codecs=opus` and rejects the request.
+    const subtype = audio.type.split('/')[1] || '';
+    const ext = (subtype.split(';')[0] || 'wav').trim() || 'wav';
     return await toFile(buffer, `audio.${ext}`, { type: audio.type });
   }
   const { filename, contentType } = detectAudioFormat(buffer);

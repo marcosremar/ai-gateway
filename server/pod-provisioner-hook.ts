@@ -47,8 +47,8 @@ function buildConfig(podId: string): ProvisionConfig | null {
     podId,
     gatewayUrl: process.env.AIGW_PUBLIC_URL || (process.env.FLY_APP_NAME ? `https://${process.env.FLY_APP_NAME}.fly.dev` : undefined),
     gatewayToken: process.env.AIGW_AGENT_TOKEN,
-    heartbeatInterval: process.env.AIGW_AGENT_INTERVAL ? parseInt(process.env.AIGW_AGENT_INTERVAL) : undefined,
-    backupIntervalHours: process.env.AIGW_BACKUP_INTERVAL_H ? parseInt(process.env.AIGW_BACKUP_INTERVAL_H) : undefined,
+    heartbeatInterval: process.env.AIGW_AGENT_INTERVAL ? parseInt(process.env.AIGW_AGENT_INTERVAL, 10) : undefined,
+    backupIntervalHours: process.env.AIGW_BACKUP_INTERVAL_H ? parseInt(process.env.AIGW_BACKUP_INTERVAL_H, 10) : undefined,
     appLogFile: process.env.AIGW_AGENT_LOG_FILE || '/tmp/container.log',
   };
 

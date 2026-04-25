@@ -100,7 +100,17 @@ async function writeRemoteFile(host: string, port: number, content: string, remo
   // expansão de variáveis nem escapes. Single quotes no conteúdo seriam um
   // problema mas usamos um delimiter improvável (AIGW_EOF) e zero processing.
   // Reject conteúdo que contenha o delimiter exato pra não corromper o stream.
-  if (content.includes('\nAIGW_EOF\n') || content.endsWith('\nAIGW_EOF')) {
+  // Reject content that contains the delimiter on its own line in any
+  // position — including the first line (content.startsWith) and a single-
+  // line file equal to the delimiter. Missing the leading-edge check would
+  // let a payload starting with "AIGW_EOF\n…" terminate the heredoc early
+  // and feed the remainder to the remote shell.
+  if (
+    content === 'AIGW_EOF' ||
+    content.startsWith('AIGW_EOF\n') ||
+    content.includes('\nAIGW_EOF\n') ||
+    content.endsWith('\nAIGW_EOF')
+  ) {
     log.warn(`writeRemoteFile: content contains delimiter, refusing to write ${remotePath}`);
     return false;
   }

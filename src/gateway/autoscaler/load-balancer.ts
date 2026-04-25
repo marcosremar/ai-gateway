@@ -381,6 +381,14 @@ export class LoadBalancer {
           this.tokenBucketConfig.capacity,
           state.tokens + refillAmount,
         );
+        // Advance lastRefill ONLY by the whole-second portion that was actually
+        // converted into tokens — preserve the fractional remainder so a burst
+        // of sub-second requests still accrues tokens correctly. Resetting to
+        // `now` would discard the leftover and hand clients a slower effective
+        // refill rate than configured.
+        if (refillAmount > 0) {
+          state.lastRefill += (refillAmount / this.tokenBucketConfig.refillRate) * 1000;
+        }
       } else {
         state = {
           tokens: this.tokenBucketConfig.initialTokens ?? this.tokenBucketConfig.capacity,
@@ -391,13 +399,11 @@ export class LoadBalancer {
       // Try to consume
       if (state.tokens >= tokens) {
         state.tokens -= tokens;
-        state.lastRefill = now;
         await this.stateStore.set(key, JSON.stringify(state), 3600); // 1 hour TTL
         return true;
       }
 
-      // Not enough tokens - still update refill time
-      state.lastRefill = now;
+      // Not enough tokens — persist the refill credit so the next call sees it
       await this.stateStore.set(key, JSON.stringify(state), 3600);
       return false;
     } catch {

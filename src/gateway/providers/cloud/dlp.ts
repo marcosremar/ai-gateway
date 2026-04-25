@@ -161,7 +161,10 @@ export function detectPII(
     let match: RegExpExecArray | null;
     while ((match = regex.exec(text)) !== null) {
       const value = match[0];
-      
+      // Guard against zero-width matches (e.g. /a*/g) which would otherwise
+      // pin lastIndex and spin forever.
+      if (value.length === 0) { regex.lastIndex++; continue; }
+
       detectedTypes.push(patternType);
       matches.push({
         type: patternType,
@@ -179,10 +182,12 @@ export function detectPII(
       try {
         const regex = new RegExp(custom.pattern, 'gi');
         let match: RegExpExecArray | null;
-        
+
         while ((match = regex.exec(text)) !== null) {
           const value = match[0];
-          
+          // Same zero-width guard as the built-in pattern loop above.
+          if (value.length === 0) { regex.lastIndex++; continue; }
+
           detectedTypes.push(custom.name);
           matches.push({
             type: custom.name,
