@@ -13,8 +13,8 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { VastClient } from '../src/gpu-providers/vast-client';
-import type { ProviderCredentials } from '../src/gpu-providers/types';
+import { VastClient } from '../../src/gpu-providers/vast-client';
+import type { ProviderCredentials } from '../../src/gpu-providers/types';
 import { loadEnv } from './helpers';
 import { createServer, type Server } from 'net';
 import { createServer as createHttpServer, type Server as HttpServer } from 'http';

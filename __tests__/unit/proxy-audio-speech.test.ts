@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleAudioSpeech } from '../src/proxy/routes/audio-speech';
-import type { ProxyRequest } from '../src/proxy/types';
+import { handleAudioSpeech } from '../../src/proxy/routes/audio-speech';
+import type { ProxyRequest } from '../../src/proxy/types';
 
 function makeReq(body: Record<string, unknown>): ProxyRequest {
   return { method: 'POST', url: '/v1/audio/speech', headers: {}, body, rawBody: Buffer.alloc(0) };

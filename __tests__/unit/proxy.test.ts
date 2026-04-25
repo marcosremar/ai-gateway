@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createProxyServer } from '../src/proxy/server';
-import { validateAuth } from '../src/proxy/middleware/auth';
-import { RateLimiter } from '../src/proxy/middleware/rate-limit';
-import type { LLMProvider, ChatResponse } from '../src/providers/types';
+import { createProxyServer } from '../../src/proxy/server';
+import { validateAuth } from '../../src/proxy/middleware/auth';
+import { RateLimiter } from '../../src/proxy/middleware/rate-limit';
+import type { LLMProvider, ChatResponse } from '../../src/providers/types';
 import type { Server } from 'http';
 
 describe('Proxy', () => {

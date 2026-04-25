@@ -7,14 +7,14 @@ import { errorSummary } from '../src/error-summary';
 import { tryAutoRemediation } from '../src/auto-remediation';
 import {
   deployState, deployApiKey, deployVastApiKey,
-  deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey,
+  deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey, deployHyperstackApiKey,
   activeProvider, resetDeployState,
 } from './state';
-import { updateActivePipeline, vast, tensordock, modal } from './providers';
+import { updateActivePipeline, vast, tensordock, modal, hyperstack } from './providers';
 import { logGpuEvent, updateDeploySession } from './metrics';
 import { broadcastProviderStatus } from './ws-state';
 import { emitGatewayEvent } from './event-bus';
-import { cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps } from './gpu-orphan-cleanup';
+import { cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps, cleanupHyperstackInstances } from './gpu-orphan-cleanup';
 import { stopGpuMonitoring } from './gpu-monitor-loop';
 import { stopWarmthMonitor } from './gpu-warmth-monitor';
 import { clearAutoDestroyTimer } from './gpu-destroy-timer';
@@ -41,6 +41,7 @@ export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
   const tdKey = deployTensordockApiKey;
   const tdAuthId = deployTensordockAuthId;
   const modalKey = deployModalApiKey;
+  const hyperstackKey = deployHyperstackApiKey;
   const provider = activeProvider;
   const podId = deployState.podId;
   broadcastProviderStatus('offline', 'cloud', `GPU terminated (${reason})`);
@@ -94,6 +95,29 @@ export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
   } else if (provider === 'vast' && vastKey) {
     await cleanupVastInstances(vastKey);
     logGpuEvent('instance_stopped', 'vast', true, { metadata: { reason } });
+  } else if (provider === 'hyperstack' && hyperstackKey) {
+    if (podId) {
+      try {
+        await hyperstack.deleteInstance(podId, { apiKey: hyperstackKey });
+        logGpuEvent('instance_stopped', 'hyperstack', true, { metadata: { podId, reason } });
+      } catch (err) {
+        const deployErr = categorizeDeployError(err, {
+          deployId: deployState.deployId,
+          provider: 'hyperstack',
+          gpuType: deployState.gpuType,
+        });
+        errorSummary.record(deployErr, deployState.deployId);
+        const remediation = await tryAutoRemediation(deployErr);
+        if (remediation) {
+          log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
+        }
+        log.error({ code: deployErr.code, category: deployErr.category }, deployErr.message);
+        await cleanupHyperstackInstances(hyperstackKey);
+      }
+    } else {
+      await cleanupHyperstackInstances(hyperstackKey);
+      logGpuEvent('instance_stopped', 'hyperstack', true, { metadata: { reason } });
+    }
   } else if (rpKey) {
     await cleanupAllPods(rpKey);
     logGpuEvent('instance_stopped', 'runpod', true, { metadata: { podId, reason } });

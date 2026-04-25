@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { RedisStateAdapter } from '../src/adapters/redis-state';
-import type { RedisLike } from '../src/adapters/redis-state';
+import { RedisStateAdapter } from '../../src/adapters/redis-state';
+import type { RedisLike } from '../../src/adapters/redis-state';
 
 function createMockRedis(): RedisLike & { _store: Record<string, string>; _lists: Record<string, string[]>; _hashes: Record<string, Record<string, string>> } {
   const store: Record<string, string> = {};

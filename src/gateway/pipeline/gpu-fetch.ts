@@ -4,7 +4,7 @@
 // remain independent of server/ state modules.
 
 import { createLogger } from '../../logger';
-import { validateRemoteEndpoint } from './ssrf-protection';
+import { validateRemoteEndpointResolved } from './ssrf-protection';
 
 const log = createLogger('gpu-fetch');
 
@@ -44,7 +44,7 @@ export async function fetchGpuSTT(
   recorder: StageRecorder,
   requestId?: string,
 ): Promise<GpuSTTResult> {
-  validateRemoteEndpoint(gpuEndpoint);
+  await validateRemoteEndpointResolved(gpuEndpoint);
   const form = new FormData();
   form.append('file', new Blob([audio as BlobPart], { type: 'audio/wav' }), 'audio.wav');
   const params = new URLSearchParams();
@@ -87,7 +87,7 @@ export async function fetchGpuLLM(
   recorder: StageRecorder,
   requestId?: string,
 ): Promise<GpuLLMResult> {
-  validateRemoteEndpoint(gpuEndpoint);
+  await validateRemoteEndpointResolved(gpuEndpoint);
   const body: Record<string, string> = { text, source_lang: sourceLang, target_lang: targetLang };
   if (glossary) body.glossary = glossary;
   if (context) body.context = context;
@@ -126,7 +126,7 @@ export async function fetchGpuTTS(
   refAudio?: string, refText?: string,
   requestId?: string,
 ): Promise<GpuTTSResult> {
-  validateRemoteEndpoint(gpuEndpoint);
+  await validateRemoteEndpointResolved(gpuEndpoint);
   try {
     const body: Record<string, string> = { text, language, speaker };
     if (refAudio) body.reference_audio = refAudio;

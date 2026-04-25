@@ -35,6 +35,7 @@ import {
   setDeployTensordockApiKey as _setDeployTensordockApiKey,
   setDeployTensordockAuthId as _setDeployTensordockAuthId,
   setDeployModalApiKey as _setDeployModalApiKey,
+  setDeployHyperstackApiKey as _setDeployHyperstackApiKey,
   setActiveProvider as _setActiveProvider,
   type DeploymentState,
 } from '../src/gateway/state/deploy-state';
@@ -144,6 +145,7 @@ export function resetDeployState() {
   _setDeployTensordockApiKey('');
   _setDeployTensordockAuthId('');
   _setDeployModalApiKey('');
+  _setDeployHyperstackApiKey('');
   _setActiveProvider('');
   Object.assign(deployState, { status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', alertLevel: 'info' as const, alertHistory: [], sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], pullHistory: [], warmingStatus: { phase: 'idle' as const, startedAt: 0 }, deployId: '', gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0, templateHashId: '', canary: undefined, canaryEvalTimer: null });
   clearPersistedDeploy();

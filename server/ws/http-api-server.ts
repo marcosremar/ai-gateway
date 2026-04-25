@@ -2,10 +2,132 @@
 // Bun.serve()-based adapter that translates Bun Request → Node-style (req, res)
 // so the handlers registered in server/routes/* continue to work.
 
+import { timingSafeEqual } from 'crypto';
+import { PassThrough } from 'stream';
 import { createLogger } from '../../src/logger';
 import { PORT } from '../config';
+import { getRouteBodyLimit } from '../http-utils';
 
 const log = createLogger('http-api-server');
+
+type AuthzResult =
+  | { ok: true }
+  | { ok: false; status: number; message: string };
+
+const PUBLIC_HTTP_ROUTES = new Set([
+  'GET /health',
+  'HEAD /health',
+]);
+
+function safeCompare(a: string, b: string): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  } catch {
+    return false;
+  }
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
+export function isPublicHttpRoute(method: string, pathname: string): boolean {
+  return PUBLIC_HTTP_ROUTES.has(`${method.toUpperCase()} ${pathname}`);
+}
+
+export function resolveHttpCorsOrigin(origin: string | null): string | null {
+  if (!origin) return null;
+
+  const corsOriginsEnv = process.env.CORS_ORIGINS
+    || `http://localhost:${PORT},http://127.0.0.1:${PORT},http://localhost:3000,http://127.0.0.1:3000`;
+  if (corsOriginsEnv === '*') return origin;
+
+  const allowedOrigins = corsOriginsEnv
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+  if (isLocal || allowedOrigins.includes(origin)) {
+    return origin;
+  }
+  return null;
+}
+
+function buildCorsHeaders(origin: string | null): Record<string, string> {
+  if (!origin) return {};
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Vary': 'Origin',
+  };
+}
+
+export function authorizeHttpRequest(
+  method: string,
+  pathname: string,
+  authHeader: string | null,
+  remoteAddr: string,
+): AuthzResult {
+  if (isPublicHttpRoute(method, pathname)) {
+    return { ok: true };
+  }
+
+  const expectedToken = process.env.GATEWAY_API_KEY;
+  if (expectedToken) {
+    const token = (authHeader || '').replace(/^Bearer\s+/i, '');
+    if (!token || !safeCompare(token, expectedToken)) {
+      return { ok: false, status: 401, message: 'Invalid or missing API key' };
+    }
+    return { ok: true };
+  }
+
+  if (!isLoopbackAddress(remoteAddr)) {
+    return {
+      ok: false,
+      status: 401,
+      message: 'No GATEWAY_API_KEY configured — remote access denied. Set GATEWAY_API_KEY or connect from localhost.',
+    };
+  }
+  return { ok: true };
+}
+
+async function pumpRequestBody(
+  req: Request,
+  fakeReq: PassThrough,
+  routeLimit: number,
+): Promise<void> {
+  const contentLength = req.headers.get('content-length');
+  if (contentLength) {
+    const length = parseInt(contentLength, 10);
+    if (!Number.isNaN(length) && length > routeLimit) {
+      const err = new Error('Payload Too Large');
+      (err as Error & { statusCode?: number }).statusCode = 413;
+      throw err;
+    }
+  }
+
+  if (!req.body) {
+    fakeReq.end();
+    return;
+  }
+
+  const reader = req.body.getReader();
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = Buffer.from(value);
+    total += chunk.length;
+    if (total > routeLimit) {
+      const err = new Error('Payload Too Large');
+      (err as Error & { statusCode?: number }).statusCode = 413;
+      throw err;
+    }
+    fakeReq.write(chunk);
+  }
+  fakeReq.end();
+}
 
 /**
  * Wraps a Node-style handler(req, res) so it resolves to a Bun Response.
@@ -13,58 +135,109 @@ const log = createLogger('http-api-server');
  */
 function invokeNodeStyleHandler(
   req: Request,
-  bodyBuf: Buffer | null,
   invoke: (fakeReq: any, fakeRes: any) => void,
+  corsOrigin: string | null,
+  routeLimit: number,
 ): Promise<Response> {
   const url = new URL(req.url);
   const method = req.method;
-  const listeners: Record<string, Function[]> = {};
-  const fakeReq: any = {
-    method, url: url.pathname + url.search,
-    headers: (() => { const h: Record<string, string> = {}; req.headers.forEach((v, k) => { h[k] = v; }); return h; })(),
-    on: (ev: string, cb: Function) => { (listeners[ev] = listeners[ev] || []).push(cb); return fakeReq; },
+  const fakeReq = new PassThrough() as PassThrough & {
+    method?: string;
+    url?: string;
+    headers?: Record<string, string>;
   };
-  queueMicrotask(() => {
-    if (bodyBuf && bodyBuf.length) (listeners['data'] || []).forEach(cb => cb(bodyBuf));
-    (listeners['end'] || []).forEach(cb => cb());
-  });
+  fakeReq.method = method;
+  fakeReq.url = url.pathname + url.search;
+  fakeReq.headers = (() => {
+    const headers: Record<string, string> = {};
+    req.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+    return headers;
+  })();
 
   return new Promise<Response>((resolve) => {
     let statusCode = 200;
     const resHeaders: Record<string, string> = {};
     const chunks: (string | Buffer | Uint8Array)[] = [];
+    let settled = false;
+    const finish = (response: Response) => {
+      if (settled) return;
+      settled = true;
+      resolve(response);
+    };
     const fakeRes: any = {
-      writeHead: (code: number, hdrs?: Record<string, string>) => { statusCode = code; fakeRes.statusCode = code; if (hdrs) Object.assign(resHeaders, hdrs); },
+      headersSent: false,
+      writeHead: (code: number, hdrs?: Record<string, string>) => {
+        statusCode = code;
+        fakeRes.statusCode = code;
+        fakeRes.headersSent = true;
+        if (hdrs) Object.assign(resHeaders, hdrs);
+      },
       setHeader: (k: string, v: string) => { resHeaders[k] = v; },
       end: (data?: string | Buffer | Uint8Array) => {
+        if (settled) return;
         if (data) chunks.push(data);
         const body = Buffer.concat(chunks.map(c => Buffer.isBuffer(c) ? c : c instanceof Uint8Array ? Buffer.from(c) : Buffer.from(c as string)));
-        resolve(new Response(body, {
+        finish(new Response(body, {
           status: statusCode,
-          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', ...resHeaders },
+          headers: { 'Content-Type': 'application/json', ...buildCorsHeaders(corsOrigin), ...resHeaders },
         }));
       },
       write: (data: string | Buffer | Uint8Array) => { chunks.push(data); },
       getHeader: (k: string) => resHeaders[k],
+      hasHeader: (k: string) => Object.prototype.hasOwnProperty.call(resHeaders, k),
       statusCode: 200,
     };
-    invoke(fakeReq, fakeRes);
+
+    Promise.resolve(invoke(fakeReq, fakeRes)).catch((err: unknown) => {
+      log.error(`[http-api-server] Handler error: ${err instanceof Error ? err.message : String(err)}`);
+      if (!settled) {
+        finish(new Response(JSON.stringify({ error: 'Internal Server Error' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', ...buildCorsHeaders(corsOrigin) },
+        }));
+      }
+      try { fakeReq.destroy(err as Error); } catch { /* no-op */ }
+    });
+
+    void pumpRequestBody(req, fakeReq, routeLimit).catch((err: unknown) => {
+      try { fakeReq.destroy(err as Error); } catch { /* no-op */ }
+      if (settled) return;
+      const status = err instanceof Error && (err as Error & { statusCode?: number }).statusCode === 413 ? 413 : 400;
+      const message = status === 413 ? 'Payload Too Large' : 'Failed to read request body';
+      finish(new Response(JSON.stringify({ error: message }), {
+        status,
+        headers: { 'Content-Type': 'application/json', ...buildCorsHeaders(corsOrigin) },
+      }));
+    });
   });
 }
 
 /** Boot the REST API server on `PORT`. Returns without throwing on failure. */
 export function startHttpApiServer(): void {
   try {
-    const { registerAllRoutes, getDockerDynamicMatcher } = require('../routes');
+    const {
+      registerAllRoutes,
+      getDockerDynamicMatcher,
+      getGpuDynamicMatcher,
+      getAppDynamicMatcher,
+    } = require('../routes');
     const handlers: Record<string, Function> = {};
     registerAllRoutes(handlers);
 
     // ── Initialize workload registry ────────────────────────────────────
     try {
       const { workloadRegistry } = require('../../src/workloads/registry');
+      const { registerWorkloadServerRuntime } = require('../../src/workloads');
       const { GpuWorkloadDriver } = require('../../src/workloads/gpu-driver');
       const { BotWorkloadDriver } = require('../../src/workloads/bot-driver');
       const { DbWorkloadDriver } = require('../../src/workloads/db-driver');
+      registerWorkloadServerRuntime({
+        state: () => import('../state'),
+        providers: () => import('../providers'),
+        gpuDeploy: () => import('../gpu-deploy'),
+      });
       workloadRegistry.registerDriver(new GpuWorkloadDriver());
       workloadRegistry.registerDriver(new BotWorkloadDriver());
       workloadRegistry.registerDriver(new DbWorkloadDriver());
@@ -81,6 +254,8 @@ export function startHttpApiServer(): void {
 
     // Docker dynamic routes (e.g. /v1/docker/builds/:id)
     const matchDockerDynamic = getDockerDynamicMatcher();
+    const matchGpuDynamic = getGpuDynamicMatcher();
+    const matchAppDynamic = getAppDynamicMatcher();
 
     Bun.serve({
       port: PORT,
@@ -88,29 +263,52 @@ export function startHttpApiServer(): void {
       // exceed the default 10s. Bump to 120s so long-running admin endpoints
       // finish without empty-reply hangups.
       idleTimeout: 120,
-      fetch: async (req) => {
+      fetch: async (req, server) => {
         const url = new URL(req.url);
         const method = req.method;
+        const corsOrigin = resolveHttpCorsOrigin(req.headers.get('origin'));
+        const routeLimit = getRouteBodyLimit(url.pathname);
 
         // CORS preflight
         if (method === 'OPTIONS') {
-          return new Response(null, { status: 204, headers: {
-            'Access-Control-Allow-Origin': req.headers.get('origin') || '*',
-            'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-          }});
+          if (!corsOrigin) {
+            return new Response(JSON.stringify({ error: 'CORS origin not allowed' }), {
+              status: 403,
+              headers: { 'Content-Type': 'application/json' },
+            });
+          }
+          return new Response(null, {
+            status: 204,
+            headers: {
+              ...buildCorsHeaders(corsOrigin),
+              'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+              'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            },
+          });
+        }
+
+        const authz = authorizeHttpRequest(
+          method,
+          url.pathname,
+          req.headers.get('authorization'),
+          server.requestIP(req)?.address || '',
+        );
+        if (!authz.ok) {
+          return new Response(JSON.stringify({ error: authz.message }), {
+            status: authz.status,
+            headers: { 'Content-Type': 'application/json', ...buildCorsHeaders(corsOrigin) },
+          });
         }
 
         // Workload routes (dynamic :id segments — checked before flat handlers)
         if (routeWorkloadRequest && url.pathname.startsWith('/v1/workloads')) {
-          const bodyBuf = method !== 'GET' && method !== 'HEAD' && method !== 'DELETE' ? Buffer.from(await req.arrayBuffer()) : null;
-          return invokeNodeStyleHandler(req, bodyBuf, (fakeReq, fakeRes) => {
+          return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => {
             if (!routeWorkloadRequest!(fakeReq, fakeRes, url.pathname, method)) {
               // Not matched — write 404 via fakeRes
               fakeRes.writeHead(404, { 'Content-Type': 'application/json' });
               fakeRes.end(JSON.stringify({ error: 'Not found' }));
             }
-          });
+          }, corsOrigin, routeLimit);
         }
 
         // Docker dynamic routes (e.g. /v1/docker/builds/:id)
@@ -118,10 +316,31 @@ export function startHttpApiServer(): void {
           const match = matchDockerDynamic(method, url.pathname);
           if (match) {
             const [dynHandler, params] = match;
-            const bodyBuf2 = method !== 'GET' && method !== 'HEAD' ? Buffer.from(await req.arrayBuffer()) : null;
-            return invokeNodeStyleHandler(req, bodyBuf2, (fakeReq, fakeRes) => {
+            return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => {
               dynHandler(fakeReq, fakeRes, ...params);
-            });
+            }, corsOrigin, routeLimit);
+          }
+        }
+
+        // GPU dynamic routes (e.g. /v1/gpu/snapshot/:id/restore)
+        if (matchGpuDynamic && url.pathname.startsWith('/v1/gpu/')) {
+          const match = matchGpuDynamic(method, url.pathname);
+          if (match) {
+            const [dynHandler, params] = match;
+            return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => {
+              dynHandler(fakeReq, fakeRes, ...params);
+            }, corsOrigin, routeLimit);
+          }
+        }
+
+        // App registry dynamic routes (e.g. /v1/apps/:name)
+        if (matchAppDynamic && url.pathname.startsWith('/v1/apps/')) {
+          const match = matchAppDynamic(method, url.pathname);
+          if (match) {
+            const [dynHandler, params] = match;
+            return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => {
+              dynHandler(fakeReq, fakeRes, ...params);
+            }, corsOrigin, routeLimit);
           }
         }
 
@@ -129,13 +348,13 @@ export function startHttpApiServer(): void {
         const handler = handlers[key];
         if (!handler) {
           return new Response(JSON.stringify({ error: 'Not found', endpoints: Object.keys(handlers) }), {
-            status: 404, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+            status: 404,
+            headers: { 'Content-Type': 'application/json', ...buildCorsHeaders(corsOrigin) },
           });
         }
 
-        // Node→Bun adapter (use arrayBuffer for binary-safe body transfer)
-        const bodyBuf = method !== 'GET' && method !== 'HEAD' ? Buffer.from(await req.arrayBuffer()) : null;
-        return invokeNodeStyleHandler(req, bodyBuf, (fakeReq, fakeRes) => handler(fakeReq, fakeRes));
+        // Node→Bun adapter (stream request body to preserve downstream size limits)
+        return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => handler(fakeReq, fakeRes), corsOrigin, routeLimit);
       },
     });
     log.log(`[ws-server] HTTP API on port ${PORT}`);

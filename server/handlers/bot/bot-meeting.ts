@@ -11,7 +11,7 @@ import { maskKey } from '../../http-utils';
 import { readJsonBody, handleBodyError } from '../../http-utils';
 import { broadcastWs, startBotTranscriptPoll, stopBotTranscriptPoll } from '../../ws-state';
 import { warmupAllGpuModels } from '../../provider-warmup';
-import { isPrivateUrl } from '../../ai-handlers';
+import { isPrivateUrl, isPrivateUrlResolved } from '../../ai-handlers';
 import { validateInput } from '../../../src/input-validator';
 import { BotJoinRequestSchema } from '../../../src/contracts';
 import { PORT } from '../../config';
@@ -95,7 +95,7 @@ export async function handleBotJoin(req: IncomingMessage, res: ServerResponse): 
     return;
   }
 
-  if (isPrivateUrl(meetingUrl)) {
+  if (isPrivateUrl(meetingUrl) || await isPrivateUrlResolved(meetingUrl)) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Meeting URL must not point to private/internal networks' }));
     return;

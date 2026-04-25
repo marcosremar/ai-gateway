@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseConnectionString } from '../src/database/backup';
+import { parseConnectionString } from '../../src/database/backup';
 
 describe('parseConnectionString', () => {
   it('parses standard postgres URL', () => {

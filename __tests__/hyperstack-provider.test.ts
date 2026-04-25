@@ -69,6 +69,45 @@ describe('HyperstackClient', () => {
     expect(offers[0].pricePerHr).toBe(2.0);
   });
 
+  it('listOffers parses the nested live payload shape from /core/flavors', async () => {
+    mockFetch(async (url) => {
+      if (url.endsWith('/core/flavors')) {
+        return new Response(JSON.stringify({
+          status: true,
+          message: 'Getting flavors successful',
+          data: [
+            {
+              gpu: 'A100-80G-PCIe',
+              region_name: 'CANADA-1',
+              flavors: [
+                {
+                  id: 100,
+                  name: 'n3-A100x1',
+                  gpu: 'A100-80G-PCIe',
+                  region_name: 'CANADA-1',
+                  gpu_count: 1,
+                  cpu: 28,
+                  ram: 120,
+                  disk: 100,
+                  stock_available: true,
+                },
+              ],
+            },
+          ],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response('not found', { status: 404 });
+    });
+    const client = new HyperstackClient();
+    const offers = await client.listOffers({ gpuTypes: ['NVIDIA A100 80GB PCIe'] }, creds);
+    expect(offers).toHaveLength(1);
+    expect(offers[0].gpuType).toBe('A100-80G-PCIe');
+    expect(offers[0].offerId).toBe('n3-A100x1');
+    expect(offers[0].region).toBe('CANADA-1');
+    expect(offers[0].available).toBe(1);
+    expect(offers[0].pricePerHr).toBe(0);
+  });
+
   it('getInstanceStatus maps API status to canonical values', async () => {
     mockFetch(async () =>
       new Response(JSON.stringify({

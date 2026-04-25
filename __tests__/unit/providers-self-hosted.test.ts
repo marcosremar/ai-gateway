@@ -3,7 +3,7 @@ import {
   SelfHostedSTTProvider,
   SelfHostedTTSProvider,
   SelfHostedLLMProvider,
-} from '../src/providers/self-hosted/self-hosted-provider';
+} from '../../src/providers/self-hosted/self-hosted-provider';
 
 describe('SelfHostedSTTProvider', () => {
   it('isConfigured returns false without endpoint', () => {

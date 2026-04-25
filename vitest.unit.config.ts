@@ -38,6 +38,7 @@ export default mergeConfig(
         '__tests__/**/memory-soak.test.ts',
         '__tests__/**/breaking-point.test.ts',
         '__tests__/**/network-stress.test.ts',
+        '__tests__/load/**',
         '__tests__/**/cold-start*.test.ts',
         '__tests__/**/stt-load.test.ts',
         '__tests__/**/load-*.test.ts',

@@ -3,8 +3,8 @@
  * Covers: span lifecycle, tags, events, pipeline tracing, analytics, cleanup.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DistributedTracer } from '../src/observability/distributed-tracer';
-import type { PipelineMetrics } from '../src/observability/types';
+import { DistributedTracer } from '../../src/observability/distributed-tracer';
+import type { PipelineMetrics } from '../../src/observability/types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

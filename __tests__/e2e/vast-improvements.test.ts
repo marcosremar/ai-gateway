@@ -44,10 +44,17 @@ describe('Vast.ai reliability improvements', () => {
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
+    try { fs.rmSync(path.join(os.homedir(), '.babelcast', 'vast-host-blacklist.json')); } catch {}
+    try { fs.rmSync(path.join(os.homedir(), '.ai-gateway', 'vast-host-reputation.json')); } catch {}
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    return new Promise<void>(resolve => setTimeout(() => {
+      try { fs.rmSync(path.join(os.homedir(), '.babelcast', 'vast-host-blacklist.json')); } catch {}
+      try { fs.rmSync(path.join(os.homedir(), '.ai-gateway', 'vast-host-reputation.json')); } catch {}
+      resolve();
+    }, 1100));
   });
 
   // ── P2b: Offer cache with TTL ─────────────────────────────────────────────

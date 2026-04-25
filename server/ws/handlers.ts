@@ -5,7 +5,7 @@ import { createLogger } from '../../src/logger';
 import { botState } from '../state';
 import { broadcastWs, subscribeDub, unsubscribeDub, getActiveTargets, stopBotTranscriptPoll } from '../ws-state';
 import type { BabelCastWS } from '../ws-state';
-import { setBotState, isPrivateUrl } from '../bot-handlers';
+import { setBotState, isPrivateUrl, isPrivateUrlResolved } from '../bot-handlers';
 import { PORT } from '../config';
 import { speculativeCache } from '../speculative-cache';
 import { getLabsFlags } from '../labs-settings';
@@ -47,7 +47,7 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
       return;
     }
     // SSRF protection — block private/internal network URLs
-    if (isPrivateUrl(meetingUrl)) {
+    if (isPrivateUrl(meetingUrl) || await isPrivateUrlResolved(meetingUrl)) {
       ws.send(JSON.stringify({ type: 'error', message: 'Meeting URL must not point to private/internal networks' }));
       return;
     }

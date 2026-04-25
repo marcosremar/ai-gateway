@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initVaultFromEnv, getVault, setVault, resetVault } from '../src/vault/vault-singleton';
-import { Vault } from '../src/vault/vault';
-import { FileVaultStore } from '../src/vault/file-store';
+import { initVaultFromEnv, getVault, setVault, resetVault } from '../../src/vault/vault-singleton';
+import { Vault } from '../../src/vault/vault';
+import { FileVaultStore } from '../../src/vault/file-store';
 import { mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
 
-function createMemoryVaultStore(): import('../src/vault/types').VaultStore {
+function createMemoryVaultStore(): import('../../src/vault/types').VaultStore {
   const store: Record<string, string> = {};
   return {
     get: async (name: string) => store[name] ?? null,

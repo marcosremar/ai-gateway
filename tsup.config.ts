@@ -26,6 +26,8 @@ export default defineConfig({
   dts: {
     compilerOptions: {
       composite: false,
+      noUnusedLocals: false,
+      noUnusedParameters: false,
     },
   },
   splitting: true,

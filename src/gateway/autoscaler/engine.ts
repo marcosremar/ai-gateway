@@ -9,7 +9,6 @@ import type {
   AutoScaleDecision,
   ScaleTrigger,
 } from '../../types';
-import { resolveStageTimeouts } from '../../types';
 import type { GpuProviderRegistry } from '../providers/gpu/registry';
 import type { ProviderCredentials } from '../providers/gpu/types';
 import type { SessionTracker } from './session-tracker';

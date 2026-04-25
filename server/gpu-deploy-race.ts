@@ -3,6 +3,8 @@
 import type { GpuProviderClient } from '../src/gpu-providers/types';
 import type { GpuTier, ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import { DEFAULT_STORAGE_GB } from '../src/gpu-providers/deploy-orchestrator';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 import { categorizeDeployError } from '../src/errors/deploy-errors';
 import { errorSummary } from '../src/error-summary';
 import { tryAutoRemediation } from '../src/auto-remediation';
@@ -10,7 +12,7 @@ import { createLogger } from '../src/logger';
 import {
   deployState, setDeployState, deployCancelled,
   setDeployApiKey, setDeployVastApiKey, setDeployTensordockApiKey,
-  setDeployTensordockAuthId, setDeployModalApiKey,
+  setDeployTensordockAuthId, setDeployModalApiKey, setDeployHyperstackApiKey,
   setGpuHealthy, setLastRequestTime,
   deploymentSM, updateGpuModelWarmth,
 } from './state';
@@ -22,6 +24,8 @@ import { activeRaceInstanceIds } from './gpu-orphan-cleanup';
 import type { DeployExtra } from './gpu-deploy';
 
 const log = createLogger('gpu-deploy');
+const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
+const MODAL_DEPLOY_SCRIPT = resolve(SERVER_DIR, '..', 'docker', 'modal', 'babelcast.py');
 
 interface RaceCandidate {
   index: number;
@@ -126,7 +130,7 @@ export async function startDeployRace(
       index: i,
       tier,
       gpuTypes: gpuType ? [gpuType] : gpuTypes,
-      tierDockerImage: tier.name === 'modal' ? `${import.meta.dir}/../../docker/modal/babelcast.py` : dockerImage,
+      tierDockerImage: tier.name === 'modal' ? MODAL_DEPLOY_SCRIPT : dockerImage,
     };
   });
 
@@ -138,6 +142,7 @@ export async function startDeployRace(
     else if (tier.name === 'vast') setDeployVastApiKey(tier.apiKey);
     else if (tier.name === 'tensordock') { setDeployTensordockApiKey(tier.apiKey); setDeployTensordockAuthId(tier.authId ?? ''); }
     else if (tier.name === 'modal') setDeployModalApiKey(tier.apiKey);
+    else if (tier.name === 'hyperstack') setDeployHyperstackApiKey(tier.apiKey);
   }
 
   setDeployState({

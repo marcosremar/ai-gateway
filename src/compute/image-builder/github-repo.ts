@@ -8,8 +8,8 @@
  * Uses only the GitHub REST API — no octokit dependency.
  */
 
-import { readdirSync, readFileSync, statSync } from 'fs';
-import { join, relative } from 'path';
+import { lstatSync, readdirSync, readFileSync } from 'fs';
+import { basename, extname, join, relative } from 'path';
 
 const GH_API = 'https://api.github.com';
 const WORKFLOW_FILENAME = 'docker-build.yml';
@@ -83,14 +83,62 @@ interface TreeEntry {
   encoding?: 'utf-8' | 'base64';
 }
 
-/** Recursively collect all files in a directory, skipping .git */
-function collectFiles(dir: string, base: string = dir): TreeEntry[] {
+const SENSITIVE_BASENAMES = new Set([
+  '.env',
+  '.env.local',
+  '.env.development',
+  '.env.production',
+  '.env.test',
+  '.npmrc',
+  '.pypirc',
+  'github_token.json',
+  'provider-config.json',
+  'active_deploy.json',
+  'cooldowns.json',
+  'daily_spend.json',
+]);
+
+const SENSITIVE_DIRECTORIES = new Set([
+  '.ssh',
+  '.aws',
+  '.gnupg',
+  '.babelcast',
+  '.ai-gateway',
+]);
+
+const SENSITIVE_EXTENSIONS = new Set([
+  '.pem',
+  '.key',
+  '.p12',
+  '.pfx',
+  '.crt',
+  '.cer',
+]);
+
+export function isSensitiveBuildPath(relPath: string): boolean {
+  const normalized = relPath.replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.some((part) => SENSITIVE_DIRECTORIES.has(part))) return true;
+
+  const fileName = parts.length > 0 ? parts[parts.length - 1] : normalized;
+  const lowerName = fileName.toLowerCase();
+  if (SENSITIVE_BASENAMES.has(lowerName)) return true;
+  if (SENSITIVE_EXTENSIONS.has(extname(lowerName))) return true;
+  return false;
+}
+
+/** Recursively collect all files in a directory, excluding secrets and rejecting symlinks. */
+export function collectFiles(dir: string, base: string = dir): TreeEntry[] {
   const entries: TreeEntry[] = [];
   for (const name of readdirSync(dir)) {
     if (name === '.git' || name === 'node_modules' || name === '.DS_Store') continue;
     const abs = join(dir, name);
     const rel = relative(base, abs).replace(/\\/g, '/');
-    const st = statSync(abs);
+    const st = lstatSync(abs);
+    if (st.isSymbolicLink()) {
+      throw new Error(`Symlinks are not allowed in Docker build contexts: ${rel || basename(abs)}`);
+    }
+    if (isSensitiveBuildPath(rel)) continue;
     if (st.isDirectory()) {
       entries.push(...collectFiles(abs, base));
     } else if (st.isFile()) {

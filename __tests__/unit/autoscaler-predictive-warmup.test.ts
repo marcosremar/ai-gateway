@@ -14,8 +14,8 @@ import {
   startPredictiveWarmupTicker,
   type PredictiveWarmupConfig,
   type PredictiveWarmupDeps,
-} from '../src/autoscaler/predictive-warmup';
-import type { StateStore } from '../src/deps';
+} from '../../src/autoscaler/predictive-warmup';
+import type { StateStore } from '../../src/deps';
 
 function makeStore() {
   const hashes = new Map<string, Record<string, string>>();

@@ -110,7 +110,7 @@ export interface CreatePodRequest {
   cloudType: 'COMMUNITY' | 'SECURE';
   supportPublicIp: boolean;
   startSsh?: boolean;
-  start Jupyter?: boolean;
+  startJupyter?: boolean;
 }
 
 export interface RunpodInstance extends GpuInstance {

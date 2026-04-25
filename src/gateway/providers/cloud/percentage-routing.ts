@@ -41,9 +41,8 @@ export function selectPercentageRoute(options: PercentageRoutingOptions): Percen
   const { routes, hashKey, seed, sticky = true } = options;
   
   if (routes.length === 0) return null;
-  
-  // Validate percentages sum to 100 (or less if using 'other' fallback)
-  const totalPercentage = routes.reduce((sum, r) => sum + r.percentage, 0);
+
+  if (!sticky) return selectRandomRoute(routes);
   
   // Generate deterministic number from hashKey
   const hash = createHash('sha256')

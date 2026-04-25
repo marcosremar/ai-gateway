@@ -27,6 +27,13 @@ export function registerImageRoutes(handlers: Record<string, Function>): void {
     const ib = require('../../image-build-handlers');
     const dockerRoutes: Record<string, Function> = ib.getDockerRoutes();
     Object.assign(handlers, dockerRoutes);
+    const di = require('../../docker-inspect');
+    Object.assign(handlers, {
+      'GET /v1/docker/inspect': di.handleDockerInspect,
+      'POST /v1/docker/inspect': di.handleDockerInspect,
+      'GET /v1/docker-inspect': di.handleDockerInspect,
+      'POST /v1/docker-inspect': di.handleDockerInspect,
+    });
   } catch (e: any) {
     log.warn(`[routes/images] image-build-handlers not loaded: ${e.message?.slice(0, 80)}`);
   }

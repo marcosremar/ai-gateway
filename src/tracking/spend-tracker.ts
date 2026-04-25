@@ -50,7 +50,6 @@ export interface BudgetStatus {
 
 const SPEND_LIST_PREFIX = 'spend:records:';
 const SPEND_DAILY_PREFIX = 'spend:daily:';
-const SPEND_TTL_SECS = 48 * 60 * 60; // 48 hours
 const MAX_RECORDS_PER_DAY = 10_000;
 
 function recordsKey(userId: string, date: string): string {
@@ -185,15 +184,4 @@ export class SpendTracker {
     };
   }
 
-  // ── Private helpers ─────────────────────────────────────────────────────────
-
-  private async sumDailyCost(userId: string, date: string): Promise<string> {
-    const summary = await this.getDailySummary(userId, date);
-    return summary.totalCostUsd.toFixed(6);
-  }
-
-  private async countDailyRequests(userId: string, date: string): Promise<string> {
-    const summary = await this.getDailySummary(userId, date);
-    return String(summary.requestCount);
-  }
 }

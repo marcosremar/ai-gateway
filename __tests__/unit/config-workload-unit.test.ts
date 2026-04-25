@@ -72,7 +72,7 @@ vi.mock('../../server/gpu-deploy', () => ({
 }));
 
 // Mock deploy-settings
-vi.mock('../src/gpu-providers/deploy-settings', () => ({
+vi.mock('../../src/gpu-providers/deploy-settings', () => ({
   setSttTargetLatencyMs: vi.fn(),
   setLlmTargetLatencyMs: vi.fn(),
   setTtsTargetLatencyMs: vi.fn(),
@@ -145,7 +145,7 @@ vi.mock('../../server/user-profiles', () => ({
 }));
 
 // Mock src/gateway/pipeline/local-kokoro.ts — imports 'bun' which is unavailable in Vitest
-vi.mock('../src/gateway/pipeline/local-kokoro', () => ({
+vi.mock('../../src/gateway/pipeline/local-kokoro', () => ({
   getLocalKokoroUrl: vi.fn(() => null),
   startLocalKokoro: vi.fn(),
   stopLocalKokoro: vi.fn(),
@@ -177,7 +177,7 @@ vi.mock('../../server/state', () => ({
 }));
 
 // Mock database/neon-management
-vi.mock('../src/database/neon-management', () => ({
+vi.mock('../../src/database/neon-management', () => ({
   NeonManagementClient: class {
     constructor(public apiKey: string, public projectId: string) {}
     getProject() { return Promise.resolve({ name: 'test-project', regionId: 'us-east-1' }); }
@@ -651,7 +651,7 @@ import {
   setSttTargetLatencyMs,
   setLlmTargetLatencyMs,
   setTtsTargetLatencyMs,
-} from '../src/gpu-providers/deploy-settings';
+} from '../../src/gpu-providers/deploy-settings';
 
 describe('Config persistence — applyProfileLatencyTargets', () => {
   beforeEach(() => {
@@ -681,14 +681,14 @@ describe('Config persistence — applyProfileLatencyTargets', () => {
 // PART 2: WORKLOAD REGISTRY + HANDLERS (#281-#310)
 // ═════════════════════════════════════════════════════════════════════════════
 
-import { WorkloadRegistry } from '../src/workloads/registry';
+import { WorkloadRegistry } from '../../src/workloads/registry';
 import type {
   Workload,
   WorkloadDriver,
   WorkloadConfig,
   WorkloadEvent,
   WorkloadType,
-} from '../src/workloads/types';
+} from '../../src/workloads/types';
 
 // ── Fake Driver ─────────────────────────────────────────────────────────────
 
@@ -1029,7 +1029,7 @@ import {
   handleWorkloadTerminate,
   routeWorkloadRequest,
 } from '../../server/workload-handlers';
-import { workloadRegistry } from '../src/workloads/registry';
+import { workloadRegistry } from '../../src/workloads/registry';
 
 describe('Workload handlers — list', () => {
   beforeEach(() => {

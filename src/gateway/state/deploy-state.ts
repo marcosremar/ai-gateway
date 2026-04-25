@@ -73,6 +73,12 @@ export interface DeploymentState {
   devMode?: boolean;
   /** Readiness probe mode. 'health' (default) polls HTTP /health; 'ssh' polls TCP port 22. */
   readinessProbe?: 'health' | 'ssh';
+  /**
+   * How the pod was paused. 'stop' → classic SHUTOFF, resumed via startInstance.
+   * 'hibernate' → Hyperstack suspend-to-disk (billing drops to ~10–15%), resumed
+   * via hibernateRestore. Undefined when the pod is not paused.
+   */
+  pausedMode?: 'stop' | 'hibernate';
 }
 
 // ── Mutable deploy state ────────────────────────────────────────────────────
@@ -137,6 +143,8 @@ export interface PersistedDeploy {
   deployId?: string;
   /** Dev mode: pause on idle but skip auto-destroy. */
   devMode?: boolean;
+  /** How the pod was paused — 'stop' (default) or 'hibernate' (Hyperstack only). */
+  pausedMode?: 'stop' | 'hibernate';
 }
 
 export function persistDeployState(): void {
@@ -163,6 +171,7 @@ export function persistDeployState(): void {
       status: deployState.status,
       ...(isStopped ? { stoppedAt: Date.now() } : {}),
       ...(deployState.devMode ? { devMode: true } : {}),
+      ...(deployState.pausedMode ? { pausedMode: deployState.pausedMode } : {}),
     };
     // Atomic write: write to temp file then rename, so a crash mid-write
     // never corrupts the active deploy file.

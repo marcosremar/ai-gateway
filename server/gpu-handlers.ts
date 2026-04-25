@@ -7,6 +7,7 @@ const log = createLogger('gpu-handlers');
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { GpuProviderClient, GpuOffer, ProviderCredentials } from '../src/gpu-providers/types';
+import { pauseInstanceForIdle } from '../src/gateway/providers/gpu/idle-pause';
 import { filterTiers } from '../src/gpu-providers/deploy-orchestrator';
 import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import {
@@ -1284,7 +1285,11 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
   }
 
   try {
-    await client.stopInstance(podId, credentials);
+    // Optional opt-in: { hibernate: true } triggers Hyperstack hibernate instead
+    // of a plain stop (billing drops to ~10–15% on hyperstack). Other providers
+    // always fall back to stopInstance.
+    const allowHibernate = body.hibernate === true;
+    const pausedMode = await pauseInstanceForIdle(provider, podId, credentials, client, { allowHibernate });
     stopGpuMonitoring();
     updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuStop');
     // Transition to 'stopped' — preserves pod info for fast resume
@@ -1292,18 +1297,36 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
     const costPerHr = deployState.costPerHr;
     const dockerImage = deployState.dockerImage;
     deploymentSM.markStopped(podId, provider, gpuType, costPerHr, dockerImage);
+    const stopMsg = pausedMode === 'hibernate'
+      ? `Pod ${podId} hibernated (billing paused). Use POST /v1/gpu/resume to restart.`
+      : `Pod ${podId} stopped (paused). Use POST /v1/gpu/resume to restart.`;
     setDeployState({
       status: 'stopped',
-      message: `Pod ${podId} stopped (paused). Use POST /v1/gpu/resume to restart.`,
+      message: stopMsg,
       podId,
       provider,
+      pausedMode,
     });
 
-    log.log(`[req=${requestId}] Pod ${podId} stopped on ${provider} (was ${prevStatus})`);
-    logGpuEvent('instance_stopped', 'manual', true, { metadata: { reason: 'manual_stop', provider } });
+    log.log(`[req=${requestId}] Pod ${podId} ${pausedMode === 'hibernate' ? 'hibernated' : 'stopped'} on ${provider} (was ${prevStatus})`);
+    logGpuEvent(
+      pausedMode === 'hibernate' ? 'instance_hibernated' : 'instance_stopped',
+      'manual',
+      true,
+      { metadata: { reason: 'manual_stop', provider, pausedMode } },
+    );
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, deployId: deployState.deployId || undefined, podId, provider, message: 'Pod stopped (paused). Data preserved. Use /v1/gpu/resume to restart.' }));
+    res.end(JSON.stringify({
+      ok: true,
+      deployId: deployState.deployId || undefined,
+      podId,
+      provider,
+      pausedMode,
+      message: pausedMode === 'hibernate'
+        ? 'Pod hibernated (billing paused). Data preserved. Use /v1/gpu/resume to restart.'
+        : 'Pod stopped (paused). Data preserved. Use /v1/gpu/resume to restart.',
+    }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error(`[req=${requestId}] GPU stop failed: ${msg}`);
@@ -1421,6 +1444,38 @@ export async function handleStandbyCancel(_req: IncomingMessage, res: ServerResp
 // The ai-gateway acts as a pass-through — it reads the active GPU endpoint from
 // deployState and forwards the request to the snapgpu-gateway.
 
+type SnapshotIdBody = { id?: string; snapshotId?: string; snapshot_id?: string };
+
+async function resolveSnapshotId(req: IncomingMessage, action: 'restore' | 'delete'): Promise<string> {
+  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const pathParts = url.pathname.split('/').filter(Boolean);
+  let snapshotId = '';
+
+  if (action === 'restore' && pathParts.at(-1) === 'restore') {
+    const candidate = pathParts.at(-2);
+    if (candidate && candidate !== 'snapshot') snapshotId = candidate;
+  } else if (action === 'delete') {
+    const candidate = pathParts.at(-1);
+    if (candidate && candidate !== 'snapshot') snapshotId = candidate;
+  }
+
+  snapshotId ||= url.searchParams.get('snapshotId')
+    || url.searchParams.get('snapshot_id')
+    || url.searchParams.get('id')
+    || '';
+
+  if (!snapshotId) {
+    try {
+      const body = await readJsonBody(req) as SnapshotIdBody;
+      snapshotId = body.snapshotId || body.snapshot_id || body.id || '';
+    } catch {
+      // Body is optional for dynamic snapshot routes.
+    }
+  }
+
+  return snapshotId.trim();
+}
+
 /** POST /v1/gpu/snapshot — create snapshot of the current GPU container */
 export async function handleSnapshotCreate(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const endpoint = deployState.endpoint;
@@ -1475,13 +1530,10 @@ export async function handleSnapshotRestore(req: IncomingMessage, res: ServerRes
     res.end(JSON.stringify({ error: 'No active GPU — deploy first' }));
     return;
   }
-  const url = new URL(req.url || '', `http://${req.headers.host}`);
-  const snapshotId = url.pathname.split('/').pop() === 'restore'
-    ? url.pathname.split('/').at(-2) || ''
-    : '';
+  const snapshotId = await resolveSnapshotId(req, 'restore');
   if (!snapshotId) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Missing snapshot_id in URL' }));
+    res.end(JSON.stringify({ error: 'Missing snapshot_id in URL, query, or body' }));
     return;
   }
   try {
@@ -1506,11 +1558,10 @@ export async function handleSnapshotDelete(req: IncomingMessage, res: ServerResp
     res.end(JSON.stringify({ error: 'No active GPU — deploy first' }));
     return;
   }
-  const url = new URL(req.url || '', `http://${req.headers.host}`);
-  const snapshotId = url.pathname.split('/').pop() || '';
+  const snapshotId = await resolveSnapshotId(req, 'delete');
   if (!snapshotId) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Missing snapshot_id in URL' }));
+    res.end(JSON.stringify({ error: 'Missing snapshot_id in URL, query, or body' }));
     return;
   }
   try {
@@ -1693,14 +1744,10 @@ export async function handleGpuHeartbeat(req: IncomingMessage, res: ServerRespon
   let source = 'unknown';
   let activeRequests: number | undefined;
   try {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
-    if (chunks.length > 0) {
-      const body = JSON.parse(Buffer.concat(chunks).toString());
-      if (body.source) source = String(body.source);
-      if (typeof body.activeRequests === 'number') activeRequests = body.activeRequests;
-      if (typeof body.active_requests === 'number') activeRequests = body.active_requests;
-    }
+    const body = await readJsonBody(req);
+    if (body.source) source = String(body.source);
+    if (typeof body.activeRequests === 'number') activeRequests = body.activeRequests;
+    if (typeof body.active_requests === 'number') activeRequests = body.active_requests;
   } catch { /* body is optional */ }
 
   const idleResetMs = Date.now() - lastModelRequestTime;
@@ -1724,7 +1771,8 @@ export {
 export {
   handleGpuStatus, handleGpuList, handleHealth, handleGpuLogs, handleGpuEventLogs,
   handleGpuCatalog, handleGpuMyLocation, handleGpuReputation, handleGpuLatencyProbe,
-  handlePreflightCheck, handleErrorSummary, handleCanaryStatus,
+  handlePreflightCheck, handleErrorSummary, handleErrorAlerts, handleCanaryStatus,
+  handlePerformanceStats, handleGpuCompatibility,
 } from './gpu-handlers-info';
 export {
   handleGetLatencySettings, handlePatchLatencySettings, handleGetGpuDefaults,

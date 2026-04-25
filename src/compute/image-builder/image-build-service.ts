@@ -9,8 +9,8 @@
  * 6. Update local catalog
  */
 
-import { existsSync } from 'fs';
-import { basename, resolve as resolvePath } from 'path';
+import { existsSync, realpathSync } from 'fs';
+import { basename, resolve as resolvePath, sep } from 'path';
 import type { ImageBuildSpec, ImageBuildRecord, ImageBuildStatus } from './types';
 import { loadGitHubToken } from './github-auth';
 import { ensureRepo, pushDirectoryAndBuild, findRunForCommit, getRunStatus } from './github-repo';
@@ -28,6 +28,53 @@ export interface BuildStartResult {
   message: string;
 }
 
+export function resolveAllowedBuildRoots(): string[] {
+  const roots = new Set<string>();
+  const addRoot = (input: string | undefined) => {
+    const trimmed = input?.trim();
+    if (!trimmed) return;
+    const resolved = resolvePath(trimmed);
+    if (!existsSync(resolved)) return;
+    try {
+      roots.add(realpathSync(resolved));
+    } catch {
+      // Ignore invalid roots — the operator can fix the env var without crashing startup.
+    }
+  };
+
+  addRoot(process.cwd());
+
+  const configuredRoots = process.env.AI_GATEWAY_BUILD_ROOTS;
+  if (configuredRoots) {
+    for (const entry of configuredRoots.split(/[\n,]+/)) {
+      addRoot(entry);
+    }
+  }
+
+  return Array.from(roots);
+}
+
+export function validateBuildContextPath(dirPath: string, allowedRoots = resolveAllowedBuildRoots()): string {
+  const requestedPath = resolvePath(dirPath);
+  if (!existsSync(requestedPath)) {
+    throw new Error(`Directory not found: ${requestedPath}`);
+  }
+
+  const realDirPath = realpathSync(requestedPath);
+  const isAllowed = allowedRoots.some((root) => {
+    if (realDirPath === root) return true;
+    return realDirPath.startsWith(`${root}${sep}`);
+  });
+
+  if (!isAllowed) {
+    throw new Error(
+      `Build directory must be inside an allowed build root. Allowed roots: ${allowedRoots.join(', ') || process.cwd()}`,
+    );
+  }
+
+  return realDirPath;
+}
+
 /**
  * Start an image build asynchronously.
  * Returns immediately with a build ID — call pollBuild() to track progress.
@@ -40,10 +87,7 @@ export async function startBuild(spec: ImageBuildSpec): Promise<BuildStartResult
     );
   }
 
-  const absDir = resolvePath(spec.dirPath);
-  if (!existsSync(absDir)) {
-    throw new Error(`Directory not found: ${absDir}`);
-  }
+  const absDir = validateBuildContextPath(spec.dirPath);
   if (!existsSync(`${absDir}/Dockerfile`) && !existsSync(`${absDir}/dockerfile`)) {
     throw new Error(`No Dockerfile found in ${absDir}`);
   }

@@ -7,8 +7,8 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { SpendTracker, type SpendRecord } from '../src/tracking/spend-tracker';
-import type { StateStore } from '../src/deps';
+import { SpendTracker, type SpendRecord } from '../../src/tracking/spend-tracker';
+import type { StateStore } from '../../src/deps';
 
 // ── In-memory StateStore mock ──────────────────────────────────────────────────
 

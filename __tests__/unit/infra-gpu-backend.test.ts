@@ -15,7 +15,7 @@ import {
   stripAnsi,
   SKY_BIN,
   execAsync,
-} from '../src/infra/gpu-backend';
+} from '../../src/infra/gpu-backend';
 
 describe('sshOpts', () => {
   it('returns default SSH options', () => {
@@ -147,14 +147,14 @@ describe('getSkySSHArgs (fallback behavior)', async () => {
   // We can't test the file-reading path easily, but we can test the fallback
   it('falls back to cluster name as host when SSH config missing', async () => {
     // For a non-existent cluster, should fallback to cluster name
-    const { getSkySSHArgs } = await import('../src/infra/gpu-backend');
+    const { getSkySSHArgs } = await import('../../src/infra/gpu-backend');
     const args = await getSkySSHArgs('nonexistent-cluster-xyz');
     // Fallback: args should contain the cluster name
     expect(args.join(' ')).toContain('nonexistent-cluster-xyz');
   });
 
   it('includes SSH options in fallback', async () => {
-    const { getSkySSHArgs } = await import('../src/infra/gpu-backend');
+    const { getSkySSHArgs } = await import('../../src/infra/gpu-backend');
     const args = await getSkySSHArgs('nonexistent-cluster-xyz');
     expect(args.join(' ')).toContain('StrictHostKeyChecking=no');
   });

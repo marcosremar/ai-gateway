@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { initVaultFromEnv, getVault, setVault, resetVault } from '../src/vault/vault-singleton';
-import { Vault } from '../src/vault/vault';
+import { initVaultFromEnv, getVault, setVault, resetVault } from '../../src/vault/vault-singleton';
+import { Vault } from '../../src/vault/vault';
 
 describe('vault-singleton', () => {
   const originalVaultKey = process.env.VAULT_MASTER_KEY;

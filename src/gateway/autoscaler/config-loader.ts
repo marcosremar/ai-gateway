@@ -45,6 +45,7 @@ const SkypilotSchema = z.object({
   tensordockAuthId: z.string().optional(),
   runpodApiKey: z.string().optional(),
   vastApiKey: z.string().optional(),
+  hyperstackApiKey: z.string().optional(),
   modalApiKey: z.string().optional(),
   hfToken: z.string().optional(),
   dockerImage: z.string().optional(),
@@ -59,13 +60,14 @@ function toFiniteNumber(value: unknown, defaultVal: number): number {
 }
 
 /** Providers that map to a self-hosted GPU tier */
-const GPU_OMNI_PROVIDERS = new Set(['skypilot', 'runpod', 'tensordock', 'vast', 'modal']);
+const GPU_OMNI_PROVIDERS = new Set(['skypilot', 'runpod', 'tensordock', 'vast', 'hyperstack', 'modal']);
 
 interface TierCredentials {
   tensordockApiKey?: string;
   tensordockAuthId?: string;
   runpodApiKey?: string;
   vastApiKey?: string;
+  hyperstackApiKey?: string;
   modalApiKey?: string;
   hfToken?: string;
   dockerImage?: string;
@@ -82,6 +84,8 @@ function resolveApiKey(provider: GpuProvider, creds: TierCredentials): string | 
       return creds.runpodApiKey;
     case 'vast':
       return creds.vastApiKey;
+    case 'hyperstack':
+      return creds.hyperstackApiKey;
     case 'modal':
       return creds.modalApiKey;
     default:
@@ -152,6 +156,8 @@ export async function loadAutoscalerConfig(
       (skypilot?.runpodApiKey as string | undefined) ?? process.env.RUNPOD_API_KEY;
     const vastApiKey: string | undefined =
       (skypilot?.vastApiKey as string | undefined) ?? process.env.VAST_API_KEY;
+    const hyperstackApiKey: string | undefined =
+      (skypilot?.hyperstackApiKey as string | undefined) ?? process.env.HYPERSTACK_API_KEY;
     const modalApiKey: string | undefined =
       (skypilot?.modalApiKey as string | undefined) ?? (
         process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET
@@ -164,7 +170,7 @@ export async function loadAutoscalerConfig(
       (skypilot?.dockerImage as string | undefined) ?? process.env.PARLE_DOCKER_IMAGE;
 
     const creds: TierCredentials = {
-      tensordockApiKey, tensordockAuthId, runpodApiKey, vastApiKey, modalApiKey, hfToken, dockerImage,
+      tensordockApiKey, tensordockAuthId, runpodApiKey, vastApiKey, hyperstackApiKey, modalApiKey, hfToken, dockerImage,
     };
 
     const rawGpuTypes = asCfg.gpuTypes;

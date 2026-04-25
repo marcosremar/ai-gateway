@@ -2,16 +2,17 @@
 // Handles auto-stop (pause) of idle pods. Stop preserves disk for fast resume.
 
 import type { GpuProviderClient, ProviderCredentials } from '../src/gpu-providers/types';
+import { pauseInstanceForIdle } from '../src/gateway/providers/gpu/idle-pause';
 import { createLogger } from '../src/logger';
 import { categorizeDeployError } from '../src/errors/deploy-errors';
 import { errorSummary } from '../src/error-summary';
 import { tryAutoRemediation } from '../src/auto-remediation';
 import {
   deployState, setDeployState, deployApiKey, deployVastApiKey,
-  deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey,
+  deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey, deployHyperstackApiKey,
   activeProvider, deploymentSM,
 } from './state';
-import { updateActivePipeline, runpod, vast, tensordock, modal } from './providers';
+import { updateActivePipeline, runpod, vast, tensordock, modal, hyperstack } from './providers';
 import { logGpuEvent } from './metrics';
 import { broadcastProviderStatus } from './ws-state';
 import { emitGatewayEvent } from './event-bus';
@@ -31,11 +32,21 @@ const log = createLogger('gpu-deploy');
  * After stopping, schedules an auto-destroy timer (IDLE_DESTROY_MS) to
  * permanently terminate the pod if not resumed.
  *
+ * For Hyperstack, a plain stop still bills 100% (SHUTOFF is not free). When
+ * the caller sets `opts.allowHibernate`, we call `hibernate()` instead so
+ * billing drops to ~10–15% of the running rate. The resume path reads the
+ * persisted `pausedMode` to dispatch between `startInstance` and
+ * `hibernateRestore`.
+ *
  * Falls back to `autoTerminateGpu` if stop fails or no credentials are available.
  *
  * @param reason - Why the stop was triggered (e.g. 'idle_timeout', 'budget_exceeded')
+ * @param opts   - Provider-aware flags (hibernate opt-in)
  */
-export async function autoStopGpu(reason: DeleteReason = 'idle_timeout') {
+export async function autoStopGpu(
+  reason: DeleteReason = 'idle_timeout',
+  opts: { allowHibernate?: boolean } = {},
+) {
   const provider = activeProvider;
   const podId = deployState.podId;
 
@@ -56,6 +67,8 @@ export async function autoStopGpu(reason: DeleteReason = 'idle_timeout') {
     client = tensordock; credentials.apiKey = deployTensordockApiKey; credentials.authId = deployTensordockAuthId;
   } else if (provider === 'modal' && deployModalApiKey) {
     client = modal; credentials.apiKey = deployModalApiKey;
+  } else if (provider === 'hyperstack' && deployHyperstackApiKey) {
+    client = hyperstack; credentials.apiKey = deployHyperstackApiKey;
   }
 
   if (!client) {
@@ -64,11 +77,22 @@ export async function autoStopGpu(reason: DeleteReason = 'idle_timeout') {
     return;
   }
 
+  let pausedMode: 'stop' | 'hibernate' = 'stop';
   try {
-    await client.stopInstance(podId, credentials);
-    log.log(`[gpu] Pod ${podId} stopped (paused) on ${provider} — disk preserved, no charges`);
-    logGpuEvent('instance_stopped', provider, true, { metadata: { podId, reason } });
-    emitGatewayEvent('gpu.stopped', { deployId: deployState.deployId, podId, provider, reason });
+    pausedMode = await pauseInstanceForIdle(provider, podId, credentials, client, {
+      allowHibernate: opts.allowHibernate === true,
+    });
+    const modeLabel = pausedMode === 'hibernate'
+      ? 'hibernated (billing paused — IP+disk only)'
+      : 'stopped (paused) — disk preserved';
+    log.log(`[gpu] Pod ${podId} ${modeLabel} on ${provider}`);
+    logGpuEvent(
+      pausedMode === 'hibernate' ? 'instance_hibernated' : 'instance_stopped',
+      provider,
+      true,
+      { metadata: { podId, reason, pausedMode } },
+    );
+    emitGatewayEvent('gpu.stopped', { deployId: deployState.deployId, podId, provider, reason, pausedMode });
   } catch (err) {
     const deployErr = categorizeDeployError(err, {
       deployId: deployState.deployId,
@@ -102,11 +126,15 @@ export async function autoStopGpu(reason: DeleteReason = 'idle_timeout') {
   const costPerHr = deployState.costPerHr;
   const dockerImage = deployState.dockerImage;
   deploymentSM.markStopped(podId, provider, gpuType, costPerHr, dockerImage);
+  const stoppedMsg = pausedMode === 'hibernate'
+    ? `Pod hibernated (idle ${Math.round(IDLE_TIMEOUT_MS / 60_000)} min — billing paused). ${destroyMsg}`
+    : `Pod stopped (idle ${Math.round(IDLE_TIMEOUT_MS / 60_000)} min). ${destroyMsg}`;
   setDeployState({
     status: 'stopped',
-    message: `Pod stopped (idle ${Math.round(IDLE_TIMEOUT_MS / 60_000)} min). ${destroyMsg}`,
+    message: stoppedMsg,
     podId,
     provider,
+    pausedMode,
   });
 
   // Schedule auto-destroy unless this is a dev deploy (user explicitly opted out)

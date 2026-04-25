@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { RequestBatcher } from '../src/autoscaler/request-batcher';
+import { RequestBatcher } from '../../src/autoscaler/request-batcher';
 
 describe('RequestBatcher — flush result mismatch', () => {
   beforeEach(() => { vi.useFakeTimers(); });

@@ -223,7 +223,7 @@ export class GatewaySDK {
       language: options.language ?? 'English',
     };
     if (options.speed !== undefined && options.speed !== 1.0) body.speed = options.speed;
-    const res = await this.fetch('/v1/tts', {
+    const res = await this.fetch('/v1/tts/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -237,7 +237,7 @@ export class GatewaySDK {
       throw new GatewayError(
         `Failed to read audio response: ${err instanceof Error ? err.message : String(err)}`,
         res.status,
-        '/v1/tts',
+        '/v1/tts/preview',
       );
     }
     return { audio, contentType: 'audio/wav', usedGpu: true };
@@ -779,8 +779,8 @@ export class GatewaySDK {
 
   /** Get request history/log. */
   async requestLog(limit = 50): Promise<Record<string, unknown>[]> {
-    const res = await this.fetch(`/v1/request-log?limit=${limit}`, { method: 'GET', timeout: this.timeouts.health });
-    const data = await this.parseJson(res, '/v1/request-log');
+    const res = await this.fetch(`/v1/requests/log?limit=${limit}`, { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/requests/log');
     return (data.requests ?? data) as Record<string, unknown>[];
   }
 
@@ -799,13 +799,13 @@ export class GatewaySDK {
 
   /** Inspect Docker image metadata from Docker Hub. */
   async dockerInspect(imageName: string): Promise<Record<string, unknown>> {
-    const res = await this.fetch('/v1/docker-inspect', {
+    const res = await this.fetch('/v1/docker/inspect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image: imageName }),
       timeout: this.timeouts.health,
     });
-    return await this.parseJson(res, '/v1/docker-inspect') as Record<string, unknown>;
+    return await this.parseJson(res, '/v1/docker/inspect') as Record<string, unknown>;
   }
 
   // ── Health ──────────────────────────────────────────────────────────────

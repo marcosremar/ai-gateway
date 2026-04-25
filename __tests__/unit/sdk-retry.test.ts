@@ -10,8 +10,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── TS SDK (src/sdk/client.ts) ──────────────────────────────────────────────
-import { GatewaySDK } from '../src/sdk/client';
-import { GatewayError } from '../src/sdk/types';
+import { GatewaySDK } from '../../src/sdk/client';
+import { GatewayError } from '../../src/sdk/types';
 
 // ── Node SDK (sdk/node/index.ts) ────────────────────────────────────────────
 import { GatewayHttpClient, GatewayHttpError, CircuitOpenError } from '../../sdk/node';

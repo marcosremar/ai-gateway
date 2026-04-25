@@ -1,20 +1,21 @@
 /**
- * BotWorkloadDriver — bridges existing bot deploy/terminate logic
- * (server/bot-handlers.ts) into the WorkloadDriver interface.
+ * BotWorkloadDriver — bridges bot deploy/terminate runtime operations
+ * into the WorkloadDriver interface.
  */
 
 import type { Workload, WorkloadConfig, WorkloadDriver, BotWorkloadConfig } from './types';
 import { WorkloadRegistry } from './registry';
+import { getWorkloadServerRuntime } from './server-runtime';
 
 export class BotWorkloadDriver implements WorkloadDriver {
   readonly type = 'bot' as const;
 
   private async serverState() {
-    return import('../../../server/state');
+    return getWorkloadServerRuntime().state();
   }
 
   private async providers() {
-    return import('../../../server/providers');
+    return getWorkloadServerRuntime().providers();
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────

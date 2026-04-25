@@ -18,7 +18,7 @@ import {
 import { runpod, vast, tensordock, ollamaAvailable, groqAvailable, openaiAvailable, openrouterAvailable, shouldPreferGpuTts, getStageBreakersSnapshot } from './providers';
 import { cooldownTracker, fetchGpuLogs, IDLE_TIMEOUT_MS } from './gpu-deploy';
 import { logGpuEvent, computePercentile, getAllReputations } from './metrics';
-import { getOrCreateRequestId, setRequestIdHeader } from './http-utils';
+import { getOrCreateRequestId, setRequestIdHeader, readJsonBody, handleBodyError } from './http-utils';
 import { getImageCatalog, PORT, PROVIDER_CHAIN, LOW_BALANCE_THRESHOLD_USD } from './config';
 import { BILLING_URLS } from '../src/providers/errors';
 import { fetchIpLocation, extractIp, fetchRunPodDatacenter, parseProviderRegion, fetchMyLocation } from './ip-location';
@@ -751,10 +751,6 @@ export async function handlePreflightCheck(req: IncomingMessage, res: ServerResp
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
 
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const body = Buffer.concat(chunks).toString();
-
   let config: {
     image?: string;
     provider?: string;
@@ -763,13 +759,8 @@ export async function handlePreflightCheck(req: IncomingMessage, res: ServerResp
     quotedPricePerHr?: number;
     templateId?: string;
   };
-  try {
-    config = JSON.parse(body);
-  } catch {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Invalid JSON body' }));
-    return;
-  }
+  try { config = await readJsonBody(req) as typeof config; }
+  catch (err) { handleBodyError(res, err); return; }
 
   if (!config.image) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -820,9 +811,9 @@ export async function handleErrorAlerts(req: IncomingMessage, res: ServerRespons
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ alerts }));
   } else if (req.method === 'POST') {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString());
+    let body: Record<string, unknown>;
+    try { body = await readJsonBody(req); }
+    catch (err) { handleBodyError(res, err); return; }
 
     if (!body.type) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -830,7 +821,7 @@ export async function handleErrorAlerts(req: IncomingMessage, res: ServerRespons
       return;
     }
 
-    errorSummary.acknowledgeAlert(body.type);
+    errorSummary.acknowledgeAlert(String(body.type));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ acknowledged: true }));
   }
@@ -943,4 +934,3 @@ export async function handleGpuCompatibility(req: IncomingMessage, res: ServerRe
     warnings: analysis.warnings,
   }));
 }
-

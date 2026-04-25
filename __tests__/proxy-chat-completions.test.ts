@@ -64,6 +64,52 @@ describe('handleChatCompletions', () => {
     expect(res.status).toBe(400);
   });
 
+  it('accepts multimodal content (array of parts) for vision calls', async () => {
+    const res = await handleChatCompletions(
+      makeReq({
+        model: 'test-model',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'describe this frame' },
+              { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' } },
+            ],
+          },
+        ],
+      }),
+      providers,
+    );
+    expect(res.status).toBe(200);
+    expect(mockProvider.chat).toHaveBeenCalledOnce();
+    const callArgs = mockProvider.chat.mock.calls[0][0];
+    expect(Array.isArray(callArgs.messages[0].content)).toBe(true);
+  });
+
+  it('rejects content array where a part has no type', async () => {
+    const res = await handleChatCompletions(
+      makeReq({
+        model: 'test-model',
+        messages: [
+          { role: 'user', content: [{ notAType: 'x' }] },
+        ],
+      }),
+      providers,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects content that is neither string nor array', async () => {
+    const res = await handleChatCompletions(
+      makeReq({
+        model: 'test-model',
+        messages: [{ role: 'user', content: 42 }],
+      }),
+      providers,
+    );
+    expect(res.status).toBe(400);
+  });
+
   it('returns 404 when model not found', async () => {
     const res = await handleChatCompletions(makeReq({ model: 'nonexistent', messages: [{ role: 'user', content: 'hi' }] }), providers);
     expect(res.status).toBe(404);

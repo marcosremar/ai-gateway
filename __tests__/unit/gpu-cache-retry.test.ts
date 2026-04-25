@@ -183,7 +183,7 @@ vi.mock('../../server/ws-state', () => ({
   broadcastWs:             vi.fn(),
 }));
 
-vi.mock('../src/autoscaler/health', () => ({
+vi.mock('../../src/autoscaler/health', () => ({
   probeGpuHealth: vi.fn(),
 }));
 

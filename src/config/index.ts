@@ -48,6 +48,7 @@ const ConfigSchema = z.object({
   // GPU Providers
   runpodApiKey: z.string().optional(),
   vastApiKey: z.string().optional(),
+  hyperstackApiKey: z.string().optional(),
   tensordockApiKey: z.string().optional(),
   tensordockAuthId: z.string().optional(),
 
@@ -105,6 +106,7 @@ export function getConfig(): GatewayConfig {
     modalApiKey: process.env.MODAL_API_KEY,
     runpodApiKey: process.env.RUNPOD_API_KEY,
     vastApiKey: process.env.VAST_API_KEY,
+    hyperstackApiKey: process.env.HYPERSTACK_API_KEY,
     tensordockApiKey: process.env.TENSORDOCK_API_KEY,
     tensordockAuthId: process.env.TENSORDOCK_AUTH_ID,
     rateLimitRpm: process.env.RATE_LIMIT_RPM,
@@ -161,6 +163,7 @@ function getEnabledProviders(config: GatewayConfig): string[] {
   if (config.fireworksApiKey) providers.push('fireworks');
   if (config.openrouterApiKey) providers.push('openrouter');
   if (config.modalApiKey) providers.push('modal');
+  if (config.hyperstackApiKey) providers.push('hyperstack');
   return providers;
 }
 
@@ -175,6 +178,7 @@ export function isProviderEnabled(providerId: string): boolean {
     fireworks: config.fireworksApiKey,
     openrouter: config.openrouterApiKey,
     modal: config.modalApiKey,
+    hyperstack: config.hyperstackApiKey,
   };
   return !!keyMap[providerId];
 }

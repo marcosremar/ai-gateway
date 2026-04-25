@@ -137,17 +137,17 @@ vi.mock('../../server/ws-state', () => ({
 }));
 
 // Mock src/ensemble-stt.ts
-vi.mock('../src/ensemble-stt', () => ({
+vi.mock('../../src/ensemble-stt', () => ({
   runEnsembleSTT: vi.fn(),
 }));
 
 // Mock src/stt-race.ts
-vi.mock('../src/stt-race', () => ({
+vi.mock('../../src/stt-race', () => ({
   sttRace: vi.fn(),
 }));
 
 // Mock src/observability/distributed-tracer.ts
-vi.mock('../src/observability/distributed-tracer', () => ({
+vi.mock('../../src/observability/distributed-tracer', () => ({
   globalTracer: {
     startSpan: vi.fn(() => ({ spanId: 'test-span' })),
     endSpan: vi.fn(),
@@ -167,14 +167,14 @@ vi.mock('../src', () => ({
 }));
 
 // Mock src/gpu-providers/deploy-settings.ts
-vi.mock('../src/gpu-providers/deploy-settings', () => ({
+vi.mock('../../src/gpu-providers/deploy-settings', () => ({
   getSttTargetLatencyMs: vi.fn(() => 1000),
   getLlmTargetLatencyMs: vi.fn(() => 800),
   getBenchmarkMarginPct: vi.fn(() => 20),
 }));
 
 // Mock src/stt-hallucination-filter.ts
-vi.mock('../src/stt-hallucination-filter', () => ({
+vi.mock('../../src/stt-hallucination-filter', () => ({
   filterHallucinations: vi.fn((_resp: unknown, _lang: unknown, _cfg: unknown) => ({
     filtered: false,
     text: '',
@@ -185,7 +185,7 @@ vi.mock('../src/stt-hallucination-filter', () => ({
 }));
 
 // Mock src/language-detect.ts
-vi.mock('../src/language-detect', () => ({
+vi.mock('../../src/language-detect', () => ({
   detectLanguage: vi.fn(() => ({ language: 'fr', confidence: 0.95 })),
   detectLanguageWithSwap: vi.fn(() => ({
     detected: { language: 'fr', confidence: 0.95 },
@@ -195,12 +195,12 @@ vi.mock('../src/language-detect', () => ({
 }));
 
 // Mock src/providers/ollama
-vi.mock('../src/providers/ollama', () => ({
+vi.mock('../../src/providers/ollama', () => ({
   OllamaSTTProvider: vi.fn(),
 }));
 
 // Mock src/gateway/pipeline/local-kokoro.ts — imports 'bun' which is unavailable in Vitest
-vi.mock('../src/gateway/pipeline/local-kokoro', () => ({
+vi.mock('../../src/gateway/pipeline/local-kokoro', () => ({
   getLocalKokoroUrl: vi.fn(() => null),
   startLocalKokoro: vi.fn(),
   stopLocalKokoro: vi.fn(),
@@ -557,7 +557,7 @@ describe('handleTranscribe', () => {
 
   // #013: Metrics are logged on success
   it('#013 calls logRequest with correct metrics on success', async () => {
-    const { logRequest } = await import('../server/metrics');
+    const { logRequest } = await import('../../server/metrics');
     const audio = fakeAudio();
     mockRaceProviders.mockResolvedValueOnce({
       result: { text: 'Hello', language: 'en', used_gpu: false, avg_logprob: 0 },
@@ -723,7 +723,7 @@ describe('handleEnsembleTranscribe', () => {
 
   // #022: Returns ensemble result from multiple providers
   it('#022 returns ensemble consensus result', async () => {
-    const { sttRace } = await import('../src/stt-race');
+    const { sttRace } = await import('../../src/stt-race');
     vi.mocked(sttRace).mockResolvedValueOnce({
       text: 'Bonjour le monde',
       provider: 'groq',
@@ -744,7 +744,7 @@ describe('handleEnsembleTranscribe', () => {
 
   // #023: Respects timeout_ms query parameter
   it('#023 respects timeout_ms query parameter', async () => {
-    const { sttRace } = await import('../src/stt-race');
+    const { sttRace } = await import('../../src/stt-race');
     vi.mocked(sttRace).mockResolvedValueOnce({
       text: 'Test',
       provider: 'groq',
@@ -771,7 +771,7 @@ describe('handleEnsembleTranscribe', () => {
 
   // #024: Caps timeout_ms at 10_000
   it('#024 caps timeout_ms at 10000ms', async () => {
-    const { sttRace } = await import('../src/stt-race');
+    const { sttRace } = await import('../../src/stt-race');
     vi.mocked(sttRace).mockResolvedValueOnce({
       text: 'Test',
       provider: 'groq',
@@ -793,7 +793,7 @@ describe('handleEnsembleTranscribe', () => {
 
   // #025: Returns 500 on internal error
   it('#025 returns 500 when ensemble engine throws', async () => {
-    const { sttRace } = await import('../src/stt-race');
+    const { sttRace } = await import('../../src/stt-race');
     vi.mocked(sttRace).mockRejectedValueOnce(new Error('Ensemble failed'));
     const audio = fakeAudio();
     const req = fakeReq('POST', '/v1/transcribe/ensemble', audio, { 'content-type': 'audio/wav' });
@@ -1265,7 +1265,7 @@ describe('handlePipeline', () => {
 
   // #054: Pipeline logs request metrics
   it('#054 logs pipeline request metrics', async () => {
-    const { logRequest } = await import('../server/metrics');
+    const { logRequest } = await import('../../server/metrics');
     const audio = fakeAudio();
     mockPipeline.mockResolvedValueOnce({
       stt: { text: 'Hello', latencyMs: 100 },

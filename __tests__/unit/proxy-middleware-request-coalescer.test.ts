@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { RequestCoalescer } from '../src/proxy/middleware/request-coalescer';
+import { RequestCoalescer } from '../../src/proxy/middleware/request-coalescer';
 
 describe('RequestCoalescer', () => {
   let coalescer: RequestCoalescer;

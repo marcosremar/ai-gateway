@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createProxyServer, startProxy } from '../src/proxy/server';
+import { createProxyServer, startProxy } from '../../src/proxy/server';
 import type { Server, IncomingMessage } from 'http';
-import type { ProxyConfig } from '../src/proxy/types';
+import type { ProxyConfig } from '../../src/proxy/types';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';

@@ -4,14 +4,14 @@
  * discovery, health polling, sendAudio/sendText validation, metrics.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpeechSDKError } from '../src/browser/errors';
+import { SpeechSDKError } from '../../src/browser/errors';
 
 // ── Mock transports ───────────────────────────────────────────────────────────
 
 let mockWsInstance: any = null;
 let mockSseInstance: any = null;
 
-vi.mock('../src/browser/transport-ws', () => ({
+vi.mock('../../src/browser/transport-ws', () => ({
   WebSocketTransport: class {
     protocol = 'websocket';
     onResponse: any = null;
@@ -36,7 +36,7 @@ vi.mock('../src/browser/transport-ws', () => ({
   },
 }));
 
-vi.mock('../src/browser/transport-sse', () => ({
+vi.mock('../../src/browser/transport-sse', () => ({
   SSETransport: class {
     protocol = 'sse';
     onResponse: any = null;
@@ -62,8 +62,8 @@ vi.mock('../src/browser/transport-sse', () => ({
 }));
 
 // Import after mocks
-import { SpeechClient } from '../src/browser/speech-client';
-import { setLogLevel } from '../src/browser/logger';
+import { SpeechClient } from '../../src/browser/speech-client';
+import { setLogLevel } from '../../src/browser/logger';
 
 beforeEach(() => {
   setLogLevel('silent');

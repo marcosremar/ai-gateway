@@ -12,14 +12,14 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { Server } from 'node:http';
-import { AIClient } from '../src/client/ai-client';
-import { AIProviderRegistry } from '../src/providers/registry';
-import type { AIProfile } from '../src/client/types';
+import { AIClient } from '../../src/client/ai-client';
+import { AIProviderRegistry } from '../../src/providers/registry';
+import type { AIProfile } from '../../src/client/types';
 import type {
   LLMProvider, ChatRequest, ChatResponse,
   STTProvider, STTRequest, STTResponse, ModelInfo,
   TTSProvider, TTSRequest, TTSResponse,
-} from '../src/providers/types';
+} from '../../src/providers/types';
 
 // ── Minimal mock providers (cloud fallback, never used when chain succeeds) ──
 
@@ -57,7 +57,7 @@ class MockTTS implements TTSProvider {
     this.calls++;
     return { audio: Buffer.from('cloud-tts-fallback'), contentType: 'audio/wav' };
   }
-  getVoices(): import('../src/providers/types').VoiceInfo[] { return []; }
+  getVoices(): import('../../src/providers/types').VoiceInfo[] { return []; }
   synthesizeStream(_r: TTSRequest): Promise<ReadableStream<Uint8Array>> {
     return Promise.resolve(new ReadableStream());
   }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleChatCompletions } from '../src/proxy/routes/chat-completions';
-import type { ProxyRequest } from '../src/proxy/types';
+import { handleChatCompletions } from '../../src/proxy/routes/chat-completions';
+import type { ProxyRequest } from '../../src/proxy/types';
 
 function makeReq(body: Record<string, unknown>): ProxyRequest {
   return { method: 'POST', url: '/v1/chat/completions', headers: {}, body, rawBody: Buffer.alloc(0) };

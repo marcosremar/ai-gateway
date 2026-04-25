@@ -842,8 +842,6 @@ export class RunpodClient extends AbstractGpuProvider {
       10,
     );
 
-    const requestedSpot = basePodConfig.interruptible === true;
-
     // Track per-GPU failure reasons for diagnostics
     const gpuFailures: Array<{ gpu: string; status: number; reason: string }> = [];
 

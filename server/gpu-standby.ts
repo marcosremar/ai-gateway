@@ -20,7 +20,7 @@ import {
   getP95Latency,
   setGpuReadyForProduction, setGpuShadowMode,
   resetGpuReadinessState,
-  deployApiKey, deployVastApiKey, deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey,
+  deployApiKey, deployVastApiKey, deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey, deployHyperstackApiKey,
 } from './state';
 import { broadcastWs } from './ws-state';
 import {
@@ -101,6 +101,7 @@ export async function triggerStandbyDeploy(reason: 'manual' | 'session_duration'
         ? { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId }
         : undefined,
       deployModalApiKey,
+      deployHyperstackApiKey,
     );
 
     // Prefer same provider as primary (no need for tier failover)
@@ -259,7 +260,7 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
 
 async function terminateOldPod(podId: string, provider: string): Promise<void> {
   if (!podId) return;
-  const { runpod, vast, tensordock } = await import('./providers');
+  const { runpod, vast, tensordock, hyperstack } = await import('./providers');
   try {
     if (provider === 'runpod' && deployApiKey) {
       await runpod.deleteInstance(podId, { apiKey: deployApiKey });
@@ -267,6 +268,8 @@ async function terminateOldPod(podId: string, provider: string): Promise<void> {
       await vast.deleteInstance(podId, { apiKey: deployVastApiKey });
     } else if (provider === 'tensordock' && deployTensordockApiKey) {
       await tensordock.deleteInstance(podId, { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId });
+    } else if (provider === 'hyperstack' && deployHyperstackApiKey) {
+      await hyperstack.deleteInstance(podId, { apiKey: deployHyperstackApiKey });
     }
     log.log(`[standby] Old pod ${podId} terminated`);
   } catch (err) {

@@ -78,6 +78,14 @@ const PROVIDER_CONFIGS: ProviderSweepConfig[] = [
       return new TensordockClient();
     },
   },
+  {
+    provider: 'hyperstack',
+    envKey: 'HYPERSTACK_API_KEY',
+    createClient: async () => {
+      const { HyperstackClient } = await import('../providers/gpu/hyperstack-client');
+      return new HyperstackClient();
+    },
+  },
 ];
 
 const RUNNING_STATUSES = new Set([

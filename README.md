@@ -1,6 +1,17 @@
-# @parle/ai-gateway
+# AI Gateway
 
-A comprehensive, modular TypeScript library for AI provider orchestration, GPU autoscaling, and real-time speech infrastructure. Built as a standalone workspace package with zero hard framework dependencies.
+[![GitHub](https://img.shields.io/badge/GitHub-marcosremar/ai--gateway-blue?logo=github)](https://github.com/marcosremar/ai-gateway)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+A self-hosted, cost-efficient AI infrastructure platform that provides:
+
+- **Speech-to-Speech Translation** — Real-time multilingual audio translation via STT → LLM → TTS pipeline
+- **GPU Deployment & Management** — Multi-provider cascade deploy (RunPod → Vast.ai → TensorDock → Modal) with auto-scaling, idle management, and crash recovery
+- **AI Provider Abstraction** — Unified interface over Groq, OpenAI, Fireworks, OpenRouter, Ollama, Deepgram, and self-hosted GPUs
+- **Hybrid Routing** — Race GPU vs cloud, auto-select cheapest, latency-based demotion, canary deployments
+- **Observability** — Request logging, provider metrics, latency tracking, circuit breakers, Prometheus metrics
+
+Built with TypeScript, providing a unified interface for AI providers and multi-tier GPU autoscaling with automatic failover.
 
 ## Features
 
@@ -192,8 +203,37 @@ await runpod.terminate(pod.id);
 | RunPod     | Working  | Primary. ~31s boot. Use HTTP+TCP ports.    |
 | TensorDock | Working  | RTX 3090 inference backend.                |
 | Modal      | Working  | Serverless, auto-scales to zero.           |
-| Vast.ai    | Limited  | HTTP access not viable (SSH proxy only).   |
+| Hyperstack | Working  | KVM w/ nested virt (`/dev/kvm` confirmed). Custom image build pipeline wired. `offloadOnIdle` = 1.3s wake. |
+| Vast.ai    | Limited  | HTTP not viable (SSH proxy only). VM mode marketplace unreliable in practice (hosts fail to materialize contracts). |
 | SkyPilot   | Working  | Multi-cloud orchestration.                 |
+
+### Providers to explore — Firecracker / gVisor / Kata GPU sandboxing
+
+These offer sandboxed GPU runtimes (sub-second cold start), per-second billing, and fit the Modal-style scale-up model we could adopt instead of rolling our own. Priority in order of fit:
+
+| Provider     | Runtime             | Cheapest GPU      | Cold start (GPU) | Free trial        | Worth testing? |
+|--------------|---------------------|-------------------|------------------|-------------------|:--------------:|
+| **Koyeb**    | Firecracker + Cloud Hypervisor (GPU) | L4 $0.70/hr, L40S $1.20/hr | seconds (GPU VRAM snapshot is WIP, CPU gets 200ms) | **$10 / 7d Pro trial**, GPU eligible | **Yes — free trial covers PoC** |
+| **Northflank** | Firecracker / Kata / gVisor (choose per workload) | L4 $0.80/hr, A100 40G $1.42/hr | 1–2 s end-to-end | Sandbox plan free (CPU only); GPU requires pay-as-you-go | Yes if you need runtime choice |
+| **RunPod Serverless** | Proprietary (FlashBoot) | T4 ~$0.20/hr active, L4/L40S ~$0.40–0.70/hr active | **<200ms in 48% of calls** | Community credits occasionally | Yes — currently the best latency/$ in the market |
+| **Beam / Beta9** | **runc or gVisor** (runtime configurable) + custom CLIP lazy image + cuda-checkpoint | ~$0.70–1.00/hr | 2–3 s typical, **50ms warm** | $30 credit | **Yes — also open source (AGPL), self-hostable as `beta9`** |
+| Inferless    | Container (no microVM, no CRIU) — just `hf-transfer` accelerated weight download | T4 $0.33/hr, A10 $0.61/hr | **Llama-3 8B 13.3s / Phi-3 7.8s** (measured, T4) | **$30 credit + 10h free** | Low priority — weight-loading only |
+| Salad.com    | Distributed marketplace (no sandbox) | RTX 4090 $0.204/hr | marketplace (unreliable like Vast) | — | Batch only, not latency-sensitive |
+| CoreWeave    | Bare-metal          | L40S $2.25/hr     | ~200ms bare-metal | — | Expensive but reliable |
+| Fly.io GPU   | Firecracker + Cloud Hypervisor | L40S $1.25/hr | ~30s / 7B model | — | **❌ Deprecated Aug 2026** |
+
+**Measured comparison baseline (Hyperstack L40 + our `offloadOnIdle`):** 1.3s wake on the same VM. Competitive with Northflank (1–2s). Beaten by RunPod Serverless FlashBoot (<200ms). Koyeb GPU currently does not deliver its 200ms CPU story for GPU workloads (VRAM snapshot limitation).
+
+#### Deeper notes per provider
+
+- **Beam / Beta9** ([GitHub](https://github.com/beam-cloud/beta9)) — the only serverless GPU runtime we've found that is **open source** (AGPL-3.0), supports **runtime choice (runc / gVisor)**, uses cuda-checkpoint for GPU snapshots, and has a **CLIP lazy-loading image format** (weights fault in on-demand from S3/FUSE — no upfront image pull). Self-hostable, so you could run Beta9 directly on Hyperstack L40 VMs and get Modal-class primitives without the Modal bill. Managed SaaS cold starts: 2–3s typical, 50ms warm.
+- **Koyeb** — Firecracker + Cloud Hypervisor (for GPU VFIO passthrough). Their "200ms wake via eBPF + Light Sleep snapshots" only applies to **CPU workloads**; for GPU, VRAM snapshot preservation is explicitly still a work-in-progress on their end.
+- **Northflank** — unique in letting the caller choose runtime **per workload** (Firecracker / Kata / gVisor). End-to-end sandbox create ~1–2s including image pull. No L40/L40S in catalog; A100 40G at $1.42/hr is the closest sweet-spot.
+- **RunPod Serverless FlashBoot** — closest real competitor to Modal on cold start (<200ms in 48% of calls per their data). Proprietary runtime, per-second billing. Best ROI if you don't need sandbox choice.
+- **Inferless** — NOT a microVM runtime. Just `hf-transfer` accelerated weight download + container. Measured cold starts: 7.8s (Phi-3, T4), 13.3s (Llama-3 8B). Fine for small models on T4/A10, doesn't replace Hyperstack offload.
+- **Salad.com** — distributed-compute marketplace (home PCs), 60k+ GPUs from $0.02/hr. No sandbox isolation, no SLA — batch only.
+
+Sources: [Koyeb pricing](https://www.koyeb.com/pricing), [Koyeb scale-to-zero blog](https://www.koyeb.com/blog/scale-to-zero-wake-vms-in-200-ms-with-light-sleep-ebpf-and-snapshots), [Koyeb GPU scale-to-zero caveats](https://www.koyeb.com/blog/scale-to-zero-optimize-gpu-and-cpu-workloads), [Northflank pricing](https://northflank.com/pricing), [Northflank sandbox runtimes](https://northflank.com/blog/best-code-execution-sandbox-for-ai-agents), [RunPod Serverless](https://www.runpod.io/product/serverless), [Beam Beta9 GitHub](https://github.com/beam-cloud/beta9), [Beam serverless platform guide](https://www.beam.cloud/blog/serverless-platform-guide), [Inferless pricing](https://www.inferless.com/pricing), [Salad pricing](https://salad.com/pricing).
 
 ## Build
 

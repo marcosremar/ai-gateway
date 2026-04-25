@@ -24,7 +24,7 @@ function makeVault(secrets: Record<string, string | Error> = {}): Vault {
 
 describe('createCredentialResolver', () => {
   // Vault may have populated these in global setup; save/restore for isolation
-  const PROVIDER_ENVS = ['RUNPOD_API_KEY', 'VAST_API_KEY', 'TENSORDOCK_API_KEY', 'TENSORDOCK_AUTH_ID', 'MODAL_API_KEY', 'HF_TOKEN'];
+  const PROVIDER_ENVS = ['RUNPOD_API_KEY', 'VAST_API_KEY', 'HYPERSTACK_API_KEY', 'TENSORDOCK_API_KEY', 'TENSORDOCK_AUTH_ID', 'MODAL_API_KEY', 'HF_TOKEN'];
   let saved: Record<string, string | undefined> = {};
 
   beforeEach(() => {
@@ -105,5 +105,13 @@ describe('createCredentialResolver', () => {
     const resolver = createCredentialResolver(vault);
     const creds = await resolver.resolve('user-1', 'unknown-provider');
     expect(creds).toBeNull();
+  });
+
+  it('falls back to HYPERSTACK_API_KEY from env', async () => {
+    process.env.HYPERSTACK_API_KEY = 'hs-key';
+    const vault = makeVault({});
+    const resolver = createCredentialResolver(vault);
+    const creds = await resolver.resolve('user-1', 'hyperstack');
+    expect(creds).toEqual({ apiKey: 'hs-key', authId: undefined, hfToken: undefined });
   });
 });

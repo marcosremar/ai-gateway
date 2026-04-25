@@ -5,7 +5,7 @@ import {
   extractErrorStatus,
   extractErrorMessage,
   BILLING_URLS,
-} from '../src/providers/errors';
+} from '../../src/providers/errors';
 
 describe('buildProviderError()', () => {
   it('should include billing URL for openai on 429', () => {
