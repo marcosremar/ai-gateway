@@ -39,13 +39,16 @@ export class FileVaultStore implements VaultStore {
   private save(): void {
     const dir = dirname(this.filePath);
     if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
+      // Vault directory holds encrypted secrets — keep it owner-only so a
+      // misconfigured umask can't leave the contents world-readable.
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
     // Atomic write: write to temp file, then rename
     const tempPath = join(dir, `.vault-${randomBytes(8).toString('hex')}.tmp`);
     const data = JSON.stringify(this.load(), null, 2);
     try {
-      writeFileSync(tempPath, data, { encoding: 'utf-8' });
+      // 0o600 — only the owning user can read or write the vault file.
+      writeFileSync(tempPath, data, { encoding: 'utf-8', mode: 0o600 });
       renameSync(tempPath, this.filePath);
     } catch (err) {
       // Clean up temp file if it exists

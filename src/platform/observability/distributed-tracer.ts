@@ -41,6 +41,9 @@ function redactValue(value: unknown): unknown {
 }
 
 export class DistributedTracer {
+  /** Bounded ring of spans to prevent unbounded memory growth on long-running
+   * processes that emit thousands of pipeline traces. */
+  private static readonly MAX_RETAINED_SPANS = 5_000;
   private spans = new Map<string, TraceContext>();
 
   generateTraceId(): string {
@@ -52,8 +55,12 @@ export class DistributedTracer {
   }
 
   startSpan(operation: string, parentSpanId?: string): TraceContext {
+    // Child spans MUST share the parent's traceId so logs/queries that group
+    // by traceId reconstruct the full pipeline. Generating a fresh traceId
+    // for every stage made every span look like its own root trace.
+    const parent = parentSpanId ? this.spans.get(parentSpanId) : undefined;
     const span: TraceContext = {
-      traceId: this.generateTraceId(),
+      traceId: parent?.traceId ?? this.generateTraceId(),
       spanId: this.generateSpanId(),
       parentSpanId,
       operation,
@@ -63,6 +70,13 @@ export class DistributedTracer {
     };
 
     this.spans.set(span.spanId, span);
+    // Cap the retained span count — drop the oldest entry once we exceed the
+    // limit. Map preserves insertion order so the first key is always the
+    // oldest, giving us a cheap FIFO eviction.
+    if (this.spans.size > DistributedTracer.MAX_RETAINED_SPANS) {
+      const oldest = this.spans.keys().next();
+      if (!oldest.done) this.spans.delete(oldest.value);
+    }
     return span;
   }
 

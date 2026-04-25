@@ -122,9 +122,14 @@ export async function withTimeout<T>(
   timeoutMs: number,
   context: string
 ): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error(`${context} timed out after ${timeoutMs}ms`)), timeoutMs);
+    timer = setTimeout(() => reject(new Error(`${context} timed out after ${timeoutMs}ms`)), timeoutMs);
   });
-  
-  return Promise.race([promise, timeoutPromise]);
+
+  // Clear the timer once the underlying promise settles so the Node event
+  // loop can exit instead of being held open by a pending rejection.
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }

@@ -62,7 +62,10 @@ export class QueueDepthTracker {
     let total = 0;
     try {
       const keys: string[] = [];
-      this.store.scan('queue-depth:*', (k) => { keys.push(...k); });
+      // Without `await`, scan is dispatched but the for-loop below runs
+      // before its callback has a chance to populate `keys`, so the
+      // function reported zero queue depth on every call.
+      await this.store.scan('queue-depth:*', (k) => { keys.push(...k); });
       for (const key of keys) {
         try {
           const raw = await this.store.get(key);

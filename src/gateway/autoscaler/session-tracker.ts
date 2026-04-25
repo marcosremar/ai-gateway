@@ -46,7 +46,10 @@ export class SessionTracker {
    * Heartbeats expire after windowMinutes of inactivity.
    */
   async reportSessionHeartbeat(userId: string, sessionKey: string): Promise<void> {
-    await this.stateStore.hset(this.key(userId), sessionKey, String(Date.now()));
+    // Pass HEARTBEAT_TTL_SECS so each new heartbeat refreshes the hash's TTL —
+    // abandoned heartbeat hashes (no fresh activity for 30 min) get evicted by
+    // the storage layer instead of accumulating until countActiveSessions runs.
+    await this.stateStore.hset(this.key(userId), sessionKey, String(Date.now()), HEARTBEAT_TTL_SECS);
     // Also aggregate under teacher if this user is a student
     void this.aggregateToTeacher(userId, sessionKey).catch(e => console.warn('[session] teacher aggregation failed:', e instanceof Error ? e.message : e));
   }
@@ -114,6 +117,6 @@ export class SessionTracker {
 
     // Store the student's heartbeat under the teacher's map (prefixed to avoid key collision)
     const teacherKey = `student:${userId}:${sessionKey}`;
-    await this.stateStore.hset(this.key(teacherId), teacherKey, String(Date.now()));
+    await this.stateStore.hset(this.key(teacherId), teacherKey, String(Date.now()), HEARTBEAT_TTL_SECS);
   }
 }
