@@ -175,9 +175,11 @@ export class TierCircuitBreaker {
   async getAll(): Promise<Map<number, CircuitState>> {
     const result = new Map<number, CircuitState>();
     const keys: string[] = [];
-    // Collect keys synchronously
-    this.store.scan('circuit:*', (k) => { keys.push(...k); });
-    // Process asynchronously
+    // KvStore.scan is async — must await before consuming the keys it
+    // populates via the callback. The previous code returned an empty
+    // result whenever the scan implementation deferred its callback (which
+    // both Redis and the InMemory adapter do).
+    await this.store.scan('circuit:*', (k) => { keys.push(...k); });
     for (const key of keys) {
       const idx = parseInt(key.replace('circuit:', ''), 10);
       if (!isNaN(idx)) {
@@ -264,7 +266,10 @@ export class TierCircuitBreaker {
     // Latency trend (increasing latency = higher risk)
     const currentLatency = recent[recent.length - 1].latencyMs;
     const avgRecentLatency = recent.slice(-10).reduce((sum, h) => sum + h.latencyMs, 0) / 10;
-    const latencyTrend = currentLatency / avgRecentLatency;
+    // Guard against the 0/0 case (all-zero samples) which would produce NaN
+    // and propagate into shouldOpenCircuitAdvanced — making the circuit
+    // open or stay closed depending on which NaN-comparison the caller used.
+    const latencyTrend = avgRecentLatency > 0 ? currentLatency / avgRecentLatency : 1;
 
     // Combine factors for risk score (0-1, higher = more likely to fail)
     const baseRisk = Math.min(failureRate * 1.5, 0.8);

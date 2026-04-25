@@ -21,6 +21,8 @@ export interface RedisLike {
   hdel(key: string, ...fields: unknown[]): Promise<unknown>;
   hgetall(key: string): Promise<Record<string, string>>;
   hincrby(key: string, field: string, increment: number): Promise<number>;
+  /** Set/refresh a key TTL — used by hset to mirror per-hash expiry. */
+  expire(key: string, ttlSecs: number): Promise<unknown>;
 }
 
 /** StateStore backed by Redis (or any RedisLike client). */
@@ -72,8 +74,14 @@ export class RedisStateAdapter implements StateStore {
     return this.redis.lrange(key, start, stop);
   }
 
-  async hset(key: string, field: string, value: string, _ttlSecs?: number): Promise<void> {
+  async hset(key: string, field: string, value: string, ttlSecs?: number): Promise<void> {
     await this.redis.hset(key, field, value);
+    // Mirror InMemory adapter semantics — when callers pass ttlSecs the whole
+    // hash gets a refreshed expiry. Without this, abandoned hashes (e.g.
+    // session heartbeats for users that disappear) accumulate forever.
+    if (ttlSecs && ttlSecs > 0 && typeof this.redis.expire === 'function') {
+      await this.redis.expire(key, ttlSecs);
+    }
   }
 
   async hdel(key: string, field: string): Promise<void> {

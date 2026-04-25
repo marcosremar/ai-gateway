@@ -58,7 +58,11 @@ export class Vault {
 
     const decipher = createDecipheriv(ALGORITHM, this.key, iv, { authTagLength: TAG_LENGTH });
     decipher.setAuthTag(tag);
-    return decipher.update(ciphertext) + decipher.final('utf8');
+    // Concatenate as Buffers and decode once at the end. Doing
+    // `update(buf) + final('utf8')` triggers an implicit Buffer→string
+    // conversion that splits any multi-byte UTF-8 character whose bytes
+    // straddle the update/final boundary, replacing them with U+FFFD.
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
   }
 
   /** Store an encrypted secret */
@@ -128,7 +132,10 @@ export class Vault {
           // Properly decrypt using newKey (the key that encrypted these blobs)
           const decipher = createDecipheriv(ALGORITHM, newKey, Buffer.from(blob.iv, 'hex'), { authTagLength: TAG_LENGTH });
           decipher.setAuthTag(Buffer.from(blob.tag, 'hex'));
-          const plaintext = decipher.update(Buffer.from(blob.ciphertext, 'hex')) + decipher.final('utf8');
+          const plaintext = Buffer.concat([
+            decipher.update(Buffer.from(blob.ciphertext, 'hex')),
+            decipher.final(),
+          ]).toString('utf8');
 
           // Re-encrypt with the original (old) key - use this.key (old key before failed rotation)
           const iv = randomBytes(IV_LENGTH);
