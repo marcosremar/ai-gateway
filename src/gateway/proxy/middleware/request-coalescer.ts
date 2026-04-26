@@ -39,8 +39,32 @@ export class RequestCoalescer {
   private inflight = new Map<string, { promise: Promise<unknown>; timestamp: number }>();
   private static readonly STALE_MS = 30_000; // Clean up entries older than 30s
 
-  /** Build a coalescing key from request params. Returns null if not coalescable. */
-  buildKey(params: { provider: string; model: string; messages: unknown[]; temperature?: number }): string | null {
+  /**
+   * Build a coalescing key from request params. Returns null if not coalescable.
+   *
+   * The key MUST incorporate every field that influences the upstream
+   * response. Two requests sharing a key will share the same in-flight
+   * promise — so any field that changes the response and isn't in the
+   * key causes a stale-result regression (response from req A returned
+   * to req B even though B asked for different tools / format / etc).
+   *
+   * Fields included: provider, model, messages, temperature, tools,
+   * response_format, max_tokens, top_p, seed, stop. Unknown fields are
+   * intentionally NOT silently dropped — callers should plumb new
+   * output-affecting params here.
+   */
+  buildKey(params: {
+    provider: string;
+    model: string;
+    messages: unknown[];
+    temperature?: number;
+    tools?: unknown;
+    response_format?: unknown;
+    max_tokens?: number;
+    top_p?: number;
+    seed?: number;
+    stop?: unknown;
+  }): string | null {
     // Only coalesce deterministic requests (temperature 0 or undefined)
     if (params.temperature !== undefined && params.temperature !== 0) return null;
 
@@ -49,6 +73,12 @@ export class RequestCoalescer {
       m: params.model,
       msg: params.messages,
       t: params.temperature,
+      tools: params.tools ?? null,
+      rf: params.response_format ?? null,
+      mt: params.max_tokens ?? null,
+      tp: params.top_p ?? null,
+      sd: params.seed ?? null,
+      stp: params.stop ?? null,
     });
     return createHash('sha256').update(raw).digest('hex').slice(0, 32);
   }

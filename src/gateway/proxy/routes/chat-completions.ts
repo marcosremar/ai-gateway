@@ -185,12 +185,21 @@ export async function handleChatCompletions(
       providerMap.set(entry.provider, entry.instance);
     }
 
-    // Request coalescing key (deduplicates identical in-flight requests)
+    // Request coalescing key (deduplicates identical in-flight requests).
+    // Pass every output-affecting field — coalescing on partial keys would
+    // serve req-A's response to req-B when only e.g. tools or response_format
+    // differ.
     const coalescingKey = coalescer.buildKey({
       provider: primaryProvider,
       model: primaryModel,
       messages: messages as ChatMessage[],
       temperature,
+      tools: (body as Record<string, unknown>).tools,
+      response_format,
+      max_tokens,
+      top_p: typeof (body as Record<string, unknown>).top_p === 'number' ? (body as Record<string, unknown>).top_p as number : undefined,
+      seed: typeof (body as Record<string, unknown>).seed === 'number' ? (body as Record<string, unknown>).seed as number : undefined,
+      stop: (body as Record<string, unknown>).stop,
     });
 
     // Execute with coalescing + per-provider semaphore
