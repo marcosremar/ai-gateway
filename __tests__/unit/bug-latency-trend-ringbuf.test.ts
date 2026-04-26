@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach } from 'bun:test';
+import { test, expect, describe, beforeEach } from 'vitest';
 import {
   latencyRing,
   latencyRingIdx,

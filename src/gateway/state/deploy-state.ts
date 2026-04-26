@@ -143,6 +143,8 @@ export interface PersistedDeploy {
   deployId?: string;
   /** Dev mode: pause on idle but skip auto-destroy. */
   devMode?: boolean;
+  /** Readiness probe mode used for this deploy. */
+  readinessProbe?: 'health' | 'ssh';
   /** How the pod was paused — 'stop' (default) or 'hibernate' (Hyperstack only). */
   pausedMode?: 'stop' | 'hibernate';
 }
@@ -171,6 +173,7 @@ export function persistDeployState(): void {
       status: deployState.status,
       ...(isStopped ? { stoppedAt: Date.now() } : {}),
       ...(deployState.devMode ? { devMode: true } : {}),
+      ...(deployState.readinessProbe ? { readinessProbe: deployState.readinessProbe } : {}),
       ...(deployState.pausedMode ? { pausedMode: deployState.pausedMode } : {}),
     };
     // Atomic write: write to temp file then rename, so a crash mid-write
@@ -207,7 +210,10 @@ export function loadPersistedDeploy(): PersistedDeploy | null {
       clearPersistedDeploy();
       return null;
     }
-    if (!data.podId || !data.endpoint) return null;
+    if (!data.podId) return null;
+    // Stopped pods may have been persisted before receiving an endpoint
+    // (e.g. Vast.ai pod stopped during boot). Allow empty endpoint for stopped pods.
+    if (!data.endpoint && !data.stoppedAt) return null;
     return data;
   } catch (e) {
     log.warn('Failed to load persisted deploy:', e instanceof Error ? e.message : e);
