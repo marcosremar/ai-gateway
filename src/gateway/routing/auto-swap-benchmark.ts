@@ -82,7 +82,9 @@ export function runAutoSwapBenchmark(opts: {
   const avgLatencyMs = latencies.length > 0
     ? Math.round(latencies.reduce((s, l) => s + l, 0) / latencies.length)
     : 0;
-  const p95LatencyMs = latencies[Math.floor(latencies.length * 0.95)] ?? latencies[latencies.length - 1] ?? 0;
+  const p95LatencyMs = latencies.length > 0
+    ? latencies[Math.max(0, Math.ceil(latencies.length * 0.95) - 1)]
+    : 0;
   const swapDetections = results.filter(r => r.shouldSwap).length;
   const falsePositives = results.filter(r => r.expectedLang === source && r.detectedLang === target).length;
   const falseNegatives = results.filter(r => r.expectedLang === target && r.detectedLang === source).length;
