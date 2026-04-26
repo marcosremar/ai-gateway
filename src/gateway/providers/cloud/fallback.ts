@@ -165,9 +165,13 @@ export class CooldownTracker {
     const state = this.map.get(key);
     if (!state || state.coolUntil === 0) return false;
     if (state.coolUntil > Date.now()) return true;
-    // Cooldown expired: remove the entry so getState() reflects clean state.
-    // The cooldownStreak is cleared intentionally — the provider has recovered.
-    this.map.delete(key);
+    // Cooldown expired: clear coolUntil but PRESERVE cooldownStreak +
+    // lastCooldownMs so adaptive escalation kicks in if the provider fails
+    // again immediately. Deleting the whole entry here wiped the streak and
+    // every subsequent failure restarted at the base cooldown — silently
+    // disabling the documented "double the cooldown if it fails after coming
+    // off cooldown" behavior. Streak is cleared on actual recordSuccess.
+    state.coolUntil = 0;
     return false;
   }
 
