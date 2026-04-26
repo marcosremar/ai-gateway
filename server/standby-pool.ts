@@ -195,13 +195,19 @@ export async function tick(): Promise<void> {
     const now = Date.now();
 
     // Scale down stale pods (older than TTL and above minStandby).
+    // Track a separate running counter — `healthy.length` is a fixed
+    // snapshot and `pool.delete` does not shrink it, so the inner break
+    // never fires and every stale pod gets terminated regardless of
+    // minStandby. Result was the pool yo-yo'ing to 0 then refilling.
     if (healthy.length > cfg.minStandby) {
       const sorted = healthy.sort((a, b) => a.deployedAt - b.deployedAt);
+      let runningCount = healthy.length;
       for (const pod of sorted) {
-        if (healthy.length <= cfg.minStandby) break;
+        if (runningCount <= cfg.minStandby) break;
         if (now - pod.lastCheckedAt > POOL_IDLE_TTL_MS) {
           log.log(`[standby-pool] scaling down idle ${pod.podId} for ${cfg.profile}`);
           pool.delete(pod.podId);
+          runningCount--;
           terminatePod(pod).catch((err) =>
             log.warn(`[standby-pool] terminate failed: ${err instanceof Error ? err.message : err}`),
           );
