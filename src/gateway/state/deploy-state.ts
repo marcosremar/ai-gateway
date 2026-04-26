@@ -152,10 +152,13 @@ export interface PersistedDeploy {
 export function persistDeployState(): void {
   // Only persist states where a pod exists
   if (!deployState.podId) return;
-  // Persist running pods (ready/booting/installing) and stopped pods (resumable)
+  // Persist running pods (ready/booting/installing/warming/error) and stopped pods (resumable).
+  // 'warming' is included because the pod has a valid endpoint and is incurring cost
+  // while models load — a gateway restart during warming would otherwise orphan it.
+  // 'error' is included so error-state pods with endpoints can be cleaned up on restart.
   const isStopped = deployState.status === 'stopped';
   if (!isStopped && !deployState.endpoint) return;
-  if (!isStopped && deployState.status !== 'ready' && deployState.status !== 'booting' && deployState.status !== 'installing') return;
+  if (!isStopped && deployState.status !== 'ready' && deployState.status !== 'booting' && deployState.status !== 'installing' && deployState.status !== 'warming' && deployState.status !== 'error') return;
   try {
     mkdirSync(BABELCAST_DIR, { recursive: true });
     const data: PersistedDeploy = {

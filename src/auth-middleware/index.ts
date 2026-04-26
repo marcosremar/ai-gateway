@@ -138,9 +138,11 @@ export function requireRole(
   };
 
   const userLevel = roleHierarchy[userRole] ?? 0;
-  const requiredLevel = roleHierarchy[role] ?? 0;
+  const requiredLevel = roleHierarchy[role];
 
-  if (userLevel < requiredLevel) {
+  // If the required role is not recognized, deny access rather than
+  // defaulting to level 0 (which would grant any authenticated user access).
+  if (requiredLevel === undefined || userLevel < requiredLevel) {
     return {
       ok: false,
       error: `Insufficient permissions. Required: ${role}, your role: ${userRole}`,
