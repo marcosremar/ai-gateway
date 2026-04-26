@@ -95,7 +95,7 @@ function computeStats(values: number[]): BenchmarkStats | null {
     count: sorted.length,
     mean: Math.round(sum / sorted.length),
     p50: sorted[Math.floor(sorted.length * 0.5)]!,
-    p95: sorted[Math.min(Math.floor(sorted.length * 0.95), sorted.length - 1)]!,
+    p95: sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)]!,
     min: sorted[0]!,
     max: sorted[sorted.length - 1]!,
   };
