@@ -164,7 +164,23 @@ export function createPerKeyRateLimiter(quotas?: Map<string, KeyQuota>, defaultQ
 
       const windowMs = quota.windowMs ?? 60_000;
       const now = Date.now();
-      const resetMs = windowMs - (now - entry.windowStart);
+      const elapsed = now - entry.windowStart;
+
+      // If the window has already expired but no check() rolled the
+      // entry over yet, report a fresh window: 0 used, full reset.
+      // Without this, `windowMs - elapsed` was negative — corrupting
+      // Retry-After headers and setTimeout-based retries.
+      if (elapsed >= windowMs) {
+        return {
+          allowed: true,
+          current: 0,
+          max: quota.maxRequests,
+          remaining: quota.maxRequests,
+          resetMs: windowMs,
+        };
+      }
+
+      const resetMs = Math.max(0, windowMs - elapsed);
 
       return {
         allowed: entry.count <= quota.maxRequests,
