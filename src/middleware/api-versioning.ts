@@ -77,16 +77,18 @@ export function extractVersion(req: IncomingMessage): ApiVersion {
  * Add version headers to response.
  */
 export function getVersionHeaders(version: ApiVersion): Record<string, string> {
-  return {
+  const headers: Record<string, string> = {
     'X-API-Version': `${version.major}.${version.minor}`,
-    ...(version.deprecated
-      ? {
-          Sunset: version.sunset ?? '',
-          Deprecation: 'true',
-          Link: `<https://docs.ai-gateway.dev/migrations/v${version.major}-to-v${version.major + 1}>; rel="deprecation"`,
-        }
-      : {}),
   };
+  if (version.deprecated) {
+    headers.Deprecation = 'true';
+    headers.Link = `<https://docs.ai-gateway.dev/migrations/v${version.major}-to-v${version.major + 1}>; rel="deprecation"`;
+    // Only emit Sunset when we actually have a date — RFC 8594 requires
+    // an HTTP-date value, and empty Sunset headers either crash setHeader
+    // (Bun) or confuse clients.
+    if (version.sunset) headers.Sunset = version.sunset;
+  }
+  return headers;
 }
 
 /**
