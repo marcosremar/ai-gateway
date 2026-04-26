@@ -7,6 +7,7 @@
 export const LATENCY_RING_SIZE = 1000;
 export const latencyRing: number[] = [];
 export let latencyRingIdx = 0;
+export let latencyRingGeneration = 0;
 export const metricsCounters = {
   requestsTotal: 0,
   errorsTotal: 0,
@@ -42,21 +43,23 @@ const MIN_LATENCY_SAMPLES = 5;
  */
 let _p95Cache: number | null = null;
 let _p95CacheTime = 0;
-let _p95CacheSampleCount = 0;
+let _p95CacheGeneration = 0;
 const P95_CACHE_TTL_MS = 5_000;
 
 export function getP95Latency(): number | null {
   if (latencyRing.length < MIN_LATENCY_SAMPLES) return null;
   const now = Date.now();
-  // Return cached value if still fresh and sample count hasn't changed
-  if (_p95Cache !== null && now - _p95CacheTime < P95_CACHE_TTL_MS && _p95CacheSampleCount === latencyRing.length) {
+  // Return cached value if still fresh and no new samples have been recorded
+  // (use generation counter instead of length, since the ring buffer overwrites
+  // in place without changing length once full)
+  if (_p95Cache !== null && now - _p95CacheTime < P95_CACHE_TTL_MS && _p95CacheGeneration === latencyRingGeneration) {
     return _p95Cache;
   }
   const sorted = [...latencyRing].sort((a, b) => a - b);
   const idx = Math.ceil(sorted.length * 0.95) - 1;
   _p95Cache = sorted[Math.max(0, idx)];
   _p95CacheTime = now;
-  _p95CacheSampleCount = latencyRing.length;
+  _p95CacheGeneration = latencyRingGeneration;
   return _p95Cache;
 }
 
@@ -70,6 +73,7 @@ export function recordGpuLatency(ms: number): void {
     latencyRing[latencyRingIdx] = ms;
     setLatencyRingIdx((latencyRingIdx + 1) % LATENCY_RING_SIZE);
   }
+  latencyRingGeneration++;
 }
 
 /**
