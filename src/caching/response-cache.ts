@@ -123,8 +123,14 @@ export class ResponseCache {
       }
     }
 
+    // Remove old position if this is an overwrite (prevents _size double-counting)
+    const existingIdx = this.accessOrder.indexOf(key);
+    if (existingIdx !== -1) {
+      this.accessOrder.splice(existingIdx, 1);
+    } else {
+      this._size++;
+    }
     this.accessOrder.push(key);
-    this._size++;
 
     const ttl = ttlMs ?? this.defaultTtlMs;
     const now = Date.now();

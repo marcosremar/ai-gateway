@@ -76,8 +76,11 @@ export function parseKeyQuotas(
     }
   }
 
-  // Add default quota for unknown keys
-  quotas.set('*', { maxRequests: defaultQuota });
+  // Add default quota for unknown keys, but only if not explicitly set
+  // in the env var (e.g. RATE_LIMIT_KEYS="*:200,sk-abc:50").
+  if (!quotas.has('*')) {
+    quotas.set('*', { maxRequests: defaultQuota });
+  }
 
   return quotas;
 }

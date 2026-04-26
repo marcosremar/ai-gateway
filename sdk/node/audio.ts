@@ -219,9 +219,7 @@ export class AudioSegmenter {
   // Remainder for non-aligned input
   private remainder: Uint8Array = new Uint8Array(0);
 
-  // Bytes per ms
-  private readonly bytesPerMs: number;
-
+  
   // AGC state
   private agcGain = 1.0;
 
@@ -287,8 +285,7 @@ export class AudioSegmenter {
 
     this.preSpeechMaxFrames = Math.max(1, Math.floor(this.cfg.preSpeechPadMs / 32));
     this.postPadSamples = Math.floor(this.cfg.postSpeechPadMs * this.cfg.sampleRate / 1000);
-    this.bytesPerMs = this.cfg.sampleRate * 2 / 1000;
-    this.overlapMaxFrames = Math.max(1, Math.floor(this.cfg.overlapWindowMs / 32));
+        this.overlapMaxFrames = Math.max(1, Math.floor(this.cfg.overlapWindowMs / 32));
     this.dualPassLookahead = Math.max(1, Math.floor(this.cfg.dualPassLookaheadMs / 32));
   }
 
