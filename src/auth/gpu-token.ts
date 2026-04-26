@@ -34,7 +34,23 @@ export function verifyGpuToken(token: string): GpuTokenPayload {
     throw new Error('Invalid signature');
   }
 
-  const payload: GpuTokenPayload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
+  const raw = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
+  // Validate required claims explicitly. Without this, a token whose
+  // payload was valid JSON but missing `exp` would slip past the expiry
+  // check (`undefined < now` evaluates to false → never expires) and a
+  // missing `uid` would propagate to downstream authz with `undefined`
+  // identity. HMAC verification only proves the payload was signed by
+  // someone holding the secret — it doesn't enforce shape.
+  if (
+    raw === null ||
+    typeof raw !== 'object' ||
+    typeof raw.uid !== 'string' || raw.uid.length === 0 ||
+    typeof raw.iat !== 'number' || !Number.isFinite(raw.iat) ||
+    typeof raw.exp !== 'number' || !Number.isFinite(raw.exp)
+  ) {
+    throw new Error('Invalid token payload');
+  }
+  const payload: GpuTokenPayload = { uid: raw.uid, iat: raw.iat, exp: raw.exp };
   if (payload.exp < Math.floor(Date.now() / 1000)) {
     throw new Error('Token expired');
   }
