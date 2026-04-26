@@ -381,8 +381,11 @@ export async function tryReconnectOrphanDeploy(): Promise<boolean> {
 // readiness, it becomes the active machine (handled by the normal deploy flow).
 
 export async function startAutoRecoveryDeploy(): Promise<void> {
-  // Prevent concurrent deploys — bail if another deploy is in progress
-  if (deployState.status === 'creating' || deployState.status === 'booting' || deployState.step === 'waiting_health') {
+  // Prevent concurrent deploys — bail if another deploy is in progress.
+  // Only status indicates an active deploy; step can be stale from a
+  // previous failure (e.g. pollHealthUntilReady sets step='waiting_health'
+  // on boot timeout, and the step is never reset when the error propagates).
+  if (deployState.status === 'creating' || deployState.status === 'booting') {
     log.warn('[gpu] Auto-recovery: deploy already in progress — skipping');
     return;
   }
