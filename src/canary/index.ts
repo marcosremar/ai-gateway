@@ -146,6 +146,17 @@ export function createCanaryDeploy(config: CanaryConfig) {
         };
       }
 
+      // Reject promote when canary has zero samples — no signal to act on.
+      // Without this guard, canaryErrorRate=0 (the 0/0 fallback) trips the
+      // "performing well" branch and promotes an unexercised canary.
+      if (stats.canaryRequests === 0) {
+        return {
+          action: 'continue',
+          reason: `No canary samples yet (${stats.stableRequests} stable, 0 canary)`,
+          confidence: 0,
+        };
+      }
+
       const canaryErrorRate = stats.canaryRequests > 0
         ? stats.canaryErrors / stats.canaryRequests
         : 0;
@@ -246,8 +257,10 @@ export function createCanaryDeploy(config: CanaryConfig) {
     resetStats(): void {
       stats.canaryRequests = 0;
       stats.canaryErrors = 0;
+      stats.canaryAvgLatencyMs = 0;
       stats.stableRequests = 0;
       stats.stableErrors = 0;
+      stats.stableAvgLatencyMs = 0;
       latencies.canary.length = 0;
       latencies.stable.length = 0;
     },
