@@ -1432,8 +1432,22 @@ async function resolveGpuInstance(opts?: GpuTargetOpts): Promise<GpuInstanceInfo
     if (listRes.ok) {
       const listData = await listRes.json() as any;
       const all = Array.isArray(listData) ? listData : (listData.instances || []);
-      // Filter to running instances only
-      instances = all.filter((i: any) => i.status === 'ready' || i.status === 'warming' || i.status === 'running');
+      // Filter to instances we can actually SSH into. Default: ready/warming/running.
+      // When the caller passed --instance explicitly OR set CLAUDEME_GPU_ALLOW_BOOTING=1
+      // we ALSO accept 'booting' / 'loading' provided the instance reports an SSH host
+      // — Vast often marks an instance 'booting' for several minutes after the SSH
+      // daemon is already accepting connections, and gating the dev tools on the
+      // gateway-side status check made `gpu dev exec`/`save`/`restore` unusable for
+      // that whole window. Status check still happens at the SSH layer (connection
+      // refused → exit 255), so this just removes a paper gate.
+      const passive = ['ready', 'warming', 'running'];
+      const active = ['booting', 'loading'];
+      const allowBooting = !!opts?.instance || process.env.CLAUDEME_GPU_ALLOW_BOOTING === '1';
+      instances = all.filter((i: any) => {
+        if (passive.includes(i.status)) return true;
+        if (allowBooting && active.includes(i.status) && i.sshHost && i.sshPort) return true;
+        return false;
+      });
     }
   } catch { /* list endpoint may not exist — fall back below */ }
 
@@ -1493,9 +1507,26 @@ async function resolveGpuInstance(opts?: GpuTargetOpts): Promise<GpuInstanceInfo
       selected = instances[pick];
     }
 
-    // Validate SSH info
-    const sshHost = selected.sshHost;
-    const sshPort = selected.sshPort;
+    // Validate SSH info. Vast.ai's /v1/gpu/list often omits sshHost/sshPort
+    // for instances still in `booting`/`loading` even after Vast itself has
+    // assigned them — those fields show up in /v1/gpu/status first. So when
+    // they're missing, hit the singleton status endpoint as a fallback for
+    // the active deploy and merge the SSH coords in.
+    let sshHost = selected.sshHost;
+    let sshPort = selected.sshPort;
+    if (!sshHost || !sshPort) {
+      try {
+        const sres = await fetch(`${url}/v1/gpu/status`, { headers: headers(key), signal: AbortSignal.timeout(5000) });
+        if (sres.ok) {
+          const sdata = await sres.json() as any;
+          const sId = sdata.podId || sdata.instanceId;
+          if (sId === (selected.instanceId || selected.podId) && sdata.sshHost && sdata.sshPort) {
+            sshHost = sdata.sshHost;
+            sshPort = sdata.sshPort;
+          }
+        }
+      } catch { /* leave undefined → error below */ }
+    }
     if (!sshHost || !sshPort) {
       console.error('SSH connection info not available for this instance.');
       console.error(`  instanceId: ${selected.instanceId || selected.podId}`);
@@ -1522,7 +1553,13 @@ async function resolveGpuInstance(opts?: GpuTargetOpts): Promise<GpuInstanceInfo
     process.exit(1);
   }
   const data = await res.json() as any;
-  if (data.status !== 'ready' && data.status !== 'warming') {
+  // Same status-gate relaxation as the list path: when --instance is set or
+  // the env flag is on, allow `booting`/`loading` so dev tools (exec, save,
+  // restore) work during the multi-minute SSH-handover window.
+  const okPassive = data.status === 'ready' || data.status === 'warming';
+  const allowBooting2 = !!opts?.instance || process.env.CLAUDEME_GPU_ALLOW_BOOTING === '1';
+  const okBooting = allowBooting2 && (data.status === 'booting' || data.status === 'loading') && data.sshHost && data.sshPort;
+  if (!okPassive && !okBooting) {
     console.error(`GPU is not running (status: ${data.status || 'idle'}).`);
     console.error('Deploy a GPU first: ai-gateway gpu deploy');
     process.exit(1);
@@ -2296,26 +2333,52 @@ async function cmdGpuDevRestore(
     }
   }
 
-  const spin = spinner(`Streaming tar to ${info.sshHost}…`);
-  // `tar -xzf - -C /` extracts at root. Paths in the tar were saved as
-  // absolute (we did NOT pass --transform on save), so they restore to
-  // their original locations. -p preserves perms; --no-same-owner because
-  // the running container is root anyway and this avoids UID surprises.
-  const remoteCmd = `tar -xzf - -C / -p --no-same-owner`;
-  const proc = spawn('ssh', [...sshArgs(info.sshHost, info.sshPort), remoteCmd], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  const inStream = createReadStream(tarPath);
-  inStream.pipe(proc.stdin);
+  // Two-stage restore: scp the tarball first (resilient — scp has its own
+  // retry/keepalive), THEN run `tar -xzf` remotely. The streaming-stdin
+  // approach (`cat tar | ssh tar -xzf -`) drops on flaky links during the
+  // multi-minute transfer of a large tarball; observed live on Vast.ai.
+  const remoteTar = `/tmp/ai-gateway-restore-${name}-${Date.now()}.tar.gz`;
 
+  ensureKnownHostsDir();
+  const scpSpin = spinner(`Uploading tar (scp) to ${info.sshHost}…`);
+  const scpProc = spawn('scp', [
+    '-P', String(info.sshPort),
+    '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', `UserKnownHostsFile=${SSH_KNOWN_HOSTS}`,
+    '-o', 'ConnectTimeout=15',
+    '-o', 'ServerAliveInterval=15',
+    '-o', 'ServerAliveCountMax=4',
+    '-o', 'LogLevel=ERROR',
+    tarPath,
+    `root@${info.sshHost}:${remoteTar}`,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let scpErr = '';
+  scpProc.stderr?.on('data', d => { scpErr += d.toString(); });
+  const scpOk = await new Promise<boolean>(r => {
+    scpProc.on('exit', code => r(code === 0));
+    scpProc.on('error', () => r(false));
+  });
+  scpSpin.stop();
+  if (!scpOk) {
+    console.error(`${c.red}scp failed${c.reset}: ${scpErr.slice(-500) || 'unknown'}`);
+    process.exit(1);
+  }
+
+  // Extract on remote. Cleans up the temp tar even on failure so we don't
+  // leak GBs across retries.
+  const xtractSpin = spinner('Extracting tar on remote…');
+  const remoteCmd =
+    `tar -xzf '${remoteTar}' -C / -p --no-same-owner; rc=$?; rm -f '${remoteTar}'; exit $rc`;
+  const proc = spawn('ssh', [...sshArgs(info.sshHost, info.sshPort), remoteCmd], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   let stderrBuf = '';
   proc.stderr.on('data', chunk => { stderrBuf += chunk.toString(); });
-
   const exitCode = await new Promise<number>((resolveP) => {
     proc.on('exit', code => resolveP(code ?? -1));
     proc.on('error', () => resolveP(-1));
   });
-  spin.stop();
+  xtractSpin.stop();
 
   if (exitCode !== 0) {
     console.error(`${c.red}Restore failed${c.reset} (exit ${exitCode}). stderr tail:\n${stderrBuf.slice(-500)}`);
