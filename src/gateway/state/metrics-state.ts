@@ -122,7 +122,7 @@ export function getLatencyTrend(): { trend: 'stable' | 'degrading' | 'improving'
   const firstAvg = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
   const secondAvg = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
 
-  const changePct = (secondAvg - firstAvg) / firstAvg;
+  const changePct = firstAvg === 0 ? 0 : (secondAvg - firstAvg) / firstAvg;
 
   // Simple linear regression for slopeMs (ms per sample)
   let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
