@@ -57,8 +57,16 @@ export function determineDegradation(
 ): DegradationLevel {
   const p = { ...DEFAULT_POLICY, ...policy };
 
-  // Check minimal first (worst case)
-  if (p.minimalWhenNoProviders && signals.readyTiers === 0 && signals.circuitStates.size > 0) {
+  // Check minimal first (worst case). Cover BOTH shapes of "no providers":
+  //   (a) tiers were tracked and every circuit is open (post-failure state)
+  //   (b) no tiers/circuits at all (cold start, all deploys failed) — the
+  //       previous code skipped this case because it required size > 0,
+  //       letting the function return 'full' which advertises a GPU
+  //       pipeline that doesn't exist.
+  if (p.minimalWhenNoProviders && signals.readyTiers === 0) {
+    if (signals.circuitStates.size === 0) {
+      return 'minimal';
+    }
     const allOpen = [...signals.circuitStates.values()].every((s) => s === 'open');
     if (allOpen) {
       return 'minimal';
