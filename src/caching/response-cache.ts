@@ -25,6 +25,14 @@ export class ResponseCache {
   private _evictions = 0;
   private maxSize: number;
   private accessOrder: string[] = [];
+  /**
+   * Per-key metadata index — maps the hashed cache key back to the
+   * (provider, model) it was built from. Populated by buildKey() so that
+   * invalidateProvider/invalidateModel can resolve which hashed keys to
+   * delete (the SHA256 hash itself carries no decodable provider/model
+   * information). Cleaned up when the entry is removed from accessOrder.
+   */
+  private _keyMeta: Map<string, { provider: string; model: string }> = new Map();
 
   constructor(store: KvStore, opts?: CacheConfig) {
     this.store = store;
@@ -54,7 +62,17 @@ export class ResponseCache {
       serialized = `${params.provider}:${params.model}:fallback`;
     }
     const hash = createHash('sha256').update(serialized).digest('hex');
-    return `${this.prefix}${hash}`;
+    const key = `${this.prefix}${hash}`;
+    // Record provider/model so invalidateProvider/invalidateModel can find this key.
+    // Bounded by maxSize — prune oldest entries when index outgrows the store cap.
+    if (params.provider) {
+      this._keyMeta.set(key, { provider: params.provider, model: params.model ?? '' });
+      if (this._keyMeta.size > this.maxSize) {
+        const oldest = this._keyMeta.keys().next().value;
+        if (oldest) this._keyMeta.delete(oldest);
+      }
+    }
+    return key;
   }
 
   /** Build custom key from explicit string (for override) */
@@ -117,6 +135,7 @@ export class ResponseCache {
         const oldestKey = this.accessOrder.shift();
         if (oldestKey) {
           await this.store.del(oldestKey);
+          this._keyMeta.delete(oldestKey);
           this._size--;
           this._evictions++;
         }
@@ -160,6 +179,7 @@ export class ResponseCache {
   async invalidateKey(key: string): Promise<void> {
     await this.store.del(key);
     this._removeFromAccessOrder(key);
+    this._keyMeta.delete(key);
   }
 
   /**
@@ -182,25 +202,53 @@ export class ResponseCache {
     await this.store.scan(`${this.prefix}${pattern}`, (k) => { keys.push(...k); });
     if (keys.length > 0) {
       await Promise.all(keys.map((k) => this.store.del(k)));
+      // Update in-memory tracking to stay consistent with the store
+      for (const k of keys) {
+        this._removeFromAccessOrder(k);
+        this._keyMeta.delete(k);
+      }
       count = keys.length;
     }
     return count;
   }
 
   /**
-   * Invalidate all cache entries for a specific provider
+   * Invalidate all cache entries for a specific provider.
+   * Uses the in-memory metadata index built by buildKey() — cache keys
+   * are SHA256 hashes that don't encode provider name, so a store-side
+   * scan pattern can never match them.
    * @returns Number of keys invalidated
    */
   async invalidateProvider(provider: string): Promise<number> {
-    return this.invalidate(`p:${provider}*`);
+    const matched: string[] = [];
+    for (const [key, meta] of this._keyMeta) {
+      if (meta.provider === provider) matched.push(key);
+    }
+    if (matched.length === 0) return 0;
+    await Promise.all(matched.map((k) => this.store.del(k)));
+    for (const k of matched) {
+      this._removeFromAccessOrder(k);
+      this._keyMeta.delete(k);
+    }
+    return matched.length;
   }
 
   /**
-   * Invalidate all cache entries for a specific model
+   * Invalidate all cache entries for a specific model.
    * @returns Number of keys invalidated
    */
   async invalidateModel(provider: string, model: string): Promise<number> {
-    return this.invalidate(`p:${provider}:m:${model}*`);
+    const matched: string[] = [];
+    for (const [key, meta] of this._keyMeta) {
+      if (meta.provider === provider && meta.model === model) matched.push(key);
+    }
+    if (matched.length === 0) return 0;
+    await Promise.all(matched.map((k) => this.store.del(k)));
+    for (const k of matched) {
+      this._removeFromAccessOrder(k);
+      this._keyMeta.delete(k);
+    }
+    return matched.length;
   }
 
   stats(): CacheStats {
