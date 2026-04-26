@@ -6,7 +6,7 @@ import { createLogger } from '../src/logger';
 import { safeCatch } from '../src/safe-catch';
 import type { IncomingMessage, ServerResponse } from 'http';
 import {
-  prisma, latencyRing, latencyRingIdx, setLatencyRingIdx, LATENCY_RING_SIZE,
+  prisma, latencyRing,
   metricsCounters, providerMetrics, setPendingDbWrites,
   setConsecutiveDbFailures, DB_FAILURE_WARN_THRESHOLD,
   activeDeploySessionId, setActiveDeploySessionId, startedAt, deployState,
@@ -68,13 +68,11 @@ export function logRequest(entry: RequestLogInput & { requestId?: string }) {
   metricsCounters.byStage[entry.stage] = (metricsCounters.byStage[entry.stage] || 0) + 1;
   metricsCounters.byProvider[entry.provider] = (metricsCounters.byProvider[entry.provider] || 0) + 1;
 
-  // Store latency in circular buffer for percentile calculation
-  if (latencyRing.length < LATENCY_RING_SIZE) {
-    latencyRing.push(entry.latencyMs);
-  } else {
-    latencyRing[latencyRingIdx] = entry.latencyMs;
-    setLatencyRingIdx((latencyRingIdx + 1) % LATENCY_RING_SIZE);
-  }
+  // Do NOT write to latencyRing here. GPU latencies are recorded by
+  // recordGpuLatency() (in ai-handlers.ts) which properly increments the
+  // generation counter for P95 cache invalidation. Cloud latencies don't
+  // belong in the GPU-specific ring buffer. Writing here without incrementing
+  // latencyRingGeneration caused stale P95 cache misses.
 
   if (entry.requestId) {
     if (!entry.success && entry.error) {

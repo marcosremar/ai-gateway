@@ -77,8 +77,9 @@ export class SpeculativeCache {
     const existing = this.pending.get(sessionId);
     if (existing && existing.partialText === trimmed) return;
 
-    // LRU eviction: remove oldest if at capacity
-    if (this.pending.size >= MAX_SPECULATIONS) {
+    // LRU eviction: remove oldest if at capacity AND this is a new session
+    // (overwriting an existing session does not increase size, so no eviction needed)
+    if (!this.pending.has(sessionId) && this.pending.size >= MAX_SPECULATIONS) {
       const oldestKey = this.pending.keys().next().value;
       if (oldestKey) {
         this.pending.delete(oldestKey);
