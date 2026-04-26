@@ -204,9 +204,14 @@ export function detectPII(
     }
   }
 
-  // Check minimum matches
+  // Check minimum matches.
+  // The config field is named `minMatches` ("Minimum matches before
+  // triggering"), so it must be compared against the total number of
+  // matches — not the count of unique pattern types. Using unique-types
+  // silently broke any threshold > 1 when the same type repeated (e.g.
+  // 5 credit cards still counted as 1 type).
   const uniqueTypes = [...new Set(detectedTypes)];
-  const detected = uniqueTypes.length >= (config.minMatches || 1);
+  const detected = matches.length >= (config.minMatches || 1);
   
   // Determine action
   const action = detected ? config.action : 'allow';
