@@ -18,9 +18,11 @@ export class Semaphore {
   private current = 0;
   private queue: Array<() => void> = [];
   private readonly maxQueue: number;
+  private readonly providerId: string;
 
-  constructor(private readonly max: number, maxQueue = 500) {
+  constructor(private readonly max: number, maxQueue = 500, providerId = 'unknown') {
     this.maxQueue = maxQueue;
+    this.providerId = providerId;
   }
 
   async acquire(): Promise<void> {
@@ -29,7 +31,7 @@ export class Semaphore {
       return;
     }
     if (this.queue.length >= this.maxQueue) {
-      throw new SemaphoreFullError('unknown');
+      throw new SemaphoreFullError(this.providerId);
     }
     return new Promise<void>((resolve) => {
       this.queue.push(resolve);
@@ -63,7 +65,7 @@ export class ProviderSemaphores {
   async withLimit<T>(providerId: string, fn: () => Promise<T>): Promise<T> {
     let sem = this.semaphores.get(providerId);
     if (!sem) {
-      sem = new Semaphore(this.defaultMax, this.defaultMaxQueue);
+      sem = new Semaphore(this.defaultMax, this.defaultMaxQueue, providerId);
       this.semaphores.set(providerId, sem);
     }
 
