@@ -18,8 +18,19 @@ export function createAlertingHooks(router: AlertRouter): Partial<GatewayHooks> 
     },
 
     onHealthChange: (data) => {
+      // Treat normal lifecycle transitions ('booting', 'installing', 'warming',
+      // 'pending') as informational. Only escalate to 'critical' when a
+      // healthy pod degraded (was 'ready') or the new state is an explicit
+      // failure mode. Otherwise operators get paged for every boot step.
+      const FAILURE_STATES = new Set(['error', 'down', 'unhealthy', 'failed']);
+      const wasHealthy = data.previousState === 'ready';
+      const becameFailure = FAILURE_STATES.has((data.newState ?? '').toLowerCase());
+      const becameReady = data.newState === 'ready';
+      let severity: 'info' | 'warning' | 'critical' = 'info';
+      if (becameReady) severity = 'info';
+      else if (wasHealthy || becameFailure) severity = 'critical';
       router.route({
-        severity: data.newState === 'ready' ? 'info' : 'critical',
+        severity,
         title: 'Health Change',
         message: `Tier ${data.tierIndex}: ${data.previousState} → ${data.newState}`,
         metadata: { provider: data.provider, endpoint: data.endpoint },
