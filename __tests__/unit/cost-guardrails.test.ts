@@ -6,7 +6,7 @@
  *   2. destroyTimer persistence — survives restart, auto-fires on boot if
  *      deadline already passed (the previous bug where restarts leaked every
  *      stopped pod forever)
- *   3. isAccountOwned per-provider flags (VAST_ACCOUNT_OWNED default=1, others=0)
+ *   3. isAccountOwned per-provider flags (default=0, opt-in via *_ACCOUNT_OWNED=1)
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -135,17 +135,31 @@ describe('cost guardrails — isAccountOwned per-provider flags', () => {
     delete process.env.TENSORDOCK_ACCOUNT_OWNED;
     delete process.env.MODAL_ACCOUNT_OWNED;
     delete process.env.HYPERSTACK_ACCOUNT_OWNED;
+    delete process.env.AIGW_VAST_NUKE_UNTRACKED;
+    delete process.env.AIGW_RUNPOD_NUKE_UNTRACKED;
+    delete process.env.AIGW_TENSORDOCK_NUKE_UNTRACKED;
+    delete process.env.AIGW_MODAL_NUKE_UNTRACKED;
+    delete process.env.AIGW_HYPERSTACK_NUKE_UNTRACKED;
   });
 
-  it('Vast.ai defaults to account-owned (safety-net inverted by user decision)', async () => {
-    const { isAccountOwned } = await import('../../server/gpu-orphan-cleanup');
-    expect(isAccountOwned('vast')).toBe(true);
-  });
-
-  it('Vast.ai can be opted OUT via VAST_ACCOUNT_OWNED=0', async () => {
-    process.env.VAST_ACCOUNT_OWNED = '0';
+  it('Vast.ai defaults to safe (prefix-filtered)', async () => {
     const { isAccountOwned } = await import('../../server/gpu-orphan-cleanup');
     expect(isAccountOwned('vast')).toBe(false);
+  });
+
+  it('VAST_ACCOUNT_OWNED=1 alone does NOT enable kill-all (requires also AIGW_VAST_NUKE_UNTRACKED=1 — post-2026-04-26 double-flag policy)', async () => {
+    process.env.VAST_ACCOUNT_OWNED = '1';
+    const { isAccountOwned, prefixesForProvider, GATEWAY_NAME_PREFIXES } = await import('../../server/gpu-orphan-cleanup');
+    expect(isAccountOwned('vast')).toBe(true);
+    expect(prefixesForProvider('vast')).toEqual(GATEWAY_NAME_PREFIXES);
+  });
+
+  it('VAST_ACCOUNT_OWNED=1 + AIGW_VAST_NUKE_UNTRACKED=1 enables kill-all', async () => {
+    process.env.VAST_ACCOUNT_OWNED = '1';
+    process.env.AIGW_VAST_NUKE_UNTRACKED = '1';
+    const { prefixesForProvider } = await import('../../server/gpu-orphan-cleanup');
+    expect(prefixesForProvider('vast')).toEqual([]);
+    delete process.env.AIGW_VAST_NUKE_UNTRACKED;
   });
 
   it('other providers default to safe (prefix-filtered)', async () => {
@@ -156,10 +170,10 @@ describe('cost guardrails — isAccountOwned per-provider flags', () => {
     expect(isAccountOwned('hyperstack')).toBe(false);
   });
 
-  it('RUNPOD_ACCOUNT_OWNED=1 opts RunPod into kill-all mode', async () => {
+  it('RUNPOD_ACCOUNT_OWNED=1 alone does NOT enable kill-all (requires also AIGW_RUNPOD_NUKE_UNTRACKED=1)', async () => {
     process.env.RUNPOD_ACCOUNT_OWNED = '1';
-    const { isAccountOwned, prefixesForProvider } = await import('../../server/gpu-orphan-cleanup');
+    const { isAccountOwned, prefixesForProvider, GATEWAY_NAME_PREFIXES } = await import('../../server/gpu-orphan-cleanup');
     expect(isAccountOwned('runpod')).toBe(true);
-    expect(prefixesForProvider('runpod')).toEqual([]);
+    expect(prefixesForProvider('runpod')).toEqual(GATEWAY_NAME_PREFIXES);
   });
 });
