@@ -189,7 +189,9 @@ export class DistributedTracer {
     const latencies = recentSpans.map(span => span.tags.duration_ms);
     latencies.sort((a, b) => a - b);
 
-    const p95Index = Math.floor(latencies.length * 0.95);
+    // P95 = the value at rank ceil(N*0.95)-1 (0-indexed). Using Math.floor
+    // collapses to the max for small N (e.g. floor(20*0.95)=19 → last element).
+    const p95Index = Math.max(0, Math.ceil(latencies.length * 0.95) - 1);
     const p95Latency = latencies[p95Index] || latencies[latencies.length - 1];
 
     const totalRequests = recentSpans.length;
@@ -238,13 +240,13 @@ export class DistributedTracer {
 
     // TTFC calculations (Time To First Content)
     const ttfcValues = recentSpans.map(span => span.ttfcMs).filter((val): val is number => val !== undefined).sort((a, b) => a - b);
-    const p50Ttfc = ttfcValues.length > 0 ? ttfcValues[Math.floor(ttfcValues.length * 0.5)] : 0;
-    const p95Ttfc = ttfcValues.length > 0 ? ttfcValues[Math.floor(ttfcValues.length * 0.95)] : 0;
+    const p50Ttfc = ttfcValues.length > 0 ? ttfcValues[Math.max(0, Math.ceil(ttfcValues.length * 0.5) - 1)] : 0;
+    const p95Ttfc = ttfcValues.length > 0 ? ttfcValues[Math.max(0, Math.ceil(ttfcValues.length * 0.95) - 1)] : 0;
 
     // TTFA calculations (Time To First Audio)
     const ttfaValues = recentSpans.map(span => span.ttfaMs).filter((val): val is number => val !== undefined).sort((a, b) => a - b);
-    const p50Ttfa = ttfaValues.length > 0 ? ttfaValues[Math.floor(ttfaValues.length * 0.5)] : 0;
-    const p95Ttfa = ttfaValues.length > 0 ? ttfaValues[Math.floor(ttfaValues.length * 0.95)] : 0;
+    const p50Ttfa = ttfaValues.length > 0 ? ttfaValues[Math.max(0, Math.ceil(ttfaValues.length * 0.5) - 1)] : 0;
+    const p95Ttfa = ttfaValues.length > 0 ? ttfaValues[Math.max(0, Math.ceil(ttfaValues.length * 0.95) - 1)] : 0;
 
     // Cold start rate: TTFC > 500ms OR no TTFA
     const coldStarts = (ttfcValues.filter(ttfc => ttfc > 500).length +
@@ -340,7 +342,7 @@ export class DistributedTracer {
     const min = sorted[0];
     const max = sorted[sorted.length - 1];
     const avg = results.reduce((a, b) => a + b) / results.length;
-    const p95 = sorted[Math.floor(sorted.length * 0.95)];
+    const p95 = sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)];
 
     // Generate analysis
     const analysisParts: string[] = [];
