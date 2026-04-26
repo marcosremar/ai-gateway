@@ -267,8 +267,10 @@ export class SSETransport implements Transport {
         if (rawBuffer[0] === 0x00 && rawBuffer.length >= 9 &&
             rawBuffer[1] === 0x41 && rawBuffer[2] === 0x55 &&
             rawBuffer[3] === 0x44 && rawBuffer[4] === 0x49) {
-          // Read uint32LE length at offset 5
-          const len = rawBuffer[5] | (rawBuffer[6] << 8) | (rawBuffer[7] << 16) | (rawBuffer[8] << 24);
+          // Read uint32LE length at offset 5. Force unsigned so a high bit
+          // doesn't yield a negative length (which would pass the bounds
+          // check below and slice past the end of the buffer).
+          const len = ((rawBuffer[5] | (rawBuffer[6] << 8) | (rawBuffer[7] << 16) | (rawBuffer[8] << 24)) >>> 0);
           if (rawBuffer.length < 9 + len) break; // need more data
           // Extract binary audio
           const audioBytes = rawBuffer.slice(9, 9 + len);

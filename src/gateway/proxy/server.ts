@@ -7,7 +7,7 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { request as httpsRequest } from 'https';
 import { randomUUID } from 'crypto';
 import { existsSync, readFileSync, statSync } from 'fs';
-import { join, extname, resolve } from 'path';
+import { join, extname, resolve, sep } from 'path';
 import { validateAuth } from './middleware/auth';
 import { RateLimiter } from './middleware/rate-limit';
 import { SECURITY_HEADERS, applySecurityHeaders } from '../../middleware/security-headers';
@@ -289,7 +289,13 @@ function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse
   const resolvedStaticDir = resolve(staticDir);
   const decodedPath = decodeURIComponent(urlPath).replace(/\/+/g, '/');
   const resolvedPath = resolve(resolvedStaticDir, decodedPath.replace(/^\/+/, ''));
-  if (!resolvedPath.startsWith(resolvedStaticDir)) {
+  // `startsWith(staticDir)` alone admits sibling dirs that share a prefix
+  // (e.g. /var/www → /var/wwwx/secret). Require an exact match OR a path
+  // separator immediately after, which is what `relative()` semantics enforce.
+  const isInsideStatic =
+    resolvedPath === resolvedStaticDir ||
+    resolvedPath.startsWith(resolvedStaticDir + sep);
+  if (!isInsideStatic) {
     res.writeHead(403, { 'Content-Type': 'application/json', 'X-Request-Id': requestId, ...SECURITY_HEADERS });
     res.end(JSON.stringify({ error: 'Forbidden' }));
     return true;
@@ -308,8 +314,12 @@ function serveStaticFile(staticDir: string, urlPath: string, res: ServerResponse
     candidates.unshift(join(staticDir, 'index.html'));
   }
 
-  // Validate all candidates are within static dir
-  const validCandidates = candidates.filter(c => resolve(c).startsWith(resolvedStaticDir));
+  // Validate all candidates are within static dir — same prefix-trap fix as
+  // above: accept exact match or `${dir}${sep}…`, never a sibling prefix.
+  const validCandidates = candidates.filter(c => {
+    const r = resolve(c);
+    return r === resolvedStaticDir || r.startsWith(resolvedStaticDir + sep);
+  });
 
   for (const filePath of validCandidates) {
     try {

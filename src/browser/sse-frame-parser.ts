@@ -38,7 +38,11 @@ export class SSEFrameParser {
       if (this.buffer[0] === MAGIC_0 && this.buffer.length >= HEADER_SIZE &&
           this.buffer[1] === MAGIC_1 && this.buffer[2] === MAGIC_2 &&
           this.buffer[3] === MAGIC_3 && this.buffer[4] === MAGIC_4) {
-        const len = this.buffer[5] | (this.buffer[6] << 8) | (this.buffer[7] << 16) | (this.buffer[8] << 24)
+        // `<< 24` produces a signed 32-bit int — for lengths ≥ 2 GiB the
+        // top bit flips to negative and the next bounds check passes
+        // erroneously, slicing far past the actual buffer. Force unsigned
+        // with `>>> 0` (or use DataView.getUint32 little-endian).
+        const len = ((this.buffer[5] | (this.buffer[6] << 8) | (this.buffer[7] << 16) | (this.buffer[8] << 24)) >>> 0)
         if (this.buffer.length < HEADER_SIZE + len) break // need more data
         frames.push({ type: 'binary', data: this.buffer.slice(HEADER_SIZE, HEADER_SIZE + len) })
         this.buffer = this.buffer.slice(HEADER_SIZE + len)

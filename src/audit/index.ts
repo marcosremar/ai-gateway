@@ -110,13 +110,16 @@ export class AuditLogger {
 
   /**
    * Check if the log file needs rotation (size-based).
+   *
+   * Previously read the whole file, threw the contents away, and hardcoded
+   * size=0 — so it always returned false and rotation never fired. Use
+   * fs.stat for an O(1) size check against the configured threshold.
    */
   async needsRotation(): Promise<boolean> {
     try {
-      const { size } = await readFile(this.filePath).then(() => ({
-        size: 0, // placeholder
-      }));
-      return false;
+      const fs = await import('fs/promises');
+      const stat = await fs.stat(this.filePath);
+      return stat.size >= (this.options.maxSizeBytes ?? Number.MAX_SAFE_INTEGER);
     } catch {
       return false;
     }
