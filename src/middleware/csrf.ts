@@ -97,8 +97,14 @@ export function csrfMiddleware(
 
 /**
  * Set CSRF token in response headers.
+ *
+ * Writes the token to the `csrf-token` response header and lists THAT same
+ * header in Access-Control-Expose-Headers so cross-origin SPAs can read it.
+ * The previous implementation exposed `X-CSRF-Token` (which is the *incoming
+ * request* header name, not the response header) — cross-origin clients
+ * could not pull the token out of the response, breaking CSRF onboarding.
  */
 export function setCsrfHeaders(res: ServerResponse, token: string): void {
   res.setHeader(CSRF_COOKIE, token);
-  res.setHeader('Access-Control-Expose-Headers', CSRF_HEADER);
+  res.setHeader('Access-Control-Expose-Headers', CSRF_COOKIE);
 }
