@@ -1063,6 +1063,14 @@ export class VastClient extends AbstractGpuProvider {
       type: 'on-demand',
       rentable: { eq: true },
       rented: { eq: false },
+      // gpu_frac=1.0 → claim the WHOLE physical GPU. Without this we
+      // can land on a fractional slice and share VRAM with other
+      // tenants on the same card. Marcos hit this with a 4090 where
+      // another tenant held 13GB of the 24GB. Hard rule: never share
+      // VRAM with strangers.
+      gpu_frac: { eq: 1.0 },
+      // Verified hosts only — protects against unstable / overcommitted boxes.
+      verified: { eq: true },
       num_gpus: { eq: spec.gpuCount ?? 1 },
       disk_space: { gte: diskGb },
       // P0b: Phase-1 — prefer direct-port hosts (no SSH tunnel needed, faster)
@@ -2272,6 +2280,9 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
       type: 'on-demand',
       rentable: { eq: true },
       rented: { eq: false },
+      // Whole physical GPU only — no fractional slices that share
+      // VRAM with other tenants. See deploy() filter for details.
+      gpu_frac: { eq: 1.0 },
       verified: { eq: true },
       reliability2: { gte: 0.9 },
       order: [['dph_total', 'asc']],
