@@ -236,7 +236,11 @@ export class StreamingSTTBackend {
           logDebug(this._logger, '[StreamingSTT] Non-object JSON skipped');
           return;
         }
-        const text = (parsed.text ?? '').trim();
+        // A misbehaving provider could send a non-string `text` field
+        // (number, boolean, null) — calling .trim() on it would throw and
+        // crash the whole onmessage handler. Coerce defensively.
+        const rawText = parsed.text;
+        const text = typeof rawText === 'string' ? rawText.trim() : '';
         if (text.length > this._maxTextLength) {
           logError(this._logger, '[StreamingSTT] Oversize text after trim: %s', text.length);
           return;

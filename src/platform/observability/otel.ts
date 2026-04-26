@@ -72,8 +72,13 @@ class InMemorySpan implements Span {
   constructor(name: string) {
     this.name = name;
     this.startTime = Date.now();
-    this._traceId = crypto.randomUUID();
-    this._spanId = crypto.randomUUID().slice(0, 16);
+    // OTel trace/span IDs are hex strings (32 hex chars / 16 hex chars).
+    // crypto.randomUUID() returns a UUID with hyphens at offsets 8, 13, 18,
+    // 23 — so `.slice(0, 16)` produced `xxxxxxxx-xxxx-xx` (a hyphen mid-id),
+    // which downstream OTel collectors reject as invalid. Strip the hyphens
+    // BEFORE truncating, so we end up with proper 32/16-hex IDs.
+    this._traceId = crypto.randomUUID().replace(/-/g, '');
+    this._spanId = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
   }
 
   setAttribute(key: string, value: string | number | boolean): void {

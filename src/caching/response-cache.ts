@@ -80,13 +80,15 @@ export class ResponseCache {
       this._misses++;
       return null;
     }
-    this._hits++;
+    // Only count this as a hit after we've successfully decoded and TTL-checked
+    // the envelope. The previous code incremented _hits up front and tried to
+    // roll it back, but the JSON.parse catch path skipped the rollback and a
+    // corrupted entry permanently inflated the hit ratio.
     try {
       const envelope = JSON.parse(raw) as { data: T; metadata: CacheMetadata };
       if (envelope.metadata.expiresAt && Date.now() > envelope.metadata.expiresAt) {
         await this.store.del(key);
         this._misses++;
-        this._hits--;
         this._removeFromAccessOrder(key);
         return null;
       }
@@ -97,8 +99,10 @@ export class ResponseCache {
       }
       this.accessOrder.push(key);
 
+      this._hits++;
       return envelope.data;
     } catch {
+      this._misses++;
       return null;
     }
   }
