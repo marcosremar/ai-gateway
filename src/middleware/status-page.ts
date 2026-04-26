@@ -85,6 +85,17 @@ export function buildStatusReport(options: {
   };
 }
 
+/** HTML-escape a value so it's safe to interpolate as text or in single attribute contexts. */
+function esc(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  return String(v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+
 /**
  * Render status as HTML for browser viewing.
  */
@@ -119,7 +130,7 @@ export function renderStatusHtml(status: SystemStatus): string {
 </head>
 <body>
   <h1>${healthEmoji} AI Gateway</h1>
-  <p class="subtitle">v${status.version} · ${uptime} · ${status.timestamp}</p>
+  <p class="subtitle">v${esc(status.version)} · ${esc(uptime)} · ${esc(status.timestamp)}</p>
 
   <div class="card">
     <h2>Providers</h2>
@@ -130,10 +141,10 @@ export function renderStatusHtml(status: SystemStatus): string {
           .map(
             (p) => `
           <tr>
-            <td>${p.id}</td>
-            <td>${p.type}</td>
+            <td>${esc(p.id)}</td>
+            <td>${esc(p.type)}</td>
             <td><span class="status ${p.cooldown ? 'cooldown' : p.healthy ? 'healthy' : 'unhealthy'}">${p.cooldown ? 'COOLDOWN' : p.healthy ? 'HEALTHY' : 'UNHEALTHY'}</span></td>
-            <td>${p.latencyMs ? `${p.latencyMs}ms` : '—'}</td>
+            <td>${p.latencyMs ? `${esc(p.latencyMs)}ms` : '—'}</td>
           </tr>
         `,
           )
@@ -144,10 +155,10 @@ export function renderStatusHtml(status: SystemStatus): string {
 
   <div class="card">
     <h2>GPU</h2>
-    <div class="metric"><span class="metric-label">Status</span><span class="metric-value">${status.gpu.status ?? 'N/A'}</span></div>
-    ${status.gpu.gpuType ? `<div class="metric"><span class="metric-label">Type</span><span class="metric-value">${status.gpu.gpuType}</span></div>` : ''}
-    ${status.gpu.idleSec !== undefined ? `<div class="metric"><span class="metric-label">Idle</span><span class="metric-value">${status.gpu.idleSec}s</span></div>` : ''}
-    ${status.gpu.podId ? `<div class="metric"><span class="metric-label">Pod</span><span class="metric-value">${status.gpu.podId}</span></div>` : ''}
+    <div class="metric"><span class="metric-label">Status</span><span class="metric-value">${esc(status.gpu.status ?? 'N/A')}</span></div>
+    ${status.gpu.gpuType ? `<div class="metric"><span class="metric-label">Type</span><span class="metric-value">${esc(status.gpu.gpuType)}</span></div>` : ''}
+    ${status.gpu.idleSec !== undefined ? `<div class="metric"><span class="metric-label">Idle</span><span class="metric-value">${esc(status.gpu.idleSec)}s</span></div>` : ''}
+    ${status.gpu.podId ? `<div class="metric"><span class="metric-label">Pod</span><span class="metric-value">${esc(status.gpu.podId)}</span></div>` : ''}
   </div>
 
   <div class="card">
