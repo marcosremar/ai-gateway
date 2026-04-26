@@ -125,11 +125,15 @@ describe('getCompatibleGpus', () => {
     expect(typeof gpus[0]).toBe('string');
   });
 
-  it('should return more GPUs for older CUDA versions', () => {
+  it('newer image CUDA opens up more GPUs (a GPU with cudaMin=N requires image CUDA >= N)', () => {
     const oldGpus = getCompatibleGpus('my-llm:cuda11.8');
     const newGpus = getCompatibleGpus('my-llm:cuda12.8');
-    // Older CUDA should be compatible with more GPUs (backward compat)
-    expect(oldGpus.length).toBeGreaterThanOrEqual(newGpus.length);
+    // The cudaMinVersion in GPU_DATABASE is the OLDEST CUDA toolkit that
+    // supports each GPU. An image built for newer CUDA can target every
+    // GPU whose minimum is ≤ the image's CUDA; older images can target
+    // strictly fewer (GPUs added in CUDA 12.x are unreachable from a
+    // CUDA 11.8 image).
+    expect(newGpus.length).toBeGreaterThanOrEqual(oldGpus.length);
   });
 });
 

@@ -304,10 +304,17 @@ export function analyzeDockerImage(
       disqualifiers.push(`Insufficient VRAM: ${gpu.vramGb}GB < ${estimatedVramGb}GB required`);
     }
 
-    // Check 2: CUDA version compatibility
+    // Check 2: CUDA version compatibility.
+    // The image carries `detectedCudaVersion` (CUDA toolkit it was built
+    // against). The GPU has `cudaMinVersion` (oldest CUDA it supports).
+    // For compatibility, the IMAGE's CUDA must be >= the GPU's minimum —
+    // not the other way around. The previous check had the arguments
+    // swapped, which incorrectly cleared Blackwell GPUs (cudaMin 12.8)
+    // for a CUDA 12.4 image and disqualified Ada GPUs (cudaMin 12.0)
+    // that would have worked.
     if (detectedCudaVersion) {
-      if (!cudaVersionGte(gpu.cudaMinVersion, detectedCudaVersion)) {
-        disqualifiers.push(`CUDA ${detectedCudaVersion} requires ${gpu.cudaMinVersion}+ (GPU supports ${gpu.cudaMinVersion})`);
+      if (!cudaVersionGte(detectedCudaVersion, gpu.cudaMinVersion)) {
+        disqualifiers.push(`Image CUDA ${detectedCudaVersion} < GPU minimum ${gpu.cudaMinVersion}`);
       }
     }
 
