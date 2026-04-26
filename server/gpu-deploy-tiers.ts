@@ -130,7 +130,10 @@ export function categorizeDeployFailure(message: string): string {
   if (m.includes('cancelled') || m.includes('canceled')) return 'cancelled';
   if (m.includes('timed out') || m.includes('timeout')) return 'timeout';
   if (m.includes('crashed') || m.includes('exited') || m.includes('terminated')) return 'crashed';
-  if (message.includes('API') || message.includes('401') || message.includes('403') || message.includes('500')) return 'api_error';
+  // Use the lowercased `m` here too — every other branch is case-insensitive,
+  // and the original `message.includes('API')` only matched uppercase, so
+  // lowercase "api auth failed" silently dropped to 'unknown'.
+  if (m.includes('api') || m.includes('401') || m.includes('402') || m.includes('403') || m.includes('429') || m.includes('500') || m.includes('502') || m.includes('503') || m.includes('504')) return 'api_error';
   if (m.includes('network') || m.includes('econnrefused') || m.includes('etimedout') || m.includes('fetch failed')) return 'network';
   return 'unknown';
 }
