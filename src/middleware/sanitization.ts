@@ -65,7 +65,11 @@ export function sanitizeUserId(input: string): string {
  * Sanitize an API key for logging (mask all but first/last chars).
  */
 export function maskApiKey(key: string): string {
-  if (key.length <= 8) return '***';
+  // The prefix+suffix scheme exposes 8 chars (4 leading + 4 trailing).
+  // For keys shorter than 12 the prefix and suffix would overlap,
+  // exposing far more than half of the secret (e.g. 8 of 9 chars).
+  // Collapse to "***" until the key is long enough for safe masking.
+  if (key.length < 12) return '***';
   return `${key.slice(0, 4)}***${key.slice(-4)}`;
 }
 
