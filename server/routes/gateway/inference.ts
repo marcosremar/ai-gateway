@@ -165,6 +165,10 @@ async function handleTtsVoices(_req: IncomingMessage, res: ServerResponse): Prom
         providerName: catalog.providerName,
         model: model.id,
         modelName: model.name,
+        // Ready-to-use routing string for /v1/tts/preview's `speaker` field.
+        // The preview pipeline parses `engine/voice` and dispatches to the
+        // matching backend so Kokoro voices don't get swallowed by Qwen3.
+        speaker: `${catalog.providerId}/${voice.id}`,
       })),
     ),
   );

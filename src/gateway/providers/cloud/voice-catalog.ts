@@ -155,48 +155,41 @@ export const KOKORO_VOICE_CATALOG: ProviderVoiceCatalog = {
         { id: 'bm_lewis', name: 'Lewis', description: 'Britanico masculino - Moderno', gender: 'male', language: 'en-GB', languageName: 'Ingles (UK)' },
 
         // ══════════════════════════════════════════════════════════════════════
-        // PORTUGUESE - Brazilian (pt-BR)
+        // EN-US extras present on the server (am_santa)
         // ══════════════════════════════════════════════════════════════════════
-        { id: 'pf_camila', name: 'Camila', description: 'Brasileiro feminino - Natural', gender: 'female', language: 'pt-BR', languageName: 'Portugues (Brasil)' },
+        { id: 'am_santa', name: 'Santa', description: 'Americano masculino - Caloroso', gender: 'male', language: 'en-US', languageName: 'Ingles (EUA)' },
+
+        // ══════════════════════════════════════════════════════════════════════
+        // PORTUGUESE - Brazilian (pt-BR) — only voices present in
+        // dockers/kokoro-tts/server.py:ALL_VOICES. The pretrained model has
+        // exactly these three; pf_camila/pf_fernanda/pm_antonio do NOT
+        // exist in hexgrad/Kokoro-82M and the server returns 400 for them.
+        // ══════════════════════════════════════════════════════════════════════
         { id: 'pf_dora', name: 'Dora', description: 'Brasileiro feminino - Expressivo', gender: 'female', language: 'pt-BR', languageName: 'Portugues (Brasil)' },
-        { id: 'pf_fernanda', name: 'Fernanda', description: 'Brasileiro feminino - Profissional', gender: 'female', language: 'pt-BR', languageName: 'Portugues (Brasil)' },
         { id: 'pm_alex', name: 'Alex', description: 'Brasileiro masculino - Claro', gender: 'male', language: 'pt-BR', languageName: 'Portugues (Brasil)' },
-        { id: 'pm_antonio', name: 'Antonio', description: 'Brasileiro masculino - Maduro', gender: 'male', language: 'pt-BR', languageName: 'Portugues (Brasil)' },
         { id: 'pm_santa', name: 'Santa', description: 'Brasileiro masculino - Caloroso', gender: 'male', language: 'pt-BR', languageName: 'Portugues (Brasil)' },
 
         // ══════════════════════════════════════════════════════════════════════
-        // SPANISH (es)
+        // SPANISH (es) — server only has ef_dora, em_alex, em_santa.
         // ══════════════════════════════════════════════════════════════════════
         { id: 'ef_dora', name: 'Dora', description: 'Espanhol feminino - Expressivo', gender: 'female', language: 'es', languageName: 'Espanhol' },
-        { id: 'ef_isabella', name: 'Isabella', description: 'Espanhol feminino - Elegante', gender: 'female', language: 'es', languageName: 'Espanhol' },
-        { id: 'ef_sara', name: 'Sara', description: 'Espanhol feminino - Natural', gender: 'female', language: 'es', languageName: 'Espanhol' },
         { id: 'em_alex', name: 'Alex', description: 'Espanhol masculino - Natural', gender: 'male', language: 'es', languageName: 'Espanhol' },
-        { id: 'em_jorge', name: 'Jorge', description: 'Espanhol masculino - Profundo', gender: 'male', language: 'es', languageName: 'Espanhol' },
         { id: 'em_santa', name: 'Santa', description: 'Espanhol masculino - Caloroso', gender: 'male', language: 'es', languageName: 'Espanhol' },
 
         // ══════════════════════════════════════════════════════════════════════
-        // FRENCH (fr)
+        // FRENCH (fr) — server only has ff_siwis.
         // ══════════════════════════════════════════════════════════════════════
-        { id: 'ff_camille', name: 'Camille', description: 'Frances feminino - Elegante', gender: 'female', language: 'fr', languageName: 'Frances' },
         { id: 'ff_siwis', name: 'Siwis', description: 'Frances feminino - Sofisticado', gender: 'female', language: 'fr', languageName: 'Frances' },
-        { id: 'fm_gabriel', name: 'Gabriel', description: 'Frances masculino - Charme', gender: 'male', language: 'fr', languageName: 'Frances' },
-        { id: 'fm_guillaume', name: 'Guillaume', description: 'Frances masculino - Classico', gender: 'male', language: 'fr', languageName: 'Frances' },
+
+        // GERMAN (de) and KOREAN (ko) intentionally omitted —
+        // hexgrad/Kokoro-82M does not include voices for these languages,
+        // even though earlier versions of this catalog claimed otherwise.
 
         // ══════════════════════════════════════════════════════════════════════
-        // GERMAN (de)
+        // ITALIAN (it) — server only has if_sara, im_nicola.
         // ══════════════════════════════════════════════════════════════════════
-        { id: 'df_anna', name: 'Anna', description: 'Alemao feminino - Claro', gender: 'female', language: 'de', languageName: 'Alemao' },
-        { id: 'df_greta', name: 'Greta', description: 'Alemao feminino - Caloroso', gender: 'female', language: 'de', languageName: 'Alemao' },
-        { id: 'dm_hans', name: 'Hans', description: 'Alemao masculino - Tradicional', gender: 'male', language: 'de', languageName: 'Alemao' },
-        { id: 'dm_stefan', name: 'Stefan', description: 'Alemao masculino - Moderno', gender: 'male', language: 'de', languageName: 'Alemao' },
-
-        // ══════════════════════════════════════════════════════════════════════
-        // ITALIAN (it)
-        // ══════════════════════════════════════════════════════════════════════
-        { id: 'if_elena', name: 'Elena', description: 'Italiano feminino - Melodico', gender: 'female', language: 'it', languageName: 'Italiano' },
         { id: 'if_sara', name: 'Sara', description: 'Italiano feminino - Natural', gender: 'female', language: 'it', languageName: 'Italiano' },
-        { id: 'im_andrea', name: 'Andrea', description: 'Italiano masculino - Expressivo', gender: 'male', language: 'it', languageName: 'Italiano' },
-        { id: 'im_marco', name: 'Marco', description: 'Italiano masculino - Caloroso', gender: 'male', language: 'it', languageName: 'Italiano' },
+        { id: 'im_nicola', name: 'Nicola', description: 'Italiano masculino - Caloroso', gender: 'male', language: 'it', languageName: 'Italiano' },
 
         // ══════════════════════════════════════════════════════════════════════
         // JAPANESE (ja)
@@ -220,17 +213,12 @@ export const KOKORO_VOICE_CATALOG: ProviderVoiceCatalog = {
         { id: 'zm_yunyang', name: 'Yunyang', description: 'Chines masculino - Natural', gender: 'male', language: 'zh', languageName: 'Chines (Mandarim)' },
 
         // ══════════════════════════════════════════════════════════════════════
-        // KOREAN (ko)
+        // HINDI (hi) — actual voices in hexgrad/Kokoro-82M.
         // ══════════════════════════════════════════════════════════════════════
-        { id: 'kf_jiwon', name: 'Jiwon', description: 'Coreano feminino - Natural', gender: 'female', language: 'ko', languageName: 'Coreano' },
-        { id: 'kf_sora', name: 'Sora', description: 'Coreano feminino - Melodico', gender: 'female', language: 'ko', languageName: 'Coreano' },
-        { id: 'km_minho', name: 'Minho', description: 'Coreano masculino - Claro', gender: 'male', language: 'ko', languageName: 'Coreano' },
-
-        // ══════════════════════════════════════════════════════════════════════
-        // HINDI (hi)
-        // ══════════════════════════════════════════════════════════════════════
-        { id: 'hf_priya', name: 'Priya', description: 'Hindi feminino - Natural', gender: 'female', language: 'hi', languageName: 'Hindi' },
-        { id: 'hm_raj', name: 'Raj', description: 'Hindi masculino - Claro', gender: 'male', language: 'hi', languageName: 'Hindi' },
+        { id: 'hf_alpha', name: 'Alpha', description: 'Hindi feminino - Claro', gender: 'female', language: 'hi', languageName: 'Hindi' },
+        { id: 'hf_beta', name: 'Beta', description: 'Hindi feminino - Natural', gender: 'female', language: 'hi', languageName: 'Hindi' },
+        { id: 'hm_omega', name: 'Omega', description: 'Hindi masculino - Profundo', gender: 'male', language: 'hi', languageName: 'Hindi' },
+        { id: 'hm_psi', name: 'Psi', description: 'Hindi masculino - Claro', gender: 'male', language: 'hi', languageName: 'Hindi' },
       ],
     },
   ],

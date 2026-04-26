@@ -16,9 +16,10 @@
  *   ai-gateway metrics
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { resolve, dirname } from 'path';
+import { readFileSync, writeFileSync, existsSync, createWriteStream, createReadStream, mkdirSync, statSync, readdirSync, unlinkSync } from 'fs';
+import { resolve, dirname, join } from 'path';
 import { spawn, type ChildProcess } from 'child_process';
+import { createHash } from 'crypto';
 
 // ── Colors (minimal, no deps) ────────────────────────────────────────────
 const isTTY = process.stdout.isTTY;
@@ -574,7 +575,15 @@ async function cmdGpuLogs() {
   console.log(typeof data === 'string' ? data : JSON.stringify(data, null, 2));
 }
 
-async function cmdGpuList() {
+// Probe utilities live in src/gateway/providers/gpu/livenessProbe.ts so
+// they can be unit-tested without spinning up the whole CLI. Re-imported
+// here so call-sites below stay unchanged.
+import {
+  tcpProbe,
+  pickProbeTarget,
+} from '../src/gateway/providers/gpu/livenessProbe';
+
+async function cmdGpuList(opts: { probe?: boolean; json?: boolean } = {}) {
   const { url, key } = getConfig();
   const res = await fetch(`${url}/v1/gpu/list`, { headers: headers(key) });
   if (res.status === 404) {
@@ -582,11 +591,35 @@ async function cmdGpuList() {
     return;
   }
   const data = await res.json();
-  const instances = Array.isArray(data) ? data : (data.instances || []);
+  const instances: Record<string, unknown>[] = Array.isArray(data) ? data : (data.instances || []);
   if (instances.length === 0) {
-    console.log('No active GPU instances.');
+    if (opts.json) {
+      console.log(JSON.stringify({ instances: [] }));
+    } else {
+      console.log('No active GPU instances.');
+    }
     return;
   }
+
+  // Default: probe when there are <= 5 instances (cheap + most useful)
+  // and we are not in --json mode. --probe forces it; --no-probe disables.
+  const shouldProbe = opts.probe !== false && instances.length <= 10;
+  if (shouldProbe) {
+    await Promise.all(instances.map(async (inst) => {
+      const target = pickProbeTarget(inst);
+      if (!target) { (inst as { liveness?: string }).liveness = 'unknown'; return; }
+      const t0 = Date.now();
+      const alive = await tcpProbe(target.host, target.port, 3000);
+      const dt = Date.now() - t0;
+      (inst as { liveness?: string }).liveness = alive ? `alive (${dt}ms)` : 'unreachable';
+    }));
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify({ instances }, null, 2));
+    return;
+  }
+
   console.log(`${instances.length} active instance(s):\n`);
   for (const inst of instances) {
     console.log(`  ${inst.instanceId || inst.podId || '?'}`);
@@ -594,11 +627,158 @@ async function cmdGpuList() {
     if (inst.provider) console.log(`    provider:  ${inst.provider}`);
     if (inst.gpuType || inst.gpuName) console.log(`    gpu:       ${inst.gpuType || inst.gpuName}`);
     if (inst.status) console.log(`    status:    ${inst.status}`);
+    // liveness is the actual TCP-probe result; status is the provider's
+    // claim. They diverge for zombie pods — flag the divergence loudly.
+    if ((inst as { liveness?: string }).liveness) {
+      const liv = (inst as { liveness?: string }).liveness!;
+      const flag = liv === 'unreachable' && inst.status === 'running' ? '  ⚠ ZOMBIE' : '';
+      console.log(`    liveness:  ${liv}${flag}`);
+    }
     if (inst.endpoint) console.log(`    endpoint:  ${inst.endpoint}`);
     if (inst.costPerHr) console.log(`    cost/hr:   $${Number(inst.costPerHr).toFixed(2)}`);
     if (inst.dockerImage) console.log(`    image:     ${inst.dockerImage}`);
     console.log('');
   }
+}
+
+/**
+ * `ai-gateway gpu doctor [--instance ID]` — full diagnostic dump for one
+ * (or all) instances. Distinct from `gpu list --probe` because:
+ *
+ *   - Probes SSH (port 22 via the proxy hostname) AND the HTTP endpoint
+ *     separately — `running` pods can have working HTTP but dead SSH
+ *     when the SSH-proxy node falls off the network (we hit this twice).
+ *   - Tries an actual SSH `echo` round-trip when --instance is given,
+ *     because TCP-open is necessary but not sufficient.
+ *   - Reports liveness in machine-readable form so scripts can branch:
+ *     `if ai-gateway gpu doctor --instance X --json | jq -e '.alive'`.
+ */
+async function cmdGpuDoctor(opts: { instance?: string; json?: boolean }) {
+  const { url, key } = getConfig();
+  const res = await fetch(`${url}/v1/gpu/list`, { headers: headers(key) });
+  const data = await res.json();
+  const instances: Record<string, unknown>[] = Array.isArray(data) ? data : (data.instances || []);
+  const targets = opts.instance
+    ? instances.filter(i => i.instanceId === opts.instance || i.podId === opts.instance)
+    : instances;
+  if (targets.length === 0) {
+    if (opts.json) console.log(JSON.stringify({ instances: [] }));
+    else console.log(opts.instance ? `No instance "${opts.instance}".` : 'No active GPU instances.');
+    return;
+  }
+
+  const reports: Record<string, unknown>[] = [];
+  for (const inst of targets) {
+    const id = String(inst.instanceId || inst.podId || '?');
+    const report: Record<string, unknown> = {
+      instanceId: id,
+      provider: inst.provider,
+      gpuType: inst.gpuType || inst.gpuName,
+      status: inst.status,
+      endpoint: inst.endpoint,
+      sshHost: inst.sshHost,
+      sshPort: inst.sshPort,
+      checks: {} as Record<string, unknown>,
+    };
+    const checks = report.checks as Record<string, unknown>;
+
+    // HTTP probe
+    if (inst.endpoint && typeof inst.endpoint === 'string' && /^https?:\/\//.test(inst.endpoint)) {
+      try {
+        const u = new URL(inst.endpoint);
+        const t0 = Date.now();
+        const alive = await tcpProbe(u.hostname, u.port ? parseInt(u.port, 10) : 80, 3000);
+        checks.http_tcp = { alive, latencyMs: Date.now() - t0 };
+        if (alive) {
+          // Try /info — most images expose it
+          try {
+            const ctrl = new AbortController();
+            const tt = setTimeout(() => ctrl.abort(), 3000);
+            const r = await fetch(`${inst.endpoint}/info`, { signal: ctrl.signal });
+            clearTimeout(tt);
+            checks.http_info = { status: r.status };
+          } catch (e) {
+            checks.http_info = { error: (e as Error).message };
+          }
+        }
+      } catch (e) {
+        checks.http_tcp = { error: (e as Error).message };
+      }
+    }
+    // SSH probe (TCP only — SSH banner timing depends on provider)
+    if (inst.sshHost && inst.sshPort) {
+      const t0 = Date.now();
+      const alive = await tcpProbe(String(inst.sshHost), Number(inst.sshPort), 3000);
+      checks.ssh_tcp = { alive, latencyMs: Date.now() - t0 };
+    }
+
+    // Aggregate alive flag — true only if we have evidence of reachability
+    const httpOk = (checks.http_tcp as { alive?: boolean } | undefined)?.alive === true;
+    const sshOk = (checks.ssh_tcp as { alive?: boolean } | undefined)?.alive === true;
+    report.alive = httpOk || sshOk;
+    report.zombie = inst.status === 'running' && !report.alive;
+    reports.push(report);
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify(opts.instance ? reports[0] : { instances: reports }, null, 2));
+    return;
+  }
+
+  for (const r of reports) {
+    const flag = r.zombie ? '  ⚠ ZOMBIE (provider says running, but unreachable)' : (r.alive ? '✓ alive' : '✗ unreachable');
+    console.log(`${r.instanceId}  ${flag}`);
+    console.log(`  provider: ${r.provider}  gpu: ${r.gpuType}  status: ${r.status}`);
+    const checks = r.checks as Record<string, unknown>;
+    if (checks.http_tcp) console.log(`  HTTP TCP : ${JSON.stringify(checks.http_tcp)}`);
+    if (checks.http_info) console.log(`  HTTP /info: ${JSON.stringify(checks.http_info)}`);
+    if (checks.ssh_tcp) console.log(`  SSH  TCP : ${JSON.stringify(checks.ssh_tcp)}`);
+    console.log('');
+  }
+  // Exit code: 1 if any target instance is unreachable. Lets scripts gate
+  // on `ai-gateway gpu doctor --instance X && do_thing`.
+  const anyDead = reports.some(r => r.alive !== true);
+  if (anyDead && opts.instance) process.exit(1);
+}
+
+/**
+ * `ai-gateway gpu wait --instance ID [--timeout SEC]` — poll until the
+ * instance is reachable (or timeout). Returns 0 when alive, 1 on timeout.
+ * The complement of `gpu doctor`: doctor diagnoses, wait blocks. Useful
+ * for scripts that just deployed and want to gate next steps on
+ * reachability rather than the provider's "running" status.
+ */
+async function cmdGpuWait(opts: { instance: string; timeout?: number; intervalSec?: number }) {
+  const timeoutSec = opts.timeout ?? 300;
+  const intervalSec = opts.intervalSec ?? 5;
+  const deadline = Date.now() + timeoutSec * 1000;
+  const { url, key } = getConfig();
+  let lastErr = '';
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${url}/v1/gpu/list`, { headers: headers(key) });
+      const data = await res.json();
+      const instances: Record<string, unknown>[] = Array.isArray(data) ? data : (data.instances || []);
+      const inst = instances.find(i => i.instanceId === opts.instance || i.podId === opts.instance);
+      if (!inst) {
+        lastErr = `instance ${opts.instance} not in list`;
+      } else {
+        const t = pickProbeTarget(inst);
+        if (t && await tcpProbe(t.host, t.port, 3000)) {
+          const elapsed = Math.round((Date.now() - (deadline - timeoutSec * 1000)) / 1000);
+          console.log(`✓ ${opts.instance} reachable (${t.host}:${t.port}, ${elapsed}s)`);
+          return;
+        }
+        lastErr = `${t ? `${t.host}:${t.port}` : 'no target'} not reachable, status=${inst.status}`;
+      }
+    } catch (e) {
+      lastErr = (e as Error).message;
+    }
+    process.stderr.write('.');
+    await new Promise(r => setTimeout(r, intervalSec * 1000));
+  }
+  console.error(`\n✗ ${opts.instance} did not become reachable in ${timeoutSec}s. Last: ${lastErr}`);
+  process.exit(1);
 }
 
 async function cmdGpuTerminate(instanceId: string, opts: { provider?: string; deployId?: string }) {
@@ -1756,6 +1936,20 @@ Subcommands:
   snapshot [-m "msg"]          Download modified files + git commit + push
                                (alias for 'gpu commit')
 
+  save <name>                  Tar key paths from the running container into
+                               a local snapshot at ~/.ai-gateway/snapshots/.
+                               Survives Vast preemption — restore on any new
+                               instance with the same Docker layout.
+    --include p1,p2,...          Override the default paths to capture
+    --exclude e1,e2,...          Tar exclude patterns (e.g. "*.log,*.tmp")
+    --notes "..."                Free-form note saved in the sidecar JSON
+  save list                    Show local snapshots (size + age + origin)
+  save delete <name>           Remove a local snapshot
+
+  restore <name>               Stream a saved tar back into the container.
+                               Files extract at their original absolute paths;
+                               existing files are overwritten in place.
+
   serve <remote-port>          Open local SSH tunnel for preview
     --local <port>               Local port (defaults to remote port)
     --bind <host>                Bind address (default: 127.0.0.1)
@@ -1888,6 +2082,292 @@ async function cmdGpuDevInfo(target?: GpuTargetOpts) {
   }
 }
 
+// ── State save/restore — preempt-resilient container snapshots ───────────────
+//
+// Vast.ai (and most spot GPU markets) preempt cheap instances within
+// minutes-to-hours. Re-doing setup (bun install, pip venv, model cache,
+// uploaded source tarballs) every time costs ~10 min of human time.
+//
+// `gpu dev save <name>` SSHes into the running instance, tars the paths
+// listed in --include (defaults below), pipes the stream to a local file
+// `~/.ai-gateway/snapshots/<name>.tar.gz`, and writes a sidecar `<name>.json`
+// with provenance + sha256.
+//
+// `gpu dev restore <name>` reverses that — pipes the local tar over SSH
+// into `tar -xzf -` on the new instance. Idempotent: existing files are
+// overwritten, paths absent from the tar are left alone.
+//
+// We deliberately do NOT call any Vast.ai API (no `vastai cloud_copy`, no
+// snapshots) — those need server-side cloud connections, S3 buckets, and
+// scheduled jobs that complicate the first-time UX. Local-tar via SSH is
+// O(disk + bandwidth), uses tools every container already has, and works
+// on any provider with SSH (Vast, RunPod, Hyperstack, Lambda, …).
+
+const SNAPSHOTS_DIR = resolve(
+  process.env.HOME || '.',
+  '.ai-gateway',
+  'snapshots',
+);
+
+/** Default tarball roots covering the bench setup state. Override with --include. */
+const DEFAULT_SAVE_PATHS: readonly string[] = [
+  '/root/.bun',
+  '/root/.claudeme',
+  '/root/.cache/flashrank',
+  '/workspace/.venv-coir',
+  '/workspace/claudeme.json',
+];
+
+interface SnapshotSidecar {
+  name: string;
+  createdAt: string;
+  instanceId: string | undefined;
+  sshHost: string;
+  sshPort: number;
+  paths: string[];
+  excluded: string[];
+  sizeBytes: number;
+  sha256: string;
+  notes?: string;
+}
+
+function ensureSnapshotsDir(): void {
+  if (!existsSync(SNAPSHOTS_DIR)) {
+    mkdirSync(SNAPSHOTS_DIR, { recursive: true });
+  }
+}
+
+function snapshotTarPath(name: string): string {
+  return join(SNAPSHOTS_DIR, `${name}.tar.gz`);
+}
+
+function snapshotJsonPath(name: string): string {
+  return join(SNAPSHOTS_DIR, `${name}.json`);
+}
+
+/**
+ * gpu dev save <name> — Pull tar.gz of `paths` from the running instance.
+ *
+ *   ai-gateway gpu dev save bench-state
+ *   ai-gateway gpu dev save bench-state --include /workspace/foo --exclude '*.log'
+ *
+ * Streams `tar` stdout straight from SSH into the local file so memory
+ * stays bounded regardless of tarball size.
+ */
+async function cmdGpuDevSave(
+  name: string,
+  opts: { include?: string[]; exclude?: string[]; notes?: string },
+  target?: GpuTargetOpts,
+): Promise<void> {
+  if (!name || /[/\s]/.test(name)) {
+    console.error(`${c.red}Invalid snapshot name${c.reset}: "${name}". Use letters/digits/dash/underscore only.`);
+    process.exit(1);
+  }
+  const info = await resolveGpuInstance(target);
+  ensureSnapshotsDir();
+
+  const paths = opts.include && opts.include.length > 0 ? opts.include : [...DEFAULT_SAVE_PATHS];
+  const excludes = opts.exclude ?? [];
+
+  // Build the remote tar command. We GZIP on the remote because compression
+  // happens close to the source (less network bytes); we also strip leading
+  // slashes via the default tar behaviour so paths restore relative to /.
+  // `--ignore-failed-read` so missing default paths don't kill the whole
+  // archive — useful when the same `gpu dev save` template runs on hosts
+  // that didn't get every dep installed.
+  const tarArgs = [
+    '-czf', '-',
+    '--ignore-failed-read',
+    '--warning=no-file-changed',
+    ...excludes.flatMap(e => ['--exclude', e]),
+    ...paths,
+  ];
+  // Heredoc-style escape: paths must already not contain shell-meta chars.
+  // We validate include/exclude args at parse time.
+  const remoteCmd = `tar ${tarArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ')}`;
+
+  const tarPath = snapshotTarPath(name);
+  console.log(`${c.cyan}SAVE${c.reset} ${info.sshHost}:${paths.join(', ')} → ${tarPath}`);
+
+  const spin = spinner(`Streaming tar from ${info.sshHost}…`);
+  const out = createWriteStream(tarPath);
+  const sha = createHash('sha256');
+  let sizeBytes = 0;
+
+  const proc = spawn('ssh', [...sshArgs(info.sshHost, info.sshPort), remoteCmd], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  proc.stdout.on('data', (chunk: Buffer) => {
+    sizeBytes += chunk.length;
+    sha.update(chunk);
+    out.write(chunk);
+  });
+
+  let stderrBuf = '';
+  proc.stderr.on('data', (chunk: Buffer) => {
+    const s = chunk.toString();
+    stderrBuf += s;
+    // tar prints noisy "no such file" lines for missing default paths;
+    // surface only fatal-looking errors live.
+    if (/error|cannot|denied/i.test(s) && !/no such file or directory/i.test(s)) {
+      process.stderr.write(`${c.dim}[remote tar] ${s}${c.reset}`);
+    }
+  });
+
+  const exitCode = await new Promise<number>((resolveP) => {
+    proc.on('exit', code => resolveP(code ?? -1));
+    proc.on('error', () => resolveP(-1));
+  });
+  out.end();
+  await new Promise<void>(r => out.once('close', () => r()));
+  spin.stop();
+
+  if (exitCode !== 0 || sizeBytes === 0) {
+    console.error(`${c.red}Save failed${c.reset} (exit ${exitCode}, ${sizeBytes} bytes). stderr tail:\n${stderrBuf.slice(-500)}`);
+    try { unlinkSync(tarPath); } catch { /* best effort */ }
+    process.exit(1);
+  }
+
+  const sidecar: SnapshotSidecar = {
+    name,
+    createdAt: new Date().toISOString(),
+    instanceId: info.instanceId,
+    sshHost: info.sshHost,
+    sshPort: info.sshPort,
+    paths,
+    excluded: excludes,
+    sizeBytes,
+    sha256: sha.digest('hex'),
+    notes: opts.notes,
+  };
+  writeFileSync(snapshotJsonPath(name), JSON.stringify(sidecar, null, 2));
+
+  const human = sizeBytes >= 1e9 ? `${(sizeBytes / 1e9).toFixed(2)} GB`
+    : sizeBytes >= 1e6 ? `${(sizeBytes / 1e6).toFixed(1)} MB`
+    : `${(sizeBytes / 1e3).toFixed(1)} KB`;
+  console.log(`${c.green}✓${c.reset} Saved ${c.bold}${name}${c.reset} — ${human} (${sidecar.sha256.slice(0, 12)}…)`);
+}
+
+/**
+ * gpu dev restore <name> — Push a previously-saved tar.gz back into a
+ * running instance and untar it at /. Defaults to the latest target
+ * resolution; pass --instance to pick a specific new instance.
+ *
+ *   ai-gateway gpu dev restore bench-state --instance inst-12345
+ */
+async function cmdGpuDevRestore(
+  name: string,
+  target?: GpuTargetOpts,
+): Promise<void> {
+  const tarPath = snapshotTarPath(name);
+  const jsonPath = snapshotJsonPath(name);
+  if (!existsSync(tarPath)) {
+    console.error(`${c.red}Snapshot not found${c.reset}: ${tarPath}`);
+    console.error(`Run \`ai-gateway gpu dev save list\` to see available snapshots.`);
+    process.exit(1);
+  }
+  const info = await resolveGpuInstance(target);
+  let sidecar: SnapshotSidecar | null = null;
+  try { sidecar = JSON.parse(readFileSync(jsonPath, 'utf-8')) as SnapshotSidecar; } catch { /* non-fatal */ }
+
+  console.log(`${c.cyan}RESTORE${c.reset} ${tarPath} → ${info.sshHost}:${info.sshPort}`);
+  if (sidecar) {
+    const ageHours = (Date.now() - new Date(sidecar.createdAt).getTime()) / 3.6e6;
+    console.log(`${c.dim}snapshot age: ${ageHours.toFixed(1)}h, paths: ${sidecar.paths.join(', ')}${c.reset}`);
+  }
+
+  // Verify sha256 if sidecar present — catches local tar corruption before
+  // we waste minutes piping garbage over SSH.
+  if (sidecar) {
+    const spin = spinner('Verifying tarball checksum…');
+    const sha = createHash('sha256');
+    await new Promise<void>((resolveP, rejectP) => {
+      const rs = createReadStream(tarPath);
+      rs.on('data', chunk => sha.update(chunk));
+      rs.on('end', () => resolveP());
+      rs.on('error', rejectP);
+    });
+    spin.stop();
+    const got = sha.digest('hex');
+    if (got !== sidecar.sha256) {
+      console.error(`${c.red}sha256 mismatch${c.reset} — tarball may be corrupt. Expected ${sidecar.sha256.slice(0, 12)}…, got ${got.slice(0, 12)}…`);
+      process.exit(1);
+    }
+  }
+
+  const spin = spinner(`Streaming tar to ${info.sshHost}…`);
+  // `tar -xzf - -C /` extracts at root. Paths in the tar were saved as
+  // absolute (we did NOT pass --transform on save), so they restore to
+  // their original locations. -p preserves perms; --no-same-owner because
+  // the running container is root anyway and this avoids UID surprises.
+  const remoteCmd = `tar -xzf - -C / -p --no-same-owner`;
+  const proc = spawn('ssh', [...sshArgs(info.sshHost, info.sshPort), remoteCmd], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const inStream = createReadStream(tarPath);
+  inStream.pipe(proc.stdin);
+
+  let stderrBuf = '';
+  proc.stderr.on('data', chunk => { stderrBuf += chunk.toString(); });
+
+  const exitCode = await new Promise<number>((resolveP) => {
+    proc.on('exit', code => resolveP(code ?? -1));
+    proc.on('error', () => resolveP(-1));
+  });
+  spin.stop();
+
+  if (exitCode !== 0) {
+    console.error(`${c.red}Restore failed${c.reset} (exit ${exitCode}). stderr tail:\n${stderrBuf.slice(-500)}`);
+    process.exit(1);
+  }
+  console.log(`${c.green}✓${c.reset} Restored ${c.bold}${name}${c.reset} on ${info.sshHost}.`);
+}
+
+/** gpu dev save list — print local snapshots with size + age. */
+function cmdGpuDevSaveList(): void {
+  ensureSnapshotsDir();
+  const entries = readdirSync(SNAPSHOTS_DIR)
+    .filter(f => f.endsWith('.tar.gz'))
+    .map(f => f.slice(0, -'.tar.gz'.length))
+    .sort();
+  if (entries.length === 0) {
+    console.log(`${c.dim}No snapshots in ${SNAPSHOTS_DIR}.${c.reset}`);
+    return;
+  }
+  console.log(`${c.bold}${entries.length} snapshot(s) in ${SNAPSHOTS_DIR}:${c.reset}\n`);
+  for (const name of entries) {
+    const tarPath = snapshotTarPath(name);
+    const jsonPath = snapshotJsonPath(name);
+    let size = 0;
+    try { size = statSync(tarPath).size; } catch { /* skip */ }
+    let createdAt = '—';
+    let host = '—';
+    try {
+      const sc = JSON.parse(readFileSync(jsonPath, 'utf-8')) as SnapshotSidecar;
+      createdAt = sc.createdAt.replace('T', ' ').slice(0, 16);
+      host = sc.sshHost;
+    } catch { /* missing sidecar */ }
+    const human = size >= 1e9 ? `${(size / 1e9).toFixed(2)} GB`
+      : size >= 1e6 ? `${(size / 1e6).toFixed(1)} MB`
+      : `${(size / 1e3).toFixed(1)} KB`;
+    console.log(`  ${c.cyan}${name.padEnd(24)}${c.reset} ${human.padStart(10)}  ${createdAt}  ${c.dim}${host}${c.reset}`);
+  }
+}
+
+/** gpu dev save delete <name> — remove tar + sidecar. */
+function cmdGpuDevSaveDelete(name: string): void {
+  const tarPath = snapshotTarPath(name);
+  const jsonPath = snapshotJsonPath(name);
+  if (!existsSync(tarPath)) {
+    console.error(`${c.red}No such snapshot${c.reset}: ${name}`);
+    process.exit(1);
+  }
+  try { unlinkSync(tarPath); } catch { /* best effort */ }
+  try { unlinkSync(jsonPath); } catch { /* best effort */ }
+  console.log(`${c.green}✓${c.reset} Deleted ${name}`);
+}
+
 async function cmdGpuDev(args: string[]) {
   const sub = args[2];
   const target: GpuTargetOpts = {
@@ -1971,6 +2451,49 @@ async function cmdGpuDev(args: string[]) {
       await cmdGpuCommit(target, { message });
       break;
     }
+    case 'save': {
+      // gpu dev save <name> [--include p1,p2] [--exclude e1,e2] [--notes "..."]
+      // gpu dev save list
+      // gpu dev save delete <name>
+      const sub2 = args[3];
+      if (sub2 === 'list') { cmdGpuDevSaveList(); break; }
+      if (sub2 === 'delete' || sub2 === 'rm') {
+        const name = args[4];
+        if (!name) {
+          console.error('Usage: ai-gateway gpu dev save delete <name>');
+          process.exit(1);
+        }
+        cmdGpuDevSaveDelete(name);
+        break;
+      }
+      if (!sub2 || sub2.startsWith('-')) {
+        console.error('Usage: ai-gateway gpu dev save <name> [--include p1,p2] [--exclude e1,e2] [--notes "..."]');
+        process.exit(1);
+      }
+      const include = (getArg(args, '--include') ?? '').split(',').map(s => s.trim()).filter(Boolean);
+      const exclude = (getArg(args, '--exclude') ?? '').split(',').map(s => s.trim()).filter(Boolean);
+      const notes = getArg(args, '--notes');
+      // Reject obvious shell-meta in include/exclude — these go into a
+      // remote shell command and we don't want path injection.
+      for (const p of [...include, ...exclude]) {
+        if (/[`$;&|<>()\\\n]/.test(p)) {
+          console.error(`${c.red}Invalid path${c.reset}: "${p}" contains shell-meta characters.`);
+          process.exit(1);
+        }
+      }
+      await cmdGpuDevSave(sub2, { include, exclude, notes }, target);
+      break;
+    }
+    case 'restore': {
+      // gpu dev restore <name>
+      const name = args[3];
+      if (!name || name.startsWith('-')) {
+        console.error('Usage: ai-gateway gpu dev restore <name> [--instance <id>]');
+        process.exit(1);
+      }
+      await cmdGpuDevRestore(name, target);
+      break;
+    }
     case 'info':
       await cmdGpuDevInfo(target);
       break;
@@ -2002,7 +2525,7 @@ async function cmdGpuDev(args: string[]) {
       break;
     default:
       console.error(`Unknown 'gpu dev' subcommand: ${sub}`);
-      console.error(`Usage: ai-gateway gpu dev <start|sh|exec|push|pull|snapshot|info|serve|stop|status>`);
+      console.error(`Usage: ai-gateway gpu dev <start|sh|exec|push|pull|save|restore|snapshot|info|serve|stop|status>`);
       process.exit(1);
   }
 }
@@ -3402,7 +3925,26 @@ ai-gateway server — Manage the local dev server
         if (sub === 'help' || sub === '--help') { console.log(HELP.gpu); break; }
         switch (sub) {
           case 'status': await cmdGpuStatus(); break;
-          case 'list': await cmdGpuList(); break;
+          case 'list': await cmdGpuList({
+            // --probe (default true unless --no-probe). We pass undefined
+            // to keep the default; only set false if user opts out.
+            probe: args.includes('--no-probe') ? false : true,
+            json: args.includes('--json'),
+          }); break;
+          case 'doctor': await cmdGpuDoctor({
+            instance: getArg(args, '--instance'),
+            json: args.includes('--json'),
+          }); break;
+          case 'wait': {
+            const inst = getArg(args, '--instance');
+            if (!inst) { console.error('Usage: ai-gateway gpu wait --instance <id> [--timeout 300]'); process.exit(1); }
+            await cmdGpuWait({
+              instance: inst,
+              timeout: getArg(args, '--timeout') ? parseInt(getArg(args, '--timeout')!) : undefined,
+              intervalSec: getArg(args, '--interval') ? parseInt(getArg(args, '--interval')!) : undefined,
+            });
+            break;
+          }
           case 'offers': await cmdGpuOffers({
             gpu: getArg(args, '--gpu'),
             limit: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
