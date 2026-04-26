@@ -96,9 +96,24 @@ export function getLatencyTrend(): { trend: 'stable' | 'degrading' | 'improving'
     return { trend: 'stable', slopeMs: 0, samples: n };
   }
 
+  // Unwrap the ring buffer into chronological order (oldest first).
+  // When the ring is full, latencyRingIdx points to the oldest entry.
+  // When not full, the array is already in order and idx == 0.
+  let chronological: number[];
+  if (n < LATENCY_RING_SIZE) {
+    // Ring hasn't wrapped — array is already in order
+    chronological = latencyRing;
+  } else {
+    // Ring has wrapped: entries [idx..n-1] are oldest, [0..idx-1] are newest
+    chronological = [
+      ...latencyRing.slice(latencyRingIdx),
+      ...latencyRing.slice(0, latencyRingIdx),
+    ];
+  }
+
   const half = Math.floor(n / 2);
-  const firstHalf = latencyRing.slice(0, half);
-  const secondHalf = latencyRing.slice(half);
+  const firstHalf = chronological.slice(0, half);
+  const secondHalf = chronological.slice(half);
 
   const firstAvg = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
   const secondAvg = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
@@ -109,8 +124,8 @@ export function getLatencyTrend(): { trend: 'stable' | 'degrading' | 'improving'
   let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
   for (let i = 0; i < n; i++) {
     sumX += i;
-    sumY += latencyRing[i];
-    sumXY += i * latencyRing[i];
+    sumY += chronological[i];
+    sumXY += i * chronological[i];
     sumXX += i * i;
   }
   const slopeMs = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);

@@ -25,9 +25,9 @@ const log = createLogger('gpu-deploy');
 /**
  * Permanently terminate the active GPU instance across all providers.
  *
- * Stops monitoring, closes SSH tunnels, resets deploy state, and cleans up
- * provider resources (RunPod pods, Vast.ai instances, TensorDock instances,
- * Modal apps). Broadcasts the termination event and updates the deploy session.
+ * Stops monitoring, closes SSH tunnels, resets deploy state, and cleans up the
+ * tracked instance plus gateway-owned provider resources. Broadcasts the
+ * termination event and updates the deploy session.
  *
  * Unlike `autoStopGpu`, this destroys the instance permanently — data is lost
  * and a full cold boot is required to restart.
@@ -44,6 +44,10 @@ export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
   const hyperstackKey = deployHyperstackApiKey;
   const provider = activeProvider;
   const podId = deployState.podId;
+  // Capture deploy context BEFORE resetDeployState() clears it — error
+  // categorization and event emission need the original values.
+  const deployId = deployState.deployId;
+  const gpuType = deployState.gpuType;
   broadcastProviderStatus('offline', 'cloud', `GPU terminated (${reason})`);
   stopGpuMonitoring();
   // Close all SSH tunnels to prevent orphaned ssh processes
@@ -59,11 +63,11 @@ export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
       logGpuEvent('instance_stopped', 'modal', true, { metadata: { podId, reason } });
     } catch (err) {
       const deployErr = categorizeDeployError(err, {
-        deployId: deployState.deployId,
+        deployId,
         provider: 'modal',
-        gpuType: deployState.gpuType,
+        gpuType,
       });
-      errorSummary.record(deployErr, deployState.deployId);
+      errorSummary.record(deployErr, deployId);
       const remediation = await tryAutoRemediation(deployErr);
       if (remediation) {
         log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
@@ -80,11 +84,11 @@ export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
       logGpuEvent('instance_stopped', 'tensordock', true, { metadata: { podId, reason } });
     } catch (err) {
       const deployErr = categorizeDeployError(err, {
-        deployId: deployState.deployId,
+        deployId,
         provider: 'tensordock',
-        gpuType: deployState.gpuType,
+        gpuType,
       });
-      errorSummary.record(deployErr, deployState.deployId);
+      errorSummary.record(deployErr, deployId);
       const remediation = await tryAutoRemediation(deployErr);
       if (remediation) {
         log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
@@ -93,7 +97,7 @@ export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
       await cleanupTensordockInstances(tdKey, tdAuthId);
     }
   } else if (provider === 'vast' && vastKey) {
-    await cleanupVastInstances(vastKey);
+    await cleanupVastInstances(vastKey, podId ? [podId] : []);
     logGpuEvent('instance_stopped', 'vast', true, { metadata: { reason } });
   } else if (provider === 'hyperstack' && hyperstackKey) {
     if (podId) {
@@ -102,11 +106,11 @@ export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
         logGpuEvent('instance_stopped', 'hyperstack', true, { metadata: { podId, reason } });
       } catch (err) {
         const deployErr = categorizeDeployError(err, {
-          deployId: deployState.deployId,
+          deployId,
           provider: 'hyperstack',
-          gpuType: deployState.gpuType,
+          gpuType,
         });
-        errorSummary.record(deployErr, deployState.deployId);
+        errorSummary.record(deployErr, deployId);
         const remediation = await tryAutoRemediation(deployErr);
         if (remediation) {
           log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
@@ -122,6 +126,6 @@ export async function autoTerminateGpu(reason: DeleteReason = 'idle_timeout') {
     await cleanupAllPods(rpKey);
     logGpuEvent('instance_stopped', 'runpod', true, { metadata: { podId, reason } });
   }
-  emitGatewayEvent('gpu.terminated', { deployId: deployState.deployId, podId, provider, reason });
+  emitGatewayEvent('gpu.terminated', { deployId, podId, provider, reason });
   updateDeploySession({ status: 'stopped', stoppedAt: new Date() });
 }
