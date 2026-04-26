@@ -389,6 +389,9 @@ export class TierCircuitBreaker {
 
     const latencies = history.slice(-20).map(h => h.latencyMs);
     const mean = latencies.reduce((a, b) => a + b) / latencies.length;
+    // All-zero latencies have no variance to report — treat as fully stable
+    // rather than producing NaN via 0/0 division.
+    if (mean === 0) return 1.0;
     const variance = latencies.reduce((sum, lat) => sum + Math.pow(lat - mean, 2), 0) / latencies.length;
     const stdDev = Math.sqrt(variance);
 
@@ -409,9 +412,16 @@ export class TierCircuitBreaker {
     const firstHalfAvg = history.slice(0, halfPoint).reduce((sum, h) => sum + h.latencyMs, 0) / halfPoint;
     const secondHalfAvg = history.slice(halfPoint).reduce((sum, h) => sum + h.latencyMs, 0) / (history.length - halfPoint);
 
-    const changePercent = (secondHalfAvg - firstHalfAvg) / firstHalfAvg;
-
     const stability = this.calculateLatencyStability(history);
+
+    // When the first half is all zeros, percentage change is undefined.
+    // Treat absolute zero-baseline as 'stable' rather than NaN-comparing
+    // through to the 'increasing' branch.
+    if (firstHalfAvg === 0) {
+      return { trend: 'stable', stability };
+    }
+
+    const changePercent = (secondHalfAvg - firstHalfAvg) / firstHalfAvg;
 
     if (Math.abs(changePercent) < 0.1) {
       return { trend: 'stable', stability };
