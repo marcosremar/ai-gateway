@@ -1715,6 +1715,7 @@ interface GpuFinetuneOpts {
   epochs?: number;
   lr?: number;
   numGpus?: number;             // shards encoding across N GPUs (uses encode_multi_gpu.sh if available)
+  maxSamples?: number;          // cap on encode + train rows (honored unless smokeOnly forces 30)
   gpu?: string;
   maxCost?: number;
   maxSpend?: number;
@@ -2435,7 +2436,15 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
   const prepStage = opts.prepCmd
     ? `if [ ! -f /root/data_paths.jsonl ]; then ${opts.prepCmd}; else echo '[fine] prep cached'; fi && `
     : '';
-  const encodeMaxSamples = smokeOnly ? ' --max-samples 30' : '';
+  // Non-smoke: honor spec.maxSamples when user explicitly caps. Smoke: cap at 30
+  // (1500 sample full encode would defeat the smoke-test purpose); warn when
+  // the user's cap is bigger than the smoke ceiling.
+  const userMaxSamples = (opts as any).maxSamples;
+  if (smokeOnly && userMaxSamples && userMaxSamples > 30) {
+    console.warn(`${c.yellow}⚠ smoke mode caps maxSamples at 30 (your value=${userMaxSamples} reduced).${c.reset}`);
+  }
+  const effectiveMaxSamples = smokeOnly ? 30 : userMaxSamples;
+  const encodeMaxSamples = effectiveMaxSamples ? ` --max-samples ${effectiveMaxSamples}` : '';
   const encodeCmd = opts.encodeCmd || (
     opts.type === 'audio'
       ? (numGpus > 1
@@ -6860,6 +6869,7 @@ Per-app isolation:
                 epochs: getArg(args, '--epochs') ? parseInt(getArg(args, '--epochs')!) : spec.epochs,
                 lr: getArg(args, '--lr') ? parseFloat(getArg(args, '--lr')!) : spec.lr,
                 numGpus: getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : spec.numGpus,
+                maxSamples: getArg(args, '--max-samples') ? parseInt(getArg(args, '--max-samples')!) : spec.maxSamples,
                 gpu: getArg(args, '--gpu') || spec.gpu,
                 maxCost: getArg(args, '--max-cost') ? parseFloat(getArg(args, '--max-cost')!) : spec.maxCost,
                 maxSpend: getArg(args, '--max-spend') ? parseFloat(getArg(args, '--max-spend')!) : spec.maxSpend,
