@@ -6864,8 +6864,18 @@ Per-app isolation:
               if (isPreset) {
                 console.log(`[preset] using bundled trainer: ${specType}`);
               }
-              // #11 Validate spec before deploy
-              const specErrs = validateFinetuneSpec({ ...spec, script });
+              // #11 Validate spec before deploy. Merge CLI overrides (--type,
+              // --dataset, --hf-base, --gpu) into the validation payload so
+              // pure-CLI invocations (no yaml) don't trip "missing required".
+              const specForValidation = {
+                ...spec,
+                script,
+                type: getArg(args, '--type') || spec.type,
+                dataset: getArg(args, '--dataset') || spec.dataset,
+                hfBase: getArg(args, '--hf-base') || spec.hfBase,
+                gpu: getArg(args, '--gpu') || spec.gpu,
+              };
+              const specErrs = validateFinetuneSpec(specForValidation);
               if (specErrs.length > 0) {
                 console.error('✗ spec invalid:');
                 specErrs.forEach((e) => console.error(`  - ${e}`));
