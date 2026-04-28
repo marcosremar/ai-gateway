@@ -11,7 +11,7 @@ Trainer can then use this extended model: tokenizer recognizes [tag] as single
 token (not tokenized to chars), embedding starts in semantically-near zone.
 
 Usage:
-    python distill/extend_tokenizer.py \\
+    python extend_tokenizer.py \\
         --base /root/pocket_tts/languages/portuguese \\
         --output /root/pocket_tts_extended
 

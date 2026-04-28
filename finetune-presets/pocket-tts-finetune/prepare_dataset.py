@@ -7,7 +7,7 @@ Input rows:
      "tokens": "<sigh>",
      "instruction": "Include a sigh"}
 
-Output rows (matches finetune_pocket_tts.encode_dataset expectation):
+Output rows (matches trainer.encode_dataset expectation):
     {"audio": "/abs/path/to/X.wav",
      "text": "[sigh] Meu celular descarregou.",
      "tag_positions": [{"name": "sigh", "char_pos": 0}],
