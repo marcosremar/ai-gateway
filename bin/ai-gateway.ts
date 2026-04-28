@@ -1774,6 +1774,11 @@ function validateFinetuneSpec(spec: any): string[] {
   // Preset types skip script requirement
   const presetExists = spec.type && loadPreset(spec.type);
   if (!spec.script && !presetExists) errs.push('missing required: script (or use a built-in preset type)');
+  // Both `type: <preset>` and `script:` would silently make script a no-op
+  // (preset overrides scriptPath downstream). Reject so the user can pick one.
+  if (spec.script && presetExists) {
+    errs.push(`cannot set both 'type: ${spec.type}' (preset) AND 'script: ${spec.script}'. Pick one — preset bundles its own trainer.`);
+  }
   if (spec.type && !presetExists && !['text', 'audio', 'custom'].includes(spec.type)) {
     errs.push(`type must be text|audio|custom OR a preset name (got ${spec.type})`);
   }
