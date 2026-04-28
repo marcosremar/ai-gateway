@@ -1898,6 +1898,15 @@ function validateFinetuneSpec(spec: any): string[] {
   if (spec.logEverySteps !== undefined && (spec.logEverySteps < 1 || spec.logEverySteps > 10000)) {
     errs.push(`logEverySteps out of range (1-10000)`);
   }
+  if (spec.rewindThreshold !== undefined && (spec.rewindThreshold < 1.5 || spec.rewindThreshold > 100)) {
+    errs.push(`rewindThreshold out of range (1.5-100) — loss > N×recent_avg triggers rewind; <1.5 over-triggers`);
+  }
+  if (spec.plateauTolerance !== undefined && (spec.plateauTolerance < 0 || spec.plateauTolerance > 1)) {
+    errs.push(`plateauTolerance out of range (0-1) — relative drop fraction (default 0.01 = 1%)`);
+  }
+  if (spec.autoStopPlateau !== undefined && (spec.autoStopPlateau < 0 || spec.autoStopPlateau > 100000)) {
+    errs.push(`autoStopPlateau out of range (0-100000) — N steps without improvement to halt`);
+  }
   return errs;
 }
 
