@@ -176,7 +176,7 @@ describe.skipIf(!process.env.RUNPOD_API_KEY || process.env.SKIP_GPU_TESTS === '1
   }, 15_000);
 });
 
-describe.skipIf(!process.env.VAST_API_KEY)('Vast.ai — real API', () => {
+describe.skipIf(!process.env.VAST_API_KEY || process.env.SKIP_LIVE_TESTS === '1')('Vast.ai — real API', () => {
   let headers: Record<string, string>;
 
   beforeAll(() => {

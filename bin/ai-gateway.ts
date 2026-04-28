@@ -6881,10 +6881,17 @@ Per-app isolation:
                 specErrs.forEach((e) => console.error(`  - ${e}`));
                 process.exit(1);
               }
-              // #4 Show estimate before submit (unless dry-run already does)
+              // #4 Show estimate before submit (unless dry-run already does).
+              // Merge CLI overrides so the prediction reflects what'll actually run.
               if (!hasFlag(args, '--dry-run') && !hasFlag(args, '--no-estimate')) {
-                const est = estimateFinetuneCost({ type: spec.type || 'audio', scriptPath: script,
-                                                   epochs: spec.epochs, numGpus: spec.numGpus } as any);
+                const est = estimateFinetuneCost({
+                  type: getArg(args, '--type') || spec.type || 'audio', scriptPath: script,
+                  epochs: getArg(args, '--epochs') ? parseInt(getArg(args, '--epochs')!) : spec.epochs,
+                  numGpus: getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : spec.numGpus,
+                  maxSamples: getArg(args, '--max-samples') ? parseInt(getArg(args, '--max-samples')!) : spec.maxSamples,
+                  batchSize: getArg(args, '--batch-size') ? parseInt(getArg(args, '--batch-size')!) : spec.batchSize,
+                  gradAccum: getArg(args, '--grad-accum') ? parseInt(getArg(args, '--grad-accum')!) : spec.gradAccum,
+                } as any);
                 console.log(`${c.dim}[estimate] ~${est.totalMin.toFixed(0)}min, ~$${est.totalUsd.toFixed(2)}${c.reset}`);
               }
               // #5 Record run
