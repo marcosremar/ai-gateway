@@ -6894,8 +6894,20 @@ Per-app isolation:
                 } as any);
                 console.log(`${c.dim}[estimate] ~${est.totalMin.toFixed(0)}min, ~$${est.totalUsd.toFixed(2)}${c.reset}`);
               }
-              // #5 Record run
-              recordFinetuneRun({ ...spec, script }, { ts: new Date().toISOString() });
+              // #5 Record run — capture merged spec + CLI overrides so history
+              // entries reflect what was actually requested (not just yaml).
+              const mergedSpec = {
+                ...spec,
+                script,
+                type: specType,
+                dataset: getArg(args, '--dataset') || spec.dataset,
+                hfBase: getArg(args, '--hf-base') || spec.hfBase,
+                gpu: getArg(args, '--gpu') || spec.gpu,
+                epochs: getArg(args, '--epochs') ? parseInt(getArg(args, '--epochs')!) : spec.epochs,
+                lr: getArg(args, '--lr') ? parseFloat(getArg(args, '--lr')!) : spec.lr,
+                quality: getArg(args, '--quality') || spec.quality,
+              };
+              recordFinetuneRun(mergedSpec, { ts: new Date().toISOString() });
               await cmdGpuFinetune({
                 type: (specType || 'audio') as any,
                 localPath: getArg(args, '--local-path') || spec.localPath,
