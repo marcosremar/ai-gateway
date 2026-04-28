@@ -7210,7 +7210,7 @@ Per-app isolation:
                   preferSpot: hasFlag(args, '--prefer-spot'),
                   reuseInstance: hasFlag(args, '--reuse-instance'),
                   abortOnDivergence: hasFlag(args, '--abort-on-divergence'),
-                  gpuFallback: hasFlag(args, '--gpu-fallback'),
+                  gpuFallback: hasFlag(args, '--no-gpu-fallback') ? false : hasFlag(args, '--gpu-fallback'),
                 });
                 break;
               }
