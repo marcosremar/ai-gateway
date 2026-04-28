@@ -147,6 +147,10 @@ export function resetDeployState() {
   _setDeployModalApiKey('');
   _setDeployHyperstackApiKey('');
   _setActiveProvider('');
+  // Stop any in-flight canary eval timer to prevent leaks across deploys.
+  if (deployState.canaryEvalTimer) {
+    clearInterval(deployState.canaryEvalTimer);
+  }
   Object.assign(deployState, { status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '', startedAt: 0, retryCount: 0, provider: '', alert: '', alertLevel: 'info' as const, alertHistory: [], sshHost: '', sshPort: 0, lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], pullHistory: [], warmingStatus: { phase: 'idle' as const, startedAt: 0 }, deployId: '', gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0, templateHashId: '', canary: undefined, canaryEvalTimer: null });
   clearPersistedDeploy();
   resetTtsWarmth(); // new pod = cold TTS

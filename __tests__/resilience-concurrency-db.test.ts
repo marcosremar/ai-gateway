@@ -344,7 +344,9 @@ describe('Performance: Architecture supports low latency (#711-#724)', () => {
   });
 
   it('#723 latency ring O(1) insert', () => {
-    const src = read('server/metrics.ts');
+    // latencyRingIdx moved from server/metrics.ts to src/gateway/state/metrics-state.ts
+    // (state extracted out of monolithic state.ts during gateway refactor).
+    const src = read('src/gateway/state/metrics-state.ts');
     expect(src).toContain('latencyRing');
     expect(src).toContain('latencyRingIdx');
   });
@@ -362,14 +364,16 @@ describe('Performance: Architecture supports low latency (#711-#724)', () => {
 
 describe('Observability (#925-#930)', () => {
   const metrics = read('server/metrics.ts');
+  // Ring buffer state moved out of metrics.ts during gateway state refactor.
+  const metricsState = read('src/gateway/state/metrics-state.ts');
 
   it('#925 request count tracked', () => {
     expect(metrics).toContain('requestsTotal');
   });
 
   it('#926 latency tracked in ring buffer', () => {
-    expect(metrics).toContain('latencyRing');
-    expect(metrics).toContain('LATENCY_RING_SIZE');
+    expect(metricsState).toContain('latencyRing');
+    expect(metricsState).toContain('LATENCY_RING_SIZE');
   });
 
   it('#927 error count tracked', () => {

@@ -103,6 +103,12 @@ export default defineConfig({
       // cost-guardrails + gpu-deploy-core suites mock the providers and
       // expect sweepOrphanInstances() to actually run. Force it off here.
       AIGW_ORPHAN_SWEEP_DISABLED: '0',
+      // Many legacy gpu-handlers / gpu-deploy unit tests submit deploy
+      // requests without a `label` field. Production now requires it (see
+      // gpu-handlers `Deploy rejected: missing required label`). Bypass for
+      // tests so they exercise downstream branches; tests that specifically
+      // verify label requirement override AIGW_LABEL_OPTIONAL=0 inline.
+      AIGW_LABEL_OPTIONAL: process.env.AIGW_LABEL_OPTIONAL ?? '1',
     },
     server: {
       deps: {

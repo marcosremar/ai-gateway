@@ -276,6 +276,26 @@ describe('Vast.ai reliability improvements', () => {
 
   // ── P0a: Hedged deploy ────────────────────────────────────────────────────
   describe('P0a: Hedged deploy', () => {
+    it('labels created instances with the gateway prefix for safe cleanup', async () => {
+      const client = new VastClient();
+
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockResp({
+          offers: [{ id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 }],
+        }))
+        .mockResolvedValueOnce(mockText('not available', 400));
+
+      await expect(
+        client.createInstance({ gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest' }, { apiKey: 'k' }),
+      ).rejects.toThrow();
+
+      const createCall = fetchSpy.mock.calls.find(c => String(c[0]).includes('/asks/'));
+      expect(createCall).toBeDefined();
+      const body = JSON.parse(createCall![1].body);
+      expect(body.label).toMatch(/^parle-autoscale-\d+(-[a-z0-9]+)?$/);
+    });
+
     it('launches multiple offers in parallel when raceCount > 1', async () => {
       const client = new VastClient();
 

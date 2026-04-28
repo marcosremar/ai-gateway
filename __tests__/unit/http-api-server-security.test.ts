@@ -6,11 +6,22 @@ import {
 } from '../../server/ws/http-api-server';
 
 const ORIGINAL_GATEWAY_API_KEY = process.env.GATEWAY_API_KEY;
+const ORIGINAL_GATEWAY_API_KEYS = process.env.GATEWAY_API_KEYS;
 const ORIGINAL_CORS_ORIGINS = process.env.CORS_ORIGINS;
+
+import { beforeEach } from 'vitest';
+beforeEach(() => {
+  // Multi-key registry from .env leaks into tests; clear so legacy single-key
+  // path is exercised. Tests that need keys set them explicitly.
+  delete process.env.GATEWAY_API_KEYS;
+});
 
 afterEach(() => {
   if (ORIGINAL_GATEWAY_API_KEY === undefined) delete process.env.GATEWAY_API_KEY;
   else process.env.GATEWAY_API_KEY = ORIGINAL_GATEWAY_API_KEY;
+
+  if (ORIGINAL_GATEWAY_API_KEYS === undefined) delete process.env.GATEWAY_API_KEYS;
+  else process.env.GATEWAY_API_KEYS = ORIGINAL_GATEWAY_API_KEYS;
 
   if (ORIGINAL_CORS_ORIGINS === undefined) delete process.env.CORS_ORIGINS;
   else process.env.CORS_ORIGINS = ORIGINAL_CORS_ORIGINS;
@@ -41,14 +52,15 @@ describe('HTTP API server security helpers', () => {
 
     expect(authorizeHttpRequest('POST', '/v1/config/api-keys', 'Bearer super-secret-gateway-key', '203.0.113.7')).toEqual({
       ok: true,
+      userId: 'default',
     });
   });
 
   it('falls back to localhost-only access when no gateway key is configured', () => {
     delete process.env.GATEWAY_API_KEY;
 
-    expect(authorizeHttpRequest('GET', '/v1/gpu/status', null, '127.0.0.1')).toEqual({ ok: true });
-    expect(authorizeHttpRequest('GET', '/v1/gpu/status', null, '::1')).toEqual({ ok: true });
+    expect(authorizeHttpRequest('GET', '/v1/gpu/status', null, '127.0.0.1')).toEqual({ ok: true, userId: null });
+    expect(authorizeHttpRequest('GET', '/v1/gpu/status', null, '::1')).toEqual({ ok: true, userId: null });
     expect(authorizeHttpRequest('GET', '/v1/gpu/status', null, '198.51.100.22')).toEqual({
       ok: false,
       status: 401,

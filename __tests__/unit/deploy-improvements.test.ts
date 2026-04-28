@@ -4,7 +4,7 @@
  *  #10: Smart retry on deploy timeout — extend PHASE_TIMEOUTS once if progress
  *       signals fired recently (pull/boot/models).
  *  #11: Orphan reconnect on startup — tryReconnectOrphanDeploy scans all
- *       providers for running pods matching POD_NAME_PREFIX and adopts the
+ *       providers for running pods matching gateway-owned prefixes and adopts the
  *       first healthy one instead of letting orphan-sweep terminate it.
  *  #12: Real-time cost-idle alert — while the pod is still billing but has
  *       been idle past the threshold, emit a periodic alert with a "stop?"
@@ -90,11 +90,16 @@ describe('Deploy improvement #11 — orphan reconnect on startup', () => {
     expect(fnBody).toContain('modal.listInstances');
   });
 
-  it('filters candidates by POD_NAME_PREFIX for RunPod', () => {
+  it('filters reconnect candidates by gateway prefixes', () => {
+    // Auto-recovery uses POD_NAME_PREFIX directly (single prefix, simpler than
+    // sweep which uses prefixesForProvider() multi-prefix matching). Both paths
+    // ultimately verify "label-starts-with-gateway-prefix".
     const fnStart = src.indexOf('export async function tryReconnectOrphanDeploy');
     const fnBody = src.slice(fnStart, fnStart + 8000);
-    expect(fnBody).toContain('POD_NAME_PREFIX');
-    expect(fnBody).toContain('.startsWith(POD_NAME_PREFIX)');
+    expect(fnBody).toMatch(/POD_NAME_PREFIX|prefixesForProvider|labelMatchesGatewayPrefix/);
+    expect(fnBody).toContain('.startsWith(');
+    const orphanSrc = read('server/gpu-orphan-cleanup.ts');
+    expect(orphanSrc).toContain('export function prefixesForProvider');
   });
 
   it('probes /health before adopting a candidate', () => {
@@ -127,6 +132,8 @@ describe('Deploy improvement #11 — orphan reconnect on startup', () => {
   it('startup-tasks runs orphan reconnect after active deploy recovery fails', () => {
     const startup = read('server/ws/startup-tasks.ts');
     expect(startup).toContain('tryReconnectOrphanDeploy');
+    expect(startup).toContain('recoveredDeploy = await tryRecoverActiveDeploy()');
+    expect(startup).toContain('if (!recoveredDeploy)');
     // Order: tryRecoverActiveDeploy → if false → tryReconnectOrphanDeploy
     const recover = startup.indexOf('tryRecoverActiveDeploy');
     const reconnect = startup.indexOf('tryReconnectOrphanDeploy');

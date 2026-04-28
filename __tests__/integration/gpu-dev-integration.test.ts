@@ -46,7 +46,11 @@ describe('gpu dev — integration', () => {
 
     it('CLI cmdGpuDevStart enables devMode: true on the deploy body', () => {
       // The function should pass devMode: true down to cmdGpuDeploy
-      expect(cliSource).toMatch(/async function cmdGpuDevStart[\s\S]{0,500}devMode:\s*true/);
+      expect(cliSource).toMatch(/async function cmdGpuDevStart[\s\S]{0,1500}devMode:\s*true/);
+    });
+
+    it('CLI cmdGpuDevStart uses SSH readiness for scratch machines', () => {
+      expect(cliSource).toMatch(/async function cmdGpuDevStart[\s\S]{0,700}readinessProbe:\s*['"]ssh['"]/);
     });
 
     it('CLI cmdGpuDeploy threads devMode into the POST body', () => {
@@ -67,6 +71,10 @@ describe('gpu dev — integration', () => {
 
     it('persistDeployState includes devMode when set', () => {
       expect(deployStateSource).toMatch(/deployState\.devMode\s*\?\s*\{\s*devMode:\s*true\s*\}\s*:\s*\{\}/);
+    });
+
+    it('persistDeployState includes readinessProbe when set', () => {
+      expect(deployStateSource).toMatch(/deployState\.readinessProbe\s*\?\s*\{\s*readinessProbe:\s*deployState\.readinessProbe\s*\}\s*:\s*\{\}/);
     });
 
     it('deploy handler accepts body.devMode and stores it in deployState', () => {

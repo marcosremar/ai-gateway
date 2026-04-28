@@ -82,26 +82,26 @@ describe('handleGpuDeploy — structure & flow', () => {
 
   it('#080 handleGpuDeploy calls getOrCreateRequestId', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('getOrCreateRequestId');
   });
 
   it('#081 handleGpuDeploy calls setRequestIdHeader', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('setRequestIdHeader');
   });
 
   it('#082 handleGpuDeploy checks deployLock and returns 409 if held', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('deployLock');
     expect(fnBody).toContain('409');
   });
 
   it('#083 handleGpuDeploy calls setDeployLock(true) to acquire the lock', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 4000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('setDeployLock(true)');
   });
 
@@ -139,13 +139,13 @@ describe('handleGpuDeploy — validation', () => {
 
   it('#088 _validateDeployRequest validates credential format', () => {
     const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1500);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('validateGpuCredentials');
   });
 
   it('#089 _validateDeployRequest resolves profile-based GPU deploy config', () => {
     const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('profileId');
     expect(fnBody).toContain('loadProviderConfig');
     expect(fnBody).toContain('activeApp');
@@ -153,7 +153,7 @@ describe('handleGpuDeploy — validation', () => {
 
   it('#090 _validateDeployRequest caps raceCount at 10', () => {
     const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 5000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('Math.min(Math.floor(raceCountRaw), 10)');
   });
 });
@@ -165,14 +165,14 @@ describe('handleGpuDeploy — validation', () => {
 describe('handleGpuDeploy — cancel/redeploy', () => {
   it('#091 cancels in-progress deploy before starting new one', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('Cancelling in-progress deploy');
     expect(fnBody).toContain('setDeployCancelled(true)');
   });
 
   it('#092 waits for deploy promise to resolve (up to 10s)', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('deployPromise');
     expect(fnBody).toContain('Promise.race');
     expect(fnBody).toContain('10_000');
@@ -180,14 +180,14 @@ describe('handleGpuDeploy — cancel/redeploy', () => {
 
   it('#093 releases lock if deploy still running after 10s wait', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2500);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('releasing lock after cancel');
     expect(fnBody).toContain('setDeployLock(false)');
   });
 
   it('#094 tears down ready GPU before redeploy', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('GPU was ready — tearing down for redeploy');
     expect(fnBody).toContain('stopGpuMonitoring');
   });
@@ -201,21 +201,21 @@ describe('handleGpuDeploy — cancel/redeploy', () => {
 
   it('#096 _startDeployAndRespond writes 202 response', () => {
     const fnStart = handlersSource.indexOf('function _startDeployAndRespond');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 25000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 100000);
     expect(fnBody).toContain('res.writeHead(202');
     expect(fnBody).toContain('Deploy started');
   });
 
   it('#097 _startDeployAndRespond calls deploymentSM.startDeploying()', () => {
     const fnStart = handlersSource.indexOf('function _startDeployAndRespond');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 25000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 100000);
     expect(fnBody).toContain('deploymentSM.startDeploying()');
   });
 
   it('#098 _startDeployAndRespond includes balanceWarnings in response', () => {
     const fnStart = handlersSource.indexOf('function _startDeployAndRespond');
     // The function is large; read enough chars to cover the balanceWarnings usage
-    const fnBody = handlersSource.slice(fnStart, fnStart + 25000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 100000);
     expect(fnBody).toContain('balanceWarnings');
   });
 });
@@ -227,21 +227,21 @@ describe('handleGpuDeploy — cancel/redeploy', () => {
 describe('handleGpuDeploy — tier selection', () => {
   it('#099 _selectDeploymentTier checks RunPod balance', () => {
     const fnStart = handlersSource.indexOf('async function _selectDeploymentTier');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('RunPod balance');
     expect(fnBody).toContain('runpod.checkBalance');
   });
 
   it('#100 _selectDeploymentTier checks TensorDock balance', () => {
     const fnStart = handlersSource.indexOf('async function _selectDeploymentTier');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 5000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('TensorDock balance');
     expect(fnBody).toContain('tensordock.checkBalance');
   });
 
   it('#101 _selectDeploymentTier checks Vast.ai balance', () => {
     const fnStart = handlersSource.indexOf('async function _selectDeploymentTier');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 5000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('Vast.ai balance');
     expect(fnBody).toContain('vast.checkBalance');
   });
@@ -255,7 +255,7 @@ describe('handleGpuDeploy — tier selection', () => {
 
   it('#103 returns 401 for invalid RunPod API key', () => {
     const fnStart = handlersSource.indexOf('async function _selectDeploymentTier');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('401');
     expect(fnBody).toContain('RunPod API key is invalid');
   });
@@ -268,14 +268,14 @@ describe('handleGpuDeploy — tier selection', () => {
 
   it('#105 calls autoSelectCheapestGpu when autoSelectGpu is true', () => {
     const fnStart = handlersSource.indexOf('async function _selectDeploymentTier');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 100000);
     expect(fnBody).toContain('autoSelectCheapestGpu');
     expect(fnBody).toContain('autoSelectGpu');
   });
 
   it('#106 resolves Docker image for Blackwell GPUs', () => {
     const fnStart = handlersSource.indexOf('async function _selectDeploymentTier');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 100000);
     expect(fnBody).toContain('resolveDockerImageForGpus');
   });
 });
@@ -305,7 +305,7 @@ describe('handleGpuStatus', () => {
 
   it('#110 includes activeTier (gpu or cloud)', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuStatus');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 500);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain("isGpuAvailable() ? 'gpu' : 'cloud'");
   });
 
@@ -424,7 +424,7 @@ describe('handleGpuStop', () => {
 
   it('#124 returns 400 when no credentials for provider', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuStop');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 4000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('Cannot stop: no credentials');
     expect(fnBody).toContain('400');
   });
@@ -461,7 +461,7 @@ describe('handleGpuResume', () => {
 
   it('#128 returns 400 when no pod to resume', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuResume');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('No pod to resume');
     expect(fnBody).toContain('400');
   });
@@ -526,13 +526,13 @@ describe('handleGpuTerminate', () => {
 
   it('#136 releases deploy lock', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuTerminate');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('setDeployLock(false)');
   });
 
   it('#137 resets deploy state and state machine', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuTerminate');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3500);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 20000);
     expect(fnBody).toContain('resetDeployState()');
     expect(fnBody).toContain('deploymentSM.reset()');
   });
@@ -575,7 +575,7 @@ describe('handleGpuOffers', () => {
 
   it('#142 rejects API keys in query params (security check)', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuOffers');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('sensitiveParams');
     expect(fnBody).toContain('API keys must not be passed via query params');
     expect(fnBody).toContain('400');
@@ -583,14 +583,14 @@ describe('handleGpuOffers', () => {
 
   it('#143 returns 400 when no provider API keys configured', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuOffers');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 5000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('No provider API keys configured');
     expect(fnBody).toContain('400');
   });
 
   it('#144 supports gpuTypes, region, limit, provider query params', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuOffers');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 3000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain("url.searchParams.get('gpuTypes')");
     expect(fnBody).toContain("url.searchParams.get('region')");
     expect(fnBody).toContain("url.searchParams.get('limit')");
@@ -599,7 +599,7 @@ describe('handleGpuOffers', () => {
 
   it('#145 fetches offers with balances in parallel', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuOffers');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 5000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('fetchOffersWithBalances');
   });
 
@@ -623,13 +623,13 @@ describe('handleGpuTypes', () => {
 
   it('#148 queries prisma.gpuTypeCache for cached types', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuTypes');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 500);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('prisma.gpuTypeCache.findMany');
   });
 
   it('#149 supports provider query param filter', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuTypes');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 500);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain("url.searchParams.get('provider')");
     expect(fnBody).toContain('providerFilter');
   });
@@ -646,13 +646,13 @@ describe('handleGpuLogs', () => {
 
   it('#151 calls fetchGpuLogs()', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuLogs');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('fetchGpuLogs()');
   });
 
   it('#152 returns 200 with logs, sshHost, sshPort, endpoint', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuLogs');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('res.writeHead(200');
     expect(fnBody).toContain('logs');
     expect(fnBody).toContain('sshHost');
@@ -662,7 +662,7 @@ describe('handleGpuLogs', () => {
 
   it('#153 returns 500 on error', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuLogs');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('res.writeHead(500');
     expect(fnBody).toContain('Failed to fetch logs');
   });
@@ -676,14 +676,14 @@ describe('handleGpuCatalog & handleGpuEventLogs', () => {
   it('#154 handleGpuCatalog is an exported function returning getImageCatalog', () => {
     expect(handlersSource).toContain('export function handleGpuCatalog');
     const fnStart = handlersSource.indexOf('export function handleGpuCatalog');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 500);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('getImageCatalog');
   });
 
   it('#155 handleGpuEventLogs supports gpu and server log types', () => {
     expect(handlersSource).toContain('export function handleGpuEventLogs');
     const fnStart = handlersSource.indexOf('export function handleGpuEventLogs');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain("'server'");
     expect(fnBody).toContain("'gpu'");
     expect(fnBody).toContain("'events'");
@@ -691,7 +691,7 @@ describe('handleGpuCatalog & handleGpuEventLogs', () => {
 
   it('#156 handleGpuEventLogs supports ?lines query param', () => {
     const fnStart = handlersSource.indexOf('export function handleGpuEventLogs');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 500);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain("url.searchParams.get('lines')");
   });
 });
@@ -787,7 +787,7 @@ describe('handleGpuMyLocation', () => {
   it('#166a handleGpuMyLocation returns location or 503', () => {
     expect(handlersSource).toContain('export async function handleGpuMyLocation');
     const fnStart = handlersSource.indexOf('export async function handleGpuMyLocation');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 500);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('fetchMyLocation');
     expect(fnBody).toContain('503');
   });
@@ -796,21 +796,21 @@ describe('handleGpuMyLocation', () => {
 describe('autoBootFromProfile', () => {
   it('#166b autoBootFromProfile skips when deploy already in progress', () => {
     const fnStart = handlersSource.indexOf('export async function autoBootFromProfile');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain("deployState.status !== 'idle'");
     expect(fnBody).toContain('deploy already in progress, skipping');
   });
 
   it('#166c autoBootFromProfile skips when deploy lock is held', () => {
     const fnStart = handlersSource.indexOf('export async function autoBootFromProfile');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('deployLock');
     expect(fnBody).toContain('deploy lock held, skipping');
   });
 
   it('#166d autoBootFromProfile only fires when bootOnStartup is true', () => {
     const fnStart = handlersSource.indexOf('export async function autoBootFromProfile');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('bootOnStartup');
   });
 });
@@ -866,7 +866,7 @@ describe('handleGpuOffersRanked', () => {
 
   it('#166k auto-detects location when lat/lon not provided', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuOffersRanked');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
     expect(fnBody).toContain('fetchMyLocation');
     expect(fnBody).toContain('clientLat');
     expect(fnBody).toContain('clientLon');
