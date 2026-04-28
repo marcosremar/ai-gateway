@@ -8,6 +8,11 @@
 type: pocket-tts-finetune          # built-in preset, no script: needed
 aigwVersion: 1.0.0                 # pin trainer version for reproducibility
 
+# prepare: auto                    # default: ai-gateway runs preset's prepare_dataset.py
+                                   #          on /root/data/metadata.jsonl (or train.jsonl)
+# prepare: skip                    # already pre-encoded; ai-gateway runs encode directly
+# prepare: <custom-shell-command>  # full override
+
 # Data + model
 dataset: hf://marcosremar2/gemini-dataset-erinome
 dataset-include: wav/*             # skip text/, only need wav files
