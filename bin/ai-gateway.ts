@@ -5745,6 +5745,30 @@ Round 6 (3-repo HF organization):
                              - download <name>-code    → /workspace
                              - download <name>         → use as --resume
 
+Round 8 (quality automation + GPU fallback + Tier 2 power knobs):
+  --quality auto|safe|fast Smart defaults derived from epochs/cadence/preset.
+                             auto (default): torch.compile + plateau-stop (epochs ≥ 2)
+                             safe: no auto-stop, no compile (debug)
+                             fast: + pitch/speed augment (small dataset boost)
+  --auto-stop-plateau N    Stop if loss doesn't improve for N steps (0 = off; auto sets N = saveEverySteps × 5)
+  --torch-compile / --no-torch-compile  Force torch.compile flow_net on/off
+  --augment-pitch          Pitch-shift ±2 semitones randomly (doubles encode dataset)
+  --augment-speed          Speed-perturb 0.9-1.1× randomly (doubles encode dataset)
+  --gpu-fallback / --no-gpu-fallback  Walk cheaper-GPU ladder (4090→3090→A5000→4080)
+                             when primary unavailable @ --max-cost. Default ON for finetune.
+  --image <ref>            Override docker image (default: marcosremar/gpu-dev:latest;
+                             use ghcr.io/<user>/aigw-finetune-base:latest for ~3-4 min faster boot)
+
+Round 8 — Tier 2 advanced (quality:auto handles 80% — leave unset unless tuning):
+  --batch-size N           Per-step micro batch size (default 2)
+  --grad-accum N           Gradient accumulation steps (effective batch = batch × accum)
+  --weight-decay X         AdamW weight decay (default 0.01)
+  --warmup-steps N         LR warmup before cosine decay (default 200)
+  --freeze-backbone-layers N  Freeze first N transformer blocks (default 4; 0 = train all)
+  --only-flow-net          MoshiVis-style: train ONLY flow_net + out_eos (LoRA-like surface)
+  --curriculum linear      Sort training rows short→long instead of random shuffle
+  --save-every-steps N     Checkpoint cadence (default 100; 5 in smoke)
+
 Submit forms:
   ai-gateway gpu finetune submit                  # auto-loads ./train.yaml
   ai-gateway gpu finetune submit -f train.yaml
