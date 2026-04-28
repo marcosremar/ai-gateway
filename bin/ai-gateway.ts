@@ -1839,6 +1839,22 @@ function validateFinetuneSpec(spec: any): string[] {
       }
     }
   }
+  // Auto-prep needs metadata.jsonl in /root/data — warn if dataset-include
+  // would exclude it. (User can override with prepare:skip or custom prepare.)
+  const dsInc = spec['dataset-include'] || spec.datasetInclude;
+  const prepareDirective = spec.prepare ?? 'auto';
+  if (dsInc && presetExists && prepareDirective === 'auto') {
+    const globs = String(dsInc).split(',').map(g => g.trim());
+    const hasMeta = globs.some(g =>
+      g === 'metadata.jsonl' || g === 'train.jsonl' || g === '*.jsonl' ||
+      g === '**/*.jsonl' || g.endsWith('/*') === false && g.endsWith('jsonl'));
+    if (!hasMeta) {
+      errs.push(
+        `dataset-include='${dsInc}' may exclude metadata.jsonl/train.jsonl that ` +
+        `auto-prep needs. Add 'metadata.jsonl' (or set prepare:skip / custom prepare).`
+      );
+    }
+  }
   if (spec.epochs !== undefined && (spec.epochs <= 0 || spec.epochs > 100)) {
     errs.push(`epochs out of range (1-100)`);
   }
