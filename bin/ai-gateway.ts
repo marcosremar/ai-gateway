@@ -6701,8 +6701,10 @@ Per-app isolation:
                 quality: (getArg(args, '--quality') as any) || spec.quality,
                 autoStopPlateau: getArg(args, '--auto-stop-plateau') ? parseInt(getArg(args, '--auto-stop-plateau')!) : spec.autoStopPlateau,
                 torchCompile: hasFlag(args, '--torch-compile') ? true : (hasFlag(args, '--no-torch-compile') ? false : spec.torchCompile),
-                augmentPitch: hasFlag(args, '--augment-pitch') || spec.augmentPitch === true,
-                augmentSpeed: hasFlag(args, '--augment-speed') || spec.augmentSpeed === true,
+                // Leave undefined when neither flag nor spec set it, so quality:fast
+                // can default it to true. `false || false` → false would stop the fallback.
+                augmentPitch: hasFlag(args, '--augment-pitch') ? true : spec.augmentPitch,
+                augmentSpeed: hasFlag(args, '--augment-speed') ? true : spec.augmentSpeed,
                 saveEverySteps: getArg(args, '--save-every-steps') ? parseInt(getArg(args, '--save-every-steps')!) : spec.saveEverySteps,
                 image: getArg(args, '--image') || spec.image,
                 batchSize: getArg(args, '--batch-size') ? parseInt(getArg(args, '--batch-size')!) : spec.batchSize,
