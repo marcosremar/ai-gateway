@@ -1798,6 +1798,18 @@ function validateFinetuneSpec(spec: any): string[] {
   if (spec.quality !== undefined && !['auto', 'safe', 'fast'].includes(spec.quality)) {
     errs.push(`quality must be auto|safe|fast (got ${spec.quality})`);
   }
+  if (spec.curriculum !== undefined && spec.curriculum !== '' && spec.curriculum !== 'linear') {
+    errs.push(`curriculum must be '' (random) or 'linear' (got ${spec.curriculum})`);
+  }
+  if (spec.batchSize !== undefined && (spec.batchSize <= 0 || spec.batchSize > 64)) {
+    errs.push(`batchSize out of range (1-64)`);
+  }
+  if (spec.gradAccum !== undefined && (spec.gradAccum <= 0 || spec.gradAccum > 256)) {
+    errs.push(`gradAccum out of range (1-256)`);
+  }
+  if (spec.freezeBackboneLayers !== undefined && (spec.freezeBackboneLayers < 0 || spec.freezeBackboneLayers > 64)) {
+    errs.push(`freezeBackboneLayers out of range (0-64)`);
+  }
   return errs;
 }
 
