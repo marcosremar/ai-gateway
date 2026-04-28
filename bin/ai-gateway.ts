@@ -2187,6 +2187,28 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
     if (!opts.maxSpend && preset.manifest.defaultMaxSpend) opts.maxSpend = preset.manifest.defaultMaxSpend;
     // Force type to 'audio' for downstream apt/pip selection
     if (preset.manifest.type) opts.type = preset.manifest.type as any;
+    // Auto-prep: if preset declares a prepareScript and user didn't supply
+    // their own prepCmd, run the bundled preprocessor over /root/data into
+    // /root/data_paths.jsonl. Detects a metadata.jsonl at the dataset root —
+    // if missing, skip (user must supply prepCmd explicitly).
+    // Suppress with `prepare: skip` in spec.yaml; override with `prepare: <cmd>`.
+    const prepareDirective = (opts as any).prepare ?? 'auto';
+    if (!opts.prepCmd && prepareDirective !== 'skip' && preset.manifest.prepareScript) {
+      const prepBin = require('path').join(preset.dir, preset.manifest.prepareScript);
+      const prepScriptName = require('path').basename(preset.manifest.prepareScript);
+      // Run only when input file exists on the GPU (avoids spurious failure if
+      // the dataset is already pre-encoded). The shell test runs at job time.
+      opts.prepCmd =
+        `if [ -f /root/data/metadata.jsonl ]; then ` +
+        `python ${prepScriptName} --input /root/data/metadata.jsonl ` +
+        `--output /root/data_paths.jsonl --wav-root /root/data; ` +
+        `elif [ -f /root/data/train.jsonl ]; then ` +
+        `python ${prepScriptName} --input /root/data/train.jsonl ` +
+        `--output /root/data_paths.jsonl --wav-root /root/data; ` +
+        `else cp /root/data/data_paths.jsonl /root/data_paths.jsonl 2>/dev/null || ` +
+        `(echo '[prep] no metadata.jsonl/train.jsonl/data_paths.jsonl in /root/data — set spec.prepCmd' && exit 1); fi`;
+      console.log(`[preset] auto-prep wired (${prepScriptName}); set prepare:skip in yaml to disable`);
+    }
   }
   if (opts.dataset && !opts.dataset.startsWith('hf://')) {
     console.error(`--dataset must use hf://<repo-id> form`); process.exit(1);
@@ -6756,6 +6778,7 @@ Per-app isolation:
                 onlyFlowNet: hasFlag(args, '--only-flow-net') || spec.onlyFlowNet === true,
                 curriculum: (getArg(args, '--curriculum') as any) || spec.curriculum,
                 gpuFallback: hasFlag(args, '--no-gpu-fallback') ? false : (hasFlag(args, '--gpu-fallback') || spec.gpuFallback !== false),
+                prepare: spec.prepare,  // auto (default) | skip | <custom command>
               } as any);
             } else if (sub === 'status') {
               if (hasFlag(args, '--raw')) await cmdGpuJobsStatus();
