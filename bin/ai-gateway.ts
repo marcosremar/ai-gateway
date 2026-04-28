@@ -7019,10 +7019,20 @@ Per-app isolation:
               if (all.length === 0) console.log('✓ spec valid');
               else { console.error('✗ spec errors:'); all.forEach((e) => console.error(`  - ${e}`)); process.exit(1); }
             } else if (sub === 'lr-find') {
-              await cmdGpuFinetuneLrFind({ ...spec } as GpuFinetuneOpts);
+              await cmdGpuFinetuneLrFind({
+                ...spec,
+                type: getArg(args, '--type') || spec.type,
+                dataset: getArg(args, '--dataset') || spec.dataset,
+                hfBase: getArg(args, '--hf-base') || spec.hfBase,
+                gpu: getArg(args, '--gpu') || spec.gpu,
+              } as GpuFinetuneOpts);
             } else if (sub === 'sweep') {
               await cmdGpuFinetuneSweep({
                 ...spec,
+                type: getArg(args, '--type') || spec.type,
+                dataset: getArg(args, '--dataset') || spec.dataset,
+                hfBase: getArg(args, '--hf-base') || spec.hfBase,
+                gpu: getArg(args, '--gpu') || spec.gpu,
                 trials: getArg(args, '--trials') ? parseInt(getArg(args, '--trials')!) : 4,
               } as any);
             } else if (sub === 'deploy') {
