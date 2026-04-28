@@ -2321,6 +2321,20 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
     );
     process.exit(1);
   }
+  // Numeric sanity — same shape as gpu jobs run guard.
+  const finetuneNumChecks: Array<[string, number | undefined, number, number]> = [
+    ['--max-cost / maxCost', opts.maxCost, 0.01, 50],
+    ['--max-spend / maxSpend', opts.maxSpend, 0.01, 100],
+    ['--epochs / epochs', opts.epochs, 1, 100],
+    ['--lr / lr', opts.lr, 1e-9, 1],
+    ['--num-gpus / numGpus', opts.numGpus, 1, 8],
+  ];
+  for (const [name, val, lo, hi] of finetuneNumChecks) {
+    if (val !== undefined && (typeof val !== 'number' || !Number.isFinite(val) || val < lo || val > hi)) {
+      console.error(`gpu finetune: invalid ${name}=${val} (expected ${lo}..${hi})`);
+      process.exit(1);
+    }
+  }
   if (preset) {
     console.log(`[preset] ${opts.type} v${preset.manifest.version} — bundled trainer (no user script needed)`);
     if (!opts.scriptPath) {
