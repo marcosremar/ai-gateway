@@ -1802,14 +1802,24 @@ function validateFinetuneSpec(spec: any): string[] {
 }
 
 // #4 Cost estimator — predict total $ before submitting
-function estimateFinetuneCost(opts: GpuFinetuneOpts, sampleCount = 7449, gpuPrice = 0.30): {
+function estimateFinetuneCost(opts: GpuFinetuneOpts & { maxSamples?: number }, sampleCount = 7449, gpuPrice = 0.30): {
   encodeMin: number; trainMin: number; setupMin: number; totalMin: number; totalUsd: number;
 } {
+  // Honor spec.maxSamples cap (encode + train operate on the smaller set).
+  const effectiveSamples = (opts as any).maxSamples
+    ? Math.min(Number((opts as any).maxSamples), sampleCount)
+    : sampleCount;
   const encRate = (opts.numGpus || 1) * 25;          // ~25 samples/s threaded per GPU
-  const encodeMin = sampleCount / encRate / 60;
-  const stepsPerEpoch = sampleCount / 32;            // grad_accum × micro_batch
+  const encodeMin = effectiveSamples / encRate / 60;
+  // Effective batch = batchSize × gradAccum (defaults: 2 × 16 = 32).
+  const effectiveBatch = ((opts as any).batchSize ?? 2) * ((opts as any).gradAccum ?? 16);
+  const stepsPerEpoch = effectiveSamples / effectiveBatch;
   const totalSteps = (opts.epochs ?? 4) * stepsPerEpoch;
-  const trainMin = totalSteps / 200 / 60;            // ~200 steps/s on 4090
+  // ~3 steps/sec on 4090 for a 100M flow-matching model (pocket-tts class).
+  // Smaller models hit 5-8/s; larger 1B+ falls to ~0.5/s. Tune via opts.stepsPerSec
+  // if a preset advertises one.
+  const stepsPerSec = (opts as any).stepsPerSec ?? 3;
+  const trainMin = totalSteps / stepsPerSec / 60;
   const setupMin = 8;                                // apt + pip + HF download
   const totalMin = encodeMin + trainMin + setupMin;
   const totalUsd = (totalMin / 60) * gpuPrice;
@@ -6755,7 +6765,9 @@ Per-app isolation:
               const est = estimateFinetuneCost({
                 type: spec.type || 'audio', scriptPath: spec.script,
                 epochs: spec.epochs, numGpus: spec.numGpus,
-              } as GpuFinetuneOpts);
+                maxSamples: spec.maxSamples,
+                batchSize: spec.batchSize, gradAccum: spec.gradAccum,
+              } as any);
               console.log(`[estimate] encode: ${est.encodeMin.toFixed(1)}min, train: ${est.trainMin.toFixed(1)}min, setup: ${est.setupMin}min`);
               console.log(`[estimate] total: ${est.totalMin.toFixed(0)}min  ≈  $${est.totalUsd.toFixed(2)}`);
             } else if (sub === 'validate') {
