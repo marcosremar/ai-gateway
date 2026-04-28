@@ -2485,6 +2485,13 @@ print('  code repo updated')
     `export ${opts.noHfTransfer ? '' : 'HF_HUB_ENABLE_HF_TRANSFER=1 '}DEBIAN_FRONTEND=noninteractive`,
     'cd /workspace',
     `apt-get update -qq && apt-get install -y -qq ${apt}`,
+    // Preset may pin torch to a CUDA-matched wheel BEFORE the generic pip step,
+    // so subsequent `torch torchaudio` in extraDeps act as a no-op (already
+    // satisfied at the pinned version). Skipping this means pip pulls latest
+    // torch, which often mismatches the host CUDA driver and fails imports.
+    ...(plugin?.torchVersion || (preset?.manifest?.torchVersion && preset?.manifest?.torchCudaIndex)
+      ? [`pip install --quiet ${preset?.manifest?.torchVersion ? `torch==${preset.manifest.torchVersion} torchaudio==${preset.manifest.torchVersion}` : 'torch torchaudio'}${preset?.manifest?.torchCudaIndex ? ` --index-url ${preset.manifest.torchCudaIndex}` : ''}`]
+      : []),
     `pip install --quiet --prefer-binary ${pip}`,
     `${datasetDl}${modelDl}true`,
     'mkdir -p /workspace/checkpoints',
