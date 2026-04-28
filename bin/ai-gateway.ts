@@ -2336,6 +2336,9 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
                  `Pipeline bugs will only surface during the full run — could waste GPU $$. ` +
                  `Recommend keeping smoke ON unless debugging a specific pipeline issue.`);
   }
+  if (smokeOnly && opts.epochs && opts.epochs !== 3) {
+    console.warn(`${c.yellow}⚠ smoke mode forces epochs=3 (your epochs=${opts.epochs} ignored).${c.reset}`);
+  }
   const epochs = smokeOnly ? 3 : (opts.epochs ?? 4);
   const lr = opts.lr ?? 5e-5;
 
