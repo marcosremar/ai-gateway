@@ -11,7 +11,7 @@ await loadEnv();
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
 // Check actual API availability (catches 429 rate limits, not just key presence)
-const hasKeys = OPENAI_KEY ? await checkOpenAIAvailable(OPENAI_KEY) : false;
+const hasKeys = OPENAI_KEY && process.env.SKIP_LIVE_TESTS !== "1" ? await checkOpenAIAvailable(OPENAI_KEY) : false;
 if (!hasKeys && OPENAI_KEY) {
   console.log('[sdk-pipeline] OpenAI unavailable (rate-limited or invalid) — tests will be skipped');
 }

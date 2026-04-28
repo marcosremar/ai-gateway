@@ -292,7 +292,7 @@ const hasDeepgram = !!process.env.DEEPGRAM_API_KEY;
 const hasOpenRouter = !!process.env.OPENROUTER_API_KEY;
 
 // Check actual OpenAI API availability (catches 429 rate limits, not just key presence)
-const openAIAvailable = hasOpenAI
+const openAIAvailable = hasOpenAI && process.env.SKIP_LIVE_TESTS !== '1'
   ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY!)
   : false;
 if (hasOpenAI && !openAIAvailable) {
