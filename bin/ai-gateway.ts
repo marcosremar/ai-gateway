@@ -1827,6 +1827,18 @@ function validateFinetuneSpec(spec: any): string[] {
   if (spec.ckptAverage !== undefined && (spec.ckptAverage < 2 || spec.ckptAverage > 50)) {
     errs.push(`ckptAverage out of range (2-50) — number of trailing ckpts to Polyak-average`);
   }
+  if (spec.multiDataset !== undefined) {
+    if (!Array.isArray(spec.multiDataset)) {
+      errs.push(`multiDataset must be an array of {path, weight} (use JSON inline)`);
+    } else {
+      for (const [i, d] of spec.multiDataset.entries()) {
+        if (!d || typeof d.path !== 'string' || typeof d.weight !== 'number' || d.weight <= 0) {
+          errs.push(`multiDataset[${i}] must be {path: string, weight: number > 0}`);
+          break;
+        }
+      }
+    }
+  }
   if (spec.epochs !== undefined && (spec.epochs <= 0 || spec.epochs > 100)) {
     errs.push(`epochs out of range (1-100)`);
   }
@@ -2380,6 +2392,12 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
   if (opts.freezeBackboneLayers !== undefined) autoTrainArgs.push(`--freeze-backbone-layers ${opts.freezeBackboneLayers}`);
   if (opts.onlyFlowNet) autoTrainArgs.push('--only-flow-net');
   if (opts.curriculum) autoTrainArgs.push(`--curriculum ${opts.curriculum}`);
+  // multiDataset: trainer expects comma-separated `path:weight` pairs.
+  if (Array.isArray((opts as any).multiDataset) && (opts as any).multiDataset.length) {
+    const pairs = ((opts as any).multiDataset as Array<{ path: string; weight: number }>)
+      .map(d => `${d.path}:${d.weight}`).join(',');
+    autoTrainArgs.push(`--multi-dataset ${pairs}`);
+  }
   const autoTrainFlags = autoTrainArgs.length ? ' ' + autoTrainArgs.join(' ') : '';
   const autoEncodeFlags = autoEncodeArgs.length ? ' ' + autoEncodeArgs.join(' ') : '';
   const numGpus = opts.numGpus ?? 1;
@@ -6921,6 +6939,7 @@ Per-app isolation:
                 gpuFallback: hasFlag(args, '--no-gpu-fallback') ? false : (hasFlag(args, '--gpu-fallback') || spec.gpuFallback !== false),
                 prepare: spec.prepare,  // auto (default) | skip | <custom command>
                 aigwVersion: spec.aigwVersion,  // pin check vs. bundled preset.manifest.version
+                multiDataset: spec.multiDataset,  // weighted multi-dataset → trainer --multi-dataset
               } as any);
             } else if (sub === 'status') {
               if (hasFlag(args, '--raw')) await cmdGpuJobsStatus();
