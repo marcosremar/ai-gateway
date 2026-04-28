@@ -2253,6 +2253,12 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
     if (!opts.maxSpend && preset.manifest.defaultMaxSpend) opts.maxSpend = preset.manifest.defaultMaxSpend;
     // Force type to 'audio' for downstream apt/pip selection
     if (preset.manifest.type) opts.type = preset.manifest.type as any;
+    // Pin check — warn if user requested a different preset version than
+    // what's bundled. Doesn't refuse (forward-compat presets), just informs.
+    const userVersion = (opts as any).aigwVersion;
+    if (userVersion && preset.manifest.version && userVersion !== preset.manifest.version) {
+      console.warn(`[preset] aigwVersion mismatch: spec asked for v${userVersion}, bundle has v${preset.manifest.version} (using bundled)`);
+    }
     // Auto-prep: if preset declares a prepareScript and user didn't supply
     // their own prepCmd, run the bundled preprocessor over /root/data into
     // /root/data_paths.jsonl. Detects a metadata.jsonl at the dataset root —
@@ -6867,6 +6873,7 @@ Per-app isolation:
                 curriculum: (getArg(args, '--curriculum') as any) || spec.curriculum,
                 gpuFallback: hasFlag(args, '--no-gpu-fallback') ? false : (hasFlag(args, '--gpu-fallback') || spec.gpuFallback !== false),
                 prepare: spec.prepare,  // auto (default) | skip | <custom command>
+                aigwVersion: spec.aigwVersion,  // pin check vs. bundled preset.manifest.version
               } as any);
             } else if (sub === 'status') {
               if (hasFlag(args, '--raw')) await cmdGpuJobsStatus();
