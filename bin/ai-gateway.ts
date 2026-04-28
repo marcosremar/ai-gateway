@@ -2118,6 +2118,15 @@ function buildWerEvalCmd(scriptDir: string, evalPrompts: string): string {
 
 // #8 Optuna sweep — parallel hyperparam search via N spot instances
 async function cmdGpuFinetuneSweep(opts: GpuFinetuneOpts & { trials?: number }): Promise<void> {
+  if (!opts.scriptPath && !opts.type) {
+    console.error(
+      `gpu finetune sweep: missing required input. Provide one of:\n` +
+      `  • -f <train.yaml>          (or place ./train.yaml in cwd)\n` +
+      `  • --type <preset>          (e.g. pocket-tts-finetune)\n` +
+      `  • --script <trainer.py>    (custom trainer)`
+    );
+    process.exit(1);
+  }
   const trials = opts.trials ?? 4;
   console.log(`[sweep] launching ${trials} parallel finetune trials with hyperparam variants`);
   // Generate trial configs varying lr, epochs, freeze layers
@@ -2127,10 +2136,14 @@ async function cmdGpuFinetuneSweep(opts: GpuFinetuneOpts & { trials?: number }):
     const lr = lrs[i % lrs.length];
     const trialId = `trial-${i}-lr${lr.toExponential(0)}`;
     console.log(`[sweep] launching ${trialId}`);
-    // Spawn separate finetune subprocess
-    const child = spawn(process.argv[0], [process.argv[1], 'gpu', 'finetune', 'submit',
-                       '--script', opts.scriptPath, '--lr', String(lr), '--smoke',
-                       '--output', `./sweeps/${trialId}`], { stdio: 'inherit' });
+    // Spawn separate finetune subprocess. Prefer preset type when given so
+    // children re-resolve through loadPreset (vs. carrying an absolute path
+    // that may not exist in their cwd).
+    const launchArgs = ['gpu', 'finetune', 'submit', '--lr', String(lr), '--smoke',
+                        '--output', `./sweeps/${trialId}`];
+    if (opts.type) launchArgs.push('--type', opts.type);
+    else if (opts.scriptPath) launchArgs.push('--script', opts.scriptPath);
+    const child = spawn(process.argv[0], [process.argv[1], ...launchArgs], { stdio: 'inherit' });
     procs.push(child);
   }
   console.log(`[sweep] ${procs.length} trials launched. Wait + compare losses.`);
