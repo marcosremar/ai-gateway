@@ -21,7 +21,7 @@ import { readFileSync, unlinkSync, existsSync } from 'fs';
 import { makeTestWav } from './helpers';
 
 await loadEnv();
-const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
+const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY && process.env.SKIP_LIVE_TESTS !== "1"
   ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY)
   : false;
 
