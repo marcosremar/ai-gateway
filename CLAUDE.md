@@ -295,6 +295,35 @@ ai-gateway server start/stop/status      # Manage local dev server
 - **hf-xet**: Use `hf_xet` for model downloads (NOT deprecated `HF_HUB_ENABLE_HF_TRANSFER`)
 - **Blackwell Image Variants**: Auto-select `:blackwell` image for RTX 5090 (CUDA 12.8.1)
 
+### 11b. GPU Finetune (`gpu finetune`)
+
+Fireworks-style declarative finetune. ONE `train.yaml`; ai-gateway provisions GPU,
+encodes data, trains, pushes weights + dataset to HF, tears down.
+
+```bash
+ai-gateway gpu finetune submit -f train.yaml      # full pipeline (smoke → encode → train → push)
+ai-gateway gpu finetune presets                   # list bundled presets
+ai-gateway gpu finetune logs                      # tail current run
+ai-gateway gpu finetune status                    # detailed status (stage, GPU%, VRAM%, $/min)
+ai-gateway gpu finetune cancel                    # graceful stop with final ckpt pull
+```
+
+- **Presets** (`finetune-presets/<name>/`): bundled trainer/prepare/tokenizer scripts
+  + `manifest.json` declaring pipDeps/aptDeps/torchVersion. Built-in:
+  `pocket-tts-finetune` (kyutai/pocket-tts flow-matching, LSD loss, Mimi codec frozen).
+- **`type: <preset>`** in train.yaml = zero user training code; preset auto-loaded.
+- **`quality: auto|safe|fast`** — smart defaults:
+  - `auto` (default): torch.compile + plateau-stop (epochs ≥ 2)
+  - `safe`: no auto-stop, no compile (debug runs)
+  - `fast`: + pitch/speed augmentation (small dataset boost; doubles encode dataset)
+- **GPU fallback ladder** (`gpuFallback: true`): 4090→3090→A5000→4080 if primary unavailable
+- **Crash-survivable**: SIGINT pull, retry, relaunch, mid-run rsync (`--pull-every`),
+  stall watchdog (`--stall-min`), budget cap (`--max-spend`)
+- **2-repo HF output**: `<hfBase>` (weights) + `<hfBase>-dataset` (encoded.pt + train.yaml)
+- **Generic base image**: `dockers/aigw-finetune-base/Dockerfile` (cuda 12.1 + torch 2.1.2 +
+  hf-xet); per-preset pipDeps installed at job startup. Mount `/opt/cache` for persistent
+  HF + torch.compile inductor cache across jobs.
+
 ### 12. Storage & Infrastructure
 
 - **Storage Adapters**: S3-compatible storage (R2, B2, AWS, MinIO, DigitalOcean Spaces)
