@@ -7207,7 +7207,7 @@ Per-app isolation:
                   stallMin: getArg(args, '--stall-min') ? parseInt(getArg(args, '--stall-min')!) : undefined,
                   maxSpend: getArg(args, '--max-spend') ? parseFloat(getArg(args, '--max-spend')!) : undefined,
                   pullExclude: args.flatMap((a, i) => a === '--pull-exclude' && args[i + 1] ? [args[i + 1]] : []),
-                  preferSpot: hasFlag(args, '--prefer-spot'),
+                  preferSpot: hasFlag(args, '--no-spot') ? false : hasFlag(args, '--prefer-spot'),
                   reuseInstance: hasFlag(args, '--reuse-instance'),
                   abortOnDivergence: hasFlag(args, '--abort-on-divergence'),
                   gpuFallback: hasFlag(args, '--no-gpu-fallback') ? false : hasFlag(args, '--gpu-fallback'),
