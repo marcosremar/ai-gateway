@@ -1768,6 +1768,9 @@ interface GpuFinetuneOpts {
   freezeBackboneLayers?: number;  // freeze first N transformer blocks (default 4)
   onlyFlowNet?: boolean;        // MoshiVis-style: train ONLY flow_net + out_eos (LoRA-like)
   curriculum?: 'linear' | '';   // curriculum strategy (default '': random shuffle)
+  seed?: number;                // random seed (reproducibility, default 42)
+  gradClip?: number;            // gradient norm clip threshold (default 1.0)
+  logEverySteps?: number;       // print loss every N steps (default 25)
 }
 // #11 Schema validation
 function validateFinetuneSpec(spec: any): string[] {
@@ -2420,6 +2423,9 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
       autoTrainArgs.push(`--rewind-threshold ${(opts as any).rewindThreshold}`);
     }
   }
+  if ((opts as any).seed !== undefined) autoTrainArgs.push(`--seed ${(opts as any).seed}`);
+  if ((opts as any).gradClip !== undefined) autoTrainArgs.push(`--grad-clip ${(opts as any).gradClip}`);
+  if ((opts as any).logEverySteps !== undefined) autoTrainArgs.push(`--log-every-steps ${(opts as any).logEverySteps}`);
   const autoTrainFlags = autoTrainArgs.length ? ' ' + autoTrainArgs.join(' ') : '';
   const autoEncodeFlags = autoEncodeArgs.length ? ' ' + autoEncodeArgs.join(' ') : '';
   const numGpus = opts.numGpus ?? 1;
@@ -6993,6 +6999,9 @@ Per-app isolation:
                 multiDataset: spec.multiDataset,  // weighted multi-dataset → trainer --multi-dataset
                 autoLrRewind: hasFlag(args, '--auto-lr-rewind') || spec.autoLrRewind === true,
                 rewindThreshold: getArg(args, '--rewind-threshold') ? parseFloat(getArg(args, '--rewind-threshold')!) : spec.rewindThreshold,
+                seed: getArg(args, '--seed') ? parseInt(getArg(args, '--seed')!) : spec.seed,
+                gradClip: getArg(args, '--grad-clip') ? parseFloat(getArg(args, '--grad-clip')!) : spec.gradClip,
+                logEverySteps: getArg(args, '--log-every-steps') ? parseInt(getArg(args, '--log-every-steps')!) : spec.logEverySteps,
               } as any);
             } else if (sub === 'status') {
               if (hasFlag(args, '--raw')) await cmdGpuJobsStatus();
