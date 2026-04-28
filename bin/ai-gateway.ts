@@ -1785,6 +1785,10 @@ function validateFinetuneSpec(spec: any): string[] {
   if (spec.dataset && !String(spec.dataset).startsWith('hf://')) {
     errs.push(`dataset must use hf://owner/repo form`);
   }
+  // Dataset required for audio + text finetunes (custom can override via prepCmd).
+  if (!spec.dataset && (presetExists || spec.type === 'audio' || spec.type === 'text')) {
+    errs.push(`missing required: dataset (hf://owner/repo)`);
+  }
   if (spec.model && !String(spec.model).startsWith('hf://')) {
     errs.push(`model must use hf://owner/repo form`);
   }
