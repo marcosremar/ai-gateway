@@ -6840,7 +6840,12 @@ Per-app isolation:
                   const m = JSON.parse(readFileSync(mp, 'utf-8'));
                   console.log(`  ${m.name} v${m.version}`);
                   console.log(`    ${m.description}`);
-                  console.log(`    type: ${m.type}, lr: ${m.defaultLR}, epochs: ${m.defaultEpochs}`);
+                  console.log(`    type: ${m.type}, lr: ${m.defaultLR}, epochs: ${m.defaultEpochs}, gpu: ${m.defaultGpu || '(any)'}, maxSpend: $${m.defaultMaxSpend ?? '(unset)'}`);
+                  if (m.defaultModel) console.log(`    base: ${m.defaultModel}`);
+                  if (Array.isArray(m.knownTags) && m.knownTags.length) {
+                    console.log(`    tags: ${m.knownTags.slice(0, 6).join(' ')}${m.knownTags.length > 6 ? ' …' : ''}`);
+                  }
+                  if (m.notes) console.log(`    notes: ${m.notes}`);
                 } catch { /* skip */ }
               }
             } else if (sub === 'watch-web') {
