@@ -5845,10 +5845,10 @@ Round 4 (ideas from Axolotl/SkyPilot/Unsloth):
   --providers a,b,c     Multi-cloud failover (try in order if 1st fails)
   --failover-on-preempt [TODO] Switch provider on spot preemption
   --ckpt-avg N          Polyak-average last N ckpts → model_avg.safetensors
-  --export-gguf         Post-train: convert ckpt to GGUF for llama.cpp/ollama
+  --export-gguf         [TODO] Post-train: convert ckpt to GGUF for llama.cpp/ollama
   spec.secrets:         Sensitive env vars (redacted from logs/state file)
-  spec.evalsPerEpoch    Run eval N times per epoch (vs every M steps)
-  spec.earlyStopOnEval  Stop if metric < threshold during eval
+  spec.evalsPerEpoch    [TODO] Run eval N times per epoch (vs every M steps)
+  spec.earlyStopOnEval  [TODO] Stop if metric < threshold during eval
   spec.multiDataset     Combine N datasets with weights
 
 Round 6 (3-repo HF organization):
