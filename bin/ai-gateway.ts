@@ -1795,6 +1795,15 @@ function validateFinetuneSpec(spec: any): string[] {
   if (spec.hfStructure !== undefined && !['flat', 'split', 'tri'].includes(spec.hfStructure)) {
     errs.push(`hfStructure must be flat|split|tri (got ${spec.hfStructure})`);
   }
+  if (spec.providers !== undefined) {
+    if (!Array.isArray(spec.providers)) {
+      errs.push(`providers must be an array (use JSON inline: providers: ["vast","runpod"])`);
+    } else {
+      const ALLOWED = ['vast', 'runpod', 'tensordock', 'modal', 'hyperstack'];
+      const bad = spec.providers.filter((p: any) => !ALLOWED.includes(p));
+      if (bad.length) errs.push(`providers contains unknown: ${bad.join(', ')} (allowed: ${ALLOWED.join('|')})`);
+    }
+  }
   if (spec.epochs !== undefined && (spec.epochs <= 0 || spec.epochs > 100)) {
     errs.push(`epochs out of range (1-100)`);
   }
@@ -6736,9 +6745,14 @@ Per-app isolation:
                   if (m) {
                     let v = m[2].trim();
                     // Strip inline comment (NOT inside quotes — naive but works here)
-                    if (!v.startsWith('"') && !v.startsWith("'")) {
+                    if (!v.startsWith('"') && !v.startsWith("'") && !v.startsWith('[') && !v.startsWith('{')) {
                       const hashIdx = v.indexOf('#');
                       if (hashIdx >= 0) v = v.slice(0, hashIdx).trim();
+                    }
+                    // JSON array / object inline values: try-parse so spec.providers etc.
+                    // come through as the right shape rather than a literal string.
+                    if (v.startsWith('[') || v.startsWith('{')) {
+                      try { spec[m[1]] = JSON.parse(v); continue; } catch { /* fall through */ }
                     }
                     spec[m[1]] = v.match(/^-?\d+$/) ? parseInt(v) :
                                  v.match(/^-?\d*\.?\d+([eE][-+]?\d+)?$/) ? parseFloat(v) :
