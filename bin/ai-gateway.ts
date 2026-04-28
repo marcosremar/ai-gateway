@@ -6971,14 +6971,25 @@ Per-app isolation:
             } else if (sub === 'history') {
               await cmdGpuJobsHistory({ n: 20, totals: true });
             } else if (sub === 'estimate') {
-              if (Object.keys(spec).length === 0) {
+              // Merge CLI overrides — pure-CLI users (no yaml) expect
+              // --epochs / --max-samples / --batch-size / --grad-accum to
+              // shape the estimate.
+              const estType = getArg(args, '--type') || spec.type || 'audio';
+              const estEpochs = getArg(args, '--epochs') ? parseInt(getArg(args, '--epochs')!) : spec.epochs;
+              const estNumGpus = getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : spec.numGpus;
+              const estMaxSamples = getArg(args, '--max-samples') ? parseInt(getArg(args, '--max-samples')!) : spec.maxSamples;
+              const estBatch = getArg(args, '--batch-size') ? parseInt(getArg(args, '--batch-size')!) : spec.batchSize;
+              const estAccum = getArg(args, '--grad-accum') ? parseInt(getArg(args, '--grad-accum')!) : spec.gradAccum;
+              const noUserInput = Object.keys(spec).length === 0
+                && !estEpochs && !estMaxSamples && !estBatch && !estAccum;
+              if (noUserInput) {
                 console.log('[estimate] no spec provided — assuming defaults (4 epochs, 7449 samples, batch=2, accum=16, $0.30/h GPU)');
               }
               const est = estimateFinetuneCost({
-                type: spec.type || 'audio', scriptPath: spec.script,
-                epochs: spec.epochs, numGpus: spec.numGpus,
-                maxSamples: spec.maxSamples,
-                batchSize: spec.batchSize, gradAccum: spec.gradAccum,
+                type: estType, scriptPath: spec.script,
+                epochs: estEpochs, numGpus: estNumGpus,
+                maxSamples: estMaxSamples,
+                batchSize: estBatch, gradAccum: estAccum,
               } as any);
               console.log(`[estimate] encode: ${est.encodeMin.toFixed(1)}min, train: ${est.trainMin.toFixed(1)}min, setup: ${est.setupMin}min`);
               console.log(`[estimate] total: ${est.totalMin.toFixed(0)}min  ≈  $${est.totalUsd.toFixed(2)}`);
