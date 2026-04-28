@@ -1134,6 +1134,20 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     console.error('Need --repo <url> OR --path <local-dir>');
     process.exit(1);
   }
+  // Numeric sanity — NaN parseFloat or absurd budgets would silently slip through.
+  const numericChecks: Array<[string, number | undefined, number, number]> = [
+    ['--max-cost', opts.maxCost, 0.01, 50],
+    ['--max-spend', opts.maxSpend, 0.01, 100],
+    ['--pull-every', opts.pullEveryMin, 0, 1440],
+    ['--stall-min', opts.stallMin, 0, 1440],
+    ['--timeout-min', opts.timeoutMin, 1, 4320],
+  ];
+  for (const [name, val, lo, hi] of numericChecks) {
+    if (val !== undefined && (typeof val !== 'number' || !Number.isFinite(val) || val < lo || val > hi)) {
+      console.error(`Invalid ${name}=${val} (expected ${lo}-${hi})`);
+      process.exit(1);
+    }
+  }
   const gpuFilter = String(opts.gpu || '4090');
   const maxCost = opts.maxCost ?? 0.5;
   const outputDir = opts.output || './job_output';
