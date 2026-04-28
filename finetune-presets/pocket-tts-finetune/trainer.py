@@ -690,7 +690,7 @@ def main() -> None:
     p_tr.add_argument("--auto-stop-plateau", type=int, default=0,
                       help="Stop if loss doesn't improve for N steps (0=disabled)")
     p_tr.add_argument("--plateau-tolerance", type=float, default=0.01,
-                      help="Min relative drop to count as improvement (default 0.01 = 1%)")
+                      help="Min relative drop to count as improvement (default 0.01 = 1 percent)")
     p_tr.add_argument("--torch-compile", action="store_true",
                       help="Enable torch.compile on flow_net (1.5-2× speedup, PyTorch 2.0+)")
     p_tr.add_argument("--batch-size", type=int, default=2,
