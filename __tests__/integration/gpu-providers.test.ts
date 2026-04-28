@@ -100,7 +100,7 @@ async function discoverRunpodEndpoint(creds: ProviderCredentials): Promise<strin
 // 1. GPU PROVIDER API TESTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!process.env.TENSORDOCK_API_TOKEN)('TensorDock — real API', () => {
+describe.skipIf(!process.env.TENSORDOCK_API_TOKEN || process.env.SKIP_LIVE_TESTS === '1')('TensorDock — real API', () => {
   let client: TensordockClient;
   let creds: ProviderCredentials;
 
@@ -220,7 +220,7 @@ describe.skipIf(!process.env.VAST_API_KEY || process.env.SKIP_LIVE_TESTS === '1'
   }, 15_000);
 });
 
-describe.skipIf(!process.env.MODAL_TOKEN_ID || !process.env.MODAL_TOKEN_SECRET)('Modal — real API', () => {
+describe.skipIf(!process.env.MODAL_TOKEN_ID || !process.env.MODAL_TOKEN_SECRET || process.env.SKIP_LIVE_TESTS === '1')('Modal — real API', () => {
   let credentials: string;
 
   beforeAll(() => {
