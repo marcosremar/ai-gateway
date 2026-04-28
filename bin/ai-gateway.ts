@@ -2153,7 +2153,10 @@ async function cmdGpuFinetuneWatchWeb(): Promise<void> {
 
 // Preset registry — bundled trainers shipped with ai-gateway.
 // Allows spec.yaml-only finetune without user-provided scripts.
-function loadPreset(presetType: string): { dir: string; manifest: any } | null {
+function loadPreset(presetType: string | undefined): { dir: string; manifest: any } | null {
+  // Guard against undefined/empty (caller may not have a type set yet).
+  // Without this, path.join(presetsDir, undefined) throws TypeError.
+  if (!presetType || typeof presetType !== 'string') return null;
   // Look for finetune-presets/<type>/manifest.json relative to this script
   const presetsDir = require('path').resolve(
     require('path').dirname(new URL(import.meta.url).pathname), '..', 'finetune-presets',
@@ -2171,6 +2174,17 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
   // PRESET DETECTION — if opts.type matches a bundled preset, override scriptPath/localPath
   // to point at the bundled trainer dir. User then needs only train.yaml + dataset.
   const preset = loadPreset(opts.type);
+  // Early input validation. Without preset OR scriptPath, downstream path.dirname /
+  // basename would crash on undefined. Surface a clear error instead.
+  if (!preset && !opts.scriptPath) {
+    console.error(
+      `gpu finetune: missing required input. Provide one of:\n` +
+      `  • --spec <train.yaml>           (or place ./train.yaml in cwd)\n` +
+      `  • --type <preset>               (e.g. pocket-tts-finetune)\n` +
+      `  • --script <path/to/trainer.py> (custom trainer)`
+    );
+    process.exit(1);
+  }
   if (preset) {
     console.log(`[preset] ${opts.type} v${preset.manifest.version} — bundled trainer (no user script needed)`);
     if (!opts.scriptPath) {
