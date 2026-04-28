@@ -17,7 +17,7 @@ import 'dotenv/config';
 import { describe, it, expect, beforeAll } from 'vitest';
 import { checkOpenAIAvailable } from './helpers';
 
-const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
+const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY && process.env.SKIP_LIVE_TESTS !== "1"
   ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY)
   : false;
 import { TensordockClient, findCheapestLocations } from '@ai-gateway/gpu-providers/tensordock-client';

@@ -22,7 +22,7 @@ function skipOn(err: unknown): boolean {
 
 // Top-level await: load env and verify OpenAI is actually usable (not rate-limited)
 await loadEnv();
-const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY
+const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY && process.env.SKIP_LIVE_TESTS !== "1"
   ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY)
   : false;
 if (!OPENAI_AVAILABLE && process.env.OPENAI_API_KEY) {
