@@ -2,7 +2,7 @@
 // After reset, deployState.deployId and deployState.gpuType are empty strings,
 // so error categorization and event emission lose the original deploy context.
 
-import { test, expect } from 'bun:test';
+import { test, expect } from 'vitest';
 
 test('autoTerminateGpu should capture deployId before resetDeployState clears it', async () => {
   const fs = require('fs');

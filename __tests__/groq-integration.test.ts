@@ -22,7 +22,7 @@ function skipOn(err: unknown): boolean {
 
 // ── STT ── 1 call total ──────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.GROQ_API_KEY)('Groq STT (Real API)', () => {
+describe.skipIf(!process.env.GROQ_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Groq STT (Real API)', () => {
   // Shared audio + result — ONE transcription call for the entire suite
   const audio = makeTestWav(0.5); // 0.5s — minimum viable audio
   let stt: STTResponse | null = null;
@@ -56,7 +56,7 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq STT (Real API)', () => {
 
 // ── TTS ── 1 call total ──────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.GROQ_API_KEY)('Groq TTS (Real API)', () => {
+describe.skipIf(!process.env.GROQ_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Groq TTS (Real API)', () => {
   let tts: TTSResponse | null = null;
   let ms = 0;
 
@@ -103,7 +103,7 @@ describe.skipIf(!process.env.GROQ_API_KEY)('Groq TTS (Real API)', () => {
 // Single JSON-mode call covers: basic completion, model/usage fields,
 // maxTokens respected, JSON response format.
 
-describe.skipIf(!process.env.GROQ_API_KEY)('Groq LLM (Real API)', () => {
+describe.skipIf(!process.env.GROQ_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Groq LLM (Real API)', () => {
   let llm: LLMResponse | null = null;
   let ms = 0;
 

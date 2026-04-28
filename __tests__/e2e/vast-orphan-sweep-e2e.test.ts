@@ -1,7 +1,8 @@
 /**
  * Vast.ai Orphan Sweep — E2E, Destructive
  *
- * Proves the gateway actually terminates Vast.ai machines it doesn't own.
+ * Proves the gateway can terminate untracked Vast.ai machines when explicitly
+ * configured for a dedicated, gateway-owned account.
  * This test deliberately creates an instance via the raw VastClient
  * (bypassing the gateway's deploy flow, so the gateway does NOT track it),
  * then calls sweepOrphanInstances() and verifies the instance is killed.
@@ -38,12 +39,14 @@ d('Vast.ai orphan sweep — E2E, destructive', () => {
   });
 
   afterAll(async () => {
+    delete process.env.VAST_ACCOUNT_OWNED;
     for (const id of createdInThisTest) {
       try { await client.deleteInstance(id, creds); } catch { /* already gone */ }
     }
   });
 
-  it('sweep terminates an untracked Vast.ai instance', async () => {
+  it('sweep terminates an untracked Vast.ai instance with VAST_ACCOUNT_OWNED=1', async () => {
+    process.env.VAST_ACCOUNT_OWNED = '1';
     // 1. Find the cheapest RTX 4090 offer
     const offers = await client.listOffers({ gpuName: 'RTX 4090' }, creds);
     expect(offers.length).toBeGreaterThan(0);
@@ -67,7 +70,8 @@ d('Vast.ai orphan sweep — E2E, destructive', () => {
     const before = await client.listInstances(creds);
     expect(before.some(i => i.instanceId === strayId)).toBe(true);
 
-    // 4. Run the orphan sweep — MUST terminate our stray VM
+    // 4. Run the orphan sweep — MUST terminate our stray VM because this test
+    //    explicitly opted into account-owned kill-all mode.
     const result = await sweepOrphanInstances();
     console.log(`[vast-e2e] sweep report: found=${result.found} terminated=${result.terminated}`);
     expect(result.terminated).toBeGreaterThan(0);

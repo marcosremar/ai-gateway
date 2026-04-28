@@ -24,7 +24,7 @@ function skipOn(err: unknown): boolean {
 
 // ── STT ── 1 call total ──────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks STT (Real API)', () => {
+describe.skipIf(!process.env.FIREWORKS_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Fireworks STT (Real API)', () => {
   const audio = makeTestWav(1.0);
   let stt: STTResponse | null = null;
   let ms = 0;
@@ -54,7 +54,7 @@ describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks STT (Real API)', () =
 //
 // Single short call covers: basic completion, usage, maxTokens respected.
 
-describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks LLM (Real API)', () => {
+describe.skipIf(!process.env.FIREWORKS_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Fireworks LLM (Real API)', () => {
   let llm: LLMResponse | null = null;
   let ms = 0;
 
@@ -96,7 +96,7 @@ describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks LLM (Real API)', () =
 
 // ── Image ── 1 call total ────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks Image (Real API)', () => {
+describe.skipIf(!process.env.FIREWORKS_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Fireworks Image (Real API)', () => {
   const image = new FireworksImageProvider();
   let result: { image: Buffer; contentType: string } | null = null;
   let ms = 0;
