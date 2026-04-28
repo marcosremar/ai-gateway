@@ -6856,7 +6856,8 @@ Per-app isolation:
                 trials: getArg(args, '--trials') ? parseInt(getArg(args, '--trials')!) : 4,
               } as any);
             } else if (sub === 'deploy') {
-              const ckpt = args[2] && !args[2].startsWith('-') ? args[2] : undefined;
+              // args[2] is 'deploy' itself; positional ckpt path is args[3].
+              const ckpt = args[3] && !args[3].startsWith('-') ? args[3] : undefined;
               const hfRepo = getArg(args, '--hf-repo');
               if (!ckpt && !hfRepo) {
                 console.error('Usage: deploy [<ckpt-path>] [--hf-repo <owner/name>] [--hf-file <name>] [--push-to-hf <repo>] [--restart-server]');
