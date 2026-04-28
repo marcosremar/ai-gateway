@@ -28,13 +28,13 @@ Reference: arXiv:2505.18825 LSD.
 
 Usage:
     # Encode dataset (Mimi latents from wavs)
-    python finetune_pocket_tts.py encode --input erinome.jsonl --output erinome_mimi.pt
+    python trainer.py encode --input erinome.jsonl --output erinome_mimi.pt
 
     # Smoke test (random data, no GPU needed, validates code)
-    python finetune_pocket_tts.py smoke
+    python trainer.py smoke
 
     # Real train (requires HF terms accept + GPU)
-    python finetune_pocket_tts.py train --tokens erinome_mimi.pt --output ckpt/
+    python trainer.py train --tokens erinome_mimi.pt --output ckpt/
 """
 
 from __future__ import annotations
