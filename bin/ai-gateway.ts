@@ -2481,7 +2481,16 @@ print('[smoke-verify] OK ✓ proceeding to full run')
   const tokensArg = opts.type === 'audio'
     ? '/root/encoded.pt'
     : '/root/prepared.pt';
-  const saveEvery = smokeOnly ? ' --save-every-steps 5' : ' --save-every-steps 100';
+  // Honor explicit spec.saveEverySteps when set; smoke mode forces 5 unless
+  // user explicitly chose something smaller (which would be even cheaper).
+  const explicitSave = (opts as any).saveEverySteps;
+  const saveSteps = explicitSave !== undefined
+    ? Math.min(explicitSave, smokeOnly ? 5 : Number.MAX_SAFE_INTEGER)
+    : (smokeOnly ? 5 : 100);
+  if (smokeOnly && explicitSave !== undefined && explicitSave > 5) {
+    console.warn(`${c.yellow}⚠ smoke mode caps saveEverySteps at 5 (your value=${explicitSave} reduced).${c.reset}`);
+  }
+  const saveEvery = ` --save-every-steps ${saveSteps}`;
   const pluginTrainArgs = plugin?.extraTrainArgs ? ' ' + plugin.extraTrainArgs : '';
   const trainCmd = opts.trainCmd || (
     `python ${scriptName} train ` +
