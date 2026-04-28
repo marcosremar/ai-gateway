@@ -2618,6 +2618,10 @@ print('  code repo updated')
   if (opts.image) {
     console.log(`${c.cyan}[finetune]${c.reset} image=${opts.image}`);
   }
+  // Runtime knobs surfaced so user can confirm at a glance what's about to spend $$.
+  const spotMode = (opts.preferSpot ?? true) ? 'spot' : 'on-demand';
+  const fbMode = ((opts as any).gpuFallback ?? true) ? 'on' : 'off';
+  console.log(`${c.cyan}[finetune]${c.reset} gpu=${opts.gpu || '4090'}  pricing=${spotMode}  fallback=${fbMode}  maxCost=$${opts.maxCost ?? 0.4}/h  maxSpend=$${opts.maxSpend ?? 5.0}`);
 
   await cmdGpuJobsRun({
     path: localPath,
