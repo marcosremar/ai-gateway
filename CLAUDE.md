@@ -312,6 +312,12 @@ ai-gateway gpu finetune cancel                    # graceful stop with final ckp
   + `manifest.json` declaring pipDeps/aptDeps/torchVersion. Built-in:
   `pocket-tts-finetune` (kyutai/pocket-tts flow-matching, LSD loss, Mimi codec frozen).
 - **`type: <preset>`** in train.yaml = zero user training code; preset auto-loaded.
+- **Auto-prep**: when preset declares `prepareScript`, ai-gateway runs it
+  automatically against `/root/data/metadata.jsonl` (or `train.jsonl`) into
+  `/root/data_paths.jsonl` before encode. Override via `prepare: skip` (skip
+  prep, use pre-encoded data) or `prepare: <shell command>` in spec.yaml.
+- **Pinned torch wheel**: manifest `torchVersion` + `torchCudaIndex` install BEFORE the
+  generic `pip install` to avoid CUDA driver mismatch on host.
 - **`quality: auto|safe|fast`** — smart defaults:
   - `auto` (default): torch.compile + plateau-stop (epochs ≥ 2)
   - `safe`: no auto-stop, no compile (debug runs)
