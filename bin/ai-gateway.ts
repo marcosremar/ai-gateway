@@ -6112,6 +6112,7 @@ Optional:
   --no-spot                   Force on-demand (no spot)
   --reuse                     Skip provisioning if a live owner instance exists
   --extra-args "..."          Appended to the python <script> train command
+  --image <ref>               Override docker image (default: marcosremar/gpu-dev:latest)
   --dry-run                   Print plan + cost without spending
 
 Example:
