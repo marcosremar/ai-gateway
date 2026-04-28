@@ -2323,6 +2323,11 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
   const skipSmoke = opts.skipSmoke === true;
   const smokeOnly = !!opts.smoke;          // explicit --smoke = ONLY smoke (no full)
   const runSmokeFirst = !skipSmoke && !smokeOnly;
+  if (skipSmoke && !smokeOnly) {
+    console.warn(`${c.yellow}⚠ smoke step skipped (--no-smoke / skipSmoke: true).${c.reset} ` +
+                 `Pipeline bugs will only surface during the full run — could waste GPU $$. ` +
+                 `Recommend keeping smoke ON unless debugging a specific pipeline issue.`);
+  }
   const epochs = smokeOnly ? 3 : (opts.epochs ?? 4);
   const lr = opts.lr ?? 5e-5;
 
