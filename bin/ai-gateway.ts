@@ -1690,6 +1690,7 @@ interface GpuTrainOpts {
   reuse?: boolean;
   extraArgs?: string;             // appended to the python script command
   dryRun?: boolean;
+  image?: string;                 // override docker image (default: marcosremar/gpu-dev:latest)
 }
 // ──────────────────────────────────────────────────────────────────────────
 // gpu finetune — generic finetune module (text or audio).
@@ -2777,7 +2778,7 @@ async function cmdGpuTrain(opts: GpuTrainOpts): Promise<void> {
     maxSpend: opts.maxSpend ?? 5.00,            // safety net
     output,
     timeoutMin: 360,
-    image: 'marcosremar/gpu-dev:latest',
+    image: opts.image || 'marcosremar/gpu-dev:latest',
     keepAlive: false,
     pullEveryMin: 10,
     stallMin: 30,
@@ -7171,6 +7172,7 @@ Per-app isolation:
               reuse: hasFlag(args, '--reuse'),
               extraArgs: getArg(args, '--extra-args'),
               dryRun: hasFlag(args, '--dry-run'),
+              image: getArg(args, '--image'),
             });
             break;
           }
