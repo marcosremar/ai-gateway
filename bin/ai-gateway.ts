@@ -2323,7 +2323,11 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
   const apt = `${aptByType[opts.type]}${opts.aptPkgs ? ' ' + opts.aptPkgs : ''}`;
   const pip = `${pipByType[opts.type]}${opts.extraDeps ? ' ' + opts.extraDeps : ''}${plugin?.extraDeps ? ' ' + plugin.extraDeps : ''}`;
 
-  const dsInclude = opts.datasetInclude ? ` --include "${opts.datasetInclude}"` : '';
+  // Comma-separated globs map to multiple --include flags (hf download
+  // accepts the flag repeatedly but no commas in a single value).
+  const dsInclude = opts.datasetInclude
+    ? opts.datasetInclude.split(',').map(p => ` --include "${p.trim()}"`).join('')
+    : '';
   const datasetDl = opts.dataset?.startsWith('hf://')
     ? `if [ ! -d /root/data ] || [ -z "$(ls /root/data 2>/dev/null)" ]; then ` +
       `hf download ${opts.dataset.slice(5)} --repo-type dataset --local-dir /root/data --token "$HF_TOKEN"${dsInclude}; ` +
@@ -2571,7 +2575,11 @@ async function cmdGpuTrain(opts: GpuTrainOpts): Promise<void> {
   const epochs = opts.epochs ?? 4;
   const lr = opts.lr ?? 5e-5;
   const output = opts.output || './checkpoints/run-' + Date.now();
-  const dsInclude = opts.datasetInclude ? ` --include "${opts.datasetInclude}"` : '';
+  // Comma-separated globs map to multiple --include flags (hf download
+  // accepts the flag repeatedly but no commas in a single value).
+  const dsInclude = opts.datasetInclude
+    ? opts.datasetInclude.split(',').map(p => ` --include "${p.trim()}"`).join('')
+    : '';
   const datasetDl = opts.dataset?.startsWith('hf://')
     ? `hf download ${opts.dataset.slice(5)} --repo-type dataset --local-dir /root/data --token "$HF_TOKEN"${dsInclude} && `
     : '';
