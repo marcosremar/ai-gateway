@@ -5798,6 +5798,11 @@ Round 8 (quality automation + GPU fallback + Tier 2 power knobs):
   --image <ref>            Override docker image (default: marcosremar/gpu-dev:latest;
                              use ghcr.io/<user>/aigw-finetune-base:latest for ~3-4 min faster boot)
 
+Spec-only — auto-prep (preset-driven dataset preprocessor):
+  prepare: auto    (default)  Run preset's prepareScript on /root/data/metadata.jsonl
+  prepare: skip               Skip prep; assume /root/data is encode-ready
+  prepare: <shell command>    Custom prep command override
+
 Round 8 — Tier 2 advanced (quality:auto handles 80% — leave unset unless tuning):
   --batch-size N           Per-step micro batch size (default 2)
   --grad-accum N           Gradient accumulation steps (effective batch = batch × accum)
