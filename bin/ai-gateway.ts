@@ -1804,6 +1804,15 @@ function validateFinetuneSpec(spec: any): string[] {
       if (bad.length) errs.push(`providers contains unknown: ${bad.join(', ')} (allowed: ${ALLOWED.join('|')})`);
     }
   }
+  if (spec.retryOnPreempt !== undefined && (spec.retryOnPreempt < 0 || spec.retryOnPreempt > 10)) {
+    errs.push(`retryOnPreempt out of range (0-10) — preempted spot retries`);
+  }
+  if (spec.numGpus !== undefined && (spec.numGpus < 1 || spec.numGpus > 8)) {
+    errs.push(`numGpus out of range (1-8)`);
+  }
+  if (spec.ckptAverage !== undefined && (spec.ckptAverage < 2 || spec.ckptAverage > 50)) {
+    errs.push(`ckptAverage out of range (2-50) — number of trailing ckpts to Polyak-average`);
+  }
   if (spec.epochs !== undefined && (spec.epochs <= 0 || spec.epochs > 100)) {
     errs.push(`epochs out of range (1-100)`);
   }
