@@ -1786,6 +1786,9 @@ function validateFinetuneSpec(spec: any): string[] {
   if (spec.pushToHf && !String(spec.pushToHf).includes('/')) {
     errs.push(`pushToHf must be 'owner/repo'`);
   }
+  if (spec.hfBase && !String(spec.hfBase).includes('/')) {
+    errs.push(`hfBase must be 'owner/name' (will derive owner/name + owner/name-dataset repos)`);
+  }
   if (spec.epochs !== undefined && (spec.epochs <= 0 || spec.epochs > 100)) {
     errs.push(`epochs out of range (1-100)`);
   }
