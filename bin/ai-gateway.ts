@@ -1789,6 +1789,12 @@ function validateFinetuneSpec(spec: any): string[] {
   if (spec.hfBase && !String(spec.hfBase).includes('/')) {
     errs.push(`hfBase must be 'owner/name' (will derive owner/name + owner/name-dataset repos)`);
   }
+  if (spec.fromHf && !String(spec.fromHf).includes('/')) {
+    errs.push(`fromHf must be 'owner/name' (resume target — same shape as hfBase)`);
+  }
+  if (spec.hfStructure !== undefined && !['flat', 'split', 'tri'].includes(spec.hfStructure)) {
+    errs.push(`hfStructure must be flat|split|tri (got ${spec.hfStructure})`);
+  }
   if (spec.epochs !== undefined && (spec.epochs <= 0 || spec.epochs > 100)) {
     errs.push(`epochs out of range (1-100)`);
   }
