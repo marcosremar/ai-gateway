@@ -6880,6 +6880,9 @@ Per-app isolation:
             } else if (sub === 'history') {
               await cmdGpuJobsHistory({ n: 20, totals: true });
             } else if (sub === 'estimate') {
+              if (Object.keys(spec).length === 0) {
+                console.log('[estimate] no spec provided — assuming defaults (4 epochs, 7449 samples, batch=2, accum=16, $0.30/h GPU)');
+              }
               const est = estimateFinetuneCost({
                 type: spec.type || 'audio', scriptPath: spec.script,
                 epochs: spec.epochs, numGpus: spec.numGpus,
