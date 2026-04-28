@@ -1,4 +1,4 @@
-import { test, expect, describe } from 'bun:test';
+import { test, expect, describe } from 'vitest';
 import { runAutoSwapBenchmark } from '../../src/gateway/routing/auto-swap-benchmark';
 import type { DetectWithSwapFn } from '../../src/gateway/routing/auto-swap-benchmark';
 

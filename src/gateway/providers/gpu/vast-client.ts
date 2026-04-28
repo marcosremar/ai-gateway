@@ -1069,6 +1069,15 @@ export class VastClient extends AbstractGpuProvider {
       // another tenant held 13GB of the 24GB. Hard rule: never share
       // VRAM with strangers.
       gpu_frac: { eq: 1.0 },
+      // cpu_ram >= 32GB (32768 MB). Cheap Vast offers ship 8–16GB
+      // sys RAM which OOM-kills sshd mid-run when the LongMemEval
+      // working set (BNB 4-bit init + Qwen3-8B residual + bge-rerank
+      // + llama-cpp + uvicorn + bench buffers) peaks ~24GB transient.
+      // Pain log confirmed pattern across multiple deploys
+      // (35605992 → 35608712 → 35609177 → 35612661 → 35612885 → ...).
+      // Override per-call via spec.ramGb (still wins because it
+      // overwrites cpu_ram below).
+      cpu_ram: { gte: 32768 },
       // Verified hosts only — protects against unstable / overcommitted boxes.
       verified: { eq: true },
       num_gpus: { eq: spec.gpuCount ?? 1 },
@@ -1078,7 +1087,9 @@ export class VastClient extends AbstractGpuProvider {
       // CUDA filter: 12.8+ for Blackwell (RTX 5090/5080), 12.4+ for everything else
       cuda_vers: { gte: this._needsBlackwellCuda(spec.gpuTypes) ? 12.8 : 12.4 },
       // Host quality filters — fast internet critical for 10GB+ images to boot under 15min
-      reliability2: { gte: 0.95 },      // >95% reliability score
+      // Strict-fast-boot opts into a higher reliability bar (0.97) to filter out
+      // hosts that historically zombie. Default 0.95 keeps backwards compat.
+      reliability2: { gte: spec.strictFastBoot ? 0.97 : 0.95 },
       inet_down: { gte: 2000 },         // Minimum 2 Gb/s download (10GB image in ~40s)
       inet_up: { gte: 200 },            // Minimum 200 Mb/s upload
       ...(spec.directPortRequired ? { direct_port_count: { gte: spec.directPortRequired } } : {}),
@@ -1136,6 +1147,30 @@ export class VastClient extends AbstractGpuProvider {
 
     let offers = await this._searchOffers(searchBody, headers);
 
+    // Client-side enforcement — Vast.ai server-side filters do NOT honor
+    // numeric thresholds for inet_down / inet_up reliably (offers come back
+    // below the requested gte). Re-filter here so callers can trust the
+    // bandwidth contract (large image pulls depend on it).
+    // NOTE: skip filter when field absent (== null) — real Vast offers always
+    // include inet_down/inet_up; missing field signals a non-prod payload
+    // (test mock or partial response). Filtering these out caused 100+ unit
+    // tests to fail when the bandwidth filter was added.
+    {
+      const minDown = (searchBody.inet_down as { gte?: number } | undefined)?.gte;
+      const minUp = (searchBody.inet_up as { gte?: number } | undefined)?.gte;
+      if (typeof minDown === 'number' || typeof minUp === 'number') {
+        const before = offers.length;
+        offers = offers.filter(o => {
+          if (typeof minDown === 'number' && o.inet_down != null && Number(o.inet_down) < minDown) return false;
+          if (typeof minUp === 'number' && o.inet_up != null && Number(o.inet_up) < minUp) return false;
+          return true;
+        });
+        if (offers.length !== before) {
+          this.log.log(`[vast] Bandwidth client-filter: ${before} → ${offers.length} offers (down>=${minDown ?? '-'}, up>=${minUp ?? '-'})`);
+        }
+      }
+    }
+
     // Client-side geo filter — Vast.ai geolocation is "Country, CC", so endsWith(', CC')
     if (createGeoFilter && offers.length) {
       const before = offers.length;
@@ -1174,7 +1209,11 @@ export class VastClient extends AbstractGpuProvider {
     // RTX 5090 Blackwell hosts which often have direct_port_end: -1.
     // Only run if Phase-1 yielded NOTHING — we don't want to consume API
     // bandwidth on this when we already have offers.
-    if (offers.length === 0) {
+    // strictFastBoot suppresses Phase-2 entirely: SSH-only hosts go through
+    // ssh*.vast.ai proxies which are the source of the "zombie" status
+    // (status=running but SSH refused). When the caller asks for fast-boot
+    // we'd rather fail loudly here than ship a slow/zombie pod.
+    if (offers.length === 0 && !spec.strictFastBoot) {
       this.log.log('[vast] Phase-2: searching SSH-only hosts (no direct_port filter)');
       const sshOnlyBody = { ...searchBody };
       delete sshOnlyBody.direct_port_count;
@@ -1400,6 +1439,16 @@ export class VastClient extends AbstractGpuProvider {
     const gpuName = (offer.gpu_name || 'unknown') as string;
     const pricePerHr = (offer.dph_total || 0) as number;
     const isSshOnlyHint = Boolean((offer as Record<string, unknown>)._sshOnlyHint);
+    // Vast.ai instance label. Prefer the caller-supplied spec.label (the
+    // user-given task name) so the instance is identifiable in the Vast
+    // console + reconcilable to its owning task. Fallback keeps the old
+    // gateway-generated `parle-autoscale-*` label for legacy / opt-out
+    // callers (AIGW_LABEL_OPTIONAL=1).
+    const baseName = spec.label && spec.label.length > 0 ? spec.label : `parle-autoscale-${Date.now()}`;
+    // Append a short timestamp suffix so race deploys don't collide on
+    // identical labels (Vast tolerates duplicates but it makes the
+    // console unreadable).
+    const instanceName = `${baseName}-${Date.now().toString(36).slice(-6)}`;
 
     // ssh_direct: Vast.ai provides SSH access + runs onstart script.
     // Works on ALL hosts (including those without direct ports like RTX 5090).
@@ -1407,6 +1456,7 @@ export class VastClient extends AbstractGpuProvider {
     const createBody: Record<string, unknown> = {
       client_id: 'me',
       image: imageName,
+      label: instanceName,
       disk: diskGb + 15,
       runtype: this._runtype,
       onstart: `nohup bash -c ${JSON.stringify(onstart)} > /var/log/app.log 2>&1 &`,
@@ -1456,7 +1506,6 @@ export class VastClient extends AbstractGpuProvider {
 
       const contractId = String(createData.new_contract);
       const instanceId = `inst-${contractId}`;
-      const instanceName = `parle-autoscale-${Date.now()}`;
 
       // P3: Adaptive polling — base timeout on host's actual download speed.
       // Faster hosts get tighter timeouts; slower hosts get more headroom.

@@ -389,6 +389,7 @@ describe('GPU Deploy - Core Logic', () => {
   });
 
   afterEach(() => {
+    delete process.env.VAST_ACCOUNT_OWNED;
     vi.clearAllTimers();
     vi.useRealTimers();
   });
@@ -730,9 +731,32 @@ describe('GPU Deploy - Core Logic', () => {
       expect(result.terminated).toBe(0);
     });
 
-    it('Vast.ai: terminates every untracked running instance regardless of name prefix', async () => {
-      // The gateway owns the Vast.ai account — any running instance not trackedo
-      // is an orphan and must be terminated, even without the gateway name prefix.
+    it('Vast.ai: defaults to preserving untracked manual instances without a gateway prefix', async () => {
+      (stateMock as any).deployVastApiKey = 'vast-key';
+      getState().podId = '';
+
+      vi.mocked(providersMock.vast.listInstances).mockResolvedValue([
+        { instanceId: 'vast-foreign-1', instanceName: 'my-manual-vm', status: 'running' },
+        { instanceId: 'vast-unnamed', instanceName: '', status: 'running' },
+        { instanceId: 'vast-gateway', instanceName: 'parle-autoscale-x', status: 'running' },
+      ] as any);
+
+      const result = await gpuDeploy.sweepOrphanInstances();
+
+      expect(result.found).toBe(1);
+      expect(result.terminated).toBe(1);
+      expect(providersMock.vast.deleteInstance).not.toHaveBeenCalledWith('vast-foreign-1', expect.any(Object));
+      expect(providersMock.vast.deleteInstance).not.toHaveBeenCalledWith('vast-unnamed', expect.any(Object));
+      expect(providersMock.vast.deleteInstance).toHaveBeenCalledWith('vast-gateway', expect.any(Object));
+
+      (stateMock as any).deployVastApiKey = '';
+    });
+
+    it('Vast.ai: VAST_ACCOUNT_OWNED=1 + AIGW_VAST_NUKE_UNTRACKED=1 restores kill-all cleanup for dedicated accounts', async () => {
+      // Post-incident-2026-04-26: double-flag policy. Only enabling
+      // VAST_ACCOUNT_OWNED (without explicit nuke opt-in) keeps prefix filter on.
+      process.env.VAST_ACCOUNT_OWNED = '1';
+      process.env.AIGW_VAST_NUKE_UNTRACKED = '1';
       (stateMock as any).deployVastApiKey = 'vast-key';
       getState().podId = '';
 
@@ -750,6 +774,8 @@ describe('GPU Deploy - Core Logic', () => {
       expect(providersMock.vast.deleteInstance).toHaveBeenCalledWith('vast-unnamed', expect.any(Object));
       expect(providersMock.vast.deleteInstance).toHaveBeenCalledWith('vast-gateway', expect.any(Object));
 
+      delete process.env.VAST_ACCOUNT_OWNED;
+      delete process.env.AIGW_VAST_NUKE_UNTRACKED;
       (stateMock as any).deployVastApiKey = '';
     });
 
@@ -758,8 +784,8 @@ describe('GPU Deploy - Core Logic', () => {
       getState().podId = 'vast-active';
 
       vi.mocked(providersMock.vast.listInstances).mockResolvedValue([
-        { instanceId: 'vast-active', instanceName: 'anything', status: 'running' },
-        { instanceId: 'vast-other', instanceName: 'anything-else', status: 'running' },
+        { instanceId: 'vast-active', instanceName: 'parle-autoscale-active', status: 'running' },
+        { instanceId: 'vast-other', instanceName: 'parle-autoscale-other', status: 'running' },
       ] as any);
 
       const result = await gpuDeploy.sweepOrphanInstances();

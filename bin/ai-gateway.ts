@@ -18,7 +18,7 @@
 
 import { readFileSync, writeFileSync, existsSync, createWriteStream, createReadStream, mkdirSync, statSync, readdirSync, unlinkSync } from 'fs';
 import { resolve, dirname, join } from 'path';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { createHash } from 'crypto';
 
 // ── Colors (minimal, no deps) ────────────────────────────────────────────
@@ -40,9 +40,57 @@ const VERSION = '0.1.0';
 
 const DEFAULT_URL = 'http://localhost:4000';
 
+/**
+ * Load `.env` from the current working directory (and walk up to git root) so
+ * an app's per-project `AIGW_APP_KEY` is picked up automatically without the
+ * operator having to source it manually. Idempotent — safe to call repeatedly.
+ *
+ * Only sets vars NOT already in the parent env so an explicit
+ * `AIGW_APP_KEY=... ai-gateway gpu list` always wins.
+ */
+let _envLoaded = false;
+function loadCwdEnv(): void {
+  if (_envLoaded) return;
+  _envLoaded = true;
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    let dir = process.cwd();
+    for (let depth = 0; depth < 6; depth++) {
+      const envPath = path.join(dir, '.env');
+      if (fs.existsSync(envPath)) {
+        const content = fs.readFileSync(envPath, 'utf8') as string;
+        for (const line of content.split('\n')) {
+          const m = line.match(/^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
+          if (!m) continue;
+          const k = m[1];
+          let v = m[2];
+          // Strip surrounding quotes; Bun's auto-loader does the same.
+          if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+            v = v.slice(1, -1);
+          }
+          if (process.env[k] === undefined) process.env[k] = v;
+        }
+        return;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) return;
+      dir = parent;
+    }
+  } catch {
+    // Best effort — never let env loading crash the CLI.
+  }
+}
+
 function getConfig(): { url: string; key: string } {
+  loadCwdEnv();
   const url = process.env.AI_GATEWAY_URL || process.env.GATEWAY_URL || DEFAULT_URL;
-  const key = process.env.AI_GATEWAY_KEY || process.env.GATEWAY_API_KEY || '';
+  // AIGW_APP_KEY is the per-app credential (preferred); the older names
+  // remain accepted for back-compat with shared "operator" keys.
+  const key = process.env.AIGW_APP_KEY
+    || process.env.AI_GATEWAY_KEY
+    || process.env.GATEWAY_API_KEY
+    || '';
   return { url, key };
 }
 
@@ -497,7 +545,110 @@ async function cmdGpuStatus() {
   if (data.gpuHealthy !== undefined) console.log(`  healthy:   ${data.gpuHealthy}`);
 }
 
-async function cmdGpuDeploy(opts: { image?: string; gpuTypes?: string; onstart?: string; storageGb?: number; env?: string; numGpus?: number; devMode?: boolean; readinessProbe?: string }) {
+/**
+ * Owner identity for label-based ownership guard. Auto-prefixes deploy labels
+ * and authorizes terminates. Override with AIGW_OWNER if running under a
+ * shared automation account (autopilot, CI). Format kept short so it doesn't
+ * dominate `gpu list` output.
+ */
+function currentOwner(): string {
+  // Order of precedence — must align with the server's resolved userId
+  // (set in GATEWAY_API_KEYS as "key:userId") so the CLI auto-prefix and
+  // the server-side per-app filter agree on the owner namespace:
+  //   1. Explicit AIGW_OWNER (escape hatch for testing)
+  //   2. AIGW_APP_NAME from cwd .env (= the userId registered in GATEWAY_API_KEYS)
+  //   3. $USER (legacy fallback for unauthenticated/loopback dev)
+  loadCwdEnv();
+  if (process.env.AIGW_OWNER) return process.env.AIGW_OWNER;
+  if (process.env.AIGW_APP_NAME) return process.env.AIGW_APP_NAME;
+  return process.env.USER || process.env.LOGNAME || 'unknown';
+}
+
+/** `ai-gateway app <subcmd>` dispatcher — per-app API key management. */
+async function cmdAppDispatch(sub: string, args: string[]): Promise<void> {
+  switch (sub) {
+    case 'init': {
+      const name = args[0];
+      if (!name || name.startsWith('-')) {
+        console.error('Usage: ai-gateway app init <app-name>');
+        console.error('       app-name must match [a-zA-Z0-9_-]+ and is what the gateway will return as your userId.');
+        process.exit(1);
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+        console.error(`Invalid app-name "${name}" — must match [a-zA-Z0-9_-]+`);
+        process.exit(1);
+      }
+      const fs = require('fs');
+      const path = require('path');
+      const crypto = require('crypto');
+      // Embed the app name in the key itself so a leaked Bearer is
+      // self-identifying (operator can grep logs/.env files by appName
+      // without needing the registry mapping). Format: aigw_<name>_<rand>.
+      const key = `aigw_${name}_${crypto.randomBytes(24).toString('base64url')}`;
+      const envPath = path.join(process.cwd(), '.env');
+      let existing = '';
+      try { existing = fs.readFileSync(envPath, 'utf8'); } catch { /* new file */ }
+      // Replace any existing AIGW_APP_KEY line so re-running init upgrades cleanly.
+      const stripped = existing
+        .split('\n')
+        .filter((l: string) => !l.match(/^\s*AIGW_APP_KEY\s*=/) && !l.match(/^\s*AIGW_APP_NAME\s*=/))
+        .join('\n');
+      const updated = (stripped && !stripped.endsWith('\n') ? stripped + '\n' : stripped)
+        + `AIGW_APP_NAME=${name}\nAIGW_APP_KEY=${key}\n`;
+      fs.writeFileSync(envPath, updated, { mode: 0o600 });
+      console.log(`Wrote ${envPath} (mode 0600) with AIGW_APP_NAME=${name} and a new AIGW_APP_KEY.`);
+      console.log('');
+      console.log('Next: register this key with the gateway by appending to its .env');
+      console.log(`(${'~/projects/ai-gateway/.env'} or wherever GATEWAY_API_KEYS is set):`);
+      console.log('');
+      console.log(`    GATEWAY_API_KEYS="$GATEWAY_API_KEYS,${key}:${name}"`);
+      console.log('');
+      console.log('then restart the ws-server (scripts/start-ws-server.sh --detach).');
+      console.log(`Verify with: ai-gateway app whoami`);
+      return;
+    }
+    case 'whoami': {
+      const { url, key } = getConfig();
+      if (!key) { console.log('Not authenticated (no AIGW_APP_KEY in env)'); process.exit(2); }
+      try {
+        const res = await fetch(`${url}/v1/gpu/list`, { headers: headers(key) });
+        if (res.status === 401) {
+          console.error(`Unauthenticated: gateway rejected the key. Is it registered in GATEWAY_API_KEYS?`);
+          process.exit(2);
+        }
+        const data = await res.json() as { scopedTo?: string; totalAcrossApps?: number; instances?: unknown[] };
+        if (data.scopedTo) {
+          console.log(`Authenticated as: ${data.scopedTo}`);
+          console.log(`Visible instances: ${data.instances?.length ?? 0} (of ${data.totalAcrossApps ?? '?'} total across all apps)`);
+        } else {
+          console.log('Authenticated as: admin (no per-app scope)');
+          console.log(`Visible instances: ${data.instances?.length ?? 0}`);
+        }
+      } catch (e) {
+        console.error(`whoami failed: ${e instanceof Error ? e.message : e}`);
+        process.exit(1);
+      }
+      return;
+    }
+    case 'key': {
+      loadCwdEnv();
+      const k = process.env.AIGW_APP_KEY || process.env.AI_GATEWAY_KEY || process.env.GATEWAY_API_KEY || '';
+      if (!k) { console.log('(no key configured)'); return; }
+      const reveal = args.includes('--reveal');
+      console.log(reveal ? k : `${k.slice(0, 8)}…${k.slice(-4)}`);
+      return;
+    }
+    default:
+      console.error(`Unknown app subcommand: ${sub}. Try: app help`);
+      process.exit(1);
+  }
+}
+
+async function cmdGpuDeploy(opts: {
+  image?: string; gpuTypes?: string; onstart?: string; storageGb?: number;
+  env?: string; numGpus?: number; devMode?: boolean; readinessProbe?: string;
+  label?: string; strictFastBoot?: boolean;
+}) {
   const { url, key } = getConfig();
   const body: Record<string, unknown> = {};
   if (opts.image) body.dockerImage = opts.image;
@@ -507,6 +658,23 @@ async function cmdGpuDeploy(opts: { image?: string; gpuTypes?: string; onstart?:
   if (opts.numGpus) body.gpuCount = opts.numGpus;
   if (opts.devMode) body.devMode = true;
   if (opts.readinessProbe === 'ssh' || opts.readinessProbe === 'health') body.readinessProbe = opts.readinessProbe;
+  // --label and --strict-fast-boot threading. Label is required by the
+  // server unless AIGW_LABEL_OPTIONAL=1 — surface a friendlier CLI error
+  // before the HTTP round-trip so the user sees it immediately.
+  // Auto-prefix labels with the current owner ("$USER/...") when missing
+  // a slash, so `gpu list` and the terminate guard can identify owner
+  // without operators having to remember the convention. Bypass with a
+  // label that already contains a slash (treated as opt-in explicit owner).
+  if (opts.label !== undefined) {
+    const owner = currentOwner();
+    body.label = opts.label.includes('/') ? opts.label : `${owner}/${opts.label}`;
+  }
+  if (opts.strictFastBoot === false) body.strictFastBoot = false;
+  if (!opts.label && !process.env.AIGW_LABEL_OPTIONAL) {
+    console.error('Error: --label is required. Pass --label "<task-name>" describing what this GPU is for.');
+    console.error('       Bypass with AIGW_LABEL_OPTIONAL=1 (legacy/CI only — discouraged).');
+    process.exit(2);
+  }
   if (opts.env) {
     const envMap: Record<string, string> = {};
     for (const pair of opts.env.split(',')) {
@@ -583,7 +751,7 @@ import {
   pickProbeTarget,
 } from '../src/gateway/providers/gpu/livenessProbe';
 
-async function cmdGpuList(opts: { probe?: boolean; json?: boolean } = {}) {
+async function cmdGpuList(opts: { probe?: boolean; json?: boolean; mine?: boolean; label?: string } = {}) {
   const { url, key } = getConfig();
   const res = await fetch(`${url}/v1/gpu/list`, { headers: headers(key) });
   if (res.status === 404) {
@@ -591,12 +759,50 @@ async function cmdGpuList(opts: { probe?: boolean; json?: boolean } = {}) {
     return;
   }
   const data = await res.json();
-  const instances: Record<string, unknown>[] = Array.isArray(data) ? data : (data.instances || []);
+  let instances: Record<string, unknown>[] = Array.isArray(data) ? data : (data.instances || []);
+
+  // --mine / --label filter happens client-side because the server's
+  // /v1/gpu/list doesn't yet accept query params. When the filter
+  // matches zero instances we still print the count so the operator
+  // knows the filter was applied (vs an actually-empty pool).
+  const totalBeforeFilter = instances.length;
+  // The server projects the provider's instance label as `instanceName`
+  // (vast.ai's `inst.label` field). Treat that as the source of truth
+  // for ownership; fall back to a separate `label` field if the server
+  // ever exposes one for the deployState branch.
+  const labelOf = (inst: Record<string, unknown>): string => {
+    const lbl = (inst as { label?: string; instanceName?: string }).label
+      ?? (inst as { instanceName?: string }).instanceName
+      ?? '';
+    // Skip placeholder labels that just echo the instanceId — they
+    // carry no ownership signal and would falsely match nothing.
+    if (lbl === inst.instanceId || lbl === inst.podId) return '';
+    return lbl;
+  };
+  if (opts.mine || opts.label) {
+    const owner = currentOwner();
+    const wantLabel = opts.label;
+    instances = instances.filter((inst) => {
+      const label = labelOf(inst);
+      if (opts.mine && !label.startsWith(`${owner}/`)) return false;
+      if (wantLabel) {
+        try {
+          if (!new RegExp(wantLabel).test(label)) return false;
+        } catch {
+          if (!label.includes(wantLabel)) return false;
+        }
+      }
+      return true;
+    });
+  }
   if (instances.length === 0) {
     if (opts.json) {
       console.log(JSON.stringify({ instances: [] }));
     } else {
-      console.log('No active GPU instances.');
+      const filterDesc = opts.mine || opts.label
+        ? ` matching filter (${totalBeforeFilter} total in pool)`
+        : '';
+      console.log(`No active GPU instances${filterDesc}.`);
     }
     return;
   }
@@ -620,10 +826,19 @@ async function cmdGpuList(opts: { probe?: boolean; json?: boolean } = {}) {
     return;
   }
 
-  console.log(`${instances.length} active instance(s):\n`);
+  const filterNote = (opts.mine || opts.label)
+    ? ` (filtered from ${totalBeforeFilter})`
+    : '';
+  console.log(`${instances.length} active instance(s)${filterNote}:\n`);
   for (const inst of instances) {
     console.log(`  ${inst.instanceId || inst.podId || '?'}`);
     if (inst.deployId) console.log(`    deployId:  ${inst.deployId}`);
+    // Label = ownership marker. Print prominently so cross-project terminates
+    // can be spotted before they happen.
+    {
+      const lbl = labelOf(inst);
+      if (lbl) console.log(`    label:     ${lbl}`);
+    }
     if (inst.provider) console.log(`    provider:  ${inst.provider}`);
     if (inst.gpuType || inst.gpuName) console.log(`    gpu:       ${inst.gpuType || inst.gpuName}`);
     if (inst.status) console.log(`    status:    ${inst.status}`);
@@ -781,8 +996,43 @@ async function cmdGpuWait(opts: { instance: string; timeout?: number; intervalSe
   process.exit(1);
 }
 
-async function cmdGpuTerminate(instanceId: string, opts: { provider?: string; deployId?: string }) {
+async function cmdGpuTerminate(instanceId: string, opts: { provider?: string; deployId?: string; force?: boolean }) {
   const { url, key } = getConfig();
+  // Cross-project terminate guard: refuse to destroy an instance whose
+  // label is owned by another user/project unless --force is passed.
+  // Looks up the instance in /v1/gpu/list so we don't have to add a
+  // dedicated "describe" endpoint server-side. Fails open (allow) when
+  // the list endpoint is unreachable so a degraded gateway doesn't
+  // strand legitimate cleanups.
+  if (!opts.force) {
+    try {
+      const listRes = await fetch(`${url}/v1/gpu/list`, { headers: headers(key) });
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        const all: Record<string, unknown>[] = Array.isArray(listData) ? listData : (listData.instances || []);
+        const target = all.find((inst) => (inst.instanceId || inst.podId) === instanceId);
+        const rawLabel = target
+          ? ((target as { label?: string; instanceName?: string }).label
+              ?? (target as { instanceName?: string }).instanceName
+              ?? '')
+          : '';
+        // Ignore the placeholder where instanceName just echoes instanceId.
+        const label = (target && (rawLabel === target.instanceId || rawLabel === target.podId)) ? '' : rawLabel;
+        if (label.includes('/')) {
+          const owner = currentOwner();
+          const labelOwner = label.split('/', 1)[0];
+          if (labelOwner !== owner) {
+            console.error(`Refusing terminate: instance ${instanceId} is owned by '${labelOwner}' (label="${label}").`);
+            console.error(`Current operator is '${owner}'. Pass --force to terminate anyway,`);
+            console.error(`or set AIGW_OWNER=${labelOwner} if you legitimately own that label.`);
+            process.exit(3);
+          }
+        }
+      }
+    } catch {
+      // see comment above — fail open
+    }
+  }
   const body: Record<string, string> = {};
   if (opts.provider) body.provider = opts.provider;
   if (opts.deployId) body.deployId = opts.deployId;
@@ -800,6 +1050,1873 @@ async function cmdGpuTerminate(instanceId: string, opts: { provider?: string; de
     process.exit(1);
   }
   console.log(`Instance ${instanceId} terminated.`);
+}
+
+// ── GPU jobs — provision cheapest GPU, run a job, pull artifacts, terminate ─
+//
+// One-shot job lifecycle:
+//   1. Pick cheapest GPU offer matching --gpu (default: 4090) under --max-cost
+//   2. Deploy via existing /v1/gpu/deploy (auto-cascade)
+//   3. Wait ready
+//   4. Upload local --path to /workspace OR git clone --repo
+//   5. Run --main inside /workspace, stream logs
+//   6. Pull /workspace back to --output
+//   7. Terminate instance (always, even on error)
+//
+// Designed for cost-sensitive batch jobs (TTS finetune, ASR eval, etc.) where
+// you don't want a long-lived dev box. Auto-terminate prevents orphan spend.
+interface GpuJobOpts {
+  repo?: string;
+  path?: string;
+  main: string;
+  gpu?: string;
+  maxCost?: number;
+  output?: string;
+  timeoutMin?: number;
+  image?: string;
+  keepAlive?: boolean;        // never terminate (success or failure)
+  terminateOnError?: boolean; // OPT-IN destroy on error. Default: keep alive on error so user can SSH-debug.
+  env?: string;
+  pullEveryMin?: number;      // periodic mid-run rsync /workspace → output (default 10; 0 disables)
+  dryRun?: boolean;           // pick offer + print plan; never spend money
+  stallMin?: number;          // warn if /workspace mtime unchanged for N min (default 30; 0 disables)
+  maxSpend?: number;          // hard $ cap. polls cost; force-terminates when exceeded
+  pullExclude?: string[];     // rsync --exclude paths (skip /root/.cache, dataset/, etc)
+  preferSpot?: boolean;       // ask vast/runpod for interruptible (≈30-50% cheaper)
+  reuseInstance?: boolean;    // skip provisioning if a live owner-tagged instance with same image exists
+  abortOnDivergence?: boolean; // tail /workspace/.job.log for loss=X; abort if NaN/Inf or 5× initial
+  gpuFallback?: boolean;      // walk cheaper-GPU ladder if primary unavailable @ maxCost
+}
+
+// Persist last job's instance info so subsequent jobs ssh/sync/pull/cleanup
+// can target it without arg-passing.
+function jobStatePath(): string {
+  const home = process.env.HOME || '/tmp';
+  return join(home, '.babelcast', 'last_job.json');
+}
+function jobHistoryPath(): string {
+  const home = process.env.HOME || '/tmp';
+  return join(home, '.babelcast', 'jobs-history.jsonl');
+}
+function appendJobHistory(entry: Record<string, unknown>): void {
+  try {
+    const p = jobHistoryPath();
+    mkdirSync(dirname(p), { recursive: true });
+    const line = JSON.stringify(entry) + '\n';
+    if (existsSync(p)) {
+      const cur = readFileSync(p, 'utf-8');
+      writeFileSync(p, cur + line);
+    } else {
+      writeFileSync(p, line);
+    }
+  } catch { /* best effort */ }
+}
+function saveJobState(state: Record<string, unknown>): void {
+  try {
+    const p = jobStatePath();
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify(state, null, 2));
+  } catch (e) {
+    console.error(`  ⚠ could not save job state: ${(e as Error).message}`);
+  }
+}
+function loadJobState(): Record<string, unknown> | null {
+  try {
+    const p = jobStatePath();
+    if (!existsSync(p)) return null;
+    return JSON.parse(readFileSync(p, 'utf-8'));
+  } catch { return null; }
+}
+
+async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
+  const { url, key } = getConfig();
+  if (!opts.repo && !opts.path) {
+    console.error('Need --repo <url> OR --path <local-dir>');
+    process.exit(1);
+  }
+  const gpuFilter = String(opts.gpu || '4090');
+  const maxCost = opts.maxCost ?? 0.5;
+  const outputDir = opts.output || './job_output';
+  const timeoutMin = opts.timeoutMin ?? 60;
+  const image = opts.image || 'marcosremar/gpu-dev:latest';
+
+  // Cheaper-GPU fallback ladder (--gpu-fallback). Used when primary unavailable
+  // OR over budget. Order = preferred → cheaper alternatives by VRAM/perf class.
+  const FALLBACK: Record<string, string[]> = {
+    '5090': ['5090', '4090', 'A6000', 'A5000'],
+    '4090': ['4090', '3090', 'A5000', '4080'],
+    '4080': ['4080', '3090', 'A5000', 'A4000'],
+    '3090': ['3090', 'A5000', 'A4000'],
+    'A6000': ['A6000', 'A5000', 'A40'],
+    'A5000': ['A5000', 'A4000', '3090'],
+    'A100': ['A100', 'A6000', 'L40S'],
+    'L40S': ['L40S', 'A6000', 'A100'],
+  };
+
+  // 1. Find cheapest matching offer.
+  // Don't pass gpuTypes — server expects exact "NVIDIA GeForce RTX 4090" string,
+  // and we want substring matching. Fetch unfiltered + filter client-side.
+  console.log(`${c.cyan}[1/6]${c.reset} Finding cheapest GPU (filter=${gpuFilter}, max=$${maxCost}/h)...`);
+  const offerRes = await fetch(`${url}/v1/gpu/offers?limit=100`, {
+    headers: headers(key),
+  });
+  if (!offerRes.ok) {
+    console.error(`No offers (HTTP ${offerRes.status}). Try later.`);
+    process.exit(1);
+  }
+  const offerData = await offerRes.json();
+  const offers: Array<Record<string, unknown>> = offerData.offers ?? [];
+  // Server emits `pricePerHr` (camelCase). Older builds called it `priceHr` —
+  // accept both. GPU name is `gpuName` (display) or `gpuType` (raw).
+  const priceOf = (o: Record<string, unknown>): number => {
+    const p = (o.pricePerHr ?? o.priceHr) as number | undefined;
+    return typeof p === 'number' ? p : Number.POSITIVE_INFINITY;
+  };
+  const gpuName = (o: Record<string, unknown>): string =>
+    String(o.gpuName ?? o.gpuType ?? o.gpu ?? '?');
+
+  // Pre-filter by --gpu substring match (server may not honor the query param).
+  // With --gpu-fallback, walk the FALLBACK ladder until something affordable found.
+  const filterLc = gpuFilter.toLowerCase();
+  const fallbackOn = !!opts.gpuFallback;
+  const tryList = fallbackOn
+    ? (FALLBACK[gpuFilter.toUpperCase()] || FALLBACK[gpuFilter] || [gpuFilter])
+    : [gpuFilter];
+  let matched: Array<Record<string, unknown>> = [];
+  let usedFilter = gpuFilter;
+  for (const candidate of tryList) {
+    const lc = candidate.toLowerCase();
+    matched = lc === 'any'
+      ? offers
+      : offers.filter((o) => gpuName(o).toLowerCase().includes(lc));
+    const cheap = matched.filter((o) => priceOf(o) <= maxCost);
+    if (cheap.length > 0) {
+      usedFilter = candidate;
+      if (candidate.toLowerCase() !== filterLc) {
+        console.log(`  ${c.yellow}[fallback]${c.reset} primary '${gpuFilter}' unavailable @ $${maxCost}/h → using '${candidate}'`);
+      }
+      break;
+    }
+  }
+  const affordable = matched
+    .filter((o) => priceOf(o) <= maxCost)
+    .sort((a, b) => priceOf(a) - priceOf(b));
+  if (affordable.length === 0) {
+    console.error(`No '${gpuFilter}' offers within $${maxCost}/h.${fallbackOn ? ` Fallback chain [${tryList.join('→')}] also empty.` : ''} ` +
+                  `Pool: ${offers.length} total, ${matched.length} match '${usedFilter}'.`);
+    if (matched.length > 0) {
+      const cheapest = [...matched].sort((a, b) => priceOf(a) - priceOf(b)).slice(0, 3);
+      console.error(`Cheapest matching:`);
+      for (const o of cheapest) console.error(`  ${gpuName(o)} @ $${priceOf(o).toFixed(3)}/h on ${o.provider}`);
+    }
+    process.exit(1);
+  }
+  const pick = affordable[0];
+  const pickPrice = priceOf(pick);
+  const pickName = gpuName(pick);
+  console.log(`  picked: ${pickName} @ $${pickPrice.toFixed(3)}/h on ${pick.provider}`);
+
+  if (opts.dryRun) {
+    const timeoutMin = opts.timeoutMin ?? 60;
+    const projHi = (pickPrice * (timeoutMin / 60)).toFixed(2);
+    console.log(`\n${c.yellow}[DRY RUN]${c.reset} Plan (no money spent):`);
+    console.log(`  gpu:        ${pickName}`);
+    console.log(`  provider:   ${pick.provider}`);
+    console.log(`  price:      $${pickPrice.toFixed(3)}/h`);
+    console.log(`  image:      ${image}`);
+    console.log(`  upload:     ${opts.path ? opts.path : `git clone ${opts.repo}`}`);
+    console.log(`  main:       ${opts.main.slice(0, 100)}${opts.main.length > 100 ? '...' : ''}`);
+    console.log(`  output:     ${outputDir}`);
+    console.log(`  timeout:    ${timeoutMin}min  → projected MAX cost: $${projHi}`);
+    console.log(`  pull-every: ${opts.pullEveryMin === undefined ? 10 : opts.pullEveryMin}min`);
+    console.log(`\nRe-run without --dry-run to actually deploy.`);
+    process.exit(0);
+  }
+
+  // 2. Deploy (or reuse a live owner-tagged instance with same image)
+  let info: Record<string, unknown> | null = null;
+  let deployId: string | undefined;
+  if (opts.reuseInstance) {
+    const owner = currentOwner();
+    const listRes = await fetch(`${url}/v1/gpu/list?probe=false`, { headers: headers(key) });
+    if (listRes.ok) {
+      const data: any = await listRes.json();
+      const all: any[] = Array.isArray(data) ? data : (data.instances || []);
+      const live = all.find((i: any) => {
+        const lbl = (i.label || i.instanceName || '') as string;
+        return lbl.startsWith(`${owner}/`) && (i.sshHost || i.host) && (!image || i.image === image);
+      });
+      if (live) {
+        console.log(`${c.cyan}[2/6]${c.reset} ${c.green}REUSING${c.reset} live instance ${live.instanceId || live.podId}`);
+        info = live;
+        deployId = live.deployId;
+      }
+    }
+  }
+  if (!info) {
+    console.log(`${c.cyan}[2/6]${c.reset} Provisioning instance...`);
+    const deployBody: Record<string, unknown> = {
+      image,
+      gpuTypes: [pickName],
+    };
+    if (opts.env) deployBody.env = opts.env;
+    if (opts.preferSpot) deployBody.interruptible = true;
+    deployBody.label = `${currentOwner()}/job-${Date.now()}`;
+    const depRes = await fetch(`${url}/v1/gpu/deploy`, {
+      method: 'POST', headers: headers(key), body: JSON.stringify(deployBody),
+    });
+    if (!depRes.ok) {
+      const err = await depRes.text();
+      console.error(`Deploy failed: ${err.slice(0, 200)}`);
+      process.exit(1);
+    }
+    const dep = await depRes.json();
+    deployId = dep.deployId;
+    console.log(`  deployId: ${deployId}`);
+  }
+
+  // 3. Poll until ready (skip if reusing — already ready)
+  if (!info) {
+    console.log(`${c.cyan}[3/6]${c.reset} Waiting for instance ready (timeout=${timeoutMin}min)...`);
+    const deadline = Date.now() + timeoutMin * 60_000;
+  while (Date.now() < deadline) {
+    const stRes = await fetch(`${url}/v1/gpu/status`, { headers: headers(key) });
+    if (stRes.ok) {
+      const st = await stRes.json();
+      const phase = (st.phase || '').toString();
+      if (phase === 'ready' || st.gpuHealthy === true || st.sshHost) {
+        info = st;
+        console.log(`  ready: ${st.sshHost || 'n/a'}:${st.sshPort || 'n/a'} (${phase})`);
+        break;
+      }
+      process.stdout.write(`\r  ${phase}...                    `);
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  console.log();
+  if (!info) {
+    console.error('Instance never became ready. Terminating...');
+    await fetch(`${url}/v1/gpu/terminate`, {
+      method: 'POST', headers: headers(key),
+      body: JSON.stringify({ deployId }),
+    });
+    process.exit(1);
+  }
+  } // end if (!info) — close reuse skip block
+
+  const sshHost = info.sshHost as string;
+  const sshPort = info.sshPort as number;
+  const instanceId = (info.instanceId || info.podId) as string;
+  const sshOpts = ['-p', String(sshPort), '-o', 'StrictHostKeyChecking=accept-new',
+                   '-o', 'ConnectTimeout=10', '-o', 'LogLevel=ERROR'];
+
+  // Persist instance info so jobs ssh/sync/pull/cleanup can target it.
+  saveJobState({
+    instanceId, deployId, sshHost, sshPort,
+    localPath: opts.path ? resolve(opts.path) : null,
+    repo: opts.repo || null,
+    output: resolve(outputDir),
+    main: opts.main,
+    pricePerHr: pickPrice,
+    provider: pick.provider,
+    gpuType: pickName,
+    startedAt: new Date().toISOString(),
+  });
+
+  let exitCode = 0;
+  let pullOk = false;
+  let t0 = Date.now();
+  try {
+    // 4. Setup workspace
+    console.log(`${c.cyan}[4/6]${c.reset} Setting up workspace...`);
+    if (opts.repo) {
+      const cloneCmd = `git clone --depth 1 ${opts.repo} /workspace`;
+      const cloneRes = spawnSync('ssh', [...sshOpts, `root@${sshHost}`, cloneCmd], { stdio: 'inherit' });
+      if (cloneRes.status !== 0) throw new Error(`git clone failed`);
+    } else if (opts.path) {
+      const localPath = opts.path.replace(/\/$/, '');
+      console.log(`  rsync ${localPath} → /workspace`);
+      const upRes = spawnSync('rsync', ['-az', '--delete', '-e',
+        `ssh -p ${sshPort} -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR`,
+        `${localPath}/`, `root@${sshHost}:/workspace/`,
+      ], { stdio: 'inherit' });
+      if (upRes.status !== 0) throw new Error(`rsync upload failed`);
+    }
+
+    // 5. Run job — async so we can rsync /workspace periodically in parallel
+    const pullEveryMin = opts.pullEveryMin === undefined ? 10 : opts.pullEveryMin;
+    console.log(`${c.cyan}[5/6]${c.reset} Running job: ${opts.main}`);
+    if (pullEveryMin > 0) {
+      console.log(`  (mid-run checkpoint pull every ${pullEveryMin}min → ${outputDir})`);
+    }
+    mkdirSync(outputDir, { recursive: true });
+    // Wrap user command with tee → /workspace/.job.log so 'gpu jobs logs' can tail it
+    // even if the local terminal disconnects. PIPESTATUS preserves user-cmd exit code.
+    const runCmd = `cd /workspace && set -o pipefail; { ${opts.main}; } 2>&1 | tee /workspace/.job.log; exit \${PIPESTATUS[0]}`;
+    t0 = Date.now();
+    const child = spawn('ssh', [...sshOpts, `root@${sshHost}`, runCmd], { stdio: 'inherit' });
+    const rsyncEnv = `ssh -p ${sshPort} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o LogLevel=ERROR`;
+
+    const midPullExcludesDefault = ['.cache/', '.cache-pip/', '.huggingface/', '__pycache__/', '*.pyc'];
+    const midPullExcludes = [...midPullExcludesDefault, ...(opts.pullExclude || [])];
+    const midPullExcludeArgs = midPullExcludes.flatMap((e) => ['--exclude', e]);
+    let midRunPulling = false;
+    const doMidPull = (label: string): boolean => {
+      if (midRunPulling) return false;
+      midRunPulling = true;
+      const r = spawnSync('rsync', ['-az', '--compress-level=3', '--partial', '--inplace', ...midPullExcludeArgs, '-e', rsyncEnv,
+        `root@${sshHost}:/workspace/`, `${outputDir}/`,
+      ], { stdio: ['ignore', 'ignore', 'ignore'] });
+      const tag = r.status === 0 ? `${c.green}✓${c.reset}` : `${c.yellow}⚠${c.reset}`;
+      const dtMin = ((Date.now() - t0) / 60_000).toFixed(1);
+      process.stderr.write(`\n  [+${dtMin}min] ${label} ${tag}${r.status === 0 ? '' : ` (exit ${r.status})`}\n`);
+      midRunPulling = false;
+      return r.status === 0;
+    };
+
+    const pullTimer = pullEveryMin > 0
+      ? setInterval(() => doMidPull('mid-run pull'), pullEveryMin * 60_000)
+      : null;
+
+    // Stall watchdog — query the newest mtime under /workspace via ssh.
+    // If it stops advancing for stallMin minutes, the box is likely hung
+    // (network blip, OOM frozen kernel, deadlocked Python). Just warns —
+    // user can SIGINT, then `gpu jobs ssh` to inspect.
+    const stallMin = opts.stallMin === undefined ? 30 : opts.stallMin;
+    let lastMtime = 0;
+    let stallSinceMs = Date.now();
+    let stallWarned = false;
+    // Live divergence watcher: tail /workspace/.job.log for loss=X.
+    // Abort job if NaN/Inf OR sustained loss > 5× initial (after warmup).
+    let divergenceAborted = false;
+    const lossSamples: number[] = [];
+    let initialLoss = 0;
+    const divergenceTimer = opts.abortOnDivergence ? setInterval(() => {
+      const r = spawnSync('ssh', [...sshOpts, `root@${sshHost}`,
+        `tail -n 50 /workspace/.job.log 2>/dev/null | grep -oE 'loss=[0-9.]+' | tail -10`],
+        { encoding: 'utf-8', timeout: 10_000 });
+      const lines = (r.stdout || '').trim().split('\n').filter(Boolean);
+      for (const ln of lines) {
+        const m = ln.match(/loss=([0-9.]+)/);
+        if (!m) continue;
+        const v = parseFloat(m[1]);
+        if (!Number.isFinite(v) || isNaN(v)) {
+          divergenceAborted = true;
+          process.stderr.write(`\n${c.red}⛔ DIVERGENCE: loss = NaN/Inf — aborting${c.reset}\n`);
+          try { child.kill('SIGTERM'); } catch { /* ignore */ }
+          return;
+        }
+        if (lossSamples.length === 0) initialLoss = v;
+        lossSamples.push(v);
+        if (lossSamples.length > 20) lossSamples.shift();
+      }
+      // After 10+ samples, check if recent avg is 5× initial = diverged
+      if (lossSamples.length >= 10 && initialLoss > 0) {
+        const recentAvg = lossSamples.slice(-5).reduce((a, x) => a + x, 0) / 5;
+        if (recentAvg > 5 * initialLoss) {
+          divergenceAborted = true;
+          process.stderr.write(`\n${c.red}⛔ DIVERGENCE: loss ${recentAvg.toFixed(2)} > 5× init ${initialLoss.toFixed(2)} — aborting${c.reset}\n`);
+          try { child.kill('SIGTERM'); } catch { /* ignore */ }
+        }
+      }
+    }, 60_000) : null;
+
+    // Hard $ budget cap — polls cost every minute. Once breached, force-kill
+    // the run + terminate instance (overrides keep-alive-on-error).
+    let budgetExceeded = false;
+    const budgetTimer = (opts.maxSpend && opts.maxSpend > 0) ? setInterval(() => {
+      const elapsedH = (Date.now() - t0) / 3_600_000;
+      const spent = elapsedH * (pickPrice as number);
+      if (spent >= opts.maxSpend!) {
+        if (budgetExceeded) return;
+        budgetExceeded = true;
+        process.stderr.write(`\n${c.red}⛔ BUDGET EXCEEDED${c.reset}: spent $${spent.toFixed(2)} ≥ cap $${opts.maxSpend!.toFixed(2)} after ${elapsedH.toFixed(2)}h\n`);
+        process.stderr.write(`  killing remote job + terminating instance...\n`);
+        try { child.kill('SIGTERM'); } catch { /* ignore */ }
+      }
+    }, 60_000) : null;
+
+    const stallTimer = stallMin > 0 ? setInterval(() => {
+      const r = spawnSync('ssh', [...sshOpts, `root@${sshHost}`,
+        `find /workspace -type f -printf '%T@\\n' 2>/dev/null | sort -nr | head -1`],
+        { encoding: 'utf-8', timeout: 15_000 });
+      const mt = parseFloat((r.stdout || '0').trim());
+      if (Number.isFinite(mt) && mt > 0) {
+        if (mt > lastMtime) {
+          lastMtime = mt;
+          stallSinceMs = Date.now();
+          stallWarned = false;
+        } else {
+          const stalledMin = (Date.now() - stallSinceMs) / 60_000;
+          if (stalledMin >= stallMin && !stallWarned) {
+            process.stderr.write(`\n${c.yellow}⚠ STALL detected: /workspace mtime unchanged for ${stalledMin.toFixed(1)}min.${c.reset}\n`);
+            process.stderr.write(`  Inspect: ai-gateway gpu jobs ssh "ps aux | head -30; nvidia-smi"\n`);
+            process.stderr.write(`  Abort: Ctrl+C (state will be pulled, instance kept alive)\n`);
+            stallWarned = true;
+          }
+        }
+      }
+    }, Math.max(60_000, (stallMin / 3) * 60_000)) : null;
+
+    // SIGINT/SIGTERM handler: user hits Ctrl+C OR session dies.
+    // Pull checkpoint state AND keep instance alive so they can reconnect.
+    let aborted = false;
+    const onAbort = (sig: string) => {
+      if (aborted) return;
+      aborted = true;
+      process.stderr.write(`\n${c.yellow}[${sig}]${c.reset} aborting — pulling /workspace before exit (instance kept alive)...\n`);
+      if (pullTimer) clearInterval(pullTimer);
+      if (stallTimer) clearInterval(stallTimer);
+      if (budgetTimer) clearInterval(budgetTimer);
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
+      doMidPull('abort pull');
+      process.stderr.write(`${c.yellow}Instance ${instanceId} kept alive. Reconnect via:${c.reset}\n`);
+      process.stderr.write(`  ai-gateway gpu jobs ssh\n`);
+      process.stderr.write(`  ai-gateway gpu jobs cleanup --force   # when done\n`);
+      process.exit(130);
+    };
+    process.on('SIGINT', () => onAbort('SIGINT'));
+    process.on('SIGTERM', () => onAbort('SIGTERM'));
+    process.on('SIGHUP', () => onAbort('SIGHUP'));
+
+    const runStatus: number = await new Promise((resolve) => {
+      child.on('exit', (code) => resolve(code ?? 0));
+      child.on('error', () => resolve(1));
+    });
+    if (pullTimer) clearInterval(pullTimer);
+    if (stallTimer) clearInterval(stallTimer);
+    if (budgetTimer) clearInterval(budgetTimer);
+    if (divergenceTimer) clearInterval(divergenceTimer);
+    process.removeAllListeners('SIGINT');
+    process.removeAllListeners('SIGTERM');
+    process.removeAllListeners('SIGHUP');
+    const dt = ((Date.now() - t0) / 60_000).toFixed(1);
+    console.log(`  job exit code: ${runStatus} (${dt}min)`);
+    if (runStatus !== 0) exitCode = runStatus || 1;
+    // Budget breach forces terminate even on default keep-alive.
+    if (budgetExceeded || divergenceAborted) opts.terminateOnError = true;
+  } catch (e) {
+    console.error(`${c.red}Job error:${c.reset} ${(e as Error).message}`);
+    exitCode = 1;
+  } finally {
+    // 6. ALWAYS pull /workspace back (success OR failure). Retries up to 3x
+    // because workspace contains the work product — losing it on failure
+    // means paying for the GPU run twice.
+    console.log(`${c.cyan}[6/6]${c.reset} Pulling /workspace → ${outputDir} (always, even on failure)...`);
+    try {
+      mkdirSync(outputDir, { recursive: true });
+      const rsyncEnv = `ssh -p ${sshPort} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o LogLevel=ERROR`;
+      // Build exclude args. Default skips well-known cache/data dirs that bloat pulls.
+      const excludesDefault = ['.cache/', '.cache-pip/', '.huggingface/', '__pycache__/', '*.pyc'];
+      const excludes = [...excludesDefault, ...(opts.pullExclude || [])];
+      const excludeArgs = excludes.flatMap((e) => ['--exclude', e]);
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const pullRes = spawnSync('rsync', ['-az', '--compress-level=3', '--partial', '--inplace', ...excludeArgs, '-e', rsyncEnv,
+          `root@${sshHost}:/workspace/`, `${outputDir}/`,
+        ], { stdio: 'inherit' });
+        if (pullRes.status === 0) { pullOk = true; break; }
+        console.error(`  ⚠ pull attempt ${attempt}/3 failed (exit=${pullRes.status})`);
+        if (attempt < 3) {
+          const waitMs = 5000 * attempt;
+          console.error(`  retrying in ${waitMs / 1000}s...`);
+          await new Promise((r) => setTimeout(r, waitMs));
+        }
+      }
+      if (pullOk) {
+        const pulledCount = (() => {
+          try {
+            return readdirSync(outputDir).length;
+          } catch { return -1; }
+        })();
+        console.log(`  ${c.green}✓${c.reset} pulled ${pulledCount >= 0 ? pulledCount + ' entries' : 'OK'} → ${outputDir}`);
+      } else {
+        console.error(`  ${c.red}✗ pull failed after 3 attempts. Files still on /workspace.${c.reset}`);
+        console.error(`  ${c.yellow}Forcing keep-alive so you can retry: ai-gateway gpu jobs pull${c.reset}`);
+      }
+    } catch (pullErr) {
+      console.error(`  ${c.red}pull threw:${c.reset} ${(pullErr as Error).message}`);
+    }
+
+    const failed = exitCode !== 0;
+    // SAFETY: never terminate if pull failed — would lose the workspace.
+    const shouldTerminate = !pullOk
+      ? false
+      : opts.keepAlive
+        ? false
+        : (failed ? !!opts.terminateOnError : true);
+
+    if (!shouldTerminate) {
+      const reason = !pullOk ? 'pull failed (data not yet local)'
+        : opts.keepAlive ? '--keep-alive'
+        : 'job failed (default: keep alive on error)';
+      const sshUserHost = `root@${sshHost}`;
+      const localPath = opts.path ? resolve(opts.path) : null;
+      console.log(`\n${c.yellow}╭─── Instance kept alive (${reason}) ───────────────────${c.reset}`);
+      console.log(`${c.yellow}│${c.reset} instance: ${instanceId}`);
+      console.log(`${c.yellow}│${c.reset} ssh:      ssh -p ${sshPort} ${sshUserHost}`);
+      console.log(`${c.yellow}│${c.reset} workspace: /workspace  (on remote)`);
+      if (localPath) {
+        console.log(`${c.yellow}│${c.reset} push local → remote:`);
+        console.log(`${c.yellow}│${c.reset}   rsync -az --delete -e "ssh -p ${sshPort}" "${localPath}/" "${sshUserHost}:/workspace/"`);
+        console.log(`${c.yellow}│${c.reset}   ai-gateway gpu jobs sync       # convenience wrapper`);
+      }
+      console.log(`${c.yellow}│${c.reset} pull remote → local:`);
+      console.log(`${c.yellow}│${c.reset}   ai-gateway gpu jobs pull         # convenience wrapper`);
+      console.log(`${c.yellow}│${c.reset} re-run main:`);
+      console.log(`${c.yellow}│${c.reset}   ai-gateway gpu jobs exec --main "<cmd>"`);
+      console.log(`${c.yellow}│${c.reset} when done: ai-gateway gpu jobs cleanup`);
+      console.log(`${c.yellow}╰────────────────────────────────────────────────${c.reset}`);
+      console.log(`  ${c.dim}(state saved to ~/.babelcast/last_job.json)${c.reset}`);
+    } else {
+      console.log(`${c.cyan}[cleanup]${c.reset} Terminating ${instanceId}...`);
+      const termRes = await fetch(`${url}/v1/gpu/terminate`, {
+        method: 'POST', headers: headers(key),
+        body: JSON.stringify({ instanceId, deployId }),
+      });
+      if (termRes.ok) console.log(`  ${c.green}✓${c.reset} terminated`);
+      else console.error(`  ${c.red}terminate may have failed${c.reset}`);
+      // Wipe state since instance is gone, append final entry to history
+      const elapsedH = (Date.now() - t0) / 3_600_000;
+      appendJobHistory({
+        instanceId, deployId, gpuType: pickName, provider: pick.provider,
+        pricePerHr: pickPrice, elapsedH, spentUsd: elapsedH * pickPrice,
+        success: exitCode === 0, budgetExceeded,
+        startedAt: new Date(t0).toISOString(),
+        endedAt: new Date().toISOString(),
+        main: opts.main.slice(0, 200),
+      });
+      try { unlinkSync(jobStatePath()); } catch { /* ignore */ }
+    }
+  }
+
+  console.log(`\n${exitCode === 0 ? c.green + '✓ Job completed' : c.red + '✗ Job failed'}${c.reset}`);
+  console.log(`  output: ${outputDir}`);
+  process.exit(exitCode);
+}
+
+// ── jobs ssh / sync / pull / exec / cleanup — operate on saved last_job state ──
+function requireJobState(): Record<string, unknown> {
+  const s = loadJobState();
+  if (!s) {
+    console.error(`No saved job state. Run 'ai-gateway gpu jobs run ...' first.`);
+    process.exit(1);
+  }
+  return s;
+}
+
+async function cmdGpuJobsSsh(extraCmd?: string): Promise<void> {
+  const s = requireJobState();
+  const args = ['-p', String(s.sshPort), '-o', 'StrictHostKeyChecking=accept-new',
+                '-o', 'LogLevel=ERROR', `root@${s.sshHost}`];
+  if (extraCmd) args.push(extraCmd);
+  const r = spawnSync('ssh', args, { stdio: 'inherit' });
+  process.exit(r.status || 0);
+}
+
+async function cmdGpuJobsSync(localOverride?: string): Promise<void> {
+  const s = requireJobState();
+  const local = localOverride || (s.localPath as string | null);
+  if (!local) {
+    console.error(`No localPath in saved state. Pass <local-dir> as positional arg.`);
+    process.exit(1);
+  }
+  console.log(`rsync ${local} → ${s.sshHost}:/workspace`);
+  const r = spawnSync('rsync', ['-az', '--delete', '-e',
+    `ssh -p ${s.sshPort} -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR`,
+    `${(local as string).replace(/\/$/, '')}/`, `root@${s.sshHost}:/workspace/`,
+  ], { stdio: 'inherit' });
+  process.exit(r.status || 0);
+}
+
+async function cmdGpuJobsPull(localOverride?: string): Promise<void> {
+  const s = requireJobState();
+  const local = localOverride || (s.output as string);
+  mkdirSync(local, { recursive: true });
+  console.log(`rsync ${s.sshHost}:/workspace/ → ${local}`);
+  const r = spawnSync('rsync', ['-az', '-e',
+    `ssh -p ${s.sshPort} -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR`,
+    `root@${s.sshHost}:/workspace/`, `${local}/`,
+  ], { stdio: 'inherit' });
+  process.exit(r.status || 0);
+}
+
+async function cmdGpuJobsExec(cmd: string): Promise<void> {
+  const s = requireJobState();
+  const r = spawnSync('ssh', ['-p', String(s.sshPort),
+    '-o', 'StrictHostKeyChecking=accept-new', '-o', 'LogLevel=ERROR',
+    `root@${s.sshHost}`, `cd /workspace && ${cmd}`], { stdio: 'inherit' });
+  process.exit(r.status || 0);
+}
+
+async function cmdGpuJobsCleanup(force: boolean): Promise<void> {
+  const s = loadJobState();
+  if (!s) { console.log('No saved job state.'); return; }
+  const { url, key } = getConfig();
+  if (!force) {
+    console.log(`About to terminate ${s.instanceId} (${s.sshHost}). Re-run with --force to confirm.`);
+    return;
+  }
+  console.log(`Terminating ${s.instanceId}...`);
+  const r = await fetch(`${url}/v1/gpu/terminate`, {
+    method: 'POST', headers: headers(key),
+    body: JSON.stringify({ instanceId: s.instanceId, deployId: s.deployId }),
+  });
+  if (r.ok) {
+    console.log(`  ${c.green}✓${c.reset} terminated`);
+    try { unlinkSync(jobStatePath()); } catch { /* ignore */ }
+  } else {
+    console.error(`  ${c.red}terminate may have failed (HTTP ${r.status})${c.reset}`);
+  }
+}
+
+// gpu train: high-level finetune/training wrapper. Composes 'jobs run' with
+// sensible ML defaults: spot instances, budget cap, mid-pull, auto-resume,
+// pull excludes for cache/dataset, optional HF push of final checkpoints.
+interface GpuTrainOpts {
+  scriptPath: string;             // local python file or directory
+  dataset?: string;               // hf://repo-id  (downloaded to /root/data)
+  datasetInclude?: string;        // hf download --include glob (e.g. "wav/*")
+  noHfTransfer?: boolean;         // disable HF_HUB_ENABLE_HF_TRANSFER (avoid 429 on small-file datasets)
+  model?: string;                 // hf://repo-id  (downloaded to /root/model)
+  epochs?: number;
+  lr?: number;
+  gpu?: string;
+  maxCost?: number;
+  maxSpend?: number;
+  output?: string;
+  pushToHf?: string;              // hf-repo to upload checkpoints
+  autoResume?: boolean;
+  preferSpot?: boolean;
+  reuse?: boolean;
+  extraArgs?: string;             // appended to the python script command
+  dryRun?: boolean;
+}
+// ──────────────────────────────────────────────────────────────────────────
+// gpu finetune — generic finetune module (text or audio).
+// Composes 'jobs run' with workload-specific defaults:
+//   - apt + pip presets per type
+//   - HF dataset/model download (filter, no-transfer)
+//   - encode stage (audio): multi-GPU shard encoder when --num-gpus > 1
+//   - train stage with --resume + checkpoint loop
+//   - HF push final ckpt
+//   - spot + budget cap + auto-keep-alive on error (defaults from jobs run)
+// ──────────────────────────────────────────────────────────────────────────
+interface GpuFinetuneOpts {
+  type: 'text' | 'audio' | 'custom';
+  localPath?: string;           // dir to rsync (default = dirname(scriptPath))
+  scriptPath: string;
+  dataset?: string;             // hf://repo-id
+  datasetInclude?: string;
+  noHfTransfer?: boolean;
+  model?: string;               // hf://repo-id
+  prepCmd?: string;             // optional pre-encode step (e.g. resolve paths, convert tags)
+  encodeCmd?: string;           // optional override (default: <script> encode --input ... --output ...)
+  trainCmd?: string;            // optional override (default: <script> train --tokens ... --output ...)
+  epochs?: number;
+  lr?: number;
+  numGpus?: number;             // shards encoding across N GPUs (uses encode_multi_gpu.sh if available)
+  gpu?: string;
+  maxCost?: number;
+  maxSpend?: number;
+  output?: string;
+  pushToHf?: string;
+  autoResume?: boolean;
+  preferSpot?: boolean;
+  reuse?: boolean;
+  extraTrainArgs?: string;
+  extraDeps?: string;           // extra pip packages
+  aptPkgs?: string;             // extra apt-get packages
+  dryRun?: boolean;
+  smoke?: boolean;              // ONLY run smoke (30 samples × 3 epochs) — useful for testing pipeline
+  skipSmoke?: boolean;          // skip mandatory pre-full smoke step (advanced; default smoke ON)
+  persistCache?: boolean;       // #9 mount persistent volume for HF cache (skip re-download $$)
+  retryOnPreempt?: number;      // #10 if spot preempted, re-deploy and resume from latest ckpt up to N times
+  incremental?: boolean;        // #14 hash dataset; if unchanged from last run, skip encode + resume from last ckpt
+  autoFix?: boolean;            // #2 on smoke failure, run KNOWN_BUGS lookup + suggest/apply fix + retry
+  plugin?: string;              // #12 named plugin (lora|qlora|grad-ckpt|flash-attn)
+  watchWer?: string;            // #7 path to eval_holdout.json — runs WER eval every 10min in background
+  webDashboard?: boolean;       // #13 open local web dashboard (stub)
+  // — Round 4: ideas from Axolotl/SkyPilot/Unsloth —
+  wandb?: { project: string; entity?: string; runName?: string; logModel?: 'checkpoint'|'end'|'none' };
+  notifyOnComplete?: string;    // webhook URL to POST {status, runId, ckpt, finalLoss}
+  secrets?: Record<string, string>;  // sensitive env vars (redacted in logs/state)
+  providers?: string[];         // multi-cloud failover order: ['vast', 'runpod']
+  failoverOnPreempt?: boolean;  // try next provider if current preempts
+  evalsPerEpoch?: number;       // run eval N times per epoch (cadence)
+  earlyStopOnEval?: { metric: string; threshold: number }; // stop if metric < threshold
+  multiDataset?: Array<{ path: string; weight: number }>; // weighted multi-dataset
+  ckptAverage?: number;         // average last N checkpoints into final (Polyak/EMA)
+  exportGguf?: boolean;         // post-train: convert ckpt to GGUF for llama.cpp
+  // Round 6 — 3-repo HF organization
+  hfBase?: string;              // owner/name → derives -dataset, -weights, -code repos
+  hfStructure?: 'flat' | 'split' | 'tri';  // flat=1 repo (legacy), split=2 (data+weights), tri=3 (+code)
+  fromHf?: string;              // resume: auto-fetch all 3 repos (encoded.pt, weights, code)
+  // Round 8 — quality automation
+  quality?: 'auto' | 'safe' | 'fast';   // auto=smart defaults, safe=conservative, fast=aggressive
+  autoStopPlateau?: number;     // override: stop train if no loss improvement for N steps
+  torchCompile?: boolean;       // override: torch.compile flow_net (1.5-2× speedup)
+  augmentPitch?: boolean;       // override: pitch-shift ±2 semitones (doubles encode dataset)
+  augmentSpeed?: boolean;       // override: speed-perturb 0.9-1.1× (doubles encode dataset)
+  saveEverySteps?: number;      // checkpoint cadence (default 100; 5 in smoke)
+  image?: string;               // override docker image (default: aigw-finetune-base if published, else gpu-dev)
+  // Tier 2 — advanced (default sane via quality:auto; expose for power users)
+  batchSize?: number;           // micro-batch size (default 2)
+  gradAccum?: number;           // gradient accumulation steps (default 16)
+  weightDecay?: number;         // AdamW weight decay (default 0.01)
+  warmupSteps?: number;         // LR warmup steps (default 200)
+  freezeBackboneLayers?: number;  // freeze first N transformer blocks (default 4)
+  onlyFlowNet?: boolean;        // MoshiVis-style: train ONLY flow_net + out_eos (LoRA-like)
+  curriculum?: 'linear' | '';   // curriculum strategy (default '': random shuffle)
+}
+// #11 Schema validation
+function validateFinetuneSpec(spec: any): string[] {
+  const errs: string[] = [];
+  // Preset types skip script requirement
+  const presetExists = spec.type && loadPreset(spec.type);
+  if (!spec.script && !presetExists) errs.push('missing required: script (or use a built-in preset type)');
+  if (spec.type && !presetExists && !['text', 'audio', 'custom'].includes(spec.type)) {
+    errs.push(`type must be text|audio|custom OR a preset name (got ${spec.type})`);
+  }
+  if (spec.dataset && !String(spec.dataset).startsWith('hf://')) {
+    errs.push(`dataset must use hf://owner/repo form`);
+  }
+  if (spec.model && !String(spec.model).startsWith('hf://')) {
+    errs.push(`model must use hf://owner/repo form`);
+  }
+  if (spec.pushToHf && !String(spec.pushToHf).includes('/')) {
+    errs.push(`pushToHf must be 'owner/repo'`);
+  }
+  if (spec.epochs !== undefined && (spec.epochs <= 0 || spec.epochs > 100)) {
+    errs.push(`epochs out of range (1-100)`);
+  }
+  if (spec.lr !== undefined && (spec.lr <= 0 || spec.lr > 1)) {
+    errs.push(`lr out of range (>0 and <=1)`);
+  }
+  if (spec.maxSpend !== undefined && spec.maxSpend > 100) {
+    errs.push(`maxSpend > $100 — refusing as safety guard`);
+  }
+  if (spec.quality !== undefined && !['auto', 'safe', 'fast'].includes(spec.quality)) {
+    errs.push(`quality must be auto|safe|fast (got ${spec.quality})`);
+  }
+  return errs;
+}
+
+// #4 Cost estimator — predict total $ before submitting
+function estimateFinetuneCost(opts: GpuFinetuneOpts, sampleCount = 7449, gpuPrice = 0.30): {
+  encodeMin: number; trainMin: number; setupMin: number; totalMin: number; totalUsd: number;
+} {
+  const encRate = (opts.numGpus || 1) * 25;          // ~25 samples/s threaded per GPU
+  const encodeMin = sampleCount / encRate / 60;
+  const stepsPerEpoch = sampleCount / 32;            // grad_accum × micro_batch
+  const totalSteps = (opts.epochs ?? 4) * stepsPerEpoch;
+  const trainMin = totalSteps / 200 / 60;            // ~200 steps/s on 4090
+  const setupMin = 8;                                // apt + pip + HF download
+  const totalMin = encodeMin + trainMin + setupMin;
+  const totalUsd = (totalMin / 60) * gpuPrice;
+  return { encodeMin, trainMin, setupMin, totalMin, totalUsd };
+}
+
+// #5 Persistent run history — store specs/timestamps for resume
+function finetuneRunsDir(): string {
+  return join(process.env.HOME || '/tmp', '.babelcast', 'finetune_runs');
+}
+function recordFinetuneRun(spec: any, instanceInfo: any): string {
+  const dir = finetuneRunsDir();
+  mkdirSync(dir, { recursive: true });
+  const id = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const path = join(dir, `${id}.json`);
+  writeFileSync(path, JSON.stringify({ id, ts: new Date().toISOString(), spec, instance: instanceInfo }, null, 2));
+  return id;
+}
+
+// Detailed finetune status — stage detection + progress + resources + logs.
+// gpu finetune compare — A/B WER test multiple ckpts via Whisper roundtrip.
+// Generates audio for N prompts, transcribes, computes WER, ranks ckpts.
+async function cmdGpuFinetuneCompare(opts: {
+  ckpts: string[]; prompts: string; max?: number; whisperModel?: string;
+}): Promise<void> {
+  if (opts.ckpts.length < 1) { console.error('Need ≥1 --ckpt path'); process.exit(1); }
+  if (!existsSync(opts.prompts)) { console.error(`Prompts not found: ${opts.prompts}`); process.exit(1); }
+  console.log(`[compare] ${opts.ckpts.length} ckpts × ${opts.max || 'all'} prompts`);
+  // Just shells out to a python script that does the actual eval.
+  // Trainer interface: distill/eval_finetune.py supports --checkpoint + --prompts.
+  const script = `
+import sys, json, os, glob
+from pathlib import Path
+import whisper
+sys.path.insert(0, str(Path('${opts.prompts}').parent.parent / 'distill'))
+from eval_finetune import wer
+
+prompts = json.load(open('${opts.prompts}'))[:${opts.max ?? 60}]
+print(f'loading whisper-${opts.whisperModel || 'base'}...')
+w = whisper.load_model('${opts.whisperModel || 'base'}')
+results = {}
+for ckpt in ${JSON.stringify(opts.ckpts)}:
+    name = os.path.basename(ckpt).replace('.safetensors', '')
+    out_dir = f'/tmp/cmp_{name}'
+    os.makedirs(out_dir, exist_ok=True)
+    if len(os.listdir(out_dir)) < len(prompts):
+        os.system(f"python -c \\"import sys; sys.argv=['','-c',{ckpt!r},'-p','${opts.prompts}','-o','{out_dir}','--no-asr','--max','${opts.max ?? 60}']; from eval_finetune import main; main()\\"")
+    wers, plain, tagged = [], [], []
+    for p in prompts:
+        wav = f'{out_dir}/{p[\"id\"]}.wav'
+        if not os.path.exists(wav): continue
+        e = wer(p['text'], w.transcribe(wav, language='pt')['text'])
+        wers.append(e)
+        (tagged if p.get('tag_positions') else plain).append(e)
+    results[name] = {
+        'avg': sum(wers)/max(len(wers),1),
+        'plain': sum(plain)/max(len(plain),1),
+        'tagged': sum(tagged)/max(len(tagged),1),
+        'n': len(wers),
+    }
+print()
+print(f'{"ckpt":40s} {"n":>5s} {"avg":>6s} {"plain":>7s} {"tagged":>7s}')
+for name, r in sorted(results.items(), key=lambda kv: kv[1]['avg']):
+    print(f'{name:40s} {r["n"]:>5d} {r["avg"]:>6.3f} {r["plain"]:>7.3f}  {r["tagged"]:>7.3f}')
+print()
+winner = min(results.items(), key=lambda kv: kv[1]['avg'])
+print(f'WINNER: {winner[0]} (avg={winner[1]["avg"]:.3f})')
+`;
+  const tmpScript = '/tmp/finetune_compare.py';
+  writeFileSync(tmpScript, script);
+  const r = spawnSync('python3', [tmpScript], { stdio: 'inherit' });
+  process.exit(r.status || 0);
+}
+
+async function cmdGpuFinetuneStatus(): Promise<void> {
+  const s = loadJobState();
+  if (!s) { console.log('No saved finetune state.'); return; }
+  const sshArgs = ['-p', String(s.sshPort), '-o', 'StrictHostKeyChecking=accept-new',
+                   '-o', 'LogLevel=ERROR', `root@${s.sshHost}`];
+
+  // One-shot remote probe — gather everything in parallel.
+  // Use unique sentinel so user log echo `=== ...` doesn't collide.
+  const SEP = '__AIGWPROBE__';
+  const probe = spawnSync('ssh', [...sshArgs, `
+    echo '${SEP}procs${SEP}';
+    ps -ef | grep -v grep | grep -E 'hf download|python distill|python -c' | head -3;
+    echo '${SEP}files${SEP}';
+    ls /root/data/wav 2>/dev/null | wc -l;
+    [ -f /root/data_paths.jsonl ] && wc -l /root/data_paths.jsonl 2>/dev/null;
+    [ -f /root/encoded.pt ] && du -h /root/encoded.pt 2>/dev/null;
+    [ -f /root/encoded_full.pt ] && du -h /root/encoded_full.pt 2>/dev/null;
+    ls /workspace/checkpoints/ 2>/dev/null | head -10;
+    ls /workspace/smoke_ckpt/ 2>/dev/null | head -10;
+    echo '${SEP}loss${SEP}';
+    tail -100 /workspace/.job.log 2>/dev/null | grep -oE 'step=[0-9]+/[0-9]+|loss=[0-9.]+|rate=[0-9.]+|saved.*\\.safetensors|\\[smoke-verify\\]' | tail -10;
+    echo '${SEP}gpu${SEP}';
+    nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1;
+    echo '${SEP}disk${SEP}';
+    df -h /workspace /root 2>/dev/null | head -5;
+  `], { encoding: 'utf-8', timeout: 20_000 });
+
+  const out = probe.stdout || '';
+  // Sections: ['<pre>', 'procs', <procs content>, 'files', <files content>, ...]
+  // After split — odds are content for the section named at index n-1.
+  const sectionMap: Record<string, string> = {};
+  const parts = out.split(SEP);
+  for (let i = 1; i < parts.length - 1; i += 2) {
+    sectionMap[parts[i].trim()] = (parts[i + 1] || '').trim();
+  }
+  const procs = sectionMap['procs'] || '';
+  const files = sectionMap['files'] || '';
+  const lossLines = (sectionMap['loss'] || '').split('\n').filter(Boolean);
+  const gpuLine = (sectionMap['gpu'] || '0,0,0').split('\n').find(Boolean) || '0,0,0';
+  const [gpuPct = 0, vramUsed = 0, vramTotal = 0] = gpuLine.split(',').map(Number);
+
+  // Cost / time
+  const price = (s.pricePerHr as number) ?? 0;
+  const startedMs = new Date(s.startedAt as string).getTime();
+  const elapsedMin = (Date.now() - startedMs) / 60_000;
+  const spent = (elapsedMin / 60) * price;
+
+  // Stage detection — match against ACTUAL python invocations, not the wrapper shells.
+  // ps -ef columns: UID PID PPID C STIME TTY TIME CMD args  (8 fields before args).
+  // Skip first 7 then keep CMD+args (so the CMD's executable name is preserved).
+  const procLines = procs.split('\n').filter((l) => l.trim());
+  const cmds = procLines.map((l) => l.replace(/^\s*\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+/, ''))
+    .filter((c) => !c.startsWith('bash -c'));
+  const hasProc = (re: RegExp) => cmds.some((c) => re.test(c));
+  let stage = '?';
+  let detail = '';
+  if (hasProc(/python\d?\s+\/\S+hf\s+download|^hf download/)) {
+    stage = 'downloading dataset/model';
+    const wavCount = parseInt((files.match(/^\d+/m) || ['0'])[0]);
+    if (wavCount > 0) detail = `${wavCount} wavs cached so far`;
+  } else if (hasProc(/python.*prepare_dataset/)) {
+    stage = 'preparing dataset (paths + tags)';
+  } else if (hasProc(/python.*finetune_pocket_tts.*encode/)) {
+    stage = 'mimi-encoding (GPU)';
+    const rateLine = lossLines.find((l) => l.startsWith('rate='));
+    if (rateLine) detail = rateLine;
+  } else if (hasProc(/python.*finetune_pocket_tts.*train/)) {
+    stage = 'training';
+    const stepLine = [...lossLines].reverse().find((l) => l.startsWith('step='));
+    const lossLine = [...lossLines].reverse().find((l) => l.startsWith('loss='));
+    if (stepLine || lossLine) detail = `${stepLine || ''}  ${lossLine || ''}`.trim();
+  } else if (hasProc(/python -c/)) {
+    stage = 'smoke-verify';
+  } else if (procLines.length === 0) {
+    if (files.includes('model.safetensors')) stage = 'completed ✓';
+    else stage = 'idle (no python procs)';
+  }
+
+  // Render
+  console.log(`\n${c.bold}═══ gpu finetune status ═══${c.reset}`);
+  console.log(`${c.dim}instance:${c.reset} ${s.instanceId}  ${s.gpuType || ''} on ${s.provider || ''} @ $${price.toFixed(3)}/h`);
+  console.log(`${c.dim}elapsed: ${c.reset} ${elapsedMin.toFixed(1)}min   ${c.dim}spent:${c.reset} $${spent.toFixed(3)}`);
+  console.log(`${c.dim}stage:   ${c.reset} ${c.cyan}${stage}${c.reset}${detail ? '   ' + c.dim + detail + c.reset : ''}`);
+
+  if (vramTotal > 0) {
+    const vramPct = (vramUsed / vramTotal) * 100;
+    console.log(`${c.dim}gpu:     ${c.reset} ${gpuPct.toFixed(0)}% util   VRAM ${(vramUsed/1024).toFixed(1)}/${(vramTotal/1024).toFixed(0)}GB (${vramPct.toFixed(0)}%)`);
+  }
+
+  // Files / artifacts
+  if (files.trim()) {
+    const wavCount = (files.match(/^\d+/m) || [''])[0];
+    const ckptList = files.split('\n').filter((l) => l.includes('.safetensors')).slice(0, 5);
+    if (wavCount && parseInt(wavCount) > 0) console.log(`${c.dim}files:   ${c.reset} ${wavCount} wavs cached`);
+    if (ckptList.length > 0) console.log(`${c.dim}ckpts:   ${c.reset} ${ckptList.join(', ').slice(0, 100)}`);
+  }
+
+  // Recent loss
+  if (lossLines.length > 0) {
+    console.log(`${c.dim}log:     ${c.reset}`);
+    for (const ln of lossLines.slice(-5)) console.log(`           ${ln}`);
+  }
+  console.log('');
+}
+
+// #15 Auto-deploy: push checkpoint to HF + (optional) hot-swap local server via env
+async function cmdGpuFinetuneDeploy(opts: {
+  ckpt?: string; hfRepo?: string; hfFile?: string; pushTo?: string; restartServer?: boolean;
+}): Promise<void> {
+  let envBlock = '';
+  if (opts.hfRepo) {
+    // Server side: env vars trigger HF auto-download + cache
+    envBlock = `IARATTS_HF_REPO='${opts.hfRepo}'`;
+    if (opts.hfFile) envBlock += ` IARATTS_HF_FILE='${opts.hfFile}'`;
+    console.log(`Deploy via HF auto-download:`);
+    console.log(`  ${envBlock} python iaratts/web/pocket_tts_server.py`);
+  } else if (opts.ckpt) {
+    if (!existsSync(opts.ckpt)) { console.error(`Ckpt not found: ${opts.ckpt}`); process.exit(1); }
+    if (opts.pushTo) {
+      console.log(`pushing ${opts.ckpt} → hf://${opts.pushTo}...`);
+      const r = spawnSync('hf', ['upload', opts.pushTo, opts.ckpt, '--repo-type', 'model'],
+                          { stdio: 'inherit' });
+      if (r.status !== 0) { console.error('hf upload failed'); process.exit(1); }
+    }
+    envBlock = `IARATTS_CKPT='${resolve(opts.ckpt)}'`;
+    console.log(`Local deploy:`);
+    console.log(`  ${envBlock} python iaratts/web/pocket_tts_server.py`);
+  } else {
+    console.error('Need --ckpt <path> OR --hf-repo <owner/name>');
+    process.exit(1);
+  }
+
+  if (opts.restartServer) {
+    // Find + kill running pocket_tts_server.py
+    const findRes = spawnSync('pgrep', ['-f', 'pocket_tts_server.py'], { encoding: 'utf-8' });
+    const pids = (findRes.stdout || '').trim().split('\n').filter(Boolean);
+    if (pids.length === 0) {
+      console.log('  (no running server to restart)');
+    } else {
+      console.log(`  killing existing server PIDs: ${pids.join(', ')}`);
+      for (const pid of pids) spawnSync('kill', [pid]);
+    }
+    console.log(`  starting new server with new env...`);
+    spawnSync('bash', ['-c', `${envBlock} nohup python iaratts/web/pocket_tts_server.py > /tmp/iaratts_server.log 2>&1 &`],
+              { stdio: 'inherit' });
+    console.log(`  ✓ server restarting (log: /tmp/iaratts_server.log)`);
+  }
+}
+
+// #3 Dataset auto-validation (local pre-flight)
+function validateDatasetLocal(jsonlPath: string, type: 'audio' | 'text' | 'custom'): string[] {
+  const errs: string[] = [];
+  if (!existsSync(jsonlPath)) { errs.push(`dataset file not found: ${jsonlPath}`); return errs; }
+  const lines = readFileSync(jsonlPath, 'utf-8').split('\n').filter((l) => l.trim());
+  if (lines.length < 100) errs.push(`only ${lines.length} samples (<100, too small)`);
+  let badRows = 0; let tagged = 0;
+  for (let i = 0; i < Math.min(lines.length, 100); i++) {
+    try {
+      const r = JSON.parse(lines[i]);
+      if (type === 'audio' && !r.audio) badRows++;
+      if (type === 'text' && !r.text) badRows++;
+      if (r.tag_positions?.length > 0) tagged++;
+    } catch { badRows++; }
+  }
+  if (badRows > 5) errs.push(`${badRows}/100 rows malformed (missing required fields)`);
+  console.log(`[validate] ${lines.length} rows total, ${tagged}/100 sample have tags`);
+  return errs;
+}
+
+// #1 LR finder — runs N mini-trains with different LR, picks lowest-loss
+async function cmdGpuFinetuneLrFind(opts: GpuFinetuneOpts & { lrs?: number[] }): Promise<void> {
+  const lrs = opts.lrs || [1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4];
+  console.log(`[lr-find] testing ${lrs.length} LRs: ${lrs.join(', ')}`);
+  console.log(`[lr-find] each is a smoke run (~5min × ${lrs.length} = ${lrs.length * 5}min, ~$${(lrs.length * 0.025).toFixed(2)})`);
+  console.log(`[lr-find] (TODO: parallel sweep via #8 sweep — currently sequential)`);
+  const results: { lr: number; finalLoss: number }[] = [];
+  for (const lr of lrs) {
+    console.log(`\n[lr-find] testing lr=${lr}`);
+    // Each call runs smoke, captures final loss from log
+    await cmdGpuFinetune({ ...opts, lr, smoke: true, dryRun: opts.dryRun });
+    // (parsing final loss from .job.log left as exercise)
+    results.push({ lr, finalLoss: NaN });
+  }
+  console.log('\n[lr-find] results:');
+  for (const r of results) console.log(`  lr=${r.lr.toExponential(1)}  final_loss=${r.finalLoss}`);
+}
+
+// #14 Incremental finetune — hash dataset, compare with last run, skip re-encode if same
+function datasetHash(jsonlPath: string): string {
+  if (!existsSync(jsonlPath)) return '';
+  const content = readFileSync(jsonlPath, 'utf-8');
+  return createHash('sha256').update(content).digest('hex').slice(0, 16);
+}
+
+// #2 Auto-fix lookup — pattern-match common errors → suggested fix
+const KNOWN_BUGS: Array<{ re: RegExp; fix: string; auto?: string }> = [
+  { re: /pkg-config.*not found/i, fix: 'Add libsentencepiece-dev to apt deps', auto: 'extraAptPkgs="libsentencepiece-dev"' },
+  { re: /unbound variable.*HF_TOKEN/i, fix: 'HF_TOKEN env not exported in main', auto: 'finetune now embeds HF_TOKEN automatically' },
+  { re: /assert ldim == flow_lm\.ldim/i, fix: 'Mimi encode dim mismatch — use mimi.encode_to_latent', auto: '' },
+  { re: /mat1 and mat2.*BFloat16/i, fix: 'Cast to model dtype, not .float()', auto: '' },
+  { re: /CUDA out of memory/i, fix: 'Reduce micro_batch_size or grad_accum, enable grad_checkpoint', auto: 'extraTrainArgs="--micro-batch-size 1"' },
+  { re: /HTTP Error 429/i, fix: 'HF rate limit — disable hf_transfer + use --include filter', auto: 'noHfTransfer=true' },
+];
+function diagnoseError(logTail: string): { bug: typeof KNOWN_BUGS[0]; line: string } | null {
+  for (const ln of logTail.split('\n')) {
+    for (const b of KNOWN_BUGS) {
+      if (b.re.test(ln)) return { bug: b, line: ln };
+    }
+  }
+  return null;
+}
+
+// #7 WER eval in background — generate sample + Whisper transcribe + log WER
+// Stub: full impl would spawn ssh worker that runs every N steps
+function buildWerEvalCmd(scriptDir: string, evalPrompts: string): string {
+  return `(while true; do sleep 600; ` +
+    `LATEST=$(ls -t /workspace/checkpoints/step-*.safetensors 2>/dev/null | head -1); ` +
+    `if [ -n "$LATEST" ]; then ` +
+    `python ${scriptDir}/eval_finetune.py --checkpoint "$LATEST" --prompts ${evalPrompts} ` +
+    `--output-dir /workspace/wer_eval --max 5 2>&1 | tee -a /workspace/wer.log; fi; done) & `;
+}
+
+// #8 Optuna sweep — parallel hyperparam search via N spot instances
+async function cmdGpuFinetuneSweep(opts: GpuFinetuneOpts & { trials?: number }): Promise<void> {
+  const trials = opts.trials ?? 4;
+  console.log(`[sweep] launching ${trials} parallel finetune trials with hyperparam variants`);
+  // Generate trial configs varying lr, epochs, freeze layers
+  const lrs = [1e-5, 3e-5, 5e-5, 1e-4];
+  const procs: ChildProcess[] = [];
+  for (let i = 0; i < trials; i++) {
+    const lr = lrs[i % lrs.length];
+    const trialId = `trial-${i}-lr${lr.toExponential(0)}`;
+    console.log(`[sweep] launching ${trialId}`);
+    // Spawn separate finetune subprocess
+    const child = spawn(process.argv[0], [process.argv[1], 'gpu', 'finetune', 'submit',
+                       '--script', opts.scriptPath, '--lr', String(lr), '--smoke',
+                       '--output', `./sweeps/${trialId}`], { stdio: 'inherit' });
+    procs.push(child);
+  }
+  console.log(`[sweep] ${procs.length} trials launched. Wait + compare losses.`);
+  console.log(`[sweep] (TODO: parse final losses + auto-pick best, push winner to HF)`);
+}
+
+// #12 Plug-in architecture — pre/post hooks via named plugins
+const PLUGINS: Record<string, { extraDeps?: string; extraTrainArgs?: string; description: string }> = {
+  lora:           { extraDeps: 'peft',       extraTrainArgs: '--use-lora --lora-rank 16',  description: 'LoRA adapter wrapping (saves $$ on big models)' },
+  qlora:          { extraDeps: 'peft bitsandbytes', extraTrainArgs: '--use-lora --quantize 4bit', description: '4-bit quantized LoRA' },
+  'grad-ckpt':    { extraTrainArgs: '--gradient-checkpointing', description: 'Activation checkpointing (saves VRAM, slower)' },
+  'flash-attn':   { extraDeps: 'flash-attn', extraTrainArgs: '--use-flash-attn', description: 'FlashAttention 2 for speed' },
+};
+
+// #13 Web dashboard stub — opens browser with URL
+async function cmdGpuFinetuneWatchWeb(): Promise<void> {
+  console.log(`Web dashboard not yet built. (TODO: serve /workspace/.job.log via http on local port + chart.js loss plot)`);
+  console.log(`For now, use: ai-gateway gpu jobs watch  (terminal dashboard with bars + log tail)`);
+}
+
+// Preset registry — bundled trainers shipped with ai-gateway.
+// Allows spec.yaml-only finetune without user-provided scripts.
+function loadPreset(presetType: string): { dir: string; manifest: any } | null {
+  // Look for finetune-presets/<type>/manifest.json relative to this script
+  const presetsDir = require('path').resolve(
+    require('path').dirname(new URL(import.meta.url).pathname), '..', 'finetune-presets',
+  );
+  const presetDir = require('path').join(presetsDir, presetType);
+  const manifestPath = require('path').join(presetDir, 'manifest.json');
+  if (!existsSync(manifestPath)) return null;
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    return { dir: presetDir, manifest };
+  } catch { return null; }
+}
+
+async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
+  // PRESET DETECTION — if opts.type matches a bundled preset, override scriptPath/localPath
+  // to point at the bundled trainer dir. User then needs only train.yaml + dataset.
+  const preset = loadPreset(opts.type);
+  if (preset) {
+    console.log(`[preset] ${opts.type} v${preset.manifest.version} — bundled trainer (no user script needed)`);
+    if (!opts.scriptPath) {
+      opts.scriptPath = require('path').join(preset.dir, preset.manifest.trainerScript || 'trainer.py');
+      opts.localPath = preset.dir;  // upload entire preset dir
+    }
+    // Inject preset-recommended deps if user didn't override
+    if (!opts.aptPkgs && preset.manifest.aptDeps) opts.aptPkgs = preset.manifest.aptDeps;
+    if (!opts.extraDeps && preset.manifest.pipDeps) opts.extraDeps = preset.manifest.pipDeps;
+    if (!opts.model && preset.manifest.defaultModel) opts.model = preset.manifest.defaultModel;
+    if (!opts.epochs && preset.manifest.defaultEpochs) opts.epochs = preset.manifest.defaultEpochs;
+    if (!opts.lr && preset.manifest.defaultLR) opts.lr = preset.manifest.defaultLR;
+    if (!opts.gpu && preset.manifest.defaultGpu) opts.gpu = preset.manifest.defaultGpu;
+    if (!opts.maxSpend && preset.manifest.defaultMaxSpend) opts.maxSpend = preset.manifest.defaultMaxSpend;
+    // Force type to 'audio' for downstream apt/pip selection
+    if (preset.manifest.type) opts.type = preset.manifest.type as any;
+  }
+  if (opts.dataset && !opts.dataset.startsWith('hf://')) {
+    console.error(`--dataset must use hf://<repo-id> form`); process.exit(1);
+  }
+  if (opts.model && !opts.model.startsWith('hf://')) {
+    console.error(`--model must use hf://<repo-id> form`); process.exit(1);
+  }
+  // Auto-load HF_TOKEN from ~/.cache/huggingface/token if not in env
+  let hfToken = process.env.HF_TOKEN;
+  if (!hfToken) {
+    const cached = `${process.env.HOME}/.cache/huggingface/token`;
+    if (existsSync(cached)) {
+      hfToken = readFileSync(cached, 'utf-8').trim();
+    } else {
+      console.error(`HF_TOKEN env not set and ~/.cache/huggingface/token missing.`); process.exit(1);
+    }
+  }
+  // Resolve script. Skip if already absolute and exists (preset fills this).
+  if (!(opts.scriptPath && existsSync(opts.scriptPath))) {
+    const scriptCandidates = [
+      opts.localPath && opts.scriptPath ? require('path').join(opts.localPath, opts.scriptPath) : null,
+      opts.scriptPath,
+    ].filter(Boolean) as string[];
+    const foundScript = scriptCandidates.find((p) => existsSync(p));
+    if (!foundScript) {
+      console.error(`Script not found: tried ${scriptCandidates.join(', ')}`);
+      process.exit(1);
+    }
+    opts.scriptPath = foundScript;
+  }
+
+  // Default behavior: run smoke FIRST (validates pipeline before full spend),
+  // then full run. set -e in main aborts full if smoke fails.
+  // --no-smoke (skipSmoke=true) bypasses; --smoke-only runs ONLY the smoke.
+  const skipSmoke = opts.skipSmoke === true;
+  const smokeOnly = !!opts.smoke;          // explicit --smoke = ONLY smoke (no full)
+  const runSmokeFirst = !skipSmoke && !smokeOnly;
+  const epochs = smokeOnly ? 3 : (opts.epochs ?? 4);
+  const lr = opts.lr ?? 5e-5;
+
+  // — Round 8 quality automation. quality:auto picks smart defaults based on
+  // epochs/cadence/preset. quality:fast adds augmentation. quality:safe disables
+  // auto-stop. Explicit per-flag opts override (passed by user spec yaml).
+  const quality = opts.quality ?? 'auto';
+  const saveEverySteps = opts.saveEverySteps ?? (smokeOnly ? 5 : 100);
+  const autoTrainArgs: string[] = [];
+  const autoEncodeArgs: string[] = [];
+  const autoLog: string[] = [];
+  if (quality !== 'safe' && !smokeOnly) {
+    const compileOn = opts.torchCompile ?? true;
+    if (compileOn) { autoTrainArgs.push('--torch-compile'); autoLog.push('torch-compile'); }
+    if (epochs >= 2) {
+      const plateau = opts.autoStopPlateau ?? saveEverySteps * 5;
+      autoTrainArgs.push(`--auto-stop-plateau ${plateau}`);
+      autoLog.push(`auto-stop-plateau=${plateau}`);
+    }
+  }
+  if (opts.torchCompile === false) {
+    // explicit off — strip it
+    const idx = autoTrainArgs.indexOf('--torch-compile');
+    if (idx >= 0) autoTrainArgs.splice(idx, 1);
+  }
+  const augPitch = opts.augmentPitch ?? (quality === 'fast');
+  const augSpeed = opts.augmentSpeed ?? (quality === 'fast');
+  if (augPitch) { autoEncodeArgs.push('--augment-pitch'); autoLog.push('augment-pitch'); }
+  if (augSpeed) { autoEncodeArgs.push('--augment-speed'); autoLog.push('augment-speed'); }
+  if (autoLog.length) {
+    console.log(`[auto] quality=${quality} → ${autoLog.join(', ')}`);
+  }
+  // Tier 2 — power-user knobs forwarded as trainer flags when set in spec.
+  if (opts.batchSize !== undefined) autoTrainArgs.push(`--batch-size ${opts.batchSize}`);
+  if (opts.gradAccum !== undefined) autoTrainArgs.push(`--grad-accum ${opts.gradAccum}`);
+  if (opts.weightDecay !== undefined) autoTrainArgs.push(`--weight-decay ${opts.weightDecay}`);
+  if (opts.warmupSteps !== undefined) autoTrainArgs.push(`--warmup-steps ${opts.warmupSteps}`);
+  if (opts.freezeBackboneLayers !== undefined) autoTrainArgs.push(`--freeze-backbone-layers ${opts.freezeBackboneLayers}`);
+  if (opts.onlyFlowNet) autoTrainArgs.push('--only-flow-net');
+  if (opts.curriculum) autoTrainArgs.push(`--curriculum ${opts.curriculum}`);
+  const autoTrainFlags = autoTrainArgs.length ? ' ' + autoTrainArgs.join(' ') : '';
+  const autoEncodeFlags = autoEncodeArgs.length ? ' ' + autoEncodeArgs.join(' ') : '';
+  const numGpus = opts.numGpus ?? 1;
+  const output = opts.output || `./ckpts/run-${Date.now()}`;
+  const isDir = require('fs').statSync(opts.scriptPath).isDirectory();
+  // localPath: explicit (spec key) > scriptPath if dir > scriptPath's parent.
+  // scriptName: basename if file, else "<dir>" placeholder (caller must override --train-cmd).
+  const localPath = opts.localPath || (isDir ? opts.scriptPath : require('path').dirname(opts.scriptPath));
+  // scriptRel: path of script RELATIVE to localPath. Used in remote python invocation.
+  const absScript = require('path').resolve(opts.scriptPath);
+  const absLocal = require('path').resolve(localPath);
+  const scriptRel = isDir
+    ? require('path').basename(opts.scriptPath)
+    : require('path').relative(absLocal, absScript) || require('path').basename(opts.scriptPath);
+  const scriptName = scriptRel;  // remote: cd /workspace && python <scriptRel> ...
+
+  // Deps presets by type
+  const aptByType: Record<string, string> = {
+    text:   'pkg-config build-essential',
+    audio:  'pkg-config build-essential libsentencepiece-dev libsndfile1 ffmpeg',
+    custom: 'pkg-config build-essential',
+  };
+  const pipByType: Record<string, string> = {
+    text:   '"huggingface-hub>=1.0.0" hf_transfer torch transformers datasets accelerate safetensors',
+    audio:  '"huggingface-hub>=1.0.0" hf_transfer torch torchaudio safetensors soundfile',
+    custom: '"huggingface-hub>=1.0.0" hf_transfer torch safetensors',
+  };
+  // #12 Plugin: merges extra deps + train args
+  const plugin = opts.plugin ? PLUGINS[opts.plugin] : undefined;
+  if (opts.plugin && !plugin) {
+    console.error(`Unknown plugin '${opts.plugin}'. Available: ${Object.keys(PLUGINS).join(', ')}`);
+    process.exit(1);
+  }
+  if (plugin) console.log(`[plugin] ${opts.plugin}: ${plugin.description}`);
+  const apt = `${aptByType[opts.type]}${opts.aptPkgs ? ' ' + opts.aptPkgs : ''}`;
+  const pip = `${pipByType[opts.type]}${opts.extraDeps ? ' ' + opts.extraDeps : ''}${plugin?.extraDeps ? ' ' + plugin.extraDeps : ''}`;
+
+  const dsInclude = opts.datasetInclude ? ` --include "${opts.datasetInclude}"` : '';
+  const datasetDl = opts.dataset?.startsWith('hf://')
+    ? `if [ ! -d /root/data ] || [ -z "$(ls /root/data 2>/dev/null)" ]; then ` +
+      `hf download ${opts.dataset.slice(5)} --repo-type dataset --local-dir /root/data --token "$HF_TOKEN"${dsInclude}; ` +
+      `else echo '[fine] dataset cached, skip'; fi && `
+    : '';
+  const modelDl = opts.model?.startsWith('hf://')
+    ? `if [ ! -d /root/model ] || [ -z "$(ls /root/model 2>/dev/null)" ]; then ` +
+      `hf download ${opts.model.slice(5)} --local-dir /root/model --token "$HF_TOKEN"; ` +
+      `else echo '[fine] model cached, skip'; fi && `
+    : '';
+
+  const prepStage = opts.prepCmd
+    ? `if [ ! -f /root/data_paths.jsonl ]; then ${opts.prepCmd}; else echo '[fine] prep cached'; fi && `
+    : '';
+  const encodeMaxSamples = smokeOnly ? ' --max-samples 30' : '';
+  const encodeCmd = opts.encodeCmd || (
+    opts.type === 'audio'
+      ? (numGpus > 1
+          ? `bash ${require('path').dirname(scriptName)}/encode_multi_gpu.sh /root/data_paths.jsonl /root/encoded.pt 8`
+          : `python ${scriptName} encode --input /root/data_paths.jsonl --output /root/encoded.pt --num-workers 8${encodeMaxSamples}${autoEncodeFlags}`)
+      : `python ${scriptName} prepare --dataset /root/data --output /root/prepared.pt`
+  );
+  const encodeStage = opts.type === 'custom' ? '' :
+    `if [ ! -f /root/encoded.pt ] && [ ! -f /root/prepared.pt ]; then ${encodeCmd}; else echo '[fine] encode cached'; fi && `;
+
+  // Pre-full smoke stage: encode 30, train 3 epochs, verify ckpt loads + gens audio.
+  // Run BEFORE full encode/train. set -e aborts full run if smoke fails.
+  const preSmokeStage = runSmokeFirst && opts.type === 'audio'
+    ? `echo '[smoke] starting pre-full validation (30 samples × 3 epochs)' && ` +
+      `python ${scriptName} encode --input /root/data_paths.jsonl --output /root/smoke_encoded.pt --num-workers 8 --max-samples 30 && ` +
+      `python ${scriptName} train --tokens /root/smoke_encoded.pt --output /workspace/smoke_ckpt --epochs 3 --learning-rate ${lr} --save-every-steps 5 && ` +
+      `python -c "
+from safetensors.torch import load_file
+from pocket_tts import TTSModel
+import os, glob, soundfile as sf, numpy as np
+ckpts = sorted(glob.glob('/workspace/smoke_ckpt/step-*.safetensors'),
+               key=lambda p: int(p.rsplit('step-',1)[1].rsplit('.',1)[0]))
+ckpt = ckpts[-1] if ckpts else '/workspace/smoke_ckpt/model.safetensors'
+print('[smoke-verify] loading', ckpt)
+sd = load_file(ckpt)
+m = TTSModel.load_model(language='portuguese')
+missing, unexpected = m.load_state_dict(sd, strict=False)
+print(f'[smoke-verify] missing={len(missing)} unexpected={len(unexpected)}')
+state = m.get_state_for_audio_prompt('anna')
+audio = m.generate_audio(state, 'Olá mundo, teste de smoke.', copy_state=True)
+if hasattr(audio, 'cpu'): audio = audio.cpu().numpy()
+audio = np.asarray(audio).astype(np.float32).reshape(-1)
+sf.write('/workspace/smoke_test.wav', audio, m.sample_rate)
+dur = len(audio)/m.sample_rate
+rms = float(np.sqrt(np.mean(audio**2)))
+print(f'[smoke-verify] dur={dur:.2f}s rms={rms:.3f}')
+assert dur > 0.5, f'audio too short: {dur}s'
+assert rms > 0.005, f'audio too quiet: rms={rms}'
+print('[smoke-verify] OK ✓ proceeding to full run')
+" && `
+    : '';
+
+  const tokensArg = opts.type === 'audio'
+    ? '/root/encoded.pt'
+    : '/root/prepared.pt';
+  const saveEvery = smokeOnly ? ' --save-every-steps 5' : ' --save-every-steps 100';
+  const pluginTrainArgs = plugin?.extraTrainArgs ? ' ' + plugin.extraTrainArgs : '';
+  const trainCmd = opts.trainCmd || (
+    `python ${scriptName} train ` +
+    `--tokens ${tokensArg} --output /workspace/checkpoints ` +
+    `--epochs ${epochs} --learning-rate ${lr}${saveEvery}${autoTrainFlags} ` +
+    (opts.autoResume ? '--resume /workspace/checkpoints ' : '') +
+    (opts.extraTrainArgs || '') + pluginTrainArgs
+  );
+
+  // #7 WER eval background watcher
+  const werBg = opts.watchWer
+    ? buildWerEvalCmd(require('path').dirname(scriptName), opts.watchWer)
+    : '';
+
+  // Inline smoke-verify (used in --smoke-only path)
+  const smokeVerify = smokeOnly
+    ? ` && python -c "
+from safetensors.torch import load_file
+from pocket_tts import TTSModel
+import os, glob
+ckpt = sorted(glob.glob('/workspace/checkpoints/step-*.safetensors'),
+              key=lambda p: int(p.rsplit('step-',1)[1].rsplit('.',1)[0]))[-1]
+print('[smoke-verify] loading', ckpt)
+sd = load_file(ckpt)
+m = TTSModel.load_model(language='portuguese')
+missing, unexpected = m.load_state_dict(sd, strict=False)
+print(f'[smoke-verify] missing={len(missing)} unexpected={len(unexpected)}')
+import soundfile as sf
+state = m.get_state_for_audio_prompt('anna')
+audio = m.generate_audio(state, 'Olá mundo, teste de smoke.', copy_state=True)
+if hasattr(audio, 'cpu'): audio = audio.cpu().numpy()
+import numpy as np
+audio = np.asarray(audio).astype(np.float32).reshape(-1)
+sf.write('/workspace/smoke_test.wav', audio, m.sample_rate)
+dur = len(audio)/m.sample_rate
+rms = float(np.sqrt(np.mean(audio**2)))
+print(f'[smoke-verify] dur={dur:.2f}s rms={rms:.3f}')
+assert dur > 0.5, f'audio too short: {dur}s'
+assert rms > 0.005, f'audio too quiet: rms={rms}'
+print('[smoke-verify] OK')
+"`
+    : '';
+
+  const pushUp = opts.pushToHf
+    ? ` && hf upload ${opts.pushToHf} /workspace/checkpoints --repo-type model --token "$HF_TOKEN"`
+    : '';
+
+  // Embed HF_TOKEN + secrets + W&B keys.
+  const wandbExports = opts.wandb
+    ? [
+        `export WANDB_PROJECT='${opts.wandb.project}'`,
+        opts.wandb.entity ? `export WANDB_ENTITY='${opts.wandb.entity}'` : '',
+        opts.wandb.runName ? `export WANDB_RUN_NAME='${opts.wandb.runName}'` : '',
+        opts.wandb.logModel ? `export WANDB_LOG_MODEL='${opts.wandb.logModel}'` : '',
+        process.env.WANDB_API_KEY ? `export WANDB_API_KEY='${process.env.WANDB_API_KEY}'` : '',
+      ].filter(Boolean)
+    : [];
+  const secretExports = opts.secrets
+    ? Object.entries(opts.secrets).map(([k, v]) => `export ${k}='${v}'`)
+    : [];
+  // Webhook stage: POST run status when finished
+  const webhookCmd = opts.notifyOnComplete
+    ? ` && curl -X POST -H 'Content-Type: application/json' -d "{\\"status\\":\\"completed\\",\\"runId\\":\\"$(hostname)\\",\\"ckpt\\":\\"/workspace/checkpoints/model.safetensors\\"}" '${opts.notifyOnComplete}' 2>&1 | tail -3`
+    : '';
+  // Checkpoint averaging post-train (Polyak)
+  const ckptAvg = opts.ckptAverage
+    ? ` && python -c "
+import torch, glob
+from safetensors.torch import load_file, save_file
+ckpts = sorted(glob.glob('/workspace/checkpoints/step-*.safetensors'),
+               key=lambda p: int(p.rsplit('step-',1)[1].rsplit('.',1)[0]))
+last_n = ckpts[-${opts.ckptAverage}:]
+print(f'[avg] averaging {len(last_n)} ckpts')
+sds = [load_file(p) for p in last_n]
+avg = {k: sum(sd[k].float() for sd in sds) / len(sds) for k in sds[0]}
+save_file(avg, '/workspace/checkpoints/model_avg.safetensors')
+print('[avg] saved → /workspace/checkpoints/model_avg.safetensors')
+"`
+    : '';
+  // Round 6: 3-repo organization. Derive names from hfBase.
+  // Trainer reads IARATTS_HF_WEIGHTS_REPO + IARATTS_HF_DATASET_REPO + IARATTS_HF_CODE_REPO.
+  const hfStructure = opts.hfStructure || (opts.hfBase ? 'split' : 'flat');
+  const hfWeights = opts.hfBase ? opts.hfBase : opts.pushToHf;  // weights = base name
+  const hfDataset = opts.hfBase && hfStructure !== 'flat' ? `${opts.hfBase}-dataset` : '';
+  const hfCode = opts.hfBase && hfStructure === 'tri' ? `${opts.hfBase}-code` : '';
+  const livePushExports = [
+    hfWeights ? `export IARATTS_HF_WEIGHTS_REPO='${hfWeights}'` : '',
+    hfDataset ? `export IARATTS_HF_DATASET_REPO='${hfDataset}'` : '',
+    hfCode ? `export IARATTS_HF_CODE_REPO='${hfCode}'` : '',
+    // Backward compat
+    opts.pushToHf && !opts.hfBase ? `export IARATTS_HF_PUSH_REPO='${opts.pushToHf}'` : '',
+  ].filter(Boolean);
+  // Pre-train: push code (distill/) to code repo via curl + tar via HF API
+  const codePushStage = hfCode
+    ? `echo '[hf] pushing code to ${hfCode}...' && ` +
+      `python -c "
+from huggingface_hub import HfApi
+import os, glob
+api = HfApi(token=os.environ['HF_TOKEN'])
+api.create_repo(repo_id='${hfCode}', repo_type='model', exist_ok=True, private=False)
+for f in glob.glob('distill/**/*.py', recursive=True) + glob.glob('distill/*.sh') + glob.glob('distill/*.md'):
+    api.upload_file(path_or_fileobj=f, path_in_repo=f, repo_id='${hfCode}', repo_type='model')
+print('  code repo updated')
+" 2>&1 | tail -5 && `
+    : '';
+  // From-HF resume: download dataset/code/weights before train
+  const fromHfStage = opts.fromHf
+    ? `echo '[hf] resume from ${opts.fromHf}...' && ` +
+      `hf download ${opts.fromHf}-dataset --repo-type dataset --local-dir /root --token "$HF_TOKEN" 2>&1 | tail -3 && ` +
+      `hf download ${opts.fromHf}-code --local-dir /workspace --token "$HF_TOKEN" 2>&1 | tail -3 && ` +
+      `hf download ${opts.fromHf} --local-dir /workspace/checkpoints --token "$HF_TOKEN" 2>&1 | tail -3 && ` +
+      `echo '[hf] resume artifacts ready' && `
+    : '';
+  const main = [
+    'set -euo pipefail',
+    `export HF_TOKEN='${hfToken}'`,
+    ...livePushExports,
+    ...wandbExports,
+    ...secretExports,
+    `export ${opts.noHfTransfer ? '' : 'HF_HUB_ENABLE_HF_TRANSFER=1 '}DEBIAN_FRONTEND=noninteractive`,
+    'cd /workspace',
+    `apt-get update -qq && apt-get install -y -qq ${apt}`,
+    `pip install --quiet --prefer-binary ${pip}`,
+    `${datasetDl}${modelDl}true`,
+    'mkdir -p /workspace/checkpoints',
+    smokeOnly
+      ? `${codePushStage}${fromHfStage}${prepStage}${encodeStage}${trainCmd}${smokeVerify}`
+      : `${codePushStage}${fromHfStage}${prepStage}${preSmokeStage}${werBg}${encodeStage}${trainCmd}${ckptAvg}${pushUp}${webhookCmd}`,
+  ].join(' && ');
+
+  console.log(`${c.cyan}[finetune]${c.reset} type=${opts.type}  gpus=${numGpus}  epochs=${epochs}  lr=${lr}`);
+
+  await cmdGpuJobsRun({
+    path: localPath,
+    main,
+    gpu: opts.gpu || '4090',
+    maxCost: opts.maxCost ?? 0.4,
+    maxSpend: opts.maxSpend ?? (smokeOnly ? 0.30 : 5.0),
+    output,
+    timeoutMin: smokeOnly ? 30 : 360,
+    image: opts.image || 'marcosremar/gpu-dev:latest',
+    keepAlive: false,
+    pullEveryMin: 10,
+    stallMin: 30,
+    pullExclude: ['data/', 'model/', 'wav/', '*.pt', '*.shard*', '__pycache__/'],
+    preferSpot: opts.preferSpot ?? true,
+    reuseInstance: opts.reuse ?? false,
+    abortOnDivergence: true,   // default ON for finetune (catches NaN/blow-up early)
+    gpuFallback: (opts as any).gpuFallback ?? true,  // default ON for finetune (don't fail on GPU shortage)
+    dryRun: opts.dryRun,
+  });
+}
+
+async function cmdGpuTrain(opts: GpuTrainOpts): Promise<void> {
+  if (!existsSync(opts.scriptPath)) {
+    console.error(`Script not found: ${opts.scriptPath}`);
+    process.exit(1);
+  }
+  // Validate HF refs early (catch typos before paying for GPU)
+  if (opts.dataset && !opts.dataset.startsWith('hf://')) {
+    console.error(`--dataset must use hf://<repo-id> form (got: ${opts.dataset})`);
+    process.exit(1);
+  }
+  if (opts.model && !opts.model.startsWith('hf://')) {
+    console.error(`--model must use hf://<repo-id> form (got: ${opts.model})`);
+    process.exit(1);
+  }
+  if (opts.pushToHf && !opts.pushToHf.includes('/')) {
+    console.error(`--push-to-hf must be 'owner/repo' form`);
+    process.exit(1);
+  }
+  if (!process.env.HF_TOKEN && !existsSync(`${process.env.HOME}/.cache/huggingface/token`)) {
+    console.error(`HF_TOKEN env not set and ~/.cache/huggingface/token missing.`);
+    console.error(`  Run: huggingface-cli login`);
+    process.exit(1);
+  }
+  const epochs = opts.epochs ?? 4;
+  const lr = opts.lr ?? 5e-5;
+  const output = opts.output || './checkpoints/run-' + Date.now();
+  const dsInclude = opts.datasetInclude ? ` --include "${opts.datasetInclude}"` : '';
+  const datasetDl = opts.dataset?.startsWith('hf://')
+    ? `hf download ${opts.dataset.slice(5)} --repo-type dataset --local-dir /root/data --token "$HF_TOKEN"${dsInclude} && `
+    : '';
+  const modelDl = opts.model?.startsWith('hf://')
+    ? `hf download ${opts.model.slice(5)} --local-dir /root/model --token "$HF_TOKEN" && `
+    : '';
+  const scriptName = opts.scriptPath.replace(/\/$/, '').split('/').pop()!;
+  const resumeFlag = opts.autoResume ? '--resume /workspace/checkpoints' : '';
+  const pushUp = opts.pushToHf
+    ? ` && hf upload ${opts.pushToHf} /workspace/checkpoints --repo-type model --token "$HF_TOKEN"`
+    : '';
+  const main = [
+    'set -euo pipefail',
+    `export ${opts.noHfTransfer ? '' : 'HF_HUB_ENABLE_HF_TRANSFER=1 '}DEBIAN_FRONTEND=noninteractive`,
+    'apt-get update -qq && apt-get install -y -qq pkg-config build-essential libsentencepiece-dev',
+    'pip install --quiet --prefer-binary "huggingface-hub>=1.0.0" hf_transfer torch torchaudio safetensors soundfile',
+    `${datasetDl}${modelDl}true`,
+    'mkdir -p /workspace/checkpoints',
+    `python ${scriptName} train --output /workspace/checkpoints --epochs ${epochs} --learning-rate ${lr} ${resumeFlag} ${opts.extraArgs || ''}${pushUp}`,
+  ].join(' && ');
+
+  await cmdGpuJobsRun({
+    path: opts.scriptPath.endsWith('/') || existsSync(opts.scriptPath) && require('fs').statSync(opts.scriptPath).isDirectory()
+      ? opts.scriptPath
+      : require('path').dirname(opts.scriptPath),
+    main,
+    gpu: opts.gpu || '4090',
+    maxCost: opts.maxCost ?? 0.4,
+    maxSpend: opts.maxSpend ?? 5.00,            // safety net
+    output,
+    timeoutMin: 360,
+    image: 'marcosremar/gpu-dev:latest',
+    keepAlive: false,
+    pullEveryMin: 10,
+    stallMin: 30,
+    pullExclude: ['data/', 'model/', 'wav/', '*.pt'], // skip raw dataset + intermediate; ckpts only
+    preferSpot: opts.preferSpot ?? true,
+    reuseInstance: opts.reuse ?? false,
+    dryRun: opts.dryRun,
+  });
+}
+
+async function cmdGpuJobsStatus(): Promise<void> {
+  const s = loadJobState();
+  if (!s) { console.log('No saved job state.'); return; }
+  console.log(JSON.stringify(s, null, 2));
+}
+
+// Pull live resource metrics from the saved instance: GPU%, VRAM, RAM,
+// disk usage on /workspace, cumulative network rx/tx bytes (eth-like ifaces).
+// Returns parsed object; logs nothing.
+function fetchInstanceMetrics(s: Record<string, unknown>): {
+  gpuPct: number; vramUsedMb: number; vramTotalMb: number;
+  ramUsedMb: number; ramTotalMb: number;
+  diskPct: number; diskUsedGb: number; diskTotalGb: number;
+  netRxBytes: number; netTxBytes: number;
+  raw: string;
+} | null {
+  const sshArgs = ['-p', String(s.sshPort), '-o', 'StrictHostKeyChecking=accept-new',
+                   '-o', 'LogLevel=ERROR', `root@${s.sshHost}`];
+  const cmd = [
+    `gpu=$(nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')`,
+    `ram=$(free -m | awk '/^Mem:/{print $3","$2}')`,
+    `disk=$(df -B1G /workspace 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $3","$2","$5}')`,
+    `net=$(awk '/eth|ens|enp|wlp/ {rx+=$2; tx+=$10} END {print rx","tx}' /proc/net/dev)`,
+    `printf "%s|%s|%s|%s\\n" "$gpu" "$ram" "$disk" "$net"`,
+  ].join('; ');
+  const r = spawnSync('ssh', [...sshArgs, cmd], { encoding: 'utf-8', timeout: 10_000 });
+  const raw = (r.stdout || '').trim();
+  const parts = raw.split('|');
+  if (parts.length < 4) return null;
+  const [gpu, ram, disk, net] = parts;
+  const [gpuPct = 0, vramUsedMb = 0, vramTotalMb = 0] = gpu.split(',').map(Number);
+  const [ramUsedMb = 0, ramTotalMb = 0] = ram.split(',').map(Number);
+  const [diskUsedGb = 0, diskTotalGb = 0, diskPct = 0] = disk.split(',').map(Number);
+  const [netRxBytes = 0, netTxBytes = 0] = net.split(',').map(Number);
+  return {
+    gpuPct, vramUsedMb, vramTotalMb,
+    ramUsedMb, ramTotalMb,
+    diskPct, diskUsedGb, diskTotalGb,
+    netRxBytes, netTxBytes, raw,
+  };
+}
+
+function renderBar(pct: number, width = 20): string {
+  const filled = Math.round((pct / 100) * width);
+  const empty = width - filled;
+  const colorFn = pct >= 90 ? c.red : pct >= 70 ? c.yellow : c.green;
+  return `${colorFn}${'█'.repeat(filled)}${c.dim}${'░'.repeat(empty)}${c.reset}`;
+}
+function fmtMB(mb: number): string {
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)}GB` : `${mb}MB`;
+}
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n}B`;
+  if (n < 1_048_576) return `${(n / 1024).toFixed(1)}KB`;
+  if (n < 1_073_741_824) return `${(n / 1_048_576).toFixed(1)}MB`;
+  return `${(n / 1_073_741_824).toFixed(2)}GB`;
+}
+
+async function cmdGpuJobsMetrics(opts: { json?: boolean; windowSec?: number }): Promise<void> {
+  const s = requireJobState();
+  const windowSec = opts.windowSec ?? 60;          // default: average over 60s
+  const sampleEvery = Math.min(5, Math.max(1, Math.floor(windowSec / 12)));
+  const samples: { rx: number; tx: number; gpuPct: number; vramUsed: number;
+                   ramUsed: number; t: number }[] = [];
+  process.stderr.write(`sampling ${windowSec}s (every ${sampleEvery}s)`);
+  const tStart = Date.now();
+  while ((Date.now() - tStart) < windowSec * 1000) {
+    const m = fetchInstanceMetrics(s);
+    if (!m) { console.error('\nFailed to fetch metrics. SSH OK?'); process.exit(1); }
+    samples.push({ rx: m.netRxBytes, tx: m.netTxBytes, gpuPct: m.gpuPct,
+                   vramUsed: m.vramUsedMb, ramUsed: m.ramUsedMb, t: Date.now() });
+    process.stderr.write('.');
+    if ((Date.now() - tStart) + sampleEvery * 1000 < windowSec * 1000) {
+      await new Promise((r) => setTimeout(r, sampleEvery * 1000));
+    } else break;
+  }
+  process.stderr.write('\n');
+  const last = samples[samples.length - 1];
+  const first = samples[0];
+  const dt = (last.t - first.t) / 1000;
+  const downBps = dt > 0 ? (last.rx - first.rx) / dt : 0;
+  const upBps = dt > 0 ? (last.tx - first.tx) / dt : 0;
+  const avgGpu = samples.reduce((a, x) => a + x.gpuPct, 0) / samples.length;
+  const avgVram = samples.reduce((a, x) => a + x.vramUsed, 0) / samples.length;
+  const avgRam = samples.reduce((a, x) => a + x.ramUsed, 0) / samples.length;
+  // Static (size info) — pull current
+  const m = fetchInstanceMetrics(s)!;
+  const vramPct = m.vramTotalMb ? (avgVram / m.vramTotalMb) * 100 : 0;
+  const ramPct = m.ramTotalMb ? (avgRam / m.ramTotalMb) * 100 : 0;
+  if (opts.json) {
+    console.log(JSON.stringify({
+      windowSec: dt.toFixed(1), samples: samples.length,
+      gpuAvgPct: avgGpu, vramPct, ramPct, diskPct: m.diskPct,
+      vramUsedMb: avgVram, vramTotalMb: m.vramTotalMb,
+      ramUsedMb: avgRam, ramTotalMb: m.ramTotalMb,
+      diskUsedGb: m.diskUsedGb, diskTotalGb: m.diskTotalGb,
+      netDownBpsAvg: downBps, netUpBpsAvg: upBps,
+      netRxBytesCum: m.netRxBytes, netTxBytesCum: m.netTxBytes,
+    }, null, 2));
+    return;
+  }
+  console.log(`instance: ${s.instanceId} (${s.gpuType} on ${s.provider})`);
+  console.log(`window:   ${dt.toFixed(0)}s avg over ${samples.length} samples`);
+  console.log(`  GPU   ${renderBar(avgGpu)} ${avgGpu.toFixed(0)}%  (avg)`);
+  console.log(`  VRAM  ${renderBar(vramPct)} ${vramPct.toFixed(0)}%  ${fmtMB(Math.round(avgVram))}/${fmtMB(m.vramTotalMb)}`);
+  console.log(`  RAM   ${renderBar(ramPct)} ${ramPct.toFixed(0)}%  ${fmtMB(Math.round(avgRam))}/${fmtMB(m.ramTotalMb)}`);
+  console.log(`  DISK  ${renderBar(m.diskPct)} ${m.diskPct.toFixed(0)}%  ${m.diskUsedGb}GB/${m.diskTotalGb}GB`);
+  console.log(`  NET   ↓ ${fmtBytes(downBps)}/s   ↑ ${fmtBytes(upBps)}/s   (${dt.toFixed(0)}s avg)`);
+}
+
+// jobs watch: single-screen live dashboard. Refreshes every <interval>s.
+// Combines cost + last log lines + workspace mtime (stall detector).
+async function cmdGpuJobsWatch(opts: { interval?: number; lines?: number }): Promise<void> {
+  const s = requireJobState();
+  const interval = (opts.interval ?? 10) * 1000;
+  const lines = opts.lines ?? 8;
+  const sshArgs = ['-p', String(s.sshPort), '-o', 'StrictHostKeyChecking=accept-new',
+                   '-o', 'LogLevel=ERROR', `root@${s.sshHost}`];
+  const price = (s.pricePerHr as number) ?? 0;
+  const started = new Date(s.startedAt as string).getTime();
+  let lastMtime = 0;
+  let lastChange = Date.now();
+  let prevRx = 0, prevTx = 0, prevTime = Date.now();
+
+  process.on('SIGINT', () => { process.stdout.write('\n'); process.exit(0); });
+
+  const render = () => {
+    process.stdout.write('\x1b[2J\x1b[H');
+    const elapsedH = (Date.now() - started) / 3_600_000;
+    const spent = elapsedH * price;
+    const stalled = (Date.now() - lastChange) / 60_000;
+    const m = fetchInstanceMetrics(s);
+
+    const probe = spawnSync('ssh', [...sshArgs,
+      `find /workspace -type f -printf '%T@\n' 2>/dev/null | sort -nr | head -1; ` +
+      `echo ---; tail -${lines} /workspace/.job.log 2>/dev/null || echo '(no log)'`],
+      { encoding: 'utf-8', timeout: 10_000 });
+    const out = probe.stdout || '';
+    const [mtimeStr, ...rest] = out.split('---');
+    const mt = parseFloat((mtimeStr || '0').trim());
+    if (Number.isFinite(mt) && mt > lastMtime) { lastMtime = mt; lastChange = Date.now(); }
+
+    const stallTag = stalled > 30
+      ? `${c.red}STALLED ${stalled.toFixed(0)}min${c.reset}`
+      : `${c.green}healthy${c.reset}`;
+    console.log(`${c.bold}gpu jobs watch${c.reset}  ${new Date().toISOString().slice(11, 19)}  (Ctrl+C to exit)`);
+    console.log(`─────────────────────────────────────────────────────────────`);
+    console.log(`instance:  ${s.instanceId}  (${s.gpuType} on ${s.provider})`);
+    console.log(`elapsed:   ${elapsedH.toFixed(2)}h    spent: ${c.yellow}$${spent.toFixed(3)}${c.reset}    @ $${price.toFixed(3)}/h`);
+    console.log(`workspace: ${stallTag}    last change: ${stalled.toFixed(1)}min ago`);
+    if (m) {
+      const vramPct = m.vramTotalMb ? (m.vramUsedMb / m.vramTotalMb) * 100 : 0;
+      const ramPct = m.ramTotalMb ? (m.ramUsedMb / m.ramTotalMb) * 100 : 0;
+      const dt = (Date.now() - prevTime) / 1000;
+      const downBps = prevRx > 0 ? (m.netRxBytes - prevRx) / dt : 0;
+      const upBps = prevTx > 0 ? (m.netTxBytes - prevTx) / dt : 0;
+      prevRx = m.netRxBytes; prevTx = m.netTxBytes; prevTime = Date.now();
+      console.log(`─── resources ────────────────────────────────────────────`);
+      console.log(`GPU   ${renderBar(m.gpuPct, 24)} ${m.gpuPct.toFixed(0)}%`);
+      console.log(`VRAM  ${renderBar(vramPct, 24)} ${vramPct.toFixed(0)}%   ${fmtMB(m.vramUsedMb)}/${fmtMB(m.vramTotalMb)}`);
+      console.log(`RAM   ${renderBar(ramPct, 24)} ${ramPct.toFixed(0)}%   ${fmtMB(m.ramUsedMb)}/${fmtMB(m.ramTotalMb)}`);
+      console.log(`DISK  ${renderBar(m.diskPct, 24)} ${m.diskPct.toFixed(0)}%   ${m.diskUsedGb}GB/${m.diskTotalGb}GB`);
+      console.log(`NET   ↓ ${fmtBytes(downBps)}/s  ↑ ${fmtBytes(upBps)}/s   ` +
+                  `cum ↓${fmtBytes(m.netRxBytes)} ↑${fmtBytes(m.netTxBytes)}`);
+    }
+    console.log(`─── /workspace/.job.log (last ${lines}) ─────────────────────`);
+    console.log(rest.join('---').trim());
+  };
+  render();
+  const t = setInterval(render, interval);
+  process.stdin.resume();
+  void t;
+}
+
+// jobs history: show last N completed jobs from ~/.babelcast/jobs-history.jsonl
+async function cmdGpuJobsHistory(opts: { n?: number; json?: boolean; totals?: boolean }): Promise<void> {
+  const p = jobHistoryPath();
+  if (!existsSync(p)) { console.log('No job history yet.'); return; }
+  const lines = readFileSync(p, 'utf-8').split('\n').filter((l) => l.trim());
+  const rows = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) as any[];
+  const recent = rows.slice(-(opts.n ?? 10));
+  if (opts.json) {
+    console.log(JSON.stringify(recent, null, 2));
+    return;
+  }
+  console.log(`${'startedAt'.padEnd(20)} ${'gpu'.padEnd(15)} ${'$/h'.padStart(6)} ${'h'.padStart(5)} ${'$'.padStart(7)} ${'ok'.padStart(3)} main`);
+  console.log('─'.repeat(80));
+  let totalSpent = 0;
+  let totalH = 0;
+  for (const r of recent) {
+    const start = (r.startedAt || '').slice(0, 19).replace('T', ' ');
+    const gpu = String(r.gpuType || '?').slice(0, 15);
+    const ph = (r.pricePerHr || 0).toFixed(3);
+    const h = (r.elapsedH || 0).toFixed(2);
+    const sp = (r.spentUsd || 0).toFixed(3);
+    const ok = r.success ? c.green + '✓' + c.reset : c.red + '✗' + c.reset;
+    const main = String(r.main || '').slice(0, 30);
+    console.log(`${start.padEnd(20)} ${gpu.padEnd(15)} ${ph.padStart(6)} ${h.padStart(5)} ${sp.padStart(7)} ${ok.padStart(3)} ${main}`);
+    totalSpent += r.spentUsd || 0;
+    totalH += r.elapsedH || 0;
+  }
+  if (opts.totals || recent.length > 1) {
+    console.log('─'.repeat(80));
+    console.log(`TOTAL (${recent.length} jobs):  ${totalH.toFixed(2)}h  $${totalSpent.toFixed(2)}`);
+  }
+}
+
+// jobs logs: fetch (or tail -f) /workspace/.job.log written by the wrapped --main
+async function cmdGpuJobsLogs(opts: { follow?: boolean; lines?: number }): Promise<void> {
+  const s = requireJobState();
+  const sshArgs = ['-p', String(s.sshPort), '-o', 'StrictHostKeyChecking=accept-new',
+                   '-o', 'LogLevel=ERROR', `root@${s.sshHost}`];
+  const lines = opts.lines ?? 200;
+  const cmd = opts.follow
+    ? `tail -n ${lines} -F /workspace/.job.log 2>/dev/null || echo '(no log yet)'`
+    : `tail -n ${lines} /workspace/.job.log 2>/dev/null || echo '(no log yet)'`;
+  const r = spawnSync('ssh', [...sshArgs, cmd], { stdio: 'inherit' });
+  process.exit(r.status || 0);
+}
+
+// jobs cost: compute hours since startedAt × pricePerHr
+async function cmdGpuJobsCost(): Promise<void> {
+  const s = requireJobState();
+  const price = (s.pricePerHr as number | undefined) ?? 0;
+  const started = new Date(s.startedAt as string).getTime();
+  const ms = Date.now() - started;
+  const hours = ms / 3_600_000;
+  const minutes = ms / 60_000;
+  const spend = hours * price;
+  // Pick most readable unit
+  const elapsedStr = hours >= 1
+    ? `${hours.toFixed(2)}h (${minutes.toFixed(0)}min)`
+    : `${minutes.toFixed(1)}min`;
+  console.log(`instance:    ${s.instanceId}  (${s.gpuType || 'n/a'} on ${s.provider || 'n/a'})`);
+  console.log(`started:     ${s.startedAt}`);
+  console.log(`elapsed:     ${elapsedStr}`);
+  console.log(`price:       $${price.toFixed(3)}/h`);
+  console.log(`spent so far:$${spend.toFixed(3)}`);
+  if (price === 0) console.log(`  ${c.yellow}(price metadata missing — older state file?)${c.reset}`);
+}
+
+// jobs clean: free up the saved instance for a fresh re-run without
+// re-provisioning. Kills GPU processes, wipes /workspace, optionally clears
+// pip/HF caches. With --orphans: sweep all instances owned by this user.
+async function cmdGpuJobsClean(opts: {
+  orphans?: boolean; cache?: boolean; keepWorkspace?: boolean;
+}): Promise<void> {
+  if (opts.orphans) {
+    const { url, key } = getConfig();
+    const owner = currentOwner();
+    console.log(`[clean --orphans] terminating all instances owned by '${owner}'...`);
+    const listRes = await fetch(`${url}/v1/gpu/list?probe=false`, { headers: headers(key) });
+    if (!listRes.ok) { console.error(`list failed (HTTP ${listRes.status})`); return; }
+    const listData: any = await listRes.json();
+    const all: any[] = Array.isArray(listData) ? listData : (listData.instances || []);
+    const mine = all.filter((i: any) => {
+      const lbl = i.label ?? i.instanceName ?? '';
+      if (lbl === i.instanceId || lbl === i.podId) return false;
+      return String(lbl).startsWith(`${owner}/`);
+    });
+    if (mine.length === 0) { console.log(`  no instances owned by '${owner}' running.`); return; }
+    console.log(`  found ${mine.length} owned instance(s):`);
+    for (const inst of mine) {
+      const id = inst.instanceId || inst.podId;
+      console.log(`    terminating ${id} (${inst.label || inst.instanceName})`);
+      const termRes = await fetch(`${url}/v1/gpu/terminate`, {
+        method: 'POST', headers: headers(key),
+        body: JSON.stringify({ instanceId: id, provider: inst.provider }),
+      });
+      console.log(`      → ${termRes.ok ? c.green + 'OK' : c.red + 'FAIL'} ${c.reset}(HTTP ${termRes.status})`);
+    }
+    // Wipe state if it pointed at one of these
+    const saved = loadJobState();
+    if (saved && mine.some((i: any) => (i.instanceId || i.podId) === saved.instanceId)) {
+      try { unlinkSync(jobStatePath()); } catch { /* ignore */ }
+    }
+    return;
+  }
+  const s = requireJobState();
+  const sshArgs = ['-p', String(s.sshPort), '-o', 'StrictHostKeyChecking=accept-new',
+                   '-o', 'LogLevel=ERROR', `root@${s.sshHost}`];
+
+  // Kill any running python (the most common stuck process for ML jobs)
+  console.log(`[clean] killing python procs on ${s.sshHost}...`);
+  spawnSync('ssh', [...sshArgs, 'pkill -9 -f python || true; pkill -9 -f train || true'], { stdio: 'inherit' });
+
+  // Free GPU memory (reset compute mode + nvidia-smi report)
+  console.log('[clean] freeing GPU memory...');
+  spawnSync('ssh', [...sshArgs, 'nvidia-smi --gpu-reset 2>/dev/null || nvidia-smi'], { stdio: 'inherit' });
+
+  if (!opts.keepWorkspace) {
+    console.log('[clean] wiping /workspace...');
+    spawnSync('ssh', [...sshArgs, 'rm -rf /workspace/* /workspace/.[!.]* 2>/dev/null; mkdir -p /workspace'], { stdio: 'inherit' });
+  } else {
+    console.log('[clean] keeping /workspace (--keep-workspace)');
+  }
+
+  if (opts.cache) {
+    console.log('[clean] clearing pip + HF caches...');
+    spawnSync('ssh', [...sshArgs, 'rm -rf /root/.cache/pip /root/.cache/huggingface /tmp/* 2>/dev/null || true'], { stdio: 'inherit' });
+  }
+
+  console.log(`${c.green}✓ clean done${c.reset} — instance ${s.instanceId} ready for re-launch.`);
+  console.log(`  next: ai-gateway gpu jobs relaunch  (or: jobs sync && jobs exec ...)`);
+}
+
+// jobs relaunch: re-run saved --main WITHOUT re-syncing. Use after `jobs clean`
+// or when nothing local changed (fixed something on the remote via SSH).
+async function cmdGpuJobsRelaunch(mainOverride?: string): Promise<void> {
+  const s = requireJobState();
+  const cmd = mainOverride || (s.main as string);
+  console.log(`[relaunch] ${s.sshHost} ← ${cmd.slice(0, 80)}${cmd.length > 80 ? '...' : ''}`);
+  const r = spawnSync('ssh', ['-p', String(s.sshPort),
+    '-o', 'StrictHostKeyChecking=accept-new', '-o', 'LogLevel=ERROR',
+    `root@${s.sshHost}`, `cd /workspace && ${cmd}`], { stdio: 'inherit' });
+  if (r.status !== 0) {
+    console.error(`\n${c.yellow}Relaunch failed (exit=${r.status}). Instance still alive — fix and re-relaunch.${c.reset}`);
+  }
+  process.exit(r.status || 0);
+}
+
+// jobs retry: re-sync local --path AND re-run saved --main on the saved instance.
+// Common after editing local files to fix the failure that kept the box alive.
+async function cmdGpuJobsRetry(opts: { skipSync?: boolean; mainOverride?: string }): Promise<void> {
+  const s = requireJobState();
+  if (!opts.skipSync && s.localPath) {
+    console.log(`${c.cyan}[1/2]${c.reset} re-syncing ${s.localPath} → /workspace`);
+    const sync = spawnSync('rsync', ['-az', '--delete', '-e',
+      `ssh -p ${s.sshPort} -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR`,
+      `${(s.localPath as string).replace(/\/$/, '')}/`, `root@${s.sshHost}:/workspace/`,
+    ], { stdio: 'inherit' });
+    if (sync.status !== 0) { console.error('rsync failed'); process.exit(sync.status || 1); }
+  }
+  const cmd = opts.mainOverride || (s.main as string);
+  console.log(`${c.cyan}[2/2]${c.reset} re-running on ${s.sshHost}: ${cmd.slice(0, 80)}${cmd.length > 80 ? '...' : ''}`);
+  const r = spawnSync('ssh', ['-p', String(s.sshPort),
+    '-o', 'StrictHostKeyChecking=accept-new', '-o', 'LogLevel=ERROR',
+    `root@${s.sshHost}`, `cd /workspace && ${cmd}`], { stdio: 'inherit' });
+  if (r.status !== 0) {
+    console.error(`\n${c.yellow}Retry failed (exit=${r.status}). Instance still alive — fix and re-retry.${c.reset}`);
+  }
+  process.exit(r.status || 0);
 }
 
 async function cmdGpuResume(instanceId?: string, opts?: { provider?: string; deployId?: string }) {
@@ -2015,7 +4132,7 @@ Notes:
     or build a Dockerfile and push via CI.
 `;
 
-async function cmdGpuDevStart(opts: { image?: string; gpuTypes?: string; storageGb?: number; env?: string }) {
+async function cmdGpuDevStart(opts: { image?: string; gpuTypes?: string; storageGb?: number; env?: string; label?: string }) {
   const image = opts.image || GPU_DEV_DEFAULT_IMAGE;
   console.log(`${c.cyan}Dev deploy${c.reset} — image: ${c.bold}${image}${c.reset}`);
   console.log(`${c.dim}Mode: pause-on-idle, auto-destroy disabled. Iterate with: exec / sh / push / pull / snapshot${c.reset}\n`);
@@ -2024,7 +4141,9 @@ async function cmdGpuDevStart(opts: { image?: string; gpuTypes?: string; storage
     gpuTypes: opts.gpuTypes,
     storageGb: opts.storageGb,
     env: opts.env,
+    label: opts.label,
     devMode: true,
+    readinessProbe: 'ssh',
   });
 }
 
@@ -2445,6 +4564,7 @@ async function cmdGpuDev(args: string[]) {
         gpuTypes: getArg(args, '--gpu-types'),
         storageGb: getArg(args, '--storage') ? parseInt(getArg(args, '--storage')!) : undefined,
         env: getArg(args, '--env'),
+        label: getArg(args, '--label'),
       });
       break;
     }
@@ -3512,6 +5632,13 @@ Hyperstack-specific (Custom OS Images + hibernation):
                                       promote to Custom OS Image (one-shot).
                                       Set HYPERSTACK_BENCH_IMAGE_ID to use it.
 
+Auto-job (provision → run → pull → terminate):
+  jobs run --main "<cmd>" (--repo <url> | --path <dir>) [opts]
+                                      Picks cheapest matching offer, deploys,
+                                      runs the command, pulls /workspace back,
+                                      then ALWAYS terminates the instance.
+                                      See 'ai-gateway gpu jobs help' for full opts.
+
   Multi-GPU targeting (applies to ssh, patch, pull, commit, dev):
     --instance <id>              Target a specific instance by ID
     --image <name>               Target by Docker image name (partial match)
@@ -3557,6 +5684,316 @@ Dev mode examples:
   ai-gateway gpu dev start                        Launch scratch dev machine
   ai-gateway gpu dev exec "nvidia-smi"            Run command in dev machine
   ai-gateway gpu dev help                         Full dev mode help
+`,
+    gpuFinetune: `
+ai-gateway gpu finetune — Generic finetuning module (Fireworks-style automation)
+
+Submit a job spec, get auto-provisioning + HF data/model download + encode +
+train + checkpoint + push-to-HF — in one call. Sensible defaults per workload
+type (text or audio). Crash-survivable via auto-resume + spot + budget cap.
+
+Subcommands:
+  submit | run    Provision + run finetune (one-shot, foreground)
+                  Smoke runs FIRST by default → only proceeds to full if OK.
+                  --no-smoke / --smoke (smoke-only) / --dry-run / --no-estimate
+  status          Show saved instance info
+  logs [-f]       Tail /workspace/.job.log
+  metrics         GPU/VRAM/RAM/DISK/NET snapshot
+  cancel          Terminate saved instance (--force)
+  history         Show last 20 finetune runs with totals
+  estimate        Predict total wall time + cost from spec (no spend)
+  validate        Schema-check spec.yaml + local dataset (no spend)
+  lr-find         Sequential mini-trains @ {1e-6..5e-4} → suggest best LR
+  sweep --trials N  Parallel hyperparam search (N spot instances)
+  deploy <ckpt>   Push ckpt to --push-to-hf or print local IARATTS_CKPT cmd
+  list-runs       Past finetune submissions (~/.babelcast/finetune_runs/)
+  plugins         Show available plugins (lora, qlora, grad-ckpt, flash-attn)
+  watch-web       Open local web dashboard (stub — use 'gpu jobs watch' for now)
+  compare         A/B WER test multiple ckpts via Whisper roundtrip
+                  --ckpt <path> (repeatable)  --prompts <path>  --max N
+                  --whisper-model base|small|medium|large-v3
+
+Submit flags (all also work as spec.yaml keys):
+  --persist-cache   Mount persistent volume (skip re-download $$)
+  --retry-on-preempt N  Auto-redeploy + resume on spot preempt (N retries)
+  --incremental     Hash dataset; skip encode if unchanged from last run
+  --auto-fix        On smoke failure, lookup KNOWN_BUGS + suggest/apply fix
+  --plugin <name>   Apply plugin (lora|qlora|grad-ckpt|flash-attn)
+  --watch-wer <p>   WER eval every 10min using <p>/eval prompts JSON
+  --web             Open local web dashboard while running
+
+Round 4 (ideas from Axolotl/SkyPilot/Unsloth):
+  --wandb-project <p>   W&B logging (auto-export WANDB_API_KEY from env)
+  --notify-url <url>    POST {status,runId,ckpt} to URL on completion
+  --providers a,b,c     Multi-cloud failover (try in order if 1st fails)
+  --failover-on-preempt Switch provider on spot preemption
+  --ckpt-avg N          Polyak-average last N ckpts → model_avg.safetensors
+  --export-gguf         Post-train: convert ckpt to GGUF for llama.cpp/ollama
+  spec.secrets:         Sensitive env vars (redacted from logs/state file)
+  spec.evalsPerEpoch    Run eval N times per epoch (vs every M steps)
+  spec.earlyStopOnEval  Stop if metric < threshold during eval
+  spec.multiDataset     Combine N datasets with weights
+
+Round 6 (3-repo HF organization):
+  --hf-base <owner/name>   Auto-create 3 HF repos:
+                             <name>-dataset (encoded.pt + manifest)
+                             <name>          (weights = ckpts)
+                             <name>-code     (training scripts) [if hfStructure=tri]
+  --hf-structure flat|split|tri  flat=1 repo, split=2, tri=3 (default split if hfBase set)
+  --from-hf <owner/name>   Resume from 3 HF repos:
+                             - download <name>-dataset → skip encode
+                             - download <name>-code    → /workspace
+                             - download <name>         → use as --resume
+
+Submit forms:
+  ai-gateway gpu finetune submit                  # auto-loads ./train.yaml
+  ai-gateway gpu finetune submit -f train.yaml
+  ai-gateway gpu finetune submit --script ./train.py --type audio --dataset hf://r ...
+
+PRESETS (no user script needed — only train.yaml + dataset):
+  type: pocket-tts-finetune    bundled flow-matching trainer for kyutai/pocket-tts
+  type: <custom>               legacy mode — provide --script <path>
+  Run 'ai-gateway gpu finetune presets' to list installed bundled trainers.
+
+Spec keys (YAML or JSON):
+  type        text | audio | custom         (default audio)
+  script      path to your trainer python   (required)
+  dataset     hf://owner/repo               (auto-downloaded → /root/data)
+  model       hf://owner/repo               (auto-downloaded → /root/model)
+  dataset-include  glob                     (e.g. "wav/*"; skip text/ etc)
+  noHfTransfer     true|false               (workaround 429 on small-file datasets)
+  epochs           N                        (default 4)
+  lr               X                        (default 5e-5)
+  numGpus          N                        (>1 → multi-GPU shard encode for audio)
+  gpu              filter                   (default "4090")
+  maxCost          $/h                      (default 0.4)
+  maxSpend         $                        (default 5.0; force-kill if exceed)
+  output           dir                      (default ./ckpts/run-<ts>)
+  pushToHf         owner/repo               (upload final ckpt to HF)
+  autoResume       true|false               (--resume from last ckpt)
+  preferSpot       true|false               (default true)
+  reuse            true|false               (skip provision if instance live)
+  extraTrainArgs   "..."                    (appended to train cmd)
+  extraDeps        "pkg1 pkg2"              (extra pip)
+  aptPkgs          "pkg1 pkg2"              (extra apt)
+
+Example spec.yaml:
+  type: audio
+  script: ./distill/finetune_pocket_tts.py
+  dataset: hf://marcosremar2/gemini-dataset-erinome
+  dataset-include: wav/*
+  noHfTransfer: true
+  model: hf://kyutai/pocket-tts
+  epochs: 4
+  lr: 5e-5
+  numGpus: 1
+  pushToHf: marcosremar2/iaratts-100M-erinome
+  autoResume: true
+  preferSpot: true
+  maxSpend: 1.50
+
+Example flag form (text LoRA on Llama):
+  ai-gateway gpu finetune submit \\
+    --script ./trainers/lora_llama.py \\
+    --type text \\
+    --dataset hf://my-user/my-instructions \\
+    --model hf://meta-llama/Llama-3-8B \\
+    --epochs 3 --lr 2e-4 \\
+    --push-to-hf my-user/llama3-8b-lora-v1 \\
+    --max-spend 3.00 --auto-resume
+
+Defaults per type:
+  text:   apt: pkg-config build-essential
+          pip: huggingface-hub hf_transfer torch transformers datasets accelerate safetensors
+  audio:  apt: pkg-config build-essential libsentencepiece-dev libsndfile1 ffmpeg
+          pip: huggingface-hub hf_transfer torch torchaudio safetensors soundfile
+  custom: apt: pkg-config build-essential
+          pip: huggingface-hub hf_transfer torch safetensors
+
+Pipeline (auto-generated remote command):
+  1. apt-get install <type-specific deps + --apt-pkgs>
+  2. pip install <type-specific deps + --extra-deps>
+  3. hf download <dataset> --include <filter>
+  4. hf download <model>
+  5. (audio) python <script> encode --input ... --output /root/encoded.pt
+     OR multi-GPU: bash encode_multi_gpu.sh ... when numGpus > 1
+     (text) python <script> prepare --dataset ... --output /root/prepared.pt
+  6. python <script> train --tokens ... --output /workspace/checkpoints
+        --epochs N --learning-rate X [--resume /workspace/checkpoints]
+  7. hf upload <pushToHf> /workspace/checkpoints (if pushToHf set)
+
+Trainer interface (your script must implement):
+  python <script> encode --input <jsonl> --output <pt>     (audio only)
+  python <script> prepare --dataset <dir> --output <pt>    (text only)
+  python <script> train --tokens <pt> --output <dir>
+                        --epochs N --learning-rate X [--resume <ckpt-dir>]
+
+If your script doesn't fit, override with --encode-cmd / --train-cmd in spec.
+`,
+    gpuTrain: `
+ai-gateway gpu train — Training/finetuning-specific wrapper
+
+Composes 'jobs run' with ML defaults: spot instances, $5 budget cap,
+mid-run pull every 10min, stall watchdog, pull excludes for cache/dataset,
+optional auto-resume from latest checkpoint, optional HF upload on success.
+
+Usage:
+  ai-gateway gpu train --script <path> [opts]
+
+Required:
+  --script <path>             Local Python script OR directory containing it.
+                              Whole dir is rsynced; remote runs the file's basename.
+
+Optional:
+  --dataset hf://<repo-id>    Auto-downloaded to /root/data on the GPU
+  --dataset-include <glob>    Restrict download to matching paths (e.g. "wav/*").
+                              Skip text/ when you only need audio. Saves $ + time.
+  --no-hf-transfer            Disable HF_TRANSFER parallel downloads. Use this
+                              for datasets with thousands of small files (avoids
+                              429 rate limits on huggingface.co).
+  --model   hf://<repo-id>    Auto-downloaded to /root/model on the GPU
+  --epochs N                  default 4
+  --lr X                      default 5e-5
+  --gpu <filter>              default "4090"
+  --max-cost <usd>            $/h cap when picking offer (default 0.4)
+  --max-spend <usd>           Hard $ cap; auto-kills if breached (default 5.00)
+  --output <dir>              Local pull dest (default ./checkpoints/run-<ts>)
+  --push-to-hf <repo-id>      Upload final /workspace/checkpoints to HF
+  --auto-resume               Add '--resume /workspace/checkpoints' to script
+  --prefer-spot               Interruptible instance (default ON, --no-spot to opt out)
+  --no-spot                   Force on-demand (no spot)
+  --reuse                     Skip provisioning if a live owner instance exists
+  --extra-args "..."          Appended to the python <script> train command
+  --dry-run                   Print plan + cost without spending
+
+Example:
+  ai-gateway gpu train --script ./distill/finetune_pocket_tts.py \\
+    --dataset hf://marcosremar2/gemini-dataset-erinome \\
+    --model   hf://kyutai/pocket-tts \\
+    --epochs 4 --lr 5e-5 \\
+    --push-to-hf marcosremar2/iaratts-100M-erinome \\
+    --max-spend 1.50 --auto-resume
+
+Notes:
+  - Auto-installs pkg-config + libsentencepiece-dev + torch wheels on remote
+  - Crash → instance kept alive (default). Re-run with --reuse + --auto-resume
+  - All 'gpu jobs *' subcommands work on the running train job
+`,
+    gpuJobs: `
+ai-gateway gpu jobs — One-shot GPU jobs with crash-survivable debugging
+
+Subcommands:
+  run        Provision GPU, upload, run, pull, terminate
+  status     Show saved instance info from last run
+  ssh [cmd]  SSH into the saved instance (or run a one-shot command)
+  sync [dir] Re-rsync local → /workspace on saved instance
+             (defaults to the original --path; pass a dir to override)
+  pull [dir] Re-rsync /workspace → local (defaults to original --output)
+  exec "cmd" Run a command inside /workspace on the saved instance
+  clean      Kill stuck procs + reset GPU mem + wipe /workspace on saved instance
+             --keep-workspace  keep /workspace contents
+             --cache           also wipe /root/.cache (pip + HF) and /tmp
+             --orphans         instead, sweep ALL instances owned by you
+  relaunch   Re-run saved --main WITHOUT re-syncing (fast restart after 'clean')
+             --main "..." overrides the saved command
+  retry      Re-sync local + re-run saved --main (one-step recovery after edits)
+             --no-sync to skip rsync; --main "..." to override
+  logs       Fetch /workspace/.job.log written by run's --main wrapper
+             -f / --follow to tail; -n <lines> for length (default 200)
+  cost       Print elapsed hours × pricePerHr (rough live spend)
+  history    Show last N completed jobs (default 10) — ts, gpu, $, success
+             -n N | --json | --totals
+  watch      Live dashboard: cost + stall + GPU/VRAM/RAM/DISK/NET + log tail.
+             Refreshes every <interval>s. NET shows live up/down speed + cumulative.
+             --interval <sec> (default 10)  -n <log lines> (default 8)
+  metrics    Average GPU/VRAM/RAM/DISK/NET over a window (default 60s).
+             NET is shown as avg ↓/↑ speed (B/s, KB/s, MB/s, GB/s).
+             --window <sec> (default 60)  --json (parseable)
+  cleanup    Terminate the saved instance (--force to confirm)
+
+──────────────────────────────────────────────────────────────────
+ai-gateway gpu jobs run — Provision → upload → execute → pull → cleanup
+
+Picks cheapest GPU matching --gpu under --max-cost, deploys, uploads workspace
+(or git-clones --repo), runs --main inside /workspace.
+
+After --main exits (zero or non-zero), ALWAYS pulls /workspace → --output
+(rsync, 3 retries with backoff). The pull happens BEFORE the terminate
+decision so failure cannot lose the work product.
+
+Termination logic:
+  - pull failed             → KEEP ALIVE (data still only on remote)
+  - pull OK + job success   → terminate (unless --keep-alive)
+  - pull OK + job failure   → KEEP ALIVE (unless --terminate-on-error)
+
+Usage:
+  ai-gateway gpu jobs run --main "<cmd>" (--repo <url> | --path <dir>) [opts]
+
+Required:
+  --main "<cmd>"             Shell command to run inside /workspace on the GPU
+  --repo <git-url>            Git URL to clone into /workspace (depth 1)
+    OR
+  --path <local-dir>          Local dir to rsync up to /workspace
+
+Options:
+  --gpu <filter>              GPU type filter (default: "4090")
+  --max-cost <usd>            Max $/hr cap (default: 0.5)
+  --output <dir>              Where to pull /workspace back (default: ./job_output)
+  --timeout <min>             Max minutes to wait for ready (default: 60)
+  --image <docker-image>      Container image (default: marcosremar/gpu-dev:latest)
+  --env "K=V K2=V2"           Env vars exported in the container
+  --keep-alive                Never terminate (manual cleanup via 'jobs cleanup')
+  --terminate-on-error        Force terminate even on failure (old default)
+  --pull-every <min>          Mid-run checkpoint pull cadence (default: 10, 0=off)
+                              Protects long jobs — if remote dies at 2h45 of 3h
+                              you still have the latest checkpointed state local
+  --dry-run                   Pick GPU + print plan + projected max cost.
+                              Does NOT deploy or spend any money.
+  --stall-min <min>           Warn if /workspace mtime unchanged for N min
+                              (default: 30, 0=off). Detects hung machines —
+                              user can SIGINT to abort while saving state.
+  --max-spend <usd>           Hard $ cap. Polls every 60s; force-terminates
+                              when elapsed × pricePerHr ≥ cap.
+  --pull-exclude <pattern>    rsync --exclude pattern. Repeatable. Built-in
+                              defaults: .cache/ .huggingface/ __pycache__/ *.pyc
+  --prefer-spot               Request interruptible/spot instances (≈30-50%
+                              cheaper, may be preempted; --auto-resume helps).
+  --reuse-instance            If a live owner-tagged instance with same image
+                              exists, skip provisioning + reuse it.
+  --gpu-fallback              If primary GPU unavailable @ --max-cost, walk a
+                              cheaper-GPU ladder (e.g. 4090→3090→A5000→4080).
+
+Crash-recovery flow (default):
+  1. Run fails. Instance stays alive, SSH info saved to ~/.babelcast/last_job.json
+  2. Inspect:        ai-gateway gpu jobs ssh "tail -50 /var/log/syslog"
+  3. Fix locally and re-push:
+                     ai-gateway gpu jobs sync     # rsyncs local --path → /workspace
+  4. Re-run:         ai-gateway gpu jobs retry    # sync + re-run saved --main
+                     # OR for a fresh slate before re-running:
+                     ai-gateway gpu jobs clean    # wipe workspace + free GPU
+                     ai-gateway gpu jobs sync     # push current local state
+                     ai-gateway gpu jobs relaunch # re-run saved --main (no resync)
+  5. Pull results:   ai-gateway gpu jobs pull
+  6. Done:           ai-gateway gpu jobs cleanup --force
+
+Examples:
+  ai-gateway gpu jobs run \\
+    --path ./iaratts \\
+    --main "pip install -r requirements.txt && python finetune_pocket_tts.py train" \\
+    --gpu 4090 --max-cost 0.4 --output ./checkpoints
+
+  # Job died → debug → retry → cleanup
+  ai-gateway gpu jobs ssh
+  ai-gateway gpu jobs sync
+  ai-gateway gpu jobs exec "python finetune_pocket_tts.py train --resume"
+  ai-gateway gpu jobs pull
+  ai-gateway gpu jobs cleanup --force
+
+Notes:
+  - Default keeps instance alive on error → DO NOT FORGET 'jobs cleanup'
+  - State persists in ~/.babelcast/last_job.json across CLI invocations
+  - Owner-prefixed label so 'gpu list --mine' picks it up
+  - rsync requires SSH access to the pod (provider must expose 22/tcp)
 `,
     metrics: `
 ai-gateway metrics — Show gateway metrics
@@ -3915,6 +6352,32 @@ ai-gateway server — Manage the local dev server
         });
         break;
       }
+      case 'app': {
+        const sub = args[1];
+        if (!sub || sub === 'help' || sub === '--help') {
+          console.log(`
+ai-gateway app — per-application API key management
+
+  app init <app-name>      Generate a new API key for this app and store it
+                           in the cwd .env (as AIGW_APP_KEY=...). Prints the
+                           line to add to the gateway's GATEWAY_API_KEYS env.
+  app whoami               Probe /health with the current key and print
+                           the userId the gateway resolves us as (or admin).
+  app key                  Print the currently configured AIGW_APP_KEY
+                           (masked unless --reveal is given).
+
+Per-app isolation:
+  - Server-side: when GATEWAY_API_KEYS is set, each Bearer maps to a userId.
+    Deploys auto-prefix the label with "<userId>/". gpu list filters to the
+    caller's instances. gpu terminate refuses cross-app destruction.
+  - Operator (loopback, no key): bypasses the filter — sees and can manage
+    everything (admin mode for local dev).
+`);
+          break;
+        }
+        await cmdAppDispatch(sub, args.slice(2));
+        break;
+      }
       case 'docker': {
         const sub = args[1];
         if (!sub || sub === 'help' || sub === '--help') {
@@ -3993,6 +6456,8 @@ ai-gateway server — Manage the local dev server
             // to keep the default; only set false if user opts out.
             probe: args.includes('--no-probe') ? false : true,
             json: args.includes('--json'),
+            mine: args.includes('--mine'),
+            label: getArg(args, '--label'),
           }); break;
           case 'doctor': await cmdGpuDoctor({
             instance: getArg(args, '--instance'),
@@ -4020,7 +6485,11 @@ ai-gateway server — Manage the local dev server
             storageGb: getArg(args, '--storage') ? parseInt(getArg(args, '--storage')!) : undefined,
             numGpus: getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : undefined,
             env: getArg(args, '--env'),
+            devMode: hasFlag(args, '--dev-mode'),
             readinessProbe: getArg(args, '--readiness-probe'),
+            label: getArg(args, '--label'),
+            // --no-strict-fast-boot opts OUT of the strict filter (default ON)
+            strictFastBoot: hasFlag(args, '--no-strict-fast-boot') ? false : undefined,
           }); break;
           case 'stop': await cmdGpuStop({
             deployId: getArg(args, '--deploy-id'),
@@ -4032,7 +6501,11 @@ ai-gateway server — Manage the local dev server
           case 'terminate': {
             const id = args[2];
             if (!id || id.startsWith('-')) { console.error('Usage: ai-gateway gpu terminate <instanceId>'); process.exit(1); }
-            await cmdGpuTerminate(id, { provider: getArg(args, '--provider'), deployId: getArg(args, '--deploy-id') });
+            await cmdGpuTerminate(id, {
+              provider: getArg(args, '--provider'),
+              deployId: getArg(args, '--deploy-id'),
+              force: hasFlag(args, '--force'),
+            });
             break;
           }
           case 'logs': await cmdGpuLogs(); break;
@@ -4117,8 +6590,371 @@ ai-gateway server — Manage the local dev server
           case 'hyperstack':
             await cmdGpuHyperstack(args.slice(2));
             break;
+          case 'finetune': {
+            // Fireworks-style declarative finetune. Either --spec <yaml/json> OR flags.
+            // Auto-detect ./train.yaml if no --spec/--f flag.
+            let specFile = getArg(args, '--spec') || getArg(args, '-f');
+            if (!specFile && existsSync('./train.yaml')) {
+              specFile = './train.yaml';
+              console.log(`[auto] using ./train.yaml`);
+            }
+            let spec: any = {};
+            if (specFile) {
+              if (!existsSync(specFile)) { console.error(`spec not found: ${specFile}`); process.exit(1); }
+              const raw = readFileSync(specFile, 'utf-8');
+              try { spec = JSON.parse(raw); } catch {
+                // Minimal YAML parser: lines `key: value`. Strip inline `#` comments.
+                spec = {};
+                for (const line of raw.split('\n')) {
+                  // Skip pure comment lines
+                  if (line.trim().startsWith('#')) continue;
+                  const m = line.match(/^([\w-]+):\s*(.*?)\s*$/);
+                  if (m) {
+                    let v = m[2].trim();
+                    // Strip inline comment (NOT inside quotes — naive but works here)
+                    if (!v.startsWith('"') && !v.startsWith("'")) {
+                      const hashIdx = v.indexOf('#');
+                      if (hashIdx >= 0) v = v.slice(0, hashIdx).trim();
+                    }
+                    spec[m[1]] = v.match(/^-?\d+$/) ? parseInt(v) :
+                                 v.match(/^-?\d*\.?\d+([eE][-+]?\d+)?$/) ? parseFloat(v) :
+                                 v === 'true' ? true : v === 'false' ? false :
+                                 v.replace(/^["']|["']$/g, '');
+                  }
+                }
+              }
+            }
+            const sub = args[2];
+            if (!sub || sub === 'help' || sub === '--help') { console.log(HELP.gpuFinetune); break; }
+            if (sub === 'submit' || sub === 'run') {
+              const script = getArg(args, '--script') || spec.script;
+              const specType = getArg(args, '--type') || spec.type;
+              const isPreset = specType && loadPreset(specType);
+              if (!script && !isPreset) {
+                console.error('Need --script <path>, "script:" in spec, OR a built-in preset type');
+                process.exit(1);
+              }
+              if (isPreset) {
+                console.log(`[preset] using bundled trainer: ${specType}`);
+              }
+              // #11 Validate spec before deploy
+              const specErrs = validateFinetuneSpec({ ...spec, script });
+              if (specErrs.length > 0) {
+                console.error('✗ spec invalid:');
+                specErrs.forEach((e) => console.error(`  - ${e}`));
+                process.exit(1);
+              }
+              // #4 Show estimate before submit (unless dry-run already does)
+              if (!hasFlag(args, '--dry-run') && !hasFlag(args, '--no-estimate')) {
+                const est = estimateFinetuneCost({ type: spec.type || 'audio', scriptPath: script,
+                                                   epochs: spec.epochs, numGpus: spec.numGpus } as any);
+                console.log(`${c.dim}[estimate] ~${est.totalMin.toFixed(0)}min, ~$${est.totalUsd.toFixed(2)}${c.reset}`);
+              }
+              // #5 Record run
+              recordFinetuneRun({ ...spec, script }, { ts: new Date().toISOString() });
+              await cmdGpuFinetune({
+                type: (specType || 'audio') as any,
+                localPath: getArg(args, '--local-path') || spec.localPath,
+                scriptPath: script || '',  // empty triggers preset fill
+                dataset: getArg(args, '--dataset') || spec.dataset,
+                datasetInclude: getArg(args, '--dataset-include') || spec['dataset-include'] || spec.datasetInclude,
+                noHfTransfer: hasFlag(args, '--no-hf-transfer') || spec.noHfTransfer === true,
+                model: getArg(args, '--model') || spec.model,
+                prepCmd: getArg(args, '--prep-cmd') || spec.prepCmd,
+                encodeCmd: getArg(args, '--encode-cmd') || spec.encodeCmd,
+                trainCmd: getArg(args, '--train-cmd') || spec.trainCmd,
+                epochs: getArg(args, '--epochs') ? parseInt(getArg(args, '--epochs')!) : spec.epochs,
+                lr: getArg(args, '--lr') ? parseFloat(getArg(args, '--lr')!) : spec.lr,
+                numGpus: getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : spec.numGpus,
+                gpu: getArg(args, '--gpu') || spec.gpu,
+                maxCost: getArg(args, '--max-cost') ? parseFloat(getArg(args, '--max-cost')!) : spec.maxCost,
+                maxSpend: getArg(args, '--max-spend') ? parseFloat(getArg(args, '--max-spend')!) : spec.maxSpend,
+                output: getArg(args, '--output') || spec.output,
+                pushToHf: getArg(args, '--push-to-hf') || spec.pushToHf,
+                autoResume: hasFlag(args, '--auto-resume') || spec.autoResume === true,
+                preferSpot: hasFlag(args, '--no-spot') ? false : (hasFlag(args, '--prefer-spot') || spec.preferSpot !== false),
+                reuse: hasFlag(args, '--reuse') || spec.reuse === true,
+                extraTrainArgs: getArg(args, '--extra-args') || spec.extraTrainArgs,
+                extraDeps: getArg(args, '--extra-deps') || spec.extraDeps,
+                aptPkgs: getArg(args, '--apt-pkgs') || spec.aptPkgs,
+                dryRun: hasFlag(args, '--dry-run') || spec.dryRun === true,
+                smoke: hasFlag(args, '--smoke') || spec.smoke === true,
+                skipSmoke: hasFlag(args, '--no-smoke') || spec.skipSmoke === true,
+                persistCache: hasFlag(args, '--persist-cache') || spec.persistCache === true,
+                retryOnPreempt: getArg(args, '--retry-on-preempt') ? parseInt(getArg(args, '--retry-on-preempt')!) : spec.retryOnPreempt,
+                incremental: hasFlag(args, '--incremental') || spec.incremental === true,
+                autoFix: hasFlag(args, '--auto-fix') || spec.autoFix === true,
+                plugin: getArg(args, '--plugin') || spec.plugin,
+                watchWer: getArg(args, '--watch-wer') || spec.watchWer,
+                webDashboard: hasFlag(args, '--web') || spec.webDashboard === true,
+                wandb: getArg(args, '--wandb-project') ? { project: getArg(args, '--wandb-project')! } : spec.wandb,
+                notifyOnComplete: getArg(args, '--notify-url') || spec.notifyOnComplete,
+                secrets: spec.secrets,
+                providers: getArg(args, '--providers') ? getArg(args, '--providers')!.split(',') : spec.providers,
+                failoverOnPreempt: hasFlag(args, '--failover-on-preempt') || spec.failoverOnPreempt === true,
+                ckptAverage: getArg(args, '--ckpt-avg') ? parseInt(getArg(args, '--ckpt-avg')!) : spec.ckptAverage,
+                exportGguf: hasFlag(args, '--export-gguf') || spec.exportGguf === true,
+                hfBase: getArg(args, '--hf-base') || spec.hfBase,
+                hfStructure: (getArg(args, '--hf-structure') as any) || spec.hfStructure,
+                fromHf: getArg(args, '--from-hf') || spec.fromHf,
+                // Round 8 — quality automation + Tier 2
+                quality: (getArg(args, '--quality') as any) || spec.quality,
+                autoStopPlateau: getArg(args, '--auto-stop-plateau') ? parseInt(getArg(args, '--auto-stop-plateau')!) : spec.autoStopPlateau,
+                torchCompile: hasFlag(args, '--torch-compile') ? true : (hasFlag(args, '--no-torch-compile') ? false : spec.torchCompile),
+                augmentPitch: hasFlag(args, '--augment-pitch') || spec.augmentPitch === true,
+                augmentSpeed: hasFlag(args, '--augment-speed') || spec.augmentSpeed === true,
+                saveEverySteps: getArg(args, '--save-every-steps') ? parseInt(getArg(args, '--save-every-steps')!) : spec.saveEverySteps,
+                image: getArg(args, '--image') || spec.image,
+                batchSize: getArg(args, '--batch-size') ? parseInt(getArg(args, '--batch-size')!) : spec.batchSize,
+                gradAccum: getArg(args, '--grad-accum') ? parseInt(getArg(args, '--grad-accum')!) : spec.gradAccum,
+                weightDecay: getArg(args, '--weight-decay') ? parseFloat(getArg(args, '--weight-decay')!) : spec.weightDecay,
+                warmupSteps: getArg(args, '--warmup-steps') ? parseInt(getArg(args, '--warmup-steps')!) : spec.warmupSteps,
+                freezeBackboneLayers: getArg(args, '--freeze-backbone-layers') ? parseInt(getArg(args, '--freeze-backbone-layers')!) : spec.freezeBackboneLayers,
+                onlyFlowNet: hasFlag(args, '--only-flow-net') || spec.onlyFlowNet === true,
+                curriculum: (getArg(args, '--curriculum') as any) || spec.curriculum,
+                gpuFallback: hasFlag(args, '--no-gpu-fallback') ? false : (hasFlag(args, '--gpu-fallback') || spec.gpuFallback !== false),
+              } as any);
+            } else if (sub === 'status') {
+              if (hasFlag(args, '--raw')) await cmdGpuJobsStatus();
+              else await cmdGpuFinetuneStatus();
+            } else if (sub === 'logs') {
+              await cmdGpuJobsLogs({ follow: hasFlag(args, '-f'), lines: 200 });
+            } else if (sub === 'metrics') {
+              await cmdGpuJobsMetrics({ json: hasFlag(args, '--json') });
+            } else if (sub === 'cancel' || sub === 'cleanup') {
+              await cmdGpuJobsCleanup(hasFlag(args, '--force'));
+            } else if (sub === 'history') {
+              await cmdGpuJobsHistory({ n: 20, totals: true });
+            } else if (sub === 'estimate') {
+              const est = estimateFinetuneCost({
+                type: spec.type || 'audio', scriptPath: spec.script,
+                epochs: spec.epochs, numGpus: spec.numGpus,
+              } as GpuFinetuneOpts);
+              console.log(`[estimate] encode: ${est.encodeMin.toFixed(1)}min, train: ${est.trainMin.toFixed(1)}min, setup: ${est.setupMin}min`);
+              console.log(`[estimate] total: ${est.totalMin.toFixed(0)}min  ≈  $${est.totalUsd.toFixed(2)}`);
+            } else if (sub === 'validate') {
+              const errs = validateFinetuneSpec(spec);
+              // Local dataset validation only if dataset path is local file (not hf://)
+              const dsPath = spec.dataset && !String(spec.dataset).startsWith('hf://') ? String(spec.dataset) : '';
+              const dsErrs = dsPath ? validateDatasetLocal(dsPath, spec.type || 'audio') : [];
+              const all = [...errs, ...dsErrs];
+              if (all.length === 0) console.log('✓ spec valid');
+              else { console.error('✗ spec errors:'); all.forEach((e) => console.error(`  - ${e}`)); process.exit(1); }
+            } else if (sub === 'lr-find') {
+              await cmdGpuFinetuneLrFind({ ...spec } as GpuFinetuneOpts);
+            } else if (sub === 'sweep') {
+              await cmdGpuFinetuneSweep({
+                ...spec,
+                trials: getArg(args, '--trials') ? parseInt(getArg(args, '--trials')!) : 4,
+              } as any);
+            } else if (sub === 'deploy') {
+              const ckpt = args[2] && !args[2].startsWith('-') ? args[2] : undefined;
+              const hfRepo = getArg(args, '--hf-repo');
+              if (!ckpt && !hfRepo) {
+                console.error('Usage: deploy [<ckpt-path>] [--hf-repo <owner/name>] [--hf-file <name>] [--push-to-hf <repo>] [--restart-server]');
+                process.exit(1);
+              }
+              await cmdGpuFinetuneDeploy({
+                ckpt,
+                hfRepo,
+                hfFile: getArg(args, '--hf-file'),
+                pushTo: getArg(args, '--push-to-hf'),
+                restartServer: hasFlag(args, '--restart-server'),
+              });
+            } else if (sub === 'list-runs') {
+              const dir = finetuneRunsDir();
+              if (!existsSync(dir)) { console.log('No runs recorded yet.'); }
+              else {
+                for (const f of readdirSync(dir).filter((f) => f.endsWith('.json'))) {
+                  try {
+                    const r = JSON.parse(readFileSync(join(dir, f), 'utf-8'));
+                    console.log(`${r.id}  ${r.ts}  type=${r.spec?.type}  lr=${r.spec?.lr}`);
+                  } catch { /* skip */ }
+                }
+              }
+            } else if (sub === 'compare') {
+              const ckpts = args.flatMap((a, i) => a === '--ckpt' && args[i + 1] ? [args[i + 1]] : []);
+              const prompts = getArg(args, '--prompts');
+              if (!prompts) { console.error('Need --prompts <path>'); process.exit(1); }
+              await cmdGpuFinetuneCompare({
+                ckpts, prompts,
+                max: getArg(args, '--max') ? parseInt(getArg(args, '--max')!) : undefined,
+                whisperModel: getArg(args, '--whisper-model'),
+              });
+            } else if (sub === 'plugins') {
+              for (const [name, p] of Object.entries(PLUGINS)) {
+                console.log(`  ${name.padEnd(12)} ${p.description}`);
+              }
+            } else if (sub === 'presets') {
+              const presetsDir = require('path').resolve(
+                require('path').dirname(new URL(import.meta.url).pathname), '..', 'finetune-presets',
+              );
+              if (!existsSync(presetsDir)) { console.log('No presets dir found.'); break; }
+              const dirs = require('fs').readdirSync(presetsDir).filter((d: string) =>
+                require('fs').statSync(require('path').join(presetsDir, d)).isDirectory()
+              );
+              if (dirs.length === 0) { console.log('No presets installed.'); break; }
+              console.log('Available finetune presets (bundled, no user script needed):');
+              for (const d of dirs) {
+                const mp = require('path').join(presetsDir, d, 'manifest.json');
+                if (!existsSync(mp)) continue;
+                try {
+                  const m = JSON.parse(readFileSync(mp, 'utf-8'));
+                  console.log(`  ${m.name} v${m.version}`);
+                  console.log(`    ${m.description}`);
+                  console.log(`    type: ${m.type}, lr: ${m.defaultLR}, epochs: ${m.defaultEpochs}`);
+                } catch { /* skip */ }
+              }
+            } else if (sub === 'watch-web') {
+              await cmdGpuFinetuneWatchWeb();
+            } else {
+              console.error('Usage: ai-gateway gpu finetune <submit|status|logs|metrics|cancel|history|estimate|validate|lr-find|sweep|deploy|list-runs|plugins|watch-web>');
+              process.exit(1);
+            }
+            break;
+          }
+          case 'train': {
+            const script = getArg(args, '--script') || args[2];
+            if (!script || script.startsWith('-')) {
+              console.log(HELP.gpuTrain || 'Usage: ai-gateway gpu train --script <path> [--dataset hf://r] [--model hf://r] [--epochs N] [--lr X] ...');
+              break;
+            }
+            await cmdGpuTrain({
+              scriptPath: script,
+              dataset: getArg(args, '--dataset'),
+              datasetInclude: getArg(args, '--dataset-include'),
+              noHfTransfer: hasFlag(args, '--no-hf-transfer'),
+              model: getArg(args, '--model'),
+              epochs: getArg(args, '--epochs') ? parseInt(getArg(args, '--epochs')!) : undefined,
+              lr: getArg(args, '--lr') ? parseFloat(getArg(args, '--lr')!) : undefined,
+              gpu: getArg(args, '--gpu'),
+              maxCost: getArg(args, '--max-cost') ? parseFloat(getArg(args, '--max-cost')!) : undefined,
+              maxSpend: getArg(args, '--max-spend') ? parseFloat(getArg(args, '--max-spend')!) : undefined,
+              output: getArg(args, '--output') || getArg(args, '-o'),
+              pushToHf: getArg(args, '--push-to-hf'),
+              autoResume: hasFlag(args, '--auto-resume'),
+              preferSpot: hasFlag(args, '--no-spot') ? false : (hasFlag(args, '--prefer-spot') || true),
+              reuse: hasFlag(args, '--reuse'),
+              extraArgs: getArg(args, '--extra-args'),
+              dryRun: hasFlag(args, '--dry-run'),
+            });
+            break;
+          }
+          case 'jobs': {
+            const jobSub = args[2];
+            if (!jobSub || jobSub === 'help' || jobSub === '--help') {
+              console.log(HELP.gpuJobs);
+              break;
+            }
+            switch (jobSub) {
+              case 'run': {
+                const main = getArg(args, '--main');
+                if (!main) {
+                  console.error('Missing --main "<command>"');
+                  process.exit(1);
+                }
+                await cmdGpuJobsRun({
+                  repo: getArg(args, '--repo'),
+                  path: getArg(args, '--path'),
+                  main,
+                  gpu: getArg(args, '--gpu'),
+                  maxCost: getArg(args, '--max-cost') ? parseFloat(getArg(args, '--max-cost')!) : undefined,
+                  output: getArg(args, '--output') || getArg(args, '-o'),
+                  timeoutMin: getArg(args, '--timeout') ? parseInt(getArg(args, '--timeout')!) : undefined,
+                  image: getArg(args, '--image'),
+                  keepAlive: hasFlag(args, '--keep-alive'),
+                  terminateOnError: hasFlag(args, '--terminate-on-error'),
+                  env: getArg(args, '--env'),
+                  pullEveryMin: getArg(args, '--pull-every') ? parseInt(getArg(args, '--pull-every')!) : undefined,
+                  dryRun: hasFlag(args, '--dry-run'),
+                  stallMin: getArg(args, '--stall-min') ? parseInt(getArg(args, '--stall-min')!) : undefined,
+                  maxSpend: getArg(args, '--max-spend') ? parseFloat(getArg(args, '--max-spend')!) : undefined,
+                  pullExclude: args.flatMap((a, i) => a === '--pull-exclude' && args[i + 1] ? [args[i + 1]] : []),
+                  preferSpot: hasFlag(args, '--prefer-spot'),
+                  reuseInstance: hasFlag(args, '--reuse-instance'),
+                  abortOnDivergence: hasFlag(args, '--abort-on-divergence'),
+                  gpuFallback: hasFlag(args, '--gpu-fallback'),
+                });
+                break;
+              }
+              case 'status': await cmdGpuJobsStatus(); break;
+              case 'ssh': {
+                // Anything after 'gpu jobs ssh' is the remote command
+                const sshCmd = args.slice(3).join(' ') || undefined;
+                await cmdGpuJobsSsh(sshCmd);
+                break;
+              }
+              case 'sync': {
+                const localPos = args[3] && !args[3].startsWith('-') ? args[3] : undefined;
+                await cmdGpuJobsSync(localPos);
+                break;
+              }
+              case 'pull': {
+                const localPos = args[3] && !args[3].startsWith('-') ? args[3] : undefined;
+                await cmdGpuJobsPull(localPos);
+                break;
+              }
+              case 'exec': {
+                const cmd = getArg(args, '--main') || args.slice(3).filter(a => !a.startsWith('-')).join(' ');
+                if (!cmd) { console.error('Usage: ai-gateway gpu jobs exec --main "<cmd>" OR ai-gateway gpu jobs exec "<cmd>"'); process.exit(1); }
+                await cmdGpuJobsExec(cmd);
+                break;
+              }
+              case 'cleanup':
+                await cmdGpuJobsCleanup(hasFlag(args, '--force'));
+                break;
+              case 'retry':
+                await cmdGpuJobsRetry({
+                  skipSync: hasFlag(args, '--no-sync'),
+                  mainOverride: getArg(args, '--main'),
+                });
+                break;
+              case 'clean':
+                await cmdGpuJobsClean({
+                  orphans: hasFlag(args, '--orphans'),
+                  cache: hasFlag(args, '--cache'),
+                  keepWorkspace: hasFlag(args, '--keep-workspace'),
+                });
+                break;
+              case 'relaunch':
+                await cmdGpuJobsRelaunch(getArg(args, '--main'));
+                break;
+              case 'logs':
+                await cmdGpuJobsLogs({
+                  follow: hasFlag(args, '-f') || hasFlag(args, '--follow'),
+                  lines: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
+                });
+                break;
+              case 'cost':
+                await cmdGpuJobsCost();
+                break;
+              case 'history':
+                await cmdGpuJobsHistory({
+                  n: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
+                  json: hasFlag(args, '--json'),
+                  totals: hasFlag(args, '--totals'),
+                });
+                break;
+              case 'watch':
+                await cmdGpuJobsWatch({
+                  interval: getArg(args, '--interval') ? parseInt(getArg(args, '--interval')!) : undefined,
+                  lines: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
+                });
+                break;
+              case 'metrics':
+                await cmdGpuJobsMetrics({
+                  json: hasFlag(args, '--json'),
+                  windowSec: getArg(args, '--window') ? parseInt(getArg(args, '--window')!) : undefined,
+                });
+                break;
+              default:
+                console.error('Usage: ai-gateway gpu jobs <run|status|ssh|sync|pull|exec|retry|clean|relaunch|logs|cost|history|watch|metrics|cleanup>');
+                process.exit(1);
+            }
+            break;
+          }
           default:
-            console.error('Usage: ai-gateway gpu <status|list|offers|deploy|stop|resume|terminate|logs|ssh|patch|pull|commit|dev|hyperstack>');
+            console.error('Usage: ai-gateway gpu <status|list|offers|deploy|stop|resume|terminate|logs|ssh|patch|pull|commit|dev|hyperstack|jobs>');
             process.exit(1);
         }
         break;
