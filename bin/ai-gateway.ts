@@ -2398,6 +2398,12 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
       .map(d => `${d.path}:${d.weight}`).join(',');
     autoTrainArgs.push(`--multi-dataset ${pairs}`);
   }
+  if ((opts as any).autoLrRewind) {
+    autoTrainArgs.push('--auto-lr-rewind');
+    if ((opts as any).rewindThreshold !== undefined) {
+      autoTrainArgs.push(`--rewind-threshold ${(opts as any).rewindThreshold}`);
+    }
+  }
   const autoTrainFlags = autoTrainArgs.length ? ' ' + autoTrainArgs.join(' ') : '';
   const autoEncodeFlags = autoEncodeArgs.length ? ' ' + autoEncodeArgs.join(' ') : '';
   const numGpus = opts.numGpus ?? 1;
@@ -6940,6 +6946,8 @@ Per-app isolation:
                 prepare: spec.prepare,  // auto (default) | skip | <custom command>
                 aigwVersion: spec.aigwVersion,  // pin check vs. bundled preset.manifest.version
                 multiDataset: spec.multiDataset,  // weighted multi-dataset → trainer --multi-dataset
+                autoLrRewind: hasFlag(args, '--auto-lr-rewind') || spec.autoLrRewind === true,
+                rewindThreshold: getArg(args, '--rewind-threshold') ? parseFloat(getArg(args, '--rewind-threshold')!) : spec.rewindThreshold,
               } as any);
             } else if (sub === 'status') {
               if (hasFlag(args, '--raw')) await cmdGpuJobsStatus();
