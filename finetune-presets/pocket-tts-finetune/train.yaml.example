@@ -15,7 +15,7 @@ aigwVersion: 1.0.0                 # pin trainer version for reproducibility
 
 # Data + model
 dataset: hf://marcosremar2/gemini-dataset-erinome
-dataset-include: wav/*             # skip text/, only need wav files
+dataset-include: wav/*,metadata.jsonl  # need wav + manifest; skip text/ to save bandwidth
 noHfTransfer: true                 # avoid 429 on small-file datasets
 model: hf://kyutai/pocket-tts      # OR hf://marcosremar2/pocket-tts-ptbr-tagextended
 
