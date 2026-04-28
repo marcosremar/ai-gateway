@@ -2601,6 +2601,9 @@ print('  code repo updated')
   ].join(' && ');
 
   console.log(`${c.cyan}[finetune]${c.reset} type=${opts.type}  gpus=${numGpus}  epochs=${epochs}  lr=${lr}`);
+  if (opts.image) {
+    console.log(`${c.cyan}[finetune]${c.reset} image=${opts.image}`);
+  }
 
   await cmdGpuJobsRun({
     path: localPath,
