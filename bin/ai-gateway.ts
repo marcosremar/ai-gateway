@@ -5829,21 +5829,21 @@ Subcommands:
                   --whisper-model base|small|medium|large-v3
 
 Submit flags (all also work as spec.yaml keys):
-  --persist-cache   Mount persistent volume (skip re-download $$)
+  --persist-cache   [TODO] Mount persistent volume (skip re-download $$)
   --retry-on-preempt N  Auto-redeploy + resume on spot preempt (N retries)
   --incremental     [TODO not yet implemented] Hash dataset; skip encode if
                     unchanged from last run. datasetHash() helper exists but
                     no skip-decision wired into encode stage yet.
-  --auto-fix        On smoke failure, lookup KNOWN_BUGS + suggest/apply fix
+  --auto-fix        [TODO] On smoke failure, lookup KNOWN_BUGS + suggest/apply fix
   --plugin <name>   Apply plugin (lora|qlora|grad-ckpt|flash-attn)
   --watch-wer <p>   WER eval every 10min using <p>/eval prompts JSON
-  --web             Open local web dashboard while running
+  --web             [TODO] Open local web dashboard while running (stub)
 
 Round 4 (ideas from Axolotl/SkyPilot/Unsloth):
   --wandb-project <p>   W&B logging (auto-export WANDB_API_KEY from env)
   --notify-url <url>    POST {status,runId,ckpt} to URL on completion
   --providers a,b,c     Multi-cloud failover (try in order if 1st fails)
-  --failover-on-preempt Switch provider on spot preemption
+  --failover-on-preempt [TODO] Switch provider on spot preemption
   --ckpt-avg N          Polyak-average last N ckpts → model_avg.safetensors
   --export-gguf         Post-train: convert ckpt to GGUF for llama.cpp/ollama
   spec.secrets:         Sensitive env vars (redacted from logs/state file)
