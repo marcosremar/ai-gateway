@@ -1883,6 +1883,21 @@ function validateFinetuneSpec(spec: any): string[] {
   if (spec.freezeBackboneLayers !== undefined && (spec.freezeBackboneLayers < 0 || spec.freezeBackboneLayers > 64)) {
     errs.push(`freezeBackboneLayers out of range (0-64)`);
   }
+  if (spec.warmupSteps !== undefined && (spec.warmupSteps < 0 || spec.warmupSteps > 10000)) {
+    errs.push(`warmupSteps out of range (0-10000)`);
+  }
+  if (spec.weightDecay !== undefined && (spec.weightDecay < 0 || spec.weightDecay > 1)) {
+    errs.push(`weightDecay out of range (0-1) — AdamW typically 0.0-0.1`);
+  }
+  if (spec.saveEverySteps !== undefined && (spec.saveEverySteps < 1 || spec.saveEverySteps > 100000)) {
+    errs.push(`saveEverySteps out of range (1-100000)`);
+  }
+  if (spec.gradClip !== undefined && (spec.gradClip <= 0 || spec.gradClip > 100)) {
+    errs.push(`gradClip out of range (>0 and <=100)`);
+  }
+  if (spec.logEverySteps !== undefined && (spec.logEverySteps < 1 || spec.logEverySteps > 10000)) {
+    errs.push(`logEverySteps out of range (1-10000)`);
+  }
   return errs;
 }
 
