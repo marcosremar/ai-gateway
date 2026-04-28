@@ -454,7 +454,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('OpenAI STT (Real API)', () => {
 
 // ─── Integration Tests — Deepgram STT ────────────────────────────────────────
 
-describe.skipIf(!process.env.DEEPGRAM_API_KEY)('Deepgram STT (Real API)', () => {
+describe.skipIf(!process.env.DEEPGRAM_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Deepgram STT (Real API)', () => {
   it('transcribes WAV audio', async () => {
     const audio = makeTestWav(1.0);
     const { result, ms } = await timed(() =>

@@ -27,7 +27,7 @@ function skipOn(err: unknown): boolean {
 // llama-3.3-70b: verifies free-tier routing (zero cost)
 // Dropped: claude-3.5-haiku — routing to Claude is proved by any successful call.
 
-describe.skipIf(!process.env.OPENROUTER_API_KEY)('OpenRouter LLM (Real API)', () => {
+describe.skipIf(!process.env.OPENROUTER_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('OpenRouter LLM (Real API)', () => {
   let gptResult: LLMResponse | null = null;
   let llamaResult: LLMResponse | null = null;
   let gptMs = 0;
@@ -84,7 +84,7 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY)('OpenRouter LLM (Real API)', ()
 
 // ── Image ── 1 call total ────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.OPENROUTER_API_KEY)('OpenRouter Image (Real API)', () => {
+describe.skipIf(!process.env.OPENROUTER_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('OpenRouter Image (Real API)', () => {
   const image = new OpenRouterImageProvider();
   let result: { image: Buffer; contentType: string } | null = null;
   let ms = 0;

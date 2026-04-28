@@ -65,7 +65,7 @@ function assertWordTimestamps(response: STTResponse): void {
 
 // ── Groq ──────────────────────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.GROQ_API_KEY)('Groq word timestamps (Real API)', () => {
+describe.skipIf(!process.env.GROQ_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Groq word timestamps (Real API)', () => {
   it('returns word timestamps with whisper-large-v3-turbo', async () => {
     try {
       const { result, ms } = await timed(() =>
@@ -111,7 +111,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('OpenAI word timestamps (Real API)', () => {
 
 // ── Deepgram ──────────────────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.DEEPGRAM_API_KEY)('Deepgram word timestamps (Real API)', () => {
+describe.skipIf(!process.env.DEEPGRAM_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Deepgram word timestamps (Real API)', () => {
   it('always returns words (no flag needed)', async () => {
     const { result, ms } = await timed(() =>
       deepgramSTT.transcribe({ audio, model: 'nova-3' }),
@@ -125,7 +125,7 @@ describe.skipIf(!process.env.DEEPGRAM_API_KEY)('Deepgram word timestamps (Real A
 
 // ── Fireworks ─────────────────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.FIREWORKS_API_KEY)('Fireworks word timestamps (Real API)', () => {
+describe.skipIf(!process.env.FIREWORKS_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Fireworks word timestamps (Real API)', () => {
   it('returns word timestamps with whisper-v3', async () => {
     const { result, ms } = await timed(() =>
       fireworksSTT.transcribe({ audio, model: 'whisper-v3', wordTimestamps: true }),

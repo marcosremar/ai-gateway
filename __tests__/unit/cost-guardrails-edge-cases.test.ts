@@ -118,12 +118,10 @@ describe('isAccountOwned — env parsing edge cases', () => {
     }
   });
 
-  it('empty string VAST_ACCOUNT_OWNED="" uses default (=true)', async () => {
+  it('empty string VAST_ACCOUNT_OWNED="" stays safe', async () => {
     process.env.VAST_ACCOUNT_OWNED = '';
     const { isAccountOwned } = await import('../../server/gpu-orphan-cleanup');
-    // Using ?? '1' default: empty string is falsy for ?? only if null/undefined,
-    // but '' is kept. Then '' !== '0' → true. Good — stays account-owned.
-    expect(isAccountOwned('vast')).toBe(true);
+    expect(isAccountOwned('vast')).toBe(false);
   });
 
   it('literal string "true" for RUNPOD_ACCOUNT_OWNED is NOT accepted (only "1")', async () => {
@@ -302,7 +300,7 @@ describe('sweepOrphanInstances — provider failure isolation', () => {
       },
       vast: {
         listInstances: async () => [
-          { instanceId: 'vast-1', instanceName: 'stray', status: 'running' },
+          { instanceId: 'vast-1', instanceName: 'parle-autoscale-vast-1', status: 'running' },
         ],
         deleteInstance: async (id: string) => { terminated.push({ provider: 'vast', id }); },
       },
@@ -334,9 +332,9 @@ describe('sweepOrphanInstances — provider failure isolation', () => {
       runpod: { listInstances: async () => [], deleteInstance: async () => {} },
       vast: {
         listInstances: async () => [
-          { instanceId: 'good-1', status: 'running' },
-          { instanceId: 'bad-api', status: 'running' },
-          { instanceId: 'good-2', status: 'running' },
+          { instanceId: 'good-1', instanceName: 'parle-autoscale-good-1', status: 'running' },
+          { instanceId: 'bad-api', instanceName: 'parle-autoscale-bad-api', status: 'running' },
+          { instanceId: 'good-2', instanceName: 'parle-autoscale-good-2', status: 'running' },
         ],
         deleteInstance: async (id: string) => {
           attempted.push(id);
