@@ -2560,11 +2560,13 @@ for f in glob.glob('distill/**/*.py', recursive=True) + glob.glob('distill/*.sh'
 print('  code repo updated')
 " 2>&1 | tail -5 && `
     : '';
-  // From-HF resume: download dataset/code/weights before train
+  // From-HF resume: download dataset + weights (and optional -code repo when
+  // the user is on the legacy 3-repo layout). 2-repo (default for presets) has
+  // no -code repo; that download is best-effort so its absence doesn't abort.
   const fromHfStage = opts.fromHf
     ? `echo '[hf] resume from ${opts.fromHf}...' && ` +
       `hf download ${opts.fromHf}-dataset --repo-type dataset --local-dir /root --token "$HF_TOKEN" 2>&1 | tail -3 && ` +
-      `hf download ${opts.fromHf}-code --local-dir /workspace --token "$HF_TOKEN" 2>&1 | tail -3 && ` +
+      `(hf download ${opts.fromHf}-code --local-dir /workspace --token "$HF_TOKEN" 2>&1 | tail -3 || echo '[hf] no -code repo (2-repo layout, OK)') && ` +
       `hf download ${opts.fromHf} --local-dir /workspace/checkpoints --token "$HF_TOKEN" 2>&1 | tail -3 && ` +
       `echo '[hf] resume artifacts ready' && `
     : '';
