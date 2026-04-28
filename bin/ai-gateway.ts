@@ -1779,6 +1779,10 @@ function validateFinetuneSpec(spec: any): string[] {
   if (spec.script && presetExists) {
     errs.push(`cannot set both 'type: ${spec.type}' (preset) AND 'script: ${spec.script}'. Pick one — preset bundles its own trainer.`);
   }
+  // smoke + skipSmoke: contradictory (smoke=run only smoke; skipSmoke=skip smoke).
+  if (spec.smoke === true && spec.skipSmoke === true) {
+    errs.push(`cannot set both smoke:true (run only smoke) AND skipSmoke:true (skip smoke). Pick one.`);
+  }
   if (spec.type && !presetExists && !['text', 'audio', 'custom'].includes(spec.type)) {
     errs.push(`type must be text|audio|custom OR a preset name (got ${spec.type})`);
   }
