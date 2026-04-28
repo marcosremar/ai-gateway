@@ -6983,10 +6983,20 @@ Per-app isolation:
               console.log(`[estimate] encode: ${est.encodeMin.toFixed(1)}min, train: ${est.trainMin.toFixed(1)}min, setup: ${est.setupMin}min`);
               console.log(`[estimate] total: ${est.totalMin.toFixed(0)}min  ≈  $${est.totalUsd.toFixed(2)}`);
             } else if (sub === 'validate') {
-              const errs = validateFinetuneSpec(spec);
+              // Merge CLI overrides into validation payload so pure-CLI users
+              // (no yaml) get the same coverage as yaml users.
+              const validateSpec = {
+                ...spec,
+                type: getArg(args, '--type') || spec.type,
+                dataset: getArg(args, '--dataset') || spec.dataset,
+                hfBase: getArg(args, '--hf-base') || spec.hfBase,
+                gpu: getArg(args, '--gpu') || spec.gpu,
+                script: getArg(args, '--script') || spec.script,
+              };
+              const errs = validateFinetuneSpec(validateSpec);
               // Local dataset validation only if dataset path is local file (not hf://)
-              const dsPath = spec.dataset && !String(spec.dataset).startsWith('hf://') ? String(spec.dataset) : '';
-              const dsErrs = dsPath ? validateDatasetLocal(dsPath, spec.type || 'audio') : [];
+              const dsPath = validateSpec.dataset && !String(validateSpec.dataset).startsWith('hf://') ? String(validateSpec.dataset) : '';
+              const dsErrs = dsPath ? validateDatasetLocal(dsPath, validateSpec.type || 'audio') : [];
               const all = [...errs, ...dsErrs];
               if (all.length === 0) console.log('✓ spec valid');
               else { console.error('✗ spec errors:'); all.forEach((e) => console.error(`  - ${e}`)); process.exit(1); }
