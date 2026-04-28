@@ -16,7 +16,7 @@
     "train":  "python trainer.py train --tokens <pt> --output <dir> --epochs N --learning-rate X [--resume <dir>]"
   },
   "aptDeps": "pkg-config build-essential libsentencepiece-dev libsndfile1 ffmpeg",
-  "pipDeps": "huggingface-hub hf_transfer torch torchaudio safetensors soundfile pocket-tts",
+  "pipDeps": "huggingface-hub hf_xet hf_transfer torch torchaudio safetensors soundfile pocket-tts",
   "torchCudaIndex": "https://download.pytorch.org/whl/cu121",
   "torchVersion": "2.1.2",
   "knownTags": ["[laugh]", "[sigh]", "[gasp]", "[cough]", "[sniff]", "[throat]", "[sneeze]"],
