@@ -5988,6 +5988,9 @@ Round 8 — Tier 2 advanced (quality:auto handles 80% — leave unset unless tun
   --only-flow-net          MoshiVis-style: train ONLY flow_net + out_eos (LoRA-like surface)
   --curriculum linear      Sort training rows short→long instead of random shuffle
   --save-every-steps N     Checkpoint cadence (default 100; 5 in smoke)
+  --seed N                 Random seed (reproducibility, default 42)
+  --grad-clip X            Gradient norm clip threshold (default 1.0)
+  --log-every-steps N      Print loss every N steps (default 25)
 
 Submit forms:
   ai-gateway gpu finetune submit                  # auto-loads ./train.yaml
