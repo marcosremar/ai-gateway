@@ -693,6 +693,8 @@ def main() -> None:
                       help="Min relative drop to count as improvement (default 0.01 = 1 percent)")
     p_tr.add_argument("--torch-compile", action="store_true",
                       help="Enable torch.compile on flow_net (1.5-2× speedup, PyTorch 2.0+)")
+    p_tr.add_argument("--log-every-steps", type=int, default=25,
+                      help="Print loss every N steps (default 25)")
     p_tr.add_argument("--batch-size", type=int, default=2,
                       help="Per-step micro batch size (default 2)")
     p_tr.add_argument("--grad-accum", type=int, default=16,
@@ -725,6 +727,7 @@ def main() -> None:
             epochs=args.epochs,
             learning_rate=args.learning_rate,
             save_every_steps=args.save_every_steps,
+            log_every_steps=args.log_every_steps,
             auto_lr_rewind=args.auto_lr_rewind,
             rewind_threshold=args.rewind_threshold,
             curriculum=args.curriculum,
