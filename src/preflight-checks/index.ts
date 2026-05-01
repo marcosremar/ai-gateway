@@ -64,6 +64,96 @@ export interface PreFlightResult {
   warnings: string[];
 }
 
+// ── Check: Docker Image Reference Format ─────────────────────────────────────
+
+const DOCKER_IMAGE_REF_HINT =
+  'Expected a Docker image reference like "owner/image:tag", "registry:5000/owner/image:tag", or "owner/image@sha256:<64 hex>".';
+
+export function isModalDeployScriptReference(value: string): boolean {
+  const ref = value.trim();
+  if (!ref.endsWith('.py')) return false;
+  if (ref.includes('\0') || /\s/.test(ref) || /[;&|`$<>]/.test(ref)) return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(ref)) return false;
+  return ref.length > 3;
+}
+
+export function validateDockerImageReference(
+  value: string,
+  options: { allowModalDeployScript?: boolean } = {},
+): { ok: true } | { ok: false; error: string } {
+  if (options.allowModalDeployScript && isModalDeployScriptReference(value)) {
+    return { ok: true };
+  }
+  if (isModalDeployScriptReference(value)) {
+    return {
+      ok: false,
+      error: `Invalid dockerImage "${value}": Modal deploy scripts are only allowed when provider is "modal". ${DOCKER_IMAGE_REF_HINT}`,
+    };
+  }
+
+  const ref = value.trim();
+  if (!ref) {
+    return { ok: false, error: `Invalid dockerImage: value is empty. ${DOCKER_IMAGE_REF_HINT}` };
+  }
+  if (ref !== value || /\s/.test(ref)) {
+    return { ok: false, error: `Invalid dockerImage "${value}": image references cannot contain whitespace. ${DOCKER_IMAGE_REF_HINT}` };
+  }
+  if (ref.length > 255) {
+    return { ok: false, error: `Invalid dockerImage "${ref}": image reference is too long (${ref.length} chars, max 255).` };
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(ref)) {
+    return { ok: false, error: `Invalid dockerImage "${ref}": pass an image reference, not a URL. ${DOCKER_IMAGE_REF_HINT}` };
+  }
+  if (ref.includes('\0') || /[;&|`$<>]/.test(ref)) {
+    return { ok: false, error: `Invalid dockerImage "${ref}": shell metacharacters are not allowed. ${DOCKER_IMAGE_REF_HINT}` };
+  }
+
+  const atParts = ref.split('@');
+  if (atParts.length > 2) {
+    return { ok: false, error: `Invalid dockerImage "${ref}": only one digest separator "@" is allowed. ${DOCKER_IMAGE_REF_HINT}` };
+  }
+
+  const nameWithTag = atParts[0];
+  const digest = atParts[1];
+  if (digest !== undefined && !/^sha256:[a-f0-9]{64}$/.test(digest)) {
+    return { ok: false, error: `Invalid dockerImage "${ref}": digest must be sha256:<64 lowercase hex chars>.` };
+  }
+  if (!nameWithTag || nameWithTag.startsWith('/') || nameWithTag.endsWith('/')) {
+    return { ok: false, error: `Invalid dockerImage "${ref}": repository name is missing or malformed. ${DOCKER_IMAGE_REF_HINT}` };
+  }
+
+  const lastSlash = nameWithTag.lastIndexOf('/');
+  const lastColon = nameWithTag.lastIndexOf(':');
+  let name = nameWithTag;
+  if (lastColon > lastSlash) {
+    const tag = nameWithTag.slice(lastColon + 1);
+    name = nameWithTag.slice(0, lastColon);
+    if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(tag)) {
+      return { ok: false, error: `Invalid dockerImage "${ref}": tag "${tag}" is malformed.` };
+    }
+  }
+
+  const parts = name.split('/');
+  if (parts.some(part => part.length === 0)) {
+    return { ok: false, error: `Invalid dockerImage "${ref}": repository path contains an empty component. ${DOCKER_IMAGE_REF_HINT}` };
+  }
+
+  const hasRegistry = parts.length > 1 && (parts[0].includes('.') || parts[0].includes(':') || parts[0] === 'localhost');
+  const registry = hasRegistry ? parts.shift()! : '';
+  if (registry && !/^(?:localhost|[a-z0-9]+(?:[.-][a-z0-9]+)*)(?::[1-9][0-9]{0,4})?$/.test(registry)) {
+    return { ok: false, error: `Invalid dockerImage "${ref}": registry "${registry}" is malformed.` };
+  }
+
+  const repoComponent = /^[a-z0-9]+(?:[._-]+[a-z0-9]+)*$/;
+  for (const part of parts) {
+    if (!repoComponent.test(part)) {
+      return { ok: false, error: `Invalid dockerImage "${ref}": repository component "${part}" is malformed or not lowercase.` };
+    }
+  }
+
+  return { ok: true };
+}
+
 // ── Check: Docker Image Existence ─────────────────────────────────────────────
 
 /**
@@ -371,38 +461,55 @@ export async function runPreFlightChecks(config: PreFlightConfig): Promise<PreFl
   const checks: PreFlightResult['checks'] = [];
   const errors: string[] = [];
   const warnings: string[] = [];
+  const isModalDeployScript = config.provider === 'modal' && isModalDeployScriptReference(config.imageName);
 
-  // Check 1: Image existence
-  const imageCheck = await checkImageExists(config);
-  checks.push({ name: 'image_exists', passed: imageCheck.passed, error: imageCheck.error, warning: imageCheck.warning });
-  if (imageCheck.error) errors.push(imageCheck.error);
-  if (imageCheck.warning) warnings.push(imageCheck.warning);
+  // Check 1: Docker image reference format. Modal deploys may use a .py deploy script.
+  const formatCheck = validateDockerImageReference(config.imageName, {
+    allowModalDeployScript: config.provider === 'modal',
+  });
+  if (formatCheck.ok) {
+    checks.push({ name: 'docker_image_format', passed: true });
+  } else {
+    checks.push({ name: 'docker_image_format', passed: false, error: formatCheck.error });
+    errors.push(formatCheck.error);
+  }
 
-  // Check 2: CUDA compatibility
+  // Check 2: Image existence
+  if (isModalDeployScript) {
+    checks.push({ name: 'image_exists', passed: true, warning: 'Skipping Docker registry lookup for Modal deploy script.' });
+    warnings.push('Skipping Docker registry lookup for Modal deploy script.');
+  } else {
+    const imageCheck = await checkImageExists(config);
+    checks.push({ name: 'image_exists', passed: imageCheck.passed, error: imageCheck.error, warning: imageCheck.warning });
+    if (imageCheck.error) errors.push(imageCheck.error);
+    if (imageCheck.warning) warnings.push(imageCheck.warning);
+  }
+
+  // Check 3: CUDA compatibility
   const cudaCheck = await checkCudaCompatibility(config);
   checks.push({ name: 'cuda_compatibility', passed: cudaCheck.passed, error: cudaCheck.error, warning: cudaCheck.warning });
   if (cudaCheck.error) errors.push(cudaCheck.error);
   if (cudaCheck.warning) warnings.push(cudaCheck.warning);
 
-  // Check 3: DNS resolution
+  // Check 4: DNS resolution
   const dnsCheck = await checkDnsResolution(config);
   checks.push({ name: 'dns_resolution', passed: dnsCheck.passed, error: dnsCheck.error, warning: dnsCheck.warning });
   if (dnsCheck.error) errors.push(dnsCheck.error);
   if (dnsCheck.warning) warnings.push(dnsCheck.warning);
 
-  // Check 4: Cost validation
+  // Check 5: Cost validation
   const costCheck = await checkCostValidation(config);
   checks.push({ name: 'cost_validation', passed: costCheck.passed, error: costCheck.error, warning: costCheck.warning });
   if (costCheck.error) errors.push(costCheck.error);
   if (costCheck.warning) warnings.push(costCheck.warning);
 
-  // Check 5: Template validity
+  // Check 6: Template validity
   const templateCheck = await checkTemplateValidity(config);
   checks.push({ name: 'template_validity', passed: templateCheck.passed, error: templateCheck.error, warning: templateCheck.warning });
   if (templateCheck.error) errors.push(templateCheck.error);
   if (templateCheck.warning) warnings.push(templateCheck.warning);
 
-  // Check 6: HEALTHCHECK risk
+  // Check 7: HEALTHCHECK risk
   const healthCheckRisk = checkHealthcheckRisk(config);
   checks.push({ name: 'healthcheck_risk', passed: healthCheckRisk.passed, warning: healthCheckRisk.warning });
   if (healthCheckRisk.warning) warnings.push(healthCheckRisk.warning);

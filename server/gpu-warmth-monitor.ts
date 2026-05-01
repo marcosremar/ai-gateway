@@ -6,6 +6,7 @@
 import { createLogger } from '../src/logger';
 import { deployState, setDeployState, updateGpuModelWarmth, isStageWarm } from './state';
 import { _startReadinessCheck } from './providers';
+import { shouldRunGpuReadinessCheck } from './gpu-readiness';
 import { broadcastWs } from './ws-state';
 
 const log = createLogger('gpu-deploy');
@@ -18,6 +19,14 @@ export function stopWarmthMonitor() {
 
 export function startBackgroundWarmthMonitor(endpoint: string) {
   stopWarmthMonitor();
+  void (async () => {
+    const shouldRun = await shouldRunGpuReadinessCheck(endpoint);
+    if (!shouldRun) {
+      log.log('[gpu] Generic GPU app detected — skipping speech warmth monitor');
+      setDeployState({ stepDetail: '' });
+      return;
+    }
+
   // If already fully warm, run readiness benchmark before activating
   if (isStageWarm('stt') && isStageWarm('llm')) {
     _startReadinessCheck(endpoint);
@@ -80,4 +89,5 @@ export function startBackgroundWarmthMonitor(endpoint: string) {
   };
 
   warmthMonitorTimer = setTimeout(poll, 5_000); // first check after 5s (not 20s)
+  })().catch((err) => log.debug(`[gpu] Warmth monitor capability check failed: ${err instanceof Error ? err.message : err}`));
 }

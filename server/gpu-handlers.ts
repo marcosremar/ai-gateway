@@ -3,6 +3,7 @@
 // Status, health, offers, latency, settings are in gpu-handlers-{info,offers,settings}.ts
 
 import { createLogger } from '../src/logger';
+import { readUserIdHeader } from './ws/api-key-resolver';
 const log = createLogger('gpu-handlers');
 
 import type { IncomingMessage, ServerResponse } from 'http';
@@ -40,7 +41,9 @@ import {
   getDeployRaceCount, getLatencyMaxMs,
 } from '../src/gpu-providers/deploy-settings';
 import { getBestLatencyByGpuModel, sortGpuTypesByLatency } from './latency-db';
-import { runPreFlightChecks } from '../src/preflight-checks';
+import { runPreFlightChecks, validateDockerImageReference } from '../src/preflight-checks';
+import type { DockerCapability } from '../src/gateway/providers/gpu/docker-manifest';
+import { defaultApiPathsForCapabilities } from '../src/gateway/providers/gpu/docker-manifest';
 import { categorizeDeployError } from '../src/errors/deploy-errors';
 import { errorSummary } from '../src/error-summary';
 
@@ -204,6 +207,94 @@ function validateVramForModel(
   return sufficient;
 }
 
+function parseExpectedApiPaths(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : null;
+  if (!raw) {
+    throw { status: 400, message: 'expectedApiPaths must be a string or array of strings' };
+  }
+
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') {
+      throw { status: 400, message: 'expectedApiPaths must contain only strings' };
+    }
+    const path = entry.trim();
+    if (!path) continue;
+    if (!path.startsWith('/') || path.includes('?') || path.includes('#') || /\s/.test(path) || /[;&|`$<>]/.test(path)) {
+      throw { status: 400, message: `Invalid expected API path "${entry}". Use path-only values like "/generate-from-text".` };
+    }
+    if (!seen.has(path)) {
+      seen.add(path);
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+function inferExpectedApiPaths(dockerImage: string): string[] {
+  const image = dockerImage.toLowerCase();
+  if (image.includes('hunyuan')) return ['/generate-from-text'];
+  if (image.includes('trellis') || image.includes('fbx2glb') || image.includes('glb') || image.includes('3d')) return ['/generate'];
+  return [];
+}
+
+const VALID_DOCKER_CAPABILITIES = new Set<DockerCapability>([
+  'speech_pipeline',
+  'openai_compat',
+  'stt',
+  'llm',
+  'tts',
+  'image',
+  'embedding',
+  'rerank',
+  'glb_generation',
+  'motion_generation',
+]);
+
+function parseExpectedCapabilities(value: unknown): DockerCapability[] {
+  if (value === undefined || value === null) return [];
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : null;
+  if (!raw) {
+    throw { status: 400, message: 'expectedCapabilities must be a string or array of strings' };
+  }
+
+  const seen = new Set<DockerCapability>();
+  const capabilities: DockerCapability[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') {
+      throw { status: 400, message: 'expectedCapabilities must contain only strings' };
+    }
+    const capability = entry.trim() as DockerCapability;
+    if (!capability) continue;
+    if (!VALID_DOCKER_CAPABILITIES.has(capability)) {
+      throw { status: 400, message: `Invalid expected capability "${entry}".` };
+    }
+    if (!seen.has(capability)) {
+      seen.add(capability);
+      capabilities.push(capability);
+    }
+  }
+  return capabilities;
+}
+
+function inferExpectedCapabilities(dockerImage: string): DockerCapability[] {
+  const image = dockerImage.toLowerCase();
+  if (image.includes('hunyuan') || image.includes('trellis') || image.includes('fbx2glb') || image.includes('glb') || image.includes('3d')) {
+    return ['glb_generation'];
+  }
+  return [];
+}
+
 // ── Deploy request validation & config types ─────────────────────────────────
 
 /** Validated deploy configuration produced by _validateDeployRequest. */
@@ -215,6 +306,10 @@ interface DeployConfig {
   tensordockAuthId: string;
   modalApiKey: string;
   dockerImage: string;
+  expectedApiPaths: string[];
+  expectedCapabilities: DockerCapability[];
+  requireDockerManifest: boolean;
+  runSmokeTests: boolean;
   gpuTypes: string[];
   autoSelectGpu: boolean;
   region: string;
@@ -256,6 +351,28 @@ interface DeployConfig {
   canaryTrafficStep: number;
   /** Dev mode: pause on idle but skip the auto-destroy timer (user resumes manually). */
   devMode?: boolean;
+  /**
+   * Human-readable task label propagated to the provider as the instance
+   * `label`/`name`. Required for accountability + orphan reconciliation —
+   * hosts that fall out of gateway tracking can still be matched back to
+   * their owning task. Format: 3-64 chars, [a-zA-Z0-9_-]+ ([space] for
+   * Vast acceptance). Mandatory unless AIGW_LABEL_OPTIONAL=1 is set.
+   */
+  label: string;
+  /**
+   * Strict-fast filter: only deploy onto hosts where SSH/HTTP boot is
+   * historically fast. Default true. When true, candidate offers must
+   * have direct_port_count>=1 (no SSH-proxy hops), reliability>=0.97,
+   * and inet_down>=200 Mbps. Set false to fall back to current
+   * permissive search (zombie-prone).
+   */
+  strictFastBoot: boolean;
+  /**
+   * Disable provider tier cascade. When true, deploy uses only the first
+   * resolved tier (or the forced provider). Useful when caller wants race=N
+   * within a single provider — no fallback to next provider on failure.
+   */
+  noTierCascade?: boolean;
 }
 
 /**
@@ -293,6 +410,48 @@ async function _validateDeployRequest(
     throw { status: 400, message: 'At least one provider API key is required (apiKey, vastApiKey, hyperstackApiKey, or Modal tokens)' };
   }
 
+  // ── Label requirement ────────────────────────────────────────────────────
+  // Mandatory by default. Goal: every running pod traces back to a named
+  // task. Set AIGW_LABEL_OPTIONAL=1 to disable for legacy callers (CI
+  // pipelines that haven't updated). The env opt-out is intentional —
+  // we DO want a hard error, not a default that silently auto-generates.
+  // Auto-generated labels would defeat the purpose (every pod looks the
+  // same in vast.ai console, can't reconcile orphans by task).
+  const rawLabel = typeof body.label === 'string' ? body.label.trim() : '';
+  const labelOptional = process.env.AIGW_LABEL_OPTIONAL === '1';
+  let label = rawLabel;
+  if (!label) {
+    if (!labelOptional) {
+      throw {
+        status: 400,
+        message:
+          'Deploy rejected: missing required `label` field describing the task. ' +
+          'Pass `{"label":"my-task-name"}` in the body, or set AIGW_LABEL_OPTIONAL=1 to disable. ' +
+          'Format: 3-64 chars, [a-zA-Z0-9_ -]. The label is attached to the provider instance ' +
+          'so orphans can be reconciled back to their owning task.',
+      };
+    }
+    // Opt-out path — fall back to a generic but traceable label so we
+    // still know who created it (gateway, not user).
+    label = `aigw-${requestId.slice(0, 8)}`;
+  } else {
+    if (label.length < 3 || label.length > 64) {
+      throw { status: 400, message: `label length must be 3-64 chars, got ${label.length}` };
+    }
+    if (!/^[a-zA-Z0-9_/ -]+$/.test(label)) {
+      throw { status: 400, message: 'label must match [a-zA-Z0-9_/ -]+ (provider compatibility; "/" allowed for owner/task namespacing)' };
+    }
+  }
+  log.log(`[req=${requestId}] deploy label="${label}"`);
+
+  // Strict fast-boot filter — opt-out via body.strictFastBoot=false.
+  // Defaults to true so the most common path (user races 3 random hosts)
+  // is the safe one. The looser filter lives in the existing offer
+  // search (reliability>=0.95) and is preserved for callers that
+  // explicitly set strictFastBoot=false.
+  const strictFastBoot = body.strictFastBoot === false ? false : true;
+  const noTierCascade = body.noTierCascade === true ? true : undefined;
+
   // Resolve app-based GPU deploy config — use active app as defaults
   const config = await loadProviderConfig();
   const appId = (body.profileId as string) || config.activeAppId;
@@ -304,6 +463,31 @@ async function _validateDeployRequest(
   if (!dockerImage) {
     throw { status: 400, message: 'dockerImage is required — provide dockerImage, profileId, or set an active app with gpuDeploy config' };
   }
+  const providerFilter = body.provider as ProviderName | undefined;
+  const onlyModalProvider = Boolean(modalApiKey && !apiKey && !vastApiKey && !hyperstackApiKey && !tensordockApiKey);
+  const dockerImageFormat = validateDockerImageReference(dockerImage, {
+    allowModalDeployScript: providerFilter === 'modal' || onlyModalProvider,
+  });
+  if (!dockerImageFormat.ok) {
+    throw { status: 400, message: dockerImageFormat.error };
+  }
+  const expectedApiPaths = parseExpectedApiPaths(
+    body.expectedApiPaths ?? appGpu?.expectedApiPaths,
+  );
+  const expectedCapabilities = parseExpectedCapabilities(
+    body.expectedCapabilities ?? appGpu?.expectedCapabilities,
+  );
+  const effectiveExpectedCapabilities = expectedCapabilities.length > 0
+    ? expectedCapabilities
+    : inferExpectedCapabilities(dockerImage);
+  const effectiveExpectedApiPaths = expectedApiPaths.length > 0
+    ? expectedApiPaths
+    : [...new Set([
+        ...inferExpectedApiPaths(dockerImage),
+        ...defaultApiPathsForCapabilities(effectiveExpectedCapabilities),
+      ])];
+  const requireDockerManifest = body.requireDockerManifest === true || appGpu?.requireDockerManifest === true;
+  const runSmokeTests = body.runSmokeTests === false || appGpu?.runSmokeTests === false ? false : true;
 
   const rawGpuTypes = body.gpuTypes;
   let gpuTypes: string[] = [];
@@ -350,7 +534,7 @@ async function _validateDeployRequest(
     || process.env.HUGGING_FACE_HUB_TOKEN
     || '';
   const llmModel = (body.llmModel as string) || '';
-  const interruptible = body.interruptible === true ? true : undefined;
+  const interruptible = body.interruptible === true ? true : body.interruptible === false ? false : undefined;
 
   // Hedged deploy: launch raceCount instances in parallel, keep first healthy
   const raceCountRaw = body.raceCount;
@@ -377,16 +561,21 @@ async function _validateDeployRequest(
   if (llmModel) deployEnv.CONF_LLM_MODEL = llmModel;
 
   // Enforce GPU allowlist — only tested & approved GPUs are permitted.
+  // When gpuPriorityList is empty, filtering is disabled — allow all types.
+  const effectiveAllowed = new Set(getGpuPriorityList());
+  const allowlistActive = effectiveAllowed.size > 0;
   if (gpuTypes.length > 0) {
-    const effectiveAllowed = new Set(getGpuPriorityList());
-    const rejected = gpuTypes.filter(g => !effectiveAllowed.has(g));
-    if (rejected.length > 0) {
-      log.warn(`[req=${requestId}] Rejected non-tested GPU(s): ${rejected.join(', ')}`);
+    if (allowlistActive) {
+      const rejected = gpuTypes.filter(g => !effectiveAllowed.has(g));
+      if (rejected.length > 0) {
+        log.warn(`[req=${requestId}] Rejected non-tested GPU(s): ${rejected.join(', ')}`);
+      }
+      gpuTypes = gpuTypes.filter(g => effectiveAllowed.has(g));
+      if (gpuTypes.length === 0) {
+        throw { status: 400, message: `None of the requested GPUs are in the tested allowlist. Allowed: ${[...effectiveAllowed].join(', ')}` };
+      }
     }
-    gpuTypes = gpuTypes.filter(g => effectiveAllowed.has(g));
-    if (gpuTypes.length === 0) {
-      throw { status: 400, message: `None of the requested GPUs are in the tested allowlist. Allowed: ${[...effectiveAllowed].join(', ')}` };
-    }
+    // else: allowlist disabled (empty list) — accept all requested GPU types
   } else if (!autoSelectGpu) {
     // No GPU specified and no auto-select — use user-configured priority list from settings
     const userList = getGpuPriorityList();
@@ -418,10 +607,15 @@ async function _validateDeployRequest(
 
   return {
     apiKey, vastApiKey, hyperstackApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
-    dockerImage, gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
+    dockerImage,
+    expectedApiPaths: effectiveExpectedApiPaths,
+    expectedCapabilities: effectiveExpectedCapabilities,
+    requireDockerManifest,
+    runSmokeTests,
+    gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
     storageGb, hfToken, llmModel, interruptible, raceCount, deployEnv,
     dockerStartCmd, onstart, containerDiskInGb, volumeId,
-    providerFilter: body.provider as ProviderName | undefined,
+    providerFilter,
     templateHashId: typeof body.templateHashId === 'string' && body.templateHashId.length > 0
       ? body.templateHashId : undefined,
     forceSshTunnel: body.forceSshTunnel === true ? true : undefined,
@@ -435,6 +629,9 @@ async function _validateDeployRequest(
     canaryMaxErrorRate,
     canaryTrafficStep,
     devMode,
+    label,
+    strictFastBoot,
+    noTierCascade,
   };
 }
 
@@ -647,7 +844,7 @@ async function _selectDeploymentTier(
     }
   }
 
-  // Clean up ALL existing instances (not just the tracked one) to prevent orphans
+  // Clean up the tracked instance plus gateway-owned strays to prevent orphans
   const oldPodId = deployState.podId;
   stopGpuMonitoring();
   updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuDeploy:cleanup');
@@ -656,7 +853,7 @@ async function _selectDeploymentTier(
       await cleanupAllPods(apiKey, oldPodId ? [oldPodId] : []);
     }
     if (vastApiKey) {
-      await cleanupVastInstances(vastApiKey);
+      await cleanupVastInstances(vastApiKey, oldPodId ? [oldPodId] : []);
     }
     if (tensordockOpts) {
       await cleanupTensordockInstances(tensordockOpts.apiKey, tensordockOpts.authId);
@@ -741,6 +938,7 @@ async function _selectDeploymentTier(
 // ── Idempotency guard for rapid double-deploys ─────────────────────────────
 
 let lastDeployRequest: { hash: string; deployId: string; ts: number } | null = null;
+let finetuneDeployActive = false;
 
 /**
  * Start the async deploy, set up the deploy promise, and write the 202 response.
@@ -767,8 +965,9 @@ function _startDeployAndRespond(
   tierResult: TierSelectionResult,
   requestId: string,
   res: ServerResponse,
+  isFinetune = false,
 ): void {
-  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep } = config;
+  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, strictFastBoot, noTierCascade } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   // Reset cancel flag FIRST so setDeployState won't be blocked by the guard
@@ -778,7 +977,8 @@ function _startDeployAndRespond(
   const deployId = generateDeployId();
   // Record for idempotency — subsequent identical requests within 5s return this deployId
   lastDeployRequest = { hash: JSON.stringify({ dockerImage: tierResult.resolvedDockerImage, gpuTypes: tierResult.gpuTypes }), deployId, ts: Date.now() };
-  setDeployState({ deployId, devMode: config.devMode === true });
+  // Clear stale SSH fields from previous deploy so poll loops don't exit early on old host:port
+  setDeployState({ deployId, devMode: config.devMode === true, sshHost: '', sshPort: 0, podId: '' });
   try {
     deploymentSM.startDeploying();
   } catch (smErr) {
@@ -801,8 +1001,21 @@ function _startDeployAndRespond(
     ...(volumeId ? { volumeId } : {}),
     ...(templateHashId ? { templateHashId } : {}),
     ...(forceSshTunnel ? { forceSshTunnel } : {}),
+    // Propagate label + strictFastBoot to the provider client. The Vast
+    // client uses `label` for the instance label (orphan reconciliation)
+    // and `strictFastBoot` to bump the host-quality threshold + suppress
+    // the SSH-only-host phase-2 fallback.
+    ...(label ? { label } : {}),
+    ...(strictFastBoot ? { strictFastBoot } : {}),
+    ...(config.expectedApiPaths.length > 0 ? { expectedApiPaths: config.expectedApiPaths } : {}),
+    ...(config.expectedCapabilities.length > 0 ? { expectedCapabilities: config.expectedCapabilities } : {}),
+    ...(config.requireDockerManifest ? { requireDockerManifest: true } : {}),
+    runSmokeTests: config.runSmokeTests,
     ...(useSnapgpu ? { snapgpuPreloadApp, snapgpuAutoSnapshot: autoSnapshot, snapgpuBackend } : {}),
     ...(canary ? { canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep } : {}),
+    // Cost-control flags propagated to deploy loop / cascade.
+    raceCount,
+    ...(noTierCascade ? { noTierCascade } : {}),
   };
 
   const deployFn = raceCount > 1
@@ -821,7 +1034,7 @@ function _startDeployAndRespond(
         log.error(`[gpu] Deploy failed unexpectedly: ${deployErr.message}`);
         setDeployState({ status: 'error', message: `Deploy failed: ${deployErr.message}` });
       })
-      .finally(() => { setDeployLock(false); setDeployPromise(null); })
+      .finally(() => { setDeployLock(false); setDeployPromise(null); if (isFinetune) finetuneDeployActive = false; })
   );
 
   const modeLabel = raceCount > 1 ? `race×${raceCount}` : `${tiers.length} tier(s): ${tiers.map(t => t.label).join(' → ')}`;
@@ -891,7 +1104,24 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
+  // Per-app isolation: when the caller authenticated with a per-app key
+  // (resolved by the auth wrapper into x-aigw-user-id), automatically
+  // namespace the label so list/terminate can scope by ownership without
+  // the caller having to remember the convention. Skip if the label
+  // already contains "/" (caller knows what they're doing) or the call is
+  // unauthenticated (loopback admin).
+  const callerUserId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
+  if (callerUserId && typeof body.label === 'string' && body.label.length > 0 && !body.label.includes('/')) {
+    body.label = `${callerUserId}/${body.label}`;
+  }
+
   const readinessProbe: 'health' | 'ssh' = body.readinessProbe === 'ssh' ? 'ssh' : 'health';
+
+  // Lock out autoscaler redeploys immediately when a finetune deploy arrives.
+  // Setting this BEFORE the cancel-and-redeploy block prevents the autoscaler's
+  // watchdog from winning the race during the multi-second validation/preflight.
+  const isFinetuneDeploy = body.finetune === true;
+  if (isFinetuneDeploy) finetuneDeployActive = true;
 
   // ── Idempotency: prevent double-deploy when user clicks twice rapidly ──
   const requestHash = JSON.stringify({ dockerImage: body.dockerImage, gpuTypes: body.gpuTypes });
@@ -904,6 +1134,13 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
 
   // If a deploy is already in progress (creating/booting/installing), cancel it first for redeploy
   if (deployState.status !== 'idle' && deployState.status !== 'stopped' && deployState.status !== 'error' && deployState.status !== 'ready') {
+    // Protect finetune deploys from being cancelled by unrelated callers (e.g. autoscaler)
+    if (finetuneDeployActive && body.finetune !== true) {
+      log.log(`[req=${requestId}] Rejecting deploy — finetune deploy in progress (protected)`);
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Finetune deploy in progress — cannot cancel', status: deployState.status }));
+      return;
+    }
     log.log(`[req=${requestId}] Cancelling in-progress deploy (status=${deployState.status}) for redeploy`);
     setDeployCancelled(true);
     stopGpuMonitoring();
@@ -923,6 +1160,12 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
 
   // If GPU is ready, stop monitoring and reset for new deploy
   if (deployState.status === 'ready') {
+    if (finetuneDeployActive && body.finetune !== true) {
+      log.log(`[req=${requestId}] Rejecting deploy — finetune deploy ready (protected)`);
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Finetune deploy in progress — cannot cancel', status: deployState.status }));
+      return;
+    }
     log.log(`[req=${requestId}] GPU was ready — tearing down for redeploy`);
     stopGpuMonitoring();
     updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuDeploy:redeploy');
@@ -1021,10 +1264,12 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     // _startDeployAndRespond takes ownership of the lock (released in .finally()).
     lockTransferred = true;
     setDeployState({ readinessProbe });
-    _startDeployAndRespond(config, tierResult, requestId, res);
+    _startDeployAndRespond(config, tierResult, requestId, res, isFinetuneDeploy);
   } finally {
     if (!lockTransferred) {
       setDeployLock(false);
+      // finetuneDeployActive was set early; clear it if deploy didn't actually start
+      if (isFinetuneDeploy) finetuneDeployActive = false;
     }
   }
 }
@@ -1090,8 +1335,8 @@ export async function autoBootFromProfile(): Promise<void> {
 /**
  * Handle POST /v1/gpu/terminate — permanently destroy the active GPU deployment.
  *
- * Terminates ALL instances across all configured providers (RunPod, Vast.ai,
- * TensorDock, Modal) to prevent orphaned resources from accruing cost.
+ * Terminates the tracked instance plus gateway-owned strays across configured
+ * providers to prevent orphaned resources from accruing cost.
  * Resets deploy state, stops monitoring, and updates the active pipeline.
  *
  * Idempotent: returns 200 if already idle with no active pod.
@@ -1107,6 +1352,47 @@ export async function autoBootFromProfile(): Promise<void> {
  * { "deployId": "deploy-abc123" }
  * ```
  */
+/**
+ * Resolve the owner (per-app userId) of a provider instance from its label.
+ * Convention: labels are formatted "<owner>/<task>" — see the deploy
+ * handler's namespacing path. Used by the terminate ownership guard.
+ *
+ * Returns:
+ *   { found: false }                       — instance not visible to us
+ *   { found: true, owner: undefined }      — visible but label not namespaced
+ *   { found: true, owner: 'foo', label }   — namespaced; owner is foo
+ */
+async function _resolveInstanceOwner(
+  instanceId: string,
+  body: Record<string, unknown>,
+): Promise<{ found: boolean; owner?: string; label?: string }> {
+  const vastKey = deployVastApiKey || (body.vastApiKey as string) || process.env.VAST_API_KEY || '';
+  const tdKey = deployTensordockApiKey || (body.tensordockApiKey as string) || process.env.TENSORDOCK_API_KEY || '';
+  const tdAuthId = deployTensordockAuthId || (body.tensordockAuthId as string) || process.env.TENSORDOCK_AUTH_ID || '';
+  const rpKey = deployApiKey || (body.apiKey as string) || process.env.RUNPOD_API_KEY || '';
+  const modalTokenId = (body.modalTokenId as string) || process.env.MODAL_TOKEN_ID || '';
+  const modalTokenSecret = (body.modalTokenSecret as string) || process.env.MODAL_TOKEN_SECRET || '';
+  const modalKey = deployModalApiKey || (modalTokenId && modalTokenSecret ? `${modalTokenId}:${modalTokenSecret}` : '');
+  const hyperstackKey = deployHyperstackApiKey || (body.hyperstackApiKey as string) || process.env.HYPERSTACK_API_KEY || '';
+
+  const probes: Promise<{ instanceName?: string } | null>[] = [];
+  if (vastKey)       probes.push(vast.listInstances({ apiKey: vastKey }).then(arr => arr.find(i => i.instanceId === instanceId) || null).catch(() => null));
+  if (rpKey)         probes.push(runpod.listInstances({ apiKey: rpKey }).then(arr => arr.find(i => i.instanceId === instanceId) || null).catch(() => null));
+  if (tdKey)         probes.push(tensordock.listInstances({ apiKey: tdKey, authId: tdAuthId }).then(arr => arr.find(i => i.instanceId === instanceId) || null).catch(() => null));
+  if (modalKey)      probes.push(modal.listInstances({ apiKey: modalKey }).then(arr => arr.find(i => i.instanceId === instanceId) || null).catch(() => null));
+  if (hyperstackKey) probes.push(hyperstack.listInstances({ apiKey: hyperstackKey }).then(arr => arr.find(i => i.instanceId === instanceId) || null).catch(() => null));
+
+  const results = await Promise.all(probes);
+  const hit = results.find(r => r !== null);
+  if (!hit) return { found: false };
+
+  const label = hit.instanceName || '';
+  if (!label.includes('/')) return { found: true, label };
+
+  const owner = label.split('/', 1)[0];
+  return { found: true, owner, label };
+}
+
 export async function handleGpuTerminate(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
   setRequestIdHeader(res, requestId);
@@ -1124,7 +1410,127 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); setDeployLock(false); return; }
 
-  // Idempotent: if already idle (nothing running), return 200 instead of error
+  // Per-app isolation: when caller authenticated as a per-app key, refuse
+  // to terminate an instance whose label-owner doesn't match. Looks up the
+  // instance via the providers' listInstances() (same path as /v1/gpu/list).
+  // Loopback / unauthenticated callers (callerUserId === null) are admin
+  // and bypass the check.
+  const callerUserId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
+  const targetInstanceId = typeof body.instanceId === 'string' ? body.instanceId : '';
+  const force = body.force === true || body.force === '1';
+  if (callerUserId && targetInstanceId && !force) {
+    try {
+      const ownerCheckResult = await _resolveInstanceOwner(targetInstanceId, body);
+      if (ownerCheckResult.found && ownerCheckResult.owner && ownerCheckResult.owner !== callerUserId) {
+        log.warn(`[req=${requestId}] terminate refused: caller=${callerUserId} != instance-owner=${ownerCheckResult.owner} (label=${ownerCheckResult.label})`);
+        setDeployLock(false);
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'Cross-app terminate refused',
+          message: `Instance ${targetInstanceId} is owned by app '${ownerCheckResult.owner}' (label="${ownerCheckResult.label}"). Caller is '${callerUserId}'. Pass {"force":true} only if you legitimately own that app.`,
+          owner: ownerCheckResult.owner,
+          caller: callerUserId,
+        }));
+        return;
+      }
+    } catch (err) {
+      // Fail-open on resolver failure (degraded gateway shouldn't strand
+      // legitimate cleanups). Log so the audit trail captures the bypass.
+      log.warn(`[req=${requestId}] terminate ownership check failed (allowing): ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // Targeted termination — caller passed { instanceId, provider } for an
+  // instance the gateway state machine doesn't track. This happens when:
+  //   - race deploys leave losers behind that the race resolver failed to
+  //     kill (network blip during cleanup, gateway restart mid-race),
+  //   - the user manually deployed via a previous gateway process whose
+  //     state was reset,
+  //   - any case where `gpu list` (which queries the provider directly)
+  //     shows an instance but `deployState.podId` doesn't match.
+  // Without this branch the old code returned the idempotent
+  // "No active deployment to terminate" 200 even though Vast.ai is still
+  // billing for the orphan — exactly the leak the user just hit.
+  // We only invoke this path when the requested instanceId is NOT the
+  // currently-tracked one; the tracked-deploy flow below handles the
+  // normal case (and additionally cleans gateway-owned strays).
+  const requestedInstanceId =
+    typeof body.instanceId === 'string' && body.instanceId.length > 0 && body.instanceId.length <= 200
+      ? body.instanceId
+      : '';
+  const requestedProvider =
+    typeof body.provider === 'string' && body.provider.length > 0 && body.provider.length <= 50
+      ? (body.provider as ProviderName)
+      : undefined;
+  if (requestedInstanceId && requestedInstanceId !== deployState.podId) {
+    const vastKey = deployVastApiKey || (body.vastApiKey as string) || process.env.VAST_API_KEY || '';
+    const tdKey = deployTensordockApiKey || (body.tensordockApiKey as string) || process.env.TENSORDOCK_API_KEY || '';
+    const tdAuthId = deployTensordockAuthId || (body.tensordockAuthId as string) || process.env.TENSORDOCK_AUTH_ID || '';
+    const rpKey = deployApiKey || (body.apiKey as string) || process.env.RUNPOD_API_KEY || '';
+    const modalTokenId = (body.modalTokenId as string) || process.env.MODAL_TOKEN_ID || '';
+    const modalTokenSecret = (body.modalTokenSecret as string) || process.env.MODAL_TOKEN_SECRET || '';
+    const modalKey = deployModalApiKey || (modalTokenId && modalTokenSecret ? `${modalTokenId}:${modalTokenSecret}` : '');
+    const hyperstackKey = deployHyperstackApiKey || (body.hyperstackApiKey as string) || process.env.HYPERSTACK_API_KEY || '';
+
+    // If provider not given, try each one we have credentials for. Vast
+    // first because it's where the orphan-leak bug actually surfaces.
+    const candidates: { name: ProviderName; client: GpuProviderClient; creds: ProviderCredentials }[] = [];
+    if (vastKey && (!requestedProvider || requestedProvider === 'vast')) {
+      candidates.push({ name: 'vast', client: vast, creds: { apiKey: vastKey } });
+    }
+    if (rpKey && (!requestedProvider || requestedProvider === 'runpod')) {
+      candidates.push({ name: 'runpod', client: runpod, creds: { apiKey: rpKey } });
+    }
+    if (tdKey && (!requestedProvider || requestedProvider === 'tensordock')) {
+      candidates.push({ name: 'tensordock', client: tensordock, creds: { apiKey: tdKey, authId: tdAuthId } });
+    }
+    if (modalKey && (!requestedProvider || requestedProvider === 'modal')) {
+      candidates.push({ name: 'modal', client: modal, creds: { apiKey: modalKey } });
+    }
+    if (hyperstackKey && (!requestedProvider || requestedProvider === 'hyperstack')) {
+      candidates.push({ name: 'hyperstack', client: hyperstack, creds: { apiKey: hyperstackKey } });
+    }
+
+    let terminatedBy: string | null = null;
+    let lastErr = '';
+    for (const c of candidates) {
+      try {
+        await c.client.deleteInstance(requestedInstanceId, c.creds);
+        terminatedBy = c.name;
+        log.log(`[req=${requestId}] orphan terminate: instance=${requestedInstanceId} via ${c.name}`);
+        logGpuEvent('instance_terminated', c.name, true, {
+          metadata: { reason: 'manual_terminate_orphan', instanceId: requestedInstanceId },
+        });
+        break;
+      } catch (err) {
+        lastErr = err instanceof Error ? err.message : String(err);
+        // Try next provider — providers reject unknown instanceIds with
+        // 404-style errors, which is exactly when we want to try another.
+      }
+    }
+
+    setDeployLock(false);
+    if (terminatedBy) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        instanceId: requestedInstanceId,
+        provider: terminatedBy,
+        mode: 'orphan_terminate',
+      }));
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: false,
+        error: `Instance ${requestedInstanceId} not found in any provider (tried ${candidates.map(c => c.name).join(', ') || 'none'}). Last error: ${lastErr || '(no candidates)'}`,
+      }));
+    }
+    return;
+  }
+
+  // Idempotent: if already idle (nothing running), return 200 instead of
+  // error. Reached only when the caller did NOT pass an instanceId the
+  // gateway considers untracked — otherwise we already terminated above.
   if (deployState.status === 'idle' && !deployState.podId) {
     log.log(`GPU already idle — idempotent 200`);
     setDeployLock(false);
@@ -1157,6 +1563,7 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   const prevMeta = { ...deployState.providerMeta };
   const prevStartedAt = deployState.startedAt;
   const prevCostPerHr = deployState.costPerHr;
+  const prevPodId = deployState.podId;
   const wasReady = deployState.status === 'ready';
 
   try {
@@ -1165,12 +1572,12 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
     deploymentSM.reset();
     updateActivePipeline({ gpuEndpoint: undefined }, 'handleGpuTerminate');
 
-    // Terminate ALL instances across all providers to prevent orphans
+    // Terminate the tracked instance plus gateway-owned strays to prevent orphans
     if (apiKey) {
       await cleanupAllPods(apiKey);
     }
     if (vastKey) {
-      await cleanupVastInstances(vastKey);
+      await cleanupVastInstances(vastKey, prevPodId ? [prevPodId] : []);
     }
     if (tdKey) {
       await cleanupTensordockInstances(tdKey, tdAuthId);
@@ -1715,6 +2122,71 @@ export async function handleGpuDeployHistory(req: IncomingMessage, res: ServerRe
   const summaries = listDeployDiagnostics(Math.min(Math.max(limit, 1), 500));
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ count: summaries.length, items: summaries }, null, 2));
+}
+
+/**
+ * POST /v1/gpu/deploy/validate — validate a deploy request without creating an instance.
+ *
+ * This endpoint is intentionally dry-run only: it validates the Docker image
+ * reference, expected API contract, credentials shape, and registry preflight
+ * checks without selecting/cleaning provider instances.
+ */
+export async function handleGpuDeployValidate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const requestId = getOrCreateRequestId(req);
+  setRequestIdHeader(res, requestId);
+
+  let body: Record<string, unknown>;
+  try { body = await readJsonBody(req); }
+  catch (e) { handleBodyError(res, e); return; }
+
+  const callerUserId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
+  if (callerUserId && typeof body.label === 'string' && body.label.length > 0 && !body.label.includes('/')) {
+    body.label = `${callerUserId}/${body.label}`;
+  }
+
+  let config: DeployConfig;
+  try {
+    config = await _validateDeployRequest(body, requestId);
+  } catch (err: unknown) {
+    const status = (err as any)?.status ?? 400;
+    const message = (err as any)?.message ?? String(err);
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: { message, type: 'validation_error' } }));
+    return;
+  }
+
+  const provider = config.providerFilter || 'vast';
+  const preflight = await runPreFlightChecks({
+    imageName: config.dockerImage,
+    provider,
+    apiKey: config.vastApiKey || config.apiKey || config.hyperstackApiKey || process.env.VAST_API_KEY || '',
+    gpuTypes: config.gpuTypes,
+    dockerhubUser: process.env.DOCKERHUB_USERNAME,
+    dockerhubToken: process.env.DOCKERHUB_TOKEN,
+    templateId: config.templateHashId,
+  });
+
+  const glbSmokePlanned = config.runSmokeTests && (
+    config.expectedCapabilities.includes('glb_generation')
+    || config.expectedApiPaths.some(path => /generate(?:-from-text)?|glb/i.test(path))
+  );
+
+  const ok = preflight.ok;
+  res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    ok,
+    dryRun: true,
+    dockerImage: config.dockerImage,
+    provider,
+    gpuTypes: config.gpuTypes,
+    apiContract: {
+      expectedCapabilities: config.expectedCapabilities,
+      expectedApiPaths: config.expectedApiPaths,
+      requireDockerManifest: config.requireDockerManifest,
+      glbSmokeTestWillRunAfterBoot: glbSmokePlanned,
+    },
+    preflight,
+  }, null, 2));
 }
 
 // ── GPU Heartbeat — external workload keepalive ─────────────────────────────

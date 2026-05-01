@@ -232,6 +232,23 @@ export function computeAdaptiveIdleTimeout(ctx: IdleTimeoutContext): number {
 }
 
 /**
+ * Resolve the timeout the monitor should actually enforce.
+ *
+ * The adaptive window protects expensive long-running workloads, but an
+ * operator-configured idle timeout is an explicit cost-control cap and must
+ * not be silently widened by the 4h adaptive floor. `Infinity` still means
+ * idle shutdown is disabled.
+ */
+export function resolveEffectiveIdleTimeout(
+  adaptiveTimeoutMs: number,
+  configuredTimeoutMs: number,
+): number {
+  if (!Number.isFinite(configuredTimeoutMs)) return configuredTimeoutMs;
+  if (configuredTimeoutMs <= 0) return adaptiveTimeoutMs;
+  return Math.min(adaptiveTimeoutMs, configuredTimeoutMs);
+}
+
+/**
  * Compute the adaptive monitor delay based on idle duration.
  * When idle > 1min, slow polling from 30s to 60s to reduce overhead.
  */

@@ -120,10 +120,11 @@ export function buildGpuTiers(
  *   timeout, crashed, network, unknown
  *
  * Non-host (does NOT penalize reputation):
- *   billing, api_error, docker_image, cancelled
+ *   billing, api_error, docker_image, app_error, cancelled
  */
 export function categorizeDeployFailure(message: string): string {
   const m = message.toLowerCase();
+  if (m.includes('app load failed') || m.includes('app_error') || m.includes('model failed to load')) return 'app_error';
   if (m.includes('balance') || m.includes('funds') || m.includes('insufficient') || m.includes('need at least')) return 'billing';
   if (m.includes('image') && (m.includes('pull') || m.includes('not found') || m.includes('manifest') || m.includes('registry'))) return 'docker_image';
   if (m.includes('docker') && (m.includes('error') || m.includes('failed'))) return 'docker_image';

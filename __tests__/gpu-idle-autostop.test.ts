@@ -22,6 +22,7 @@ import {
   computeIdleMs,
   computeAdaptiveIdleTimeout,
   estimateBootTimeFromImage,
+  resolveEffectiveIdleTimeout,
 } from '../server/gpu-idle-logic';
 
 const readSource = (file: string) => readFileSync(join(__dirname, '..', file), 'utf-8');
@@ -918,6 +919,20 @@ describe('computeAdaptiveIdleTimeout — post-ready idle', () => {
   });
 });
 
+describe('resolveEffectiveIdleTimeout — configured cap', () => {
+  it('uses configured idle timeout as an explicit cost-control cap', () => {
+    expect(resolveEffectiveIdleTimeout(240 * 60_000, 25 * 60_000)).toBe(25 * 60_000);
+  });
+
+  it('keeps the adaptive timeout when it is lower than the configured cap', () => {
+    expect(resolveEffectiveIdleTimeout(20 * 60_000, 60 * 60_000)).toBe(20 * 60_000);
+  });
+
+  it('preserves Infinity as disabled idle shutdown', () => {
+    expect(resolveEffectiveIdleTimeout(240 * 60_000, Infinity)).toBe(Infinity);
+  });
+});
+
 describe('computeAdaptiveIdleTimeout — boot grace (during init)', () => {
   it('provides boot grace of 1.5x estimated boot time', () => {
     // 70B model: 600s estimate → 1.5x = 900s = 15 min
@@ -1317,6 +1332,7 @@ describe('full auto-stop lifecycle — source wiring', () => {
   it('monitor uses computeAdaptiveIdleTimeout for idle checks', () => {
     const src = readSource('server/gpu-monitor-loop.ts');
     expect(src).toContain('computeAdaptiveIdleTimeout');
+    expect(src).toContain('resolveEffectiveIdleTimeout');
     expect(src).toContain('effectiveTimeout');
     expect(src).toContain('healthCheckTimeout');
   });

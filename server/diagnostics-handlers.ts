@@ -3,7 +3,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import {
-  prisma, deployState, latencyRing, metricsCounters, providerMetrics,
+  prisma, deployState, latencyRing, metricsCounters,
 } from './state';
 import { createLogger } from '../src/logger';
 import { safeCatch } from '../src/safe-catch';
@@ -11,12 +11,11 @@ import { safeCatch } from '../src/safe-catch';
 const log = createLogger('diagnostics-handlers');
 import {
   getAllReputations, loadReputationsByGpuType,
-  aggregateRequestLogsToReputation, computeReputationScore,
+  aggregateRequestLogsToReputation,
 } from './metrics';
 import { getOrCreateRequestId, setRequestIdHeader, readJsonBody } from './http-utils';
 import { getLatencyDbStats, getAllHostLatencies } from './latency-db';
 import { defaultPerformanceRanker } from '../src/providers/performance-ranker';
-import { PORT } from './config';
 import { validateInput } from '../src/input-validator';
 import { DiagnosticsCleanupRequestSchema, DiagnosticsBenchmarkRequestSchema } from '../src/contracts';
 

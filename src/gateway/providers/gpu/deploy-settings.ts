@@ -16,42 +16,15 @@ const SETTINGS_PATH = path.join(configDir, 'latency-settings.json');
 
 // ── GPU Priority Defaults ────────────────────────────────────────────────────
 
-// Default GPU priority — ordered by performance/cost for Whisper + 12B LLM inference.
-export const DEFAULT_GPU_PRIORITY: string[] = [
-  'NVIDIA GeForce RTX 5090', // ~150 tok/s, 32GB GDDR7, Blackwell
-  'NVIDIA H200',             // 141GB HBM3e, Hopper, best for 70B+ models
-  'NVIDIA L40S',             // ~114 tok/s, 48GB VRAM
-  'NVIDIA H100 80GB HBM3',   // 80GB HBM3, Hopper, data center
-  'NVIDIA GeForce RTX 4090', // ~110 tok/s, 24GB VRAM, widely available
-  'NVIDIA RTX A6000',        // ~102 tok/s, 48GB VRAM, stable
-  'NVIDIA A100-SXM4-80GB',   // ~135 tok/s, 80GB VRAM
-  'NVIDIA A100 80GB PCIe',   // tested — 80GB VRAM
-  // RTX 5080 removed — Blackwell hosts consistently have direct_port_end: -1 (no NAT forwarding)
-  'NVIDIA A40',              // 48GB VRAM, backup
-  'NVIDIA GeForce RTX 3090', // 24GB VRAM, Ampere — budget option for small models (e.g. EmoTalk)
-];
+// Default GPU priority — EMPTY means no filtering (all GPU types shown)
+// To enable filtering, set gpuPriorityList in latency-settings.json
+export const DEFAULT_GPU_PRIORITY: string[] = [];
 
-// Per-provider defaults — each provider has different GPU availability.
+// Per-provider defaults — empty = no filtering
 export const DEFAULT_GPU_PRIORITY_BY_PROVIDER: Record<string, string[]> = {
-  vast: [...DEFAULT_GPU_PRIORITY], // Vast has the widest GPU selection
-  runpod: [                        // RunPod Secure Cloud — data center GPUs
-    'NVIDIA GeForce RTX 5090',
-    'NVIDIA H200',
-    'NVIDIA H100 80GB HBM3',
-    'NVIDIA RTX A6000',
-    'NVIDIA L40S',
-    'NVIDIA A100-SXM4-80GB',
-    'NVIDIA A100 80GB PCIe',
-    'NVIDIA GeForce RTX 4090',
-    'NVIDIA A40',
-  ],
-  tensordock: [                    // TensorDock bare metal marketplace
-    'NVIDIA GeForce RTX 5090',
-    'NVIDIA GeForce RTX 4090',
-    'NVIDIA RTX A6000',
-    'NVIDIA A40',
-    'NVIDIA L40S',
-  ],
+  vast: [],
+  runpod: [],
+  tensordock: [],
 };
 
 // ── Settings Interface ───────────────────────────────────────────────────────
@@ -228,6 +201,9 @@ export function setLatencyMaxMs(maxLatencyMs: number): void {
 // ── GPU Priority ──────────────────────────────────────────────────────────────
 
 export function getGpuPriorityList(): string[] { return _s.gpuPriorityList; }
+
+// Returns true if GPU type filtering is disabled
+export function isGpuFilterDisabled(): boolean { return _s.gpuPriorityList.length === 0; }
 
 export function setGpuPriorityList(list: string[]): void {
   _s.gpuPriorityList = list.length > 0 ? list : [...DEFAULT_GPU_PRIORITY];

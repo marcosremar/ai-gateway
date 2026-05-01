@@ -89,7 +89,7 @@ function makeBodyRequest(
   body: Buffer,
   contentType: string,
 ): IncomingMessage {
-  const fakeReq = new PassThrough() as IncomingMessage;
+  const fakeReq = new PassThrough() as unknown as IncomingMessage & PassThrough;
   fakeReq.method = 'POST';
   fakeReq.url = url;
   fakeReq.headers = {
@@ -249,6 +249,7 @@ export function registerInferenceRoutes(handlers: Record<string, Function>): voi
       'POST /v1/ensemble-transcribe': ai.handleEnsembleTranscribe,
       'POST /v1/audio/transcriptions': (req: IncomingMessage, res: ServerResponse) => handleAudioTranscriptionsCompat(req, res, ai),
       'POST /v1/chat/completions': ai.handleChatCompletions,
+      'POST /v1/embeddings': ai.handleEmbeddings,
       'POST /v1/translate': ai.handleTranslate,
       'POST /v1/tts': ai.handleTtsPreview,
       'POST /v1/tts-preview': ai.handleTtsPreview,

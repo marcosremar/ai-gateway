@@ -3,6 +3,7 @@
  *
  * Routes:
  *   POST /v1/gpu/deploy              — Deploy GPU pod
+ *   POST /v1/gpu/deploy/validate     — Validate deploy request without provisioning
  *   GET  /v1/gpu/status              — Current GPU status
  *   POST /v1/gpu/stop                — Stop running pod
  *   POST /v1/gpu/resume              — Resume stopped pod
@@ -50,6 +51,7 @@ export function registerGpuRoutes(handlers: Record<string, Function>): void {
 
   Object.assign(handlers, {
     'POST /v1/gpu/deploy': gh.handleGpuDeploy,
+    'POST /v1/gpu/deploy/validate': gh.handleGpuDeployValidate,
     'GET /v1/gpu/status': gh.handleGpuStatus,
     'POST /v1/gpu/stop': gh.handleGpuStop,
     'POST /v1/gpu/resume': gh.handleGpuResume,
@@ -86,8 +88,8 @@ export function registerGpuRoutes(handlers: Record<string, Function>): void {
         res.end(JSON.stringify({ error: e.message }));
       }
     },
-    // Destructive orphan sweep — terminates every untracked instance now.
-    // On Vast.ai: no prefix filter (account is gateway-owned), includes `exited`.
+    // Destructive orphan sweep — terminates untracked gateway-owned instances.
+    // Set *_ACCOUNT_OWNED=1 only for dedicated provider accounts.
     'POST /v1/gpu/orphan-sweep': async (_req: any, res: any) => {
       try {
         const { sweepOrphanInstances } = await import('../../gpu-orphan-cleanup');

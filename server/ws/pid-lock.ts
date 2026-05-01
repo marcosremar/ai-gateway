@@ -37,7 +37,14 @@ function isProcessAlive(pid: number): boolean {
 }
 
 /** Acquire the per-user ws-server PID lock. Exits the process with a clear
- * message if another ws-server is already running. */
+ * message if another ws-server is already running.
+ *
+ * When running under `bun --watch` (or any hot-reload runner that sends
+ * SIGTERM to the old process and immediately spawns a new one) there is a
+ * short race window where the old process hasn't yet deleted the PID file
+ * when the new process starts.  We retry up to 10 times × 50 ms = 500 ms
+ * before giving up, which is well within the time bun needs to finish its
+ * SIGTERM → process.exit round-trip. */
 export function acquirePidLock(): void {
   try {
     mkdirSync(BABELCAST_DIR, { recursive: true });
@@ -45,22 +52,38 @@ export function acquirePidLock(): void {
     log.warn(`Could not create ${BABELCAST_DIR}: ${err instanceof Error ? err.message : err}`);
   }
 
-  if (existsSync(PID_FILE)) {
+  const MAX_RETRIES = 10;
+  const RETRY_MS = 50;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (!existsSync(PID_FILE)) break; // no contention — proceed to write
+
     try {
       const raw = readFileSync(PID_FILE, 'utf-8').trim();
       const existingPid = Number(raw);
-      if (isProcessAlive(existingPid) && existingPid !== process.pid) {
-        log.error('='.repeat(70));
-        log.error(`Another ai-gateway ws-server is already running (pid=${existingPid}).`);
-        log.error(`Lock file: ${PID_FILE}`);
-        log.error('Refusing to start a second instance — state files are not safe for concurrent writes.');
-        log.error('Stop the other instance first, or remove the lock file if you are sure it is stale.');
-        log.error('='.repeat(70));
-        process.exit(1);
+
+      if (!isProcessAlive(existingPid) || existingPid === process.pid) {
+        log.warn(`Stale PID lock found (pid=${raw}) — previous instance did not clean up; taking over.`);
+        break; // safe to overwrite
       }
-      log.warn(`Stale PID lock found (pid=${raw}) — previous instance did not clean up; taking over.`);
+
+      if (attempt < MAX_RETRIES) {
+        // Hot-reload race: old process is still shutting down. Wait a bit.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RETRY_MS);
+        continue;
+      }
+
+      // Exhausted retries — real second instance.
+      log.error('='.repeat(70));
+      log.error(`Another ai-gateway ws-server is already running (pid=${existingPid}).`);
+      log.error(`Lock file: ${PID_FILE}`);
+      log.error('Refusing to start a second instance — state files are not safe for concurrent writes.');
+      log.error('Stop the other instance first, or remove the lock file if you are sure it is stale.');
+      log.error('='.repeat(70));
+      process.exit(1);
     } catch (err) {
       log.warn(`Could not read existing PID file, overwriting: ${err instanceof Error ? err.message : err}`);
+      break;
     }
   }
 

@@ -129,6 +129,27 @@ describe('handleGpuDeploy — validation', () => {
     expect(handlersSource).toContain('dockerImage is required');
   });
 
+  it('_validateDeployRequest validates dockerImage reference format before deploy', () => {
+    const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
+    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
+    expect(fnBody).toContain('validateDockerImageReference');
+    expect(fnBody).toContain('allowModalDeployScript');
+  });
+
+  it('_validateDeployRequest accepts expectedApiPaths for Docker API contract validation', () => {
+    const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
+    const fnBody = handlersSource.slice(fnStart, fnStart + 12000);
+    expect(fnBody).toContain('parseExpectedApiPaths');
+    expect(fnBody).toContain('parseExpectedCapabilities');
+    expect(fnBody).toContain('inferExpectedApiPaths');
+    expect(fnBody).toContain('expectedApiPaths');
+  });
+
+  it('exposes a dry-run deploy validation handler', () => {
+    expect(handlersSource).toContain('export async function handleGpuDeployValidate');
+    expect(handlersSource).toContain('dryRun: true');
+  });
+
   it('#087 _validateDeployRequest enforces GPU allowlist', () => {
     const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
     const fnEnd = handlersSource.indexOf('\n/**', fnStart + 100);

@@ -8,7 +8,7 @@ import {
   prisma, deployState, setDeployState,
   deployApiKey, deployVastApiKey, deployTensordockApiKey, deployTensordockAuthId, deployModalApiKey, deployHyperstackApiKey,
   setDeployApiKey, setDeployVastApiKey, setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey, setDeployHyperstackApiKey,
-  setActiveProvider, setDeployCancelled,
+  setActiveProvider, setDeployCancelled, setGpuHealthy,
   deploymentSM,
   loadPersistedDeploy, clearPersistedDeploy, persistDeployState,
   resetDeployState,
@@ -178,6 +178,7 @@ export async function tryRecoverActiveDeploy(): Promise<boolean> {
 
     // Mark GPU healthy and set up translation routing
     markGpuHealthy();
+    setGpuHealthy(true);
     deploymentSM.markReady(persisted.podId, persisted.endpoint, persisted.gpuType, persisted.costPerHr);
 
     // Start monitoring
@@ -209,7 +210,7 @@ export async function tryReconnectOrphanDeploy(): Promise<boolean> {
   }
 
   type Candidate = {
-    provider: 'runpod' | 'vast' | 'tensordock' | 'modal';
+    provider: ProviderName;
     instanceId: string;
     endpoint: string;
     gpuType: string;
@@ -361,6 +362,7 @@ export async function tryReconnectOrphanDeploy(): Promise<boolean> {
       });
       persistDeployState();
       markGpuHealthy();
+      setGpuHealthy(true);
       deploymentSM.markReady(c.instanceId, c.endpoint, c.gpuType, c.costPerHr ?? 0);
 
       const { startGpuMonitoring } = await import('./gpu-health-monitor');

@@ -24,6 +24,14 @@ import { registerBotRoutes } from './compute/bots';
 import { registerImageRoutes, getDockerDynamicMatcher } from './compute/images';
 import { registerHealthRoutes } from './diagnostics/health';
 import { registerMetricsRoutes } from './diagnostics/metrics';
+import { registerToolsRoutes } from './diagnostics/tools';
+import {
+  handleLightningStatus,
+  handleLightningStart,
+  handleLightningStop,
+  handleLightningSessionStart,
+  handleLightningSessionEnd,
+} from '../lightning-handlers';
 
 // Re-export individual register functions for selective use
 export {
@@ -42,6 +50,7 @@ export {
   getDockerDynamicMatcher,
   registerHealthRoutes,
   registerMetricsRoutes,
+  registerToolsRoutes,
 };
 
 /**
@@ -65,9 +74,17 @@ export function registerAllRoutes(handlers: Record<string, Function>): void {
   // Diagnostics
   registerHealthRoutes(handlers);
   registerMetricsRoutes(handlers);
+  registerToolsRoutes(handlers);
 
   // Pipeline (WebSocket — no HTTP routes)
   registerPipelineRoutes(handlers);
+
+  // Lightning AI studio
+  handlers['GET /v1/lightning/status'] = handleLightningStatus;
+  handlers['POST /v1/lightning/start'] = handleLightningStart;
+  handlers['POST /v1/lightning/stop'] = handleLightningStop;
+  handlers['POST /v1/lightning/session/start'] = handleLightningSessionStart;
+  handlers['POST /v1/lightning/session/end'] = handleLightningSessionEnd;
 }
 
 export function getGpuDynamicMatcher(): typeof matchGpuDynamicRoute {

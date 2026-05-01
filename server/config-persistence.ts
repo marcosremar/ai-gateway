@@ -6,7 +6,7 @@
 import { createLogger } from '../src/logger';
 import { homedir } from 'os';
 import { join } from 'path';
-import { mkdir, writeFile, readFile, access } from 'fs/promises';
+import { readFile, access } from 'fs/promises';
 import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync } from 'fs';
 import { setIdleTimeoutMs } from './gpu-deploy';
 import { setSttTargetLatencyMs, setLlmTargetLatencyMs, setTtsTargetLatencyMs, setGpuSortBy, loadDeploySettings } from '../src/gpu-providers/deploy-settings';
@@ -65,6 +65,14 @@ export interface GpuDeployConfig {
    *  trades cost for latency. Use hibernateOnIdle or terminate when cost
    *  is the priority. */
   offloadOnIdle?: boolean;
+  /** API paths that must exist on the deployed container before it is marked ready. */
+  expectedApiPaths?: string[];
+  /** Manifest capabilities that must be declared by /v1/manifest before ready. */
+  expectedCapabilities?: string[];
+  /** Require /v1/manifest to exist and match the expected capabilities/paths. */
+  requireDockerManifest?: boolean;
+  /** Run capability-specific smoke tests before marking ready. Default true for GLB generation. */
+  runSmokeTests?: boolean;
 }
 
 /**
@@ -540,12 +548,6 @@ export async function patchProviderConfig(partial: Partial<ProviderConfig>): Pro
 
 // ── Latency target mapping ─────────────────────────────────────────────────────
 
-// Must stay in sync with web/src/sections/provider-types.ts LATENCY_TARGETS
-const LATENCY_TARGETS: Record<string, { sttMs: number; llmMs: number; ttsMs: number }> = {
-  realtime: { sttMs: 300,   llmMs: 500,    ttsMs: 300   },
-  low:      { sttMs: 800,   llmMs: 2_000,  ttsMs: 1_500 },
-  batch:    { sttMs: 10_000, llmMs: 30_000, ttsMs: 15_000 },
-};
 
 /**
  * Apply a profile's latency field to the benchmarking thresholds.

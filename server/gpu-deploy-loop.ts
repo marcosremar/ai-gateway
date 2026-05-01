@@ -3,6 +3,7 @@
 // Called for each tier in startDeployWithTiers and for hedged (race) deploys.
 
 import type { GpuProviderClient, ProviderCredentials } from '../src/gpu-providers/types';
+import type { DockerCapability } from '../src/gateway/providers/gpu/docker-manifest';
 import { PROVIDER_LABELS, DEFAULT_STORAGE_GB } from '../src/gpu-providers/deploy-orchestrator';
 import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import { categorizeDeployError } from '../src/errors/deploy-errors';
@@ -66,6 +67,10 @@ export interface DeployExtra {
   canaryInitialTraffic?: number;
   canaryMaxErrorRate?: number;
   canaryTrafficStep?: number;
+  expectedApiPaths?: string[];
+  expectedCapabilities?: DockerCapability[];
+  requireDockerManifest?: boolean;
+  runSmokeTests?: boolean;
 }
 
 export async function startDeployLoop(
@@ -118,12 +123,12 @@ export async function startDeployLoop(
             message: `TensorDock instance resumed, waiting for /health...`,
           });
           deploymentSM.startBooting(existing.instanceId);
-          const { result: res1, pullTimeS: pt1 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>);
+          const { result: res1, pullTimeS: pt1 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests);
           if (res1 === 'ready') {
             const durationMs = Date.now() - deployState.startedAt;
             setGpuHealthy(true);
             setLastRequestTime(Date.now());
-            setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs });
+            setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
             deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
             log.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pt1 ?? '?'}s, ${label})`);
@@ -149,12 +154,12 @@ export async function startDeployLoop(
             message: `TensorDock instance already running, checking health...`,
           });
           deploymentSM.startBooting(existing.instanceId);
-          const { result: res2, pullTimeS: pt2 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, existing.endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>);
+          const { result: res2, pullTimeS: pt2 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, existing.endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests);
           if (res2 === 'ready') {
             const durationMs = Date.now() - deployState.startedAt;
             setGpuHealthy(true);
             setLastRequestTime(Date.now());
-            setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs });
+            setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
             deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
             log.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pt2 ?? '?'}s, ${label})`);
@@ -277,6 +282,8 @@ export async function startDeployLoop(
                       step: 'ready',
                       stepDetail: `snapshot:${restore.entry?.r2Key ?? '?'}`,
                       deployDurationMs: durationMs,
+                      alert: '',
+                      alertLevel: 'info',
                     });
                     broadcastProviderStatus('booting', 'cloud', `GPU deployed via snapshot (${restore.durationMs}ms)`);
                     deploymentSM.markReady(deployState.podId, endpoint, deployState.gpuType, deployState.costPerHr);
@@ -300,13 +307,13 @@ export async function startDeployLoop(
         }
       }
 
-      const pollResult = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt, dockerImage, instance.providerMeta);
+      const pollResult = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt, dockerImage, instance.providerMeta, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests);
       const { result, pullTimeS } = pollResult;
       if (result === 'ready') {
         const durationMs = Date.now() - deployState.startedAt;
         setGpuHealthy(true);
         setLastRequestTime(Date.now());
-        setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs });
+        setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
         deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
         log.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pullTimeS ?? '?'}s, ${label})`);

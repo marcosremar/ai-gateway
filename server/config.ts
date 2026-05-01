@@ -43,7 +43,6 @@ export const LOW_BALANCE_THRESHOLD_USD = parseFloat(process.env.LOW_BALANCE_THRE
  *  Pin deploys to a specific version for reproducibility; use :latest for dev. */
 export const DOCKER_IMAGE_VERSION = process.env.DOCKER_IMAGE_VERSION || 'v1.3.0';
 
-const IMAGE_PREFIX = process.env.DOCKER_IMAGE_PREFIX || 'marcosremar';
 
 /** All known Docker image base names (without tag).
  *

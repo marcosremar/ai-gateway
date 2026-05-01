@@ -10,12 +10,8 @@ import type {
   FanoutSideEffects,
   FanoutStageExecutors,
 } from '../src/gateway/pipeline/fanout-orchestrator';
-import { raceProviders } from './race-providers';
 import type { RaceCandidate } from './race-providers';
 import { broadcastWs, broadcastDubAudio, getActiveTargets } from './ws-state';
-import { createLogger } from '../src/logger';
-
-const log = createLogger('dub-fanout');
 import {
   getCachedTranslation, setCachedTranslation,
   buildSystemPrompt, getCloudProviderName,

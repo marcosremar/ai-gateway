@@ -12,95 +12,93 @@
 
 import { spawn, type ChildProcess } from 'child_process';
 import { watch } from 'fs';
-import { join, resolve } from 'path';
+import { resolve } from 'path';
 import { createLogger } from '../src/logger';
 
 const log = createLogger('dev');
 
-const SRC_DIR = resolve(process.cwd(), 'src');
-const SERVER_FILE = resolve(process.cwd(), 'serve.ts');
+const SERVER_FILE = resolve(process.cwd(), 'server/ws-server.ts');
+const WATCH_DIRS = [
+  resolve(process.cwd(), 'src'),
+  resolve(process.cwd(), 'server'),
+];
 
 let child: ChildProcess | null = null;
-let restarting = false;
-let pendingRestart = false;
+// debounce timer — coalesces rapid saves into one restart
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+// true while we're killing + waiting for exit
+let killing = false;
 
 /**
- * Start the proxy server as a child process.
+ * Spawn the server. Must only be called when child is null.
  */
 function startServer(): void {
-  if (child) {
-    child.kill('SIGTERM');
-    child = null;
-  }
+  log.log({}, `Starting server...`);
 
-  log.log({}, `Starting server (pid: ${process.pid})...`);
-
-  child = spawn('bun', ['run', SERVER_FILE], {
+  child = spawn('bun', [SERVER_FILE], {
     stdio: 'inherit',
     env: { ...process.env, NODE_ENV: 'development' },
   });
 
-  child.on('exit', (code) => {
-    if (code !== null && code > 0) {
-      log.log({ code }, 'Server exited with error');
-    }
-    child = null;
+  log.log({}, `Server pid=${child.pid}`);
 
-    // If there's a pending restart, do it now
-    if (pendingRestart) {
-      pendingRestart = false;
-      setTimeout(() => startServer(), 100);
+  child.on('exit', (code) => {
+    child = null;
+    killing = false;
+    if (code !== null && code > 0 && code !== 143) {
+      log.log({ code }, 'Server exited with error — waiting for next save to restart');
     }
   });
-
-  log.log({}, `Server started (child pid: ${child.pid})`);
 }
 
 /**
- * Restart the server with debounce.
+ * Kill current child (if any) then start fresh.
+ * Waits for the exit event so ports are fully released before rebinding.
  */
 function restartServer(): void {
-  if (restarting) {
-    pendingRestart = true;
-    return;
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
   }
 
-  restarting = true;
-  log.log({}, 'File changed — restarting...');
+  if (killing) return; // already mid-kill, exit handler will start fresh
 
   if (child) {
+    killing = true;
+    log.log({}, 'File changed — restarting...');
+    // Start new server only after old one fully exits (port released)
+    child.once('exit', () => {
+      child = null;
+      killing = false;
+      startServer();
+    });
     child.kill('SIGTERM');
-    child = null;
-  }
-
-  // Small delay to ensure file is fully written
-  setTimeout(() => {
+  } else {
     startServer();
-    restarting = false;
-
-    if (pendingRestart) {
-      pendingRestart = false;
-      restartServer();
-    }
-  }, 200);
+  }
 }
 
 /**
- * Watch src/ directory for changes.
+ * Debounced file-change handler (50 ms window coalesces burst saves).
+ */
+function onFileChange(filename: string | null): void {
+  if (!filename?.endsWith('.ts')) return;
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    debounceTimer = null;
+    log.log({ file: filename }, `changed`);
+    restartServer();
+  }, 50);
+}
+
+/**
+ * Watch server/ and src/ for TypeScript changes.
  */
 function watchForChanges(): void {
-  log.log({ path: SRC_DIR }, 'Watching for changes...');
-
-  watch(
-    SRC_DIR,
-    { recursive: true },
-    (eventType, filename) => {
-      if (filename && filename.endsWith('.ts')) {
-        log.log({ file: filename }, `${eventType}: ${filename}`);
-        restartServer();
-      }
-    },
-  );
+  for (const dir of WATCH_DIRS) {
+    log.log({ path: dir }, 'Watching...');
+    watch(dir, { recursive: true }, (_eventType, filename) => onFileChange(filename));
+  }
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────

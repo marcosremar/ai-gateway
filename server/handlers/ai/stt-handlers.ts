@@ -34,24 +34,24 @@ export async function handleTranscribe(
 ): Promise<void> {
   const requestId = generateRequestId();
   const startTime = Date.now();
-  
+
   log.log(`[${requestId}] Starting transcription`);
 
   try {
     // Parse request
-    let audio: Buffer;
+    let audio: Buffer | undefined;
     let language: string | undefined;
     let prompt: string | undefined;
-    
+
     const contentType = req.headers['content-type'] || '';
-    
+
     if (contentType.includes('multipart/form-data')) {
       // Parse multipart
       const body = await parseRawBody(req);
       // Simple multipart parsing
       const boundary = contentType.split('boundary=')[1];
       const parts = body.toString().split(`--${boundary}`);
-      
+
       for (const part of parts) {
         if (part.includes('name="file"')) {
           const binaryStart = part.indexOf('\r\n\r\n') + 4;
@@ -77,7 +77,7 @@ export async function handleTranscribe(
 
     // Get timeout
     const timeoutMs = getStageTimeout('stt', 'cloud');
-    
+
     // Perform transcription with timeout
     const result = await withTimeout(
       'stt-transcribe',
@@ -87,7 +87,7 @@ export async function handleTranscribe(
 
     // Filter hallucinations
     const filtered = filterHallucinations(result.text, HALLUCINATION_FILTER_CONFIG);
-    
+
     logRequestTiming(requestId, 'STT', startTime, 'mock', true);
 
     sendJson(res, {
@@ -102,7 +102,7 @@ export async function handleTranscribe(
   } catch (err) {
     log.error(`[${requestId}] Transcription error:`, err);
     logRequestTiming(requestId, 'STT', startTime, undefined, false);
-    
+
     const errorMsg = err instanceof Error ? err.message : 'Transcription failed';
     sendError(res, errorMsg, 500);
   }
@@ -117,7 +117,7 @@ export async function handleEnsembleTranscribe(
 ): Promise<void> {
   const requestId = generateRequestId();
   const startTime = Date.now();
-  
+
   log.log(`[${requestId}] Starting ensemble transcription`);
 
   try {
@@ -125,7 +125,7 @@ export async function handleEnsembleTranscribe(
     const body = await parseJsonBody<{ audio: string; language?: string; providers?: string[] }>(req);
     const audio = Buffer.from(body.audio, 'base64');
     const providers = body.providers || ['groq', 'deepgram'];
-    
+
     if (!audio) {
       sendError(res, 'No audio provided', 400);
       return;
@@ -133,7 +133,7 @@ export async function handleEnsembleTranscribe(
 
     // Race multiple providers
     const timeoutMs = getStageTimeout('stt', 'cloud');
-    
+
     const results = await Promise.allSettled(
       providers.map(async provider => {
         const providerStart = Date.now();
@@ -169,7 +169,7 @@ export async function handleEnsembleTranscribe(
 
     if (successful.length === 0) {
       sendError(res, 'All providers failed', 500, {
-        results: results.map(r => 
+        results: results.map(r =>
           r.status === 'fulfilled' ? r.value : { status: 'rejected', reason: r.reason }
         ),
       });
@@ -177,7 +177,7 @@ export async function handleEnsembleTranscribe(
     }
 
     // Use result with highest confidence
-    const best = successful.reduce((prev, current) => 
+    const best = successful.reduce((prev, current) =>
       (current.result.confidence || 0) > (prev.result.confidence || 0) ? current : prev
     );
 
@@ -205,7 +205,7 @@ export async function handleEnsembleTranscribe(
   } catch (err) {
     log.error(`[${requestId}] Ensemble transcription error:`, err);
     logRequestTiming(requestId, 'Ensemble STT', startTime, undefined, false);
-    
+
     const errorMsg = err instanceof Error ? err.message : 'Ensemble transcription failed';
     sendError(res, errorMsg, 500);
   }
