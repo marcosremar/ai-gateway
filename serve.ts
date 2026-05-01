@@ -12,6 +12,7 @@
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { openrouterLLM } from './src/gateway/providers/cloud/openrouter';
+import { zaiLLM, ZAI_LLM_MODELS } from './src/modules/gateway/providers/cloud/zai';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
 import type { ProviderMapping, PrefixRoute } from './src/proxy/types';
@@ -62,6 +63,14 @@ const providers: ProviderMapping = {
     'moonshotai/kimi-k2-0905': openrouterLLM,
     'moonshotai/kimi-k2-thinking': openrouterLLM,
     'moonshotai/kimi-k2.5': openrouterLLM,
+    'moonshotai/kimi-k2.6': openrouterLLM,
+    // OpenRouter — DeepSeek V4
+    'deepseek/deepseek-v4-pro': openrouterLLM,
+    'deepseek/deepseek-v4-flash': openrouterLLM,
+    // Z.AI — GLM-4.6 / GLM-4.5V (vision) / GLM-4.5 / GLM-4.5-Air. Registered
+    // dynamically from ZAI_LLM_MODELS so the model catalog is the single
+    // source of truth (capability flags + pricing live there).
+    ...Object.fromEntries(ZAI_LLM_MODELS.map(m => [m.id, zaiLLM])),
   },
   chatFallbackChain: [
     { providerId: 'groq', model: 'llama-3.3-70b-versatile', provider: groqLLM },
@@ -75,7 +84,13 @@ const providers: ProviderMapping = {
 };
 
 log.log({ port: PORT, apiKeys: API_KEYS ? API_KEYS.length : 0, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
-log.log({ groqConfigured: Boolean(process.env.GROQ_API_KEY), tts: 'groq/orpheus' }, 'Providers configured');
+log.log({
+  groqConfigured: Boolean(process.env.GROQ_API_KEY),
+  openrouterConfigured: Boolean(process.env.OPENROUTER_API_KEY),
+  zaiConfigured: Boolean(process.env.ZAI_API_KEY),
+  zaiModels: process.env.ZAI_API_KEY ? ZAI_LLM_MODELS.map(m => m.id) : [],
+  tts: 'groq/orpheus',
+}, 'Providers configured');
 
 const prefixRoutes: PrefixRoute[] = [];
 if (routeWorkloadRequest) {

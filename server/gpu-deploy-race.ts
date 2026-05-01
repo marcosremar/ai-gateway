@@ -17,6 +17,7 @@ import {
   deploymentSM, updateGpuModelWarmth,
 } from './state';
 import { broadcastProviderStatus, broadcastWs } from './ws-state';
+import { extractAppHealthError, runGlbSmokeTest, validateEndpointApiContract } from './gpu-poll-health';
 import { emitGatewayEvent } from './event-bus';
 import { logGpuEvent, upsertHostReputation } from './metrics';
 import { getDeployTimeoutMinForProvider } from '../src/gpu-providers/deploy-settings';
@@ -248,6 +249,7 @@ export async function startDeployRace(
   const raceAbort = new AbortController();
   let winner: RaceCandidate | null = null;
   let raceDone = false;
+  let lastRaceHealthError = '';
 
   /** Abortable sleep: resolves after `ms` or immediately when raceAbort fires.
    *  Guards against the signal being already aborted before addEventListener is called. */
@@ -293,6 +295,26 @@ export async function startDeployRace(
             const data = await res.json() as { status?: string };
             const HEALTHY = new Set(['healthy', 'ok', 'degraded', 'ready']);
             if (HEALTHY.has(data.status ?? '')) {
+              const appHealthError = extractAppHealthError(data);
+              if (appHealthError) {
+                lastRaceHealthError = `App load failed on ${c.tier.name}: ${appHealthError.message}`;
+                log.warn(`[race] Slot ${idx} rejected: ${lastRaceHealthError}`);
+                break;
+              }
+              const apiContract = await validateEndpointApiContract(localEndpoint, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest);
+              if (!apiContract.ok) {
+                lastRaceHealthError = apiContract.error;
+                log.warn(`[race] Slot ${idx} rejected: ${apiContract.error}`);
+                break;
+              }
+              if (extra.runSmokeTests !== false && (extra.expectedCapabilities?.includes('glb_generation') || extra.expectedApiPaths?.some(path => /generate(?:-from-text)?|glb/i.test(path)))) {
+                const smoke = await runGlbSmokeTest(localEndpoint, extra.expectedApiPaths);
+                if (!smoke.ok) {
+                  lastRaceHealthError = smoke.error;
+                  log.warn(`[race] Slot ${idx} rejected: ${smoke.error}`);
+                  break;
+                }
+              }
               if (!raceDone) {
                 // Winner — update global state and abort all other slots immediately
                 raceDone = true;
@@ -309,6 +331,7 @@ export async function startDeployRace(
                   sshHost: c.sshHost, sshPort: c.sshPort, providerMeta: c.providerMeta,
                   message: `GPU ready (race ${candidates.length}→1, ${Math.round(durationMs / 1000)}s): ${localEndpoint}`,
                   step: 'ready', stepDetail: '', deployDurationMs: durationMs,
+                  alert: '', alertLevel: 'info',
                 });
                 broadcastProviderStatus('booting', 'cloud', 'GPU deployed — warming up models');
                 deploymentSM.markReady(c.instanceId, localEndpoint, c.gpuType, c.costPerHr);
@@ -427,7 +450,7 @@ export async function startDeployRace(
       );
     }
   } else {
-    const msg = deployCancelled ? 'Deploy cancelled' : 'All race candidates failed to become healthy';
+    const msg = deployCancelled ? 'Deploy cancelled' : (lastRaceHealthError || 'All race candidates failed to become healthy');
     setDeployState({ status: 'error', message: msg });
     deploymentSM.markError(msg);
     emitGatewayEvent('gpu.failed', {

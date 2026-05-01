@@ -1577,8 +1577,10 @@ export class VastClient extends AbstractGpuProvider {
           // Vast.ai propagates user SSH keys to the container at boot, but there's
           // a ~10-15s delay between status=running and the keys being available.
           // Sleeping here avoids the first-attempt "Permission denied" failure.
-          this.log.log(`[vast] Instance ${contractId} waiting 10s for SSH key propagation...`);
-          await new Promise(r => setTimeout(r, 10_000));
+          // VMs take longer for SSH key propagation (~30s) than containers (~10s).
+          const keyPropMs = this._runtype === 'vm' ? 30_000 : 10_000;
+          this.log.log(`[vast] Instance ${contractId} waiting ${keyPropMs / 1000}s for SSH key propagation...`);
+          await new Promise(r => setTimeout(r, keyPropMs));
           const ok = await tunnel.open(15_000);
           if (ok) {
             this.log.log(`[vast] SSH tunnel opened: ${tunnel.endpoint} → ${sshHost}:8000`);
@@ -2677,7 +2679,9 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     const status = String(inst.actual_status ?? inst.cur_state ?? 'unknown');
     const sshHost = (inst.ssh_host ?? inst.public_ipaddr) as string | undefined;
     const rawSshPort = inst.ssh_port as number | undefined;
-    const sshPort = rawSshPort && rawSshPort >= 1 && rawSshPort <= 65535 ? rawSshPort : undefined;
+    const parsedSshPort = rawSshPort && rawSshPort >= 1 && rawSshPort <= 65535 ? rawSshPort : undefined;
+    // VM-mode Vast.ai instances expose SSH on port 22 directly; the API often omits ssh_port for VMs.
+    const sshPort = parsedSshPort ?? (this._runtype === 'vm' && sshHost ? 22 : undefined);
 
     if (!ip) {
       this.log.log(`[vast] _parseInstance: no IP yet (status=${status}, cur_state=${inst.cur_state}, actual_status=${inst.actual_status})`);

@@ -102,7 +102,13 @@ function safeCompare(a: string, b: string): boolean {
 }
 
 function isLoopbackAddress(address: string): boolean {
-  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+  // Accept the full 127.0.0.0/8 range per RFC 1122, plus IPv6 loopback and
+  // IPv4-mapped IPv6 loopback addresses (e.g. ::ffff:127.0.0.x).
+  if (address === '::1') return true;
+  if (address === '0:0:0:0:0:0:0:1') return true;
+  const v4Mapped = address.match(/^::ffff:(.+)$/i);
+  if (v4Mapped) return isLoopbackAddress(v4Mapped[1]);
+  return address.startsWith('127.');
 }
 
 function isGatewayWsAuthorized(
@@ -184,6 +190,7 @@ export async function startWsServer(): Promise<number> {
   const WS_PORT = PORT + 1;
   Bun.serve<WsData>({
     port: WS_PORT,
+    reusePort: true,
     fetch(req, server) {
       const url = new URL(req.url);
 

@@ -34,6 +34,7 @@ const autoRecoverySource = readFileSync('server/gpu-auto-recovery.ts', 'utf8');
 const typeCacheSource = readFileSync('server/gpu-type-cache.ts', 'utf8');
 const autoSelectSource = readFileSync('server/gpu-auto-select.ts', 'utf8');
 const gpuPollHealthSource = readFileSync('server/gpu-poll-health.ts', 'utf8');
+const gpuReadinessSource = readFileSync('server/gpu-readiness.ts', 'utf8');
 const gpuTiersSource = readFileSync('server/gpu-deploy-tiers.ts', 'utf8');
 const terminateSource = readFileSync('server/gpu-terminate.ts', 'utf8');
 const healthMetricsSource = readFileSync('server/gpu-health-metrics.ts', 'utf8');
@@ -68,21 +69,19 @@ describe('startDeployWithTiers — structure', () => {
 
   it('#171 retries up to MAX_DEPLOY_RETRIES times', () => {
     expect(deployLoopSource).toContain('export const MAX_DEPLOY_RETRIES = 2');
-    // Retries happen in startDeployLoop. Loop var is now `maxRetries` (local
-    // = MAX_DEPLOY_RETRIES unless raceCount===1, in which case 0).
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
     const fnBody = deployLoopSource.slice(fnStart, fnStart + 15000);
-    expect(fnBody).toContain('attempt <= maxRetries');
+    expect(fnBody).toContain('attempt <= MAX_DEPLOY_RETRIES');
   });
 
   it('#172 checks deployCancelled before each attempt', () => {
-    const fnStart = deployLoopSource.indexOf('for (let attempt = 0; attempt <= maxRetries');
+    const fnStart = deployLoopSource.indexOf('for (let attempt = 0; attempt <= MAX_DEPLOY_RETRIES');
     const fnBody = deployLoopSource.slice(fnStart, fnStart + 5000);
     expect(fnBody).toContain('if (deployCancelled) return');
   });
 
   it('#173 delays 5s between retries', () => {
-    const fnStart = deployLoopSource.indexOf('for (let attempt = 0; attempt <= maxRetries');
+    const fnStart = deployLoopSource.indexOf('for (let attempt = 0; attempt <= MAX_DEPLOY_RETRIES');
     const fnBody = deployLoopSource.slice(fnStart, fnStart + 5000);
     expect(fnBody).toContain("setTimeout(r, 5_000)");
   });
@@ -150,6 +149,20 @@ describe('startDeployWithTiers — error handling', () => {
     expect(fnBody).toContain('max retries exceeded');
     expect(fnBody).toContain('deploymentSM.markError');
   });
+
+  it('classifies app health errors as non-provider failures and stops cascade', () => {
+    expect(gpuTiersSource).toContain("'app_error'");
+    expect(gpuTiersSource).toContain("m.includes('app load failed')");
+    expect(deployWithTiersSource).toContain("failureCategory === 'app_error'");
+    expect(deployWithTiersSource).toContain('stopping cascade because another provider will run the same broken image');
+  });
+
+  it('clears stale instance fields before falling back to the next provider', () => {
+    expect(deployWithTiersSource).toContain('clearPersistedDeploy()');
+    expect(deployWithTiersSource).toContain("podId: ''");
+    expect(deployWithTiersSource).toContain("endpoint: ''");
+    expect(deployWithTiersSource).toContain('providerMeta: {}');
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -211,6 +224,61 @@ describe('health monitoring', () => {
     const fnBody = monitorLoopSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 20000);
     expect(fnBody).toContain('recordHostCrash');
     expect(fnBody).toContain('monitorConsecFails === 5');
+  });
+});
+
+describe('pollHealthUntilReady — generic GPU apps', () => {
+  it('treats ready non-speech apps as deploy-ready without speech service warmup', () => {
+    expect(gpuPollHealthSource).toContain('function isGenericAppHealthReady');
+    expect(gpuPollHealthSource).toContain('generic_app_ready');
+    expect(gpuPollHealthSource).toContain('Skipping speech pipeline warmup checks');
+  });
+
+  it('fails fast when non-speech app health includes an error or traceback', () => {
+    expect(gpuPollHealthSource).toContain('function extractAppHealthError');
+    expect(gpuPollHealthSource).toContain("phase: 'app_error'");
+    expect(gpuPollHealthSource).toContain("result: 'app_error'");
+  });
+
+  it('validates declared Docker API paths before marking the endpoint ready', () => {
+    expect(gpuPollHealthSource).toContain('function validateEndpointApiContract');
+    expect(gpuPollHealthSource).toContain('/openapi.json');
+    expect(gpuPollHealthSource).toContain('/v1/manifest');
+    expect(gpuPollHealthSource).toContain('if (requireDockerManifest && !manifestPayload)');
+    expect(gpuPollHealthSource).toContain('api_contract_error');
+  });
+
+  it('does not add default capability paths when explicit API paths are declared', () => {
+    expect(gpuPollHealthSource).toContain('const explicitExpectedPaths = expectedApiPaths.map(normalizeApiPath)');
+    expect(gpuPollHealthSource).toContain('explicitExpectedPaths.length > 0');
+    expect(gpuPollHealthSource).toContain('defaultApiPathsForCapabilities(expectedCapabilities)');
+  });
+
+  it('does not warm STT/LLM/TTS for declared generic apps while health is still loading', () => {
+    expect(gpuPollHealthSource).toContain('function isExpectedGenericGpuApp');
+    expect(gpuPollHealthSource).toContain('function isGenericAppUsableWhileLoading');
+    expect(gpuPollHealthSource).toContain('generic_app_loading');
+    expect(gpuPollHealthSource).toContain('waiting without speech pipeline warmup checks');
+  });
+
+  it('uses multipart image upload for image-to-GLB smoke tests', () => {
+    expect(gpuPollHealthSource).toContain('function endpointPathExpectsMultipartFile');
+    expect(gpuPollHealthSource).toContain("content?.['multipart/form-data']");
+    expect(gpuPollHealthSource).toContain('function createGlbSmokeImageForm');
+    expect(gpuPollHealthSource).toContain("form.append('file'");
+    expect(gpuPollHealthSource).toContain('GLB_SMOKE_TIMEOUT_MS = 10 * 60_000');
+  });
+
+  it('applies app health and API contract validation in race deploys too', () => {
+    expect(deployRaceSource).toContain('extractAppHealthError');
+    expect(deployRaceSource).toContain('validateEndpointApiContract');
+    expect(deployRaceSource).toContain('lastRaceHealthError');
+  });
+
+  it('skips STT/LLM/TTS readiness benchmarks for generate-from-text apps', () => {
+    expect(gpuReadinessSource).toContain('shouldRunGpuReadinessCheck');
+    expect(gpuReadinessSource).toContain('/generate-from-text');
+    expect(gpuReadinessSource).toContain('hasSpeechPipelinePaths');
   });
 });
 
@@ -804,11 +872,11 @@ describe('exported constants', () => {
 });
 
 describe('TensorDock discover & resume fast path', () => {
-  // Moved from gpu-deploy-loop.ts to per-provider strategy files (tensordock-strategy.ts).
-  // Verifying via strategy source instead of deploy-loop body.
   it('attempts to discover and resume stopped instances on TensorDock', () => {
-    const tensorStrategy = readFileSync('src/gpu-providers/strategies/tensordock-strategy.ts', 'utf8');
-    expect(tensorStrategy).toContain('discoverInstance');
+    const fnStart = deployLoopSource.indexOf("if (providerName === 'tensordock')");
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 6000);
+    expect(fnBody).toContain('discoverInstance');
+    expect(fnBody).toContain('startInstance');
   });
 
   it.skip('falls through to create new instance if discover/resume fails', () => {
@@ -897,6 +965,13 @@ describe('tryRecoverActiveDeploy', () => {
     expect(fnBody).toContain('probeGpuHealth');
     expect(fnBody).toContain('not healthy');
     expect(fnBody).toContain('clearPersistedDeploy');
+  });
+
+  it('restores gpuHealthy after reconnecting a persisted healthy deploy', () => {
+    const fnStart = autoRecoverySource.indexOf('export async function tryRecoverActiveDeploy');
+    const fnBody = autoRecoverySource.slice(fnStart, fnStart + 3500);
+    expect(fnBody).toContain('markGpuHealthy()');
+    expect(fnBody).toContain('setGpuHealthy(true)');
   });
 
   it.skip('restores readinessProbe from persisted state', () => {

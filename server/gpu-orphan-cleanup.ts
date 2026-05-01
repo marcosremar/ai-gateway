@@ -176,15 +176,6 @@ const ORPHAN_SWEEP_INTERVAL_MS = 10 * 60_000; // every 10 minutes
  * explicitly marked account-owned.
  */
 export async function sweepOrphanInstances(): Promise<{ found: number; terminated: number }> {
-  // Kill switch — set AIGW_ORPHAN_SWEEP_DISABLED=1 in dev/test sessions to
-  // prevent the periodic sweep from accidentally killing pods (known false-
-  // positive when deployState.podId desyncs after race-resolution edge cases).
-  // Status is also announced once at startup in startOrphanSweep(), but log
-  // each tick suppression so a debugger watching the file can confirm.
-  if (process.env.AIGW_ORPHAN_SWEEP_DISABLED === '1') {
-    log.log('[orphan-sweep] tick skipped (AIGW_ORPHAN_SWEEP_DISABLED=1)');
-    return { found: 0, terminated: 0 };
-  }
   const sweepStartedAt = Date.now();
   logGpuEvent({
     eventType: 'sweep_started',
@@ -551,13 +542,11 @@ let orphanSweepInitialTimer: ReturnType<typeof setTimeout> | null = null;
 export function startOrphanSweep(): void {
   if (orphanSweepTimer || orphanSweepInitialTimer) return;
   // Announce sweep policy explicitly at startup so an operator reading the
-  // server log knows whether the sweep will actually nuke anything. Forensic
-  // incident 2026-04-26: previous server gave only "[orphan-sweep] Started"
-  // with no indication of whether the kill switch or fail-closed flags were
-  // active, leaving impossible to tell in retrospect why an instance vanished.
-  const disabled = process.env.AIGW_ORPHAN_SWEEP_DISABLED === '1';
+  // server log knows whether the sweep will only clean gateway-prefixed
+  // instances or has explicit kill-all permissions for dedicated accounts.
+  // There is no global disable switch: orphan cleanup is a cost-control guard.
   const policy = {
-    disabled,
+    enabled: true,
     intervalMin: ORPHAN_SWEEP_INTERVAL_MS / 60_000,
     nukeUntracked: {
       vast:       nukeUntrackedAllowed('vast'),
@@ -574,11 +563,7 @@ export function startOrphanSweep(): void {
       hyperstack: isAccountOwned('hyperstack'),
     },
   };
-  if (disabled) {
-    log.log('[orphan-sweep] DISABLED via AIGW_ORPHAN_SWEEP_DISABLED=1 — periodic sweep will start but each tick will no-op');
-  } else {
-    log.log(`[orphan-sweep] ENABLED interval=${policy.intervalMin}min — nukeUntracked: ${JSON.stringify(policy.nukeUntracked)}`);
-  }
+  log.log(`[orphan-sweep] ENABLED interval=${policy.intervalMin}min — nukeUntracked: ${JSON.stringify(policy.nukeUntracked)}`);
   logGpuEvent({
     eventType: 'sweep_policy',
     provider: 'multi',

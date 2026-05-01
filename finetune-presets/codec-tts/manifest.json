@@ -1,0 +1,35 @@
+{
+  "name": "codec-tts",
+  "version": "1.0.0",
+  "description": "Generic codec-based TTS fine-tune via teacher-forcing cross-entropy. Works with VUI (Fluac codec) and similar quantizer-based TTS models.",
+  "type": "audio",
+  "trainerScript": "trainer.py",
+  "prepareScript": "prepare_dataset.py",
+  "defaultEpochs": 3,
+  "defaultLR": 3e-5,
+  "defaultGpu": "4090",
+  "defaultMaxSpend": 3.0,
+  "trainerInterface": {
+    "train": "python trainer.py --jsonl <jsonl> --wav-root <wav_dir> --base-model <model_dir>/vui-100m-base.pt --out <checkpoints_dir> --steps N --lr X --batch 4"
+  },
+  "aptDeps": "",
+  "pipDeps": "huggingface-hub hf_xet hf_transfer torch torchaudio soundfile julius einops tiktoken transformers pydantic numba inflect gradio safetensors pandas pyarrow",
+  "torchCudaIndex": "",
+  "torchVersion": "",
+  "knownTags": ["[laugh]", "[sigh]", "[gasp]", "[cough]", "[sniff]", "[throat]", "[sneeze]", "[breath]"],
+  "notes": "Codec MUST be frozen. Text embedding optionally frozen (--freeze-text-emb). Cross-entropy over all quantizers. 3000 steps on 8h data achieves loss ~4.95.",
+  "defaultStepsPerSec": 6,
+  "defaultEncodeRatePerGpu": 0,
+  "smokeVerify": {
+    "pythonInline": "import sys, torch, soundfile as sf\nsys.path.insert(0, '/root/model/src')\nfrom vui.model import Vui\nfrom vui.inference import generate\nimport glob\nckpts = sorted(glob.glob('/workspace/checkpoints/erinome_step*.pt'))\nassert ckpts, 'no checkpoints found'\nckpt = torch.load(ckpts[-1], map_location='cuda', weights_only=False)\nm = Vui.from_pretrained('/workspace/model/vui-100m-base.pt').cuda()\nm.load_state_dict(ckpt['model'])\nm.eval()\ncodes = generate(m, 'Olá, teste de smoke.', temperature=0.5)\nwav = m.codec.from_indices(codes).squeeze().cpu().numpy()\nsf.write('/workspace/smoke_test.wav', wav, 22050)\nrms = float((wav**2).mean()**0.5)\nassert len(wav)/22050 > 0.3 and rms > 0.005\nprint('[smoke-verify] OK')"
+  },
+  "probePaths": {
+    "wavDir": "/workspace/data/wav",
+    "dataPathsFile": "/workspace/data/cml_tts.jsonl",
+    "encodedFile": "/workspace/data/cml_tts.jsonl",
+    "encodedFullFile": "/workspace/data/cml_tts.jsonl",
+    "checkpointsDir": "/workspace/checkpoints",
+    "smokeCheckpointsDir": "/workspace/checkpoints",
+    "jobLog": "/workspace/finetune.log"
+  }
+}

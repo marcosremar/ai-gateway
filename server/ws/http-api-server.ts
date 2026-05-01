@@ -7,16 +7,18 @@ import { PassThrough } from 'stream';
 import { createLogger } from '../../src/logger';
 import { PORT } from '../config';
 import { getRouteBodyLimit } from '../http-utils';
+import { resolveBearer, X_AIGW_USER_ID } from './api-key-resolver';
 
 const log = createLogger('http-api-server');
 
 type AuthzResult =
-  | { ok: true }
+  | { ok: true; userId: string | null }
   | { ok: false; status: number; message: string };
 
 const PUBLIC_HTTP_ROUTES = new Set([
   'GET /health',
   'HEAD /health',
+  'GET /api/tools',
 ]);
 
 function safeCompare(a: string, b: string): boolean {
@@ -29,7 +31,13 @@ function safeCompare(a: string, b: string): boolean {
 }
 
 function isLoopbackAddress(address: string): boolean {
-  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+  // Accept the full 127.0.0.0/8 range per RFC 1122, plus IPv6 loopback and
+  // IPv4-mapped IPv6 loopback addresses (e.g. ::ffff:127.0.0.x).
+  if (address === '::1') return true;
+  if (address === '0:0:0:0:0:0:0:1') return true;
+  const v4Mapped = address.match(/^::ffff:(.+)$/i);
+  if (v4Mapped) return isLoopbackAddress(v4Mapped[1]);
+  return address.startsWith('127.');
 }
 
 export function isPublicHttpRoute(method: string, pathname: string): boolean {
@@ -70,16 +78,32 @@ export function authorizeHttpRequest(
   remoteAddr: string,
 ): AuthzResult {
   if (isPublicHttpRoute(method, pathname)) {
-    return { ok: true };
+    return { ok: true, userId: null };
   }
 
+  const token = (authHeader || '').replace(/^Bearer\s+/i, '');
+
+  // Multi-key registry path — when GATEWAY_API_KEYS is set, every request
+  // must present a Bearer that resolves to a known userId. The userId is
+  // forwarded to handlers via the x-aigw-user-id synthetic header so they
+  // can scope GPU list/terminate to only this caller's instances.
+  const multiKeysRaw = process.env.GATEWAY_API_KEYS;
+  if (multiKeysRaw) {
+    const resolution = resolveBearer(token);
+    if (!resolution.ok) {
+      return { ok: false, status: 401, message: 'Invalid or missing API key' };
+    }
+    return { ok: true, userId: resolution.userId };
+  }
+
+  // Legacy single-key path — a single shared GATEWAY_API_KEY for back-compat.
+  // Callers all resolve to userId 'default' (no per-app isolation).
   const expectedToken = process.env.GATEWAY_API_KEY;
   if (expectedToken) {
-    const token = (authHeader || '').replace(/^Bearer\s+/i, '');
     if (!token || !safeCompare(token, expectedToken)) {
       return { ok: false, status: 401, message: 'Invalid or missing API key' };
     }
-    return { ok: true };
+    return { ok: true, userId: 'default' };
   }
 
   if (!isLoopbackAddress(remoteAddr)) {
@@ -89,7 +113,9 @@ export function authorizeHttpRequest(
       message: 'No GATEWAY_API_KEY configured — remote access denied. Set GATEWAY_API_KEY or connect from localhost.',
     };
   }
-  return { ok: true };
+  // Localhost with no auth configured = admin (sees all instances). This
+  // matches today's behavior for local dev where the operator is trusted.
+  return { ok: true, userId: null };
 }
 
 async function pumpRequestBody(
@@ -138,6 +164,9 @@ function invokeNodeStyleHandler(
   invoke: (fakeReq: any, fakeRes: any) => void,
   corsOrigin: string | null,
   routeLimit: number,
+  /** Resolved app/user identity from the auth wrapper. Forwarded to handlers
+   *  via the synthetic x-aigw-user-id header so they can scope GPU isolation. */
+  userId: string | null = null,
 ): Promise<Response> {
   const url = new URL(req.url);
   const method = req.method;
@@ -153,6 +182,14 @@ function invokeNodeStyleHandler(
     req.headers.forEach((value, key) => {
       headers[key] = value;
     });
+    // Inject resolved identity (or strip the inbound copy so callers can't
+    // spoof it). Trusted handlers downstream read X_AIGW_USER_ID for app
+    // isolation in GPU list/terminate/deploy.
+    if (userId) {
+      headers[X_AIGW_USER_ID] = userId;
+    } else {
+      delete headers[X_AIGW_USER_ID];
+    }
     return headers;
   })();
 
@@ -259,6 +296,7 @@ export function startHttpApiServer(): void {
 
     Bun.serve({
       port: PORT,
+      reusePort: true,
       // GPU offers/catalog queries fan out to multiple cloud providers and can
       // exceed the default 10s. Bump to 120s so long-running admin endpoints
       // finish without empty-reply hangups.
@@ -287,11 +325,12 @@ export function startHttpApiServer(): void {
           });
         }
 
+        const remoteAddr = server.requestIP(req)?.address || '';
         const authz = authorizeHttpRequest(
           method,
           url.pathname,
           req.headers.get('authorization'),
-          server.requestIP(req)?.address || '',
+          remoteAddr,
         );
         if (!authz.ok) {
           return new Response(JSON.stringify({ error: authz.message }), {
@@ -300,6 +339,7 @@ export function startHttpApiServer(): void {
           });
         }
 
+        const callerUserId = authz.ok ? authz.userId : null;
         // Workload routes (dynamic :id segments — checked before flat handlers)
         if (routeWorkloadRequest && url.pathname.startsWith('/v1/workloads')) {
           return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => {
@@ -308,7 +348,7 @@ export function startHttpApiServer(): void {
               fakeRes.writeHead(404, { 'Content-Type': 'application/json' });
               fakeRes.end(JSON.stringify({ error: 'Not found' }));
             }
-          }, corsOrigin, routeLimit);
+          }, corsOrigin, routeLimit, callerUserId);
         }
 
         // Docker dynamic routes (e.g. /v1/docker/builds/:id)
@@ -318,7 +358,7 @@ export function startHttpApiServer(): void {
             const [dynHandler, params] = match;
             return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => {
               dynHandler(fakeReq, fakeRes, ...params);
-            }, corsOrigin, routeLimit);
+            }, corsOrigin, routeLimit, callerUserId);
           }
         }
 
@@ -329,7 +369,7 @@ export function startHttpApiServer(): void {
             const [dynHandler, params] = match;
             return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => {
               dynHandler(fakeReq, fakeRes, ...params);
-            }, corsOrigin, routeLimit);
+            }, corsOrigin, routeLimit, callerUserId);
           }
         }
 
@@ -340,7 +380,7 @@ export function startHttpApiServer(): void {
             const [dynHandler, params] = match;
             return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => {
               dynHandler(fakeReq, fakeRes, ...params);
-            }, corsOrigin, routeLimit);
+            }, corsOrigin, routeLimit, callerUserId);
           }
         }
 
@@ -354,7 +394,7 @@ export function startHttpApiServer(): void {
         }
 
         // Node→Bun adapter (stream request body to preserve downstream size limits)
-        return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => handler(fakeReq, fakeRes), corsOrigin, routeLimit);
+        return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => handler(fakeReq, fakeRes), corsOrigin, routeLimit, callerUserId);
       },
     });
     log.log(`[ws-server] HTTP API on port ${PORT}`);

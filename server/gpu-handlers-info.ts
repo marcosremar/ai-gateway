@@ -3,7 +3,6 @@
 // my-location, latency-probe, reputation, and provider balance cache.
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import type { GpuProviderClient, ProviderCredentials } from '../src/gpu-providers/types';
 import { createLogger } from '../src/logger';
 
 const log = createLogger('gpu-handlers-info');
@@ -19,6 +18,7 @@ import { runpod, vast, tensordock, ollamaAvailable, groqAvailable, openaiAvailab
 import { cooldownTracker, fetchGpuLogs, IDLE_TIMEOUT_MS } from './gpu-deploy';
 import { logGpuEvent, computePercentile, getAllReputations } from './metrics';
 import { getOrCreateRequestId, setRequestIdHeader, readJsonBody, handleBodyError } from './http-utils';
+import { readUserIdHeader } from './ws/api-key-resolver';
 import { getImageCatalog, PORT, PROVIDER_CHAIN, LOW_BALANCE_THRESHOLD_USD } from './config';
 import { BILLING_URLS } from '../src/providers/errors';
 import { fetchIpLocation, extractIp, fetchRunPodDatacenter, parseProviderRegion, fetchMyLocation } from './ip-location';
@@ -32,8 +32,9 @@ import { getDeployTimeoutMin } from '../src/gpu-providers/deploy-settings';
 import { runPreFlightChecks } from '../src/preflight-checks';
 import { analyzeDockerImage } from '../src/gpu-compat';
 import { loadProviderConfig } from './config-persistence';
-import { errorSummary } from '../src/error-summary';
 import { getMemoryStats, getOperationStats } from '../src/performance-profiler';
+import { errorSummary } from '../src/error-summary';
+import { computeAdaptiveIdleTimeout, resolveEffectiveIdleTimeout } from './gpu-idle-logic';
 
 // ── Friendly error message cleanup ──────────────────────────────────────────
 
@@ -265,6 +266,13 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
   const elapsed = deployState.startedAt > 0 ? Math.round((Date.now() - deployState.startedAt) / 1000) : 0;
   const activeTier = isGpuAvailable() ? 'gpu' : 'cloud';
   const idleSec = lastRequestTime > 0 ? Math.round((Date.now() - lastRequestTime) / 1000) : 0;
+  const adaptiveIdleTimeoutMs = computeAdaptiveIdleTimeout({
+    lastBootDurationMs: deployState.deployDurationMs || 0,
+    avgBootTimeS: (deployState.providerMeta as Record<string, unknown>)?.avgBootTimeS as number || 0,
+    dockerImage: deployState.dockerImage || '',
+    isBooting: false,
+  });
+  const effectiveIdleTimeoutMs = resolveEffectiveIdleTimeout(adaptiveIdleTimeoutMs, IDLE_TIMEOUT_MS);
 
   // Collect active provider cooldowns
   const cooldowns = cooldownTracker.getActiveCooldowns();
@@ -305,7 +313,9 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
     gpuHealthy,
     activeTier,
     idleSec,
-    idleTimeoutSec: Math.round(IDLE_TIMEOUT_MS / 1000),
+    idleTimeoutSec: Number.isFinite(effectiveIdleTimeoutMs) ? Math.round(effectiveIdleTimeoutMs / 1000) : null,
+    configuredIdleTimeoutSec: Number.isFinite(IDLE_TIMEOUT_MS) ? Math.round(IDLE_TIMEOUT_MS / 1000) : null,
+    adaptiveIdleTimeoutSec: Math.round(adaptiveIdleTimeoutMs / 1000),
     provider: deployState.provider,
     alert: deployState.alert,
     region: (deployState.providerMeta?.region as string) || '',
@@ -385,6 +395,11 @@ export async function handleGpuList(_req: IncomingMessage, res: ServerResponse):
   const requestId = getOrCreateRequestId(_req);
   setRequestIdHeader(res, requestId);
 
+  // Per-app isolation: when caller authenticated with a per-app key, scope
+  // the response to instances whose label is namespaced "<callerUserId>/...".
+  // Loopback/admin (callerUserId === null) sees everything.
+  const callerUserId = readUserIdHeader(_req.headers as Record<string, string | string[] | undefined>);
+
   // Use deploy-time keys first, fall back to env vars (so list works even after gateway restart)
   const vastKey = deployVastApiKey || process.env.VAST_API_KEY || '';
   const rpKey = deployApiKey || process.env.RUNPOD_API_KEY || '';
@@ -444,8 +459,30 @@ export async function handleGpuList(_req: IncomingMessage, res: ServerResponse):
     }
   }
 
+  // Apply per-app filter (server-authoritative). Convention: instance label
+  // is "<owner>/<task>" — see deploy handler. Without a "/" the label
+  // belongs to no app and is filtered out for non-admin callers.
+  let visibleInstances = instances;
+  let totalBeforeFilter = instances.length;
+  if (callerUserId) {
+    visibleInstances = instances.filter((inst) => {
+      const label = (inst as { instanceName?: string; label?: string }).instanceName
+        ?? (inst as { label?: string }).label
+        ?? '';
+      // Skip placeholder labels that just echo the instanceId — no ownership signal
+      const id = (inst as { instanceId?: string; podId?: string }).instanceId
+        ?? (inst as { podId?: string }).podId
+        ?? '';
+      const effectiveLabel = (label === id) ? '' : label;
+      return effectiveLabel.startsWith(`${callerUserId}/`);
+    });
+  }
+
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ instances }));
+  res.end(JSON.stringify({
+    instances: visibleInstances,
+    ...(callerUserId ? { scopedTo: callerUserId, totalAcrossApps: totalBeforeFilter } : {}),
+  }));
 }
 
 // ── Granular /health endpoint ───────────────────────────────────────────────
@@ -821,7 +858,14 @@ export async function handleErrorAlerts(req: IncomingMessage, res: ServerRespons
       return;
     }
 
-    errorSummary.acknowledgeAlert(String(body.type));
+    const alertType = String(body.type);
+    if (!['high_error_rate', 'critical_error_spike', 'new_error_pattern'].includes(alertType)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid alert type' }));
+      return;
+    }
+
+    errorSummary.acknowledgeAlert(alertType as 'high_error_rate' | 'critical_error_spike' | 'new_error_pattern');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ acknowledged: true }));
   }

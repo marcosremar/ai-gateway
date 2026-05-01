@@ -48,10 +48,12 @@ const P50_TIE_THRESHOLD = 0.10;
  *  magnitude hints for `reorderByLatency` when we have no better signal.) */
 const PROVIDER_COST_PRIOR: Record<ProviderName, number> = {
   vast: 0.35,        // Vast.ai spot — cheapest
+  'vast-vm': 0.40,   // Vast.ai VM mode
   runpod: 0.45,      // RunPod spot
   tensordock: 0.55,  // TensorDock
   snapgpu: 0.50,     // Snapgpu wraps another provider
   modal: 2.50,       // Modal on-demand is expensive
+  hyperstack: 0.75,  // Hyperstack on-demand
 };
 
 export interface ProviderLatencyObservation {

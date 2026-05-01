@@ -120,38 +120,38 @@ export async function runStartupTasks(): Promise<void> {
     log.warn(`[ws-server] terminateStaleStoppedPodOnStartup not loaded: ${e.message?.slice(0, 80)}`);
   }
 
+  let recoveredDeploy = false;
+
   // 3. Reconnect to any pod that was healthy before restart
   try {
     const { tryRecoverActiveDeploy } = require('../gpu-deploy');
-    tryRecoverActiveDeploy().catch((e: any) =>
-      log.warn(`[ws-server] tryRecoverActiveDeploy failed: ${e.message?.slice(0, 80)}`)
-    );
+    recoveredDeploy = await tryRecoverActiveDeploy();
   } catch (e: any) {
-    log.warn(`[ws-server] tryRecoverActiveDeploy not loaded: ${e.message?.slice(0, 80)}`);
+    log.warn(`[ws-server] tryRecoverActiveDeploy failed: ${e.message?.slice(0, 80)}`);
   }
 
   // 3b. If no active deploy was recovered, scan for orphaned pods (deploy
   // improvement #11) and reconnect to one if found. Must run after
   // tryRecoverActiveDeploy so it only fires when the active-deploy path missed.
-  try {
-    const { tryReconnectOrphanDeploy } = require('../gpu-deploy');
-    tryReconnectOrphanDeploy().catch((e: any) =>
-      log.warn(`[ws-server] tryReconnectOrphanDeploy failed: ${e.message?.slice(0, 80)}`)
-    );
-  } catch (e: any) {
-    log.warn(`[ws-server] tryReconnectOrphanDeploy not loaded: ${e.message?.slice(0, 80)}`);
+  if (!recoveredDeploy) {
+    try {
+      const { tryReconnectOrphanDeploy } = require('../gpu-deploy');
+      recoveredDeploy = await tryReconnectOrphanDeploy();
+    } catch (e: any) {
+      log.warn(`[ws-server] tryReconnectOrphanDeploy failed: ${e.message?.slice(0, 80)}`);
+    }
   }
 
   // 4. Auto-boot GPU if profile has bootOnStartup=true
-  try {
-    const gh = require('../gpu-handlers');
-    if (gh.autoBootFromProfile) {
-      gh.autoBootFromProfile().catch((e: any) =>
-        log.warn(`[ws-server] autoBootFromProfile failed: ${e.message?.slice(0, 80)}`)
-      );
+  if (!recoveredDeploy) {
+    try {
+      const gh = require('../gpu-handlers');
+      if (gh.autoBootFromProfile) {
+        await gh.autoBootFromProfile();
+      }
+    } catch (e: any) {
+      log.warn(`[ws-server] autoBootFromProfile failed: ${e.message?.slice(0, 80)}`);
     }
-  } catch (e: any) {
-    log.warn(`[ws-server] autoBootFromProfile not loaded: ${e.message?.slice(0, 80)}`);
   }
 
   // 5. Start standby monitor — auto-deploys a warm GPU when session duration or

@@ -1,2 +1,2 @@
-// Barrel re-export for backwards compatibility — canonical source is src/platform/logger.ts
-export * from './platform/logger';
+// Barrel re-export — canonical source is src/modules/platform/logger.ts
+export * from './modules/platform/logger';

@@ -32,7 +32,7 @@ import { recordHostCrash } from './metrics';
 import { broadcastProviderStatus, broadcastWs } from './ws-state';
 import { emitGatewayEvent } from './event-bus';
 import { GPU_MONITOR_INTERVAL_MS, parseAndStoreGpuMetrics } from './gpu-health-metrics';
-import { checkIdleAction, shouldResetIdleFromHealth, adaptiveMonitorDelay, computeAdaptiveIdleTimeout } from './gpu-idle-logic';
+import { checkIdleAction, shouldResetIdleFromHealth, adaptiveMonitorDelay, computeAdaptiveIdleTimeout, resolveEffectiveIdleTimeout } from './gpu-idle-logic';
 import { stopWarmthMonitor } from './gpu-warmth-monitor';
 
 const log = createLogger('gpu-deploy');
@@ -168,12 +168,13 @@ export function scheduleNextMonitorProbe() {
         // If health data indicates active training/work, treat as "not idle"
         // (prevents idle timeout from killing fine-tuning or long-running jobs)
         // Compute effective timeout for health-based idle check (same context as idle check below)
-        const healthCheckTimeout = computeAdaptiveIdleTimeout({
+        const adaptiveHealthTimeout = computeAdaptiveIdleTimeout({
           lastBootDurationMs: deployState.deployDurationMs || 0,
           avgBootTimeS: (deployState.providerMeta as Record<string, unknown>)?.avgBootTimeS as number || 0,
           dockerImage: deployState.dockerImage || '',
           isBooting: false,
         });
+        const healthCheckTimeout = resolveEffectiveIdleTimeout(adaptiveHealthTimeout, IDLE_TIMEOUT_MS);
         if (shouldResetIdleFromHealth(probeResult.data as Record<string, unknown>, deployState.gpuUtil, healthCheckTimeout)) {
           setLastModelRequestTime(Date.now());
         }
@@ -422,12 +423,13 @@ export function scheduleNextMonitorProbe() {
       }
 
       // Idle check — compute adaptive timeout based on boot cost + history
-      const effectiveTimeout = computeAdaptiveIdleTimeout({
+      const adaptiveTimeout = computeAdaptiveIdleTimeout({
         lastBootDurationMs: deployState.deployDurationMs || 0,
         avgBootTimeS: (deployState.providerMeta as Record<string, unknown>)?.avgBootTimeS as number || 0,
         dockerImage: deployState.dockerImage || '',
         isBooting: false, // we're in ready state here
       });
+      const effectiveTimeout = resolveEffectiveIdleTimeout(adaptiveTimeout, IDLE_TIMEOUT_MS);
       const idleResult = checkIdleAction(lastModelRequestTime, lastRequestTime, Date.now(), effectiveTimeout, idleWarned);
       if (idleResult.action === 'stop') {
         // Read the active app's `gpuDeploy.hibernateOnIdle` flag and thread it

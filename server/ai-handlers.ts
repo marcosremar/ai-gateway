@@ -52,7 +52,7 @@ import {
 import type { HybridStagesDeps, PipelineStageParams } from '../src/gateway/pipeline';
 import type {
   GpuSTTResult, GpuLLMResult, GpuTTSResult, StageRecorder,
-  SttStageResult, LlmStageResult, TtsStageResult, PipelineResponseBody,
+  SttStageResult, PipelineResponseBody,
 } from '../src/gateway/pipeline';
 import { getLocalKokoroUrl } from '../src/gateway/pipeline/local-kokoro';
 
@@ -67,15 +67,15 @@ import {
 import {
   client, groqProfile, ollamaProfile, translationProfile,
   groqAvailable, openaiAvailable, deepgramAvailable, fireworksAvailable,
-  openrouterAvailable, whisperAvailable, ollamaAvailable, whisperHost,
+  whisperAvailable, whisperHost,
   ENSEMBLE_STT_PROVIDERS,
   groqSTT, openaiSTT, deepgramSTT, fireworksSTT,
   groqLLM, fireworksLLM, groqLlmModel, groqTtsModel, groqTtsVoice,
-  openrouterQwen3Embedding, openaiEmbedding,
-  markGpuUnhealthy, shouldPreferGpu, shouldPreferGpuTts,
+  shouldPreferGpu, shouldPreferGpuTts,
   recordStageSuccess, recordStageFailure, isStageCircuitClosed,
   providers, modalTTS, gpuShadowMode,
   markGpuProductionReady,
+  openrouterQwen3Embedding, openaiEmbedding,
 } from './providers';
 import { recordShadowRun } from './gpu-readiness';
 import {
@@ -275,7 +275,6 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
   try { audio = await rawBodyPromise; }
   catch (e) {
     if (e instanceof BodyTimeoutError) { res.writeHead(408, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Request Timeout' })); return; }
-    const msg = e instanceof Error ? e.message : String(e);
     res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid request body' })); return;
   }
 
@@ -465,12 +464,12 @@ export async function handleEnsembleTranscribe(req: IncomingMessage, res: Server
     }
 
     log.log(`${result.provider} → ${result.latencyMs}ms: "${finalText.slice(0, 80)}"`);
-    logRequest({ timestamp: Date.now(), stage: 'stt', provider: result.provider, latencyMs: result.latencyMs, success: true, inputSize: audio.length, outputPreview: finalText.slice(0, 80) });
+    logRequest({ timestamp: Date.now(), stage: 'stt', provider: result.provider as 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid', latencyMs: result.latencyMs, success: true, inputSize: audio.length, outputPreview: finalText.slice(0, 80) });
 
     // Include filter metadata in response for Python client
     const responseBody = {
       text: finalText,
-      provider: result.provider,
+      provider: result.provider as string,
       latencyMs: result.latencyMs,
       segments: result.segments,
     } as Record<string, unknown>;
@@ -713,7 +712,6 @@ async function _parsePipelineRequest(
   try { audioBuffer = await speechBodyPromise; }
   catch (e) {
     if (e instanceof BodyTimeoutError) { res.writeHead(408, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Request Timeout' })); return null; }
-    const msg = e instanceof Error ? e.message : String(e);
     res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid request body' })); return null;
   }
   if (audioBuffer.length === 0) {
@@ -911,7 +909,7 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
   if (!params) return;  // invalid request — response already sent
 
   const {
-    source, target, speaker, style, systemPrompt,
+    source, target, speaker, systemPrompt,
     audioBuffer, baseProfile, isCloneRequest, cloneTtsChain,
     referenceAudio, refText, cloudProfile,
     gpuEp, sttOnGpu, llmOnGpu, ttsOnGpu, allOnGpu, anyOnGpu, cloneGpuEndpoint,
@@ -1175,7 +1173,7 @@ export async function handleVoiceProfileStatus(_req: IncomingMessage, res: Serve
   }
 }
 
-export async function handleVoiceProfileReset(req: IncomingMessage, res: ServerResponse): Promise<void> {
+export async function handleVoiceProfileReset(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   const gpuEndpoint = isGpuAvailable() ? deployState.endpoint : null;
   if (!gpuEndpoint) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1196,7 +1194,7 @@ export async function handleVoiceProfileReset(req: IncomingMessage, res: ServerR
 }
 
 // ── Language Detection ─────────────────────────────────────────────────────────
-import { detectLanguage, detectLanguageWithSwap, SUPPORTED_LANGUAGES } from '../src/language-detect';
+import { detectLanguageWithSwap, SUPPORTED_LANGUAGES } from '../src/language-detect';
 
 /**
  * POST /v1/detect-language
@@ -1336,12 +1334,33 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
     return;
   }
 
-  const model = (body.model as string) || '';
+  let model = (body.model as string) || '';
   const messages = body.messages as Array<{ role: string; content: unknown }>;
   if (!messages || !Array.isArray(messages)) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'messages array is required' } }));
     return;
+  }
+
+  // Profile-driven model selection: when client sends `model: "@app/llm"`
+  // (or omits it entirely), resolve to the authenticated user's app config
+  // — apps[].llm[0]. This lets babylon-cinema, dumont-agent, etc. pin their
+  // preferred LLM in ~/.babelcast/provider-config.json without hardcoding it
+  // client-side.
+  if (!model || model === '@app/llm' || model === 'auto') {
+    const userId = req.headers['x-aigw-user-id'] as string | undefined;
+    if (userId) {
+      try {
+        const cfg = await loadProviderConfig();
+        const app = cfg.apps.find(a => a.id === userId);
+        const first = app?.llm?.[0];
+        if (first?.model) {
+          model = first.model;
+        }
+      } catch (err) {
+        log.warn('app-profile resolve failed: %s', err instanceof Error ? err.message : err);
+      }
+    }
   }
 
   const { provider: chatProvider, resolvedModel } = resolveChatProvider(model, {
@@ -1354,6 +1373,15 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
   });
 
   try {
+    // OpenRouter passthrough — reasoning + provider routing.
+    const reasoning = body.reasoning && typeof body.reasoning === 'object'
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ? (body.reasoning as any)
+      : undefined;
+    const providerRouting = body.provider && typeof body.provider === 'object'
+      ? (body.provider as Record<string, unknown>)
+      : undefined;
+
     const result = await chatProvider.chat({
       model: resolvedModel,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1362,6 +1390,8 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
       maxTokens: typeof body.max_tokens === 'number' ? body.max_tokens : undefined,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       responseFormat: body.response_format as any,
+      ...(reasoning ? { reasoning } : {}),
+      ...(providerRouting ? { provider: providerRouting } : {}),
     });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1383,6 +1413,61 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
     log.error(`${model} failed: ${msg}`);
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'Internal server error' } }));
+  }
+}
+
+// ── Embeddings — POST /v1/embeddings (OpenAI-compatible) ───────────────────
+//
+// Routes to OpenRouter's qwen3-embedding-0.6b by default. Used by the
+// scenery-author asset retrieval pipeline (semantic search over thumb VLM
+// descriptions) and any consumer that needs vector embeddings.
+
+export async function handleEmbeddings(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  touchRequest();
+  const requestId = getOrCreateRequestId(req);
+  setRequestIdHeader(res, requestId);
+
+  let body: Record<string, unknown>;
+  try { body = await readJsonBody(req); }
+  catch (err) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: `Invalid body: ${err instanceof Error ? err.message : err}` } }));
+    return;
+  }
+  // Default to qwen3-embedding-8b on OpenRouter — qwen3-embedding-0.6b isn't
+  // exposed by the upstream and OpenAI text-embedding-3-* needs separate
+  // quota. -8b is the most reliable open multilingual embedder available.
+  const model = (body.model as string) || 'qwen/qwen3-embedding-8b';
+  const input = body.input;
+  if (!input || (typeof input !== 'string' && !Array.isArray(input))) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'input must be a string or array of strings' } }));
+    return;
+  }
+
+  const provider = model.includes('text-embedding-3') ? openaiEmbedding : openrouterQwen3Embedding;
+  if (!provider.isConfigured()) {
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: `Embedding provider for "${model}" not configured` } }));
+    return;
+  }
+
+  try {
+    const inputs = Array.isArray(input) ? input as string[] : [input as string];
+    const result = await provider.embed(inputs, { model });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      object: 'list',
+      data: result.embeddings.map((vec, i) => ({ object: 'embedding', index: i, embedding: vec })),
+      model,
+      usage: result.usage,
+    }));
+  } catch (err) {
+    const status = (err as { status?: number })?.status || 500;
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error(`${model} embed failed: ${msg}`);
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: msg.slice(0, 200) } }));
   }
 }
 

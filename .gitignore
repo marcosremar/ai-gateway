@@ -20,3 +20,7 @@ PRIORITY_ACTION_PLAN.md
 qr-screenshot.png
 opencode.json
 backend
+
+# Git lock files are internal and normally never tracked.
+# If `.git/index.lock` causes errors, remove the stale lock or fix `.git/` permissions.
+.git/index.lock

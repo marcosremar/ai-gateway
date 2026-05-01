@@ -44,7 +44,7 @@ import {
   isStageWarm, gpuModelWarmth,
   setGpuReadyForProduction, setGpuShadowMode, gpuShadowMode, resetGpuReadinessState, setGpuReadinessState,
 } from './state';
-import { runGpuReadinessCheck, resetReadinessCheck, isReadinessCheckInProgress } from './gpu-readiness';
+import { runGpuReadinessCheck, resetReadinessCheck, isReadinessCheckInProgress, shouldRunGpuReadinessCheck } from './gpu-readiness';
 import { RUNPOD_ENDPOINT, PROVIDER_CHAIN } from './config';
 import { broadcastProviderStatus } from './ws-state';
 
@@ -151,13 +151,20 @@ if (openrouterAvailable) {
   // `model: "google/gemini-2.5-flash"` etc.). Used by avatar-engine's shot
   // verification pipeline (Gemini 2.5 Flash → 2.0 Flash-Lite → GPT-4o-mini).
   const OPENROUTER_VISION_CHAT_MODELS = [
+    'google/gemini-3-flash-preview',
+    'google/gemini-3.1-flash-lite-preview',
+    'google/gemini-3.1-pro-preview',
     'google/gemini-2.5-flash',
     'google/gemini-2.5-flash-lite',
+    'google/gemini-2.5-pro',
     'google/gemini-2.0-flash-001',
     'google/gemini-2.0-flash-lite-001',
     'openai/gpt-4o-mini',
     'anthropic/claude-3.5-sonnet',
     'meta-llama/llama-3.2-11b-vision-instruct',
+    'deepseek/deepseek-v4-pro',
+    'deepseek/deepseek-v4-flash',
+    'deepseek/deepseek-chat-v3-0324',
   ];
   for (const modelId of OPENROUTER_VISION_CHAT_MODELS) {
     providers.chat![modelId] = openrouterLLM;
@@ -525,12 +532,21 @@ export function markGpuHealthy(): void {
 
 /** Internal helper: start readiness benchmark for the given endpoint. */
 export function _startReadinessCheck(endpoint: string): void {
-  broadcastProviderStatus('booting', 'cloud', 'GPU ready — running readiness benchmark');
-  runGpuReadinessCheck(
-    endpoint,
-    () => markGpuShadowMode(endpoint), // onPass → shadow mode
-    (stage, bestMs, targetMs) => markGpuWarmupFailed(stage, bestMs, targetMs), // onFail → repechage
-  ).catch(err => log.error('Readiness check error: %s', err instanceof Error ? err.message : err));
+  void (async () => {
+    const shouldRun = await shouldRunGpuReadinessCheck(endpoint);
+    if (!shouldRun) {
+      log.log('GPU endpoint is not a speech pipeline — skipping STT/LLM/TTS readiness benchmark');
+      broadcastProviderStatus('ready', 'gpu', 'GPU app ready — speech readiness benchmark not applicable');
+      return;
+    }
+
+    broadcastProviderStatus('booting', 'cloud', 'GPU ready — running readiness benchmark');
+    await runGpuReadinessCheck(
+      endpoint,
+      () => markGpuShadowMode(endpoint), // onPass → shadow mode
+      (stage, bestMs, targetMs) => markGpuWarmupFailed(stage, bestMs, targetMs), // onFail → repechage
+    );
+  })().catch(err => log.error('Readiness check error: %s', err instanceof Error ? err.message : err));
 }
 
 /** Called when all services pass benchmark → enter shadow mode */

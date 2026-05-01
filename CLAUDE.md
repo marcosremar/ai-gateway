@@ -310,7 +310,7 @@ ai-gateway gpu finetune cancel                    # graceful stop with final ckp
 
 - **Presets** (`finetune-presets/<name>/`): bundled trainer/prepare/tokenizer scripts
   + `manifest.json` declaring pipDeps/aptDeps/torchVersion. Built-in:
-  `pocket-tts-finetune` (kyutai/pocket-tts flow-matching, LSD loss, Mimi codec frozen).
+  `flow-matching-tts` (kyutai/pocket-tts flow-matching, LSD loss, Mimi codec frozen).
 - **`type: <preset>`** in train.yaml = zero user training code; preset auto-loaded.
 - **Auto-prep**: when preset declares `prepareScript`, ai-gateway runs it
   automatically against `/root/data/metadata.jsonl` (or `train.jsonl`) into

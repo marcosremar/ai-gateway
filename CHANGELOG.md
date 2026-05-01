@@ -10,6 +10,18 @@ on release via `bunx changeset version`.
 
 ## [Unreleased]
 
+### Added
+
+- **Z.AI (Zhipu) cloud provider** (`src/gateway/providers/cloud/zai/`) — registers
+  the OpenAI-compatible `https://api.z.ai/api/paas/v4` endpoint as provider id
+  `zai`, exposing `glm-4.6` (200K-context text + tools), `glm-4.5`, `glm-4.5-air`,
+  and the vision-capable `glm-4.5v` (accepts standard OpenAI multimodal
+  `image_url` content parts) directly through `POST /v1/chat/completions`.
+  Wires the `ZAI_API_KEY` env var into config, classification, error labels,
+  cloud health probes, the chain-builder env-key map, and the default pricing
+  table; mirrors the OpenRouter wiring in `server/providers.ts` so callers can
+  hit GLM models with the same flow they already use for OpenRouter today.
+
 ## [0.1.0] — 2026-04-12
 
 Initial tagged release. Captures the full set of features landed on `main`

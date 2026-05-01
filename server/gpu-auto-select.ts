@@ -2,7 +2,7 @@
 
 import type { GpuOffer } from '../src/gpu-providers/types';
 import type { GpuTier } from '../src/gpu-providers/deploy-orchestrator';
-import { getGpuPriorityList, getGpuSortBy } from '../src/gpu-providers/deploy-settings';
+import { getGpuPriorityList, getGpuSortBy, isGpuFilterDisabled } from '../src/gpu-providers/deploy-settings';
 import { prisma, deployState } from './state';
 import { getBestLatencyByGpuModel } from './latency-db';
 import { loadReputationsByGpuType } from './metrics';
@@ -313,18 +313,26 @@ export async function autoSelectCheapestGpu(
     log.log(`[gpu] autoSelectGpu: sort=${sortBy}, top 5: ${topOffers.join(', ')}`);
   }
 
-  // Prefer allowlisted GPUs, then fall back to any suitable GPU.
-  // Providers use varying naming formats (e.g. "RTX 4090" vs "NVIDIA GeForce RTX 4090")
-  // so we normalize names for comparison: strip "NVIDIA", "GeForce", spaces, and lowercase.
-  const normalize = (s: string) => s.replace(/nvidia|geforce/gi, '').replace(/\s+/g, '').toLowerCase();
-  const allowedNormalized = new Set([...allowed].map(normalize));
-  const isAllowed = (o: GpuOffer) =>
-    allowed.has(o.gpuType) || allowed.has(o.gpuName) ||
-    allowedNormalized.has(normalize(o.gpuType)) || allowedNormalized.has(normalize(o.gpuName));
-  const allowedOffers = ranked.filter(isAllowed);
-  const prioritized = allowedOffers.length > 0 ? allowedOffers : ranked;
-  if (allowedOffers.length === 0) {
-    log.warn(`[gpu] autoSelectGpu: no offers match allowlist, using best available. Sample types: ${ranked.slice(0, 5).map(o => `${o.gpuName}(${o.gpuType})`).join(', ')}`);
+  // GPU type filtering — disabled when priority list is empty (show all GPUs)
+  let prioritized = ranked;
+  let allowedOfferCount = ranked.length;
+  if (isGpuFilterDisabled()) {
+    log.log(`[gpu] autoSelectCheapestGpu: GPU filter disabled — showing all GPU types`);
+  } else {
+    // Prefer allowlisted GPUs, then fall back to any suitable GPU.
+    // Providers use varying naming formats (e.g. "RTX 4090" vs "NVIDIA GeForce RTX 4090")
+    // so we normalize names for comparison: strip "NVIDIA", "GeForce", spaces, and lowercase.
+    const normalize = (s: string) => s.replace(/nvidia|geforce/gi, '').replace(/\s+/g, '').toLowerCase();
+    const allowedNormalized = new Set([...allowed].map(normalize));
+    const isAllowed = (o: GpuOffer) =>
+      allowed.has(o.gpuType) || allowed.has(o.gpuName) ||
+      allowedNormalized.has(normalize(o.gpuType)) || allowedNormalized.has(normalize(o.gpuName));
+    const allowedOffers = ranked.filter(isAllowed);
+    allowedOfferCount = allowedOffers.length;
+    prioritized = allowedOffers.length > 0 ? allowedOffers : ranked;
+    if (allowedOffers.length === 0) {
+      log.warn(`[gpu] autoSelectGpu: no offers match allowlist, using best available. Sample types: ${ranked.slice(0, 5).map(o => `${o.gpuName}(${o.gpuType})`).join(', ')}`);
+    }
   }
 
   // Deduplicate by gpuName (full name), keeping best effective-price offer for each type.
@@ -341,6 +349,6 @@ export async function autoSelectCheapestGpu(
     }
   }
 
-  log.log(`[gpu] autoSelectGpu: ${ranked.length} suitable offers (${allowedOffers.length} in allowlist, ${gpuTypeReps.size} with reputation) → ${uniqueTypes.length} GPU types: ${uniqueTypes.join(', ')}`);
+  log.log(`[gpu] autoSelectGpu: ${ranked.length} suitable offers (${allowedOfferCount} in allowlist, ${gpuTypeReps.size} with reputation) → ${uniqueTypes.length} GPU types: ${uniqueTypes.join(', ')}`);
   return uniqueTypes;
 }

@@ -58,8 +58,8 @@ export async function handleGpuDeploy(
     }
 
     // Parse request body
-    const body = await readJsonBody(req) as DeployRequest;
-    
+    const body = await readJsonBody(req) as unknown as DeployRequest;
+
     if (!body.dockerImage) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -72,7 +72,7 @@ export async function handleGpuDeploy(
     // Check force flag
     if (body.force && deployState.status !== 'idle') {
       log.warn(`[${requestId}] Force deploy requested - terminating current deploy`);
-      await cleanupAllPods();
+      await cleanupAllPods(process.env.RUNPOD_API_KEY || '', deployState.podId ? [deployState.podId] : []);
       resetDeployState();
     }
 
@@ -107,7 +107,7 @@ export async function handleGpuDeploy(
     // Start deploy
     setDeployLock(true);
     setDeployCancelled(false);
-    
+
     const deployId = generateDeployId();
     setDeployState({
       status: 'creating',
@@ -119,10 +119,12 @@ export async function handleGpuDeploy(
       startedAt: Date.now(),
     });
 
-    logGpuEvent('deploy_start', {
-      deployId,
-      dockerImage: body.dockerImage,
-      gpuTypes: body.gpuTypes,
+    logGpuEvent('deploy_start', 'gateway', true, {
+      metadata: {
+        deployId,
+        dockerImage: body.dockerImage,
+        gpuTypes: body.gpuTypes,
+      },
     });
 
     // Build tiers and start deploy
@@ -144,7 +146,7 @@ export async function handleGpuDeploy(
       const racePromise = startDeployRace(tiers, body.dockerImage, gpuTypes, {
         env: body.env,
         onstart: body.onstart,
-        diskGb: body.diskGb,
+        storageGb: body.diskGb,
         region: body.region,
       }, body.raceCount ?? 2);
       setDeployPromise(racePromise);
@@ -157,7 +159,7 @@ export async function handleGpuDeploy(
         {
           env: body.env,
           onstart: body.onstart,
-          diskGb: body.diskGb,
+          storageGb: body.diskGb,
           region: body.region,
         }
       );
@@ -176,7 +178,7 @@ export async function handleGpuDeploy(
     // Continue deploy in background
     deployPromise?.then(() => {
       log.log(`[${requestId}] Deploy completed successfully`);
-      updateDeploySession(deployId, 'completed');
+      updateDeploySession({ status: 'completed' });
     }).catch((err) => {
       log.error(`[${requestId}] Deploy failed:`, err);
       const deployErr = categorizeDeployError(err, {
@@ -184,7 +186,7 @@ export async function handleGpuDeploy(
         detail: 'Background deploy',
       });
       errorSummary.record(deployErr);
-      updateDeploySession(deployId, 'failed', err.message);
+      updateDeploySession({ status: 'failed', errorMessage: err instanceof Error ? err.message : String(err) });
     }).finally(() => {
       setDeployLock(false);
       setDeployPromise(null);
@@ -193,7 +195,7 @@ export async function handleGpuDeploy(
   } catch (err) {
     log.error(`[${requestId}] Deploy handler error:`, err);
     setDeployLock(false);
-    
+
     const errorMsg = err instanceof Error ? err.message : 'Unknown error';
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -215,16 +217,16 @@ export async function handleGpuTerminate(
   try {
     // Cancel any in-progress deploy
     setDeployCancelled(true);
-    
+
     // Clear auto-destroy timer if set
     clearAutoDestroyTimer();
-    
+
     // Clean up all pods
-    const cleanupResult = await cleanupAllPods();
-    
+    const cleanupResult = await cleanupAllPods(process.env.RUNPOD_API_KEY || '', deployState.podId ? [deployState.podId] : []);
+
     // Reset deploy state
     resetDeployState();
-    
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: true,
@@ -235,7 +237,7 @@ export async function handleGpuTerminate(
   } catch (err) {
     log.error('Terminate error:', err);
     const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-    
+
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: false,
@@ -279,7 +281,7 @@ export async function handleGpuStop(
   } catch (err) {
     log.error('Stop error:', err);
     const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-    
+
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: false,
@@ -333,7 +335,7 @@ export async function handleGpuResume(
   } catch (err) {
     log.error('Resume error:', err);
     const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-    
+
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: false,

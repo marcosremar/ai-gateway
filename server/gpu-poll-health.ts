@@ -1,5 +1,7 @@
 // ── GPU Poll Health — wait for a newly-created instance to become healthy ─────
 
+import { Buffer } from 'node:buffer';
+import { deflateSync } from 'node:zlib';
 import type { GpuProviderClient, ProviderCredentials } from '../src/gpu-providers/types';
 import { RunpodClient } from '../src/gpu-providers/runpod-client';
 import { createLogger } from '../src/logger';
@@ -10,6 +12,11 @@ import {
 } from './state';
 import { broadcastWs } from './ws-state';
 import { registry } from './providers';
+import type { DockerCapability } from '../src/gateway/providers/gpu/docker-manifest';
+import {
+  validateDockerContractManifest,
+  defaultApiPathsForCapabilities,
+} from '../src/gateway/providers/gpu/docker-manifest';
 
 const log = createLogger('gpu-deploy');
 
@@ -59,6 +66,402 @@ async function autoRegisterDockerProviderAsync(endpoint: string): Promise<void> 
   }
 }
 
+type HealthPayload = Record<string, unknown>;
+
+const HEALTHY_STATUSES = new Set(['healthy', 'ok', 'degraded', 'ready', 'loading']);
+const GENERIC_APP_READY_STATUSES = new Set(['healthy', 'ok', 'degraded', 'ready']);
+const PIPELINE_SERVICE_KEYS = new Set(['whisper', 'stt', 'llama_cpp', 'llm', 'tts']);
+const SPEECH_CAPABILITIES = new Set<DockerCapability>(['speech_pipeline', 'openai_compat', 'stt', 'llm', 'tts']);
+const GLB_SMOKE_TIMEOUT_MS = 10 * 60_000;
+
+function asRecord(value: unknown): HealthPayload | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as HealthPayload
+    : null;
+}
+
+function healthStatus(data: unknown): string {
+  const payload = asRecord(data);
+  return typeof payload?.status === 'string' ? payload.status.toLowerCase() : '';
+}
+
+function serviceStatus(services: HealthPayload, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = services[key];
+    if (typeof value === 'string') return value.toLowerCase();
+  }
+  return '';
+}
+
+export function hasPipelineServices(data: unknown): boolean {
+  const services = asRecord(asRecord(data)?.services);
+  if (!services) return false;
+  return Object.keys(services).some(key => PIPELINE_SERVICE_KEYS.has(key));
+}
+
+export function extractAppHealthError(data: unknown): { message: string; traceback?: string } | null {
+  const payload = asRecord(data);
+  if (!payload) return null;
+  const status = healthStatus(payload);
+  const rawError = typeof payload.error === 'string' ? payload.error.trim() : '';
+  const rawMessage = typeof payload.message === 'string' ? payload.message.trim() : '';
+  const traceback = typeof payload.error_traceback === 'string' && payload.error_traceback.trim()
+    ? payload.error_traceback
+    : undefined;
+  if (status === 'error') {
+    return { message: rawError || rawMessage || 'unknown app error', traceback };
+  }
+  if (!hasPipelineServices(payload) && (rawError || traceback)) {
+    return { message: rawError || rawMessage || 'app reported an error in /health', traceback };
+  }
+  return null;
+}
+
+export function isGenericAppHealthReady(data: unknown): boolean {
+  if (!GENERIC_APP_READY_STATUSES.has(healthStatus(data))) return false;
+  if (hasPipelineServices(data)) return false;
+  return extractAppHealthError(data) === null;
+}
+
+function isExpectedGenericGpuApp(
+  expectedApiPaths: string[] = [],
+  expectedCapabilities: DockerCapability[] = [],
+): boolean {
+  if (expectedCapabilities.some(capability => !SPEECH_CAPABILITIES.has(capability))) return true;
+  return expectedApiPaths.some(path => /generate(?:-from-(?:text|url))?|glb|image|embed|rerank/i.test(path));
+}
+
+function hasTruthyFlag(value: unknown, ...keys: string[]): boolean {
+  const payload = asRecord(value);
+  if (!payload) return false;
+  return keys.some(key => payload[key] === true);
+}
+
+function isGenericAppUsableWhileLoading(
+  data: unknown,
+  expectedApiPaths: string[] = [],
+  expectedCapabilities: DockerCapability[] = [],
+): boolean {
+  if (!isExpectedGenericGpuApp(expectedApiPaths, expectedCapabilities)) return false;
+  if (hasPipelineServices(data)) return false;
+  if (extractAppHealthError(data)) return false;
+  if (healthStatus(data) !== 'loading') return false;
+  const payload = asRecord(data);
+  return hasTruthyFlag(payload, 'ready', 'loaded', 'model_loaded', 'shape_loaded')
+    || hasTruthyFlag(payload?.config, 'ready', 'loaded', 'model_loaded', 'shape_loaded')
+    || hasTruthyFlag(payload?.model, 'ready', 'loaded', 'model_loaded', 'shape_loaded');
+}
+
+function describeGenericAppHealth(data: unknown, dockerImage?: string): string {
+  const payload = asRecord(data);
+  const model = typeof payload?.model === 'string' ? payload.model : '';
+  return model || dockerImage || 'generic GPU app';
+}
+
+function normalizeApiPath(path: string): string {
+  return path.startsWith('/') ? path : `/${path}`;
+}
+
+function collectApiPaths(payload: unknown): Set<string> {
+  const paths = new Set<string>();
+  const data = asRecord(payload);
+  if (!data) return paths;
+
+  const openApiPaths = asRecord(data.paths);
+  if (openApiPaths) {
+    for (const path of Object.keys(openApiPaths)) paths.add(normalizeApiPath(path));
+  }
+
+  const api = asRecord(data.api);
+  if (api) {
+    for (const value of Object.values(api)) {
+      const route = asRecord(value)?.endpoint;
+      if (typeof route === 'string') paths.add(normalizeApiPath(route));
+    }
+  }
+
+  const routes = Array.isArray(data.routes) ? data.routes : [];
+  for (const route of routes) {
+    if (typeof route === 'string') paths.add(normalizeApiPath(route));
+    const routePath = asRecord(route)?.path;
+    if (typeof routePath === 'string') paths.add(normalizeApiPath(routePath));
+  }
+
+  return paths;
+}
+
+async function fetchJson(url: string): Promise<unknown | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(4_000) });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchJsonPaths(url: string): Promise<Set<string>> {
+  return collectApiPaths(await fetchJson(url));
+}
+
+async function probePathExists(endpoint: string, path: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${endpoint}${path}`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(3_000),
+    });
+    return res.status !== 404;
+  } catch {
+    return false;
+  }
+}
+
+export async function validateEndpointApiContract(
+  endpoint: string,
+  expectedApiPaths: string[] = [],
+  expectedCapabilities: DockerCapability[] = [],
+  requireDockerManifest = false,
+): Promise<{ ok: true; discoveredPaths: string[] } | { ok: false; error: string; discoveredPaths: string[] }> {
+  const explicitExpectedPaths = expectedApiPaths.map(normalizeApiPath);
+  const expected = [...new Set(
+    explicitExpectedPaths.length > 0
+      ? explicitExpectedPaths
+      : defaultApiPathsForCapabilities(expectedCapabilities),
+  )];
+
+  const manifestPayload = await fetchJson(`${endpoint}/v1/manifest`);
+  if (requireDockerManifest && !manifestPayload) {
+    return {
+      ok: false,
+      error: 'Docker API contract mismatch. Missing required /v1/manifest for declared capability validation.',
+      discoveredPaths: [],
+    };
+  }
+  if (manifestPayload && (requireDockerManifest || expectedCapabilities.length > 0)) {
+    const manifestResult = validateDockerContractManifest(
+      manifestPayload,
+      expectedCapabilities,
+      expected,
+    );
+    if (!manifestResult.ok) {
+      return {
+        ok: false,
+        error: `Docker API contract mismatch. ${manifestResult.errors.join(' ')}`,
+        discoveredPaths: manifestResult.paths,
+      };
+    }
+  }
+
+  if (expected.length === 0) return { ok: true, discoveredPaths: [] };
+
+  const discovered = new Set<string>();
+  for (const path of collectApiPaths(manifestPayload)) discovered.add(path);
+  for (const url of [`${endpoint}/openapi.json`]) {
+    for (const path of await fetchJsonPaths(url)) discovered.add(path);
+  }
+
+  const missingFromDocs = expected.filter(path => !discovered.has(path));
+  const missing: string[] = [];
+  for (const path of missingFromDocs) {
+    if (!await probePathExists(endpoint, path)) missing.push(path);
+  }
+
+  const discoveredPaths = [...discovered].sort();
+  if (missing.length > 0) {
+    const discoveredMsg = discoveredPaths.length > 0 ? discoveredPaths.join(', ') : 'no /openapi.json or /v1/manifest paths discovered';
+    return {
+      ok: false,
+      error: `Docker API contract mismatch. Missing expected path(s): ${missing.join(', ')}. Discovered: ${discoveredMsg}`,
+      discoveredPaths,
+    };
+  }
+
+  return { ok: true, discoveredPaths };
+}
+
+function shouldRunGlbSmokeTest(expectedApiPaths: string[] = [], expectedCapabilities: DockerCapability[] = []): boolean {
+  return expectedCapabilities.includes('glb_generation')
+    || expectedApiPaths.some(path => /generate(?:-from-text)?|glb/i.test(path));
+}
+
+function findGlbSmokePath(expectedApiPaths: string[] = []): string {
+  if (expectedApiPaths.includes('/generate-from-text')) return '/generate-from-text';
+  if (expectedApiPaths.includes('/generate')) return '/generate';
+  return '/generate-from-text';
+}
+
+async function endpointPathExpectsMultipartFile(endpoint: string, path: string): Promise<boolean> {
+  const api = asRecord(await fetchJson(`${endpoint}/openapi.json`));
+  const paths = asRecord(api?.paths);
+  const pathSpec = asRecord(paths?.[normalizeApiPath(path)]);
+  const post = asRecord(pathSpec?.post);
+  const requestBody = asRecord(post?.requestBody);
+  const content = asRecord(requestBody?.content);
+  return Boolean(content?.['multipart/form-data']);
+}
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < table.length; i++) {
+    let c = i;
+    for (let bit = 0; bit < 8; bit++) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(buffer: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Uint8Array): Buffer {
+  const typeBuffer = Buffer.from(type, 'ascii');
+  const dataBuffer = Buffer.from(data);
+  const payload = Buffer.concat([typeBuffer, dataBuffer]);
+  const chunk = Buffer.alloc(12 + dataBuffer.length);
+  chunk.writeUInt32BE(dataBuffer.length, 0);
+  typeBuffer.copy(chunk, 4);
+  dataBuffer.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(payload), 8 + dataBuffer.length);
+  return chunk;
+}
+
+function createSmokePngBuffer(): Buffer {
+  const width = 96;
+  const height = 96;
+  const bytesPerPixel = 4;
+  const raw = Buffer.alloc((width * bytesPerPixel + 1) * height);
+
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * bytesPerPixel + 1);
+    raw[row] = 0;
+    for (let x = 0; x < width; x++) {
+      const i = row + 1 + x * bytesPerPixel;
+      const inObject = x >= 24 && x <= 71 && y >= 20 && y <= 74;
+      const onEdge = inObject && (x <= 27 || x >= 68 || y <= 23 || y >= 71);
+      const shadow = x >= 34 && x <= 80 && y >= 76 && y <= 82;
+      const highlight = inObject && x < 44 && y < 42;
+      const [r, g, b] = onEdge
+        ? [52, 57, 65]
+        : highlight
+          ? [255, 140, 128]
+          : inObject
+            ? [220, 70, 62]
+            : shadow
+              ? [185, 190, 198]
+              : [248, 250, 252];
+      raw[i] = r;
+      raw[i + 1] = g;
+      raw[i + 2] = b;
+      raw[i + 3] = 255;
+    }
+  }
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+function createGlbSmokeImageForm(): FormData {
+  const form = new FormData();
+  const png = createSmokePngBuffer();
+  form.append('file', new Blob([new Uint8Array(png)], { type: 'image/png' }), 'smoke.png');
+  return form;
+}
+
+function responseLooksLikeGlbResult(contentType: string, body: string, byteLength: number): boolean {
+  if (byteLength > 128 && /model\/gltf-binary|application\/octet-stream/i.test(contentType)) return true;
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    const candidates = [
+      parsed.url,
+      parsed.glbUrl,
+      parsed.glb_url,
+      parsed.output,
+      parsed.file,
+      parsed.path,
+      parsed.assetUrl,
+      parsed.asset_url,
+      parsed.model_url,
+    ];
+    return candidates.some(value => typeof value === 'string' && /\.glb(?:$|\?)/i.test(value));
+  } catch {
+    return /\.glb(?:$|\?)/i.test(body);
+  }
+}
+
+type GlbSmokeResult = { ok: true } | { ok: false; error: string; missingMultipartFile?: boolean };
+
+async function postGlbSmokeRequest(endpoint: string, path: string, useMultipartFile: boolean): Promise<GlbSmokeResult> {
+  const url = `${endpoint}${path}${useMultipartFile && !path.includes('?') ? '?seed=1' : ''}`;
+  const res = await fetch(url, useMultipartFile
+    ? {
+        method: 'POST',
+        body: createGlbSmokeImageForm(),
+        signal: AbortSignal.timeout(GLB_SMOKE_TIMEOUT_MS),
+      }
+    : {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: 'a small red cube, low detail',
+          with_texture: false,
+          texture: false,
+          seed: 1,
+        }),
+        signal: AbortSignal.timeout(GLB_SMOKE_TIMEOUT_MS),
+      });
+  const contentType = res.headers.get('content-type') || '';
+  const buffer = await res.arrayBuffer();
+  const text = new TextDecoder().decode(buffer.slice(0, Math.min(buffer.byteLength, 8192)));
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: `GLB smoke test failed on ${path}: HTTP ${res.status} ${text.slice(0, 300)}`,
+      missingMultipartFile: res.status === 422 && /body.*file|field required|multipart|uploadfile/i.test(text),
+    };
+  }
+  if (!responseLooksLikeGlbResult(contentType, text, buffer.byteLength)) {
+    return { ok: false, error: `GLB smoke test on ${path} returned unexpected payload (${contentType || 'unknown content-type'}, ${buffer.byteLength} bytes).` };
+  }
+  return { ok: true };
+}
+
+export async function runGlbSmokeTest(
+  endpoint: string,
+  expectedApiPaths: string[] = [],
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const path = findGlbSmokePath(expectedApiPaths);
+  try {
+    const useMultipartFile = await endpointPathExpectsMultipartFile(endpoint, path);
+    const result = await postGlbSmokeRequest(endpoint, path, useMultipartFile);
+    if (!result.ok && !useMultipartFile && path === '/generate' && result.missingMultipartFile) {
+      return await postGlbSmokeRequest(endpoint, path, true);
+    }
+    return result;
+  } catch (err) {
+    return { ok: false, error: `GLB smoke test failed: ${err instanceof Error ? err.message : err}` };
+  }
+}
+
 /** Minimal TCP reachability check — resolves true once a TCP connection to host:port
  * opens within the timeout. Used by the SSH-only readiness branch. */
 async function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
@@ -90,7 +493,13 @@ async function pollSshUntilReady(
   endpoint: string,
   deployStartedAt: number,
 ): Promise<PollHealthResult> {
-  const deployTimeoutMs = getDeployTimeoutMinForProvider(providerName) * 60_000;
+  // Cap SSH probe at 90s — Vast.ai SSH proxies either answer fast or never.
+  // If a host fails this cap, the deploy retries on different hosts in
+  // parallel via race=N (configured at deploy time, default 3).
+  const deployTimeoutMs = Math.min(
+    getDeployTimeoutMinForProvider(providerName) * 60_000,
+    90_000,
+  );
   // Extract host from `endpoint` (e.g. "http://1.2.3.4:8000") — fall back to the raw string.
   let host = endpoint;
   try {
@@ -124,7 +533,7 @@ async function pollSshUntilReady(
       const durationMs = Date.now() - deployStartedAt;
       log.log(`[gpu] ${providerName} pod ${podId}: SSH reachable after ${Math.round(durationMs / 1000)}s`);
       setLastRequestTime(Date.now());
-      setDeployState({ status: 'ready', step: 'ready', message: 'SSH reachable', deployDurationMs: durationMs });
+      setDeployState({ status: 'ready', step: 'ready', message: 'SSH reachable', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
       return { result: 'ready' };
     }
     await new Promise((r) => setTimeout(r, 3000));
@@ -140,6 +549,10 @@ export async function pollHealthUntilReady(
   deployStartedAt: number,
   dockerImage?: string,
   providerMeta?: Record<string, unknown>,
+  expectedApiPaths: string[] = [],
+  expectedCapabilities: DockerCapability[] = [],
+  requireDockerManifest = false,
+  runSmokeTests = true,
 ): Promise<PollHealthResult> {
   const credentials: ProviderCredentials = { apiKey };
 
@@ -644,11 +1057,10 @@ export async function pollHealthUntilReady(
           }
 
           // ── Fail-fast on app-reported error ──────────────────────────
-          if (data && typeof data === 'object' && data.status === 'error') {
-            const appErrMsg = String(data.error ?? data.message ?? 'unknown app error');
-            const appTraceback = typeof data.error_traceback === 'string'
-              ? data.error_traceback
-              : undefined;
+          const appHealthError = extractAppHealthError(data);
+          if (appHealthError) {
+            const appErrMsg = appHealthError.message;
+            const appTraceback = appHealthError.traceback;
             log.error(`[gpu] App reported error via /health — failing deploy fast.`);
             log.error(`[gpu]   error: ${appErrMsg}`);
             if (appTraceback) {
@@ -674,15 +1086,91 @@ export async function pollHealthUntilReady(
             };
           }
 
-            const HEALTHY_STATUSES = new Set(['healthy', 'ok', 'degraded', 'ready', 'loading']);
-            if (HEALTHY_STATUSES.has(data.status)) {
+            if (HEALTHY_STATUSES.has(healthStatus(data))) {
               if (!healthRespondedOnce) { healthRespondedOnce = true; healthFirstResponseAt = Date.now(); }
               consecutiveHealthFailures = 0;
 
-              const svc = data.services ?? {};
-              const ttsReady = svc.tts === 'loaded' || svc.tts === 'disabled';
-              const sttReady = svc.whisper === 'loaded';
-              const llmReady = svc.llama_cpp === 'ready' || svc.llama_cpp === 'loaded';
+              const expectedGenericApp = isExpectedGenericGpuApp(expectedApiPaths, expectedCapabilities);
+              const genericAppReady = isGenericAppHealthReady(data)
+                || isGenericAppUsableWhileLoading(data, expectedApiPaths, expectedCapabilities);
+              if (expectedGenericApp && !hasPipelineServices(data) && !genericAppReady) {
+                const appLabel = describeGenericAppHealth(data, dockerImage);
+                const status = healthStatus(data) || 'unknown';
+                const stepDetail = `generic_app_loading:${status}`;
+                if (lastServicesSnapshot !== stepDetail) {
+                  log.log(`[gpu] Generic GPU app health=${status}; waiting without speech pipeline warmup checks.`);
+                  lastServicesSnapshot = stepDetail;
+                }
+                setDeployState({
+                  status: 'booting',
+                  step: 'loading_app',
+                  message: `Loading GPU app: ${appLabel} (${status})`,
+                  stepDetail,
+                });
+                continue;
+              }
+
+              if (genericAppReady) {
+                allServicesLoaded = true;
+                const appLabel = describeGenericAppHealth(data, dockerImage);
+                const stepDetail = `generic_app_ready:${appLabel}`;
+                const apiContract = await validateEndpointApiContract(endpoint, expectedApiPaths, expectedCapabilities, requireDockerManifest);
+                if (!apiContract.ok) {
+                  log.error(`[gpu] ${apiContract.error}`);
+                  setDeployState({
+                    status: 'error',
+                    step: 'api_contract_error',
+                    message: apiContract.error,
+                    stepDetail: expectedApiPaths.join(', '),
+                  });
+                  broadcastWs({
+                    type: 'gpu:deploy',
+                    phase: 'api_contract_error',
+                    deployId: deployState.deployId,
+                    provider: providerName,
+                    error: apiContract.error,
+                  });
+                  return {
+                    result: 'app_error',
+                    pullTimeS: actualPullTimeS,
+                    appError: { message: apiContract.error },
+                  };
+                }
+                if (runSmokeTests && shouldRunGlbSmokeTest(expectedApiPaths, expectedCapabilities)) {
+                  setDeployState({ step: 'testing_api', message: 'Running GLB smoke test...', stepDetail: expectedApiPaths.join(', ') });
+                  const smoke = await runGlbSmokeTest(endpoint, expectedApiPaths);
+                  if (!smoke.ok) {
+                    log.error(`[gpu] ${smoke.error}`);
+                    setDeployState({
+                      status: 'error',
+                      step: 'api_smoke_error',
+                      message: smoke.error,
+                      stepDetail: expectedApiPaths.join(', '),
+                    });
+                    return {
+                      result: 'app_error',
+                      pullTimeS: actualPullTimeS,
+                      appError: { message: smoke.error },
+                    };
+                  }
+                }
+                log.log(`[gpu] Generic GPU app health ready — ${appLabel}. Skipping speech pipeline warmup checks.`);
+                setDeployState({
+                  step: 'ready',
+                  stepDetail,
+                  message: `GPU app ready: ${appLabel}`,
+                });
+                await autoRegisterDockerProviderAsync(endpoint);
+                return { result: 'ready', pullTimeS: actualPullTimeS };
+              }
+
+              const svc = asRecord(asRecord(data)?.services) ?? {};
+              const ttsStatus = serviceStatus(svc, 'tts');
+              const sttStatus = serviceStatus(svc, 'whisper', 'stt');
+              const llmStatus = serviceStatus(svc, 'llama_cpp', 'llm');
+              const ttsReady = ttsStatus === 'loaded' || ttsStatus === 'disabled';
+              const sttReady = sttStatus === 'loaded' || sttStatus === 'ready';
+              const llmReady = llmStatus === 'ready' || llmStatus === 'loaded';
               allServicesLoaded = sttReady && llmReady && ttsReady;
               const readyStages = [sttReady && 'STT', llmReady && 'LLM', ttsReady && 'TTS'].filter(Boolean);
               const loadingStages = [!sttReady && 'STT', !llmReady && 'LLM', !ttsReady && 'TTS'].filter(Boolean);
@@ -692,9 +1180,9 @@ export async function pollHealthUntilReady(
               const warmPhase = allServicesLoaded ? 'complete' : (sttReady ? (llmReady ? 'tts' : 'llm') : 'stt');
               warmingPatch.warmingStatus = {
                 phase: warmPhase,
-                sttProgress: { loaded: sttReady, modelName: svc.whisper ? String(svc.whisper) : 'whisper', loadTimeMs: sttReady ? (containerStartedAt ? Date.now() - containerStartedAt : 0) : 0 },
-                llmProgress: { loaded: llmReady, modelName: svc.llama_cpp ? String(svc.llama_cpp) : 'llm', loadTimeMs: llmReady ? (containerStartedAt ? Date.now() - containerStartedAt : 0) : 0 },
-                ttsProgress: { loaded: ttsReady, modelName: svc.tts ? String(svc.tts) : 'tts', loadTimeMs: ttsReady ? (containerStartedAt ? Date.now() - containerStartedAt : 0) : 0 },
+                sttProgress: { loaded: sttReady, modelName: sttStatus || 'whisper', loadTimeMs: sttReady ? (containerStartedAt ? Date.now() - containerStartedAt : 0) : 0 },
+                llmProgress: { loaded: llmReady, modelName: llmStatus || 'llm', loadTimeMs: llmReady ? (containerStartedAt ? Date.now() - containerStartedAt : 0) : 0 },
+                ttsProgress: { loaded: ttsReady, modelName: ttsStatus || 'tts', loadTimeMs: ttsReady ? (containerStartedAt ? Date.now() - containerStartedAt : 0) : 0 },
                 startedAt: containerStartedAt || Date.now(),
                 ...(allServicesLoaded ? { completedAt: Date.now() } : {}),
               };
@@ -722,6 +1210,47 @@ export async function pollHealthUntilReady(
                   log.log(`[gpu] Skipping inference test — need STT or LLM ready first (${readyStages.join(', ') || 'none'} ready)`);
                   continue;
                 }
+
+              const apiContract = await validateEndpointApiContract(endpoint, expectedApiPaths, expectedCapabilities, requireDockerManifest);
+              if (!apiContract.ok) {
+                log.error(`[gpu] ${apiContract.error}`);
+                setDeployState({
+                  status: 'error',
+                  step: 'api_contract_error',
+                  message: apiContract.error,
+                  stepDetail: expectedApiPaths.join(', '),
+                });
+                broadcastWs({
+                  type: 'gpu:deploy',
+                  phase: 'api_contract_error',
+                  deployId: deployState.deployId,
+                  provider: providerName,
+                  error: apiContract.error,
+                });
+                return {
+                  result: 'app_error',
+                  pullTimeS: actualPullTimeS,
+                  appError: { message: apiContract.error },
+                };
+              }
+              if (runSmokeTests && shouldRunGlbSmokeTest(expectedApiPaths, expectedCapabilities)) {
+                setDeployState({ step: 'testing_api', message: 'Running GLB smoke test...', stepDetail: expectedApiPaths.join(', ') });
+                const smoke = await runGlbSmokeTest(endpoint, expectedApiPaths);
+                if (!smoke.ok) {
+                  log.error(`[gpu] ${smoke.error}`);
+                  setDeployState({
+                    status: 'error',
+                    step: 'api_smoke_error',
+                    message: smoke.error,
+                    stepDetail: expectedApiPaths.join(', '),
+                  });
+                  return {
+                    result: 'app_error',
+                    pullTimeS: actualPullTimeS,
+                    appError: { message: smoke.error },
+                  };
+                }
+              }
 
               // ── Inference test: verify actual AI pipeline works before marking ready ──
               setDeployState({ step: 'testing_inference', message: 'Testing inference...' });
@@ -866,9 +1395,8 @@ export async function pollHealthUntilReady(
             }
             const appElapsed = Math.round((Date.now() - containerStartedAt) / 1000);
 
-            const whisperStatus = svc.whisper || svc.stt || '';
-            const llamaStatus = svc.llama_cpp || svc.llm || '';
-            const ttsStatus = svc.tts || '';
+            const whisperStatus = sttStatus;
+            const llamaStatus = llmStatus;
             let modelStep = 'downloading_models';
             let modelDetail = '';
 

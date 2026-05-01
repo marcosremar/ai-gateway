@@ -1,0 +1,40 @@
+{
+  "name": "flow-matching-tts",
+  "version": "1.0.0",
+  "description": "Generic flow-matching TTS fine-tune. LSD loss, Mimi codec frozen. Works with any pocket-tts-compatible model.",
+  "type": "audio",
+  "trainerScript": "trainer.py",
+  "prepareScript": "prepare_dataset.py",
+  "tokenizerExtScript": "extend_tokenizer.py",
+  "defaultEpochs": 2,
+  "defaultLR": 1e-6,
+  "defaultGpu": "4090",
+  "defaultMaxSpend": 2.0,
+  "trainerInterface": {
+    "encode": "python trainer.py encode --input <jsonl> --output <pt> [--num-workers 8] [--max-samples N]",
+    "train":  "python trainer.py train --tokens <pt> --output <dir> --epochs N --learning-rate X [--resume <dir>]"
+  },
+  "aptDeps": "pkg-config build-essential libsentencepiece-dev libsndfile1 ffmpeg",
+  "pipDeps": "huggingface-hub hf_xet hf_transfer torch torchaudio safetensors soundfile pocket-tts",
+  "torchCudaIndex": "https://download.pytorch.org/whl/cu121",
+  "torchVersion": "2.1.2",
+  "knownTags": ["[laugh]", "[sigh]", "[gasp]", "[cough]", "[sniff]", "[throat]", "[sneeze]"],
+  "notes": "Codec MUST be frozen. LR sweet spot 1e-6 to 5e-6. Risk of overfit past 3 epochs. Prefer intermediate checkpoint.",
+  "defaultStepsPerSec": 3,
+  "defaultEncodeRatePerGpu": 25,
+  "smokeVerify": {
+    "pythonInline": "from safetensors.torch import load_file\nfrom pocket_tts import TTSModel\nimport os, glob, soundfile as sf, numpy as np\nckpt = sorted(glob.glob('/workspace/checkpoints/step-*.safetensors'), key=lambda p: int(p.rsplit('step-',1)[1].rsplit('.',1)[0]))[-1]\nprint('[smoke-verify] loading', ckpt)\nsd = load_file(ckpt)\nm = TTSModel.load_model(language='portuguese')\nm.load_state_dict(sd, strict=False)\nstate = m.get_state_for_audio_prompt('anna')\naudio = m.generate_audio(state, 'Olá mundo, teste de smoke.', copy_state=True)\nif hasattr(audio, 'cpu'): audio = audio.cpu().numpy()\naudio = np.asarray(audio).astype(np.float32).reshape(-1)\nsf.write('/workspace/smoke_test.wav', audio, m.sample_rate)\ndur = len(audio)/m.sample_rate\nrms = float(np.sqrt(np.mean(audio**2)))\nassert dur > 0.5 and rms > 0.005\nprint('[smoke-verify] OK')"
+  },
+  "preSmokeVerify": {
+    "pythonInline": "from safetensors.torch import load_file\nfrom pocket_tts import TTSModel\nimport os, glob, soundfile as sf, numpy as np\nckpts = sorted(glob.glob('/workspace/smoke_ckpt/step-*.safetensors'), key=lambda p: int(p.rsplit('step-',1)[1].rsplit('.',1)[0]))\nckpt = ckpts[-1] if ckpts else '/workspace/smoke_ckpt/model.safetensors'\nprint('[smoke-verify] loading', ckpt)\nsd = load_file(ckpt)\nm = TTSModel.load_model(language='portuguese')\nm.load_state_dict(sd, strict=False)\nstate = m.get_state_for_audio_prompt('anna')\naudio = m.generate_audio(state, 'Olá mundo, teste de smoke.', copy_state=True)\nif hasattr(audio, 'cpu'): audio = audio.cpu().numpy()\naudio = np.asarray(audio).astype(np.float32).reshape(-1)\nsf.write('/workspace/smoke_test.wav', audio, m.sample_rate)\ndur = len(audio)/m.sample_rate\nrms = float(np.sqrt(np.mean(audio**2)))\nassert dur > 0.5, f'audio too short: {dur}s'\nassert rms > 0.005, f'audio too quiet: rms={rms}'\nprint('[smoke-verify] OK ✓ proceeding to full run')"
+  },
+  "probePaths": {
+    "wavDir": "/root/data/wav",
+    "dataPathsFile": "/root/data_paths.jsonl",
+    "encodedFile": "/root/encoded.pt",
+    "encodedFullFile": "/root/encoded_full.pt",
+    "checkpointsDir": "/workspace/checkpoints",
+    "smokeCheckpointsDir": "/workspace/smoke_ckpt",
+    "jobLog": "/workspace/.job.log"
+  }
+}

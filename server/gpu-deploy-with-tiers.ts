@@ -16,6 +16,7 @@ import {
   deployState, setDeployState, deployCancelled, deploymentSM,
   setDeployApiKey, setDeployVastApiKey,
   setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey, setDeployHyperstackApiKey,
+  clearPersistedDeploy,
 } from './state';
 import {
   logGpuEvent, startDeploySession, updateDeploySession, upsertHostReputation,
@@ -319,15 +320,31 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
         await cooldownTracker.recordFailure(tier.name);
         log.log(`[gpu] ${tier.name} cooldown set: ${cooldownTracker.getRemainingSeconds(tier.name)}s (fail #${cooldownTracker.getFailCount(tier.name)})`);
       }
+
+      const message = deployState.message ?? '';
+      if (failureCategory === 'app_error' || failureCategory === 'docker_image') {
+        log.error(`[gpu] ${tier.label} failed with non-provider error (${failureCategory}); stopping cascade because another provider will run the same broken image.`);
+        clearPersistedDeploy();
+        deploymentSM.markError(message || `${tier.label} failed: ${failureCategory}`);
+        return;
+      }
+      if (message.toLowerCase().includes('failed to clean up crashed instance')) {
+        log.error(`[gpu] ${tier.label} cleanup failed; stopping cascade to avoid creating another billable orphan.`);
+        deploymentSM.markError(message);
+        return;
+      }
     }
 
-    // If this tier failed and there's a next tier, set fallback alert
+    // If this tier failed and there's a next tier, clear stale instance fields and set fallback alert.
     if (i < availableTiers.length - 1 && deployState.status === 'error') {
       const next = availableTiers[i + 1];
       const alertMsg = `${tier.label} indisponível — usando ${next.label} como fallback.`;
       log.warn(`[gpu] ⚠️ ${alertMsg}`);
+      clearPersistedDeploy();
       setDeployState({
         status: 'creating', provider: next.name, step: 'creating_pod',
+        podId: '', endpoint: '', sshHost: '', sshPort: 0, gpuType: '',
+        costPerHr: 0, providerMeta: {}, stepDetail: '',
         message: `${tier.label} indisponível. Tentando ${next.label}...`,
         alert: alertMsg,
       });

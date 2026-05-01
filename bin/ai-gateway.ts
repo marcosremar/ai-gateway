@@ -87,9 +87,13 @@ function getConfig(): { url: string; key: string } {
   const url = process.env.AI_GATEWAY_URL || process.env.GATEWAY_URL || DEFAULT_URL;
   // AIGW_APP_KEY is the per-app credential (preferred); the older names
   // remain accepted for back-compat with shared "operator" keys.
+  // GATEWAY_API_KEYS is the multi-key format "key:name,key:name" — extract the first key.
+  const multiKeys = process.env.GATEWAY_API_KEYS;
+  const firstMultiKey = multiKeys ? multiKeys.split(',')[0]?.split(':')[0]?.trim() : '';
   const key = process.env.AIGW_APP_KEY
     || process.env.AI_GATEWAY_KEY
     || process.env.GATEWAY_API_KEY
+    || firstMultiKey
     || '';
   return { url, key };
 }
@@ -124,19 +128,21 @@ async function ensureLocalServer(): Promise<void> {
     // Not running — start it
   }
 
-  // Find serve.ts relative to this CLI script
+  // Find server entry point — prefer ws-server.ts (full GPU management) over serve.ts (proxy only)
   const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), '..');
+  const wsServerPath = resolve(repoRoot, 'server/ws-server.ts');
   const servePath = resolve(repoRoot, 'serve.ts');
-  if (!existsSync(servePath)) {
-    console.error(`Cannot auto-start: serve.ts not found at ${servePath}`);
-    console.error('Start the server manually: bun run serve.ts');
+  const entryPath = existsSync(wsServerPath) ? wsServerPath : servePath;
+  if (!existsSync(entryPath)) {
+    console.error(`Cannot auto-start: neither server/ws-server.ts nor serve.ts found`);
+    console.error('Start the server manually: bun run server/ws-server.ts');
     process.exit(1);
   }
 
   const port = new URL(url).port || '4000';
   console.log(`Starting local gateway on port ${port}...`);
 
-  const child: ChildProcess = spawn('bun', ['run', servePath], {
+  const child: ChildProcess = spawn('bun', ['run', entryPath], {
     env: { ...process.env, PORT: port },
     stdio: 'ignore',
     detached: true,
@@ -163,7 +169,7 @@ async function ensureLocalServer(): Promise<void> {
   }
   console.error('Gateway failed to start within 10 seconds.');
   console.error('Check logs or start manually: bun run serve.ts');
-  process.exit(1);
+  // Non-fatal: commands that don't need HTTP gateway (gpu finetune, gpu jobs) continue.
 }
 
 async function cmdServerStop() {
@@ -749,7 +755,29 @@ async function cmdGpuLogs() {
 import {
   tcpProbe,
   pickProbeTarget,
-} from '../src/gateway/providers/gpu/livenessProbe';
+} from '../src/modules/gateway/providers/gpu/livenessProbe';
+
+// Finetune module — GPU finetune orchestration with DI + SOLID principles.
+import {
+  validateSpec,
+  estimateCost,
+  FinetuneGateway,
+  FileFinetuneState,
+  EnvHfTokenResolver,
+  buildProbeCommand,
+  parseProbeOutput,
+  buildStatusResult,
+  loadPreset,
+  listPresets,
+  runNumericChecks,
+  runCompare,
+  BUNDLED_PLUGINS,
+} from '../src/modules/gpu-finetune';
+import type {
+  GpuJobRunner,
+  FinetuneProbe,
+  FinetuneOpts,
+} from '../src/modules/gpu-finetune';
 
 async function cmdGpuList(opts: { probe?: boolean; json?: boolean; mine?: boolean; label?: string } = {}) {
   const { url, key } = getConfig();
@@ -957,12 +985,47 @@ async function cmdGpuDoctor(opts: { instance?: string; json?: boolean }) {
 }
 
 /**
- * `ai-gateway gpu wait --instance ID [--timeout SEC]` — poll until the
- * instance is reachable (or timeout). Returns 0 when alive, 1 on timeout.
- * The complement of `gpu doctor`: doctor diagnoses, wait blocks. Useful
- * for scripts that just deployed and want to gate next steps on
- * reachability rather than the provider's "running" status.
+ * `ai-gateway gpu wait [--instance ID] [--timeout SEC]` — poll until the
+ * active deploy (or a specific instance) is ready/reachable.
+ * Without --instance: polls /v1/gpu/status until status === 'ready'.
+ * With --instance: polls /v1/gpu/list until that instance is TCP-reachable.
+ * Returns 0 when ready, 1 on timeout or error.
  */
+async function cmdGpuWaitActive(opts: { timeout?: number }) {
+  const timeoutSec = opts.timeout ?? 600;
+  const startMs = Date.now();
+  const deadline = startMs + timeoutSec * 1000;
+  const { url, key } = getConfig();
+  while (Date.now() < deadline) {
+    try {
+      const data = await fetchJSON(`${url}/v1/gpu/status`, { headers: headers(key) });
+      const elapsed = Math.round((Date.now() - startMs) / 1000);
+      if (data.status === 'ready') {
+        process.stderr.write('\n');
+        console.log(`✓ ready (${elapsed}s) endpoint=${data.endpoint || '?'} ssh=${data.ssh || '?'}`);
+        return;
+      }
+      if (data.status === 'error') {
+        process.stderr.write('\n');
+        console.error(`✗ deploy error: ${data.message || 'unknown'}`);
+        process.exit(1);
+      }
+      if (data.status === 'idle') {
+        process.stderr.write('\n');
+        console.error('✗ no active deploy (status=idle)');
+        process.exit(1);
+      }
+      process.stderr.write(`\r  [${elapsed}s] ${data.step || data.status} ${data.message || ''}`.padEnd(80));
+    } catch (e) {
+      process.stderr.write(`\r  gateway unreachable: ${(e as Error).message}`.padEnd(80));
+    }
+    await new Promise(r => setTimeout(r, 5000));
+  }
+  process.stderr.write('\n');
+  console.error(`✗ deploy did not become ready in ${timeoutSec}s`);
+  process.exit(1);
+}
+
 async function cmdGpuWait(opts: { instance: string; timeout?: number; intervalSec?: number }) {
   const timeoutSec = opts.timeout ?? 300;
   const intervalSec = opts.intervalSec ?? 5;
@@ -1086,6 +1149,7 @@ interface GpuJobOpts {
   reuseInstance?: boolean;    // skip provisioning if a live owner-tagged instance with same image exists
   abortOnDivergence?: boolean; // tail /workspace/.job.log for loss=X; abort if NaN/Inf or 5× initial
   gpuFallback?: boolean;      // walk cheaper-GPU ladder if primary unavailable @ maxCost
+  bootTimeoutMin?: number;    // max wait for instance to reach "ready" before abandoning (default: timeoutMin)
 }
 
 // Persist last job's instance info so subsequent jobs ssh/sync/pull/cleanup
@@ -1274,7 +1338,9 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
       gpuTypes: [pickName],
     };
     if (opts.env) deployBody.env = opts.env;
-    if (opts.preferSpot) deployBody.interruptible = true;
+    deployBody.interruptible = opts.preferSpot === true;
+    deployBody.strictFastBoot = true;  // reliability >= 0.97 filter for finetune jobs
+    deployBody.finetune = true;        // protect from autoscaler cancel-and-redeploy
     deployBody.label = `${currentOwner()}/job-${Date.now()}`;
     const depRes = await fetch(`${url}/v1/gpu/deploy`, {
       method: 'POST', headers: headers(key), body: JSON.stringify(deployBody),
@@ -1291,14 +1357,22 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
 
   // 3. Poll until ready (skip if reusing — already ready)
   if (!info) {
-    console.log(`${c.cyan}[3/6]${c.reset} Waiting for instance ready (timeout=${timeoutMin}min)...`);
-    const deadline = Date.now() + timeoutMin * 60_000;
+    // bootTimeoutMin caps how long we wait for provisioning. Shorter than timeoutMin so
+    // slow/dead instances are abandoned fast and auto-resubmit picks a new one.
+    const bootTimeoutMin = opts.bootTimeoutMin ?? timeoutMin;
+    console.log(`${c.cyan}[3/6]${c.reset} Waiting for instance ready (timeout=${bootTimeoutMin}min)...`);
+    const deadline = Date.now() + bootTimeoutMin * 60_000;
   while (Date.now() < deadline) {
     const stRes = await fetch(`${url}/v1/gpu/status`, { headers: headers(key) });
     if (stRes.ok) {
       const st = await stRes.json();
       const phase = (st.phase || '').toString();
-      if (phase === 'ready' || st.gpuHealthy === true || st.sshHost) {
+      // Guard against autoscaler race: status endpoint returns global active
+      // deploy. Ignore results that belong to a different deployId.
+      const stDeployId = st.deployId || st.podId;
+      const deployIdMatches = !deployId || !stDeployId || stDeployId === deployId ||
+        String(stDeployId).includes(deployId.replace('deploy-', ''));
+      if ((phase === 'ready' || st.gpuHealthy === true || st.sshHost) && deployIdMatches) {
         info = st;
         console.log(`  ready: ${st.sshHost || 'n/a'}:${st.sshPort || 'n/a'} (${phase})`);
         break;
@@ -1309,12 +1383,12 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   }
   console.log();
   if (!info) {
-    console.error('Instance never became ready. Terminating...');
+    process.stderr.write(`${c.yellow}⚠ instance boot timed out after ${bootTimeoutMin}min — terminating and trying new instance${c.reset}\n`);
     await fetch(`${url}/v1/gpu/terminate`, {
       method: 'POST', headers: headers(key),
       body: JSON.stringify({ deployId }),
     });
-    process.exit(1);
+    throw new Error(`instance boot timed out after ${bootTimeoutMin}min`);
   }
   } // end if (!info) — close reuse skip block
 
@@ -1322,7 +1396,8 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   const sshPort = info.sshPort as number;
   const instanceId = (info.instanceId || info.podId) as string;
   const sshOpts = ['-p', String(sshPort), '-o', 'StrictHostKeyChecking=accept-new',
-                   '-o', 'ConnectTimeout=10', '-o', 'LogLevel=ERROR'];
+                   '-o', 'ConnectTimeout=10', '-o', 'LogLevel=ERROR',
+                   '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=8'];
 
   // Persist instance info so jobs ssh/sync/pull/cleanup can target it.
   saveJobState({
@@ -1340,24 +1415,53 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   let exitCode = 0;
   let pullOk = false;
   let t0 = Date.now();
+  let budgetExceeded = false;
   try {
     // 4. Setup workspace
     console.log(`${c.cyan}[4/6]${c.reset} Setting up workspace...`);
     if (opts.repo) {
       const cloneCmd = `git clone --depth 1 ${opts.repo} /workspace`;
-      const cloneRes = spawnSync('ssh', [...sshOpts, `root@${sshHost}`, cloneCmd], { stdio: 'inherit' });
-      if (cloneRes.status !== 0) throw new Error(`git clone failed`);
+      // Retry clone: vast.ai "ready" can fire before sshd is fully stable.
+      let cloneOk = false;
+      for (let i = 0; i < 12; i++) {
+        const cloneRes = spawnSync('ssh', [...sshOpts, `root@${sshHost}`, cloneCmd], { stdio: 'inherit' });
+        if (cloneRes.status === 0) { cloneOk = true; break; }
+        if (i < 11) {
+          process.stderr.write(`  git clone failed (attempt ${i + 1}/12), retrying in 10s...\n`);
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000);
+        }
+      }
+      if (!cloneOk) throw new Error(`git clone failed after 12 attempts`);
     } else if (opts.path) {
       const localPath = opts.path.replace(/\/$/, '');
       console.log(`  rsync ${localPath} → /workspace`);
-      const upRes = spawnSync('rsync', ['-az', '--delete', '-e',
-        `ssh -p ${sshPort} -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR`,
-        `${localPath}/`, `root@${sshHost}:/workspace/`,
-      ], { stdio: 'inherit' });
-      if (upRes.status !== 0) throw new Error(`rsync upload failed`);
+      // Retry rsync: vast.ai "ready" fires before sshd is stable; backoff up to ~3min.
+      // 8 attempts is enough for any legitimate SSH proxy startup. Dead instances fail fast.
+      let rsyncOk = false;
+      let rsyncRefusedStreak = 0;
+      const rsyncDelays = [5, 10, 15, 20, 30, 30, 30, 30];
+      for (let i = 0; i < rsyncDelays.length; i++) {
+        const upRes = spawnSync('rsync', ['-az', '--delete', '-e',
+          `ssh -p ${sshPort} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=8`,
+          `${localPath}/`, `root@${sshHost}:/workspace/`,
+        ], { stdio: ['inherit', 'inherit', 'pipe'] });
+        if (upRes.status === 0) { rsyncOk = true; break; }
+        const stderr = upRes.stderr?.toString() ?? '';
+        const refused = stderr.includes('Connection refused') || stderr.includes('connect to host');
+        if (refused) rsyncRefusedStreak++; else rsyncRefusedStreak = 0;
+        // 5 consecutive "Connection refused" = proxy port is dead, fail fast
+        if (rsyncRefusedStreak >= 5) {
+          process.stderr.write(`  rsync: SSH port ${sshPort} consistently refused — instance SSH proxy dead\n`);
+          break;
+        }
+        if (i < rsyncDelays.length - 1) {
+          process.stderr.write(`  rsync failed (attempt ${i + 1}/${rsyncDelays.length}), retrying in ${rsyncDelays[i]}s...\n`);
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, rsyncDelays[i] * 1000);
+        }
+      }
+      if (!rsyncOk) throw new Error(`rsync upload failed — SSH proxy unreachable`);
     }
 
-    // 5. Run job — async so we can rsync /workspace periodically in parallel
     const pullEveryMin = opts.pullEveryMin === undefined ? 10 : opts.pullEveryMin;
     console.log(`${c.cyan}[5/6]${c.reset} Running job: ${opts.main}`);
     if (pullEveryMin > 0) {
@@ -1366,7 +1470,9 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     mkdirSync(outputDir, { recursive: true });
     // Wrap user command with tee → /workspace/.job.log so 'gpu jobs logs' can tail it
     // even if the local terminal disconnects. PIPESTATUS preserves user-cmd exit code.
-    const runCmd = `cd /workspace && set -o pipefail; { ${opts.main}; } 2>&1 | tee /workspace/.job.log; exit \${PIPESTATUS[0]}`;
+    // Heartbeat: some SSH proxies (vast.ai) drop connections on application-level idle.
+    // Print a space every 4s so there's always data flowing even during silent pip/hf phases.
+    const runCmd = `cd /workspace && { while true; do sleep 4; printf ' '; done; } & _HB=$!; trap 'kill $_HB 2>/dev/null' EXIT; set -o pipefail; { ${opts.main}; } 2>&1 | tee /workspace/.job.log; _EC=\${PIPESTATUS[0]}; kill $_HB 2>/dev/null; exit $_EC`;
     t0 = Date.now();
     const child = spawn('ssh', [...sshOpts, `root@${sshHost}`, runCmd], { stdio: 'inherit' });
     const rsyncEnv = `ssh -p ${sshPort} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o LogLevel=ERROR`;
@@ -1437,7 +1543,6 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
 
     // Hard $ budget cap — polls cost every minute. Once breached, force-kill
     // the run + terminate instance (overrides keep-alive-on-error).
-    let budgetExceeded = false;
     const budgetTimer = (opts.maxSpend && opts.maxSpend > 0) ? setInterval(() => {
       const elapsedH = (Date.now() - t0) / 3_600_000;
       const spent = elapsedH * (pickPrice as number);
@@ -1524,14 +1629,14 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
       const excludesDefault = ['.cache/', '.cache-pip/', '.huggingface/', '__pycache__/', '*.pyc'];
       const excludes = [...excludesDefault, ...(opts.pullExclude || [])];
       const excludeArgs = excludes.flatMap((e) => ['--exclude', e]);
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (let attempt = 1; attempt <= 5; attempt++) {
         const pullRes = spawnSync('rsync', ['-az', '--compress-level=3', '--partial', '--inplace', ...excludeArgs, '-e', rsyncEnv,
           `root@${sshHost}:/workspace/`, `${outputDir}/`,
         ], { stdio: 'inherit' });
         if (pullRes.status === 0) { pullOk = true; break; }
-        console.error(`  ⚠ pull attempt ${attempt}/3 failed (exit=${pullRes.status})`);
-        if (attempt < 3) {
-          const waitMs = 5000 * attempt;
+        console.error(`  ⚠ pull attempt ${attempt}/5 failed (exit=${pullRes.status})`);
+        if (attempt < 5) {
+          const waitMs = 15000 * attempt; // 15s, 30s, 45s, 60s — survives SSH proxy reconnect
           console.error(`  retrying in ${waitMs / 1000}s...`);
           await new Promise((r) => setTimeout(r, waitMs));
         }
@@ -1552,9 +1657,10 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     }
 
     const failed = exitCode !== 0;
-    // SAFETY: never terminate if pull failed — would lose the workspace.
+    // SAFETY: keep alive when pull failed AND terminateOnError not set — workspace may still be accessible.
+    // But if terminateOnError is set (e.g. automated finetune), always terminate to prevent billing leaks.
     const shouldTerminate = !pullOk
-      ? false
+      ? !!opts.terminateOnError   // automated jobs: terminate even when pull failed
       : opts.keepAlive
         ? false
         : (failed ? !!opts.terminateOnError : true);
@@ -1718,6 +1824,7 @@ interface GpuTrainOpts {
 // ──────────────────────────────────────────────────────────────────────────
 interface GpuFinetuneOpts {
   type: 'text' | 'audio' | 'custom';
+  project?: string;             // project name → resolves preset + injects defaults
   localPath?: string;           // dir to rsync (default = dirname(scriptPath))
   scriptPath: string;
   dataset?: string;             // hf://repo-id
@@ -1787,337 +1894,88 @@ interface GpuFinetuneOpts {
   gradClip?: number;            // gradient norm clip threshold (default 1.0)
   logEverySteps?: number;       // print loss every N steps (default 25)
 }
-// #11 Schema validation
-function validateFinetuneSpec(spec: any): string[] {
-  const errs: string[] = [];
-  // Preset types skip script requirement
-  const presetExists = spec.type && loadPreset(spec.type);
-  if (!spec.script && !presetExists) errs.push('missing required: script (or use a built-in preset type)');
-  // Both `type: <preset>` and `script:` would silently make script a no-op
-  // (preset overrides scriptPath downstream). Reject so the user can pick one.
-  if (spec.script && presetExists) {
-    errs.push(`cannot set both 'type: ${spec.type}' (preset) AND 'script: ${spec.script}'. Pick one — preset bundles its own trainer.`);
-  }
-  // smoke + skipSmoke: contradictory (smoke=run only smoke; skipSmoke=skip smoke).
-  if (spec.smoke === true && spec.skipSmoke === true) {
-    errs.push(`cannot set both smoke:true (run only smoke) AND skipSmoke:true (skip smoke). Pick one.`);
-  }
-  if (spec.type && !presetExists && !['text', 'audio', 'custom'].includes(spec.type)) {
-    errs.push(`type must be text|audio|custom OR a preset name (got ${spec.type})`);
-  }
-  if (spec.dataset && !String(spec.dataset).startsWith('hf://')) {
-    errs.push(`dataset must use hf://owner/repo form`);
-  }
-  // Dataset required for audio + text finetunes (custom can override via prepCmd).
-  if (!spec.dataset && (presetExists || spec.type === 'audio' || spec.type === 'text')) {
-    errs.push(`missing required: dataset (hf://owner/repo)`);
-  }
-  if (spec.model && !String(spec.model).startsWith('hf://')) {
-    errs.push(`model must use hf://owner/repo form`);
-  }
-  if (spec.pushToHf && !String(spec.pushToHf).includes('/')) {
-    errs.push(`pushToHf must be 'owner/repo'`);
-  }
-  if (spec.hfBase && !String(spec.hfBase).includes('/')) {
-    errs.push(`hfBase must be 'owner/name' (will derive owner/name + owner/name-dataset repos)`);
-  }
-  if (spec.fromHf && !String(spec.fromHf).includes('/')) {
-    errs.push(`fromHf must be 'owner/name' (resume target — same shape as hfBase)`);
-  }
-  if (spec.hfStructure !== undefined && !['flat', 'split', 'tri'].includes(spec.hfStructure)) {
-    errs.push(`hfStructure must be flat|split|tri (got ${spec.hfStructure})`);
-  }
-  if (spec.providers !== undefined) {
-    if (!Array.isArray(spec.providers)) {
-      errs.push(`providers must be an array (use JSON inline: providers: ["vast","runpod"])`);
-    } else {
-      const ALLOWED = ['vast', 'runpod', 'tensordock', 'modal', 'hyperstack'];
-      const bad = spec.providers.filter((p: any) => !ALLOWED.includes(p));
-      if (bad.length) errs.push(`providers contains unknown: ${bad.join(', ')} (allowed: ${ALLOWED.join('|')})`);
-    }
-  }
-  if (spec.retryOnPreempt !== undefined && (spec.retryOnPreempt < 0 || spec.retryOnPreempt > 10)) {
-    errs.push(`retryOnPreempt out of range (0-10) — preempted spot retries`);
-  }
-  if (spec.numGpus !== undefined && (spec.numGpus < 1 || spec.numGpus > 8)) {
-    errs.push(`numGpus out of range (1-8)`);
-  }
-  if (spec.ckptAverage !== undefined && (spec.ckptAverage < 2 || spec.ckptAverage > 50)) {
-    errs.push(`ckptAverage out of range (2-50) — number of trailing ckpts to Polyak-average`);
-  }
-  if (spec.multiDataset !== undefined) {
-    if (!Array.isArray(spec.multiDataset)) {
-      errs.push(`multiDataset must be an array of {path, weight} (use JSON inline)`);
-    } else {
-      for (const [i, d] of spec.multiDataset.entries()) {
-        if (!d || typeof d.path !== 'string' || typeof d.weight !== 'number' || d.weight <= 0) {
-          errs.push(`multiDataset[${i}] must be {path: string, weight: number > 0}`);
-          break;
-        }
-      }
-    }
-  }
-  // Auto-prep needs metadata.jsonl in /root/data — warn if dataset-include
-  // would exclude it. (User can override with prepare:skip or custom prepare.)
-  const dsInc = spec['dataset-include'] || spec.datasetInclude;
-  const prepareDirective = spec.prepare ?? 'auto';
-  if (dsInc && presetExists && prepareDirective === 'auto') {
-    const globs = String(dsInc).split(',').map(g => g.trim());
-    const hasMeta = globs.some(g =>
-      g === 'metadata.jsonl' || g === 'train.jsonl' || g === '*.jsonl' ||
-      g === '**/*.jsonl' || g.endsWith('/*') === false && g.endsWith('jsonl'));
-    if (!hasMeta) {
-      errs.push(
-        `dataset-include='${dsInc}' may exclude metadata.jsonl/train.jsonl that ` +
-        `auto-prep needs. Add 'metadata.jsonl' (or set prepare:skip / custom prepare).`
-      );
-    }
-  }
-  if (spec.epochs !== undefined && (spec.epochs <= 0 || spec.epochs > 100)) {
-    errs.push(`epochs out of range (1-100)`);
-  }
-  if (spec.lr !== undefined && (spec.lr <= 0 || spec.lr > 1)) {
-    errs.push(`lr out of range (>0 and <=1)`);
-  }
-  if (spec.maxSpend !== undefined && spec.maxSpend > 100) {
-    errs.push(`maxSpend > $100 — refusing as safety guard`);
-  }
-  if (spec.quality !== undefined && !['auto', 'safe', 'fast'].includes(spec.quality)) {
-    errs.push(`quality must be auto|safe|fast (got ${spec.quality})`);
-  }
-  if (spec.curriculum !== undefined && spec.curriculum !== '' && spec.curriculum !== 'linear') {
-    errs.push(`curriculum must be '' (random) or 'linear' (got ${spec.curriculum})`);
-  }
-  if (spec.batchSize !== undefined && (spec.batchSize <= 0 || spec.batchSize > 64)) {
-    errs.push(`batchSize out of range (1-64)`);
-  }
-  if (spec.gradAccum !== undefined && (spec.gradAccum <= 0 || spec.gradAccum > 256)) {
-    errs.push(`gradAccum out of range (1-256)`);
-  }
-  if (spec.freezeBackboneLayers !== undefined && (spec.freezeBackboneLayers < 0 || spec.freezeBackboneLayers > 64)) {
-    errs.push(`freezeBackboneLayers out of range (0-64)`);
-  }
-  if (spec.warmupSteps !== undefined && (spec.warmupSteps < 0 || spec.warmupSteps > 10000)) {
-    errs.push(`warmupSteps out of range (0-10000)`);
-  }
-  if (spec.weightDecay !== undefined && (spec.weightDecay < 0 || spec.weightDecay > 1)) {
-    errs.push(`weightDecay out of range (0-1) — AdamW typically 0.0-0.1`);
-  }
-  if (spec.saveEverySteps !== undefined && (spec.saveEverySteps < 1 || spec.saveEverySteps > 100000)) {
-    errs.push(`saveEverySteps out of range (1-100000)`);
-  }
-  if (spec.gradClip !== undefined && (spec.gradClip <= 0 || spec.gradClip > 100)) {
-    errs.push(`gradClip out of range (>0 and <=100)`);
-  }
-  if (spec.logEverySteps !== undefined && (spec.logEverySteps < 1 || spec.logEverySteps > 10000)) {
-    errs.push(`logEverySteps out of range (1-10000)`);
-  }
-  if (spec.rewindThreshold !== undefined && (spec.rewindThreshold < 1.5 || spec.rewindThreshold > 100)) {
-    errs.push(`rewindThreshold out of range (1.5-100) — loss > N×recent_avg triggers rewind; <1.5 over-triggers`);
-  }
-  if (spec.plateauTolerance !== undefined && (spec.plateauTolerance < 0 || spec.plateauTolerance > 1)) {
-    errs.push(`plateauTolerance out of range (0-1) — relative drop fraction (default 0.01 = 1%)`);
-  }
-  if (spec.autoStopPlateau !== undefined && (spec.autoStopPlateau < 0 || spec.autoStopPlateau > 100000)) {
-    errs.push(`autoStopPlateau out of range (0-100000) — N steps without improvement to halt`);
-  }
-  return errs;
+// Schema validation, cost estimation, and run history all delegate to the
+// gpu-finetune module. These thin wrappers keep call-sites below readable.
+function validateFinetuneSpec(spec: Partial<FinetuneOpts>): string[] {
+  return validateSpec(spec).errors;
 }
 
-// #4 Cost estimator — predict total $ before submitting
-function estimateFinetuneCost(opts: GpuFinetuneOpts & { maxSamples?: number }, sampleCount = 7449, gpuPrice = 0.30): {
-  encodeMin: number; trainMin: number; setupMin: number; totalMin: number; totalUsd: number;
-} {
-  // Honor spec.maxSamples cap (encode + train operate on the smaller set).
-  const effectiveSamples = (opts as any).maxSamples
-    ? Math.min(Number((opts as any).maxSamples), sampleCount)
-    : sampleCount;
-  const encRate = (opts.numGpus || 1) * 25;          // ~25 samples/s threaded per GPU
-  const encodeMin = effectiveSamples / encRate / 60;
-  // Effective batch = batchSize × gradAccum (defaults: 2 × 16 = 32).
-  const effectiveBatch = ((opts as any).batchSize ?? 2) * ((opts as any).gradAccum ?? 16);
-  const stepsPerEpoch = effectiveSamples / effectiveBatch;
-  const totalSteps = (opts.epochs ?? 4) * stepsPerEpoch;
-  // ~3 steps/sec on 4090 for a 100M flow-matching model (pocket-tts class).
-  // Smaller models hit 5-8/s; larger 1B+ falls to ~0.5/s. Tune via opts.stepsPerSec
-  // if a preset advertises one.
-  const stepsPerSec = (opts as any).stepsPerSec ?? 3;
-  const trainMin = totalSteps / stepsPerSec / 60;
-  const setupMin = 8;                                // apt + pip + HF download
-  const totalMin = encodeMin + trainMin + setupMin;
-  const totalUsd = (totalMin / 60) * gpuPrice;
-  return { encodeMin, trainMin, setupMin, totalMin, totalUsd };
+function estimateFinetuneCost(opts: Partial<FinetuneOpts>, sampleCount = 7449, gpuPrice = 0.30) {
+  return estimateCost(opts, sampleCount, gpuPrice);
 }
 
-// #5 Persistent run history — store specs/timestamps for resume
-function finetuneRunsDir(): string {
-  return join(process.env.HOME || '/tmp', '.babelcast', 'finetune_runs');
+function finetuneStateStore(): FileFinetuneState {
+  return new FileFinetuneState(join(process.env.HOME || '/tmp', '.babelcast', 'finetune_runs'));
 }
-function recordFinetuneRun(spec: any, instanceInfo: any): string {
-  const dir = finetuneRunsDir();
-  mkdirSync(dir, { recursive: true });
+
+function recordFinetuneRun(spec: Partial<FinetuneOpts>, instanceInfo: Record<string, unknown>): string {
   const id = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const path = join(dir, `${id}.json`);
-  writeFileSync(path, JSON.stringify({ id, ts: new Date().toISOString(), spec, instance: instanceInfo }, null, 2));
+  finetuneStateStore().save({ id, ts: new Date().toISOString(), spec, instance: instanceInfo });
   return id;
 }
 
-// Detailed finetune status — stage detection + progress + resources + logs.
 // gpu finetune compare — A/B WER test multiple ckpts via Whisper roundtrip.
-// Generates audio for N prompts, transcribes, computes WER, ranks ckpts.
+// Delegates to src/modules/gpu-finetune/compare.ts.
 async function cmdGpuFinetuneCompare(opts: {
   ckpts: string[]; prompts: string; max?: number; whisperModel?: string;
 }): Promise<void> {
   if (opts.ckpts.length < 1) { console.error('Need ≥1 --ckpt path'); process.exit(1); }
   if (!existsSync(opts.prompts)) { console.error(`Prompts not found: ${opts.prompts}`); process.exit(1); }
   console.log(`[compare] ${opts.ckpts.length} ckpts × ${opts.max || 'all'} prompts`);
-  // Just shells out to a python script that does the actual eval.
-  // Trainer interface: distill/eval_finetune.py supports --checkpoint + --prompts.
-  const script = `
-import sys, json, os, glob
-from pathlib import Path
-import whisper
-sys.path.insert(0, str(Path('${opts.prompts}').parent.parent / 'distill'))
-from eval_finetune import wer
-
-prompts = json.load(open('${opts.prompts}'))[:${opts.max ?? 60}]
-print(f'loading whisper-${opts.whisperModel || 'base'}...')
-w = whisper.load_model('${opts.whisperModel || 'base'}')
-results = {}
-for ckpt in ${JSON.stringify(opts.ckpts)}:
-    name = os.path.basename(ckpt).replace('.safetensors', '')
-    out_dir = f'/tmp/cmp_{name}'
-    os.makedirs(out_dir, exist_ok=True)
-    if len(os.listdir(out_dir)) < len(prompts):
-        os.system(f"python -c \\"import sys; sys.argv=['','-c',{ckpt!r},'-p','${opts.prompts}','-o','{out_dir}','--no-asr','--max','${opts.max ?? 60}']; from eval_finetune import main; main()\\"")
-    wers, plain, tagged = [], [], []
-    for p in prompts:
-        wav = f'{out_dir}/{p[\"id\"]}.wav'
-        if not os.path.exists(wav): continue
-        e = wer(p['text'], w.transcribe(wav, language='pt')['text'])
-        wers.append(e)
-        (tagged if p.get('tag_positions') else plain).append(e)
-    results[name] = {
-        'avg': sum(wers)/max(len(wers),1),
-        'plain': sum(plain)/max(len(plain),1),
-        'tagged': sum(tagged)/max(len(tagged),1),
-        'n': len(wers),
+  try {
+    const result = runCompare(opts);
+    if (result.winner) {
+      console.log(`\n[compare] winner=${result.winner}  avgWER=${result.winnerAvgWer.toFixed(3)}`);
     }
-print()
-print(f'{"ckpt":40s} {"n":>5s} {"avg":>6s} {"plain":>7s} {"tagged":>7s}')
-for name, r in sorted(results.items(), key=lambda kv: kv[1]['avg']):
-    print(f'{name:40s} {r["n"]:>5d} {r["avg"]:>6.3f} {r["plain"]:>7.3f}  {r["tagged"]:>7.3f}')
-print()
-winner = min(results.items(), key=lambda kv: kv[1]['avg'])
-print(f'WINNER: {winner[0]} (avg={winner[1]["avg"]:.3f})')
-`;
-  const tmpScript = '/tmp/finetune_compare.py';
-  writeFileSync(tmpScript, script);
-  const r = spawnSync('python3', [tmpScript], { stdio: 'inherit' });
-  process.exit(r.status || 0);
+  } catch (e) {
+    console.error(`[compare] failed: ${(e as Error).message}`);
+    process.exit(1);
+  }
 }
 
+/**
+ * Thin CLI shell — delegates status parsing to src/gpu-finetune/status.ts.
+ * SSH probe is still run here (CLI lives near the SSH session); only the
+ * parse/detect/render logic is shared with the module.
+ */
 async function cmdGpuFinetuneStatus(): Promise<void> {
   const s = loadJobState();
   if (!s) { console.log('No saved finetune state.'); return; }
   const sshArgs = ['-p', String(s.sshPort), '-o', 'StrictHostKeyChecking=accept-new',
                    '-o', 'LogLevel=ERROR', `root@${s.sshHost}`];
 
-  // One-shot remote probe — gather everything in parallel.
-  // Use unique sentinel so user log echo `=== ...` doesn't collide.
-  const SEP = '__AIGWPROBE__';
-  const probe = spawnSync('ssh', [...sshArgs, `
-    echo '${SEP}procs${SEP}';
-    ps -ef | grep -v grep | grep -E 'hf download|python distill|python -c' | head -3;
-    echo '${SEP}files${SEP}';
-    ls /root/data/wav 2>/dev/null | wc -l;
-    [ -f /root/data_paths.jsonl ] && wc -l /root/data_paths.jsonl 2>/dev/null;
-    [ -f /root/encoded.pt ] && du -h /root/encoded.pt 2>/dev/null;
-    [ -f /root/encoded_full.pt ] && du -h /root/encoded_full.pt 2>/dev/null;
-    ls /workspace/checkpoints/ 2>/dev/null | head -10;
-    ls /workspace/smoke_ckpt/ 2>/dev/null | head -10;
-    echo '${SEP}loss${SEP}';
-    tail -100 /workspace/.job.log 2>/dev/null | grep -oE 'step=[0-9]+/[0-9]+|loss=[0-9.]+|rate=[0-9.]+|saved.*\\.safetensors|\\[smoke-verify\\]' | tail -10;
-    echo '${SEP}gpu${SEP}';
-    nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1;
-    echo '${SEP}disk${SEP}';
-    df -h /workspace /root 2>/dev/null | head -5;
-  `], { encoding: 'utf-8', timeout: 20_000 });
+  // Pick probe paths from preset manifest if the saved run used one.
+  const presetType = (s.spec as Record<string, unknown> | undefined)?.type as string | undefined;
+  const preset = presetType ? loadPreset(presetType) : undefined;
+  const probeCmd = buildProbeCommand(preset?.manifest?.probePaths);
+  const probe = spawnSync('ssh', [...sshArgs, probeCmd], { encoding: 'utf-8', timeout: 20_000 });
 
   const out = probe.stdout || '';
-  // Sections: ['<pre>', 'procs', <procs content>, 'files', <files content>, ...]
-  // After split — odds are content for the section named at index n-1.
-  const sectionMap: Record<string, string> = {};
-  const parts = out.split(SEP);
-  for (let i = 1; i < parts.length - 1; i += 2) {
-    sectionMap[parts[i].trim()] = (parts[i + 1] || '').trim();
-  }
-  const procs = sectionMap['procs'] || '';
-  const files = sectionMap['files'] || '';
-  const lossLines = (sectionMap['loss'] || '').split('\n').filter(Boolean);
-  const gpuLine = (sectionMap['gpu'] || '0,0,0').split('\n').find(Boolean) || '0,0,0';
-  const [gpuPct = 0, vramUsed = 0, vramTotal = 0] = gpuLine.split(',').map(Number);
+  const probeOut = parseProbeOutput(out);
+  const status = buildStatusResult(probeOut, {
+    instanceId: s.instanceId as string,
+    gpuType: (s.gpuType as string) || '',
+    provider: (s.provider as string) || '',
+    pricePerHr: (s.pricePerHr as number) ?? 0,
+    startedAt: s.startedAt as string,
+  }, preset?.manifest?.stagePatterns);
 
-  // Cost / time
-  const price = (s.pricePerHr as number) ?? 0;
-  const startedMs = new Date(s.startedAt as string).getTime();
-  const elapsedMin = (Date.now() - startedMs) / 60_000;
-  const spent = (elapsedMin / 60) * price;
-
-  // Stage detection — match against ACTUAL python invocations, not the wrapper shells.
-  // ps -ef columns: UID PID PPID C STIME TTY TIME CMD args  (8 fields before args).
-  // Skip first 7 then keep CMD+args (so the CMD's executable name is preserved).
-  const procLines = procs.split('\n').filter((l) => l.trim());
-  const cmds = procLines.map((l) => l.replace(/^\s*\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+/, ''))
-    .filter((c) => !c.startsWith('bash -c'));
-  const hasProc = (re: RegExp) => cmds.some((c) => re.test(c));
-  let stage = '?';
-  let detail = '';
-  if (hasProc(/python\d?\s+\/\S+hf\s+download|^hf download/)) {
-    stage = 'downloading dataset/model';
-    const wavCount = parseInt((files.match(/^\d+/m) || ['0'])[0]);
-    if (wavCount > 0) detail = `${wavCount} wavs cached so far`;
-  } else if (hasProc(/python.*prepare_dataset/)) {
-    stage = 'preparing dataset (paths + tags)';
-  } else if (hasProc(/python.*finetune_pocket_tts.*encode/)) {
-    stage = 'mimi-encoding (GPU)';
-    const rateLine = lossLines.find((l) => l.startsWith('rate='));
-    if (rateLine) detail = rateLine;
-  } else if (hasProc(/python.*finetune_pocket_tts.*train/)) {
-    stage = 'training';
-    const stepLine = [...lossLines].reverse().find((l) => l.startsWith('step='));
-    const lossLine = [...lossLines].reverse().find((l) => l.startsWith('loss='));
-    if (stepLine || lossLine) detail = `${stepLine || ''}  ${lossLine || ''}`.trim();
-  } else if (hasProc(/python -c/)) {
-    stage = 'smoke-verify';
-  } else if (procLines.length === 0) {
-    if (files.includes('model.safetensors')) stage = 'completed ✓';
-    else stage = 'idle (no python procs)';
-  }
-
-  // Render
   console.log(`\n${c.bold}═══ gpu finetune status ═══${c.reset}`);
-  console.log(`${c.dim}instance:${c.reset} ${s.instanceId}  ${s.gpuType || ''} on ${s.provider || ''} @ $${price.toFixed(3)}/h`);
-  console.log(`${c.dim}elapsed: ${c.reset} ${elapsedMin.toFixed(1)}min   ${c.dim}spent:${c.reset} $${spent.toFixed(3)}`);
-  console.log(`${c.dim}stage:   ${c.reset} ${c.cyan}${stage}${c.reset}${detail ? '   ' + c.dim + detail + c.reset : ''}`);
+  console.log(`${c.dim}instance:${c.reset} ${status.instanceId}  ${status.gpuType} on ${status.provider} @ $${status.pricePerHr.toFixed(3)}/h`);
+  console.log(`${c.dim}elapsed: ${c.reset} ${status.elapsedMin.toFixed(1)}min   ${c.dim}spent:${c.reset} $${status.spent.toFixed(3)}`);
+  console.log(`${c.dim}stage:   ${c.reset} ${c.cyan}${status.stage}${c.reset}${status.stageDetail ? '   ' + c.dim + status.stageDetail + c.reset : ''}`);
 
-  if (vramTotal > 0) {
-    const vramPct = (vramUsed / vramTotal) * 100;
-    console.log(`${c.dim}gpu:     ${c.reset} ${gpuPct.toFixed(0)}% util   VRAM ${(vramUsed/1024).toFixed(1)}/${(vramTotal/1024).toFixed(0)}GB (${vramPct.toFixed(0)}%)`);
+  if (status.vramTotalGb > 0) {
+    const vramPct = (status.vramUsedGb / status.vramTotalGb) * 100;
+    console.log(`${c.dim}gpu:     ${c.reset} ${status.gpuPct.toFixed(0)}% util   VRAM ${status.vramUsedGb.toFixed(1)}/${status.vramTotalGb.toFixed(0)}GB (${vramPct.toFixed(0)}%)`);
   }
 
-  // Files / artifacts
-  if (files.trim()) {
-    const wavCount = (files.match(/^\d+/m) || [''])[0];
-    const ckptList = files.split('\n').filter((l) => l.includes('.safetensors')).slice(0, 5);
-    if (wavCount && parseInt(wavCount) > 0) console.log(`${c.dim}files:   ${c.reset} ${wavCount} wavs cached`);
-    if (ckptList.length > 0) console.log(`${c.dim}ckpts:   ${c.reset} ${ckptList.join(', ').slice(0, 100)}`);
-  }
+  if (status.wavCached > 0) console.log(`${c.dim}files:   ${c.reset} ${status.wavCached} wavs cached`);
+  if (status.checkpoints.length > 0) console.log(`${c.dim}ckpts:   ${c.reset} ${status.checkpoints.join(', ').slice(0, 100)}`);
 
-  // Recent loss
-  if (lossLines.length > 0) {
+  if (status.recentLoss.length > 0) {
     console.log(`${c.dim}log:     ${c.reset}`);
-    for (const ln of lossLines.slice(-5)) console.log(`           ${ln}`);
+    for (const ln of status.recentLoss.slice(-5)) console.log(`           ${ln}`);
   }
   console.log('');
 }
@@ -2245,7 +2103,7 @@ async function cmdGpuFinetuneSweep(opts: GpuFinetuneOpts & { trials?: number }):
     console.error(
       `gpu finetune sweep: missing required input. Provide one of:\n` +
       `  • -f <train.yaml>          (or place ./train.yaml in cwd)\n` +
-      `  • --type <preset>          (e.g. pocket-tts-finetune)\n` +
+      `  • --type <preset>          (e.g. flow-matching-tts)\n` +
       `  • --script <trainer.py>    (custom trainer)`
     );
     process.exit(1);
@@ -2273,149 +2131,122 @@ async function cmdGpuFinetuneSweep(opts: GpuFinetuneOpts & { trials?: number }):
   console.log(`[sweep] (TODO: parse final losses + auto-pick best, push winner to HF)`);
 }
 
-// #12 Plug-in architecture — pre/post hooks via named plugins
-const PLUGINS: Record<string, { extraDeps?: string; extraTrainArgs?: string; description: string }> = {
-  lora:           { extraDeps: 'peft',       extraTrainArgs: '--use-lora --lora-rank 16',  description: 'LoRA adapter wrapping (saves $$ on big models)' },
-  qlora:          { extraDeps: 'peft bitsandbytes', extraTrainArgs: '--use-lora --quantize 4bit', description: '4-bit quantized LoRA' },
-  'grad-ckpt':    { extraTrainArgs: '--gradient-checkpointing', description: 'Activation checkpointing (saves VRAM, slower)' },
-  'flash-attn':   { extraDeps: 'flash-attn', extraTrainArgs: '--use-flash-attn', description: 'FlashAttention 2 for speed' },
-};
+// Plugins (LoRA / QLoRA / grad-ckpt / flash-attn) live in
+// src/modules/gpu-finetune/types.ts:BUNDLED_PLUGINS — single source of truth.
+// `loadPreset` and `listPresets` are imported from the module.
 
-// #13 Web dashboard stub — opens browser with URL
+// Web dashboard stub — opens browser with URL
 async function cmdGpuFinetuneWatchWeb(): Promise<void> {
   console.log(`Web dashboard not yet built. (TODO: serve /workspace/.job.log via http on local port + chart.js loss plot)`);
   console.log(`For now, use: ai-gateway gpu jobs watch  (terminal dashboard with bars + log tail)`);
 }
 
-// Preset registry — bundled trainers shipped with ai-gateway.
-// Allows spec.yaml-only finetune without user-provided scripts.
-function loadPreset(presetType: string | undefined): { dir: string; manifest: any } | null {
-  // Guard against undefined/empty (caller may not have a type set yet).
-  // Without this, path.join(presetsDir, undefined) throws TypeError.
-  if (!presetType || typeof presetType !== 'string') return null;
-  // Look for finetune-presets/<type>/manifest.json relative to this script
-  const presetsDir = require('path').resolve(
-    require('path').dirname(new URL(import.meta.url).pathname), '..', 'finetune-presets',
-  );
-  const presetDir = require('path').join(presetsDir, presetType);
-  const manifestPath = require('path').join(presetDir, 'manifest.json');
-  if (!existsSync(manifestPath)) return null;
-  try {
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
-    return { dir: presetDir, manifest };
-  } catch { return null; }
-}
-
+/**
+ * Thin CLI shell over FinetuneGateway (src/gpu-finetune).
+ * All orchestration logic lives in the module; the CLI only:
+ *   - parses args into FinetuneOpts
+ *   - injects jobRunner + probe adapters that bridge to cmdGpuJobsRun / SSH
+ *   - calls gateway.run() and surfaces the result
+ */
 async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
-  // PRESET DETECTION — if opts.type matches a bundled preset, override scriptPath/localPath
-  // to point at the bundled trainer dir. User then needs only train.yaml + dataset.
   const preset = loadPreset(opts.type);
-  // Early input validation. Without preset OR scriptPath, downstream path.dirname /
-  // basename would crash on undefined. Surface a clear error instead.
   if (!preset && !opts.scriptPath) {
     console.error(
       `gpu finetune: missing required input. Provide one of:\n` +
       `  • --spec <train.yaml>           (or place ./train.yaml in cwd)\n` +
-      `  • --type <preset>               (e.g. pocket-tts-finetune)\n` +
+      `  • --type <preset>               (e.g. flow-matching-tts)\n` +
       `  • --script <path/to/trainer.py> (custom trainer)`
     );
     process.exit(1);
   }
-  // Numeric sanity — same shape as gpu jobs run guard.
-  const finetuneNumChecks: Array<[string, number | undefined, number, number]> = [
-    ['--max-cost / maxCost', opts.maxCost, 0.01, 50],
-    ['--max-spend / maxSpend', opts.maxSpend, 0.01, 100],
-    ['--epochs / epochs', opts.epochs, 1, 100],
-    ['--lr / lr', opts.lr, 1e-9, 1],
-    ['--num-gpus / numGpus', opts.numGpus, 1, 8],
-  ];
-  for (const [name, val, lo, hi] of finetuneNumChecks) {
-    if (val !== undefined && (typeof val !== 'number' || !Number.isFinite(val) || val < lo || val > hi)) {
-      console.error(`gpu finetune: invalid ${name}=${val} (expected ${lo}..${hi})`);
+
+  const checks = runNumericChecks(opts as Partial<FinetuneOpts>);
+  for (const r of checks) {
+    if (!r.ok) {
+      console.error(`gpu finetune: invalid ${r.name}=${r.value} (expected ${r.lo}..${r.hi})`);
       process.exit(1);
     }
   }
-  if (preset) {
-    console.log(`[preset] ${opts.type} v${preset.manifest.version} — bundled trainer (no user script needed)`);
-    if (!opts.scriptPath) {
-      opts.scriptPath = require('path').join(preset.dir, preset.manifest.trainerScript || 'trainer.py');
-      opts.localPath = preset.dir;  // upload entire preset dir
-    }
-    // Inject preset-recommended deps if user didn't override
-    if (!opts.aptPkgs && preset.manifest.aptDeps) opts.aptPkgs = preset.manifest.aptDeps;
-    if (!opts.extraDeps && preset.manifest.pipDeps) opts.extraDeps = preset.manifest.pipDeps;
-    if (!opts.model && preset.manifest.defaultModel) opts.model = preset.manifest.defaultModel;
-    if (!opts.epochs && preset.manifest.defaultEpochs) opts.epochs = preset.manifest.defaultEpochs;
-    if (!opts.lr && preset.manifest.defaultLR) opts.lr = preset.manifest.defaultLR;
-    if (!opts.gpu && preset.manifest.defaultGpu) opts.gpu = preset.manifest.defaultGpu;
-    if (!opts.maxSpend && preset.manifest.defaultMaxSpend) opts.maxSpend = preset.manifest.defaultMaxSpend;
-    // Force type to 'audio' for downstream apt/pip selection
-    if (preset.manifest.type) opts.type = preset.manifest.type as any;
-    // Pin check — warn if user requested a different preset version than
-    // what's bundled. Doesn't refuse (forward-compat presets), just informs.
-    const userVersion = (opts as any).aigwVersion;
-    if (userVersion && preset.manifest.version && userVersion !== preset.manifest.version) {
-      console.warn(`[preset] aigwVersion mismatch: spec asked for v${userVersion}, bundle has v${preset.manifest.version} (using bundled)`);
-    }
-    // Auto-prep: if preset declares a prepareScript and user didn't supply
-    // their own prepCmd, run the bundled preprocessor over /root/data into
-    // /root/data_paths.jsonl. Detects a metadata.jsonl at the dataset root —
-    // if missing, skip (user must supply prepCmd explicitly).
-    // Suppress with `prepare: skip` in spec.yaml; override with `prepare: <cmd>`.
-    const prepareDirective = (opts as any).prepare ?? 'auto';
-    if (!opts.prepCmd && prepareDirective !== 'skip' && preset.manifest.prepareScript) {
-      const prepBin = require('path').join(preset.dir, preset.manifest.prepareScript);
-      const prepScriptName = require('path').basename(preset.manifest.prepareScript);
-      // Run only when input file exists on the GPU (avoids spurious failure if
-      // the dataset is already pre-encoded). The shell test runs at job time.
-      opts.prepCmd =
-        `if [ -f /root/data/metadata.jsonl ]; then ` +
-        `python ${prepScriptName} --input /root/data/metadata.jsonl ` +
-        `--output /root/data_paths.jsonl --wav-root /root/data; ` +
-        `elif [ -f /root/data/train.jsonl ]; then ` +
-        `python ${prepScriptName} --input /root/data/train.jsonl ` +
-        `--output /root/data_paths.jsonl --wav-root /root/data; ` +
-        `else cp /root/data/data_paths.jsonl /root/data_paths.jsonl 2>/dev/null || ` +
-        `(echo '[prep] no metadata.jsonl/train.jsonl/data_paths.jsonl in /root/data — set spec.prepCmd' && exit 1); fi`;
-      console.log(`[preset] auto-prep wired (${prepScriptName}); set prepare:skip in yaml to disable`);
-    }
-  }
+
   if (opts.dataset && !opts.dataset.startsWith('hf://')) {
     console.error(`--dataset must use hf://<repo-id> form`); process.exit(1);
   }
   if (opts.model && !opts.model.startsWith('hf://')) {
     console.error(`--model must use hf://<repo-id> form`); process.exit(1);
   }
-  // Auto-load HF_TOKEN from ~/.cache/huggingface/token if not in env
-  let hfToken = process.env.HF_TOKEN;
-  if (!hfToken) {
-    const cached = `${process.env.HOME}/.cache/huggingface/token`;
-    if (existsSync(cached)) {
-      hfToken = readFileSync(cached, 'utf-8').trim();
-    } else {
-      console.error(`HF_TOKEN env not set and ~/.cache/huggingface/token missing.`); process.exit(1);
-    }
-  }
-  // Resolve script. Skip if already absolute and exists (preset fills this).
-  if (!(opts.scriptPath && existsSync(opts.scriptPath))) {
-    const scriptCandidates = [
-      opts.localPath && opts.scriptPath ? require('path').join(opts.localPath, opts.scriptPath) : null,
-      opts.scriptPath,
-    ].filter(Boolean) as string[];
-    const foundScript = scriptCandidates.find((p) => existsSync(p));
-    if (!foundScript) {
-      console.error(`Script not found: tried ${scriptCandidates.join(', ')}`);
-      process.exit(1);
-    }
-    opts.scriptPath = foundScript;
-  }
 
-  // Default behavior: run smoke FIRST (validates pipeline before full spend),
-  // then full run. set -e in main aborts full if smoke fails.
-  // --no-smoke (skipSmoke=true) bypasses; --smoke-only runs ONLY the smoke.
+  // jobRunner: cmdGpuJobsRun has side-effects (saves job state, prints to stdout)
+  // and returns void. Read loadJobState() AFTER the call to recover real metadata.
+  const jobRunner: GpuJobRunner = {
+    async run(rOpts) {
+      await cmdGpuJobsRun({
+        path: rOpts.path,
+        main: rOpts.main,
+        gpu: rOpts.gpu,
+        maxCost: rOpts.maxCost,
+        maxSpend: rOpts.maxSpend,
+        output: rOpts.output,
+        timeoutMin: rOpts.timeoutMin,
+        bootTimeoutMin: rOpts.bootTimeoutMin,
+        image: rOpts.image,
+        keepAlive: false,
+        terminateOnError: true,
+        pullEveryMin: rOpts.pullEveryMin,
+        stallMin: rOpts.stallMin,
+        pullExclude: rOpts.pullExclude,
+        preferSpot: rOpts.preferSpot,
+        reuseInstance: rOpts.reuseInstance,
+        abortOnDivergence: rOpts.abortOnDivergence,
+        gpuFallback: rOpts.gpuFallback,
+        dryRun: rOpts.dryRun,
+      });
+      const s = loadJobState();
+      return {
+        instanceId: (s?.instanceId as string) || '',
+        sshHost: (s?.sshHost as string) || '',
+        sshPort: (s?.sshPort as number) ?? 0,
+        gpuType: (s?.gpuType as string) || rOpts.gpu,
+        provider: (s?.provider as string) || '',
+        pricePerHr: (s?.pricePerHr as number) ?? rOpts.maxCost,
+        startedAt: (s?.startedAt as string) || new Date().toISOString(),
+      };
+    },
+  };
+
+  const probePathsFromPreset = preset?.manifest?.probePaths;
+  const probe: FinetuneProbe = {
+    async probe(meta) {
+      const s = loadJobState();
+      const sshHost = (s?.sshHost as string) || meta.sshHost;
+      const sshPort = (s?.sshPort as number) ?? meta.sshPort;
+      if (!sshHost) return '';
+      const sshArgs = [
+        '-p', String(sshPort),
+        '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', 'LogLevel=ERROR',
+        `root@${sshHost}`,
+      ];
+      const cmd = buildProbeCommand(probePathsFromPreset);
+      const result = spawnSync('ssh', [...sshArgs, cmd], { encoding: 'utf-8', timeout: 20_000 });
+      return result.stdout || '';
+    },
+  };
+
+  const gateway = new FinetuneGateway({
+    stateStore: finetuneStateStore(),
+    hfToken: new EnvHfTokenResolver(),
+    jobRunner,
+    probe,
+    log: {
+      debug: (...a: unknown[]) => { if (process.env.DEBUG) console.log(...a); },
+      log: (...a: unknown[]) => console.log(...a),
+      warn: (...a: unknown[]) => console.warn(...a),
+      error: (...a: unknown[]) => console.error(...a),
+    },
+  });
+
   const skipSmoke = opts.skipSmoke === true;
-  const smokeOnly = !!opts.smoke;          // explicit --smoke = ONLY smoke (no full)
-  const runSmokeFirst = !skipSmoke && !smokeOnly;
+  const smokeOnly = !!opts.smoke;
   if (skipSmoke && !smokeOnly) {
     console.warn(`${c.yellow}⚠ smoke step skipped (--no-smoke / skipSmoke: true).${c.reset} ` +
                  `Pipeline bugs will only surface during the full run — could waste GPU $$. ` +
@@ -2424,348 +2255,29 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
   if (smokeOnly && opts.epochs && opts.epochs !== 3) {
     console.warn(`${c.yellow}⚠ smoke mode forces epochs=3 (your epochs=${opts.epochs} ignored).${c.reset}`);
   }
-  const epochs = smokeOnly ? 3 : (opts.epochs ?? 4);
-  const lr = opts.lr ?? 5e-5;
 
-  // — Round 8 quality automation. quality:auto picks smart defaults based on
-  // epochs/cadence/preset. quality:fast adds augmentation. quality:safe disables
-  // auto-stop. Explicit per-flag opts override (passed by user spec yaml).
-  const quality = opts.quality ?? 'auto';
-  const saveEverySteps = opts.saveEverySteps ?? (smokeOnly ? 5 : 100);
-  const autoTrainArgs: string[] = [];
-  const autoEncodeArgs: string[] = [];
-  const autoLog: string[] = [];
-  if (quality !== 'safe' && !smokeOnly) {
-    const compileOn = opts.torchCompile ?? true;
-    if (compileOn) { autoTrainArgs.push('--torch-compile'); autoLog.push('torch-compile'); }
-    if (epochs >= 2) {
-      const plateau = opts.autoStopPlateau ?? saveEverySteps * 5;
-      autoTrainArgs.push(`--auto-stop-plateau ${plateau}`);
-      autoLog.push(`auto-stop-plateau=${plateau}`);
+  // Auto-resubmit: vast.ai instances evict randomly. Retry up to 5 times total.
+  // HF checkpoint push/resume means each restart picks up from the last saved step.
+  const maxAttempts = 5;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      if (attempt > 1) {
+        process.stderr.write(`\n${c.yellow}[finetune] auto-resubmit attempt ${attempt}/${maxAttempts} (instance died — resuming from HF checkpoint)${c.reset}\n`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);
+      }
+      const result = await gateway.run(opts as FinetuneOpts);
+      console.log(`[finetune] submitted — instanceId=${result.instanceId || '(see job state)'}  gpu=${result.gpuType}  $${result.pricePerHr}/h`);
+      return;
+    } catch (err) {
+      lastErr = err;
+      const msg = String(err instanceof Error ? err.message : err);
+      const isEviction = msg.includes('exit code: 255') || msg.includes('SSH proxy') || msg.includes('rsync upload failed') || msg.includes('Connection refused') || msg.includes('boot timed out');
+      if (!isEviction || attempt === maxAttempts) throw err;
+      process.stderr.write(`  [finetune] attempt ${attempt} failed: ${msg}\n`);
     }
   }
-  if (opts.torchCompile === false) {
-    // explicit off — strip it
-    const idx = autoTrainArgs.indexOf('--torch-compile');
-    if (idx >= 0) autoTrainArgs.splice(idx, 1);
-  }
-  const augPitch = opts.augmentPitch ?? (quality === 'fast');
-  const augSpeed = opts.augmentSpeed ?? (quality === 'fast');
-  if (augPitch) { autoEncodeArgs.push('--augment-pitch'); autoLog.push('augment-pitch'); }
-  if (augSpeed) { autoEncodeArgs.push('--augment-speed'); autoLog.push('augment-speed'); }
-  if (autoLog.length) {
-    console.log(`[auto] quality=${quality} → ${autoLog.join(', ')}`);
-  }
-  // Tier 2 — power-user knobs forwarded as trainer flags when set in spec.
-  if (opts.batchSize !== undefined) autoTrainArgs.push(`--batch-size ${opts.batchSize}`);
-  if (opts.gradAccum !== undefined) autoTrainArgs.push(`--grad-accum ${opts.gradAccum}`);
-  if (opts.weightDecay !== undefined) autoTrainArgs.push(`--weight-decay ${opts.weightDecay}`);
-  if (opts.warmupSteps !== undefined) autoTrainArgs.push(`--warmup-steps ${opts.warmupSteps}`);
-  if (opts.freezeBackboneLayers !== undefined) autoTrainArgs.push(`--freeze-backbone-layers ${opts.freezeBackboneLayers}`);
-  if (opts.onlyFlowNet) autoTrainArgs.push('--only-flow-net');
-  if (opts.curriculum) autoTrainArgs.push(`--curriculum ${opts.curriculum}`);
-  // multiDataset: trainer expects comma-separated `path:weight` pairs.
-  if (Array.isArray((opts as any).multiDataset) && (opts as any).multiDataset.length) {
-    const pairs = ((opts as any).multiDataset as Array<{ path: string; weight: number }>)
-      .map(d => `${d.path}:${d.weight}`).join(',');
-    autoTrainArgs.push(`--multi-dataset ${pairs}`);
-  }
-  if ((opts as any).autoLrRewind) {
-    autoTrainArgs.push('--auto-lr-rewind');
-    if ((opts as any).rewindThreshold !== undefined) {
-      autoTrainArgs.push(`--rewind-threshold ${(opts as any).rewindThreshold}`);
-    }
-  }
-  if ((opts as any).seed !== undefined) autoTrainArgs.push(`--seed ${(opts as any).seed}`);
-  if ((opts as any).gradClip !== undefined) autoTrainArgs.push(`--grad-clip ${(opts as any).gradClip}`);
-  if ((opts as any).logEverySteps !== undefined) autoTrainArgs.push(`--log-every-steps ${(opts as any).logEverySteps}`);
-  const autoTrainFlags = autoTrainArgs.length ? ' ' + autoTrainArgs.join(' ') : '';
-  const autoEncodeFlags = autoEncodeArgs.length ? ' ' + autoEncodeArgs.join(' ') : '';
-  const numGpus = opts.numGpus ?? 1;
-  const output = opts.output || `./ckpts/run-${Date.now()}`;
-  const isDir = require('fs').statSync(opts.scriptPath).isDirectory();
-  // localPath: explicit (spec key) > scriptPath if dir > scriptPath's parent.
-  // scriptName: basename if file, else "<dir>" placeholder (caller must override --train-cmd).
-  const localPath = opts.localPath || (isDir ? opts.scriptPath : require('path').dirname(opts.scriptPath));
-  // scriptRel: path of script RELATIVE to localPath. Used in remote python invocation.
-  const absScript = require('path').resolve(opts.scriptPath);
-  const absLocal = require('path').resolve(localPath);
-  const scriptRel = isDir
-    ? require('path').basename(opts.scriptPath)
-    : require('path').relative(absLocal, absScript) || require('path').basename(opts.scriptPath);
-  const scriptName = scriptRel;  // remote: cd /workspace && python <scriptRel> ...
-
-  // Deps presets by type
-  const aptByType: Record<string, string> = {
-    text:   'pkg-config build-essential',
-    audio:  'pkg-config build-essential libsentencepiece-dev libsndfile1 ffmpeg',
-    custom: 'pkg-config build-essential',
-  };
-  const pipByType: Record<string, string> = {
-    text:   '"huggingface-hub>=1.0.0" hf_transfer torch transformers datasets accelerate safetensors',
-    audio:  '"huggingface-hub>=1.0.0" hf_transfer torch torchaudio safetensors soundfile',
-    custom: '"huggingface-hub>=1.0.0" hf_transfer torch safetensors',
-  };
-  // #12 Plugin: merges extra deps + train args
-  const plugin = opts.plugin ? PLUGINS[opts.plugin] : undefined;
-  if (opts.plugin && !plugin) {
-    console.error(`Unknown plugin '${opts.plugin}'. Available: ${Object.keys(PLUGINS).join(', ')}`);
-    process.exit(1);
-  }
-  if (plugin) console.log(`[plugin] ${opts.plugin}: ${plugin.description}`);
-  const apt = `${aptByType[opts.type]}${opts.aptPkgs ? ' ' + opts.aptPkgs : ''}`;
-  const pip = `${pipByType[opts.type]}${opts.extraDeps ? ' ' + opts.extraDeps : ''}${plugin?.extraDeps ? ' ' + plugin.extraDeps : ''}`;
-
-  // Comma-separated globs map to multiple --include flags (hf download
-  // accepts the flag repeatedly but no commas in a single value).
-  const dsInclude = opts.datasetInclude
-    ? opts.datasetInclude.split(',').map(p => ` --include "${p.trim()}"`).join('')
-    : '';
-  const datasetDl = opts.dataset?.startsWith('hf://')
-    ? `if [ ! -d /root/data ] || [ -z "$(ls /root/data 2>/dev/null)" ]; then ` +
-      `hf download ${opts.dataset.slice(5)} --repo-type dataset --local-dir /root/data --token "$HF_TOKEN"${dsInclude}; ` +
-      `else echo '[fine] dataset cached, skip'; fi && `
-    : '';
-  const modelDl = opts.model?.startsWith('hf://')
-    ? `if [ ! -d /root/model ] || [ -z "$(ls /root/model 2>/dev/null)" ]; then ` +
-      `hf download ${opts.model.slice(5)} --local-dir /root/model --token "$HF_TOKEN"; ` +
-      `else echo '[fine] model cached, skip'; fi && `
-    : '';
-
-  const prepStage = opts.prepCmd
-    ? `if [ ! -f /root/data_paths.jsonl ]; then ${opts.prepCmd}; else echo '[fine] prep cached'; fi && `
-    : '';
-  // Non-smoke: honor spec.maxSamples when user explicitly caps. Smoke: cap at 30
-  // (1500 sample full encode would defeat the smoke-test purpose); warn when
-  // the user's cap is bigger than the smoke ceiling.
-  const userMaxSamples = (opts as any).maxSamples;
-  if (smokeOnly && userMaxSamples && userMaxSamples > 30) {
-    console.warn(`${c.yellow}⚠ smoke mode caps maxSamples at 30 (your value=${userMaxSamples} reduced).${c.reset}`);
-  }
-  const effectiveMaxSamples = smokeOnly ? 30 : userMaxSamples;
-  const encodeMaxSamples = effectiveMaxSamples ? ` --max-samples ${effectiveMaxSamples}` : '';
-  const encodeCmd = opts.encodeCmd || (
-    opts.type === 'audio'
-      ? (numGpus > 1
-          ? `bash ${require('path').dirname(scriptName)}/encode_multi_gpu.sh /root/data_paths.jsonl /root/encoded.pt 8`
-          : `python ${scriptName} encode --input /root/data_paths.jsonl --output /root/encoded.pt --num-workers 8${encodeMaxSamples}${autoEncodeFlags}`)
-      : `python ${scriptName} prepare --dataset /root/data --output /root/prepared.pt`
-  );
-  const encodeStage = opts.type === 'custom' ? '' :
-    `if [ ! -f /root/encoded.pt ] && [ ! -f /root/prepared.pt ]; then ${encodeCmd}; else echo '[fine] encode cached'; fi && `;
-
-  // Pre-full smoke stage: encode 30, train 3 epochs, verify ckpt loads + gens audio.
-  // Run BEFORE full encode/train. set -e aborts full run if smoke fails.
-  const preSmokeStage = runSmokeFirst && opts.type === 'audio'
-    ? `echo '[smoke] starting pre-full validation (30 samples × 3 epochs)' && ` +
-      `python ${scriptName} encode --input /root/data_paths.jsonl --output /root/smoke_encoded.pt --num-workers 8 --max-samples 30 && ` +
-      `python ${scriptName} train --tokens /root/smoke_encoded.pt --output /workspace/smoke_ckpt --epochs 3 --learning-rate ${lr} --save-every-steps 5 && ` +
-      `python -c "
-from safetensors.torch import load_file
-from pocket_tts import TTSModel
-import os, glob, soundfile as sf, numpy as np
-ckpts = sorted(glob.glob('/workspace/smoke_ckpt/step-*.safetensors'),
-               key=lambda p: int(p.rsplit('step-',1)[1].rsplit('.',1)[0]))
-ckpt = ckpts[-1] if ckpts else '/workspace/smoke_ckpt/model.safetensors'
-print('[smoke-verify] loading', ckpt)
-sd = load_file(ckpt)
-m = TTSModel.load_model(language='portuguese')
-missing, unexpected = m.load_state_dict(sd, strict=False)
-print(f'[smoke-verify] missing={len(missing)} unexpected={len(unexpected)}')
-state = m.get_state_for_audio_prompt('anna')
-audio = m.generate_audio(state, 'Olá mundo, teste de smoke.', copy_state=True)
-if hasattr(audio, 'cpu'): audio = audio.cpu().numpy()
-audio = np.asarray(audio).astype(np.float32).reshape(-1)
-sf.write('/workspace/smoke_test.wav', audio, m.sample_rate)
-dur = len(audio)/m.sample_rate
-rms = float(np.sqrt(np.mean(audio**2)))
-print(f'[smoke-verify] dur={dur:.2f}s rms={rms:.3f}')
-assert dur > 0.5, f'audio too short: {dur}s'
-assert rms > 0.005, f'audio too quiet: rms={rms}'
-print('[smoke-verify] OK ✓ proceeding to full run')
-" && `
-    : '';
-
-  const tokensArg = opts.type === 'audio'
-    ? '/root/encoded.pt'
-    : '/root/prepared.pt';
-  // Honor explicit spec.saveEverySteps when set; smoke mode forces 5 unless
-  // user explicitly chose something smaller (which would be even cheaper).
-  const explicitSave = (opts as any).saveEverySteps;
-  const saveSteps = explicitSave !== undefined
-    ? Math.min(explicitSave, smokeOnly ? 5 : Number.MAX_SAFE_INTEGER)
-    : (smokeOnly ? 5 : 100);
-  if (smokeOnly && explicitSave !== undefined && explicitSave > 5) {
-    console.warn(`${c.yellow}⚠ smoke mode caps saveEverySteps at 5 (your value=${explicitSave} reduced).${c.reset}`);
-  }
-  const saveEvery = ` --save-every-steps ${saveSteps}`;
-  const pluginTrainArgs = plugin?.extraTrainArgs ? ' ' + plugin.extraTrainArgs : '';
-  const trainCmd = opts.trainCmd || (
-    `python ${scriptName} train ` +
-    `--tokens ${tokensArg} --output /workspace/checkpoints ` +
-    `--epochs ${epochs} --learning-rate ${lr}${saveEvery}${autoTrainFlags} ` +
-    (opts.autoResume ? '--resume /workspace/checkpoints ' : '') +
-    (opts.extraTrainArgs || '') + pluginTrainArgs
-  );
-
-  // #7 WER eval background watcher
-  const werBg = opts.watchWer
-    ? buildWerEvalCmd(require('path').dirname(scriptName), opts.watchWer)
-    : '';
-
-  // Inline smoke-verify (used in --smoke-only path)
-  const smokeVerify = smokeOnly
-    ? ` && python -c "
-from safetensors.torch import load_file
-from pocket_tts import TTSModel
-import os, glob
-ckpt = sorted(glob.glob('/workspace/checkpoints/step-*.safetensors'),
-              key=lambda p: int(p.rsplit('step-',1)[1].rsplit('.',1)[0]))[-1]
-print('[smoke-verify] loading', ckpt)
-sd = load_file(ckpt)
-m = TTSModel.load_model(language='portuguese')
-missing, unexpected = m.load_state_dict(sd, strict=False)
-print(f'[smoke-verify] missing={len(missing)} unexpected={len(unexpected)}')
-import soundfile as sf
-state = m.get_state_for_audio_prompt('anna')
-audio = m.generate_audio(state, 'Olá mundo, teste de smoke.', copy_state=True)
-if hasattr(audio, 'cpu'): audio = audio.cpu().numpy()
-import numpy as np
-audio = np.asarray(audio).astype(np.float32).reshape(-1)
-sf.write('/workspace/smoke_test.wav', audio, m.sample_rate)
-dur = len(audio)/m.sample_rate
-rms = float(np.sqrt(np.mean(audio**2)))
-print(f'[smoke-verify] dur={dur:.2f}s rms={rms:.3f}')
-assert dur > 0.5, f'audio too short: {dur}s'
-assert rms > 0.005, f'audio too quiet: rms={rms}'
-print('[smoke-verify] OK')
-"`
-    : '';
-
-  const pushUp = opts.pushToHf
-    ? ` && hf upload ${opts.pushToHf} /workspace/checkpoints --repo-type model --token "$HF_TOKEN"`
-    : '';
-
-  // Embed HF_TOKEN + secrets + W&B keys.
-  const wandbExports = opts.wandb
-    ? [
-        `export WANDB_PROJECT='${opts.wandb.project}'`,
-        opts.wandb.entity ? `export WANDB_ENTITY='${opts.wandb.entity}'` : '',
-        opts.wandb.runName ? `export WANDB_RUN_NAME='${opts.wandb.runName}'` : '',
-        opts.wandb.logModel ? `export WANDB_LOG_MODEL='${opts.wandb.logModel}'` : '',
-        process.env.WANDB_API_KEY ? `export WANDB_API_KEY='${process.env.WANDB_API_KEY}'` : '',
-      ].filter(Boolean)
-    : [];
-  const secretExports = opts.secrets
-    ? Object.entries(opts.secrets).map(([k, v]) => `export ${k}='${v}'`)
-    : [];
-  // Webhook stage: POST run status when finished
-  const webhookCmd = opts.notifyOnComplete
-    ? ` && curl -X POST -H 'Content-Type: application/json' -d "{\\"status\\":\\"completed\\",\\"runId\\":\\"$(hostname)\\",\\"ckpt\\":\\"/workspace/checkpoints/model.safetensors\\"}" '${opts.notifyOnComplete}' 2>&1 | tail -3`
-    : '';
-  // Checkpoint averaging post-train (Polyak)
-  const ckptAvg = opts.ckptAverage
-    ? ` && python -c "
-import torch, glob
-from safetensors.torch import load_file, save_file
-ckpts = sorted(glob.glob('/workspace/checkpoints/step-*.safetensors'),
-               key=lambda p: int(p.rsplit('step-',1)[1].rsplit('.',1)[0]))
-last_n = ckpts[-${opts.ckptAverage}:]
-print(f'[avg] averaging {len(last_n)} ckpts')
-sds = [load_file(p) for p in last_n]
-avg = {k: sum(sd[k].float() for sd in sds) / len(sds) for k in sds[0]}
-save_file(avg, '/workspace/checkpoints/model_avg.safetensors')
-print('[avg] saved → /workspace/checkpoints/model_avg.safetensors')
-"`
-    : '';
-  // Round 6: 3-repo organization. Derive names from hfBase.
-  // Trainer reads IARATTS_HF_WEIGHTS_REPO + IARATTS_HF_DATASET_REPO + IARATTS_HF_CODE_REPO.
-  const hfStructure = opts.hfStructure || (opts.hfBase ? 'split' : 'flat');
-  const hfWeights = opts.hfBase ? opts.hfBase : opts.pushToHf;  // weights = base name
-  const hfDataset = opts.hfBase && hfStructure !== 'flat' ? `${opts.hfBase}-dataset` : '';
-  const hfCode = opts.hfBase && hfStructure === 'tri' ? `${opts.hfBase}-code` : '';
-  const livePushExports = [
-    hfWeights ? `export IARATTS_HF_WEIGHTS_REPO='${hfWeights}'` : '',
-    hfDataset ? `export IARATTS_HF_DATASET_REPO='${hfDataset}'` : '',
-    hfCode ? `export IARATTS_HF_CODE_REPO='${hfCode}'` : '',
-    // Backward compat
-    opts.pushToHf && !opts.hfBase ? `export IARATTS_HF_PUSH_REPO='${opts.pushToHf}'` : '',
-  ].filter(Boolean);
-  // Pre-train: push code (distill/) to code repo via curl + tar via HF API
-  const codePushStage = hfCode
-    ? `echo '[hf] pushing code to ${hfCode}...' && ` +
-      `python -c "
-from huggingface_hub import HfApi
-import os, glob
-api = HfApi(token=os.environ['HF_TOKEN'])
-api.create_repo(repo_id='${hfCode}', repo_type='model', exist_ok=True, private=False)
-for f in glob.glob('distill/**/*.py', recursive=True) + glob.glob('distill/*.sh') + glob.glob('distill/*.md'):
-    api.upload_file(path_or_fileobj=f, path_in_repo=f, repo_id='${hfCode}', repo_type='model')
-print('  code repo updated')
-" 2>&1 | tail -5 && `
-    : '';
-  // From-HF resume: download dataset + weights (and optional -code repo when
-  // the user is on the legacy 3-repo layout). 2-repo (default for presets) has
-  // no -code repo; that download is best-effort so its absence doesn't abort.
-  const fromHfStage = opts.fromHf
-    ? `echo '[hf] resume from ${opts.fromHf}...' && ` +
-      `hf download ${opts.fromHf}-dataset --repo-type dataset --local-dir /root --token "$HF_TOKEN" 2>&1 | tail -3 && ` +
-      `(hf download ${opts.fromHf}-code --local-dir /workspace --token "$HF_TOKEN" 2>&1 | tail -3 || echo '[hf] no -code repo (2-repo layout, OK)') && ` +
-      `hf download ${opts.fromHf} --local-dir /workspace/checkpoints --token "$HF_TOKEN" 2>&1 | tail -3 && ` +
-      `echo '[hf] resume artifacts ready' && `
-    : '';
-  const main = [
-    'set -euo pipefail',
-    `export HF_TOKEN='${hfToken}'`,
-    ...livePushExports,
-    ...wandbExports,
-    ...secretExports,
-    `export ${opts.noHfTransfer ? '' : 'HF_HUB_ENABLE_HF_TRANSFER=1 '}DEBIAN_FRONTEND=noninteractive`,
-    'cd /workspace',
-    `apt-get update -qq && apt-get install -y -qq ${apt}`,
-    // Preset may pin torch to a CUDA-matched wheel BEFORE the generic pip step,
-    // so subsequent `torch torchaudio` in extraDeps act as a no-op (already
-    // satisfied at the pinned version). Skipping this means pip pulls latest
-    // torch, which often mismatches the host CUDA driver and fails imports.
-    ...(plugin?.torchVersion || (preset?.manifest?.torchVersion && preset?.manifest?.torchCudaIndex)
-      ? [`pip install --quiet ${preset?.manifest?.torchVersion ? `torch==${preset.manifest.torchVersion} torchaudio==${preset.manifest.torchVersion}` : 'torch torchaudio'}${preset?.manifest?.torchCudaIndex ? ` --index-url ${preset.manifest.torchCudaIndex}` : ''}`]
-      : []),
-    `pip install --quiet --prefer-binary ${pip}`,
-    `${datasetDl}${modelDl}true`,
-    'mkdir -p /workspace/checkpoints',
-    smokeOnly
-      ? `${codePushStage}${fromHfStage}${prepStage}${encodeStage}${trainCmd}${smokeVerify}`
-      : `${codePushStage}${fromHfStage}${prepStage}${preSmokeStage}${werBg}${encodeStage}${trainCmd}${ckptAvg}${pushUp}${webhookCmd}`,
-  ].join(' && ');
-
-  console.log(`${c.cyan}[finetune]${c.reset} type=${opts.type}  gpus=${numGpus}  epochs=${epochs}  lr=${lr}`);
-  if (opts.image) {
-    console.log(`${c.cyan}[finetune]${c.reset} image=${opts.image}`);
-  }
-  // Runtime knobs surfaced so user can confirm at a glance what's about to spend $$.
-  const spotMode = (opts.preferSpot ?? true) ? 'spot' : 'on-demand';
-  const fbMode = ((opts as any).gpuFallback ?? true) ? 'on' : 'off';
-  console.log(`${c.cyan}[finetune]${c.reset} gpu=${opts.gpu || '4090'}  pricing=${spotMode}  fallback=${fbMode}  maxCost=$${opts.maxCost ?? 0.4}/h  maxSpend=$${opts.maxSpend ?? 5.0}`);
-
-  await cmdGpuJobsRun({
-    path: localPath,
-    main,
-    gpu: opts.gpu || '4090',
-    maxCost: opts.maxCost ?? 0.4,
-    maxSpend: opts.maxSpend ?? (smokeOnly ? 0.30 : 5.0),
-    output,
-    timeoutMin: smokeOnly ? 30 : 360,
-    image: opts.image || 'marcosremar/gpu-dev:latest',
-    keepAlive: false,
-    pullEveryMin: 10,
-    stallMin: 30,
-    pullExclude: ['data/', 'model/', 'wav/', '*.pt', '*.shard*', '__pycache__/'],
-    preferSpot: opts.preferSpot ?? true,
-    reuseInstance: opts.reuse ?? false,
-    abortOnDivergence: true,   // default ON for finetune (catches NaN/blow-up early)
-    gpuFallback: (opts as any).gpuFallback ?? true,  // default ON for finetune (don't fail on GPU shortage)
-    dryRun: opts.dryRun,
-  });
+  throw lastErr;
 }
 
 async function cmdGpuTrain(opts: GpuTrainOpts): Promise<void> {
@@ -2834,8 +2346,8 @@ async function cmdGpuTrain(opts: GpuTrainOpts): Promise<void> {
     keepAlive: false,
     pullEveryMin: 10,
     stallMin: 30,
-    pullExclude: ['data/', 'model/', 'wav/', '*.pt'], // skip raw dataset + intermediate; ckpts only
-    preferSpot: opts.preferSpot ?? true,
+    pullExclude: ['data/', 'model/', 'wav/'], // skip raw dataset; checkpoints (.pt) ARE pulled
+    preferSpot: opts.preferSpot ?? false,
     reuseInstance: opts.reuse ?? false,
     dryRun: opts.dryRun,
   });
@@ -5001,7 +4513,7 @@ function requireHyperstackKey(): string {
 }
 
 async function getHyperstackClient() {
-  const { HyperstackClient } = await import('../src/gateway/providers/gpu/hyperstack-client');
+  const { HyperstackClient } = await import('../src/modules/gateway/providers/gpu/hyperstack-client');
   return new HyperstackClient();
 }
 
@@ -5500,7 +5012,7 @@ async function cmdDockerBuild(dir: string, opts: {
 
   // If deploy flag is set, we must wait for build to complete
   const shouldWait = opts.wait || opts.deploy;
-  
+
   if (!shouldWait) {
     console.log(`\nTrack progress:`);
     console.log(`  ai-gateway docker status ${buildId}`);
@@ -5510,7 +5022,7 @@ async function cmdDockerBuild(dir: string, opts: {
   console.log(`\nWaiting for build to complete...`);
   const deadline = Date.now() + 50 * 60_000;
   let builtImage: string | null = null;
-  
+
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 10_000));
     const sr = await fetch(`${url}/v1/docker/builds/${buildId}`, { headers: headers(key) });
@@ -5531,12 +5043,12 @@ async function cmdDockerBuild(dir: string, opts: {
       process.exit(1);
     }
   }
-  
+
   if (!builtImage) {
     console.error(`\n${c.yellow}!${c.reset} Timed out — check: ai-gateway docker status ${buildId}`);
     process.exit(1);
   }
-  
+
   // Auto-deploy if --deploy flag is set
   if (opts.deploy && builtImage) {
     console.log(`\n${c.cyan}→${c.reset} Auto-deploying image...`);
@@ -6051,8 +5563,14 @@ Submit forms:
   ai-gateway gpu finetune submit --script ./train.py --type audio --dataset hf://r ...
 
 PRESETS (no user script needed — only train.yaml + dataset):
-  type: pocket-tts-finetune    bundled flow-matching trainer for kyutai/pocket-tts
+  type: flow-matching-tts      generic flow-matching TTS (kyutai/pocket-tts compatible)
+  type: codec-tts              generic codec TTS via cross-entropy (VUI/Fluac)
+  type: lora-llm               LoRA fine-tune for LLaMA/Mistral/Qwen 7B-32B
   type: <custom>               legacy mode — provide --script <path>
+
+PROJECTS (preset + model + dataset bundled):
+  project: pocket-tts          kyutai/pocket-tts + flow-matching-tts preset
+  project: vui-ptbr            VUI 100M + codec-tts preset + PT-BR dataset
   Run 'ai-gateway gpu finetune presets' to list installed bundled trainers.
 
 Spec keys (YAML or JSON):
@@ -6766,12 +6284,16 @@ Per-app isolation:
           }); break;
           case 'wait': {
             const inst = getArg(args, '--instance');
-            if (!inst) { console.error('Usage: ai-gateway gpu wait --instance <id> [--timeout 300]'); process.exit(1); }
-            await cmdGpuWait({
-              instance: inst,
-              timeout: getArg(args, '--timeout') ? parseInt(getArg(args, '--timeout')!) : undefined,
-              intervalSec: getArg(args, '--interval') ? parseInt(getArg(args, '--interval')!) : undefined,
-            });
+            const timeout = getArg(args, '--timeout') ? parseInt(getArg(args, '--timeout')!) : undefined;
+            if (inst) {
+              await cmdGpuWait({
+                instance: inst,
+                timeout,
+                intervalSec: getArg(args, '--interval') ? parseInt(getArg(args, '--interval')!) : undefined,
+              });
+            } else {
+              await cmdGpuWaitActive({ timeout });
+            }
             break;
           }
           case 'offers': await cmdGpuOffers({
@@ -6934,14 +6456,31 @@ Per-app isolation:
             if (!sub || sub === 'help' || sub === '--help') { console.log(HELP.gpuFinetune); break; }
             if (sub === 'submit' || sub === 'run') {
               const script = getArg(args, '--script') || spec.script;
+              const specProject = getArg(args, '--project') || spec.project;
               const specType = getArg(args, '--type') || spec.type;
-              const isPreset = specType && loadPreset(specType);
+
+              // Resolve project → inject defaults + derive preset name
+              let resolvedType = specType;
+              if (specProject) {
+                const { loadProject, resolveProjectOpts } = await import('../src/modules/gpu-finetune/index.js');
+                const proj = loadProject(specProject);
+                if (!proj) {
+                  console.error(`Unknown project '${specProject}'. Run 'ai-gateway gpu finetune projects' to list available.`);
+                  process.exit(1);
+                }
+                const { opts: merged } = resolveProjectOpts({ ...spec, project: specProject });
+                Object.assign(spec, merged);
+                resolvedType = proj.manifest.preset;
+                console.log(`[project] ${specProject} → preset: ${resolvedType}`);
+              }
+
+              const isPreset = resolvedType && loadPreset(resolvedType);
               if (!script && !isPreset) {
-                console.error('Need --script <path>, "script:" in spec, OR a built-in preset type');
+                console.error('Need --script <path>, "script:" in spec, OR a built-in preset/project type');
                 process.exit(1);
               }
               if (isPreset) {
-                console.log(`[preset] using bundled trainer: ${specType}`);
+                console.log(`[preset] using bundled trainer: ${resolvedType}`);
               }
               // #11 Validate spec before deploy. Merge CLI overrides (--type,
               // --dataset, --hf-base, --gpu) into the validation payload so
@@ -6949,7 +6488,7 @@ Per-app isolation:
               const specForValidation = {
                 ...spec,
                 script,
-                type: getArg(args, '--type') || spec.type,
+                type: resolvedType || getArg(args, '--type') || spec.type,
                 dataset: getArg(args, '--dataset') || spec.dataset,
                 hfBase: getArg(args, '--hf-base') || spec.hfBase,
                 gpu: getArg(args, '--gpu') || spec.gpu,
@@ -6988,7 +6527,8 @@ Per-app isolation:
               };
               recordFinetuneRun(mergedSpec, { ts: new Date().toISOString() });
               await cmdGpuFinetune({
-                type: (specType || 'audio') as any,
+                type: (resolvedType || specType || 'audio') as any,
+                project: specProject,
                 localPath: getArg(args, '--local-path') || spec.localPath,
                 scriptPath: script || '',  // empty triggers preset fill
                 dataset: getArg(args, '--dataset') || spec.dataset,
@@ -7008,7 +6548,7 @@ Per-app isolation:
                 output: getArg(args, '--output') || spec.output,
                 pushToHf: getArg(args, '--push-to-hf') || spec.pushToHf,
                 autoResume: hasFlag(args, '--auto-resume') || spec.autoResume === true,
-                preferSpot: hasFlag(args, '--no-spot') ? false : (hasFlag(args, '--prefer-spot') || spec.preferSpot !== false),
+                preferSpot: hasFlag(args, '--no-spot') ? false : (hasFlag(args, '--prefer-spot') || (spec.preferSpot !== false && spec.preferSpot !== 'false')),
                 reuse: hasFlag(args, '--reuse') || spec.reuse === true,
                 extraTrainArgs: getArg(args, '--extra-args') || spec.extraTrainArgs,
                 extraDeps: getArg(args, '--extra-deps') || spec.extraDeps,
@@ -7145,14 +6685,11 @@ Per-app isolation:
                 restartServer: hasFlag(args, '--restart-server'),
               });
             } else if (sub === 'list-runs') {
-              const dir = finetuneRunsDir();
-              if (!existsSync(dir)) { console.log('No runs recorded yet.'); }
+              const all = finetuneStateStore().loadAll();
+              if (all.length === 0) { console.log('No runs recorded yet.'); }
               else {
-                for (const f of readdirSync(dir).filter((f) => f.endsWith('.json'))) {
-                  try {
-                    const r = JSON.parse(readFileSync(join(dir, f), 'utf-8'));
-                    console.log(`${r.id}  ${r.ts}  type=${r.spec?.type}  lr=${r.spec?.lr}`);
-                  } catch { /* skip */ }
+                for (const r of all) {
+                  console.log(`${r.id}  ${r.ts}  type=${r.spec?.type}  lr=${r.spec?.lr}`);
                 }
               }
             } else if (sub === 'compare') {
@@ -7165,33 +6702,23 @@ Per-app isolation:
                 whisperModel: getArg(args, '--whisper-model'),
               });
             } else if (sub === 'plugins') {
-              for (const [name, p] of Object.entries(PLUGINS)) {
+              for (const [name, p] of Object.entries(BUNDLED_PLUGINS)) {
                 console.log(`  ${name.padEnd(12)} ${p.description}`);
               }
             } else if (sub === 'presets') {
-              const presetsDir = require('path').resolve(
-                require('path').dirname(new URL(import.meta.url).pathname), '..', 'finetune-presets',
-              );
-              if (!existsSync(presetsDir)) { console.log('No presets dir found.'); break; }
-              const dirs = require('fs').readdirSync(presetsDir).filter((d: string) =>
-                require('fs').statSync(require('path').join(presetsDir, d)).isDirectory()
-              );
-              if (dirs.length === 0) { console.log('No presets installed.'); break; }
+              const presets = listPresets();
+              if (presets.length === 0) { console.log('No presets installed.'); break; }
               console.log('Available finetune presets (bundled, no user script needed):');
-              for (const d of dirs) {
-                const mp = require('path').join(presetsDir, d, 'manifest.json');
-                if (!existsSync(mp)) continue;
-                try {
-                  const m = JSON.parse(readFileSync(mp, 'utf-8'));
-                  console.log(`  ${m.name} v${m.version}`);
-                  console.log(`    ${m.description}`);
-                  console.log(`    type: ${m.type}, lr: ${m.defaultLR}, epochs: ${m.defaultEpochs}, gpu: ${m.defaultGpu || '(any)'}, maxSpend: $${m.defaultMaxSpend ?? '(unset)'}`);
-                  if (m.defaultModel) console.log(`    base: ${m.defaultModel}`);
-                  if (Array.isArray(m.knownTags) && m.knownTags.length) {
-                    console.log(`    tags: ${m.knownTags.slice(0, 6).join(' ')}${m.knownTags.length > 6 ? ' …' : ''}`);
-                  }
-                  if (m.notes) console.log(`    notes: ${m.notes}`);
-                } catch { /* skip */ }
+              for (const p of presets) {
+                const m = p.manifest;
+                console.log(`  ${m.name} v${m.version}`);
+                console.log(`    ${m.description}`);
+                console.log(`    type: ${m.type}, lr: ${m.defaultLR}, epochs: ${m.defaultEpochs}, gpu: ${m.defaultGpu || '(any)'}, maxSpend: $${m.defaultMaxSpend ?? '(unset)'}`);
+                if (m.defaultModel) console.log(`    base: ${m.defaultModel}`);
+                if (Array.isArray(m.knownTags) && m.knownTags.length) {
+                  console.log(`    tags: ${m.knownTags.slice(0, 6).join(' ')}${m.knownTags.length > 6 ? ' …' : ''}`);
+                }
+                if (m.notes) console.log(`    notes: ${m.notes}`);
               }
             } else if (sub === 'watch-web') {
               await cmdGpuFinetuneWatchWeb();
@@ -7379,6 +6906,9 @@ Per-app isolation:
           count: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : getArg(args, '--count') ? parseInt(getArg(args, '--count')!) : undefined,
         });
         break;
+      case 'lightning':
+        await cmdLightning(args.slice(1));
+        break;
       default:
         console.error(`Unknown command: ${cmd}. Run 'ai-gateway help' for usage.`);
         process.exit(1);
@@ -7390,6 +6920,223 @@ Per-app isolation:
       console.error(`Error: ${err.message || err}`);
     }
     process.exit(1);
+  }
+}
+
+// ── Lightning AI studio commands ────────────────────────────────────────────
+
+const LIGHTNING_API_BASE = 'https://lightning.ai/v1';
+const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+
+interface LightningEnvConfig {
+  apiKey: string;
+  projectId: string;
+  cloudspaceId: string;
+  sshUser: string;
+  sshHost: string;
+  sshKeyPath: string;
+}
+
+function loadLightningConfigFromEnv(): LightningEnvConfig | null {
+  const apiKey = process.env.LIGHTNING_API_KEY;
+  const projectId = process.env.LIGHTNING_PROJECT_ID;
+  const cloudspaceId = process.env.LIGHTNING_CLOUDSPACE_ID;
+  const sshUser = process.env.LIGHTNING_SSH_USER;
+  if (!apiKey || !projectId || !cloudspaceId || !sshUser) return null;
+  return {
+    apiKey,
+    projectId,
+    cloudspaceId,
+    sshUser,
+    sshHost: process.env.LIGHTNING_SSH_HOST ?? 'ssh.lightning.ai',
+    sshKeyPath: process.env.LIGHTNING_SSH_KEY ?? `${process.env.HOME}/.ssh/id_ed25519`,
+  };
+}
+
+async function lightningApiGet(cfg: LightningEnvConfig): Promise<Record<string, unknown>> {
+  const res = await fetch(
+    `${LIGHTNING_API_BASE}/projects/${cfg.projectId}/cloudspaces/${cfg.cloudspaceId}`,
+    { headers: { 'Authorization': `Bearer ${cfg.apiKey}` } }
+  );
+  if (!res.ok) throw new Error(`Lightning API ${res.status}: ${await res.text()}`);
+  const data = await res.json() as Record<string, unknown>;
+  const inUse = (data.codeStatus as Record<string, unknown>)?.inUse as Record<string, unknown> | null;
+  return {
+    phase: inUse?.phase ?? 'STOPPED',
+    sshUser: inUse?.sshUsername,
+    sshHost: inUse?.sshHost,
+    instanceId: inUse?.cloudSpaceInstanceId,
+  };
+}
+
+async function lightningApiStart(cfg: LightningEnvConfig): Promise<void> {
+  const res = await fetch(
+    `${LIGHTNING_API_BASE}/projects/${cfg.projectId}/cloudspaces/${cfg.cloudspaceId}/start`,
+    { method: 'POST', headers: { 'Authorization': `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' }, body: '{}' }
+  );
+  const body = await res.json() as Record<string, unknown>;
+  if (!res.ok && body.code !== 2) throw new Error(`Start failed: ${body.message ?? res.status}`);
+}
+
+async function lightningApiStop(cfg: LightningEnvConfig): Promise<void> {
+  const res = await fetch(
+    `${LIGHTNING_API_BASE}/projects/${cfg.projectId}/cloudspaces/${cfg.cloudspaceId}/stop`,
+    { method: 'POST', headers: { 'Authorization': `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' }, body: '{}' }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+    throw new Error(`Stop failed: ${body.message ?? res.status}`);
+  }
+}
+
+async function lightningWaitRunning(cfg: LightningEnvConfig, timeoutMs = 5 * 60 * 1000): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const s = await lightningApiGet(cfg);
+    if (s.phase === 'CLOUD_SPACE_INSTANCE_STATE_RUNNING') return s;
+    if (s.phase === 'STOPPED') throw new Error('Studio stopped unexpectedly during boot');
+    await new Promise(r => setTimeout(r, 5000));
+  }
+  throw new Error(`Studio did not reach RUNNING within ${timeoutMs / 1000}s`);
+}
+
+// Notify gateway server (optional — only when server is running)
+async function lightningNotifyServer(gwUrl: string, path: string, gwKey?: string): Promise<void> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (gwKey) headers['Authorization'] = `Bearer ${gwKey}`;
+  await fetch(`${gwUrl}${path}`, { method: 'POST', headers, signal: AbortSignal.timeout(2000) }).catch(() => {});
+}
+
+async function cmdLightning(args: string[]): Promise<void> {
+  const sub = args[0];
+
+  if (!sub || sub === 'help' || sub === '--help') {
+    console.log(`
+Lightning AI studio commands:
+
+  ai-gateway lightning status     Show studio status
+  ai-gateway lightning start      Start studio and wait until running
+  ai-gateway lightning stop       Stop studio immediately
+  ai-gateway lightning ssh        Lazy-start + SSH in (auto-stop after 15 min idle)
+
+Config (add to .env):
+  LIGHTNING_API_KEY       API key (LIGHTNING_API_KEY inside studio env)
+  LIGHTNING_PROJECT_ID    Project ID (LIGHTNING_CLOUD_PROJECT_ID inside studio)
+  LIGHTNING_CLOUDSPACE_ID Cloudspace ID (LIGHTNING_CLOUD_SPACE_ID inside studio)
+  LIGHTNING_SSH_USER      SSH username (s_<cloudspaceId>)
+  LIGHTNING_SSH_KEY       SSH private key path (default: ~/.ssh/id_ed25519)
+`);
+    return;
+  }
+
+  const cfg = loadLightningConfigFromEnv();
+  if (!cfg) {
+    console.error('Lightning AI not configured. Set LIGHTNING_API_KEY, LIGHTNING_PROJECT_ID, LIGHTNING_CLOUDSPACE_ID, LIGHTNING_SSH_USER in .env');
+    process.exit(1);
+  }
+
+  switch (sub) {
+    case 'status': {
+      const s = await lightningApiGet(cfg);
+      const running = s.phase === 'CLOUD_SPACE_INSTANCE_STATE_RUNNING';
+      console.log(`Studio: ${running ? c.green + 'RUNNING' : c.yellow + s.phase}${c.reset}`);
+      if (s.sshUser) console.log(`SSH:    ${s.sshUser}@${s.sshHost}`);
+      break;
+    }
+
+    case 'start': {
+      process.stdout.write('Starting Lightning AI studio...');
+      await lightningApiStart(cfg);
+      const s = await lightningWaitRunning(cfg);
+      console.log(` ${c.green}RUNNING${c.reset}`);
+      if (s.sshUser) console.log(`SSH: ${s.sshUser}@${s.sshHost}`);
+      break;
+    }
+
+    case 'stop': {
+      const s = await lightningApiGet(cfg);
+      if (s.phase === 'STOPPED' || !s.instanceId) { console.log('Studio already stopped.'); break; }
+      await lightningApiStop(cfg);
+      console.log('Studio stopped.');
+      break;
+    }
+
+    case 'ssh': {
+      // 1. Check + lazy-start
+      process.stdout.write('Checking studio...');
+      let status = await lightningApiGet(cfg);
+
+      if (status.phase !== 'CLOUD_SPACE_INSTANCE_STATE_RUNNING') {
+        process.stdout.write(` ${c.yellow}sleeping${c.reset} — waking up`);
+        await lightningApiStart(cfg);
+        let dots = 0;
+        const ticker = setInterval(() => { process.stdout.write('.'); dots++; }, 3000);
+        try {
+          status = await lightningWaitRunning(cfg);
+        } finally {
+          clearInterval(ticker);
+        }
+      }
+      console.log(` ${c.green}RUNNING${c.reset}`);
+
+      const sshUser = (status.sshUser as string) || cfg.sshUser;
+      const sshHost = (status.sshHost as string) || cfg.sshHost;
+
+      // 2. Notify gateway server (best-effort — idle tracker)
+      const gwUrl = getConfig().url;
+      const gwKey = getConfig().key;
+      await lightningNotifyServer(gwUrl, '/v1/lightning/session/start', gwKey);
+
+      // 3. On exit: notify server + optionally schedule idle stop
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      const scheduleIdleStop = () => {
+        idleTimer = setTimeout(async () => {
+          const cur = await lightningApiGet(cfg).catch(() => ({ phase: 'STOPPED', instanceId: null }));
+          if (cur.phase === 'CLOUD_SPACE_INSTANCE_STATE_RUNNING') {
+            await lightningApiStop(cfg).catch(() => {});
+            console.log('\n[lightning] idle timeout — studio stopped');
+          }
+        }, IDLE_TIMEOUT_MS);
+      };
+
+      const notifyEnd = () => {
+        lightningNotifyServer(gwUrl, '/v1/lightning/session/end', gwKey).catch(() => {});
+        // If gateway server not running, handle idle stop locally
+        scheduleIdleStop();
+      };
+
+      process.on('SIGINT', () => { notifyEnd(); process.exit(0); });
+      process.on('SIGTERM', () => { notifyEnd(); process.exit(0); });
+
+      // 4. Connect SSH
+      console.log(`Connecting to ${sshUser}@${sshHost}...\n`);
+      const extraArgs = args.slice(1);
+      const sshArgs = [
+        '-i', cfg.sshKeyPath,
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=/dev/null',
+        '-o', 'ServerAliveInterval=30',
+        ...extraArgs,
+        `${sshUser}@${sshHost}`,
+      ];
+      const ssh = require('child_process').spawn('ssh', sshArgs, { stdio: 'inherit' });
+      ssh.on('close', (code: number) => {
+        notifyEnd();
+        // Keep process alive for idle timer if running standalone
+        if (idleTimer) {
+          console.log(`\nSSH session ended. Studio auto-stops in ${IDLE_TIMEOUT_MS / 60000} min if unused.`);
+          // Let the idle timer fire then exit
+          idleTimer.unref(); // don't block node exit if something else exits first
+        }
+        process.exit(code ?? 0);
+      });
+      break;
+    }
+
+    default:
+      console.error(`Unknown lightning subcommand: ${sub}`);
+      console.log('Usage: ai-gateway lightning <status|start|stop|ssh>');
+      process.exit(1);
   }
 }
 

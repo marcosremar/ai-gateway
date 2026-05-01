@@ -11,6 +11,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   validateManifest,
+  validateDockerContractManifest,
+  defaultApiPathsForCapabilities,
   getLatencyTarget,
   DEFAULT_LATENCY_TARGETS,
   type DockerManifest,
@@ -34,6 +36,27 @@ describe('Docker Manifest Types', () => {
   describe('validateManifest', () => {
     it('should accept valid manifest', () => {
       expect(validateManifest(validManifest)).toBe(true);
+    });
+
+    it('should accept GLB generation manifest contract', () => {
+      const manifest: DockerManifest = {
+        id: 'hunyuan3d',
+        name: 'Hunyuan3D',
+        version: '1.0.0',
+        contractVersion: '1.0',
+        capabilities: ['glb_generation'],
+        api: {
+          glb_generation: {
+            endpoint: '/generate-from-text',
+            method: 'POST',
+            responseFormat: 'json',
+          },
+        },
+        models: ['tencent/Hunyuan3D-2'],
+      };
+
+      expect(validateManifest(manifest)).toBe(true);
+      expect(validateDockerContractManifest(manifest, ['glb_generation'], ['/generate-from-text']).ok).toBe(true);
     });
 
     it('should reject null manifest', () => {
@@ -96,9 +119,9 @@ describe('Docker Manifest Types', () => {
     });
 
     it('should reject manifest with invalid capability', () => {
-      const invalid = { 
-        ...validManifest, 
-        capabilities: ['stt', 'invalid-capability'] 
+      const invalid = {
+        ...validManifest,
+        capabilities: ['stt', 'invalid-capability']
       };
       expect(validateManifest(invalid)).toBe(false);
     });
@@ -124,17 +147,21 @@ describe('Docker Manifest Types', () => {
     });
 
     it('should accept manifest with all valid capabilities', () => {
-      const allCaps: DockerCapability[] = ['stt', 'llm', 'tts', 'image', 'embedding', 'rerank'];
-      const manifest = { 
-        ...validManifest, 
+      const allCaps: DockerCapability[] = ['speech_pipeline', 'openai_compat', 'stt', 'llm', 'tts', 'image', 'embedding', 'rerank', 'glb_generation', 'motion_generation'];
+      const manifest = {
+        ...validManifest,
         capabilities: allCaps,
         api: {
+          speech_pipeline: { endpoint: '/v1/speech' },
+          openai_compat: { endpoint: '/v1/models' },
           stt: { endpoint: '/stt' },
           llm: { endpoint: '/llm' },
           tts: { endpoint: '/tts' },
           image: { endpoint: '/image' },
           embedding: { endpoint: '/embed' },
           rerank: { endpoint: '/rerank' },
+          glb_generation: { endpoint: '/generate-from-text' },
+          motion_generation: { endpoint: '/generate' },
         },
       };
       expect(validateManifest(manifest)).toBe(true);
@@ -166,11 +193,22 @@ describe('Docker Manifest Types', () => {
       };
       expect(validateManifest(withOptionals)).toBe(true);
     });
+
+    it('should report missing endpoint for declared capability contract', () => {
+      const invalid = {
+        ...validManifest,
+        capabilities: ['glb_generation'] as DockerCapability[],
+        api: {},
+      };
+      const result = validateDockerContractManifest(invalid, ['glb_generation'], ['/generate-from-text']);
+      expect(result.ok).toBe(false);
+      expect(result.errors.join(' ')).toContain('api.glb_generation.endpoint');
+    });
   });
 
   describe('DEFAULT_LATENCY_TARGETS', () => {
     it('should have targets for all capabilities', () => {
-      const caps: DockerCapability[] = ['stt', 'llm', 'tts', 'image', 'embedding', 'rerank'];
+      const caps: DockerCapability[] = ['speech_pipeline', 'openai_compat', 'stt', 'llm', 'tts', 'image', 'embedding', 'rerank', 'glb_generation', 'motion_generation'];
       for (const cap of caps) {
         expect(DEFAULT_LATENCY_TARGETS[cap]).toBeDefined();
         expect(typeof DEFAULT_LATENCY_TARGETS[cap]).toBe('number');
@@ -185,6 +223,13 @@ describe('Docker Manifest Types', () => {
       expect(DEFAULT_LATENCY_TARGETS.image).toBe(5000);
       expect(DEFAULT_LATENCY_TARGETS.embedding).toBe(300);
       expect(DEFAULT_LATENCY_TARGETS.rerank).toBe(200);
+      expect(DEFAULT_LATENCY_TARGETS.glb_generation).toBe(60_000);
+    });
+  });
+
+  describe('defaultApiPathsForCapabilities', () => {
+    it('maps glb_generation to text-to-GLB endpoint', () => {
+      expect(defaultApiPathsForCapabilities(['glb_generation'])).toContain('/generate-from-text');
     });
   });
 
@@ -220,7 +265,7 @@ describe('Docker Manifest Types', () => {
         ...validManifest,
         latencyTargets: undefined,
       };
-      const caps: DockerCapability[] = ['stt', 'llm', 'tts', 'image', 'embedding', 'rerank'];
+      const caps: DockerCapability[] = ['speech_pipeline', 'openai_compat', 'stt', 'llm', 'tts', 'image', 'embedding', 'rerank', 'glb_generation', 'motion_generation'];
       for (const cap of caps) {
         expect(getLatencyTarget(manifest, cap)).toBe(DEFAULT_LATENCY_TARGETS[cap]);
       }

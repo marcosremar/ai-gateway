@@ -158,6 +158,59 @@ export function resetReadinessCheck(): void {
   setGpuReadinessState({ autoRecoveryAttempt: 0 });
 }
 
+function hasSpeechPipelineHealth(data: Record<string, unknown>): boolean {
+  const services = data.services;
+  if (services && typeof services === 'object') {
+    const svc = services as Record<string, unknown>;
+    return ['whisper', 'llama_cpp', 'tts', 'stt', 'llm'].some((key) => key in svc);
+  }
+  return ['stt_ready', 'llm_ready', 'tts_ready', 'whisper_ready', 'llama_ready'].some((key) => key in data);
+}
+
+function hasSpeechPipelinePaths(paths: string[]): boolean {
+  return paths.some((path) =>
+    path === '/v1/transcribe' ||
+    path === '/v1/translate/text' ||
+    path === '/v1/tts' ||
+    path === '/v1/audio/transcriptions' ||
+    path === '/v1/chat/completions' ||
+    path === '/v1/audio/speech'
+  );
+}
+
+function hasGenericGpuAppPaths(paths: string[]): boolean {
+  return paths.some((path) =>
+    path === '/generate' ||
+    path === '/generate-from-text' ||
+    path === '/generate-from-url'
+  );
+}
+
+export async function shouldRunGpuReadinessCheck(endpoint: string): Promise<boolean> {
+  try {
+    const health = await fetch(`${endpoint.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(3_000) });
+    if (health.ok) {
+      const data = await health.json().catch(() => null) as Record<string, unknown> | null;
+      if (data && hasSpeechPipelineHealth(data)) return true;
+    }
+  } catch {
+    return true;
+  }
+
+  try {
+    const openapi = await fetch(`${endpoint.replace(/\/$/, '')}/openapi.json`, { signal: AbortSignal.timeout(3_000) });
+    if (!openapi.ok) return true;
+    const doc = await openapi.json().catch(() => null) as { paths?: Record<string, unknown> } | null;
+    const paths = Object.keys(doc?.paths ?? {});
+    if (hasSpeechPipelinePaths(paths)) return true;
+    if (hasGenericGpuAppPaths(paths)) return false;
+  } catch {
+    return true;
+  }
+
+  return true;
+}
+
 // ── Pre-built silence WAV for STT benchmarks (reused across all runs) ────────
 
 const STT_BENCH_WAV = (() => {
