@@ -18,6 +18,13 @@ import { modalVoxtralSTT } from '../src/providers/modal-voxtral';
 import { MlxQwen3AsrProvider, mlxQwen3AsrSTT } from '../src/providers/mlx-qwen3-asr';
 import { openrouterQwen3Embedding } from '../src/providers/openrouter/openrouter-embedding';
 import { openrouterLLM } from '../src/providers/openrouter';
+import {
+  codexLocalLLM,
+  claudeLocalLLM,
+  CODEX_MODELS,
+  CLAUDE_MODELS,
+  REASONING_LEVELS,
+} from '../src/providers/local-cli';
 import { openaiEmbedding } from '../src/providers/openai/openai-embedding';
 import { AIProviderRegistry } from '../src/providers/registry';
 import { createAIClient } from '../src/client';
@@ -67,7 +74,12 @@ export function getProviderP95(provider: string, stage: string): number | null {
   const tracker = providerLatencyTracker[key];
   if (!tracker || tracker.samples.length < 5) return null;
   const sorted = [...tracker.samples].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length * 0.95)];
+  // Nearest-rank percentile: ceil(N * P) - 1. Math.floor used to land
+  // on N when N*0.95 was an integer (e.g. N=20 → floor(19)=19 picks the
+  // max), which made the P95 leak in a single outlier. Clamp to >=0
+  // for tiny samples just in case.
+  const idx = Math.max(0, Math.ceil(sorted.length * 0.95) - 1);
+  return sorted[idx];
 }
 
 // ── Provider availability ────────────────────────────────────────────────────
@@ -323,6 +335,51 @@ if (openaiAvailable) {
     });
   }
   log.log('OpenAI registered (STT: gpt-4o-transcribe, TTS: fallback)');
+}
+
+// Local-CLI LLMs — codex and claude binaries running on this host. Auth comes
+// from each CLI's own keychain/OAuth, so no API key is required at the gateway.
+// Probed at boot via `command -v <bin>`; falls through silently when missing.
+export const codexLocalAvailable = codexLocalLLM.isConfigured();
+export const claudeLocalAvailable = claudeLocalLLM.isConfigured();
+if (codexLocalAvailable) {
+  registry.register({
+    id: 'local-codex' as ProviderId,
+    name: 'Local Codex CLI',
+    description: 'OpenAI Codex CLI (gpt-5.5) running on this host',
+    capabilities: ['llm'],
+    requiresApiKey: false,
+    llm: codexLocalLLM,
+  });
+  // Expose every codex model × reasoning-level combination so the proxy's
+  // model→provider map can route them. The provider's modelAliases strips
+  // the `codex-` prefix and reasoning suffix back to the CLI's real model.
+  for (const m of CODEX_MODELS) {
+    providers.chat![`codex-${m}`] = codexLocalLLM;
+    for (const level of REASONING_LEVELS) {
+      providers.chat![`codex-${m}-${level}`] = codexLocalLLM;
+    }
+  }
+  providers.chat!['codex-local'] = codexLocalLLM;
+  log.log(`Local Codex CLI registered (models: ${CODEX_MODELS.join(',')}, levels: ${REASONING_LEVELS.join(',')}, bin: ${process.env.LOCAL_CODEX_BIN || 'codex'})`);
+}
+if (claudeLocalAvailable) {
+  registry.register({
+    id: 'local-claude' as ProviderId,
+    name: 'Local Claude Code',
+    description: 'Claude Code CLI (sonnet/haiku/opus) running on this host',
+    capabilities: ['llm'],
+    requiresApiKey: false,
+    llm: claudeLocalLLM,
+  });
+  for (const m of CLAUDE_MODELS) {
+    providers.chat![`claude-${m}`] = claudeLocalLLM;
+    for (const level of REASONING_LEVELS) {
+      providers.chat![`claude-${m}-${level}`] = claudeLocalLLM;
+    }
+  }
+  providers.chat!['claude-local'] = claudeLocalLLM;
+  log.log(`Local Claude Code registered (models: ${CLAUDE_MODELS.join(',')}, levels: ${REASONING_LEVELS.join(',')}, bin: ${process.env.LOCAL_CLAUDE_BIN || 'claude'})`);
 }
 
 // ElevenLabs Scribe STT — highest accuracy (2.3% WER)

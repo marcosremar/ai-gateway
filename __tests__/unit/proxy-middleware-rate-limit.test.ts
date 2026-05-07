@@ -98,12 +98,15 @@ describe('RateLimiter', () => {
       expect(RateLimiter.clientId(req)).toBe('ip:1.2.3.4');
     });
 
-    it('falls back to IP when token too short', () => {
+    it('hashes any non-empty token (no IP fallback for short tokens)', () => {
+      // Previously short tokens (<8 chars) fell through to IP bucketing,
+      // letting a caller send `Bearer x` to escape per-key limits and join
+      // the (possibly NAT-shared) IP bucket.
       const req = {
         headers: { authorization: 'Bearer abc' },
         socket: { remoteAddress: '1.2.3.4' },
       } as any;
-      expect(RateLimiter.clientId(req)).toBe('ip:1.2.3.4');
+      expect(RateLimiter.clientId(req)).toMatch(/^key:[0-9a-f]+$/);
     });
 
     it('handles unknown IP', () => {

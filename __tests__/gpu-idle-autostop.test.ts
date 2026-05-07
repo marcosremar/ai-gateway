@@ -1242,7 +1242,10 @@ describe('GPU heartbeat endpoint — source verification', () => {
 
   it('heartbeat returns idleTimeoutMs and lastModelRequestAt', () => {
     const fnIdx = src.indexOf('handleGpuHeartbeat');
-    const fnBody = src.slice(fnIdx, fnIdx + 1500);
+    // Bumped slice — handleGpuHeartbeat grew past the prior 1500-char window
+    // when the per-app scoping branch landed between the destructure and the
+    // response body that mentions idleTimeoutMs / lastModelRequestAt.
+    const fnBody = src.slice(fnIdx, fnIdx + 6000);
     expect(fnBody).toContain('idleTimeoutMs');
     expect(fnBody).toContain('lastModelRequestAt');
   });

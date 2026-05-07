@@ -44,10 +44,13 @@ describe('requireAuth', () => {
     expect(result.apiKey).toBe('sk-valid-key');
   });
 
-  it('should authenticate with plain API key', () => {
+  it('rejects a plain API key without Bearer prefix', () => {
+    // Previously any non-Bearer Authorization value was accepted verbatim
+    // as the key — that allowed `Authorization: Basic xyz` or arbitrary
+    // strings matching a configured key. Header now requires the prefix.
     const req = createMockRequest({ authorization: 'sk-valid-key' });
     const result = requireAuth(req, config);
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
   });
 
   it('should reject missing auth', () => {

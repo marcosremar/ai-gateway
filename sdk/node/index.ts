@@ -119,6 +119,10 @@ export class GatewayHttpClient {
     } = {},
   ): Promise<{ data: T; requestId: string; response: Response }> {
     if (this.closed) throw new Error('Client is closed');
+    // Short-circuit when the breaker is open so callers fail fast with
+    // CircuitOpenError instead of paying for one more request that will
+    // either time out or pile another failure onto the count.
+    this.circuitBreaker.allowRequest();
 
     const requestId = generateRequestId();
     const timeoutMs = options.timeoutMs ?? this.timeouts.defaultMs;

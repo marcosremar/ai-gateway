@@ -11,30 +11,33 @@ import { RunawayDetector } from '../src/autoscaler/runaway-detector';
 
 describe('RunawayDetector', () => {
   describe('with default config (6 starts / 2 min / 15 min pause)', () => {
-    it('allows the first 6 starts in rapid succession', () => {
+    // The detector trips the gate on the Nth event (>=) — refusing that
+    // very call breaks the loop one earlier than the previous (>) check
+    // which allowed maxStarts+1 events before pausing.
+    it('allows the first 5 starts in rapid succession (the 6th trips)', () => {
       const det = new RunawayDetector();
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 5; i++) {
         expect(det.recordDeployStart('runpod')).toBe(true);
       }
     });
 
-    it('refuses the 7th start and pauses the provider', () => {
+    it('refuses the 6th start and pauses the provider', () => {
       const det = new RunawayDetector();
-      for (let i = 0; i < 6; i++) det.recordDeployStart('runpod');
+      for (let i = 0; i < 5; i++) det.recordDeployStart('runpod');
       expect(det.recordDeployStart('runpod')).toBe(false);
       expect(det.isPaused('runpod')).toBe(true);
     });
 
-    it('fires onPause listener on the 7th start with the right metadata', () => {
+    it('fires onPause listener on the 6th start with the right metadata', () => {
       const events: Array<{ provider: string; startCount: number }> = [];
       const det = new RunawayDetector();
       det.onPause(e => events.push({ provider: e.provider, startCount: e.startCount }));
-      for (let i = 0; i < 6; i++) det.recordDeployStart('runpod');
+      for (let i = 0; i < 5; i++) det.recordDeployStart('runpod');
       expect(events).toHaveLength(0);
       det.recordDeployStart('runpod'); // triggers the pause
       expect(events).toHaveLength(1);
       expect(events[0].provider).toBe('runpod');
-      expect(events[0].startCount).toBe(7);
+      expect(events[0].startCount).toBe(6);
     });
   });
 
@@ -48,11 +51,10 @@ describe('RunawayDetector', () => {
         now: () => now,
       });
 
-      // Fill the window
+      // Fill the window — Nth event trips the gate (>=)
       expect(det.recordDeployStart('vast')).toBe(true); // t=1000
       expect(det.recordDeployStart('vast')).toBe(true); // t=1000
-      expect(det.recordDeployStart('vast')).toBe(true); // t=1000
-      // 4th within the window — runaway trip
+      // 3rd within the window — runaway trip (maxStarts=3)
       expect(det.recordDeployStart('vast')).toBe(false);
       expect(det.isPaused('vast')).toBe(true);
 
@@ -67,12 +69,15 @@ describe('RunawayDetector', () => {
       let now = 1000;
       const det = new RunawayDetector({
         maxStarts: 3,
-        windowMs: 10_000,
+        // Window deliberately just under 2× the inter-start gap so the
+        // sliding cutoff drops the previous start before the new one
+        // pushes the count to 3.
+        windowMs: 9_000,
         pauseMs: 60_000,
         now: () => now,
       });
 
-      // 1 start per 5 seconds → only 2 in any 10s window
+      // 1 start per 5 seconds → at most 1 in the trailing 9s window
       for (let i = 0; i < 20; i++) {
         expect(det.recordDeployStart('runpod')).toBe(true);
         now += 5_000;
@@ -85,8 +90,7 @@ describe('RunawayDetector', () => {
     it('pauses one provider without affecting another', () => {
       const det = new RunawayDetector({ maxStarts: 2, windowMs: 60_000 });
       det.recordDeployStart('runpod');
-      det.recordDeployStart('runpod');
-      det.recordDeployStart('runpod'); // 3rd trips the pause
+      det.recordDeployStart('runpod'); // 2nd trips the pause (maxStarts=2)
       expect(det.isPaused('runpod')).toBe(true);
       expect(det.isPaused('vast')).toBe(false);
       // Vast is unaffected
@@ -103,8 +107,7 @@ describe('RunawayDetector', () => {
         pauseMs: 5_000,
         now: () => now,
       });
-      det.recordDeployStart('runpod');
-      det.recordDeployStart('runpod'); // trips
+      det.recordDeployStart('runpod'); // trips immediately (maxStarts=1)
       expect(det.isPaused('runpod')).toBe(true);
       now += 5_001;
       expect(det.isPaused('runpod')).toBe(false);
@@ -118,9 +121,9 @@ describe('RunawayDetector', () => {
     });
 
     it('manual clear() lifts both auto and manual pauses', () => {
-      const det = new RunawayDetector({ maxStarts: 1, windowMs: 60_000 });
+      const det = new RunawayDetector({ maxStarts: 2, windowMs: 60_000 });
       det.recordDeployStart('runpod');
-      det.recordDeployStart('runpod'); // trips
+      det.recordDeployStart('runpod'); // 2nd trips (maxStarts=2)
       expect(det.isPaused('runpod')).toBe(true);
       det.clear('runpod');
       expect(det.isPaused('runpod')).toBe(false);
@@ -164,12 +167,12 @@ describe('RunawayDetector', () => {
       const listener = vi.fn();
       det.onPause(listener);
 
-      // First 6 attempts — detector allows, records window
-      for (let i = 0; i < 6; i++) {
+      // First 5 attempts — detector allows, records window
+      for (let i = 0; i < 5; i++) {
         expect(det.recordDeployStart('runpod')).toBe(true);
         now += 10_000; // 10s between loop iterations
       }
-      // The 7th attempt lands 60s into the window (6 × 10s) — still
+      // The 6th attempt lands 50s into the window (5 × 10s) — still
       // within the 2min window, so the detector should pause.
       expect(det.recordDeployStart('runpod')).toBe(false);
       expect(listener).toHaveBeenCalledOnce();

@@ -378,11 +378,10 @@ describe('race deploy — startDeployRace', () => {
   });
 
   it('#201 winner aborts all other slots via AbortController', () => {
-    const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
-    const fnEnd = deployRaceSource.indexOf('\nexport ', fnStart + 100);
-    const fnBody = deployRaceSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
-    expect(fnBody).toContain('raceAbort.abort()');
-    expect(fnBody).toContain('AbortController');
+    // Scan the whole file — startDeployRace grew past the prior 15KB slice
+    // when the AbortController plumbing landed.
+    expect(deployRaceSource).toContain('raceAbort.abort()');
+    expect(deployRaceSource).toContain('AbortController');
   });
 
   it('#202 losers are terminated with wasted cost logging', () => {
@@ -452,7 +451,7 @@ describe('budget enforcement', () => {
   it('#209 uses actual elapsed time for budget calculation (not assumed interval)', () => {
     const budgetSection = monitorLoopSource.slice(
       monitorLoopSource.indexOf('Budget tracking: accumulate'),
-      monitorLoopSource.indexOf('Budget tracking: accumulate') + 500,
+      monitorLoopSource.indexOf('Budget tracking: accumulate') + 2000,
     );
     expect(budgetSection).toContain('lastBudgetCalcTime');
     expect(budgetSection).toContain('actualElapsedMs');
@@ -462,7 +461,7 @@ describe('budget enforcement', () => {
   it('#210 daily reset compares date strings', () => {
     const budgetSection = monitorLoopSource.slice(
       monitorLoopSource.indexOf('Budget tracking: accumulate'),
-      monitorLoopSource.indexOf('Budget tracking: accumulate') + 500,
+      monitorLoopSource.indexOf('Budget tracking: accumulate') + 2000,
     );
     expect(budgetSection).toContain('dailySpendResetDate');
     expect(budgetSection).toContain('setDailyGpuSpendUsd(0)');

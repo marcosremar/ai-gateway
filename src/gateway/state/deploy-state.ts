@@ -174,6 +174,10 @@ export function persistDeployState(): void {
       providerMeta: deployState.providerMeta ?? {},
       savedAt: Date.now(),
       status: deployState.status,
+      // Carry the deploy correlation id through persistence so the orphan
+      // sweep on the next gateway start can match a stray pod back to its
+      // owning deploy session instead of nuking it as untracked.
+      ...(deployState.deployId ? { deployId: deployState.deployId } : {}),
       ...(isStopped ? { stoppedAt: Date.now() } : {}),
       ...(deployState.devMode ? { devMode: true } : {}),
       ...(deployState.readinessProbe ? { readinessProbe: deployState.readinessProbe } : {}),

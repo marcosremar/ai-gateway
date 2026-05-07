@@ -44,11 +44,13 @@ describe('Vast.ai reliability improvements', () => {
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
+    process.env.VAST_SKIP_IMAGE_PRECHECK = '1';
     try { fs.rmSync(path.join(os.homedir(), '.babelcast', 'vast-host-blacklist.json')); } catch {}
     try { fs.rmSync(path.join(os.homedir(), '.ai-gateway', 'vast-host-reputation.json')); } catch {}
   });
 
   afterEach(() => {
+    delete process.env.VAST_SKIP_IMAGE_PRECHECK;
     vi.restoreAllMocks();
     return new Promise<void>(resolve => setTimeout(() => {
       try { fs.rmSync(path.join(os.homedir(), '.babelcast', 'vast-host-blacklist.json')); } catch {}

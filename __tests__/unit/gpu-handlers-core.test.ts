@@ -191,6 +191,7 @@ vi.mock('../../server/http-utils', () => ({
 
 vi.mock('../../src/preflight-checks', () => ({
   runPreFlightChecks: vi.fn(() => Promise.resolve({ ok: true, checks: [], errors: [], warnings: [] })),
+  validateDockerImageReference: vi.fn(() => ({ ok: true, normalized: '' })),
 }));
 
 vi.mock('../../src/errors/deploy-errors', () => ({
@@ -264,6 +265,9 @@ describe('GPU Handlers - Core Logic', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Tests don't author label fields in mock bodies; opt out of the
+    // label-required guard added in 81a19b82.
+    process.env.AIGW_LABEL_OPTIONAL = '1';
     // Reset deploy state between tests
     vi.mocked(stateMock.setDeployLock).mockImplementation(() => {});
     vi.mocked(stateMock.setDeployState).mockImplementation(() => {});
@@ -282,6 +286,7 @@ describe('GPU Handlers - Core Logic', () => {
   });
 
   afterEach(() => {
+    delete process.env.AIGW_LABEL_OPTIONAL;
     vi.restoreAllMocks();
   });
 

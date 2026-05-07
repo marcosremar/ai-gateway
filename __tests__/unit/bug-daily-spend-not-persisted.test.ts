@@ -25,8 +25,9 @@ afterAll(() => {
   if (existsSync(DAILY_SPEND_FILE)) unlinkSync(DAILY_SPEND_FILE);
 });
 
-// Helper: wait for the debounced persist (2s timer in cost-state.ts)
-const waitForPersist = () => new Promise<void>(r => setTimeout(r, 2_500));
+// Helper: wait for the debounced persist (10s timer in cost-state.ts).
+// Padded to 11s so we don't race the timer flush.
+const waitForPersist = () => new Promise<void>(r => setTimeout(r, 11_000));
 
 test('setDailyGpuSpendUsd persists the value to daily_spend.json after debounce', async () => {
   const mod = await import('../../src/gateway/state/cost-state');

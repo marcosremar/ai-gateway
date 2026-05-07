@@ -18,7 +18,7 @@ describe('Error Alerts', () => {
     it('should trigger high_error_rate alert when error rate exceeds 10%', () => {
       // Record 20 errors: 3 deploy errors out of 20 total = 15% rate
       // We need to simulate errors by recording DeployErrors
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 50; i++) {
         const deployErr = new DeployError('NETWORK', 'NET_TIMEOUT', { detail: `error-${i}` });
         errorSummary.record(deployErr);
       }
@@ -28,8 +28,11 @@ describe('Error Alerts', () => {
 
       expect(highRateAlert).toBeDefined();
       expect(highRateAlert?.severity).toBe('warning');
-      expect(highRateAlert?.currentValue).toBeGreaterThan(0.10);
-      expect(highRateAlert?.threshold).toBe(0.10);
+      // Threshold switched from a 10% rate to an absolute count of 50 errors
+      // in the last 5 minutes (the prior implementation always tripped because
+      // the tracker only stores errors).
+      expect(highRateAlert?.currentValue).toBeGreaterThanOrEqual(50);
+      expect(highRateAlert?.threshold).toBe(50);
     });
 
     it('should not trigger alert when fewer than 10 operations', () => {
@@ -48,7 +51,7 @@ describe('Error Alerts', () => {
       // The tracker only records DeployErrors, so we can't easily simulate "success" operations.
       // With only errors recorded, the rate would be 100%, so let's just verify the alert fires.
       // This test verifies the alert logic works — the threshold check is covered above.
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 50; i++) {
         const deployErr = new DeployError('PROVIDER', 'PRV_API_ERROR', { detail: `error-${i}` });
         errorSummary.record(deployErr);
       }
@@ -106,7 +109,7 @@ describe('Error Alerts', () => {
   describe('alert deduplication', () => {
     it('should not create duplicate alerts for same type within 1 hour', () => {
       // Trigger an alert
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 50; i++) {
         const deployErr = new DeployError('NETWORK', 'NET_TIMEOUT', { detail: `error-${i}` });
         errorSummary.record(deployErr);
       }
@@ -129,7 +132,7 @@ describe('Error Alerts', () => {
 
   describe('acknowledge alert', () => {
     it('should acknowledge an alert and remove it from active list', () => {
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 50; i++) {
         const deployErr = new DeployError('NETWORK', 'NET_TIMEOUT', { detail: `error-${i}` });
         errorSummary.record(deployErr);
       }
@@ -147,7 +150,7 @@ describe('Error Alerts', () => {
     });
 
     it('should not affect unrelated alerts', () => {
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 50; i++) {
         const deployErr = new DeployError('NETWORK', 'NET_TIMEOUT', { detail: `error-${i}` });
         errorSummary.record(deployErr);
       }
@@ -163,7 +166,7 @@ describe('Error Alerts', () => {
 
   describe('clear alerts', () => {
     it('should remove all alerts', () => {
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 50; i++) {
         const deployErr = new DeployError('NETWORK', 'NET_TIMEOUT', { detail: `error-${i}` });
         errorSummary.record(deployErr);
       }
@@ -185,7 +188,7 @@ describe('Error Alerts', () => {
 
   describe('alerts in summary', () => {
     it('should include alerts in getSummary response', () => {
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 50; i++) {
         const deployErr = new DeployError('NETWORK', 'NET_TIMEOUT', { detail: `error-${i}` });
         errorSummary.record(deployErr);
       }

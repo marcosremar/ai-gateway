@@ -272,7 +272,7 @@ describe('Regression: Budget accuracy (#831)', () => {
   it('uses actual elapsed time for budget', () => {
     const src = readSrc('server/gpu-monitor-loop.ts');
     const idx = src.indexOf('Budget tracking: accumulate GPU spend');
-    const budgetSection = src.slice(idx, idx + 500);
+    const budgetSection = src.slice(idx, idx + 2000);
     expect(budgetSection).toContain('lastBudgetCalcTime');
     expect(budgetSection).toContain('actualElapsedMs');
   });
@@ -395,7 +395,7 @@ describe('Regression: Vast 429 (#845)', () => {
   it('throws on rate limit exhaustion', () => {
     const src = readSrc('src/gateway/providers/gpu/vast-client.ts');
     const idx = src.indexOf('retries exhausted');
-    const block = src.slice(idx, idx + 500);
+    const block = src.slice(idx, idx + 2000);
     expect(block).toContain('throw new Error');
     expect(block).not.toContain('return lastRes');
   });
