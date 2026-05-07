@@ -45,6 +45,7 @@ describe('VastClient — extended unit tests', () => {
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
+    process.env.VAST_SKIP_IMAGE_PRECHECK = '1';
     // Mock _pollForEndpoint to return immediately — avoids 5s initial delay + TCP probes
     vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({
       endpoint: 'http://1.2.3.4:8000', ip: '1.2.3.4',
@@ -52,6 +53,7 @@ describe('VastClient — extended unit tests', () => {
   });
 
   afterEach(() => {
+    delete process.env.VAST_SKIP_IMAGE_PRECHECK;
     vi.restoreAllMocks();
   });
 

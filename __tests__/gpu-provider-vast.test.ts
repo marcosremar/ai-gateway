@@ -31,6 +31,7 @@ describe('VastClient', () => {
     vi.stubGlobal('fetch', fetchSpy);
     // Prevent Docker Hub calls during createInstance — return fixed disk size
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
+    process.env.VAST_SKIP_IMAGE_PRECHECK = '1';
     // Mock the poll+probe loop to return immediately — avoids 5s initial delay
     // + TCP probe on fake IPs that time out (60s test timeout).
     vi.spyOn(client as any, '_pollForEndpoint').mockResolvedValue({

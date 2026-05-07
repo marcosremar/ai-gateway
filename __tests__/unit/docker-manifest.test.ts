@@ -228,8 +228,10 @@ describe('Docker Manifest Types', () => {
   });
 
   describe('defaultApiPathsForCapabilities', () => {
-    it('maps glb_generation to text-to-GLB endpoint', () => {
-      expect(defaultApiPathsForCapabilities(['glb_generation'])).toContain('/generate-from-text');
+    it('maps glb_generation to /generate (universal across providers)', () => {
+      // /generate-from-text is hunyuan3d-specific; trellis2 only exposes /generate.
+      // Default to the universal endpoint so contract validation works for both.
+      expect(defaultApiPathsForCapabilities(['glb_generation'])).toContain('/generate');
     });
   });
 

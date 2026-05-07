@@ -45,6 +45,10 @@ describe('VastClient image_login', () => {
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
+    // Skip the pre-flight image-existence registry probe so the fetch mock
+    // chain only sees the calls the test cares about (preflight, search,
+    // create, poll).
+    process.env.VAST_SKIP_IMAGE_PRECHECK = '1';
     // Mock the entire poll loop to return immediately. These tests only care
     // about the CREATE body (image_login field), not the poll/probe behavior.
     // Without this, _pollForEndpoint waits 5s initial + does TCP probes on
@@ -61,6 +65,7 @@ describe('VastClient image_login', () => {
   });
 
   afterEach(() => {
+    delete process.env.VAST_SKIP_IMAGE_PRECHECK;
     vi.restoreAllMocks();
     // Restore env vars
     for (const [key, val] of Object.entries(envBackup)) {

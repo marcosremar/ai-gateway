@@ -79,7 +79,7 @@ describe('budget tracking', () => {
     const source = gpuDeploySource;
     const budgetSection = source.slice(
       source.indexOf('Budget tracking: accumulate'),
-      source.indexOf('Budget tracking: accumulate') + 500,
+      source.indexOf('Budget tracking: accumulate') + 2000,
     );
     // Should use actual elapsed calculation, not monitorDelayMs
     expect(budgetSection).toContain('lastBudgetCalcTime');

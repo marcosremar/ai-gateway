@@ -195,9 +195,11 @@ describe('DOCKER_IMAGE_NAMES', () => {
     expect(DOCKER_IMAGE_NAMES).toContain('marcosremar/babelcast-subtitle');
   });
 
-  it('all names follow marcosremar/* pattern', () => {
+  it('all names follow marcosremar/* pattern (with optional ghcr.io/ prefix)', () => {
+    // Some entries are mirrored to GHCR to dodge Docker Hub anonymous pull
+    // limits — accept the ghcr.io/ prefix as well as the bare repo name.
     for (const name of DOCKER_IMAGE_NAMES) {
-      expect(name).toMatch(/^marcosremar\//);
+      expect(name).toMatch(/^(ghcr\.io\/)?marcosremar\//);
     }
   });
 

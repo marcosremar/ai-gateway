@@ -114,7 +114,7 @@ describe('PreFlightChecks', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.checks.length).toBe(6);
+    expect(result.checks.length).toBe(7);
   });
 
   it('should include warnings in result', async () => {
@@ -139,7 +139,7 @@ describe('PreFlightChecks', () => {
       quotedPricePerHr: 1.50,
     });
 
-    expect(result.checks.length).toBe(6);
+    expect(result.checks.length).toBe(7);
     const dnsCheck = result.checks.find(c => c.name === 'dns_resolution');
     expect(dnsCheck).toBeDefined();
     // RunPod DNS endpoint should be resolvable
@@ -155,7 +155,7 @@ describe('PreFlightChecks', () => {
       quotedPricePerHr: 0.80,
     });
 
-    expect(result.checks.length).toBe(6);
+    expect(result.checks.length).toBe(7);
     const dnsCheck = result.checks.find(c => c.name === 'dns_resolution');
     expect(dnsCheck).toBeDefined();
     // TensorDock DNS endpoint should be resolvable
@@ -171,7 +171,7 @@ describe('PreFlightChecks', () => {
       quotedPricePerHr: 2.00,
     });
 
-    expect(result.checks.length).toBe(6);
+    expect(result.checks.length).toBe(7);
     const dnsCheck = result.checks.find(c => c.name === 'dns_resolution');
     expect(dnsCheck).toBeDefined();
     // Modal DNS endpoint should be resolvable

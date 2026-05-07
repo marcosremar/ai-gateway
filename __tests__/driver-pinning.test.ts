@@ -23,6 +23,9 @@ vi.mock('../server/metrics', () => ({
 vi.mock('../src/gpu-providers/deploy-settings', () => ({
   getGpuPriorityList: () => ['NVIDIA GeForce RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA L40S', 'NVIDIA RTX A5000', 'NVIDIA A40', 'NVIDIA H100 80GB HBM3'],
   getGpuSortBy: () => 'price',
+  // Newer call site reads this opt-out flag — default off so the priority
+  // list is honored.
+  isGpuFilterDisabled: () => false,
 }));
 
 describe('autoSelectCheapestGpu — driver pinning', () => {

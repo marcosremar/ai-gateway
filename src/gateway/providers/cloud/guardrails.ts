@@ -134,25 +134,35 @@ export function checkContent(
     // Handle self_harm -> self_harm mapping
     const patternKey = category;
     const patterns = KEYWORD_PATTERNS[patternKey] || [];
-    
+
     for (const pattern of patterns) {
-      // Check if pattern is in text (case insensitive)
-      if (textLower.includes(pattern.toLowerCase())) {
+      // Prefix word-boundary match — `\b<pattern>` lets stems match their
+      // inflected forms ("harass" → "harassing", "kill" → "killing") but
+      // still rejects substring false positives like "kill" in "skillet"
+      // or "hate" in "whatever" where there's no leading word boundary.
+      const escaped = pattern.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`\\b${escaped}`, 'i');
+      if (re.test(textLower)) {
         triggeredCategories.push(category);
         allMatches.push(pattern);
         break; // Only flag category once
       }
     }
+  }
 
-    // Check custom keywords
-    if (config.customKeywords) {
-      for (const keyword of config.customKeywords) {
-        if (textLower.includes(keyword.toLowerCase())) {
-          if (!triggeredCategories.includes('custom')) {
-            triggeredCategories.push('custom');
-          }
-          allMatches.push(keyword);
+  // Custom keywords scanned ONCE per request (was previously inside the
+  // per-category loop, recording each match N times where N = enabled
+  // category count, inflating `confidence = matches.length * 20` and
+  // triggering false-positive blocks).
+  if (config.customKeywords) {
+    const seenCustomKeyword = new Set<string>();
+    for (const keyword of config.customKeywords) {
+      if (textLower.includes(keyword.toLowerCase()) && !seenCustomKeyword.has(keyword)) {
+        seenCustomKeyword.add(keyword);
+        if (!triggeredCategories.includes('custom')) {
+          triggeredCategories.push('custom');
         }
+        allMatches.push(keyword);
       }
     }
   }

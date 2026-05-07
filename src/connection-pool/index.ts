@@ -40,7 +40,18 @@ export function createConnectionPool(config: PoolConfig = {}) {
 
   return {
     async fetch(url: string, init?: RequestInit): Promise<Response> {
-      return fetch(url, init);
+      // Enforce the pool's timeout via AbortSignal — without this the
+      // `timeoutMs` config was inert and the pool would hang forever on a
+      // slow upstream.
+      const signal = init?.signal ?? AbortSignal.timeout(cfg.timeoutMs);
+      try {
+        return await fetch(url, { ...init, signal });
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'TimeoutError') {
+          throw new Error(`fetch timeout after ${cfg.timeoutMs}ms: ${url}`);
+        }
+        throw err;
+      }
     },
 
     getStats(): PoolStats | null {

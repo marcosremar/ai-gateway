@@ -22,16 +22,19 @@ describe('parseRolesFromEnv with unknown role name', () => {
     delete process.env[ENV_KEY];
   });
 
-  it('should default unknown role to READONLY (least privilege), not OPERATOR', () => {
+  // Behavior tightened: instead of silently defaulting to a role, the parser
+  // now THROWS on unknown / missing / empty role strings. Throwing fails the
+  // service start-up loudly so the operator fixes the typo, rather than
+  // silently downgrading a key to readonly (which would still let bad config
+  // ship to production undetected).
+  it('throws on unknown role name', () => {
     process.env[ENV_KEY] = 'sk-viewer-key:viewer';
-    const mapping = parseRolesFromEnv(ENV_KEY);
-    expect(mapping['sk-viewer-key']).toBe(ROLES.READONLY);
+    expect(() => parseRolesFromEnv(ENV_KEY)).toThrow(/unknown role/);
   });
 
-  it('should default misspelled role to READONLY', () => {
+  it('throws on misspelled role', () => {
     process.env[ENV_KEY] = 'sk-key:redonly';
-    const mapping = parseRolesFromEnv(ENV_KEY);
-    expect(mapping['sk-key']).toBe(ROLES.READONLY);
+    expect(() => parseRolesFromEnv(ENV_KEY)).toThrow(/unknown role/);
   });
 
   it('should still correctly parse valid role names', () => {
@@ -42,15 +45,13 @@ describe('parseRolesFromEnv with unknown role name', () => {
     expect(mapping['sk-ro']).toBe(ROLES.READONLY);
   });
 
-  it('should default key without role colon to READONLY', () => {
+  it('throws on key without role colon', () => {
     process.env[ENV_KEY] = 'sk-no-role-colon';
-    const mapping = parseRolesFromEnv(ENV_KEY);
-    expect(mapping['sk-no-role-colon']).toBe(ROLES.READONLY);
+    expect(() => parseRolesFromEnv(ENV_KEY)).toThrow(/missing role/);
   });
 
-  it('should default empty role (trailing colon) to READONLY', () => {
+  it('throws on empty role (trailing colon)', () => {
     process.env[ENV_KEY] = 'sk-empty:';
-    const mapping = parseRolesFromEnv(ENV_KEY);
-    expect(mapping['sk-empty']).toBe(ROLES.READONLY);
+    expect(() => parseRolesFromEnv(ENV_KEY)).toThrow(/missing role/);
   });
 });

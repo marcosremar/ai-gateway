@@ -24,13 +24,18 @@ vi.stubGlobal('fetch', mockFetch);
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function mockReq(body: Record<string, unknown> | null = null): IncomingMessage {
-  const stream = new PassThrough();
+  const stream = new PassThrough() as unknown as IncomingMessage & { headers: Record<string, string>; socket: { remoteAddress: string } };
   if (body !== null) {
-    stream.end(JSON.stringify(body));
+    (stream as unknown as PassThrough).end(JSON.stringify(body));
   } else {
-    stream.end('');
+    (stream as unknown as PassThrough).end('');
   }
-  return stream as unknown as IncomingMessage;
+  // Webhook auth: when RECALL_WEBHOOK_SECRET is unset (test default),
+  // requests must originate from localhost. Provide a socket so the
+  // handler's IP check passes.
+  stream.headers = stream.headers ?? {};
+  stream.socket = { remoteAddress: '127.0.0.1' };
+  return stream;
 }
 
 function mockRes(): ServerResponse & { _status: number; _body: string } {

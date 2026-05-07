@@ -119,7 +119,7 @@ const DEFAULT_ENDPOINT_BY_CAPABILITY: Partial<Record<DockerCapability, string[]>
   image: ['/v1/images/generations'],
   embedding: ['/v1/embeddings'],
   rerank: ['/v1/rerank'],
-  glb_generation: ['/generate-from-text'],
+  glb_generation: ['/generate'],
   motion_generation: ['/generate'],
 };
 

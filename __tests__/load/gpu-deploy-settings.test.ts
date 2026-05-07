@@ -78,14 +78,11 @@ import {
 
 describe('deploy-settings', () => {
   describe('DEFAULT_GPU_PRIORITY', () => {
-    it('is a non-empty array of strings', () => {
+    // Default is intentionally empty — empty means "no filtering, all GPU types
+    // shown". Filtering is opt-in via gpuPriorityList in latency-settings.json.
+    it('is an array of strings', () => {
       expect(DEFAULT_GPU_PRIORITY).toBeInstanceOf(Array);
-      expect(DEFAULT_GPU_PRIORITY.length).toBeGreaterThan(0);
       expect(DEFAULT_GPU_PRIORITY.every(g => typeof g === 'string')).toBe(true);
-    });
-
-    it('includes RTX 4090', () => {
-      expect(DEFAULT_GPU_PRIORITY.some(g => g.includes('4090'))).toBe(true);
     });
 
     it('getDefaultGpuPriority returns a copy (not reference)', () => {
@@ -104,9 +101,9 @@ describe('deploy-settings', () => {
       expect(DEFAULT_GPU_PRIORITY_BY_PROVIDER.tensordock).toBeDefined();
     });
 
-    it('all provider lists are non-empty', () => {
-      for (const [provider, list] of Object.entries(DEFAULT_GPU_PRIORITY_BY_PROVIDER)) {
-        expect(list.length, `${provider} list is empty`).toBeGreaterThan(0);
+    it('all provider entries are arrays', () => {
+      for (const [, list] of Object.entries(DEFAULT_GPU_PRIORITY_BY_PROVIDER)) {
+        expect(Array.isArray(list)).toBe(true);
       }
     });
 
@@ -120,10 +117,9 @@ describe('deploy-settings', () => {
   describe('gpuPriorityList getter/setter', () => {
     beforeEach(() => flushDeploySettings());
 
-    it('returns default list initially', () => {
+    it('returns default list initially (empty by default)', () => {
       const list = getGpuPriorityList();
       expect(list).toBeInstanceOf(Array);
-      expect(list.length).toBeGreaterThan(0);
     });
 
     it('setGpuPriorityList updates the list', () => {
@@ -137,7 +133,6 @@ describe('deploy-settings', () => {
     it('returns provider-specific list for known providers', () => {
       const vastList = getGpuPriorityForProvider('vast');
       expect(vastList).toBeInstanceOf(Array);
-      expect(vastList.length).toBeGreaterThan(0);
     });
 
     it('returns default list for unknown provider', () => {

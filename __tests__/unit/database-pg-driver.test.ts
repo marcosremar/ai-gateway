@@ -97,7 +97,13 @@ describe('createNeonDriver()', () => {
   it('returns a driver with query method', async () => {
     const mockRows = [{ id: 1 }, { id: 2 }];
     vi.doMock('@neondatabase/serverless', () => ({
-      neon: (_connStr: string) => async (_sql: string, ...params: unknown[]) => mockRows,
+      // The driver now goes through `sql.query(sqlStr, params)` so $N
+      // placeholders bind correctly; the mock must expose .query for the
+      // existence check to pass.
+      neon: (_connStr: string) => Object.assign(
+        async (..._args: unknown[]) => mockRows,
+        { query: async (_sql: string, _params?: unknown[]) => mockRows },
+      ),
     }));
 
     const { createNeonDriver } = await import('../../src/database/pg-driver');
@@ -123,7 +129,8 @@ describe('createNeonDriver()', () => {
   });
 
   it('passes params to neon function', async () => {
-    const sqlFn = vi.fn(async () => [{ count: 5 }]);
+    const queryFn = vi.fn(async () => [{ count: 5 }]);
+    const sqlFn = Object.assign(async () => [{ count: 5 }], { query: queryFn });
     vi.doMock('@neondatabase/serverless', () => ({
       neon: (_connStr: string) => sqlFn,
     }));
@@ -131,7 +138,9 @@ describe('createNeonDriver()', () => {
     const { createNeonDriver } = await import('../../src/database/pg-driver');
     const driver = await createNeonDriver('postgresql://host/db');
     await driver.query('SELECT $1', ['hello']);
-    expect(sqlFn).toHaveBeenCalledWith('SELECT $1', 'hello');
+    // Driver now calls sql.query(sqlStr, paramsArray) — pass-through with the
+    // params array intact, not spread.
+    expect(queryFn).toHaveBeenCalledWith('SELECT $1', ['hello']);
 
     vi.doUnmock('@neondatabase/serverless');
   });

@@ -44,12 +44,18 @@ describe('Vast.ai reliability improvements', () => {
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
+    // Skip the docker-registry image-existence probe so the fetch mock chain
+    // matches the call sequence the assertions expect (preflight, search,
+    // create, poll). Without this, image precheck consumes mocks and shifts
+    // every subsequent index.
+    process.env.VAST_SKIP_IMAGE_PRECHECK = '1';
     // Clear persisted host-blacklist to prevent state leakage between test runs
     try { fs.rmSync(path.join(os.homedir(), '.babelcast', 'vast-host-blacklist.json')); } catch {}
     try { fs.rmSync(path.join(os.homedir(), '.ai-gateway', 'vast-host-reputation.json')); } catch {}
   });
 
   afterEach(() => {
+    delete process.env.VAST_SKIP_IMAGE_PRECHECK;
     vi.restoreAllMocks();
     return new Promise<void>(resolve => setTimeout(() => {
       try { fs.rmSync(path.join(os.homedir(), '.babelcast', 'vast-host-blacklist.json')); } catch {}

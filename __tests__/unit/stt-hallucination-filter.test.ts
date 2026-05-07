@@ -286,11 +286,14 @@ describe('filterHallucinations — edge cases', () => {
     expect(result.text).toBe(longText);
   });
 
-  it('reason array includes segment id when segment is rejected', () => {
+  it('reason array includes the segment array index when segment is rejected', () => {
+    // Whisper restarts `seg.id` at 0 per chunk, so the filter labels
+    // rejections by the array index (monotonically unique within the
+    // batch), not by the upstream `seg.id`.
     const seg = makeSegment({ id: 5, text: ' silence', no_speech_prob: 0.9 });
     const response = makeResponse({ text: 'silence', segments: [seg] });
     const result = filterHallucinations(response);
-    expect(result.reasons.some(r => r.includes('seg[5]'))).toBe(true);
+    expect(result.reasons.some(r => r.includes('seg[0]'))).toBe(true);
   });
 
   it('metadata priority: no_speech_prob checked before compression_ratio', () => {

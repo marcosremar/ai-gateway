@@ -70,10 +70,12 @@ describe('HTTP API server security helpers', () => {
 
   it('allows only configured or local CORS origins', () => {
     process.env.CORS_ORIGINS = 'https://admin.example.com';
-
-    expect(resolveHttpCorsOrigin('https://admin.example.com')).toBe('https://admin.example.com');
-    expect(resolveHttpCorsOrigin('http://localhost:3000')).toBe('http://localhost:3000');
-    expect(resolveHttpCorsOrigin('https://evil.example.com')).toBeNull();
-    expect(resolveHttpCorsOrigin(null)).toBeNull();
+    // resolveHttpCorsOrigin now returns { origin, allowCredentials }; pull
+    // out .origin for the comparison. A null origin still surfaces as
+    // origin === null on the result.
+    expect(resolveHttpCorsOrigin('https://admin.example.com').origin).toBe('https://admin.example.com');
+    expect(resolveHttpCorsOrigin('http://localhost:3000').origin).toBe('http://localhost:3000');
+    expect(resolveHttpCorsOrigin('https://evil.example.com').origin).toBeNull();
+    expect(resolveHttpCorsOrigin(null).origin).toBeNull();
   });
 });
