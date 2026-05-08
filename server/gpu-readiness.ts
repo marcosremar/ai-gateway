@@ -168,14 +168,23 @@ function hasSpeechPipelineHealth(data: Record<string, unknown>): boolean {
 }
 
 function hasSpeechPipelinePaths(paths: string[]): boolean {
-  return paths.some((path) =>
-    path === '/v1/transcribe' ||
-    path === '/v1/translate/text' ||
-    path === '/v1/tts' ||
-    path === '/v1/audio/transcriptions' ||
-    path === '/v1/chat/completions' ||
-    path === '/v1/audio/speech'
+  // The readiness check benchmarks STT + LLM + TTS in series, so it is only
+  // meaningful for a *full* speech pipeline pod. Single-stage pods (TTS-only,
+  // STT-only, LLM-only) would never satisfy the warmth gate and the monitor
+  // would orphan-terminate them after ~4 minutes — confirmed in production
+  // with the canal-dark qwen3-tts pod (only exposes /v1/audio/speech and
+  // /v1/audio/speech/clone). Require evidence of all three stages before
+  // claiming the pipeline is present.
+  const hasStt = paths.some((path) =>
+    path === '/v1/transcribe' || path === '/v1/audio/transcriptions'
   );
+  const hasLlm = paths.some((path) =>
+    path === '/v1/translate/text' || path === '/v1/chat/completions'
+  );
+  const hasTts = paths.some((path) =>
+    path === '/v1/tts' || path === '/v1/audio/speech'
+  );
+  return hasStt && hasLlm && hasTts;
 }
 
 function hasGenericGpuAppPaths(paths: string[]): boolean {

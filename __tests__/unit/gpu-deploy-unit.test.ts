@@ -280,6 +280,19 @@ describe('pollHealthUntilReady — generic GPU apps', () => {
     expect(gpuReadinessSource).toContain('/generate-from-text');
     expect(gpuReadinessSource).toContain('hasSpeechPipelinePaths');
   });
+
+  it('hasSpeechPipelinePaths requires evidence of all three stages (STT+LLM+TTS) — single-stage pods skip warmth', () => {
+    // qwen3-tts pods (canal-dark) only expose /v1/audio/speech +
+    // /v1/audio/speech/clone. Before this fix, warmth expected STT+LLM+TTS,
+    // never reached it, and orphan-terminated the pod ~4min after deploy.
+    expect(gpuReadinessSource).toMatch(/hasStt[\s\S]+hasLlm[\s\S]+hasTts[\s\S]+return hasStt && hasLlm && hasTts/);
+    expect(gpuReadinessSource).toContain('Single-stage');
+    // Verify the canal-dark TTS-only signature isn't accidentally flagged
+    // as full pipeline by the new detector — the only TTS path it must
+    // recognise is /v1/audio/speech (and /v1/tts), nothing else.
+    const fnBody = gpuReadinessSource.match(/function hasSpeechPipelinePaths[\s\S]+?return hasStt && hasLlm && hasTts;\s*\n}/);
+    expect(fnBody, 'hasSpeechPipelinePaths must define hasStt/hasLlm/hasTts triple-gate').not.toBeNull();
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
