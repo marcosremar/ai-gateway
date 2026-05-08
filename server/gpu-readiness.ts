@@ -213,6 +213,12 @@ export async function shouldRunGpuReadinessCheck(endpoint: string): Promise<bool
     const paths = Object.keys(doc?.paths ?? {});
     if (hasSpeechPipelinePaths(paths)) return true;
     if (hasGenericGpuAppPaths(paths)) return false;
+    // Pod served openapi.json but neither full speech pipeline nor a known
+    // generic-app shape matched — that means it is a single-stage pod
+    // (TTS-only, STT-only, image-gen, alignment, etc). The readiness
+    // benchmark would orphan-terminate it after ~4 min waiting for stages
+    // it never has, so treat it like a generic GPU app and skip warmth.
+    return false;
   } catch {
     return true;
   }
