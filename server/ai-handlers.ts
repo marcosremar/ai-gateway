@@ -75,7 +75,7 @@ import {
   recordStageSuccess, recordStageFailure, isStageCircuitClosed,
   providers, modalTTS, gpuShadowMode,
   markGpuProductionReady,
-  openrouterQwen3Embedding, openaiEmbedding,
+  openrouterLLM, openrouterQwen3Embedding, openaiEmbedding,
 } from './providers';
 import { recordShadowRun } from './gpu-readiness';
 import {
@@ -165,8 +165,11 @@ export function forwardToAvatar(audioBase64: string): void {
   const ep = botState.endpoint;
   if (!ep) return;
 
-  // Derive avatar endpoint from bot endpoint
-  const runpodMatch = ep.match(/^(https?:\/\/)([^-]+)-8080(.*)$/);
+  // Derive avatar endpoint from bot endpoint. RunPod proxy URLs look like
+  // `https://<podid>-8080.proxy.runpod.net`. The previous regex used `[^-]+`
+  // for the pod ID which fails when pod IDs contain hyphens (they often do).
+  // Use a non-greedy capture up to the last `-8080`.
+  const runpodMatch = ep.match(/^(https?:\/\/)(.+)-8080(.*)$/);
   const avatarUrl = runpodMatch
     ? `${runpodMatch[1]}${runpodMatch[2]}-3099${runpodMatch[3]}`
     : ep.includes('localhost') ? 'http://localhost:3099' : null;
@@ -570,7 +573,20 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
 
   const sourceName = langNames[sourceLang] || sourceLang;
   const targetName = langNames[targetLang] || targetLang;
-  const systemPrompt = buildTranslatePrompt(buildSystemPrompt(sourceName, targetName, style), context, glossary);
+  let systemPrompt = buildTranslatePrompt(buildSystemPrompt(sourceName, targetName, style), context, glossary);
+  // Optional incomplete-turn filter — opt-in via env or per-request flag.
+  // Augments the system prompt with ✓/○/◐ marker instruction; the LLM emits
+  // the marker as its first character and we suppress + re-prompt if user
+  // was cut off mid-thought.
+  const filterIncompleteTurns = process.env.FILTER_INCOMPLETE_USER_TURNS === '1'
+    || (body && (body as Record<string, unknown>).filter_incomplete_user_turns === true);
+  let _turnFilter: { classify: (s: string) => { kind: string; cleanedText: string; timeoutMs: number } } | null = null;
+  if (filterIncompleteTurns) {
+    const { IncompleteTurnFilter } = await import('../src/llm-context');
+    const f = new IncompleteTurnFilter();
+    systemPrompt = f.augmentSystemPrompt(systemPrompt);
+    _turnFilter = f;
+  }
   const messages = [
     { role: 'system' as const, content: systemPrompt },
     { role: 'user' as const, content: text },
@@ -590,19 +606,40 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
   const gpuEndpoint = isGpuReadyForProduction() ? deployState.endpoint : null;
   const cloudProfile = getCloudProfile();
 
+  const llmReqTs = Date.now();
+  const { emitFrame } = await import('../src/observers');
+  emitFrame({ kind: 'llm_request', ts: llmReqTs, stage: 'llm', meta: { sourceLang, targetLang, len: text.length } });
   try {
     const out = await runTranslateRace(
       { text, sourceLang, targetLang, glossary, context, style, systemPrompt, messages, maxTokens,
         gpuLlmTimeout, gpuEndpoint, requestId },
       { client, cloudProfile, cloudProviderName: getCloudProviderName(), shouldPreferGpu, raceProviders, fetchGpuLLM },
     );
+    emitFrame({ kind: 'llm_complete', ts: Date.now(), stage: 'llm', provider: out.provider, meta: { latencyMs: out.latencyMs, len: out.translatedText.length } });
     if (out.provider === 'gpu') { recordGpuLatency(out.latencyMs); recordPerStageLatency('llm', out.latencyMs); }
-    if (out.translatedText) setCachedTranslation(text, sourceLang, targetLang, out.translatedText, style);
+    let translatedText = out.translatedText;
+    let turnDecision: { kind: string; timeoutMs: number } | null = null;
+    if (_turnFilter && translatedText) {
+      const decision = _turnFilter.classify(translatedText);
+      turnDecision = { kind: decision.kind, timeoutMs: decision.timeoutMs };
+      // Incomplete turn → don't cache, suppress translatedText (caller
+      // schedules re-prompt based on timeoutMs).
+      if (decision.kind !== 'complete') {
+        translatedText = '';
+      } else {
+        translatedText = decision.cleanedText;
+      }
+    }
+    if (translatedText) setCachedTranslation(text, sourceLang, targetLang, translatedText, style);
     logRequest({ timestamp: Date.now(), stage: 'llm',
       provider: out.provider as 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid',
-      latencyMs: out.latencyMs, success: true, inputSize: text.length, outputPreview: out.translatedText.slice(0, 80) });
+      latencyMs: out.latencyMs, success: true, inputSize: text.length, outputPreview: translatedText.slice(0, 80) });
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ translated_text: out.translatedText, used_gpu: out.usedGpu }));
+    res.end(JSON.stringify({
+      translated_text: translatedText,
+      used_gpu: out.usedGpu,
+      ...(turnDecision && turnDecision.kind !== 'complete' ? { incomplete_turn: turnDecision } : {}),
+    }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error(`All translation providers failed: ${msg}`);
@@ -687,7 +724,12 @@ async function _parsePipelineRequest(
   }
   if (!refText) {
     const refTextRaw = (req.headers['x-ref-text'] as string) || url.searchParams.get('ref_text') || undefined;
-    refText = refTextRaw ? decodeURIComponent(refTextRaw) : undefined;
+    // Defend against malformed `%XX` sequences — `decodeURIComponent` throws
+    // URIError on `%FF`/lone `%`, which would crash the request handler.
+    if (refTextRaw) {
+      try { refText = decodeURIComponent(refTextRaw); }
+      catch { refText = refTextRaw; /* keep raw — provider will likely reject too */ }
+    }
   }
 
   // When voice cloning is requested, force TTS to Modal (Groq/OpenAI don't support cloning)
@@ -949,8 +991,20 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
     }
 
     try {
+      // Emit user_speech_start at audio receive — opens a turn for the
+      // UserBotLatencyObserver / TurnTrackingObserver.
+      const { emitFrame: _ef } = await import('../src/observers');
+      _ef({ kind: 'user_speech_start', ts: pipeT0, stage: 'pipeline', meta: { audioBytes: audioBuffer.length } });
+
       // ── Stage 1: STT ────────────────────────────────────────────────────
+      const sttSpan = globalTracer.startSpan('stt_stage', traceSpan.spanId);
       const sttResult = await _runSttStage(params);
+      globalTracer.addTag(sttSpan.spanId, 'stt.provider', sttResult.provider);
+      globalTracer.addTag(sttSpan.spanId, 'stt.latency_ms', sttResult.latencyMs);
+      globalTracer.addTag(sttSpan.spanId, 'stt.text_length', (sttResult.text || '').length);
+      globalTracer.endSpan(sttSpan.spanId);
+
+      _ef({ kind: 'stt_final', ts: Date.now(), stage: 'stt', provider: sttResult.provider, meta: { text: sttResult.text, latencyMs: sttResult.latencyMs } });
 
       if (!sttResult.text.trim()) {
         const totalMs = Date.now() - pipeT0;
@@ -961,10 +1015,29 @@ export async function handlePipeline(req: IncomingMessage, res: ServerResponse):
       }
 
       // ── Stage 2: LLM ────────────────────────────────────────────────────
+      const llmSpan = globalTracer.startSpan('llm_stage', traceSpan.spanId);
+      _ef({ kind: 'llm_request', ts: Date.now(), stage: 'llm', meta: { len: sttResult.text.length } });
       const llmResult = await _runLlmStage(params, sttResult);
+      globalTracer.addTag(llmSpan.spanId, 'llm.provider', llmResult.provider);
+      globalTracer.addTag(llmSpan.spanId, 'llm.latency_ms', llmResult.latencyMs);
+      globalTracer.addTag(llmSpan.spanId, 'llm.output_length', (llmResult.translatedText || '').length);
+      globalTracer.endSpan(llmSpan.spanId);
+      _ef({ kind: 'llm_first_token', ts: Date.now(), stage: 'llm', provider: llmResult.provider });
+      _ef({ kind: 'llm_complete', ts: Date.now(), stage: 'llm', provider: llmResult.provider, meta: { latencyMs: llmResult.latencyMs, len: (llmResult.translatedText || '').length } });
 
       // ── Stage 3: TTS ────────────────────────────────────────────────────
+      const ttsSpan = globalTracer.startSpan('tts_stage', traceSpan.spanId);
+      const { emitFrame: _emitFrame } = await import('../src/observers');
+      _emitFrame({ kind: 'tts_request', ts: Date.now(), stage: 'tts', meta: { len: llmResult.translatedText.length } });
       const ttsResult = await _runTtsStage(params, llmResult.translatedText);
+      globalTracer.addTag(ttsSpan.spanId, 'tts.provider', ttsResult.provider ?? 'unknown');
+      globalTracer.addTag(ttsSpan.spanId, 'tts.latency_ms', ttsResult.latencyMs);
+      if (ttsResult.audioB64) {
+        globalTracer.addTag(ttsSpan.spanId, 'tts.audio_bytes', ttsResult.audioB64.length);
+        _emitFrame({ kind: 'tts_first_audio', ts: Date.now(), stage: 'tts', provider: ttsResult.provider ?? undefined, meta: { latencyMs: ttsResult.latencyMs, bytes: ttsResult.audioB64.length } });
+      }
+      globalTracer.endSpan(ttsSpan.spanId);
+      _emitFrame({ kind: 'tts_complete', ts: Date.now(), stage: 'tts', provider: ttsResult.provider ?? undefined, meta: { latencyMs: ttsResult.latencyMs } });
 
       // ── Build and send response ─────────────────────────────────────────
       const totalMs = Date.now() - pipeT0;
@@ -1363,6 +1436,12 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
     }
   }
 
+  const providerAdapters = {
+    groq: groqLLM,
+    ...(fireworksLLM ? { fireworks: fireworksLLM } : {}),
+    ...(openrouterLLM ? { openrouter: openrouterLLM } : {}),
+  };
+
   const { provider: chatProvider, resolvedModel } = resolveChatProvider(model, {
     chatProviders: providers.chat || {},
     fallback: groqLLM,
@@ -1370,6 +1449,7 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
       groq: groqLlmModel,
       fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
     },
+    providerAdapters,
   });
 
   try {

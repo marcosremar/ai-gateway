@@ -96,6 +96,7 @@ vi.mock('../server/providers', () => ({
   groqLlmModel: 'llama-3.3-70b-versatile',
   groqTtsModel: 'orpheus',
   groqTtsVoice: 'autumn',
+  openrouterLLM: null,
   openrouterQwen3Embedding: null,
   openaiEmbedding: null,
   markGpuUnhealthy: vi.fn(),

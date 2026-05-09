@@ -18,6 +18,7 @@ import { modalVoxtralSTT } from '../src/providers/modal-voxtral';
 import { MlxQwen3AsrProvider, mlxQwen3AsrSTT } from '../src/providers/mlx-qwen3-asr';
 import { openrouterQwen3Embedding } from '../src/providers/openrouter/openrouter-embedding';
 import { openrouterLLM } from '../src/providers/openrouter';
+export { openrouterLLM };
 import {
   codexLocalLLM,
   claudeLocalLLM,
@@ -120,6 +121,41 @@ export function maskKey(key: string): string {
   return '***';
 }
 
+function acceptsOpenRouterPassthroughModel(model: string): boolean {
+  return /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:/-]*$/i.test(model);
+}
+
+function openRouterUpstreamModel(model: string): string {
+  return model.startsWith('openrouter/') ? model.slice('openrouter/'.length) : model;
+}
+
+async function listOpenRouterModels(): Promise<string[]> {
+  const headers: Record<string, string> = {};
+  if (process.env.OPENROUTER_API_KEY) headers.Authorization = `Bearer ${process.env.OPENROUTER_API_KEY}`;
+  const response = await fetch('https://openrouter.ai/api/v1/models', {
+    headers,
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) throw new Error(`OpenRouter models failed: ${response.status}`);
+  const payload = await response.json() as { data?: Array<{ id?: unknown }> };
+  return (payload.data ?? [])
+    .map((model) => model.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+}
+
+function enableOpenRouterPassthrough(): void {
+  providers.chatDynamicRoutes = [{
+    providerId: 'openrouter',
+    provider: openrouterLLM,
+    acceptsModel: acceptsOpenRouterPassthroughModel,
+    upstreamModel: openRouterUpstreamModel,
+  }];
+  providers.dynamicModelCatalogs = [{
+    providerId: 'openrouter',
+    listModels: listOpenRouterModels,
+  }];
+}
+
 if (groqAvailable) {
   providers.stt!['whisper-large-v3'] = groqSTT;
   providers.stt!['whisper-large-v3-turbo'] = groqSTT;
@@ -158,30 +194,8 @@ if (openaiAvailable) log.log(`OpenAI key: ${maskKey(process.env.OPENAI_API_KEY!)
 if (deepgramAvailable) log.log(`Deepgram key: ${maskKey(process.env.DEEPGRAM_API_KEY!)} (ensemble STT: nova-3)`);
 if (fireworksAvailable) log.log(`Fireworks key: ${maskKey(process.env.FIREWORKS_API_KEY!)} (ensemble STT: whisper-v3)`);
 if (openrouterAvailable) {
-  // Vision-capable chat models reachable via OpenRouter — exposed by id so
-  // clients can route directly (`POST /v1/chat/completions` with
-  // `model: "google/gemini-2.5-flash"` etc.). Used by avatar-engine's shot
-  // verification pipeline (Gemini 2.5 Flash → 2.0 Flash-Lite → GPT-4o-mini).
-  const OPENROUTER_VISION_CHAT_MODELS = [
-    'google/gemini-3-flash-preview',
-    'google/gemini-3.1-flash-lite-preview',
-    'google/gemini-3.1-pro-preview',
-    'google/gemini-2.5-flash',
-    'google/gemini-2.5-flash-lite',
-    'google/gemini-2.5-pro',
-    'google/gemini-2.0-flash-001',
-    'google/gemini-2.0-flash-lite-001',
-    'openai/gpt-4o-mini',
-    'anthropic/claude-3.5-sonnet',
-    'meta-llama/llama-3.2-11b-vision-instruct',
-    'deepseek/deepseek-v4-pro',
-    'deepseek/deepseek-v4-flash',
-    'deepseek/deepseek-chat-v3-0324',
-  ];
-  for (const modelId of OPENROUTER_VISION_CHAT_MODELS) {
-    providers.chat![modelId] = openrouterLLM;
-  }
-  log.log(`OpenRouter key: ${maskKey(process.env.OPENROUTER_API_KEY!)} (embedding fallback 1: qwen3-embedding-0.6b; chat: ${OPENROUTER_VISION_CHAT_MODELS.length} vision models)`);
+  enableOpenRouterPassthrough();
+  log.log(`OpenRouter key: ${maskKey(process.env.OPENROUTER_API_KEY!)} (embedding fallback 1: qwen3-embedding-0.6b; chat: dynamic passthrough)`);
 }
 if (whisperAvailable && !ollamaAvailable) log.log(`Whisper STT (ensemble): ${whisperHost}`);
 log.log(`Ensemble STT providers: ${ENSEMBLE_STT_PROVIDERS.join(',') || 'all'}`);
@@ -823,6 +837,8 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
   // Rebuild providers mapping (clear and repopulate)
   providers.stt = {};
   providers.chat = {};
+  providers.chatDynamicRoutes = undefined;
+  providers.dynamicModelCatalogs = undefined;
 
   if (groqAvailable) {
     providers.stt['whisper-large-v3'] = groqSTT;
@@ -845,6 +861,10 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
     providers.chat[ollamaModel] = ollamaLLMProvider;
     providers.chat['llama-3.3-70b-versatile'] = providers.chat['llama-3.3-70b-versatile'] || ollamaLLMProvider;
     providers.chat['llama-3.1-8b-instant'] = providers.chat['llama-3.1-8b-instant'] || ollamaLLMProvider;
+  }
+
+  if (openrouterAvailable) {
+    enableOpenRouterPassthrough();
   }
 
   // Rebuild registry entries for providers that changed availability.
