@@ -24,3 +24,19 @@ backend
 # Git lock files are internal and normally never tracked.
 # If `.git/index.lock` causes errors, remove the stale lock or fix `.git/` permissions.
 .git/index.lock
+
+# Local tool state, caches, and generated artifacts
+.autopilot-logs/
+.fastembed_cache/
+.openchrome/
+.playwright-mcp/
+.playwright-report/
+.qwen/
+.venv*/
+bench-results/
+infer_out*/
+output/
+test-results/
+web/test-results/
+web/tsconfig.tsbuildinfo
+*.tsbuildinfo

@@ -26,6 +26,8 @@ export interface ChatCompletionsDeps {
   fallback: ChatProviderAdapter;
   /** Default model IDs for each provider ID (e.g. "groq" → "llama-3.3-70b-versatile"). */
   providerDefaults: Record<string, string>;
+  /** Adapters addressable via provider/model shorthand (e.g. "openrouter/meta-llama/..."). */
+  providerAdapters?: Record<string, ChatProviderAdapter>;
 }
 
 export interface OpenAiChatResponse {
@@ -52,6 +54,17 @@ export function resolveChatProvider(
 ): { provider: ChatProviderAdapter; resolvedModel: string } {
   let resolvedModel = model;
   let provider = deps.chatProviders[model];
+  if (!provider) {
+    const slashIdx = model.indexOf('/');
+    if (slashIdx > 0) {
+      const providerId = model.slice(0, slashIdx);
+      const providerAdapter = deps.providerAdapters?.[providerId] || deps.chatProviders[providerId];
+      if (providerAdapter) {
+        resolvedModel = model.slice(slashIdx + 1);
+        provider = providerAdapter;
+      }
+    }
+  }
   if (!provider) {
     const defaultModel = deps.providerDefaults[model];
     if (defaultModel) {

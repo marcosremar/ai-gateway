@@ -179,6 +179,27 @@ async function cmdServerStop() {
     return;
   }
   const pid = parseInt(readFileSync(pidPath, 'utf8').trim(), 10);
+  if (!Number.isFinite(pid) || pid <= 0) {
+    console.log('PID file is malformed; removing.');
+    try { require('fs').unlinkSync(pidPath); } catch { /* no-op */ }
+    return;
+  }
+  // Verify the PID actually owns the gateway port. After process exit the OS
+  // recycles PIDs; without this check `cmdServerStop` could SIGTERM an
+  // unrelated process that happens to occupy the same PID slot. We probe
+  // /health (cheap, gateway-specific) before signalling.
+  try {
+    const { url } = getConfig();
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500);
+    const res = await fetch(`${url}/health`, { signal: ctrl.signal }).catch(() => null);
+    clearTimeout(t);
+    if (!res || !res.ok) {
+      console.log(`Gateway (pid ${pid}) does not respond on ${url}/health — refusing to SIGTERM unverified PID. Removing stale PID file.`);
+      try { require('fs').unlinkSync(pidPath); } catch { /* no-op */ }
+      return;
+    }
+  } catch { /* fall through to SIGTERM with caution */ }
   try {
     process.kill(pid, 'SIGTERM');
     console.log(`Sent SIGTERM to gateway (pid ${pid}).`);
@@ -405,12 +426,21 @@ async function cmdBalance() {
   }
 }
 
-async function cmdChat(message: string, opts: { model?: string; stream?: boolean; maxTokens?: number }) {
+async function cmdChat(message: string, opts: { model?: string; stream?: boolean; maxTokens?: number; imagePaths?: string[] }) {
   const { url, key } = getConfig();
-  const model = opts.model || 'llama-3.1-8b-instant';
+  const model = opts.model || '@app/llm';
+  const content = opts.imagePaths?.length
+    ? [
+        { type: 'text', text: message },
+        ...opts.imagePaths.map((path) => ({
+          type: 'image_url',
+          image_url: { url: imageDataUrl(path) },
+        })),
+      ]
+    : message;
   const body = {
     model,
-    messages: [{ role: 'user', content: message }],
+    messages: [{ role: 'user', content }],
     max_tokens: opts.maxTokens || 1024,
     stream: opts.stream ?? true,
   };
@@ -481,7 +511,31 @@ async function cmdChat(message: string, opts: { model?: string; stream?: boolean
   }
 }
 
-async function cmdTranscribe(filePath: string, opts: { model?: string; language?: string }) {
+function imageDataUrl(path: string): string {
+  const absPath = resolve(path);
+  if (!existsSync(absPath)) {
+    console.error(`Image file not found: ${absPath}`);
+    process.exit(1);
+  }
+  const bytes = readFileSync(absPath);
+  const maxImageBytes = 20 * 1024 * 1024;
+  if (bytes.length > maxImageBytes) {
+    console.error(`Image file too large: ${absPath} (${(bytes.length / 1024 / 1024).toFixed(1)}MB, max 20MB)`);
+    process.exit(1);
+  }
+  return `data:${imageMimeType(absPath)};base64,${bytes.toString('base64')}`;
+}
+
+function imageMimeType(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  console.error(`Unsupported image type: ${path}. Use PNG, JPG, JPEG, or WEBP.`);
+  process.exit(1);
+}
+
+async function cmdTranscribe(filePath: string, opts: { model?: string; language?: string; prompt?: string }) {
   const { url, key } = getConfig();
   const absPath = resolve(filePath);
   if (!existsSync(absPath)) {
@@ -493,6 +547,7 @@ async function cmdTranscribe(filePath: string, opts: { model?: string; language?
   form.append('file', new Blob([audioData]), filePath);
   form.append('model', opts.model || 'whisper-large-v3-turbo');
   if (opts.language) form.append('language', opts.language);
+  if (opts.prompt) form.append('prompt', opts.prompt);
 
   const h: Record<string, string> = {};
   if (getConfig().key) h['Authorization'] = `Bearer ${getConfig().key}`;
@@ -504,6 +559,85 @@ async function cmdTranscribe(filePath: string, opts: { model?: string; language?
   if (!res.ok) { console.error(`Error ${res.status}: ${text.slice(0, 200)}`); process.exit(1); }
   const data = JSON.parse(text);
   console.log(data.text);
+}
+
+async function cmdSpeech(filePath: string, opts: { source?: string; target?: string; speaker?: string; prompt?: string; refText?: string; referenceAudio?: string; output?: string; json?: boolean }) {
+  const { url, key } = getConfig();
+  const absPath = resolve(filePath);
+  if (!existsSync(absPath)) {
+    console.error(`File not found: ${absPath}`);
+    process.exit(1);
+  }
+  const audioData = readFileSync(absPath);
+  const params = new URLSearchParams();
+  if (opts.source) params.set('source', opts.source);
+  if (opts.target) params.set('target', opts.target);
+  if (opts.speaker) params.set('speaker', opts.speaker);
+  if (opts.prompt) params.set('prompt', opts.prompt);
+  if (opts.refText) params.set('ref_text', opts.refText);
+  const h: Record<string, string> = { 'Content-Type': 'audio/wav' };
+  if (key) h['Authorization'] = `Bearer ${key}`;
+  if (opts.referenceAudio) h['X-Reference-Audio'] = Buffer.from(readFileSync(resolve(opts.referenceAudio))).toString('base64');
+
+  const endpoint = `${url}/v1/speech${params.toString() ? `?${params}` : ''}`;
+  const res = await fetch(endpoint, { method: 'POST', headers: h, body: audioData });
+  const contentType = res.headers.get('content-type') || '';
+  if (!res.ok) {
+    const err = await res.text();
+    console.error(`Error ${res.status}: ${err.slice(0, 300)}`);
+    process.exit(1);
+  }
+  if (contentType.includes('audio/')) {
+    const outPath = opts.output || 'speech-output.wav';
+    const audioBuffer = Buffer.from(await res.arrayBuffer());
+    writeFileSync(outPath, audioBuffer);
+    console.log(`${c.green}✓${c.reset} Audio saved to ${c.bold}${outPath}${c.reset} (${(audioBuffer.length / 1024).toFixed(0)} KB)`);
+    return;
+  }
+  const data = await res.json();
+  if (opts.json) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  if (data.transcription) console.log(`transcription: ${data.transcription}`);
+  if (data.response) console.log(`response: ${data.response}`);
+  if (data.audio_base64 && opts.output) {
+    const audioBuffer = Buffer.from(data.audio_base64, 'base64');
+    writeFileSync(opts.output, audioBuffer);
+    console.log(`${c.green}✓${c.reset} Audio saved to ${c.bold}${opts.output}${c.reset} (${(audioBuffer.length / 1024).toFixed(0)} KB)`);
+  }
+}
+
+async function cmdMediaTest(opts: { image?: string; audio?: string; model?: string }) {
+  let ok = true;
+  if (opts.image) {
+    try {
+      await cmdChat('What is shown? Answer in 5 words max.', {
+        model: opts.model || 'openrouter/google/gemini-2.5-flash',
+        stream: false,
+        maxTokens: 30,
+        imagePaths: [opts.image],
+      });
+      console.log(`${c.green}✓${c.reset} image+text OK`);
+    } catch (err) {
+      ok = false;
+      console.error(`${c.red}✗${c.reset} image+text failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  if (opts.audio) {
+    try {
+      await cmdTranscribe(opts.audio, { language: 'en', prompt: 'Short media smoke test.' });
+      console.log(`${c.green}✓${c.reset} audio transcription OK`);
+    } catch (err) {
+      ok = false;
+      console.error(`${c.red}✗${c.reset} audio transcription failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  if (!opts.image && !opts.audio) {
+    console.error('Usage: ai-gateway media test --image <path> --audio <path>');
+    process.exit(1);
+  }
+  if (!ok) process.exit(1);
 }
 
 async function cmdTTS(text: string, opts: { model?: string; voice?: string; output?: string }) {
@@ -653,7 +787,7 @@ async function cmdAppDispatch(sub: string, args: string[]): Promise<void> {
 async function cmdGpuDeploy(opts: {
   image?: string; gpuTypes?: string; onstart?: string; storageGb?: number;
   env?: string; numGpus?: number; devMode?: boolean; readinessProbe?: string;
-  label?: string; strictFastBoot?: boolean;
+  label?: string; strictFastBoot?: boolean; allowUnverified?: boolean;
 }) {
   const { url, key } = getConfig();
   const body: Record<string, unknown> = {};
@@ -676,6 +810,7 @@ async function cmdGpuDeploy(opts: {
     body.label = opts.label.includes('/') ? opts.label : `${owner}/${opts.label}`;
   }
   if (opts.strictFastBoot === false) body.strictFastBoot = false;
+  if (opts.allowUnverified === true) body.allowUnverified = true;
   if (!opts.label && !process.env.AIGW_LABEL_OPTIONAL) {
     console.error('Error: --label is required. Pass --label "<task-name>" describing what this GPU is for.');
     console.error('       Bypass with AIGW_LABEL_OPTIONAL=1 (legacy/CI only — discouraged).');
@@ -1167,12 +1302,12 @@ function appendJobHistory(entry: Record<string, unknown>): void {
     const p = jobHistoryPath();
     mkdirSync(dirname(p), { recursive: true });
     const line = JSON.stringify(entry) + '\n';
-    if (existsSync(p)) {
-      const cur = readFileSync(p, 'utf-8');
-      writeFileSync(p, cur + line);
-    } else {
-      writeFileSync(p, line);
-    }
+    // Use appendFileSync (O_APPEND under the hood) — atomic under POSIX, so
+    // two concurrent CLI processes don't race on read-modify-write and lose
+    // history. Previous code read the whole file, concatenated, and rewrote
+    // (O(n²) + last-write-wins).
+    const fs = require('fs');
+    fs.appendFileSync(p, line);
   } catch { /* best effort */ }
 }
 function saveJobState(state: Record<string, unknown>): void {
@@ -4467,7 +4602,14 @@ async function cmdGpuDev(args: string[]) {
       for (let i = 0; i < serveSlice.length; i++) {
         const a = serveSlice[i];
         if (a === '--instance' || a === '--image') { i++; }
-        else if (a === '--local' && i + 1 < serveSlice.length) { localPort = parseInt(serveSlice[++i]); }
+        else if (a === '--local' && i + 1 < serveSlice.length) {
+          const v = parseInt(serveSlice[++i], 10);
+          if (!Number.isFinite(v) || v <= 0 || v > 65535) {
+            console.error(`--local requires a valid port number (1-65535), got "${serveSlice[i]}"`);
+            process.exit(1);
+          }
+          localPort = v;
+        }
         else if (a === '--bind' && i + 1 < serveSlice.length) { bind = serveSlice[++i]; }
         else { servePos.push(a); }
       }
@@ -5149,8 +5291,30 @@ function getArg(args: string[], flag: string): string | undefined {
   return args[idx + 1];
 }
 
+function getArgs(args: string[], flag: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] === flag) values.push(args[index + 1]);
+  }
+  return values;
+}
+
 function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
+}
+
+function chatMessageArgs(args: string[], valuedFlags: Set<string>): string[] {
+  const message: string[] = [];
+  for (let index = 1; index < args.length; index++) {
+    const arg = args[index];
+    if (valuedFlags.has(arg)) {
+      index++;
+      continue;
+    }
+    if (arg.startsWith('-')) continue;
+    message.push(arg);
+  }
+  return message;
 }
 
 async function main() {
@@ -5174,9 +5338,11 @@ Commands:
   translate       Translate text between languages (supports pipe)
   detect-language Detect the language of a text
   transcribe      Transcribe an audio file (speech-to-text)
+  speech          Run full speech pipeline (audio + optional text prompt)
   tts             Generate speech from text (text-to-speech)
   voices          List available TTS voices
   image           Generate an image from a text prompt
+  media           Test image/audio media capabilities
   docker          Build Docker images via GitHub Actions and GHCR (auth, build, list)
   gpu             Manage GPU deployments (status, deploy, stop, logs, ssh, patch, commit)
   apps            List and manage app configurations
@@ -5202,12 +5368,20 @@ Environment Variables:
                   Example: https://parle-ai-gateway.fly.dev
   AI_GATEWAY_KEY  API key for Bearer token authentication
                   Required when the gateway has GATEWAY_API_KEYS set
+  AIGW_APP_KEY    Per-app API key; enables @app/llm model resolution
+  AIGW_APP_NAME   App/Profile ID registered in GATEWAY_API_KEYS
+
+Model selection:
+  ai-gateway chat defaults to @app/llm, resolved from authenticated App/Profile.
+  Use -m openrouter/<model> to force OpenRouter by provider/model shorthand.
 
 Examples:
   ai-gateway health
   ai-gateway chat "What is 2+2?"
+  ai-gateway chat "Say OK only." -m openrouter/meta-llama/llama-3.1-8b-instruct --no-stream
   ai-gateway chat "Translate to French: hello" -m llama-3.3-70b-versatile
-  ai-gateway transcribe meeting.wav -l en
+  ai-gateway transcribe meeting.wav -l en --prompt "product names: AI Gateway"
+  ai-gateway speech meeting.wav --from pt --to en --prompt "classroom dialogue" -o dubbed.wav
   ai-gateway tts "Hello world" -o hello.wav -v daniel
   ai-gateway image "a cat on a keyboard" -o cat.jpg
 `,
@@ -5222,14 +5396,19 @@ Arguments:
 
 Options:
   -m, --model <model>          Model to use
-                               Default: llama-3.1-8b-instant
+                               Default: @app/llm (authenticated app profile)
+                               Provider shorthand allowed: openrouter/<model>, groq/<model>
                                Available: llama-3.1-8b-instant, llama-3.3-70b-versatile,
                                meta-llama/llama-4-scout-17b-16e-instruct
   --no-stream                  Return the full response at once instead of streaming
   --max-tokens <n>             Maximum tokens to generate (default: 1024, max: 128000)
+  -i, --image <path>           Attach an image file; repeat for multiple images
+                               Supported: PNG, JPG/JPEG, WEBP; max 20MB each
 
 Notes:
   - Streaming is enabled by default — tokens appear as they're generated
+  - Vision providers may ignore streaming; use --no-stream for predictable output
+  - Image inputs require a vision-capable model and are sent as image_url parts
   - Token usage is shown at the end when streaming completes
   - Only models configured on the gateway are available (no proprietary models)
   - Temperature defaults to the model's default (typically ~0.7)
@@ -5237,7 +5416,8 @@ Notes:
 Examples:
   ai-gateway chat "What is 2+2?"
   ai-gateway chat "Explain quantum computing" -m llama-3.3-70b-versatile
-  ai-gateway chat "Say OK" --no-stream --max-tokens 5
+  ai-gateway chat "Say OK" -m openrouter/meta-llama/llama-3.1-8b-instruct --no-stream --max-tokens 5
+  ai-gateway chat "Compare these images" -m openrouter/google/gemini-2.5-flash -i ideal.jpg -i render.jpg --no-stream
 `,
     transcribe: `
 ai-gateway transcribe — Speech-to-text transcription
@@ -5255,6 +5435,7 @@ Options:
                                Available: whisper-large-v3, whisper-large-v3-turbo
   -l, --language <lang>        Language hint (BCP-47 code: en, fr, es, pt, de, ja, zh...)
                                Improves accuracy when the language is known
+  --prompt <text>              STT context/hotwords for audio + text requests
 
 Notes:
   - Identical audio files are cached for 5 minutes (X-Cache: HIT on repeat)
@@ -5262,8 +5443,45 @@ Notes:
 
 Examples:
   ai-gateway transcribe recording.wav
-  ai-gateway transcribe meeting.mp3 -l en
+  ai-gateway transcribe meeting.mp3 -l en --prompt "names: Marcos, BabelCast"
   ai-gateway transcribe audio.flac -m whisper-large-v3 -l fr
+`,
+    speech: `
+ai-gateway speech — Full speech pipeline (STT → LLM → TTS)
+
+Usage:
+  ai-gateway speech <audio-file> [options]
+
+Arguments:
+  <audio-file>                 Path to audio file (WAV, MP3, FLAC, etc.)
+
+Options:
+  --from <lang>                Source language (default: fr)
+  --to <lang>                  Target language (default: en)
+  --prompt <text>              STT prompt/context for audio + text input
+  --speaker <voice>            TTS voice/speaker hint
+  --ref-text <text>            Voice clone reference text
+  --reference-audio <file>     Voice clone reference audio file
+  -o, --output <file>          Save returned audio when available
+  --json                       Print full JSON response
+
+Examples:
+  ai-gateway speech meeting.wav --from pt --to en --prompt "classroom dialogue"
+  ai-gateway speech phrase.wav --from es --to en -o dub.wav --json
+`,
+    media: `
+ai-gateway media — Verify media capabilities
+
+Usage:
+  ai-gateway media test --image <path> --audio <path> [options]
+
+Options:
+  --image <path>               Image fixture for image+text chat test
+  --audio <path>               Audio fixture for transcription test
+  -m, --model <model>          Vision model (default: openrouter/google/gemini-2.5-flash)
+
+Examples:
+  ai-gateway media test --image web/e2e/screenshots/overview.png --audio tests-playwright/fixtures/samples/statement.wav
 `,
     tts: `
 ai-gateway tts — Text-to-speech generation
@@ -5916,6 +6134,12 @@ Output:
   - STT models (whisper-large-v3, whisper-large-v3-turbo)
   - TTS models (canopylabs/orpheus-v1-english, etc.)
 
+Chat model shortcuts:
+  - @app/llm resolves from the authenticated App/Profile (AIGW_APP_KEY → userId)
+  - openrouter/<model> forces OpenRouter and sends <model> upstream
+    Example: openrouter/meta-llama/llama-3.1-8b-instruct
+  - Capabilities: llm=text chat, vision=image+text, stt=audio transcription, tts=speech output
+
 Notes:
   - Only models configured on this gateway instance are shown
   - Proprietary models (gpt-4o, claude-3, etc.) are NOT available
@@ -6131,7 +6355,8 @@ ai-gateway server — Manage the local dev server
         await cmdBalance();
         break;
       case 'chat': {
-        let msg = args.slice(1).filter(a => !a.startsWith('-')).join(' ');
+        const imagePaths = [...getArgs(args, '-i'), ...getArgs(args, '--image')];
+        let msg = chatMessageArgs(args, new Set(['-m', '--model', '--max-tokens', '-i', '--image'])).join(' ');
         // Support piped input: echo "hello" | ai-gateway chat
         if (!msg) msg = (await readStdin()) || '';
         if (!msg) { console.error('Usage: ai-gateway chat "your message" or echo "msg" | ai-gateway chat'); process.exit(1); }
@@ -6139,6 +6364,7 @@ ai-gateway server — Manage the local dev server
           model: getArg(args, '-m') || getArg(args, '--model'),
           stream: !hasFlag(args, '--no-stream'),
           maxTokens: getArg(args, '--max-tokens') ? parseInt(getArg(args, '--max-tokens')!) : undefined,
+          imagePaths,
         });
         break;
       }
@@ -6148,6 +6374,32 @@ ai-gateway server — Manage the local dev server
         await cmdTranscribe(file, {
           model: getArg(args, '-m') || getArg(args, '--model'),
           language: getArg(args, '-l') || getArg(args, '--language'),
+          prompt: getArg(args, '--prompt'),
+        });
+        break;
+      }
+      case 'speech': {
+        const file = args[1];
+        if (!file || file.startsWith('-')) { console.error('Usage: ai-gateway speech <audio-file>'); process.exit(1); }
+        await cmdSpeech(file, {
+          source: getArg(args, '--from') || getArg(args, '--source'),
+          target: getArg(args, '--to') || getArg(args, '--target'),
+          speaker: getArg(args, '--speaker'),
+          prompt: getArg(args, '--prompt'),
+          refText: getArg(args, '--ref-text'),
+          referenceAudio: getArg(args, '--reference-audio'),
+          output: getArg(args, '-o') || getArg(args, '--output'),
+          json: hasFlag(args, '--json'),
+        });
+        break;
+      }
+      case 'media': {
+        const sub = args[1];
+        if (sub !== 'test') { console.error('Usage: ai-gateway media test --image <path> --audio <path>'); process.exit(1); }
+        await cmdMediaTest({
+          image: getArg(args, '--image'),
+          audio: getArg(args, '--audio'),
+          model: getArg(args, '-m') || getArg(args, '--model'),
         });
         break;
       }
@@ -6313,6 +6565,9 @@ Per-app isolation:
             label: getArg(args, '--label'),
             // --no-strict-fast-boot opts OUT of the strict filter (default ON)
             strictFastBoot: hasFlag(args, '--no-strict-fast-boot') ? false : undefined,
+            // --allow-unverified opts INTO Vast deverified/unverified rentable hosts
+            // (only path when no verified offer is rentable for the requested GPU)
+            allowUnverified: hasFlag(args, '--allow-unverified') ? true : undefined,
           }); break;
           case 'stop': await cmdGpuStop({
             deployId: getArg(args, '--deploy-id'),
