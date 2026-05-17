@@ -321,11 +321,15 @@ describe('GPU Handlers - Core Logic', () => {
     it('should reject deploy without dockerImage when no active app', async () => {
       vi.mocked(httpUtilsMock.readJsonBody).mockResolvedValue({
         gpuTypes: ['NVIDIA GeForce RTX 4090'],
+        apiKey: 'rpa_valid-key-1234567890abcdefghij',
       });
       vi.mocked(httpUtilsMock.validateGpuCredentials).mockReturnValue(null);
 
       const res = createMockRes();
-      await gpuHandlers.handleGpuDeploy(createMockReq({ gpuTypes: ['NVIDIA GeForce RTX 4090'] }), res);
+      await gpuHandlers.handleGpuDeploy(createMockReq({
+        gpuTypes: ['NVIDIA GeForce RTX 4090'],
+        apiKey: 'rpa_valid-key-1234567890abcdefghij',
+      }), res);
 
       expect(res.writeHead).toHaveBeenCalledWith(
         400,
@@ -336,15 +340,20 @@ describe('GPU Handlers - Core Logic', () => {
     });
 
     it('should reject deploy without gpuTypes and no active app priority list', async () => {
+      const img = uniqueImage();
       vi.mocked(httpUtilsMock.readJsonBody).mockResolvedValue({
-        dockerImage: uniqueImage(),
+        dockerImage: img,
+        apiKey: 'rpa_valid-key-1234567890abcdefghij',
       });
       vi.mocked(httpUtilsMock.validateGpuCredentials).mockReturnValue(null);
       vi.mocked(deploySettingsMock.getGpuPriorityList).mockReturnValue([]);
       vi.mocked(gpuDeployMock.getVerifiedGpuTypes).mockResolvedValue(['NVIDIA GeForce RTX 4090']);
 
       const res = createMockRes();
-      await gpuHandlers.handleGpuDeploy(createMockReq({ dockerImage: uniqueImage() }), res);
+      await gpuHandlers.handleGpuDeploy(createMockReq({
+        dockerImage: img,
+        apiKey: 'rpa_valid-key-1234567890abcdefghij',
+      }), res);
 
       // Should proceed with verified GPU types, not reject
       expect(res.writeHead).toHaveBeenCalledWith(202, expect.any(Object));

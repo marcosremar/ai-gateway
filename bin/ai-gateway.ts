@@ -788,6 +788,7 @@ async function cmdGpuDeploy(opts: {
   image?: string; gpuTypes?: string; onstart?: string; storageGb?: number;
   env?: string; numGpus?: number; devMode?: boolean; readinessProbe?: string;
   label?: string; strictFastBoot?: boolean; allowUnverified?: boolean;
+  provider?: string;
 }) {
   const { url, key } = getConfig();
   const body: Record<string, unknown> = {};
@@ -798,6 +799,7 @@ async function cmdGpuDeploy(opts: {
   if (opts.numGpus) body.gpuCount = opts.numGpus;
   if (opts.devMode) body.devMode = true;
   if (opts.readinessProbe === 'ssh' || opts.readinessProbe === 'health') body.readinessProbe = opts.readinessProbe;
+  if (opts.provider) body.provider = opts.provider;
   // --label and --strict-fast-boot threading. Label is required by the
   // server unless AIGW_LABEL_OPTIONAL=1 — surface a friendlier CLI error
   // before the HTTP round-trip so the user sees it immediately.
@@ -5593,6 +5595,8 @@ Subcommands:
     --image <docker-image>       Docker image (e.g. marcosremar/babelcast-subtitle:latest)
     --gpu-types <types>          Comma-separated GPU types
                                  (e.g. "NVIDIA GeForce RTX 4090,NVIDIA RTX A6000")
+    --provider <name>            Restrict to one provider (vast, runpod, modal,
+                                 hyperstack, tensordock). Skips tier cascade race.
   stop                         Stop (pause) the current GPU instance
   resume [instanceId]          Resume a stopped instance
     --provider <name>            Provider hint (runpod, vast, tensordock)
@@ -6568,6 +6572,9 @@ Per-app isolation:
             // --allow-unverified opts INTO Vast deverified/unverified rentable hosts
             // (only path when no verified offer is rentable for the requested GPU)
             allowUnverified: hasFlag(args, '--allow-unverified') ? true : undefined,
+            // --provider restricts deploy to a single provider (vast, runpod, modal,
+            // hyperstack, tensordock). Bypasses tier cascade race.
+            provider: getArg(args, '--provider'),
           }); break;
           case 'stop': await cmdGpuStop({
             deployId: getArg(args, '--deploy-id'),

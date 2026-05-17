@@ -43,6 +43,7 @@ interface DeploySettings {
   deployDockerImage:     string;                   // last-used Docker image (persisted across reloads)
   minVramGb:             number;                   // minimum VRAM filter in GB (0 = any)
   minDiskGb:             number;                   // minimum disk space in GB (default 100)
+  minInetDownMbps:       number;                   // minimum host download bandwidth in Mbps (default 2000)
   preferSsd:             boolean;                  // prefer SSD/NVMe over HDD (diskBwRead > 200 MB/s)
   sttTargetLatencyMs:    number;                   // per-service max latency for STT
   llmTargetLatencyMs:    number;                   // per-service max latency for LLM/translate
@@ -74,6 +75,7 @@ const DEFAULTS: DeploySettings = {
   deployDockerImage:     '',
   minVramGb:             16,
   minDiskGb:             20,   // was 100 — caused ghost machines on RunPod (no host has 200GB free)
+  minInetDownMbps:       2000, // 2 Gb/s default — pulls a 10GB image in ~40s. Lower for cheap consumer GPUs (3060 hosts top out ~1Gbps).
   preferSsd:             false,
   sttTargetLatencyMs:    800,
   llmTargetLatencyMs:    2000,
@@ -117,7 +119,7 @@ export async function loadDeploySettings(): Promise<void> {
   } catch { /* use defaults */ }
 
   // Validate numeric fields — JSON.parse allows any type
-  const numFields: (keyof DeploySettings)[] = ['intervalMin','lastRunAt','maxLatencyMs','deployTimeoutMin','minVramGb','minDiskGb','sttTargetLatencyMs','llmTargetLatencyMs','ttsTargetLatencyMs','benchmarkMaxRuns','benchmarkMarginPct','shadowRuns','p95DemotionMultiplier','p95IdleWindowSec','repechageMaxAttempts','standbyTriggerHours','standbyDrainTimeoutMs','deployRaceCount','autoRecoveryDelaySec','autoRecoveryMaxRetries'];
+  const numFields: (keyof DeploySettings)[] = ['intervalMin','lastRunAt','maxLatencyMs','deployTimeoutMin','minVramGb','minDiskGb','minInetDownMbps','sttTargetLatencyMs','llmTargetLatencyMs','ttsTargetLatencyMs','benchmarkMaxRuns','benchmarkMarginPct','shadowRuns','p95DemotionMultiplier','p95IdleWindowSec','repechageMaxAttempts','standbyTriggerHours','standbyDrainTimeoutMs','deployRaceCount','autoRecoveryDelaySec','autoRecoveryMaxRetries'];
   for (const k of numFields) {
     if (typeof _s[k] !== 'number' || Number.isNaN(_s[k] as number)) {
       (_s as unknown as Record<string, unknown>)[k] = (DEFAULTS as unknown as Record<string, unknown>)[k];
@@ -281,6 +283,13 @@ export function getMinDiskGb(): number { return _s.minDiskGb ?? DEFAULTS.minDisk
 
 export function setMinDiskGb(gb: number): void {
   _s.minDiskGb = Math.max(0, gb);
+  saveDeploySettings();
+}
+
+export function getMinInetDownMbps(): number { return _s.minInetDownMbps ?? DEFAULTS.minInetDownMbps; }
+
+export function setMinInetDownMbps(mbps: number): void {
+  _s.minInetDownMbps = Math.max(0, mbps);
   saveDeploySettings();
 }
 

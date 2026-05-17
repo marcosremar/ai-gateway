@@ -304,6 +304,26 @@ export function filterTiers(
   return { tiers: [forced] };
 }
 
+/**
+ * Drop the Modal tier when the deploy is for a Docker image (not a `.py` serve
+ * script). The race loop silently substitutes Docker images with
+ * `docker/modal/babelcast.py` and "wins" against the existing babelcast Modal
+ * serve endpoint in a few seconds, hijacking the user's intended deploy.
+ *
+ * Modal is kept when:
+ *   - `forceProvider === 'modal'` (user explicitly asked for it), OR
+ *   - `dockerImage` ends with `.py` (legitimate Modal deploy script).
+ */
+export function dropModalForDockerImage(
+  tiers: GpuTier[],
+  dockerImage: string,
+  forceProvider?: ProviderName,
+): GpuTier[] {
+  if (forceProvider === 'modal') return tiers;
+  if (dockerImage.endsWith('.py')) return tiers;
+  return tiers.filter(t => t.name !== 'modal');
+}
+
 // ── Default Storage per Provider ────────────────────────────────────────────
 // Keep RunPod storage low to avoid ghost machines — most Secure Cloud hosts
 // don't have >100GB local disk. Vast.ai has much more disk availability.

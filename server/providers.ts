@@ -203,7 +203,12 @@ log.log(`Ensemble STT providers: ${ENSEMBLE_STT_PROVIDERS.join(',') || 'all'}`);
 if (!groqAvailable && !ollamaAvailable && !fireworksAvailable) {
   // Must have at least one cloud/local LLM provider
   log.error('No LLM provider configured. Set GROQ_API_KEY, FIREWORKS_API_KEY, or OLLAMA_HOST+PROVIDER_CHAIN=ollama');
-  process.exit(1);
+  // Allow tests / scripts that legitimately load this module without an LLM
+  // provider configured (e.g. orphan-recovery unit tests) to skip the hard
+  // exit. The check still runs in real startup unless explicitly disabled.
+  if (process.env.AIGW_ALLOW_NO_LLM !== '1' && process.env.VITEST !== 'true' && process.env.NODE_ENV !== 'test') {
+    process.exit(1);
+  }
 }
 
 if (fireworksAvailable) {

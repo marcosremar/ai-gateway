@@ -44,12 +44,17 @@ export function isPublicHttpRoute(method: string, pathname: string): boolean {
   return PUBLIC_HTTP_ROUTES.has(`${method.toUpperCase()} ${pathname}`);
 }
 
-export function resolveHttpCorsOrigin(origin: string | null): string | null {
-  if (!origin) return null;
+export interface CorsResolution {
+  origin: string | null;
+  allowCredentials: boolean;
+}
+
+export function resolveHttpCorsOrigin(origin: string | null): CorsResolution {
+  if (!origin) return { origin: null, allowCredentials: false };
 
   const corsOriginsEnv = process.env.CORS_ORIGINS
     || `http://localhost:${PORT},http://127.0.0.1:${PORT},http://localhost:3000,http://127.0.0.1:3000`;
-  if (corsOriginsEnv === '*') return origin;
+  if (corsOriginsEnv === '*') return { origin, allowCredentials: false };
 
   const allowedOrigins = corsOriginsEnv
     .split(',')
@@ -58,9 +63,9 @@ export function resolveHttpCorsOrigin(origin: string | null): string | null {
 
   const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
   if (isLocal || allowedOrigins.includes(origin)) {
-    return origin;
+    return { origin, allowCredentials: true };
   }
-  return null;
+  return { origin: null, allowCredentials: false };
 }
 
 function buildCorsHeaders(origin: string | null): Record<string, string> {
@@ -304,7 +309,7 @@ export function startHttpApiServer(): void {
       fetch: async (req, server) => {
         const url = new URL(req.url);
         const method = req.method;
-        const corsOrigin = resolveHttpCorsOrigin(req.headers.get('origin'));
+        const corsOrigin = resolveHttpCorsOrigin(req.headers.get('origin')).origin;
         const routeLimit = getRouteBodyLimit(url.pathname);
 
         // CORS preflight
