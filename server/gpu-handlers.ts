@@ -9,7 +9,7 @@ const log = createLogger('gpu-handlers');
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { GpuProviderClient, GpuOffer, ProviderCredentials } from '../src/gpu-providers/types';
 import { pauseInstanceForIdle } from '../src/gateway/providers/gpu/idle-pause';
-import { filterTiers } from '../src/gpu-providers/deploy-orchestrator';
+import { filterTiers, dropModalForDockerImage } from '../src/gpu-providers/deploy-orchestrator';
 import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import {
   deployState, setDeployState, deployCancelled, setDeployCancelled, deployLock, setDeployLock,
@@ -798,7 +798,11 @@ async function _selectDeploymentTier(
       : '';
     throw { status: 400, message: filtered.error + balanceHint };
   }
-  const tiers = filtered.tiers;
+  const tiersBeforeModalDrop = filtered.tiers;
+  const tiers = dropModalForDockerImage(tiersBeforeModalDrop, dockerImage, providerFilter);
+  if (tiers.length < tiersBeforeModalDrop.length) {
+    log.log(`[req=${requestId}] Dropped modal tier — dockerImage is not a .py script; pass --provider modal to opt in.`);
+  }
 
   // Auto-select cheapest GPUs with adequate VRAM when autoSelectGpu is true and no gpuTypes specified
   if (autoSelectGpu && gpuTypes.length === 0 && tiers.length > 0) {

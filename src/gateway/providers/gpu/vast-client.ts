@@ -22,6 +22,7 @@
 import type { GpuInstance, GpuOffer, InstanceSpec, ListOffersOptions, ProviderCredentials } from './types';
 import { AbstractGpuProvider, TIMEOUTS } from './abstract-provider';
 import type { AbstractGpuProviderOptions } from './abstract-provider';
+import { getMinInetDownMbps } from './deploy-settings';
 import os from 'os';
 import path from 'path';
 import { readFile, writeFile, mkdir, access } from 'fs/promises';
@@ -1090,10 +1091,12 @@ export class VastClient extends AbstractGpuProvider {
       // Strict-fast-boot opts into a higher reliability bar (0.97) to filter out
       // hosts that historically zombie. Default 0.95 keeps backwards compat.
       reliability2: { gte: spec.strictFastBoot ? 0.97 : 0.95 },
-      inet_down: { gte: 2000 },         // Minimum 2 Gb/s download (10GB image in ~40s)
+      // Default minimum download bandwidth from persisted settings (default 2000 Mbps,
+      // pulls a 10GB image in ~40s). Lower it for cheap consumer GPUs (RTX 3060
+      // hosts top out near 1 Gbps). `spec.minInetDownMbps` overrides per call.
+      inet_down: { gte: spec.minInetDownMbps ?? getMinInetDownMbps() },
       inet_up: { gte: 200 },            // Minimum 200 Mb/s upload
       ...(spec.directPortRequired ? { direct_port_count: { gte: spec.directPortRequired } } : {}),
-      ...(spec.minInetDownMbps ? { inet_down: { gte: spec.minInetDownMbps } } : {}),
       order: [['dph_total', 'asc']],
     };
 
