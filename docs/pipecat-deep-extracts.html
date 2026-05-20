@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipecat — Deep Extracts (round 2)</title>
+<style>
+  :root {
+    --bg: #0b0f10;
+    --panel: #11171a;
+    --panel-2: #161d21;
+    --border: #1f2a30;
+    --text: #d8e0e3;
+    --muted: #7e8d93;
+    --accent: #4ade80;
+    --accent-2: #38bdf8;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --magenta: #c084fc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Menlo, monospace;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+  }
+  header {
+    padding: 48px 32px 32px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #0e1518 0%, var(--bg) 100%);
+  }
+  header .crumb { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  header .crumb a { color: var(--accent-2); text-decoration: none; }
+  header h1 { margin: 0 0 8px; font-size: 28px; color: var(--magenta); }
+  header p.sub { margin: 0; color: var(--muted); max-width: 880px; font-size: 14px; }
+  main { max-width: 1200px; margin: 0 auto; padding: 32px; }
+  section { margin-bottom: 48px; }
+  section > h2 {
+    font-size: 22px;
+    color: var(--accent-2);
+    margin: 0 0 4px;
+    border-left: 3px solid var(--accent-2);
+    padding-left: 12px;
+  }
+  section > h2 .badge {
+    font-size: 11px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2px 10px;
+    margin-left: 8px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    vertical-align: middle;
+  }
+  section > .lede { color: var(--muted); margin: 0 0 16px 15px; font-size: 13px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    transition: border-color 0.15s;
+  }
+  .card:hover { border-color: var(--magenta); }
+  .card h3 { margin: 0 0 6px; font-size: 14px; color: var(--text); }
+  .card .src {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: "SF Mono", Menlo, monospace;
+    margin-bottom: 8px;
+    word-break: break-all;
+  }
+  .card .src code { color: var(--accent); }
+  .card p { margin: 0 0 10px; font-size: 13px; color: #c0c8cc; }
+  .card .apply {
+    font-size: 12px;
+    color: var(--accent);
+    border-top: 1px dashed var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+  .card .apply b { color: var(--warn); }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .tag {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .tag.gold { color: var(--warn); border-color: var(--warn); }
+  .tag.steal { color: var(--magenta); border-color: var(--magenta); }
+  .tag.new { color: var(--accent); border-color: var(--accent); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 13px;
+  }
+  th, td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: var(--panel-2);
+    color: var(--accent-2);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code {
+    background: var(--panel-2);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: var(--accent);
+  }
+  td .effort {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    text-transform: uppercase;
+  }
+  td .effort.s { color: var(--accent); border-color: var(--accent); }
+  td .effort.m { color: var(--accent-2); border-color: var(--accent-2); }
+  td .effort.l { color: var(--warn); border-color: var(--warn); }
+  td .effort.xl { color: var(--danger); border-color: var(--danger); }
+  pre {
+    background: #050708;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px;
+    overflow-x: auto;
+    font-size: 12px;
+    color: #c0c8cc;
+    line-height: 1.5;
+  }
+  pre code { background: transparent; padding: 0; color: inherit; }
+  footer {
+    padding: 32px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .hl {
+    background: linear-gradient(180deg, transparent 60%, rgba(192,132,252,0.2) 60%);
+    padding: 0 2px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="crumb"><a href="ai-coding-ideas.html">← AI Coding Ideas</a> / <a href="pipecat-ideas.html">Pipecat round 1</a> / Deep extracts (round 2)</div>
+  <h1>Pipecat — Round 2: Deep Extracts</h1>
+  <p class="sub">Walked deeper into <code>/tmp/pipecat-research/src/pipecat/</code>. Found 8 entire categories of useful code beyond the high-level steal list. Telephony codecs, audio mixers, IVR navigation, voicemail detection, pattern pair aggregator, 7 user-turn-start strategies, full RTVI protocol, OpenTelemetry tracing.</p>
+</header>
+
+<main>
+
+<!-- ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>1. Telephony stack <span class="badge">net-new feature</span></h2>
+  <p class="lede">ai-gateway has zero telephony today. Pipecat ships full Twilio/Plivo/Vonage/Telnyx/Exotel/Genesys integration with μ-law codec, hangup automation, and DTMF handling. Total ~2400 LOC across 6 serializers + base.</p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag steal">port me</span><span class="tag gold">codec</span></div>
+      <h3>μ-law ↔ PCM codec</h3>
+      <div class="src">audio/utils.py · pcm_to_ulaw / ulaw_to_pcm</div>
+      <p>Async helpers convert PCM ↔ μ-law (G.711) with optional resample. Telephony is fixed 8kHz μ-law; ai-gateway pipeline 16kHz PCM. Need both directions.</p>
+      <div class="apply"><b>Apply:</b> Bun helper using <code>audioop</code> equivalent (port via lookup table — μ-law is byte-mapped, no math). ~40 LOC.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">copy structure</span></div>
+      <h3>TwilioFrameSerializer (276 LOC)</h3>
+      <div class="src">serializers/twilio.py</div>
+      <p>Handles: Twilio Media Streams WS protocol, base64 audio frames, DTMF events, auto-hangup via Twilio REST API on EndFrame. Validates account_sid/auth_token/region/edge.</p>
+      <div class="apply"><b>Apply:</b> reference for new <code>server/telephony/twilio.ts</code>. Wire to existing <code>/v1/speech/ws</code> with format adapter.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">copy structure</span></div>
+      <h3>Plivo / Vonage / Telnyx / Exotel / Genesys</h3>
+      <div class="src">serializers/{plivo,vonage,telnyx,exotel,genesys}.py</div>
+      <p>252 / 184 / 288 / 167 / 962 LOC each. Each carrier has slightly different WS protocol but same shape: connect → audio frames → DTMF → hangup.</p>
+      <div class="apply"><b>Apply:</b> start with Twilio (largest market). Genesys is enterprise contact-center oriented (962 LOC = most complex). Plivo simplest path.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag gold">unique feature</span></div>
+      <h3>IVR Navigator (extension)</h3>
+      <div class="src">extensions/ivr/ivr_navigator.py</div>
+      <p>LLM-driven phone tree navigation. Listens to IVR prompts ("Press 1 for sales..."), feeds to LLM with goal context, generates DTMF tones to navigate. Uses <code>OutputDTMFUrgentFrame</code> + <code>PatternPairAggregator</code>.</p>
+      <div class="apply"><b>Apply:</b> outbound call automation product feature. Requires telephony stack first.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag gold">unique feature</span></div>
+      <h3>Voicemail Detector</h3>
+      <div class="src">extensions/voicemail/voicemail_detector.py</div>
+      <p>Parallel pipeline classifies if outbound call hit voicemail vs human. Critical for outbound dialers — different prompts based on result.</p>
+      <div class="apply"><b>Apply:</b> outbound calling SaaS feature. Drop-in once telephony works.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">DTMF</span></div>
+      <h3>DTMF tone library</h3>
+      <div class="src">audio/dtmf/ · dtmf-{0..9,*,#}.wav + types.py</div>
+      <p>12 pre-recorded DTMF tones for keypad output. <code>KeypadEntry</code> enum maps digits to tones.</p>
+      <div class="apply"><b>Apply:</b> copy 12 wavs to <code>dockers/&lt;tts&gt;/assets/dtmf/</code>. Mix with audio output for IVR.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>2. Audio processing utilities <span class="badge">port these</span></h2>
+  <p class="lede">Audio helpers ai-gateway lacks: noise filters, mixers, volume meters, multi-backend resamplers.</p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag steal">port</span></div>
+      <h3>3 resampler implementations</h3>
+      <div class="src">audio/resamplers/{soxr,soxr_stream,resampy}_resampler.py</div>
+      <p><b>SOXR</b> (best quality, slow), <b>SOXR stream</b> (chunk-by-chunk for live), <b>Resampy</b> (numpy-based, decent). Pipecat uses SOXR as default.</p>
+      <div class="apply"><b>Apply:</b> Bun uses <code>soxr-wasm</code> for browser, native <code>libsoxr</code> via FFI for server. Stream variant essential for WS.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">copy</span></div>
+      <h3>Audio mixer (background music)</h3>
+      <div class="src">audio/mixers/soundfile_mixer.py</div>
+      <p>Mixes background WAV file into output stream at configurable gain. Loops automatically.</p>
+      <div class="apply"><b>Apply:</b> hold-music for telephony, ambient sound for voice agents.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">noise filter</span></div>
+      <h3>5 noise filter providers</h3>
+      <div class="src">audio/filters/{aic,koala,krisp_viva,rnnoise}_filter.py</div>
+      <p><b>RNNoise</b> = OSS, free, recurrent NN. <b>Krisp Viva</b> = commercial, best. <b>Koala</b> = Picovoice, on-device. <b>AIC</b> = acoustic interference cancel.</p>
+      <div class="apply"><b>Apply:</b> RNNoise via WASM in browser (MIT licensed); Krisp for production. Cleans mic input before STT.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">port</span></div>
+      <h3>Volume calc (pyloudnorm)</h3>
+      <div class="src">audio/utils.py · calculate_audio_volume</div>
+      <p>ITU-R BS.1770-4 loudness standard. Returns LUFS. <code>SPEAKING_THRESHOLD = 20</code> constant — speech usually ±500 to ±5000.</p>
+      <div class="apply"><b>Apply:</b> volume meter UI for /v1/speech/ws clients. Detect "user too quiet/loud".</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">stereo</span></div>
+      <h3>Stereo interleave + mix</h3>
+      <div class="src">audio/utils.py · interleave_stereo_audio + mix_audio</div>
+      <p>Bot voice on right channel, user on left — useful for recording / debugging conversations as 2-channel WAV.</p>
+      <div class="apply"><b>Apply:</b> bot recording feature — save sessions as stereo WAV for QA.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>3. Pipeline composition patterns <span class="badge">arch ideas</span></h2>
+  <p class="lede">Beyond ParallelPipeline already noted. Pipecat has runtime hot-swap of services + sync parallel + service routing.</p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag steal">A/B testing</span></div>
+      <h3>ServiceSwitcher / LLMSwitcher</h3>
+      <div class="src">pipeline/{service_switcher,llm_switcher}.py</div>
+      <p>Hot-swap LLM/STT/TTS provider mid-conversation without restart. Different model per turn. Useful for: cheap LLM for simple turns + expensive for complex; A/B testing in production.</p>
+      <div class="apply"><b>Apply:</b> formalize ai-gateway's percentage-routing feature. Decide per-frame, not per-session.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">sync</span></div>
+      <h3>SyncParallelPipeline</h3>
+      <div class="src">pipeline/sync_parallel_pipeline.py</div>
+      <p>Like ParallelPipeline but waits for ALL branches to complete before passing downstream. Useful: ensemble STT race where you wait for slowest.</p>
+      <div class="apply"><b>Apply:</b> ensemble STT with consensus voting (vs current "first wins").</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">obs</span></div>
+      <h3>TaskObserver</h3>
+      <div class="src">pipeline/task_observer.py</div>
+      <p>Observer pattern at pipeline-task level. Monitors task lifecycle: start, frame counts, errors, shutdown.</p>
+      <div class="apply"><b>Apply:</b> add to <code>server/ws-server.ts</code> session lifecycle metrics.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">infra</span></div>
+      <h3>FrameQueue (with backpressure)</h3>
+      <div class="src">utils/frame_queue.py</div>
+      <p>Bounded async queue with size limits + frame priority. Drops/rejects on overflow.</p>
+      <div class="apply"><b>Apply:</b> WebSocket backpressure — current /v1/speech/ws has no bounded queue → memory leak risk under load.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>4. LLM Context management <span class="badge">conversation quality</span></h2>
+  <p class="lede">Pipecat treats LLM context as a first-class object with summarization, gating, and pattern-pair extraction.</p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag steal">huge value</span></div>
+      <h3>LLMContextSummarizer (auto-compaction)</h3>
+      <div class="src">processors/aggregators/llm_context_summarizer.py + utils/context/llm_context_summarization.py</div>
+      <p>Auto-summarizes old conversation turns when context approaches token limit. Configurable threshold + summary prompt. Keeps recent N turns verbatim, condenses earlier into bullet summary.</p>
+      <div class="apply"><b>Apply:</b> long-running meeting bots overflow context fast. Critical missing piece.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag gold">unique</span></div>
+      <h3>PatternPairAggregator</h3>
+      <div class="src">utils/text/pattern_pair_aggregator.py</div>
+      <p>Strips delimited content from streaming LLM output. Extract <code>&lt;thinking&gt;...&lt;/thinking&gt;</code> blocks (reasoning models), pull function call args, separate inner monologue from spoken response. Configurable: REMOVE / KEEP / FORWARD.</p>
+      <div class="apply"><b>Apply:</b> handle reasoning model outputs without sending thinking tokens to TTS. Already needed for Claude/o1 integration.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">flow</span></div>
+      <h3>GatedLLMContext</h3>
+      <div class="src">processors/aggregators/gated_llm_context.py</div>
+      <p>Delays LLM context updates until external signal. Use case: pause inserting user's mid-thought into context until VAD confirms turn end.</p>
+      <div class="apply"><b>Apply:</b> Smart Turn integration — only commit to LLM context when COMPLETE confirmed.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">per-provider</span></div>
+      <h3>LLM-specific context aggregators</h3>
+      <div class="src">processors/aggregators/llm_response.py + adapters/services/*_adapter.py</div>
+      <p>Per-LLM message format adapter. Anthropic (system param + content blocks), OpenAI (messages array), Gemini (parts), Bedrock, Mistral, Perplexity, Inworld realtime, OpenAI realtime, AWS Nova Sonic, Grok realtime.</p>
+      <div class="apply"><b>Apply:</b> reference for ai-gateway provider abstraction. Some quirks (Anthropic system param) easy to miss.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">streaming</span></div>
+      <h3>SentenceAggregator</h3>
+      <div class="src">processors/aggregators/sentence.py</div>
+      <p>Buffers LLM streaming tokens until sentence end (`.` `?` `!`), then emits full sentence. Drives TTS chunking — synthesize per sentence not per token.</p>
+      <div class="apply"><b>Apply:</b> port to <code>src/streaming-stt.ts</code> overlap layer. ~40 LOC. Existing token→TTS overlap probably has this implicitly.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>5. User Turn Start strategies <span class="badge">7 variants</span></h2>
+  <p class="lede">Different ways to detect when user starts speaking. Composable — pick or stack.</p>
+
+  <table>
+    <thead><tr><th>Strategy</th><th>Trigger</th><th>Use case</th></tr></thead>
+    <tbody>
+      <tr><td><code>VADUserTurnStartStrategy</code></td><td>Silero VAD says speech</td><td>Default — works with any audio source</td></tr>
+      <tr><td><code>WakePhraseUserTurnStartStrategy</code></td><td>Hotword "hey computer"</td><td>Always-on assistant, ignore until wake</td></tr>
+      <tr><td><code>MinWordsUserTurnStartStrategy</code></td><td>≥ N words transcribed</td><td>Filter "uh"/"um"/single-syllable noise</td></tr>
+      <tr><td><code>TranscriptionUserTurnStartStrategy</code></td><td>STT emitted text</td><td>VAD-less, transcript drives turn</td></tr>
+      <tr><td><code>ExternalUserTurnStartStrategy</code></td><td>App pushes signal</td><td>Push-to-talk button</td></tr>
+      <tr><td><code>KrispVivaIPUserTurnStartStrategy</code></td><td>Krisp ML model</td><td>Heavy noise environments</td></tr>
+    </tbody>
+  </table>
+
+  <div class="grid" style="margin-top: 16px;">
+    <div class="card">
+      <div class="tags"><span class="tag new">composable</span></div>
+      <h3>Stacking strategies</h3>
+      <p>Strategies emit <code>UserStartedSpeakingFrame</code>. Pipeline can require ALL or ANY. Wake-phrase + min-words = hotword detection that ignores accidental "ok google" with no real follow-up.</p>
+      <div class="apply"><b>Apply:</b> ai-gateway today only has VAD-based heuristics. Adopting strategy pattern unlocks PTT, wake-word, transcript-driven modes.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>6. RTVI protocol <span class="badge">free client SDKs</span></h2>
+  <p class="lede">~1700 LOC: frames + models + observer + processor. Standardized real-time voice interface.</p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag steal">protocol</span></div>
+      <h3>RTVI message types</h3>
+      <div class="src">processors/frameworks/rtvi/models.py (551 LOC)</div>
+      <p>Pydantic models for client/server messages: client-ready, action, function-call, function-call-result, append-to-context, llm-config, configure, start, stop, interrupt, transcription, bot-llm, bot-tts, bot-started-speaking, bot-stopped-speaking, user-started-speaking, user-stopped-speaking, metrics, error.</p>
+      <div class="apply"><b>Apply:</b> standard wire format = compat with JS/React/RN/Swift/Kotlin/C++/ESP32 SDKs published by Daily.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">obs</span></div>
+      <h3>RTVIObserver (auto-emit)</h3>
+      <div class="src">processors/frameworks/rtvi/observer.py (633 LOC)</div>
+      <p>Watches frame flow, emits RTVI messages to client automatically: speaking events, transcripts, LLM lifecycle, function calls, metrics, audio levels.</p>
+      <div class="apply"><b>Apply:</b> bridge layer. Drop-in to convert internal frames → RTVI client messages.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>7. OpenTelemetry tracing <span class="badge">production observability</span></h2>
+  <p class="lede">Service decorators + setup utilities. Optional dep — graceful skip if not installed.</p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag steal">port</span></div>
+      <h3>Service decorators</h3>
+      <div class="src">utils/tracing/service_decorators.py</div>
+      <p>Decorators wrap STT/LLM/TTS calls in OTel spans. Auto-add: model name, latency, token counts, sample rates, success/error status.</p>
+      <div class="apply"><b>Apply:</b> decorate ai-gateway provider methods. Span attributes drive Langfuse + any OTel-compatible backend.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">turn</span></div>
+      <h3>TurnTraceObserver</h3>
+      <div class="src">utils/tracing/turn_trace_observer.py</div>
+      <p>Per-conversation-turn OTel span. Child spans: STT, LLM, TTS, TTFAC. Parent links to conversation.</p>
+      <div class="apply"><b>Apply:</b> conversation tracing in Langfuse — already integrated, this gives the right span hierarchy.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag">runtime</span></div>
+      <h3>TracingContext</h3>
+      <div class="src">utils/tracing/tracing_context.py</div>
+      <p>Thread-local context for current trace ID. Propagates through async tasks via contextvars. Link external requests to internal spans.</p>
+      <div class="apply"><b>Apply:</b> Bun has AsyncLocalStorage. Same pattern. Propagate trace IDs across handler → provider → response.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>8. Frame filters <span class="badge">composable middleware</span></h2>
+  <p class="lede">5 small reusable filter processors. Each ~50-100 LOC.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3><code>FrameFilter</code></h3>
+      <div class="src">processors/filters/frame_filter.py</div>
+      <p>Pass only listed frame types downstream. Block all others.</p>
+    </div>
+    <div class="card">
+      <h3><code>FunctionFilter</code></h3>
+      <div class="src">processors/filters/function_filter.py</div>
+      <p>Predicate function decides per-frame. Async-safe.</p>
+    </div>
+    <div class="card">
+      <h3><code>IdentityFilter</code></h3>
+      <div class="src">processors/filters/identity_filter.py</div>
+      <p>Pass-through. Used as observation point or for testing.</p>
+    </div>
+    <div class="card">
+      <h3><code>NullFilter</code></h3>
+      <div class="src">processors/filters/null_filter.py</div>
+      <p>Drops everything. Pipeline terminator for testing.</p>
+    </div>
+    <div class="card">
+      <h3><code>WakeNotifierFilter</code></h3>
+      <div class="src">processors/filters/wake_notifier_filter.py</div>
+      <p>Emits notification when wake phrase detected. Used by wake-phrase strategy.</p>
+    </div>
+    <div class="card">
+      <h3><code>IdleFrameProcessor</code></h3>
+      <div class="src">processors/idle_frame_processor.py</div>
+      <p>Triggers callback after N seconds of no frames. Auto-greet user, ping for response, terminate idle session.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>9. Updated steal list (round 2)</h2>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Steal</th><th>Target file/concern</th><th>Effort</th><th>Impact</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>13</td><td>μ-law codec (pcm_to_ulaw)</td><td><code>src/audio/codec.ts</code> NEW</td><td><span class="effort s">S</span></td><td>required for telephony</td></tr>
+      <tr><td>14</td><td>LLMContextSummarizer</td><td><code>src/llm/context-summarizer.ts</code></td><td><span class="effort m">M</span></td><td>long sessions</td></tr>
+      <tr><td>15</td><td>PatternPairAggregator</td><td><code>src/llm/pattern-pair.ts</code></td><td><span class="effort s">S</span></td><td>reasoning models</td></tr>
+      <tr><td>16</td><td>SentenceAggregator</td><td><code>src/streaming/sentence-aggregator.ts</code></td><td><span class="effort s">S</span></td><td>TTS chunking</td></tr>
+      <tr><td>17</td><td>RNNoise filter (WASM)</td><td>browser SDK + Docker</td><td><span class="effort m">M</span></td><td>STT accuracy</td></tr>
+      <tr><td>18</td><td>SOXR resampler (stream variant)</td><td><code>src/audio/resampler.ts</code></td><td><span class="effort m">M</span></td><td>real-time audio</td></tr>
+      <tr><td>19</td><td>SoundfileMixer (background music)</td><td><code>src/audio/mixer.ts</code></td><td><span class="effort s">S</span></td><td>hold music</td></tr>
+      <tr><td>20</td><td>OTel decorators on providers</td><td><code>src/providers/*.ts</code></td><td><span class="effort m">M</span></td><td>tracing</td></tr>
+      <tr><td>21</td><td>FrameQueue (bounded backpressure)</td><td>WS handler</td><td><span class="effort s">S</span></td><td>memory safety</td></tr>
+      <tr><td>22</td><td>IdleFrameProcessor</td><td>WS session</td><td><span class="effort s">S</span></td><td>auto-disconnect</td></tr>
+      <tr><td>23</td><td>WakePhrase strategy</td><td><code>src/audio/turn/wake-phrase.ts</code></td><td><span class="effort m">M</span></td><td>always-on assistants</td></tr>
+      <tr><td>24</td><td>ServiceSwitcher (mid-session)</td><td>routing layer</td><td><span class="effort l">L</span></td><td>cost/A-B routing</td></tr>
+      <tr><td>25</td><td>Voicemail Detector</td><td>extension after telephony</td><td><span class="effort l">L</span></td><td>outbound calling</td></tr>
+      <tr><td>26</td><td>IVR Navigator</td><td>extension after telephony</td><td><span class="effort xl">XL</span></td><td>premium feature</td></tr>
+      <tr><td>27</td><td>Volume calc (LUFS)</td><td>browser SDK</td><td><span class="effort s">S</span></td><td>UX feedback</td></tr>
+      <tr><td>28</td><td>Stereo interleave (recordings)</td><td>session recorder</td><td><span class="effort s">S</span></td><td>QA / debugging</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>10. Quick wins (do this week)</h2>
+
+  <p>Picked by impact ÷ effort:</p>
+
+  <ol>
+    <li><b>SentenceAggregator</b> (S) — port ~40 LOC; immediate TTS chunking improvement.</li>
+    <li><b>PatternPairAggregator</b> (S) — extract <code>&lt;thinking&gt;</code> blocks from Claude/o1; ship Today.</li>
+    <li><b>FrameQueue</b> (S) — fix WS memory-leak risk; preventive.</li>
+    <li><b>IdleFrameProcessor</b> (S) — auto-disconnect dead WS sessions.</li>
+    <li><b>μ-law codec</b> (S) — unblocks all telephony work.</li>
+    <li><b>Volume LUFS</b> (S) — UX win, simple browser util.</li>
+  </ol>
+
+  <p>All six together: ~1 day of work, all S effort.</p>
+</section>
+
+<section>
+  <h2>11. What's worth NOT taking from round 2</h2>
+  <ul style="font-size: 13px; color: #c0c8cc;">
+    <li><b>Krisp filters</b> — commercial license, expensive. Use RNNoise instead.</li>
+    <li><b>GStreamer processor</b> — heavy native dep. Bun + soxr-wasm cleaner.</li>
+    <li><b>Genesys serializer</b> — 962 LOC for niche enterprise contact-center protocol. Skip until customer asks.</li>
+    <li><b>resampy</b> — slower than SOXR, redundant.</li>
+    <li><b>WakeCheckFilter</b> (deprecated) — use new WakePhraseUserTurnStartStrategy.</li>
+    <li><b>Pipecat <code>BaseObject</code> events</b> — heavy class hierarchy, doesn't fit Bun composition style.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>12. Inspect locally</h2>
+  <pre>cd /tmp/pipecat-research/src/pipecat
+
+# Round 2 deep dives
+cat audio/utils.py                     # μ-law, mix, volume
+cat serializers/twilio.py              # 276 LOC, simplest carrier
+cat extensions/voicemail/voicemail_detector.py
+cat extensions/ivr/ivr_navigator.py
+cat utils/text/pattern_pair_aggregator.py
+cat processors/aggregators/sentence.py
+cat processors/aggregators/llm_context_summarizer.py
+ls turns/user_start/                   # 7 strategies
+cat utils/tracing/service_decorators.py</pre>
+</section>
+
+</main>
+
+<footer>
+  Pipecat round 2 deep extracts · Source: <a href="https://github.com/pipecat-ai/pipecat" style="color:var(--magenta)">github.com/pipecat-ai/pipecat</a> · Generated 2026-05-06
+</footer>
+
+</body>
+</html>

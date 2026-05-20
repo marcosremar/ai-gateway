@@ -28,7 +28,7 @@ import { defaultLogger } from '../../logger';
 
 export interface ProviderAccount {
   userId: string;
-  provider: 'runpod' | 'tensordock' | string;
+  provider: 'runpod' | 'tensordock' | 'modal' | string;
   credentials: ProviderCredentials;
   /** Instance IDs currently managed/tracked by the autoscaler for this user */
   trackedInstanceIds: string[];
@@ -121,6 +121,12 @@ const RUNNING_STATUSES = new Set([
   'running',
   'online',
   'active',
+  // Modal apps with zero tasks still represent a live deployed endpoint. They
+  // may hold warm GPU containers depending on the function autoscaler config.
+  'deployed',
+  'ephemeral',
+  'detached',
+  'initializing',
 ]);
 
 /** Stopped statuses — machine may still incur storage charges */
@@ -134,11 +140,29 @@ const STOPPED_STATUSES = new Set([
 ]);
 
 function isRunning(status: string): boolean {
-  return RUNNING_STATUSES.has(status) || status.toLowerCase().includes('run');
+  const normalized = status.toLowerCase();
+  return RUNNING_STATUSES.has(status)
+    || RUNNING_STATUSES.has(normalized)
+    || normalized.includes('run')
+    || normalized.startsWith('ephemeral')
+    || normalized.includes('detached');
 }
 
 function isStopped(status: string): boolean {
   return STOPPED_STATUSES.has(status) || status.toLowerCase().includes('stop');
+}
+
+function shouldProbeProvider(provider: string): boolean {
+  // Modal endpoints are serverless: probing /health can wake a GPU container and
+  // create exactly the idle spend this monitor is trying to prevent.
+  return provider.toLowerCase() !== 'modal';
+}
+
+function shouldAutoStopProvider(provider: string): boolean {
+  // Modal has a dedicated idle-grace sweep in the server. The generic cost
+  // monitor is account-wide and has no Modal name/prefix policy, so it must
+  // never perform immediate stop actions for Modal apps.
+  return provider.toLowerCase() !== 'modal';
 }
 
 // ─── Stale tracking — remember when instances first appeared unhealthy ──────
@@ -314,7 +338,7 @@ export async function runCostMonitorCycle(deps: CostMonitorDeps): Promise<CostMo
 
     // Probe health in parallel for tracked running instances
     const healthResults = new Map<string, boolean>();
-    if (shouldProbe) {
+    if (shouldProbe && shouldProbeProvider(account.provider)) {
       const trackedRunning = runningInstances.filter((i) => trackedIds.has(i.instanceId) && i.endpoint);
       const probes = trackedRunning.map(async (inst) => {
         const healthy = await healthProbe(inst.endpoint);
@@ -346,7 +370,7 @@ export async function runCostMonitorCycle(deps: CostMonitorDeps): Promise<CostMo
 
       // Stale detection: tracked instance whose /health is unreachable beyond grace
       let isStaleRunning = false;
-      if (!isOrphaned && shouldProbe && instance.endpoint) {
+      if (!isOrphaned && shouldProbe && shouldProbeProvider(account.provider) && instance.endpoint) {
         const healthy = healthResults.get(instance.instanceId) ?? false;
         isStaleRunning = staleTracker.checkGrace(instance.instanceId, healthy, staleGraceMs);
       }
@@ -387,7 +411,7 @@ export async function runCostMonitorCycle(deps: CostMonitorDeps): Promise<CostMo
         }
       }
 
-      if (autoStop) {
+      if (autoStop && shouldAutoStopProvider(account.provider)) {
         try {
           await client.stopInstance(instance.instanceId, account.credentials);
           entry.actionTaken = 'stopped';

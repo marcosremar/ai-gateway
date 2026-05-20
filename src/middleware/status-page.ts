@@ -163,10 +163,10 @@ export function renderStatusHtml(status: SystemStatus): string {
 
   <div class="card">
     <h2>Requests</h2>
-    <div class="metric"><span class="metric-label">Total</span><span class="metric-value">${status.requests.total}</span></div>
-    <div class="metric"><span class="metric-label">Last minute</span><span class="metric-value">${status.requests.lastMinute}</span></div>
-    ${status.requests.avgLatencyMs ? `<div class="metric"><span class="metric-label">Avg latency</span><span class="metric-value">${status.requests.avgLatencyMs}ms</span></div>` : ''}
-    ${status.requests.errorRate !== undefined ? `<div class="metric"><span class="metric-label">Error rate</span><span class="metric-value">${(status.requests.errorRate * 100).toFixed(1)}%</span></div>` : ''}
+    <div class="metric"><span class="metric-label">Total</span><span class="metric-value">${Number(status.requests.total) || 0}</span></div>
+    <div class="metric"><span class="metric-label">Last minute</span><span class="metric-value">${Number(status.requests.lastMinute) || 0}</span></div>
+    ${status.requests.avgLatencyMs ? `<div class="metric"><span class="metric-label">Avg latency</span><span class="metric-value">${Number(status.requests.avgLatencyMs) || 0}ms</span></div>` : ''}
+    ${status.requests.errorRate !== undefined ? `<div class="metric"><span class="metric-label">Error rate</span><span class="metric-value">${(Number(status.requests.errorRate) * 100).toFixed(1)}%</span></div>` : ''}
   </div>
 
   ${
@@ -174,10 +174,10 @@ export function renderStatusHtml(status: SystemStatus): string {
       ? `
     <div class="card">
       <h2>Budget</h2>
-      <div class="metric"><span class="metric-label">Spent</span><span class="metric-value">$${status.budget.spent.toFixed(2)}</span></div>
-      <div class="metric"><span class="metric-label">Limit</span><span class="metric-value">$${status.budget.limit.toFixed(2)}</span></div>
-      <div class="metric"><span class="metric-label">Remaining</span><span class="metric-value">$${status.budget.remaining.toFixed(2)}</span></div>
-      <div class="budget-bar"><div class="budget-fill" style="width: ${status.budget.percentageUsed}%"></div></div>
+      <div class="metric"><span class="metric-label">Spent</span><span class="metric-value">$${(Number(status.budget.spent) || 0).toFixed(2)}</span></div>
+      <div class="metric"><span class="metric-label">Limit</span><span class="metric-value">$${(Number(status.budget.limit) || 0).toFixed(2)}</span></div>
+      <div class="metric"><span class="metric-label">Remaining</span><span class="metric-value">$${(Number(status.budget.remaining) || 0).toFixed(2)}</span></div>
+      <div class="budget-bar"><div class="budget-fill" style="width: ${Math.max(0, Math.min(100, Number(status.budget.percentageUsed) || 0))}%"></div></div>
     </div>
   `
       : ''

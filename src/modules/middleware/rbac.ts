@@ -116,17 +116,20 @@ export function getRequiredRoleForEndpoint(
   path: string,
   mapping: EndpointRoleMap = DEFAULT_ENDPOINT_ROLES,
 ): Role {
-  // Find the most specific matching prefix
-  let bestMatch: Role = ROLES.OPERATOR; // Default: operator
+  // Default ADMIN (most-restrictive) on no-match — fail-CLOSED.
+  let bestMatch: Role = ROLES.ADMIN;
   let bestMatchLength = 0;
+  let matched = false;
 
   for (const [prefix, role] of Object.entries(mapping)) {
     if (path.startsWith(prefix) && prefix.length > bestMatchLength) {
       bestMatch = role;
       bestMatchLength = prefix.length;
+      matched = true;
     }
   }
 
+  if (!matched) return ROLES.ADMIN;
   return bestMatch;
 }
 
@@ -158,7 +161,18 @@ export function parseRolesFromEnv(envVar = 'RBAC_ROLES'): RoleMapping {
     if (!trimmed) continue;
 
     const [key, roleStr] = trimmed.split(':');
-    const role = roleByName[roleStr?.toLowerCase() ?? ''] ?? ROLES.OPERATOR;
+    if (!key || !key.trim()) {
+      console.warn(`[rbac] Skipping empty key in ${envVar}: "${trimmed}"`);
+      continue;
+    }
+    const normalizedRole = roleStr?.toLowerCase().trim() ?? '';
+    if (!normalizedRole) {
+      throw new Error(`[rbac] ${envVar} entry "${trimmed}" missing role (expected key:role)`);
+    }
+    const role = roleByName[normalizedRole];
+    if (!role) {
+      throw new Error(`[rbac] ${envVar} entry "${trimmed}" has unknown role "${roleStr}". Expected: admin, operator, readonly`);
+    }
     mapping[key] = role;
   }
 

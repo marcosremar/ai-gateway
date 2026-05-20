@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipecat — Extracts for ai-gateway</title>
+<style>
+  :root {
+    --bg: #0b0f10;
+    --panel: #11171a;
+    --panel-2: #161d21;
+    --border: #1f2a30;
+    --text: #d8e0e3;
+    --muted: #7e8d93;
+    --accent: #4ade80;
+    --accent-2: #38bdf8;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --magenta: #c084fc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Menlo, monospace;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+  }
+  header {
+    padding: 48px 32px 32px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #0e1518 0%, var(--bg) 100%);
+  }
+  header .crumb {
+    color: var(--muted);
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+  header .crumb a { color: var(--accent-2); text-decoration: none; }
+  header .crumb a:hover { text-decoration: underline; }
+  header h1 {
+    margin: 0 0 8px;
+    font-size: 28px;
+    color: var(--magenta);
+  }
+  header p {
+    margin: 0;
+    color: var(--muted);
+    max-width: 880px;
+  }
+  header .meta {
+    margin-top: 12px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  header .meta code { color: var(--accent); }
+  main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 32px;
+  }
+  section { margin-bottom: 48px; }
+  section h2 {
+    font-size: 20px;
+    color: var(--accent-2);
+    margin: 0 0 4px;
+    border-left: 3px solid var(--accent-2);
+    padding-left: 12px;
+  }
+  section .lede {
+    color: var(--muted);
+    margin: 0 0 16px 15px;
+    font-size: 14px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .card:hover {
+    border-color: var(--magenta);
+    transform: translateY(-1px);
+  }
+  .card h3 {
+    margin: 0 0 6px;
+    font-size: 15px;
+    color: var(--text);
+  }
+  .card .src {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: "SF Mono", Menlo, monospace;
+    margin-bottom: 8px;
+    word-break: break-all;
+  }
+  .card .src code { color: var(--accent); }
+  .card p {
+    margin: 0 0 10px;
+    font-size: 13px;
+    color: #c0c8cc;
+  }
+  .card .apply {
+    font-size: 12px;
+    color: var(--accent);
+    border-top: 1px dashed var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+  .card .apply b { color: var(--warn); }
+  .tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .tag {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .tag.hot { color: var(--accent); border-color: var(--accent); }
+  .tag.steal { color: var(--magenta); border-color: var(--magenta); }
+  .tag.warn { color: var(--warn); border-color: var(--warn); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  th, td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  th {
+    background: var(--panel-2);
+    color: var(--accent-2);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code {
+    background: var(--panel-2);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: var(--accent);
+  }
+  td .effort {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    text-transform: uppercase;
+  }
+  td .effort.s { color: var(--accent); border-color: var(--accent); }
+  td .effort.m { color: var(--accent-2); border-color: var(--accent-2); }
+  td .effort.l { color: var(--warn); border-color: var(--warn); }
+  td .effort.xl { color: var(--danger); border-color: var(--danger); }
+  pre {
+    background: #050708;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px;
+    overflow-x: auto;
+    font-size: 12px;
+    color: #c0c8cc;
+  }
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+  }
+  .stat .num {
+    font-size: 28px;
+    color: var(--magenta);
+    font-weight: 700;
+  }
+  .stat .lbl {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  footer {
+    padding: 32px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="crumb"><a href="ai-coding-ideas.html">← AI Coding Ideas</a> / Pipecat extracts</div>
+  <h1>Pipecat — Extracts for ai-gateway</h1>
+  <p>Cloned <code>pipecat-ai/pipecat</code> (depth 1). Mapped Python framework concepts → ai-gateway TS/Bun stack. Goal: identify steal-worthy patterns + module references for STT/LLM/TTS pipeline upgrades.</p>
+  <div class="meta">Local clone: <code>/tmp/pipecat-research/</code> · License: BSD 2-Clause · Refresh: 2026-05-06</div>
+  <p style="margin-top:12px;font-size:13px;"><b style="color:#c084fc;">→ <a href="pipecat-deep-extracts.html" style="color:#c084fc;">Round 2 deep extracts</a></b> — telephony codecs, IVR navigator, voicemail detector, LLM context summarizer, pattern pair aggregator, OTel tracing, 7 turn-start strategies. 16 new steal items added.</p>
+</header>
+
+<main>
+
+<section>
+  <div class="stat-grid">
+    <div class="stat"><div class="num">63</div><div class="lbl">AI Services</div></div>
+    <div class="stat"><div class="num">11</div><div class="lbl">Transports</div></div>
+    <div class="stat"><div class="num">7</div><div class="lbl">Telephony Serializers</div></div>
+    <div class="stat"><div class="num">3</div><div class="lbl">Smart Turn Models</div></div>
+    <div class="stat"><div class="num">100+</div><div class="lbl">Frame Types</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Architectural Patterns to Steal</h2>
+  <p class="lede">Concepts to formalize in ai-gateway. These are the load-bearing ideas.</p>
+  <div class="grid">
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">core</span><span class="tag hot">adopt</span></div>
+      <h3>Frame-based pipeline (downstream/upstream)</h3>
+      <div class="src">src/pipecat/frames/frames.py · ~100 frame types</div>
+      <p>All data flows as <code>Frame</code> objects through <code>FrameProcessor</code> chain. Downstream = data path. Upstream = errors/acks. Each frame has id, name, pts (presentation timestamp ns), metadata, transport_source/dest.</p>
+      <div class="apply"><b>Apply:</b> formalize current ad-hoc pipeline in <code>src/streaming-stt.ts</code> + speech route. Frame abstraction = clean interruption + barge-in support.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">core</span><span class="tag hot">adopt</span></div>
+      <h3>Smart Turn detection (ML end-of-turn) — <a href="smart-turn-explained.html" style="color:#c084fc">deep dive →</a></h3>
+      <div class="src">src/pipecat/audio/turn/smart_turn/ · v2 + v3 + CoreML + HTTP</div>
+      <p>ML model decides when user finished speaking. Beats silence-threshold pauseMs. Params: <code>stop_secs=3</code>, <code>pre_speech_ms=500</code>, <code>max_duration_secs=8</code>. Pluggable via <code>BaseSmartTurn</code>. ONNX 16 kHz + Whisper feature extractor.</p>
+      <div class="apply"><b>Apply:</b> drop-in replacement for current pauseMs in <code>/v1/stt/stream</code> + WS pipeline. HTTP variant = call hosted model. <a href="smart-turn-explained.html" style="color:#fbbf24">See architecture + TS port plan →</a></div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">core</span></div>
+      <h3>VAD analyzer abstraction</h3>
+      <div class="src">src/pipecat/audio/vad/ · silero + aic + krisp_viva</div>
+      <p>Pluggable VAD with <code>VADParams</code>. Three concrete impls. <code>VADController</code> drives state machine.</p>
+      <div class="apply"><b>Apply:</b> add Silero VAD into Whisper Docker; replace amplitude-threshold gating in stream STT.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">core</span></div>
+      <h3>ParallelPipeline</h3>
+      <div class="src">src/pipecat/pipeline/parallel_pipeline.py</div>
+      <p>Run N pipelines parallel. Matches dub-fanout (1→N translations).</p>
+      <div class="apply"><b>Apply:</b> formal pattern for current dub-fanout. Also: ensemble STT race (already exists ad-hoc).</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">core</span></div>
+      <h3>Interruption handling protocol</h3>
+      <div class="src">CLAUDE.md: InterruptionFrame + asyncio.Event</div>
+      <p><code>InterruptionFrame</code> carries <code>asyncio.Event</code> set when frame reaches sink. Processor that stops it MUST call <code>frame.complete()</code>. Uninterruptible: <code>EndFrame</code>, <code>StopFrame</code>.</p>
+      <div class="apply"><b>Apply:</b> barge-in for <code>/v1/speech/ws</code>. Currently no clean cancel of in-flight LLM/TTS. Critical for production voice agents.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">obs</span></div>
+      <h3>Observer pattern (non-invasive)</h3>
+      <div class="src">src/pipecat/observers/ · base_observer + turn_tracking + user_bot_latency + startup_timing</div>
+      <p>Monitor frame flow without modifying pipeline. <code>on_process_frame</code> + <code>on_push_frame</code> hooks. Built-in: <code>TurnTrackingObserver</code>, <code>UserBotLatencyObserver</code>, <code>StartupTimingObserver</code>.</p>
+      <div class="apply"><b>Apply:</b> replace scattered metric calls with observer pattern. Plugs into existing Langfuse + Prometheus.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">infra</span></div>
+      <h3>TaskManager (auto-cleanup)</h3>
+      <div class="src">CLAUDE.md: self.create_task(coro, name)</div>
+      <p>Never raw <code>asyncio.create_task</code>. <code>TaskManager</code> tracks + cleans on processor shutdown. <code>cancel_task(task, timeout)</code> for cancellation.</p>
+      <div class="apply"><b>Apply:</b> server/* lifecycle. Many leaked Promises in current GPU monitor + autoscaler loops. Bun-native equivalent.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">protocol</span></div>
+      <h3>RTVI protocol</h3>
+      <div class="src">src/pipecat/processors/frameworks/rtvi.py</div>
+      <p>Real-Time Voice Interface protocol bridging clients + pipeline. Standardized messages: text input, audio, function call results, user/bot speaking events, transcriptions, LLM/TTS lifecycle, metrics, audio levels.</p>
+      <div class="apply"><b>Apply:</b> standardize <code>/v1/speech/ws</code> wire format. Free client SDKs (JS/React/iOS/Android/C++/ESP32) via RTVI compatibility.</div>
+    </div>
+
+    <div class="card">
+      <div class="tags"><span class="tag steal">phone</span><span class="tag hot">net new</span></div>
+      <h3>Telephony serializers (μ-law)</h3>
+      <div class="src">src/pipecat/serializers/ · twilio + plivo + vonage + telnyx + exotel + genesys</div>
+      <p>6 telephony providers + base. Handle μ-law encoding + provider-specific WS protocols.</p>
+      <div class="apply"><b>Apply:</b> NEW feature category. Phone-bot deployment beyond Recall.ai meeting bots. Adds Twilio voice → ai-gateway pipeline.</div>
+    </div>
+
+  </div>
+</section>
+
+<section>
+  <h2>Services to Add as Providers</h2>
+  <p class="lede">Pipecat covers 63 AI services. Subset not yet in <code>src/providers/</code>.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag hot">tts gold</span></div>
+      <h3>Cartesia (TTS)</h3>
+      <p>Sub-100ms TTS. Industry-leading low-latency.</p>
+      <div class="apply"><b>Apply:</b> add provider. Strong cloud fallback for /v1/tts-preview.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag hot">tts</span></div>
+      <h3>ElevenLabs (TTS)</h3>
+      <p>Voice clone leader.</p>
+      <div class="apply"><b>Apply:</b> voice clone path bypassing GPU when quality > cost.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">stt</span></div>
+      <h3>AssemblyAI / Gladia / Soniox / Speechmatics (STT)</h3>
+      <p>Streaming STT alternatives to Deepgram + Groq.</p>
+      <div class="apply"><b>Apply:</b> ensemble STT race expansion.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">tts</span></div>
+      <h3>LMNT, Rime, Neuphonic, Smallest, Piper, XTTS</h3>
+      <p>Six more TTS engines. XTTS + Piper = self-hostable.</p>
+      <div class="apply"><b>Apply:</b> XTTS Docker variant; Piper for edge.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">llm</span></div>
+      <h3>Cerebras, SambaNova, Together, Perplexity, Mistral, Qwen</h3>
+      <p>LLM providers not yet in cascade.</p>
+      <div class="apply"><b>Apply:</b> Cerebras = absurd token speed (LPU). Promote in race.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">multimodal</span></div>
+      <h3>Hume (emotion), Inworld, Moondream (vision)</h3>
+      <p>Specialized multimodal services.</p>
+      <div class="apply"><b>Apply:</b> emotion-aware TTS routing; vision endpoint.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag steal">protocol</span></div>
+      <h3>MCP service</h3>
+      <div class="src">src/pipecat/services/mcp_service.py</div>
+      <p>Model Context Protocol integration. Tool ecosystem.</p>
+      <div class="apply"><b>Apply:</b> ai-gateway as MCP server exposing GPU/STT/LLM/TTS as tools to Claude Code etc.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">avatar</span></div>
+      <h3>HeyGen, Tavus, Simli, Lemonslice (video avatar)</h3>
+      <p>Video avatar transports.</p>
+      <div class="apply"><b>Apply:</b> bot-audio companion for visual meeting bots.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Transports beyond WebSocket</h2>
+  <p class="lede">ai-gateway has WebSocket + Recall.ai. Pipecat covers more.</p>
+  <table>
+    <thead><tr><th>Transport</th><th>Use</th><th>ai-gateway gap</th></tr></thead>
+    <tbody>
+      <tr><td><code>daily</code></td><td>Daily.co WebRTC</td><td>Already used by Recall — direct integration possible</td></tr>
+      <tr><td><code>livekit</code></td><td>LiveKit WebRTC</td><td>Lower-latency than WS; consider for /v1/speech/ws v2</td></tr>
+      <tr><td><code>smallwebrtc</code></td><td>Lightweight WebRTC</td><td>Self-hostable WebRTC option</td></tr>
+      <tr><td><code>websocket</code></td><td>Plain WS server</td><td>Already covered</td></tr>
+      <tr><td><code>local</code></td><td>Local mic/speaker</td><td>CLI realtime mode</td></tr>
+      <tr><td><code>whatsapp</code></td><td>WhatsApp messaging</td><td>NEW — direct WA bot deploy</td></tr>
+      <tr><td><code>heygen / tavus / lemonslice</code></td><td>Video avatars</td><td>Visual bot ingress</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Tooling Ecosystem (around pipecat)</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag steal">claude</span></div>
+      <h3>pipecat-ai/skills (Claude Code marketplace)</h3>
+      <p>Install: <code>claude plugin marketplace add pipecat-ai/skills</code>. Skills scaffold projects + deploy.</p>
+      <div class="apply"><b>Apply:</b> install in Claude Code; reference for ai-gateway own skill marketplace.</div>
+    </div>
+    <div class="card">
+      <h3>pipecat-ai/whisker (debugger)</h3>
+      <p>Real-time pipeline + processor debugger.</p>
+      <div class="apply"><b>Apply:</b> ref pattern for /v1/analytics/system live view.</div>
+    </div>
+    <div class="card">
+      <h3>pipecat-ai/voice-ui-kit</h3>
+      <p>Components, hooks, templates for voice AI UIs.</p>
+      <div class="apply"><b>Apply:</b> mine for web/src admin panel components beyond IconBox/StatusDot/KV.</div>
+    </div>
+    <div class="card">
+      <h3>pipecat-ai/pipecat-flows</h3>
+      <p>Structured conversation state machines.</p>
+      <div class="apply"><b>Apply:</b> guided-flow bot deploys (intake forms, customer support).</div>
+    </div>
+    <div class="card">
+      <h3>pipecat-ai/pipecat-subagents</h3>
+      <p>Distributed multi-agent: each agent own pipeline + shared message bus. Cross-process scaling.</p>
+      <div class="apply"><b>Apply:</b> meeting bot fleet = subagent topology. Already partial via /v1/workloads.</div>
+    </div>
+    <div class="card">
+      <h3>Client SDKs (JS/React/RN/Swift/Kotlin/C++/ESP32)</h3>
+      <p>Free if RTVI protocol adopted.</p>
+      <div class="apply"><b>Apply:</b> ESP32 = embedded device deploy. RN/Swift/Kotlin for Babelcast mobile.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Concrete Steal List (ranked)</h2>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Steal</th><th>Target file/concern</th><th>Effort</th><th>Impact</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>Smart Turn detection (ML end-of-turn)</td><td><code>src/streaming-stt.ts</code> + WS</td><td><span class="effort m">M</span></td><td>UX huge</td></tr>
+      <tr><td>2</td><td>Interruption protocol (barge-in)</td><td><code>/v1/speech/ws</code> handler</td><td><span class="effort l">L</span></td><td>production-grade voice</td></tr>
+      <tr><td>3</td><td>RTVI protocol on /v1/speech/ws</td><td>WS wire format</td><td><span class="effort l">L</span></td><td>free client SDKs</td></tr>
+      <tr><td>4</td><td>Cartesia + ElevenLabs TTS providers</td><td><code>src/providers/</code></td><td><span class="effort s">S</span></td><td>latency + voice clone</td></tr>
+      <tr><td>5</td><td>Cerebras LLM provider</td><td><code>src/providers/</code></td><td><span class="effort s">S</span></td><td>token speed</td></tr>
+      <tr><td>6</td><td>Twilio/Plivo serializers (μ-law)</td><td>NEW <code>src/telephony/</code></td><td><span class="effort l">L</span></td><td>phone bot deploy</td></tr>
+      <tr><td>7</td><td>Observer pattern for metrics</td><td>tracing + Prometheus</td><td><span class="effort m">M</span></td><td>cleaner code</td></tr>
+      <tr><td>8</td><td>VAD (Silero) in stream STT</td><td>STT Docker + stream handler</td><td><span class="effort m">M</span></td><td>noise filter</td></tr>
+      <tr><td>9</td><td>MCP service exposure</td><td>NEW <code>server/mcp.ts</code></td><td><span class="effort m">M</span></td><td>tool integration</td></tr>
+      <tr><td>10</td><td>LiveKit transport for /v1/speech/ws v2</td><td>transport layer</td><td><span class="effort xl">XL</span></td><td>WebRTC parity</td></tr>
+      <tr><td>11</td><td>Frame-based pipeline formalization</td><td>cross-cutting refactor</td><td><span class="effort xl">XL</span></td><td>arch clarity</td></tr>
+      <tr><td>12</td><td>WhatsApp transport</td><td>new feature</td><td><span class="effort l">L</span></td><td>net-new channel</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>What NOT to Take</h2>
+  <p class="lede">Pipecat is Python framework with strong opinions. Avoid wholesale port.</p>
+  <ul>
+    <li><b>asyncio idioms</b> — Bun has different concurrency model. Adapt patterns, don't port.</li>
+    <li><b>Frame protobuf wire format</b> — over-engineered for our scope. JSON + binary opcodes simpler.</li>
+    <li><b>Daily.co coupling</b> — Daily is owner; some patterns favor their infra.</li>
+    <li><b>Heavy class hierarchy</b> — TS/Bun stack prefers composition. <code>BaseObject</code> → events tree → tasks tree is Python-flavored.</li>
+    <li><b>uv tooling</b> — we use Bun. Pre-commit + ruff don't apply.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Inspect locally</h2>
+  <pre>cd /tmp/pipecat-research
+ls src/pipecat/services/        # 63 providers
+ls src/pipecat/audio/turn/      # smart turn impls
+ls src/pipecat/serializers/     # telephony
+cat src/pipecat/frames/frames.py | head -200
+cat CLAUDE.md                    # their own guidelines</pre>
+</section>
+
+</main>
+
+<footer>
+  Pipecat extracts for ai-gateway · Sources: <a href="https://github.com/pipecat-ai/pipecat" style="color:var(--magenta)">github.com/pipecat-ai/pipecat</a> · Generated 2026-05-06
+</footer>
+
+</body>
+</html>

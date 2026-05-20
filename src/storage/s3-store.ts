@@ -97,8 +97,19 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
     },
 
     presign(key: string, opts?: PresignOptions): string {
+      // Reject path-traversal-shaped keys — caller may pass user-supplied
+      // values; without this guard, `presign(req.query.key)` could mint a
+      // signed URL for `../bucket-other/secret`.
+      if (key.includes('..') || key.startsWith('/')) {
+        throw new Error(`presign refuses suspicious key: ${key.slice(0, 80)}`);
+      }
+      // Cap TTL at 24h. A caller passing `expiresIn: 365 * 86400` would mint
+      // perma-URLs that survive credential rotation; clamp defensively.
+      const PRESIGN_MAX_S = 24 * 3600;
+      const requested = opts?.expiresIn ?? 3600;
+      const expiresIn = Math.min(Math.max(60, requested), PRESIGN_MAX_S);
       return client.presign(key, {
-        expiresIn: opts?.expiresIn ?? 3600,
+        expiresIn,
         method: opts?.method ?? 'GET',
       });
     },

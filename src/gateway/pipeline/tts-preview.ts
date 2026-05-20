@@ -30,7 +30,7 @@ export interface TtsPreviewInput {
 export interface TtsPreviewResult {
   audio: Buffer;
   contentType: string;
-  source: 'gpu' | 'local-kokoro' | 'modal-clone' | 'cloud';
+  source: 'gpu' | 'local-kokoro' | 'modal-clone' | 'minimax' | 'cloud';
   latencyMs: number;
 }
 
@@ -48,11 +48,22 @@ export interface TtsPreviewModalTTS {
   }): Promise<{ audio: Buffer | Uint8Array; contentType: string }>;
 }
 
+export interface TtsPreviewMinimaxTTS {
+  synthesize(input: {
+    input: string;
+    model: string;
+    voice: string;
+    responseFormat?: 'mp3' | 'wav' | 'pcm' | 'flac';
+    speed?: number;
+  }): Promise<{ audio: Buffer | Uint8Array; contentType: string }>;
+}
+
 export interface TtsPreviewDeps {
   gpuEndpoint: string | null;
   localKokoroUrl: string | null;
   client: TtsPreviewClient;
   modalTTS: TtsPreviewModalTTS;
+  minimaxTTS?: TtsPreviewMinimaxTTS;
   translationProfile: AIProfile;
 }
 
@@ -61,18 +72,20 @@ export interface TtsPreviewDeps {
 // swallows unknown voice IDs and returns its default speaker — which is
 // exactly the bug this routing was added to fix.
 const KOKORO_VOICE_RE = /^[a-z]{2}_[a-z0-9]+$/i;
-type Engine = 'kokoro' | 'qwen3' | 'gpu' | 'modal' | 'cloud' | 'auto';
+const MINIMAX_VOICE_RE = /^(Portuguese|English|French|Spanish|Italian|German|Chinese|Japanese)_/;
+type Engine = 'kokoro' | 'qwen3' | 'gpu' | 'modal' | 'minimax' | 'cloud' | 'auto';
 function parseSpeaker(raw: string): { engine: Engine; voice: string } {
   const idx = raw.indexOf('/');
   if (idx > 0) {
     const prefix = raw.slice(0, idx).toLowerCase();
     const voice = raw.slice(idx + 1);
     if (prefix === 'kokoro' || prefix === 'qwen3' || prefix === 'qwen' ||
-        prefix === 'gpu' || prefix === 'modal' || prefix === 'cloud') {
+        prefix === 'gpu' || prefix === 'modal' || prefix === 'minimax' || prefix === 'cloud') {
       const engine = (prefix === 'qwen' ? 'qwen3' : prefix) as Engine;
       return { engine, voice };
     }
   }
+  if (MINIMAX_VOICE_RE.test(raw)) return { engine: 'minimax', voice: raw };
   if (KOKORO_VOICE_RE.test(raw)) return { engine: 'kokoro', voice: raw };
   return { engine: 'auto', voice: raw };
 }
@@ -91,10 +104,11 @@ export async function generateTtsPreview(
   const { engine, voice: speaker } = parseSpeaker(rawSpeaker);
   const isCloneRequest = !!(referenceAudio && refText);
   const { gpuEndpoint } = deps;
-  const allowGpu    = engine === 'auto' || engine === 'gpu' || engine === 'qwen3';
-  const allowKokoro = engine === 'auto' || engine === 'kokoro';
-  const allowModal  = engine === 'auto' || engine === 'modal';
-  const allowCloud  = engine === 'auto' || engine === 'cloud';
+  const allowGpu     = engine === 'auto' || engine === 'gpu' || engine === 'qwen3';
+  const allowKokoro  = engine === 'auto' || engine === 'kokoro';
+  const allowModal   = engine === 'auto' || engine === 'modal';
+  const allowMinimax = engine === 'minimax';
+  const allowCloud   = engine === 'auto' || engine === 'cloud';
   log.log(`preview routing: engine=${engine} voice=${speaker} (raw="${rawSpeaker}")`);
 
   // 1) GPU pod — supports both preset and clone
@@ -152,6 +166,24 @@ export async function generateTtsPreview(
       audio: Buffer.isBuffer(result.audio) ? result.audio : Buffer.from(result.audio),
       contentType: result.contentType || 'audio/wav',
       source: 'modal-clone',
+      latencyMs,
+    };
+  }
+
+  // 3.5) Minimax (Portuguese/multilingual, when explicitly requested)
+  if (allowMinimax) {
+    if (!deps.minimaxTTS) {
+      throw new Error("preview: engine='minimax' requested but minimaxTTS dep is missing (MINIMAX_API_KEY not set?)");
+    }
+    const result = await deps.minimaxTTS.synthesize({
+      input: text, model: 'speech-02-turbo', voice: speaker, responseFormat: 'mp3',
+    });
+    const latencyMs = Date.now() - t0;
+    log.log(`preview [minimax]: speaker=${speaker} lang=${language} ${result.audio.length}B ${latencyMs}ms`);
+    return {
+      audio: Buffer.isBuffer(result.audio) ? result.audio : Buffer.from(result.audio),
+      contentType: result.contentType || 'audio/mpeg',
+      source: 'minimax',
       latencyMs,
     };
   }

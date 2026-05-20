@@ -58,7 +58,7 @@ export function negotiateCompression(acceptEncoding: string): CompressionAlgorit
 export async function compressResponse(
   res: ServerResponse,
   data: Buffer | string,
-  options: CompressionOptions = {},
+  options: CompressionOptions & { acceptEncoding?: string } = {},
 ): Promise<void> {
   const opts: Required<CompressionOptions> = { ...DEFAULT_OPTIONS, ...options };
   const buf = typeof data === 'string' ? Buffer.from(data) : data;
@@ -70,8 +70,15 @@ export async function compressResponse(
     return;
   }
 
-  const acceptEncoding = res.getHeader('Accept-Encoding') as string | undefined;
-  const algorithm = negotiateCompression(acceptEncoding ?? '');
+  // Accept-Encoding comes from REQUEST, not response. Previously read from
+  // res.getHeader() which always returned undefined → middleware silently
+  // emitted identity for every response. Caller must pass the request's
+  // Accept-Encoding via options.acceptEncoding (or attach it to res via a
+  // synthetic header before calling — kept for backward compat).
+  const acceptEncoding = options.acceptEncoding
+    ?? (res.getHeader('Accept-Encoding') as string | undefined)
+    ?? '';
+  const algorithm = negotiateCompression(acceptEncoding);
 
   if (algorithm === 'br' && opts.brotli) {
     try {
@@ -115,15 +122,26 @@ export async function compressResponse(
 /**
  * Decompress request body based on Content-Encoding header.
  */
-export async function decompressRequest(req: IncomingMessage, body: Buffer): Promise<Buffer> {
+export async function decompressRequest(req: IncomingMessage, body: Buffer, opts?: { maxDecompressedBytes?: number }): Promise<Buffer> {
   const encoding = (req.headers['content-encoding'] ?? '').toLowerCase();
+  // Decompression bomb guard — a 1KB gzip body can expand to gigabytes.
+  // Default cap 50MB matches MAX_BODY_BYTES; callers can override.
+  const maxBytes = opts?.maxDecompressedBytes ?? 50 * 1024 * 1024;
 
   if (encoding.includes('br')) {
     return new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
+      let total = 0;
       const decompressor = createBrotliDecompress();
 
-      decompressor.on('data', (chunk) => chunks.push(chunk));
+      decompressor.on('data', (chunk) => {
+        total += chunk.length;
+        if (total > maxBytes) {
+          decompressor.destroy(new Error(`Decompressed body exceeds limit (${maxBytes} bytes)`));
+          return;
+        }
+        chunks.push(chunk);
+      });
       decompressor.on('end', () => resolve(Buffer.concat(chunks)));
       decompressor.on('error', reject);
 
@@ -133,10 +151,20 @@ export async function decompressRequest(req: IncomingMessage, body: Buffer): Pro
 
   if (encoding.includes('gzip')) {
     return new Promise<Buffer>((resolve, reject) => {
-      gunzip(body, (err, result) => {
-        if (err) reject(err);
-        else resolve(result);
+      const decompressor = createGunzip();
+      const chunks: Buffer[] = [];
+      let total = 0;
+      decompressor.on('data', (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > maxBytes) {
+          decompressor.destroy(new Error(`Decompressed body exceeds limit (${maxBytes} bytes)`));
+          return;
+        }
+        chunks.push(chunk);
       });
+      decompressor.on('end', () => resolve(Buffer.concat(chunks)));
+      decompressor.on('error', reject);
+      decompressor.end(body);
     });
   }
 

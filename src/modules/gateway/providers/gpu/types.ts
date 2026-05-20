@@ -208,6 +208,10 @@ export interface InstanceSpec {
   raceCount?: number;
   /** Vast.ai-only: require direct-port, high-reliability offers and skip SSH-only fallback for faster boot. */
   strictFastBoot?: boolean;
+  /** Vast.ai-only: opt-in to deverified/unverified hosts when no verified offer is rentable.
+   *  Trade-off: lower availability blocker, but host may be reclaimed mid-boot.
+   *  Default false (verified-only, safer). */
+  allowUnverified?: boolean;
   /** Snapgpu-only: which underlying backend provider to deploy on (vast/runpod).
    *  Snapgpu has no hardware of its own — it's a capability layer. */
   snapgpuBackend?: 'vast' | 'runpod';

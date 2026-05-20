@@ -53,13 +53,15 @@ export { handleWsCommand };
 
 type WsData = {
   id: string;
-  type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio';
+  type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio' | 'frame-inspector';
   language?: string;
   /** Target language for STT sessions — enables auto-speculation when set. */
   speculateTarget?: string;
   /** Silence timeout before flushing accumulated STT text (ms). Default 700. */
   pauseMs?: number;
   speechConfig?: { source: string; target: string; speaker?: string };
+  /** For frame-inspector: unsubscribe fn returned by subscribeFrames. */
+  __unsubscribe?: () => void;
 };
 
 /** Global WebSocket connection limit — prevents resource exhaustion from unlimited connections. */
@@ -93,9 +95,18 @@ export function validateStartupConfig(): string[] {
   return warnings;
 }
 
-/** Constant-time string comparison to prevent timing attacks on auth tokens. */
+/** Constant-time string comparison to prevent timing attacks on auth tokens.
+ *  Length mismatches are still compared in constant time (against a padded
+ *  copy of `b`) so the response time doesn't leak the expected token length.
+ */
 function safeCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
+  if (!a || !b) return false;
+  if (a.length !== b.length) {
+    try {
+      timingSafeEqual(Buffer.from(a.padEnd(b.length, '\0')), Buffer.from(b.padEnd(a.length, '\0')));
+    } catch { /* no-op */ }
+    return false;
+  }
   try {
     return timingSafeEqual(Buffer.from(a), Buffer.from(b));
   } catch { return false; }
@@ -239,6 +250,9 @@ export async function startWsServer(): Promise<number> {
       } else if (url.pathname === '/ws/bot-audio') {
         const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'bot-audio' } });
         if (upgraded) return;
+      } else if (url.pathname === '/v1/observability/frames') {
+        const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'frame-inspector' } });
+        if (upgraded) return;
       } else {
         const upgraded = server.upgrade(req, { data: { id: crypto.randomUUID(), type: 'bot' } });
         if (upgraded) return;
@@ -267,6 +281,20 @@ export async function startWsServer(): Promise<number> {
           import('./recall-handlers').then(({ setRecallState }) => {
             setRecallState({ wsConnected: true, status: 'in_meeting', message: 'Recall bot streaming audio' });
           }).catch(safeCatch('ws-recall-setstate'));
+        } else if (ws.data.type === 'frame-inspector') {
+          // Whisker-style live frame tail. Each emitFrame() broadcast to subscribers.
+          log.log(`[frame-inspector] Subscriber connected id=${ws.data.id}`);
+          ws.send(JSON.stringify({ type: 'connected', message: 'Frame inspector ready' }));
+          try {
+            const { subscribeFrames } = require('./observers-init') as { subscribeFrames: (h: (f: unknown) => void) => () => void };
+            ws.data.__unsubscribe = subscribeFrames((frame) => {
+              if (ws.readyState === 1) {
+                try { ws.send(JSON.stringify({ type: 'frame', frame })); } catch { /* WS may be closing */ }
+              }
+            });
+          } catch (e) {
+            log.warn('[frame-inspector] subscribeFrames not available:', e instanceof Error ? e.message : e);
+          }
         } else {
           // ── Bot events session ─────────────────────────────────────
           const MAX_WS_CLIENTS = 500;
@@ -306,9 +334,24 @@ export async function startWsServer(): Promise<number> {
               const ctrl = JSON.parse(msg);
               if (ctrl.action === 'clear') {
                 (backend as { clearState?: () => void }).clearState?.();
+              } else if (ctrl.action === 'turn_complete') {
+                // Smart-Turn signal from client: client-side ONNX model
+                // detected end-of-utterance. Forces immediate flush of
+                // accumulated text (skip the server-side pause timer).
+                // See docs/test-vad-smart-turn.html for the client model.
+                const flush = (backend as { _flushAccum?: () => void })._flushAccum
+                  ?? (backend as { flushAccum?: () => void }).flushAccum;
+                try { flush?.(); } catch { /* no-op */ }
               }
             } catch { /* ignore malformed */ }
           } else {
+            // Mute gate: drop chunks while bot is speaking (configurable via
+            // AIGW_MUTE_STRATEGY). Prevents feedback loops on speakers and
+            // honors operator turn-take strategy.
+            try {
+              const { shouldDropUserAudio } = require('./observers-init') as { shouldDropUserAudio: () => boolean };
+              if (shouldDropUserAudio()) return;
+            } catch { /* observers not loaded — fall through */ }
             try {
               backend.sendAudio(msg);
             } catch (sendErr) {
@@ -319,8 +362,25 @@ export async function startWsServer(): Promise<number> {
           if (typeof msg === 'string') {
             try {
               const meta = JSON.parse(msg) as Record<string, unknown>;
-              log.log(`[recall-audio] Metadata: bot_id=${meta.bot_id} recording_id=${meta.recording_id}`);
+              const safeBotId = String(meta.bot_id ?? '?').replace(/[\r\n\t]/g, '_').slice(0, 80);
+              const safeRecId = String(meta.recording_id ?? '?').replace(/[\r\n\t]/g, '_').slice(0, 80);
+              log.log(`[recall-audio] Metadata: bot_id=${safeBotId} recording_id=${safeRecId}`);
             } catch { /* ignore */ }
+            return;
+          }
+          // Per-connection rate limit: cap recall-audio chunks at 100 msgs/sec.
+          // A compromised Recall token could otherwise fan-out 4MB chunks at line
+          // speed to all wsClients (O(N) amplifier).
+          const now = Date.now();
+          const wsRl = ws.data as unknown as { __rlWindow?: number; __rlCount?: number };
+          if (!wsRl.__rlWindow || now - wsRl.__rlWindow > 1000) {
+            wsRl.__rlWindow = now;
+            wsRl.__rlCount = 0;
+          }
+          wsRl.__rlCount = (wsRl.__rlCount ?? 0) + 1;
+          if (wsRl.__rlCount > 100) {
+            log.warn('[recall-audio] Rate limit exceeded — closing connection');
+            ws.close(1008, 'Rate limit exceeded');
             return;
           }
           const recallChunk = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
@@ -362,6 +422,11 @@ export async function startWsServer(): Promise<number> {
         wsConnectionCount--;
         speculativeCache.clear(ws.data.id);
 
+        if (ws.data.type === 'frame-inspector') {
+          try { ws.data.__unsubscribe?.(); } catch { /* no-op */ }
+          log.log(`[frame-inspector] Subscriber disconnected id=${ws.data.id}`);
+          return;
+        }
         if (ws.data.type === 'speech') {
           log.log(`[speech-ws] Client disconnected id=${ws.data.id}`);
         } else if (ws.data.type === 'stt') {

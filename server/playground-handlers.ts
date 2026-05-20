@@ -271,9 +271,71 @@ export async function handlePlaygroundLlm(req: IncomingMessage, res: ServerRespo
   profile.keys = buildKeysMap();
 
   // Prepend system prompt if provided and not already in messages
-  const chatMessages = [...messages];
+  let chatMessages = [...messages];
   if (systemPrompt && (!chatMessages.length || chatMessages[0].role !== 'system')) {
     chatMessages.unshift({ role: 'system', content: systemPrompt });
+  }
+
+  // Incomplete-turn filter — opt-in via body.filter_incomplete_user_turns
+  // OR env FILTER_INCOMPLETE_USER_TURNS=1. Augments system prompt; LLM emits
+  // ✓/○/◐ marker as first char; we suppress + report incomplete_turn in
+  // response if user was cut off.
+  const filterIncomplete = body.filter_incomplete_user_turns === true
+    || process.env.FILTER_INCOMPLETE_USER_TURNS === '1';
+  let _turnFilterPlay: { classify: (s: string) => { kind: string; cleanedText: string; timeoutMs: number } } | null = null;
+  if (filterIncomplete && chatMessages.length > 0 && chatMessages[0].role === 'system') {
+    const { IncompleteTurnFilter } = await import('../src/llm-context');
+    const f = new IncompleteTurnFilter();
+    chatMessages = [
+      { role: 'system', content: f.augmentSystemPrompt(chatMessages[0].content) },
+      ...chatMessages.slice(1),
+    ];
+    _turnFilterPlay = f;
+  } else if (filterIncomplete) {
+    // No system msg present — inject a minimal one with the marker instruction.
+    const { IncompleteTurnFilter } = await import('../src/llm-context');
+    const f = new IncompleteTurnFilter();
+    chatMessages = [
+      { role: 'system', content: f.augmentSystemPrompt('You are a helpful assistant.') },
+      ...chatMessages,
+    ];
+    _turnFilterPlay = f;
+  }
+
+  // Auto-context summarization — opt-in via body.auto_summarize=true or env
+  // PLAYGROUND_AUTO_SUMMARIZE=1. Compresses old turns when message count or
+  // token estimate exceeds threshold. Uses cheaper provider for summary if
+  // configured (defaults to current provider).
+  const autoSummarize = body.auto_summarize === true || process.env.PLAYGROUND_AUTO_SUMMARIZE === '1';
+  let summaryApplied: { compressed: number; replacedWith: number } | undefined;
+  if (autoSummarize && chatMessages.length >= 10) {
+    try {
+      const { LLMContextSummarizer } = await import('../src/llm-context');
+      const summarizer = new LLMContextSummarizer(
+        async (msgs, prompt, max) => {
+          const summaryRes = await client.chat(
+            [
+              { role: 'system' as const, content: prompt },
+              { role: 'user' as const, content: 'Conversation:\n' + msgs.map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join('\n') },
+            ],
+            { ...profile, maxTokens: max },
+          );
+          return summaryRes.content || '';
+        },
+        {
+          maxContextTokens: typeof body.max_context_tokens === 'number' ? body.max_context_tokens : 4000,
+          maxUnsummarizedMessages: typeof body.max_unsummarized_messages === 'number' ? body.max_unsummarized_messages : 20,
+        },
+      );
+      const compactedMessages = await summarizer.compact(chatMessages as Parameters<typeof summarizer.compact>[0]);
+      if (compactedMessages.length < chatMessages.length) {
+        summaryApplied = { compressed: chatMessages.length, replacedWith: compactedMessages.length };
+      }
+      chatMessages = compactedMessages as typeof chatMessages;
+    } catch (e) {
+      // Non-fatal — proceed with original messages.
+      console.warn('[playground/llm] auto-summarize failed:', e instanceof Error ? e.message : e);
+    }
   }
 
   try {
@@ -286,14 +348,28 @@ export async function handlePlaygroundLlm(req: IncomingMessage, res: ServerRespo
 
     logRequest({ timestamp: Date.now(), stage: 'llm', provider: result.provider as 'gpu' | 'groq' | 'ollama', model: result.model, latencyMs, success: true, outputPreview: result.content?.slice(0, 80), inputTokens: result.usage?.promptTokens, outputTokens: result.usage?.completionTokens });
 
+    let content = result.content;
+    let incompleteTurn: { kind: string; timeoutMs: number } | undefined;
+    if (_turnFilterPlay && content) {
+      const decision = _turnFilterPlay.classify(content);
+      if (decision.kind !== 'complete') {
+        incompleteTurn = { kind: decision.kind, timeoutMs: decision.timeoutMs };
+        content = '';
+      } else {
+        content = decision.cleanedText;
+      }
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      content: result.content,
+      content,
       provider: result.provider,
       model: result.model,
       usage: result.usage,
       fallbackUsed: result.fallbackUsed,
       latencyMs,
+      ...(summaryApplied ? { context_summarized: summaryApplied } : {}),
+      ...(incompleteTurn ? { incomplete_turn: incompleteTurn } : {}),
     }));
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' });

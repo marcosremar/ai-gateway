@@ -19,8 +19,12 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
 
+// Both request input and response output use the SAME header name so SPAs
+// can read the response header and echo it back in subsequent requests.
+// Previous code wrote `csrf-token` and read `x-csrf-token` — token round-trip
+// was impossible without manual header juggling.
 const CSRF_HEADER = 'X-CSRF-Token';
-const CSRF_COOKIE = 'csrf-token';
+const CSRF_COOKIE = 'X-CSRF-Token';
 
 function signNonce(nonce: string, secret: string): string {
   return createHmac('sha256', secret).update(nonce).digest('base64url');

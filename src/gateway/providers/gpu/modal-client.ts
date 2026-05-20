@@ -62,6 +62,28 @@ function buildEndpointUrl(workspace: string, appName: string, functionName = 'we
   return `https://${workspace}--${appName}-${functionName}.modal.run`;
 }
 
+const MODAL_APP_STATES: Record<number, string> = {
+  1: 'ephemeral',
+  2: 'detached',
+  3: 'deployed',
+  4: 'stopping',
+  5: 'stopped',
+  6: 'initializing',
+  7: 'disabled',
+  8: 'detached',
+  9: 'derived',
+};
+
+function normalizeModalState(value: unknown): string {
+  if (typeof value === 'number') return MODAL_APP_STATES[value] ?? 'unknown';
+  if (typeof value === 'string') {
+    const numeric = Number(value);
+    if (Number.isInteger(numeric) && MODAL_APP_STATES[numeric]) return MODAL_APP_STATES[numeric];
+    return value.toLowerCase();
+  }
+  return 'unknown';
+}
+
 /** Options for deploy via `modal deploy`. */
 export interface ModalDeployOptions {
   /** Deploy strategy: 'rolling' (default, zero-downtime) or 'recreate'. */
@@ -360,9 +382,9 @@ export class ModalClient extends AbstractGpuProvider {
   }
 
   async resolveInstanceEndpoint(instanceId: string, credentials: ProviderCredentials): Promise<string | null> {
-    if (this.lastDeployedEndpoint) return this.lastDeployedEndpoint;
     const instances = await this.listInstances(credentials);
     const found = instances.find((i) => i.instanceId === instanceId);
+    if (!found && this.lastDeployedEndpoint) return this.lastDeployedEndpoint;
     return found?.endpoint || null;
   }
 
@@ -440,8 +462,8 @@ export class ModalClient extends AbstractGpuProvider {
   private parseApp(app: Record<string, unknown>, workspace: string): GpuInstance {
     const appId = (app['App ID'] ?? app.app_id ?? app.id ?? '') as string;
     const desc = (app['Description'] ?? app.description ?? app.name ?? '') as string;
-    const tasks = parseInt(String(app['Tasks'] ?? app.tasks ?? '0'), 10) || 0;
-    const state = (app['State'] ?? app.state ?? 'unknown') as string;
+    const tasks = parseInt(String(app['Tasks'] ?? app.tasks ?? app.n_running_tasks ?? '0'), 10) || 0;
+    const state = normalizeModalState(app['State'] ?? app.state);
     const status = tasks > 0 ? 'running' : state;
 
     return {
@@ -474,7 +496,8 @@ export class ModalClient extends AbstractGpuProvider {
 
       if (!appId.startsWith('ap-')) continue;
 
-      const status = tasks > 0 ? 'running' : state;
+      const normalizedState = normalizeModalState(state);
+      const status = tasks > 0 ? 'running' : normalizedState;
 
       results.push({
         instanceId: appId,

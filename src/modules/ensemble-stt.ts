@@ -134,7 +134,9 @@ export async function runVerifiedSTT(
   prompt: string,
   deps: STTVerifierDeps,
 ): Promise<STTVerifierResult> {
-  const { providers, timeoutMs } = deps;
+  const { providers } = deps;
+  // Default 30s upper bound to prevent N× upstream cost on losers.
+  const timeoutMs = deps.timeoutMs && deps.timeoutMs > 0 ? deps.timeoutMs : 30_000;
   const t0 = Date.now();
 
   if (providers.length === 0) {
@@ -171,17 +173,14 @@ export async function runVerifiedSTT(
           resolve({ name, response });
         }).catch(reject);
 
-        // Set up deadline timer if timeoutMs is specified
-        if (timeoutMs && timeoutMs > 0) {
-          const timer = setTimeout(() => {
-            reject(new Error(`Provider ${name} timed out after ${timeoutMs}ms`));
-          }, timeoutMs);
-          deadlineTimers.push(timer);
-          // Attach cleanup to the transcribe promise to clear timer on success
-          void transcribePromise.finally?.(() => {
-            clearTimeout(timer);
-          });
-        }
+        // Deadline timer always fires so losers don't run forever paying upstream cost.
+        const timer = setTimeout(() => {
+          reject(new Error(`Provider ${name} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        deadlineTimers.push(timer);
+        void transcribePromise.finally?.(() => {
+          clearTimeout(timer);
+        });
       }),
     );
 

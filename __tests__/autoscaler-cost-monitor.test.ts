@@ -98,6 +98,62 @@ describe('runCostMonitorCycle', () => {
     expect(client.stopInstance).toHaveBeenCalledWith('orphan-1', { apiKey: 'key-1' });
   });
 
+  it('treats deployed Modal apps as live but leaves stop decisions to the Modal idle sweep', async () => {
+    const account = makeAccount([], 'modal');
+    const instances = [makeInstance('ap-modal-1', 'deployed', 'https://workspace--app-web.modal.run', 'my-modal-app')];
+    const client = makeMockClient({
+      providerId: 'modal',
+      listInstances: vi.fn().mockResolvedValue(instances),
+    });
+    const deps = makeDeps([account], instances, {
+      autoStop: true,
+      registry: { get: vi.fn().mockReturnValue(client) } as any,
+    });
+
+    const report = await runCostMonitorCycle(deps);
+
+    expect(report.totalRunning).toBe(1);
+    expect(report.orphaned).toHaveLength(1);
+    expect(report.orphaned[0].actionTaken).toBe('none');
+    expect(client.stopInstance).not.toHaveBeenCalled();
+  });
+
+  it('treats detached Modal apps as live without auto-stopping them', async () => {
+    const account = makeAccount([], 'Modal');
+    const instances = [makeInstance('ap-modal-2', 'ephemeral (detached)', 'https://workspace--app-web.modal.run', 'detached-modal-app')];
+    const client = makeMockClient({
+      providerId: 'modal',
+      listInstances: vi.fn().mockResolvedValue(instances),
+    });
+    const deps = makeDeps([account], instances, {
+      autoStop: true,
+      registry: { get: vi.fn().mockReturnValue(client) } as any,
+    });
+
+    const report = await runCostMonitorCycle(deps);
+
+    expect(report.totalRunning).toBe(1);
+    expect(report.orphaned).toHaveLength(1);
+    expect(report.orphaned[0].actionTaken).toBe('none');
+    expect(client.stopInstance).not.toHaveBeenCalled();
+  });
+
+  it('does not probe tracked Modal apps because probes can wake GPU containers', async () => {
+    const account = makeAccount(['ap-modal-1'], 'modal');
+    const instances = [makeInstance('ap-modal-1', 'deployed', 'https://workspace--app-web.modal.run')];
+    const probe = vi.fn().mockResolvedValue(false);
+    const deps = makeDeps([account], instances, {
+      probeHealth: true,
+      _probeHealth: probe,
+    });
+
+    const report = await runCostMonitorCycle(deps);
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(report.stale).toHaveLength(0);
+    expect(report.orphaned).toHaveLength(0);
+  });
+
   it('auto-deletes zombie stopped instances when autoDelete=true', async () => {
     const account = makeAccount([]);
     const instances = [makeInstance('zombie-1', 'EXITED')];

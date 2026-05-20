@@ -97,6 +97,20 @@ export async function handleImageInpaint(
   if (!imageUrl || !maskUrl) {
     return { status: 400, body: { error: { message: '`imageUrl` and `maskUrl` are required for inpainting', type: 'invalid_request_error' } } };
   }
+  // SSRF guard — both URLs are fetched server-side by the image provider.
+  // Without this, a caller could exfiltrate cloud metadata (169.254.169.254),
+  // probe internal services (10.*, 192.168.*), or hit localhost admin
+  // endpoints. DNS-based check would be even safer; sync version blocks the
+  // common literal-IP forms.
+  const { isPrivateUrlResolved } = await import('../../pipeline/ssrf-protection');
+  for (const [name, url] of [['imageUrl', imageUrl] as const, ['maskUrl', maskUrl] as const]) {
+    if (await isPrivateUrlResolved(url)) {
+      return {
+        status: 400,
+        body: { error: { message: `${name} resolves to a private/internal address (SSRF blocked)`, type: 'invalid_request_error' } },
+      };
+    }
+  }
 
   try {
     const result = await provider.generate({

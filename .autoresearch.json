@@ -1,0 +1,6 @@
+{
+  "cwd": "/tmp/autoresearch-modal-vast-live-gateway",
+  "metricCmd": "bun score.ts",
+  "metricRegex": "score=([0-9.]+)",
+  "metricGoal": "maximize"
+}

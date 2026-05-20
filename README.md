@@ -235,6 +235,44 @@ These offer sandboxed GPU runtimes (sub-second cold start), per-second billing, 
 
 Sources: [Koyeb pricing](https://www.koyeb.com/pricing), [Koyeb scale-to-zero blog](https://www.koyeb.com/blog/scale-to-zero-wake-vms-in-200-ms-with-light-sleep-ebpf-and-snapshots), [Koyeb GPU scale-to-zero caveats](https://www.koyeb.com/blog/scale-to-zero-optimize-gpu-and-cpu-workloads), [Northflank pricing](https://northflank.com/pricing), [Northflank sandbox runtimes](https://northflank.com/blog/best-code-execution-sandbox-for-ai-agents), [RunPod Serverless](https://www.runpod.io/product/serverless), [Beam Beta9 GitHub](https://github.com/beam-cloud/beta9), [Beam serverless platform guide](https://www.beam.cloud/blog/serverless-platform-guide), [Inferless pricing](https://www.inferless.com/pricing), [Salad pricing](https://salad.com/pricing).
 
+
+<!-- AI_QUALITY_CONTROLS_START -->
+## Automated AI Quality Controls
+
+This section is generated from `docs/quality-controls.json`. Run `bun run quality:readme` after changing the quality gate manifest.
+
+| Control | Automation | Enforcement | Purpose |
+|---------|------------|-------------|---------|
+| AI quality fitness gate | bun run quality:fitness / bun run quality:fitness:debt | Blocking in quality:ai and CI | Project-specific boundaries: src/server/web isolation, forbidden infra imports, undeclared dependencies and shared UI reuse. Structural debt is visible through the debt/strict modes. |
+| Architecture dependency graph | bun run quality:architecture / bun run quality:architecture:strict | Blocking in quality:ai | dependency-cruiser enforces publishable-library boundaries. The strict variant surfaces existing circular dependencies as ratchet warnings. |
+| Typecheck, lint and security lint | bun run typecheck && bun run lint / bun run lint:warnings | Blocking in quality:ai and CI | TypeScript strict checks and ESLint errors block merges. lint:warnings exposes legacy style/security warnings as audit debt. |
+| Static application security testing | CodeQL workflow and Semgrep project rules | Blocking on security findings in CI | Detects injection, XSS, path traversal, unsafe regex, SSRF-like patterns, weak crypto and other security classes common in AI-generated code. |
+| Dependency and vulnerability review | bun audit, GitHub Dependency Review and OSV-Scanner | Blocking for critical/new vulnerable dependencies | Stops hallucinated, vulnerable or license-incompatible dependencies from entering pull requests. |
+| Secret scanning | Gitleaks workflow plus GitHub secret scanning when enabled | Blocking in CI | Catches API keys, tokens and provider credentials before merge. |
+| Container and Dockerfile scanning | Docker security workflow with Trivy plus supply-chain policy scan | Blocking for high/critical image findings; ratchet warnings for floating tags and curl-pipe-shell | Protects GPU images, Dockerfiles and deployment scripts from vulnerable bases and unsafe install patterns. |
+| Dead code and dependency hygiene | bun run quality:deadcode / bun run quality:deadcode:strict | Manual/audit ratchet until current debt is triaged | Knip finds unused files, exports and dependencies so AI-generated scaffolding does not accumulate silently. |
+| Property-based tests | bun run test:properties | Available as a focused gate for high-risk pure logic | fast-check generates many edge cases for invariants in routing, compatibility, parsing, cache keys and state machines. |
+| Mutation testing | bun run quality:mutation | Deep gate via quality:ai:deep | Stryker verifies whether tests actually fail when behavior changes, instead of trusting coverage alone. |
+| Contract/API drift checks | Existing contract unit tests plus planned OpenAPI/Pact gate | Unit gate today; OpenAPI/Pact can become blocking after specs are generated | Prevents SDK, HTTP routes and WebSocket payload expectations from drifting across Gateway clients and server handlers. |
+| CI supply-chain policy | bun run quality:supply-chain | Blocking in quality:ai for hard failures; warnings ratcheted with --strict | Audits GitHub Actions permissions, action pinning, floating refs, Docker latest tags and unsafe shell installers. |
+| Provenance and SBOM | GitHub artifact attestations and SBOM upload in release workflows | Release hardening target | Creates verifiable build provenance for published artifacts and Docker images. |
+
+### Local Quality Commands
+
+```bash
+bun run quality:ai              # typecheck + lint + build + fitness + supply-chain + architecture
+bun run quality:ai:test         # quality:ai plus the unit suite
+bun run quality:ai:deep         # quality:ai:test plus mutation testing
+bun run quality:fitness:debt    # inspect current complexity/module-size structural debt
+bun run quality:fitness:strict  # fail on current complexity/module-size ratchet warnings
+bun run quality:supply-chain    # audit CI/Docker supply-chain hardening
+bun run quality:architecture:strict # include circular dependency warnings
+bun run quality:deadcode        # Knip dead-code/dependency audit without failing on existing debt
+bun run quality:deadcode:strict # fail on Knip issues after the debt is triaged
+bun run test:properties         # property-based invariant tests
+```
+<!-- AI_QUALITY_CONTROLS_END -->
+
 ## Build
 
 ```bash

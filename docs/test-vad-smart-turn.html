@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VAD + Smart Turn — Live Test</title>
+<style>
+  :root {
+    --bg: #0b0f10;
+    --panel: #11171a;
+    --panel-2: #161d21;
+    --border: #1f2a30;
+    --text: #d8e0e3;
+    --muted: #7e8d93;
+    --accent: #4ade80;
+    --accent-2: #38bdf8;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --magenta: #c084fc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Menlo, monospace;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  header {
+    padding: 32px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0 0 4px; font-size: 22px; color: var(--magenta); }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  header .crumb { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  header .crumb a { color: var(--accent-2); text-decoration: none; }
+  main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+  .controls {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  button {
+    padding: 10px 20px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  button:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  button.primary {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  button.primary:hover:not(:disabled) {
+    background: #22c55e;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .panel h3 {
+    margin: 0 0 8px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--accent-2);
+  }
+  .panel .value {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .panel .value.speech { color: var(--accent); }
+  .panel .value.silence { color: var(--muted); }
+  .panel .value.complete { color: var(--accent); }
+  .panel .value.incomplete { color: var(--warn); }
+  .panel .sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  .bar-container {
+    margin-top: 8px;
+    height: 6px;
+    background: var(--panel-2);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .bar {
+    height: 100%;
+    transition: width 0.1s, background 0.1s;
+    background: var(--accent);
+  }
+  .bar.warn { background: var(--warn); }
+  .bar.danger { background: var(--danger); }
+  .bar.magenta { background: var(--magenta); }
+
+  .big-state {
+    background: var(--panel);
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    text-align: center;
+    margin-bottom: 16px;
+    transition: border-color 0.2s;
+  }
+  .big-state.speaking { border-color: var(--accent); }
+  .big-state.silence { border-color: var(--muted); }
+  .big-state.complete { border-color: var(--accent); background: #0f1a14; }
+  .big-state.incomplete { border-color: var(--warn); background: #1a1610; }
+  .big-state .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--muted);
+    letter-spacing: 1px;
+  }
+  .big-state .text {
+    font-size: 32px;
+    font-weight: 700;
+    margin-top: 4px;
+  }
+
+  #log {
+    background: #050708;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    height: 280px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  #log .entry { margin-bottom: 2px; }
+  #log .ts { color: var(--muted); margin-right: 8px; }
+  #log .info { color: var(--accent-2); }
+  #log .speech { color: var(--accent); }
+  #log .silence { color: var(--muted); }
+  #log .turn-complete { color: var(--accent); font-weight: 600; }
+  #log .turn-incomplete { color: var(--warn); }
+  #log .error { color: var(--danger); }
+  #log .warn { color: var(--warn); }
+
+  .loading {
+    background: var(--panel);
+    border-left: 3px solid var(--magenta);
+    padding: 12px 16px;
+    border-radius: 4px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    display: none;
+  }
+  .loading.active { display: block; }
+  .loading .step .step-text { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+  .loading .step {
+    display: flex;
+    gap: 12px;
+    padding: 4px 0;
+  }
+  .loading .step .dot {
+    color: var(--muted);
+  }
+  .loading .step.done .dot { color: var(--accent); }
+  .loading .step.active .dot { color: var(--accent-2); }
+
+  .config {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+    font-size: 13px;
+  }
+  .config label { display: flex; gap: 8px; margin-bottom: 4px; align-items: center; }
+  .config input { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 3px; font-family: inherit; font-size: 12px; width: 80px; }
+  .config .row { display: flex; gap: 24px; flex-wrap: wrap; }
+
+  details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 8px 0; }
+  details[open] summary { color: var(--accent-2); }
+
+  .footer-hint {
+    margin-top: 24px;
+    padding: 12px 16px;
+    background: var(--panel);
+    border-left: 3px solid var(--accent-2);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .footer-hint b { color: var(--accent-2); }
+</style>
+</head>
+<body>
+<header>
+  <div class="crumb"><a href="ai-coding-ideas.html">← AI Coding Ideas</a> / <a href="smart-turn-explained.html">Smart Turn</a> / Live Test</div>
+  <h1>VAD + Smart Turn — Live Test</h1>
+  <p>Silero VAD (per-chunk) + Smart Turn v3 (per-turn ML). Detects if you finished speaking or just paused. Tudo no browser. Mic raw nunca sai do device.</p>
+</header>
+
+<main>
+
+  <div class="loading active" id="loading">
+    <div class="step" data-step="imports"><span class="dot">●</span> <span class="step-text">Importing libs (onnxruntime-web + vad-web + transformers)…</span></div>
+    <div class="step" data-step="vad-wasm"><span class="dot">●</span> <span class="step-text">Prefetching VAD WASM + worklet…</span></div>
+    <div class="step" data-step="vad-onnx"><span class="dot">●</span> <span class="step-text">Prefetching silero_vad.onnx…</span></div>
+    <div class="step" data-step="extractor"><span class="dot">●</span> <span class="step-text">Loading Whisper feature extractor…</span></div>
+    <div class="step" data-step="smart-turn"><span class="dot">●</span> <span class="step-text">Fetching Smart Turn v3 ONNX (~8 MB)…</span></div>
+    <div class="step" data-step="warmup"><span class="dot">●</span> <span class="step-text">Warming up ONNX session…</span></div>
+    <div class="step" data-step="ready"><span class="dot">●</span> <span class="step-text">Ready</span></div>
+  </div>
+
+  <div class="controls">
+    <button id="start" class="primary">🎤 Start mic</button>
+    <button id="stop" disabled>⏹ Stop</button>
+    <button id="clear">Clear log</button>
+  </div>
+
+  <div class="big-state silence" id="big-state">
+    <div class="label">Smart Turn Decision</div>
+    <div class="text" id="big-state-text">— waiting —</div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h3>VAD State</h3>
+      <div class="value silence" id="vad-state">silence</div>
+      <div class="sub" id="vad-sub">no speech detected yet</div>
+      <div class="bar-container"><div class="bar" id="vad-bar" style="width:0%"></div></div>
+    </div>
+    <div class="panel">
+      <h3>Smart Turn Probability</h3>
+      <div class="value" id="prob-value">—</div>
+      <div class="sub">probability turn is COMPLETE (&gt; 0.5 = done)</div>
+      <div class="bar-container"><div class="bar magenta" id="prob-bar" style="width:0%"></div></div>
+    </div>
+    <div class="panel">
+      <h3>Silence</h3>
+      <div class="value" id="silence-ms">0 <span style="font-size:14px;color:var(--muted)">ms</span></div>
+      <div class="sub">hard cutoff at <span id="stop-secs-display">3000</span> ms</div>
+      <div class="bar-container"><div class="bar warn" id="silence-bar" style="width:0%"></div></div>
+    </div>
+    <div class="panel">
+      <h3>Total E2E</h3>
+      <div class="value" id="e2e-time">—</div>
+      <div class="sub">speech end → decision (full pipeline)</div>
+      <div class="bar-container"><div class="bar" id="e2e-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h3>Window prep + resample</h3>
+      <div class="value" id="prep-time">—</div>
+      <div class="sub">buffer slice + Float32Array build</div>
+    </div>
+    <div class="panel">
+      <h3>Whisper feat extract</h3>
+      <div class="value" id="feat-time">—</div>
+      <div class="sub">mel-spectrogram (80 bins × 3000 frames)</div>
+    </div>
+    <div class="panel">
+      <h3>ONNX inference</h3>
+      <div class="value" id="onnx-time">—</div>
+      <div class="sub">smart-turn-v3.2-cpu.onnx · WASM</div>
+    </div>
+    <div class="panel">
+      <h3>Last 5 runs (avg)</h3>
+      <div class="value" id="avg-time">—</div>
+      <div class="sub" id="avg-sub">rolling average e2e</div>
+    </div>
+  </div>
+
+  <div class="config">
+    <div class="row">
+      <label>stop_secs <input type="number" id="cfg-stop" value="1.5" min="0.5" max="10" step="0.25"></label>
+      <label>threshold <input type="number" id="cfg-threshold" value="0.5" min="0" max="1" step="0.05"></label>
+      <label>pre_speech_ms <input type="number" id="cfg-pre" value="500" min="100" max="2000" step="100"></label>
+      <label>redemptionFrames <input type="number" id="cfg-redemption" value="4" min="1" max="20" step="1"></label>
+    </div>
+  </div>
+
+  <details>
+    <summary>Event log</summary>
+    <div id="log"></div>
+  </details>
+
+  <div class="footer-hint">
+    <b>Como testar:</b> diga "manda uma mensagem para..." e pause 1-2s. Smart Turn deve dizer INCOMPLETE (probability baixa). Diga "manda mensagem." e pause. Smart Turn deve dizer COMPLETE rapidamente. Hard cutoff de 3s sempre força COMPLETE como fallback.
+  </div>
+
+</main>
+
+<script type="module">
+  // ─────────────────────────────────────────────────────────────────────────
+  // Imports (ESM via jsdelivr CDN). First load = ~15 MB total. Cached after.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const log = (cls, msg) => {
+    const el = document.getElementById('log');
+    const ts = new Date().toISOString().slice(11, 23);
+    const div = document.createElement('div');
+    div.className = 'entry';
+    div.innerHTML = `<span class="ts">${ts}</span><span class="${cls}">${msg}</span>`;
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
+  };
+
+  const setStep = (step, state, text) => {
+    const el = document.querySelector(`.step[data-step="${step}"]`);
+    if (el) {
+      el.classList.add(state);
+      if (text) {
+        const ts = el.querySelector('.step-text');
+        if (ts) ts.textContent = text;
+      }
+    }
+  };
+
+  // Fetch with progress reporting
+  async function fetchWithProgress(url, label, step) {
+    const t0 = performance.now();
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${label}: HTTP ${response.status}`);
+    const total = parseInt(response.headers.get('content-length') || '0', 10);
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (total > 0) {
+        const pct = ((received / total) * 100).toFixed(0);
+        const mb = (received / 1024 / 1024).toFixed(1);
+        const totalMb = (total / 1024 / 1024).toFixed(1);
+        setStep(step, 'active', `${label} ${pct}% (${mb}/${totalMb} MB)`);
+      } else {
+        const mb = (received / 1024 / 1024).toFixed(1);
+        setStep(step, 'active', `${label} ${mb} MB downloaded…`);
+      }
+    }
+    const blob = new Blob(chunks);
+    const elapsed = performance.now() - t0;
+    log('info', `${label}: ${(received / 1024 / 1024).toFixed(1)} MB in ${(elapsed / 1000).toFixed(1)}s`);
+    return blob;
+  }
+
+  setStep('imports', 'active');
+
+  let MicVAD, transformersPipeline, ort;
+  try {
+    log('info', 'Importing onnxruntime-web…');
+    ort = await import('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.mjs');
+    log('info', 'Importing @ricky0123/vad-web…');
+    const vadMod = await import('https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/+esm');
+    MicVAD = vadMod.MicVAD;
+    log('info', 'Importing @huggingface/transformers (Whisper feature extractor)…');
+    transformersPipeline = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0/+esm');
+    setStep('imports', 'done');
+  } catch (err) {
+    log('error', `Module import failed: ${err.message}`);
+    document.getElementById('start').disabled = true;
+    throw err;
+  }
+
+  // Prefetch heavy assets in parallel — primes browser HTTP cache
+  // so MicVAD.new() finds them locally instead of fetching cold from CDN.
+  const VAD_BASE = 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/';
+  const ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+
+  async function prefetchVadAssets() {
+    // Best-effort — primes browser HTTP cache. Failures here don't block
+    // MicVAD.new() (it'll fetch on demand). Keep going on individual errors.
+    setStep('vad-wasm', 'active');
+    const wasmFiles = [
+      'ort-wasm-simd-threaded.jsep.wasm',
+      'ort-wasm-simd-threaded.wasm',
+    ];
+    await Promise.all(wasmFiles.map(f =>
+      fetchWithProgress(ORT_BASE + f, `ORT ${f}`, 'vad-wasm').catch(e => log('warn', `WASM ${f} prefetch skipped: ${e.message}`))
+    ));
+    await fetchWithProgress(VAD_BASE + 'vad.worklet.bundle.min.js', 'vad worklet', 'vad-wasm')
+      .catch(e => log('warn', `worklet prefetch skipped: ${e.message}`));
+    setStep('vad-wasm', 'done');
+
+    setStep('vad-onnx', 'active');
+    // vad-web 0.0.29 ships silero_vad_v5.onnx + silero_vad_legacy.onnx.
+    // Prefetch both so MicVAD picks whichever it needs from cache.
+    const onnxFiles = ['silero_vad_v5.onnx', 'silero_vad_legacy.onnx'];
+    await Promise.all(onnxFiles.map(f =>
+      fetchWithProgress(VAD_BASE + f, f, 'vad-onnx').catch(e => log('warn', `${f} prefetch skipped: ${e.message}`))
+    ));
+    setStep('vad-onnx', 'done');
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Smart Turn loader
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const MODEL_URL = 'https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx';
+  const SAMPLE_RATE = 16000;
+  const MAX_DURATION_SECS = 8;
+  const MAX_SAMPLES = SAMPLE_RATE * MAX_DURATION_SECS;
+
+  let smartTurnSession = null;
+  let featureExtractor = null;
+
+  async function loadFeatureExtractor() {
+    setStep('extractor', 'active');
+    log('info', 'Loading Whisper-tiny feature extractor weights from HF…');
+    const { AutoProcessor, env } = transformersPipeline;
+    env.allowLocalModels = false;
+    env.useBrowserCache = true;
+    const processor = await AutoProcessor.from_pretrained('onnx-community/whisper-tiny');
+    featureExtractor = processor.feature_extractor;
+    // Smart Turn v3 wants 8s window. Whisper default = 30s.
+    // Override config so normalization + padding match pipecat behavior.
+    const cfg = featureExtractor.config;
+    if (cfg) {
+      cfg.chunk_length = 8;
+      cfg.n_samples = 8 * 16000;
+      cfg.nb_max_frames = 800;
+      log('info', `Feature extractor configured: chunk_length=8 n_samples=${cfg.n_samples} nb_max_frames=800`);
+    }
+    setStep('extractor', 'done');
+  }
+
+  async function loadSmartTurn() {
+    setStep('smart-turn', 'active');
+    const blob = await fetchWithProgress(MODEL_URL, 'smart-turn-v3.2-cpu.onnx', 'smart-turn');
+    const buf = await blob.arrayBuffer();
+    setStep('smart-turn', 'active', `Creating ONNX session (${(buf.byteLength / 1024 / 1024).toFixed(1)} MB)…`);
+    smartTurnSession = await ort.InferenceSession.create(buf, {
+      executionProviders: ['wasm'],
+    });
+    setStep('smart-turn', 'done');
+    log('info', `Smart Turn loaded. Inputs: ${smartTurnSession.inputNames.join(',')} · Outputs: ${smartTurnSession.outputNames.join(',')}`);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // State
+  // ─────────────────────────────────────────────────────────────────────────
+
+  let micVAD = null;
+  let speechTriggered = false;
+  let silenceMs = 0;
+  let speechBuffer = []; // Float32Array chunks, ~30ms each at 16kHz
+  let speechStartTime = 0;
+  let lastFrameWasSpeech = false;
+  let cfg = { stopSecs: 3, threshold: 0.5, preSpeechMs: 500 };
+
+  function getCfg() {
+    cfg.stopSecs = parseFloat(document.getElementById('cfg-stop').value);
+    cfg.threshold = parseFloat(document.getElementById('cfg-threshold').value);
+    cfg.preSpeechMs = parseFloat(document.getElementById('cfg-pre').value);
+    document.getElementById('stop-secs-display').textContent = (cfg.stopSecs * 1000).toFixed(0);
+    return cfg;
+  }
+
+  function appendChunk(audio) {
+    speechBuffer.push(audio);
+    let total = speechBuffer.reduce((s, c) => s + c.length, 0);
+    while (total > MAX_SAMPLES + SAMPLE_RATE && speechBuffer.length > 1) {
+      total -= speechBuffer[0].length;
+      speechBuffer.shift();
+    }
+  }
+
+  function getWindow() {
+    const total = speechBuffer.reduce((s, c) => s + c.length, 0);
+    const out = new Float32Array(Math.min(total, MAX_SAMPLES));
+    let offset = 0;
+    let skip = Math.max(0, total - MAX_SAMPLES);
+    for (const chunk of speechBuffer) {
+      if (skip >= chunk.length) { skip -= chunk.length; continue; }
+      const start = skip; skip = 0;
+      const slice = chunk.subarray(start);
+      const room = out.length - offset;
+      out.set(slice.subarray(0, room), offset);
+      offset += Math.min(slice.length, room);
+      if (offset >= out.length) break;
+    }
+    if (out.length < MAX_SAMPLES) {
+      const padded = new Float32Array(MAX_SAMPLES);
+      padded.set(out, MAX_SAMPLES - out.length);
+      return padded;
+    }
+    return out;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Smart Turn inference
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async function predictEndOfTurn(providedAudio = null) {
+    if (!smartTurnSession || !featureExtractor) {
+      log('error', 'Smart Turn not ready');
+      return null;
+    }
+    const tPrep0 = performance.now();
+    const audio = providedAudio ?? getWindow();
+    const tPrep = performance.now() - tPrep0;
+
+    const tFeat0 = performance.now();
+    const features = await featureExtractor(audio);
+    const tFeat = performance.now() - tFeat0;
+
+    const inputTensor = features.input_features ?? features;
+    const rawData = inputTensor.data ?? inputTensor.tensor?.data ?? inputTensor;
+    const rawDims = inputTensor.dims ?? inputTensor.tensor?.dims ?? [1, 80, 3000];
+
+    // Smart Turn v3 expects [1, 80, 800] (8s window). Whisper-tiny default
+    // outputs [1, 80, 3000] (pads 8s audio → 30s with TRAILING zeros).
+    // Real signal lives in first 800 frames; rest is zero-padding from
+    // Whisper's post-padding. Pipecat avoids this by setting chunk_length=8
+    // in the feature extractor; we slice instead.
+    const TARGET_FRAMES = 800;
+    const numMels = rawDims[1];
+    const numFrames = rawDims[2];
+    let tensorData = rawData;
+    let dims = rawDims;
+    if (numFrames !== TARGET_FRAMES) {
+      const sliced = new Float32Array(numMels * TARGET_FRAMES);
+      for (let m = 0; m < numMels; m++) {
+        for (let f = 0; f < TARGET_FRAMES; f++) {
+          sliced[m * TARGET_FRAMES + f] = rawData[m * numFrames + f];
+        }
+      }
+      tensorData = sliced;
+      dims = [1, numMels, TARGET_FRAMES];
+    }
+
+    const tOnnx0 = performance.now();
+    const ortTensor = new ort.Tensor('float32', tensorData, dims);
+    const feedKey = smartTurnSession.inputNames[0];
+    const outputs = await smartTurnSession.run({ [feedKey]: ortTensor });
+    const outKey = smartTurnSession.outputNames[0];
+    const raw = outputs[outKey].data[0];
+    const probability = raw < 0 || raw > 1 ? 1 / (1 + Math.exp(-raw)) : raw;
+    const tOnnx = performance.now() - tOnnx0;
+
+    return {
+      probability,
+      timing: {
+        prepMs: tPrep,
+        featMs: tFeat,
+        onnxMs: tOnnx,
+        modelMs: tFeat + tOnnx,
+      },
+    };
+  }
+
+  // Rolling average of last 5 e2e times
+  const e2eHistory = [];
+  function recordE2E(ms) {
+    e2eHistory.push(ms);
+    if (e2eHistory.length > 5) e2eHistory.shift();
+    const avg = e2eHistory.reduce((s, x) => s + x, 0) / e2eHistory.length;
+    document.getElementById('avg-time').textContent = avg.toFixed(0) + ' ms';
+    document.getElementById('avg-sub').textContent = `over ${e2eHistory.length} run${e2eHistory.length > 1 ? 's' : ''}`;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // VAD setup
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async function start() {
+    document.getElementById('start').disabled = true;
+    document.getElementById('stop').disabled = false;
+    document.getElementById('big-state-text').textContent = 'listening…';
+    document.getElementById('big-state').className = 'big-state silence';
+
+    const redemptionFrames = parseInt(document.getElementById('cfg-redemption').value, 10) || 4;
+
+    micVAD = await MicVAD.new({
+      onnxWASMBasePath: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/',
+      baseAssetPath: 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/',
+      positiveSpeechThreshold: 0.5,
+      negativeSpeechThreshold: 0.35,
+      redemptionFrames: redemptionFrames,
+      minSpeechFrames: 3,
+      onSpeechStart: () => {
+        log('speech', '▶ speech start');
+        speechTriggered = true;
+        silenceMs = 0;
+        if (speechStartTime === 0) speechStartTime = performance.now();
+        document.getElementById('vad-state').textContent = 'speech';
+        document.getElementById('vad-state').className = 'value speech';
+        document.getElementById('vad-sub').textContent = 'speaking now';
+        document.getElementById('big-state-text').textContent = 'speaking…';
+        document.getElementById('big-state').className = 'big-state speaking';
+      },
+      onSpeechEnd: async (audio) => {
+        const tE2E0 = performance.now();
+        log('silence', `⏸ speech end · segment ${(audio.length / SAMPLE_RATE).toFixed(2)}s`);
+        appendChunk(audio);
+        document.getElementById('vad-state').textContent = 'silence';
+        document.getElementById('vad-state').className = 'value silence';
+        document.getElementById('vad-sub').textContent = 'analyzing…';
+        document.getElementById('big-state-text').textContent = 'analyzing…';
+        document.getElementById('big-state').className = 'big-state silence';
+
+        try {
+          const result = await predictEndOfTurn();
+          if (!result) return;
+          const tE2E = performance.now() - tE2E0;
+
+          getCfg();
+          const isComplete = result.probability > cfg.threshold;
+          const probPct = (result.probability * 100).toFixed(1);
+          const t = result.timing;
+
+          document.getElementById('prob-value').textContent = probPct + '%';
+          document.getElementById('prob-bar').style.width = probPct + '%';
+          document.getElementById('prob-bar').className = 'bar ' + (isComplete ? 'magenta' : 'warn');
+
+          document.getElementById('e2e-time').textContent = tE2E.toFixed(0) + ' ms';
+          document.getElementById('prep-time').textContent = t.prepMs.toFixed(1) + ' ms';
+          document.getElementById('feat-time').textContent = t.featMs.toFixed(0) + ' ms';
+          document.getElementById('onnx-time').textContent = t.onnxMs.toFixed(0) + ' ms';
+
+          // E2E bar: scale 0-500ms green, 500-1000ms yellow, >1000ms red
+          const e2ePct = Math.min(100, (tE2E / 1000) * 100);
+          const e2eBar = document.getElementById('e2e-bar');
+          e2eBar.style.width = e2ePct + '%';
+          e2eBar.className = 'bar ' + (tE2E < 200 ? '' : tE2E < 500 ? 'warn' : 'danger');
+
+          recordE2E(tE2E);
+
+          const timingLog = `e2e=${tE2E.toFixed(0)}ms (prep=${t.prepMs.toFixed(1)} feat=${t.featMs.toFixed(0)} onnx=${t.onnxMs.toFixed(0)})`;
+
+          if (isComplete) {
+            log('turn-complete', `✅ COMPLETE · prob=${probPct}% · ${timingLog}`);
+            document.getElementById('big-state-text').textContent = '✅ COMPLETE';
+            document.getElementById('big-state').className = 'big-state complete';
+            speechTriggered = false;
+            speechStartTime = 0;
+            speechBuffer = [];
+          } else {
+            log('turn-incomplete', `⏳ INCOMPLETE · prob=${probPct}% · ${timingLog} · keep listening`);
+            document.getElementById('big-state-text').textContent = '⏳ INCOMPLETE — go on';
+            document.getElementById('big-state').className = 'big-state incomplete';
+          }
+        } catch (err) {
+          log('error', `Smart Turn error: ${err.message}`);
+        }
+      },
+      onFrameProcessed: (probs, frame) => {
+        const isSpeech = probs.isSpeech > 0.5;
+        const speechPct = (probs.isSpeech * 100).toFixed(0);
+        document.getElementById('vad-bar').style.width = speechPct + '%';
+        document.getElementById('vad-bar').className = 'bar ' + (isSpeech ? '' : 'warn');
+
+        if (frame) appendChunk(frame);
+
+        if (speechTriggered) {
+          if (isSpeech) {
+            silenceMs = 0;
+          } else {
+            silenceMs += 32;
+            const cfgNow = getCfg();
+            const stopMs = cfgNow.stopSecs * 1000;
+            document.getElementById('silence-ms').innerHTML = `${silenceMs.toFixed(0)} <span style="font-size:14px;color:var(--muted)">ms</span>`;
+            const pct = Math.min(100, (silenceMs / stopMs) * 100);
+            document.getElementById('silence-bar').style.width = pct + '%';
+
+            if (silenceMs >= stopMs) {
+              log('turn-complete', `🛑 HARD CUTOFF — silence ${silenceMs.toFixed(0)}ms ≥ ${stopMs}ms`);
+              document.getElementById('big-state-text').textContent = '🛑 HARD CUTOFF';
+              document.getElementById('big-state').className = 'big-state complete';
+              speechTriggered = false;
+              speechStartTime = 0;
+              silenceMs = 0;
+            }
+          }
+        }
+        lastFrameWasSpeech = isSpeech;
+      },
+      onVADMisfire: () => {
+        log('warn', '⚠ VAD misfire (speech too short)');
+      },
+    });
+
+    micVAD.start();
+    log('info', '🎤 Mic started. Speak now.');
+    setStep('ready', 'done');
+  }
+
+  function stop() {
+    if (micVAD) {
+      micVAD.pause();
+      micVAD.destroy?.();
+      micVAD = null;
+    }
+    speechTriggered = false;
+    speechBuffer = [];
+    silenceMs = 0;
+    document.getElementById('start').disabled = false;
+    document.getElementById('stop').disabled = true;
+    document.getElementById('big-state-text').textContent = '— stopped —';
+    document.getElementById('big-state').className = 'big-state silence';
+    log('info', 'Mic stopped.');
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Load models in background
+  // ─────────────────────────────────────────────────────────────────────────
+
+  setStep('vad', 'done');
+
+  async function warmup() {
+    log('info', '🔥 Warming up (first inference is slow due to ONNX JIT)…');
+    const dummy = new Float32Array(MAX_SAMPLES);
+    for (let i = 0; i < dummy.length; i++) dummy[i] = (Math.random() - 0.5) * 0.001;
+    const times = [];
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      await predictEndOfTurn(dummy);
+      times.push(performance.now() - t0);
+    }
+    log('info', `✅ Warmup done. Runs: ${times.map(t => t.toFixed(0) + 'ms').join(' → ')} (steady state at end)`);
+  }
+
+  try {
+    // Run all asset prefetches + smart turn load + extractor in parallel
+    // Prefetched VAD assets prime browser cache so MicVAD.new() is instant.
+    await Promise.all([
+      prefetchVadAssets(),
+      loadFeatureExtractor(),
+      loadSmartTurn(),
+    ]);
+    setStep('warmup', 'active');
+    await warmup();
+    setStep('warmup', 'done');
+    setStep('ready', 'done');
+    document.getElementById('loading').classList.remove('active');
+    log('info', '✅ All models warm. Click "Start mic" to begin.');
+  } catch (err) {
+    log('error', `Model load failed: ${err.message}`);
+    document.getElementById('start').disabled = true;
+  }
+
+  // Test hook — exposed for Playwright automated tests.
+  // Lets a test page.evaluate() a Float32Array directly into smart-turn,
+  // bypassing the mic. Returns { probability, timing }.
+  window.__smartTurn = {
+    ready: () => smartTurnSession !== null && featureExtractor !== null,
+    predict: async (float32Array) => {
+      const audio = new Float32Array(float32Array);
+      const t0 = performance.now();
+      const result = await predictEndOfTurn(audio);
+      const e2e = performance.now() - t0;
+      return { ...result, e2eMs: e2e };
+    },
+    loadingState: () => Array.from(document.querySelectorAll('.step')).map(el => ({
+      step: el.dataset.step,
+      done: el.classList.contains('done'),
+      active: el.classList.contains('active'),
+    })),
+    sampleRate: SAMPLE_RATE,
+    maxSamples: MAX_SAMPLES,
+  };
+
+  document.getElementById('start').addEventListener('click', () => {
+    start().catch(err => {
+      log('error', `Start failed: ${err.message}`);
+      document.getElementById('start').disabled = false;
+      document.getElementById('stop').disabled = true;
+    });
+  });
+  document.getElementById('stop').addEventListener('click', stop);
+  document.getElementById('clear').addEventListener('click', () => {
+    document.getElementById('log').innerHTML = '';
+  });
+
+  getCfg();
+</script>
+
+</body>
+</html>

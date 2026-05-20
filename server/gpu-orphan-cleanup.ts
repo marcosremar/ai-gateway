@@ -37,6 +37,10 @@ function nukeUntrackedAllowed(provider: 'vast' | 'runpod' | 'tensordock' | 'moda
   }
 }
 
+function modalStopsUntrackedByDefault(): boolean {
+  return process.env.AIGW_MODAL_STOP_UNTRACKED !== '0';
+}
+
 export const POD_NAME_PREFIX = 'parle-autoscale-';
 
 /**
@@ -90,7 +94,16 @@ export function isAccountOwned(provider: 'vast' | 'runpod' | 'tensordock' | 'mod
  * post-incident-2026-04-26 double-flag policy enforced by sweepOrphanInstances().
  */
 export function prefixesForProvider(provider: 'vast' | 'runpod' | 'tensordock' | 'modal' | 'hyperstack'): string[] {
+  if (provider === 'modal' && modalStopsUntrackedByDefault()) return [];
   return nukeUntrackedAllowed(provider) ? [] : GATEWAY_NAME_PREFIXES;
+}
+
+function getModalApiKey(): string {
+  if (deployModalApiKey) return deployModalApiKey;
+  if (process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET) {
+    return `${process.env.MODAL_TOKEN_ID}:${process.env.MODAL_TOKEN_SECRET}`;
+  }
+  return process.env.MODAL_API_KEY || process.env.MODAL_TOKEN_ID || '';
 }
 
 /**
@@ -134,6 +147,16 @@ export async function cleanupAllPods(apiKey: string, knownPodIds: string[] = [])
 
 
 const VAST_SWEEP_STATUSES = ['running', 'active', 'loading', 'creating', 'created', 'exited', 'stopped'];
+
+// Grace window — don't orphan-sweep instances created within this many ms.
+// Vast race deploys take 5-10 min before the winner+loser bookkeeping
+// finishes. Any instance newer than this is most likely still being
+// orchestrated and we've previously destroyed paused-but-not-yet-resumed
+// instances via the sweep. Override with VAST_ORPHAN_GRACE_MS.
+const VAST_ORPHAN_GRACE_MS = parseInt(
+  process.env.VAST_ORPHAN_GRACE_MS || String(45 * 60_000),
+  10,
+);
 export async function cleanupVastInstances(apiKey: string, knownInstanceIds: string[] = []): Promise<void> {
   for (const instanceId of knownInstanceIds.filter(Boolean)) {
     try {
@@ -155,19 +178,182 @@ export async function cleanupVastInstances(apiKey: string, knownInstanceIds: str
   );
 }
 
+// Direct cleanup helpers route through prefixesForProvider() so the
+// `AIGW_<PROVIDER>_NUKE_UNTRACKED=1` opt-in is honored consistently with
+// sweepOrphanInstances. Previously these helpers hard-coded
+// GATEWAY_NAME_PREFIXES, silently dropping the operator opt-in.
 export const cleanupTensordockInstances = (apiKey: string, authId?: string) =>
-  cleanupProviderInstances(tensordock, { apiKey, authId }, ['running', 'active', 'deploying', 'creating'], 'TensorDock', console.log, console.warn, GATEWAY_NAME_PREFIXES);
+  cleanupProviderInstances(tensordock, { apiKey, authId }, ['running', 'active', 'deploying', 'creating'], 'TensorDock', console.log, console.warn, prefixesForProvider('tensordock'));
 
 export const cleanupModalApps = (apiKey: string) =>
-  cleanupProviderInstances(modal, { apiKey }, ['running', 'deployed', 'active'], 'Modal', console.log, console.warn, GATEWAY_NAME_PREFIXES);
+  cleanupProviderInstances(
+    modal,
+    { apiKey },
+    ['running', 'deployed', 'active'],
+    'Modal',
+    console.log,
+    console.warn,
+    nukeUntrackedAllowed('modal') ? [] : GATEWAY_NAME_PREFIXES,
+  );
 
 export const cleanupHyperstackInstances = (apiKey: string) =>
-  cleanupProviderInstances(hyperstack, { apiKey }, ['running', 'active', 'creating', 'booting'], 'Hyperstack', console.log, console.warn, GATEWAY_NAME_PREFIXES);
+  cleanupProviderInstances(hyperstack, { apiKey }, ['running', 'active', 'creating', 'booting'], 'Hyperstack', console.log, console.warn, prefixesForProvider('hyperstack'));
 
 // ── Orphan instance sweep ─────────────────────────────────────────────────
 
 let orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
 const ORPHAN_SWEEP_INTERVAL_MS = 10 * 60_000; // every 10 minutes
+let modalIdleSweepTimer: ReturnType<typeof setInterval> | null = null;
+function parsePositiveMs(value: string | undefined, fallbackMs: number): number {
+  const parsed = Number.parseInt(value || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackMs;
+}
+const MODAL_IDLE_SWEEP_INTERVAL_MS = parsePositiveMs(process.env.MODAL_IDLE_SWEEP_INTERVAL_MS, 60_000);
+const MODAL_IDLE_GRACE_MS = parsePositiveMs(process.env.MODAL_IDLE_GRACE_MS, 5 * 60_000);
+const modalIdleSince = new Map<string, number>();
+
+function isModalIdleCandidate(status: string): boolean {
+  // Modal "Tasks" means a container/process exists, not necessarily that a
+  // user request is in flight. Treat running/deployed apps as idle candidates
+  // unless the gateway is actively tracking them.
+  const normalized = status.toLowerCase();
+  return ['running', 'active', 'deployed', 'ephemeral', 'detached'].includes(normalized)
+    || normalized.startsWith('ephemeral')
+    || normalized.includes('detached');
+}
+
+function shouldStopModalIdleApp(instanceId: string, status: string, now: number): boolean {
+  if (!isModalIdleCandidate(status)) {
+    modalIdleSince.delete(instanceId);
+    return false;
+  }
+  const firstSeenIdle = modalIdleSince.get(instanceId);
+  if (!firstSeenIdle) {
+    modalIdleSince.set(instanceId, now);
+    return false;
+  }
+  return now - firstSeenIdle >= MODAL_IDLE_GRACE_MS;
+}
+
+async function collectTrackedInstanceIds(): Promise<Set<string>> {
+  const tracked = new Set<string>();
+  if (deployState.podId) tracked.add(deployState.podId);
+  const { standbyDeployState } = await import('./state');
+  if (standbyDeployState.podId) tracked.add(standbyDeployState.podId);
+  for (const id of activeRaceInstanceIds) tracked.add(id);
+
+  try {
+    const { deployState: ds } = await import('./state');
+    for (const t of (ds.transitions || []).slice(-10)) {
+      const detail = t.detail || '';
+      const matches = detail.match(/\binst-\d+|\bap-[a-zA-Z0-9]+|\b[a-z0-9]{8,}\b/g);
+      if (matches) for (const id of matches) tracked.add(id);
+    }
+  } catch { /* best effort */ }
+
+  return tracked;
+}
+
+function getSweepSafetyAbortReason(): string | null {
+  const status = (deployState.status || '').toLowerCase();
+  if (status === 'ready' && !deployState.podId) {
+    return "deployState.status=ready but podId is empty (desync guard)";
+  }
+
+  if (status && !['idle', 'ready', 'error', 'stopped', 'terminated'].includes(status)) {
+    return `deploy is in progress (status=${status})`;
+  }
+
+  const TRANSITION_GRACE_MS = 3 * 60_000;
+  const lastTransition = deployState.transitions?.[deployState.transitions.length - 1];
+  if (lastTransition && Date.now() - lastTransition.ts < TRANSITION_GRACE_MS) {
+    return `within ${TRANSITION_GRACE_MS / 1000}s post-transition grace`;
+  }
+
+  return null;
+}
+
+async function sweepModalIdleApps(tracked: Set<string>, trigger = 'orphan-sweep'): Promise<{ found: number; terminated: number }> {
+  let found = 0;
+  let terminated = 0;
+  const modalKey = getModalApiKey();
+  if (!modalKey) return { found, terminated };
+
+  try {
+    const instances = await modal.listInstances({ apiKey: modalKey });
+    const mPrefixes = prefixesForProvider('modal');
+    const now = Date.now();
+    const orphans = instances.filter(i => {
+      const st = i.status?.toLowerCase() ?? '';
+      if (!['running', 'deployed', 'active', 'ephemeral', 'detached', 'initializing'].includes(st)
+        && !st.startsWith('ephemeral')
+        && !st.includes('detached')) {
+        modalIdleSince.delete(i.instanceId);
+        return false;
+      }
+      if (tracked.has(i.instanceId)) {
+        modalIdleSince.delete(i.instanceId);
+        return false;
+      }
+      const eligible =
+        mPrefixes.length === 0
+          ? modalStopsUntrackedByDefault() || nukeUntrackedAllowed('modal')
+          : mPrefixes.some(p => (i.instanceName || '').startsWith(p));
+      if (!eligible) {
+        modalIdleSince.delete(i.instanceId);
+        return false;
+      }
+      const shouldStop = shouldStopModalIdleApp(i.instanceId, st, now);
+      if (!shouldStop && isModalIdleCandidate(st)) {
+        const idleMs = now - (modalIdleSince.get(i.instanceId) ?? now);
+        log.log(`[orphan-sweep] Modal ${i.instanceId} (${i.instanceName || '?'}) idle ${Math.round(idleMs / 1000)}s/${Math.round(MODAL_IDLE_GRACE_MS / 1000)}s — waiting before stop`);
+      }
+      return shouldStop;
+    });
+    found += orphans.length;
+    for (const inst of orphans) {
+      logGpuEvent({
+        eventType: 'orphan_terminate_attempt',
+        provider: 'modal',
+        instanceId: inst.instanceId,
+        trigger,
+        oldState: inst.status || 'unknown',
+        newState: 'terminating',
+        metadata: { source: 'orphan-sweep', instanceName: inst.instanceName, msg: 'Will terminate idle Modal app after grace window' },
+      });
+      try {
+        await modal.deleteInstance(inst.instanceId, { apiKey: modalKey });
+        modalIdleSince.delete(inst.instanceId);
+        terminated++;
+        log.log(`[orphan-sweep] Modal ${inst.instanceId} terminated`);
+        logGpuEvent({
+          eventType: 'orphan_terminated',
+          provider: 'modal',
+          instanceId: inst.instanceId,
+          trigger,
+          oldState: 'terminating',
+          newState: 'terminated',
+          metadata: { source: 'orphan-sweep', instanceName: inst.instanceName, msg: 'Modal idle app terminated' },
+        });
+      } catch (err) {
+        log.warn(`[orphan-sweep] Modal ${inst.instanceId} delete failed: ${err instanceof Error ? err.message : err}`);
+        logGpuEvent({
+          eventType: 'orphan_terminate_failed',
+          provider: 'modal',
+          instanceId: inst.instanceId,
+          trigger,
+          oldState: 'terminating',
+          newState: 'unknown',
+          metadata: { source: 'orphan-sweep', instanceName: inst.instanceName, msg: `delete failed: ${err instanceof Error ? err.message : String(err)}` },
+        });
+      }
+    }
+  } catch (err) {
+    log.warn(`[orphan-sweep] Modal list failed: ${err instanceof Error ? err.message : err}`);
+  }
+
+  return { found, terminated };
+}
 
 /**
  * Scan all providers for gateway-owned instances we don't track and terminate
@@ -187,58 +373,19 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
     },
   });
 
-  const tracked = new Set<string>();
-  if (deployState.podId) tracked.add(deployState.podId);
-  const { standbyDeployState } = await import('./state');
-  if (standbyDeployState.podId) tracked.add(standbyDeployState.podId);
-  // Include all active race candidates — they are legitimately booting, not orphans
-  for (const id of activeRaceInstanceIds) tracked.add(id);
+  const tracked = await collectTrackedInstanceIds();
 
-  // Defense-in-depth: if there's a "ready" deploy but the podId field is
-  // empty (the desync bug), refuse to sweep — better to leak than to nuke an
-  // active pod the user is working with.
-  if (deployState.status === 'ready' && !deployState.podId) {
-    log.warn(`[orphan-sweep] deployState.status=ready but podId='' — aborting sweep to avoid killing active pod`);
+  const abortReason = getSweepSafetyAbortReason();
+  if (abortReason) {
+    log.log(`[orphan-sweep] skipping — ${abortReason}`);
     logGpuEvent({
       eventType: 'sweep_aborted',
       provider: 'multi',
       trigger: 'orphan-sweep',
-      metadata: { source: 'orphan-sweep', msg: 'aborted: deployState.status=ready but podId is empty (desync guard)' },
+      metadata: { source: 'orphan-sweep', msg: `aborted: ${abortReason}` },
     });
     return { found: 0, terminated: 0 };
   }
-
-  // Defense-in-depth #2: skip sweep for 3 minutes after any transition.
-  // Race-winner resolution can leave deployState.podId pointing at the WRONG
-  // instance when 2 candidates become healthy nearly simultaneously. Giving
-  // time for state to stabilize prevents killing the true winner.
-  const TRANSITION_GRACE_MS = 3 * 60_000;
-  const lastTransition = deployState.transitions?.[deployState.transitions.length - 1];
-  if (lastTransition && Date.now() - lastTransition.ts < TRANSITION_GRACE_MS) {
-    log.log(`[orphan-sweep] skipping — last transition ${Math.round((Date.now() - lastTransition.ts) / 1000)}s ago (grace ${TRANSITION_GRACE_MS / 1000}s)`);
-    logGpuEvent({
-      eventType: 'sweep_aborted',
-      provider: 'multi',
-      trigger: 'orphan-sweep',
-      metadata: { source: 'orphan-sweep', msg: `aborted: within ${TRANSITION_GRACE_MS / 1000}s post-transition grace` },
-    });
-    return { found: 0, terminated: 0 };
-  }
-
-  // Defense-in-depth #3: also track recent podIds from persisted deploys.
-  // If a pod was recently the active deploy (even if replaced), don't nuke it
-  // until the operator explicitly terminates. This avoids the case where the
-  // winner's ID got overwritten by a loser.
-  try {
-    const { deployState: ds } = await import('./state');
-    // If the race recently completed, check transitions for any podId mentioned
-    for (const t of (ds.transitions || []).slice(-10)) {
-      const detail = t.detail || '';
-      // Detail strings sometimes contain instance IDs; be permissive
-      const match = detail.match(/inst-\d+/g);
-      if (match) for (const id of match) tracked.add(id);
-    }
-  } catch { /* best effort */ }
 
   let found = 0;
   let terminated = 0;
@@ -269,6 +416,14 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
           newState: 'terminating',
           metadata: { source: 'orphan-sweep', instanceName: inst.instanceName, msg: `Will terminate untracked RunPod pod` },
         });
+        // Re-check tracked just before delete — a race deploy starting
+        // mid-sweep may have added the instance ID to activeRaceInstanceIds.
+        // Without this last-mile check, the brand-new candidate gets killed
+        // because the snapshot at sweep start didn't include it.
+        if (activeRaceInstanceIds.has(inst.instanceId) || tracked.has(inst.instanceId)) {
+          log.log(`[orphan-sweep] RunPod ${inst.instanceId} skipped — became tracked mid-sweep (race candidate)`);
+          continue;
+        }
         try {
           await runpod.deleteInstance(inst.instanceId, { apiKey: rpKey });
           terminated++;
@@ -306,10 +461,20 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
     try {
       const instances = await vast.listInstances({ apiKey: vastKey });
       const vastPrefixes = prefixesForProvider('vast');
+      const now = Date.now();
       const orphans = instances.filter(i => {
         const st = i.status?.toLowerCase() ?? '';
         if (!VAST_SWEEP_STATUSES.includes(st)) return false;
         if (tracked.has(i.instanceId)) return false;
+        // Grace window: skip very new instances. Race deploys take ~5-10min
+        // and the winner/loser bookkeeping happens AFTER the API call —
+        // pre-emptively destroying these races a paused-not-yet-tracked pod.
+        const startedAtMs = (i as { startDateMs?: number; createdAtMs?: number }).startDateMs
+          || (i as { createdAtMs?: number }).createdAtMs
+          || 0;
+        if (startedAtMs > 0 && now - startedAtMs < VAST_ORPHAN_GRACE_MS) {
+          return false;
+        }
         if (vastPrefixes.length === 0) return nukeUntrackedAllowed('vast');
         return vastPrefixes.some(p => (i.instanceName || '').startsWith(p));
       });
@@ -412,59 +577,9 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
   }
 
   // ── Modal ──
-  const modalKey = deployModalApiKey || process.env.MODAL_TOKEN_ID || '';
-  if (modalKey) {
-    try {
-      const instances = await modal.listInstances({ apiKey: modalKey });
-      const mPrefixes = prefixesForProvider('modal');
-      const orphans = instances.filter(i => {
-        const st = i.status?.toLowerCase() ?? '';
-        if (!['running', 'deployed', 'active'].includes(st)) return false;
-        if (tracked.has(i.instanceId)) return false;
-        if (mPrefixes.length === 0) return nukeUntrackedAllowed('modal');
-        return mPrefixes.some(p => (i.instanceName || '').startsWith(p));
-      });
-      found += orphans.length;
-      for (const inst of orphans) {
-        logGpuEvent({
-          eventType: 'orphan_terminate_attempt',
-          provider: 'modal',
-          instanceId: inst.instanceId,
-          trigger: 'orphan-sweep',
-          oldState: inst.status || 'unknown',
-          newState: 'terminating',
-          metadata: { source: 'orphan-sweep', instanceName: inst.instanceName, msg: 'Will terminate untracked Modal app' },
-        });
-        try {
-          await modal.deleteInstance(inst.instanceId, { apiKey: modalKey });
-          terminated++;
-          log.log(`[orphan-sweep] Modal ${inst.instanceId} terminated`);
-          logGpuEvent({
-            eventType: 'orphan_terminated',
-            provider: 'modal',
-            instanceId: inst.instanceId,
-            trigger: 'orphan-sweep',
-            oldState: 'terminating',
-            newState: 'terminated',
-            metadata: { source: 'orphan-sweep', instanceName: inst.instanceName, msg: 'Modal orphan terminated' },
-          });
-        } catch (err) {
-          log.warn(`[orphan-sweep] Modal ${inst.instanceId} delete failed: ${err instanceof Error ? err.message : err}`);
-          logGpuEvent({
-            eventType: 'orphan_terminate_failed',
-            provider: 'modal',
-            instanceId: inst.instanceId,
-            trigger: 'orphan-sweep',
-            oldState: 'terminating',
-            newState: 'unknown',
-            metadata: { source: 'orphan-sweep', instanceName: inst.instanceName, msg: `delete failed: ${err instanceof Error ? err.message : String(err)}` },
-          });
-        }
-      }
-    } catch (err) {
-      log.warn(`[orphan-sweep] Modal list failed: ${err instanceof Error ? err.message : err}`);
-    }
-  }
+  const modalSweep = await sweepModalIdleApps(tracked);
+  found += modalSweep.found;
+  terminated += modalSweep.terminated;
 
   // ── Hyperstack ──
   const hyperstackKey = deployHyperstackApiKey || process.env.HYPERSTACK_API_KEY || '';
@@ -548,6 +663,9 @@ export function startOrphanSweep(): void {
   const policy = {
     enabled: true,
     intervalMin: ORPHAN_SWEEP_INTERVAL_MS / 60_000,
+    modalIdleIntervalSec: MODAL_IDLE_SWEEP_INTERVAL_MS / 1000,
+    modalIdleGraceSec: MODAL_IDLE_GRACE_MS / 1000,
+    modalStopUntrackedByDefault: modalStopsUntrackedByDefault(),
     nukeUntracked: {
       vast:       nukeUntrackedAllowed('vast'),
       runpod:     nukeUntrackedAllowed('runpod'),
@@ -583,7 +701,18 @@ export function startOrphanSweep(): void {
       log.warn(`[orphan-sweep] Periodic sweep failed: ${err instanceof Error ? err.message : err}`),
     );
   }, ORPHAN_SWEEP_INTERVAL_MS);
-  log.log(`[orphan-sweep] Started (interval: ${ORPHAN_SWEEP_INTERVAL_MS / 60_000}min)`);
+  modalIdleSweepTimer = setInterval(() => {
+    const abortReason = getSweepSafetyAbortReason();
+    if (abortReason) {
+      log.log(`[orphan-sweep] Modal idle sweep skipped — ${abortReason}`);
+      return;
+    }
+    collectTrackedInstanceIds()
+      .then(tracked => sweepModalIdleApps(tracked, 'modal-idle-sweep'))
+      .catch(err => log.warn(`[orphan-sweep] Modal idle sweep failed: ${err instanceof Error ? err.message : err}`));
+  }, MODAL_IDLE_SWEEP_INTERVAL_MS);
+  if (modalIdleSweepTimer.unref) modalIdleSweepTimer.unref();
+  log.log(`[orphan-sweep] Started (interval: ${ORPHAN_SWEEP_INTERVAL_MS / 60_000}min, modal idle: ${MODAL_IDLE_GRACE_MS / 60_000}min)`);
 }
 
 /** Stop periodic orphan sweep. */
@@ -592,5 +721,9 @@ export function stopOrphanSweep(): void {
   if (orphanSweepTimer) {
     clearInterval(orphanSweepTimer);
     orphanSweepTimer = null;
+  }
+  if (modalIdleSweepTimer) {
+    clearInterval(modalIdleSweepTimer);
+    modalIdleSweepTimer = null;
   }
 }

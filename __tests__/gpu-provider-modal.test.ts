@@ -262,6 +262,19 @@ describe('ModalClient', () => {
       expect(result[0].endpoint).toBe('https://test-workspace--my-app-web.modal.run');
     });
 
+    it('normalizes numeric Modal app states from JSON output', async () => {
+      mockExec.mockResolvedValueOnce({
+        stdout: JSON.stringify([
+          { app_id: 'ap-num', description: 'numeric-app', state: 3, n_running_tasks: 0 },
+        ]),
+        stderr: '',
+      });
+
+      const result = await client.listInstances(creds);
+      expect(result[0].status).toBe('deployed');
+      expect(result[0].endpoint).toBe('https://test-workspace--numeric-app-web.modal.run');
+    });
+
     it('stopped apps have empty endpoint', async () => {
       mockExec.mockResolvedValueOnce({
         stdout: JSON.stringify([

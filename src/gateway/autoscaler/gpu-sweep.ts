@@ -86,11 +86,22 @@ const PROVIDER_CONFIGS: ProviderSweepConfig[] = [
       return new HyperstackClient();
     },
   },
+  {
+    provider: 'modal',
+    envKey: 'MODAL_TOKEN_ID',
+    envKeyAlt: 'MODAL_API_KEY',
+    authIdEnv: 'MODAL_TOKEN_SECRET',
+    createClient: async () => {
+      const { ModalClient } = await import('../providers/gpu/modal-client');
+      return new ModalClient();
+    },
+  },
 ];
 
 const RUNNING_STATUSES = new Set([
   'running', 'active', 'loading', 'creating', 'booting',
   'RUNNING', 'ACTIVE', 'CREATING',
+  'deployed', 'ephemeral', 'initializing',
 ]);
 
 /**
@@ -120,11 +131,13 @@ export async function sweepAllProviders(
 
   // Sweep each provider in parallel
   const promises = PROVIDER_CONFIGS.map(async (cfg) => {
-    const apiKey = process.env[cfg.envKey];
+    let apiKey = process.env[cfg.envKey] || '';
+    if (!apiKey && cfg.envKeyAlt) apiKey = process.env[cfg.envKeyAlt] || '';
     if (!apiKey) return; // No credentials — skip this provider
 
     const authId = cfg.authIdEnv ? process.env[cfg.authIdEnv] : undefined;
-    if (cfg.authIdEnv && !authId) return; // Needs auth ID but missing
+    if (cfg.authIdEnv && !authId && !(cfg.provider === 'modal' && apiKey.includes(':'))) return; // Needs auth ID but missing
+    if (cfg.provider === 'modal') apiKey = apiKey.includes(':') ? apiKey : `${apiKey}:${authId}`;
 
     report.providers.push(cfg.provider);
 

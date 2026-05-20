@@ -130,6 +130,7 @@ vi.mock('../../src/gpu-providers/deploy-settings', () => ({
   getDeployTimeoutMin: vi.fn(() => 45),
   setDeployTimeoutMin: vi.fn(),
   getMinVramGb: vi.fn(() => 0),
+  getMinInetDownMbps: vi.fn(() => 0),
   getPreferSsd: vi.fn(() => false),
   getDeployRaceCount: vi.fn(() => 1),
   getGpuPriorityList: vi.fn(() => ['NVIDIA GeForce RTX 4090', 'NVIDIA GeForce RTX 3090', 'NVIDIA A100-SXM4-80GB']),

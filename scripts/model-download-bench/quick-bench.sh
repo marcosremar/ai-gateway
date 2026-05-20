@@ -114,18 +114,18 @@ print(f'{s/1024/1024/t:.1f}' if t > 0 and s > 0 else 'N/A')
 echo -e "${B}── Starting benchmarks ──${N}"
 echo ""
 
-# Test 1: HuggingFace Hub (no hf_transfer)
+# Test 1: HuggingFace Hub (no hf_xet)
 bench "hf_hub_plain" "HuggingFace Hub SDK (requests, single stream)" \
     python3 -c "
-import os; os.environ['HF_HUB_ENABLE_HF_TRANSFER']='0'; os.environ['HF_HOME']='$DL_DIR/hf_cache'
+import os; os.environ['HF_XET_HIGH_PERFORMANCE']='0'; os.environ['HF_HOME']='$DL_DIR/hf_cache'
 from huggingface_hub import hf_hub_download
 hf_hub_download('$HF_REPO', '$HF_FILE', cache_dir='$DL_DIR/hf_cache')
 "
 
-# Test 2: HuggingFace Hub (hf_transfer)
-bench "hf_hub_transfer" "HuggingFace Hub SDK (hf_transfer, Rust multi-stream)" \
+# Test 2: HuggingFace Hub (hf_xet)
+bench "hf_hub_transfer" "HuggingFace Hub SDK (hf_xet, Rust multi-stream)" \
     python3 -c "
-import os; os.environ['HF_HUB_ENABLE_HF_TRANSFER']='1'; os.environ['HF_HOME']='$DL_DIR/hf_cache'
+import os; os.environ['HF_XET_HIGH_PERFORMANCE']='1'; os.environ['HF_HOME']='$DL_DIR/hf_cache'
 from huggingface_hub import hf_hub_download
 hf_hub_download('$HF_REPO', '$HF_FILE', cache_dir='$DL_DIR/hf_cache')
 "

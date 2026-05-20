@@ -44,11 +44,13 @@ function isValidUrl(url: string): boolean {
 }
 
 function logError(logger: Console | undefined, msg: string, ...args: unknown[]): void {
-  logger?.error?.(msg, ...args) ?? console.error(msg, ...args);
+  if (logger?.error) logger.error(msg, ...args);
+  else console.error(msg, ...args);
 }
 
 function logDebug(logger: Console | undefined, msg: string, ...args: unknown[]): void {
-  logger?.debug?.(msg, ...args) ?? console.debug(msg, ...args);
+  if (logger?.debug) logger.debug(msg, ...args);
+  else console.debug(msg, ...args);
 }
 
 /** Per-session streaming STT parameters (passed as query params to backend). */
@@ -213,9 +215,11 @@ export class StreamingSTTBackend {
       if (this._aborted) return;
       try {
         let raw: string;
+        // Byte cap = 4× char cap (worst-case UTF-8 expansion).
+        const maxBytes = this._maxTextLength * 4;
         if (evt.data instanceof ArrayBuffer) {
-          if (evt.data.byteLength > this._maxTextLength) {
-            logError(this._logger, '[StreamingSTT] Oversized message: %s bytes', evt.data.byteLength);
+          if (evt.data.byteLength > maxBytes) {
+            logError(this._logger, '[StreamingSTT] Oversized message: %s bytes (max %s)', evt.data.byteLength, maxBytes);
             return;
           }
           raw = this._textDecoder!.decode(evt.data);
@@ -227,7 +231,7 @@ export class StreamingSTTBackend {
         }
 
         if (raw.length > this._maxTextLength) {
-          logError(this._logger, '[StreamingSTT] Oversized text: %s chars', raw.length);
+          logError(this._logger, '[StreamingSTT] Oversized text: %s chars (max %s)', raw.length, this._maxTextLength);
           return;
         }
 
@@ -269,6 +273,10 @@ export class StreamingSTTBackend {
       this._clearConnectTimer();
       logError(this._logger, '[StreamingSTT] WebSocket error');
       this.onDisconnected?.('WebSocket error');
+      // Close the underlying socket to release the FD. Without this, repeated
+      // upstream failures grow open-FD count without bound — onerror fires but
+      // the socket sticks until GC.
+      this._closeWs('error');
     };
   }
 

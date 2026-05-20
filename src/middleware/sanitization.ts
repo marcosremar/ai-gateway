@@ -90,8 +90,11 @@ export function detectInjection(input: string): boolean {
     /DAN mode/i,
     // SQL injection
     /['"];\s*(DROP|DELETE|UPDATE|INSERT)/i,
-    // Command injection
-    /[`$(){}]/,
+    // Command injection — backticks or shell expansion `$(...)` / `${...}`.
+    // Plain `{` or `}` was previously matched, flagging every JSON body
+    // (effectively false-positive on every API call). Tighten to actual
+    // shell-meta sequences only.
+    /[`]|\$\(|\$\{/,
     // Path traversal
     /\.\.\//,
     // XSS

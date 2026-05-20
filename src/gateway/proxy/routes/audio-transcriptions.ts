@@ -21,8 +21,11 @@ const STT_CACHE_MAX_ENTRIES = 200;
 const sttCache = new Map<string, { text: string; expiresAt: number }>();
 let cacheWriteInProgress = false;
 
-function sttCacheKey(audioHash: string, model: string, language?: string): string {
-  return `${audioHash}:${model}:${language ?? '*'}`;
+function sttCacheKey(audioHash: string, model: string, language?: string, responseFormat?: string): string {
+  // Include response_format — verbose_json/srt/vtt produce structurally
+  // different responses; without it, a hit from a `verbose_json` request
+  // could be returned to a `srt`-format request as plain JSON.
+  return `${audioHash}:${model}:${language ?? '*'}:${responseFormat ?? 'json'}`;
 }
 
 function hashAudio(buf: Buffer): string {
@@ -89,7 +92,12 @@ export async function handleAudioTranscriptions(
 
   // Check STT cache — identical audio + model + language returns cached result
   const audioHash = hashAudio(req.rawBody);
-  const cacheKey = sttCacheKey(audioHash, body.model, typeof body.language === 'string' ? body.language : undefined);
+  const cacheKey = sttCacheKey(
+    audioHash,
+    body.model,
+    typeof body.language === 'string' ? body.language : undefined,
+    typeof body.response_format === 'string' ? body.response_format : undefined,
+  );
   const cached = sttCacheGet(cacheKey);
   if (cached !== null) {
     return {

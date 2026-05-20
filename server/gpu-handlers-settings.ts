@@ -19,6 +19,7 @@ import {
   getDeployTimeoutMin, setDeployTimeoutMin, getDeployRegion, setDeployRegion,
   getDeployDockerImage, setDeployDockerImage,
   getMinVramGb, setMinVramGb, getPreferSsd, setPreferSsd,
+  getMinDiskGb, setMinDiskGb,
   getMinInetDownMbps, setMinInetDownMbps,
   getSttTargetLatencyMs, getLlmTargetLatencyMs, getTtsTargetLatencyMs,
   setBenchmarkMaxRuns, setBenchmarkMarginPct, setShadowRuns,
@@ -140,6 +141,9 @@ export async function handlePatchLatencySettings(req: IncomingMessage, res: Serv
   if (typeof body.minVramGb === 'number') {
     setMinVramGb(body.minVramGb);
   }
+  if (typeof body.minDiskGb === 'number') {
+    setMinDiskGb(body.minDiskGb);
+  }
   if (typeof body.minInetDownMbps === 'number') {
     setMinInetDownMbps(body.minInetDownMbps);
   }
@@ -170,6 +174,7 @@ export async function handlePatchLatencySettings(req: IncomingMessage, res: Serv
     gpuSortBy: s.gpuSortBy,
     deployTimeoutMin: s.deployTimeoutMin,
     minVramGb: getMinVramGb(),
+    minDiskGb: getMinDiskGb(),
     minInetDownMbps: getMinInetDownMbps(),
     preferSsd: getPreferSsd(),
     sttTargetLatencyMs: getSttTargetLatencyMs(),

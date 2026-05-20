@@ -116,17 +116,24 @@ export function getRequiredRoleForEndpoint(
   path: string,
   mapping: EndpointRoleMap = DEFAULT_ENDPOINT_ROLES,
 ): Role {
-  // Find the most specific matching prefix
-  let bestMatch: Role = ROLES.OPERATOR; // Default: operator
+  // Find the most specific matching prefix.
+  // Default to ADMIN (most-restrictive) on no-match — fail-CLOSED. The
+  // previous default OPERATOR silently downgraded any unmapped path
+  // (typo'd URL, new endpoint not yet added to the map) to operator-level
+  // access, breaking least-privilege.
+  let bestMatch: Role = ROLES.ADMIN;
   let bestMatchLength = 0;
+  let matched = false;
 
   for (const [prefix, role] of Object.entries(mapping)) {
     if (path.startsWith(prefix) && prefix.length > bestMatchLength) {
       bestMatch = role;
       bestMatchLength = prefix.length;
+      matched = true;
     }
   }
 
+  if (!matched) return ROLES.ADMIN;
   return bestMatch;
 }
 
@@ -158,7 +165,23 @@ export function parseRolesFromEnv(envVar = 'RBAC_ROLES'): RoleMapping {
     if (!trimmed) continue;
 
     const [key, roleStr] = trimmed.split(':');
-    const role = roleByName[roleStr?.toLowerCase() ?? ''] ?? ROLES.OPERATOR;
+    // Reject empty keys: `:admin,foo:admin` could grant ADMIN to `mapping[""]`,
+    // matched by callers passing empty `apiKey` (e.g. unauth bypass paths).
+    if (!key || !key.trim()) {
+      console.warn(`[rbac] Skipping empty key in ${envVar}: "${trimmed}"`);
+      continue;
+    }
+    // Reject malformed role strings (typos like `admiin`) so operators don't
+    // silently get OPERATOR when they intended ADMIN. Throw rather than
+    // default — config errors should fail loud at startup.
+    const normalizedRole = roleStr?.toLowerCase().trim() ?? '';
+    if (!normalizedRole) {
+      throw new Error(`[rbac] ${envVar} entry "${trimmed}" missing role (expected key:role)`);
+    }
+    const role = roleByName[normalizedRole];
+    if (!role) {
+      throw new Error(`[rbac] ${envVar} entry "${trimmed}" has unknown role "${roleStr}". Expected one of: admin, operator, readonly`);
+    }
     mapping[key] = role;
   }
 

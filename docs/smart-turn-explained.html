@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Turn Detection — How it works</title>
+<style>
+  :root {
+    --bg: #0b0f10;
+    --panel: #11171a;
+    --panel-2: #161d21;
+    --border: #1f2a30;
+    --text: #d8e0e3;
+    --muted: #7e8d93;
+    --accent: #4ade80;
+    --accent-2: #38bdf8;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --magenta: #c084fc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Menlo, monospace;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  header {
+    padding: 48px 32px 32px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #0e1518 0%, var(--bg) 100%);
+  }
+  header .crumb {
+    color: var(--muted);
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+  header .crumb a { color: var(--accent-2); text-decoration: none; }
+  header .crumb a:hover { text-decoration: underline; }
+  header h1 {
+    margin: 0 0 8px;
+    font-size: 30px;
+    color: var(--magenta);
+  }
+  header p.sub {
+    margin: 0;
+    color: var(--muted);
+    max-width: 880px;
+    font-size: 15px;
+  }
+  main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 32px;
+  }
+  section { margin-bottom: 48px; }
+  section h2 {
+    font-size: 22px;
+    color: var(--accent-2);
+    margin: 0 0 16px;
+    border-left: 3px solid var(--accent-2);
+    padding-left: 12px;
+  }
+  section h3 {
+    color: var(--accent);
+    font-size: 16px;
+    margin: 24px 0 8px;
+  }
+  p { margin: 0 0 12px; font-size: 14px; color: #c8d0d4; }
+  ul, ol { font-size: 14px; color: #c8d0d4; }
+  li { margin-bottom: 6px; }
+  code {
+    background: var(--panel-2);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 12.5px;
+    color: var(--accent);
+  }
+  pre {
+    background: #050708;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    color: #c8d0d4;
+    line-height: 1.5;
+  }
+  pre code { background: transparent; padding: 0; color: inherit; }
+  .ascii {
+    background: #050708;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px;
+    color: var(--accent-2);
+    font-size: 12px;
+    line-height: 1.4;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 16px 0;
+  }
+  .compare > div {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .compare h4 { margin: 0 0 8px; font-size: 14px; }
+  .compare .bad h4 { color: var(--danger); }
+  .compare .good h4 { color: var(--accent); }
+  .compare ul { margin: 0; padding-left: 18px; font-size: 13px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 13px;
+  }
+  th, td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: var(--panel-2);
+    color: var(--accent-2);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  tr:last-child td { border-bottom: none; }
+  .callout {
+    background: var(--panel);
+    border-left: 3px solid var(--magenta);
+    border-radius: 4px;
+    padding: 14px 16px;
+    margin: 16px 0;
+    font-size: 13.5px;
+  }
+  .callout.warn { border-color: var(--warn); }
+  .callout.tip { border-color: var(--accent); }
+  .callout b { color: var(--magenta); }
+  .callout.tip b { color: var(--accent); }
+  .callout.warn b { color: var(--warn); }
+  .step {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+  .step .num {
+    display: inline-block;
+    background: var(--magenta);
+    color: var(--bg);
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    text-align: center;
+    line-height: 24px;
+    font-weight: 700;
+    margin-right: 8px;
+    font-size: 12px;
+  }
+  .step h3 {
+    display: inline;
+    color: var(--text);
+    font-size: 14px;
+    margin: 0;
+  }
+  footer {
+    padding: 32px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .badge {
+    display: inline-block;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: var(--muted);
+    margin-right: 4px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="crumb"><a href="ai-coding-ideas.html">← AI Coding Ideas</a> / <a href="pipecat-ideas.html">Pipecat extracts</a> / Smart Turn Detection</div>
+  <h1>Smart Turn Detection — How it works</h1>
+  <p class="sub">ML-based end-of-turn detection. Replaces dumb silence-threshold pauseMs with a model that asks: "Did the user actually finish, or just pause to think?". Source analyzed: <code>pipecat-ai/pipecat</code> v3 ONNX model + HTTP variant.</p>
+</header>
+
+<main>
+
+<section>
+  <h2>1. Problem: silence ≠ done</h2>
+  <p>Current ai-gateway <code>/v1/stt/stream</code> uses <code>pauseMs</code>: wait N ms of silence → end turn → fire LLM. This breaks on natural speech.</p>
+
+  <div class="compare">
+    <div class="bad">
+      <h4>❌ Silence-threshold (current)</h4>
+      <ul>
+        <li>"Send a message to..." [pause 800ms thinking] — bot interrupts before name spoken</li>
+        <li>Drop pauseMs to 300ms → bot cuts every word</li>
+        <li>Raise pauseMs to 1500ms → laggy, conversation feels dead</li>
+        <li>One global value for all utterance shapes</li>
+        <li>Trailing "uhhh" counts as speech, blocks turn end</li>
+      </ul>
+    </div>
+    <div class="good">
+      <h4>✅ Smart Turn (ML)</h4>
+      <ul>
+        <li>Model trained on prosody + intonation. Knows "...send a message to" sounds incomplete (rising tone, dangling preposition)</li>
+        <li>"Send the report." sounds complete (falling tone) → end turn even at 300ms silence</li>
+        <li>Outputs probability 0–1 of "turn complete"</li>
+        <li>Falls back to silence threshold if model uncertain</li>
+        <li>Hard cap (<code>stop_secs</code>) prevents infinite wait</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>2. Architecture</h2>
+
+  <div class="ascii">          [  Audio chunks (16-bit PCM)  ]
+                       │
+                       ▼
+              ┌────────────────┐
+              │   VAD Silero   │   is_speech: bool per chunk
+              └────────┬───────┘
+                       │
+                       ▼
+   ┌───────────────────────────────────────┐
+   │  SmartTurnAnalyzer.append_audio()    │
+   │  ─ buffer (timestamp, float32)        │
+   │  ─ track silence_ms                   │
+   │  ─ if silence > stop_secs (3s):       │
+   │      → COMPLETE (hard fallback)       │
+   └───────────────────┬───────────────────┘
+                       │ (triggered by VAD turn boundary
+                       │  OR scheduler — see step 4)
+                       ▼
+   ┌───────────────────────────────────────┐
+   │  analyze_end_of_turn()  [async]       │
+   │  ─ extract last 8s window             │
+   │  ─ resample to 16 kHz                 │
+   │  ─ Whisper feature extractor          │
+   │  ─ ONNX inference (sigmoid)           │
+   │  ─ probability > 0.5 → COMPLETE       │
+   └───────────────────┬───────────────────┘
+                       │
+                       ▼
+            COMPLETE  /  INCOMPLETE
+                │             │
+                ▼             ▼
+          end turn      keep listening</div>
+
+  <div class="callout tip"><b>Two-layer safety:</b> hard silence threshold (3s) is the floor. ML model can end turn earlier with high confidence, but never delays past <code>stop_secs</code>. If model fails/timeouts → fall back to silence rule.</div>
+</section>
+
+<section>
+  <h2>3. Core data structures</h2>
+
+  <h3>Params (defaults from base_smart_turn.py)</h3>
+<pre><code>STOP_SECS         = 3      # max silence before forcing end of turn
+PRE_SPEECH_MS     = 500    # audio kept before speech starts (carries lead-in)
+MAX_DURATION_SECS = 8      # max audio window sent to model</code></pre>
+
+  <h3>State machine</h3>
+<pre><code>class EndOfTurnState(Enum):
+    COMPLETE   = 1   # user done; fire LLM
+    INCOMPLETE = 2   # user still speaking or just paused</code></pre>
+
+  <h3>Internal state per analyzer</h3>
+<pre><code>self._audio_buffer       : list[(timestamp, float32_chunk)]  # rolling
+self._speech_triggered   : bool                               # ever heard speech?
+self._silence_ms         : float                              # accumulated silence
+self._speech_start_time  : float                              # epoch sec
+self._executor           : ThreadPoolExecutor(max_workers=1)  # model inference</code></pre>
+</section>
+
+<section>
+  <h2>4. Algorithm walkthrough</h2>
+
+  <div class="step">
+    <span class="num">1</span><h3>Chunk arrives → <code>append_audio(buffer, is_speech)</code></h3>
+    <p style="margin-top:8px;">Convert int16 → float32 normalized [-1, 1]. Append <code>(time.time(), float_chunk)</code> to ring buffer.</p>
+  </div>
+
+  <div class="step">
+    <span class="num">2</span><h3>If <code>is_speech=True</code></h3>
+    <p style="margin-top:8px;">Reset <code>silence_ms = 0</code>. Set <code>speech_triggered = True</code>. Stamp <code>speech_start_time</code> if first speech ever.</p>
+  </div>
+
+  <div class="step">
+    <span class="num">3</span><h3>If <code>is_speech=False</code> and speech was triggered</h3>
+    <p style="margin-top:8px;">Compute chunk duration: <code>len(int16_chunk) / (sample_rate / 1000)</code>. Add to <code>silence_ms</code>. <b>If <code>silence_ms ≥ stop_secs * 1000</code> → return <code>COMPLETE</code> immediately.</b> No model call needed; user is clearly silent.</p>
+  </div>
+
+  <div class="step">
+    <span class="num">4</span><h3>Caller decides to analyze (e.g. VAD says "user stopped")</h3>
+    <p style="margin-top:8px;">Calls <code>await analyzer.analyze_end_of_turn()</code>. This dispatches model inference to executor thread (model may take 50–200ms).</p>
+  </div>
+
+  <div class="step">
+    <span class="num">5</span><h3>Window extraction</h3>
+    <p style="margin-top:8px;">Pull audio from <code>speech_start_time - pre_speech_ms</code> to now. Concatenate float32 chunks. If &gt; <code>max_duration_secs</code>, keep only last 8 seconds. The model needs context — too short = bad guess.</p>
+  </div>
+
+  <div class="step">
+    <span class="num">6</span><h3>Resample + feature extract</h3>
+    <p style="margin-top:8px;">Resample to 16 kHz with <code>soxr</code> (VHQ quality) if pipeline rate differs. Feed Whisper feature extractor (mel-spectrogram, chunk_length=8). Pad with zeros at <b>start</b> (not end!) to exactly 8s.</p>
+  </div>
+
+  <div class="step">
+    <span class="num">7</span><h3>ONNX inference</h3>
+    <p style="margin-top:8px;">Run <code>session.run(None, {"input_features": features})</code>. Model is <code>smart-turn-v3.2-cpu.onnx</code> bundled in package. Sigmoid output ∈ [0, 1] = probability turn is complete.</p>
+  </div>
+
+  <div class="step">
+    <span class="num">8</span><h3>Threshold + return</h3>
+    <p style="margin-top:8px;"><code>prediction = 1 if probability &gt; 0.5 else 0</code>. Return <code>(state, TurnMetricsData)</code> where metrics carry probability + e2e processing ms.</p>
+  </div>
+</section>
+
+<section>
+  <h2>5. Key code excerpts</h2>
+
+  <h3>Hard silence cutoff (no model needed)</h3>
+<pre><code>if is_speech:
+    self._silence_ms = 0
+    self._speech_triggered = True
+    if self._speech_start_time == 0:
+        self._speech_start_time = time.time()
+else:
+    if self._speech_triggered:
+        chunk_duration_ms = len(audio_int16) / (self._sample_rate / 1000)
+        self._silence_ms += chunk_duration_ms
+        if self._silence_ms >= self._stop_ms:
+            state = EndOfTurnState.COMPLETE
+            self._clear(state)</code></pre>
+
+  <h3>Window extraction with pre-speech context</h3>
+<pre><code>effective_pre_speech_ms = self._params.pre_speech_ms + (self._vad_start_secs * 1000)
+start_time = self._speech_start_time - (effective_pre_speech_ms / 1000)
+
+start_index = 0
+for i, (t, _) in enumerate(audio_buffer):
+    if t >= start_time:
+        start_index = i
+        break
+
+segment_audio = np.concatenate([chunk for _, chunk in audio_buffer[start_index:]])
+
+# Cap at max_duration_secs (keep last N seconds)
+max_samples = int(self._params.max_duration_secs * self.sample_rate)
+if len(segment_audio) > max_samples:
+    segment_audio = segment_audio[-max_samples:]</code></pre>
+
+  <h3>ONNX inference (smart-turn-v3)</h3>
+<pre><code># Pad to 8s by prepending zeros (not appending!)
+def truncate_or_pad(audio, n_seconds=8, sr=16000):
+    max_samples = n_seconds * sr
+    if len(audio) > max_samples:
+        return audio[-max_samples:]
+    elif len(audio) < max_samples:
+        padding = max_samples - len(audio)
+        return np.pad(audio, (padding, 0), mode="constant", constant_values=0)
+    return audio
+
+# Whisper feature extractor → mel spectrogram
+inputs = self._feature_extractor(
+    audio_array,
+    sampling_rate=16000,
+    return_tensors="np",
+    padding="max_length",
+    max_length=8 * 16000,
+    truncation=True,
+    do_normalize=True,
+)
+input_features = np.expand_dims(inputs.input_features.squeeze(0).astype(np.float32), axis=0)
+
+outputs = self._session.run(None, {"input_features": input_features})
+probability = outputs[0][0].item()
+prediction = 1 if probability > 0.5 else 0</code></pre>
+</section>
+
+<section>
+  <h2>6. Implementation variants</h2>
+  <table>
+    <thead>
+      <tr><th>Variant</th><th>Backend</th><th>Latency</th><th>Use case</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>LocalSmartTurnAnalyzerV3</code></td>
+        <td>ONNX runtime (CPU)</td>
+        <td>~50–200ms</td>
+        <td>Default. Bundled model. Offline.</td>
+      </tr>
+      <tr>
+        <td><code>LocalCoreMLSmartTurnAnalyzer</code></td>
+        <td>CoreML (Apple Silicon)</td>
+        <td>~20–80ms</td>
+        <td>Mac dev / edge devices.</td>
+      </tr>
+      <tr>
+        <td><code>LocalSmartTurnAnalyzerV2</code></td>
+        <td>Older PyTorch model</td>
+        <td>varies</td>
+        <td>Legacy.</td>
+      </tr>
+      <tr>
+        <td><code>HttpSmartTurnAnalyzer</code></td>
+        <td>POST to remote endpoint</td>
+        <td>~100–500ms (net)</td>
+        <td>Hosted model, GPU acceleration, version control.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>HTTP variant — wire format</h3>
+<pre><code>POST /predict
+Content-Type: application/octet-stream
+Body: serialized numpy array (np.save → bytes)
+
+→ {
+  "prediction": 1,
+  "probability": 0.87,
+  "metrics": { "inference_time": 0.04, "total_time": 0.12 }
+}</code></pre>
+  <p>Timeout = <code>stop_secs</code>. On timeout → <code>SmartTurnTimeoutException</code> → falls back to hard silence cutoff (state COMPLETE).</p>
+</section>
+
+<section>
+  <h2>7. Why it matters for ai-gateway</h2>
+
+  <p>Current pipeline pain points fixed by Smart Turn:</p>
+
+  <ul>
+    <li><b>Babelcast S2S</b> (real-time translation): user thinks mid-sentence → bot translates partial. Smart Turn waits for prosodic completion.</li>
+    <li><b>Meeting bots via Recall.ai</b>: speakers in meetings have natural long pauses. Aggressive pauseMs creates fragmented translations.</li>
+    <li><b>Voice clone TTS</b> conditioned on full utterance — needs complete turn before LLM call to avoid splitting context.</li>
+    <li><b>Ensemble STT race</b>: cleaner turn boundaries = better consensus across providers.</li>
+  </ul>
+
+  <div class="callout warn"><b>Cost trade-off:</b> ML inference per turn boundary (~50–200ms CPU). Adds &lt; 200ms p95. Saves 1000ms+ of false-positive interrupts on natural speech. Net win.</div>
+</section>
+
+<section>
+  <h2>8. Integration plan for ai-gateway</h2>
+
+  <h3>File map (proposed)</h3>
+<pre><code>src/audio/
+├── vad/
+│   ├── silero.ts                 # ONNX Silero VAD wrapper (already common)
+│   └── types.ts
+├── turn/
+│   ├── base-turn-analyzer.ts     # interface (mirrors base_turn_analyzer.py)
+│   ├── smart-turn-onnx.ts        # local ONNX via onnxruntime-node
+│   ├── smart-turn-http.ts        # remote variant
+│   └── types.ts                  # EndOfTurnState, SmartTurnParams</code></pre>
+
+  <h3>TypeScript skeleton</h3>
+<pre><code>// src/audio/turn/base-turn-analyzer.ts
+export enum EndOfTurnState { COMPLETE = 1, INCOMPLETE = 2 }
+
+export interface SmartTurnParams {
+  stopSecs: number;        // 3
+  preSpeechMs: number;     // 500
+  maxDurationSecs: number; // 8
+}
+
+export interface TurnAnalyzer {
+  appendAudio(pcm16: Int16Array, isSpeech: boolean): EndOfTurnState;
+  analyzeEndOfTurn(): Promise&lt;{ state: EndOfTurnState; probability: number }&gt;;
+  clear(): void;
+}</code></pre>
+
+<pre><code>// src/audio/turn/smart-turn-http.ts
+export class HttpSmartTurnAnalyzer implements TurnAnalyzer {
+  constructor(private url: string, private params: SmartTurnParams) {}
+
+  appendAudio(pcm16: Int16Array, isSpeech: boolean): EndOfTurnState {
+    // mirror Python state machine — silence accumulator + buffer
+    // ...
+    if (this.silenceMs >= this.params.stopSecs * 1000) {
+      this.clear();
+      return EndOfTurnState.COMPLETE;
+    }
+    return EndOfTurnState.INCOMPLETE;
+  }
+
+  async analyzeEndOfTurn() {
+    const audio = this.extractWindow();        // last 8s, prepended zeros
+    const resampled = await resampleTo16k(audio);
+    const body = serializeFloat32(resampled);  // matches np.save format
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.params.stopSecs * 1000);
+    try {
+      const r = await fetch(this.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body,
+        signal: ctrl.signal,
+      });
+      const json = await r.json();
+      return {
+        state: json.prediction === 1 ? EndOfTurnState.COMPLETE : EndOfTurnState.INCOMPLETE,
+        probability: json.probability,
+      };
+    } catch {
+      // timeout/error → conservative: close turn (fall back to silence rule)
+      return { state: EndOfTurnState.COMPLETE, probability: 0 };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}</code></pre>
+
+  <h3>Wiring into <code>/v1/stt/stream</code></h3>
+<pre><code>// server/routes/streaming-stt.ts (sketch)
+const vad = new SileroVAD();
+const turn = new HttpSmartTurnAnalyzer(
+  'http://gpu-pod:8001/predict',
+  { stopSecs: 3, preSpeechMs: 500, maxDurationSecs: 8 },
+);
+
+ws.on('message', async (chunk: Buffer) => {
+  const pcm16 = new Int16Array(chunk.buffer);
+  const isSpeech = vad.detect(pcm16);
+  const fastState = turn.appendAudio(pcm16, isSpeech);
+
+  if (fastState === EndOfTurnState.COMPLETE) {
+    fireLLMPipeline(buffered);            // hard silence cutoff
+    return;
+  }
+
+  if (vad.justStopped()) {                // optional ML check
+    const { state, probability } = await turn.analyzeEndOfTurn();
+    if (state === EndOfTurnState.COMPLETE) {
+      logger.info({ probability }, 'smart turn end');
+      fireLLMPipeline(buffered);
+    }
+  }
+});</code></pre>
+
+  <h3>GPU side — host the model</h3>
+<pre><code># dockers/smart-turn/Dockerfile (sketch)
+FROM python:3.12-slim
+RUN pip install onnxruntime fastapi uvicorn numpy soxr transformers
+
+COPY smart-turn-v3.2-gpu.onnx /model/
+COPY server.py /
+
+EXPOSE 8001
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8001"]</code></pre>
+</section>
+
+<section>
+  <h2>9. Tuning notes</h2>
+  <ul>
+    <li><b>Threshold 0.5 is conservative</b>: lower it (e.g. 0.4) to end turns faster — risks more false-completes.</li>
+    <li><b><code>pre_speech_ms=500</code></b>: model needs lead-in for prosody context. Don't go below 300ms.</li>
+    <li><b><code>max_duration_secs=8</code></b>: hard limit. Long monologues lose early context (truncated to last 8s).</li>
+    <li><b>Sample rate</b>: model trained on 16 kHz. Resample everything else (use <code>soxr</code> VHQ for quality, <code>linear</code> for speed).</li>
+    <li><b>VAD coupling</b>: smart turn runs on top of VAD. Bad VAD → garbage in. Use Silero, not amplitude threshold.</li>
+    <li><b>Model variant</b>: v3.2-cpu bundled. GPU model variant exists for HTTP service — ~5x faster, batchable.</li>
+    <li><b>Logging</b>: env <code>PIPECAT_SMART_TURN_LOG_DATA=1</code> dumps audio segments for offline review (with <code>_complete</code> / <code>_incomplete</code> suffix).</li>
+  </ul>
+</section>
+
+<section>
+  <h2>10. References</h2>
+  <ul>
+    <li>pipecat source: <code>/tmp/pipecat-research/src/pipecat/audio/turn/</code></li>
+    <li><code>base_smart_turn.py</code> — state machine + windowing (251 lines)</li>
+    <li><code>local_smart_turn_v3.py</code> — ONNX runtime + Whisper extractor (195 lines)</li>
+    <li><code>http_smart_turn.py</code> — remote variant + timeout handling (123 lines)</li>
+    <li><code>base_turn_analyzer.py</code> — abstract interface (137 lines)</li>
+    <li>Model: <code>smart-turn-v3.2-cpu.onnx</code> (bundled in package data dir)</li>
+    <li>Whisper feature extractor: <code>transformers.WhisperFeatureExtractor(chunk_length=8)</code></li>
+  </ul>
+</section>
+
+</main>
+
+<footer>
+  Smart Turn Detection deep-dive · Source: <a href="https://github.com/pipecat-ai/pipecat" style="color:var(--magenta)">pipecat-ai/pipecat</a> · Generated 2026-05-06
+</footer>
+
+</body>
+</html>

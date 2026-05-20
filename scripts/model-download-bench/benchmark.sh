@@ -132,10 +132,10 @@ install_deps() {
         fi
     fi
 
-    # hf_transfer (Python)
-    if ! python3 -c "import hf_transfer" &>/dev/null; then
-        warn "Installing hf_transfer..."
-        pip install -q hf_transfer huggingface-hub 2>/dev/null
+    # hf_xet (Python)
+    if ! python3 -c "import hf_xet" &>/dev/null; then
+        warn "Installing hf_xet..."
+        pip install -q hf_xet huggingface-hub 2>/dev/null
     fi
 
     # zstd
@@ -170,13 +170,13 @@ resolve_hf_url() {
 
 # 1. HuggingFace Hub (Python, baseline)
 bench_hf_hub() {
-    log "Testing: HuggingFace Hub (Python, hf_transfer=$1)..."
+    log "Testing: HuggingFace Hub (Python, hf_xet=$1)..."
     clean
     local enable_hf="$1"
     local elapsed
-    elapsed=$(bench_cmd "HF Hub (hf_transfer=$enable_hf)" python3 -c "
+    elapsed=$(bench_cmd "HF Hub (hf_xet=$enable_hf)" python3 -c "
 import os
-os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '$enable_hf'
+os.environ['HF_XET_HIGH_PERFORMANCE'] = '$enable_hf'
 os.environ['HF_HOME'] = '$DOWNLOAD_DIR/hf_cache'
 from huggingface_hub import hf_hub_download
 path = hf_hub_download('$HF_REPO', '$HF_FILE', cache_dir='$DOWNLOAD_DIR/hf_cache')
@@ -379,8 +379,8 @@ main() {
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         # --- HuggingFace Hub (Python SDK) ---
-        bench_hf_hub "0"     # Without hf_transfer
-        bench_hf_hub "1"     # With hf_transfer
+        bench_hf_hub "0"     # Without hf_xet
+        bench_hf_hub "1"     # With hf_xet
 
         # --- Direct HTTP from HuggingFace CDN ---
         bench_curl "hf_cdn" "$HF_URL"

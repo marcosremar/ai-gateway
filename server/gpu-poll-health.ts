@@ -600,6 +600,7 @@ export async function pollHealthUntilReady(
   let firstAppResponseAt = 0;
   const BOOT_5XX_LEEWAY_MS = 60_000;
   let preflightDone = false;
+  let speedTestDone = false;
 
   // ── Adaptive pull timeout ──────────────────────────────────────────────
   const { estimatePullTimeout, deriveHostKey: deriveKey } = await import('../src/gpu-providers/pull-time-estimator');
@@ -949,6 +950,51 @@ export async function pollHealthUntilReady(
           log.log(`[gpu] [trellis-debug] preflight ssh inspection:\n${out}`);
         } catch (e) {
           log.log(`[gpu] [trellis-debug] preflight ssh failed: ${e instanceof Error ? e.message : e}`);
+        }
+      }
+    }
+
+    // One-time internet speed test — abort if actual << advertised
+    {
+      const sshHost = deployState.sshHost;
+      const sshPort = deployState.sshPort;
+      if (sshHost && sshPort && !speedTestDone && inetDown > 0) {
+        speedTestDone = true;
+        try {
+          const { spawn: sshSpawn } = await import('child_process');
+          const proc = sshSpawn('ssh', [
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'ConnectTimeout=8',
+            '-o', 'LogLevel=ERROR',
+            '-p', String(sshPort),
+            `root@${sshHost}`,
+            'curl -o /dev/null -w "%{speed_download}" -s --max-time 30 https://speed.cloudflare.com/__down?bytes=50000000 2>/dev/null',
+          ], { stdio: ['ignore', 'pipe', 'pipe'] });
+          let speedOut = '';
+          proc.stdout.on('data', (c: Buffer) => { speedOut += c.toString(); });
+          await new Promise<void>((r) => {
+            const t = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* best-effort */ } r(); }, 40_000);
+            proc.on('exit', () => { clearTimeout(t); r(); });
+            proc.on('error', () => { clearTimeout(t); r(); });
+          });
+          const speedBytes = parseFloat(speedOut.trim());
+          if (!isNaN(speedBytes) && speedBytes > 0) {
+            const actualMbps = Math.round(speedBytes * 8 / 1_000_000);
+            const threshold = inetDown * 0.5;
+            log.log(`[gpu] Speed test: ${actualMbps} Mbps actual vs ${inetDown} Mbps advertised (threshold: ${Math.round(threshold)} Mbps)`);
+            broadcastWs({ type: 'gpu:deploy', phase: 'speed_test', deployId: deployState.deployId, provider: providerName, actualMbps, advertisedMbps: inetDown });
+            if (actualMbps < threshold) {
+              const msg = `Speed test failed: ${actualMbps} Mbps actual < ${Math.round(threshold)} Mbps threshold (advertised ${inetDown} Mbps) — trying faster machine`;
+              log.warn(`[gpu] ${providerName} pod ${podId}: ${msg}`);
+              setDeployState({ status: 'error', step: 'speed_test_failed', message: msg });
+              return { result: 'timeout', pullTimeS: actualPullTimeS };
+            }
+          } else {
+            log.warn(`[gpu] Speed test: curl not available or returned invalid output: "${speedOut.trim().slice(0, 100)}"`);
+          }
+        } catch (e) {
+          log.warn(`[gpu] Speed test failed: ${e instanceof Error ? e.message : e}`);
         }
       }
     }

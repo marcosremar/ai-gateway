@@ -108,22 +108,25 @@ function filterSegmentsByMetadata(
 ): SegmentFilterResult {
   const kept: STTSegment[] = [];
   const rejected: STTSegment[] = [];
+  // Use array index as key — some Whisper variants restart `seg.id` at 0 per
+  // chunk, so a Map keyed by `seg.id` would silently overwrite earlier
+  // rejections from a different chunk. Index is monotonically unique.
   const reasons = new Map<number, string>();
 
-  for (const seg of segments) {
+  segments.forEach((seg, i) => {
     if (seg.no_speech_prob > config.noSpeechProbThreshold) {
       rejected.push(seg);
-      reasons.set(seg.id, `no_speech_prob=${seg.no_speech_prob.toFixed(3)} > ${config.noSpeechProbThreshold}`);
+      reasons.set(i, `no_speech_prob=${seg.no_speech_prob.toFixed(3)} > ${config.noSpeechProbThreshold}`);
     } else if (seg.compression_ratio > config.compressionRatioThreshold) {
       rejected.push(seg);
-      reasons.set(seg.id, `compression_ratio=${seg.compression_ratio.toFixed(2)} > ${config.compressionRatioThreshold}`);
+      reasons.set(i, `compression_ratio=${seg.compression_ratio.toFixed(2)} > ${config.compressionRatioThreshold}`);
     } else if (seg.avg_logprob < config.avgLogprobThreshold) {
       rejected.push(seg);
-      reasons.set(seg.id, `avg_logprob=${seg.avg_logprob.toFixed(3)} < ${config.avgLogprobThreshold}`);
+      reasons.set(i, `avg_logprob=${seg.avg_logprob.toFixed(3)} < ${config.avgLogprobThreshold}`);
     } else {
       kept.push(seg);
     }
-  }
+  });
 
   return { kept, rejected, reasons };
 }
@@ -193,11 +196,15 @@ export function filterHallucinations(
   let metadataRejected = 0;
   let blocklistRejected = false;
 
+  // Only include fields actually reported by the provider — `?? 0` for
+  // missing metrics produced misleading "avg_logprob: 0" entries that
+  // looked like real measurements. NaN sentinel makes downstream consumers
+  // explicitly handle the missing case.
   const metrics = (response.avg_logprob !== undefined || response.compression_ratio !== undefined || response.no_speech_prob !== undefined)
     ? {
-        avg_logprob: response.avg_logprob ?? 0,
-        compression_ratio: response.compression_ratio ?? 0,
-        no_speech_prob: response.no_speech_prob ?? 0,
+        avg_logprob: response.avg_logprob ?? NaN,
+        compression_ratio: response.compression_ratio ?? NaN,
+        no_speech_prob: response.no_speech_prob ?? NaN,
       }
     : undefined;
 

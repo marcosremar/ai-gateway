@@ -11,8 +11,9 @@ const log = createLogger('speech-lifecycle');
 
 type WsData = {
   id: string;
-  type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio';
+  type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio' | 'frame-inspector';
   speechConfig?: { source: string; target: string; speaker?: string };
+  __unsubscribe?: () => void;
 };
 
 /** Handle a single inbound message on a /v1/speech/ws client. */

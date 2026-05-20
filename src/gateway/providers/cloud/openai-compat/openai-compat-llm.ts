@@ -99,18 +99,27 @@ export class OpenAICompatLLMProvider implements LLMProvider {
    */
   async *chatStream(request: ChatRequest): AsyncGenerator<string, void, undefined> {
     const client = this.getClient();
+    // Match non-streaming chat() timeout behaviour. Without abort wiring, a
+    // stalled provider stream hangs the consumer indefinitely; the for-await
+    // loop only releases on normal stream end. AbortSignal.timeout fires the
+    // signal after `timeoutMs` of inactivity at the OpenAI SDK layer, which
+    // the SDK propagates to the underlying fetch.
+    const timeoutMs = request.timeoutMs || 120_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    const stream = await client.chat.completions.create({
-      model: request.model || this.config.defaultModel || '',
-      messages: request.messages as OpenAI.ChatCompletionMessageParam[],
-      ...(request.temperature !== undefined && { temperature: request.temperature }),
-      ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
-      ...(request.responseFormat && { response_format: request.responseFormat }),
-      stream: true,
-      stream_options: { include_usage: true },
-    });
-
+    let stream: AsyncIterable<OpenAI.ChatCompletionChunk> | null = null;
     try {
+      stream = await client.chat.completions.create({
+        model: request.model || this.config.defaultModel || '',
+        messages: request.messages as OpenAI.ChatCompletionMessageParam[],
+        ...(request.temperature !== undefined && { temperature: request.temperature }),
+        ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
+        ...(request.responseFormat && { response_format: request.responseFormat }),
+        stream: true,
+        stream_options: { include_usage: true },
+      }, { signal: controller.signal });
+
       for await (const chunk of stream) {
         if (chunk.usage) {
           yield `__usage__:${JSON.stringify({
@@ -123,8 +132,16 @@ export class OpenAICompatLLMProvider implements LLMProvider {
         const delta = chunk.choices[0]?.delta?.content;
         if (delta) yield delta;
       }
+    } catch (err: unknown) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message?.includes('aborted'))) {
+        throw new Error(`[openai-compat] chatStream() timed out after ${timeoutMs}ms`);
+      }
+      throw err;
     } finally {
-      // Cleanup is handled automatically by the for await loop
+      clearTimeout(timer);
+      // Best-effort signal abort so caller-side early-termination (consumer
+      // breaks out of for-await) also cancels in-flight HTTP request.
+      try { controller.abort(); } catch { /* no-op */ }
     }
   }
 }

@@ -1,0 +1,23 @@
+title = "AI Gateway secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Repository fixtures and documentation may contain non-secret placeholders."
+paths = [
+  '''^\.env\.example$''',
+  '''^\.env\.test$''',
+  '''^docs/''',
+  '''^README\.md$''',
+  '''^__tests__/''',
+  '''^dist/''',
+  '''^node_modules/'''
+]
+
+regexes = [
+  '''gw_loadtest_2026''',
+  '''mock[_-]?api[_-]?key''',
+  '''test[_-]?api[_-]?key''',
+  '''your[_-]?(api|token|secret)[_-]?key'''
+]

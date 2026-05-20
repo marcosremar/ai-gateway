@@ -34,7 +34,20 @@ function loadPrisma(config: DatabaseConfig): unknown {
 
   // Use Neon HTTP adapter (port 443) instead of TCP (port 5432) for Neon environments.
   // This avoids firewall/network issues with the standard PostgreSQL port.
-  console.log('[database] loadPrisma env:', config.environment, '| url:', config.databaseUrl?.replace(/:[^@]+@/, ':***@').slice(0, 80));
+  // Robust redaction via URL parsing — naive `/:[^@]+@/` regex leaks the
+  // password if it contains literal `@` (the regex stops at first `@`,
+  // exposing the rest of the password).
+  const redactedUrl = (() => {
+    try {
+      const u = new URL(config.databaseUrl ?? '');
+      if (u.password) u.password = '***';
+      if (u.username) u.username = u.username.slice(0, 3) + '***';
+      return u.toString().slice(0, 100);
+    } catch {
+      return '<unparseable>';
+    }
+  })();
+  console.log('[database] loadPrisma env:', config.environment, '| url:', redactedUrl);
   if (config.environment === 'neon') {
     try {
       // Use PrismaNeonHTTP (HTTP/fetch via port 443) to avoid TCP port 5432 firewall issues.

@@ -67,6 +67,12 @@ export interface DeployExtra {
   canaryInitialTraffic?: number;
   canaryMaxErrorRate?: number;
   canaryTrafficStep?: number;
+  /** Human-readable instance label/name propagated to provider consoles. */
+  label?: string;
+  /** Use only high-confidence hosts/offers for fast-boot sensitive deploys. */
+  strictFastBoot?: boolean;
+  /** Vast.ai opt-in for unverified/deverified offers. Defaults to verified-only. */
+  allowUnverified?: boolean;
   expectedApiPaths?: string[];
   expectedCapabilities?: DockerCapability[];
   requireDockerManifest?: boolean;
@@ -144,8 +150,19 @@ export async function startDeployLoop(
             startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
             return;
           }
-          if (res1 === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
-          log.log(`[gpu] Resumed TensorDock instance failed health check — creating new`);
+          if (res1 === 'cancelled') {
+            // Don't leave the just-resumed instance billing — terminate before
+            // returning. Without this, cancel mid-poll-health left the
+            // resumed pod running until orphan sweep.
+            try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
+            catch (e) { log.warn(`[gpu] Cleanup of cancelled-resume failed: ${e instanceof Error ? e.message : e}`); }
+            setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
+          }
+          log.log(`[gpu] Resumed TensorDock instance failed health check — terminating before creating new`);
+          // Health-fail path also leaked the resumed instance — kill it now,
+          // otherwise we end up with TWO billable pods (resumed + new).
+          try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
+          catch (e) { log.warn(`[gpu] Cleanup of unhealthy-resume failed: ${e instanceof Error ? e.message : e}`); }
         } else if (isRunning && existing.endpoint) {
           log.log(`[gpu] TensorDock: found running instance ${existing.instanceId} at ${existing.endpoint}`);
           setDeployState({
@@ -174,8 +191,14 @@ export async function startDeployLoop(
             startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
             return;
           }
-          if (res2 === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
-          log.log(`[gpu] Running TensorDock instance not healthy — creating new`);
+          if (res2 === 'cancelled') {
+            try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
+            catch (e) { log.warn(`[gpu] Cleanup of cancelled-running failed: ${e instanceof Error ? e.message : e}`); }
+            setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
+          }
+          log.log(`[gpu] Running TensorDock instance not healthy — terminating before creating new`);
+          try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
+          catch (e) { log.warn(`[gpu] Cleanup of unhealthy-running failed: ${e instanceof Error ? e.message : e}`); }
         }
       }
     } catch (err) {
@@ -199,7 +222,15 @@ export async function startDeployLoop(
       broadcastWs({ type: 'gpu:deploy', phase: 'creating', deployId: deployState.deployId, provider: providerName });
 
       const defaultStorage = DEFAULT_STORAGE_GB[providerName];
-      const storageGb = Math.max(extra.storageGb || defaultStorage, defaultStorage);
+      // Explicit body.storageGb wins over the provider default — the
+      // previous Math.max(...,defaultStorage) clamp always forced the
+      // floor to defaultStorage (100 GB on Vast), which excluded every
+      // small-disk offer (most A100 PCIe in the marketplace ship 48-94 GB).
+      // Honour the caller's value verbatim when set; only fall back to the
+      // provider default when none was provided.
+      const storageGb = (typeof extra.storageGb === 'number' && extra.storageGb > 0)
+        ? extra.storageGb
+        : defaultStorage;
 
       // Progress callback: broadcast every poll update so CLI shows "Creating... 45s"
       const onPollProgress = (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => {
@@ -212,6 +243,10 @@ export async function startDeployLoop(
         { gpuTypes, dockerImage, storageGb, region: extra.region, hfToken: extra.hfToken, env: extra.env, bareMetal: providerName === 'tensordock', interruptible: extra.interruptible,
           // IMPORTANT: RunPod must ALWAYS use SECURE cloud — NEVER COMMUNITY (unreliable third-party machines)
           ...(providerName === 'runpod' ? { cloudType: 'SECURE' as const } : {}),
+          // Forward Vast-only opt-in flags (see canonical comment in
+          // gpu-deploy-race.ts) so the verified-host filter and the
+          // strict-fast-boot tier are actually controllable from the API.
+          ...(extra.allowUnverified ? { allowUnverified: extra.allowUnverified } : {}),
           ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
           ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
           ...(extra.volumeId ? { volumeId: extra.volumeId } : {}),
@@ -333,7 +368,19 @@ export async function startDeployLoop(
         return;
       }
 
-      if (result === 'cancelled') { setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return; }
+      if (result === 'cancelled') {
+        // Cancellation arrived after createInstance succeeded — terminate the
+        // billable pod before returning. Without this cleanup, cancelled
+        // deploys leaked instances that orphan-sweep might skip because
+        // status flipped to 'error' immediately.
+        try {
+          await providerClient.deleteInstance(instance.instanceId, { apiKey });
+          log.log(`[gpu] Cancelled deploy: terminated ${instance.instanceId}`);
+        } catch (e) {
+          log.warn(`[gpu] Failed to terminate cancelled instance ${instance.instanceId}: ${e instanceof Error ? e.message : e}`);
+        }
+        setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
+      }
       // instance crashed, timed out, or app reported error — fetch logs
       // before cleanup. App-error is a special case: the container itself
       // is healthy and SSH-accessible, we just know the model failed to

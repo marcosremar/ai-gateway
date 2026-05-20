@@ -4,6 +4,7 @@
  */
 import type { HandlerResult } from './types';
 import { ok, err } from './types';
+import { ModalClient } from '../gateway/providers/gpu/modal-client';
 
 const MODAL_API_BASE = process.env.MODAL_API_BASE || 'https://api.modal.com/v1';
 
@@ -53,6 +54,57 @@ const STATE_PRIORITY: Record<string, number> = {
   unknown: 6,
 };
 
+function normalizeApps(rawApps: ModalApp[]): NormalizedApp[] {
+  return rawApps.map((app) => ({
+    appId: app.app_id,
+    name: app.name || app.description || '',
+    description: app.description || app.name || '',
+    state: app.state,
+    stateLabel: APP_STATE[app.state] ?? 'unknown',
+    nRunningTasks: app.n_running_tasks ?? 0,
+    createdAt: app.created_at ?? null,
+    stoppedAt: app.stopped_at ?? null,
+    webUrl: app.web_url ?? '',
+    webUrls: app.web_url ? [{ fn: 'web', url: app.web_url }] : [],
+  }));
+}
+
+function sortAndDedupeApps(normalized: NormalizedApp[]): NormalizedApp[] {
+  const byName = new Map<string, NormalizedApp>();
+  for (const app of normalized) {
+    const existing = byName.get(app.name);
+    if (!existing) {
+      byName.set(app.name, app);
+    } else {
+      const better =
+        (app.stateLabel === 'deployed' && existing.stateLabel !== 'deployed') ||
+        (app.stateLabel === existing.stateLabel && (app.createdAt ?? '') > (existing.createdAt ?? ''));
+      if (better) byName.set(app.name, app);
+    }
+  }
+
+  return Array.from(byName.values()).sort(
+    (a, b) => (STATE_PRIORITY[a.stateLabel] ?? 99) - (STATE_PRIORITY[b.stateLabel] ?? 99),
+  );
+}
+
+async function listModalAppsViaCli(tokenId: string, tokenSecret: string): Promise<NormalizedApp[]> {
+  const client = new ModalClient();
+  const instances = await client.listInstances({ apiKey: `${tokenId}:${tokenSecret}` });
+  return instances.map((inst): NormalizedApp => ({
+    appId: inst.instanceId,
+    name: inst.instanceName || inst.instanceId,
+    description: inst.instanceName || inst.instanceId,
+    state: undefined,
+    stateLabel: inst.status,
+    nRunningTasks: inst.status === 'running' ? 1 : 0,
+    createdAt: null,
+    stoppedAt: inst.status === 'stopped' ? new Date().toISOString() : null,
+    webUrl: inst.endpoint || '',
+    webUrls: inst.endpoint ? [{ fn: 'web', url: inst.endpoint }] : [],
+  }));
+}
+
 /**
  * List Modal apps using Basic auth credentials.
  */
@@ -90,9 +142,9 @@ export async function handleModalApps(
       });
     }
 
-    let data: Record<string, unknown>;
+    let data: Record<string, unknown> | null;
     try {
-      data = await res.json() as Record<string, unknown>;
+      data = await res.json() as Record<string, unknown> | null;
     } catch {
       return ok({
         connected: false,
@@ -101,47 +153,20 @@ export async function handleModalApps(
     }
 
     // Modal API may return apps under different keys
-    const rawApps: ModalApp[] = (
+    const rawApps: ModalApp[] = data ? (
       Array.isArray(data.apps) ? data.apps :
       Array.isArray(data.items) ? data.items :
       Array.isArray(data) ? data : []
-    ) as ModalApp[];
-
-    const normalized: NormalizedApp[] = rawApps.map((app) => ({
-      appId: app.app_id,
-      name: app.name || app.description || '',
-      description: app.description || app.name || '',
-      state: app.state,
-      stateLabel: APP_STATE[app.state] ?? 'unknown',
-      nRunningTasks: app.n_running_tasks ?? 0,
-      createdAt: app.created_at ?? null,
-      stoppedAt: app.stopped_at ?? null,
-      webUrl: app.web_url ?? '',
-      webUrls: app.web_url ? [{ fn: 'web', url: app.web_url }] : [],
-    }));
-
-    // Deduplicate by name — keep deployed over stopped
-    const byName = new Map<string, NormalizedApp>();
-    for (const app of normalized) {
-      const existing = byName.get(app.name);
-      if (!existing) {
-        byName.set(app.name, app);
-      } else {
-        const better =
-          (app.stateLabel === 'deployed' && existing.stateLabel !== 'deployed') ||
-          (app.stateLabel === existing.stateLabel && (app.createdAt ?? '') > (existing.createdAt ?? ''));
-        if (better) byName.set(app.name, app);
-      }
-    }
-
-    const apps = Array.from(byName.values()).sort(
-      (a, b) => (STATE_PRIORITY[a.stateLabel] ?? 99) - (STATE_PRIORITY[b.stateLabel] ?? 99),
-    );
+    ) as ModalApp[] : [];
+    const normalized = rawApps.length > 0
+      ? normalizeApps(rawApps)
+      : await listModalAppsViaCli(tokenId, tokenSecret);
+    const apps = sortAndDedupeApps(normalized);
 
     return ok({
       connected: true,
       apps,
-      totalCount: rawApps.length,
+      totalCount: normalized.length,
       deployedCount: apps.filter((a) => a.stateLabel === 'deployed').length,
     });
   } catch (e: unknown) {

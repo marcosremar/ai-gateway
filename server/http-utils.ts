@@ -51,8 +51,17 @@ export function readJsonBody(req: IncomingMessage): Promise<Record<string, unkno
       const raw = Buffer.concat(chunks).toString();
       if (!raw.trim()) { resolve({}); return; }  // empty body is OK (optional JSON)
       try {
-        const parsed = JSON.parse(raw);
-        // Sanitize prototype pollution keys (OWASP recommendation)
+        // Sanitize prototype pollution at parse time so nested
+        // {"a": {"__proto__": ...}} can't slip through. The reviver runs for
+        // every key/value pair (including deeply nested ones); returning
+        // undefined drops the property entirely. Top-level delete still runs
+        // as a belt-and-suspenders pass.
+        const parsed = JSON.parse(raw, (key, value) => {
+          if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+            return undefined;
+          }
+          return value;
+        });
         if (typeof parsed === 'object' && parsed !== null) {
           delete parsed.__proto__;
           delete parsed.constructor;

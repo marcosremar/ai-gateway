@@ -1,0 +1,80 @@
+[
+  {
+    "control": "AI quality fitness gate",
+    "automation": "bun run quality:fitness / bun run quality:fitness:debt",
+    "enforcement": "Blocking in quality:ai and CI",
+    "purpose": "Project-specific boundaries: src/server/web isolation, forbidden infra imports, undeclared dependencies and shared UI reuse. Structural debt is visible through the debt/strict modes."
+  },
+  {
+    "control": "Architecture dependency graph",
+    "automation": "bun run quality:architecture / bun run quality:architecture:strict",
+    "enforcement": "Blocking in quality:ai",
+    "purpose": "dependency-cruiser enforces publishable-library boundaries. The strict variant surfaces existing circular dependencies as ratchet warnings."
+  },
+  {
+    "control": "Typecheck, lint and security lint",
+    "automation": "bun run typecheck && bun run lint / bun run lint:warnings",
+    "enforcement": "Blocking in quality:ai and CI",
+    "purpose": "TypeScript strict checks and ESLint errors block merges. lint:warnings exposes legacy style/security warnings as audit debt."
+  },
+  {
+    "control": "Static application security testing",
+    "automation": "CodeQL workflow and Semgrep project rules",
+    "enforcement": "Blocking on security findings in CI",
+    "purpose": "Detects injection, XSS, path traversal, unsafe regex, SSRF-like patterns, weak crypto and other security classes common in AI-generated code."
+  },
+  {
+    "control": "Dependency and vulnerability review",
+    "automation": "bun audit, GitHub Dependency Review and OSV-Scanner",
+    "enforcement": "Blocking for critical/new vulnerable dependencies",
+    "purpose": "Stops hallucinated, vulnerable or license-incompatible dependencies from entering pull requests."
+  },
+  {
+    "control": "Secret scanning",
+    "automation": "Gitleaks workflow plus GitHub secret scanning when enabled",
+    "enforcement": "Blocking in CI",
+    "purpose": "Catches API keys, tokens and provider credentials before merge."
+  },
+  {
+    "control": "Container and Dockerfile scanning",
+    "automation": "Docker security workflow with Trivy plus supply-chain policy scan",
+    "enforcement": "Blocking for high/critical image findings; ratchet warnings for floating tags and curl-pipe-shell",
+    "purpose": "Protects GPU images, Dockerfiles and deployment scripts from vulnerable bases and unsafe install patterns."
+  },
+  {
+    "control": "Dead code and dependency hygiene",
+    "automation": "bun run quality:deadcode / bun run quality:deadcode:strict",
+    "enforcement": "Manual/audit ratchet until current debt is triaged",
+    "purpose": "Knip finds unused files, exports and dependencies so AI-generated scaffolding does not accumulate silently."
+  },
+  {
+    "control": "Property-based tests",
+    "automation": "bun run test:properties",
+    "enforcement": "Available as a focused gate for high-risk pure logic",
+    "purpose": "fast-check generates many edge cases for invariants in routing, compatibility, parsing, cache keys and state machines."
+  },
+  {
+    "control": "Mutation testing",
+    "automation": "bun run quality:mutation",
+    "enforcement": "Deep gate via quality:ai:deep",
+    "purpose": "Stryker verifies whether tests actually fail when behavior changes, instead of trusting coverage alone."
+  },
+  {
+    "control": "Contract/API drift checks",
+    "automation": "Existing contract unit tests plus planned OpenAPI/Pact gate",
+    "enforcement": "Unit gate today; OpenAPI/Pact can become blocking after specs are generated",
+    "purpose": "Prevents SDK, HTTP routes and WebSocket payload expectations from drifting across Gateway clients and server handlers."
+  },
+  {
+    "control": "CI supply-chain policy",
+    "automation": "bun run quality:supply-chain",
+    "enforcement": "Blocking in quality:ai for hard failures; warnings ratcheted with --strict",
+    "purpose": "Audits GitHub Actions permissions, action pinning, floating refs, Docker latest tags and unsafe shell installers."
+  },
+  {
+    "control": "Provenance and SBOM",
+    "automation": "GitHub artifact attestations and SBOM upload in release workflows",
+    "enforcement": "Release hardening target",
+    "purpose": "Creates verifiable build provenance for published artifacts and Docker images."
+  }
+]

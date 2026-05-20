@@ -12,7 +12,7 @@ import { createLogger } from '../../../logger';
 
 const log = createLogger('chat-completions');
 import { emitHook } from '../../../hooks';
-import type { ProxyRequest, ProxyResponse, ChatFallbackEntry } from '../types';
+import type { ProxyRequest, ProxyResponse, ChatFallbackEntry, ChatDynamicRoute } from '../types';
 import { withProviderFallback, type FallbackEntry, type FallbackOptions, CooldownTracker } from '../../providers/cloud/fallback';
 import { RequestCoalescer } from '../middleware/request-coalescer';
 import { ProviderSemaphores } from '../middleware/semaphore';
@@ -32,6 +32,7 @@ export async function handleChatCompletions(
   hooks?: GatewayHooks,
   fallbackChain?: ChatFallbackEntry[],
   guardrails?: GuardrailEngine,
+  dynamicRoutes?: ChatDynamicRoute[],
 ): Promise<ProxyResponse> {
   if (!req.body || typeof req.body !== 'object') {
     return { status: 400, body: { error: { message: 'request body is required', type: 'invalid_request_error' } } };
@@ -72,6 +73,7 @@ export async function handleChatCompletions(
   if (max_tokens !== undefined && (max_tokens < 1 || max_tokens > 128000)) {
     return { status: 400, body: { error: { message: 'max_tokens must be between 1 and 128000', type: 'invalid_request_error' } } };
   }
+  const requestTimeoutMs = messagesContainImage(messages as unknown[]) ? 90_000 : 15_000;
 
   // ── beforeRequest guardrails ───────────────────────────────────────────────
   if (guardrails) {
@@ -89,7 +91,7 @@ export async function handleChatCompletions(
   }
 
   // Build fallback chain: use the configured chain, or fall back to single-provider lookup
-  const chain = buildChain(model, chatProviders, fallbackChain);
+  const chain = buildChain(model, chatProviders, fallbackChain, dynamicRoutes);
   if (chain.length === 0) {
     return { status: 404, body: { error: { message: `Model "${model}" not found`, type: 'invalid_request_error' } } };
   }
@@ -104,6 +106,7 @@ export async function handleChatCompletions(
     temperature,
     maxTokens: max_tokens,
     responseFormat: response_format as { type: 'json_object' | 'text' } | undefined,
+    timeoutMs: requestTimeoutMs,
   };
 
   emitHook(hooks, 'onRequestStart', {
@@ -176,7 +179,7 @@ export async function handleChatCompletions(
 
     const opts: FallbackOptions = {
       logPrefix: process.env.NODE_ENV === 'production' ? '' : '[proxy:llm]',
-      timeoutMs: 15_000,
+      timeoutMs: requestTimeoutMs,
       retriesPerProvider: 1,
       retryBaseDelayMs: 200,
       cooldownTracker: llmCooldownTracker,
@@ -290,6 +293,15 @@ export async function handleChatCompletions(
   }
 }
 
+function messagesContainImage(messages: unknown[]): boolean {
+  return messages.some((message) => {
+    const content = (message as { content?: unknown } | null)?.content;
+    return Array.isArray(content) && content.some((part) => (
+      (part as { type?: unknown } | null)?.type === 'image_url'
+    ));
+  });
+}
+
 /**
  * Build a provider chain: requested model first, then fallbacks.
  *
@@ -308,6 +320,7 @@ function buildChain(
   requestedModel: string,
   chatProviders: Record<string, LLMProvider>,
   fallbackChain?: ChatFallbackEntry[],
+  dynamicRoutes?: ChatDynamicRoute[],
 ): Array<{ provider: string; model: string; instance: LLMProvider }> {
   const chain: Array<{ provider: string; model: string; instance: LLMProvider }> = [];
   const seen = new Set<string>();
@@ -330,6 +343,18 @@ function buildChain(
         }
       }
     }
+    return chain;
+  }
+
+  for (const route of dynamicRoutes ?? []) {
+    if (!route.acceptsModel(requestedModel)) continue;
+    chain.push({
+      provider: route.providerId,
+      model: route.upstreamModel?.(requestedModel) ?? requestedModel,
+      instance: route.provider,
+    });
+    seen.add(route.providerId);
+    break;
   }
 
   return chain;
@@ -356,6 +381,14 @@ function buildSSEStream(
   const created = Math.floor(Date.now() / 1000);
   const startMs = Date.now();
 
+  // Track the active generator + timeout from outside `start()` so cancel()
+  // (fired when the consumer disconnects) can stop both. Without this, a
+  // client that drops mid-stream leaves the upstream generator running and
+  // the gateway keeps consuming (and billing) tokens until the 30s silence
+  // timeout fires.
+  let activeGen: AsyncGenerator<string> | null = null;
+  let activeTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
   return new ReadableStream<Uint8Array>({
     async start(controller) {
 
@@ -365,6 +398,7 @@ function buildSSEStream(
         if (currentTimeoutId) clearTimeout(currentTimeoutId);
         return new Promise<T>((resolve, reject) => {
           currentTimeoutId = setTimeout(() => reject(new Error('Streaming timeout')), STREAM_TIMEOUT_MS);
+          activeTimeoutId = currentTimeoutId;
           p.then(v => { if (currentTimeoutId) clearTimeout(currentTimeoutId); resolve(v); },
                  e => { if (currentTimeoutId) clearTimeout(currentTimeoutId); reject(e); });
         });
@@ -403,6 +437,7 @@ function buildSSEStream(
 
         // Content delta chunks — each next() is raced against the timeout
         const gen = provider.chatStream(opts);
+        activeGen = gen;
         for (;;) {
           const { done, value } = await withTimeout(gen.next());
           if (done) break;
@@ -436,7 +471,23 @@ function buildSSEStream(
         controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: msg, type: 'server_error' } })}\n\n`));
         controller.close();
         finish(false, msg);
+      } finally {
+        activeGen = null;
+        activeTimeoutId = null;
       }
+    },
+    cancel() {
+      // Consumer disconnected. Stop the upstream generator and clear the
+      // pending timeout so we stop consuming (and billing) tokens.
+      if (activeTimeoutId) {
+        clearTimeout(activeTimeoutId);
+        activeTimeoutId = null;
+      }
+      if (activeGen) {
+        try { activeGen.return?.(undefined); } catch { /* no-op */ }
+        activeGen = null;
+      }
+      onEnd?.(Date.now() - startMs, false, 'client_disconnected');
     },
   });
 }

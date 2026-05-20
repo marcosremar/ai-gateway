@@ -27,7 +27,11 @@ if (process.env.DAILY_BUDGET_USD && isNaN(_parsedBudget)) {
 }
 export const DAILY_BUDGET_USD = isNaN(_parsedBudget) ? 0 : _parsedBudget; // 0 = no limit
 export let dailyGpuSpendUsd = 0;
-export let dailySpendResetDate = new Date().toDateString();
+// Use ISO date (YYYY-MM-DD) consistently — `toDateString()` returns
+// "Tue May 06 2026" while persistDailySpend() and gpu-monitor-loop compare
+// against `toISOString().slice(0,10)`. Mismatch caused spurious resets after
+// process restart that overwrote the just-restored counter.
+export let dailySpendResetDate = new Date().toISOString().slice(0, 10);
 
 /** Default estimated cost of a new deploy if the caller doesn't pass one. */
 const DEFAULT_ESTIMATED_DEPLOY_COST_USD = 2;
@@ -82,8 +86,34 @@ export function canAffordDeploy(estimatedCostUsd: number = DEFAULT_ESTIMATED_DEP
 
 // ── Setters ─────────────────────────────────────────────────────────────────
 
-export function setDailyGpuSpendUsd(v: number) { dailyGpuSpendUsd = v; }
-export function setDailySpendResetDate(v: string) { dailySpendResetDate = v; }
+let _persistTimer: ReturnType<typeof setTimeout> | null = null;
+function _schedulePersist() {
+  if (_persistTimer) return; // already scheduled
+  _persistTimer = setTimeout(() => {
+    _persistTimer = null;
+    persistDailySpend();
+  }, 10_000);
+}
+
+export function setDailyGpuSpendUsd(v: number) {
+  dailyGpuSpendUsd = v;
+  // Debounced persistence — without this, the gate state was lost on every
+  // process crash and the daily budget effectively re-armed mid-day.
+  _schedulePersist();
+}
+export function setDailySpendResetDate(v: string) {
+  dailySpendResetDate = v;
+  _schedulePersist();
+}
+
+/** Force-flush pending persistence; call before process exit. */
+export function flushDailySpend(): void {
+  if (_persistTimer) {
+    clearTimeout(_persistTimer);
+    _persistTimer = null;
+  }
+  persistDailySpend();
+}
 
 // ── Persistence (daily_spend.json) ──────────────────────────────────────────
 

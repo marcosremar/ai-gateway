@@ -414,6 +414,29 @@ When using AI to generate code (vibe coding), follow these guidelines:
 - **Run tests** — Always run `bun test` after AI-generated changes
 - **Architecture review** — For changes >500 lines, use [`docs/architecture-review-checklist.md`](docs/architecture-review-checklist.md)
 
+### Expert AI-Coding Workflow (Karpathy / Willison / Osmani)
+
+Applied distillation from agentic-coding specialists. Use on every non-trivial change:
+
+1. **Spec before code** — Ask the agent for spec.md (requirements + edge cases) before any implementation. Iterate spec until coherent.
+2. **Plan as meta-program** — Generate step-by-step plan from spec. Save plan; agent executes one step per turn, not monolithic.
+3. **Stuff full context** — Paste relevant files, ADR snippets, error messages, library doc excerpts upfront. Context > prompt cleverness.
+4. **One concrete change per turn** — No multi-feature dumps. Land it, verify, commit, next.
+5. **Ask trade-offs first, code second** — "Pros/cons of approach A vs B in this codebase" before "write the code".
+6. **Function signatures explicit** — Define exact signature, agent fills body. Reduces drift.
+7. **Test alongside, never after** — Generate test plan with spec; run `bun test` after each step.
+8. **Commit granular** — Each completed step = one commit. Rollback granularity = recovery speed.
+9. **Reset stuck threads** — If agent loops or contradicts, start fresh conversation with current code state.
+10. **Review every line** — AI-generated code = junior PR. ~45% AI code carries vulns; assume bug present until proven absent.
+11. **Never merge what you cannot explain** — If you cannot defend the line in review, do not ship it.
+12. **Prompt-in-PR** — When opening PR, include the prompt that generated material change in description. Reviewer sees intent.
+
+Anti-patterns:
+- Asking for whole feature in one prompt
+- Skipping spec/plan because "it's small"
+- Trusting tests written by same agent without manual case
+- Letting context window fill with stale exchanges instead of resetting
+
 ### Quick ADR Lookup
 
 | Concern | ADR |

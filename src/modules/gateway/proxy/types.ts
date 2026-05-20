@@ -25,6 +25,31 @@ export interface ChatFallbackEntry {
 }
 
 /**
+ * Dynamic LLM route for providers with remote model catalogs.
+ *
+ * Use this for aggregators such as OpenRouter: local models stay explicit in
+ * `chat`, while unknown remote model IDs can be forwarded without maintaining
+ * a gateway-side allowlist.
+ */
+export interface ChatDynamicRoute {
+  /** Provider identifier (e.g. "openrouter") */
+  providerId: string;
+  /** The provider instance */
+  provider: LLMProvider;
+  /** Returns true when this provider should receive the requested model. */
+  acceptsModel: (model: string) => boolean;
+  /** Optional mapping from gateway model alias to upstream provider model. */
+  upstreamModel?: (model: string) => string;
+}
+
+export interface DynamicModelCatalog {
+  /** Provider identifier used as `owned_by` in `/v1/models`. */
+  providerId: string;
+  /** Lists remote model IDs. Failures should be handled by the caller. */
+  listModels: () => Promise<string[]>;
+}
+
+/**
  * Mapping of model names to provider instances for all supported modalities.
  *
  * The proxy uses this to route requests to the correct provider based on
@@ -35,6 +60,10 @@ export interface ProviderMapping {
   chat?: Record<string, LLMProvider>;
   /** Ordered fallback chain for LLM chat (Groq -> Fireworks -> Ollama) */
   chatFallbackChain?: ChatFallbackEntry[];
+  /** Dynamic LLM routes for aggregator providers such as OpenRouter. */
+  chatDynamicRoutes?: ChatDynamicRoute[];
+  /** Dynamic model catalogs merged into GET /v1/models. */
+  dynamicModelCatalogs?: DynamicModelCatalog[];
   /** model name -> Embedding provider instance */
   embedding?: Record<string, EmbeddingProvider>;
   /** model name -> STT provider instance */

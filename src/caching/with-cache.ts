@@ -53,18 +53,14 @@ export function withCache(
         log.warn?.(`[withCache] cache.get failed: ${msg}`);
       }
 
+      const response = await provider.chat(request);
       try {
-        const response = await provider.chat(request);
-        try {
-          await cache.set(key, response, opts?.ttlMs);
-        } catch (setErr) {
-          const msg = setErr instanceof Error ? setErr.message : String(setErr);
-          log.warn?.(`[withCache] cache.set failed: ${msg}`);
-        }
-        return response;
-      } catch (err) {
-        throw err;
+        await cache.set(key, response, opts?.ttlMs);
+      } catch (setErr) {
+        const msg = setErr instanceof Error ? setErr.message : String(setErr);
+        log.warn?.(`[withCache] cache.set failed: ${msg}`);
       }
+      return response;
     },
   };
 }

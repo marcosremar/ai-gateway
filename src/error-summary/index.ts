@@ -103,26 +103,26 @@ class ErrorSummaryTracker {
 
     const newAlerts: ErrorAlert[] = [];
 
-    // Check 1: High error rate (>10% in last 5 minutes)
+    // Check 1: High error volume (>=N in last 5 minutes).
+    // Previous implementation computed `recentErrors / recentTotal` from the
+    // SAME filtered set — both were only errors, so rate was always 1.0,
+    // tripping the >10% threshold every >10-error window. This collection
+    // doesn't track total operations (only errors), so use a raw-count
+    // threshold instead. Operators can reason about absolute volume.
     const recentErrors = this.errors.filter(e =>
       new Date(e.timestamp).getTime() > now - 5 * 60 * 1000
     );
-    const recentTotal = this.errors.filter(e =>
-      new Date(e.timestamp).getTime() > now - 5 * 60 * 1000
-    ).length;
+    const HIGH_ERROR_VOLUME_5MIN = 50;
 
-    if (recentTotal > 10) { // Need at least 10 operations to calculate rate
-      const errorRate = recentErrors.length / recentTotal;
-      if (errorRate > this.HIGH_ERROR_RATE_THRESHOLD) {
-        newAlerts.push({
-          type: 'high_error_rate',
-          severity: 'warning',
-          message: `Error rate ${(errorRate * 100).toFixed(1)}% exceeds ${(this.HIGH_ERROR_RATE_THRESHOLD * 100).toFixed(0)}% threshold`,
-          currentValue: errorRate,
-          threshold: this.HIGH_ERROR_RATE_THRESHOLD,
-          triggeredAt: new Date().toISOString(),
-        });
-      }
+    if (recentErrors.length >= HIGH_ERROR_VOLUME_5MIN) {
+      newAlerts.push({
+        type: 'high_error_rate',
+        severity: 'warning',
+        message: `${recentErrors.length} errors in last 5 minutes (threshold: ${HIGH_ERROR_VOLUME_5MIN})`,
+        currentValue: recentErrors.length,
+        threshold: HIGH_ERROR_VOLUME_5MIN,
+        triggeredAt: new Date().toISOString(),
+      });
     }
 
     // Check 2: Critical error spike (5+ critical errors in 5 min)

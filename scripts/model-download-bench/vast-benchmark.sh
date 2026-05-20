@@ -71,7 +71,7 @@ echo ""
 
 # Install deps
 apt-get update -qq && apt-get install -y -qq aria2 axel zstd python3-pip curl wget >/dev/null 2>&1
-pip install -q huggingface-hub hf_transfer 2>/dev/null
+pip install -q huggingface-hub hf_xet 2>/dev/null
 
 HF_REPO="bullerwins/translategemma-4b-it-GGUF"
 HF_FILE="translategemma-4b-it-Q8_0.gguf"
@@ -109,9 +109,9 @@ bench() {
     rm -f "$DL_DIR/model"* 2>/dev/null
 }
 
-echo "── Test 1: HuggingFace Hub (no hf_transfer) ──"
+echo "── Test 1: HuggingFace Hub (no hf_xet) ──"
 bench "hf_hub_no_transfer" python3 -c "
-import os; os.environ['HF_HUB_ENABLE_HF_TRANSFER']='0'; os.environ['HF_HOME']='$DL_DIR/hf'
+import os; os.environ['HF_XET_HIGH_PERFORMANCE']='0'; os.environ['HF_HOME']='$DL_DIR/hf'
 from huggingface_hub import hf_hub_download
 import shutil
 p = hf_hub_download('$HF_REPO', '$HF_FILE', cache_dir='$DL_DIR/hf')
@@ -119,9 +119,9 @@ shutil.copy2(p, '$DL_DIR/model')
 "
 rm -rf "$DL_DIR/hf" 2>/dev/null
 
-echo "── Test 2: HuggingFace Hub (hf_transfer=1) ──"
-bench "hf_hub_hf_transfer" python3 -c "
-import os; os.environ['HF_HUB_ENABLE_HF_TRANSFER']='1'; os.environ['HF_HOME']='$DL_DIR/hf'
+echo "── Test 2: HuggingFace Hub (hf_xet=1) ──"
+bench "hf_hub_hf_xet" python3 -c "
+import os; os.environ['HF_XET_HIGH_PERFORMANCE']='1'; os.environ['HF_HOME']='$DL_DIR/hf'
 from huggingface_hub import hf_hub_download
 import shutil
 p = hf_hub_download('$HF_REPO', '$HF_FILE', cache_dir='$DL_DIR/hf')

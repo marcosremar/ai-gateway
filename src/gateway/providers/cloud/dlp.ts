@@ -85,8 +85,11 @@ const PATTERNS = {
   // Email addresses
   email: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g,
   
-  // Phone numbers - various formats
-  phone: /\b(?:\+?1[-.\s]?)?(?:\(?[0-9]{3}\)?[-.\s]?)?[0-9]{3}[-.\s]?[0-9]{4}\b/g,
+  // Phone numbers — require area code or country code so we don't match
+  // any 7-digit number (timestamps, IDs, line numbers etc). Previously the
+  // first two groups were both optional, reducing the pattern to /\d{3}-?\d{4}/
+  // which had massive false-positive rate.
+  phone: /\b(?:\+?1[-.\s]?)?(?:\(?[0-9]{3}\)?[-.\s]?)[0-9]{3}[-.\s]?[0-9]{4}\b/g,
   
   // IP addresses (IPv4)
   ipAddress: /\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/g,
@@ -180,10 +183,22 @@ export function detectPII(
   if (config.customPatterns) {
     for (const custom of config.customPatterns) {
       try {
+        // ReDoS guard: reject patterns with nested quantifiers that are the
+        // canonical catastrophic-backtracking shape `(...)+`, `(...){2,}`,
+        // `(.*)+` etc. Operator-supplied patterns can otherwise lock the
+        // event loop for seconds on adversarial input.
+        if (/\([^)]*[+*][^)]*\)[+*{]/.test(custom.pattern) || /\(\.\*\)[+*]/.test(custom.pattern)) {
+          continue;
+        }
+        // Length cap on input — even safe regex on 10MB text can churn.
+        const scanText = text.length > 100_000 ? text.slice(0, 100_000) : text;
         const regex = new RegExp(custom.pattern, 'gi');
         let match: RegExpExecArray | null;
+        let iterations = 0;
+        const MAX_ITERS = 10_000;
 
-        while ((match = regex.exec(text)) !== null) {
+        while ((match = regex.exec(scanText)) !== null) {
+          if (++iterations > MAX_ITERS) break;
           const value = match[0];
           // Same zero-width guard as the built-in pattern loop above.
           if (value.length === 0) { regex.lastIndex++; continue; }

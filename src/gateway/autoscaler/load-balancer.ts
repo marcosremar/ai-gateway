@@ -406,9 +406,15 @@ export class LoadBalancer {
       // Not enough tokens — persist the refill credit so the next call sees it
       await this.stateStore.set(key, JSON.stringify(state), 3600);
       return false;
-    } catch {
-      // On error, allow the request (fail open)
-      return true;
+    } catch (err) {
+      // Fail-CLOSED on stateStore errors. A previous "fail open" policy
+      // could be exploited: a caller crafting requests that trigger
+      // stateStore JSON.parse errors (e.g. via a corrupted bucket left from
+      // a prior abort) would bypass rate limiting entirely. Better to
+      // refuse a few requests under degraded state than to silently grant
+      // unlimited throughput.
+      console.warn('[load-balancer] tryConsume failed-closed:', err instanceof Error ? err.message : String(err));
+      return false;
     }
   }
 

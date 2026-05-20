@@ -109,7 +109,7 @@ describe('StreamingOverlap', () => {
       expect(chunks).toHaveLength(2);
     });
 
-    it('detects comma as boundary', async () => {
+    it('does NOT split on comma (sentence-only chunking)', async () => {
       const tokens = ['hello ', 'dear ', 'friend, ', 'how ', 'are ', 'you?'];
       const chunks: number[] = [];
       await overlap.processWithOverlap(
@@ -117,7 +117,7 @@ describe('StreamingOverlap', () => {
         mockTTS,
         (_, idx) => chunks.push(idx),
       );
-      expect(chunks).toHaveLength(2);
+      expect(chunks).toHaveLength(1);
     });
 
     it('detects newline as boundary when newline is followed by more text', async () => {
@@ -183,12 +183,10 @@ describe('StreamingOverlap', () => {
     });
   });
 
-  // ── Safety valve (2x minTokens) ──────────────────────────────────────────
+  // ── Long unpunctuated run flushes at end of stream ───────────────────────
 
-  describe('safety valve', () => {
-    it('forces a chunk at 2x minTokens even without boundary', async () => {
-      // minTokens=3, safety valve at 6 words
-      // No punctuation boundaries in these tokens
+  describe('end-of-stream flush', () => {
+    it('long unpunctuated run flushes as one chunk at end of stream', async () => {
       const tokens = [
         'alpha ', 'beta ', 'gamma ',
         'delta ', 'epsilon ', 'zeta ',
@@ -200,11 +198,9 @@ describe('StreamingOverlap', () => {
         async (text) => { chunkTexts.push(text); return Buffer.from(text); },
         () => {},
       );
-      // Safety valve should trigger at 6 words, then remainder flushed
-      expect(chunkTexts.length).toBeGreaterThanOrEqual(2);
-      // First chunk should have ~6 words
-      const firstChunkWords = chunkTexts[0].trim().split(/\s+/).filter(Boolean).length;
-      expect(firstChunkWords).toBe(6);
+      expect(chunkTexts).toHaveLength(1);
+      const words = chunkTexts[0].trim().split(/\s+/).filter(Boolean).length;
+      expect(words).toBe(9);
     });
   });
 

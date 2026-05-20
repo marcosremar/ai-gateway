@@ -85,6 +85,7 @@ vi.mock('../../server/providers', () => ({
   deepgramSTT: { transcribe: vi.fn(), getModels: () => [{ id: 'nova-3', name: 'Nova 3', capability: 'stt' }] },
   fireworksSTT: { transcribe: vi.fn(), getModels: () => [{ id: 'whisper-v3', name: 'Whisper v3', capability: 'stt' }] },
   groqLLM: mockChatProvider,
+  minimaxLLM: null,
   fireworksLLM: null,
   groqLlmModel: 'llama-3.3-70b-versatile',
   groqTtsModel: 'orpheus',
@@ -100,6 +101,7 @@ vi.mock('../../server/providers', () => ({
   isStageCircuitClosed: vi.fn(() => true),
   providers: { chat: {}, stt: {} },
   modalTTS: { synthesize: vi.fn() },
+  minimaxTTS: null,
   gpuShadowMode: false,
   markGpuProductionReady: vi.fn(),
 }));

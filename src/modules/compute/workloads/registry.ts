@@ -69,15 +69,29 @@ export class WorkloadRegistry {
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
+  // Per-name lock to serialize concurrent deploy() calls.
+  private _deployLocks: Map<string, Promise<Workload>> = new Map();
+
   async deploy(name: string, config: WorkloadConfig): Promise<Workload> {
-    // Prevent duplicate names
+    const inflight = this._deployLocks.get(name);
+    if (inflight) {
+      throw new Error(`Workload "${name}" is already being deployed (concurrent request)`);
+    }
+    const promise = this._deployInner(name, config);
+    this._deployLocks.set(name, promise);
+    try {
+      return await promise;
+    } finally {
+      this._deployLocks.delete(name);
+    }
+  }
+
+  private async _deployInner(name: string, config: WorkloadConfig): Promise<Workload> {
     const existing = this.getByName(name);
     if (existing && existing.status !== 'error') {
       throw new Error(`Workload "${name}" already exists (status: ${existing.status})`);
     }
-    // Remove errored workload with same name so we can redeploy
     if (existing) this.workloads.delete(existing.id);
-
     const driver = this.getDriver(config.type);
     const workload = await driver.deploy(name, config);
     this.workloads.set(workload.id, workload);

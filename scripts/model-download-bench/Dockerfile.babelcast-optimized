@@ -52,13 +52,14 @@ RUN pip install --no-cache-dir \
     "faster-whisper>=1.2.1" \
     "ctranslate2>=4.7.1" \
     httpx \
-    huggingface-hub hf_transfer \
+    "huggingface-hub>=1.0.0" "hf_xet>=1.4.0" \
     python-multipart \
     uvicorn[standard] \
     fastapi
 
 ENV HF_HOME=/app/.cache/huggingface \
-    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HF_XET_HIGH_PERFORMANCE=1 \
+    HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50 \
     HUGGINGFACE_HUB_CACHE=/app/.cache/huggingface/hub
 
 # ── Pre-download ALL models (eliminates runtime downloads) ───────────────────

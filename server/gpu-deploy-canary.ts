@@ -32,6 +32,13 @@ export function startCanaryIfEnabled(
   const canary = createCanaryDeploy(canaryConfig);
 
   // Store canary controller in deploy state for monitoring
+  // Clear any prior canary timer before installing a new one. Otherwise
+  // every successful deploy with canary enabled spawned a fresh interval
+  // while the previous interval kept firing forever (stale-closure
+  // promote/rollback decisions + log spam).
+  if (deployState.canaryEvalTimer) {
+    try { clearInterval(deployState.canaryEvalTimer as ReturnType<typeof setInterval>); } catch { /* no-op */ }
+  }
   setDeployState({ canary, canaryEvalTimer: null });
 
   log.log({ canaryConfig }, 'Canary deployment started');

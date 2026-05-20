@@ -15,7 +15,7 @@ import { handleChatCompletions } from './routes/chat-completions';
 import { handleEmbeddings } from './routes/embeddings';
 import { handleAudioSpeech } from './routes/audio-speech';
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
-import { handleModels } from './routes/models';
+import { handleModelsWithDynamic } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
 import { createLogger, withLogContext } from '../../logger';
 import { ApiKeyRegistry } from './middleware/api-keys';
@@ -489,11 +489,18 @@ export function createProxyServer(config: ProxyConfig): Server {
         return;
       }
       userConcurrency.set(userId, currentConcurrent + 1);
-      res.on('finish', () => {
+      // Use 'close' (fires on both finish and abort) — 'finish' alone leaks
+      // the counter on client disconnect / TCP reset.
+      let decremented = false;
+      const onComplete = () => {
+        if (decremented) return;
+        decremented = true;
         const c = userConcurrency.get(userId) || 1;
         if (c <= 1) userConcurrency.delete(userId);
         else userConcurrency.set(userId, c - 1);
-      });
+      };
+      res.on('close', onComplete);
+      res.on('finish', onComplete);
     }
 
     // Rate limit — keyed by userId (resolved from API key above) so each
@@ -663,12 +670,20 @@ export function createProxyServer(config: ProxyConfig): Server {
 
       // Route matching
       if (method === 'GET' && url === '/v1/models') {
-        proxyRes = handleModels(config.providers);
+        proxyRes = await handleModelsWithDynamic(config.providers);
       } else if (method === 'POST' && url === '/v1/chat/completions') {
         if (!config.providers.chat) {
           proxyRes = { status: 404, body: { error: { message: 'No chat providers configured', type: 'invalid_request_error' } } };
         } else {
-          proxyRes = await handleChatCompletions(proxyReq, config.providers.chat, config.cache, config.hooks, config.providers.chatFallbackChain, config.guardrails);
+          proxyRes = await handleChatCompletions(
+            proxyReq,
+            config.providers.chat,
+            config.cache,
+            config.hooks,
+            config.providers.chatFallbackChain,
+            config.guardrails,
+            config.providers.chatDynamicRoutes,
+          );
         }
       } else if (method === 'POST' && url === '/v1/embeddings') {
         if (!config.providers.embedding) {

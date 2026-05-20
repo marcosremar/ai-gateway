@@ -11,6 +11,8 @@ import { fireworksSTT, fireworksLLM } from '../src/providers/fireworks';
 import { deepgramSTT } from '../src/providers/deepgram';
 import { elevenlabsSTT } from '../src/providers/elevenlabs';
 import { modalTTS } from '../src/providers/modal';
+import { minimaxTTS, minimaxLLM } from '../src/providers/minimax';
+export { minimaxTTS, minimaxLLM };
 import { modalMossTTS } from '../src/providers/modal-moss';
 import { modalSeamlessSTT, modalSeamlessLLM } from '../src/providers/modal-seamless';
 import { qwen3asrPipelineSTT, qwen3asrPipelineLLM } from '../src/providers/modal-qwen3asr-pipeline';
@@ -268,6 +270,23 @@ registry.register({
   tts: modalTTS,
 });
 log.log('Modal TTS registered (Qwen3-TTS, no API key needed)');
+
+// Minimax — speech-02 TTS + MiniMax-M2 LLM, requires MINIMAX_API_KEY
+const minimaxAvailable = !!process.env.MINIMAX_API_KEY;
+if (minimaxAvailable) {
+  registry.register({
+    id: 'minimax' as ProviderId,
+    name: 'Minimax',
+    description: 'Minimax (TTS: speech-02 + LLM: MiniMax-M2)',
+    capabilities: ['tts', 'llm'],
+    requiresApiKey: true,
+    tts: minimaxTTS,
+    llm: minimaxLLM,
+  });
+  log.log('Minimax TTS + LLM registered (MINIMAX_API_KEY present)');
+} else {
+  log.log('Minimax skipped (MINIMAX_API_KEY not set)');
+}
 
 // Modal SeamlessM4T v2 — ASR + speech/text translation (no API key, serverless GPU)
 registry.register({

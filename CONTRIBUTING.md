@@ -283,6 +283,35 @@ bun test __tests__/gpu-deploy-unit.test.ts
 bun run test:watch
 ```
 
+## AI Quality Gates
+
+AI-generated changes must pass the same deterministic checks as human-written changes. Use:
+
+```bash
+bun run quality:fitness        # Architecture/dependency fitness checks
+bun run quality:fitness:debt   # Inspect structural debt warnings
+bun run quality:supply-chain   # GitHub Actions/Docker supply-chain policy scan
+bun run quality:architecture   # dependency-cruiser architecture graph checks
+bun run quality:architecture:strict # Include circular dependency warnings
+bun run quality:deadcode       # Knip dead-code/dependency audit
+bun run test:properties        # fast-check property-based invariants
+bun run quality:ai             # Typecheck + lint + build + fitness + supply-chain + architecture
+bun run quality:ai:test        # Adds the unit test suite
+bun run quality:ai:deep        # Adds mutation testing for high-risk changes
+```
+
+`quality:fitness` enforces project-specific boundaries that generic linters do not know:
+
+- `src/` and `sdk/` must not import `server/` or `web/`
+- `src/` must not depend on Prisma, Redis, or Next.js directly
+- `web/src` must not import `server/`
+- external packages must be declared in the relevant `package.json`
+- shared UI controls must come from `web/src/components/ui/`
+
+`quality:supply-chain` audits workflow permissions, action pinning, floating refs, Docker `:latest`, deprecated Hugging Face transfer settings, and `curl | bash` install patterns. Warnings are hardening ratchets; `quality:supply-chain:strict` turns them into failures.
+
+Known legacy violations live in `quality-fitness-baseline.json`. Do not add to that file for new work unless an ADR explains the migration plan.
+
 ## Architecture Decisions
 
 When making significant architectural changes, document the decision:
@@ -310,12 +339,14 @@ See `docs/adr/TEMPLATE.md` for the template.
 
 1. Run `bun test` — all tests must pass
 2. Run `bun run build` — no type errors
-3. Update documentation if needed
+3. Run `bun run quality:ai` — AI quality gate must pass
+4. Update documentation if needed
 
 ### PR Checklist
 
 - [ ] `bun run build` succeeds
 - [ ] `bun test` passes
+- [ ] `bun run quality:ai` passes
 - [ ] No `src/` → `server/` imports
 - [ ] No `any` types without justification
 - [ ] No hardcoded secrets

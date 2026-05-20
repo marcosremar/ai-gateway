@@ -97,6 +97,16 @@ export function createWebhookDelivery(config: WebhookConfig) {
 
       const signature = cfg.secret ? signWebhook(enrichedEvent, cfg.secret) : undefined;
 
+      // SSRF guard — webhook URL is operator-supplied via config; refuse
+      // private/metadata hosts so a misconfigured webhook can't probe
+      // internal services or replay HMAC-signed payloads back to the gateway.
+      try {
+        const { isPrivateUrlResolved } = await import('../gateway/pipeline/ssrf-protection');
+        if (await isPrivateUrlResolved(cfg.url)) {
+          log.warn({ url: cfg.url, eventId }, 'Webhook target resolves to private address — refusing');
+          return false;
+        }
+      } catch { /* ssrf module optional in test env */ }
       try {
         await withRetry(
           async () => {
