@@ -140,6 +140,8 @@ describe('cost guardrails — isAccountOwned per-provider flags', () => {
     delete process.env.AIGW_TENSORDOCK_NUKE_UNTRACKED;
     delete process.env.AIGW_MODAL_NUKE_UNTRACKED;
     delete process.env.AIGW_HYPERSTACK_NUKE_UNTRACKED;
+    delete process.env.AIGW_MODAL_STOP_UNTRACKED;
+    vi.resetModules();
   });
 
   it('Vast.ai defaults to safe (prefix-filtered)', async () => {
@@ -162,12 +164,27 @@ describe('cost guardrails — isAccountOwned per-provider flags', () => {
     delete process.env.AIGW_VAST_NUKE_UNTRACKED;
   });
 
-  it('other providers default to safe (prefix-filtered)', async () => {
-    const { isAccountOwned } = await import('../../server/gpu-orphan-cleanup');
+  it('other VM providers default to safe (prefix-filtered)', async () => {
+    const { isAccountOwned, prefixesForProvider, GATEWAY_NAME_PREFIXES } = await import('../../server/gpu-orphan-cleanup');
     expect(isAccountOwned('runpod')).toBe(false);
     expect(isAccountOwned('tensordock')).toBe(false);
-    expect(isAccountOwned('modal')).toBe(false);
     expect(isAccountOwned('hyperstack')).toBe(false);
+    expect(prefixesForProvider('runpod')).toEqual(GATEWAY_NAME_PREFIXES);
+    expect(prefixesForProvider('tensordock')).toEqual(GATEWAY_NAME_PREFIXES);
+    expect(prefixesForProvider('hyperstack')).toEqual(GATEWAY_NAME_PREFIXES);
+  });
+
+  it('Modal stops untracked apps by default because app stop is the idle-cost control', async () => {
+    const { isAccountOwned, prefixesForProvider } = await import('../../server/gpu-orphan-cleanup');
+    expect(isAccountOwned('modal')).toBe(false);
+    expect(prefixesForProvider('modal')).toEqual([]);
+  });
+
+  it('AIGW_MODAL_STOP_UNTRACKED=0 restores Modal prefix filtering', async () => {
+    process.env.AIGW_MODAL_STOP_UNTRACKED = '0';
+    vi.resetModules();
+    const { prefixesForProvider, GATEWAY_NAME_PREFIXES } = await import('../../server/gpu-orphan-cleanup');
+    expect(prefixesForProvider('modal')).toEqual(GATEWAY_NAME_PREFIXES);
   });
 
   it('RUNPOD_ACCOUNT_OWNED=1 alone does NOT enable kill-all (requires also AIGW_RUNPOD_NUKE_UNTRACKED=1)', async () => {

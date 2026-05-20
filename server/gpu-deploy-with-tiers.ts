@@ -28,7 +28,18 @@ import { startDeployLoop, type DeployExtra } from './gpu-deploy-loop';
 
 const log = createLogger('gpu-deploy');
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
-const MODAL_DEPLOY_SCRIPT = resolve(SERVER_DIR, '..', 'docker', 'modal', 'babelcast.py');
+// Per-image Modal app script lookup. `gpu-deploy-race.ts` documents the
+// fallback rationale; we mirror the same shim here so both deploy paths
+// agree on which Modal `.py` runs for a given registry image.
+const MODAL_DEPLOY_SCRIPT_FALLBACK = resolve(SERVER_DIR, '..', 'dockers', 'modal', 'babelcast.py');
+import { modalStrategy } from '../src/modules/gpu-providers/strategies';
+function modalScriptFor(image: string): string {
+  try {
+    return modalStrategy.resolveImage(image);
+  } catch {
+    return MODAL_DEPLOY_SCRIPT_FALLBACK;
+  }
+}
 
 export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>) {
   const deployId = `deploy-${Date.now()}`;
@@ -218,7 +229,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     try {
       // Modal uses a deploy script, not a Docker image — resolve to absolute path
       const tierDockerImage = tier.name === 'modal'
-        ? MODAL_DEPLOY_SCRIPT
+        ? modalScriptFor(dockerImage)
         : dockerImage;
       const tierGpuTypes = gpuTypesByProvider?.[tier.name] ?? gpuTypes;
       log.log(`[gpu] Starting ${tier.label} deploy loop (tier ${i + 1}/${availableTiers.length}, GPUs: ${tierGpuTypes.slice(0,3).map(g=>g.replace('NVIDIA ','').replace('GeForce ','')).join(', ')}...)`);

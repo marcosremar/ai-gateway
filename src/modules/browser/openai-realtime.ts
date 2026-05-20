@@ -72,6 +72,28 @@ export interface OpenAIRealtimeOptions {
   maxReconnectAttempts?: number;
   /** Called when network quality changes. */
   onNetworkQualityChange?: (quality: NetworkQuality) => void;
+  /**
+   * Turn detection / VAD config — controls when OpenAI's server-side VAD
+   * fires user_speech_end. Tune for your use case:
+   *   - silence_duration_ms: smaller = more responsive but can cut user off
+   *     mid-pause. Default 500ms; 200-300ms for snappy assistants, 800-1000ms
+   *     for thoughtful conversations.
+   *   - threshold: 0.0-1.0 sensitivity. Lower = more permissive (catches
+   *     soft speech but more false positives).
+   *   - prefix_padding_ms: audio retained before speech detected.
+   *   - type: 'server_vad' (silence-based, default) or 'semantic_vad'
+   *     (ML-based completion detection — better but slightly slower).
+   */
+  turnDetection?: {
+    type?: 'server_vad' | 'semantic_vad';
+    threshold?: number;
+    prefix_padding_ms?: number;
+    silence_duration_ms?: number;
+    /** semantic_vad eagerness: 'auto' | 'low' | 'medium' | 'high'. */
+    eagerness?: 'auto' | 'low' | 'medium' | 'high';
+    /** Disable turn detection entirely (manual response.create). */
+    disabled?: boolean;
+  };
 }
 
 /** A complete response turn from the model. */
@@ -391,16 +413,28 @@ export class OpenAIRealtimeClient extends TypedEmitter<OpenAIRealtimeEventMap> {
           birthDate: this._options.birthDate,
         });
 
+        const td = this._options.turnDetection;
+        let turnDetection: Record<string, unknown> | null;
+        if (td?.disabled) {
+          turnDetection = null;
+        } else if (td?.type === 'semantic_vad') {
+          turnDetection = {
+            type: 'semantic_vad',
+            ...(td.eagerness !== undefined && { eagerness: td.eagerness }),
+          };
+        } else {
+          turnDetection = {
+            type: 'server_vad',
+            threshold: td?.threshold ?? 0.5,
+            prefix_padding_ms: td?.prefix_padding_ms ?? 300,
+            silence_duration_ms: td?.silence_duration_ms ?? 500,
+          };
+        }
         const sessionUpdate = {
           type: 'session.update',
           session: {
             instructions,
-            turn_detection: {
-              type: 'server_vad',
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 500,
-            },
+            turn_detection: turnDetection,
             input_audio_transcription: {
               model: 'gpt-4o-mini-transcribe',
             },

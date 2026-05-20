@@ -54,6 +54,10 @@ export function resolveHttpCorsOrigin(origin: string | null): CorsResolution {
 
   const corsOriginsEnv = process.env.CORS_ORIGINS
     || `http://localhost:${PORT},http://127.0.0.1:${PORT},http://localhost:3000,http://127.0.0.1:3000`;
+
+  // Wildcard: echo origin but DROP credentials. Browsers forbid `*` + credentials,
+  // and echoing the origin while keeping `Access-Control-Allow-Credentials: true`
+  // is a CSRF vector — any malicious site can read authenticated responses.
   if (corsOriginsEnv === '*') return { origin, allowCredentials: false };
 
   const allowedOrigins = corsOriginsEnv
@@ -68,12 +72,20 @@ export function resolveHttpCorsOrigin(origin: string | null): CorsResolution {
   return { origin: null, allowCredentials: false };
 }
 
-function buildCorsHeaders(origin: string | null): Record<string, string> {
-  if (!origin) return {};
-  return {
-    'Access-Control-Allow-Origin': origin,
+function buildCorsHeaders(corsResolved: CorsResolution | string | null): Record<string, string> {
+  // Back-compat: accept legacy string form (always treat as credentialed).
+  const resolved: CorsResolution = typeof corsResolved === 'string' || corsResolved === null
+    ? { origin: corsResolved, allowCredentials: corsResolved !== null }
+    : corsResolved;
+  if (!resolved.origin) return {};
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Origin': resolved.origin,
     'Vary': 'Origin',
   };
+  if (resolved.allowCredentials) {
+    headers['Access-Control-Allow-Credentials'] = 'true';
+  }
+  return headers;
 }
 
 export function authorizeHttpRequest(
@@ -167,7 +179,7 @@ async function pumpRequestBody(
 function invokeNodeStyleHandler(
   req: Request,
   invoke: (fakeReq: any, fakeRes: any) => void,
-  corsOrigin: string | null,
+  corsOrigin: CorsResolution | string | null,
   routeLimit: number,
   /** Resolved app/user identity from the auth wrapper. Forwarded to handlers
    *  via the synthetic x-aigw-user-id header so they can scope GPU isolation. */
@@ -309,12 +321,12 @@ export function startHttpApiServer(): void {
       fetch: async (req, server) => {
         const url = new URL(req.url);
         const method = req.method;
-        const corsOrigin = resolveHttpCorsOrigin(req.headers.get('origin')).origin;
+        const corsOrigin = resolveHttpCorsOrigin(req.headers.get('origin'));
         const routeLimit = getRouteBodyLimit(url.pathname);
 
         // CORS preflight
         if (method === 'OPTIONS') {
-          if (!corsOrigin) {
+          if (!corsOrigin.origin) {
             return new Response(JSON.stringify({ error: 'CORS origin not allowed' }), {
               status: 403,
               headers: { 'Content-Type': 'application/json' },

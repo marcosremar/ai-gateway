@@ -116,7 +116,10 @@ export function createPerKeyRateLimiter(quotas?: Map<string, KeyQuota>, defaultQ
       entry.count++;
 
       const remaining = Math.max(0, quota.maxRequests - entry.count);
-      const resetMs = windowMs - (now - entry.windowStart);
+      // Clamp to non-negative — `now - entry.windowStart` can exceed
+      // windowMs in a window-rollover edge case, producing a negative
+      // Retry-After header that browsers interpret unpredictably.
+      const resetMs = Math.max(0, windowMs - (now - entry.windowStart));
 
       if (entry.count > quota.maxRequests) {
         const retryAfterMs = resetMs;

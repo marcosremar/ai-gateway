@@ -155,11 +155,12 @@ export class TierCircuitBreaker {
   }
 
   async getState(tierIndex: number): Promise<CircuitState> {
-    const s = this.applyTimeTransition(await this.load(tierIndex));
-    // Persist time transition if it happened
-    const raw = await this.store.get(storeKey(tierIndex));
-    const original = raw ? (JSON.parse(raw) as PersistedCircuitState) : defaultState();
-    if (s.state !== original.state) {
+    const loaded = await this.load(tierIndex);
+    const s = this.applyTimeTransition(loaded);
+    // Only persist when the time-based transition actually changed our local
+    // view. Re-reading the store here creates a last-write-wins race against
+    // concurrent recordFailure/recordSuccess workers.
+    if (s.state !== loaded.state) {
       await this.save(tierIndex, s);
     }
     return s.state;

@@ -25,6 +25,7 @@ import { runHealthCheck, runSSEBench } from './benchmarking/bench';
 import { InMemoryStateAdapter } from './adapters/in-memory-state';
 import { StatePersistence } from './autoscaler/state-persistence';
 import { startCostMonitorTicker } from './autoscaler/cost-monitor';
+import type { ProviderAccount } from './autoscaler/cost-monitor';
 
 import type { HandlerDeps } from './handlers/types';
 
@@ -40,6 +41,70 @@ export interface GatewayConfig {
 
   /** Optional: override config loader (defaults to loadAutoscalerConfig). */
   loadConfig?: (userId: string) => Promise<AutoScalerConfig | null>;
+}
+
+function getEnvModalApiKey(): string | null {
+  if (process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET) {
+    return `${process.env.MODAL_TOKEN_ID}:${process.env.MODAL_TOKEN_SECRET}`;
+  }
+  const modalApiKey = process.env.MODAL_API_KEY;
+  return modalApiKey?.includes(':') ? modalApiKey : null;
+}
+
+async function collectTrackedProviderIds(
+  persistence: StatePersistence,
+  loadConfig: (userId: string) => Promise<AutoScalerConfig | null>,
+): Promise<Map<string, Set<string>>> {
+  const trackedByProvider = new Map<string, Set<string>>();
+  const userIds = await persistence.findUsersWithActiveGpus();
+  for (const userId of userIds) {
+    const cfg = await loadConfig(userId);
+    for (const tier of cfg?.tiers ?? []) {
+      if (!tier.provider || !tier.instanceId) continue;
+      let ids = trackedByProvider.get(tier.provider);
+      if (!ids) {
+        ids = new Set<string>();
+        trackedByProvider.set(tier.provider, ids);
+      }
+      ids.add(tier.instanceId);
+    }
+  }
+  return trackedByProvider;
+}
+
+function mergeProviderAccounts(accounts: ProviderAccount[]): ProviderAccount[] {
+  const merged = new Map<string, ProviderAccount>();
+  for (const account of accounts) {
+    const key = `${account.provider}::${account.credentials.apiKey}`;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, { ...account, trackedInstanceIds: [...account.trackedInstanceIds] });
+      continue;
+    }
+    for (const id of account.trackedInstanceIds) {
+      if (!existing.trackedInstanceIds.includes(id)) existing.trackedInstanceIds.push(id);
+    }
+  }
+  return [...merged.values()];
+}
+
+async function buildCostMonitorAccounts(
+  loadStoredAccounts: (() => Promise<ProviderAccount[]>) | undefined,
+  persistence: StatePersistence,
+  loadConfig: (userId: string) => Promise<AutoScalerConfig | null>,
+): Promise<ProviderAccount[]> {
+  const accounts = loadStoredAccounts ? await loadStoredAccounts() : [];
+  const modalApiKey = getEnvModalApiKey();
+  if (!modalApiKey) return accounts;
+
+  const trackedByProvider = await collectTrackedProviderIds(persistence, loadConfig);
+  accounts.push({
+    userId: 'env',
+    provider: 'modal',
+    credentials: { apiKey: modalApiKey },
+    trackedInstanceIds: [...(trackedByProvider.get('modal') ?? new Set<string>())],
+  });
+  return mergeProviderAccounts(accounts);
 }
 
 /**
@@ -220,12 +285,12 @@ export function createGateway(config: GatewayConfig): Gateway {
       return stop;
     },
     startCostMonitor: (intervalMs) => {
-      if (!storage.loadAllAccounts) {
-        log.warn('Cannot start cost monitor: storage.loadAllAccounts not implemented');
+      if (!storage.loadAllAccounts && !getEnvModalApiKey()) {
+        log.warn('Cannot start cost monitor: storage.loadAllAccounts not implemented and no Modal env credentials found');
         return () => {};
       }
-      const loadAllAccounts = () => storage.loadAllAccounts!();
       const persistence = new StatePersistence(stateStore);
+      const loadAllAccounts = () => buildCostMonitorAccounts(storage.loadAllAccounts?.bind(storage), persistence, loadConfig);
       const stop = startCostMonitorTicker({
         registry: autoscaler.registry,
         persistence,

@@ -46,6 +46,17 @@ export class DeepgramSTTProvider implements STTProvider {
     const params = new URLSearchParams({ model, smart_format: 'true' });
     if (request.language) params.set('language', request.language);
     if (request.wordTimestamps) params.set('punctuate', 'true');
+    // VAD / endpointing knobs — exposed via STTRequest.vad. Sensible defaults
+    // when unspecified; explicit values let callers tune for snappy vs
+    // thoughtful conversation patterns.
+    if (request.vad?.endpointingMs !== undefined) {
+      params.set('endpointing', String(Math.max(0, request.vad.endpointingMs)));
+    }
+    if (request.vad?.vadEvents) params.set('vad_events', 'true');
+    if (request.vad?.utteranceEndMs !== undefined) {
+      params.set('utterance_end_ms', String(Math.max(0, request.vad.utteranceEndMs)));
+    }
+    if (request.vad?.interimResults) params.set('interim_results', 'true');
 
     const audioBuffer = request.audio instanceof Blob
       ? Buffer.from(await request.audio.arrayBuffer())

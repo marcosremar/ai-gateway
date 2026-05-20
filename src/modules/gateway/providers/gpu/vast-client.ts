@@ -45,6 +45,35 @@ const POLL_MAX_MS = 30_000;
 // We poll generously here; the boot health poller (engine.ts) handles "app ready".
 const POLL_TOTAL_MAX_MS = 1_800_000; // 30 minutes
 
+// Fast-fail: if the SSH proxy doesn't accept TCP connections within this
+// window from instance creation, mark the offer as a slow/dead host and
+// abort the slot. Override via VAST_SSH_FASTFAIL_MS (set 0 to disable).
+const SSH_FASTFAIL_MS = parseInt(
+  process.env.VAST_SSH_FASTFAIL_MS || String(60_000), 10,
+);
+
+const LOG_FASTFAIL_MS = parseInt(
+  process.env.VAST_LOG_FASTFAIL_MS || String(60_000), 10,
+);
+const CONTAINER_LOG_PROBE_MS = parseInt(
+  process.env.VAST_LOG_PROBE_MS || String(15_000), 10,
+);
+const CONTAINER_LOG_ERROR_PATTERNS = (
+  process.env.VAST_LOG_ERROR_PATTERNS ||
+  'Traceback \\(most recent call last\\)|' +
+  'Error response from daemon|' +
+  'failed to (create|inject|start)|' +
+  'OCI runtime|CDI devices|' +
+  'CUDA error|no kernel image is available|' +
+  'CUDA out of memory|RuntimeError|' +
+  'pull access denied|repository does not exist|' +
+  'toomanyrequests|pull rate limit|' +
+  'manifest unknown|manifest not found|' +
+  'OOMKilled|out of memory|' +
+  'permission denied|' +
+  'killed (by signal|: signal)'
+).split('|');
+
 // ── Host reliability tracking ────────────────────────────────────────────────
 // Hosts that reclaim instances during loading are blacklisted for a cooldown period.
 // This prevents wasting time and money on unreliable hosts.
@@ -226,8 +255,12 @@ export class VastClient extends AbstractGpuProvider {
   private _hostFailuresPath = HOST_BLACKLIST_PATH;
   /** Debounce timer for persisting host blacklist. */
   private _hostFailuresSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Pending auto-snapshot timers — cleared on dispose. */
+  private _autoSnapshotTimers: Set<ReturnType<typeof setTimeout>> = new Set();
+  private _disposed = false;
 
   dispose(): void {
+    this._disposed = true;
     if (this._reputationSaveTimer) {
       clearTimeout(this._reputationSaveTimer);
       this._reputationSaveTimer = null;
@@ -236,6 +269,8 @@ export class VastClient extends AbstractGpuProvider {
       clearTimeout(this._hostFailuresSaveTimer);
       this._hostFailuresSaveTimer = null;
     }
+    for (const t of this._autoSnapshotTimers) clearTimeout(t);
+    this._autoSnapshotTimers.clear();
   }
 
   constructor(opts?: VastClientOptions) {
@@ -1045,7 +1080,26 @@ export class VastClient extends AbstractGpuProvider {
     if (!spec.dockerImage) {
       throw new Error('[vast] spec.dockerImage is required — no default image');
     }
-    const imageName = spec.dockerImage;
+    // Image mirror translation — see canonical comment in src/gateway/.
+    const imageName = (() => {
+      const raw = spec.dockerImage;
+      if (process.env.VAST_PREFER_GHCR === '0') return raw;
+      const m = raw.match(/^marcosremar\/([^/].*)$/);
+      if (!m) return raw;
+      const mirrored = `ghcr.io/marcosremar/${m[1]}`;
+      this.log.log(`[vast] Image mirror: ${raw} → ${mirrored} (VAST_PREFER_GHCR)`);
+      return mirrored;
+    })();
+
+    if (process.env.VAST_SKIP_IMAGE_PRECHECK !== '1') {
+      const exists = await this._imageExistsInRegistry(imageName);
+      if (exists === false) {
+        throw new Error(
+          `[vast] Image ${imageName} not found in registry — refusing to create instance. ` +
+          `Verify the tag was pushed (CI green?) or pass VAST_SKIP_IMAGE_PRECHECK=1 to bypass.`,
+        );
+      }
+    }
     const { getMinDiskGb } = await import('./deploy-settings');
     let diskGb = spec.storageGb ?? 0;
     if (diskGb <= 0) {
@@ -1078,8 +1132,10 @@ export class VastClient extends AbstractGpuProvider {
       // Override per-call via spec.ramGb (still wins because it
       // overwrites cpu_ram below).
       cpu_ram: { gte: 32768 },
-      // Verified hosts only — protects against unstable / overcommitted boxes.
-      verified: { eq: true },
+      // Verified hosts by default — protects against unstable / overcommitted boxes.
+      // spec.allowUnverified opts into deverified/unverified rentable offers
+      // (only path when Vast has no verified rentable hosts for the requested GPU).
+      ...(spec.allowUnverified ? {} : { verified: { eq: true } }),
       num_gpus: { eq: spec.gpuCount ?? 1 },
       disk_space: { gte: diskGb },
       // P0b: Phase-1 — prefer direct-port hosts (no SSH tunnel needed, faster)
@@ -1289,7 +1345,8 @@ export class VastClient extends AbstractGpuProvider {
     // others are torn down to avoid runaway costs.
     const offerFailures: Array<{ offerId: string; gpu: string; reason: string }> = [];
     const failuresMutex = { push: (f: typeof offerFailures[number]) => offerFailures.push(f) };
-    const raceCount = Math.max(1, Math.min(5, spec.raceCount ?? 2));
+    const _defaultRace = parseInt(process.env.VAST_DEFAULT_RACE_COUNT || '3', 10);
+    const raceCount = Math.max(1, Math.min(5, spec.raceCount ?? _defaultRace));
     const offerPool = offers.slice(0, 10);
     const losers: Array<{ instanceId: string; contractId: string }> = [];
 
@@ -1309,10 +1366,12 @@ export class VastClient extends AbstractGpuProvider {
       losers,
     });
 
-    // Tear down losing parallel attempts (fire-and-forget but logged)
-    if (losers.length > 0) {
-      this.log.log(`[vast] Tearing down ${losers.length} losing parallel attempts`);
-      for (const loser of losers) {
+    // Tear down losing parallel attempts (fire-and-forget but logged).
+    // Dedupe against entries already cleaned by _raceOffers async branch.
+    const toClean = losers.filter(l => !(l as { _cleaned?: boolean })._cleaned);
+    if (toClean.length > 0) {
+      this.log.log(`[vast] Tearing down ${toClean.length} losing parallel attempts`);
+      for (const loser of toClean) {
         this.deleteInstance(loser.instanceId, { apiKey })
           .then(() => this.log.log(`[vast] Cleaned up loser ${loser.contractId}`))
           .catch((e) => this.log.warn(`[vast] Failed to clean up loser ${loser.contractId}: ${this.errMsg(e)}`));
@@ -1322,11 +1381,14 @@ export class VastClient extends AbstractGpuProvider {
     if (winner) {
       // P1a: Auto-snapshot in background (no await — non-blocking)
       if ((spec as any).autoSnapshot !== false && !(spec as any)._sshOnlyHint) {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          this._autoSnapshotTimers.delete(timer);
+          if (this._disposed) return;
           this.takeSnapshot(winner.instanceId, { apiKey })
             .then((ref) => ref && this.log.log(`[vast] Auto-snapshot scheduled for ${winner.instanceId}: ${ref}`))
             .catch((e) => this.log.debug(`[vast] Auto-snapshot failed for ${winner.instanceId}: ${this.errMsg(e)}`));
         }, 60_000); // wait 1min so container is fully booted
+        this._autoSnapshotTimers.add(timer);
       }
       return winner;
     }
@@ -1398,10 +1460,12 @@ export class VastClient extends AbstractGpuProvider {
           for (const r of remaining) {
             if (r.status === 'fulfilled' && r.value.result) {
               const loser = r.value.result;
-              losers.push({
+              const entry: { instanceId: string; contractId: string; _cleaned?: boolean } = {
                 instanceId: loser.instanceId,
                 contractId: loser.instanceId.replace(/^inst-/, ''),
-              });
+                _cleaned: true, // caller dedupe must skip
+              };
+              losers.push(entry);
               // Clean up immediately — caller's cleanup loop already ran (empty array)
               this.deleteInstance(loser.instanceId, { apiKey })
                 .then(() => this.log.log(`[vast] Cleaned up async loser ${loser.instanceId}`))
@@ -2422,7 +2486,12 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     let ip = '';
     let sshHost: string | undefined;
     let sshPort: number | undefined;
-    let elapsed = 0;
+    // Real wall-clock anchor — fast-fail thresholds were drifting because the
+    // synthetic `elapsed` accumulator only counted scheduled sleeps, ignoring
+    // time spent inside slow API calls. Use Date.now() so guards behave as
+    // documented.
+    const startedAt = Date.now();
+    const elapsedMs = (): number => Date.now() - startedAt;
     let attempt = 0;
 
     // Terminal statuses that mean the instance will never recover
@@ -2440,14 +2509,87 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     if (attempt === 0) {
       const initialDelay = isFastHost ? 2_000 : 5_000;
       await new Promise((r) => setTimeout(r, initialDelay));
-      elapsed += initialDelay;
     }
 
+    let sshProxyReachable = false;
+    let lastLogProbeAt = 0;
+    let logErrorAbort: string | null = null;
+    let elapsed = elapsedMs();
     while (elapsed < maxWaitMs) {
       const delay = Math.min(baseMs * Math.pow(POLL_GROWTH, attempt), POLL_MAX_MS);
       await new Promise((r) => setTimeout(r, delay));
-      elapsed += delay;
       attempt++;
+      elapsed = elapsedMs();
+
+      // Fast-fail: probe SSH proxy as soon as we know its host:port. If TCP
+      // connect doesn't succeed within SSH_FASTFAIL_MS from start, abort —
+      // host is stuck and the race controller picks another offer.
+      if (
+        SSH_FASTFAIL_MS > 0 &&
+        !sshProxyReachable &&
+        sshHost &&
+        sshPort &&
+        elapsed > 5_000
+      ) {
+        const reachable = await this._probeTcp(sshHost, sshPort, 4_000);
+        if (reachable) {
+          sshProxyReachable = true;
+          this.log.log(
+            `[vast] Instance ${contractId} SSH proxy reachable at ${sshHost}:${sshPort} (${Math.round(elapsed / 1000)}s)`,
+          );
+        } else if (elapsed >= SSH_FASTFAIL_MS) {
+          this.log.warn(
+            `[vast] Instance ${contractId} SSH proxy ${sshHost}:${sshPort} unreachable after ${Math.round(elapsed / 1000)}s — fast-fail abort (override with VAST_SSH_FASTFAIL_MS=0)`,
+          );
+          if (ip) this._markHostUnstable(ip);
+          this.emitError({
+            operation: '_pollForEndpoint', instanceId: `inst-${contractId}`,
+            message: `SSH proxy unreachable for ${Math.round(elapsed / 1000)}s — slow/dead host`,
+            errorCode: 'SSH_FASTFAIL', retryable: true,
+            metadata: { sshHost, sshPort, elapsedSecs: Math.round(elapsed / 1000) },
+          });
+          break;
+        }
+      }
+
+      // Container-log fast-fail: once SSH is reachable, sample the log and
+      // abort early on CUDA / OCI / Python failures.
+      if (
+        LOG_FASTFAIL_MS > 0 &&
+        sshProxyReachable &&
+        !logErrorAbort &&
+        elapsed - lastLogProbeAt >= CONTAINER_LOG_PROBE_MS
+      ) {
+        lastLogProbeAt = elapsed;
+        const errLine = await this._probeContainerLogs(sshHost!, sshPort!, { timeoutMs: 6_000 });
+        if (errLine) {
+          logErrorAbort = errLine;
+          this.log.warn(
+            `[vast] Instance ${contractId} container error detected via SSH log probe (${Math.round(elapsed / 1000)}s): ${errLine}`,
+          );
+          const hostBanRe = /Error response from daemon|OCI runtime|CDI devices|toomanyrequests|pull rate limit|manifest unknown|manifest not found|OOMKilled|killed (by signal|: signal)/i;
+          if (ip && hostBanRe.test(errLine)) this._markHostUnstable(ip);
+          this.emitError({
+            operation: '_pollForEndpoint', instanceId: `inst-${contractId}`,
+            message: `Container log shows error after ${Math.round(elapsed / 1000)}s: ${errLine}`,
+            errorCode: 'CONTAINER_LOG_FASTFAIL', retryable: true,
+            metadata: { sshHost, sshPort, elapsedSecs: Math.round(elapsed / 1000), pattern: errLine },
+          });
+          break;
+        } else if (elapsed >= LOG_FASTFAIL_MS && !endpoint) {
+          this.log.warn(
+            `[vast] Instance ${contractId} no endpoint and no error in container logs after ${Math.round(elapsed / 1000)}s — treating as slow host, aborting`,
+          );
+          if (ip) this._markHostUnstable(ip);
+          this.emitError({
+            operation: '_pollForEndpoint', instanceId: `inst-${contractId}`,
+            message: `No endpoint after ${Math.round(elapsed / 1000)}s, container log silent — slow host`,
+            errorCode: 'CONTAINER_LOG_FASTFAIL', retryable: true,
+            metadata: { sshHost, sshPort, elapsedSecs: Math.round(elapsed / 1000) },
+          });
+          break;
+        }
+      }
 
       try {
         const detail = await this._fetchInstanceDetail(contractId, headers);
@@ -2550,6 +2692,134 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
    * we need an actual HTTP response (or even an HTTP-shaped error like
    * 404, which still proves something is listening at L7).
    */
+  /** HEAD the manifest endpoint of a docker registry to verify the image+tag
+   *  exists before creating a Vast instance. true=present, false=404,
+   *  null=can't tell (private/transient). See canonical doc in src/gateway/. */
+  private async _imageExistsInRegistry(imageName: string): Promise<boolean | null> {
+    try {
+      let registry: string;
+      let repo: string;
+      let tag = 'latest';
+      const lastColon = imageName.lastIndexOf(':');
+      const lastSlash = imageName.lastIndexOf('/');
+      let imageWithoutTag = imageName;
+      if (lastColon > lastSlash) {
+        tag = imageName.slice(lastColon + 1);
+        imageWithoutTag = imageName.slice(0, lastColon);
+      }
+      if (imageWithoutTag.startsWith('ghcr.io/')) {
+        registry = 'ghcr.io';
+        repo = imageWithoutTag.slice('ghcr.io/'.length);
+      } else if (/^[\w.-]+(:\d+)?\//.test(imageWithoutTag) && imageWithoutTag.includes('.')) {
+        return null;
+      } else {
+        registry = 'registry-1.docker.io';
+        repo = imageWithoutTag.includes('/') ? imageWithoutTag : `library/${imageWithoutTag}`;
+      }
+      let token: string | undefined;
+      if (registry === 'registry-1.docker.io') {
+        const tokenRes = await fetch(
+          `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`,
+          { signal: AbortSignal.timeout(4_000) },
+        );
+        if (!tokenRes.ok) return null;
+        token = ((await tokenRes.json()) as { token?: string }).token;
+      } else if (registry === 'ghcr.io') {
+        const tokenRes = await fetch(
+          `https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull`,
+          { signal: AbortSignal.timeout(4_000) },
+        );
+        if (tokenRes.ok) {
+          token = ((await tokenRes.json()) as { token?: string }).token;
+        }
+      }
+      const url = `https://${registry === 'ghcr.io' ? 'ghcr.io' : 'registry-1.docker.io'}/v2/${repo}/manifests/${encodeURIComponent(tag)}`;
+      const headers: Record<string, string> = {
+        Accept: [
+          'application/vnd.oci.image.index.v1+json',
+          'application/vnd.docker.distribution.manifest.list.v2+json',
+          'application/vnd.docker.distribution.manifest.v2+json',
+          'application/vnd.oci.image.manifest.v1+json',
+        ].join(', '),
+      };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(url, { method: 'HEAD', headers, signal: AbortSignal.timeout(4_000) });
+      if (res.status === 200) return true;
+      if (res.status === 404) return false;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Pure TCP-connect probe to host:port. Resolves true if SYN-ACK received
+   *  before timeoutMs, else false. Used to verify Vast SSH proxy is up. */
+  private async _probeTcp(host: string, port: number, timeoutMs: number = 4_000): Promise<boolean> {
+    const { createConnection } = await import('net');
+    return new Promise<boolean>((resolve) => {
+      const socket = createConnection(
+        { host, port, timeout: timeoutMs },
+        () => { socket.destroy(); resolve(true); },
+      );
+      socket.on('error', () => { socket.destroy(); resolve(false); });
+      socket.on('timeout', () => { socket.destroy(); resolve(false); });
+    });
+  }
+
+  /** SSH-tail the container log and grep for known failure patterns —
+   *  surfaces CUDA/OCI/Python errors that the network layer won't catch. */
+  private async _probeContainerLogs(
+    sshHost: string,
+    sshPort: number,
+    options: { timeoutMs?: number; maxLines?: number } = {},
+  ): Promise<string | null> {
+    const timeoutMs = options.timeoutMs ?? 6_000;
+    const maxLines = options.maxLines ?? 200;
+    const { spawn } = await import('child_process');
+
+    return new Promise<string | null>((resolve) => {
+      const cmd = `(tail -n ${maxLines} /tmp/container.log 2>/dev/null` +
+        ` || tail -n ${maxLines} /var/log/onstart.log 2>/dev/null` +
+        ` || dmesg | tail -n ${maxLines} 2>/dev/null) | head -c 65536`;
+      const proc = spawn('ssh', [
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=/dev/null',
+        '-o', 'BatchMode=yes',
+        '-o', `ConnectTimeout=${Math.max(2, Math.floor(timeoutMs / 2 / 1000))}`,
+        '-o', 'LogLevel=ERROR',
+        '-p', String(sshPort),
+        `root@${sshHost}`,
+        cmd,
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+
+      let buf = '';
+      const timer = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch {}
+        resolve(null);
+      }, timeoutMs);
+      proc.stdout?.on('data', (chunk) => { buf += chunk.toString('utf8'); });
+      proc.on('close', () => {
+        clearTimeout(timer);
+        if (!buf) return resolve(null);
+        for (const pat of CONTAINER_LOG_ERROR_PATTERNS) {
+          try {
+            const re = new RegExp(pat, 'i');
+            const match = buf.match(re);
+            if (match) {
+              const idx = buf.indexOf(match[0]);
+              const lineStart = buf.lastIndexOf('\n', Math.max(0, idx - 1)) + 1;
+              const lineEnd = buf.indexOf('\n', idx);
+              const line = buf.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
+              return resolve(line.slice(0, 240));
+            }
+          } catch { /* invalid pattern */ }
+        }
+        resolve(null);
+      });
+      proc.on('error', () => { clearTimeout(timer); resolve(null); });
+    });
+  }
+
   private async _probeEndpoint(endpoint: string, timeoutMs: number = 8_000): Promise<boolean> {
     try {
       const url = new URL(endpoint);

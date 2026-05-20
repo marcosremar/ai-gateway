@@ -33,6 +33,8 @@ When making architectural decisions during AI-assisted development:
 | [ADR-012](ADR-012-criugpu-snapshot-lifecycle.md) | CRIUgpu Snapshot Lifecycle — Capture, Restore, Catalog | Accepted | 2026-04-17 |
 | [ADR-013](ADR-013-standby-pool-policy.md) | Standby Pool Policy | Accepted | 2026-04-17 |
 | [ADR-014](ADR-014-snapshot-capable-provider-landscape-2026.md) | Snapshot-Capable Provider Landscape (2026) | Accepted | 2026-04-17 |
+| [ADR-015](ADR-015-ai-quality-fitness-gates.md) | AI Quality Fitness Gates | Accepted | 2026-05-04 |
+| [ADR-016](ADR-016-automated-ai-control-layers.md) | Automated AI Control Layers | Accepted | 2026-05-04 |
 
 ## Creating a New ADR
 

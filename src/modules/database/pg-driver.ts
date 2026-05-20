@@ -11,6 +11,16 @@ export interface SqlDriver {
   close(): Promise<void>;
 }
 
+interface PgClientLike {
+  connect(): Promise<unknown>;
+  query<T>(sql: string, params?: unknown[]): Promise<{
+    rows: T[];
+    rowCount: number | null;
+    fields: Array<{ name: string; dataTypeID: number }>;
+  }>;
+  end(): Promise<void>;
+}
+
 // ── Neon HTTP driver ──────────────────────────────────────────────────────────
 
 export async function createNeonDriver(connectionString: string): Promise<SqlDriver> {
@@ -32,8 +42,16 @@ export async function createNeonDriver(connectionString: string): Promise<SqlDri
 
   return {
     async query<T>(sqlStr: string, params: unknown[] = []): Promise<QueryResult<T>> {
-      // Use tagged template literal syntax via Function constructor to pass params safely
-      const rows = (await (sql as Function)(sqlStr, ...params)) as T[];
+      // @neondatabase/serverless accepts two forms:
+      //   1. tagged template: sql`SELECT ... WHERE id = ${id}`
+      //   2. positional:      sql.query('SELECT ... WHERE id = $1', [id])
+      // Always go through .query() so $N placeholders bind correctly.
+      const sqlObj = sql as { query?: (s: string, p?: unknown[]) => Promise<T[] | { rows: T[] }> };
+      if (typeof sqlObj.query !== 'function') {
+        throw new DatabaseError('neon driver: .query() method missing — incompatible package version', 'NEON_INCOMPATIBLE');
+      }
+      const result = await sqlObj.query(sqlStr, params);
+      const rows = (Array.isArray(result) ? result : (result as { rows: T[] }).rows) as T[];
       return { rows, rowCount: rows.length };
     },
     async close() {
@@ -45,11 +63,7 @@ export async function createNeonDriver(connectionString: string): Promise<SqlDri
 // ── pg TCP driver ─────────────────────────────────────────────────────────────
 
 export async function createPgDriver(connectionString: string): Promise<SqlDriver> {
-  let PgClient: new (opts: { connectionString: string }) => {
-    connect(): Promise<void>;
-    query<T>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number; fields: Array<{ name: string; dataTypeID: number }> }>;
-    end(): Promise<void>;
-  };
+  let PgClient: new (opts: { connectionString: string }) => PgClientLike;
 
   try {
     const mod = await import('pg');

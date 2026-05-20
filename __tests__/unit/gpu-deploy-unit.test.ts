@@ -432,12 +432,13 @@ describe('orphan sweep', () => {
   });
 
   it('#206 sweepOrphanInstances excludes tracked pods and race candidates', () => {
-    const fnStart = orphanCleanupSource.indexOf('export async function sweepOrphanInstances');
+    const fnStart = orphanCleanupSource.indexOf('async function collectTrackedInstanceIds');
     const fnBody = orphanCleanupSource.slice(fnStart, fnStart + 5000);
     expect(fnBody).toContain('tracked.add(deployState.podId)');
     expect(fnBody).toContain('standbyDeployState.podId');
     expect(fnBody).toContain('activeRaceInstanceIds');
     expect(fnBody).toContain('tracked.add(id)');
+    expect(orphanCleanupSource).toContain('const tracked = await collectTrackedInstanceIds()');
   });
 
   it('#207 startOrphanSweep guards against double-scheduling', () => {
@@ -1022,7 +1023,8 @@ describe('cleanupProviderInstances delegates', () => {
   it('cleanupModalApps delegates to cleanupProviderInstances', () => {
     expect(deploySource).toContain('cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps');
     expect(orphanCleanupSource).toContain('export const cleanupModalApps');
-    expect(orphanCleanupSource).toContain('cleanupProviderInstances(modal');
+    expect(orphanCleanupSource).toContain('cleanupProviderInstances(');
+    expect(orphanCleanupSource).toContain('nukeUntrackedAllowed(\'modal\') ? [] : GATEWAY_NAME_PREFIXES');
   });
 });
 

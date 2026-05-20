@@ -313,12 +313,12 @@ export async function estimatePullTimeout(opts: {
   if (imageHistory.length > 0) {
     // Some data but not enough — use generous timeout while collecting more
     const maxSeen = Math.max(...imageHistory.map((r) => r.pullTimeS));
-    const timeoutMs = clamp(Math.max(maxSeen * 2.0, FIRST_RUN_TIMEOUT_MS / 2) * 1000);
+    const timeoutMs = clamp(Math.max(maxSeen * 1.2, FIRST_RUN_TIMEOUT_MS / 2) * 1000);
     return {
       estimatedPullS: Math.round(maxSeen),
       timeoutMs,
       confidence: 'calculated',
-      basis: `${imageHistory.length}/10 observations (learning), max seen ${Math.round(maxSeen)}s × 2.0 — need ${10 - imageHistory.length} more for tight timeout`,
+      basis: `${imageHistory.length}/10 observations (learning), max seen ${Math.round(maxSeen)}s × 1.2 — need ${10 - imageHistory.length} more for tight timeout`,
     };
   }
 
@@ -329,13 +329,13 @@ export async function estimatePullTimeout(opts: {
     const theoreticalS = (compressedGb * 1024 * 8) / Math.max(inetDownMbps, 100);
     const withOverhead = theoreticalS * 1.3;
     // First run: use max of calculated×2 or 15 min, up to 30 min
-    const timeoutMs = clamp(Math.max(withOverhead * 2.0, 900) * 1000);
+    const timeoutMs = clamp(Math.max(withOverhead * 1.2, 900) * 1000);
 
     return {
       estimatedPullS: Math.round(withOverhead),
       timeoutMs,
       confidence: 'calculated',
-      basis: `FIRST RUN: ${compressedGb.toFixed(1)}GB ÷ ${inetDownMbps}Mbps ≈ ${Math.round(withOverhead)}s — generous timeout (no history)`,
+      basis: `FIRST RUN: ${compressedGb.toFixed(1)}GB ÷ ${inetDownMbps}Mbps ≈ ${Math.round(withOverhead)}s + 20% margin`,
     };
   }
 

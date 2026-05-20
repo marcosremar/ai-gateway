@@ -84,8 +84,11 @@ export class RateLimiter {
   static clientId(req: IncomingMessage): string {
     const auth = req.headers.authorization;
     if (auth) {
-      const token = auth.replace(/^Bearer\s+/i, '');
-      if (token.length >= 8) {
+      const token = auth.replace(/^Bearer\s+/i, '').trim();
+      // Always hash if a token is present — previous code fell through to IP
+      // bucketing for tokens <8 chars, letting a caller send `Bearer x` to
+      // escape per-key limits and join the (possibly NAT-shared) IP bucket.
+      if (token.length > 0) {
         return `key:${hashToken(token)}`;
       }
     }

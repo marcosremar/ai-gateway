@@ -53,6 +53,7 @@ export function registerGpuRoutes(handlers: Record<string, Function>): void {
     'POST /v1/gpu/deploy': gh.handleGpuDeploy,
     'POST /v1/gpu/deploy/validate': gh.handleGpuDeployValidate,
     'GET /v1/gpu/status': gh.handleGpuStatus,
+    'POST /v1/gpu/keepalive': gh.handleGpuKeepalive,
     'POST /v1/gpu/stop': gh.handleGpuStop,
     'POST /v1/gpu/resume': gh.handleGpuResume,
     'POST /v1/gpu/terminate': gh.handleGpuTerminate,
@@ -122,8 +123,9 @@ export function registerGpuRoutes(handlers: Record<string, Function>): void {
       try {
         const { readRecentLogs } = await import('../../../src/autoscaler/file-lifecycle-logger');
         const url = new URL(req.url, 'http://localhost');
-        const lines = parseInt(url.searchParams.get('lines') || '100', 10);
-        const logs = readRecentLogs(Math.min(lines, 1000));
+        const linesRaw = parseInt(url.searchParams.get('lines') || '100', 10);
+        const lines = Number.isFinite(linesRaw) && linesRaw > 0 ? Math.min(linesRaw, 1000) : 100;
+        const logs = readRecentLogs(lines);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(logs));
       } catch (e: any) {

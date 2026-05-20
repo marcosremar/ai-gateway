@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Gateway — Research Ideas & Reference Repos</title>
+<style>
+  :root {
+    --bg: #0b0f10;
+    --panel: #11171a;
+    --panel-2: #161d21;
+    --border: #1f2a30;
+    --text: #d8e0e3;
+    --muted: #7e8d93;
+    --accent: #4ade80;
+    --accent-2: #38bdf8;
+    --warn: #fbbf24;
+    --danger: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Menlo, monospace;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+  }
+  header {
+    padding: 48px 32px 32px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #0e1518 0%, var(--bg) 100%);
+  }
+  header h1 {
+    margin: 0 0 8px;
+    font-size: 28px;
+    color: var(--accent);
+  }
+  header p {
+    margin: 0;
+    color: var(--muted);
+    max-width: 880px;
+  }
+  main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 32px;
+  }
+  section {
+    margin-bottom: 48px;
+  }
+  section h2 {
+    font-size: 20px;
+    color: var(--accent-2);
+    margin: 0 0 4px;
+    border-left: 3px solid var(--accent-2);
+    padding-left: 12px;
+  }
+  section .lede {
+    color: var(--muted);
+    margin: 0 0 16px 15px;
+    font-size: 14px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .card:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+  }
+  .card h3 {
+    margin: 0 0 6px;
+    font-size: 15px;
+  }
+  .card h3 a {
+    color: var(--text);
+    text-decoration: none;
+  }
+  .card h3 a:hover { color: var(--accent); }
+  .card .repo {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: "SF Mono", Menlo, monospace;
+    margin-bottom: 8px;
+    word-break: break-all;
+  }
+  .card p {
+    margin: 0 0 10px;
+    font-size: 13px;
+    color: #c0c8cc;
+  }
+  .card .apply {
+    font-size: 12px;
+    color: var(--accent);
+    border-top: 1px dashed var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+  .card .apply b { color: var(--warn); }
+  .tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .tag {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .tag.hot { color: var(--accent); border-color: var(--accent); }
+  .tag.warn { color: var(--warn); border-color: var(--warn); }
+  .tag.security { color: var(--danger); border-color: var(--danger); }
+  .principles {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .principles ol {
+    margin: 0;
+    padding-left: 20px;
+  }
+  .principles li {
+    margin-bottom: 8px;
+    font-size: 14px;
+  }
+  .principles li b { color: var(--accent); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  th, td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  th {
+    background: var(--panel-2);
+    color: var(--accent-2);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code {
+    background: var(--panel-2);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: var(--accent);
+  }
+  footer {
+    padding: 32px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 24px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI Gateway — Research Ideas & Reference Repos</h1>
+  <p>Curated open-source projects + concepts mapped to ai-gateway concerns. Source for ADR proposals, architecture borrowing, and benchmark targets. Last refresh: 2026-05-06.</p>
+  <p style="margin-top:12px;font-size:13px;"><b style="color:#c084fc;">Deep dives:</b> <a href="pipecat-ideas.html" style="color:#c084fc;">→ Pipecat extracts</a> · <a href="pipecat-deep-extracts.html" style="color:#c084fc;">→ Pipecat round 2 (telephony, IVR, context mgmt, OTel)</a> · <a href="smart-turn-explained.html" style="color:#c084fc;">→ Smart Turn Detection</a></p>
+</header>
+
+<main>
+
+<section>
+  <h2>Expert AI-Coding Workflow</h2>
+  <p class="lede">Distilled from Karpathy / Willison / Osmani / Anthropic 2026 report. Mirrored in CLAUDE.md.</p>
+  <div class="principles">
+    <ol>
+      <li><b>Spec before code</b> — generate spec.md (requirements + edge cases) first.</li>
+      <li><b>Plan as meta-program</b> — step list saved, agent executes one per turn.</li>
+      <li><b>Stuff full context</b> — ADRs, files, errors, doc excerpts upfront. Context > prompt cleverness.</li>
+      <li><b>One concrete change per turn</b> — land it, verify, commit, next.</li>
+      <li><b>Trade-offs first, code second</b> — pros/cons of A vs B before implementation.</li>
+      <li><b>Function signatures explicit</b> — agent fills body. Reduces drift.</li>
+      <li><b>Test alongside, never after</b> — test plan in spec, run after each step.</li>
+      <li><b>Commit granular</b> — each step = one commit. Rollback granularity = recovery speed.</li>
+      <li><b>Reset stuck threads</b> — fresh conversation when looping/contradicting.</li>
+      <li><b>Review every line</b> — ~45% AI code carries vulns; assume bug present.</li>
+      <li><b>Never merge what you cannot explain</b> — defend in review or do not ship.</li>
+      <li><b>Prompt-in-PR</b> — include generating prompt in PR description.</li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <h2>Gateway / Router Reference</h2>
+  <p class="lede">Direct competitors and architectural references for <code>src/providers/</code> and routing logic.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag hot">primary ref</span><span class="tag security">audit needed</span></div>
+      <h3><a href="https://github.com/BerriAI/litellm">BerriAI/litellm</a></h3>
+      <div class="repo">github.com/BerriAI/litellm</div>
+      <p>100+ providers, OpenAI-compat, cost tracking, guardrails, virtual keys. De-facto standard.</p>
+      <div class="apply"><b>Apply:</b> compare error normalization + retry semantics. <b>Warn:</b> mar/2026 supply-chain compromise (v1.82.7/8) — vet patterns, don't blindly mirror.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag hot">closest stack</span></div>
+      <h3><a href="https://github.com/theopenco/llmgateway">theopenco/llmgateway</a></h3>
+      <div class="repo">github.com/theopenco/llmgateway</div>
+      <p>TS/JS gateway, unified API, analytics. Closer to ai-gateway language stack.</p>
+      <div class="apply"><b>Apply:</b> module layout + types pattern.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">routing</span></div>
+      <h3><a href="https://github.com/openziti/llm-gateway">openziti/llm-gateway</a></h3>
+      <div class="repo">github.com/openziti/llm-gateway</div>
+      <p>3-layer cascade routing: keyword → embedding similarity → LLM classifier.</p>
+      <div class="apply"><b>Apply:</b> ADR-008 hybrid GPU-vs-cloud routing — borrow tiered classifier idea.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">routing</span></div>
+      <h3><a href="https://github.com/ulab-uiuc/LLMRouter">ulab-uiuc/LLMRouter</a></h3>
+      <div class="repo">github.com/ulab-uiuc/LLMRouter</div>
+      <p>16+ routing strategies (KNN, SVM, MLP, LLM-based).</p>
+      <div class="apply"><b>Apply:</b> latency demotion (ADR-007) + percentage routing.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">obs+gateway</span></div>
+      <h3><a href="https://github.com/Helicone/ai-gateway">Helicone/ai-gateway</a></h3>
+      <div class="repo">github.com/Helicone/ai-gateway</div>
+      <p>"Fastest, lightest" OSS gateway with built-in observability + fallbacks.</p>
+      <div class="apply"><b>Apply:</b> tracing wire-format + OTel export.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">enterprise</span></div>
+      <h3><a href="https://aigateway.envoyproxy.io/">Envoy AI Gateway</a></h3>
+      <div class="repo">aigateway.envoyproxy.io</div>
+      <p>Production-grade rate limit, auth, multi-tenancy.</p>
+      <div class="apply"><b>Apply:</b> reference API key auth + ratelimit; adopt headers (x-ratelimit-*).</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Voice / Speech Pipeline</h2>
+  <p class="lede">Core ai-gateway concern: STT → LLM → TTS streaming overlap. Frameworks to study or adopt as provider.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag hot">deep dive</span><span class="tag hot">cloned</span></div>
+      <h3><a href="https://github.com/pipecat-ai/pipecat">pipecat-ai/pipecat</a> → <a href="pipecat-ideas.html" style="color:#c084fc">extracts page →</a></h3>
+      <div class="repo">github.com/pipecat-ai/pipecat · cloned to /tmp/pipecat-research</div>
+      <p>Frame-based pipeline. 63 services, 11 transports, 7 telephony serializers, smart-turn ML model, RTVI protocol, observer pattern, interruption handling. Full extract list on <a href="pipecat-ideas.html" style="color:#c084fc">pipecat-ideas.html</a>.</p>
+      <div class="apply"><b>Apply:</b> 12 ranked steal items: smart turn detection, barge-in, RTVI, Cartesia/ElevenLabs/Cerebras providers, telephony, observer pattern. <a href="pipecat-ideas.html" style="color:#fbbf24">See ranked steal list →</a></div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag hot">webrtc</span></div>
+      <h3><a href="https://github.com/livekit/agents">livekit/agents</a></h3>
+      <div class="repo">github.com/livekit/agents</div>
+      <p>WebRTC-first SFU. Agent joins Room as headless participant. Lowest-latency stack.</p>
+      <div class="apply"><b>Apply:</b> alternate transport for /v1/speech/ws; consider as bot ingress instead of Recall.ai for direct meetings.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">benchmark target</span></div>
+      <h3><a href="https://github.com/huggingface/speech-to-speech">huggingface/speech-to-speech</a></h3>
+      <div class="repo">github.com/huggingface/speech-to-speech</div>
+      <p>Parakeet + LLM + Qwen3-TTS. WebSocket API. Local voice agents.</p>
+      <div class="apply"><b>Apply:</b> bench on Vast RTX 4090 vs current pipeline. Validate latency claim.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">all-in-one</span></div>
+      <h3><a href="https://github.com/ictnlp/StreamSpeech">ictnlp/StreamSpeech</a></h3>
+      <div class="repo">github.com/ictnlp/StreamSpeech</div>
+      <p>Single seamless model: ASR + S2TT + S2ST + TTS, streaming.</p>
+      <div class="apply"><b>Apply:</b> evaluate as cascade-replacement provider. Single-model = fewer cold starts.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">VAD</span></div>
+      <h3><a href="https://github.com/KoljaB/RealtimeSTT">KoljaB/RealtimeSTT</a></h3>
+      <div class="repo">github.com/KoljaB/RealtimeSTT</div>
+      <p>Low-latency STT, advanced VAD, wake word, instant transcription.</p>
+      <div class="apply"><b>Apply:</b> VAD upgrade for /v1/stt/stream; replace silence-threshold pauseMs.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">tts</span></div>
+      <h3><a href="https://github.com/KoljaB/RealtimeTTS">KoljaB/RealtimeTTS</a></h3>
+      <div class="repo">github.com/KoljaB/RealtimeTTS</div>
+      <p>Realtime TTS streaming with sentence-chunking.</p>
+      <div class="apply"><b>Apply:</b> token→TTS overlap (ADR-relevant streaming-overlap claim).</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>GPU / Inference</h2>
+  <p class="lede">Targets for self-hosted inference Dockers and autoscaler integration.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag hot">production</span></div>
+      <h3><a href="https://github.com/vllm-project/vllm">vllm-project/vllm</a></h3>
+      <div class="repo">github.com/vllm-project/vllm</div>
+      <p>Battle-tested inference engine. Powers Meta/Mistral/Cohere/IBM. ~12.5K tok/s H100.</p>
+      <div class="apply"><b>Apply:</b> default LLM backend in custom Dockers; OpenAI-compat = drop-in replace cloud.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag hot">faster</span></div>
+      <h3><a href="https://github.com/sgl-project/sglang">sgl-project/sglang</a></h3>
+      <div class="repo">github.com/sgl-project/sglang</div>
+      <p>~16.2K tok/s H100 (29% faster than vLLM). Strong on multi-turn, structured output, RAG prefix cache.</p>
+      <div class="apply"><b>Apply:</b> alternate backend for prefix-heavy translation cache scenarios.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">orchestration</span></div>
+      <h3><a href="https://github.com/runpod/flash">runpod/flash</a></h3>
+      <div class="repo">github.com/runpod/flash</div>
+      <p>Python SDK: define hardware + remote functions + deps in code. RunPod serverless provisioning.</p>
+      <div class="apply"><b>Apply:</b> pattern reference for /v1/workloads serverless mode. Compare with current autoscaler.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Caching / Performance</h2>
+  <p class="lede">Translation cache (LRU exists) → semantic cache upgrade path.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag hot">cache upgrade</span></div>
+      <h3><a href="https://github.com/zilliztech/GPTCache">zilliztech/GPTCache</a></h3>
+      <div class="repo">github.com/zilliztech/GPTCache</div>
+      <p>Semantic cache with embeddings + cosine similarity (0.85-0.95 threshold). Redis backend.</p>
+      <div class="apply"><b>Apply:</b> upgrade ADR-002 LRU exact-match → semantic. Hit rate jump on paraphrased prompts.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">infra</span></div>
+      <h3><a href="https://docs.redisvl.com/en/stable/api/cache.html">RedisVL SemanticCache</a></h3>
+      <div class="repo">redis/redis-vl-python</div>
+      <p>Redis-native vector cache with TTL + eviction policies.</p>
+      <div class="apply"><b>Apply:</b> backing store if production needs Redis-mode (current Redis adapter exists).</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Observability</h2>
+  <p class="lede">Replace/augment current request-log + metrics. Langfuse already integrated per CLAUDE.md.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="tags"><span class="tag hot">trace</span></div>
+      <h3><a href="https://github.com/langfuse/langfuse">langfuse/langfuse</a></h3>
+      <div class="repo">github.com/langfuse/langfuse</div>
+      <p>OSS LLM platform: traces, prompt mgmt, evals, datasets. OTel-compatible.</p>
+      <div class="apply"><b>Apply:</b> already integrated — extend with prompt mgmt + dataset eval for translation quality.</div>
+    </div>
+    <div class="card">
+      <div class="tags"><span class="tag">cost</span></div>
+      <h3><a href="https://github.com/Helicone/helicone">Helicone/helicone</a></h3>
+      <div class="repo">github.com/Helicone/helicone</div>
+      <p>One-line LLM observability. Cost/latency/quality tracking with session view.</p>
+      <div class="apply"><b>Apply:</b> alternative for cost-anomaly detection + per-user spend tracking.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Concept / Skill / Prompt Repos</h2>
+  <p class="lede">Reference for Claude Code skills, slash commands, sub-agent patterns.</p>
+  <div class="grid">
+    <div class="card">
+      <h3><a href="https://github.com/Piebald-AI/claude-code-system-prompts">Piebald-AI/claude-code-system-prompts</a></h3>
+      <div class="repo">github.com/Piebald-AI/claude-code-system-prompts</div>
+      <p>System prompts + 24 builtin tools + sub-agent prompts (Plan/Explore/Task).</p>
+      <div class="apply"><b>Apply:</b> read before authoring custom skills/agents in .claude/.</div>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/Prat011/awesome-llm-skills">Prat011/awesome-llm-skills</a></h3>
+      <div class="repo">github.com/Prat011/awesome-llm-skills</div>
+      <p>Curated skills for Claude Code / Codex / Gemini CLI.</p>
+      <div class="apply"><b>Apply:</b> mine for ai-gateway-relevant skills (deploy/test/bench).</div>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/anthropics/claude-code-action">anthropics/claude-code-action</a></h3>
+      <div class="repo">github.com/anthropics/claude-code-action</div>
+      <p>Official GH Action: PR/issue answer + implement.</p>
+      <div class="apply"><b>Apply:</b> add to .github/workflows for auto-review of PRs.</div>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/simonw/llm">simonw/llm</a></h3>
+      <div class="repo">github.com/simonw/llm</div>
+      <p>11.8k⭐ CLI multi-provider. Plugin ecosystem (llm-cmd, llm-fragments-github).</p>
+      <div class="apply"><b>Apply:</b> ai-gateway CLI design reference. <code>llm-fragments-github</code> for stuffing repo-as-context.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Action Matrix</h2>
+  <p class="lede">Concrete next steps mapped to current codebase areas.</p>
+  <table>
+    <thead>
+      <tr><th>Concern</th><th>Repo to study</th><th>Action</th><th>Effort</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>src/providers/</code> error normalization</td><td>litellm</td><td>Audit retry/error mapping; align taxonomy</td><td>M</td></tr>
+      <tr><td>ADR-002 translation cache</td><td>GPTCache</td><td>Prototype semantic cache; bench hit-rate</td><td>M</td></tr>
+      <tr><td><code>POST /v1/speech/ws</code></td><td>pipecat + livekit/agents</td><td>Replace pauseMs with semantic turn detection</td><td>L</td></tr>
+      <tr><td>Custom Docker LLM backend</td><td>vllm + sglang</td><td>Add sglang variant Docker for prefix-cache wins</td><td>L</td></tr>
+      <tr><td>ADR-008 hybrid routing</td><td>openziti/llm-gateway</td><td>Add embedding-similarity tier between keyword + LLM classifier</td><td>M</td></tr>
+      <tr><td>Cost anomaly detection</td><td>helicone</td><td>Borrow per-user spend dashboard pattern</td><td>S</td></tr>
+      <tr><td>CI auto-review</td><td>claude-code-action</td><td>Add workflow on PRs</td><td>S</td></tr>
+      <tr><td><code>/v1/stt/stream</code> VAD</td><td>RealtimeSTT</td><td>Replace silence-threshold with VAD model</td><td>M</td></tr>
+      <tr><td>Single-model alternative</td><td>StreamSpeech</td><td>Bench against cascade pipeline</td><td>L</td></tr>
+    </tbody>
+  </table>
+</section>
+
+</main>
+
+<footer>
+  Curated for ai-gateway. Generated 2026-05-06. See CLAUDE.md → "Expert AI-Coding Workflow" for prompt protocol.
+</footer>
+
+</body>
+</html>

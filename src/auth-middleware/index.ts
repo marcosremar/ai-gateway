@@ -54,7 +54,10 @@ function extractApiKey(req: IncomingMessage, config: AuthConfig): string | null 
     if (authHeader.startsWith(prefix)) {
       return authHeader.slice(prefix.length);
     }
-    return authHeader;
+    // Reject non-Bearer auth schemes when a prefix is required. Previously
+    // any malformed `Authorization: ...` was returned verbatim as the key,
+    // accepting `Authorization: Basic xyz` or arbitrary values matching a
+    // configured key. Only fall through to query param.
   }
 
   // Try query param

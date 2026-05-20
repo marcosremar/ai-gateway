@@ -167,6 +167,12 @@ export interface WebRTCConfig {
   targetLanguage?: string;
   /** TTS speaker name for aiortc mode. Default: 'Ryan'. */
   speaker?: string;
+  /**
+   * Optional noise suppression mode applied to the mic stream BEFORE adding
+   * tracks to the peer connection. Default 'none' = passthrough. See
+   * `createNoiseSuppressor` for full options.
+   */
+  noiseSuppressionMode?: 'webrtc' | 'deepfilternet' | 'none';
 }
 
 // ── Circuit Breaker config ────────────────────────────────────────────────
@@ -239,6 +245,18 @@ export interface SpeechClientConfig {
   onTokenRefresh?: () => Promise<string | null | undefined>;
   /** Enable debug-level logging. Default: false. */
   debug?: boolean;
+  /**
+   * Client-side noise suppression applied to mic stream before upload.
+   * - 'webrtc'        — browser builtin (default, zero deps)
+   * - 'deepfilternet' — ML model (~8MB lazy-load, ~95% Krisp parity)
+   * - 'none'          — passthrough
+   * Requires onnxruntime-web peer dep when using 'deepfilternet'.
+   */
+  noiseSuppression?: {
+    mode: 'webrtc' | 'deepfilternet' | 'none';
+    modelUrl?: string;
+    onLoadProgress?: (loaded: number, total: number) => void;
+  };
 }
 
 // ── Metrics ────────────────────────────────────────────────────────────────

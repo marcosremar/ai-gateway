@@ -9,16 +9,18 @@ import { speculativeCache } from '../speculative-cache';
 import { getLabsFlags } from '../labs-settings';
 import { getSttRouter, sttSessions } from './streaming-stt-session';
 import { buildSpeculativeTranslateFn } from './bot-audio';
+import { emitFrame } from '../../src/observers';
 
 const log = createLogger('stt-lifecycle');
 
 type WsData = {
   id: string;
-  type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio';
+  type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio' | 'frame-inspector';
   language?: string;
   speculateTarget?: string;
   pauseMs?: number;
   speechConfig?: { source: string; target: string; speaker?: string };
+  __unsubscribe?: () => void;
 };
 
 /**
@@ -40,6 +42,7 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
     backend.onConnected = () => {
       log.log(`[stt-ws] Backend connected: ${backend.provider} id=${ws.data.id}`);
       ws.send(JSON.stringify({ type: 'connected', provider: backend.provider }));
+      emitFrame({ kind: 'user_speech_start', ts: Date.now(), stage: 'stt', provider: backend.provider, meta: { sessionId: ws.data.id } });
     };
     // Text accumulator: the STT backend emits the FULL running text on each
     // result (all active segments concatenated). We track the full text and a
@@ -64,6 +67,7 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
     const emitText = (text: string) => {
       if (!text || ws.readyState !== 1) return;
       ws.send(JSON.stringify({ type: 'text', text, provider: backend.provider }));
+      emitFrame({ kind: 'stt_final', ts: Date.now(), stage: 'stt', provider: backend.provider, meta: { sessionId: ws.data.id, len: text.length } });
       sttContext.push(text);
       while (sttContext.length > STT_CONTEXT_MAX) sttContext.shift();
       (backend as any).sendSeed?.(sttContext.join(' '));
@@ -97,6 +101,7 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
 
       const partialText = shortBuf ? (shortBuf + ' ' + pending).trim() : (pending || newText);
       ws.send(JSON.stringify({ type: 'partial', text: partialText, provider: evt.provider }));
+      emitFrame({ kind: 'stt_partial', ts: Date.now(), stage: 'stt', provider: evt.provider, meta: { sessionId: ws.data.id, len: partialText.length } });
 
       if (!pending) return;
 
@@ -143,6 +148,8 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
     sttSessions.set(ws.data.id, backend);
     (backend as any)._sttAccumTimer = () => sttAccumTimer;
     (backend as any)._clearSttAccumTimer = () => { if (sttAccumTimer) { clearTimeout(sttAccumTimer); sttAccumTimer = null; } };
+    // Expose flush for client-driven Smart-Turn `{action:'turn_complete'}` ctrl.
+    (backend as any)._flushAccum = () => flushSttAccum();
     log.log(`[stt-ws] Client connected id=${ws.data.id} lang=${language || 'auto'} provider=${backend.provider}`);
   };
   connectBackend();

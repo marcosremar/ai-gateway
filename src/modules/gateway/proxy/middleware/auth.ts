@@ -51,7 +51,11 @@ export function validateAuth(authHeader: string | undefined, validKeys: string[]
     log.warn('Empty Bearer token');
     return false;
   }
-  const valid = validKeys.some((key) => safeEqual(token, key));
+  // Iterate ALL keys (no short-circuit) — leaks key index via timing otherwise.
+  let valid = false;
+  for (const key of validKeys) {
+    if (safeEqual(token, key)) valid = true;
+  }
   if (!valid) {
     log.warn('Invalid API key');
   }

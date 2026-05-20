@@ -145,13 +145,19 @@ export function createAlertRouter(config: AlertRouterConfig) {
         ],
       };
 
-      await fetch(slack.webhookUrl, {
+      const res = await fetch(slack.webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),
       });
-
+      if (!res.ok) {
+        // Surface 4xx/5xx — without this, mis-typed webhook URL or revoked
+        // token silently logged "alert sent" and operators believed alerts
+        // were flowing during incidents.
+        const txt = await res.text().catch(() => '');
+        throw new Error(`Slack webhook returned ${res.status}: ${txt.slice(0, 200)}`);
+      }
       log.log({ channel: slack.channel }, 'Slack alert sent');
     } catch (error) {
       log.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to send Slack alert');
@@ -184,13 +190,16 @@ export function createAlertRouter(config: AlertRouterConfig) {
         ],
       };
 
-      await fetch(discord.webhookUrl, {
+      const res = await fetch(discord.webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),
       });
-
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`Discord webhook returned ${res.status}: ${txt.slice(0, 200)}`);
+      }
       log.log({}, 'Discord alert sent');
     } catch (error) {
       log.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to send Discord alert');
@@ -217,13 +226,16 @@ export function createAlertRouter(config: AlertRouterConfig) {
         },
       };
 
-      await fetch('https://events.pagerduty.com/v2/enqueue', {
+      const res = await fetch('https://events.pagerduty.com/v2/enqueue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),
       });
-
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`PagerDuty returned ${res.status}: ${txt.slice(0, 200)}`);
+      }
       log.log({}, 'PagerDuty alert sent');
     } catch (error) {
       log.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to send PagerDuty alert');

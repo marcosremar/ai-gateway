@@ -16,6 +16,10 @@ on:
   schedule:
     - cron: '0 9 * * 1'
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   # Scan main project Dockerfiles
   trivy-main:
@@ -30,13 +34,13 @@ jobs:
           - Dockerfile.worker
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Build Docker image (${{ matrix.dockerfile }})
         run: docker build -t ai-gateway-${{ matrix.dockerfile }}:scan -f ${{ matrix.dockerfile }} .
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           image-ref: 'ai-gateway-${{ matrix.dockerfile }}:scan'
           format: 'sarif'
@@ -45,7 +49,7 @@ jobs:
           exit-code: '1'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@0daab03d71ff584ef619d027a3fd9146679c5d84
         if: always()
         with:
           sarif_file: 'trivy-results-${{ matrix.dockerfile }}.sarif'
@@ -73,13 +77,13 @@ jobs:
           - wilor
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Build Docker image (${{ matrix.subproject }})
         run: docker build -t ai-gateway-${{ matrix.subproject }}:scan -f dockers/${{ matrix.subproject }}/Dockerfile dockers/${{ matrix.subproject }}/
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           image-ref: 'ai-gateway-${{ matrix.subproject }}:scan'
           format: 'sarif'
@@ -88,7 +92,7 @@ jobs:
           exit-code: '1'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@0daab03d71ff584ef619d027a3fd9146679c5d84
         if: always()
         with:
           sarif_file: 'trivy-results-${{ matrix.subproject }}.sarif'

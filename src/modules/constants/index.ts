@@ -114,6 +114,11 @@ export const DOCKER_IMAGES = {
   BABELCAST_MISTRAL: 'marcosremar/babelcast-mistral',
   ULTRAVOX_S2S_LATEST: 'marcosremar/ai-gateway-dockers:latest',
   ULTRAVOX_S2S_BLACKWELL: 'marcosremar/ai-gateway-dockers:blackwell',
+  FLUX_LATEST: 'marcosremar/flux:latest',
+  MANIM_LATEST: 'marcosremar/manim:latest',
+  QWEN3_TTS_LATEST: 'marcosremar/qwen3-tts:latest',
+  WHISPER_ALIGN_LATEST: 'marcosremar/whisper-align:latest',
+  STORYBOARD_WHITEBOARD_LATEST: 'marcosremar/storyboard-whiteboard:latest',
 } as const;
 
 // ── Download Tuning ─────────────────────────────────────────────────────────

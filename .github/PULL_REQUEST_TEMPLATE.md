@@ -20,6 +20,8 @@
 <!-- Describe the tests you ran and how to reproduce them -->
 
 - [ ] Unit tests pass (`bun run test:unit`)
+- [ ] AI quality gate passes (`bun run quality:ai`)
+- [ ] Property checks pass for high-risk pure logic (`bun run test:properties`, when touched)
 - [ ] Integration tests pass (`bun run test`)
 - [ ] Manual testing completed
 - [ ] Load tests run (if applicable)
@@ -31,6 +33,7 @@
 - [ ] I have commented my code, particularly in hard-to-understand areas
 - [ ] I have made corresponding changes to the documentation
 - [ ] My changes generate no new warnings
+- [ ] No new architecture, dependency, secret, or supply-chain gate findings
 - [ ] I have added tests that prove my fix is effective or that my feature works
 - [ ] New and existing unit tests pass locally with my changes
 - [ ] Any dependent changes have been merged and published

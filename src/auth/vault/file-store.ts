@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, statSync, chmodSync } from 'fs';
 import { dirname, join } from 'path';
 import { randomBytes } from 'crypto';
 import type { VaultStore } from './types';
@@ -6,16 +6,25 @@ import type { VaultStore } from './types';
 export class FileVaultStore implements VaultStore {
   private filePath: string;
   private cache: Record<string, string> = {};
-  private loaded = false;
+  private cacheMtime = 0;
 
   constructor(filePath: string) {
     this.filePath = filePath;
   }
 
   private load(): Record<string, string> {
-    if (this.loaded) return this.cache;
+    // Multi-process safety: the previous implementation cached forever,
+    // so writes from `ai-gateway secrets set` (CLI process) were invisible
+    // to a long-running gateway server. Re-read whenever the file's mtime
+    // changes — cheap stat, costs only when another process actually wrote.
     if (!existsSync(this.filePath)) {
-      this.loaded = true;
+      this.cache = {};
+      this.cacheMtime = 0;
+      return this.cache;
+    }
+    let mtimeMs = 0;
+    try { mtimeMs = statSync(this.filePath).mtimeMs; } catch { /* fall through */ }
+    if (this.cacheMtime !== 0 && this.cacheMtime === mtimeMs) {
       return this.cache;
     }
     try {
@@ -27,11 +36,11 @@ export class FileVaultStore implements VaultStore {
       } else {
         this.cache = parsed as Record<string, string>;
       }
-      this.loaded = true;
+      this.cacheMtime = mtimeMs;
       return this.cache;
     } catch {
-      this.loaded = true;
       this.cache = {};
+      this.cacheMtime = mtimeMs;
       return this.cache;
     }
   }
@@ -41,6 +50,10 @@ export class FileVaultStore implements VaultStore {
     if (!existsSync(dir)) {
       // Vault directory holds encrypted secrets — owner-only.
       mkdirSync(dir, { recursive: true, mode: 0o700 });
+    } else {
+      // Re-tighten dir perms in case it was created externally with default
+      // umask (0o755 leaks secret *names* via directory listing).
+      try { chmodSync(dir, 0o700); } catch { /* no-op */ }
     }
     // Atomic write: write to temp file, then rename
     const tempPath = join(dir, `.vault-${randomBytes(8).toString('hex')}.tmp`);
@@ -48,6 +61,11 @@ export class FileVaultStore implements VaultStore {
     try {
       writeFileSync(tempPath, data, { encoding: 'utf-8', mode: 0o600 });
       renameSync(tempPath, this.filePath);
+      // mode 0o600 only applies on creation. After rename, ensure perms
+      // are tight even if the destination inode existed with different mode.
+      try { chmodSync(this.filePath, 0o600); } catch { /* no-op */ }
+      // Update mtime cache to our own write so we don't reload on next read.
+      try { this.cacheMtime = statSync(this.filePath).mtimeMs; } catch { /* no-op */ }
     } catch (err) {
       // Clean up temp file if it exists
       try {

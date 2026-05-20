@@ -73,7 +73,7 @@ import {
   groqLLM, fireworksLLM, groqLlmModel, groqTtsModel, groqTtsVoice,
   shouldPreferGpu, shouldPreferGpuTts,
   recordStageSuccess, recordStageFailure, isStageCircuitClosed,
-  providers, modalTTS, gpuShadowMode,
+  providers, modalTTS, minimaxTTS, minimaxLLM, gpuShadowMode,
   markGpuProductionReady,
   openrouterLLM, openrouterQwen3Embedding, openaiEmbedding,
 } from './providers';
@@ -526,7 +526,7 @@ export async function handleTtsPreview(req: IncomingMessage, res: ServerResponse
       {
         gpuEndpoint: isGpuAvailable() ? deployState.endpoint : null,
         localKokoroUrl: getLocalKokoroUrl(),
-        client, modalTTS, translationProfile,
+        client, modalTTS, minimaxTTS, translationProfile,
       },
     );
     res.writeHead(200, { 'Content-Type': result.contentType });
@@ -1440,6 +1440,7 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
     groq: groqLLM,
     ...(fireworksLLM ? { fireworks: fireworksLLM } : {}),
     ...(openrouterLLM ? { openrouter: openrouterLLM } : {}),
+    ...(minimaxLLM?.isConfigured() ? { minimax: minimaxLLM } : {}),
   };
 
   const { provider: chatProvider, resolvedModel } = resolveChatProvider(model, {

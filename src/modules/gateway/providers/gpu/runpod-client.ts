@@ -834,7 +834,15 @@ export class RunpodClient extends AbstractGpuProvider {
 
     const rawGpuTypes = spec.gpuTypes?.length ? spec.gpuTypes : RUNPOD_GPU_FALLBACK;
     // Map short names (e.g. "RTX 3090") to RunPod API names (e.g. "NVIDIA GeForce RTX 3090")
-    const gpuTypesToTry = [...new Set(rawGpuTypes.map((t) => RUNPOD_GPU_TYPE_MAP[t] ?? t))];
+    const gpuTypesToTry = [...new Set(rawGpuTypes.map((t) => {
+      const mapped = RUNPOD_GPU_TYPE_MAP[t] ?? t;
+      // Warn loudly when a legacy/unavailable GPU is silently substituted.
+      const isLegacySub = (t === 'RTX 4080' || t === 'RTX4080' || t === 'RTX A4000' || t === 'RTXA4000') && mapped !== t;
+      if (isLegacySub) {
+        this.log.warn(`[runpod] GPU type "${t}" not available — substituting "${mapped}" (cost may differ).`);
+      }
+      return mapped;
+    }))];
 
     const TRANSIENT_RETRY_MAX = parseInt(process.env.RUNPOD_TRANSIENT_RETRIES || '2', 10);
     const TRANSIENT_RETRY_DELAY_MS = parseInt(
@@ -934,17 +942,34 @@ export class RunpodClient extends AbstractGpuProvider {
                 volumeInGb: basePodConfig.volumeInGb,
               },
             });
-            try {
-              await this.fetchRaw(
-                `${RunpodClient.API_BASE}/pods/${podId}`,
-                {
-                  method: 'DELETE',
-                  headers: this.authHeaders(apiKey),
-                },
-                TIMEOUTS.write,
-              );
-            } catch (err) {
-              this.log.debug({ error: err instanceof Error ? err.message : String(err) }, 'Ghost pod cleanup failed (best effort)');
+            // Ghost pods are billed until deleted; retry up to 3x then surface.
+            let ghostDeleted = false;
+            for (let ghostAttempt = 1; ghostAttempt <= 3; ghostAttempt++) {
+              try {
+                await this.fetchRaw(
+                  `${RunpodClient.API_BASE}/pods/${podId}`,
+                  {
+                    method: 'DELETE',
+                    headers: this.authHeaders(apiKey),
+                  },
+                  TIMEOUTS.write,
+                );
+                ghostDeleted = true;
+                break;
+              } catch (err) {
+                this.log.warn(`[runpod] Ghost pod ${podId} cleanup attempt ${ghostAttempt}/3 failed: ${err instanceof Error ? err.message : String(err)}`);
+                if (ghostAttempt < 3) await new Promise((r) => setTimeout(r, 1000 * ghostAttempt));
+              }
+            }
+            if (!ghostDeleted) {
+              this.emitError({
+                operation: 'ghostPodCleanup',
+                instanceId: podId,
+                message: `Ghost pod ${podId} could not be deleted after 3 attempts — billing until orphan sweep`,
+                errorCode: 'GHOST_POD_LEAK',
+                retryable: false,
+                metadata: { gpuType, podId },
+              });
             }
             gpuFailures.push({
               gpu: gpuType,

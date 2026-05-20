@@ -115,6 +115,78 @@ describe('handleChatCompletions', () => {
     expect(res.status).toBe(404);
   });
 
+  it('routes unknown slash model ids through a dynamic provider', async () => {
+    const dynamicProvider = {
+      providerId: 'openrouter',
+      chat: vi.fn().mockResolvedValue({
+        content: 'vision ok',
+        model: 'qwen/qwen3-vl-32b-instruct',
+        usage: { promptTokens: 20, completionTokens: 3, totalTokens: 23 },
+      }),
+      isConfigured: () => true,
+    };
+    const res = await handleChatCompletions(
+      makeReq({
+        model: 'qwen/qwen3-vl-32b-instruct',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'compare' },
+              { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+            ],
+          },
+        ],
+      }),
+      providers,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [{
+        providerId: 'openrouter',
+        provider: dynamicProvider as any,
+        acceptsModel: (model) => model.includes('/'),
+      }],
+    );
+    expect(res.status).toBe(200);
+    expect(dynamicProvider.chat).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'qwen/qwen3-vl-32b-instruct',
+    }));
+  });
+
+  it('can map a dynamic gateway alias to an upstream model id', async () => {
+    const dynamicProvider = {
+      providerId: 'openrouter',
+      chat: vi.fn().mockResolvedValue({
+        content: 'alias ok',
+        model: 'qwen/qwen3-vl-32b-instruct',
+      }),
+      isConfigured: () => true,
+    };
+    const res = await handleChatCompletions(
+      makeReq({
+        model: 'openrouter/qwen/qwen3-vl-32b-instruct',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+      providers,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [{
+        providerId: 'openrouter',
+        provider: dynamicProvider as any,
+        acceptsModel: (model) => model.startsWith('openrouter/'),
+        upstreamModel: (model) => model.slice('openrouter/'.length),
+      }],
+    );
+    expect(res.status).toBe(200);
+    expect(dynamicProvider.chat).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'qwen/qwen3-vl-32b-instruct',
+    }));
+  });
+
   it('returns 200 with content on valid request', async () => {
     const res = await handleChatCompletions(makeReq({ model: 'test-model', messages: [{ role: 'user', content: 'hi' }] }), providers);
     expect(res.status).toBe(200);

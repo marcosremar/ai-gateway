@@ -80,14 +80,26 @@ export class BackupService {
     if (parsed.database) args.push(parsed.database);
 
     let stdout: string;
+    // Allow operators with larger DBs to bump maxBuffer. Default 500MB
+    // (was 100MB which threw ERR_CHILD_PROCESS_STDOUT_MAXBUFFER_EXCEEDED on
+    // medium-sized prod DBs). For >500MB DBs, set DB_BACKUP_MAX_BUFFER_MB.
+    const maxBufferMb = parseInt(process.env.DB_BACKUP_MAX_BUFFER_MB || '500', 10);
+    const maxBufferBytes = (Number.isFinite(maxBufferMb) && maxBufferMb > 0 ? maxBufferMb : 500) * 1024 * 1024;
     try {
-      ({ stdout } = await execFileAsync('pg_dump', args, { env, maxBuffer: 100 * 1024 * 1024 }));
+      ({ stdout } = await execFileAsync('pg_dump', args, { env, maxBuffer: maxBufferBytes }));
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === 'ENOENT') {
         throw new DatabaseError(
           'pg_dump not found. Install PostgreSQL client tools (e.g. apt install postgresql-client or brew install libpq).',
           'BINARY_NOT_FOUND',
+        );
+      }
+      // Surface buffer exhaustion with actionable hint.
+      if ((e as { code?: string }).code === 'ERR_CHILD_PROCESS_STDOUT_MAXBUFFER_EXCEEDED') {
+        throw new DatabaseError(
+          `pg_dump output exceeded ${maxBufferMb}MB. Set DB_BACKUP_MAX_BUFFER_MB env var to a larger value or stream-based backup.`,
+          'BACKUP_TOO_LARGE',
         );
       }
       throw err;

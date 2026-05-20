@@ -107,7 +107,10 @@ export class ResponseCache {
       if (envelope.metadata.expiresAt && Date.now() > envelope.metadata.expiresAt) {
         await this.store.del(key);
         this._misses++;
+        // Drop both index structures so invalidateProvider/Model don't see
+        // stale meta and so _size doesn't drift on long-running processes.
         this._removeFromAccessOrder(key);
+        this._keyMeta.delete(key);
         return null;
       }
 
@@ -169,7 +172,8 @@ export class ResponseCache {
     const idx = this.accessOrder.indexOf(key);
     if (idx !== -1) {
       this.accessOrder.splice(idx, 1);
-      this._size--;
+      // Guard against underflow on cross-process eviction or repeated calls.
+      if (this._size > 0) this._size--;
     }
   }
 

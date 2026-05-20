@@ -26,6 +26,9 @@ describe('createGateway', () => {
   beforeEach(() => {
     process.env.VAULT_MASTER_KEY = 'a'.repeat(64); // 32 bytes as hex
     process.env.VAULT_PATH = `/tmp/test-vault-${Date.now()}`;
+    delete process.env.MODAL_TOKEN_ID;
+    delete process.env.MODAL_TOKEN_SECRET;
+    delete process.env.MODAL_API_KEY;
     resetVault();
     storage = mockStorage();
     gateway = createGateway({ storage });
@@ -34,6 +37,9 @@ describe('createGateway', () => {
   afterEach(() => {
     delete process.env.VAULT_MASTER_KEY;
     delete process.env.VAULT_PATH;
+    delete process.env.MODAL_TOKEN_ID;
+    delete process.env.MODAL_TOKEN_SECRET;
+    delete process.env.MODAL_API_KEY;
     resetVault();
   });
 

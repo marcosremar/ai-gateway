@@ -120,8 +120,21 @@ export class WebRTCTransport implements Transport {
         }
       };
 
-      // Get user media (microphone) and add audio track to the connection
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      // Get user media (microphone) and add audio track to the connection.
+      // Optional client-side noise suppression: wraps the stream before track
+      // addition so the peer never sees the noisy original.
+      let stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const nsMode = this.config.noiseSuppressionMode;
+      if (nsMode && nsMode !== 'none') {
+        try {
+          const { createNoiseSuppressor } = await import('./noise-suppression');
+          const suppressor = await createNoiseSuppressor({ mode: nsMode });
+          stream = await suppressor.process(stream);
+          this.log.info(`noise suppression: ${nsMode}`);
+        } catch (err) {
+          this.log.warn('noise suppression failed, using raw stream:', (err as Error).message);
+        }
+      }
       this.localStream = stream;
       for (const track of stream.getAudioTracks()) {
         pc.addTrack(track, stream);

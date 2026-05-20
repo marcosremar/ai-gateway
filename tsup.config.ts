@@ -30,7 +30,9 @@ export default defineConfig({
       noUnusedParameters: false,
     },
   },
-  splitting: true,
+  // Keep entry bundles self-contained. Code splitting produced empty chunks and
+  // mixed default/named export warnings for barrel-heavy public entry points.
+  splitting: false,
   sourcemap: true,
   clean: true,
   outDir: 'dist',

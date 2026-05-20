@@ -60,6 +60,14 @@ export type { SSEFrame } from './sse-frame-parser';
 // ── Streaming Audio ───────────────────────────────────────────────────────
 export { StreamingAudioPlayer } from './streaming-audio';
 
+// ── Noise Suppression (DeepFilterNet / WebRTC builtin) ────────────────────
+export { createNoiseSuppressor } from './noise-suppression';
+export type {
+  NoiseSuppressionMode,
+  NoiseSuppressorOptions,
+  NoiseSuppressor,
+} from './noise-suppression';
+
 // ── Types ──────────────────────────────────────────────────────────────────
 export type {
   ProcessingStage,

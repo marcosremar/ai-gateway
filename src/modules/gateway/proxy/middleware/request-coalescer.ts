@@ -14,17 +14,25 @@ import { createHash } from 'crypto';
 // If two identical requests (by key) arrive while the first is still in-flight,
 // the second gets the same promise instead of making a duplicate API call.
 
-const inflightRequests = new Map<string, Promise<unknown>>();
+const inflightRequests = new Map<string, { promise: Promise<unknown>; ts: number }>();
+const STANDALONE_STALE_MS = 30_000;
 
 /**
  * In-flight request deduplication: if two identical requests arrive while the
  * first is still pending, return the same promise for both.
+ *
+ * Includes a 30s staleness guard — without it, a hung upstream that never
+ * resolves would force every future request with the same key to pile onto
+ * the dead promise (DoS-on-self).
  */
 export function coalesce<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const existing = inflightRequests.get(key);
-  if (existing) return existing as Promise<T>;
+  if (existing && Date.now() - existing.ts < STANDALONE_STALE_MS) {
+    return existing.promise as Promise<T>;
+  }
+  if (existing) inflightRequests.delete(key);
   const p = fn().finally(() => inflightRequests.delete(key));
-  inflightRequests.set(key, p);
+  inflightRequests.set(key, { promise: p, ts: Date.now() });
   return p;
 }
 
@@ -64,9 +72,18 @@ export class RequestCoalescer {
     top_p?: number;
     seed?: number;
     stop?: unknown;
+    stream?: boolean;
+    n?: number;
+    logprobs?: unknown;
+    presence_penalty?: number;
+    frequency_penalty?: number;
+    user?: string;
+    tool_choice?: unknown;
   }): string | null {
     // Only coalesce deterministic requests (temperature 0 or undefined)
     if (params.temperature !== undefined && params.temperature !== 0) return null;
+    // Refuse to coalesce when n > 1: each call gets fresh randomness.
+    if (params.n !== undefined && params.n > 1) return null;
 
     const raw = JSON.stringify({
       p: params.provider,
@@ -79,6 +96,16 @@ export class RequestCoalescer {
       tp: params.top_p ?? null,
       sd: params.seed ?? null,
       stp: params.stop ?? null,
+      // Critical to include: a non-streaming request must NOT receive a
+      // resolved-promise from a streaming request with otherwise-identical
+      // params (response shapes differ).
+      stream: params.stream ?? false,
+      n: params.n ?? 1,
+      lp: params.logprobs ?? null,
+      pp: params.presence_penalty ?? null,
+      fp: params.frequency_penalty ?? null,
+      u: params.user ?? null,
+      tc: params.tool_choice ?? null,
     });
     return createHash('sha256').update(raw).digest('hex').slice(0, 32);
   }

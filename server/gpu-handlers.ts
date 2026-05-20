@@ -37,7 +37,7 @@ import { resolveDockerImageForGpus, LOW_BALANCE_THRESHOLD_USD } from './config';
 import { loadProviderConfig } from './config-persistence';
 import {
   getGpuPriorityList, getDefaultGpuPriorityByProvider, getGpuPriorityForProvider,
-  getGpuSortBy, getDeployTimeoutMin, setDeployTimeoutMin, getDeployRegion, getMinVramGb, getPreferSsd,
+  getGpuSortBy, getDeployTimeoutMin, setDeployTimeoutMin, getDeployRegion, getMinVramGb, getMinInetDownMbps, getPreferSsd,
   getDeployRaceCount, getLatencyMaxMs,
 } from '../src/gpu-providers/deploy-settings';
 import { getBestLatencyByGpuModel, sortGpuTypesByLatency } from './latency-db';
@@ -314,6 +314,7 @@ interface DeployConfig {
   autoSelectGpu: boolean;
   region: string;
   minVramGb: number;
+  minInetDownMbps: number;
   preferSsd: boolean;
   storageGb: number;
   hfToken: string;
@@ -367,6 +368,13 @@ interface DeployConfig {
    * permissive search (zombie-prone).
    */
   strictFastBoot: boolean;
+  /**
+   * Vast.ai-only: opt-in to deverified/unverified rentable hosts.
+   * When false (default), only Vast-verified hosts are eligible. Set true
+   * to widen the offer pool when no verified hosts are available for the
+   * requested GPU. Trade-off: host may be reclaimed mid-boot.
+   */
+  allowUnverified?: boolean;
   /**
    * Disable provider tier cascade. When true, deploy uses only the first
    * resolved tier (or the forced provider). Useful when caller wants race=N
@@ -450,6 +458,7 @@ async function _validateDeployRequest(
   // search (reliability>=0.95) and is preserved for callers that
   // explicitly set strictFastBoot=false.
   const strictFastBoot = body.strictFastBoot === false ? false : true;
+  const allowUnverified = body.allowUnverified === true ? true : undefined;
   const noTierCascade = body.noTierCascade === true ? true : undefined;
 
   // Resolve app-based GPU deploy config — use active app as defaults
@@ -506,10 +515,29 @@ async function _validateDeployRequest(
   const autoSelectGpu = body.autoSelectGpu === true;
 
   // Region / hardware filters: app → saved preference → request body
-  const region = (body.region as string) || appGpu?.region || getDeployRegion();
+  // Use nullish coalescing on body.region so callers can override with the
+  // empty string ("any region") — `||` treats `""` as falsy and surprises
+  // anyone trying to disable a sticky persisted region. Same fix for the
+  // app-level fallback. The env-level `VAST_NO_DEFAULT_REGION=1` short-
+  // circuits to "" entirely (kills the sticky `us-east` that some upstream
+  // helpers set during latency probing).
+  const region = process.env.VAST_NO_DEFAULT_REGION === '1'
+    ? ''
+    : (typeof body.region === 'string' ? body.region : (appGpu?.region ?? getDeployRegion()));
   // Apply app timeout if provided (and not overridden by body)
   if (appGpu?.timeoutMin && typeof body.timeoutMin !== 'number') {
     setDeployTimeoutMin(appGpu.timeoutMin);
+  }
+  // Per-deploy idle override. Callers (canal-dark, voice-clone scripts,
+  // etc.) often need a longer idle window than the persisted default —
+  // the gateway used to silently kill 5-min-boot containers after 25 min
+  // even though the user hadn't issued the first inference yet. Accept
+  // body.idleTimeoutMin (minutes) and apply it for the lifetime of this
+  // deploy. Falls through to whatever loadDeploySettings() / config set.
+  if (typeof body.idleTimeoutMin === 'number' && body.idleTimeoutMin > 0) {
+    const { setIdleTimeoutMs } = await import('./gpu-deploy');
+    setIdleTimeoutMs(Math.min(body.idleTimeoutMin, 24 * 60) * 60_000);
+    log.log(`[req=${requestId}] Per-deploy idle override: ${body.idleTimeoutMin}min`);
   }
   const minVramGbRaw = body.minVramGb;
   let minVramGb: number;
@@ -521,6 +549,10 @@ async function _validateDeployRequest(
     minVramGb = getMinVramGb();
   }
   const preferSsd = typeof body.preferSsd === 'boolean' ? body.preferSsd : getPreferSsd();
+  const minInetDownMbpsRaw = body.minInetDownMbps;
+  const minInetDownMbps = typeof minInetDownMbpsRaw === 'number' && minInetDownMbpsRaw >= 0
+    ? Math.min(minInetDownMbpsRaw, 100_000)
+    : getMinInetDownMbps();
   const storageGb = typeof body.storageGb === 'number' ? Math.min(Math.max(body.storageGb, 0), 1000) : 0;
   // HuggingFace token has FOUR canonical env-var spellings depending on
   // which library is reading it (transformers, diffusers, datasets, hub).
@@ -612,7 +644,7 @@ async function _validateDeployRequest(
     expectedCapabilities: effectiveExpectedCapabilities,
     requireDockerManifest,
     runSmokeTests,
-    gpuTypes, autoSelectGpu, region, minVramGb, preferSsd,
+    gpuTypes, autoSelectGpu, region, minVramGb, minInetDownMbps, preferSsd,
     storageGb, hfToken, llmModel, interruptible, raceCount, deployEnv,
     dockerStartCmd, onstart, containerDiskInGb, volumeId,
     providerFilter,
@@ -631,6 +663,7 @@ async function _validateDeployRequest(
     devMode,
     label,
     strictFastBoot,
+    allowUnverified,
     noTierCascade,
   };
 }
@@ -971,7 +1004,7 @@ function _startDeployAndRespond(
   res: ServerResponse,
   isFinetune = false,
 ): void {
-  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, strictFastBoot, noTierCascade } = config;
+  const { raceCount, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, strictFastBoot, allowUnverified, noTierCascade, minInetDownMbps } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   // Reset cancel flag FIRST so setDeployState won't be blocked by the guard
@@ -1011,6 +1044,8 @@ function _startDeployAndRespond(
     // the SSH-only-host phase-2 fallback.
     ...(label ? { label } : {}),
     ...(strictFastBoot ? { strictFastBoot } : {}),
+    ...(allowUnverified ? { allowUnverified } : {}),
+    ...(minInetDownMbps > 0 ? { minInetDownMbps } : {}),
     ...(config.expectedApiPaths.length > 0 ? { expectedApiPaths: config.expectedApiPaths } : {}),
     ...(config.expectedCapabilities.length > 0 ? { expectedCapabilities: config.expectedCapabilities } : {}),
     ...(config.requireDockerManifest ? { requireDockerManifest: true } : {}),
@@ -1438,9 +1473,21 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
         return;
       }
     } catch (err) {
-      // Fail-open on resolver failure (degraded gateway shouldn't strand
-      // legitimate cleanups). Log so the audit trail captures the bypass.
-      log.warn(`[req=${requestId}] terminate ownership check failed (allowing): ${err instanceof Error ? err.message : err}`);
+      // Fail-CLOSED on resolver failure: a degraded resolver must not become
+      // a cross-app terminate bypass. Caller can pass {"force":true} once they
+      // confirm ownership. Previously this fell open ("legitimate cleanups
+      // shouldn't strand"), but that allowed any caller who DoSed the
+      // resolver path to destroy other apps' instances.
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.warn(`[req=${requestId}] terminate ownership check failed (denying): ${errMsg}`);
+      setDeployLock(false);
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: 'Ownership resolver unavailable',
+        message: 'Cross-app terminate ownership check failed. Retry, or pass {"force":true} if you confirm ownership.',
+        detail: errMsg.slice(0, 200),
+      }));
+      return;
     }
   }
 
@@ -1618,6 +1665,56 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
 }
 
 // ── GPU Stop (pause without destroying) ──────────────────────────────────────
+
+/**
+ * POST /v1/gpu/keepalive — Reset the idle timeout counter on the active pod
+ * so the autoscaler doesn't pause/destroy it. /health probes deliberately
+ * don't count as activity (they're external liveness checks); pipelines
+ * that boot a pod ahead of a long offline batch can ping this every few
+ * minutes to keep the pod alive without burning quota on real inferences.
+ *
+ * Optional body: { deployId?: string } — safety check.
+ */
+export async function handleGpuKeepalive(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const requestId = getOrCreateRequestId(req);
+  setRequestIdHeader(res, requestId);
+
+  let body: Record<string, unknown> = {};
+  try { body = await readJsonBody(req); } catch { /* empty body fine */ }
+
+  if (body.deployId && deployState.deployId && body.deployId !== deployState.deployId) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: false,
+      error: 'deployId mismatch',
+      activeDeployId: deployState.deployId,
+      requestedDeployId: body.deployId,
+    }));
+    return;
+  }
+
+  if (deployState.status !== 'ready') {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: false,
+      error: 'no active GPU pod',
+      status: deployState.status,
+    }));
+    return;
+  }
+
+  const { setLastModelRequestTime } = await import('./state');
+  const now = Date.now();
+  setLastModelRequestTime(now);
+  log.log(`[req=${requestId}] keepalive — idle counter reset`);
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    ok: true,
+    deployId: deployState.deployId,
+    podId: deployState.podId,
+    lastActivityAt: now,
+  }));
+}
 
 /**
  * POST /v1/gpu/stop — Stop (pause) the current GPU pod without destroying it.
@@ -2210,8 +2307,22 @@ export async function handleGpuDeployValidate(req: IncomingMessage, res: ServerR
  * Lightweight: no body required, 200 OK with updated idle state.
  */
 export async function handleGpuHeartbeat(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const { setLastModelRequestTime, lastModelRequestTime } = await import('./state');
+  const { setLastModelRequestTime, lastModelRequestTime, deployState } = await import('./state');
   const { resetIdleState, IDLE_TIMEOUT_MS } = await import('./gpu-monitor-loop');
+
+  // Per-app scoping: when GATEWAY_API_KEYS is configured, the caller's userId
+  // must match the deploy owner. Otherwise app A's heartbeat could keep app B's
+  // GPU alive indefinitely. Falls open when no multi-key registry configured
+  // (single-key / loopback-admin mode).
+  const callerId = (req.headers['x-aigw-user-id'] as string | undefined) || null;
+  if (process.env.GATEWAY_API_KEYS && callerId) {
+    const ownerId = (deployState as { userId?: string | null } | undefined)?.userId ?? null;
+    if (ownerId && ownerId !== callerId) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Heartbeat denied: deploy owned by another app' }));
+      return;
+    }
+  }
 
   setLastModelRequestTime(Date.now());
   resetIdleState();
@@ -2226,15 +2337,18 @@ export async function handleGpuHeartbeat(req: IncomingMessage, res: ServerRespon
     if (typeof body.active_requests === 'number') activeRequests = body.active_requests;
   } catch { /* body is optional */ }
 
-  const idleResetMs = Date.now() - lastModelRequestTime;
-  log.log(`[gpu] Heartbeat received (source=${source}${activeRequests !== undefined ? `, active=${activeRequests}` : ''}) — idle timer reset`);
+  // Sanitize against log-line injection (newlines/CR could forge entries when
+  // a SIEM consumes the log stream).
+  const safeSource = source.replace(/[\r\n\t]/g, ' ').slice(0, 80);
+
+  log.log(`[gpu] Heartbeat received (source=${safeSource}${activeRequests !== undefined ? `, active=${activeRequests}` : ''}) — idle timer reset`);
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     ok: true,
     idleTimeoutMs: IDLE_TIMEOUT_MS,
     lastModelRequestAt: lastModelRequestTime,
-    source,
+    source: safeSource,
   }));
 }
 

@@ -313,6 +313,25 @@ export const DEFAULT_APPS: GatewayApp[] = [
     loadBalanceStrategy: 'least-latency',
   },
   {
+    // Local Codex CLI — routes chat to the `codex` binary on this host. The CLI
+    // holds its own ChatGPT/OpenAI auth (keychain), so no API key flows through
+    // the gateway. Useful for code-edit agents that want gpt-5.5 reasoning
+    // without the API key + cost-tracking overhead.
+    id: 'local-codex-cli',
+    name: 'Local Codex CLI (gpt-5.5)',
+    llm: [{ provider: 'local-codex', model: 'gpt-5.5' }],
+    latencyTargetsMs: { llm: 60_000 },
+  },
+  {
+    // Local Claude Code — routes chat to the `claude` binary on this host with
+    // OAuth/keychain auth. `model` accepts the same aliases the CLI exposes
+    // (sonnet, haiku, opus, or full ids like claude-sonnet-4-6).
+    id: 'local-claude-cli',
+    name: 'Local Claude Code (sonnet)',
+    llm: [{ provider: 'local-claude', model: 'sonnet' }],
+    latencyTargetsMs: { llm: 60_000 },
+  },
+  {
     id: 'cloud-only',
     name: 'Cloud Only (fast boot, no GPU)',
     stt: [{ provider: 'groq', model: 'whisper-large-v3-turbo' }],

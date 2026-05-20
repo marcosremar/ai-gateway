@@ -57,6 +57,9 @@ let monitorRunning = false;
 let monitorConsecFails = 0;
 let monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
 let monitorBackoffMaxAlerted = false;
+// Track whether the current deploy already had a crash recorded — prevents
+// double-recording when monitorConsecFails crosses thresholds repeatedly.
+let crashRecordedForCurrentDeploy = false;
 
 // P95 demotion: require N consecutive violations before demoting (avoids transient spike false positives)
 const P95_DEMOTION_CONSECUTIVE_VIOLATIONS = 3;
@@ -163,6 +166,7 @@ export function scheduleNextMonitorProbe() {
       if (healthy) {
         markGpuHealthy();
         monitorConsecFails = 0;
+        crashRecordedForCurrentDeploy = false;
         monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
         monitorBackoffMaxAlerted = false;
         // If health data indicates active training/work, treat as "not idle"
@@ -194,9 +198,59 @@ export function scheduleNextMonitorProbe() {
             monitorBackoffMaxAlerted = true;
             log.warn('[gpu] WARNING: GPU health probe has backed off to maximum interval (120s). Pod may be unreachable.');
           }
-          // Record crash in host reputation at threshold (5 consecutive failures = likely crash)
-          if (monitorConsecFails === 5 && deployState.provider) {
+          // Record crash in host reputation at threshold (>=5 consecutive
+          // failures = likely crash). Equality `=== 5` would silently miss
+          // the threshold if `monitorConsecFails` skipped 5 (e.g. burst
+          // increments) — track via flag to fire exactly once per crash.
+          if (monitorConsecFails >= 5 && !crashRecordedForCurrentDeploy && deployState.provider) {
+            crashRecordedForCurrentDeploy = true;
             recordHostCrash(deployState.provider, deployState.gpuType, deployState.providerMeta);
+          }
+          // App-level recovery first: at 3 consecutive failures, try to
+          // restart the in-container app via SSH (cheap, ~5s) before the
+          // expensive pod-level restart at 5. Common on Vast where the
+          // container's idle_watchdog kills /app/server.py while the host
+          // and SSH proxy stay up — SSH-exec `bash /app/start.sh` is
+          // enough to bring the FastAPI server back without rebooting the
+          // pod and re-paying the image-pull tax.
+          if (
+            monitorConsecFails === 3 &&
+            activeProvider === 'vast' &&
+            deployState.sshHost &&
+            deployState.sshPort
+          ) {
+            try {
+              log.log(`[gpu] App-level recovery: SSH-restart /app/start.sh on ${deployState.sshHost}:${deployState.sshPort}...`);
+              const { spawn } = await import('child_process');
+              const cmd = `pgrep -f "python.*server" >/dev/null || (cd /app && nohup bash /app/start.sh > /tmp/recover.log 2>&1 &) ; sleep 2; pgrep -f "python.*server" >/dev/null && echo OK || echo FAIL`;
+              const out = await new Promise<string>((resolve) => {
+                const p = spawn('ssh', [
+                  '-o', 'StrictHostKeyChecking=no',
+                  '-o', 'UserKnownHostsFile=/dev/null',
+                  '-o', 'BatchMode=yes',
+                  '-o', 'ConnectTimeout=5',
+                  '-o', 'LogLevel=ERROR',
+                  '-p', String(deployState.sshPort),
+                  `root@${deployState.sshHost}`,
+                  cmd,
+                ], { stdio: ['ignore', 'pipe', 'ignore'] });
+                let buf = '';
+                const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} resolve(''); }, 15_000);
+                p.stdout?.on('data', (c) => { buf += c.toString('utf8'); });
+                p.on('close', () => { clearTimeout(timer); resolve(buf); });
+                p.on('error', () => { clearTimeout(timer); resolve(''); });
+              });
+              if (out.includes('OK')) {
+                log.log(`[gpu] App-level recovery succeeded — server.py back up. Resetting health counter.`);
+                monitorConsecFails = 0;
+                monitorDelayMs = GPU_MONITOR_INTERVAL_MS;
+                setDeployState({ alert: `App auto-restarted via SSH after 3 health failures` });
+              } else {
+                log.warn(`[gpu] App-level recovery did not confirm server up — falling through to pod restart at 5.`);
+              }
+            } catch (sshErr) {
+              log.warn(`[gpu] App-level SSH recovery failed: ${sshErr instanceof Error ? sshErr.message : sshErr}`);
+            }
           }
           // Auto-restart: attempt to restart the pod before declaring it dead
           if (monitorConsecFails === 5 && deployState.podId) {
@@ -285,8 +339,25 @@ export function scheduleNextMonitorProbe() {
       if (deployState.costPerHr > 0) {
         const today = new Date().toISOString().slice(0, 10);
         if (today !== dailySpendResetDate) { setDailyGpuSpendUsd(0); setDailySpendResetDate(today); budgetSoftWarned = false; budgetWarned50 = false; }
-        // Use actual elapsed time since last probe instead of assuming monitorDelayMs
-        const actualElapsedMs = lastBudgetCalcTime > 0 ? Date.now() - lastBudgetCalcTime : monitorDelayMs;
+        // First probe after restart: charge for elapsed time since deploy
+        // started (clamped to today midnight UTC so we don't backdate spend
+        // across calendar boundaries). Previously fell back to monitorDelayMs
+        // (10s), under-counting hours of spend across gateway restarts and
+        // letting the budget gate fail to trip when it should.
+        let actualElapsedMs: number;
+        if (lastBudgetCalcTime > 0) {
+          actualElapsedMs = Date.now() - lastBudgetCalcTime;
+        } else if (deployState.startedAt > 0) {
+          const todayMidnightUtc = Date.UTC(
+            new Date().getUTCFullYear(),
+            new Date().getUTCMonth(),
+            new Date().getUTCDate(),
+          );
+          const since = Math.max(deployState.startedAt, todayMidnightUtc);
+          actualElapsedMs = Math.max(0, Date.now() - since);
+        } else {
+          actualElapsedMs = monitorDelayMs;
+        }
         lastBudgetCalcTime = Date.now();
         setDailyGpuSpendUsd(dailyGpuSpendUsd + deployState.costPerHr * (actualElapsedMs / 1000 / 3600));
         if (DAILY_BUDGET_USD > 0) {

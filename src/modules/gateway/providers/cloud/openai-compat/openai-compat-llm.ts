@@ -99,18 +99,23 @@ export class OpenAICompatLLMProvider implements LLMProvider {
    */
   async *chatStream(request: ChatRequest): AsyncGenerator<string, void, undefined> {
     const client = this.getClient();
-
-    const stream = await client.chat.completions.create({
-      model: request.model || this.config.defaultModel || '',
-      messages: request.messages as OpenAI.ChatCompletionMessageParam[],
-      ...(request.temperature !== undefined && { temperature: request.temperature }),
-      ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
-      ...(request.responseFormat && { response_format: request.responseFormat }),
-      stream: true,
-      stream_options: { include_usage: true },
-    });
+    // Match non-streaming chat() timeout. Without abort wiring a stalled
+    // provider stream hangs the consumer indefinitely.
+    const timeoutMs = request.timeoutMs || 120_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      const stream = await client.chat.completions.create({
+        model: request.model || this.config.defaultModel || '',
+        messages: request.messages as OpenAI.ChatCompletionMessageParam[],
+        ...(request.temperature !== undefined && { temperature: request.temperature }),
+        ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
+        ...(request.responseFormat && { response_format: request.responseFormat }),
+        stream: true,
+        stream_options: { include_usage: true },
+      }, { signal: controller.signal });
+
       for await (const chunk of stream) {
         if (chunk.usage) {
           yield `__usage__:${JSON.stringify({
@@ -123,8 +128,14 @@ export class OpenAICompatLLMProvider implements LLMProvider {
         const delta = chunk.choices[0]?.delta?.content;
         if (delta) yield delta;
       }
+    } catch (err: unknown) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message?.includes('aborted'))) {
+        throw new Error(`[openai-compat] chatStream() timed out after ${timeoutMs}ms`);
+      }
+      throw err;
     } finally {
-      // Cleanup is handled automatically by the for await loop
+      clearTimeout(timer);
+      try { controller.abort(); } catch { /* no-op */ }
     }
   }
 }

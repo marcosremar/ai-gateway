@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ── Fast Model Download ──────────────────────────────────────────────────────
 # Drop-in replacement for HuggingFace Hub downloads.
-# Tries multiple sources in order: B2/R2 CDN → aria2c from HF → hf_transfer.
+# Tries multiple sources in order: B2/R2 CDN → aria2c from HF → hf_xet.
 #
 # Usage:
 #   # Download a GGUF model
@@ -162,7 +162,7 @@ download_single_file() {
     log "Falling back to HuggingFace Hub SDK..."
     python3 -c "
 import os, shutil
-os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
+os.environ['HF_XET_HIGH_PERFORMANCE'] = '1'
 from huggingface_hub import hf_hub_download
 path = hf_hub_download('$repo', '$file')
 shutil.copy2(path, '$dest')
@@ -187,7 +187,7 @@ download_snapshot() {
 
     local cache_dir="${MODEL_CACHE_DIR}/${repo}"
 
-    # For snapshots, HuggingFace Hub with hf_transfer is usually the best option
+    # For snapshots, HuggingFace Hub with hf_xet is usually the best option
     # because it handles multiple files, versioning, and symlinks correctly.
     # But we can try a tar.zst bundle from CDN first.
 
@@ -219,7 +219,7 @@ download_snapshot() {
     log "Using HuggingFace Hub snapshot_download..."
     python3 -c "
 import os
-os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
+os.environ['HF_XET_HIGH_PERFORMANCE'] = '1'
 from huggingface_hub import snapshot_download
 path = snapshot_download('$repo', local_dir='$dest')
 print(f'Downloaded snapshot: {path}')

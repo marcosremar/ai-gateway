@@ -43,6 +43,23 @@ export interface STTRequest {
   temperature?: number;
   wordTimestamps?: boolean;
   signal?: AbortSignal;
+  /**
+   * Endpointing / VAD configuration. Provider-native turn detection knobs.
+   * Currently honored by Deepgram; other STT providers ignore unknown
+   * fields. Tune for your conversation style.
+   */
+  vad?: {
+    /** Deepgram `endpointing` ms — silence required before utterance ends.
+     *  Default 10ms (snappy); 200-500ms for natural conversations. */
+    endpointingMs?: number;
+    /** Deepgram `vad_events=true` to receive SpeechStarted events. */
+    vadEvents?: boolean;
+    /** Deepgram `utterance_end_ms` — fire UtteranceEnd after N ms silence
+     *  even without final transcript. */
+    utteranceEndMs?: number;
+    /** Deepgram `interim_results` — partial transcripts as user speaks. */
+    interimResults?: boolean;
+  };
 }
 
 /** Per-segment metadata returned by Whisper (verbose_json). */

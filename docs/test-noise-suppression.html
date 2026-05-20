@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Noise Suppression — E2E Test</title>
+<style>
+  body { font-family: monospace; background: #0b0f10; color: #d8e0e3; padding: 24px; }
+  pre { background: #11171a; padding: 16px; border-radius: 6px; }
+  button { padding: 8px 16px; margin-right: 8px; }
+  .ok { color: #4ade80; }
+  .err { color: #f87171; }
+</style>
+</head>
+<body>
+<h1>Noise Suppression Factory — E2E Test</h1>
+<p>Black-box test page driven by Playwright. Exercises createNoiseSuppressor()
+factory dispatch across all modes without needing a working microphone or
+ONNX runtime.</p>
+
+<button id="run">Run Tests</button>
+<pre id="log"></pre>
+
+<script type="module">
+// Inline a minimal copy of the relevant API so the test page is
+// self-contained — production SDK is unbuilt at this point. The factory
+// dispatch logic is what the unit tests cover; here we verify the same
+// branches behave correctly inside a real browser DOM.
+
+class PassthroughSuppressor {
+  mode = 'none';
+  async process(s) { return s; }
+  async dispose() {}
+  stats() { return { framesProcessed: 0, avgInferenceMs: 0, mode: this.mode }; }
+}
+
+class WebRtcSuppressor {
+  mode = 'webrtc';
+  cloned = null;
+  async process(input) {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      throw new Error('WebRTC noise suppression requires navigator.mediaDevices');
+    }
+    const audioTrack = input.getAudioTracks()[0];
+    if (!audioTrack) throw new Error('input MediaStream has no audio track');
+    this.cloned = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: audioTrack.getSettings().deviceId,
+        echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+      },
+      video: false,
+    });
+    return this.cloned;
+  }
+  async dispose() {
+    if (this.cloned) for (const t of this.cloned.getTracks()) t.stop();
+  }
+  stats() { return { framesProcessed: 0, avgInferenceMs: 0, mode: this.mode }; }
+}
+
+async function createNoiseSuppressor(opts) {
+  if (opts.mode === 'none') return new PassthroughSuppressor();
+  if (opts.mode === 'webrtc') return new WebRtcSuppressor();
+  if (opts.mode === 'deepfilternet') {
+    try {
+      await import(opts.ortPath ?? 'onnxruntime-web');
+    } catch (err) {
+      throw new Error(`DeepFilterNet requires onnxruntime-web. Original error: ${err.message}`);
+    }
+    throw new Error('DeepFilterNet load not implemented in test page');
+  }
+  throw new Error(`unknown noise suppression mode: ${opts.mode}`);
+}
+
+window.__noiseSuppression = { createNoiseSuppressor };
+
+const log = document.getElementById('log');
+function push(msg, ok) {
+  const line = document.createElement('div');
+  line.className = ok ? 'ok' : 'err';
+  line.textContent = (ok ? '✓ ' : '✗ ') + msg;
+  log.appendChild(line);
+}
+
+async function runTests() {
+  log.innerHTML = '';
+  const results = [];
+
+  // 1. mode=none returns passthrough
+  try {
+    const ns = await createNoiseSuppressor({ mode: 'none' });
+    if (ns.mode !== 'none') throw new Error('expected mode=none');
+    const fakeStream = { id: 'fake' };
+    const out = await ns.process(fakeStream);
+    if (out !== fakeStream) throw new Error('passthrough did not return same stream');
+    await ns.dispose();
+    push('mode=none passthrough OK', true);
+    results.push({ name: 'none_passthrough', ok: true });
+  } catch (e) {
+    push(`mode=none failed: ${e.message}`, false);
+    results.push({ name: 'none_passthrough', ok: false, err: e.message });
+  }
+
+  // 2. mode=webrtc returns suppressor with correct mode
+  try {
+    const ns = await createNoiseSuppressor({ mode: 'webrtc' });
+    if (ns.mode !== 'webrtc') throw new Error('expected mode=webrtc');
+    if (ns.stats().mode !== 'webrtc') throw new Error('stats mode mismatch');
+    push('mode=webrtc factory OK', true);
+    results.push({ name: 'webrtc_factory', ok: true });
+  } catch (e) {
+    push(`mode=webrtc failed: ${e.message}`, false);
+    results.push({ name: 'webrtc_factory', ok: false, err: e.message });
+  }
+
+  // 3. unknown mode throws
+  try {
+    await createNoiseSuppressor({ mode: 'bogus' });
+    push('unknown mode should have thrown', false);
+    results.push({ name: 'unknown_throws', ok: false });
+  } catch (e) {
+    if (/unknown noise suppression mode/.test(e.message)) {
+      push('unknown mode rejected OK', true);
+      results.push({ name: 'unknown_throws', ok: true });
+    } else {
+      push(`unknown mode wrong error: ${e.message}`, false);
+      results.push({ name: 'unknown_throws', ok: false, err: e.message });
+    }
+  }
+
+  // 4. deepfilternet without onnxruntime fails fast
+  try {
+    await createNoiseSuppressor({ mode: 'deepfilternet', ortPath: '/__nonexistent_ort__' });
+    push('deepfilternet should have thrown', false);
+    results.push({ name: 'dfn_missing_dep', ok: false });
+  } catch (e) {
+    if (/onnxruntime-web/.test(e.message)) {
+      push('deepfilternet missing-dep rejected OK', true);
+      results.push({ name: 'dfn_missing_dep', ok: true });
+    } else {
+      push(`deepfilternet wrong error: ${e.message}`, false);
+      results.push({ name: 'dfn_missing_dep', ok: false, err: e.message });
+    }
+  }
+
+  // 5. webrtc.process actually re-acquires mic (fake media in CI gives 1 track)
+  try {
+    const fakeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ns = await createNoiseSuppressor({ mode: 'webrtc' });
+    const cleanStream = await ns.process(fakeStream);
+    if (cleanStream.getAudioTracks().length === 0) {
+      throw new Error('webrtc-cleaned stream had no audio tracks');
+    }
+    await ns.dispose();
+    for (const t of fakeStream.getTracks()) t.stop();
+    push('webrtc process() returns audio stream OK', true);
+    results.push({ name: 'webrtc_process', ok: true });
+  } catch (e) {
+    push(`webrtc process failed: ${e.message}`, false);
+    results.push({ name: 'webrtc_process', ok: false, err: e.message });
+  }
+
+  window.__noiseSuppressionResults = results;
+  window.__noiseSuppressionDone = true;
+}
+
+document.getElementById('run').addEventListener('click', runTests);
+window.__runNoiseTests = runTests;
+</script>
+</body>
+</html>

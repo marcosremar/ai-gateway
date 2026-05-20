@@ -107,7 +107,11 @@ export class ResponseCache {
       if (envelope.metadata.expiresAt && Date.now() > envelope.metadata.expiresAt) {
         await this.store.del(key);
         this._misses++;
+        // Drop both index structures so a subsequent invalidateProvider/Model
+        // doesn't see stale meta and so _size doesn't drift on long-running
+        // processes (TTL-expired entries that were never re-set would leak).
         this._removeFromAccessOrder(key);
+        this._keyMeta.delete(key);
         return null;
       }
 
@@ -169,7 +173,11 @@ export class ResponseCache {
     const idx = this.accessOrder.indexOf(key);
     if (idx !== -1) {
       this.accessOrder.splice(idx, 1);
-      this._size--;
+      // Guard against underflow: _size is the number of entries in accessOrder
+      // (single source of truth). When called against a key that's already
+      // gone (e.g. evicted by Redis TTL externally) this branch is skipped,
+      // but if internal logic ever drifts, never go negative.
+      if (this._size > 0) this._size--;
     }
   }
 

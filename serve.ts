@@ -44,6 +44,28 @@ if (!process.env.GROQ_API_KEY) {
   process.exit(1);
 }
 
+function acceptsOpenRouterPassthroughModel(model: string): boolean {
+  return /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:/-]*$/i.test(model);
+}
+
+function openRouterUpstreamModel(model: string): string {
+  return model.startsWith('openrouter/') ? model.slice('openrouter/'.length) : model;
+}
+
+async function listOpenRouterModels(): Promise<string[]> {
+  const headers: Record<string, string> = {};
+  if (process.env.OPENROUTER_API_KEY) headers.Authorization = `Bearer ${process.env.OPENROUTER_API_KEY}`;
+  const response = await fetch('https://openrouter.ai/api/v1/models', {
+    headers,
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) throw new Error(`OpenRouter models failed: ${response.status}`);
+  const payload = await response.json() as { data?: Array<{ id?: unknown }> };
+  return (payload.data ?? [])
+    .map((model) => model.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+}
+
 // Wire providers directly — no Prisma dependency
 const providers: ProviderMapping = {
   stt: {
@@ -58,15 +80,6 @@ const providers: ProviderMapping = {
     'openai/gpt-oss-20b': groqLLM,
     'qwen/qwen3-32b': groqLLM,
     'groq/compound': groqLLM,
-    // OpenRouter — Kimi K2 family
-    'moonshotai/kimi-k2': openrouterLLM,
-    'moonshotai/kimi-k2-0905': openrouterLLM,
-    'moonshotai/kimi-k2-thinking': openrouterLLM,
-    'moonshotai/kimi-k2.5': openrouterLLM,
-    'moonshotai/kimi-k2.6': openrouterLLM,
-    // OpenRouter — DeepSeek V4
-    'deepseek/deepseek-v4-pro': openrouterLLM,
-    'deepseek/deepseek-v4-flash': openrouterLLM,
     // Z.AI — GLM-4.6 / GLM-4.5V (vision) / GLM-4.5 / GLM-4.5-Air. Registered
     // dynamically from ZAI_LLM_MODELS so the model catalog is the single
     // source of truth (capability flags + pricing live there).
@@ -75,9 +88,25 @@ const providers: ProviderMapping = {
   chatFallbackChain: [
     { providerId: 'groq', model: 'llama-3.3-70b-versatile', provider: groqLLM },
   ],
+  ...(process.env.OPENROUTER_API_KEY ? {
+    chatDynamicRoutes: [{
+      providerId: 'openrouter',
+      provider: openrouterLLM,
+      acceptsModel: acceptsOpenRouterPassthroughModel,
+      upstreamModel: openRouterUpstreamModel,
+    }],
+    dynamicModelCatalogs: [{
+      providerId: 'openrouter',
+      listModels: listOpenRouterModels,
+    }],
+  } : {}),
   tts: {
     'canopylabs/orpheus-v1-english': groqTTS,
     'canopylabs/orpheus-arabic-saudi': groqTTS,
+    // Groq PlayAI TTS — multilingual (PT-BR supported), needed for Sofia/Marcos
+    // dialogue in the Copacabana Unity scene.
+    'playai-tts': groqTTS,
+    'playai-tts-arabic': groqTTS,
   },
   // Routing image provider: dit360 → local GPU 360°, fal-ai/* → fal.ai cloud
   image: routingImage,
@@ -87,6 +116,7 @@ log.log({ port: PORT, apiKeys: API_KEYS ? API_KEYS.length : 0, rateLimit: RATE_L
 log.log({
   groqConfigured: Boolean(process.env.GROQ_API_KEY),
   openrouterConfigured: Boolean(process.env.OPENROUTER_API_KEY),
+  openrouterRouting: process.env.OPENROUTER_API_KEY ? 'dynamic-passthrough' : 'disabled',
   zaiConfigured: Boolean(process.env.ZAI_API_KEY),
   zaiModels: process.env.ZAI_API_KEY ? ZAI_LLM_MODELS.map(m => m.id) : [],
   tts: 'groq/orpheus',

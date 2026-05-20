@@ -1,0 +1,17 @@
+dist/
+coverage/
+node_modules/
+web/.next/
+.stryker-tmp/
+.venv-kokoro/
+.fastembed_cache/
+output/
+infer_out/
+infer_out_compare/
+bench-results/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.glb
+*.mp4

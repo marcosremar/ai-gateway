@@ -22,6 +22,24 @@ export function initDatabase(): void {
 
 /** Fire-and-forget startup sequence (persisted spend, config, recovery, auto-boot). */
 export async function runStartupTasks(): Promise<void> {
+  // -1. Init observers — attach UserBotLatencyObserver to ring buffer.
+  try {
+    const { initObservers } = require('../observers-init');
+    initObservers();
+  } catch (e: any) {
+    log.warn(`[ws-server] initObservers failed: ${e?.message?.slice(0, 80)}`);
+  }
+
+  // -1b. Init OTLP exporter when OTEL_EXPORTER_OTLP_ENDPOINT is set.
+  // Auto-attaches to globalTracer so every endSpan() flushes upstream.
+  try {
+    const { initOtlpFromEnv, attachExporterToTracer } = require('../../src/platform/observability/otlp-exporter');
+    const exporter = initOtlpFromEnv();
+    if (exporter) attachExporterToTracer(exporter);
+  } catch (e: any) {
+    log.warn(`[ws-server] initOtlpFromEnv failed: ${e?.message?.slice(0, 80)}`);
+  }
+
   // 0. Restore persisted daily spend counter (must run before any budget checks)
   try {
     const { loadPersistedDailySpend } = require('../state');

@@ -109,13 +109,25 @@ describe('destroyTimer — edge cases', () => {
 
 describe('isAccountOwned — env parsing edge cases', () => {
   const originalEnv = { ...process.env };
-
-  afterEach(() => {
-    // Restore to clean slate
-    for (const k of ['VAST_ACCOUNT_OWNED', 'RUNPOD_ACCOUNT_OWNED', 'TENSORDOCK_ACCOUNT_OWNED', 'MODAL_ACCOUNT_OWNED', 'HYPERSTACK_ACCOUNT_OWNED']) {
+  const restoreEnv = () => {
+    for (const k of [
+      'VAST_ACCOUNT_OWNED', 'RUNPOD_ACCOUNT_OWNED', 'TENSORDOCK_ACCOUNT_OWNED', 'MODAL_ACCOUNT_OWNED', 'HYPERSTACK_ACCOUNT_OWNED',
+      'AIGW_VAST_NUKE_UNTRACKED', 'AIGW_RUNPOD_NUKE_UNTRACKED', 'AIGW_TENSORDOCK_NUKE_UNTRACKED', 'AIGW_MODAL_NUKE_UNTRACKED', 'AIGW_HYPERSTACK_NUKE_UNTRACKED',
+      'AIGW_MODAL_STOP_UNTRACKED',
+    ]) {
       if (originalEnv[k] !== undefined) process.env[k] = originalEnv[k];
       else delete process.env[k];
     }
+  };
+
+  beforeEach(() => {
+    restoreEnv();
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+    vi.resetModules();
   });
 
   it('empty string VAST_ACCOUNT_OWNED="" stays safe', async () => {
@@ -139,12 +151,21 @@ describe('isAccountOwned — env parsing edge cases', () => {
     }
   });
 
-  it('prefixesForProvider returns [] iff isAccountOwned returns true', async () => {
-    const { prefixesForProvider, isAccountOwned, GATEWAY_NAME_PREFIXES } = await import('../../server/gpu-orphan-cleanup');
-    for (const p of ['vast', 'runpod', 'tensordock', 'modal', 'hyperstack'] as const) {
-      if (isAccountOwned(p)) expect(prefixesForProvider(p)).toEqual([]);
-      else expect(prefixesForProvider(p)).toEqual(GATEWAY_NAME_PREFIXES);
-    }
+  it('prefixesForProvider requires account-owned plus nuke-untracked for VM provider kill-all', async () => {
+    process.env.VAST_ACCOUNT_OWNED = '1';
+    const { prefixesForProvider, GATEWAY_NAME_PREFIXES } = await import('../../server/gpu-orphan-cleanup');
+    expect(prefixesForProvider('vast')).toEqual(GATEWAY_NAME_PREFIXES);
+
+    process.env.AIGW_VAST_NUKE_UNTRACKED = '1';
+    expect(prefixesForProvider('vast')).toEqual([]);
+  });
+
+  it('Modal sweep defaults to app stop, but can be forced back to prefix-only mode', async () => {
+    const { prefixesForProvider, GATEWAY_NAME_PREFIXES } = await import('../../server/gpu-orphan-cleanup');
+    expect(prefixesForProvider('modal')).toEqual([]);
+
+    process.env.AIGW_MODAL_STOP_UNTRACKED = '0';
+    expect(prefixesForProvider('modal')).toEqual(GATEWAY_NAME_PREFIXES);
   });
 });
 
@@ -279,7 +300,39 @@ describe('auditGpuCosts — destroy-gate belt-and-braces', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('sweepOrphanInstances — provider failure isolation', () => {
-  beforeEach(() => { vi.resetModules(); });
+  const originalEnv = { ...process.env };
+  const envKeys = [
+    'MODAL_IDLE_GRACE_MS', 'MODAL_IDLE_SWEEP_INTERVAL_MS', 'AIGW_MODAL_STOP_UNTRACKED',
+    'MODAL_TOKEN_ID', 'MODAL_TOKEN_SECRET', 'MODAL_API_KEY',
+    'RUNPOD_API_KEY', 'VAST_API_KEY', 'TENSORDOCK_API_KEY', 'TENSORDOCK_AUTH_ID', 'HYPERSTACK_API_KEY',
+  ];
+
+  const restoreEnv = () => {
+    for (const k of envKeys) {
+      if (originalEnv[k] !== undefined) process.env[k] = originalEnv[k];
+      else delete process.env[k];
+    }
+  };
+
+  beforeEach(() => {
+    restoreEnv();
+    for (const k of envKeys) delete process.env[k];
+    vi.resetModules();
+    vi.doMock('../../src/gateway/autoscaler/file-lifecycle-logger', () => ({
+      logGpuEvent: vi.fn(),
+    }));
+  });
+
+  afterEach(() => {
+    restoreEnv();
+    vi.useRealTimers();
+    vi.doUnmock('../../server/state');
+    vi.doUnmock('../../server/providers');
+    vi.doUnmock('../../server/ws-state');
+    vi.doUnmock('../../server/gpu-terminate');
+    vi.doUnmock('../../src/gateway/autoscaler/file-lifecycle-logger');
+    vi.resetModules();
+  });
 
   it('one provider throwing does not stop the others from being swept', async () => {
     const terminated: Array<{ provider: string; id: string }> = [];
@@ -352,5 +405,364 @@ describe('sweepOrphanInstances — provider failure isolation', () => {
     // Found 3, terminated 2 (one threw)
     expect(result.found).toBe(3);
     expect(result.terminated).toBe(2);
+  });
+
+  it('Modal apps are stopped only after 5 continuous idle minutes', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-12T10:00:00Z'));
+    process.env.MODAL_IDLE_GRACE_MS = String(5 * 60_000);
+    const stopped: string[] = [];
+
+    vi.doMock('../../server/state', () => ({
+      deployApiKey: '',
+      deployVastApiKey: '',
+      deployTensordockApiKey: '',
+      deployModalApiKey: 'modal-key',
+      deployHyperstackApiKey: '',
+      deployTensordockAuthId: '',
+      deployState: { podId: '', transitions: [] },
+      standbyDeployState: { podId: '' },
+    }));
+    vi.doMock('../../server/providers', () => ({
+      runpod: { listInstances: async () => [], deleteInstance: async () => {} },
+      vast: { listInstances: async () => [], deleteInstance: async () => {} },
+      tensordock: { listInstances: async () => [], deleteInstance: async () => {} },
+      modal: {
+        listInstances: async () => [
+          { instanceId: 'ap-idle', instanceName: 'manual-modal-app', status: 'deployed' },
+        ],
+        deleteInstance: async (id: string) => { stopped.push(id); },
+      },
+      hyperstack: { listInstances: async () => [], deleteInstance: async () => {} },
+    }));
+
+    const { sweepOrphanInstances } = await import('../../server/gpu-orphan-cleanup');
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(5 * 60_000 + 1);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 1, terminated: 1 });
+    expect(stopped).toEqual(['ap-idle']);
+  });
+
+  it('Modal running task is still stopped after 5 minutes when the gateway is not tracking it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-12T10:00:00Z'));
+    process.env.MODAL_IDLE_GRACE_MS = String(5 * 60_000);
+    const stopped: string[] = [];
+
+    vi.doMock('../../server/state', () => ({
+      deployApiKey: '',
+      deployVastApiKey: '',
+      deployTensordockApiKey: '',
+      deployModalApiKey: 'modal-key',
+      deployHyperstackApiKey: '',
+      deployTensordockAuthId: '',
+      deployState: { podId: '', transitions: [] },
+      standbyDeployState: { podId: '' },
+    }));
+    vi.doMock('../../server/providers', () => ({
+      runpod: { listInstances: async () => [], deleteInstance: async () => {} },
+      vast: { listInstances: async () => [], deleteInstance: async () => {} },
+      tensordock: { listInstances: async () => [], deleteInstance: async () => {} },
+      modal: {
+        listInstances: async () => [
+          { instanceId: 'ap-active', instanceName: 'active-modal-app', status: 'running' },
+        ],
+        deleteInstance: async (id: string) => { stopped.push(id); },
+      },
+      hyperstack: { listInstances: async () => [], deleteInstance: async () => {} },
+    }));
+
+    const { sweepOrphanInstances } = await import('../../server/gpu-orphan-cleanup');
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(4 * 60_000);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(60_001);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 1, terminated: 1 });
+    expect(stopped).toEqual(['ap-active']);
+  });
+
+  it('cleanupModalApps keeps direct cleanup prefix-scoped by default', async () => {
+    const stopped: string[] = [];
+
+    vi.doMock('../../server/state', () => ({
+      deployApiKey: '',
+      deployVastApiKey: '',
+      deployTensordockApiKey: '',
+      deployModalApiKey: '',
+      deployHyperstackApiKey: '',
+      deployTensordockAuthId: '',
+      deployState: { podId: '', transitions: [] },
+      standbyDeployState: { podId: '' },
+    }));
+    vi.doMock('../../server/providers', () => ({
+      runpod: { listInstances: async () => [], deleteInstance: async () => {} },
+      vast: { listInstances: async () => [], deleteInstance: async () => {} },
+      tensordock: { listInstances: async () => [], deleteInstance: async () => {} },
+      modal: {
+        listInstances: async () => [
+          { instanceId: 'ap-manual', instanceName: 'manual-modal-app', status: 'deployed' },
+          { instanceId: 'ap-gateway', instanceName: 'ai-gateway-modal-app', status: 'deployed' },
+        ],
+        deleteInstance: async (id: string) => { stopped.push(id); },
+      },
+      hyperstack: { listInstances: async () => [], deleteInstance: async () => {} },
+    }));
+
+    const { cleanupModalApps } = await import('../../server/gpu-orphan-cleanup');
+    await cleanupModalApps('modal-key');
+    expect(stopped).toEqual(['ap-gateway']);
+  });
+
+  it('Modal app tracked by the gateway is not stopped, and only starts idle grace after tracking is removed', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-12T10:00:00Z'));
+    process.env.MODAL_IDLE_GRACE_MS = String(5 * 60_000);
+    const stopped: string[] = [];
+    const deployState = { podId: 'ap-tracked', transitions: [] as any[] };
+
+    vi.doMock('../../server/state', () => ({
+      deployApiKey: '',
+      deployVastApiKey: '',
+      deployTensordockApiKey: '',
+      deployModalApiKey: 'modal-key',
+      deployHyperstackApiKey: '',
+      deployTensordockAuthId: '',
+      deployState,
+      standbyDeployState: { podId: '' },
+    }));
+    vi.doMock('../../server/providers', () => ({
+      runpod: { listInstances: async () => [], deleteInstance: async () => {} },
+      vast: { listInstances: async () => [], deleteInstance: async () => {} },
+      tensordock: { listInstances: async () => [], deleteInstance: async () => {} },
+      modal: {
+        listInstances: async () => [
+          { instanceId: 'ap-tracked', instanceName: 'tracked-modal-app', status: 'deployed' },
+        ],
+        deleteInstance: async (id: string) => { stopped.push(id); },
+      },
+      hyperstack: { listInstances: async () => [], deleteInstance: async () => {} },
+    }));
+
+    const { sweepOrphanInstances } = await import('../../server/gpu-orphan-cleanup');
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+
+    deployState.podId = '';
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(5 * 60_000 + 1);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 1, terminated: 1 });
+    expect(stopped).toEqual(['ap-tracked']);
+  });
+
+  it('Modal initializing apps do not accrue idle time until they become deployed', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-12T10:00:00Z'));
+    process.env.MODAL_IDLE_GRACE_MS = String(5 * 60_000);
+    const stopped: string[] = [];
+    let status = 'initializing';
+
+    vi.doMock('../../server/state', () => ({
+      deployApiKey: '',
+      deployVastApiKey: '',
+      deployTensordockApiKey: '',
+      deployModalApiKey: 'modal-key',
+      deployHyperstackApiKey: '',
+      deployTensordockAuthId: '',
+      deployState: { podId: '', transitions: [] },
+      standbyDeployState: { podId: '' },
+    }));
+    vi.doMock('../../server/providers', () => ({
+      runpod: { listInstances: async () => [], deleteInstance: async () => {} },
+      vast: { listInstances: async () => [], deleteInstance: async () => {} },
+      tensordock: { listInstances: async () => [], deleteInstance: async () => {} },
+      modal: {
+        listInstances: async () => [
+          { instanceId: 'ap-booting', instanceName: 'booting-modal-app', status },
+        ],
+        deleteInstance: async (id: string) => { stopped.push(id); },
+      },
+      hyperstack: { listInstances: async () => [], deleteInstance: async () => {} },
+    }));
+
+    const { sweepOrphanInstances } = await import('../../server/gpu-orphan-cleanup');
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(20 * 60_000);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+
+    status = 'deployed';
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(5 * 60_000 + 1);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 1, terminated: 1 });
+    expect(stopped).toEqual(['ap-booting']);
+  });
+
+  it('Modal stopped status clears the idle clock, so a redeployed app gets a fresh grace window', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-12T10:00:00Z'));
+    process.env.MODAL_IDLE_GRACE_MS = String(5 * 60_000);
+    const stopped: string[] = [];
+    let status = 'deployed';
+
+    vi.doMock('../../server/state', () => ({
+      deployApiKey: '',
+      deployVastApiKey: '',
+      deployTensordockApiKey: '',
+      deployModalApiKey: 'modal-key',
+      deployHyperstackApiKey: '',
+      deployTensordockAuthId: '',
+      deployState: { podId: '', transitions: [] },
+      standbyDeployState: { podId: '' },
+    }));
+    vi.doMock('../../server/providers', () => ({
+      runpod: { listInstances: async () => [], deleteInstance: async () => {} },
+      vast: { listInstances: async () => [], deleteInstance: async () => {} },
+      tensordock: { listInstances: async () => [], deleteInstance: async () => {} },
+      modal: {
+        listInstances: async () => [
+          { instanceId: 'ap-redeploy', instanceName: 'redeploy-modal-app', status },
+        ],
+        deleteInstance: async (id: string) => { stopped.push(id); },
+      },
+      hyperstack: { listInstances: async () => [], deleteInstance: async () => {} },
+    }));
+
+    const { sweepOrphanInstances } = await import('../../server/gpu-orphan-cleanup');
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(4 * 60_000);
+    status = 'stopped';
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+
+    vi.advanceTimersByTime(10 * 60_000);
+    status = 'deployed';
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(4 * 60_000);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(60_001);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 1, terminated: 1 });
+    expect(stopped).toEqual(['ap-redeploy']);
+  });
+
+  it('AIGW_MODAL_STOP_UNTRACKED=0 protects non-prefixed Modal apps but still stops gateway-prefixed apps', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-12T10:00:00Z'));
+    process.env.MODAL_IDLE_GRACE_MS = String(5 * 60_000);
+    process.env.AIGW_MODAL_STOP_UNTRACKED = '0';
+    const stopped: string[] = [];
+
+    vi.doMock('../../server/state', () => ({
+      deployApiKey: '',
+      deployVastApiKey: '',
+      deployTensordockApiKey: '',
+      deployModalApiKey: 'modal-key',
+      deployHyperstackApiKey: '',
+      deployTensordockAuthId: '',
+      deployState: { podId: '', transitions: [] },
+      standbyDeployState: { podId: '' },
+    }));
+    vi.doMock('../../server/providers', () => ({
+      runpod: { listInstances: async () => [], deleteInstance: async () => {} },
+      vast: { listInstances: async () => [], deleteInstance: async () => {} },
+      tensordock: { listInstances: async () => [], deleteInstance: async () => {} },
+      modal: {
+        listInstances: async () => [
+          { instanceId: 'ap-manual', instanceName: 'manual-modal-app', status: 'deployed' },
+          { instanceId: 'ap-gateway', instanceName: 'ai-gateway-modal-app', status: 'deployed' },
+        ],
+        deleteInstance: async (id: string) => { stopped.push(id); },
+      },
+      hyperstack: { listInstances: async () => [], deleteInstance: async () => {} },
+    }));
+
+    const { sweepOrphanInstances } = await import('../../server/gpu-orphan-cleanup');
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(5 * 60_000 + 1);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 1, terminated: 1 });
+    expect(stopped).toEqual(['ap-gateway']);
+  });
+
+  it('Modal credentials are built from MODAL_TOKEN_ID and MODAL_TOKEN_SECRET when deploy state has no key', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-12T10:00:00Z'));
+    process.env.MODAL_IDLE_GRACE_MS = String(5 * 60_000);
+    process.env.MODAL_TOKEN_ID = 'ak-test';
+    process.env.MODAL_TOKEN_SECRET = 'as-test';
+    const credentialsSeen: string[] = [];
+
+    vi.doMock('../../server/state', () => ({
+      deployApiKey: '',
+      deployVastApiKey: '',
+      deployTensordockApiKey: '',
+      deployModalApiKey: '',
+      deployHyperstackApiKey: '',
+      deployTensordockAuthId: '',
+      deployState: { podId: '', transitions: [] },
+      standbyDeployState: { podId: '' },
+    }));
+    vi.doMock('../../server/providers', () => ({
+      runpod: { listInstances: async () => [], deleteInstance: async () => {} },
+      vast: { listInstances: async () => [], deleteInstance: async () => {} },
+      tensordock: { listInstances: async () => [], deleteInstance: async () => {} },
+      modal: {
+        listInstances: async (creds: { apiKey: string }) => {
+          credentialsSeen.push(creds.apiKey);
+          return [{ instanceId: 'ap-env-key', instanceName: 'env-key-modal-app', status: 'deployed' }];
+        },
+        deleteInstance: async (_id: string, creds: { apiKey: string }) => {
+          credentialsSeen.push(creds.apiKey);
+        },
+      },
+      hyperstack: { listInstances: async () => [], deleteInstance: async () => {} },
+    }));
+
+    const { sweepOrphanInstances } = await import('../../server/gpu-orphan-cleanup');
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 0, terminated: 0 });
+    vi.advanceTimersByTime(5 * 60_000 + 1);
+    expect(await sweepOrphanInstances()).toMatchObject({ found: 1, terminated: 1 });
+    expect(credentialsSeen.length).toBeGreaterThanOrEqual(2);
+    expect(credentialsSeen.every((value) => value === 'ak-test:as-test')).toBe(true);
+  });
+
+  it('startOrphanSweep schedules the Modal idle timer and stopOrphanSweep clears it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-12T10:00:00Z'));
+    process.env.MODAL_IDLE_GRACE_MS = String(5 * 60_000);
+    process.env.MODAL_IDLE_SWEEP_INTERVAL_MS = String(60_000);
+    const stopped: string[] = [];
+
+    vi.doMock('../../server/state', () => ({
+      deployApiKey: '',
+      deployVastApiKey: '',
+      deployTensordockApiKey: '',
+      deployModalApiKey: 'modal-key',
+      deployHyperstackApiKey: '',
+      deployTensordockAuthId: '',
+      deployState: { status: 'idle', podId: '', transitions: [] },
+      standbyDeployState: { podId: '' },
+    }));
+    vi.doMock('../../server/providers', () => ({
+      runpod: { listInstances: async () => [], deleteInstance: async () => {} },
+      vast: { listInstances: async () => [], deleteInstance: async () => {} },
+      tensordock: { listInstances: async () => [], deleteInstance: async () => {} },
+      modal: {
+        listInstances: async () => [
+          { instanceId: 'ap-periodic', instanceName: 'periodic-modal-app', status: 'deployed' },
+        ],
+        deleteInstance: async (id: string) => { stopped.push(id); },
+      },
+      hyperstack: { listInstances: async () => [], deleteInstance: async () => {} },
+    }));
+
+    const { startOrphanSweep, stopOrphanSweep } = await import('../../server/gpu-orphan-cleanup');
+    startOrphanSweep();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(stopped).toEqual([]);
+    await vi.advanceTimersByTimeAsync(75_000);
+    expect(stopped).toEqual(['ap-periodic']);
+
+    stopOrphanSweep();
+    stopped.length = 0;
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(stopped).toEqual([]);
   });
 });

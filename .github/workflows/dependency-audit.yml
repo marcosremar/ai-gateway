@@ -16,15 +16,57 @@ on:
   schedule:
     - cron: '0 9 * * 1'
 
+permissions:
+  contents: read
+  pull-requests: read
+  security-events: write
+
 jobs:
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48
+        with:
+          fail-on-severity: high
+          fail-on-scopes: runtime
+          vulnerability-check: true
+          license-check: true
+
+  osv-pr:
+    name: OSV Scanner - PR Delta
+    if: github.event_name == 'pull_request'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@375a0e8ebdc98e99b02ac4338a724f5750f21213
+    with:
+      scan-args: |-
+        --recursive
+        ./
+      fail-on-vuln: true
+      upload-sarif: true
+
+  osv-full:
+    name: OSV Scanner - Full
+    if: github.event_name != 'pull_request'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@375a0e8ebdc98e99b02ac4338a724f5750f21213
+    with:
+      scan-args: |-
+        --recursive
+        ./
+      fail-on-vuln: true
+      upload-sarif: true
+
   audit:
     name: Dependency Vulnerability Audit
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: latest
 

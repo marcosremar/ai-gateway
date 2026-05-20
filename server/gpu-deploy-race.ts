@@ -26,7 +26,20 @@ import type { DeployExtra } from './gpu-deploy';
 
 const log = createLogger('gpu-deploy');
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
-const MODAL_DEPLOY_SCRIPT = resolve(SERVER_DIR, '..', 'docker', 'modal', 'babelcast.py');
+// Kept only as a documented constant for the legacy fallback path. The
+// actual per-image script lookup goes through `modalStrategy.resolveImage`
+// (see `src/modules/gpu-providers/strategies/modal-strategy.ts`) so the
+// trellis2/babelcast/etc Modal apps each get the right `.py` instead of
+// every modal slot collapsing onto babelcast.py and crashing.
+const MODAL_DEPLOY_SCRIPT_FALLBACK = resolve(SERVER_DIR, '..', 'dockers', 'modal', 'babelcast.py');
+import { modalStrategy } from '../src/modules/gpu-providers/strategies';
+function modalScriptFor(image: string): string {
+  try {
+    return modalStrategy.resolveImage(image);
+  } catch {
+    return MODAL_DEPLOY_SCRIPT_FALLBACK;
+  }
+}
 
 interface RaceCandidate {
   index: number;
@@ -131,7 +144,7 @@ export async function startDeployRace(
       index: i,
       tier,
       gpuTypes: gpuType ? [gpuType] : gpuTypes,
-      tierDockerImage: tier.name === 'modal' ? MODAL_DEPLOY_SCRIPT : dockerImage,
+      tierDockerImage: tier.name === 'modal' ? modalScriptFor(dockerImage) : dockerImage,
     };
   });
 
@@ -157,7 +170,13 @@ export async function startDeployRace(
   const createResults = await Promise.allSettled(slots.map(async (slot) => {
     const credentials = { apiKey: slot.tier.apiKey, authId: slot.tier.authId };
     const defaultStorage = DEFAULT_STORAGE_GB[slot.tier.name] || 50;
-    const storageGb = Math.max(extra.storageGb || defaultStorage, defaultStorage);
+    // Honour explicit body.storageGb verbatim — the previous
+    // Math.max(extra.storageGb||defaultStorage, defaultStorage) clamp
+    // forced every Vast deploy to 100 GB and excluded most A100 PCIe
+    // offers (48-94 GB disk).
+    const storageGb = (typeof extra.storageGb === 'number' && extra.storageGb > 0)
+      ? extra.storageGb
+      : defaultStorage;
 
     // Progress callback: update deploy state during image pull so the UI
     // shows "pulling_image" instead of being stuck at "creating_pod".
@@ -187,6 +206,13 @@ export async function startDeployRace(
           region: extra.region, hfToken: extra.hfToken, env: extra.env,
           bareMetal: slot.tier.name === 'tensordock', interruptible: extra.interruptible,
           ...(slot.tier.name === 'runpod' ? { cloudType: 'SECURE' as const } : {}),
+          // Vast-only flags that opt the offer search out of the verified-host
+          // filter / the strict-fast-boot reliability tier. The handler already
+          // copies them into `extra`; we just need to forward them to the
+          // provider client so they reach the search payload.
+          ...(extra.allowUnverified ? { allowUnverified: extra.allowUnverified } : {}),
+          ...(extra.strictFastBoot ? { strictFastBoot: extra.strictFastBoot } : {}),
+          ...(extra.label ? { label: extra.label } : {}),
           ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
           ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
           ...(extra.volumeId ? { volumeId: extra.volumeId } : {}),
@@ -290,7 +316,15 @@ export async function startDeployRace(
       // Probe /health
       if (localEndpoint && !raceDone) {
         try {
-          const res = await fetch(`${localEndpoint}/health`, { signal: AbortSignal.timeout(8000) });
+          // Wire raceAbort.signal so winner-decided losers cancel in-flight
+          // /health fetches immediately. Previous code used only a per-fetch
+          // 8s timeout — losers wasted up to 8s+contract-validation per slot
+          // after the winner was already chosen. AbortSignal.any combines the
+          // two signals in Node 20.3+ / Bun.
+          const healthSignal = (typeof (AbortSignal as { any?: Function }).any === 'function')
+            ? (AbortSignal as { any: (sigs: AbortSignal[]) => AbortSignal }).any([raceAbort.signal, AbortSignal.timeout(8000)])
+            : raceAbort.signal;
+          const res = await fetch(`${localEndpoint}/health`, { signal: healthSignal });
           if (res.ok) {
             const data = await res.json() as { status?: string };
             const HEALTHY = new Set(['healthy', 'ok', 'degraded', 'ready']);
@@ -301,12 +335,16 @@ export async function startDeployRace(
                 log.warn(`[race] Slot ${idx} rejected: ${lastRaceHealthError}`);
                 break;
               }
+              // Bail out if winner already declared between fetches — avoids
+              // wasted contract validation / smoke tests on losing slots.
+              if (raceDone) break;
               const apiContract = await validateEndpointApiContract(localEndpoint, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest);
               if (!apiContract.ok) {
                 lastRaceHealthError = apiContract.error;
                 log.warn(`[race] Slot ${idx} rejected: ${apiContract.error}`);
                 break;
               }
+              if (raceDone) break;
               if (extra.runSmokeTests !== false && (extra.expectedCapabilities?.includes('glb_generation') || extra.expectedApiPaths?.some(path => /generate(?:-from-text)?|glb/i.test(path)))) {
                 const smoke = await runGlbSmokeTest(localEndpoint, extra.expectedApiPaths);
                 if (!smoke.ok) {
@@ -315,6 +353,7 @@ export async function startDeployRace(
                   break;
                 }
               }
+              if (raceDone) break;
               if (!raceDone) {
                 // Winner — update global state and abort all other slots immediately
                 raceDone = true;
@@ -435,9 +474,11 @@ export async function startDeployRace(
   // Phase 3: Final state / race summary
   if (winner) {
     const w = winner as RaceCandidate;
-    // winnerBootMs is simply the time since deploy started (all candidates started at same time)
-    // The costPerHr check is just a safety guard — if costPerHr is 0, something is wrong
-    const winnerBootMs = w.costPerHr > 0 ? Date.now() - deployStartedAt : 0;
+    // Wall-clock since deploy started — independent of costPerHr (some price
+    // probes return 0 for free/credit-funded offers, but the actual boot time
+    // still matters for observability). Previous gating on costPerHr made the
+    // summary log report 0ms boot for legitimate free-tier deploys.
+    const winnerBootMs = Date.now() - deployStartedAt;
     const loserCount = candidates.length - 1;
     if (loserCount > 0) {
       // w is already declared above — no need to redeclare

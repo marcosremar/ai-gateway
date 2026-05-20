@@ -7,7 +7,7 @@ WORKDIR /app
 
 # Install only production dependencies
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile --production && \
+RUN bun install --frozen-lockfile --production --ignore-scripts && \
     rm -rf /tmp/bun* /root/.bun/install/cache
 
 # ── Stage 2: Build ──────────────────────────────────────────────────────────
@@ -16,7 +16,7 @@ WORKDIR /app
 
 # Install all dependencies (including dev)
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
+RUN bun install --frozen-lockfile --ignore-scripts
 
 # Copy source code
 COPY src/ src/

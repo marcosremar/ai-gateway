@@ -1,0 +1,21 @@
+rules:
+  - id: aigw-no-eval-or-dynamic-function
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: Avoid eval/new Function. AI-generated code must use explicit parsers or typed dispatch.
+    pattern-either:
+      - pattern: eval($EXPR)
+      - pattern: new Function(...)
+
+  - id: aigw-no-hardcoded-provider-token
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: Possible hardcoded AI provider credential. Use environment variables or the AES-GCM vault.
+    patterns:
+      - pattern-regex: '(sk-[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9_-]{20,}|rpa_[A-Za-z0-9_-]{20,})'
+
+  - id: aigw-deprecated-hf-transfer
+    languages: [generic]
+    severity: WARNING
+    message: Use HF_XET_HIGH_PERFORMANCE and hf_xet instead of deprecated HF_HUB_ENABLE_HF_TRANSFER.
+    pattern: HF_HUB_ENABLE_HF_TRANSFER

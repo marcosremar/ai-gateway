@@ -1,0 +1,60 @@
+{
+  "$schema": "https://unpkg.com/knip/schema.json",
+  "entry": [
+    "src/index.ts",
+    "sdk/node/index.ts",
+    "bin/ai-gateway.ts",
+    "server/ws-server.ts",
+    "server/**/*.ts",
+    "scripts/**/*.ts",
+    "vitest.config.ts",
+    "vitest.unit.config.ts",
+    "tsup.config.ts",
+    "eslint.config.js",
+    "stryker.config.cjs"
+  ],
+  "project": [
+    "src/**/*.ts",
+    "sdk/**/*.ts",
+    "server/**/*.ts",
+    "bin/**/*.ts",
+    "scripts/**/*.ts",
+    "__tests__/**/*.ts"
+  ],
+  "ignore": [
+    "dist/**",
+    "coverage/**",
+    "node_modules/**",
+    "web/.next/**",
+    "src/modules/**",
+    "dockers/**",
+    "react-project/**",
+    "react-project-2/**"
+  ],
+  "ignoreDependencies": [
+    "@aws-sdk/client-s3",
+    "@changesets/cli",
+    "@eslint/js",
+    "@types/bun",
+    "@types/ws",
+    "@vitest/spy",
+    "dependency-cruiser",
+    "eslint-plugin-security",
+    "fast-check",
+    "knip",
+    "tsup",
+    "typescript-eslint",
+    "vitepress",
+    "vitest"
+  ],
+  "ignoreBinaries": [
+    "bun",
+    "docker",
+    "flyctl",
+    "gh",
+    "git",
+    "k6",
+    "ssh",
+    "tsc"
+  ]
+}

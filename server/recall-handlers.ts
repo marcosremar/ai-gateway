@@ -209,9 +209,57 @@ export async function handleRecallStatus(_req: IncomingMessage, res: ServerRespo
 }
 
 export async function handleRecallWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // Auth gate — without this, anyone can flip recallBotStatus + broadcast
+  // recall:status events to all WS clients (and clear recallBotId).
+  // Accept either:
+  //   1. shared secret in Authorization: Bearer <RECALL_WEBHOOK_SECRET>
+  //   2. HMAC-SHA256 signature in X-Recall-Signature: sha256=<hex>
+  // Both checked in constant time. If RECALL_WEBHOOK_SECRET is unset, fall
+  // through to localhost-only (request from 127.0.0.1) to avoid breaking
+  // local dev. In production set RECALL_WEBHOOK_SECRET.
+  const secret = process.env.RECALL_WEBHOOK_SECRET || '';
+  let rawBody = '';
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    rawBody = Buffer.concat(chunks).toString('utf-8');
+  } catch (err) {
+    handleBodyError(res, err);
+    return;
+  }
+
+  if (secret) {
+    const { timingSafeEqual, createHmac } = await import('crypto');
+    const safeEq = (a: string, b: string): boolean => {
+      if (!a || !b) return false;
+      if (a.length !== b.length) {
+        try { timingSafeEqual(Buffer.from(a.padEnd(b.length, '\0')), Buffer.from(b.padEnd(a.length, '\0'))); } catch { /* no-op */ }
+        return false;
+      }
+      try { return timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; }
+    };
+    const authHeader = (req.headers['authorization'] as string | undefined) || '';
+    const bearer = authHeader.replace(/^Bearer\s+/i, '').trim();
+    const sigHeader = (req.headers['x-recall-signature'] as string | undefined) || '';
+    const expectedSig = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+    const bearerOk = bearer.length > 0 && safeEq(bearer, secret);
+    const sigOk = sigHeader.length > 0 && safeEq(sigHeader, expectedSig);
+    if (!bearerOk && !sigOk) {
+      jsonResponse(res, 401, { error: 'Recall webhook authentication failed' });
+      return;
+    }
+  } else {
+    const remote = req.socket?.remoteAddress || '';
+    const isLocal = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1' || remote.startsWith('127.');
+    if (!isLocal) {
+      jsonResponse(res, 401, { error: 'RECALL_WEBHOOK_SECRET not configured — non-localhost rejected' });
+      return;
+    }
+  }
+
   let body: Record<string, unknown>;
   try {
-    body = await readJsonBody(req);
+    body = rawBody.trim() ? JSON.parse(rawBody) : {};
   } catch (err) {
     handleBodyError(res, err);
     return;
@@ -227,7 +275,10 @@ export async function handleRecallWebhook(req: IncomingMessage, res: ServerRespo
   const event = validated.event || '';
   const data = validated.data || {};
 
-  log.log(`event=${event} bot_id=${data.bot_id ?? '?'}`);
+  // Sanitize against log injection (newlines could forge log entries).
+  const safeEvent = String(event).replace(/[\r\n\t]/g, '_').slice(0, 80);
+  const safeBotId = String(data.bot_id ?? '?').replace(/[\r\n\t]/g, '_').slice(0, 80);
+  log.log(`event=${safeEvent} bot_id=${safeBotId}`);
 
   // Map Recall.ai webhook events to our status
   const statusCode = ((data.status ?? {}) as Record<string, unknown>).code as string | undefined;

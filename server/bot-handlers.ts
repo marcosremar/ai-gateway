@@ -739,7 +739,10 @@ export async function handleBotStatus(_req: IncomingMessage, res: ServerResponse
     ...botState,
     elapsedSec: elapsed,
     webcamRtmpUrl: botState.webcamRtmpUrl,
-    youtubeStreamKey: botState.youtubeStreamKey ? `${botState.youtubeStreamKey.slice(0, 4)}****` : '',
+    // Show only last 4 chars (after `****`) — first 4 of YouTube stream
+    // keys have low entropy + structured prefix that meaningfully reduces
+    // brute-force search space. Last-4 is the standard "tail redaction".
+    youtubeStreamKey: botState.youtubeStreamKey ? `****${botState.youtubeStreamKey.slice(-4)}` : '',
   }));
 }
 

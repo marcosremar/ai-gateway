@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { handleModels } from '../src/proxy/routes/models';
+import { handleModels, handleModelsWithDynamic } from '../src/proxy/routes/models';
 import type { ProviderMapping } from '../src/proxy/types';
 
 describe('handleModels', () => {
@@ -95,5 +95,20 @@ describe('handleModels', () => {
     const res = handleModels(providers);
     const body = res.body as { data: Array<{ id: string }> };
     expect(body.data).toHaveLength(3);
+  });
+
+  it('merges dynamic remote model catalogs without fixed allowlists', async () => {
+    const providers: ProviderMapping = {
+      chat: { 'local-model': { providerId: 't', isConfigured: () => true } as any },
+      dynamicModelCatalogs: [{
+        providerId: 'openrouter',
+        listModels: async () => ['qwen/qwen3-vl-32b-instruct', 'local-model'],
+      }],
+    };
+    const res = await handleModelsWithDynamic(providers);
+    const body = res.body as { data: Array<{ id: string; owned_by: string }> };
+    expect(body.data.map((m) => m.id)).toContain('qwen/qwen3-vl-32b-instruct');
+    expect(body.data.filter((m) => m.id === 'local-model')).toHaveLength(1);
+    expect(body.data.find((m) => m.id === 'qwen/qwen3-vl-32b-instruct')?.owned_by).toBe('openrouter');
   });
 });

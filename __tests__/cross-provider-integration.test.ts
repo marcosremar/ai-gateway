@@ -24,7 +24,9 @@ beforeAll(() => loadEnv());
 
 function skipOn(err: unknown): boolean {
   const s = (err as Record<string, unknown>)?.status;
-  return s === 401 || s === 402 || s === 403 || s === 429;
+  // 404 = provider decommissioned the model; skip like auth/billing/rate-limit
+  // rather than hard-failing this cross-provider contract test on model drift.
+  return s === 401 || s === 402 || s === 403 || s === 404 || s === 429;
 }
 
 // ─── STT Cross-Provider ──────────────────────────────────────────────────────
