@@ -180,6 +180,14 @@ export interface FinetuneOpts {
   ckptAverage?: number;
   exportGguf?: boolean;
 
+  // R2 / S3 durable storage (independente de HF) — sobrevive morte do pod.
+  /** Bucket R2/S3 p/ dataset + checkpoints. Liga restore/backup via rclone no script. */
+  r2Bucket?: string;
+  /** Prefix/pasta dentro do bucket (ex: jobs/tts-ptbr-v12). Default: jobs/<projeto-ou-preset>. */
+  r2Prefix?: string;
+  /** Ao subir, restaura /workspace/checkpoints do R2 e retoma o último step. */
+  resumeFromR2?: boolean;
+
   // Operations
   autoResume?: boolean;
   preferSpot?: boolean;

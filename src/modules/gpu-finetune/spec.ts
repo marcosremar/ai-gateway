@@ -205,6 +205,19 @@ export function validateSpec(spec: Partial<FinetuneOpts>): ValidationResult {
     errs.push(`hfStructure must be flat|split|tri (got ${spec.hfStructure})`);
   }
 
+  // ── R2 / S3 durable storage ──
+  if (spec.r2Bucket !== undefined) {
+    if (typeof spec.r2Bucket !== 'string' || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(spec.r2Bucket)) {
+      errs.push(`r2Bucket must be a valid bucket name (lowercase, 3-63 chars, [a-z0-9.-]) — got '${spec.r2Bucket}'`);
+    }
+  }
+  if (spec.r2Prefix !== undefined && (typeof spec.r2Prefix !== 'string' || spec.r2Prefix.startsWith('/'))) {
+    errs.push(`r2Prefix must be a string without a leading slash (e.g. 'jobs/my-run')`);
+  }
+  if (spec.resumeFromR2 && !spec.r2Bucket) {
+    errs.push('resumeFromR2 requires r2Bucket to be set');
+  }
+
   // ── Providers ──
   if (spec.providers !== undefined) {
     if (!Array.isArray(spec.providers)) {

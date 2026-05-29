@@ -410,6 +410,56 @@ describe('FinetuneGateway.compose', () => {
     expect(main).toContain('peft');
   });
 
+  it('wires R2 restore/backup + forces resume when r2Bucket + resumeFromR2 + creds present', () => {
+    const saved = { ...process.env };
+    process.env.B2_ACCOUNT_ID = 'ak_test';
+    process.env.B2_APPLICATION_KEY = 'sk_test';
+    process.env.B2_ENDPOINT = 'https://acct.r2.cloudflarestorage.com';
+    process.env.B2_REGION = 'auto';
+    try {
+      const gw = makeGateway();
+      const { main } = gw.compose({
+        type: 'flow-matching-tts', dataset: 'hf://foo/bar',
+        r2Bucket: 'tts-ptbr-training', r2Prefix: 'jobs/my-run', resumeFromR2: true,
+      });
+      // rclone remote env injected
+      expect(main).toContain('RCLONE_CONFIG_R2AIGW_ACCESS_KEY_ID');
+      expect(main).toContain('RCLONE_CONFIG_R2AIGW_PROVIDER=Cloudflare');
+      // restore before train
+      expect(main).toContain('rclone copy r2aigw:tts-ptbr-training/jobs/my-run/checkpoints /workspace/checkpoints');
+      // resume forced
+      expect(main).toContain('--resume /workspace/checkpoints');
+      // final backup after push
+      expect(main).toContain('rclone sync /workspace/checkpoints r2aigw:tts-ptbr-training/jobs/my-run/checkpoints');
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('R2 stages no-op (echo skip) when r2Bucket set but creds missing', () => {
+    const saved = { ...process.env };
+    delete process.env.B2_ACCOUNT_ID; delete process.env.B2_APPLICATION_KEY; delete process.env.B2_ENDPOINT;
+    delete process.env.STORAGE_ACCESS_KEY; delete process.env.STORAGE_SECRET_KEY; delete process.env.STORAGE_ENDPOINT;
+    try {
+      const gw = makeGateway();
+      const { main } = gw.compose({
+        type: 'flow-matching-tts', dataset: 'hf://foo/bar',
+        r2Bucket: 'tts-ptbr-training', resumeFromR2: true,
+      });
+      expect(main).not.toContain('rclone copy r2aigw:');
+      expect(main).toContain('sem creds R2');
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('omits all R2 stages when r2Bucket unset', () => {
+    const gw = makeGateway();
+    const { main } = gw.compose({ type: 'flow-matching-tts', dataset: 'hf://foo/bar' });
+    expect(main).not.toContain('r2aigw');
+    expect(main).not.toContain('RCLONE_CONFIG_R2AIGW');
+  });
+
   it('includes notifyOnComplete webhook in non-smoke pipeline', () => {
     const gw = makeGateway();
     const { main } = gw.compose({

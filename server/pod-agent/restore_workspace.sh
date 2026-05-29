@@ -16,13 +16,25 @@ LOG="${BACKUP_LOG:-/var/log/aigw-agent/backup.log}"
 mkdir -p "$(dirname "$LOG")"
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] [restore] $*" | tee -a "$LOG"; }
 
+# Aliases STORAGE_* → B2_* (mesmo esquema do backup_workspace.sh).
+: "${B2_ACCOUNT_ID:=${STORAGE_ACCESS_KEY:-}}"
+: "${B2_APPLICATION_KEY:=${STORAGE_SECRET_KEY:-}}"
+: "${B2_BUCKET:=${STORAGE_BUCKET:-}}"
+: "${B2_ENDPOINT:=${STORAGE_ENDPOINT:-}}"
+: "${B2_REGION:=${STORAGE_REGION:-}}"
+: "${B2_PREFIX:=${STORAGE_PREFIX:-}}"
+
 if [ -z "${B2_ACCOUNT_ID:-}" ] || [ -z "${B2_APPLICATION_KEY:-}" ] || [ -z "${B2_BUCKET:-}" ]; then
-    log "B2/R2 credentials not set — restore skipped"
+    log "B2/R2/S3 credentials not set — restore skipped"
     exit 0
 fi
 
-ENDPOINT="${B2_ENDPOINT:-https://s3.us-west-004.backblazeb2.com}"
-REGION="${B2_REGION:-us-west-004}"
+ENDPOINT="${B2_ENDPOINT:-}"
+if [ -z "$ENDPOINT" ]; then
+    log "B2_ENDPOINT/STORAGE_ENDPOINT not set — restore skipped"
+    exit 0
+fi
+REGION="${B2_REGION:-auto}"
 DEFAULT_PREFIX="pods/${VAST_CONTAINERLABEL:-${HOSTNAME:-unknown}}"
 SELF_PREFIX="${B2_PREFIX:-$DEFAULT_PREFIX}"
 SRC_PREFIX="${WORKSPACE_RESTORE_FROM:-$SELF_PREFIX}"
