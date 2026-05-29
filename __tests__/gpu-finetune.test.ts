@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import {
   validateSpec,
   estimateCost,
+  lookupGpuSpec,
   parseProbeOutput,
   detectStage,
   buildStatusResult,
@@ -115,6 +116,34 @@ describe('estimateCost', () => {
     const e1 = estimateCost({ epochs: 1, maxSamples: 50, sampleCount: 1000 });
     const e2 = estimateCost({ epochs: 1, sampleCount: 1000 });
     expect(e1.encodeMin).toBeLessThan(e2.encodeMin);
+  });
+
+  // GPU/model/task-aware context (Phase 5) — backward-compatible 4th arg.
+  it('a faster GPU lowers train time (and cost) vs the 4090 baseline', () => {
+    const opts = { epochs: 2, sampleCount: 1000 };
+    const on4090 = estimateCost(opts, 1000, 0.3, { gpuSpec: lookupGpuSpec('4090') });
+    const onH100 = estimateCost(opts, 1000, 0.3, { gpuSpec: lookupGpuSpec('H100') });
+    expect(onH100.trainMin).toBeLessThan(on4090.trainMin);
+  });
+
+  it('encode scales with host CPU cores, not GPU', () => {
+    const few = estimateCost({ epochs: 1, sampleCount: 1000 }, 1000, 0.3, { cpuCores: 4 });
+    const many = estimateCost({ epochs: 1, sampleCount: 1000 }, 1000, 0.3, { cpuCores: 32 });
+    expect(many.encodeMin).toBeLessThan(few.encodeMin);
+  });
+
+  it('spot adds expected-eviction overhead to cost (lower reliability = more)', () => {
+    const onDemand = estimateCost({ epochs: 2 }, 1000, 0.3, {});
+    const spotGood = estimateCost({ epochs: 2 }, 1000, 0.3, { spot: true, reliability: 0.98 });
+    const spotBad = estimateCost({ epochs: 2 }, 1000, 0.3, { spot: true, reliability: 0.6 });
+    expect(spotGood.totalUsd).toBeGreaterThan(onDemand.totalUsd);
+    expect(spotBad.totalUsd).toBeGreaterThan(spotGood.totalUsd);
+  });
+
+  it('default call (no ctx) is unchanged', () => {
+    const a = estimateCost({ epochs: 4, numGpus: 1 });
+    const b = estimateCost({ epochs: 4, numGpus: 1 }, undefined, 0.3, {});
+    expect(a.totalUsd).toBeCloseTo(b.totalUsd, 9);
   });
 });
 
@@ -458,6 +487,41 @@ describe('FinetuneGateway.compose', () => {
     const { main } = gw.compose({ type: 'flow-matching-tts', dataset: 'hf://foo/bar' });
     expect(main).not.toContain('r2aigw');
     expect(main).not.toContain('RCLONE_CONFIG_R2AIGW');
+  });
+
+  it('exportGguf on an audio preset emits a skip notice (not applicable)', () => {
+    const gw = makeGateway();
+    const { main } = gw.compose({ type: 'flow-matching-tts', dataset: 'hf://foo/bar', exportGguf: true });
+    expect(main).toContain('GGUF not applicable');
+    expect(main).not.toContain('convert_hf_to_gguf.py');
+  });
+
+  it('exportGguf on a text preset wires the GGUF conversion stage', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'finetune-presets-'));
+    try {
+      mkdirSync(join(tmp, 'txt'));
+      writeFileSync(join(tmp, 'txt', 'manifest.json'), JSON.stringify({
+        name: 'txt', version: '1.0.0', description: 'text', type: 'text',
+        trainerScript: 'trainer.py', trainerInterface: { train: 'x' },
+      }));
+      writeFileSync(join(tmp, 'txt', 'trainer.py'), '# stub');
+      setPresetsRoot(tmp);
+      const gw = makeGateway();
+      const { main } = gw.compose({ type: 'txt', dataset: 'hf://foo/bar', exportGguf: true });
+      expect(main).toContain('convert_hf_to_gguf.py');
+      expect(main).toContain('model.gguf');
+      expect(main).toContain('non-fatal'); // tolerant of conversion failure
+    } finally {
+      setPresetsRoot(null);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('omits GGUF stage entirely when exportGguf unset', () => {
+    const gw = makeGateway();
+    const { main } = gw.compose({ type: 'flow-matching-tts', dataset: 'hf://foo/bar' });
+    expect(main).not.toContain('convert_hf_to_gguf.py');
+    expect(main).not.toContain('GGUF');
   });
 
   it('includes notifyOnComplete webhook in non-smoke pipeline', () => {

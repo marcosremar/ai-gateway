@@ -76,6 +76,33 @@ export function listPresets(): Preset[] {
   return [...getPresetMap().values()];
 }
 
+// Valid probePaths keys (mirror ProbePathsSpec). A typo here silently disables
+// stage detection, so the lint surfaces unknown keys instead of failing quietly.
+const PROBE_PATH_KEYS = new Set([
+  'wavDir', 'dataPathsFile', 'encodedFile', 'encodedFullFile',
+  'checkpointsDir', 'smokeCheckpointsDir', 'jobLog',
+]);
+
+/**
+ * Lint a preset manifest for common authoring mistakes. Returns warning strings
+ * (empty = clean). Non-fatal — used by the `presets` CLI to flag issues without
+ * breaking load. Catches: unknown probePaths keys, missing trainerInterface.train,
+ * missing trainerScript.
+ */
+export function lintPresetManifest(manifest: PresetManifest): string[] {
+  const warns: string[] = [];
+  if (!manifest.trainerScript) warns.push('missing trainerScript');
+  if (!manifest.trainerInterface?.train) warns.push('missing trainerInterface.train');
+  if (manifest.probePaths) {
+    for (const key of Object.keys(manifest.probePaths)) {
+      if (!PROBE_PATH_KEYS.has(key)) {
+        warns.push(`unknown probePaths key '${key}' (valid: ${[...PROBE_PATH_KEYS].join(', ')})`);
+      }
+    }
+  }
+  return warns;
+}
+
 // ─── Project loader ──────────────────────────────────────────────────────────
 
 let _projects: Map<string, Project> | null = null;

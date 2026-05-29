@@ -343,6 +343,9 @@ def train(args):
             if args.hf_repo and hf_token:
                 _hf_push(ckpt_path, args.hf_repo, hf_token)
 
+    # Self-calibration: ai-gateway records this to refine future cost estimates.
+    _tr_dt = max(1e-6, time.perf_counter() - t0)
+    print(f"[calib] steps_per_sec={step / _tr_dt:.3f}")
     print(f"Done. Best loss: {best_loss:.4f}")
 
 
