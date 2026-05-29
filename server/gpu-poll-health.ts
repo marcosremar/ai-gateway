@@ -981,14 +981,54 @@ export async function pollHealthUntilReady(
           const speedBytes = parseFloat(speedOut.trim());
           if (!isNaN(speedBytes) && speedBytes > 0) {
             const actualMbps = Math.round(speedBytes * 8 / 1_000_000);
-            const threshold = inetDown * 0.5;
+            // Configurable gate. SPEED_TEST_THRESHOLD_FACTOR (default 0.5) is the
+            // fraction of advertised bandwidth a host must actually deliver.
+            // SPEED_TEST_ALLOW_DEGRADED keeps a slow-but-usable host instead of
+            // destroying it, as long as it clears SPEED_TEST_DEGRADED_FLOOR
+            // (default 0.25 of advertised) — avoids the "every cheap 4090 fails
+            // the gate and we churn pods forever" failure mode.
+            const thresholdFactor = Math.min(1, Math.max(0.1, parseFloat(process.env.SPEED_TEST_THRESHOLD_FACTOR ?? '0.5') || 0.5));
+            const degradedFloorFactor = Math.min(thresholdFactor, Math.max(0, parseFloat(process.env.SPEED_TEST_DEGRADED_FLOOR ?? '0.25') || 0.25));
+            const allowDegraded = process.env.SPEED_TEST_ALLOW_DEGRADED === '1' || process.env.SPEED_TEST_ALLOW_DEGRADED === 'true';
+            const threshold = inetDown * thresholdFactor;
+            const degradedFloor = inetDown * degradedFloorFactor;
             log.log(`[gpu] Speed test: ${actualMbps} Mbps actual vs ${inetDown} Mbps advertised (threshold: ${Math.round(threshold)} Mbps)`);
             broadcastWs({ type: 'gpu:deploy', phase: 'speed_test', deployId: deployState.deployId, provider: providerName, actualMbps, advertisedMbps: inetDown });
             if (actualMbps < threshold) {
-              const msg = `Speed test failed: ${actualMbps} Mbps actual < ${Math.round(threshold)} Mbps threshold (advertised ${inetDown} Mbps) — trying faster machine`;
-              log.warn(`[gpu] ${providerName} pod ${podId}: ${msg}`);
-              setDeployState({ status: 'error', step: 'speed_test_failed', message: msg });
-              return { result: 'timeout', pullTimeS: actualPullTimeS };
+              if (allowDegraded && actualMbps >= degradedFloor) {
+                // Slow but acceptable — keep the host, flag degraded, continue.
+                const dmsg = `Speed test degraded-accept: ${actualMbps} Mbps actual < ${Math.round(threshold)} Mbps threshold but >= ${Math.round(degradedFloor)} Mbps floor (advertised ${inetDown} Mbps)`;
+                log.warn(`[gpu] ${providerName} pod ${podId}: ${dmsg}`);
+                setDeployState({ networkDegraded: true, alert: dmsg, alertLevel: 'warning' });
+              } else {
+                const msg = `Speed test failed: ${actualMbps} Mbps actual < ${Math.round(threshold)} Mbps threshold (advertised ${inetDown} Mbps) — destroying pod and trying faster machine`;
+                log.warn(`[gpu] ${providerName} pod ${podId}: ${msg}`);
+                // Penalize this host so auto-select avoids it next time (#10).
+                try {
+                  const { upsertHostReputation } = await import('./metrics');
+                  await upsertHostReputation({
+                    provider: providerName,
+                    gpuType: deployState.gpuType || '',
+                    providerMeta,
+                    success: false,
+                    failureCategory: 'network',
+                    latencyMs: undefined,
+                  });
+                } catch (repErr) {
+                  log.warn(`[gpu] failed to record speed_test reputation: ${repErr instanceof Error ? repErr.message : repErr}`);
+                }
+                // Auto-destroy the slow pod so it stops charging (#7). Leaving it
+                // running was the root cause of the cost cascade: a failed speed
+                // test left a $1.2-1.4/hr pod billing while the race retried.
+                try {
+                  await providerClient.deleteInstance(podId, credentials);
+                  log.log(`[gpu] destroyed pod ${podId} after speed_test_failed`);
+                } catch (delErr) {
+                  log.error(`[gpu] FAILED to destroy pod ${podId} after speed_test_failed — MAY STILL BE BILLING: ${delErr instanceof Error ? delErr.message : delErr}`);
+                }
+                setDeployState({ status: 'error', step: 'speed_test_failed', message: msg });
+                return { result: 'timeout', pullTimeS: actualPullTimeS };
+              }
             }
           } else {
             log.warn(`[gpu] Speed test: curl not available or returned invalid output: "${speedOut.trim().slice(0, 100)}"`);
@@ -1077,6 +1117,16 @@ export async function pollHealthUntilReady(
           const healthBodyStr = JSON.stringify(data);
           if (healthBodyStr === lastHealthBody) {
             identicalHealthCount++;
+            if (identicalHealthCount >= 20) {
+              // 20 identical responses ≈ 10 min stalled after /health started responding.
+              // No phase timeout will save us here — abort now so the retry picks a better host.
+              const stalledSec = Math.round(identicalHealthCount * 30);
+              const stallMsg = `Health stalled — same /health response for ${stalledSec}s (${identicalHealthCount} checks). Aborting to retry on a better host.`;
+              log.error(`[gpu] ${providerName} pod ${podId}: ${stallMsg}`);
+              broadcastWs({ type: 'gpu:deploy', phase: 'stalled_abort', deployId: deployState.deployId, provider: providerName, stalledSeconds: stalledSec });
+              setDeployState({ status: 'error', step: 'stalled', message: stallMsg });
+              return { result: 'timeout', pullTimeS: actualPullTimeS };
+            }
             if (identicalHealthCount >= 5 && !stalledWarned) {
               stalledWarned = true;
               const stalledSec = identicalHealthCount * 30;

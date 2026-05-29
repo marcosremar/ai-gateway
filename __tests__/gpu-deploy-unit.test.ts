@@ -138,7 +138,7 @@ describe('startDeployWithTiers — error handling', () => {
 
   it('#179 detects no-offers as non-retryable', () => {
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
-    const fnBody = deployLoopSource.slice(fnStart, fnStart + 25000);
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 40000);
     expect(fnBody).toContain("isNoOffers");
     expect(fnBody).toContain("'no gpus available'");
     expect(fnBody).toContain("'0 offers'");
@@ -146,7 +146,7 @@ describe('startDeployWithTiers — error handling', () => {
 
   it('#182 sets error state when max retries exhausted', () => {
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
-    const fnBody = deployLoopSource.slice(fnStart, fnStart + 25000);
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 40000);
     expect(fnBody).toContain('max retries exceeded');
     expect(fnBody).toContain('deploymentSM.markError');
   });

@@ -1059,43 +1059,39 @@ export class VastClient extends AbstractGpuProvider {
     // P0b: NOTE — direct_port_count filter intentionally REMOVED. SSH-only hosts
     // (e.g. RTX 5090 Blackwell) are now first-class citizens via SSH tunnel fallback.
     // We try direct-port hosts first (faster), then SSH-only as a 2nd-pass fallback.
+    const isHighQualitySearch = spec.searchMode === 'full' ? false : spec.strictFastBoot !== false;
     const searchBody: Record<string, unknown> = {
       limit: 50,
       type: 'on-demand',
       rentable: { eq: true },
       rented: { eq: false },
-      // gpu_frac=1.0 → claim the WHOLE physical GPU. Without this we
-      // can land on a fractional slice and share VRAM with other
-      // tenants on the same card. Marcos hit this with a 4090 where
-      // another tenant held 13GB of the 24GB. Hard rule: never share
-      // VRAM with strangers.
-      gpu_frac: { eq: 1.0 },
-      // cpu_ram >= 32GB (32768 MB). Cheap Vast offers ship 8–16GB
-      // sys RAM which OOM-kills sshd mid-run when the LongMemEval
-      // working set (BNB 4-bit init + Qwen3-8B residual + bge-rerank
-      // + llama-cpp + uvicorn + bench buffers) peaks ~24GB transient.
-      // Pain log confirmed pattern across multiple deploys
-      // (35605992 → 35608712 → 35609177 → 35612661 → 35612885 → ...).
-      // Override per-call via spec.ramGb (still wins because it
-      // overwrites cpu_ram below).
-      cpu_ram: { gte: 32768 },
-      // Verified hosts only — protects against unstable / overcommitted boxes.
-      verified: { eq: true },
+      // gpu_frac=1.0 → only the WHOLE physical GPU. This also excludes a
+      // dedicated single GPU on a multi-GPU rig (gpu_frac<1 there), which
+      // wipes out most A6000/L40S/4090 offers. Gate it to strict mode only;
+      // num_gpus already pins the GPU count we rent.
+      ...(isHighQualitySearch ? { gpu_frac: { eq: 1.0 } } : {}),
+      // cpu_ram >= 16GB. 32GB excludes most consumer-GPU hosts; 16GB is
+      // enough headroom for small/medium models. Override via spec.ramGb.
+      cpu_ram: { gte: 16384 },
+      // Verified hosts only in strict mode — most quality hosts are
+      // unverified but carry high reliability2, so don't hard-require it
+      // outside strict (it alone zeroed A6000 offers).
+      ...(isHighQualitySearch ? { verified: { eq: true } } : {}),
       num_gpus: { eq: spec.gpuCount ?? 1 },
       disk_space: { gte: diskGb },
       // P0b: Phase-1 — prefer direct-port hosts (no SSH tunnel needed, faster)
-      direct_port_count: { gte: 1 },
+      ...(isHighQualitySearch ? { direct_port_count: { gte: 1 } } : {}),
       // CUDA filter: 12.8+ for Blackwell (RTX 5090/5080), 12.4+ for everything else
       cuda_vers: { gte: this._needsBlackwellCuda(spec.gpuTypes) ? 12.8 : 12.4 },
       // Host quality filters — fast internet critical for 10GB+ images to boot under 15min
       // Strict-fast-boot opts into a higher reliability bar (0.97) to filter out
       // hosts that historically zombie. Default 0.95 keeps backwards compat.
-      reliability2: { gte: spec.strictFastBoot ? 0.97 : 0.95 },
-      // Default minimum download bandwidth from persisted settings (default 2000 Mbps,
-      // pulls a 10GB image in ~40s). Lower it for cheap consumer GPUs (RTX 3060
-      // hosts top out near 1 Gbps). `spec.minInetDownMbps` overrides per call.
-      inet_down: { gte: spec.minInetDownMbps ?? getMinInetDownMbps() },
-      inet_up: { gte: 200 },            // Minimum 200 Mb/s upload
+      reliability2: { gte: isHighQualitySearch ? 0.97 : 0.95 },
+      // Minimum download bandwidth. spec.minInetDownMbps overrides per call;
+      // the no-spec fallback is clamped to 500 so a stale persisted 2000
+      // default doesn't zero out otherwise-fine offers.
+      inet_down: { gte: spec.minInetDownMbps ?? Math.min(getMinInetDownMbps(), 500) },
+      inet_up: { gte: 100 },            // Minimum 100 Mb/s upload
       ...(spec.directPortRequired ? { direct_port_count: { gte: spec.directPortRequired } } : {}),
       order: [['dph_total', 'asc']],
     };
@@ -1208,15 +1204,18 @@ export class VastClient extends AbstractGpuProvider {
       }
     }
 
-    // P0b: Phase-2 fallback — SSH-only hosts (no direct ports). Critical for
-    // RTX 5090 Blackwell hosts which often have direct_port_end: -1.
-    // Only run if Phase-1 yielded NOTHING — we don't want to consume API
-    // bandwidth on this when we already have offers.
-    // strictFastBoot suppresses Phase-2 entirely: SSH-only hosts go through
-    // ssh*.vast.ai proxies which are the source of the "zombie" status
-    // (status=running but SSH refused). When the caller asks for fast-boot
-    // we'd rather fail loudly here than ship a slow/zombie pod.
-    if (offers.length === 0 && !spec.strictFastBoot) {
+      // P0b: Phase-2 fallback — SSH-only hosts (no direct ports). Critical for
+      // RTX 5090 Blackwell hosts which often have direct_port_end: -1.
+      // Only run if Phase-1 yielded NOTHING — we don't want to consume API
+      // bandwidth on this when we already have offers.
+      // strictFastBoot suppresses Phase-2 entirely: SSH-only hosts go through
+      // ssh*.vast.ai proxies which are the source of the "zombie" status
+      // (status=running but SSH refused). When the caller asks for fast-boot
+      // we'd rather fail loudly here than ship a slow/zombie pod.
+      // directPortRequired also suppresses Phase-2: caller explicitly requires
+      // direct ports — adding SSH-only hosts defeats the purpose and causes
+      // tunnel hangs (direct_port=-1 forever while container loads).
+    if (offers.length === 0 && !spec.strictFastBoot && !spec.directPortRequired) {
       this.log.log('[vast] Phase-2: searching SSH-only hosts (no direct_port filter)');
       const sshOnlyBody = { ...searchBody };
       delete sshOnlyBody.direct_port_count;
@@ -1292,7 +1291,12 @@ export class VastClient extends AbstractGpuProvider {
     // others are torn down to avoid runaway costs.
     const offerFailures: Array<{ offerId: string; gpu: string; reason: string }> = [];
     const failuresMutex = { push: (f: typeof offerFailures[number]) => offerFailures.push(f) };
-    const raceCount = Math.max(1, Math.min(5, spec.raceCount ?? 2));
+    // Internal offer-hedge count. Default 2 (Vast hosts reclaim/zombie often), but
+    // honour spec.raceCount when the caller pins it — raceCount:1 ⇒ exactly ONE
+    // instance created (no duplicate billing). VAST_OFFER_RACE overrides the default.
+    const envOfferRace = parseInt(process.env.VAST_OFFER_RACE ?? '', 10);
+    const defaultOfferRace = Number.isFinite(envOfferRace) && envOfferRace > 0 ? envOfferRace : 2;
+    const raceCount = Math.max(1, Math.min(5, spec.raceCount ?? defaultOfferRace));
     const offerPool = offers.slice(0, 10);
     const losers: Array<{ instanceId: string; contractId: string }> = [];
 
@@ -1370,13 +1374,38 @@ export class VastClient extends AbstractGpuProvider {
     let nextOfferIdx = 0;
     const inflight = new Map<number, Promise<{ result: GpuInstance | null; idx: number; offerId: string }>>();
 
+    // Every instance an in-flight attempt has actually created, keyed by
+    // contractId. Populated synchronously by `_tryOffer` the moment a contract
+    // exists — BEFORE the long endpoint poll / SSH-tunnel wait. This lets us
+    // delete a loser the instant we have a winner, instead of waiting minutes
+    // for the loser's own retry chain to settle (the dual-billing cost leak).
+    let winner: GpuInstance | null = null;
+    let winnerInstanceId: string | null = null;
+    const created = new Map<string, { instanceId: string; contractId: string }>();
+
+    const deleteLoser = (rec: { instanceId: string; contractId: string }) => {
+      losers.push(rec);
+      this.deleteInstance(rec.instanceId, { apiKey })
+        .then(() => this.log.log(`[vast] Eagerly deleted loser ${rec.contractId}`))
+        .catch((e) => this.log.warn(`[vast] Failed to delete loser ${rec.contractId}: ${this.errMsg(e)}`));
+    };
+
+    const onCreated = (rec: { instanceId: string; contractId: string }) => {
+      // Late create after a winner already exists — kill it on sight.
+      if (winner && rec.instanceId !== winnerInstanceId) {
+        deleteLoser(rec);
+        return;
+      }
+      created.set(rec.contractId, rec);
+    };
+
     const launch = (): boolean => {
       if (nextOfferIdx >= offers.length) return false;
       const idx = nextOfferIdx++;
       const offer = offers[idx];
       const offerId = String(offer.id);
       const p = this._tryOffer({
-        offer, headers, apiKey, diskGb, imageName, envVars, spec, userId, failures,
+        offer, headers, apiKey, diskGb, imageName, envVars, spec, userId, failures, onCreated,
       }).then((result) => ({ result, idx, offerId }));
       inflight.set(idx, p);
       return true;
@@ -1387,31 +1416,20 @@ export class VastClient extends AbstractGpuProvider {
       if (!launch()) break;
     }
 
-    let winner: GpuInstance | null = null;
     while (inflight.size > 0 && !winner) {
       const settled = await Promise.race(inflight.values());
       inflight.delete(settled.idx);
       if (settled.result) {
-        // We have a winner! Collect losers and clean them up in the background.
-        // Previously `Promise.allSettled` here blocked for up to 13 minutes when
-        // losing SSH-only racers had many retries left (backoff up to 60s × 10+).
+        // Winner! Eagerly tear down every loser instance that already exists.
+        // Any loser still mid-create will be caught by `onCreated` above.
         winner = settled.result;
-        const remainingInflight = new Map(inflight); // snapshot before clear
-        void Promise.allSettled(remainingInflight.values()).then((remaining) => {
-          for (const r of remaining) {
-            if (r.status === 'fulfilled' && r.value.result) {
-              const loser = r.value.result;
-              losers.push({
-                instanceId: loser.instanceId,
-                contractId: loser.instanceId.replace(/^inst-/, ''),
-              });
-              // Clean up immediately — caller's cleanup loop already ran (empty array)
-              this.deleteInstance(loser.instanceId, { apiKey })
-                .then(() => this.log.log(`[vast] Cleaned up async loser ${loser.instanceId}`))
-                .catch((e) => this.log.warn(`[vast] Failed to clean up async loser ${loser.instanceId}: ${this.errMsg(e)}`));
-            }
+        winnerInstanceId = winner.instanceId;
+        for (const [cid, rec] of created) {
+          if (rec.instanceId !== winnerInstanceId) {
+            created.delete(cid);
+            deleteLoser(rec);
           }
-        });
+        }
         inflight.clear();
         break;
       }
@@ -1436,8 +1454,9 @@ export class VastClient extends AbstractGpuProvider {
     spec: InstanceSpec;
     userId?: string;
     failures: { push: (f: { offerId: string; gpu: string; reason: string }) => void };
+    onCreated?: (rec: { instanceId: string; contractId: string }) => void;
   }): Promise<GpuInstance | null> {
-    const { offer, headers, apiKey, diskGb, imageName, envVars, spec, userId, failures } = args;
+    const { offer, headers, apiKey, diskGb, imageName, envVars, spec, userId, failures, onCreated } = args;
     const offerId = String(offer.id);
     const gpuName = (offer.gpu_name || 'unknown') as string;
     const pricePerHr = (offer.dph_total || 0) as number;
@@ -1509,6 +1528,10 @@ export class VastClient extends AbstractGpuProvider {
 
       const contractId = String(createData.new_contract);
       const instanceId = `inst-${contractId}`;
+      // Register the live contract immediately so a parallel winner can tear
+      // this down right away — before the (potentially multi-minute) endpoint
+      // poll / SSH-tunnel wait below. Prevents dual-billing on SSH-only hosts.
+      onCreated?.({ instanceId, contractId });
 
       // P3: Adaptive polling — base timeout on host's actual download speed.
       // Faster hosts get tighter timeouts; slower hosts get more headroom.
