@@ -460,6 +460,41 @@ describe('FinetuneGateway.compose', () => {
     expect(main).not.toContain('RCLONE_CONFIG_R2AIGW');
   });
 
+  it('exportGguf on an audio preset emits a skip notice (not applicable)', () => {
+    const gw = makeGateway();
+    const { main } = gw.compose({ type: 'flow-matching-tts', dataset: 'hf://foo/bar', exportGguf: true });
+    expect(main).toContain('GGUF not applicable');
+    expect(main).not.toContain('convert_hf_to_gguf.py');
+  });
+
+  it('exportGguf on a text preset wires the GGUF conversion stage', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'finetune-presets-'));
+    try {
+      mkdirSync(join(tmp, 'txt'));
+      writeFileSync(join(tmp, 'txt', 'manifest.json'), JSON.stringify({
+        name: 'txt', version: '1.0.0', description: 'text', type: 'text',
+        trainerScript: 'trainer.py', trainerInterface: { train: 'x' },
+      }));
+      writeFileSync(join(tmp, 'txt', 'trainer.py'), '# stub');
+      setPresetsRoot(tmp);
+      const gw = makeGateway();
+      const { main } = gw.compose({ type: 'txt', dataset: 'hf://foo/bar', exportGguf: true });
+      expect(main).toContain('convert_hf_to_gguf.py');
+      expect(main).toContain('model.gguf');
+      expect(main).toContain('non-fatal'); // tolerant of conversion failure
+    } finally {
+      setPresetsRoot(null);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('omits GGUF stage entirely when exportGguf unset', () => {
+    const gw = makeGateway();
+    const { main } = gw.compose({ type: 'flow-matching-tts', dataset: 'hf://foo/bar' });
+    expect(main).not.toContain('convert_hf_to_gguf.py');
+    expect(main).not.toContain('GGUF');
+  });
+
   it('includes notifyOnComplete webhook in non-smoke pipeline', () => {
     const gw = makeGateway();
     const { main } = gw.compose({
