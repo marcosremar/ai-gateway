@@ -61,7 +61,28 @@ const GPU_TYPES  = flag('gpu-types')?.split(',').map(s => s.trim()).filter(Boole
 const BOOT_SLA   = parseInt(flag('boot-sla') ?? '120', 10) * 1000;
 const READY_SLA  = parseInt(flag('ready-sla') ?? '150', 10) * 1000;
 const INFER_SLA  = parseInt(flag('infer-sla') ?? '20', 10) * 1000;
-const SLOT_TRIES = parseInt(flag('slot-attempts') ?? '8', 10);
+const SLOT_TRIES = parseInt(flag('slot-attempts') ?? '40', 10);
+// Per-slot wall-clock budget. A slot retries fresh offers until success OR this
+// deadline — a streak of duds no longer ends a slot in failure. 0 = disabled (use
+// SLOT_TRIES cap only). Pair with auto-relax refill so the pool never dries.
+const SLOT_DEADLINE = parseInt(flag('slot-deadline') ?? '600', 10) * 1000;
+// Hedge degree: each slot attempt fires this many offers in parallel and keeps
+// the first that reaches T3 within SLA, terminating the rest. Helps at LOW
+// parallelism (ample supply per slot) but HURTS at high N: 2x consumption drains
+// the finite bootable-host pool and starves the tail slots. Default off; opt in
+// only when supply per slot is generous. For high N use --overprovision instead.
+const HEDGE = Math.max(1, parseInt(flag('hedge') ?? '1', 10));
+// Over-provision: launch ceil(PARALLEL * OVERPROVISION) independent slots but
+// stop as soon as PARALLEL of them succeed, cancelling the rest. Unlike hedge,
+// each slot consumes 1x supply; the surplus slots are redundancy that absorbs
+// unlucky dud streaks without doubling pool drain. The right lever for high N.
+const OVERPROVISION = Math.max(1, parseFloat(flag('overprovision') ?? '1'));
+
+// Mutable search filters. refillPool() progressively relaxes these when the pool
+// starves, so a slot can always find a fresh offer instead of giving up.
+let curMaxPrice = MAX_PRICE;
+let curMinInet  = MIN_INET;
+let curMinRel   = MIN_REL;
 const KEEP       = bool('keep');
 const QUIET      = bool('quiet');
 const JSON_OUT   = bool('json');
@@ -157,11 +178,11 @@ async function searchOffers(limit: number): Promise<Offer[]> {
     num_gpus: { eq: 1 },
     disk_space: { gte: 20 },
     direct_port_count: { gte: 1 },
-    reliability2: { gte: MIN_REL },
-    inet_down: { gte: MIN_INET },
+    reliability2: { gte: curMinRel },
+    inet_down: { gte: curMinInet },
     inet_up: { gte: 100 },
     cuda_vers: { gte: 12.0 },
-    dph_total: { lte: MAX_PRICE },
+    dph_total: { lte: curMaxPrice },
     type: 'on-demand',
     order: [['dph_total', 'asc']],
     limit,
@@ -195,6 +216,14 @@ async function refillPool(): Promise<void> {
       added++;
     }
     if (!QUIET) console.error(`[pool] refilled +${added} (pool=${offerPool.length}, used=${usedOfferIds.size}, badHosts=${badHostIds.size})`);
+    // Pool starved (no fresh unused offers left at current filters). Widen the
+    // search envelope so slots keep finding machines instead of giving up.
+    if (added === 0 && offerPool.length === 0 && (curMaxPrice < 3.0 || curMinRel > 0.5 || curMinInet > 50)) {
+      curMaxPrice = Math.min(3.0, curMaxPrice * 1.5);
+      curMinRel   = Math.max(0.5, curMinRel - 0.05);
+      curMinInet  = Math.max(50, curMinInet - 50);
+      if (!QUIET) console.error(`[pool] starved → relax filters (price<=$${curMaxPrice.toFixed(2)} rel>=${curMinRel.toFixed(2)} inet>=${curMinInet})`);
+    }
   })();
   try { await refilling; } finally { refilling = null; }
 }
@@ -328,7 +357,9 @@ interface BenchResult {
 const TERMINAL = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted', 'stopped']);
 
 // Returns the result if it reached T3 within SLA, else null (caller retries).
-async function attemptOnce(offer: Offer, tag: string): Promise<BenchResult | null> {
+interface Ctl { reached: boolean }
+
+async function attemptOnce(offer: Offer, tag: string, onDeploy?: (id: number) => void, ctl?: Ctl): Promise<BenchResult | null> {
   const t0 = now();
   const result: BenchResult = {
     offerId: offer.id, gpu: offer.gpu, pricePerHr: offer.pricePerHr,
@@ -345,6 +376,7 @@ async function attemptOnce(offer: Offer, tag: string): Promise<BenchResult | nul
   }
   result.instanceId = instanceId;
   liveInstances.add(instanceId);
+  onDeploy?.(instanceId);
   console.error(`${tag} deployed ${instanceId} (${offer.gpu} @ $${offer.pricePerHr.toFixed(3)}/hr, ${offer.geo})`);
 
   const fail = async (reason: string, blameHost: boolean): Promise<null> => {
@@ -353,6 +385,9 @@ async function attemptOnce(offer: Offer, tag: string): Promise<BenchResult | nul
     await terminateInstance(instanceId);
     return null;
   };
+  // Cancel (target already reached elsewhere): drop this instance without
+  // blaming the host — it may be perfectly good, we just don't need it.
+  const cancel = async (): Promise<null> => { await terminateInstance(instanceId); return null; };
 
   // Phase 1: running + port mapping live, within BOOT_SLA
   result.phase = 'running';
@@ -360,6 +395,7 @@ async function attemptOnce(offer: Offer, tag: string): Promise<BenchResult | nul
   let lastStatus = '';
   const bootDeadline = t0 + BOOT_SLA;
   while (now() < bootDeadline) {
+    if (ctl?.reached) return cancel();
     await sleep(4_000);
     const inst = await getInstance(instanceId);
     if (!inst) continue;
@@ -381,6 +417,7 @@ async function attemptOnce(offer: Offer, tag: string): Promise<BenchResult | nul
   result.phase = 'ready';
   const readyDeadline = t0 + READY_SLA;
   while (now() < readyDeadline) {
+    if (ctl?.reached) return cancel();
     if (await probeModelLoaded(endpoint)) {
       result.t2Ms = now() - t0;
       console.error(`${tag} T2 model-ready ${fmtS(result.t2Ms)}`);
@@ -406,19 +443,66 @@ async function attemptOnce(offer: Offer, tag: string): Promise<BenchResult | nul
 
 // ── Slot: retry fresh offers until one success within SLA ───────────────────────
 
-async function runSlot(idx: number): Promise<BenchResult> {
+// Fire up to HEDGE offers in parallel; resolve with the first that reaches T3
+// within SLA and terminate every other instance (including late winners and
+// late deploys). Returns { r, pulled } so the slot can tell "all duds" from
+// "no offers in pool" (the latter warrants a wait, not another immediate try).
+async function hedgedAttempt(tag: string, ctl?: Ctl): Promise<{ r: BenchResult | null; pulled: number }> {
+  const offers: Offer[] = [];
+  for (let i = 0; i < HEDGE; i++) { const o = await takeOffer(); if (o) offers.push(o); }
+  if (offers.length === 0) return { r: null, pulled: 0 };
+
+  const losers = new Set<number>();
+  let settled = false;
+  const register = (id: number) => { if (settled) void terminateInstance(id); else losers.add(id); };
+
+  const r = await new Promise<BenchResult | null>(resolve => {
+    let pending = offers.length;
+    offers.forEach((o, i) => {
+      attemptOnce(o, `${tag}h${i + 1}`, register, ctl).then(res => {
+        pending--;
+        if (res && !settled) {
+          settled = true;
+          losers.delete(res.instanceId ?? -1);
+          resolve(res);
+        } else if (res) {
+          // Late winner after someone else already won — terminate it.
+          if (res.instanceId) void terminateInstance(res.instanceId);
+        } else if (!settled && pending === 0) {
+          resolve(null); // all hedged offers were duds
+        }
+      });
+    });
+  });
+
+  // Kill every instance that isn't the chosen winner.
+  for (const id of losers) if (id !== r?.instanceId) void terminateInstance(id);
+  return { r, pulled: offers.length };
+}
+
+async function runSlot(idx: number, ctl: Ctl, onWin: () => void): Promise<BenchResult> {
   const tag = `[s${idx + 1}]`;
+  const deadline = SLOT_DEADLINE > 0 ? now() + SLOT_DEADLINE : Infinity;
   let lastErr = 'no offers available';
-  for (let attempt = 1; attempt <= SLOT_TRIES; attempt++) {
-    const offer = await takeOffer();
-    if (!offer) { lastErr = 'offer pool exhausted'; break; }
-    const r = await attemptOnce(offer, `${tag}.${attempt}`);
-    if (r) { r.attempts = attempt; return r; }
+  let attempt = 0;
+  while (attempt < SLOT_TRIES && now() < deadline) {
+    if (ctl.reached) return { offerId: 0, gpu: '-', pricePerHr: 0, geo: '-', inetDown: 0, attempts: attempt, phase: 'failed', error: 'cancelled (target reached)' };
+    const { r, pulled } = await hedgedAttempt(`${tag}.${attempt + 1}`, ctl);
+    if (pulled === 0) {
+      // Pool momentarily empty (contention / refill in flight). Wait — don't
+      // give up; refillPool auto-relaxes filters so an offer will appear.
+      lastErr = 'waiting for offers';
+      await sleep(5_000);
+      continue;
+    }
+    attempt++;
+    if (r) { r.attempts = attempt; onWin(); return r; }
     lastErr = `dud after ${attempt} attempt(s)`;
   }
   return {
     offerId: 0, gpu: '-', pricePerHr: 0, geo: '-', inetDown: 0,
-    attempts: SLOT_TRIES, phase: 'failed', error: lastErr,
+    attempts: attempt, phase: 'failed',
+    error: now() >= deadline ? `deadline ${SLOT_DEADLINE / 1000}s exceeded (${attempt} tries)` : lastErr,
   };
 }
 
@@ -431,8 +515,9 @@ function pct(arr: number[], p: number): number {
 
 async function main() {
   console.error(`\n=== Vast.ai Parallel Deploy Bench (SLA-gated) ===`);
-  console.error(`  target: ${PARALLEL} successful | model: ${MODEL}`);
-  console.error(`  SLA: boot<=${BOOT_SLA / 1000}s ready<=${READY_SLA / 1000}s infer<=${INFER_SLA / 1000}s | slot-tries: ${SLOT_TRIES}`);
+  const numSlots = Math.ceil(PARALLEL * OVERPROVISION);
+  console.error(`  target: ${PARALLEL} successful | slots: ${numSlots} (overprovision ${OVERPROVISION}x) | model: ${MODEL}`);
+  console.error(`  SLA: boot<=${BOOT_SLA / 1000}s ready<=${READY_SLA / 1000}s infer<=${INFER_SLA / 1000}s | slot-tries: ${SLOT_TRIES} deadline: ${SLOT_DEADLINE / 1000}s hedge: ${HEDGE}`);
   console.error(`  filters: reliability>=${MIN_REL} inet_down>=${MIN_INET}Mbps price<=$${MAX_PRICE}/hr\n`);
 
   await refillPool();
@@ -440,20 +525,29 @@ async function main() {
     console.error('ERROR: no offers found matching filters');
     process.exit(1);
   }
-  console.error(`[pool] ${offerPool.length} offers available, launching ${PARALLEL} slots\n`);
+  console.error(`[pool] ${offerPool.length} offers available, launching ${numSlots} slots (target ${PARALLEL})\n`);
 
   const t0Global = now();
-  const results = await Promise.all(Array.from({ length: PARALLEL }, (_, i) => runSlot(i)));
+  const ctl: Ctl = { reached: false };
+  let wins = 0;
+  const onWin = () => {
+    if (++wins >= PARALLEL && !ctl.reached) {
+      ctl.reached = true;
+      console.error(`\n[target] ${PARALLEL} successes reached → cancelling remaining slots\n`);
+    }
+  };
+  const results = await Promise.all(Array.from({ length: numSlots }, (_, i) => runSlot(i, ctl, onWin)));
 
   if (!KEEP) await terminateAll();
 
   // ── Report ───────────────────────────────────────────────────────────────────
 
   const ok = results.filter(r => r.phase === 'done');
-  const failed = results.filter(r => r.phase === 'failed');
+  const cancelled = results.filter(r => r.error === 'cancelled (target reached)');
+  const failed = results.filter(r => r.phase === 'failed' && r.error !== 'cancelled (target reached)');
 
   console.error('\n╔══════════════════════════════════════════════════════════════════╗');
-  console.error(`║  RESULTS: ${ok.length}/${results.length} machines successful (all within SLA)            ║`);
+  console.error(`║  RESULTS: ${ok.length}/${PARALLEL} target reached | ${failed.length} failed, ${cancelled.length} cancelled (surplus)`);
   console.error('╚══════════════════════════════════════════════════════════════════╝\n');
   console.error('Machine breakdown:');
   console.error(`${'#'.padEnd(3)} ${'GPU'.padEnd(20)} ${'Price'.padEnd(10)} ${'Try'.padEnd(4)} ${'T1'.padEnd(8)} ${'T2'.padEnd(8)} ${'T3'.padEnd(8)} ${'Inf'.padEnd(8)} Status`);
@@ -485,7 +579,7 @@ async function main() {
     console.error(fmt(t3s, 'T3 inference'));
     console.error(fmt(lats, 'Inf latency'));
     console.error(`  total wall      ${fmtS(now() - t0Global)}`);
-    console.error(`  success rate    ${ok.length}/${results.length} (${Math.round(ok.length / results.length * 100)}%)`);
+    console.error(`  success rate    ${ok.length}/${PARALLEL} target (${Math.round(ok.length / PARALLEL * 100)}%) | ${results.length} slots launched`);
     console.error(`  avg attempts    ${(ok.reduce((s, r) => s + r.attempts, 0) / ok.length).toFixed(1)}`);
     console.error(`  avg price       $${(ok.reduce((s, r) => s + r.pricePerHr, 0) / ok.length).toFixed(3)}/hr`);
     console.error(`  bad hosts       ${badHostIds.size} blocklisted`);
@@ -510,7 +604,7 @@ async function main() {
     }, null, 2) + '\n');
   }
 
-  process.exit(ok.length === results.length ? 0 : 1);
+  process.exit(ok.length >= PARALLEL ? 0 : 1);
 }
 
 if (!bool('sweep')) {
