@@ -78,7 +78,10 @@ async function refreshProviderBalance(
     const checkBalanceFn = (client as { checkBalance?: (creds: ProviderCredentials) => Promise<{ balance: number } | null> }).checkBalance;
     if (!checkBalanceFn) return;
     const result = await Promise.race([
-      checkBalanceFn(credentials),
+      // call via .call(client, …) so `this` stays bound — extracting the method
+      // to `checkBalanceFn` and calling it bare detached `this`, crashing on the
+      // first `this.log…` inside ("undefined is not an object (evaluating 'this.log')").
+      checkBalanceFn.call(client, credentials),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${name} checkBalance timed out`)), 10_000)),
     ]);
     if (result === null) {

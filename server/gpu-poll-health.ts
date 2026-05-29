@@ -987,15 +987,15 @@ export async function pollHealthUntilReady(
             // destroying it, as long as it clears SPEED_TEST_DEGRADED_FLOOR
             // (default 0.25 of advertised) — avoids the "every cheap 4090 fails
             // the gate and we churn pods forever" failure mode.
-            const thresholdFactor = Math.min(1, Math.max(0.1, parseFloat(process.env.SPEED_TEST_THRESHOLD_FACTOR ?? '0.5') || 0.5));
-            const degradedFloorFactor = Math.min(thresholdFactor, Math.max(0, parseFloat(process.env.SPEED_TEST_DEGRADED_FLOOR ?? '0.25') || 0.25));
-            const allowDegraded = process.env.SPEED_TEST_ALLOW_DEGRADED === '1' || process.env.SPEED_TEST_ALLOW_DEGRADED === 'true';
-            const threshold = inetDown * thresholdFactor;
-            const degradedFloor = inetDown * degradedFloorFactor;
+            // Fix #1: degraded-accept is now ON by default — destroying every cheap
+            // 4090 that misses 0.5× advertised was the dominant churn source. Logic
+            // extracted to evaluateSpeedTest() (pure, testable). Set
+            // SPEED_TEST_ALLOW_DEGRADED=0 to restore strict destroy.
+            const { decision: speedDecision, threshold, degradedFloor } = evaluateSpeedTest(actualMbps, inetDown, process.env);
             log.log(`[gpu] Speed test: ${actualMbps} Mbps actual vs ${inetDown} Mbps advertised (threshold: ${Math.round(threshold)} Mbps)`);
             broadcastWs({ type: 'gpu:deploy', phase: 'speed_test', deployId: deployState.deployId, provider: providerName, actualMbps, advertisedMbps: inetDown });
-            if (actualMbps < threshold) {
-              if (allowDegraded && actualMbps >= degradedFloor) {
+            if (speedDecision !== 'accept') {
+              if (speedDecision === 'degraded') {
                 // Slow but acceptable — keep the host, flag degraded, continue.
                 const dmsg = `Speed test degraded-accept: ${actualMbps} Mbps actual < ${Math.round(threshold)} Mbps threshold but >= ${Math.round(degradedFloor)} Mbps floor (advertised ${inetDown} Mbps)`;
                 log.warn(`[gpu] ${providerName} pod ${podId}: ${dmsg}`);
@@ -1623,4 +1623,37 @@ export async function pollHealthUntilReady(
     }
     await new Promise(r => setTimeout(r, pollMs));
   }
+}
+
+export type SpeedTestDecision = 'accept' | 'degraded' | 'destroy';
+
+/**
+ * Pure decision for the post-boot speed test (fix #1).
+ *  - accept   : actual >= threshold (thresholdFactor × advertised)
+ *  - degraded : below threshold but >= floor AND degraded-accept enabled → keep pod
+ *  - destroy  : below floor, or degraded-accept disabled → destroy + try faster host
+ *
+ * Degraded-accept defaults ON (set SPEED_TEST_ALLOW_DEGRADED=0/false to disable).
+ * Tunables: SPEED_TEST_THRESHOLD_FACTOR (0.5), SPEED_TEST_DEGRADED_FLOOR (0.25).
+ */
+export function evaluateSpeedTest(
+  actualMbps: number,
+  advertisedMbps: number,
+  env: NodeJS.ProcessEnv = process.env,
+): { decision: SpeedTestDecision; threshold: number; degradedFloor: number } {
+  const thresholdFactor = Math.min(1, Math.max(0.1, parseFloat(env.SPEED_TEST_THRESHOLD_FACTOR ?? '0.5') || 0.5));
+  const degradedFloorFactor = Math.min(thresholdFactor, Math.max(0, parseFloat(env.SPEED_TEST_DEGRADED_FLOOR ?? '0.25') || 0.25));
+  const allowDegraded = env.SPEED_TEST_ALLOW_DEGRADED !== '0' && env.SPEED_TEST_ALLOW_DEGRADED !== 'false';
+  // Absolute usable floor (Mbps). Hosts wildly over-advertise (log: 6705 advertised,
+  // 759 actual = 11%) so a pure ratio gate destroys perfectly usable hosts. 759 Mbps
+  // pulls a 40GB image in ~7min — keep it. Set SPEED_TEST_MIN_ABS_MBPS to tune.
+  const absMinMbps = Math.max(0, parseFloat(env.SPEED_TEST_MIN_ABS_MBPS ?? '200') || 200);
+  const threshold = advertisedMbps * thresholdFactor;
+  const degradedFloor = advertisedMbps * degradedFloorFactor;
+  let decision: SpeedTestDecision = 'accept';
+  if (actualMbps < threshold) {
+    const usable = actualMbps >= degradedFloor || actualMbps >= absMinMbps;
+    decision = allowDegraded && usable ? 'degraded' : 'destroy';
+  }
+  return { decision, threshold, degradedFloor };
 }

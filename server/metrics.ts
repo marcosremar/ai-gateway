@@ -194,7 +194,9 @@ export function logGpuEvent(
 export function startDeploySession(provider: string, dockerImage: string, gpuType: string) {
   prisma.gpuDeploySession
     .create({ data: { provider, dockerImage, gpuType, status: 'deploying' } })
-    .then((row: { id: number }) => { setActiveDeploySessionId(row.id); })
+    // row is null when running without a DB (prisma no-op proxy) — guard so we
+    // don't throw "null is not an object (evaluating 'row.id')" each deploy.
+    .then((row: { id: number } | null) => { if (row) setActiveDeploySessionId(row.id); })
     .catch((err: unknown) => log.warn('Failed to create deploy session: %s', err instanceof Error ? err.message : err));
 }
 

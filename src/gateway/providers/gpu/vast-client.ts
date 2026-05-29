@@ -1271,8 +1271,15 @@ export class VastClient extends AbstractGpuProvider {
 
     if (!offers.length) {
       const gpuFilter = spec.gpuTypes?.length ? normalizeGpuNames(spec.gpuTypes).join(', ') : 'any';
-      this.log.error(`[vast] No offers found. GPU filter: [${gpuFilter}], disk: ${diskGb}GB, region: ${spec.region || 'any'}`);
-      throw new Error(`No GPUs available on Vast.ai (0 offers matched). GPU filter: [${gpuFilter}], disk: ${diskGb}GB`);
+      // Explain WHICH constraints were active so the surfaced error is actionable
+      // (not a fake "region" cause). strict/direct-port are the usual offer-killers.
+      const constraints = [
+        `disk>=${diskGb}GB`,
+        spec.strictFastBoot ? 'strictFastBoot(reliability>=0.97,verified,gpu_frac=1)' : null,
+        (spec.directPortRequired || spec.strictFastBoot) ? 'direct_port>=1' : null,
+      ].filter(Boolean).join(', ');
+      this.log.error(`[vast] No offers found. GPU filter: [${gpuFilter}], constraints: ${constraints}, region: ${spec.region || 'any'}`);
+      throw new Error(`No GPUs available on Vast.ai (0 offers matched). GPU filter: [${gpuFilter}], constraints: ${constraints}`);
     }
 
     // ── 2. Build env vars ──────────────────────────────────────────────────
@@ -2679,7 +2686,11 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     // Also skip: recently used hosts (cross-call dedup), unstable hosts
     // (single-strike flag) and banned hosts (aggressive persistent blacklist).
     // When deduplicateByIp=false (listOffers), keep all offers — only filter bad hosts.
-    const seenIps = deduplicateByIp ? new Set<string>(this._recentlyUsedIps) : new Set<string>();
+    const seenIps = new Set<string>(); // physical hosts already taken THIS call
+    // Fix #2: recently-used is now a SOFT skip — stash these as fallback instead of
+    // hard-dropping, so they can be re-admitted if nothing else survives (avoids the
+    // "1 offers → 0 unique hosts (1 recently used)" deploy-killer).
+    const recentlyUsedFallback: Array<Record<string, unknown>> = [];
     let unstableSkipped = 0;
     let bannedSkipped = 0;
     let recentlyUsedSkipped = 0;
@@ -2687,9 +2698,12 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     for (const offer of allOffers) {
       const ip = String(offer.public_ipaddr ?? '');
       if (deduplicateByIp) {
-        if (ip && seenIps.has(ip)) continue;
         if (ip && this._isHostBanned(ip)) { bannedSkipped++; continue; }
         if (ip && this._isHostUnstable(ip)) { unstableSkipped++; continue; }
+        if (ip && seenIps.has(ip)) continue; // collapse multiple GPUs of the same host
+        if (ip && this._recentlyUsedIps.has(ip)) {
+          recentlyUsedSkipped++; seenIps.add(ip); recentlyUsedFallback.push(offer); continue;
+        }
         if (ip) { seenIps.add(ip); }
       } else {
         if (ip && this._isHostBanned(ip)) { bannedSkipped++; continue; }
@@ -2697,6 +2711,12 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
         if (ip && this._recentlyUsedIps.has(ip)) { recentlyUsedSkipped++; continue; }
       }
       deduplicated.push(offer);
+    }
+
+    // Last-resort re-admission: a recently-used host beats a hard "0 offers" fail.
+    if (deduplicateByIp && deduplicated.length === 0 && recentlyUsedFallback.length > 0) {
+      this.log.warn(`[vast] All ${recentlyUsedFallback.length} candidate host(s) were recently-used; re-admitting to avoid a 0-offer failure.`);
+      deduplicated.push(...recentlyUsedFallback);
     }
 
     const dedupType = deduplicateByIp ? 'unique hosts' : 'offers';
