@@ -144,16 +144,22 @@ def _latest_ckpt(out: str):
 
 
 def encode(args):
+    import time
     rows = [json.loads(l) for l in open(args.input) if l.strip()]
     if args.max_samples:
         rows = rows[: args.max_samples]
+    t0 = time.time()
     # TODO: turn each row into model inputs (tokens/latents) and persist to args.output.
     import torch
     torch.save({"rows": rows}, args.output)
+    dt = max(1e-6, time.time() - t0)
     print(f"[encode] wrote {len(rows)} samples -> {args.output}")
+    # Self-calibration: ai-gateway records this to refine future cost estimates.
+    print(f"[calib] encode_rate_per_gpu={len(rows) / dt:.2f}")
 
 
 def train(args):
+    import time
     import torch
     from safetensors.torch import save_file
     os.makedirs(args.output, exist_ok=True)
@@ -173,6 +179,7 @@ def train(args):
     # TODO: replace this stub loop with a real training step.
     step = start_step
     total = max(1, len(rows)) * args.epochs
+    t0 = time.time()
     while step < start_step + total:
         step += 1
         if step % args.save_every_steps == 0 or step >= start_step + total:
@@ -180,6 +187,9 @@ def train(args):
             save_file({"placeholder": torch.zeros(1)}, path)  # TODO: real state_dict
             print(f"[save] step={step} -> {path}")
             _hf_push(path, os.path.basename(path))
+    dt = max(1e-6, time.time() - t0)
+    # Self-calibration: ai-gateway records this to refine future cost estimates.
+    print(f"[calib] steps_per_sec={(step - start_step) / dt:.3f}")
     print("[train] done")
 
 

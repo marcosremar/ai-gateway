@@ -62,6 +62,11 @@ train   --tokens <encoded.pt> --output <ckpt_dir> --epochs N --learning-rate X
   state — model + optimizer + scheduler + step — so spot-preemption resume is exact).
 - **HF push**: when `IARATTS_HF_WEIGHTS_REPO` is set, upload each checkpoint (non-fatal).
   `IARATTS_HF_DATASET_REPO` (encoded.pt) and `IARATTS_HF_CODE_REPO` (scripts) are also injected.
+- **Self-calibration** (optional, recommended): print at the end of each stage —
+  `[calib] steps_per_sec=<N>` (train) and `[calib] encode_rate_per_gpu=<N>` (encode).
+  ai-gateway records these per (GPU, model-size, task, mode) so future auto-select
+  cost estimates use your *measured* throughput instead of the built-in priors.
+  The scaffold emits both automatically.
 
 ## manifest.json schema
 

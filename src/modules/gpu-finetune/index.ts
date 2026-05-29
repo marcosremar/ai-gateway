@@ -62,6 +62,12 @@ export type {
   WorkloadProfile, Task, Precision, FinetuneMode, OptimizerKind, VramNeed, ThroughputBaseline,
 } from './workload.js';
 
+// Throughput calibration (self-improving estimates from real run data)
+export {
+  calibKey, observeThroughput, parseCalibLine, applyObservation, lookupCalib,
+} from './calibration.js';
+export type { CalibStore, CalibRecord, ThroughputObs } from './calibration.js';
+
 // Fail-fast preflight (live HF/R2/script checks before GPU spend)
 export { preflightChecks } from './preflight.js';
 export type { PreflightCheck, PreflightResult, PreflightStatus, PreflightDeps } from './preflight.js';
