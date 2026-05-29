@@ -1575,6 +1575,10 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     if (opts.provider) deployBody.provider = opts.provider;  // pin provider (server honors body.provider)
     deployBody.interruptible = opts.preferSpot === true;
     deployBody.strictFastBoot = true;  // reliability >= 0.97 filter for finetune jobs
+    // Fix #2: pin a sane disk so we don't inherit the image-estimate's ×3 → ~100GB
+    // floor that excludes most consumer 4090s. 40GB fits the MOSS finetune; callers
+    // can override with --storage.
+    deployBody.storageGb = opts.storageGb ?? 40;
     deployBody.finetune = true;        // protect from autoscaler cancel-and-redeploy
     deployBody.label = `${currentOwner()}/job-${Date.now()}`;
     const depRes = await fetch(`${url}/v1/gpu/deploy`, {

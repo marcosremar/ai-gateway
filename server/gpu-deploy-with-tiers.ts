@@ -3,7 +3,7 @@
 // probing, per-tier deploy loop, fallback alerts, host reputation.
 
 import type { GpuTier } from '../src/gpu-providers/deploy-orchestrator';
-import { deprioritizeUnavailable } from '../src/gpu-providers/deploy-orchestrator';
+import { deprioritizeUnavailable, isProviderHardBlock } from '../src/gpu-providers/deploy-orchestrator';
 import { PROVIDER_LABELS } from '../src/gpu-providers/deploy-orchestrator';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -332,7 +332,13 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
         dockerImage,
         failureCategory,
       });
-      if (failureCategory === 'billing') {
+      if (isProviderHardBlock(deployState.message ?? '')) {
+        // Fix #4b: provider hard-block (RunPod quota→0 abuse flag / KYC). Long
+        // persisted cooldown so the cascade SKIPS it for hours instead of
+        // retrying 60s later and re-hitting the blocked account.
+        await cooldownTracker.recordHardBlock(tier.name);
+        log.warn(`[gpu] ${tier.name} HARD-BLOCKED (quota/abuse/KYC) — cooldown ${Math.round(cooldownTracker.getRemainingSeconds(tier.name) / 3600)}h; skipping it until it clears`);
+      } else if (failureCategory === 'billing') {
         await cooldownTracker.recordBillingFailure(tier.name);
         log.log(`[gpu] ${tier.name} billing cooldown set: ${cooldownTracker.getRemainingSeconds(tier.name)}s — add funds to resume`);
       } else {

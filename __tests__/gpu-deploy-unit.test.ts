@@ -549,7 +549,7 @@ describe('startDeployWithTiers — advanced', () => {
   it('#220d sets fallback alert when tier fails and next available', () => {
     const fnStart = deployWithTiersSource.indexOf('export async function startDeployWithTiers');
     const fnEnd = deployWithTiersSource.indexOf('\n// ──', fnStart + 50);
-    const fnBody = deployWithTiersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
+    const fnBody = deployWithTiersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 17000);
     expect(fnBody).toContain('fallback');
     expect(fnBody).toContain('alertMsg');
     expect(fnBody).toContain('alert:');

@@ -34,6 +34,20 @@ export function deprioritizeUnavailable<T extends { name: string }>(tiers: T[], 
   return [...working, ...dead];
 }
 
+/**
+ * Fix #4b: detect a provider-level HARD block (not a transient failure) — e.g.
+ * RunPod's "machine quota is 0 / account blocked" abuse flag, or KYC/preflight
+ * blocks. These last ~hours, so retrying the provider 60s later just re-hits the
+ * blocked account; callers should apply a long cooldown instead.
+ */
+const HARD_BLOCK_SIGNATURES = [
+  'machine quota is 0', 'account blocked', 'preflight blocked', 'abuse', 'kyc',
+];
+export function isProviderHardBlock(message: string): boolean {
+  const m = (message || '').toLowerCase();
+  return HARD_BLOCK_SIGNATURES.some(s => m.includes(s));
+}
+
 // ── Provider Name & Tier ────────────────────────────────────────────────────
 
 export type ProviderName =
@@ -196,6 +210,22 @@ export class ProviderCooldownTracker {
       failedAt: Date.now(),
       cooldownUntilMs: Date.now() + BILLING_COOLDOWN_MS,
       failCount,
+    });
+    await this.persist();
+  }
+
+  /**
+   * Fix #4b: record a provider HARD block (abuse flag / quota-0 / KYC). Unlike
+   * recordFailure/recordBillingFailure this BYPASSES MAX_COOLDOWN_MS — a 24h
+   * block must actually skip the provider for 24h, not 15min. Persisted.
+   */
+  async recordHardBlock(name: string, ttlMs = 24 * 60 * 60_000): Promise<void> {
+    const now = Date.now();
+    const existing = this.cooldowns.get(name);
+    this.cooldowns.set(name, {
+      failedAt: now,
+      cooldownUntilMs: now + Math.max(0, ttlMs),
+      failCount: (existing?.failCount ?? 0) + 1,
     });
     await this.persist();
   }

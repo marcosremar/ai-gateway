@@ -71,8 +71,18 @@ export interface DeployExtra {
   label?: string;
   /** Use only high-confidence hosts/offers for fast-boot sensitive deploys. */
   strictFastBoot?: boolean;
+  /** Vast.ai offer-search profile (`high_quality`/`full`) for request-level mapping. */
+  searchMode?: 'high_quality' | 'full';
   /** Vast.ai opt-in for unverified/deverified offers. Defaults to verified-only. */
   allowUnverified?: boolean;
+  /**
+   * Internal Vast offer-hedge count (distinct from the deploy-level raceCount
+   * that selects race-vs-cascade). 1 ⇒ exactly one instance created — no
+   * duplicate billing. Undefined ⇒ provider default (Vast hedges 2).
+   */
+  offerRaceCount?: number;
+  /** Reject SSH-only offers — require at least one direct port (avoids tunnel hangs). */
+  requireDirectPort?: boolean;
   expectedApiPaths?: string[];
   expectedCapabilities?: DockerCapability[];
   requireDockerManifest?: boolean;
@@ -207,14 +217,36 @@ export async function startDeployLoop(
     }
   }
 
+  // Accumulated boot-time waste across retries. Each failed attempt that
+  // created (and destroyed) a pod still burned boot-time billing. Without a
+  // ceiling, a host class that fails the speed-test on every offer churns pod
+  // after pod and bleeds money (the cost-cascade incident). Cap it.
+  const maxWasteUsd = Math.max(0.5, parseFloat(process.env.DEPLOY_MAX_WASTE_USD ?? '3') || 3);
+  let accumulatedWasteUsd = 0;
+
   for (let attempt = 0; attempt <= MAX_DEPLOY_RETRIES; attempt++) {
     if (deployCancelled) return;
 
     if (attempt > 0) {
+      // Fix #4c: gate RETRIES through the runaway detector. The rapid
+      // create/destroy churn that trips provider abuse flags (RunPod quota→0)
+      // happens HERE, per-attempt — not just at the once-per-request call in
+      // gpu-deploy-with-tiers. Abort the retry loop if the create-rate tripped.
+      try {
+        const { getGlobalRunawayDetector } = await import('../src/autoscaler/runaway-detector');
+        if (!getGlobalRunawayDetector().recordDeployStart(providerName)) {
+          const msg = `[runaway] ${providerName} create-rate tripped — aborting retries to avoid a provider abuse flag`;
+          log.warn(msg);
+          setDeployState({ status: 'error', step: 'runaway_pause', message: msg });
+          return;
+        }
+      } catch { /* detector is best-effort — never block a deploy on its failure */ }
       setDeployState({ retryCount: attempt, message: `Retry ${attempt + 1}/${MAX_DEPLOY_RETRIES + 1}: creating new ${label} instance...` });
       await new Promise(r => setTimeout(r, 5_000));
       if (deployCancelled) return;
     }
+
+    const attemptStartedAt = Date.now();
 
     try {
       // Transition: searching → creating (found offers, now creating instance)
@@ -247,6 +279,9 @@ export async function startDeployLoop(
           // gpu-deploy-race.ts) so the verified-host filter and the
           // strict-fast-boot tier are actually controllable from the API.
           ...(extra.allowUnverified ? { allowUnverified: extra.allowUnverified } : {}),
+          ...(typeof extra.offerRaceCount === 'number' ? { raceCount: extra.offerRaceCount } : {}),
+          ...(extra.requireDirectPort ? { directPortRequired: 1 } : {}),
+          ...(extra.searchMode ? { searchMode: extra.searchMode } : {}),
           ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
           ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
           ...(extra.volumeId ? { volumeId: extra.volumeId } : {}),
@@ -437,6 +472,18 @@ export async function startDeployLoop(
         const errMsg = `App load failed (non-retryable): ${appErr?.message ?? 'unknown'}`;
         log.error(`[gpu] ${errMsg}`);
         setDeployState({ status: 'error', message: errMsg, step: 'app_error' });
+        deploymentSM.markError(errMsg);
+        return;
+      }
+
+      // Accumulate boot-time waste for this failed attempt and stop the whole
+      // deploy if we've crossed the ceiling — cheaper than churning more pods.
+      const attemptMs = Date.now() - attemptStartedAt;
+      accumulatedWasteUsd += instanceCostPerHr > 0 ? instanceCostPerHr * attemptMs / 3_600_000 : 0;
+      if (accumulatedWasteUsd >= maxWasteUsd) {
+        const errMsg = `${label} deploy aborted: accumulated boot-time waste ≈$${accumulatedWasteUsd.toFixed(2)} ≥ cap $${maxWasteUsd.toFixed(2)} after ${attempt + 1} attempt(s)`;
+        log.error(`[gpu] ${errMsg}`);
+        setDeployState({ status: 'error', message: errMsg, step: 'waste_cap_exceeded' });
         deploymentSM.markError(errMsg);
         return;
       }

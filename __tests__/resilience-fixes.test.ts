@@ -17,7 +17,7 @@ import { categorizeDeployError } from '../src/errors/deploy-errors';
 import { evaluateSpeedTest } from '../server/gpu-poll-health';
 import { buildSshArgs, resolveSshIdentity, tcpProbe } from '../src/gateway/providers/gpu/ssh-tunnel';
 import { createServer } from 'net';
-import { computeBackoffCooldownMs, deprioritizeUnavailable } from '../src/gpu-providers/deploy-orchestrator';
+import { computeBackoffCooldownMs, deprioritizeUnavailable, isProviderHardBlock, ProviderCooldownTracker } from '../src/gpu-providers/deploy-orchestrator';
 import { RunawayDetector } from '../src/autoscaler/runaway-detector';
 
 const hasRealKeys = !!process.env.VAST_API_KEY;
@@ -216,5 +216,23 @@ describe('fix #4c — runaway detector trips on rapid create-rate', () => {
     const d = new RunawayDetector({ maxStarts: 2, windowMs: 60_000, pauseMs: 60_000, now: () => t });
     d.recordDeployStart('vast'); d.recordDeployStart('vast'); // trip vast
     expect(d.recordDeployStart('runpod')).toBe(true);
+  });
+});
+
+// ── Fix #4b: hard-block (quota 0 / abuso / KYC) vira cooldown longo ───────────
+describe('fix #4b — provider hard-block → long persisted cooldown', () => {
+  it('isProviderHardBlock detecta abuso/quota/KYC, ignora falhas transitórias', () => {
+    expect(isProviderHardBlock('RunPod machine quota is 0 — account blocked')).toBe(true);
+    expect(isProviderHardBlock('PREFLIGHT BLOCKED: ... abuse flag')).toBe(true);
+    expect(isProviderHardBlock('KYC pending')).toBe(true);
+    expect(isProviderHardBlock('No GPUs available on Vast.ai (0 offers matched)')).toBe(false);
+    expect(isProviderHardBlock('ssh exited with code 255')).toBe(false);
+  });
+  it('recordHardBlock aplica cooldown longo que IGNORA o teto de 15min', async () => {
+    const t = new ProviderCooldownTracker();
+    await t.recordHardBlock('runpod', 24 * 60 * 60_000);
+    const remain = t.getRemainingSeconds('runpod');
+    expect(remain).toBeGreaterThan(ProviderCooldownTracker.MAX_COOLDOWN_MS / 1000); // > 900s (15min)
+    expect(remain).toBeGreaterThan(80_000); // ~24h
   });
 });
