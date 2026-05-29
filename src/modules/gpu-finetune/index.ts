@@ -51,6 +51,16 @@ export type { NumericCheckResult } from './spec.js';
 // Cost estimation
 export { estimateCost } from './cost.js';
 
+// GPU specs + workload model (VRAM feasibility + throughput scaling)
+export { GPU_SPECS, BASELINE_GPU, lookupGpuSpec, gpuVramGb, relSpeed } from './gpu-specs.js';
+export type { GpuSpec } from './gpu-specs.js';
+export {
+  vramNeedGb, scaleStepsPerSec, detectParamsFromHfConfig, precisionFromHint,
+} from './workload.js';
+export type {
+  WorkloadProfile, Task, Precision, FinetuneMode, OptimizerKind, VramNeed, ThroughputBaseline,
+} from './workload.js';
+
 // Fail-fast preflight (live HF/R2/script checks before GPU spend)
 export { preflightChecks } from './preflight.js';
 export type { PreflightCheck, PreflightResult, PreflightStatus, PreflightDeps } from './preflight.js';
