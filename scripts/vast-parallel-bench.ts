@@ -54,6 +54,11 @@ function bool(name: string): boolean { return args.includes(`--${name}`); }
 
 const PARALLEL   = parseInt(flag('parallel') ?? '3', 10);
 const MODEL      = flag('model') ?? 'qwen2.5:0.5b';
+// Docker image to deploy. Default pulls the model at runtime; a pre-baked image
+// (e.g. ghcr.io/marcosremar/ollama-qwen05:latest) ships the model in a layer —
+// pair with --skip-pull to drop the runtime `ollama pull` from onstart.
+const IMAGE      = flag('image') ?? 'ollama/ollama:latest';
+const SKIP_PULL  = bool('skip-pull');
 const MAX_PRICE  = parseFloat(flag('max-price') ?? '0.30');
 const MIN_INET   = parseInt(flag('min-inet-down') ?? '300', 10);
 const MIN_REL    = parseFloat(flag('min-reliability') ?? '0.92');
@@ -255,13 +260,13 @@ async function deployOffer(offer: Offer): Promise<number> {
   const onstart = [
     '#!/bin/bash',
     'ollama serve > /var/log/ollama.log 2>&1 &',
-    'sleep 5',
-    `ollama pull ${MODEL} >> /var/log/ollama.log 2>&1`,
+    // Pre-baked images already ship the model; skip the runtime pull.
+    ...(SKIP_PULL ? [] : ['sleep 5', `ollama pull ${MODEL} >> /var/log/ollama.log 2>&1`]),
   ].join('\n');
 
   const body: Record<string, unknown> = {
     client_id: 'me',
-    image: 'ollama/ollama:latest',
+    image: IMAGE,
     disk: 25,
     runtype: 'ssh_direct',
     onstart,
@@ -522,6 +527,7 @@ async function main() {
   console.error(`\n=== Vast.ai Parallel Deploy Bench (SLA-gated) ===`);
   const numSlots = Math.max(Math.ceil(PARALLEL * OVERPROVISION), PARALLEL + MIN_EXTRA);
   console.error(`  target: ${PARALLEL} successful | slots: ${numSlots} (overprovision ${OVERPROVISION}x, +${numSlots - PARALLEL} surplus) | model: ${MODEL}`);
+  console.error(`  image: ${IMAGE}${SKIP_PULL ? ' (pre-baked, skip-pull)' : ' (runtime pull)'}`);
   console.error(`  SLA: boot<=${BOOT_SLA / 1000}s ready<=${READY_SLA / 1000}s infer<=${INFER_SLA / 1000}s | slot-tries: ${SLOT_TRIES} deadline: ${SLOT_DEADLINE / 1000}s hedge: ${HEDGE}`);
   console.error(`  filters: reliability>=${MIN_REL} inet_down>=${MIN_INET}Mbps price<=$${MAX_PRICE}/hr\n`);
 
