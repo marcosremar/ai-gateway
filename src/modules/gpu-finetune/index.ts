@@ -59,6 +59,17 @@ export type { ProbeOutput } from './status.js';
 export { runCompare, parseCompareOutput } from './compare.js';
 export type { CompareOpts, CompareResult, CompareRow } from './compare.js';
 
+// Spot/preemptible resume controller (pure decision logic)
+export {
+  isEvictionError,
+  attemptSpendUsd,
+  addAttempt,
+  emptyBudget,
+  decideRetry,
+  deriveJobId,
+} from './spot-resume.js';
+export type { SpendAttempt, JobBudget, RetryDecision } from './spot-resume.js';
+
 // Gateway + DI deps
 export {
   FinetuneGateway,

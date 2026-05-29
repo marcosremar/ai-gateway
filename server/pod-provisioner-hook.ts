@@ -12,6 +12,8 @@
  *   AIGW_BACKUP_PREFIX       prefix estável do backup (ex: jobs/<projeto>) — sobrevive a recreate do pod
  *   AIGW_RESTORE_FROM        prefix de onde restaurar /workspace ao subir (default = AIGW_BACKUP_PREFIX)
  *   AIGW_AGENT_LOG_FILE      caminho do log da app (default /tmp/container.log)
+ *   AIGW_DEV_CLIS            csv de CLIs dev p/ instalar no pod ("claude,opencode"|"all") — opt-in
+ *   ANTHROPIC_API_KEY        auth headless do Claude Code (só enviado se AIGW_DEV_CLIS inclui claude)
  *   AIGW_PROVISION_DISABLED  se "1", pula provisioning (debug)
  *
  *   B2_ACCOUNT_ID, B2_APPLICATION_KEY, B2_BUCKET, B2_ENDPOINT, B2_REGION, B2_PREFIX
@@ -54,6 +56,8 @@ function buildConfig(podId: string): ProvisionConfig | null {
     backupIntervalHours: process.env.AIGW_BACKUP_INTERVAL_H ? parseInt(process.env.AIGW_BACKUP_INTERVAL_H, 10) : undefined,
     backupCheckSecs: process.env.AIGW_BACKUP_CHECK_SECS ? parseInt(process.env.AIGW_BACKUP_CHECK_SECS, 10) : undefined,
     appLogFile: process.env.AIGW_AGENT_LOG_FILE || '/tmp/container.log',
+    devClis: process.env.AIGW_DEV_CLIS || undefined,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY || undefined,
   };
 
   if (accessKey && secretKey && bucket) {
