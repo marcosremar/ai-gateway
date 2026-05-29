@@ -15,6 +15,10 @@ import { loadEnv, requireEnv } from './helpers';
 import { installMockFetch } from './mock-fetch';
 import { categorizeDeployError } from '../src/errors/deploy-errors';
 import { evaluateSpeedTest } from '../server/gpu-poll-health';
+import { buildSshArgs, resolveSshIdentity, tcpProbe } from '../src/gateway/providers/gpu/ssh-tunnel';
+import { createServer } from 'net';
+import { computeBackoffCooldownMs, deprioritizeUnavailable } from '../src/gpu-providers/deploy-orchestrator';
+import { RunawayDetector } from '../src/autoscaler/runaway-detector';
 
 const hasRealKeys = !!process.env.VAST_API_KEY;
 let creds: ProviderCredentials;
@@ -132,5 +136,85 @@ describe('fix #2 — recently-used offers are re-admitted instead of dropping to
     } finally {
       globalThis.fetch = orig;
     }
+  });
+});
+
+// ── Fix #5: SSH tunnel — identity file, args, forward validation ──────────────
+describe('fix #5 — ssh tunnel resilience primitives', () => {
+  it('buildSshArgs passa -i + IdentitiesOnly quando há identity', () => {
+    const args = buildSshArgs({ localPort: 19000, remotePort: 8000, sshPort: 222, sshHost: 'ssh6.vast.ai', identityFile: '/k/id' });
+    expect(args).toContain('-i');
+    expect(args[args.indexOf('-i') + 1]).toBe('/k/id');
+    expect(args).toContain('IdentitiesOnly=yes');
+    expect(args).toContain('19000:localhost:8000');
+    expect(args[args.length - 1]).toBe('root@ssh6.vast.ai');
+  });
+  it('buildSshArgs sem identity → sem -i', () => {
+    const args = buildSshArgs({ localPort: 1, remotePort: 2, sshPort: 3, sshHost: 'h' });
+    expect(args).not.toContain('-i');
+  });
+  it('resolveSshIdentity honra env quando o arquivo existe', () => {
+    // process.execPath sempre existe — usado como "identity" só p/ testar a resolução
+    expect(resolveSshIdentity({ VAST_SSH_KEY: process.execPath } as NodeJS.ProcessEnv)).toBe(process.execPath);
+    // caminho inexistente não é retornado
+    expect(resolveSshIdentity({ VAST_SSH_KEY: '/no/such/key' } as NodeJS.ProcessEnv)).not.toBe('/no/such/key');
+  });
+  it('tcpProbe valida forward: true em porta aberta, false em fechada', async () => {
+    const srv = createServer();
+    const port: number = await new Promise((res) => srv.listen(0, '127.0.0.1', () => res((srv.address() as { port: number }).port)));
+    try {
+      expect(await tcpProbe(port, 1500)).toBe(true);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+    // porta agora fechada → forward inválido
+    expect(await tcpProbe(port, 800)).toBe(false);
+  });
+});
+
+// ── Fix #4a: cooldown exponencial com jitter ─────────────────────────────────
+describe('fix #4a — cooldown backoff has ±20% jitter, capped', () => {
+  it('exponencial sem jitter (rand=0.5): 60s, 120s, 240s', () => {
+    expect(computeBackoffCooldownMs(60_000, 900_000, 1, () => 0.5)).toBe(60_000);
+    expect(computeBackoffCooldownMs(60_000, 900_000, 2, () => 0.5)).toBe(120_000);
+    expect(computeBackoffCooldownMs(60_000, 900_000, 3, () => 0.5)).toBe(240_000);
+  });
+  it('jitter fica em ±20%', () => {
+    expect(computeBackoffCooldownMs(60_000, 900_000, 2, () => 0)).toBe(96_000);   // -20%
+    expect(computeBackoffCooldownMs(60_000, 900_000, 2, () => 1)).toBe(144_000);  // +20%
+  });
+  it('respeita o teto maxMs', () => {
+    expect(computeBackoffCooldownMs(60_000, 300_000, 20, () => 1)).toBe(300_000);
+  });
+});
+
+// ── Fix #7: providers indisponíveis vão pro fim do cascade (estável) ──────────
+describe('fix #7 — deprioritize probe-unavailable providers (stable)', () => {
+  const tiers = [{ name: 'vast' }, { name: 'runpod' }, { name: 'tensordock' }];
+  it('empurra o indisponível pro fim preservando ordem dos demais', () => {
+    const out = deprioritizeUnavailable(tiers, new Set(['runpod']));
+    expect(out.map((t) => t.name)).toEqual(['vast', 'tensordock', 'runpod']);
+  });
+  it('set vazio = inalterado', () => {
+    expect(deprioritizeUnavailable(tiers, new Set())).toBe(tiers);
+  });
+});
+
+// ── Fix #4c: detector de runaway gateia o create-rate das re-tentativas ───────
+describe('fix #4c — runaway detector trips on rapid create-rate', () => {
+  it('bloqueia após maxStarts na janela (o gate que o loop de retry usa)', () => {
+    let t = 1_000;
+    const d = new RunawayDetector({ maxStarts: 3, windowMs: 60_000, pauseMs: 60_000, now: () => t });
+    expect(d.recordDeployStart('vast')).toBe(true);
+    expect(d.recordDeployStart('vast')).toBe(true);
+    expect(d.recordDeployStart('vast')).toBe(false); // 3ª trip → pausa
+    t += 1_000;
+    expect(d.recordDeployStart('vast')).toBe(false); // segue pausado
+  });
+  it('outro provedor não é afetado', () => {
+    let t = 1_000;
+    const d = new RunawayDetector({ maxStarts: 2, windowMs: 60_000, pauseMs: 60_000, now: () => t });
+    d.recordDeployStart('vast'); d.recordDeployStart('vast'); // trip vast
+    expect(d.recordDeployStart('runpod')).toBe(true);
   });
 });

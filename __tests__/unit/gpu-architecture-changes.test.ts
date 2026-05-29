@@ -137,22 +137,23 @@ describe('Inference Test Fallback Chain', () => {
 });
 
 describe('Probe Behavior (No Reordering)', () => {
-  it('#17 should probe providers but not reorder tiers', () => {
+  it('#17 should probe providers and defer only unavailable ones (no latency reorder)', () => {
     // Should have probe code
     expect(deployWithTiersSource).toContain('Promise.allSettled');
     expect(deployWithTiersSource).toContain('probeResults');
-    
+
     // Should log probe results
     expect(deployWithTiersSource).toContain('Provider probe:');
-    
-    // Should NOT reorder availableTiers based on probe results
-    // (This is verified by the absence of sorting/reordering code after probe)
+
     const probeSection = deployWithTiersSource.slice(
       deployWithTiersSource.indexOf('probeResults'),
       deployWithTiersSource.indexOf('for (let i = 0; i < availableTiers.length')
     );
+    // Must NOT reorder by latency/speed — that's the Modal-0ms-first hazard.
     expect(probeSection).not.toContain('sort');
-    expect(probeSection).not.toContain('availableTiers = ');
+    // The ONLY allowed reorder (fix #7): defer probe-confirmed-dead providers to
+    // the end (stable) so a timed-out/0-offer provider doesn't burn an early attempt.
+    expect(probeSection).toContain('deprioritizeUnavailable');
   });
 
   it('#18 should have comment explaining why not to reorder', () => {

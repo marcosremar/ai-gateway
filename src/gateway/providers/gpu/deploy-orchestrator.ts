@@ -9,6 +9,31 @@ import { readFile, writeFile, mkdir, access } from 'fs/promises';
 import path from 'path';
 import type { GpuProviderClient, ProviderCredentials } from './types';
 
+/**
+ * Exponential backoff cooldown with ±20% jitter (fix #4a), capped at maxMs.
+ * Pure + injectable RNG for testing.
+ */
+export function computeBackoffCooldownMs(
+  baseMs: number, maxMs: number, failCount: number, rand: () => number = Math.random,
+): number {
+  const raw = Math.min(baseMs * Math.pow(2, Math.max(0, failCount - 1)), maxMs);
+  const jitter = 1 + (rand() * 0.4 - 0.2); // ±20%
+  return Math.min(Math.max(0, Math.round(raw * jitter)), maxMs);
+}
+
+/**
+ * Fix #7: move probe-confirmed-unavailable providers to the END of the cascade
+ * without otherwise reordering (stable partition). Keeps the configured priority
+ * among working providers but stops wasting an early deploy attempt on a provider
+ * the parallel probe already knows is down.
+ */
+export function deprioritizeUnavailable<T extends { name: string }>(tiers: T[], unavailable: Set<string>): T[] {
+  if (unavailable.size === 0) return tiers;
+  const working = tiers.filter(t => !unavailable.has(t.name));
+  const dead = tiers.filter(t => unavailable.has(t.name));
+  return [...working, ...dead];
+}
+
 // ── Provider Name & Tier ────────────────────────────────────────────────────
 
 export type ProviderName =
@@ -149,7 +174,9 @@ export class ProviderCooldownTracker {
         `(${recent.length} failures in the last ${Math.round(ProviderCooldownTracker.AUTO_BLACKLIST_WINDOW_MS / 60_000)}min)`
       );
     } else {
-      cooldownMs = Math.min(this.baseCooldownMs * Math.pow(2, failCount - 1), this.maxCooldownMs);
+      // Fix #4a: ±20% jitter so multiple providers/restarts don't retry in
+      // lock-step (synchronized retry storms re-trigger provider rate limits).
+      cooldownMs = computeBackoffCooldownMs(this.baseCooldownMs, this.maxCooldownMs, failCount);
     }
 
     this.cooldowns.set(name, {

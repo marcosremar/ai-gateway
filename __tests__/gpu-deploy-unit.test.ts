@@ -99,7 +99,7 @@ describe('startDeployWithTiers — structure', () => {
     // Now in startDeployLoop
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
     const fnEnd = deployLoopSource.indexOf('\n// ──', fnStart);
-    const fnBody = deployLoopSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 10000);
+    const fnBody = deployLoopSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 12000);
     expect(fnBody).toContain("status: 'creating'");
     expect(fnBody).toContain("status: 'booting'");
     expect(fnBody).toContain("status: 'ready'");
@@ -108,7 +108,7 @@ describe('startDeployWithTiers — structure', () => {
   it('#176 sets gpuHealthy and lastRequestTime on successful deploy', () => {
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
     const fnEnd = deployLoopSource.indexOf('\n// ──', fnStart);
-    const fnBody = deployLoopSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 10000);
+    const fnBody = deployLoopSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 12000);
     expect(fnBody).toContain('setGpuHealthy(true)');
     expect(fnBody).toContain('setLastRequestTime(Date.now())');
   });
@@ -121,7 +121,7 @@ describe('startDeployWithTiers — structure', () => {
 describe('startDeployWithTiers — error handling', () => {
   it('#177 detects billing errors as non-retryable', () => {
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
-    const fnBody = deployLoopSource.slice(fnStart, fnStart + 25000);
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 27000);
     expect(fnBody).toContain("isBilling");
     expect(fnBody).toContain("'balance'");
     expect(fnBody).toContain("'funds'");
@@ -130,7 +130,7 @@ describe('startDeployWithTiers — error handling', () => {
 
   it('#178 detects auth errors as non-retryable', () => {
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
-    const fnBody = deployLoopSource.slice(fnStart, fnStart + 25000);
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 27000);
     expect(fnBody).toContain("isAuth");
     expect(fnBody).toContain("'authentication'");
     expect(fnBody).toContain("'unauthorized'");
@@ -323,7 +323,7 @@ describe('race deploy — startDeployRace', () => {
   it('#203 wraps Promise.all in try/finally for guaranteed cleanup', () => {
     const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
     // Force-clean is ~17k into function, need larger slice
-    const fnBody = deployRaceSource.slice(fnStart, fnStart + 25000);
+    const fnBody = deployRaceSource.slice(fnStart, fnStart + 27000);
     expect(fnBody).toContain('try {');
     expect(fnBody).toContain('await Promise.all(candidates.map');
     expect(fnBody).toContain('Force-clean');
@@ -702,7 +702,7 @@ describe('autoSelectCheapestGpu', () => {
   it('filters by minimum VRAM', () => {
     const fnStart = autoSelectSource.indexOf('export async function autoSelectCheapestGpu');
     const fnEnd = autoSelectSource.indexOf('\n// ──', fnStart + 100);
-    const fnBody = autoSelectSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 10000);
+    const fnBody = autoSelectSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 12000);
     expect(fnBody).toContain('minVram');
     expect(fnBody).toContain('o.vram >= minVram');
   });

@@ -3,6 +3,7 @@
 // probing, per-tier deploy loop, fallback alerts, host reputation.
 
 import type { GpuTier } from '../src/gpu-providers/deploy-orchestrator';
+import { deprioritizeUnavailable } from '../src/gpu-providers/deploy-orchestrator';
 import { PROVIDER_LABELS } from '../src/gpu-providers/deploy-orchestrator';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -208,7 +209,14 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
       .filter((r): r is PromiseFulfilledResult<{tier: GpuTier; available: boolean; ms: number; offerCount: number}> => r.status === 'fulfilled')
       .map(r => r.value);
     log.log(`[gpu] Provider probe: ${probed.map(p => `${p.tier.label}(${p.available ? p.offerCount + ' offers' : 'unavailable'}, ${p.ms}ms)`).join(', ')}`);
-    // availableTiers stays in original order - do NOT reorder
+    // Fix #7: defer probe-confirmed-unavailable providers to the END (stable —
+    // we don't reorder by speed, only push the dead ones last). A provider that
+    // timed out / returned 0 offers shouldn't burn an early deploy attempt.
+    const unavailableNames = new Set(probed.filter(p => p.available === false).map(p => p.tier.name));
+    if (unavailableNames.size > 0 && unavailableNames.size < availableTiers.length) {
+      availableTiers = deprioritizeUnavailable(availableTiers, unavailableNames);
+      log.log(`[gpu] Cascade order after probe (unavailable last): ${availableTiers.map(t => t.label).join(' → ')}`);
+    }
   }
 
   for (let i = 0; i < availableTiers.length; i++) {
