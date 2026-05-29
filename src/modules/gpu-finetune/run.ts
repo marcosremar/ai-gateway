@@ -59,6 +59,7 @@ export interface GpuJobRunnerOpts {
   timeoutMin: number;
   bootTimeoutMin?: number;
   image: string;
+  provider?: string;        // pin a specific provider (e.g. 'vast') instead of cascade default
   preferSpot: boolean;
   reuseInstance: boolean;
   pullEveryMin: number;
@@ -181,6 +182,7 @@ export class FinetuneGateway {
       output: resolved.output,
       timeoutMin: resolved.smokeOnly ? 30 : 360,
       image: resolved.image,
+      provider: opts.providers?.[0],   // pin first listed provider (e.g. vast) — server honors body.provider
       preferSpot: resolved.preferSpot,
       reuseInstance: resolved.reuse,
       pullEveryMin: 3,

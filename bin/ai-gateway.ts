@@ -1295,6 +1295,7 @@ interface GpuJobOpts {
   abortOnDivergence?: boolean; // tail /workspace/.job.log for loss=X; abort if NaN/Inf or 5× initial
   gpuFallback?: boolean;      // walk cheaper-GPU ladder if primary unavailable @ maxCost
   bootTimeoutMin?: number;    // max wait for instance to reach "ready" before abandoning (default: timeoutMin)
+  provider?: string;          // pin a provider (e.g. 'vast') — passed to server as body.provider
 }
 
 // Persist last job's instance info so subsequent jobs ssh/sync/pull/cleanup
@@ -1516,6 +1517,7 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
       gpuTypes: [pickName],
     };
     if (opts.env) deployBody.env = opts.env;
+    if (opts.provider) deployBody.provider = opts.provider;  // pin provider (server honors body.provider)
     deployBody.interruptible = opts.preferSpot === true;
     deployBody.strictFastBoot = true;  // reliability >= 0.97 filter for finetune jobs
     deployBody.finetune = true;        // protect from autoscaler cancel-and-redeploy
@@ -1538,8 +1540,13 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     // bootTimeoutMin caps how long we wait for provisioning. Shorter than timeoutMin so
     // slow/dead instances are abandoned fast and auto-resubmit picks a new one.
     const bootKey = `${pick.provider}:${pickName}`;
-    const bootTimeoutMin = opts.bootTimeoutMin ?? adaptiveBootTimeoutMin(bootKey, timeoutMin);
-    const adaptiveNote = opts.bootTimeoutMin ? '' : (adaptiveBootTimeoutMin(bootKey, timeoutMin) < timeoutMin ? ' (adaptive: median×1.2)' : '');
+    // Caller's bootTimeoutMin is the CEILING/fallback, not an override: the
+    // adaptive value (median×1.2 of recent boots, clamped [3min, ceiling]) wins
+    // once there's history, else we fall back to the caller's value. This lets
+    // the finetune's fixed 10-min cap still benefit from adaptive shortening.
+    const bootCeilingMin = opts.bootTimeoutMin ?? timeoutMin;
+    const bootTimeoutMin = adaptiveBootTimeoutMin(bootKey, bootCeilingMin);
+    const adaptiveNote = bootTimeoutMin < bootCeilingMin ? ' (adaptive: median×1.2)' : '';
     console.log(`${c.cyan}[3/6]${c.reset} Waiting for instance ready (timeout=${bootTimeoutMin}min${adaptiveNote})...`);
     const bootStart = Date.now();
     const deadline = bootStart + bootTimeoutMin * 60_000;
@@ -2372,6 +2379,7 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
         timeoutMin: rOpts.timeoutMin,
         bootTimeoutMin: rOpts.bootTimeoutMin,
         image: rOpts.image,
+        provider: rOpts.provider,
         keepAlive: false,
         terminateOnError: true,
         pullEveryMin: rOpts.pullEveryMin,
