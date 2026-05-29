@@ -42,7 +42,7 @@ export { BUNDLED_PLUGINS } from './types.js';
 // Spec validation + project loading
 export {
   validateSpec,
-  loadPreset, listPresets, setPresetsRoot,
+  loadPreset, listPresets, setPresetsRoot, lintPresetManifest,
   loadProject, listProjects, setProjectsRoot, resolveProjectOpts,
   runNumericChecks,
 } from './spec.js';
@@ -50,6 +50,31 @@ export type { NumericCheckResult } from './spec.js';
 
 // Cost estimation
 export { estimateCost } from './cost.js';
+export type { EstimateCtx } from './cost.js';
+
+// GPU specs + workload model (VRAM feasibility + throughput scaling)
+export { GPU_SPECS, BASELINE_GPU, lookupGpuSpec, gpuVramGb, relSpeed } from './gpu-specs.js';
+export type { GpuSpec } from './gpu-specs.js';
+export {
+  vramNeedGb, scaleStepsPerSec, detectParamsFromHfConfig, precisionFromHint,
+} from './workload.js';
+export type {
+  WorkloadProfile, Task, Precision, FinetuneMode, OptimizerKind, VramNeed, ThroughputBaseline,
+} from './workload.js';
+
+// Throughput calibration (self-improving estimates from real run data)
+export {
+  calibKey, observeThroughput, parseCalibLine, applyObservation, lookupCalib,
+} from './calibration.js';
+export type { CalibStore, CalibRecord, ThroughputObs } from './calibration.js';
+
+// Fail-fast preflight (live HF/R2/script checks before GPU spend)
+export { preflightChecks } from './preflight.js';
+export type { PreflightCheck, PreflightResult, PreflightStatus, PreflightDeps } from './preflight.js';
+
+// Preset scaffolding (generate a new preset skeleton)
+export { scaffoldPreset, STD_PATHS } from './scaffold.js';
+export type { ScaffoldFile, ScaffoldOpts, ScaffoldType } from './scaffold.js';
 
 // Status / probe
 export { parseProbeOutput, detectStage, buildStatusResult, buildProbeCommand } from './status.js';
@@ -76,6 +101,7 @@ export {
   InMemoryFinetuneState,
   FileFinetuneState,
   EnvHfTokenResolver,
+  resolveR2Creds,
 } from './run.js';
 export type {
   FinetuneStateStore,
@@ -86,4 +112,5 @@ export type {
   FinetuneProbe,
   ResolvedFinetune,
   GatewayLogger,
+  R2Creds,
 } from './run.js';

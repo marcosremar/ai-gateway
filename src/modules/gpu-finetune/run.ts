@@ -129,6 +129,30 @@ export class EnvHfTokenResolver implements HfTokenResolver {
   }
 }
 
+// ─── R2 / S3 credential resolution ─────────────────────────────────────────
+
+export interface R2Creds {
+  accessKey: string;
+  secretKey: string;
+  endpoint: string;
+  region: string;
+  /** true only when access key, secret key, AND endpoint are all present. */
+  hasCreds: boolean;
+}
+
+/**
+ * Resolve R2/S3 credentials from the gateway env. Single source of truth —
+ * shared by buildR2Config (run composition) and preflight (fail-fast check).
+ * Accepts B2_* or STORAGE_* aliases (same scheme as the pod-agent backup).
+ */
+export function resolveR2Creds(env: Record<string, string | undefined> = process.env): R2Creds {
+  const accessKey = env.B2_ACCOUNT_ID || env.STORAGE_ACCESS_KEY || '';
+  const secretKey = env.B2_APPLICATION_KEY || env.STORAGE_SECRET_KEY || '';
+  const endpoint = env.B2_ENDPOINT || env.STORAGE_ENDPOINT || '';
+  const region = env.B2_REGION || env.STORAGE_REGION || 'auto';
+  return { accessKey, secretKey, endpoint, region, hasCreds: !!(accessKey && secretKey && endpoint) };
+}
+
 // ─── FinetuneGateway ───────────────────────────────────────────────────────
 
 export interface GatewayLogger {
@@ -271,9 +295,14 @@ export class FinetuneGateway {
       output: resolved.output ?? './output',
       preferSpot: resolved.preferSpot ?? false,
       reuse: resolved.reuse ?? false,
-      gpuFallback: resolved.gpuFallback ?? false,
+      // Default ON: walk the cheaper-GPU ladder (3090/A4000 before 4090) — a
+      // ≤2B QLoRA fits a 3090 (~$0.15/h) vs 4090 (~$0.30/h).
+      gpuFallback: resolved.gpuFallback ?? true,
       dryRun: resolved.dryRun ?? false,
-      image: resolved.image ?? 'aigw-finetune-base',
+      // Registry-qualified so the pod can actually PULL it. A bare
+      // 'aigw-finetune-base' has no registry → silently fell back to gpu-dev
+      // (no ML deps) → full reinstall every run.
+      image: resolved.image ?? 'marcosremar/aigw-finetune-base:latest',
       scriptPath: resolved.scriptPath!,
       localPath: resolved.localPath!,
     };
@@ -299,6 +328,7 @@ export class FinetuneGateway {
     const trainStage = this.buildTrainStage(opts, scriptName);
     const smokeVerifyInline = this.buildSmokeVerifyInline(opts);
     const ckptAvgStage = this.buildCkptAverageStage(opts);
+    const ggufStage = this.buildGgufStage(opts);
     const pushStage = this.buildPushStage(opts);
     const r2BackupStage = this.buildR2BackupStage(opts, r2);
     const webhookStage = this.buildWebhookStage(opts);
@@ -306,7 +336,7 @@ export class FinetuneGateway {
     // R2 restore/backup só no run completo (smoke é efêmero, não persiste).
     const pipeline = opts.smokeOnly
       ? `${prepStage}${encodeStage}${trainStage}${smokeVerifyInline}`
-      : `${prepStage}${preSmokeStage}${encodeStage}${r2RestoreStage}${trainStage}${ckptAvgStage}${pushStage}${r2BackupStage}${webhookStage}`;
+      : `${prepStage}${preSmokeStage}${encodeStage}${r2RestoreStage}${trainStage}${ckptAvgStage}${ggufStage}${pushStage}${r2BackupStage}${webhookStage}`;
 
     // Overlap pip install with dataset/model download to save ~2min per run.
     // pip runs in background; dataset + model download in foreground; then we wait for pip.
@@ -432,16 +462,12 @@ export class FinetuneGateway {
     remote: string; bucket: string; prefix: string; exports: string[]; hasCreds: boolean;
   } | null {
     if (!opts.r2Bucket) return null;
-    const ak = process.env.B2_ACCOUNT_ID || process.env.STORAGE_ACCESS_KEY || '';
-    const sk = process.env.B2_APPLICATION_KEY || process.env.STORAGE_SECRET_KEY || '';
-    const endpoint = process.env.B2_ENDPOINT || process.env.STORAGE_ENDPOINT || '';
-    const region = process.env.B2_REGION || process.env.STORAGE_REGION || 'auto';
+    const { accessKey: ak, secretKey: sk, endpoint, region, hasCreds } = resolveR2Creds(process.env);
     const remote = 'r2aigw';
     const R = remote.toUpperCase();
     const projName = opts.project || opts.preset?.manifest?.name || opts.type;
     const prefix = (opts.r2Prefix || `jobs/${projName}`).replace(/\/+$/, '');
     const provider = endpoint.includes('r2.cloudflarestorage.com') ? 'Cloudflare' : 'Other';
-    const hasCreds = !!(ak && sk && endpoint);
     const exports = hasCreds ? [
       `export RCLONE_CONFIG_${R}_TYPE=s3`,
       `export RCLONE_CONFIG_${R}_PROVIDER=${provider}`,
@@ -562,6 +588,27 @@ sds = [load_file(p) for p in last_n]
 avg = {k: sum(sd[k].float() for sd in sds) / len(sds) for k in sds[0]}
 save_file(avg, '/workspace/checkpoints/model_avg.safetensors')
 `.trim())}"`;
+  }
+
+  /**
+   * Post-train GGUF export for llama.cpp / ollama. Gated to non-audio presets
+   * (TTS codec checkpoints aren't GGUF-convertible). Best-effort + non-fatal so
+   * a successful train is never lost to a conversion hiccup. Runs BEFORE push so
+   * the .gguf is uploaded + R2-backed alongside the safetensors.
+   */
+  private buildGgufStage(opts: ResolvedFinetune): string {
+    if (!opts.exportGguf) return '';
+    const isAudio = opts.type === 'audio' || opts.preset?.manifest?.type === 'audio';
+    if (isAudio) {
+      return ` && echo '[gguf] export-gguf set but preset type is audio — GGUF not applicable, skipping'`;
+    }
+    // Shallow-clone llama.cpp if absent, install its convert deps, convert the
+    // final HF-format checkpoint dir → q8_0 GGUF. Tolerant of failure.
+    return ` && { echo '[gguf] converting /workspace/checkpoints → GGUF (q8_0)'; ` +
+      `[ -d /opt/llama.cpp ] || git clone --depth 1 https://github.com/ggerganov/llama.cpp /opt/llama.cpp; ` +
+      `pip install -q -r /opt/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt 2>/dev/null || pip install -q gguf sentencepiece; ` +
+      `python /opt/llama.cpp/convert_hf_to_gguf.py /workspace/checkpoints --outfile /workspace/checkpoints/model.gguf --outtype q8_0 && ` +
+      `echo '[gguf] wrote /workspace/checkpoints/model.gguf'; } || echo '[gguf] conversion failed (non-fatal) — safetensors ckpt still saved'`;
   }
 
   private buildPushStage(opts: ResolvedFinetune): string {

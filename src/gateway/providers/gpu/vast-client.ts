@@ -1062,7 +1062,10 @@ export class VastClient extends AbstractGpuProvider {
     const isHighQualitySearch = spec.searchMode === 'full' ? false : spec.strictFastBoot !== false;
     const searchBody: Record<string, unknown> = {
       limit: 50,
-      type: 'on-demand',
+      // Spot/interruptible offers are searched with type:'bid' (≈50-70% cheaper
+      // than on-demand). On-demand otherwise. Without this, --prefer-spot was a
+      // no-op on Vast and every job paid on-demand price.
+      type: spec.interruptible ? 'bid' : 'on-demand',
       rentable: { eq: true },
       rented: { eq: false },
       // gpu_frac=1.0 → only the WHOLE physical GPU. This also excludes a
@@ -1475,12 +1478,25 @@ export class VastClient extends AbstractGpuProvider {
     // ssh_direct: Vast.ai provides SSH access + runs onstart script.
     // Works on ALL hosts (including those without direct ports like RTX 5090).
     const onstart = spec.onstart || '/app/start.sh';
+    // Spot bid: on Vast, setting `price` on create makes the instance
+    // interruptible (bid). Bid ~1.4× the offer's market floor to lower the
+    // preemption rate while staying well under on-demand; cap at maxPricePerHr.
+    let bidPrice = 0;
+    if (spec.interruptible) {
+      bidPrice = Math.max(pricePerHr * 1.4, pricePerHr + 0.01);
+      if (spec.maxPricePerHr && spec.maxPricePerHr > 0) {
+        bidPrice = Math.min(bidPrice, spec.maxPricePerHr);
+      }
+      bidPrice = Math.round(bidPrice * 1000) / 1000;
+      this.log.log(`[vast] interruptible bid $${bidPrice}/hr on offer ${offerId} (floor $${pricePerHr}/hr, ${gpuName})`);
+    }
     const createBody: Record<string, unknown> = {
       client_id: 'me',
       image: imageName,
       label: instanceName,
       disk: diskGb + 15,
       runtype: this._runtype,
+      ...(spec.interruptible && bidPrice > 0 ? { price: bidPrice } : {}),
       onstart: `nohup bash -c ${JSON.stringify(onstart)} > /var/log/app.log 2>&1 &`,
       env: {
         TZ: 'UTC',

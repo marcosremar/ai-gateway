@@ -920,10 +920,23 @@ import {
   buildStatusResult,
   loadPreset,
   listPresets,
+  lintPresetManifest,
   runNumericChecks,
   runCompare,
+  preflightChecks,
+  scaffoldPreset,
+  lookupGpuSpec,
+  gpuVramGb,
+  vramNeedGb,
+  detectParamsFromHfConfig,
+  precisionFromHint,
+  calibKey,
+  lookupCalib,
+  parseCalibLine,
+  applyObservation,
   BUNDLED_PLUGINS,
 } from '../src/modules/gpu-finetune';
+import type { PreflightResult, WorkloadProfile, CalibStore } from '../src/modules/gpu-finetune';
 import type {
   GpuJobRunner,
   FinetuneProbe,
@@ -1306,6 +1319,14 @@ interface GpuJobOpts {
   maxSpend?: number;          // hard $ cap. polls cost; force-terminates when exceeded
   pullExclude?: string[];     // rsync --exclude paths (skip /root/.cache, dataset/, etc)
   preferSpot?: boolean;       // ask vast/runpod for interruptible (≈30-50% cheaper)
+  selectMode?: 'cheapest' | 'balanced' | 'fast'; // offer ranking; all obey maxCost ceiling. default balanced
+  // Workload-aware selection (Phase 5): when set, drop GPUs without enough VRAM
+  // and rank by *estimated total job cost/time* (speed×price), not hourly price.
+  vramNeedGb?: number;             // min VRAM the model+task needs — feasibility gate
+  workloadProfile?: WorkloadProfile; // model/task profile for throughput scaling
+  estimateOpts?: Partial<FinetuneOpts>; // finetune hyperparams (epochs/batch/accum) for estimateCost
+  estimateSamples?: number;        // dataset sample count for estimateCost
+  calibStore?: CalibStore;         // measured throughput per gpu+model — overrides priors
   reuseInstance?: boolean;    // skip provisioning if a live owner-tagged instance with same image exists
   abortOnDivergence?: boolean; // tail /workspace/.job.log for loss=X; abort if NaN/Inf or 5× initial
   gpuFallback?: boolean;      // walk cheaper-GPU ladder if primary unavailable @ maxCost
@@ -1409,6 +1430,66 @@ function saveBudget(b: JobBudget): void {
   } catch { /* best effort — never block a run on budget bookkeeping */ }
 }
 
+// ─── Per-job spec persistence (enables `finetune resume <jobId>`) ────────────
+// The spot-resume retry loop lives in the CLI process. If the CLI dies (laptop
+// sleep, terminal close), the loop is lost — but budget + R2 checkpoints
+// survive. Persisting the resolved spec by stable jobId lets the user re-attach
+// with `finetune resume <jobId>` and continue from the last checkpoint, budget
+// intact. Stored next to budget-<jobId>.json under ~/.babelcast/.
+function jobSpecPath(jobId: string): string {
+  const safe = jobId.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return join(process.env.HOME || '/tmp', '.babelcast', `jobspec-${safe}.json`);
+}
+function saveJobSpec(jobId: string, opts: GpuFinetuneOpts): void {
+  try {
+    const p = jobSpecPath(jobId);
+    mkdirSync(dirname(p), { recursive: true });
+    // secrets are redacted from the persisted spec — never write them to disk.
+    const { secrets: _drop, ...safe } = opts as GpuFinetuneOpts & { secrets?: unknown };
+    writeFileSync(p, JSON.stringify({ jobId, savedAt: new Date().toISOString(), spec: safe }, null, 2));
+  } catch { /* best effort — never block a run on spec bookkeeping */ }
+}
+function loadJobSpec(jobId: string): GpuFinetuneOpts | null {
+  try {
+    const p = jobSpecPath(jobId);
+    if (existsSync(p)) return (JSON.parse(readFileSync(p, 'utf-8')).spec as GpuFinetuneOpts);
+  } catch { /* fall through */ }
+  return null;
+}
+// ─── Throughput calibration store (self-improving cost estimates) ───────────
+// Records real observed steps/sec + encode rate per (gpu, model-bucket, task,
+// mode) so future auto-select estimates use measured throughput, not priors.
+function calibStorePath(): string {
+  return join(process.env.HOME || '/tmp', '.babelcast', 'finetune_calib.json');
+}
+function loadCalibStore(): CalibStore {
+  try {
+    const p = calibStorePath();
+    if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf-8')) as CalibStore;
+  } catch { /* fall through */ }
+  return {};
+}
+function saveCalibStore(store: CalibStore): void {
+  try {
+    const p = calibStorePath();
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify(store, null, 2));
+  } catch { /* best effort — never block on calibration bookkeeping */ }
+}
+
+/** Most-recently-saved jobId (by file mtime), for no-arg `finetune resume`. */
+function latestJobId(): string | null {
+  try {
+    const dir = join(process.env.HOME || '/tmp', '.babelcast');
+    const files = readdirSync(dir)
+      .filter(f => f.startsWith('jobspec-') && f.endsWith('.json'))
+      .map(f => ({ f, m: statSync(join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.m - a.m);
+    if (!files.length) return null;
+    return (JSON.parse(readFileSync(join(dir, files[0].f), 'utf-8')).jobId as string) || null;
+  } catch { return null; }
+}
+
 async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   const { url, key } = getConfig();
   if (!opts.repo && !opts.path) {
@@ -1493,11 +1574,70 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
       break;
     }
   }
-  const affordable = matched
-    .filter((o) => priceOf(o) <= maxCost)
-    .sort((a, b) => priceOf(a) - priceOf(b));
+  // Selection mode: cheapest | balanced (cost-benefit, default) | fast.
+  // ALL modes obey the maxCost price ceiling first — so "fast" can never pick
+  // an absurdly expensive GPU; it only prefers faster-booting hosts UNDER the cap.
+  const selectMode = ((opts.selectMode as string) ?? 'balanced') as 'cheapest' | 'balanced' | 'fast';
+  const qualityOf = (o: Record<string, unknown>): number => {
+    const rel = Number(o.reliability2 ?? o.reliability ?? 0.9);   // 0-1
+    const inet = Number(o.inetDown ?? o.inet_down ?? 0);          // Mbps
+    const dl = Number(o.dlperf ?? o.dlPerf ?? 0);                 // vast dlperf
+    const inetBoost = Math.min(inet / 1000, 1);                  // 1Gbps+ = full
+    const dlBoost = Math.min(dl / 30, 1);
+    return Math.max(0.05, 0.6 * rel + 0.25 * inetBoost + 0.15 * dlBoost);
+  };
+  // VRAM feasibility gate (Phase 5): drop GPUs that can't hold the workload.
+  // Only filter offers whose VRAM we know AND is too small — unknown GPUs pass
+  // (server-side validateVramForModel is the backstop at deploy).
+  const vramNeed = opts.vramNeedGb;
+  const priceFiltered = matched.filter((o) => priceOf(o) <= maxCost);
+  const feasible = vramNeed
+    ? priceFiltered.filter((o) => { const v = gpuVramGb(gpuName(o)); return v === undefined || v >= vramNeed; })
+    : priceFiltered;
+  const droppedForVram = priceFiltered.length - feasible.length;
+  if (vramNeed && droppedForVram > 0) {
+    console.log(`  ${c.dim}[vram] need ~${vramNeed}GB — dropped ${droppedForVram} offer(s) with too little VRAM${c.reset}`);
+  }
+
+  // Estimated total job cost/time on a given offer (workload-aware). Falls back
+  // to hourly price when no workload profile is supplied (generic jobs).
+  const estimateFor = (o: Record<string, unknown>) => {
+    const wl = opts.workloadProfile;
+    if (!wl) return null;
+    const spec = lookupGpuSpec(gpuName(o));
+    const cpuCores = Number(o.cpuCores ?? o.cpu_cores ?? o.numCpus) || undefined;
+    const reliability = Number(o.reliability2 ?? o.reliability) || undefined;
+    // Prefer measured throughput for THIS gpu+model when calibrated.
+    let est = opts.estimateOpts ?? {};
+    const cal = opts.calibStore
+      ? lookupCalib(opts.calibStore, calibKey(gpuName(o), wl.paramsB, wl.task, wl.finetuneMode))
+      : undefined;
+    if (cal) est = { ...est, stepsPerSec: cal.stepsPerSec ?? est.stepsPerSec, encodeRatePerGpu: cal.encodeRatePerGpu ?? est.encodeRatePerGpu };
+    // A calibrated stepsPerSec is ALREADY gpu-specific — don't re-scale by GPU
+    // speed (would double-count). Without it, scale the prior by gpuSpec+workload.
+    const ctx = cal?.stepsPerSec
+      ? { cpuCores, spot: opts.preferSpot, reliability }
+      : { gpuSpec: spec, workload: wl, cpuCores, spot: opts.preferSpot, reliability };
+    return estimateCost(est, opts.estimateSamples, priceOf(o), ctx);
+  };
+  const costOf = (o: Record<string, unknown>) => estimateFor(o)?.totalUsd ?? priceOf(o);
+  const timeOf = (o: Record<string, unknown>) => estimateFor(o)?.totalMin ?? (1 / qualityOf(o));
+
+  const affordable = feasible
+    .sort((a, b) => {
+      if (selectMode === 'cheapest') return priceOf(a) - priceOf(b);   // lowest $/h
+      if (selectMode === 'fast') {                                     // fastest finish
+        const dt = timeOf(a) - timeOf(b);
+        return dt !== 0 ? dt : priceOf(a) - priceOf(b);
+      }
+      // balanced (default): lowest estimated TOTAL job cost (speed×price, spot
+      // eviction folded in). Without a workload profile this is $/quality as before.
+      if (opts.workloadProfile) return costOf(a) - costOf(b);
+      return priceOf(a) / qualityOf(a) - priceOf(b) / qualityOf(b);
+    });
   if (affordable.length === 0) {
-    console.error(`No '${gpuFilter}' offers within $${maxCost}/h.${fallbackOn ? ` Fallback chain [${tryList.join('→')}] also empty.` : ''} ` +
+    const vramNote = vramNeed && droppedForVram > 0 ? ` (${droppedForVram} dropped for <${vramNeed}GB VRAM)` : '';
+    console.error(`No '${gpuFilter}' offers within $${maxCost}/h${vramNote}.${fallbackOn ? ` Fallback chain [${tryList.join('→')}] also empty.` : ''} ` +
                   `Pool: ${offers.length} total, ${matched.length} match '${usedFilter}'.`);
     if (matched.length > 0) {
       const cheapest = [...matched].sort((a, b) => priceOf(a) - priceOf(b)).slice(0, 3);
@@ -1509,7 +1649,11 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   const pick = affordable[0];
   const pickPrice = priceOf(pick);
   const pickName = gpuName(pick);
-  console.log(`  picked: ${pickName} @ $${pickPrice.toFixed(3)}/h on ${pick.provider}`);
+  const pickEst = estimateFor(pick);
+  const estNote = pickEst
+    ? `  ${c.dim}≈${pickEst.totalMin.toFixed(0)}min, ~$${pickEst.totalUsd.toFixed(2)} total${c.reset}`
+    : '';
+  console.log(`  picked: ${pickName} @ $${pickPrice.toFixed(3)}/h on ${pick.provider} (mode=${selectMode})${estNote}`);
 
   if (opts.dryRun) {
     const timeoutMin = opts.timeoutMin ?? 60;
@@ -2083,6 +2227,7 @@ interface GpuFinetuneOpts {
   pushToHf?: string;
   autoResume?: boolean;
   preferSpot?: boolean;
+  selectMode?: 'cheapest' | 'balanced' | 'fast'; // offer ranking (default balanced); all obey maxCost ceiling
   reuse?: boolean;
   r2Bucket?: string;            // R2/S3 bucket for durable dataset+ckpt storage (spot-resume)
   r2Prefix?: string;            // stable prefix/folder (default jobs/<project|type>) — ties data to the run
@@ -2134,6 +2279,13 @@ interface GpuFinetuneOpts {
   seed?: number;                // random seed (reproducibility, default 42)
   gradClip?: number;            // gradient norm clip threshold (default 1.0)
   logEverySteps?: number;       // print loss every N steps (default 25)
+  // Phase 5 — workload overrides for VRAM gate + cost-aware GPU select.
+  // Auto-detected from the HF model config when omitted.
+  modelParamsB?: number;        // model size in billions (override auto-detect)
+  precision?: string;          // bf16|fp16|fp32|int8|int4 (override; else from plugin)
+  seqLen?: number;             // tokens/frames per sample (override; affects VRAM)
+  task?: 'finetune' | 'inference'; // default finetune
+  sampleCount?: number;        // dataset size hint for cost estimate
 }
 // Schema validation, cost estimation, and run history all delegate to the
 // gpu-finetune module. These thin wrappers keep call-sites below readable.
@@ -2153,6 +2305,120 @@ function recordFinetuneRun(spec: Partial<FinetuneOpts>, instanceInfo: Record<str
   const id = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   finetuneStateStore().save({ id, ts: new Date().toISOString(), spec, instance: instanceInfo });
   return id;
+}
+
+// Spec keys / flags that are parsed (for back-compat + help docs) but NOT yet
+// wired into the pipeline. Keep this list in sync as features get implemented —
+// export-gguf IS now wired (post-train stage) and is NOT here.
+// persist-cache (needs network-volume lifecycle) and incremental (needs
+// cross-run dataset-hash + encoded-artifact restore) remain genuinely unwired.
+const UNIMPLEMENTED_FINETUNE_FLAGS: Array<[keyof GpuFinetuneOpts, string]> = [
+  ['persistCache', '--persist-cache'],
+  ['incremental', '--incremental'],
+  ['autoFix', '--auto-fix'],
+  ['webDashboard', '--web'],
+  ['failoverOnPreempt', '--failover-on-preempt'],
+  ['evalsPerEpoch', 'spec.evalsPerEpoch'],
+  ['earlyStopOnEval', 'spec.earlyStopOnEval'],
+  ['multiDataset', 'spec.multiDataset'],
+];
+
+/** Warn (don't fail) for accepted-but-unimplemented flags so users aren't misled. */
+function warnUnimplementedFinetuneFlags(opts: GpuFinetuneOpts): void {
+  for (const [key, label] of UNIMPLEMENTED_FINETUNE_FLAGS) {
+    const v = opts[key];
+    const set = Array.isArray(v) ? v.length > 0 : v !== undefined && v !== false;
+    if (set) {
+      console.warn(`${c.yellow}⚠ ${label} accepted but not implemented yet — ignoring.${c.reset}`);
+    }
+  }
+}
+
+// Live fail-fast checks (HF reachability, token write-access, R2 creds, script)
+// before any GPU spend. Prints a one-line-per-check report. Returns the result
+// so callers decide whether to abort (submit) or just report (validate).
+async function runFinetunePreflight(spec: Partial<FinetuneOpts>): Promise<PreflightResult> {
+  const result = await preflightChecks(spec, process.env);
+  for (const ch of result.checks) {
+    const icon = ch.status === 'ok' ? `${c.green}✓${c.reset}`
+      : ch.status === 'warn' ? `${c.yellow}!${c.reset}`
+      : `${c.red}✗${c.reset}`;
+    console.log(`  ${icon} ${ch.name}: ${ch.detail}`);
+  }
+  return result;
+}
+
+/**
+ * After a run, record measured throughput into the calibration store so future
+ * estimates self-correct. Reads the pulled job log for a trainer-emitted
+ * `[calib] steps_per_sec=… encode_rate_per_gpu=…` line (or a bare `rate=`).
+ * Best-effort; silent when the log lacks the markers (e.g. preset not updated).
+ */
+function recordCalibrationFromRun(
+  workload: WorkloadProfile | undefined,
+  gpuType: string | undefined,
+  outputDir: string | undefined,
+): void {
+  try {
+    if (!workload || !gpuType) return;
+    const logPath = join(outputDir || './output', '.job.log');
+    if (!existsSync(logPath)) return;
+    const tail = readFileSync(logPath, 'utf-8').split('\n').slice(-300).join('\n');
+    const obs = parseCalibLine(tail);
+    if (!obs.stepsPerSec && !obs.encodeRatePerGpu) return;
+    const key = calibKey(gpuType, workload.paramsB, workload.task, workload.finetuneMode);
+    saveCalibStore(applyObservation(loadCalibStore(), key, obs, new Date().toISOString()));
+    const parts = [
+      obs.stepsPerSec ? `${obs.stepsPerSec.toFixed(2)} steps/s` : '',
+      obs.encodeRatePerGpu ? `${obs.encodeRatePerGpu.toFixed(1)} enc/s` : '',
+    ].filter(Boolean).join(', ');
+    console.log(`  ${c.dim}[calib] recorded ${key} → ${parts}${c.reset}`);
+  } catch { /* best effort — never block on calibration */ }
+}
+
+/** Fetch a HF model's config.json and estimate its param count (B). Best-effort. */
+async function fetchHfModelParamsB(modelRef: string): Promise<number | undefined> {
+  const repo = modelRef.replace(/^hf:\/\//, '').replace(/\/+$/, '');
+  const hdr = process.env.HF_TOKEN ? { authorization: `Bearer ${process.env.HF_TOKEN}` } : {};
+  try {
+    const r = await fetch(`https://huggingface.co/${repo}/resolve/main/config.json`, { headers: hdr });
+    if (!r.ok) return undefined;
+    return detectParamsFromHfConfig(await r.json() as Record<string, unknown>);
+  } catch { return undefined; }
+}
+
+/**
+ * Build a WorkloadProfile for the run: model size auto-detected from the HF
+ * config (overridable via spec), task/precision/mode from plugin + flags.
+ * Returns undefined when model size can't be determined (→ legacy selection).
+ */
+async function detectFinetuneWorkload(
+  opts: GpuFinetuneOpts,
+  preset: ReturnType<typeof loadPreset>,
+): Promise<WorkloadProfile | undefined> {
+  const mode = opts.plugin === 'qlora' ? 'qlora' : opts.plugin === 'lora' ? 'lora' : 'full';
+  const precision = opts.precision
+    ? precisionFromHint(opts.precision)
+    : precisionFromHint(`${opts.plugin ?? ''} ${opts.extraTrainArgs ?? ''}`, mode === 'qlora' ? 'int4' : 'bf16');
+
+  let paramsB = opts.modelParamsB;
+  if (!paramsB) {
+    const modelRef = opts.model || preset?.manifest?.defaultModel;
+    if (modelRef?.startsWith('hf://')) paramsB = await fetchHfModelParamsB(modelRef);
+  }
+  if (!paramsB || paramsB <= 0) return undefined; // can't reason about VRAM/speed
+
+  const isAudio = preset?.manifest?.type === 'audio';
+  return {
+    paramsB,
+    precision,
+    task: (opts.task as WorkloadProfile['task']) ?? 'finetune',
+    finetuneMode: mode,
+    optimizer: mode === 'qlora' ? 'adamw8bit' : 'adamw',
+    gradCkpt: opts.plugin === 'grad-ckpt' || !!opts.freezeBackboneLayers,
+    seqLen: opts.seqLen ?? (isAudio ? 1500 : 2048),
+    batchSize: opts.batchSize ?? 1,
+  };
 }
 
 // gpu finetune compare — A/B WER test multiple ckpts via Whisper roundtrip.
@@ -2416,6 +2682,27 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
     console.error(`--model must use hf://<repo-id> form`); process.exit(1);
   }
 
+  // Honesty guard: these spec keys/flags are accepted (back-compat + help docs)
+  // but NOT yet wired into the pipeline. Warn loudly instead of silently
+  // ignoring, so users don't believe a feature is active when it isn't.
+  warnUnimplementedFinetuneFlags(opts);
+
+  // Auto-detect the workload (model size from HF config + task/precision/mode)
+  // so the GPU auto-select can gate on VRAM and rank by estimated total cost,
+  // not hourly price. Best-effort: undefined → falls back to legacy selection.
+  const workload = await detectFinetuneWorkload(opts, preset);
+  const need = workload ? vramNeedGb(workload) : undefined;
+  if (workload && need) {
+    console.log(`  ${c.dim}[workload] ${workload.paramsB.toFixed(1)}B ${workload.precision} ${workload.finetuneMode} → ~${need.gb}GB VRAM needed${c.reset}`);
+  }
+  const estimateOpts: Partial<FinetuneOpts> = {
+    epochs: opts.epochs, batchSize: opts.batchSize, gradAccum: opts.gradAccum,
+    numGpus: opts.numGpus, stepsPerSec: preset?.manifest?.defaultStepsPerSec,
+    encodeRatePerGpu: preset?.manifest?.defaultEncodeRatePerGpu,
+  };
+  // Calibration: measured throughput per gpu+model refines the per-offer estimate.
+  const calib = loadCalibStore();
+
   // jobRunner: cmdGpuJobsRun has side-effects (saves job state, prints to stdout)
   // and returns void. Read loadJobState() AFTER the call to recover real metadata.
   const jobRunner: GpuJobRunner = {
@@ -2441,6 +2728,12 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
         abortOnDivergence: rOpts.abortOnDivergence,
         gpuFallback: rOpts.gpuFallback,
         dryRun: rOpts.dryRun,
+        // Phase 5: VRAM gate + workload-aware (total-cost) offer ranking.
+        vramNeedGb: need?.gb,
+        workloadProfile: workload,
+        estimateOpts,
+        estimateSamples: opts.sampleCount,
+        calibStore: calib,
       });
       const s = loadJobState();
       return {
@@ -2507,6 +2800,7 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
     ? Math.min(20, opts.retryOnPreempt + 1)
     : 5;
   const jobId = deriveJobId(opts);
+  saveJobSpec(jobId, opts);  // enable `finetune resume <jobId>` if the CLI dies mid-run
   let budget = loadBudget(jobId);
   if (budget.totalSpentUsd > 0 || budget.attempts > 0) {
     process.stderr.write(`${c.dim}[finetune] job '${jobId}' prior spend $${budget.totalSpentUsd.toFixed(2)} over ${budget.attempts} attempt(s)${c.reset}\n`);
@@ -2535,6 +2829,8 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
       budget = addAttempt(budget, spend, new Date().toISOString());
       saveBudget(budget);
       console.log(`[finetune] submitted — instanceId=${result.instanceId || '(see job state)'}  gpu=${result.gpuType}  $${result.pricePerHr}/h  cumSpend=$${budget.totalSpentUsd.toFixed(2)}`);
+      // Close the calibration loop: record measured throughput for this gpu+model.
+      recordCalibrationFromRun(workload, result.gpuType, opts.output);
       return;
     } catch (err) {
       lastErr = err;
@@ -2630,6 +2926,7 @@ async function cmdGpuTrain(opts: GpuTrainOpts): Promise<void> {
     stallMin: 30,
     pullExclude: ['data/', 'model/', 'wav/'], // skip raw dataset; checkpoints (.pt) ARE pulled
     preferSpot: opts.preferSpot ?? false,
+    selectMode: opts.selectMode,
     reuseInstance: opts.reuse ?? false,
     dryRun: opts.dryRun,
   });
@@ -5842,13 +6139,19 @@ Subcommands:
   submit | run    Provision + run finetune (one-shot, foreground)
                   Smoke runs FIRST by default → only proceeds to full if OK.
                   --no-smoke / --smoke (smoke-only) / --dry-run / --no-estimate
+                  Preflight (HF reachable + token write + R2 creds + script)
+                  runs before GPU spend. --skip-preflight bypass / --preflight-only diagnose
+  resume [jobId]  Re-attach a job whose CLI died (laptop sleep) — reloads saved
+                  spec, resumes from last checkpoint, budget intact. Default: most recent.
   status          Show saved instance info
   logs [-f]       Tail /workspace/.job.log
   metrics         GPU/VRAM/RAM/DISK/NET snapshot
   cancel          Terminate saved instance (--force)
   history         Show last 20 finetune runs with totals
   estimate        Predict total wall time + cost from spec (no spend)
-  validate        Schema-check spec.yaml + local dataset (no spend)
+  validate        Schema + live preflight (HF/R2/script, no spend). --no-preflight = schema only
+  init <name>     Scaffold a new preset skeleton (manifest + trainer + prepare)
+                  under finetune-presets/<name>/. --type audio|text  --model hf://…
   lr-find         Sequential mini-trains @ {1e-6..5e-4} → suggest best LR
   sweep --trials N  Parallel hyperparam search (N spot instances)
   deploy <ckpt>   Push ckpt to --push-to-hf or print local IARATTS_CKPT cmd
@@ -5876,7 +6179,15 @@ Round 4 (ideas from Axolotl/SkyPilot/Unsloth):
   --providers a,b,c     Multi-cloud failover (try in order if 1st fails)
   --failover-on-preempt [TODO] Switch provider on spot preemption
   --ckpt-avg N          Polyak-average last N ckpts → model_avg.safetensors
-  --export-gguf         [TODO] Post-train: convert ckpt to GGUF for llama.cpp/ollama
+  --export-gguf         Post-train: convert ckpt → q8_0 GGUF for llama.cpp/ollama (non-audio presets)
+
+Auto-select (Phase 5) — model+task aware. Model size auto-detected from the HF
+config; GPUs without enough VRAM are dropped, offers ranked by ESTIMATED TOTAL
+cost (speed×price), not hourly. --select-mode cheapest|balanced|fast. Overrides:
+  --model-params-b N    Model size in billions (skip HF auto-detect)
+  --precision X         bf16|fp16|fp32|int8|int4 (else inferred from --plugin)
+  --seq-len N           Tokens/frames per sample (affects VRAM estimate)
+  --task finetune|inference   (default finetune)
   spec.secrets:         Sensitive env vars (redacted from logs/state file)
   spec.evalsPerEpoch    [TODO] Run eval N times per epoch (vs every M steps)
   spec.earlyStopOnEval  [TODO] Stop if metric < threshold during eval
@@ -6908,6 +7219,26 @@ Per-app isolation:
                 specErrs.forEach((e) => console.error(`  - ${e}`));
                 process.exit(1);
               }
+              // Fail-fast preflight: live HF/R2/script checks before GPU spend.
+              // Skipped on --dry-run/--skip-preflight; --preflight-only exits after.
+              const preflightOnly = hasFlag(args, '--preflight-only');
+              if (!hasFlag(args, '--skip-preflight') && (!hasFlag(args, '--dry-run') || preflightOnly)) {
+                console.log('[preflight] checking dataset/model/token/storage…');
+                const pf = await runFinetunePreflight({
+                  ...specForValidation,
+                  scriptPath: script,
+                  model: getArg(args, '--model') || spec.model,
+                  pushToHf: getArg(args, '--push-to-hf') || spec.pushToHf,
+                  prepare: spec.prepare,
+                  r2Bucket: getArg(args, '--r2-bucket') || spec.r2Bucket,
+                  resumeFromR2: hasFlag(args, '--resume-from-r2') || spec.resumeFromR2 === true,
+                } as Partial<FinetuneOpts>);
+                if (!pf.ok) {
+                  console.error('✗ preflight failed — aborting before GPU spend. Fix the above or pass --skip-preflight.');
+                  process.exit(1);
+                }
+                if (preflightOnly) { console.log('✓ preflight passed (--preflight-only, not deploying)'); break; }
+              }
               // #4 Show estimate before submit (unless dry-run already does).
               // Merge CLI overrides so the prediction reflects what'll actually run.
               if (!hasFlag(args, '--dry-run') && !hasFlag(args, '--no-estimate')) {
@@ -6961,6 +7292,7 @@ Per-app isolation:
                 // progress is worse than a redundant resume check on a fresh run.
                 autoResume: hasFlag(args, '--no-resume') ? false : (spec.autoResume !== false),
                 preferSpot: hasFlag(args, '--no-spot') ? false : (hasFlag(args, '--prefer-spot') || (spec.preferSpot !== false && spec.preferSpot !== 'false')),
+                selectMode: (getArg(args, '--select-mode') as 'cheapest' | 'balanced' | 'fast') || (spec.selectMode as 'cheapest' | 'balanced' | 'fast') || 'balanced',
                 reuse: hasFlag(args, '--reuse') || spec.reuse === true,
                 extraTrainArgs: getArg(args, '--extra-args') || spec.extraTrainArgs,
                 extraDeps: getArg(args, '--extra-deps') || spec.extraDeps,
@@ -6973,6 +7305,11 @@ Per-app isolation:
                 // from latest checkpoint). The count IS the crash-loop guard — set
                 // 0 to disable. Capped at 10 by validateSpec.
                 retryOnPreempt: getArg(args, '--retry-on-preempt') ? parseInt(getArg(args, '--retry-on-preempt')!) : (spec.retryOnPreempt ?? 3),
+                // R2/S3 durable storage — flags OR spec (yaml). Without these the
+                // runner can't restore/backup checkpoints across spot preemption.
+                r2Bucket: getArg(args, '--r2-bucket') || spec.r2Bucket,
+                r2Prefix: getArg(args, '--r2-prefix') || spec.r2Prefix,
+                resumeFromR2: hasFlag(args, '--resume-from-r2') || spec.resumeFromR2 === true,
                 incremental: hasFlag(args, '--incremental') || spec.incremental === true,
                 autoFix: hasFlag(args, '--auto-fix') || spec.autoFix === true,
                 plugin: getArg(args, '--plugin') || spec.plugin,
@@ -7014,7 +7351,27 @@ Per-app isolation:
                 seed: getArg(args, '--seed') ? parseInt(getArg(args, '--seed')!) : spec.seed,
                 gradClip: getArg(args, '--grad-clip') ? parseFloat(getArg(args, '--grad-clip')!) : spec.gradClip,
                 logEverySteps: getArg(args, '--log-every-steps') ? parseInt(getArg(args, '--log-every-steps')!) : spec.logEverySteps,
+                // Phase 5 — workload overrides (else auto-detected from HF config)
+                modelParamsB: getArg(args, '--model-params-b') ? parseFloat(getArg(args, '--model-params-b')!) : spec.modelParamsB,
+                precision: getArg(args, '--precision') || spec.precision,
+                seqLen: getArg(args, '--seq-len') ? parseInt(getArg(args, '--seq-len')!) : spec.seqLen,
+                task: (getArg(args, '--task') as 'finetune' | 'inference') || spec.task,
+                sampleCount: getArg(args, '--sample-count') ? parseInt(getArg(args, '--sample-count')!) : spec.sampleCount,
               } as any);
+            } else if (sub === 'resume') {
+              // Re-attach a job whose CLI controller died (laptop sleep, closed
+              // terminal). Reloads the persisted spec by jobId (or the most
+              // recent), forces resume-from-checkpoint, re-enters the submit loop
+              // with budget intact (budget-<jobId>.json carries over).
+              const wantId = args[3] && !args[3].startsWith('-') ? args[3] : undefined;
+              const jobId = wantId || latestJobId();
+              if (!jobId) { console.error('No saved job to resume. Run a submit first, or pass <jobId>.'); process.exit(1); }
+              const saved = loadJobSpec(jobId);
+              if (!saved) { console.error(`No saved spec for job '${jobId}'. List: ls ~/.babelcast/jobspec-*.json`); process.exit(1); }
+              const budget = loadBudget(jobId);
+              console.log(`[resume] job '${jobId}' — prior spend $${budget.totalSpentUsd.toFixed(2)} over ${budget.attempts} attempt(s)`);
+              if (saved.r2Bucket) saved.resumeFromR2 = true; else saved.autoResume = true;
+              await cmdGpuFinetune(saved as any);
             } else if (sub === 'status') {
               if (hasFlag(args, '--raw')) await cmdGpuJobsStatus();
               else await cmdGpuFinetuneStatus();
@@ -7065,8 +7422,22 @@ Per-app isolation:
               const dsPath = validateSpec.dataset && !String(validateSpec.dataset).startsWith('hf://') ? String(validateSpec.dataset) : '';
               const dsErrs = dsPath ? validateDatasetLocal(dsPath, validateSpec.type || 'audio') : [];
               const all = [...errs, ...dsErrs];
-              if (all.length === 0) console.log('✓ spec valid');
-              else { console.error('✗ spec errors:'); all.forEach((e) => console.error(`  - ${e}`)); process.exit(1); }
+              if (all.length > 0) { console.error('✗ spec errors:'); all.forEach((e) => console.error(`  - ${e}`)); process.exit(1); }
+              console.log('✓ schema valid');
+              // Live preflight (HF/R2/script) unless --no-preflight — same checks as submit.
+              if (!hasFlag(args, '--no-preflight')) {
+                console.log('[preflight] checking dataset/model/token/storage…');
+                const pf = await runFinetunePreflight({
+                  ...validateSpec,
+                  scriptPath: validateSpec.script,
+                  model: getArg(args, '--model') || spec.model,
+                  pushToHf: getArg(args, '--push-to-hf') || spec.pushToHf,
+                  prepare: spec.prepare,
+                  r2Bucket: getArg(args, '--r2-bucket') || spec.r2Bucket,
+                  resumeFromR2: hasFlag(args, '--resume-from-r2') || spec.resumeFromR2 === true,
+                } as Partial<FinetuneOpts>);
+                if (!pf.ok) process.exit(1);
+              }
             } else if (sub === 'lr-find') {
               await cmdGpuFinetuneLrFind({
                 ...spec,
@@ -7120,6 +7491,22 @@ Per-app isolation:
               for (const [name, p] of Object.entries(BUNDLED_PLUGINS)) {
                 console.log(`  ${name.padEnd(12)} ${p.description}`);
               }
+            } else if (sub === 'init') {
+              // Scaffold a new preset skeleton under finetune-presets/<name>/.
+              const initName = args[3] && !args[3].startsWith('-') ? args[3] : undefined;
+              if (!initName) { console.error('Usage: ai-gateway gpu finetune init <name> [--type audio|text] [--model hf://owner/repo]'); process.exit(1); }
+              const initType = (getArg(args, '--type') as 'audio' | 'text') || 'audio';
+              const destDir = join(process.cwd(), 'finetune-presets', initName);
+              if (existsSync(destDir)) { console.error(`✗ ${destDir} already exists — pick another name or remove it.`); process.exit(1); }
+              let files;
+              try {
+                files = scaffoldPreset(initName, { type: initType, defaultModel: getArg(args, '--model') });
+              } catch (e) { console.error(`✗ ${(e as Error).message}`); process.exit(1); }
+              mkdirSync(destDir, { recursive: true });
+              for (const f of files) writeFileSync(join(destDir, f.rel), f.contents);
+              console.log(`✓ scaffolded preset '${initName}' → ${destDir}`);
+              files.forEach(f => console.log(`    ${f.rel}`));
+              console.log(`\nNext:\n  1. Edit trainer.py (encode/train) + prepare_dataset.py for your model\n  2. ai-gateway gpu finetune validate --type ${initName} --dataset hf://you/data\n  3. ai-gateway gpu finetune submit --type ${initName} --dataset hf://you/data --smoke`);
             } else if (sub === 'presets') {
               const presets = listPresets();
               if (presets.length === 0) { console.log('No presets installed.'); break; }
@@ -7134,11 +7521,13 @@ Per-app isolation:
                   console.log(`    tags: ${m.knownTags.slice(0, 6).join(' ')}${m.knownTags.length > 6 ? ' …' : ''}`);
                 }
                 if (m.notes) console.log(`    notes: ${m.notes}`);
+                // Surface authoring mistakes (unknown probePaths keys, missing interface).
+                for (const w of lintPresetManifest(m)) console.log(`    ${c.yellow}⚠ ${w}${c.reset}`);
               }
             } else if (sub === 'watch-web') {
               await cmdGpuFinetuneWatchWeb();
             } else {
-              console.error('Usage: ai-gateway gpu finetune <submit|status|logs|metrics|cancel|history|estimate|validate|lr-find|sweep|deploy|list-runs|plugins|watch-web>');
+              console.error('Usage: ai-gateway gpu finetune <submit|resume|status|logs|metrics|cancel|history|estimate|validate|init|lr-find|sweep|deploy|list-runs|presets|plugins|watch-web>');
               process.exit(1);
             }
             break;
@@ -7164,6 +7553,7 @@ Per-app isolation:
               pushToHf: getArg(args, '--push-to-hf'),
               autoResume: hasFlag(args, '--auto-resume'),
               preferSpot: hasFlag(args, '--no-spot') ? false : (hasFlag(args, '--prefer-spot') || true),
+              selectMode: (getArg(args, '--select-mode') as 'cheapest' | 'balanced' | 'fast') || 'balanced',
               reuse: hasFlag(args, '--reuse'),
               extraArgs: getArg(args, '--extra-args'),
               dryRun: hasFlag(args, '--dry-run'),
@@ -7202,6 +7592,7 @@ Per-app isolation:
                   maxSpend: getArg(args, '--max-spend') ? parseFloat(getArg(args, '--max-spend')!) : undefined,
                   pullExclude: args.flatMap((a, i) => a === '--pull-exclude' && args[i + 1] ? [args[i + 1]] : []),
                   preferSpot: hasFlag(args, '--no-spot') ? false : hasFlag(args, '--prefer-spot'),
+                  selectMode: (getArg(args, '--select-mode') as 'cheapest' | 'balanced' | 'fast') || 'balanced',
                   reuseInstance: hasFlag(args, '--reuse-instance'),
                   abortOnDivergence: hasFlag(args, '--abort-on-divergence'),
                   gpuFallback: hasFlag(args, '--no-gpu-fallback') ? false : hasFlag(args, '--gpu-fallback'),
