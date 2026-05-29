@@ -919,9 +919,14 @@ import {
   runCompare,
   preflightChecks,
   scaffoldPreset,
+  lookupGpuSpec,
+  gpuVramGb,
+  vramNeedGb,
+  detectParamsFromHfConfig,
+  precisionFromHint,
   BUNDLED_PLUGINS,
 } from '../src/modules/gpu-finetune';
-import type { PreflightResult } from '../src/modules/gpu-finetune';
+import type { PreflightResult, WorkloadProfile } from '../src/modules/gpu-finetune';
 import type {
   GpuJobRunner,
   FinetuneProbe,
@@ -1305,6 +1310,12 @@ interface GpuJobOpts {
   pullExclude?: string[];     // rsync --exclude paths (skip /root/.cache, dataset/, etc)
   preferSpot?: boolean;       // ask vast/runpod for interruptible (≈30-50% cheaper)
   selectMode?: 'cheapest' | 'balanced' | 'fast'; // offer ranking; all obey maxCost ceiling. default balanced
+  // Workload-aware selection (Phase 5): when set, drop GPUs without enough VRAM
+  // and rank by *estimated total job cost/time* (speed×price), not hourly price.
+  vramNeedGb?: number;             // min VRAM the model+task needs — feasibility gate
+  workloadProfile?: WorkloadProfile; // model/task profile for throughput scaling
+  estimateOpts?: Partial<FinetuneOpts>; // finetune hyperparams (epochs/batch/accum) for estimateCost
+  estimateSamples?: number;        // dataset sample count for estimateCost
   reuseInstance?: boolean;    // skip provisioning if a live owner-tagged instance with same image exists
   abortOnDivergence?: boolean; // tail /workspace/.job.log for loss=X; abort if NaN/Inf or 5× initial
   gpuFallback?: boolean;      // walk cheaper-GPU ladder if primary unavailable @ maxCost
@@ -1543,19 +1554,49 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     const dlBoost = Math.min(dl / 30, 1);
     return Math.max(0.05, 0.6 * rel + 0.25 * inetBoost + 0.15 * dlBoost);
   };
-  const affordable = matched
-    .filter((o) => priceOf(o) <= maxCost)   // price ceiling = "not absurd" guard
+  // VRAM feasibility gate (Phase 5): drop GPUs that can't hold the workload.
+  // Only filter offers whose VRAM we know AND is too small — unknown GPUs pass
+  // (server-side validateVramForModel is the backstop at deploy).
+  const vramNeed = opts.vramNeedGb;
+  const priceFiltered = matched.filter((o) => priceOf(o) <= maxCost);
+  const feasible = vramNeed
+    ? priceFiltered.filter((o) => { const v = gpuVramGb(gpuName(o)); return v === undefined || v >= vramNeed; })
+    : priceFiltered;
+  const droppedForVram = priceFiltered.length - feasible.length;
+  if (vramNeed && droppedForVram > 0) {
+    console.log(`  ${c.dim}[vram] need ~${vramNeed}GB — dropped ${droppedForVram} offer(s) with too little VRAM${c.reset}`);
+  }
+
+  // Estimated total job cost/time on a given offer (workload-aware). Falls back
+  // to hourly price when no workload profile is supplied (generic jobs).
+  const estimateFor = (o: Record<string, unknown>) => {
+    if (!opts.workloadProfile) return null;
+    const spec = lookupGpuSpec(gpuName(o));
+    const cpuCores = Number(o.cpuCores ?? o.cpu_cores ?? o.numCpus) || undefined;
+    const reliability = Number(o.reliability2 ?? o.reliability) || undefined;
+    return estimateCost(opts.estimateOpts ?? {}, opts.estimateSamples, priceOf(o), {
+      gpuSpec: spec, workload: opts.workloadProfile, cpuCores,
+      spot: opts.preferSpot, reliability,
+    });
+  };
+  const costOf = (o: Record<string, unknown>) => estimateFor(o)?.totalUsd ?? priceOf(o);
+  const timeOf = (o: Record<string, unknown>) => estimateFor(o)?.totalMin ?? (1 / qualityOf(o));
+
+  const affordable = feasible
     .sort((a, b) => {
-      if (selectMode === 'cheapest') return priceOf(a) - priceOf(b);
-      if (selectMode === 'fast') {
-        const dq = qualityOf(b) - qualityOf(a);            // fastest/most-reliable first
-        return dq !== 0 ? dq : priceOf(a) - priceOf(b);    // tie-break cheaper
+      if (selectMode === 'cheapest') return priceOf(a) - priceOf(b);   // lowest $/h
+      if (selectMode === 'fast') {                                     // fastest finish
+        const dt = timeOf(a) - timeOf(b);
+        return dt !== 0 ? dt : priceOf(a) - priceOf(b);
       }
-      // balanced: effective price = $/quality (best cost-benefit)
+      // balanced (default): lowest estimated TOTAL job cost (speed×price, spot
+      // eviction folded in). Without a workload profile this is $/quality as before.
+      if (opts.workloadProfile) return costOf(a) - costOf(b);
       return priceOf(a) / qualityOf(a) - priceOf(b) / qualityOf(b);
     });
   if (affordable.length === 0) {
-    console.error(`No '${gpuFilter}' offers within $${maxCost}/h.${fallbackOn ? ` Fallback chain [${tryList.join('→')}] also empty.` : ''} ` +
+    const vramNote = vramNeed && droppedForVram > 0 ? ` (${droppedForVram} dropped for <${vramNeed}GB VRAM)` : '';
+    console.error(`No '${gpuFilter}' offers within $${maxCost}/h${vramNote}.${fallbackOn ? ` Fallback chain [${tryList.join('→')}] also empty.` : ''} ` +
                   `Pool: ${offers.length} total, ${matched.length} match '${usedFilter}'.`);
     if (matched.length > 0) {
       const cheapest = [...matched].sort((a, b) => priceOf(a) - priceOf(b)).slice(0, 3);
@@ -1567,7 +1608,11 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   const pick = affordable[0];
   const pickPrice = priceOf(pick);
   const pickName = gpuName(pick);
-  console.log(`  picked: ${pickName} @ $${pickPrice.toFixed(3)}/h on ${pick.provider} (mode=${selectMode})`);
+  const pickEst = estimateFor(pick);
+  const estNote = pickEst
+    ? `  ${c.dim}≈${pickEst.totalMin.toFixed(0)}min, ~$${pickEst.totalUsd.toFixed(2)} total${c.reset}`
+    : '';
+  console.log(`  picked: ${pickName} @ $${pickPrice.toFixed(3)}/h on ${pick.provider} (mode=${selectMode})${estNote}`);
 
   if (opts.dryRun) {
     const timeoutMin = opts.timeoutMin ?? 60;
@@ -2193,6 +2238,13 @@ interface GpuFinetuneOpts {
   seed?: number;                // random seed (reproducibility, default 42)
   gradClip?: number;            // gradient norm clip threshold (default 1.0)
   logEverySteps?: number;       // print loss every N steps (default 25)
+  // Phase 5 — workload overrides for VRAM gate + cost-aware GPU select.
+  // Auto-detected from the HF model config when omitted.
+  modelParamsB?: number;        // model size in billions (override auto-detect)
+  precision?: string;          // bf16|fp16|fp32|int8|int4 (override; else from plugin)
+  seqLen?: number;             // tokens/frames per sample (override; affects VRAM)
+  task?: 'finetune' | 'inference'; // default finetune
+  sampleCount?: number;        // dataset size hint for cost estimate
 }
 // Schema validation, cost estimation, and run history all delegate to the
 // gpu-finetune module. These thin wrappers keep call-sites below readable.
@@ -2253,6 +2305,51 @@ async function runFinetunePreflight(spec: Partial<FinetuneOpts>): Promise<Prefli
     console.log(`  ${icon} ${ch.name}: ${ch.detail}`);
   }
   return result;
+}
+
+/** Fetch a HF model's config.json and estimate its param count (B). Best-effort. */
+async function fetchHfModelParamsB(modelRef: string): Promise<number | undefined> {
+  const repo = modelRef.replace(/^hf:\/\//, '').replace(/\/+$/, '');
+  const hdr = process.env.HF_TOKEN ? { authorization: `Bearer ${process.env.HF_TOKEN}` } : {};
+  try {
+    const r = await fetch(`https://huggingface.co/${repo}/resolve/main/config.json`, { headers: hdr });
+    if (!r.ok) return undefined;
+    return detectParamsFromHfConfig(await r.json() as Record<string, unknown>);
+  } catch { return undefined; }
+}
+
+/**
+ * Build a WorkloadProfile for the run: model size auto-detected from the HF
+ * config (overridable via spec), task/precision/mode from plugin + flags.
+ * Returns undefined when model size can't be determined (→ legacy selection).
+ */
+async function detectFinetuneWorkload(
+  opts: GpuFinetuneOpts,
+  preset: ReturnType<typeof loadPreset>,
+): Promise<WorkloadProfile | undefined> {
+  const mode = opts.plugin === 'qlora' ? 'qlora' : opts.plugin === 'lora' ? 'lora' : 'full';
+  const precision = opts.precision
+    ? precisionFromHint(opts.precision)
+    : precisionFromHint(`${opts.plugin ?? ''} ${opts.extraTrainArgs ?? ''}`, mode === 'qlora' ? 'int4' : 'bf16');
+
+  let paramsB = opts.modelParamsB;
+  if (!paramsB) {
+    const modelRef = opts.model || preset?.manifest?.defaultModel;
+    if (modelRef?.startsWith('hf://')) paramsB = await fetchHfModelParamsB(modelRef);
+  }
+  if (!paramsB || paramsB <= 0) return undefined; // can't reason about VRAM/speed
+
+  const isAudio = preset?.manifest?.type === 'audio';
+  return {
+    paramsB,
+    precision,
+    task: (opts.task as WorkloadProfile['task']) ?? 'finetune',
+    finetuneMode: mode,
+    optimizer: mode === 'qlora' ? 'adamw8bit' : 'adamw',
+    gradCkpt: opts.plugin === 'grad-ckpt' || !!opts.freezeBackboneLayers,
+    seqLen: opts.seqLen ?? (isAudio ? 1500 : 2048),
+    batchSize: opts.batchSize ?? 1,
+  };
 }
 
 // gpu finetune compare — A/B WER test multiple ckpts via Whisper roundtrip.
@@ -2521,6 +2618,20 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
   // ignoring, so users don't believe a feature is active when it isn't.
   warnUnimplementedFinetuneFlags(opts);
 
+  // Auto-detect the workload (model size from HF config + task/precision/mode)
+  // so the GPU auto-select can gate on VRAM and rank by estimated total cost,
+  // not hourly price. Best-effort: undefined → falls back to legacy selection.
+  const workload = await detectFinetuneWorkload(opts, preset);
+  const need = workload ? vramNeedGb(workload) : undefined;
+  if (workload && need) {
+    console.log(`  ${c.dim}[workload] ${workload.paramsB.toFixed(1)}B ${workload.precision} ${workload.finetuneMode} → ~${need.gb}GB VRAM needed${c.reset}`);
+  }
+  const estimateOpts: Partial<FinetuneOpts> = {
+    epochs: opts.epochs, batchSize: opts.batchSize, gradAccum: opts.gradAccum,
+    numGpus: opts.numGpus, stepsPerSec: preset?.manifest?.defaultStepsPerSec,
+    encodeRatePerGpu: preset?.manifest?.defaultEncodeRatePerGpu,
+  };
+
   // jobRunner: cmdGpuJobsRun has side-effects (saves job state, prints to stdout)
   // and returns void. Read loadJobState() AFTER the call to recover real metadata.
   const jobRunner: GpuJobRunner = {
@@ -2546,6 +2657,11 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
         abortOnDivergence: rOpts.abortOnDivergence,
         gpuFallback: rOpts.gpuFallback,
         dryRun: rOpts.dryRun,
+        // Phase 5: VRAM gate + workload-aware (total-cost) offer ranking.
+        vramNeedGb: need?.gb,
+        workloadProfile: workload,
+        estimateOpts,
+        estimateSamples: opts.sampleCount,
       });
       const s = loadJobState();
       return {
@@ -5990,6 +6106,14 @@ Round 4 (ideas from Axolotl/SkyPilot/Unsloth):
   --failover-on-preempt [TODO] Switch provider on spot preemption
   --ckpt-avg N          Polyak-average last N ckpts → model_avg.safetensors
   --export-gguf         Post-train: convert ckpt → q8_0 GGUF for llama.cpp/ollama (non-audio presets)
+
+Auto-select (Phase 5) — model+task aware. Model size auto-detected from the HF
+config; GPUs without enough VRAM are dropped, offers ranked by ESTIMATED TOTAL
+cost (speed×price), not hourly. --select-mode cheapest|balanced|fast. Overrides:
+  --model-params-b N    Model size in billions (skip HF auto-detect)
+  --precision X         bf16|fp16|fp32|int8|int4 (else inferred from --plugin)
+  --seq-len N           Tokens/frames per sample (affects VRAM estimate)
+  --task finetune|inference   (default finetune)
   spec.secrets:         Sensitive env vars (redacted from logs/state file)
   spec.evalsPerEpoch    [TODO] Run eval N times per epoch (vs every M steps)
   spec.earlyStopOnEval  [TODO] Stop if metric < threshold during eval
@@ -7153,6 +7277,12 @@ Per-app isolation:
                 seed: getArg(args, '--seed') ? parseInt(getArg(args, '--seed')!) : spec.seed,
                 gradClip: getArg(args, '--grad-clip') ? parseFloat(getArg(args, '--grad-clip')!) : spec.gradClip,
                 logEverySteps: getArg(args, '--log-every-steps') ? parseInt(getArg(args, '--log-every-steps')!) : spec.logEverySteps,
+                // Phase 5 — workload overrides (else auto-detected from HF config)
+                modelParamsB: getArg(args, '--model-params-b') ? parseFloat(getArg(args, '--model-params-b')!) : spec.modelParamsB,
+                precision: getArg(args, '--precision') || spec.precision,
+                seqLen: getArg(args, '--seq-len') ? parseInt(getArg(args, '--seq-len')!) : spec.seqLen,
+                task: (getArg(args, '--task') as 'finetune' | 'inference') || spec.task,
+                sampleCount: getArg(args, '--sample-count') ? parseInt(getArg(args, '--sample-count')!) : spec.sampleCount,
               } as any);
             } else if (sub === 'resume') {
               // Re-attach a job whose CLI controller died (laptop sleep, closed
