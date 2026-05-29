@@ -625,6 +625,23 @@ export async function pollHealthUntilReady(
       throw new Error(`Deploy timed out after ${Math.round(deployTimeoutMs / 60000)} minutes (total elapsed: ${Math.round(totalElapsedMs / 1000)}s)`);
     }
 
+    // ── Early-abandon stuck/offline hosts (fast self-heal) ──
+    // A dud/offline host can sit "offline" without ever starting the image pull
+    // until the full deploy timeout. If neither the pull nor the container has
+    // started within AIGW_OFFLINE_ABANDON_SEC (default 150s) of creation, give up
+    // on this host and return a retryable timeout so the deploy loop immediately
+    // picks a fresh machine — the gateway self-heals instead of waiting minutes.
+    {
+      const offlineAbandonMs = (parseInt(process.env.AIGW_OFFLINE_ABANDON_SEC || '150', 10) || 150) * 1000;
+      if (!pullStartedAt && !containerStartedAt && totalElapsedMs > offlineAbandonMs) {
+        const msg = `Host offline / no image-pull after ${Math.round(totalElapsedMs / 1000)}s (> ${Math.round(offlineAbandonMs / 1000)}s) — abandoning dud host, trying next machine`;
+        log.warn(`[gpu] ${providerName} pod ${podId}: ${msg}`);
+        broadcastWs({ type: 'gpu:deploy', phase: 'offline_abandon', deployId: deployState.deployId, provider: providerName, elapsedMs: totalElapsedMs });
+        setDeployState({ status: 'error', step: 'creating', message: msg });
+        return { result: 'timeout' };
+      }
+    }
+
     // ── Per-phase timeouts (fail fast, try next machine) ──
     const isInfServer = /vllm|text-generation-inference|tgi|llama\.cpp|ollama/i.test(dockerImage || '');
     const modelHint = `${dockerImage || ''} ${deployState.message || ''}`;
