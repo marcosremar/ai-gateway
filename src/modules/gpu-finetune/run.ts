@@ -285,6 +285,7 @@ export class FinetuneGateway {
   buildShellScript(opts: ResolvedFinetune, scriptName: string): string {
     const token = this.deps.hfToken.resolve();
     const exports = this.buildExports(opts, token);
+    const r2 = this.buildR2Config(opts);
     const aptStage = this.buildAptStage(opts);
     const pipStage = this.buildPipStage(opts);
     const torchStage = this.buildTorchStage(opts);
@@ -294,15 +295,18 @@ export class FinetuneGateway {
     const prepStage = this.buildPrepStage(opts);
     const preSmokeStage = this.buildPreSmokeStage(opts, scriptName);
     const encodeStage = this.buildEncodeStage(opts, scriptName);
+    const r2RestoreStage = this.buildR2RestoreStage(opts, r2);
     const trainStage = this.buildTrainStage(opts, scriptName);
     const smokeVerifyInline = this.buildSmokeVerifyInline(opts);
     const ckptAvgStage = this.buildCkptAverageStage(opts);
     const pushStage = this.buildPushStage(opts);
+    const r2BackupStage = this.buildR2BackupStage(opts, r2);
     const webhookStage = this.buildWebhookStage(opts);
 
+    // R2 restore/backup só no run completo (smoke é efêmero, não persiste).
     const pipeline = opts.smokeOnly
       ? `${prepStage}${encodeStage}${trainStage}${smokeVerifyInline}`
-      : `${prepStage}${preSmokeStage}${encodeStage}${trainStage}${ckptAvgStage}${pushStage}${webhookStage}`;
+      : `${prepStage}${preSmokeStage}${encodeStage}${r2RestoreStage}${trainStage}${ckptAvgStage}${pushStage}${r2BackupStage}${webhookStage}`;
 
     // Overlap pip install with dataset/model download to save ~2min per run.
     // pip runs in background; dataset + model download in foreground; then we wait for pip.
@@ -323,6 +327,7 @@ export class FinetuneGateway {
       'set -euo pipefail',
       `export HF_TOKEN='${token}'`,
       ...exports,
+      ...(r2?.exports ?? []),
       `export ${opts.noHfTransfer ? '' : 'HF_HUB_ENABLE_HF_TRANSFER=1 '}DEBIAN_FRONTEND=noninteractive`,
       'cd /workspace',
       aptStage,
@@ -418,6 +423,63 @@ export class FinetuneGateway {
       `hf download ${opts.fromHf} --local-dir /workspace/checkpoints --token "$HF_TOKEN" 2>&1 | tail -3 && `;
   }
 
+  // ─── R2 / S3 durable storage ───────────────────────────────────────────
+  // Independente do HF. Liga quando opts.r2Bucket é setado. Creds vêm do env
+  // do gateway (B2_*/STORAGE_*) — mesmo esquema do pod-agent. Sem creds, os
+  // estágios viram echo no-op (não quebram dryRun/testes).
+
+  private buildR2Config(opts: ResolvedFinetune): {
+    remote: string; bucket: string; prefix: string; exports: string[]; hasCreds: boolean;
+  } | null {
+    if (!opts.r2Bucket) return null;
+    const ak = process.env.B2_ACCOUNT_ID || process.env.STORAGE_ACCESS_KEY || '';
+    const sk = process.env.B2_APPLICATION_KEY || process.env.STORAGE_SECRET_KEY || '';
+    const endpoint = process.env.B2_ENDPOINT || process.env.STORAGE_ENDPOINT || '';
+    const region = process.env.B2_REGION || process.env.STORAGE_REGION || 'auto';
+    const remote = 'r2aigw';
+    const R = remote.toUpperCase();
+    const projName = opts.project || opts.preset?.manifest?.name || opts.type;
+    const prefix = (opts.r2Prefix || `jobs/${projName}`).replace(/\/+$/, '');
+    const provider = endpoint.includes('r2.cloudflarestorage.com') ? 'Cloudflare' : 'Other';
+    const hasCreds = !!(ak && sk && endpoint);
+    const exports = hasCreds ? [
+      `export RCLONE_CONFIG_${R}_TYPE=s3`,
+      `export RCLONE_CONFIG_${R}_PROVIDER=${provider}`,
+      `export RCLONE_CONFIG_${R}_ENDPOINT='${endpoint}'`,
+      `export RCLONE_CONFIG_${R}_ACCESS_KEY_ID='${ak}'`,
+      `export RCLONE_CONFIG_${R}_SECRET_ACCESS_KEY='${sk}'`,
+      `export RCLONE_CONFIG_${R}_REGION='${region}'`,
+      `export RCLONE_CONFIG_${R}_NO_CHECK_BUCKET=true`,
+    ] : [];
+    return { remote, bucket: opts.r2Bucket, prefix, exports, hasCreds };
+  }
+
+  /** Garante rclone instalado no pod (base image pode não ter). */
+  private rcloneEnsure(): string {
+    return `{ command -v rclone >/dev/null 2>&1 || { apt-get update -q && apt-get install -y -q rclone || curl -fsSL https://rclone.org/install.sh | bash; }; }`;
+  }
+
+  private buildR2RestoreStage(opts: ResolvedFinetune, r2: ReturnType<FinetuneGateway['buildR2Config']>): string {
+    if (!r2 || !opts.resumeFromR2) return '';
+    if (!r2.hasCreds) {
+      return `echo '[r2] resumeFromR2 set mas sem creds R2 no env do gateway — restore pulado' && `;
+    }
+    const dst = `${r2.remote}:${r2.bucket}/${r2.prefix}/checkpoints`;
+    return `${this.rcloneEnsure()} && ` +
+      `echo '[r2] restaurando checkpoints de ${dst}' && mkdir -p /workspace/checkpoints && ` +
+      `rclone copy ${dst} /workspace/checkpoints --transfers 8 --checksum 2>&1 | tail -3 && `;
+  }
+
+  private buildR2BackupStage(opts: ResolvedFinetune, r2: ReturnType<FinetuneGateway['buildR2Config']>): string {
+    if (!r2) return '';
+    if (!r2.hasCreds) {
+      return ` && echo '[r2] r2Bucket set mas sem creds R2 — backup final pulado'`;
+    }
+    const dst = `${r2.remote}:${r2.bucket}/${r2.prefix}/checkpoints`;
+    return ` && ${this.rcloneEnsure()} && echo '[r2] backup final → ${dst}' && ` +
+      `rclone sync /workspace/checkpoints ${dst} --transfers 8 --checksum 2>&1 | tail -3`;
+  }
+
   private buildPrepStage(opts: ResolvedFinetune): string {
     const prepareDirective = opts.prepare ?? 'auto';
     if (opts.prepCmd) {
@@ -462,10 +524,12 @@ export class FinetuneGateway {
     const pluginData = opts.plugin ? BUNDLED_PLUGINS[opts.plugin] : undefined;
     const autoFlags = this.autoTrainFlags(opts, saveSteps);
 
+    // resumeFromR2 implica retomar dos checkpoints restaurados do R2.
+    const doResume = opts.autoResume || (opts.resumeFromR2 && !!opts.r2Bucket);
     return `python ${scriptName} train ` +
       `--tokens ${tokensArg} --output /workspace/checkpoints ` +
       `--epochs ${opts.epochs} --learning-rate ${opts.lr} --save-every-steps ${saveSteps}${autoFlags} ` +
-      `${opts.autoResume ? '--resume /workspace/checkpoints ' : ''}` +
+      `${doResume ? '--resume /workspace/checkpoints ' : ''}` +
       `${opts.extraTrainArgs || ''}${pluginData?.extraTrainArgs ? ' ' + pluginData.extraTrainArgs : ''}`;
   }
 

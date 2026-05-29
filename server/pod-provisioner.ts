@@ -42,8 +42,12 @@ export interface ProvisionConfig {
   gatewayToken?: string;
   /** Segundos entre heartbeats (default 30) */
   heartbeatInterval?: number;
-  /** Backup interval em horas (default 24) */
+  /** Backup interval em horas (default 6 — teto de fallback; backup real é por checkpoint) */
   backupIntervalHours?: number;
+  /** Segundos entre checagens do dir de checkpoints (default 120) */
+  backupCheckSecs?: number;
+  /** Prefix de onde restaurar /workspace ao subir (migrar de pod morto / resume de run) */
+  restoreFrom?: string;
   /** Path do log da app pra fazer tail no heartbeat */
   appLogFile?: string;
   /** Credenciais R2/B2/S3 — passadas via env do install.sh */
@@ -129,11 +133,13 @@ function buildEnvFile(cfg: ProvisionConfig): string {
   const lines: string[] = [
     `AIGW_POD_ID=${cfg.podId}`,
     `AIGW_INTERVAL=${cfg.heartbeatInterval ?? 30}`,
-    `BACKUP_INTERVAL_HOURS=${cfg.backupIntervalHours ?? 24}`,
+    `BACKUP_INTERVAL_HOURS=${cfg.backupIntervalHours ?? 6}`,
+    `BACKUP_CHECK_SECS=${cfg.backupCheckSecs ?? 120}`,
   ];
   if (cfg.gatewayUrl) lines.push(`AIGW_URL=${cfg.gatewayUrl}`);
   if (cfg.gatewayToken) lines.push(`AIGW_TOKEN=${cfg.gatewayToken}`);
   if (cfg.appLogFile) lines.push(`AIGW_LOG_FILE=${cfg.appLogFile}`);
+  if (cfg.restoreFrom) lines.push(`WORKSPACE_RESTORE_FROM=${cfg.restoreFrom}`);
   if (cfg.s3) {
     lines.push(`B2_ACCOUNT_ID=${cfg.s3.accountId}`);
     lines.push(`B2_APPLICATION_KEY=${cfg.s3.applicationKey}`);
