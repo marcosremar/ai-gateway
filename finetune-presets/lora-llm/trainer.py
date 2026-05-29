@@ -173,7 +173,14 @@ def main():
         packing=True,
     )
 
-    trainer.train()
+    train_result = trainer.train()
+    # Self-calibration: ai-gateway records this to refine future cost estimates.
+    try:
+        sps = (train_result.metrics or {}).get("train_steps_per_second")
+        if sps:
+            print(f"[calib] steps_per_sec={sps:.3f}")
+    except Exception:
+        pass
     trainer.save_model(args.output)
     tokenizer.save_pretrained(args.output)
     print(f"Done. Saved to {args.output}")

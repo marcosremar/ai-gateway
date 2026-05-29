@@ -209,6 +209,9 @@ def encode_dataset(input_jsonl: str, output_pt: str,
             print(f"  ↑ pushed → hf://datasets/{ds_repo}/{os.path.basename(output_pt)}")
         except Exception as e:
             print(f"  ⚠ HF dataset push failed (non-fatal): {e}")
+    # Self-calibration: ai-gateway records this to refine future cost estimates.
+    _enc_dt = max(1e-6, time.time() - t0)
+    print(f"[calib] encode_rate_per_gpu={len(encoded) / _enc_dt:.2f}")
     return len(encoded)
 
 
@@ -590,6 +593,9 @@ def train(cfg: FinetuneConfig, resume_from: str | None = None) -> None:
         if plateau_stop:
             break
 
+    # Self-calibration: ai-gateway records this to refine future cost estimates.
+    _tr_dt = max(1e-6, time.time() - t0)
+    print(f"[calib] steps_per_sec={step / _tr_dt:.3f}")
     _save(model, cfg, step, final=True, state=_state_for_save(cfg.epochs))
 
 
