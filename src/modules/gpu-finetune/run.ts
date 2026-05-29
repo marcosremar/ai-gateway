@@ -129,6 +129,30 @@ export class EnvHfTokenResolver implements HfTokenResolver {
   }
 }
 
+// ─── R2 / S3 credential resolution ─────────────────────────────────────────
+
+export interface R2Creds {
+  accessKey: string;
+  secretKey: string;
+  endpoint: string;
+  region: string;
+  /** true only when access key, secret key, AND endpoint are all present. */
+  hasCreds: boolean;
+}
+
+/**
+ * Resolve R2/S3 credentials from the gateway env. Single source of truth —
+ * shared by buildR2Config (run composition) and preflight (fail-fast check).
+ * Accepts B2_* or STORAGE_* aliases (same scheme as the pod-agent backup).
+ */
+export function resolveR2Creds(env: Record<string, string | undefined> = process.env): R2Creds {
+  const accessKey = env.B2_ACCOUNT_ID || env.STORAGE_ACCESS_KEY || '';
+  const secretKey = env.B2_APPLICATION_KEY || env.STORAGE_SECRET_KEY || '';
+  const endpoint = env.B2_ENDPOINT || env.STORAGE_ENDPOINT || '';
+  const region = env.B2_REGION || env.STORAGE_REGION || 'auto';
+  return { accessKey, secretKey, endpoint, region, hasCreds: !!(accessKey && secretKey && endpoint) };
+}
+
 // ─── FinetuneGateway ───────────────────────────────────────────────────────
 
 export interface GatewayLogger {
@@ -271,9 +295,14 @@ export class FinetuneGateway {
       output: resolved.output ?? './output',
       preferSpot: resolved.preferSpot ?? false,
       reuse: resolved.reuse ?? false,
-      gpuFallback: resolved.gpuFallback ?? false,
+      // Default ON: walk the cheaper-GPU ladder (3090/A4000 before 4090) — a
+      // ≤2B QLoRA fits a 3090 (~$0.15/h) vs 4090 (~$0.30/h).
+      gpuFallback: resolved.gpuFallback ?? true,
       dryRun: resolved.dryRun ?? false,
-      image: resolved.image ?? 'aigw-finetune-base',
+      // Registry-qualified so the pod can actually PULL it. A bare
+      // 'aigw-finetune-base' has no registry → silently fell back to gpu-dev
+      // (no ML deps) → full reinstall every run.
+      image: resolved.image ?? 'marcosremar/aigw-finetune-base:latest',
       scriptPath: resolved.scriptPath!,
       localPath: resolved.localPath!,
     };
@@ -432,16 +461,12 @@ export class FinetuneGateway {
     remote: string; bucket: string; prefix: string; exports: string[]; hasCreds: boolean;
   } | null {
     if (!opts.r2Bucket) return null;
-    const ak = process.env.B2_ACCOUNT_ID || process.env.STORAGE_ACCESS_KEY || '';
-    const sk = process.env.B2_APPLICATION_KEY || process.env.STORAGE_SECRET_KEY || '';
-    const endpoint = process.env.B2_ENDPOINT || process.env.STORAGE_ENDPOINT || '';
-    const region = process.env.B2_REGION || process.env.STORAGE_REGION || 'auto';
+    const { accessKey: ak, secretKey: sk, endpoint, region, hasCreds } = resolveR2Creds(process.env);
     const remote = 'r2aigw';
     const R = remote.toUpperCase();
     const projName = opts.project || opts.preset?.manifest?.name || opts.type;
     const prefix = (opts.r2Prefix || `jobs/${projName}`).replace(/\/+$/, '');
     const provider = endpoint.includes('r2.cloudflarestorage.com') ? 'Cloudflare' : 'Other';
-    const hasCreds = !!(ak && sk && endpoint);
     const exports = hasCreds ? [
       `export RCLONE_CONFIG_${R}_TYPE=s3`,
       `export RCLONE_CONFIG_${R}_PROVIDER=${provider}`,
