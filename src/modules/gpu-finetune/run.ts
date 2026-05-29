@@ -328,6 +328,7 @@ export class FinetuneGateway {
     const trainStage = this.buildTrainStage(opts, scriptName);
     const smokeVerifyInline = this.buildSmokeVerifyInline(opts);
     const ckptAvgStage = this.buildCkptAverageStage(opts);
+    const ggufStage = this.buildGgufStage(opts);
     const pushStage = this.buildPushStage(opts);
     const r2BackupStage = this.buildR2BackupStage(opts, r2);
     const webhookStage = this.buildWebhookStage(opts);
@@ -335,7 +336,7 @@ export class FinetuneGateway {
     // R2 restore/backup só no run completo (smoke é efêmero, não persiste).
     const pipeline = opts.smokeOnly
       ? `${prepStage}${encodeStage}${trainStage}${smokeVerifyInline}`
-      : `${prepStage}${preSmokeStage}${encodeStage}${r2RestoreStage}${trainStage}${ckptAvgStage}${pushStage}${r2BackupStage}${webhookStage}`;
+      : `${prepStage}${preSmokeStage}${encodeStage}${r2RestoreStage}${trainStage}${ckptAvgStage}${ggufStage}${pushStage}${r2BackupStage}${webhookStage}`;
 
     // Overlap pip install with dataset/model download to save ~2min per run.
     // pip runs in background; dataset + model download in foreground; then we wait for pip.
@@ -587,6 +588,27 @@ sds = [load_file(p) for p in last_n]
 avg = {k: sum(sd[k].float() for sd in sds) / len(sds) for k in sds[0]}
 save_file(avg, '/workspace/checkpoints/model_avg.safetensors')
 `.trim())}"`;
+  }
+
+  /**
+   * Post-train GGUF export for llama.cpp / ollama. Gated to non-audio presets
+   * (TTS codec checkpoints aren't GGUF-convertible). Best-effort + non-fatal so
+   * a successful train is never lost to a conversion hiccup. Runs BEFORE push so
+   * the .gguf is uploaded + R2-backed alongside the safetensors.
+   */
+  private buildGgufStage(opts: ResolvedFinetune): string {
+    if (!opts.exportGguf) return '';
+    const isAudio = opts.type === 'audio' || opts.preset?.manifest?.type === 'audio';
+    if (isAudio) {
+      return ` && echo '[gguf] export-gguf set but preset type is audio — GGUF not applicable, skipping'`;
+    }
+    // Shallow-clone llama.cpp if absent, install its convert deps, convert the
+    // final HF-format checkpoint dir → q8_0 GGUF. Tolerant of failure.
+    return ` && { echo '[gguf] converting /workspace/checkpoints → GGUF (q8_0)'; ` +
+      `[ -d /opt/llama.cpp ] || git clone --depth 1 https://github.com/ggerganov/llama.cpp /opt/llama.cpp; ` +
+      `pip install -q -r /opt/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt 2>/dev/null || pip install -q gguf sentencepiece; ` +
+      `python /opt/llama.cpp/convert_hf_to_gguf.py /workspace/checkpoints --outfile /workspace/checkpoints/model.gguf --outtype q8_0 && ` +
+      `echo '[gguf] wrote /workspace/checkpoints/model.gguf'; } || echo '[gguf] conversion failed (non-fatal) — safetensors ckpt still saved'`;
   }
 
   private buildPushStage(opts: ResolvedFinetune): string {

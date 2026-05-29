@@ -2173,6 +2173,33 @@ function recordFinetuneRun(spec: Partial<FinetuneOpts>, instanceInfo: Record<str
   return id;
 }
 
+// Spec keys / flags that are parsed (for back-compat + help docs) but NOT yet
+// wired into the pipeline. Keep this list in sync as features get implemented —
+// export-gguf IS now wired (post-train stage) and is NOT here.
+// persist-cache (needs network-volume lifecycle) and incremental (needs
+// cross-run dataset-hash + encoded-artifact restore) remain genuinely unwired.
+const UNIMPLEMENTED_FINETUNE_FLAGS: Array<[keyof GpuFinetuneOpts, string]> = [
+  ['persistCache', '--persist-cache'],
+  ['incremental', '--incremental'],
+  ['autoFix', '--auto-fix'],
+  ['webDashboard', '--web'],
+  ['failoverOnPreempt', '--failover-on-preempt'],
+  ['evalsPerEpoch', 'spec.evalsPerEpoch'],
+  ['earlyStopOnEval', 'spec.earlyStopOnEval'],
+  ['multiDataset', 'spec.multiDataset'],
+];
+
+/** Warn (don't fail) for accepted-but-unimplemented flags so users aren't misled. */
+function warnUnimplementedFinetuneFlags(opts: GpuFinetuneOpts): void {
+  for (const [key, label] of UNIMPLEMENTED_FINETUNE_FLAGS) {
+    const v = opts[key];
+    const set = Array.isArray(v) ? v.length > 0 : v !== undefined && v !== false;
+    if (set) {
+      console.warn(`${c.yellow}⚠ ${label} accepted but not implemented yet — ignoring.${c.reset}`);
+    }
+  }
+}
+
 // Live fail-fast checks (HF reachability, token write-access, R2 creds, script)
 // before any GPU spend. Prints a one-line-per-check report. Returns the result
 // so callers decide whether to abort (submit) or just report (validate).
@@ -2447,6 +2474,11 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
   if (opts.model && !opts.model.startsWith('hf://')) {
     console.error(`--model must use hf://<repo-id> form`); process.exit(1);
   }
+
+  // Honesty guard: these spec keys/flags are accepted (back-compat + help docs)
+  // but NOT yet wired into the pipeline. Warn loudly instead of silently
+  // ignoring, so users don't believe a feature is active when it isn't.
+  warnUnimplementedFinetuneFlags(opts);
 
   // jobRunner: cmdGpuJobsRun has side-effects (saves job state, prints to stdout)
   // and returns void. Read loadJobState() AFTER the call to recover real metadata.
@@ -5911,7 +5943,7 @@ Round 4 (ideas from Axolotl/SkyPilot/Unsloth):
   --providers a,b,c     Multi-cloud failover (try in order if 1st fails)
   --failover-on-preempt [TODO] Switch provider on spot preemption
   --ckpt-avg N          Polyak-average last N ckpts → model_avg.safetensors
-  --export-gguf         [TODO] Post-train: convert ckpt to GGUF for llama.cpp/ollama
+  --export-gguf         Post-train: convert ckpt → q8_0 GGUF for llama.cpp/ollama (non-audio presets)
   spec.secrets:         Sensitive env vars (redacted from logs/state file)
   spec.evalsPerEpoch    [TODO] Run eval N times per epoch (vs every M steps)
   spec.earlyStopOnEval  [TODO] Stop if metric < threshold during eval
