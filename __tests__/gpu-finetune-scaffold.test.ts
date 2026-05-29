@@ -37,6 +37,7 @@ describe('scaffoldPreset', () => {
     expect(trainer).toContain('step-');           // step-N.safetensors convention
     expect(trainer).toContain('parse_known_args'); // tolerates extra auto-flags
     expect(trainer).toContain('IARATTS_HF_WEIGHTS_REPO');
+    expect(trainer).toContain('[calib] steps_per_sec='); // self-calibration emit
   });
 
   it('rejects invalid preset names', () => {

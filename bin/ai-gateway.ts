@@ -924,9 +924,13 @@ import {
   vramNeedGb,
   detectParamsFromHfConfig,
   precisionFromHint,
+  calibKey,
+  lookupCalib,
+  parseCalibLine,
+  applyObservation,
   BUNDLED_PLUGINS,
 } from '../src/modules/gpu-finetune';
-import type { PreflightResult, WorkloadProfile } from '../src/modules/gpu-finetune';
+import type { PreflightResult, WorkloadProfile, CalibStore } from '../src/modules/gpu-finetune';
 import type {
   GpuJobRunner,
   FinetuneProbe,
@@ -1316,6 +1320,7 @@ interface GpuJobOpts {
   workloadProfile?: WorkloadProfile; // model/task profile for throughput scaling
   estimateOpts?: Partial<FinetuneOpts>; // finetune hyperparams (epochs/batch/accum) for estimateCost
   estimateSamples?: number;        // dataset sample count for estimateCost
+  calibStore?: CalibStore;         // measured throughput per gpu+model — overrides priors
   reuseInstance?: boolean;    // skip provisioning if a live owner-tagged instance with same image exists
   abortOnDivergence?: boolean; // tail /workspace/.job.log for loss=X; abort if NaN/Inf or 5× initial
   gpuFallback?: boolean;      // walk cheaper-GPU ladder if primary unavailable @ maxCost
@@ -1445,6 +1450,27 @@ function loadJobSpec(jobId: string): GpuFinetuneOpts | null {
   } catch { /* fall through */ }
   return null;
 }
+// ─── Throughput calibration store (self-improving cost estimates) ───────────
+// Records real observed steps/sec + encode rate per (gpu, model-bucket, task,
+// mode) so future auto-select estimates use measured throughput, not priors.
+function calibStorePath(): string {
+  return join(process.env.HOME || '/tmp', '.babelcast', 'finetune_calib.json');
+}
+function loadCalibStore(): CalibStore {
+  try {
+    const p = calibStorePath();
+    if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf-8')) as CalibStore;
+  } catch { /* fall through */ }
+  return {};
+}
+function saveCalibStore(store: CalibStore): void {
+  try {
+    const p = calibStorePath();
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify(store, null, 2));
+  } catch { /* best effort — never block on calibration bookkeeping */ }
+}
+
 /** Most-recently-saved jobId (by file mtime), for no-arg `finetune resume`. */
 function latestJobId(): string | null {
   try {
@@ -1570,14 +1596,23 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   // Estimated total job cost/time on a given offer (workload-aware). Falls back
   // to hourly price when no workload profile is supplied (generic jobs).
   const estimateFor = (o: Record<string, unknown>) => {
-    if (!opts.workloadProfile) return null;
+    const wl = opts.workloadProfile;
+    if (!wl) return null;
     const spec = lookupGpuSpec(gpuName(o));
     const cpuCores = Number(o.cpuCores ?? o.cpu_cores ?? o.numCpus) || undefined;
     const reliability = Number(o.reliability2 ?? o.reliability) || undefined;
-    return estimateCost(opts.estimateOpts ?? {}, opts.estimateSamples, priceOf(o), {
-      gpuSpec: spec, workload: opts.workloadProfile, cpuCores,
-      spot: opts.preferSpot, reliability,
-    });
+    // Prefer measured throughput for THIS gpu+model when calibrated.
+    let est = opts.estimateOpts ?? {};
+    const cal = opts.calibStore
+      ? lookupCalib(opts.calibStore, calibKey(gpuName(o), wl.paramsB, wl.task, wl.finetuneMode))
+      : undefined;
+    if (cal) est = { ...est, stepsPerSec: cal.stepsPerSec ?? est.stepsPerSec, encodeRatePerGpu: cal.encodeRatePerGpu ?? est.encodeRatePerGpu };
+    // A calibrated stepsPerSec is ALREADY gpu-specific — don't re-scale by GPU
+    // speed (would double-count). Without it, scale the prior by gpuSpec+workload.
+    const ctx = cal?.stepsPerSec
+      ? { cpuCores, spot: opts.preferSpot, reliability }
+      : { gpuSpec: spec, workload: wl, cpuCores, spot: opts.preferSpot, reliability };
+    return estimateCost(est, opts.estimateSamples, priceOf(o), ctx);
   };
   const costOf = (o: Record<string, unknown>) => estimateFor(o)?.totalUsd ?? priceOf(o);
   const timeOf = (o: Record<string, unknown>) => estimateFor(o)?.totalMin ?? (1 / qualityOf(o));
@@ -2307,6 +2342,34 @@ async function runFinetunePreflight(spec: Partial<FinetuneOpts>): Promise<Prefli
   return result;
 }
 
+/**
+ * After a run, record measured throughput into the calibration store so future
+ * estimates self-correct. Reads the pulled job log for a trainer-emitted
+ * `[calib] steps_per_sec=… encode_rate_per_gpu=…` line (or a bare `rate=`).
+ * Best-effort; silent when the log lacks the markers (e.g. preset not updated).
+ */
+function recordCalibrationFromRun(
+  workload: WorkloadProfile | undefined,
+  gpuType: string | undefined,
+  outputDir: string | undefined,
+): void {
+  try {
+    if (!workload || !gpuType) return;
+    const logPath = join(outputDir || './output', '.job.log');
+    if (!existsSync(logPath)) return;
+    const tail = readFileSync(logPath, 'utf-8').split('\n').slice(-300).join('\n');
+    const obs = parseCalibLine(tail);
+    if (!obs.stepsPerSec && !obs.encodeRatePerGpu) return;
+    const key = calibKey(gpuType, workload.paramsB, workload.task, workload.finetuneMode);
+    saveCalibStore(applyObservation(loadCalibStore(), key, obs, new Date().toISOString()));
+    const parts = [
+      obs.stepsPerSec ? `${obs.stepsPerSec.toFixed(2)} steps/s` : '',
+      obs.encodeRatePerGpu ? `${obs.encodeRatePerGpu.toFixed(1)} enc/s` : '',
+    ].filter(Boolean).join(', ');
+    console.log(`  ${c.dim}[calib] recorded ${key} → ${parts}${c.reset}`);
+  } catch { /* best effort — never block on calibration */ }
+}
+
 /** Fetch a HF model's config.json and estimate its param count (B). Best-effort. */
 async function fetchHfModelParamsB(modelRef: string): Promise<number | undefined> {
   const repo = modelRef.replace(/^hf:\/\//, '').replace(/\/+$/, '');
@@ -2631,6 +2694,8 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
     numGpus: opts.numGpus, stepsPerSec: preset?.manifest?.defaultStepsPerSec,
     encodeRatePerGpu: preset?.manifest?.defaultEncodeRatePerGpu,
   };
+  // Calibration: measured throughput per gpu+model refines the per-offer estimate.
+  const calib = loadCalibStore();
 
   // jobRunner: cmdGpuJobsRun has side-effects (saves job state, prints to stdout)
   // and returns void. Read loadJobState() AFTER the call to recover real metadata.
@@ -2662,6 +2727,7 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
         workloadProfile: workload,
         estimateOpts,
         estimateSamples: opts.sampleCount,
+        calibStore: calib,
       });
       const s = loadJobState();
       return {
@@ -2757,6 +2823,8 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
       budget = addAttempt(budget, spend, new Date().toISOString());
       saveBudget(budget);
       console.log(`[finetune] submitted — instanceId=${result.instanceId || '(see job state)'}  gpu=${result.gpuType}  $${result.pricePerHr}/h  cumSpend=$${budget.totalSpentUsd.toFixed(2)}`);
+      // Close the calibration loop: record measured throughput for this gpu+model.
+      recordCalibrationFromRun(workload, result.gpuType, opts.output);
       return;
     } catch (err) {
       lastErr = err;
