@@ -39,7 +39,9 @@ export const vastStrategy: ProviderStrategy = {
       ...(extra.templateHashId ? { templateHashId: extra.templateHashId } : {}),
       ...(extra.forceSshTunnel ? { forceSshTunnel: extra.forceSshTunnel } : {}),
       ...(extra.label ? { label: extra.label } : {}),
+      ...(extra.searchMode ? { searchMode: extra.searchMode } : {}),
       ...(extra.strictFastBoot ? { strictFastBoot: extra.strictFastBoot } : {}),
+      ...(extra.requireDirectPort ? { directPortRequired: 1 } : {}),
     };
   },
 
