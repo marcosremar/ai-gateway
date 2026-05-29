@@ -914,9 +914,11 @@ import {
   buildStatusResult,
   loadPreset,
   listPresets,
+  lintPresetManifest,
   runNumericChecks,
   runCompare,
   preflightChecks,
+  scaffoldPreset,
   BUNDLED_PLUGINS,
 } from '../src/modules/gpu-finetune';
 import type { PreflightResult } from '../src/modules/gpu-finetune';
@@ -5958,6 +5960,8 @@ Subcommands:
   history         Show last 20 finetune runs with totals
   estimate        Predict total wall time + cost from spec (no spend)
   validate        Schema + live preflight (HF/R2/script, no spend). --no-preflight = schema only
+  init <name>     Scaffold a new preset skeleton (manifest + trainer + prepare)
+                  under finetune-presets/<name>/. --type audio|text  --model hf://…
   lr-find         Sequential mini-trains @ {1e-6..5e-4} → suggest best LR
   sweep --trials N  Parallel hyperparam search (N spot instances)
   deploy <ckpt>   Push ckpt to --push-to-hf or print local IARATTS_CKPT cmd
@@ -7283,6 +7287,22 @@ Per-app isolation:
               for (const [name, p] of Object.entries(BUNDLED_PLUGINS)) {
                 console.log(`  ${name.padEnd(12)} ${p.description}`);
               }
+            } else if (sub === 'init') {
+              // Scaffold a new preset skeleton under finetune-presets/<name>/.
+              const initName = args[3] && !args[3].startsWith('-') ? args[3] : undefined;
+              if (!initName) { console.error('Usage: ai-gateway gpu finetune init <name> [--type audio|text] [--model hf://owner/repo]'); process.exit(1); }
+              const initType = (getArg(args, '--type') as 'audio' | 'text') || 'audio';
+              const destDir = join(process.cwd(), 'finetune-presets', initName);
+              if (existsSync(destDir)) { console.error(`✗ ${destDir} already exists — pick another name or remove it.`); process.exit(1); }
+              let files;
+              try {
+                files = scaffoldPreset(initName, { type: initType, defaultModel: getArg(args, '--model') });
+              } catch (e) { console.error(`✗ ${(e as Error).message}`); process.exit(1); }
+              mkdirSync(destDir, { recursive: true });
+              for (const f of files) writeFileSync(join(destDir, f.rel), f.contents);
+              console.log(`✓ scaffolded preset '${initName}' → ${destDir}`);
+              files.forEach(f => console.log(`    ${f.rel}`));
+              console.log(`\nNext:\n  1. Edit trainer.py (encode/train) + prepare_dataset.py for your model\n  2. ai-gateway gpu finetune validate --type ${initName} --dataset hf://you/data\n  3. ai-gateway gpu finetune submit --type ${initName} --dataset hf://you/data --smoke`);
             } else if (sub === 'presets') {
               const presets = listPresets();
               if (presets.length === 0) { console.log('No presets installed.'); break; }
@@ -7297,11 +7317,13 @@ Per-app isolation:
                   console.log(`    tags: ${m.knownTags.slice(0, 6).join(' ')}${m.knownTags.length > 6 ? ' …' : ''}`);
                 }
                 if (m.notes) console.log(`    notes: ${m.notes}`);
+                // Surface authoring mistakes (unknown probePaths keys, missing interface).
+                for (const w of lintPresetManifest(m)) console.log(`    ${c.yellow}⚠ ${w}${c.reset}`);
               }
             } else if (sub === 'watch-web') {
               await cmdGpuFinetuneWatchWeb();
             } else {
-              console.error('Usage: ai-gateway gpu finetune <submit|resume|status|logs|metrics|cancel|history|estimate|validate|lr-find|sweep|deploy|list-runs|plugins|watch-web>');
+              console.error('Usage: ai-gateway gpu finetune <submit|resume|status|logs|metrics|cancel|history|estimate|validate|init|lr-find|sweep|deploy|list-runs|presets|plugins|watch-web>');
               process.exit(1);
             }
             break;
