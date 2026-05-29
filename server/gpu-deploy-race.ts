@@ -68,6 +68,22 @@ export async function startDeployRace(
   const deployStartedAt = Date.now();
   const raceN = Math.min(raceCount, 10); // cap at 10
 
+  // ── Provider readiness pre-filter ───────────────────────────────────────
+  // Don't waste race slots on providers with no credentials (e.g. Modal with no
+  // token, RunPod with no key) — they fail every slot instantly and can mask the
+  // configured providers behind a misleading "all slots failed". Safe fallback:
+  // if everything looks unconfigured, race the original set untouched.
+  {
+    const { filterUsableTiers } = await import('../src/modules/gpu-providers/provider-readiness');
+    const r = filterUsableTiers(tiers);
+    if (r.skipped.length > 0) {
+      log.log(`[race] skipping ${r.skipped.length} unconfigured provider(s): ${r.skipped.map(t => t.name).join(', ')} — racing: ${r.usable.map(t => t.name).join(', ')}`);
+    } else if (r.fellBack) {
+      log.warn('[race] all providers look unconfigured (no creds detected) — racing original set as-is; check provider API keys');
+    }
+    tiers = r.usable;
+  }
+
   // ── Budget gate (same as startDeployWithTiers) ──────────────────────────
   // Race deploys bypass startDeployWithTiers, so we must guard here too.
   // Estimate: $2 per instance (N instances run simultaneously during boot).
@@ -211,6 +227,11 @@ export async function startDeployRace(
           // copies them into `extra`; we just need to forward them to the
           // provider client so they reach the search payload.
           ...(extra.allowUnverified ? { allowUnverified: extra.allowUnverified } : {}),
+          // Deploy-level race already creates N instances; pin the internal Vast
+          // offer-hedge to 1 so each slot spawns exactly one instance (no 2N blow-up).
+          raceCount: 1,
+          ...(extra.requireDirectPort ? { directPortRequired: 1 } : {}),
+          ...(extra.searchMode ? { searchMode: extra.searchMode } : {}),
           ...(extra.strictFastBoot ? { strictFastBoot: extra.strictFastBoot } : {}),
           ...(extra.label ? { label: extra.label } : {}),
           ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
