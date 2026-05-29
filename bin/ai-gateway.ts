@@ -1567,6 +1567,16 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
         console.log(`  ready: ${st.sshHost || 'n/a'}:${st.sshPort || 'n/a'} (${phase}) in ${bootSec.toFixed(0)}s`);
         break;
       }
+      // Server-side deploy errored (no instance will appear) — abort NOW rather
+      // than polling a dead deploy for the full timeout. auto-resubmit retries.
+      if ((phase === 'error' || st.status === 'error') && deployIdMatches) {
+        console.log();
+        process.stderr.write(`${c.yellow}⚠ deploy errored server-side (${st.error || st.message || 'unknown'}) — abandoning${c.reset}\n`);
+        await fetch(`${url}/v1/gpu/terminate`, {
+          method: 'POST', headers: headers(key), body: JSON.stringify({ deployId }),
+        }).catch(() => {});
+        throw new Error(`deploy errored: ${st.error || st.message || 'unknown'}`);
+      }
       process.stdout.write(`\r  ${phase}...                    `);
     }
     await new Promise((r) => setTimeout(r, 5000));
