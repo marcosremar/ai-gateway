@@ -120,6 +120,22 @@ export async function getVerifiedGpuTypes(dockerImage: string): Promise<string[]
  * Loads persisted deploy state from disk, probes health, and restores monitoring if alive.
  * Called once at gateway startup.
  */
+/** TCP liveness probe — true if host:port accepts a connection within timeoutMs.
+ * Used as an SSH-reachability fallback so a pod running a non-serving job (e.g.
+ * training) is re-adopted across a gateway restart instead of being discarded. */
+function tcpReachable(host: string, port: number, timeoutMs = 6000): Promise<boolean> {
+  return new Promise((resolve) => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const net = require('net');
+    const sock = net.connect({ host, port });
+    let done = false;
+    const finish = (ok: boolean) => { if (done) return; done = true; try { sock.destroy(); } catch { /* noop */ } resolve(ok); };
+    sock.setTimeout(timeoutMs);
+    sock.once('connect', () => finish(true));
+    sock.once('timeout', () => finish(false));
+    sock.once('error', () => finish(false));
+  });
+}
 export async function tryRecoverActiveDeploy(): Promise<boolean> {
   const persisted = loadPersistedDeploy();
   if (!persisted) return false;
@@ -129,16 +145,27 @@ export async function tryRecoverActiveDeploy(): Promise<boolean> {
 
   try {
     const probeResult = await probeGpuHealth(persisted.endpoint, true);
-    const healthy = probeResult.ok;
+    let healthy = probeResult.ok;
     if (probeResult.data) updateGpuModelWarmth(probeResult.data);
     if (!healthy) {
-      log.log(`[gpu] Persisted pod is not healthy — discarding`);
-      clearPersistedDeploy();
-      return false;
+      // /health can be down because the pod is busy with a NON-serving workload
+      // (e.g. a training job that doesn't expose the app port) rather than dead.
+      // Fall back to an SSH/TCP liveness probe: if the pod answers, the GPU is
+      // still alive — re-adopt it instead of orphaning a running job. This is
+      // what keeps a training run alive across a gateway restart.
+      const sshAlive = persisted.sshHost && persisted.sshPort
+        ? await tcpReachable(persisted.sshHost, persisted.sshPort, 6000)
+        : false;
+      if (!sshAlive) {
+        log.log(`[gpu] Persisted pod not health-serving AND SSH unreachable — discarding`);
+        clearPersistedDeploy();
+        return false;
+      }
+      log.log(`[gpu] /health down but SSH alive (${persisted.sshHost}:${persisted.sshPort}) — re-adopting running pod (likely an active job)`);
     }
 
-    // Pod is alive! Restore state
-    log.log(`[gpu] Pod is still healthy! Reconnecting...`);
+    // Pod is alive (health-serving or SSH-reachable)! Restore state
+    log.log(`[gpu] Pod still alive — reconnecting${healthy ? '' : ' (SSH-only, job in progress)'}...`);
     setDeployCancelled(false);
     setDeployState({
       status: 'ready',
