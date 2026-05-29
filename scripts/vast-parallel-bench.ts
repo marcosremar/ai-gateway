@@ -2,35 +2,37 @@
 /**
  * Vast.ai Parallel Deploy Benchmark
  *
- * Deploys N cheap machines in parallel, boots ollama + qwen2.5:0.5b,
- * verifies inference works, and reports timing per machine + aggregate.
+ * Deploys N cheap machines in parallel, boots ollama + model via SSH tunnel,
+ * verifies inference, and reports timing per machine + aggregate stats.
  *
  * Phases measured from t0 = deploy POST sent:
- *   T1  actual_status='running'   (image pulled, container up)
- *   T2  GET /health 200 + model listed in /api/tags  (ollama ready + model loaded)
- *   T3  First POST /api/generate OK  (real inference round-trip)
+ *   T1  actual_status='running'            (container up)
+ *   T2  ollama /api/tags lists model       (ollama ready + model loaded, via SSH tunnel)
+ *   T3  First POST /api/generate OK        (real inference round-trip)
  *
  * Usage:
  *   bun scripts/vast-parallel-bench.ts
  *   bun scripts/vast-parallel-bench.ts --parallel 5 --model qwen2.5:0.5b
- *   bun scripts/vast-parallel-bench.ts --keep --quiet
+ *   bun scripts/vast-parallel-bench.ts --keep --json
  *
  * Options:
- *   --parallel <n>         Number of machines to deploy in parallel (default 3)
+ *   --parallel <n>         Machines to deploy in parallel (default 3)
  *   --model <tag>          Ollama model to pull and test (default qwen2.5:0.5b)
  *   --max-wait <sec>       Boot timeout per machine (default 900)
- *   --min-inet-down <mbps> Min download bandwidth filter (default 500)
+ *   --min-inet-down <mbps> Min download bandwidth (default 500)
  *   --min-reliability <n>  Min host reliability2 score (default 0.97)
- *   --max-price <usd/hr>   Max hourly price per machine (default 0.50)
+ *   --max-price <usd/hr>   Max hourly price (default 0.50)
  *   --gpu-types <list>     Comma-separated GPU names (default any)
  *   --keep                 Don't terminate instances after bench
  *   --quiet                Less verbose output
- *   --json                 Print JSON summary at end
+ *   --json                 Print JSON summary to stdout
  *
- * Env: VAST_API_KEY (loaded from .env)
+ * Env: VAST_API_KEY (from .env)
  */
 
 import 'dotenv/config';
+import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 
 const VAST_API_BASE = 'https://console.vast.ai/api/v0';
 
@@ -41,17 +43,17 @@ function flag(name: string): string | undefined {
 }
 function bool(name: string): boolean { return args.includes(`--${name}`); }
 
-const PARALLEL     = parseInt(flag('parallel') ?? '3', 10);
-const MODEL        = flag('model') ?? 'qwen2.5:0.5b';
-const MAX_WAIT_S   = parseInt(flag('max-wait') ?? '900', 10);
-const MIN_INET     = parseInt(flag('min-inet-down') ?? '500', 10);
-const MIN_REL      = parseFloat(flag('min-reliability') ?? '0.97');
-const MAX_PRICE    = parseFloat(flag('max-price') ?? '0.50');
-const GPU_TYPES    = flag('gpu-types')?.split(',').map(s => s.trim()).filter(Boolean);
-const KEEP         = bool('keep');
-const QUIET        = bool('quiet');
-const JSON_OUT     = bool('json');
-const OLLAMA_PORT  = 11434;
+const PARALLEL    = parseInt(flag('parallel') ?? '3', 10);
+const MODEL       = flag('model') ?? 'qwen2.5:0.5b';
+const MAX_WAIT_S  = parseInt(flag('max-wait') ?? '900', 10);
+const MIN_INET    = parseInt(flag('min-inet-down') ?? '500', 10);
+const MIN_REL     = parseFloat(flag('min-reliability') ?? '0.97');
+const MAX_PRICE   = parseFloat(flag('max-price') ?? '0.50');
+const GPU_TYPES   = flag('gpu-types')?.split(',').map(s => s.trim()).filter(Boolean);
+const KEEP        = bool('keep');
+const QUIET       = bool('quiet');
+const JSON_OUT    = bool('json');
+const OLLAMA_PORT = 11434;
 
 const VAST_KEY = process.env.VAST_API_KEY;
 if (!VAST_KEY) { console.error('ERROR: VAST_API_KEY not set'); process.exit(1); }
@@ -61,14 +63,36 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const now = () => Date.now();
 const fmtS = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
 
+// ── SSH key setup ─────────────────────────────────────────────────────────────
+// Use ~/.ssh/id_ed25519 — already registered on the Vast.ai account.
+// Don't inject ssh_key into deploy body: that would override account authorized_keys.
+
+import { homedir } from 'node:os';
+
+const sshPrivKeyPath = join(homedir(), '.ssh', 'id_ed25519');
+
+async function setupSshKey(): Promise<void> {
+  try {
+    await Bun.file(sshPrivKeyPath).text();
+    console.error(`[ssh] using registered key: ${sshPrivKeyPath}`);
+  } catch {
+    console.error(`[ssh] WARNING: ${sshPrivKeyPath} not found — SSH tunnel will likely fail`);
+  }
+}
+
+async function cleanupSshKey(): Promise<void> { /* no temp key to clean up */ }
+
 // ── Cleanup registry ──────────────────────────────────────────────────────────
 
 const instances: number[] = [];
+const tunnels: ReturnType<typeof spawn>[] = [];
 let cleanupDone = false;
 
 async function terminateAll() {
   if (cleanupDone) return;
   cleanupDone = true;
+  // Kill SSH tunnels
+  for (const t of tunnels) { try { t.kill(); } catch {} }
   if (instances.length === 0) return;
   console.error(`\n[cleanup] terminating ${instances.length} instance(s)...`);
   await Promise.allSettled(instances.map(async id => {
@@ -77,6 +101,7 @@ async function terminateAll() {
       console.error(`[cleanup] instance ${id} → HTTP ${r.status}`);
     } catch (e) { console.error(`[cleanup] instance ${id} error:`, e); }
   }));
+  await cleanupSshKey();
 }
 
 process.on('SIGINT', async () => { await terminateAll(); process.exit(130); });
@@ -111,9 +136,7 @@ async function searchOffers(needed: number): Promise<Offer[]> {
     order: [['dph_total', 'asc']],
     limit: needed * 4,
   };
-  if (GPU_TYPES?.length) {
-    searchBody.gpu_name = { in: GPU_TYPES };
-  }
+  if (GPU_TYPES?.length) searchBody.gpu_name = { in: GPU_TYPES };
 
   if (!QUIET) console.error(`[search] querying Vast.ai (parallel=${needed}, min_inet=${MIN_INET}Mbps, min_rel=${MIN_REL}, max_price=$${MAX_PRICE}/hr)...`);
   const res = await fetch(`${VAST_API_BASE}/bundles/`, { method: 'POST', headers, body: JSON.stringify(searchBody) });
@@ -121,7 +144,6 @@ async function searchOffers(needed: number): Promise<Offer[]> {
   const data = (await res.json()) as { offers?: Array<Record<string, unknown>> };
   const raw = data.offers ?? [];
 
-  // Client-side filter: remove offers with missing/low bandwidth
   const filtered = raw.filter(o => {
     const down = Number(o.inet_down ?? 0);
     const up = Number(o.inet_up ?? 0);
@@ -148,15 +170,17 @@ async function searchOffers(needed: number): Promise<Offer[]> {
 // ── Deploy ────────────────────────────────────────────────────────────────────
 
 async function deployOffer(offer: Offer): Promise<number> {
-  // ssh_direct: Vast injects SSH server (overrides image entrypoint).
-  // onstart runs after SSH up — start ollama serve then pull model.
+  // ssh_direct: Vast writes our onstart field to /root/onstart.sh and runs it
+  // via `bash /root/onstart.sh`. Must be valid bash script, NOT one-liner with
+  // `& &&` (that's a syntax error). Use newlines between commands.
   const onstart = [
-    'nohup ollama serve > /var/log/ollama.log 2>&1 &',
+    '#!/bin/bash',
+    'ollama serve > /var/log/ollama.log 2>&1 &',
     'sleep 5',
     `ollama pull ${MODEL} >> /var/log/ollama.log 2>&1`,
-  ].join(' && ');
+  ].join('\n');
 
-  const body = {
+  const body: Record<string, unknown> = {
     client_id: 'me',
     image: 'ollama/ollama:latest',
     disk: 25,
@@ -168,7 +192,8 @@ async function deployOffer(offer: Offer): Promise<number> {
       OLLAMA_MODELS: '/root/.ollama/models',
       [`-p ${OLLAMA_PORT}:${OLLAMA_PORT}`]: '1',
     },
-    label: `vast-parallel-bench-${Date.now().toString(36)}`,
+    label: `vast-bench-${Date.now().toString(36)}`,
+    // No ssh_key field — instance inherits all account registered keys
   };
 
   const res = await fetch(`${VAST_API_BASE}/asks/${offer.id}/`, { method: 'PUT', headers, body: JSON.stringify(body) });
@@ -183,7 +208,6 @@ async function deployOffer(offer: Offer): Promise<number> {
 interface InstState {
   status: string;
   ip: string;
-  endpoint: string;
   directPort: number;
   sshHost: string;
   sshPort: number;
@@ -194,65 +218,101 @@ async function getInstance(id: number): Promise<InstState | null> {
     const res = await fetch(`${VAST_API_BASE}/instances/${id}/`, { headers });
     if (!res.ok) return null;
     const raw = (await res.json()) as Record<string, unknown>;
-    // Vast returns either { instances: [...] } or the object directly
-    // Vast.ai single-instance endpoint returns { instances: {...} } (object) for
-    // active instances, or { instances: [...] } (array) in some edge cases.
+    // Vast single-instance endpoint returns { instances: {...} } (object, not array)
     const rawInst = (raw as any).instances;
     const inst = (Array.isArray(rawInst) ? rawInst[0] : rawInst) as Record<string, unknown>;
     if (!inst) return null;
 
     const status = String(inst.actual_status ?? inst.cur_state ?? '?');
     const ip = String(inst.public_ipaddr ?? '');
-    let endpoint = '';
-    let directPort = 0;
-
-    const ports = inst.ports as Record<string, unknown> | undefined;
     const dpStart = Number(inst.direct_port_start ?? -1);
-
-    if (ports && dpStart > 0) {
-      const key = `${OLLAMA_PORT}/tcp`;
-      const mapping = (ports[key] ?? ports[String(OLLAMA_PORT)]) as Array<{ HostPort?: string; HostIp?: string }> | undefined;
-      const entry = mapping?.find(e => Number(e.HostPort) > 0);
-      if (entry?.HostPort) {
-        const hostIp = entry.HostIp && !['0.0.0.0', '172.', '10.'].some(p => (entry.HostIp ?? '').startsWith(p)) ? entry.HostIp : ip;
-        endpoint = `http://${hostIp}:${entry.HostPort}`;
-        directPort = Number(entry.HostPort);
-      }
-    }
-    if (!endpoint && ip && dpStart > 0) {
-      endpoint = `http://${ip}:${dpStart + OLLAMA_PORT - 11434}`;
-      directPort = dpStart;
-    }
-
-    // Cloudflare tunnel fallback (SSH-only hosts or pre-port-assignment)
-    if (!endpoint) {
-      const webpage = String(inst.webpage ?? '').trim();
-      if (webpage.startsWith('https://') && webpage.includes('.trycloudflare.com')) {
-        endpoint = webpage;
-      }
-    }
-
     const sshHost = String(inst.ssh_host ?? ip);
     const sshPort = Number(inst.ssh_port ?? 0);
 
-    return { status, ip, endpoint, directPort, sshHost, sshPort };
+    return { status, ip, directPort: dpStart, sshHost, sshPort };
   } catch { return null; }
+}
+
+// ── SSH tunnel ────────────────────────────────────────────────────────────────
+
+interface Tunnel {
+  localPort: number;
+  proc: ReturnType<typeof spawn>;
+  endpoint: string;
+}
+
+async function openSshTunnel(sshHost: string, sshPort: number, localPort: number, tag: string): Promise<Tunnel | null> {
+  if (!sshPrivKeyPath || !sshHost || !sshPort) return null;
+  return new Promise(resolve => {
+    const proc = spawn('ssh', [
+      '-N',                            // no remote command, just forward
+      '-o', 'StrictHostKeyChecking=no',
+      '-o', 'UserKnownHostsFile=/dev/null',
+      '-o', 'ConnectTimeout=15',
+      '-o', 'ServerAliveInterval=15',
+      '-o', 'ServerAliveCountMax=3',
+      '-i', sshPrivKeyPath,
+      '-L', `${localPort}:localhost:${OLLAMA_PORT}`,
+      '-p', String(sshPort),
+      `root@${sshHost}`,
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+
+    tunnels.push(proc);
+
+    let resolved = false;
+    const endpoint = `http://localhost:${localPort}`;
+
+    // Strategy: if SSH proc is still alive after 5s, authentication succeeded
+    // and the local port forward is listening. Channel failures ("open failed:
+    // connect failed") just mean ollama isn't serving yet — that's fine, we'll
+    // poll ollama in Phase 2.
+    const authTimeout = setTimeout(async () => {
+      // Check if proc is still running (not killed due to auth failure)
+      if (proc.exitCode !== null) {
+        // Process already exited → auth failed or connection refused
+        if (!resolved) { resolved = true; resolve(null); }
+        return;
+      }
+      // Process still alive → SSH tunnel is up, port forward listening
+      if (!resolved) {
+        resolved = true;
+        console.error(`${tag} SSH tunnel established → ${endpoint}`);
+        resolve({ localPort, proc, endpoint });
+      }
+    }, 5_000);
+
+    proc.stderr?.on('data', (data: Buffer) => {
+      const msg = data.toString().trim();
+      // Log only non-spam lines
+      if (!msg.includes('channel') && !msg.includes('setsockopt') && msg.length > 0) {
+        console.error(`${tag} ssh: ${msg}`);
+      }
+    });
+
+    proc.on('error', () => {
+      if (!resolved) { resolved = true; clearTimeout(authTimeout); resolve(null); }
+    });
+
+    proc.on('exit', (code) => {
+      if (!resolved) { resolved = true; clearTimeout(authTimeout); resolve(null); }
+    });
+  });
 }
 
 // ── Health + inference probes ─────────────────────────────────────────────────
 
 async function probeOllamaReady(endpoint: string): Promise<{ ok: boolean; err?: string }> {
   try {
-    const res = await fetch(`${endpoint}/`, { signal: AbortSignal.timeout(8_000) });
+    const res = await fetch(`${endpoint}/`, { signal: AbortSignal.timeout(5_000) });
     return { ok: res.ok };
   } catch (e) {
-    return { ok: false, err: String(e).slice(0, 80) };
+    return { ok: false, err: String(e).slice(0, 100) };
   }
 }
 
 async function probeModelLoaded(endpoint: string): Promise<boolean> {
   try {
-    const res = await fetch(`${endpoint}/api/tags`, { signal: AbortSignal.timeout(4_000) });
+    const res = await fetch(`${endpoint}/api/tags`, { signal: AbortSignal.timeout(5_000) });
     if (!res.ok) return false;
     const data = (await res.json()) as { models?: Array<{ name?: string }> };
     const modelBase = MODEL.split(':')[0];
@@ -267,7 +327,7 @@ async function runInference(endpoint: string): Promise<{ ok: boolean; latencyMs:
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: MODEL, prompt: 'Say "ok" in one word.', stream: false }),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(60_000),
     });
     const latencyMs = now() - t;
     if (!res.ok) return { ok: false, latencyMs };
@@ -288,18 +348,20 @@ interface BenchResult {
   geo: string;
   inetDown: number;
   t0: number;
-  t1Ms?: number;  // running
-  t2Ms?: number;  // ollama ready + model loaded
-  t3Ms?: number;  // first inference OK
+  t1Ms?: number;
+  t2Ms?: number;
+  t3Ms?: number;
   inferenceLatencyMs?: number;
   inferenceResponse?: string;
-  endpoint?: string;
-  directPort?: number;
   sshHost?: string;
   sshPort?: number;
   error?: string;
-  phase: 'search' | 'deploy' | 'running' | 'ready' | 'inference' | 'done' | 'failed';
+  phase: 'search' | 'deploy' | 'running' | 'tunnel' | 'ready' | 'inference' | 'done' | 'failed';
 }
+
+// Global port counter for SSH tunnels (one per machine, avoid collisions)
+let nextLocalPort = 21000;
+function allocPort(): number { return nextLocalPort++; }
 
 async function benchMachine(offer: Offer, idx: number): Promise<BenchResult> {
   const tag = `[m${idx + 1}]`;
@@ -313,7 +375,7 @@ async function benchMachine(offer: Offer, idx: number): Promise<BenchResult> {
     phase: 'deploy',
   };
 
-  // Deploy (retry up to 3x with fresh offers on stale-offer 400)
+  // Deploy (retry up to 3x on stale-offer 400)
   let instanceId = 0;
   let usedOffer = offer;
   const triedIds = new Set<number>();
@@ -328,7 +390,7 @@ async function benchMachine(offer: Offer, idx: number): Promise<BenchResult> {
         if (msg.includes('400') || msg.includes('no_such_ask') || msg.includes('not available')) {
           console.error(`${tag} offer ${usedOffer.id} stale, re-searching... (attempt ${attempt + 1})`);
           const fresh = (await searchOffers(PARALLEL + 4)).filter(o => !triedIds.has(o.id));
-          if (fresh.length === 0) throw new Error('No fresh offers available after retry');
+          if (fresh.length === 0) throw new Error('No fresh offers after retry');
           usedOffer = fresh[0];
         } else {
           throw e;
@@ -352,10 +414,11 @@ async function benchMachine(offer: Offer, idx: number): Promise<BenchResult> {
   const deadline = result.t0 + MAX_WAIT_S * 1000;
   const TERMINAL = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted', 'stopped']);
 
-  // Phase 1: wait for actual_status='running'
+  // Phase 1: wait for actual_status='running' + SSH host info
   result.phase = 'running';
   let lastStatus = '';
-  let endpoint = '';
+  let sshHost = '';
+  let sshPort = 0;
 
   while (now() < deadline) {
     await sleep(8_000);
@@ -366,22 +429,17 @@ async function benchMachine(offer: Offer, idx: number): Promise<BenchResult> {
       console.error(`${tag} status: ${lastStatus || '?'} → ${inst.status} (${fmtS(now() - result.t0)})`);
       lastStatus = inst.status;
     }
-
     if (TERMINAL.has(inst.status)) {
-      result.error = `instance exited with status=${inst.status}`;
+      result.error = `instance exited: ${inst.status}`;
       result.phase = 'failed';
       return result;
     }
-
-    if (inst.endpoint) endpoint = inst.endpoint;
-    if (inst.directPort > 0) result.directPort = inst.directPort;
-    if (inst.sshHost) result.sshHost = inst.sshHost;
-    if (inst.sshPort > 0) result.sshPort = inst.sshPort;
+    if (inst.sshHost) { sshHost = inst.sshHost; result.sshHost = inst.sshHost; }
+    if (inst.sshPort > 0) { sshPort = inst.sshPort; result.sshPort = inst.sshPort; }
 
     if (inst.status === 'running') {
       result.t1Ms = now() - result.t0;
-      console.error(`${tag} T1 running: ${fmtS(result.t1Ms)} | endpoint=${endpoint || 'none'} | ssh=${inst.sshHost}:${inst.sshPort || '?'}`);
-      result.endpoint = endpoint;
+      console.error(`${tag} T1 running: ${fmtS(result.t1Ms)} | ssh=${sshHost}:${sshPort || '?'}`);
       break;
     }
   }
@@ -392,56 +450,72 @@ async function benchMachine(offer: Offer, idx: number): Promise<BenchResult> {
     return result;
   }
 
-  // Phase 2: wait for ollama ready + model loaded
-  // SSH-only hosts (direct_port=-1, no Cloudflare tunnel) can't be probed from
-  // outside without an SSH tunnel. Report T1 as partial success and skip T2/T3.
-  const endpointDeadline = result.t0 + Math.min(MAX_WAIT_S, 90) * 1000;
-  while (!endpoint && now() < endpointDeadline) {
-    await sleep(8_000);
-    const fresh = await getInstance(instanceId);
-    if (fresh?.endpoint) {
-      endpoint = fresh.endpoint;
-      result.endpoint = endpoint;
-      console.error(`${tag} endpoint resolved: ${endpoint}`);
+  // Phase 2: open SSH tunnel then wait for ollama + model
+  result.phase = 'tunnel';
+  if (!sshHost || !sshPort) {
+    // Poll a bit more for SSH info
+    for (let i = 0; i < 5 && (!sshHost || !sshPort); i++) {
+      await sleep(5_000);
+      const inst = await getInstance(instanceId);
+      if (inst?.sshHost) { sshHost = inst.sshHost; result.sshHost = inst.sshHost; }
+      if (inst?.sshPort && inst.sshPort > 0) { sshPort = inst.sshPort; result.sshPort = inst.sshPort; }
     }
   }
-  if (!endpoint) {
-    console.error(`${tag} SSH-only host (no direct port / no Cloudflare tunnel) — T1 only`);
-    result.phase = 'done';  // partial success: T1 measured
+
+  if (!sshHost || !sshPort) {
+    result.error = 'no SSH host/port after T1 — cannot tunnel';
+    result.phase = 'failed';
     return result;
   }
 
+  const localPort = allocPort();
+  console.error(`${tag} opening SSH tunnel :${localPort} → ${sshHost}:${sshPort} → localhost:${OLLAMA_PORT}`);
+  // SSH proxy may take 30-60s to register after container running — retry
+  let tunnel: Awaited<ReturnType<typeof openSshTunnel>> = null;
+  let prevProc: ReturnType<typeof spawn> | null = null;
+  for (let attempt = 0; attempt < 6 && now() < deadline; attempt++) {
+    if (attempt > 0) {
+      // Kill previous SSH proc before retry to free the local port
+      try { prevProc?.kill(); } catch {}
+      await sleep(2_000);  // give OS time to release port
+      console.error(`${tag} SSH tunnel attempt ${attempt + 1}/6, waiting 12s...`);
+      await sleep(12_000);
+    }
+    const result_tunnel = await openSshTunnel(sshHost, sshPort, localPort, tag);
+    if (result_tunnel) { tunnel = result_tunnel; break; }
+    // openSshTunnel returns null — save proc reference so we can kill it
+    prevProc = tunnels[tunnels.length - 1] ?? null;
+  }
+  if (!tunnel) {
+    result.error = `SSH tunnel failed after 6 attempts to ${sshHost}:${sshPort}`;
+    result.phase = 'failed';
+    return result;
+  }
+  const endpoint = tunnel.endpoint;
+  console.error(`${tag} SSH tunnel up → ${endpoint}`);
+
+  // Phase 2b: wait for ollama + model via tunnel
   result.phase = 'ready';
-  let endpointFailCount = 0;
   while (now() < deadline) {
-    await sleep(10_000);
+    await sleep(8_000);
     const probe = await probeOllamaReady(endpoint);
     if (!probe.ok) {
-      endpointFailCount++;
-      console.error(`${tag} ollama not ready: ${probe.err ?? 'HTTP error'} @ ${endpoint} (${fmtS(now() - result.t0)})`);
-      // After 4 consecutive failures: endpoint not accessible from client (SSH-proxied port).
-      // SSH-proxied ports require SSH tunnel — report T1-only and move on.
-      if (endpointFailCount >= 4) {
-        console.error(`${tag} endpoint ${endpoint} unreachable after ${endpointFailCount} tries — SSH-proxied port, T1 only`);
-        result.phase = 'done';
-        return result;
-      }
+      if (!QUIET) console.error(`${tag} ollama not ready: ${probe.err ?? 'http error'} (${fmtS(now() - result.t0)})`);
       continue;
     }
     const modelReady = await probeModelLoaded(endpoint);
     if (modelReady) {
       result.t2Ms = now() - result.t0;
-      if (!QUIET) console.error(`${tag} T2 model ready: ${fmtS(result.t2Ms)}`);
+      console.error(`${tag} T2 model ready: ${fmtS(result.t2Ms)}`);
       break;
     }
-    if (!QUIET) console.error(`${tag} ollama up, waiting for ${MODEL} pull... (${fmtS(now() - result.t0)})`);
+    console.error(`${tag} ollama up, pulling ${MODEL}... (${fmtS(now() - result.t0)})`);
   }
 
   if (!result.t2Ms) {
-    result.error = !endpoint
-      ? `no direct endpoint after ${MAX_WAIT_S}s (SSH-only host, no Cloudflare tunnel)`
-      : `timeout waiting for model ${MODEL} (${MAX_WAIT_S}s)`;
+    result.error = `timeout waiting for model ${MODEL} (${MAX_WAIT_S}s)`;
     result.phase = 'failed';
+    tunnel.proc.kill();
     return result;
   }
 
@@ -451,6 +525,7 @@ async function benchMachine(offer: Offer, idx: number): Promise<BenchResult> {
   result.t3Ms = now() - result.t0;
   result.inferenceLatencyMs = inf.latencyMs;
   result.inferenceResponse = inf.response;
+  tunnel.proc.kill();
 
   if (!inf.ok) {
     result.error = `inference failed (${fmtS(inf.latencyMs)})`;
@@ -458,7 +533,7 @@ async function benchMachine(offer: Offer, idx: number): Promise<BenchResult> {
     return result;
   }
 
-  if (!QUIET) console.error(`${tag} T3 inference OK: ${fmtS(result.t3Ms)} | latency=${fmtS(inf.latencyMs)} | response="${inf.response}"`);
+  console.error(`${tag} T3 inference OK: ${fmtS(result.t3Ms)} | latency=${fmtS(inf.latencyMs)} | response="${inf.response}"`);
   result.phase = 'done';
   return result;
 }
@@ -475,10 +550,12 @@ async function main() {
   console.error(`  machines: ${PARALLEL} | model: ${MODEL} | max_wait: ${MAX_WAIT_S}s`);
   console.error(`  filters: reliability>=${MIN_REL} | inet_down>=${MIN_INET}Mbps | price<=$${MAX_PRICE}/hr\n`);
 
-  // Search
+  await setupSshKey();
+
   const offers = await searchOffers(PARALLEL);
   if (offers.length === 0) {
     console.error('ERROR: no offers found matching filters');
+    await terminateAll();
     process.exit(1);
   }
   const chosen = offers.slice(0, PARALLEL);
@@ -488,15 +565,14 @@ async function main() {
   }
   console.error('');
 
-  // Deploy all in parallel
   console.error(`[bench] deploying ${chosen.length} machines in parallel...`);
   const t0Global = now();
   const results = await Promise.all(chosen.map((offer, idx) => benchMachine(offer, idx)));
 
-  // Terminate
   if (!KEEP) await terminateAll();
+  else await cleanupSshKey();
 
-  // ── Report ──────────────────────────────────────────────────────────────────
+  // ── Report ───────────────────────────────────────────────────────────────────
 
   const ok = results.filter(r => r.phase === 'done');
   const failed = results.filter(r => r.phase === 'failed');
@@ -518,9 +594,7 @@ async function main() {
       (r.t2Ms != null ? fmtS(r.t2Ms) : '-').padEnd(10),
       (r.t3Ms != null ? fmtS(r.t3Ms) : '-').padEnd(10),
       (r.inferenceLatencyMs != null ? fmtS(r.inferenceLatencyMs) : '-').padEnd(8),
-      r.phase === 'done'
-        ? (r.t2Ms != null ? '✓ full' : `✓ T1-only ssh=${r.sshHost ?? '?'}:${r.sshPort ?? '?'}`)
-        : `✗ ${r.error ?? r.phase}`,
+      r.phase === 'done' ? '✓ ok' : `✗ ${r.error ?? r.phase}`,
     ].join(' ');
     console.error(row);
   }
@@ -535,15 +609,15 @@ async function main() {
     const lats = ok.filter(r => r.inferenceLatencyMs != null).map(r => r.inferenceLatencyMs!);
 
     const fmt = (arr: number[], label: string) =>
-      `  ${label.padEnd(12)} p50=${fmtS(pct(arr, 50))}  p95=${fmtS(pct(arr, 95))}  min=${fmtS(Math.min(...arr))}  max=${fmtS(Math.max(...arr))}`;
+      `  ${label.padEnd(14)} p50=${fmtS(pct(arr, 50))}  p95=${fmtS(pct(arr, 95))}  min=${fmtS(Math.min(...arr))}  max=${fmtS(Math.max(...arr))}`;
 
     console.error(fmt(t1s, 'T1 running'));
     if (t2s.length > 0) console.error(fmt(t2s, 'T2 model-ready'));
     if (t3s.length > 0) console.error(fmt(t3s, 'T3 inference'));
     if (lats.length > 0) console.error(fmt(lats, 'Inf latency'));
-    console.error(`  total wall    ${fmtS(now() - t0Global)}`);
-    console.error(`  success rate  ${ok.length}/${results.length} (${Math.round(ok.length / results.length * 100)}%)`);
-    console.error(`  avg price     $${(ok.reduce((s, r) => s + r.pricePerHr, 0) / ok.length).toFixed(3)}/hr`);
+    console.error(`  total wall      ${fmtS(now() - t0Global)}`);
+    console.error(`  success rate    ${ok.length}/${results.length} (${Math.round(ok.length / results.length * 100)}%)`);
+    console.error(`  avg price       $${(ok.reduce((s, r) => s + r.pricePerHr, 0) / ok.length).toFixed(3)}/hr`);
   }
 
   if (failed.length > 0) {
@@ -563,7 +637,7 @@ async function main() {
         gpu: r.gpu, pricePerHr: r.pricePerHr, geo: r.geo, inetDown: r.inetDown,
         t1Ms: r.t1Ms, t2Ms: r.t2Ms, t3Ms: r.t3Ms,
         inferenceLatencyMs: r.inferenceLatencyMs, inferenceResponse: r.inferenceResponse,
-        directPort: r.directPort, endpoint: r.endpoint,
+        sshHost: r.sshHost, sshPort: r.sshPort,
         phase: r.phase, error: r.error,
       })),
     };
