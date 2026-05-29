@@ -77,6 +77,11 @@ const HEDGE = Math.max(1, parseInt(flag('hedge') ?? '1', 10));
 // each slot consumes 1x supply; the surplus slots are redundancy that absorbs
 // unlucky dud streaks without doubling pool drain. The right lever for high N.
 const OVERPROVISION = Math.max(1, parseFloat(flag('overprovision') ?? '1'));
+// Absolute surplus floor: always launch at least this many slots beyond target,
+// regardless of the multiplier. Matters at small targets where 1.3x rounds to
+// only +1 — e.g. target 1 needs a real buffer of spare machines to guarantee a
+// success. numSlots = max(ceil(target * OVERPROVISION), target + MIN_EXTRA).
+const MIN_EXTRA = Math.max(0, parseInt(flag('min-extra') ?? '0', 10));
 
 // Mutable search filters. refillPool() progressively relaxes these when the pool
 // starves, so a slot can always find a fresh offer instead of giving up.
@@ -515,8 +520,8 @@ function pct(arr: number[], p: number): number {
 
 async function main() {
   console.error(`\n=== Vast.ai Parallel Deploy Bench (SLA-gated) ===`);
-  const numSlots = Math.ceil(PARALLEL * OVERPROVISION);
-  console.error(`  target: ${PARALLEL} successful | slots: ${numSlots} (overprovision ${OVERPROVISION}x) | model: ${MODEL}`);
+  const numSlots = Math.max(Math.ceil(PARALLEL * OVERPROVISION), PARALLEL + MIN_EXTRA);
+  console.error(`  target: ${PARALLEL} successful | slots: ${numSlots} (overprovision ${OVERPROVISION}x, +${numSlots - PARALLEL} surplus) | model: ${MODEL}`);
   console.error(`  SLA: boot<=${BOOT_SLA / 1000}s ready<=${READY_SLA / 1000}s infer<=${INFER_SLA / 1000}s | slot-tries: ${SLOT_TRIES} deadline: ${SLOT_DEADLINE / 1000}s hedge: ${HEDGE}`);
   console.error(`  filters: reliability>=${MIN_REL} inet_down>=${MIN_INET}Mbps price<=$${MAX_PRICE}/hr\n`);
 
