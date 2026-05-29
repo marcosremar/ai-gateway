@@ -84,7 +84,13 @@ function loadCwdEnv(): void {
 
 function getConfig(): { url: string; key: string } {
   loadCwdEnv();
-  const url = process.env.AI_GATEWAY_URL || process.env.GATEWAY_URL || DEFAULT_URL;
+  // Honor the server's configured PORT (.env) so the CLI talks to the SAME
+  // gateway the server runs on. Without this the CLI hardcoded :4000, missed a
+  // server on :9012, and spawned a duplicate gateway on :4000. Explicit
+  // AI_GATEWAY_URL / GATEWAY_URL still win.
+  const port = (process.env.PORT && /^\d+$/.test(process.env.PORT)) ? process.env.PORT : '4000';
+  const defaultUrl = port === '4000' ? DEFAULT_URL : `http://localhost:${port}`;
+  const url = process.env.AI_GATEWAY_URL || process.env.GATEWAY_URL || defaultUrl;
   // AIGW_APP_KEY is the per-app credential (preferred); the older names
   // remain accepted for back-compat with shared "operator" keys.
   // GATEWAY_API_KEYS is the multi-key format "key:name,key:name" — extract the first key.
