@@ -1406,6 +1406,45 @@ function saveBudget(b: JobBudget): void {
   } catch { /* best effort — never block a run on budget bookkeeping */ }
 }
 
+// ─── Per-job spec persistence (enables `finetune resume <jobId>`) ────────────
+// The spot-resume retry loop lives in the CLI process. If the CLI dies (laptop
+// sleep, terminal close), the loop is lost — but budget + R2 checkpoints
+// survive. Persisting the resolved spec by stable jobId lets the user re-attach
+// with `finetune resume <jobId>` and continue from the last checkpoint, budget
+// intact. Stored next to budget-<jobId>.json under ~/.babelcast/.
+function jobSpecPath(jobId: string): string {
+  const safe = jobId.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return join(process.env.HOME || '/tmp', '.babelcast', `jobspec-${safe}.json`);
+}
+function saveJobSpec(jobId: string, opts: GpuFinetuneOpts): void {
+  try {
+    const p = jobSpecPath(jobId);
+    mkdirSync(dirname(p), { recursive: true });
+    // secrets are redacted from the persisted spec — never write them to disk.
+    const { secrets: _drop, ...safe } = opts as GpuFinetuneOpts & { secrets?: unknown };
+    writeFileSync(p, JSON.stringify({ jobId, savedAt: new Date().toISOString(), spec: safe }, null, 2));
+  } catch { /* best effort — never block a run on spec bookkeeping */ }
+}
+function loadJobSpec(jobId: string): GpuFinetuneOpts | null {
+  try {
+    const p = jobSpecPath(jobId);
+    if (existsSync(p)) return (JSON.parse(readFileSync(p, 'utf-8')).spec as GpuFinetuneOpts);
+  } catch { /* fall through */ }
+  return null;
+}
+/** Most-recently-saved jobId (by file mtime), for no-arg `finetune resume`. */
+function latestJobId(): string | null {
+  try {
+    const dir = join(process.env.HOME || '/tmp', '.babelcast');
+    const files = readdirSync(dir)
+      .filter(f => f.startsWith('jobspec-') && f.endsWith('.json'))
+      .map(f => ({ f, m: statSync(join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.m - a.m);
+    if (!files.length) return null;
+    return (JSON.parse(readFileSync(join(dir, files[0].f), 'utf-8')).jobId as string) || null;
+  } catch { return null; }
+}
+
 async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   const { url, key } = getConfig();
   if (!opts.repo && !opts.path) {
@@ -2571,6 +2610,7 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
     ? Math.min(20, opts.retryOnPreempt + 1)
     : 5;
   const jobId = deriveJobId(opts);
+  saveJobSpec(jobId, opts);  // enable `finetune resume <jobId>` if the CLI dies mid-run
   let budget = loadBudget(jobId);
   if (budget.totalSpentUsd > 0 || budget.attempts > 0) {
     process.stderr.write(`${c.dim}[finetune] job '${jobId}' prior spend $${budget.totalSpentUsd.toFixed(2)} over ${budget.attempts} attempt(s)${c.reset}\n`);
@@ -5909,6 +5949,8 @@ Subcommands:
                   --no-smoke / --smoke (smoke-only) / --dry-run / --no-estimate
                   Preflight (HF reachable + token write + R2 creds + script)
                   runs before GPU spend. --skip-preflight bypass / --preflight-only diagnose
+  resume [jobId]  Re-attach a job whose CLI died (laptop sleep) — reloads saved
+                  spec, resumes from last checkpoint, budget intact. Default: most recent.
   status          Show saved instance info
   logs [-f]       Tail /workspace/.job.log
   metrics         GPU/VRAM/RAM/DISK/NET snapshot
@@ -7108,6 +7150,20 @@ Per-app isolation:
                 gradClip: getArg(args, '--grad-clip') ? parseFloat(getArg(args, '--grad-clip')!) : spec.gradClip,
                 logEverySteps: getArg(args, '--log-every-steps') ? parseInt(getArg(args, '--log-every-steps')!) : spec.logEverySteps,
               } as any);
+            } else if (sub === 'resume') {
+              // Re-attach a job whose CLI controller died (laptop sleep, closed
+              // terminal). Reloads the persisted spec by jobId (or the most
+              // recent), forces resume-from-checkpoint, re-enters the submit loop
+              // with budget intact (budget-<jobId>.json carries over).
+              const wantId = args[3] && !args[3].startsWith('-') ? args[3] : undefined;
+              const jobId = wantId || latestJobId();
+              if (!jobId) { console.error('No saved job to resume. Run a submit first, or pass <jobId>.'); process.exit(1); }
+              const saved = loadJobSpec(jobId);
+              if (!saved) { console.error(`No saved spec for job '${jobId}'. List: ls ~/.babelcast/jobspec-*.json`); process.exit(1); }
+              const budget = loadBudget(jobId);
+              console.log(`[resume] job '${jobId}' — prior spend $${budget.totalSpentUsd.toFixed(2)} over ${budget.attempts} attempt(s)`);
+              if (saved.r2Bucket) saved.resumeFromR2 = true; else saved.autoResume = true;
+              await cmdGpuFinetune(saved as any);
             } else if (sub === 'status') {
               if (hasFlag(args, '--raw')) await cmdGpuJobsStatus();
               else await cmdGpuFinetuneStatus();
@@ -7245,7 +7301,7 @@ Per-app isolation:
             } else if (sub === 'watch-web') {
               await cmdGpuFinetuneWatchWeb();
             } else {
-              console.error('Usage: ai-gateway gpu finetune <submit|status|logs|metrics|cancel|history|estimate|validate|lr-find|sweep|deploy|list-runs|plugins|watch-web>');
+              console.error('Usage: ai-gateway gpu finetune <submit|resume|status|logs|metrics|cancel|history|estimate|validate|lr-find|sweep|deploy|list-runs|plugins|watch-web>');
               process.exit(1);
             }
             break;
