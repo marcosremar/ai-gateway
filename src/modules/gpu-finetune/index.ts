@@ -51,6 +51,10 @@ export type { NumericCheckResult } from './spec.js';
 // Cost estimation
 export { estimateCost } from './cost.js';
 
+// Fail-fast preflight (live HF/R2/script checks before GPU spend)
+export { preflightChecks } from './preflight.js';
+export type { PreflightCheck, PreflightResult, PreflightStatus, PreflightDeps } from './preflight.js';
+
 // Status / probe
 export { parseProbeOutput, detectStage, buildStatusResult, buildProbeCommand } from './status.js';
 export type { ProbeOutput } from './status.js';
@@ -76,6 +80,7 @@ export {
   InMemoryFinetuneState,
   FileFinetuneState,
   EnvHfTokenResolver,
+  resolveR2Creds,
 } from './run.js';
 export type {
   FinetuneStateStore,
@@ -86,4 +91,5 @@ export type {
   FinetuneProbe,
   ResolvedFinetune,
   GatewayLogger,
+  R2Creds,
 } from './run.js';
