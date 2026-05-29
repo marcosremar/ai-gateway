@@ -131,11 +131,21 @@ export function detectOrphanDeployOnBoot(): void {
     const ageMs = data.savedAt ? Date.now() - data.savedAt : 0;
     const inFlight = status === 'booting' || status === 'installing' || status === 'creating';
     const veryOld = ageMs > 30 * 60 * 1000; // 30 min
+    // KEEP recent in-flight records that name a real pod: the previous ws-server
+    // may have restarted while a deploy was still alive on the provider. Deleting
+    // the record here orphaned that running pod (it survives on the provider but
+    // the gateway forgot it). Leave it so tryRecoverActiveDeploy + the provider
+    // scan can re-adopt it on boot. Only clear records that are stale or nameless.
+    const hasPod = !!(data.podId && data.podId.length > 0);
+    if (inFlight && hasPod && !veryOld) {
+      log.warn(`[startup] in-flight deploy in active_deploy.json (provider=${data.provider || '?'} podId=${data.podId} status=${status} age=${Math.round(ageMs / 1000)}s) — KEEPING for re-adoption (recovery will probe + reconnect)`);
+      return;
+    }
     if (inFlight || veryOld) {
       log.warn('='.repeat(70));
       log.warn(`[startup] Orphan deploy detected in active_deploy.json`);
       log.warn(`  provider=${data.provider || '?'} podId=${data.podId || '?'} status=${status || '?'} age=${Math.round(ageMs / 1000)}s`);
-      log.warn(`  Previous ws-server likely died mid-deploy. Clearing local state.`);
+      log.warn(`  Stale/nameless record — clearing local state.`);
       log.warn(`  Run 'ai-gateway gpu list' to check for orphan pods and terminate manually.`);
       log.warn('='.repeat(70));
       try { unlinkSync(ACTIVE_DEPLOY_FILE); } catch {}
