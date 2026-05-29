@@ -48,6 +48,10 @@ export interface ProvisionConfig {
   backupCheckSecs?: number;
   /** Prefix de onde restaurar /workspace ao subir (migrar de pod morto / resume de run) */
   restoreFrom?: string;
+  /** Dev CLIs a instalar no pod (csv: "claude,opencode" | "all"). Opt-in. */
+  devClis?: string;
+  /** ANTHROPIC_API_KEY p/ Claude Code headless no pod (só passado se devClis inclui claude). */
+  anthropicApiKey?: string;
   /** Path do log da app pra fazer tail no heartbeat */
   appLogFile?: string;
   /** Credenciais R2/B2/S3 — passadas via env do install.sh */
@@ -140,6 +144,13 @@ function buildEnvFile(cfg: ProvisionConfig): string {
   if (cfg.gatewayToken) lines.push(`AIGW_TOKEN=${cfg.gatewayToken}`);
   if (cfg.appLogFile) lines.push(`AIGW_LOG_FILE=${cfg.appLogFile}`);
   if (cfg.restoreFrom) lines.push(`WORKSPACE_RESTORE_FROM=${cfg.restoreFrom}`);
+  if (cfg.devClis) {
+    lines.push(`AIGW_DEV_CLIS=${cfg.devClis}`);
+    // Only ship the Anthropic key when Claude Code is actually requested.
+    if (cfg.anthropicApiKey && /(^|,)(claude|all|1)(,|$)/.test(cfg.devClis)) {
+      lines.push(`ANTHROPIC_API_KEY=${cfg.anthropicApiKey}`);
+    }
+  }
   if (cfg.s3) {
     lines.push(`B2_ACCOUNT_ID=${cfg.s3.accountId}`);
     lines.push(`B2_APPLICATION_KEY=${cfg.s3.applicationKey}`);
@@ -179,13 +190,14 @@ export async function provisionPod(cfg: ProvisionConfig): Promise<ProvisionResul
   }
 
   // 1. Lê assets locais
-  let backup: string, restore: string, agent: string, install: string;
+  let backup: string, restore: string, agent: string, install: string, devcli: string;
   try {
-    [backup, restore, agent, install] = await Promise.all([
+    [backup, restore, agent, install, devcli] = await Promise.all([
       readFile(join(AGENT_DIR, 'backup_workspace.sh'), 'utf8'),
       readFile(join(AGENT_DIR, 'restore_workspace.sh'), 'utf8'),
       readFile(join(AGENT_DIR, 'aigw_agent.py'), 'utf8'),
       readFile(join(AGENT_DIR, 'install.sh'), 'utf8'),
+      readFile(join(AGENT_DIR, 'install_dev_clis.sh'), 'utf8'),
     ]);
   } catch (e) {
     return { ok: false, durationMs: Date.now() - start, error: `Failed to read local agent assets: ${e}` };
@@ -197,6 +209,7 @@ export async function provisionPod(cfg: ProvisionConfig): Promise<ProvisionResul
     writeRemoteFile(sshHost, sshPort, restore, '/usr/local/bin/aigw-restore', '0755'),
     writeRemoteFile(sshHost, sshPort, agent, '/usr/local/bin/aigw-agent', '0755'),
     writeRemoteFile(sshHost, sshPort, install, '/usr/local/bin/aigw-install', '0755'),
+    writeRemoteFile(sshHost, sshPort, devcli, '/usr/local/bin/aigw-devcli', '0755'),
     writeRemoteFile(sshHost, sshPort, buildEnvFile(cfg), '/etc/aigw-agent.env', '0600'),
   ];
   const writeResults = await Promise.all(writes);

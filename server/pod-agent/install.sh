@@ -105,4 +105,15 @@ else
     echo "[install] AIGW_URL not set — heartbeat agent skipped"
 fi
 
+# ── 6. dev CLIs (Claude Code / OpenCode) — opt-in, non-fatal ─────────────────
+# Lets you SSH into the pod and run agentic coding on the box. Off unless the
+# gateway set AIGW_DEV_CLIS. Runs in background so it never delays the job.
+if [ -n "${AIGW_DEV_CLIS:-}" ] && [ -x /usr/local/bin/aigw-devcli ]; then
+    echo "[install] installing dev CLIs (AIGW_DEV_CLIS=$AIGW_DEV_CLIS) in background"
+    nohup bash /usr/local/bin/aigw-devcli >> /var/log/aigw-agent/devcli.log 2>&1 &
+    echo "[install] dev CLI install launched (log: /var/log/aigw-agent/devcli.log)"
+else
+    echo "[install] AIGW_DEV_CLIS unset — dev CLIs skipped"
+fi
+
 echo "[install] aigw-agent install complete"

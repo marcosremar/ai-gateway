@@ -361,8 +361,12 @@ def train(cfg: FinetuneConfig, resume_from: str | None = None) -> None:
     if cfg.bf16 and device.type == "cuda":
         model = model.to(torch.bfloat16)
 
+    # Full-state resume: weights load here; optimizer/scheduler/step/epoch/RNG
+    # are captured into `resume_state` and applied AFTER optim/sched are built.
+    resume_state = None
     if resume_from:
         # Auto-discover latest step-*.safetensors if a directory was given
+        resume_dir = resume_from if os.path.isdir(resume_from) else os.path.dirname(resume_from)
         if os.path.isdir(resume_from):
             import glob
             cands = sorted(glob.glob(os.path.join(resume_from, "step-*.safetensors")),
@@ -379,6 +383,14 @@ def train(cfg: FinetuneConfig, resume_from: str | None = None) -> None:
         sd = load_file(resume_from)
         missing, unexpected = model.load_state_dict(sd, strict=False)
         print(f"  loaded (missing={len(missing)} unexpected={len(unexpected)})")
+        # Companion training state (optimizer/sched/step/epoch/RNG) for seamless
+        # spot-resume. Absent on pre-existing weight-only checkpoints → we still
+        # resume the weights, just with a fresh optimizer (graceful degrade).
+        resume_state = _load_train_state(os.path.join(resume_dir, "train_state.pt"))
+        if resume_state is not None:
+            print(f"  + train_state.pt found: step={resume_state.get('step')} epoch={resume_state.get('epoch')}")
+        else:
+            print(f"  ! no train_state.pt — fresh optimizer (weights-only resume)")
 
     freeze_layers(model, cfg.freeze_backbone_layers, only_flow_net=cfg.only_flow_net)
 
@@ -445,6 +457,48 @@ def train(cfg: FinetuneConfig, resume_from: str | None = None) -> None:
     plateau_best_step = 0
     plateau_stop = False
 
+    # ── Full-state resume (spot-resume) ──────────────────────────────────────
+    # Apply optimizer/scheduler/step/epoch/RNG captured at resume time, now that
+    # optim+sched exist. Weights were already loaded above. Graceful degrade: any
+    # failure → fresh optimizer from step 0 (weights still resumed).
+    start_epoch = 0
+    if resume_state is not None:
+        try:
+            optim.load_state_dict(resume_state["optim"])
+            for st in optim.state.values():  # saved on CPU → move to train device
+                for k, v in st.items():
+                    if torch.is_tensor(v):
+                        st[k] = v.to(device)
+            if resume_state.get("sched") is not None:
+                sched.load_state_dict(resume_state["sched"])
+            step = int(resume_state.get("step", 0))
+            start_epoch = int(resume_state.get("epoch", 0))
+            rewind_lr_factor = float(resume_state.get("rewind_lr_factor", 1.0))
+            plateau_best_loss = float(resume_state.get("plateau_best_loss", float("inf")))
+            plateau_best_step = int(resume_state.get("plateau_best_step", 0))
+            recent_losses = list(resume_state.get("recent_losses", []))
+            last_good_step = int(resume_state.get("last_good_step", 0))
+            if resume_state.get("rng_python") is not None:
+                rng.setstate(resume_state["rng_python"])
+            if resume_state.get("rng_torch") is not None:
+                torch.set_rng_state(resume_state["rng_torch"])
+            if resume_state.get("rng_cuda") is not None and torch.cuda.is_available():
+                try:
+                    torch.cuda.set_rng_state_all(resume_state["rng_cuda"])
+                except Exception as _e:
+                    print(f"  ! cuda RNG restore skipped: {_e}")
+            print(f"[train] ✓ resumed optimizer+sched @ step={step} epoch={start_epoch} lr_factor={rewind_lr_factor}")
+        except Exception as e:
+            print(f"[train] WARN: train_state restore failed ({e}); fresh optimizer from step 0")
+            step = 0
+            start_epoch = 0
+
+    def _state_for_save(ep_now):
+        return dict(optim=optim, sched=sched, step=step, epoch=ep_now, rng=rng,
+                    rewind_lr_factor=rewind_lr_factor,
+                    plateau_best_loss=plateau_best_loss, plateau_best_step=plateau_best_step,
+                    recent_losses=recent_losses, last_good_step=last_good_step)
+
     def snapshot_good():
         nonlocal last_good_state, last_good_step
         last_good_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -478,7 +532,7 @@ def train(cfg: FinetuneConfig, resume_from: str | None = None) -> None:
             return (train_rows[i] for i in idxs)
         return iter(train_rows)
 
-    for ep in range(cfg.epochs):
+    for ep in range(start_epoch, cfg.epochs):
         if cfg.curriculum != "linear":
             rng.shuffle(train_rows)
         for r in sample_iter():
@@ -529,17 +583,49 @@ def train(cfg: FinetuneConfig, resume_from: str | None = None) -> None:
                     loss_running = 0.0
 
                 if cfg.save_every_steps and step % cfg.save_every_steps == 0:
-                    _save(model, cfg, step)
+                    _save(model, cfg, step, state=_state_for_save(ep))
 
                 if plateau_stop:
                     break
         if plateau_stop:
             break
 
-    _save(model, cfg, step, final=True)
+    _save(model, cfg, step, final=True, state=_state_for_save(cfg.epochs))
 
 
-def _save(model, cfg: FinetuneConfig, step: int, final: bool = False) -> None:
+def _save_train_state(path, optim, sched, step, epoch, rng=None, **extra) -> None:
+    """Persist full training state for seamless spot-resume (optimizer momentum,
+    LR scheduler position, global step, epoch, and RNG). Written atomically via a
+    .tmp + os.replace so a pod death mid-write never leaves a corrupt state file.
+    """
+    state = {
+        "step": int(step),
+        "epoch": int(epoch),
+        "optim": optim.state_dict(),
+        "sched": sched.state_dict() if sched is not None else None,
+        "rng_python": rng.getstate() if rng is not None else None,
+        "rng_torch": torch.get_rng_state(),
+        "rng_cuda": (torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None),
+    }
+    state.update(extra)
+    tmp = path + ".tmp"
+    torch.save(state, tmp)
+    os.replace(tmp, path)
+
+
+def _load_train_state(path):
+    """Load companion train_state.pt. Returns None if absent/corrupt (caller then
+    does a weights-only resume with a fresh optimizer)."""
+    if not os.path.exists(path):
+        return None
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as e:
+        print(f"[train] WARN: failed to read {path}: {e}")
+        return None
+
+
+def _save(model, cfg: FinetuneConfig, step: int, final: bool = False, state: dict | None = None) -> None:
     import safetensors.torch
     name = "model.safetensors" if final else f"step-{step}.safetensors"
     path = os.path.join(cfg.output_dir, name)
@@ -548,6 +634,14 @@ def _save(model, cfg: FinetuneConfig, step: int, final: bool = False) -> None:
     if not os.path.exists(cfg_path):
         with open(cfg_path, "w") as f:
             json.dump(asdict(cfg), f, indent=2, default=str)
+    # Companion full training state (always points at the LATEST save) so a
+    # restarted spot pod resumes the optimizer/scheduler/step, not just weights.
+    if state is not None:
+        sp = os.path.join(cfg.output_dir, "train_state.pt")
+        try:
+            _save_train_state(sp, **state)
+        except Exception as e:
+            print(f"[save] WARN train_state failed (non-fatal): {e}")
     print(f"[save] step={step} → {path}")
 
     # Live HF push: if IARATTS_HF_PUSH_REPO env is set, upload this ckpt

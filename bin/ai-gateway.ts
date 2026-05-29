@@ -923,6 +923,15 @@ import type {
   FinetuneProbe,
   FinetuneOpts,
 } from '../src/modules/gpu-finetune';
+import {
+  isEvictionError,
+  attemptSpendUsd,
+  addAttempt,
+  emptyBudget,
+  decideRetry,
+  deriveJobId,
+  type JobBudget,
+} from '../src/modules/gpu-finetune/spot-resume';
 
 async function cmdGpuList(opts: { probe?: boolean; json?: boolean; mine?: boolean; label?: string } = {}) {
   const { url, key } = getConfig();
@@ -1369,6 +1378,29 @@ function loadJobState(): Record<string, unknown> | null {
     if (!existsSync(p)) return null;
     return JSON.parse(readFileSync(p, 'utf-8'));
   } catch { return null; }
+}
+
+// ── Cumulative job budget (spot-resume) ──────────────────────────────────────
+// Spend is tracked per logical job (keyed by stable R2 prefix) so it survives
+// pod restarts AND fresh CLI invocations — per-pod accounting would reset to $0
+// on every preemption and let a flapping job blow the budget.
+function jobBudgetPath(jobId: string): string {
+  const safe = jobId.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return join(process.env.HOME || '/tmp', '.babelcast', `budget-${safe}.json`);
+}
+function loadBudget(jobId: string): JobBudget {
+  try {
+    const p = jobBudgetPath(jobId);
+    if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf-8')) as JobBudget;
+  } catch { /* fall through to empty */ }
+  return emptyBudget(jobId, new Date().toISOString());
+}
+function saveBudget(b: JobBudget): void {
+  try {
+    const p = jobBudgetPath(b.jobId);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify(b, null, 2));
+  } catch { /* best effort — never block a run on budget bookkeeping */ }
 }
 
 async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
@@ -2046,6 +2078,9 @@ interface GpuFinetuneOpts {
   autoResume?: boolean;
   preferSpot?: boolean;
   reuse?: boolean;
+  r2Bucket?: string;            // R2/S3 bucket for durable dataset+ckpt storage (spot-resume)
+  r2Prefix?: string;            // stable prefix/folder (default jobs/<project|type>) — ties data to the run
+  resumeFromR2?: boolean;       // on (re)start, restore /workspace/checkpoints from R2 and --resume
   extraTrainArgs?: string;
   extraDeps?: string;           // extra pip packages
   aptPkgs?: string;             // extra apt-get packages
@@ -2457,25 +2492,65 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
     console.warn(`${c.yellow}⚠ smoke mode forces epochs=3 (your epochs=${opts.epochs} ignored).${c.reset}`);
   }
 
-  // Auto-resubmit: vast.ai instances evict randomly. Retry up to 5 times total.
-  // HF checkpoint push/resume means each restart picks up from the last saved step.
-  const maxAttempts = 5;
+  // Auto-resubmit (spot-resume controller): vast.ai spot pods evict randomly.
+  // On a transient pod death we redeploy and resume from the last checkpoint —
+  // from R2 when r2Bucket is set (durable, full optimizer state), else HF.
+  // Budget is accumulated ACROSS restarts (spot-resume.ts) so a flapping job
+  // can't blow past maxSpend; non-eviction errors stop immediately.
+  const maxAttempts = opts.retryOnPreempt && opts.retryOnPreempt > 0
+    ? Math.min(20, opts.retryOnPreempt + 1)
+    : 5;
+  const jobId = deriveJobId(opts);
+  let budget = loadBudget(jobId);
+  if (budget.totalSpentUsd > 0 || budget.attempts > 0) {
+    process.stderr.write(`${c.dim}[finetune] job '${jobId}' prior spend $${budget.totalSpentUsd.toFixed(2)} over ${budget.attempts} attempt(s)${c.reset}\n`);
+  }
+  const maxSpend = typeof opts.maxSpend === 'number' ? opts.maxSpend : 0;
   let lastErr: unknown;
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) {
+      // Force R2 resume on restarts so the fresh pod continues from the last
+      // checkpoint even if the first attempt started clean.
+      if (opts.r2Bucket) (opts as FinetuneOpts).resumeFromR2 = true;
+      else (opts as FinetuneOpts).autoResume = true;
+      const via = opts.r2Bucket ? `R2 (${jobId})` : 'HF';
+      process.stderr.write(`\n${c.yellow}[finetune] auto-resubmit ${attempt}/${maxAttempts} — resuming from ${via} checkpoint (spent $${budget.totalSpentUsd.toFixed(2)}${maxSpend > 0 ? `/$${maxSpend.toFixed(2)}` : ''})${c.reset}\n`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);
+    }
+    const attemptStart = new Date().toISOString();
     try {
-      if (attempt > 1) {
-        process.stderr.write(`\n${c.yellow}[finetune] auto-resubmit attempt ${attempt}/${maxAttempts} (instance died — resuming from HF checkpoint)${c.reset}\n`);
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);
-      }
       const result = await gateway.run(opts as FinetuneOpts);
-      console.log(`[finetune] submitted — instanceId=${result.instanceId || '(see job state)'}  gpu=${result.gpuType}  $${result.pricePerHr}/h`);
+      const spend = attemptSpendUsd({
+        pricePerHr: result.pricePerHr || 0,
+        startedAt: result.startedAt || attemptStart,
+        endedAt: new Date().toISOString(),
+      });
+      budget = addAttempt(budget, spend, new Date().toISOString());
+      saveBudget(budget);
+      console.log(`[finetune] submitted — instanceId=${result.instanceId || '(see job state)'}  gpu=${result.gpuType}  $${result.pricePerHr}/h  cumSpend=$${budget.totalSpentUsd.toFixed(2)}`);
       return;
     } catch (err) {
       lastErr = err;
       const msg = String(err instanceof Error ? err.message : err);
-      const isEviction = msg.includes('exit code: 255') || msg.includes('SSH proxy') || msg.includes('rsync upload failed') || msg.includes('Connection refused') || msg.includes('boot timed out');
-      if (!isEviction || attempt === maxAttempts) throw err;
-      process.stderr.write(`  [finetune] attempt ${attempt} failed: ${msg}\n`);
+      // Account this attempt's spend from persisted job state (pricePerHr/startedAt).
+      const s = loadJobState();
+      const spend = attemptSpendUsd({
+        pricePerHr: (s?.pricePerHr as number) || 0,
+        startedAt: (s?.startedAt as string) || attemptStart,
+        endedAt: new Date().toISOString(),
+      });
+      budget = addAttempt(budget, spend, new Date().toISOString());
+      saveBudget(budget);
+      const decision = decideRetry({
+        isEviction: isEvictionError(msg),
+        attempt,
+        maxAttempts,
+        totalSpentUsd: budget.totalSpentUsd,
+        maxSpend,
+      });
+      process.stderr.write(`  [finetune] attempt ${attempt} failed: ${msg}\n  → ${decision.reason}\n`);
+      if (!decision.retry) throw err;
     }
   }
   throw lastErr;
