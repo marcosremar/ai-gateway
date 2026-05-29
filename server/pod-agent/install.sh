@@ -10,7 +10,11 @@
 # Variáveis injetadas no /etc/aigw-agent.env pelo provisioner:
 #   AIGW_URL, AIGW_POD_ID, AIGW_TOKEN, AIGW_INTERVAL
 #   B2_ACCOUNT_ID, B2_APPLICATION_KEY, B2_BUCKET, B2_ENDPOINT, B2_REGION, B2_PREFIX
-#   BACKUP_INTERVAL_HOURS (default 24)
+#     (STORAGE_* são aliases aceitos — ver backup_workspace.sh)
+#   WORKSPACE_RESTORE_FROM (prefix de onde restaurar — migrar de pod morto)
+#   BACKUP_INTERVAL_HOURS (default 6 — teto de fallback; backup real é por checkpoint)
+#   BACKUP_CHECK_SECS (default 120 — frequência de checagem do dir de ckpt)
+#   BACKUP_WATCH_DIR (default /workspace/checkpoints)
 
 set -e
 
@@ -44,8 +48,14 @@ chmod +x /usr/local/bin/aigw-backup /usr/local/bin/aigw-restore /usr/local/bin/a
 echo "[install] running initial restore (no-op se /workspace tem dados)"
 /usr/local/bin/aigw-restore || echo "[install] restore skipped/failed (continuing)"
 
-# ── 4. backup loop em background ─────────────────────────────────────────────
-INTERVAL_H="${BACKUP_INTERVAL_HOURS:-24}"
+# ── 4. backup loop em background (checkpoint-driven) ─────────────────────────
+# Em vez de backup por tempo fixo (perdia até 24h de ckpt num crash), observamos
+# o dir de checkpoints: assim que um novo step-*.safetensors aparece (mtime/size
+# muda), dispara backup. INTERVAL_H vira só um teto de segurança (fallback).
+INTERVAL_H="${BACKUP_INTERVAL_HOURS:-6}"
+CHECK_SECS="${BACKUP_CHECK_SECS:-120}"
+WATCH_DIR="${BACKUP_WATCH_DIR:-/workspace/checkpoints}"
+MAX_GAP=$(( INTERVAL_H * 3600 ))
 BACKUP_PIDFILE="/var/run/aigw-backup-loop.pid"
 
 # Mata loop antigo se existir (idempotência)
@@ -55,14 +65,28 @@ if [ -f "$BACKUP_PIDFILE" ] && kill -0 "$(cat "$BACKUP_PIDFILE")" 2>/dev/null; t
 fi
 
 nohup bash -c "
-    sleep 300  # bootstrap delay
+    sleep 60  # bootstrap delay
+    last_sig=''
+    last_backup=0
     while true; do
-        /usr/local/bin/aigw-backup || true
-        sleep $((INTERVAL_H * 3600))
+        now=\$(date +%s)
+        # Assinatura barata do dir de ckpt: lista mtime+size+path -> hash.
+        sig=''
+        if [ -d '$WATCH_DIR' ]; then
+            sig=\$(find '$WATCH_DIR' -type f -printf '%T@ %s %p\n' 2>/dev/null | sort | md5sum | cut -d' ' -f1)
+        fi
+        elapsed=\$(( now - last_backup ))
+        if [ \"\$sig\" != \"\$last_sig\" ] || [ \$elapsed -ge $MAX_GAP ]; then
+            if /usr/local/bin/aigw-backup; then
+                last_sig=\"\$sig\"
+                last_backup=\$now
+            fi
+        fi
+        sleep $CHECK_SECS
     done
 " >> /var/log/aigw-agent/backup-loop.log 2>&1 &
 echo $! > "$BACKUP_PIDFILE"
-echo "[install] backup loop started pid=$(cat "$BACKUP_PIDFILE") interval=${INTERVAL_H}h"
+echo "[install] backup loop started pid=$(cat "$BACKUP_PIDFILE") (checkpoint-driven, check=${CHECK_SECS}s, max_gap=${INTERVAL_H}h, watch=${WATCH_DIR})"
 
 # ── 5. heartbeat agent em background ─────────────────────────────────────────
 AGENT_PIDFILE="/var/run/aigw-agent.pid"
