@@ -787,7 +787,7 @@ async function cmdAppDispatch(sub: string, args: string[]): Promise<void> {
 async function cmdGpuDeploy(opts: {
   image?: string; gpuTypes?: string; onstart?: string; storageGb?: number;
   env?: string; numGpus?: number; devMode?: boolean; readinessProbe?: string;
-  label?: string; strictFastBoot?: boolean; allowUnverified?: boolean;
+  label?: string; strictFastBoot?: boolean; searchMode?: string; allowUnverified?: boolean;
   provider?: string;
 }) {
   const { url, key } = getConfig();
@@ -812,6 +812,14 @@ async function cmdGpuDeploy(opts: {
     body.label = opts.label.includes('/') ? opts.label : `${owner}/${opts.label}`;
   }
   if (opts.strictFastBoot === false) body.strictFastBoot = false;
+  if (opts.searchMode !== undefined) {
+    const mode = opts.searchMode.trim().toLowerCase();
+    if (mode !== 'high_quality' && mode !== 'full') {
+      console.error('Error: --search-mode must be one of: high_quality, full');
+      process.exit(2);
+    }
+    body.searchMode = mode;
+  }
   if (opts.allowUnverified === true) body.allowUnverified = true;
   if (!opts.label && !process.env.AIGW_LABEL_OPTIONAL) {
     console.error('Error: --label is required. Pass --label "<task-name>" describing what this GPU is for.');
@@ -1321,6 +1329,39 @@ function saveJobState(state: Record<string, unknown>): void {
     console.error(`  ⚠ could not save job state: ${(e as Error).message}`);
   }
 }
+
+// ── Adaptive boot timeout ───────────────────────────────────────────────────
+// A fixed 10-min boot timeout wastes ~10 min on a dud host before retrying.
+// Instead, learn the typical boot time per (provider,gpu) and abandon a host
+// that runs >20% over the recent median — then auto-resubmit picks a fresh one.
+// Keeps a rolling window of recent successful boot durations on disk.
+function bootStatsPath(): string {
+  return join(process.env.HOME || '/tmp', '.babelcast', 'boot_stats.json');
+}
+function readBootStats(): Record<string, number[]> {
+  try { return JSON.parse(require('fs').readFileSync(bootStatsPath(), 'utf-8')); }
+  catch { return {}; }
+}
+function recordBootTime(key: string, sec: number): void {
+  try {
+    const stats = readBootStats();
+    const arr = stats[key] ?? [];
+    arr.push(Math.round(sec));
+    stats[key] = arr.slice(-20); // rolling window of last 20 boots
+    const p = bootStatsPath();
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify(stats));
+  } catch { /* best effort — never block deploy on stats */ }
+}
+// Returns adaptive boot timeout in MINUTES, or the fallback when there is not
+// enough history yet. median(recent)*1.2, clamped to [floorMin, fallbackMin].
+function adaptiveBootTimeoutMin(key: string, fallbackMin: number, floorMin = 3): number {
+  const arr = (readBootStats()[key] ?? []).slice().sort((a, b) => a - b);
+  if (arr.length < 3) return fallbackMin; // not enough data — stay conservative
+  const median = arr[Math.floor(arr.length / 2)];
+  const adaptiveMin = (median * 1.2) / 60;
+  return Math.max(floorMin, Math.min(fallbackMin, Math.ceil(adaptiveMin)));
+}
 function loadJobState(): Record<string, unknown> | null {
   try {
     const p = jobStatePath();
@@ -1496,9 +1537,12 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   if (!info) {
     // bootTimeoutMin caps how long we wait for provisioning. Shorter than timeoutMin so
     // slow/dead instances are abandoned fast and auto-resubmit picks a new one.
-    const bootTimeoutMin = opts.bootTimeoutMin ?? timeoutMin;
-    console.log(`${c.cyan}[3/6]${c.reset} Waiting for instance ready (timeout=${bootTimeoutMin}min)...`);
-    const deadline = Date.now() + bootTimeoutMin * 60_000;
+    const bootKey = `${pick.provider}:${pickName}`;
+    const bootTimeoutMin = opts.bootTimeoutMin ?? adaptiveBootTimeoutMin(bootKey, timeoutMin);
+    const adaptiveNote = opts.bootTimeoutMin ? '' : (adaptiveBootTimeoutMin(bootKey, timeoutMin) < timeoutMin ? ' (adaptive: median×1.2)' : '');
+    console.log(`${c.cyan}[3/6]${c.reset} Waiting for instance ready (timeout=${bootTimeoutMin}min${adaptiveNote})...`);
+    const bootStart = Date.now();
+    const deadline = bootStart + bootTimeoutMin * 60_000;
   while (Date.now() < deadline) {
     const stRes = await fetch(`${url}/v1/gpu/status`, { headers: headers(key) });
     if (stRes.ok) {
@@ -1511,7 +1555,9 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
         String(stDeployId).includes(deployId.replace('deploy-', ''));
       if ((phase === 'ready' || st.gpuHealthy === true || st.sshHost) && deployIdMatches) {
         info = st;
-        console.log(`  ready: ${st.sshHost || 'n/a'}:${st.sshPort || 'n/a'} (${phase})`);
+        const bootSec = (Date.now() - bootStart) / 1000;
+        recordBootTime(bootKey, bootSec); // feed the adaptive timeout for next runs
+        console.log(`  ready: ${st.sshHost || 'n/a'}:${st.sshPort || 'n/a'} (${phase}) in ${bootSec.toFixed(0)}s`);
         break;
       }
       process.stdout.write(`\r  ${phase}...                    `);
@@ -5595,6 +5641,7 @@ Subcommands:
     --image <docker-image>       Docker image (e.g. marcosremar/babelcast-subtitle:latest)
     --gpu-types <types>          Comma-separated GPU types
                                  (e.g. "NVIDIA GeForce RTX 4090,NVIDIA RTX A6000")
+    --search-mode <high_quality|full>  Vast offer search profile (default: high_quality)
     --provider <name>            Restrict to one provider (vast, runpod, modal,
                                  hyperstack, tensordock). Skips tier cascade race.
   stop                         Stop (pause) the current GPU instance
@@ -6569,6 +6616,7 @@ Per-app isolation:
             label: getArg(args, '--label'),
             // --no-strict-fast-boot opts OUT of the strict filter (default ON)
             strictFastBoot: hasFlag(args, '--no-strict-fast-boot') ? false : undefined,
+            searchMode: getArg(args, '--search-mode'),
             // --allow-unverified opts INTO Vast deverified/unverified rentable hosts
             // (only path when no verified offer is rentable for the requested GPU)
             allowUnverified: hasFlag(args, '--allow-unverified') ? true : undefined,
@@ -6809,7 +6857,10 @@ Per-app isolation:
                 maxSpend: getArg(args, '--max-spend') ? parseFloat(getArg(args, '--max-spend')!) : spec.maxSpend,
                 output: getArg(args, '--output') || spec.output,
                 pushToHf: getArg(args, '--push-to-hf') || spec.pushToHf,
-                autoResume: hasFlag(args, '--auto-resume') || spec.autoResume === true,
+                // Crash-survivable by default: resume from last checkpoint unless
+                // explicitly disabled (--no-resume / spec autoResume:false). Losing
+                // progress is worse than a redundant resume check on a fresh run.
+                autoResume: hasFlag(args, '--no-resume') ? false : (spec.autoResume !== false),
                 preferSpot: hasFlag(args, '--no-spot') ? false : (hasFlag(args, '--prefer-spot') || (spec.preferSpot !== false && spec.preferSpot !== 'false')),
                 reuse: hasFlag(args, '--reuse') || spec.reuse === true,
                 extraTrainArgs: getArg(args, '--extra-args') || spec.extraTrainArgs,
@@ -6819,7 +6870,10 @@ Per-app isolation:
                 smoke: hasFlag(args, '--smoke') || spec.smoke === true,
                 skipSmoke: hasFlag(args, '--no-smoke') || spec.skipSmoke === true,
                 persistCache: hasFlag(args, '--persist-cache') || spec.persistCache === true,
-                retryOnPreempt: getArg(args, '--retry-on-preempt') ? parseInt(getArg(args, '--retry-on-preempt')!) : spec.retryOnPreempt,
+                // Default to 3 spot-preemption retries (each re-deploys + resumes
+                // from latest checkpoint). The count IS the crash-loop guard — set
+                // 0 to disable. Capped at 10 by validateSpec.
+                retryOnPreempt: getArg(args, '--retry-on-preempt') ? parseInt(getArg(args, '--retry-on-preempt')!) : (spec.retryOnPreempt ?? 3),
                 incremental: hasFlag(args, '--incremental') || spec.incremental === true,
                 autoFix: hasFlag(args, '--auto-fix') || spec.autoFix === true,
                 plugin: getArg(args, '--plugin') || spec.plugin,
