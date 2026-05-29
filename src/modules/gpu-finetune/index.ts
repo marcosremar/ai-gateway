@@ -42,7 +42,7 @@ export { BUNDLED_PLUGINS } from './types.js';
 // Spec validation + project loading
 export {
   validateSpec,
-  loadPreset, listPresets, setPresetsRoot,
+  loadPreset, listPresets, setPresetsRoot, lintPresetManifest,
   loadProject, listProjects, setProjectsRoot, resolveProjectOpts,
   runNumericChecks,
 } from './spec.js';
@@ -54,6 +54,10 @@ export { estimateCost } from './cost.js';
 // Fail-fast preflight (live HF/R2/script checks before GPU spend)
 export { preflightChecks } from './preflight.js';
 export type { PreflightCheck, PreflightResult, PreflightStatus, PreflightDeps } from './preflight.js';
+
+// Preset scaffolding (generate a new preset skeleton)
+export { scaffoldPreset, STD_PATHS } from './scaffold.js';
+export type { ScaffoldFile, ScaffoldOpts, ScaffoldType } from './scaffold.js';
 
 // Status / probe
 export { parseProbeOutput, detectStage, buildStatusResult, buildProbeCommand } from './status.js';
