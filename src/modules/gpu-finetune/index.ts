@@ -50,6 +50,7 @@ export type { NumericCheckResult } from './spec.js';
 
 // Cost estimation
 export { estimateCost } from './cost.js';
+export type { EstimateCtx } from './cost.js';
 
 // GPU specs + workload model (VRAM feasibility + throughput scaling)
 export { GPU_SPECS, BASELINE_GPU, lookupGpuSpec, gpuVramGb, relSpeed } from './gpu-specs.js';

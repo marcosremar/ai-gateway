@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import {
   validateSpec,
   estimateCost,
+  lookupGpuSpec,
   parseProbeOutput,
   detectStage,
   buildStatusResult,
@@ -115,6 +116,34 @@ describe('estimateCost', () => {
     const e1 = estimateCost({ epochs: 1, maxSamples: 50, sampleCount: 1000 });
     const e2 = estimateCost({ epochs: 1, sampleCount: 1000 });
     expect(e1.encodeMin).toBeLessThan(e2.encodeMin);
+  });
+
+  // GPU/model/task-aware context (Phase 5) — backward-compatible 4th arg.
+  it('a faster GPU lowers train time (and cost) vs the 4090 baseline', () => {
+    const opts = { epochs: 2, sampleCount: 1000 };
+    const on4090 = estimateCost(opts, 1000, 0.3, { gpuSpec: lookupGpuSpec('4090') });
+    const onH100 = estimateCost(opts, 1000, 0.3, { gpuSpec: lookupGpuSpec('H100') });
+    expect(onH100.trainMin).toBeLessThan(on4090.trainMin);
+  });
+
+  it('encode scales with host CPU cores, not GPU', () => {
+    const few = estimateCost({ epochs: 1, sampleCount: 1000 }, 1000, 0.3, { cpuCores: 4 });
+    const many = estimateCost({ epochs: 1, sampleCount: 1000 }, 1000, 0.3, { cpuCores: 32 });
+    expect(many.encodeMin).toBeLessThan(few.encodeMin);
+  });
+
+  it('spot adds expected-eviction overhead to cost (lower reliability = more)', () => {
+    const onDemand = estimateCost({ epochs: 2 }, 1000, 0.3, {});
+    const spotGood = estimateCost({ epochs: 2 }, 1000, 0.3, { spot: true, reliability: 0.98 });
+    const spotBad = estimateCost({ epochs: 2 }, 1000, 0.3, { spot: true, reliability: 0.6 });
+    expect(spotGood.totalUsd).toBeGreaterThan(onDemand.totalUsd);
+    expect(spotBad.totalUsd).toBeGreaterThan(spotGood.totalUsd);
+  });
+
+  it('default call (no ctx) is unchanged', () => {
+    const a = estimateCost({ epochs: 4, numGpus: 1 });
+    const b = estimateCost({ epochs: 4, numGpus: 1 }, undefined, 0.3, {});
+    expect(a.totalUsd).toBeCloseTo(b.totalUsd, 9);
   });
 });
 
