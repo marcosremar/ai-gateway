@@ -123,6 +123,54 @@ export function setDeployHyperstackApiKey(v: string) { deployHyperstackApiKey = 
 export function setActiveProvider(v: ProviderName | '') { activeProvider = v; }
 export function setGpuHealthy(v: boolean) { gpuHealthy = v; }
 
+// ── Per-owner deploy slots (multi-tenant concurrency — step 1: foundation) ────
+// A DeploySlot bundles all mutable state for ONE concurrent deploy. The module
+// globals above are the implicit "default" slot (loopback/admin + the production
+// serving pod, which inference routes to). Named slots let app-keyed deploys
+// (e.g. finetune jobs) run concurrently without clobbering the default slot.
+// Step 1 only introduces the type + registry + a fresh-state factory; later
+// steps thread an optional slot through setDeployState / the deploy loop /
+// monitor / persistence. With no slot passed, behavior is byte-identical.
+export interface DeploySlot {
+  ownerKey: string;                 // resolved userId, or 'default'
+  state: DeploymentState;
+  cancelled: boolean;
+  lock: boolean;
+  promise: Promise<void> | null;
+  persistFile: string;              // per-slot persistence path (used in step 4)
+}
+
+/** Build a clean idle DeploymentState (same shape as the global initializer). */
+export function freshDeploymentState(userId?: string | null): DeploymentState {
+  return {
+    status: 'idle', podId: '', endpoint: '', gpuType: '', dockerImage: '', message: '', step: '', stepDetail: '',
+    startedAt: 0, retryCount: 0, provider: '', alert: '', alertLevel: 'info', alertHistory: [], sshHost: '', sshPort: 0,
+    lastLogs: '', deployDurationMs: 0, costPerHr: 0, providerMeta: {}, transitions: [], pullHistory: [],
+    warmingStatus: { phase: 'idle', startedAt: 0 }, deployId: '', gpuTemp: 0, gpuUtil: -1, gpuMemUsed: 0, gpuMemTotal: 0,
+    templateHashId: '', userId: userId ?? null,
+  };
+}
+
+const _deploySlots = new Map<string, DeploySlot>();
+const _slugifyOwner = (u: string) => u.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+
+/** Get-or-create the deploy slot for an owner userId (named, non-default slot). */
+export function createDeploySlot(userId: string): DeploySlot {
+  const existing = _deploySlots.get(userId);
+  if (existing) return existing;
+  const slot: DeploySlot = {
+    ownerKey: userId,
+    state: freshDeploymentState(userId),
+    cancelled: false, lock: false, promise: null,
+    persistFile: join(homedir(), '.babelcast', `active_deploy.${_slugifyOwner(userId)}.json`),
+  };
+  _deploySlots.set(userId, slot);
+  return slot;
+}
+export function getDeploySlot(userId: string): DeploySlot | undefined { return _deploySlots.get(userId); }
+export function listDeploySlots(): DeploySlot[] { return [..._deploySlots.values()]; }
+export function deleteDeploySlot(userId: string): void { _deploySlots.delete(userId); }
+
 // ── Active deploy persistence ────────────────────────────────────────────────
 // Persists active deploy to ~/.babelcast/active_deploy.json so we can reconnect
 // to running GPU pods after gateway restart.

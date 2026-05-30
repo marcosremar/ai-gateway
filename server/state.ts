@@ -38,6 +38,7 @@ import {
   setDeployHyperstackApiKey as _setDeployHyperstackApiKey,
   setActiveProvider as _setActiveProvider,
   type DeploymentState,
+  type DeploySlot,
 } from '../src/gateway/state/deploy-state';
 
 import {
@@ -81,7 +82,36 @@ export function setMonitorInterval(v: Timer | null) { monitorInterval = v; }
 
 // ── Deploy state mutation (server-specific — uses require('./ws-state')) ─────
 
-export function setDeployState(patch: Partial<DeploymentState>) {
+export function setDeployState(patch: Partial<DeploymentState>, slot?: DeploySlot) {
+  // Named per-owner slot (multi-tenant concurrency). Independent of the global
+  // serving slot: no standby routing, no global deployCancelled gate, no
+  // active_deploy.json write (per-slot persistence is step 4). When `slot` is
+  // omitted the function falls through to the byte-identical global path below.
+  if (slot) {
+    if (slot.cancelled && patch.status !== 'idle') return;
+    if (patch.alert && patch.alert !== slot.state.alert) {
+      const level = patch.alertLevel ?? (patch.status === 'error' ? 'error' : 'warning');
+      slot.state.alertHistory.push({ level, message: patch.alert, ts: Date.now() });
+      if (slot.state.alertHistory.length > 30) slot.state.alertHistory.splice(0, slot.state.alertHistory.length - 30);
+    }
+    const ps = slot.state.status, pst = slot.state.step;
+    Object.assign(slot.state, patch);
+    if (slot.state.status !== ps || slot.state.step !== pst) {
+      const elapsed = slot.state.startedAt > 0 ? Math.round((Date.now() - slot.state.startedAt) / 1000) : 0;
+      slot.state.transitions.push({
+        status: slot.state.status, step: slot.state.step, provider: slot.state.provider || '',
+        ts: Date.now(), elapsed, detail: slot.state.gpuType || slot.state.message?.slice(0, 60),
+      });
+      if (slot.state.transitions.length > 50) slot.state.transitions.splice(0, slot.state.transitions.length - 50);
+      try {
+        const { broadcastWs: bws } = require('./ws-state');
+        bws?.({ type: 'gpu:transition', owner: slot.ownerKey, status: slot.state.status, step: slot.state.step, provider: slot.state.provider, elapsed, gpuType: slot.state.gpuType });
+      } catch (e) { log.warn('broadcastWs failed:', e instanceof Error ? e.message : e); }
+    }
+    log.log(`[slot:${slot.ownerKey}] ${slot.state.status}: ${slot.state.message}`);
+    return;
+  }
+
   if (deployTarget === 'standby') {
     // Route to standby state during standby deploy — do NOT persist to active_deploy.json
     const mapped: Partial<StandbyDeployState> = {};

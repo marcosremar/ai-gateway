@@ -19,6 +19,8 @@ import { buildSshArgs, resolveSshIdentity, tcpProbe } from '../src/gateway/provi
 import { createServer } from 'net';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { createDeploySlot, deployState } from '../src/gateway/state/deploy-state';
+import { setDeployState } from '../server/state';
 import { computeBackoffCooldownMs, deprioritizeUnavailable, isProviderHardBlock, ProviderCooldownTracker, ownerFromLabel } from '../src/gpu-providers/deploy-orchestrator';
 import { RunawayDetector } from '../src/autoscaler/runaway-detector';
 
@@ -274,5 +276,35 @@ describe('per-key isolation — tier-cascade deploy forwards owner label', () =>
     expect(h).toContain('deployState.userId !== resumeCallerUserId');
     // status hides another app's deploy
     expect(info).toContain('deployState.userId !== statusCallerUserId');
+  });
+});
+
+// ── Multi-tenant concurrency (épico) — Passo 1: indireção DeploySlot ──────────
+describe('multi-tenant slots — step 1 (sink indirection, global untouched)', () => {
+  it('createDeploySlot dá um slot ocioso isolado por dono', () => {
+    const s = createDeploySlot('moss-tts-test-1');
+    expect(s.ownerKey).toBe('moss-tts-test-1');
+    expect(s.state.status).toBe('idle');
+    expect(s.state.userId).toBe('moss-tts-test-1');
+    expect(s.persistFile).toContain('active_deploy.moss-tts-test-1.json');
+  });
+
+  it('setDeployState(patch, slot) escreve no SLOT, não no global', () => {
+    const globalStatusBefore = deployState.status;
+    const globalPodBefore = deployState.podId;
+    const s = createDeploySlot('moss-tts-test-2');
+    setDeployState({ status: 'creating', podId: 'pod-SLOT', message: 'm', step: 'creating_pod' }, s);
+    expect(s.state.status).toBe('creating');
+    expect(s.state.podId).toBe('pod-SLOT');
+    expect(s.state.transitions.length).toBeGreaterThan(0); // transição registrada no slot
+    // global intocado
+    expect(deployState.status).toBe(globalStatusBefore);
+    expect(deployState.podId).toBe(globalPodBefore);
+    expect(deployState.podId).not.toBe('pod-SLOT');
+  });
+
+  it('setDeployState(patch) sem slot ainda escreve no global (compat)', () => {
+    setDeployState({ message: 'global-msg-test' });
+    expect(deployState.message).toBe('global-msg-test');
   });
 });
