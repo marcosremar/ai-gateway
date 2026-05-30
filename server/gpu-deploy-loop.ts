@@ -110,6 +110,11 @@ export async function startDeployLoop(
     status: 'searching', startedAt, retryCount: 0, podId: '', endpoint: '', gpuType: '',
     message: `Searching for GPU on ${label}...`, step: 'searching_offers', stepDetail: gpuTypes.join(', '), provider: providerName,
     dockerImage,
+    // Per-key isolation: derive the owner from the namespaced label (<userId>/<task>)
+    // set by the deploy handler, so status/stop/resume/terminate/clobber can scope by it.
+    // Inlined (not the ownerFromLabel helper) so a mocked deploy-orchestrator in tests
+    // doesn't break this hot path; ownerFromLabel mirrors this and is unit-tested.
+    userId: extra.label && extra.label.includes('/') ? extra.label.split('/')[0] : null,
   });
   broadcastWs({ type: 'gpu:deploy', phase: 'searching', deployId: deployState.deployId, provider: providerName, gpuTypes });
 

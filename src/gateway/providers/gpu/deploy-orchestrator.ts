@@ -48,6 +48,17 @@ export function isProviderHardBlock(message: string): boolean {
   return HARD_BLOCK_SIGNATURES.some(s => m.includes(s));
 }
 
+/**
+ * Per-key isolation: derive the owner userId from a namespaced deploy label
+ * `<userId>/<task>`. Returns null for labels without a namespace (admin/raw),
+ * so callers treat them as ownerless.
+ */
+export function ownerFromLabel(label: string | undefined | null): string | null {
+  if (!label || !label.includes('/')) return null;
+  const owner = label.split('/')[0].trim();
+  return owner || null;
+}
+
 // ── Provider Name & Tier ────────────────────────────────────────────────────
 
 export type ProviderName =

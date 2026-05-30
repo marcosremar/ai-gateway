@@ -262,6 +262,17 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
   const requestId = getOrCreateRequestId(_req);
   setRequestIdHeader(res, requestId);
   log.log(`GPU status query`);
+
+  // Per-key isolation (fix B): a key must NOT observe another app's deploy. If the
+  // active deploy is owned by a different app, report idle to this caller.
+  // (loopback/admin → callerUserId null → sees everything.)
+  const statusCallerUserId = readUserIdHeader(_req.headers as Record<string, string | string[] | undefined>);
+  if (deployState.userId && statusCallerUserId && deployState.userId !== statusCallerUserId) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'idle', podId: '', endpoint: '', gpuType: '', provider: '', message: '', activeTier: 'cloud', healthy: false, scopedHidden: true }));
+    return;
+  }
+
   const cfg = await loadProviderConfig();
   const elapsed = deployState.startedAt > 0 ? Math.round((Date.now() - deployState.startedAt) / 1000) : 0;
   const activeTier = isGpuAvailable() ? 'gpu' : 'cloud';

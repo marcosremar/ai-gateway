@@ -79,6 +79,15 @@ export interface DeploymentState {
    * via hibernateRestore. Undefined when the pod is not paused.
    */
   pausedMode?: 'stop' | 'hibernate';
+  /** Set when the host passed the speed test only via degraded-accept (slow but usable). */
+  networkDegraded?: boolean;
+  /**
+   * Owner identity (the app/userId resolved from the deploying API key) — the
+   * basis for per-key isolation: status/logs are hidden from, and stop/resume/
+   * terminate/clobber are refused to, callers whose userId differs. null/undefined
+   * = anonymous/loopback (admin, sees everything). Also read by the heartbeat guard.
+   */
+  userId?: string | null;
 }
 
 // ── Mutable deploy state ────────────────────────────────────────────────────

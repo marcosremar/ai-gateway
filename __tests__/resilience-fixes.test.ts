@@ -19,7 +19,7 @@ import { buildSshArgs, resolveSshIdentity, tcpProbe } from '../src/gateway/provi
 import { createServer } from 'net';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { computeBackoffCooldownMs, deprioritizeUnavailable, isProviderHardBlock, ProviderCooldownTracker } from '../src/gpu-providers/deploy-orchestrator';
+import { computeBackoffCooldownMs, deprioritizeUnavailable, isProviderHardBlock, ProviderCooldownTracker, ownerFromLabel } from '../src/gpu-providers/deploy-orchestrator';
 import { RunawayDetector } from '../src/autoscaler/runaway-detector';
 
 const hasRealKeys = !!process.env.VAST_API_KEY;
@@ -247,5 +247,32 @@ describe('per-key isolation — tier-cascade deploy forwards owner label', () =>
     expect(start).toBeGreaterThan(0);
     const spec = src.slice(start, start + 2000);
     expect(spec).toContain('extra.label');
+  });
+
+  it('ownerFromLabel extrai o userId do label <userId>/<task>', () => {
+    expect(ownerFromLabel('moss-tts/job-123')).toBe('moss-tts');
+    expect(ownerFromLabel('a/b/c')).toBe('a');
+    expect(ownerFromLabel('hybrik')).toBeNull();      // sem namespace → ownerless
+    expect(ownerFromLabel('')).toBeNull();
+    expect(ownerFromLabel(undefined)).toBeNull();
+  });
+
+  it('o loop seta deployState.userId pelo dono do label (inline, mesma lógica do ownerFromLabel)', () => {
+    const loop = readFileSync(join(__dirname, '../server/gpu-deploy-loop.ts'), 'utf-8');
+    expect(loop).toMatch(/userId:\s*extra\.label && extra\.label\.includes\('\/'\)/);
+    // a lógica inline deve casar com o helper unit-testado
+    expect(ownerFromLabel('moss-tts/job-1')).toBe('moss-tts');
+  });
+
+  it('handlers escopam por dono: deploy 409, stop/resume 403, status esconde', () => {
+    const h = readFileSync(join(__dirname, '../server/gpu-handlers.ts'), 'utf-8');
+    const info = readFileSync(join(__dirname, '../server/gpu-handlers-info.ts'), 'utf-8');
+    // deploy anti-clobber
+    expect(h).toContain('deployState.userId && callerUserId && deployState.userId !== callerUserId');
+    // stop / resume owner guard
+    expect(h).toContain('deployState.userId !== stopCallerUserId');
+    expect(h).toContain('deployState.userId !== resumeCallerUserId');
+    // status hides another app's deploy
+    expect(info).toContain('deployState.userId !== statusCallerUserId');
   });
 });
