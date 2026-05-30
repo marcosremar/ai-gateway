@@ -1568,7 +1568,10 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   if (!info) {
     console.log(`${c.cyan}[2/6]${c.reset} Provisioning instance...`);
     const deployBody: Record<string, unknown> = {
-      image,
+      // Server reads body.dockerImage (gpu-handlers _validateDeployRequest); sending
+      // `image` was silently dropped → deploy fell back to the active profile's image
+      // (e.g. hybrik-x) and the finetune base never deployed. Send the field it reads.
+      dockerImage: image,
       gpuTypes: [pickName],
     };
     if (opts.env) deployBody.env = opts.env;
@@ -1580,6 +1583,11 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     // can override with --storage.
     deployBody.storageGb = opts.storageGb ?? 40;
     deployBody.finetune = true;        // protect from autoscaler cancel-and-redeploy
+    // Finetune deploys a bare compute image (e.g. nvidia/cuda) with NO HTTP /health
+    // endpoint — the trainer is driven over SSH, not served. Tell the gateway to gate
+    // readiness on TCP :22 instead of polling /health (which would app_error on a
+    // bare image and abort the deploy before the SSH upload/train phase).
+    deployBody.readinessProbe = 'ssh';
     deployBody.label = `${currentOwner()}/job-${Date.now()}`;
     const depRes = await fetch(`${url}/v1/gpu/deploy`, {
       method: 'POST', headers: headers(key), body: JSON.stringify(deployBody),
