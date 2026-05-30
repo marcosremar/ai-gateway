@@ -15,6 +15,7 @@ import {
   setActiveProvider, setGpuHealthy, setLastRequestTime,
   deploymentSM,
 } from './state';
+import type { DeploySlot } from '../src/gateway/state/deploy-state';
 import { logGpuEvent } from './metrics';
 import { broadcastProviderStatus, broadcastWs } from './ws-state';
 import { pollHealthUntilReady } from './gpu-poll-health';
@@ -97,16 +98,19 @@ export async function startDeployLoop(
   gpuTypes: string[],
   authId?: string,
   extra: DeployExtra = {},
+  slot?: DeploySlot,
 ) {
+  const sd=slot?.state??deployState,sds=(p:any)=>setDeployState(p,slot);
   // Import from extracted modules
   const { startGpuMonitoring, startBackgroundWarmthMonitor } = await import('./gpu-health-monitor');
 
   setDeployCancelled(false); // reset cancel flag from previous deploy
+  if (slot) slot.cancelled = false;
   setActiveProvider(providerName);
   const credentials: ProviderCredentials = { apiKey, authId };
   const startedAt = Date.now();
   const label = PROVIDER_LABELS[providerName];
-  setDeployState({
+  sds({
     status: 'searching', startedAt, retryCount: 0, podId: '', endpoint: '', gpuType: '',
     message: `Searching for GPU on ${label}...`, step: 'searching_offers', stepDetail: gpuTypes.join(', '), provider: providerName,
     dockerImage,
@@ -116,7 +120,7 @@ export async function startDeployLoop(
     // doesn't break this hot path; ownerFromLabel mirrors this and is unit-tested.
     userId: extra.label && extra.label.includes('/') ? extra.label.split('/')[0] : null,
   });
-  broadcastWs({ type: 'gpu:deploy', phase: 'searching', deployId: deployState.deployId, provider: providerName, gpuTypes });
+  broadcastWs({ type: 'gpu:deploy', phase: 'searching', deployId: sd.deployId, provider: providerName, gpuTypes });
 
   // TensorDock: try to discover and resume a stopped instance first (fast restart)
   if (providerName === 'tensordock') {
@@ -129,7 +133,7 @@ export async function startDeployLoop(
         const isRunning = ['running', 'active'].includes(existing.status?.toLowerCase() ?? '');
         if (isStopped) {
           log.log(`[gpu] TensorDock: found stopped instance ${existing.instanceId} — resuming`);
-          setDeployState({ message: `Resuming stopped TensorDock instance...`, step: 'creating_pod' });
+          sds({ message: `Resuming stopped TensorDock instance...`, step: 'creating_pod' });
           logGpuEvent('instance_resumed', 'tensordock', true, { metadata: { instanceId: existing.instanceId } });
           await providerClient.startInstance(existing.instanceId, credentials);
           // Resolve endpoint after start
@@ -138,20 +142,20 @@ export async function startDeployLoop(
             const resolved = await providerClient.resolveInstanceEndpoint(existing.instanceId, credentials);
             if (resolved) endpoint = resolved;
           }
-          setDeployState({
+          sds({
             status: 'booting', podId: existing.instanceId, endpoint,
             gpuType: existing.gpuType || '', step: 'waiting_health',
             message: `TensorDock instance resumed, waiting for /health...`,
           });
           deploymentSM.startBooting(existing.instanceId);
-          const { result: res1, pullTimeS: pt1 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests);
+          const { result: res1, pullTimeS: pt1 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests, slot);
           if (res1 === 'ready') {
-            const durationMs = Date.now() - deployState.startedAt;
+            const durationMs = Date.now() - sd.startedAt;
             setGpuHealthy(true);
             setLastRequestTime(Date.now());
-            setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
+            sds({ status: 'ready', message: `GPU ready (${label}): ${sd.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
-            deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
+            deploymentSM.markReady(sd.podId, sd.endpoint, sd.gpuType, sd.costPerHr);
             log.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pt1 ?? '?'}s, ${label})`);
             if (pt1 != null) {
               const { recordPullTime, deriveHostKey: dk } = await import('../src/gpu-providers/pull-time-estimator');
@@ -161,8 +165,8 @@ export async function startDeployLoop(
             // Record cold-start latency for dynamic tier reordering (A2).
             recordTierLatencySafe(providerName, durationMs, pt1);
             startGpuMonitoring();
-            startBackgroundWarmthMonitor(deployState.endpoint);
-            startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
+            startBackgroundWarmthMonitor(sd.endpoint);
+            startCanaryIfEnabled(extra, dockerImage, sd.gpuType);
             return;
           }
           if (res1 === 'cancelled') {
@@ -171,7 +175,7 @@ export async function startDeployLoop(
             // resumed pod running until orphan sweep.
             try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
             catch (e) { log.warn(`[gpu] Cleanup of cancelled-resume failed: ${e instanceof Error ? e.message : e}`); }
-            setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
+            sds({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
           }
           log.log(`[gpu] Resumed TensorDock instance failed health check — terminating before creating new`);
           // Health-fail path also leaked the resumed instance — kill it now,
@@ -180,20 +184,20 @@ export async function startDeployLoop(
           catch (e) { log.warn(`[gpu] Cleanup of unhealthy-resume failed: ${e instanceof Error ? e.message : e}`); }
         } else if (isRunning && existing.endpoint) {
           log.log(`[gpu] TensorDock: found running instance ${existing.instanceId} at ${existing.endpoint}`);
-          setDeployState({
+          sds({
             status: 'booting', podId: existing.instanceId, endpoint: existing.endpoint,
             gpuType: existing.gpuType || '', step: 'waiting_health',
             message: `TensorDock instance already running, checking health...`,
           });
           deploymentSM.startBooting(existing.instanceId);
-          const { result: res2, pullTimeS: pt2 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, existing.endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests);
+          const { result: res2, pullTimeS: pt2 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, existing.endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests, slot);
           if (res2 === 'ready') {
-            const durationMs = Date.now() - deployState.startedAt;
+            const durationMs = Date.now() - sd.startedAt;
             setGpuHealthy(true);
             setLastRequestTime(Date.now());
-            setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
+            sds({ status: 'ready', message: `GPU ready (${label}): ${sd.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
-            deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
+            deploymentSM.markReady(sd.podId, sd.endpoint, sd.gpuType, sd.costPerHr);
             log.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pt2 ?? '?'}s, ${label})`);
             if (pt2 != null) {
               const { recordPullTime, deriveHostKey: dk } = await import('../src/gpu-providers/pull-time-estimator');
@@ -202,14 +206,14 @@ export async function startDeployLoop(
             // Record cold-start latency for dynamic tier reordering (A2).
             recordTierLatencySafe(providerName, durationMs, pt2);
             startGpuMonitoring();
-            startBackgroundWarmthMonitor(deployState.endpoint);
-            startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
+            startBackgroundWarmthMonitor(sd.endpoint);
+            startCanaryIfEnabled(extra, dockerImage, sd.gpuType);
             return;
           }
           if (res2 === 'cancelled') {
             try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
             catch (e) { log.warn(`[gpu] Cleanup of cancelled-running failed: ${e instanceof Error ? e.message : e}`); }
-            setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
+            sds({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
           }
           log.log(`[gpu] Running TensorDock instance not healthy — terminating before creating new`);
           try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
@@ -230,7 +234,7 @@ export async function startDeployLoop(
   let accumulatedWasteUsd = 0;
 
   for (let attempt = 0; attempt <= MAX_DEPLOY_RETRIES; attempt++) {
-    if (deployCancelled) return;
+    if (deployCancelled) return; if (slot?.cancelled) return;
 
     if (attempt > 0) {
       // Fix #4c: gate RETRIES through the runaway detector. The rapid
@@ -242,21 +246,21 @@ export async function startDeployLoop(
         if (!getGlobalRunawayDetector().recordDeployStart(providerName)) {
           const msg = `[runaway] ${providerName} create-rate tripped — aborting retries to avoid a provider abuse flag`;
           log.warn(msg);
-          setDeployState({ status: 'error', step: 'runaway_pause', message: msg });
+          sds({ status: 'error', step: 'runaway_pause', message: msg });
           return;
         }
       } catch { /* detector is best-effort — never block a deploy on its failure */ }
-      setDeployState({ retryCount: attempt, message: `Retry ${attempt + 1}/${MAX_DEPLOY_RETRIES + 1}: creating new ${label} instance...` });
+      sds({ retryCount: attempt, message: `Retry ${attempt + 1}/${MAX_DEPLOY_RETRIES + 1}: creating new ${label} instance...` });
       await new Promise(r => setTimeout(r, 5_000));
-      if (deployCancelled) return;
+      if (deployCancelled) return; if (slot?.cancelled) return;
     }
 
     const attemptStartedAt = Date.now();
 
     try {
       // Transition: searching → creating (found offers, now creating instance)
-      setDeployState({ status: 'creating', step: 'creating_pod', message: `Creating ${label} instance...` });
-      broadcastWs({ type: 'gpu:deploy', phase: 'creating', deployId: deployState.deployId, provider: providerName });
+      sds({ status: 'creating', step: 'creating_pod', message: `Creating ${label} instance...` });
+      broadcastWs({ type: 'gpu:deploy', phase: 'creating', deployId: sd.deployId, provider: providerName });
 
       const defaultStorage = DEFAULT_STORAGE_GB[providerName];
       // Explicit body.storageGb wins over the provider default — the
@@ -272,8 +276,8 @@ export async function startDeployLoop(
       // Progress callback: broadcast every poll update so CLI shows "Creating... 45s"
       const onPollProgress = (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => {
         const sshInfo = info.sshHost ? ` (ssh ${info.sshHost}:${info.sshPort})` : '';
-        setDeployState({ message: `Creating ${label} instance... ${info.elapsedS}s (${info.status})${sshInfo}` });
-        broadcastWs({ type: 'gpu:deploy', phase: 'creating', deployId: deployState.deployId, provider: providerName, message: `Creating ${label} instance... ${info.elapsedS}s (${info.status})` });
+        sds({ message: `Creating ${label} instance... ${info.elapsedS}s (${info.status})${sshInfo}` });
+        broadcastWs({ type: 'gpu:deploy', phase: 'creating', deployId: sd.deployId, provider: providerName, message: `Creating ${label} instance... ${info.elapsedS}s (${info.status})` });
       };
 
       const instance = await providerClient.createInstance(
@@ -308,7 +312,7 @@ export async function startDeployLoop(
         },
         credentials,
       );
-      if (deployCancelled) {
+      if (deployCancelled || slot?.cancelled) {
         try { await providerClient.deleteInstance(instance.instanceId, credentials); }
         catch (err) { log.warn(`[gpu] Failed to clean up cancelled instance ${instance.instanceId}: ${err}`); }
         return;
@@ -317,7 +321,7 @@ export async function startDeployLoop(
         || (instance.providerMeta?.costPerHr as number)
         || (instance.providerMeta?.pricePerHr as number)
         || 0;
-      setDeployState({
+      sds({
         status: 'booting',
         podId: instance.instanceId,
         endpoint: instance.endpoint,
@@ -354,10 +358,10 @@ export async function startDeployLoop(
                 try {
                   const probe = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(5_000) });
                   if (probe.ok) {
-                    const durationMs = Date.now() - deployState.startedAt;
+                    const durationMs = Date.now() - sd.startedAt;
                     setGpuHealthy(true);
                     setLastRequestTime(Date.now());
-                    setDeployState({
+                    sds({
                       status: 'ready',
                       message: `GPU ready via snapshot restore (${label}): ${endpoint} — ${restore.durationMs}ms`,
                       step: 'ready',
@@ -367,11 +371,11 @@ export async function startDeployLoop(
                       alertLevel: 'info',
                     });
                     broadcastProviderStatus('booting', 'cloud', `GPU deployed via snapshot (${restore.durationMs}ms)`);
-                    deploymentSM.markReady(deployState.podId, endpoint, deployState.gpuType, deployState.costPerHr);
+                    deploymentSM.markReady(sd.podId, endpoint, sd.gpuType, sd.costPerHr);
                     log.log(`[gpu] Snapshot restore succeeded in ${restore.durationMs}ms (${label})`);
                     startGpuMonitoring();
                     startBackgroundWarmthMonitor(endpoint);
-                    startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
+                    startCanaryIfEnabled(extra, dockerImage, sd.gpuType);
                     return;
                   }
                 } catch (probeErr) {
@@ -388,15 +392,15 @@ export async function startDeployLoop(
         }
       }
 
-      const pollResult = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt, dockerImage, instance.providerMeta, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests);
+      const pollResult = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt, dockerImage, instance.providerMeta, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests, slot);
       const { result, pullTimeS } = pollResult;
       if (result === 'ready') {
-        const durationMs = Date.now() - deployState.startedAt;
+        const durationMs = Date.now() - sd.startedAt;
         setGpuHealthy(true);
         setLastRequestTime(Date.now());
-        setDeployState({ status: 'ready', message: `GPU ready (${label}): ${deployState.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
+        sds({ status: 'ready', message: `GPU ready (${label}): ${sd.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
-        deploymentSM.markReady(deployState.podId, deployState.endpoint, deployState.gpuType, deployState.costPerHr);
+        deploymentSM.markReady(sd.podId, sd.endpoint, sd.gpuType, sd.costPerHr);
         log.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pullTimeS ?? '?'}s, ${label})`);
         // Record pull time for adaptive timeout learning
         if (pullTimeS != null) {
@@ -409,8 +413,8 @@ export async function startDeployLoop(
         // Record cold-start latency for dynamic tier reordering (A2).
         recordTierLatencySafe(providerName, durationMs, pullTimeS);
         startGpuMonitoring();
-        startBackgroundWarmthMonitor(deployState.endpoint);
-        startCanaryIfEnabled(extra, dockerImage, deployState.gpuType);
+        startBackgroundWarmthMonitor(sd.endpoint);
+        startCanaryIfEnabled(extra, dockerImage, sd.gpuType);
         return;
       }
 
@@ -425,7 +429,7 @@ export async function startDeployLoop(
         } catch (e) {
           log.warn(`[gpu] Failed to terminate cancelled instance ${instance.instanceId}: ${e instanceof Error ? e.message : e}`);
         }
-        setDeployState({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
+        sds({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
       }
       // instance crashed, timed out, or app reported error — fetch logs
       // before cleanup. App-error is a special case: the container itself
@@ -469,7 +473,7 @@ export async function startDeployLoop(
         // If cleanup fails, don't continue creating new instances — the orphan will keep billing
         const errMsg = `Failed to clean up crashed instance ${instance.instanceId} on ${providerName}: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`;
         log.error(`[gpu] ${errMsg}`);
-        setDeployState({ status: 'error', message: errMsg, podId: instance.instanceId });
+        sds({ status: 'error', message: errMsg, podId: instance.instanceId });
         deploymentSM.markError(errMsg);
         return; // Stop deploy — orphan sweep will attempt cleanup later
       }
@@ -482,7 +486,7 @@ export async function startDeployLoop(
         const appErr = pollResult.appError;
         const errMsg = `App load failed (non-retryable): ${appErr?.message ?? 'unknown'}`;
         log.error(`[gpu] ${errMsg}`);
-        setDeployState({ status: 'error', message: errMsg, step: 'app_error' });
+        sds({ status: 'error', message: errMsg, step: 'app_error' });
         deploymentSM.markError(errMsg);
         return;
       }
@@ -494,7 +498,7 @@ export async function startDeployLoop(
       if (accumulatedWasteUsd >= maxWasteUsd) {
         const errMsg = `${label} deploy aborted: accumulated boot-time waste ≈$${accumulatedWasteUsd.toFixed(2)} ≥ cap $${maxWasteUsd.toFixed(2)} after ${attempt + 1} attempt(s)`;
         log.error(`[gpu] ${errMsg}`);
-        setDeployState({ status: 'error', message: errMsg, step: 'waste_cap_exceeded' });
+        sds({ status: 'error', message: errMsg, step: 'waste_cap_exceeded' });
         deploymentSM.markError(errMsg);
         return;
       }
@@ -502,18 +506,18 @@ export async function startDeployLoop(
       continue;
     } catch (err) {
       const deployErr = categorizeDeployError(err, {
-        deployId: deployState.deployId,
+        deployId: sd.deployId,
         provider: providerName,
-        gpuType: deployState.gpuType || gpuTypes[0],
+        gpuType: sd.gpuType || gpuTypes[0],
         imageName: dockerImage,
       });
-      errorSummary.record(deployErr, deployState.deployId);
+      errorSummary.record(deployErr, sd.deployId);
       const remediation = await tryAutoRemediation(deployErr);
       if (remediation) {
         log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
       }
       log.error({ code: deployErr.code, category: deployErr.category }, `${label} create attempt ${attempt + 1}/${MAX_DEPLOY_RETRIES + 1} failed: ${deployErr.message}`);
-      setDeployState({ message: `${label} create failed (attempt ${attempt + 1}): ${deployErr.message}` });
+      sds({ message: `${label} create failed (attempt ${attempt + 1}): ${deployErr.message}` });
 
       // Non-retryable errors — fail immediately without wasting retries
       const lowerMsg = deployErr.message.toLowerCase();
@@ -522,8 +526,8 @@ export async function startDeployLoop(
         || lowerMsg.includes('forbidden') || lowerMsg.includes('api key') || lowerMsg.includes('invalid key');
       const isNoOffers = lowerMsg.includes('no gpus available') || lowerMsg.includes('0 offers') || lowerMsg.includes('no offers');
       if (isNoOffers) {
-        setDeployState({ step: 'no_offers', message: `${label}: no GPUs available — trying next provider` });
-        broadcastWs({ type: 'gpu:deploy', phase: 'no_offers', deployId: deployState.deployId, provider: providerName, gpuTypes });
+        sds({ step: 'no_offers', message: `${label}: no GPUs available — trying next provider` });
+        broadcastWs({ type: 'gpu:deploy', phase: 'no_offers', deployId: sd.deployId, provider: providerName, gpuTypes });
       }
       const nonRetryable = isBilling || isAuth || isNoOffers;
       if (nonRetryable || attempt >= MAX_DEPLOY_RETRIES) {
@@ -536,7 +540,7 @@ export async function startDeployLoop(
           errMsg = `${label} failed after ${MAX_DEPLOY_RETRIES + 1} attempts: ${deployErr.message}`;
         }
         log.error({ code: deployErr.code, category: deployErr.category }, `${label} deploy failed (non_retryable=${nonRetryable}, attempt=${attempt + 1}): ${deployErr.message}`);
-        setDeployState({ status: 'error', message: errMsg });
+        sds({ status: 'error', message: errMsg });
         deploymentSM.markError(errMsg);
         return;
       }
@@ -544,6 +548,6 @@ export async function startDeployLoop(
   }
 
   const exhaustedMsg = `${label} deploy failed: max retries exceeded`;
-  setDeployState({ status: 'error', message: exhaustedMsg });
+  sds({ status: 'error', message: exhaustedMsg });
   deploymentSM.markError(exhaustedMsg);
 }

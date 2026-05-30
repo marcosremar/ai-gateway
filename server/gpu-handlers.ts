@@ -19,7 +19,13 @@ import {
   deploymentSM,
   standbyDeployState, standbyReadyForHandover,
 } from './state';
+import { createDeploySlot, getDeploySlot } from '../src/gateway/state/deploy-state';
+import type { DeploySlot } from '../src/gateway/state/deploy-state';
 import { triggerStandbyDeploy, initiateHandover, cancelStandby, startStandbyMonitor } from './gpu-standby';
+/** Derive the owner (app userId) from a namespaced deploy label (<userId>/<task>). */
+export function ownerFromLabel(label: string | undefined | null): string | null {
+  return label && label.includes('/') ? label.split('/')[0] : null;
+}
 export { startStandbyMonitor };
 import { updateActivePipeline, runpod, vast, tensordock, modal, hyperstack } from './providers';
 import {
@@ -1027,31 +1033,37 @@ function _startDeployAndRespond(
   requestId: string,
   res: ServerResponse,
   isFinetune = false,
+  appSlot?: DeploySlot,
 ): void {
   const { raceCount, offerRaceCount, requireDirectPort, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, strictFastBoot, searchMode, allowUnverified, noTierCascade, minInetDownMbps } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   // Reset cancel flag FIRST so setDeployState won't be blocked by the guard
-  setDeployCancelled(false);
+  // For app-key callers, reset their slot's cancel flag instead
+  if (appSlot) { appSlot.cancelled = false; } else { setDeployCancelled(false); }
 
   // Generate a unique deploy ID for tracking this deploy through its lifecycle
   const deployId = generateDeployId();
   // Record for idempotency — subsequent identical requests within 5s return this deployId
   lastDeployRequest = { hash: JSON.stringify({ dockerImage: tierResult.resolvedDockerImage, gpuTypes: tierResult.gpuTypes }), deployId, ts: Date.now() };
   // Clear stale SSH fields from previous deploy so poll loops don't exit early on old host:port
-  setDeployState({ deployId, devMode: config.devMode === true, sshHost: '', sshPort: 0, podId: '' });
-  try {
-    deploymentSM.startDeploying();
-  } catch (smErr) {
-    const deployErr = categorizeDeployError(smErr, {
-      deployId: deployState.deployId,
-    });
-    errorSummary.record(deployErr, deployState.deployId);
-    log.error({ code: deployErr.code, category: deployErr.category }, `State machine error: ${deployErr.message}`);
-    setDeployLock(false);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: { message: 'Internal server error', type: 'server_error' } }));
-    return;
+  if (appSlot) {
+    Object.assign(appSlot.state, { deployId, devMode: config.devMode === true, sshHost: '', sshPort: 0, podId: '' });
+  } else {
+    setDeployState({ deployId, devMode: config.devMode === true, sshHost: '', sshPort: 0, podId: '' });
+    try {
+      deploymentSM.startDeploying();
+    } catch (smErr) {
+      const deployErr = categorizeDeployError(smErr, {
+        deployId: deployState.deployId,
+      });
+      errorSummary.record(deployErr, deployState.deployId);
+      log.error({ code: deployErr.code, category: deployErr.category }, `State machine error: ${deployErr.message}`);
+      setDeployLock(false);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Internal server error', type: 'server_error' } }));
+      return;
+    }
   }
 
   const extra = {
@@ -1087,22 +1099,30 @@ function _startDeployAndRespond(
 
   const deployFn = raceCount > 1
     ? startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount)
-    : startDeployWithTiers(tiers, resolvedDockerImage, gpuTypes, extra, gpuPriorityByProvider);
-  setDeployPromise(
-    deployFn
-      .catch(err => {
-        const deployErr = categorizeDeployError(err, {
-          deployId: deployState.deployId,
-          provider: tiers[0]?.name,
-          gpuType: gpuTypes[0],
-          imageName: resolvedDockerImage,
-        });
-        errorSummary.record(deployErr, deployState.deployId);
-        log.error(`[gpu] Deploy failed unexpectedly: ${deployErr.message}`);
-        setDeployState({ status: 'error', message: `Deploy failed: ${deployErr.message}` });
-      })
-      .finally(() => { setDeployLock(false); setDeployPromise(null); if (isFinetune) finetuneDeployActive = false; })
-  );
+    : startDeployWithTiers(tiers, resolvedDockerImage, gpuTypes, extra, gpuPriorityByProvider, appSlot);
+  const activeDeployId = appSlot ? appSlot.state.deployId : deployState.deployId;
+  const handledFn = deployFn
+    .catch(err => {
+      const deployErr = categorizeDeployError(err, {
+        deployId: activeDeployId,
+        provider: tiers[0]?.name,
+        gpuType: gpuTypes[0],
+        imageName: resolvedDockerImage,
+      });
+      errorSummary.record(deployErr, activeDeployId);
+      log.error(`[gpu] Deploy failed unexpectedly: ${deployErr.message}`);
+      setDeployState({ status: 'error', message: `Deploy failed: ${deployErr.message}` }, appSlot ?? undefined);
+    })
+    .finally(() => {
+      if (!appSlot) { setDeployLock(false); setDeployPromise(null); }
+      else { appSlot.lock = false; appSlot.promise = null; }
+      if (isFinetune) finetuneDeployActive = false;
+    });
+  if (appSlot) {
+    appSlot.promise = handledFn;
+  } else {
+    setDeployPromise(handledFn);
+  }
 
   const modeLabel = raceCount > 1 ? `race×${raceCount}` : `${tiers.length} tier(s): ${tiers.map(t => t.label).join(' → ')}`;
   log.log(`[req=${requestId}] GPU deploy started: ${modeLabel}`);
@@ -1196,6 +1216,64 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     log.log(`[req=${requestId}] Idempotent deploy — returning existing deployId=${lastDeployRequest.deployId}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ deployId: lastDeployRequest.deployId, status: 'creating', message: 'Deploy already in progress (idempotent)', idempotent: true }));
+    return;
+  }
+
+  // Per-app slot path: app-key callers use their own isolated deploy slot,
+  // completely bypassing the global lock / cancel-and-redeploy flow.
+  if (callerUserId) {
+    const appSlot = createDeploySlot(callerUserId);
+    if (appSlot.lock) {
+      log.log(`[req=${requestId}] App-key deploy rejected: slot lock held for '${callerUserId}'`);
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Deploy already in progress for this app', status: appSlot.state.status }));
+      return;
+    }
+    appSlot.lock = true;
+    let appLockTransferred = false;
+    try {
+      let config: DeployConfig;
+      try { config = await _validateDeployRequest(body, requestId); }
+      catch (err: unknown) {
+        const status = (err as any)?.status ?? 400;
+        const message = (err as any)?.message ?? String(err);
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message, type: 'validation_error' } }));
+        return;
+      }
+      let tierResult: TierSelectionResult;
+      try { tierResult = await _selectDeploymentTier(config, requestId); }
+      catch (err: unknown) {
+        const status = (err as any)?.status ?? 500;
+        const message = (err as any)?.message ?? String(err);
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
+        return;
+      }
+      if (config.maxCostUsd !== undefined && tierResult.estimatedCostPerHr) {
+        if (tierResult.estimatedCostPerHr > config.maxCostUsd) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: `Estimated cost ($${tierResult.estimatedCostPerHr.toFixed(2)}/hr) exceeds your maxCostUsd ($${config.maxCostUsd.toFixed(2)})`, type: 'cost_cap_exceeded' }, estimatedCostPerHr: tierResult.estimatedCostPerHr, maxCostUsd: config.maxCostUsd }));
+          return;
+        }
+      }
+      const appSlotPreflightResult = await runPreFlightChecks({
+        imageName: config.dockerImage, provider: tierResult.tiers[0]?.name || 'vast',
+        apiKey: config.vastApiKey || process.env.VAST_API_KEY || '', gpuTypes: config.gpuTypes,
+        quotedPricePerHr: tierResult.estimatedCostPerHr, dockerhubUser: process.env.DOCKERHUB_USERNAME, dockerhubToken: process.env.DOCKERHUB_TOKEN, templateId: config.templateHashId,
+      });
+      if (!appSlotPreflightResult.ok) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: `Deploy aborted — pre-flight checks failed:\n${appSlotPreflightResult.errors.join('\n')}`, type: 'preflight_error' }, checks: appSlotPreflightResult.checks, warnings: appSlotPreflightResult.warnings }));
+        return;
+      }
+      if (appSlotPreflightResult.warnings.length > 0) config.deployEnv._PREFLIGHT_WARNINGS = JSON.stringify(appSlotPreflightResult.warnings);
+      appLockTransferred = true;
+      Object.assign(appSlot.state, { readinessProbe });
+      _startDeployAndRespond(config, tierResult, requestId, res, isFinetuneDeploy, appSlot);
+    } finally {
+      if (!appLockTransferred) { appSlot.lock = false; setDeployLock(false); if (isFinetuneDeploy) finetuneDeployActive = false; }
+    }
     return;
   }
 
@@ -1766,6 +1844,17 @@ export async function handleGpuKeepalive(req: IncomingMessage, res: ServerRespon
     podId: deployState.podId,
     lastActivityAt: now,
   }));
+}
+
+/** Cancel a per-app deploy slot and send 200. Returns true if slot was found. */
+function _cancelAppSlot(userId: string, res: ServerResponse): boolean {
+  const s = getDeploySlot(userId);
+  if (!s) return false;
+  s.cancelled = true;
+  setDeployState({ status: 'idle', message: 'Stopped' }, s);
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: true }));
+  return true;
 }
 
 /**

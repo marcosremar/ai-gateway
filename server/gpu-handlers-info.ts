@@ -4,6 +4,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import { createLogger } from '../src/logger';
+import { getDeploySlot } from '../src/gateway/state/deploy-state';
 
 const log = createLogger('gpu-handlers-info');
 import {
@@ -263,10 +264,26 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
   setRequestIdHeader(res, requestId);
   log.log(`GPU status query`);
 
-  // Per-key isolation (fix B): a key must NOT observe another app's deploy. If the
-  // active deploy is owned by a different app, report idle to this caller.
-  // (loopback/admin → callerUserId null → sees everything.)
+  // Per-key isolation: app-key callers see their own slot (not the global deploy).
+  // Admin/loopback (statusCallerUserId null) sees the global slot.
   const statusCallerUserId = readUserIdHeader(_req.headers as Record<string, string | string[] | undefined>);
+  const callerSlot = statusCallerUserId ? getDeploySlot(statusCallerUserId) : undefined;
+  // If caller has a slot, use it; otherwise fall through to global (with fix-B isolation)
+  if (callerSlot) {
+    const s = callerSlot.state;
+    const elapsed = s.startedAt > 0 ? Math.round((Date.now() - s.startedAt) / 1000) : 0;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: s.status, podId: s.podId, endpoint: s.endpoint, gpuType: s.gpuType,
+      provider: s.provider, message: s.message, step: s.step, stepDetail: s.stepDetail,
+      elapsed, startedAt: s.startedAt, deployId: s.deployId, costPerHr: s.costPerHr,
+      alert: s.alert, alertLevel: s.alertLevel, alertHistory: s.alertHistory,
+      transitions: s.transitions, pullHistory: s.pullHistory, sshHost: s.sshHost, sshPort: s.sshPort,
+      activeTier: s.status === 'ready' ? 'gpu' : 'cloud', healthy: s.status === 'ready', slotOwner: callerSlot.ownerKey,
+    }));
+    return;
+  }
+  // Fix B: if global slot is owned by a different app, report idle to this caller.
   if (deployState.userId && statusCallerUserId && deployState.userId !== statusCallerUserId) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'idle', podId: '', endpoint: '', gpuType: '', provider: '', message: '', activeTier: 'cloud', healthy: false, scopedHidden: true }));

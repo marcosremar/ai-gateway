@@ -19,6 +19,7 @@ import {
   setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey, setDeployHyperstackApiKey,
   clearPersistedDeploy,
 } from './state';
+import type { DeploySlot } from '../src/gateway/state/deploy-state';
 import {
   logGpuEvent, startDeploySession, updateDeploySession, upsertHostReputation,
 } from './metrics';
@@ -42,12 +43,12 @@ function modalScriptFor(image: string): string {
   }
 }
 
-export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>) {
+export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>, slot?: DeploySlot) {
   const deployId = `deploy-${Date.now()}`;
   const { result, profile } = await profileOperation(
     deployId,
     async () => {
-      return await _executeDeploy(tiers, dockerImage, gpuTypes, extra, gpuTypesByProvider);
+      return await _executeDeploy(tiers, dockerImage, gpuTypes, extra, gpuTypesByProvider, slot);
     },
     { cpuProfileThresholdMs: 60_000, heapSnapshotThresholdMb: 200 },
   );
@@ -59,7 +60,9 @@ export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string
   return result;
 }
 
-async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>) {
+async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>, slot?: DeploySlot) {
+  const sd = slot ? slot.state : deployState;
+  const sds = (patch: Parameters<typeof setDeployState>[0]) => setDeployState(patch, slot ?? undefined);
   // ── Pre-flight checks ───────────────────────────────────────────────────
   // Validate image, DNS, CUDA compatibility, and cost BEFORE attempting any
   // provider deploy. Catches common failure scenarios early (Fixes #6, #13,
@@ -76,7 +79,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
       gpuTypes,
       dockerhubUser: process.env.DOCKERHUB_USERNAME,
       dockerhubToken: process.env.DOCKERHUB_TOKEN,
-      templateId: deployState.templateHashId,
+      templateId: sd.templateHashId,
     });
 
     if (!preflightResult.ok) {
@@ -97,7 +100,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
   if (preflightOk.length === 0) {
     const msg = `All providers failed preflight: ${preflightSkip.join(', ')}`;
     log.error(msg);
-    setDeployState({ status: 'error', message: msg });
+    sds({ status: 'error', message: msg });
     return;
   }
 
@@ -221,7 +224,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
 
   for (let i = 0; i < availableTiers.length; i++) {
     const tier = availableTiers[i];
-    if (deployCancelled) return;
+    if (deployCancelled) return; if (slot?.cancelled) return;
 
     // Track active credentials
     if (tier.name === 'runpod') setDeployApiKey(tier.apiKey);
@@ -243,63 +246,63 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
       log.log(`[gpu] Starting ${tier.label} deploy loop (tier ${i + 1}/${availableTiers.length}, GPUs: ${tierGpuTypes.slice(0,3).map(g=>g.replace('NVIDIA ','').replace('GeForce ','')).join(', ')}...)`);
       await startDeployLoop(tier.client, tier.name, tier.apiKey, tierDockerImage, tierGpuTypes, tier.authId, extra);
       const durationMs = Date.now() - tierStartedAt;
-      if (deployState.status === 'ready') {
+      if (sd.status === 'ready') {
         log.log(`[gpu] ✓ ${tier.label} deploy succeeded in ${Math.round(durationMs / 1000)}s`);
-        logGpuEvent('deploy_ready', tier.name, true, { durationMs, metadata: { endpoint: deployState.endpoint, gpuType: deployState.gpuType } });
+        logGpuEvent('deploy_ready', tier.name, true, { durationMs, metadata: { endpoint: sd.endpoint, gpuType: sd.gpuType } });
         updateDeploySession({
           status: 'ready',
-          podId: deployState.podId,
-          endpoint: deployState.endpoint,
-          gpuType: deployState.gpuType,
-          region: deployState.sshHost ? 'ssh' : '',
-          costPerHr: deployState.costPerHr,
+          podId: sd.podId,
+          endpoint: sd.endpoint,
+          gpuType: sd.gpuType,
+          region: sd.sshHost ? 'ssh' : '',
+          costPerHr: sd.costPerHr,
           provisionTimeS: Math.round(durationMs / 1000),
         });
         // Record successful deploy in host reputation
         upsertHostReputation({
           provider: tier.name,
-          gpuType: deployState.gpuType,
-          providerMeta: deployState.providerMeta,
+          gpuType: sd.gpuType,
+          providerMeta: sd.providerMeta,
           success: true,
           bootTimeS: Math.round(durationMs / 1000),
           dockerImage,
-          costUsd: deployState.costPerHr > 0 ? deployState.costPerHr * (durationMs / 1000 / 3600) : undefined,
+          costUsd: sd.costPerHr > 0 ? sd.costPerHr * (durationMs / 1000 / 3600) : undefined,
         });
         if (await cooldownTracker.recordSuccess(tier.name)) {
           logGpuEvent('cooldown_cleared', tier.name, true, { durationMs });
         }
         emitGatewayEvent('gpu.deployed', {
-          deployId: deployState.deployId,
+          deployId: sd.deployId,
           provider: tier.name,
-          gpuType: deployState.gpuType,
-          endpoint: deployState.endpoint,
-          costPerHr: deployState.costPerHr,
+          gpuType: sd.gpuType,
+          endpoint: sd.endpoint,
+          costPerHr: sd.costPerHr,
           durationMs,
         });
         return;
       }
       // Deploy loop returned without reaching 'ready' or 'error' — treat as failure
-      if (deployState.status !== 'error') {
-        const msg = `${tier.label} deploy ended without reaching ready (status=${deployState.status}, elapsed=${Math.round(durationMs / 1000)}s)`;
+      if (sd.status !== 'error') {
+        const msg = `${tier.label} deploy ended without reaching ready (status=${sd.status}, elapsed=${Math.round(durationMs / 1000)}s)`;
         log.warn(`[gpu] ${msg}`);
-        setDeployState({ status: 'error', message: msg });
+        sds({ status: 'error', message: msg });
       }
     } catch (err) {
       const durationMs = Date.now() - tierStartedAt;
       const deployErr = categorizeDeployError(err, {
-        deployId: deployState.deployId,
+        deployId: sd.deployId,
         provider: tier.name,
-        gpuType: deployState.gpuType,
-        imageName: deployState.dockerImage,
+        gpuType: sd.gpuType,
+        imageName: sd.dockerImage,
       });
-      errorSummary.record(deployErr, deployState.deployId);
+      errorSummary.record(deployErr, sd.deployId);
       const remediation = await tryAutoRemediation(deployErr);
       if (remediation) {
         log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
       }
       log.error({ code: deployErr.code, category: deployErr.category }, `${tier.label} deploy failed after ${Math.round(durationMs / 1000)}s: ${deployErr.message}`);
-      if (deployState.status !== 'error') {
-        setDeployState({ status: 'error', message: `${tier.label} deploy failed: ${deployErr.message}` });
+      if (sd.status !== 'error') {
+        sds({ status: 'error', message: `${tier.label} deploy failed: ${deployErr.message}` });
       }
     }
 
@@ -307,32 +310,32 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     if (deployState.status === 'idle') {
       const msg = `${tier.label} deploy returned to idle unexpectedly — possible silent failure`;
       log.error(`[gpu] ${msg}`);
-      setDeployState({ status: 'error', message: msg });
+      sds({ status: 'error', message: msg });
     }
 
-    if (deployState.status === 'error') {
+    if (sd.status === 'error') {
       const durationMs = Date.now() - tierStartedAt;
-      const failureCategory = categorizeDeployFailure(deployState.message ?? '');
-      logGpuEvent('deploy_failed', tier.name, false, { durationMs, error: deployState.message, metadata: { failureCategory } });
-      updateDeploySession({ status: 'failed', errorMessage: deployState.message ?? '' });
+      const failureCategory = categorizeDeployFailure(sd.message ?? '');
+      logGpuEvent('deploy_failed', tier.name, false, { durationMs, error: sd.message, metadata: { failureCategory } });
+      updateDeploySession({ status: 'failed', errorMessage: sd.message ?? '' });
       emitGatewayEvent('gpu.failed', {
-        deployId: deployState.deployId,
+        deployId: sd.deployId,
         provider: tier.name,
-        error: deployState.message,
+        error: sd.message,
         durationMs,
         failureCategory,
       });
       // Record failed deploy in host reputation
       upsertHostReputation({
         provider: tier.name,
-        gpuType: deployState.gpuType,
-        providerMeta: deployState.providerMeta,
+        gpuType: sd.gpuType,
+        providerMeta: sd.providerMeta,
         success: false,
         bootTimeS: Math.round(durationMs / 1000),
         dockerImage,
         failureCategory,
       });
-      if (isProviderHardBlock(deployState.message ?? '')) {
+      if (isProviderHardBlock(sd.message ?? '')) {
         // Fix #4b: provider hard-block (RunPod quota→0 abuse flag / KYC). Long
         // persisted cooldown so the cascade SKIPS it for hours instead of
         // retrying 60s later and re-hitting the blocked account.
@@ -346,7 +349,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
         log.log(`[gpu] ${tier.name} cooldown set: ${cooldownTracker.getRemainingSeconds(tier.name)}s (fail #${cooldownTracker.getFailCount(tier.name)})`);
       }
 
-      const message = deployState.message ?? '';
+      const message = sd.message ?? '';
       if (failureCategory === 'app_error' || failureCategory === 'docker_image') {
         log.error(`[gpu] ${tier.label} failed with non-provider error (${failureCategory}); stopping cascade because another provider will run the same broken image.`);
         clearPersistedDeploy();
@@ -361,12 +364,12 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     }
 
     // If this tier failed and there's a next tier, clear stale instance fields and set fallback alert.
-    if (i < availableTiers.length - 1 && deployState.status === 'error') {
+    if (i < availableTiers.length - 1 && sd.status === 'error') {
       const next = availableTiers[i + 1];
       const alertMsg = `${tier.label} indisponível — usando ${next.label} como fallback.`;
       log.warn(`[gpu] ⚠️ ${alertMsg}`);
       clearPersistedDeploy();
-      setDeployState({
+      sds({
         status: 'creating', provider: next.name, step: 'creating_pod',
         podId: '', endpoint: '', sshHost: '', sshPort: 0, gpuType: '',
         costPerHr: 0, providerMeta: {}, stepDetail: '',
@@ -377,19 +380,19 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
   }
 
   // Final guard: if all tiers were tried and deploy isn't ready, ensure error state
-  if (deployState.status !== 'ready' && deployState.status !== 'error') {
+  if (sd.status !== 'ready' && sd.status !== 'error') {
     const labels = availableTiers.map(t => t.label).join(', ');
-    const lastMsg = deployState.message || 'unknown';
+    const lastMsg = sd.message || 'unknown';
     const msg = `All ${availableTiers.length} provider(s) failed (${labels}). Last error: ${lastMsg}`;
     log.error(`[gpu] Deploy exhausted: ${msg}`);
-    setDeployState({ status: 'error', message: msg });
+    sds({ status: 'error', message: msg });
     deploymentSM.markError(msg);
   }
 
   // If deploy failed and only one tier was provided (forced provider), append context
-  if (deployState.status === 'error' && tiers.length === 1) {
-    const originalMsg = deployState.message || 'unknown error';
-    setDeployState({
+  if (sd.status === 'error' && tiers.length === 1) {
+    const originalMsg = sd.message || 'unknown error';
+    sds({
       message: `${originalMsg} (no fallback — provider was forced)`,
     });
   }
