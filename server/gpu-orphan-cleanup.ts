@@ -6,6 +6,7 @@ import {
   deployState, deployApiKey, deployVastApiKey, deployTensordockApiKey,
   deployTensordockAuthId, deployModalApiKey, deployHyperstackApiKey,
 } from './state';
+import { listDeploySlots } from '../src/gateway/state/deploy-state';
 import { runpod, vast, tensordock, modal, hyperstack } from './providers';
 import { logGpuEvent } from '../src/gateway/autoscaler/file-lifecycle-logger';
 
@@ -241,6 +242,10 @@ async function collectTrackedInstanceIds(): Promise<Set<string>> {
   const { standbyDeployState } = await import('./state');
   if (standbyDeployState.podId) tracked.add(standbyDeployState.podId);
   for (const id of activeRaceInstanceIds) tracked.add(id);
+  // Per-owner slot job pods (multi-tenant): protect them too — their podId lives
+  // in slot.state.podId, NOT the global deployState, so without this the sweep
+  // would terminate live finetune/job pods.
+  for (const slot of listDeploySlots()) if (slot.state.podId) tracked.add(slot.state.podId);
 
   try {
     const { deployState: ds } = await import('./state');
@@ -263,6 +268,14 @@ function getSweepSafetyAbortReason(): string | null {
   if (status && !['idle', 'ready', 'error', 'stopped', 'terminated'].includes(status)) {
     return `deploy is in progress (status=${status})`;
   }
+
+  // Abort the sweep while ANY per-owner slot is mid-deploy — its pod may not be
+  // discoverable/tracked yet (multi-tenant safety).
+  const busySlot = listDeploySlots().find(s => {
+    const st = (s.state.status || '').toLowerCase();
+    return st && !['idle', 'ready', 'error', 'stopped', 'terminated'].includes(st);
+  });
+  if (busySlot) return `per-owner slot '${busySlot.ownerKey}' deploy in progress (status=${busySlot.state.status})`;
 
   const TRANSITION_GRACE_MS = 3 * 60_000;
   const lastTransition = deployState.transitions?.[deployState.transitions.length - 1];

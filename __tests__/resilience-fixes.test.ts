@@ -307,4 +307,12 @@ describe('multi-tenant slots — step 1 (sink indirection, global untouched)', (
     setDeployState({ message: 'global-msg-test' });
     expect(deployState.message).toBe('global-msg-test');
   });
+
+  // Step 3-lite: orphan sweep não pode matar pods dos slots
+  it('orphan-sweep protege pods dos slots + aborta se slot mid-deploy', () => {
+    const src = readFileSync(join(__dirname, '../server/gpu-orphan-cleanup.ts'), 'utf-8');
+    expect(src).toContain('listDeploySlots()');
+    expect(src).toMatch(/slot\.state\.podId/);                 // protege podId do slot
+    expect(src).toMatch(/slot.*deploy in progress/i);          // aborta sweep se slot ocupado
+  });
 });
