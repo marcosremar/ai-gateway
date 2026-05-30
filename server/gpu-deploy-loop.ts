@@ -275,6 +275,12 @@ export async function startDeployLoop(
         { gpuTypes, dockerImage, storageGb, region: extra.region, hfToken: extra.hfToken, env: extra.env, bareMetal: providerName === 'tensordock', interruptible: extra.interruptible,
           // IMPORTANT: RunPod must ALWAYS use SECURE cloud — NEVER COMMUNITY (unreliable third-party machines)
           ...(providerName === 'runpod' ? { cloudType: 'SECURE' as const } : {}),
+          // Per-key isolation (fix A): forward the owner-namespaced label
+          // (<userId>/<task>) so pods created on the tier-cascade path are
+          // tagged with their owner. Without this the default path dropped the
+          // label → pods were invisible to `gpu list`'s owner filter and
+          // unprotected by the terminate owner guard. (race path already does this.)
+          ...(extra.label ? { label: extra.label } : {}),
           // Forward Vast-only opt-in flags (see canonical comment in
           // gpu-deploy-race.ts) so the verified-host filter and the
           // strict-fast-boot tier are actually controllable from the API.

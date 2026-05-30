@@ -17,6 +17,8 @@ import { categorizeDeployError } from '../src/errors/deploy-errors';
 import { evaluateSpeedTest } from '../server/gpu-poll-health';
 import { buildSshArgs, resolveSshIdentity, tcpProbe } from '../src/gateway/providers/gpu/ssh-tunnel';
 import { createServer } from 'net';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { computeBackoffCooldownMs, deprioritizeUnavailable, isProviderHardBlock, ProviderCooldownTracker } from '../src/gpu-providers/deploy-orchestrator';
 import { RunawayDetector } from '../src/autoscaler/runaway-detector';
 
@@ -234,5 +236,16 @@ describe('fix #4b — provider hard-block → long persisted cooldown', () => {
     const remain = t.getRemainingSeconds('runpod');
     expect(remain).toBeGreaterThan(ProviderCooldownTracker.MAX_COOLDOWN_MS / 1000); // > 900s (15min)
     expect(remain).toBeGreaterThan(80_000); // ~24h
+  });
+});
+
+// ── Per-key isolation (fix A): deploy loop forwards the owner label ───────────
+describe('per-key isolation — tier-cascade deploy forwards owner label', () => {
+  it('createInstance spec inclui extra.label (senão o pod fica sem dono → invisível ao filtro)', () => {
+    const src = readFileSync(join(__dirname, '../server/gpu-deploy-loop.ts'), 'utf-8');
+    const start = src.indexOf('providerClient.createInstance(');
+    expect(start).toBeGreaterThan(0);
+    const spec = src.slice(start, start + 2000);
+    expect(spec).toContain('extra.label');
   });
 });
