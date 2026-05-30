@@ -174,9 +174,19 @@ export function ReputationSection() {
           {loading ? (
             <div className="flex justify-center py-8"><Spinner /></div>
           ) : sorted.length === 0 ? (
-            <p className="text-center py-8 text-sm" style={{ color: 'var(--color-text-muted)' }}>
-              No reputation data yet. Deploy a GPU to start tracking.
-            </p>
+            <div className="flex flex-col items-center gap-3 py-8 text-center">
+              <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
+                No reputation data yet. Deploy a GPU to start tracking.
+              </p>
+              <a
+                href="/dashboard"
+                onClick={e => { e.preventDefault(); window.history.pushState(null, '', '/'); window.dispatchEvent(new PopStateEvent('popstate')); }}
+                className="inline-flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-lg"
+                style={{ background: 'var(--color-primary)', color: '#fff' }}
+              >
+                Go to Overview →
+              </a>
+            </div>
           ) : (
             <div className="space-y-3">
               {/* Sort header row */}

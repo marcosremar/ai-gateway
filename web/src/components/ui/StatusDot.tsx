@@ -25,12 +25,19 @@ export function StatusDot({ status, size = 'sm', label, className = '' }: Status
 
   if (label) {
     return (
-      <div className={`flex items-center gap-1.5 ${className}`}>
-        <div className={`${s} rounded-full flex-shrink-0`} style={{ background: color }} />
+      <div className={`flex items-center gap-1.5 ${className}`} role="status" aria-label={`${status}: ${label}`}>
+        <div className={`${s} rounded-full flex-shrink-0`} style={{ background: color }} aria-hidden="true" />
         <span className="text-xs font-medium" style={{ color }}>{label}</span>
       </div>
     );
   }
 
-  return <div className={`${s} rounded-full flex-shrink-0 ${className}`} style={{ background: color }} />;
+  return (
+    <div
+      className={`${s} rounded-full flex-shrink-0 ${className}`}
+      style={{ background: color }}
+      role="status"
+      aria-label={status}
+    />
+  );
 }

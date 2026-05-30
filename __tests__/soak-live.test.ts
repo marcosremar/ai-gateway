@@ -14,7 +14,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { GatewayHttpClient } from '../../sdk/node';
 
-const GATEWAY_URL = process.env.GATEWAY_URL || process.env.GATEWAY_URL || 'http://localhost:4000';
+const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:4000';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_loadtest_2026';
 const SKIP = process.env.SKIP_LIVE_TESTS === '1';
 const SOAK_DURATION_MS = Number(process.env.SOAK_DURATION_MS) || 2 * 60 * 1000; // 2 minutes
@@ -66,7 +66,7 @@ function analyzeTrend(windows: WindowReport[]): 'stable' | 'degrading' | 'improv
   return 'stable';
 }
 
-describe.skipIf(SKIP)('Soak Test — Live Gateway', { timeout: SOAK_DURATION_MS + 120_000 }, () => {
+(SKIP ? describe.skip : describe)('Soak Test — Live Gateway', { timeout: SOAK_DURATION_MS + 120_000 }, () => {
   let gw: GatewayHttpClient;
 
   beforeAll(() => {

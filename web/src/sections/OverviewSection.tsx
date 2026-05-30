@@ -7,7 +7,7 @@ import { useGpuList } from '@/hooks/useGpuList';
 import { useBotStatus } from '@/hooks/useBotStatus';
 import { useGatewayWs } from '@/hooks/useGatewayWs';
 import { getRequestLog, getReadinessStatus, type RequestLogEntry, type GpuReadinessState, type ReadinessStatusResponse, type CloudHealthEntry } from '@/lib/gateway';
-import { AlertBanner, Spinner, StatusBadge } from '@/components/ui';
+import { AlertBanner, Spinner, StatusBadge, SkeletonCard } from '@/components/ui';
 import { phaseColor, phaseBg, phaseVariant, phaseLabel, formatPhaseDuration, STAGE_COLORS, type ServicePhase } from '@/lib/phase-colors';
 import { PipelineHealthCard } from './PipelineHealthCard';
 import {
@@ -363,15 +363,46 @@ export function OverviewSection() {
   }, [loadLatencies]);
 
   if (error) return <AlertBanner variant="error" className="m-6">Gateway unavailable: {error}</AlertBanner>;
-  if (!health) return <div className="flex justify-center p-12"><Spinner size="lg" /></div>;
+  if (!health) {
+    return (
+      <div className="p-6 space-y-4">
+        <SkeletonCard />
+        <div className="grid grid-cols-2 gap-4">
+          <SkeletonCard />
+          <SkeletonCard />
+        </div>
+        <SkeletonCard />
+      </div>
+    );
+  }
 
   const isOnline = health.status === 'ok';
   const statusColor = isOnline ? '#10b981' : '#f59e0b';
   const providerEntries = Object.entries(health.providerMetrics || {});
   const maxRequests = Math.max(...providerEntries.map(([, m]) => m.requests), 1);
 
+  const balanceAlerts = (health.balanceAlerts ?? []).filter(b => b.balance != null && b.balance < 0);
+
   return (
     <div className="p-6 space-y-5">
+
+      {balanceAlerts.length > 0 && (
+        <AlertBanner variant="error">
+          {balanceAlerts.length === 1 ? (
+            <>
+              <strong>{balanceAlerts[0].provider}</strong> balance is negative ({new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(balanceAlerts[0].balance!)}).
+              {balanceAlerts[0].billingUrl && balanceAlerts[0].billingUrl !== 'https://undefined' && (
+                <> <a href={balanceAlerts[0].billingUrl} target="_blank" rel="noreferrer" className="underline">Top up →</a></>
+              )}
+            </>
+          ) : (
+            <><strong>{balanceAlerts.length}</strong> providers with low/negative balance: {balanceAlerts.map(b => b.provider).join(', ')}</>
+          )}
+        </AlertBanner>
+      )}
+
+      {/* ── Mute control ── */}
+      <MuteControlCard />
 
       {/* ── Status strip ── */}
       {(() => {
@@ -424,8 +455,11 @@ export function OverviewSection() {
                   </span>
                 )}
                 {health.reason && (
-                  <span className="text-[11px] ml-auto font-medium" style={{ color: '#fbbf24' }}>{health.reason}</span>
+                  <span className="text-[11px] font-medium" style={{ color: '#fbbf24' }}>{health.reason}</span>
                 )}
+                <span className="text-[10px] ml-auto" style={{ color: 'var(--color-text-muted)' }} title={new Date().toLocaleString()}>
+                  updated <span className="font-mono">just now</span>
+                </span>
               </div>
             </div>
             {/* Cloud API health row */}
@@ -770,6 +804,85 @@ export function OverviewSection() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── MuteControlCard — admin pane for runtime mute strategy ──────────────────
+
+function MuteControlCard() {
+  const [state, setState] = useState<{ muted: boolean; strategy: string | null } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const { getMuteState } = await import('@/lib/gateway');
+      const s = await getMuteState();
+      setState(s);
+    } catch { /* observers may not be attached yet */ }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 3000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  const choose = async (strategy: 'always_mute_during_bot_speech' | 'mute_until_first_word' | 'never') => {
+    setBusy(true);
+    try {
+      const { setMuteStrategy } = await import('@/lib/gateway');
+      await setMuteStrategy(strategy);
+      await load();
+    } finally { setBusy(false); }
+  };
+
+  if (!state) return null;
+
+  const labels: Record<string, string> = {
+    always_mute_during_bot_speech: 'Always mute',
+    mute_until_first_word: 'Until first word',
+    never: 'Never',
+  };
+
+  return (
+    <div className="rounded-xl border overflow-hidden"
+      style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface-elevated)' }}>
+      <div className="flex items-center justify-between px-4 py-3 gap-4 flex-wrap">
+        <div className="flex items-center gap-3">
+          <div
+            className="w-2 h-2 rounded-full"
+            style={{ background: state.muted ? '#fbbf24' : '#34d399' }}
+            title={state.muted ? 'Currently muted (bot speaking)' : 'Mic active'}
+          />
+          <span className="text-[12px] font-semibold" style={{ color: 'var(--color-text)' }}>
+            User mic gate
+          </span>
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded"
+            style={{ background: 'var(--color-surface)', color: state.muted ? '#fbbf24' : '#34d399' }}>
+            {state.muted ? 'muted' : 'open'}
+          </span>
+        </div>
+        <div className="flex items-center gap-1 flex-wrap">
+          {(['always_mute_during_bot_speech', 'mute_until_first_word', 'never'] as const).map(s => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => choose(s)}
+              disabled={busy}
+              aria-pressed={state.strategy === s}
+              className="text-[11px] px-2.5 py-1 rounded-md font-medium cursor-pointer disabled:opacity-50"
+              style={{
+                background: state.strategy === s ? 'color-mix(in srgb, var(--color-primary) 18%, transparent)' : 'var(--color-surface)',
+                color: state.strategy === s ? 'var(--color-primary)' : 'var(--color-text-secondary)',
+                border: `1px solid ${state.strategy === s ? 'var(--color-primary)' : 'var(--color-border)'}`,
+              }}
+            >
+              {labels[s]}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

@@ -26,8 +26,11 @@ const NUMERIC_BOUNDS: Array<[string, keyof FinetuneOpts, number, number]> = [
   ['warmupSteps', 'warmupSteps', 0, 10000],
   ['weightDecay', 'weightDecay', 0, 1],
   ['saveEverySteps', 'saveEverySteps', 1, 100_000],
+  ['steps', 'steps', 1, 10_000_000],
+  ['shardCacheMaxGb', 'shardCacheMaxGb', 0.25, 10_000],
   ['gradClip', 'gradClip', 0.001, 100],
   ['logEverySteps', 'logEverySteps', 1, 10000],
+  ['workers', 'workers', 0, 64],
   ['rewindThreshold', 'rewindThreshold', 1.5, 100],
   ['plateauTolerance', 'plateauTolerance', 0, 1],
   ['autoStopPlateau', 'autoStopPlateau', 0, 100000],
@@ -142,6 +145,24 @@ export function resolveProjectOpts(opts: Partial<FinetuneOpts>): {
     lr:        opts.lr        ?? m.defaultLR,
     gpu:       opts.gpu       ?? m.defaultGpu,
     maxSpend:  opts.maxSpend  ?? m.defaultMaxSpend,
+    r2Bucket: opts.r2Bucket ?? m.r2Bucket,
+    r2Prefix: opts.r2Prefix ?? m.r2Prefix,
+    resumeFromR2: opts.resumeFromR2 ?? m.resumeFromR2,
+    r2ShardedRoot: opts.r2ShardedRoot ?? m.r2ShardedRoot,
+    r2ShardedManifest: opts.r2ShardedManifest ?? m.r2ShardedManifest,
+    r2BaseCkpt: opts.r2BaseCkpt ?? m.r2BaseCkpt,
+    r2BaseVocab: opts.r2BaseVocab ?? m.r2BaseVocab,
+    r2CkptDest: opts.r2CkptDest ?? m.r2CkptDest,
+    shardCacheDir: opts.shardCacheDir ?? m.shardCacheDir,
+    shardCacheMaxGb: opts.shardCacheMaxGb ?? m.shardCacheMaxGb,
+    steps: opts.steps ?? m.steps,
+    batchSize: opts.batchSize ?? m.batchSize,
+    saveEverySteps: opts.saveEverySteps ?? m.saveEverySteps,
+    logEverySteps: opts.logEverySteps ?? m.logEverySteps,
+    workers: opts.workers ?? m.workers,
+    skipSmoke: opts.skipSmoke ?? m.skipSmoke,
+    encodeCmd: opts.encodeCmd ?? m.encodeCmd,
+    trainCmd: opts.trainCmd ?? m.trainCmd,
     // type comes from preset, not caller — overwrite
     type: (opts.type !== undefined && !opts.project ? opts.type : m.preset) as FinetuneOpts['type'],
   };
@@ -189,7 +210,7 @@ export function validateSpec(spec: Partial<FinetuneOpts>): ValidationResult {
   if (effectiveSpec.model && !effectiveSpec.model.startsWith('hf://')) {
     errs.push('model must use hf://owner/repo form');
   }
-  if (!effectiveSpec.dataset && (hasPreset || effectiveSpec.type === 'audio' || effectiveSpec.type === 'text')) {
+  if (!effectiveSpec.dataset && !effectiveSpec.r2ShardedRoot && (hasPreset || effectiveSpec.type === 'audio' || effectiveSpec.type === 'text')) {
     errs.push('missing required: dataset (hf://owner/repo)');
   }
   if (spec.pushToHf && !spec.pushToHf.includes('/')) {
@@ -216,6 +237,12 @@ export function validateSpec(spec: Partial<FinetuneOpts>): ValidationResult {
   }
   if (spec.resumeFromR2 && !spec.r2Bucket) {
     errs.push('resumeFromR2 requires r2Bucket to be set');
+  }
+  if (spec.r2ShardedRoot && !/^[A-Za-z0-9_-]+:/.test(spec.r2ShardedRoot)) {
+    errs.push(`r2ShardedRoot must be an rclone remote path (e.g. r2aigw:bucket/path)`);
+  }
+  if (spec.r2ShardedManifest && !/^[A-Za-z0-9_-]+:/.test(spec.r2ShardedManifest)) {
+    errs.push(`r2ShardedManifest must be an rclone remote path`);
   }
 
   // ── Providers ──

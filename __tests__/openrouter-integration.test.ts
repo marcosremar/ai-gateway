@@ -8,13 +8,16 @@
  * Only 2 LLM models tested: gpt-4o-mini (paid routing) + llama (free tier).
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, test, expect, beforeAll } from 'vitest';
 import { openrouterLLM } from '../src/providers/openrouter';
 import { OpenRouterImageProvider } from '../src/providers/openrouter/openrouter-image';
 import type { LLMResponse } from '../src/providers/types';
 import { loadEnv, timed } from './helpers';
 
 beforeAll(() => loadEnv());
+
+const hasApiKey = !!process.env.OPENROUTER_API_KEY;
+const skipLive = process.env.SKIP_LIVE_TESTS === '1';
 
 function skipOn(err: unknown): boolean {
   const s = (err as Record<string, unknown>)?.status;
@@ -27,13 +30,14 @@ function skipOn(err: unknown): boolean {
 // llama-3.3-70b: verifies free-tier routing (zero cost)
 // Dropped: claude-3.5-haiku — routing to Claude is proved by any successful call.
 
-describe.skipIf(!process.env.OPENROUTER_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('OpenRouter LLM (Real API)', () => {
+describe('OpenRouter LLM (Real API)', () => {
   let gptResult: LLMResponse | null = null;
   let llamaResult: LLMResponse | null = null;
   let gptMs = 0;
 
   beforeAll(async () => {
-    // Call 1: paid model (gpt-4o-mini)
+    if (!hasApiKey || skipLive) return;
+
     try {
       ({ result: gptResult, ms: gptMs } = await timed(() =>
         openrouterLLM.chat({
@@ -50,7 +54,6 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY || process.env.SKIP_LIVE_TESTS =
       if (!skipOn(err)) throw err;
     }
 
-    // Call 2: free model (llama) — different code path, zero cost
     try {
       ({ result: llamaResult } = await timed(() =>
         openrouterLLM.chat({
@@ -64,19 +67,22 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY || process.env.SKIP_LIVE_TESTS =
     }
   });
 
-  it('gpt-4o-mini routes correctly and returns expected answer', () => {
+  test('gpt-4o-mini routes correctly and returns expected answer', () => {
+    if (!hasApiKey || skipLive) return;
     if (!gptResult) return;
     expect(gptResult.content.toLowerCase()).toContain('jupiter');
     console.log(`  OpenRouter LLM (gpt-4o-mini): "${gptResult.content}" (${gptMs}ms)`);
   });
 
-  it('gpt-4o-mini returns usage stats', () => {
+  test('gpt-4o-mini returns usage stats', () => {
+    if (!hasApiKey || skipLive) return;
     if (!gptResult) return;
     expect(gptResult.usage).toBeDefined();
     expect(gptResult.usage!.totalTokens).toBeGreaterThan(0);
   });
 
-  it('llama-3.3-70b (free) routes and returns a response', () => {
+  test('llama-3.3-70b (free) routes and returns a response', () => {
+    if (!hasApiKey || skipLive) return;
     if (!llamaResult) return;
     expect(llamaResult.content.toLowerCase()).toContain('hello');
   });
@@ -84,12 +90,14 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY || process.env.SKIP_LIVE_TESTS =
 
 // ── Image ── 1 call total ────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.OPENROUTER_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('OpenRouter Image (Real API)', () => {
+describe('OpenRouter Image (Real API)', () => {
   const image = new OpenRouterImageProvider();
   let result: { image: Buffer; contentType: string } | null = null;
   let ms = 0;
 
   beforeAll(async () => {
+    if (!hasApiKey || skipLive) return;
+
     try {
       ({ result, ms } = await timed(() =>
         image.generate({
@@ -102,14 +110,16 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY || process.env.SKIP_LIVE_TESTS =
     }
   });
 
-  it('returns image buffer', () => {
+  test('returns image buffer', () => {
+    if (!hasApiKey || skipLive) return;
     if (!result) return;
     expect(result.image).toBeInstanceOf(Buffer);
     expect(result.image.length).toBeGreaterThan(500);
     console.log(`  OpenRouter Image: ${result.image.length} bytes, ${result.contentType} (${ms}ms)`);
   });
 
-  it('returns a valid content type', () => {
+  test('returns a valid content type', () => {
+    if (!hasApiKey || skipLive) return;
     if (!result) return;
     expect(result.contentType).toMatch(/^image\//);
   });

@@ -2117,6 +2117,15 @@ interface GpuFinetuneOpts {
   r2Bucket?: string;            // R2/S3 bucket for durable dataset+ckpt storage (spot-resume)
   r2Prefix?: string;            // stable prefix/folder (default jobs/<project|type>) — ties data to the run
   resumeFromR2?: boolean;       // on (re)start, restore /workspace/checkpoints from R2 and --resume
+  r2ShardedRoot?: string;       // rclone remote root for Route2 sharded NPY dataset
+  r2ShardedManifest?: string;   // rclone remote manifest for Route2 sharded NPY dataset
+  r2BaseCkpt?: string;          // base Route2 checkpoint remote
+  r2BaseVocab?: string;         // base Route2 phon_vocab remote
+  r2CkptDest?: string;          // Route2 checkpoint sync destination
+  shardCacheDir?: string;       // local bounded cache dir for R2 shards
+  shardCacheMaxGb?: number;     // max shard cache size in GiB
+  steps?: number;               // step-based trainers
+  workers?: number;             // dataloader workers
   extraTrainArgs?: string;
   extraDeps?: string;           // extra pip packages
   aptPkgs?: string;             // extra apt-get packages
@@ -7046,6 +7055,14 @@ Per-app isolation:
                 r2Bucket: getArg(args, '--r2-bucket') || spec.r2Bucket,
                 r2Prefix: getArg(args, '--r2-prefix') || spec.r2Prefix,
                 resumeFromR2: hasFlag(args, '--resume-from-r2') || spec.resumeFromR2 === true,
+                r2ShardedRoot: getArg(args, '--r2-sharded-root') || spec.r2ShardedRoot,
+                r2ShardedManifest: getArg(args, '--r2-sharded-manifest') || spec.r2ShardedManifest,
+                r2BaseCkpt: getArg(args, '--r2-base-ckpt') || spec.r2BaseCkpt,
+                r2BaseVocab: getArg(args, '--r2-base-vocab') || spec.r2BaseVocab,
+                r2CkptDest: getArg(args, '--r2-ckpt-dest') || spec.r2CkptDest,
+                shardCacheDir: getArg(args, '--shard-cache-dir') || spec.shardCacheDir,
+                shardCacheMaxGb: getArg(args, '--shard-cache-max-gb') ? parseFloat(getArg(args, '--shard-cache-max-gb')!) : spec.shardCacheMaxGb,
+                steps: getArg(args, '--steps') ? parseInt(getArg(args, '--steps')!) : spec.steps,
                 incremental: hasFlag(args, '--incremental') || spec.incremental === true,
                 autoFix: hasFlag(args, '--auto-fix') || spec.autoFix === true,
                 plugin: getArg(args, '--plugin') || spec.plugin,
@@ -7087,6 +7104,7 @@ Per-app isolation:
                 seed: getArg(args, '--seed') ? parseInt(getArg(args, '--seed')!) : spec.seed,
                 gradClip: getArg(args, '--grad-clip') ? parseFloat(getArg(args, '--grad-clip')!) : spec.gradClip,
                 logEverySteps: getArg(args, '--log-every-steps') ? parseInt(getArg(args, '--log-every-steps')!) : spec.logEverySteps,
+                workers: getArg(args, '--workers') ? parseInt(getArg(args, '--workers')!) : spec.workers,
               } as any);
             } else if (sub === 'status') {
               if (hasFlag(args, '--raw')) await cmdGpuJobsStatus();
@@ -7125,13 +7143,22 @@ Per-app isolation:
             } else if (sub === 'validate') {
               // Merge CLI overrides into validation payload so pure-CLI users
               // (no yaml) get the same coverage as yaml users.
+              const validateProject = getArg(args, '--project') || spec.project;
+              let validateResolved = { ...spec, project: validateProject };
+              if (validateProject) {
+                const { resolveProjectOpts } = await import('../src/modules/gpu-finetune/index.js');
+                validateResolved = resolveProjectOpts(validateResolved).opts as typeof validateResolved;
+              }
               const validateSpec = {
-                ...spec,
-                type: getArg(args, '--type') || spec.type,
-                dataset: getArg(args, '--dataset') || spec.dataset,
-                hfBase: getArg(args, '--hf-base') || spec.hfBase,
-                gpu: getArg(args, '--gpu') || spec.gpu,
-                script: getArg(args, '--script') || spec.script,
+                ...validateResolved,
+                type: getArg(args, '--type') || validateResolved.type,
+                dataset: getArg(args, '--dataset') || validateResolved.dataset,
+                hfBase: getArg(args, '--hf-base') || validateResolved.hfBase,
+                gpu: getArg(args, '--gpu') || validateResolved.gpu,
+                script: getArg(args, '--script') || validateResolved.script,
+                r2Bucket: getArg(args, '--r2-bucket') || validateResolved.r2Bucket,
+                r2ShardedRoot: getArg(args, '--r2-sharded-root') || validateResolved.r2ShardedRoot,
+                r2ShardedManifest: getArg(args, '--r2-sharded-manifest') || validateResolved.r2ShardedManifest,
               };
               const errs = validateFinetuneSpec(validateSpec);
               // Local dataset validation only if dataset path is local file (not hf://)
@@ -7149,8 +7176,8 @@ Per-app isolation:
                   model: getArg(args, '--model') || spec.model,
                   pushToHf: getArg(args, '--push-to-hf') || spec.pushToHf,
                   prepare: spec.prepare,
-                  r2Bucket: getArg(args, '--r2-bucket') || spec.r2Bucket,
-                  resumeFromR2: hasFlag(args, '--resume-from-r2') || spec.resumeFromR2 === true,
+                  r2Bucket: getArg(args, '--r2-bucket') || validateResolved.r2Bucket,
+                  resumeFromR2: hasFlag(args, '--resume-from-r2') || validateResolved.resumeFromR2 === true,
                 } as Partial<FinetuneOpts>);
                 if (!pf.ok) process.exit(1);
               }

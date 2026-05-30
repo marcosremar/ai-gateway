@@ -8,12 +8,15 @@
  * 4. Event loop saturation — single-threaded Node.js blocks on body parsing
  *
  * This test isolates each variable.
+ *
+ * Run: bunx vitest run __tests__/latency-investigation.test.ts
+ * Set SKIP_LIVE_TESTS=1 to skip.
  */
 
 import { describe, it, expect } from 'vitest';
 import { GatewayHttpClient } from '../../sdk/node';
 
-const GATEWAY_URL = process.env.GATEWAY_URL || process.env.GATEWAY_URL || 'http://localhost:4000';
+const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:4000';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_loadtest_2026';
 const SKIP = process.env.SKIP_LIVE_TESTS === '1';
 
@@ -72,7 +75,7 @@ function logResults(label: string, results: TimedResult[]) {
   }
 }
 
-describe.skipIf(SKIP)('Latency Investigation', { timeout: 600_000 }, () => {
+(SKIP ? describe.skip : describe)('Latency Investigation', { timeout: 600_000 }, () => {
 
   // ── Hypothesis 1: Cold start ──────────────────────────────────────────
   // If the first batch is slow because Fly machines are waking up,

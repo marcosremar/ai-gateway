@@ -17,6 +17,7 @@ import { handleAudioSpeech } from './routes/audio-speech';
 import { handleAudioTranscriptions } from './routes/audio-transcriptions';
 import { handleModelsWithDynamic } from './routes/models';
 import { handleImageGenerate, handleImageInpaint } from './routes/images';
+import { handleSearch } from './routes/search';
 import { createLogger, withLogContext } from '../../logger';
 import { ApiKeyRegistry } from './middleware/api-keys';
 import type { ProxyConfig, PrefixRoute, ProxyRequest, ProxyResponse } from './types';
@@ -709,6 +710,8 @@ export function createProxyServer(config: ProxyConfig): Server {
         proxyRes = await handleImageGenerate(proxyReq, config.providers.image);
       } else if (method === 'POST' && url === '/v1/images/inpaint') {
         proxyRes = await handleImageInpaint(proxyReq, config.providers.image);
+      } else if ((method === 'GET' || method === 'POST') && url.split('?')[0] === '/v1/search') {
+        proxyRes = await handleSearch(proxyReq);
       // /health is handled before auth (line 345) — no need to match here
       } else if (method === 'GET' && config.staticDir && serveStaticFile(config.staticDir, path, res, requestId)) {
         return; // static file served

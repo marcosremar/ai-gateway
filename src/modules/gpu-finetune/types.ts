@@ -108,6 +108,24 @@ export interface ProjectManifest {
   defaultLR?: number;
   defaultGpu?: string;
   defaultMaxSpend?: number;
+  r2Bucket?: string;
+  r2Prefix?: string;
+  resumeFromR2?: boolean;
+  r2ShardedRoot?: string;
+  r2ShardedManifest?: string;
+  r2BaseCkpt?: string;
+  r2BaseVocab?: string;
+  r2CkptDest?: string;
+  shardCacheDir?: string;
+  shardCacheMaxGb?: number;
+  steps?: number;
+  batchSize?: number;
+  saveEverySteps?: number;
+  logEverySteps?: number;
+  workers?: number;
+  skipSmoke?: boolean;
+  encodeCmd?: string;
+  trainCmd?: string;
   notes?: string;
 }
 
@@ -187,6 +205,24 @@ export interface FinetuneOpts {
   r2Prefix?: string;
   /** Ao subir, restaura /workspace/checkpoints do R2 e retoma o último step. */
   resumeFromR2?: boolean;
+  /** Rclone root containing Route2 sharded NPY dataset. Example: r2aigw:bucket/path. */
+  r2ShardedRoot?: string;
+  /** Manifest JSONL for Route2 sharded dataset. */
+  r2ShardedManifest?: string;
+  /** Base checkpoint remote for Route2 fine-tune. */
+  r2BaseCkpt?: string;
+  /** Base phoneme vocab remote for Route2 fine-tune. */
+  r2BaseVocab?: string;
+  /** Checkpoint destination remote for Route2 periodic sync. */
+  r2CkptDest?: string;
+  /** Local bounded cache directory for R2 shard files. */
+  shardCacheDir?: string;
+  /** Max local shard cache size in GiB. */
+  shardCacheMaxGb?: number;
+  /** Step count for trainers that are step-based instead of epoch-based. */
+  steps?: number;
+  /** Dataloader workers for trainers that expose this knob. */
+  workers?: number;
 
   // Operations
   autoResume?: boolean;

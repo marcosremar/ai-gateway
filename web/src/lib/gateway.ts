@@ -2,8 +2,16 @@ const GATEWAY = typeof window !== 'undefined'
   ? (process.env.NEXT_PUBLIC_GATEWAY_URL || window.location.origin)
   : 'http://localhost:4000';
 
+const GATEWAY_API_KEY = process.env.NEXT_PUBLIC_GATEWAY_API_KEY || '';
+
 async function gw(path: string, opts?: RequestInit): Promise<Response> {
-  return fetch(`${GATEWAY}${path}`, { credentials: 'include', ...opts });
+  const headers: Record<string, string> = {
+    ...(opts?.headers as Record<string, string> | undefined),
+  };
+  if (GATEWAY_API_KEY && !headers['Authorization'] && !headers['authorization']) {
+    headers['Authorization'] = `Bearer ${GATEWAY_API_KEY}`;
+  }
+  return fetch(`${GATEWAY}${path}`, { credentials: 'include', ...opts, headers });
 }
 
 async function gwJson<T>(path: string, opts?: RequestInit): Promise<T> {
@@ -32,6 +40,17 @@ export interface CloudHealthEntry {
   error?: string;
 }
 
+export interface ProviderBalanceEntry {
+  provider: string;
+  apiKeyHint?: string;
+  balance: number | null;
+  spendPerHr?: number;
+  spendPerDay?: number;
+  billingUrl?: string;
+  low?: boolean;
+  active?: boolean;
+}
+
 export interface HealthResponse {
   status: string;
   uptime_sec: number;
@@ -45,6 +64,8 @@ export interface HealthResponse {
   reason?: string;
   cloudHealth?: CloudHealthEntry[];
   cloudHealthAt?: number;
+  providerBalances?: ProviderBalanceEntry[];
+  balanceAlerts?: ProviderBalanceEntry[];
   translationCache?: {
     hits: number;
     misses: number;
@@ -77,8 +98,38 @@ export interface MetricsResponse {
   uptimeSec: number;
 }
 
+function parsePrometheus(text: string): MetricsResponse {
+  const get = (name: string): number => {
+    const re = new RegExp(`^${name}(?:\\{[^}]*\\})?\\s+([0-9eE.+-]+)`, 'm');
+    const m = text.match(re);
+    return m ? Number(m[1]) : 0;
+  };
+  const groupedBy = (name: string, label: string): Record<string, number> => {
+    const re = new RegExp(`^${name}\\{[^}]*${label}="([^"]+)"[^}]*\\}\\s+([0-9eE.+-]+)`, 'gm');
+    const out: Record<string, number> = {};
+    for (const m of text.matchAll(re)) out[m[1]] = (out[m[1]] ?? 0) + Number(m[2]);
+    return out;
+  };
+  return {
+    requestsTotal: get('aigw_requests_total') || get('requests_total'),
+    requestsByStage: groupedBy('aigw_requests_total', 'stage'),
+    requestsByProvider: groupedBy('aigw_requests_total', 'provider'),
+    errorsTotal: get('aigw_errors_total') || get('errors_total'),
+    latencyP50Ms: get('aigw_latency_p50_ms') || get('latency_p50_ms'),
+    latencyP95Ms: get('aigw_latency_p95_ms') || get('latency_p95_ms'),
+    latencyP99Ms: get('aigw_latency_p99_ms') || get('latency_p99_ms'),
+    gpuStatus: '',
+    uptimeSec: get('aigw_uptime_seconds') || get('uptime_seconds'),
+  };
+}
+
 export async function getMetrics(): Promise<MetricsResponse> {
-  return gwJson('/metrics');
+  const res = await gw('/metrics');
+  if (!res.ok) throw new Error(`Gateway ${res.status}`);
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('json')) return res.json();
+  const text = await res.text();
+  return parsePrometheus(text);
 }
 
 export interface RequestLogEntry {
@@ -105,6 +156,40 @@ export interface RequestLogResponse {
     errors: number;
     byStage: Record<string, number>;
   };
+}
+
+export interface TurnLatencyEntry {
+  ts: number;
+  totalMs: number;
+  sttTtfbMs: number | null;
+  sttFinalMs: number | null;
+  llmTtftMs: number | null;
+  llmCompleteMs: number | null;
+  ttsTtfaMs: number | null;
+  providers: { stt?: string; llm?: string; tts?: string };
+}
+
+export interface TurnLatencyResponse {
+  count: number;
+  items: TurnLatencyEntry[];
+}
+
+export async function getTurnLatencies(): Promise<TurnLatencyResponse> {
+  return gwJson('/v1/observability/turn-latency');
+}
+
+export type MuteStrategy = 'always_mute_during_bot_speech' | 'mute_until_first_word' | 'never';
+export interface MuteState {
+  muted: boolean;
+  strategy: MuteStrategy | null;
+}
+
+export async function getMuteState(): Promise<MuteState> {
+  return gwJson('/v1/observability/mute-state');
+}
+
+export async function setMuteStrategy(strategy: MuteStrategy): Promise<{ ok: boolean; strategy: MuteStrategy; error?: string }> {
+  return gwPost('/v1/observability/mute-state', { strategy });
 }
 
 export async function getRequestLog(sinceId = 0, limit = 50): Promise<RequestLogResponse> {
@@ -970,6 +1055,9 @@ export interface ReadinessStatusResponse {
   targets: { stt: number; llm: number; tts: number };
   p95DemotionMultiplier: number;
   repechageMaxAttempts: number;
+  benchMaxRuns?: number;
+  benchMarginPct?: number;
+  shadowRuns?: number;
 }
 
 export async function getReadinessStatus(): Promise<ReadinessStatusResponse> {

@@ -1582,7 +1582,7 @@ describe.skipIf(!hasKeys)('11. Watchdog', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe.skipIf(!hasKeys)('12. Provider API Operations', () => {
-  it('12.1 RunPod listInstances succeeds', async () => {
+  it.skipIf(!hasKeys)('12.1 RunPod listInstances succeeds', async () => {
     const { result: instances, ms } = await timed(() =>
       runpodClient.listInstances(runpodCreds),
     );
@@ -1590,7 +1590,7 @@ describe.skipIf(!hasKeys)('12. Provider API Operations', () => {
     expect(Array.isArray(instances)).toBe(true);
   });
 
-  it('12.2 Vast.ai listInstances succeeds', async () => {
+  it.skipIf(!hasKeys)('12.2 Vast.ai listInstances succeeds', async () => {
     const { result: instances, ms } = await timed(() =>
       vastClient.listInstances(vastCreds),
     );
@@ -1625,7 +1625,7 @@ describe.skipIf(!hasKeys)('12. Provider API Operations', () => {
     expect(registry.get('tensordock')).toBeUndefined();
   });
 
-  it('12.6 RunPod non-existent pod → null/error', async () => {
+  it.skipIf(!hasKeys)('12.6 RunPod non-existent pod → null/error', async () => {
     try {
       const status = await runpodClient.getInstanceStatus('non-existent-pod-id-12345', runpodCreds);
       // May return null or throw

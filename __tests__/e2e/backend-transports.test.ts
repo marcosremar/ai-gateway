@@ -29,6 +29,9 @@ const hasBackendServers =
   existsSync(resolve(process.cwd(), 'backend/ws-server.ts')) &&
   existsSync(resolve(process.cwd(), 'backend/webrtc-server.ts'));
 
+const runBackendTests = hasWerift && hasBackendServers;
+const describeOrSkip = (run: boolean) => run ? describe : describe.skip;
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -155,7 +158,7 @@ afterAll(() => {
 // WebSocket Server Tests
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!hasWerift || !hasBackendServers)('WebSocket backend server', () => {
+describeOrSkip(runBackendTests)('WebSocket backend server', () => {
 
   // ── Health ──────────────────────────────────────────────────────────────
 
@@ -336,7 +339,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebSocket backend server', ()
 // WebRTC Server Tests
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () => {
+describeOrSkip(runBackendTests)('WebRTC backend server', () => {
 
   // ── Health ──────────────────────────────────────────────────────────────
 
@@ -538,7 +541,7 @@ describe.skipIf(!hasWerift || !hasBackendServers)('WebRTC backend server', () =>
 // Discovery Probing Tests
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!hasWerift || !hasBackendServers)('Discovery probing', () => {
+describeOrSkip(runBackendTests)('Discovery probing', () => {
   async function probe(url: string, timeoutMs = 2000): Promise<boolean> {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });

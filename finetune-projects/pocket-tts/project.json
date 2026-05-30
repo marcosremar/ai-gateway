@@ -1,0 +1,12 @@
+{
+  "name": "pocket-tts",
+  "description": "Fine-tune kyutai/pocket-tts (Sonic) for Portuguese voice transfer using flow-matching.",
+  "preset": "flow-matching-tts",
+  "model": "hf://kyutai/pocket-tts",
+  "defaultDataset": "hf://paozinhofrances2024/erinome-voice",
+  "defaultEpochs": 1,
+  "defaultLR": 1e-6,
+  "defaultGpu": "4090",
+  "defaultMaxSpend": 1.5,
+  "notes": "Mimi codec MUST be frozen. LR sweet spot ~1e-6. 1-3 epochs max (overfit risk). Use intermediate checkpoint, not final."
+}

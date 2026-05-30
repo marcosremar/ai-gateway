@@ -22,11 +22,10 @@ function skipOn(err: unknown): boolean {
 
 // Top-level await: load env and verify OpenAI is actually usable (not rate-limited)
 await loadEnv();
-const OPENAI_AVAILABLE = process.env.OPENAI_API_KEY && process.env.SKIP_LIVE_TESTS !== "1"
-  ? await checkOpenAIAvailable(process.env.OPENAI_API_KEY)
-  : false;
+const OPENAI_AVAILABLE = !!(process.env.OPENAI_API_KEY && process.env.SKIP_LIVE_TESTS !== "1");
+const describeOrSkip = (run: boolean) => run ? describe : describe.skip;
 if (!OPENAI_AVAILABLE && process.env.OPENAI_API_KEY) {
-  console.log('[openai-integration] OpenAI unavailable (rate-limited or invalid key) — all tests will be skipped');
+  console.log('[openai-integration] OpenAI unavailable — all tests will be skipped');
 }
 
 const openaiLLM = new OpenAICompatLLMProvider({
@@ -38,7 +37,7 @@ const openaiLLM = new OpenAICompatLLMProvider({
 
 // ── STT ── 2 calls (2 different models), results shared across assertions ────
 
-describe.skipIf(!OPENAI_AVAILABLE)('OpenAI STT (Real API)', () => {
+describeOrSkip(OPENAI_AVAILABLE)('OpenAI STT (Real API)', () => {
   const stt = new OpenAISTTProvider();
   const audio = makeTestWav(0.5); // 0.5s — minimum viable audio
   let whisper1: { text: string } | null = null;
@@ -81,7 +80,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('OpenAI STT (Real API)', () => {
 
 // ── TTS ── 1 synthesize call shared, 1 stream call ──────────────────────────
 
-describe.skipIf(!OPENAI_AVAILABLE)('OpenAI TTS (Real API)', () => {
+describeOrSkip(OPENAI_AVAILABLE)('OpenAI TTS (Real API)', () => {
   const tts = new OpenAITTSProvider();
   let synth: TTSResponse | null = null;
   let ms = 0;
@@ -138,7 +137,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('OpenAI TTS (Real API)', () => {
 
 // ── LLM ── 1 call covers: content, model, usage, JSON format ────────────────
 
-describe.skipIf(!OPENAI_AVAILABLE)('OpenAI LLM (Real API)', () => {
+describeOrSkip(OPENAI_AVAILABLE)('OpenAI LLM (Real API)', () => {
   let llm: LLMResponse | null = null;
   let ms = 0;
 
@@ -181,7 +180,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('OpenAI LLM (Real API)', () => {
 
 // ── Realtime ── 1 session call covers all config assertions ─────────────────
 
-describe.skipIf(!OPENAI_AVAILABLE)('OpenAI Realtime (Real API)', () => {
+describeOrSkip(OPENAI_AVAILABLE)('OpenAI Realtime (Real API)', () => {
   const realtime = new OpenAIRealtimeProvider();
   type Session = Awaited<ReturnType<typeof realtime.createSession>>;
   let session: Session | null = null;
@@ -218,7 +217,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('OpenAI Realtime (Real API)', () => {
   });
 });
 
-describe.skipIf(!OPENAI_AVAILABLE)('OpenAI Omni (Real API)', () => {
+describeOrSkip(OPENAI_AVAILABLE)('OpenAI Omni (Real API)', () => {
   const omni = new OpenAIOmniProvider();
 
   it('generates text+audio from text input', async () => {
@@ -242,7 +241,7 @@ describe.skipIf(!OPENAI_AVAILABLE)('OpenAI Omni (Real API)', () => {
   });
 });
 
-describe.skipIf(!OPENAI_AVAILABLE)('OpenAI Image (Real API)', () => {
+describeOrSkip(OPENAI_AVAILABLE)('OpenAI Image (Real API)', () => {
   const image = new OpenAIImageProvider();
 
   it('generates an image with dall-e-2', async () => {

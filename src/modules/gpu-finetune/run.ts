@@ -395,7 +395,23 @@ export class FinetuneGateway {
       ? Object.entries(secrets).map(([k, v]) => `export ${k}='${v}'`)
       : [];
 
-    return [...livePushExports, ...wandbExports, ...secretExports];
+    const route2Exports = [
+      opts.r2ShardedRoot ? `export R2_SHARDED_ROOT='${opts.r2ShardedRoot}'` : '',
+      opts.r2ShardedManifest ? `export R2_SHARDED_MANIFEST='${opts.r2ShardedManifest}'` : '',
+      opts.r2BaseCkpt ? `export R2_BASE_CKPT='${opts.r2BaseCkpt}'` : '',
+      opts.r2BaseVocab ? `export R2_BASE_VOCAB='${opts.r2BaseVocab}'` : '',
+      opts.r2CkptDest ? `export R2_CKPT_DEST='${opts.r2CkptDest}'` : '',
+      opts.shardCacheDir ? `export SHARD_CACHE_DIR='${opts.shardCacheDir}'` : '',
+      opts.shardCacheMaxGb !== undefined ? `export SHARD_CACHE_MAX_GB='${opts.shardCacheMaxGb}'` : '',
+      opts.steps !== undefined ? `export ROUTE2_STEPS='${opts.steps}'` : '',
+      `export ROUTE2_BATCH='${opts.batchSize ?? 32}'`,
+      `export ROUTE2_LR='${opts.lr}'`,
+      `export ROUTE2_WORKERS='${opts.workers ?? 2}'`,
+      `export ROUTE2_SAVE_EVERY='${opts.saveEverySteps ?? 500}'`,
+      `export ROUTE2_LOG_EVERY='${opts.logEverySteps ?? 20}'`,
+    ].filter(Boolean);
+
+    return [...livePushExports, ...wandbExports, ...secretExports, ...route2Exports];
   }
 
   private buildAptStage(opts: ResolvedFinetune): string {

@@ -26,6 +26,8 @@ export interface DeployExtra {
   /** Bump host-quality threshold + suppress SSH-only-host fallback in
    *  Vast offer search. See InstanceSpec.strictFastBoot. */
   strictFastBoot?: boolean;
+  /** Vast.ai offer-search profile (`high_quality` default vs `full` compatibility mode). */
+  searchMode?: 'high_quality' | 'full';
   snapgpuPreloadApp?: string;
   snapgpuAutoSnapshot?: boolean;
   snapgpuBackend?: 'vast' | 'runpod';

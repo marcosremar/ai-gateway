@@ -1,0 +1,12 @@
+{
+  "name": "vui-ptbr",
+  "description": "Fine-tune resemble-ai/vui-100m-base on Portuguese (PT-BR) speech for improved phonetic coverage.",
+  "preset": "codec-tts",
+  "model": "hf://fluxions/vui",
+  "defaultDataset": "hf://freds0/cml_tts_dataset_portuguese",
+  "defaultEpochs": 3,
+  "defaultLR": 3e-5,
+  "defaultGpu": "4090",
+  "defaultMaxSpend": 3.0,
+  "notes": "Fluac codec MUST be frozen. ByT5 tokenizer handles PT-BR natively. 3000 steps (~8h dataset, batch=4) achieves loss ~4.95."
+}

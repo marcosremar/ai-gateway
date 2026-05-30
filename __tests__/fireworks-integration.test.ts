@@ -15,7 +15,8 @@ import { FireworksImageProvider } from '../src/providers/fireworks/fireworks-ima
 import type { STTResponse, LLMResponse } from '../src/providers/types';
 import { loadEnv, makeTestWav, timed } from './helpers';
 
-beforeAll(() => loadEnv());
+const FIREWORKS_AVAILABLE = !!(process.env.FIREWORKS_API_KEY && process.env.SKIP_LIVE_TESTS !== "1");
+const describeOrSkip = (run: boolean) => run ? describe : describe.skip;
 
 function skipOn(err: unknown): boolean {
   const s = (err as Record<string, unknown>)?.status;
@@ -24,7 +25,7 @@ function skipOn(err: unknown): boolean {
 
 // ── STT ── 1 call total ──────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.FIREWORKS_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Fireworks STT (Real API)', () => {
+describeOrSkip(FIREWORKS_AVAILABLE)('Fireworks STT (Real API)', () => {
   const audio = makeTestWav(1.0);
   let stt: STTResponse | null = null;
   let ms = 0;
@@ -54,7 +55,7 @@ describe.skipIf(!process.env.FIREWORKS_API_KEY || process.env.SKIP_LIVE_TESTS ==
 //
 // Single short call covers: basic completion, usage, maxTokens respected.
 
-describe.skipIf(!process.env.FIREWORKS_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Fireworks LLM (Real API)', () => {
+describeOrSkip(FIREWORKS_AVAILABLE)('Fireworks LLM (Real API)', () => {
   let llm: LLMResponse | null = null;
   let ms = 0;
 
@@ -96,7 +97,7 @@ describe.skipIf(!process.env.FIREWORKS_API_KEY || process.env.SKIP_LIVE_TESTS ==
 
 // ── Image ── 1 call total ────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.FIREWORKS_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Fireworks Image (Real API)', () => {
+describeOrSkip(FIREWORKS_AVAILABLE)('Fireworks Image (Real API)', () => {
   const image = new FireworksImageProvider();
   let result: { image: Buffer; contentType: string } | null = null;
   let ms = 0;

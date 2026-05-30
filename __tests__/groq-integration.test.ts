@@ -13,7 +13,8 @@ import { groqSTT, groqTTS, groqLLM } from '../src/providers/groq';
 import type { STTResponse, LLMResponse, TTSResponse } from '../src/providers/types';
 import { loadEnv, makeTestWav, timed } from './helpers';
 
-beforeAll(() => loadEnv());
+const GROQ_AVAILABLE = !!(process.env.GROQ_API_KEY && process.env.SKIP_LIVE_TESTS !== "1");
+const describeOrSkip = (run: boolean) => run ? describe : describe.skip;
 
 function skipOn(err: unknown): boolean {
   const s = (err as Record<string, unknown>)?.status;
@@ -22,7 +23,7 @@ function skipOn(err: unknown): boolean {
 
 // ── STT ── 1 call total ──────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.GROQ_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Groq STT (Real API)', () => {
+describeOrSkip(GROQ_AVAILABLE)('Groq STT (Real API)', () => {
   // Shared audio + result — ONE transcription call for the entire suite
   const audio = makeTestWav(0.5); // 0.5s — minimum viable audio
   let stt: STTResponse | null = null;
@@ -56,7 +57,7 @@ describe.skipIf(!process.env.GROQ_API_KEY || process.env.SKIP_LIVE_TESTS === "1"
 
 // ── TTS ── 1 call total ──────────────────────────────────────────────────────
 
-describe.skipIf(!process.env.GROQ_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Groq TTS (Real API)', () => {
+describeOrSkip(GROQ_AVAILABLE)('Groq TTS (Real API)', () => {
   let tts: TTSResponse | null = null;
   let ms = 0;
 
@@ -103,7 +104,7 @@ describe.skipIf(!process.env.GROQ_API_KEY || process.env.SKIP_LIVE_TESTS === "1"
 // Single JSON-mode call covers: basic completion, model/usage fields,
 // maxTokens respected, JSON response format.
 
-describe.skipIf(!process.env.GROQ_API_KEY || process.env.SKIP_LIVE_TESTS === "1")('Groq LLM (Real API)', () => {
+describeOrSkip(GROQ_AVAILABLE)('Groq LLM (Real API)', () => {
   let llm: LLMResponse | null = null;
   let ms = 0;
 

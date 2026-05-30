@@ -129,12 +129,12 @@ describe('handleGpuDeploy — validation', () => {
     expect(handlersSource).toContain('dockerImage is required');
   });
 
-  it('#087 _validateDeployRequest enforces GPU allowlist', () => {
+  it('#087 _validateDeployRequest accepts requested GPUs outside the priority list', () => {
     const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
     const fnEnd = handlersSource.indexOf('\n/**', fnStart + 100);
     const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
-    expect(fnBody).toContain('Rejected non-tested GPU');
-    expect(fnBody).toContain('None of the requested GPUs are in the tested allowlist');
+    expect(fnBody).toContain('Requested GPU(s) outside priority list accepted');
+    expect(fnBody).not.toContain('None of the requested GPUs');
   });
 
   it('#088 _validateDeployRequest validates credential format', () => {
@@ -153,7 +153,7 @@ describe('handleGpuDeploy — validation', () => {
 
   it('#090 _validateDeployRequest caps raceCount at 10', () => {
     const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 14000);
     expect(fnBody).toContain('Math.min(Math.floor(raceCountRaw), 10)');
   });
 });

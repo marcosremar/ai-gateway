@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
-import { Sidebar, type SidebarItem } from '@/components/ui';
+import { Sidebar, type SidebarItem, CommandPalette, type CommandItem, Breadcrumbs, type BreadcrumbCrumb } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon, Gauge, RefreshCw, Activity, FlaskConical, Layers, Server, AppWindow } from 'lucide-react';
 
@@ -98,7 +98,12 @@ function getRouteFromPath(): string {
   const hash = window.location.hash.replace('#/', '').replace('#', '');
   if (hash && VALID_ROUTES.has(hash)) return hash;
   // Pathname: /config/providers or sub-routes like /config/profiles/edit/xxx
-  const path = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
+  // Strip optional /dashboard prefix so both /dashboard/<route> and /<route> resolve.
+  let path = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
+  if (path === 'dashboard' || path.startsWith('dashboard/')) {
+    path = path.replace(/^dashboard\/?/, '');
+  }
+  if (path === '' || path === 'dashboard') return 'overview';
   if (VALID_ROUTES.has(path)) return path;
   // Redirect removed/renamed pages
   if (path === 'config/profiles') return 'config/apps';
@@ -131,8 +136,29 @@ function useTheme() {
 
 function Dashboard() {
   const [activeTab, setActiveTab] = useState('overview');
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const { health, error } = useGateway();
   const { light, toggle: toggleTheme } = useTheme();
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen(o => !o);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const commandItems: CommandItem[] = NAV_ITEMS.filter(i => !i.divider).map(i => {
+    const sectionKey = i.id.includes('/') ? i.id.split('/')[0] : '';
+    const groupLabel = sectionKey === 'config' ? 'Config'
+      : sectionKey === 'tools' ? 'Tools'
+        : sectionKey === 'monitor' ? 'Monitor'
+          : '';
+    return { id: i.id, label: i.label, icon: i.icon, group: groupLabel };
+  });
 
   // Sync tab with URL on mount and popstate
   useEffect(() => {
@@ -156,6 +182,12 @@ function Dashboard() {
 
   return (
     <div className="flex h-screen overflow-hidden">
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        onSelect={(id) => navigate(id)}
+        items={commandItems}
+      />
       <Sidebar
         items={NAV_ITEMS}
         activeItem={activeTab}
@@ -176,9 +208,26 @@ function Dashboard() {
             }}
           >
             <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold">
-                {NAV_ITEMS.find(t => t.id === activeTab)?.label}
-              </span>
+              {(() => {
+                const path = typeof window !== 'undefined' ? window.location.pathname.replace(/^\//, '').replace(/\/$/, '') : '';
+                const isNested = path.split('/').length > 2 && path.startsWith(activeTab);
+                if (!isNested) {
+                  return (
+                    <span className="text-sm font-semibold">
+                      {NAV_ITEMS.find(t => t.id === activeTab)?.label}
+                    </span>
+                  );
+                }
+                const segments = path.split('/');
+                const crumbs: BreadcrumbCrumb[] = [];
+                const sectionLabel = NAV_ITEMS.find(t => t.id === activeTab)?.label ?? activeTab;
+                crumbs.push({ label: sectionLabel, href: `/${activeTab}` });
+                segments.slice(activeTab.split('/').length).forEach((seg, i, arr) => {
+                  const partial = `/${activeTab}/${arr.slice(0, i + 1).join('/')}`;
+                  crumbs.push({ label: seg.charAt(0).toUpperCase() + seg.slice(1), href: partial });
+                });
+                return <Breadcrumbs items={crumbs} />;
+              })()}
             </div>
             <div className="flex items-center gap-3">
               <button
@@ -193,8 +242,18 @@ function Dashboard() {
               >
                 {light ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
               </button>
-              <div className={`w-2 h-2 rounded-full ${health ? 'bg-emerald-500' : error ? 'bg-red-500' : 'bg-zinc-500'}`} />
-              <span className="text-xs font-mono" style={{ color: 'var(--color-text-muted)' }}>
+              <div
+                className={`w-2 h-2 rounded-full ${health ? 'bg-emerald-500' : error ? 'bg-red-500' : 'bg-zinc-500'}`}
+                role="status"
+                aria-label={health ? `Gateway ${health.status}` : error ? 'Gateway offline' : 'Connecting'}
+              />
+              <span
+                className="text-xs font-semibold font-mono uppercase tracking-wider"
+                style={{
+                  color: health ? '#34d399' : error ? '#f87171' : 'var(--color-text-muted)',
+                  letterSpacing: '0.08em',
+                }}
+              >
                 {health ? `${health.status}` : error ? 'Offline' : 'Connecting...'}
               </span>
             </div>

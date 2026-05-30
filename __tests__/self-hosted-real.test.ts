@@ -123,7 +123,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
 
   // ── 1. warmup() health-checks Ollama ──────────────────────────────────────
 
-  it('warmup() reports ok for Ollama on localhost:11434', async () => {
+  it.skipIf(!ollamaAvailable)('warmup() reports ok for Ollama on localhost:11434', async () => {
     const { registry } = buildRegistry();
 
     const client = new AIClient({
@@ -154,7 +154,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
 
   // ── 2. warmup() with replicas checks Ollama N times ───────────────────────
 
-  it('warmup() health-checks each replica independently', async () => {
+  it.skipIf(!ollamaAvailable)('warmup() health-checks each replica independently', async () => {
     const { registry } = buildRegistry();
 
     const client = new AIClient({
@@ -187,7 +187,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
 
   // ── 3. warmup() skips cloud, only warms self-hosted ───────────────────────
 
-  it('warmup() skips cloud providers in mixed profile', async () => {
+  it.skipIf(!ollamaAvailable)('warmup() skips cloud providers in mixed profile', async () => {
     const { registry } = buildRegistry();
 
     const client = new AIClient({
@@ -217,7 +217,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
 
   // ── 4. warmup() reports error for unreachable self-hosted endpoint ────────
 
-  it('warmup() reports error for unreachable endpoint', async () => {
+  it.skipIf(!ollamaAvailable)('warmup() reports error for unreachable endpoint', async () => {
     const { registry } = buildRegistry();
 
     const client = new AIClient({
@@ -246,7 +246,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
 
   // ── 5. chat() through real Ollama (alwaysActive self-hosted) ──────────────
 
-  it('chat() completes through real Ollama', async () => {
+  it.skipIf(!ollamaAvailable)('chat() completes through real Ollama', async () => {
     const { registry } = buildRegistry();
 
     const client = new AIClient({
@@ -312,7 +312,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
 
   // ── 7. Replicas in fallback chain: 2x Ollama + cloud ─────────────────────
 
-  it('replicas expand self-hosted entries in fallback chain', async () => {
+  it.skipIf(!ollamaAvailable)('replicas expand self-hosted entries in fallback chain', async () => {
     const { registry, fakeCloud } = buildRegistry();
 
     const client = new AIClient({
@@ -372,7 +372,7 @@ describe.skipIf(!ollamaAvailable)('Self-hosted warmup — Real Ollama', () => {
 
   // ── 9. Full warmup + chat cycle ──────────────────────────────────────────
 
-  it('warmup then chat — full self-hosted lifecycle', async () => {
+  it.skipIf(!ollamaAvailable)('warmup then chat — full self-hosted lifecycle', async () => {
     const { registry } = buildRegistry();
 
     const client = new AIClient({

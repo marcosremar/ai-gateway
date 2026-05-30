@@ -25,6 +25,8 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
+const itIfReal = (condition: boolean) => condition ? it : it.skip;
+
 // ── Load .env ────────────────────────────────────────────────────────────
 function loadEnv() {
   try {
@@ -133,16 +135,13 @@ function createModalAutoscaler(userId: string, activeSessions: number) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('1. Modal REST API (handleModalApps)', () => {
-  it.skipIf(!hasCredentials)('calls Modal API and returns a valid response', async () => {
+  itIfReal(hasCredentials)('calls Modal API and returns a valid response', async () => {
     const result = await handleModalApps(TOKEN_ID, TOKEN_SECRET);
     const body = result.body as ModalAppsResult;
 
     expect(result.status).toBe(200);
 
-    // Modal's v1/apps endpoint may return gRPC/protobuf instead of JSON.
-    // handleModalApps returns connected:false with an error in that case.
     if (body.connected) {
-      // REST JSON worked — validate app structure
       expect(body.apps).toBeDefined();
       expect(Array.isArray(body.apps)).toBe(true);
       expect(typeof body.totalCount).toBe('number');
@@ -153,16 +152,15 @@ describe('1. Modal REST API (handleModalApps)', () => {
         console.log(`  - ${app.name} [${app.stateLabel}] tasks=${app.nRunningTasks} appId=${app.appId}`);
       }
     } else {
-      // gRPC/protobuf response — handler gracefully reports disconnected
       expect(typeof body.error).toBe('string');
       console.log(`[Modal API] API returned non-JSON (gRPC): ${body.error}`);
     }
   });
 
-  it.skipIf(!hasCredentials)('apps have required fields when API returns JSON', async () => {
+  itIfReal(hasCredentials)('apps have required fields when API returns JSON', async () => {
     const result = await handleModalApps(TOKEN_ID, TOKEN_SECRET);
     const body = result.body as ModalAppsResult;
-    if (!body.connected) return; // skip if gRPC
+    if (!body.connected) return;
 
     const apps = body.apps ?? [];
     for (const app of apps) {
@@ -173,10 +171,10 @@ describe('1. Modal REST API (handleModalApps)', () => {
     }
   });
 
-  it.skipIf(!hasCredentials)('apps are sorted by state priority when API returns JSON', async () => {
+  itIfReal(hasCredentials)('apps are sorted by state priority when API returns JSON', async () => {
     const result = await handleModalApps(TOKEN_ID, TOKEN_SECRET);
     const body = result.body as ModalAppsResult;
-    if (!body.connected) return; // skip if gRPC
+    if (!body.connected) return;
 
     const apps = body.apps ?? [];
     if (apps.length >= 2) {
@@ -357,7 +355,7 @@ describe('3. ModalClient GPU Provider', () => {
     expect(client.bootTimeSecs).toBe(10);
   });
 
-  it.skipIf(!hasCredentials)('discoverInstance finds parle-ultralight app', async () => {
+  itIfReal(hasCredentials)('discoverInstance finds parle-ultralight app', async () => {
     try {
       const instance = await client.discoverInstance(
         { apiKey: API_KEY },
@@ -385,7 +383,7 @@ describe('3. ModalClient GPU Provider', () => {
     }
   }, 60_000);
 
-  it.skipIf(!hasCredentials)('getInstanceStatus returns null for non-existent app', async () => {
+  itIfReal(hasCredentials)('getInstanceStatus returns null for non-existent app', async () => {
     try {
       const status = await client.getInstanceStatus('ap-nonexistent-12345', { apiKey: API_KEY });
       expect(status).toBeNull();
@@ -405,7 +403,7 @@ describe('3. ModalClient GPU Provider', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('4. Autoscaler with Modal Tier', () => {
-  it.skipIf(!hasCredentials)('creates autoscaler with Modal tier and initial state is idle', () => {
+  itIfReal(hasCredentials)('creates autoscaler with Modal tier and initial state is idle', () => {
     const { autoscaler, config } = createModalAutoscaler('test-user-modal', 0);
 
     expect(autoscaler).toBeTruthy();
@@ -431,7 +429,7 @@ describe('4. Autoscaler with Modal Tier', () => {
     expect(autoscaler.registry.get('vast')).toBeTruthy();
   });
 
-  it.skipIf(!hasCredentials)('probeGpuHealth handles MOSS-TTS endpoint', async () => {
+  itIfReal(hasCredentials)('probeGpuHealth handles MOSS-TTS endpoint', async () => {
     const health = await probeGpuHealth(MODAL_TTS_ENDPOINT, false, 10_000);
 
     console.log(`[Autoscaler] Health probe result:`, health);
@@ -445,7 +443,7 @@ describe('4. Autoscaler with Modal Tier', () => {
     }
   }, 15_000);
 
-  it.skipIf(!hasCredentials)('getAutoScaleDecision with 0 sessions returns idle/noop', async () => {
+  itIfReal(hasCredentials)('getAutoScaleDecision with 0 sessions returns idle/noop', async () => {
     const { autoscaler, config } = createModalAutoscaler('test-decision-idle', 0);
 
     const decision = await autoscaler.getAutoScaleDecision(
@@ -462,7 +460,7 @@ describe('4. Autoscaler with Modal Tier', () => {
     expect(decision.gpuState).toBe('idle');
   }, 30_000);
 
-  it.skipIf(!hasCredentials)('getAutoScaleDecision with active sessions triggers boot', async () => {
+  itIfReal(hasCredentials)('getAutoScaleDecision with active sessions triggers boot', async () => {
     const { autoscaler, config } = createModalAutoscaler('test-decision-boot', 1);
 
     const decision = await autoscaler.getAutoScaleDecision(
@@ -491,7 +489,7 @@ describe('4. Autoscaler with Modal Tier', () => {
     console.log(`[Autoscaler] Pool status after decision: ${JSON.stringify(states)}`);
   }, 60_000);
 
-  it.skipIf(!hasCredentials)('PROVIDER_BOOT_SECS includes modal at 60s', () => {
+  itIfReal(hasCredentials)('PROVIDER_BOOT_SECS includes modal at 60s', () => {
     const { autoscaler } = createModalAutoscaler('test-boot-secs', 0);
     expect(autoscaler.PROVIDER_BOOT_SECS.modal).toBe(60);
   });
@@ -501,8 +499,12 @@ describe('4. Autoscaler with Modal Tier', () => {
 // 5. MOSS-TTS Endpoint Health
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe.skipIf(!process.env.MODAL_TOKEN_ID || process.env.SKIP_GPU_TESTS === '1')('5. MOSS-TTS Endpoint Health', () => {
+describe('5. MOSS-TTS Endpoint Health', () => {
+  const hasTokenId = !!process.env.MODAL_TOKEN_ID;
+  const skipGpu = process.env.SKIP_GPU_TESTS === '1';
+
   it('endpoint is reachable (may be stopped)', async () => {
+    if (skipGpu || !hasTokenId) return;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
 
@@ -511,8 +513,6 @@ describe.skipIf(!process.env.MODAL_TOKEN_ID || process.env.SKIP_GPU_TESTS === '1
         signal: controller.signal,
       });
 
-      // A running Modal app returns some response
-      // 404 = app stopped, 200/405 = app running
       console.log(`[Health] ${MODAL_TTS_ENDPOINT} -> ${res.status}`);
       expect(res.status).toBeDefined();
 
@@ -527,8 +527,8 @@ describe.skipIf(!process.env.MODAL_TOKEN_ID || process.env.SKIP_GPU_TESTS === '1
   }, 15_000);
 
   it('/api/text endpoint responds to POST (when running)', async () => {
-    if (!modalTtsAvailable) {
-      console.log('[Health] Skipped — endpoint stopped');
+    if (skipGpu || !hasTokenId || !modalTtsAvailable) {
+      console.log('[Health] Skipped — endpoint stopped or credentials missing');
       return;
     }
 
@@ -568,7 +568,7 @@ describe.skipIf(!process.env.MODAL_TOKEN_ID || process.env.SKIP_GPU_TESTS === '1
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('6. Gateway unified API', () => {
-  it.skipIf(!hasCredentials)('handleModalApps returns valid response structure', async () => {
+  itIfReal(hasCredentials)('handleModalApps returns valid response structure', async () => {
     const result = await handleModalApps(TOKEN_ID, TOKEN_SECRET);
     const body = result.body as ModalAppsResult;
 
@@ -594,7 +594,7 @@ describe('6. Gateway unified API', () => {
     }
   });
 
-  it.skipIf(!hasCredentials)('handleModalStop rejects invalid appId gracefully', async () => {
+  itIfReal(hasCredentials)('handleModalStop rejects invalid appId gracefully', async () => {
     const result = await handleModalStop(
       'ap-nonexistent-99999',
       TOKEN_ID,

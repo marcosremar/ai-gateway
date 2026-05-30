@@ -26,7 +26,10 @@ export default mergeConfig(
         // GPU lifecycle (real provider calls)
         '__tests__/**/*-lifecycle.test.ts',
         '__tests__/**/gpu-lifecycle-*.test.ts',
-        '__tests__/**/runpod-*.test.ts',
+        '__tests__/**/autoscaler-resilience-real.test.ts',
+        '__tests__/**/autoscaler-e2e-real.test.ts',
+        '__tests__/**/gateway-live.test.ts',
+        '__tests__/**/self-hosted-real.test.ts',
         '__tests__/**/vast-*.test.ts',
         '__tests__/**/tensordock-*.test.ts',
         '__tests__/**/modal-*.test.ts',

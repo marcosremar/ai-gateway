@@ -33,6 +33,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { PassThrough } from 'stream';
 import { createLogger } from '../../../src/logger';
 import { readJsonBody, readRawBody } from '../../http-utils';
+import { handleSearch } from '../../../src/gateway/proxy/routes/search';
 const log = createLogger('routes/inference');
 
 type MultipartPart = { name?: string; filename?: string; data: Buffer };
@@ -693,6 +694,25 @@ function modelCapabilities(capability: string, provider?: string, model?: string
   return Array.from(caps);
 }
 
+async function handleSearchCompat(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const proxyReq = {
+    method: req.method,
+    url: req.url || '',
+    headers: Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v[0] ?? '' : v ?? ''])),
+    body: null as Record<string, unknown> | null,
+    rawBody: Buffer.alloc(0),
+  };
+  if (req.method === 'POST') {
+    try {
+      const body = await readJsonBody(req);
+      proxyReq.body = body as Record<string, unknown>;
+    } catch { /* ignore */ }
+  }
+  const result = await handleSearch(proxyReq);
+  res.writeHead(result.status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(result.body));
+}
+
 async function handleModels(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   const models = new Map<string, { id: string; object: 'model'; created: number; owned_by: string; capability: string; capabilities: string[]; shortcut?: string }>();
@@ -769,6 +789,9 @@ export function registerInferenceRoutes(handlers: Record<string, Function>): voi
       'POST /v1/speech': ai.handlePipeline,
       'POST /v1/detect-language': ai.handleDetectLanguage,
       'GET /v1/analytics/system': ai.handleSystemAnalytics,
+      // Search (SearXNG)
+      'GET /v1/search': handleSearchCompat,
+      'POST /v1/search': handleSearchCompat,
       // Auto-swap
       'GET /v1/auto-swap/status': ai.handleAutoSwapStatus,
       'POST /v1/auto-swap/toggle': ai.handleAutoSwapToggle,

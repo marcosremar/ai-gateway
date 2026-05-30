@@ -1,0 +1,10 @@
+project: vui-ptbr
+dataset: hf://PHBJT/cml-tts-filtered
+gpu: 4090
+maxSpend: 5.0
+preferSpot: false
+image: nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+skipSmoke: true
+encodeCmd: "true"
+prepCmd: "python prepare_dataset.py --src /root/data --out /workspace/data --max-hours 8"
+trainCmd: "python trainer.py --jsonl /workspace/data/cml_tts.jsonl --wav-root /workspace/data/wav --base-model /root/model/vui-100m-base.pt --out /workspace/checkpoints --steps 3000 --lr 3e-5 --batch 4 --hf-repo marcosremar2/vui-ptbr-checkpoints --resume-from hf://marcosremar2/vui-ptbr-checkpoints/latest.pt"

@@ -151,7 +151,7 @@ export async function runStartupTasks(): Promise<void> {
   // 3b. If no active deploy was recovered, scan for orphaned pods (deploy
   // improvement #11) and reconnect to one if found. Must run after
   // tryRecoverActiveDeploy so it only fires when the active-deploy path missed.
-  if (!recoveredDeploy) {
+  if (!recoveredDeploy && process.env.AIGW_DISABLE_AUTOSCALE !== '1') {
     try {
       const { tryReconnectOrphanDeploy } = require('../gpu-deploy');
       recoveredDeploy = await tryReconnectOrphanDeploy();
@@ -174,31 +174,37 @@ export async function runStartupTasks(): Promise<void> {
 
   // 5. Start standby monitor — auto-deploys a warm GPU when session duration or
   // P95 latency thresholds are exceeded (standbyEnabled controls gating inside).
-  try {
-    const { startStandbyMonitor } = require('../gpu-standby');
-    startStandbyMonitor();
-  } catch (e: any) {
-    log.warn('[ws-server] Standby monitor not started:', e?.message?.slice(0, 80));
-  }
-
-  // 5b. Start standby-pool monitor (Phase B4) + install deploy/terminate
-  // adapters. Monitor remains a no-op until a profile is registered via
-  // setStandbyPoolConfig(); adapter install is skipped if no snapshot-capable
-  // provider key is set (VAST_API_KEY, HYPERSTACK_API_KEY). Global pool cap
-  // protects against runaway cost — tune via STANDBY_POOL_GLOBAL_MAX.
-  try {
-    const { startStandbyPoolMonitor } = require('../standby-pool');
-    const { installPoolAdaptersIfEnabled } = require('../standby-pool-adapter');
-    startStandbyPoolMonitor();
-    installPoolAdaptersIfEnabled();
+  // Gated by AIGW_DISABLE_AUTOSCALE=1 to run the gateway as a passive job-runner
+  // (no background GPU provisioning) for one-off finetune jobs.
+  if (process.env.AIGW_DISABLE_AUTOSCALE !== '1') {
     try {
-      const { registerFastServeProfile } = require('../fast-serve-init');
-      registerFastServeProfile();
+      const { startStandbyMonitor } = require('../gpu-standby');
+      startStandbyMonitor();
     } catch (e: any) {
-      log.warn('[ws-server] fast-serve profile init failed:', e?.message?.slice(0, 80));
+      log.warn('[ws-server] Standby monitor not started:', e?.message?.slice(0, 80));
     }
-  } catch (e: any) {
-    log.warn('[ws-server] Standby pool init failed:', e?.message?.slice(0, 80));
+
+    // 5b. Start standby-pool monitor (Phase B4) + install deploy/terminate
+    // adapters. Monitor remains a no-op until a profile is registered via
+    // setStandbyPoolConfig(); adapter install is skipped if no snapshot-capable
+    // provider key is set (VAST_API_KEY, HYPERSTACK_API_KEY). Global pool cap
+    // protects against runaway cost — tune via STANDBY_POOL_GLOBAL_MAX.
+    try {
+      const { startStandbyPoolMonitor } = require('../standby-pool');
+      const { installPoolAdaptersIfEnabled } = require('../standby-pool-adapter');
+      startStandbyPoolMonitor();
+      installPoolAdaptersIfEnabled();
+      try {
+        const { registerFastServeProfile } = require('../fast-serve-init');
+        registerFastServeProfile();
+      } catch (e: any) {
+        log.warn('[ws-server] fast-serve profile init failed:', e?.message?.slice(0, 80));
+      }
+    } catch (e: any) {
+      log.warn('[ws-server] Standby pool init failed:', e?.message?.slice(0, 80));
+    }
+  } else {
+    log.log('[ws-server] AIGW_DISABLE_AUTOSCALE=1 — standby monitor + pool + fast-serve disabled (passive job-runner mode)');
   }
 
   // 5b. Start orphan sweep — periodic destruction of untracked instances.

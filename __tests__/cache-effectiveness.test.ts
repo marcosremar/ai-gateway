@@ -5,14 +5,16 @@
  * Tests both chat and embedding caching behavior.
  *
  * Run: bunx vitest run __tests__/cache-effectiveness.test.ts
- * Set SKIP_LIVE_TESTS=1 to skip.
+ * Set SKIP_LIVE_TESTS=1 to skip live API calls.
+ * Set ASSERT_CACHE=1 to assert cache is working.
  */
 
 import { describe, it, expect } from 'vitest';
 
-const GATEWAY_URL = process.env.GATEWAY_URL || process.env.GATEWAY_URL || 'http://localhost:4000';
+const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:4000';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_loadtest_2026';
 const SKIP = process.env.SKIP_LIVE_TESTS === '1';
+const ASSERT_CACHE = process.env.ASSERT_CACHE === '1';
 
 const headers = {
   'Content-Type': 'application/json',
@@ -36,7 +38,7 @@ async function timedChat(body: string): Promise<{ ok: boolean; latencyMs: number
   }
 }
 
-describe.skipIf(SKIP)('Cache Effectiveness', { timeout: 120_000 }, () => {
+(SKIP ? describe.skip : describe)('Cache Effectiveness', { timeout: 120_000 }, () => {
 
   it('second identical request is faster (cache hit)', { timeout: 30_000 }, async () => {
     console.log('\n── Cache Hit Test: sequential identical requests ──');
@@ -71,6 +73,10 @@ describe.skipIf(SKIP)('Cache Effectiveness', { timeout: 120_000 }, () => {
     } else {
       console.log('  ⚠ Cache may not be configured (no significant speedup)');
       console.log('  This is expected if the proxy has no ResponseCache configured');
+    }
+
+    if (ASSERT_CACHE) {
+      expect(second.latencyMs).toBeLessThan(first.latencyMs * 0.5);
     }
   });
 

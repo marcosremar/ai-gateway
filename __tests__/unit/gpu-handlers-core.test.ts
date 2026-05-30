@@ -274,7 +274,7 @@ describe('GPU Handlers - Core Logic', () => {
     vi.mocked(stateMock.setDeployState).mockImplementation(() => {});
     vi.mocked(stateMock.setDeployCancelled).mockImplementation(() => {});
     vi.mocked(stateMock.setDeployPromise).mockImplementation(() => {});
-    // Reset GPU priority list to default allowlist
+    // Reset GPU priority list to default fallback order
     vi.mocked(deploySettingsMock.getGpuPriorityList).mockReturnValue([
       'NVIDIA GeForce RTX 4090',
       'NVIDIA GeForce RTX 3090',
@@ -499,7 +499,7 @@ describe('GPU Handlers - Core Logic', () => {
   });
 
   describe('GPU Type Validation', () => {
-    it('should reject unknown GPU types not in the tested allowlist', async () => {
+    it('should accept requested GPU types outside the priority list', async () => {
       vi.mocked(httpUtilsMock.readJsonBody).mockResolvedValue({
         dockerImage: uniqueImage(),
         gpuTypes: ['Unknown GPU XYZ'],
@@ -518,12 +518,10 @@ describe('GPU Handlers - Core Logic', () => {
         apiKey: 'rpa_valid-key-1234567890abcdefghij',
       }), res);
 
-      expect(res.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
-      const responseBody = JSON.parse(vi.mocked(res.end).mock.calls[0][0] as string);
-      expect(responseBody.error.message).toContain('tested allowlist');
+      expect(res.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
     });
 
-    it('should accept known GPU types in the allowlist', async () => {
+    it('should accept GPU types in the priority list', async () => {
       const img = uniqueImage();
       vi.mocked(httpUtilsMock.readJsonBody).mockResolvedValue({
         dockerImage: img,

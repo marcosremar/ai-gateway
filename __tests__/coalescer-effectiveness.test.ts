@@ -5,14 +5,16 @@
  * Sends N identical requests simultaneously and compares with N unique requests.
  *
  * Run: bunx vitest run __tests__/coalescer-effectiveness.test.ts
- * Set SKIP_LIVE_TESTS=1 to skip.
+ * Set SKIP_LIVE_TESTS=1 to skip live API calls.
+ * Set EXPECT_COALESCE=1 to assert coalescing effectiveness (not just observe).
  */
 
 import { describe, it, expect } from 'vitest';
 
-const GATEWAY_URL = process.env.GATEWAY_URL || process.env.GATEWAY_URL || 'http://localhost:4000';
+const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:4000';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || 'gw_loadtest_2026';
 const SKIP = process.env.SKIP_LIVE_TESTS === '1';
+const ASSERT_COALESCE = process.env.EXPECT_COALESCE === '1';
 
 const headers = {
   'Content-Type': 'application/json',
@@ -57,7 +59,7 @@ function logBatch(label: string, results: TimedResult[]) {
   console.log(`  ${label}: ${ok.length}/${results.length} OK | p50=${p50.toFixed(0)}ms p95=${p95.toFixed(0)}ms | wall=${wallTime.toFixed(0)}ms`);
 }
 
-describe.skipIf(SKIP)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
+(SKIP ? describe.skip : describe)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
 
   it('identical requests are coalesced', { timeout: 60_000 }, async () => {
     console.log('\n── Test: 20 identical vs 20 unique requests ──');
@@ -115,6 +117,10 @@ describe.skipIf(SKIP)('Coalescer Effectiveness', { timeout: 120_000 }, () => {
 
     expect(identicalResults.filter(r => r.ok).length).toBeGreaterThan(10);
     expect(uniqueResults.filter(r => r.ok).length).toBeGreaterThan(10);
+
+    if (ASSERT_COALESCE) {
+      expect(identicalWall).toBeLessThan(uniqueWall * 0.7);
+    }
   });
 
   it('100 identical requests all get the same response', { timeout: 60_000 }, async () => {

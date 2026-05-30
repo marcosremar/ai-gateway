@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { getProviderConfig } from '@/lib/gateway';
-import { Spinner } from '@/components/ui';
+import { KV, Spinner, EmptyState } from '@/components/ui';
 import { deriveProvides, STAGE_ACCENTS, type Service, type App } from './provider-types';
 import { Cloud, Server, Zap, HardDrive, Package, Cpu, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
 
@@ -229,15 +229,6 @@ function ServiceCard({ service, usedByApps }: { service: Service; usedByApps: st
   );
 }
 
-function KV({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{label}: </span>
-      <span className="text-[11px] font-medium" style={{ color: 'var(--color-text-secondary)' }}>{value}</span>
-    </div>
-  );
-}
-
 // ── Group header ──────────────────────────────────────────────────────────────
 
 function GroupHeader({ kind, count }: { kind: string; count: number }) {
@@ -305,17 +296,17 @@ export function ServicesSection() {
           <h2 className="text-lg font-bold">Services</h2>
         </div>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
-          Unidades de deploy — APIs cloud, containers Docker e funções serverless que fornecem STT, LLM e TTS.
+          Deploy units — cloud APIs, Docker containers, and serverless functions that provide STT, LLM, and TTS.
         </p>
       </div>
 
       {/* Stats row */}
       <div className="grid grid-cols-4 gap-3">
         {[
-          { label: 'Total de serviços', value: totalServices, color: '#60a5fa' },
-          { label: 'Apps configurados', value: totalApps, color: '#a78bfa' },
-          { label: 'Containers GPU', value: byKind.container?.length ?? 0, color: '#a78bfa' },
-          { label: 'Máquinas CPU', value: byKind.cpu?.length ?? 0, color: '#f59e0b' },
+          { label: 'Total services', value: totalServices, color: '#60a5fa' },
+          { label: 'Configured apps', value: totalApps, color: '#a78bfa' },
+          { label: 'GPU containers', value: byKind.container?.length ?? 0, color: '#a78bfa' },
+          { label: 'CPU machines', value: byKind.cpu?.length ?? 0, color: '#f59e0b' },
         ].map(({ label, value, color }) => (
           <div key={label} className="rounded-xl border p-4 text-center"
             style={{ borderColor: `color-mix(in srgb, ${color} 20%, var(--color-border))`, background: 'var(--color-surface-elevated)' }}>
@@ -334,21 +325,21 @@ export function ServicesSection() {
 
       {/* Empty state */}
       {totalServices === 0 && !error && (
-        <div className="rounded-xl border p-10 text-center" style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
-          <Server className="w-10 h-10 mx-auto mb-3 opacity-20" />
-          <p className="font-medium mb-1">Nenhum serviço configurado</p>
-          <p className="text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
-            Crie um App e adicione serviços a ele para que apareçam aqui.
-          </p>
-          <a
-            href="/dashboard/config/apps"
-            onClick={e => { e.preventDefault(); window.history.pushState(null, '', '/config/apps'); window.dispatchEvent(new PopStateEvent('popstate')); }}
-            className="inline-flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-lg"
-            style={{ background: 'var(--color-primary)', color: '#fff' }}
-          >
-            Ir para Apps
-          </a>
-        </div>
+        <EmptyState
+          icon={Server}
+          title="No services configured"
+          description="Create an App and add services to it so they appear here."
+          action={
+            <a
+              href="/config/apps"
+              onClick={e => { e.preventDefault(); window.history.pushState(null, '', '/config/apps'); window.dispatchEvent(new PopStateEvent('popstate')); }}
+              className="inline-flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-lg"
+              style={{ background: 'var(--color-primary)', color: '#fff' }}
+            >
+              Go to Apps
+            </a>
+          }
+        />
       )}
 
       {/* Services grouped by kind */}

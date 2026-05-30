@@ -109,6 +109,19 @@ function useAudioRecorder() {
     });
   }, []);
 
+  // Cleanup on unmount: stop interval, stop recorder, release mic tracks
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      const mr = mrRef.current;
+      if (mr) {
+        try { if (mr.state !== 'inactive') mr.stop(); } catch { /* no-op */ }
+        try { mr.stream.getTracks().forEach(t => t.stop()); } catch { /* no-op */ }
+        mrRef.current = null;
+      }
+    };
+  }, []);
+
   return { recording, seconds, start, stop };
 }
 
@@ -191,6 +204,15 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recorder = useAudioRecorder();
+  const objectUrlsRef = useRef<Set<string>>(new Set());
+
+  // Revoke all blob URLs on unmount to free memory
+  useEffect(() => {
+    return () => {
+      objectUrlsRef.current.forEach(u => { try { URL.revokeObjectURL(u); } catch { /* no-op */ } });
+      objectUrlsRef.current.clear();
+    };
+  }, []);
 
   // Derived: current mode's provider/model/models
   const cap = MODE_META[mode].capability;
@@ -271,6 +293,7 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
       if (res.audioBase64) {
         const bytes = Uint8Array.from(atob(res.audioBase64), c => c.charCodeAt(0));
         audioUrl = URL.createObjectURL(new Blob([bytes], { type: res.contentType || 'audio/mp3' }));
+        objectUrlsRef.current.add(audioUrl);
       }
       setMessages(prev => [...prev, {
         id: nextId(), role: 'assistant',
@@ -285,6 +308,7 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
   async function handleAudioInput(blob: Blob) {
     if (blob.size === 0) return;
     const audioUrl = URL.createObjectURL(blob);
+    objectUrlsRef.current.add(audioUrl);
 
     if (mode === 'chat') {
       // Chat mode: STT → fill input → auto-send to LLM
@@ -297,6 +321,7 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
           language: sttLanguage || undefined,
         });
         URL.revokeObjectURL(audioUrl);
+        objectUrlsRef.current.delete(audioUrl);
         if (!sttRes.text?.trim()) { setError('No speech detected'); setLoading(false); return; }
         // Use transcription as a chat message and send to LLM
         const userMsg: ChatMessage = { id: nextId(), role: 'user', content: sttRes.text };
@@ -365,9 +390,15 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
       if (res.audioBase64) {
         const bytes = Uint8Array.from(atob(res.audioBase64), c => c.charCodeAt(0));
         const url = URL.createObjectURL(new Blob([bytes], { type: res.contentType || 'audio/mp3' }));
+        objectUrlsRef.current.add(url);
         const audio = new Audio(url);
-        audio.onended = () => URL.revokeObjectURL(url);
-        audio.play();
+        const cleanup = () => {
+          URL.revokeObjectURL(url);
+          objectUrlsRef.current.delete(url);
+        };
+        audio.onended = cleanup;
+        audio.onerror = cleanup;
+        try { await audio.play(); } catch { cleanup(); }
       }
     } catch { /* silent fail for read-aloud */ }
   }

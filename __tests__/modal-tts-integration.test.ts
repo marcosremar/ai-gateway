@@ -19,7 +19,7 @@ import { timed } from './helpers';
 // Detect Modal availability before tests
 await initFeatures();
 
-describe.skipIf(!FEATURES.modalTts)('Modal TTS (Real API)', () => {
+describe('Modal TTS (Real API)', () => {
   const tts = new ModalTTSProvider();
   let result: TTSResponse | null = null;
   let ms = 0;

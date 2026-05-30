@@ -148,7 +148,7 @@ export async function handleGpuDeploy(
         onstart: body.onstart,
         storageGb: body.diskGb,
         region: body.region,
-      }, body.raceCount ?? 2);
+      }, body.raceCount ?? 1);
       setDeployPromise(racePromise);
     } else {
       // Sequential tier deploy

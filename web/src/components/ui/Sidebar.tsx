@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import { ChevronLeft, ChevronRight, BookOpen } from 'lucide-react';
+import { ChevronLeft, ChevronRight, BookOpen, Menu, X } from 'lucide-react';
 
 export interface SidebarItem {
   id: string;
@@ -28,28 +28,94 @@ function formatUptime(sec: number): string {
 
 export function Sidebar({ items, activeItem, onChange, health, error }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)');
+    const apply = () => setIsMobile(mq.matches);
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, []);
+
+  // Close mobile drawer on selection
+  const onChangeMobile = (id: string) => {
+    onChange(id);
+    if (isMobile) setMobileOpen(false);
+  };
 
   return (
-    <aside
-      className="sidebar-transition flex flex-col h-screen border-r flex-shrink-0 relative"
-      style={{
-        width: collapsed ? 'var(--sidebar-collapsed-width)' : 'var(--sidebar-width)',
-        borderColor: 'var(--color-border)',
-        background: 'var(--color-surface)',
-      }}
-    >
+    <div className="contents">
+      {/* Mobile hamburger button */}
+      {isMobile && !mobileOpen && (
+        <button
+          onClick={() => setMobileOpen(true)}
+          aria-label="Open menu"
+          className="fixed top-2.5 left-2.5 z-40 w-9 h-9 rounded-lg flex items-center justify-center cursor-pointer"
+          style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
+        >
+          <Menu className="w-4 h-4" />
+        </button>
+      )}
+
+      {/* Mobile backdrop */}
+      {isMobile && mobileOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+
+      <aside
+        className="sidebar-transition flex flex-col h-screen border-r relative"
+        style={{
+          width: isMobile ? '260px' : (collapsed ? 'var(--sidebar-collapsed-width)' : 'var(--sidebar-width)'),
+          borderColor: 'var(--color-border)',
+          background: 'var(--color-surface)',
+          position: isMobile ? 'fixed' : 'relative',
+          top: 0,
+          left: isMobile ? (mobileOpen ? 0 : '-280px') : 0,
+          zIndex: isMobile ? 35 : 'auto',
+          transition: 'left 200ms ease',
+          flexShrink: 0,
+        }}
+      >
       {/* Logo / Brand */}
       <div className="flex items-center gap-3 px-4 h-14 border-b flex-shrink-0" style={{ borderColor: 'var(--color-border)' }}>
         <div className="w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center flex-shrink-0">
           <span className="text-white font-bold text-sm">AI</span>
         </div>
+        {isMobile && (
+          <button
+            onClick={() => setMobileOpen(false)}
+            aria-label="Close menu"
+            className="ml-auto w-7 h-7 rounded-md flex items-center justify-center cursor-pointer"
+            style={{ color: 'var(--color-text-muted)' }}
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
         {!collapsed && (
           <div className="min-w-0">
             <h1 className="text-sm font-bold tracking-tight truncate">AI Gateway Settings</h1>
-            <div className="flex items-center gap-1.5">
-              <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${health ? 'bg-emerald-500' : error ? 'bg-red-500' : 'bg-zinc-500'}`} />
+            <div
+              className="flex items-center gap-1.5"
+              title={
+                health
+                  ? `Gateway online — uptime ${formatUptime(health.uptime_sec)} (started ${new Date(Date.now() - health.uptime_sec * 1000).toLocaleString()})`
+                  : error
+                    ? `Gateway offline — ${error}`
+                    : 'Connecting…'
+              }
+            >
+              <div
+                className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${health ? 'bg-emerald-500' : error ? 'bg-red-500' : 'bg-zinc-500'}`}
+                role="status"
+                aria-label={health ? 'Gateway online' : error ? 'Gateway offline' : 'Connecting'}
+              />
               <span className="text-[10px] font-medium truncate" style={{ color: 'var(--color-text-muted)' }}>
-                {health ? formatUptime(health.uptime_sec) : error ? 'Offline' : '...'}
+                {health ? `up ${formatUptime(health.uptime_sec)}` : error ? 'Offline' : '...'}
               </span>
             </div>
           </div>
@@ -57,7 +123,7 @@ export function Sidebar({ items, activeItem, onChange, health, error }: SidebarP
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 overflow-y-auto py-2 px-2">
+      <nav className="flex-1 overflow-y-auto py-2 px-2" aria-label="Main navigation">
         <div className="space-y-0.5">
           {items.map((item) => {
             if (item.divider) {
@@ -83,8 +149,10 @@ export function Sidebar({ items, activeItem, onChange, health, error }: SidebarP
             return (
               <button
                 key={item.id}
-                onClick={() => onChange(item.id)}
+                onClick={() => onChangeMobile(item.id)}
                 title={collapsed ? item.label : undefined}
+                aria-label={item.label}
+                aria-current={isActive ? 'page' : undefined}
                 className={[
                   'w-full flex items-center gap-3 rounded-lg text-sm font-medium transition-all cursor-pointer',
                   collapsed ? 'justify-center px-2 py-2.5' : 'px-3 py-2',
@@ -143,6 +211,8 @@ export function Sidebar({ items, activeItem, onChange, health, error }: SidebarP
         <div className="px-2 py-2">
           <button
             onClick={() => setCollapsed(!collapsed)}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-expanded={!collapsed}
             className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             style={{ color: 'var(--color-text-muted)' }}
             onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--color-surface-hover)'; }}
@@ -154,5 +224,6 @@ export function Sidebar({ items, activeItem, onChange, health, error }: SidebarP
         </div>
       </div>
     </aside>
+    </div>
   );
 }

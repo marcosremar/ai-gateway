@@ -3,7 +3,7 @@
 import { useState, type ComponentType } from 'react';
 import { useBotStatus } from '@/hooks/useBotStatus';
 import { deployBot, joinMeeting, leaveBot, terminateBot } from '@/lib/gateway';
-import { Card, CardHeader, CardBody, CardFooter, Button, FormInput, StatusBadge, AlertBanner, CardSectionHeader, Toggle, KV } from '@/components/ui';
+import { Card, CardHeader, CardBody, CardFooter, Button, FormInput, StatusBadge, AlertBanner, CardSectionHeader, Toggle, KV, ConfirmModal } from '@/components/ui';
 import { Bot, Play, Square, LogIn, LogOut, RefreshCw, Copy, Check, ExternalLink, Cpu, Server, Cloud } from 'lucide-react';
 
 function formatUptime(sec: number): string {
@@ -47,6 +47,7 @@ export function BotSection() {
   const [terminating, setTerminating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [confirmTerminate, setConfirmTerminate] = useState(false);
 
   // Derive deploy mode from cpuOnly + localDeploy (keeps original state logic)
   const deployMode: DeployMode = localDeploy ? 'local' : cpuOnly ? 'cpu' : 'gpu';
@@ -130,10 +131,15 @@ export function BotSection() {
 
   function copyEndpoint() {
     if (!bot?.endpoint) return;
-    navigator.clipboard.writeText(bot.endpoint).then(() => {
-      setCopiedUrl(true);
-      setTimeout(() => setCopiedUrl(false), 2000);
-    });
+    navigator.clipboard.writeText(bot.endpoint).then(
+      () => {
+        setCopiedUrl(true);
+        setTimeout(() => setCopiedUrl(false), 2000);
+      },
+      (err) => {
+        setActionError(`Copy failed: ${err instanceof Error ? err.message : String(err)} (clipboard requires HTTPS or localhost)`);
+      },
+    );
   }
 
   const currentStepIndex = isActive ? getStepIndex(bot!.status) : -1;
@@ -258,12 +264,23 @@ export function BotSection() {
             <Button onClick={handleDeploy} isLoading={deploying} loadingText="Deploying..." disabled={!isIdle}>
               <Play className="w-4 h-4" /> Deploy Bot
             </Button>
-            <Button variant="danger" onClick={handleTerminate} isLoading={terminating} loadingText="Stopping..." disabled={isIdle}>
+            <Button variant="danger" onClick={() => setConfirmTerminate(true)} isLoading={terminating} loadingText="Stopping..." disabled={isIdle}>
               <Square className="w-4 h-4" /> Terminate
             </Button>
           </div>
         </CardFooter>
       </Card>
+
+      <ConfirmModal
+        open={confirmTerminate}
+        onClose={() => setConfirmTerminate(false)}
+        onConfirm={async () => { setConfirmTerminate(false); await handleTerminate(); }}
+        title="Terminate bot pod?"
+        description="This will permanently terminate the bot pod. The meeting (if joined) will end and the pod will be destroyed."
+        confirmLabel="Terminate"
+        variant="danger"
+        isLoading={terminating}
+      />
 
       {/* Status Card — shown when bot is active */}
       {bot && bot.status !== 'idle' && (
@@ -386,7 +403,7 @@ export function BotSection() {
         </CardBody>
         <CardFooter>
           <div className="flex gap-3">
-            <Button onClick={handleJoin} isLoading={joining} loadingText="Joining..." disabled={!canJoin || !urlValid}>
+            <Button onClick={handleJoin} isLoading={joining} loadingText="Joining..." disabled={!canJoin || !urlValid || !botName.trim()}>
               <LogIn className="w-4 h-4" /> Join
             </Button>
             <Button variant="outline" onClick={handleLeave} isLoading={leaving} loadingText="Leaving..." disabled={!isJoined}>

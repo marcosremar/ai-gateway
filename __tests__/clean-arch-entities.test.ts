@@ -6,7 +6,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { Deployment, InvalidDeployTransitionError } from '../src/gateway/entities/deployment';
+import { Deployment } from '../src/gateway/entities/deployment';
+import { InvalidDeployTransitionError } from '../src/gateway/entities/value-objects/deploy-phase';
 import {
   Workload,
   InvalidWorkloadTransitionError,

@@ -1,0 +1,30 @@
+{
+  "name": "route2-v12-tts",
+  "version": "1.0.0",
+  "description": "Route-2 v12 phoneme-conditioned Matcha/OT-CFM TTS trainer with R2 sharded NPY on-demand cache.",
+  "type": "audio",
+  "trainerScript": "trainer.py",
+  "defaultEpochs": 1,
+  "defaultLR": 0.00005,
+  "defaultGpu": "4090",
+  "defaultMaxSpend": 2.0,
+  "trainerInterface": {
+    "train": "python trainer.py --sharded_root <rclone-root> --sharded_manifest <manifest> --shard_cache_max_gb <gb>"
+  },
+  "aptDeps": "build-essential rclone",
+  "pipDeps": "numpy einops numba safetensors",
+  "torchCudaIndex": "https://download.pytorch.org/whl/cu128",
+  "torchVersion": "2.11.0+cu128",
+  "notes": "No FUSE required. Reads R2 shards lazily through rclone copyto into a bounded LRU cache, then np.load(..., mmap_mode='r').",
+  "defaultStepsPerSec": 5.5,
+  "probePaths": {
+    "checkpointsDir": "/workspace/checkpoints",
+    "jobLog": "/workspace/.job.log"
+  },
+  "stagePatterns": {
+    "download": "PULL ROUTE2 BASE|SHARD_CACHE_FETCH",
+    "train": "MILESTONE TRAIN_START|step [0-9]+/",
+    "prepare": "loading index",
+    "encode": "SHARD_CACHE"
+  }
+}

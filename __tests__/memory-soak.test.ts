@@ -56,7 +56,7 @@ function getMachineMemoryViaTop(): number | null {
   }
 }
 
-describe.skipIf(SKIP)('Memory Soak', { timeout: DURATION_MS + 120_000 }, () => {
+(SKIP ? describe.skip : describe)('Memory Soak', { timeout: DURATION_MS + 120_000 }, () => {
 
   it(`monitors memory under load for ${DURATION_MS / 1000}s`, { timeout: DURATION_MS + 60_000 }, async () => {
     console.log(`\n── Memory Soak: ${DURATION_MS / 1000}s, 10 concurrent workers ──`);
@@ -143,16 +143,16 @@ describe.skipIf(SKIP)('Memory Soak', { timeout: DURATION_MS + 120_000 }, () => {
 
         console.log(`\n  Memory growth: ${growth.toFixed(1)}%`);
         if (growth > 50) {
-          console.log('  ⚠ Possible memory leak detected (>50% growth)');
+          console.log('  Warning: Possible memory leak detected (>50% growth)');
         } else {
-          console.log('  ✓ Memory stable');
+          console.log('  Memory stable');
         }
 
         // Memory shouldn't grow more than 100% over the test duration
         expect(growth).toBeLessThan(100);
       }
     } else {
-      console.log('\n  ⚠ SSH not available — could not measure memory directly');
+      console.log('\n  SSH not available — could not measure memory directly');
       console.log('  Check Fly.io dashboard: https://fly.io/apps/' + FLY_APP + '/monitoring');
     }
 

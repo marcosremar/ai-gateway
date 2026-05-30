@@ -180,7 +180,7 @@ export const DEFAULT_APPS: GatewayApp[] = [
       gpuTypes: ['NVIDIA GeForce RTX 5090', 'NVIDIA RTX 5090', 'NVIDIA GeForce RTX 4090', 'NVIDIA RTX A6000', 'NVIDIA A40'],
       region: '',
       timeoutMin: 30,
-      bootOnStartup: true,
+      bootOnStartup: false,
     },
     // Real-time speech pipeline: tight latency targets so the readiness
     // benchmark gates GPU→production only when the pod is fast enough for

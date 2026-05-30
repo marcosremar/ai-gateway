@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   getLatencySettings, patchLatencySettings, triggerLatencyRun,
   getLatencyHosts, patchLatencyHosts,
@@ -43,6 +43,7 @@ export function LatencySection() {
   const [gpuFilter, setGpuFilter] = useState('');
   const [showMonitoredOnly, setShowMonitoredOnly] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [lastFetched, setLastFetched] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -50,6 +51,7 @@ export function LatencySection() {
       const [s, h] = await Promise.all([getLatencySettings(), getLatencyHosts()]);
       setSettings(s);
       setHosts(h.hosts);
+      setLastFetched(Date.now());
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load');
@@ -60,12 +62,26 @@ export function LatencySection() {
 
   useEffect(() => { load(); }, [load]);
 
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const handleRunNow = async () => {
     setRunning(true);
     try {
       await triggerLatencyRun();
-      // Wait a bit then refresh
-      setTimeout(load, 3000);
+      // Wait a bit then refresh (cancellable on unmount)
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = setTimeout(() => {
+        refreshTimerRef.current = null;
+        load();
+      }, 3000);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Trigger failed');
     } finally {
@@ -127,7 +143,16 @@ export function LatencySection() {
     );
   }
 
-  if (error && !settings) return <AlertBanner variant="error" className="m-6">{error}</AlertBanner>;
+  if (error && !settings) return (
+    <div className="m-6">
+      <AlertBanner variant="error">Failed to load latency data: {error}</AlertBanner>
+      <div className="mt-4 flex justify-center">
+        <Button onClick={load} size="sm">
+          <RefreshCw className="w-3.5 h-3.5" /> Retry
+        </Button>
+      </div>
+    </div>
+  );
 
   return (
     <div className="p-6 space-y-4">
@@ -151,7 +176,9 @@ export function LatencySection() {
             </div>
             <div className="flex items-center gap-2">
               {settings && (
-                <span className="text-[11px] font-mono" style={{ color: 'var(--color-text-muted)' }}>
+                <span className="text-[11px] font-mono" style={{ color: 'var(--color-text-muted)' }}
+                  title={lastFetched ? `Data fetched ${new Date(lastFetched).toLocaleTimeString()}` : ''}
+                >
                   Last: {fmtAgo(settings.lastRunAt)} · Next: {settings.nextRunAt > Date.now() ? fmtAgo(settings.nextRunAt).replace('ago', '') : 'now'}
                 </span>
               )}
@@ -250,6 +277,47 @@ export function LatencySection() {
               </div>
             </div>
           )}
+        </CardBody>
+      </Card>
+
+      {/* ── VAD / Endpointing config (info card) ── */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+              style={{ background: 'rgba(168,85,247,0.12)' }}>
+              <Settings2 className="w-4 h-4" style={{ color: '#c084fc' }} />
+            </div>
+            <div>
+              <h3 className="font-semibold text-sm" style={{ color: 'var(--color-text)' }}>VAD / Turn Detection</h3>
+              <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                Provider-native voice activity + endpointing knobs
+              </p>
+            </div>
+          </div>
+        </CardHeader>
+        <CardBody>
+          <div className="space-y-3 text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+            <p>
+              Pass these per-request to tune turn-end detection. Lower values =
+              snappier responses but may cut user off mid-pause; higher = more
+              thoughtful conversations.
+            </p>
+            <div className="rounded-lg border p-3 font-mono text-[11px] leading-relaxed"
+              style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', color: 'var(--color-text)' }}>
+              <div><span style={{ color: '#a78bfa' }}>Deepgram</span> <span style={{ color: 'var(--color-text-muted)' }}>(POST /v1/audio/transcriptions)</span></div>
+              <div className="ml-2" style={{ color: 'var(--color-text-secondary)' }}>vad: {'{'} endpointingMs: 300, vadEvents: true, utteranceEndMs: 1000, interimResults: true {'}'}</div>
+              <div className="mt-2"><span style={{ color: '#60a5fa' }}>OpenAI Realtime</span> <span style={{ color: 'var(--color-text-muted)' }}>(WebRTC client)</span></div>
+              <div className="ml-2" style={{ color: 'var(--color-text-secondary)' }}>turnDetection: {'{'} type: &lsquo;server_vad&rsquo;, silence_duration_ms: 500, threshold: 0.5 {'}'}</div>
+              <div className="ml-2" style={{ color: 'var(--color-text-secondary)' }}>turnDetection: {'{'} type: &lsquo;semantic_vad&rsquo;, eagerness: &lsquo;medium&rsquo; {'}'}</div>
+            </div>
+            <p style={{ color: 'var(--color-text-muted)' }}>
+              For LLM-based incomplete-turn filtering (suppresses bot speech when user cut off mid-thought),
+              pass <code style={{ background: 'var(--color-surface)', padding: '0 4px', borderRadius: 3 }}>filter_incomplete_user_turns: true</code> to
+              <code style={{ background: 'var(--color-surface)', padding: '0 4px', borderRadius: 3 }}>POST /v1/translate</code>
+              {' '}or set env <code style={{ background: 'var(--color-surface)', padding: '0 4px', borderRadius: 3 }}>FILTER_INCOMPLETE_USER_TURNS=1</code>.
+            </p>
+          </div>
         </CardBody>
       </Card>
 
@@ -500,9 +568,21 @@ export function LatencySection() {
               style={{ background: 'rgba(6,182,212,0.12)' }}>
               <Wifi className="w-4 h-4 text-cyan-400" />
             </div>
-            <div>
+            <div className="flex items-center gap-2 flex-wrap">
               <h3 className="font-semibold text-sm" style={{ color: 'var(--color-text)' }}>Streaming STT Benchmark</h3>
-              <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+              <span
+                className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded"
+                style={{
+                  background: 'color-mix(in srgb, #fbbf24 15%, transparent)',
+                  color: '#fbbf24',
+                  border: '1px solid color-mix(in srgb, #fbbf24 30%, transparent)',
+                  letterSpacing: '0.06em',
+                }}
+                title="These figures are reference results from a March 2026 benchmark, not live data."
+              >
+                Reference data
+              </span>
+              <p className="text-xs w-full" style={{ color: 'var(--color-text-muted)' }}>
                 Qwen3-ASR 1.7B vs Fireworks Whisper v3 — real-time mic simulation, 2026-03-21
               </p>
             </div>

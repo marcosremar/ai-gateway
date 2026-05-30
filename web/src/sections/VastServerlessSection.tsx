@@ -31,7 +31,7 @@ function HowItWorksPanel() {
           <div className="flex items-center gap-3">
             <IconBox icon={Info} color="#38bdf8" size="sm" />
             <span className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>
-              Como funciona o Serverless do Vast.ai
+              How Vast.ai Serverless works
             </span>
           </div>
           {open
@@ -176,7 +176,7 @@ function CreateEndpointForm({ onCreated }: CreateEndpointFormProps) {
     return (
       <Button variant="primary" size="sm" onClick={() => setOpen(true)}>
         <Plus className="w-3.5 h-3.5" />
-        Novo Endpoint
+        New Endpoint
       </Button>
     );
   }
@@ -186,7 +186,7 @@ function CreateEndpointForm({ onCreated }: CreateEndpointFormProps) {
       <CardHeader>
         <div className="flex items-center gap-2">
           <IconBox icon={Plus} color="#34d399" size="sm" />
-          <span className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Criar Endpoint</span>
+          <span className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Create Endpoint</span>
         </div>
       </CardHeader>
       <CardBody>
@@ -631,7 +631,7 @@ export function VastServerlessSection() {
     <div className="p-6 space-y-5">
       <SectionHeader
         title="Vast.ai Serverless"
-        subtitle="Gerenciar endpoints serverless e worker groups para escalonamento automático de GPUs"
+        subtitle="Manage serverless endpoints and worker groups for automatic GPU scaling"
       />
 
       <HowItWorksPanel />
@@ -639,7 +639,7 @@ export function VastServerlessSection() {
       {error && (
         <AlertBanner variant="error">
           {error.includes('VAST_API_KEY') ? (
-            <>VAST_API_KEY não configurada. Adicione em <strong>Config → API Keys</strong>.</>
+            <>VAST_API_KEY not configured. Add it in <strong>Config → API Keys</strong>.</>
           ) : error}
         </AlertBanner>
       )}
@@ -660,7 +660,7 @@ export function VastServerlessSection() {
                 onClick={load}
                 className="flex items-center justify-center w-7 h-7 rounded-md cursor-pointer"
                 style={{ color: 'var(--color-text-muted)' }}
-                title="Atualizar"
+                title="Refresh"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
               </button>
@@ -675,10 +675,10 @@ export function VastServerlessSection() {
                   <IconBox icon={Server} color="#f59e0b" size="md" />
                   <div>
                     <p className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>
-                      Nenhum endpoint configurado
+                      No endpoint configured
                     </p>
                     <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
-                      Crie um endpoint para começar a usar o serverless do Vast.ai.
+                      Create an endpoint to start using Vast.ai serverless.
                     </p>
                   </div>
                 </div>
