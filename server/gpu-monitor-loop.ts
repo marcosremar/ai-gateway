@@ -39,6 +39,36 @@ const log = createLogger('gpu-deploy');
 
 export { GPU_MONITOR_INTERVAL_MS } from './gpu-health-metrics';
 
+/**
+ * Poll a pod's GPU utilization over SSH (pull model). Returns the max GPU
+ * utilization % across GPUs, or -1 if unreachable/parse-fail. Used to keep a
+ * training/job pod (GPU busy, no HTTP requests) from being reaped by the
+ * request-based idle logic — works even when the pod can't reach the gateway
+ * and when the app /health exposes no GPU metrics.
+ */
+async function pollGpuUtilViaSsh(host: string, port: number): Promise<number> {
+  return new Promise((resolve) => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { spawn } = require('child_process');
+    const args = [
+      '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
+      '-o', 'ConnectTimeout=8', '-o', 'LogLevel=ERROR', '-p', String(port),
+      `root@${host}`, 'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits',
+    ];
+    let out = ''; let done = false;
+    const p = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    const finish = (v: number) => { if (done) return; done = true; try { p.kill('SIGKILL'); } catch { /* noop */ } resolve(v); };
+    const timer = setTimeout(() => finish(-1), 12_000);
+    p.stdout?.on('data', (b: Buffer) => { out += b.toString(); });
+    p.on('close', () => {
+      clearTimeout(timer);
+      const utils = out.split('\n').map((s) => parseFloat(s.trim())).filter((n) => !Number.isNaN(n));
+      finish(utils.length ? Math.max(...utils) : -1);
+    });
+    p.on('error', () => { clearTimeout(timer); finish(-1); });
+  });
+}
+
 // Cold-start plan A3 — 15 → 5 min idle timeout. Resume of a stopped pod is
 // ~19s on Vast.ai vs ~288s for a fresh deploy, so pausing aggressively after
 // 5 min of no activity costs a few extra resume events but saves ~$32k/yr in
@@ -491,6 +521,27 @@ export function scheduleNextMonitorProbe() {
           // Activity resumed — reset so next idle period triggers a fresh alert
           lastSessionCostAlertAt = 0;
         }
+      }
+
+      // ── Job-vs-inference auto-differentiation (GPU-util pull) ──────────────
+      // A training/job pod keeps the GPU busy but serves no HTTP requests, so the
+      // request-based idle logic would reap it. Poll GPU utilization over SSH
+      // (pull) and, if the GPU is working, reset the idle timer. Works even when
+      // the pod can't reach the gateway (local gateway) and when the app /health
+      // doesn't expose GPU metrics. An idle inference pod (util≈0, no requests)
+      // still gets reaped — cost control preserved. AIGW_GPU_BUSY_PCT tunable.
+      if (deployState.sshHost && deployState.sshPort) {
+        try {
+          const util = await pollGpuUtilViaSsh(deployState.sshHost, deployState.sshPort);
+          if (util >= 0) {
+            setDeployState({ gpuUtil: util });
+            const busyPct = parseFloat(process.env.AIGW_GPU_BUSY_PCT || '5') || 5;
+            if (util > busyPct) {
+              setLastModelRequestTime(Date.now());
+              log.debug(`[gpu] GPU util ${util}% > ${busyPct}% (job busy) — idle timer reset`);
+            }
+          }
+        } catch { /* best-effort — never let util poll break the monitor */ }
       }
 
       // Idle check — compute adaptive timeout based on boot cost + history
