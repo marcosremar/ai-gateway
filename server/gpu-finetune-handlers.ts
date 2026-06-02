@@ -560,6 +560,24 @@ export async function handleStartFinetune(req: IncomingMessage, res: ServerRespo
     });
     return;
   }
+  if (body.dryRun === true) {
+    json(res, 200, {
+      status: 'validated',
+      dryRun: true,
+      gpuType: String(spec.gpu ?? ''),
+      checkpointPrefix: spec.r2Prefix,
+      r2CheckpointUrl: spec.r2CkptDest,
+      hfRepoUrl: typeof spec.hfSyncRepo === 'string' ? `https://huggingface.co/${spec.hfSyncRepo}` : undefined,
+      runtime: {
+        output: spec.output,
+        requestedOutput: requestedSpec.output,
+        outputRewritten: spec.output !== requestedSpec.output,
+        remoteRunner: isRemoteFinetuneRuntime(process.env),
+      },
+      plan,
+    });
+    return;
+  }
 
   const job = createFinetuneJobRecord(spec, userId);
   const logStream = createWriteStream(job.logPath, { flags: 'a' });

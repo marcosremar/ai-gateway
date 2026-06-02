@@ -62,6 +62,7 @@
     "test:adapters": "vitest run --config vitest.config.ts __tests__/adapters-integration.test.ts",
     "test:runpod": "vitest run --config vitest.config.ts __tests__/runpod-real-api.test.ts",
     "test:vast": "vitest run --config vitest.config.ts __tests__/vast-real-api.test.ts",
+    "test:finetune-fly-real": "SKIP_LIVE_TESTS=0 vitest run --config vitest.config.ts __tests__/finetune-fly-real-api.test.ts",
     "test:runpod-lifecycle": "vitest run --config vitest.config.ts __tests__/runpod-lifecycle.test.ts",
     "test:vast-lifecycle": "vitest run --config vitest.config.ts __tests__/vast-lifecycle.test.ts",
     "test:load": "vitest run --config vitest.config.ts __tests__/load-live.test.ts",
