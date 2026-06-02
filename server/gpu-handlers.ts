@@ -707,19 +707,25 @@ async function _validateDeployRequest(
   } else {
     raceCount = clampRaceCount(getDeployRaceCount(), 'settings');
   }
-  // Direct SSH is an explicit operator policy. By default Vast SSH-driven
-  // workloads may use either a direct mapping or Vast's SSH proxy, whichever
-  // becomes reachable first.
+  const requestedReadinessProbe: 'health' | 'ssh' = body.readinessProbe === 'ssh' ? 'ssh' : 'health';
+
+  // Direct SSH is the safe default for fine-tune SSH deploys. The fine-tune
+  // runner cannot do useful work until SSH is reachable, and Vast proxy SSH is
+  // the failure mode that turns reservations into 600s boot timeouts. Generic
+  // deploys can still use the operator env policy, and callers can explicitly
+  // pass requireDirectPort:false when they accept proxy SSH.
   const requireDirectPort = body.requireDirectPort === true
     ? true
     : body.requireDirectPort === false
-      || isFinetuneRequest
-      || process.env.AIGW_VAST_ALLOW_PROXY === '1'
-      || process.env.AIGW_VAST_REQUIRE_DIRECT === '0'
       ? false
-      : process.env.AIGW_VAST_REQUIRE_DIRECT === '1'
+      : isFinetuneRequest && requestedReadinessProbe === 'ssh'
         ? true
-        : undefined;
+        : process.env.AIGW_VAST_ALLOW_PROXY === '1'
+          || process.env.AIGW_VAST_REQUIRE_DIRECT === '0'
+          ? false
+          : process.env.AIGW_VAST_REQUIRE_DIRECT === '1'
+            ? true
+            : undefined;
 
   // Custom env vars, Docker start command, and container disk
   const customEnv = (typeof body.env === 'object' && body.env !== null && !Array.isArray(body.env))
@@ -770,7 +776,7 @@ async function _validateDeployRequest(
 
   // Dev mode: skip auto-destroy after idle-stop (pod stays paused until manually resumed)
   const devMode = body.devMode === true;
-  const readinessProbe: 'health' | 'ssh' = body.readinessProbe === 'ssh' ? 'ssh' : 'health';
+  const readinessProbe: 'health' | 'ssh' = requestedReadinessProbe;
   const bootTimeoutSecRaw = body.bootTimeoutSec;
   let bootTimeoutSec: number | undefined;
   if (typeof bootTimeoutSecRaw === 'number' && Number.isFinite(bootTimeoutSecRaw)) {

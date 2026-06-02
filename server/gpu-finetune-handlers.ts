@@ -412,7 +412,7 @@ async function terminateFinetuneInstance(jobId: string, token: string): Promise<
     const resp = await fetch(`http://127.0.0.1:${PORT}/v1/gpu/terminate`, {
       method: 'POST',
       headers: gatewayHeaders(token),
-      body: JSON.stringify({ instanceId, deployId, provider, force: true }),
+      body: JSON.stringify({ instanceId, deployId, provider, parallelSlot: jobId, force: true }),
       signal: AbortSignal.timeout(15_000),
     });
     if (!resp.ok) {
@@ -498,7 +498,7 @@ async function reconcileFinetuneJobs(): Promise<void> {
       const resp = await fetch(`http://127.0.0.1:${PORT}/v1/gpu/terminate`, {
         method: 'POST',
         headers: gatewayHeaders(token),
-        body: JSON.stringify({ instanceId, provider: inst.provider, force: true }),
+        body: JSON.stringify({ instanceId, provider: inst.provider, parallelSlot: jobId, force: true }),
         signal: AbortSignal.timeout(15_000),
       });
       if (!resp.ok) {
@@ -593,6 +593,7 @@ export async function handleStartFinetune(req: IncomingMessage, res: ServerRespo
     '--no-estimate',
   ];
   if (body.skipPreflight === true) args.push('--skip-preflight');
+  const allowVastProxy = body.requireDirectPort === false;
 
   const child = spawn(process.env.BUN_BIN || 'bun', args, {
     cwd: repoRoot,
@@ -601,8 +602,9 @@ export async function handleStartFinetune(req: IncomingMessage, res: ServerRespo
       AI_GATEWAY_URL: process.env.AI_GATEWAY_URL || process.env.GATEWAY_URL || `http://127.0.0.1:${PORT}`,
       ...(token ? { AIGW_APP_KEY: token } : {}),
       ...(userId ? { AIGW_APP_NAME: userId, AIGW_OWNER: userId } : {}),
-      AIGW_VAST_ALLOW_PROXY: body.requireDirectPort === true ? '0' : '1',
-      AIGW_VAST_REQUIRE_DIRECT: body.requireDirectPort === true ? '1' : '0',
+      AIGW_VAST_ALLOW_PROXY: allowVastProxy ? '1' : '0',
+      AIGW_VAST_ALLOW_PROXY_FOR_FINETUNE: allowVastProxy ? '1' : '0',
+      AIGW_VAST_REQUIRE_DIRECT: allowVastProxy ? '0' : '1',
       AIGW_JOB_STATE_ID: job.jobId,
       AIGW_PARALLEL_SLOT: job.jobId,
     },

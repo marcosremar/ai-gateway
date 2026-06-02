@@ -243,6 +243,31 @@ describe('gpu jobs CLI acquisition wiring', () => {
     expect(src).toContain('SSH acquisition serial');
   });
 
+  it('defaults Vast fine-tune SSH deploys to direct SSH instead of proxy SSH', () => {
+    const serverSrc = readFileSync(join(process.cwd(), 'server/gpu-handlers.ts'), 'utf-8');
+    const finetuneHandlerSrc = readFileSync(join(process.cwd(), 'server/gpu-finetune-handlers.ts'), 'utf-8');
+    const cliSrc = cliSource();
+
+    expect(serverSrc).toContain("isFinetuneRequest && requestedReadinessProbe === 'ssh'");
+    expect(serverSrc).toMatch(/isFinetuneRequest\s*&&\s*requestedReadinessProbe\s*===\s*'ssh'\s*\n\s*\?\s*true/);
+    expect(finetuneHandlerSrc).toContain('const allowVastProxy = body.requireDirectPort === false');
+    expect(finetuneHandlerSrc).toMatch(/AIGW_VAST_ALLOW_PROXY:\s*allowVastProxy\s*\?\s*'1'\s*:\s*'0'/);
+    expect(finetuneHandlerSrc).toMatch(/AIGW_VAST_REQUIRE_DIRECT:\s*allowVastProxy\s*\?\s*'0'\s*:\s*'1'/);
+    expect(cliSrc).toContain('AIGW_VAST_ALLOW_PROXY_FOR_FINETUNE');
+    expect(cliSrc).toMatch(/deployBody\.requireDirectPort\s*=\s*true/);
+  });
+
+  it('terminates pre-SSH failures through the fine-tune parallel slot', () => {
+    const cliSrc = cliSource();
+    const finetuneHandlerSrc = readFileSync(join(process.cwd(), 'server/gpu-finetune-handlers.ts'), 'utf-8');
+
+    expect(cliSrc).toContain('const terminateDeployBody');
+    expect(cliSrc).toMatch(/parallelSlot\s*\?\s*\{\s*parallelSlot\s*\}/);
+    expect((cliSrc.match(/body:\s*terminateDeployBody\(/g) || []).length).toBeGreaterThanOrEqual(4);
+    expect(finetuneHandlerSrc).toMatch(/JSON\.stringify\(\{\s*instanceId,\s*deployId,\s*provider,\s*parallelSlot:\s*jobId,\s*force:\s*true\s*\}\)/);
+    expect(finetuneHandlerSrc).toMatch(/JSON\.stringify\(\{\s*instanceId,\s*provider:\s*inst\.provider,\s*parallelSlot:\s*jobId,\s*force:\s*true\s*\}\)/);
+  });
+
   it('keeps deploy-level race capped without the removed Vast acquisition knob', () => {
     const serverSrc = readFileSync(join(process.cwd(), 'server/gpu-handlers.ts'), 'utf-8');
     const cliSrc = cliSource();

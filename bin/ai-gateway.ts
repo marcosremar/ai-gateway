@@ -1825,7 +1825,15 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     if (opts.searchMode) deployBody.searchMode = opts.searchMode;
     if (opts.allowUnverified === true) deployBody.allowUnverified = true;
     deployBody.maxCostUsd = maxCost;   // server-side hourly price guard
-    const requireVastDirect = process.env.AIGW_VAST_REQUIRE_DIRECT === '1';
+    deployBody.finetune = true;        // protect from autoscaler cancel-and-redeploy
+    // Finetune deploys a bare compute image (e.g. nvidia/cuda) with NO HTTP /health
+    // endpoint — the trainer is driven over SSH, not served. Tell the gateway to gate
+    // readiness on TCP :22 instead of polling /health (which would app_error on a
+    // bare image and abort the deploy before the SSH upload/train phase).
+    deployBody.readinessProbe = 'ssh';
+    const allowVastProxyForFinetune = process.env.AIGW_VAST_ALLOW_PROXY_FOR_FINETUNE === '1';
+    const requireVastDirect = selectedProvider.toLowerCase() === 'vast'
+      && (process.env.AIGW_VAST_REQUIRE_DIRECT === '1' || !allowVastProxyForFinetune);
     if (selectedProvider.toLowerCase() === 'vast' && requireVastDirect) {
       deployBody.requireDirectPort = true;
     }
@@ -1836,7 +1844,6 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     // floor that excludes most consumer 4090s. 40GB fits the MOSS finetune; callers
     // can override with --storage.
     deployBody.storageGb = opts.storageGb ?? 40;
-    deployBody.finetune = true;        // protect from autoscaler cancel-and-redeploy
     if (requestedBootTimeoutSec) {
       // The CLI polls with this timeout too, but the server-side SSH readiness
       // poll is what creates/cleans the billable instance. Forward the same
@@ -1844,11 +1851,6 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
       // server's default SSH cap.
       deployBody.bootTimeoutSec = requestedBootTimeoutSec;
     }
-    // Finetune deploys a bare compute image (e.g. nvidia/cuda) with NO HTTP /health
-    // endpoint — the trainer is driven over SSH, not served. Tell the gateway to gate
-    // readiness on TCP :22 instead of polling /health (which would app_error on a
-    // bare image and abort the deploy before the SSH upload/train phase).
-    deployBody.readinessProbe = 'ssh';
     const jobLabelId = (process.env.AIGW_JOB_STATE_ID || process.env.AIGW_PARALLEL_SLOT || String(Date.now()))
       .replace(/[^a-zA-Z0-9._-]/g, '_')
       .slice(0, 96);
@@ -1865,6 +1867,14 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     deployId = dep.deployId;
     console.log(`  deployId: ${deployId}`);
   }
+
+  const terminateDeployBody = (extra: Record<string, unknown> = {}) => JSON.stringify({
+    deployId,
+    provider: pick.provider,
+    ...(parallelSlot ? { parallelSlot } : {}),
+    force: true,
+    ...extra,
+  });
 
   // 3. Poll until ready (skip if reusing — already ready)
   if (!info) {
@@ -1908,7 +1918,7 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
         console.log();
         process.stderr.write(`${c.yellow}⚠ deploy errored server-side (${st.error || st.message || 'unknown'}) — abandoning${c.reset}\n`);
         await fetch(`${url}/v1/gpu/terminate`, {
-          method: 'POST', headers: headers(key), body: JSON.stringify({ deployId, provider: pick.provider, force: true }),
+          method: 'POST', headers: headers(key), body: terminateDeployBody(),
         }).catch(() => {});
         throw new Error(`deploy errored: ${st.error || st.message || 'unknown'}`);
       }
@@ -1918,7 +1928,7 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
           console.log();
           process.stderr.write(`${c.yellow}⚠ deploy returned to idle before SSH became available — abandoning${c.reset}\n`);
           await fetch(`${url}/v1/gpu/terminate`, {
-            method: 'POST', headers: headers(key), body: JSON.stringify({ deployId, provider: pick.provider, force: true }),
+            method: 'POST', headers: headers(key), body: terminateDeployBody(),
           }).catch(() => {});
           throw new Error(`deploy returned to idle before SSH became available`);
         }
@@ -1934,7 +1944,7 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     process.stderr.write(`${c.yellow}⚠ instance boot timed out after ${bootTimeoutLabel} — terminating and trying new instance${c.reset}\n`);
     await fetch(`${url}/v1/gpu/terminate`, {
       method: 'POST', headers: headers(key),
-      body: JSON.stringify({ deployId, provider: pick.provider, force: true }),
+      body: terminateDeployBody(),
     });
     throw new Error(`instance boot timed out after ${bootTimeoutLabel}`);
   }
@@ -1992,7 +2002,7 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     await fetch(`${url}/v1/gpu/terminate`, {
       method: 'POST',
       headers: headers(key),
-      body: JSON.stringify({ instanceId, deployId, provider: pick.provider, force: true }),
+      body: terminateDeployBody({ instanceId }),
     }).catch(() => {});
     throw err;
   }

@@ -63,6 +63,7 @@
     "test:runpod": "vitest run --config vitest.config.ts __tests__/runpod-real-api.test.ts",
     "test:vast": "vitest run --config vitest.config.ts __tests__/vast-real-api.test.ts",
     "test:vast-live-asks-stress": "RUN_LIVE_VAST_ASKS_STRESS=1 vitest run --config vitest.config.ts __tests__/vast-live-asks-stress.test.ts --reporter=verbose",
+    "test:mcp-vast-finetune-ssh": "RUN_LIVE_MCP_VAST_FINETUNE_SSH=1 SKIP_LIVE_TESTS=0 vitest run --config vitest.config.ts --no-changed __tests__/mcp-vast-finetune-ssh-e2e.test.ts --reporter=verbose",
     "test:finetune-fly-real": "SKIP_LIVE_TESTS=0 vitest run --config vitest.config.ts --no-changed __tests__/finetune-fly-real-api.test.ts",
     "test:runpod-lifecycle": "vitest run --config vitest.config.ts __tests__/runpod-lifecycle.test.ts",
     "test:vast-lifecycle": "vitest run --config vitest.config.ts __tests__/vast-lifecycle.test.ts",
