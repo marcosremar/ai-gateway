@@ -343,6 +343,9 @@ describe('race deploy — startDeployRace', () => {
 
   it('cleans up a race instance that materializes after an app-slot cancel', () => {
     expect(deployRaceSource).toContain("if (isCancelled()) throw new Error('Deploy cancelled before race slot create')");
+    expect(deployRaceSource).toContain('const cancelCleanupInstanceIds = new Set<string>()');
+    expect(deployRaceSource).toContain('deleteInstance(info.instanceId, credentials)');
+    expect(deployRaceSource).toContain('from progress callback');
     expect(deployRaceSource).toContain('await slot.tier.client.deleteInstance(instance.instanceId, credentials)');
     expect(deployRaceSource).toContain('Cancelled race slot: deleted');
     expect(deployRaceSource).toContain("throw new Error('Deploy cancelled after race slot create')");

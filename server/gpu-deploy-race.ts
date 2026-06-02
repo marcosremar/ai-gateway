@@ -72,6 +72,8 @@ export async function startDeployRace(
   const sd = slot ? slot.state : deployState;
   const sds = (patch: Parameters<typeof setDeployState>[0]) => setDeployState(patch, slot ?? undefined);
   const isCancelled = () => slot ? slot.cancelled : deployCancelled;
+  const progressInstanceIds = new Set<string>();
+  const cancelCleanupInstanceIds = new Set<string>();
 
   // ── Provider readiness pre-filter ───────────────────────────────────────
   // Don't waste race slots on providers with no credentials (e.g. Modal with no
@@ -209,6 +211,17 @@ export async function startDeployRace(
     // Progress callback: update deploy state during image pull so the UI
     // shows "pulling_image" instead of being stuck at "creating_pod".
     const onPollProgress = (info: { elapsedS: number; status: string; instanceId: string; ip: string }) => {
+      if (info.instanceId) {
+        progressInstanceIds.add(info.instanceId);
+        activeRaceInstanceIds.add(info.instanceId);
+      }
+      if (isCancelled() && info.instanceId && !cancelCleanupInstanceIds.has(info.instanceId)) {
+        cancelCleanupInstanceIds.add(info.instanceId);
+        void slot.tier.client.deleteInstance(info.instanceId, credentials)
+          .then(() => log.log(`[race] Cancelled race slot: deleted ${info.instanceId.slice(0, 12)} from progress callback`))
+          .catch((err) => log.warn(`[race] Cancelled race slot progress cleanup failed for ${info.instanceId}: ${err instanceof Error ? err.message : err}`));
+        return;
+      }
       const vastStatus = info.status?.toLowerCase();
       if (vastStatus === 'loading' || vastStatus === 'pulling') {
         sds({
@@ -513,6 +526,7 @@ export async function startDeployRace(
   } finally {
     // Always clear race tracking — sweep may now treat any remaining instances as orphans
     for (const c of candidates) activeRaceInstanceIds.delete(c.instanceId);
+    for (const instanceId of progressInstanceIds) activeRaceInstanceIds.delete(instanceId);
   }
 
   // Phase 3: Final state / race summary
