@@ -330,6 +330,23 @@ describe('race deploy — startDeployRace', () => {
     expect(fnBody).toContain('finally {');
     expect(fnBody).toContain('activeRaceInstanceIds.delete');
   });
+
+  it('app-slot race deploys use slot-scoped state and cancellation', () => {
+    const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
+    const fnBody = deployRaceSource.slice(fnStart, fnStart + 12000);
+    expect(deployRaceSource).toContain("import type { DeploySlot } from '../src/gateway/state/deploy-state'");
+    expect(fnBody).toContain('slot?: DeploySlot');
+    expect(fnBody).toContain('const sd = slot ? slot.state : deployState');
+    expect(fnBody).toContain('setDeployState(patch, slot ?? undefined)');
+    expect(fnBody).toContain('const isCancelled = () => slot ? slot.cancelled : deployCancelled');
+  });
+
+  it('cleans up a race instance that materializes after an app-slot cancel', () => {
+    expect(deployRaceSource).toContain("if (isCancelled()) throw new Error('Deploy cancelled before race slot create')");
+    expect(deployRaceSource).toContain('await slot.tier.client.deleteInstance(instance.instanceId, credentials)');
+    expect(deployRaceSource).toContain('Cancelled race slot: deleted');
+    expect(deployRaceSource).toContain("throw new Error('Deploy cancelled after race slot create')");
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────

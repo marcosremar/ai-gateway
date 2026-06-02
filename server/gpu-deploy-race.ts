@@ -23,6 +23,7 @@ import { logGpuEvent, upsertHostReputation } from './metrics';
 import { getDeployTimeoutMinForProvider } from '../src/gpu-providers/deploy-settings';
 import { activeRaceInstanceIds } from './gpu-orphan-cleanup';
 import type { DeployExtra } from './gpu-deploy';
+import type { DeploySlot } from '../src/gateway/state/deploy-state';
 
 const log = createLogger('gpu-deploy');
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
@@ -59,6 +60,7 @@ export async function startDeployRace(
   gpuTypes: string[],
   extra: DeployExtra,
   raceCount: number,
+  slot?: DeploySlot,
 ): Promise<void> {
   // Import these lazily to avoid circular dependency at module load time
   const { startGpuMonitoring } = await import('./gpu-health-monitor');
@@ -67,6 +69,9 @@ export async function startDeployRace(
 
   const deployStartedAt = Date.now();
   const raceN = Math.min(raceCount, 10); // cap at 10
+  const sd = slot ? slot.state : deployState;
+  const sds = (patch: Parameters<typeof setDeployState>[0]) => setDeployState(patch, slot ?? undefined);
+  const isCancelled = () => slot ? slot.cancelled : deployCancelled;
 
   // ── Provider readiness pre-filter ───────────────────────────────────────
   // Don't waste race slots on providers with no credentials (e.g. Modal with no
@@ -98,8 +103,8 @@ export async function startDeployRace(
         metadata: { reason: decision.reason, currentSpend: decision.currentSpend, projected: decision.projected, cap: decision.cap, raceN },
       });
       broadcastWs({ type: 'gpu:budget', action: 'deploy-refused', spend: decision.currentSpend, projected: decision.projected, budget: decision.cap, reason: decision.reason });
-      setDeployState({ status: 'error', message: msg });
-      deploymentSM.markError(msg);
+      sds({ status: 'error', message: msg });
+      if (!slot) deploymentSM.markError(msg);
       return;
     }
   }
@@ -116,8 +121,8 @@ export async function startDeployRace(
       log.error(msg);
       logGpuEvent('runaway_pause', providerName, false, { metadata: { recentStarts: stats.recentStarts, raceN } });
       broadcastWs({ type: 'gpu:runaway', action: 'deploy-refused', provider: providerName, recentStarts: stats.recentStarts });
-      setDeployState({ status: 'error', message: msg });
-      deploymentSM.markError(msg);
+      sds({ status: 'error', message: msg });
+      if (!slot) deploymentSM.markError(msg);
       return;
     }
   }
@@ -149,8 +154,8 @@ export async function startDeployRace(
   }
 
   if (pairs.length === 0) {
-    setDeployState({ status: 'error', message: 'No deployment tiers available for race' });
-    deploymentSM.markError('No tiers available');
+    sds({ status: 'error', message: 'No deployment tiers available for race' });
+    if (!slot) deploymentSM.markError('No tiers available');
     return;
   }
 
@@ -175,7 +180,7 @@ export async function startDeployRace(
     else if (tier.name === 'hyperstack') setDeployHyperstackApiKey(tier.apiKey);
   }
 
-  setDeployState({
+  sds({
     status: 'creating', startedAt: deployStartedAt, retryCount: 0,
     podId: '', endpoint: '', gpuType: '',
     message: `Launching ${slots.length} instances in parallel...`,
@@ -184,6 +189,7 @@ export async function startDeployRace(
 
   // Phase 1: Create all instances in parallel
   const createResults = await Promise.allSettled(slots.map(async (slot) => {
+    if (isCancelled()) throw new Error('Deploy cancelled before race slot create');
     const credentials = { apiKey: slot.tier.apiKey, authId: slot.tier.authId };
     const defaultStorage = DEFAULT_STORAGE_GB[slot.tier.name] || 50;
     // Honour explicit body.storageGb verbatim — the previous
@@ -205,14 +211,14 @@ export async function startDeployRace(
     const onPollProgress = (info: { elapsedS: number; status: string; instanceId: string; ip: string }) => {
       const vastStatus = info.status?.toLowerCase();
       if (vastStatus === 'loading' || vastStatus === 'pulling') {
-        setDeployState({
+        sds({
           step: 'pulling_image',
           stepDetail: `${info.instanceId.slice(0, 12)} pulling image (${info.elapsedS}s)`,
           message: `Pulling Docker image on ${slot.tier.label}... (${info.elapsedS}s)`,
           podId: info.instanceId,
         });
       } else if (vastStatus === 'running') {
-        setDeployState({
+        sds({
           step: 'waiting_health',
           stepDetail: `${info.instanceId.slice(0, 12)} running, waiting for endpoint`,
           message: `Instance running, resolving endpoint... (${info.elapsedS}s)`,
@@ -257,6 +263,15 @@ export async function startDeployRace(
       ),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${slot.tier.name} createInstance timed out`)), getDeployTimeoutMinForProvider(slot.tier.name) * 60_000)),
     ]);
+    if (isCancelled()) {
+      try {
+        await slot.tier.client.deleteInstance(instance.instanceId, credentials);
+        log.log(`[race] Cancelled race slot: deleted ${instance.instanceId.slice(0, 12)} after create`);
+      } catch (err) {
+        log.warn(`[race] Cancelled race slot cleanup failed for ${instance.instanceId}: ${err instanceof Error ? err.message : err}`);
+      }
+      throw new Error('Deploy cancelled after race slot create');
+    }
     log.log(`[race] Slot ${slot.index}: created ${instance.instanceId.slice(0, 8)} (gpu=${instance.gpuType}, tier=${slot.tier.label})`);
     return { slot, instance };
   }));
@@ -281,23 +296,23 @@ export async function startDeployRace(
   }
 
   if (candidates.length === 0) {
-    const msg = `All ${slots.length} race slots failed to create instances`;
-    setDeployState({ status: 'error', message: msg });
-    deploymentSM.markError(msg);
+    const msg = isCancelled() ? 'Deploy cancelled' : `All ${slots.length} race slots failed to create instances`;
+    sds({ status: isCancelled() ? 'idle' : 'error', message: msg });
+    if (!slot) deploymentSM.markError(msg);
     return;
   }
 
   log.log(`[race] ${candidates.length}/${slots.length} instances created — racing to first healthy`);
   // Register all race candidates so the orphan sweep doesn't mistake them for orphans
   for (const c of candidates) activeRaceInstanceIds.add(c.instanceId);
-  setDeployState({
+  sds({
     status: 'booting', podId: candidates[0].instanceId,
     endpoint: candidates[0].endpoint, gpuType: candidates[0].gpuType,
     costPerHr: candidates[0].costPerHr, provider: candidates[0].tier.name,
     message: `${candidates.length} instances booting — racing to first healthy...`,
     step: 'waiting_health',
   });
-  deploymentSM.startBooting(candidates[0].instanceId);
+  if (!slot) deploymentSM.startBooting(candidates[0].instanceId);
 
   // Phase 2: Race health polling — first healthy wins, others are terminated
   // AbortController lets the winner signal all losers instantly (no 5s sleep delay).
@@ -322,7 +337,7 @@ export async function startDeployRace(
     let localEndpoint = c.endpoint;
     const timeoutMs = getDeployTimeoutMinForProvider(c.tier.name) * 60_000;
 
-    while (!raceDone && !deployCancelled) {
+    while (!raceDone && !isCancelled()) {
       if (Date.now() - deployStartedAt > timeoutMs) {
         log.log(`[race] Slot ${idx} timed out`);
         break;
@@ -337,7 +352,7 @@ export async function startDeployRace(
           ]);
           if (resolved && resolved !== localEndpoint) {
             localEndpoint = resolved;
-            if (idx === 0) setDeployState({ endpoint: localEndpoint });
+            if (idx === 0) sds({ endpoint: localEndpoint });
           }
         } catch { /* expected during early boot */ }
       }
@@ -392,7 +407,7 @@ export async function startDeployRace(
                 setGpuHealthy(true);
                 setLastRequestTime(Date.now());
                 updateGpuModelWarmth(data as Record<string, unknown>);
-                setDeployState({
+                sds({
                   status: 'ready',
                   podId: c.instanceId, endpoint: localEndpoint, gpuType: c.gpuType,
                   costPerHr: c.costPerHr, provider: c.tier.name,
@@ -402,20 +417,20 @@ export async function startDeployRace(
                   alert: '', alertLevel: 'info',
                 });
                 broadcastProviderStatus('booting', 'cloud', 'GPU deployed — warming up models');
-                deploymentSM.markReady(c.instanceId, localEndpoint, c.gpuType, c.costPerHr);
-                startGpuMonitoring();
+                if (!slot) deploymentSM.markReady(c.instanceId, localEndpoint, c.gpuType, c.costPerHr);
+                if (!slot) startGpuMonitoring();
                 // startBackgroundWarmthMonitor is internal to gpu-health-monitor
                 const { startBackgroundWarmthMonitor } = await import('./gpu-health-monitor');
                 startBackgroundWarmthMonitor(localEndpoint);
                 startCanaryIfEnabled(extra, dockerImage, c.gpuType);
-                log.log(`[race] Winner: deployId=${deployState.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} provider=${c.tier.name} gpu=${c.gpuType} t=${Math.round(durationMs / 1000)}s`);
+                log.log(`[race] Winner: deployId=${sd.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} provider=${c.tier.name} gpu=${c.gpuType} t=${Math.round(durationMs / 1000)}s`);
                 logGpuEvent('deploy_ready', c.tier.name, true, { durationMs, metadata: { endpoint: localEndpoint, gpuType: c.gpuType, raceCount: candidates.length } });
                 upsertHostReputation({ provider: c.tier.name, gpuType: c.gpuType, providerMeta: c.providerMeta, success: true, bootTimeS: Math.round(durationMs / 1000), dockerImage });
                 if (await cooldownTracker.recordSuccess(c.tier.name)) {
                   logGpuEvent('cooldown_cleared', c.tier.name, true, { durationMs });
                 }
                 emitGatewayEvent('gpu.deployed', {
-                  deployId: deployState.deployId,
+                  deployId: sd.deployId,
                   provider: c.tier.name,
                   gpuType: c.gpuType,
                   endpoint: localEndpoint,
@@ -435,7 +450,7 @@ export async function startDeployRace(
 
       if (idx === 0 && !raceDone) {
         const elapsed = Math.round((Date.now() - deployStartedAt) / 1000);
-        setDeployState({ message: `${candidates.length} instances booting... [${elapsed}s]` });
+        sds({ message: `${candidates.length} instances booting... [${elapsed}s]` });
       }
 
       await raceSleep(5000); // aborted immediately when winner is found
@@ -443,7 +458,7 @@ export async function startDeployRace(
 
     // Loser, timed out, or cancelled — terminate the instance and log wasted cost
     if (!winner || winner.instanceId !== c.instanceId) {
-      const reason = raceDone ? 'lost' : deployCancelled ? 'cancelled' : 'timed out';
+      const reason = raceDone ? 'lost' : isCancelled() ? 'cancelled' : 'timed out';
       const aliveMs = Date.now() - deployStartedAt;
       const wastedUsd = c.costPerHr > 0 ? c.costPerHr * aliveMs / 3_600_000 : 0;
       try {
@@ -452,7 +467,7 @@ export async function startDeployRace(
           new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`${c.tier.name} deleteInstance timed out`)), 15_000)),
         ]);
         log.log(
-          `[race] Loser destroyed: deployId=${deployState.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} ` +
+          `[race] Loser destroyed: deployId=${sd.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} ` +
           `provider=${c.tier.name} gpu=${c.gpuType || '-'} reason=${reason} ` +
           `alive=${Math.round(aliveMs / 1000)}s` +
           (wastedUsd > 0 ? ` wasted≈$${wastedUsd.toFixed(3)}` : ''),
@@ -471,12 +486,12 @@ export async function startDeployRace(
     // Promise.all threw — some slots may not have cleaned up their pods.
     // Force-terminate any non-winner instances that are still alive.
     const deployErr = categorizeDeployError(raceErr, {
-      deployId: deployState.deployId,
+      deployId: sd.deployId,
       provider: 'race',
-      gpuType: deployState.gpuType,
-      imageName: deployState.dockerImage,
+      gpuType: sd.gpuType,
+      imageName: sd.dockerImage,
     });
-    errorSummary.record(deployErr, deployState.deployId);
+    errorSummary.record(deployErr, sd.deployId);
     const remediation = await tryAutoRemediation(deployErr);
     if (remediation) {
       log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
@@ -520,11 +535,11 @@ export async function startDeployRace(
       );
     }
   } else {
-    const msg = deployCancelled ? 'Deploy cancelled' : (lastRaceHealthError || 'All race candidates failed to become healthy');
-    setDeployState({ status: 'error', message: msg });
-    deploymentSM.markError(msg);
+    const msg = isCancelled() ? 'Deploy cancelled' : (lastRaceHealthError || 'All race candidates failed to become healthy');
+    sds({ status: isCancelled() ? 'idle' : 'error', message: msg });
+    if (!slot) deploymentSM.markError(msg);
     emitGatewayEvent('gpu.failed', {
-      deployId: deployState.deployId,
+      deployId: sd.deployId,
       error: msg,
       durationMs: Date.now() - deployStartedAt,
       raceCount: candidates.length,

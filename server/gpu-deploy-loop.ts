@@ -107,8 +107,11 @@ export async function startDeployLoop(
   // Import from extracted modules
   const { startGpuMonitoring, startBackgroundWarmthMonitor } = await import('./gpu-health-monitor');
 
-  setDeployCancelled(false); // reset cancel flag from previous deploy
-  if (slot) slot.cancelled = false;
+  if (slot?.cancelled) {
+    sds({ status: 'idle', message: 'Deploy cancelled before provider loop started' });
+    return;
+  }
+  if (!slot) setDeployCancelled(false); // reset global cancel flag from previous deploy
   setActiveProvider(providerName);
   const credentials: ProviderCredentials = { apiKey, authId };
   const startedAt = Date.now();

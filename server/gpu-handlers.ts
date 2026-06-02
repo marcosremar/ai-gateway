@@ -1240,7 +1240,7 @@ function _startDeployAndRespond(
   };
 
   const deployFn = raceCount > 1
-    ? startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount)
+    ? startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount, appSlot)
     : startDeployWithTiers(tiers, resolvedDockerImage, gpuTypes, extra, gpuPriorityByProvider, appSlot);
   const activeDeployId = appSlot ? appSlot.state.deployId : deployState.deployId;
   const handledFn = deployFn

@@ -588,6 +588,28 @@ describe('Gateway MCP endpoint', () => {
     });
   });
 
+  it('rejects MCP request bodies above the configured byte limit', async () => {
+    const previous = process.env.MCP_MAX_BODY_BYTES;
+    process.env.MCP_MAX_BODY_BYTES = '128';
+    try {
+      const port = await start();
+      const oversized = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'oversized',
+        method: 'tools/call',
+        params: { name: 'gateway.health', arguments: { padding: 'x'.repeat(256) } },
+      });
+      const response = await mcpRaw(port, oversized);
+      expect(response.status).toBe(413);
+      expect(await response.json()).toMatchObject({
+        error: { code: -32600 },
+      });
+    } finally {
+      if (previous === undefined) delete process.env.MCP_MAX_BODY_BYTES;
+      else process.env.MCP_MAX_BODY_BYTES = previous;
+    }
+  });
+
   it('handles JSON-RPC batches and notifications without producing phantom responses', async () => {
     const port = await start({}, [
       echoRoute('GET', '/v1/gpu/status'),

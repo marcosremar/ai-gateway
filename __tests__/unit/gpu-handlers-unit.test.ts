@@ -218,6 +218,12 @@ describe('handleGpuDeploy — cancel/redeploy', () => {
     const fnBody = handlersSource.slice(fnStart, fnStart + 100000);
     expect(fnBody).toContain('balanceWarnings');
   });
+
+  it('_startDeployAndRespond passes appSlot into race deploys', () => {
+    const fnStart = handlersSource.indexOf('function _startDeployAndRespond');
+    const fnBody = handlersSource.slice(fnStart, fnStart + 100000);
+    expect(fnBody).toContain('startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount, appSlot)');
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
