@@ -172,8 +172,8 @@ describe('runNumericChecks', () => {
 // ─── Vast SSH acquisition policy ───────────────────────────────────────
 
 describe('resolveVastSshAcquisitionPolicy', () => {
-  it('uses a 600s serial acquisition timeout for Vast RTX 5090 jobs by default', () => {
-    expect(DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC).toBe(600);
+  it('uses a 300s serial acquisition timeout for Vast RTX 5090 jobs by default', () => {
+    expect(DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC).toBe(300);
     const policy = resolveVastSshAcquisitionPolicy({
       provider: 'vast',
       gpuFilter: '5090',

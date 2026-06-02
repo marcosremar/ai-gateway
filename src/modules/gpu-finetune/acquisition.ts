@@ -1,4 +1,4 @@
-export const DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC = 600;
+export const DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC = 300;
 
 export interface VastSshAcquisitionPolicyInput {
   provider?: string;

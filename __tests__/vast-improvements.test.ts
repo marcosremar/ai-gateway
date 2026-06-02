@@ -291,6 +291,56 @@ describe('Vast.ai reliability improvements', () => {
       const client = new FreshClient();
       expect(client).toBeDefined();
     });
+
+    it('filters actively banned hosts out of offer search', async () => {
+      const client = new VastClient();
+      (client as any)._recordHostFailure('1.2.3.4');
+
+      fetchSpy.mockResolvedValueOnce(mockResp({
+        offers: [
+          { id: 'bad', gpu_name: 'RTX 5090', dph_total: 0.8, public_ipaddr: '1.2.3.4' },
+          { id: 'good', gpu_name: 'RTX 5090', dph_total: 0.9, public_ipaddr: '5.6.7.8' },
+        ],
+      }));
+
+      const offers = await (client as any)._searchOffers(
+        { limit: 10, gpu_name: { in: ['RTX 5090'] } },
+        { Authorization: 'Bearer k', 'Content-Type': 'application/json' },
+      );
+
+      expect(offers.map((o: Record<string, unknown>) => o.id)).toEqual(['good']);
+    });
+
+    it('demotes hosts with expired failure history instead of picking them first', async () => {
+      const client = new VastClient();
+      (client as any)._hostFailures.set('1.2.3.4', {
+        count: 2,
+        bannedUntilMs: Date.now() - 1,
+        lastFailureMs: Date.now() - 60_000,
+      });
+
+      const offers = [
+        { id: 'bad', gpu_name: 'RTX 5090', dph_total: 1.0, public_ipaddr: '1.2.3.4', reliability2: 0.99, inet_down: 20000 },
+        { id: 'good', gpu_name: 'RTX 5090', dph_total: 1.0, public_ipaddr: '5.6.7.8', reliability2: 0.98, inet_down: 10000 },
+      ];
+
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockResp({ offers }))
+        .mockResolvedValue(mockText('not available', 400));
+
+      await expect(
+        client.createInstance({
+          gpuTypes: ['RTX 5090'],
+          dockerImage: 'test/image:latest',
+          strictFastBoot: true,
+          raceCount: 1,
+        }, { apiKey: 'k' }),
+      ).rejects.toThrow();
+
+      const createCall = fetchSpy.mock.calls.find(c => String(c[0]).includes('/asks/'));
+      expect(String(createCall?.[0])).toContain('/asks/good/');
+    });
   });
 
   // ── P3: Adaptive polling parameters ───────────────────────────────────────

@@ -6840,7 +6840,7 @@ Spec keys (YAML or JSON):
   gpu              filter                   (default "4090")
   maxCost          $/h                      (default 0.4)
   maxSpend         $                        (default 5.0; force-kill if exceed)
-  bootTimeoutSec   seconds                  (Vast RTX 5090 default 600)
+  bootTimeoutSec   seconds                  (Vast RTX 5090 default 300)
   raceCount        N                        (deploy-level parallel race)
   output           dir                      (default ./ckpts/run-<ts>)
   pushToHf         owner/repo               (upload final ckpt to HF)

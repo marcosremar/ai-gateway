@@ -100,7 +100,7 @@ liveDescribe('live MCP Vast fine-tune SSH acquisition', () => {
       raceCount: 1,
       finetune: true,
       readinessProbe: 'ssh',
-      bootTimeoutSec: 600,
+      bootTimeoutSec: 300,
       runSmokeTests: false,
       onstart: 'sleep infinity',
       noTierCascade: true,

@@ -810,6 +810,19 @@ export class VastClient extends AbstractGpuProvider {
     return true;
   }
 
+  /** Historical failures still demote a host after its active ban expires. */
+  private _hostFailureCount(ip: string): number {
+    if (!ip) return 0;
+    const rec = this._hostFailures.get(ip);
+    if (!rec) return 0;
+    if (Date.now() - rec.lastFailureMs > HOST_FAILURE_RESET_MS && rec.bannedUntilMs <= Date.now()) {
+      this._hostFailures.delete(ip);
+      this._persistHostFailures();
+      return 0;
+    }
+    return Math.max(0, rec.count || 0);
+  }
+
   /**
    * Record a failure for this host — increment counter and escalate cooldown:
    *   1 failure  → 5 min ban
@@ -1704,6 +1717,8 @@ export class VastClient extends AbstractGpuProvider {
     // Within each tier, offers are sorted by inet_down desc (fastest boot).
     if (offers.length > 1 && spec.strictFastBoot) {
       offers = [...offers].sort((a, b) => {
+        const failureDelta = this._hostFailureCount(String(a.public_ipaddr ?? '')) - this._hostFailureCount(String(b.public_ipaddr ?? ''));
+        if (failureDelta !== 0) return failureDelta;
         const rel = Number(b.reliability2 ?? b.reliability ?? 0) - Number(a.reliability2 ?? a.reliability ?? 0);
         if (Math.abs(rel) > 0.0001) return rel;
         const inet = Number(b.inet_down || 0) - Number(a.inet_down || 0);
@@ -1720,7 +1735,11 @@ export class VastClient extends AbstractGpuProvider {
       for (const mult of tiers) {
         const ceiling = mult === Infinity ? Infinity : avgPrice * mult;
         const tier = offers.filter(o => !seen.has(String(o.id)) && Number(o.dph_total || 0) <= ceiling);
-        tier.sort((a, b) => Number(b.inet_down || 0) - Number(a.inet_down || 0));
+        tier.sort((a, b) => {
+          const failureDelta = this._hostFailureCount(String(a.public_ipaddr ?? '')) - this._hostFailureCount(String(b.public_ipaddr ?? ''));
+          if (failureDelta !== 0) return failureDelta;
+          return Number(b.inet_down || 0) - Number(a.inet_down || 0);
+        });
         for (const o of tier) { seen.add(String(o.id)); ranked.push(o); }
       }
 
@@ -1964,6 +1983,7 @@ export class VastClient extends AbstractGpuProvider {
     const gpuName = (offer.gpu_name || 'unknown') as string;
     const pricePerHr = (offer.dph_total || 0) as number;
     const isSshOnlyHint = Boolean((offer as Record<string, unknown>)._sshOnlyHint);
+    const offerIp = String(offer.public_ipaddr ?? offer.ssh_host ?? '');
     // Vast.ai instance label. Prefer the caller-supplied spec.label (the
     // user-given task name) so the instance is identifiable in the Vast
     // console + reconcilable to its owning task. Fallback keeps the old
@@ -2093,7 +2113,6 @@ export class VastClient extends AbstractGpuProvider {
             this.log.warn(`[vast] Instance ${contractId}: log fetch failed (${this.errMsg(logErr)}) — proceeding to cleanup`);
           }
           this.log.warn(`[vast] Instance ${contractId} no longer exists (status=${stillExists?.status ?? 'gone'}) — ${reason}.`);
-          const offerIp = String(offer.public_ipaddr ?? '');
           if (offerIp) {
             this._markHostUnstable(offerIp);
             this._recordHostFailure(offerIp);
@@ -2113,7 +2132,7 @@ export class VastClient extends AbstractGpuProvider {
           ? `direct SSH required but Vast returned SSH proxy ${sshTarget}`
           : `direct SSH required but Vast did not return a usable direct SSH target (ssh=${sshTarget}, endpoint=${endpoint || 'none'})`;
         this.log.warn(`[vast] Instance ${contractId}: ${reason}. Destroying so the deploy can try a host with direct SSH mapping.`);
-        if (ip) this._recordHostFailure(ip);
+        this._recordHostFailure(ip || offerIp);
         await this._safeCleanupInstance(instanceId, apiKey, reason);
         failures.push({ offerId, gpu: gpuName, reason });
         return null;
@@ -2225,6 +2244,7 @@ export class VastClient extends AbstractGpuProvider {
 
       if (!endpoint) {
         this.log.warn(`[vast] Instance ${contractId} has no endpoint and no SSH — destroying...`);
+        this._recordHostFailure(ip || offerIp);
         await this._safeCleanupInstance(instanceId, apiKey, 'no endpoint, no SSH');
         failures.push({ offerId, gpu: gpuName, reason: 'no endpoint, no SSH' });
         return null;
