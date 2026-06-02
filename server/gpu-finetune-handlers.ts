@@ -4,7 +4,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createWriteStream, existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, type ChildProcess } from 'node:child_process';
 
@@ -32,12 +32,14 @@ import { validateSpec } from '../src/modules/gpu-finetune/spec';
 import { readJsonBody, handleBodyError, sendJsonError } from './http-utils';
 import { readUserIdHeader } from './ws/api-key-resolver';
 import { PORT } from './config';
+import type { FinetuneOpts } from '../src/modules/gpu-finetune/types';
 
 const log = createLogger('gpu-finetune-handlers');
 const children = new Map<string, ChildProcess>();
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cliPath = resolve(repoRoot, 'bin/ai-gateway.ts');
+const REMOTE_FINETUNE_OUTPUT_ROOT = '/tmp/ai-gateway-finetune';
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -318,6 +320,38 @@ function numberOr(value: unknown, fallback: number | undefined): number | undefi
   return fallback;
 }
 
+function isRemoteFinetuneRuntime(env: NodeJS.ProcessEnv): boolean {
+  return !!env.FLY_APP_NAME || env.AIGW_FINETUNE_REMOTE_RUNNER === '1';
+}
+
+function safeOutputLeaf(output: string): string {
+  const leaf = basename(output.trim()).replace(/[^a-zA-Z0-9._-]/g, '_');
+  return leaf || `finetune-${Date.now()}`;
+}
+
+export function resolveFinetuneOutputForRuntime(
+  output: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (typeof output !== 'string' || !output.trim()) return undefined;
+  const trimmed = output.trim();
+  if (!isRemoteFinetuneRuntime(env)) return trimmed;
+  if (trimmed === '/tmp' || trimmed.startsWith('/tmp/') || trimmed.startsWith('/workspace/')) return trimmed;
+  if (trimmed.startsWith('/Users/') || trimmed.startsWith('/Volumes/')) {
+    return join(REMOTE_FINETUNE_OUTPUT_ROOT, safeOutputLeaf(trimmed));
+  }
+  return trimmed;
+}
+
+export function normalizeFinetuneSpecForServerRuntime(
+  spec: Partial<FinetuneOpts>,
+  env: NodeJS.ProcessEnv = process.env,
+): Partial<FinetuneOpts> {
+  const output = resolveFinetuneOutputForRuntime(spec.output, env);
+  if (output === spec.output || output === undefined) return spec;
+  return { ...spec, output };
+}
+
 async function listGatewayGpuInstances(token: string): Promise<any[]> {
   const resp = await fetch(`http://127.0.0.1:${PORT}/v1/gpu/list?probe=false`, {
     headers: gatewayHeaders(token),
@@ -504,7 +538,14 @@ export async function handleStartFinetune(req: IncomingMessage, res: ServerRespo
   catch (err) { handleBodyError(res, err); return; }
 
   const userId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
-  const spec = normalizeFinetuneHttpSpec(body);
+  const requestedSpec = normalizeFinetuneHttpSpec(body);
+  const spec = normalizeFinetuneSpecForServerRuntime(requestedSpec);
+  if (spec.output !== requestedSpec.output) {
+    log.log('rewrote fine-tune output path for remote runner', {
+      requestedOutput: requestedSpec.output,
+      runtimeOutput: spec.output,
+    });
+  }
   const validation = validateSpec(spec);
   if (!validation.valid) {
     json(res, 400, { error: { message: 'Fine-tune spec invalid', type: 'validation_error' }, errors: validation.errors });
