@@ -87,6 +87,10 @@ export const ROUTE_MAX_BYTES: Record<string, number> = {
   '/v1/config/api-keys': 64 * 1024,         // 64 KB
   '/v1/config/labs': 64 * 1024,             // 64 KB
   '/v1/docker/build': 64 * 1024,            // 64 KB
+  '/v1/gpu/finetune': 2 * 1024 * 1024,      // 2 MB (declarative train specs)
+  '/v1/gpu/finetune/kokoro-dataset': 64 * 1024, // 64 KB
+  '/v1/gpu/finetune/kokoro-dataset/plan': 64 * 1024, // 64 KB
+  '/v1/gpu/finetune/kokoro-dataset/run': 64 * 1024, // 64 KB
   '/v1/gpu/preflight': 64 * 1024,           // 64 KB
   '/v1/errors/alerts/acknowledge': 16 * 1024, // 16 KB
   '/v1/gpu/heartbeat': 16 * 1024,           // 16 KB

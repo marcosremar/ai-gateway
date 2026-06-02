@@ -253,6 +253,115 @@ class DeployResponse:
     message: str
 
 
+# ── GPU fine-tuning ─────────────────────────────────────────────────────────
+
+
+@dataclass
+class FinetuneGateConfig:
+    enabled: bool | None = None
+    type: str = "asr"  # "asr" | "wer" | "custom"
+    every_steps: int | None = None
+    eval_n: int | None = None
+    asr_model: str = ""
+    target: float | None = None
+    early_stop_patience: int | None = None
+
+
+@dataclass
+class FinetuneR2Config:
+    bucket: str = ""
+    prefix: str = ""
+    checkpoint_dest: str = ""
+    sharded_root: str = ""
+    sharded_manifest: str = ""
+    base_checkpoint: str = ""
+    base_vocab: str = ""
+    cache_dir: str = ""
+    cache_max_gb: float | None = None
+    sync_every_sec: int | None = None
+    resume: bool | None = None
+
+
+@dataclass
+class FinetuneHfSyncConfig:
+    repo: str = ""
+    path: str = ""
+    interval_sec: int | None = None
+    final_only: bool | None = None
+    private: bool | None = None
+
+
+@dataclass
+class FinetuneSshTarget:
+    host: str
+    port: int
+    user: str = "root"
+
+
+@dataclass
+class FinetuneJobOptions:
+    project: str = ""
+    type: str = ""
+    dataset: str = ""
+    model: str = ""
+    gpu: str = ""
+    providers: list[str] | None = None
+    steps: int | None = None
+    epochs: int | None = None
+    batch_size: int | None = None
+    lr: float | None = None
+    workers: int | None = None
+    save_every_steps: int | None = None
+    log_every_steps: int | None = None
+    max_spend: float | None = None
+    max_cost: float | None = None
+    image: str = ""
+    remote_url: str = ""
+    checkpoint_url: str = ""
+    ssh: FinetuneSshTarget | None = None
+    gate: FinetuneGateConfig | None = None
+    r2: FinetuneR2Config | None = None
+    hugging_face: FinetuneHfSyncConfig | None = None
+    extra_train_args: str = ""
+    dry_run: bool | None = None
+
+
+@dataclass
+class FinetuneJobResponse:
+    job_id: str
+    status: str
+    instance_id: str = ""
+    provider: str = ""
+    gpu_type: str = ""
+    ssh_host: str = ""
+    ssh_port: int = 0
+    r2_checkpoint_url: str = ""
+    hf_repo_url: str = ""
+    checkpoint_prefix: str = ""
+    message: str = ""
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class FinetuneJobStatus:
+    status: str
+    job_id: str = ""
+    stage: str = ""
+    step: int = 0
+    total_steps: int = 0
+    progress_pct: float = 0.0
+    best_score: float = 0.0
+    last_score: float = 0.0
+    gate_target: float = 0.0
+    last_eval_step: int = 0
+    eta_sec: int = 0
+    checkpoints: list[str] = field(default_factory=list)
+    r2_checkpoint_url: str = ""
+    hf_repo_url: str = ""
+    raw_logs: str = ""
+    raw: dict = field(default_factory=dict)
+
+
 # ── GPU Offer Discovery ────────────────────────────────────────────────────
 
 

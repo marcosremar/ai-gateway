@@ -1,6 +1,7 @@
 // ── GPU Poll Health — wait for a newly-created instance to become healthy ─────
 
 import { Buffer } from 'node:buffer';
+import { spawn } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import type { GpuProviderClient, ProviderCredentials } from '../src/gpu-providers/types';
 import { RunpodClient } from '../src/gpu-providers/runpod-client';
@@ -484,41 +485,116 @@ async function tcpReachable(host: string, port: number, timeoutMs: number): Prom
   });
 }
 
-/** Wait for SSH (TCP :22) on the instance. Polls provider for liveness and
- * returns 'ready' once the socket opens. No HTTP /health required. */
+async function sshCommandReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const child = spawn('ssh', [
+      '-p', String(port),
+      '-o', 'BatchMode=yes',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', `ConnectTimeout=${Math.max(1, Math.ceil(timeoutMs / 1000))}`,
+      '-o', 'LogLevel=ERROR',
+      `root@${host}`,
+      'true',
+    ], { stdio: 'ignore' });
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { child.kill('SIGKILL'); } catch {}
+      resolve(false);
+    }, timeoutMs);
+    child.once('exit', (code) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+    child.once('error', () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
+
+function endpointHost(endpoint: string): string {
+  try {
+    return new URL(endpoint).hostname;
+  } catch {
+    return endpoint.replace(/^https?:\/\//, '').split(':')[0].split('/')[0];
+  }
+}
+
+function isVastProxyHost(host: string): boolean {
+  return /(^|\.)vast\.ai$/i.test(host);
+}
+
+const DEFAULT_SSH_READINESS_TIMEOUT_SEC = 120;
+
+/** Wait for SSH on the instance. Polls provider for liveness and returns
+ * 'ready' only after a real non-interactive `ssh true` succeeds. */
 async function pollSshUntilReady(
   providerClient: GpuProviderClient,
   providerName: string,
   credentials: ProviderCredentials,
   podId: string,
   endpoint: string,
+  providerMeta: Record<string, unknown> | undefined,
   deployStartedAt: number,
+  requestedTimeoutSec?: number,
   slot?: DeploySlot,
 ): Promise<PollHealthResult> {
   const sd = slot ? slot.state : deployState;
   const sds = (p: Parameters<typeof setDeployState>[0]) => setDeployState(p, slot ?? undefined);
-  // Cap SSH probe at 90s — Vast.ai SSH proxies either answer fast or never.
-  // If a host fails this cap, the deploy retries on different hosts in
-  // parallel via race=N (configured at deploy time, default 3).
-  const deployTimeoutMs = Math.min(
-    getDeployTimeoutMinForProvider(providerName) * 60_000,
-    90_000,
+  // Cap SSH probe, but let batch jobs override it explicitly. Some direct-port
+  // marketplace hosts, especially scarce 5090s, can take longer to accept SSH
+  // even though the instance is still coming up.
+  const explicitTimeoutConfigured = requestedTimeoutSec != null
+    || process.env.AIGW_SSH_READINESS_TIMEOUT_SEC != null
+    || process.env.AIGW_VAST_SSH_BOOT_TIMEOUT_SEC != null;
+  const configuredTimeoutSec = requestedTimeoutSec
+    ?? process.env.AIGW_SSH_READINESS_TIMEOUT_SEC
+    ?? process.env.AIGW_VAST_SSH_BOOT_TIMEOUT_SEC
+    ?? DEFAULT_SSH_READINESS_TIMEOUT_SEC;
+  const sshReadinessCapSec = Math.max(
+    30,
+    Math.min(
+      600,
+      Number(configuredTimeoutSec) || DEFAULT_SSH_READINESS_TIMEOUT_SEC,
+    ),
   );
-  // Extract host from `endpoint` (e.g. "http://1.2.3.4:8000") — fall back to the raw string.
-  let host = endpoint;
-  try {
-    host = new URL(endpoint).hostname;
-  } catch {
-    host = endpoint.replace(/^https?:\/\//, '').split(':')[0].split('/')[0];
+  const providerTimeoutMs = getDeployTimeoutMinForProvider(providerName) * 60_000;
+  const deployTimeoutMs = explicitTimeoutConfigured
+    ? sshReadinessCapSec * 1000
+    : Math.min(providerTimeoutMs, sshReadinessCapSec * 1000);
+  const metaSshHost = typeof providerMeta?.sshHost === 'string' ? providerMeta.sshHost : '';
+  const metaSshPort = typeof providerMeta?.sshPort === 'number' ? providerMeta.sshPort : 0;
+  const source = sd.sshHost ? 'state' : metaSshHost ? 'providerMeta' : 'endpointFallback';
+  const host = sd.sshHost || metaSshHost || endpointHost(endpoint);
+  const port = sd.sshPort || metaSshPort || 22;
+  const accessMode = providerName === 'vast'
+    ? (isVastProxyHost(host) ? 'proxy' : 'direct')
+    : 'provider';
+  const vastProxyAllowed = process.env.AIGW_VAST_ALLOW_PROXY === '1'
+    || process.env.AIGW_VAST_REQUIRE_DIRECT === '0';
+
+  log.log(`[gpu] ${providerName} pod ${podId}: SSH-only readiness probe against ${host}:${port} (access=${accessMode}, source=${source})`);
+  if (providerName === 'vast' && (source === 'endpointFallback' || (!vastProxyAllowed && accessMode !== 'direct'))) {
+    const msg = source === 'endpointFallback'
+      ? `direct SSH was not resolved for ${providerName} pod ${podId}; refusing to fall back to HTTP endpoint host ${host}:22`
+      : `SSH target is not direct for ${providerName} pod ${podId}: ${host}:${port} (access=${accessMode})`;
+    log.warn(`[gpu] ${msg}`);
+    sds({ status: 'error', step: 'waiting_ssh', message: msg, stepDetail: `${host}:${port} (${accessMode})` });
+    return { result: 'timeout' };
   }
-  log.log(`[gpu] ${providerName} pod ${podId}: SSH-only readiness probe against ${host}:22`);
-  sds({ status: 'booting', step: 'waiting_ssh', stepDetail: `${host}:22` });
+  sds({ status: 'booting', step: 'waiting_ssh', stepDetail: `${host}:${port} (${accessMode})` });
 
   while (true) {
     if (deployCancelled) return { result: 'cancelled' }; if (slot?.cancelled) return { result: 'cancelled' };
     const elapsed = Date.now() - deployStartedAt;
     if (elapsed > deployTimeoutMs) {
-      const msg = `SSH readiness timeout after ${Math.round(elapsed / 1000)}s — :22 never answered on ${host}`;
+      const msg = `SSH readiness timeout after ${Math.round(elapsed / 1000)}s — ${host}:${port} never accepted ssh`;
       log.warn(`[gpu] ${msg}`);
       sds({ status: 'error', step: 'waiting_ssh', message: msg });
       return { result: 'timeout' };
@@ -533,7 +609,9 @@ async function pollSshUntilReady(
     } catch (err) {
       log.debug(`[gpu] provider status check failed during SSH wait: ${err instanceof Error ? err.message : err}`);
     }
-    if (await tcpReachable(host, 22, 3000)) {
+    const tcpOk = await tcpReachable(host, port, 3000);
+    const sshOk = tcpOk && await sshCommandReachable(host, port, 7000);
+    if (sshOk) {
       const durationMs = Date.now() - deployStartedAt;
       log.log(`[gpu] ${providerName} pod ${podId}: SSH reachable after ${Math.round(durationMs / 1000)}s`);
       setLastRequestTime(Date.now());
@@ -558,16 +636,16 @@ export async function pollHealthUntilReady(
   requireDockerManifest = false,
   runSmokeTests = true,
   slot?: DeploySlot,
+  sshReadinessTimeoutSec?: number,
 ): Promise<PollHealthResult> {
   const sd = slot ? slot.state : deployState;
   const sds = (p: Parameters<typeof setDeployState>[0]) => setDeployState(p, slot ?? undefined);
   const credentials: ProviderCredentials = { apiKey };
 
   // SSH-only readiness mode: skip HTTP /health polling entirely and just wait
-  // for TCP :22 to answer on the endpoint host. Used for experiments that only
-  // need shell access (e.g. CRIU on a plain CPU process, cold-boot benchmarks).
+  // for the provider-reported SSH host/port to accept a real command.
   if (sd.readinessProbe === 'ssh') {
-    return pollSshUntilReady(providerClient, providerName, credentials, podId, endpoint, deployStartedAt, slot);
+    return pollSshUntilReady(providerClient, providerName, credentials, podId, endpoint, providerMeta, deployStartedAt, sshReadinessTimeoutSec, slot);
   }
 
   let consecutiveExited = 0;

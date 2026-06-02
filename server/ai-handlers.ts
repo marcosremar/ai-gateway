@@ -45,7 +45,7 @@ import {
   runLlmStage as _runLlmStageCore,
   runTtsStage as _runTtsStageCore,
   generateTtsPreview,
-  resolveChatProvider, buildOpenAiChatResponse,
+  resolveChatProvider, resolveProfileChatModel, buildOpenAiChatResponse,
   buildAtomicResponseBody, computeNetworkMs, extractAtomicAudio,
   runTranslateRace, buildTranslatePrompt,
 } from '../src/gateway/pipeline';
@@ -1427,8 +1427,9 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
         const cfg = await loadProviderConfig();
         const app = cfg.apps.find(a => a.id === userId);
         const first = app?.llm?.[0];
-        if (first?.model) {
-          model = first.model;
+        const profileModel = resolveProfileChatModel(first);
+        if (profileModel) {
+          model = profileModel;
         }
       } catch (err) {
         log.warn('app-profile resolve failed: %s', err instanceof Error ? err.message : err);
@@ -1449,6 +1450,7 @@ export async function handleChatCompletions(req: IncomingMessage, res: ServerRes
     providerDefaults: {
       groq: groqLlmModel,
       fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+      minimax: process.env.MINIMAX_LLM_MODEL || 'MiniMax-M2.7',
     },
     providerAdapters,
   });

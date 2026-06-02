@@ -63,6 +63,7 @@ export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string
 async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>, slot?: DeploySlot) {
   const sd = slot ? slot.state : deployState;
   const sds = (patch: Parameters<typeof setDeployState>[0]) => setDeployState(patch, slot ?? undefined);
+  const isCancelled = () => slot ? slot.cancelled : deployCancelled;
   // ── Pre-flight checks ───────────────────────────────────────────────────
   // Validate image, DNS, CUDA compatibility, and cost BEFORE attempting any
   // provider deploy. Catches common failure scenarios early (Fixes #6, #13,
@@ -224,7 +225,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
 
   for (let i = 0; i < availableTiers.length; i++) {
     const tier = availableTiers[i];
-    if (deployCancelled) return; if (slot?.cancelled) return;
+    if (isCancelled()) return;
 
     // Track active credentials
     if (tier.name === 'runpod') setDeployApiKey(tier.apiKey);
@@ -244,7 +245,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
         : dockerImage;
       const tierGpuTypes = gpuTypesByProvider?.[tier.name] ?? gpuTypes;
       log.log(`[gpu] Starting ${tier.label} deploy loop (tier ${i + 1}/${availableTiers.length}, GPUs: ${tierGpuTypes.slice(0,3).map(g=>g.replace('NVIDIA ','').replace('GeForce ','')).join(', ')}...)`);
-      await startDeployLoop(tier.client, tier.name, tier.apiKey, tierDockerImage, tierGpuTypes, tier.authId, extra);
+      await startDeployLoop(tier.client, tier.name, tier.apiKey, tierDockerImage, tierGpuTypes, tier.authId, extra, slot);
       const durationMs = Date.now() - tierStartedAt;
       if (sd.status === 'ready') {
         log.log(`[gpu] ✓ ${tier.label} deploy succeeded in ${Math.round(durationMs / 1000)}s`);
@@ -306,8 +307,12 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
       }
     }
 
-    // Detect silent failures: deploy returned to idle without error or ready
-    if (deployState.status === 'idle') {
+    // Detect silent failures: deploy returned to idle without error or ready.
+    // Use the active deploy slot, not the global serving slot: app/finetune
+    // deploys run in isolated slots while the global state can legitimately
+    // remain idle. Reading the global state here made healthy slot deploys look
+    // like "returned to idle" and retried the same provider unnecessarily.
+    if (sd.status === 'idle') {
       const msg = `${tier.label} deploy returned to idle unexpectedly — possible silent failure`;
       log.error(`[gpu] ${msg}`);
       sds({ status: 'error', message: msg });

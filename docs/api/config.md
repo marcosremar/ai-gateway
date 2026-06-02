@@ -112,10 +112,10 @@ const stateStore = new RedisStateAdapter({ url: process.env.REDIS_URL });
 
 ## Cooldowns
 
-Provider cooldowns persist in `~/.babelcast/cooldowns.json`. Delete this file to clear stuck cooldowns:
+Provider cooldowns persist in `~/.ai-gateway/cooldowns.json`. Delete this file to clear stuck cooldowns:
 
 ```bash
-rm ~/.babelcast/cooldowns.json
+rm ~/.ai-gateway/cooldowns.json
 ```
 
 ## RunPod Quota Tracking

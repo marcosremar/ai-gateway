@@ -116,6 +116,8 @@ export interface ProjectManifest {
   r2BaseCkpt?: string;
   r2BaseVocab?: string;
   r2CkptDest?: string;
+  r2SyncIntervalSec?: number;
+  autoResumeR2?: boolean;
   shardCacheDir?: string;
   shardCacheMaxGb?: number;
   steps?: number;
@@ -123,6 +125,14 @@ export interface ProjectManifest {
   saveEverySteps?: number;
   logEverySteps?: number;
   workers?: number;
+  evalEverySteps?: number;
+  evalN?: number;
+  evalAsrModel?: string;
+  evalGateTarget?: number;
+  earlyStopPatience?: number;
+  hfSyncRepo?: string;
+  hfSyncPath?: string;
+  hfSyncIntervalSec?: number;
   skipSmoke?: boolean;
   encodeCmd?: string;
   trainCmd?: string;
@@ -162,9 +172,31 @@ export interface FinetuneOpts {
 
   // Budget / runtime
   gpu?: string;
+  /** Optional provider region/geolocation filter, e.g. "Alberta, CA" for Vast. */
+  region?: string;
   maxCost?: number;
   maxSpend?: number;
   output?: string;
+  timeoutMin?: number;
+  bootTimeoutMin?: number;
+  bootTimeoutSec?: number;
+  /** Deploy-level parallel race count. */
+  raceCount?: number;
+  /** Vast internal offer race knob. */
+  offerRaceCount?: number;
+  /** Vast strict/high-quality search; false allows broader SSH-only hosts. */
+  strictFastBoot?: boolean;
+  /** Vast offer search profile. */
+  searchMode?: 'high_quality' | 'full';
+  /** Allow unverified Vast hosts when searchMode is full. */
+  allowUnverified?: boolean;
+  /** Per-app deploy slot for concurrent finetune workers. */
+  parallelSlot?: string;
+  /** Remote instance storage size override in GB. */
+  storageGb?: number;
+  pullEveryMin?: number;
+  stallMin?: number;
+  pullExclude?: string[];
 
   // Quality / features
   quality?: QualityMode;
@@ -223,14 +255,38 @@ export interface FinetuneOpts {
   steps?: number;
   /** Dataloader workers for trainers that expose this knob. */
   workers?: number;
+  /** Evaluate quality gate every N steps. */
+  evalEverySteps?: number;
+  /** Number of validation samples for each quality gate pass. */
+  evalN?: number;
+  /** ASR/Whisper model used by the validation gate. */
+  evalAsrModel?: string;
+  /** Target score for the validation gate. */
+  evalGateTarget?: number;
+  /** Stop after N gate passes without improvement, when trainer supports it. */
+  earlyStopPatience?: number;
+  /** Hugging Face repo for periodic checkpoint sync. */
+  hfSyncRepo?: string;
+  /** Path inside Hugging Face repo for checkpoint sync. */
+  hfSyncPath?: string;
+  /** Periodic Hugging Face checkpoint sync interval. */
+  hfSyncIntervalSec?: number;
+  /** Periodic R2/S3 checkpoint sync interval. 0 disables live sync; final sync still runs. */
+  r2SyncIntervalSec?: number;
+  /** Auto-restore checkpoints from R2/S3 when r2Bucket is set. Defaults to true. */
+  autoResumeR2?: boolean;
 
   // Operations
   autoResume?: boolean;
   preferSpot?: boolean;
+  /** Offer ranking for cost-sensitive GPU jobs. All modes still obey maxCost. */
+  selectMode?: 'cheapest' | 'balanced' | 'fast';
   reuse?: boolean;
   dryRun?: boolean;
   smoke?: boolean;
   skipSmoke?: boolean;
+  /** Safety override: allow skipping smoke even when estimated spend is high. */
+  allowSkipSmokeForExpensive?: boolean;
   persistCache?: boolean;
   retryOnPreempt?: number;
   incremental?: boolean;
@@ -245,6 +301,7 @@ export interface FinetuneOpts {
   secrets?: Record<string, string>;
 
   // Infrastructure
+  provider?: string;
   providers?: string[];
   failoverOnPreempt?: boolean;
   evalsPerEpoch?: number;
@@ -319,6 +376,11 @@ export interface FinetuneStatusResult {
   encodedPath?: string;
   checkpoints: string[];
   recentLoss: string[];
+  step?: number;
+  totalSteps?: number;
+  bestScore?: number;
+  lastScore?: number;
+  lastEvalStep?: number;
 }
 
 // ─── Cost estimation ────────────────────────────────────────────────────────
@@ -329,6 +391,57 @@ export interface FinetuneCostEstimate {
   setupMin: number;
   totalMin: number;
   totalUsd: number;
+}
+
+// ─── Dataset planning ──────────────────────────────────────────────────────
+
+export type DatasetPrepComputeKind = 'cpu-fanout' | 'cheap-gpu' | 'selected-gpu';
+
+export interface DatasetPrepOption {
+  kind: DatasetPrepComputeKind;
+  label: string;
+  workers: number;
+  samplesPerSec: number;
+  pricePerHour: number;
+  setupMin: number;
+  totalMin: number;
+  totalUsd: number;
+  notes: string[];
+}
+
+export interface DatasetStoragePlan {
+  provider: 'backblaze-b2' | 'cloudflare-r2' | 's3-compatible';
+  bucket: string;
+  prefix: string;
+  datasetUri: string;
+  manifestUri: string;
+  exists: boolean;
+  checked: boolean;
+  checks: Array<{ target: string; ok: boolean; detail: string; bytes?: number }>;
+}
+
+export interface FinetunePlan {
+  project?: string;
+  type: FinetuneType | string;
+  agent: 'minimax' | 'deterministic';
+  dataset: {
+    source?: string;
+    sampleCount: number;
+    maxSamples?: number;
+    needsPreparation: boolean;
+    validation: string[];
+  };
+  storage: DatasetStoragePlan | null;
+  economics: {
+    options: DatasetPrepOption[];
+    recommended: DatasetPrepOption;
+    reason: string;
+  };
+  training: FinetuneCostEstimate;
+  blockers: string[];
+  warnings: string[];
+  nextSteps: string[];
+  agentNotes?: string;
 }
 
 // ─── Validation result ──────────────────────────────────────────────────────

@@ -37,7 +37,7 @@ await withProviderFallback(
 - Failed providers enter cooldown (default 30s)
 - Cooldown is tracked per-provider, per-user
 - Credit exhaustion is tracked permanently (until manual reset)
-- Cooldown state persists in `~/.babelcast/cooldowns.json`
+- Cooldown state persists in `~/.ai-gateway/cooldowns.json`
 
 ## Consequences
 

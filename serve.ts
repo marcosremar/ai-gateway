@@ -9,28 +9,121 @@
  * Requires GROQ_API_KEY in env.
  */
 
+import './src/env/load-project-env';
 import { startProxy } from './src/proxy/server';
 import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { openrouterLLM } from './src/gateway/providers/cloud/openrouter';
 import { zaiLLM, ZAI_LLM_MODELS } from './src/modules/gateway/providers/cloud/zai';
 import { routingImage } from './src/providers/routing-image';
 import { createLogger } from './src/logger';
+import { createGatewayMcpHandler } from './src/gateway/mcp/server';
 import type { ProviderMapping, PrefixRoute } from './src/proxy/types';
+import { resolveBearer, X_AIGW_USER_ID } from './server/ws/api-key-resolver';
 
 const log = createLogger('serve');
+const runtimeRequire = eval('require') as typeof require;
 
-// Workload handlers live in server/ which is NOT included in the Fly.io
-// Docker image (only src/ + serve.ts are copied). Dynamic import with
-// fallback so the proxy starts regardless.
+// Server handlers are optional so the lightweight proxy can still boot when
+// consumed as a library entrypoint without the reference server tree.
 let routeWorkloadRequest: ((req: any, res: any, path: string, method: string) => boolean) | null = null;
 try {
-  const wh = require('./server/workload-handlers');
+  const wh = runtimeRequire('./server/workload-handlers');
   routeWorkloadRequest = wh.routeWorkloadRequest;
   const { workloadRegistry, GpuWorkloadDriver } = require('./src/workloads');
   workloadRegistry.registerDriver(new GpuWorkloadDriver());
   log.log({}, 'Workload registry initialized (gpu driver)');
 } catch {
   log.log({}, 'Workload handlers not available (server/ not bundled) — skipping');
+}
+
+const lightweightProxyRoutes = new Set([
+  'GET /v1/models',
+  'POST /v1/chat/completions',
+  'POST /v1/embeddings',
+  'POST /v1/audio/speech',
+  'POST /v1/audio/transcriptions',
+  'POST /v1/images/generate',
+  'POST /v1/images/inpaint',
+  'GET /v1/search',
+  'POST /v1/search',
+]);
+
+let routeServerRequest: ((req: any, res: any, path: string, method: string) => boolean) | null = null;
+try {
+  const {
+    registerAllRoutes,
+    getDockerDynamicMatcher,
+    getGpuDynamicMatcher,
+    getAppDynamicMatcher,
+  } = runtimeRequire('./server/routes');
+  const handlers: Record<string, Function> = {};
+  registerAllRoutes(handlers);
+
+  const matchDockerDynamic = getDockerDynamicMatcher?.();
+  const matchGpuDynamic = getGpuDynamicMatcher?.();
+  const matchAppDynamic = getAppDynamicMatcher?.();
+
+  routeServerRequest = (req: any, res: any, path: string, method: string): boolean => {
+    const key = `${method} ${path}`;
+    if (lightweightProxyRoutes.has(key)) return false;
+
+    const authHeader = Array.isArray(req.headers?.authorization)
+      ? req.headers.authorization[0]
+      : req.headers?.authorization;
+    const token = typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '') : '';
+    if (token && !req.headers?.[X_AIGW_USER_ID]) {
+      const resolution = resolveBearer(token);
+      if (resolution.ok && resolution.userId) {
+        req.headers[X_AIGW_USER_ID] = resolution.userId;
+      }
+    }
+
+    const invoke = (handler: Function, params: string[] = []) => {
+      Promise.resolve(handler(req, res, ...params)).catch((err) => {
+        log.error({ err, route: key }, 'Unhandled error in server route fallback');
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Internal server error' }));
+        }
+      });
+    };
+
+    if (path.startsWith('/v1/docker/') && matchDockerDynamic) {
+      const match = matchDockerDynamic(method, path);
+      if (match) {
+        const [handler, params] = match;
+        invoke(handler, params);
+        return true;
+      }
+    }
+
+    if (path.startsWith('/v1/gpu/') && matchGpuDynamic) {
+      const match = matchGpuDynamic(method, path);
+      if (match) {
+        const [handler, params] = match;
+        invoke(handler, params);
+        return true;
+      }
+    }
+
+    if (path.startsWith('/v1/apps/') && matchAppDynamic) {
+      const match = matchAppDynamic(method, path);
+      if (match) {
+        const [handler, params] = match;
+        invoke(handler, params);
+        return true;
+      }
+    }
+
+    const handler = handlers[key];
+    if (!handler) return false;
+    invoke(handler);
+    return true;
+  };
+
+  log.log({ routes: Object.keys(handlers).length }, 'Server route fallback initialized');
+} catch (err) {
+  log.warn({ error: err instanceof Error ? err.message : String(err) }, 'Server route fallback not available');
 }
 
 const PORT = parseInt(process.env.PORT || '4000');
@@ -126,12 +219,27 @@ const prefixRoutes: PrefixRoute[] = [];
 if (routeWorkloadRequest) {
   prefixRoutes.push({ prefix: '/v1/workloads', handler: routeWorkloadRequest });
 }
+if (routeServerRequest) {
+  prefixRoutes.push({ prefix: '/v1', handler: routeServerRequest });
+  prefixRoutes.push({ prefix: '/metrics', handler: routeServerRequest });
+}
 
 const server = await startProxy({
   port: PORT,
   hostname: '0.0.0.0',
   apiKeys: API_KEYS,
   providers,
+  customRoutes: [
+    {
+      method: 'POST',
+      path: '/mcp',
+      handler: createGatewayMcpHandler({
+        name: 'parle-ai-gateway',
+        version: '1.0.0',
+        providers,
+      }),
+    },
+  ],
   ...(prefixRoutes.length > 0 ? { prefixRoutes } : {}),
   ...(RATE_LIMIT_RPM > 0 ? { rateLimit: { rpm: RATE_LIMIT_RPM } } : {}),
 });

@@ -121,6 +121,22 @@ const result = await withProviderFallback(
 );
 ```
 
+### GPU Acquisition Safety
+
+GPU provider cooldowns are persisted in `~/.ai-gateway/cooldowns.json`. Before a GPU job or finetune run picks an offer, the CLI reads that file and prints an operator-facing message such as:
+
+```text
+[cooldown] detected from ~/.ai-gateway/cooldowns.json: vast 41m left, failCount=8
+```
+
+If every requested provider is cooling down, the command exits before creating any machines. This prevents batch launchers from retrying into a known provider block and extending the outage.
+
+Parallel deploy and offer acquisition races are disabled for Vast.ai. Vast RTX 5090 acquisition runs serially (`fanout=1`) because each parallel offer attempt can create or reserve a real marketplace machine; on scarce GPUs those losers/failures rapidly accumulate and can put the provider into cooldown. Vast.ai ignores old aggressive race settings and clamps `--offer-race-count`, `VAST_OFFER_RACE`, and deploy `raceCount` to 1.
+
+SSH-readiness jobs prefer direct SSH targets, not HTTP/proxy readiness. The CLI forwards `--boot-timeout-sec` into the server-side SSH poller so a requested 420s acquisition window is honored by the process that owns cleanup of the billable instance.
+
+The server/MCP entrypoints load the project `.env` during bootstrap, before provider routes are registered. That keeps MCP GPU offer queries on the same credential path as the local launcher, even when the MCP process starts with a different working directory.
+
 ### GPU Provider Clients
 
 ```typescript

@@ -47,7 +47,7 @@ Cooldown expires → Half-open (allow one attempt)
 
 ## Persistence
 
-Cooldowns persist to `~/.babelcast/cooldowns.json`:
+Cooldowns persist to `~/.ai-gateway/cooldowns.json`:
 
 ```json
 {

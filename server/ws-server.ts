@@ -2,6 +2,7 @@
 // Bun native WS on PORT+1 + HTTP REST API on PORT. All route/handler logic
 // lives in server/ws/* and server/routes/*. This file wires them together.
 
+import '../src/env/load-project-env';
 import { createLogger } from '../src/logger';
 import { safeCatch } from '../src/safe-catch';
 const log = createLogger('ws-server');
@@ -67,6 +68,7 @@ type WsData = {
 /** Global WebSocket connection limit — prevents resource exhaustion from unlimited connections. */
 const MAX_WS_TOTAL = 200;
 let wsConnectionCount = 0;
+const liveServers: unknown[] = [];
 
 /**
  * Validate critical configuration at startup and return warnings.
@@ -199,7 +201,7 @@ export async function startWsServer(): Promise<number> {
   }
 
   const WS_PORT = PORT + 1;
-  Bun.serve<WsData>({
+  const wsServer = Bun.serve<WsData>({
     port: WS_PORT,
     reusePort: true,
     fetch(req, server) {
@@ -463,6 +465,7 @@ export async function startWsServer(): Promise<number> {
       },
     },
   });
+  liveServers.push(wsServer);
 
   initDatabase();
   startHttpApiServer();

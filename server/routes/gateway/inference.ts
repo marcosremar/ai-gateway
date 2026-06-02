@@ -696,7 +696,7 @@ function modelCapabilities(capability: string, provider?: string, model?: string
 
 async function handleSearchCompat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const proxyReq = {
-    method: req.method,
+    method: req.method || 'GET',
     url: req.url || '',
     headers: Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v[0] ?? '' : v ?? ''])),
     body: null as Record<string, unknown> | null,

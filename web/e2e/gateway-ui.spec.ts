@@ -383,8 +383,8 @@ test.describe('Gateway Unavailable', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.describe('Header Branding', () => {
-  test('shows AI Gateway title (not BabelCast)', async ({ page }) => {
+  test('shows BabelCast settings title', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('aside h1')).toHaveText('AI Gateway Settings');
+    await expect(page.locator('aside h1')).toHaveText('BabelCast Settings');
   });
 });

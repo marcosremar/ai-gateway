@@ -435,6 +435,12 @@ export {
   type GpuStatus as SDKGpuStatus,
   type DeployOptions as SDKDeployOptions,
   type DeployResponse as SDKDeployResponse,
+  type FinetuneGateConfig as SDKFinetuneGateConfig,
+  type FinetuneR2Config as SDKFinetuneR2Config,
+  type FinetuneHfSyncConfig as SDKFinetuneHfSyncConfig,
+  type FinetuneJobOptions as SDKFinetuneJobOptions,
+  type FinetuneJobResponse as SDKFinetuneJobResponse,
+  type FinetuneJobStatus as SDKFinetuneJobStatus,
 } from './modules/sdk';
 
 // ── Language Detection ─────────────────────────────────────────────────────

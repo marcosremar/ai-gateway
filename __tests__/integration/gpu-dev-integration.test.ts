@@ -79,7 +79,8 @@ describe('gpu dev — integration', () => {
 
     it('deploy handler accepts body.devMode and stores it in deployState', () => {
       expect(handlersSource).toMatch(/body\.devMode\s*===\s*true/);
-      expect(handlersSource).toMatch(/setDeployState\(\{\s*deployId,\s*devMode:/);
+      expect(handlersSource).toMatch(/const initialDeployState\s*=\s*\{[\s\S]*?deployId,[\s\S]*?devMode:\s*config\.devMode\s*===\s*true/);
+      expect(handlersSource).toMatch(/setDeployState\(initialDeployState/);
       // DeployConfig interface carries the flag
       expect(handlersSource).toMatch(/devMode\?:\s*boolean/);
     });

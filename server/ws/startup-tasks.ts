@@ -218,6 +218,15 @@ export async function runStartupTasks(): Promise<void> {
     log.warn(`[startup] startOrphanSweep failed: ${e?.message?.slice(0, 80)}`);
   }
 
+  // 5b.2 Fine-tune reconciler — if the HTTP/CLI runner dies after provisioning,
+  // reconcile job records and terminate any job-owned GPU through the gateway API.
+  try {
+    const { startFinetuneReconciler } = require('../gpu-finetune-handlers');
+    startFinetuneReconciler();
+  } catch (e: any) {
+    log.warn(`[startup] startFinetuneReconciler failed: ${e?.message?.slice(0, 80)}`);
+  }
+
   // 5c. Recover persisted auto-destroy timer for stopped pods.
   // Without this, a gateway restart orphans every stopped pod (they never get
   // destroyed on schedule and quietly accumulate storage costs).

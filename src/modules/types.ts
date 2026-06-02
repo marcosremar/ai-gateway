@@ -14,7 +14,7 @@ export type { GpuInstance } from './gpu-providers/types';
 export interface StageTimeouts {
   /** Max time for discoverInstance (default: 30s) */
   discoverMs?: number;
-  /** Max time for createInstance — includes offer search + API call + endpoint polling (default: 120s) */
+  /** Max time for createInstance — includes offer search + API call + endpoint polling (Vast default: 600s) */
   createMs?: number;
   /** Max time for startInstance on an existing stopped instance (default: 30s) */
   startMs?: number;
@@ -22,7 +22,7 @@ export interface StageTimeouts {
 
 /** Default stage timeouts per provider (ms) */
 export const DEFAULT_STAGE_TIMEOUTS: Record<string, Required<StageTimeouts>> = {
-  vast:       { discoverMs: 30_000, createMs: 120_000, startMs: 30_000 },
+  vast:       { discoverMs: 30_000, createMs: 600_000, startMs: 30_000 },
   hyperstack: { discoverMs: 30_000, createMs: 120_000, startMs: 30_000 },
   runpod:     { discoverMs: 30_000, createMs: 90_000,  startMs: 30_000 },
   tensordock: { discoverMs: 30_000, createMs: 120_000, startMs: 30_000 },

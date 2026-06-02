@@ -269,6 +269,10 @@ describe('GPU Handlers - Core Logic', () => {
     // Tests don't author label fields in mock bodies; opt out of the
     // label-required guard added in 81a19b82.
     process.env.AIGW_LABEL_OPTIONAL = '1';
+    // These unit tests exercise validation/orchestration in the legacy global
+    // deploy path. Production still requires an app owner by default; the
+    // explicit opt-out keeps old no-header test requests on that path.
+    process.env.AIGW_ALLOW_UNSCOPED_GPU_DEPLOY = '1';
     // Reset deploy state between tests
     vi.mocked(stateMock.setDeployLock).mockImplementation(() => {});
     vi.mocked(stateMock.setDeployState).mockImplementation(() => {});
@@ -288,6 +292,7 @@ describe('GPU Handlers - Core Logic', () => {
 
   afterEach(() => {
     delete process.env.AIGW_LABEL_OPTIONAL;
+    delete process.env.AIGW_ALLOW_UNSCOPED_GPU_DEPLOY;
     vi.restoreAllMocks();
   });
 

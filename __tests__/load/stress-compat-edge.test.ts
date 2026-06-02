@@ -314,14 +314,14 @@ describe('Fly.io Architecture (#905-#910)', () => {
     expect(toml).toContain('internal_port');
   });
 
-  it('#909 auto_stop configured', () => {
+  it('#909 auto_stop disabled for always-on production gateway', () => {
     const toml = read('fly.toml');
-    expect(toml).toContain("auto_stop_machines = 'stop'");
+    expect(toml).toContain("auto_stop_machines = 'off'");
   });
 
-  it('#910 min_machines_running = 0 (scale-to-zero, auto_start handles wake)', () => {
+  it('#910 keeps one machine running for gateway availability', () => {
     const toml = read('fly.toml');
-    expect(toml).toContain('min_machines_running = 0');
+    expect(toml).toContain('min_machines_running = 1');
   });
 });
 

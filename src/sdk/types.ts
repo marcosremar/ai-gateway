@@ -116,6 +116,101 @@ export interface DeployResponse {
   message: string;
 }
 
+// ── GPU fine-tuning ────────────────────────────────────────────────────────
+
+export interface FinetuneGateConfig {
+  enabled?: boolean;
+  type?: 'asr' | 'wer' | 'custom';
+  everySteps?: number;
+  evalN?: number;
+  asrModel?: string;
+  target?: number;
+  earlyStopPatience?: number;
+}
+
+export interface FinetuneR2Config {
+  bucket?: string;
+  prefix?: string;
+  checkpointDest?: string;
+  shardedRoot?: string;
+  shardedManifest?: string;
+  baseCheckpoint?: string;
+  baseVocab?: string;
+  cacheDir?: string;
+  cacheMaxGb?: number;
+  syncEverySec?: number;
+  resume?: boolean;
+}
+
+export interface FinetuneHfSyncConfig {
+  repo?: string;
+  path?: string;
+  intervalSec?: number;
+  finalOnly?: boolean;
+  private?: boolean;
+}
+
+export interface FinetuneJobOptions {
+  project?: string;
+  type?: 'text' | 'audio' | 'custom' | string;
+  dataset?: string;
+  model?: string;
+  gpu?: string;
+  providers?: string[];
+  steps?: number;
+  epochs?: number;
+  batchSize?: number;
+  lr?: number;
+  workers?: number;
+  saveEverySteps?: number;
+  logEverySteps?: number;
+  maxSpend?: number;
+  maxCost?: number;
+  image?: string;
+  remoteUrl?: string;
+  checkpointUrl?: string;
+  ssh?: { host: string; port: number; user?: string };
+  gate?: FinetuneGateConfig;
+  r2?: FinetuneR2Config;
+  huggingFace?: FinetuneHfSyncConfig;
+  extraTrainArgs?: string;
+  dryRun?: boolean;
+}
+
+export interface FinetuneJobResponse {
+  jobId: string;
+  status: string;
+  instanceId: string;
+  provider: string;
+  gpuType: string;
+  sshHost?: string;
+  sshPort?: number;
+  r2CheckpointUrl?: string;
+  hfRepoUrl?: string;
+  checkpointPrefix?: string;
+  message?: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface FinetuneJobStatus {
+  jobId?: string;
+  status: string;
+  stage?: string;
+  step?: number;
+  totalSteps?: number;
+  progressPct?: number;
+  bestScore?: number;
+  lastScore?: number;
+  gateTarget?: number;
+  lastEvalStep?: number;
+  etaSec?: number;
+  checkpoints?: string[];
+  r2CheckpointUrl?: string;
+  hfRepoUrl?: string;
+  rawLogs?: string;
+  raw?: Record<string, unknown>;
+}
+
 // ── Chat completions ────────────────────────────────────────────────────────
 
 export interface ChatMessage {

@@ -121,14 +121,14 @@ describe('preflight: HF write access', () => {
   });
 });
 
-describe('preflight: R2 credentials', () => {
+describe('preflight: object storage credentials', () => {
   it('fails when r2Bucket set but no creds (silent-data-loss guard)', async () => {
     const r = await preflightChecks(
       { type: 'audio', dataset: 'hf://o/d', r2Bucket: 'my-bucket' },
       {},
       { fetch: fakeFetch({ '/datasets/o/d': ok() }), fileExists: () => true },
     );
-    expect(checkByName(r, 'R2 credentials')?.status).toBe('fail');
+    expect(checkByName(r, 'object storage credentials')?.status).toBe('fail');
     expect(r.ok).toBe(false);
   });
 
@@ -142,8 +142,57 @@ describe('preflight: R2 credentials', () => {
       },
       { fetch: fakeFetch({ '/datasets/o/d': ok() }), fileExists: () => true },
     );
-    expect(checkByName(r, 'R2 credentials')?.status).toBe('ok');
+    expect(checkByName(r, 'object storage credentials')?.status).toBe('ok');
+    expect(checkByName(r, 'object storage credentials')?.detail).toContain('Cloudflare R2');
     expect(r.ok).toBe(true);
+  });
+
+  it('fails fast when Backblaze is required but creds point at Cloudflare R2', async () => {
+    const r = await preflightChecks(
+      { type: 'audio', dataset: 'hf://o/d', r2Bucket: 'my-bucket' },
+      {
+        B2_ACCOUNT_ID: 'ak',
+        B2_APPLICATION_KEY: 'sk',
+        B2_ENDPOINT: 'https://x.r2.cloudflarestorage.com',
+        AIGW_EXPECT_STORAGE_PROVIDER: 'backblaze',
+      },
+      { fetch: fakeFetch({ '/datasets/o/d': ok() }), fileExists: () => true },
+    );
+    expect(checkByName(r, 'object storage credentials')?.status).toBe('fail');
+    expect(checkByName(r, 'object storage credentials')?.detail).toContain('Cloudflare R2');
+    expect(r.ok).toBe(false);
+  });
+
+  it('passes when Backblaze is required and creds point at Backblaze B2', async () => {
+    const r = await preflightChecks(
+      { type: 'audio', dataset: 'hf://o/d', r2Bucket: 'my-bucket' },
+      {
+        B2_ACCOUNT_ID: 'ak',
+        B2_APPLICATION_KEY: 'sk',
+        B2_ENDPOINT: 'https://s3.us-east-005.backblazeb2.com',
+        AIGW_EXPECT_STORAGE_PROVIDER: 'b2',
+      },
+      { fetch: fakeFetch({ '/datasets/o/d': ok() }), fileExists: () => true },
+    );
+    expect(checkByName(r, 'object storage credentials')?.status).toBe('ok');
+    expect(checkByName(r, 'object storage credentials')?.detail).toContain('Backblaze B2');
+    expect(r.ok).toBe(true);
+  });
+
+  it('accepts Backblaze B2 key id aliases and derives endpoint from region', async () => {
+    const r = await preflightChecks(
+      { type: 'audio', dataset: 'hf://o/d', r2Bucket: 'my-bucket' },
+      {
+        B2_KEY_ID: 'ak',
+        B2_APPLICATION_KEY: 'sk',
+        B2_REGION: 'eu-central-003',
+        AIGW_EXPECT_STORAGE_PROVIDER: 'backblaze',
+      },
+      { fetch: fakeFetch({ '/datasets/o/d': ok() }), fileExists: () => true },
+    );
+    expect(checkByName(r, 'object storage credentials')?.status).toBe('ok');
+    expect(checkByName(r, 'object storage credentials')?.detail).toContain('Backblaze B2');
+    expect(checkByName(r, 'object storage credentials')?.detail).toContain('s3.eu-central-003.backblazeb2.com');
   });
 
   it('accepts STORAGE_* alias creds', async () => {
@@ -152,7 +201,7 @@ describe('preflight: R2 credentials', () => {
       { STORAGE_ACCESS_KEY: 'ak', STORAGE_SECRET_KEY: 'sk', STORAGE_ENDPOINT: 'https://s3' },
       { fetch: fakeFetch({ '/datasets/o/d': ok() }), fileExists: () => true },
     );
-    expect(checkByName(r, 'R2 credentials')?.status).toBe('ok');
+    expect(checkByName(r, 'object storage credentials')?.status).toBe('ok');
   });
 });
 

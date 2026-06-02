@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
+import { SETTINGS_APP_NAME } from "@/lib/branding";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AI Gateway Settings",
-  description: "AI Gateway Settings — provider configuration, GPU deployment, and monitoring",
+  title: SETTINGS_APP_NAME,
+  description: `${SETTINGS_APP_NAME} — provider configuration, GPU deployment, and monitoring`,
 };
 
 export default function RootLayout({

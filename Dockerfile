@@ -11,6 +11,8 @@ RUN bun install --frozen-lockfile --production
 
 # Copy source
 COPY src/ src/
+COPY server/ server/
+COPY bin/ bin/
 COPY sdk/ sdk/
 COPY serve.ts .
 COPY tsconfig.json .

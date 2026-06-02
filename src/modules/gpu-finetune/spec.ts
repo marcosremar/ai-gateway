@@ -31,9 +31,19 @@ const NUMERIC_BOUNDS: Array<[string, keyof FinetuneOpts, number, number]> = [
   ['gradClip', 'gradClip', 0.001, 100],
   ['logEverySteps', 'logEverySteps', 1, 10000],
   ['workers', 'workers', 0, 64],
+  ['evalEverySteps', 'evalEverySteps', 0, 1_000_000],
+  ['evalN', 'evalN', 1, 10_000],
+  ['evalGateTarget', 'evalGateTarget', 0, 1],
+  ['earlyStopPatience', 'earlyStopPatience', 0, 1_000],
+  ['hfSyncIntervalSec', 'hfSyncIntervalSec', 30, 86_400],
+  ['r2SyncIntervalSec', 'r2SyncIntervalSec', 0, 86_400],
   ['rewindThreshold', 'rewindThreshold', 1.5, 100],
   ['plateauTolerance', 'plateauTolerance', 0, 1],
   ['autoStopPlateau', 'autoStopPlateau', 0, 100000],
+  ['bootTimeoutSec', 'bootTimeoutSec', 30, 600],
+  ['raceCount', 'raceCount', 1, 10],
+  ['offerRaceCount', 'offerRaceCount', 1, 5],
+  ['storageGb', 'storageGb', 1, 1000],
 ];
 
 // ─── Preset loader ──────────────────────────────────────────────────────────
@@ -153,6 +163,8 @@ export function resolveProjectOpts(opts: Partial<FinetuneOpts>): {
     r2BaseCkpt: opts.r2BaseCkpt ?? m.r2BaseCkpt,
     r2BaseVocab: opts.r2BaseVocab ?? m.r2BaseVocab,
     r2CkptDest: opts.r2CkptDest ?? m.r2CkptDest,
+    r2SyncIntervalSec: opts.r2SyncIntervalSec ?? m.r2SyncIntervalSec,
+    autoResumeR2: opts.autoResumeR2 ?? m.autoResumeR2,
     shardCacheDir: opts.shardCacheDir ?? m.shardCacheDir,
     shardCacheMaxGb: opts.shardCacheMaxGb ?? m.shardCacheMaxGb,
     steps: opts.steps ?? m.steps,
@@ -160,6 +172,14 @@ export function resolveProjectOpts(opts: Partial<FinetuneOpts>): {
     saveEverySteps: opts.saveEverySteps ?? m.saveEverySteps,
     logEverySteps: opts.logEverySteps ?? m.logEverySteps,
     workers: opts.workers ?? m.workers,
+    evalEverySteps: opts.evalEverySteps ?? m.evalEverySteps,
+    evalN: opts.evalN ?? m.evalN,
+    evalAsrModel: opts.evalAsrModel ?? m.evalAsrModel,
+    evalGateTarget: opts.evalGateTarget ?? m.evalGateTarget,
+    earlyStopPatience: opts.earlyStopPatience ?? m.earlyStopPatience,
+    hfSyncRepo: opts.hfSyncRepo ?? m.hfSyncRepo,
+    hfSyncPath: opts.hfSyncPath ?? m.hfSyncPath,
+    hfSyncIntervalSec: opts.hfSyncIntervalSec ?? m.hfSyncIntervalSec,
     skipSmoke: opts.skipSmoke ?? m.skipSmoke,
     encodeCmd: opts.encodeCmd ?? m.encodeCmd,
     trainCmd: opts.trainCmd ?? m.trainCmd,
@@ -222,26 +242,35 @@ export function validateSpec(spec: Partial<FinetuneOpts>): ValidationResult {
   if (spec.fromHf && !spec.fromHf.includes('/')) {
     errs.push('fromHf must be \'owner/name\'');
   }
+  if (spec.hfSyncRepo && !spec.hfSyncRepo.includes('/')) {
+    errs.push('hfSyncRepo must be \'owner/name\'');
+  }
+  if (spec.hfSyncPath && spec.hfSyncPath.startsWith('/')) {
+    errs.push('hfSyncPath must not start with /');
+  }
   if (spec.hfStructure && !['flat', 'split', 'tri'].includes(spec.hfStructure)) {
     errs.push(`hfStructure must be flat|split|tri (got ${spec.hfStructure})`);
   }
 
   // ── R2 / S3 durable storage ──
-  if (spec.r2Bucket !== undefined) {
-    if (typeof spec.r2Bucket !== 'string' || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(spec.r2Bucket)) {
-      errs.push(`r2Bucket must be a valid bucket name (lowercase, 3-63 chars, [a-z0-9.-]) — got '${spec.r2Bucket}'`);
+  if (effectiveSpec.r2Bucket !== undefined) {
+    if (typeof effectiveSpec.r2Bucket !== 'string' || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(effectiveSpec.r2Bucket)) {
+      errs.push(`r2Bucket must be a valid bucket name (lowercase, 3-63 chars, [a-z0-9.-]) — got '${effectiveSpec.r2Bucket}'`);
     }
   }
-  if (spec.r2Prefix !== undefined && (typeof spec.r2Prefix !== 'string' || spec.r2Prefix.startsWith('/'))) {
+  if (effectiveSpec.r2Prefix !== undefined && (typeof effectiveSpec.r2Prefix !== 'string' || effectiveSpec.r2Prefix.startsWith('/'))) {
     errs.push(`r2Prefix must be a string without a leading slash (e.g. 'jobs/my-run')`);
   }
-  if (spec.resumeFromR2 && !spec.r2Bucket) {
+  if (effectiveSpec.resumeFromR2 && !effectiveSpec.r2Bucket) {
     errs.push('resumeFromR2 requires r2Bucket to be set');
   }
-  if (spec.r2ShardedRoot && !/^[A-Za-z0-9_-]+:/.test(spec.r2ShardedRoot)) {
+  if (effectiveSpec.autoResumeR2 === true && !effectiveSpec.r2Bucket) {
+    errs.push('autoResumeR2 requires r2Bucket to be set');
+  }
+  if (effectiveSpec.r2ShardedRoot && !/^[A-Za-z0-9_-]+:/.test(effectiveSpec.r2ShardedRoot)) {
     errs.push(`r2ShardedRoot must be an rclone remote path (e.g. r2aigw:bucket/path)`);
   }
-  if (spec.r2ShardedManifest && !/^[A-Za-z0-9_-]+:/.test(spec.r2ShardedManifest)) {
+  if (effectiveSpec.r2ShardedManifest && !/^[A-Za-z0-9_-]+:/.test(effectiveSpec.r2ShardedManifest)) {
     errs.push(`r2ShardedManifest must be an rclone remote path`);
   }
 
@@ -260,7 +289,7 @@ export function validateSpec(spec: Partial<FinetuneOpts>): ValidationResult {
   for (const [name, key, lo, hi] of NUMERIC_BOUNDS) {
     const val = spec[key];
     if (val !== undefined && (typeof val !== 'number' || !Number.isFinite(val) || val < lo || val > hi)) {
-      errs.push(`${name}=${val} out of range [${lo}, ${hi}]`);
+      errs.push(`${name}=${val} out of range [${lo}, ${hi}]; ${name} out of range`);
     }
   }
 
@@ -273,6 +302,20 @@ export function validateSpec(spec: Partial<FinetuneOpts>): ValidationResult {
   }
   if (spec.curriculum !== undefined && spec.curriculum !== '' && spec.curriculum !== 'linear') {
     errs.push(`curriculum must be '' (random) or 'linear' (got '${spec.curriculum}')`);
+  }
+  if (effectiveSpec.skipSmoke && !effectiveSpec.allowSkipSmokeForExpensive) {
+    const threshold = Number(process.env.AIGW_FINETUNE_SMOKE_REQUIRED_SPEND ?? '2');
+    const maxSpend = effectiveSpec.maxSpend;
+    const estimatedByRate = effectiveSpec.maxCost && effectiveSpec.timeoutMin
+      ? effectiveSpec.maxCost * (effectiveSpec.timeoutMin / 60)
+      : undefined;
+    const estimatedSpend = maxSpend ?? estimatedByRate;
+    const longRunWithoutBudget = estimatedSpend === undefined && (effectiveSpec.timeoutMin ?? 0) >= 120;
+    if ((estimatedSpend !== undefined && estimatedSpend >= threshold) || longRunWithoutBudget) {
+      errs.push(
+        `skipSmoke is blocked for expensive fine-tune runs; run the smoke first or set allowSkipSmokeForExpensive:true`
+      );
+    }
   }
 
   // ── Plugin ──
@@ -317,6 +360,30 @@ export function runNumericChecks(
     ['--epochs / epochs', opts.epochs, 1, 100],
     ['--lr / lr', opts.lr, 1e-9, 1],
     ['--num-gpus / numGpus', opts.numGpus, 1, 8],
+    ['--batch-size / batchSize', opts.batchSize, 1, 64],
+    ['--grad-accum / gradAccum', opts.gradAccum, 1, 256],
+    ['--weight-decay / weightDecay', opts.weightDecay, 0, 1],
+    ['--freeze-backbone-layers / freezeBackboneLayers', opts.freezeBackboneLayers, 0, 64],
+    ['--warmup-steps / warmupSteps', opts.warmupSteps, 0, 10000],
+    ['--save-every-steps / saveEverySteps', opts.saveEverySteps, 1, 100_000],
+    ['--steps / steps', opts.steps, 1, 10_000_000],
+    ['--workers / workers', opts.workers, 0, 64],
+    ['--eval-every-steps / evalEverySteps', opts.evalEverySteps, 0, 1_000_000],
+    ['--eval-n / evalN', opts.evalN, 1, 10_000],
+    ['--eval-gate-target / evalGateTarget', opts.evalGateTarget, 0, 1],
+    ['--early-stop-patience / earlyStopPatience', opts.earlyStopPatience, 0, 1_000],
+    ['--hf-sync-interval-sec / hfSyncIntervalSec', opts.hfSyncIntervalSec, 30, 86_400],
+    ['--r2-sync-interval-sec / r2SyncIntervalSec', opts.r2SyncIntervalSec, 0, 86_400],
+    ['--grad-clip / gradClip', opts.gradClip, 0.001, 100],
+    ['--log-every-steps / logEverySteps', opts.logEverySteps, 1, 10000],
+    ['--timeout-min / timeoutMin', opts.timeoutMin, 1, 4320],
+    ['--boot-timeout-min / bootTimeoutMin', opts.bootTimeoutMin, 1, 4320],
+    ['--boot-timeout-sec / bootTimeoutSec', opts.bootTimeoutSec, 30, 600],
+    ['--race-count / raceCount', opts.raceCount, 1, 10],
+    ['--offer-race-count / offerRaceCount', opts.offerRaceCount, 1, 5],
+    ['--storage / storageGb', opts.storageGb, 1, 1000],
+    ['--pull-every / pullEveryMin', opts.pullEveryMin, 0, 1440],
+    ['--stall-min / stallMin', opts.stallMin, 0, 1440],
   ];
   return checks.map(([name, val, lo, hi]) => ({
     ok: val === undefined || (Number.isFinite(val!) && val! >= lo && val! <= hi),

@@ -21,6 +21,7 @@ RUN bun install --frozen-lockfile --ignore-scripts
 # Copy source code
 COPY src/ src/
 COPY server/ server/
+COPY bin/ bin/
 COPY sdk/ sdk/
 COPY serve.ts tsconfig.json tsup.config.ts ./
 
@@ -32,8 +33,8 @@ RUN bun build --compile --minify --target=bun --outfile serve-compiled serve.ts
 FROM oven/bun:1-alpine AS production
 WORKDIR /app
 
-# Install wget for healthcheck (curl not available in alpine)
-RUN apk add --no-cache wget ca-certificates && \
+# Install wget for healthcheck and SSH tools for GPU batch jobs.
+RUN apk add --no-cache wget ca-certificates openssh-client rsync && \
     rm -rf /var/cache/apk/*
 
 # Copy production dependencies from stage 1
@@ -42,10 +43,19 @@ COPY --from=deps /app/node_modules ./node_modules
 # Copy compiled binary and dist from builder
 COPY --from=builder /app/serve-compiled ./serve-compiled
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/src ./src
+COPY --from=builder /app/server ./server
+COPY --from=builder /app/bin ./bin
+COPY --from=builder /app/sdk ./sdk
+COPY --from=builder /app/serve.ts ./serve.ts
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
 # Non-root user for security
 RUN addgroup -g 1001 -S appgroup && \
-    adduser -u 1001 -S appuser -G appgroup
+    adduser -u 1001 -S appuser -G appgroup && \
+    mkdir -p /app/profiles /home/appuser/.babelcast /home/appuser/.ssh && \
+    chmod 700 /home/appuser/.ssh && \
+    chown -R appuser:appgroup /app/profiles /home/appuser/.babelcast /home/appuser/.ssh
 USER appuser
 
 # Health check
@@ -55,5 +65,7 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
 EXPOSE ${PORT:-4000}
 
 ENV NODE_ENV=production
+ENV HOME=/home/appuser
+ENV AIGW_SSH_KEY=/home/appuser/.ssh/id_rsa
 
-CMD ["./serve-compiled"]
+CMD ["sh", "-lc", "if [ -n \"${AIGW_SSH_PRIVATE_KEY:-}\" ]; then mkdir -p \"$HOME/.ssh\" && printf '%s\\n' \"$AIGW_SSH_PRIVATE_KEY\" > \"$AIGW_SSH_KEY\" && chmod 600 \"$AIGW_SSH_KEY\"; fi && exec bun run serve.ts"]

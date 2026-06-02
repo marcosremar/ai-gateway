@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { resolveChatProvider } from '../../src/gateway/pipeline/chat-completions-service';
+import { resolveChatProvider, resolveProfileChatModel } from '../../src/gateway/pipeline/chat-completions-service';
 
 const fallback = {
   providerId: 'groq',
@@ -12,6 +12,11 @@ const fallback = {
 
 const openrouter = {
   providerId: 'openrouter',
+  chat: vi.fn(),
+};
+
+const minimax = {
+  providerId: 'minimax',
   chat: vi.fn(),
 };
 
@@ -38,6 +43,37 @@ describe('chat model resolution', () => {
 
     expect(provider).toBe(openrouter);
     expect(resolvedModel).toBe('google/gemini-2.5-flash');
+  });
+
+  it('routes MiniMax provider/model shorthand to the MiniMax adapter', () => {
+    const { provider, resolvedModel } = resolveChatProvider('minimax/MiniMax-M2.7-highspeed', {
+      chatProviders: {},
+      fallback,
+      providerDefaults: {},
+      providerAdapters: { minimax },
+    });
+
+    expect(provider).toBe(minimax);
+    expect(resolvedModel).toBe('MiniMax-M2.7-highspeed');
+  });
+
+  it('keeps MiniMax exact model IDs when they are registered in provider map', () => {
+    const { provider, resolvedModel } = resolveChatProvider('MiniMax-M2.7-highspeed', {
+      chatProviders: { 'MiniMax-M2.7-highspeed': minimax },
+      fallback,
+      providerDefaults: {},
+      providerAdapters: {},
+    });
+
+    expect(provider).toBe(minimax);
+    expect(resolvedModel).toBe('MiniMax-M2.7-highspeed');
+  });
+
+  it('turns app profile provider+model entries into direct provider routing', () => {
+    expect(resolveProfileChatModel({ provider: 'minimax', model: 'MiniMax-M2.7-highspeed' }))
+      .toBe('minimax/MiniMax-M2.7-highspeed');
+    expect(resolveProfileChatModel({ provider: 'gpu', model: 'qwen3-coder' }))
+      .toBe('qwen3-coder');
   });
 });
 

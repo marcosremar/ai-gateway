@@ -99,6 +99,49 @@ function isPrivateIp(ip: string): boolean {
   return false;
 }
 
+function isVastProxyHost(host?: string): boolean {
+  return !!host && /(^|\.)vast\.ai$/i.test(host);
+}
+
+function isDirectSshTarget(host?: string, port?: number): boolean {
+  return !!host && !!port && port > 0 && port <= 65535 && !isPrivateIp(host) && !isVastProxyHost(host);
+}
+
+type VastPortEntry = {
+  HostIp?: string;
+  HostPort?: string | number;
+  host_ip?: string;
+  host_port?: string | number;
+};
+
+function normalizePortEntries(raw: unknown): VastPortEntry[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.filter((entry): entry is VastPortEntry => !!entry && typeof entry === 'object');
+  if (typeof raw === 'object') return [raw as VastPortEntry];
+  if (typeof raw === 'string' || typeof raw === 'number') return [{ HostPort: raw }];
+  return [];
+}
+
+function portEntryHost(entry: VastPortEntry, fallbackIp: string): string {
+  const host = entry.HostIp ?? entry.host_ip ?? '';
+  return host && !isPrivateIp(host) ? host : fallbackIp;
+}
+
+function portEntryPort(entry: VastPortEntry): number {
+  const value = entry.HostPort ?? entry.host_port;
+  const port = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(port) && port > 0 && port <= 65535 ? port : 0;
+}
+
+function firstMappedPort(ports: Record<string, unknown> | undefined, ...keys: string[]): VastPortEntry | undefined {
+  if (!ports) return undefined;
+  for (const key of keys) {
+    const entry = normalizePortEntries(ports[key]).find((candidate) => portEntryPort(candidate) > 0);
+    if (entry) return entry;
+  }
+  return undefined;
+}
+
 /** Max IPs to track in _recentlyUsedIps before pruning (prevents memory leak). */
 const MAX_RECENTLY_USED_IPS = 200;
 
@@ -1061,7 +1104,7 @@ export class VastClient extends AbstractGpuProvider {
     // We try direct-port hosts first (faster), then SSH-only as a 2nd-pass fallback.
     const isHighQualitySearch = spec.searchMode === 'full' ? false : spec.strictFastBoot !== false;
     const searchBody: Record<string, unknown> = {
-      limit: 50,
+      limit: isHighQualitySearch ? 200 : 50,
       // Spot/interruptible offers are searched with type:'bid' (≈50-70% cheaper
       // than on-demand). On-demand otherwise. Without this, --prefer-spot was a
       // no-op on Vast and every job paid on-demand price.
@@ -1096,7 +1139,9 @@ export class VastClient extends AbstractGpuProvider {
       inet_down: { gte: spec.minInetDownMbps ?? Math.min(getMinInetDownMbps(), 500) },
       inet_up: { gte: 100 },            // Minimum 100 Mb/s upload
       ...(spec.directPortRequired ? { direct_port_count: { gte: spec.directPortRequired } } : {}),
-      order: [['dph_total', 'asc']],
+      order: isHighQualitySearch
+        ? [['reliability2', 'desc'], ['inet_down', 'desc'], ['dph_total', 'asc']]
+        : [['dph_total', 'asc']],
     };
 
     // Filter by GPU type if specified
@@ -1245,13 +1290,22 @@ export class VastClient extends AbstractGpuProvider {
       }
     }
 
-    // ── Tiered offer ranking: prefer fast internet, expand budget progressively ──
+    // ── Offer ranking: strict-fast jobs prefer reliability/boot speed first ──
     // Tier 1 (≤avg×1.2): try fastest internet first at near-average price.
     // Tier 2 (≤avg×1.3): expand to slightly more expensive if Tier 1 exhausted.
     // Tier 3 (≤avg×1.4): expand further.
     // Tier 4: everything else (expensive, last resort).
     // Within each tier, offers are sorted by inet_down desc (fastest boot).
-    if (offers.length > 1) {
+    if (offers.length > 1 && spec.strictFastBoot) {
+      offers = [...offers].sort((a, b) => {
+        const rel = Number(b.reliability2 ?? b.reliability ?? 0) - Number(a.reliability2 ?? a.reliability ?? 0);
+        if (Math.abs(rel) > 0.0001) return rel;
+        const inet = Number(b.inet_down || 0) - Number(a.inet_down || 0);
+        if (inet !== 0) return inet;
+        return Number(a.dph_total || 0) - Number(b.dph_total || 0);
+      });
+      this.log.log(`[vast] Strict-fast ranking: ${offers.length} offers — top reliability=${Number(offers[0]?.reliability2 ?? offers[0]?.reliability ?? 0).toFixed(3)}, inet=${Number(offers[0]?.inet_down || 0).toFixed(0)} Mbps, $${Number(offers[0]?.dph_total || 0).toFixed(3)}/hr`);
+    } else if (offers.length > 1) {
       const avgPrice = offers.reduce((s, o) => s + Number(o.dph_total || 0), 0) / offers.length;
       const tiers = [1.2, 1.3, 1.4, Infinity];
       const ranked: typeof offers = [];
@@ -1276,7 +1330,7 @@ export class VastClient extends AbstractGpuProvider {
       const constraints = [
         `disk>=${diskGb}GB`,
         spec.strictFastBoot ? 'strictFastBoot(reliability>=0.97,verified,gpu_frac=1)' : null,
-        (spec.directPortRequired || spec.strictFastBoot) ? 'direct_port>=1' : null,
+        (spec.directPortRequired || spec.strictFastBoot) ? `direct_port>=${spec.directPortRequired ?? 1}` : null,
       ].filter(Boolean).join(', ');
       this.log.error(`[vast] No offers found. GPU filter: [${gpuFilter}], constraints: ${constraints}, region: ${spec.region || 'any'}`);
       throw new Error(`No GPUs available on Vast.ai (0 offers matched). GPU filter: [${gpuFilter}], constraints: ${constraints}`);
@@ -1294,19 +1348,13 @@ export class VastClient extends AbstractGpuProvider {
     // Merge explicit env overrides from tier config
     if (spec.env) Object.assign(envVars, spec.env);
 
-    // ── 3. Hedged deploy: try N offers in parallel, keep first success ─────
-    // P0a: Vast.ai is unreliable (host reclaims, slow pulls). Default raceCount=2
-    // for Vast.ai (overridable via spec.raceCount). Each parallel attempt picks
-    // a different offer; the first one to return a healthy endpoint wins, the
-    // others are torn down to avoid runaway costs.
+    // ── 3. Vast acquisition ────────────────────────────────────────────────
+    // SSH batch jobs may request a small offer hedge so slow Vast boots fail
+    // fast without waiting on one contract at a time.
     const offerFailures: Array<{ offerId: string; gpu: string; reason: string }> = [];
     const failuresMutex = { push: (f: typeof offerFailures[number]) => offerFailures.push(f) };
-    // Internal offer-hedge count. Default 2 (Vast hosts reclaim/zombie often), but
-    // honour spec.raceCount when the caller pins it — raceCount:1 ⇒ exactly ONE
-    // instance created (no duplicate billing). VAST_OFFER_RACE overrides the default.
-    const envOfferRace = parseInt(process.env.VAST_OFFER_RACE ?? '', 10);
-    const defaultOfferRace = Number.isFinite(envOfferRace) && envOfferRace > 0 ? envOfferRace : 2;
-    const raceCount = Math.max(1, Math.min(5, spec.raceCount ?? defaultOfferRace));
+    const requestedRaceCount = Math.max(1, Math.min(5, spec.raceCount ?? 1));
+    const raceCount = requestedRaceCount;
     const offerPool = offers.slice(0, 10);
     const losers: Array<{ instanceId: string; contractId: string }> = [];
 
@@ -1565,10 +1613,14 @@ export class VastClient extends AbstractGpuProvider {
       const pullEstimateS = (diskGb * 8 * 1024) / Math.max(inetDown, 100); // theoretical seconds
       const isLargeImage = diskGb > 15;
       const safetyMultiplier = isLargeImage ? 3 : 2; // large images need more headroom (decompression overhead)
-      const CREATE_POLL_MAX_MS = Math.max(
+      const adaptiveCreatePollMaxMs = Math.max(
         Math.min(Math.round(pullEstimateS * safetyMultiplier * 1000), 1_800_000), // cap 30 min (matches POLL_TOTAL_MAX_MS)
         isLargeImage ? 600_000 : 180_000, // floor: 10 min for large images, 3 min otherwise
       );
+      const requestedSshBootMaxMs = spec.readinessProbe === 'ssh' && spec.bootTimeoutSec
+        ? Math.max(30_000, Math.min(600_000, spec.bootTimeoutSec * 1000))
+        : undefined;
+      const CREATE_POLL_MAX_MS = requestedSshBootMaxMs ?? adaptiveCreatePollMaxMs;
       let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS, inetDown, spec.onPollProgress);
 
       // forceSshTunnel: skip the direct endpoint even if it looks reachable.
@@ -1610,6 +1662,51 @@ export class VastClient extends AbstractGpuProvider {
         sshPort = stillExists.sshPort;
       }
 
+      if (spec.readinessProbe === 'ssh' && (spec.directPortRequired ?? 0) > 0 && !isDirectSshTarget(sshHost, sshPort)) {
+        const sshTarget = sshHost ? `${sshHost}:${sshPort ?? 'unknown'}` : 'missing';
+        const reason = isVastProxyHost(sshHost)
+          ? `direct SSH required but Vast returned SSH proxy ${sshTarget}`
+          : `direct SSH required but Vast did not return a usable direct SSH target (ssh=${sshTarget}, endpoint=${endpoint || 'none'})`;
+        this.log.warn(`[vast] Instance ${contractId}: ${reason}. Destroying so the deploy can try a host with direct SSH mapping.`);
+        if (ip) this._recordHostFailure(ip);
+        await this._safeCleanupInstance(instanceId, apiKey, reason);
+        failures.push({ offerId, gpu: gpuName, reason });
+        return null;
+      }
+
+      // SSH-driven batch jobs (fine-tune, offline eval, image builds) do not
+      // need an HTTP endpoint at provider-create time. Return as soon as Vast
+      // exposes SSH; the gateway boot monitor will run `ssh true` before
+      // marking the pod ready. Without this branch, a bare training container
+      // can get stuck trying to open an HTTP tunnel it will never use.
+      if (!endpoint && ip && sshHost && sshPort && spec.readinessProbe === 'ssh') {
+        this.log.log(`[vast] Instance ${contractId} has SSH but no HTTP endpoint; readinessProbe=ssh, returning for SSH readiness (${sshHost}:${sshPort})`);
+        if (ip) this._recordHostSuccess(ip);
+        return {
+          instanceId,
+          instanceName,
+          endpoint: '',
+          status: 'running',
+          gpuType: gpuName,
+          ipAddress: ip,
+          sshHost,
+          sshPort,
+          providerMeta: {
+            provider: 'vast',
+            hostIp: ip,
+            sshHost,
+            sshPort,
+            sshAccessMode: isVastProxyHost(sshHost) ? 'proxy' : 'direct',
+            gpuVramGb: ((offer.gpu_ram as number) ?? 0) / 1024,
+            inetDown: offer.inet_down as number | undefined,
+            inetUp: offer.inet_up as number | undefined,
+            dphTotal: pricePerHr,
+            sshOnlyHint: isSshOnlyHint,
+            readinessProbe: 'ssh',
+          },
+        };
+      }
+
       // SSH-only hosts: use SSH tunnel
       if (!endpoint && ip && sshHost && sshPort) {
         this.log.log(`[vast] Instance ${contractId} is SSH-only (no direct ports). Setting up SSH tunnel to ${sshHost}:${sshPort}...`);
@@ -1646,6 +1743,10 @@ export class VastClient extends AbstractGpuProvider {
               sshPort,
               providerMeta: {
                 provider: 'vast',
+                hostIp: ip,
+                sshHost,
+                sshPort,
+                sshAccessMode: isVastProxyHost(sshHost) ? 'proxy' : 'direct',
                 gpuVramGb: ((offer.gpu_ram as number) ?? 0) / 1024,
                 inetDown: offer.inet_down as number | undefined,
                 inetUp: offer.inet_up as number | undefined,
@@ -1700,6 +1801,9 @@ export class VastClient extends AbstractGpuProvider {
         instanceName,
         endpoint,
         ipAddress: ip,
+        sshHost,
+        sshPort,
+        sshAccessMode: sshHost ? (isVastProxyHost(sshHost) ? 'proxy' : 'direct') : 'none',
         gpuType: gpuName,
         status: 'creating',
         pricePerHr,
@@ -1718,6 +1822,9 @@ export class VastClient extends AbstractGpuProvider {
         providerMeta: {
           provider: 'vast',
           hostIp: ip,
+          sshHost,
+          sshPort,
+          sshAccessMode: sshHost ? (isVastProxyHost(sshHost) ? 'proxy' : 'direct') : 'none',
           reliability2: offer.reliability2 as number | undefined,
           inetDown: offer.inet_down as number | undefined,
           inetUp: offer.inet_up as number | undefined,
@@ -2739,11 +2846,11 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
   } {
     const ip = (inst.public_ipaddr || inst.ssh_host || '') as string;
     const status = String(inst.actual_status ?? inst.cur_state ?? 'unknown');
-    const sshHost = (inst.ssh_host ?? inst.public_ipaddr) as string | undefined;
+    let sshHost = (inst.ssh_host ?? inst.public_ipaddr) as string | undefined;
     const rawSshPort = inst.ssh_port as number | undefined;
     const parsedSshPort = rawSshPort && rawSshPort >= 1 && rawSshPort <= 65535 ? rawSshPort : undefined;
     // VM-mode Vast.ai instances expose SSH on port 22 directly; the API often omits ssh_port for VMs.
-    const sshPort = parsedSshPort ?? (this._runtype === 'vm' && sshHost ? 22 : undefined);
+    let sshPort = parsedSshPort ?? (this._runtype === 'vm' && sshHost ? 22 : undefined);
 
     if (!ip) {
       this.log.log(`[vast] _parseInstance: no IP yet (status=${status}, cur_state=${inst.cur_state}, actual_status=${inst.actual_status})`);
@@ -2766,18 +2873,31 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
       return { ip, endpoint: '', status, sshHost, sshPort };
     }
 
-    // Parse ports — Vast.ai format: { "8000/tcp": [{ "HostIp": "...", "HostPort": "..." }] }
+    // Parse ports — Vast.ai usually returns
+    // { "8000/tcp": [{ "HostIp": "...", "HostPort": "..." }] }, but some
+    // endpoints return a single object or raw port value. Normalize before
+    // choosing a target so direct-port jobs don't silently fall back to the
+    // Vast SSH proxy.
     // Only trust direct port mapping if direct_port_start > 0 (SSH-only hosts report ports
     // in Docker NAT format but they're NOT accessible without SSH tunnel)
     const hasDirect = directPort && directPort > 0;
     if (ports && hasDirect) {
+      const sshEntry = firstMappedPort(ports, '22/tcp', '22');
+      if (sshEntry) {
+        const hostIp = portEntryHost(sshEntry, ip);
+        sshHost = hostIp;
+        sshPort = portEntryPort(sshEntry);
+        this.log.log(`[vast] _parseInstance: using direct SSH ${sshHost}:${sshPort} from 22/tcp mapping`);
+      } else if (isVastProxyHost(sshHost)) {
+        this.log.warn(`[vast] _parseInstance: direct HTTP port is present, but SSH target remains Vast proxy ${sshHost}:${sshPort ?? 'unknown'}`);
+      }
+
       // Check both '8000/tcp' and '8000' keys (API inconsistency)
-      const p8000 = (ports['8000/tcp'] ?? ports['8000']) as Array<{ HostPort?: string; HostIp?: string }> | undefined;
-      const entry = p8000?.find((e) => Number(e.HostPort) > 0);
-      if (entry?.HostPort) {
+      const entry = firstMappedPort(ports, '8000/tcp', '8000');
+      if (entry) {
         // Use HostIp if it's a public routable IP, otherwise fall back to instance ip
-        const hostIp = entry.HostIp && !isPrivateIp(entry.HostIp) ? entry.HostIp : ip;
-        return { ip, endpoint: `http://${hostIp}:${entry.HostPort}`, status, sshHost, sshPort };
+        const hostIp = portEntryHost(entry, ip);
+        return { ip, endpoint: `http://${hostIp}:${portEntryPort(entry)}`, status, sshHost, sshPort };
       }
     }
 

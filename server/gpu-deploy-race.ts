@@ -193,6 +193,12 @@ export async function startDeployRace(
     const storageGb = (typeof extra.storageGb === 'number' && extra.storageGb > 0)
       ? extra.storageGb
       : defaultStorage;
+    const directPortRequired = (slot.tier.name.startsWith('vast') && (extra.requireDirectPort || extra.readinessProbe === 'ssh'))
+      // SSH jobs only need direct SSH. The Vast client validates the actual
+      // SSH host/port after creation; requiring two direct ports here filtered
+      // out otherwise usable hosts and pushed jobs back into bad retries.
+      ? 1
+      : undefined;
 
     // Progress callback: update deploy state during image pull so the UI
     // shows "pulling_image" instead of being stuck at "creating_pod".
@@ -227,10 +233,12 @@ export async function startDeployRace(
           // copies them into `extra`; we just need to forward them to the
           // provider client so they reach the search payload.
           ...(extra.allowUnverified ? { allowUnverified: extra.allowUnverified } : {}),
+          ...(typeof extra.maxPricePerHr === 'number' ? { maxPricePerHr: extra.maxPricePerHr } : {}),
           // Deploy-level race already creates N instances; pin the internal Vast
           // offer-hedge to 1 so each slot spawns exactly one instance (no 2N blow-up).
           raceCount: 1,
-          ...(extra.requireDirectPort ? { directPortRequired: 1 } : {}),
+          ...(directPortRequired ? { directPortRequired } : {}),
+          ...(extra.readinessProbe ? { readinessProbe: extra.readinessProbe } : {}),
           ...(extra.searchMode ? { searchMode: extra.searchMode } : {}),
           ...(extra.strictFastBoot ? { strictFastBoot: extra.strictFastBoot } : {}),
           ...(extra.label ? { label: extra.label } : {}),

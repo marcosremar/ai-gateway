@@ -12,6 +12,48 @@ import { createLogger } from '../src/logger';
 
 const log = createLogger('gpu-handlers-offers');
 
+const GPU_FILTER_ALIASES = ['gpuTypes', 'gpuType', 'gpu', 'gpuName'] as const;
+
+function splitGpuFilters(values: string[]): string[] {
+  return values
+    .flatMap(value => value.split(','))
+    .map(value => value.trim())
+    .filter(Boolean);
+}
+
+export function parseGpuTypesQuery(url: URL): string[] | undefined {
+  for (const key of GPU_FILTER_ALIASES) {
+    const parsed = splitGpuFilters(url.searchParams.getAll(key));
+    if (parsed.length > 0) return [...new Set(parsed)];
+  }
+  return undefined;
+}
+
+function normalizeGpuFilter(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\bnvidia\b|\bgeforce\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function compactGpuFilter(value: string): string {
+  return normalizeGpuFilter(value).replace(/\s+/g, '');
+}
+
+export function gpuOfferMatchesTypes(offer: Pick<GpuOffer, 'gpuType' | 'gpuName'>, gpuTypes: string[] | undefined): boolean {
+  if (!gpuTypes || gpuTypes.length === 0) return true;
+  const label = normalizeGpuFilter(`${offer.gpuName || ''} ${offer.gpuType || ''}`);
+  if (!label) return false;
+  const compactLabel = compactGpuFilter(label);
+  return gpuTypes.some(type => {
+    const wanted = normalizeGpuFilter(type);
+    if (!wanted) return false;
+    const compactWanted = compactGpuFilter(type);
+    return label.includes(wanted) || wanted.includes(label) || compactLabel.includes(compactWanted) || compactWanted.includes(compactLabel);
+  });
+}
+
 /** Build provider query list from API keys, optionally filtered to a single provider. */
 export function buildProviderQueries(opts: {
   runpodApiKey?: string;
@@ -211,8 +253,7 @@ export async function handleGpuOffers(req: IncomingMessage, res: ServerResponse)
     res.end(JSON.stringify({ error: `API keys must not be passed via query params (found: ${foundInQuery.join(', ')}). Use environment variables instead.` }));
     return;
   }
-  const gpuTypesParam = url.searchParams.get('gpuTypes');
-  const gpuTypes = gpuTypesParam ? gpuTypesParam.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+  const gpuTypes = parseGpuTypesQuery(url);
   const region = url.searchParams.get('region') || undefined;
   const limit = parseInt(url.searchParams.get('limit') || '100', 10);
   const providerFilter = url.searchParams.get('provider') || undefined;
@@ -271,6 +312,9 @@ export async function handleGpuOffers(req: IncomingMessage, res: ServerResponse)
 
   // Apply hardware filters (same logic as autoSelectCheapestGpu)
   let filteredOffers = allOffers;
+  if (gpuTypes && gpuTypes.length > 0) {
+    filteredOffers = filteredOffers.filter(o => gpuOfferMatchesTypes(o, gpuTypes));
+  }
   if (minVramGbParam > 0) {
     filteredOffers = filteredOffers.filter(o => o.vram >= minVramGbParam);
   }
@@ -350,8 +394,7 @@ export async function handleGpuOffersRanked(req: IncomingMessage, res: ServerRes
     clientLon = loc.lon;
   }
 
-  const gpuTypesParam = url.searchParams.get('gpuTypes');
-  const gpuTypes = gpuTypesParam ? gpuTypesParam.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+  const gpuTypes = parseGpuTypesQuery(url);
   const region = url.searchParams.get('region') || undefined;
   const limit = parseInt(url.searchParams.get('limit') || '100', 10);
   const providerFilter = url.searchParams.get('provider') || undefined;
@@ -408,7 +451,13 @@ export async function handleGpuOffersRanked(req: IncomingMessage, res: ServerRes
     hostRtts = await getHostRttMap(hostIds);
   }
 
-  const ranked = rankOffers(allOffers, clientLat, clientLon, {}, hostRtts).map(o => ({
+  const ranked = rankOffers(
+    allOffers.filter(o => gpuOfferMatchesTypes(o, gpuTypes)),
+    clientLat,
+    clientLon,
+    {},
+    hostRtts,
+  ).map(o => ({
     ...o,
     canDeploy: providerBalances[o.provider]?.canDeploy !== false,
     providerBalance: providerBalances[o.provider]?.balance ?? null,

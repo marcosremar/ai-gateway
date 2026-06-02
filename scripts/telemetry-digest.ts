@@ -15,7 +15,7 @@
  *   ~/.babelcast/gpu-readiness-history.json  per-image latency history
  *   ~/.babelcast/cost_ledger.json      daily GPU spend
  *   ~/.babelcast/runpod-quota.json     RunPod account state
- *   ~/.babelcast/cooldowns.json        provider cooldown state
+ *   ~/.ai-gateway/cooldowns.json       provider cooldown state
  *
  * All sources are optional. A missing file contributes zero findings to
  * the report rather than failing the whole run.

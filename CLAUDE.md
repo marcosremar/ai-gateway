@@ -378,6 +378,7 @@ bun install
 bun run build        # tsup → dist/ (ESM + CJS + .d.ts)
 bun run test         # Vitest, sequential
 bun run test:watch
+bun run process:audit # List JS/dev/test processes for manual review only
 
 # Integration tests (require live API keys in .env)
 SKIP_GPU_TESTS=1 bun run test   # CI default — skips real API calls
@@ -390,6 +391,7 @@ bun run test:groq / test:openai / test:vast-lifecycle / test:runpod-lifecycle
 2. **All GPU ops go through the gateway API** — never call RunPod/Vast.ai/TensorDock directly. Bypasses watchdog, cost tracking, ghost detection.
 3. **No Prisma/Redis/Next.js in `src/`** — use DI interfaces (`AutoscalerDeps`, `StateStore`, `SettingsStore`).
 4. **All new UI uses `web/src/components/ui/`** — `IconBox`, `StatusDot`, `KV`, `DropdownList`, `Button`, `Toggle`, `Card`, `SaveBar`, `ConfirmModal`, etc. Never inline equivalents.
+5. **No automatic process killing.** Use Bun for JS tooling; run `bun run process:audit` before watchers, Playwright, or dev servers; only report suspicious processes and ask before stopping anything.
 
 ## Vibe Coding Guidelines
 

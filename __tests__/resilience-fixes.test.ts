@@ -21,6 +21,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { createDeploySlot, deployState } from '../src/gateway/state/deploy-state';
 import { setDeployState } from '../server/state';
+import { gpuOfferMatchesTypes, parseGpuTypesQuery } from '../server/gpu-handlers-offers';
 import { computeBackoffCooldownMs, deprioritizeUnavailable, isProviderHardBlock, ProviderCooldownTracker, ownerFromLabel } from '../src/gpu-providers/deploy-orchestrator';
 import { RunawayDetector } from '../src/autoscaler/runaway-detector';
 
@@ -277,6 +278,15 @@ describe('per-key isolation — tier-cascade deploy forwards owner label', () =>
     // status hides another app's deploy
     expect(info).toContain('deployState.userId !== statusCallerUserId');
   });
+
+  it('logs/inspect usam o deploy slot visível ao caller', () => {
+    const h = readFileSync(join(__dirname, '../server/gpu-handlers.ts'), 'utf-8');
+    const info = readFileSync(join(__dirname, '../server/gpu-handlers-info.ts'), 'utf-8');
+    expect(info).toContain('resolveDeployStateForRequest(req)');
+    expect(info).toContain('fetchGpuLogs(state.sshHost, state.sshPort, state.endpoint, state)');
+    expect(h).toContain('resolveDeployStateForReadRequest(req)');
+    expect(h).toContain('const sshHost = state.sshHost');
+  });
 });
 
 // ── Multi-tenant concurrency (épico) — Passo 1: indireção DeploySlot ──────────
@@ -314,5 +324,15 @@ describe('multi-tenant slots — step 1 (sink indirection, global untouched)', (
     expect(src).toContain('listDeploySlots()');
     expect(src).toMatch(/slot\.state\.podId/);                 // protege podId do slot
     expect(src).toMatch(/slot.*deploy in progress/i);          // aborta sweep se slot ocupado
+  });
+});
+
+describe('MCP GPU offers filter aliases', () => {
+  it('gpu=RTX 5090 vira filtro gpuTypes e exclui ofertas genericas', () => {
+    const url = new URL('http://localhost/v1/gpu/offers?gpu=RTX%205090&provider=vast');
+    const gpuTypes = parseGpuTypesQuery(url);
+    expect(gpuTypes).toEqual(['RTX 5090']);
+    expect(gpuOfferMatchesTypes({ gpuName: 'NVIDIA GeForce RTX 5090', gpuType: 'RTX 5090' } as any, gpuTypes)).toBe(true);
+    expect(gpuOfferMatchesTypes({ gpuName: 'NVIDIA GeForce RTX 4090', gpuType: 'RTX 4090' } as any, gpuTypes)).toBe(false);
   });
 });

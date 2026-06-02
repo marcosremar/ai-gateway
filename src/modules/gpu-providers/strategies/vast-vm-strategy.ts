@@ -45,7 +45,8 @@ export const vastVmStrategy: ProviderStrategy = {
       ...(extra.label ? { label: extra.label } : {}),
       ...(extra.searchMode ? { searchMode: extra.searchMode } : {}),
       ...(extra.strictFastBoot ? { strictFastBoot: extra.strictFastBoot } : {}),
-      ...(extra.requireDirectPort ? { directPortRequired: 1 } : {}),
+      ...((extra.requireDirectPort || extra.readinessProbe === 'ssh') ? { directPortRequired: 1 } : {}),
+      ...(extra.readinessProbe ? { readinessProbe: extra.readinessProbe } : {}),
     };
   },
 

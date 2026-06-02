@@ -28,6 +28,14 @@ export interface DeployExtra {
   strictFastBoot?: boolean;
   /** Vast.ai offer-search profile (`high_quality` default vs `full` compatibility mode). */
   searchMode?: 'high_quality' | 'full';
+  /** Reject SSH-only offers when the workload needs direct HTTP/TCP ports. */
+  requireDirectPort?: boolean;
+  /** Readiness strategy requested by the deploy caller. */
+  readinessProbe?: 'health' | 'ssh';
+  /** SSH readiness timeout requested by the deploy caller, in seconds. */
+  bootTimeoutSec?: number;
+  /** For cost-sensitive batch jobs, avoid retrying the same provider/GPU pool. */
+  suppressProviderRetries?: boolean;
   snapgpuPreloadApp?: string;
   snapgpuAutoSnapshot?: boolean;
   snapgpuBackend?: 'vast' | 'runpod';

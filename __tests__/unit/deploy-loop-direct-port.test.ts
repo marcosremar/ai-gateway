@@ -2,7 +2,7 @@
  * deploy-loop-direct-port.test.ts
  *
  * Verifies that startDeployLoop with extra.requireDirectPort = true:
- *   1. Passes directPortRequired=1 to createInstance
+ *   1. Passes directPortRequired=1 as the Vast marketplace filter
  *   2. When Phase-1 returns 0 direct-port offers (mock throws "No GPUs available"),
  *      Phase-2 (SSH-only fallback) is NOT attempted
  *   3. Deploy fails with a message matching "No GPUs available" (not a tunnel hang)
@@ -221,6 +221,48 @@ describe('startDeployLoop — requireDirectPort=true', () => {
     expect(spec).toMatchObject({ directPortRequired: 1 });
     // SSH tunnel flag must NOT be set (would defeat the purpose)
     expect(spec.forceSshTunnel).toBeUndefined();
+  });
+
+  it('passes directPortRequired=1 for SSH readiness jobs', async () => {
+    mockCreateInstance.mockRejectedValueOnce(
+      new Error('No GPUs available on Vast.ai (0 offers matched). GPU filter: [RTX 4090], disk: 40GB'),
+    );
+
+    const { startDeployLoop } = await import('../../server/gpu-deploy-loop');
+
+    await startDeployLoop(
+      providerClient as any,
+      'vast',
+      'fake-api-key',
+      'myrepo/myimage:latest',
+      ['NVIDIA GeForce RTX 4090'],
+      undefined,
+      { requireDirectPort: true, readinessProbe: 'ssh' },
+    );
+
+    const spec = mockCreateInstance.mock.calls[0][0] as Record<string, unknown>;
+    expect(spec).toMatchObject({ directPortRequired: 1, readinessProbe: 'ssh' });
+  });
+
+  it('infers directPortRequired=1 for Vast SSH readiness even without explicit requireDirectPort', async () => {
+    mockCreateInstance.mockRejectedValueOnce(
+      new Error('No GPUs available on Vast.ai (0 offers matched). GPU filter: [RTX 4090], disk: 40GB'),
+    );
+
+    const { startDeployLoop } = await import('../../server/gpu-deploy-loop');
+
+    await startDeployLoop(
+      providerClient as any,
+      'vast',
+      'fake-api-key',
+      'myrepo/myimage:latest',
+      ['NVIDIA GeForce RTX 4090'],
+      undefined,
+      { readinessProbe: 'ssh' },
+    );
+
+    const spec = mockCreateInstance.mock.calls[0][0] as Record<string, unknown>;
+    expect(spec).toMatchObject({ directPortRequired: 1, readinessProbe: 'ssh' });
   });
 
   it('succeeds normally (no direct-port constraint) when requireDirectPort is omitted', async () => {

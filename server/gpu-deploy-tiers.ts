@@ -4,6 +4,7 @@
 
 import { homedir } from 'os';
 import { join } from 'path';
+import { existsSync } from 'fs';
 import type { GpuProviderClient } from '../src/gpu-providers/types';
 import { ProviderCooldownTracker, PROVIDER_LABELS } from '../src/gpu-providers/deploy-orchestrator';
 import type { ProviderName, GpuTier } from '../src/gpu-providers/deploy-orchestrator';
@@ -14,16 +15,23 @@ import { reorderByLatency } from './tier-ranking';
 
 const log = createLogger('gpu-deploy');
 
-// ── Provider Cooldown (persisted to ~/.babelcast/cooldowns.json) ─────────────
+// ── Provider Cooldown (persisted to ~/.ai-gateway/cooldowns.json) ────────────
+const AI_GATEWAY_DIR = join(homedir(), '.ai-gateway');
+const COOLDOWNS_FILE = join(AI_GATEWAY_DIR, 'cooldowns.json');
+const LEGACY_COOLDOWNS_FILE = join(homedir(), '.babelcast', 'cooldowns.json');
+
 export const cooldownTracker = new ProviderCooldownTracker();
-void cooldownTracker.loadFromFile(join(homedir(), '.babelcast', 'cooldowns.json'));
-{
+void (async () => {
+  if (!existsSync(COOLDOWNS_FILE)) {
+    await cooldownTracker.loadFromFile(LEGACY_COOLDOWNS_FILE);
+  }
+  await cooldownTracker.loadFromFile(COOLDOWNS_FILE);
   const active = cooldownTracker.getActiveCooldowns();
   const names = Object.keys(active);
   if (names.length > 0) {
-    log.log(`[gateway] Restored cooldowns: ${names.map(n => `${n} (${active[n].remainSec}s left)`).join(', ')}`);
+    log.log(`[gateway] Restored cooldowns from ${COOLDOWNS_FILE}: ${names.map(n => `${n} (${active[n].remainSec}s left)`).join(', ')}`);
   }
-}
+})();
 
 /** Map of provider name → client instance for tier building. */
 export const providerClients: Record<ProviderName, GpuProviderClient> = {

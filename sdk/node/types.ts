@@ -218,6 +218,118 @@ export interface GpuSnapshotResult {
   createdAt?: string;
 }
 
+// ── GPU fine-tuning types ───────────────────────────────────────────────────
+
+export interface FinetuneGateConfig {
+  /** Enable validation gate during training. Default true when provided. */
+  enabled?: boolean;
+  /** Gate family. ASR gate uses a Whisper/WER/similarity evaluator. */
+  type?: 'asr' | 'wer' | 'custom';
+  /** Evaluate every N training steps. */
+  everySteps?: number;
+  /** Number of validation samples per gate pass. */
+  evalN?: number;
+  /** ASR model used by the gate, e.g. "base", "small", "medium". */
+  asrModel?: string;
+  /** Quality target for early acceptance, e.g. cosine/similarity threshold. */
+  target?: number;
+  /** Stop after N gate passes without improvement. */
+  earlyStopPatience?: number;
+}
+
+export interface FinetuneR2Config {
+  bucket?: string;
+  prefix?: string;
+  checkpointDest?: string;
+  shardedRoot?: string;
+  shardedManifest?: string;
+  baseCheckpoint?: string;
+  baseVocab?: string;
+  cacheDir?: string;
+  cacheMaxGb?: number;
+  syncEverySec?: number;
+  resume?: boolean;
+}
+
+export interface FinetuneHfSyncConfig {
+  /** Hugging Face repo in owner/name form. */
+  repo?: string;
+  /** Destination path inside the repo. */
+  path?: string;
+  /** Periodic checkpoint upload interval. */
+  intervalSec?: number;
+  /** Upload only at job end. */
+  finalOnly?: boolean;
+  private?: boolean;
+}
+
+export interface FinetuneSshTarget {
+  host: string;
+  port: number;
+  user?: string;
+}
+
+export interface FinetuneJobOptions {
+  project?: string;
+  type?: 'text' | 'audio' | 'custom' | string;
+  dataset?: string;
+  model?: string;
+  gpu?: string;
+  providers?: string[];
+  steps?: number;
+  epochs?: number;
+  batchSize?: number;
+  lr?: number;
+  workers?: number;
+  saveEverySteps?: number;
+  logEverySteps?: number;
+  maxSpend?: number;
+  maxCost?: number;
+  image?: string;
+  remoteUrl?: string;
+  checkpointUrl?: string;
+  ssh?: FinetuneSshTarget;
+  gate?: FinetuneGateConfig;
+  r2?: FinetuneR2Config;
+  huggingFace?: FinetuneHfSyncConfig;
+  extraTrainArgs?: string;
+  dryRun?: boolean;
+}
+
+export interface FinetuneJobResult {
+  jobId: string;
+  status: string;
+  instanceId: string;
+  provider: string;
+  gpuType: string;
+  sshHost?: string;
+  sshPort?: number;
+  r2CheckpointUrl?: string;
+  hfRepoUrl?: string;
+  checkpointPrefix?: string;
+  message?: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface FinetuneJobStatus {
+  jobId?: string;
+  status: string;
+  stage?: string;
+  step?: number;
+  totalSteps?: number;
+  progressPct?: number;
+  bestScore?: number;
+  lastScore?: number;
+  gateTarget?: number;
+  lastEvalStep?: number;
+  etaSec?: number;
+  checkpoints?: string[];
+  r2CheckpointUrl?: string;
+  hfRepoUrl?: string;
+  rawLogs?: string;
+  raw?: Record<string, unknown>;
+}
+
 export interface GpuReadinessResult {
   ready: boolean;
   phase: string;

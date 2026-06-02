@@ -19,15 +19,89 @@ import {
   deploymentSM,
   standbyDeployState, standbyReadyForHandover,
 } from './state';
-import { createDeploySlot, getDeploySlot } from '../src/gateway/state/deploy-state';
-import type { DeploySlot } from '../src/gateway/state/deploy-state';
+import { createDeploySlot, getDeploySlot, listDeploySlots } from '../src/gateway/state/deploy-state';
+import type { DeploySlot, DeploymentState } from '../src/gateway/state/deploy-state';
 import { triggerStandbyDeploy, initiateHandover, cancelStandby, startStandbyMonitor } from './gpu-standby';
 /** Derive the owner (app userId) from a namespaced deploy label (<userId>/<task>). */
 export function ownerFromLabel(label: string | undefined | null): string | null {
   return label && label.includes('/') ? label.split('/')[0] : null;
 }
+
+function scopedDeploySlotKey(callerUserId: string, rawSlot: unknown): string {
+  if (typeof rawSlot !== 'string' || rawSlot.trim() === '') return callerUserId;
+  const safe = rawSlot.trim().replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 80);
+  return safe ? `${callerUserId}:${safe}` : callerUserId;
+}
+
+function slotBelongsToCaller(slot: DeploySlot, callerUserId: string): boolean {
+  return slot.ownerKey === callerUserId || slot.ownerKey.startsWith(`${callerUserId}:`);
+}
+
+function findCallerDeploySlot(callerUserId: string, body: Record<string, unknown>): DeploySlot | undefined {
+  if (body.parallelSlot !== undefined) {
+    return getDeploySlot(scopedDeploySlotKey(callerUserId, body.parallelSlot));
+  }
+  const wantedDeployId = typeof body.deployId === 'string' ? body.deployId : '';
+  const wantedInstanceId = typeof body.instanceId === 'string' ? body.instanceId : '';
+  if (wantedDeployId || wantedInstanceId) {
+    return listDeploySlots().find(slot => {
+      if (!slotBelongsToCaller(slot, callerUserId)) return false;
+      const s = slot.state;
+      return (wantedDeployId && s.deployId === wantedDeployId) ||
+        (wantedInstanceId && (s.podId === wantedInstanceId || s.deployId === wantedInstanceId));
+    });
+  }
+  return getDeploySlot(callerUserId);
+}
+
+function findDeploySlotForReadRequest(req: IncomingMessage, callerUserId: string | null): DeploySlot | undefined {
+  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const parallelSlot = url.searchParams.get('parallelSlot') || url.searchParams.get('slot');
+  const deployId = url.searchParams.get('deployId') || '';
+  const instanceId = url.searchParams.get('instanceId') || url.searchParams.get('podId') || '';
+
+  if (callerUserId) {
+    if (parallelSlot !== null) return getDeploySlot(scopedDeploySlotKey(callerUserId, parallelSlot));
+    if (deployId || instanceId) {
+      return listDeploySlots().find(slot => {
+        if (!slotBelongsToCaller(slot, callerUserId)) return false;
+        const s = slot.state;
+        return (deployId && s.deployId === deployId) ||
+          (instanceId && (s.podId === instanceId || s.deployId === instanceId));
+      });
+    }
+    return getDeploySlot(callerUserId);
+  }
+
+  if (deployId || instanceId) {
+    return listDeploySlots().find(slot => {
+      const s = slot.state;
+      return (deployId && s.deployId === deployId) ||
+        (instanceId && (s.podId === instanceId || s.deployId === instanceId));
+    });
+  }
+
+  const activeSlots = listDeploySlots().filter(slot => slot.state.status !== 'idle');
+  if (deployState.status === 'idle' && activeSlots.length === 1) return activeSlots[0];
+  return undefined;
+}
+
+function resolveDeployStateForReadRequest(req: IncomingMessage): {
+  state: DeploymentState;
+  slotOwner?: string;
+  scopedHidden?: boolean;
+} {
+  const callerUserId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
+  const slot = findDeploySlotForReadRequest(req, callerUserId);
+  if (slot) return { state: slot.state, slotOwner: slot.ownerKey };
+  if (deployState.userId && callerUserId && deployState.userId !== callerUserId) {
+    return { state: deployState, scopedHidden: true };
+  }
+  return { state: deployState };
+}
+
 export { startStandbyMonitor };
-import { updateActivePipeline, runpod, vast, tensordock, modal, hyperstack } from './providers';
+import { updateActivePipeline, runpod, vast, vastVm, tensordock, modal, hyperstack } from './providers';
 import {
   startGpuMonitoring, stopGpuMonitoring, startDeployWithTiers, startDeployRace, buildGpuTiers, cooldownTracker,
   cleanupAllPods, cleanupVastInstances, cleanupTensordockInstances, cleanupModalApps, cleanupHyperstackInstances,
@@ -371,6 +445,10 @@ interface DeployConfig {
    * Vast acceptance). Mandatory unless AIGW_LABEL_OPTIONAL=1 is set.
    */
   label: string;
+  /** Readiness strategy for this deploy. Fine-tune jobs use SSH readiness. */
+  readinessProbe: 'health' | 'ssh';
+  /** SSH readiness timeout requested by the caller, in seconds. */
+  bootTimeoutSec?: number;
   /**
    * Strict-fast filter: only deploy onto hosts where SSH/HTTP boot is
    * historically fast. Default true. When true, candidate offers must
@@ -592,7 +670,9 @@ async function _validateDeployRequest(
   const llmModel = (body.llmModel as string) || '';
   const interruptible = body.interruptible === true ? true : body.interruptible === false ? false : undefined;
 
-  // Hedged deploy: launch raceCount instances in parallel, keep first healthy
+  // Hedged deploy: launch raceCount instances in parallel, keep first healthy.
+  // Callers must request it explicitly (or configure it globally); fine-tunes
+  // default to serial acquisition unless raceCount is present on the request.
   const raceCountRaw = body.raceCount;
   let raceCount: number;
   if (typeof raceCountRaw === 'number' && raceCountRaw >= 1 && Number.isFinite(raceCountRaw)) {
@@ -600,17 +680,25 @@ async function _validateDeployRequest(
   } else if (typeof raceCountRaw !== 'undefined') {
     throw { status: 400, message: 'raceCount must be a positive number between 1 and 10' };
   } else {
+    // Fine-tunes are long-running, cost-sensitive batch jobs. They should not
+    // inherit a globally configured deploy race unless a caller opts in.
+    if (body.finetune === true) {
+      raceCount = 1;
+    } else {
     raceCount = getDeployRaceCount();
+    }
   }
-
   // Internal Vast offer-hedge count (distinct from deploy-level raceCount above).
-  // 1 ⇒ exactly one billed instance — no duplicate spawn. Undefined ⇒ provider default (2).
+  // Used by SSH-driven batch jobs to try a small number of Vast offers in
+  // parallel and keep the first instance that becomes reachable.
   const offerRaceCountRaw = body.offerRaceCount;
   let offerRaceCount: number | undefined;
   if (typeof offerRaceCountRaw === 'number' && Number.isFinite(offerRaceCountRaw) && offerRaceCountRaw >= 1) {
     offerRaceCount = Math.min(Math.floor(offerRaceCountRaw), 5);
   } else if (typeof offerRaceCountRaw !== 'undefined') {
     throw { status: 400, message: 'offerRaceCount must be a positive number between 1 and 5' };
+  } else if (body.finetune === true) {
+    offerRaceCount = 1;
   }
 
   // Reject SSH-only offers — require at least one direct port (avoids tunnel hangs).
@@ -665,6 +753,14 @@ async function _validateDeployRequest(
 
   // Dev mode: skip auto-destroy after idle-stop (pod stays paused until manually resumed)
   const devMode = body.devMode === true;
+  const readinessProbe: 'health' | 'ssh' = body.readinessProbe === 'ssh' ? 'ssh' : 'health';
+  const bootTimeoutSecRaw = body.bootTimeoutSec;
+  let bootTimeoutSec: number | undefined;
+  if (typeof bootTimeoutSecRaw === 'number' && Number.isFinite(bootTimeoutSecRaw)) {
+    bootTimeoutSec = Math.max(30, Math.min(600, Math.floor(bootTimeoutSecRaw)));
+  } else if (typeof bootTimeoutSecRaw !== 'undefined') {
+    throw { status: 400, message: 'bootTimeoutSec must be a number between 30 and 600' };
+  }
 
   return {
     apiKey, vastApiKey, hyperstackApiKey, tensordockApiKey, tensordockAuthId, modalApiKey,
@@ -691,6 +787,8 @@ async function _validateDeployRequest(
     canaryTrafficStep,
     devMode,
     label,
+    readinessProbe,
+    bootTimeoutSec,
     strictFastBoot: effectiveStrictFastBoot,
     searchMode,
     allowUnverified,
@@ -1034,8 +1132,10 @@ function _startDeployAndRespond(
   res: ServerResponse,
   isFinetune = false,
   appSlot?: DeploySlot,
+  idempotencyHash?: string,
 ): void {
-  const { raceCount, offerRaceCount, requireDirectPort, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, strictFastBoot, searchMode, allowUnverified, noTierCascade, minInetDownMbps } = config;
+  let { raceCount, offerRaceCount } = config;
+  const { requireDirectPort, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, readinessProbe, bootTimeoutSec, strictFastBoot, searchMode, allowUnverified, noTierCascade, minInetDownMbps } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   // Reset cancel flag FIRST so setDeployState won't be blocked by the guard
@@ -1045,12 +1145,34 @@ function _startDeployAndRespond(
   // Generate a unique deploy ID for tracking this deploy through its lifecycle
   const deployId = generateDeployId();
   // Record for idempotency — subsequent identical requests within 5s return this deployId
-  lastDeployRequest = { hash: JSON.stringify({ dockerImage: tierResult.resolvedDockerImage, gpuTypes: tierResult.gpuTypes }), deployId, ts: Date.now() };
-  // Clear stale SSH fields from previous deploy so poll loops don't exit early on old host:port
+  lastDeployRequest = {
+    hash: idempotencyHash ?? JSON.stringify({ dockerImage: tierResult.resolvedDockerImage, gpuTypes: tierResult.gpuTypes }),
+    deployId,
+    ts: Date.now(),
+  };
+  // Clear stale SSH fields from previous deploy so poll loops don't exit early on old host:port.
+  // App slots must leave "idle" immediately; the finetune CLI polls the slot
+  // status and treats idle-after-deploy as a failed provisioning attempt.
+  const initialDeployState = {
+    deployId,
+    devMode: config.devMode === true,
+    status: 'creating' as const,
+    startedAt: Date.now(),
+    message: 'Deploy request accepted',
+    step: 'creating_pod',
+    dockerImage: resolvedDockerImage,
+    gpuType: gpuTypes[0] || '',
+    provider: tiers[0]?.name || '',
+    endpoint: '',
+    sshHost: '',
+    sshPort: 0,
+    podId: '',
+    readinessProbe,
+  };
   if (appSlot) {
-    Object.assign(appSlot.state, { deployId, devMode: config.devMode === true, sshHost: '', sshPort: 0, podId: '' });
+    setDeployState(initialDeployState, appSlot);
   } else {
-    setDeployState({ deployId, devMode: config.devMode === true, sshHost: '', sshPort: 0, podId: '' });
+    setDeployState(initialDeployState);
     try {
       deploymentSM.startDeploying();
     } catch (smErr) {
@@ -1083,6 +1205,9 @@ function _startDeployAndRespond(
     ...(strictFastBoot ? { strictFastBoot } : {}),
     ...(allowUnverified ? { allowUnverified } : {}),
     ...(minInetDownMbps > 0 ? { minInetDownMbps } : {}),
+    ...(typeof maxCostUsd === 'number' ? { maxPricePerHr: maxCostUsd } : {}),
+    readinessProbe,
+    ...(typeof bootTimeoutSec === 'number' ? { bootTimeoutSec } : {}),
     ...(config.expectedApiPaths.length > 0 ? { expectedApiPaths: config.expectedApiPaths } : {}),
     ...(config.expectedCapabilities.length > 0 ? { expectedCapabilities: config.expectedCapabilities } : {}),
     ...(config.requireDockerManifest ? { requireDockerManifest: true } : {}),
@@ -1091,6 +1216,7 @@ function _startDeployAndRespond(
     ...(canary ? { canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep } : {}),
     // Cost-control flags propagated to deploy loop / cascade.
     raceCount,
+    ...(isFinetune ? { suppressProviderRetries: true } : {}),
     // Internal Vast offer-hedge override (1 ⇒ no duplicate spawn) + SSH-only rejection.
     ...(typeof offerRaceCount === 'number' ? { offerRaceCount } : {}),
     ...(requireDirectPort ? { requireDirectPort } : {}),
@@ -1191,15 +1317,32 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   try { body = await readJsonBody(req); }
   catch (e) { handleBodyError(res, e); return; }
 
-  // Per-app isolation: when the caller authenticated with a per-app key
-  // (resolved by the auth wrapper into x-aigw-user-id), automatically
-  // namespace the label so list/terminate can scope by ownership without
-  // the caller having to remember the convention. Skip if the label
-  // already contains "/" (caller knows what they're doing) or the call is
-  // unauthenticated (loopback admin).
+  // GPU creation is billable, so it must always be tied to an app key. Read-only
+  // endpoints can still serve local/admin callers, but deploys need an owner so
+  // list/terminate can see and clean up exactly the resources they created.
   const callerUserId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
-  if (callerUserId && typeof body.label === 'string' && body.label.length > 0 && !body.label.includes('/')) {
-    body.label = `${callerUserId}/${body.label}`;
+  if (!callerUserId && process.env.AIGW_ALLOW_UNSCOPED_GPU_DEPLOY !== '1') {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: 'GPU deploy requires an app API key',
+      message: 'Refusing to create a billable GPU resource without an app owner. Set AIGW_APP_KEY/GATEWAY_API_KEY, or AIGW_ALLOW_UNSCOPED_GPU_DEPLOY=1 for local development only.',
+    }));
+    return;
+  }
+  if (callerUserId) {
+    const rawLabel = typeof body.label === 'string' ? body.label.trim() : '';
+    if (!rawLabel) {
+      body.label = `${callerUserId}/gpu-deploy`;
+    } else if (!rawLabel.includes('/')) {
+      body.label = `${callerUserId}/${rawLabel}`;
+    } else if (rawLabel.split('/')[0] !== callerUserId) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: 'Deploy label owner mismatch',
+        message: `Authenticated app '${callerUserId}' cannot create GPU resources labelled '${rawLabel}'.`,
+      }));
+      return;
+    }
   }
 
   const readinessProbe: 'health' | 'ssh' = body.readinessProbe === 'ssh' ? 'ssh' : 'health';
@@ -1211,7 +1354,13 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   if (isFinetuneDeploy) finetuneDeployActive = true;
 
   // ── Idempotency: prevent double-deploy when user clicks twice rapidly ──
-  const requestHash = JSON.stringify({ dockerImage: body.dockerImage, gpuTypes: body.gpuTypes });
+  const requestHash = JSON.stringify({
+    callerUserId: callerUserId || null,
+    parallelSlot: callerUserId ? body.parallelSlot || null : null,
+    dockerImage: body.dockerImage,
+    gpuTypes: body.gpuTypes,
+    provider: body.provider || null,
+  });
   if (lastDeployRequest && lastDeployRequest.hash === requestHash && Date.now() - lastDeployRequest.ts < 5000) {
     log.log(`[req=${requestId}] Idempotent deploy — returning existing deployId=${lastDeployRequest.deployId}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1222,9 +1371,10 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   // Per-app slot path: app-key callers use their own isolated deploy slot,
   // completely bypassing the global lock / cancel-and-redeploy flow.
   if (callerUserId) {
-    const appSlot = createDeploySlot(callerUserId);
+    const appSlotKey = scopedDeploySlotKey(callerUserId, body.parallelSlot);
+    const appSlot = createDeploySlot(appSlotKey);
     if (appSlot.lock) {
-      log.log(`[req=${requestId}] App-key deploy rejected: slot lock held for '${callerUserId}'`);
+      log.log(`[req=${requestId}] App-key deploy rejected: slot lock held for '${appSlotKey}'`);
       res.writeHead(409, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Deploy already in progress for this app', status: appSlot.state.status }));
       return;
@@ -1270,7 +1420,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
       if (appSlotPreflightResult.warnings.length > 0) config.deployEnv._PREFLIGHT_WARNINGS = JSON.stringify(appSlotPreflightResult.warnings);
       appLockTransferred = true;
       Object.assign(appSlot.state, { readinessProbe });
-      _startDeployAndRespond(config, tierResult, requestId, res, isFinetuneDeploy, appSlot);
+      _startDeployAndRespond(config, tierResult, requestId, res, isFinetuneDeploy, appSlot, requestHash);
     } finally {
       if (!appLockTransferred) { appSlot.lock = false; setDeployLock(false); if (isFinetuneDeploy) finetuneDeployActive = false; }
     }
@@ -1425,7 +1575,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     // _startDeployAndRespond takes ownership of the lock (released in .finally()).
     lockTransferred = true;
     setDeployState({ readinessProbe });
-    _startDeployAndRespond(config, tierResult, requestId, res, isFinetuneDeploy);
+    _startDeployAndRespond(config, tierResult, requestId, res, isFinetuneDeploy, undefined, requestHash);
   } finally {
     if (!lockTransferred) {
       setDeployLock(false);
@@ -1569,6 +1719,86 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   // a runaway hedged race into an unkillable cost cascade (the exact incident
   // that motivated this path). Forcing here aborts the deploy promise's hold.
   const forceTerminate = body.force === true || body.force === '1';
+  const callerUserId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
+  const targetInstanceId = typeof body.instanceId === 'string' ? body.instanceId : '';
+  const requestedProvider =
+    typeof body.provider === 'string' && body.provider.length > 0 && body.provider.length <= 50
+      ? (body.provider as ProviderName)
+      : undefined;
+  const appSlot = callerUserId ? findCallerDeploySlot(callerUserId, body) : undefined;
+  if (appSlot) {
+    if (appSlot.lock && !forceTerminate) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: 'Deploy already in progress for this app',
+        message: 'Pass {"force":true} to cancel and terminate this in-flight app slot deploy.',
+        status: appSlot.state.status,
+        deployId: appSlot.state.deployId || undefined,
+      }));
+      return;
+    }
+    if (appSlot.lock && forceTerminate) {
+      log.warn(`[req=${requestId}] force terminate breaking app slot lock (${appSlot.ownerKey}, status=${appSlot.state.status})`);
+    }
+    appSlot.lock = true;
+    appSlot.cancelled = true;
+    const slotState = appSlot.state;
+    const instanceId = targetInstanceId || slotState.podId || '';
+    const provider = requestedProvider || (slotState.provider as ProviderName | undefined);
+    let terminatedBy: string | null = null;
+    let lastErr = '';
+    if (instanceId) {
+      const vastKey = deployVastApiKey || (body.vastApiKey as string) || process.env.VAST_API_KEY || '';
+      const tdKey = deployTensordockApiKey || (body.tensordockApiKey as string) || process.env.TENSORDOCK_API_KEY || '';
+      const tdAuthId = deployTensordockAuthId || (body.tensordockAuthId as string) || process.env.TENSORDOCK_AUTH_ID || '';
+      const rpKey = deployApiKey || (body.apiKey as string) || process.env.RUNPOD_API_KEY || '';
+      const modalTokenId = (body.modalTokenId as string) || process.env.MODAL_TOKEN_ID || '';
+      const modalTokenSecret = (body.modalTokenSecret as string) || process.env.MODAL_TOKEN_SECRET || '';
+      const modalKey = deployModalApiKey || (modalTokenId && modalTokenSecret ? `${modalTokenId}:${modalTokenSecret}` : '');
+      const hyperstackKey = deployHyperstackApiKey || (body.hyperstackApiKey as string) || process.env.HYPERSTACK_API_KEY || '';
+      const candidates: { name: ProviderName; client: GpuProviderClient; creds: ProviderCredentials }[] = [];
+      if (vastKey && (!provider || provider === 'vast' || provider === 'vast-vm')) {
+        candidates.push({ name: provider === 'vast-vm' ? 'vast-vm' : 'vast', client: provider === 'vast-vm' ? vastVm : vast, creds: { apiKey: vastKey } });
+      }
+      if (rpKey && (!provider || provider === 'runpod')) candidates.push({ name: 'runpod', client: runpod, creds: { apiKey: rpKey } });
+      if (tdKey && (!provider || provider === 'tensordock')) candidates.push({ name: 'tensordock', client: tensordock, creds: { apiKey: tdKey, authId: tdAuthId } });
+      if (modalKey && (!provider || provider === 'modal')) candidates.push({ name: 'modal', client: modal, creds: { apiKey: modalKey } });
+      if (hyperstackKey && (!provider || provider === 'hyperstack')) candidates.push({ name: 'hyperstack', client: hyperstack, creds: { apiKey: hyperstackKey } });
+      for (const c of candidates) {
+        try {
+          await c.client.deleteInstance(instanceId, c.creds);
+          terminatedBy = c.name;
+          logGpuEvent('instance_terminated', c.name, true, {
+            metadata: { reason: 'app_slot_terminate', instanceId, deployId: slotState.deployId, owner: appSlot.ownerKey },
+          });
+          break;
+        } catch (err) {
+          lastErr = err instanceof Error ? err.message : String(err);
+        }
+      }
+    }
+    setDeployState({
+      status: 'idle',
+      podId: '',
+      endpoint: '',
+      sshHost: '',
+      sshPort: 0,
+      message: instanceId
+        ? `App slot deploy cancelled${terminatedBy ? ` and terminated via ${terminatedBy}` : ''}`
+        : 'App slot deploy cancelled before provider instance id was assigned',
+    }, appSlot);
+    appSlot.lock = false;
+    res.writeHead(instanceId && !terminatedBy ? 404 : 200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: !(instanceId && !terminatedBy),
+      deployId: slotState.deployId || undefined,
+      instanceId: instanceId || undefined,
+      provider: terminatedBy || provider || undefined,
+      mode: 'app_slot_terminate',
+      ...(instanceId && !terminatedBy ? { error: `Instance ${instanceId} not found/terminated in provider. Last error: ${lastErr || '(none)'}` } : {}),
+    }));
+    return;
+  }
   if (deployLock && !forceTerminate) {
     res.writeHead(409, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Deploy lock held — try again in a moment, or pass {"force":true} to break the lock and terminate an in-flight deploy', status: deployState.status }));
@@ -1584,8 +1814,6 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
   // instance via the providers' listInstances() (same path as /v1/gpu/list).
   // Loopback / unauthenticated callers (callerUserId === null) are admin
   // and bypass the check.
-  const callerUserId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
-  const targetInstanceId = typeof body.instanceId === 'string' ? body.instanceId : '';
   const force = forceTerminate;
   if (callerUserId && targetInstanceId && !force) {
     try {
@@ -1639,10 +1867,6 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
     typeof body.instanceId === 'string' && body.instanceId.length > 0 && body.instanceId.length <= 200
       ? body.instanceId
       : '';
-  const requestedProvider =
-    typeof body.provider === 'string' && body.provider.length > 0 && body.provider.length <= 50
-      ? (body.provider as ProviderName)
-      : undefined;
   if (requestedInstanceId && requestedInstanceId !== deployState.podId) {
     const vastKey = deployVastApiKey || (body.vastApiKey as string) || process.env.VAST_API_KEY || '';
     const tdKey = deployTensordockApiKey || (body.tensordockApiKey as string) || process.env.TENSORDOCK_API_KEY || '';
@@ -1656,8 +1880,8 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
     // If provider not given, try each one we have credentials for. Vast
     // first because it's where the orphan-leak bug actually surfaces.
     const candidates: { name: ProviderName; client: GpuProviderClient; creds: ProviderCredentials }[] = [];
-    if (vastKey && (!requestedProvider || requestedProvider === 'vast')) {
-      candidates.push({ name: 'vast', client: vast, creds: { apiKey: vastKey } });
+    if (vastKey && (!requestedProvider || requestedProvider === 'vast' || requestedProvider === 'vast-vm')) {
+      candidates.push({ name: requestedProvider === 'vast-vm' ? 'vast-vm' : 'vast', client: requestedProvider === 'vast-vm' ? vastVm : vast, creds: { apiKey: vastKey } });
     }
     if (rpKey && (!requestedProvider || requestedProvider === 'runpod')) {
       candidates.push({ name: 'runpod', client: runpod, creds: { apiKey: rpKey } });
@@ -2256,16 +2480,24 @@ export async function handleSnapshotDelete(req: IncomingMessage, res: ServerResp
  * Requires the deploy to be in 'creating', 'booting', or 'ready' state
  * with sshHost/sshPort populated.
  */
-export async function handleGpuInspect(_req: IncomingMessage, res: ServerResponse): Promise<void> {
-  if (!deployState.sshHost || !deployState.sshPort) {
+export async function handleGpuInspect(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const resolved = resolveDeployStateForReadRequest(req);
+  const state = resolved.state;
+
+  if (resolved.scopedHidden || !state.sshHost || !state.sshPort) {
     res.writeHead(409, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'No active deploy with SSH host', state: deployState.status }));
+    res.end(JSON.stringify({
+      error: 'No active deploy with SSH host',
+      state: resolved.scopedHidden ? 'idle' : state.status,
+      ...(resolved.scopedHidden ? { scopedHidden: true } : {}),
+      ...(resolved.slotOwner ? { slotOwner: resolved.slotOwner } : {}),
+    }));
     return;
   }
 
   const { spawn } = await import('child_process');
-  const sshHost = deployState.sshHost;
-  const sshPort = deployState.sshPort;
+  const sshHost = state.sshHost;
+  const sshPort = state.sshPort;
 
   // The remote command is intentionally a single multi-line bash here-doc
   // executed via SSH. We pull EVERYTHING the operator might need in one

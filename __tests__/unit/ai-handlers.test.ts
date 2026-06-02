@@ -10,13 +10,14 @@ import type { IncomingMessage, ServerResponse } from 'http';
 // defined in the test file scope. Use vi.hoisted() for shared mock functions.
 
 const {
-  mockTranscribe, mockChat, mockSynthesize, mockPipeline, mockChatProvider,
+  mockTranscribe, mockChat, mockSynthesize, mockPipeline, mockChatProvider, mockMinimaxProvider,
 } = vi.hoisted(() => ({
   mockTranscribe: vi.fn(),
   mockChat: vi.fn(),
   mockSynthesize: vi.fn(),
   mockPipeline: vi.fn(),
   mockChatProvider: { chat: vi.fn(), providerId: 'groq' },
+  mockMinimaxProvider: { chat: vi.fn(), providerId: 'minimax', isConfigured: vi.fn(() => true) },
 }));
 
 const { mockRaceProviders } = vi.hoisted(() => ({
@@ -85,7 +86,7 @@ vi.mock('../../server/providers', () => ({
   deepgramSTT: { transcribe: vi.fn(), getModels: () => [{ id: 'nova-3', name: 'Nova 3', capability: 'stt' }] },
   fireworksSTT: { transcribe: vi.fn(), getModels: () => [{ id: 'whisper-v3', name: 'Whisper v3', capability: 'stt' }] },
   groqLLM: mockChatProvider,
-  minimaxLLM: null,
+  minimaxLLM: mockMinimaxProvider,
   fireworksLLM: null,
   groqLlmModel: 'llama-3.3-70b-versatile',
   groqTtsModel: 'orpheus',
@@ -114,7 +115,7 @@ vi.mock('../../server/gpu-readiness', () => ({
 // Mock server/config-persistence.ts
 vi.mock('../../server/config-persistence', () => ({
   loadProviderConfig: vi.fn(() => ({ activeAppId: 'default', sttModelOverrides: {}, sttHallucinationFilter: {} })),
-  stampAppRequest: vi.fn(),
+  stampProfileRequest: vi.fn(),
 }));
 
 // Mock server/config.ts
@@ -233,6 +234,7 @@ import {
   GPU_STT_TIMEOUT_MS,
   GPU_LLM_TIMEOUT_MS,
 } from '../../server/ai-handlers';
+import { loadProviderConfig } from '../../server/config-persistence';
 
 // ── Helpers: fake Node HTTP req/res ────────────────────────────────────────
 
@@ -335,6 +337,10 @@ beforeEach(() => {
   mockSynthesize.mockReset();
   mockPipeline.mockReset();
   mockChatProvider.chat.mockReset();
+  mockMinimaxProvider.chat.mockReset();
+  mockMinimaxProvider.isConfigured.mockReturnValue(true);
+  vi.mocked(loadProviderConfig).mockReset();
+  vi.mocked(loadProviderConfig).mockResolvedValue({ activeAppId: 'default', sttModelOverrides: {}, sttHallucinationFilter: {} } as any);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1046,6 +1052,37 @@ describe('handleChatCompletions', () => {
     await handleChatCompletions(req, res);
     expect(res.statusCode).toBe(200);
     expect(res.json.choices[0].message.content).toBe('I see an image');
+  });
+
+  it('routes @app/llm profile provider+model entries to MiniMax', async () => {
+    vi.mocked(loadProviderConfig).mockResolvedValueOnce({
+      activeAppId: 'fine-tune-assistant',
+      apps: [{
+        id: 'fine-tune-assistant',
+        llm: [{ provider: 'minimax', model: 'MiniMax-M2.7-highspeed' }],
+      }],
+      sttModelOverrides: {},
+      sttHallucinationFilter: {},
+    } as any);
+    mockMinimaxProvider.chat.mockResolvedValueOnce({
+      content: 'MiniMax ready',
+      model: 'MiniMax-M2.7-highspeed',
+      usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 },
+    });
+
+    const req = fakeReq('POST', '/v1/chat/completions', JSON.stringify({
+      model: '@app/llm',
+      messages: [{ role: 'user', content: 'Status?' }],
+    }), { 'x-aigw-user-id': 'fine-tune-assistant' });
+    const res = fakeRes();
+
+    await handleChatCompletions(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(mockMinimaxProvider.chat).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'MiniMax-M2.7-highspeed' }),
+    );
+    expect(mockChatProvider.chat).not.toHaveBeenCalled();
   });
 });
 

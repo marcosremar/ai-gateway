@@ -26,7 +26,7 @@ describe('deployCancelled lifecycle', () => {
     const source = gpuDeploySource;
     // The fix: startDeployLoop must call setDeployCancelled(false) before starting
     const loopStart = source.indexOf('export async function startDeployLoop');
-    const loopBody = source.slice(loopStart, loopStart + 500);
+    const loopBody = source.slice(loopStart, loopStart + 2000);
     expect(loopBody).toContain('setDeployCancelled(false)');
   });
 });

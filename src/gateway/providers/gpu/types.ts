@@ -30,6 +30,10 @@ export interface RunpodProviderMeta {
 export interface VastProviderMeta {
   provider: 'vast';
   hostIp?: string;
+  sshHost?: string;
+  sshPort?: number;
+  /** How the gateway reaches SSH for this Vast instance. */
+  sshAccessMode?: 'direct' | 'proxy' | 'none';
   reliability2?: number;
   inetDown?: number;
   inetUp?: number;
@@ -162,17 +166,21 @@ export interface InstanceSpec {
    *  boot health monitor probes this path; if it returns 200 the instance is
    *  marked ready. Setting this lets apps use /healthz, /api/status, etc. */
   healthEndpoint?: string;
+  /** Readiness strategy requested by the gateway. SSH-driven batch jobs do not
+   *  need an HTTP endpoint during provider creation; the boot monitor will run
+   *  a real SSH probe before marking the pod ready. */
+  readinessProbe?: 'health' | 'ssh';
   /** Force SSH tunnel for Vast.ai instances (skip direct-port endpoint).
    *  Use this when targeting residential hosts whose NAT/firewall accepts
    *  TCP SYN packets for the mapped port even when the container app isn't
    *  listening yet — the gateway's direct-port probe gives a false positive
    *  and never falls back to the (working) SSH tunnel. */
   forceSshTunnel?: boolean;
-  /** Minimum number of direct ports the host must have. Vast.ai residential
-   *  hosts often have direct_port_count=0 (only SSH access), which forces
-   *  SSH tunneling and breaks apps that need multiple direct ports. Set to
-   *  1 to require at least one direct port (for an HTTP API like FastAPI on :8000),
-   *  or 2 to also require :22 for direct SSH. */
+  /** Minimum number of direct ports the host must advertise. Vast.ai
+   *  residential hosts often have direct_port_count=0, which forces SSH proxy
+   *  paths and tunnel hangs. For SSH-driven jobs this is only a coarse offer
+   *  filter; the client validates the actual sshHost/sshPort after creation
+   *  and rejects proxy targets before the deploy can be marked ready. */
   directPortRequired?: number;
   /** Minimum inet_down (Mbps) the host must have. If not set, auto-computed
    *  from image size: imageGb * 8 * 1024 / pullBudgetSec. Default pullBudgetSec=600
@@ -208,6 +216,8 @@ export interface InstanceSpec {
   /** Vast.ai-only: number of parallel deploy attempts (race). Default 2, max 5.
    *  Useful because Vast.ai hosts often reclaim/fail mid-boot — racing N hosts increases success rate. */
   raceCount?: number;
+  /** Vast.ai/SSH-driven jobs: cap provider-side boot/SSH acquisition, in seconds. */
+  bootTimeoutSec?: number;
   /** Vast.ai-only: require direct-port, high-reliability offers and skip SSH-only fallback for faster boot. */
   strictFastBoot?: boolean;
   /** Vast.ai offer-search profile passed through deploy request (`searchMode`). */

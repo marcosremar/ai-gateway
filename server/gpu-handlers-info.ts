@@ -4,7 +4,8 @@
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import { createLogger } from '../src/logger';
-import { getDeploySlot } from '../src/gateway/state/deploy-state';
+import { getDeploySlot, listDeploySlots } from '../src/gateway/state/deploy-state';
+import type { DeploySlot, DeploymentState } from '../src/gateway/state/deploy-state';
 
 const log = createLogger('gpu-handlers-info');
 import {
@@ -33,6 +34,62 @@ import { getDeployTimeoutMin } from '../src/gpu-providers/deploy-settings';
 import { runPreFlightChecks } from '../src/preflight-checks';
 import { analyzeDockerImage } from '../src/gpu-compat';
 import { loadProviderConfig } from './config-persistence';
+
+function scopedDeploySlotKey(callerUserId: string, rawSlot: string | null): string {
+  if (!rawSlot || rawSlot.trim() === '') return callerUserId;
+  const safe = rawSlot.trim().replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 80);
+  return safe ? `${callerUserId}:${safe}` : callerUserId;
+}
+
+function slotBelongsToCaller(ownerKey: string, callerUserId: string): boolean {
+  return ownerKey === callerUserId || ownerKey.startsWith(`${callerUserId}:`);
+}
+
+function findDeploySlotForRequest(req: IncomingMessage, callerUserId: string | null): DeploySlot | undefined {
+  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const parallelSlot = url.searchParams.get('parallelSlot') || url.searchParams.get('slot');
+  const wantedDeployId = url.searchParams.get('deployId') || '';
+  const wantedInstanceId = url.searchParams.get('instanceId') || url.searchParams.get('podId') || '';
+
+  if (callerUserId) {
+    if (parallelSlot !== null) return getDeploySlot(scopedDeploySlotKey(callerUserId, parallelSlot));
+    if (wantedDeployId || wantedInstanceId) {
+      return listDeploySlots().find(slot => {
+        if (!slotBelongsToCaller(slot.ownerKey, callerUserId)) return false;
+        const s = slot.state;
+        return (wantedDeployId && s.deployId === wantedDeployId) ||
+          (wantedInstanceId && (s.podId === wantedInstanceId || s.deployId === wantedInstanceId));
+      });
+    }
+    return getDeploySlot(callerUserId);
+  }
+
+  if (wantedDeployId || wantedInstanceId) {
+    return listDeploySlots().find(slot => {
+      const s = slot.state;
+      return (wantedDeployId && s.deployId === wantedDeployId) ||
+        (wantedInstanceId && (s.podId === wantedInstanceId || s.deployId === wantedInstanceId));
+    });
+  }
+
+  const activeSlots = listDeploySlots().filter(slot => slot.state.status !== 'idle');
+  if (deployState.status === 'idle' && activeSlots.length === 1) return activeSlots[0];
+  return undefined;
+}
+
+function resolveDeployStateForRequest(req: IncomingMessage): {
+  state: DeploymentState;
+  slotOwner?: string;
+  scopedHidden?: boolean;
+} {
+  const callerUserId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
+  const slot = findDeploySlotForRequest(req, callerUserId);
+  if (slot) return { state: slot.state, slotOwner: slot.ownerKey };
+  if (deployState.userId && callerUserId && deployState.userId !== callerUserId) {
+    return { state: deployState, scopedHidden: true };
+  }
+  return { state: deployState };
+}
 import { getMemoryStats, getOperationStats } from '../src/performance-profiler';
 import { errorSummary } from '../src/error-summary';
 import { computeAdaptiveIdleTimeout, resolveEffectiveIdleTimeout } from './gpu-idle-logic';
@@ -267,7 +324,11 @@ export async function handleGpuStatus(_req: IncomingMessage, res: ServerResponse
   // Per-key isolation: app-key callers see their own slot (not the global deploy).
   // Admin/loopback (statusCallerUserId null) sees the global slot.
   const statusCallerUserId = readUserIdHeader(_req.headers as Record<string, string | string[] | undefined>);
-  const callerSlot = statusCallerUserId ? getDeploySlot(statusCallerUserId) : undefined;
+  const statusUrl = new URL(_req.url || '/v1/gpu/status', 'http://localhost');
+  const parallelSlot = statusUrl.searchParams.get('parallelSlot') || statusUrl.searchParams.get('slot');
+  const callerSlot = statusCallerUserId
+    ? getDeploySlot(scopedDeploySlotKey(statusCallerUserId, parallelSlot))
+    : undefined;
   // If caller has a slot, use it; otherwise fall through to global (with fix-B isolation)
   if (callerSlot) {
     const s = callerSlot.state;
@@ -477,6 +538,36 @@ export async function handleGpuList(_req: IncomingMessage, res: ServerResponse):
     });
   }
 
+  // Include per-app deploy slots even before provider list reconciliation sees
+  // them. This keeps in-flight finetune/job pods visible and terminable while a
+  // provider client is still in its create/poll phase.
+  for (const slot of listDeploySlots()) {
+    const s = slot.state;
+    if (s.status === 'idle') continue;
+    if (callerUserId && !slotBelongsToCaller(slot.ownerKey, callerUserId)) continue;
+    const elapsed = s.startedAt > 0 ? Math.round((Date.now() - s.startedAt) / 1000) : 0;
+    const owner = slot.ownerKey.split(':')[0] || slot.ownerKey;
+    const slotName = slot.ownerKey.includes(':') ? slot.ownerKey.split(':').slice(1).join(':') : 'default';
+    const instanceId = s.podId || s.deployId || slot.ownerKey;
+    if (instances.some((x: unknown) => (x as { instanceId?: string; deployId?: string }).instanceId === instanceId || (x as { deployId?: string }).deployId === s.deployId)) continue;
+    instances.push({
+      provider: s.provider,
+      deployId: s.deployId || undefined,
+      instanceId,
+      instanceName: `${owner}/slot-${slotName}`,
+      endpoint: s.endpoint,
+      status: s.status,
+      gpuType: s.gpuType,
+      costPerHr: s.costPerHr,
+      elapsedSec: elapsed,
+      dockerImage: s.dockerImage,
+      isActive: s.status === 'ready',
+      sshHost: s.sshHost,
+      sshPort: s.sshPort,
+      slotOwner: slot.ownerKey,
+    });
+  }
+
   // Add any extra instances found from providers that aren't the current deployState
   for (const result of results) {
     if (result.status !== 'fulfilled') continue;
@@ -659,9 +750,28 @@ export async function handleGpuLogs(req: IncomingMessage, res: ServerResponse) {
 
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const filter = url.searchParams.get('filter') || undefined;
+  const resolved = resolveDeployStateForRequest(req);
+  const state = resolved.state;
+
+  if (resolved.scopedHidden) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      logs: '',
+      sshHost: '',
+      sshPort: 0,
+      endpoint: '',
+      podId: '',
+      provider: '',
+      status: 'idle',
+      scopedHidden: true,
+    }));
+    return;
+  }
 
   try {
-    let logs = await fetchGpuLogs();
+    let logs = state === deployState
+      ? await fetchGpuLogs()
+      : await fetchGpuLogs(state.sshHost, state.sshPort, state.endpoint, state);
     if (filter && logs) {
       const filtered = logs.split('\n').filter(line => line.includes(filter)).join('\n');
       if (filtered.trim()) logs = filtered;
@@ -669,12 +779,13 @@ export async function handleGpuLogs(req: IncomingMessage, res: ServerResponse) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       logs,
-      sshHost: deployState.sshHost,
-      sshPort: deployState.sshPort,
-      endpoint: deployState.endpoint,
-      podId: deployState.podId,
-      provider: deployState.provider,
-      status: deployState.status,
+      sshHost: state.sshHost,
+      sshPort: state.sshPort,
+      endpoint: state.endpoint,
+      podId: state.podId,
+      provider: state.provider,
+      status: state.status,
+      ...(resolved.slotOwner ? { slotOwner: resolved.slotOwner } : {}),
     }));
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' });

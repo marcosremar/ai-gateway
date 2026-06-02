@@ -88,8 +88,8 @@ export type {
 export { generateTtsPreview } from './tts-preview';
 export type { TtsPreviewInput, TtsPreviewResult, TtsPreviewDeps } from './tts-preview';
 
-export { resolveChatProvider, buildOpenAiChatResponse } from './chat-completions-service';
-export type { ChatProviderAdapter, ChatCompletionsDeps, OpenAiChatResponse } from './chat-completions-service';
+export { resolveChatProvider, resolveProfileChatModel, buildOpenAiChatResponse } from './chat-completions-service';
+export type { ChatProviderAdapter, ChatCompletionsDeps, ChatProfileLlmEntry, OpenAiChatResponse } from './chat-completions-service';
 
 export { buildAtomicResponseBody, computeNetworkMs, extractAtomicAudio } from './atomic-response';
 export type { AtomicPipelineResult, AtomicResponseBody } from './atomic-response';

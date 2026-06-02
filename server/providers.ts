@@ -11,7 +11,7 @@ import { fireworksSTT, fireworksLLM } from '../src/providers/fireworks';
 import { deepgramSTT } from '../src/providers/deepgram';
 import { elevenlabsSTT } from '../src/providers/elevenlabs';
 import { modalTTS } from '../src/providers/modal';
-import { minimaxTTS, minimaxLLM } from '../src/providers/minimax';
+import { minimaxTTS, minimaxLLM, MINIMAX_LLM_MODELS } from '../src/providers/minimax';
 export { minimaxTTS, minimaxLLM };
 import { modalMossTTS } from '../src/providers/modal-moss';
 import { modalSeamlessSTT, modalSeamlessLLM } from '../src/providers/modal-seamless';
@@ -93,6 +93,7 @@ export let deepgramAvailable = !!process.env.DEEPGRAM_API_KEY;
 export let fireworksAvailable = !!process.env.FIREWORKS_API_KEY;
 export let elevenlabsAvailable = !!process.env.ELEVENLABS_API_KEY;
 export let openrouterAvailable = !!process.env.OPENROUTER_API_KEY;
+export let minimaxAvailable = !!process.env.MINIMAX_API_KEY;
 export let groqSttModel = process.env.GROQ_STT_MODEL || 'whisper-large-v3-turbo';
 export let groqLlmModel = process.env.GROQ_LLM_MODEL || 'llama-3.3-70b-versatile';
 export let groqTtsModel = process.env.GROQ_TTS_MODEL || 'canopylabs/orpheus-v1-english';
@@ -202,9 +203,9 @@ if (openrouterAvailable) {
 if (whisperAvailable && !ollamaAvailable) log.log(`Whisper STT (ensemble): ${whisperHost}`);
 log.log(`Ensemble STT providers: ${ENSEMBLE_STT_PROVIDERS.join(',') || 'all'}`);
 
-if (!groqAvailable && !ollamaAvailable && !fireworksAvailable) {
+if (!groqAvailable && !ollamaAvailable && !fireworksAvailable && !minimaxAvailable) {
   // Must have at least one cloud/local LLM provider
-  log.error('No LLM provider configured. Set GROQ_API_KEY, FIREWORKS_API_KEY, or OLLAMA_HOST+PROVIDER_CHAIN=ollama');
+  log.error('No LLM provider configured. Set GROQ_API_KEY, FIREWORKS_API_KEY, MINIMAX_API_KEY, or OLLAMA_HOST+PROVIDER_CHAIN=ollama');
   // Allow tests / scripts that legitimately load this module without an LLM
   // provider configured (e.g. orphan-recovery unit tests) to skip the hard
   // exit. The check still runs in real startup unless explicitly disabled.
@@ -218,21 +219,32 @@ if (fireworksAvailable) {
   providers.chat!['accounts/fireworks/models/llama-v3p3-70b-instruct'] = fireworksLLM;
   providers.chat!['accounts/fireworks/models/llama-v3p1-70b-instruct'] = fireworksLLM;
 }
+if (minimaxAvailable) {
+  for (const model of MINIMAX_LLM_MODELS) {
+    providers.chat![model] = minimaxLLM;
+  }
+}
 
 // Build LLM fallback chain: Groq → Fireworks → Ollama (ordered by latency)
 import type { ChatFallbackEntry } from '../src/proxy/types';
-const chatFallbackChain: ChatFallbackEntry[] = [];
-if (groqAvailable) {
-  chatFallbackChain.push({ providerId: 'groq', model: groqLlmModel, provider: groqLLM });
+function rebuildChatFallbackChain(): ChatFallbackEntry[] {
+  const chain: ChatFallbackEntry[] = [];
+  if (groqAvailable) {
+    chain.push({ providerId: 'groq', model: groqLlmModel, provider: groqLLM });
+  }
+  if (fireworksAvailable) {
+    chain.push({ providerId: 'fireworks', model: 'accounts/fireworks/models/llama-v3p3-70b-instruct', provider: fireworksLLM });
+  }
+  if (minimaxAvailable) {
+    chain.push({ providerId: 'minimax', model: process.env.MINIMAX_LLM_MODEL || 'MiniMax-M2.7', provider: minimaxLLM });
+  }
+  if (ollamaAvailable && ollamaLLMProvider) {
+    chain.push({ providerId: 'ollama', model: ollamaModel, provider: ollamaLLMProvider });
+  }
+  return chain;
 }
-if (fireworksAvailable) {
-  chatFallbackChain.push({ providerId: 'fireworks', model: 'accounts/fireworks/models/llama-v3p3-70b-instruct', provider: fireworksLLM });
-}
-if (ollamaAvailable && ollamaLLMProvider) {
-  chatFallbackChain.push({ providerId: 'ollama', model: ollamaModel, provider: ollamaLLMProvider });
-}
-providers.chatFallbackChain = chatFallbackChain;
-log.log(`LLM fallback chain: ${chatFallbackChain.map(e => e.providerId).join(' → ') || 'none'}`);
+providers.chatFallbackChain = rebuildChatFallbackChain();
+log.log(`LLM fallback chain: ${providers.chatFallbackChain.map(e => e.providerId).join(' → ') || 'none'}`);
 
 // ── AIClient for voice dubbing pipeline ─────────────────────────────────────
 
@@ -271,13 +283,12 @@ registry.register({
 });
 log.log('Modal TTS registered (Qwen3-TTS, no API key needed)');
 
-// Minimax — speech-02 TTS + MiniMax-M2 LLM, requires MINIMAX_API_KEY
-const minimaxAvailable = !!process.env.MINIMAX_API_KEY;
+// Minimax — speech-02 TTS + MiniMax M-series LLM, requires MINIMAX_API_KEY
 if (minimaxAvailable) {
   registry.register({
     id: 'minimax' as ProviderId,
     name: 'Minimax',
-    description: 'Minimax (TTS: speech-02 + LLM: MiniMax-M2)',
+    description: 'Minimax (TTS: speech-02 + LLM: MiniMax M-series)',
     capabilities: ['tts', 'llm'],
     requiresApiKey: true,
     tts: minimaxTTS,
@@ -480,12 +491,14 @@ export const translationDefaults: AIProfile = {
   llm: [
     ...(groqAvailable ? [{ provider: 'groq' as const, model: groqLlmModel }] : []),
     ...(fireworksAvailable ? [{ provider: 'fireworks' as const, model: 'accounts/fireworks/models/llama-v3p3-70b-instruct' }] : []),
+    ...(minimaxAvailable ? [{ provider: 'minimax' as const, model: process.env.MINIMAX_LLM_MODEL || 'MiniMax-M2.7' }] : []),
     { provider: 'modal-qwen3asr-pipeline', model: 'translategemma-12b' },
   ],
   tts: ttsChain,
   keys: {
     ...(groqAvailable ? { groq: process.env.GROQ_API_KEY! } : {}),
     ...(openaiAvailable ? { openai: process.env.OPENAI_API_KEY! } : {}),
+    ...(minimaxAvailable ? { minimax: process.env.MINIMAX_API_KEY! } : {}),
   },
   audioFormat: 'wav',  // VoiceDubService expects WAV for AudioStreamBuffer
   language: 'fr',
@@ -841,6 +854,7 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
     deepgram: deepgramAvailable,
     fireworks: fireworksAvailable,
     openrouter: openrouterAvailable,
+    minimax: minimaxAvailable,
     elevenlabs: elevenlabsAvailable,
   };
 
@@ -850,6 +864,7 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
   deepgramAvailable = !!process.env.DEEPGRAM_API_KEY;
   fireworksAvailable = !!process.env.FIREWORKS_API_KEY;
   openrouterAvailable = !!process.env.OPENROUTER_API_KEY;
+  minimaxAvailable = !!process.env.MINIMAX_API_KEY;
   elevenlabsAvailable = !!process.env.ELEVENLABS_API_KEY;
 
   // Re-evaluate model/voice vars
@@ -887,9 +902,22 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
     providers.chat['llama-3.1-8b-instant'] = providers.chat['llama-3.1-8b-instant'] || ollamaLLMProvider;
   }
 
+  if (fireworksAvailable) {
+    providers.chat['accounts/fireworks/models/llama-v3p3-70b-instruct'] = fireworksLLM;
+    providers.chat['accounts/fireworks/models/llama-v3p1-70b-instruct'] = fireworksLLM;
+  }
+
+  if (minimaxAvailable) {
+    for (const model of MINIMAX_LLM_MODELS) {
+      providers.chat[model] = minimaxLLM;
+    }
+  }
+
   if (openrouterAvailable) {
     enableOpenRouterPassthrough();
   }
+
+  providers.chatFallbackChain = rebuildChatFallbackChain();
 
   // Rebuild registry entries for providers that changed availability.
   // Note: AIProviderRegistry has no unregister() — re-registering overwrites,
@@ -942,6 +970,18 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
     });
   }
 
+  if (minimaxAvailable) {
+    registry.register({
+      id: 'minimax' as ProviderId,
+      name: 'Minimax',
+      description: 'Minimax (TTS: speech-02 + LLM: MiniMax M-series)',
+      capabilities: ['tts', 'llm'],
+      requiresApiKey: true,
+      tts: minimaxTTS,
+      llm: minimaxLLM,
+    });
+  }
+
   // Rebuild TTS chain (Modal first — multilingual, free, no API key)
   ttsChain = [
     { provider: 'modal', model: 'qwen3-tts' },
@@ -952,12 +992,21 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
   // Update translationDefaults keys and chains
   updateActivePipeline({
     keys: {
-      groq: process.env.GROQ_API_KEY || '',
+      ...(groqAvailable ? { groq: process.env.GROQ_API_KEY! } : {}),
       ...(openaiAvailable ? { openai: process.env.OPENAI_API_KEY! } : {}),
+      ...(minimaxAvailable ? { minimax: process.env.MINIMAX_API_KEY! } : {}),
     },
-    stt: [{ provider: 'groq', model: groqSttModel }],
+    stt: [
+      ...(mlxQwenAvailable ? [{ provider: 'mlx-qwen3-asr' as const, model: 'qwen3-asr' }] : []),
+      ...(groqAvailable ? [{ provider: 'groq' as const, model: groqSttModel }] : []),
+      ...(fireworksAvailable && !groqAvailable ? [{ provider: 'fireworks' as const, model: 'whisper-v3' }] : []),
+      { provider: 'modal-qwen3asr-pipeline', model: 'qwen3-asr-1.7b' },
+      { provider: 'modal-voxtral', model: 'voxtral-mini-3b' },
+    ],
     llm: [
-      { provider: 'groq', model: groqLlmModel },
+      ...(groqAvailable ? [{ provider: 'groq' as const, model: groqLlmModel }] : []),
+      ...(fireworksAvailable ? [{ provider: 'fireworks' as const, model: 'accounts/fireworks/models/llama-v3p3-70b-instruct' }] : []),
+      ...(minimaxAvailable ? [{ provider: 'minimax' as const, model: process.env.MINIMAX_LLM_MODEL || 'MiniMax-M2.7' }] : []),
       { provider: 'modal-qwen3asr-pipeline', model: 'translategemma-12b' },
     ],
     tts: ttsChain,
@@ -972,6 +1021,7 @@ export function reloadProviderAvailability(): { added: string[]; removed: string
     deepgram: deepgramAvailable,
     fireworks: fireworksAvailable,
     openrouter: openrouterAvailable,
+    minimax: minimaxAvailable,
     elevenlabs: elevenlabsAvailable,
   };
   for (const [name, was] of Object.entries(prev)) {

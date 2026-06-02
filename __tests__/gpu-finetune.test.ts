@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,6 +19,8 @@ import {
   buildStatusResult,
   buildProbeCommand,
   parseCompareOutput,
+  deriveFinetuneHttpStatus,
+  readFinetuneJobLogs,
   loadPreset,
   listPresets,
   setPresetsRoot,
@@ -27,6 +29,9 @@ import {
   InMemoryFinetuneState,
   FileFinetuneState,
   BUNDLED_PLUGINS,
+  DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC,
+  DEFAULT_VAST_SSH_FANOUT_WORKERS,
+  resolveVastSshAcquisitionPolicy,
 } from '../src/modules/gpu-finetune';
 import type {
   GpuJobRunner,
@@ -87,6 +92,41 @@ describe('validateSpec', () => {
     const r = validateSpec({ type: 'audio', scriptPath: '/tmp/x.py', dataset: 'hf://a/b', smoke: true, skipSmoke: true });
     expect(r.errors.some(e => e.includes('cannot set both smoke:true and skipSmoke:true'))).toBe(true);
   });
+
+  it('requires a smoke gate before expensive full runs unless explicitly overridden', () => {
+    const blocked = validateSpec({
+      type: 'audio',
+      scriptPath: '/tmp/x.py',
+      dataset: 'hf://a/b',
+      skipSmoke: true,
+      maxSpend: 10,
+    });
+    expect(blocked.valid).toBe(false);
+    expect(blocked.errors.some(e => e.includes('skipSmoke is blocked'))).toBe(true);
+
+    const allowed = validateSpec({
+      type: 'audio',
+      scriptPath: '/tmp/x.py',
+      dataset: 'hf://a/b',
+      skipSmoke: true,
+      maxSpend: 10,
+      allowSkipSmokeForExpensive: true,
+    });
+    expect(allowed.errors.some(e => e.includes('skipSmoke is blocked'))).toBe(false);
+  });
+
+  it('validates R2 auto-resume and sync interval knobs', () => {
+    const missingBucket = validateSpec({ type: 'audio', scriptPath: '/tmp/x.py', dataset: 'hf://a/b', autoResumeR2: true });
+    expect(missingBucket.errors).toContain('autoResumeR2 requires r2Bucket to be set');
+    const badInterval = validateSpec({
+      type: 'audio',
+      scriptPath: '/tmp/x.py',
+      dataset: 'hf://a/b',
+      r2Bucket: 'tts-ptbr-training',
+      r2SyncIntervalSec: -1,
+    });
+    expect(badInterval.errors.some(e => e.includes('r2SyncIntervalSec=-1'))).toBe(true);
+  });
 });
 
 // ─── estimateCost ──────────────────────────────────────────────────────
@@ -127,6 +167,103 @@ describe('runNumericChecks', () => {
     expect(byName['--max-cost / maxCost'].ok).toBe(false);
     expect(byName['--epochs / epochs'].ok).toBe(true);
     expect(byName['--max-spend / maxSpend'].ok).toBe(true); // undefined → ok
+  });
+});
+
+// ─── Vast SSH acquisition policy ───────────────────────────────────────
+
+describe('resolveVastSshAcquisitionPolicy', () => {
+  it('uses 600s direct-SSH fanout acquisition for Vast RTX 5090 jobs by default', () => {
+    expect(DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC).toBe(600);
+    const policy = resolveVastSshAcquisitionPolicy({
+      provider: 'vast',
+      gpuFilter: '5090',
+      gpuName: 'NVIDIA GeForce RTX 5090',
+      env: {},
+    });
+    expect(policy).toMatchObject({
+      enabled: true,
+      reason: 'vast-5090-ssh-acquisition',
+      offerRaceCount: DEFAULT_VAST_SSH_FANOUT_WORKERS,
+      bootTimeoutSec: DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC,
+    });
+  });
+
+  it('leaves non-5090 Vast jobs on the normal minute-based boot policy', () => {
+    const policy = resolveVastSshAcquisitionPolicy({
+      provider: 'vast',
+      gpuFilter: '4090',
+      gpuName: 'NVIDIA GeForce RTX 4090',
+      env: {},
+    });
+    expect(policy).toMatchObject({
+      enabled: false,
+      reason: 'vast-non-5090',
+      offerRaceCount: 1,
+    });
+    expect(policy.bootTimeoutSec).toBeUndefined();
+  });
+
+  it('honors env fanout overrides for Vast RTX 5090 jobs', () => {
+    const policy = resolveVastSshAcquisitionPolicy({
+      provider: 'vast',
+      gpuFilter: 'RTX 5090',
+      env: {
+        AIGW_VAST_SSH_FANOUT: '2',
+        AIGW_VAST_SSH_BOOT_TIMEOUT_SEC: '60',
+      },
+    });
+    expect(policy.offerRaceCount).toBe(2);
+    expect(policy.bootTimeoutSec).toBe(60);
+  });
+
+  it('caps explicit fanout while preserving the configured timeout', () => {
+    const policy = resolveVastSshAcquisitionPolicy({
+      provider: 'vast',
+      gpuFilter: 'RTX 5090',
+      requestedOfferRaceCount: 9,
+      env: {
+        AIGW_VAST_SSH_BOOT_TIMEOUT_SEC: '60',
+      },
+    });
+    expect(policy.offerRaceCount).toBe(5);
+    expect(policy.bootTimeoutSec).toBe(60);
+  });
+});
+
+// ─── CLI wiring invariants ─────────────────────────────────────────────
+
+describe('gpu jobs CLI acquisition wiring', () => {
+  const cliSource = () => readFileSync(join(process.cwd(), 'bin/ai-gateway.ts'), 'utf-8');
+
+  it('passes Vast SSH acquisition policy and seconds timeout into deploy/readiness flow', () => {
+    const src = cliSource();
+    expect(src).toContain('resolveVastSshAcquisitionPolicy');
+    expect(src).toMatch(/if \(typeof opts\.raceCount === 'number'\) deployBody\.raceCount = opts\.raceCount/);
+    expect(src).toMatch(/deployBody\.offerRaceCount\s*=\s*acquisitionPolicy\.offerRaceCount/);
+    expect(src).toMatch(/const requestedBootTimeoutSec\s*=\s*opts\.bootTimeoutSec\s*\?\?\s*acquisitionPolicy\.bootTimeoutSec/);
+    expect(src).toMatch(/deployBody\.bootTimeoutSec\s*=\s*requestedBootTimeoutSec/);
+    expect(src).toMatch(/deployBody\.provider\s*=\s*selectedProvider/);
+    expect(src).toMatch(/deployBody\.requireDirectPort\s*=\s*!allowVastProxy/);
+    expect(src).toMatch(/offerRaceCount:\s*rOpts\.offerRaceCount/);
+    expect(src).toMatch(/parallelSlot:\s*rOpts\.parallelSlot/);
+    expect(src).toMatch(/storageGb:\s*rOpts\.storageGb/);
+    expect(src).toContain('Vast SSH offer acquisition fanout');
+  });
+
+  it('keeps deploy race available while allowing Vast offer fanout', () => {
+    const serverSrc = readFileSync(join(process.cwd(), 'server/gpu-handlers.ts'), 'utf-8');
+    const lifecycleSrc = readFileSync(join(process.cwd(), 'server/handlers/gpu/lifecycle.ts'), 'utf-8');
+    const vastSrc = readFileSync(join(process.cwd(), 'src/gateway/providers/gpu/vast-client.ts'), 'utf-8');
+    const moduleVastSrc = readFileSync(join(process.cwd(), 'src/modules/gateway/providers/gpu/vast-client.ts'), 'utf-8');
+    expect(serverSrc).not.toContain('Vast.ai deploy race disabled');
+    expect(serverSrc).toContain('Internal Vast offer-hedge count');
+    expect(lifecycleSrc).not.toContain('Vast.ai deploy race disabled');
+    expect(lifecycleSrc).toContain('if (body.race)');
+    expect(vastSrc).toContain('const raceCount = requestedRaceCount');
+    expect(moduleVastSrc).toContain('const raceCount = requestedRaceCount');
+    expect(vastSrc).not.toContain('const defaultOfferRace');
+    expect(moduleVastSrc).not.toContain('const _defaultRace');
   });
 });
 
@@ -375,6 +512,15 @@ describe('FinetuneGateway.compose', () => {
     expect(main).toContain('pip install');
     expect(main).toContain('hf download foo/bar');
     expect(main).toContain('cu121'); // pinned torch index
+    expect(main).toContain('HF_XET_HIGH_PERFORMANCE=1');
+    expect(main).toContain('HF_HUB_DOWNLOAD_TIMEOUT=30');
+    expect(main).toContain('[diag] job bootstrap diagnostics');
+    expect(main).toContain('hf_token_present=');
+    expect(main).toContain("getent ahosts 'huggingface.co'");
+    expect(main).toContain('prefer IPv4 enabled via /etc/gai.conf');
+    expect(main).not.toContain('HF_HUB_ENABLE_HF_TRANSFER');
+    expect(main).toContain('( { pip install');
+    expect(main).toContain('; wait $__PIP');
   });
 
   it('embeds preset smoke verify when smoke=true', () => {
@@ -416,6 +562,7 @@ describe('FinetuneGateway.compose', () => {
     process.env.B2_APPLICATION_KEY = 'sk_test';
     process.env.B2_ENDPOINT = 'https://acct.r2.cloudflarestorage.com';
     process.env.B2_REGION = 'auto';
+    delete process.env.AIGW_STORAGE_REMOTE;
     try {
       const gw = makeGateway();
       const { main } = gw.compose({
@@ -425,12 +572,82 @@ describe('FinetuneGateway.compose', () => {
       // rclone remote env injected
       expect(main).toContain('RCLONE_CONFIG_R2AIGW_ACCESS_KEY_ID');
       expect(main).toContain('RCLONE_CONFIG_R2AIGW_PROVIDER=Cloudflare');
+      expect(main).toContain('export RCLONE_BIND=0.0.0.0');
+      expect(main).toContain('export RCLONE_CONNECT_TIMEOUT=10s');
+      expect(main).toContain('export RCLONE_LOW_LEVEL_RETRIES=20');
+      expect(main).toContain('rclone_remote=r2aigw');
       // restore before train
       expect(main).toContain('rclone copy r2aigw:tts-ptbr-training/jobs/my-run/checkpoints /workspace/checkpoints');
       // resume forced
       expect(main).toContain('--resume /workspace/checkpoints');
+      expect(main).toContain('[r2] live sync a cada 180s');
+      expect(main).toContain('aigw_manifest.jsonl');
       // final backup after push
       expect(main).toContain('rclone sync /workspace/checkpoints r2aigw:tts-ptbr-training/jobs/my-run/checkpoints');
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('uses generic S3 provider for Backblaze B2 endpoints', () => {
+    const saved = { ...process.env };
+    process.env.B2_ACCOUNT_ID = 'ak_test';
+    process.env.B2_APPLICATION_KEY = 'sk_test';
+    process.env.B2_ENDPOINT = 'https://s3.us-east-005.backblazeb2.com';
+    process.env.B2_REGION = 'us-east-005';
+    try {
+      const gw = makeGateway();
+      const { main } = gw.compose({
+        type: 'flow-matching-tts', dataset: 'hf://foo/bar',
+        r2Bucket: 'tts-ptbr-training', r2Prefix: 'jobs/my-run', resumeFromR2: true,
+      });
+      expect(main).toContain('RCLONE_CONFIG_B2AIGW_PROVIDER=Other');
+      expect(main).toContain("RCLONE_CONFIG_B2AIGW_ENDPOINT='https://s3.us-east-005.backblazeb2.com'");
+      expect(main).toContain('export RCLONE_BIND=0.0.0.0');
+      expect(main).toContain("getent ahosts 's3.us-east-005.backblazeb2.com'");
+      expect(main).toContain('rclone copy b2aigw:tts-ptbr-training/jobs/my-run/checkpoints /workspace/checkpoints');
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('derives Backblaze B2 endpoint from B2_REGION when B2 key id aliases are used', () => {
+    const saved = { ...process.env };
+    delete process.env.B2_ACCOUNT_ID;
+    delete process.env.B2_ENDPOINT;
+    process.env.B2_KEY_ID = 'b2_key_id_test';
+    process.env.B2_APPLICATION_KEY = 'sk_test';
+    process.env.B2_REGION = 'eu-central-003';
+    try {
+      const gw = makeGateway();
+      const { main } = gw.compose({
+        type: 'flow-matching-tts', dataset: 'hf://foo/bar',
+        r2Bucket: 'tts-ptbr-training', r2Prefix: 'jobs/my-run', resumeFromR2: true,
+      });
+      expect(main).toContain('RCLONE_CONFIG_B2AIGW_PROVIDER=Other');
+      expect(main).toContain("RCLONE_CONFIG_B2AIGW_ENDPOINT='https://s3.eu-central-003.backblazeb2.com'");
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('auto-restores from R2 by default when r2Bucket is set', () => {
+    const saved = { ...process.env };
+    process.env.B2_ACCOUNT_ID = 'ak_test';
+    process.env.B2_APPLICATION_KEY = 'sk_test';
+    process.env.B2_ENDPOINT = 'https://acct.r2.cloudflarestorage.com';
+    try {
+      const gw = makeGateway();
+      const { main } = gw.compose({
+        type: 'flow-matching-tts',
+        dataset: 'hf://foo/bar',
+        r2Bucket: 'tts-ptbr-training',
+        r2Prefix: 'jobs/auto',
+        r2SyncIntervalSec: 30,
+      });
+      expect(main).toContain('[r2] checando checkpoints para resume');
+      expect(main).toContain('--resume /workspace/checkpoints');
+      expect(main).toContain('[r2] live sync a cada 30s');
     } finally {
       process.env = saved;
     }
@@ -510,5 +727,113 @@ describe('FinetuneGateway.run', () => {
     expect(runner.calls.length).toBe(1);
     expect(store.loadAll().length).toBe(1);
     expect(store.loadLast()?.spec.type).toBe('flow-matching-tts');
+  });
+
+  it('passes operational runtime knobs through to the job runner', async () => {
+    const runner = new MockRunner();
+    const gw = new FinetuneGateway({
+      stateStore: new InMemoryFinetuneState(),
+      hfToken: new MockHf(),
+      jobRunner: runner,
+      probe: new MockProbe(),
+      log: silentLog,
+    });
+    await gw.run({
+      type: 'flow-matching-tts',
+      dataset: 'hf://foo/bar',
+      timeoutMin: 12,
+      bootTimeoutMin: 4,
+      bootTimeoutSec: 90,
+      raceCount: 2,
+      offerRaceCount: 1,
+      parallelSlot: 'slot-a',
+      storageGb: 80,
+      pullEveryMin: 0,
+      stallMin: 5,
+      pullExclude: ['dataset-cache/'],
+    });
+    expect(runner.calls[0]).toMatchObject({
+      timeoutMin: 12,
+      bootTimeoutMin: 4,
+      bootTimeoutSec: 90,
+      raceCount: 2,
+      offerRaceCount: 1,
+      parallelSlot: 'slot-a',
+      storageGb: 80,
+      pullEveryMin: 0,
+      stallMin: 5,
+      pullExclude: ['dataset-cache/'],
+    });
+  });
+});
+
+// ─── HTTP job log/status helpers ───────────────────────────────────────
+
+describe('fine-tune HTTP job status helpers', () => {
+  it('redacts R2 secrets and recognizes VUI-style checkpoints', () => {
+    const savedEnv = { ...process.env };
+    const dir = mkdtempSync(join(tmpdir(), 'finetune-job-'));
+    try {
+      delete process.env.AIGW_STORAGE_REMOTE;
+      delete process.env.B2_ENDPOINT;
+      delete process.env.R2_ENDPOINT;
+      const logPath = join(dir, 'job.log');
+      writeFileSync(logPath, [
+        "export RCLONE_CONFIG_R2AIGW_SECRET_ACCESS_KEY='super-secret'",
+        "export RCLONE_CONFIG_R2AIGW_ACCESS_KEY_ID='access-key'",
+        'Starting training: 2 steps',
+        '  saved /workspace/checkpoints/erinome_step2.pt',
+        '  job exit code: 0',
+      ].join('\n'));
+      const record = {
+        jobId: 'ft-test',
+        status: 'running' as const,
+        spec: { r2Bucket: 'tts-ptbr-training', r2Prefix: 'smoke/full-flow' },
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        endedAt: '2026-01-01T00:10:00.000Z',
+        pricePerHr: 0.6,
+        instanceId: 'inst-1',
+        specPath: join(dir, 'spec.json'),
+        logPath,
+        exitPath: join(dir, 'exit.json'),
+      };
+      const logs = readFinetuneJobLogs(record);
+      expect(logs).toContain('RCLONE_CONFIG_R2AIGW_SECRET_ACCESS_KEY=[redacted]');
+      expect(logs).toContain('RCLONE_CONFIG_R2AIGW_ACCESS_KEY_ID=[redacted]');
+      expect(logs).not.toContain('super-secret');
+      expect(logs).not.toContain('access-key');
+      const status = deriveFinetuneHttpStatus(record, logs);
+      expect(status.status).toBe('completed');
+      expect(status.checkpoints).toContain('erinome_step2.pt');
+      expect(status.r2CheckpointUrl).toBe('r2aigw:tts-ptbr-training/smoke/full-flow/checkpoints');
+      expect(status.elapsedSec).toBe(600);
+      expect(status.estimatedCostUsd).toBeCloseTo(0.1, 5);
+      expect(status.phasesSeen).toContain('training');
+    } finally {
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses configured B2 remote in derived checkpoint URLs', () => {
+    const savedEnv = { ...process.env };
+    try {
+      process.env.AIGW_STORAGE_REMOTE = 'b2aigw';
+      const status = deriveFinetuneHttpStatus({
+        jobId: 'ft-b2',
+        status: 'running' as const,
+        spec: { r2Bucket: 'omni-speech-dataset', r2Prefix: 'tts-ptbr-training/ckpts/run-1' },
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        specPath: '/tmp/spec.json',
+        logPath: '/tmp/job.log',
+        exitPath: '/tmp/exit.json',
+      }, 'Starting training');
+      expect(status.r2CheckpointUrl).toBe('b2aigw:omni-speech-dataset/tts-ptbr-training/ckpts/run-1/checkpoints');
+    } finally {
+      process.env = savedEnv;
+    }
   });
 });

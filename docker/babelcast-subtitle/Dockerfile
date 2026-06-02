@@ -39,6 +39,9 @@ RUN pip install --no-cache-dir \
     pip install --no-cache-dir \
     transformers>=4.48.0 \
     accelerate \
+    librosa \
+    soundfile \
+    python-multipart \
     sentencepiece \
     protobuf \
     uvicorn[standard] \

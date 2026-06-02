@@ -41,6 +41,23 @@ export interface PreflightDeps {
 
 const HF_API = 'https://huggingface.co/api';
 
+function storageHost(endpoint: string): string {
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return endpoint.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  }
+}
+
+function matchesExpectedStorageProvider(kind: string, expectedRaw: string): boolean {
+  const expected = expectedRaw.trim().toLowerCase();
+  if (!expected) return true;
+  if (['backblaze', 'b2', 'backblaze-b2'].includes(expected)) return kind === 'backblaze-b2';
+  if (['cloudflare', 'r2', 'cloudflare-r2'].includes(expected)) return kind === 'cloudflare-r2';
+  if (['s3', 's3-compatible', 'other'].includes(expected)) return kind === 's3-compatible';
+  return kind === expected;
+}
+
 /** `hf://owner/repo` (or `owner/repo`) → `owner/repo`; undefined passthrough. */
 function stripHf(ref?: string): string | undefined {
   if (!ref) return undefined;
@@ -161,15 +178,29 @@ export async function preflightChecks(
   if (opts.dataset?.startsWith('hf://') && preset?.manifest?.prepareScript && prepareDirective === 'auto') {
     checks.push(await checkDatasetPrepInput(opts.dataset, token, doFetch));
   }
-  // 5. R2 creds present when r2Bucket/resumeFromR2 set — FAIL (silent data loss)
+  // 5. Object-storage creds present when r2Bucket/resumeFromR2 set — FAIL (silent data loss)
   if (opts.r2Bucket || opts.resumeFromR2) {
-    const { hasCreds } = resolveR2Creds(env);
-    checks.push(hasCreds
-      ? { name: 'R2 credentials', status: 'ok', detail: 'present (B2_*/STORAGE_*)' }
-      : {
-          name: 'R2 credentials', status: 'fail',
-          detail: 'r2Bucket/resumeFromR2 set but no R2 creds (B2_ACCOUNT_ID/B2_APPLICATION_KEY/B2_ENDPOINT) — backup would silently no-op',
-        });
+    const { hasCreds, endpoint, providerKind, providerLabel } = resolveR2Creds(env);
+    const expectedProvider = env.AIGW_EXPECT_STORAGE_PROVIDER || '';
+    if (!hasCreds) {
+      checks.push({
+        name: 'object storage credentials',
+        status: 'fail',
+        detail: 'r2Bucket/resumeFromR2 set but no object-storage creds (Backblaze B2: B2_KEY_ID/B2_APPLICATION_KEY/B2_REGION or B2_ENDPOINT) — backup would silently no-op',
+      });
+    } else if (!matchesExpectedStorageProvider(providerKind, expectedProvider)) {
+      checks.push({
+        name: 'object storage credentials',
+        status: 'fail',
+        detail: `expected ${expectedProvider} storage, got ${providerLabel} (${storageHost(endpoint)})`,
+      });
+    } else {
+      checks.push({
+        name: 'object storage credentials',
+        status: 'ok',
+        detail: `present (${providerLabel}; ${storageHost(endpoint)})`,
+      });
+    }
   }
   // 6. Trainer script exists locally (custom runs / explicit script, no preset)
   if (opts.scriptPath && !preset) {

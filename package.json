@@ -19,6 +19,7 @@
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
     "dev": "bun scripts/dev.ts",
+    "process:audit": "bash scripts/process-audit.sh",
     "sync": "bash scripts/sync-pod.sh",
     "sync:watch": "bash scripts/sync-pod.sh --watch",
     "build": "NODE_OPTIONS='--max-old-space-size=4096' tsup",
@@ -87,7 +88,6 @@
     "zod": ">=3.20.0"
   },
   "devDependencies": {
-    "@aws-sdk/client-s3": "^3.1027.0",
     "@changesets/cli": "^2.30.0",
     "@eslint/js": "^9.20.0",
     "@playwright/test": "^1.59.1",
@@ -109,6 +109,7 @@
     "vitest": "^4.1.4"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1027.0",
     "@neondatabase/serverless": "^0.10.4",
     "@prisma/client": "^7.6.0",
     "context-mode": "^1.0.75",

@@ -170,6 +170,72 @@ const rep       = await gw.gpuReputation();   // host reputation scores
 
 ---
 
+## GPU Fine Tuning
+
+The SDK can describe a complete training job: quality Gate, R2 durable storage,
+Hugging Face checkpoint sync, and optional remote/checkpoint URLs.
+
+```typescript
+const job = await gw.startFinetune({
+  project: 'route2-cml-tts',
+  gpu: '5090',
+  steps: 8000,
+  lr: 5e-6,
+  gate: {
+    type: 'asr',
+    everySteps: 1000,
+    evalN: 8,
+    asrModel: 'base',
+    target: 0.55,
+    earlyStopPatience: 4,
+  },
+  r2: {
+    bucket: 'tts-ptbr-training',
+    checkpointDest: 'r2aigw:tts-ptbr-training/ckpts/cmlft-sharded-eval-lr5e6',
+    shardedRoot: 'r2aigw:tts-ptbr-training/datasets/cml-tts/pt-sharded-v1-full',
+    shardedManifest: 'r2aigw:tts-ptbr-training/datasets/cml-tts/pt-sharded-v1-full/all_manifest.jsonl',
+    baseCheckpoint: 'r2aigw:tts-ptbr-training/ckpts/v12/best.pt',
+    baseVocab: 'r2aigw:tts-ptbr-training/ckpts/v12/phon_vocab.json',
+    cacheDir: '/root/r2_shard_cache',
+    cacheMaxGb: 20,
+  },
+  huggingFace: {
+    repo: 'marcosremar2/gemma1b-tts-integration',
+    path: 'checkpoints/cmlft-sharded-eval-lr5e6',
+    intervalSec: 180,
+  },
+});
+
+const status = await gw.finetuneStatus(job.jobId);
+const logs = await gw.finetuneLogs({ jobId: job.jobId, tail: 200 });
+```
+
+Python mirrors the same shape:
+
+```python
+from gateway_sdk import GatewaySDK, FinetuneJobOptions, FinetuneGateConfig
+
+async with GatewaySDK(base_url="http://localhost:4000") as gw:
+    job = await gw.start_finetune(FinetuneJobOptions(
+        project="route2-cml-tts",
+        gpu="5090",
+        gate=FinetuneGateConfig(
+            type="asr",
+            every_steps=1000,
+            eval_n=8,
+            asr_model="base",
+            target=0.55,
+            early_stop_patience=4,
+        ),
+    ))
+    status = await gw.finetune_status(job.job_id)
+```
+
+`buildFinetuneSpec()` / `build_finetune_spec()` are available when you only want
+the normalized JSON payload for a job runner.
+
+---
+
 ## Configuration
 
 ```typescript

@@ -1,5 +1,5 @@
-// ── BabelCast Gateway — Cooldown & Credit-Block Persistence ─────────────────
-// Persists provider cooldown and credit-block state to ~/.babelcast/cooldowns.json
+// ── AI Gateway — Cooldown & Credit-Block Persistence ────────────────────────
+// Persists provider cooldown and credit-block state to ~/.ai-gateway/cooldowns.json
 // so they survive gateway restarts. Without this, a restarted gateway immediately
 // hammers providers that were previously failing or out of credits.
 
@@ -12,8 +12,9 @@ import { createLogger } from '../src/logger';
 
 const log = createLogger('cooldown-persistence');
 
-const BABELCAST_DIR = join(homedir(), '.babelcast');
-const COOLDOWNS_FILE = join(BABELCAST_DIR, 'cooldowns.json');
+const AI_GATEWAY_DIR = join(homedir(), '.ai-gateway');
+const COOLDOWNS_FILE = join(AI_GATEWAY_DIR, 'cooldowns.json');
+const LEGACY_COOLDOWNS_FILE = join(homedir(), '.babelcast', 'cooldowns.json');
 
 interface PersistedState {
   cooldowns: Record<string, { failures: number; windowStart: number; coolUntil: number }>;
@@ -27,8 +28,9 @@ interface PersistedState {
  */
 export function loadCooldownState(): void {
   try {
-    if (!existsSync(COOLDOWNS_FILE)) return;
-    const raw = readFileSync(COOLDOWNS_FILE, 'utf-8');
+    const filePath = existsSync(COOLDOWNS_FILE) ? COOLDOWNS_FILE : LEGACY_COOLDOWNS_FILE;
+    if (!existsSync(filePath)) return;
+    const raw = readFileSync(filePath, 'utf-8');
     const data = JSON.parse(raw) as PersistedState;
 
     // Reject if too old (>10 minutes — all cooldowns would have expired)
@@ -48,7 +50,7 @@ export function loadCooldownState(): void {
     }
 
     if (loaded > 0) {
-      log.log(`Loaded ${loaded} persisted entries from ${COOLDOWNS_FILE}`);
+      log.log(`Loaded ${loaded} persisted entries from ${filePath}`);
     }
   } catch (err) {
     log.warn('Failed to load persisted state:', err instanceof Error ? err.message : err);
@@ -70,7 +72,7 @@ export function saveCooldownState(): void {
     const totalEntries = Object.keys(data.cooldowns).length + Object.keys(data.creditBlocks).length;
     if (totalEntries === 0) return; // nothing to persist
 
-    mkdirSync(BABELCAST_DIR, { recursive: true });
+    mkdirSync(AI_GATEWAY_DIR, { recursive: true });
     writeFileSync(COOLDOWNS_FILE, JSON.stringify(data, null, 2));
     log.log(`Saved ${totalEntries} entries to ${COOLDOWNS_FILE}`);
   } catch (err) {

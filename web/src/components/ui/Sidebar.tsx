@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import { ChevronLeft, ChevronRight, BookOpen, Menu, X } from 'lucide-react';
+import { SETTINGS_APP_MARK, SETTINGS_APP_NAME } from '@/lib/branding';
 
 export interface SidebarItem {
   id: string;
@@ -84,7 +85,7 @@ export function Sidebar({ items, activeItem, onChange, health, error }: SidebarP
       {/* Logo / Brand */}
       <div className="flex items-center gap-3 px-4 h-14 border-b flex-shrink-0" style={{ borderColor: 'var(--color-border)' }}>
         <div className="w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center flex-shrink-0">
-          <span className="text-white font-bold text-sm">AI</span>
+          <span className="text-white font-bold text-sm">{SETTINGS_APP_MARK}</span>
         </div>
         {isMobile && (
           <button
@@ -98,7 +99,7 @@ export function Sidebar({ items, activeItem, onChange, health, error }: SidebarP
         )}
         {!collapsed && (
           <div className="min-w-0">
-            <h1 className="text-sm font-bold tracking-tight truncate">AI Gateway Settings</h1>
+            <h1 className="text-sm font-bold tracking-tight truncate">{SETTINGS_APP_NAME}</h1>
             <div
               className="flex items-center gap-1.5"
               title={

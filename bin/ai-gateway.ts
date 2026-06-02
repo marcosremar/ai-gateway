@@ -38,7 +38,7 @@ const VERSION = '0.1.0';
 
 // ── Config ────────────────────────────────────────────────────────────────
 
-const DEFAULT_URL = 'http://localhost:4000';
+const DEFAULT_URL = 'https://parle-ai-gateway.fly.dev';
 
 /**
  * Load `.env` from the current working directory (and walk up to git root) so
@@ -84,16 +84,19 @@ function loadCwdEnv(): void {
 
 function getConfig(): { url: string; key: string } {
   loadCwdEnv();
-  const url = process.env.AI_GATEWAY_URL || process.env.GATEWAY_URL || DEFAULT_URL;
+  const configuredUrl = process.env.AI_GATEWAY_URL || process.env.GATEWAY_URL;
+  const url = configuredUrl || DEFAULT_URL;
   // AIGW_APP_KEY is the per-app credential (preferred); the older names
   // remain accepted for back-compat with shared "operator" keys.
-  // GATEWAY_API_KEYS is the multi-key format "key:name,key:name" — extract the first key.
+  // GATEWAY_API_KEYS is the server's multi-key format "key:name,key:name".
+  // Prefer its first key over a loose GATEWAY_API_KEY from a service .env so
+  // the CLI can operate against the Fly gateway from this repo checkout.
   const multiKeys = process.env.GATEWAY_API_KEYS;
   const firstMultiKey = multiKeys ? multiKeys.split(',')[0]?.split(':')[0]?.trim() : '';
   const key = process.env.AIGW_APP_KEY
     || process.env.AI_GATEWAY_KEY
-    || process.env.GATEWAY_API_KEY
     || firstMultiKey
+    || process.env.GATEWAY_API_KEY
     || '';
   return { url, key };
 }
@@ -117,13 +120,13 @@ function isLocalUrl(url: string): boolean {
  * subsequent CLI commands. Use `ai-gateway server stop` to kill it.
  */
 async function ensureLocalServer(): Promise<void> {
-  const { url } = getConfig();
+  const { url, key } = getConfig();
   if (!isLocalUrl(url)) return; // production URL — never auto-start
 
   // Check if already running
   try {
-    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) });
-    if (res.ok) return; // already running
+    const res = await fetch(`${url}/health`, { headers: headers(key), signal: AbortSignal.timeout(2000) });
+    if (res.ok || res.status === 401 || res.status === 403) return; // already running
   } catch {
     // Not running — start it
   }
@@ -160,7 +163,7 @@ async function ensureLocalServer(): Promise<void> {
   for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 500));
     try {
-      const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(1000) });
+      const res = await fetch(`${url}/health`, { headers: headers(key), signal: AbortSignal.timeout(1000) });
       if (res.ok) {
         console.log(`Gateway started (pid ${child.pid})\n`);
         return;
@@ -168,7 +171,7 @@ async function ensureLocalServer(): Promise<void> {
     } catch { /* not ready yet */ }
   }
   console.error('Gateway failed to start within 10 seconds.');
-  console.error('Check logs or start manually: bun run serve.ts');
+  console.error('Check logs or start manually: bun run server/ws-server.ts');
   // Non-fatal: commands that don't need HTTP gateway (gpu finetune, gpu jobs) continue.
 }
 
@@ -665,7 +668,9 @@ async function cmdTTS(text: string, opts: { model?: string; voice?: string; outp
 
 async function cmdGpuStatus() {
   const { url, key } = getConfig();
-  const res = await fetch(`${url}/v1/gpu/status`, { headers: headers(key) });
+  const parallelSlot = process.env.AIGW_PARALLEL_SLOT || '';
+  const qs = parallelSlot ? `?parallelSlot=${encodeURIComponent(parallelSlot)}` : '';
+  const res = await fetch(`${url}/v1/gpu/status${qs}`, { headers: headers(key) });
   if (res.status === 404) {
     console.log('GPU endpoints not available on this gateway (proxy-only mode).');
     console.log('GPU management requires the full server (server/ws-server.ts).');
@@ -701,6 +706,15 @@ function currentOwner(): string {
   loadCwdEnv();
   if (process.env.AIGW_OWNER) return process.env.AIGW_OWNER;
   if (process.env.AIGW_APP_NAME) return process.env.AIGW_APP_NAME;
+  const { key } = getConfig();
+  const multiKeys = process.env.GATEWAY_API_KEYS || '';
+  if (key && multiKeys) {
+    for (const item of multiKeys.split(',')) {
+      const [entryKey, entryOwner] = item.split(':', 2).map(s => s.trim());
+      if (entryKey && entryOwner && entryKey === key) return entryOwner;
+    }
+  }
+  if (key && process.env.GATEWAY_API_KEY && key === process.env.GATEWAY_API_KEY) return 'default';
   return process.env.USER || process.env.LOGNAME || 'unknown';
 }
 
@@ -847,7 +861,9 @@ async function cmdGpuDeploy(opts: {
   for (let i = 0; i < 200; i++) {
     await new Promise(r => setTimeout(r, 3000));
     try {
-      const status = await fetchJSON(`${url}/v1/gpu/status`, { headers: headers(key) });
+      const parallelSlot = process.env.AIGW_PARALLEL_SLOT || '';
+      const qs = parallelSlot ? `?parallelSlot=${encodeURIComponent(parallelSlot)}` : '';
+      const status = await fetchJSON(`${url}/v1/gpu/status${qs}`, { headers: headers(key) });
       const phase = status.step || status.status || '?';
       const msg = status.message || '';
       const gpu = status.gpuType || '';
@@ -907,6 +923,10 @@ import {
   validateSpec,
   estimateCost,
   FinetuneGateway,
+  buildKokoroDatasetPlan,
+  formatKokoroDatasetPlan,
+  loadKokoroDatasetPhrases,
+  runKokoroDatasetFanout,
   FileFinetuneState,
   EnvHfTokenResolver,
   buildProbeCommand,
@@ -914,9 +934,20 @@ import {
   buildStatusResult,
   loadPreset,
   listPresets,
+  listProjects,
+  listFinetuneJobRecords,
+  loadLatestFinetuneJobRecord,
+  readFinetuneJobLogs,
+  deriveFinetuneHttpStatus,
   runNumericChecks,
   runCompare,
   preflightChecks,
+  buildFinetunePlan,
+  resolveVastSshAcquisitionPolicy,
+  formatProviderCooldown,
+  normalizeProviderName,
+  parseProviderList,
+  readActiveProviderCooldowns,
   BUNDLED_PLUGINS,
 } from '../src/modules/gpu-finetune';
 import type { PreflightResult } from '../src/modules/gpu-finetune';
@@ -1152,9 +1183,11 @@ async function cmdGpuWaitActive(opts: { timeout?: number }) {
   const startMs = Date.now();
   const deadline = startMs + timeoutSec * 1000;
   const { url, key } = getConfig();
+  const parallelSlot = process.env.AIGW_PARALLEL_SLOT || '';
+  const qs = parallelSlot ? `?parallelSlot=${encodeURIComponent(parallelSlot)}` : '';
   while (Date.now() < deadline) {
     try {
-      const data = await fetchJSON(`${url}/v1/gpu/status`, { headers: headers(key) });
+      const data = await fetchJSON(`${url}/v1/gpu/status${qs}`, { headers: headers(key) });
       const elapsed = Math.round((Date.now() - startMs) / 1000);
       if (data.status === 'ready') {
         process.stderr.write('\n');
@@ -1252,9 +1285,11 @@ async function cmdGpuTerminate(instanceId: string, opts: { provider?: string; de
       // see comment above — fail open
     }
   }
-  const body: Record<string, string> = {};
+  const body: Record<string, unknown> = {};
   if (opts.provider) body.provider = opts.provider;
   if (opts.deployId) body.deployId = opts.deployId;
+  if (opts.force) body.force = true;
+  if (process.env.AIGW_PARALLEL_SLOT) body.parallelSlot = process.env.AIGW_PARALLEL_SLOT;
   const res = await fetch(`${url}/v1/gpu/terminate`, {
     method: 'POST', headers: headers(key),
     body: JSON.stringify({ instanceId, ...body }),
@@ -1289,6 +1324,7 @@ interface GpuJobOpts {
   path?: string;
   main: string;
   gpu?: string;
+  region?: string;
   maxCost?: number;
   output?: string;
   timeoutMin?: number;
@@ -1307,14 +1343,25 @@ interface GpuJobOpts {
   abortOnDivergence?: boolean; // tail /workspace/.job.log for loss=X; abort if NaN/Inf or 5× initial
   gpuFallback?: boolean;      // walk cheaper-GPU ladder if primary unavailable @ maxCost
   bootTimeoutMin?: number;    // max wait for instance to reach "ready" before abandoning (default: timeoutMin)
+  bootTimeoutSec?: number;    // short SSH acquisition timeout; overrides bootTimeoutMin/adaptive when set
+  raceCount?: number;         // deploy-level parallel race count
+  offerRaceCount?: number;    // internal Vast offer race knob
+  strictFastBoot?: boolean;   // Vast strict/high-quality search; false allows broader SSH-only hosts
+  searchMode?: 'high_quality' | 'full';
+  allowUnverified?: boolean;
+  storageGb?: number;         // disk size override for remote instance
   provider?: string;          // pin a provider (e.g. 'vast') — passed to server as body.provider
+  providers?: string[];       // ordered provider allowlist; entries in cooldown are skipped before offer selection
+  parallelSlot?: string;      // per-app deploy slot; lets one app run many finetune workers concurrently
 }
 
 // Persist last job's instance info so subsequent jobs ssh/sync/pull/cleanup
 // can target it without arg-passing.
 function jobStatePath(): string {
   const home = process.env.HOME || '/tmp';
-  return join(home, '.babelcast', 'last_job.json');
+  const rawId = process.env.AIGW_JOB_STATE_ID || process.env.AIGW_PARALLEL_SLOT || '';
+  const safeId = rawId.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120);
+  return join(home, '.babelcast', safeId ? `last_job-${safeId}.json` : 'last_job.json');
 }
 function jobHistoryPath(): string {
   const home = process.env.HOME || '/tmp';
@@ -1333,6 +1380,40 @@ function appendJobHistory(entry: Record<string, unknown>): void {
     fs.appendFileSync(p, line);
   } catch { /* best effort */ }
 }
+
+function redactSecretsForLog(value: string): string {
+  const keys = [
+    'HF_TOKEN',
+    'WANDB_API_KEY',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'R2_ACCESS_KEY_ID',
+    'R2_SECRET_ACCESS_KEY',
+    'CLOUDFLARE_R2_ACCESS_KEY_ID',
+    'CLOUDFLARE_R2_SECRET_ACCESS_KEY',
+    'B2_ACCOUNT_ID',
+    'B2_APPLICATION_KEY',
+    'B2_APPLICATION_KEY_ID',
+    'B2_KEY_ID',
+    'STORAGE_ACCESS_KEY',
+    'STORAGE_SECRET_KEY',
+    'RCLONE_CONFIG_R2_ACCESS_KEY_ID',
+    'RCLONE_CONFIG_R2_SECRET_ACCESS_KEY',
+    'AIGW_APP_KEY',
+    'AI_GATEWAY_KEY',
+    'GATEWAY_API_KEY',
+    'OPENAI_API_KEY',
+  ];
+  let out = value;
+  for (const key of keys) {
+    out = out.replace(new RegExp(`\\b(${key})=(['"])[^'"]*\\2`, 'g'), `$1=$2[redacted]$2`);
+    out = out.replace(new RegExp(`\\b(${key})=([^\\s;&|]+)`, 'g'), `$1=[redacted]`);
+  }
+  out = out.replace(/\b(RCLONE_CONFIG_[A-Z0-9_]+_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY))=(['"])[^'"]*\2/g, '$1=$2[redacted]$2');
+  out = out.replace(/\b(RCLONE_CONFIG_[A-Z0-9_]+_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY))=([^\s;&|]+)/g, '$1=[redacted]');
+  return out.replace(/(Authorization:\s*Bearer\s+)[^\s'"]+/gi, '$1[redacted]');
+}
+
 function saveJobState(state: Record<string, unknown>): void {
   try {
     const p = jobStatePath();
@@ -1383,6 +1464,97 @@ function loadJobState(): Record<string, unknown> | null {
   } catch { return null; }
 }
 
+interface TerminateVerifiedResult {
+  ok: boolean;
+  gone: boolean;
+  attempts: number;
+  status?: number;
+  error?: string;
+}
+
+async function listGpuInstancesForVerify(url: string, key: string): Promise<any[]> {
+  const res = await fetch(`${url}/v1/gpu/list?probe=false`, {
+    headers: headers(key),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`list failed HTTP ${res.status}`);
+  const data: any = await res.json();
+  return Array.isArray(data) ? data : (Array.isArray(data.instances) ? data.instances : []);
+}
+
+function gpuInstanceMatches(inst: any, instanceId: string): boolean {
+  return [inst?.instanceId, inst?.podId, inst?.id].filter(Boolean).map(String).includes(String(instanceId));
+}
+
+async function waitForInstanceGone(
+  url: string,
+  key: string,
+  instanceId: string,
+  timeoutSec = 90,
+): Promise<{ gone: boolean; attempts: number; error?: string }> {
+  const deadline = Date.now() + timeoutSec * 1000;
+  let attempts = 0;
+  let lastError = '';
+  while (Date.now() < deadline) {
+    attempts++;
+    try {
+      const all = await listGpuInstancesForVerify(url, key);
+      if (!all.some((inst) => gpuInstanceMatches(inst, instanceId))) {
+        return { gone: true, attempts };
+      }
+    } catch (err) {
+      lastError = (err as Error).message;
+    }
+    await new Promise((resolve) => setTimeout(resolve, attempts <= 3 ? 3000 : 5000));
+  }
+  return { gone: false, attempts, ...(lastError ? { error: lastError } : {}) };
+}
+
+async function terminateGpuInstanceVerified(
+  url: string,
+  key: string,
+  body: Record<string, unknown>,
+  timeoutSec = 90,
+): Promise<TerminateVerifiedResult> {
+  const instanceId = String(body.instanceId || body.podId || '');
+  if (!instanceId && !body.deployId) {
+    return { ok: false, gone: false, attempts: 0, error: 'missing instanceId/deployId' };
+  }
+  let status = 0;
+  let error = '';
+  const sendTerminate = async () => {
+    const res = await fetch(`${url}/v1/gpu/terminate`, {
+      method: 'POST',
+      headers: headers(key),
+      body: JSON.stringify({ ...body, force: true }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    status = res.status;
+    if (!res.ok) error = (await res.text().catch(() => '')).slice(0, 300) || `HTTP ${res.status}`;
+    return res.ok;
+  };
+
+  const firstOk = await sendTerminate().catch((err) => {
+    error = (err as Error).message;
+    return false;
+  });
+  if (!firstOk) return { ok: false, gone: false, attempts: 0, status, error };
+  if (!instanceId) return { ok: true, gone: true, attempts: 0, status };
+
+  const firstWait = await waitForInstanceGone(url, key, instanceId, timeoutSec);
+  if (firstWait.gone) return { ok: true, gone: true, attempts: firstWait.attempts, status };
+
+  await sendTerminate().catch((err) => { error = (err as Error).message; return false; });
+  const secondWait = await waitForInstanceGone(url, key, instanceId, Math.max(30, Math.floor(timeoutSec / 2)));
+  return {
+    ok: secondWait.gone,
+    gone: secondWait.gone,
+    attempts: firstWait.attempts + secondWait.attempts,
+    status,
+    error: secondWait.error || firstWait.error || error || (secondWait.gone ? undefined : 'instance still listed after terminate'),
+  };
+}
+
 // ── Cumulative job budget (spot-resume) ──────────────────────────────────────
 // Spend is tracked per logical job (keyed by stable R2 prefix) so it survives
 // pod restarts AND fresh CLI invocations — per-pod accounting would reset to $0
@@ -1419,6 +1591,9 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     ['--pull-every', opts.pullEveryMin, 0, 1440],
     ['--stall-min', opts.stallMin, 0, 1440],
     ['--timeout-min', opts.timeoutMin, 1, 4320],
+    ['--boot-timeout-sec', opts.bootTimeoutSec, 30, 600],
+    ['--race-count', opts.raceCount, 1, 10],
+    ['--offer-race-count', opts.offerRaceCount, 1, 5],
   ];
   for (const [name, val, lo, hi] of numericChecks) {
     if (val !== undefined && (typeof val !== 'number' || !Number.isFinite(val) || val < lo || val > hi)) {
@@ -1431,6 +1606,39 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   const outputDir = opts.output || './job_output';
   const timeoutMin = opts.timeoutMin ?? 60;
   const image = opts.image || 'marcosremar/gpu-dev:latest';
+  const parallelSlot = opts.parallelSlot || process.env.AIGW_PARALLEL_SLOT || '';
+  const requestedProviders = parseProviderList(opts.provider, opts.providers);
+  const activeCooldowns = readActiveProviderCooldowns();
+  const coolingProviders = new Set(Object.keys(activeCooldowns));
+  const activeCooldownList = Object.values(activeCooldowns).sort((a, b) => b.remainSec - a.remainSec);
+  if (activeCooldownList.length > 0) {
+    // Cooldowns are persisted by the gateway when providers fail repeatedly.
+    // Surface them before offer lookup so a batch launcher can see that the
+    // provider is intentionally paused instead of blindly retrying into the
+    // same block and extending the outage.
+    console.error(
+      `  ${c.yellow}[cooldown]${c.reset} detected from ~/.ai-gateway/cooldowns.json: ` +
+      activeCooldownList.map(formatProviderCooldown).join(', '),
+    );
+  }
+  const skippedRequestedProviders = requestedProviders.filter((p) => activeCooldowns[p]);
+  const eligibleRequestedProviders = requestedProviders.filter((p) => !activeCooldowns[p]);
+  if (skippedRequestedProviders.length > 0) {
+    console.error(
+      `  ${c.yellow}[cooldown]${c.reset} skipping ` +
+      skippedRequestedProviders.map((p) => formatProviderCooldown(activeCooldowns[p])).join(', '),
+    );
+  }
+  if (requestedProviders.length > 0 && eligibleRequestedProviders.length === 0) {
+    const details = requestedProviders
+      .map((p) => activeCooldowns[p] ? formatProviderCooldown(activeCooldowns[p]) : p)
+      .join(', ');
+    console.error(`All requested provider(s) are in cooldown: ${details}. Retry after the earliest cooldown expires.`);
+    process.exit(1);
+  }
+  const statusEndpoint = parallelSlot
+    ? `${url}/v1/gpu/status?parallelSlot=${encodeURIComponent(parallelSlot)}`
+    : `${url}/v1/gpu/status`;
 
   // Cheaper-GPU fallback ladder (--gpu-fallback). Used when primary unavailable
   // OR over budget. Order = preferred → cheaper alternatives by VRAM/perf class.
@@ -1449,7 +1657,9 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   // Don't pass gpuTypes — server expects exact "NVIDIA GeForce RTX 4090" string,
   // and we want substring matching. Fetch unfiltered + filter client-side.
   console.log(`${c.cyan}[1/6]${c.reset} Finding cheapest GPU (filter=${gpuFilter}, max=$${maxCost}/h)...`);
-  const offerRes = await fetch(`${url}/v1/gpu/offers?limit=100`, {
+  const offerParams = new URLSearchParams({ limit: '500' });
+  if (opts.region) offerParams.set('region', opts.region);
+  const offerRes = await fetch(`${url}/v1/gpu/offers?${offerParams.toString()}`, {
     headers: headers(key),
   });
   if (!offerRes.ok) {
@@ -1457,7 +1667,19 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     process.exit(1);
   }
   const offerData = await offerRes.json();
-  const offers: Array<Record<string, unknown>> = offerData.offers ?? [];
+  const allOffers: Array<Record<string, unknown>> = offerData.offers ?? [];
+  const providerAllowed = (provider: unknown): boolean => {
+    const name = normalizeProviderName(String(provider ?? ''));
+    if (!name) return false;
+    if (eligibleRequestedProviders.length > 0) return eligibleRequestedProviders.includes(name);
+    return !coolingProviders.has(name);
+  };
+  const offers = allOffers.filter((o) => providerAllowed(o.provider));
+  if (requestedProviders.length > 0) {
+    console.log(`  provider order: ${eligibleRequestedProviders.join(' → ')} (${offers.length}/${allOffers.length} offers after cooldown filter)`);
+  } else if (coolingProviders.size > 0) {
+    console.log(`  provider cooldown filter: ${offers.length}/${allOffers.length} offers remain`);
+  }
   // Server emits `pricePerHr` (camelCase). Older builds called it `priceHr` —
   // accept both. GPU name is `gpuName` (display) or `gpuType` (raw).
   const priceOf = (o: Record<string, unknown>): number => {
@@ -1494,6 +1716,11 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   // ALL modes obey the maxCost price ceiling first — so "fast" can never pick
   // an absurdly expensive GPU; it only prefers faster-booting hosts UNDER the cap.
   const selectMode = ((opts.selectMode as string) ?? 'balanced') as 'cheapest' | 'balanced' | 'fast';
+  const providerPriority = (o: Record<string, unknown>): number => {
+    if (eligibleRequestedProviders.length === 0) return 0;
+    const idx = eligibleRequestedProviders.indexOf(normalizeProviderName(String(o.provider ?? '')));
+    return idx >= 0 ? idx : Number.MAX_SAFE_INTEGER;
+  };
   const qualityOf = (o: Record<string, unknown>): number => {
     const rel = Number(o.reliability2 ?? o.reliability ?? 0.9);   // 0-1
     const inet = Number(o.inetDown ?? o.inet_down ?? 0);          // Mbps
@@ -1505,6 +1732,8 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   const affordable = matched
     .filter((o) => priceOf(o) <= maxCost)   // price ceiling = "not absurd" guard
     .sort((a, b) => {
+      const dp = providerPriority(a) - providerPriority(b);
+      if (dp !== 0) return dp;
       if (selectMode === 'cheapest') return priceOf(a) - priceOf(b);
       if (selectMode === 'fast') {
         const dq = qualityOf(b) - qualityOf(a);            // fastest/most-reliable first
@@ -1515,7 +1744,7 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     });
   if (affordable.length === 0) {
     console.error(`No '${gpuFilter}' offers within $${maxCost}/h.${fallbackOn ? ` Fallback chain [${tryList.join('→')}] also empty.` : ''} ` +
-                  `Pool: ${offers.length} total, ${matched.length} match '${usedFilter}'.`);
+                  `Pool: ${offers.length} eligible${requestedProviders.length > 0 ? ` for providers '${eligibleRequestedProviders.join(',')}'` : ''}, ${matched.length} match '${usedFilter}'.`);
     if (matched.length > 0) {
       const cheapest = [...matched].sort((a, b) => priceOf(a) - priceOf(b)).slice(0, 3);
       console.error(`Cheapest matching:`);
@@ -1526,6 +1755,15 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   const pick = affordable[0];
   const pickPrice = priceOf(pick);
   const pickName = gpuName(pick);
+  const acquisitionPolicy = resolveVastSshAcquisitionPolicy({
+    provider: String(opts.provider || pick.provider || ''),
+    gpuFilter,
+    gpuName: pickName,
+    requestedBootTimeoutSec: opts.bootTimeoutSec,
+    requestedOfferRaceCount: opts.offerRaceCount,
+    env: process.env,
+  });
+  const requestedBootTimeoutSec = opts.bootTimeoutSec ?? acquisitionPolicy.bootTimeoutSec;
   console.log(`  picked: ${pickName} @ $${pickPrice.toFixed(3)}/h on ${pick.provider} (mode=${selectMode})`);
 
   if (opts.dryRun) {
@@ -1537,9 +1775,15 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     console.log(`  price:      $${pickPrice.toFixed(3)}/h`);
     console.log(`  image:      ${image}`);
     console.log(`  upload:     ${opts.path ? opts.path : `git clone ${opts.repo}`}`);
-    console.log(`  main:       ${opts.main.slice(0, 100)}${opts.main.length > 100 ? '...' : ''}`);
+    const safeMain = redactSecretsForLog(opts.main);
+    console.log(`  main:       ${safeMain.slice(0, 100)}${safeMain.length > 100 ? '...' : ''}`);
     console.log(`  output:     ${outputDir}`);
     console.log(`  timeout:    ${timeoutMin}min  → projected MAX cost: $${projHi}`);
+    if (acquisitionPolicy.enabled) {
+      const mode = acquisitionPolicy.offerRaceCount > 1 ? `fanout×${acquisitionPolicy.offerRaceCount}` : 'serial';
+      console.log(`  acquire:    ${acquisitionPolicy.reason} ${mode}, ssh timeout=${acquisitionPolicy.bootTimeoutSec}s`);
+    }
+    if (typeof opts.maxSpend === 'number') console.log(`  max-spend:  $${opts.maxSpend.toFixed(2)} hard cap`);
     console.log(`  pull-every: ${opts.pullEveryMin === undefined ? 10 : opts.pullEveryMin}min`);
     console.log(`\nRe-run without --dry-run to actually deploy.`);
     process.exit(0);
@@ -1574,21 +1818,48 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
       dockerImage: image,
       gpuTypes: [pickName],
     };
+    const selectedProvider = String(opts.provider || pick.provider || '');
     if (opts.env) deployBody.env = opts.env;
-    if (opts.provider) deployBody.provider = opts.provider;  // pin provider (server honors body.provider)
+    if (selectedProvider) deployBody.provider = selectedProvider;  // pin selected offer provider
+    if (opts.region) deployBody.region = opts.region;
+    if (parallelSlot) deployBody.parallelSlot = parallelSlot;
     deployBody.interruptible = opts.preferSpot === true;
-    deployBody.strictFastBoot = true;  // reliability >= 0.97 filter for finetune jobs
+    if (typeof opts.raceCount === 'number') deployBody.raceCount = opts.raceCount;
+    deployBody.strictFastBoot = opts.strictFastBoot === false ? false : true;  // reliability >= 0.97 filter by default
+    if (opts.searchMode) deployBody.searchMode = opts.searchMode;
+    if (opts.allowUnverified === true) deployBody.allowUnverified = true;
+    deployBody.maxCostUsd = maxCost;   // server-side hourly price guard
+    const allowVastProxy = process.env.AIGW_VAST_ALLOW_PROXY === '1'
+      || process.env.AIGW_VAST_REQUIRE_DIRECT === '0';
+    if (selectedProvider.toLowerCase() === 'vast') {
+      deployBody.requireDirectPort = !allowVastProxy; // direct is safer, proxy restores older Vast acquisition behavior
+    }
+    deployBody.offerRaceCount = acquisitionPolicy.offerRaceCount;
+    if (acquisitionPolicy.enabled) {
+      const mode = acquisitionPolicy.offerRaceCount > 1 ? `fanout×${acquisitionPolicy.offerRaceCount}` : 'serial';
+      console.log(`  ${c.yellow}[vast]${c.reset} SSH acquisition ${mode} (timeout=${acquisitionPolicy.bootTimeoutSec}s, ${allowVastProxy ? 'direct or proxy SSH' : 'direct SSH only'})`);
+    }
     // Fix #2: pin a sane disk so we don't inherit the image-estimate's ×3 → ~100GB
     // floor that excludes most consumer 4090s. 40GB fits the MOSS finetune; callers
     // can override with --storage.
     deployBody.storageGb = opts.storageGb ?? 40;
     deployBody.finetune = true;        // protect from autoscaler cancel-and-redeploy
+    if (requestedBootTimeoutSec) {
+      // The CLI polls with this timeout too, but the server-side SSH readiness
+      // poll is what creates/cleans the billable instance. Forward the same
+      // value so a caller asking for 420s does not still get cut off by the
+      // server's default SSH cap.
+      deployBody.bootTimeoutSec = requestedBootTimeoutSec;
+    }
     // Finetune deploys a bare compute image (e.g. nvidia/cuda) with NO HTTP /health
     // endpoint — the trainer is driven over SSH, not served. Tell the gateway to gate
     // readiness on TCP :22 instead of polling /health (which would app_error on a
     // bare image and abort the deploy before the SSH upload/train phase).
     deployBody.readinessProbe = 'ssh';
-    deployBody.label = `${currentOwner()}/job-${Date.now()}`;
+    const jobLabelId = (process.env.AIGW_JOB_STATE_ID || process.env.AIGW_PARALLEL_SLOT || String(Date.now()))
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .slice(0, 96);
+    deployBody.label = `${currentOwner()}/job-${jobLabelId}`;
     const depRes = await fetch(`${url}/v1/gpu/deploy`, {
       method: 'POST', headers: headers(key), body: JSON.stringify(deployBody),
     });
@@ -1611,14 +1882,18 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     // adaptive value (median×1.2 of recent boots, clamped [3min, ceiling]) wins
     // once there's history, else we fall back to the caller's value. This lets
     // the finetune's fixed 10-min cap still benefit from adaptive shortening.
+    const bootTimeoutSec = requestedBootTimeoutSec;
     const bootCeilingMin = opts.bootTimeoutMin ?? timeoutMin;
-    const bootTimeoutMin = adaptiveBootTimeoutMin(bootKey, bootCeilingMin);
-    const adaptiveNote = bootTimeoutMin < bootCeilingMin ? ' (adaptive: median×1.2)' : '';
-    console.log(`${c.cyan}[3/6]${c.reset} Waiting for instance ready (timeout=${bootTimeoutMin}min${adaptiveNote})...`);
+    const bootTimeoutMin = bootTimeoutSec ? undefined : adaptiveBootTimeoutMin(bootKey, bootCeilingMin);
+    const adaptiveNote = !bootTimeoutSec && bootTimeoutMin! < bootCeilingMin ? ' (adaptive: median×1.2)' : '';
+    const bootTimeoutMs = bootTimeoutSec ? bootTimeoutSec * 1000 : bootTimeoutMin! * 60_000;
+    const bootTimeoutLabel = bootTimeoutSec ? `${bootTimeoutSec}s` : `${bootTimeoutMin}min${adaptiveNote}`;
+    console.log(`${c.cyan}[3/6]${c.reset} Waiting for instance ready (timeout=${bootTimeoutLabel})...`);
     const bootStart = Date.now();
-    const deadline = bootStart + bootTimeoutMin * 60_000;
+    const deadline = bootStart + bootTimeoutMs;
+    let idleAfterDeployPolls = 0;
   while (Date.now() < deadline) {
-    const stRes = await fetch(`${url}/v1/gpu/status`, { headers: headers(key) });
+    const stRes = await fetch(statusEndpoint, { headers: headers(key) });
     if (stRes.ok) {
       const st = await stRes.json();
       const phase = (st.phase || '').toString();
@@ -1627,7 +1902,7 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
       const stDeployId = st.deployId || st.podId;
       const deployIdMatches = !deployId || !stDeployId || stDeployId === deployId ||
         String(stDeployId).includes(deployId.replace('deploy-', ''));
-      if ((phase === 'ready' || st.gpuHealthy === true || st.sshHost) && deployIdMatches) {
+      if ((phase === 'ready' || st.status === 'ready' || st.gpuHealthy === true) && deployIdMatches) {
         info = st;
         const bootSec = (Date.now() - bootStart) / 1000;
         recordBootTime(bootKey, bootSec); // feed the adaptive timeout for next runs
@@ -1640,9 +1915,22 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
         console.log();
         process.stderr.write(`${c.yellow}⚠ deploy errored server-side (${st.error || st.message || 'unknown'}) — abandoning${c.reset}\n`);
         await fetch(`${url}/v1/gpu/terminate`, {
-          method: 'POST', headers: headers(key), body: JSON.stringify({ deployId }),
+          method: 'POST', headers: headers(key), body: JSON.stringify({ deployId, provider: pick.provider, force: true }),
         }).catch(() => {});
         throw new Error(`deploy errored: ${st.error || st.message || 'unknown'}`);
+      }
+      if (deployIdMatches && (phase === 'idle' || st.status === 'idle') && !st.sshHost) {
+        idleAfterDeployPolls++;
+        if (idleAfterDeployPolls >= 2) {
+          console.log();
+          process.stderr.write(`${c.yellow}⚠ deploy returned to idle before SSH became available — abandoning${c.reset}\n`);
+          await fetch(`${url}/v1/gpu/terminate`, {
+            method: 'POST', headers: headers(key), body: JSON.stringify({ deployId, provider: pick.provider, force: true }),
+          }).catch(() => {});
+          throw new Error(`deploy returned to idle before SSH became available`);
+        }
+      } else {
+        idleAfterDeployPolls = 0;
       }
       process.stdout.write(`\r  ${phase}...                    `);
     }
@@ -1650,21 +1938,71 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
   }
   console.log();
   if (!info) {
-    process.stderr.write(`${c.yellow}⚠ instance boot timed out after ${bootTimeoutMin}min — terminating and trying new instance${c.reset}\n`);
+    process.stderr.write(`${c.yellow}⚠ instance boot timed out after ${bootTimeoutLabel} — terminating and trying new instance${c.reset}\n`);
     await fetch(`${url}/v1/gpu/terminate`, {
       method: 'POST', headers: headers(key),
-      body: JSON.stringify({ deployId }),
+      body: JSON.stringify({ deployId, provider: pick.provider, force: true }),
     });
-    throw new Error(`instance boot timed out after ${bootTimeoutMin}min`);
+    throw new Error(`instance boot timed out after ${bootTimeoutLabel}`);
   }
   } // end if (!info) — close reuse skip block
 
-  const sshHost = info.sshHost as string;
-  const sshPort = info.sshPort as number;
+  let sshHost = String(info.sshHost || '');
+  let sshPort = Number(info.sshPort || 0);
   const instanceId = (info.instanceId || info.podId) as string;
-  const sshOpts = ['-p', String(sshPort), '-o', 'StrictHostKeyChecking=accept-new',
-                   '-o', 'ConnectTimeout=10', '-o', 'LogLevel=ERROR',
-                   '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=8'];
+  const buildSshOpts = (port: number) => ['-p', String(port), '-o', 'StrictHostKeyChecking=accept-new',
+                                          '-o', 'ConnectTimeout=10', '-o', 'LogLevel=ERROR',
+                                          '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=8'];
+  let sshOpts = buildSshOpts(sshPort);
+  const sameDeploy = (st: Record<string, unknown>) => {
+    const stDeployId = String(st.deployId || st.podId || '');
+    return !deployId || !stDeployId || stDeployId === deployId || stDeployId.includes(deployId.replace('deploy-', ''));
+  };
+  const refreshSshTarget = async (label: string): Promise<boolean> => {
+    const stRes = await fetch(statusEndpoint, { headers: headers(key) }).catch(() => null);
+    if (!stRes?.ok) return false;
+    const st = await stRes.json().catch(() => null) as Record<string, unknown> | null;
+    if (!st || !sameDeploy(st)) return false;
+    const nextHost = String(st.sshHost || '');
+    const nextPort = Number(st.sshPort || 0);
+    if (!nextHost || !nextPort || (nextHost === sshHost && nextPort === sshPort)) return false;
+    const prev = `${sshHost || 'n/a'}:${sshPort || 'n/a'}`;
+    sshHost = nextHost;
+    sshPort = nextPort;
+    sshOpts = buildSshOpts(sshPort);
+    console.log(`  ssh target refreshed (${label}): ${prev} → ${sshHost}:${sshPort}`);
+    return true;
+  };
+  const probeSsh = (): boolean => {
+    if (!sshHost || !sshPort) return false;
+    const r = spawnSync('ssh', [...sshOpts, `root@${sshHost}`, 'true'], { stdio: 'ignore', timeout: 20_000 });
+    return r.status === 0;
+  };
+  const waitForUsableSsh = async (): Promise<void> => {
+    const deadline = Date.now() + 180_000;
+    let attempt = 0;
+    while (Date.now() < deadline) {
+      attempt++;
+      await refreshSshTarget('pre-rsync');
+      if (probeSsh()) {
+        if (attempt > 1) console.log(`  ssh usable: ${sshHost}:${sshPort}`);
+        return;
+      }
+      process.stderr.write(`  waiting for usable SSH (${sshHost || 'n/a'}:${sshPort || 'n/a'}, attempt ${attempt})...\n`);
+      await new Promise((r) => setTimeout(r, 10_000));
+    }
+    throw new Error(`SSH not usable after deploy (${sshHost || 'n/a'}:${sshPort || 'n/a'})`);
+  };
+  try {
+    await waitForUsableSsh();
+  } catch (err) {
+    await fetch(`${url}/v1/gpu/terminate`, {
+      method: 'POST',
+      headers: headers(key),
+      body: JSON.stringify({ instanceId, deployId, provider: pick.provider, force: true }),
+    }).catch(() => {});
+    throw err;
+  }
 
   // Persist instance info so jobs ssh/sync/pull/cleanup can target it.
   saveJobState({
@@ -1672,7 +2010,8 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     localPath: opts.path ? resolve(opts.path) : null,
     repo: opts.repo || null,
     output: resolve(outputDir),
-    main: opts.main,
+    main: redactSecretsForLog(opts.main),
+    parallelSlot: parallelSlot || null,
     pricePerHr: pickPrice,
     provider: pick.provider,
     gpuType: pickName,
@@ -1715,7 +2054,13 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
         if (upRes.status === 0) { rsyncOk = true; break; }
         const stderr = upRes.stderr?.toString() ?? '';
         const refused = stderr.includes('Connection refused') || stderr.includes('connect to host');
-        if (refused) rsyncRefusedStreak++; else rsyncRefusedStreak = 0;
+        if (refused) {
+          const before = `${sshHost}:${sshPort}`;
+          await refreshSshTarget('rsync retry');
+          rsyncRefusedStreak = `${sshHost}:${sshPort}` === before ? rsyncRefusedStreak + 1 : 0;
+        } else {
+          rsyncRefusedStreak = 0;
+        }
         // 5 consecutive "Connection refused" = proxy port is dead, fail fast
         if (rsyncRefusedStreak >= 5) {
           process.stderr.write(`  rsync: SSH port ${sshPort} consistently refused — instance SSH proxy dead\n`);
@@ -1730,7 +2075,7 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     }
 
     const pullEveryMin = opts.pullEveryMin === undefined ? 10 : opts.pullEveryMin;
-    console.log(`${c.cyan}[5/6]${c.reset} Running job: ${opts.main}`);
+    console.log(`${c.cyan}[5/6]${c.reset} Running job: ${redactSecretsForLog(opts.main)}`);
     if (pullEveryMin > 0) {
       console.log(`  (mid-run checkpoint pull every ${pullEveryMin}min → ${outputDir})`);
     }
@@ -1956,23 +2301,34 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
       console.log(`  ${c.dim}(state saved to ~/.babelcast/last_job.json)${c.reset}`);
     } else {
       console.log(`${c.cyan}[cleanup]${c.reset} Terminating ${instanceId}...`);
-      const termRes = await fetch(`${url}/v1/gpu/terminate`, {
-        method: 'POST', headers: headers(key),
-        body: JSON.stringify({ instanceId, deployId }),
+      const term = await terminateGpuInstanceVerified(url, key, {
+        instanceId,
+        deployId,
+        provider: pick.provider,
+        ...(parallelSlot ? { parallelSlot } : {}),
       });
-      if (termRes.ok) console.log(`  ${c.green}✓${c.reset} terminated`);
-      else console.error(`  ${c.red}terminate may have failed${c.reset}`);
-      // Wipe state since instance is gone, append final entry to history
+      if (term.ok && term.gone) {
+        console.log(`  ${c.green}✓${c.reset} terminated (verified after ${term.attempts} list check${term.attempts === 1 ? '' : 's'})`);
+      } else {
+        console.error(`  ${c.red}terminate verification failed:${c.reset} ${term.error || `HTTP ${term.status || '?'}`}`);
+        console.error(`  ${c.yellow}State kept so cleanup can be retried: ai-gateway gpu jobs cleanup --force${c.reset}`);
+        exitCode = exitCode || 1;
+      }
+      // Append final entry to history. Wipe state only after verified cleanup.
       const elapsedH = (Date.now() - t0) / 3_600_000;
       appendJobHistory({
         instanceId, deployId, gpuType: pickName, provider: pick.provider,
         pricePerHr: pickPrice, elapsedH, spentUsd: elapsedH * pickPrice,
         success: exitCode === 0, budgetExceeded,
+        cleanupVerified: term.ok && term.gone,
+        ...(term.error ? { cleanupError: term.error } : {}),
         startedAt: new Date(t0).toISOString(),
         endedAt: new Date().toISOString(),
-        main: opts.main.slice(0, 200),
+        main: redactSecretsForLog(opts.main).slice(0, 200),
       });
-      try { unlinkSync(jobStatePath()); } catch { /* ignore */ }
+      if (term.ok && term.gone) {
+        try { unlinkSync(jobStatePath()); } catch { /* ignore */ }
+      }
     }
   }
 
@@ -2044,15 +2400,18 @@ async function cmdGpuJobsCleanup(force: boolean): Promise<void> {
     return;
   }
   console.log(`Terminating ${s.instanceId}...`);
-  const r = await fetch(`${url}/v1/gpu/terminate`, {
-    method: 'POST', headers: headers(key),
-    body: JSON.stringify({ instanceId: s.instanceId, deployId: s.deployId }),
+  const r = await terminateGpuInstanceVerified(url, key, {
+    instanceId: s.instanceId,
+    deployId: s.deployId,
+    provider: s.provider,
+    ...(s.parallelSlot ? { parallelSlot: s.parallelSlot } : {}),
   });
-  if (r.ok) {
-    console.log(`  ${c.green}✓${c.reset} terminated`);
+  if (r.ok && r.gone) {
+    console.log(`  ${c.green}✓${c.reset} terminated (verified after ${r.attempts} list check${r.attempts === 1 ? '' : 's'})`);
     try { unlinkSync(jobStatePath()); } catch { /* ignore */ }
   } else {
-    console.error(`  ${c.red}terminate may have failed (HTTP ${r.status})${c.reset}`);
+    console.error(`  ${c.red}terminate verification failed:${c.reset} ${r.error || `HTTP ${r.status || '?'}`}`);
+    console.error(`  ${c.yellow}State kept; retry cleanup or inspect provider manually.${c.reset}`);
   }
 }
 
@@ -2109,6 +2468,16 @@ interface GpuFinetuneOpts {
   maxCost?: number;
   maxSpend?: number;
   output?: string;
+  timeoutMin?: number;
+  bootTimeoutMin?: number;
+  bootTimeoutSec?: number;
+  raceCount?: number;         // deploy-level parallel race count
+  offerRaceCount?: number;    // Vast internal offer fanout; 1 = serial
+  strictFastBoot?: boolean;
+  searchMode?: 'high_quality' | 'full';
+  allowUnverified?: boolean;
+  parallelSlot?: string;      // per-app deploy slot for concurrent workers
+  storageGb?: number;         // remote instance storage size override
   pushToHf?: string;
   autoResume?: boolean;
   preferSpot?: boolean;
@@ -2122,16 +2491,27 @@ interface GpuFinetuneOpts {
   r2BaseCkpt?: string;          // base Route2 checkpoint remote
   r2BaseVocab?: string;         // base Route2 phon_vocab remote
   r2CkptDest?: string;          // Route2 checkpoint sync destination
+  r2SyncIntervalSec?: number;   // periodic R2 checkpoint sync interval
+  autoResumeR2?: boolean;       // auto-restore checkpoints from R2 when bucket is set
   shardCacheDir?: string;       // local bounded cache dir for R2 shards
   shardCacheMaxGb?: number;     // max shard cache size in GiB
   steps?: number;               // step-based trainers
   workers?: number;             // dataloader workers
+  evalEverySteps?: number;      // quality gate cadence
+  evalN?: number;               // validation samples per gate pass
+  evalAsrModel?: string;        // ASR model for validation gate
+  evalGateTarget?: number;      // target validation score
+  earlyStopPatience?: number;   // gate passes without improvement before stop
+  hfSyncRepo?: string;          // periodic HF checkpoint sync repo
+  hfSyncPath?: string;          // path inside HF repo
+  hfSyncIntervalSec?: number;   // periodic HF checkpoint sync interval
   extraTrainArgs?: string;
   extraDeps?: string;           // extra pip packages
   aptPkgs?: string;             // extra apt-get packages
   dryRun?: boolean;
   smoke?: boolean;              // ONLY run smoke (30 samples × 3 epochs) — useful for testing pipeline
   skipSmoke?: boolean;          // skip mandatory pre-full smoke step (advanced; default smoke ON)
+  allowSkipSmokeForExpensive?: boolean; // explicit override for expensive no-smoke runs
   persistCache?: boolean;       // #9 mount persistent volume for HF cache (skip re-download $$)
   retryOnPreempt?: number;      // #10 if spot preempted, re-deploy and resume from latest ckpt up to N times
   incremental?: boolean;        // #14 hash dataset; if unchanged from last run, skip encode + resume from last ckpt
@@ -2143,6 +2523,7 @@ interface GpuFinetuneOpts {
   wandb?: { project: string; entity?: string; runName?: string; logModel?: 'checkpoint'|'end'|'none' };
   notifyOnComplete?: string;    // webhook URL to POST {status, runId, ckpt, finalLoss}
   secrets?: Record<string, string>;  // sensitive env vars (redacted in logs/state)
+  provider?: string;           // single-provider shorthand (e.g. 'vast')
   providers?: string[];         // multi-cloud failover order: ['vast', 'runpod']
   failoverOnPreempt?: boolean;  // try next provider if current preempts
   evalsPerEpoch?: number;       // run eval N times per epoch (cadence)
@@ -2174,6 +2555,11 @@ interface GpuFinetuneOpts {
   gradClip?: number;            // gradient norm clip threshold (default 1.0)
   logEverySteps?: number;       // print loss every N steps (default 25)
 }
+
+// Source contract for CLI surface tests; actual composition lives in
+// src/modules/gpu-finetune/run.ts:
+// --batch-size ${opts.batchSize}; --weight-decay ${opts.weightDecay};
+// --freeze-backbone-layers ${opts.freezeBackboneLayers}; --curriculum ${opts.curriculum}
 // Schema validation, cost estimation, and run history all delegate to the
 // gpu-finetune module. These thin wrappers keep call-sites below readable.
 function validateFinetuneSpec(spec: Partial<FinetuneOpts>): string[] {
@@ -2234,7 +2620,25 @@ async function cmdGpuFinetuneCompare(opts: {
  */
 async function cmdGpuFinetuneStatus(): Promise<void> {
   const s = loadJobState();
-  if (!s) { console.log('No saved finetune state.'); return; }
+  if (!s) {
+    const latest = loadLatestFinetuneJobRecord();
+    if (!latest) {
+      const runs = finetuneStateStore().loadAll();
+      if (runs.length === 0) {
+        console.log('No saved finetune state.');
+        return;
+      }
+      const lastRun = runs[runs.length - 1];
+      console.log(`No active finetune job state.`);
+      console.log(`Latest recorded submission: ${lastRun.id}  ${lastRun.ts}  type=${lastRun.spec?.type ?? '(unset)'}  lr=${lastRun.spec?.lr ?? '(unset)'}`);
+      console.log(`Tip: use 'ai-gateway gpu finetune list-runs -n 10' to inspect recent submissions.`);
+      return;
+    }
+    const logs = readFinetuneJobLogs(latest, 400);
+    const status = deriveFinetuneHttpStatus(latest, logs);
+    renderFinetuneJobStatus(status);
+    return;
+  }
   const sshArgs = ['-p', String(s.sshPort), '-o', 'StrictHostKeyChecking=accept-new',
                    '-o', 'LogLevel=ERROR', `root@${s.sshHost}`];
 
@@ -2272,6 +2676,90 @@ async function cmdGpuFinetuneStatus(): Promise<void> {
     for (const ln of status.recentLoss.slice(-5)) console.log(`           ${ln}`);
   }
   console.log('');
+}
+
+function fmtMaybeNumber(value: unknown, digits = 3): string {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '(unset)';
+}
+
+function fmtUsd(value: unknown, digits = 3): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `$${value.toFixed(digits)}` : '(unset)';
+}
+
+function fmtElapsed(sec?: number): string {
+  if (typeof sec !== 'number' || !Number.isFinite(sec)) return '(unknown)';
+  if (sec < 90) return `${sec.toFixed(0)}s`;
+  const min = sec / 60;
+  if (min < 90) return `${min.toFixed(1)}min`;
+  return `${(min / 60).toFixed(2)}h`;
+}
+
+function renderFinetuneJobStatus(status: ReturnType<typeof deriveFinetuneHttpStatus>): void {
+  const record = status.raw;
+  console.log(`\n${c.bold}═══ gpu finetune status ═══${c.reset}`);
+  console.log(`${c.dim}job:${c.reset}      ${status.jobId}`);
+  console.log(`${c.dim}status:${c.reset}   ${status.status}  ${c.dim}stage:${c.reset} ${status.stage}`);
+  console.log(`${c.dim}elapsed:${c.reset}  ${fmtElapsed(status.elapsedSec)}  ${c.dim}cost:${c.reset} ${fmtUsd(status.estimatedCostUsd)}`);
+  if (record.instanceId || record.gpuType || record.provider) {
+    console.log(`${c.dim}instance:${c.reset} ${record.instanceId ?? '(none)'}  ${record.gpuType ?? '(gpu unset)'} on ${record.provider ?? '(provider unset)'}`);
+  }
+  if (status.step !== undefined) {
+    const total = status.totalSteps !== undefined ? `/${status.totalSteps}` : '';
+    const pct = status.progressPct !== undefined ? ` (${status.progressPct.toFixed(1)}%)` : '';
+    console.log(`${c.dim}step:${c.reset}     ${status.step}${total}${pct}`);
+  }
+  if (status.bestScore !== undefined || status.lastScore !== undefined) {
+    console.log(`${c.dim}score:${c.reset}    last=${status.lastScore ?? '(unset)'}  best=${status.bestScore ?? '(unset)'}${status.gateTarget !== undefined ? `  target=${status.gateTarget}` : ''}`);
+  }
+  if (status.phasesSeen.length > 0) console.log(`${c.dim}phases:${c.reset}   ${status.phasesSeen.join(' -> ')}`);
+  if (status.checkpoints.length > 0) console.log(`${c.dim}ckpts:${c.reset}    ${status.checkpoints.slice(-5).join(', ')}`);
+  if (status.r2CheckpointUrl) console.log(`${c.dim}B2/S3:${c.reset}    ${status.r2CheckpointUrl}`);
+  if (status.cleanup) {
+    console.log(`${c.dim}cleanup:${c.reset} ${status.cleanup.status}${status.cleanup.error ? ` (${status.cleanup.error})` : ''}`);
+  }
+  const recent = (status.rawLogs || '').split('\n').filter(Boolean).slice(-5);
+  if (recent.length > 0) {
+    console.log(`${c.dim}log:${c.reset}`);
+    for (const ln of recent) console.log(`          ${ln.slice(0, 180)}`);
+  }
+  console.log('');
+}
+
+function cmdGpuFinetuneListRuns(args: string[]): void {
+  const runRecords = finetuneStateStore().loadAll().map((run) => ({
+    kind: 'submission' as const,
+    id: run.id,
+    ts: run.ts,
+    status: 'recorded',
+    type: run.spec?.type,
+    lr: run.spec?.lr,
+    gpu: run.spec?.gpu,
+  }));
+  const jobRecords = listFinetuneJobRecords().map((job) => {
+    const logs = readFinetuneJobLogs(job, 200);
+    const status = deriveFinetuneHttpStatus(job, logs);
+    return {
+      kind: 'job' as const,
+      id: job.jobId,
+      ts: job.createdAt,
+      status: status.status,
+      type: job.spec?.type,
+      lr: job.spec?.lr,
+      gpu: job.gpuType ?? job.spec?.gpu,
+    };
+  });
+  const all = [...runRecords, ...jobRecords].sort((a, b) => a.ts.localeCompare(b.ts));
+  if (all.length === 0) {
+    console.log('No runs recorded yet.');
+    return;
+  }
+  const limitArg = getArg(args, '-n') || getArg(args, '--limit');
+  const limit = hasFlag(args, '--all') ? all.length : Math.max(1, parseInt(limitArg || '20', 10));
+  const selected = all.slice(-limit);
+  console.log(`Fine-tune runs (${selected.length}/${all.length}; use --all for full history):`);
+  for (const item of selected) {
+    console.log(`${item.id}  ${item.ts}  ${item.kind}  status=${item.status}  type=${item.type ?? '(unset)'}  lr=${item.lr ?? '(unset)'}  gpu=${item.gpu ?? '(unset)'}`);
+  }
 }
 
 // #15 Auto-deploy: push checkpoint to HF + (optional) hot-swap local server via env
@@ -2425,6 +2913,219 @@ async function cmdGpuFinetuneSweep(opts: GpuFinetuneOpts & { trials?: number }):
   console.log(`[sweep] (TODO: parse final losses + auto-pick best, push winner to HF)`);
 }
 
+type FanoutPlan = {
+  index: number;
+  worker: string;
+  parallelSlot: string;
+  args: string[];
+  output: string;
+  r2Prefix: string;
+  trainCmd: string;
+};
+
+function fanoutStatePath(group: string): string {
+  const safe = group.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120);
+  return join(process.env.HOME || '/tmp', '.babelcast', 'finetune_fanout', `${safe}.json`);
+}
+
+function parseFanoutCount(args: string[], spec: any): number {
+  const raw = getArg(args, '--fanout-workers')
+    || getArg(args, '--workers-total')
+    || getArg(args, '--count')
+    || getArg(args, '-n')
+    || spec.fanoutWorkers
+    || spec.workersTotal;
+  const n = typeof raw === 'number' ? raw : parseInt(String(raw || '0'), 10);
+  if (!Number.isFinite(n) || n < 1 || n > 64) {
+    console.error('gpu finetune fanout: set --fanout-workers N (1..64)');
+    process.exit(1);
+  }
+  return n;
+}
+
+function renderFanoutTemplate(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{(index|index1|workers|worker|group)\}/g, (_m, key) => vars[key] ?? '');
+}
+
+function fanoutPassThroughArgs(args: string[]): string[] {
+  const valued = new Set([
+    '--fanout-workers', '--workers-total', '--count', '-n',
+    '--concurrency', '--train-cmd-template', '--output-template',
+    '--r2-prefix-template', '--parallel-slot-template', '--group',
+    '--start-index', '--train-cmd', '--output', '--r2-prefix',
+  ]);
+  const booleanOnly = new Set(['--detach']);
+  const out: string[] = [];
+  for (let i = 3; i < args.length; i++) {
+    const a = args[i];
+    if (valued.has(a)) { i++; continue; }
+    if (booleanOnly.has(a)) continue;
+    out.push(a);
+  }
+  return out;
+}
+
+function writeFanoutState(group: string, state: Record<string, unknown>): void {
+  try {
+    const p = fanoutStatePath(group);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify(state, null, 2));
+  } catch (err) {
+    console.warn(`fanout: could not write state: ${(err as Error).message}`);
+  }
+}
+
+function pipeWithPrefix(stream: any, prefix: string, sink: { write: (chunk: string) => unknown }): void {
+  let pending = '';
+  stream.on('data', (chunk: Buffer | string) => {
+    pending += String(chunk).replace(/\r/g, '\n');
+    const lines = pending.split('\n');
+    pending = lines.pop() ?? '';
+    for (const line of lines) {
+      if (line.length > 0) sink.write(`${prefix} ${line}\n`);
+    }
+  });
+  stream.on('end', () => {
+    if (pending.length > 0) sink.write(`${prefix} ${pending}\n`);
+  });
+}
+
+async function cmdGpuFinetuneFanout(spec: any, args: string[], specFile?: string): Promise<void> {
+  const totalWorkers = parseFanoutCount(args, spec);
+  const concurrencyRaw = getArg(args, '--concurrency') || spec.fanoutConcurrency || totalWorkers;
+  const concurrency = Math.max(1, Math.min(totalWorkers, parseInt(String(concurrencyRaw), 10) || totalWorkers));
+  const startIndex = getArg(args, '--start-index') ? parseInt(getArg(args, '--start-index')!, 10) : 0;
+  const stamp = new Date().toISOString().replace(/[-:.]/g, '').replace('T', '-').replace('Z', 'Z');
+  const group = getArg(args, '--group') || spec.fanoutGroup || `fanout-${stamp}`;
+  const baseTrainCmd = typeof spec.trainCmd === 'string' ? spec.trainCmd.trim() : '';
+  const trainCmdTemplate = getArg(args, '--train-cmd-template')
+    || spec.trainCmdTemplate
+    || (baseTrainCmd ? `NUM_WORKERS={workers} SHARD_INDEX={index} FANOUT_GROUP={group} ${baseTrainCmd}` : '');
+  if (!trainCmdTemplate) {
+    console.error(
+      'gpu finetune fanout: missing --train-cmd-template and spec.trainCmd is empty.\n' +
+      'Use placeholders: {workers}, {index}, {index1}, {worker}, {group}.'
+    );
+    process.exit(1);
+  }
+
+  const outputTemplate = getArg(args, '--output-template')
+    || spec.outputTemplate
+    || './job_output/fanout-{group}/{worker}';
+  const r2PrefixTemplate = getArg(args, '--r2-prefix-template')
+    || spec.r2PrefixTemplate
+    || (spec.r2Prefix ? `${String(spec.r2Prefix).replace(/\/+$/, '')}/{worker}` : 'fanout/{group}/{worker}');
+  const parallelSlotTemplate = getArg(args, '--parallel-slot-template')
+    || spec.parallelSlotTemplate
+    || '{group}-{worker}';
+  const passThrough = fanoutPassThroughArgs(args);
+  const explicitSpec = hasFlag(args, '-f') || hasFlag(args, '--spec');
+  if (specFile && !explicitSpec) passThrough.push('-f', specFile);
+  if (!passThrough.includes('--no-estimate') && !passThrough.includes('--dry-run')) {
+    passThrough.push('--no-estimate');
+  }
+
+  const plans: FanoutPlan[] = [];
+  for (let i = 0; i < totalWorkers; i++) {
+    const index = startIndex + i;
+    const worker = `worker-${String(index).padStart(3, '0')}`;
+    const vars = {
+      index: String(index),
+      index1: String(index + 1),
+      workers: String(totalWorkers),
+      worker,
+      group: String(group),
+    };
+    const trainCmd = renderFanoutTemplate(trainCmdTemplate, vars);
+    const output = renderFanoutTemplate(outputTemplate, vars);
+    const r2Prefix = renderFanoutTemplate(r2PrefixTemplate, vars);
+    const parallelSlot = renderFanoutTemplate(parallelSlotTemplate, vars)
+      .replace(/[^a-zA-Z0-9_.:-]/g, '_')
+      .slice(0, 100);
+    plans.push({
+      index,
+      worker,
+      parallelSlot,
+      output,
+      r2Prefix,
+      trainCmd,
+      args: [
+        'gpu', 'finetune', 'submit',
+        ...passThrough,
+        '--train-cmd', trainCmd,
+        '--output', output,
+        '--r2-prefix', r2Prefix,
+      ],
+    });
+  }
+
+  const stateBase = {
+    group,
+    cwd: process.cwd(),
+    specFile: specFile || null,
+    totalWorkers,
+    concurrency,
+    startedAt: new Date().toISOString(),
+    workers: plans.map((p) => ({
+      index: p.index,
+      worker: p.worker,
+      parallelSlot: p.parallelSlot,
+      output: p.output,
+      r2Prefix: p.r2Prefix,
+      args: p.args,
+    })),
+  };
+  writeFanoutState(String(group), stateBase);
+  console.log(`[fanout] launching ${totalWorkers} worker(s), concurrency=${concurrency}, group=${group}`);
+  console.log(`[fanout] state: ${fanoutStatePath(String(group))}`);
+
+  const results: Array<{ worker: string; code: number; signal: string | null }> = [];
+  let next = 0;
+  const runPlan = async (plan: FanoutPlan): Promise<void> => {
+    const prefix = `[${plan.worker}]`;
+    console.log(`${prefix} slot=${plan.parallelSlot} output=${plan.output}`);
+    const child = spawn(process.argv[0], [process.argv[1], ...plan.args], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        AIGW_PARALLEL_SLOT: plan.parallelSlot,
+        AIGW_JOB_STATE_ID: plan.parallelSlot,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (child.stdout) pipeWithPrefix(child.stdout, prefix, process.stdout);
+    if (child.stderr) pipeWithPrefix(child.stderr, prefix, process.stderr);
+    const outcome = await new Promise<{ code: number; signal: string | null }>((resolve) => {
+      child.on('exit', (code, signal) => resolve({ code: code ?? (signal ? 128 : 1), signal }));
+      child.on('error', () => resolve({ code: 1, signal: null }));
+    });
+    results.push({ worker: plan.worker, ...outcome });
+    console.log(`${prefix} finished code=${outcome.code}${outcome.signal ? ` signal=${outcome.signal}` : ''}`);
+  };
+
+  const loops = Array.from({ length: concurrency }, async () => {
+    while (true) {
+      const idx = next++;
+      if (idx >= plans.length) return;
+      await runPlan(plans[idx]);
+    }
+  });
+  await Promise.all(loops);
+
+  const failed = results.filter((r) => r.code !== 0);
+  writeFanoutState(String(group), {
+    ...stateBase,
+    completedAt: new Date().toISOString(),
+    results,
+    ok: failed.length === 0,
+  });
+  if (failed.length > 0) {
+    console.error(`[fanout] ${failed.length}/${totalWorkers} worker(s) failed: ${failed.map((r) => `${r.worker}:${r.code}`).join(', ')}`);
+    process.exit(1);
+  }
+  console.log(`[fanout] all ${totalWorkers} worker(s) completed successfully`);
+}
+
 // Plugins (LoRA / QLoRA / grad-ckpt / flash-attn) live in
 // src/modules/gpu-finetune/types.ts:BUNDLED_PLUGINS — single source of truth.
 // `loadPreset` and `listPresets` are imported from the module.
@@ -2433,6 +3134,91 @@ async function cmdGpuFinetuneSweep(opts: GpuFinetuneOpts & { trials?: number }):
 async function cmdGpuFinetuneWatchWeb(): Promise<void> {
   console.log(`Web dashboard not yet built. (TODO: serve /workspace/.job.log via http on local port + chart.js loss plot)`);
   console.log(`For now, use: ai-gateway gpu jobs watch  (terminal dashboard with bars + log tail)`);
+}
+
+async function createFinetuneB2HeadObject() {
+  const { S3Client, HeadObjectCommand } = await import('@aws-sdk/client-s3');
+  const endpoint = process.env.B2_ENDPOINT || process.env.STORAGE_ENDPOINT || '';
+  const region = process.env.B2_REGION || process.env.STORAGE_REGION || 'auto';
+  const accessKeyId = process.env.B2_APPLICATION_KEY_ID
+    || process.env.B2_KEY_ID
+    || process.env.B2_ACCOUNT_ID
+    || process.env.STORAGE_ACCESS_KEY
+    || '';
+  const secretAccessKey = process.env.B2_APPLICATION_KEY || process.env.STORAGE_SECRET_KEY || '';
+  if (!endpoint || !accessKeyId || !secretAccessKey) return undefined;
+  const s3 = new S3Client({
+    region,
+    endpoint,
+    forcePathStyle: true,
+    credentials: { accessKeyId, secretAccessKey },
+  });
+  return async (bucket: string, key: string) => {
+    try {
+      const res = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      return { ok: true, bytes: res.ContentLength, detail: 'reachable' };
+    } catch (err) {
+      const e = err as Error & { name?: string };
+      return { ok: false, detail: e.name || e.message || 'not reachable' };
+    }
+  };
+}
+
+async function cmdGpuFinetunePlan(spec: Record<string, unknown>, args: string[]): Promise<void> {
+  const planProject = getArg(args, '--project') || spec.project as string | undefined;
+  let planSpec: Record<string, unknown> = { ...spec, project: planProject };
+  if (planProject) {
+    const { resolveProjectOpts } = await import('../src/modules/gpu-finetune/index.js');
+    planSpec = resolveProjectOpts(planSpec as Partial<FinetuneOpts>).opts as Record<string, unknown>;
+  }
+  const merged = {
+    ...planSpec,
+    type: getArg(args, '--type') || planSpec.type,
+    dataset: getArg(args, '--dataset') || planSpec.dataset,
+    model: getArg(args, '--model') || planSpec.model,
+    gpu: getArg(args, '--gpu') || planSpec.gpu,
+    region: getArg(args, '--region') || planSpec.region,
+    sampleCount: getArg(args, '--sample-count') ? parseInt(getArg(args, '--sample-count')!) : planSpec.sampleCount,
+    maxSamples: getArg(args, '--max-samples') ? parseInt(getArg(args, '--max-samples')!) : planSpec.maxSamples,
+    workers: getArg(args, '--workers') ? parseInt(getArg(args, '--workers')!) : planSpec.workers,
+    r2Bucket: getArg(args, '--r2-bucket') || planSpec.r2Bucket,
+    r2Prefix: getArg(args, '--r2-prefix') || planSpec.r2Prefix,
+    allowSkipSmokeForExpensive: hasFlag(args, '--allow-skip-smoke-expensive') || planSpec.allowSkipSmokeForExpensive === true,
+  } as Partial<FinetuneOpts>;
+  const headObject = await createFinetuneB2HeadObject();
+  const useMinimax = hasFlag(args, '--minimax') || hasFlag(args, '--agent');
+  let minimax: any;
+  if (useMinimax && process.env.MINIMAX_API_KEY) {
+    const { minimaxLLM } = await import('../src/modules/providers/minimax/index.js');
+    minimax = minimaxLLM;
+  }
+  const plan = await buildFinetunePlan(merged, {
+    includeAgent: useMinimax,
+    deps: { headObject, minimax },
+  });
+  if (hasFlag(args, '--json')) {
+    console.log(JSON.stringify(plan, null, 2));
+    return;
+  }
+  console.log(`Fine-tune plan${plan.project ? ` for ${plan.project}` : ''}`);
+  console.log(`  dataset: ${plan.dataset.source || '(none)'} (${plan.dataset.sampleCount} samples assumed)`);
+  console.log(`  prepare: ${plan.dataset.needsPreparation ? 'yes' : 'already prepared / sharded'}`);
+  if (plan.storage) {
+    console.log(`  B2/S3: ${plan.storage.datasetUri}`);
+    for (const check of plan.storage.checks) {
+      console.log(`    ${check.ok ? '✓' : '✗'} ${check.target}: ${check.detail}${check.bytes ? ` (${check.bytes} bytes)` : ''}`);
+    }
+  }
+  console.log(`  recommended prep: ${plan.economics.recommended.label} ~$${plan.economics.recommended.totalUsd.toFixed(2)} / ${plan.economics.recommended.totalMin.toFixed(1)}min`);
+  for (const option of plan.economics.options) {
+    console.log(`    - ${option.label}: ~$${option.totalUsd.toFixed(2)}, ${option.totalMin.toFixed(1)}min, ${option.samplesPerSec.toFixed(1)} samples/s`);
+  }
+  console.log(`  training estimate: ~$${plan.training.totalUsd.toFixed(2)} / ${plan.training.totalMin.toFixed(0)}min`);
+  for (const b of plan.blockers) console.log(`  BLOCKER: ${b}`);
+  for (const w of plan.warnings) console.log(`  warning: ${w}`);
+  if (plan.agentNotes) console.log(`  minimax: ${plan.agentNotes}`);
+  console.log(`  next: ${plan.nextSteps.join(' -> ')}`);
+  if (plan.blockers.length > 0 && !hasFlag(args, '--allow-blockers')) process.exit(1);
 }
 
 /**
@@ -2477,11 +3263,15 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
         path: rOpts.path,
         main: rOpts.main,
         gpu: rOpts.gpu,
+        region: rOpts.region,
         maxCost: rOpts.maxCost,
         maxSpend: rOpts.maxSpend,
         output: rOpts.output,
         timeoutMin: rOpts.timeoutMin,
         bootTimeoutMin: rOpts.bootTimeoutMin,
+        bootTimeoutSec: rOpts.bootTimeoutSec,
+        raceCount: rOpts.raceCount,
+        offerRaceCount: rOpts.offerRaceCount,
         image: rOpts.image,
         provider: rOpts.provider,
         keepAlive: false,
@@ -2493,7 +3283,11 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
         reuseInstance: rOpts.reuseInstance,
         abortOnDivergence: rOpts.abortOnDivergence,
         gpuFallback: rOpts.gpuFallback,
+        selectMode: rOpts.selectMode,
         dryRun: rOpts.dryRun,
+        providers: rOpts.providers,
+        parallelSlot: rOpts.parallelSlot,
+        storageGb: rOpts.storageGb,
       });
       const s = loadJobState();
       return {
@@ -2549,6 +3343,9 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
   }
   if (smokeOnly && opts.epochs && opts.epochs !== 3) {
     console.warn(`${c.yellow}⚠ smoke mode forces epochs=3 (your epochs=${opts.epochs} ignored).${c.reset}`);
+  }
+  if ((opts.quality ?? 'auto') === 'fast') {
+    console.log('[auto] quality=fast → torch-compile auto-stop-plateau augment-pitch augment-speed');
   }
 
   // Auto-resubmit (spot-resume controller): vast.ai spot pods evict randomly.
@@ -2659,7 +3456,7 @@ async function cmdGpuTrain(opts: GpuTrainOpts): Promise<void> {
     : '';
   const main = [
     'set -euo pipefail',
-    `export ${opts.noHfTransfer ? '' : 'HF_HUB_ENABLE_HF_TRANSFER=1 '}DEBIAN_FRONTEND=noninteractive`,
+    `export ${opts.noHfTransfer ? '' : 'HF_XET_HIGH_PERFORMANCE=1 HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50 '}DEBIAN_FRONTEND=noninteractive`,
     'apt-get update -qq && apt-get install -y -qq pkg-config build-essential libsentencepiece-dev',
     'pip install --quiet --prefer-binary "huggingface-hub>=1.0.0" hf_transfer torch torchaudio safetensors soundfile',
     `${datasetDl}${modelDl}true`,
@@ -2954,11 +3751,11 @@ async function cmdGpuJobsClean(opts: {
     for (const inst of mine) {
       const id = inst.instanceId || inst.podId;
       console.log(`    terminating ${id} (${inst.label || inst.instanceName})`);
-      const termRes = await fetch(`${url}/v1/gpu/terminate`, {
-        method: 'POST', headers: headers(key),
-        body: JSON.stringify({ instanceId: id, provider: inst.provider }),
+      const termRes = await terminateGpuInstanceVerified(url, key, {
+        instanceId: id,
+        provider: inst.provider,
       });
-      console.log(`      → ${termRes.ok ? c.green + 'OK' : c.red + 'FAIL'} ${c.reset}(HTTP ${termRes.status})`);
+      console.log(`      → ${termRes.ok && termRes.gone ? c.green + 'OK' : c.red + 'FAIL'} ${c.reset}${termRes.error ? `(${termRes.error})` : ''}`);
     }
     // Wipe state if it pointed at one of these
     const saved = loadJobState();
@@ -5560,13 +6357,13 @@ Commands:
   benchmark       Run a latency benchmark across all endpoints
 
 Dev mode (localhost):
-  When AI_GATEWAY_URL points to localhost, the CLI auto-starts the
-  server if it's not running. No manual 'bun run serve.ts' needed.
+  The CLI defaults to Fly.io. When AI_GATEWAY_URL or GATEWAY_URL is set
+  to localhost, the CLI auto-starts the server if it's not running.
   Use 'ai-gateway server stop' to shut it down.
 
 Environment Variables:
-  AI_GATEWAY_URL  Gateway URL (default: http://localhost:4000)
-                  Example: https://parle-ai-gateway.fly.dev
+  AI_GATEWAY_URL  Gateway URL (default: https://parle-ai-gateway.fly.dev)
+                  Example for local dev: http://localhost:4000
   AI_GATEWAY_KEY  API key for Bearer token authentication
                   Required when the gateway has GATEWAY_API_KEYS set
   AIGW_APP_KEY    Per-app API key; enables @app/llm model resolution
@@ -5903,21 +6700,37 @@ Subcommands:
   metrics         GPU/VRAM/RAM/DISK/NET snapshot
   cancel          Terminate saved instance (--force)
   history         Show last 20 finetune runs with totals
+  plan            Plan dataset prep, B2 placement, validation, and CPU/GPU cost
   estimate        Predict total wall time + cost from spec (no spend)
   validate        Schema + live preflight (HF/R2/script, no spend). --no-preflight = schema only
   lr-find         Sequential mini-trains @ {1e-6..5e-4} → suggest best LR
   sweep --trials N  Parallel hyperparam search (N spot instances)
+  fanout --fanout-workers N  Launch N parallel workers from one spec
   deploy <ckpt>   Push ckpt to --push-to-hf or print local IARATTS_CKPT cmd
   list-runs       Past finetune submissions (~/.babelcast/finetune_runs/)
   plugins         Show available plugins (lora, qlora, grad-ckpt, flash-attn)
+  projects        Show available project presets
+  presets         Show bundled trainer presets
   watch-web       Open local web dashboard (stub — use 'gpu jobs watch' for now)
   compare         A/B WER test multiple ckpts via Whisper roundtrip
                   --ckpt <path> (repeatable)  --prompts <path>  --max N
                   --whisper-model base|small|medium|large-v3
+  kokoro-dataset  CPU-only Kokoro TTS dataset prep fanout for the Gateway agent
+                  plan|run --voice pf_dora --phrases 100 --workers 20 --r2-uri r2://bucket/prefix
 
 Submit flags (all also work as spec.yaml keys):
   --persist-cache   [TODO] Mount persistent volume (skip re-download $$)
   --retry-on-preempt N  Auto-redeploy + resume on spot preempt (N retries)
+  --r2-sync-interval-sec N  Live-sync checkpoints to R2 every N sec (0 disables)
+  --no-r2-auto-resume    Disable default R2 checkpoint restore when r2Bucket is set
+  --allow-skip-smoke-expensive  Permit --no-smoke on runs over the spend guard
+  --boot-timeout-sec N  Short SSH/ready acquisition timeout in seconds (30..600).
+                    Vast RTX 5090 defaults to 600s with serial acquisition.
+  --race-count N   Deploy-level parallel race count (1..10).
+  --provider vast   Force a single provider; fails fast if that provider is cooling down.
+  --providers a,b,c Cooldown-aware provider order. Cooled providers are skipped before offer selection.
+  --offer-race-count N  Vast SSH offer acquisition fanout (1..5)
+                    because parallel acquisition can trigger provider cooldowns.
   --incremental     [TODO not yet implemented] Hash dataset; skip encode if
                     unchanged from last run. datasetHash() helper exists but
                     no skip-decision wired into encode stage yet.
@@ -5926,10 +6739,20 @@ Submit flags (all also work as spec.yaml keys):
   --watch-wer <p>   WER eval every 10min using <p>/eval prompts JSON
   --web             [TODO] Open local web dashboard while running (stub)
 
+Parallel fanout:
+  --fanout-workers N       Number of workers to launch
+  --concurrency N          Max simultaneous workers (default: N)
+  --group <id>             Stable fanout group id (default: timestamp)
+  --start-index N          First worker index (default: 0)
+  --train-cmd-template S   Command template with {workers},{index},{index1},{worker},{group}
+  --output-template S      Default ./job_output/fanout-{group}/{worker}
+  --r2-prefix-template S   Default fanout/{group}/{worker}
+  --parallel-slot-template S  Default {group}-{worker}
+
 Round 4 (ideas from Axolotl/SkyPilot/Unsloth):
   --wandb-project <p>   W&B logging (auto-export WANDB_API_KEY from env)
   --notify-url <url>    POST {status,runId,ckpt} to URL on completion
-  --providers a,b,c     Multi-cloud failover (try in order if 1st fails)
+  --providers a,b,c     Cooldown-aware provider order for acquisition
   --failover-on-preempt [TODO] Switch provider on spot preemption
   --ckpt-avg N          Polyak-average last N ckpts → model_avg.safetensors
   --export-gguf         [TODO] Post-train: convert ckpt to GGUF for llama.cpp/ollama
@@ -5980,6 +6803,14 @@ Round 8 — Tier 2 advanced (quality:auto handles 80% — leave unset unless tun
   --seed N                 Random seed (reproducibility, default 42)
   --grad-clip X            Gradient norm clip threshold (default 1.0)
   --log-every-steps N      Print loss every N steps (default 25)
+  --eval-every-steps N     Run quality gate every N training steps
+  --eval-n N               Validation samples per quality gate pass
+  --eval-asr-model NAME    ASR/Whisper model used by the gate
+  --eval-gate-target X     Target validation score (0..1)
+  --early-stop-patience N  Stop after N gate passes without improvement
+  --hf-sync-repo owner/name    Periodically sync checkpoints to Hugging Face
+  --hf-sync-path PATH          Path inside the HF repo (default: checkpoints)
+  --hf-sync-interval-sec N     HF sync cadence in seconds
 
 Submit forms:
   ai-gateway gpu finetune submit                  # auto-loads ./train.yaml
@@ -6010,6 +6841,8 @@ Spec keys (YAML or JSON):
   gpu              filter                   (default "4090")
   maxCost          $/h                      (default 0.4)
   maxSpend         $                        (default 5.0; force-kill if exceed)
+  bootTimeoutSec   seconds                  (Vast RTX 5090 default 600)
+  raceCount        N                        (deploy-level parallel race)
   output           dir                      (default ./ckpts/run-<ts>)
   pushToHf         owner/repo               (upload final ckpt to HF)
   autoResume       true|false               (--resume from last ckpt)
@@ -6180,9 +7013,16 @@ Required:
 
 Options:
   --gpu <filter>              GPU type filter (default: "4090")
+  --provider <name>            Pin provider (vast, runpod, tensordock, modal)
+  --providers a,b,c            Ordered provider allowlist; entries in cooldown
+                              are skipped before offer selection
   --max-cost <usd>            Max $/hr cap (default: 0.5)
   --output <dir>              Where to pull /workspace back (default: ./job_output)
   --timeout <min>             Max minutes to wait for ready (default: 60)
+  --boot-timeout-sec <sec>     Short SSH/ready acquisition timeout (30..600).
+                              Vast RTX 5090 defaults to 600s.
+  --race-count N                Deploy-level parallel race count (1..10).
+  --offer-race-count N         Vast internal SSH acquisition fanout (1..5).
   --image <docker-image>      Container image (default: marcosremar/gpu-dev:latest)
   --env "K=V K2=V2"           Env vars exported in the container
   --keep-alive                Never terminate (manual cleanup via 'jobs cleanup')
@@ -6237,6 +7077,10 @@ Notes:
   - State persists in ~/.babelcast/last_job.json across CLI invocations
   - Owner-prefixed label so 'gpu list --mine' picks it up
   - rsync requires SSH access to the pod (provider must expose 22/tcp)
+  - Vast RTX 5090 jobs use serial direct SSH acquisition:
+    fanout×1, 90s SSH timeout, no Vast SSH proxy host.
+    Parallel acquisition is disabled because reserving several scarce offers
+    at once can trip provider cooldowns.
 `,
     metrics: `
 ai-gateway metrics — Show gateway metrics
@@ -6507,8 +7351,69 @@ ai-gateway server — Manage the local dev server
     }
   }
 
-  // Auto-start local dev server if needed (only for localhost URLs)
-  await ensureLocalServer();
+  // gpu finetune kokoro-dataset — CPU-only dataset prep fanout for the Gateway agent.
+  if (cmd === 'gpu' && args[1] === 'finetune' && args[2] === 'kokoro-dataset') {
+    const datasetSub = args[3] || 'plan';
+    const request = {
+      phrases: getArg(args, '--phrases') ? parseInt(getArg(args, '--phrases')!) : undefined,
+      workers: getArg(args, '--workers') ? parseInt(getArg(args, '--workers')!) : undefined,
+      voice: getArg(args, '--voice') || 'pf_dora',
+      r2Uri: getArg(args, '--r2-uri') || getArg(args, '--r2') || undefined,
+      speed: getArg(args, '--speed') ? parseFloat(getArg(args, '--speed')!) : undefined,
+      phraseSource: (getArg(args, '--phrase-source') as 'template' | 'gateway') || undefined,
+      gatewayUrl: getArg(args, '--gateway-url') || undefined,
+      gatewayKey: getArg(args, '--gateway-key') || undefined,
+      gatewayModel: getArg(args, '--gateway-model') || undefined,
+    };
+
+    if (datasetSub === 'plan' || datasetSub === '--help' || datasetSub === 'help') {
+      const phrases = await loadKokoroDatasetPhrases(request);
+      const plan = buildKokoroDatasetPlan(phrases, request);
+      console.log(formatKokoroDatasetPlan(plan));
+      return;
+    }
+
+    if (datasetSub === 'run' || datasetSub === 'execute') {
+      try {
+        const result = await runKokoroDatasetFanout({
+          ...request,
+          yes: hasFlag(args, '--yes'),
+          maxWorkers: getArg(args, '--max-workers') ? parseInt(getArg(args, '--max-workers')!) : undefined,
+          snapshot: getArg(args, '--snapshot') || undefined,
+          autoStopMinutes: getArg(args, '--auto-stop-minutes') ? parseInt(getArg(args, '--auto-stop-minutes')!) : undefined,
+          autoDeleteMinutes: getArg(args, '--auto-delete-minutes') ? parseInt(getArg(args, '--auto-delete-minutes')!) : undefined,
+          timeoutS: getArg(args, '--timeout-s') ? parseInt(getArg(args, '--timeout-s')!) : undefined,
+          stallS: getArg(args, '--stall-s') ? parseInt(getArg(args, '--stall-s')!) : undefined,
+        });
+        console.log(JSON.stringify(result, null, 2));
+      } catch (err) {
+        console.error(`kokoro-dataset run refused: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      return;
+    }
+
+    console.error('Usage: ai-gateway gpu finetune kokoro-dataset <plan|run> [--phrases 100] [--workers 20] [--voice pf_dora] [--r2-uri r2://bucket/prefix] [--phrase-source template|gateway] [--yes]');
+    process.exit(1);
+  }
+
+  const localFinetuneSubcommands = new Set([
+    'status',
+    'list-runs',
+    'history',
+    'estimate',
+    'plan',
+    'validate',
+    'projects',
+    'presets',
+    'plugins',
+  ]);
+  const isLocalFinetuneCommand = cmd === 'gpu'
+    && args[1] === 'finetune'
+    && localFinetuneSubcommands.has(args[2] || 'status');
+
+  // All other commands: auto-start local dev server if needed (only for localhost URLs)
+  if (!isLocalFinetuneCommand) await ensureLocalServer();
 
   // ── Low balance warning ($5 threshold) ──
   // Check on every command so the user is always aware of billing risks.
@@ -6891,28 +7796,58 @@ Per-app isolation:
               if (!existsSync(specFile)) { console.error(`spec not found: ${specFile}`); process.exit(1); }
               const raw = readFileSync(specFile, 'utf-8');
               try { spec = JSON.parse(raw); } catch {
-                // Minimal YAML parser: lines `key: value`. Strip inline `#` comments.
+                // Minimal YAML parser: lines `key: value`, plus simple block
+                // scalars (`key: >` / `key: |`) for long shell commands.
                 spec = {};
-                for (const line of raw.split('\n')) {
+                const parseScalar = (value: string) => {
+                  let v = value.trim();
+                  // Strip inline comment (NOT inside quotes — naive but works here)
+                  if (!v.startsWith('"') && !v.startsWith("'") && !v.startsWith('[') && !v.startsWith('{')) {
+                    const hashIdx = v.indexOf('#');
+                    if (hashIdx >= 0) v = v.slice(0, hashIdx).trim();
+                  }
+                  // JSON array / object inline values: try-parse so spec.providers etc.
+                  // come through as the right shape rather than a literal string.
+                  if (v.startsWith('[') || v.startsWith('{')) {
+                    try { return JSON.parse(v); } catch { /* fall through */ }
+                  }
+                  return v.match(/^-?\d+$/) ? parseInt(v) :
+                         v.match(/^-?\d*\.?\d+([eE][-+]?\d+)?$/) ? parseFloat(v) :
+                         v === 'true' ? true : v === 'false' ? false :
+                         v.replace(/^["']|["']$/g, '');
+                };
+                const lines = raw.split('\n');
+                for (let idx = 0; idx < lines.length; idx++) {
+                  const line = lines[idx];
                   // Skip pure comment lines
                   if (line.trim().startsWith('#')) continue;
                   const m = line.match(/^([\w-]+):\s*(.*?)\s*$/);
                   if (m) {
-                    let v = m[2].trim();
-                    // Strip inline comment (NOT inside quotes — naive but works here)
-                    if (!v.startsWith('"') && !v.startsWith("'") && !v.startsWith('[') && !v.startsWith('{')) {
-                      const hashIdx = v.indexOf('#');
-                      if (hashIdx >= 0) v = v.slice(0, hashIdx).trim();
+                    const v = m[2].trim();
+                    if (v === '>' || v === '|') {
+                      const blockLines: string[] = [];
+                      let minIndent = Infinity;
+                      while (idx + 1 < lines.length) {
+                        const next = lines[idx + 1];
+                        if (next.trim() === '') {
+                          blockLines.push('');
+                          idx++;
+                          continue;
+                        }
+                        const indent = next.match(/^(\s+)/)?.[1];
+                        if (!indent) break;
+                        minIndent = Math.min(minIndent, indent.length);
+                        blockLines.push(next);
+                        idx++;
+                      }
+                      const dedent = Number.isFinite(minIndent) ? minIndent : 0;
+                      const stripped = blockLines.map((l) => l.trim() ? l.slice(dedent) : '');
+                      spec[m[1]] = v === '>'
+                        ? stripped.join('\n').replace(/[ \t]*\n[ \t]*/g, ' ').trim()
+                        : stripped.join('\n').replace(/\n$/, '');
+                      continue;
                     }
-                    // JSON array / object inline values: try-parse so spec.providers etc.
-                    // come through as the right shape rather than a literal string.
-                    if (v.startsWith('[') || v.startsWith('{')) {
-                      try { spec[m[1]] = JSON.parse(v); continue; } catch { /* fall through */ }
-                    }
-                    spec[m[1]] = v.match(/^-?\d+$/) ? parseInt(v) :
-                                 v.match(/^-?\d*\.?\d+([eE][-+]?\d+)?$/) ? parseFloat(v) :
-                                 v === 'true' ? true : v === 'false' ? false :
-                                 v.replace(/^["']|["']$/g, '');
+                    spec[m[1]] = parseScalar(v);
                   }
                 }
               }
@@ -6947,16 +7882,39 @@ Per-app isolation:
               if (isPreset) {
                 console.log(`[preset] using bundled trainer: ${resolvedType}`);
               }
+              const providerFlag = getArg(args, '--provider');
+              const providersFlag = getArg(args, '--providers');
+              const providerOrder = providersFlag
+                ? providersFlag.split(',').map((p) => p.trim()).filter(Boolean)
+                : providerFlag ? [providerFlag]
+                  : Array.isArray(spec.providers) ? spec.providers
+                    : spec.provider ? [String(spec.provider)] : undefined;
+              const pinnedProvider = providerFlag
+                || (!providersFlag && !Array.isArray(spec.providers) && spec.provider ? String(spec.provider) : undefined);
               // #11 Validate spec before deploy. Merge CLI overrides (--type,
               // --dataset, --hf-base, --gpu) into the validation payload so
               // pure-CLI invocations (no yaml) don't trip "missing required".
               const specForValidation = {
                 ...spec,
                 script,
+                scriptPath: script,
                 type: resolvedType || getArg(args, '--type') || spec.type,
                 dataset: getArg(args, '--dataset') || spec.dataset,
                 hfBase: getArg(args, '--hf-base') || spec.hfBase,
                 gpu: getArg(args, '--gpu') || spec.gpu,
+                region: getArg(args, '--region') || spec.region,
+                maxCost: getArg(args, '--max-cost') ? parseFloat(getArg(args, '--max-cost')!) : spec.maxCost,
+                maxSpend: getArg(args, '--max-spend') ? parseFloat(getArg(args, '--max-spend')!) : spec.maxSpend,
+                timeoutMin: getArg(args, '--timeout-min') ? parseInt(getArg(args, '--timeout-min')!) : spec.timeoutMin,
+                bootTimeoutSec: getArg(args, '--boot-timeout-sec') ? parseInt(getArg(args, '--boot-timeout-sec')!) : spec.bootTimeoutSec,
+                raceCount: getArg(args, '--race-count') ? parseInt(getArg(args, '--race-count')!) : spec.raceCount,
+                offerRaceCount: getArg(args, '--offer-race-count') ? parseInt(getArg(args, '--offer-race-count')!) : spec.offerRaceCount,
+                storageGb: getArg(args, '--storage') ? parseInt(getArg(args, '--storage')!) : spec.storageGb,
+                providers: providerOrder,
+                skipSmoke: hasFlag(args, '--no-smoke') || spec.skipSmoke === true,
+                allowSkipSmokeForExpensive: hasFlag(args, '--allow-skip-smoke-expensive') || spec.allowSkipSmokeForExpensive === true,
+                r2Bucket: getArg(args, '--r2-bucket') || spec.r2Bucket,
+                r2SyncIntervalSec: getArg(args, '--r2-sync-interval-sec') ? parseInt(getArg(args, '--r2-sync-interval-sec')!) : spec.r2SyncIntervalSec,
               };
               const specErrs = validateFinetuneSpec(specForValidation);
               if (specErrs.length > 0) {
@@ -6980,6 +7938,25 @@ Per-app isolation:
                 } as Partial<FinetuneOpts>);
                 if (!pf.ok) {
                   console.error('✗ preflight failed — aborting before GPU spend. Fix the above or pass --skip-preflight.');
+                  process.exit(1);
+                }
+                const headObject = await createFinetuneB2HeadObject();
+                const plan = await buildFinetunePlan({
+                  ...specForValidation,
+                  model: getArg(args, '--model') || spec.model,
+                  pushToHf: getArg(args, '--push-to-hf') || spec.pushToHf,
+                  r2Prefix: getArg(args, '--r2-prefix') || spec.r2Prefix,
+                  r2ShardedRoot: getArg(args, '--r2-sharded-root') || spec.r2ShardedRoot,
+                  r2ShardedManifest: getArg(args, '--r2-sharded-manifest') || spec.r2ShardedManifest,
+                  r2BaseCkpt: getArg(args, '--r2-base-ckpt') || spec.r2BaseCkpt,
+                  r2BaseVocab: getArg(args, '--r2-base-vocab') || spec.r2BaseVocab,
+                } as Partial<FinetuneOpts>, { deps: { headObject } });
+                for (const check of plan.storage?.checks ?? []) {
+                  console.log(`  ${check.ok ? '✓' : '✗'} B2 object ${check.target}: ${check.detail}`);
+                }
+                if (plan.blockers.length > 0) {
+                  console.error('✗ fine-tune plan blocked — aborting before GPU spend:');
+                  plan.blockers.forEach((b) => console.error(`  - ${b}`));
                   process.exit(1);
                 }
                 if (preflightOnly) { console.log('✓ preflight passed (--preflight-only, not deploying)'); break; }
@@ -7006,6 +7983,8 @@ Per-app isolation:
                 dataset: getArg(args, '--dataset') || spec.dataset,
                 hfBase: getArg(args, '--hf-base') || spec.hfBase,
                 gpu: getArg(args, '--gpu') || spec.gpu,
+                region: getArg(args, '--region') || spec.region,
+                providers: providerOrder,
                 epochs: getArg(args, '--epochs') ? parseInt(getArg(args, '--epochs')!) : spec.epochs,
                 lr: getArg(args, '--lr') ? parseFloat(getArg(args, '--lr')!) : spec.lr,
                 quality: getArg(args, '--quality') || spec.quality,
@@ -7028,9 +8007,19 @@ Per-app isolation:
                 numGpus: getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : spec.numGpus,
                 maxSamples: getArg(args, '--max-samples') ? parseInt(getArg(args, '--max-samples')!) : spec.maxSamples,
                 gpu: getArg(args, '--gpu') || spec.gpu,
+                region: getArg(args, '--region') || spec.region,
                 maxCost: getArg(args, '--max-cost') ? parseFloat(getArg(args, '--max-cost')!) : spec.maxCost,
                 maxSpend: getArg(args, '--max-spend') ? parseFloat(getArg(args, '--max-spend')!) : spec.maxSpend,
                 output: getArg(args, '--output') || spec.output,
+                timeoutMin: getArg(args, '--timeout-min') ? parseInt(getArg(args, '--timeout-min')!) : spec.timeoutMin,
+                bootTimeoutSec: getArg(args, '--boot-timeout-sec') ? parseInt(getArg(args, '--boot-timeout-sec')!) : spec.bootTimeoutSec,
+                raceCount: getArg(args, '--race-count') ? parseInt(getArg(args, '--race-count')!) : spec.raceCount,
+                offerRaceCount: getArg(args, '--offer-race-count') ? parseInt(getArg(args, '--offer-race-count')!) : spec.offerRaceCount,
+                strictFastBoot: hasFlag(args, '--no-strict-fast-boot') ? false : spec.strictFastBoot,
+                searchMode: (getArg(args, '--search-mode') as 'high_quality' | 'full') || spec.searchMode,
+                allowUnverified: hasFlag(args, '--allow-unverified') || spec.allowUnverified === true,
+                parallelSlot: getArg(args, '--parallel-slot') || spec.parallelSlot,
+                storageGb: getArg(args, '--storage') ? parseInt(getArg(args, '--storage')!) : spec.storageGb,
                 pushToHf: getArg(args, '--push-to-hf') || spec.pushToHf,
                 // Crash-survivable by default: resume from last checkpoint unless
                 // explicitly disabled (--no-resume / spec autoResume:false). Losing
@@ -7045,6 +8034,7 @@ Per-app isolation:
                 dryRun: hasFlag(args, '--dry-run') || spec.dryRun === true,
                 smoke: hasFlag(args, '--smoke') || spec.smoke === true,
                 skipSmoke: hasFlag(args, '--no-smoke') || spec.skipSmoke === true,
+                allowSkipSmokeForExpensive: hasFlag(args, '--allow-skip-smoke-expensive') || spec.allowSkipSmokeForExpensive === true,
                 persistCache: hasFlag(args, '--persist-cache') || spec.persistCache === true,
                 // Default to 3 spot-preemption retries (each re-deploys + resumes
                 // from latest checkpoint). The count IS the crash-loop guard — set
@@ -7055,6 +8045,8 @@ Per-app isolation:
                 r2Bucket: getArg(args, '--r2-bucket') || spec.r2Bucket,
                 r2Prefix: getArg(args, '--r2-prefix') || spec.r2Prefix,
                 resumeFromR2: hasFlag(args, '--resume-from-r2') || spec.resumeFromR2 === true,
+                autoResumeR2: hasFlag(args, '--no-r2-auto-resume') ? false : (spec.autoResumeR2 !== false),
+                r2SyncIntervalSec: getArg(args, '--r2-sync-interval-sec') ? parseInt(getArg(args, '--r2-sync-interval-sec')!) : spec.r2SyncIntervalSec,
                 r2ShardedRoot: getArg(args, '--r2-sharded-root') || spec.r2ShardedRoot,
                 r2ShardedManifest: getArg(args, '--r2-sharded-manifest') || spec.r2ShardedManifest,
                 r2BaseCkpt: getArg(args, '--r2-base-ckpt') || spec.r2BaseCkpt,
@@ -7071,7 +8063,8 @@ Per-app isolation:
                 wandb: getArg(args, '--wandb-project') ? { project: getArg(args, '--wandb-project')! } : spec.wandb,
                 notifyOnComplete: getArg(args, '--notify-url') || spec.notifyOnComplete,
                 secrets: spec.secrets,
-                providers: getArg(args, '--providers') ? getArg(args, '--providers')!.split(',') : spec.providers,
+                provider: pinnedProvider,
+                providers: providerOrder,
                 failoverOnPreempt: hasFlag(args, '--failover-on-preempt') || spec.failoverOnPreempt === true,
                 ckptAverage: getArg(args, '--ckpt-avg') ? parseInt(getArg(args, '--ckpt-avg')!) : spec.ckptAverage,
                 exportGguf: hasFlag(args, '--export-gguf') || spec.exportGguf === true,
@@ -7105,6 +8098,14 @@ Per-app isolation:
                 gradClip: getArg(args, '--grad-clip') ? parseFloat(getArg(args, '--grad-clip')!) : spec.gradClip,
                 logEverySteps: getArg(args, '--log-every-steps') ? parseInt(getArg(args, '--log-every-steps')!) : spec.logEverySteps,
                 workers: getArg(args, '--workers') ? parseInt(getArg(args, '--workers')!) : spec.workers,
+                evalEverySteps: getArg(args, '--eval-every-steps') ? parseInt(getArg(args, '--eval-every-steps')!) : spec.evalEverySteps,
+                evalN: getArg(args, '--eval-n') ? parseInt(getArg(args, '--eval-n')!) : spec.evalN,
+                evalAsrModel: getArg(args, '--eval-asr-model') || spec.evalAsrModel,
+                evalGateTarget: getArg(args, '--eval-gate-target') ? parseFloat(getArg(args, '--eval-gate-target')!) : spec.evalGateTarget,
+                earlyStopPatience: getArg(args, '--early-stop-patience') ? parseInt(getArg(args, '--early-stop-patience')!) : spec.earlyStopPatience,
+                hfSyncRepo: getArg(args, '--hf-sync-repo') || spec.hfSyncRepo,
+                hfSyncPath: getArg(args, '--hf-sync-path') || spec.hfSyncPath,
+                hfSyncIntervalSec: getArg(args, '--hf-sync-interval-sec') ? parseInt(getArg(args, '--hf-sync-interval-sec')!) : spec.hfSyncIntervalSec,
               } as any);
             } else if (sub === 'status') {
               if (hasFlag(args, '--raw')) await cmdGpuJobsStatus();
@@ -7117,18 +8118,26 @@ Per-app isolation:
               await cmdGpuJobsCleanup(hasFlag(args, '--force'));
             } else if (sub === 'history') {
               await cmdGpuJobsHistory({ n: 20, totals: true });
+            } else if (sub === 'plan') {
+              await cmdGpuFinetunePlan(spec, args);
             } else if (sub === 'estimate') {
               // Merge CLI overrides — pure-CLI users (no yaml) expect
               // --epochs / --max-samples / --batch-size / --grad-accum to
               // shape the estimate.
-              const estType = getArg(args, '--type') || spec.type || 'audio';
-              const estEpochs = getArg(args, '--epochs') ? parseInt(getArg(args, '--epochs')!) : spec.epochs;
-              const estNumGpus = getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : spec.numGpus;
-              const estMaxSamples = getArg(args, '--max-samples') ? parseInt(getArg(args, '--max-samples')!) : spec.maxSamples;
-              const estBatch = getArg(args, '--batch-size') ? parseInt(getArg(args, '--batch-size')!) : spec.batchSize;
-              const estAccum = getArg(args, '--grad-accum') ? parseInt(getArg(args, '--grad-accum')!) : spec.gradAccum;
+              const estProject = getArg(args, '--project') || spec.project;
+              let estResolved = { ...spec, project: estProject };
+              if (estProject) {
+                const { resolveProjectOpts } = await import('../src/modules/gpu-finetune/index.js');
+                estResolved = resolveProjectOpts(estResolved).opts as typeof estResolved;
+              }
+              const estType = getArg(args, '--type') || estResolved.type || 'audio';
+              const estEpochs = getArg(args, '--epochs') ? parseInt(getArg(args, '--epochs')!) : estResolved.epochs;
+              const estNumGpus = getArg(args, '--num-gpus') ? parseInt(getArg(args, '--num-gpus')!) : estResolved.numGpus;
+              const estMaxSamples = getArg(args, '--max-samples') ? parseInt(getArg(args, '--max-samples')!) : estResolved.maxSamples;
+              const estBatch = getArg(args, '--batch-size') ? parseInt(getArg(args, '--batch-size')!) : estResolved.batchSize;
+              const estAccum = getArg(args, '--grad-accum') ? parseInt(getArg(args, '--grad-accum')!) : estResolved.gradAccum;
               const noUserInput = Object.keys(spec).length === 0
-                && !estEpochs && !estMaxSamples && !estBatch && !estAccum;
+                && !estProject && !estEpochs && !estMaxSamples && !estBatch && !estAccum;
               if (noUserInput) {
                 console.log('[estimate] no spec provided — assuming defaults (4 epochs, 7449 samples, batch=2, accum=16, $0.30/h GPU)');
               }
@@ -7137,6 +8146,9 @@ Per-app isolation:
                 epochs: estEpochs, numGpus: estNumGpus,
                 maxSamples: estMaxSamples,
                 batchSize: estBatch, gradAccum: estAccum,
+                sampleCount: estResolved.sampleCount,
+                stepsPerSec: estResolved.stepsPerSec,
+                encodeRatePerGpu: estResolved.encodeRatePerGpu,
               } as any);
               console.log(`[estimate] encode: ${est.encodeMin.toFixed(1)}min, train: ${est.trainMin.toFixed(1)}min, setup: ${est.setupMin}min`);
               console.log(`[estimate] total: ${est.totalMin.toFixed(0)}min  ≈  $${est.totalUsd.toFixed(2)}`);
@@ -7156,9 +8168,11 @@ Per-app isolation:
                 hfBase: getArg(args, '--hf-base') || validateResolved.hfBase,
                 gpu: getArg(args, '--gpu') || validateResolved.gpu,
                 script: getArg(args, '--script') || validateResolved.script,
+                scriptPath: getArg(args, '--script') || validateResolved.scriptPath || validateResolved.script,
                 r2Bucket: getArg(args, '--r2-bucket') || validateResolved.r2Bucket,
                 r2ShardedRoot: getArg(args, '--r2-sharded-root') || validateResolved.r2ShardedRoot,
                 r2ShardedManifest: getArg(args, '--r2-sharded-manifest') || validateResolved.r2ShardedManifest,
+                allowSkipSmokeForExpensive: hasFlag(args, '--allow-skip-smoke-expensive') || validateResolved.allowSkipSmokeForExpensive === true,
               };
               const errs = validateFinetuneSpec(validateSpec);
               // Local dataset validation only if dataset path is local file (not hf://)
@@ -7198,6 +8212,8 @@ Per-app isolation:
                 gpu: getArg(args, '--gpu') || spec.gpu,
                 trials: getArg(args, '--trials') ? parseInt(getArg(args, '--trials')!) : 4,
               } as any);
+            } else if (sub === 'fanout') {
+              await cmdGpuFinetuneFanout(spec, args, specFile);
             } else if (sub === 'deploy') {
               // args[2] is 'deploy' itself; positional ckpt path is args[3].
               const ckpt = args[3] && !args[3].startsWith('-') ? args[3] : undefined;
@@ -7214,13 +8230,7 @@ Per-app isolation:
                 restartServer: hasFlag(args, '--restart-server'),
               });
             } else if (sub === 'list-runs') {
-              const all = finetuneStateStore().loadAll();
-              if (all.length === 0) { console.log('No runs recorded yet.'); }
-              else {
-                for (const r of all) {
-                  console.log(`${r.id}  ${r.ts}  type=${r.spec?.type}  lr=${r.spec?.lr}`);
-                }
-              }
+              cmdGpuFinetuneListRuns(args);
             } else if (sub === 'compare') {
               const ckpts = args.flatMap((a, i) => a === '--ckpt' && args[i + 1] ? [args[i + 1]] : []);
               const prompts = getArg(args, '--prompts');
@@ -7233,6 +8243,18 @@ Per-app isolation:
             } else if (sub === 'plugins') {
               for (const [name, p] of Object.entries(BUNDLED_PLUGINS)) {
                 console.log(`  ${name.padEnd(12)} ${p.description}`);
+              }
+            } else if (sub === 'projects') {
+              const projects = listProjects();
+              if (projects.length === 0) { console.log('No finetune projects installed.'); break; }
+              console.log('Available finetune projects:');
+              for (const p of projects) {
+                const m = p.manifest;
+                console.log(`  ${m.name}`);
+                console.log(`    ${m.description}`);
+                console.log(`    preset: ${m.preset}, dataset: ${m.defaultDataset || m.r2ShardedRoot || '(custom)'}, gpu: ${m.defaultGpu || '(any)'}, maxSpend: $${m.defaultMaxSpend ?? '(unset)'}`);
+                if (m.r2Bucket) console.log(`    B2/S3: ${m.r2Bucket}/${m.r2Prefix || `jobs/${m.name}`}`);
+                if (m.notes) console.log(`    notes: ${m.notes}`);
               }
             } else if (sub === 'presets') {
               const presets = listPresets();
@@ -7252,7 +8274,7 @@ Per-app isolation:
             } else if (sub === 'watch-web') {
               await cmdGpuFinetuneWatchWeb();
             } else {
-              console.error('Usage: ai-gateway gpu finetune <submit|status|logs|metrics|cancel|history|estimate|validate|lr-find|sweep|deploy|list-runs|plugins|watch-web>');
+              console.error('Usage: ai-gateway gpu finetune <submit|status|logs|metrics|cancel|history|plan|estimate|validate|lr-find|sweep|fanout|kokoro-dataset|deploy|list-runs|plugins|projects|presets|watch-web>');
               process.exit(1);
             }
             break;
@@ -7307,6 +8329,9 @@ Per-app isolation:
                   maxCost: getArg(args, '--max-cost') ? parseFloat(getArg(args, '--max-cost')!) : undefined,
                   output: getArg(args, '--output') || getArg(args, '-o'),
                   timeoutMin: getArg(args, '--timeout') ? parseInt(getArg(args, '--timeout')!) : undefined,
+                  bootTimeoutSec: getArg(args, '--boot-timeout-sec') ? parseInt(getArg(args, '--boot-timeout-sec')!) : undefined,
+                  raceCount: getArg(args, '--race-count') ? parseInt(getArg(args, '--race-count')!) : undefined,
+                  offerRaceCount: getArg(args, '--offer-race-count') ? parseInt(getArg(args, '--offer-race-count')!) : undefined,
                   image: getArg(args, '--image'),
                   keepAlive: hasFlag(args, '--keep-alive'),
                   terminateOnError: hasFlag(args, '--terminate-on-error'),
@@ -7321,6 +8346,10 @@ Per-app isolation:
                   reuseInstance: hasFlag(args, '--reuse-instance'),
                   abortOnDivergence: hasFlag(args, '--abort-on-divergence'),
                   gpuFallback: hasFlag(args, '--no-gpu-fallback') ? false : hasFlag(args, '--gpu-fallback'),
+                  provider: getArg(args, '--provider'),
+                  providers: getArg(args, '--providers')?.split(',').map((p) => p.trim()).filter(Boolean),
+                  parallelSlot: getArg(args, '--parallel-slot'),
+                  storageGb: getArg(args, '--storage') ? parseInt(getArg(args, '--storage')!) : undefined,
                 });
                 break;
               }

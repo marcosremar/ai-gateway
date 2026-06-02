@@ -1,5 +1,5 @@
 /**
- * Integration tests for AI Gateway Settings.
+ * Integration tests for BabelCast Settings.
  * Runs against the REAL gateway on localhost:4000.
  *
  * Tests cover:

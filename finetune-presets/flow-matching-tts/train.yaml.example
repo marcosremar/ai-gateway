@@ -1,0 +1,8 @@
+type: flow-matching-tts
+dataset: hf://example/ptbr-tts-dataset
+hfBase: example/ptbr-tts
+gpu: 4090
+maxCost: 0.5
+maxSpend: 2
+epochs: 2
+lr: 1e-6

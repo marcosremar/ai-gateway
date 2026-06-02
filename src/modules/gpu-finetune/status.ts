@@ -123,6 +123,11 @@ export function buildStatusResult(
     .slice(0, 5);
 
   const lossLines = probe.loss.split('\n').filter(Boolean).slice(-10);
+  const joinedLoss = lossLines.join('\n');
+  const stepMatch = joinedLoss.match(/step=(\d+)\/(\d+)/);
+  const lastScoreMatch = joinedLoss.match(/sim_mean=([0-9.]+)/g)?.pop()?.match(/sim_mean=([0-9.]+)/);
+  const bestScoreMatch = joinedLoss.match(/best_sim=([0-9.]+)/g)?.pop()?.match(/best_sim=([0-9.]+)/);
+  const evalStepMatch = joinedLoss.match(/eval[^\n]*step[=: ](\d+)/i);
 
   return {
     instanceId: jobMeta.instanceId,
@@ -139,6 +144,11 @@ export function buildStatusResult(
     wavCached,
     checkpoints: ckptList,
     recentLoss: lossLines,
+    step: stepMatch ? Number(stepMatch[1]) : undefined,
+    totalSteps: stepMatch ? Number(stepMatch[2]) : undefined,
+    lastScore: lastScoreMatch ? Number(lastScoreMatch[1]) : undefined,
+    bestScore: bestScoreMatch ? Number(bestScoreMatch[1]) : undefined,
+    lastEvalStep: evalStepMatch ? Number(evalStepMatch[1]) : undefined,
   };
 }
 
@@ -166,7 +176,7 @@ export function buildProbeCommand(paths: ProbePathsSpec = {}): string {
     `ls ${p.checkpointsDir}/ 2>/dev/null | head -10;`,
     `ls ${p.smokeCheckpointsDir}/ 2>/dev/null | head -10;`,
     `echo '${SEP}loss${SEP}';`,
-    `tail -100 ${p.jobLog} 2>/dev/null | grep -oE 'step=[0-9]+/[0-9]+|loss=[0-9.]+|rate=[0-9.]+|saved.*\\\\.safetensors|\\\\[smoke-verify\\\\]' | tail -10;`,
+    `tail -200 ${p.jobLog} 2>/dev/null | grep -oE 'step=[0-9]+/[0-9]+|loss=[0-9.]+|rate=[0-9.]+|eval[^\\n]*(step[=: ][0-9]+)?[^\\n]*|sim_mean=[0-9.]+|best_sim=[0-9.]+|saved.*\\\\.safetensors|\\\\[smoke-verify\\\\]' | tail -20;`,
     `echo '${SEP}gpu${SEP}';`,
     `nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1;`,
     `echo '${SEP}disk${SEP}';`,

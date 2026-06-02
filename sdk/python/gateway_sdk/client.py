@@ -19,7 +19,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Callable, Awaitable, Optional
 
 import httpx
@@ -56,6 +56,13 @@ from gateway_sdk.types import (
     GpuStatus,
     DeployOptions,
     DeployResponse,
+    FinetuneGateConfig,
+    FinetuneHfSyncConfig,
+    FinetuneJobOptions,
+    FinetuneJobResponse,
+    FinetuneJobStatus,
+    FinetuneR2Config,
+    FinetuneSshTarget,
 )
 
 log = logging.getLogger(__name__)
@@ -1242,6 +1249,184 @@ class GatewaySDK:
             provider=d.get("provider", ""),
             status=d.get("status", ""),
         )
+
+    def build_finetune_spec(self, options: FinetuneJobOptions | dict) -> dict:
+        """Build the canonical JSON body for a fine-tune job."""
+        raw = asdict(options) if is_dataclass(options) else dict(options)
+
+        body: dict[str, Any] = {}
+        direct = {
+            "project": "project",
+            "type": "type",
+            "dataset": "dataset",
+            "model": "model",
+            "gpu": "gpu",
+            "providers": "providers",
+            "steps": "steps",
+            "epochs": "epochs",
+            "batch_size": "batchSize",
+            "lr": "lr",
+            "workers": "workers",
+            "save_every_steps": "saveEverySteps",
+            "log_every_steps": "logEverySteps",
+            "max_spend": "maxSpend",
+            "max_cost": "maxCost",
+            "image": "image",
+            "remote_url": "remoteUrl",
+            "checkpoint_url": "checkpointUrl",
+            "extra_train_args": "extraTrainArgs",
+            "dry_run": "dryRun",
+        }
+        for src, dst in direct.items():
+            value = raw.get(src)
+            if value not in ("", None):
+                body[dst] = value
+
+        ssh = raw.get("ssh")
+        if ssh:
+            body["ssh"] = {
+                "host": ssh.get("host", ""),
+                "port": ssh.get("port", 0),
+                "user": ssh.get("user", "root"),
+            }
+
+        gate = raw.get("gate")
+        if gate:
+            body["gate"] = {k: v for k, v in gate.items() if v not in ("", None)}
+            if gate.get("every_steps") is not None:
+                body["evalEverySteps"] = gate["every_steps"]
+            if gate.get("eval_n") is not None:
+                body["evalN"] = gate["eval_n"]
+            if gate.get("asr_model"):
+                body["evalAsrModel"] = gate["asr_model"]
+            if gate.get("target") is not None:
+                body["evalGateTarget"] = gate["target"]
+            if gate.get("early_stop_patience") is not None:
+                body["earlyStopPatience"] = gate["early_stop_patience"]
+
+        r2 = raw.get("r2")
+        if r2:
+            body["r2"] = {k: v for k, v in r2.items() if v not in ("", None)}
+            mapping = {
+                "bucket": "r2Bucket",
+                "prefix": "r2Prefix",
+                "resume": "resumeFromR2",
+                "sharded_root": "r2ShardedRoot",
+                "sharded_manifest": "r2ShardedManifest",
+                "base_checkpoint": "r2BaseCkpt",
+                "base_vocab": "r2BaseVocab",
+                "checkpoint_dest": "r2CkptDest",
+                "cache_dir": "shardCacheDir",
+                "cache_max_gb": "shardCacheMaxGb",
+                "sync_every_sec": "r2SyncEverySec",
+            }
+            for src, dst in mapping.items():
+                if r2.get(src) not in ("", None):
+                    body[dst] = r2[src]
+
+        hf = raw.get("hugging_face")
+        if hf:
+            body["huggingFace"] = {k: v for k, v in hf.items() if v not in ("", None)}
+            if hf.get("repo"):
+                body["pushToHf"] = hf["repo"]
+                body["hfSyncRepo"] = hf["repo"]
+            if hf.get("path"):
+                body["hfSyncPath"] = hf["path"]
+            if hf.get("interval_sec") is not None:
+                body["hfSyncIntervalSec"] = hf["interval_sec"]
+            if hf.get("final_only") is not None:
+                body["hfFinalOnly"] = hf["final_only"]
+            if hf.get("private") is not None:
+                body["hfPrivate"] = hf["private"]
+
+        return body
+
+    async def start_finetune(self, options: FinetuneJobOptions | dict) -> FinetuneJobResponse:
+        """Start a GPU fine-tune job with Gate, R2, and Hugging Face sync config."""
+        r = await self._request_with_retry(
+            "post",
+            "/v1/gpu/finetune",
+            json=self.build_finetune_spec(options),
+            timeout=self._timeouts.deploy,
+        )
+        self._check_response(r, "/v1/gpu/finetune")
+        d = self._parse_json(r, "/v1/gpu/finetune")
+        return FinetuneJobResponse(
+            job_id=str(d.get("jobId") or d.get("id") or ""),
+            status=str(d.get("status", "")),
+            instance_id=str(d.get("instanceId") or d.get("podId") or ""),
+            provider=str(d.get("provider", "")),
+            gpu_type=str(d.get("gpuType", "")),
+            ssh_host=str(d.get("sshHost", "")),
+            ssh_port=int(d.get("sshPort") or 0),
+            r2_checkpoint_url=str(d.get("r2CheckpointUrl", "")),
+            hf_repo_url=str(d.get("hfRepoUrl", "")),
+            checkpoint_prefix=str(d.get("checkpointPrefix", "")),
+            message=str(d.get("message", "")),
+            raw=d,
+        )
+
+    async def finetune_status(self, job_id: str = "", tail: int = 0) -> FinetuneJobStatus:
+        """Fetch structured fine-tune status, including gate scores and checkpoint URLs."""
+        params: dict[str, str] = {}
+        if job_id:
+            params["jobId"] = job_id
+        if tail:
+            params["tail"] = str(tail)
+        r = await self._request_with_retry(
+            "get",
+            "/v1/gpu/finetune/status",
+            params=params,
+            timeout=self._timeouts.health,
+        )
+        self._check_response(r, "/v1/gpu/finetune/status")
+        d = self._parse_json(r, "/v1/gpu/finetune/status")
+        return FinetuneJobStatus(
+            job_id=str(d.get("jobId", "")),
+            status=str(d.get("status") or d.get("stage") or ""),
+            stage=str(d.get("stage", "")),
+            step=int(d.get("step") or 0),
+            total_steps=int(d.get("totalSteps") or 0),
+            progress_pct=float(d.get("progressPct") or 0),
+            best_score=float(d.get("bestScore") or 0),
+            last_score=float(d.get("lastScore") or 0),
+            gate_target=float(d.get("gateTarget") or 0),
+            last_eval_step=int(d.get("lastEvalStep") or 0),
+            eta_sec=int(d.get("etaSec") or 0),
+            checkpoints=list(d.get("checkpoints") or []),
+            r2_checkpoint_url=str(d.get("r2CheckpointUrl", "")),
+            hf_repo_url=str(d.get("hfRepoUrl", "")),
+            raw_logs=str(d.get("rawLogs", "")),
+            raw=d,
+        )
+
+    async def finetune_logs(self, job_id: str = "", tail: int = 0) -> str:
+        """Fetch fine-tune logs."""
+        params: dict[str, str] = {}
+        if job_id:
+            params["jobId"] = job_id
+        if tail:
+            params["tail"] = str(tail)
+        r = await self._request_with_retry(
+            "get",
+            "/v1/gpu/finetune/logs",
+            params=params,
+            timeout=self._timeouts.deploy,
+        )
+        self._check_response(r, "/v1/gpu/finetune/logs")
+        d = self._parse_json(r, "/v1/gpu/finetune/logs")
+        return d.get("logs", "")
+
+    async def cancel_finetune(self, job_id: str = "") -> dict:
+        """Cancel the active or selected fine-tune job."""
+        r = await self._request_with_retry(
+            "post",
+            "/v1/gpu/finetune/cancel",
+            json={"jobId": job_id} if job_id else {},
+            timeout=self._timeouts.deploy,
+        )
+        self._check_response(r, "/v1/gpu/finetune/cancel")
+        return self._parse_json(r, "/v1/gpu/finetune/cancel")
 
     async def wait_for_gpu(self, poll_interval_s: float = 5.0, timeout_s: float = 20 * 60) -> GpuStatus:
         """Wait for GPU to reach 'ready' status (polls gpu_status)."""

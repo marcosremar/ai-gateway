@@ -21,4 +21,10 @@ export {
   type GpuStatus,
   type DeployOptions,
   type DeployResponse,
+  type FinetuneGateConfig,
+  type FinetuneR2Config,
+  type FinetuneHfSyncConfig,
+  type FinetuneJobOptions,
+  type FinetuneJobResponse,
+  type FinetuneJobStatus,
 } from './types';

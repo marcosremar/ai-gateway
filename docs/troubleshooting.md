@@ -97,7 +97,7 @@ ai-gateway config keys
 **Fix:**
 ```bash
 # Clear cooldown file
-rm -f ~/.babelcast/cooldowns.json
+rm -f ~/.ai-gateway/cooldowns.json
 # Restart gateway
 ```
 

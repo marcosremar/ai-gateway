@@ -183,6 +183,72 @@ describe('VastClient', () => {
       expect(createBody.env['-p 8001:8001/udp']).toBe('1');
     }, 60000);
 
+    it('rejects HTTP-only direct port when SSH readiness requires a direct SSH target', async () => {
+      vi.mocked((client as any)._pollForEndpoint).mockResolvedValueOnce({
+        endpoint: 'http://2.2.2.2:28000',
+        ip: '2.2.2.2',
+      });
+      const cleanupSpy = vi.spyOn(client as any, '_safeCleanupInstance').mockResolvedValue(undefined);
+
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockFetchResponse({
+          offers: [{ id: 'offer-1', gpu_name: 'RTX 4090', dph_total: 0.75 }],
+        }))
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '999' }));
+
+      await expect(client.createInstance(
+        {
+          gpuTypes: ['RTX 4090'],
+          dockerImage: 'test/image:latest',
+          readinessProbe: 'ssh',
+          directPortRequired: 1,
+          raceCount: 1,
+        },
+        creds,
+      )).rejects.toThrow(/direct SSH required/);
+
+      expect(cleanupSpy).toHaveBeenCalledWith(
+        'inst-999',
+        creds.apiKey,
+        expect.stringMatching(/direct SSH required.*direct SSH target/),
+      );
+    }, 60000);
+
+    it('rejects Vast SSH proxy when SSH readiness requires direct SSH', async () => {
+      vi.mocked((client as any)._pollForEndpoint).mockResolvedValueOnce({
+        endpoint: 'http://2.2.2.2:28000',
+        ip: '2.2.2.2',
+        sshHost: 'ssh7.vast.ai',
+        sshPort: 25000,
+      });
+      const cleanupSpy = vi.spyOn(client as any, '_safeCleanupInstance').mockResolvedValue(undefined);
+
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockFetchResponse({
+          offers: [{ id: 'offer-1', gpu_name: 'RTX 4090', dph_total: 0.75 }],
+        }))
+        .mockResolvedValueOnce(mockFetchResponse({ success: true, new_contract: '1000' }));
+
+      await expect(client.createInstance(
+        {
+          gpuTypes: ['RTX 4090'],
+          dockerImage: 'test/image:latest',
+          readinessProbe: 'ssh',
+          directPortRequired: 1,
+          raceCount: 1,
+        },
+        creds,
+      )).rejects.toThrow(/direct SSH required.*SSH proxy/);
+
+      expect(cleanupSpy).toHaveBeenCalledWith(
+        'inst-1000',
+        creds.apiKey,
+        expect.stringMatching(/SSH proxy ssh7\.vast\.ai:25000/),
+      );
+    }, 60000);
+
     it('calls onInstancePersist when userId provided', async () => {
       const onPersist = vi.fn().mockResolvedValue(undefined);
       const clientWithPersist = new VastClient({ onInstancePersist: onPersist });
@@ -327,6 +393,32 @@ describe('VastClient', () => {
 
       const result = await client.listInstances(creds);
       expect(result[0].endpoint).toBe('http://2.2.2.2:28000');
+    });
+
+    it('prefers direct SSH mapping over Vast SSH proxy when 22/tcp is exposed', async () => {
+      fetchSpy
+        .mockResolvedValueOnce(mockFetchResponse({
+          instances: [
+            {
+              id: '1',
+              actual_status: 'running',
+              public_ipaddr: '2.2.2.2',
+              ssh_host: 'ssh7.vast.ai',
+              ssh_port: 25000,
+              direct_port_start: 28000,
+              ports: {
+                '22/tcp': { HostIp: '2.2.2.2', HostPort: '28022' },
+                '8000/tcp': { HostPort: '28000' },
+              },
+            },
+          ],
+        }))
+        .mockResolvedValueOnce(mockFetchResponse([]));
+
+      const result = await client.listInstances(creds);
+      expect(result[0].endpoint).toBe('http://2.2.2.2:28000');
+      expect(result[0].sshHost).toBe('2.2.2.2');
+      expect(result[0].sshPort).toBe(28022);
     });
 
     it('falls back to direct_port_start', async () => {

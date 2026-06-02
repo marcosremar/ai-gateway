@@ -76,6 +76,8 @@ export interface DeployExtra {
   searchMode?: 'high_quality' | 'full';
   /** Vast.ai opt-in for unverified/deverified offers. Defaults to verified-only. */
   allowUnverified?: boolean;
+  /** Vast.ai hourly price ceiling forwarded to provider offer search. */
+  maxPricePerHr?: number;
   /**
    * Internal Vast offer-hedge count (distinct from the deploy-level raceCount
    * that selects race-vs-cascade). 1 ⇒ exactly one instance created — no
@@ -84,6 +86,12 @@ export interface DeployExtra {
   offerRaceCount?: number;
   /** Reject SSH-only offers — require at least one direct port (avoids tunnel hangs). */
   requireDirectPort?: boolean;
+  /** Readiness strategy requested by the deploy caller. */
+  readinessProbe?: 'health' | 'ssh';
+  /** SSH readiness timeout requested by the deploy caller, in seconds. */
+  bootTimeoutSec?: number;
+  /** For cost-sensitive batch jobs, avoid retrying the same provider/GPU pool. */
+  suppressProviderRetries?: boolean;
   expectedApiPaths?: string[];
   expectedCapabilities?: DockerCapability[];
   requireDockerManifest?: boolean;
@@ -101,6 +109,7 @@ export async function startDeployLoop(
   slot?: DeploySlot,
 ) {
   const sd=slot?.state??deployState,sds=(p:any)=>setDeployState(p,slot);
+  const isCancelled = () => slot ? slot.cancelled : deployCancelled;
   // Import from extracted modules
   const { startGpuMonitoring, startBackgroundWarmthMonitor } = await import('./gpu-health-monitor');
 
@@ -232,9 +241,10 @@ export async function startDeployLoop(
   // after pod and bleeds money (the cost-cascade incident). Cap it.
   const maxWasteUsd = Math.max(0.5, parseFloat(process.env.DEPLOY_MAX_WASTE_USD ?? '3') || 3);
   let accumulatedWasteUsd = 0;
+  const maxDeployRetries = extra.suppressProviderRetries ? 0 : MAX_DEPLOY_RETRIES;
 
-  for (let attempt = 0; attempt <= MAX_DEPLOY_RETRIES; attempt++) {
-    if (deployCancelled) return; if (slot?.cancelled) return;
+  for (let attempt = 0; attempt <= maxDeployRetries; attempt++) {
+    if (isCancelled()) return;
 
     if (attempt > 0) {
       // Fix #4c: gate RETRIES through the runaway detector. The rapid
@@ -250,9 +260,9 @@ export async function startDeployLoop(
           return;
         }
       } catch { /* detector is best-effort — never block a deploy on its failure */ }
-      sds({ retryCount: attempt, message: `Retry ${attempt + 1}/${MAX_DEPLOY_RETRIES + 1}: creating new ${label} instance...` });
+      sds({ retryCount: attempt, message: `Retry ${attempt + 1}/${maxDeployRetries + 1}: creating new ${label} instance...` });
       await new Promise(r => setTimeout(r, 5_000));
-      if (deployCancelled) return; if (slot?.cancelled) return;
+      if (isCancelled()) return;
     }
 
     const attemptStartedAt = Date.now();
@@ -276,9 +286,23 @@ export async function startDeployLoop(
       // Progress callback: broadcast every poll update so CLI shows "Creating... 45s"
       const onPollProgress = (info: { elapsedS: number; status: string; instanceId: string; ip: string; sshHost?: string; sshPort?: number }) => {
         const sshInfo = info.sshHost ? ` (ssh ${info.sshHost}:${info.sshPort})` : '';
-        sds({ message: `Creating ${label} instance... ${info.elapsedS}s (${info.status})${sshInfo}` });
+        sds({
+          message: `Creating ${label} instance... ${info.elapsedS}s (${info.status})${sshInfo}`,
+          ...(info.instanceId ? { podId: info.instanceId } : {}),
+          ...(info.sshHost ? { sshHost: info.sshHost, sshPort: info.sshPort || 0 } : {}),
+        });
         broadcastWs({ type: 'gpu:deploy', phase: 'creating', deployId: sd.deployId, provider: providerName, message: `Creating ${label} instance... ${info.elapsedS}s (${info.status})` });
       };
+
+      const vastProxyAllowed = process.env.AIGW_VAST_ALLOW_PROXY === '1'
+        || process.env.AIGW_VAST_REQUIRE_DIRECT === '0';
+      const directPortRequired = (providerName.startsWith('vast') && (extra.requireDirectPort || (extra.readinessProbe === 'ssh' && !vastProxyAllowed)))
+        // For SSH-driven jobs this is only a coarse marketplace filter.
+        // The provider client still validates the actual SSH target after
+        // creation. When Vast proxy SSH is allowed, do not require direct
+        // ports here; scarce 5090 pools commonly expose only ssh*.vast.ai.
+        ? 1
+        : undefined;
 
       const instance = await providerClient.createInstance(
         { gpuTypes, dockerImage, storageGb, region: extra.region, hfToken: extra.hfToken, env: extra.env, bareMetal: providerName === 'tensordock', interruptible: extra.interruptible,
@@ -294,8 +318,11 @@ export async function startDeployLoop(
           // gpu-deploy-race.ts) so the verified-host filter and the
           // strict-fast-boot tier are actually controllable from the API.
           ...(extra.allowUnverified ? { allowUnverified: extra.allowUnverified } : {}),
+          ...(typeof extra.maxPricePerHr === 'number' ? { maxPricePerHr: extra.maxPricePerHr } : {}),
           ...(typeof extra.offerRaceCount === 'number' ? { raceCount: extra.offerRaceCount } : {}),
-          ...(extra.requireDirectPort ? { directPortRequired: 1 } : {}),
+          ...(typeof extra.bootTimeoutSec === 'number' ? { bootTimeoutSec: extra.bootTimeoutSec } : {}),
+          ...(directPortRequired ? { directPortRequired } : {}),
+          ...(extra.readinessProbe ? { readinessProbe: extra.readinessProbe } : {}),
           ...(extra.searchMode ? { searchMode: extra.searchMode } : {}),
           ...(extra.dockerStartCmd ? { dockerStartCmd: extra.dockerStartCmd } : {}),
           ...(extra.containerDiskInGb ? { containerDiskInGb: extra.containerDiskInGb } : {}),
@@ -312,7 +339,7 @@ export async function startDeployLoop(
         },
         credentials,
       );
-      if (deployCancelled || slot?.cancelled) {
+      if (isCancelled()) {
         try { await providerClient.deleteInstance(instance.instanceId, credentials); }
         catch (err) { log.warn(`[gpu] Failed to clean up cancelled instance ${instance.instanceId}: ${err}`); }
         return;
@@ -392,7 +419,7 @@ export async function startDeployLoop(
         }
       }
 
-      const pollResult = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, startedAt, dockerImage, instance.providerMeta, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests, slot);
+      const pollResult = await pollHealthUntilReady(providerClient, providerName, apiKey, instance.instanceId, instance.endpoint, attemptStartedAt, dockerImage, instance.providerMeta, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests, slot, extra.bootTimeoutSec);
       const { result, pullTimeS } = pollResult;
       if (result === 'ready') {
         const durationMs = Date.now() - sd.startedAt;
@@ -516,7 +543,7 @@ export async function startDeployLoop(
       if (remediation) {
         log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
       }
-      log.error({ code: deployErr.code, category: deployErr.category }, `${label} create attempt ${attempt + 1}/${MAX_DEPLOY_RETRIES + 1} failed: ${deployErr.message}`);
+      log.error({ code: deployErr.code, category: deployErr.category }, `${label} create attempt ${attempt + 1}/${maxDeployRetries + 1} failed: ${deployErr.message}`);
       sds({ message: `${label} create failed (attempt ${attempt + 1}): ${deployErr.message}` });
 
       // Non-retryable errors — fail immediately without wasting retries
@@ -530,14 +557,14 @@ export async function startDeployLoop(
         broadcastWs({ type: 'gpu:deploy', phase: 'no_offers', deployId: sd.deployId, provider: providerName, gpuTypes });
       }
       const nonRetryable = isBilling || isAuth || isNoOffers;
-      if (nonRetryable || attempt >= MAX_DEPLOY_RETRIES) {
+      if (nonRetryable || attempt >= maxDeployRetries) {
         let errMsg: string;
         if (isBilling) {
           errMsg = `${label}: account balance too low — add funds and retry`;
         } else if (isAuth) {
           errMsg = `${label}: authentication failed — check API key in .env`;
         } else {
-          errMsg = `${label} failed after ${MAX_DEPLOY_RETRIES + 1} attempts: ${deployErr.message}`;
+          errMsg = `${label} failed after ${maxDeployRetries + 1} attempts: ${deployErr.message}`;
         }
         log.error({ code: deployErr.code, category: deployErr.category }, `${label} deploy failed (non_retryable=${nonRetryable}, attempt=${attempt + 1}): ${deployErr.message}`);
         sds({ status: 'error', message: errMsg });

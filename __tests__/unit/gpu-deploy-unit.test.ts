@@ -70,26 +70,26 @@ describe('startDeployWithTiers — structure', () => {
   it('#171 retries up to MAX_DEPLOY_RETRIES times', () => {
     expect(deployLoopSource).toContain('export const MAX_DEPLOY_RETRIES = 2');
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
-    const fnBody = deployLoopSource.slice(fnStart, fnStart + 15000);
-    expect(fnBody).toContain('attempt <= MAX_DEPLOY_RETRIES');
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 50000);
+    expect(fnBody).toContain('attempt <= maxDeployRetries');
   });
 
   it('#172 checks deployCancelled before each attempt', () => {
-    const fnStart = deployLoopSource.indexOf('for (let attempt = 0; attempt <= MAX_DEPLOY_RETRIES');
+    const fnStart = deployLoopSource.indexOf('for (let attempt = 0; attempt <= maxDeployRetries');
     const fnBody = deployLoopSource.slice(fnStart, fnStart + 5000);
-    expect(fnBody).toContain('if (deployCancelled) return');
+    expect(fnBody).toContain('if (isCancelled()) return');
   });
 
   it('#173 delays 5s between retries', () => {
-    const fnStart = deployLoopSource.indexOf('for (let attempt = 0; attempt <= MAX_DEPLOY_RETRIES');
+    const fnStart = deployLoopSource.indexOf('for (let attempt = 0; attempt <= maxDeployRetries');
     const fnBody = deployLoopSource.slice(fnStart, fnStart + 5000);
     expect(fnBody).toContain("setTimeout(r, 5_000)");
   });
 
   it('#174 cleans up cancelled instance immediately after creation', () => {
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
-    const fnBody = deployLoopSource.slice(fnStart, fnStart + 15000);
-    expect(fnBody).toContain('if (deployCancelled)');
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 50000);
+    expect(fnBody).toContain('if (isCancelled())');
     // Cleanup now goes through strategy.cleanup() (refactored from raw deleteInstance).
     expect(fnBody).toMatch(/strategy\.cleanup\(providerClient, instance\.instanceId|deleteInstance\(instance\.instanceId/);
   });
@@ -120,7 +120,7 @@ describe('startDeployWithTiers — structure', () => {
 describe('startDeployWithTiers — error handling', () => {
   it('#177 detects billing errors as non-retryable', () => {
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
-    const fnBody = deployLoopSource.slice(fnStart, fnStart + 27000);
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 40000);
     expect(fnBody).toContain("isBilling");
     expect(fnBody).toContain("'balance'");
     expect(fnBody).toContain("'funds'");
@@ -129,7 +129,7 @@ describe('startDeployWithTiers — error handling', () => {
 
   it('#178 detects auth errors as non-retryable', () => {
     const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
-    const fnBody = deployLoopSource.slice(fnStart, fnStart + 27000);
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 40000);
     expect(fnBody).toContain("isAuth");
     expect(fnBody).toContain("'authentication'");
     expect(fnBody).toContain("'unauthorized'");
@@ -652,7 +652,7 @@ describe('startDeployWithTiers — advanced', () => {
     const fnEnd = deployWithTiersSource.indexOf('\n// ──', fnStart + 50);
     const fnBody = deployWithTiersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 15000);
     expect(fnBody).toContain('silent failure');
-    expect(fnBody).toContain("deployState.status === 'idle'");
+    expect(fnBody).toContain("sd.status === 'idle'");
   });
 });
 

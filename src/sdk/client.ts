@@ -41,6 +41,9 @@ import type {
   ChatCompletionResponse,
   WorkloadInfo,
   WorkloadDeployOptions,
+  FinetuneJobOptions,
+  FinetuneJobResponse,
+  FinetuneJobStatus,
 } from './types';
 import { GatewayError } from './types';
 
@@ -374,6 +377,130 @@ export class GatewaySDK {
     const data = await this.parseJson(res, '/v1/gpu/logs');
     const logs = (data.logs as string) ?? '';
     return logs.slice(0, maxBytes);
+  }
+
+  buildFinetuneSpec(options: FinetuneJobOptions): Record<string, unknown> {
+    const body: Record<string, unknown> = { ...options };
+    delete body.gate;
+    delete body.r2;
+    delete body.huggingFace;
+
+    const gate = options.gate;
+    if (gate) {
+      body.gate = gate;
+      if (gate.everySteps !== undefined) body.evalEverySteps = gate.everySteps;
+      if (gate.evalN !== undefined) body.evalN = gate.evalN;
+      if (gate.asrModel) body.evalAsrModel = gate.asrModel;
+      if (gate.target !== undefined) body.evalGateTarget = gate.target;
+      if (gate.earlyStopPatience !== undefined) body.earlyStopPatience = gate.earlyStopPatience;
+    }
+
+    const r2 = options.r2;
+    if (r2) {
+      body.r2 = r2;
+      if (r2.bucket) body.r2Bucket = r2.bucket;
+      if (r2.prefix) body.r2Prefix = r2.prefix;
+      if (r2.resume !== undefined) body.resumeFromR2 = r2.resume;
+      if (r2.shardedRoot) body.r2ShardedRoot = r2.shardedRoot;
+      if (r2.shardedManifest) body.r2ShardedManifest = r2.shardedManifest;
+      if (r2.baseCheckpoint) body.r2BaseCkpt = r2.baseCheckpoint;
+      if (r2.baseVocab) body.r2BaseVocab = r2.baseVocab;
+      if (r2.checkpointDest) body.r2CkptDest = r2.checkpointDest;
+      if (r2.cacheDir) body.shardCacheDir = r2.cacheDir;
+      if (r2.cacheMaxGb !== undefined) body.shardCacheMaxGb = r2.cacheMaxGb;
+      if (r2.syncEverySec !== undefined) body.r2SyncEverySec = r2.syncEverySec;
+    }
+
+    const hf = options.huggingFace;
+    if (hf) {
+      body.huggingFace = hf;
+      if (hf.repo) {
+        body.pushToHf = hf.repo;
+        body.hfSyncRepo = hf.repo;
+      }
+      if (hf.path) body.hfSyncPath = hf.path;
+      if (hf.intervalSec !== undefined) body.hfSyncIntervalSec = hf.intervalSec;
+      if (hf.finalOnly !== undefined) body.hfFinalOnly = hf.finalOnly;
+      if (hf.private !== undefined) body.hfPrivate = hf.private;
+    }
+
+    return body;
+  }
+
+  async startFinetune(options: FinetuneJobOptions): Promise<FinetuneJobResponse> {
+    const res = await this.fetch('/v1/gpu/finetune', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(this.buildFinetuneSpec(options)),
+      timeout: this.timeouts.deploy,
+      allowedStatuses: [200, 201, 202, 409],
+    });
+    const data = await this.parseJson(res, '/v1/gpu/finetune');
+    return {
+      jobId: String(data.jobId ?? data.id ?? ''),
+      status: String(data.status ?? ''),
+      instanceId: String(data.instanceId ?? data.podId ?? ''),
+      provider: String(data.provider ?? ''),
+      gpuType: String(data.gpuType ?? ''),
+      sshHost: data.sshHost as string | undefined,
+      sshPort: data.sshPort as number | undefined,
+      r2CheckpointUrl: data.r2CheckpointUrl as string | undefined,
+      hfRepoUrl: data.hfRepoUrl as string | undefined,
+      checkpointPrefix: data.checkpointPrefix as string | undefined,
+      message: data.message as string | undefined,
+      raw: data,
+    };
+  }
+
+  async finetuneStatus(jobId = '', tail = 0): Promise<FinetuneJobStatus> {
+    const params = new URLSearchParams();
+    if (jobId) params.set('jobId', jobId);
+    if (tail > 0) params.set('tail', String(tail));
+    const qs = params.toString();
+    const path = `/v1/gpu/finetune/status${qs ? `?${qs}` : ''}`;
+    const res = await this.fetch(path, { method: 'GET', timeout: this.timeouts.health });
+    const data = await this.parseJson(res, '/v1/gpu/finetune/status');
+    return {
+      jobId: data.jobId as string | undefined,
+      status: String(data.status ?? data.stage ?? ''),
+      stage: data.stage as string | undefined,
+      step: data.step as number | undefined,
+      totalSteps: data.totalSteps as number | undefined,
+      progressPct: data.progressPct as number | undefined,
+      bestScore: data.bestScore as number | undefined,
+      lastScore: data.lastScore as number | undefined,
+      gateTarget: data.gateTarget as number | undefined,
+      lastEvalStep: data.lastEvalStep as number | undefined,
+      etaSec: data.etaSec as number | undefined,
+      checkpoints: data.checkpoints as string[] | undefined,
+      r2CheckpointUrl: data.r2CheckpointUrl as string | undefined,
+      hfRepoUrl: data.hfRepoUrl as string | undefined,
+      rawLogs: data.rawLogs as string | undefined,
+      raw: data,
+    };
+  }
+
+  async finetuneLogs(jobId = '', tail = 0): Promise<string> {
+    const params = new URLSearchParams();
+    if (jobId) params.set('jobId', jobId);
+    if (tail > 0) params.set('tail', String(tail));
+    const qs = params.toString();
+    const res = await this.fetch(`/v1/gpu/finetune/logs${qs ? `?${qs}` : ''}`, {
+      method: 'GET',
+      timeout: this.timeouts.health,
+    });
+    const data = await this.parseJson(res, '/v1/gpu/finetune/logs');
+    return String(data.logs ?? '');
+  }
+
+  async cancelFinetune(jobId = ''): Promise<Record<string, unknown>> {
+    const res = await this.fetch('/v1/gpu/finetune/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(jobId ? { jobId } : {}),
+      timeout: this.timeouts.deploy,
+    });
+    return await this.parseJson(res, '/v1/gpu/finetune/cancel') as Record<string, unknown>;
   }
 
   /** Fetch persistent GPU event logs (JSONL file-based). */

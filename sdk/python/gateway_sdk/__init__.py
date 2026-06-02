@@ -43,6 +43,13 @@ from gateway_sdk.types import (
     GpuStatus,
     DeployOptions,
     DeployResponse,
+    FinetuneGateConfig,
+    FinetuneHfSyncConfig,
+    FinetuneJobOptions,
+    FinetuneJobResponse,
+    FinetuneJobStatus,
+    FinetuneR2Config,
+    FinetuneSshTarget,
 )
 
 __all__ = [
@@ -77,4 +84,11 @@ __all__ = [
     "GpuStatus",
     "DeployOptions",
     "DeployResponse",
+    "FinetuneGateConfig",
+    "FinetuneHfSyncConfig",
+    "FinetuneJobOptions",
+    "FinetuneJobResponse",
+    "FinetuneJobStatus",
+    "FinetuneR2Config",
+    "FinetuneSshTarget",
 ]

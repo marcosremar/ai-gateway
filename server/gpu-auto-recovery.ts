@@ -13,6 +13,7 @@ import {
   loadPersistedDeploy, clearPersistedDeploy, persistDeployState,
   resetDeployState,
   updateGpuModelWarmth,
+  type DeploymentState,
 } from './state';
 import { markGpuHealthy, runpod, vast, tensordock, modal, hyperstack } from './providers';
 import { broadcastWs } from './ws-state';
@@ -21,7 +22,7 @@ import { POD_NAME_PREFIX } from './gpu-orphan-cleanup';
 
 const log = createLogger('gpu-deploy');
 
-export async function fetchGpuLogs(sshHost?: string, sshPort?: number, endpoint?: string): Promise<string> {
+export async function fetchGpuLogs(sshHost?: string, sshPort?: number, endpoint?: string, targetState: DeploymentState = deployState): Promise<string> {
   const host = sshHost || deployState.sshHost;
   const port = sshPort || deployState.sshPort;
   const gpuEndpoint = endpoint || deployState.endpoint;
@@ -65,7 +66,7 @@ export async function fetchGpuLogs(sshHost?: string, sshPort?: number, endpoint?
     return '(no logs available — no SSH or HTTP access to GPU)';
   }
   const result = lines.join('\n');
-  deployState.lastLogs = result;
+  targetState.lastLogs = result;
   return result;
 }
 

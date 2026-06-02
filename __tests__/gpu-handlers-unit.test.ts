@@ -82,7 +82,7 @@ describe('handleGpuDeploy — structure & flow', () => {
 
   it('#080 handleGpuDeploy calls getOrCreateRequestId', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 30000);
     expect(fnBody).toContain('getOrCreateRequestId');
   });
 
@@ -101,7 +101,7 @@ describe('handleGpuDeploy — structure & flow', () => {
 
   it('#083 handleGpuDeploy calls setDeployLock(true) to acquire the lock', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuDeploy');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
+    const fnBody = handlersSource.slice(fnStart, fnStart + 30000);
     expect(fnBody).toContain('setDeployLock(true)');
   });
 
@@ -612,7 +612,8 @@ describe('handleGpuOffers', () => {
   it('#144 supports gpuTypes, region, limit, provider query params', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuOffers');
     const fnBody = handlersSource.slice(fnStart, fnStart + 10000);
-    expect(fnBody).toContain("url.searchParams.get('gpuTypes')");
+    expect(handlersSource).toContain("const GPU_FILTER_ALIASES = ['gpuTypes', 'gpuType', 'gpu', 'gpuName']");
+    expect(fnBody).toContain('parseGpuTypesQuery(url)');
     expect(fnBody).toContain("url.searchParams.get('region')");
     expect(fnBody).toContain("url.searchParams.get('limit')");
     expect(fnBody).toContain("url.searchParams.get('provider')");

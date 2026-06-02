@@ -10,6 +10,7 @@ import { getRouteBodyLimit } from '../http-utils';
 import { resolveBearer, X_AIGW_USER_ID } from './api-key-resolver';
 
 const log = createLogger('http-api-server');
+const liveServers: unknown[] = [];
 
 type AuthzResult =
   | { ok: true; userId: string | null }
@@ -311,7 +312,7 @@ export function startHttpApiServer(): void {
     const matchGpuDynamic = getGpuDynamicMatcher();
     const matchAppDynamic = getAppDynamicMatcher();
 
-    Bun.serve({
+    const httpServer = Bun.serve({
       port: PORT,
       reusePort: true,
       // GPU offers/catalog queries fan out to multiple cloud providers and can
@@ -414,6 +415,7 @@ export function startHttpApiServer(): void {
         return invokeNodeStyleHandler(req, (fakeReq, fakeRes) => handler(fakeReq, fakeRes), corsOrigin, routeLimit, callerUserId);
       },
     });
+    liveServers.push(httpServer);
     log.log(`[ws-server] HTTP API on port ${PORT}`);
   } catch (e: any) {
     log.warn(`[ws-server] HTTP API not started: ${e.message?.slice(0, 80)}`);

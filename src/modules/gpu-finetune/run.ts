@@ -53,13 +53,20 @@ export interface GpuJobRunnerOpts {
   path: string;
   main: string;
   gpu: string;
+  region?: string;
   maxCost: number;
   maxSpend: number;
   output: string;
   timeoutMin: number;
   bootTimeoutMin?: number;
+  bootTimeoutSec?: number;
+  raceCount?: number;
+  offerRaceCount?: number;
+  parallelSlot?: string;
+  storageGb?: number;
   image: string;
   provider?: string;        // pin a specific provider (e.g. 'vast') instead of cascade default
+  providers?: string[];     // ordered provider allowlist; runner skips entries in cooldown
   preferSpot: boolean;
   reuseInstance: boolean;
   pullEveryMin: number;
@@ -67,6 +74,7 @@ export interface GpuJobRunnerOpts {
   pullExclude: string[];
   abortOnDivergence: boolean;
   gpuFallback: boolean;
+  selectMode?: 'cheapest' | 'balanced' | 'fast';
   dryRun?: boolean;
 }
 
@@ -136,21 +144,38 @@ export interface R2Creds {
   secretKey: string;
   endpoint: string;
   region: string;
+  providerKind: 'cloudflare-r2' | 'backblaze-b2' | 's3-compatible';
+  providerLabel: string;
+  rcloneProvider: 'Cloudflare' | 'Other';
   /** true only when access key, secret key, AND endpoint are all present. */
   hasCreds: boolean;
 }
 
+export function detectObjectStorageProvider(endpoint: string): Pick<R2Creds, 'providerKind' | 'providerLabel' | 'rcloneProvider'> {
+  if (endpoint.includes('r2.cloudflarestorage.com')) {
+    return { providerKind: 'cloudflare-r2', providerLabel: 'Cloudflare R2', rcloneProvider: 'Cloudflare' };
+  }
+  if (endpoint.includes('backblazeb2.com')) {
+    return { providerKind: 'backblaze-b2', providerLabel: 'Backblaze B2', rcloneProvider: 'Other' };
+  }
+  return { providerKind: 's3-compatible', providerLabel: 'S3-compatible storage', rcloneProvider: 'Other' };
+}
+
 /**
- * Resolve R2/S3 credentials from the gateway env. Single source of truth —
+ * Resolve durable object-storage credentials from the gateway env. Single source of truth —
  * shared by buildR2Config (run composition) and preflight (fail-fast check).
- * Accepts B2_* or STORAGE_* aliases (same scheme as the pod-agent backup).
+ * Accepts Backblaze B2 names first, then legacy B2_ACCOUNT_ID/STORAGE_* aliases.
  */
 export function resolveR2Creds(env: Record<string, string | undefined> = process.env): R2Creds {
-  const accessKey = env.B2_ACCOUNT_ID || env.STORAGE_ACCESS_KEY || '';
+  const accessKey = env.B2_APPLICATION_KEY_ID || env.B2_KEY_ID || env.B2_ACCOUNT_ID || env.STORAGE_ACCESS_KEY || '';
   const secretKey = env.B2_APPLICATION_KEY || env.STORAGE_SECRET_KEY || '';
-  const endpoint = env.B2_ENDPOINT || env.STORAGE_ENDPOINT || '';
   const region = env.B2_REGION || env.STORAGE_REGION || 'auto';
-  return { accessKey, secretKey, endpoint, region, hasCreds: !!(accessKey && secretKey && endpoint) };
+  const endpoint = env.B2_ENDPOINT || env.STORAGE_ENDPOINT ||
+    ((env.B2_APPLICATION_KEY_ID || env.B2_KEY_ID) && region && region !== 'auto'
+      ? `https://s3.${region}.backblazeb2.com`
+      : '');
+  const provider = detectObjectStorageProvider(endpoint);
+  return { accessKey, secretKey, endpoint, region, ...provider, hasCreds: !!(accessKey && secretKey && endpoint) };
 }
 
 // ─── FinetuneGateway ───────────────────────────────────────────────────────
@@ -201,20 +226,28 @@ export class FinetuneGateway {
       path: resolved.localPath,
       main,
       gpu: resolved.gpu,
+      region: resolved.region,
       maxCost: resolved.maxCost,
       maxSpend: resolved.maxSpend,
       output: resolved.output,
-      timeoutMin: resolved.smokeOnly ? 30 : 360,
+      timeoutMin: resolved.timeoutMin ?? (resolved.smokeOnly ? 30 : 360),
+      bootTimeoutSec: resolved.bootTimeoutSec,
+      raceCount: resolved.raceCount,
+      offerRaceCount: resolved.offerRaceCount,
+      parallelSlot: resolved.parallelSlot,
+      storageGb: resolved.storageGb,
       image: resolved.image,
-      provider: opts.providers?.[0],   // pin first listed provider (e.g. vast) — server honors body.provider
+      provider: opts.provider ?? (opts.providers?.length === 1 ? opts.providers[0] : undefined),
+      providers: opts.provider ? undefined : opts.providers,
       preferSpot: resolved.preferSpot,
       reuseInstance: resolved.reuse,
-      pullEveryMin: 3,
-      stallMin: 30,
-      bootTimeoutMin: 10,   // abandon slow/dead instances fast; auto-resubmit picks a new one
-      pullExclude: ['data/', 'model/', 'wav/', '*.shard*', '__pycache__/'],
+      pullEveryMin: resolved.pullEveryMin ?? 3,
+      stallMin: resolved.stallMin ?? 30,
+      bootTimeoutMin: resolved.bootTimeoutMin ?? 10,   // abandon slow/dead instances fast; auto-resubmit picks a new one
+      pullExclude: resolved.pullExclude ?? ['data/', 'model/', 'wav/', '*.shard*', '__pycache__/'],
       abortOnDivergence: true,
       gpuFallback: resolved.gpuFallback,
+      selectMode: resolved.selectMode,
       dryRun: resolved.dryRun,
     });
 
@@ -303,6 +336,7 @@ export class FinetuneGateway {
       // 'aigw-finetune-base' has no registry → silently fell back to gpu-dev
       // (no ML deps) → full reinstall every run.
       image: resolved.image ?? 'marcosremar/aigw-finetune-base:latest',
+      selectMode: resolved.selectMode ?? 'balanced',
       scriptPath: resolved.scriptPath!,
       localPath: resolved.localPath!,
     };
@@ -312,9 +346,10 @@ export class FinetuneGateway {
   // ─── Private: shell script builder ─────────────────────────────────────
 
   buildShellScript(opts: ResolvedFinetune, scriptName: string): string {
-    const token = this.deps.hfToken.resolve();
+    const token = this.resolveHfTokenForRun(opts);
     const exports = this.buildExports(opts, token);
     const r2 = this.buildR2Config(opts);
+    const runtimeDiagnostics = this.buildRuntimeDiagnosticsStage(opts, r2);
     const aptStage = this.buildAptStage(opts);
     const pipStage = this.buildPipStage(opts);
     const torchStage = this.buildTorchStage(opts);
@@ -329,13 +364,15 @@ export class FinetuneGateway {
     const smokeVerifyInline = this.buildSmokeVerifyInline(opts);
     const ckptAvgStage = this.buildCkptAverageStage(opts);
     const pushStage = this.buildPushStage(opts);
+    const r2LiveSyncStart = this.buildR2LiveSyncStart(opts, r2);
+    const r2LiveSyncStop = this.buildR2LiveSyncStop(opts, r2);
     const r2BackupStage = this.buildR2BackupStage(opts, r2);
     const webhookStage = this.buildWebhookStage(opts);
 
     // R2 restore/backup só no run completo (smoke é efêmero, não persiste).
     const pipeline = opts.smokeOnly
       ? `${prepStage}${encodeStage}${trainStage}${smokeVerifyInline}`
-      : `${prepStage}${preSmokeStage}${encodeStage}${r2RestoreStage}${trainStage}${ckptAvgStage}${pushStage}${r2BackupStage}${webhookStage}`;
+      : `${prepStage}${preSmokeStage}${encodeStage}${r2RestoreStage}${r2LiveSyncStart}${trainStage}${r2LiveSyncStop}${ckptAvgStage}${pushStage}${r2BackupStage}${webhookStage}`;
 
     // Overlap pip install with dataset/model download to save ~2min per run.
     // pip runs in background; dataset + model download in foreground; then we wait for pip.
@@ -344,26 +381,50 @@ export class FinetuneGateway {
     let installBlock: string;
     if (hasDl && (pipStage || torchStage)) {
       const pipFull = [torchStage, pipStage].filter(Boolean).join(' && ');
-      // Launch pip in background before downloads, join after
-      installBlock = `{ ${pipFull}; } > /tmp/pip.log 2>&1 & __PIP=$! && ` +
-        `${datasetDl}${modelDl}${fromHfStage}true && ` +
-        `wait $__PIP || { cat /tmp/pip.log; exit 1; }`;
+      // Launch pip in background before downloads, join after. Keep the
+      // background operator inside a grouped command; otherwise shell `&& ... &`
+      // backgrounds the whole previous AND-list, including the env exports.
+      installBlock = `( { ${pipFull}; } > /tmp/pip.log 2>&1 & __PIP=$!; ` +
+        `${datasetDl}${modelDl}${fromHfStage}true; ` +
+        `wait $__PIP || { cat /tmp/pip.log; exit 1; } )`;
     } else {
       installBlock = [torchStage, pipStage, `${datasetDl}${modelDl}${fromHfStage}true`].filter(Boolean).join(' && ');
     }
 
     return [
       'set -euo pipefail',
-      `export HF_TOKEN='${token}'`,
+      token ? `export HF_TOKEN=${shellQuote(token)}` : '',
       ...exports,
       ...(r2?.exports ?? []),
-      `export ${opts.noHfTransfer ? '' : 'HF_HUB_ENABLE_HF_TRANSFER=1 '}DEBIAN_FRONTEND=noninteractive`,
+      `export ${opts.noHfTransfer ? '' : 'HF_XET_HIGH_PERFORMANCE=1 HF_XET_FIXED_DOWNLOAD_CONCURRENCY=50 '}HF_HUB_DOWNLOAD_TIMEOUT=30 HF_HUB_ETAG_TIMEOUT=30 DEBIAN_FRONTEND=noninteractive`,
       'cd /workspace',
+      runtimeDiagnostics,
       aptStage,
       installBlock,
       'mkdir -p /workspace/checkpoints',
       pipeline,
     ].filter(Boolean).join(' && ');
+  }
+
+  private needsHfToken(opts: ResolvedFinetune): boolean {
+    return Boolean(
+      opts.dataset ||
+      opts.model ||
+      opts.pushToHf ||
+      opts.hfBase ||
+      opts.fromHf ||
+      opts.hfSyncRepo
+    );
+  }
+
+  private resolveHfTokenForRun(opts: ResolvedFinetune): string {
+    if (!this.needsHfToken(opts)) return '';
+    try {
+      return this.deps.hfToken.resolve();
+    } catch (err) {
+      if (opts.dryRun) return '[dry-run-hf-token]';
+      throw err;
+    }
   }
 
   // ─── Stage builders ────────────────────────────────────────────────────
@@ -376,39 +437,50 @@ export class FinetuneGateway {
     const hfCode = hfBase && hfStructureVal === 'tri' ? `${hfBase}-code` : '';
 
     const livePushExports = [
-      hfWeights ? `export IARATTS_HF_WEIGHTS_REPO='${hfWeights}'` : '',
-      hfDataset ? `export IARATTS_HF_DATASET_REPO='${hfDataset}'` : '',
-      hfCode ? `export IARATTS_HF_CODE_REPO='${hfCode}'` : '',
+      hfWeights ? `export IARATTS_HF_WEIGHTS_REPO=${shellQuote(hfWeights)}` : '',
+      hfDataset ? `export IARATTS_HF_DATASET_REPO=${shellQuote(hfDataset)}` : '',
+      hfCode ? `export IARATTS_HF_CODE_REPO=${shellQuote(hfCode)}` : '',
     ].filter(Boolean);
 
     const wandbExports = wandb
       ? [
-          `export WANDB_PROJECT='${wandb.project}'`,
-          wandb.entity ? `export WANDB_ENTITY='${wandb.entity}'` : '',
-          wandb.runName ? `export WANDB_RUN_NAME='${wandb.runName}'` : '',
-          wandb.logModel ? `export WANDB_LOG_MODEL='${wandb.logModel}'` : '',
-          process.env.WANDB_API_KEY ? `export WANDB_API_KEY='${process.env.WANDB_API_KEY}'` : '',
+          `export WANDB_PROJECT=${shellQuote(wandb.project)}`,
+          wandb.entity ? `export WANDB_ENTITY=${shellQuote(wandb.entity)}` : '',
+          wandb.runName ? `export WANDB_RUN_NAME=${shellQuote(wandb.runName)}` : '',
+          wandb.logModel ? `export WANDB_LOG_MODEL=${shellQuote(wandb.logModel)}` : '',
+          process.env.WANDB_API_KEY ? `export WANDB_API_KEY=${shellQuote(process.env.WANDB_API_KEY)}` : '',
         ].filter(Boolean)
       : [];
 
     const secretExports = secrets
-      ? Object.entries(secrets).map(([k, v]) => `export ${k}='${v}'`)
+      ? Object.entries(secrets).map(([k, v]) => `export ${k}=${shellQuote(v)}`)
       : [];
 
     const route2Exports = [
-      opts.r2ShardedRoot ? `export R2_SHARDED_ROOT='${opts.r2ShardedRoot}'` : '',
-      opts.r2ShardedManifest ? `export R2_SHARDED_MANIFEST='${opts.r2ShardedManifest}'` : '',
-      opts.r2BaseCkpt ? `export R2_BASE_CKPT='${opts.r2BaseCkpt}'` : '',
-      opts.r2BaseVocab ? `export R2_BASE_VOCAB='${opts.r2BaseVocab}'` : '',
-      opts.r2CkptDest ? `export R2_CKPT_DEST='${opts.r2CkptDest}'` : '',
-      opts.shardCacheDir ? `export SHARD_CACHE_DIR='${opts.shardCacheDir}'` : '',
-      opts.shardCacheMaxGb !== undefined ? `export SHARD_CACHE_MAX_GB='${opts.shardCacheMaxGb}'` : '',
-      opts.steps !== undefined ? `export ROUTE2_STEPS='${opts.steps}'` : '',
-      `export ROUTE2_BATCH='${opts.batchSize ?? 32}'`,
-      `export ROUTE2_LR='${opts.lr}'`,
-      `export ROUTE2_WORKERS='${opts.workers ?? 2}'`,
-      `export ROUTE2_SAVE_EVERY='${opts.saveEverySteps ?? 500}'`,
-      `export ROUTE2_LOG_EVERY='${opts.logEverySteps ?? 20}'`,
+      opts.r2ShardedRoot ? `export R2_SHARDED_ROOT=${shellQuote(opts.r2ShardedRoot)}` : '',
+      opts.r2ShardedManifest ? `export R2_SHARDED_MANIFEST=${shellQuote(opts.r2ShardedManifest)}` : '',
+      opts.r2BaseCkpt ? `export R2_BASE_CKPT=${shellQuote(opts.r2BaseCkpt)}` : '',
+      opts.r2BaseVocab ? `export R2_BASE_VOCAB=${shellQuote(opts.r2BaseVocab)}` : '',
+      opts.r2CkptDest ? `export R2_CKPT_DEST=${shellQuote(opts.r2CkptDest)}` : '',
+      opts.shardCacheDir ? `export SHARD_CACHE_DIR=${shellQuote(opts.shardCacheDir)}` : '',
+      opts.shardCacheMaxGb !== undefined ? `export SHARD_CACHE_MAX_GB=${shellQuote(String(opts.shardCacheMaxGb))}` : '',
+      opts.steps !== undefined ? `export ROUTE2_STEPS=${shellQuote(String(opts.steps))}` : '',
+      `export ROUTE2_BATCH=${shellQuote(String(opts.batchSize ?? 32))}`,
+      `export ROUTE2_LR=${shellQuote(String(opts.lr))}`,
+      `export ROUTE2_WORKERS=${shellQuote(String(opts.workers ?? 2))}`,
+      `export ROUTE2_SAVE_EVERY=${shellQuote(String(opts.saveEverySteps ?? 500))}`,
+      `export ROUTE2_LOG_EVERY=${shellQuote(String(opts.logEverySteps ?? 20))}`,
+      `export ROUTE2_EVAL_EVERY=${shellQuote(String(opts.evalEverySteps ?? 1000))}`,
+      `export ROUTE2_EVAL_N=${shellQuote(String(opts.evalN ?? 8))}`,
+      `export ROUTE2_WHISPER=${shellQuote(opts.evalAsrModel ?? 'base')}`,
+      `export ROUTE2_PATIENCE=${shellQuote(String(opts.earlyStopPatience ?? 4))}`,
+      opts.evalGateTarget !== undefined ? `export ROUTE2_GATE_TARGET=${shellQuote(String(opts.evalGateTarget))}` : '',
+      opts.hfSyncRepo ? `export HF_SYNC_REPO=${shellQuote(opts.hfSyncRepo)}` : '',
+      opts.hfSyncPath ? `export HF_SYNC_PATH=${shellQuote(opts.hfSyncPath)}` : '',
+      opts.hfSyncIntervalSec !== undefined ? `export HF_SYNC_INTERVAL_SEC=${shellQuote(String(opts.hfSyncIntervalSec))}` : '',
+      opts.r2Bucket ? `export AIGW_CHECKPOINT_DIR=/workspace/checkpoints` : '',
+      opts.r2Bucket ? `export AIGW_R2_AUTO_RESUME=${shellQuote(String(opts.autoResumeR2 !== false))}` : '',
+      opts.r2Bucket ? `export AIGW_R2_SYNC_INTERVAL_SEC=${shellQuote(String(opts.r2SyncIntervalSec ?? 180))}` : '',
     ].filter(Boolean);
 
     return [...livePushExports, ...wandbExports, ...secretExports, ...route2Exports];
@@ -421,7 +493,7 @@ export class FinetuneGateway {
       custom: 'build-essential',
     };
     const apt = `${aptByType[opts.type] || 'pkg-config build-essential'}${opts.aptPkgs ? ' ' + opts.aptPkgs : ''}`;
-    return `apt-get update -q && apt-get install -y -q ${apt}`;
+    return `${this.aptWait()} && apt-get update -q && apt-get install -y -q ${apt}`;
   }
 
   private buildPipStage(opts: ResolvedFinetune): string {
@@ -477,38 +549,128 @@ export class FinetuneGateway {
     remote: string; bucket: string; prefix: string; exports: string[]; hasCreds: boolean;
   } | null {
     if (!opts.r2Bucket) return null;
-    const { accessKey: ak, secretKey: sk, endpoint, region, hasCreds } = resolveR2Creds(process.env);
-    const remote = 'r2aigw';
+    const { accessKey: ak, secretKey: sk, endpoint, region, hasCreds, rcloneProvider, providerKind } = resolveR2Creds(process.env);
+    const remote = process.env.AIGW_STORAGE_REMOTE || (providerKind === 'backblaze-b2' ? 'b2aigw' : 'r2aigw');
     const R = remote.toUpperCase();
     const projName = opts.project || opts.preset?.manifest?.name || opts.type;
     const prefix = (opts.r2Prefix || `jobs/${projName}`).replace(/\/+$/, '');
-    const provider = endpoint.includes('r2.cloudflarestorage.com') ? 'Cloudflare' : 'Other';
     const exports = hasCreds ? [
       `export RCLONE_CONFIG_${R}_TYPE=s3`,
-      `export RCLONE_CONFIG_${R}_PROVIDER=${provider}`,
-      `export RCLONE_CONFIG_${R}_ENDPOINT='${endpoint}'`,
-      `export RCLONE_CONFIG_${R}_ACCESS_KEY_ID='${ak}'`,
-      `export RCLONE_CONFIG_${R}_SECRET_ACCESS_KEY='${sk}'`,
-      `export RCLONE_CONFIG_${R}_REGION='${region}'`,
+      `export RCLONE_CONFIG_${R}_PROVIDER=${rcloneProvider}`,
+      `export RCLONE_CONFIG_${R}_ENDPOINT=${shellQuote(endpoint)}`,
+      `export RCLONE_CONFIG_${R}_ACCESS_KEY_ID=${shellQuote(ak)}`,
+      `export RCLONE_CONFIG_${R}_SECRET_ACCESS_KEY=${shellQuote(sk)}`,
+      `export RCLONE_CONFIG_${R}_REGION=${shellQuote(region)}`,
       `export RCLONE_CONFIG_${R}_NO_CHECK_BUCKET=true`,
+      `export B2_KEY_ID=${shellQuote(ak)}`,
+      `export B2_APPLICATION_KEY_ID=${shellQuote(ak)}`,
+      `export B2_ACCOUNT_ID=${shellQuote(ak)}`,
+      `export B2_APPLICATION_KEY=${shellQuote(sk)}`,
+      `export B2_ENDPOINT=${shellQuote(endpoint)}`,
+      `export B2_REGION=${shellQuote(region)}`,
+      `export RCLONE_BIND=0.0.0.0`,
+      `export RCLONE_CONNECT_TIMEOUT=10s`,
+      `export RCLONE_TIMEOUT=30s`,
+      `export RCLONE_RETRIES=5`,
+      `export RCLONE_LOW_LEVEL_RETRIES=20`,
+      `export RCLONE_STATS=30s`,
     ] : [];
     return { remote, bucket: opts.r2Bucket, prefix, exports, hasCreds };
   }
 
+  private buildRuntimeDiagnosticsStage(
+    opts: ResolvedFinetune,
+    r2: ReturnType<FinetuneGateway['buildR2Config']>,
+  ): string {
+    const hosts = [
+      opts.dataset?.startsWith('hf://') || opts.model?.startsWith('hf://') || opts.fromHf ? 'huggingface.co' : '',
+      r2?.hasCreds ? this.hostFromEndpoint(resolveR2Creds(process.env).endpoint) : '',
+    ].filter(Boolean);
+    const hostProbe = hosts.length
+      ? hosts.map((h) => `echo '[net] ahosts ${h}'; getent ahosts ${shellQuote(h)} 2>/dev/null | head -8 || true`).join('; ')
+      : `echo '[net] no external host probes configured'`;
+
+    return `{ ` +
+      `echo '[diag] job bootstrap diagnostics'; ` +
+      `__AIGW_HF_TOKEN_TMP="\${HF_TOKEN:-}"; ` +
+      `echo "[diag] hf_token_present=$([ -n "$__AIGW_HF_TOKEN_TMP" ] && echo yes || echo no) hf_token_len=\${#__AIGW_HF_TOKEN_TMP}"; ` +
+      `echo "[diag] rclone_remote=${r2?.remote ?? 'none'} rclone_bind=\${RCLONE_BIND:-unset}"; ` +
+      `if [ -w /etc/gai.conf ]; then ` +
+      `grep -q '^precedence ::ffff:0:0/96  100' /etc/gai.conf || printf '\\nprecedence ::ffff:0:0/96  100\\n' >> /etc/gai.conf; ` +
+      `echo '[net] prefer IPv4 enabled via /etc/gai.conf'; ` +
+      `else echo '[net] /etc/gai.conf not writable; relying on RCLONE_BIND when rclone is used'; fi; ` +
+      `ip -brief route 2>/dev/null || true; ` +
+      `ip -6 route 2>/dev/null || true; ` +
+      `${hostProbe}; ` +
+      `} `;
+  }
+
+  private hostFromEndpoint(endpoint: string): string {
+    try {
+      return new URL(endpoint).hostname;
+    } catch {
+      return endpoint.replace(/^https?:\/\//, '').split('/')[0] || endpoint;
+    }
+  }
+
   /** Garante rclone instalado no pod (base image pode não ter). */
   private rcloneEnsure(): string {
-    return `{ command -v rclone >/dev/null 2>&1 || { apt-get update -q && apt-get install -y -q rclone || curl -fsSL https://rclone.org/install.sh | bash; }; }`;
+    return `{ command -v rclone >/dev/null 2>&1 || ` +
+      `{ for i in $(seq 1 5); do ` +
+      `rm -rf /tmp/rclone.zip /tmp/rclonezip; ` +
+      `curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip && ` +
+      `python3 -c "import glob,os,shutil,zipfile; zipfile.ZipFile('/tmp/rclone.zip').extractall('/tmp/rclonezip'); p=glob.glob('/tmp/rclonezip/rclone-*/rclone')[0]; shutil.copy2(p,'/usr/local/bin/rclone'); os.chmod('/usr/local/bin/rclone',0o755)" && break; ` +
+      `sleep 5; done; command -v rclone >/dev/null 2>&1; }; }`;
+  }
+
+  private aptWait(): string {
+    return `for i in $(seq 1 60); do ` +
+      `fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 || break; ` +
+      `echo '[apt] waiting for lock'; sleep 5; ` +
+      `done`;
   }
 
   private buildR2RestoreStage(opts: ResolvedFinetune, r2: ReturnType<FinetuneGateway['buildR2Config']>): string {
-    if (!r2 || !opts.resumeFromR2) return '';
+    const shouldRestore = !!r2 && !opts.smokeOnly && (opts.resumeFromR2 || opts.autoResumeR2 !== false);
+    if (!r2 || !shouldRestore) return '';
     if (!r2.hasCreds) {
-      return `echo '[r2] resumeFromR2 set mas sem creds R2 no env do gateway — restore pulado' && `;
+      return `echo '[r2] auto-resume set mas sem creds R2 no env do gateway — restore pulado' && `;
     }
     const dst = `${r2.remote}:${r2.bucket}/${r2.prefix}/checkpoints`;
     return `${this.rcloneEnsure()} && ` +
-      `echo '[r2] restaurando checkpoints de ${dst}' && mkdir -p /workspace/checkpoints && ` +
-      `rclone copy ${dst} /workspace/checkpoints --transfers 8 --checksum 2>&1 | tail -3 && `;
+      `echo '[r2] checando checkpoints para resume em ${dst}' && mkdir -p /workspace/checkpoints && ` +
+      `if rclone lsf ${dst} >/tmp/aigw_r2_resume.lst 2>/tmp/aigw_r2_resume.err && [ -s /tmp/aigw_r2_resume.lst ]; then ` +
+      `echo '[r2] restaurando checkpoints de ${dst}'; ` +
+      `rclone copy ${dst} /workspace/checkpoints --transfers 8 --checksum 2>&1 | tail -3; ` +
+      `else echo '[r2] nenhum checkpoint anterior em ${dst}'; fi && `;
+  }
+
+  private buildR2ManifestCommand(): string {
+    return `mkdir -p /workspace/checkpoints && ` +
+      `find /workspace/checkpoints -maxdepth 1 -type f ` +
+      `-printf '{"path":"%f","bytes":%s,"mtime":%T@}\\n' ` +
+      `> /workspace/checkpoints/aigw_manifest.jsonl 2>/dev/null || true`;
+  }
+
+  private buildR2LiveSyncStart(opts: ResolvedFinetune, r2: ReturnType<FinetuneGateway['buildR2Config']>): string {
+    if (!r2 || opts.smokeOnly || !r2.hasCreds) return '';
+    const interval = opts.r2SyncIntervalSec ?? 180;
+    if (interval <= 0) return '';
+    const dst = `${r2.remote}:${r2.bucket}/${r2.prefix}/checkpoints`;
+    return `${this.rcloneEnsure()} && echo '[r2] live sync a cada ${interval}s → ${dst}' && ` +
+      `{ ( while true; do sleep ${Math.max(5, Math.floor(interval))}; ` +
+      `${this.buildR2ManifestCommand()} && ` +
+      `rclone sync /workspace/checkpoints ${dst} --transfers 4 --checksum 2>&1 | tail -3 || true; ` +
+      `done ) & __AIGW_R2_SYNC_PID=$!; ` +
+      `trap 'if [ -n "\${__AIGW_R2_SYNC_PID:-}" ]; then kill "$__AIGW_R2_SYNC_PID" 2>/dev/null || true; fi' EXIT; } && `;
+  }
+
+  private buildR2LiveSyncStop(opts: ResolvedFinetune, r2: ReturnType<FinetuneGateway['buildR2Config']>): string {
+    if (!r2 || opts.smokeOnly || !r2.hasCreds || (opts.r2SyncIntervalSec ?? 180) <= 0) return '';
+    return ` && if [ -n "\${__AIGW_R2_SYNC_PID:-}" ]; then ` +
+      `kill "$__AIGW_R2_SYNC_PID" 2>/dev/null || true; ` +
+      `wait "$__AIGW_R2_SYNC_PID" 2>/dev/null || true; ` +
+      `fi`;
   }
 
   private buildR2BackupStage(opts: ResolvedFinetune, r2: ReturnType<FinetuneGateway['buildR2Config']>): string {
@@ -518,6 +680,7 @@ export class FinetuneGateway {
     }
     const dst = `${r2.remote}:${r2.bucket}/${r2.prefix}/checkpoints`;
     return ` && ${this.rcloneEnsure()} && echo '[r2] backup final → ${dst}' && ` +
+      `${this.buildR2ManifestCommand()} && ` +
       `rclone sync /workspace/checkpoints ${dst} --transfers 8 --checksum 2>&1 | tail -3`;
   }
 
@@ -565,8 +728,9 @@ export class FinetuneGateway {
     const pluginData = opts.plugin ? BUNDLED_PLUGINS[opts.plugin] : undefined;
     const autoFlags = this.autoTrainFlags(opts, saveSteps);
 
-    // resumeFromR2 implica retomar dos checkpoints restaurados do R2.
-    const doResume = opts.autoResume || (opts.resumeFromR2 && !!opts.r2Bucket);
+    // r2Bucket defaults to auto-resume so interrupted/preempted runs continue
+    // from the restored checkpoint directory when the trainer supports it.
+    const doResume = opts.autoResume || (!!opts.r2Bucket && (opts.resumeFromR2 || opts.autoResumeR2 !== false));
     return `python ${scriptName} train ` +
       `--tokens ${tokensArg} --output /workspace/checkpoints ` +
       `--epochs ${opts.epochs} --learning-rate ${opts.lr} --save-every-steps ${saveSteps}${autoFlags} ` +
@@ -657,6 +821,11 @@ function escapeForShellDoubleQuoted(src: string): string {
   return src.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$');
 }
 
+/** Quote a shell value for POSIX sh without allowing command substitution. */
+function shellQuote(value: string): string {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
 // ─── ResolvedFinetune (after preset injection + defaults) ─────────────────
 
 export interface ResolvedFinetune extends FinetuneOpts {
@@ -676,6 +845,7 @@ export interface ResolvedFinetune extends FinetuneOpts {
   preferSpot: boolean;
   reuse: boolean;
   gpuFallback: boolean;
+  selectMode: 'cheapest' | 'balanced' | 'fast';
   dryRun: boolean;
   image: string;
   smokeMaxSamples?: number;

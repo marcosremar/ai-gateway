@@ -23,6 +23,10 @@
  *   DELETE /v1/gpu/snapshot           — Delete snapshot
  *   GET  /v1/gpu/sweep               — Sweep idle pods
  *   GET  /v1/gpu/lifecycle-logs      — Lifecycle event logs
+ *   POST /v1/gpu/finetune/plan                 — Dataset/B2/economics plan before GPU spend
+ *   POST /v1/gpu/finetune/kokoro-dataset       — Agent-callable Kokoro CPU dataset plan/run
+ *   POST /v1/gpu/finetune/kokoro-dataset/plan  — Plan Kokoro CPU dataset fanout
+ *   POST /v1/gpu/finetune/kokoro-dataset/run   — Launch Kokoro CPU dataset fanout
  *   GET  /v1/canary/status           — Canary deploy status
  *   GET  /v1/performance             — Performance stats
  *
@@ -48,9 +52,18 @@ const log = createLogger('routes/gpu');
 
 export function registerGpuRoutes(handlers: Record<string, Function>): void {
   const gh = require('../../gpu-handlers');
+  const fth = require('../../gpu-finetune-handlers');
 
   Object.assign(handlers, {
     'POST /v1/gpu/deploy': gh.handleGpuDeploy,
+    'POST /v1/gpu/finetune/plan': fth.handleFinetunePlan,
+    'POST /v1/gpu/finetune': fth.handleStartFinetune,
+    'GET /v1/gpu/finetune/status': fth.handleFinetuneStatus,
+    'GET /v1/gpu/finetune/logs': fth.handleFinetuneLogs,
+    'POST /v1/gpu/finetune/cancel': fth.handleCancelFinetune,
+    'POST /v1/gpu/finetune/kokoro-dataset': fth.handleKokoroDatasetAgentAction,
+    'POST /v1/gpu/finetune/kokoro-dataset/plan': fth.handleKokoroDatasetAgentAction,
+    'POST /v1/gpu/finetune/kokoro-dataset/run': fth.handleKokoroDatasetAgentAction,
     'POST /v1/gpu/deploy/validate': gh.handleGpuDeployValidate,
     'GET /v1/gpu/status': gh.handleGpuStatus,
     'POST /v1/gpu/keepalive': gh.handleGpuKeepalive,
