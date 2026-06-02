@@ -1699,7 +1699,7 @@ export class VastClient extends AbstractGpuProvider {
         sshPort = stillExists.sshPort;
       }
 
-      if (spec.readinessProbe === 'ssh' && (spec.directPortRequired ?? 0) > 0 && !isDirectSshTarget(sshHost, sshPort)) {
+      if ((spec.directPortRequired ?? 0) > 0 && !isDirectSshTarget(sshHost, sshPort)) {
         const sshTarget = sshHost ? `${sshHost}:${sshPort ?? 'unknown'}` : 'missing';
         const reason = isVastProxyHost(sshHost)
           ? `direct SSH required but Vast returned SSH proxy ${sshTarget}`

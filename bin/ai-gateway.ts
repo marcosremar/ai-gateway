@@ -1345,7 +1345,6 @@ interface GpuJobOpts {
   bootTimeoutMin?: number;    // max wait for instance to reach "ready" before abandoning (default: timeoutMin)
   bootTimeoutSec?: number;    // short SSH acquisition timeout; overrides bootTimeoutMin/adaptive when set
   raceCount?: number;         // deploy-level parallel race count
-  offerRaceCount?: number;    // internal Vast offer race knob
   strictFastBoot?: boolean;   // Vast strict/high-quality search; false allows broader SSH-only hosts
   searchMode?: 'high_quality' | 'full';
   allowUnverified?: boolean;
@@ -1593,7 +1592,6 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     ['--timeout-min', opts.timeoutMin, 1, 4320],
     ['--boot-timeout-sec', opts.bootTimeoutSec, 30, 600],
     ['--race-count', opts.raceCount, 1, 10],
-    ['--offer-race-count', opts.offerRaceCount, 1, 5],
   ];
   for (const [name, val, lo, hi] of numericChecks) {
     if (val !== undefined && (typeof val !== 'number' || !Number.isFinite(val) || val < lo || val > hi)) {
@@ -1760,7 +1758,6 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     gpuFilter,
     gpuName: pickName,
     requestedBootTimeoutSec: opts.bootTimeoutSec,
-    requestedOfferRaceCount: opts.offerRaceCount,
     env: process.env,
   });
   const requestedBootTimeoutSec = opts.bootTimeoutSec ?? acquisitionPolicy.bootTimeoutSec;
@@ -1780,8 +1777,7 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     console.log(`  output:     ${outputDir}`);
     console.log(`  timeout:    ${timeoutMin}min  → projected MAX cost: $${projHi}`);
     if (acquisitionPolicy.enabled) {
-      const mode = acquisitionPolicy.offerRaceCount > 1 ? `fanout×${acquisitionPolicy.offerRaceCount}` : 'serial';
-      console.log(`  acquire:    ${acquisitionPolicy.reason} ${mode}, ssh timeout=${acquisitionPolicy.bootTimeoutSec}s`);
+      console.log(`  acquire:    ${acquisitionPolicy.reason} serial, ssh timeout=${acquisitionPolicy.bootTimeoutSec}s`);
     }
     if (typeof opts.maxSpend === 'number') console.log(`  max-spend:  $${opts.maxSpend.toFixed(2)} hard cap`);
     console.log(`  pull-every: ${opts.pullEveryMin === undefined ? 10 : opts.pullEveryMin}min`);
@@ -1829,15 +1825,12 @@ async function cmdGpuJobsRun(opts: GpuJobOpts): Promise<void> {
     if (opts.searchMode) deployBody.searchMode = opts.searchMode;
     if (opts.allowUnverified === true) deployBody.allowUnverified = true;
     deployBody.maxCostUsd = maxCost;   // server-side hourly price guard
-    const allowVastProxy = process.env.AIGW_VAST_ALLOW_PROXY === '1'
-      || process.env.AIGW_VAST_REQUIRE_DIRECT === '0';
-    if (selectedProvider.toLowerCase() === 'vast') {
-      deployBody.requireDirectPort = !allowVastProxy; // direct is safer, proxy restores older Vast acquisition behavior
+    const requireVastDirect = process.env.AIGW_VAST_REQUIRE_DIRECT === '1';
+    if (selectedProvider.toLowerCase() === 'vast' && requireVastDirect) {
+      deployBody.requireDirectPort = true;
     }
-    deployBody.offerRaceCount = acquisitionPolicy.offerRaceCount;
     if (acquisitionPolicy.enabled) {
-      const mode = acquisitionPolicy.offerRaceCount > 1 ? `fanout×${acquisitionPolicy.offerRaceCount}` : 'serial';
-      console.log(`  ${c.yellow}[vast]${c.reset} SSH acquisition ${mode} (timeout=${acquisitionPolicy.bootTimeoutSec}s, ${allowVastProxy ? 'direct or proxy SSH' : 'direct SSH only'})`);
+      console.log(`  ${c.yellow}[vast]${c.reset} SSH acquisition serial (timeout=${acquisitionPolicy.bootTimeoutSec}s, ${requireVastDirect ? 'direct SSH only' : 'direct or proxy SSH'})`);
     }
     // Fix #2: pin a sane disk so we don't inherit the image-estimate's ×3 → ~100GB
     // floor that excludes most consumer 4090s. 40GB fits the MOSS finetune; callers
@@ -2472,7 +2465,6 @@ interface GpuFinetuneOpts {
   bootTimeoutMin?: number;
   bootTimeoutSec?: number;
   raceCount?: number;         // deploy-level parallel race count
-  offerRaceCount?: number;    // Vast internal offer fanout; 1 = serial
   strictFastBoot?: boolean;
   searchMode?: 'high_quality' | 'full';
   allowUnverified?: boolean;
@@ -3271,7 +3263,6 @@ async function cmdGpuFinetune(opts: GpuFinetuneOpts): Promise<void> {
         bootTimeoutMin: rOpts.bootTimeoutMin,
         bootTimeoutSec: rOpts.bootTimeoutSec,
         raceCount: rOpts.raceCount,
-        offerRaceCount: rOpts.offerRaceCount,
         image: rOpts.image,
         provider: rOpts.provider,
         keepAlive: false,
@@ -6729,8 +6720,6 @@ Submit flags (all also work as spec.yaml keys):
   --race-count N   Deploy-level parallel race count (1..10).
   --provider vast   Force a single provider; fails fast if that provider is cooling down.
   --providers a,b,c Cooldown-aware provider order. Cooled providers are skipped before offer selection.
-  --offer-race-count N  Vast SSH offer acquisition fanout (1..5)
-                    because parallel acquisition can trigger provider cooldowns.
   --incremental     [TODO not yet implemented] Hash dataset; skip encode if
                     unchanged from last run. datasetHash() helper exists but
                     no skip-decision wired into encode stage yet.
@@ -7022,7 +7011,6 @@ Options:
   --boot-timeout-sec <sec>     Short SSH/ready acquisition timeout (30..600).
                               Vast RTX 5090 defaults to 600s.
   --race-count N                Deploy-level parallel race count (1..10).
-  --offer-race-count N         Vast internal SSH acquisition fanout (1..5).
   --image <docker-image>      Container image (default: marcosremar/gpu-dev:latest)
   --env "K=V K2=V2"           Env vars exported in the container
   --keep-alive                Never terminate (manual cleanup via 'jobs cleanup')
@@ -7077,10 +7065,10 @@ Notes:
   - State persists in ~/.babelcast/last_job.json across CLI invocations
   - Owner-prefixed label so 'gpu list --mine' picks it up
   - rsync requires SSH access to the pod (provider must expose 22/tcp)
-  - Vast RTX 5090 jobs use serial direct SSH acquisition:
-    fanout×1, 90s SSH timeout, no Vast SSH proxy host.
-    Parallel acquisition is disabled because reserving several scarce offers
-    at once can trip provider cooldowns.
+  - Vast RTX 5090 jobs use serial SSH acquisition by default.
+    Direct SSH can be forced with AIGW_VAST_REQUIRE_DIRECT=1 when needed.
+    Parallel offer acquisition is disabled because reserving several scarce
+    offers at once can trip provider cooldowns.
 `,
     metrics: `
 ai-gateway metrics — Show gateway metrics
@@ -7908,7 +7896,6 @@ Per-app isolation:
                 timeoutMin: getArg(args, '--timeout-min') ? parseInt(getArg(args, '--timeout-min')!) : spec.timeoutMin,
                 bootTimeoutSec: getArg(args, '--boot-timeout-sec') ? parseInt(getArg(args, '--boot-timeout-sec')!) : spec.bootTimeoutSec,
                 raceCount: getArg(args, '--race-count') ? parseInt(getArg(args, '--race-count')!) : spec.raceCount,
-                offerRaceCount: getArg(args, '--offer-race-count') ? parseInt(getArg(args, '--offer-race-count')!) : spec.offerRaceCount,
                 storageGb: getArg(args, '--storage') ? parseInt(getArg(args, '--storage')!) : spec.storageGb,
                 providers: providerOrder,
                 skipSmoke: hasFlag(args, '--no-smoke') || spec.skipSmoke === true,
@@ -8014,7 +8001,6 @@ Per-app isolation:
                 timeoutMin: getArg(args, '--timeout-min') ? parseInt(getArg(args, '--timeout-min')!) : spec.timeoutMin,
                 bootTimeoutSec: getArg(args, '--boot-timeout-sec') ? parseInt(getArg(args, '--boot-timeout-sec')!) : spec.bootTimeoutSec,
                 raceCount: getArg(args, '--race-count') ? parseInt(getArg(args, '--race-count')!) : spec.raceCount,
-                offerRaceCount: getArg(args, '--offer-race-count') ? parseInt(getArg(args, '--offer-race-count')!) : spec.offerRaceCount,
                 strictFastBoot: hasFlag(args, '--no-strict-fast-boot') ? false : spec.strictFastBoot,
                 searchMode: (getArg(args, '--search-mode') as 'high_quality' | 'full') || spec.searchMode,
                 allowUnverified: hasFlag(args, '--allow-unverified') || spec.allowUnverified === true,
@@ -8331,7 +8317,6 @@ Per-app isolation:
                   timeoutMin: getArg(args, '--timeout') ? parseInt(getArg(args, '--timeout')!) : undefined,
                   bootTimeoutSec: getArg(args, '--boot-timeout-sec') ? parseInt(getArg(args, '--boot-timeout-sec')!) : undefined,
                   raceCount: getArg(args, '--race-count') ? parseInt(getArg(args, '--race-count')!) : undefined,
-                  offerRaceCount: getArg(args, '--offer-race-count') ? parseInt(getArg(args, '--offer-race-count')!) : undefined,
                   image: getArg(args, '--image'),
                   keepAlive: hasFlag(args, '--keep-alive'),
                   terminateOnError: hasFlag(args, '--terminate-on-error'),

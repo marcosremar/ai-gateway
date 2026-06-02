@@ -44,7 +44,6 @@ export { BUNDLED_PLUGINS } from './types.js';
 
 export {
   DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC,
-  DEFAULT_VAST_SSH_FANOUT_WORKERS,
   resolveVastSshAcquisitionPolicy,
 } from './acquisition.js';
 export type { VastSshAcquisitionPolicy, VastSshAcquisitionPolicyInput } from './acquisition.js';

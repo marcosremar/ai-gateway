@@ -401,10 +401,7 @@ interface DeployConfig {
   llmModel: string;
   interruptible: boolean | undefined;
   raceCount: number;
-  /** Internal Vast offer-hedge count (distinct from deploy-level raceCount). 1 ⇒ exactly
-   *  one billed instance. Undefined ⇒ provider default (Vast hedges 2). */
-  offerRaceCount?: number;
-  /** Reject SSH-only offers — require at least one direct port (avoids tunnel hangs). */
+  /** Reject SSH-only offers — require at least one direct port. */
   requireDirectPort?: boolean;
   deployEnv: Record<string, string>;
   dockerStartCmd: string;
@@ -688,21 +685,14 @@ async function _validateDeployRequest(
     raceCount = getDeployRaceCount();
     }
   }
-  // Internal Vast offer-hedge count (distinct from deploy-level raceCount above).
-  // Used by SSH-driven batch jobs to try a small number of Vast offers in
-  // parallel and keep the first instance that becomes reachable.
-  const offerRaceCountRaw = body.offerRaceCount;
-  let offerRaceCount: number | undefined;
-  if (typeof offerRaceCountRaw === 'number' && Number.isFinite(offerRaceCountRaw) && offerRaceCountRaw >= 1) {
-    offerRaceCount = Math.min(Math.floor(offerRaceCountRaw), 5);
-  } else if (typeof offerRaceCountRaw !== 'undefined') {
-    throw { status: 400, message: 'offerRaceCount must be a positive number between 1 and 5' };
-  } else if (body.finetune === true) {
-    offerRaceCount = 1;
-  }
-
-  // Reject SSH-only offers — require at least one direct port (avoids tunnel hangs).
-  const requireDirectPort = body.requireDirectPort === true ? true : undefined;
+  // Direct SSH is an explicit operator policy. By default Vast SSH-driven
+  // workloads may use either a direct mapping or Vast's SSH proxy, whichever
+  // becomes reachable first.
+  const requireDirectPort = body.requireDirectPort === true || process.env.AIGW_VAST_REQUIRE_DIRECT === '1'
+    ? true
+    : body.requireDirectPort === false || process.env.AIGW_VAST_ALLOW_PROXY === '1' || process.env.AIGW_VAST_REQUIRE_DIRECT === '0'
+      ? false
+      : undefined;
 
   // Custom env vars, Docker start command, and container disk
   const customEnv = (typeof body.env === 'object' && body.env !== null && !Array.isArray(body.env))
@@ -770,7 +760,7 @@ async function _validateDeployRequest(
     requireDockerManifest,
     runSmokeTests,
     gpuTypes, autoSelectGpu, region, minVramGb, minInetDownMbps, preferSsd,
-    storageGb, hfToken, llmModel, interruptible, raceCount, offerRaceCount, requireDirectPort, deployEnv,
+    storageGb, hfToken, llmModel, interruptible, raceCount, requireDirectPort, deployEnv,
     dockerStartCmd, onstart, containerDiskInGb, volumeId,
     providerFilter,
     templateHashId: typeof body.templateHashId === 'string' && body.templateHashId.length > 0
@@ -1134,7 +1124,7 @@ function _startDeployAndRespond(
   appSlot?: DeploySlot,
   idempotencyHash?: string,
 ): void {
-  let { raceCount, offerRaceCount } = config;
+  const { raceCount } = config;
   const { requireDirectPort, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, readinessProbe, bootTimeoutSec, strictFastBoot, searchMode, allowUnverified, noTierCascade, minInetDownMbps } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
@@ -1217,9 +1207,8 @@ function _startDeployAndRespond(
     // Cost-control flags propagated to deploy loop / cascade.
     raceCount,
     ...(isFinetune ? { suppressProviderRetries: true } : {}),
-    // Internal Vast offer-hedge override (1 ⇒ no duplicate spawn) + SSH-only rejection.
-    ...(typeof offerRaceCount === 'number' ? { offerRaceCount } : {}),
-    ...(requireDirectPort ? { requireDirectPort } : {}),
+    // Direct SSH policy. Undefined lets Vast use direct or proxy SSH.
+    ...(typeof requireDirectPort === 'boolean' ? { requireDirectPort } : {}),
     ...(noTierCascade ? { noTierCascade } : {}),
   };
 
@@ -2663,6 +2652,8 @@ export async function handleGpuDeployValidate(req: IncomingMessage, res: ServerR
     config.expectedCapabilities.includes('glb_generation')
     || config.expectedApiPaths.some(path => /generate(?:-from-text)?|glb/i.test(path))
   );
+  const directSshRequired = provider === 'vast' && config.requireDirectPort === true;
+  const vastProxyAllowed = provider === 'vast' && !directSshRequired;
 
   const ok = preflight.ok;
   res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json' });
@@ -2672,6 +2663,11 @@ export async function handleGpuDeployValidate(req: IncomingMessage, res: ServerR
     dockerImage: config.dockerImage,
     provider,
     gpuTypes: config.gpuTypes,
+    deployPolicy: {
+      directSshRequired,
+      vastProxyAllowed,
+      sshAccessPolicy: directSshRequired ? 'direct' : 'direct-or-proxy',
+    },
     apiContract: {
       expectedCapabilities: config.expectedCapabilities,
       expectedApiPaths: config.expectedApiPaths,

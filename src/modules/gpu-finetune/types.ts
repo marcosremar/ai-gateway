@@ -182,8 +182,6 @@ export interface FinetuneOpts {
   bootTimeoutSec?: number;
   /** Deploy-level parallel race count. */
   raceCount?: number;
-  /** Vast internal offer race knob. */
-  offerRaceCount?: number;
   /** Vast strict/high-quality search; false allows broader SSH-only hosts. */
   strictFastBoot?: boolean;
   /** Vast offer search profile. */

@@ -30,7 +30,6 @@ import {
   FileFinetuneState,
   BUNDLED_PLUGINS,
   DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC,
-  DEFAULT_VAST_SSH_FANOUT_WORKERS,
   resolveVastSshAcquisitionPolicy,
 } from '../src/modules/gpu-finetune';
 import type {
@@ -173,7 +172,7 @@ describe('runNumericChecks', () => {
 // ─── Vast SSH acquisition policy ───────────────────────────────────────
 
 describe('resolveVastSshAcquisitionPolicy', () => {
-  it('uses 600s direct-SSH fanout acquisition for Vast RTX 5090 jobs by default', () => {
+  it('uses a 600s serial acquisition timeout for Vast RTX 5090 jobs by default', () => {
     expect(DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC).toBe(600);
     const policy = resolveVastSshAcquisitionPolicy({
       provider: 'vast',
@@ -184,7 +183,6 @@ describe('resolveVastSshAcquisitionPolicy', () => {
     expect(policy).toMatchObject({
       enabled: true,
       reason: 'vast-5090-ssh-acquisition',
-      offerRaceCount: DEFAULT_VAST_SSH_FANOUT_WORKERS,
       bootTimeoutSec: DEFAULT_VAST_SSH_BOOT_TIMEOUT_SEC,
     });
   });
@@ -199,35 +197,31 @@ describe('resolveVastSshAcquisitionPolicy', () => {
     expect(policy).toMatchObject({
       enabled: false,
       reason: 'vast-non-5090',
-      offerRaceCount: 1,
     });
     expect(policy.bootTimeoutSec).toBeUndefined();
   });
 
-  it('honors env fanout overrides for Vast RTX 5090 jobs', () => {
+  it('honors env timeout overrides for Vast RTX 5090 jobs', () => {
     const policy = resolveVastSshAcquisitionPolicy({
       provider: 'vast',
       gpuFilter: 'RTX 5090',
       env: {
-        AIGW_VAST_SSH_FANOUT: '2',
         AIGW_VAST_SSH_BOOT_TIMEOUT_SEC: '60',
       },
     });
-    expect(policy.offerRaceCount).toBe(2);
     expect(policy.bootTimeoutSec).toBe(60);
   });
 
-  it('caps explicit fanout while preserving the configured timeout', () => {
+  it('caps explicit timeout overrides', () => {
     const policy = resolveVastSshAcquisitionPolicy({
       provider: 'vast',
       gpuFilter: 'RTX 5090',
-      requestedOfferRaceCount: 9,
+      requestedBootTimeoutSec: 900,
       env: {
         AIGW_VAST_SSH_BOOT_TIMEOUT_SEC: '60',
       },
     });
-    expect(policy.offerRaceCount).toBe(5);
-    expect(policy.bootTimeoutSec).toBe(60);
+    expect(policy.bootTimeoutSec).toBe(600);
   });
 });
 
@@ -240,24 +234,26 @@ describe('gpu jobs CLI acquisition wiring', () => {
     const src = cliSource();
     expect(src).toContain('resolveVastSshAcquisitionPolicy');
     expect(src).toMatch(/if \(typeof opts\.raceCount === 'number'\) deployBody\.raceCount = opts\.raceCount/);
-    expect(src).toMatch(/deployBody\.offerRaceCount\s*=\s*acquisitionPolicy\.offerRaceCount/);
     expect(src).toMatch(/const requestedBootTimeoutSec\s*=\s*opts\.bootTimeoutSec\s*\?\?\s*acquisitionPolicy\.bootTimeoutSec/);
     expect(src).toMatch(/deployBody\.bootTimeoutSec\s*=\s*requestedBootTimeoutSec/);
     expect(src).toMatch(/deployBody\.provider\s*=\s*selectedProvider/);
-    expect(src).toMatch(/deployBody\.requireDirectPort\s*=\s*!allowVastProxy/);
-    expect(src).toMatch(/offerRaceCount:\s*rOpts\.offerRaceCount/);
+    expect(src).toMatch(/deployBody\.requireDirectPort\s*=\s*true/);
     expect(src).toMatch(/parallelSlot:\s*rOpts\.parallelSlot/);
     expect(src).toMatch(/storageGb:\s*rOpts\.storageGb/);
-    expect(src).toContain('Vast SSH offer acquisition fanout');
+    expect(src).toContain('SSH acquisition serial');
   });
 
-  it('keeps deploy race available while allowing Vast offer fanout', () => {
+  it('keeps deploy-level race available without the removed Vast acquisition knob', () => {
     const serverSrc = readFileSync(join(process.cwd(), 'server/gpu-handlers.ts'), 'utf-8');
+    const cliSrc = cliSource();
     const lifecycleSrc = readFileSync(join(process.cwd(), 'server/handlers/gpu/lifecycle.ts'), 'utf-8');
     const vastSrc = readFileSync(join(process.cwd(), 'src/gateway/providers/gpu/vast-client.ts'), 'utf-8');
     const moduleVastSrc = readFileSync(join(process.cwd(), 'src/modules/gateway/providers/gpu/vast-client.ts'), 'utf-8');
     expect(serverSrc).not.toContain('Vast.ai deploy race disabled');
-    expect(serverSrc).toContain('Internal Vast offer-hedge count');
+    const removedKnob = 'offer' + 'RaceCount';
+    expect(serverSrc).not.toContain(removedKnob);
+    expect(cliSrc).not.toContain(removedKnob);
+    expect(cliSrc).not.toContain('--offer-' + 'race-count');
     expect(lifecycleSrc).not.toContain('Vast.ai deploy race disabled');
     expect(lifecycleSrc).toContain('if (body.race)');
     expect(vastSrc).toContain('const raceCount = requestedRaceCount');
@@ -745,7 +741,6 @@ describe('FinetuneGateway.run', () => {
       bootTimeoutMin: 4,
       bootTimeoutSec: 90,
       raceCount: 2,
-      offerRaceCount: 1,
       parallelSlot: 'slot-a',
       storageGb: 80,
       pullEveryMin: 0,
@@ -757,7 +752,6 @@ describe('FinetuneGateway.run', () => {
       bootTimeoutMin: 4,
       bootTimeoutSec: 90,
       raceCount: 2,
-      offerRaceCount: 1,
       parallelSlot: 'slot-a',
       storageGb: 80,
       pullEveryMin: 0,

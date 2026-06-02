@@ -193,10 +193,10 @@ export async function startDeployRace(
     const storageGb = (typeof extra.storageGb === 'number' && extra.storageGb > 0)
       ? extra.storageGb
       : defaultStorage;
-    const directPortRequired = (slot.tier.name.startsWith('vast') && (extra.requireDirectPort || extra.readinessProbe === 'ssh'))
-      // SSH jobs only need direct SSH. The Vast client validates the actual
-      // SSH host/port after creation; requiring two direct ports here filtered
-      // out otherwise usable hosts and pushed jobs back into bad retries.
+    const directPortRequired = (slot.tier.name.startsWith('vast') && extra.requireDirectPort === true)
+      // This is a coarse marketplace filter. The Vast client validates the
+      // actual SSH host/port after creation when direct SSH is explicitly
+      // required; one direct port is enough for SSH-driven jobs.
       ? 1
       : undefined;
 
@@ -234,8 +234,8 @@ export async function startDeployRace(
           // provider client so they reach the search payload.
           ...(extra.allowUnverified ? { allowUnverified: extra.allowUnverified } : {}),
           ...(typeof extra.maxPricePerHr === 'number' ? { maxPricePerHr: extra.maxPricePerHr } : {}),
-          // Deploy-level race already creates N instances; pin the internal Vast
-          // offer-hedge to 1 so each slot spawns exactly one instance (no 2N blow-up).
+          // Deploy-level race already creates N instances; each slot must
+          // create exactly one provider instance to avoid duplicate billing.
           raceCount: 1,
           ...(directPortRequired ? { directPortRequired } : {}),
           ...(extra.readinessProbe ? { readinessProbe: extra.readinessProbe } : {}),

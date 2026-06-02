@@ -78,13 +78,7 @@ export interface DeployExtra {
   allowUnverified?: boolean;
   /** Vast.ai hourly price ceiling forwarded to provider offer search. */
   maxPricePerHr?: number;
-  /**
-   * Internal Vast offer-hedge count (distinct from the deploy-level raceCount
-   * that selects race-vs-cascade). 1 ⇒ exactly one instance created — no
-   * duplicate billing. Undefined ⇒ provider default (Vast hedges 2).
-   */
-  offerRaceCount?: number;
-  /** Reject SSH-only offers — require at least one direct port (avoids tunnel hangs). */
+  /** Reject SSH-only offers — require at least one direct port. */
   requireDirectPort?: boolean;
   /** Readiness strategy requested by the deploy caller. */
   readinessProbe?: 'health' | 'ssh';
@@ -294,13 +288,10 @@ export async function startDeployLoop(
         broadcastWs({ type: 'gpu:deploy', phase: 'creating', deployId: sd.deployId, provider: providerName, message: `Creating ${label} instance... ${info.elapsedS}s (${info.status})` });
       };
 
-      const vastProxyAllowed = process.env.AIGW_VAST_ALLOW_PROXY === '1'
-        || process.env.AIGW_VAST_REQUIRE_DIRECT === '0';
-      const directPortRequired = (providerName.startsWith('vast') && (extra.requireDirectPort || (extra.readinessProbe === 'ssh' && !vastProxyAllowed)))
-        // For SSH-driven jobs this is only a coarse marketplace filter.
-        // The provider client still validates the actual SSH target after
-        // creation. When Vast proxy SSH is allowed, do not require direct
-        // ports here; scarce 5090 pools commonly expose only ssh*.vast.ai.
+      const directPortRequired = (providerName.startsWith('vast') && extra.requireDirectPort === true)
+        // This is a coarse marketplace filter. The provider client still
+        // validates the actual SSH target after creation when direct SSH is
+        // explicitly required.
         ? 1
         : undefined;
 
@@ -319,7 +310,6 @@ export async function startDeployLoop(
           // strict-fast-boot tier are actually controllable from the API.
           ...(extra.allowUnverified ? { allowUnverified: extra.allowUnverified } : {}),
           ...(typeof extra.maxPricePerHr === 'number' ? { maxPricePerHr: extra.maxPricePerHr } : {}),
-          ...(typeof extra.offerRaceCount === 'number' ? { raceCount: extra.offerRaceCount } : {}),
           ...(typeof extra.bootTimeoutSec === 'number' ? { bootTimeoutSec: extra.bootTimeoutSec } : {}),
           ...(directPortRequired ? { directPortRequired } : {}),
           ...(extra.readinessProbe ? { readinessProbe: extra.readinessProbe } : {}),

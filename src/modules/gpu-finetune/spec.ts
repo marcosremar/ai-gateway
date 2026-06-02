@@ -42,7 +42,6 @@ const NUMERIC_BOUNDS: Array<[string, keyof FinetuneOpts, number, number]> = [
   ['autoStopPlateau', 'autoStopPlateau', 0, 100000],
   ['bootTimeoutSec', 'bootTimeoutSec', 30, 600],
   ['raceCount', 'raceCount', 1, 10],
-  ['offerRaceCount', 'offerRaceCount', 1, 5],
   ['storageGb', 'storageGb', 1, 1000],
 ];
 
@@ -380,7 +379,6 @@ export function runNumericChecks(
     ['--boot-timeout-min / bootTimeoutMin', opts.bootTimeoutMin, 1, 4320],
     ['--boot-timeout-sec / bootTimeoutSec', opts.bootTimeoutSec, 30, 600],
     ['--race-count / raceCount', opts.raceCount, 1, 10],
-    ['--offer-race-count / offerRaceCount', opts.offerRaceCount, 1, 5],
     ['--storage / storageGb', opts.storageGb, 1, 1000],
     ['--pull-every / pullEveryMin', opts.pullEveryMin, 0, 1440],
     ['--stall-min / stallMin', opts.stallMin, 0, 1440],

@@ -244,7 +244,7 @@ describe('startDeployLoop — requireDirectPort=true', () => {
     expect(spec).toMatchObject({ directPortRequired: 1, readinessProbe: 'ssh' });
   });
 
-  it('infers directPortRequired=1 for Vast SSH readiness even without explicit requireDirectPort', async () => {
+  it('does not infer directPortRequired for Vast SSH readiness without explicit requireDirectPort', async () => {
     mockCreateInstance.mockRejectedValueOnce(
       new Error('No GPUs available on Vast.ai (0 offers matched). GPU filter: [RTX 4090], disk: 40GB'),
     );
@@ -262,11 +262,11 @@ describe('startDeployLoop — requireDirectPort=true', () => {
     );
 
     const spec = mockCreateInstance.mock.calls[0][0] as Record<string, unknown>;
-    expect(spec).toMatchObject({ directPortRequired: 1, readinessProbe: 'ssh' });
+    expect(spec).toMatchObject({ readinessProbe: 'ssh' });
+    expect(spec.directPortRequired).toBeFalsy();
   });
 
-  it('succeeds normally (no direct-port constraint) when requireDirectPort is omitted', async () => {
-    // When requireDirectPort is not set, createInstance should NOT receive directPortRequired
+  it('succeeds normally when requireDirectPort is omitted', async () => {
     mockCreateInstance.mockRejectedValueOnce(
       new Error('No GPUs available on Vast.ai (0 offers matched). GPU filter: [RTX 4090], disk: 40GB'),
     );
@@ -284,7 +284,27 @@ describe('startDeployLoop — requireDirectPort=true', () => {
     );
 
     const spec = mockCreateInstance.mock.calls[0][0] as Record<string, unknown>;
-    // directPortRequired should be absent (falsy) — Phase-2 would be allowed inside vast-client
+    expect(spec.directPortRequired).toBeFalsy();
+  });
+
+  it('also allows Vast proxy SSH when requireDirectPort=false is explicit', async () => {
+    mockCreateInstance.mockRejectedValueOnce(
+      new Error('No GPUs available on Vast.ai (0 offers matched). GPU filter: [RTX 4090], disk: 40GB'),
+    );
+
+    const { startDeployLoop } = await import('../../server/gpu-deploy-loop');
+
+    await startDeployLoop(
+      providerClient as any,
+      'vast',
+      'fake-api-key',
+      'myrepo/myimage:latest',
+      ['NVIDIA GeForce RTX 4090'],
+      undefined,
+      { requireDirectPort: false },
+    );
+
+    const spec = mockCreateInstance.mock.calls[0][0] as Record<string, unknown>;
     expect(spec.directPortRequired).toBeFalsy();
   });
 });

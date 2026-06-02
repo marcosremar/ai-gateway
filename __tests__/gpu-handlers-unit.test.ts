@@ -148,6 +148,9 @@ describe('handleGpuDeploy — validation', () => {
   it('exposes a dry-run deploy validation handler', () => {
     expect(handlersSource).toContain('export async function handleGpuDeployValidate');
     expect(handlersSource).toContain('dryRun: true');
+    expect(handlersSource).toContain('deployPolicy');
+    expect(handlersSource).toContain('directSshRequired');
+    expect(handlersSource).toContain('sshAccessPolicy');
   });
 
   it('#087 _validateDeployRequest accepts requested GPUs outside the priority list', () => {

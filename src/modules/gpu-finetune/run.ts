@@ -61,7 +61,6 @@ export interface GpuJobRunnerOpts {
   bootTimeoutMin?: number;
   bootTimeoutSec?: number;
   raceCount?: number;
-  offerRaceCount?: number;
   parallelSlot?: string;
   storageGb?: number;
   image: string;
@@ -233,7 +232,6 @@ export class FinetuneGateway {
       timeoutMin: resolved.timeoutMin ?? (resolved.smokeOnly ? 30 : 360),
       bootTimeoutSec: resolved.bootTimeoutSec,
       raceCount: resolved.raceCount,
-      offerRaceCount: resolved.offerRaceCount,
       parallelSlot: resolved.parallelSlot,
       storageGb: resolved.storageGb,
       image: resolved.image,
