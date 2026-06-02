@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { VastClient } from '@ai-gateway/gpu-providers/vast-client';
+import { VastClient, resetVastRateLimitStateForTests } from '@ai-gateway/gpu-providers/vast-client';
 import { AbstractGpuProvider } from '@ai-gateway/gpu-providers/abstract-provider';
 import { SshTunnel } from '../../server/ssh-tunnel';
 import fs from 'fs';
@@ -41,16 +41,24 @@ describe('Vast.ai reliability improvements', () => {
   const mockPreflight = () => mockResp({ credit: 100 });
 
   beforeEach(() => {
+    resetVastRateLimitStateForTests();
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
     process.env.VAST_SKIP_IMAGE_PRECHECK = '1';
+    process.env.VAST_OFFER_RACE_STAGGER_MS = '0';
+    process.env.VAST_RESERVATION_QUEUE_MAX_SIZE = '5';
+    process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS = '600000';
     try { fs.rmSync(path.join(os.homedir(), '.babelcast', 'vast-host-blacklist.json')); } catch {}
     try { fs.rmSync(path.join(os.homedir(), '.ai-gateway', 'vast-host-reputation.json')); } catch {}
   });
 
   afterEach(() => {
+    resetVastRateLimitStateForTests();
     delete process.env.VAST_SKIP_IMAGE_PRECHECK;
+    delete process.env.VAST_OFFER_RACE_STAGGER_MS;
+    delete process.env.VAST_RESERVATION_QUEUE_MAX_SIZE;
+    delete process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS;
     vi.restoreAllMocks();
     return new Promise<void>(resolve => setTimeout(() => {
       try { fs.rmSync(path.join(os.homedir(), '.babelcast', 'vast-host-blacklist.json')); } catch {}
@@ -330,7 +338,7 @@ describe('Vast.ai reliability improvements', () => {
       expect(createCalls.length).toBe(2);
     });
 
-    it('caps raceCount at 5 (defensive)', async () => {
+    it('caps raceCount at 2 (defensive)', async () => {
       const client = new VastClient();
 
       fetchSpy
@@ -349,7 +357,7 @@ describe('Vast.ai reliability improvements', () => {
         ),
       ).rejects.toThrow();
 
-      // All 10 offers tried (raceCount caps internally but doesn't limit total attempts)
+      // All 10 offers tried; the cap only limits simultaneous attempts.
       const createCalls = fetchSpy.mock.calls.filter(c => String(c[0]).includes('/asks/'));
       expect(createCalls.length).toBe(10);
     });

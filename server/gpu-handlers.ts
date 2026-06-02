@@ -572,6 +572,17 @@ async function _validateDeployRequest(
     throw { status: 400, message: 'dockerImage is required — provide dockerImage, profileId, or set an active app with gpuDeploy config' };
   }
   const providerFilter = body.provider as ProviderName | undefined;
+  const isFinetuneRequest = body.finetune === true;
+  const onlyVastProvider = Boolean(vastApiKey && !apiKey && !hyperstackApiKey && !tensordockApiKey && !modalApiKey);
+  const snapgpuBackendHint = ((body.snapgpuBackend as string) || appGpu?.snapgpuBackend || 'vast').toLowerCase();
+  const usesVastProviderHint = providerFilter === 'vast'
+    || providerFilter === 'vast-vm'
+    || onlyVastProvider
+    || (providerFilter === 'snapgpu' && snapgpuBackendHint === 'vast');
+  const configuredMaxDeployRaceCount = parseInt(process.env.AIGW_MAX_DEPLOY_RACE_COUNT || '2', 10);
+  const maxSafeDeployRaceCount = Number.isFinite(configuredMaxDeployRaceCount)
+    ? Math.max(1, Math.min(2, configuredMaxDeployRaceCount))
+    : 2;
   const onlyModalProvider = Boolean(modalApiKey && !apiKey && !vastApiKey && !hyperstackApiKey && !tensordockApiKey);
   const dockerImageFormat = validateDockerImageReference(dockerImage, {
     allowModalDeployScript: providerFilter === 'modal' || onlyModalProvider,
@@ -668,27 +679,37 @@ async function _validateDeployRequest(
   const interruptible = body.interruptible === true ? true : body.interruptible === false ? false : undefined;
 
   // Hedged deploy: launch raceCount instances in parallel, keep first healthy.
-  // Callers must request it explicitly (or configure it globally); fine-tunes
-  // default to serial acquisition unless raceCount is present on the request.
+  // Fine-tunes are cost-sensitive batch jobs and must stay serial. Vast.ai is
+  // endpoint-rate-limited, so explicit Vast acquisition is capped at race=2.
   const raceCountRaw = body.raceCount;
   let raceCount: number;
+  const clampRaceCount = (requested: number, source: 'request' | 'settings'): number => {
+    if (isFinetuneRequest) {
+      if (requested > 1) {
+        log.warn(`[req=${requestId}] Fine-tune deploy forced to raceCount=1 (requested ${requested} from ${source})`);
+      }
+      return 1;
+    }
+    if (usesVastProviderHint && requested > 2) {
+      log.warn(`[req=${requestId}] Vast deploy raceCount capped at 2 (requested ${requested} from ${source})`);
+      return Math.min(2, maxSafeDeployRaceCount);
+    }
+    if (requested > maxSafeDeployRaceCount) {
+      log.warn(`[req=${requestId}] Deploy raceCount capped at ${maxSafeDeployRaceCount} (requested ${requested} from ${source})`);
+      return maxSafeDeployRaceCount;
+    }
+    return requested;
+  };
   if (typeof raceCountRaw === 'number' && raceCountRaw >= 1 && Number.isFinite(raceCountRaw)) {
-    raceCount = Math.min(Math.floor(raceCountRaw), 10);
+    raceCount = clampRaceCount(Math.min(Math.floor(raceCountRaw), 10), 'request');
   } else if (typeof raceCountRaw !== 'undefined') {
     throw { status: 400, message: 'raceCount must be a positive number between 1 and 10' };
   } else {
-    // Fine-tunes are long-running, cost-sensitive batch jobs. They should not
-    // inherit a globally configured deploy race unless a caller opts in.
-    if (body.finetune === true) {
-      raceCount = 1;
-    } else {
-    raceCount = getDeployRaceCount();
-    }
+    raceCount = clampRaceCount(getDeployRaceCount(), 'settings');
   }
   // Direct SSH is an explicit operator policy. By default Vast SSH-driven
   // workloads may use either a direct mapping or Vast's SSH proxy, whichever
   // becomes reachable first.
-  const isFinetuneRequest = body.finetune === true;
   const requireDirectPort = body.requireDirectPort === true
     ? true
     : body.requireDirectPort === false

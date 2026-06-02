@@ -37,7 +37,10 @@ const VAST_API_BASE = process.env.VAST_API_BASE || 'https://console.vast.ai/api/
 const VAST_IDENTITY_PORT = 70008;
 
 // ── Polling constants ─────────────────────────────────────────────────────────
-const POLL_BASE_MS = 5_000;
+const POLL_BASE_MS = parseInt(process.env.VAST_POLL_BASE_MS || '10000', 10);
+const POLL_FAST_BASE_MS = parseInt(process.env.VAST_FAST_POLL_BASE_MS || String(POLL_BASE_MS), 10);
+const POLL_INITIAL_DELAY_MS = parseInt(process.env.VAST_INITIAL_POLL_DELAY_MS || String(POLL_BASE_MS), 10);
+const POLL_FAST_INITIAL_DELAY_MS = parseInt(process.env.VAST_FAST_INITIAL_DELAY_MS || String(POLL_FAST_BASE_MS), 10);
 const POLL_GROWTH = 1.4;
 const POLL_MAX_MS = 30_000;
 // Vast.ai on-demand instances typically get an IP within 2 min for small images,
@@ -81,15 +84,26 @@ const UNSTABLE_HOST_COOLDOWN_MS = parseInt(process.env.VAST_UNSTABLE_HOST_COOLDO
 const MAX_UNSTABLE_HOSTS = 50;
 
 // ── Rate limiting ────────────────────────────────────────────────────────────
-// Vast.ai limits to ~4.5 req/s. We use a token bucket at 3 req/s to stay safe.
-const RATE_LIMIT_INTERVAL_MS = 334; // ~3 req/s
+// Vast publishes endpoint-scoped thresholds without a fixed numeric table. Keep
+// billable and high-churn endpoints conservative, and share buckets across all
+// VastClient instances for the same credential identity.
+const RATE_LIMIT_INTERVAL_MS = parseInt(process.env.VAST_API_MIN_INTERVAL_MS || '750', 10);
+const RATE_LIMIT_INSTANCE_POLL_MS = parseInt(process.env.VAST_INSTANCE_POLL_MIN_INTERVAL_MS || '3000', 10);
+const RATE_LIMIT_OFFER_SEARCH_MS = parseInt(process.env.VAST_OFFER_SEARCH_MIN_INTERVAL_MS || '15000', 10);
+const RATE_LIMIT_RESERVE_MS = parseInt(process.env.VAST_RESERVE_MIN_INTERVAL_MS || '15000', 10);
+const RATE_LIMIT_MUTATION_MS = parseInt(process.env.VAST_MUTATION_MIN_INTERVAL_MS || '3000', 10);
 const RATE_LIMIT_429_RETRY_MS = parseInt(process.env.VAST_RATE_LIMIT_429_RETRY_MS || '2000', 10);
+const RATE_LIMIT_429_ENDPOINT_COOLDOWN_MS = parseInt(process.env.VAST_429_ENDPOINT_COOLDOWN_MS || '15000', 10);
 const RATE_LIMIT_429_MAX_RETRIES = 3;
+const VAST_MAX_OFFER_RACE_COUNT_RAW = parseInt(process.env.VAST_MAX_OFFER_RACE_COUNT || '2', 10);
+const VAST_MAX_OFFER_RACE_COUNT = Number.isFinite(VAST_MAX_OFFER_RACE_COUNT_RAW)
+  ? Math.max(1, Math.min(2, VAST_MAX_OFFER_RACE_COUNT_RAW))
+  : 2;
 
 // ── Offer cache ─────────────────────────────────────────────────────────────
-// Reduced from 60s to 10s because GPU availability changes rapidly.
-// A stale cache could cause deploy failures when all GPUs get rented between requests.
-const OFFER_CACHE_TTL_MS = parseInt(process.env.VAST_OFFER_CACHE_TTL_MS || '10000', 10); // 10s
+// GPU availability changes quickly, but repeated deploy loops should reuse the
+// same marketplace snapshot long enough to avoid hammering /bundles/.
+const OFFER_CACHE_TTL_MS = parseInt(process.env.VAST_OFFER_CACHE_TTL_MS || '30000', 10);
 
 // ── Host reputation persistence ─────────────────────────────────────────────
 const REPUTATION_DIR = process.env.AI_GATEWAY_CONFIG_DIR || path.join(os.homedir(), '.ai-gateway');
@@ -109,6 +123,382 @@ interface HostFailureRecord {
   count: number;
   bannedUntilMs: number;
   lastFailureMs: number;
+}
+
+export interface VastRateLimitPolicy {
+  route: string;
+  bucketKey: string;
+  identityHash: string;
+  minIntervalMs: number;
+}
+
+interface VastRateLimitBucket {
+  lastRequestMs: number;
+  blockedUntilMs: number;
+  queue: Promise<void>;
+}
+
+const vastRateLimitBuckets = new Map<string, VastRateLimitBucket>();
+
+interface VastReservationQueueItem {
+  start: () => void;
+  timer?: ReturnType<typeof setTimeout>;
+  queuedAtMs: number;
+}
+
+interface VastReservationQueueState {
+  active: boolean;
+  queue: VastReservationQueueItem[];
+}
+
+const vastReservationQueues = new Map<string, VastReservationQueueState>();
+
+export class VastReservationQueueError extends Error {
+  readonly status = 429;
+  readonly statusCode = 429;
+  readonly code: 'VAST_RESERVATION_QUEUE_FULL' | 'VAST_RESERVATION_QUEUE_TIMEOUT';
+  readonly retryAfterMs: number;
+  readonly queuePosition: number;
+  readonly queueDepth: number;
+
+  constructor(fields: {
+    code: 'VAST_RESERVATION_QUEUE_FULL' | 'VAST_RESERVATION_QUEUE_TIMEOUT';
+    retryAfterMs: number;
+    queuePosition: number;
+    queueDepth: number;
+    message: string;
+  }) {
+    super(fields.message);
+    this.name = 'VastReservationQueueError';
+    this.code = fields.code;
+    this.retryAfterMs = fields.retryAfterMs;
+    this.queuePosition = fields.queuePosition;
+    this.queueDepth = fields.queueDepth;
+  }
+}
+
+function isVastReservationQueueError(err: unknown): err is VastReservationQueueError {
+  return err instanceof VastReservationQueueError
+    || (typeof err === 'object' && err !== null && String((err as { code?: unknown }).code).startsWith('VAST_RESERVATION_QUEUE_'));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getVastOfferRaceStaggerMs(): number {
+  const raw = parseInt(process.env.VAST_OFFER_RACE_STAGGER_MS || String(RATE_LIMIT_RESERVE_MS), 10);
+  return Number.isFinite(raw) ? Math.max(0, raw) : RATE_LIMIT_RESERVE_MS;
+}
+
+export function getVastOfferRaceStaggerMsForTests(): number {
+  return getVastOfferRaceStaggerMs();
+}
+
+function getVastReservationQueueMaxSize(): number {
+  const raw = parseInt(process.env.VAST_RESERVATION_QUEUE_MAX_SIZE || '5', 10);
+  return Number.isFinite(raw) ? Math.max(1, Math.min(50, raw)) : 5;
+}
+
+function getVastReservationQueueTimeoutMs(): number {
+  const raw = parseInt(process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS || String(10 * 60_000), 10);
+  return Number.isFinite(raw) ? Math.max(1_000, raw) : 10 * 60_000;
+}
+
+function isVastReservationPolicy(policy: VastRateLimitPolicy): boolean {
+  return policy.route === 'PUT /asks/:offer';
+}
+
+function getVastReservationQueueKey(policy: VastRateLimitPolicy): string {
+  return `reservation:${policy.identityHash}`;
+}
+
+function getVastReservationQueueIntervalMs(policy: VastRateLimitPolicy): number {
+  return Math.max(policy.minIntervalMs, getVastOfferRaceStaggerMs());
+}
+
+function buildVastReservationQueueError(fields: {
+  code: 'VAST_RESERVATION_QUEUE_FULL' | 'VAST_RESERVATION_QUEUE_TIMEOUT';
+  retryAfterMs: number;
+  queuePosition: number;
+  queueDepth: number;
+  reason: string;
+}): VastReservationQueueError {
+  const label = fields.code === 'VAST_RESERVATION_QUEUE_FULL'
+    ? 'Vast reservation queue full'
+    : 'Vast reservation queue timeout';
+  return new VastReservationQueueError({
+    code: fields.code,
+    retryAfterMs: fields.retryAfterMs,
+    queuePosition: fields.queuePosition,
+    queueDepth: fields.queueDepth,
+    message: `${label}: ${fields.reason} (position=${fields.queuePosition}, depth=${fields.queueDepth}, retryAfterMs=${fields.retryAfterMs})`,
+  });
+}
+
+export function getVastReservationQueueSnapshotForTests(): Array<{
+  key: string;
+  active: boolean;
+  pending: number;
+  depth: number;
+}> {
+  return [...vastReservationQueues.entries()].map(([key, state]) => ({
+    key,
+    active: state.active,
+    pending: state.queue.length,
+    depth: (state.active ? 1 : 0) + state.queue.length,
+  }));
+}
+
+function clearVastReservationQueues(): void {
+  for (const state of vastReservationQueues.values()) {
+    for (const item of state.queue) {
+      if (item.timer) clearTimeout(item.timer);
+    }
+  }
+  vastReservationQueues.clear();
+}
+
+function isMockedFetch(): boolean {
+  const fetchFn = globalThis.fetch as unknown as { _isMockFunction?: boolean; mock?: unknown } | undefined;
+  return !!fetchFn && (fetchFn._isMockFunction === true || !!fetchFn.mock);
+}
+
+function hashVastIdentity(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function getHeaderValue(headers: HeadersInit | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const lowerName = name.toLowerCase();
+  if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+    return headers.get(name) ?? undefined;
+  }
+  if (Array.isArray(headers)) {
+    const entry = headers.find(([key]) => key.toLowerCase() === lowerName);
+    return entry?.[1];
+  }
+  for (const [key, value] of Object.entries(headers as Record<string, string | string[] | undefined>)) {
+    if (key.toLowerCase() !== lowerName) continue;
+    return Array.isArray(value) ? value.join(',') : value;
+  }
+  return undefined;
+}
+
+function normalizeVastPath(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url.split('?')[0] || url;
+  }
+}
+
+function vastLogPath(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.pathname}${parsed.search}`.replace(/^\/api\/v\d+/, '') || parsed.pathname;
+  } catch {
+    return url.replace(VAST_API_BASE, '');
+  }
+}
+
+function getVastIdentityHash(url: string, init?: RequestInit): string {
+  let apiKeyParam = '';
+  try {
+    apiKeyParam = new URL(url).searchParams.get('api_key') ?? '';
+  } catch {
+    apiKeyParam = '';
+  }
+  const authHeader = getHeaderValue(init?.headers, 'authorization') ?? '';
+  const userHeader = getHeaderValue(init?.headers, 'x-user-id') ?? '';
+  const rawIdentity = [authHeader, apiKeyParam, userHeader].filter(Boolean).join('|') || 'anonymous';
+  return hashVastIdentity(rawIdentity);
+}
+
+function classifyVastRoute(url: string, init?: RequestInit): { route: string; minIntervalMs: number } {
+  const method = String(init?.method || 'GET').toUpperCase();
+  const pathName = normalizeVastPath(url);
+
+  if (/\/bundles\/?$/.test(pathName)) {
+    return { route: `${method} /bundles`, minIntervalMs: RATE_LIMIT_OFFER_SEARCH_MS };
+  }
+  if (/\/asks\/[^/]+\/?$/.test(pathName)) {
+    return { route: `${method} /asks/:offer`, minIntervalMs: RATE_LIMIT_RESERVE_MS };
+  }
+  if (/\/api\/v1\/instances\/?$/.test(pathName)) {
+    return { route: `${method} /api/v1/instances`, minIntervalMs: method === 'GET' ? RATE_LIMIT_INSTANCE_POLL_MS : RATE_LIMIT_MUTATION_MS };
+  }
+  if (/\/instances\/(reboot|recycle|bid_price|command|request_logs)\/[^/]+\/?$/.test(pathName)) {
+    return { route: `${method} /instances/mutation`, minIntervalMs: RATE_LIMIT_MUTATION_MS };
+  }
+  if (/\/instances\/[^/]+\/?$/.test(pathName)) {
+    return {
+      route: `${method} /instances/:id`,
+      minIntervalMs: method === 'GET' || method === 'HEAD' ? RATE_LIMIT_INSTANCE_POLL_MS : RATE_LIMIT_MUTATION_MS,
+    };
+  }
+  if (/\/instances\/?$/.test(pathName)) {
+    return {
+      route: `${method} /instances`,
+      minIntervalMs: method === 'GET' || method === 'HEAD' ? RATE_LIMIT_INSTANCE_POLL_MS : RATE_LIMIT_MUTATION_MS,
+    };
+  }
+  if (method !== 'GET' && method !== 'HEAD') {
+    return { route: `${method} ${pathName.replace(/^\/api\/v\d+/, '') || '/'}`, minIntervalMs: RATE_LIMIT_MUTATION_MS };
+  }
+  return { route: `${method} ${pathName.replace(/^\/api\/v\d+/, '') || '/'}`, minIntervalMs: RATE_LIMIT_INTERVAL_MS };
+}
+
+function getVastRateLimitPolicy(url: string, init?: RequestInit): VastRateLimitPolicy {
+  const identityHash = getVastIdentityHash(url, init);
+  const { route, minIntervalMs } = classifyVastRoute(url, init);
+  return {
+    route,
+    identityHash,
+    minIntervalMs,
+    bucketKey: `${identityHash}:${route}`,
+  };
+}
+
+export function getVastRateLimitPolicyForTests(url: string, init?: RequestInit): VastRateLimitPolicy {
+  return getVastRateLimitPolicy(url, init);
+}
+
+export function resetVastRateLimitStateForTests(): void {
+  vastRateLimitBuckets.clear();
+  clearVastReservationQueues();
+}
+
+async function waitForVastRateLimit(policy: VastRateLimitPolicy): Promise<void> {
+  if (process.env.VAST_RATE_LIMIT_DISABLED === '1' || isMockedFetch()) return;
+  let bucket = vastRateLimitBuckets.get(policy.bucketKey);
+  if (!bucket) {
+    bucket = { lastRequestMs: 0, blockedUntilMs: 0, queue: Promise.resolve() };
+    vastRateLimitBuckets.set(policy.bucketKey, bucket);
+  }
+
+  const task = bucket.queue.then(async () => {
+    const now = Date.now();
+    const intervalWaitMs = bucket.lastRequestMs > 0 ? Math.max(0, bucket.lastRequestMs + policy.minIntervalMs - now) : 0;
+    const penaltyWaitMs = Math.max(0, bucket.blockedUntilMs - now);
+    const waitMs = Math.max(intervalWaitMs, penaltyWaitMs);
+    if (waitMs > 0) await sleep(waitMs);
+    bucket.lastRequestMs = Date.now();
+  });
+  bucket.queue = task.catch(() => {});
+  await task;
+}
+
+function applyVastRateLimitPenalty(policy: VastRateLimitPolicy, waitMs: number): void {
+  let bucket = vastRateLimitBuckets.get(policy.bucketKey);
+  if (!bucket) {
+    bucket = { lastRequestMs: 0, blockedUntilMs: 0, queue: Promise.resolve() };
+    vastRateLimitBuckets.set(policy.bucketKey, bucket);
+  }
+  bucket.blockedUntilMs = Math.max(bucket.blockedUntilMs, Date.now() + waitMs);
+}
+
+async function withVastReservationQueue<T>(policy: VastRateLimitPolicy, task: () => Promise<T>): Promise<T> {
+  if (!isVastReservationPolicy(policy)) return task();
+
+  const key = getVastReservationQueueKey(policy);
+  let state = vastReservationQueues.get(key);
+  if (!state) {
+    state = { active: false, queue: [] };
+    vastReservationQueues.set(key, state);
+  }
+
+  const currentDepth = (state.active ? 1 : 0) + state.queue.length;
+  const queuePosition = state.active ? state.queue.length + 1 : 0;
+  const intervalMs = getVastReservationQueueIntervalMs(policy);
+  const etaMs = queuePosition * intervalMs;
+  const maxSize = getVastReservationQueueMaxSize();
+  const timeoutMs = getVastReservationQueueTimeoutMs();
+
+  if (currentDepth >= maxSize) {
+    throw buildVastReservationQueueError({
+      code: 'VAST_RESERVATION_QUEUE_FULL',
+      retryAfterMs: Math.max(etaMs, intervalMs),
+      queuePosition,
+      queueDepth: currentDepth,
+      reason: `max depth ${maxSize} reached for Vast reservation identity`,
+    });
+  }
+
+  if (queuePosition > 0 && etaMs > timeoutMs) {
+    throw buildVastReservationQueueError({
+      code: 'VAST_RESERVATION_QUEUE_TIMEOUT',
+      retryAfterMs: etaMs,
+      queuePosition,
+      queueDepth: currentDepth,
+      reason: `estimated wait ${etaMs}ms exceeds timeout ${timeoutMs}ms`,
+    });
+  }
+
+  return await new Promise<T>((resolve, reject) => {
+    const item: VastReservationQueueItem = {
+      queuedAtMs: Date.now(),
+      start: () => {
+        if (item.timer) {
+          clearTimeout(item.timer);
+          item.timer = undefined;
+        }
+
+        const finish = () => {
+          const next = state!.queue.shift();
+          if (next) {
+            queueMicrotask(() => next.start());
+            return;
+          }
+          state!.active = false;
+          vastReservationQueues.delete(key);
+        };
+
+        const waitedMs = Date.now() - item.queuedAtMs;
+        if (waitedMs > timeoutMs) {
+          reject(buildVastReservationQueueError({
+            code: 'VAST_RESERVATION_QUEUE_TIMEOUT',
+            retryAfterMs: intervalMs,
+            queuePosition: 0,
+            queueDepth: (state!.active ? 1 : 0) + state!.queue.length,
+            reason: `queued reservation waited ${waitedMs}ms before it could start`,
+          }));
+          finish();
+          return;
+        }
+
+        Promise.resolve()
+          .then(task)
+          .then(resolve, reject)
+          .finally(finish);
+      },
+    };
+
+    if (!state!.active) {
+      state!.active = true;
+      item.start();
+      return;
+    }
+
+    item.timer = setTimeout(() => {
+      const idx = state!.queue.indexOf(item);
+      if (idx < 0) return;
+      state!.queue.splice(idx, 1);
+      reject(buildVastReservationQueueError({
+        code: 'VAST_RESERVATION_QUEUE_TIMEOUT',
+        retryAfterMs: intervalMs,
+        queuePosition: idx + 1,
+        queueDepth: (state!.active ? 1 : 0) + state!.queue.length,
+        reason: `queued reservation exceeded timeout ${timeoutMs}ms`,
+      }));
+    }, timeoutMs);
+    state!.queue.push(item);
+  });
 }
 
 /** Check if an IP address is RFC1918 private / loopback / link-local (unreachable from internet). */
@@ -284,7 +674,6 @@ export class VastClient extends AbstractGpuProvider {
    *   3. Interruptible instances are reclaimed during the pull phase.
    *      Fix: use on-demand (spec.interruptible = false). */
   readonly bootTimeSecs = parseInt(process.env.VAST_BOOT_TIME_SECS || '600', 10);
-  private _lastRequestMs = 0;
   /** IPs of hosts where we recently created instances (cross-call dedup). */
   private _recentlyUsedIps = new Set<string>();
   /** Hosts that reclaimed instances during loading — blacklisted with expiry timestamps. */
@@ -526,41 +915,58 @@ export class VastClient extends AbstractGpuProvider {
 
   /**
    * Rate-limited fetch for Vast.ai API.
-   * Enforces minimum interval between requests and retries on 429.
-   */
+   * Enforces endpoint-scoped minimum intervals and retries on 429.
+  */
   private async _vastFetch(url: string, init?: RequestInit, timeout = TIMEOUTS.read): Promise<Response> {
-    // Enforce minimum interval between requests (~3 req/s)
-    const now = Date.now();
-    const elapsed = now - this._lastRequestMs;
-    if (elapsed < RATE_LIMIT_INTERVAL_MS) {
-      await new Promise((r) => setTimeout(r, RATE_LIMIT_INTERVAL_MS - elapsed));
-    }
-    this._lastRequestMs = Date.now();
+    const policy = getVastRateLimitPolicy(url, init);
 
-    // Fetch with 429 retry
-    let lastRes: Response | undefined;
-    for (let attempt = 0; attempt <= RATE_LIMIT_429_MAX_RETRIES; attempt++) {
-      lastRes = await this.fetchRaw(url, init, timeout);
-      if (lastRes.status !== 429) return lastRes;
+    const run = async (): Promise<Response> => {
+      // Fetch with 429 retry
+      let lastRes: Response | undefined;
+      for (let attempt = 0; attempt <= RATE_LIMIT_429_MAX_RETRIES; attempt++) {
+        await waitForVastRateLimit(policy);
+        lastRes = await this.fetchRaw(url, init, timeout);
+        if (lastRes.status !== 429) return lastRes;
 
-      if (attempt < RATE_LIMIT_429_MAX_RETRIES) {
-        const backoff = RATE_LIMIT_429_RETRY_MS * (attempt + 1);
-        this.log.warn(`[vast] 429 rate limited on ${url.replace(VAST_API_BASE, '')}, retry in ${backoff}ms (${attempt + 1}/${RATE_LIMIT_429_MAX_RETRIES})`);
-        await new Promise((r) => setTimeout(r, backoff));
-        this._lastRequestMs = Date.now();
+        if (attempt < RATE_LIMIT_429_MAX_RETRIES) {
+          const backoff = Math.max(RATE_LIMIT_429_RETRY_MS * (attempt + 1), RATE_LIMIT_429_ENDPOINT_COOLDOWN_MS);
+          applyVastRateLimitPenalty(policy, backoff);
+          this.log.warn(`[vast] 429 rate limited on ${vastLogPath(url)} (${policy.route}), endpoint cooldown ${backoff}ms (${attempt + 1}/${RATE_LIMIT_429_MAX_RETRIES})`);
+        }
       }
-    }
 
-    // All retries exhausted — throw instead of returning 429 (callers expect valid data)
-    const errMsg = `Vast.ai rate limit exhausted after ${RATE_LIMIT_429_MAX_RETRIES} retries: ${url.replace(VAST_API_BASE, '')}`;
-    this.emitError({
-      operation: '_vastFetch',
-      message: errMsg,
-      errorCode: 'HTTP_429',
-      httpStatus: 429,
-      retryable: true,
-    });
-    throw new Error(errMsg);
+      // All retries exhausted — throw instead of returning 429 (callers expect valid data)
+      const errMsg = `Vast.ai rate limit exhausted after ${RATE_LIMIT_429_MAX_RETRIES} retries: ${vastLogPath(url)}`;
+      this.emitError({
+        operation: '_vastFetch',
+        message: errMsg,
+        errorCode: 'HTTP_429',
+        httpStatus: 429,
+        retryable: true,
+      });
+      throw new Error(errMsg);
+    };
+
+    try {
+      return await withVastReservationQueue(policy, run);
+    } catch (err) {
+      if (isVastReservationQueueError(err)) {
+        this.emitError({
+          operation: '_vastFetch',
+          message: err.message,
+          errorCode: err.code,
+          httpStatus: err.status,
+          retryable: true,
+          metadata: {
+            route: policy.route,
+            queuePosition: err.queuePosition,
+            queueDepth: err.queueDepth,
+            retryAfterMs: err.retryAfterMs,
+          },
+        });
+      }
+      throw err;
+    }
   }
 
   async discoverInstance(
@@ -1402,12 +1808,20 @@ export class VastClient extends AbstractGpuProvider {
     // fast without waiting on one contract at a time.
     const offerFailures: Array<{ offerId: string; gpu: string; reason: string }> = [];
     const failuresMutex = { push: (f: typeof offerFailures[number]) => offerFailures.push(f) };
-    const requestedRaceCount = Math.max(1, Math.min(5, spec.raceCount ?? 1));
-    const raceCount = requestedRaceCount;
+    const requestedRaceCount = Math.max(1, Math.floor(spec.raceCount ?? 1));
+    const raceCount = Math.min(requestedRaceCount, VAST_MAX_OFFER_RACE_COUNT);
+    if (requestedRaceCount > raceCount) {
+      this.log.warn(`[vast] Capping hedged deploy race from ${requestedRaceCount} to ${raceCount} to avoid API rate limits`);
+    }
     const offerPool = offers.slice(0, 10);
     const losers: Array<{ instanceId: string; contractId: string }> = [];
 
-    this.log.log(`[vast] Hedged deploy: race=${raceCount}, pool=${offerPool.length} offers`);
+    const offerRaceStaggerMs = raceCount > 1 ? getVastOfferRaceStaggerMs() : 0;
+    this.log.log(
+      raceCount > 1
+        ? `[vast] Staggered hedge deploy: maxInFlight=${raceCount}, stagger=${offerRaceStaggerMs}ms, pool=${offerPool.length} offers`
+        : `[vast] Serial deploy: pool=${offerPool.length} offers`,
+    );
 
     const winner = await this._raceOffers({
       offers: offerPool,
@@ -1423,11 +1837,11 @@ export class VastClient extends AbstractGpuProvider {
       losers,
     });
 
-    // Tear down losing parallel attempts (fire-and-forget but logged).
+    // Tear down losing hedged attempts (fire-and-forget but logged).
     // Dedupe against entries already cleaned by _raceOffers async branch.
     const toClean = losers.filter(l => !(l as { _cleaned?: boolean })._cleaned);
     if (toClean.length > 0) {
-      this.log.log(`[vast] Tearing down ${toClean.length} losing parallel attempts`);
+      this.log.log(`[vast] Tearing down ${toClean.length} losing hedged attempts`);
       for (const loser of toClean) {
         this.deleteInstance(loser.instanceId, { apiKey })
           .then(() => this.log.log(`[vast] Cleaned up loser ${loser.contractId}`))
@@ -1465,7 +1879,8 @@ export class VastClient extends AbstractGpuProvider {
   }
 
   /**
-   * P0a: Hedged deploy — try multiple offers in parallel, return first success.
+   * P0a: Staggered hedge deploy — start one offer, then add another only
+   * after a configured headstart. Returns the first success.
    * Tracks "loser" instances so caller can clean them up.
    */
   private async _raceOffers(args: {
@@ -1485,6 +1900,8 @@ export class VastClient extends AbstractGpuProvider {
 
     let nextOfferIdx = 0;
     const inflight = new Map<number, Promise<{ result: GpuInstance | null; idx: number; offerId: string }>>();
+    const staggerMs = raceCount > 1 ? getVastOfferRaceStaggerMs() : 0;
+    let lastLaunchAt = 0;
 
     // Every instance an in-flight attempt has actually created, keyed by
     // contractId. Populated synchronously by `_tryOffer` the moment a contract
@@ -1516,6 +1933,7 @@ export class VastClient extends AbstractGpuProvider {
       const idx = nextOfferIdx++;
       const offer = offers[idx];
       const offerId = String(offer.id);
+      lastLaunchAt = Date.now();
       const p = this._tryOffer({
         offer, headers, apiKey, diskGb, imageName, envVars, spec, userId, failures, onCreated,
       }).then((result) => ({ result, idx, offerId }));
@@ -1523,30 +1941,57 @@ export class VastClient extends AbstractGpuProvider {
       return true;
     };
 
-    // Launch initial wave
-    for (let i = 0; i < raceCount; i++) {
-      if (!launch()) break;
-    }
+    const launchDelayMs = (): number => {
+      if (staggerMs <= 0 || lastLaunchAt === 0) return 0;
+      return Math.max(0, lastLaunchAt + staggerMs - Date.now());
+    };
 
-    while (inflight.size > 0 && !winner) {
-      const settled = await Promise.race(inflight.values());
-      inflight.delete(settled.idx);
-      if (settled.result) {
-        // Winner! Eagerly tear down every loser instance that already exists.
-        // Any loser still mid-create will be caught by `onCreated` above.
-        winner = settled.result;
-        winnerInstanceId = winner.instanceId;
-        for (const [cid, rec] of created) {
-          if (rec.instanceId !== winnerInstanceId) {
-            created.delete(cid);
-            deleteLoser(rec);
-          }
-        }
-        inflight.clear();
-        break;
+    // Launch the first offer immediately. Additional hedged attempts are
+    // staggered so Vast.ai never receives simultaneous reservation attempts.
+    if (!launch()) return null;
+
+    while ((inflight.size > 0 || nextOfferIdx < offers.length) && !winner) {
+      if (inflight.size === 0) {
+        const delay = launchDelayMs();
+        if (delay > 0) await sleep(delay);
+        launch();
+        continue;
       }
-      // Failed attempt — launch next offer to keep raceCount in flight
-      launch();
+
+      const events: Array<Promise<
+        | { type: 'settled'; settled: { result: GpuInstance | null; idx: number; offerId: string } }
+        | { type: 'launch' }
+      >> = [
+        Promise.race(inflight.values()).then((settled) => ({ type: 'settled' as const, settled })),
+      ];
+
+      if (nextOfferIdx < offers.length && inflight.size < raceCount) {
+        const delay = launchDelayMs();
+        events.push(sleep(delay).then(() => ({ type: 'launch' as const })));
+      }
+
+      const event = await Promise.race(events);
+      if (event.type === 'launch') {
+        launch();
+        continue;
+      }
+
+      const settled = event.settled;
+      inflight.delete(settled.idx);
+      if (!settled.result) continue;
+
+      // Winner! Eagerly tear down every loser instance that already exists.
+      // Any loser still mid-create will be caught by `onCreated` above.
+      winner = settled.result;
+      winnerInstanceId = winner.instanceId;
+      for (const [cid, rec] of created) {
+        if (rec.instanceId !== winnerInstanceId) {
+          created.delete(cid);
+          deleteLoser(rec);
+        }
+      }
+      inflight.clear();
+      break;
     }
 
     return winner;
@@ -1640,7 +2085,7 @@ export class VastClient extends AbstractGpuProvider {
 
       const contractId = String(createData.new_contract);
       const instanceId = `inst-${contractId}`;
-      // Register the live contract immediately so a parallel winner can tear
+      // Register the live contract immediately so a hedged winner can tear
       // this down right away — before the (potentially multi-minute) endpoint
       // poll / SSH-tunnel wait below. Prevents dual-billing on SSH-only hosts.
       onCreated?.({ instanceId, contractId });
@@ -1878,6 +2323,10 @@ export class VastClient extends AbstractGpuProvider {
         },
       };
     } catch (e) {
+      if (isVastReservationQueueError(e)) {
+        this.log.warn(`[vast] Reservation queue blocked offer ${offerId}: ${this.errMsg(e)}`);
+        throw e;
+      }
       this.log.warn(`[vast] Create on offer ${offerId} error: ${this.errMsg(e)}`);
       failures.push({ offerId, gpu: gpuName, reason: this.errMsg(e) });
       return null;
@@ -2630,13 +3079,14 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     const MAX_MISSING_STREAK = 5; // abort after 5 consecutive "not found" polls (~55s with backoff)
     let sshOnlyRunningCount = 0; // consecutive polls where instance is running with SSH but no endpoint
 
-    // P3: Adaptive base interval — fast hosts (>5Gbps) get 2s base, slow get 5s
+    // P3: Adaptive base interval. Defaults are intentionally conservative:
+    // repeated endpoint polls were the main source of Vast 429s during deploy storms.
     const isFastHost = (inetDownMbps ?? 0) >= 5000;
-    const baseMs = isFastHost ? 2_000 : POLL_BASE_MS;
+    const baseMs = isFastHost ? POLL_FAST_BASE_MS : POLL_BASE_MS;
 
-    // Initial delay: Vast.ai API takes 3-5s to propagate. Fast hosts: 2s; slow: 5s.
+    // Initial delay: Vast.ai API takes time to propagate new contracts.
     if (attempt === 0) {
-      const initialDelay = isFastHost ? 2_000 : 5_000;
+      const initialDelay = isFastHost ? POLL_FAST_INITIAL_DELAY_MS : POLL_INITIAL_DELAY_MS;
       await new Promise((r) => setTimeout(r, initialDelay));
     }
 

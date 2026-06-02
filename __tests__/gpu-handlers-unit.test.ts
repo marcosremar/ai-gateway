@@ -175,10 +175,25 @@ describe('handleGpuDeploy — validation', () => {
     expect(fnBody).toContain('activeApp');
   });
 
-  it('#090 _validateDeployRequest caps raceCount at 10', () => {
+  it('#090 _validateDeployRequest validates raceCount before safe clamps', () => {
     const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
     const fnBody = handlersSource.slice(fnStart, fnStart + 14000);
     expect(fnBody).toContain('Math.min(Math.floor(raceCountRaw), 10)');
+  });
+
+  it('_validateDeployRequest forces fine-tune deploys to serial raceCount=1', () => {
+    const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
+    const fnBody = handlersSource.slice(fnStart, fnStart + 16000);
+    expect(fnBody).toContain('Fine-tune deploy forced to raceCount=1');
+    expect(fnBody).toContain('return 1');
+  });
+
+  it('_validateDeployRequest caps Vast and global deploy race to 2', () => {
+    const fnStart = handlersSource.indexOf('async function _validateDeployRequest');
+    const fnBody = handlersSource.slice(fnStart, fnStart + 16000);
+    expect(fnBody).toContain('Vast deploy raceCount capped at 2');
+    expect(fnBody).toContain('AIGW_MAX_DEPLOY_RACE_COUNT');
+    expect(fnBody).toContain('Math.min(2, configuredMaxDeployRaceCount)');
   });
 });
 

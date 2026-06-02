@@ -8,7 +8,11 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { VastClient } from '../src/gpu-providers/vast-client';
+import {
+  VastClient,
+  getVastRateLimitPolicyForTests,
+  resetVastRateLimitStateForTests,
+} from '../src/gpu-providers/vast-client';
 import type { ProviderCredentials } from '../src/gpu-providers/types';
 import { loadEnv, requireEnv, timed } from './helpers';
 import { installMockFetch } from './mock-fetch';
@@ -34,6 +38,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  resetVastRateLimitStateForTests();
   restoreFetch?.();
 });
 
@@ -77,6 +82,24 @@ describe('VastClient — Read-Only (Real API or Mock)', () => {
 });
 
 describe('VastClient — Offer Search (Real API or Mock)', () => {
+  it('uses VastClient rate policy and cache for read-only offer searches', async () => {
+    resetVastRateLimitStateForTests();
+    const policy = getVastRateLimitPolicyForTests('https://console.vast.ai/api/v0/bundles/', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${creds.apiKey}` },
+    });
+
+    expect(policy.route).toBe('POST /bundles');
+    expect(policy.minIntervalMs).toBeGreaterThanOrEqual(15_000);
+
+    const first = await client.listOffers({ gpuTypes: ['RTX 4090'], limit: 5 }, creds);
+    const second = await client.listOffers({ gpuTypes: ['RTX 4090'], limit: 5 }, creds);
+
+    expect(Array.isArray(first)).toBe(true);
+    expect(second).toEqual(first);
+    console.log(`  VastClient cached RTX 4090 offers: ${first.length}`);
+  });
+
   it('searches for RTX 4090 GPU offers', async () => {
     // Use the private _searchOffers via a small wrapper to test the API
     const searchBody = {

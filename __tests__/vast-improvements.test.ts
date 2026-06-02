@@ -1,6 +1,6 @@
 /**
  * Tests for Vast.ai reliability improvements:
- * - P0a: Hedged deploy (parallel offer attempts)
+ * - P0a: Staggered hedged deploy (delayed extra offer attempts)
  * - P0b: SSH-only fallback search (Phase-2)
  * - P1a: Auto-snapshot after success
  * - P1b: Persistent host reputation
@@ -14,7 +14,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { VastClient } from '@ai-gateway/gpu-providers/vast-client';
+import {
+  VastClient,
+  getVastOfferRaceStaggerMsForTests,
+  getVastReservationQueueSnapshotForTests,
+  getVastRateLimitPolicyForTests,
+  resetVastRateLimitStateForTests,
+} from '@ai-gateway/gpu-providers/vast-client';
+import type { GpuInstance } from '@ai-gateway/gpu-providers/types';
 import { AbstractGpuProvider } from '@ai-gateway/gpu-providers/abstract-provider';
 import { SshTunnel } from '../server/ssh-tunnel';
 import fs from 'fs';
@@ -41,22 +48,164 @@ describe('Vast.ai reliability improvements', () => {
   const mockPreflight = () => mockResp({ credit: 100 });
 
   beforeEach(() => {
+    resetVastRateLimitStateForTests();
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
     process.env.VAST_SKIP_IMAGE_PRECHECK = '1';
+    process.env.VAST_OFFER_RACE_STAGGER_MS = '0';
+    process.env.VAST_RESERVATION_QUEUE_MAX_SIZE = '5';
+    process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS = '600000';
     try { fs.rmSync(path.join(os.homedir(), '.babelcast', 'vast-host-blacklist.json')); } catch {}
     try { fs.rmSync(path.join(os.homedir(), '.ai-gateway', 'vast-host-reputation.json')); } catch {}
   });
 
   afterEach(() => {
+    resetVastRateLimitStateForTests();
     delete process.env.VAST_SKIP_IMAGE_PRECHECK;
+    delete process.env.VAST_OFFER_RACE_STAGGER_MS;
+    delete process.env.VAST_RESERVATION_QUEUE_MAX_SIZE;
+    delete process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS;
     vi.restoreAllMocks();
     return new Promise<void>(resolve => setTimeout(() => {
       try { fs.rmSync(path.join(os.homedir(), '.babelcast', 'vast-host-blacklist.json')); } catch {}
       try { fs.rmSync(path.join(os.homedir(), '.ai-gateway', 'vast-host-reputation.json')); } catch {}
       resolve();
     }, 1100));
+  });
+
+  // ── Vast rate-limit policy ───────────────────────────────────────────────
+  describe('Rate-limit policy', () => {
+    it('uses conservative per-endpoint intervals for Vast acquisition routes', () => {
+      const headers = { Authorization: 'Bearer vast-secret' };
+
+      const reserve = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/asks/123/`, { method: 'PUT', headers });
+      const instancePoll = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/instances/123/`, { method: 'GET', headers });
+      const offerSearch = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/bundles/`, { method: 'POST', headers });
+      const mutation = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/instances/command/123/`, { method: 'POST', headers });
+
+      expect(reserve.route).toBe('PUT /asks/:offer');
+      expect(reserve.minIntervalMs).toBeGreaterThanOrEqual(15_000);
+      expect(instancePoll.route).toBe('GET /instances/:id');
+      expect(instancePoll.minIntervalMs).toBeGreaterThanOrEqual(3_000);
+      expect(offerSearch.route).toBe('POST /bundles');
+      expect(offerSearch.minIntervalMs).toBeGreaterThanOrEqual(15_000);
+      expect(mutation.route).toBe('POST /instances/mutation');
+      expect(mutation.minIntervalMs).toBeGreaterThanOrEqual(3_000);
+    });
+
+    it('shares reserve buckets across offer IDs without exposing bearer tokens', () => {
+      const headers = { Authorization: 'Bearer very-secret-token' };
+      const first = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/asks/111/`, { method: 'PUT', headers });
+      const second = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/asks/222/`, { method: 'PUT', headers });
+      const otherIdentity = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/asks/111/`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer other-token' },
+      });
+
+      expect(first.bucketKey).toBe(second.bucketKey);
+      expect(first.bucketKey).not.toContain('very-secret-token');
+      expect(first.identityHash).not.toContain('very-secret-token');
+      expect(first.bucketKey).not.toBe(otherIdentity.bucketKey);
+    });
+
+    it('retries Vast 429 responses through the shared fetch wrapper', async () => {
+      const client = new VastClient();
+      fetchSpy
+        .mockResolvedValueOnce(mockResp({ error: 'API requests too frequent' }, 429))
+        .mockResolvedValueOnce(mockResp({ ok: true }));
+
+      const res = await (client as any)._vastFetch(`${VAST_API_BASE}/instances/123/`, {
+        headers: { Authorization: 'Bearer k' },
+      });
+
+      expect(res.status).toBe(200);
+      expect(fetchSpy.mock.calls.length).toBe(2);
+    });
+
+    it('queues Vast reservations with a bounded queue instead of starting them simultaneously', async () => {
+      process.env.VAST_RESERVATION_QUEUE_MAX_SIZE = '2';
+      const client = new VastClient();
+      const releases: Array<(res: Response) => void> = [];
+      fetchSpy.mockImplementation(() => new Promise<Response>((resolve) => releases.push(resolve)));
+
+      const p1 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/1/`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer k' },
+      });
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+
+      const p2 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/2/`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer k' },
+      });
+      await Promise.resolve();
+
+      const p3 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/3/`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer k' },
+      });
+
+      await expect(p3).rejects.toThrow(/Vast reservation queue full/);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(getVastReservationQueueSnapshotForTests()[0]).toMatchObject({
+        active: true,
+        pending: 1,
+        depth: 2,
+      });
+
+      releases[0](mockResp({ ok: true }));
+      await p1;
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+
+      releases[1](mockResp({ ok: true }));
+      await p2;
+      expect(getVastReservationQueueSnapshotForTests()).toEqual([]);
+    });
+
+    it('times out queued reservations that cannot start before the queue timeout', async () => {
+      process.env.VAST_RESERVATION_QUEUE_MAX_SIZE = '2';
+      process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS = '16000';
+      vi.useFakeTimers();
+      try {
+        const client = new VastClient();
+        const releases: Array<(res: Response) => void> = [];
+        fetchSpy.mockImplementation(() => new Promise<Response>((resolve) => releases.push(resolve)));
+
+        const p1 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/1/`, {
+          method: 'PUT',
+          headers: { Authorization: 'Bearer k' },
+        });
+        await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+
+        const p2 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/2/`, {
+          method: 'PUT',
+          headers: { Authorization: 'Bearer k' },
+        });
+        const p2Rejected = expect(p2).rejects.toThrow(/Vast reservation queue timeout/);
+
+        await vi.advanceTimersByTimeAsync(15_999);
+        expect(getVastReservationQueueSnapshotForTests()[0]).toMatchObject({
+          active: true,
+          pending: 1,
+          depth: 2,
+        });
+
+        await vi.advanceTimersByTimeAsync(1);
+        await p2Rejected;
+        expect(getVastReservationQueueSnapshotForTests()[0]).toMatchObject({
+          active: true,
+          pending: 0,
+          depth: 1,
+        });
+
+        releases[0](mockResp({ ok: true }));
+        await p1;
+        expect(getVastReservationQueueSnapshotForTests()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // ── P2b: Offer cache with TTL ─────────────────────────────────────────────
@@ -153,37 +302,19 @@ describe('Vast.ai reliability improvements', () => {
       expect((client as any)._pollForEndpoint.length).toBe(2); // 2 required, rest optional
     });
 
-    it('uses faster initial delay for high-bandwidth hosts', async () => {
-      const client = new VastClient();
-      // Stub _fetchInstanceDetail to immediately return a "running" instance
-      // with a non-private IP and direct_port. The probe will fail in tests
-      // (TCP to fake IP) but we just need to measure initial delay.
-      vi.spyOn(client as any, '_fetchInstanceDetail').mockResolvedValue({
-        ip: '10.0.0.1', // private — will short-circuit to no endpoint
-        endpoint: '',
-        status: 'running',
+    it('keeps endpoint polling on the shared Vast instance-detail bucket', () => {
+      const first = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/instances/111/`, {
+        method: 'GET',
+        headers: { Authorization: 'Bearer k' },
+      });
+      const second = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/instances/222/`, {
+        method: 'GET',
+        headers: { Authorization: 'Bearer k' },
       });
 
-      const startSlow = Date.now();
-      // Slow host (no inetDown given)
-      await Promise.race([
-        (client as any)._pollForEndpoint('test1', {}, 10_000, undefined),
-        new Promise((r) => setTimeout(r, 6_000)),
-      ]);
-      const slowElapsed = Date.now() - startSlow;
-
-      const startFast = Date.now();
-      // Fast host (>5Gbps)
-      await Promise.race([
-        (client as any)._pollForEndpoint('test2', {}, 10_000, 8_000),
-        new Promise((r) => setTimeout(r, 6_000)),
-      ]);
-      const fastElapsed = Date.now() - startFast;
-
-      // Fast host should reach first poll faster than slow host (initial delay 2s vs 5s)
-      // We just verify the fast path takes meaningfully less time before first poll
-      expect(fastElapsed).toBeLessThan(slowElapsed + 100); // fast can't be slower
-    }, 30_000);
+      expect(first.bucketKey).toBe(second.bucketKey);
+      expect(first.minIntervalMs).toBeGreaterThanOrEqual(3_000);
+    });
   });
 
   // ── P1a: Auto-snapshot after success ──────────────────────────────────────
@@ -276,8 +407,8 @@ describe('Vast.ai reliability improvements', () => {
     });
   });
 
-  // ── P0a: Hedged deploy ────────────────────────────────────────────────────
-  describe('P0a: Hedged deploy', () => {
+  // ── P0a: Staggered hedge deploy ──────────────────────────────────────────
+  describe('P0a: Staggered hedge deploy', () => {
     it('labels created instances with the gateway prefix for safe cleanup', async () => {
       const client = new VastClient();
 
@@ -298,7 +429,7 @@ describe('Vast.ai reliability improvements', () => {
       expect(body.label).toMatch(/^parle-autoscale-\d+(-[a-z0-9]+)?$/);
     });
 
-    it('launches multiple offers in parallel when raceCount > 1', async () => {
+    it('tries multiple offers when raceCount > 1', async () => {
       const client = new VastClient();
 
       // 3 offers, race=2 — all 3 fail (so we can count attempts)
@@ -325,7 +456,54 @@ describe('Vast.ai reliability improvements', () => {
       expect(createCalls.length).toBe(3);
     });
 
-    it('respects spec.raceCount=1 (no parallelism)', async () => {
+    it('stages the second hedge instead of launching it immediately', async () => {
+      process.env.VAST_OFFER_RACE_STAGGER_MS = '250';
+      vi.useFakeTimers();
+      try {
+        const client = new VastClient();
+        const launchedAt: number[] = [];
+        const pending: Array<(value: GpuInstance | null) => void> = [];
+        vi.spyOn(client as any, '_tryOffer').mockImplementation(() => {
+          launchedAt.push(Date.now());
+          return new Promise<GpuInstance | null>((resolve) => pending.push(resolve));
+        });
+
+        const race = (client as any)._raceOffers({
+          offers: [
+            { id: 'o1', gpu_name: 'RTX 4090' },
+            { id: 'o2', gpu_name: 'RTX 4090' },
+          ],
+          raceCount: 2,
+          headers: {},
+          apiKey: 'k',
+          diskGb: 20,
+          imageName: 'test/image:latest',
+          envVars: {},
+          spec: { gpuTypes: ['RTX 4090'], dockerImage: 'test/image:latest' },
+          failures: { push: vi.fn() },
+          losers: [],
+        });
+
+        await vi.advanceTimersByTimeAsync(0);
+        expect(getVastOfferRaceStaggerMsForTests()).toBe(250);
+        expect(launchedAt).toHaveLength(1);
+
+        await vi.advanceTimersByTimeAsync(249);
+        expect(launchedAt).toHaveLength(1);
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(launchedAt).toHaveLength(2);
+        expect(launchedAt[1] - launchedAt[0]).toBeGreaterThanOrEqual(250);
+
+        pending[0]?.(null);
+        pending[1]?.(null);
+        await race;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('respects spec.raceCount=1 (serial offers)', async () => {
       const client = new VastClient();
 
       fetchSpy
@@ -350,7 +528,7 @@ describe('Vast.ai reliability improvements', () => {
       expect(createCalls.length).toBe(2);
     });
 
-    it('caps raceCount at 5 (defensive)', async () => {
+    it('caps raceCount at 2 (defensive)', async () => {
       const client = new VastClient();
 
       fetchSpy
@@ -369,7 +547,7 @@ describe('Vast.ai reliability improvements', () => {
         ),
       ).rejects.toThrow();
 
-      // All 10 offers tried (raceCount caps internally but doesn't limit total attempts)
+      // All 10 offers are still tried; the cap only limits simultaneous attempts.
       const createCalls = fetchSpy.mock.calls.filter(c => String(c[0]).includes('/asks/'));
       expect(createCalls.length).toBe(10);
     });

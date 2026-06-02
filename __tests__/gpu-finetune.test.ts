@@ -243,7 +243,7 @@ describe('gpu jobs CLI acquisition wiring', () => {
     expect(src).toContain('SSH acquisition serial');
   });
 
-  it('keeps deploy-level race available without the removed Vast acquisition knob', () => {
+  it('keeps deploy-level race capped without the removed Vast acquisition knob', () => {
     const serverSrc = readFileSync(join(process.cwd(), 'server/gpu-handlers.ts'), 'utf-8');
     const cliSrc = cliSource();
     const lifecycleSrc = readFileSync(join(process.cwd(), 'server/handlers/gpu/lifecycle.ts'), 'utf-8');
@@ -256,8 +256,10 @@ describe('gpu jobs CLI acquisition wiring', () => {
     expect(cliSrc).not.toContain('--offer-' + 'race-count');
     expect(lifecycleSrc).not.toContain('Vast.ai deploy race disabled');
     expect(lifecycleSrc).toContain('if (body.race)');
-    expect(vastSrc).toContain('const raceCount = requestedRaceCount');
-    expect(moduleVastSrc).toContain('const raceCount = requestedRaceCount');
+    expect(vastSrc).toContain('const raceCount = Math.min(requestedRaceCount, VAST_MAX_OFFER_RACE_COUNT)');
+    expect(moduleVastSrc).toContain('const raceCount = Math.min(requestedRaceCount, VAST_MAX_OFFER_RACE_COUNT)');
+    expect(vastSrc).toContain('Staggered hedge deploy');
+    expect(moduleVastSrc).toContain('Staggered hedge deploy');
     expect(vastSrc).not.toContain('const defaultOfferRace');
     expect(moduleVastSrc).not.toContain('const _defaultRace');
   });
