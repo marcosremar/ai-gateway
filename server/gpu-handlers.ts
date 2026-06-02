@@ -688,11 +688,17 @@ async function _validateDeployRequest(
   // Direct SSH is an explicit operator policy. By default Vast SSH-driven
   // workloads may use either a direct mapping or Vast's SSH proxy, whichever
   // becomes reachable first.
-  const requireDirectPort = body.requireDirectPort === true || process.env.AIGW_VAST_REQUIRE_DIRECT === '1'
+  const isFinetuneRequest = body.finetune === true;
+  const requireDirectPort = body.requireDirectPort === true
     ? true
-    : body.requireDirectPort === false || process.env.AIGW_VAST_ALLOW_PROXY === '1' || process.env.AIGW_VAST_REQUIRE_DIRECT === '0'
+    : body.requireDirectPort === false
+      || isFinetuneRequest
+      || process.env.AIGW_VAST_ALLOW_PROXY === '1'
+      || process.env.AIGW_VAST_REQUIRE_DIRECT === '0'
       ? false
-      : undefined;
+      : process.env.AIGW_VAST_REQUIRE_DIRECT === '1'
+        ? true
+        : undefined;
 
   // Custom env vars, Docker start command, and container disk
   const customEnv = (typeof body.env === 'object' && body.env !== null && !Array.isArray(body.env))

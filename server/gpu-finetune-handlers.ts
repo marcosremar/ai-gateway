@@ -601,6 +601,8 @@ export async function handleStartFinetune(req: IncomingMessage, res: ServerRespo
       AI_GATEWAY_URL: process.env.AI_GATEWAY_URL || process.env.GATEWAY_URL || `http://127.0.0.1:${PORT}`,
       ...(token ? { AIGW_APP_KEY: token } : {}),
       ...(userId ? { AIGW_APP_NAME: userId, AIGW_OWNER: userId } : {}),
+      AIGW_VAST_ALLOW_PROXY: body.requireDirectPort === true ? '0' : '1',
+      AIGW_VAST_REQUIRE_DIRECT: body.requireDirectPort === true ? '1' : '0',
       AIGW_JOB_STATE_ID: job.jobId,
       AIGW_PARALLEL_SLOT: job.jobId,
     },
