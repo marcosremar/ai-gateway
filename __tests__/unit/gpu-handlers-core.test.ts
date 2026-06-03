@@ -250,7 +250,7 @@ vi.mock('../../server/config-persistence', () => ({
 // We import specific exported functions. Because the module is large and
 // imports many things, we re-mock the state module to get access to its internals.
 import * as gpuHandlers from '../../server/gpu-handlers';
-import { createDeploySlot } from '../../src/gateway/state/deploy-state';
+import { createDeploySlot, deleteDeploySlot } from '../../src/gateway/state/deploy-state';
 
 // Re-import mocked modules for test assertions
 import * as stateMock from '../../server/state';
@@ -765,6 +765,50 @@ describe('GPU Handlers - Core Logic', () => {
       expect(response.deployId).toBe('deploy-existing-slot');
       expect(response.slot).toBe(slotKey);
       expect(gpuDeployMock.startDeployWithTiers).not.toHaveBeenCalled();
+      deleteDeploySlot(slotKey);
+    });
+
+    it('should report queued for duplicate app-slot deploys before a deployId exists', async () => {
+      const img = uniqueImage();
+      const parallelSlot = `queued-slot-${Date.now()}`;
+      const slotKey = `default:${parallelSlot}`;
+      const slot = createDeploySlot(slotKey);
+      Object.assign(slot.state, {
+        status: 'idle',
+        deployId: '',
+        startedAt: 0,
+        dockerImage: img,
+        provider: '',
+      });
+      slot.lock = true;
+      slot.promise = null;
+
+      const body = {
+        dockerImage: img,
+        gpuTypes: ['NVIDIA GeForce RTX 4090'],
+        provider: 'vast',
+        parallelSlot,
+        finetune: true,
+        readinessProbe: 'ssh',
+        bootTimeoutSec: 300,
+      };
+      vi.mocked(httpUtilsMock.readJsonBody).mockResolvedValue(body);
+      vi.mocked(gpuDeployMock.startDeployWithTiers).mockClear();
+
+      const req = createMockReq(body) as import('http').IncomingMessage & { headers: Record<string, string> };
+      req.headers = { 'x-aigw-user-id': 'default' };
+      const res = createMockRes();
+
+      await gpuHandlers.handleGpuDeploy(req, res);
+
+      expect(res.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
+      const response = JSON.parse(vi.mocked(res.end).mock.calls[0][0] as string);
+      expect(response.idempotent).toBe(true);
+      expect(response.deployId).toBeUndefined();
+      expect(response.status).toBe('queued');
+      expect(response.slot).toBe(slotKey);
+      expect(gpuDeployMock.startDeployWithTiers).not.toHaveBeenCalled();
+      deleteDeploySlot(slotKey);
     });
   });
 
@@ -901,6 +945,49 @@ describe('GPU Handlers - Core Logic', () => {
 
       // Since deployState.deployId is empty, no mismatch check fires
       expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
+    });
+
+    it('should queue app-slot cancellation while provider instance id is not assigned', async () => {
+      const previousWaitMs = process.env.AIGW_APP_SLOT_CANCEL_WAIT_MS;
+      process.env.AIGW_APP_SLOT_CANCEL_WAIT_MS = '0';
+      const parallelSlot = `cancel-slot-${Date.now()}`;
+      const slotKey = `default:${parallelSlot}`;
+      const slot = createDeploySlot(slotKey);
+      Object.assign(slot.state, {
+        status: 'creating',
+        deployId: 'deploy-cancel-slot',
+        startedAt: Date.now(),
+        provider: 'vast',
+        podId: '',
+      });
+      slot.lock = true;
+      slot.cancelled = false;
+      slot.promise = new Promise<void>(() => {});
+
+      try {
+        const body = { parallelSlot, force: true };
+        vi.mocked(httpUtilsMock.readJsonBody).mockResolvedValue(body);
+
+        const req = createMockReq(body) as import('http').IncomingMessage & { headers: Record<string, string> };
+        req.headers = { 'x-aigw-user-id': 'default' };
+        const res = createMockRes();
+
+        await gpuHandlers.handleGpuTerminate(req, res);
+
+        expect(res.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
+        const response = JSON.parse(vi.mocked(res.end).mock.calls[0][0] as string);
+        expect(response.ok).toBe(true);
+        expect(response.cancellationQueued).toBe(true);
+        expect(response.deployId).toBe('deploy-cancel-slot');
+        expect(slot.cancelled).toBe(true);
+        expect(slot.lock).toBe(true);
+      } finally {
+        slot.promise = null;
+        slot.lock = false;
+        deleteDeploySlot(slotKey);
+        if (previousWaitMs === undefined) delete process.env.AIGW_APP_SLOT_CANCEL_WAIT_MS;
+        else process.env.AIGW_APP_SLOT_CANCEL_WAIT_MS = previousWaitMs;
+      }
     });
   });
 

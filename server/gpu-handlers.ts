@@ -1137,6 +1137,16 @@ const SLOT_IN_FLIGHT_STATUSES = new Set<DeploymentState['status']>([
 ]);
 const SLOT_DUPLICATE_HOLD_MS = 10 * 60_000;
 
+function appSlotCancelWaitMs(): number {
+  const raw = Number(process.env.AIGW_APP_SLOT_CANCEL_WAIT_MS);
+  if (Number.isFinite(raw)) return Math.max(0, Math.min(60_000, Math.floor(raw)));
+  return 20_000;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function slotDuplicateHoldMs(body: Record<string, unknown>): number {
   const raw = body.bootTimeoutSec;
   const bootMs = typeof raw === 'number' && Number.isFinite(raw)
@@ -1158,15 +1168,19 @@ function respondWithExistingSlotDeploy(
   slotKey: string,
   requestId: string,
 ): void {
+  const effectiveStatus: DeploymentState['status'] =
+    slot.state.status === 'idle' && (slot.lock || slot.promise) ? 'queued' : slot.state.status;
   const elapsedSec = slot.state.startedAt > 0
     ? Math.max(0, Math.round((Date.now() - slot.state.startedAt) / 1000))
     : 0;
-  log.log(`[req=${requestId}] App-key deploy coalesced: slot '${slotKey}' already ${slot.state.status} (${elapsedSec}s)`);
-  res.writeHead(200, { 'Content-Type': 'application/json' });
+  log.log(`[req=${requestId}] App-key deploy coalesced: slot '${slotKey}' already ${effectiveStatus} (${elapsedSec}s)`);
+  res.writeHead(effectiveStatus === 'queued' ? 202 : 200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     deployId: slot.state.deployId || undefined,
-    status: slot.state.status,
-    message: 'Deploy already in progress for this slot',
+    status: effectiveStatus,
+    message: slot.state.deployId
+      ? 'Deploy already in progress for this slot'
+      : 'Deploy already queued for this slot',
     idempotent: true,
     slot: slotKey,
     elapsedSec,
@@ -1805,10 +1819,23 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
     if (appSlot.lock && forceTerminate) {
       log.warn(`[req=${requestId}] force terminate breaking app slot lock (${appSlot.ownerKey}, status=${appSlot.state.status})`);
     }
+    const inFlightPromise = appSlot.promise;
     appSlot.lock = true;
     appSlot.cancelled = true;
-    const slotState = appSlot.state;
-    const instanceId = targetInstanceId || slotState.podId || '';
+    let slotState = appSlot.state;
+    let instanceId = targetInstanceId || slotState.podId || '';
+    if (!instanceId && inFlightPromise) {
+      const waitMs = appSlotCancelWaitMs();
+      if (waitMs > 0) {
+        log.warn(`[req=${requestId}] app slot terminate waiting up to ${waitMs}ms for provider instance id (${appSlot.ownerKey})`);
+      }
+      await Promise.race([
+        inFlightPromise.catch(() => undefined),
+        sleep(waitMs),
+      ]);
+      slotState = appSlot.state;
+      instanceId = targetInstanceId || slotState.podId || '';
+    }
     const provider = requestedProvider || (slotState.provider as ProviderName | undefined);
     let terminatedBy: string | null = null;
     let lastErr = '';
@@ -1841,6 +1868,19 @@ export async function handleGpuTerminate(req: IncomingMessage, res: ServerRespon
           lastErr = err instanceof Error ? err.message : String(err);
         }
       }
+    }
+    if (!instanceId && appSlot.promise) {
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        deployId: slotState.deployId || undefined,
+        provider: provider || undefined,
+        mode: 'app_slot_terminate',
+        cancellationQueued: true,
+        status: slotState.status === 'idle' ? 'queued' : slotState.status,
+        message: 'App slot deploy cancellation queued; provider instance id has not been assigned yet.',
+      }));
+      return;
     }
     setDeployState({
       status: 'idle',
