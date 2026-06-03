@@ -1127,6 +1127,51 @@ async function _selectDeploymentTier(
 
 let lastDeployRequest: { hash: string; deployId: string; ts: number } | null = null;
 let finetuneDeployActive = false;
+const SLOT_IN_FLIGHT_STATUSES = new Set<DeploymentState['status']>([
+  'searching',
+  'queued',
+  'creating',
+  'booting',
+  'installing',
+  'warming',
+]);
+const SLOT_DUPLICATE_HOLD_MS = 10 * 60_000;
+
+function slotDuplicateHoldMs(body: Record<string, unknown>): number {
+  const raw = body.bootTimeoutSec;
+  const bootMs = typeof raw === 'number' && Number.isFinite(raw)
+    ? Math.max(30_000, Math.min(600_000, Math.floor(raw) * 1000))
+    : 0;
+  return Math.max(SLOT_DUPLICATE_HOLD_MS, bootMs + 120_000);
+}
+
+function isDeploySlotInFlight(slot: DeploySlot, body: Record<string, unknown>, now = Date.now()): boolean {
+  if (slot.lock || slot.promise) return true;
+  if (!SLOT_IN_FLIGHT_STATUSES.has(slot.state.status)) return false;
+  if (!slot.state.startedAt) return true;
+  return now - slot.state.startedAt < slotDuplicateHoldMs(body);
+}
+
+function respondWithExistingSlotDeploy(
+  res: ServerResponse,
+  slot: DeploySlot,
+  slotKey: string,
+  requestId: string,
+): void {
+  const elapsedSec = slot.state.startedAt > 0
+    ? Math.max(0, Math.round((Date.now() - slot.state.startedAt) / 1000))
+    : 0;
+  log.log(`[req=${requestId}] App-key deploy coalesced: slot '${slotKey}' already ${slot.state.status} (${elapsedSec}s)`);
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    deployId: slot.state.deployId || undefined,
+    status: slot.state.status,
+    message: 'Deploy already in progress for this slot',
+    idempotent: true,
+    slot: slotKey,
+    elapsedSec,
+  }));
+}
 
 /**
  * Start the async deploy, set up the deploy promise, and write the 202 response.
@@ -1395,10 +1440,8 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
   if (callerUserId) {
     const appSlotKey = scopedDeploySlotKey(callerUserId, body.parallelSlot);
     const appSlot = createDeploySlot(appSlotKey);
-    if (appSlot.lock) {
-      log.log(`[req=${requestId}] App-key deploy rejected: slot lock held for '${appSlotKey}'`);
-      res.writeHead(409, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Deploy already in progress for this app', status: appSlot.state.status }));
+    if (isDeploySlotInFlight(appSlot, body)) {
+      respondWithExistingSlotDeploy(res, appSlot, appSlotKey, requestId);
       return;
     }
     appSlot.lock = true;

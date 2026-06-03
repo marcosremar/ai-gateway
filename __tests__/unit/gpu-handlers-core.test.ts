@@ -250,6 +250,7 @@ vi.mock('../../server/config-persistence', () => ({
 // We import specific exported functions. Because the module is large and
 // imports many things, we re-mock the state module to get access to its internals.
 import * as gpuHandlers from '../../server/gpu-handlers';
+import { createDeploySlot } from '../../src/gateway/state/deploy-state';
 
 // Re-import mocked modules for test assertions
 import * as stateMock from '../../server/state';
@@ -722,6 +723,48 @@ describe('GPU Handlers - Core Logic', () => {
       // Note: In real code the 5s window would need to pass. Since we can't
       // easily manipulate Date.now() without affecting everything, this test
       // verifies the deploy path is exercised.
+    });
+
+    it('should coalesce duplicate app-slot deploys while the slot is still creating', async () => {
+      const img = uniqueImage();
+      const parallelSlot = `dup-slot-${Date.now()}`;
+      const slotKey = `default:${parallelSlot}`;
+      const slot = createDeploySlot(slotKey);
+      Object.assign(slot.state, {
+        status: 'creating',
+        deployId: 'deploy-existing-slot',
+        startedAt: Date.now() - 120_000,
+        message: 'Creating Vast.ai instance...',
+        dockerImage: img,
+        provider: 'vast',
+      });
+      slot.lock = false;
+      slot.promise = null;
+
+      const body = {
+        dockerImage: img,
+        gpuTypes: ['NVIDIA GeForce RTX 4090'],
+        provider: 'vast',
+        parallelSlot,
+        finetune: true,
+        readinessProbe: 'ssh',
+        bootTimeoutSec: 300,
+      };
+      vi.mocked(httpUtilsMock.readJsonBody).mockResolvedValue(body);
+      vi.mocked(gpuDeployMock.startDeployWithTiers).mockClear();
+
+      const req = createMockReq(body) as import('http').IncomingMessage & { headers: Record<string, string> };
+      req.headers = { 'x-aigw-user-id': 'default' };
+      const res = createMockRes();
+
+      await gpuHandlers.handleGpuDeploy(req, res);
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
+      const response = JSON.parse(vi.mocked(res.end).mock.calls[0][0] as string);
+      expect(response.idempotent).toBe(true);
+      expect(response.deployId).toBe('deploy-existing-slot');
+      expect(response.slot).toBe(slotKey);
+      expect(gpuDeployMock.startDeployWithTiers).not.toHaveBeenCalled();
     });
   });
 
