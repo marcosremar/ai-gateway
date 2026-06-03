@@ -291,6 +291,31 @@ describe('Vast.ai reliability improvements', () => {
 
   // ── P0a: Hedged deploy ────────────────────────────────────────────────────
   describe('P0a: Hedged deploy', () => {
+    it('does not reserve an offer after cooperative cancellation', async () => {
+      const client = new VastClient();
+      let cancelChecks = 0;
+
+      fetchSpy
+        .mockResolvedValueOnce(mockPreflight())
+        .mockResolvedValueOnce(mockResp({
+          offers: [{ id: 'o1', gpu_name: 'RTX 4090', dph_total: 0.5 }],
+        }));
+
+      await expect(
+        client.createInstance(
+          {
+            gpuTypes: ['RTX 4090'],
+            dockerImage: 'test/image:latest',
+            isCancelled: () => ++cancelChecks >= 2,
+          },
+          { apiKey: 'k' },
+        ),
+      ).rejects.toThrow('Deploy cancelled');
+
+      const createCalls = fetchSpy.mock.calls.filter(c => String(c[0]).includes('/asks/'));
+      expect(createCalls.length).toBe(0);
+    });
+
     it('labels created instances with the gateway prefix for safe cleanup', async () => {
       const client = new VastClient();
 

@@ -1500,9 +1500,11 @@ export class VastClient extends AbstractGpuProvider {
   ): Promise<GpuInstance> {
     const { apiKey } = credentials;
     const headers = this.jsonHeaders(apiKey);
+    const isCancelled = () => spec.isCancelled?.() === true;
 
     // ── Preflight: account balance check ──────────────────────────────────
     await this._runPreflight(credentials);
+    if (isCancelled()) throw new Error('Deploy cancelled');
 
     // ── 1. Auto-detect disk from Docker image if not specified ─────────────
     if (!spec.dockerImage) {
@@ -1612,6 +1614,7 @@ export class VastClient extends AbstractGpuProvider {
     }
 
     let offers = await this._searchOffers(searchBody, headers);
+    if (isCancelled()) throw new Error('Deploy cancelled');
 
     // Client-side enforcement — Vast.ai server-side filters do NOT honor
     // numeric thresholds for inet_down / inet_up reliably (offers come back
@@ -1660,6 +1663,7 @@ export class VastClient extends AbstractGpuProvider {
       searchBody.reliability2 = { gte: 0.9 };
       try {
         offers = await this._searchOffers(searchBody, headers);
+        if (isCancelled()) throw new Error('Deploy cancelled');
         if (createGeoFilter && offers.length) {
           offers = offers.filter(o => {
             const geo = String(o.geolocation || '');
@@ -1688,6 +1692,7 @@ export class VastClient extends AbstractGpuProvider {
       delete sshOnlyBody.direct_port_count;
       try {
         const sshOffers = await this._searchOffers(sshOnlyBody, headers);
+        if (isCancelled()) throw new Error('Deploy cancelled');
         let filtered = sshOffers;
         if (createGeoFilter && filtered.length) {
           filtered = filtered.filter(o => {
@@ -1806,6 +1811,10 @@ export class VastClient extends AbstractGpuProvider {
       failures: failuresMutex,
       losers,
     });
+    if (isCancelled()) {
+      if (winner) await this._safeCleanupInstance(winner.instanceId, apiKey, 'deploy cancelled after offer winner');
+      throw new Error('Deploy cancelled');
+    }
 
     // Tear down losing hedged attempts (fire-and-forget but logged)
     if (losers.length > 0) {
@@ -1862,6 +1871,7 @@ export class VastClient extends AbstractGpuProvider {
     losers: Array<{ instanceId: string; contractId: string }>;
   }): Promise<GpuInstance | null> {
     const { offers, raceCount, headers, apiKey, diskGb, imageName, envVars, spec, userId, failures, losers } = args;
+    const isCancelled = () => spec.isCancelled?.() === true;
 
     let nextOfferIdx = 0;
     const inflight = new Map<number, Promise<{ result: GpuInstance | null; idx: number; offerId: string }>>();
@@ -1894,6 +1904,7 @@ export class VastClient extends AbstractGpuProvider {
     };
 
     const launch = (): boolean => {
+      if (isCancelled()) return false;
       if (nextOfferIdx >= offers.length) return false;
       const idx = nextOfferIdx++;
       const offer = offers[idx];
@@ -1915,7 +1926,7 @@ export class VastClient extends AbstractGpuProvider {
     // staggered so Vast.ai never receives simultaneous reservation attempts.
     if (!launch()) return null;
 
-    while ((inflight.size > 0 || nextOfferIdx < offers.length) && !winner) {
+    while ((inflight.size > 0 || nextOfferIdx < offers.length) && !winner && !isCancelled()) {
       if (inflight.size === 0) {
         const delay = launchDelayMs();
         if (delay > 0) await sleep(delay);
@@ -1936,6 +1947,7 @@ export class VastClient extends AbstractGpuProvider {
       }
 
       const event = await Promise.race(events);
+      if (isCancelled()) break;
       if (event.type === 'launch') {
         launch();
         continue;
@@ -1959,6 +1971,13 @@ export class VastClient extends AbstractGpuProvider {
       break;
     }
 
+    if (isCancelled()) {
+      for (const rec of created.values()) {
+        if (rec.instanceId !== winnerInstanceId) deleteLoser(rec);
+      }
+      return null;
+    }
+
     return winner;
   }
 
@@ -1979,6 +1998,7 @@ export class VastClient extends AbstractGpuProvider {
     onCreated?: (rec: { instanceId: string; contractId: string }) => void;
   }): Promise<GpuInstance | null> {
     const { offer, headers, apiKey, diskGb, imageName, envVars, spec, userId, failures, onCreated } = args;
+    const isCancelled = () => spec.isCancelled?.() === true;
     const offerId = String(offer.id);
     const gpuName = (offer.gpu_name || 'unknown') as string;
     const pricePerHr = (offer.dph_total || 0) as number;
@@ -2036,6 +2056,7 @@ export class VastClient extends AbstractGpuProvider {
     };
 
     try {
+      if (isCancelled()) return null;
       const createRes = await this._vastFetch(`${VAST_API_BASE}/asks/${offerId}/`, {
         method: 'PUT',
         headers,
@@ -2068,6 +2089,10 @@ export class VastClient extends AbstractGpuProvider {
       // this down right away — before the (potentially multi-minute) endpoint
       // poll / SSH-tunnel wait below. Prevents dual-billing on SSH-only hosts.
       onCreated?.({ instanceId, contractId });
+      if (isCancelled()) {
+        await this._safeCleanupInstance(instanceId, apiKey, 'deploy cancelled after contract creation');
+        return null;
+      }
 
       // P3: Adaptive polling — base timeout on host's actual download speed.
       // Faster hosts get tighter timeouts; slower hosts get more headroom.
@@ -2087,6 +2112,10 @@ export class VastClient extends AbstractGpuProvider {
         : undefined;
       const CREATE_POLL_MAX_MS = requestedSshBootMaxMs ?? adaptiveCreatePollMaxMs;
       let { endpoint, ip, sshHost, sshPort } = await this._pollForEndpoint(contractId, headers, CREATE_POLL_MAX_MS, inetDown, spec.onPollProgress);
+      if (isCancelled()) {
+        await this._safeCleanupInstance(instanceId, apiKey, 'deploy cancelled during endpoint polling');
+        return null;
+      }
 
       // forceSshTunnel: skip the direct endpoint even if it looks reachable.
       // Use this on residential hosts where the direct port is unreliable but
@@ -2101,6 +2130,10 @@ export class VastClient extends AbstractGpuProvider {
       // If instance vanished (no endpoint), verify it still exists before trying SSH.
       if (!endpoint) {
         const stillExists = await this._fetchInstanceDetail(contractId, headers);
+        if (isCancelled()) {
+          await this._safeCleanupInstance(instanceId, apiKey, 'deploy cancelled during instance detail lookup');
+          return null;
+        }
         if (!stillExists || !stillExists.ip || ['exited', 'failed', 'destroyed', 'error', 'deleted'].includes(stillExists.status?.toLowerCase())) {
           const reason = 'instance vanished during startup (host reclaimed)';
           // Best-effort fetch of pre-destroy logs for diagnostics. Host reclaims
@@ -2144,6 +2177,10 @@ export class VastClient extends AbstractGpuProvider {
       // marking the pod ready. Without this branch, a bare training container
       // can get stuck trying to open an HTTP tunnel it will never use.
       if (!endpoint && ip && sshHost && sshPort && spec.readinessProbe === 'ssh') {
+        if (isCancelled()) {
+          await this._safeCleanupInstance(instanceId, apiKey, 'deploy cancelled before SSH readiness handoff');
+          return null;
+        }
         this.log.log(`[vast] Instance ${contractId} has SSH but no HTTP endpoint; readinessProbe=ssh, returning for SSH readiness (${sshHost}:${sshPort})`);
         if (ip) this._recordHostSuccess(ip);
         return {
@@ -2191,7 +2228,15 @@ export class VastClient extends AbstractGpuProvider {
           const keyPropMs = this._runtype === 'vm' ? 30_000 : 10_000;
           this.log.log(`[vast] Instance ${contractId} waiting ${keyPropMs / 1000}s for SSH key propagation...`);
           await new Promise(r => setTimeout(r, keyPropMs));
+          if (isCancelled()) {
+            await this._safeCleanupInstance(instanceId, apiKey, 'deploy cancelled before SSH tunnel open');
+            return null;
+          }
           const ok = await tunnel.open(15_000);
+          if (isCancelled()) {
+            await this._safeCleanupInstance(instanceId, apiKey, 'deploy cancelled after SSH tunnel open');
+            return null;
+          }
           if (ok) {
             this.log.log(`[vast] SSH tunnel opened: ${tunnel.endpoint} → ${sshHost}:8000`);
             // Successful boot → clear any lingering failure record for this host
@@ -2251,6 +2296,10 @@ export class VastClient extends AbstractGpuProvider {
       }
 
       // Track host IP to avoid placing multiple instances on the same host
+      if (isCancelled()) {
+        await this._safeCleanupInstance(instanceId, apiKey, 'deploy cancelled before instance return');
+        return null;
+      }
       if (ip) {
         this._recentlyUsedIps.add(ip);
         if (this._recentlyUsedIps.size > MAX_RECENTLY_USED_IPS) {

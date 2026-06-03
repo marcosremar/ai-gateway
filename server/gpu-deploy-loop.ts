@@ -328,6 +328,7 @@ export async function startDeployLoop(
           ...(extra.snapgpuPreloadApp ? { snapgpuPreloadApp: extra.snapgpuPreloadApp } : {}),
           ...(extra.snapgpuAutoSnapshot !== undefined ? { autoSnapshot: extra.snapgpuAutoSnapshot } : {}),
           ...(extra.snapgpuBackend ? { snapgpuBackend: extra.snapgpuBackend } : {}),
+          isCancelled,
           onPollProgress,
         },
         credentials,
@@ -523,8 +524,10 @@ export async function startDeployLoop(
         return;
       }
 
+      if (isCancelled()) return;
       continue;
     } catch (err) {
+      if (isCancelled()) return;
       const deployErr = categorizeDeployError(err, {
         deployId: sd.deployId,
         provider: providerName,

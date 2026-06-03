@@ -170,6 +170,8 @@ export interface InstanceSpec {
    *  need an HTTP endpoint during provider creation; the boot monitor will run
    *  a real SSH probe before marking the pod ready. */
   readinessProbe?: 'health' | 'ssh';
+  /** Optional cooperative cancellation hook checked during long provider create loops. */
+  isCancelled?: () => boolean;
   /** Force SSH tunnel for Vast.ai instances (skip direct-port endpoint).
    *  Use this when targeting residential hosts whose NAT/firewall accepts
    *  TCP SYN packets for the mapped port even when the container app isn't
