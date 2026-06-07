@@ -70,6 +70,7 @@ export class OpenAICompatEmbeddingProvider implements EmbeddingProvider {
     const response = await client.embeddings.create({
       input,
       model,
+      encoding_format: 'float',
       ...(opts?.dimensions !== undefined && { dimensions: opts.dimensions }),
     });
 

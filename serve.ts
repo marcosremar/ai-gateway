@@ -15,6 +15,8 @@ import { groqSTT, groqLLM, groqTTS } from './src/providers/groq';
 import { openrouterLLM } from './src/gateway/providers/cloud/openrouter';
 import { zaiLLM, ZAI_LLM_MODELS } from './src/modules/gateway/providers/cloud/zai';
 import { routingImage } from './src/providers/routing-image';
+import { fireworksEmbedding } from './src/gateway/providers/cloud/fireworks/fireworks-embedding';
+import { openaiEmbedding } from './src/gateway/providers/cloud/openai/openai-embedding';
 import { createLogger } from './src/logger';
 import { createGatewayMcpHandler } from './src/gateway/mcp/server';
 import type { ProviderMapping, PrefixRoute } from './src/proxy/types';
@@ -203,6 +205,17 @@ const providers: ProviderMapping = {
   },
   // Routing image provider: dit360 → local GPU 360°, fal-ai/* → fal.ai cloud
   image: routingImage,
+  ...((process.env.OPENAI_API_KEY || process.env.FIREWORKS_API_KEY) ? {
+    embedding: {
+      ...(process.env.OPENAI_API_KEY ? {
+        'text-embedding-3-small': openaiEmbedding,
+        'text-embedding-3-large': openaiEmbedding,
+      } : {}),
+      ...(process.env.FIREWORKS_API_KEY ? {
+        'nomic-ai/nomic-embed-text-v1.5': fireworksEmbedding,
+      } : {}),
+    },
+  } : {}),
 };
 
 log.log({ port: PORT, apiKeys: API_KEYS ? API_KEYS.length : 0, rateLimit: RATE_LIMIT_RPM || 'disabled' }, 'Starting AI Gateway');
