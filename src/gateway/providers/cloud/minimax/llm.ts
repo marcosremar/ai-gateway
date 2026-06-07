@@ -14,6 +14,8 @@ const DEFAULT_BASE = process.env.MINIMAX_LLM_API_BASE || process.env.MINIMAX_API
 const DEFAULT_MODEL = process.env.MINIMAX_LLM_MODEL || 'MiniMax-M2.7';
 
 export const MINIMAX_LLM_MODELS = [
+  'MiniMax-M3-highspeed',
+  'MiniMax-M3',
   'MiniMax-M2.7-highspeed',
   'MiniMax-M2.7',
   'MiniMax-M2.5-highspeed',
@@ -105,7 +107,7 @@ export class MinimaxLLMProvider implements LLMProvider {
     const model = request.model || DEFAULT_MODEL;
     const messages = request.messages.map(m => ({
       role: m.role,
-      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+      content: m.content,
     }));
 
     const send = async (modelName: string): Promise<ChatResponse> => {
