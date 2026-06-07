@@ -530,6 +530,89 @@ function isVastProxyHost(host: string): boolean {
   return /(^|\.)vast\.ai$/i.test(host);
 }
 
+interface ProviderInstanceStatusDetail {
+  status?: string | null;
+  actualStatus?: string;
+  curState?: string;
+  intendedStatus?: string;
+  nextState?: string;
+  statusMsg?: string;
+  statusMsgShort?: string;
+  error?: string;
+  imageUuid?: string;
+  gpuUtil?: number;
+  gpuTemp?: number;
+  cpuUtil?: number;
+}
+
+type ProviderWithStatusDetail = GpuProviderClient & {
+  getInstanceStatusDetail?: (
+    instanceId: string,
+    credentials: ProviderCredentials,
+  ) => Promise<ProviderInstanceStatusDetail | null>;
+};
+
+async function getProviderStatusDetail(
+  providerClient: GpuProviderClient,
+  podId: string,
+  credentials: ProviderCredentials,
+): Promise<ProviderInstanceStatusDetail | null> {
+  const detailedClient = providerClient as ProviderWithStatusDetail;
+  if (typeof detailedClient.getInstanceStatusDetail === 'function') {
+    return detailedClient.getInstanceStatusDetail(podId, credentials);
+  }
+  const status = await providerClient.getInstanceStatus(podId, credentials);
+  return status ? { status } : null;
+}
+
+function compactProviderStatusMessage(detail: ProviderInstanceStatusDetail): string {
+  const status = detail.status || detail.actualStatus || detail.curState || 'unknown';
+  const msg = detail.statusMsg || detail.statusMsgShort || detail.error || '';
+  return msg ? `${status}: ${msg}` : status;
+}
+
+function providerResourceDetail(detail: ProviderInstanceStatusDetail, fallbackGpuType = ''): string {
+  const parts: string[] = [];
+  if (fallbackGpuType) parts.push(fallbackGpuType);
+  if (typeof detail.gpuUtil === 'number') {
+    const temp = typeof detail.gpuTemp === 'number' ? ` ${Math.round(detail.gpuTemp)}C` : '';
+    parts.push(`GPU ${Math.round(detail.gpuUtil)}%${temp}`);
+  } else if (typeof detail.gpuTemp === 'number') {
+    parts.push(`GPU ${Math.round(detail.gpuTemp)}C`);
+  }
+  if (typeof detail.cpuUtil === 'number') parts.push(`CPU ${detail.cpuUtil.toFixed(2)}%`);
+  if (detail.imageUuid) parts.push(detail.imageUuid);
+  return parts.join(' - ');
+}
+
+function isProviderSuccessStatusMessage(message: string): boolean {
+  return /\b(status:\s*)?success\b/i.test(message)
+    || /\bsuccessfully loaded\b/i.test(message)
+    || /\bsuccess,\s*running\b/i.test(message);
+}
+
+function providerStatusErrorMessage(detail: ProviderInstanceStatusDetail | null): string | null {
+  if (!detail) return null;
+  const statusLower = String(detail.status || detail.actualStatus || detail.curState || '').toLowerCase();
+  const terminal = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted', 'terminated', 'stopped', 'unloaded', 'offline']);
+  const disassociated = statusLower === 'stoppeddisassociated' || statusLower === 'stopped_disassociated';
+  const msg = [detail.error, detail.statusMsgShort, detail.statusMsg].filter(Boolean).join(' | ');
+  const hasSuccess = msg ? isProviderSuccessStatusMessage(msg) : false;
+
+  if (terminal.has(statusLower) || disassociated) {
+    return msg
+      ? `Provider reported terminal status ${statusLower}: ${msg}`
+      : `Provider reported terminal status ${statusLower}`;
+  }
+
+  if (!msg || hasSuccess || /\b(no error|without error)\b/i.test(msg)) return null;
+
+  if (/\b(error|failed|failure|exception|traceback|denied|unauthori[sz]ed|not found|no such|manifest unknown|pull access denied|oom|out of memory|no space|killed|crash|segfault|unhealthy|exited|terminated|offline|unloaded)\b/i.test(msg)) {
+    return `Provider status message: ${msg}`;
+  }
+  return null;
+}
+
 const DEFAULT_SSH_READINESS_TIMEOUT_SEC = 120;
 
 /** Wait for SSH on the instance. Polls provider for liveness and returns
@@ -601,7 +684,19 @@ async function pollSshUntilReady(
     }
     // Check provider says instance is still alive — bail fast if it died.
     try {
-      const status = await providerClient.getInstanceStatus(podId, credentials);
+      const detail = await getProviderStatusDetail(providerClient, podId, credentials);
+      const providerError = providerStatusErrorMessage(detail);
+      if (providerError) {
+        log.warn(`[gpu] ${providerName} pod ${podId}: ${providerError}`);
+        sds({
+          status: 'error',
+          step: 'provider_status_error',
+          message: providerError,
+          stepDetail: detail ? providerResourceDetail(detail, sd.gpuType) : `${host}:${port} (${accessMode})`,
+        });
+        return { result: 'exited' };
+      }
+      const status = detail?.status;
       if (status === 'exited' || status === 'deleted' || status === 'terminated') {
         sds({ status: 'error', step: 'waiting_ssh', message: `Instance ${status} before SSH came up` });
         return { result: 'exited' };
@@ -914,12 +1009,28 @@ export async function pollHealthUntilReady(
     } else {
       // Vast.ai (and other providers): use GpuProviderClient interface
       try {
-        const status = await providerClient.getInstanceStatus(podId, credentials);
+        const detail = await getProviderStatusDetail(providerClient, podId, credentials);
+        const providerError = providerStatusErrorMessage(detail);
+        if (providerError) {
+          consecutiveExited++;
+          log.warn(`[gpu] ${providerName} instance ${podId}: ${providerError}`);
+          sds({
+            status: 'error',
+            step: 'provider_status_error',
+            message: providerError,
+            stepDetail: detail ? providerResourceDetail(detail, sd.gpuType) : sd.gpuType || '',
+          });
+          if (consecutiveExited >= 2) return { result: 'exited', pullTimeS: actualPullTimeS };
+          continue;
+        }
+        const status = detail?.status ?? null;
         if (status) {
           const statusLower = status.toLowerCase();
+          const providerStatusLabel = detail ? compactProviderStatusMessage(detail) : status;
+          const providerStepDetail = detail ? providerResourceDetail(detail, sd.gpuType) : sd.gpuType || '';
           // Progress signal: status string changed
-          if (status !== lastProviderStatus) { markProgress(`${providerName} status → ${status}`); lastProviderStatus = status; }
-          const TERMINAL = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted']);
+          if (providerStatusLabel !== lastProviderStatus) { markProgress(`${providerName} status → ${providerStatusLabel}`); lastProviderStatus = providerStatusLabel; }
+          const TERMINAL = new Set(['exited', 'failed', 'destroyed', 'error', 'deleted', 'terminated', 'stopped', 'unloaded', 'offline']);
           const DISASSOCIATED = statusLower === 'stoppeddisassociated' || statusLower === 'stopped_disassociated';
           if (TERMINAL.has(statusLower) || DISASSOCIATED) {
             consecutiveExited++;
@@ -944,23 +1055,23 @@ export async function pollHealthUntilReady(
             if (isQueued) {
               sds({
                 status: 'queued', step: 'queued',
-                message: `GPU allocated, waiting in queue... [${elapsed}s]`,
-                stepDetail: sd.gpuType || '',
+                message: `GPU allocated, waiting in queue... [${elapsed}s] (${providerStatusLabel})`,
+                stepDetail: providerStepDetail,
               });
             } else {
               if (!pullStartedAt) pullStartedAt = Date.now();
               sds({
                 status: 'installing', step: 'pulling_image',
-                message: `Pulling Docker image... [${elapsed}s]`,
-                stepDetail: sd.gpuType || '',
+                message: `Pulling Docker image... [${elapsed}s] (${providerStatusLabel})`,
+                stepDetail: providerStepDetail,
               });
             }
           } else {
             const appElapsed = Math.round((Date.now() - containerStartedAt) / 1000);
             sds({
               status: 'booting', step: 'waiting_health',
-              message: `Container running, waiting for /health... [${elapsed}s, up ${appElapsed}s]`,
-              stepDetail: sd.gpuType || '',
+              message: `Container running, waiting for /health... [${elapsed}s, up ${appElapsed}s] (${providerStatusLabel})`,
+              stepDetail: providerStepDetail,
             });
             setLastRequestTime(Date.now());
           }

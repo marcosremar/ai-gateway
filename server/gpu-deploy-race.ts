@@ -267,6 +267,10 @@ export async function startDeployRace(
           ...(extra.onstart ? { onstart: extra.onstart } : {}),
           ...(extra.templateHashId ? { templateHashId: extra.templateHashId } : {}),
           ...(extra.forceSshTunnel ? { forceSshTunnel: extra.forceSshTunnel } : {}),
+          ...(extra.minInetDownMbps ? { minInetDownMbps: extra.minInetDownMbps } : {}),
+          ...(extra.minRamGb ? { minRamGb: extra.minRamGb } : {}),
+          ...(extra.minCuda ? { minCuda: extra.minCuda } : {}),
+          ...(extra.minReliability ? { minReliability: extra.minReliability } : {}),
           ...(extra.snapgpuPreloadApp ? { snapgpuPreloadApp: extra.snapgpuPreloadApp } : {}),
           ...(extra.snapgpuAutoSnapshot !== undefined ? { autoSnapshot: extra.snapgpuAutoSnapshot } : {}),
           ...(extra.snapgpuBackend ? { snapgpuBackend: extra.snapgpuBackend } : {}),
@@ -290,12 +294,22 @@ export async function startDeployRace(
   }));
 
   const candidates: RaceCandidate[] = [];
+  const maxPricePerHr = typeof extra.maxPricePerHr === 'number' ? extra.maxPricePerHr : 1.0;
   for (const r of createResults) {
     if (r.status === 'fulfilled') {
       const { slot, instance } = r.value;
       const costPerHr = (instance.providerMeta?.dphTotal as number)
         || (instance.providerMeta?.costPerHr as number)
         || (instance.providerMeta?.pricePerHr as number) || 0;
+      if (costPerHr > maxPricePerHr) {
+        log.warn(`[race] Slot ${slot.index} (${instance.gpuType}) over budget: $${costPerHr.toFixed(3)}/h > $${maxPricePerHr.toFixed(3)}/h — destroying immediately`);
+        try {
+          await slot.tier.client.deleteInstance(instance.instanceId, { apiKey: slot.tier.apiKey, authId: slot.tier.authId });
+        } catch (err) {
+          log.warn(`[race] Failed to destroy over-budget instance: ${err}`);
+        }
+        continue;
+      }
       candidates.push({
         index: slot.index, tier: slot.tier,
         instanceId: instance.instanceId, endpoint: instance.endpoint,
@@ -309,7 +323,12 @@ export async function startDeployRace(
   }
 
   if (candidates.length === 0) {
-    const msg = isCancelled() ? 'Deploy cancelled' : `All ${slots.length} race slots failed to create instances`;
+    const reasons = createResults
+      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      .map((r) => String(r.reason?.message || r.reason))
+      .filter(Boolean);
+    const reasonSummary = reasons.length > 0 ? `: ${reasons[0]}` : '';
+    const msg = isCancelled() ? 'Deploy cancelled' : `All ${slots.length} race slots failed to create instances${reasonSummary}`;
     sds({ status: isCancelled() ? 'idle' : 'error', message: msg });
     if (!slot) deploymentSM.markError(msg);
     return;
