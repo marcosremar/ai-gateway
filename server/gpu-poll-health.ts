@@ -872,8 +872,11 @@ export async function pollHealthUntilReady(
       const modelSec = Math.round((Date.now() - (healthFirstResponseAt || Date.now())) / 1000);
       const sinceProgress = Date.now() - lastProgressAt;
       // Specifically require that /health body wasn't identical for long — models phase tracks identicalHealthCount
-      const stalledInHealth = identicalHealthCount >= 5;
-      if (!modelsTimeoutExtendedOnce && sinceProgress < PROGRESS_WINDOW_MS && !stalledInHealth) {
+      const stalledInHealth = identicalHealthCount >= 20;
+      const stallCheckActive = identicalHealthCount > 0 && identicalHealthCount < 20;
+      if (stallCheckActive) {
+        PHASE_TIMEOUTS.MODELS += 30_000;
+      } else if (!modelsTimeoutExtendedOnce && sinceProgress < PROGRESS_WINDOW_MS && !stalledInHealth) {
         modelsTimeoutExtendedOnce = true;
         PHASE_TIMEOUTS.MODELS = Math.round(PHASE_TIMEOUTS.MODELS * 1.5);
         const extMsg = `Model loading slow but progressing (${modelSec}s, last signal ${Math.round(sinceProgress / 1000)}s ago) — extending timeout by 50%`;
