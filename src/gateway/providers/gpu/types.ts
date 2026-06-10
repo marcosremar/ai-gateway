@@ -188,6 +188,9 @@ export interface InstanceSpec {
    *  from image size: imageGb * 8 * 1024 / pullBudgetSec. Default pullBudgetSec=600
    *  so a 15GB image requires ~200 Mbps minimum to pull within 10 minutes. */
   minInetDownMbps?: number;
+  minRamGb?: number;
+  minCuda?: number;
+  minReliability?: number;
   /** Cancel creation immediately if GPU unavailable (Vast.ai fail-fast) */
   cancelUnavail?: boolean;
   /** Region filter (e.g. 'US', 'EU' for Vast; 'US-TX-3' for RunPod; city name for TensorDock) */

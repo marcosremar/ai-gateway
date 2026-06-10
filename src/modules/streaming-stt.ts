@@ -50,7 +50,7 @@ function logError(logger: Console | undefined, msg: string, ...args: unknown[]):
 
 function logDebug(logger: Console | undefined, msg: string, ...args: unknown[]): void {
   if (logger?.debug) logger.debug(msg, ...args);
-  else console.debug(msg, ...args);
+  else console.log(msg, ...args);
 }
 
 /** Per-session streaming STT parameters (passed as query params to backend). */
@@ -215,7 +215,10 @@ export class StreamingSTTBackend {
       if (this._aborted) return;
       try {
         let raw: string;
-        // Byte cap = 4× char cap (worst-case UTF-8 expansion).
+        // Treat byte cap as 4× char cap (worst case UTF-8 expansion: 4 bytes
+        // per character). Previously compared bytes against a char limit —
+        // a small UTF-16 message could fail the gate while a large UTF-8
+        // could pass and only be caught by the second char gate after decode.
         const maxBytes = this._maxTextLength * 4;
         if (evt.data instanceof ArrayBuffer) {
           if (evt.data.byteLength > maxBytes) {
@@ -273,9 +276,8 @@ export class StreamingSTTBackend {
       this._clearConnectTimer();
       logError(this._logger, '[StreamingSTT] WebSocket error');
       this.onDisconnected?.('WebSocket error');
-      // Close the underlying socket to release the FD. Without this, repeated
-      // upstream failures grow open-FD count without bound — onerror fires but
-      // the socket sticks until GC.
+      // Close socket to release FD; otherwise repeated upstream failures grow
+      // open-FD count without bound (onerror fires but socket sticks until GC).
       this._closeWs('error');
     };
   }

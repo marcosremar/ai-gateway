@@ -802,7 +802,8 @@ async function cmdGpuDeploy(opts: {
   image?: string; gpuTypes?: string; onstart?: string; storageGb?: number;
   env?: string; numGpus?: number; devMode?: boolean; readinessProbe?: string;
   label?: string; strictFastBoot?: boolean; searchMode?: string; allowUnverified?: boolean;
-  provider?: string;
+  provider?: string; minRamGb?: number; minCuda?: number; minReliability?: number; minInetDownMbps?: number;
+  maxCostUsd?: number;
 }) {
   const { url, key } = getConfig();
   const body: Record<string, unknown> = {};
@@ -813,6 +814,11 @@ async function cmdGpuDeploy(opts: {
   if (opts.numGpus) body.gpuCount = opts.numGpus;
   if (opts.devMode) body.devMode = true;
   if (opts.readinessProbe === 'ssh' || opts.readinessProbe === 'health') body.readinessProbe = opts.readinessProbe;
+  if (typeof opts.minRamGb === 'number') body.minRamGb = opts.minRamGb;
+  if (typeof opts.minCuda === 'number') body.minCuda = opts.minCuda;
+  if (typeof opts.minReliability === 'number') body.minReliability = opts.minReliability;
+  if (typeof opts.minInetDownMbps === 'number') body.minInetDownMbps = opts.minInetDownMbps;
+  if (typeof opts.maxCostUsd === 'number') body.maxCostUsd = opts.maxCostUsd;
   if (opts.provider) body.provider = opts.provider;
   // --label and --strict-fast-boot threading. Label is required by the
   // server unless AIGW_LABEL_OPTIONAL=1 — surface a friendlier CLI error
@@ -7681,6 +7687,12 @@ Per-app isolation:
             // --provider restricts deploy to a single provider (vast, runpod, modal,
             // hyperstack, tensordock). Bypasses tier cascade race.
             provider: getArg(args, '--provider'),
+            minRamGb: getArg(args, '--min-ram-gb') ? parseInt(getArg(args, '--min-ram-gb')!) : undefined,
+            minCuda: getArg(args, '--min-cuda') ? parseFloat(getArg(args, '--min-cuda')!) : undefined,
+            minReliability: getArg(args, '--min-reliability') ? parseFloat(getArg(args, '--min-reliability')!) : undefined,
+            minInetDownMbps: getArg(args, '--min-inet-down') ? parseInt(getArg(args, '--min-inet-down')!) : undefined,
+            maxCostUsd: getArg(args, '--max-cost-usd') ? parseFloat(getArg(args, '--max-cost-usd')!) : undefined,
+            parallelSlot: getArg(args, '--parallel-slot'),
           }); break;
           case 'stop': await cmdGpuStop({
             deployId: getArg(args, '--deploy-id'),

@@ -1106,6 +1106,32 @@ describe('VastClient — extended unit tests', () => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
 
+    it('exposes Vast status_msg and GPU telemetry from instance detail', async () => {
+      fetchSpy.mockResolvedValueOnce(mockFetchResponse({
+        instances: {
+          id: '60',
+          actual_status: 'running',
+          cur_state: 'running',
+          status_msg: 'GPU: 0% 45°C, CPU: 0.07%, Status: success, running vastai/pytorch_cuda-12.8.1-auto/jupyter',
+          image_uuid: 'vastai/pytorch_cuda-12.8.1-auto/jupyter',
+          gpu_util: 0,
+          gpu_temp: 45,
+          cpu_util: 0.07,
+          public_ipaddr: '4.4.4.4',
+        },
+      }));
+
+      const detail = await client.getInstanceStatusDetail('inst-60', creds);
+      expect(detail).toMatchObject({
+        status: 'running',
+        statusMsg: 'GPU: 0% 45°C, CPU: 0.07%, Status: success, running vastai/pytorch_cuda-12.8.1-auto/jupyter',
+        imageUuid: 'vastai/pytorch_cuda-12.8.1-auto/jupyter',
+        gpuUtil: 0,
+        gpuTemp: 45,
+        cpuUtil: 0.07,
+      });
+    });
+
     it('falls back to list when individual returns null instances', async () => {
       fetchSpy
         .mockResolvedValueOnce(mockFetchResponse({ instances: null }))

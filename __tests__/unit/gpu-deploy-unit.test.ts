@@ -111,6 +111,22 @@ describe('startDeployWithTiers — structure', () => {
     expect(fnBody).toContain('setGpuHealthy(true)');
     expect(fnBody).toContain('setLastRequestTime(Date.now())');
   });
+
+  it('keeps retryable provider readiness failures in a non-terminal retry state', () => {
+    const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 50000);
+    expect(fnBody).toContain('providerRetryAvailable');
+    expect(fnBody).toContain("step: 'retrying_provider'");
+    expect(fnBody).toContain('cleaning up before retry');
+  });
+
+  it('does not let per-app deploy slots mutate the global deployment state machine', () => {
+    const fnStart = deployLoopSource.indexOf('export async function startDeployLoop');
+    const fnBody = deployLoopSource.slice(fnStart, fnStart + 50000);
+    expect(fnBody).toContain('if (!slot) deploymentSM.startBooting');
+    expect(fnBody).toContain('if (!slot) deploymentSM.markReady');
+    expect(fnBody).toContain('if (!slot) deploymentSM.markError');
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -162,6 +178,16 @@ describe('startDeployWithTiers — error handling', () => {
     expect(deployWithTiersSource).toContain("podId: ''");
     expect(deployWithTiersSource).toContain("endpoint: ''");
     expect(deployWithTiersSource).toContain('providerMeta: {}');
+  });
+});
+
+describe('pollHealthUntilReady — provider status detail', () => {
+  it('uses provider status_detail/status_msg to fail Vast hosts before health timeout', () => {
+    expect(gpuPollHealthSource).toContain('getInstanceStatusDetail');
+    expect(gpuPollHealthSource).toContain('providerStatusErrorMessage');
+    expect(gpuPollHealthSource).toContain("step: 'provider_status_error'");
+    expect(gpuPollHealthSource).toContain('statusMsg');
+    expect(gpuPollHealthSource).toContain('gpuTemp');
   });
 });
 

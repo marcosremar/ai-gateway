@@ -97,10 +97,19 @@ export function createCanaryDeploy(config: CanaryConfig) {
     /**
      * Determine if a request should go to the canary version.
      */
-    shouldRouteToCanary(): boolean {
+    shouldRouteToCanary(routeKey?: string): boolean {
       if (status === 'rolled_back') return false;
       if (status === 'promoted') return true;
-      return Math.random() * 100 < trafficPercentage;
+      if (trafficPercentage <= 0) return false;
+      if (trafficPercentage >= 100) return true;
+      const key = routeKey ?? `${Date.now()}-${Math.random()}`;
+      let h = 2166136261;
+      for (let i = 0; i < key.length; i++) {
+        h ^= key.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      const bucket = ((h >>> 0) % 100) + 1;
+      return bucket <= trafficPercentage;
     },
 
     /**

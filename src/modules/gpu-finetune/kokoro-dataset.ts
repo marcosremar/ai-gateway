@@ -514,8 +514,8 @@ function quoteShell(value: string): string {
 
 class DaytonaRestClient implements DaytonaLike {
   private readonly api = process.env.DAYTONA_API_URL || 'https://app.daytona.io/api';
-  private readonly successSentinel = `AIGW_KOKORO_DONE_${Math.random().toString(36).slice(2)}`;
-  private readonly failureSentinel = `AIGW_KOKORO_FAILED_${Math.random().toString(36).slice(2)}`;
+  private static readonly successSentinel = 'AIGW_KOKORO_DONE_b6d3f1';
+  private static readonly failureSentinel = 'AIGW_KOKORO_FAILED_b6d3f1';
 
   constructor(private readonly key: string) {}
 
@@ -559,7 +559,7 @@ class DaytonaRestClient implements DaytonaLike {
 
   async execDetached(id: string, command: string, logFile: string): Promise<void> {
     const quotedLog = quoteShell(logFile);
-    const wrapped = `set -e; trap 'code=$?; echo ${this.failureSentinel}:$code >>${quotedLog}; exit $code' ERR; ${command}; echo ${this.successSentinel} >>${quotedLog}`;
+    const wrapped = `set -e; trap 'code=$?; echo ${DaytonaRestClient.failureSentinel}:$code >>${quotedLog}; exit $code' ERR; ${command}; echo ${DaytonaRestClient.successSentinel} >>${quotedLog}`;
     await this.exec(id, `nohup bash -lc ${JSON.stringify(wrapped)} >${quotedLog} 2>&1 & echo started`, 30);
   }
 
@@ -569,10 +569,10 @@ class DaytonaRestClient implements DaytonaLike {
     let lastGrowth = Date.now();
     while (true) {
       const { result } = await this.exec(id, `test -f ${quoteShell(logFile)} && tail -c 8000 ${quoteShell(logFile)} || true`, 30);
-      if (result.includes(this.failureSentinel)) {
-        throw new Error(`${match} worker failed:\n${result.replace(this.failureSentinel, '').slice(-3000)}`);
+      if (result.includes(DaytonaRestClient.failureSentinel)) {
+        throw new Error(`${match} worker failed:\n${result.replace(DaytonaRestClient.failureSentinel, '').slice(-3000)}`);
       }
-      if (result.includes(this.successSentinel)) return result.replace(this.successSentinel, '');
+      if (result.includes(DaytonaRestClient.successSentinel)) return result.replace(DaytonaRestClient.successSentinel, '');
       const size = result.length;
       if (size > lastSize) {
         lastSize = size;

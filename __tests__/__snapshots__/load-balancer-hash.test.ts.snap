@@ -1,3 +1,5 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`FNV-1a hash function (load-balancer) > matches known FNV-1a values for regression guard > fnv1a-a 1`] = `3826002220`;
+
+exports[`FNV-1a hash function (load-balancer) matches known FNV-1a values for regression guard: fnv1a-a 1`] = `3826002220`;

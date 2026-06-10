@@ -123,50 +123,55 @@ describe('Vast.ai reliability improvements', () => {
       expect(fetchSpy.mock.calls.length).toBe(2);
     });
 
-    it('queues Vast reservations with a bounded queue instead of starting them simultaneously', async () => {
+    it('spaces Vast reservation starts without waiting for the previous response to finish', async () => {
       process.env.VAST_RESERVATION_QUEUE_MAX_SIZE = '2';
-      const client = new VastClient();
-      const releases: Array<(res: Response) => void> = [];
-      fetchSpy.mockImplementation(() => new Promise<Response>((resolve) => releases.push(resolve)));
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-06-02T00:00:00Z'));
+      try {
+        const client = new VastClient();
+        const headers = { Authorization: 'Bearer k' };
+        const policy = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/asks/1/`, { method: 'PUT', headers });
+        const releases: Array<(res: Response) => void> = [];
+        fetchSpy.mockImplementation(() => new Promise<Response>((resolve) => releases.push(resolve)));
 
-      const p1 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/1/`, {
-        method: 'PUT',
-        headers: { Authorization: 'Bearer k' },
-      });
-      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+        const p1 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/1/`, { method: 'PUT', headers });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-      const p2 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/2/`, {
-        method: 'PUT',
-        headers: { Authorization: 'Bearer k' },
-      });
-      await Promise.resolve();
+        const p2 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/2/`, { method: 'PUT', headers });
+        await Promise.resolve();
 
-      const p3 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/3/`, {
-        method: 'PUT',
-        headers: { Authorization: 'Bearer k' },
-      });
+        const p3 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/3/`, { method: 'PUT', headers });
 
-      await expect(p3).rejects.toThrow(/Vast reservation queue full/);
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      expect(getVastReservationQueueSnapshotForTests()[0]).toMatchObject({
-        active: true,
-        pending: 1,
-        depth: 2,
-      });
+        await expect(p3).rejects.toThrow(/Vast reservation queue full/);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(getVastReservationQueueSnapshotForTests()[0]).toMatchObject({
+          active: true,
+          pending: 1,
+          depth: 2,
+        });
 
-      releases[0](mockResp({ ok: true }));
-      await p1;
-      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+        await vi.advanceTimersByTimeAsync(policy.minIntervalMs - 1);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-      releases[1](mockResp({ ok: true }));
-      await p2;
-      expect(getVastReservationQueueSnapshotForTests()).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+        releases[0](mockResp({ ok: true }));
+        await p1;
+        releases[1](mockResp({ ok: true }));
+        await p2;
+        expect(getVastReservationQueueSnapshotForTests()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
-    it('times out queued reservations that cannot start before the queue timeout', async () => {
+    it('rejects reservations whose estimated start exceeds the queue timeout', async () => {
       process.env.VAST_RESERVATION_QUEUE_MAX_SIZE = '2';
-      process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS = '16000';
+      process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS = '10000';
       vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-06-02T00:00:00Z'));
       try {
         const client = new VastClient();
         const releases: Array<(res: Response) => void> = [];
@@ -176,23 +181,14 @@ describe('Vast.ai reliability improvements', () => {
           method: 'PUT',
           headers: { Authorization: 'Bearer k' },
         });
-        await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
 
         const p2 = (client as any)._vastFetch(`${VAST_API_BASE}/asks/2/`, {
           method: 'PUT',
           headers: { Authorization: 'Bearer k' },
         });
-        const p2Rejected = expect(p2).rejects.toThrow(/Vast reservation queue timeout/);
-
-        await vi.advanceTimersByTimeAsync(15_999);
-        expect(getVastReservationQueueSnapshotForTests()[0]).toMatchObject({
-          active: true,
-          pending: 1,
-          depth: 2,
-        });
-
-        await vi.advanceTimersByTimeAsync(1);
-        await p2Rejected;
+        await expect(p2).rejects.toThrow(/Vast reservation queue timeout/);
         expect(getVastReservationQueueSnapshotForTests()[0]).toMatchObject({
           active: true,
           pending: 0,

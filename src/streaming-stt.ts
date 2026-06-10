@@ -50,7 +50,7 @@ function logError(logger: Console | undefined, msg: string, ...args: unknown[]):
 
 function logDebug(logger: Console | undefined, msg: string, ...args: unknown[]): void {
   if (logger?.debug) logger.debug(msg, ...args);
-  else console.debug(msg, ...args);
+  else console.log(msg, ...args);
 }
 
 /** Per-session streaming STT parameters (passed as query params to backend). */

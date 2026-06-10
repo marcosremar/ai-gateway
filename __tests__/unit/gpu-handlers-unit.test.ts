@@ -224,6 +224,17 @@ describe('handleGpuDeploy — cancel/redeploy', () => {
     const fnBody = handlersSource.slice(fnStart, fnStart + 100000);
     expect(fnBody).toContain('startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount, appSlot)');
   });
+
+  it('allows explicit provider retry override for SSH reservation E2E', () => {
+    const validateStart = handlersSource.indexOf('async function _validateDeployRequest');
+    const validateBody = handlersSource.slice(validateStart, validateStart + 50000);
+    expect(validateBody).toContain('suppressProviderRetries must be a boolean');
+    expect(validateBody).toContain('suppressProviderRetries,');
+
+    const startDeployStart = handlersSource.indexOf('function _startDeployAndRespond');
+    const startDeployBody = handlersSource.slice(startDeployStart, startDeployStart + 50000);
+    expect(startDeployBody).toContain('suppressProviderRetries ?? isFinetune');
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -256,7 +267,10 @@ describe('handleGpuDeploy — tier selection', () => {
     const fnStart = handlersSource.indexOf('async function _selectDeploymentTier');
     const fnBody = handlersSource.slice(fnStart, fnStart + 8000);
     expect(fnBody).toContain('402');
-    expect(fnBody).toContain('Insufficient balance for all configured providers');
+    expect(fnBody).toContain('Insufficient funds for all configured GPU providers');
+    expect(fnBody).toContain("type: 'funds'");
+    expect(fnBody).toContain("code: 'insufficient_funds'");
+    expect(fnBody).toContain('https://console.vast.ai/billing/');
   });
 
   it('#103 returns 401 for invalid RunPod API key', () => {
@@ -787,6 +801,15 @@ describe('handleGpuList', () => {
     const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
     expect(fnBody).toContain('deployState.podId');
     expect(fnBody).toContain("deployState.status !== 'idle'");
+  });
+
+  it('allows the default operator key to request an all-provider GPU list', () => {
+    const fnStart = handlersSource.indexOf('export async function handleGpuList');
+    const fnEnd = handlersSource.indexOf('\n// ──', fnStart + 100);
+    const fnBody = handlersSource.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 5000);
+    expect(fnBody).toContain("callerUserId === 'default'");
+    expect(fnBody).toContain("url.searchParams.get('all') === '1'");
+    expect(fnBody).toContain("scopedTo: includeAll ? 'all' : callerUserId");
   });
 });
 

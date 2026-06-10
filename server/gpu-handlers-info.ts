@@ -484,10 +484,9 @@ export async function handleGpuList(_req: IncomingMessage, res: ServerResponse):
   const requestId = getOrCreateRequestId(_req);
   setRequestIdHeader(res, requestId);
 
-  // Per-app isolation: when caller authenticated with a per-app key, scope
-  // the response to instances whose label is namespaced "<callerUserId>/...".
-  // Loopback/admin (callerUserId === null) sees everything.
   const callerUserId = readUserIdHeader(_req.headers as Record<string, string | string[] | undefined>);
+  const url = new URL(_req.url || '/', 'http://localhost');
+  const includeAll = callerUserId === 'default' && url.searchParams.get('all') === '1';
 
   // Use deploy-time keys first, fall back to env vars (so list works even after gateway restart)
   const vastKey = deployVastApiKey || process.env.VAST_API_KEY || '';
@@ -583,7 +582,7 @@ export async function handleGpuList(_req: IncomingMessage, res: ServerResponse):
   // belongs to no app and is filtered out for non-admin callers.
   let visibleInstances = instances;
   let totalBeforeFilter = instances.length;
-  if (callerUserId) {
+  if (callerUserId && !includeAll) {
     visibleInstances = instances.filter((inst) => {
       const label = (inst as { instanceName?: string; label?: string }).instanceName
         ?? (inst as { label?: string }).label
@@ -600,7 +599,7 @@ export async function handleGpuList(_req: IncomingMessage, res: ServerResponse):
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     instances: visibleInstances,
-    ...(callerUserId ? { scopedTo: callerUserId, totalAcrossApps: totalBeforeFilter } : {}),
+    ...(callerUserId ? { scopedTo: includeAll ? 'all' : callerUserId, totalAcrossApps: totalBeforeFilter } : {}),
   }));
 }
 

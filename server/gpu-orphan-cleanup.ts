@@ -488,6 +488,14 @@ export async function sweepOrphanInstances(): Promise<{ found: number; terminate
         if (startedAtMs > 0 && now - startedAtMs < VAST_ORPHAN_GRACE_MS) {
           return false;
         }
+        // Stuck-in-loading override: any instance stuck in `loading`/`creating`
+        // for over 25 min (longer than the 20-min boot cap) is a leaked
+        // race loser or a broken host — destroy regardless of name prefix.
+        if ((st === 'loading' || st === 'creating') && startedAtMs > 0
+            && now - startedAtMs > 25 * 60_000) {
+          log.warn(`[orphan-sweep] Stuck in ${st} for ${Math.round((now - startedAtMs) / 1000)}s — destroying`);
+          return true;
+        }
         if (vastPrefixes.length === 0) return nukeUntrackedAllowed('vast');
         return vastPrefixes.some(p => (i.instanceName || '').startsWith(p));
       });

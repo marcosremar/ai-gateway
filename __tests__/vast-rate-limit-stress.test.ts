@@ -27,7 +27,7 @@ describe('Vast reservation rate-limit stress', () => {
     delete process.env.VAST_RATE_LIMIT_DISABLED;
   });
 
-  it('drains a reservation burst with one active request and reserve-interval spacing', async () => {
+  it('drains a reservation burst with reserve-interval start spacing', async () => {
     resetVastRateLimitStateForTests();
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-06-02T00:00:00Z'));
@@ -52,7 +52,7 @@ describe('Vast reservation rate-limit stress', () => {
     expect(fetchStartedAtMs).toHaveLength(1);
     expect(getVastReservationQueueSnapshotForTests()[0]).toMatchObject({
       active: true,
-      pending: totalReservations - 2,
+      pending: totalReservations - 1,
       depth: totalReservations - 1,
     });
 
@@ -74,6 +74,8 @@ describe('Vast reservation rate-limit stress', () => {
 
   it('rejects overflow beyond the bounded queue and still drains accepted reservations', async () => {
     resetVastRateLimitStateForTests();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-02T00:00:00Z'));
     process.env.VAST_RESERVATION_QUEUE_MAX_SIZE = '5';
     process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS = '600000';
     process.env.VAST_OFFER_RACE_STAGGER_MS = '0';
@@ -84,6 +86,7 @@ describe('Vast reservation rate-limit stress', () => {
 
     const client = new VastClient();
     const headers = { Authorization: 'Bearer stress-key' };
+    const policy = getVastRateLimitPolicyForTests(`${VAST_API_BASE}/asks/0/`, { method: 'PUT', headers });
     const totalReservations = 30;
     const queueCapacity = 5;
     const calls = Array.from({ length: totalReservations }, (_, i) => (
@@ -94,7 +97,8 @@ describe('Vast reservation rate-limit stress', () => {
       (err: unknown) => ({ ok: false as const, err }),
     ));
 
-    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
     const rejectedOverflow = await Promise.all(observed.slice(queueCapacity));
 
     expect(rejectedOverflow).toHaveLength(totalReservations - queueCapacity);
@@ -115,13 +119,16 @@ describe('Vast reservation rate-limit stress', () => {
     });
 
     for (let i = 0; i < queueCapacity; i++) {
+      if (i > 0) {
+        await vi.advanceTimersByTimeAsync(policy.minIntervalMs - 1);
+        expect(fetchSpy).toHaveBeenCalledTimes(i);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(fetchSpy).toHaveBeenCalledTimes(i + 1);
+      }
+
       releases[i](mockResp({ ok: true, i }));
       const accepted = await observed[i];
       expect(accepted.ok).toBe(true);
-
-      if (i < queueCapacity - 1) {
-        await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(i + 2));
-      }
     }
 
     expect(fetchSpy).toHaveBeenCalledTimes(queueCapacity);

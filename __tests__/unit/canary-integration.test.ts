@@ -43,7 +43,7 @@ describe('createCanaryDeploy — basic lifecycle', () => {
     const canaryFull = createCanaryDeploy({ ...config, initialTrafficPercentage: 100 });
     let canaryCount = 0;
     for (let i = 0; i < 100; i++) {
-      if (canaryFull.shouldRouteToCanary()) canaryCount++;
+      if (canaryFull.shouldRouteToCanary(`req-${i}`)) canaryCount++;
     }
     expect(canaryCount).toBe(100);
 
@@ -51,9 +51,33 @@ describe('createCanaryDeploy — basic lifecycle', () => {
     const canaryZero = createCanaryDeploy({ ...config, initialTrafficPercentage: 0 });
     canaryCount = 0;
     for (let i = 0; i < 100; i++) {
-      if (canaryZero.shouldRouteToCanary()) canaryCount++;
+      if (canaryZero.shouldRouteToCanary(`req-${i}`)) canaryCount++;
     }
     expect(canaryCount).toBe(0);
+  });
+
+  it('should be deterministic per route key (no Math.random flip on retry)', () => {
+    const canary = createCanaryDeploy({ ...config, initialTrafficPercentage: 30 });
+    for (let i = 0; i < 200; i++) {
+      const key = `stable-key-${i}`;
+      const first = canary.shouldRouteToCanary(key);
+      const second = canary.shouldRouteToCanary(key);
+      const third = canary.shouldRouteToCanary(key);
+      expect(first).toBe(second);
+      expect(second).toBe(third);
+    }
+  });
+
+  it('should distribute traffic roughly proportionally for large samples', () => {
+    const canary = createCanaryDeploy({ ...config, initialTrafficPercentage: 25 });
+    let canaryCount = 0;
+    const N = 10_000;
+    for (let i = 0; i < N; i++) {
+      if (canary.shouldRouteToCanary(`req-${i}`)) canaryCount++;
+    }
+    const ratio = canaryCount / N;
+    expect(ratio).toBeGreaterThan(0.22);
+    expect(ratio).toBeLessThan(0.28);
   });
 
   it('should not route to canary after rollback', async () => {
