@@ -210,6 +210,14 @@ export async function resumeOrDeploy(opts: {
     }
 
     // ── Fall back to fresh deploy ─────────────────────────────────────
+    // Finding #26: refuse to resurrect an image nobody asked for this session
+    // (resume of state restored after a gateway restart must not cascade into
+    // a fresh deploy of a stale config).
+    const { checkAutonomousRedeploy } = await import('./gpu-deploy-intent');
+    const intentCheck = checkAutonomousRedeploy(dockerImage || 'marcosremar/babelcast-subtitle:latest');
+    if (!intentCheck.ok) {
+      throw new Error(`Resume failed and fresh-deploy fallback blocked: ${intentCheck.reason}`);
+    }
     const { buildGpuTiers, startDeployWithTiers } = await import('./gpu-deploy');
     const { getGpuPriorityList } = await import('../src/gpu-providers/deploy-settings');
     const {

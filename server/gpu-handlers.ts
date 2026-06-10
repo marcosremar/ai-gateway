@@ -55,6 +55,25 @@ function findCallerDeploySlot(callerUserId: string, body: Record<string, unknown
   return getDeploySlot(callerUserId);
 }
 
+/**
+ * Merge slot-addressing query params into a request body (body wins).
+ * Write endpoints (stop/resume) historically resolved slots from the body
+ * only, answering "No active pod (idle)" for `?slot=` callers while the
+ * instance kept billing — finding #22. Read endpoints already accept both.
+ */
+function mergeSlotQueryParams(req: IncomingMessage, body: Record<string, unknown>): Record<string, unknown> {
+  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const qSlot = url.searchParams.get('parallelSlot') ?? url.searchParams.get('slot');
+  const qDeployId = url.searchParams.get('deployId');
+  const qInstanceId = url.searchParams.get('instanceId') || url.searchParams.get('podId');
+  return {
+    ...(qSlot !== null ? { parallelSlot: qSlot } : {}),
+    ...(qDeployId ? { deployId: qDeployId } : {}),
+    ...(qInstanceId ? { instanceId: qInstanceId } : {}),
+    ...body,
+  };
+}
+
 function findDeploySlotForReadRequest(req: IncomingMessage, callerUserId: string | null): DeploySlot | undefined {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const parallelSlot = url.searchParams.get('parallelSlot') || url.searchParams.get('slot');
@@ -1404,6 +1423,9 @@ function _startDeployAndRespond(
     ...(noTierCascade ? { noTierCascade } : {}),
   };
 
+  // Caller intent for this image — gates autonomous redeploys (finding #26).
+  require('./gpu-deploy-intent').recordDeployIntent(resolvedDockerImage);
+
   // Resolve before creating the deploy promise: a throw between promise
   // creation and handler attachment would orphan it with the lock held.
   const activeDeployId = appSlot ? appSlot.state?.deployId : deployState.deployId;
@@ -1786,6 +1808,8 @@ export async function autoBootFromProfile(): Promise<void> {
 
   const gd = activeApp.gpuDeploy;
   log.log(`[gpu] Auto-booting GPU for app: ${activeApp.name} (${gd.dockerImage})`);
+  // bootOnStartup is config-declared intent (finding #26).
+  require('./gpu-deploy-intent').recordDeployIntent(gd.dockerImage || '');
   const requestId = 'startup:autoboot';
 
   setDeployLock(true);
@@ -2315,7 +2339,7 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
   // — otherwise this handler answered "No active pod (idle)" for a running,
   // billing instance.
   const stopCallerId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
-  const stopSlot = stopCallerId ? findCallerDeploySlot(stopCallerId, body) : undefined;
+  const stopSlot = stopCallerId ? findCallerDeploySlot(stopCallerId, mergeSlotQueryParams(req, body)) : undefined;
   if (stopSlot?.state.podId && stopSlot.state.status === 'ready' && deployState.status === 'idle') {
     const slotState = stopSlot.state;
     const provider = (slotState.provider || 'vast') as ProviderName;
@@ -2512,7 +2536,10 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
   // caller's stopped slot pod in place (no global resumeOrDeploy fallback —
   // on failure the caller should redeploy).
   const resumeCallerId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
-  const resumeSlot = resumeCallerId ? findCallerDeploySlot(resumeCallerId, body) : undefined;
+  const resumeSlot = resumeCallerId ? findCallerDeploySlot(resumeCallerId, mergeSlotQueryParams(req, body)) : undefined;
+  // A resume is caller intent for the pod's image — permits the fresh-deploy
+  // fallback and auto-recovery for this image (finding #26).
+  require('./gpu-deploy-intent').recordDeployIntent(resumeSlot?.state.dockerImage || deployState.dockerImage || '');
   if (resumeSlot?.state.podId && resumeSlot.state.status === 'stopped' && deployState.status === 'idle') {
     const slotState = resumeSlot.state;
     const provider = (slotState.provider || 'vast') as ProviderName;

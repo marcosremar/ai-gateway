@@ -402,6 +402,16 @@ export async function startAutoRecoveryDeploy(): Promise<void> {
     return;
   }
 
+  // Finding #26: never resurrect state restored from a previous session — a
+  // gateway restart repopulates deployState from disk/provider listings, and
+  // auto-recovery would happily redeploy an image nobody asked for this session.
+  const intentCheck = (await import('./gpu-deploy-intent')).checkAutonomousRedeploy(lastImage);
+  if (!intentCheck.ok) {
+    log.warn(`[gpu] Auto-recovery blocked: ${intentCheck.reason}`);
+    broadcastWs({ type: 'gpu:readiness', stage: 'all', phase: 'auto-recovery-blocked', error: intentCheck.reason });
+    return;
+  }
+
   // Save API keys BEFORE reset (resetDeployState clears them)
   const savedKeys = {
     runpod: deployApiKey,
