@@ -29,6 +29,11 @@
  *   POST /v1/gpu/finetune/kokoro-dataset/run   — Launch Kokoro CPU dataset fanout
  *   GET  /v1/canary/status           — Canary deploy status
  *   GET  /v1/performance             — Performance stats
+ *   POST /v1/gpu/warmpool/provision  — Provision stopped-instance warm pool
+ *   GET  /v1/gpu/warmpool/status     — Warm pool state
+ *   POST /v1/gpu/warmpool/acquire    — Resume best worker, verified inference
+ *   POST /v1/gpu/warmpool/release    — Stop active worker back into pool
+ *   POST /v1/gpu/warmpool/teardown   — Terminate all pool workers
  *
  * Vast.ai-specific routes:
  *   GET    /v1/gpu/vast/templates              — List templates
@@ -88,6 +93,12 @@ export function registerGpuRoutes(handlers: Record<string, Function>): void {
     'POST /v1/gpu/heartbeat': gh.handleGpuHeartbeat,
     // Canary deployment status
     'GET /v1/canary/status': gh.handleCanaryStatus,
+    // Warm pool — stopped-instance pool for <60s time-to-first-inference
+    'POST /v1/gpu/warmpool/provision': require('../../gpu-warmpool').handleWarmpoolProvision,
+    'GET /v1/gpu/warmpool/status': require('../../gpu-warmpool').handleWarmpoolStatus,
+    'POST /v1/gpu/warmpool/acquire': require('../../gpu-warmpool').handleWarmpoolAcquire,
+    'POST /v1/gpu/warmpool/release': require('../../gpu-warmpool').handleWarmpoolRelease,
+    'POST /v1/gpu/warmpool/teardown': require('../../gpu-warmpool').handleWarmpoolTeardown,
     // Performance profiling
     'GET /v1/performance': gh.handlePerformanceStats,
     // GPU sweep
