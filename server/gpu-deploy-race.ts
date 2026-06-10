@@ -22,6 +22,7 @@ import { emitGatewayEvent } from './event-bus';
 import { logGpuEvent, upsertHostReputation } from './metrics';
 import { getDeployTimeoutMinForProvider } from '../src/gpu-providers/deploy-settings';
 import { activeRaceInstanceIds } from './gpu-orphan-cleanup';
+import { categorizeDeployFailure } from './gpu-deploy-tiers';
 import type { DeployExtra } from './gpu-deploy';
 import type { DeploySlot } from '../src/gateway/state/deploy-state';
 
@@ -395,7 +396,7 @@ export async function startDeployRace(
     }
     startCanaryIfEnabled(extra, dockerImage, c.gpuType);
     log.log(`[race] Winner: deployId=${sd.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} provider=${c.tier.name} gpu=${c.gpuType} t=${Math.round(durationMs / 1000)}s`);
-    logGpuEvent('deploy_ready', c.tier.name, true, { durationMs, metadata: { endpoint: localEndpoint, gpuType: c.gpuType, raceCount: candidates.length } });
+    logGpuEvent('deploy_ready', c.tier.name, true, { durationMs, metadata: { endpoint: localEndpoint, gpuType: c.gpuType, raceCount: candidates.length, deployId: sd.deployId, owner: slot?.ownerKey ?? 'global' } });
     upsertHostReputation({ provider: c.tier.name, gpuType: c.gpuType, providerMeta: c.providerMeta, success: true, bootTimeS: Math.round(durationMs / 1000), dockerImage });
     if (await cooldownTracker.recordSuccess(c.tier.name)) {
       logGpuEvent('cooldown_cleared', c.tier.name, true, { durationMs });
@@ -610,6 +611,16 @@ export async function startDeployRace(
     const msg = isCancelled() ? 'Deploy cancelled' : (lastRaceHealthError || 'All race candidates failed to become healthy');
     sds({ status: isCancelled() ? 'idle' : 'error', message: msg });
     if (!slot) deploymentSM.markError(msg);
+    if (!isCancelled()) {
+      // The non-race path emits deploy_failed from the tier loop; races end
+      // here, so emit it directly — without this, race failures were
+      // invisible to the deploy metrics/alerts.
+      logGpuEvent('deploy_failed', candidates[0]?.tier.name ?? 'race', false, {
+        durationMs: Date.now() - deployStartedAt,
+        error: msg,
+        metadata: { failureCategory: categorizeDeployFailure(msg), deployId: sd.deployId, gpuType: candidates[0]?.gpuType ?? '', owner: slot?.ownerKey ?? 'global', raceCount: candidates.length },
+      });
+    }
     emitGatewayEvent('gpu.failed', {
       deployId: sd.deployId,
       error: msg,

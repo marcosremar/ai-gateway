@@ -429,7 +429,8 @@ describe('handleGpuStop', () => {
 
   it('#122 returns 400 when no active pod', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuStop');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 2600);
+    // Slot-aware stop branch sits before the legacy global path — widen the slice.
+    const fnBody = handlersSource.slice(fnStart, fnStart + 7000);
     expect(fnBody).toContain('No active pod to stop');
     expect(fnBody).toContain('400');
   });
@@ -488,7 +489,8 @@ describe('handleGpuResume', () => {
 
   it('#129 uses body.podId or falls back to deployState.podId', () => {
     const fnStart = handlersSource.indexOf('export async function handleGpuResume');
-    const fnBody = handlersSource.slice(fnStart, fnStart + 1600);
+    // Slot-aware resume branch sits before the legacy global path — widen the slice.
+    const fnBody = handlersSource.slice(fnStart, fnStart + 8000);
     expect(fnBody).toContain('body.podId');
     expect(fnBody).toContain('deployState.podId');
   });

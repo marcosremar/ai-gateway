@@ -243,7 +243,9 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     else if (tier.name === 'hyperstack') setDeployHyperstackApiKey(tier.apiKey);
 
     const tierStartedAt = Date.now();
-    logGpuEvent('deploy_started', tier.name, true);
+    logGpuEvent('deploy_started', tier.name, true, {
+      metadata: { deployId: sd.deployId, gpuType: sd.gpuType || gpuTypes[0] || '', owner: slot?.ownerKey ?? 'global', dockerImage },
+    });
     startDeploySession(tier.name, dockerImage, gpuTypes[0] ?? '');
 
     try {
@@ -257,7 +259,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
       const durationMs = Date.now() - tierStartedAt;
       if (sd.status === 'ready') {
         log.log(`[gpu] ✓ ${tier.label} deploy succeeded in ${Math.round(durationMs / 1000)}s`);
-        logGpuEvent('deploy_ready', tier.name, true, { durationMs, metadata: { endpoint: sd.endpoint, gpuType: sd.gpuType } });
+        logGpuEvent('deploy_ready', tier.name, true, { durationMs, metadata: { endpoint: sd.endpoint, gpuType: sd.gpuType, deployId: sd.deployId, owner: slot?.ownerKey ?? 'global' } });
         updateDeploySession({
           status: 'ready',
           podId: sd.podId,
@@ -329,7 +331,7 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     if (sd.status === 'error') {
       const durationMs = Date.now() - tierStartedAt;
       const failureCategory = categorizeDeployFailure(sd.message ?? '');
-      logGpuEvent('deploy_failed', tier.name, false, { durationMs, error: sd.message, metadata: { failureCategory } });
+      logGpuEvent('deploy_failed', tier.name, false, { durationMs, error: sd.message, metadata: { failureCategory, deployId: sd.deployId, gpuType: sd.gpuType || gpuTypes[0] || '', owner: slot?.ownerKey ?? 'global' } });
       updateDeploySession({ status: 'failed', errorMessage: sd.message ?? '' });
       emitGatewayEvent('gpu.failed', {
         deployId: sd.deployId,

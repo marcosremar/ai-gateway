@@ -21,6 +21,7 @@ let _pendingWrites = 0;
 let _consecutiveFailures = 0;
 import { getOrCreateRequestId, setRequestIdHeader } from './http-utils';
 import { getTranslationCacheStats } from './ai-handlers';
+import { recordDeployEvent, renderGpuTelemetryProm } from './gpu-telemetry';
 
 const log = createLogger('metrics');
 
@@ -145,6 +146,11 @@ export function logGpuEvent(
     metadata?: Record<string, unknown>;
   },
 ) {
+  // Feed the deploy-lifecycle Prometheus registry + operational alerts.
+  // recordDeployEvent never throws; the guard is pure paranoia so telemetry
+  // can never break event logging.
+  try { recordDeployEvent(event, provider, success, opts); } catch { /* self-reported */ }
+
   // Always write to file (persistent, no DB dependency). File-logger has
   // its own rotation and stderr fallback — a failure here means the file
   // system is fully unwritable, which will surface elsewhere. No point
@@ -957,7 +963,47 @@ function renderPrometheus(snap: Record<string, unknown>): string {
   lines.push('# HELP gateway_gpu_ready GPU tier readiness (1 = ready, 0 = not ready)\n# TYPE gateway_gpu_ready gauge\n');
   lines.push(`gateway_gpu_ready{status="${promLabelEscape(gpuStatus)}"} ${gpuReady}\n`);
 
+  // GPU deploy lifecycle (attempts by result, boot-time histogram)
+  lines.push(renderGpuTelemetryProm());
+
+  // Host reputation (refreshed async by handleMetrics, rendered from cache)
+  lines.push(_hostReputationProm);
+
   return lines.join('');
+}
+
+// ── Host reputation → Prometheus (cached) ────────────────────────────────────
+// renderPrometheus is sync; the reputation table lives in Prisma. Refresh a
+// rendered-text cache at most once per minute from the async handler.
+
+let _hostReputationProm = '';
+let _hostReputationPromAt = 0;
+const HOST_REPUTATION_PROM_TTL_MS = 60_000;
+const HOST_REPUTATION_PROM_LIMIT = 50;
+
+async function refreshHostReputationProm(): Promise<void> {
+  if (Date.now() - _hostReputationPromAt < HOST_REPUTATION_PROM_TTL_MS) return;
+  _hostReputationPromAt = Date.now();
+  try {
+    const hosts = await prisma.hostReputation.findMany({
+      orderBy: { deployCount: 'desc' },
+      take: HOST_REPUTATION_PROM_LIMIT,
+    });
+    const lines: string[] = [];
+    lines.push('# HELP gateway_host_reputation_score Host reputation score (0-1) per provider host\n# TYPE gateway_host_reputation_score gauge\n');
+    lines.push('# HELP gateway_host_deploy_success_rate Deploy success rate per provider host\n# TYPE gateway_host_deploy_success_rate gauge\n');
+    lines.push('# HELP gateway_host_avg_boot_seconds Average boot time per provider host\n# TYPE gateway_host_avg_boot_seconds gauge\n');
+    for (const h of hosts as Array<{ hostKey: string; provider: string; gpuType: string | null; reputationScore: number; deployCount: number; successCount: number; avgBootTimeS: number }>) {
+      const labels = `provider="${promLabelEscape(h.provider)}",gpu_type="${promLabelEscape(h.gpuType ?? '')}",host="${promLabelEscape(h.hostKey)}"`;
+      lines.push(`gateway_host_reputation_score{${labels}} ${h.reputationScore.toFixed(3)}\n`);
+      if (h.deployCount > 0) lines.push(`gateway_host_deploy_success_rate{${labels}} ${(h.successCount / h.deployCount).toFixed(3)}\n`);
+      if (h.avgBootTimeS > 0) lines.push(`gateway_host_avg_boot_seconds{${labels}} ${h.avgBootTimeS.toFixed(1)}\n`);
+    }
+    _hostReputationProm = lines.join('');
+  } catch (err) {
+    // DB unavailable — keep the stale cache (or empty) rather than failing the scrape.
+    log.warn('host reputation metrics refresh failed: %s', err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -979,6 +1025,7 @@ export async function handleMetrics(req: IncomingMessage, res: ServerResponse): 
     return;
   }
 
+  await refreshHostReputationProm();
   // Prometheus text format — Content-Type per the spec.
   res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
   res.end(renderPrometheus(snap));

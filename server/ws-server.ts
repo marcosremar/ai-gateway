@@ -187,6 +187,10 @@ export async function startWsServer(): Promise<number> {
   acquirePidLock();
   detectOrphanDeployOnBoot();
 
+  // ── GPU telemetry: slot spend accrual, stuck-deploy watchdog, alerts ──────
+  const { startGpuTelemetry } = await import('./gpu-telemetry');
+  startGpuTelemetry();
+
   // ── Startup config validation ─────────────────────────────────────────────
   const configWarnings = validateStartupConfig();
   if (configWarnings.length > 0) {
