@@ -17,7 +17,7 @@ import {
   deploymentSM, updateGpuModelWarmth,
 } from './state';
 import { broadcastProviderStatus, broadcastWs } from './ws-state';
-import { extractAppHealthError, runGlbSmokeTest, validateEndpointApiContract } from './gpu-poll-health';
+import { extractAppHealthError, runGlbSmokeTest, validateEndpointApiContract, tcpReachable, sshCommandReachable } from './gpu-poll-health';
 import { emitGatewayEvent } from './event-bus';
 import { logGpuEvent, upsertHostReputation } from './metrics';
 import { getDeployTimeoutMinForProvider } from '../src/gpu-providers/deploy-settings';
@@ -274,6 +274,10 @@ export async function startDeployRace(
           ...(extra.snapgpuPreloadApp ? { snapgpuPreloadApp: extra.snapgpuPreloadApp } : {}),
           ...(extra.snapgpuAutoSnapshot !== undefined ? { autoSnapshot: extra.snapgpuAutoSnapshot } : {}),
           ...(extra.snapgpuBackend ? { snapgpuBackend: extra.snapgpuBackend } : {}),
+          // Cooperative cancellation: lets the provider client stop BEFORE
+          // reserving/creating an offer and skip host-reputation penalties
+          // for racers we cancelled ourselves.
+          isCancelled,
           onPollProgress,
         },
         credentials,
@@ -362,6 +366,51 @@ export async function startDeployRace(
       raceAbort.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
     });
 
+  /** First healthy candidate becomes the winner: flip global/slot state to
+   *  ready, abort the other racers immediately and record metrics. */
+  const declareWinner = async (c: RaceCandidate, localEndpoint: string, healthData?: Record<string, unknown>) => {
+    raceDone = true;
+    raceAbort.abort(); // wake up sleeping losers right away
+    const durationMs = Date.now() - deployStartedAt;
+    winner = { ...c, endpoint: localEndpoint };
+    setGpuHealthy(true);
+    setLastRequestTime(Date.now());
+    if (healthData) updateGpuModelWarmth(healthData);
+    sds({
+      status: 'ready',
+      podId: c.instanceId, endpoint: localEndpoint, gpuType: c.gpuType,
+      costPerHr: c.costPerHr, provider: c.tier.name,
+      sshHost: c.sshHost, sshPort: c.sshPort, providerMeta: c.providerMeta,
+      message: `GPU ready (race ${candidates.length}→1, ${Math.round(durationMs / 1000)}s): ${localEndpoint || `${c.sshHost}:${c.sshPort} (ssh)`}`,
+      step: 'ready', stepDetail: '', deployDurationMs: durationMs,
+      alert: '', alertLevel: 'info',
+    });
+    broadcastProviderStatus('booting', 'cloud', 'GPU deployed — warming up models');
+    if (!slot) deploymentSM.markReady(c.instanceId, localEndpoint, c.gpuType, c.costPerHr);
+    if (!slot) startGpuMonitoring();
+    // startBackgroundWarmthMonitor is internal to gpu-health-monitor
+    if (localEndpoint) {
+      const { startBackgroundWarmthMonitor } = await import('./gpu-health-monitor');
+      startBackgroundWarmthMonitor(localEndpoint);
+    }
+    startCanaryIfEnabled(extra, dockerImage, c.gpuType);
+    log.log(`[race] Winner: deployId=${sd.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} provider=${c.tier.name} gpu=${c.gpuType} t=${Math.round(durationMs / 1000)}s`);
+    logGpuEvent('deploy_ready', c.tier.name, true, { durationMs, metadata: { endpoint: localEndpoint, gpuType: c.gpuType, raceCount: candidates.length } });
+    upsertHostReputation({ provider: c.tier.name, gpuType: c.gpuType, providerMeta: c.providerMeta, success: true, bootTimeS: Math.round(durationMs / 1000), dockerImage });
+    if (await cooldownTracker.recordSuccess(c.tier.name)) {
+      logGpuEvent('cooldown_cleared', c.tier.name, true, { durationMs });
+    }
+    emitGatewayEvent('gpu.deployed', {
+      deployId: sd.deployId,
+      provider: c.tier.name,
+      gpuType: c.gpuType,
+      endpoint: localEndpoint,
+      costPerHr: c.costPerHr,
+      durationMs,
+      raceCount: candidates.length,
+    });
+  };
+
   // Wrap in try/finally to guarantee loser cleanup even if Promise.all throws
   try {
   await Promise.all(candidates.map(async (c, idx) => {
@@ -387,6 +436,39 @@ export async function startDeployRace(
             if (idx === 0) sds({ endpoint: localEndpoint });
           }
         } catch { /* expected during early boot */ }
+      }
+
+      // SSH readiness mode (readinessProbe: 'ssh'): batch/SSH-driven
+      // containers have no HTTP /health. Probe the candidate's SSH target
+      // instead — mirrors pollSshUntilReady in the non-race path. Without
+      // this branch the race polled /health on containers that never serve
+      // it and burned the full deploy timeout on every slot.
+      if (extra.readinessProbe === 'ssh') {
+        if (!c.sshHost || !c.sshPort) {
+          const clientWithDetail = c.tier.client as unknown as {
+            getInstanceStatusDetail?: (id: string, cred: unknown) => Promise<{ sshHost?: string; sshPort?: number } | null>;
+          };
+          if (typeof clientWithDetail.getInstanceStatusDetail === 'function') {
+            try {
+              const detail = await clientWithDetail.getInstanceStatusDetail(c.instanceId, credentials);
+              if (detail?.sshHost && detail?.sshPort) { c.sshHost = detail.sshHost; c.sshPort = detail.sshPort; }
+            } catch { /* not ready yet — retry next round */ }
+          }
+        }
+        if (c.sshHost && c.sshPort && !raceDone) {
+          const tcpOk = await tcpReachable(c.sshHost, c.sshPort, 3000);
+          const sshOk = tcpOk && await sshCommandReachable(c.sshHost, c.sshPort, 7000);
+          if (sshOk && !raceDone) {
+            await declareWinner(c, localEndpoint);
+            return; // winner exits cleanly — no cleanup needed
+          }
+        }
+        if (idx === 0 && !raceDone) {
+          const elapsed = Math.round((Date.now() - deployStartedAt) / 1000);
+          sds({ message: `${candidates.length} instances booting (ssh probe)... [${elapsed}s]` });
+        }
+        await raceSleep(3000);
+        continue;
       }
 
       // Probe /health
@@ -430,51 +512,8 @@ export async function startDeployRace(
                 }
               }
               if (raceDone) break;
-              if (!raceDone) {
-                // Winner — update global state and abort all other slots immediately
-                raceDone = true;
-                raceAbort.abort(); // wake up sleeping losers right away
-                const durationMs = Date.now() - deployStartedAt;
-                winner = { ...c, endpoint: localEndpoint };
-                setGpuHealthy(true);
-                setLastRequestTime(Date.now());
-                updateGpuModelWarmth(data as Record<string, unknown>);
-                sds({
-                  status: 'ready',
-                  podId: c.instanceId, endpoint: localEndpoint, gpuType: c.gpuType,
-                  costPerHr: c.costPerHr, provider: c.tier.name,
-                  sshHost: c.sshHost, sshPort: c.sshPort, providerMeta: c.providerMeta,
-                  message: `GPU ready (race ${candidates.length}→1, ${Math.round(durationMs / 1000)}s): ${localEndpoint}`,
-                  step: 'ready', stepDetail: '', deployDurationMs: durationMs,
-                  alert: '', alertLevel: 'info',
-                });
-                broadcastProviderStatus('booting', 'cloud', 'GPU deployed — warming up models');
-                if (!slot) deploymentSM.markReady(c.instanceId, localEndpoint, c.gpuType, c.costPerHr);
-                if (!slot) startGpuMonitoring();
-                // startBackgroundWarmthMonitor is internal to gpu-health-monitor
-                const { startBackgroundWarmthMonitor } = await import('./gpu-health-monitor');
-                startBackgroundWarmthMonitor(localEndpoint);
-                startCanaryIfEnabled(extra, dockerImage, c.gpuType);
-                log.log(`[race] Winner: deployId=${sd.deployId || '-'} instanceId=${c.instanceId.slice(0, 12)} provider=${c.tier.name} gpu=${c.gpuType} t=${Math.round(durationMs / 1000)}s`);
-                logGpuEvent('deploy_ready', c.tier.name, true, { durationMs, metadata: { endpoint: localEndpoint, gpuType: c.gpuType, raceCount: candidates.length } });
-                upsertHostReputation({ provider: c.tier.name, gpuType: c.gpuType, providerMeta: c.providerMeta, success: true, bootTimeS: Math.round(durationMs / 1000), dockerImage });
-                if (await cooldownTracker.recordSuccess(c.tier.name)) {
-                  logGpuEvent('cooldown_cleared', c.tier.name, true, { durationMs });
-                }
-                emitGatewayEvent('gpu.deployed', {
-                  deployId: sd.deployId,
-                  provider: c.tier.name,
-                  gpuType: c.gpuType,
-                  endpoint: localEndpoint,
-                  costPerHr: c.costPerHr,
-                  durationMs,
-                  raceCount: candidates.length,
-                });
-                return; // winner exits cleanly — no cleanup needed
-              }
-              // Another slot already won while this fetch was in flight.
-              // Break to loser-cleanup code below so this instance gets terminated.
-              break;
+              await declareWinner(c, localEndpoint, data as Record<string, unknown>);
+              return; // winner exits cleanly — no cleanup needed
             }
           }
         } catch { /* health probe failed — keep trying */ }

@@ -64,6 +64,13 @@ Goal: test cheap GPU deploy paths through ai-gateway only, prioritize offers und
 
 Custo total da bateria de validação (7 instâncias reais): ≈ $0.09. Cleanup: 0 órfãos.
 
+| 15 | Fixed | Race ignores `readinessProbe: "ssh"` | Live: race×2 with ollama (no HTTP /health) polled `/health` for the FULL 30-min timeout on both slots (~$0.09 burned), while the non-race path was ready in 61s | SSH-probe branch in the race health loop (mirrors pollSshUntilReady); winner declaration extracted to `declareWinner()`. Re-validated live: race×2 ssh-ready in **71s**, loser destroyed in 72s ($0.002) |
+| 16 | Fixed | Cancelled racers poison host reputation | Race loser cleanup deletes the instance; the vast client's poll then sees "instance vanished (host reclaimed)" and blacklists the innocent host | Race now passes `isCancelled` into `createInstance`; the vanish branch checks `spec.isCancelled?.()` before `_markHostUnstable`/`_recordHostFailure`. Validated live: blacklist empty after race |
+| 17 | Fixed | Stale `deployCancelled` swallows direct deploys (ROOT CAUSE of "returned to idle unexpectedly — possible silent failure", 11× in logs) | `resetDeployState()` sets `deployCancelled=true`; only `_startDeployAndRespond` cleared it. Direct callers (resume fallback, auto-recovery, standby, workloads) ran with EVERY `setDeployState` silently dropped — incl. `ready` (instance leak) | `_executeDeploy` clears the stale flag for global deploys (covers all 6 direct callers) |
+| 18 | Fixed | `/v1/gpu/stop` and `/v1/gpu/resume` not slot-aware | Live: deploy landed in per-caller slot; stop answered "No active pod (idle)" for a running, billing instance (status/terminate are slot-aware; stop/resume read only global deployState) | Slot-aware branches in both handlers (`mode: app_slot_stop` / `app_slot_resume`). Validated live: stop instant, **resume in 4s** |
+| 19 | Open | Slot instances have no idle auto-stop / auto-destroy | `gpu-monitor-loop` and `gpu-destroy-timer` are global-only; a ready slot instance never idles out (bills until credit 0 → Vast stops-not-destroys → storage keeps billing). Blanket auto-stop would kill long finetune runs — needs per-slot policy decision | Design needed: opt-in `idleTimeoutSec` per deploy? |
+| 20 | Open | Auto-snapshot fires and fails on every Vast deploy | `takeSnapshot` → HTTP 400 "invalid_args: Invalid command given" on every create (log noise; snapshot never works on Vast) | Disable for vast or fix the API payload |
+
 ## Live run evidence (2026-06-10, gateway @ localhost:9012, maxCostUsd=0.10)
 
 - Offers under $0.10/hr available: RTX 3060 $0.075/hr (rel 0.987), GTX 1080 Ti $0.082/hr (rel 0.983)

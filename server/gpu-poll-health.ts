@@ -466,7 +466,7 @@ export async function runGlbSmokeTest(
 
 /** Minimal TCP reachability check — resolves true once a TCP connection to host:port
  * opens within the timeout. Used by the SSH-only readiness branch. */
-async function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+export async function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
   const net = await import('node:net');
   return new Promise<boolean>((resolve) => {
     const socket = new net.Socket();
@@ -485,7 +485,7 @@ async function tcpReachable(host: string, port: number, timeoutMs: number): Prom
   });
 }
 
-async function sshCommandReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+export async function sshCommandReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const child = spawn('ssh', [
       '-p', String(port),

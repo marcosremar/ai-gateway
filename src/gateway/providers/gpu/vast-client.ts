@@ -824,6 +824,8 @@ export class VastClient extends AbstractGpuProvider {
    *  Best-effort: any failure is logged and never blocks the deploy. */
   private async _ensureAccountSshKey(apiKey: string): Promise<void> {
     if (this._sshKeyEnsured) return;
+    // Unit tests stub fetch with strict call sequences (see VAST_SKIP_IMAGE_PRECHECK).
+    if (process.env.VAST_SKIP_SSH_KEY_ENSURE === '1') return;
     try {
       const candidates = process.env.AIGW_SSH_PUBKEY_PATH
         ? [process.env.AIGW_SSH_PUBKEY_PATH]
@@ -2277,6 +2279,15 @@ export class VastClient extends AbstractGpuProvider {
       if (!endpoint) {
         const stillExists = await this._fetchInstanceDetail(contractId, headers);
         if (!stillExists || !stillExists.ip || ['exited', 'failed', 'destroyed', 'error', 'deleted'].includes(stillExists.status?.toLowerCase())) {
+          // Cooperative cancellation deletes racer instances out from under
+          // this poll — indistinguishable from a host reclaim unless we ask.
+          // Don't punish the host's reputation for our own cancellation.
+          if (spec.isCancelled?.()) {
+            this.log.log(`[vast] Instance ${contractId} gone after cooperative cancellation — skipping host penalty`);
+            await this._safeCleanupInstance(instanceId, apiKey, 'cancelled during create');
+            failures.push({ offerId, gpu: gpuName, reason: 'cancelled' });
+            return null;
+          }
           const reason = 'instance vanished during startup (host reclaimed)';
           // Best-effort fetch of pre-destroy logs for diagnostics. Host reclaims
           // are the #1 Vast.ai failure mode and the logs are usually our only clue.

@@ -431,8 +431,9 @@ describe('race deploy — startDeployRace', () => {
 
   it('#203 wraps Promise.all in try/finally for guaranteed cleanup', () => {
     const fnStart = deployRaceSource.indexOf('export async function startDeployRace');
-    // Force-clean is ~17k into function, need larger slice
-    const fnBody = deployRaceSource.slice(fnStart, fnStart + 27000);
+    // Force-clean sits deep into the function (declareWinner refactor pushed
+    // it past 27k) — keep the slice comfortably larger than the function body.
+    const fnBody = deployRaceSource.slice(fnStart, fnStart + 40000);
     expect(fnBody).toContain('try {');
     expect(fnBody).toContain('await Promise.all(candidates.map');
     expect(fnBody).toContain('Force-clean');

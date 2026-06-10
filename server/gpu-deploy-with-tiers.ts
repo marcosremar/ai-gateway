@@ -14,7 +14,7 @@ import { runPreFlightChecks } from '../src/preflight-checks';
 import { createLogger } from '../src/logger';
 import { profileOperation, recordOperationTiming } from '../src/performance-profiler';
 import {
-  deployState, setDeployState, deployCancelled, deploymentSM,
+  deployState, setDeployState, deployCancelled, setDeployCancelled, deploymentSM,
   setDeployApiKey, setDeployVastApiKey,
   setDeployTensordockApiKey, setDeployTensordockAuthId, setDeployModalApiKey, setDeployHyperstackApiKey,
   clearPersistedDeploy,
@@ -64,6 +64,14 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
   const sd = slot ? slot.state : deployState;
   const sds = (patch: Parameters<typeof setDeployState>[0]) => setDeployState(patch, slot ?? undefined);
   const isCancelled = () => slot ? slot.cancelled : deployCancelled;
+  // A new global deploy supersedes any previous cancellation. Direct callers
+  // (resume fallback, auto-recovery, standby, workloads) don't go through
+  // _startDeployAndRespond, so a stale deployCancelled=true left behind by
+  // resetDeployState() makes setDeployState silently swallow EVERY update of
+  // this deploy — state stays 'idle' ("returned to idle unexpectedly —
+  // possible silent failure") and a successfully booted instance would never
+  // be marked ready (cost leak).
+  if (!slot && deployCancelled) setDeployCancelled(false);
   // ── Pre-flight checks ───────────────────────────────────────────────────
   // Validate image, DNS, CUDA compatibility, and cost BEFORE attempting any
   // provider deploy. Catches common failure scenarios early (Fixes #6, #13,

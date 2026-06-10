@@ -53,6 +53,7 @@ describe('Vast.ai reliability improvements', () => {
     vi.stubGlobal('fetch', fetchSpy);
     vi.spyOn(AbstractGpuProvider, 'estimateImageDiskGb').mockResolvedValue(20);
     process.env.VAST_SKIP_IMAGE_PRECHECK = '1';
+    process.env.VAST_SKIP_SSH_KEY_ENSURE = '1';
     process.env.VAST_OFFER_RACE_STAGGER_MS = '0';
     process.env.VAST_RESERVATION_QUEUE_MAX_SIZE = '5';
     process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS = '600000';
@@ -63,6 +64,7 @@ describe('Vast.ai reliability improvements', () => {
   afterEach(() => {
     resetVastRateLimitStateForTests();
     delete process.env.VAST_SKIP_IMAGE_PRECHECK;
+    delete process.env.VAST_SKIP_SSH_KEY_ENSURE;
     delete process.env.VAST_OFFER_RACE_STAGGER_MS;
     delete process.env.VAST_RESERVATION_QUEUE_MAX_SIZE;
     delete process.env.VAST_RESERVATION_QUEUE_TIMEOUT_MS;

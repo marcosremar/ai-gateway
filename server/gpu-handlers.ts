@@ -8,7 +8,8 @@ const log = createLogger('gpu-handlers');
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { GpuProviderClient, GpuOffer, ProviderCredentials } from '../src/gpu-providers/types';
-import { pauseInstanceForIdle } from '../src/gateway/providers/gpu/idle-pause';
+import { pauseInstanceForIdle, resumeInstanceFromIdle } from '../src/gateway/providers/gpu/idle-pause';
+import { tcpReachable, sshCommandReachable } from './gpu-poll-health';
 import { filterTiers, dropModalForDockerImage } from '../src/gpu-providers/deploy-orchestrator';
 import type { ProviderName } from '../src/gpu-providers/deploy-orchestrator';
 import {
@@ -2308,6 +2309,57 @@ export async function handleGpuStop(req: IncomingMessage, res: ServerResponse): 
     return;
   }
 
+  // Slot-aware stop: deploys land in per-caller slots and /v1/gpu/status +
+  // /v1/gpu/terminate already resolve them. When the caller's slot holds the
+  // active pod while the legacy global deployState is idle, stop the slot pod
+  // — otherwise this handler answered "No active pod (idle)" for a running,
+  // billing instance.
+  const stopCallerId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
+  const stopSlot = stopCallerId ? findCallerDeploySlot(stopCallerId, body) : undefined;
+  if (stopSlot?.state.podId && stopSlot.state.status === 'ready' && deployState.status === 'idle') {
+    const slotState = stopSlot.state;
+    const provider = (slotState.provider || 'vast') as ProviderName;
+    const podId = slotState.podId;
+    let slotClient: GpuProviderClient | null = null;
+    let slotCreds: ProviderCredentials = { apiKey: '' };
+    if (provider === 'runpod' && (deployApiKey || process.env.RUNPOD_API_KEY)) {
+      slotClient = runpod; slotCreds = { apiKey: deployApiKey || process.env.RUNPOD_API_KEY || '' };
+    } else if ((provider === 'vast' || provider === 'vast-vm') && (deployVastApiKey || process.env.VAST_API_KEY)) {
+      slotClient = provider === 'vast-vm' ? vastVm : vast;
+      slotCreds = { apiKey: deployVastApiKey || process.env.VAST_API_KEY || '' };
+    } else if (provider === 'tensordock' && (deployTensordockApiKey || process.env.TENSORDOCK_API_KEY)) {
+      slotClient = tensordock;
+      slotCreds = { apiKey: deployTensordockApiKey || process.env.TENSORDOCK_API_KEY || '', authId: deployTensordockAuthId || process.env.TENSORDOCK_AUTH_ID || '' };
+    } else if (provider === 'hyperstack' && (deployHyperstackApiKey || process.env.HYPERSTACK_API_KEY)) {
+      slotClient = hyperstack; slotCreds = { apiKey: deployHyperstackApiKey || process.env.HYPERSTACK_API_KEY || '' };
+    }
+    if (!slotClient) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Cannot stop: no credentials for provider "${provider}"` }));
+      return;
+    }
+    try {
+      const pausedMode = await pauseInstanceForIdle(provider, podId, slotCreds, slotClient, { allowHibernate: body.hibernate === true });
+      setDeployState({
+        status: 'stopped',
+        message: `Pod ${podId} ${pausedMode === 'hibernate' ? 'hibernated' : 'stopped (paused)'}. Use POST /v1/gpu/resume to restart.`,
+        podId, provider, pausedMode,
+      }, stopSlot);
+      log.log(`[req=${requestId}] Slot pod ${podId} ${pausedMode === 'hibernate' ? 'hibernated' : 'stopped'} on ${provider} (owner=${stopSlot.ownerKey})`);
+      logGpuEvent(pausedMode === 'hibernate' ? 'instance_hibernated' : 'instance_stopped', 'manual', true, {
+        metadata: { reason: 'manual_stop', provider, pausedMode, owner: stopSlot.ownerKey },
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, deployId: slotState.deployId || undefined, podId, provider, mode: 'app_slot_stop', message: `Pod ${podId} stopped. Use POST /v1/gpu/resume to restart.` }));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`[req=${requestId}] Slot stop failed for ${podId}: ${msg}`);
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Stop failed: ${msg}` }));
+    }
+    return;
+  }
+
   // Idempotent: if already stopped or idle, return 200 instead of error
   if (deployState.status === 'stopped') {
     log.log(`[req=${requestId}] GPU already stopped — idempotent 200`);
@@ -2453,6 +2505,80 @@ export async function handleGpuResume(req: IncomingMessage, res: ServerResponse)
     setDeployLock(false);
     res.writeHead(409, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Deploy ID mismatch — this deploy may have been replaced', expected: deployState.deployId, received: body.deployId }));
+    return;
+  }
+
+  // Slot-aware resume: counterpart of the slot-aware stop above. Resumes the
+  // caller's stopped slot pod in place (no global resumeOrDeploy fallback —
+  // on failure the caller should redeploy).
+  const resumeCallerId = readUserIdHeader(req.headers as Record<string, string | string[] | undefined>);
+  const resumeSlot = resumeCallerId ? findCallerDeploySlot(resumeCallerId, body) : undefined;
+  if (resumeSlot?.state.podId && resumeSlot.state.status === 'stopped' && deployState.status === 'idle') {
+    const slotState = resumeSlot.state;
+    const provider = (slotState.provider || 'vast') as ProviderName;
+    const podId = slotState.podId;
+    let slotClient: GpuProviderClient | null = null;
+    let slotCreds: ProviderCredentials = { apiKey: '' };
+    if (provider === 'runpod' && (deployApiKey || process.env.RUNPOD_API_KEY)) {
+      slotClient = runpod; slotCreds = { apiKey: deployApiKey || process.env.RUNPOD_API_KEY || '' };
+    } else if ((provider === 'vast' || provider === 'vast-vm') && (deployVastApiKey || process.env.VAST_API_KEY)) {
+      slotClient = provider === 'vast-vm' ? vastVm : vast;
+      slotCreds = { apiKey: deployVastApiKey || process.env.VAST_API_KEY || '' };
+    } else if (provider === 'tensordock' && (deployTensordockApiKey || process.env.TENSORDOCK_API_KEY)) {
+      slotClient = tensordock;
+      slotCreds = { apiKey: deployTensordockApiKey || process.env.TENSORDOCK_API_KEY || '', authId: deployTensordockAuthId || process.env.TENSORDOCK_AUTH_ID || '' };
+    } else if (provider === 'hyperstack' && (deployHyperstackApiKey || process.env.HYPERSTACK_API_KEY)) {
+      slotClient = hyperstack; slotCreds = { apiKey: deployHyperstackApiKey || process.env.HYPERSTACK_API_KEY || '' };
+    }
+    if (!slotClient) {
+      setDeployLock(false);
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Cannot resume: no credentials for provider "${provider}"` }));
+      return;
+    }
+    const resumeStartedAt = Date.now();
+    try {
+      await resumeInstanceFromIdle(provider, podId, slotCreds, slotClient, slotState.pausedMode);
+      setDeployState({ status: 'booting', message: 'Pod resumed — waiting for readiness', pausedMode: undefined }, resumeSlot);
+      // Wait for readiness: ssh target when known, otherwise provider status.
+      const RESUME_TIMEOUT_MS = Number.parseInt(process.env.RESUME_TIMEOUT_MS ?? '300000', 10);
+      let resumedOk = false;
+      let sshHost = slotState.sshHost;
+      let sshPort = slotState.sshPort;
+      while (Date.now() - resumeStartedAt < RESUME_TIMEOUT_MS) {
+        if ((!sshHost || !sshPort) && typeof (slotClient as { getInstanceStatusDetail?: Function }).getInstanceStatusDetail === 'function') {
+          try {
+            const detail = await (slotClient as unknown as { getInstanceStatusDetail: (id: string, cred: unknown) => Promise<{ sshHost?: string; sshPort?: number } | null> }).getInstanceStatusDetail(podId, slotCreds);
+            if (detail?.sshHost && detail?.sshPort) { sshHost = detail.sshHost; sshPort = detail.sshPort; }
+          } catch { /* not up yet */ }
+        }
+        if (sshHost && sshPort) {
+          const tcpOk = await tcpReachable(sshHost, sshPort, 3000);
+          if (tcpOk && await sshCommandReachable(sshHost, sshPort, 7000)) { resumedOk = true; break; }
+        }
+        setDeployState({ message: `Pod resumed — waiting for readiness (${Math.round((Date.now() - resumeStartedAt) / 1000)}s)` }, resumeSlot);
+        await sleep(3000);
+      }
+      if (!resumedOk) throw new Error(`Resume readiness timed out after ${Math.round((Date.now() - resumeStartedAt) / 1000)}s`);
+      const durationMs = Date.now() - resumeStartedAt;
+      setDeployState({
+        status: 'ready',
+        message: `GPU ready (slot resume in ${Math.round(durationMs / 1000)}s)`,
+        sshHost, sshPort,
+        step: 'ready', stepDetail: '', deployDurationMs: durationMs,
+      }, resumeSlot);
+      logGpuEvent('instance_resumed', provider, true, { durationMs, metadata: { podId, owner: resumeSlot.ownerKey } });
+      setDeployLock(false);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, method: 'resumed', mode: 'app_slot_resume', podId, provider, durationMs }));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setDeployState({ status: 'error', message: `Resume failed: ${msg} — redeploy to get a fresh instance` }, resumeSlot);
+      logGpuEvent('resume_failed', provider, false, { metadata: { podId, owner: resumeSlot.ownerKey, error: msg } });
+      setDeployLock(false);
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Resume failed: ${msg}`, suggestion: 'POST /v1/gpu/deploy for a fresh instance' }));
+    }
     return;
   }
 
