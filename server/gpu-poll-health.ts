@@ -673,6 +673,16 @@ async function pollSshUntilReady(
   }
   sds({ status: 'booting', step: 'waiting_ssh', stepDetail: `${host}:${port} (${accessMode})` });
 
+  // Direct-first, proxy-fallback: cheap community hosts frequently advertise
+  // a 22/tcp direct mapping that the host firewall silently drops while the
+  // Vast SSH proxy works fine. If direct SSH hasn't accepted within the
+  // fallback window, probe the proxy too and switch to it on success.
+  // Disable with AIGW_VAST_DIRECT_SSH_FALLBACK_MS=0.
+  const PROXY_FALLBACK_MS = Number.parseInt(process.env.AIGW_VAST_DIRECT_SSH_FALLBACK_MS ?? '120000', 10);
+  const sshWaitStartedAt = Date.now();
+  let proxyHost = '';
+  let proxyPort = 0;
+
   while (true) {
     if (deployCancelled) return { result: 'cancelled' }; if (slot?.cancelled) return { result: 'cancelled' };
     const elapsed = Date.now() - deployStartedAt;
@@ -685,6 +695,11 @@ async function pollSshUntilReady(
     // Check provider says instance is still alive — bail fast if it died.
     try {
       const detail = await getProviderStatusDetail(providerClient, podId, credentials);
+      const proxyInfo = detail as { sshProxyHost?: string; sshProxyPort?: number } | null;
+      if (proxyInfo?.sshProxyHost && proxyInfo.sshProxyPort) {
+        proxyHost = proxyInfo.sshProxyHost;
+        proxyPort = proxyInfo.sshProxyPort;
+      }
       const providerError = providerStatusErrorMessage(detail);
       if (providerError) {
         log.warn(`[gpu] ${providerName} pod ${podId}: ${providerError}`);
@@ -712,6 +727,26 @@ async function pollSshUntilReady(
       setLastRequestTime(Date.now());
       sds({ status: 'ready', step: 'ready', message: 'SSH reachable', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
       return { result: 'ready' };
+    }
+    if (
+      providerName === 'vast' && accessMode === 'direct'
+      && PROXY_FALLBACK_MS > 0 && proxyHost && proxyPort
+      && Date.now() - sshWaitStartedAt >= PROXY_FALLBACK_MS
+    ) {
+      const proxyTcp = await tcpReachable(proxyHost, proxyPort, 3000);
+      const proxyOk = proxyTcp && await sshCommandReachable(proxyHost, proxyPort, 7000);
+      if (proxyOk) {
+        const durationMs = Date.now() - deployStartedAt;
+        log.warn(`[gpu] ${providerName} pod ${podId}: direct SSH ${host}:${port} never accepted but Vast proxy ${proxyHost}:${proxyPort} is reachable — switching to proxy (${Math.round(durationMs / 1000)}s)`);
+        setLastRequestTime(Date.now());
+        sds({
+          status: 'ready', step: 'ready',
+          message: `SSH reachable via Vast proxy (direct ${host}:${port} firewalled)`,
+          sshHost: proxyHost, sshPort: proxyPort,
+          deployDurationMs: durationMs, alert: '', alertLevel: 'info',
+        });
+        return { result: 'ready' };
+      }
     }
     await new Promise((r) => setTimeout(r, 3000));
   }

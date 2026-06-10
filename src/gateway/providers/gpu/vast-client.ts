@@ -140,6 +140,10 @@ export interface VastInstanceStatusDetail {
   cpuUtil?: number;
   ip: string;
   endpoint: string;
+  /** Vast SSH proxy target (sshN.vast.ai) kept as fallback when the direct
+   *  22/tcp mapping is firewalled on the host. */
+  sshProxyHost?: string;
+  sshProxyPort?: number;
   sshHost?: string;
   sshPort?: number;
 }
@@ -810,6 +814,54 @@ export class VastClient extends AbstractGpuProvider {
     if (!gpuTypes?.length) return false;
     const blackwell = ['5090', '5080', '5070', 'B200', 'B100', 'GB200'];
     return gpuTypes.some(g => blackwell.some(b => g.includes(b)));
+  }
+
+  /** Once-per-process guard for _ensureAccountSshKey. */
+  private _sshKeyEnsured = false;
+
+  /** Make sure this machine's SSH public key is registered on the Vast
+   *  account so new instances accept our readiness probes and finetune SSH.
+   *  Best-effort: any failure is logged and never blocks the deploy. */
+  private async _ensureAccountSshKey(apiKey: string): Promise<void> {
+    if (this._sshKeyEnsured) return;
+    try {
+      const candidates = process.env.AIGW_SSH_PUBKEY_PATH
+        ? [process.env.AIGW_SSH_PUBKEY_PATH]
+        : [path.join(os.homedir(), '.ssh', 'id_ed25519.pub'), path.join(os.homedir(), '.ssh', 'id_rsa.pub')];
+      let pub = '';
+      for (const p of candidates) {
+        try { pub = (await readFile(p, 'utf8')).trim(); if (pub) break; } catch { /* try next */ }
+      }
+      if (!pub) {
+        this.log.warn('[vast] No local SSH public key found — SSH readiness probes will fail unless a key is registered on the account');
+        return;
+      }
+      const keyBody = pub.split(/\s+/)[1] ?? '';
+      const headers = this.jsonHeaders(apiKey);
+      const listRes = await this._vastFetch(`${VAST_API_BASE}/ssh/`, { headers });
+      if (listRes.ok) {
+        const keys = (await listRes.json()) as Array<{ public_key?: string }> | unknown;
+        const registered = Array.isArray(keys)
+          && keys.some(k => typeof k?.public_key === 'string' && k.public_key.split(/\s+/)[1] === keyBody);
+        if (registered) {
+          this._sshKeyEnsured = true;
+          return;
+        }
+      }
+      const createRes = await this._vastFetch(`${VAST_API_BASE}/ssh/`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ ssh_key: pub }),
+      });
+      if (createRes.ok) {
+        this.log.log('[vast] Registered this machine\'s SSH public key on the Vast account');
+        this._sshKeyEnsured = true;
+      } else {
+        this.log.warn(`[vast] Could not register SSH key on account: HTTP ${createRes.status}`);
+      }
+    } catch (err) {
+      this.log.warn(`[vast] ensureAccountSshKey failed (non-fatal): ${this.errMsg(err)}`);
+    }
   }
 
   /** Report an externally-observed deploy failure on a host (e.g. the
@@ -1608,6 +1660,13 @@ export class VastClient extends AbstractGpuProvider {
 
     // ── Preflight: account balance check ──────────────────────────────────
     await this._runPreflight(credentials);
+
+    // ── Preflight: SSH key registration ───────────────────────────────────
+    // Vast injects the ACCOUNT's registered SSH keys into new instances. If
+    // this machine's key is not on the account, every SSH readiness probe and
+    // finetune job fails with "Permission denied (publickey)" after the full
+    // boot timeout — which presents as a deploy hang. Ensure it once.
+    await this._ensureAccountSshKey(apiKey);
 
     // ── 1. Auto-detect disk from Docker image if not specified ─────────────
     if (!spec.dockerImage) {
@@ -3660,6 +3719,12 @@ private _fetchContainerLogsViaSsh(sshHost: string, sshPort: number): Promise<str
     let sshHost = (inst.ssh_host ?? inst.public_ipaddr) as string | undefined;
     const rawSshPort = inst.ssh_port as number | undefined;
     let sshPort = rawSshPort && rawSshPort >= 1 && rawSshPort <= 65535 ? rawSshPort : undefined;
+    // Preserve the Vast SSH proxy before the direct 22/tcp override below —
+    // readiness polling falls back to it when the direct port never accepts.
+    if (typeof inst.ssh_host === 'string' && isVastProxyHost(inst.ssh_host) && sshPort) {
+      baseDetail.sshProxyHost = inst.ssh_host;
+      baseDetail.sshProxyPort = sshPort;
+    }
 
     if (!ip) {
       this.log.log(`[vast] _parseInstance: no IP yet (status=${status}, cur_state=${inst.cur_state}, actual_status=${inst.actual_status})`);

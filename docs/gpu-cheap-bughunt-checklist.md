@@ -47,6 +47,22 @@ Goal: test cheap GPU deploy paths through ai-gateway only, prioritize offers und
 | 10 | Fixed | Exhausted-retries message | Live e2e reproduced "Vast.ai deploy failed: max retries exceeded" masking the real cause (ssh_timeout on a dead host) | `lastFailureReason` carried into the exhausted message: `… — last failure: <result> on <instance> (<gpu>)` |
 | 11 | Fixed | Resume stuck in scheduling | Vast docs: >30s in `scheduling` after stop/start means the GPU was reassigned — resume waited the full 5-min health timeout | Early-abort in `gpu-resume-manager` after 60s of scheduling (RESUME_SCHEDULING_ABORT_MS) → existing fresh-deploy fallback |
 | 12 | Open | GPU allowlist dead code | `GPU_TYPE_ALLOWLIST` (server/constants.ts:161) is exported but never enforced — explicit `gpuTypes` in deploy requests pass through (which is what enables <$0.10/hr types like RTX 3060) | Decide: enforce or delete the constant |
+| 13 | Fixed | **SSH key not on account (ROOT CAUSE of ssh-probe "hangs")** | 6 consecutive live deploys failed SSH readiness across different hosts; `ssh root@ssh2.vast.ai` → "Permission denied (publickey)" — the gateway machine's ed25519 key was never registered on the Vast account, so every instance rejected probes until boot timeout | `_ensureAccountSshKey()` preflight in `vast.createInstance` (idempotent: lists `/ssh/`, registers `~/.ssh/id_ed25519.pub` or `AIGW_SSH_PUBKEY_PATH` if missing). After fix: SSH ready in **61s**, inference at **74s** |
+| 14 | Fixed | Direct SSH port firewalled on community hosts | Vast advertises a 22/tcp direct mapping that some host firewalls silently drop while the ssh proxy works; probe policy refuses proxy by default | Direct-first proxy-fallback in `pollSshUntilReady` after 120s (`AIGW_VAST_DIRECT_SSH_FALLBACK_MS`, 0=off); `_parseInstance` now preserves `sshProxyHost/Port` |
+
+## Validated end-to-end timeline (2026-06-10, RTX 3060 @ $0.076/hr, ollama + smollm2:135m)
+
+| Marco | Tempo |
+|---|---|
+| POST /v1/gpu/deploy → instância criada | 16s |
+| Instância "running" na Vast | 41s |
+| SSH ready (gateway "ready") | **61s** |
+| API Ollama respondendo | 62s |
+| Modelo 135M baixado (pull) | 72s |
+| **Primeira inferência real concluída** | **~74s** |
+| Inferência quente (p50 / p95, 20 reqs, 0 erros) | 243ms / 347ms |
+
+Custo total da bateria de validação (7 instâncias reais): ≈ $0.09. Cleanup: 0 órfãos.
 
 ## Live run evidence (2026-06-10, gateway @ localhost:9012, maxCostUsd=0.10)
 
