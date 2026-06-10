@@ -812,6 +812,17 @@ export class VastClient extends AbstractGpuProvider {
     return gpuTypes.some(g => blackwell.some(b => g.includes(b)));
   }
 
+  /** Report an externally-observed deploy failure on a host (e.g. the
+   *  server-side SSH/health readiness poll timed out after the instance
+   *  reached "running"). Feeds both the soft unstable cooldown and the
+   *  escalating blacklist so the next offer search demotes/skips the host —
+   *  without this, back-to-back deploys re-pick the same dead host. */
+  reportHostDeployFailure(hostIp: string): void {
+    if (!hostIp) return;
+    this._markHostUnstable(hostIp);
+    this._recordHostFailure(hostIp);
+  }
+
   /** Mark a host as unstable (reclaimed an instance during loading). Persists to disk. */
   private _markHostUnstable(ip: string): void {
     this._unstableHosts.set(ip, Date.now());

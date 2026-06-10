@@ -100,6 +100,62 @@ function resolveDeployStateForReadRequest(req: IncomingMessage): {
   return { state: deployState };
 }
 
+interface GpuDeployHttpError extends Error {
+  status?: number;
+  type?: string;
+  code?: string;
+  providers?: string[];
+  billingUrl?: string;
+  retryableAfterFunding?: boolean;
+}
+
+function parseFundsProviders(message: string): string[] {
+  const match = message.match(/\(([^)]+)\)/);
+  if (!match) return [];
+  return match[1].split(',').map(provider => provider.trim()).filter(Boolean);
+}
+
+function billingUrlForProviders(providers: string[]): string | undefined {
+  if (providers.length !== 1) return undefined;
+  const provider = providers[0].toLowerCase();
+  if (provider.includes('vast')) return 'https://console.vast.ai/billing/';
+  if (provider.includes('runpod')) return 'https://www.runpod.io/console/billing';
+  if (provider.includes('tensordock')) return 'https://dashboard.tensordock.com/billing';
+  return undefined;
+}
+
+function toGpuDeployHttpError(err: unknown, fallbackStatus = 500): GpuDeployHttpError {
+  const raw = err as Partial<GpuDeployHttpError> | null | undefined;
+  const message = raw?.message || String(err);
+  const status = typeof raw?.status === 'number' ? raw.status : fallbackStatus;
+  const providers = Array.isArray(raw?.providers) ? raw.providers : parseFundsProviders(message);
+  const isFunds = status === 402 || /insufficient balance|balance too low|add funds|no credits|insufficient funds/i.test(message);
+  const httpErr = new Error(message) as GpuDeployHttpError;
+  httpErr.status = status;
+  httpErr.type = raw?.type || (isFunds ? 'funds' : status >= 500 ? 'server_error' : 'validation_error');
+  httpErr.code = raw?.code || (isFunds ? 'insufficient_funds' : undefined);
+  httpErr.providers = providers;
+  httpErr.billingUrl = raw?.billingUrl || (isFunds ? billingUrlForProviders(providers) : undefined);
+  httpErr.retryableAfterFunding = raw?.retryableAfterFunding ?? (isFunds ? true : undefined);
+  return httpErr;
+}
+
+function sendGpuDeployError(res: ServerResponse, err: unknown, fallbackStatus = 500): void {
+  const httpErr = toGpuDeployHttpError(err, fallbackStatus);
+  const status = httpErr.status ?? fallbackStatus;
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    error: {
+      message: httpErr.message,
+      type: httpErr.type || (status >= 500 ? 'server_error' : 'validation_error'),
+      ...(httpErr.code ? { code: httpErr.code } : {}),
+      ...(httpErr.providers && httpErr.providers.length > 0 ? { providers: httpErr.providers } : {}),
+      ...(httpErr.billingUrl ? { billingUrl: httpErr.billingUrl } : {}),
+      ...(httpErr.retryableAfterFunding !== undefined ? { retryableAfterFunding: httpErr.retryableAfterFunding } : {}),
+    },
+  }));
+}
+
 export { startStandbyMonitor };
 import { updateActivePipeline, runpod, vast, vastVm, tensordock, modal, hyperstack } from './providers';
 import {
@@ -395,6 +451,9 @@ interface DeployConfig {
   region: string;
   minVramGb: number;
   minInetDownMbps: number;
+  minRamGb: number;
+  minCuda: number;
+  minReliability: number;
   preferSsd: boolean;
   storageGb: number;
   hfToken: string;
@@ -473,6 +532,12 @@ interface DeployConfig {
    * within a single provider — no fallback to next provider on failure.
    */
   noTierCascade?: boolean;
+  /**
+   * Suppress retries within the same GPU provider. Fine-tune jobs default to
+   * true for cost control, but live reservation E2E can explicitly set false
+   * to retry bad hosts without switching provider.
+   */
+  suppressProviderRetries?: boolean;
 }
 
 /**
@@ -559,6 +624,12 @@ async function _validateDeployRequest(
   const effectiveStrictFastBoot = strictFastBoot ?? (searchMode === 'high_quality');
   const allowUnverified = body.allowUnverified === true ? true : undefined;
   const noTierCascade = body.noTierCascade === true ? true : undefined;
+  let suppressProviderRetries: boolean | undefined;
+  if (typeof body.suppressProviderRetries === 'boolean') {
+    suppressProviderRetries = body.suppressProviderRetries;
+  } else if (typeof body.suppressProviderRetries !== 'undefined') {
+    throw { status: 400, message: 'suppressProviderRetries must be a boolean' };
+  }
 
   // Resolve app-based GPU deploy config — use active app as defaults
   const config = await loadProviderConfig();
@@ -663,6 +734,18 @@ async function _validateDeployRequest(
   const minInetDownMbps = typeof minInetDownMbpsRaw === 'number' && minInetDownMbpsRaw >= 0
     ? Math.min(minInetDownMbpsRaw, 100_000)
     : getMinInetDownMbps();
+  const minRamGbRaw = body.minRamGb;
+  const minRamGb = typeof minRamGbRaw === 'number' && minRamGbRaw >= 0
+    ? Math.min(minRamGbRaw, 256)
+    : 16;
+  const minCudaRaw = body.minCuda;
+  const minCuda = typeof minCudaRaw === 'number' && minCudaRaw >= 0
+    ? minCudaRaw
+    : 12.4;
+  const minReliabilityRaw = body.minReliability;
+  const minReliability = typeof minReliabilityRaw === 'number' && minReliabilityRaw >= 0 && minReliabilityRaw <= 1
+    ? minReliabilityRaw
+    : 0.95;
   const storageGb = typeof body.storageGb === 'number' ? Math.min(Math.max(body.storageGb, 0), 1000) : 0;
   // HuggingFace token has FOUR canonical env-var spellings depending on
   // which library is reading it (transformers, diffusers, datasets, hub).
@@ -792,7 +875,7 @@ async function _validateDeployRequest(
     expectedCapabilities: effectiveExpectedCapabilities,
     requireDockerManifest,
     runSmokeTests,
-    gpuTypes, autoSelectGpu, region, minVramGb, minInetDownMbps, preferSsd,
+    gpuTypes, autoSelectGpu, region, minVramGb, minInetDownMbps, minRamGb, minCuda, minReliability, preferSsd,
     storageGb, hfToken, llmModel, interruptible, raceCount, requireDirectPort, deployEnv,
     dockerStartCmd, onstart, containerDiskInGb, volumeId,
     providerFilter,
@@ -816,6 +899,7 @@ async function _validateDeployRequest(
     searchMode,
     allowUnverified,
     noTierCascade,
+    suppressProviderRetries,
   };
 }
 
@@ -938,7 +1022,15 @@ async function _selectDeploymentTier(
   const nonModalConfigured = configuredProviders.length;
   if (nonModalConfigured > 0 && balanceExcluded.length >= nonModalConfigured && !modalApiKey) {
     const providerList = balanceExcluded.map(p => `${p}`).join(', ');
-    throw { status: 402, message: `Insufficient balance for all configured providers (${providerList}). Please add funds before deploying.` };
+    throw {
+      status: 402,
+      type: 'funds',
+      code: 'insufficient_funds',
+      providers: balanceExcluded,
+      billingUrl: billingUrlForProviders(balanceExcluded),
+      retryableAfterFunding: true,
+      message: `Insufficient funds for all configured GPU providers (${providerList}). Add credits before deploying. For Vast.ai, add credit at https://console.vast.ai/billing/ and retry once /v1/gpu/offers shows canDeploy=true.`,
+    };
   }
 
   // Build tier list from available API keys, optionally filtered to a specific provider
@@ -1217,7 +1309,7 @@ function _startDeployAndRespond(
   idempotencyHash?: string,
 ): void {
   const { raceCount } = config;
-  const { requireDirectPort, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, readinessProbe, bootTimeoutSec, strictFastBoot, searchMode, allowUnverified, noTierCascade, minInetDownMbps } = config;
+  const { requireDirectPort, region, storageGb, hfToken, deployEnv, interruptible, dockerStartCmd, onstart, containerDiskInGb, volumeId, templateHashId, forceSshTunnel, useSnapgpu, autoSnapshot, snapgpuPreloadApp, snapgpuBackend, maxCostUsd, canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep, label, readinessProbe, bootTimeoutSec, strictFastBoot, searchMode, allowUnverified, noTierCascade, minInetDownMbps, minRamGb, minCuda, minReliability, suppressProviderRetries } = config;
   const { tiers, gpuTypes, resolvedDockerImage, gpuPriorityByProvider } = tierResult;
 
   // Reset cancel flag FIRST so setDeployState won't be blocked by the guard
@@ -1251,23 +1343,27 @@ function _startDeployAndRespond(
     podId: '',
     readinessProbe,
   };
-  if (appSlot) {
-    setDeployState(initialDeployState, appSlot);
-  } else {
-    setDeployState(initialDeployState);
-    try {
+  try {
+    if (appSlot) {
+      setDeployState(initialDeployState, appSlot);
+    } else {
+      setDeployState(initialDeployState);
       deploymentSM.startDeploying();
-    } catch (smErr) {
-      const deployErr = categorizeDeployError(smErr, {
-        deployId: deployState.deployId,
-      });
-      errorSummary.record(deployErr, deployState.deployId);
-      log.error({ code: deployErr.code, category: deployErr.category }, `State machine error: ${deployErr.message}`);
-      setDeployLock(false);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: { message: 'Internal server error', type: 'server_error' } }));
-      return;
     }
+  } catch (smErr) {
+    // A synchronous throw here would otherwise leak the deploy lock forever
+    // (callers mark the lock as transferred before invoking this function).
+    const deployErr = categorizeDeployError(smErr, {
+      deployId: appSlot ? appSlot.state?.deployId : deployState.deployId,
+    });
+    errorSummary.record(deployErr, deployId);
+    log.error({ code: deployErr.code, category: deployErr.category }, `State machine error: ${deployErr.message}`);
+    if (appSlot) { appSlot.lock = false; appSlot.promise = null; }
+    else { setDeployLock(false); setDeployPromise(null); }
+    if (isFinetune) finetuneDeployActive = false;
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Internal server error', type: 'server_error' } }));
+    return;
   }
 
   const extra = {
@@ -1287,6 +1383,9 @@ function _startDeployAndRespond(
     ...(strictFastBoot ? { strictFastBoot } : {}),
     ...(allowUnverified ? { allowUnverified } : {}),
     ...(minInetDownMbps > 0 ? { minInetDownMbps } : {}),
+    ...(minRamGb > 0 ? { minRamGb } : {}),
+    ...(minCuda > 0 ? { minCuda } : {}),
+    ...(minReliability > 0 ? { minReliability } : {}),
     ...(typeof maxCostUsd === 'number' ? { maxPricePerHr: maxCostUsd } : {}),
     readinessProbe,
     ...(typeof bootTimeoutSec === 'number' ? { bootTimeoutSec } : {}),
@@ -1298,16 +1397,18 @@ function _startDeployAndRespond(
     ...(canary ? { canary, canaryInitialTraffic, canaryMaxErrorRate, canaryTrafficStep } : {}),
     // Cost-control flags propagated to deploy loop / cascade.
     raceCount,
-    ...(isFinetune ? { suppressProviderRetries: true } : {}),
+    ...((suppressProviderRetries ?? isFinetune) ? { suppressProviderRetries: true } : {}),
     // Direct SSH policy. Undefined lets Vast use direct or proxy SSH.
     ...(typeof requireDirectPort === 'boolean' ? { requireDirectPort } : {}),
     ...(noTierCascade ? { noTierCascade } : {}),
   };
 
+  // Resolve before creating the deploy promise: a throw between promise
+  // creation and handler attachment would orphan it with the lock held.
+  const activeDeployId = appSlot ? appSlot.state?.deployId : deployState.deployId;
   const deployFn = raceCount > 1
     ? startDeployRace(tiers, resolvedDockerImage, gpuTypes, extra, raceCount, appSlot)
     : startDeployWithTiers(tiers, resolvedDockerImage, gpuTypes, extra, gpuPriorityByProvider, appSlot);
-  const activeDeployId = appSlot ? appSlot.state.deployId : deployState.deployId;
   const handledFn = deployFn
     .catch(err => {
       const deployErr = categorizeDeployError(err, {
@@ -1333,6 +1434,7 @@ function _startDeployAndRespond(
 
   const modeLabel = raceCount > 1 ? `race×${raceCount}` : `${tiers.length} tier(s): ${tiers.map(t => t.label).join(' → ')}`;
   log.log(`[req=${requestId}] GPU deploy started: ${modeLabel}`);
+  try {
   res.writeHead(202, { 'Content-Type': 'application/json' });
   const responseBody: Record<string, unknown> = { deployId, status: 'creating', message: `Deploy started (${modeLabel})` };
   if (tierResult.balanceWarnings.length > 0) {
@@ -1363,6 +1465,11 @@ function _startDeployAndRespond(
   }
 
   res.end(JSON.stringify(responseBody));
+  } catch (resErr) {
+    // The deploy promise owns the lock now — a response-write failure must
+    // not unwind the deploy or leak/double-release the lock.
+    log.warn(`[req=${requestId}] deploy response write failed: ${(resErr as Error).message}`);
+  }
 }
 
 // ── Main deploy handler (orchestrator) ───────────────────────────────────────
@@ -1473,10 +1580,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
       let tierResult: TierSelectionResult;
       try { tierResult = await _selectDeploymentTier(config, requestId); }
       catch (err: unknown) {
-        const status = (err as any)?.status ?? 500;
-        const message = (err as any)?.message ?? String(err);
-        res.writeHead(status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
+        sendGpuDeployError(res, err, 500);
         return;
       }
       if (config.maxCostUsd !== undefined && tierResult.estimatedCostPerHr) {
@@ -1595,10 +1699,7 @@ export async function handleGpuDeploy(req: IncomingMessage, res: ServerResponse)
     try {
       tierResult = await _selectDeploymentTier(config, requestId);
     } catch (err: unknown) {
-      const status = (err as any)?.status ?? 500;
-      const message = (err as any)?.message ?? String(err);
-      res.writeHead(status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: { message, type: 'server_error' } }));
+      sendGpuDeployError(res, err, 500);
       return;
     }
 

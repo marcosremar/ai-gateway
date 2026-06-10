@@ -70,10 +70,20 @@ export interface DeployExtra {
   canaryTrafficStep?: number;
   /** Human-readable instance label/name propagated to provider consoles. */
   label?: string;
+  /** Minimum host RAM in GB — Vast-only offer search filter. */
+  minRamGb?: number;
+  /** Minimum CUDA version — Vast-only offer search filter. */
+  minCuda?: number;
+  /** Minimum host reliability score (0-1) — Vast-only offer search filter. */
+  minReliability?: number;
+  /** Minimum host download bandwidth in Mbps — Vast-only offer search filter. */
+  minInetDownMbps?: number;
   /** Use only high-confidence hosts/offers for fast-boot sensitive deploys. */
   strictFastBoot?: boolean;
   /** Vast.ai offer-search profile (`high_quality`/`full`) for request-level mapping. */
   searchMode?: 'high_quality' | 'full';
+  /** Per-deploy slot key for parallel deploys. */
+  parallelSlot?: string;
   /** Vast.ai opt-in for unverified/deverified offers. Defaults to verified-only. */
   allowUnverified?: boolean;
   /** Vast.ai hourly price ceiling forwarded to provider offer search. */
@@ -153,7 +163,7 @@ export async function startDeployLoop(
             gpuType: existing.gpuType || '', step: 'waiting_health',
             message: `TensorDock instance resumed, waiting for /health...`,
           });
-          deploymentSM.startBooting(existing.instanceId);
+          if (!slot) deploymentSM.startBooting(existing.instanceId);
           const { result: res1, pullTimeS: pt1 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests, slot);
           if (res1 === 'ready') {
             const durationMs = Date.now() - sd.startedAt;
@@ -161,7 +171,7 @@ export async function startDeployLoop(
             setLastRequestTime(Date.now());
             sds({ status: 'ready', message: `GPU ready (${label}): ${sd.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
-            deploymentSM.markReady(sd.podId, sd.endpoint, sd.gpuType, sd.costPerHr);
+            if (!slot) deploymentSM.markReady(sd.podId, sd.endpoint, sd.gpuType, sd.costPerHr);
             log.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pt1 ?? '?'}s, ${label})`);
             if (pt1 != null) {
               const { recordPullTime, deriveHostKey: dk } = await import('../src/gpu-providers/pull-time-estimator');
@@ -181,7 +191,9 @@ export async function startDeployLoop(
             // resumed pod running until orphan sweep.
             try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
             catch (e) { log.warn(`[gpu] Cleanup of cancelled-resume failed: ${e instanceof Error ? e.message : e}`); }
-            sds({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
+            sds({ status: 'error', message: 'Deploy cancelled' });
+            if (!slot) deploymentSM.markError('Deploy cancelled');
+            return;
           }
           log.log(`[gpu] Resumed TensorDock instance failed health check — terminating before creating new`);
           // Health-fail path also leaked the resumed instance — kill it now,
@@ -195,7 +207,7 @@ export async function startDeployLoop(
             gpuType: existing.gpuType || '', step: 'waiting_health',
             message: `TensorDock instance already running, checking health...`,
           });
-          deploymentSM.startBooting(existing.instanceId);
+          if (!slot) deploymentSM.startBooting(existing.instanceId);
           const { result: res2, pullTimeS: pt2 } = await pollHealthUntilReady(providerClient, providerName, apiKey, existing.instanceId, existing.endpoint, startedAt, dockerImage, existing.providerMeta as Record<string, unknown>, extra.expectedApiPaths, extra.expectedCapabilities, extra.requireDockerManifest, extra.runSmokeTests, slot);
           if (res2 === 'ready') {
             const durationMs = Date.now() - sd.startedAt;
@@ -203,7 +215,7 @@ export async function startDeployLoop(
             setLastRequestTime(Date.now());
             sds({ status: 'ready', message: `GPU ready (${label}): ${sd.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
-            deploymentSM.markReady(sd.podId, sd.endpoint, sd.gpuType, sd.costPerHr);
+            if (!slot) deploymentSM.markReady(sd.podId, sd.endpoint, sd.gpuType, sd.costPerHr);
             log.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pt2 ?? '?'}s, ${label})`);
             if (pt2 != null) {
               const { recordPullTime, deriveHostKey: dk } = await import('../src/gpu-providers/pull-time-estimator');
@@ -219,7 +231,9 @@ export async function startDeployLoop(
           if (res2 === 'cancelled') {
             try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
             catch (e) { log.warn(`[gpu] Cleanup of cancelled-running failed: ${e instanceof Error ? e.message : e}`); }
-            sds({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
+            sds({ status: 'error', message: 'Deploy cancelled' });
+            if (!slot) deploymentSM.markError('Deploy cancelled');
+            return;
           }
           log.log(`[gpu] Running TensorDock instance not healthy — terminating before creating new`);
           try { await providerClient.deleteInstance(existing.instanceId, { apiKey }); }
@@ -238,6 +252,9 @@ export async function startDeployLoop(
   // after pod and bleeds money (the cost-cascade incident). Cap it.
   const maxWasteUsd = Math.max(0.5, parseFloat(process.env.DEPLOY_MAX_WASTE_USD ?? '3') || 3);
   let accumulatedWasteUsd = 0;
+  // Carried into the exhausted-retries message so operators see the real
+  // cause (ssh_timeout/crashed/...) instead of a bare "max retries exceeded".
+  let lastFailureReason = '';
   const maxDeployRetries = extra.suppressProviderRetries ? 0 : MAX_DEPLOY_RETRIES;
 
   for (let attempt = 0; attempt <= maxDeployRetries; attempt++) {
@@ -356,7 +373,7 @@ export async function startDeployLoop(
         costPerHr: instanceCostPerHr,
         providerMeta: { ...instance.providerMeta, gpuType: instance.gpuType || '' },
       });
-      deploymentSM.startBooting(instance.instanceId);
+      if (!slot) deploymentSM.startBooting(instance.instanceId);
 
       // ── Snapshot restore path (Phase B2) ──────────────────────────────
       // Only vast-vm / hyperstack are snapshot-eligible; everything else
@@ -392,7 +409,7 @@ export async function startDeployLoop(
                       alertLevel: 'info',
                     });
                     broadcastProviderStatus('booting', 'cloud', `GPU deployed via snapshot (${restore.durationMs}ms)`);
-                    deploymentSM.markReady(sd.podId, endpoint, sd.gpuType, sd.costPerHr);
+                    if (!slot) deploymentSM.markReady(sd.podId, endpoint, sd.gpuType, sd.costPerHr);
                     log.log(`[gpu] Snapshot restore succeeded in ${restore.durationMs}ms (${label})`);
                     startGpuMonitoring();
                     startBackgroundWarmthMonitor(endpoint);
@@ -421,7 +438,7 @@ export async function startDeployLoop(
         setLastRequestTime(Date.now());
         sds({ status: 'ready', message: `GPU ready (${label}): ${sd.endpoint}`, step: 'ready', stepDetail: '', deployDurationMs: durationMs, alert: '', alertLevel: 'info' });
             broadcastProviderStatus('booting', 'cloud', `GPU deployed — warming up models`);
-        deploymentSM.markReady(sd.podId, sd.endpoint, sd.gpuType, sd.costPerHr);
+        if (!slot) deploymentSM.markReady(sd.podId, sd.endpoint, sd.gpuType, sd.costPerHr);
         log.log(`[gpu] Deploy completed in ${(durationMs / 1000).toFixed(1)}s (pull=${pullTimeS ?? '?'}s, ${label})`);
         // Record pull time for adaptive timeout learning
         if (pullTimeS != null) {
@@ -450,7 +467,18 @@ export async function startDeployLoop(
         } catch (e) {
           log.warn(`[gpu] Failed to terminate cancelled instance ${instance.instanceId}: ${e instanceof Error ? e.message : e}`);
         }
-        sds({ status: 'error', message: 'Deploy cancelled' }); deploymentSM.markError('Deploy cancelled'); return;
+        sds({ status: 'error', message: 'Deploy cancelled' });
+        if (!slot) deploymentSM.markError('Deploy cancelled');
+        return;
+      }
+      const providerRetryAvailable = result !== 'app_error' && attempt < maxDeployRetries;
+      if (providerRetryAvailable) {
+        sds({
+          status: 'creating',
+          step: 'retrying_provider',
+          message: `${label} host failed readiness (${result}); cleaning up before retry ${attempt + 2}/${maxDeployRetries + 1}`,
+          podId: instance.instanceId,
+        });
       }
       // instance crashed, timed out, or app reported error — fetch logs
       // before cleanup. App-error is a special case: the container itself
@@ -458,6 +486,15 @@ export async function startDeployLoop(
       // load. The remote logs (with full traceback) are GOLD here, and
       // recurringly retrying the same image won't help — fail the whole
       // deploy after this one attempt, no retries.
+      lastFailureReason = `${result} on ${instance.instanceId} (${sd.gpuType || gpuTypes[0] || '?'})`;
+      // Host-attributable readiness failure (ssh/boot timeout, crash): feed
+      // the provider's host reputation so the next offer search skips this
+      // machine. app_error is image-attributable — don't punish the host.
+      const failedHostIp = (instance.providerMeta?.hostIp as string) || '';
+      if (result !== 'app_error' && failedHostIp
+        && typeof (providerClient as { reportHostDeployFailure?: (ip: string) => void }).reportHostDeployFailure === 'function') {
+        (providerClient as unknown as { reportHostDeployFailure: (ip: string) => void }).reportHostDeployFailure(failedHostIp);
+      }
       log.log(`[gpu] Instance ${instance.instanceId} failed (${result}), fetching remote logs before cleanup...`);
       let remoteLogsCaptured = '';
       try {
@@ -495,7 +532,7 @@ export async function startDeployLoop(
         const errMsg = `Failed to clean up crashed instance ${instance.instanceId} on ${providerName}: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`;
         log.error(`[gpu] ${errMsg}`);
         sds({ status: 'error', message: errMsg, podId: instance.instanceId });
-        deploymentSM.markError(errMsg);
+        if (!slot) deploymentSM.markError(errMsg);
         return; // Stop deploy — orphan sweep will attempt cleanup later
       }
 
@@ -508,7 +545,7 @@ export async function startDeployLoop(
         const errMsg = `App load failed (non-retryable): ${appErr?.message ?? 'unknown'}`;
         log.error(`[gpu] ${errMsg}`);
         sds({ status: 'error', message: errMsg, step: 'app_error' });
-        deploymentSM.markError(errMsg);
+        if (!slot) deploymentSM.markError(errMsg);
         return;
       }
 
@@ -520,7 +557,7 @@ export async function startDeployLoop(
         const errMsg = `${label} deploy aborted: accumulated boot-time waste ≈$${accumulatedWasteUsd.toFixed(2)} ≥ cap $${maxWasteUsd.toFixed(2)} after ${attempt + 1} attempt(s)`;
         log.error(`[gpu] ${errMsg}`);
         sds({ status: 'error', message: errMsg, step: 'waste_cap_exceeded' });
-        deploymentSM.markError(errMsg);
+        if (!slot) deploymentSM.markError(errMsg);
         return;
       }
 
@@ -540,6 +577,7 @@ export async function startDeployLoop(
         log.warn({ action: remediation.action, suggestions: remediation.suggestions }, 'Auto-remediation attempted');
       }
       log.error({ code: deployErr.code, category: deployErr.category }, `${label} create attempt ${attempt + 1}/${maxDeployRetries + 1} failed: ${deployErr.message}`);
+      lastFailureReason = deployErr.message;
       sds({ message: `${label} create failed (attempt ${attempt + 1}): ${deployErr.message}` });
 
       // Non-retryable errors — fail immediately without wasting retries
@@ -564,13 +602,13 @@ export async function startDeployLoop(
         }
         log.error({ code: deployErr.code, category: deployErr.category }, `${label} deploy failed (non_retryable=${nonRetryable}, attempt=${attempt + 1}): ${deployErr.message}`);
         sds({ status: 'error', message: errMsg });
-        deploymentSM.markError(errMsg);
+        if (!slot) deploymentSM.markError(errMsg);
         return;
       }
     }
   }
 
-  const exhaustedMsg = `${label} deploy failed: max retries exceeded`;
+  const exhaustedMsg = `${label} deploy failed: max retries exceeded${lastFailureReason ? ` — last failure: ${lastFailureReason}` : ''}`;
   sds({ status: 'error', message: exhaustedMsg });
-  deploymentSM.markError(exhaustedMsg);
+  if (!slot) deploymentSM.markError(exhaustedMsg);
 }

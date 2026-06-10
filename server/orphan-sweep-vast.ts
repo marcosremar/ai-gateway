@@ -88,8 +88,10 @@ const VAST_BASE = 'https://console.vast.ai/api/v0';
 /** Direct vast.ai REST list — bypasses the gateway's tracked-state cache so
  *  pods leaked from another session are visible. */
 export async function listVastInstancesDirect(apiKey: string, fetchImpl: typeof fetch = fetch): Promise<VastInstanceLite[]> {
-  const url = `${VAST_BASE}/instances/?api_key=${encodeURIComponent(apiKey)}`;
-  const res = await fetchImpl(url);
+  const res = await fetchImpl(`${VAST_BASE}/instances/`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(15_000),
+  });
   if (!res.ok) throw new Error(`vast list HTTP ${res.status}`);
   const body = (await res.json()) as { instances?: unknown[] };
   return (body.instances ?? [])
@@ -105,7 +107,10 @@ export async function listVastInstancesDirect(apiKey: string, fetchImpl: typeof 
 
 /** Direct vast.ai REST terminate. */
 export async function terminateVastInstanceDirect(id: number, apiKey: string, fetchImpl: typeof fetch = fetch): Promise<void> {
-  const url = `${VAST_BASE}/instances/${id}/?api_key=${encodeURIComponent(apiKey)}`;
-  const res = await fetchImpl(url, { method: 'DELETE' });
+  const res = await fetchImpl(`${VAST_BASE}/instances/${id}/`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(15_000),
+  });
   if (!res.ok) throw new Error(`vast terminate ${id} HTTP ${res.status}`);
 }

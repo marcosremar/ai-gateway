@@ -110,6 +110,14 @@ export async function resumeOrDeploy(opts: {
     // via RESUME_TIMEOUT_MS env var if your image is even slower.
     const RESUME_TIMEOUT_MS = Number.parseInt(process.env.RESUME_TIMEOUT_MS ?? '300000', 10);
     const RESUME_POLL_INTERVAL_MS = 3_000;
+    // Vast docs: after stop/start the instance is bound to specific GPU IDs;
+    // if they were reassigned it sits in "scheduling" indefinitely and >30s
+    // already means the GPU is likely gone. Abort early to the fresh-deploy
+    // fallback instead of burning the full health timeout.
+    const SCHEDULING_ABORT_MS = Number.parseInt(process.env.RESUME_SCHEDULING_ABORT_MS ?? '60000', 10);
+    const STATUS_CHECK_INTERVAL_MS = 15_000;
+    let schedulingSince = 0;
+    let lastStatusCheckAt = 0;
     let healthy = false;
     while (Date.now() - resumeStartedAt < RESUME_TIMEOUT_MS) {
       const probe = await probeGpuHealth(endpoint, true);
@@ -117,8 +125,33 @@ export async function resumeOrDeploy(opts: {
         healthy = true;
         break;
       }
-      const elapsedS = Math.round((Date.now() - resumeStartedAt) / 1000);
-      setDeployState({ message: `Pod resumed — waiting for health (${elapsedS}s)` });
+      if (provider === 'vast' && Date.now() - lastStatusCheckAt >= STATUS_CHECK_INTERVAL_MS) {
+        lastStatusCheckAt = Date.now();
+        let detail: { actualStatus?: string; intendedStatus?: string; statusMsg?: string; statusMsgShort?: string } | null = null;
+        try {
+          detail = await (client as any).getInstanceStatusDetail?.(podId, credentials) ?? null;
+        } catch { /* best-effort: status probe failure must not abort the resume */ }
+        if (detail) {
+          const msg = `${detail.statusMsg ?? ''} ${detail.statusMsgShort ?? ''}`.toLowerCase();
+          const actual = detail.actualStatus ?? '';
+          const waitingForGpu = msg.includes('schedul')
+            || (detail.intendedStatus === 'running' && (actual === 'created' || actual === 'exited' || actual === ''));
+          if (waitingForGpu) {
+            if (!schedulingSince) schedulingSince = Date.now();
+            const stuckS = Math.round((Date.now() - schedulingSince) / 1000);
+            if (Date.now() - schedulingSince >= SCHEDULING_ABORT_MS) {
+              throw new Error(`Vast instance stuck scheduling for ${stuckS}s — GPU likely reassigned to another renter`);
+            }
+            setDeployState({ message: `Pod resumed — waiting for GPU slot (scheduling ${stuckS}s)` });
+          } else {
+            schedulingSince = 0;
+          }
+        }
+      }
+      if (!schedulingSince) {
+        const elapsedS = Math.round((Date.now() - resumeStartedAt) / 1000);
+        setDeployState({ message: `Pod resumed — waiting for health (${elapsedS}s)` });
+      }
       await new Promise(r => setTimeout(r, RESUME_POLL_INTERVAL_MS));
     }
 

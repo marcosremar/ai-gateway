@@ -653,11 +653,15 @@ export class DeployError extends Error {
     const meta = ERROR_CODE_METADATA[code];
     let message = meta.message;
 
-    // Substitute template variables: {key} or {KEY}
+    // Substitute template variables: {key} or {KEY}; skip undefined/null so
+    // messages never render "after undefinedms"
     for (const [key, value] of Object.entries(context)) {
+      if (value === undefined || value === null) continue;
       message = message.replace(`{${key}}`, String(value));
       message = message.replace(`{${key.toUpperCase()}}`, String(value));
     }
+    // Placeholders with no value provided degrade to '?' instead of leaking '{key}'
+    message = message.replace(/\{[a-zA-Z0-9_]+\}/g, '?');
 
     super(message);
     this.name = 'DeployError';

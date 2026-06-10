@@ -413,9 +413,9 @@ export const ERROR_CODE_METADATA: Record<ErrorCode, ErrorCodeMetadata> = {
     realWorldPattern: 'Vast.ai template list/create API failure',
   },
   PRV_NO_GPUS: {
-    message: 'No GPUs available in region: {region}',
+    message: 'No GPUs matched the search filters (0 offers): {detail}',
     retryable: false, httpStatus: 404, severity: 'warn',
-    realWorldPattern: '0 offers matched after filters',
+    realWorldPattern: '0 offers matched after filters (disk/direct-port/reliability/recently-used)',
   },
   PRV_API_KEY_EXPIRED: {
     message: 'API key expired or revoked',
@@ -653,11 +653,15 @@ export class DeployError extends Error {
     const meta = ERROR_CODE_METADATA[code];
     let message = meta.message;
 
-    // Substitute template variables: {key} or {KEY}
+    // Substitute template variables: {key} or {KEY}; skip undefined/null so
+    // messages never render "after undefinedms"
     for (const [key, value] of Object.entries(context)) {
+      if (value === undefined || value === null) continue;
       message = message.replace(`{${key}}`, String(value));
       message = message.replace(`{${key.toUpperCase()}}`, String(value));
     }
+    // Placeholders with no value provided degrade to '?' instead of leaking '{key}'
+    message = message.replace(/\{[a-zA-Z0-9_]+\}/g, '?');
 
     super(message);
     this.name = 'DeployError';
@@ -770,7 +774,9 @@ export function categorizeDeployError(err: unknown, context: DeployErrorContext 
     return new DeployError('PROVIDER', 'PRV_AUTH_FAILED', { ...context }, cause);
   }
   if (lower.includes('no offers') || lower.includes('no gpus') || lower.includes('0 offer')) {
-    return new DeployError('PROVIDER', 'PRV_NO_GPUS', { ...context, region: extractRegion(message) }, cause);
+    // Carry the REAL filter detail (gpu/disk/strict flags) instead of fabricating
+    // a "region: unknown" — the cause is filters collapsing offers, not a region.
+    return new DeployError('PROVIDER', 'PRV_NO_GPUS', { ...context, detail: message }, cause);
   }
   if (lower.includes('offer') && (lower.includes('unavailable') || lower.includes('disappear') || lower.includes('not found'))) {
     return new DeployError('PROVIDER', 'PRV_OFFER_UNAVAILABLE', { ...context, offer: extractOffer(message) }, cause);
