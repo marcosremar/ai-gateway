@@ -28,6 +28,7 @@ export type { GuardrailStats } from './stats';
 
 export {
   validateGuardrailEngineConfig,
+  coerceGuardrailAction,
   GuardrailEngineConfigSchema,
   GuardrailActionSchema,
 } from './config-validation';

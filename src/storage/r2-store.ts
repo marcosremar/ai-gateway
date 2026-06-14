@@ -24,7 +24,7 @@
  * const url = r2.presign('hello.txt', { expiresIn: 600 });
  */
 
-import type { ObjectStore } from './types';
+import type { ObjectStore, PutOptions } from './types';
 import { createS3Store } from './s3-store';
 
 export interface R2StoreConfig {
@@ -42,6 +42,13 @@ export interface R2StoreConfig {
    *   https://<accountId>.eu.r2.cloudflarestorage.com
    */
   endpoint?: string;
+  /**
+   * Default PUT options for every upload (#754). For CDN-served buckets set
+   * `{ acl: 'public-read', cacheControl: 'public, max-age=31536000, immutable' }`
+   * so repeat reads hit Cloudflare's edge instead of paying origin egress.
+   * Per-call options to `put` override these.
+   */
+  defaultPut?: PutOptions;
 }
 
 export function createR2Store(config: R2StoreConfig): ObjectStore {
@@ -51,5 +58,6 @@ export function createR2Store(config: R2StoreConfig): ObjectStore {
     accessKeyId: config.accessKeyId,
     secretAccessKey: config.secretAccessKey,
     region: 'auto',
+    ...(config.defaultPut ? { defaultPut: config.defaultPut } : {}),
   });
 }

@@ -134,6 +134,29 @@ export function isAllowedModel(model: string, allowlist: readonly string[]): boo
 }
 
 /**
+ * Clamp a number into `[min, max]` (#664 helper).
+ *
+ * `validateNumber` REJECTS an out-of-range value (returns null). For cost-cap
+ * fields like `max_tokens` the safer default is often to CLAMP to the ceiling
+ * rather than fail the whole request: `max_tokens: 1e9` becomes the configured
+ * max instead of a 400. This is the localized primitive a caller can apply at
+ * the edge without changing any request schema. Non-finite input returns the
+ * `min` (or 0 when no min) so it can never propagate `NaN`/`Infinity` downstream.
+ */
+export function clampNumber(
+  value: number,
+  options: { min?: number; max?: number } = {},
+): number {
+  const min = options.min;
+  const max = options.max;
+  if (!Number.isFinite(value)) return min ?? 0;
+  let out = value;
+  if (min != null && out < min) out = min;
+  if (max != null && out > max) out = max;
+  return out;
+}
+
+/**
  * Validate number is within range.
  */
 export function validateNumber(
@@ -169,6 +192,29 @@ export const Schemas = {
   // Array validators
   NonEmptyArray: (itemSchema: z.ZodType) => z.array(itemSchema).min(1),
   MaxLength: (itemSchema: z.ZodType, max: number) => z.array(itemSchema).max(max),
+
+  /**
+   * A string with a hard upper length bound (#662 helper). Unbounded
+   * `z.string()` on chat `content` lets a caller push megabytes per message →
+   * uncontrolled token/$ spend and memory. This is the reusable bounded variant
+   * a schema can drop in (`Schemas.BoundedString(100_000)`).
+   */
+  BoundedString: (max: number, opts: { min?: number } = {}) => {
+    let s = z.string().max(max);
+    if (opts.min != null) s = s.min(opts.min);
+    return s;
+  },
+
+  /**
+   * An array with a hard element-count cap (#663 helper). An unbounded
+   * `messages` array (or any list flowing into context) explodes cost; this
+   * caps it (`Schemas.BoundedArray(item, 200)`).
+   */
+  BoundedArray: (itemSchema: z.ZodType, max: number, opts: { min?: number } = {}) => {
+    let a = z.array(itemSchema).max(max);
+    if (opts.min != null) a = a.min(opts.min);
+    return a;
+  },
 
   // Common request schemas
   Pagination: z.object({

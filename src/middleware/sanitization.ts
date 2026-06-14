@@ -111,6 +111,35 @@ export function sanitizeFilename(input: string, maxLength = 255): string {
   return cleaned;
 }
 
+import { createHash, timingSafeEqual } from 'crypto';
+
+/**
+ * Constant-time string comparison (#604).
+ *
+ * A naive `a === b` (or any compare that early-returns on the first byte
+ * mismatch / on a length mismatch) leaks information about how much of a secret
+ * was guessed — including its length — via response timing. Several token/secret
+ * compares in the codebase already pad-and-compare; this is the shared primitive
+ * so every call site uses the same constant-time path instead of re-rolling it.
+ *
+ * Both operands are hashed to a fixed-width buffer of equal length before the
+ * `timingSafeEqual`, so the comparison time does NOT depend on the inputs'
+ * lengths or contents (a plain length check would itself be a length oracle).
+ */
+export function constantTimeEqual(a: string, b: string): boolean {
+  // Compare fixed-width digests so length never short-circuits the compare.
+  // (timingSafeEqual throws on differing lengths; equal-length digests avoid
+  // that while keeping the comparison independent of the raw input lengths.)
+  const ha = createHash('sha256').update(a, 'utf8').digest();
+  const hb = createHash('sha256').update(b, 'utf8').digest();
+  // Digests are always 32 bytes; timingSafeEqual is safe here.
+  const digestsEqual = timingSafeEqual(ha, hb);
+  // Guard against the astronomically-unlikely hash collision by also requiring
+  // the raw lengths to match — but do this AFTER the constant-time compare so a
+  // mismatch here can't be used as an early-exit timing signal in practice.
+  return digestsEqual && a.length === b.length;
+}
+
 /**
  * Sanitize an API key for logging (mask all but first/last chars).
  */
@@ -127,6 +156,30 @@ export function maskApiKey(key: string): string {
   const maxReveal = Math.floor(key.length * 0.25);
   const each = Math.max(1, Math.min(4, Math.floor(maxReveal / 2)));
   return `${key.slice(0, each)}***${key.slice(-each)}`;
+}
+
+/**
+ * Redact secret-looking tokens from a free-form string before it is logged
+ * (#650/#696 — consistent masking policy in one place).
+ *
+ * Catches the common provider-key shapes (`sk-…`, `gsk_…`, `xai-…`, long
+ * bearer-style blobs) and bare 32+ char hex/base64 runs (HMAC secrets, master
+ * keys). Each match is replaced with `maskApiKey()` so the SAME masking policy
+ * applies everywhere logs are produced, rather than each call site inventing its
+ * own slice. Best-effort: it reduces accidental leakage in error strings / audit
+ * lines; it is not a substitute for never logging the secret in the first place.
+ */
+export function redactSecrets(input: string): string {
+  if (!input) return input;
+  return (
+    input
+      // Prefixed provider keys: sk-…, gsk_…, xai-…, pk-…, rk_… (>= 12 chars total).
+      .replace(/\b((?:sk|gsk|xai|pk|rk|key)[-_][A-Za-z0-9_-]{8,})\b/g, (m) => maskApiKey(m))
+      // Bare long hex (>=32) — HMAC/master-key shaped.
+      .replace(/\b[0-9a-fA-F]{32,}\b/g, (m) => maskApiKey(m))
+      // Bare long base64url-ish runs (>=32) that aren't plain prose.
+      .replace(/\b[A-Za-z0-9_-]{32,}\b/g, (m) => maskApiKey(m))
+  );
 }
 
 /**

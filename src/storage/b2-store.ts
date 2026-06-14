@@ -21,7 +21,7 @@
  * });
  */
 
-import type { ObjectStore } from './types';
+import type { ObjectStore, PutOptions } from './types';
 import { createS3Store } from './s3-store';
 
 export interface B2StoreConfig {
@@ -35,6 +35,13 @@ export interface B2StoreConfig {
   applicationKey: string;
   /** Override endpoint URL. Default builds from region. */
   endpoint?: string;
+  /**
+   * Default PUT options for every upload (#754). Set a long `cacheControl`
+   * (and `acl: 'public-read'` for public buckets) so CDN-served assets are
+   * cached at the edge and don't re-hit origin on every read. Per-call options
+   * to `put` override these.
+   */
+  defaultPut?: PutOptions;
 }
 
 export function createB2Store(config: B2StoreConfig): ObjectStore {
@@ -44,5 +51,6 @@ export function createB2Store(config: B2StoreConfig): ObjectStore {
     accessKeyId: config.keyId,
     secretAccessKey: config.applicationKey,
     region: config.region,
+    ...(config.defaultPut ? { defaultPut: config.defaultPut } : {}),
   });
 }

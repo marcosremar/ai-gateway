@@ -24,6 +24,37 @@ function getSecret(): string {
   return secret;
 }
 
+/**
+ * Optional PREVIOUS signing secret, used only on the VERIFY path during a
+ * secret rotation (#619).
+ *
+ * Rotating `GPU_ACCESS_SECRET` instantly invalidates every token already issued
+ * under the old secret — any in-flight request signed seconds before the swap is
+ * rejected. Supplying `GPU_ACCESS_SECRET_PREVIOUS` lets `verifyGpuToken` accept
+ * tokens signed by EITHER the current or the previous secret for the overlap
+ * window, then the operator drops the previous value once the 60s TTL has fully
+ * cycled.
+ *
+ * IMPORTANT: this changes nothing on the wire — `signGpuToken` always signs with
+ * the CURRENT secret, and the token format is byte-identical. Only verification
+ * gains a second acceptable key. Returns null when unset or too short to be a
+ * real secret (a short/garbage value is ignored rather than weakening verify).
+ */
+function getPreviousSecret(): string | null {
+  const secret = process.env.GPU_ACCESS_SECRET_PREVIOUS;
+  if (!secret || secret.length < 32) return null;
+  return secret;
+}
+
+/** Constant-time HMAC comparison against one secret. */
+function sigMatches(payloadB64: string, sig: string, secret: string): boolean {
+  const expectedSig = createHmac('sha256', secret).update(payloadB64).digest('base64url');
+  const sigBuf = Buffer.from(sig);
+  const expectedBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expectedBuf.length) return false;
+  return timingSafeEqual(sigBuf, expectedBuf);
+}
+
 export function signGpuToken(userId: string): string {
   const now = Math.floor(Date.now() / 1000);
   const payload: GpuTokenPayload = { uid: userId, iat: now, exp: now + TTL_SECONDS };
@@ -36,10 +67,13 @@ export function verifyGpuToken(token: string): GpuTokenPayload {
   const [payloadB64, sig] = token.split('.');
   if (!payloadB64 || !sig) throw new Error('Invalid token format');
 
-  const expectedSig = createHmac('sha256', getSecret()).update(payloadB64).digest('base64url');
-  const sigBuf = Buffer.from(sig);
-  const expectedBuf = Buffer.from(expectedSig);
-  if (sigBuf.length !== expectedBuf.length || !timingSafeEqual(sigBuf, expectedBuf)) {
+  // Accept the CURRENT secret, or (during rotation) the PREVIOUS one. Both
+  // comparisons run constant-time; we always evaluate the previous-secret branch
+  // when it is configured so acceptance timing doesn't reveal which key matched.
+  const previous = getPreviousSecret();
+  const matchesCurrent = sigMatches(payloadB64, sig, getSecret());
+  const matchesPrevious = previous !== null && sigMatches(payloadB64, sig, previous);
+  if (!matchesCurrent && !matchesPrevious) {
     throw new Error('Invalid signature');
   }
 

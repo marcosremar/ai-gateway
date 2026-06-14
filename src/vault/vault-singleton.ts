@@ -57,6 +57,22 @@ export function clearVaultMasterKeyFromEnv(): boolean {
   return true;
 }
 
+/**
+ * Initialize the vault from env AND immediately scrub `VAULT_MASTER_KEY` from
+ * `process.env` (#647 convenience).
+ *
+ * `initVaultFromEnv()` followed by `clearVaultMasterKeyFromEnv()` is the correct
+ * sequence, but the scrub is easy to forget — and forgetting leaves the raw key
+ * in `/proc/self/environ` / child processes for the whole process lifetime. This
+ * one-call helper closes that window by default. Returns the vault (or null if
+ * env wasn't configured). The scrub only happens on a successful init.
+ */
+export function initAndScrubVaultFromEnv(): Vault | null {
+  const vault = initVaultFromEnv();
+  if (vault) clearVaultMasterKeyFromEnv();
+  return vault;
+}
+
 export function getVault(): Vault | null {
   return vaultInstance;
 }

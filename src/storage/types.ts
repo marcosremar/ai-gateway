@@ -25,6 +25,12 @@ export interface PutOptions {
   contentEncoding?: string;
   /** ACL — usually omit (private). Use "public-read" for CDN-served assets. */
   acl?: 'private' | 'public-read';
+  /**
+   * Cache-Control header (#754). CDN-served assets benefit from a long max-age
+   * so repeat reads hit the edge instead of paying origin egress. The R2/B2
+   * convenience constructors can set a default that per-call options override.
+   */
+  cacheControl?: string;
 }
 
 export interface PresignOptions {
@@ -95,8 +101,22 @@ export interface ObjectStore {
   /**
    * Stream an object's bytes. Use this for large files (model weights,
    * recordings) to avoid buffering the whole thing in memory.
+   *
+   * NOTE: this returns synchronously and a missing key only errors when the
+   * stream is consumed (unlike `head`/`get`). Use {@link getStreamChecked} when
+   * you need a consistent up-front 404 signal.
    */
   getStream(key: string): ReadableStream<Uint8Array>;
+
+  /**
+   * Like {@link getStream} but pre-checks existence (#748): returns null when
+   * the object is missing (404) and throws only on real errors, so absence is
+   * signalled consistently with `head`/`get` instead of lazily at consume time.
+   *
+   * Optional so lightweight/partial implementations need not provide it; the S3
+   * adapter always does.
+   */
+  getStreamChecked?(key: string): Promise<ReadableStream<Uint8Array> | null>;
 
   /**
    * Get metadata for an object without fetching its contents.

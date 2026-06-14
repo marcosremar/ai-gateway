@@ -59,3 +59,19 @@ export function validateGuardrailEngineConfig(input: unknown): GuardrailConfigVa
     errors: parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`),
   };
 }
+
+/**
+ * Coerce an untrusted `action` value to a valid `GuardrailAction`, falling back
+ * to a SAFE default (#685 companion).
+ *
+ * The engine reads `this.config.action ?? 'block'` and only `=== 'block'` blocks.
+ * A typo like `"adit"` (for `"audit"`) is neither — it silently STOPS blocking.
+ * Use this to normalize an action from config: an unknown/typo'd value returns
+ * the fallback (default `'block'`, fail-closed) instead of degrading to allow.
+ */
+export function coerceGuardrailAction(
+  value: unknown,
+  fallback: 'block' | 'audit' = 'block',
+): 'block' | 'audit' {
+  return value === 'block' || value === 'audit' ? value : fallback;
+}

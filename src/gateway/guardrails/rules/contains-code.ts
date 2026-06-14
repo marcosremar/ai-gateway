@@ -40,15 +40,25 @@ const PATTERNS: Record<string, RegExp[]> = {
  */
 const MAX_CODE_INPUT_CHARS = 100_000;
 
+/** Minimum pattern hits within a single language to call it "code". */
+const MIN_PATTERN_HITS = 2;
+
 function detectLanguage(rawText: string, language: string): boolean {
   const text = rawText.length > MAX_CODE_INPUT_CHARS ? rawText.slice(0, MAX_CODE_INPUT_CHARS) : rawText;
   if (language === 'any') {
-    return Object.values(PATTERNS).some(pats => pats.some(p => p.test(text)));
+    // Require >=2 hits WITHIN ONE language, same threshold as a specific
+    // language. The old single-`.some()` flagged code on a lone keyword (e.g.
+    // the word "SELECT" or "import" in ordinary prose), a noisy false positive.
+    // Demanding two structural markers in the same language cuts that without
+    // weakening real-code detection.
+    return Object.values(PATTERNS).some(
+      pats => pats.filter(p => p.test(text)).length >= MIN_PATTERN_HITS,
+    );
   }
   const pats = PATTERNS[language];
   if (!pats) return false;
   // Require at least 2 pattern matches for higher confidence
-  return pats.filter(p => p.test(text)).length >= 2;
+  return pats.filter(p => p.test(text)).length >= MIN_PATTERN_HITS;
 }
 
 export function runContainsCode(rule: ContainsCodeRule, ctx: RuleContext): RuleResult {

@@ -87,12 +87,45 @@ export function canAffordDeploy(estimatedCostUsd: number = DEFAULT_ESTIMATED_DEP
 // ── Setters ─────────────────────────────────────────────────────────────────
 
 let _persistTimer: ReturnType<typeof setTimeout> | null = null;
+// #716: max-staleness cap. The trailing 10s debounce coalesces a steady stream
+// of spend updates into a single write, so a crash could lose nearly 10s of
+// spend each cycle. Track when the on-disk value was last persisted; if it is
+// already older than MAX_SPEND_STALENESS_MS we flush immediately (leading edge)
+// instead of pushing the trailing timer out again.
+const PERSIST_DEBOUNCE_MS = 10_000;
+export const MAX_SPEND_STALENESS_MS = 30_000;
+let _lastPersistAt = 0;
+
+/**
+ * Pure scheduling decision for {@link _schedulePersist} (#716). Exported for
+ * unit testing. Returns 'flush-now' when the on-disk value is older than the
+ * staleness cap (forces a write this tick), 'already-scheduled' when a trailing
+ * write is already pending, or 'scheduled' when a fresh trailing debounce should
+ * be armed.
+ */
+export function spendPersistDecision(
+  now: number,
+  lastPersistAt: number,
+  timerPending: boolean,
+  maxStalenessMs = MAX_SPEND_STALENESS_MS,
+): 'flush-now' | 'already-scheduled' | 'scheduled' {
+  if (now - lastPersistAt >= maxStalenessMs) return 'flush-now';
+  if (timerPending) return 'already-scheduled';
+  return 'scheduled';
+}
+
 function _schedulePersist() {
-  if (_persistTimer) return; // already scheduled
+  const decision = spendPersistDecision(Date.now(), _lastPersistAt, _persistTimer !== null);
+  if (decision === 'flush-now') {
+    if (_persistTimer) { clearTimeout(_persistTimer); _persistTimer = null; }
+    persistDailySpend();
+    return;
+  }
+  if (decision === 'already-scheduled') return;
   _persistTimer = setTimeout(() => {
     _persistTimer = null;
     persistDailySpend();
-  }, 10_000);
+  }, PERSIST_DEBOUNCE_MS);
 }
 
 export function setDailyGpuSpendUsd(v: number) {
@@ -162,6 +195,7 @@ export function persistDailySpend(): void {
     // writeFileSync left the budget-gate file half-written (and unparseable)
     // if the process died mid-write, despite CLAUDE.md claiming atomicity.
     atomicWriteSyncWithFsync(DAILY_SPEND_FILE, JSON.stringify(data));
+    _lastPersistAt = Date.now(); // #716: track for the staleness cap
   } catch (e) {
     log.warn('[budget] Failed to persist daily spend: ' + (e instanceof Error ? e.message : String(e)));
   }

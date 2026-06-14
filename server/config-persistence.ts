@@ -414,6 +414,23 @@ export const DEFAULT_APPS: GatewayApp[] = [
 /** Alias for DEFAULT_APPS — used by tests and external tooling. */
 export const DEFAULT_GPU_PROFILES = DEFAULT_APPS;
 
+/**
+ * Append any DEFAULT_APPS missing from `apps` by id (#775). Pure → unit-testable
+ * and lets the cold-load path use a single indexed lookup instead of an O(n·m)
+ * `find` per default. Mutates and returns `apps` for the existing call-site
+ * (which already pushes into the live array). Existing apps are never replaced.
+ */
+export function mergeMissingDefaultApps(apps: GatewayApp[], defaults: GatewayApp[] = DEFAULT_APPS): GatewayApp[] {
+  const present = new Set(apps.map((a) => a.id));
+  for (const def of defaults) {
+    if (!present.has(def.id)) {
+      apps.push(def);
+      present.add(def.id);
+    }
+  }
+  return apps;
+}
+
 const DEFAULT_CONFIG: ProviderConfig = {
   apps: [...DEFAULT_APPS],
   activeAppId: 'realtime-translation-dubbing-mistral',
@@ -512,12 +529,9 @@ export async function loadProviderConfig(): Promise<ProviderConfig> {
         }
       }
     }
-    // Merge any default apps that are missing (new defaults added in code updates)
-    for (const def of DEFAULT_APPS) {
-      if (!config.apps.find(a => a.id === def.id)) {
-        config.apps.push(def);
-      }
-    }
+    // Merge any default apps that are missing (new defaults added in code
+    // updates). #775: single-pass via a Set lookup instead of O(n·m) find.
+    mergeMissingDefaultApps(config.apps, DEFAULT_APPS);
     // Preserve extra UI fields (dockerImages, gpuImage, gpuTypes, etc.)
     for (const key of Object.keys(data)) {
       if (!(key in config)) config[key] = data[key as keyof typeof data];

@@ -39,15 +39,64 @@ export function deriveVaultKeyFromPassphrase(
   return key.toString('hex');
 }
 
+/**
+ * Audit event emitted on every secret access (#650). Carries metadata ONLY —
+ * never the plaintext or the ciphertext — so wiring it to a log/event-bus can't
+ * itself leak the secret.
+ */
+export interface VaultAccessEvent {
+  /** Operation performed. */
+  op: 'retrieve' | 'store' | 'delete';
+  /** Secret name (the lookup key, not the value). */
+  name: string;
+  /** Whether the operation succeeded. */
+  ok: boolean;
+  /** Epoch ms. */
+  at: number;
+  /** Present on failures: a short reason (e.g. 'not-found', 'corrupt'). */
+  reason?: string;
+}
+
+export interface VaultOptions {
+  keyVersion?: number;
+  /**
+   * Optional audit sink (#650). Invoked fire-and-forget on every retrieve/
+   * store/delete with metadata only. A throwing sink is swallowed so audit
+   * wiring can never break secret access. This is the self-contained primitive:
+   * the caller decides where events go (logger, event bus, SIEM) — the vault
+   * makes no cross-module decision.
+   */
+  onAccess?: (event: VaultAccessEvent) => void;
+}
+
 export class Vault {
   private key: Buffer;
   private _store: VaultStore;
   private keyVersion: number;
+  private onAccess?: (event: VaultAccessEvent) => void;
 
-  constructor(masterKey: string, store: VaultStore, keyVersion = 1) {
+  constructor(masterKey: string, store: VaultStore, keyVersionOrOpts: number | VaultOptions = 1) {
     this.key = Vault.deriveKey(masterKey);
     this._store = store;
-    this.keyVersion = keyVersion;
+    // Back-compat: the third arg used to be a bare `keyVersion` number. Accept
+    // either that or an options object so existing `new Vault(key, store, 2)`
+    // call sites keep working.
+    if (typeof keyVersionOrOpts === 'number') {
+      this.keyVersion = keyVersionOrOpts;
+    } else {
+      this.keyVersion = keyVersionOrOpts.keyVersion ?? 1;
+      this.onAccess = keyVersionOrOpts.onAccess;
+    }
+  }
+
+  /** Emit an audit event without ever throwing into the caller. */
+  private emitAccess(event: VaultAccessEvent): void {
+    if (!this.onAccess) return;
+    try {
+      this.onAccess(event);
+    } catch {
+      // A broken audit sink must never break secret access.
+    }
   }
 
   /** Derive a 32-byte key from hex or base64 input */
@@ -92,23 +141,44 @@ export class Vault {
     return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
   }
 
+  /**
+   * Validate that a parsed value has the shape of an `EncryptedBlob` (#646-ext):
+   * `iv`, `ciphertext`, `tag` must all be non-empty hex strings. Without this a
+   * blob missing a field (e.g. `{"iv":"..","ciphertext":".."}` — no `tag`) reaches
+   * `createDecipheriv`/`setAuthTag` and throws a cryptic crypto error that looks
+   * identical to a wrong-key failure. Surfacing "corrupt (missing fields)" lets
+   * operators tell a damaged vault from a wrong master key.
+   */
+  private static isValidBlobShape(value: unknown): value is EncryptedBlob {
+    if (!value || typeof value !== 'object') return false;
+    const b = value as Record<string, unknown>;
+    const hex = (s: unknown): s is string => typeof s === 'string' && s.length > 0 && /^[0-9a-fA-F]+$/.test(s);
+    return hex(b.iv) && hex(b.ciphertext) && hex(b.tag);
+  }
+
   /** Store an encrypted secret */
   async storeSecret(name: string, plaintext: string): Promise<void> {
     if (!plaintext || typeof plaintext !== 'string') {
+      this.emitAccess({ op: 'store', name, ok: false, at: Date.now(), reason: 'invalid-plaintext' });
       throw new Error('[Vault] plaintext must be a non-empty string');
     }
     const blob = this.encrypt(plaintext);
     const serialized = JSON.stringify(blob);
     if (!serialized) {
+      this.emitAccess({ op: 'store', name, ok: false, at: Date.now(), reason: 'serialize-failed' });
       throw new Error('[Vault] Failed to serialize encrypted blob');
     }
     await this._store.set(name, serialized);
+    this.emitAccess({ op: 'store', name, ok: true, at: Date.now() });
   }
 
   /** Retrieve and decrypt a secret */
   async retrieve(name: string): Promise<string> {
     const raw = await this._store.get(name);
-    if (!raw) throw new Error(`[Vault] Secret "${name}" not found`);
+    if (!raw) {
+      this.emitAccess({ op: 'retrieve', name, ok: false, at: Date.now(), reason: 'not-found' });
+      throw new Error(`[Vault] Secret "${name}" not found`);
+    }
     // A truncated/corrupt entry would otherwise throw a raw `SyntaxError`,
     // which is indistinguishable from a wrong-key auth failure (the GCM
     // `decrypt` throws too). Surface a distinct, named error so operators can
@@ -117,14 +187,29 @@ export class Vault {
     try {
       blob = JSON.parse(raw) as EncryptedBlob;
     } catch {
+      this.emitAccess({ op: 'retrieve', name, ok: false, at: Date.now(), reason: 'corrupt' });
       throw new Error(`[Vault] Secret "${name}" is corrupt (invalid JSON blob)`);
     }
-    return this.decrypt(blob);
+    // Shape-check BEFORE decrypt so a missing iv/ciphertext/tag is reported as
+    // corruption rather than surfacing a cryptic crypto error (#646-ext).
+    if (!Vault.isValidBlobShape(blob)) {
+      this.emitAccess({ op: 'retrieve', name, ok: false, at: Date.now(), reason: 'corrupt-shape' });
+      throw new Error(`[Vault] Secret "${name}" is corrupt (missing/invalid iv, ciphertext, or tag)`);
+    }
+    try {
+      const plaintext = this.decrypt(blob);
+      this.emitAccess({ op: 'retrieve', name, ok: true, at: Date.now() });
+      return plaintext;
+    } catch (err) {
+      this.emitAccess({ op: 'retrieve', name, ok: false, at: Date.now(), reason: 'decrypt-failed' });
+      throw err;
+    }
   }
 
   /** Delete a secret */
   async delete(name: string): Promise<void> {
     await this._store.delete(name);
+    this.emitAccess({ op: 'delete', name, ok: true, at: Date.now() });
   }
 
   /** List all secret names */

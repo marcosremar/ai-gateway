@@ -30,13 +30,47 @@ export const SECURITY_HEADERS: Record<string, string> = {
 };
 
 /**
+ * Build a Content-Security-Policy string (#698).
+ *
+ * Nonce-based alternative to the static `'unsafe-inline'` style policy. Kept
+ * byte-identical with `src/middleware/security-headers.ts` — drift here silently
+ * weakens one of the two servers. See that file for the full rationale.
+ *
+ * @returns the CSP header VALUE.
+ */
+export function buildContentSecurityPolicy(
+  opts: { styleNonce?: string; scriptNonce?: string; allowStyleUnsafeInline?: boolean } = {},
+): string {
+  const scriptSrc = ['\'self\''];
+  if (opts.scriptNonce) scriptSrc.push(`'nonce-${opts.scriptNonce}'`);
+
+  const styleSrc = ['\'self\''];
+  if (opts.styleNonce) {
+    styleSrc.push(`'nonce-${opts.styleNonce}'`);
+  } else if (opts.allowStyleUnsafeInline ?? true) {
+    styleSrc.push('\'unsafe-inline\'');
+  }
+
+  return `default-src 'self'; script-src ${scriptSrc.join(' ')}; style-src ${styleSrc.join(' ')}`;
+}
+
+/**
  * Apply security headers to response.
  * Only sets headers that haven't already been set (caller can override).
+ *
+ * Pass `opts.styleNonce`/`opts.scriptNonce` to emit a nonce-based CSP for this
+ * response instead of the static `'unsafe-inline'` default.
  */
-export function applySecurityHeaders(res: ServerResponse): void {
+export function applySecurityHeaders(
+  res: ServerResponse,
+  opts: { styleNonce?: string; scriptNonce?: string } = {},
+): void {
+  const csp =
+    opts.styleNonce || opts.scriptNonce
+      ? buildContentSecurityPolicy(opts)
+      : SECURITY_HEADERS['Content-Security-Policy'];
   for (const [header, value] of Object.entries(SECURITY_HEADERS)) {
-    if (!res.getHeader(header)) {
-      res.setHeader(header, value);
-    }
+    if (res.getHeader(header)) continue;
+    res.setHeader(header, header === 'Content-Security-Policy' ? csp : value);
   }
 }

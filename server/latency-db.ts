@@ -275,60 +275,142 @@ export async function setHostsMonitored(hostIds: string[], monitored: boolean): 
   }
 }
 
-export async function getLatencyDbStats(): Promise<{
+export interface LatencyDbStats {
   totalHosts:     number;
   monitoredHosts: number;
   probedInLast2h: number;
   unstable:       number;
   failing:        number;
   historyRows:    number;
-}> {
-  const now    = Date.now();
-  const cut2h  = BigInt(now - INTERVAL_STABLE_MS);
+}
 
-  const [total, monitored, recent, unstable, failing, historyRows] = await Promise.all([
-    prisma.hostLatency.count(),
-    prisma.hostLatency.count({ where: { monitored: true } }),
-    prisma.hostLatency.count({ where: { lastProbedAt: { gt: cut2h } } }),
-    prisma.hostLatency.count({ where: { stddevMs: { gt: STDDEV_UNSTABLE_MS }, consecutiveFailures: { lt: 3 } } }),
-    prisma.hostLatency.count({ where: { consecutiveFailures: { gte: 3 } } }),
+/**
+ * Minimal shape of a host row needed to compute the dashboard stats (#724).
+ * Kept narrow so the reducer is trivially unit-testable without Prisma.
+ */
+export interface HostStatRow {
+  monitored:           boolean;
+  lastProbedAt:        bigint | number;
+  stddevMs:            number | null;
+  consecutiveFailures: number;
+}
+
+/**
+ * Reduce a single `findMany` of host rows into the six dashboard counters (#724).
+ *
+ * Previously `getLatencyDbStats` fired SIX separate `count()` queries (six Neon
+ * round-trips). All six are derivable from one scan of the host table plus the
+ * history-row count, so this pure reducer lets the caller do ONE host read and
+ * ONE history count instead. Exported for unit testing without a DB.
+ */
+export function mapHostStatsFromRows(
+  rows: HostStatRow[],
+  historyRows: number,
+  cut2hMs: number,
+): LatencyDbStats {
+  let monitoredHosts = 0;
+  let probedInLast2h = 0;
+  let unstable = 0;
+  let failing = 0;
+  for (const r of rows) {
+    if (r.monitored) monitoredHosts++;
+    if (Number(r.lastProbedAt) > cut2hMs) probedInLast2h++;
+    if (r.consecutiveFailures >= 3) {
+      failing++;
+    } else if (r.stddevMs !== null && r.stddevMs > STDDEV_UNSTABLE_MS) {
+      // "unstable" in the original query required consecutiveFailures < 3.
+      unstable++;
+    }
+  }
+  return {
+    totalHosts: rows.length,
+    monitoredHosts,
+    probedInLast2h,
+    unstable,
+    failing,
+    historyRows,
+  };
+}
+
+export async function getLatencyDbStats(): Promise<LatencyDbStats> {
+  const now    = Date.now();
+  const cut2h  = now - INTERVAL_STABLE_MS;
+
+  // #724: a single host scan + one history count replaces six `count()`
+  // round-trips. All counters are derived client-side from the same rows.
+  const [rows, historyRows] = await Promise.all([
+    prisma.hostLatency.findMany({
+      select: { monitored: true, lastProbedAt: true, stddevMs: true, consecutiveFailures: true },
+    }),
     prisma.hostLatencyHistory.count(),
   ]);
 
-  return { totalHosts: total, monitoredHosts: monitored, probedInLast2h: recent, unstable, failing, historyRows };
+  return mapHostStatsFromRows(rows as HostStatRow[], historyRows, cut2h);
+}
+
+/** Strip vendor/brand prefixes so "NVIDIA GeForce RTX 4090" → "RTX 4090". */
+export function normalizeGpuModel(gpuType: string): string {
+  return gpuType.replace(/nvidia\s*/gi, '').replace(/geforce\s*/gi, '').trim();
+}
+
+/**
+ * Partition GPU types into good / unknown / bad by the best median latency of
+ * any host whose `gpuName` contains the (normalized) model (#722).
+ *
+ * Pure — takes the already-fetched host rows and groups client-side instead of
+ * one query per GPU type. `hostRows` is the result of a SINGLE `findMany` over
+ * all candidate hosts (consecutiveFailures < 3). Order within each bucket
+ * preserves the input order; result is `[...good, ...unknown, ...bad]`.
+ */
+export function partitionGpuTypesByLatency(
+  gpuTypes: string[],
+  hostRows: Array<{ gpuName: string; medianMs: number | null }>,
+  thresholdMs: number,
+): { sorted: string[]; good: string[]; unknown: string[]; bad: string[] } {
+  const good: string[]    = [];
+  const unknown: string[] = [];
+  const bad: string[]     = [];
+
+  for (const gpuType of gpuTypes) {
+    const model = normalizeGpuModel(gpuType).toLowerCase();
+    let best = Number.POSITIVE_INFINITY;
+    for (const r of hostRows) {
+      if (r.medianMs === null) continue;
+      if (!r.gpuName.toLowerCase().includes(model)) continue;
+      if (r.medianMs < best) best = r.medianMs;
+    }
+    if (!isFinite(best)) unknown.push(gpuType);
+    else if (best <= thresholdMs) good.push(gpuType);
+    else bad.push(gpuType);
+  }
+
+  return { sorted: [...good, ...unknown, ...bad], good, unknown, bad };
 }
 
 export async function sortGpuTypesByLatency(gpuTypes: string[], thresholdMs: number): Promise<string[]> {
   if (thresholdMs <= 0 || gpuTypes.length === 0) return gpuTypes;
 
-  const good: string[]    = [];
-  const unknown: string[] = [];
-  const allBad: string[]  = [];
+  // #722: ONE query over all monitored-ish hosts (was one findMany per GPU
+  // type → N Neon round-trips per deploy ranking). We over-fetch slightly
+  // (all non-failing hosts) and group client-side; the host table is tiny
+  // relative to the per-type round-trip cost.
+  const hostRows = await prisma.hostLatency.findMany({
+    where:  { consecutiveFailures: { lt: 3 }, medianMs: { not: null } },
+    select: { gpuName: true, medianMs: true },
+  });
 
-  for (const gpuType of gpuTypes) {
-    const model = gpuType.replace(/nvidia\s*/gi, '').replace(/geforce\s*/gi, '').trim();
+  const { sorted, bad } = partitionGpuTypesByLatency(
+    gpuTypes,
+    hostRows as Array<{ gpuName: string; medianMs: number | null }>,
+    thresholdMs,
+  );
 
-    const rows = await prisma.hostLatency.findMany({
-      where:  { gpuName: { contains: model, mode: 'insensitive' }, consecutiveFailures: { lt: 3 } },
-      select: { medianMs: true },
-    });
-
-    const withData = rows.filter((r: { medianMs: number | null }) => r.medianMs !== null);
-    if (withData.length === 0) {
-      unknown.push(gpuType);
-    } else {
-      const best = Math.min(...withData.map((r: { medianMs: number | null }) => r.medianMs!));
-      if (best <= thresholdMs) good.push(gpuType);
-      else allBad.push(gpuType);
-    }
-  }
-
-  if (allBad.length > 0) {
-    const names = allBad.map(g => g.replace(/nvidia\s*/gi, '').replace(/geforce\s*/gi, '').trim());
+  if (bad.length > 0) {
+    const names = bad.map(normalizeGpuModel);
     log.log(`GPU types deprioritised (all hosts > ${thresholdMs}ms): ${names.join(', ')}`);
   }
 
-  return [...good, ...unknown, ...allBad];
+  return sorted;
 }
 
 export async function getBestLatencyByGpuModel(): Promise<Record<string, { bestMs: number; region: string }>> {

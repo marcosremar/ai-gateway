@@ -9,7 +9,18 @@ import type { RegexMatchRule, RuleContext, RuleResult } from '../types';
  */
 const MAX_REGEX_INPUT_CHARS = 100_000;
 
+/**
+ * Cap on the operator-supplied PATTERN length itself. An enormous pattern is a
+ * separate amplification vector from a long input (compilation + matching cost
+ * scale with pattern size too); a real moderation regex is a few hundred chars
+ * at most. Reject oversized patterns rather than compiling them.
+ */
+const MAX_REGEX_PATTERN_CHARS = 4_000;
+
 export function runRegexMatch(rule: RegexMatchRule, ctx: RuleContext): RuleResult {
+  if (typeof rule.pattern !== 'string' || rule.pattern.length > MAX_REGEX_PATTERN_CHARS) {
+    return { pass: false, reason: 'Invalid regex pattern: too long or not a string' };
+  }
   let re: RegExp;
   try {
     re = new RegExp(rule.pattern, 'i');

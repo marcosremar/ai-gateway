@@ -128,6 +128,20 @@ export interface S3StoreConfig {
   region?: string;
   /** Optional session token for temporary credentials. */
   sessionToken?: string;
+  /**
+   * Default PUT options (#754) applied to every `put` unless overridden per
+   * call. The R2/B2 convenience constructors use this to set a sensible
+   * cache/ACL policy for CDN-served assets so repeat reads hit the edge.
+   */
+  defaultPut?: PutOptions;
+}
+
+/**
+ * Merge per-call PutOptions over store defaults (#754). Per-call values win;
+ * defaults fill the gaps. Pure → unit-testable.
+ */
+export function mergePutOptions(defaults?: PutOptions, opts?: PutOptions): PutOptions {
+  return { ...(defaults ?? {}), ...(opts ?? {}) };
 }
 
 /**
@@ -153,10 +167,15 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
 
   const store: ObjectStore = {
     async put(key: string, body: PutBody, opts?: PutOptions): Promise<void> {
+      // #754: layer per-call options over the store's default PUT policy so
+      // CDN-served buckets get cache/ACL headers without every caller repeating
+      // them.
+      const merged = mergePutOptions(config.defaultPut, opts);
       await client.write(key, body as Parameters<typeof client.write>[1], {
-        ...(opts?.contentType ? { type: opts.contentType } : {}),
-        ...(opts?.contentEncoding ? { contentEncoding: opts.contentEncoding } : {}),
-        ...(opts?.acl ? { acl: opts.acl } : {}),
+        ...(merged.contentType ? { type: merged.contentType } : {}),
+        ...(merged.contentEncoding ? { contentEncoding: merged.contentEncoding } : {}),
+        ...(merged.acl ? { acl: merged.acl } : {}),
+        ...(merged.cacheControl ? { cacheControl: merged.cacheControl } : {}),
       });
     },
 
@@ -189,6 +208,20 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
     },
 
     getStream(key: string): ReadableStream<Uint8Array> {
+      return client.file(key).stream();
+    },
+
+    async getStreamChecked(key: string): Promise<ReadableStream<Uint8Array> | null> {
+      // #748: `getStream` returns a stream synchronously and only errors when
+      // consumed, so a missing key surfaces inconsistently vs `head`/`get`.
+      // Pre-`stat` so callers get an explicit null for absence (404) and a
+      // thrown error only for real failures (e.g. 403).
+      try {
+        await withS3Retry(() => client.stat(key));
+      } catch (err) {
+        if (isNotFound(err)) return null;
+        throw err;
+      }
       return client.file(key).stream();
     },
 

@@ -171,9 +171,15 @@ export function safeParseInt(
   if (!value) return NaN;
   if (opts.strict) {
     const trimmed = value.trim();
-    // Whole string must be an optional sign + digits valid for the radix.
-    const pattern = radix === 10 ? /^[+-]?\d+$/ : radix === 16 ? /^[+-]?[0-9a-fA-F]+$/ : null;
-    if (pattern && !pattern.test(trimmed)) return NaN;
+    // Whole string must be an optional sign + digits valid for ANY radix 2-36.
+    // Previously only radix 10/16 had a pattern, so `{ strict: true }` silently
+    // fell back to lenient `parseInt` for e.g. radix 2 or 36 — a strict-mode
+    // guarantee that wasn't actually enforced. Build the valid digit set from
+    // the radix so strict means strict for every base.
+    if (radix < 2 || radix > 36) return NaN;
+    const digits = '0123456789abcdefghijklmnopqrstuvwxyz'.slice(0, radix);
+    const pattern = new RegExp(`^[+-]?[${digits}]+$`, 'i');
+    if (!pattern.test(trimmed)) return NaN;
   }
   const result = parseInt(value, radix);
   return isNaN(result) ? NaN : result;

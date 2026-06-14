@@ -80,6 +80,17 @@ function validateApiKey(key: string, config: AuthConfig): boolean {
 }
 
 /**
+ * Whether the dev auth-bypass would currently grant unauthenticated access
+ * (#612). Pure predicate — no request needed — so a startup self-check or the
+ * `/health` surface can flag the dangerous state ("auth is OFF") explicitly,
+ * and it's unit-testable. The bypass requires BOTH `allowDevBypass` AND
+ * `NODE_ENV==='development'`; a production image must satisfy neither.
+ */
+export function isDevBypassActive(config: Pick<AuthConfig, 'allowDevBypass'>): boolean {
+  return Boolean(config.allowDevBypass) && process.env.NODE_ENV === 'development';
+}
+
+/**
  * Require authentication on any endpoint.
  *
  * @example
@@ -99,7 +110,7 @@ export function requireAuth(
   // grants full `dev` access is exactly the kind of thing that ships to prod by
   // accident (e.g. an image built with NODE_ENV=development). Make every
   // activation visible in logs so it can't pass unnoticed.
-  if (config.allowDevBypass && process.env.NODE_ENV === 'development') {
+  if (isDevBypassActive(config)) {
     console.warn(
       '[auth] DEV BYPASS ACTIVE — authentication skipped (allowDevBypass + NODE_ENV=development). ' +
         'This must never be enabled in production.',

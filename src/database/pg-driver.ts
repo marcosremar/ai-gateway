@@ -5,15 +5,18 @@
 import type { DatabaseConfig, QueryResult } from './types';
 import { DatabaseError } from './types';
 import { safeClose } from '../safe-catch';
+import { createHash } from 'crypto';
 
 export interface SqlDriver {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<QueryResult<T>>;
   close(): Promise<void>;
 }
 
+type PgQueryArg = string | { name?: string; text: string; values?: unknown[] };
+
 interface PgClientLike {
   connect(): Promise<unknown>;
-  query<T>(sql: string, params?: unknown[]): Promise<{
+  query<T>(sql: PgQueryArg, params?: unknown[]): Promise<{
     rows: T[];
     rowCount: number | null;
     fields: Array<{ name: string; dataTypeID: number }>;
@@ -92,8 +95,13 @@ export async function createPgDriver(connectionString: string): Promise<SqlDrive
 
   return {
     async query<T>(sql: string, params: unknown[] = []): Promise<QueryResult<T>> {
+      // #732: send a NAMED prepared statement so pg caches the server-side plan
+      // and skips re-parsing identical SQL on every call. The name is a stable
+      // hash of the SQL text. Unnamed (empty SQL) falls back to a plain string.
+      const name = nameStatement(sql);
+      const queryArg: PgQueryArg = name ? { name, text: sql, values: params } : sql;
       try {
-        const result = await client.query<T>(sql, params);
+        const result = await client.query<T>(queryArg, name ? undefined : params);
         return { rows: result.rows, rowCount: result.rowCount ?? result.rows.length, fields: result.fields };
       } catch (err) {
         // #733: on a transient disconnect the old code closed the client and
@@ -105,7 +113,7 @@ export async function createPgDriver(connectionString: string): Promise<SqlDrive
           try {
             client = new PgClient({ connectionString });
             await client.connect();
-            const result = await client.query<T>(sql, params);
+            const result = await client.query<T>(queryArg, name ? undefined : params);
             return { rows: result.rows, rowCount: result.rowCount ?? result.rows.length, fields: result.fields };
           } catch (retryErr) {
             throw retryErr;
@@ -118,6 +126,21 @@ export async function createPgDriver(connectionString: string): Promise<SqlDrive
       await client.end();
     },
   };
+}
+
+/**
+ * Derive a stable prepared-statement name from a SQL string (#732).
+ *
+ * pg's extended protocol caches a server-side plan per *named* statement, so
+ * reusing the same name for the same SQL lets the server skip re-parsing on
+ * every call. The name must be deterministic for identical SQL and a valid pg
+ * identifier (≤63 bytes, no NULs); a short hash satisfies both. Returns
+ * `undefined` for empty SQL so the caller falls back to an unnamed statement.
+ */
+export function nameStatement(sql: string, prefix = 's'): string | undefined {
+  if (!sql || !sql.trim()) return undefined;
+  const hash = createHash('sha1').update(sql).digest('hex').slice(0, 24);
+  return `${prefix}_${hash}`;
 }
 
 /** True for connection-level errors that a single reconnect can recover (#733). */

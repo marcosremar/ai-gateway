@@ -59,12 +59,22 @@ export function generateCsrfToken(secret: string): string {
  */
 const MAX_CSRF_TOKEN_LENGTH = 1024;
 
+/**
+ * Minimum nonce length we accept. A well-formed nonce is a 32-byte base64url
+ * value (43 chars); a token with a 1-2 char nonce is degenerate/forged. We
+ * reject it structurally before recomputing the HMAC — cheap, and it can't be a
+ * timing oracle because the HMAC over a tiny nonce never matches a real token's
+ * signature anyway.
+ */
+const MIN_CSRF_NONCE_LENGTH = 16;
+
 export function verifyCsrfToken(token: string, secret: string): boolean {
   if (!token || !secret) return false;
   if (token.length > MAX_CSRF_TOKEN_LENGTH) return false;
   const dot = token.indexOf('.');
   if (dot <= 0 || dot === token.length - 1) return false;
   const nonce = token.slice(0, dot);
+  if (nonce.length < MIN_CSRF_NONCE_LENGTH) return false;
   const supplied = token.slice(dot + 1);
   const expected = signNonce(nonce, secret);
   const a = Buffer.from(supplied);

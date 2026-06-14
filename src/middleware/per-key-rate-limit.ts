@@ -112,8 +112,19 @@ export function createPerKeyRateLimiter(quotas?: Map<string, KeyQuota>, defaultQ
   return {
     /**
      * Check if a request from the given API key is allowed.
+     *
+     * `opts.cost` (#686) lets a single expensive request consume more than one
+     * unit of the per-window quota. The speech/STT/TTS path fires STT→LLM→TTS —
+     * far more spend than a cheap `/v1/models` call — so a cost-weighted quota
+     * stops one key from draining the shared GPU/token budget with a burst of
+     * heavy requests even while staying under a flat request count. Defaults to
+     * 1 (unchanged behavior). A cost < 1 is clamped to 1; non-finite is ignored.
      */
-    check(apiKey: string): RateLimitResult {
+    check(apiKey: string, opts: { cost?: number } = {}): RateLimitResult {
+      const cost =
+        Number.isFinite(opts.cost) && (opts.cost as number) > 1
+          ? Math.floor(opts.cost as number)
+          : 1;
       const quota = keyQuotas.get(apiKey) ?? keyQuotas.get('*') ?? { maxRequests: defaultQuota };
       const windowMs = quota.windowMs ?? 60_000;
       const now = Date.now();
@@ -126,7 +137,7 @@ export function createPerKeyRateLimiter(quotas?: Map<string, KeyQuota>, defaultQ
         tracking.set(apiKey, entry);
       }
 
-      entry.count++;
+      entry.count += cost;
 
       const remaining = Math.max(0, quota.maxRequests - entry.count);
       // Clamp to non-negative — `now - entry.windowStart` can exceed
