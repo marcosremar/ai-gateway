@@ -1014,3 +1014,113 @@ export function classifyDeployPollOutcome(
   // Not exhausted and not terminal → caller should keep polling.
   return { outcome: 'timeout', message: 'Deploy still in progress.', exitCode: EXIT_RUNTIME };
 }
+
+// ── #812: surface the auto-start-server behaviour ────────────────────────────
+
+/**
+ * One-line, NO_COLOR-friendly note explaining why the CLI is auto-starting a
+ * local gateway and how to disable it (#812). The localhost auto-start spawns
+ * `server/ws-server.ts` detached, which is powerful but surprising; printing the
+ * reasoning + the escape hatch on first spawn removes the surprise.
+ *
+ * @param port the port the local gateway is being started on
+ */
+export function autoStartNote(port: string | number): string {
+  return (
+    `Auto-starting a local gateway on port ${port} ` +
+    `(URL points at localhost and nothing is listening). ` +
+    `To use a remote gateway instead, set AI_GATEWAY_URL; ` +
+    `stop this one with \`ai-gateway server stop\`.`
+  );
+}
+
+// ── #853: dry-run / estimate-only mode for `gpu deploy` ──────────────────────
+
+export interface DeployDryRun {
+  /** Whether any dry-run / estimate-only / preflight-only flag was supplied. */
+  dryRun: boolean;
+  /** The canonical flag that was matched (for messaging), or undefined. */
+  flag?: string;
+}
+
+/** Flags that put `gpu deploy` into estimate-only mode (no provisioning), mirroring
+ *  `gpu finetune`'s `--dry-run`/`--no-estimate`/`--preflight-only` family (#853). */
+export const DEPLOY_DRY_RUN_FLAGS = ['--dry-run', '--estimate-only', '--preflight-only'] as const;
+
+/**
+ * Detect whether `gpu deploy` was asked to run preflight + print the would-be
+ * cost WITHOUT provisioning (#853). `gpu deploy` currently has no such mode even
+ * though `gpu finetune` does. Pure so it is unit-testable without the CLI.
+ */
+export function parseDeployDryRun(args: string[]): DeployDryRun {
+  for (const flag of DEPLOY_DRY_RUN_FLAGS) {
+    if (args.includes(flag)) return { dryRun: true, flag };
+  }
+  return { dryRun: false };
+}
+
+/**
+ * Human-readable summary line for a dry-run deploy (#853), given the preflight
+ * estimate. Keeps the messaging in one tested place; the caller just prints it
+ * and exits 0 without calling `/v1/gpu/deploy`.
+ */
+export function describeDeployDryRun(estimate: {
+  gpuType?: string;
+  pricePerHrUsd?: number;
+  provider?: string;
+}): string {
+  const parts: string[] = ['Dry run — no GPU provisioned.'];
+  if (estimate.gpuType) parts.push(`gpu=${estimate.gpuType}`);
+  if (estimate.provider) parts.push(`provider=${estimate.provider}`);
+  if (typeof estimate.pricePerHrUsd === 'number' && Number.isFinite(estimate.pricePerHrUsd)) {
+    parts.push(`est=$${estimate.pricePerHrUsd.toFixed(2)}/hr`);
+  } else {
+    parts.push('est=unknown');
+  }
+  return parts.join('  ');
+}
+
+// ── #814: use the dedicated /v1/detect-language endpoint ─────────────────────
+
+export interface DetectLanguageRequest {
+  endpoint: string;
+  method: 'POST';
+  body: { text: string };
+}
+
+/**
+ * Build the request for the dedicated language-detection endpoint (#814). The
+ * CLI currently re-implements detection via a hand-rolled chat completion, which
+ * is costlier and inconsistent with the SDK's `detectLanguage()`. This targets
+ * `/v1/detect-language` instead. Pure — returns the request shape for the caller.
+ */
+export function buildDetectLanguageRequest(text: string): DetectLanguageRequest {
+  return { endpoint: '/v1/detect-language', method: 'POST', body: { text: text ?? '' } };
+}
+
+/**
+ * Normalise a `/v1/detect-language` response (#814) into a stable shape, tolerant
+ * of the legacy chat-derived payloads (which returned a bare language string or a
+ * `detected_language` field) so the CLI output stays consistent across providers.
+ */
+export function parseDetectLanguageResponse(
+  raw: unknown,
+): { language: string; confidence?: number } {
+  if (typeof raw === 'string') {
+    const lang = raw.trim();
+    return { language: lang || 'unknown' };
+  }
+  if (raw && typeof raw === 'object') {
+    const o = raw as Record<string, unknown>;
+    const lang =
+      (typeof o.language === 'string' && o.language) ||
+      (typeof o.detected_language === 'string' && o.detected_language) ||
+      (typeof o.lang === 'string' && o.lang) ||
+      '';
+    const conf = typeof o.confidence === 'number' && Number.isFinite(o.confidence)
+      ? o.confidence
+      : undefined;
+    return { language: lang.trim() || 'unknown', ...(conf !== undefined ? { confidence: conf } : {}) };
+  }
+  return { language: 'unknown' };
+}

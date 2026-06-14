@@ -22,6 +22,7 @@ export {
   classifyGpuPollState,
   parseSSEChunk,
   normalizeGatewayError,
+  shouldFallbackToGroq,
   type PrometheusSample,
   type PollOptions,
   type NormalizedGatewayError,

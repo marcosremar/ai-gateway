@@ -11,6 +11,13 @@
  *
  * Zero-config: `GatewaySDK.fromEnv()` mirrors the CLI's URL/key discovery
  * (AI_GATEWAY_URL > GATEWAY_URL > PORT), so no hardcoded baseUrl is required.
+ *
+ * Direct-Groq fallback (#839) is OFF by default — when the gateway is
+ * unreachable the SDK now throws instead of silently billing Groq and
+ * bypassing gateway routing/cost tracking. To restore the legacy auto-fallback
+ * (uses GROQ_API_KEY), opt in explicitly:
+ *
+ *   const gw = GatewaySDK.fromEnv({ fallbackToGroq: true });
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';

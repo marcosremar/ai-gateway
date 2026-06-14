@@ -15,6 +15,11 @@ export interface GatewayConfig {
   /** Groq API key for direct fallback when the gateway is unreachable.
    *  Falls back to GROQ_API_KEY env var if not provided. */
   groqApiKey?: string;
+  /** Opt in to transparently calling Groq directly when the gateway is
+   *  unreachable (#839). This bills Groq and bypasses gateway routing / cost
+   *  tracking, so it is **off by default** even when a `groqApiKey`/`GROQ_API_KEY`
+   *  is present. Set `true` to restore the legacy auto-fallback behaviour. */
+  fallbackToGroq?: boolean;
   /** Per-endpoint timeout overrides (milliseconds) */
   timeouts?: {
     stt?: number;

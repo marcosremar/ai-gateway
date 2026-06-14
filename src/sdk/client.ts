@@ -124,6 +124,22 @@ export function isRetryableNetworkError(err: unknown): boolean {
 }
 
 /**
+ * Decide whether a failed call should transparently fall back to calling Groq
+ * directly (#839). The fallback bills Groq and bypasses gateway routing / cost
+ * tracking, so it requires BOTH an explicit opt-in (`fallbackToGroq`) AND a Groq
+ * key — and only triggers for genuine network failures (a 5xx/4xx from the
+ * gateway is a real answer, not an outage). Pure so the gating is unit-testable.
+ */
+export function shouldFallbackToGroq(opts: {
+  enabled: boolean;
+  hasGroqKey: boolean;
+  err: unknown;
+}): boolean {
+  if (!opts.enabled || !opts.hasGroqKey) return false;
+  return opts.err instanceof GatewayError && opts.err.isNetworkError === true;
+}
+
+/**
  * Resolve a gateway base URL from the environment (#824), mirroring the CLI's
  * discovery: `AI_GATEWAY_URL` > `GATEWAY_URL` > `http://localhost:<PORT>` >
  * default `http://localhost:4000`. Lets the SDK be constructed zero-config via
@@ -306,6 +322,7 @@ export class GatewaySDK {
   private readonly headers: Record<string, string>;
   private readonly timeouts: Required<NonNullable<GatewayConfig['timeouts']>>;
   private readonly groqApiKey: string;
+  private readonly fallbackToGroq: boolean;
   private readonly maxRetries: number;
   private readonly retryBackoffMs: number[];
   private readonly emitRequestId: boolean;
@@ -341,6 +358,9 @@ export class GatewaySDK {
       : {};
     this.timeouts = { ...DEFAULT_TIMEOUTS, ...config.timeouts };
     this.groqApiKey = config.groqApiKey ?? (typeof process !== 'undefined' ? (process.env.GROQ_API_KEY ?? '') : '');
+    // #839 — direct-Groq fallback is OFF by default: it bills Groq and bypasses
+    // gateway routing/cost tracking, so callers must explicitly opt in.
+    this.fallbackToGroq = config.fallbackToGroq === true;
     // Retry tuning — clamp to non-negative integer; fall back to defaults on bad input.
     this.maxRetries = Number.isFinite(config.maxRetries) && (config.maxRetries as number) >= 0
       ? Math.floor(config.maxRetries as number)
@@ -361,7 +381,9 @@ export class GatewaySDK {
   // ── Inference ───────────────────────────────────────────────────────────
 
   /** Transcribe audio to text (GPU-aware: gateway routes to GPU or cloud).
-   *  Falls back to Groq Whisper directly when the gateway is unreachable.
+   *  Falls back to Groq Whisper directly when the gateway is unreachable **only
+   *  if** `fallbackToGroq` was opted in at construction (#839) and a Groq key is
+   *  present — otherwise the network error propagates.
    *  @param options.ensemble — race multiple STT providers, return best result */
   async transcribe(audio: Uint8Array, languageOrOpts: string | TranscribeOptions = 'fr', prompt = ''): Promise<TranscribeResponse> {
     const opts: TranscribeOptions = typeof languageOrOpts === 'string'
@@ -381,7 +403,7 @@ export class GatewaySDK {
       const data = await this.parseJson(res, endpoint);
       return { text: (data.text as string) ?? '', usedGpu: (data.used_gpu as boolean) ?? false };
     } catch (err) {
-      if (err instanceof GatewayError && err.isNetworkError && this.groqApiKey) {
+      if (shouldFallbackToGroq({ enabled: this.fallbackToGroq, hasGroqKey: !!this.groqApiKey, err })) {
         return this.groqTranscribeFallback(audio, language, opts.prompt ?? '');
       }
       throw err;
@@ -389,7 +411,9 @@ export class GatewaySDK {
   }
 
   /** Send a chat completion request through the gateway.
-   *  Falls back to Groq directly when the gateway is unreachable.
+   *  Falls back to Groq directly when the gateway is unreachable **only if**
+   *  `fallbackToGroq` was opted in at construction (#839); otherwise the network
+   *  error propagates (no surprise Groq billing / routing bypass).
    *  Pass `options.signal` to cancel a long-running call (#840). */
   async chat(messages: ChatMessage[], options: ChatCompletionOptions & { signal?: AbortSignal } = {}): Promise<ChatCompletionResponse> {
     const body: Record<string, unknown> = {
@@ -420,7 +444,7 @@ export class GatewaySDK {
         } : undefined,
       };
     } catch (err) {
-      if (err instanceof GatewayError && err.isNetworkError && this.groqApiKey) {
+      if (shouldFallbackToGroq({ enabled: this.fallbackToGroq, hasGroqKey: !!this.groqApiKey, err })) {
         return this.groqChatFallback(messages, options);
       }
       throw err;
