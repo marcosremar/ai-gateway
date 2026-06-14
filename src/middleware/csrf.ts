@@ -50,8 +50,18 @@ export function generateCsrfToken(secret: string): string {
  * we recompute from `secret` over the token's nonce. Constant-time compare
  * to avoid signature-length / byte-by-byte timing leaks.
  */
+/**
+ * Upper bound on an accepted CSRF token length. A well-formed token is a
+ * 32-byte base64url nonce (43 chars) + '.' + a base64url HMAC (43 chars) ≈ 87
+ * chars. Anything an order of magnitude larger is malformed/adversarial;
+ * rejecting before the Buffer allocation + constant-time compare avoids a
+ * trivial memory/CPU amplifier on an unauthenticated verify path.
+ */
+const MAX_CSRF_TOKEN_LENGTH = 1024;
+
 export function verifyCsrfToken(token: string, secret: string): boolean {
   if (!token || !secret) return false;
+  if (token.length > MAX_CSRF_TOKEN_LENGTH) return false;
   const dot = token.indexOf('.');
   if (dot <= 0 || dot === token.length - 1) return false;
   const nonce = token.slice(0, dot);

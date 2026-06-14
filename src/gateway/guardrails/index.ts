@@ -25,3 +25,10 @@ export {
   resetGuardrailStats,
 } from './stats';
 export type { GuardrailStats } from './stats';
+
+export {
+  validateGuardrailEngineConfig,
+  GuardrailEngineConfigSchema,
+  GuardrailActionSchema,
+} from './config-validation';
+export type { GuardrailConfigValidation } from './config-validation';

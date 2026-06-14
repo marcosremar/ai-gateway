@@ -120,7 +120,31 @@ export function maskApiKey(key: string): string {
   // exposing far more than half of the secret (e.g. 8 of 9 chars).
   // Collapse to "***" until the key is long enough for safe masking.
   if (key.length < 12) return '***';
-  return `${key.slice(0, 4)}***${key.slice(-4)}`;
+  // Additionally cap the TOTAL revealed characters to <=25% of the key length.
+  // A flat 8-char reveal exposes 2/3 of a 12-char key; for shorter-but-eligible
+  // keys we trim the visible window so the masked form never leaks more than a
+  // quarter of the secret. `reveal` is split across prefix/suffix.
+  const maxReveal = Math.floor(key.length * 0.25);
+  const each = Math.max(1, Math.min(4, Math.floor(maxReveal / 2)));
+  return `${key.slice(0, each)}***${key.slice(-each)}`;
+}
+
+/**
+ * Normalize text for keyword/injection matching so trivial obfuscation
+ * (letter-spacing, punctuation insertion, common leetspeak) doesn't slip a
+ * banned phrase past a substring/keyword check. This is BEST-EFFORT only — it
+ * defeats `i g n o r e`, `i.g.n.o.r.e`, `1gn0r3`, but not semantic evasion;
+ * real moderation needs the webhook rule to an external classifier.
+ *
+ * Transformations: lowercase → leetspeak digits to letters → strip everything
+ * that isn't a letter (so spacing/punctuation between letters collapses).
+ */
+export function normalizeForKeywordMatch(input: string): string {
+  const leet: Record<string, string> = { '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '@': 'a', '$': 's' };
+  return input
+    .toLowerCase()
+    .replace(/[013457@$]/g, (c) => leet[c] ?? c)
+    .replace(/[^a-z]/g, '');
 }
 
 /**
@@ -153,7 +177,22 @@ export function detectInjection(input: string): boolean {
     /on\w+\s*=/i,
   ];
 
-  return patterns.some((pattern) => pattern.test(input));
+  if (patterns.some((pattern) => pattern.test(input))) return true;
+
+  // Second pass: catch the highest-signal instruction-override phrases even
+  // when obfuscated with spacing/punctuation/leetspeak (e.g. `i g n o r e
+  // previous instructions`, `1gn0r3previousinstructions`). Only a short,
+  // high-confidence allowlist is checked against the de-obfuscated text to
+  // avoid false positives from collapsing all non-letters.
+  const normalized = normalizeForKeywordMatch(input);
+  const OBFUSCATION_RESISTANT_PHRASES = [
+    'ignorepreviousinstructions',
+    'ignoreallprevious',
+    'ignoreallinstructions',
+    'developermode',
+    'danmode',
+  ];
+  return OBFUSCATION_RESISTANT_PHRASES.some((p) => normalized.includes(p));
 }
 
 /**

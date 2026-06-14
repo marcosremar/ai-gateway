@@ -37,6 +37,26 @@ export function initVaultFromEnv(): Vault | null {
   return vaultInstance;
 }
 
+/**
+ * Remove `VAULT_MASTER_KEY` from `process.env` after the vault has been
+ * initialized (#647). Once `initVaultFromEnv()` has derived the key into the
+ * `Vault` instance, leaving the raw key in the environment keeps it visible to
+ * `/proc/self/environ`, any child process, and accidental env dumps for the
+ * whole process lifetime. Call this right after a successful `initVaultFromEnv`.
+ *
+ * No-op if the vault isn't initialized yet — we never want to drop the key
+ * before it's been consumed (that would silently disable the vault on a later
+ * lazy init).
+ *
+ * @returns true if the key was present and removed.
+ */
+export function clearVaultMasterKeyFromEnv(): boolean {
+  if (!vaultInstance) return false;
+  if (process.env.VAULT_MASTER_KEY === undefined) return false;
+  delete process.env.VAULT_MASTER_KEY;
+  return true;
+}
+
 export function getVault(): Vault | null {
   return vaultInstance;
 }

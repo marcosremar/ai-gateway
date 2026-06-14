@@ -91,6 +91,49 @@ export function sanitizeString(
 }
 
 /**
+ * Luhn (mod-10) checksum validation for a candidate card number.
+ *
+ * A DLP credit-card regex flags any 13-16 digit run that matches a brand
+ * prefix — which false-positives on order IDs, timestamps, and tracking
+ * numbers. Gating a "looks like a card" match behind a Luhn check cuts those
+ * false positives sharply (a random 16-digit run passes Luhn only ~10% of the
+ * time). Non-digit separators (spaces, dashes) are ignored.
+ *
+ * @returns true iff the digits form a valid Luhn sequence.
+ */
+export function luhnCheck(candidate: string): boolean {
+  const digits = candidate.replace(/[\s-]/g, '');
+  if (!/^\d+$/.test(digits) || digits.length < 2) return false;
+  let sum = 0;
+  let double = false;
+  // Walk right-to-left, doubling every second digit.
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48; // '0' = 48
+    if (double) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+/**
+ * Validate a requested model against an allowlist.
+ *
+ * Arbitrary `model` strings otherwise flow straight to providers, allowing a
+ * caller to route to an unintended/expensive model. Comparison is exact and
+ * case-sensitive; pass the configured model set. An empty allowlist returns
+ * false (deny-all) rather than allow-all, so a missing/empty config fails
+ * closed.
+ */
+export function isAllowedModel(model: string, allowlist: readonly string[]): boolean {
+  if (!model || allowlist.length === 0) return false;
+  return allowlist.includes(model);
+}
+
+/**
  * Validate number is within range.
  */
 export function validateNumber(

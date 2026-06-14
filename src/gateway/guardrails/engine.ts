@@ -18,20 +18,36 @@ import { runModelWhitelist } from './rules/model-whitelist';
 const log = createLogger('guardrail-engine');
 
 /**
+ * Largest concatenated request text we will build for rule evaluation. A
+ * request with thousands of messages (or one giant message) would otherwise
+ * let the body size drive guardrail CPU; downstream rules already cap their
+ * own input, but bounding here keeps even the concat + join step O(cap).
+ * Real prompts are far below this; rules see a truncated view of pathological
+ * inputs (which still trips any "contains forbidden substring" rule that would
+ * have matched within the cap).
+ */
+const MAX_REQUEST_TEXT_CHARS = 1_000_000;
+
+/**
  * Extracts plain text from an OpenAI-format request body.
- * Concatenates all message contents into a single string.
+ * Concatenates all message contents into a single string (bounded).
  */
 export function extractRequestText(body: unknown): string {
-  if (typeof body === 'string') return body;
+  if (typeof body === 'string') return body.slice(0, MAX_REQUEST_TEXT_CHARS);
   if (!body || typeof body !== 'object') return '';
   const b = body as Record<string, unknown>;
   if (Array.isArray(b.messages)) {
-    return (b.messages as Array<{ content?: unknown }>)
-      .map(m => (typeof m.content === 'string' ? m.content : ''))
-      .filter(Boolean)
-      .join('\n');
+    const parts: string[] = [];
+    let total = 0;
+    for (const m of b.messages as Array<{ content?: unknown }>) {
+      if (typeof m.content !== 'string' || m.content.length === 0) continue;
+      parts.push(m.content);
+      total += m.content.length + 1; // +1 for the join separator
+      if (total >= MAX_REQUEST_TEXT_CHARS) break;
+    }
+    return parts.join('\n').slice(0, MAX_REQUEST_TEXT_CHARS);
   }
-  if (typeof b.prompt === 'string') return b.prompt;
+  if (typeof b.prompt === 'string') return b.prompt.slice(0, MAX_REQUEST_TEXT_CHARS);
   return '';
 }
 

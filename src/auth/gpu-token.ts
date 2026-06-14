@@ -78,3 +78,37 @@ export function verifyGpuToken(token: string): GpuTokenPayload {
   }
   return payload;
 }
+
+/**
+ * Decode the token payload WITHOUT verifying the HMAC signature.
+ *
+ * Intended only for logging/diagnostics (e.g. "which uid issued this expired
+ * token"). It performs NO authentication — never gate access on its result.
+ *
+ * SECURITY NOTE (#625): the `uid` in a GPU token is plain base64url, readable
+ * by anyone holding the token. That is acceptable for an HMAC-signed token (the
+ * signature provides integrity, not confidentiality) — but it means callers
+ * MUST NOT place PII or other secrets in `userId`. This helper makes that
+ * readability explicit.
+ *
+ * @returns the decoded claims, or null if the payload isn't well-formed.
+ */
+export function readGpuTokenClaimsUnverified(token: string): GpuTokenPayload | null {
+  const payloadB64 = token.split('.')[0];
+  if (!payloadB64) return null;
+  try {
+    const raw = JSON.parse(Buffer.from(payloadB64, 'base64url').toString()) as Record<string, unknown>;
+    if (
+      raw === null ||
+      typeof raw !== 'object' ||
+      typeof raw.uid !== 'string' ||
+      typeof raw.iat !== 'number' ||
+      typeof raw.exp !== 'number'
+    ) {
+      return null;
+    }
+    return { uid: raw.uid, iat: raw.iat, exp: raw.exp };
+  } catch {
+    return null;
+  }
+}

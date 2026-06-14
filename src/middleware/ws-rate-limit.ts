@@ -98,7 +98,11 @@ export function createWsRateLimiter(config: Partial<RateLimitConfig> = {}) {
       return {
         count: state.count,
         remaining: Math.max(0, cfg.maxMessages - state.count),
-        windowMs: cfg.windowMs - (now - state.windowStart),
+        // Clamp to non-negative. `now - state.windowStart` can momentarily
+        // exceed windowMs at the rollover boundary (the `>` check above uses
+        // strict greater-than), which previously produced a NEGATIVE remaining
+        // window — corrupting any Retry-After/backoff math a caller derives.
+        windowMs: Math.max(0, cfg.windowMs - (now - state.windowStart)),
       };
     },
 

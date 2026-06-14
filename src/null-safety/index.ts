@@ -155,18 +155,44 @@ export function safeToString(value: unknown): string {
 
 /**
  * Safe number parsing — returns NaN instead of throwing.
+ *
+ * `parseInt` is deliberately lenient: it reads a leading numeric prefix and
+ * ignores trailing garbage (`'12px'` → 12), and at radix 16 accepts `0x`
+ * prefixes. On a security-sensitive surface (limits, ids, sizes parsed from
+ * user/config input) that silent coercion is a footgun. Pass `{ strict: true }`
+ * to require the WHOLE string be a valid base-`radix` integer, returning NaN
+ * otherwise. Default behavior is unchanged for existing callers.
  */
-export function safeParseInt(value: string | undefined | null, radix = 10): number {
+export function safeParseInt(
+  value: string | undefined | null,
+  radix = 10,
+  opts: { strict?: boolean } = {},
+): number {
   if (!value) return NaN;
+  if (opts.strict) {
+    const trimmed = value.trim();
+    // Whole string must be an optional sign + digits valid for the radix.
+    const pattern = radix === 10 ? /^[+-]?\d+$/ : radix === 16 ? /^[+-]?[0-9a-fA-F]+$/ : null;
+    if (pattern && !pattern.test(trimmed)) return NaN;
+  }
   const result = parseInt(value, radix);
   return isNaN(result) ? NaN : result;
 }
 
 /**
  * Safe JSON parse — returns undefined instead of throwing.
+ *
+ * Optionally bound the input length: parsing an attacker-influenced multi-MB
+ * string is a CPU-amplification vector. Pass `{ maxLength }` on any untrusted
+ * surface to short-circuit (return undefined) before the parse. Default is
+ * unbounded to preserve existing call sites.
  */
-export function safeJsonParse<T = unknown>(value: string | undefined | null): T | undefined {
+export function safeJsonParse<T = unknown>(
+  value: string | undefined | null,
+  opts: { maxLength?: number } = {},
+): T | undefined {
   if (!value) return undefined;
+  if (opts.maxLength != null && value.length > opts.maxLength) return undefined;
   try {
     return JSON.parse(value) as T;
   } catch {

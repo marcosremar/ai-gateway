@@ -74,8 +74,21 @@ function validate(value: unknown, schema: Record<string, unknown>, path = ''): s
   return null;
 }
 
+/**
+ * Cap on the response text we will attempt to `JSON.parse`. A valid LLM JSON
+ * response is small; parsing a multi-MB (potentially adversarial) body just to
+ * validate its shape is a CPU-spike vector. An oversized body is treated as
+ * "not valid JSON" (same path as a parse failure) rather than parsed.
+ */
+const MAX_JSON_INPUT_CHARS = 1_000_000;
+
 export function runJsonSchema(rule: JsonSchemaRule, ctx: RuleContext): RuleResult {
-  // Only meaningful on responses — parse the text as JSON first
+  // Only meaningful on responses — parse the text as JSON first.
+  // Oversized bodies short-circuit to the not-valid-JSON branch.
+  if (ctx.text.length > MAX_JSON_INPUT_CHARS) {
+    const pass = rule.not ? true : false;
+    return { pass, reason: pass ? undefined : 'Response too large to validate as JSON' };
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(ctx.text);

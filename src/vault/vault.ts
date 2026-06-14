@@ -5,12 +5,39 @@
  * Stores {iv, ciphertext, tag, version} as JSON via VaultStore.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
 import type { EncryptedBlob, VaultStore } from './types';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
 const TAG_LENGTH = 16;
+
+/**
+ * Derive a 32-byte AES key from an arbitrary-length passphrase via scrypt.
+ *
+ * `Vault`'s constructor requires a raw 32-byte key (64 hex / 44 base64) and
+ * throws on anything else — deliberately, because silently hashing a typo'd
+ * key would make blobs undecryptable. This helper is the explicit, opt-in path
+ * for operators who *want* to key the vault from a human passphrase: run it
+ * once, feed the result to `new Vault(...)`. It is a pure function (no I/O, no
+ * on-disk format change) so adding it is safe.
+ *
+ * NOTE: scrypt params are fixed here; changing them changes the derived key,
+ * so a passphrase-keyed vault must pin a stable salt + params (pass your own
+ * salt — do NOT use a random one, or you can never re-derive the same key).
+ */
+export function deriveVaultKeyFromPassphrase(
+  passphrase: string,
+  salt: string,
+  opts: { keyLength?: number } = {},
+): string {
+  if (!passphrase) throw new Error('[Vault] passphrase must be non-empty');
+  if (!salt) throw new Error('[Vault] salt must be non-empty (a stable, per-deployment value)');
+  const keyLength = opts.keyLength ?? 32;
+  // N=16384, r=8, p=1 — standard interactive scrypt cost.
+  const key = scryptSync(passphrase, salt, keyLength, { N: 16384, r: 8, p: 1 });
+  return key.toString('hex');
+}
 
 export class Vault {
   private key: Buffer;
@@ -109,6 +136,20 @@ export class Vault {
   async rotateKey(newMasterKey: string): Promise<void> {
     const newKey = Vault.deriveKey(newMasterKey);
     const names = await this._store.list();
+
+    // Snapshot the ORIGINAL serialized blob of every secret up front. Rollback
+    // then restores these exact bytes verbatim — no decrypt/re-encrypt round
+    // trip. The previous rollback re-encrypted with the old key, so if the
+    // rollback path itself threw (e.g. a corrupt intermediate blob) a secret
+    // could be left written under `newKey` while `this.key` stays old →
+    // permanently undecryptable. Restoring the captured originals makes
+    // rollback I/O-only and side-effect-free on the crypto state.
+    const originals = new Map<string, string>();
+    for (const name of names) {
+      const raw = await this._store.get(name);
+      if (raw != null) originals.set(name, raw);
+    }
+
     const reEncrypted: string[] = [];
 
     try {
@@ -132,35 +173,16 @@ export class Vault {
       this.key = newKey;
       this.keyVersion += 1;
     } catch (err) {
-      // Rollback: decrypt with newKey (the key used to re-encrypt), then re-encrypt with OLD key
+      // Atomic rollback: write back the captured original bytes for every blob
+      // we touched. No key state changes (this.key is untouched on the failure
+      // path), so the vault is exactly as it was before the rotation attempt.
       for (const name of reEncrypted) {
+        const original = originals.get(name);
+        if (original == null) continue;
         try {
-          const raw = await this._store.get(name);
-          if (!raw) continue;
-          const blob: EncryptedBlob = JSON.parse(raw);
-          // Properly decrypt using newKey (the key that encrypted these blobs)
-          const decipher = createDecipheriv(ALGORITHM, newKey, Buffer.from(blob.iv, 'hex'), { authTagLength: TAG_LENGTH });
-          decipher.setAuthTag(Buffer.from(blob.tag, 'hex'));
-          const plaintext = Buffer.concat([
-            decipher.update(Buffer.from(blob.ciphertext, 'hex')),
-            decipher.final(),
-          ]).toString('utf8');
-
-          // Re-encrypt with the original (old) key - use this.key (old key before failed rotation)
-          const iv = randomBytes(IV_LENGTH);
-          const cipher = createCipheriv(ALGORITHM, this.key, iv, { authTagLength: TAG_LENGTH });
-          const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-          const tag = cipher.getAuthTag();
-
-          const rolledBack: EncryptedBlob = {
-            iv: iv.toString('hex'),
-            ciphertext: encrypted.toString('hex'),
-            tag: tag.toString('hex'),
-            version: this.keyVersion,
-          };
-          await this._store.set(name, JSON.stringify(rolledBack));
+          await this._store.set(name, original);
         } catch (rollbackErr) {
-          console.error('[Vault] Rollback failed, data may be corrupted:', rollbackErr);
+          console.error(`[Vault] Rollback failed for "${name}", data may be inconsistent:`, rollbackErr);
         }
       }
       throw err;

@@ -32,7 +32,16 @@ const PATTERNS: Record<string, RegExp[]> = {
   ],
 };
 
-function detectLanguage(text: string, language: string): boolean {
+/**
+ * Cap on the text these heuristic regexes are tested against. Several patterns
+ * (e.g. `:\s*\n\s+`, `<\/\s*\w+\s*>`) can backtrack on long adversarial input;
+ * bounding the input keeps each `.test()` O(cap) so a giant body can't stall
+ * the event loop. Real prompts/completions are far below this.
+ */
+const MAX_CODE_INPUT_CHARS = 100_000;
+
+function detectLanguage(rawText: string, language: string): boolean {
+  const text = rawText.length > MAX_CODE_INPUT_CHARS ? rawText.slice(0, MAX_CODE_INPUT_CHARS) : rawText;
   if (language === 'any') {
     return Object.values(PATTERNS).some(pats => pats.some(p => p.test(text)));
   }
