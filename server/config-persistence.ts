@@ -7,7 +7,7 @@ import { createLogger } from '../src/logger';
 import { homedir } from 'os';
 import { join } from 'path';
 import { readFile, access } from 'fs/promises';
-import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync } from 'fs';
+import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statSync } from 'fs';
 import { setIdleTimeoutMs } from './gpu-deploy';
 import { setSttTargetLatencyMs, setLlmTargetLatencyMs, setTtsTargetLatencyMs, setGpuSortBy, loadDeploySettings } from '../src/gpu-providers/deploy-settings';
 import type { AIProfile } from '../src/client';
@@ -28,6 +28,68 @@ const log = createLogger('config-persistence');
 let _cachedConfig: ProviderConfig | null = null;
 let _cacheTime = 0;
 const CONFIG_CACHE_TTL_MS = 5_000;
+/** mtime (ms) of CONFIG_FILE at the time the cache was populated (#773). */
+let _cacheMtimeMs = 0;
+
+/**
+ * Decide whether the in-memory config cache should be reused (#773).
+ *
+ * Previously the cache was reused for a flat 5s regardless of whether the file
+ * changed underneath it — a manual edit to `provider-config.json` (or a DB-side
+ * change written to the file) wasn't seen for up to 5s. This pure helper adds an
+ * mtime check: even inside the TTL window, a newer on-disk mtime busts the cache
+ * so external edits are picked up promptly. Returns true when the cached value
+ * is still valid (fresh AND file unchanged).
+ *
+ * @param now            current time (ms)
+ * @param cachedAt       when the cache was populated (ms)
+ * @param cachedMtimeMs  file mtime captured when cached (ms; 0 if unknown)
+ * @param currentMtimeMs file mtime now (ms; null if the file is missing/unstat-able)
+ * @param ttlMs          cache TTL (ms)
+ */
+export function isConfigCacheFresh(
+  now: number,
+  cachedAt: number,
+  cachedMtimeMs: number,
+  currentMtimeMs: number | null,
+  ttlMs: number = CONFIG_CACHE_TTL_MS,
+): boolean {
+  if (now - cachedAt >= ttlMs) return false; // expired by time
+  // If we can read the current mtime and it is newer than what we cached, the
+  // file was edited out-of-band → bust. A null current mtime (file vanished or
+  // unstat-able) also busts so we re-evaluate from scratch.
+  if (currentMtimeMs === null) return false;
+  if (cachedMtimeMs > 0 && currentMtimeMs > cachedMtimeMs) return false;
+  return true;
+}
+
+/**
+ * Drop the in-memory config cache so the next {@link loadProviderConfig} re-reads
+ * from disk (#773). Use after an out-of-band edit or to force a reload.
+ */
+export function invalidateConfigCache(): void {
+  _cachedConfig = null;
+  _cacheTime = 0;
+  _cacheMtimeMs = 0;
+}
+
+// ── DB-sync failure observability (#774) ─────────────────────────────────────
+// saveProviderConfig fires the user-DB sync as fire-and-forget inside the
+// resolved promise, so callers `await saveProviderConfig` and assume durability
+// even when the DB write fails. We can't block the local save on the remote DB,
+// but we can at least surface failures via a counter so a /metrics scrape (or a
+// test) can detect that durability to the user DB is silently broken.
+let _dbSyncFailures = 0;
+
+/** Number of times the user-DB config sync failed since process start (#774). */
+export function getConfigDbSyncFailures(): number {
+  return _dbSyncFailures;
+}
+
+/** Test-only: reset the DB-sync failure counter (#774). */
+export function __resetConfigDbSyncFailures(): void {
+  _dbSyncFailures = 0;
+}
 
 // ── Config write serialization (#770) ────────────────────────────────────────
 // Concurrent profile mutations each do load → mutate → saveProviderConfig with
@@ -447,8 +509,15 @@ const DEFAULT_CONFIG: ProviderConfig = {
  *  arrays/objects are NOT deep-cloned. Caller must not mutate returned arrays. */
 export async function loadProviderConfig(): Promise<ProviderConfig> {
   const now = Date.now();
-  if (_cachedConfig && (now - _cacheTime) < CONFIG_CACHE_TTL_MS) {
-    return _cachedConfig;
+  if (_cachedConfig) {
+    // #773: reuse the cache only when it is fresh AND the file hasn't changed
+    // out-of-band (mtime check), so manual edits to provider-config.json are
+    // picked up within the TTL instead of after it.
+    let currentMtimeMs: number | null = null;
+    try { currentMtimeMs = statSync(CONFIG_FILE).mtimeMs; } catch { currentMtimeMs = null; }
+    if (isConfigCacheFresh(now, _cacheTime, _cacheMtimeMs, currentMtimeMs)) {
+      return _cachedConfig;
+    }
   }
   try {
     let fileExists: boolean;
@@ -538,6 +607,8 @@ export async function loadProviderConfig(): Promise<ProviderConfig> {
     }
     _cachedConfig = config;
     _cacheTime = now;
+    // #773: remember the file's mtime so a later out-of-band edit busts the cache.
+    try { _cacheMtimeMs = statSync(CONFIG_FILE).mtimeMs; } catch { _cacheMtimeMs = 0; }
     return _cachedConfig;
   } catch (err) {
     log.warn('Failed to load provider config: %s', err instanceof Error ? err.message : err);
@@ -592,6 +663,9 @@ export function saveProviderConfig(config: ProviderConfig): Promise<void> {
       // Update cache so subsequent reads skip file I/O
       _cachedConfig = config;
       _cacheTime = Date.now();
+      // #773: record the just-written file's mtime so this save doesn't
+      // immediately bust its own cache on the next mtime-checked read.
+      try { _cacheMtimeMs = statSync(CONFIG_FILE).mtimeMs; } catch { _cacheMtimeMs = 0; }
       log.log('Saved provider config (%d apps) to %s', config.apps.length, CONFIG_FILE);
     } catch (err) {
       log.warn('Failed to save provider config: %s', err instanceof Error ? err.message : err);
@@ -601,9 +675,14 @@ export function saveProviderConfig(config: ProviderConfig): Promise<void> {
       const apiKey = _currentUserApiKey;
       import('./user-profiles').then(({ saveUserConfig }) => {
         saveUserConfig(apiKey, 'Default', config).catch((err) => {
+          // #774: the local save already resolved, so callers can't see this
+          // failure — surface it via a counter (readable for /metrics or tests)
+          // instead of only logging, so silent durability loss is detectable.
+          _dbSyncFailures++;
           log.warn('Failed to persist user config to DB: %s', err instanceof Error ? err.message : err);
         });
       }).catch((err) => {
+        _dbSyncFailures++;
         log.warn('Failed to load user-profiles module for DB sync: %s', err instanceof Error ? err.message : err);
       });
     }

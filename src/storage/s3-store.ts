@@ -134,6 +134,12 @@ export interface S3StoreConfig {
    * cache/ACL policy for CDN-served assets so repeat reads hit the edge.
    */
   defaultPut?: PutOptions;
+  /**
+   * Body size (bytes) at/above which `put` requests a multipart upload (#745).
+   * Defaults to {@link DEFAULT_MULTIPART_THRESHOLD} (100MB). Bodies whose size
+   * isn't known up front (streams) are left to the client's own default.
+   */
+  multipartThresholdBytes?: number;
 }
 
 /**
@@ -142,6 +148,58 @@ export interface S3StoreConfig {
  */
 export function mergePutOptions(defaults?: PutOptions, opts?: PutOptions): PutOptions {
   return { ...(defaults ?? {}), ...(opts ?? {}) };
+}
+
+/** Default body size (bytes) above which a PUT should be multipart (#745). 100MB. */
+export const DEFAULT_MULTIPART_THRESHOLD = 100 * 1024 * 1024;
+
+/**
+ * Decide whether a PUT of `sizeBytes` should use multipart upload (#745).
+ *
+ * A single PUT of a large body (model weights, recordings) must be fully
+ * re-uploaded on a mid-transfer failure — wasted egress + retry cost. Multipart
+ * uploads each part independently so only the failed part is retried. When the
+ * size is unknown (streaming body, `undefined`) we cannot decide up front, so we
+ * return false and leave it to the client. Pure → unit-testable.
+ *
+ * @param sizeBytes   known body size, or undefined when not determinable
+ * @param thresholdBytes size at/above which multipart is used (default 100MB)
+ */
+export function shouldUseMultipart(
+  sizeBytes: number | undefined,
+  thresholdBytes: number = DEFAULT_MULTIPART_THRESHOLD,
+): boolean {
+  if (sizeBytes === undefined || !Number.isFinite(sizeBytes)) return false;
+  return sizeBytes >= thresholdBytes;
+}
+
+/**
+ * Best-effort byte length of a PutBody when known synchronously (#745).
+ * Strings, ArrayBuffers/views and Blobs expose a length/size; streams and
+ * Response bodies do not, so they return undefined (caller can't pre-decide
+ * multipart). Pure → unit-testable.
+ */
+export function putBodyByteLength(body: PutBody): number | undefined {
+  if (typeof body === 'string') return Buffer.byteLength(body);
+  if (body instanceof ArrayBuffer) return body.byteLength;
+  if (ArrayBuffer.isView(body)) return body.byteLength;
+  if (typeof Blob !== 'undefined' && body instanceof Blob) return body.size;
+  return undefined;
+}
+
+/**
+ * Clamp a presign TTL and apply method-specific bounds (#752, #752).
+ *
+ * GET/HEAD/DELETE default to 1h; PUT (write) presigns default SHORTER (15 min)
+ * because an open-ended write URL is a bigger exposure than a read URL. All
+ * methods are clamped to [60s, 24h]. Pure → unit-testable.
+ */
+export function presignTtlSeconds(method: string, requested: number | undefined): number {
+  const MIN_S = 60;
+  const MAX_S = 24 * 3600;
+  const def = method === 'PUT' ? 15 * 60 : 3600;
+  const want = requested ?? def;
+  return Math.min(Math.max(MIN_S, want), MAX_S);
 }
 
 /**
@@ -171,12 +229,20 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
       // CDN-served buckets get cache/ACL headers without every caller repeating
       // them.
       const merged = mergePutOptions(config.defaultPut, opts);
+      // #745: when the body is large enough (and its size is known up front),
+      // hint a multipart upload so a mid-transfer failure only re-uploads the
+      // failed part rather than the whole object. Bun.S3Client's write splits
+      // into parts when given a `partSize`; smaller/unknown bodies use a single
+      // PUT as before.
+      const size = putBodyByteLength(body);
+      const useMultipart = shouldUseMultipart(size, config.multipartThresholdBytes);
       await client.write(key, body as Parameters<typeof client.write>[1], {
         ...(merged.contentType ? { type: merged.contentType } : {}),
         ...(merged.contentEncoding ? { contentEncoding: merged.contentEncoding } : {}),
         ...(merged.acl ? { acl: merged.acl } : {}),
         ...(merged.cacheControl ? { cacheControl: merged.cacheControl } : {}),
-      });
+        ...(useMultipart ? { partSize: 16 * 1024 * 1024 } : {}),
+      } as Parameters<typeof client.write>[2]);
     },
 
     async get(key: string): Promise<Uint8Array> {
@@ -248,15 +314,12 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
       if (key.includes('..') || key.startsWith('/')) {
         throw new Error(`presign refuses suspicious key: ${key.slice(0, 80)}`);
       }
-      // Cap TTL at 24h. A caller passing `expiresIn: 365 * 86400` would mint
-      // perma-URLs that survive credential rotation; clamp defensively.
-      const PRESIGN_MAX_S = 24 * 3600;
-      const requested = opts?.expiresIn ?? 3600;
-      const expiresIn = Math.min(Math.max(60, requested), PRESIGN_MAX_S);
-      return client.presign(key, {
-        expiresIn,
-        method: opts?.method ?? 'GET',
-      });
+      // #752: clamp TTL to [60s, 24h] AND apply a shorter default for PUT
+      // (write) presigns — an open-ended upload URL is a bigger exposure than a
+      // read URL — so write presigns don't inherit the GET-oriented 1h default.
+      const method = opts?.method ?? 'GET';
+      const expiresIn = presignTtlSeconds(method, opts?.expiresIn);
+      return client.presign(key, { expiresIn, method });
     },
 
     async delete(key: string): Promise<void> {

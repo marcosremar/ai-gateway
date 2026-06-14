@@ -10,7 +10,7 @@
  * already migrated.
  */
 
-import { existsSync, renameSync } from 'fs';
+import { existsSync, renameSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { prisma } from './state';
@@ -20,6 +20,29 @@ const log = createLogger('latency-db-migrate');
 
 const DB_PATH      = join(homedir(), '.babelcast', 'latency.db');
 const DONE_MARKER  = DB_PATH + '.migrated';
+/**
+ * Durable sidecar completion flag (#797). The migration previously recorded
+ * "done" ONLY by renaming latency.db → latency.db.migrated; if that rename
+ * failed after a successful import, the next start re-ran the whole import
+ * (upserts are idempotent, but history `create` could duplicate). We now write
+ * this small flag file BEFORE attempting the rename, and the guard treats the
+ * presence of EITHER marker as "already migrated".
+ */
+const DONE_FLAG    = DB_PATH + '.migrated.flag';
+
+/** Path of the durable completion flag for a given db path (#797). Pure. */
+export function migrationFlagPath(dbPath: string): string {
+  return dbPath + '.migrated.flag';
+}
+
+/**
+ * Whether the migration is already complete given the presence of the renamed
+ * marker and/or the durable sidecar flag (#797). Pure → unit-testable. Either
+ * one being present means "done" so a failed rename no longer triggers re-import.
+ */
+export function isMigrationComplete(hasRenamedMarker: boolean, hasDoneFlag: boolean): boolean {
+  return hasRenamedMarker || hasDoneFlag;
+}
 
 interface SqliteHostRow {
   host_id:              string;
@@ -120,7 +143,9 @@ export function buildHistoryCreateManyData(
 }
 
 export async function migrateLatencyDbIfNeeded(): Promise<void> {
-  if (!existsSync(DB_PATH) || existsSync(DONE_MARKER)) return;
+  // #797: treat the durable flag OR the renamed marker as "already done" so a
+  // rename that failed last time doesn't re-trigger the whole import.
+  if (!existsSync(DB_PATH) || isMigrationComplete(existsSync(DONE_MARKER), existsSync(DONE_FLAG))) return;
 
   log.log('Found legacy SQLite latency.db — migrating to Neon...');
 
@@ -199,6 +224,16 @@ export async function migrateLatencyDbIfNeeded(): Promise<void> {
   }
 
   log.log(`Done: ${hostsDone} hosts (${hostsSkipped} skipped), ${historyDone} history rows imported.`);
+
+  // #797: write the durable completion flag FIRST so that even if the rename
+  // below fails the next start sees "done" and skips re-importing (which could
+  // duplicate history rows). The rename is still attempted as the primary
+  // signal + to free the disk space.
+  try {
+    writeFileSync(DONE_FLAG, new Date().toISOString());
+  } catch (err) {
+    log.warn('Could not write migration flag:', err instanceof Error ? err.message : err);
+  }
 
   // Mark as migrated
   try {

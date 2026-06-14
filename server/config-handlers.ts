@@ -13,7 +13,7 @@
 // POST   /v1/config/labs               — patch labs feature flags
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import { readFileSync, writeFileSync, existsSync, chmodSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, chmodSync, renameSync, openSync, fsyncSync, closeSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { getOrCreateRequestId, setRequestIdHeader, readJsonBody, handleBodyError } from './http-utils';
@@ -150,6 +150,52 @@ function getEnvFilePath(): string {
   return resolve(__dir, '..', '.env');
 }
 
+/**
+ * Merge key/value updates into an existing `.env` body (#709).
+ *
+ * Pure (string-in, string-out) so the munging logic is unit-testable without
+ * touching the filesystem — previously this lived inline in handleSetApiKeys
+ * right next to a non-atomic `writeFileSync` that could truncate `.env` (and
+ * lose unrelated secrets) on a crash mid-write. Existing lines for a key are
+ * replaced in place; an empty value removes the key; non-empty values are
+ * appended (and quoted/escaped). Unrelated lines are preserved verbatim.
+ */
+export function mergeEnvContent(existing: string, updates: Record<string, unknown>): string {
+  let envContent = existing;
+  for (const [envVar, value] of Object.entries(updates)) {
+    if (typeof value !== 'string') continue;
+    // Remove existing line for this var (escape envVar for regex safety)
+    const escapedVar = envVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`^${escapedVar}=.*$`, 'm');
+    envContent = envContent.replace(regex, '').replace(/\n{3,}/g, '\n\n');
+    // Add new line if value is non-empty (escape special chars)
+    if (value) {
+      envContent = envContent.trimEnd() + `\n${envVar}=${escapeEnvValue(value)}\n`;
+    }
+  }
+  return envContent;
+}
+
+/**
+ * Atomically write `.env` (#709): write to a sibling `.env.tmp`, fsync it so the
+ * bytes are durable, then `renameSync` over the primary. A crash now leaves
+ * either the old complete file or the new complete file — never a truncated one
+ * that loses unrelated keys. Mode 0o600 is enforced on the temp file before the
+ * rename so the secret is never briefly world-readable.
+ */
+export function atomicWriteEnv(envPath: string, content: string): void {
+  const tmp = envPath + '.tmp';
+  const fd = openSync(tmp, 'w', 0o600);
+  try {
+    writeFileSync(fd, content);
+    try { fsyncSync(fd); } catch { /* best-effort durability */ }
+  } finally {
+    closeSync(fd);
+  }
+  try { chmodSync(tmp, 0o600); } catch { /* best-effort: enforce perms pre-rename */ }
+  renameSync(tmp, envPath);
+}
+
 /** GET /v1/config/api-keys — returns masked keys + configured status */
 export async function handleGetApiKeys(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestId = getOrCreateRequestId(req);
@@ -212,25 +258,12 @@ export async function handleSetApiKeys(req: IncomingMessage, res: ServerResponse
   let saveFailed = false;
   try {
     const envPath = getEnvFilePath();
-    let envContent = existsSync(envPath) ? readFileSync(envPath, 'utf8') : '';
-
-    for (const [envVar, value] of Object.entries(updates)) {
-      if (typeof value !== 'string') continue;
-      // Remove existing line for this var (escape envVar for regex safety)
-      const escapedVar = envVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const regex = new RegExp(`^${escapedVar}=.*$`, 'm');
-      envContent = envContent.replace(regex, '').replace(/\n{3,}/g, '\n\n');
-
-      // Add new line if value is non-empty (escape special chars)
-      if (value) {
-        envContent = envContent.trimEnd() + `\n${envVar}=${escapeEnvValue(value)}\n`;
-      }
-    }
-
-    writeFileSync(envPath, envContent, { mode: 0o600 });
-    // Belt-and-suspenders: writeFileSync mode only applies on file creation;
-    // chmodSync enforces 0o600 on pre-existing files too.
-    try { chmodSync(envPath, 0o600); } catch { /* best-effort: cleanup or optional side-effect */ }
+    const existing = existsSync(envPath) ? readFileSync(envPath, 'utf8') : '';
+    // #709: build the new body with a pure helper, then write atomically
+    // (tmp+fsync+rename) so a crash mid-write can't truncate `.env` and lose
+    // unrelated secrets. Replaces the previous in-place writeFileSync.
+    const envContent = mergeEnvContent(existing, updates);
+    atomicWriteEnv(envPath, envContent);
   } catch (err) {
     log.error('Failed to persist API keys to .env:', err);
     saveFailed = true;

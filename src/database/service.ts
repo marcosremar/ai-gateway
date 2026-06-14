@@ -17,6 +17,29 @@ import { createSqlDriver } from './pg-driver';
 import { DatabaseError } from './types';
 import type { DatabaseConfig, QueryResult, BackupInfo, BackupOptions, BackupResult, RestoreOptions, NeonProject, NeonBranch, NeonDatabase, NeonEndpoint } from './types';
 import type { SqlDriver } from './pg-driver';
+import { createLogger } from '../logger';
+
+const log = createLogger('database');
+
+/**
+ * Redact credentials from a database URL for safe logging (#786).
+ *
+ * Pure → unit-testable. Parses the URL and masks the password entirely and the
+ * username down to a 3-char prefix; the naive `/:[^@]+@/` regex would leak the
+ * password if it contained a literal `@`. Returns `<unparseable>` for malformed
+ * input so we never accidentally log a raw connection string. Output is capped
+ * to 100 chars.
+ */
+export function redactDatabaseUrl(url: string | undefined): string {
+  try {
+    const u = new URL(url ?? '');
+    if (u.password) u.password = '***';
+    if (u.username) u.username = u.username.slice(0, 3) + '***';
+    return u.toString().slice(0, 100);
+  } catch {
+    return '<unparseable>';
+  }
+}
 
 // ── Dynamic Prisma loader (no hard dep on @prisma/client) ───────────────────
 
@@ -37,17 +60,10 @@ function loadPrisma(config: DatabaseConfig): unknown {
   // Robust redaction via URL parsing — naive `/:[^@]+@/` regex leaks the
   // password if it contains literal `@` (the regex stops at first `@`,
   // exposing the rest of the password).
-  const redactedUrl = (() => {
-    try {
-      const u = new URL(config.databaseUrl ?? '');
-      if (u.password) u.password = '***';
-      if (u.username) u.username = u.username.slice(0, 3) + '***';
-      return u.toString().slice(0, 100);
-    } catch {
-      return '<unparseable>';
-    }
-  })();
-  console.log('[database] loadPrisma env:', config.environment, '| url:', redactedUrl);
+  // #786: route through the structured logger (gated by level) instead of a raw
+  // console.log that fired on every init regardless of configured log level.
+  const redactedUrl = redactDatabaseUrl(config.databaseUrl);
+  log.debug({ env: config.environment, url: redactedUrl }, 'loadPrisma');
   if (config.environment === 'neon') {
     try {
       // Use PrismaNeonHTTP (HTTP/fetch via port 443) to avoid TCP port 5432 firewall issues.

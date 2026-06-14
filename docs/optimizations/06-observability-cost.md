@@ -1,5 +1,15 @@
 # Observability, Metrics & Cost Tracking — 100 Optimizations (IDs 501-600)
 
+> **Implementation status (waves 1-5):** the **safe, localized, in-scope pool is
+> exhausted.** Every remaining unimplemented ID either lives outside the
+> observability ownership set (`src/gateway/state/**`, `src/platform/observability/**`,
+> `src/gateway/routing|providers/**`, `server/gpu-monitor-loop.ts`) or is a
+> High-impact cross-cutting change needing an ADR (e.g. #522/#523 cost-model
+> reconciliation, #576 event-bus consolidation). See
+> [`implemented/06-observability-w5.md`](implemented/06-observability-w5.md) for
+> the per-ID deferral reasons. Further safe work here requires relaxing the
+> ownership boundary.
+
 > This audit covers the gateway's observability and cost-tracking surface: in-memory metrics & latency ring buffers (`src/gateway/state/metrics-state.ts`, `server/metrics.ts`), per-request inference cost tracking (`server/cost-tracker.ts`, `src/tracking/`), daily GPU spend / budget enforcement (`src/gateway/state/cost-state.ts`, `server/gpu-monitor-loop.ts`), GPU cost-leak audit (`server/gpu-cost-audit.ts`), distributed tracing & OTLP export (`src/platform/observability/`), the typed event bus (`src/event-bus/`, `server/event-bus.ts`), hooks (`src/events/hooks.ts`), alert channels (`src/alerting/`), Prometheus `/metrics`, Langfuse, and TTFAC tracking. Recurring problems: percentile math that conflates "nearest-rank" with "max" or treats percentiles as histogram buckets; O(n log n) sorts on every scrape; unbounded in-memory sample arrays; two parallel cost models (`server/cost-tracker.ts` flat-rate vs `src/tracking/pricing.ts` per-1M-token) that never reconcile; daily-spend persistence races; metric cardinality risk on unbounded label values; fire-and-forget alert/hook delivery with no retry, queue, or dead-letter; and significant `src/` ↔ `src/modules/` duplication/drift. Cost (economia) is heavily represented because spend accuracy and budget enforcement have the highest direct dollar impact.
 
 ## Latency, Percentiles & Ring Buffers
