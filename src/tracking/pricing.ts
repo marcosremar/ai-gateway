@@ -12,6 +12,26 @@ export interface ModelPricing {
 }
 
 /**
+ * #530 — revision stamp for {@link DEFAULT_PRICING_TABLE}. Provider prices drift
+ * quarterly; an undated table silently mis-bills with stale rates. Bump this
+ * (YYYY-MM-DD) whenever a rate changes. {@link isPricingStale} flags a table
+ * that has not been reviewed within N months.
+ */
+export const PRICING_TABLE_AS_OF = '2026-06-14';
+
+/**
+ * True when the pricing table is older than `maxAgeMonths` (default 6) relative
+ * to `now`. Lets a startup check / test warn when rates may be out of date.
+ */
+export function isPricingStale(maxAgeMonths = 6, now: Date = new Date()): boolean {
+  const asOf = new Date(`${PRICING_TABLE_AS_OF}T00:00:00Z`);
+  if (Number.isNaN(asOf.getTime())) return true; // unparseable stamp = treat as stale
+  const ageMs = now.getTime() - asOf.getTime();
+  const maxAgeMs = maxAgeMonths * 30 * 24 * 60 * 60 * 1000; // ~30-day months
+  return ageMs > maxAgeMs;
+}
+
+/**
  * Key format: "provider/model" or just "model" for provider-agnostic pricing.
  */
 export const DEFAULT_PRICING_TABLE: Record<string, ModelPricing> = {

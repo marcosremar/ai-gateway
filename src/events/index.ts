@@ -41,6 +41,12 @@ class EventBus {
   private historyCount = 0; // total events ever written (for ordering)
   private maxHistory = 1000;
   private paused = false;
+  /**
+   * #578 — per-type history rings so getHistory(eventType) reads only that type's
+   * events instead of filtering the whole 1000-entry global ring on every call.
+   * Each list is chronological and bounded to maxHistory.
+   */
+  private historyByType = new Map<string, EventBusEvent[]>();
 
   /**
    * Subscribe to an event type.
@@ -104,6 +110,15 @@ class EventBus {
     this.historyCursor = (this.historyCursor + 1) % this.maxHistory;
     this.historyCount++;
 
+    // Per-type ring (#578) so getHistory(type) skips the full-ring scan.
+    let typeRing = this.historyByType.get(eventType);
+    if (!typeRing) {
+      typeRing = [];
+      this.historyByType.set(eventType, typeRing);
+    }
+    typeRing.push(event);
+    if (typeRing.length > this.maxHistory) typeRing.shift();
+
     // Notify handlers
     const handlers = this.handlers.get(eventType) ?? [];
     const errors: Error[] = [];
@@ -144,9 +159,12 @@ class EventBus {
    * Get event history (chronological order, oldest first).
    */
   getHistory(eventType?: string, limit = 100): EventBusEvent[] {
-    const ordered = this.orderedHistory();
-    const events = eventType ? ordered.filter((e) => e.type === eventType) : ordered;
-    return events.slice(-limit);
+    if (eventType) {
+      // #578 — read the per-type ring directly; no scan over unrelated events.
+      const ring = this.historyByType.get(eventType);
+      return ring ? ring.slice(-limit) : [];
+    }
+    return this.orderedHistory().slice(-limit);
   }
 
   /**
@@ -181,6 +199,7 @@ class EventBus {
     this.history = [];
     this.historyCursor = 0;
     this.historyCount = 0;
+    this.historyByType.clear();
   }
 }
 

@@ -47,8 +47,21 @@ const COST_PER_REQUEST: Record<string, number> = {
 
 let totalInferenceCostUsd = 0;
 let requestCount = 0;
+/**
+ * #594 — Monotonic cumulative inference cost. Unlike `totalInferenceCostUsd`
+ * (which `resetDailyInferenceCost()` zeroes at the daily rollover, so a Grafana
+ * `increase()` over the reset goes negative), this counter only ever grows for
+ * the process lifetime. Exported as `gateway_inference_spend_usd_total` so
+ * cumulative cloud spend survives the daily reset.
+ */
+let cumulativeInferenceCostUsd = 0;
 /** Per-provider cost breakdown for `/metrics` (mirrors metricsCounters.byProvider). */
 const costByProvider: Record<string, number> = {};
+/** #563 — per-provider request + success counts so `/metrics` can expose
+ *  cost-per-SUCCESSFUL-request (a high-error provider that burns money on
+ *  retries is invisible when cost is divided by total requests). */
+const requestsByProvider: Record<string, number> = {};
+const successByProvider: Record<string, number> = {};
 /** Count of requests whose provider:stage pair has no entry in COST_PER_REQUEST. */
 let unmappedCount = 0;
 /** Provider:stage keys we've already warned about (warn once, not per-request). */
@@ -62,6 +75,10 @@ export interface InferenceCostStats {
   byProvider: Record<string, number>;
   /** Number of requests that hit an unmapped provider:stage (recorded as $0). */
   unmappedRequests: number;
+  /** #594 — monotonic cumulative cost (survives daily reset). */
+  cumulativeUsd: number;
+  /** #563 — per-provider cost ÷ successful requests (null when no successes). */
+  costPerSuccessByProvider: Record<string, number>;
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -75,15 +92,24 @@ export interface InferenceCostStats {
  * GPU + cloud spend; a runaway cloud loop now counts toward DAILY_BUDGET_USD.
  * GPU stages are $0 here (their cost is the hourly rental tracked separately).
  */
-export function recordInferenceCost(provider: string, stage: string, tokens?: number): void {
+export function recordInferenceCost(
+  provider: string,
+  stage: string,
+  tokens?: number,
+  /** #563 — whether the request succeeded (default true for back-compat). */
+  success = true,
+): void {
   const key = `${provider}:${stage}`;
   const mapped = Object.prototype.hasOwnProperty.call(COST_PER_REQUEST, key);
   const baseCost = mapped ? COST_PER_REQUEST[key] : 0;
   const cost = tokens ? baseCost * (tokens / 1000) : baseCost;
 
   totalInferenceCostUsd += cost;
+  cumulativeInferenceCostUsd += cost;
   requestCount++;
   costByProvider[provider] = (costByProvider[provider] ?? 0) + cost;
+  requestsByProvider[provider] = (requestsByProvider[provider] ?? 0) + 1;
+  if (success) successByProvider[provider] = (successByProvider[provider] ?? 0) + 1;
 
   // An unmapped pair silently records $0 — surface it so spend gaps are visible
   // instead of vanishing. Warn once per key; count every occurrence.
@@ -127,6 +153,16 @@ export function getInferenceCostStats(): InferenceCostStats {
   for (const [p, v] of Object.entries(costByProvider)) {
     byProvider[p] = Math.round(v * 10000) / 10000;
   }
+  // #563 — cost per SUCCESSFUL request, per provider. Skip providers with no
+  // recorded success (would divide by zero) and providers with $0 cost (no
+  // signal). A high error rate shows up as inflated cost-per-success.
+  const costPerSuccessByProvider: Record<string, number> = {};
+  for (const [p, cost] of Object.entries(costByProvider)) {
+    const successes = successByProvider[p] ?? 0;
+    if (successes > 0 && cost > 0) {
+      costPerSuccessByProvider[p] = Math.round((cost / successes) * 100000) / 100000;
+    }
+  }
   return {
     totalUsd: Math.round(totalInferenceCostUsd * 10000) / 10000,
     requests: requestCount,
@@ -135,14 +171,37 @@ export function getInferenceCostStats(): InferenceCostStats {
       : 0,
     byProvider,
     unmappedRequests: unmappedCount,
+    cumulativeUsd: Math.round(cumulativeInferenceCostUsd * 10000) / 10000,
+    costPerSuccessByProvider,
   };
 }
 
-/** Reset counters (e.g. daily reset via cron or monitor loop). */
+/**
+ * #527 — seed the cumulative-cost counter from a persisted value at startup so
+ * the monotonic `gateway_inference_spend_usd_total` survives a restart. Only
+ * advances the counter (never lowers it) and ignores invalid input.
+ */
+export function loadInferenceCostTotal(persistedCumulativeUsd: number): void {
+  if (Number.isFinite(persistedCumulativeUsd) && persistedCumulativeUsd > cumulativeInferenceCostUsd) {
+    cumulativeInferenceCostUsd = persistedCumulativeUsd;
+  }
+}
+
+/** #527 — current monotonic cumulative cost, for persistence to disk. */
+export function getCumulativeInferenceCostUsd(): number {
+  return Math.round(cumulativeInferenceCostUsd * 10000) / 10000;
+}
+
+/**
+ * Reset DAILY counters (e.g. daily reset via cron or monitor loop).
+ * The cumulative monotonic total (#594) is intentionally NOT reset here.
+ */
 export function resetDailyInferenceCost(): void {
   totalInferenceCostUsd = 0;
   requestCount = 0;
   unmappedCount = 0;
   for (const k of Object.keys(costByProvider)) delete costByProvider[k];
+  for (const k of Object.keys(requestsByProvider)) delete requestsByProvider[k];
+  for (const k of Object.keys(successByProvider)) delete successByProvider[k];
   warnedUnmapped.clear();
 }

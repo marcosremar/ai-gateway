@@ -8,10 +8,27 @@
 import type { UsageLogStore } from '../deps';
 
 export interface CostAnomaly {
-  type: 'high_spend_user' | 'background_spike' | 'expensive_model' | 'untracked_realtime' | 'idle_gpu_waste';
+  type:
+    | 'high_spend_user'
+    | 'background_spike'
+    | 'expensive_model'
+    | 'untracked_realtime'
+    | 'idle_gpu_waste'
+    | 'baseline_spend_spike';
   severity: 'info' | 'warning' | 'critical';
   message: string;
   data?: Record<string, unknown>;
+}
+
+/** Per-user historical spend baseline for relative (z-score) anomaly detection. */
+export interface UserSpendBaseline {
+  userId: string;
+  /** Today's spend (USD). */
+  todayUsd: number;
+  /** Mean of prior-day spend over the baseline window (USD). */
+  meanUsd: number;
+  /** Std-dev of prior-day spend over the baseline window (USD). */
+  stdDevUsd: number;
 }
 
 /** Minimal alert sink — the AlertRouter shape, kept structural to avoid a hard
@@ -55,6 +72,19 @@ export interface CostAnomalyDetectorConfig {
    * per-request cost is untrackable, from their duration, instead of $0 (#561).
    */
   realtimeUsdPerMinute: number;
+  /**
+   * #557 — z-score above a user's own rolling baseline mean at which their spend
+   * is flagged. Absolute thresholds (highSpendThresholdUsd) cause alert fatigue
+   * for power users and miss a normally-$0.01 user spiking to $0.50; a per-user
+   * baseline catches the relative anomaly. Default 3 (≈99.7th percentile).
+   */
+  baselineSpikeZScore: number;
+  /**
+   * #557 — minimum absolute today-spend (USD) before the baseline z-score check
+   * fires, so a user going from $0.00 to $0.02 doesn't trip a huge z-score on a
+   * near-zero stddev. Default $0.10.
+   */
+  baselineSpikeMinUsd: number;
 }
 
 const DEFAULT_CONFIG: CostAnomalyDetectorConfig = {
@@ -64,6 +94,8 @@ const DEFAULT_CONFIG: CostAnomalyDetectorConfig = {
   absoluteBackgroundSpikeCount: 1000,
   idleGpuMinutes: 30,
   realtimeUsdPerMinute: 0.06, // ~OpenAI gpt-4o-mini-realtime audio order of magnitude
+  baselineSpikeZScore: 3,
+  baselineSpikeMinUsd: 0.10,
 };
 
 export interface CostAnomalyDetectorDeps {
@@ -71,8 +103,19 @@ export interface CostAnomalyDetectorDeps {
   getIdleGpuSnapshot?: () => IdleGpuSnapshot | null | undefined;
   /** Alert sink for detectAndAlert() (#559/#560). */
   alertSink?: AnomalyAlertSink;
+  /**
+   * #557 — per-user spend baselines for relative (z-score) anomaly detection.
+   * Optional: when absent the baseline check is skipped (behavior unchanged).
+   */
+  getUserSpendBaselines?: () => Promise<UserSpendBaseline[]> | UserSpendBaseline[];
   /** Clock injection for deterministic tests. */
   now?: () => number;
+}
+
+/** Compute the z-score of `value` against a mean/stddev, guarding stddev≈0. */
+export function spendZScore(value: number, meanUsd: number, stdDevUsd: number): number {
+  if (!(stdDevUsd > 0)) return value > meanUsd ? Infinity : 0;
+  return (value - meanUsd) / stdDevUsd;
 }
 
 export function createCostAnomalyDetector(
@@ -213,6 +256,33 @@ export function createCostAnomalyDetector(
         // traffic. Fed by the monitor loop's snapshot rather than the usage log.
         const idle = detectIdleGpuWaste();
         if (idle) anomalies.push(idle);
+
+        // 6. Per-user baseline spend spike (#557) — relative to each user's own
+        // rolling history, not an absolute cap. Opt-in: only runs when a baseline
+        // provider is supplied. Catches a normally-cheap user spiking even if
+        // they're far below highSpendThresholdUsd, without flagging steady power
+        // users every day.
+        if (deps.getUserSpendBaselines) {
+          const baselines = await deps.getUserSpendBaselines();
+          for (const b of baselines) {
+            if (b.todayUsd < cfg.baselineSpikeMinUsd) continue;
+            const z = spendZScore(b.todayUsd, b.meanUsd, b.stdDevUsd);
+            if (z >= cfg.baselineSpikeZScore) {
+              anomalies.push({
+                type: 'baseline_spend_spike',
+                severity: z >= cfg.baselineSpikeZScore * 2 ? 'critical' : 'warning',
+                message: `User ${b.userId} spent $${b.todayUsd.toFixed(4)} today — ${Number.isFinite(z) ? z.toFixed(1) : '∞'}σ above their $${b.meanUsd.toFixed(4)} baseline`,
+                data: {
+                  userId: b.userId,
+                  todayUsd: b.todayUsd,
+                  meanUsd: b.meanUsd,
+                  stdDevUsd: b.stdDevUsd,
+                  zScore: Number.isFinite(z) ? Math.round(z * 100) / 100 : null,
+                },
+              });
+            }
+          }
+        }
       } catch (error) {
         console.warn('[CostAnomalyDetector] Error:', error);
       }

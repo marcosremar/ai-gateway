@@ -11,7 +11,7 @@ import { safeCatch } from '../src/safe-catch';
 const log = createLogger('diagnostics-handlers');
 import {
   getAllReputations, loadReputationsByGpuType,
-  aggregateRequestLogsToReputation,
+  aggregateRequestLogsToReputation, computePercentile,
 } from './metrics';
 import { getOrCreateRequestId, setRequestIdHeader, readJsonBody } from './http-utils';
 import { getLatencyDbStats, getAllHostLatencies } from './latency-db';
@@ -101,13 +101,16 @@ export async function handleDiagnosticsScores(req: IncomingMessage, res: ServerR
       prisma.gpuCompatibilityTest.count(),
     ]);
 
-    // 6. In-memory metrics
-    const latencyP50 = latencyRing.length > 0
-      ? [...latencyRing].sort((a, b) => a - b)[Math.floor(latencyRing.length * 0.5)]
-      : null;
-    const latencyP95 = latencyRing.length > 0
-      ? [...latencyRing].sort((a, b) => a - b)[Math.floor(latencyRing.length * 0.95)]
-      : null;
+    // 6. In-memory metrics. #502 — sort the ring ONCE and slice both percentiles
+    // from the shared copy (was two independent `[...latencyRing].sort()` calls,
+    // tripling the work). Use the shared nearest-rank computePercentile() so p50/
+    // p95 here agree with /metrics instead of the old `Math.floor` off-by-one
+    // (floor(n*0.95) overshot for small n, overstating the tail).
+    const sortedLatency = latencyRing.length > 0
+      ? [...latencyRing].sort((a, b) => a - b)
+      : [];
+    const latencyP50 = sortedLatency.length > 0 ? computePercentile(sortedLatency, 50) : null;
+    const latencyP95 = sortedLatency.length > 0 ? computePercentile(sortedLatency, 95) : null;
 
     // Oldest records
     const oldestRequest = await prisma.requestLog.findFirst({ orderBy: { timestamp: 'asc' }, select: { timestamp: true } });

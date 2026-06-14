@@ -41,7 +41,20 @@ export interface CostAuditReport {
   warnings: string[];
 }
 
-const RUNPOD_VOLUME_USD_PER_GB_MONTH = 0.10;
+/** #534 — RunPod network-volume rate (USD/GB/month). Was a hardcoded literal
+ *  that drifts as RunPod changes pricing; surface it as config so operators can
+ *  re-validate against the current rate without a code change. Falls back to the
+ *  documented ~$0.10/GB/mo default when unset/invalid. */
+const RUNPOD_VOLUME_USD_PER_GB_MONTH = (() => {
+  const n = Number(process.env.RUNPOD_VOLUME_USD_PER_GB_MONTH);
+  return Number.isFinite(n) && n > 0 ? n : 0.10;
+})();
+
+/** #534 — estimate a RunPod network volume's monthly cost from its size (GB). */
+export function estRunpodVolumeMonthlyUsd(sizeGb: number): number {
+  const gb = Number.isFinite(sizeGb) && sizeGb > 0 ? sizeGb : 0;
+  return Math.round(gb * RUNPOD_VOLUME_USD_PER_GB_MONTH * 100) / 100;
+}
 /** Stopped-pod storage rate (USD/GB/month) and assumed disk when size unknown.
  *  A stopped Vast pod still pays for its container disk; the API doesn't reliably
  *  expose the size here, so estimate from a configurable default. */
@@ -80,7 +93,7 @@ export async function auditGpuCosts(opts: { destroyOrphans?: boolean } = {}): Pr
     try {
       const volumes = await runpod.listNetworkVolumes({ apiKey: rpKey });
       for (const v of volumes) {
-        const est = v.size * RUNPOD_VOLUME_USD_PER_GB_MONTH;
+        const est = estRunpodVolumeMonthlyUsd(v.size);
         // A volume is "tracked" if its name matches the gateway's current or
         // standby pod, OR if its id is referenced in any running tracked pod.
         // Without provider-side attachment info we default to conservative:

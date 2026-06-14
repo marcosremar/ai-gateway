@@ -83,6 +83,90 @@ export function resolveDailySpendSlo(env: NodeJS.ProcessEnv = process.env): numb
   return Number.isFinite(raw) && raw > 0 ? raw : SLO_TARGETS.dailySpendUsd;
 }
 
+// ── SLO evaluator (#598) ──────────────────────────────────────────────────────
+// SLO_TARGETS + SLO_BREACH_POLICY existed but nothing compared live metrics
+// against them, so the page/failover thresholds were dead config. This evaluator
+// takes a metrics snapshot and returns the set of breached SLOs plus the
+// recommended action per SLO_BREACH_POLICY. Pure + injectable for tests.
+
+/** The subset of the metrics snapshot the SLO evaluator reads. All optional —
+ *  a missing field simply skips that SLO (can't breach what you don't measure). */
+export interface SloMetricsSnapshot {
+  chatP95Ms?: number;
+  speechPipelineP95Ms?: number;
+  sttP95Ms?: number;
+  ttsP95Ms?: number;
+  healthP99Ms?: number;
+  gpuColdBootP95Ms?: number;
+  gpuSnapshotRestoreP95Ms?: number;
+  /** Observed HTTP availability ratio (0-1). Breaches when BELOW target. */
+  uptimeRatio?: number;
+  /** Observed daily spend (USD). Breaches when ABOVE the live budget cap. */
+  dailySpendUsd?: number;
+  /** Observed boot failure rate (0-1). Breaches when ABOVE target. */
+  bootFailureRate?: number;
+}
+
+export interface SloBreach {
+  metric: SloMetricKey;
+  observed: number;
+  target: number;
+  /** 'over' = observed exceeded a ceiling; 'under' = observed fell below a floor. */
+  direction: 'over' | 'under';
+}
+
+/** SLOs where a HIGHER observed value than target is the breach (latency, spend). */
+const CEILING_METRICS: SloMetricKey[] = [
+  'chatP95Ms', 'speechPipelineP95Ms', 'sttP95Ms', 'ttsP95Ms', 'healthP99Ms',
+  'gpuColdBootP95Ms', 'gpuSnapshotRestoreP95Ms', 'dailySpendUsd', 'bootFailureRate',
+];
+
+/**
+ * Evaluate a metrics snapshot against the SLO targets. Returns every breached
+ * SLO. The daily-spend target is resolved from the live budget env (#599) so it
+ * never drifts from the deploy gate. `uptimeRatio` is a FLOOR (breach when below);
+ * all other metrics are CEILINGS (breach when above).
+ */
+export function evaluateSlos(
+  snap: SloMetricsSnapshot,
+  env: NodeJS.ProcessEnv = process.env,
+): SloBreach[] {
+  const breaches: SloBreach[] = [];
+  const dailySpendTarget = resolveDailySpendSlo(env);
+
+  for (const metric of CEILING_METRICS) {
+    const observed = snap[metric as keyof SloMetricsSnapshot];
+    if (observed === undefined) continue;
+    const target = metric === 'dailySpendUsd' ? dailySpendTarget : (SLO_TARGETS[metric] as number);
+    if (observed > target) {
+      breaches.push({ metric, observed, target, direction: 'over' });
+    }
+  }
+
+  // Uptime is a floor: breach when observed availability drops BELOW the target.
+  if (snap.uptimeRatio !== undefined && snap.uptimeRatio < SLO_TARGETS.uptimeRatio) {
+    breaches.push({
+      metric: 'uptimeRatio',
+      observed: snap.uptimeRatio,
+      target: SLO_TARGETS.uptimeRatio,
+      direction: 'under',
+    });
+  }
+
+  return breaches;
+}
+
+/**
+ * Map a count of recent breaches to the escalation action per SLO_BREACH_POLICY.
+ * 'none' < 'warn' < 'page' < 'failover'.
+ */
+export function breachAction(recentBreachCount: number): 'none' | 'warn' | 'page' | 'failover' {
+  if (recentBreachCount >= SLO_BREACH_POLICY.failoverThreshold) return 'failover';
+  if (recentBreachCount >= SLO_BREACH_POLICY.pageThreshold) return 'page';
+  if (recentBreachCount >= SLO_BREACH_POLICY.warningThreshold) return 'warn';
+  return 'none';
+}
+
 /** Pretty-print a target for inclusion in alert messages. */
 export function formatTarget(key: SloMetricKey): string {
   const v = SLO_TARGETS[key];

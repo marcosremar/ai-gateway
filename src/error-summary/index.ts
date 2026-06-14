@@ -41,6 +41,26 @@ class ErrorSummaryTracker {
   private readonly ALERT_CHECK_INTERVAL_MS = 60_000; // Check every minute
   private readonly HIGH_ERROR_RATE_THRESHOLD = 0.10; // 10% error rate
   private readonly CRITICAL_SPIKE_THRESHOLD = 5; // 5 critical errors in 5 min
+  /**
+   * #587 — total-operation timestamps (epoch ms) so we can compute a TRUE error
+   * RATE (errors ÷ operations) in the 5-min window rather than a raw error count.
+   * A bounded ring; only populated when callers wire recordOperation(). Without
+   * it, the alert falls back to the absolute-volume threshold.
+   */
+  private operationTsMs: number[] = [];
+  private readonly maxOperations = 5000;
+  /** Minimum operations in the window before a RATE-based alert is trusted. */
+  private readonly MIN_OPS_FOR_RATE = 20;
+
+  /**
+   * #587 — record that an operation occurred (success OR failure). Lets the
+   * high-error alert use a real rate. Fire this on every request/deploy attempt.
+   */
+  recordOperation(): void {
+    const now = Date.now();
+    this.operationTsMs.push(now);
+    if (this.operationTsMs.length > this.maxOperations) this.operationTsMs.shift();
+  }
 
   /** Record a deploy error */
   record(err: unknown, deployId?: string): DeployError | null {
@@ -107,22 +127,35 @@ class ErrorSummaryTracker {
 
     const newAlerts: ErrorAlert[] = [];
 
-    // Check 1: High error volume (>=N in last 5 minutes).
-    // Previous implementation computed `recentErrors / recentTotal` from the
-    // SAME filtered set — both were only errors, so rate was always 1.0,
-    // tripping the >10% threshold every >10-error window. This collection
-    // doesn't track total operations (only errors), so use a raw-count
-    // threshold instead. Operators can reason about absolute volume.
+    // Check 1: High error rate in last 5 minutes.
+    // #587 — When total operations are tracked (recordOperation), compute a TRUE
+    // rate (errors ÷ ops) so 50/60 (catastrophic) is distinguished from 50/50000
+    // (noise). The previous raw-count threshold couldn't tell them apart. Falls
+    // back to the absolute-volume threshold when no operations are recorded.
+    const windowStart = now - 5 * 60 * 1000;
     const recentErrors = this.errors.filter(e =>
-      (e.tsMs ?? Date.parse(e.timestamp)) > now - 5 * 60 * 1000
+      (e.tsMs ?? Date.parse(e.timestamp)) > windowStart
     );
+    const recentOps = this.operationTsMs.filter(ts => ts > windowStart).length;
     const HIGH_ERROR_VOLUME_5MIN = 50;
 
-    if (recentErrors.length >= HIGH_ERROR_VOLUME_5MIN) {
+    if (recentOps >= this.MIN_OPS_FOR_RATE) {
+      const rate = recentErrors.length / recentOps;
+      if (rate >= this.HIGH_ERROR_RATE_THRESHOLD) {
+        newAlerts.push({
+          type: 'high_error_rate',
+          severity: rate >= this.HIGH_ERROR_RATE_THRESHOLD * 5 ? 'critical' : 'warning',
+          message: `Error rate ${(rate * 100).toFixed(1)}% over last 5 minutes (${recentErrors.length}/${recentOps}, threshold ${(this.HIGH_ERROR_RATE_THRESHOLD * 100).toFixed(0)}%)`,
+          currentValue: Math.round(rate * 1000) / 1000,
+          threshold: this.HIGH_ERROR_RATE_THRESHOLD,
+          triggeredAt: new Date().toISOString(),
+        });
+      }
+    } else if (recentErrors.length >= HIGH_ERROR_VOLUME_5MIN) {
       newAlerts.push({
         type: 'high_error_rate',
         severity: 'warning',
-        message: `${recentErrors.length} errors in last 5 minutes (threshold: ${HIGH_ERROR_VOLUME_5MIN})`,
+        message: `${recentErrors.length} errors in last 5 minutes (threshold: ${HIGH_ERROR_VOLUME_5MIN}; no op-count for rate)`,
         currentValue: recentErrors.length,
         threshold: HIGH_ERROR_VOLUME_5MIN,
         triggeredAt: new Date().toISOString(),
@@ -172,6 +205,11 @@ class ErrorSummaryTracker {
     return this.alerts.filter(a => !a.acknowledged);
   }
 
+  /** Force the next checkAlerts() to run (bypass the 60s throttle). Tests only. */
+  _forceAlertCheck(): void {
+    this.lastAlertCheck = 0;
+  }
+
   /**
    * Acknowledge an alert.
    */
@@ -193,6 +231,7 @@ class ErrorSummaryTracker {
   /** Clear all tracked errors */
   clear(): void {
     this.errors = [];
+    this.operationTsMs = [];
   }
 
   /** Current count */

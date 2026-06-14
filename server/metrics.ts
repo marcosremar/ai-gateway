@@ -6,12 +6,13 @@ import { createLogger } from '../src/logger';
 import { safeCatch } from '../src/safe-catch';
 import type { IncomingMessage, ServerResponse } from 'http';
 import {
-  prisma, latencyRing,
+  prisma, latencyRing, latencyRingGeneration,
   metricsCounters, providerMetrics, setPendingDbWrites,
   setConsecutiveDbFailures, DB_FAILURE_WARN_THRESHOLD,
   activeDeploySessionId, setActiveDeploySessionId, startedAt, deployState,
   dailyGpuSpendUsd, DAILY_BUDGET_USD,
 } from './state';
+import { getInferenceCostStats } from './cost-tracker';
 
 // Module-level counters for pending DB writes and consecutive failures.
 // These are read directly inside async closures (.then/.catch), so they must
@@ -845,6 +846,56 @@ export function computePercentile(sortedArr: number[], p: number): number {
   return sortedArr[Math.max(0, idx)];
 }
 
+// ── Cached sorted latency snapshot (#501) ─────────────────────────────────────
+// `snapshotMetrics()` used to `[...latencyRing].sort()` (O(n log n), n≈1000) on
+// EVERY /metrics scrape, then compute p50/p95/p99 off it. The ring only changes
+// when recordGpuLatency() bumps `latencyRingGeneration`, so cache the sorted copy
+// and reuse it across scrapes until the generation advances — exactly the pattern
+// getP95Latency() already uses. Frequent scrapers now pay the sort once per new
+// sample batch, not once per request.
+let _sortedLatencyCache: number[] = [];
+let _sortedLatencyCacheGen = -1;
+
+export function getSortedLatencies(): number[] {
+  if (_sortedLatencyCacheGen !== latencyRingGeneration) {
+    _sortedLatencyCache = [...latencyRing].sort((a, b) => a - b);
+    _sortedLatencyCacheGen = latencyRingGeneration;
+  }
+  return _sortedLatencyCache;
+}
+
+// ── Provider label allow-list (#592) ──────────────────────────────────────────
+// `byProvider`/`byStage` accept any string key, and RequestLogInput.provider is
+// typed open; an unexpected provider value would add a permanent Prometheus
+// series (unbounded label cardinality). Bucket unknown providers under "other"
+// in the exposition so the cardinality is bounded to the known enum + 1.
+const KNOWN_PROVIDERS = new Set([
+  'gpu', 'groq', 'openai', 'fireworks', 'openrouter', 'ollama',
+  'deepgram', 'modal', 'ensemble', 'cache', 'hybrid', 'stream', 'elevenlabs',
+]);
+
+export function isKnownProvider(provider: string): boolean {
+  return KNOWN_PROVIDERS.has(provider);
+}
+
+// ── Bounded GPU-status enum (#593) ────────────────────────────────────────────
+// A gauge whose label carried the raw status string created a new, lingering
+// Prometheus series per distinct value. Constrain to a fixed enum (+ "other").
+const GPU_STATUS_KNOWN = new Set([
+  'idle', 'deploying', 'booting', 'installing', 'ready', 'error', 'stopped', 'terminated', 'unknown',
+]);
+const GPU_STATUS_ENUM = [...GPU_STATUS_KNOWN, 'other'] as const;
+
+/** Collapse unknown provider keys into a single "other" bucket (#592). */
+function bucketProviderCounts(byProvider: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [provider, count] of Object.entries(byProvider)) {
+    const key = isKnownProvider(provider) ? provider : 'other';
+    out[key] = (out[key] ?? 0) + count;
+  }
+  return out;
+}
+
 // ── /metrics endpoint ───────────────────────────────────────────────────────
 
 /**
@@ -853,8 +904,11 @@ export function computePercentile(sortedArr: number[], p: number): number {
  * — they always see the same underlying numbers at the same instant.
  */
 function snapshotMetrics(): Record<string, unknown> {
-  const sorted = [...latencyRing].sort((a, b) => a - b);
+  // #501 — reuse the generation-cached sorted ring instead of sorting per scrape.
+  const sorted = getSortedLatencies();
   const uptimeSec = Math.round((Date.now() - startedAt) / 1000);
+  const inference = getInferenceCostStats();
+  const gpuReqCount = metricsCounters.byProvider['gpu'] || 0;
 
   return {
     requestsTotal: metricsCounters.requestsTotal,
@@ -878,11 +932,20 @@ function snapshotMetrics(): Record<string, unknown> {
       dailyBudgetUsd: DAILY_BUDGET_USD,
       budgetPct: DAILY_BUDGET_USD > 0 ? Math.round((dailyGpuSpendUsd / DAILY_BUDGET_USD) * 100) : 0,
       costPerHr: deployState.costPerHr || 0,
-      gpuRequests: metricsCounters.byProvider['gpu'] || 0,
-      cloudRequests: (metricsCounters.byProvider['groq'] || 0) + (metricsCounters.byProvider['openai'] || 0) + (metricsCounters.byProvider['modal'] || 0),
-      costPerGpuRequest: (metricsCounters.byProvider['gpu'] || 0) > 0 && deployState.costPerHr > 0
-        ? +(dailyGpuSpendUsd / (metricsCounters.byProvider['gpu'] || 1)).toFixed(5)
+      gpuRequests: gpuReqCount,
+      // #533 — cloud = total − gpu, instead of an allow-list sum of 3 providers
+      // (which silently dropped fireworks/openrouter/deepgram). Clamp at 0.
+      cloudRequests: Math.max(0, metricsCounters.requestsTotal - gpuReqCount),
+      // #532 — this divides ALL daily spend (incl. idle-time) by GPU request
+      // count, so a mostly-idle pod inflates it. Label it honestly as a blended
+      // daily figure rather than a true per-request cost.
+      blendedCostPerGpuRequestUsd: gpuReqCount > 0 && deployState.costPerHr > 0
+        ? +(dailyGpuSpendUsd / gpuReqCount).toFixed(5)
         : null,
+      // #594 — monotonic cumulative cloud inference spend (survives daily reset).
+      inferenceSpendTotalUsd: inference.cumulativeUsd,
+      // #563 — cost per SUCCESSFUL request, per cloud provider.
+      costPerSuccessByProvider: inference.costPerSuccessByProvider,
     },
   };
 }
@@ -931,8 +994,9 @@ function renderPrometheus(snap: Record<string, unknown>): string {
     lines.push(`gateway_requests_by_stage{stage="${promLabelEscape(stage)}"} ${count}\n`);
   }
 
-  // Per-provider counters
-  const byProvider = snap.requestsByProvider as Record<string, number>;
+  // Per-provider counters — unknown providers bucketed under "other" to bound
+  // label cardinality (#592).
+  const byProvider = bucketProviderCounts(snap.requestsByProvider as Record<string, number>);
   lines.push('# HELP gateway_requests_by_provider Requests served per provider\n# TYPE gateway_requests_by_provider counter\n');
   for (const [provider, count] of Object.entries(byProvider)) {
     lines.push(`gateway_requests_by_provider{provider="${promLabelEscape(provider)}"} ${count}\n`);
@@ -944,18 +1008,57 @@ function renderPrometheus(snap: Record<string, unknown>): string {
   lines.push(promLine('gateway_tokens_output_total', 'Total output tokens emitted across all LLM providers', 'counter', tokens.totalOutputTokens));
 
   // Cost metrics
-  const cost = snap.cost as { dailySpendUsd: number; dailyBudgetUsd: number; costPerHr: number };
+  const cost = snap.cost as {
+    dailySpendUsd: number; dailyBudgetUsd: number; costPerHr: number;
+    inferenceSpendTotalUsd: number; costPerSuccessByProvider: Record<string, number>;
+  };
   lines.push(promLine('gateway_daily_spend_usd', 'Current day GPU spend in USD', 'gauge', cost.dailySpendUsd));
   lines.push(promLine('gateway_daily_budget_usd', 'Daily GPU spend cap in USD', 'gauge', cost.dailyBudgetUsd));
   lines.push(promLine('gateway_cost_per_hour_usd', 'Current GPU tier cost per hour in USD', 'gauge', cost.costPerHr));
+  // #594 — monotonic cumulative cloud inference spend. Unlike the daily gauge
+  // (which resets at midnight, making increase() go negative), this is a counter
+  // that only grows, so PromQL increase()/rate() over the reset stay correct.
+  lines.push(promLine('gateway_inference_spend_usd_total', 'Cumulative cloud inference spend in USD (monotonic, survives daily reset)', 'counter', cost.inferenceSpendTotalUsd ?? 0));
 
-  // GPU status as a gauge (1 if ready, 0 otherwise). Label carries the string.
-  const gpuStatus = String(snap.gpuStatus ?? 'unknown');
-  const gpuReady = gpuStatus.toLowerCase() === 'ready' ? 1 : 0;
-  lines.push('# HELP gateway_gpu_ready GPU tier readiness (1 = ready, 0 = not ready)\n# TYPE gateway_gpu_ready gauge\n');
-  lines.push(`gateway_gpu_ready{status="${promLabelEscape(gpuStatus)}"} ${gpuReady}\n`);
+  // #563 — cost per SUCCESSFUL request, per provider. Surfaces providers that
+  // burn money on retries (high error rate → inflated cost-per-success).
+  const cps = cost.costPerSuccessByProvider ?? {};
+  if (Object.keys(cps).length > 0) {
+    lines.push('# HELP gateway_cost_per_success_usd Cloud inference cost per successful request, per provider\n# TYPE gateway_cost_per_success_usd gauge\n');
+    for (const [provider, v] of Object.entries(cps)) {
+      const p = isKnownProvider(provider) ? provider : 'other';
+      lines.push(`gateway_cost_per_success_usd{provider="${promLabelEscape(p)}"} ${v}\n`);
+    }
+  }
+
+  // #593 — GPU status. Keep the boolean-ready gauge for back-compat, but stop
+  // putting the free-form status string in a label that lingers per distinct
+  // value (booting/installing/error/...). Emit a bounded-enum gauge that is 1
+  // for exactly the current status drawn from a fixed set.
+  const gpuStatus = String(snap.gpuStatus ?? 'unknown').toLowerCase();
+  const gpuReady = gpuStatus === 'ready' ? 1 : 0;
+  lines.push(promLine('gateway_gpu_ready', 'GPU tier readiness (1 = ready, 0 = not ready)', 'gauge', gpuReady));
+  lines.push('# HELP gateway_gpu_status GPU tier status (1 = current status, bounded enum)\n# TYPE gateway_gpu_status gauge\n');
+  for (const s of GPU_STATUS_ENUM) {
+    const isCurrent = s === gpuStatus || (s === 'other' && !GPU_STATUS_KNOWN.has(gpuStatus));
+    lines.push(`gateway_gpu_status{status="${s}"} ${isCurrent ? 1 : 0}\n`);
+  }
 
   return lines.join('');
+}
+
+/**
+ * Public: the metrics snapshot the JSON exporter and /metrics handler share.
+ * Exposed so callers (and tests) can read the in-memory metrics without going
+ * through the HTTP handler.
+ */
+export function getMetricsSnapshot(): Record<string, unknown> {
+  return snapshotMetrics();
+}
+
+/** Public: render the current metrics in Prometheus text exposition format. */
+export function renderPrometheusMetrics(): string {
+  return renderPrometheus(snapshotMetrics());
 }
 
 /**
