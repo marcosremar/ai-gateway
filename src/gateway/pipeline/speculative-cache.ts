@@ -53,6 +53,15 @@ interface SpeculationEntry {
 
 export class SpeculativeCache {
   private pending = new Map<string, SpeculationEntry>();
+  // #36 — optional per-session ring of recent speculations. With the default
+  // ring size of 1 the cache keeps ONLY the latest partial per session
+  // (identical to the original overwrite behaviour). When `setRingSize(n>1)` is
+  // used, the last `n` partials per session are retained so a final transcript
+  // that matches an EARLIER partial (rapid 200ms partials overwrite faster than
+  // the final arrives) can still hit instead of being discarded. Only populated
+  // when the ring is enabled, so the default path allocates nothing extra.
+  private rings = new Map<string, SpeculationEntry[]>();
+  private _ringSize = 1;
   private _total = 0;
   private _hits = 0;
   private _misses = 0;
@@ -70,6 +79,16 @@ export class SpeculativeCache {
   }
 
   /**
+   * Set how many recent partials to retain per session (#36). 1 (default) =
+   * legacy overwrite behaviour. n>1 keeps a small ring so the final transcript
+   * can match an earlier partial that a later partial would have overwritten.
+   * Shrinking the ring does not retroactively trim existing rings.
+   */
+  setRingSize(n: number): void {
+    this._ringSize = Math.max(1, Math.floor(n) || 1);
+  }
+
+  /**
    * Start a speculative translation for a partial ASR result.
    * The translateFn should use the same LLM routing as the normal pipeline.
    */
@@ -80,9 +99,14 @@ export class SpeculativeCache {
     // Evict expired entries first
     this.evictExpired();
 
-    // If we already have a speculation for this session with the same text, skip
+    // If we already have a speculation for this session with the same text, skip.
+    // With a ring, "already have" means any retained partial matches (#36).
     const existing = this.pending.get(sessionId);
     if (existing && existing.partialText === trimmed) return;
+    if (this._ringSize > 1) {
+      const ring = this.rings.get(sessionId);
+      if (ring && ring.some(e => e.partialText === trimmed)) return;
+    }
 
     // LRU eviction: remove oldest if at capacity AND this is a new session
     // (overwriting an existing session does not increase size, so no eviction needed)
@@ -114,6 +138,14 @@ export class SpeculativeCache {
     };
 
     this.pending.set(sessionId, entry);
+    // #36 — when the ring is enabled, retain the last N partials per session so
+    // the final can match an earlier one a later partial would have overwritten.
+    if (this._ringSize > 1) {
+      const ring = this.rings.get(sessionId) ?? [];
+      ring.push(entry);
+      while (ring.length > this._ringSize) ring.shift();
+      this.rings.set(sessionId, ring);
+    }
     log.log(`Started for session=${sessionId} partial="${trimmed.slice(0, 60)}"`);
   }
 
@@ -127,18 +159,20 @@ export class SpeculativeCache {
    * 3. Levenshtein ratio >= minConfidence -> match
    */
   async resolve(sessionId: string, finalText: string, minConfidence: number): Promise<string | null> {
-    const entry = this.pending.get(sessionId);
     this._total++;
+
+    const normalizedFinal = this.normalize(finalText);
+    const entry = this.selectEntry(sessionId, normalizedFinal, minConfidence);
 
     if (!entry) {
       this._misses++;
       return null;
     }
 
-    // Clean up this entry regardless of outcome
+    // Clean up this session's speculations regardless of outcome.
     this.pending.delete(sessionId);
+    this.rings.delete(sessionId);
 
-    const normalizedFinal = this.normalize(finalText);
     const normalizedPartial = entry.normalizedPartial;
 
     // Skip if partial is empty or too short to be meaningful
@@ -180,6 +214,31 @@ export class SpeculativeCache {
     }
   }
 
+  /**
+   * Pick the speculation entry to resolve against the final (#36). Default
+   * (ring size 1): the single latest `pending` entry — byte-for-byte the legacy
+   * behaviour. With a ring: prefer the newest retained partial that is actually
+   * similar to the final, so an earlier partial a later one would have
+   * overwritten can still hit. If none match, fall back to the newest entry so
+   * the downstream miss-accounting (too-short / not-similar) is unchanged.
+   */
+  private selectEntry(sessionId: string, normalizedFinal: string, minConfidence: number): SpeculationEntry | undefined {
+    if (this._ringSize > 1) {
+      const ring = this.rings.get(sessionId);
+      if (ring && ring.length > 0) {
+        for (let i = ring.length - 1; i >= 0; i--) {
+          const e = ring[i];
+          if (e.normalizedPartial.length >= 3 &&
+              this.checkSimilarity(e.normalizedPartial, normalizedFinal, minConfidence)) {
+            return e;
+          }
+        }
+        return ring[ring.length - 1]; // newest; downstream reports the miss reason
+      }
+    }
+    return this.pending.get(sessionId);
+  }
+
   /** Check if partial and final texts are similar enough. */
   private checkSimilarity(normalizedPartial: string, normalizedFinal: string, minConfidence: number): boolean {
     // 1. Exact prefix match — high confidence
@@ -219,6 +278,7 @@ export class SpeculativeCache {
   /** Clear all speculations for a session. */
   clear(sessionId: string): void {
     this.pending.delete(sessionId);
+    this.rings.delete(sessionId); // #36
   }
 
   /** Remove expired entries. */
@@ -227,6 +287,14 @@ export class SpeculativeCache {
     for (const [key, entry] of this.pending) {
       if (now - entry.startedAt > EXPIRY_MS) {
         this.pending.delete(key);
+      }
+    }
+    // #36 — expire ring entries too; drop the session's ring once all stale.
+    if (this._ringSize > 1) {
+      for (const [key, ring] of this.rings) {
+        const live = ring.filter(e => now - e.startedAt <= EXPIRY_MS);
+        if (live.length === 0) this.rings.delete(key);
+        else if (live.length !== ring.length) this.rings.set(key, live);
       }
     }
   }

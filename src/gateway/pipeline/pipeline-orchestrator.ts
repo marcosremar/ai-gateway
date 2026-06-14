@@ -27,6 +27,29 @@ export function isGpuProvider(provider: string | undefined | null): boolean {
   return p === 'gpu' || p.startsWith('gpu-') || p.startsWith('gpu/') || p.startsWith('gpu:');
 }
 
+/** Bytes per second of 16 kHz / 16-bit (S16LE) mono PCM — the pipeline's wire format. */
+export const PCM16_BYTES_PER_SEC = 16000 * 2;
+
+/**
+ * Estimate the duration (seconds) of a 16 kHz / 16-bit mono PCM buffer (#64).
+ * Pure — extracted so the audio-duration guard can be unit-tested and reused.
+ */
+export function estimateAudioSeconds(audio: Buffer | Uint8Array, bytesPerSec = PCM16_BYTES_PER_SEC): number {
+  if (!audio || audio.length === 0 || bytesPerSec <= 0) return 0;
+  return audio.length / bytesPerSec;
+}
+
+/**
+ * Whether an audio buffer is too short to be worth paying STT for (#64). A
+ * sub-threshold or empty buffer otherwise fans out to 3-4 paid STT providers
+ * only to (almost always) transcribe nothing. `minMs <= 0` disables the guard
+ * (legacy behaviour — never short-circuits).
+ */
+export function isAudioTooShort(audio: Buffer | Uint8Array, minMs: number, bytesPerSec = PCM16_BYTES_PER_SEC): boolean {
+  if (!minMs || minMs <= 0) return false;
+  return estimateAudioSeconds(audio, bytesPerSec) * 1000 < minMs;
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface PipelineCallbacks {
@@ -48,6 +71,13 @@ export interface PipelineOpts {
   refText?: string;
   /** Session ID for speculative translation cache lookups. */
   sessionId?: string;
+  /**
+   * Minimum audio duration (ms) below which the whole pipeline is short-circuited
+   * to an empty result instead of paying 3-4 STT providers for silence/too-short
+   * input (#64). Unset / <=0 disables the guard (legacy behaviour). Assumes the
+   * pipeline's 16 kHz/16-bit mono PCM wire format.
+   */
+  minAudioMs?: number;
 }
 
 export interface PipelineResult {
@@ -323,7 +353,21 @@ export async function runPipelineOrchestrator(
   const targetName = langs[target] || target;
   const systemPrompt = ex.buildSystemPrompt(sourceName, targetName, style);
 
-  const audioDur = (audio.length / (16000 * 2)).toFixed(1);
+  const audioSec = estimateAudioSeconds(audio);
+  const audioDur = audioSec.toFixed(1);
+
+  // ── Audio-duration guard (#64) ───────────────────────────────────────────
+  // Skip the entire STT→LLM→TTS fan-out for sub-threshold / silence-only audio
+  // instead of paying 3-4 STT providers to transcribe nothing. Opt-in via
+  // `opts.minAudioMs`; unset/<=0 keeps the legacy always-transcribe behaviour.
+  if (isAudioTooShort(audio, opts.minAudioMs ?? 0)) {
+    log.log(`── Skipped: ${audioDur}s audio < ${opts.minAudioMs}ms guard ──`);
+    cb.onComplete({
+      transcription: '', translation: '', audioBase64: '', contentType: '',
+      timing: { total_ms: Date.now() - pipeT0, stt_ms: 0, llm_ms: 0, tts_ms: 0, tts_ttfac_ms: 0, stt_provider: 'none', llm_provider: 'none', tts_provider: 'none', used_gpu: false },
+    });
+    return;
+  }
 
   // Pre-warm connections
   fx.preWarmConnections(routing.gpuEndpoint || routing.cloneGpuEndpoint);

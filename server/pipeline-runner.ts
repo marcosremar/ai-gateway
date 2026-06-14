@@ -121,6 +121,36 @@ export function ttsCandidateKindsForClone(isClone: boolean): { gpu: boolean; mod
     : { gpu: true, modal: true, cloud: true };
 }
 
+/**
+ * Resolve the max number of concurrent paid STT race candidates (#8). STT can
+ * fan out to gpu + modal-babelcast + cloud + ensemble-fallback = 4 paid calls
+ * EVERY chunk. This cap (opt → `STT_MAX_CANDIDATES` env → 0) bounds that. 0 /
+ * unset = unlimited (legacy behaviour — no cap applied).
+ */
+export function resolveMaxSttCandidates(
+  optMax?: number,
+  env: { STT_MAX_CANDIDATES?: string } = (typeof process !== 'undefined' ? process.env : {}) as any,
+): number {
+  if (typeof optMax === 'number' && Number.isFinite(optMax) && optMax > 0) return Math.floor(optMax);
+  const raw = env?.STT_MAX_CANDIDATES;
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return 0;
+}
+
+/**
+ * Cap an ordered STT candidate list to at most `max` entries (#8), preserving
+ * priority order (the builder pushes GPU → modal → cloud → ensemble, cheapest /
+ * most-likely-winner first). `max <= 0` returns the list unchanged; the result
+ * always keeps at least one candidate so the race never starves.
+ */
+export function capSttCandidates<T>(candidates: T[], max: number): T[] {
+  if (!max || max <= 0 || candidates.length <= max) return candidates;
+  return candidates.slice(0, Math.max(1, max));
+}
+
 // modal-babelcast STT leg deadline (#65). The cloud STT leg has an 8s deadline,
 // so a 15s Modal leg fired in parallel kept a (possibly cold-started) Modal
 // container alive ~7s past the point cloud already won. Tighten to 10s — enough
@@ -273,7 +303,10 @@ function buildStageExecutors(routing: PipelineRouting): PipelineStageExecutors {
           },
         });
       }
-      return candidates;
+      // #8 — bound the number of concurrent paid STT candidates (opt-in via
+      // STT_MAX_CANDIDATES). Default 0 = unlimited; order is priority-preserving
+      // so a cap of e.g. 2 keeps GPU + the next-best leg and drops the tail.
+      return capSttCandidates(candidates, resolveMaxSttCandidates());
     },
 
     buildLlmCandidates(rt, sttText, source, target, systemPrompt, adaptTimeout) {
