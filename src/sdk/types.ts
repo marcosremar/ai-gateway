@@ -171,6 +171,49 @@ export interface ChatCompletionResponse {
   };
 }
 
+/** A single streamed chat token/usage delta (#831). The async-iterator from
+ *  `chatStream()` yields these so SDK consumers get the same token-by-token UX
+ *  as the CLI. `done` marks the final `[DONE]` sentinel. */
+export interface ChatStreamChunk {
+  /** Incremental content delta, when present. */
+  content?: string;
+  /** Token usage, emitted on the final chunk by some providers. */
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+  /** True for the terminal sentinel chunk. */
+  done?: boolean;
+}
+
+// ── Ensemble transcription (#877) ────────────────────────────────────────────
+
+/** One provider's contribution to an ensemble transcription. */
+export interface EnsembleProviderResult {
+  provider: string;
+  text: string;
+  latencyMs?: number;
+}
+
+/** Rich ensemble-transcription result (#877) — mirrors the Python SDK's
+ *  `EnsembleTranscribeResponse` (consensus + per-provider + correction) so the
+ *  TS client returns more than a flat text string. */
+export interface EnsembleTranscribeResponse {
+  /** Consensus (best) transcription text. */
+  consensus: string;
+  /** Per-provider results keyed by provider name. */
+  providers: Record<string, EnsembleProviderResult>;
+  /** How many providers contributed to the consensus. */
+  usedProviders: number;
+  /** End-to-end ensemble latency (ms). */
+  latencyMs: number;
+  /** Optional LLM-corrected text (when `llmCorrect` was requested). */
+  corrected?: string;
+  /** Whether an LLM correction pass was applied. */
+  correctionApplied: boolean;
+}
+
 // ── GPU extended responses ──────────────────────────────────────────────────
 
 export interface GpuOffer {

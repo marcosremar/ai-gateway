@@ -20,8 +20,11 @@ export {
   parseGatewayErrorBody,
   validatePollOptions,
   classifyGpuPollState,
+  parseSSEChunk,
+  normalizeGatewayError,
   type PrometheusSample,
   type PollOptions,
+  type NormalizedGatewayError,
 } from './client';
 export {
   GatewayError,
@@ -34,4 +37,7 @@ export {
   type GpuStatus,
   type DeployOptions,
   type DeployResponse,
+  type ChatStreamChunk,
+  type EnsembleTranscribeResponse,
+  type EnsembleProviderResult,
 } from './types';

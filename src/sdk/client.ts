@@ -39,6 +39,9 @@ import type {
   ChatMessage,
   ChatCompletionOptions,
   ChatCompletionResponse,
+  ChatStreamChunk,
+  EnsembleTranscribeResponse,
+  EnsembleProviderResult,
   WorkloadInfo,
   WorkloadDeployOptions,
 } from './types';
@@ -175,6 +178,72 @@ export function parseMetrics(text: string): PrometheusSample[] {
     out.push({ name, labels, value });
   }
   return out;
+}
+
+/**
+ * Parse a single SSE `data:` line from a chat-completions stream into a
+ * normalised chunk (#831). Returns `{ done: true }` for the `[DONE]` sentinel,
+ * `null` for a non-`data:`/blank/malformed line (caller skips it), or a
+ * `{ content?, usage? }` delta. Pure — no I/O — so the streaming logic is
+ * unit-testable without a live SSE connection.
+ */
+export function parseSSEChunk(line: string): ChatStreamChunk | null {
+  const trimmed = line.trimEnd();
+  if (!trimmed.startsWith('data:')) return null;
+  const payload = trimmed.slice(trimmed.indexOf(':') + 1).trim();
+  if (!payload) return null;
+  if (payload === '[DONE]') return { done: true };
+  let obj: unknown;
+  try {
+    obj = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== 'object') return null;
+  const o = obj as Record<string, unknown>;
+  const choices = Array.isArray(o.choices) ? (o.choices as Array<Record<string, unknown>>) : [];
+  const delta = choices[0]?.delta as Record<string, unknown> | undefined;
+  const content = typeof delta?.content === 'string' ? delta.content : undefined;
+  const usageRaw = o.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined;
+  const usage = usageRaw
+    ? {
+        promptTokens: usageRaw.prompt_tokens ?? 0,
+        completionTokens: usageRaw.completion_tokens ?? 0,
+        totalTokens: usageRaw.total_tokens ?? 0,
+      }
+    : undefined;
+  if (content === undefined && usage === undefined) return null;
+  return { content, usage };
+}
+
+/** A normalised SDK error shape (#825) that any of the divergent error classes
+ *  (`errors/index.ts` GatewayError, `src/sdk` GatewayError, `sdk/node`
+ *  GatewayHttpError) can be reduced to, so a consumer catching one can branch the
+ *  same way regardless of which SDK threw. */
+export interface NormalizedGatewayError {
+  message: string;
+  statusCode: number;
+  endpoint?: string;
+  code?: string;
+  retryable?: boolean;
+  isNetworkError: boolean;
+}
+
+/**
+ * Normalise any of the three incompatible gateway error classes into one shape
+ * (#825). Reads whichever of `statusCode`, `code`, `retryable`, `endpoint`,
+ * `isNetworkError` the error happens to expose; falls back to sane defaults for a
+ * plain `Error`. Pure — useful in catch blocks for cross-SDK error handling.
+ */
+export function normalizeGatewayError(err: unknown): NormalizedGatewayError {
+  const e = (err && typeof err === 'object' ? (err as Record<string, unknown>) : {}) as Record<string, unknown>;
+  const message = err instanceof Error ? err.message : typeof e.message === 'string' ? e.message : String(err);
+  const statusCode = typeof e.statusCode === 'number' ? e.statusCode : 0;
+  const endpoint = typeof e.endpoint === 'string' ? e.endpoint : undefined;
+  const code = typeof e.code === 'string' ? e.code : undefined;
+  const retryable = typeof e.retryable === 'boolean' ? e.retryable : undefined;
+  const isNetworkError = e.isNetworkError === true || statusCode === 0;
+  return { message, statusCode, endpoint, code, retryable, isNetworkError };
 }
 
 /** Generate a short, collision-resistant request id (#837) for X-Request-ID. */
@@ -320,8 +389,9 @@ export class GatewaySDK {
   }
 
   /** Send a chat completion request through the gateway.
-   *  Falls back to Groq directly when the gateway is unreachable. */
-  async chat(messages: ChatMessage[], options: ChatCompletionOptions = {}): Promise<ChatCompletionResponse> {
+   *  Falls back to Groq directly when the gateway is unreachable.
+   *  Pass `options.signal` to cancel a long-running call (#840). */
+  async chat(messages: ChatMessage[], options: ChatCompletionOptions & { signal?: AbortSignal } = {}): Promise<ChatCompletionResponse> {
     const body: Record<string, unknown> = {
       model: options.model ?? GROQ_FALLBACK_LLM_MODEL,
       messages,
@@ -334,6 +404,7 @@ export class GatewaySDK {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         timeout: this.timeouts.translate,
+        signal: options.signal,
       });
       const data = await this.parseJson(res, '/v1/chat/completions');
       const choices = (data.choices as Array<{ message: { content: string } }>) ?? [];
@@ -356,6 +427,111 @@ export class GatewaySDK {
     }
   }
 
+  /**
+   * Stream a chat completion token-by-token (#831) — an async-iterator so SDK
+   * consumers get the same streaming UX as the CLI. Yields `ChatStreamChunk`s
+   * with incremental `content` (and a final `usage`/`done` chunk). Pass
+   * `options.signal` to cancel mid-stream (#840).
+   *
+   * @example
+   * for await (const c of gw.chatStream(msgs)) process.stdout.write(c.content ?? '');
+   */
+  async *chatStream(
+    messages: ChatMessage[],
+    options: ChatCompletionOptions & { signal?: AbortSignal } = {},
+  ): AsyncGenerator<ChatStreamChunk, void, unknown> {
+    const body: Record<string, unknown> = {
+      model: options.model ?? GROQ_FALLBACK_LLM_MODEL,
+      messages,
+      stream: true,
+    };
+    if (options.temperature !== undefined) body.temperature = options.temperature;
+    if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens;
+    const res = await this.fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      timeout: this.timeouts.translate,
+      signal: options.signal,
+    });
+    // Some gateways ignore `stream:true` and return a buffered JSON response —
+    // surface it as a single chunk so callers don't silently get nothing.
+    const contentType = res.headers.get('content-type') ?? '';
+    if (!contentType.includes('text/event-stream')) {
+      const data = await this.parseJson(res, '/v1/chat/completions');
+      const choices = (data.choices as Array<{ message?: { content?: string } }>) ?? [];
+      const content = choices[0]?.message?.content;
+      if (content) yield { content };
+      yield { done: true };
+      return;
+    }
+    const reader = res.body?.getReader();
+    if (!reader) { yield { done: true }; return; }
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const line of lines) {
+        const chunk = parseSSEChunk(line);
+        if (chunk) yield chunk;
+      }
+    }
+    const tail = parseSSEChunk(buf);
+    if (tail) yield tail;
+  }
+
+  /**
+   * Ensemble transcription (#877) — race multiple STT providers and return the
+   * consensus plus per-provider results (and optional LLM correction). Richer
+   * than `transcribe(audio,{ensemble:true})`, which only returns flat text;
+   * mirrors the Python SDK's `transcribe_ensemble`.
+   *
+   * @param options.llmCorrect run an LLM pass to fix names/obvious errors (~+300ms)
+   */
+  async transcribeEnsemble(
+    audio: Uint8Array,
+    options: { language?: string; prompt?: string; llmCorrect?: boolean; signal?: AbortSignal } = {},
+  ): Promise<EnsembleTranscribeResponse> {
+    const params = new URLSearchParams({ language: options.language ?? 'fr' });
+    if (options.prompt) params.set('prompt', options.prompt);
+    if (options.llmCorrect) params.set('llm_correct', 'true');
+    const endpoint = '/v1/transcribe/ensemble';
+    const res = await this.fetch(`${endpoint}?${params}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'audio/wav' },
+      body: audio,
+      timeout: this.timeouts.stt,
+      signal: options.signal,
+    });
+    const data = await this.parseJson(res, endpoint);
+    // Normalise the provider map (object keyed by provider) into our typed shape.
+    const providers: Record<string, EnsembleProviderResult> = {};
+    const rawProviders = data.providers;
+    if (rawProviders && typeof rawProviders === 'object' && !Array.isArray(rawProviders)) {
+      for (const [name, v] of Object.entries(rawProviders as Record<string, unknown>)) {
+        const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+        providers[name] = {
+          provider: name,
+          text: typeof o.text === 'string' ? o.text : '',
+          latencyMs: typeof o.latencyMs === 'number' ? o.latencyMs
+            : typeof o.latency_ms === 'number' ? o.latency_ms : undefined,
+        };
+      }
+    }
+    return {
+      consensus: (data.consensus as string) ?? (data.text as string) ?? '',
+      providers,
+      usedProviders: (data.used_providers as number) ?? Object.keys(providers).length,
+      latencyMs: (data.latency_ms as number) ?? 0,
+      corrected: typeof data.corrected === 'string' && data.corrected ? data.corrected : undefined,
+      correctionApplied: (data.correction_applied as boolean) ?? false,
+    };
+  }
+
   /** Translate text (GPU-aware: gateway routes to GPU or cloud LLM). */
   async translate(text: string, sourceLang: string, targetLang: string, glossary = ''): Promise<TranslateResponse> {
     if (!text.trim()) return { translatedText: '', usedGpu: false };
@@ -371,8 +547,9 @@ export class GatewaySDK {
     return { translatedText: (data.translated_text as string) ?? '', usedGpu: (data.used_gpu as boolean) ?? false };
   }
 
-  /** Full pipeline: audio → STT → LLM → TTS (GPU-aware routing). */
-  async pipeline(audio: Uint8Array, options: PipelineOptions = {}): Promise<PipelineResponse> {
+  /** Full pipeline: audio → STT → LLM → TTS (GPU-aware routing).
+   *  Pass `options.signal` to cancel a long-running call (#840). */
+  async pipeline(audio: Uint8Array, options: PipelineOptions & { signal?: AbortSignal } = {}): Promise<PipelineResponse> {
     const params = new URLSearchParams();
     params.set('source', options.source ?? 'fr');
     params.set('target', options.target ?? 'en');
@@ -384,6 +561,7 @@ export class GatewaySDK {
       headers: { 'Content-Type': 'audio/wav' },
       body: audio,
       timeout: this.timeouts.pipeline,
+      signal: options.signal,
     });
     const data = await this.parseJson(res, '/v1/speech');
     const timing = data.timing as Record<string, unknown> | undefined;
@@ -950,6 +1128,30 @@ export class GatewaySDK {
       limit: (data.limit as number) ?? 100,
       offset: (data.offset as number) ?? 0,
     };
+  }
+
+  /**
+   * Auto-iterate every workload across pages (#832) so callers don't have to
+   * manage `limit`/`offset` themselves. Walks pages until `offset + returned >=
+   * total` (or a short page is returned), guarding against an infinite loop when
+   * the server reports an inconsistent `total`.
+   *
+   * @example for await (const w of gw.listAllWorkloads()) console.log(w.id);
+   */
+  async *listAllWorkloads(
+    options?: { type?: WorkloadInfo['type']; pageSize?: number },
+  ): AsyncGenerator<WorkloadInfo, void, unknown> {
+    const pageSize = validatePositiveInt(options?.pageSize ?? 100, 'pageSize', 100);
+    let offset = 0;
+    // Hard cap on iterations as a belt-and-braces guard against a bad `total`.
+    for (let guard = 0; guard < 10_000; guard++) {
+      const page = await this.listWorkloads({ type: options?.type, limit: pageSize, offset });
+      for (const w of page.workloads) yield w;
+      offset += page.workloads.length;
+      // Stop on a short/empty page or once we've covered the reported total.
+      if (page.workloads.length === 0 || page.workloads.length < pageSize) return;
+      if (page.total > 0 && offset >= page.total) return;
+    }
   }
 
   /** Deploy a new workload (GPU, bot, or database). */

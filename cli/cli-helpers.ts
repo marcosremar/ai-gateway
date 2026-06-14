@@ -687,3 +687,330 @@ export function isLocalGatewayUrl(url: string): boolean {
     return false;
   }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// WAVE 4 — additional localized CLI helpers (docs/optimizations/09-cli-sdk-dx.md)
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── #810: shell-completion script generation ──────────────────────────────────
+
+export type CompletionShell = 'bash' | 'zsh' | 'fish';
+
+/** Parse/validate the `completion <shell>` argument (#810). */
+export function parseCompletionShell(raw: string | undefined): { value: CompletionShell } | { error: string } {
+  const v = (raw ?? '').trim().toLowerCase();
+  if (v === 'bash' || v === 'zsh' || v === 'fish') return { value: v };
+  return { error: `Unknown shell "${raw ?? ''}" (expected bash|zsh|fish)` };
+}
+
+/**
+ * Emit a shell-completion script for the `ai-gateway` CLI (#810). A manual
+ * switch/case CLI with ~30 commands and a deep `gpu` subtree has zero discovery
+ * help; this returns a static completion script the caller writes to stdout
+ * (`ai-gateway completion bash`). Pure — no I/O.
+ *
+ * @param shell    target shell
+ * @param commands top-level command names to complete
+ * @param prog     program name (default `ai-gateway`)
+ */
+export function generateCompletionScript(
+  shell: CompletionShell,
+  commands: readonly string[],
+  prog = 'ai-gateway',
+): string {
+  const words = commands.join(' ');
+  if (shell === 'bash') {
+    return [
+      `# ${prog} bash completion`,
+      `_${prog.replace(/-/g, '_')}() {`,
+      `  local cur="\${COMP_WORDS[COMP_CWORD]}"`,
+      `  COMPREPLY=( $(compgen -W "${words}" -- "$cur") )`,
+      `}`,
+      `complete -F _${prog.replace(/-/g, '_')} ${prog}`,
+    ].join('\n');
+  }
+  if (shell === 'zsh') {
+    return [
+      `#compdef ${prog}`,
+      `_${prog.replace(/-/g, '_')}() {`,
+      `  local -a cmds; cmds=(${commands.map(c => `'${c}'`).join(' ')})`,
+      `  _describe '${prog} command' cmds`,
+      `}`,
+      `compdef _${prog.replace(/-/g, '_')} ${prog}`,
+    ].join('\n');
+  }
+  // fish
+  return commands
+    .map(c => `complete -c ${prog} -n '__fish_use_subcommand' -a '${c}'`)
+    .join('\n');
+}
+
+// ── #813: normalise live TTS voices (vs the hardcoded fallback) ────────────────
+
+export interface NormalizedVoice {
+  id: string;
+  name: string;
+  language?: string;
+  gender?: string;
+}
+
+/**
+ * Normalise a `/v1/tts/voices` payload into a stable list (#813) so `voices`
+ * reflects the configured provider instead of a hardcoded set. Accepts the raw
+ * `voices` array (objects or bare strings) and de-dupes by id. Returns `[]` for a
+ * missing/garbage payload so the caller can fall back to its static list.
+ */
+export function normalizeVoices(raw: unknown): NormalizedVoice[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: NormalizedVoice[] = [];
+  for (const item of raw) {
+    let v: NormalizedVoice | undefined;
+    if (typeof item === 'string') {
+      if (item.trim()) v = { id: item.trim(), name: item.trim() };
+    } else if (item && typeof item === 'object') {
+      const o = item as Record<string, unknown>;
+      const id = typeof o.id === 'string' ? o.id : typeof o.name === 'string' ? o.name : undefined;
+      if (id) {
+        v = {
+          id,
+          name: typeof o.name === 'string' ? o.name : id,
+          language: typeof o.language === 'string' ? o.language : undefined,
+          gender: typeof o.gender === 'string' ? o.gender : undefined,
+        };
+      }
+    }
+    if (v && !seen.has(v.id)) { seen.add(v.id); out.push(v); }
+  }
+  return out;
+}
+
+// ── #819: `media test` machine-readable summary ───────────────────────────────
+
+/**
+ * Build a machine-readable summary for `media test --json` (#819) and the exit
+ * code that CI should use (0 = all pass, 1 = any failure). Pure — caller prints
+ * the JSON and exits with the returned code.
+ */
+export function buildMediaTestSummary(results: { image: boolean; audio: boolean }): {
+  json: { image: boolean; audio: boolean; ok: boolean };
+  exitCode: number;
+} {
+  const ok = results.image && results.audio;
+  return { json: { image: results.image, audio: results.audio, ok }, exitCode: ok ? 0 : EXIT_RUNTIME };
+}
+
+// ── #820: native 16kHz silence WAV (no python3 subprocess) ────────────────────
+
+/**
+ * Generate a mono 16-bit PCM WAV of silence in pure TypeScript (#820) so
+ * `benchmark` no longer shells out to `python3 -c` (which crashes on a host
+ * without python3). Returns the full WAV byte stream (44-byte header + samples).
+ *
+ * @param seconds     duration in seconds (default 1)
+ * @param sampleRate  sample rate in Hz (default 16000 — Whisper's native rate)
+ */
+export function makeSilenceWav(seconds = 1, sampleRate = 16_000): Uint8Array {
+  const sec = Number.isFinite(seconds) && seconds > 0 ? seconds : 1;
+  const rate = Number.isFinite(sampleRate) && sampleRate > 0 ? Math.floor(sampleRate) : 16_000;
+  const numSamples = Math.floor(sec * rate);
+  const bytesPerSample = 2; // 16-bit
+  const dataSize = numSamples * bytesPerSample;
+  const buf = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buf);
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);          // PCM chunk size
+  view.setUint16(20, 1, true);           // audio format = PCM
+  view.setUint16(22, 1, true);           // mono
+  view.setUint32(24, rate, true);        // sample rate
+  view.setUint32(28, rate * bytesPerSample, true); // byte rate
+  view.setUint16(32, bytesPerSample, true);        // block align
+  view.setUint16(34, 16, true);          // bits per sample
+  writeStr(36, 'data');
+  view.setUint32(40, dataSize, true);
+  // samples already zero-initialised (silence)
+  return new Uint8Array(buf);
+}
+
+// ── #844: dedicated cost / spend summary ──────────────────────────────────────
+
+export interface CostSummaryInput {
+  /** Per-instance hourly costs of currently running GPU instances. */
+  instanceHourly: readonly number[];
+  /** Today's GPU spend so far (USD), if known. */
+  dailySpendUsd?: number;
+  /** Per-provider balances (USD) keyed by provider name. */
+  balances?: Record<string, number>;
+}
+
+export interface CostSummary {
+  /** Combined hourly burn across all running instances. */
+  hourlyBurnUsd: number;
+  /** Number of instances contributing to the burn. */
+  runningInstances: number;
+  /** Projected 24h cost at the current burn rate. */
+  projectedDailyUsd: number;
+  /** Projected 30-day cost at the current burn rate. */
+  projectedMonthlyUsd: number;
+  /** Echoed daily spend so far (0 when unknown). */
+  dailySpendUsd: number;
+  /** Sum of all known provider balances. */
+  totalBalanceUsd: number;
+}
+
+/**
+ * Summarise GPU spend for a dedicated `ai-gateway cost` view (#844): combined
+ * hourly burn, projected daily/monthly cost, and total balance. Pure — the caller
+ * fetches `gpu list` + `balance` and feeds the numbers in.
+ */
+export function buildCostSummary(input: CostSummaryInput): CostSummary {
+  let hourlyBurnUsd = 0;
+  let runningInstances = 0;
+  for (const h of input.instanceHourly) {
+    if (Number.isFinite(h) && h > 0) { hourlyBurnUsd += h; runningInstances++; }
+  }
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const totalBalanceUsd = input.balances
+    ? Object.values(input.balances).reduce((a, b) => (Number.isFinite(b) ? a + b : a), 0)
+    : 0;
+  return {
+    hourlyBurnUsd: round2(hourlyBurnUsd),
+    runningInstances,
+    projectedDailyUsd: round2(hourlyBurnUsd * 24),
+    projectedMonthlyUsd: round2(hourlyBurnUsd * 24 * 30),
+    dailySpendUsd: Number.isFinite(input.dailySpendUsd as number) ? round2(input.dailySpendUsd as number) : 0,
+    totalBalanceUsd: round2(totalBalanceUsd),
+  };
+}
+
+// ── #848: idle / auto-stop reassurance note ───────────────────────────────────
+
+/** Default idle auto-stop window (minutes), mirroring IDLE_TIMEOUT_MIN. */
+export const DEFAULT_IDLE_STOP_MIN = 15;
+/** Default auto-destroy window after stop (hours). */
+export const DEFAULT_AUTO_DESTROY_HOURS = 2;
+
+/**
+ * One-line reassurance that a freshly-deployed pod won't bill forever (#848):
+ * "auto-stops after 15m idle, auto-destroys 2h later". Pure string builder so the
+ * deploy command can print it without restating the policy inline.
+ */
+export function idleStopNote(idleMin = DEFAULT_IDLE_STOP_MIN, destroyHours = DEFAULT_AUTO_DESTROY_HOURS): string {
+  return `Pod auto-stops after ${idleMin}m idle, then auto-destroys ${destroyHours}h later (no charges while stopped).`;
+}
+
+// ── #849: zombie-pod cost annotation ──────────────────────────────────────────
+
+/**
+ * Annotate a `running`-but-unreachable ("zombie") pod with its financial stakes
+ * (#849) so the user understands the cost of leaving it. Returns the per-hour and
+ * projected-daily burn plus a ready-to-print warning, or `null` when the cost is
+ * unknown/zero (nothing to warn about).
+ */
+export function annotateZombieCost(costPerHr: unknown): { hourlyUsd: number; dailyUsd: number; warning: string } | null {
+  const v = typeof costPerHr === 'number' ? costPerHr : Number(costPerHr);
+  if (!Number.isFinite(v) || v <= 0) return null;
+  const hourlyUsd = Math.round(v * 100) / 100;
+  const dailyUsd = Math.round(v * 24 * 100) / 100;
+  return {
+    hourlyUsd,
+    dailyUsd,
+    warning: `ZOMBIE pod burning $${hourlyUsd.toFixed(2)}/hr ($${dailyUsd.toFixed(2)}/day) — terminate to stop charges.`,
+  };
+}
+
+// ── #850: discover sibling binaries from the main CLI ──────────────────────────
+
+export interface SiblingBinary {
+  name: string;
+  summary: string;
+}
+
+/**
+ * The companion binaries shipped alongside `ai-gateway` (#850) so the main help
+ * can point at them (e.g. the cost-audit orphan sweep). Pure metadata — the
+ * caller renders it under a "See also" section.
+ */
+export function listSiblingBinaries(): SiblingBinary[] {
+  return [
+    { name: 'ai-gateway-cost-audit', summary: 'Sweep & terminate orphaned GPU instances (cost leak cleanup).' },
+  ];
+}
+
+// ── #891: scripting contract (exit codes + JSON-capable commands) ──────────────
+
+export interface ScriptingContract {
+  exitCodes: Array<{ code: number; meaning: string }>;
+  jsonCommands: string[];
+}
+
+/**
+ * Describe the CLI's scripting contract (#891): the exit-code scheme and which
+ * commands honour `--json`. Pure metadata so a `docs/cli` page or `--help` footer
+ * can render a reliable automation reference instead of leaving it undocumented.
+ */
+export function describeScriptingContract(jsonCommands: readonly string[]): ScriptingContract {
+  return {
+    exitCodes: [
+      { code: 0, meaning: 'success' },
+      { code: EXIT_RUNTIME, meaning: 'runtime / HTTP / network error' },
+      { code: EXIT_USAGE, meaning: 'usage error (bad args or flags)' },
+      { code: 130, meaning: 'interrupted (Ctrl-C / SIGINT)' },
+    ],
+    jsonCommands: [...jsonCommands].sort(),
+  };
+}
+
+// ── #899: SIGINT (Ctrl-C) clean-exit handling ─────────────────────────────────
+
+/** Conventional exit code for a process terminated by SIGINT (128 + 2). */
+export const EXIT_SIGINT = 130;
+
+/**
+ * Build the clean-exit payload for a Ctrl-C during a streaming/polling loop
+ * (#899): a trailing newline to flush the half-written line, an optional summary,
+ * and exit code 130. Pure — the caller writes `flush`+`summary` then exits.
+ */
+export function buildInterruptExit(summary?: string): { flush: string; summary?: string; exitCode: number } {
+  return { flush: '\n', summary: summary && summary.trim() ? summary : undefined, exitCode: EXIT_SIGINT };
+}
+
+// ── #900: deploy poller — distinguish timeout from completion ──────────────────
+
+export type DeployPollOutcome = 'ready' | 'error' | 'timeout';
+
+/**
+ * Classify the terminal outcome of the deploy status poll loop (#900). Today the
+ * loop simply falls through when it exhausts iterations without `ready`/`error`,
+ * printing nothing and exiting 0 — so scripts assume success. This returns an
+ * explicit outcome + message + exit code so a timeout is reported and non-zero.
+ *
+ * @param lastStatus the last status seen, or undefined if the loop never saw one
+ * @param exhausted  whether the poll loop ran out of iterations
+ */
+export function classifyDeployPollOutcome(
+  lastStatus: string | undefined,
+  exhausted: boolean,
+): { outcome: DeployPollOutcome; message: string; exitCode: number } {
+  if (lastStatus === 'ready') {
+    return { outcome: 'ready', message: 'GPU ready.', exitCode: 0 };
+  }
+  if (lastStatus === 'error') {
+    return { outcome: 'error', message: 'Deploy failed.', exitCode: EXIT_RUNTIME };
+  }
+  if (exhausted) {
+    return {
+      outcome: 'timeout',
+      message: 'Still deploying after the poll window — check `ai-gateway gpu status`.',
+      exitCode: EXIT_RUNTIME,
+    };
+  }
+  // Not exhausted and not terminal → caller should keep polling.
+  return { outcome: 'timeout', message: 'Deploy still in progress.', exitCode: EXIT_RUNTIME };
+}
