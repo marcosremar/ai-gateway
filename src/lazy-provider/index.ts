@@ -40,11 +40,18 @@ export interface LazyProvider<T = unknown> {
 
 /**
  * Create a lazy provider instance.
+ *
+ * @param factory async factory that constructs the provider
+ * @param name    explicit display name for logs (#395). Arrow-function and
+ *   minified factories have an empty `.name`, which made load logs read
+ *   "Lazy-loading provider undefined"; pass a name to get readable logs.
+ *   Falls back to `factory.name` then `'anonymous'`.
  */
-export function createLazyProvider<T>(factory: ProviderFactory<T>): LazyProvider<T> {
+export function createLazyProvider<T>(factory: ProviderFactory<T>, name?: string): LazyProvider<T> {
   let instance: T | null = null;
   let loadPromise: Promise<T> | null = null;
   let loadedAt: number | undefined;
+  const label = name || factory.name || 'anonymous';
 
   return {
     async get(): Promise<T> {
@@ -52,7 +59,7 @@ export function createLazyProvider<T>(factory: ProviderFactory<T>): LazyProvider
 
       if (loadPromise) return loadPromise;
 
-      log.log({ provider: factory.name }, 'Lazy-loading provider');
+      log.log({ provider: label }, 'Lazy-loading provider');
       const start = Date.now();
 
       loadPromise = factory()
@@ -60,7 +67,7 @@ export function createLazyProvider<T>(factory: ProviderFactory<T>): LazyProvider
           instance = result;
           loadPromise = null;
           loadedAt = Date.now();
-          log.log({ provider: factory.name, loadMs: Date.now() - start }, 'Provider loaded');
+          log.log({ provider: label, loadMs: Date.now() - start }, 'Provider loaded');
           return result;
         })
         .catch((err) => {
@@ -79,7 +86,7 @@ export function createLazyProvider<T>(factory: ProviderFactory<T>): LazyProvider
       instance = null;
       loadPromise = null;
       loadedAt = undefined;
-      log.log({ provider: factory.name }, 'Provider unloaded');
+      log.log({ provider: label }, 'Provider unloaded');
     },
 
     get loadedAt() {
@@ -94,9 +101,10 @@ export function createLazyProvider<T>(factory: ProviderFactory<T>): LazyProvider
 export class LazyProviderRegistry {
   private providers = new Map<string, LazyProvider>();
 
-  /** Register a provider factory */
+  /** Register a provider factory. The registry `name` is also used as the
+   *  lazy-loader log label so logs stay readable for arrow-function factories (#395). */
   register<T>(name: string, factory: ProviderFactory<T>): void {
-    this.providers.set(name, createLazyProvider(factory));
+    this.providers.set(name, createLazyProvider(factory, name));
   }
 
   /** Register an already-created provider */

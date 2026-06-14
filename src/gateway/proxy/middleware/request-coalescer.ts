@@ -31,7 +31,29 @@ export function coalesce<T>(key: string, fn: () => Promise<T>): Promise<T> {
     return existing.promise as Promise<T>;
   }
   if (existing) inflightRequests.delete(key);
-  const p = fn().finally(() => inflightRequests.delete(key));
+  // Eager .then/.catch delete (rather than only .finally) so a *rejecting*
+  // promise releases its map slot immediately. With finally-only cleanup, late
+  // callers arriving inside the 30s window could otherwise join a promise that
+  // is already settling into a rejection and inherit the failure (#320). The
+  // settled-guard ensures we only delete the entry we created (not a newer one
+  // that replaced it after a stale eviction).
+  let settled = false;
+  const release = () => {
+    if (settled) return;
+    settled = true;
+    const cur = inflightRequests.get(key);
+    if (cur && cur.promise === (p as Promise<unknown>)) inflightRequests.delete(key);
+  };
+  const p = fn().then(
+    (v) => {
+      release();
+      return v;
+    },
+    (err) => {
+      release();
+      throw err;
+    },
+  );
   inflightRequests.set(key, { promise: p, ts: Date.now() });
   return p;
 }
@@ -80,8 +102,16 @@ export class RequestCoalescer {
     user?: string;
     tool_choice?: unknown;
   }): string | null {
-    // Only coalesce deterministic requests (temperature 0 or undefined)
-    if (params.temperature !== undefined && params.temperature !== 0) return null;
+    // Coalesce deterministic requests. Temperature 0/undefined is always
+    // deterministic. A non-zero temperature is also coalescable when a fixed
+    // `seed` is supplied — providers that honour the seed return identical
+    // output for identical (prompt, seed), so two such concurrent requests can
+    // safely share one upstream call instead of each paying for it (#324).
+    const deterministic =
+      params.temperature === undefined ||
+      params.temperature === 0 ||
+      params.seed !== undefined;
+    if (!deterministic) return null;
     // Refuse to coalesce when n > 1: each call gets fresh randomness.
     if (params.n !== undefined && params.n > 1) return null;
 

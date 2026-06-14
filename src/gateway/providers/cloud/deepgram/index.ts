@@ -4,6 +4,7 @@
  */
 
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse } from '../types';
+import { makeProviderError } from '../provider-error';
 
 
 interface DeepgramWord {
@@ -84,7 +85,9 @@ export class DeepgramSTTProvider implements STTProvider {
 
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      throw new Error(`[deepgram] HTTP ${res.status}: ${errText.slice(0, 200)}`);
+      // Throw with a real numeric `.status` (#371) so the fallback layer
+      // classifies 429/5xx reliably instead of regex-scraping the message.
+      throw makeProviderError('deepgram', res.status, errText.slice(0, 200));
     }
 
     const data = await res.json() as DeepgramResponse;

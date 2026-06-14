@@ -25,6 +25,56 @@ export const DEFAULT_REALTIME_METRICS: RealtimeMetrics = {
   audioExperienceScore: 80,
 };
 
+/**
+ * Real spend signals used to compute the economics block instead of hardcoded
+ * placeholders (#391). All optional — when omitted, the dashboard falls back to
+ * the legacy demo constants so existing callers don't break.
+ */
+export interface EconomicsInput {
+  /** Actual measured GPU cost per hour (USD), e.g. from daily_spend tracking. */
+  gpuCostHour?: number;
+  /** Reference competitor cost per hour for the same workload (USD). */
+  competitorCostHour?: number;
+  /** Fraction (0–1) of requests served by the cheaper self-hosted path. */
+  selfHostedShare?: number;
+}
+
+/**
+ * Compute the economics block from real spend figures.
+ *
+ * `openaiSavings` is the percentage saved vs the competitor cost; efficiency is
+ * the share of traffic served by the cheaper path. Returns the legacy demo
+ * constants when no real data is supplied. Exported for direct unit testing.
+ */
+export function computeEconomics(input?: EconomicsInput): SystemAnalyticsPayload['economics'] {
+  const gpuCostHour = input?.gpuCostHour;
+  const competitorCostHour = input?.competitorCostHour;
+
+  // No real data → preserve the previous (clearly-labeled) demo values.
+  if (gpuCostHour === undefined || competitorCostHour === undefined || competitorCostHour <= 0) {
+    return {
+      gpuCostHour: gpuCostHour ?? 0.16,
+      vsCompetitors: { openaiRealtime: competitorCostHour ?? 43.0, openaiSavings: 99.6 },
+      optimizationStatus: 'TTFA streaming optimizations active',
+      aiGatewayEfficiency: input?.selfHostedShare ?? 0.95,
+    };
+  }
+
+  const savingsPct = Math.max(0, (1 - gpuCostHour / competitorCostHour) * 100);
+  return {
+    gpuCostHour: Math.round(gpuCostHour * 1000) / 1000,
+    vsCompetitors: {
+      openaiRealtime: Math.round(competitorCostHour * 100) / 100,
+      openaiSavings: Math.round(savingsPct * 10) / 10,
+    },
+    optimizationStatus: 'TTFA streaming optimizations active',
+    aiGatewayEfficiency:
+      input?.selfHostedShare !== undefined
+        ? Math.max(0, Math.min(1, input.selfHostedShare))
+        : 0.95,
+  };
+}
+
 export interface SystemAnalyticsPayload {
   timestamp: string;
   requestId: string;
@@ -65,6 +115,8 @@ export function buildSystemAnalytics(opts: {
   requestId: string;
   realtimeMetrics: RealtimeMetrics;
   routingAdvice: RoutingDecision;
+  /** Real spend signals for the economics block (#391). Optional. */
+  economics?: EconomicsInput;
 }): SystemAnalyticsPayload {
   const { requestId, realtimeMetrics, routingAdvice } = opts;
 
@@ -124,15 +176,7 @@ export function buildSystemAnalytics(opts: {
       reasoning: routingAdvice.reason,
       costPerRequest: routingAdvice.costEstimate,
     },
-    economics: {
-      gpuCostHour: 0.16,
-      vsCompetitors: {
-        openaiRealtime: 43.0,
-        openaiSavings: 99.6,
-      },
-      optimizationStatus: 'TTFA streaming optimizations active',
-      aiGatewayEfficiency: 0.95,
-    },
+    economics: computeEconomics(opts.economics),
     recommendations,
   };
 }

@@ -14,6 +14,22 @@ export interface WithCacheOptions {
 }
 
 /**
+ * Build a cache `condition` that also caches *low* non-zero temperatures.
+ *
+ * The default condition only caches `temperature === 0 | undefined`, but many
+ * translation/extraction prompts run with a small non-zero temperature
+ * (e.g. 0.2) yet produce stable, high-hit-rate output; refusing to cache them
+ * loses the savings on the very routes that benefit most (#333). This returns a
+ * predicate that caches when temperature is `<= maxTemperature`.
+ *
+ * @param maxTemperature inclusive upper bound to still cache. Default 0.3.
+ */
+export function deterministicEnoughCondition(maxTemperature = 0.3): (req: ChatRequest) => boolean {
+  return (req: ChatRequest) =>
+    req.temperature === undefined || req.temperature <= maxTemperature;
+}
+
+/**
  * Wrap an LLMProvider with caching.
  * Returns a new provider that checks the cache before calling `chat()`.
  */

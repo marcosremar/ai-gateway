@@ -142,8 +142,18 @@ const DEFAULT_ALLOWED_FAILS = 3;
  */
 const DEFAULT_COOLDOWN_MS = 15_000;
 
-function cooldownKey(entry: FallbackEntry): string {
-  return `${entry.provider}:${entry.model ?? '*'}`;
+/**
+ * Build the cooldown map key for a fallback entry.
+ *
+ * Includes `entry.endpoint` when present (#308): distributed profiles route the
+ * same provider/model to different pods (pod-A vs pod-B). A `provider:model`-only
+ * key means one dead pod cools down the *healthy* pod sharing the same
+ * provider/model, taking it out of rotation. Entries without an endpoint keep
+ * the original `provider:model` key for backward compatibility.
+ */
+export function cooldownKey(entry: FallbackEntry): string {
+  const base = `${entry.provider}:${entry.model ?? '*'}`;
+  return entry.endpoint ? `${base}@${entry.endpoint}` : base;
 }
 
 /**
@@ -569,12 +579,17 @@ export async function withProviderFallback<T>(
           );
         }
 
-        // Record failure latency for adaptive timeout calibration
-        // On timeout: record the ceiling value so p95 reflects the cap was hit
-        // On other failures: record actual elapsed so fast-fail providers don't inflate timeouts
+        // Record failure latency for adaptive timeout calibration.
+        // On timeout: record via recordTimeout (penalized, marked failure) so
+        //   the ceiling doesn't ratchet future timeouts upward (#344).
+        // On other failures: record actual elapsed but flagged as a failure so a
+        //   fast-failing provider can't drag the success-percentile down (#346).
         if (adaptiveTimeout) {
-          const latencyForTimeout = isTimeout && effectiveTimeout ? effectiveTimeout : elapsed;
-          adaptiveTimeout.record(entry.provider, entry.model ?? '*', latencyForTimeout);
+          if (isTimeout && effectiveTimeout) {
+            adaptiveTimeout.recordTimeout(entry.provider, entry.model ?? '*', effectiveTimeout);
+          } else {
+            adaptiveTimeout.record(entry.provider, entry.model ?? '*', elapsed, false);
+          }
         }
 
         // ── Non-retryable: abort everything ──────────────────────────────────

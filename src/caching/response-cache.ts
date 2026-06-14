@@ -24,7 +24,21 @@ export class ResponseCache {
   private _size = 0;
   private _evictions = 0;
   private maxSize: number;
-  private accessOrder: string[] = [];
+  /**
+   * Recency index as an insertion-ordered Map (#335). A plain array used
+   * `indexOf` + `splice` on every get/set — O(n) per access, which at
+   * maxSize=10000 is a hot-path cost. A JS `Map` preserves insertion order, so
+   * `delete` + `set` moves a key to the most-recent (last) position in O(1), and
+   * the least-recently-used key is always `keys().next().value`. The value is
+   * unused (`1`); only the key order matters.
+   */
+  private accessOrder: Map<string, 1> = new Map();
+
+  /** Move (or add) a key to the most-recently-used end of the recency index. */
+  private _touch(key: string): void {
+    this.accessOrder.delete(key);
+    this.accessOrder.set(key, 1);
+  }
   /**
    * Per-key metadata index — maps the hashed cache key back to the
    * (provider, model) it was built from. Populated by buildKey() so that
@@ -124,11 +138,7 @@ export class ResponseCache {
         return null;
       }
 
-      const idx = this.accessOrder.indexOf(key);
-      if (idx !== -1) {
-        this.accessOrder.splice(idx, 1);
-      }
-      this.accessOrder.push(key);
+      this._touch(key);
 
       this._hits++;
       return envelope.data;
@@ -143,26 +153,24 @@ export class ResponseCache {
    * Similar to Cloudflare's cf-aig-cache-ttl header.
    */
   async set<T>(key: string, value: T, ttlMs?: number, metadata?: Partial<CacheMetadata>): Promise<void> {
-    if (this._size >= this.maxSize && !this.accessOrder.includes(key)) {
-      while (this.accessOrder.length > 0 && this._size >= this.maxSize) {
-        const oldestKey = this.accessOrder.shift();
-        if (oldestKey) {
-          await this.store.del(oldestKey);
-          this._keyMeta.delete(oldestKey);
-          this._size--;
-          this._evictions++;
-        }
+    if (this._size >= this.maxSize && !this.accessOrder.has(key)) {
+      while (this.accessOrder.size > 0 && this._size >= this.maxSize) {
+        // Least-recently-used key is the first in insertion order.
+        const oldestKey = this.accessOrder.keys().next().value as string | undefined;
+        if (oldestKey === undefined) break;
+        this.accessOrder.delete(oldestKey);
+        await this.store.del(oldestKey);
+        this._keyMeta.delete(oldestKey);
+        this._size--;
+        this._evictions++;
       }
     }
 
-    // Remove old position if this is an overwrite (prevents _size double-counting)
-    const existingIdx = this.accessOrder.indexOf(key);
-    if (existingIdx !== -1) {
-      this.accessOrder.splice(existingIdx, 1);
-    } else {
+    // Track _size only for genuinely new keys (an overwrite must not double-count).
+    if (!this.accessOrder.has(key)) {
       this._size++;
     }
-    this.accessOrder.push(key);
+    this._touch(key);
 
     const ttl = ttlMs ?? this.defaultTtlMs;
     const now = Date.now();
@@ -179,9 +187,7 @@ export class ResponseCache {
   }
 
   private _removeFromAccessOrder(key: string): void {
-    const idx = this.accessOrder.indexOf(key);
-    if (idx !== -1) {
-      this.accessOrder.splice(idx, 1);
+    if (this.accessOrder.delete(key)) {
       // Guard against underflow: _size is the number of entries in accessOrder
       // (single source of truth). When called against a key that's already
       // gone (e.g. evicted by Redis TTL externally) this branch is skipped,

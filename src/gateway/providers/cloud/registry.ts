@@ -27,6 +27,24 @@ export class AIProviderRegistry {
     this.providers.set(descriptor.id, descriptor);
   }
 
+  /**
+   * Remove a provider so it is no longer routable (#399).
+   *
+   * Previously there was no way to drop a provider after its API key was
+   * removed — the descriptor lingered and calls failed at runtime instead of
+   * being skipped by availability checks / fallback. Call this on key removal
+   * (e.g. reloadProviderAvailability) for every capability class so the same id
+   * is purged from the descriptor, embedding, and rerank maps.
+   *
+   * @returns true if anything was removed.
+   */
+  unregister(id: ProviderId): boolean {
+    let removed = this.providers.delete(id);
+    removed = this.embeddingProviders.delete(id) || removed;
+    removed = this.rerankProviders.delete(id) || removed;
+    return removed;
+  }
+
   getProvider(id: ProviderId): ProviderDescriptor | undefined {
     return this.providers.get(id);
   }

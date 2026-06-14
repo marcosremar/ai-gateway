@@ -29,6 +29,9 @@ export interface AdaptiveTimeoutConfig {
 interface LatencySample {
   latencyMs: number;
   timestamp: number;
+  /** Whether the originating request succeeded. Failures are excluded from the
+   *  p95 used to derive the timeout (#346). Defaults to true. */
+  success?: boolean;
 }
 
 /** Cached p95-derived timeout for a key, valid while the buffer is unchanged. */
@@ -135,7 +138,13 @@ export class AdaptiveTimeoutCalculator {
       return cached.timeout;
     }
 
-    const latencies = valid.map((s) => s.latencyMs).sort((a, b) => a - b);
+    // Derive the p95 from SUCCESSFUL samples only (#346). A provider that fails
+    // fast records a tiny `elapsed`; including those failures pulls the
+    // percentile down and starves slow-but-correct retries with too tight a
+    // timeout. Fall back to all valid samples if there are too few successes.
+    const successOnly = valid.filter((s) => s.success !== false);
+    const sampleSet = successOnly.length >= this.minSamples ? successOnly : valid;
+    const latencies = sampleSet.map((s) => s.latencyMs).sort((a, b) => a - b);
     const p95 = percentile(latencies, 95);
     const adaptive = Math.round(p95 * this.marginMultiplier);
 
@@ -145,10 +154,13 @@ export class AdaptiveTimeoutCalculator {
   }
 
   /**
-   * Record a successful latency observation for a provider+model pair.
+   * Record a latency observation for a provider+model pair.
    * Uses a circular buffer capped at MAX_BUFFER_SIZE entries.
+   *
+   * @param success Whether the request succeeded. Pass `false` for failures so
+   *   they are excluded from the timeout percentile (#346). Defaults to true.
    */
-  record(provider: string, model: string, latencyMs: number): void {
+  record(provider: string, model: string, latencyMs: number, success = true): void {
     const key = bufferKey(provider, model);
     let buffer = this.buffers.get(key);
 
@@ -169,7 +181,7 @@ export class AdaptiveTimeoutCalculator {
       buffer.push(...valid);
     }
 
-    buffer.push({ latencyMs, timestamp: now });
+    buffer.push({ latencyMs, timestamp: now, success });
 
     if (buffer.length > MAX_BUFFER_SIZE) {
       buffer.splice(0, buffer.length - MAX_BUFFER_SIZE);
@@ -178,6 +190,24 @@ export class AdaptiveTimeoutCalculator {
     // A new sample changes the percentile — drop the memo so the next
     // getTimeout recomputes (#345).
     this.timeoutCache.delete(key);
+  }
+
+  /**
+   * Record a timeout for a provider+model pair (#344).
+   *
+   * On a timeout the previous code fed `effectiveTimeout` (the ceiling) into the
+   * p95 history; because the timeout is derived FROM that p95, recording the cap
+   * ratchets future timeouts upward and keeps slow providers in rotation longer
+   * (more cost/latency). Instead we record the timeout as a *failure* sample at
+   * a penalized fraction of the cap (default 0.75×), so it neither inflates the
+   * percentile nor counts as a fast success.
+   *
+   * @param effectiveTimeoutMs The timeout value that elapsed.
+   * @param penaltyFactor Fraction of the cap to record (0–1). Default 0.75.
+   */
+  recordTimeout(provider: string, model: string, effectiveTimeoutMs: number, penaltyFactor = 0.75): void {
+    const clamped = Math.max(0, Math.min(1, penaltyFactor));
+    this.record(provider, model, Math.round(effectiveTimeoutMs * clamped), false);
   }
 
   /** Number of valid (non-expired) samples for a given provider+model. */

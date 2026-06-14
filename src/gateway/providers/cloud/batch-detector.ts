@@ -19,6 +19,15 @@ const BATCH_THRESHOLD = 3;
 /** Hard cap on retained entries per tenant so a burst can't grow unbounded. */
 const MAX_WINDOW_ENTRIES = 256;
 
+/** Count requests per language code. Pure helper used by batch draining (#386). */
+export function groupByLanguage(entries: ReadonlyArray<{ language: string }>): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const e of entries) {
+    counts.set(e.language, (counts.get(e.language) ?? 0) + 1);
+  }
+  return counts;
+}
+
 /**
  * Per-tenant batch detector. Keying by tenant prevents cross-tenant leakage —
  * a single module-global array mixed all users' requests so one tenant's
@@ -63,6 +72,43 @@ export class BatchDetector {
     }
 
     return sameLang;
+  }
+
+  /**
+   * Drain the current window for a tenant into language-grouped batches (#386).
+   *
+   * The detector previously only counted/logged opportunities and never acted
+   * on them. This returns the same-language groups that currently meet the
+   * batch threshold (so a caller can issue one provider batch call per group)
+   * and removes those entries from the window. Groups below the threshold are
+   * left in place to keep accumulating.
+   *
+   * @returns map of language → count of requests to batch (only groups ≥ threshold)
+   */
+  drainBatchableGroups(tenant = 'default'): Map<string, number> {
+    const window = this.windows.get(tenant);
+    const result = new Map<string, number>();
+    if (!window || window.length === 0) return result;
+
+    // Prune stale entries first so a drain only batches fresh same-window reqs.
+    const now = Date.now();
+    while (window.length > 0 && now - window[0].timestamp > BATCH_WINDOW_MS) {
+      window.shift();
+    }
+
+    const counts = groupByLanguage(window);
+    for (const [lang, count] of counts) {
+      if (count >= BATCH_THRESHOLD) result.set(lang, count);
+    }
+
+    if (result.size > 0) {
+      // Remove the drained languages from the window.
+      const remaining = window.filter((r) => !result.has(r.language));
+      window.length = 0;
+      window.push(...remaining);
+    }
+
+    return result;
   }
 
   /** Detected batch opportunities for a tenant (or total across all). */

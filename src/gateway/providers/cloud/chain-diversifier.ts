@@ -22,6 +22,14 @@ export interface DiversifyConfig {
   minFamilies?: number;
   /** Custom backup entries per stage, overriding DEFAULT_BACKUPS */
   backupEntries?: Partial<Record<string, FallbackEntry[]>>;
+  /**
+   * Where to inject the cross-family backup(s). Default `'tail'` keeps the
+   * historical behaviour (appended last). `'early'` inserts the backup right
+   * after the primary (index 1) so true family diversity is reached earlier in
+   * the chain — otherwise the only different-provider entry is reached
+   * worst-case last, after every same-family entry has failed (#313).
+   */
+  insertPosition?: 'tail' | 'early';
 }
 
 // ---------------------------------------------------------------------------
@@ -99,9 +107,9 @@ export function diversifyChain(
     return chain;
   }
 
-  // Build the diversified chain (clone to avoid mutating the original)
-  const result = [...chain];
+  // Collect eligible backups first so we can choose where to insert them.
   const providers = new Set(existingProviders);
+  const chosen: FallbackEntry[] = [];
 
   for (const backup of backups) {
     // Stop once we have enough distinct providers
@@ -119,9 +127,17 @@ export function diversifyChain(
       continue;
     }
 
-    result.push(backup);
+    chosen.push(backup);
     providers.add(backup.provider);
   }
 
-  return result;
+  if (chosen.length === 0) return chain;
+
+  // Build the diversified chain (clone to avoid mutating the original).
+  if ((config?.insertPosition ?? 'tail') === 'early') {
+    // Insert the cross-family backups right after the primary so a different
+    // provider is the *second* thing tried, not the last (#313).
+    return [chain[0], ...chosen, ...chain.slice(1)];
+  }
+  return [...chain, ...chosen];
 }

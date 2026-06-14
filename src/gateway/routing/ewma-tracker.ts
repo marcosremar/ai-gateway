@@ -17,6 +17,43 @@ export interface EWMARanking {
   samples: number;
 }
 
+// ── Pure helpers (exported for unit testing — no `this`, no state) ───────────
+
+/**
+ * #252 — staleness penalty scaled by *how* stale a provider is.
+ *
+ * The old code applied a flat ×1.1 to any provider unused >60s, so one idle for
+ * 61s and one idle for an hour were distrusted equally. This grows the penalty
+ * linearly with the number of stale-thresholds elapsed, capped at `maxFactor`,
+ * so a long-cold provider is appropriately deprioritised. Below the threshold
+ * there is no penalty (factor 1).
+ */
+export function stalePenaltyFactor(
+  elapsedMs: number,
+  thresholdMs = 60_000,
+  perWindow = 0.1,
+  maxFactor = 2.0,
+): number {
+  if (elapsedMs <= thresholdMs) return 1;
+  const windows = elapsedMs / thresholdMs; // 1 window at the threshold
+  const factor = 1 + (windows - 1) * perWindow;
+  return Math.min(maxFactor, Math.max(1, factor));
+}
+
+/**
+ * #251 — routing score that incorporates the tracked `peak` (tail latency).
+ *
+ * `ranking()`/`pickBest()` historically sorted on `ewma` alone, ignoring the
+ * "PeakEWMA" intent: a provider with a low average but spiky tails ranked the
+ * same as a steady one. This blends the (stale-adjusted) average with the peak
+ * so a provider with bad tails is deprioritised. `peakWeight=0` reproduces the
+ * legacy ewma-only behavior.
+ */
+export function effectiveScore(adjustedEwmaMs: number, peakMs: number, peakWeight = 0.3): number {
+  const w = Math.max(0, Math.min(1, peakWeight));
+  return adjustedEwmaMs * (1 - w) + Math.max(adjustedEwmaMs, peakMs) * w;
+}
+
 /**
  * PeakEWMA latency tracker per provider.
  *
@@ -153,6 +190,33 @@ export class EWMATracker {
 
     // No cost signal — keep configured-priority order (first unknown).
     return unknowns[0];
+  }
+
+  /**
+   * #251/#252 — tail-aware ranking.
+   *
+   * Like `ranking()` but sorts by a blended score that (a) penalises stale
+   * providers proportionally to how stale they are (#252) and (b) folds in the
+   * tracked `peak` so spiky-tail providers are deprioritised (#251). Returns
+   * the same shape as `ranking()` plus the computed `scoreMs`. The legacy
+   * `ranking()` is left untouched for back-compat.
+   */
+  rankingByScore(peakWeight = 0.3): Array<EWMARanking & { scoreMs: number }> {
+    const now = Date.now();
+    const entries: Array<EWMARanking & { scoreMs: number }> = [];
+    this.providers.forEach((state, provider) => {
+      const adjusted = state.ewma * stalePenaltyFactor(now - state.lastUpdate, EWMATracker.STALE_THRESHOLD_MS);
+      const scoreMs = effectiveScore(adjusted, state.peak, peakWeight);
+      entries.push({
+        provider,
+        ewmaMs: Math.round(adjusted),
+        peakMs: Math.round(state.peak),
+        samples: state.samples,
+        scoreMs: Math.round(scoreMs),
+      });
+    });
+    entries.sort((a, b) => a.scoreMs - b.scoreMs);
+    return entries;
   }
 
   /** Update the decay factor (e.g., from Labs settings UI) */

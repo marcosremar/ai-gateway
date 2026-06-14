@@ -118,6 +118,42 @@ export function selectRandomRoute(routes: PercentageRoute[]): PercentageRoute | 
 }
 
 /**
+ * Auto-shrink a failing canary/variant route based on its observed error rate
+ * (#363). Provider A/B testing previously had no feedback loop — a variant that
+ * started erroring kept its full traffic share until a human intervened. This
+ * pure function reduces a route's weight proportionally to how far its error
+ * rate exceeds a tolerance, and zeroes it once a hard ceiling is crossed, so a
+ * failing variant auto-shrinks toward the stable baseline.
+ *
+ * @param routes      current routes
+ * @param errorRateOf returns the recent error rate (0–1) for a route, or
+ *   null/undefined when there isn't enough data (route left unchanged)
+ * @param opts.tolerance error rate below which weight is untouched. Default 0.05.
+ * @param opts.killThreshold error rate at/above which weight is set to 0. Default 0.5.
+ * @returns a new (un-normalized) route array; pass through
+ *   {@link normalizeRouteWeights} or {@link selectPercentageRoute} to re-balance.
+ */
+export function applyCanaryFeedback(
+  routes: PercentageRoute[],
+  errorRateOf: (route: PercentageRoute) => number | null | undefined,
+  opts?: { tolerance?: number; killThreshold?: number },
+): PercentageRoute[] {
+  const tolerance = opts?.tolerance ?? 0.05;
+  const killThreshold = opts?.killThreshold ?? 0.5;
+
+  return routes.map((r) => {
+    const err = errorRateOf(r);
+    if (err === null || err === undefined || err <= tolerance) return { ...r };
+    if (err >= killThreshold) return { ...r, percentage: 0 };
+    // Linear shrink between tolerance and kill: at tolerance keep full weight,
+    // at killThreshold drop to 0.
+    const span = killThreshold - tolerance;
+    const keepFraction = span > 0 ? 1 - (err - tolerance) / span : 0;
+    return { ...r, percentage: Math.max(0, r.percentage * keepFraction) };
+  });
+}
+
+/**
  * Build percentage routes from a config array.
  *
  * Preserves the optional `endpoint` and `metadata` fields (#361) so
