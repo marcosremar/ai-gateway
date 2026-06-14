@@ -79,7 +79,9 @@ export function Sidebar({ items, activeItem, onChange, health, error }: SidebarP
             }
 
             const isActive = activeItem === item.id;
-            const Icon = item.icon!;
+            // Icon is optional for non-divider links; fall back to a spacer so a
+            // missing icon never crashes (icons are meaningless on dividers, #935).
+            const Icon = item.icon;
             return (
               <button
                 key={item.id}
@@ -100,7 +102,11 @@ export function Sidebar({ items, activeItem, onChange, health, error }: SidebarP
                   if (!isActive) e.currentTarget.style.background = 'transparent';
                 }}
               >
-                <Icon className="w-[18px] h-[18px] flex-shrink-0" />
+                {Icon ? (
+                  <Icon className="w-[18px] h-[18px] flex-shrink-0" />
+                ) : (
+                  <span className="w-[18px] h-[18px] flex-shrink-0" aria-hidden />
+                )}
                 {!collapsed && (
                   <>
                     <span className="truncate">{item.label}</span>

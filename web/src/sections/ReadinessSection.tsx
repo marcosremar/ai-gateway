@@ -7,6 +7,7 @@ import {
 } from '@/lib/gateway';
 import { Card, CardHeader, CardBody, Button, AlertBanner, StatusBadge, FormInput, SectionHeader } from '@/components/ui';
 import { phaseColor, phaseBg, phaseVariant, phaseLabel as phaseLabel_, type ServicePhase as Phase } from '@/lib/phase-colors';
+import { readinessPollInterval, READINESS_IDLE_INTERVAL_MS } from './readiness-logic';
 import { RefreshCw, RotateCcw, Activity, AlertTriangle, ChevronDown, ChevronRight, CheckCircle2, XCircle, Mic, Brain, Volume2 } from 'lucide-react';
 
 function PhaseBadge({ phase }: { phase: Phase }) {
@@ -143,17 +144,27 @@ export function ReadinessSection() {
     }
   }, []);
 
-  // Determine if any stage is in an active phase
-  const hasActivePhase = status && ['benchmarking', 'degraded', 'repechage', 'condemned'].some(p =>
-    status.readinessState.stt.phase === p || status.readinessState.llm.phase === p || status.readinessState.tts.phase === p
-  );
-  const pollIntervalMs = hasActivePhase || status?.readinessState.shadowPhase ? 2000 : 10000;
+  // Adaptive cadence: fast while a stage is transitioning / shadow mode runs,
+  // otherwise idle. Held in a ref so flipping cadence doesn't tear down and
+  // rebuild the interval on every phase change (#948).
+  const desiredIntervalRef = useRef<number>(READINESS_IDLE_INTERVAL_MS);
+  desiredIntervalRef.current = readinessPollInterval(status);
 
   useEffect(() => {
     load();
-    const iv = setInterval(load, pollIntervalMs);
-    return () => clearInterval(iv);
-  }, [load, pollIntervalMs]);
+    // Self-rescheduling timeout: each tick re-reads the desired cadence from the
+    // ref, so a 10s↔2s phase change is picked up on the next tick instead of
+    // tearing down and rebuilding the effect (#948).
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      timer = setTimeout(() => {
+        load();
+        schedule();
+      }, desiredIntervalRef.current);
+    };
+    schedule();
+    return () => clearTimeout(timer);
+  }, [load]);
 
   const handleSaveSettings = async () => {
     setSavingSettings(true);

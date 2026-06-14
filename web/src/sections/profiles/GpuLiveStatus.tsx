@@ -4,52 +4,31 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Loader2, Check, X, AlertTriangle, Clock, Zap, Activity } from 'lucide-react';
 import { getGpuStatus, getReadinessStatus, type GpuStatusResponse, type ReadinessStatusResponse } from '@/lib/gateway';
 import { useGatewayWs, type GatewayWsState } from '@/hooks/useGatewayWs';
-import { STAGE_COLORS, formatPhaseDuration } from '@/lib/phase-colors';
+import {
+  STAGE_COLORS,
+  formatPhaseDuration,
+  deployPhaseMeta,
+} from '@/lib/phase-colors';
 
-/* ── Phase config (includes deploy-specific phases not in shared phase-colors) ── */
+/* ── Phase config ──────────────────────────────────────────────────────────────
+ * Color + label come from the shared `DEPLOY_PHASE_META` registry in
+ * `lib/phase-colors` (#925, single source of truth); only the lucide icon map is
+ * component-local since icons are React-specific. */
 
-const PHASE_META: Record<string, { color: string; label: string; icon: typeof Loader2 }> = {
-  // Pre-deploy
-  idle:             { color: '#6b7280', label: 'Offline',         icon: Clock },
-  offline:          { color: '#6b7280', label: 'Offline',         icon: Clock },
-  searching:        { color: '#a78bfa', label: 'Searching GPU',   icon: Loader2 },
-  searching_offers: { color: '#a78bfa', label: 'Searching',       icon: Loader2 },
-  no_offers:        { color: '#f59e0b', label: 'No GPUs Found',   icon: AlertTriangle },
-  // Deploy phases
-  queued:           { color: '#a78bfa', label: 'Queued',          icon: Clock },
-  creating:         { color: '#38bdf8', label: 'Creating',        icon: Loader2 },
-  creating_pod:     { color: '#38bdf8', label: 'Creating Pod',    icon: Loader2 },
-  installing:       { color: '#38bdf8', label: 'Pulling Image',   icon: Loader2 },
-  pulling_image:    { color: '#38bdf8', label: 'Pulling Image',   icon: Loader2 },
-  starting_container: { color: '#38bdf8', label: 'Starting',      icon: Loader2 },
-  booting:          { color: '#38bdf8', label: 'Booting',         icon: Loader2 },
-  waiting_health:   { color: '#a78bfa', label: 'Loading Models',  icon: Loader2 },
-  // Granular model loading
-  downloading_models: { color: '#a78bfa', label: 'Downloading',   icon: Loader2 },
-  loading_stt:      { color: '#38bdf8', label: 'Loading STT',     icon: Loader2 },
-  loading_llm:      { color: '#a78bfa', label: 'Loading LLM',     icon: Loader2 },
-  loading_tts:      { color: '#fbbf24', label: 'Loading TTS',     icon: Loader2 },
-  compiling_tts:    { color: '#fbbf24', label: 'Compiling TTS',   icon: Loader2 },
-  // Readiness
-  warming:          { color: '#a78bfa', label: 'Warming Models',  icon: Loader2 },
-  benchmarking:     { color: '#38bdf8', label: 'Benchmarking',    icon: Activity },
-  shadow:           { color: '#a78bfa', label: 'Shadow Mode',     icon: Activity },
-  'fast-tracked':   { color: '#10b981', label: 'Fast-Tracked',    icon: Zap },
-  // Production
-  ready:            { color: '#10b981', label: 'Ready',           icon: Check },
-  production:       { color: '#10b981', label: 'Production',      icon: Check },
-  // Degradation
-  degraded:         { color: '#f59e0b', label: 'Degraded',        icon: AlertTriangle },
-  repechage:        { color: '#f97316', label: 'Repechage',       icon: Loader2 },
-  failed:           { color: '#ef4444', label: 'Failed',          icon: X },
-  condemned:        { color: '#ef4444', label: 'Condemned',       icon: X },
-  'auto-recovery':  { color: '#06b6d4', label: 'Auto-Recovery',   icon: Zap },
-  draining:         { color: '#a78bfa', label: 'Draining',        icon: Loader2 },
-  error:            { color: '#ef4444', label: 'Error',           icon: X },
+const PHASE_ICONS: Record<string, typeof Loader2> = {
+  idle: Clock, offline: Clock, searching: Loader2, searching_offers: Loader2,
+  no_offers: AlertTriangle, queued: Clock, creating: Loader2, creating_pod: Loader2,
+  installing: Loader2, pulling_image: Loader2, starting_container: Loader2,
+  booting: Loader2, waiting_health: Loader2, downloading_models: Loader2,
+  loading_stt: Loader2, loading_llm: Loader2, loading_tts: Loader2, compiling_tts: Loader2,
+  warming: Loader2, benchmarking: Activity, shadow: Activity, 'fast-tracked': Zap,
+  ready: Check, production: Check, degraded: AlertTriangle, repechage: Loader2,
+  failed: X, condemned: X, 'auto-recovery': Zap, draining: Loader2, error: X,
 };
 
 function phaseMeta(phase: string) {
-  return PHASE_META[phase] || { color: '#6b7280', label: phase, icon: Clock };
+  const { color, label } = deployPhaseMeta(phase);
+  return { color, label, icon: PHASE_ICONS[phase] ?? Clock };
 }
 
 function formatElapsed(ms: number): string {

@@ -5,7 +5,7 @@ import dynamic from 'next/dynamic';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
 import { Sidebar, type SidebarItem } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
-import { resolveRoute, routeToPath } from '@/lib/nav';
+import { resolveRoute, routeToPath, validRoutesFromNav } from '@/lib/nav';
 import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon, Gauge, RefreshCw, Activity, FlaskConical, Layers, Server, AppWindow } from 'lucide-react';
 
 // Critical above-the-fold section — loaded eagerly
@@ -70,7 +70,8 @@ const VastServerlessSection = dynamic(
 const NAV_ITEMS: SidebarItem[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
 
-  { id: '_config', label: 'Config', divider: true, icon: LayoutDashboard },
+  // Dividers carry no icon — the Sidebar never renders one for them (#935).
+  { id: '_config', label: 'Config', divider: true },
   { id: 'config/services', label: 'Services', icon: Server },
   { id: 'config/apps', label: 'Apps', icon: AppWindow },
   { id: 'config/guardrails', label: 'Guardrails', icon: Shield },
@@ -78,20 +79,20 @@ const NAV_ITEMS: SidebarItem[] = [
   { id: 'config/labs', label: 'Labs', icon: FlaskConical },
   { id: 'config/vast-serverless', label: 'Vast Serverless', icon: Layers },
 
-  { id: '_tools', label: 'Tools', divider: true, icon: LayoutDashboard },
+  { id: '_tools', label: 'Tools', divider: true },
   { id: 'tools/playground', label: 'Playground', icon: Sparkles },
   { id: 'tools/bot', label: 'Bot', icon: Bot },
   { id: 'tools/auto-swap', label: 'Auto-Swap', icon: RefreshCw },
   { id: 'tools/standby', label: 'GPU Standby', icon: Moon },
 
-  { id: '_monitor', label: 'Monitor', divider: true, icon: LayoutDashboard },
+  { id: '_monitor', label: 'Monitor', divider: true },
   { id: 'monitor/latency', label: 'Latency', icon: Activity },
   { id: 'monitor/reputation', label: 'Reputation', icon: Shield },
   { id: 'monitor/logs', label: 'Logs & Metrics', icon: ScrollText },
   { id: 'monitor/readiness', label: 'Readiness', icon: Gauge },
 ];
 
-const VALID_ROUTES = new Set(NAV_ITEMS.filter(item => !item.divider).map(item => item.id));
+const VALID_ROUTES = validRoutesFromNav(NAV_ITEMS);
 
 function getRouteFromPath(): string {
   if (typeof window === 'undefined') return 'overview';

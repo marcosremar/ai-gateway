@@ -133,6 +133,81 @@ export function formatPhaseDuration(phaseStartedAt: number | undefined): string 
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+// ── Deploy phase registry (GpuLiveStatus) → color / label ─────────────────────
+//
+// `GpuLiveStatus` tracked a 40-entry `PHASE_META` map of deploy-lifecycle phases
+// (searching → creating_pod → pulling_image → … → ready) separate from the
+// service `ServicePhase` map above (#925). That was a second source of truth for
+// phase color/label and could drift on edits. The *data* (color + label) lives
+// here as one exported registry; the React component layers its lucide icon map
+// on top (icons are React-specific and stay in the component).
+
+export interface DeployPhaseStyle {
+  color: string;
+  label: string;
+}
+
+/** Canonical color/label for every GPU deploy-lifecycle phase. Single source. */
+export const DEPLOY_PHASE_META: Record<string, DeployPhaseStyle> = {
+  // Pre-deploy
+  idle:               { color: '#6b7280', label: 'Offline' },
+  offline:            { color: '#6b7280', label: 'Offline' },
+  searching:          { color: '#a78bfa', label: 'Searching GPU' },
+  searching_offers:   { color: '#a78bfa', label: 'Searching' },
+  no_offers:          { color: '#f59e0b', label: 'No GPUs Found' },
+  // Deploy phases
+  queued:             { color: '#a78bfa', label: 'Queued' },
+  creating:           { color: '#38bdf8', label: 'Creating' },
+  creating_pod:       { color: '#38bdf8', label: 'Creating Pod' },
+  installing:         { color: '#38bdf8', label: 'Pulling Image' },
+  pulling_image:      { color: '#38bdf8', label: 'Pulling Image' },
+  starting_container: { color: '#38bdf8', label: 'Starting' },
+  booting:            { color: '#38bdf8', label: 'Booting' },
+  waiting_health:     { color: '#a78bfa', label: 'Loading Models' },
+  // Granular model loading
+  downloading_models: { color: '#a78bfa', label: 'Downloading' },
+  loading_stt:        { color: '#38bdf8', label: 'Loading STT' },
+  loading_llm:        { color: '#a78bfa', label: 'Loading LLM' },
+  loading_tts:        { color: '#fbbf24', label: 'Loading TTS' },
+  compiling_tts:      { color: '#fbbf24', label: 'Compiling TTS' },
+  // Readiness
+  warming:            { color: '#a78bfa', label: 'Warming Models' },
+  benchmarking:       { color: '#38bdf8', label: 'Benchmarking' },
+  shadow:             { color: '#a78bfa', label: 'Shadow Mode' },
+  'fast-tracked':     { color: '#10b981', label: 'Fast-Tracked' },
+  // Production
+  ready:              { color: '#10b981', label: 'Ready' },
+  production:         { color: '#10b981', label: 'Production' },
+  // Degradation
+  degraded:           { color: '#f59e0b', label: 'Degraded' },
+  repechage:          { color: '#f97316', label: 'Repechage' },
+  failed:             { color: '#ef4444', label: 'Failed' },
+  condemned:          { color: '#ef4444', label: 'Condemned' },
+  'auto-recovery':    { color: '#06b6d4', label: 'Auto-Recovery' },
+  draining:           { color: '#a78bfa', label: 'Draining' },
+  error:              { color: '#ef4444', label: 'Error' },
+};
+
+const DEPLOY_PHASE_FALLBACK_COLOR = '#6b7280';
+
+/** Deploy-phase accent color; falls back to gray for unknown phases. Pure. */
+export function deployPhaseColor(phase: string): string {
+  return DEPLOY_PHASE_META[phase]?.color ?? DEPLOY_PHASE_FALLBACK_COLOR;
+}
+
+/**
+ * Human label for a deploy phase; unknown phases echo the raw phase string
+ * (matching the previous inline `PHASE_META[phase] || { label: phase }`). Pure.
+ */
+export function deployPhaseLabel(phase: string): string {
+  return DEPLOY_PHASE_META[phase]?.label ?? phase;
+}
+
+/** Color + label for a deploy phase with a gray/echo fallback. Pure. */
+export function deployPhaseMeta(phase: string): DeployPhaseStyle {
+  return DEPLOY_PHASE_META[phase] ?? { color: DEPLOY_PHASE_FALLBACK_COLOR, label: phase };
+}
+
 // ── Phase label (human-readable) ─────────────────────────────────────────────
 
 const PHASE_LABELS: Record<ServicePhase, string> = {

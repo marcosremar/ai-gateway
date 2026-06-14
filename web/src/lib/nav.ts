@@ -65,6 +65,34 @@ export function routeToPath(routeId: string): string {
   return routeId === 'overview' ? '/' : `/${routeId}`;
 }
 
+// ── Sidebar nav-item helpers (#935) ───────────────────────────────────────────
+//
+// Divider nav entries used to carry a meaningless `icon: LayoutDashboard` even
+// though the Sidebar never renders an icon for dividers — dead, misleading
+// config. These predicates make the divider-vs-link distinction explicit and
+// are used to derive the valid-route set without relying on an icon being set.
+
+/** Minimal shape of a sidebar entry for routing/predicate logic. Pure-data. */
+export interface NavItemLike {
+  id: string;
+  divider?: boolean;
+}
+
+/** True when a nav item is a section divider (not a navigable link). Pure. */
+export function isNavSection(item: NavItemLike): boolean {
+  return item.divider === true;
+}
+
+/** True when a nav item is a navigable link (has a real route). Pure. */
+export function isNavLink(item: NavItemLike): boolean {
+  return item.divider !== true;
+}
+
+/** Collect the set of valid route ids (link items only) from a nav list. Pure. */
+export function validRoutesFromNav(items: ReadonlyArray<NavItemLike>): Set<string> {
+  return new Set(items.filter(isNavLink).map((item) => item.id));
+}
+
 /**
  * Push a raw URL path and notify the in-app router (#936).
  *

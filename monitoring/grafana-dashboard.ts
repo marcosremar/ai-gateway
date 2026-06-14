@@ -194,3 +194,47 @@ export const GRAFANA_DASHBOARD = {
     ],
   },
 };
+
+// ── Alert-rule accessors (#1000) ──────────────────────────────────────────────
+//
+// The dashboard ships real Prometheus-style alert rules (error-rate, p95
+// latency, GPU-down, budget, memory, failover) wired to the Slack/Discord
+// channels the gateway alerts through. These pure accessors make the rules
+// queryable (and unit-testable) without re-deriving the structure elsewhere — a
+// channel router or `/health` summary can consume `alertsBySeverity` /
+// `alertChannels` directly.
+
+export type AlertSeverity = 'critical' | 'warning' | 'info';
+
+export interface GrafanaAlertRule {
+  name: string;
+  condition: string;
+  for: string;
+  severity: AlertSeverity;
+  channel: string;
+}
+
+/** All configured alert rules from the dashboard. Pure. */
+export function getAlertRules(): GrafanaAlertRule[] {
+  return (GRAFANA_DASHBOARD.dashboard.alerts ?? []) as GrafanaAlertRule[];
+}
+
+/** Alert rules filtered by severity. Pure. */
+export function alertsBySeverity(severity: AlertSeverity): GrafanaAlertRule[] {
+  return getAlertRules().filter((a) => a.severity === severity);
+}
+
+/** Distinct alert names (handy for asserting coverage of key SLOs). Pure. */
+export function alertNames(): string[] {
+  return getAlertRules().map((a) => a.name);
+}
+
+/** Distinct notification channels referenced by the alert rules. Pure. */
+export function alertChannels(): string[] {
+  return [...new Set(getAlertRules().map((a) => a.channel))];
+}
+
+/** True when at least one alert routes to the given channel. Pure. */
+export function hasAlertForChannel(channel: string): boolean {
+  return getAlertRules().some((a) => a.channel === channel);
+}
