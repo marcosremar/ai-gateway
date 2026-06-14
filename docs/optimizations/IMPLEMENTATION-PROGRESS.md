@@ -21,30 +21,57 @@
 
 | Metric | Value |
 |--------|-------|
-| Distinct audit IDs implemented + tested | **416 / 1000** |
-| Opt unit tests passing | **1055** |
-| Opt test files | 32 |
+| Distinct audit IDs implemented + tested | **602 / 1000** |
+| Opt unit tests passing | **1709** |
+| Opt test files | 56 |
+| Per-domain implemented-docs | 47 |
 | Typecheck errors | 11 (baseline 22; **0 new**, 11 fixed) |
-| Waves complete | Waves 1–3 (all 10 domains) · Wave 4 in progress |
+| Waves complete | Waves 1–5 (per-domain, all 10) · Wave 6 (cross-ownership harvest) |
 
 ### Per-domain coverage (distinct IDs implemented & tested)
 
-| Domain | Range | Done | Waves |
+| Domain | Range | Done | Notes |
 |--------|-------|-----:|-------|
-| 1 Core AI Pipeline | 1–100 | 46 | 1–3 |
-| 2 GPU Deployment | 101–200 | 42 | 1–3 |
-| 3 Autoscaling | 201–300 | 53 | 1–3 |
-| 4 Provider Routing | 301–400 | 52 | 1–3 |
-| 5 WebSocket/Realtime | 401–500 | 41 | 1–3 |
-| 6 Observability/Cost | 501–600 | 45 | 1–3 |
-| 7 Security/Auth | 601–700 | 31 | 1–3 |
-| 8 Storage/State | 701–800 | 43 | 1–3 |
-| 9 CLI/SDK/DX | 801–900 | 41 | 1–3 |
-| 10 Web/Build/Infra | 901–1000 | 22* | 1–3 |
+| 1 Core AI Pipeline | 1–100 | 62 | |
+| 2 GPU Deployment | 101–200 | 63 | |
+| 3 Autoscaling | 201–300 | 73 | |
+| 4 Provider Routing | 301–400 | 68 | |
+| 5 WebSocket/Realtime | 401–500 | 55 | |
+| 6 Observability/Cost | 501–600 | 78 | |
+| 7 Security/Auth | 601–700 | 47 | most remainder = live-middleware wiring (deferred) |
+| 8 Storage/State | 701–800 | 66 | |
+| 9 CLI/SDK/DX | 801–900 | 61 | |
+| 10 Web/Build/Infra | 901–1000 | 29* | |
 
-\* Domain 10's count is low because many of its items are config/Dockerfile/YAML/
-Terraform changes that are validated by inspection (no unit test = not counted by
-the ID-in-test scan), though the pure-TS logic is tested.
+\* Domain 10's count is low because most remaining items are config/Dockerfile/
+YAML/Terraform/CI changes validated by inspection (no unit test = not counted by
+the ID-in-test scan) or need a `next build`/CI environment; its pure-TS logic is tested.
+
+## Terminal state — the remaining ~398 are deferred-by-design
+
+After 6 waves every domain reported its safe, in-lane pool exhausted. The
+remaining ~398 audit IDs are **not** safely auto-implementable as minimal,
+tested, behavior-preserving diffs. They fall into these categories (each item's
+reason is recorded in the per-domain `implemented/*.md` "Deferred" sections):
+
+| Category | ~Count | Why deferred | What it needs |
+|----------|-------:|--------------|---------------|
+| `src/modules/` dedup (80k-LOC mirror) | ~40 | Published lib imports the duplicate tree; collapsing it is large & risky | Dedicated refactor branch + full build/review |
+| Live-middleware wiring (RBAC, CSRF, per-key rate limit, DLP, recall webhook) | ~35 | Changes runtime auth/security posture of the running gateway | Product sign-off + server-owner coordination (primitives are built + tested) |
+| Large/behavioral rewrites (Node→Bun streaming adapter, chat SSE, terminate teardown, base64 snapshot streaming, coalescing/tee, boot state machine) | ~60 | Not safely additive; alter live latency/concurrency semantics | Focused tasks with integration tests |
+| Build/CI/infra-env-dependent (client bundle/CSS, turbo/tsup/CI config, Dockerfiles, Helm/Terraform/k6) | ~40 | Need a `next build` / CI / infra environment to validate | CI/build environment |
+| Wire-format / blob-format changes (GPU-token kid/aud/jti, vault AAD/version-keyed decrypt) | ~10 | Change signed payloads / on-disk formats | Migration + pod-image coordination |
+| ADR-level cross-module consolidation (cost-model reconciliation, SDK/TS↔Python parity, event-bus/tracer unification, AsyncLocalStorage context) | ~30 | Architectural; multi-module breaking changes | ADR + dedicated effort |
+| Packaging (`package.json` main/types→dist, `@parle` naming, exports) | ~10 | Editing root build manifests breaks parallel work | Maintainer pass |
+| Schema/index/migration (Prisma schema, DB indexes) | ~10 | Out-of-scope schema/migration files | DB migration review |
+| Docs-only (onboarding/guides) | ~15 | Documentation, not code | Docs pass |
+| Already-equivalent / no-op / superseded | ~30 | Verified already satisfied or made moot by another fix | — |
+| Misc out-of-ownership / lower-value localized | ~108 | Lower-value or require ownership expansion | Optional later waves |
+
+These are tracked honestly rather than faked. The biggest single unlock is the
+`src/modules/` dedup (Theme A in the master report), which would also resolve
+the packaging and several drift items at once — recommended as the next
+dedicated piece of work.
 
 ## Highlights implemented (with tests)
 
@@ -92,4 +119,4 @@ Tracked in each per-domain `implemented/*.md` "Deferred" section:
 - **Terminal state:** every audit ID is either (a) implemented with a passing
   test, or (b) listed as deferred-by-design with a reason — reconciling to 1000.
 
-_Last updated: 2026-06-14, after Wave 3 (all 10 domains); Wave 4 in progress._
+_Last updated: 2026-06-14, after Wave 6 (cross-ownership harvest). 602/1000 implemented + tested (1709 tests); remaining ~398 deferred-by-design (see table above)._
