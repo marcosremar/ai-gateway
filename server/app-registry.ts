@@ -20,7 +20,7 @@
 //
 // See __tests__/app-registry.test.ts for contract coverage.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -57,6 +57,7 @@ export interface AppRegistryEntry {
 
 const REGISTRY_DIR = process.env.AI_GATEWAY_HOME || join(homedir(), '.ai-gateway');
 const REGISTRY_FILE = join(REGISTRY_DIR, 'apps.json');
+const REGISTRY_BAK = REGISTRY_FILE + '.bak';
 
 // ── Default seed (post-refactor source of truth for first-boot state) ─────
 //
@@ -87,18 +88,43 @@ function ensureDir(): void {
   if (!existsSync(REGISTRY_DIR)) mkdirSync(REGISTRY_DIR, { recursive: true });
 }
 
+/** Parse a registry JSON blob into a name→entry map. Throws on invalid JSON or
+ *  a non-array payload so the caller can attempt recovery. */
+function parseRegistry(raw: string): Map<string, AppRegistryEntry> {
+  const entries = JSON.parse(raw) as AppRegistryEntry[];
+  if (!Array.isArray(entries)) throw new Error('registry payload is not an array');
+  return new Map(entries.map(e => [e.name, e]));
+}
+
 function loadFromDisk(): Map<string, AppRegistryEntry> {
   ensureDir();
   if (!existsSync(REGISTRY_FILE)) {
-    // First boot: seed the file.
-    writeFileSync(REGISTRY_FILE, JSON.stringify(SEED_ENTRIES, null, 2));
+    // First boot: seed the file (atomically — a crash mid-seed otherwise leaves
+    // a truncated registry that then "falls back to seed" forever). #706
+    atomicWriteRegistry(JSON.stringify(SEED_ENTRIES, null, 2));
     log.log(`Seeded ${SEED_ENTRIES.length} default apps → ${REGISTRY_FILE}`);
     return new Map(SEED_ENTRIES.map(e => [e.name, e]));
   }
+  let map: Map<string, AppRegistryEntry>;
   try {
-    const raw = readFileSync(REGISTRY_FILE, 'utf8');
-    const entries = JSON.parse(raw) as AppRegistryEntry[];
-    const map = new Map(entries.map(e => [e.name, e]));
+    map = parseRegistry(readFileSync(REGISTRY_FILE, 'utf8'));
+  } catch (err) {
+    // #707: primary corrupted — try the .bak before discarding operator edits.
+    log.warn(`Failed to parse ${REGISTRY_FILE}: ${(err as Error).message}`);
+    if (existsSync(REGISTRY_BAK)) {
+      try {
+        map = parseRegistry(readFileSync(REGISTRY_BAK, 'utf8'));
+        log.warn(`Recovered app registry from backup: ${REGISTRY_BAK}`);
+      } catch (bakErr) {
+        log.warn(`Backup also corrupt (${(bakErr as Error).message}) — falling back to seed`);
+        return new Map(SEED_ENTRIES.map(e => [e.name, e]));
+      }
+    } else {
+      log.warn('No backup available — falling back to seed');
+      return new Map(SEED_ENTRIES.map(e => [e.name, e]));
+    }
+  }
+  {
 
     // Forward-migration: for every seed entry missing on disk or missing a
     // field we now care about, patch it in without overwriting operator
@@ -130,16 +156,29 @@ function loadFromDisk(): Map<string, AppRegistryEntry> {
       catch (e) { log.warn(`Registry migration save failed: ${(e as Error).message}`); }
     }
     return map;
-  } catch (err) {
-    log.warn(`Failed to parse ${REGISTRY_FILE}: ${(err as Error).message} — falling back to seed`);
-    return new Map(SEED_ENTRIES.map(e => [e.name, e]));
   }
 }
 
 function saveToDisk(entries: Map<string, AppRegistryEntry>): void {
   ensureDir();
   const arr = Array.from(entries.values());
-  writeFileSync(REGISTRY_FILE, JSON.stringify(arr, null, 2));
+  atomicWriteRegistry(JSON.stringify(arr, null, 2));
+}
+
+/**
+ * #706/#707: crash-safe registry write. Keeps a `.bak` of the last-known-good
+ * file (so #707's recovery path has something to fall back to) and writes the
+ * new content via tmp → rename so a crash mid-write can never truncate apps.json
+ * into a permanently-"fall back to seed" state.
+ */
+function atomicWriteRegistry(data: string): void {
+  // Snapshot the current good file to .bak BEFORE we touch the primary.
+  if (existsSync(REGISTRY_FILE)) {
+    try { writeFileSync(REGISTRY_BAK, readFileSync(REGISTRY_FILE)); } catch { /* best-effort backup */ }
+  }
+  const tmp = REGISTRY_FILE + '.tmp';
+  writeFileSync(tmp, data);
+  renameSync(tmp, REGISTRY_FILE);
 }
 
 function ensureLoaded(): Map<string, AppRegistryEntry> {

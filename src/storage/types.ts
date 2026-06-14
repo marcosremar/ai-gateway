@@ -80,6 +80,19 @@ export interface ObjectStore {
   get(key: string): Promise<Uint8Array>;
 
   /**
+   * Download a byte RANGE of an object (#747).
+   *
+   * Issues a ranged GET (`Range: bytes=start-end`, inclusive end) so callers
+   * doing resumable downloads or metadata-only sniffs (e.g. the GGUF magic in
+   * the first bytes) transfer only what they need instead of the whole object.
+   * `end` is inclusive; omit it to read from `start` to EOF.
+   *
+   * Optional so lightweight/partial implementations (test fakes) need not
+   * provide it; the S3 adapter always does.
+   */
+  getRange?(key: string, start: number, end?: number): Promise<Uint8Array>;
+
+  /**
    * Stream an object's bytes. Use this for large files (model weights,
    * recordings) to avoid buffering the whole thing in memory.
    */
@@ -99,6 +112,18 @@ export interface ObjectStore {
    * a separate method.
    */
   presign(key: string, opts?: PresignOptions): string;
+
+  /**
+   * Server-side copy an object (#751).
+   *
+   * Uses S3 `CopyObject` so renaming/duplicating an object stays inside the
+   * provider — no GET+PUT round-trip through the gateway (which would pay full
+   * egress + ingress). Overwrites any object already at `dstKey`.
+   *
+   * Optional for the same reason as {@link getRange}; the S3 adapter always
+   * provides it.
+   */
+  copy?(srcKey: string, dstKey: string): Promise<void>;
 
   /**
    * Delete an object. Idempotent — does not throw if the object is missing.

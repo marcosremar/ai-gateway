@@ -22,6 +22,38 @@ export class InMemoryStateAdapter implements StateStore {
   /** #759: hard cap on fields per hash so heartbeat hashes can't grow forever. */
   private readonly MAX_HASH_FIELDS = 100_000;
 
+  /** #758: handle for the optional periodic (write-driven) sweep timer. */
+  private _sweepTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Start a periodic timer-based sweep (#758). The lazy {@link sweep} only runs
+   * inside get/scan/hgetall, so a store that is written but rarely read never
+   * expires keys — TTL'd entries linger indefinitely. Call this once to evict on
+   * a timer regardless of reads. The timer is `unref()`'d so it never keeps the
+   * process alive. Idempotent.
+   *
+   * @param intervalMs sweep cadence (default 60s, the lazy-sweep cadence)
+   */
+  startPeriodicSweep(intervalMs = 60_000): void {
+    if (this._sweepTimer) return;
+    this._sweepTimer = setInterval(() => {
+      // Force a sweep even if a recent lazy sweep ran by resetting the gate.
+      this.lastSweep = 0;
+      this.sweep();
+    }, intervalMs);
+    if (typeof (this._sweepTimer as unknown as { unref?: () => void }).unref === 'function') {
+      (this._sweepTimer as unknown as { unref: () => void }).unref();
+    }
+  }
+
+  /** Stop the periodic sweep started by {@link startPeriodicSweep}. Idempotent. */
+  stopPeriodicSweep(): void {
+    if (this._sweepTimer) {
+      clearInterval(this._sweepTimer);
+      this._sweepTimer = null;
+    }
+  }
+
   /** Lazily sweep expired entries (at most every 60s). */
   private sweep(): void {
     const now = Date.now();
@@ -111,12 +143,19 @@ export class InMemoryStateAdapter implements StateStore {
     this.lists.set(key, list.slice(s, e + 1));
   }
 
-  async lrange(key: string, start: number, stop: number): Promise<string[]> {
+  async lrange(key: string, start: number, stop: number, maxElements?: number): Promise<string[]> {
     const list = this.lists.get(key) ?? [];
     const len = list.length;
     const s = start < 0 ? Math.max(len + start, 0) : start;
     const e = stop < 0 ? len + stop : stop;
-    return list.slice(s, e + 1);
+    const out = list.slice(s, e + 1);
+    // #767: enforce the documented guard so an unbounded `lrange(0,-1)` on a hot
+    // list can't return a huge array and blow memory. The contract is to THROW
+    // when the requested range exceeds maxElements (callers must page instead).
+    if (maxElements !== undefined && out.length > maxElements) {
+      throw new Error(`lrange: range returns ${out.length} elements, exceeds maxElements (${maxElements})`);
+    }
+    return out;
   }
 
   async hset(key: string, field: string, value: string, ttlSecs?: number): Promise<void> {

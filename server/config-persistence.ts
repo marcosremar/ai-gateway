@@ -199,8 +199,37 @@ export interface ProviderConfig {
   idleTimeoutMin: number;  // auto-terminate GPU after N minutes idle (0 = disabled)
   /** STT hallucination filter settings. */
   sttHallucinationFilter?: SttHallucinationFilterSettings;
+  /** Schema version of the on-disk format (#776). Bump when the format changes
+   *  so migrations can be gated reliably instead of running ad-hoc heuristics. */
+  schemaVersion?: number;
   updatedAt: number;
   [key: string]: unknown;  // allow extra fields from UI (dockerImages, gpuTypes, etc.)
+}
+
+/**
+ * Current provider-config on-disk schema version (#776). Historically the
+ * format evolved (`profiles` → `apps`, `gpu-pod` → `container`) with NO version
+ * marker, so old files were only detected via field-shape heuristics. Stamp
+ * every save with this and gate migrations on it.
+ */
+export const CONFIG_SCHEMA_VERSION = 1;
+
+/**
+ * Decide whether a loaded config blob predates {@link CONFIG_SCHEMA_VERSION}
+ * and therefore needs migration. Pure → unit-testable. A blob is "old" when it
+ * has no numeric `schemaVersion`, or a lower one, OR it still carries the legacy
+ * `profiles`/`activeProfileId` keys (pre-v1 files written before the field
+ * existed).
+ */
+export function needsConfigMigration(data: Record<string, unknown> | null | undefined): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const v = (data as { schemaVersion?: unknown }).schemaVersion;
+  if (typeof v === 'number') return v < CONFIG_SCHEMA_VERSION;
+  // No version field at all → legacy. Definitely needs migration if it still
+  // uses the old key names.
+  if ('profiles' in data || 'activeProfileId' in data) return true;
+  // No version + no legacy keys: treat as pre-v1 (needs stamping on next save).
+  return true;
 }
 
 /** Get the active app, or null if none is active. */
@@ -535,6 +564,9 @@ export function saveProviderConfig(config: ProviderConfig): Promise<void> {
     try {
       mkdirSync(BABELCAST_DIR, { recursive: true });
       config.updatedAt = Date.now();
+      // #776: stamp the schema version on every save so future format changes
+      // are detectable (needsConfigMigration) instead of guessed from shape.
+      config.schemaVersion = CONFIG_SCHEMA_VERSION;
       // Backup current file before overwriting (corruption recovery)
       if (existsSync(CONFIG_FILE)) {
         try { writeFileSync(CONFIG_FILE + '.bak', readFileSync(CONFIG_FILE)); } catch { /* best-effort backup */ }
@@ -668,19 +700,25 @@ export async function applyRuntimeConfig(): Promise<void> {
   await loadDeploySettings();
 }
 
-/** Debounced stamp: update lastRequestAt on the given app.
+/** Debounced stamp: update lastRequestAt on the given app(s).
  *  Batches writes — persists at most once per 10 seconds to avoid
  *  sync file I/O on every pipeline request. */
 let _stampTimer: ReturnType<typeof setTimeout> | null = null;
-let _pendingStampId: string | null = null;
+// #714: previously a single `_pendingStampId` — a later stampAppRequest(other)
+// during the debounce window OVERWROTE the first, so only the last app in the
+// window ever got its lastRequestAt recorded. Track a Set so every distinct app
+// touched in the window is stamped in one write.
+const _pendingStampIds = new Set<string>();
 
-async function _flushStamp(appId: string): Promise<void> {
+async function _flushStamps(appIds: string[]): Promise<void> {
+  if (appIds.length === 0) return;
   try {
     const config = await loadProviderConfig();
     const now = Date.now();
+    const ids = new Set(appIds);
     const updated = {
       ...config,
-      apps: config.apps.map(a => a.id === appId ? { ...a, lastRequestAt: now } : a),
+      apps: config.apps.map(a => ids.has(a.id) ? { ...a, lastRequestAt: now } : a),
     };
     await saveProviderConfig(updated);
   } catch (e) { log.warn('app lastRequestAt update failed: %s', e instanceof Error ? e.message : e); }
@@ -688,19 +726,28 @@ async function _flushStamp(appId: string): Promise<void> {
 
 export function stampAppRequest(appId: string | null): void {
   if (!appId) return;
+  _pendingStampIds.add(appId);
   if (!_stampTimer) {
-    _pendingStampId = appId;
     _stampTimer = setTimeout(() => {
       _stampTimer = null;
-      const pending = _pendingStampId;
-      _pendingStampId = null;
-      if (pending) {
-        _flushStamp(pending);
-      }
+      const pending = Array.from(_pendingStampIds);
+      _pendingStampIds.clear();
+      void _flushStamps(pending);
     }, 10_000);
-  } else {
-    _pendingStampId = appId;
   }
+}
+
+/** Test-only: snapshot the set of app IDs pending a stamp flush (#714). */
+export function __getPendingStampIds(): string[] {
+  return Array.from(_pendingStampIds);
+}
+
+/** Test-only: flush pending stamps synchronously (returns the promise). (#714) */
+export function __flushStampsNow(): Promise<void> {
+  if (_stampTimer) { clearTimeout(_stampTimer); _stampTimer = null; }
+  const pending = Array.from(_pendingStampIds);
+  _pendingStampIds.clear();
+  return _flushStamps(pending);
 }
 
 /** @deprecated Use stampAppRequest */

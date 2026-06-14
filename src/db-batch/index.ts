@@ -259,6 +259,38 @@ export async function computeStatsAggregated<A, R>(
 }
 
 /**
+ * Build the args for a single "keep newest N, delete the rest" prune (#723).
+ *
+ * The latency-db history prune currently does TWO round-trips: a `findMany`
+ * (top-N ids) followed by a `deleteMany(id < minId)`. When the caller already
+ * knows the id ordering it can collapse that to ONE `deleteMany` by computing
+ * the cutoff client-side. This helper returns the `where` clause for that
+ * single delete given the ids sorted newest-first.
+ *
+ * Returns `null` when there is nothing to prune (≤ keepNewest rows), so the
+ * caller can skip the delete entirely. The newest `keepNewest` ids are retained;
+ * everything strictly older than the cutoff id is deleted.
+ *
+ * Pure + deterministic → unit-testable without a DB.
+ *
+ * @param idsNewestFirst row ids ordered newest → oldest (e.g. `orderBy id desc`)
+ * @param keepNewest how many of the newest rows to keep
+ * @param idField the id column name (default `id`)
+ */
+export function buildPruneKeepNewest(
+  idsNewestFirst: number[],
+  keepNewest: number,
+  idField = 'id',
+): { where: Record<string, { lt: number }> } | null {
+  if (keepNewest < 0) keepNewest = 0;
+  if (idsNewestFirst.length <= keepNewest) return null; // nothing to prune
+  // The cutoff is the oldest id we KEEP; delete everything strictly below it.
+  const cutoffId = idsNewestFirst[keepNewest - 1];
+  if (cutoffId === undefined) return null;
+  return { where: { [idField]: { lt: cutoffId } } };
+}
+
+/**
  * Differential update — only write changed fields instead of full state.
  *
  * @example

@@ -47,6 +47,70 @@ export async function* listAllVia(
   } while (token);
 }
 
+/**
+ * Broadened "object not found" detection (#753).
+ *
+ * The previous heuristic matched a fixed set of codes/names; some
+ * S3-compatibles (B2/MinIO/Wasabi) surface 404s with different shapes, so a
+ * genuinely-missing object could throw instead of returning null. We now treat
+ * any 4xx-that-is-not-403 (auth) as not-found, plus the well-known codes.
+ * Exported so callers (and tests) share one definition.
+ */
+export function isS3NotFound(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: string; statusCode?: number; status?: number; name?: string };
+  const status = e.statusCode ?? e.status;
+  if (status === 404) return true;
+  // Any client error other than 403 (forbidden) is treated as absence — a 403
+  // is a real permission problem the caller must see, not a missing key.
+  if (typeof status === 'number' && status >= 400 && status < 500 && status !== 403) return true;
+  const code = e.code ?? e.name;
+  return code === 'NotFound' || code === 'NoSuchKey' || code === 'NoSuchBucket';
+}
+
+/**
+ * Retryable-transient classification for S3 ops (#755). 5xx and SlowDown/
+ * throttling are transient; 4xx (except 429) are caller errors and must NOT be
+ * retried (retrying a 404/403 just wastes time). Exported for unit testing.
+ */
+export function isRetryableS3Error(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: string; statusCode?: number; status?: number; name?: string };
+  const status = e.statusCode ?? e.status;
+  if (typeof status === 'number') {
+    if (status >= 500) return true;
+    if (status === 429) return true; // Too Many Requests
+    return false;
+  }
+  const code = e.code ?? e.name;
+  return code === 'SlowDown' || code === 'RequestTimeout' || code === 'InternalError' || code === 'ServiceUnavailable';
+}
+
+/**
+ * Run an idempotent S3 op with bounded exponential backoff on transient
+ * errors (#755). Non-retryable errors (4xx other than 429) surface immediately.
+ * `sleep` is injectable so tests run instantly.
+ */
+export async function withS3Retry<T>(
+  op: () => Promise<T>,
+  opts: { maxRetries?: number; baseDelayMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<T> {
+  const maxRetries = opts.maxRetries ?? 3;
+  const baseDelayMs = opts.baseDelayMs ?? 100;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await op();
+    } catch (err) {
+      attempt++;
+      if (attempt > maxRetries || !isRetryableS3Error(err)) throw err;
+      const cap = baseDelayMs * 2 ** (attempt - 1);
+      await sleep(Math.floor(Math.random() * cap)); // full jitter
+    }
+  }
+}
+
 export interface S3StoreConfig {
   /** Bucket name. */
   bucket: string;
@@ -83,14 +147,9 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
     ...(config.sessionToken ? { sessionToken: config.sessionToken } : {}),
   });
 
-  const isNotFound = (err: unknown): boolean => {
-    if (!err || typeof err !== 'object') return false;
-    const e = err as { code?: string; statusCode?: number; status?: number; name?: string };
-    if (e.statusCode === 404 || e.status === 404) return true;
-    if (e.code === 'NotFound' || e.code === 'NoSuchKey') return true;
-    if (e.name === 'NotFound' || e.name === 'NoSuchKey') return true;
-    return false;
-  };
+  // #753: use the broadened, exported detector so all S3-compatibles' 404
+  // shapes are handled consistently.
+  const isNotFound = isS3NotFound;
 
   const store: ObjectStore = {
     async put(key: string, body: PutBody, opts?: PutOptions): Promise<void> {
@@ -102,8 +161,31 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
     },
 
     async get(key: string): Promise<Uint8Array> {
-      const buf = await client.file(key).arrayBuffer();
-      return new Uint8Array(buf);
+      // #755: GET is idempotent — retry transient 5xx/throttle.
+      return withS3Retry(async () => {
+        const buf = await client.file(key).arrayBuffer();
+        return new Uint8Array(buf);
+      });
+    },
+
+    async getRange(key: string, start: number, end?: number): Promise<Uint8Array> {
+      // #747: ranged GET. Bun.S3Client exposes `slice(start, end)` on the file
+      // handle (end exclusive) and/or accepts a `Range` header; prefer slice
+      // when present. `end` here is INCLUSIVE (HTTP Range semantics) so convert
+      // to slice's exclusive end.
+      return withS3Retry(async () => {
+        const file = client.file(key) as unknown as {
+          slice?: (s: number, e?: number) => { arrayBuffer(): Promise<ArrayBuffer> };
+          arrayBuffer(): Promise<ArrayBuffer>;
+        };
+        if (typeof file.slice === 'function') {
+          const sliced = file.slice(start, end === undefined ? undefined : end + 1);
+          return new Uint8Array(await sliced.arrayBuffer());
+        }
+        // Fallback: full fetch then slice client-side (still correct, less efficient).
+        const buf = new Uint8Array(await file.arrayBuffer());
+        return buf.subarray(start, end === undefined ? undefined : end + 1);
+      });
     },
 
     getStream(key: string): ReadableStream<Uint8Array> {
@@ -112,7 +194,8 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
 
     async head(key: string): Promise<ObjectMetadata | null> {
       try {
-        const stat = await client.stat(key);
+        // #755: HEAD is idempotent — retry transient 5xx/throttle.
+        const stat = await withS3Retry(() => client.stat(key));
         return {
           size: stat.size,
           etag: stat.etag,
@@ -153,6 +236,18 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
       }
     },
 
+    async copy(srcKey: string, dstKey: string): Promise<void> {
+      // #751: prefer a native server-side copy when the client exposes one so we
+      // never round-trip the bytes through the gateway. Fall back to GET+PUT.
+      const c = client as unknown as { copy?: (s: string, d: string) => Promise<unknown> };
+      if (typeof c.copy === 'function') {
+        await withS3Retry(() => c.copy!(srcKey, dstKey));
+        return;
+      }
+      const bytes = await store.get(srcKey);
+      await store.put(dstKey, bytes);
+    },
+
     async deleteMany(keys: string[]): Promise<void> {
       if (keys.length === 0) return;
       // #750: S3 DeleteObjects accepts up to 1000 keys per request. Bun.S3Client
@@ -177,11 +272,12 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
     },
 
     async list(prefix?: string, opts?: ListOptions): Promise<ListResult> {
-      const result = await client.list({
+      // #755: LIST is idempotent — retry transient 5xx/throttle.
+      const result = await withS3Retry(() => client.list({
         ...(prefix ? { prefix } : {}),
         ...(opts?.limit ? { maxKeys: opts.limit } : {}),
         ...(opts?.continuationToken ? { continuationToken: opts.continuationToken } : {}),
-      });
+      }));
 
       const entries = (result.contents ?? []).map(o => ({
         key: o.key,

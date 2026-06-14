@@ -58,8 +58,10 @@ export interface HashStore {
   hdel(key: string, field: string): Promise<void>;
   /** Get all hash fields up to limit (default 1000). Use limit param with cursor for large hashes. */
   hgetall(key: string, limit?: number): Promise<Record<string, string>>;
-  /** Increment a hash field by a number */
-  hincrby(key: string, field: string, increment: number): Promise<void>;
+  /** Increment a hash field by a number.
+   *  @param ttlSecs Optional — when set, refreshes the hash's TTL so counters
+   *   can expire (parity with hset). Omit for an immortal counter. (#763) */
+  hincrby(key: string, field: string, increment: number, ttlSecs?: number): Promise<void>;
 }
 
 /**
@@ -68,6 +70,28 @@ export interface HashStore {
  * Kept as intersection for backward compatibility — concrete adapters implement all ops.
  */
 export type StateStore = KvStore & ListStore & HashStore;
+
+/**
+ * Capability-scoped state store (#766). The full {@link StateStore} intersection
+ * forces every adapter to implement KV + List + Hash even when a backend only
+ * needs KV, increasing coupling. A `PartialStateStore` lets a host supply just
+ * the slices it has; consumers feature-detect with {@link hasListOps} /
+ * {@link hasHashOps} before using list/hash methods.
+ */
+export type PartialStateStore = KvStore & Partial<ListStore> & Partial<HashStore>;
+
+/** Runtime guard: does this store implement the List operations? (#766) */
+export function hasListOps(store: PartialStateStore): store is KvStore & ListStore & Partial<HashStore> {
+  return typeof (store as Partial<ListStore>).rpush === 'function'
+    && typeof (store as Partial<ListStore>).lrange === 'function'
+    && typeof (store as Partial<ListStore>).ltrim === 'function';
+}
+
+/** Runtime guard: does this store implement the Hash operations? (#766) */
+export function hasHashOps(store: PartialStateStore): store is KvStore & Partial<ListStore> & HashStore {
+  return typeof (store as Partial<HashStore>).hset === 'function'
+    && typeof (store as Partial<HashStore>).hgetall === 'function';
+}
 
 /** Resolves session counts and teacher→student relationships */
 export interface SessionResolver {
