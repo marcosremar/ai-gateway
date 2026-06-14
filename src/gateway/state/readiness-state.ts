@@ -4,7 +4,7 @@
 
 import { homedir } from 'os';
 import { join } from 'path';
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from 'fs';
 import { createLogger } from '../../platform/logger';
 
 const log = createLogger('readiness-state');
@@ -87,9 +87,13 @@ export function resetGpuReadinessState(): void {
 }
 
 // ── Per-Stage P95 Ring Buffers ────────────────────────────────────────────────
-// 20-sample ring buffer per stage for continuous P95 monitoring.
-
-const PER_STAGE_RING_SIZE = 20;
+// Ring buffer per stage for continuous P95 monitoring.
+//
+// #506: widened from 20 → 100 samples. At 20 samples p95 = ceil(20*0.95)-1 =
+// index 18, i.e. the 2nd-worst of 20 — a single spike dominated the demotion
+// decision in gpu-monitor-loop.ts. 100 samples gives a far more stable p95
+// (index 94) so one outlier no longer flips routing.
+const PER_STAGE_RING_SIZE = 100;
 const MIN_PER_STAGE_SAMPLES = 5;
 
 export const perStageLatencyRing: Record<'stt' | 'llm' | 'tts', number[]> = {
@@ -101,13 +105,20 @@ const perStageRingIdx: Record<string, number> = {};
 export function recordPerStageLatency(stage: 'stt' | 'llm' | 'tts', ms: number): void {
   const ring = perStageLatencyRing[stage];
   const key = stage;
-  if (!perStageRingIdx[key]) perStageRingIdx[key] = 0;
+  // #508: use an explicit `=== undefined` check — `!perStageRingIdx[key]`
+  // treated a legitimate counter value of 0 as "uninitialized" and reset it.
+  if (perStageRingIdx[key] === undefined) perStageRingIdx[key] = 0;
 
   if (ring.length < PER_STAGE_RING_SIZE) {
     ring.push(ms);
   } else {
     const idx = perStageRingIdx[key] % PER_STAGE_RING_SIZE;
     ring[idx] = ms;
+    // #507: reset the counter on wrap so the integer does not grow unbounded
+    // for the process lifetime (eventual precision drift / wasted growth). The
+    // modulo of the next index is preserved because (idx+1) % SIZE == ((idx % SIZE)+1) % SIZE.
+    perStageRingIdx[key] = (idx + 1) % PER_STAGE_RING_SIZE;
+    return;
   }
   perStageRingIdx[key]++;
 }
@@ -363,7 +374,11 @@ export function saveColdStartProfile(profile: ColdStartProfile): void {
     } else {
       profiles.push(profile);
     }
-    writeFileSync(COLD_START_PROFILES_FILE, JSON.stringify(profiles, null, 2));
+    // #720: atomic write (tmp + rename) so a crash mid-write doesn't corrupt the
+    // cold-start profiles file — mirrors deploy-state.ts / cost-state.ts.
+    const tmp = COLD_START_PROFILES_FILE + '.tmp';
+    writeFileSync(tmp, JSON.stringify(profiles, null, 2));
+    renameSync(tmp, COLD_START_PROFILES_FILE);
     log.log(`Saved profile: ${profile.provider}/${profile.gpuType} (${profile.dockerImage}) — cold=${profile.coldTtfbMs}ms warm=${profile.warmTtfbAvgMs}ms`);
   } catch (err) {
     log.warn(`Failed to save profile: ${err instanceof Error ? err.message : err}`);

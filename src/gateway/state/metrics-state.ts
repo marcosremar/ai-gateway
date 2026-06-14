@@ -120,6 +120,29 @@ export function isGpuLatencyAcceptable(): boolean {
 const TREND_MIN_SAMPLES = 20;
 
 /**
+ * #511 — ordinary-least-squares slope. Pure and exported for direct unit
+ * testing. The default x-axis is the sample index (slope is "ms per sample");
+ * pass real wall-clock timestamps as `xs` to get a slope in "ms per ms" which
+ * callers can scale by 1000 for "ms per second". The existing
+ * {@link getLatencyTrend}.slopeMs uses index-as-time and is therefore a
+ * per-sample slope — labelled as such to avoid misinterpreting unevenly-spaced
+ * samples as a wall-clock rate.
+ */
+export function olsSlope(ys: number[], xs?: number[]): number {
+  const n = ys.length;
+  if (n < 2) return 0;
+  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  for (let i = 0; i < n; i++) {
+    const x = xs ? xs[i] : i;
+    const y = ys[i];
+    sumX += x; sumY += y; sumXY += x * y; sumXX += x * x;
+  }
+  const denom = n * sumXX - sumX * sumX;
+  if (denom === 0) return 0; // all x identical (e.g. same-millisecond timestamps)
+  return (n * sumXY - sumX * sumY) / denom;
+}
+
+/**
  * Compute linear regression slope on the latency ring buffer.
  * Returns trend based on whether recent half is >20% different from first half.
  */
@@ -134,8 +157,12 @@ export function getLatencyTrend(): { trend: 'stable' | 'degrading' | 'improving'
   // When not full, the array is already in order and idx == 0.
   let chronological: number[];
   if (n < LATENCY_RING_SIZE) {
-    // Ring hasn't wrapped — array is already in order
-    chronological = latencyRing;
+    // Ring hasn't wrapped — array is already in order.
+    // #510: defensively copy rather than alias the live `latencyRing`. The
+    // subsequent `.slice()` reads are safe today, but aliasing the live buffer
+    // is a latent footgun — any future in-place mutation of `chronological`
+    // would corrupt the shared ring. A copy makes the read-only contract real.
+    chronological = latencyRing.slice();
   } else {
     // Ring has wrapped: entries [idx..n-1] are oldest, [0..idx-1] are newest
     chronological = [
@@ -153,15 +180,10 @@ export function getLatencyTrend(): { trend: 'stable' | 'degrading' | 'improving'
 
   const changePct = firstAvg === 0 ? 0 : (secondAvg - firstAvg) / firstAvg;
 
-  // Simple linear regression for slopeMs (ms per sample)
-  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
-  for (let i = 0; i < n; i++) {
-    sumX += i;
-    sumY += chronological[i];
-    sumXY += i * chronological[i];
-    sumXX += i * i;
-  }
-  const slopeMs = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+  // #511: slopeMs is a per-sample slope (index used as the x-axis), not a
+  // per-second rate; samples are unevenly spaced in wall-clock time. Computed
+  // via the shared `olsSlope` helper.
+  const slopeMs = olsSlope(chronological);
 
   if (Math.abs(changePct) < 0.2) {
     return { trend: 'stable', slopeMs, samples: n };

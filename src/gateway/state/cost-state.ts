@@ -37,6 +37,24 @@ export let dailySpendResetDate = new Date().toISOString().slice(0, 10);
 const DEFAULT_ESTIMATED_DEPLOY_COST_USD = 2;
 
 /**
+ * #545 — counter of deploys refused by the budget gate, keyed by reason. The
+ * soft/hard limits silently throttle work today; exposing how often the cap
+ * blocks a deploy lets operators see whether the budget is too tight (surface
+ * as `gateway_deploys_blocked_total{reason}` in /metrics). Bumped inside
+ * {@link canAffordDeploy} so every gate path is counted uniformly.
+ */
+export const deploysBlockedTotal: Record<'soft_limit_exceeded' | 'hard_limit_exceeded', number> = {
+  soft_limit_exceeded: 0,
+  hard_limit_exceeded: 0,
+};
+
+/** Reset the blocked-deploys counters (tests / daily rollover). */
+export function resetDeploysBlocked(): void {
+  deploysBlockedTotal.soft_limit_exceeded = 0;
+  deploysBlockedTotal.hard_limit_exceeded = 0;
+}
+
+/**
  * Structured budget decision returned by canAffordDeploy(). Callers should
  * inspect `allowed` and emit `reason` in the deploy_rejected lifecycle event.
  */
@@ -71,6 +89,7 @@ export function canAffordDeploy(estimatedCostUsd: number = DEFAULT_ESTIMATED_DEP
 
   // Hard limit: projected spend would exceed the cap entirely. Refuse.
   if (projected > cap) {
+    deploysBlockedTotal.hard_limit_exceeded++; // #545
     return { allowed: false, currentSpend, projected, cap, reason: 'hard_limit_exceeded' };
   }
 
@@ -78,6 +97,7 @@ export function canAffordDeploy(estimatedCostUsd: number = DEFAULT_ESTIMATED_DEP
   // interrupt running pods. The threshold of 0.8 matches the monitor-loop
   // soft-limit threshold so both paths agree.
   if (currentSpend / cap >= 0.8) {
+    deploysBlockedTotal.soft_limit_exceeded++; // #545
     return { allowed: false, currentSpend, projected, cap, reason: 'soft_limit_exceeded' };
   }
 
@@ -189,8 +209,13 @@ export function loadPersistedDailySpend(): void {
 export function persistDailySpend(): void {
   try {
     if (!existsSync(BABELCAST_DIR)) mkdirSync(BABELCAST_DIR, { recursive: true });
-    const today = new Date().toISOString().slice(0, 10);
-    const data = { date: today, spendUsd: dailyGpuSpendUsd, savedAt: Date.now() };
+    // #543: persist the *tracked* reset date, not wall-clock "now". If a write
+    // fires just after a UTC midnight rollover but before the monitor loop has
+    // run its reset, writing `now` would stamp the file with the new day while
+    // it still holds yesterday's spend — so the new day would inherit it. Using
+    // `dailySpendResetDate` keeps the spend bound to the day it was accrued.
+    const date = dailySpendResetDate || new Date().toISOString().slice(0, 10);
+    const data = { date, spendUsd: dailyGpuSpendUsd, savedAt: Date.now() };
     // #701: write to a temp file, fsync the bytes, then rename. A bare
     // writeFileSync left the budget-gate file half-written (and unparseable)
     // if the process died mid-write, despite CLAUDE.md claiming atomicity.

@@ -55,6 +55,32 @@ export function effectiveScore(adjustedEwmaMs: number, peakMs: number, peakWeigh
 }
 
 /**
+ * #516 — slower-decaying / latch-on peak so a brief spike is *not* forgotten
+ * within a few samples.
+ *
+ * The legacy formula `peak = max(ewma, latency*0.5 + peak*0.5)` decays the peak
+ * toward the mean: a single 5s tail is averaged away after ~3 normal samples,
+ * which defeats conservative tail-aware routing. This pure helper instead latches
+ * the peak immediately to any new high-water latency and otherwise decays it only
+ * slowly (default 5% per sample) toward the current EWMA, so a real spike keeps
+ * the provider deprioritised for many samples. `decay=0.5` reproduces the old
+ * mean-reverting behaviour for callers that want it.
+ */
+export function updatePeak(
+  prevPeak: number,
+  newLatencyMs: number,
+  ewmaMs: number,
+  decay = 0.05,
+): number {
+  // New high-water mark — latch on immediately.
+  if (newLatencyMs >= prevPeak) return newLatencyMs;
+  const d = Math.max(0, Math.min(1, decay));
+  // Decay slowly toward the EWMA, but never below it (peak ≥ average by defn).
+  const decayed = prevPeak * (1 - d) + ewmaMs * d;
+  return Math.max(ewmaMs, decayed);
+}
+
+/**
  * PeakEWMA latency tracker per provider.
  *
  * EWMA formula: ewma = decayFactor * newValue + (1 - decayFactor) * oldEwma
@@ -64,6 +90,10 @@ export function effectiveScore(adjustedEwmaMs: number, peakMs: number, peakWeigh
 export class EWMATracker {
   private providers: Map<string, EWMAState> = new Map();
   private decayFactor: number;
+  /** #516 — how fast the tracked peak decays toward the mean (per sample). */
+  private peakDecay: number;
+  /** #517 — minimum samples before a provider's latency is trusted for routing. */
+  private minSamples: number;
 
   /** Stale threshold: if a provider hasn't been used in this many ms, penalise it */
   private static readonly STALE_THRESHOLD_MS = 60_000;
@@ -72,8 +102,17 @@ export class EWMATracker {
   /** Max providers to track (prevents unbounded growth) */
   private static readonly MAX_PROVIDERS = 50;
 
-  constructor(decayFactor: number = 0.3) {
+  /**
+   * @param decayFactor EWMA blend weight for new observations (0–1).
+   * @param opts.peakDecay (#516) per-sample peak decay toward the mean (default 0.05).
+   * @param opts.minSamples (#517) samples required before {@link pickBest} trusts
+   *   a provider's latency; below this it is treated as "unknown" so one fast
+   *   fluke cannot pin routing. Default 1 preserves the legacy behaviour.
+   */
+  constructor(decayFactor: number = 0.3, opts: { peakDecay?: number; minSamples?: number } = {}) {
     this.decayFactor = Math.max(0, Math.min(1, decayFactor));
+    this.peakDecay = Math.max(0, Math.min(1, opts.peakDecay ?? 0.05));
+    this.minSamples = Math.max(1, Math.floor(opts.minSamples ?? 1));
   }
 
   /** Record a completed request's latency for a provider */
@@ -103,8 +142,10 @@ export class EWMATracker {
 
     // EWMA update: blend new observation with existing estimate
     existing.ewma = this.decayFactor * latencyMs + (1 - this.decayFactor) * existing.ewma;
-    // Peak update: conservative blend — keeps track of worst-case
-    existing.peak = Math.max(existing.ewma, latencyMs * 0.5 + existing.peak * 0.5);
+    // Peak update (#516): latch onto new highs, decay slowly toward the mean so
+    // a brief tail spike keeps deprioritising the provider for many samples
+    // instead of being averaged away after ~3 normal observations.
+    existing.peak = updatePeak(existing.peak, latencyMs, existing.ewma, this.peakDecay);
     existing.lastUpdate = now;
     existing.samples++;
   }
@@ -149,6 +190,10 @@ export class EWMATracker {
    * otherwise a cold *expensive* provider listed first would beat a cold cheap
    * one (#355). Providers without a cost are treated as +Infinity (least
    * preferred); ties fall back to the original (configured-priority) order.
+   *
+   * #517 — a provider with fewer than `minSamples` observations is treated as
+   * "unknown" here so a single fast fluke cannot pin routing to it; it only
+   * becomes eligible once it has accumulated enough samples to be trusted.
    */
   pickBest(candidates: string[], costOf?: (provider: string) => number | null): string | null {
     if (candidates.length === 0) return null;
@@ -159,8 +204,10 @@ export class EWMATracker {
     const unknowns: string[] = [];
 
     for (const c of candidates) {
+      const state = this.providers.get(c);
       const latency = this.getLatency(c);
-      if (latency === null) {
+      // Not enough samples yet → distrust and treat as unknown (#517).
+      if (latency === null || !state || state.samples < this.minSamples) {
         unknowns.push(c);
         continue;
       }
