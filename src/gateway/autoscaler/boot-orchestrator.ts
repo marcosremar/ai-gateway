@@ -81,6 +81,28 @@ export function classifyBootFailure(reason: string | null | undefined): BootFail
 }
 
 /**
+ * #222 — build the `bootPathByTier` map key including the boot timestamp.
+ *
+ * The path map was keyed by `${userId}:${tierIndex}` only, so a *newer* boot on
+ * the same tier overwrote the entry before the older poller consumed it — the
+ * SnapGPU cold/restore attribution recorded into `SnapgpuMetrics` could then be
+ * misassigned to the wrong attempt. Including `bootTriggeredAt` (the same
+ * discriminator the pollers already use to detect a superseded boot) makes each
+ * boot attempt's path entry unique. A non-positive/absent timestamp falls back
+ * to the legacy 2-part key so callers that don't yet have a timestamp remain
+ * compatible. Pure + exported for unit testing.
+ */
+export function bootPathKey(
+  userId: string,
+  tierIndex: number,
+  bootTriggeredAt?: number,
+): string {
+  return bootTriggeredAt != null && bootTriggeredAt > 0
+    ? `${userId}:${tierIndex}:${bootTriggeredAt}`
+    : `${userId}:${tierIndex}`;
+}
+
+/**
  * Compute cooldown duration for a given failure. The categorization wins
  * over exponential backoff for categories with explicit durations. For
  * unknown failures, the old exponential formula applies with the 15-min cap.
@@ -302,8 +324,13 @@ export class BootOrchestrator {
     }
 
     // Stash the path so the health poller can record it after boot succeeds.
-    // Overwrites any stale entry from a previous failed boot on the same tier.
-    this.bootPathByTier.set(`${userId}:${tierIndex}`, usedSnapshotRestore ? 'restore' : 'cold');
+    // #222: key by the in-flight boot's `bootTriggeredAt` (when the caller has
+    // already transitioned the tier to 'booting') so a newer boot on the same
+    // tier can't steal/overwrite this attempt's path entry before the older
+    // poller consumes it. Falls back to the legacy 2-part key when no booting
+    // timestamp is available yet (back-compat).
+    const setBootTs = (this.callbacks.getStates(userId)?.[tierIndex] as BootingTierState | undefined)?.bootTriggeredAt;
+    this.bootPathByTier.set(bootPathKey(userId, tierIndex, setBootTs), usedSnapshotRestore ? 'restore' : 'cold');
 
     const timeouts = resolveStageTimeouts(cfg.provider, cfg.stageTimeouts);
 
@@ -701,9 +728,15 @@ export class BootOrchestrator {
           if (provider === 'snapgpu' && tierConfig) {
             const appName = tierConfig.snapgpuPreloadApp || 'default';
             const workloadKey = buildWorkloadKey(tierConfig.dockerImage, appName);
-            const tierKey = `${userId}:${tierIndex}`;
-            const path: 'cold' | 'restore' = this.bootPathByTier.get(tierKey) ?? 'cold';
+            // #222: read with the timestamped key (matching triggerGpuBoot's
+            // set); fall back to the legacy 2-part key for entries stashed
+            // before a booting timestamp existed.
+            const tierKey = bootPathKey(userId, tierIndex, bootTimestamp);
+            const legacyKey = bootPathKey(userId, tierIndex);
+            const path: 'cold' | 'restore' =
+              this.bootPathByTier.get(tierKey) ?? this.bootPathByTier.get(legacyKey) ?? 'cold';
             this.bootPathByTier.delete(tierKey);
+            this.bootPathByTier.delete(legacyKey);
             this.snapgpuMetrics.record(userId, workloadKey, path, bootDurationMs);
           }
 

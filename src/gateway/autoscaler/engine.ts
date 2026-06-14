@@ -35,6 +35,42 @@ export const MAX_BOOT_FAILURES = 3;
 export const BOOT_COOLDOWN_BASE_MS = 2 * 60_000;  // 2 min base, exponential backoff
 export const BOOT_COOLDOWN_MAX_MS = 30 * 60_000;  // Max 30 min cooldown
 
+/**
+ * Default freshness window for a `ready` tier endpoint (#228). A ready tier whose
+ * `lastHealthyAt` is older than this is treated as *unverified* (e.g. a tier
+ * restored from persistence on restart, or force-marked ready) and should be
+ * re-probed before being routed to. 90s comfortably exceeds the health-probe
+ * cadence so a live, regularly-probed pod is never spuriously excluded.
+ */
+export const READY_ENDPOINT_FRESH_MS = 90_000;
+
+/**
+ * #228 — is a ready tier's last-healthy timestamp recent enough to trust without
+ * a fresh probe? After a restart, persisted `ready` tiers are returned before
+ * the next probe confirms liveness, so callers can route to a dead GPU. A
+ * non-positive `lastHealthyAt` (never verified) is always stale. Pure + exported.
+ */
+export function isReadyEndpointFresh(
+  lastHealthyAt: number,
+  now: number,
+  maxStaleMs: number = READY_ENDPOINT_FRESH_MS,
+): boolean {
+  if (!Number.isFinite(lastHealthyAt) || lastHealthyAt <= 0) return false;
+  return now - lastHealthyAt < maxStaleMs;
+}
+
+/**
+ * #225 — next tier action after probing a force-marked-ready endpoint.
+ *
+ * `forceTierReady` flips a tier to `ready` without a health probe, so a forced
+ * dead endpoint serves traffic until the next periodic probe. After firing a
+ * single verification probe, this maps the result: `keep-ready` on success,
+ * `demote-idle` on failure. Pure + exported for unit testing.
+ */
+export function forceReadyVerificationAction(probeOk: boolean): 'keep-ready' | 'demote-idle' {
+  return probeOk ? 'keep-ready' : 'demote-idle';
+}
+
 export interface AutoscalerEngineOptions {
   registry: GpuProviderRegistry;
   sessionTracker: SessionTracker;
@@ -454,7 +490,7 @@ export class AutoscalerEngine {
     this.forceTierReady(userId, 0, endpoint);
   }
 
-  forceTierReady(userId: string, tierIndex: number, endpoint: string): void {
+  forceTierReady(userId: string, tierIndex: number, endpoint: string, verify = true): void {
     const existing = this.stateMap.get(userId) ?? [];
     while (existing.length <= tierIndex) {
       existing.push({ state: 'idle', tierIndex: existing.length } satisfies IdleTierState);
@@ -478,12 +514,63 @@ export class AutoscalerEngine {
       trigger: 'force-ready',
       metadata: { source: 'force-ready' },
     });
+    // #225: a force-ready endpoint is flipped to ready without a health probe,
+    // so a dead endpoint would serve traffic until the next periodic probe.
+    // Fire ONE background verification probe (non-blocking, keeps this method
+    // synchronous for back-compat) and demote the tier to idle if it fails.
+    if (verify) void this._verifyForceReady(userId, tierIndex, endpoint);
+  }
+
+  /** #225 — background single-probe verification of a force-marked-ready tier. */
+  private async _verifyForceReady(userId: string, tierIndex: number, endpoint: string): Promise<void> {
+    let ok = false;
+    try {
+      ok = await this.probeHealth(endpoint);
+    } catch {
+      ok = false;
+    }
+    if (forceReadyVerificationAction(ok) === 'keep-ready') return;
+    // Only demote if the tier is STILL the same force-ready endpoint (a later
+    // boot/transition may have legitimately replaced it in the meantime).
+    const states = this.stateMap.get(userId);
+    const cur = states?.[tierIndex];
+    if (!states || !cur || cur.state !== 'ready' || (cur as ReadyTierState).endpoint !== endpoint) return;
+    states[tierIndex] = { state: 'idle', tierIndex, unhealthy: true } satisfies IdleTierState;
+    this.stateMap.set(userId, states);
+    void this.persistence.persistTierStates(userId, states).catch(() => {});
+    void this.lifecycleLogger.log({
+      userId, tierIndex, provider: 'manual',
+      eventType: 'health_lost', endpoint,
+      oldState: 'ready', newState: 'idle',
+      trigger: 'force-ready',
+      error: 'force-ready verification probe failed',
+      metadata: { source: 'force-ready-verify', unhealthy: true },
+    });
+    this.logger.warn(`[autoscaler] force-ready tier ${tierIndex} failed verification probe — demoted to idle`);
   }
 
   getReadyEndpoints(userId: string): string[] {
     const tiers = this.stateMap.get(userId) ?? [];
     return tiers
       .filter((ts): ts is ReadyTierState => ts.state === 'ready')
+      .map((ts) => ts.endpoint);
+  }
+
+  /**
+   * #228 — like {@link getReadyEndpoints} but only returns endpoints whose last
+   * health check is recent enough to trust (`isReadyEndpointFresh`). After a
+   * restart, persisted `ready` tiers are returned before the next probe confirms
+   * liveness; callers that must not route to a possibly-dead GPU should use this.
+   */
+  getVerifiedReadyEndpoints(
+    userId: string,
+    now: number = Date.now(),
+    maxStaleMs: number = READY_ENDPOINT_FRESH_MS,
+  ): string[] {
+    const tiers = this.stateMap.get(userId) ?? [];
+    return tiers
+      .filter((ts): ts is ReadyTierState => ts.state === 'ready')
+      .filter((ts) => isReadyEndpointFresh(ts.lastHealthyAt, now, maxStaleMs))
       .map((ts) => ts.endpoint);
   }
 

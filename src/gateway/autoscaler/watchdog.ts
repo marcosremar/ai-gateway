@@ -10,7 +10,7 @@ import type { Logger } from '../../deps';
 import { fileLifecycleLogger } from './file-lifecycle-logger';
 import { emitHook } from '../../hooks';
 import { cleanupProviderInstance } from './cleanup';
-import { resolveBootTimeoutCap } from './boot-timeout';
+import { resolveBootTimeoutCap, handleBootTimeout } from './boot-timeout';
 import { defaultLogger } from '../../logger';
 
 /** Rate-limit per-user watchdog to 2 min */
@@ -290,29 +290,27 @@ async function runWatchdogForUser(
 
     log.warn(`[watchdog] Tier ${i} stuck booting for ${Math.round(bootingMs / 1000)}s, forcing cleanup`);
 
-    const tierConfig = config.tiers[i];
-    if (tierConfig) {
-      await cleanupProviderInstance(tierConfig, registry, `stuck booting tier ${i} (${Math.round(bootingMs / 1000)}s)`);
+    // #216/#224: route stuck-booting cleanup through the shared handler so it
+    // gets the SAME cooldown semantics as the engine's boot-timeout path
+    // (previously the watchdog set `unhealthy:true` but never `cooldownUntil`,
+    // so a flapping tier was immediately retriable) AND cleans up the
+    // *discovered* instance id (not just the static config) so a runtime-created
+    // pod that died mid-boot isn't leaked.
+    const { newState, logEntry, cleanupConfig } = handleBootTimeout(
+      i,
+      booting,
+      config.tiers[i],
+      maxBootMs,
+      now,
+      'watchdog',
+    );
+    if (cleanupConfig) {
+      await cleanupProviderInstance(cleanupConfig, registry, `stuck booting tier ${i} (${Math.round(bootingMs / 1000)}s)`);
     }
 
-    const failCount = booting.prevBootFailCount + 1;
-    const newIdle: IdleTierState = {
-      state: 'idle',
-      tierIndex: i,
-      bootFailCount: failCount,
-      unhealthy: true,
-    };
-    tierStates[i] = newIdle;
+    tierStates[i] = newState;
 
-    void logger.log({
-      userId, tierIndex: i, provider: tierProvider,
-      eventType: 'boot_timeout', durationMs: bootingMs,
-      instanceId: booting.discoveredInstanceId,
-      endpoint: booting.endpoint, trigger: booting.trigger,
-      oldState: 'booting', newState: 'idle',
-      error: `Watchdog: stuck booting for ${Math.round(bootingMs / 1000)}s`,
-      metadata: { failCount, unhealthy: true, source: 'watchdog' },
-    });
+    void logger.log({ userId, ...logEntry });
   }
 
   const changed = tierStates.some((ts, i) => ts.state !== prevStates[i]);
