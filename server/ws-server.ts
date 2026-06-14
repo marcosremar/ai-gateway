@@ -85,6 +85,82 @@ export function clampConnCount(n: number): number {
 const MAX_WS_TOTAL = 200;
 let wsConnectionCount = 0;
 
+/** Advertised per-type cap for bot-events clients (legacy 500-slot budget). */
+export const MAX_WS_CLIENTS = 500;
+
+/**
+ * Effective bot-events client budget (#401). The bot-events `open()` checks
+ * `wsClients.size >= MAX_WS_CLIENTS` (500), but the global `MAX_WS_TOTAL` (200)
+ * is enforced first in `fetch`, so the 500-slot check can never fire — bot
+ * clients are silently starved at 200. The real budget is the smaller of the two
+ * caps; surface it so the per-type check uses the true ceiling (and operators can
+ * see the advertised 500 is unreachable while the global cap is lower). Pure.
+ */
+export function effectiveBotEventsBudget(
+  globalCap = MAX_WS_TOTAL,
+  perTypeCap = MAX_WS_CLIENTS,
+): number {
+  return Math.min(globalCap, perTypeCap);
+}
+
+/**
+ * Whether PII-adjacent recall/bot handshake metadata (bot_id, recording_id,
+ * sample_rate) should be logged (#472). These fields are newline-sanitized but
+ * still identifier-adjacent, so they shouldn't land in normal logs. Gate behind
+ * an explicit debug flag (`AIGW_WS_DEBUG_META=1`); default off. Pure (reads env).
+ */
+export function shouldLogWsMetadata(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const flag = (env.AIGW_WS_DEBUG_META ?? '').toLowerCase();
+  return flag === '1' || flag === 'true' || flag === 'yes';
+}
+
+/**
+ * Fail-closed decision for the Recall WS ingress (#473). When `RECALL_API_KEY`
+ * is configured (Recall is in use) but `RECALL_WS_SECRET` is absent, the recall
+ * path silently falls back to generic gateway auth — meaning any gateway-key
+ * holder can stream into the recall fan-out. Returns true when the dedicated
+ * recall secret must be present (i.e. fall back is NOT allowed): Recall is
+ * enabled AND we're not explicitly allowing the insecure fallback. Pure.
+ */
+export function recallRequiresWsSecret(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const recallEnabled = Boolean((env.RECALL_API_KEY ?? '').trim());
+  const allowInsecure = (env.AIGW_RECALL_ALLOW_GATEWAY_AUTH ?? '').toLowerCase();
+  const insecureOk = allowInsecure === '1' || allowInsecure === 'true' || allowInsecure === 'yes';
+  return recallEnabled && !insecureOk;
+}
+
+/** Versioned WS message-protocol identifier advertised on connect (#492). */
+export const WS_PROTOCOL_VERSION = 1;
+
+/**
+ * Stamp the protocol version onto an outbound `connected` frame (#492). Event
+ * types were implicit, so clients couldn't negotiate or detect a protocol bump.
+ * Adding a `protocolVersion` field to the connect handshake lets clients branch
+ * on capability. Additive (never removes caller fields). Pure.
+ */
+export function withProtocolVersion<T extends Record<string, unknown>>(frame: T): T & { protocolVersion: number } {
+  return { ...frame, protocolVersion: WS_PROTOCOL_VERSION };
+}
+
+/**
+ * Classify a parsed control message on an STT socket (#453). The message loop
+ * only acts on `action: 'clear' | 'turn_complete'`; any other/malformed action
+ * was silently ignored, giving the client no feedback. This returns the
+ * recognized action or null so the caller can nack an unknown control message.
+ * Pure (operates on an already-parsed object).
+ */
+export type WsControlAction = 'clear' | 'turn_complete';
+export function parseWsControlAction(parsed: unknown): WsControlAction | null {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const action = (parsed as { action?: unknown }).action;
+  if (action === 'clear' || action === 'turn_complete') return action;
+  return null;
+}
+
 /** Seconds clients should wait before retrying after a connection-cap 429 (#404). */
 export const WS_CONN_CAP_RETRY_AFTER_SEC = 5;
 
@@ -410,6 +486,13 @@ export async function startWsServer(): Promise<number> {
         const recallAuthorized = recallSecret.length > 0
           ? Boolean(recallToken) && safeCompare(recallToken ?? '', recallSecret)
           : false;
+        // Fail closed: when Recall is enabled but no dedicated WS secret is set,
+        // do NOT silently fall back to generic gateway auth (any gateway-key
+        // holder could otherwise stream into the recall fan-out) (#473).
+        if (recallSecret.length === 0 && recallRequiresWsSecret()) {
+          log.warn('[recall-audio] RECALL_API_KEY set but RECALL_WS_SECRET missing — refusing ingress (set the secret or AIGW_RECALL_ALLOW_GATEWAY_AUTH=1)');
+          return new Response('Recall WS secret not configured', { status: 503 });
+        }
         if (!recallAuthorized && !isGatewayWsAuthorized(req, server, recallToken)) {
           return new Response('Unauthorized', { status: 401 });
         }
@@ -480,7 +563,8 @@ export async function startWsServer(): Promise<number> {
         wsConnectionCount++;
         ws.data.__counted = true;  // gate the close() decrement on this (#403)
         if (ws.data.type === 'speech') {
-          ws.send(JSON.stringify({ type: 'connected', message: 'Speech pipeline ready. Send config JSON then binary WAV.' }));
+          // Advertise the protocol version so clients can negotiate (#492).
+          ws.send(JSON.stringify(withProtocolVersion({ type: 'connected', message: 'Speech pipeline ready. Send config JSON then binary WAV.' })));
           log.log(`[speech-ws] Client connected id=${ws.data.id}`);
         } else if (ws.data.type === 'stt') {
           openSttSession(ws);
@@ -505,19 +589,29 @@ export async function startWsServer(): Promise<number> {
           ws.send(JSON.stringify({ type: 'connected', message: 'Frame inspector ready' }));
           try {
             const { subscribeFrames } = require('./observers-init') as { subscribeFrames: (h: (f: unknown) => void) => () => void };
-            ws.data.__unsubscribe = subscribeFrames((frame) => {
+            const unsub = subscribeFrames((frame) => {
               if (ws.readyState === 1) {
                 try { ws.send(JSON.stringify({ type: 'frame', frame })); } catch { /* WS may be closing */ }
               }
             });
+            // If the socket already started closing during subscribe, tear the
+            // subscription down now rather than leaking it until a close that may
+            // not re-fire (#414).
+            if (ws.readyState !== 1) {
+              try { unsub(); } catch { /* no-op */ }
+            } else {
+              ws.data.__unsubscribe = unsub;
+            }
           } catch (e) {
             log.warn('[frame-inspector] subscribeFrames not available:', e instanceof Error ? e.message : e);
           }
         } else {
           // ── Bot events session ─────────────────────────────────────
-          const MAX_WS_CLIENTS = 500;
-          if (wsClients.size >= MAX_WS_CLIENTS) {
-            log.warn(`[ws] Connection limit reached (${MAX_WS_CLIENTS}) — rejecting`);
+          // Use the reconciled budget (min of global + per-type cap) so the
+          // check reflects the real ceiling instead of an unreachable 500 (#401).
+          const budget = effectiveBotEventsBudget();
+          if (wsClients.size >= budget) {
+            log.warn(`[ws] Connection limit reached (${budget}) — rejecting`);
             ws.close(1013, 'Too many connections');
             return;
           }
@@ -548,9 +642,13 @@ export async function startWsServer(): Promise<number> {
           if (typeof msg === 'string') {
             try {
               const ctrl = JSON.parse(msg);
-              if (ctrl.action === 'clear') {
+              // Classify the control action; nack anything unrecognized so a
+              // client sending a typo'd action gets feedback instead of a
+              // silent no-op (#453).
+              const action = parseWsControlAction(ctrl);
+              if (action === 'clear') {
                 (backend as { clearState?: () => void }).clearState?.();
-              } else if (ctrl.action === 'turn_complete') {
+              } else if (action === 'turn_complete') {
                 // Smart-Turn signal from client: client-side ONNX model
                 // detected end-of-utterance. Forces immediate flush of
                 // accumulated text (skip the server-side pause timer).
@@ -558,6 +656,8 @@ export async function startWsServer(): Promise<number> {
                 const flush = (backend as { _flushAccum?: () => void })._flushAccum
                   ?? (backend as { flushAccum?: () => void }).flushAccum;
                 try { flush?.(); } catch { /* no-op */ }
+              } else {
+                try { ws.send(JSON.stringify({ type: 'error', code: 'unknown_control', message: 'unknown STT control action' })); } catch { /* socket closing */ }
               }
             } catch { /* ignore malformed */ }
           } else {
@@ -576,12 +676,16 @@ export async function startWsServer(): Promise<number> {
           }
         } else if (ws.data.type === 'recall-audio') {
           if (typeof msg === 'string') {
-            try {
-              const meta = JSON.parse(msg) as Record<string, unknown>;
-              const safeBotId = String(meta.bot_id ?? '?').replace(/[\r\n\t]/g, '_').slice(0, 80);
-              const safeRecId = String(meta.recording_id ?? '?').replace(/[\r\n\t]/g, '_').slice(0, 80);
-              log.log(`[recall-audio] Metadata: bot_id=${safeBotId} recording_id=${safeRecId}`);
-            } catch { /* ignore */ }
+            // Identifier-adjacent metadata (bot_id/recording_id) is gated behind
+            // an explicit debug flag so it doesn't land in normal logs (#472).
+            if (shouldLogWsMetadata()) {
+              try {
+                const meta = JSON.parse(msg) as Record<string, unknown>;
+                const safeBotId = String(meta.bot_id ?? '?').replace(/[\r\n\t]/g, '_').slice(0, 80);
+                const safeRecId = String(meta.recording_id ?? '?').replace(/[\r\n\t]/g, '_').slice(0, 80);
+                log.log(`[recall-audio] Metadata: bot_id=${safeBotId} recording_id=${safeRecId}`);
+              } catch { /* ignore */ }
+            }
             return;
           }
           // Per-connection rate limit: cap recall-audio chunks at 100 msgs/sec.

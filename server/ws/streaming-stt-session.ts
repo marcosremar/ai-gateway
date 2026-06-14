@@ -62,15 +62,35 @@ export async function reloadStreamingSTTRouter(): Promise<void> {
 // Active STT sessions: client WS id → upstream backend
 export const sttSessions = new Map<string, StreamingSTTBackend>();
 
+/**
+ * Compute which session ids no longer have a live client (#407). The original
+ * sweep nested `for (ws of wsClients)` inside `for (id of sessions)`, i.e.
+ * O(sessions × clients) every tick — wasteful at hundreds of sessions × 200
+ * clients. Building a Set of live ids once makes it O(sessions + clients) with
+ * O(1) membership checks. Pure (takes the two id collections) so it's unit-
+ * testable without booting the server or a real WS. Returns the stale ids in the
+ * map's iteration order.
+ */
+export function computeStaleSessionIds(
+  sessionIds: Iterable<string>,
+  liveClientIds: Iterable<string>,
+): string[] {
+  const live = new Set(liveClientIds);
+  const stale: string[] = [];
+  for (const id of sessionIds) {
+    if (!live.has(id)) stale.push(id);
+  }
+  return stale;
+}
+
 // Cleanup timer — drops sessions whose client WS is gone
 export const sttCleanupTimer: ReturnType<typeof setInterval> = setInterval(() => {
   if (sttSessions.size === 0) return;
-  const stale: string[] = [];
-  for (const [id] of sttSessions) {
-    let found = false;
-    for (const ws of wsClients) { if (ws.data.id === id) { found = true; break; } }
-    if (!found) stale.push(id);
-  }
+  // Build the live-id Set once (O(clients)) then check membership in O(1) per
+  // session, instead of the old O(sessions × clients) nested scan (#407).
+  const liveIds: string[] = [];
+  for (const ws of wsClients) liveIds.push(ws.data.id);
+  const stale = computeStaleSessionIds(sttSessions.keys(), liveIds);
   for (const id of stale) {
     const backend = sttSessions.get(id);
     if (backend) try { backend.close(); } catch { /* already closed */ }

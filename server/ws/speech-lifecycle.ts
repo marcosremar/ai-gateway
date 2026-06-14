@@ -47,6 +47,16 @@ export function validateSpeechAudio(buf: Buffer): string | null {
   return null;
 }
 
+/**
+ * True when a completed pipeline produced no transcription (#458). `onComplete`
+ * always reports `status:'complete'`, so a client can't tell genuine silence
+ * (mic muted, background noise filtered) from a real translation without this
+ * flag. Treats a missing or whitespace-only transcription as no-speech. Pure.
+ */
+export function isNoSpeechResult(transcription: string | null | undefined): boolean {
+  return !transcription || transcription.trim().length === 0;
+}
+
 type WsData = {
   id: string;
   type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio' | 'frame-inspector';
@@ -107,7 +117,7 @@ export function handleSpeechMessage(
       if (ws.readyState !== 1) return;
       // Distinguish silence from a successful translation so clients don't treat
       // an empty transcript as an error or a real result (#458).
-      const noSpeech = !result.transcription || result.transcription.trim().length === 0;
+      const noSpeech = isNoSpeechResult(result.transcription);
       ws.send(JSON.stringify({
         status: 'complete',
         noSpeech,

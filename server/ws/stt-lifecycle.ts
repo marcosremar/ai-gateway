@@ -72,6 +72,34 @@ export function capSeedChars(seed: string, maxChars = STT_SEED_MAX_CHARS): strin
   return sp > 0 && sp < tail.length - 1 ? tail.slice(sp + 1) : tail;
 }
 
+/**
+ * Application-level WebSocket close code used when no STT backend is available
+ * (#417). A plain transport close (1000/1006) is indistinguishable from a network
+ * drop; a code in the private application range (4000–4999) lets clients tell a
+ * config/availability failure ("no GPU and no Fireworks key") from a flaky link
+ * and avoid pointlessly reconnecting. Centralized so the value can't drift.
+ */
+export const STT_NO_BACKEND_CLOSE_CODE = 4002;
+
+/**
+ * Decide whether a previously-excluded STT provider set should be cleared after a
+ * provider has stayed healthy long enough (#451). `excluded` only ever grows on
+ * disconnect, so a provider that drops once (e.g. a GPU pod restart) and then
+ * recovers is never retried for the life of the session — pinning the client to a
+ * slower cloud fallback. Once the current backend has been continuously connected
+ * for `minHealthyMs`, it's safe to forget past exclusions so the preferred
+ * (faster) provider can be re-selected on the next reconnect. Pure/time-injected.
+ */
+export const STT_EXCLUSION_RESET_MS = 30_000;
+export function shouldResetExclusions(
+  connectedSinceMs: number,
+  now: number,
+  minHealthyMs = STT_EXCLUSION_RESET_MS,
+): boolean {
+  if (!Number.isFinite(connectedSinceMs) || connectedSinceMs <= 0) return false;
+  return now - connectedSinceMs >= minHealthyMs;
+}
+
 type WsData = {
   id: string;
   type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio' | 'frame-inspector';
@@ -90,17 +118,22 @@ type WsData = {
 export function openSttSession(ws: ServerWebSocket<WsData>): void {
   const language = ws.data.language;
   const excluded = new Set<string>();
+  // Wall-clock of the current backend's last successful connect; used to decide
+  // whether a recovered provider has been healthy long enough to clear the
+  // exclusion set so the preferred (faster) provider can be retried (#451).
+  let connectedSince = 0;
 
   const connectBackend = () => {
     const backend = getSttRouter().createBackend(language, excluded);
     if (!backend) {
       ws.send(JSON.stringify({ type: 'error', code: 'no_backend', message: 'No STT backend available (no GPU and no Fireworks key)' }));
-      // Application close code (4002) so clients can distinguish a config/backend
+      // Application close code so clients can distinguish a config/backend
       // failure from a transport-level network drop (#417).
-      ws.close(4002, 'No STT backend available');
+      ws.close(STT_NO_BACKEND_CLOSE_CODE, 'No STT backend available');
       return;
     }
     backend.onConnected = () => {
+      connectedSince = Date.now();
       log.log(`[stt-ws] Backend connected: ${backend.provider} id=${ws.data.id}`);
       // Echo the effective pause window so a client that sent an out-of-range
       // (or omitted) pause_ms learns the value the server actually applied (#455).
@@ -207,6 +240,14 @@ export function openSttSession(ws: ServerWebSocket<WsData>): void {
       sttSessions.delete(ws.data.id);
       if (ws.readyState !== 1) return;
       if (ws.readyState === 1) {
+        // If this backend had been healthy long enough, forget prior exclusions so
+        // the preferred (faster) provider can be retried instead of staying pinned
+        // to a slower fallback for the rest of the session (#451).
+        if (shouldResetExclusions(connectedSince, Date.now()) && excluded.size > 0) {
+          log.log(`[stt-ws] Provider ${backend.provider} was healthy ≥${STT_EXCLUSION_RESET_MS}ms — clearing exclusions id=${ws.data.id}`);
+          excluded.clear();
+        }
+        connectedSince = 0;
         excluded.add(backend.provider);
         log.log(`[stt-ws] Reconnecting (excluded: ${[...excluded].join(',')}) id=${ws.data.id}`);
         try {

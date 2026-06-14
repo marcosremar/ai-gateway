@@ -25,6 +25,54 @@ export function isKnownWsCommand(cmd: Record<string, unknown>): boolean {
   return typeof cmd.type === 'string' && KNOWN_WS_COMMANDS.has(cmd.type);
 }
 
+/** Default bot-events command budget: max commands per rolling 1s window (#487). */
+export const WS_COMMAND_RATE_LIMIT = 30;
+export const WS_COMMAND_RATE_WINDOW_MS = 1000;
+
+/**
+ * Make a per-connection command rate limiter for the bot-events channel (#487).
+ * Only the recall-audio path was throttled; a bot-events client could spam
+ * `bot:join`/`dub:switch`/`ping` to drive repeated upstream fetches and
+ * broadcasts (an O(N) amplifier). This is a simple fixed-window counter:
+ * `allow(now)` returns false once more than `limit` commands arrive within
+ * `windowMs`. Closure-based with time injected so it's deterministic in tests.
+ */
+export function makeCommandRateLimiter(
+  limit = WS_COMMAND_RATE_LIMIT,
+  windowMs = WS_COMMAND_RATE_WINDOW_MS,
+) {
+  let windowStart = -Infinity;
+  let count = 0;
+  return function allow(now: number): boolean {
+    if (now - windowStart > windowMs) {
+      windowStart = now;
+      count = 0;
+    }
+    count++;
+    return count <= limit;
+  };
+}
+
+/** Minimum gap (ms) between dub:switch actions on one connection (#484). */
+export const DUB_SWITCH_MIN_INTERVAL_MS = 250;
+
+/**
+ * Make a debouncer for `dub:switch` churn (#484). `dub:subscribe`/`dub:switch`
+ * already replaces the prior subscription (so it's 1 per client), but rapid
+ * switches re-create Set entries and thrash `dubTargetClients`. This returns
+ * `allow(now)` → false when a switch arrives within `minIntervalMs` of the last
+ * accepted one, so a client mashing language buttons doesn't churn the maps.
+ * Closure-based, time injected.
+ */
+export function makeDubSwitchDebounce(minIntervalMs = DUB_SWITCH_MIN_INTERVAL_MS) {
+  let last = -Infinity;
+  return function allow(now: number): boolean {
+    if (now - last < minIntervalMs) return false;
+    last = now;
+    return true;
+  };
+}
+
 export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unknown>): Promise<void> {
   // Reject malformed / unknown commands so typos get explicit feedback instead
   // of silently no-op'ing (#482 shape, #485 unknown-command nack).
@@ -33,6 +81,19 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     return;
   }
   const type = cmd.type as string;
+
+  // Per-connection command rate limit so a bot-events client can't spam
+  // join/switch/ping to drive repeated fetches + broadcasts (#487).
+  const cmdState = ws.data as unknown as {
+    __cmdLimiter?: (now: number) => boolean;
+    __dubSwitchDebounce?: (now: number) => boolean;
+  };
+  if (!cmdState.__cmdLimiter) cmdState.__cmdLimiter = makeCommandRateLimiter();
+  if (!cmdState.__cmdLimiter(Date.now())) {
+    try { ws.send(JSON.stringify({ type: 'error', code: 'rate_limited', message: 'Too many commands' })); } catch { /* socket closing */ }
+    return;
+  }
+
   log.log(`[ws] Command from client: ${type}`);
 
   try {
@@ -152,6 +213,16 @@ export async function handleWsCommand(ws: BabelCastWS, cmd: Record<string, unkno
     broadcastWs({ type: 'bot:status', status: 'idle', message: 'Bot left meeting' });
 
   } else if (type === 'dub:subscribe' || type === 'dub:switch') {
+    // Debounce rapid dub:switch churn so a client mashing language buttons can't
+    // thrash the dubTargetClients maps (#484). Only switches are debounced; an
+    // initial subscribe is always honored.
+    if (type === 'dub:switch') {
+      if (!cmdState.__dubSwitchDebounce) cmdState.__dubSwitchDebounce = makeDubSwitchDebounce();
+      if (!cmdState.__dubSwitchDebounce(Date.now())) {
+        try { ws.send(JSON.stringify({ type: 'error', code: 'switch_debounced', message: 'dub:switch too frequent' })); } catch { /* socket closing */ }
+        return;
+      }
+    }
     const target = String(cmd.target || '');
     if (!target) {
       ws.send(JSON.stringify({ type: 'error', message: 'target is required for dub:subscribe' }));
