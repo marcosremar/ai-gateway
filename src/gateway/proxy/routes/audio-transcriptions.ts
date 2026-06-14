@@ -11,15 +11,43 @@ import { createHash } from 'crypto';
 import { createLogger } from '../../../logger';
 
 const log = createLogger('audio-transcriptions');
-import type { STTProvider } from '../../providers/cloud/types';
+import type { STTProvider, STTResponse } from '../../providers/cloud/types';
 import type { ProxyRequest, ProxyResponse } from '../types';
 import { withProxyRetry } from './retry';
 
 // ── STT response cache ──────────────────────────────────────────────────
 const STT_CACHE_TTL_MS = 5 * 60_000;
 const STT_CACHE_MAX_ENTRIES = 200;
-const sttCache = new Map<string, { text: string; expiresAt: number }>();
+/**
+ * Cache the FULL STT response, not just `text` (#330). The cache key already
+ * includes response_format (verbose_json/srt/vtt), so a verbose_json request
+ * that hit the cache previously got back `{ text }` with the segments/words
+ * silently dropped. Storing the whole response object preserves the rich
+ * payload on a cache hit.
+ */
+const sttCache = new Map<string, { response: STTResponse; expiresAt: number }>();
 let cacheWriteInProgress = false;
+
+/**
+ * Build the response body for a transcription result honoring the requested
+ * format (#330). For `verbose_json` the full object (segments/words/language/
+ * duration) is returned; other formats return `{ text }`. Pure + exported so
+ * the shaping logic can be unit-tested without a provider call.
+ */
+export function buildTranscriptionBody(
+  response: STTResponse,
+  responseFormat?: string,
+): unknown {
+  if (responseFormat === 'verbose_json') {
+    const body: Record<string, unknown> = { text: response.text };
+    if (response.language !== undefined) body.language = response.language;
+    if (response.duration !== undefined) body.duration = response.duration;
+    if (response.segments !== undefined) body.segments = response.segments;
+    if (response.words !== undefined) body.words = response.words;
+    return body;
+  }
+  return { text: response.text };
+}
 
 function sttCacheKey(audioHash: string, model: string, language?: string, responseFormat?: string): string {
   // Include response_format — verbose_json/srt/vtt produce structurally
@@ -32,17 +60,17 @@ function hashAudio(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex').slice(0, 16);
 }
 
-function sttCacheGet(key: string): string | null {
+function sttCacheGet(key: string): STTResponse | null {
   const entry = sttCache.get(key);
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) { sttCache.delete(key); return null; }
-  return entry.text;
+  return entry.response;
 }
 
 /** Clear the STT cache. Exported for tests. */
 export function _resetSttCache(): void { sttCache.clear(); }
 
-function sttCacheSet(key: string, text: string): void {
+function sttCacheSet(key: string, response: STTResponse): void {
   while (sttCache.size >= STT_CACHE_MAX_ENTRIES) {
     const now = Date.now();
     let removedAny = false;
@@ -59,7 +87,7 @@ function sttCacheSet(key: string, text: string): void {
       else break;
     }
   }
-  sttCache.set(key, { text, expiresAt: Date.now() + STT_CACHE_TTL_MS });
+  sttCache.set(key, { response, expiresAt: Date.now() + STT_CACHE_TTL_MS });
 }
 
 export async function handleAudioTranscriptions(
@@ -98,12 +126,14 @@ export async function handleAudioTranscriptions(
     typeof body.language === 'string' ? body.language : undefined,
     typeof body.response_format === 'string' ? body.response_format : undefined,
   );
+  const responseFormat = typeof body.response_format === 'string' ? body.response_format : undefined;
   const cached = sttCacheGet(cacheKey);
   if (cached !== null) {
     return {
       status: 200,
       headers: { 'X-Cache': 'HIT' },
-      body: { text: cached },
+      // Replay the full cached response so verbose_json hits keep segments/words (#330).
+      body: buildTranscriptionBody(cached, responseFormat),
     };
   }
 
@@ -121,13 +151,13 @@ export async function handleAudioTranscriptions(
       'STT',
     );
 
-    // Cache the result for future identical requests
-    sttCacheSet(cacheKey, result.text);
+    // Cache the FULL result for future identical requests (#330).
+    sttCacheSet(cacheKey, result);
 
     return {
       status: 200,
       headers: { 'X-Cache': 'MISS' },
-      body: { text: result.text },
+      body: buildTranscriptionBody(result, responseFormat),
     };
   } catch (err) {
     log.error(`STT error for model ${body.model}:`, err);

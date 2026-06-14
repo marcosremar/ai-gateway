@@ -141,7 +141,16 @@ export class AIProviderRegistry {
         for (const model of provider.tts.getModels()) models.push({ ...model, providerId: provider.id });
       }
       if (capability === 'llm' && provider.llm) {
-        models.push({ id: provider.id, name: provider.name, description: provider.description, capability: 'llm', providerId: provider.id });
+        // Enumerate the explicit LLM model catalog when the descriptor carries
+        // one (#398) — the LLMProvider interface has no getModels(), so without
+        // this the registry reported a single pseudo-model per provider and
+        // under-reported available LLMs on /v1/models. Falls back to the
+        // provider-as-model entry for descriptors that didn't declare a catalog.
+        if (provider.llmModels && provider.llmModels.length > 0) {
+          for (const model of provider.llmModels) models.push({ ...model, providerId: provider.id });
+        } else {
+          models.push({ id: provider.id, name: provider.name, description: provider.description, capability: 'llm', providerId: provider.id });
+        }
       }
       if (capability === 'realtime' && provider.realtime) {
         for (const model of provider.realtime.getModels()) models.push({ ...model, providerId: provider.id });

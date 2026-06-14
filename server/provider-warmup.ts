@@ -12,11 +12,18 @@ import {
   updateGpuModelWarmth, isStageWarm,
   activeRequests, lastRequestTime,
 } from './state';
-import { groqAvailable, openaiAvailable, markGpuHealthy, markGpuUnhealthy } from './providers';
+import {
+  groqAvailable, openaiAvailable, markGpuHealthy, markGpuUnhealthy,
+  fireworksAvailable, openrouterAvailable, deepgramAvailable, elevenlabsAvailable,
+} from './providers';
 import { probeAllCloudProviders, probeGpuHealth } from '../src';
 import type { CloudProbeResult } from '../src';
 import { createLogger } from '../src/logger';
 import { safeCatch } from '../src/safe-catch';
+// Pure warmup helpers (#382, #383) live in src/ so they can be unit-tested
+// without this module's heavy server graph; re-exported for back-compat.
+import { buildWarmupKeys, shouldRunWarmupCycle } from '../src/gateway/providers/cloud/warmup-keys';
+export { buildWarmupKeys, shouldRunWarmupCycle };
 
 const log = createLogger('provider-warmup');
 
@@ -39,11 +46,30 @@ function isIdleEnoughForProbe(): boolean {
   return idleMs > IDLE_THRESHOLD_MS;
 }
 
+
 async function runWarmupCycle(): Promise<void> {
-  // Build keys map for configured cloud providers
-  const keys: Record<string, string> = {};
-  if (groqAvailable && process.env.GROQ_API_KEY) keys.groq = process.env.GROQ_API_KEY;
-  if (openaiAvailable && process.env.OPENAI_API_KEY) keys.openai = process.env.OPENAI_API_KEY;
+  const gpuDeployed = deployState.status === 'ready' && !!deployState.endpoint;
+
+  // Idle backoff (#383): skip cloud warmup when the gateway has been idle for a
+  // long time and no GPU pod needs monitoring — avoids burning rate budget on a
+  // dormant gateway.
+  if (!shouldRunWarmupCycle({ now: Date.now(), lastRequestTime, gpuDeployed })) {
+    return;
+  }
+
+  // Build keys map for ALL configured cloud providers (#382) so first-fallback
+  // requests don't pay a cold handshake.
+  const keys = buildWarmupKeys(
+    {
+      groq: groqAvailable,
+      openai: openaiAvailable,
+      fireworks: fireworksAvailable,
+      openrouter: openrouterAvailable,
+      deepgram: deepgramAvailable,
+      elevenlabs: elevenlabsAvailable,
+    },
+    process.env,
+  );
 
   // Probe cloud providers via ai-gateway (encapsulates URLs + auth)
   const cloudProbe = Object.keys(keys).length > 0

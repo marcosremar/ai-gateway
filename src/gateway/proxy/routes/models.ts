@@ -4,11 +4,63 @@
 
 import type { ProviderMapping, ProxyResponse } from '../types';
 
+/** Minimal shape of a dynamic model catalog (e.g. live OpenRouter listing). */
+interface DynamicModelCatalog {
+  providerId: string;
+  listModels(): Promise<string[]>;
+}
+
+/**
+ * TTL memo around live model-catalog HTTP calls (#340).
+ *
+ * `handleModelsWithDynamic` called `catalog.listModels()` (a live OpenRouter
+ * fetch) on *every* `/v1/models` request, adding latency and outbound calls to
+ * a list that changes at most a few times a day. This caches each provider's id
+ * list for a multi-minute window. On an in-window hit the cached ids are
+ * returned with no network call; a failed refresh transparently serves the
+ * last good value (stale-on-error) so a transient provider blip doesn't drop
+ * models from the catalog.
+ */
+export class ModelCatalogCache {
+  private readonly ttlMs: number;
+  private readonly entries = new Map<string, { ids: string[]; expiresAt: number }>();
+  private readonly now: () => number;
+
+  constructor(ttlMs = 5 * 60_000, now: () => number = Date.now) {
+    this.ttlMs = ttlMs;
+    this.now = now;
+  }
+
+  /** Get the catalog's model ids, fetching only when the cache is cold/stale. */
+  async getModels(catalog: DynamicModelCatalog): Promise<string[]> {
+    const cached = this.entries.get(catalog.providerId);
+    if (cached && cached.expiresAt > this.now()) return cached.ids;
+    try {
+      const ids = await catalog.listModels();
+      this.entries.set(catalog.providerId, { ids, expiresAt: this.now() + this.ttlMs });
+      return ids;
+    } catch (err) {
+      // Stale-on-error: serve the last good list rather than dropping models.
+      if (cached) return cached.ids;
+      throw err;
+    }
+  }
+
+  /** Drop all cached catalogs (tests / forced refresh). */
+  clear(): void { this.entries.clear(); }
+}
+
+/** Module-level catalog cache shared across /v1/models requests. */
+const defaultCatalogCache = new ModelCatalogCache();
+
 export function handleModels(providers: ProviderMapping): ProxyResponse {
   return buildModelsResponse(collectStaticModels(providers));
 }
 
-export async function handleModelsWithDynamic(providers: ProviderMapping): Promise<ProxyResponse> {
+export async function handleModelsWithDynamic(
+  providers: ProviderMapping,
+  catalogCache: ModelCatalogCache = defaultCatalogCache,
+): Promise<ProxyResponse> {
   const models = collectStaticModels(providers);
   const seen = new Set(models.map((model) => model.id));
   const warnings: string[] = [];
@@ -16,7 +68,7 @@ export async function handleModelsWithDynamic(providers: ProviderMapping): Promi
 
   for (const catalog of providers.dynamicModelCatalogs ?? []) {
     try {
-      const ids = await catalog.listModels();
+      const ids = await catalogCache.getModels(catalog);
       for (const id of ids) {
         if (seen.has(id)) continue;
         seen.add(id);

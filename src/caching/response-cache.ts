@@ -12,6 +12,42 @@ import { createHash } from 'crypto';
 import type { KvStore } from '../deps';
 import type { CacheConfig, CacheStats, CacheRequestOptions, CacheMetadata } from './types';
 
+/**
+ * Deterministic JSON stringify that recursively sorts object keys (#334).
+ *
+ * `JSON.stringify` preserves key *insertion* order, so two semantically
+ * identical requests whose nested objects (tool schemas, message content parts,
+ * response_format) were built with different key ordering hash to different
+ * cache keys and never share an entry. This walks the value and emits object
+ * keys in sorted order at every depth, so equivalent requests collapse to one
+ * key. Arrays keep their order (order is significant for messages/tools).
+ * Falls back to `JSON.stringify` semantics for primitives; cycles throw exactly
+ * like `JSON.stringify` would, letting the caller's try/catch handle them.
+ */
+export function stableStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+  const walk = (v: unknown): unknown => {
+    if (v === null || typeof v !== 'object') return v;
+    if (seen.has(v as object)) throw new TypeError('Converting circular structure to JSON');
+    seen.add(v as object);
+    let out: unknown;
+    if (Array.isArray(v)) {
+      out = v.map(walk);
+    } else {
+      const obj = v as Record<string, unknown>;
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(obj).sort()) {
+        const walked = walk(obj[k]);
+        if (walked !== undefined) sorted[k] = walked;
+      }
+      out = sorted;
+    }
+    seen.delete(v as object);
+    return out;
+  };
+  return JSON.stringify(walk(value));
+}
+
 export class ResponseCache {
   private store: KvStore;
   private defaultTtlMs: number;
@@ -66,7 +102,10 @@ export class ResponseCache {
       // e.g. max_tokens or response_format must NOT share a cache entry — a
       // request capped at 50 tokens would otherwise be served a cached
       // full-length answer (or a verbose_json hit returned to a text request).
-      serialized = JSON.stringify({
+      // Use stableStringify (#334) so nested objects (tool schemas, message
+      // content parts, response_format) hash deterministically regardless of
+      // key insertion order — otherwise equivalent requests miss the cache.
+      serialized = stableStringify({
         p: params.provider,
         m: params.model,
         msgs: params.messages,

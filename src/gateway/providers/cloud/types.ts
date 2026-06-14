@@ -344,6 +344,14 @@ export interface ProviderDescriptor {
   realtime?: RealtimeProvider;
   image?: ImageProvider;
   omni?: OmniProvider;
+  /**
+   * Optional explicit model catalog for capabilities whose provider interface
+   * has no `getModels()` (notably LLM). When present, `getAllModels('llm')`
+   * enumerates these instead of collapsing the provider to a single pseudo-model
+   * (#398), so `/v1/models` reports every available LLM, not one entry per
+   * provider id.
+   */
+  llmModels?: ModelInfo[];
 }
 
 // ---------------------------------------------------------------------------

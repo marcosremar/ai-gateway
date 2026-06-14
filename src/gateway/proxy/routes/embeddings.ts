@@ -13,6 +13,67 @@ const log = createLogger('embeddings');
 const MAX_EMBEDDING_INPUTS = 100;
 const MAX_INPUT_LENGTH = 8192;
 
+/**
+ * Per-input embedding cache plumbing (#331).
+ *
+ * The previous cache keyed on the WHOLE input array, so two requests sharing
+ * 99/100 strings got 0% reuse. These pure helpers let the handler cache each
+ * input string individually and only embed the miss subset. They also guard
+ * against memoizing a truncated provider response (validate count == inputs).
+ */
+
+/** Build a per-input cache key for one embedding string. */
+export function embeddingInputKey(
+  cache: { buildCustomKey(k: string): string },
+  providerId: string,
+  model: string,
+  input: string,
+  dimensions?: number,
+): string {
+  return cache.buildCustomKey(`emb:${providerId}:${model}:${dimensions ?? 0}:${input}`);
+}
+
+/**
+ * Split inputs into per-index cache hits and the still-needed miss list.
+ * `getHit(index)` returns a cached vector or null. Returns the indices that
+ * missed (in order) plus a sparse results array pre-filled with hits.
+ */
+export function partitionEmbeddingInputs(
+  inputs: string[],
+  getHit: (index: number) => number[] | null,
+): { missIndices: number[]; results: (number[] | null)[] } {
+  const results: (number[] | null)[] = new Array(inputs.length).fill(null);
+  const missIndices: number[] = [];
+  for (let i = 0; i < inputs.length; i++) {
+    const hit = getHit(i);
+    if (hit) results[i] = hit;
+    else missIndices.push(i);
+  }
+  return { missIndices, results };
+}
+
+/**
+ * Merge freshly-embedded vectors (in miss order) back into the sparse results.
+ * Throws when the provider returned a different count than was requested (#331)
+ * — a truncated response must not be partially merged or cached.
+ */
+export function assembleEmbeddings(
+  results: (number[] | null)[],
+  missIndices: number[],
+  fresh: number[][],
+): number[][] {
+  if (fresh.length !== missIndices.length) {
+    throw new Error(`embedding count mismatch: expected ${missIndices.length}, got ${fresh.length}`);
+  }
+  const out = [...results];
+  for (let j = 0; j < missIndices.length; j++) out[missIndices[j]] = fresh[j];
+  // After filling, no slot may remain null.
+  return out.map((v, i) => {
+    if (v === null) throw new Error(`embedding missing for index ${i}`);
+    return v;
+  });
+}
+
 export async function handleEmbeddings(
   req: ProxyRequest,
   embeddingProviders: Record<string, EmbeddingProvider>,
@@ -56,38 +117,51 @@ export async function handleEmbeddings(
   const dimensions = typeof body.dimensions === 'number' ? body.dimensions : undefined;
 
   try {
-    const cacheKey = cache ? cache.buildKey({ provider: provider.providerId, model, input: inputs, dimensions }) : null;
+    // Per-input caching (#331): look up each string individually so a request
+    // sharing most inputs with a prior one reuses those vectors and only embeds
+    // the misses, instead of all-or-nothing on the whole-array key.
+    const perInputKeys = cache
+      ? inputs.map((s) => embeddingInputKey(cache, provider.providerId, model, s, dimensions))
+      : null;
 
-    if (cacheKey) {
-      const cached = await cache!.get<{ embeddings: number[][]; model: string; usage: { promptTokens: number; totalTokens: number } }>(cacheKey);
-      if (cached) {
-        return {
-          status: 200,
-          body: {
-            object: 'list',
-            data: cached.embeddings.map((embedding, i) => ({ object: 'embedding', index: i, embedding })),
-            model: cached.model,
-            usage: { prompt_tokens: cached.usage.promptTokens, total_tokens: cached.usage.totalTokens },
-          },
-        };
-      }
+    let cachedHits: (number[] | null)[] = new Array(inputs.length).fill(null);
+    if (cache && perInputKeys) {
+      cachedHits = await Promise.all(
+        perInputKeys.map((k) => cache.get<number[]>(k).catch(() => null)),
+      );
     }
 
-    const result = await withProxyRetry(
-      provider.providerId,
-      model,
-      () => provider.embed(inputs, {
-        model,
-        dimensions,
-      }),
-      'Embedding',
-    );
+    const { missIndices, results } = partitionEmbeddingInputs(inputs, (i) => cachedHits[i]);
 
-    if (cacheKey) {
-      try {
-        await cache!.set(cacheKey, result);
-      } catch (cacheErr) {
-        log.error(`Cache set failed:`, cacheErr);
+    let usage = { promptTokens: 0, totalTokens: 0 };
+    let resolvedModel = model;
+    let finalEmbeddings: number[][];
+
+    if (missIndices.length === 0) {
+      // Full cache hit — no provider call.
+      finalEmbeddings = results.map((v) => v as number[]);
+    } else {
+      const missInputs = missIndices.map((i) => inputs[i]);
+      const result = await withProxyRetry(
+        provider.providerId,
+        model,
+        () => provider.embed(missInputs, { model, dimensions }),
+        'Embedding',
+      );
+      // assembleEmbeddings throws if the provider returned a truncated count,
+      // so a partial response is never cached or returned (#331).
+      finalEmbeddings = assembleEmbeddings(results, missIndices, result.embeddings);
+      usage = result.usage;
+      resolvedModel = result.model;
+
+      if (cache && perInputKeys) {
+        await Promise.all(
+          missIndices.map((idx, j) =>
+            cache.set(perInputKeys[idx], result.embeddings[j]).catch((cacheErr) => {
+              log.error(`Cache set failed:`, cacheErr);
+            }),
+          ),
+        );
       }
     }
 
@@ -95,15 +169,15 @@ export async function handleEmbeddings(
       status: 200,
       body: {
         object: 'list',
-        data: result.embeddings.map((embedding, i) => ({
+        data: finalEmbeddings.map((embedding, i) => ({
           object: 'embedding',
           index: i,
           embedding,
         })),
-        model: result.model,
+        model: resolvedModel,
         usage: {
-          prompt_tokens: result.usage.promptTokens,
-          total_tokens: result.usage.totalTokens,
+          prompt_tokens: usage.promptTokens,
+          total_tokens: usage.totalTokens,
         },
       },
     };

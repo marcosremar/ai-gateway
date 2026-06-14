@@ -43,6 +43,43 @@ function hexToBuffer(hex: string): Buffer {
   return Buffer.from(hex, 'hex');
 }
 
+/** Default chunk size (bytes) for streaming a fully-buffered audio payload. */
+export const TTS_STREAM_CHUNK_BYTES = 16 * 1024;
+
+/**
+ * Split a buffer into fixed-size chunks for a real chunked-transfer stream
+ * (#370). Providers that only return a complete buffer (minimax, self-hosted
+ * one-shot) previously wrapped the whole thing in a single ReadableStream chunk,
+ * which gives the consumer zero TTFAC/streaming-overlap benefit — the player
+ * still waits for the entire payload. Emitting the buffer in smaller chunks lets
+ * a downstream consumer begin playback / forwarding as bytes arrive. Pure +
+ * exported for unit testing.
+ */
+export function chunkAudioBuffer(buf: Buffer, chunkBytes = TTS_STREAM_CHUNK_BYTES): Uint8Array[] {
+  const size = Math.max(1, Math.floor(chunkBytes));
+  if (buf.length === 0) return [];
+  const chunks: Uint8Array[] = [];
+  for (let offset = 0; offset < buf.length; offset += size) {
+    chunks.push(new Uint8Array(buf.subarray(offset, Math.min(offset + size, buf.length))));
+  }
+  return chunks;
+}
+
+/** Build a ReadableStream that emits a buffer in fixed-size chunks (#370). */
+export function bufferToChunkedStream(buf: Buffer, chunkBytes = TTS_STREAM_CHUNK_BYTES): ReadableStream<Uint8Array> {
+  const chunks = chunkAudioBuffer(buf, chunkBytes);
+  let i = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (i >= chunks.length) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(chunks[i++]);
+    },
+  });
+}
+
 export class MinimaxTTSProvider implements TTSProvider {
   readonly providerId: ProviderId = 'minimax';
   private apiKey: string | null = null;
@@ -125,12 +162,10 @@ export class MinimaxTTSProvider implements TTSProvider {
 
   async synthesizeStream(request: TTSRequest): Promise<ReadableStream<Uint8Array>> {
     const result = await this.synthesize(request);
-    return new ReadableStream({
-      start(controller) {
-        controller.enqueue(new Uint8Array(result.audio));
-        controller.close();
-      },
-    });
+    // Minimax's HTTP API returns a complete buffer; emit it in chunks (#370)
+    // so the consumer can begin playback/forwarding before the whole payload is
+    // walked, instead of receiving one giant single-chunk stream.
+    return bufferToChunkedStream(result.audio);
   }
 }
 

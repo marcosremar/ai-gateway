@@ -8,6 +8,7 @@ import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse, TTSProvider, TTSRequest, TTSResponse, TTSAudioFormat, VoiceInfo, LLMProvider, ChatRequest, ChatResponse } from '../types';
 import { prepareAudioFile } from '../openai-compat/audio-utils';
 import { buildSamplingParams } from '../openai-compat/chat-params';
+import { bufferToChunkedStream } from '../minimax';
 
 const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
   mp3: 'audio/mpeg',
@@ -17,6 +18,29 @@ const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
   wav: 'audio/wav',
   pcm: 'audio/pcm',
 };
+
+/** STT response formats the OpenAI-compatible transcription endpoint accepts. */
+const SELF_HOSTED_STT_FORMATS = ['json', 'text', 'srt', 'verbose_json', 'vtt'] as const;
+type SelfHostedSttFormat = (typeof SELF_HOSTED_STT_FORMATS)[number];
+
+/**
+ * Resolve the response_format sent to a self-hosted whisper server (#378).
+ *
+ * Previously any non-`text` request was forced to `verbose_json`, so a caller
+ * asking for `srt`/`vtt`/`json` got JSON instead — the requested format was
+ * silently ignored. This honors the requested format when it's one the endpoint
+ * supports, defaulting to `verbose_json` only when nothing (or an unknown
+ * value) is supplied, preserving the rich segment/word metadata for the common
+ * path while letting subtitle formats through.
+ *
+ * Pure + exported so the mapping can be unit-tested without an OpenAI client.
+ */
+export function resolveSelfHostedSttFormat(requested?: string): SelfHostedSttFormat {
+  if (requested && (SELF_HOSTED_STT_FORMATS as readonly string[]).includes(requested)) {
+    return requested as SelfHostedSttFormat;
+  }
+  return 'verbose_json';
+}
 
 // ---------------------------------------------------------------------------
 // Self-Hosted STT
@@ -61,7 +85,9 @@ export class SelfHostedSTTProvider implements STTProvider {
       ...(request.language && { language: request.language }),
       ...(request.prompt && { prompt: request.prompt }),
       ...(request.temperature !== undefined && { temperature: request.temperature }),
-      response_format: request.responseFormat === 'text' ? 'text' : 'verbose_json',
+      // Honor the requested response format (#378) instead of forcing
+      // verbose_json for everything except text.
+      response_format: resolveSelfHostedSttFormat(request.responseFormat) as OpenAI.Audio.TranscriptionCreateParams['response_format'],
     };
 
     const transcription = await client.audio.transcriptions.create(params);
@@ -147,11 +173,10 @@ export class SelfHostedTTSProvider implements TTSProvider {
       return response.body as unknown as ReadableStream<Uint8Array>;
     }
 
+    // Fallback: the SDK returned a fully-buffered body. Emit it in chunks (#370)
+    // so the consumer still gets incremental delivery rather than one big chunk.
     const arrayBuffer = await response.arrayBuffer();
-    const uint8 = new Uint8Array(arrayBuffer);
-    return new ReadableStream({
-      start(controller) { controller.enqueue(uint8); controller.close(); },
-    });
+    return bufferToChunkedStream(Buffer.from(arrayBuffer));
   }
 }
 
