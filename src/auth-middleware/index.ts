@@ -91,6 +91,28 @@ export function isDevBypassActive(config: Pick<AuthConfig, 'allowDevBypass'>): b
 }
 
 /**
+ * Whether the gateway is running with a SINGLE shared API key (#605).
+ *
+ * When every caller authenticates with one key, the gateway can't tell tenants
+ * apart — per-app GPU isolation, per-key rate limits, and audit attribution all
+ * collapse to a single identity. A multi-tenant deployment should use a multi-
+ * key set instead. This is the pure predicate a startup self-check or the
+ * `/health` surface can use to emit a "running single-shared-key" advisory; it
+ * makes NO wiring decision and never throws.
+ *
+ * Returns true only when exactly one key is configured as a `Set`. A function
+ * validator is opaque (we can't count its accepted keys), so it returns false
+ * (can't assert single-key). An empty set returns false (no auth ⇒ a different
+ * concern, not "shared key").
+ */
+export function isSingleSharedKeyMode(
+  validKeys: AuthConfig['validKeys'],
+): boolean {
+  if (typeof validKeys === 'function') return false;
+  return validKeys.size === 1;
+}
+
+/**
  * Require authentication on any endpoint.
  *
  * @example

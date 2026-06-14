@@ -63,20 +63,13 @@ export function signGpuToken(userId: string): string {
   return `${payloadB64}.${sig}`;
 }
 
-export function verifyGpuToken(token: string): GpuTokenPayload {
-  const [payloadB64, sig] = token.split('.');
-  if (!payloadB64 || !sig) throw new Error('Invalid token format');
-
-  // Accept the CURRENT secret, or (during rotation) the PREVIOUS one. Both
-  // comparisons run constant-time; we always evaluate the previous-secret branch
-  // when it is configured so acceptance timing doesn't reveal which key matched.
-  const previous = getPreviousSecret();
-  const matchesCurrent = sigMatches(payloadB64, sig, getSecret());
-  const matchesPrevious = previous !== null && sigMatches(payloadB64, sig, previous);
-  if (!matchesCurrent && !matchesPrevious) {
-    throw new Error('Invalid signature');
-  }
-
+/**
+ * Parse + validate the claims of a token whose signature has ALREADY been
+ * verified. Shared by `verifyGpuToken` and `verifyGpuTokenWithSecrets` so the
+ * payload-shape / expiry rules stay identical no matter which verify entrypoint
+ * accepted the signature. Throws the same normalized errors as before.
+ */
+function decodeVerifiedPayload(payloadB64: string): GpuTokenPayload {
   // A valid HMAC only proves the bytes were signed by a secret holder — it
   // does not prove the payload is well-formed JSON. base64url that decodes to
   // non-JSON would otherwise throw a raw `SyntaxError` here, leaking the
@@ -88,12 +81,6 @@ export function verifyGpuToken(token: string): GpuTokenPayload {
   } catch {
     throw new Error('Invalid token payload');
   }
-  // Validate required claims explicitly. Without this, a token whose
-  // payload was valid JSON but missing `exp` would slip past the expiry
-  // check (`undefined < now` evaluates to false → never expires) and a
-  // missing `uid` would propagate to downstream authz with `undefined`
-  // identity. HMAC verification only proves the payload was signed by
-  // someone holding the secret — it doesn't enforce shape.
   const claims = raw as Record<string, unknown>;
   if (
     claims === null ||
@@ -111,6 +98,60 @@ export function verifyGpuToken(token: string): GpuTokenPayload {
     throw new Error('Token expired');
   }
   return payload;
+}
+
+/**
+ * Verify a token against an EXPLICIT list of candidate secrets (#620).
+ *
+ * `verifyGpuToken` accepts the current secret (+ optionally one previous one via
+ * `GPU_ACCESS_SECRET_PREVIOUS`). A rotation that must overlap MORE than two
+ * secrets — e.g. several pods mid-rollout, or a staged multi-key migration —
+ * needs to verify against an arbitrary set. This is the wire-compatible
+ * generalization: `signGpuToken` is UNCHANGED (still no `kid` claim, byte-
+ * identical tokens), only verification gains the ability to try N keys.
+ *
+ * All candidate comparisons use the same constant-time `sigMatches`, and EVERY
+ * candidate is evaluated (no early return on first match) so acceptance timing
+ * doesn't reveal which key — or how many keys — matched. Short/garbage secrets
+ * (< 32 chars) are skipped. Throws the same errors as `verifyGpuToken`.
+ *
+ * NOTE: a per-token `kid` claim (the full #620 design) is intentionally NOT
+ * added here because it would change the on-the-wire token format; this helper
+ * is the safe subset that needs no format change.
+ */
+export function verifyGpuTokenWithSecrets(token: string, secrets: readonly string[]): GpuTokenPayload {
+  const [payloadB64, sig] = token.split('.');
+  if (!payloadB64 || !sig) throw new Error('Invalid token format');
+
+  let matched = false;
+  for (const secret of secrets) {
+    if (typeof secret !== 'string' || secret.length < 32) continue;
+    // Evaluate every candidate (bitwise-OR accumulate) — do NOT short-circuit,
+    // so the number of HMAC computations is independent of which/how-many match.
+    matched = sigMatches(payloadB64, sig, secret) || matched;
+  }
+  if (!matched) throw new Error('Invalid signature');
+
+  return decodeVerifiedPayload(payloadB64);
+}
+
+export function verifyGpuToken(token: string): GpuTokenPayload {
+  const [payloadB64, sig] = token.split('.');
+  if (!payloadB64 || !sig) throw new Error('Invalid token format');
+
+  // Accept the CURRENT secret, or (during rotation) the PREVIOUS one. Both
+  // comparisons run constant-time; we always evaluate the previous-secret branch
+  // when it is configured so acceptance timing doesn't reveal which key matched.
+  const previous = getPreviousSecret();
+  const matchesCurrent = sigMatches(payloadB64, sig, getSecret());
+  const matchesPrevious = previous !== null && sigMatches(payloadB64, sig, previous);
+  if (!matchesCurrent && !matchesPrevious) {
+    throw new Error('Invalid signature');
+  }
+
+  // Signature verified — decode + validate claims (shape, required fields,
+  // expiry) via the shared helper so both verify entrypoints behave identically.
+  return decodeVerifiedPayload(payloadB64);
 }
 
 /**

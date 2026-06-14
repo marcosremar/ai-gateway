@@ -134,6 +134,95 @@ export function isAllowedModel(model: string, allowlist: readonly string[]): boo
 }
 
 /**
+ * True iff `urlStr` parses to an `http:`/`https:` URL (#657 helper).
+ *
+ * SSRF/local-read hardening is usually framed as a host denylist, but the
+ * *scheme* is an independent vector: `file:` can read local files, and
+ * `ftp:`/`gopher:`/`data:` can be abused to pivot or smuggle. The SSRF
+ * validator blocks `file:` specifically, but a positive allowlist (only
+ * http/https) is the safer posture for any operator/config-supplied URL.
+ *
+ * This is the pure, reusable predicate — it does NO DNS resolution and does NOT
+ * touch the SSRF module (which lives outside this file's ownership); callers
+ * apply it at the edge before handing a URL to a fetch path. A non-string or
+ * un-parseable value returns false (fail-closed).
+ */
+export function isHttpUrl(urlStr: unknown): boolean {
+  if (typeof urlStr !== 'string' || urlStr.length === 0) return false;
+  let url: URL;
+  try {
+    url = new URL(urlStr);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'http:' || url.protocol === 'https:';
+}
+
+/**
+ * Built-in PII patterns used by {@link redactPII}. Kept self-contained in this
+ * (owned) module rather than importing the DLP detector — the goal is a small,
+ * dependency-free redaction primitive, not a second copy of the full DLP engine.
+ * Credit-card matches are additionally gated by {@link luhnCheck} to cut the
+ * false positives that plague a bare brand-prefix regex.
+ */
+const PII_REDACT_PATTERNS: Array<{ type: string; re: RegExp; luhn?: boolean }> = [
+  // Email
+  { type: 'email', re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
+  // US SSN
+  { type: 'ssn', re: /\b(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}\b/g },
+  // Credit-card-shaped runs (Visa/MC/Amex/Discover) — Luhn-gated.
+  { type: 'creditCard', re: /\b(?:4\d{12}(?:\d{3})?|5[1-5]\d{14}|3[47]\d{13}|6(?:011|5\d{2})\d{12})\b/g, luhn: true },
+];
+
+/** Default placeholder substituted for a redacted PII span. */
+const PII_PLACEHOLDER = '[REDACTED]';
+
+export interface RedactPIIResult {
+  /** The text with detected PII replaced by the placeholder. */
+  redacted: string;
+  /** Whether anything was redacted. */
+  found: boolean;
+  /** Distinct PII types that were redacted. */
+  types: string[];
+}
+
+/**
+ * Replace detected PII in `text` with a placeholder (#682 — redaction mode).
+ *
+ * The DLP engine's `block` action only flags/denies; it offers no way to let a
+ * request PROCEED with the sensitive spans removed. This is the localized,
+ * pure-function counterpart: it MASKS matches in place so a prompt/response can
+ * continue downstream without leaking the raw PII to the provider or a log line.
+ *
+ * Best-effort and dependency-free — it covers the high-signal shapes (email,
+ * US SSN, Luhn-valid card numbers); it is NOT a substitute for the full DLP
+ * detector, and it makes no wiring decision (callers choose where to apply it).
+ *
+ * @param placeholder string to substitute (default `[REDACTED]`).
+ */
+export function redactPII(
+  text: string,
+  opts: { placeholder?: string } = {},
+): RedactPIIResult {
+  if (typeof text !== 'string' || text.length === 0) {
+    return { redacted: text ?? '', found: false, types: [] };
+  }
+  const placeholder = opts.placeholder ?? PII_PLACEHOLDER;
+  const types = new Set<string>();
+  let out = text;
+  for (const { type, re, luhn } of PII_REDACT_PATTERNS) {
+    // Fresh lastIndex per call — the module-level regexes are global/stateful.
+    re.lastIndex = 0;
+    out = out.replace(re, (match) => {
+      if (luhn && !luhnCheck(match)) return match; // not a real card — leave it
+      types.add(type);
+      return placeholder;
+    });
+  }
+  return { redacted: out, found: types.size > 0, types: [...types] };
+}
+
+/**
  * Clamp a number into `[min, max]` (#664 helper).
  *
  * `validateNumber` REJECTS an out-of-range value (returns null). For cost-cap
@@ -215,6 +304,34 @@ export const Schemas = {
     if (opts.min != null) a = a.min(opts.min);
     return a;
   },
+
+  /**
+   * A base64 string with a hard byte-length cap (#674 helper). Fields like an
+   * avatar's `audio` blob are typed `z.string().optional()` with NO max, so a
+   * huge base64 payload sails past the request body-size logic on a per-field
+   * basis → memory/cost amplification. This validates the base64 charset AND
+   * bounds the DECODED byte size (`maxBytes`), not the raw char count, since
+   * base64 inflates ~33% — the meaningful limit is on the bytes the server will
+   * actually buffer/decode. Rejects (does not truncate) over-limit input.
+   *
+   * Accepts standard and URL-safe base64, with or without `=` padding.
+   *
+   * @example `Schemas.BoundedBase64(2 * 1024 * 1024) // 2 MB decoded`
+   */
+  BoundedBase64: (maxBytes: number) =>
+    z
+      .string()
+      .regex(/^[A-Za-z0-9+/_-]*={0,2}$/, 'must be valid base64')
+      .refine(
+        (s) => {
+          // Decoded byte length = floor(len * 3 / 4) minus padding chars.
+          const len = s.length;
+          const pad = s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0;
+          const bytes = Math.floor((len * 3) / 4) - pad;
+          return bytes <= maxBytes;
+        },
+        { message: `base64 payload exceeds ${maxBytes} bytes` },
+      ),
 
   // Common request schemas
   Pagination: z.object({
