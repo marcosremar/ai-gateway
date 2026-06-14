@@ -57,6 +57,22 @@ export function isNoSpeechResult(transcription: string | null | undefined): bool
   return !transcription || transcription.trim().length === 0;
 }
 
+/**
+ * Guarded send for speech-ws callbacks (#459). Each callback checks
+ * `readyState === 1` before sending, but the socket can still close between that
+ * check and the actual `ws.send`, so an un-guarded send can throw on the late
+ * frame and reject the pipeline promise. This re-checks readyState AND swallows a
+ * send throw, returning whether the payload was actually sent. The STT path
+ * already wraps its sends; this brings the speech path to parity.
+ */
+export function safeWsSend(
+  ws: { readyState: number; send: (data: string | Buffer) => unknown },
+  payload: string | Buffer,
+): boolean {
+  if (ws.readyState !== 1) return false;
+  try { ws.send(payload); return true; } catch { return false; }
+}
+
 type WsData = {
   id: string;
   type: 'bot' | 'stt' | 'bot-audio' | 'speech' | 'recall-audio' | 'frame-inspector';
@@ -94,31 +110,30 @@ export function handleSpeechMessage(
     return;
   }
   const config = ws.data.speechConfig || { source: 'fr', target: 'en' };
+  // All callback sends go through safeWsSend so a socket that closes between the
+  // readyState check and the send can't throw and reject the pipeline promise (#459).
   const callbacks: PipelineCallbacks = {
     onStageStart(stage: string) {
-      if (ws.readyState !== 1) return;
-      ws.send(JSON.stringify({ status: 'processing', stage }));
+      safeWsSend(ws, JSON.stringify({ status: 'processing', stage }));
     },
     onStageDone(stage: string, result) {
-      if (ws.readyState !== 1) return;
       const data: Record<string, unknown> = { status: 'processing', stage, latencyMs: result.latencyMs, provider: result.provider };
       if (stage === 'stt' && result.text) data.transcript = result.text;
       if (stage === 'llm' && result.text) data.response = result.text;
-      ws.send(JSON.stringify(data));
+      safeWsSend(ws, JSON.stringify(data));
     },
     onAudioChunk(chunk: Buffer, _isFirst: boolean) {
       if (ws.readyState !== 1) return;
       // Skip the chunk if the client is already saturated; sending would grow
       // the per-socket buffer and trip the backpressure-close instead.
       if (isSpeechBackpressured(ws as unknown as { getBufferedAmount?: () => number })) return;
-      ws.send(chunk);
+      safeWsSend(ws, chunk);
     },
     onComplete(result: PipelineResult) {
-      if (ws.readyState !== 1) return;
       // Distinguish silence from a successful translation so clients don't treat
       // an empty transcript as an error or a real result (#458).
       const noSpeech = isNoSpeechResult(result.transcription);
-      ws.send(JSON.stringify({
+      safeWsSend(ws, JSON.stringify({
         status: 'complete',
         noSpeech,
         transcript: result.transcription,
@@ -127,16 +142,14 @@ export function handleSpeechMessage(
       }));
     },
     onError(stage: string, error: Error) {
-      if (ws.readyState !== 1) return;
-      ws.send(JSON.stringify({ status: 'error', stage, message: error.message }));
+      safeWsSend(ws, JSON.stringify({ status: 'error', stage, message: error.message }));
     },
   };
   runStreamingPipeline(audioBuffer, {
     source: config.source, target: config.target, speaker: config.speaker,
     sessionId: ws.data.id,
   }, callbacks).catch(err => {
-    if (ws.readyState !== 1) return;
     log.warn('speech pipeline error: %s', err instanceof Error ? err.message : err);
-    ws.send(JSON.stringify({ status: 'error', message: err instanceof Error ? err.message : String(err) }));
+    safeWsSend(ws, JSON.stringify({ status: 'error', message: err instanceof Error ? err.message : String(err) }));
   });
 }

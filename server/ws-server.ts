@@ -10,7 +10,7 @@ import { timingSafeEqual } from 'crypto';
 import { botState, deployState, gpuHealthy, gpuModelWarmth, gpuReadinessState, gpuReadyForProduction, isStageWarm, isTtsWarm } from './state';
 import { shouldPreferGpuTts } from './providers';
 import { isGpuAvailable } from './state';
-import { wsClients, unsubscribeDub, isBackpressured, shouldEmitLegacyProviderStatus } from './ws-state';
+import { wsClients, unsubscribeDub, isBackpressured, shouldEmitLegacyProviderStatus, getWsBroadcastDropped, buildTranscriptReconnectHint } from './ws-state';
 import type { BabelCastWS } from './ws-state';
 import { PORT } from './config';
 import { speculativeCache } from './speculative-cache';
@@ -243,20 +243,23 @@ export function formatWsCloseLog(
 /**
  * A live snapshot of WS connection counters for `/metrics` / debugging (#489).
  * These gauges were not exported anywhere, so operators couldn't see leaks or
- * backpressure drops. Pure read of the current counts (the dropped-frame counter
- * lives in ws-state as `wsBroadcastDropped`).
+ * backpressure drops. Now also surfaces the broadcast-drop counter (#490) so a
+ * silent audio/status gap caused by a saturated subscriber is diagnosable
+ * instead of invisible. Pure read of the current counts.
  */
 export function getWsConnectionStats(): {
   total: number;
   max: number;
   botEvents: number;
   sttSessions: number;
+  broadcastDropped: number;
 } {
   return {
     total: wsConnectionCount,
     max: MAX_WS_TOTAL,
     botEvents: wsClients.size,
     sttSessions: sttSessions.size,
+    broadcastDropped: getWsBroadcastDropped(),
   };
 }
 
@@ -439,6 +442,9 @@ function sendInitialGpuStatus(ws: import('bun').ServerWebSocket<WsData>): void {
   if (shouldEmitLegacyProviderStatus()) {
     ws.send(JSON.stringify({ type: 'provider:status', gpu: _gpuStatus, tier: _tier, reason: deployState.message || 'Current status' }));
   }
+  // Tell a (re)connecting client the current transcript cursor so it can resume
+  // a delta instead of missing or duplicating transcripts on reconnect (#491).
+  try { ws.send(JSON.stringify(buildTranscriptReconnectHint())); } catch { /* socket closing */ }
   log.log(`[ws] Client connected id=${ws.data.id} (total=${wsClients.size}), sent gpu:status gpu=${_gpuStatus} tier=${_tier}`);
 }
 

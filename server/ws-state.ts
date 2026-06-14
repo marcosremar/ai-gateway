@@ -27,6 +27,12 @@ export const WS_BROADCAST_BACKPRESSURE_BYTES = 1 * 1024 * 1024;
 export let wsBroadcastDropped = 0;
 /** Reset the dropped-frame counter (used by tests / metrics rollover). */
 export function resetWsBroadcastDropped(): void { wsBroadcastDropped = 0; }
+/**
+ * Read the current dropped-frame count (#490). Exposed as a getter so callers in
+ * other modules see the live value — a re-exported `let` binding can be stale
+ * across module boundaries under some bundlers, and metrics must reflect reality.
+ */
+export function getWsBroadcastDropped(): number { return wsBroadcastDropped; }
 
 /** True when the socket's buffered bytes are at/over the broadcast ceiling. */
 export function isBackpressured(ws: { getBufferedAmount?: () => number }, limit = WS_BROADCAST_BACKPRESSURE_BYTES): boolean {
