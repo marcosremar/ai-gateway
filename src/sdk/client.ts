@@ -79,6 +79,84 @@ function validatePositiveInt(value: number, name: string, defaultVal: number, ma
   return Math.floor(value);
 }
 
+/**
+ * Extract the structured `{ code, retryable, message }` from a gateway error body
+ * (#826). The gateway returns ErrorResponseSchema-shaped JSON; this surfaces the
+ * code/retryable so the SDK's GatewayError carries them. Tolerant of non-JSON and
+ * of both flat (`{code,...}`) and nested (`{error:{code,...}}`) shapes.
+ *
+ * Exported for unit testing without instantiating the client.
+ */
+export function parseGatewayErrorBody(body: string): { message?: string; code?: string; retryable?: boolean } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== 'object') return {};
+  const o = parsed as Record<string, unknown>;
+  const inner = (o.error && typeof o.error === 'object') ? (o.error as Record<string, unknown>) : o;
+  const code = typeof o.code === 'string' ? o.code
+    : typeof inner.code === 'string' ? inner.code
+    : undefined;
+  const retryable = typeof o.retryable === 'boolean' ? o.retryable
+    : typeof inner.retryable === 'boolean' ? inner.retryable
+    : undefined;
+  const message = typeof inner.message === 'string' ? inner.message
+    : typeof o.message === 'string' ? o.message
+    : typeof o.error === 'string' ? o.error
+    : undefined;
+  return { message, code, retryable };
+}
+
+/** GPU statuses that are transient/in-progress and must NOT abort `waitForGpu`. */
+const GPU_TRANSIENT_STATUSES: ReadonlySet<string> = new Set([
+  'idle', 'creating', 'booting', 'installing', 'searching', 'queued',
+]);
+
+/** Validated `waitForGpu` polling parameters. */
+export interface PollOptions {
+  pollIntervalMs: number;
+  timeoutMs: number;
+}
+
+/**
+ * Validate/normalise `waitForGpu` polling params (#836) so a `0` interval can't
+ * busy-loop and a non-finite timeout can't run forever. Clamps to sane defaults.
+ */
+export function validatePollOptions(
+  pollIntervalMs: number | undefined,
+  timeoutMs: number | undefined,
+  defaults: PollOptions = { pollIntervalMs: 5_000, timeoutMs: 20 * 60_000 },
+): PollOptions {
+  return {
+    pollIntervalMs: validatePositiveInt(pollIntervalMs ?? defaults.pollIntervalMs, 'pollIntervalMs', defaults.pollIntervalMs),
+    timeoutMs: validatePositiveInt(timeoutMs ?? defaults.timeoutMs, 'timeoutMs', defaults.timeoutMs),
+  };
+}
+
+/**
+ * Decide what `waitForGpu` should do for a given status + how many polls have
+ * elapsed (#829). Early `idle` (before the deploy state machine has flipped to a
+ * boot phase) is treated as transient for the first few polls — mirrors the CLI's
+ * `i > 2` grace window — so a deploy that briefly reports `idle` isn't reported as
+ * "cancelled" spuriously.
+ *
+ * @returns `'ready'` | `'error'` | `'cancelled'` | `'wait'`
+ */
+export function classifyGpuPollState(status: string, pollCount: number, graceWindow = 2): 'ready' | 'error' | 'cancelled' | 'wait' {
+  if (status === 'ready') return 'ready';
+  if (status === 'error') return 'error';
+  if (status === 'idle') {
+    // Within the grace window an early idle is just "not started yet".
+    return pollCount <= graceWindow ? 'wait' : 'cancelled';
+  }
+  if (GPU_TRANSIENT_STATUSES.has(status)) return 'wait';
+  // Unknown status — keep waiting rather than aborting.
+  return 'wait';
+}
+
 export class GatewaySDK {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
@@ -331,17 +409,23 @@ export class GatewaySDK {
     });
   }
 
-  /** Wait for GPU to reach 'ready' status (polls gpuStatus). */
+  /** Wait for GPU to reach 'ready' status (polls gpuStatus).
+   *  Validates poll params (#836) and applies a grace window for an early `idle`
+   *  status (#829) so a just-started deploy isn't reported as cancelled. */
   async waitForGpu(pollIntervalMs = 5_000, timeoutMs = 20 * 60_000): Promise<GpuStatus> {
+    const poll = validatePollOptions(pollIntervalMs, timeoutMs);
     const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
+    let pollCount = 0;
+    while (Date.now() - start < poll.timeoutMs) {
       const status = await this.gpuStatus();
-      if (status.status === 'ready') return status;
-      if (status.status === 'error') throw new GatewayError(status.message, 0, '/v1/gpu/status');
-      if (status.status === 'idle') throw new GatewayError('Deploy cancelled', 0, '/v1/gpu/status');
-      await new Promise(r => setTimeout(r, pollIntervalMs));
+      pollCount++;
+      const decision = classifyGpuPollState(status.status, pollCount);
+      if (decision === 'ready') return status;
+      if (decision === 'error') throw new GatewayError(status.message, 0, '/v1/gpu/status');
+      if (decision === 'cancelled') throw new GatewayError('Deploy cancelled', 0, '/v1/gpu/status');
+      await new Promise(r => setTimeout(r, poll.pollIntervalMs));
     }
-    throw new GatewayError(`GPU deploy timed out after ${Math.round(timeoutMs / 60_000)} min`, 0, '/v1/gpu/status');
+    throw new GatewayError(`GPU deploy timed out after ${Math.round(poll.timeoutMs / 60_000)} min`, 0, '/v1/gpu/status');
   }
 
   // ── GPU extended ────────────────────────────────────────────────────────
@@ -970,10 +1054,15 @@ export class GatewaySDK {
         const allowed = options.allowedStatuses ?? [];
         if (!res.ok && !allowed.includes(res.status)) {
           const text = await res.text().catch(() => '');
+          // Surface the gateway's structured { code, retryable } on the error (#826).
+          const structured = parseGatewayErrorBody(text);
           throw new GatewayError(
             `${options.method} ${path} failed (${res.status}): ${text.slice(0, 200)}`,
             res.status,
             path,
+            false,
+            structured.code,
+            structured.retryable,
           );
         }
         return res;

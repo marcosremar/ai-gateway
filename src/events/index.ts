@@ -33,7 +33,12 @@ export interface EventBusEvent<T = unknown> {
 
 class EventBus {
   private handlers = new Map<string, Array<EventHandler>>();
-  private history: EventBusEvent[] = [];
+  // Ring buffer for history: a fixed-size array with a write cursor avoids the
+  // O(n) `Array.shift()` reindex on every emit past the cap (#577). On a hot
+  // bus that shift dominated emit cost; this keeps emit O(1).
+  private history: Array<EventBusEvent | undefined> = [];
+  private historyCursor = 0; // next write index
+  private historyCount = 0; // total events ever written (for ordering)
   private maxHistory = 1000;
   private paused = false;
 
@@ -94,11 +99,10 @@ class EventBus {
       source,
     };
 
-    // Store in history
-    this.history.push(event);
-    if (this.history.length > this.maxHistory) {
-      this.history.shift();
-    }
+    // Store in history (ring buffer, O(1) write — no shift()).
+    this.history[this.historyCursor] = event;
+    this.historyCursor = (this.historyCursor + 1) % this.maxHistory;
+    this.historyCount++;
 
     // Notify handlers
     const handlers = this.handlers.get(eventType) ?? [];
@@ -122,12 +126,26 @@ class EventBus {
   }
 
   /**
-   * Get event history.
+   * Read the ring buffer in chronological (oldest → newest) order.
+   */
+  private orderedHistory(): EventBusEvent[] {
+    const n = Math.min(this.historyCount, this.maxHistory);
+    const out: EventBusEvent[] = [];
+    // When wrapped, the oldest entry sits at `historyCursor`; otherwise at 0.
+    const start = this.historyCount > this.maxHistory ? this.historyCursor : 0;
+    for (let i = 0; i < n; i++) {
+      const ev = this.history[(start + i) % this.maxHistory];
+      if (ev) out.push(ev);
+    }
+    return out;
+  }
+
+  /**
+   * Get event history (chronological order, oldest first).
    */
   getHistory(eventType?: string, limit = 100): EventBusEvent[] {
-    const events = eventType
-      ? this.history.filter((e) => e.type === eventType)
-      : this.history;
+    const ordered = this.orderedHistory();
+    const events = eventType ? ordered.filter((e) => e.type === eventType) : ordered;
     return events.slice(-limit);
   }
 
@@ -152,7 +170,7 @@ class EventBus {
     return {
       handlerCount: Array.from(this.handlers.values()).reduce((sum, h) => sum + h.length, 0),
       eventTypes: this.handlers.size,
-      historySize: this.history.length,
+      historySize: Math.min(this.historyCount, this.maxHistory),
     };
   }
 
@@ -161,6 +179,8 @@ class EventBus {
    */
   clearHistory(): void {
     this.history = [];
+    this.historyCursor = 0;
+    this.historyCount = 0;
   }
 }
 

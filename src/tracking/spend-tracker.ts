@@ -73,19 +73,33 @@ function todayStr(): string {
 export class SpendTracker {
   private stateStore: StateStore;
   private pricingTable?: Record<string, ModelPricing>;
+  /**
+   * Count of records rejected as invalid (negative/non-finite cost). A
+   * systematic negative-cost bug would otherwise corrupt totals with only log
+   * noise (#556); expose it so it can be surfaced as a metric / alert.
+   */
+  private invalidCount = 0;
 
   constructor(stateStore: StateStore, pricingTable?: Record<string, ModelPricing>) {
     this.stateStore = stateStore;
     this.pricingTable = pricingTable;
   }
 
+  /** Number of records dropped for an invalid (negative/non-finite) cost. */
+  getInvalidCount(): number {
+    return this.invalidCount;
+  }
+
   /**
    * Record a spend event. Cost is auto-calculated if not provided (set to 0).
    */
   async record(record: SpendRecord): Promise<void> {
-    // Guard against negative costs corrupting budget enforcement
-    if (record.costUsd < 0) {
-      console.warn(`[spend-tracker] Ignoring record with negative cost: $${record.costUsd} (provider=${record.provider})`);
+    // Guard against negative / non-finite costs corrupting budget enforcement.
+    // Count the drop (#556) so a systematic bad-cost bug is observable, not just
+    // log noise.
+    if (!Number.isFinite(record.costUsd) || record.costUsd < 0) {
+      this.invalidCount++;
+      console.warn(`[spend-tracker] Ignoring record with invalid cost: $${record.costUsd} (provider=${record.provider})`);
       return;
     }
 

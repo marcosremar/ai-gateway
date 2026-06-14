@@ -55,15 +55,16 @@ export function createConnectionPool(config: PoolConfig = {}) {
     },
 
     getStats(): PoolStats | null {
-      return {
-        origin: '*',
-        connected: cfg.maxConnections,
-        free: cfg.maxConnections,
-        pending: 0,
-        queued: 0,
-        running: 0,
-        size: cfg.maxConnections,
-      };
+      // #738: this wrapper delegates to global `fetch` and does not own an
+      // undici dispatcher, so it cannot know real connection counts. Returning
+      // fabricated `connected/free` numbers masked actual exhaustion on
+      // dashboards. Return `null` ("unknown") until a real Agent is wired.
+      return null;
+    },
+
+    /** Effective configuration (read-only) — handy for diagnostics/tests. */
+    getConfig(): Required<PoolConfig> {
+      return { ...cfg };
     },
 
     async close(): Promise<void> {},
@@ -72,10 +73,41 @@ export function createConnectionPool(config: PoolConfig = {}) {
 
 let globalPool: ReturnType<typeof createConnectionPool> | null = null;
 
+/**
+ * Get the process-wide shared pool.
+ *
+ * #742: this is a singleton — `config` is honored ONLY on the first call that
+ * constructs the pool. Later callers passing a *different* config previously
+ * got the original silently; we now log a warning so the mismatch is visible.
+ * Use {@link resetGlobalPool} to deliberately rebuild with new config.
+ */
 export function getGlobalPool(config: PoolConfig = {}): ReturnType<typeof createConnectionPool> {
   if (!globalPool) {
     globalPool = createConnectionPool(config);
+    return globalPool;
   }
+  if (Object.keys(config).length > 0) {
+    const current = globalPool.getConfig();
+    const conflicts = (Object.keys(config) as (keyof PoolConfig)[]).some(
+      (k) => config[k] !== undefined && config[k] !== current[k],
+    );
+    if (conflicts) {
+      log.warn(
+        { requested: config, effective: current },
+        'getGlobalPool: ignoring new config — pool already initialized (call resetGlobalPool to rebuild)',
+      );
+    }
+  }
+  return globalPool;
+}
+
+/**
+ * Tear down and forget the global pool so the next {@link getGlobalPool} rebuilds
+ * it with fresh config. Returns the new pool for convenience. (#742)
+ */
+export async function resetGlobalPool(config: PoolConfig = {}): Promise<ReturnType<typeof createConnectionPool>> {
+  await closeGlobalPool();
+  globalPool = createConnectionPool(config);
   return globalPool;
 }
 

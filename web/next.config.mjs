@@ -7,6 +7,11 @@ const nextConfig = {
   ...(isDev ? {} : { output: 'export' }),
   eslint: { ignoreDuringBuilds: true },
   typescript: { ignoreBuildErrors: true },
+  // Tree-shake the large named-import lists (the ~30-icon `lucide-react` imports
+  // across sections) so unused icons/modules don't ship in the bundle (#960).
+  experimental: {
+    optimizePackageImports: ['lucide-react', '@xyflow/react'],
+  },
   // In dev mode, proxy API calls to the gateway server
   ...(isDev ? {
     async rewrites() {

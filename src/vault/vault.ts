@@ -82,7 +82,16 @@ export class Vault {
   async retrieve(name: string): Promise<string> {
     const raw = await this._store.get(name);
     if (!raw) throw new Error(`[Vault] Secret "${name}" not found`);
-    const blob: EncryptedBlob = JSON.parse(raw);
+    // A truncated/corrupt entry would otherwise throw a raw `SyntaxError`,
+    // which is indistinguishable from a wrong-key auth failure (the GCM
+    // `decrypt` throws too). Surface a distinct, named error so operators can
+    // tell "vault file is damaged" apart from "wrong master key".
+    let blob: EncryptedBlob;
+    try {
+      blob = JSON.parse(raw) as EncryptedBlob;
+    } catch {
+      throw new Error(`[Vault] Secret "${name}" is corrupt (invalid JSON blob)`);
+    }
     return this.decrypt(blob);
   }
 

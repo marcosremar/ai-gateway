@@ -21,6 +21,14 @@
  * const city = safeGet(user, 'address.city', 'Unknown');
  * ```
  */
+/**
+ * Object keys that walk into the prototype chain. A path containing these
+ * (e.g. a user-supplied `field` like `__proto__.isAdmin`) should never resolve
+ * through `safeGet` — at best it leaks engine internals, at worst it's the
+ * read half of a prototype-pollution probe. Treat them as "not found".
+ */
+const UNSAFE_PATH_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
 export function safeGet<T, D = undefined>(
   obj: unknown,
   path: string,
@@ -31,6 +39,9 @@ export function safeGet<T, D = undefined>(
 
   for (const key of keys) {
     if (current === null || current === undefined) {
+      return defaultValue as D;
+    }
+    if (UNSAFE_PATH_KEYS.has(key)) {
       return defaultValue as D;
     }
     current = (current as Record<string, unknown>)[key];

@@ -11,54 +11,85 @@
 - **Tests:** `bunx vitest run --config vitest.opt.config.ts` (deterministic
   harness; `__tests__/opt/**`).
 - **Types:** `bun run typecheck` — gate is **no new errors** vs. the 22-error
-  pre-existing baseline (wave 1 actually reduced this to 11).
+  pre-existing baseline (the work so far reduced this to **11**, adding none).
 - **Isolation:** each domain has a disjoint file-ownership set so parallel
   implementation agents never collide.
+- **Honesty rule:** behavior-changing / cross-cutting items are implemented only
+  where safe; otherwise recorded as **Deferred (with reason)** — never faked.
 
-## Wave 1 — complete (committed)
+## Status snapshot
 
-8 domains committed with tests; 2 domains (4, 10) finishing tests.
+| Metric | Value |
+|--------|-------|
+| Distinct audit IDs implemented + tested | **273 / 1000** |
+| Opt unit tests passing | **680** |
+| Opt test files | 22 |
+| Typecheck errors | 11 (baseline 22; **0 new**, 11 fixed) |
+| Waves complete | Wave 1 (all 10 domains) · Wave 2 (all 10 domains) |
 
-| Domain | Tests | Sample audit IDs implemented | Status |
-|--------|------:|------------------------------|--------|
-| 01 Core pipeline (STT→LLM→TTS) | 19 | #4 ensemble AbortSignal, #5 Jaccard consensus fold, #29 adaptive max-tokens, #19-24 hallucination filter, #81/#85 | ✅ committed |
-| 02 GPU deployment | 28 | #105 maxCostUsd, #122, #137/#138, #181 SSH port, #186, #190, #196 | ✅ committed |
-| 03 Autoscaling | 31 | #201 idle floor, #239 crash-recovery `>=`, #261-267, #266 setTimeout restore, #280 | ✅ committed |
-| 04 Provider routing | _adding tests_ | #1 race fix, #328 TTS cache, #347/#348, #364 chat params, #379 | ⏳ in progress |
-| 05 WebSocket/realtime | 23 | #418-421 backpressure, #432/#433, #469 SSRF test, #475 ingress guard | ✅ committed |
-| 06 Observability/cost | 24 | #513/#514/#515 percentiles, #528 cloud→budget gate, #552 atomic spend, #590 Prom quantiles, #580/#582 | ✅ committed |
-| 07 Security/auth | 38 | #648 vault key, #651 guardrail SSRF, #667/#670 validation, #684, #699 COOP/CORP | ✅ committed |
-| 08 Storage/state | 21 | #701/#702/#705, #711/#712 shutdown flush, #717-719, #721 txn, #770/#771 mutex | ✅ committed |
-| 09 CLI/SDK/DX | 31 | #662-664 bounded schema, #805/#807/#808 exit codes, #827/#833 SDK retry, #842 --max-cost-usd | ✅ committed |
-| 10 Web/build/infra | _adding tests_ | #940 hidden-tab polling, #942 shared WS, #976/#977 hf_xet+prebake, #993 token, CORS | ⏳ in progress |
+### Per-domain coverage (distinct IDs implemented & tested)
 
-**Wave 1 tally:** 216 opt tests passing · typecheck 11 errors (−11 vs baseline, 0 new) · ~100 audit items implemented with tests.
+| Domain | Range | Done | Tests | Waves |
+|--------|-------|-----:|------:|-------|
+| 1 Core AI Pipeline | 1–100 | 27 | 19 | 1, 2 |
+| 2 GPU Deployment | 101–200 | 26 | 28+ | 1, 2 |
+| 3 Autoscaling | 201–300 | 37 | 31+ | 1, 2 |
+| 4 Provider Routing | 301–400 | 38 | — | 1, 2 |
+| 5 WebSocket/Realtime | 401–500 | 27 | 68 | 1, 2 |
+| 6 Observability/Cost | 501–600 | 30 | 45 | 1, 2 |
+| 7 Security/Auth | 601–700 | 21 | 67 | 1, 2 |
+| 8 Storage/State | 701–800 | 28 | 49 | 1, 2 |
+| 9 CLI/SDK/DX | 801–900 | 26 | 88 | 1, 2 |
+| 10 Web/Build/Infra | 901–1000 | 13* | 68 | 1, 2 |
+
+\* Domain 10's count is low because many of its items are config/Dockerfile/YAML/
+Terraform changes that are validated by inspection (no unit test = not counted by
+the ID-in-test scan), though the pure-TS logic is tested.
+
+## Highlights implemented (with tests)
+
+- **Cost (economia):** `maxCostUsd` enforcement, cloud per-token spend folded into
+  the real daily budget gate (#528), atomic spend accounting (#552), idle-timeout
+  floor, predictive-warmup moving average, snapshot model-hash reuse, shutdown
+  flush of spend/cooldowns, GPU-cost-audit stopped-pod estimate.
+- **Reliability:** ensemble STT AbortSignal + deterministic Jaccard consensus,
+  head-start race fix, WebSocket backpressure + byte-accurate guards, `.unref()`
+  on background timers, DB transaction for probe writes, profile-write mutex,
+  EventBus O(1) ring buffer, pg-driver reconnect-retry.
+- **Security:** guardrail SSRF blocklist + body cap, finite-number/filename/
+  control-char validation, vault key validation + corruption detection, COOP/CORP
+  headers, per-key-quota parsing (primitives correct + tested; live wiring deferred).
+- **Observability:** real Prometheus summary quantiles, percentile-math fixes,
+  metric cardinality caps, cost-anomaly detection (idle-GPU waste, realtime est.),
+  SLO derivation from `DAILY_BUDGET_USD`.
+- **DX:** bounded chat schema, SDK retry/timeout config + `waitForGpu`, exit-code
+  classification, `--max-cost-usd`/`--json`/`--version`, structured error codes,
+  Blackwell image-tag mapping, pinned GitHub Action SHAs, tolerant feature flags.
 
 ## Deferred-by-design (require explicit decisions, not silent fakes)
 
-These recur across the audit and are **not** safe to land via parallel agents;
-each is tracked in the per-domain `implemented/*.md` "Deferred" sections:
+Tracked in each per-domain `implemented/*.md` "Deferred" section:
 
-1. **`src/modules/` dedup (~80k LOC mirror).** Large, risky, inherently
-   sequential refactor; prerequisite for packaging/tree-shaking fixes. Needs a
-   dedicated branch + review.
-2. **Wiring dead security middleware into the live request path** (RBAC, CSRF,
-   per-key rate limiting, DLP enablement, Recall webhook registration).
-   Behavior-changing; needs server-owner coordination. Primitives are now
-   correct + unit-tested; only the wiring is deferred.
-3. **Packaging** (`package.json` `main`/`types`→`dist`, `@parle` vs `@ai-gateway`,
-   exports conditions) — editing root build files mid-wave breaks other agents;
-   reserved for a maintainer pass.
-4. **GPU-token / vault crypto-contract changes** — change signed payloads /
-   on-disk blob formats; need migration + coordination with the pod image.
-5. **Large streaming rewrites** (Node→Bun response-adapter / chat SSE) — not
-   safely additive; scheduled as a focused task.
+1. **`src/modules/` dedup (~80k-LOC mirror)** — large, risky, inherently sequential
+   refactor; prerequisite for packaging/tree-shaking. Dedicated branch + review.
+2. **Wiring dead security middleware into the live path** (RBAC, CSRF, per-key
+   rate limiting, DLP enablement, Recall webhook registration) — behavior-changing,
+   needs server-owner coordination. Primitives are correct + unit-tested.
+3. **Packaging** (`package.json` `main`/`types`→`dist`, `@parle` naming, exports) —
+   editing root build files mid-wave breaks other agents; maintainer pass.
+4. **GPU-token / vault crypto-contract changes** — alter signed payloads / on-disk
+   blob formats; need migration + pod-image coordination.
+5. **Large streaming rewrites** (Node→Bun response adapter / chat SSE) and
+   server hot-path metrics scrape — not safely additive; focused task.
+6. **Cross-module cost-model reconciliation** and DB query-shape/schema/index
+   rewrites — need an ADR + broad call-site edits.
 
 ## Plan to continue
 
-- **Waves 2+:** each domain agent implements its next batch of safe, localized
-  High/Med-impact items with tests, run in smaller concurrent batches (~5
-  agents) to stay under the rate limit. Commit each wave; update this tracker.
+- **Waves 3+:** each domain agent implements its next batch of safe, localized
+  items with tests, in ~5-agent batches to stay under rate/session limits. Commit
+  each wave; refresh this tracker.
 - **Terminal state:** every audit ID is either (a) implemented with a passing
-  test, or (b) listed here as deferred-by-design with a reason. Reconciles to
-  1000.
+  test, or (b) listed as deferred-by-design with a reason — reconciling to 1000.
+
+_Last updated: 2026-06-14, after Wave 2 (all 10 domains)._

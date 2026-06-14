@@ -24,6 +24,7 @@
  */
 
 import { createLogger } from '../logger';
+import { maskApiKey } from './sanitization';
 
 const log = createLogger('per-key-rate-limit');
 
@@ -68,11 +69,23 @@ export function parseKeyQuotas(
       if (!trimmed) continue;
 
       const [key, maxStr] = trimmed.split(':');
+      // Skip empty keys (`:100,sk-abc:50` would otherwise create a quota for
+      // the empty-string key, matched by unauthenticated/empty-key callers).
+      if (!key || !key.trim()) {
+        log.warn({ entry: trimmed }, 'Skipping rate-limit entry with empty key');
+        continue;
+      }
       const maxRequests = parseInt(maxStr ?? '100', 10);
 
-      if (!isNaN(maxRequests)) {
-        quotas.set(key, { maxRequests });
+      // Reject non-finite or non-positive quotas. `parseInt('0')`/negatives
+      // previously slipped through (only `isNaN` was checked), producing a
+      // bucket that blocks *every* request for that key — a silent DoS from a
+      // config typo. Skip the bad entry rather than apply it.
+      if (!Number.isFinite(maxRequests) || maxRequests <= 0) {
+        log.warn({ entry: trimmed }, 'Skipping rate-limit entry with invalid (<=0) quota');
+        continue;
       }
+      quotas.set(key.trim(), { maxRequests });
     }
   }
 
@@ -124,7 +137,10 @@ export function createPerKeyRateLimiter(quotas?: Map<string, KeyQuota>, defaultQ
       if (entry.count > quota.maxRequests) {
         const retryAfterMs = resetMs;
         log.log(
-          { apiKey: `${apiKey.slice(0, 4)}***`, count: entry.count, max: quota.maxRequests },
+          // Use the shared masking policy so logged keys are consistent across
+          // the codebase (short keys collapse to *** instead of leaking a
+          // 4-char prefix).
+          { apiKey: maskApiKey(apiKey), count: entry.count, max: quota.maxRequests },
           'Per-key rate limit exceeded',
         );
 

@@ -62,6 +62,56 @@ export function sanitizeUserId(input: string): string {
 }
 
 /**
+ * Strip control characters (and, by default, line breaks) from a string that
+ * will be forwarded to a downstream service, header, or log line.
+ *
+ * Control chars / CR / LF in a user-influenced value enable header- and
+ * log-injection (e.g. CRLF splitting, forging a fake log entry). This keeps
+ * ordinary printable text intact and only removes the dangerous bytes.
+ *
+ * @param input  the raw string
+ * @param opts.keepNewlines  when true, preserves `\n`/`\r`/`\t` (for prompt-
+ *   like multi-line text); default false (single-line fields: names, ids).
+ * @param opts.maxLength  optional length cap (applied after stripping).
+ */
+export function stripControlChars(
+  input: string,
+  opts: { keepNewlines?: boolean; maxLength?: number } = {},
+): string {
+  // Without keepNewlines, also remove \t (\x09), \n (\x0A), \r (\x0D).
+  const pattern = opts.keepNewlines
+    ? /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g
+    : /[\x00-\x1F\x7F]/g;
+  let out = input.replace(pattern, '');
+  if (opts.maxLength != null && out.length > opts.maxLength) {
+    out = out.slice(0, opts.maxLength);
+  }
+  return out;
+}
+
+/**
+ * Sanitize a user-supplied filename so it can't be used for path traversal or
+ * header/log injection when later used in a path, Content-Disposition header,
+ * or log line.
+ *
+ * - Drops any directory component (`../`, `/`, `\`) — only the basename remains.
+ * - Removes control characters and path separators.
+ * - Collapses a name that reduces to empty / `.` / `..` to a safe placeholder.
+ * - Caps length (default 255, the common filesystem limit).
+ */
+export function sanitizeFilename(input: string, maxLength = 255): string {
+  // Take the last path segment for either separator style; this neutralizes
+  // `../../etc/passwd` and `..\\..\\windows` before any further processing.
+  const base = input.split(/[\\/]/).pop() ?? '';
+  // Remove control chars and anything that is a path separator or NUL.
+  let cleaned = base.replace(/[\x00-\x1F\x7F/\\]/g, '').trim();
+  // A name that is empty or only dots ("." / "..") is unsafe/meaningless.
+  if (cleaned === '' || /^\.+$/.test(cleaned)) cleaned = 'file';
+  if (cleaned.length > maxLength) cleaned = cleaned.slice(0, maxLength);
+  return cleaned;
+}
+
+/**
  * Sanitize an API key for logging (mask all but first/last chars).
  */
 export function maskApiKey(key: string): string {

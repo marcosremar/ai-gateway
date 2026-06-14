@@ -15,6 +15,8 @@ export class AlertRouter {
   private rateBucket: number[] = []; // timestamps of recent sends
   /** Count of non-critical alerts dropped by the rate limiter. */
   private suppressedCount = 0;
+  /** Last time the dedupe map was fully swept (amortizes cleanup). */
+  private lastDedupeSweep = 0;
 
   constructor(channels: AlertChannel[], opts?: AlertRouterOptions) {
     this.channels = channels;
@@ -28,15 +30,24 @@ export class AlertRouter {
   async route(payload: AlertPayload): Promise<void> {
     const now = Date.now();
 
-    // Dedup check
+    // Dedup check. Expire this key lazily on lookup so the common path touches a
+    // single entry instead of scanning the whole map every call (#597).
     const dedupeKey = `${payload.severity}:${payload.title}:${payload.message}`;
     const lastSeen = this.recentKeys.get(dedupeKey);
-    if (lastSeen && now - lastSeen < this.dedupeWindowMs) return;
+    if (lastSeen !== undefined) {
+      if (now - lastSeen < this.dedupeWindowMs) return;
+      this.recentKeys.delete(dedupeKey); // stale — drop before re-adding
+    }
     this.recentKeys.set(dedupeKey, now);
 
-    // Clean old dedup keys
-    for (const [key, ts] of this.recentKeys) {
-      if (now - ts > this.dedupeWindowMs) this.recentKeys.delete(key);
+    // Amortized full sweep: only walk the whole map once per dedupe window
+    // instead of on every route() call, bounding worst-case memory without the
+    // per-alert O(n) cost during a storm.
+    if (now - this.lastDedupeSweep >= this.dedupeWindowMs) {
+      this.lastDedupeSweep = now;
+      for (const [key, ts] of this.recentKeys) {
+        if (now - ts > this.dedupeWindowMs) this.recentKeys.delete(key);
+      }
     }
 
     // Rate limit check. Critical alerts ALWAYS deliver — during an incident the

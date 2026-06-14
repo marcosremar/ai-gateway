@@ -8,10 +8,31 @@
 import type { UsageLogStore } from '../deps';
 
 export interface CostAnomaly {
-  type: 'high_spend_user' | 'background_spike' | 'expensive_model' | 'untracked_realtime';
+  type: 'high_spend_user' | 'background_spike' | 'expensive_model' | 'untracked_realtime' | 'idle_gpu_waste';
   severity: 'info' | 'warning' | 'critical';
   message: string;
   data?: Record<string, unknown>;
+}
+
+/** Minimal alert sink — the AlertRouter shape, kept structural to avoid a hard
+ *  dependency (and a possible import cycle) on the alerting module. */
+export interface AnomalyAlertSink {
+  route(payload: {
+    severity: 'info' | 'warning' | 'critical';
+    title: string;
+    message: string;
+    timestamp: Date;
+    metadata?: Record<string, unknown>;
+  }): unknown;
+}
+
+/** Snapshot of a billing GPU's recent activity — supplied by the monitor loop. */
+export interface IdleGpuSnapshot {
+  /** Currently billing (rented) and >$0/hr. */
+  active: boolean;
+  costPerHr: number;
+  /** Epoch ms of the last model request served, or 0/undefined if never. */
+  lastRequestMs?: number;
 }
 
 export interface CostAnomalyDetectorConfig {
@@ -24,6 +45,16 @@ export interface CostAnomalyDetectorConfig {
    * multiplier-based check no-ops on day one and a cost explosion is invisible.
    */
   absoluteBackgroundSpikeCount: number;
+  /**
+   * Minutes a billing GPU may go without serving a request before it is flagged
+   * as idle-waste (#562) — the biggest waste class (paying $/hr for nothing).
+   */
+  idleGpuMinutes: number;
+  /**
+   * Realtime API per-minute price (USD). Used to estimate cost for sessions whose
+   * per-request cost is untrackable, from their duration, instead of $0 (#561).
+   */
+  realtimeUsdPerMinute: number;
 }
 
 const DEFAULT_CONFIG: CostAnomalyDetectorConfig = {
@@ -31,15 +62,52 @@ const DEFAULT_CONFIG: CostAnomalyDetectorConfig = {
   backgroundSpikeMultiplier: 3,
   expensiveModels: ['gpt-4o', 'llama-3.3-70b-versatile', 'llama-3.1-70b-instruct'],
   absoluteBackgroundSpikeCount: 1000,
+  idleGpuMinutes: 30,
+  realtimeUsdPerMinute: 0.06, // ~OpenAI gpt-4o-mini-realtime audio order of magnitude
 };
+
+export interface CostAnomalyDetectorDeps {
+  /** Returns the current billing-GPU snapshot for idle-waste detection (#562). */
+  getIdleGpuSnapshot?: () => IdleGpuSnapshot | null | undefined;
+  /** Alert sink for detectAndAlert() (#559/#560). */
+  alertSink?: AnomalyAlertSink;
+  /** Clock injection for deterministic tests. */
+  now?: () => number;
+}
 
 export function createCostAnomalyDetector(
   usageLogStore: UsageLogStore,
   config: Partial<CostAnomalyDetectorConfig> = {},
+  deps: CostAnomalyDetectorDeps = {},
 ) {
   const cfg = { ...DEFAULT_CONFIG, ...config };
+  const now = deps.now ?? (() => Date.now());
 
-  return {
+  /** Flag a billing GPU that has served no request for too long (#562). */
+  function detectIdleGpuWaste(): CostAnomaly | null {
+    const snap = deps.getIdleGpuSnapshot?.();
+    if (!snap || !snap.active || snap.costPerHr <= 0) return null;
+    const lastMs = snap.lastRequestMs ?? 0;
+    const idleMs = now() - lastMs;
+    const idleMinutes = idleMs / 60_000;
+    if (lastMs > 0 && idleMinutes < cfg.idleGpuMinutes) return null;
+    // Never served a request, or idle past the threshold → wasted spend.
+    const wastedUsd = (idleMs / 3_600_000) * snap.costPerHr;
+    return {
+      type: 'idle_gpu_waste',
+      severity: 'warning',
+      message: lastMs > 0
+        ? `GPU billing $${snap.costPerHr.toFixed(2)}/hr has served no request for ${Math.round(idleMinutes)}m (~$${wastedUsd.toFixed(2)} wasted)`
+        : `GPU billing $${snap.costPerHr.toFixed(2)}/hr has never served a request`,
+      data: {
+        costPerHr: snap.costPerHr,
+        idleMinutes: Math.round(idleMinutes),
+        wastedUsd: Math.round(wastedUsd * 10000) / 10000,
+      },
+    };
+  }
+
+  const api = {
     async detectAnomalies(): Promise<CostAnomaly[]> {
       const anomalies: CostAnomaly[] = [];
       const todayStart = new Date();
@@ -114,18 +182,70 @@ export function createCostAnomalyDetector(
         });
 
         if (realtimeSessions > 0) {
+          // Realtime APIs bill per audio-minute, so estimate cost from total
+          // session duration (when the store can provide it) instead of leaving
+          // it at $0 (#561). Falls back to a count-only message if unavailable.
+          let estUsd: number | undefined;
+          const durFn = (usageLogStore as Partial<{ sumRealtimeDurationMinutes: (q: unknown) => Promise<number> }>)
+            .sumRealtimeDurationMinutes;
+          if (typeof durFn === 'function') {
+            try {
+              const minutes = await durFn.call(usageLogStore, { stage: 'realtime', startDate: todayStart });
+              if (Number.isFinite(minutes) && minutes > 0) {
+                estUsd = Math.round(minutes * cfg.realtimeUsdPerMinute * 10000) / 10000;
+              }
+            } catch { /* duration query unavailable — fall through to count-only */ }
+          }
+
           anomalies.push({
             type: 'untracked_realtime',
             severity: 'info',
-            message: `${realtimeSessions} Realtime session(s) started today — per-request cost not trackable`,
-            data: { count: realtimeSessions },
+            message: estUsd !== undefined
+              ? `${realtimeSessions} Realtime session(s) today — est. $${estUsd.toFixed(4)} from audio-minute duration`
+              : `${realtimeSessions} Realtime session(s) started today — per-request cost not trackable`,
+            data: estUsd !== undefined
+              ? { count: realtimeSessions, estUsd, estimated: true }
+              : { count: realtimeSessions },
           });
         }
+
+        // 5. Idle GPU waste (#562) — biggest waste class: a billing GPU with no
+        // traffic. Fed by the monitor loop's snapshot rather than the usage log.
+        const idle = detectIdleGpuWaste();
+        if (idle) anomalies.push(idle);
       } catch (error) {
         console.warn('[CostAnomalyDetector] Error:', error);
       }
 
       return anomalies;
     },
+
+    /**
+     * Detect anomalies and route warning/critical ones to the alert sink
+     * (#559/#560). Returns all detected anomalies. Without an `alertSink` this
+     * behaves exactly like detectAnomalies() (no-op routing). Best-effort: a
+     * failing sink never throws out of here.
+     */
+    async detectAndAlert(): Promise<CostAnomaly[]> {
+      const anomalies = await api.detectAnomalies();
+      const sink = deps.alertSink;
+      if (sink) {
+        for (const a of anomalies) {
+          if (a.severity === 'info') continue; // only escalate warning/critical
+          try {
+            sink.route({
+              severity: a.severity,
+              title: `Cost anomaly: ${a.type}`,
+              message: a.message,
+              timestamp: new Date(now()),
+              metadata: a.data,
+            });
+          } catch { /* never let alert delivery break detection */ }
+        }
+      }
+      return anomalies;
+    },
   };
+
+  return api;
 }

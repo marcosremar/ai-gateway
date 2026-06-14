@@ -315,6 +315,12 @@ export class GatewayError extends Error {
     /** True when the error is a network-level connection failure (gateway unreachable),
      *  as opposed to an HTTP error or timeout. Used to decide whether to fall back to Groq. */
     public readonly isNetworkError: boolean = false,
+    /** Structured error code from the gateway body (e.g. "CREDIT_EXHAUSTED",
+     *  "PROVIDER_TIMEOUT"), when the server returned one. Lets callers branch on
+     *  the code instead of guessing from the HTTP status. (#826) */
+    public readonly code?: string,
+    /** Whether the gateway flagged the error as retryable, when present. (#826) */
+    public readonly retryable?: boolean,
   ) {
     super(message);
     this.name = 'GatewayError';

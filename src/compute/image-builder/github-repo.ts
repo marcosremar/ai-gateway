@@ -301,6 +301,26 @@ async function pushTree(
 
 // ── Workflow template ─────────────────────────────────────────────────────────
 
+/**
+ * Pinned action refs for the generated build workflow (#969).
+ *
+ * The repo's own CI pins every action to a full commit SHA; the *generated*
+ * build workflow previously used floating `@v4`/`@v5` tags, a supply-chain
+ * inconsistency (a compromised tag would execute in the user's repo with
+ * `packages: write`). Pin to SHAs (with the human-readable version in a trailing
+ * comment) so generated workflows match the project's security posture.
+ *
+ * SHAs correspond to the tagged releases noted in each comment.
+ */
+export const PINNED_ACTIONS = {
+  checkout: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683', // v4.2.2
+  setupQemu: 'docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf', // v3.2.0
+  setupBuildx: 'docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349', // v3.7.1
+  login: 'docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567', // v3.3.0
+  metadata: 'docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96', // v5.6.1
+  buildPush: 'docker/build-push-action@48aba3b46d1b1fec4febb7c5d0c644b249a11355', // v6.10.0
+} as const;
+
 export function generateWorkflow(imageName: string, platforms: string): string {
   return `name: Build Docker Image
 
@@ -332,16 +352,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: ${PINNED_ACTIONS.checkout}
 
       - name: Set up QEMU (multi-arch)
-        uses: docker/setup-qemu-action@v3
+        uses: ${PINNED_ACTIONS.setupQemu}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: ${PINNED_ACTIONS.setupBuildx}
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: ${PINNED_ACTIONS.login}
         with:
           registry: \${{ env.REGISTRY }}
           username: \${{ github.actor }}
@@ -349,7 +369,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: ${PINNED_ACTIONS.metadata}
         with:
           images: \${{ env.REGISTRY }}/\${{ env.IMAGE_NAME }}
           tags: |
@@ -358,7 +378,7 @@ jobs:
             type=raw,value=\${{ github.event.inputs.tag || 'latest' }}
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: ${PINNED_ACTIONS.buildPush}
         with:
           context: .
           push: true
@@ -434,6 +454,41 @@ export interface ActionRun {
   name: string;
 }
 
+/** Display name of the generated build workflow (matches `generateWorkflow`). */
+export const BUILD_WORKFLOW_NAME = 'Build Docker Image';
+
+interface RawWorkflowRun {
+  id: number;
+  status: string;
+  conclusion: string | null;
+  html_url: string;
+  name: string;
+  path?: string;
+}
+
+/**
+ * Pick the right workflow run for our generated build out of a SHA's runs (#974).
+ *
+ * Taking `workflow_runs[0]` blindly can match an unrelated workflow (e.g. a repo
+ * test/lint job) that also triggers on push to the same SHA, leaving the builder
+ * watching the wrong run forever. Prefer the run whose name/path is our generated
+ * build workflow; only fall back to the newest run if none matches (so existing
+ * repos without an identifiable build name still work).
+ *
+ * Pure; exported for tests.
+ */
+export function pickWorkflowRun(
+  runs: RawWorkflowRun[],
+  workflowName = BUILD_WORKFLOW_NAME,
+  workflowFile = WORKFLOW_FILENAME,
+): RawWorkflowRun | null {
+  if (!Array.isArray(runs) || runs.length === 0) return null;
+  const matched = runs.find(
+    (r) => r?.name === workflowName || (r?.path != null && r.path.endsWith(`/${workflowFile}`)),
+  );
+  return matched ?? runs[0] ?? null;
+}
+
 /** Find the most recent workflow run for a given commit SHA */
 export async function findRunForCommit(
   token: string,
@@ -446,11 +501,11 @@ export async function findRunForCommit(
   while (Date.now() < deadline) {
     const res = await ghFetch(
       token,
-      `/repos/${owner}/${repo}/actions/runs?head_sha=${commitSha}&per_page=5`,
+      `/repos/${owner}/${repo}/actions/runs?head_sha=${commitSha}&per_page=10`,
     );
     if (res.ok) {
-      const data = res.data as { workflow_runs: Array<{ id: number; status: string; conclusion: string | null; html_url: string; name: string }> };
-      const run = data.workflow_runs[0];
+      const data = res.data as { workflow_runs: RawWorkflowRun[] };
+      const run = pickWorkflowRun(data.workflow_runs);
       if (run) {
         return {
           id: run.id,

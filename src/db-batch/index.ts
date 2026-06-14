@@ -37,6 +37,25 @@ const DEFAULT_BATCH_OPTIONS: Required<BatchOptions> = {
 };
 
 /**
+ * Exponential backoff with full jitter (#729).
+ *
+ * The previous `retryDelayMs * retries` schedule was linear AND deterministic,
+ * so under a Neon brownout every caller retried in lock-step (thundering herd).
+ * Here the base doubles per attempt (`base * 2^(attempt-1)`) and the actual
+ * sleep is a random value in `[0, cappedBase]` so concurrent retries spread out.
+ *
+ * Exported for unit testing — the bounds are deterministic even though the
+ * point value is random.
+ *
+ * @param attempt 1-based retry number (1 = first retry)
+ */
+export function backoffDelayMs(attempt: number, baseMs: number, capMs = 30_000): number {
+  const exp = baseMs * 2 ** Math.max(0, attempt - 1);
+  const capped = Math.min(exp, capMs);
+  return Math.floor(Math.random() * capped);
+}
+
+/**
  * Insert records in batches instead of individually.
  *
  * @example
@@ -75,7 +94,8 @@ export async function batchInsert<T>(
           );
           throw error;
         }
-        await new Promise((r) => setTimeout(r, opts.retryDelayMs * retries));
+        // #729: exponential backoff with jitter (was linear `retryDelayMs * retries`).
+        await new Promise((r) => setTimeout(r, backoffDelayMs(retries, opts.retryDelayMs)));
       }
     }
   }
@@ -115,8 +135,28 @@ export async function batchUpsert<T, R>(
 
   for (let i = 0; i < records.length; i += opts.batchSize) {
     const batch = records.slice(i, i + opts.batchSize);
-    const results = await upsertFn(batch);
-    allResults.push(...results);
+
+    // #728: mirror batchInsert's retry/backoff — previously a single transient
+    // Neon error aborted the whole upsert with no retry despite the docstring
+    // implying parity with batchInsert.
+    let retries = 0;
+    while (true) {
+      try {
+        const results = await upsertFn(batch);
+        allResults.push(...results);
+        break;
+      } catch (error) {
+        retries++;
+        if (retries >= opts.maxRetries) {
+          log.error(
+            { error: error instanceof Error ? error.message : String(error), batch: i / opts.batchSize },
+            'Batch upsert failed after max retries',
+          );
+          throw error;
+        }
+        await new Promise((r) => setTimeout(r, backoffDelayMs(retries, opts.retryDelayMs)));
+      }
+    }
   }
 
   log.log({ totalUpserted: allResults.length, totalRecords: records.length }, 'Batch upsert complete');
@@ -196,6 +236,29 @@ export async function computeStats<T, R>(
 }
 
 /**
+ * Aggregate-aware stats (#734). Prefer this for high-cardinality tables: it
+ * runs a single DB-side aggregate (`COUNT`/`AVG`/`groupBy`) via `aggregateFn`
+ * instead of streaming every matching row into JS just to reduce it (which
+ * transfers far more egress). When no `aggregateFn` is supplied it falls back
+ * to the row-scan `computeStats` behaviour so existing callers are unaffected.
+ *
+ * @example
+ * ```ts
+ * const stats = await computeStatsAggregated(
+ *   () => prisma.hostLatency.aggregate({ _count: true, _avg: { medianMs: true } }),
+ *   (agg) => ({ total: agg._count, avg: agg._avg.medianMs }),
+ * );
+ * ```
+ */
+export async function computeStatsAggregated<A, R>(
+  aggregateFn: () => Promise<A>,
+  map: (agg: A) => R,
+): Promise<R> {
+  const agg = await aggregateFn();
+  return map(agg);
+}
+
+/**
  * Differential update — only write changed fields instead of full state.
  *
  * @example
@@ -213,10 +276,36 @@ export function diffState<T extends Record<string, unknown>>(
   const changes: Record<string, unknown> = {};
 
   for (const key of Object.keys(newState)) {
-    if (oldState[key] !== newState[key]) {
+    // #735: compare by value, not reference. The old `!==` flagged every
+    // object/array field as "changed" (reference inequality), so an unchanged
+    // nested field was rewritten on every update — defeating the differential
+    // write. Scalars short-circuit on `===`; non-scalars fall back to a
+    // structural (JSON) comparison.
+    if (!valuesEqual(oldState[key], newState[key])) {
       changes[key] = newState[key];
     }
   }
 
   return changes;
+}
+
+/**
+ * Structural equality used by `diffState` (#735). Scalars compare with `===`
+ * (incl. NaN-safe via Object.is); objects/arrays compare by stable JSON so a
+ * deep-equal-but-distinct reference is NOT reported as a change. Intended for
+ * the plain serializable state objects this module persists — not a general
+ * deep-equal (it does not handle cyclic refs or Map/Set).
+ */
+export function valuesEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') {
+    return false;
+  }
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    // Non-serializable (cyclic) — fall back to reference inequality (already
+    // known false here) so we err on the side of "changed".
+    return false;
+  }
 }

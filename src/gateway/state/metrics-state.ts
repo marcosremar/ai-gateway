@@ -18,6 +18,35 @@ export const metricsCounters = {
   totalOutputTokens: 0,
 };
 
+/**
+ * #768: hard cap on distinct keys in the `byStage`/`byProvider` cardinality
+ * maps. They key off provider/stage strings; a typo'd, dynamic, or
+ * attacker-supplied name would otherwise grow them without bound (a slow memory
+ * leak + bloated `/metrics` output). Real deployments have <~30 of each.
+ */
+export const MAX_METRIC_KEYS = 200;
+
+/**
+ * Safely increment one of the cardinality maps. Existing keys always increment;
+ * once the map hits {@link MAX_METRIC_KEYS} distinct keys, further *new* keys
+ * are folded into a single `__other__` bucket instead of being added, bounding
+ * memory while preserving the total count. Returns the key that was actually
+ * incremented (useful for tests/observability).
+ */
+export function incrMetricCounter(
+  map: Record<string, number>,
+  rawKey: string,
+  by = 1,
+): string {
+  const key = rawKey || '__unknown__';
+  if (key in map || Object.keys(map).length < MAX_METRIC_KEYS) {
+    map[key] = (map[key] || 0) + by;
+    return key;
+  }
+  map.__other__ = (map.__other__ || 0) + by;
+  return '__other__';
+}
+
 export let pendingDbWrites = 0;
 export let consecutiveDbFailures = 0;
 export const DB_FAILURE_WARN_THRESHOLD = 10;

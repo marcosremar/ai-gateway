@@ -106,6 +106,19 @@ export interface ObjectStore {
   delete(key: string): Promise<void>;
 
   /**
+   * Delete many objects in as few requests as possible (#750).
+   *
+   * S3 supports up to 1000 keys per `DeleteObjects` call, so deleting N keys
+   * costs ceil(N/1000) requests instead of N. Idempotent — missing keys are
+   * ignored. No-op for an empty array.
+   *
+   * Optional so lightweight/partial implementations (e.g. test fakes) need not
+   * provide it; the S3 adapter always does. Callers should feature-detect or
+   * fall back to looping `delete`.
+   */
+  deleteMany?(keys: string[]): Promise<void>;
+
+  /**
    * List objects under an optional key prefix.
    *
    * Use `prefix` like a directory: `list('models/babelcast/')` returns all
@@ -114,4 +127,18 @@ export interface ObjectStore {
    * from the result to paginate.
    */
   list(prefix?: string, opts?: ListOptions): Promise<ListResult>;
+
+  /**
+   * Auto-paginating async iterator over every object under `prefix` (#749).
+   *
+   * Yields entries one page at a time, transparently following
+   * `nextContinuationToken`, so callers can `for await (... of store.listAll())`
+   * without the common bug of processing only the first 1000 keys. Page size is
+   * controlled by `pageSize` (default 1000).
+   *
+   * Optional for the same reason as {@link deleteMany}; the S3 adapter always
+   * provides it. Use `listAllVia(store.list, prefix)` from `s3-store` when a
+   * store does not implement it directly.
+   */
+  listAll?(prefix?: string, pageSize?: number): AsyncIterable<ListEntry>;
 }

@@ -16,7 +16,36 @@ import type {
   PutBody,
   ListOptions,
   ListResult,
+  ListEntry,
 } from './types';
+
+/**
+ * Auto-paginating async iterator over `list()` (#749). Standalone + dependency-
+ * injected on the store's own `list` so it has no S3 SDK coupling and is unit-
+ * testable against any `ObjectStore`-shaped fake. Stops when a page returns no
+ * continuation token. Guards against a misbehaving backend that returns the
+ * same token forever.
+ */
+export async function* listAllVia(
+  listFn: (prefix?: string, opts?: ListOptions) => Promise<ListResult>,
+  prefix?: string,
+  pageSize = 1000,
+): AsyncIterable<ListEntry> {
+  let token: string | undefined;
+  const seenTokens = new Set<string>();
+  do {
+    const page: ListResult = await listFn(prefix, {
+      limit: pageSize,
+      ...(token ? { continuationToken: token } : {}),
+    });
+    for (const entry of page.entries) yield entry;
+    token = page.nextContinuationToken;
+    if (token) {
+      if (seenTokens.has(token)) break; // backend not advancing — avoid infinite loop
+      seenTokens.add(token);
+    }
+  } while (token);
+}
 
 export interface S3StoreConfig {
   /** Bucket name. */
@@ -63,7 +92,7 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
     return false;
   };
 
-  return {
+  const store: ObjectStore = {
     async put(key: string, body: PutBody, opts?: PutOptions): Promise<void> {
       await client.write(key, body as Parameters<typeof client.write>[1], {
         ...(opts?.contentType ? { type: opts.contentType } : {}),
@@ -124,6 +153,29 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
       }
     },
 
+    async deleteMany(keys: string[]): Promise<void> {
+      if (keys.length === 0) return;
+      // #750: S3 DeleteObjects accepts up to 1000 keys per request. Bun.S3Client
+      // exposes a batch `delete(string[])`; fall back to per-key deletes if a
+      // particular runtime/version doesn't. Either way, missing keys are
+      // ignored (idempotent).
+      const CHUNK = 1000;
+      const batchDelete = (client as unknown as { delete?: (k: string[]) => Promise<unknown> }).delete;
+      for (let i = 0; i < keys.length; i += CHUNK) {
+        const chunk = keys.slice(i, i + CHUNK);
+        try {
+          if (typeof batchDelete === 'function') {
+            await batchDelete.call(client, chunk);
+          } else {
+            await Promise.all(chunk.map((k) => store.delete(k)));
+          }
+        } catch (err) {
+          if (isNotFound(err)) continue;
+          throw err;
+        }
+      }
+    },
+
     async list(prefix?: string, opts?: ListOptions): Promise<ListResult> {
       const result = await client.list({
         ...(prefix ? { prefix } : {}),
@@ -145,5 +197,11 @@ export function createS3Store(config: S3StoreConfig): ObjectStore {
           : {}),
       };
     },
+
+    listAll(prefix?: string, pageSize = 1000): AsyncIterable<ListEntry> {
+      return listAllVia((p, o) => store.list(p, o), prefix, pageSize);
+    },
   };
+
+  return store;
 }

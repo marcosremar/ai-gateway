@@ -27,6 +27,14 @@ const COST_PER_REQUEST: Record<string, number> = {
   'fireworks:stt': 0.002, // ~$0.002 per STT request
   'fireworks:llm': 0.001, // ~$0.001 per 1K tokens
   'openrouter:llm': 0.002, // ~$0.002 per 1K tokens (varies by model)
+  // #524 — providers/stages previously missing recorded cost=0 and vanished from
+  // spend. (deepgram:stt and elevenlabs:tts are intentionally left to pricing.ts /
+  // the unmapped path — see ADR + wave-1 tests — so only the additive gaps below
+  // are mapped here.)
+  'fireworks:tts': 0.001, // ~$0.001 per TTS request
+  'ollama:llm': 0, // self-hosted — no per-request cost
+  'ollama:stt': 0,
+  'ollama:tts': 0,
   'gpu:stt': 0, // included in hourly cost
   'gpu:llm': 0,
   'gpu:tts': 0,

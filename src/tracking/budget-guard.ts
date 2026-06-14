@@ -51,12 +51,14 @@ export interface BudgetCheckResult {
 
 // ── Default downgrades ───────────────────────────────────────────────────────
 
+// Only models that have a genuinely cheaper tier belong here. Self-mapping
+// entries (model → itself) were dead config: the `!== model` guard in
+// checkAndDowngrade already skips them, so listing "already cheapest" models
+// here just obscured which models actually downgrade (#555). Removed.
 const DEFAULT_DOWNGRADES: Record<string, string> = {
   'gpt-4o': 'gpt-4o-mini',
   'gpt-4o-transcribe': 'gpt-4o-mini-transcribe',
-  'gpt-4o-mini-tts': 'gpt-4o-mini-tts', // already cheapest
   'llama-3.3-70b-versatile': 'llama-3.1-8b-instant',
-  'whisper-large-v3-turbo': 'whisper-large-v3-turbo', // already cheapest
 };
 
 // ── Guard ────────────────────────────────────────────────────────────────────

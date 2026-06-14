@@ -27,6 +27,9 @@ export interface ErrorAlert {
 interface ErrorEntry {
   error: DeployError;
   timestamp: string;
+  /** Epoch ms of `timestamp`, cached so alert/summary filters avoid re-parsing
+   *  the ISO string on every pass over up to 1000 entries (#586). */
+  tsMs: number;
   deployId?: string;
 }
 
@@ -42,7 +45,8 @@ class ErrorSummaryTracker {
   /** Record a deploy error */
   record(err: unknown, deployId?: string): DeployError | null {
     if (err instanceof DeployError) {
-      const entry: ErrorEntry = { error: err, timestamp: new Date().toISOString(), deployId };
+      const now = Date.now();
+      const entry: ErrorEntry = { error: err, timestamp: new Date(now).toISOString(), tsMs: now, deployId };
       this.errors.push(entry);
       if (this.errors.length > this.maxEntries) {
         this.errors.shift();
@@ -60,7 +64,7 @@ class ErrorSummaryTracker {
   getSummary(hours: number = 24): ErrorSummary & { period: string; alerts: ErrorAlert[] } {
     const cutoff = Date.now() - (hours * 60 * 60 * 1000);
     const recent = this.errors
-      .filter(e => new Date(e.timestamp).getTime() > cutoff)
+      .filter(e => (e.tsMs ?? Date.parse(e.timestamp)) > cutoff)
       .map(e => e.error);
 
     const summary = summarizeErrors(recent);
@@ -110,7 +114,7 @@ class ErrorSummaryTracker {
     // doesn't track total operations (only errors), so use a raw-count
     // threshold instead. Operators can reason about absolute volume.
     const recentErrors = this.errors.filter(e =>
-      new Date(e.timestamp).getTime() > now - 5 * 60 * 1000
+      (e.tsMs ?? Date.parse(e.timestamp)) > now - 5 * 60 * 1000
     );
     const HIGH_ERROR_VOLUME_5MIN = 50;
 
@@ -128,7 +132,7 @@ class ErrorSummaryTracker {
     // Check 2: Critical error spike (5+ critical errors in 5 min)
     const criticalErrors = this.errors.filter(e =>
       e.error.severity === 'critical' &&
-      new Date(e.timestamp).getTime() > now - 5 * 60 * 1000
+      (e.tsMs ?? Date.parse(e.timestamp)) > now - 5 * 60 * 1000
     );
 
     if (criticalErrors.length >= this.CRITICAL_SPIKE_THRESHOLD) {

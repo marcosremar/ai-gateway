@@ -68,10 +68,34 @@ export interface MetricSeries {
   labels: Record<string, string>;
 }
 
+/**
+ * Max distinct label-sets retained per metric base name before new series are
+ * dropped. A high-cardinality label (userId, requestId, model variant) would
+ * otherwise grow the counters/gauges/histograms Maps without bound — the
+ * classic Prometheus cardinality blowup (#589). Override via env for ops tuning.
+ */
+const MAX_SERIES_PER_METRIC = (() => {
+  const n = Number(process.env.METRICS_MAX_SERIES_PER_METRIC);
+  return Number.isFinite(n) && n > 0 ? n : 1000;
+})();
+
 class MetricsCollector {
   private counters = new Map<string, number>();
   private gauges = new Map<string, number>();
   private histograms = new Map<string, MetricSeries>();
+  /** base metric name → set of distinct serialized keys seen (cardinality cap). */
+  private seriesKeys = new Map<string, Set<string>>();
+  /** Count of (name) records dropped because the per-metric series cap was hit. */
+  private droppedCardinality = 0;
+  /** base names we've already warned about (warn once per metric). */
+  private warnedCardinality = new Set<string>();
+  /** Active per-metric series cap. Defaults from env; tunable at runtime. */
+  private maxSeriesPerMetric = MAX_SERIES_PER_METRIC;
+
+  /** Override the per-metric cardinality cap (runtime tuning / tests). */
+  setMaxSeriesPerMetric(n: number): void {
+    if (Number.isFinite(n) && n > 0) this.maxSeriesPerMetric = n;
+  }
   /**
    * Total samples observed. Previously every record pushed a full MetricSample
    * object (incl. `new Date().toISOString()`) into a 10k ring that was only
@@ -81,10 +105,44 @@ class MetricsCollector {
   private sampleCount = 0;
 
   /**
+   * Cardinality gate. Returns true if `key` is already tracked for `name`, or if
+   * accepting a new key keeps `name` within MAX_SERIES_PER_METRIC. Returns false
+   * (and counts the drop) when `name` is at the cap and `key` is new — protecting
+   * the Maps from unbounded growth on a high-cardinality label.
+   */
+  private withinCardinalityBudget(name: string, key: string): boolean {
+    let keys = this.seriesKeys.get(name);
+    if (!keys) {
+      keys = new Set();
+      this.seriesKeys.set(name, keys);
+    }
+    if (keys.has(key)) return true;
+    if (keys.size >= this.maxSeriesPerMetric) {
+      this.droppedCardinality++;
+      if (!this.warnedCardinality.has(name)) {
+        this.warnedCardinality.add(name);
+        log.warn(
+          `[metrics] cardinality cap (${this.maxSeriesPerMetric}) hit for "${name}" — ` +
+            `dropping new label-sets. Reduce label cardinality or raise METRICS_MAX_SERIES_PER_METRIC.`,
+        );
+      }
+      return false;
+    }
+    keys.add(key);
+    return true;
+  }
+
+  /** Number of records dropped because a per-metric series cap was reached. */
+  getDroppedCardinalityCount(): number {
+    return this.droppedCardinality;
+  }
+
+  /**
    * Increment a counter.
    */
   increment(name: string, labels: Record<string, string> = {}, value = 1): void {
     const key = this.makeKey(name, labels);
+    if (!this.withinCardinalityBudget(name, key)) return;
     const current = this.counters.get(key) ?? 0;
     this.counters.set(key, current + value);
     this.sampleCount++;
@@ -95,6 +153,7 @@ class MetricsCollector {
    */
   gauge(name: string, value: number, labels: Record<string, string> = {}): void {
     const key = this.makeKey(name, labels);
+    if (!this.withinCardinalityBudget(name, key)) return;
     this.gauges.set(key, value);
     this.sampleCount++;
   }
@@ -104,6 +163,7 @@ class MetricsCollector {
    */
   histogram(name: string, value: number, labels: Record<string, string> = {}): void {
     const key = this.makeKey(name, labels);
+    if (!this.withinCardinalityBudget(name, key)) return;
 
     if (!this.histograms.has(key)) {
       this.histograms.set(key, { name, type: 'histogram', samples: [], labels });
@@ -217,6 +277,9 @@ class MetricsCollector {
     this.counters.clear();
     this.gauges.clear();
     this.histograms.clear();
+    this.seriesKeys.clear();
+    this.warnedCardinality.clear();
+    this.droppedCardinality = 0;
     this.sampleCount = 0;
   }
 

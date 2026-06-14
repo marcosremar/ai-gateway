@@ -42,11 +42,20 @@ export interface RequestEntry {
   providerId?: string;
   model?: string;
   error?: string;
+  /** Epoch ms of `timestamp`, cached to avoid re-parsing on every stats call. */
+  tsMs?: number;
 }
 
 class RequestLogger {
   private entries: RequestEntry[] = [];
   private maxSize: number;
+  /**
+   * requestId → entry index, so logResponse()/getById() are O(1) instead of an
+   * O(n) `Array.find` per response on the hot path (#584). Each entry also
+   * caches its epoch ms (`tsMs`) so getStats()'s RPM window doesn't re-parse
+   * `new Date()` on every entry per call (#585).
+   */
+  private byId = new Map<string, RequestEntry>();
 
   constructor(maxSize = 1000) {
     this.maxSize = maxSize;
@@ -56,23 +65,31 @@ class RequestLogger {
    * Log a request.
    */
   log(entry: Omit<RequestEntry, 'timestamp'>): void {
+    const now = Date.now();
     const fullEntry: RequestEntry = {
       ...entry,
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(now).toISOString(),
+      tsMs: now,
     };
 
     this.entries.push(fullEntry);
+    this.byId.set(fullEntry.requestId, fullEntry);
 
     // Evict oldest if at capacity
     if (this.entries.length > this.maxSize) {
-      this.entries.shift();
+      const evicted = this.entries.shift();
+      // Only drop the index entry if it still points at the evicted object — a
+      // requestId could have been reused with a newer entry.
+      if (evicted && this.byId.get(evicted.requestId) === evicted) {
+        this.byId.delete(evicted.requestId);
+      }
     }
 
     log.debug(fullEntry, 'Request logged');
   }
 
   /**
-   * Log a response — updates existing request entry.
+   * Log a response — updates existing request entry (O(1) via id index).
    */
   logResponse(entry: {
     requestId: string;
@@ -80,7 +97,7 @@ class RequestLogger {
     durationMs: number;
     error?: string;
   }): void {
-    const existing = this.entries.find((e) => e.requestId === entry.requestId);
+    const existing = this.byId.get(entry.requestId);
     if (existing) {
       existing.statusCode = entry.statusCode;
       existing.durationMs = entry.durationMs;
@@ -111,7 +128,7 @@ class RequestLogger {
    * Get request by ID.
    */
   getById(requestId: string): RequestEntry | undefined {
-    return this.entries.find((e) => e.requestId === requestId);
+    return this.byId.get(requestId);
   }
 
   /**
@@ -130,9 +147,13 @@ class RequestLogger {
         ? entriesWithDuration.reduce((sum, e) => sum + (e.durationMs ?? 0), 0) / entriesWithDuration.length
         : 0;
 
-    // Calculate requests per minute (based on last minute of entries)
+    // Calculate requests per minute (based on last minute of entries). Use the
+    // cached `tsMs` epoch (falling back to a one-time parse for legacy entries)
+    // instead of `new Date(e.timestamp)` per entry per call (#585).
     const oneMinuteAgo = Date.now() - 60_000;
-    const recentCount = this.entries.filter((e) => new Date(e.timestamp).getTime() > oneMinuteAgo).length;
+    const recentCount = this.entries.filter(
+      (e) => (e.tsMs ?? Date.parse(e.timestamp)) > oneMinuteAgo,
+    ).length;
 
     return {
       total: this.entries.length,
@@ -147,6 +168,7 @@ class RequestLogger {
    */
   clear(): void {
     this.entries = [];
+    this.byId.clear();
   }
 
   /**

@@ -20,7 +20,20 @@ import { readFileSync, writeFileSync, existsSync, createWriteStream, createReadS
 import { resolve, dirname, join } from 'path';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { createHash } from 'crypto';
-import { validateNumericFlag, parseMaxCostUsd, classifyExitCode, UsageError, EXIT_USAGE } from '../cli/cli-helpers';
+import {
+  validateNumericFlag,
+  parseMaxCostUsd,
+  classifyExitCode,
+  UsageError,
+  EXIT_USAGE,
+  parseTopLevelFlag,
+  sumBurnRate,
+  resolveLowBalanceThreshold,
+  parseOffersSort,
+  sortOffers,
+  parseHttpError,
+  formatHttpError,
+} from '../cli/cli-helpers';
 
 // ── Colors (minimal, no deps) ────────────────────────────────────────────
 const isTTY = process.stdout.isTTY;
@@ -256,12 +269,10 @@ async function fetchJSON(url: string, opts?: RequestInit): Promise<any> {
   const res = await fetch(url, opts);
   const text = await res.text();
   if (!res.ok) {
-    try {
-      const err = JSON.parse(text);
-      console.error(`Error ${res.status}: ${err.error?.message || text.slice(0, 200)}`);
-    } catch {
-      console.error(`Error ${res.status}: ${text.slice(0, 200)}`);
-    }
+    // Surface the gateway's structured { code, retryable } (#898/#826) so users
+    // see e.g. CREDIT_EXHAUSTED instead of a bare status.
+    const parsed = parseHttpError(res.status, text);
+    console.error(`Error ${res.status}: ${formatHttpError(parsed)}`);
     process.exit(1);
   }
   try { return JSON.parse(text); }
@@ -1058,6 +1069,11 @@ async function cmdGpuList(opts: { probe?: boolean; json?: boolean; mine?: boolea
     if (inst.costPerHr) console.log(`    cost/hr:   $${Number(inst.costPerHr).toFixed(2)}`);
     if (inst.dockerImage) console.log(`    image:     ${inst.dockerImage}`);
     console.log('');
+  }
+  // Aggregate burn footer (#843): combined $/hr across instances at a glance.
+  const burn = sumBurnRate(instances as Array<{ costPerHr?: unknown }>);
+  if (burn.counted > 0) {
+    console.log(`  ${c.bold}Total burn: $${burn.totalPerHr.toFixed(2)}/hr across ${burn.counted} instance(s)${c.reset}`);
   }
 }
 
@@ -3297,8 +3313,12 @@ async function cmdGpuResume(instanceId?: string, opts?: { provider?: string; dep
   console.log(data.message || 'GPU resumed.');
 }
 
-async function cmdGpuOffers(opts: { gpu?: string; limit?: number; provider?: string }) {
+async function cmdGpuOffers(opts: { gpu?: string; limit?: number; provider?: string; sort?: string }) {
   const { url, key } = getConfig();
+  // --sort price|vram|score (#852); default cheapest-first.
+  const sortRes = parseOffersSort(opts.sort);
+  if ('error' in sortRes) throw new UsageError(sortRes.error);
+  const sortKey = sortRes.value;
   const params = new URLSearchParams();
   if (opts.gpu) params.set('gpuTypes', opts.gpu);
   if (opts.provider) params.set('provider', opts.provider);
@@ -3315,8 +3335,8 @@ async function cmdGpuOffers(opts: { gpu?: string; limit?: number; provider?: str
     console.log('No GPU offers available.');
     return;
   }
-  console.log(`${offers.length} offers (showing top ${Math.min(opts.limit || 10, offers.length)} by price):\n`);
-  const sorted = [...offers].sort((a: any, b: any) => a.pricePerHr - b.pricePerHr);
+  console.log(`${offers.length} offers (showing top ${Math.min(opts.limit || 10, offers.length)} by ${sortKey}):\n`);
+  const sorted = sortOffers(offers, sortKey);
   console.log(`  ${'GPU'.padEnd(30)} ${'$/hr'.padStart(7)} ${'VRAM'.padStart(6)} ${'Provider'.padEnd(10)} Region`);
   console.log(`  ${'─'.repeat(30)} ${'─'.repeat(7)} ${'─'.repeat(6)} ${'─'.repeat(10)} ──────`);
   for (const o of sorted.slice(0, opts.limit || 10)) {
@@ -6734,6 +6754,13 @@ Examples:
 `,
   };
 
+  // Top-level --version / -v / -V and --help / -h (#804). `-v` is only treated
+  // as version when it's the FIRST token (the tts `-v <voice>` shorthand on a
+  // real command is unaffected — it's never args[0]).
+  const topFlag = parseTopLevelFlag(args);
+  if (topFlag === 'version') { await cmdVersion(); return; }
+  if (topFlag === 'help' && args.length === 1) { console.log(HELP.main); return; }
+
   // Per-command help: `ai-gateway chat help` or `ai-gateway chat --help`
   if (args[1] === 'help' || args[1] === '--help' || args[1] === '-h') {
     const sub = args[0];
@@ -6780,11 +6807,13 @@ ai-gateway server — Manage the local dev server
     if (hRes?.ok) {
       const hData = await hRes.json().catch(() => null);
       const balances = hData?.providerBalances || [];
-      const low = balances.filter((b: any) => b.balance != null && b.balance < 5 && b.balance >= 0);
+      // Threshold is configurable via AIGW_LOW_BALANCE_USD (#845); defaults to $5.
+      const lowThreshold = resolveLowBalanceThreshold(process.env.AIGW_LOW_BALANCE_USD);
+      const low = balances.filter((b: any) => b.balance != null && b.balance < lowThreshold && b.balance >= 0);
       if (low.length > 0) {
         const names = low.map((b: any) => `${b.provider || b.name}: $${Number(b.balance).toFixed(2)}`).join(', ');
         console.error(`\n${c.red}${c.bold}⚠ LOW BALANCE WARNING${c.reset}${c.red} — ${names}`);
-        console.error(`  Providers with <$5 may fail to deploy or auto-stop machines.${c.reset}\n`);
+        console.error(`  Providers with <$${lowThreshold} may fail to deploy or auto-stop machines.${c.reset}\n`);
       }
     }
   } catch { /* best effort — don't block commands */ }
@@ -7020,6 +7049,7 @@ Per-app isolation:
             gpu: getArg(args, '--gpu'),
             limit: getArg(args, '-n') ? parseInt(getArg(args, '-n')!) : undefined,
             provider: getArg(args, '--provider'),
+            sort: getArg(args, '--sort'),
           }); break;
           case 'deploy': {
             const maxCost = parseMaxCostUsd(getArg(args, '--max-cost-usd'));

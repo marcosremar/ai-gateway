@@ -25,15 +25,31 @@ export type ValidationResult<T> =
 
 /**
  * Validate input against a Zod schema.
+ *
+ * `details` echoes the Zod issue paths (e.g. `messages.0.content: ...`) by
+ * default, which is helpful in development but reveals the internal schema
+ * shape to clients (schema fingerprinting). Pass `{ exposeDetails: false }`
+ * — or set `VALIDATOR_HIDE_DETAILS=1` in the environment — to return a single
+ * generic detail string in production while keeping the same result shape.
  */
-export function validateInput<T>(input: unknown, schema: z.ZodType<T>): ValidationResult<T> {
+export function validateInput<T>(
+  input: unknown,
+  schema: z.ZodType<T>,
+  options: { exposeDetails?: boolean } = {},
+): ValidationResult<T> {
   const result = schema.safeParse(input);
 
   if (result.success) {
     return { ok: true, data: result.data };
   }
 
-  const details = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`);
+  const exposeDetails =
+    options.exposeDetails ?? process.env.VALIDATOR_HIDE_DETAILS !== '1';
+
+  const details = exposeDetails
+    ? result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+    : ['Invalid request body'];
+
   return {
     ok: false,
     error: 'Validation failed',
@@ -122,5 +138,27 @@ export const Schemas = {
     order: z.enum(['asc', 'desc']).default('asc'),
   }),
 
+  // Arbitrary-key filter. Convenient but mass-assignment-prone: any attacker
+  // key survives validation and can flow into a downstream query. Prefer
+  // `ConstrainedFilter([...])` for anything that maps to a query/DB filter.
   Filter: z.record(z.string(), z.unknown()),
+
+  /**
+   * Filter object whose keys are restricted to an explicit allowlist. Unknown
+   * keys are rejected (not silently dropped), closing the mass-assignment gap
+   * in the open `Filter` record. Values are still `unknown` — validate the
+   * value type per field at the call site if needed.
+   *
+   * @example
+   * ```ts
+   * const QueryFilter = Schemas.ConstrainedFilter(['status', 'createdAfter']);
+   * validateInput(req.query, QueryFilter); // rejects { __proto__: ... }
+   * ```
+   */
+  ConstrainedFilter: (allowedKeys: readonly string[]) => {
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const key of allowedKeys) shape[key] = z.unknown().optional();
+    // `.strict()` makes unrecognized keys a validation ERROR.
+    return z.object(shape).strict();
+  },
 } as const;

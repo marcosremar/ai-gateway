@@ -95,8 +95,15 @@ export function requireAuth(
   req: IncomingMessage,
   config: AuthConfig,
 ): AuthResult {
-  // Dev bypass (optional)
+  // Dev bypass (optional). Loud, deliberate warning: a bypass that silently
+  // grants full `dev` access is exactly the kind of thing that ships to prod by
+  // accident (e.g. an image built with NODE_ENV=development). Make every
+  // activation visible in logs so it can't pass unnoticed.
   if (config.allowDevBypass && process.env.NODE_ENV === 'development') {
+    console.warn(
+      '[auth] DEV BYPASS ACTIVE — authentication skipped (allowDevBypass + NODE_ENV=development). ' +
+        'This must never be enabled in production.',
+    );
     return { ok: true, apiKey: 'dev-bypass', role: 'dev' };
   }
 

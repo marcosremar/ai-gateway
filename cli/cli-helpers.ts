@@ -104,3 +104,382 @@ export class UsageError extends Error {
     this.name = 'UsageError';
   }
 }
+
+// ── #804: top-level --version / --help dispatch ───────────────────────────────
+
+/**
+ * Classify a top-level argv into an early-exit flag, before per-command dispatch.
+ *
+ * `version` is only a positional command today; `ai-gateway --version`/`-v` fall
+ * through to "unknown command". This recognises the GNU-style flags. Note `-v`
+ * is ONLY treated as version when it is the *first* token with no command — the
+ * `tts -v <voice>` shorthand (a value flag on a real command) is unaffected.
+ *
+ * @returns `'version'` | `'help'` | `undefined` (no top-level flag → dispatch normally)
+ */
+export function parseTopLevelFlag(args: string[]): 'version' | 'help' | undefined {
+  const first = args[0];
+  if (first === undefined) return undefined;
+  if (first === '--version' || first === '-V' || first === '-v') return 'version';
+  if (first === '--help' || first === '-h') return 'help';
+  return undefined;
+}
+
+// ── #806: unknown / misspelled flag detection ─────────────────────────────────
+
+/** Levenshtein distance — small, dependency-free, for "did you mean" suggestions. */
+function editDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  let cur = new Array<number>(n + 1).fill(0);
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return prev[n];
+}
+
+/** Result of scanning a command's argv for unrecognised `--flags`. */
+export interface UnknownFlagsResult {
+  /** Flags present in argv that are not in the known set. */
+  unknown: string[];
+  /** Best-effort "did you mean" suggestion for the first unknown flag. */
+  suggestion?: string;
+}
+
+/**
+ * Detect unrecognised `--flags`/`-x` tokens for a command (#806).
+ *
+ * `getArg`/`hasFlag` silently ignore unknown flags, so a typo like `--maxtokens`
+ * is dropped without error. This collects them and suggests the closest known
+ * flag (edit-distance ≤ 2) so the caller can warn.
+ *
+ * Only tokens that *start with* `-` and are not a lone `-`/`--` are considered.
+ * Negative numbers (`-5`) are skipped — they're values, not flags.
+ *
+ * @param args   the argv slice for the command (excluding the command name)
+ * @param known  the set/array of recognised flag spellings (both short + long)
+ */
+export function detectUnknownFlags(args: string[], known: Iterable<string>): UnknownFlagsResult {
+  const knownSet = known instanceof Set ? known : new Set(known);
+  const unknown: string[] = [];
+  for (const tok of args) {
+    if (!tok.startsWith('-') || tok === '-' || tok === '--') continue;
+    // Skip negative numbers (e.g. "-5", "-1.5") — they are values, not flags.
+    if (/^-\d/.test(tok)) continue;
+    // Strip an inline value: --model=x → --model
+    const flag = tok.includes('=') ? tok.slice(0, tok.indexOf('=')) : tok;
+    if (!knownSet.has(flag)) unknown.push(flag);
+  }
+  let suggestion: string | undefined;
+  if (unknown.length > 0) {
+    const bad = unknown[0].replace(/^-+/, '');
+    let best: string | undefined;
+    let bestDist = Infinity;
+    for (const k of knownSet) {
+      const d = editDistance(bad, k.replace(/^-+/, ''));
+      if (d < bestDist) { bestDist = d; best = k; }
+    }
+    if (best !== undefined && bestDist <= 2) suggestion = best;
+  }
+  return { unknown, suggestion };
+}
+
+// ── #809 / #852: gpu offers --sort ────────────────────────────────────────────
+
+export type OffersSortKey = 'price' | 'vram' | 'score';
+
+/** Parse/validate the `gpu offers --sort` key. Defaults to `price` (cheapest-first). */
+export function parseOffersSort(raw: string | undefined): { value: OffersSortKey } | { error: string } {
+  if (raw === undefined) return { value: 'price' };
+  const v = raw.trim().toLowerCase();
+  if (v === 'price' || v === 'vram' || v === 'score') return { value: v };
+  return { error: `Invalid --sort: "${raw}" (expected price|vram|score)` };
+}
+
+interface OfferLike {
+  pricePerHr?: number;
+  vram?: number;
+  vramGb?: number;
+  score?: number;
+}
+
+/**
+ * Sort GPU offers by the chosen key (#852). Returns a new array (does not mutate).
+ *   - `price`: ascending (cheapest first — the documented default)
+ *   - `vram` : descending (most VRAM first)
+ *   - `score`: descending (best score first)
+ */
+export function sortOffers<T extends OfferLike>(offers: readonly T[], key: OffersSortKey): T[] {
+  const arr = [...offers];
+  const num = (v: number | undefined) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  if (key === 'price') {
+    return arr.sort((a, b) => (num(a.pricePerHr) ?? Infinity) - (num(b.pricePerHr) ?? Infinity));
+  }
+  if (key === 'vram') {
+    return arr.sort((a, b) => (num(b.vramGb ?? b.vram) ?? -1) - (num(a.vramGb ?? a.vram) ?? -1));
+  }
+  return arr.sort((a, b) => (num(b.score) ?? -1) - (num(a.score) ?? -1));
+}
+
+// ── #843: aggregate burn rate across instances ────────────────────────────────
+
+/**
+ * Sum the per-hour cost across active GPU instances (#843) so `gpu list` can
+ * print a combined-burn footer. Ignores missing/non-numeric `costPerHr`.
+ */
+export function sumBurnRate(instances: ReadonlyArray<{ costPerHr?: unknown }>): { totalPerHr: number; counted: number } {
+  let totalPerHr = 0;
+  let counted = 0;
+  for (const inst of instances) {
+    const v = typeof inst.costPerHr === 'number' ? inst.costPerHr : Number(inst.costPerHr);
+    if (Number.isFinite(v) && v > 0) {
+      totalPerHr += v;
+      counted++;
+    }
+  }
+  return { totalPerHr, counted };
+}
+
+// ── #854 / #863: API-key source provenance ────────────────────────────────────
+
+/** The env var names the CLI consults for the gateway API key, in precedence order. */
+export const KEY_ENV_PRECEDENCE = [
+  'AIGW_APP_KEY',
+  'AI_GATEWAY_KEY',
+  'GATEWAY_API_KEY',
+  'GATEWAY_API_KEYS',
+] as const;
+
+/**
+ * Resolve which env var supplied the API key (#854) so `config` can show
+ * provenance. Mirrors `getConfig()`'s precedence; for `GATEWAY_API_KEYS`
+ * (the "key:name,..." multi-key format) it returns the first key.
+ *
+ * @returns `{ key, source }` — `source` is `'none'` when no key is set.
+ */
+export function resolveKeySource(env: Record<string, string | undefined>): { key: string; source: string } {
+  for (const name of KEY_ENV_PRECEDENCE) {
+    const raw = env[name];
+    if (!raw) continue;
+    if (name === 'GATEWAY_API_KEYS') {
+      const first = raw.split(',')[0]?.split(':')[0]?.trim();
+      if (first) return { key: first, source: name };
+      continue;
+    }
+    return { key: raw, source: name };
+  }
+  return { key: '', source: 'none' };
+}
+
+/** Mask a secret for display: first 8 + last 4 chars, or `(not set)` when empty. */
+export function maskKey(key: string): string {
+  if (!key) return '(not set)';
+  if (key.length <= 12) return `${key.slice(0, 2)}…`;
+  return `${key.slice(0, 8)}…${key.slice(-4)}`;
+}
+
+// ── #857: whoami identity parsing ─────────────────────────────────────────────
+
+/**
+ * Parse the `key:user[:label]` structured API-key format into an identity (#857).
+ * Pure version of `cmdWhoami`'s inline `key.split(':')` logic so it's testable.
+ */
+export function parseUserIdentity(key: string): { user: string; label?: string; keyHint: string } {
+  const parts = key.split(':');
+  if (parts.length >= 2) {
+    return {
+      user: parts[1] || 'default',
+      label: parts.length >= 3 ? parts.slice(2).join(':') : undefined,
+      keyHint: `${parts[0].slice(0, 8)}…`,
+    };
+  }
+  return { user: 'default', keyHint: `${key.slice(0, 8)}…` };
+}
+
+// ── #858: gateway URL validation ──────────────────────────────────────────────
+
+/**
+ * Validate a resolved gateway URL early with a clear error (#858), matching the
+ * SDK's constructor check. Returns the normalised (trailing-slash-stripped) URL
+ * or a usage error string.
+ */
+export function validateGatewayUrl(raw: string | undefined): { value: string } | { error: string } {
+  if (!raw || !raw.trim()) return { error: 'Gateway URL is empty — set AI_GATEWAY_URL' };
+  const url = raw.trim();
+  if (!/^https?:\/\/[^/\s]+/i.test(url)) {
+    return { error: `Invalid gateway URL "${raw}" — must be a full http(s):// URL` };
+  }
+  try {
+    new URL(url);
+  } catch {
+    return { error: `Invalid gateway URL "${raw}" — could not be parsed` };
+  }
+  return { value: url.replace(/\/+$/, '') };
+}
+
+// ── #898 / #826: structured HTTP error parsing ────────────────────────────────
+
+export interface ParsedHttpError {
+  /** Best-effort human message. */
+  message: string;
+  /** Structured `code` from the gateway error body, when present (e.g. CREDIT_EXHAUSTED). */
+  code?: string;
+  /** Whether the gateway flagged the error as retryable. */
+  retryable?: boolean;
+}
+
+/**
+ * Parse a non-OK HTTP response body into a structured error (#898/#826).
+ *
+ * The gateway returns `{ error, code, message, retryable }` (ErrorResponseSchema).
+ * Surfaces `code`/`retryable` so users see `CREDIT_EXHAUSTED` etc. instead of a
+ * bare status. Falls back to the raw (truncated) text when the body is not JSON.
+ */
+export function parseHttpError(status: number, body: string): ParsedHttpError {
+  const truncated = body.length > 300 ? `${body.slice(0, 300)}…` : body;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { message: `HTTP ${status}: ${truncated || '(empty body)'}` };
+  }
+  if (parsed && typeof parsed === 'object') {
+    const o = parsed as Record<string, unknown>;
+    const inner = (o.error && typeof o.error === 'object') ? (o.error as Record<string, unknown>) : o;
+    const msg = (typeof inner.message === 'string' && inner.message)
+      || (typeof o.message === 'string' && o.message)
+      || (typeof o.error === 'string' && o.error)
+      || `HTTP ${status}`;
+    const code = typeof o.code === 'string' ? o.code
+      : typeof inner.code === 'string' ? inner.code
+      : undefined;
+    const retryable = typeof o.retryable === 'boolean' ? o.retryable
+      : typeof inner.retryable === 'boolean' ? inner.retryable
+      : undefined;
+    return { message: String(msg), code, retryable };
+  }
+  return { message: `HTTP ${status}: ${truncated}` };
+}
+
+/** Format a ParsedHttpError for a single-line CLI message (includes the code when set). */
+export function formatHttpError(err: ParsedHttpError): string {
+  if (err.code) {
+    const retry = err.retryable === true ? ' (retryable)' : err.retryable === false ? ' (not retryable)' : '';
+    return `${err.code}: ${err.message}${retry}`;
+  }
+  return err.message;
+}
+
+// ── #816: overwrite guard for binary-output commands ──────────────────────────
+
+/**
+ * Decide whether to warn/refuse before clobbering an existing output file (#816).
+ *
+ * @param exists  whether the target path already exists on disk
+ * @param force   whether `--force` was passed (caller may overwrite silently)
+ * @returns `'ok'` (write), `'warn'` (exists but force/non-default → warn only),
+ *          or `'block'` (exists, default path, no force → refuse with guidance)
+ */
+export function overwriteDecision(opts: { exists: boolean; force?: boolean; isDefaultPath?: boolean }): 'ok' | 'warn' | 'block' {
+  if (!opts.exists) return 'ok';
+  if (opts.force) return 'warn';
+  if (opts.isDefaultPath) return 'block';
+  return 'warn';
+}
+
+// ── #817: client-side upload size validation ──────────────────────────────────
+
+/** Default audio upload cap (25 MB) — matches the CLI's documented STT limit. */
+export const MAX_AUDIO_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Validate a file size client-side before upload (#817) so a multi-MB file
+ * fails fast locally instead of after a wasted upload + provider charge.
+ */
+export function validateUploadSize(bytes: number, maxBytes = MAX_AUDIO_UPLOAD_BYTES): { ok: true } | { ok: false; error: string } {
+  if (!Number.isFinite(bytes) || bytes < 0) return { ok: false, error: 'Invalid file size' };
+  if (bytes === 0) return { ok: false, error: 'File is empty (0 bytes)' };
+  if (bytes > maxBytes) {
+    const mb = (bytes / 1024 / 1024).toFixed(1);
+    const maxMb = (maxBytes / 1024 / 1024).toFixed(0);
+    return { ok: false, error: `File too large: ${mb}MB (max ${maxMb}MB)` };
+  }
+  return { ok: true };
+}
+
+// ── #896: `--` separator for verbatim chat messages ───────────────────────────
+
+/**
+ * Collect a chat message from argv, supporting a `--` separator that terminates
+ * flag parsing so a message like `chat -- -5 degrees` is preserved verbatim (#896).
+ *
+ * Before `--`: tokens starting with `-` are dropped (existing behaviour), and a
+ * value flag in `valuedFlags` consumes its following token. After `--`: every
+ * token is taken verbatim.
+ */
+export function chatMessageArgsWithSeparator(args: string[], valuedFlags: Iterable<string>): string[] {
+  const valued = valuedFlags instanceof Set ? valuedFlags : new Set(valuedFlags);
+  const sep = args.indexOf('--');
+  const message: string[] = [];
+  const end = sep === -1 ? args.length : sep;
+  // Pre-separator: skip flags + their values. Start at 1 to skip the command name.
+  for (let i = 1; i < end; i++) {
+    const arg = args[i];
+    if (valued.has(arg)) { i++; continue; }
+    if (arg.startsWith('-')) continue;
+    message.push(arg);
+  }
+  // Post-separator: everything verbatim.
+  if (sep !== -1) {
+    for (let i = sep + 1; i < args.length; i++) message.push(args[i]);
+  }
+  return message;
+}
+
+// ── #845: configurable low-balance threshold ──────────────────────────────────
+
+/** Default low-balance warning threshold (USD). */
+export const DEFAULT_LOW_BALANCE_USD = 5;
+
+/**
+ * Resolve the low-balance warning threshold (#845) from `AIGW_LOW_BALANCE_USD`,
+ * falling back to the documented default. Non-numeric/≤0 values are ignored.
+ */
+export function resolveLowBalanceThreshold(raw: string | undefined, fallback = DEFAULT_LOW_BALANCE_USD): number {
+  if (raw === undefined) return fallback;
+  const n = Number(raw.trim());
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return n;
+}
+
+// ── #802 / #818: quiet / NO_COLOR decorative-output suppression ────────────────
+
+/**
+ * Decide whether decorative output (spinners, "✓ saved" lines, the low-balance
+ * banner) should be suppressed (#802/#818) so JSON consumers and cron jobs get
+ * clean output. True when `--quiet`/`-q`, `NO_COLOR`, or non-TTY.
+ */
+export function shouldSuppressDecorative(opts: { quiet?: boolean; noColor?: boolean; isTTY?: boolean }): boolean {
+  if (opts.quiet) return true;
+  if (opts.noColor) return true;
+  if (opts.isTTY === false) return true;
+  return false;
+}
+
+// ── #815: `-o -` stdout target detection ──────────────────────────────────────
+
+/**
+ * Detect whether an `-o`/`--output` value targets stdout (`-`) rather than a file
+ * (#815) so binary commands (tts/image/speech) can stream bytes to a pipe.
+ */
+export function isStdoutTarget(output: string | undefined): boolean {
+  return output === '-';
+}

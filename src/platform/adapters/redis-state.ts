@@ -48,8 +48,12 @@ export class RedisStateAdapter implements StateStore {
   async scan(pattern: string, callback?: (keys: string[]) => boolean | void, limit: number = 1000): Promise<number> {
     let cursor = '0';
     let totalKeys = 0;
+    // #765: scale COUNT toward the caller's remaining `limit` (capped at a sane
+    // upper bound) instead of a flat 100. A 10k scan was doing ~100 round-trips;
+    // letting COUNT grow cuts that to ~10 while still bounding per-call work.
+    const SCAN_COUNT_CAP = 1000;
     do {
-      const batchSize = Math.min(100, limit - totalKeys);
+      const batchSize = Math.min(SCAN_COUNT_CAP, limit - totalKeys);
       if (batchSize <= 0) break;
       const [nextCursor, batch] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', batchSize);
       cursor = nextCursor;

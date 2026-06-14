@@ -17,6 +17,10 @@ export class InMemoryStateAdapter implements StateStore {
   private listAccess = new Map<string, number>(); // key → last access timestamp
   private lastSweep = Date.now();
   private readonly LIST_IDLE_TTL = 48 * 60 * 60_000; // 48h
+  /** #757: hard cap so a runaway producer can't OOM before the idle sweep. */
+  private readonly MAX_LIST_LEN = 100_000;
+  /** #759: hard cap on fields per hash so heartbeat hashes can't grow forever. */
+  private readonly MAX_HASH_FIELDS = 100_000;
 
   /** Lazily sweep expired entries (at most every 60s). */
   private sweep(): void {
@@ -60,25 +64,41 @@ export class InMemoryStateAdapter implements StateStore {
     this.sweep();
     const now = Date.now();
     const prefix = pattern.replace('*', '');
-    const allKeys: string[] = [];
+    // #761: stream matching keys to the callback in batches (like Redis SCAN
+    // with COUNT) instead of materializing the entire matching keyspace into one
+    // array before a single callback. This keeps the working set small for large
+    // keyspaces and lets the caller stop early after any batch.
+    const BATCH = 100;
+    let batch: string[] = [];
+    let total = 0;
     for (const [k, e] of this.kv) {
-      if (k.startsWith(prefix) && e.expiresAt >= now) {
-        allKeys.push(k);
-        if (limit && allKeys.length >= limit) break;
+      if (!k.startsWith(prefix) || e.expiresAt < now) continue;
+      batch.push(k);
+      total++;
+      if (limit && total >= limit) break;
+      if (callback && batch.length >= BATCH) {
+        const shouldContinue = callback(batch);
+        batch = [];
+        if (shouldContinue === false) return total;
       }
     }
-    if (callback && allKeys.length > 0) {
-      const shouldContinue = callback(allKeys);
-      if (shouldContinue === false) {
-        return allKeys.length;
-      }
+    if (callback && batch.length > 0) {
+      callback(batch);
     }
-    return allKeys.length;
+    return total;
   }
 
   async rpush(key: string, value: string): Promise<void> {
     if (!this.lists.has(key)) this.lists.set(key, []);
-    this.lists.get(key)!.push(value);
+    const list = this.lists.get(key)!;
+    list.push(value);
+    // #757: enforce a hard upper bound. Redis lists are only trimmed by an
+    // explicit `ltrim`; a producer that never trims could grow unbounded and
+    // OOM the process before the 48h idle sweep. Drop the oldest entries (FIFO)
+    // once over the cap so the newest data survives.
+    if (list.length > this.MAX_LIST_LEN) {
+      list.splice(0, list.length - this.MAX_LIST_LEN);
+    }
     this.listAccess.set(key, Date.now());
   }
 
@@ -101,7 +121,15 @@ export class InMemoryStateAdapter implements StateStore {
 
   async hset(key: string, field: string, value: string, ttlSecs?: number): Promise<void> {
     if (!this.hashes.has(key)) this.hashes.set(key, new Map());
-    this.hashes.get(key)!.set(field, value);
+    const hash = this.hashes.get(key)!;
+    hash.set(field, value);
+    // #759: cap distinct fields per hash. Updating an existing field is always
+    // allowed; only *new* fields beyond the cap are rejected so a session that
+    // keeps adding heartbeat fields can't grow without bound.
+    if (hash.size > this.MAX_HASH_FIELDS) {
+      hash.delete(field);
+      throw new Error(`hset: hash '${key}' exceeds MAX_HASH_FIELDS (${this.MAX_HASH_FIELDS})`);
+    }
     if (ttlSecs) this.hashExpiry.set(key, Date.now() + ttlSecs * 1000);
   }
 
@@ -122,7 +150,7 @@ export class InMemoryStateAdapter implements StateStore {
     return Object.fromEntries(entries);
   }
 
-  async hincrby(key: string, field: string, increment: number): Promise<void> {
+  async hincrby(key: string, field: string, increment: number, ttlSecs?: number): Promise<void> {
     const hash = this.hashes.get(key);
     if (!hash) {
       this.hashes.set(key, new Map([[field, String(increment)]]));
@@ -130,5 +158,9 @@ export class InMemoryStateAdapter implements StateStore {
       const current = parseFloat(hash.get(field) || '0');
       hash.set(field, String(current + increment));
     }
+    // #760: honor TTL so counters created via hincrby expire like hset-created
+    // hashes. Previously hincrby never set hashExpiry, making counters immortal
+    // even when callers expected TTL parity with hset.
+    if (ttlSecs && ttlSecs > 0) this.hashExpiry.set(key, Date.now() + ttlSecs * 1000);
   }
 }

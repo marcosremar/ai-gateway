@@ -24,11 +24,16 @@
 /** Base URL for CDN assets */
 let cdnBase = '';
 
+/** Normalize a CDN base URL: trim whitespace and any trailing slashes. Pure. */
+export function normalizeCdnBase(url: string): string {
+  return url.trim().replace(/\/+$/, '');
+}
+
 /**
  * Set the CDN base URL for loading browser SDK assets.
  */
 export function setCDNBase(url: string): void {
-  cdnBase = url.replace(/\/$/, ''); // Remove trailing slash
+  cdnBase = normalizeCdnBase(url); // Remove trailing slash(es)
 }
 
 /**
@@ -39,13 +44,25 @@ export function getCDNBase(): string {
 }
 
 /**
+ * Join a CDN base and an asset path into a single URL without producing a
+ * double slash at the seam (while preserving the `https://` scheme slashes).
+ * Pure; exported for tests.
+ */
+export function joinCdnUrl(base: string, path: string): string {
+  const trimmedBase = base.replace(/\/+$/, '');
+  const trimmedPath = path.replace(/^\/+/, '');
+  if (!trimmedPath) return trimmedBase;
+  return `${trimmedBase}/${trimmedPath}`;
+}
+
+/**
  * Build a full CDN URL for a given asset path.
  */
 export function cdnUrl(path: string): string {
   if (!cdnBase) {
     throw new Error('CDN base URL not set. Call setCDNBase() first.');
   }
-  return `${cdnBase}/${path.replace(/^\//, '')}`;
+  return joinCdnUrl(cdnBase, path);
 }
 
 /**

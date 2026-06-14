@@ -4,6 +4,7 @@ import type {
   GuardrailEngineConfig,
   GuardrailRule,
   GuardrailHook,
+  GuardrailAction,
   RuleContext,
   EngineResult,
 } from './types';
@@ -78,6 +79,7 @@ export function extractResponseText(body: unknown): string {
 async function runRules(
   rules: GuardrailRule[],
   ctx: RuleContext,
+  opts: { failClosed?: boolean; action?: GuardrailAction } = {},
 ): Promise<EngineResult> {
   for (const rule of rules) {
     if (!rule.hooks.includes(ctx.hook)) continue;
@@ -116,8 +118,20 @@ async function runRules(
         };
       }
     } catch (err) {
-      // Rule threw unexpectedly — log and continue (fail open)
-      log.warn(`Rule "${rule.type}" threw unexpectedly, skipping:`, err);
+      // Rule threw unexpectedly. Default: fail OPEN (log and continue) so a
+      // buggy rule never hard-blocks legitimate traffic. When the engine is
+      // configured `failClosed` AND its action is 'block', treat the inability
+      // to evaluate as a block — "we couldn't check" denies rather than allows.
+      if (opts.failClosed && (opts.action ?? 'block') === 'block') {
+        const reason = err instanceof Error ? err.message : String(err);
+        log.warn(`Rule "${rule.type}" threw unexpectedly, failing closed:`, err);
+        return {
+          pass: false,
+          reason: `Guardrail "${rule.type}" could not be evaluated: ${reason}`,
+          failedRule: rule.type,
+        };
+      }
+      log.warn(`Rule "${rule.type}" threw unexpectedly, skipping (fail-open):`, err);
     }
   }
 
@@ -157,7 +171,10 @@ export class GuardrailEngine {
       hook: 'beforeRequest',
     };
 
-    const result = await runRules(this.config.rules, ctx);
+    const result = await runRules(this.config.rules, ctx, {
+      failClosed: this.config.failClosed,
+      action: this.action,
+    });
 
     if (!result.pass) {
       log.warn({ rule: result.failedRule, reason: result.reason, model }, 'beforeRequest guardrail blocked');
@@ -181,7 +198,10 @@ export class GuardrailEngine {
       hook: 'afterResponse',
     };
 
-    const result = await runRules(this.config.rules, ctx);
+    const result = await runRules(this.config.rules, ctx, {
+      failClosed: this.config.failClosed,
+      action: this.action,
+    });
 
     if (!result.pass) {
       log.warn({ rule: result.failedRule, reason: result.reason, model }, 'afterResponse guardrail blocked');
@@ -202,7 +222,10 @@ export class GuardrailEngine {
     if (this.config.rules.length === 0) return { pass: true };
 
     const ctx: RuleContext = { text, model, hook: 'beforeRequest' };
-    const result = await runRules(this.config.rules, ctx);
+    const result = await runRules(this.config.rules, ctx, {
+      failClosed: this.config.failClosed,
+      action: this.action,
+    });
     if (!result.pass) {
       if (this.action === 'block') recordGuardrailBlock(result.failedRule ?? 'unknown');
       else recordGuardrailAudit(result.failedRule ?? 'unknown');
@@ -217,7 +240,10 @@ export class GuardrailEngine {
     if (this.config.rules.length === 0) return { pass: true };
 
     const ctx: RuleContext = { text, model, hook: 'afterResponse' };
-    const result = await runRules(this.config.rules, ctx);
+    const result = await runRules(this.config.rules, ctx, {
+      failClosed: this.config.failClosed,
+      action: this.action,
+    });
     if (!result.pass) {
       if (this.action === 'block') recordGuardrailBlock(result.failedRule ?? 'unknown');
       else recordGuardrailAudit(result.failedRule ?? 'unknown');

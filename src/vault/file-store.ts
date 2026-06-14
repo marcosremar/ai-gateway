@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, chmodSync } from 'fs';
 import { dirname, join } from 'path';
 import { randomBytes } from 'crypto';
 import type { VaultStore } from './types';
@@ -42,10 +42,26 @@ export class FileVaultStore implements VaultStore {
       // Vault directory holds encrypted secrets — keep it owner-only so a
       // misconfigured umask can't leave the contents world-readable.
       mkdirSync(dir, { recursive: true, mode: 0o700 });
+    } else {
+      // `mkdirSync(...0o700)` only applies the mode when *creating* the dir.
+      // If the directory already exists with a permissive mode (e.g. created
+      // by another tool under a lax umask), the encrypted vault would sit in
+      // a world-readable directory. Re-assert owner-only on every save.
+      try {
+        chmodSync(dir, 0o700);
+      } catch {
+        // Best-effort: a chmod failure (e.g. not the owner) must not block
+        // persisting the secret; the file itself is still written 0o600.
+      }
     }
-    // Atomic write: write to temp file, then rename
+    // Atomic write: write to temp file, then rename.
+    // Serialize the live in-memory cache directly rather than calling
+    // `this.load()` again: `load()` returns the cache today, but routing the
+    // write through the loader is fragile — a future change to `load` (e.g.
+    // re-reading from disk) could silently persist stale data over fresh
+    // mutations. Pass the source of truth explicitly.
     const tempPath = join(dir, `.vault-${randomBytes(8).toString('hex')}.tmp`);
-    const data = JSON.stringify(this.load(), null, 2);
+    const data = JSON.stringify(this.cache, null, 2);
     try {
       // 0o600 — only the owning user can read or write the vault file.
       writeFileSync(tempPath, data, { encoding: 'utf-8', mode: 0o600 });

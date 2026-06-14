@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useGateway } from '@/hooks/useGateway';
 import { useGpuStatus } from '@/hooks/useGpuStatus';
 import { useGpuList } from '@/hooks/useGpuList';
@@ -9,6 +9,7 @@ import { useGatewayWs } from '@/hooks/useGatewayWs';
 import { getRequestLog, getReadinessStatus, type RequestLogEntry, type GpuReadinessState, type ReadinessStatusResponse, type CloudHealthEntry } from '@/lib/gateway';
 import { AlertBanner, Spinner, StatusBadge } from '@/components/ui';
 import { phaseColor, phaseBg, phaseVariant, phaseLabel, formatPhaseDuration, STAGE_COLORS, type ServicePhase } from '@/lib/phase-colors';
+import { computeStageLatencies, computeProviderTrends, sparklinePoints, type StageLatency } from '@/lib/metrics';
 import { PipelineHealthCard } from './PipelineHealthCard';
 import {
   Cpu, Bot, Snowflake, Flame, Server, AlertTriangle, Activity, Mic, Brain, Volume2, ArrowRight,
@@ -22,41 +23,8 @@ function formatUptime(sec: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-interface StageLatency {
-  cold: number | null;
-  warm: number | null;
-  samples: number;
-  provider: string;
-}
-
-function computeStageLatencies(entries: RequestLogEntry[]): Record<string, StageLatency> {
-  const byStage: Record<string, RequestLogEntry[]> = {};
-  for (const e of entries) {
-    if (!e.success) continue;
-    if (!byStage[e.stage]) byStage[e.stage] = [];
-    byStage[e.stage].push(e);
-  }
-  const result: Record<string, StageLatency> = {};
-  for (const [stage, stageEntries] of Object.entries(byStage)) {
-    const sorted = [...stageEntries].sort((a, b) => a.timestamp - b.timestamp);
-    const provider = sorted[sorted.length - 1]?.provider || '';
-    if (sorted.length === 0) { result[stage] = { cold: null, warm: null, samples: 0, provider }; continue; }
-    const coldLatencies: number[] = [];
-    const warmLatencies: number[] = [];
-    for (let i = 0; i < sorted.length; i++) {
-      const gap = i === 0 ? Infinity : sorted[i].timestamp - sorted[i - 1].timestamp;
-      if (gap > 60000) coldLatencies.push(sorted[i].latencyMs);
-      else warmLatencies.push(sorted[i].latencyMs);
-    }
-    result[stage] = {
-      cold: coldLatencies.length > 0 ? Math.round(coldLatencies.reduce((a, b) => a + b, 0) / coldLatencies.length) : null,
-      warm: warmLatencies.length > 0 ? Math.round(warmLatencies.reduce((a, b) => a + b, 0) / warmLatencies.length) : null,
-      samples: sorted.length,
-      provider,
-    };
-  }
-  return result;
-}
+// Stage-latency math now lives in `@/lib/metrics` (computeStageLatencies) so it
+// is pure and memoizable (#945); StageLatency is re-exported from there.
 
 // ── Service Summary (per-service phase badges) ──────────────────────────────
 
@@ -214,19 +182,14 @@ function ProviderBar({ name, requests, avgLatencyMs, errorRate, maxRequests, tre
         <div className="h-full rounded-full transition-all duration-700"
           style={{ width: `${barPct}%`, background: 'color-mix(in srgb, #60a5fa 70%, #a78bfa)' }} />
       </div>
-      {/* Sparkline trend */}
+      {/* Sparkline trend — points computed once (Math.max hoisted, #946) */}
       {trend && trend.length > 1 && (
         <svg width="40" height="16" className="flex-shrink-0" style={{ opacity: 0.7 }}>
           <polyline
             fill="none"
             stroke={latColor}
             strokeWidth="1.5"
-            points={trend.map((v, i) => {
-              const maxVal = Math.max(...trend);
-              const x = (i / (trend.length - 1)) * 38 + 1;
-              const y = maxVal > 0 ? 16 - (v / maxVal) * 14 + 1 : 9;
-              return `${x},${y}`;
-            }).join(' ')}
+            points={sparklinePoints(trend)}
           />
         </svg>
       )}
@@ -319,9 +282,20 @@ export function OverviewSection() {
   const { instances: gpuInstances } = useGpuList(true, 10000);
   const { bot } = useBotStatus(true, 10000);
   const ws = useGatewayWs();
-  const [stageLatencies, setStageLatencies] = useState<Record<string, StageLatency>>({});
-  const [providerTrends, setProviderTrends] = useState<Record<string, number[]>>({});
+  const [logEntries, setLogEntries] = useState<RequestLogEntry[]>([]);
   const [readinessStatus, setReadinessStatus] = useState<ReadinessStatusResponse | null>(null);
+
+  // Derive latency views once per raw-entries change instead of on every render/
+  // unrelated poll (#945). The O(n log n) sort + scan only re-runs when the log
+  // actually changes.
+  const stageLatencies = useMemo<Record<string, StageLatency>>(
+    () => computeStageLatencies(logEntries),
+    [logEntries],
+  );
+  const providerTrends = useMemo<Record<string, number[]>>(
+    () => computeProviderTrends(logEntries, 20),
+    [logEntries],
+  );
 
   // Fetch readiness status when any service is ready/degraded (for P95 warning)
   const readiness = gpu?.readinessState;
@@ -339,20 +313,9 @@ export function OverviewSection() {
   const loadLatencies = useCallback(async () => {
     try {
       const log = await getRequestLog(0, 100);
-      setStageLatencies(computeStageLatencies(log.entries));
-
-      // Compute per-provider latency trends (last 20 data points)
-      const byProvider: Record<string, number[]> = {};
-      for (const e of log.entries) {
-        if (!e.success) continue;
-        if (!byProvider[e.provider]) byProvider[e.provider] = [];
-        byProvider[e.provider].push(e.latencyMs);
-      }
-      const trends: Record<string, number[]> = {};
-      for (const [provider, latencies] of Object.entries(byProvider)) {
-        trends[provider] = latencies.slice(-20);
-      }
-      setProviderTrends(trends);
+      // Store the raw entries; stage latencies + provider trends are derived in
+      // memos so we don't recompute the O(n log n) sort on unrelated re-renders.
+      setLogEntries(log.entries);
     } catch {}
   }, []);
 

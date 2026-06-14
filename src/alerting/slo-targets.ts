@@ -67,6 +67,22 @@ export const SLO_BREACH_POLICY = {
   failoverWindowMs: 60 * 60_000,
 } as const;
 
+/**
+ * Resolve the effective daily-spend SLO in USD.
+ *
+ * `SLO_TARGETS.dailySpendUsd` is a static documented default, but the live cap
+ * is `process.env.DAILY_BUDGET_USD`. If an operator raises the env cap, an SLO
+ * check built on the static value would false-alarm (#599). Derive the SLO from
+ * the same source the deploy gate reads, falling back to the documented default
+ * when the env var is unset or invalid (0 / NaN / negative).
+ *
+ * @param env - environment to read (defaults to process.env; injectable for tests)
+ */
+export function resolveDailySpendSlo(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.DAILY_BUDGET_USD);
+  return Number.isFinite(raw) && raw > 0 ? raw : SLO_TARGETS.dailySpendUsd;
+}
+
 /** Pretty-print a target for inclusion in alert messages. */
 export function formatTarget(key: SloMetricKey): string {
   const v = SLO_TARGETS[key];

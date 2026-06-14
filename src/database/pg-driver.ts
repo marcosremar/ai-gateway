@@ -82,7 +82,7 @@ export async function createPgDriver(connectionString: string): Promise<SqlDrive
     throw err;
   }
 
-  const client = new PgClient({ connectionString });
+  let client = new PgClient({ connectionString });
   try {
     await client.connect();
   } catch (err) {
@@ -96,9 +96,20 @@ export async function createPgDriver(connectionString: string): Promise<SqlDrive
         const result = await client.query<T>(sql, params);
         return { rows: result.rows, rowCount: result.rowCount ?? result.rows.length, fields: result.fields };
       } catch (err) {
-        const dbErr = err as NodeJS.ErrnoException;
-        if (dbErr.code === 'ECONNRESET' || dbErr.code === 'ENOTCONN' || dbErr.code === 'ECONNREFUSED') {
-    await safeClose(client, 'pg-connect-fallback');
+        // #733: on a transient disconnect the old code closed the client and
+        // rethrew — but kept the dead client, so the *next* query failed too.
+        // Reconnect with a fresh client and retry the query ONCE; only surface
+        // the error if the retry also fails (or the error isn't transient).
+        if (isTransientDisconnect(err)) {
+          await safeClose(client, 'pg-connect-fallback');
+          try {
+            client = new PgClient({ connectionString });
+            await client.connect();
+            const result = await client.query<T>(sql, params);
+            return { rows: result.rows, rowCount: result.rowCount ?? result.rows.length, fields: result.fields };
+          } catch (retryErr) {
+            throw retryErr;
+          }
         }
         throw err;
       }
@@ -107,6 +118,12 @@ export async function createPgDriver(connectionString: string): Promise<SqlDrive
       await client.end();
     },
   };
+}
+
+/** True for connection-level errors that a single reconnect can recover (#733). */
+export function isTransientDisconnect(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'ECONNRESET' || code === 'ENOTCONN' || code === 'ECONNREFUSED' || code === 'EPIPE';
 }
 
 // ── Factory ───────────────────────────────────────────────────────────────────

@@ -116,6 +116,17 @@ export interface GuardrailEngineConfig {
    * - 'audit' → log and continue
    */
   action?: GuardrailAction;
+  /**
+   * How to treat a rule that *throws* unexpectedly (bug, network blip in a
+   * webhook rule, etc.).
+   * - `false` (default): fail OPEN — log and skip the throwing rule so a buggy
+   *   rule never hard-blocks legitimate traffic.
+   * - `true`: fail CLOSED — when `action: 'block'`, a throwing rule is treated
+   *   as a block (return `pass: false`). Use for high-assurance deployments
+   *   where "we couldn't evaluate the guardrail" should deny rather than allow.
+   *   Has no effect under `action: 'audit'` (audit never blocks).
+   */
+  failClosed?: boolean;
 }
 
 /** Result of running all applicable rules for a hook */

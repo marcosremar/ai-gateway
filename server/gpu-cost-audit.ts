@@ -23,6 +23,9 @@ export interface StoppedPodAudit {
   status: string;
   gpuType?: string;
   ageHours?: number;
+  /** #537 — storage cost a stopped pod keeps accruing per month, so operators
+   *  can prioritize cleanup by dollars rather than a bare count. */
+  estMonthlyUsd: number;
 }
 
 export interface CostAuditReport {
@@ -33,10 +36,23 @@ export interface CostAuditReport {
     orphanCount: number;
   };
   stoppedPods: StoppedPodAudit[];
+  /** #537 — combined estimated monthly storage cost across all stopped pods. */
+  stoppedPodsMonthlyUsd: number;
   warnings: string[];
 }
 
 const RUNPOD_VOLUME_USD_PER_GB_MONTH = 0.10;
+/** Stopped-pod storage rate (USD/GB/month) and assumed disk when size unknown.
+ *  A stopped Vast pod still pays for its container disk; the API doesn't reliably
+ *  expose the size here, so estimate from a configurable default. */
+const STOPPED_POD_USD_PER_GB_MONTH = Number(process.env.STOPPED_POD_USD_PER_GB_MONTH) || 0.10;
+const STOPPED_POD_DEFAULT_DISK_GB = Number(process.env.STOPPED_POD_DEFAULT_DISK_GB) || 30;
+
+/** Estimate a stopped pod's monthly storage cost from its (or a default) disk size. */
+export function estStoppedPodMonthlyUsd(diskGb?: number): number {
+  const gb = diskGb && diskGb > 0 ? diskGb : STOPPED_POD_DEFAULT_DISK_GB;
+  return Math.round(gb * STOPPED_POD_USD_PER_GB_MONTH * 100) / 100;
+}
 
 /**
  * Comprehensive cost audit — finds non-instance cost leaks.
@@ -50,6 +66,7 @@ export async function auditGpuCosts(opts: { destroyOrphans?: boolean } = {}): Pr
     ts: new Date().toISOString(),
     volumes: { runpod: [], totalMonthlyUsd: 0, orphanCount: 0 },
     stoppedPods: [],
+    stoppedPodsMonthlyUsd: 0,
     warnings: [],
   };
 
@@ -118,12 +135,15 @@ export async function auditGpuCosts(opts: { destroyOrphans?: boolean } = {}): Pr
       for (const inst of vastInstances) {
         const st = (inst.status ?? '').toLowerCase();
         if ((st === 'exited' || st === 'stopped') && !tracked.has(inst.instanceId)) {
+          const est = estStoppedPodMonthlyUsd((inst as { diskGb?: number }).diskGb);
           report.stoppedPods.push({
             provider: 'vast',
             instanceId: inst.instanceId,
             status: st,
             gpuType: inst.gpuType,
+            estMonthlyUsd: est,
           });
+          report.stoppedPodsMonthlyUsd += est;
         }
       }
     } catch (err) {
@@ -132,7 +152,10 @@ export async function auditGpuCosts(opts: { destroyOrphans?: boolean } = {}): Pr
   }
 
   if (report.stoppedPods.length > 0) {
-    log.warn(`[cost-audit] ${report.stoppedPods.length} stopped pod(s) accumulating storage cost`);
+    log.warn(
+      `[cost-audit] ${report.stoppedPods.length} stopped pod(s) accumulating storage cost ` +
+        `(~$${report.stoppedPodsMonthlyUsd.toFixed(2)}/month)`,
+    );
   }
 
   return report;

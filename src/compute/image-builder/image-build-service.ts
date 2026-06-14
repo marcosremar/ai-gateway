@@ -47,6 +47,44 @@ export function nextBuildPollDelayMs(
   return Math.min(Math.round(delay), maxMs);
 }
 
+/**
+ * Map build platforms → an arch-variant tag suffix (#971).
+ *
+ * CLAUDE.md mandates the `:blackwell` image (CUDA 12.8.1) for the RTX 5090
+ * (Blackwell). `startBuild` previously always tagged `latest` with no variant
+ * awareness. When a caller targets a Blackwell-capable build (sm_120 / explicit
+ * `linux/amd64+blackwell` marker), surface a `blackwell` suffix so the published
+ * image is selectable by the deploy path.
+ *
+ * Returns `''` for the default (no suffix). Pure; exported for tests.
+ */
+export function tagSuffixForPlatforms(platforms: string | undefined): string {
+  const p = (platforms ?? '').toLowerCase();
+  if (p.includes('blackwell') || p.includes('sm_120') || p.includes('sm120')) {
+    return 'blackwell';
+  }
+  return '';
+}
+
+/**
+ * Resolve the final Docker tag from a requested tag + platforms (#971).
+ *
+ * - No variant → the requested tag unchanged.
+ * - Blackwell variant + `latest` → `blackwell` (the canonical Blackwell tag).
+ * - Blackwell variant + custom tag → `<tag>-blackwell` so the variant is
+ *   never silently collapsed into a non-variant tag.
+ *
+ * Pure; exported for tests.
+ */
+export function resolveImageTag(requestedTag: string | undefined, platforms: string | undefined): string {
+  const tag = (requestedTag ?? 'latest').trim() || 'latest';
+  const suffix = tagSuffixForPlatforms(platforms);
+  if (!suffix) return tag;
+  if (tag === 'latest') return suffix;
+  if (tag.endsWith(`-${suffix}`) || tag === suffix) return tag;
+  return `${tag}-${suffix}`;
+}
+
 export function resolveAllowedBuildRoots(): string[] {
   const roots = new Set<string>();
   const addRoot = (input: string | undefined) => {
@@ -112,9 +150,10 @@ export async function startBuild(spec: ImageBuildSpec): Promise<BuildStartResult
   }
 
   const name = spec.name ?? basename(absDir).toLowerCase().replace(/[^a-z0-9-]/g, '-');
-  const tag = spec.tag ?? 'latest';
-  const repoName = spec.repoName ?? `ai-gateway-img-${name}`;
   const platforms = spec.platforms ?? 'linux/amd64';
+  // Apply the Blackwell arch-variant suffix when targeting a Blackwell build (#971).
+  const tag = resolveImageTag(spec.tag, platforms);
+  const repoName = spec.repoName ?? `ai-gateway-img-${name}`;
   const isPublic = spec.isPublic ?? false;
 
   const buildId = generateBuildId();

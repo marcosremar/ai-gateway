@@ -1,5 +1,14 @@
 import type { RegexMatchRule, RuleContext, RuleResult } from '../types';
 
+/**
+ * Cap on the text length a (operator-supplied) regex is tested against. A
+ * catastrophic-backtracking pattern can take seconds-to-minutes on a long
+ * adversarial input; bounding the input keeps any single match O(cap) and
+ * stops a request body from being used to stall the event loop. Real prompts/
+ * completions are far below this.
+ */
+const MAX_REGEX_INPUT_CHARS = 100_000;
+
 export function runRegexMatch(rule: RegexMatchRule, ctx: RuleContext): RuleResult {
   let re: RegExp;
   try {
@@ -8,7 +17,11 @@ export function runRegexMatch(rule: RegexMatchRule, ctx: RuleContext): RuleResul
     return { pass: false, reason: `Invalid regex pattern: ${rule.pattern}` };
   }
 
-  const matched = re.test(ctx.text);
+  const text =
+    ctx.text.length > MAX_REGEX_INPUT_CHARS
+      ? ctx.text.slice(0, MAX_REGEX_INPUT_CHARS)
+      : ctx.text;
+  const matched = re.test(text);
   const pass = rule.not ? !matched : matched;
 
   return {

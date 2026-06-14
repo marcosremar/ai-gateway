@@ -227,10 +227,25 @@ export function createBackupScheduler(config: BackupConfig = {}) {
 
   /**
    * Get scheduler status.
+   *
+   * #800: `running` previously conflated two distinct states (a backup actually
+   * executing vs the scheduler merely being armed), so an operator couldn't tell
+   * whether a backup was in flight. Expose them separately; `running` is kept as
+   * the OR for backward compatibility.
    */
-  function getStatus(): { running: boolean; intervalHours: number; backupDir: string } {
+  function getStatus(): {
+    running: boolean;
+    scheduled: boolean;
+    inProgress: boolean;
+    intervalHours: number;
+    backupDir: string;
+  } {
+    const scheduled = intervalId !== null;
+    const inProgress = isRunning;
     return {
-      running: isRunning || intervalId !== null,
+      running: inProgress || scheduled,
+      scheduled,
+      inProgress,
       intervalHours: cfg.intervalHours,
       backupDir: cfg.backupDir,
     };

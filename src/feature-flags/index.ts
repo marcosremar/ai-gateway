@@ -38,6 +38,44 @@ export interface FlagValue {
   updatedAt: string;
 }
 
+/** Tokens that mean "true" for a boolean flag env override (case-insensitive). */
+const TRUTHY_ENV_TOKENS: ReadonlySet<string> = new Set(['true', '1', 'yes', 'on', 'y']);
+/** Tokens that mean "false" for a boolean flag env override (case-insensitive). */
+const FALSY_ENV_TOKENS: ReadonlySet<string> = new Set(['false', '0', 'no', 'off', 'n', '']);
+
+/**
+ * Parse a raw env-var string into the flag's typed value, falling back to the
+ * default when the override is unusable. Pure; exported for tests.
+ *
+ * - boolean: case-insensitive, trimmed; accepts true/1/yes/on and false/0/no/off.
+ *   An unrecognized token (e.g. "maybe") falls back to the default rather than
+ *   silently coercing to `false` (the old `=== 'true' || === '1'` behavior made
+ *   `"TRUE"`/`" true "` read as false).
+ * - number: parsed via parseFloat; non-finite values fall back to the default
+ *   instead of setting the flag to NaN.
+ * - string: used verbatim.
+ */
+export function parseEnvFlagValue(
+  raw: string | undefined,
+  defaultValue: boolean | number | string,
+): boolean | number | string {
+  if (raw === undefined) return defaultValue;
+
+  if (typeof defaultValue === 'boolean') {
+    const token = raw.trim().toLowerCase();
+    if (TRUTHY_ENV_TOKENS.has(token)) return true;
+    if (FALSY_ENV_TOKENS.has(token)) return false;
+    return defaultValue;
+  }
+
+  if (typeof defaultValue === 'number') {
+    const parsed = parseFloat(raw);
+    return Number.isFinite(parsed) ? parsed : defaultValue;
+  }
+
+  return raw;
+}
+
 class FeatureFlags {
   private flags = new Map<string, FlagValue>();
   private definitions = new Map<string, FlagDefinition>();
@@ -54,17 +92,10 @@ class FeatureFlags {
     let source: FlagValue['source'] = 'default';
 
     if (definition.envVar && process.env[definition.envVar] !== undefined) {
-      const envVal = process.env[definition.envVar];
-      if (typeof definition.defaultValue === 'boolean') {
-        value = envVal === 'true' || envVal === '1';
-      } else if (typeof definition.defaultValue === 'number') {
-        const parsed = parseFloat(envVal ?? String(definition.defaultValue));
-        // Ignore unparseable numeric env overrides (e.g. "abc") instead of
-        // silently setting the flag to NaN — fall back to the default.
-        value = Number.isFinite(parsed) ? parsed : definition.defaultValue;
-      } else {
-        value = envVal ?? definition.defaultValue;
-      }
+      // Robust, type-aware parse: tolerant boolean tokens (TRUE/yes/on/off …),
+      // NaN-guarded numbers, verbatim strings — all falling back to the default
+      // on an unusable override.
+      value = parseEnvFlagValue(process.env[definition.envVar], definition.defaultValue);
       source = 'env';
     }
 

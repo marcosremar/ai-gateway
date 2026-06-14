@@ -32,6 +32,54 @@ function saveCatalog(catalog: ImageCatalog): void {
   renameSync(tmp, CATALOG_FILE);
 }
 
+// ── Retention / eviction (#973) ─────────────────────────────────────────────
+
+/** Default max catalog records kept (newest-first). Override via env. */
+export const DEFAULT_MAX_CATALOG_RECORDS = 100;
+/** Default age (ms) after which terminal records are pruned: 90 days. */
+export const DEFAULT_CATALOG_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+const TERMINAL_STATUSES: ReadonlySet<ImageBuildStatus> = new Set<ImageBuildStatus>([
+  'success',
+  'failed',
+  'cancelled',
+]);
+
+function isTerminal(status: ImageBuildStatus): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
+
+/**
+ * Prune a newest-first record list (#973). The catalog grows unbounded as every
+ * build appends forever, bloating the file and any list endpoint. Drop terminal
+ * records older than `ttlMs`, then hard-cap to `maxRecords`. In-flight records
+ * (pending/queued/building) are never pruned by TTL so a long build can't be
+ * evicted mid-flight. Pure; exported for tests.
+ */
+export function pruneCatalogRecords(
+  records: ImageBuildRecord[],
+  maxRecords = DEFAULT_MAX_CATALOG_RECORDS,
+  ttlMs = DEFAULT_CATALOG_TTL_MS,
+  now = Date.now(),
+): ImageBuildRecord[] {
+  const ttlPruned = records.filter((r) => {
+    if (!isTerminal(r.status)) return true; // keep in-flight regardless of age
+    const ts = r.completedAt ?? r.updatedAt ?? r.createdAt ?? now;
+    return now - ts <= ttlMs;
+  });
+  const cap = Math.max(0, Math.floor(maxRecords));
+  return ttlPruned.slice(0, cap);
+}
+
+function maxCatalogRecords(): number {
+  const raw = process.env.AI_GATEWAY_MAX_CATALOG_RECORDS;
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return DEFAULT_MAX_CATALOG_RECORDS;
+}
+
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 
 export function addBuildRecord(record: ImageBuildRecord): void {
@@ -39,8 +87,8 @@ export function addBuildRecord(record: ImageBuildRecord): void {
   // Remove old record with same ID if it exists
   catalog.records = catalog.records.filter(r => r.id !== record.id);
   catalog.records.unshift(record); // newest first
-  // Keep last 100 records
-  if (catalog.records.length > 100) catalog.records = catalog.records.slice(0, 100);
+  // Evict by TTL + hard cap so the catalog stays small (#973).
+  catalog.records = pruneCatalogRecords(catalog.records, maxCatalogRecords());
   saveCatalog(catalog);
 }
 
