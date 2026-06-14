@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic';
 import { GatewayProvider, useGateway } from '@/hooks/useGateway';
 import { Sidebar, type SidebarItem } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { resolveRoute, routeToPath } from '@/lib/nav';
 import { LayoutDashboard, Settings2, Bot, Shield, ScrollText, KeyRound, Sparkles, LayoutList, Sun, Moon, Gauge, RefreshCw, Activity, FlaskConical, Layers, Server, AppWindow } from 'lucide-react';
 
 // Critical above-the-fold section — loaded eagerly
@@ -94,22 +95,8 @@ const VALID_ROUTES = new Set(NAV_ITEMS.filter(item => !item.divider).map(item =>
 
 function getRouteFromPath(): string {
   if (typeof window === 'undefined') return 'overview';
-  // Support hash navigation: /#/config/providers
-  const hash = window.location.hash.replace('#/', '').replace('#', '');
-  if (hash && VALID_ROUTES.has(hash)) return hash;
-  // Pathname: /config/providers or sub-routes like /config/profiles/edit/xxx
-  const path = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
-  if (VALID_ROUTES.has(path)) return path;
-  // Redirect removed/renamed pages
-  if (path === 'config/profiles') return 'config/apps';
-  if (path === 'config/providers' || path === 'config/deploy') return 'config/apps';
-  if (path === 'tools/pipeline') return 'tools/playground';
-  if (path === 'tools/pathbench') return 'config/apps';
-  // Match sub-routes: /config/profiles/edit/xxx → config/profiles
-  for (const route of VALID_ROUTES) {
-    if (path.startsWith(route + '/')) return route;
-  }
-  return 'overview';
+  // Pure resolution lives in `lib/nav` (#936) — this is a thin window adapter.
+  return resolveRoute(window.location.pathname, window.location.hash, VALID_ROUTES);
 }
 
 function useTheme() {
@@ -149,8 +136,7 @@ function Dashboard() {
 
   // Navigate: pushState with clean nested URL
   const navigate = useCallback((id: string) => {
-    const url = id === 'overview' ? '/' : `/${id}`;
-    window.history.pushState(null, '', url);
+    window.history.pushState(null, '', routeToPath(id));
     setActiveTab(id);
   }, []);
 

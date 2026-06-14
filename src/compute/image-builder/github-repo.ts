@@ -168,6 +168,34 @@ export function assertBuildContextSize(
   return total;
 }
 
+/**
+ * Default bounded concurrency for binary blob uploads (#967).
+ *
+ * GitHub's secondary rate limits punish high burst concurrency, so we cap the
+ * fan-out rather than firing every blob at once.
+ */
+export const DEFAULT_BLOB_UPLOAD_CONCURRENCY = 6;
+
+/**
+ * Split a list into fixed-size batches for bounded-concurrency processing (#967).
+ *
+ * Image builds previously created blobs serially (one `POST /git/blobs` per
+ * binary file), making `startBuild` slow for large contexts. Batching the files
+ * lets the caller `Promise.all` each batch in parallel while keeping the in-flight
+ * count bounded. Pure; exported for tests.
+ *
+ * - `size <= 0` is coerced to 1 (never an infinite/empty batch).
+ * - An empty input yields no batches.
+ */
+export function partitionForConcurrency<T>(items: readonly T[], size: number): T[][] {
+  const n = Math.max(1, Math.floor(size) || 1);
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += n) {
+    batches.push(items.slice(i, i + n));
+  }
+  return batches;
+}
+
 /** Recursively collect all files in a directory, excluding secrets and rejecting symlinks. */
 export function collectFiles(dir: string, base: string = dir): TreeEntry[] {
   const entries = collectFilesInternal(dir, base, { bytes: 0 });
@@ -239,21 +267,29 @@ async function pushTree(
 
   // 2. Create blobs for binary files (GitHub tree API wants separate blobs for base64)
   //    For utf-8 content we can inline it directly in the tree.
-  const treeItems: Array<{ path: string; mode: string; type: string; content?: string; sha?: string }> = [];
+  //    Binary blobs are uploaded with bounded concurrency (#967) instead of one
+  //    sequential POST per file, which made large contexts slow. Tree order is
+  //    preserved by mapping each batch back into its original slot.
+  type Item = { path: string; mode: string; type: string; content?: string; sha?: string };
+  const treeItems: Item[] = new Array(files.length);
 
-  for (const file of files) {
+  const uploadBlob = async (file: TreeEntry, index: number) => {
     if (file.encoding === 'base64') {
-      // Create a blob for binary content
       const blobRes = await ghFetch(token, `/repos/${owner}/${repo}/git/blobs`, {
         method: 'POST',
         body: { content: file.content, encoding: 'base64' },
       });
       if (!blobRes.ok) throw new Error(`Failed to create blob for ${file.path}`);
       const blob = blobRes.data as { sha: string };
-      treeItems.push({ path: file.path, mode: file.mode, type: 'blob', sha: blob.sha });
+      treeItems[index] = { path: file.path, mode: file.mode, type: 'blob', sha: blob.sha };
     } else {
-      treeItems.push({ path: file.path, mode: file.mode, type: 'blob', content: file.content });
+      treeItems[index] = { path: file.path, mode: file.mode, type: 'blob', content: file.content };
     }
+  };
+
+  const indexed = files.map((file, index) => ({ file, index }));
+  for (const batch of partitionForConcurrency(indexed, DEFAULT_BLOB_UPLOAD_CONCURRENCY)) {
+    await Promise.all(batch.map(({ file, index }) => uploadBlob(file, index)));
   }
 
   // 3. Create tree

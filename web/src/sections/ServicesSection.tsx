@@ -5,26 +5,15 @@ import { getProviderConfig } from '@/lib/gateway';
 import { Spinner } from '@/components/ui';
 import { deriveProvides, STAGE_ACCENTS, type Service, type App } from './provider-types';
 import { Cloud, Server, Zap, HardDrive, Package, Cpu, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
+import { stageColor, stageLabel } from '@/lib/phase-colors';
 
 // ── Stage badge ───────────────────────────────────────────────────────────────
-
-const STAGE_LABELS: Record<string, { label: string; short: string }> = {
-  stt: { label: 'Speech-to-Text', short: 'STT' },
-  llm: { label: 'Language Model', short: 'LLM' },
-  tts: { label: 'Text-to-Speech', short: 'TTS' },
-  image: { label: 'Image Generation', short: 'IMG' },
-};
-
-const STAGE_COLORS: Record<string, string> = {
-  stt: '#0ea5e9',
-  llm: '#8b5cf6',
-  tts: '#f59e0b',
-  image: '#10b981',
-};
+// Colors + short labels come from the shared `phase-colors` registry (#926) so
+// STT/LLM/TTS render identically here, in LogsSection, and in PipelineHealthCard.
 
 function StageBadge({ stage }: { stage: string }) {
-  const color = STAGE_COLORS[stage] ?? '#71717a';
-  const { short } = STAGE_LABELS[stage] ?? { short: stage.toUpperCase() };
+  const color = stageColor(stage);
+  const short = stageLabel(stage);
   return (
     <span
       className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide"

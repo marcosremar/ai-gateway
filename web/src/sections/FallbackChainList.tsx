@@ -6,6 +6,7 @@ import { GripVertical, Plus, Trash2, ChevronDown, Cpu, Cloud, Zap, Server, Penci
 import type { LucideIcon } from 'lucide-react';
 import { Button, Toggle, DropdownList, type DropdownOption } from '@/components/ui';
 import { type PipelineChainEntry, type Service, PIPELINE_CATALOG, DEFAULT_DOCKER_IMAGES } from './provider-types';
+import { latencySuffix, type ServiceStatsData } from '@/lib/service-stats';
 
 interface Accent { iconColor: string; dot: string; }
 
@@ -47,9 +48,7 @@ interface FallbackChainListProps {
 }
 
 // Latency stats per stage::provider from /v1/metrics/service-stats
-interface ServiceStats {
-  stats: Record<string, { avgMs: number; samples: number }>;
-  coldStart: { provider: string; coldTtfbMs: number; warmTtfbAvgMs: number } | null;
+interface ServiceStats extends ServiceStatsData {
   warmth: { stt: { warm: boolean; avgLatencyMs: number | null; requests: number }; llm: { warm: boolean; avgLatencyMs: number | null; requests: number }; tts: { warm: boolean; avgLatencyMs: number | null; requests: number } } | null;
 }
 
@@ -97,24 +96,8 @@ export default function FallbackChainList({ stage, chain, setChain, accent, serv
 
   const getIcon = (providerId: string) => PROVIDER_ICON[providerId] || DEFAULT_ICON;
 
-  /** Get latency suffix for a provider in the current stage. */
-  const getLatencySuffix = (provider: string): string => {
-    if (!serviceStats) return '';
-    const key = `${stage}::${provider}`;
-    const stat = serviceStats.stats[key];
-    const parts: string[] = [];
-    if (stat) parts.push(`~${stat.avgMs}ms`);
-    // Cold start for GPU (self-hosted) and serverless
-    if (provider === 'gpu' && serviceStats.coldStart) {
-      parts.push(`cold: ${Math.round(serviceStats.coldStart.coldTtfbMs / 1000)}s`);
-    }
-    const SERVERLESS_IDS = new Set(['modal', 'modal-moss']);
-    if (SERVERLESS_IDS.has(provider) && serviceStats.coldStart) {
-      // Modal cold start is different — typically 5-15s
-      parts.push('cold: ~10s');
-    }
-    return parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
-  };
+  // Latency suffix logic lives in the pure `latencySuffix` helper (#950), called
+  // directly inside the `serviceOptions` memo below.
 
   // Build flat list of all available service options
   // Order: Serverless (fast, few items) → Self-hosted → Cloud
@@ -213,12 +196,13 @@ export default function FallbackChainList({ stage, chain, setChain, accent, serv
       }
     }
 
-    // Enrich subtitles with latency data
+    // Enrich subtitles with latency data via the pure helper so this memo's
+    // `serviceStats` dependency is honest (no stale closure — #950).
     return opts.map(o => {
-      const suffix = getLatencySuffix(o.provider);
+      const suffix = latencySuffix(stage, o.provider, serviceStats);
       return suffix ? { ...o, subtitle: o.subtitle + suffix } : o;
     });
-  }, [services, providers, catalog.models, serviceStats]);
+  }, [stage, services, providers, catalog.models, serviceStats]);
 
   /** Find the ServiceOption matching a chain entry */
   const findOption = (entry: PipelineChainEntry): ServiceOption | undefined =>

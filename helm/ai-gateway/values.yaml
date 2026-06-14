@@ -3,7 +3,10 @@ replicaCount: 1
 
 image:
   repository: marcosremar/ai-gateway
-  pullPolicy: IfNotPresent
+  # #989: a mutable `:latest` tag with `IfNotPresent` lets pods run stale/mismatched
+  # images across nodes. Default to `Always` so `:latest` is re-pulled; pin a digest
+  # or immutable tag (e.g. `tag: "v1.4.2"`) for reproducible production rollouts.
+  pullPolicy: Always
   tag: "latest"
 
 service:
@@ -25,9 +28,13 @@ resources:
   limits:
     cpu: 2000m
     memory: 2Gi
+  # #990: the gateway is I/O-bound (it brokers calls to upstream providers/GPUs),
+  # so a full 1 vCPU + 1Gi reserved per replica over-provisions idle pods and
+  # hurts cluster bin-packing (minReplicas:1 × this baseline is always reserved).
+  # Lower requests let the scheduler pack cheaper while limits still allow bursts.
   requests:
-    cpu: 500m
-    memory: 1Gi
+    cpu: 250m
+    memory: 512Mi
 
 autoscaling:
   enabled: true
@@ -39,7 +46,11 @@ autoscaling:
 env:
   NODE_ENV: "production"
   PORT: "4000"
-  CORS_ORIGINS: "*"
+  # #993: wildcard CORS in a production default is a real exposure if the override
+  # is forgotten. Leave empty (closed) by default and set an explicit allow-list
+  # per environment (e.g. CORS_ORIGINS: "https://app.example.com"). Only set "*"
+  # for non-production clusters where you accept open cross-origin access.
+  CORS_ORIGINS: ""
   RATE_LIMIT_RPM: "6000"
   CANARY_DEPLOY: "1"
   LOG_LEVEL: "warn"
@@ -57,5 +68,8 @@ healthCheck:
 monitoring:
   enabled: true
   serviceMonitor:
+    # #992: a 15s scrape on a high-cardinality `/metrics` endpoint multiplies TSDB
+    # storage/ingest cost cluster-wide. 30s is plenty for this gateway; reserve a
+    # tighter interval for hot dashboards via a dedicated ServiceMonitor.
     enabled: true
-    interval: 15s
+    interval: 30s

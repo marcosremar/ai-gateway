@@ -6,12 +6,11 @@ import type { LucideIcon } from 'lucide-react';
 import { Card, CardHeader, CardBody, StatusBadge } from '@/components/ui';
 import { getProviderConfig, getReadinessStatus } from '@/lib/gateway';
 import type { HealthResponse, ProviderConfigResponse, ReadinessStatusResponse, PipelineChainEntry, ServicePhase, CloudHealthEntry } from '@/lib/gateway';
-import { STAGE_COLORS } from '@/lib/phase-colors';
+import { STAGE_COLORS, providerPhaseColor, providerPhaseLabel, type ProviderPhase } from '@/lib/phase-colors';
+import { navigateToPath } from '@/lib/nav';
 import { PROVIDER_ICON } from './FallbackChainList';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-
-type ProviderPhase = 'active' | 'ok' | 'benchmarking' | 'ready' | 'degraded' | 'repechage' | 'error' | 'idle';
 
 interface ProviderStatus {
   phase: ProviderPhase;
@@ -25,30 +24,9 @@ const STAGE_META: Record<'stt' | 'llm' | 'tts', { label: string; icon: LucideIco
 };
 
 // ── Status helpers ────────────────────────────────────────────────────────────
-
-function dotColor(phase: ProviderPhase): string {
-  switch (phase) {
-    case 'active':
-    case 'ok':
-    case 'ready':        return '#10b981';
-    case 'benchmarking': return '#fbbf24';
-    case 'degraded':     return '#f97316';
-    case 'repechage':    return '#a78bfa';
-    case 'error':        return '#ef4444';
-    default:             return '#52525b';
-  }
-}
-
-function phaseLabel(phase: ProviderPhase): string {
-  if (phase === 'active') return 'active';
-  if (phase === 'ok') return 'ok';
-  if (phase === 'ready') return 'ready';
-  if (phase === 'benchmarking') return 'bench…';
-  if (phase === 'degraded') return 'degraded';
-  if (phase === 'repechage') return 'retry';
-  if (phase === 'error') return 'error';
-  return 'idle';
-}
+// Provider phase → color / label centralized in `phase-colors` (#924).
+const dotColor = providerPhaseColor;
+const phaseLabel = providerPhaseLabel;
 
 function relativeTime(ts: number): string {
   const diff = Date.now() - ts;
@@ -251,10 +229,7 @@ function ProfileRow({
           type="button"
           className="text-xs font-semibold flex-1 text-left truncate cursor-pointer hover:underline"
           style={{ color: isActive ? 'var(--color-text)' : 'var(--color-text-secondary)' }}
-          onClick={() => {
-            window.history.pushState(null, '', `/config/apps/edit/${profile.id}`);
-            window.dispatchEvent(new PopStateEvent('popstate'));
-          }}
+          onClick={() => navigateToPath(`/config/apps/edit/${profile.id}`)}
         >
           {profile.name}
         </button>
@@ -318,10 +293,7 @@ function ProfileRow({
             type="button"
             className="flex-shrink-0 cursor-pointer opacity-40 hover:opacity-100 transition-opacity"
             title="Edit profile"
-            onClick={() => {
-              window.history.pushState(null, '', '/config/apps');
-              window.dispatchEvent(new PopStateEvent('popstate'));
-            }}
+            onClick={() => navigateToPath('/config/apps')}
           >
             <ExternalLink className="w-3 h-3" style={{ color: 'var(--color-text-muted)' }} />
           </button>

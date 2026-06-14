@@ -216,7 +216,8 @@ describe('sanitizePrompt (pure)', () => {
 describe('maskApiKey / model / language sanitizers', () => {
   it('collapses short keys to *** and masks long keys to prefix+suffix', () => {
     expect(maskApiKey('short')).toBe('***');
-    expect(maskApiKey('sk-1234567890abcdef')).toBe('sk-1***cdef');
+    // #649: total revealed chars capped at <=25% of key length (here 18 → 4 → 2/side).
+    expect(maskApiKey('sk-1234567890abcdef')).toBe('sk***ef');
   });
   it('strips shell/path chars from model names and validates lang codes', () => {
     expect(sanitizeModelName('gpt-4o; rm -rf /')).toBe('gpt-4orm-rf/');

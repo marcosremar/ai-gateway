@@ -39,12 +39,86 @@ export function phaseVariant(phase: ServicePhase): BadgeVariant {
 }
 
 // ── Stage accent colors ──────────────────────────────────────────────────────
+//
+// Single source of truth for STT/LLM/TTS (+ image/pipeline) accent colors.
+// Previously three divergent palettes existed (#926): `phase-colors.STAGE_COLORS`,
+// `LogsSection.stageBgColor` (#38bdf8/#a78bfa/#fbbf24) and `ServicesSection`
+// (#0ea5e9/#8b5cf6/#f59e0b). Both sections now consume the helpers below so a
+// stage looks identical on every page.
 
 export const STAGE_COLORS = {
   stt: '#38bdf8',
   llm: '#a78bfa',
   tts: '#fbbf24',
 } as const;
+
+/** Extended accent map including non-pipeline-stage badges (image, pipeline). */
+const STAGE_ACCENT_MAP: Record<string, string> = {
+  stt: STAGE_COLORS.stt,
+  llm: STAGE_COLORS.llm,
+  tts: STAGE_COLORS.tts,
+  image: '#34d399',
+  pipeline: '#34d399',
+};
+
+const STAGE_MUTED = 'var(--color-text-muted)';
+
+/** Accent color for a stage id; muted fallback for unknown stages. Pure. */
+export function stageColor(stage: string): string {
+  return STAGE_ACCENT_MAP[stage] ?? STAGE_MUTED;
+}
+
+/** `StatusBadge` variant for a stage id. Pure. */
+export function stageBadgeVariant(stage: string): BadgeVariant {
+  switch (stage) {
+    case 'stt': return 'blue';
+    case 'llm': return 'violet';
+    case 'tts': return 'amber';
+    case 'image':
+    case 'pipeline': return 'emerald';
+    default: return 'gray';
+  }
+}
+
+const STAGE_SHORT_LABELS: Record<string, string> = {
+  stt: 'STT', llm: 'LLM', tts: 'TTS', image: 'IMG', pipeline: 'PIPE',
+};
+
+/** Short uppercase label for a stage id (falls back to `stage.toUpperCase()`). Pure. */
+export function stageLabel(stage: string): string {
+  return STAGE_SHORT_LABELS[stage] ?? stage.toUpperCase();
+}
+
+// ── Provider phase (PipelineHealthCard) → dot color / short label ─────────────
+//
+// PipelineHealthCard tracks a *provider* phase distinct from the deploy/service
+// `ServicePhase` above (#924). Centralized here so the two label/color maps don't
+// drift across edits.
+
+export type ProviderPhase =
+  | 'active' | 'ok' | 'benchmarking' | 'ready'
+  | 'degraded' | 'repechage' | 'error' | 'idle';
+
+const PROVIDER_PHASE_COLORS: Record<ProviderPhase, string> = {
+  active: '#10b981', ok: '#10b981', ready: '#10b981',
+  benchmarking: '#fbbf24', degraded: '#f97316', repechage: '#a78bfa',
+  error: '#ef4444', idle: '#52525b',
+};
+
+const PROVIDER_PHASE_LABELS: Record<ProviderPhase, string> = {
+  active: 'active', ok: 'ok', ready: 'ready', benchmarking: 'bench…',
+  degraded: 'degraded', repechage: 'retry', error: 'error', idle: 'idle',
+};
+
+/** Status-dot color for a provider phase; falls back to the idle gray. Pure. */
+export function providerPhaseColor(phase: ProviderPhase): string {
+  return PROVIDER_PHASE_COLORS[phase] ?? PROVIDER_PHASE_COLORS.idle;
+}
+
+/** Short human label for a provider phase. Pure. */
+export function providerPhaseLabel(phase: ProviderPhase): string {
+  return PROVIDER_PHASE_LABELS[phase] ?? 'idle';
+}
 
 // ── Phase duration formatter ─────────────────────────────────────────────────
 

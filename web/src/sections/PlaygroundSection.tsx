@@ -11,6 +11,7 @@ import {
   Mic, Square, Upload, Volume2, MessageSquare, AudioLines, Speech,
   Zap, Clock, Hash, Globe,
 } from 'lucide-react';
+import { revokeObjectUrls } from '@/lib/object-urls';
 
 // ── Types ──
 
@@ -191,6 +192,11 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recorder = useAudioRecorder();
+
+  // Revoke any outstanding message blob URLs on unmount (#951).
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  useEffect(() => () => { revokeObjectUrls(messagesRef.current); }, []);
 
   // Derived: current mode's provider/model/models
   const cap = MODE_META[mode].capability;
@@ -382,6 +388,7 @@ function ChatPlayground({ catalog }: { catalog: PlaygroundCatalog }) {
   }
 
   function handleClear() {
+    revokeObjectUrls(messages); // free per-message blob object URLs (#951)
     setMessages([]);
     setError(null);
     inputRef.current?.focus();

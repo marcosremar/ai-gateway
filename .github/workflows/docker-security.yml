@@ -35,11 +35,34 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      # #984: editing one Dockerfile previously rebuilt + scanned all three.
+      # On PR/push we only scan the entry that actually changed (schedule always
+      # scans everything). Keeps the security floor while cutting build minutes.
+      - name: Detect whether ${{ matrix.dockerfile }} changed
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "scan=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "scan=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$BASE" "${{ github.sha }}" | grep -qx "${{ matrix.dockerfile }}"; then
+            echo "scan=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "scan=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build Docker image (${{ matrix.dockerfile }})
+        if: steps.changed.outputs.scan == 'true'
         run: docker build -t ai-gateway-${{ matrix.dockerfile }}:scan -f ${{ matrix.dockerfile }} .
 
       - name: Run Trivy vulnerability scanner
+        if: steps.changed.outputs.scan == 'true'
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           image-ref: 'ai-gateway-${{ matrix.dockerfile }}:scan'
@@ -50,7 +73,7 @@ jobs:
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@0daab03d71ff584ef619d027a3fd9146679c5d84
-        if: always()
+        if: always() && steps.changed.outputs.scan == 'true'
         with:
           sarif_file: 'trivy-results-${{ matrix.dockerfile }}.sarif'
 
@@ -79,8 +102,22 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
+      # #985: 12 large CUDA images were rebuilt weekly with no layer cache. Build
+      # with buildx + the GitHub Actions cache so unchanged layers are restored
+      # instead of recompiled, then load the result locally for Trivy to scan.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db
+
       - name: Build Docker image (${{ matrix.subproject }})
-        run: docker build -t ai-gateway-${{ matrix.subproject }}:scan -f dockers/${{ matrix.subproject }}/Dockerfile dockers/${{ matrix.subproject }}/
+        uses: docker/build-push-action@0adf9959216b96bec444f325f1e493d4aa344497
+        with:
+          context: dockers/${{ matrix.subproject }}/
+          file: dockers/${{ matrix.subproject }}/Dockerfile
+          tags: ai-gateway-${{ matrix.subproject }}:scan
+          load: true
+          push: false
+          cache-from: type=gha,scope=trivy-${{ matrix.subproject }}
+          cache-to: type=gha,mode=max,scope=trivy-${{ matrix.subproject }}
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8

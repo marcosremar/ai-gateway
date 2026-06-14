@@ -5,6 +5,7 @@ import { getRequestLog, getMetrics, type RequestLogEntry, type MetricsResponse }
 import { Card, CardHeader, CardBody, Button, StatusBadge, AlertBanner, Spinner, Toggle } from '@/components/ui';
 import { ScrollText, BarChart3, RefreshCw, ChevronDown, ChevronUp, Clock, AlertCircle, Activity, Cpu } from 'lucide-react';
 import { PROVIDER_ICON } from './FallbackChainList';
+import { stageColor } from '@/lib/phase-colors';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 
@@ -349,27 +350,12 @@ export function LogsSection() {
 }
 
 function stageBgColor(stage: string): string {
-  if (stage === 'stt') return '#38bdf8';
-  if (stage === 'llm') return '#a78bfa';
-  if (stage === 'tts') return '#fbbf24';
-  if (stage === 'pipeline') return '#34d399';
-  return 'var(--color-text-muted)';
+  return stageColor(stage);
 }
 
 function stageRowTint(stage: string): string {
-  if (stage === 'stt') return 'color-mix(in srgb, #38bdf8 4%, transparent)';
-  if (stage === 'llm') return 'color-mix(in srgb, #a78bfa 4%, transparent)';
-  if (stage === 'tts') return 'color-mix(in srgb, #fbbf24 4%, transparent)';
-  if (stage === 'pipeline') return 'color-mix(in srgb, #34d399 4%, transparent)';
-  return 'transparent';
-}
-
-function stageColor(stage: string): 'emerald' | 'blue' | 'violet' | 'amber' | 'gray' {
-  if (stage === 'stt') return 'blue';
-  if (stage === 'llm') return 'violet';
-  if (stage === 'tts') return 'amber';
-  if (stage === 'pipeline') return 'emerald';
-  return 'gray';
+  const c = stageColor(stage);
+  return c === 'var(--color-text-muted)' ? 'transparent' : `color-mix(in srgb, ${c} 4%, transparent)`;
 }
 
 function StageBadge({ stage }: { stage: string }) {

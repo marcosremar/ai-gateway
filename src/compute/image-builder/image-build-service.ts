@@ -85,6 +85,23 @@ export function resolveImageTag(requestedTag: string | undefined, platforms: str
   return `${tag}-${suffix}`;
 }
 
+/**
+ * Terminal build statuses — a build in one of these will never change again (#970).
+ *
+ * Centralizes the `success | failed | cancelled` check that was inlined in the
+ * pollers, so the loop-exit condition can't drift from the record updates.
+ */
+export const TERMINAL_BUILD_STATUSES: ReadonlySet<ImageBuildStatus> = new Set<ImageBuildStatus>([
+  'success',
+  'failed',
+  'cancelled',
+]);
+
+/** True when a build status is terminal (no further polling needed). Pure. */
+export function isTerminalBuildStatus(status: ImageBuildStatus): boolean {
+  return TERMINAL_BUILD_STATUSES.has(status);
+}
+
 export function resolveAllowedBuildRoots(): string[] {
   const roots = new Set<string>();
   const addRoot = (input: string | undefined) => {
@@ -286,7 +303,7 @@ export async function* pollBuildStatus(
     const record = getBuildRecord(buildId);
     if (!record) throw new Error(`Build ${buildId} not found`);
     yield record;
-    if (record.status === 'success' || record.status === 'failed' || record.status === 'cancelled') {
+    if (isTerminalBuildStatus(record.status)) {
       return;
     }
     await new Promise(r => setTimeout(r, intervalMs));
