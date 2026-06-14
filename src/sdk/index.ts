@@ -10,7 +10,19 @@
  *   gw = GatewaySDK(base_url="http://localhost:4000")
  */
 
-export { GatewaySDK } from './client';
+export {
+  GatewaySDK,
+  // Pure, testable helpers also usable standalone.
+  resolveBaseUrlFromEnv,
+  parseMetrics,
+  generateRequestId,
+  isRetryableNetworkError,
+  parseGatewayErrorBody,
+  validatePollOptions,
+  classifyGpuPollState,
+  type PrometheusSample,
+  type PollOptions,
+} from './client';
 export {
   GatewayError,
   type GatewayConfig,
@@ -18,6 +30,7 @@ export {
   type TranslateResponse,
   type PipelineResponse,
   type PipelineOptions,
+  type PipelineTiming,
   type GpuStatus,
   type DeployOptions,
   type DeployResponse,

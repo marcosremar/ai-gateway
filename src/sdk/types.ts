@@ -30,6 +30,10 @@ export interface GatewayConfig {
   /** Per-attempt backoff delays in ms. The last entry is reused for further attempts.
    *  Default: [500, 1000, 2000, 4000]. */
   retryBackoffMs?: number[];
+  /** Emit an `X-Request-ID` header on every request (#837) so calls can be
+   *  cross-correlated with gateway logs. Default: true. The id of the most recent
+   *  request is readable via `sdk.lastRequestId()`. */
+  requestId?: boolean;
 }
 
 // ── Inference responses ─────────────────────────────────────────────────────
@@ -44,15 +48,28 @@ export interface TranslateResponse {
   usedGpu: boolean;
 }
 
+/** Per-stage + total timing for a pipeline run. Per-stage fields (#828) mirror
+ *  the Python/`sdk/node` clients so latency debugging works from this client too.
+ *  Stage fields are optional — the gateway may omit them on a cache hit. */
+export interface PipelineTiming {
+  /** End-to-end wall time for the whole pipeline (ms). */
+  totalMs: number;
+  /** Whether a GPU tier served the request. */
+  usedGpu: boolean;
+  /** Speech-to-text stage time (ms), when reported. */
+  sttMs?: number;
+  /** LLM/translation stage time (ms), when reported. */
+  llmMs?: number;
+  /** Text-to-speech stage time (ms), when reported. */
+  ttsMs?: number;
+}
+
 export interface PipelineResponse {
   transcription: string;
   response: string;
   audioBase64: string;
   contentType: string;
-  timing: {
-    totalMs: number;
-    usedGpu: boolean;
-  };
+  timing: PipelineTiming;
 }
 
 export interface PipelineOptions {

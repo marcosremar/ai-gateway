@@ -110,6 +110,81 @@ export function parseGatewayErrorBody(body: string): { message?: string; code?: 
   return { message, code, retryable };
 }
 
+/**
+ * Public, testable predicate for "is this error a retryable connection-level
+ * failure?" (#885). Wraps the internal `isRetryableError` so consumers (and the
+ * other SDKs) can align on one policy. ECONNREFUSED/ENOTFOUND/ECONNRESET/network
+ * failures are retryable; timeouts and HTTP errors are not.
+ */
+export function isRetryableNetworkError(err: unknown): boolean {
+  return isRetryableError(err);
+}
+
+/**
+ * Resolve a gateway base URL from the environment (#824), mirroring the CLI's
+ * discovery: `AI_GATEWAY_URL` > `GATEWAY_URL` > `http://localhost:<PORT>` >
+ * default `http://localhost:4000`. Lets the SDK be constructed zero-config via
+ * `GatewaySDK.fromEnv()` instead of forcing every caller to pass `baseUrl`.
+ */
+export function resolveBaseUrlFromEnv(
+  env: Record<string, string | undefined> = (typeof process !== 'undefined' ? process.env : {}),
+  defaultUrl = 'http://localhost:4000',
+): string {
+  if (env.AI_GATEWAY_URL?.trim()) return env.AI_GATEWAY_URL.trim();
+  if (env.GATEWAY_URL?.trim()) return env.GATEWAY_URL.trim();
+  if (env.PORT && /^\d+$/.test(env.PORT)) {
+    return env.PORT === '4000' ? defaultUrl : `http://localhost:${env.PORT}`;
+  }
+  return defaultUrl;
+}
+
+/** A single parsed Prometheus sample. */
+export interface PrometheusSample {
+  name: string;
+  labels: Record<string, string>;
+  value: number;
+}
+
+/**
+ * Parse Prometheus exposition text into structured samples (#838) so SDK callers
+ * don't have to regex the raw metrics string. Skips `#` comment/HELP/TYPE lines
+ * and blank lines; tolerates label sets and bare metrics. Unparseable lines are
+ * skipped rather than throwing.
+ */
+export function parseMetrics(text: string): PrometheusSample[] {
+  const out: PrometheusSample[] = [];
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    // name{label="v",...} value   |   name value
+    const m = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(-?[0-9.eE+]+|[+-]?Inf|NaN)\s*$/);
+    if (!m) continue;
+    const [, name, labelBlock, rawValue] = m;
+    const labels: Record<string, string> = {};
+    if (labelBlock) {
+      const inner = labelBlock.slice(1, -1);
+      for (const pair of inner.match(/([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/g) ?? []) {
+        const lm = pair.match(/([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/);
+        if (lm) labels[lm[1]] = lm[2].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      }
+    }
+    const value = rawValue === 'NaN' ? NaN
+      : rawValue === '+Inf' || rawValue === 'Inf' ? Infinity
+      : rawValue === '-Inf' ? -Infinity
+      : Number(rawValue);
+    out.push({ name, labels, value });
+  }
+  return out;
+}
+
+/** Generate a short, collision-resistant request id (#837) for X-Request-ID. */
+export function generateRequestId(): string {
+  // Prefer crypto.randomUUID when available; fall back to time+random.
+  const c = (typeof globalThis !== 'undefined' ? (globalThis as { crypto?: { randomUUID?: () => string } }).crypto : undefined);
+  if (c?.randomUUID) return c.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /** GPU statuses that are transient/in-progress and must NOT abort `waitForGpu`. */
 const GPU_TRANSIENT_STATUSES: ReadonlySet<string> = new Set([
   'idle', 'creating', 'booting', 'installing', 'searching', 'queued',
@@ -164,6 +239,24 @@ export class GatewaySDK {
   private readonly groqApiKey: string;
   private readonly maxRetries: number;
   private readonly retryBackoffMs: number[];
+  private readonly emitRequestId: boolean;
+  private _lastRequestId: string | undefined;
+  private _closed = false;
+
+  /**
+   * Construct an SDK from the environment (#824), mirroring the CLI's discovery
+   * (`AI_GATEWAY_URL`/`GATEWAY_URL`/`PORT`). Zero-config parity with the CLI:
+   *   const gw = GatewaySDK.fromEnv();
+   * Any explicit field in `overrides` wins over the env-derived baseUrl.
+   */
+  static fromEnv(overrides: Partial<GatewayConfig> = {}): GatewaySDK {
+    const env = typeof process !== 'undefined' ? process.env : {};
+    return new GatewaySDK({
+      baseUrl: overrides.baseUrl ?? resolveBaseUrlFromEnv(env),
+      apiKey: overrides.apiKey ?? env.AIGW_APP_KEY ?? env.AI_GATEWAY_KEY ?? env.GATEWAY_API_KEY,
+      ...overrides,
+    });
+  }
 
   constructor(config: GatewayConfig) {
     if (!config.baseUrl) {
@@ -186,6 +279,14 @@ export class GatewaySDK {
     this.retryBackoffMs = Array.isArray(config.retryBackoffMs) && config.retryBackoffMs.length > 0
       ? config.retryBackoffMs
       : DEFAULT_RETRY_BACKOFF_MS;
+    // #837 — emit X-Request-ID by default for log cross-correlation.
+    this.emitRequestId = config.requestId !== false;
+  }
+
+  /** The X-Request-ID of the most recent request (#837), or undefined if none
+   *  has been sent / request-id emission is disabled. */
+  lastRequestId(): string | undefined {
+    return this._lastRequestId;
   }
 
   // ── Inference ───────────────────────────────────────────────────────────
@@ -286,6 +387,10 @@ export class GatewaySDK {
     });
     const data = await this.parseJson(res, '/v1/speech');
     const timing = data.timing as Record<string, unknown> | undefined;
+    // #828 — surface per-stage timings (stt_ms/llm_ms/tts_ms) when present so
+    // latency debugging works from this client, not just totalMs.
+    const num = (v: unknown): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) ? v : undefined;
     return {
       transcription: (data.transcription as string) ?? '',
       response: (data.response as string) ?? '',
@@ -294,6 +399,9 @@ export class GatewaySDK {
       timing: {
         totalMs: (timing?.total_ms as number) ?? 0,
         usedGpu: (timing?.used_gpu as boolean) ?? false,
+        sttMs: num(timing?.stt_ms),
+        llmMs: num(timing?.llm_ms),
+        ttsMs: num(timing?.tts_ms),
       },
     };
   }
@@ -895,6 +1003,12 @@ export class GatewaySDK {
     return text.slice(0, maxBytes);
   }
 
+  /** Get metrics parsed into structured samples (#838) so callers don't have to
+   *  regex the Prometheus text themselves. */
+  async metricsJson(maxBytes = 1024 * 1024): Promise<PrometheusSample[]> {
+    return parseMetrics(await this.metrics(maxBytes));
+  }
+
   /** Get service statistics. */
   async serviceStats(): Promise<Record<string, unknown>> {
     const res = await this.fetch('/v1/service-stats', { method: 'GET', timeout: this.timeouts.health });
@@ -999,9 +1113,18 @@ export class GatewaySDK {
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
-  /** Clean up resources. No-op for now (fetch has no persistent connections). */
-  close(): void {
-    // Reserved for future connection pooling
+  /**
+   * Clean up resources (#830). `await`-able so the contract matches the Python /
+   * `sdk/node` clients (which close httpx/mark-closed). Idempotent; after close,
+   * `isClosed()` is true. No persistent connections today, so this is a marker.
+   */
+  async close(): Promise<void> {
+    this._closed = true;
+  }
+
+  /** Whether `close()` has been called (#830). */
+  isClosed(): boolean {
+    return this._closed;
   }
 
   // ── Internal ──────────────────────────────────────────────────────────
@@ -1041,10 +1164,18 @@ export class GatewaySDK {
         ? AbortSignal.any([options.signal, timeoutSignal])
         : timeoutSignal;
 
+      // #837 — generate a fresh request id per logical request (first attempt)
+      // and reuse it across retries so the gateway can correlate the retries.
+      const reqIdHeader: Record<string, string> = {};
+      if (this.emitRequestId) {
+        if (attempt === 0 || !this._lastRequestId) this._lastRequestId = generateRequestId();
+        reqIdHeader['X-Request-ID'] = this._lastRequestId;
+      }
+
       try {
         const res = await fetch(url, {
           method: options.method,
-          headers: { ...this.headers, ...options.headers },
+          headers: { ...this.headers, ...reqIdHeader, ...options.headers },
           body: options.body as BodyInit,
           signal: combinedSignal,
         });

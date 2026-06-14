@@ -483,3 +483,207 @@ export function shouldSuppressDecorative(opts: { quiet?: boolean; noColor?: bool
 export function isStdoutTarget(output: string | undefined): boolean {
   return output === '-';
 }
+
+// ── #801 / #819 / #855: global `--json` flag handling ─────────────────────────
+
+/**
+ * Detect a global `--json` flag for read commands (#801) so any command can emit
+ * machine-readable output. Pure: scans argv for the flag, ignoring its position.
+ */
+export function hasJsonFlag(args: string[]): boolean {
+  return args.includes('--json');
+}
+
+/**
+ * Serialise a value for `--json` output (#801/#855). Stable 2-space indentation,
+ * and `undefined` is normalised to `null` so the top-level value is always valid
+ * JSON. Kept here (not inline `JSON.stringify`) so every command formats alike.
+ */
+export function jsonOutput(value: unknown): string {
+  return JSON.stringify(value === undefined ? null : value, null, 2);
+}
+
+// ── #803: per-subcommand `--help` / `-h` detection ────────────────────────────
+
+/**
+ * Detect a `-h`/`--help` request anywhere in a command's argv (#803).
+ *
+ * Per-command help today only fires for keys present in the `HELP` map; commands
+ * like `balance`, `config`, `whoami`, `ping`, `voices` have no entry so
+ * `ai-gateway balance --help` falls through and *runs* the command. A command
+ * can call this first and print a one-liner instead of executing.
+ */
+export function hasHelpFlag(args: string[]): boolean {
+  return args.includes('--help') || args.includes('-h');
+}
+
+// ── #811: group `gpu` subcommands by lifecycle for help ───────────────────────
+
+/** A grouped view of `gpu` subcommands for a less wall-of-text help screen (#811). */
+export interface GpuSubcommandGroups {
+  Lifecycle: string[];
+  Cost: string[];
+  Dev: string[];
+  Advanced: string[];
+}
+
+/**
+ * Classify the (long) flat list of `gpu` subcommands into lifecycle groups (#811)
+ * so the help text can render "Lifecycle / Cost / Dev / Advanced" sections. Pure —
+ * returns the grouping; the caller does the rendering. Unknown commands fall into
+ * `Advanced` so nothing is silently dropped.
+ */
+export function groupGpuSubcommands(subcommands: readonly string[]): GpuSubcommandGroups {
+  const LIFECYCLE = new Set(['status', 'deploy', 'stop', 'resume', 'terminate', 'list', 'logs', 'inspect']);
+  const COST = new Set(['offers', 'best', 'sweep', 'preflight']);
+  const DEV = new Set(['ssh', 'patch', 'commit', 'pull', 'dev', 'push']);
+  const groups: GpuSubcommandGroups = { Lifecycle: [], Cost: [], Dev: [], Advanced: [] };
+  for (const cmd of subcommands) {
+    if (LIFECYCLE.has(cmd)) groups.Lifecycle.push(cmd);
+    else if (COST.has(cmd)) groups.Cost.push(cmd);
+    else if (DEV.has(cmd)) groups.Dev.push(cmd);
+    else groups.Advanced.push(cmd);
+  }
+  return groups;
+}
+
+// ── #846: spot / interruptible price savings ──────────────────────────────────
+
+/**
+ * Compute the % savings of a spot/interruptible price vs the on-demand price (#846)
+ * so `gpu offers` can flag the cheaper interruptible option. Returns `null` when
+ * spot is missing/zero or not actually cheaper than on-demand.
+ *
+ * @returns `{ savingsPct, spotPerHr, onDemandPerHr }` or `null`
+ */
+export function computeSpotSavings(
+  onDemandPerHr: number | undefined,
+  spotPerHr: number | undefined,
+): { savingsPct: number; spotPerHr: number; onDemandPerHr: number } | null {
+  const od = typeof onDemandPerHr === 'number' && Number.isFinite(onDemandPerHr) ? onDemandPerHr : NaN;
+  const sp = typeof spotPerHr === 'number' && Number.isFinite(spotPerHr) ? spotPerHr : NaN;
+  if (!(od > 0) || !(sp > 0) || sp >= od) return null;
+  const savingsPct = Math.round(((od - sp) / od) * 100);
+  return { savingsPct, spotPerHr: sp, onDemandPerHr: od };
+}
+
+// ── #847: per-request cost estimate for chat / benchmark ──────────────────────
+
+/**
+ * Estimate the dollar cost of a single request from token usage and a per-1M-token
+ * price (#847) so `chat`/`benchmark` can surface spend at the point of use. Self
+ * contained (no cross-module import of the pricing table) — the caller supplies the
+ * rate it looked up. Returns `null` when usage/pricing is unavailable.
+ *
+ * @param usage          token counts (`promptTokens`/`completionTokens`)
+ * @param pricePer1M     `{ input, output }` USD per 1,000,000 tokens
+ */
+export function estimateChatCostUsd(
+  usage: { promptTokens?: number; completionTokens?: number } | undefined,
+  pricePer1M: { input?: number; output?: number } | undefined,
+): number | null {
+  if (!usage || !pricePer1M) return null;
+  const inTok = Number(usage.promptTokens);
+  const outTok = Number(usage.completionTokens);
+  const inRate = Number(pricePer1M.input);
+  const outRate = Number(pricePer1M.output);
+  if (!Number.isFinite(inTok) || !Number.isFinite(outTok)) return null;
+  if (!Number.isFinite(inRate) && !Number.isFinite(outRate)) return null;
+  const cost =
+    (Number.isFinite(inTok) && Number.isFinite(inRate) ? (inTok / 1_000_000) * inRate : 0) +
+    (Number.isFinite(outTok) && Number.isFinite(outRate) ? (outTok / 1_000_000) * outRate : 0);
+  return Number.isFinite(cost) ? cost : null;
+}
+
+// ── #856: gateway URL env precedence + provenance ─────────────────────────────
+
+/** The env var names that influence the resolved gateway URL, in precedence order. */
+export const URL_ENV_PRECEDENCE = ['AI_GATEWAY_URL', 'GATEWAY_URL', 'PORT'] as const;
+
+/**
+ * Resolve the gateway URL from the environment AND report which source won (#856),
+ * mirroring `getConfig()`'s precedence so `config` can print provenance. `PORT`
+ * only contributes a default `http://localhost:<port>` (not a full URL).
+ *
+ * @returns `{ url, source }` — `source` is `'default'` when nothing is set.
+ */
+export function resolveGatewayUrlFromEnv(
+  env: Record<string, string | undefined>,
+  defaultUrl = 'http://localhost:4000',
+): { url: string; source: string } {
+  if (env.AI_GATEWAY_URL) return { url: env.AI_GATEWAY_URL, source: 'AI_GATEWAY_URL' };
+  if (env.GATEWAY_URL) return { url: env.GATEWAY_URL, source: 'GATEWAY_URL' };
+  if (env.PORT && /^\d+$/.test(env.PORT)) {
+    const port = env.PORT;
+    return { url: port === '4000' ? defaultUrl : `http://localhost:${port}`, source: 'PORT' };
+  }
+  return { url: defaultUrl, source: 'default' };
+}
+
+// ── #855: machine-readable config / whoami payloads ───────────────────────────
+
+/**
+ * Build the `{ url, keySource, connected, ... }` payload for `config --json` /
+ * `whoami --json` (#855) so CI provisioning scripts get structured identity +
+ * connectivity instead of human-only key/value lines.
+ */
+export function buildConfigJson(input: {
+  url: string;
+  urlSource?: string;
+  keySource: string;
+  keyMasked: string;
+  connected?: boolean;
+  userId?: string;
+}): Record<string, unknown> {
+  return {
+    url: input.url,
+    urlSource: input.urlSource ?? 'default',
+    keySource: input.keySource,
+    key: input.keyMasked,
+    connected: input.connected ?? false,
+    ...(input.userId ? { userId: input.userId } : {}),
+  };
+}
+
+// ── #859: `.env` walk-up discovery description ─────────────────────────────────
+
+/** How many parent directories `loadCwdEnv` walks up looking for a `.env`. */
+export const ENV_WALK_UP_LEVELS = 6;
+
+/**
+ * Describe the `.env` walk-up discovery (#859) for help / `config` output so the
+ * (otherwise invisible) per-project key resolution is predictable. When a found
+ * path is supplied, names it; otherwise states the search depth.
+ */
+export function describeEnvDiscovery(foundPath?: string): string {
+  if (foundPath) return `Loaded .env from ${foundPath}`;
+  return `No .env found (searched cwd and up to ${ENV_WALK_UP_LEVELS} parent directories)`;
+}
+
+// ── #860: warn when no API key but gateway likely requires one ─────────────────
+
+/**
+ * Decide whether to warn that no API key is configured (#860). When the target is
+ * a remote (non-localhost) gateway and no key is set, requests will 401 with a raw
+ * error; warn up front. Localhost is exempt (the server allows unauthenticated
+ * localhost when no key is configured).
+ */
+export function needsApiKeyWarning(opts: { key: string; isLocal: boolean }): boolean {
+  return !opts.key && !opts.isLocal;
+}
+
+/**
+ * Determine whether a URL points at the local machine (#860 helper). Pure,
+ * mirrors the CLI's `isLocalUrl`. Malformed URLs are treated as non-local so the
+ * caller errs toward warning.
+ */
+export function isLocalGatewayUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    // URL normalises IPv6 hosts with brackets (e.g. "[::1]"); strip them.
+    const host = u.hostname.replace(/^\[|\]$/g, '');
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
+}
