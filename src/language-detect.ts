@@ -56,6 +56,37 @@ export interface LanguageDetectResult {
 /** Minimum word count for reliable detection. Short texts are unreliable. */
 const MIN_WORDS = 4;
 
+// ── Unrestricted-franc result cache (#25) ────────────────────────────────────
+// The confidence estimate runs `franc()` a SECOND time with no `only` allow-list.
+// That unrestricted pass depends ONLY on the text, so in the dub-fanout path —
+// where the same `sttText` is detected once per target language — it is pure
+// recomputation. Memoize it with a small bounded LRU keyed by the raw text.
+const UNRESTRICTED_CACHE_MAX = 256;
+const _unrestrictedCache = new Map<string, string>();
+
+function francUnrestricted(text: string): string {
+  const cached = _unrestrictedCache.get(text);
+  if (cached !== undefined) {
+    // LRU promote: re-insert so the hottest text survives eviction.
+    _unrestrictedCache.delete(text);
+    _unrestrictedCache.set(text, cached);
+    return cached;
+  }
+  const result = franc(text, { minLength: 10 });
+  if (_unrestrictedCache.size >= UNRESTRICTED_CACHE_MAX) {
+    // Evict the oldest (first-inserted) entry — Map preserves insertion order.
+    const oldest = _unrestrictedCache.keys().next().value;
+    if (oldest !== undefined) _unrestrictedCache.delete(oldest);
+  }
+  _unrestrictedCache.set(text, result);
+  return result;
+}
+
+/** Test/observability hook: clear the unrestricted-franc memo. */
+export function _clearUnrestrictedCache(): void {
+  _unrestrictedCache.clear();
+}
+
 // ── Confidence tuning constants ──────────────────────────────────────────────
 // Previously these were inline magic numbers. Named so operators reading the
 // detection logic can see (and tune) exactly how confidence is scored.
@@ -118,8 +149,10 @@ export function detectLanguage(text: string, source: string, target: string): La
   let unrestricted: string;
   try {
     detected = franc(text, { only: [srcIso3, tgtIso3], minLength: 10 });
-    // Estimate confidence: run again unrestricted and compare.
-    unrestricted = franc(text, { minLength: 10 });
+    // Estimate confidence: run again unrestricted and compare. The unrestricted
+    // pass is text-only, so it is memoized (#25) — the dub-fanout path detects
+    // the same `sttText` once per target and would otherwise pay this twice each.
+    unrestricted = francUnrestricted(text);
   } catch {
     return { language: '', confidence: 0 };
   }

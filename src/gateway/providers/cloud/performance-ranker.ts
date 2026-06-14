@@ -50,6 +50,13 @@ export interface PerformanceRankerConfig {
   persistPath?: string | null;
   /** How often to auto-save to disk in ms (default: 60_000 = 1 min) */
   persistIntervalMs?: number;
+  /**
+   * Neutral "mediocre latency" anchor (ms) that stale scores decay toward.
+   * Default 500ms is fine for LLM but wildly off for STT/TTS (sub-300ms
+   * targets), where a stale fast provider would be unfairly demoted toward a
+   * 500ms anchor — make it per-stage configurable (#353).
+   */
+  neutralScoreMs?: number;
 }
 
 /** Serialized format for disk persistence */
@@ -89,6 +96,7 @@ const DEFAULT_WINDOW_SIZE = 50;
 const DEFAULT_WINDOW_TIME_MS = 600_000; // 10 minutes
 const DEFAULT_MIN_SAMPLES = 5;
 const DEFAULT_DEGRADATION_THRESHOLD = 2.0;
+const DEFAULT_NEUTRAL_SCORE_MS = 500;
 
 // ─── Model pricing ─────────────────────────────────────────────────────────────
 
@@ -154,6 +162,7 @@ export class PerformanceRanker {
   private readonly windowTimeMs: number;
   private readonly minSamples: number;
   private readonly degradationThreshold: number;
+  private readonly neutralScoreMs: number;
   private readonly persistPath: string | null;
   private persistTimer: ReturnType<typeof setInterval> | null = null;
   private dirty = false;
@@ -163,6 +172,7 @@ export class PerformanceRanker {
     this.windowTimeMs = config.windowTimeMs ?? DEFAULT_WINDOW_TIME_MS;
     this.minSamples = config.minSamples ?? DEFAULT_MIN_SAMPLES;
     this.degradationThreshold = config.degradationThreshold ?? DEFAULT_DEGRADATION_THRESHOLD;
+    this.neutralScoreMs = config.neutralScoreMs ?? DEFAULT_NEUTRAL_SCORE_MS;
     this.persistPath = config.persistPath ?? null;
 
     // Auto-load from disk if path configured
@@ -351,7 +361,7 @@ export class PerformanceRanker {
       const ageFraction = (Date.now() - newestTs) / this.windowTimeMs;
       if (ageFraction > 0.1) {
         // only apply after 10% of window has passed
-        const NEUTRAL_SCORE = 500; // ms — a "mediocre" latency as neutral anchor
+        const NEUTRAL_SCORE = this.neutralScoreMs; // ms — "mediocre" latency anchor (per-stage configurable, #353)
         const decayFactor = Math.exp(-ageFraction * 1.5); // τ ≈ 67% of windowTimeMs
         score = score * decayFactor + NEUTRAL_SCORE * (1 - decayFactor);
       }

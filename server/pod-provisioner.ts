@@ -39,6 +39,26 @@ export function isSafeRemotePath(remotePath: string): boolean {
     && !remotePath.includes('..');
 }
 
+/** SSH usernames are alphanumeric with `_`, `-`, `.` (POSIX-ish). Guards the
+ *  configurable user before it's interpolated into `user@host` (#185). */
+const SAFE_SSH_USER_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
+export function isSafeSshUser(user: string): boolean {
+  return user.length > 0 && user.length <= 32 && SAFE_SSH_USER_RE.test(user);
+}
+
+/**
+ * Build the `user@host` SSH destination, defaulting to `root` (#185).
+ *
+ * Providers/images that use a non-root SSH user couldn't be provisioned
+ * because the destination was hardcoded `root@host`. Falls back to `root` when
+ * the user is missing or fails validation (never lets an unsafe value into the
+ * spawn args). Pure.
+ */
+export function sshUserHost(host: string, user?: string): string {
+  const u = user && isSafeSshUser(user) ? user : 'root';
+  return `${u}@${host}`;
+}
+
 const AGENT_DIR = join(__dirname, 'pod-agent');
 const SSH_OPTS = [
   '-o', 'StrictHostKeyChecking=no',
@@ -51,6 +71,8 @@ const SSH_OPTS = [
 export interface ProvisionConfig {
   sshHost: string;
   sshPort: number;
+  /** SSH user for the pod. Defaults to `root` (#185). */
+  sshUser?: string;
   podId: string;
   /** URL do gateway que o agente vai POSTar — geralmente process.env.AIGW_PUBLIC_URL */
   gatewayUrl?: string;
@@ -92,9 +114,9 @@ interface ProvisionResult {
 /**
  * Roda um comando SSH e captura stdout/stderr.
  */
-function sshExec(host: string, port: number, command: string, timeoutMs = 60_000): Promise<{ ok: boolean; stdout: string; stderr: string; code: number | null }> {
+function sshExec(host: string, port: number, command: string, timeoutMs = 60_000, user?: string): Promise<{ ok: boolean; stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve) => {
-    const args = [...SSH_OPTS, '-p', String(port), `root@${host}`, command];
+    const args = [...SSH_OPTS, '-p', String(port), sshUserHost(host, user), command];
     const proc = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -119,7 +141,7 @@ function sshExec(host: string, port: number, command: string, timeoutMs = 60_000
  * Escreve um arquivo no pod via heredoc — evita scp pra arquivos pequenos
  * (mais rápido, menos overhead, menos race com sshd ainda subindo).
  */
-async function writeRemoteFile(host: string, port: number, content: string, remotePath: string, mode = '0644'): Promise<boolean> {
+async function writeRemoteFile(host: string, port: number, content: string, remotePath: string, mode = '0644', user?: string): Promise<boolean> {
   // Heredoc com EOF single-quoted preserva o conteúdo literalmente — sem
   // expansão de variáveis nem escapes. Single quotes no conteúdo seriam um
   // problema mas usamos um delimiter improvável (AIGW_EOF) e zero processing.
@@ -145,7 +167,7 @@ async function writeRemoteFile(host: string, port: number, content: string, remo
     return false;
   }
   const cmd = `mkdir -p $(dirname ${remotePath}) && cat > ${remotePath} <<'AIGW_EOF'\n${content}\nAIGW_EOF\nchmod ${mode} ${remotePath}`;
-  const result = await sshExec(host, port, cmd, 30_000);
+  const result = await sshExec(host, port, cmd, 30_000, user);
   if (!result.ok) {
     log.warn(`writeRemoteFile failed for ${remotePath}: code=${result.code} stderr=${result.stderr}`);
   }
@@ -195,16 +217,16 @@ function buildEnvFile(cfg: ProvisionConfig): string {
  */
 export async function provisionPod(cfg: ProvisionConfig): Promise<ProvisionResult> {
   const start = Date.now();
-  const { sshHost, sshPort, podId } = cfg;
+  const { sshHost, sshPort, podId, sshUser } = cfg;
 
   if (!sshHost || !sshPort) {
     return { ok: false, durationMs: 0, error: 'sshHost/sshPort missing — pod has no SSH access' };
   }
 
-  log.log(`[provision] starting for pod=${podId} via ${sshHost}:${sshPort}`);
+  log.log(`[provision] starting for pod=${podId} via ${sshUserHost(sshHost, sshUser)}:${sshPort}`);
 
   // Quick reachability probe — fail fast em vez de pendurar 60s
-  const probe = await sshExec(sshHost, sshPort, 'echo aigw-probe-ok', 15_000);
+  const probe = await sshExec(sshHost, sshPort, 'echo aigw-probe-ok', 15_000, sshUser);
   if (!probe.ok) {
     const error = `SSH probe failed: code=${probe.code} stderr=${probe.stderr.trim()}`;
     log.warn(`[provision] ${error}`);
@@ -227,12 +249,12 @@ export async function provisionPod(cfg: ProvisionConfig): Promise<ProvisionResul
 
   // 2. Push assets
   const writes = [
-    writeRemoteFile(sshHost, sshPort, backup, '/usr/local/bin/aigw-backup', '0755'),
-    writeRemoteFile(sshHost, sshPort, restore, '/usr/local/bin/aigw-restore', '0755'),
-    writeRemoteFile(sshHost, sshPort, agent, '/usr/local/bin/aigw-agent', '0755'),
-    writeRemoteFile(sshHost, sshPort, install, '/usr/local/bin/aigw-install', '0755'),
-    writeRemoteFile(sshHost, sshPort, devcli, '/usr/local/bin/aigw-devcli', '0755'),
-    writeRemoteFile(sshHost, sshPort, buildEnvFile(cfg), '/etc/aigw-agent.env', '0600'),
+    writeRemoteFile(sshHost, sshPort, backup, '/usr/local/bin/aigw-backup', '0755', sshUser),
+    writeRemoteFile(sshHost, sshPort, restore, '/usr/local/bin/aigw-restore', '0755', sshUser),
+    writeRemoteFile(sshHost, sshPort, agent, '/usr/local/bin/aigw-agent', '0755', sshUser),
+    writeRemoteFile(sshHost, sshPort, install, '/usr/local/bin/aigw-install', '0755', sshUser),
+    writeRemoteFile(sshHost, sshPort, devcli, '/usr/local/bin/aigw-devcli', '0755', sshUser),
+    writeRemoteFile(sshHost, sshPort, buildEnvFile(cfg), '/etc/aigw-agent.env', '0600', sshUser),
   ];
   const writeResults = await Promise.all(writes);
   if (writeResults.some(r => !r)) {
@@ -241,7 +263,7 @@ export async function provisionPod(cfg: ProvisionConfig): Promise<ProvisionResul
 
   // 3. Roda install.sh
   log.log(`[provision] running install.sh on ${podId}`);
-  const installResult = await sshExec(sshHost, sshPort, 'bash /usr/local/bin/aigw-install', 300_000);
+  const installResult = await sshExec(sshHost, sshPort, 'bash /usr/local/bin/aigw-install', 300_000, sshUser);
   const durationMs = Date.now() - start;
 
   if (!installResult.ok) {

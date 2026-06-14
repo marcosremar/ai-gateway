@@ -59,7 +59,10 @@ interface PersistedCircuitState {
   avgLatencyMs: number;
   latencyVariance: number;
   lastSuccessRate: number;
-  failureMadre: string[]; // Recent failure reasons
+  /** Recent failure reasons (most recent last). Was historically the typo'd
+   *  `failureMadre`; we read that legacy field on load for back-compat
+   *  (#232) so persisted state written by older builds still surfaces. */
+  failureReasons: string[];
   adaptiveThreshold: number; // Currently adapted failure threshold
   predictiveScore: number; // 0-1 risk score for future failures
 }
@@ -79,10 +82,54 @@ function defaultState(): PersistedCircuitState {
     avgLatencyMs: 0,
     latencyVariance: 0,
     lastSuccessRate: 1.0,
-    failureMadre: [],
+    failureReasons: [],
     adaptiveThreshold: 3, // Start with default
     predictiveScore: 0
   };
+}
+
+// ── Pure helpers (exported for unit testing — no I/O, no `this`) ────────────
+
+/**
+ * #234 — adaptive failure threshold floor + hysteresis.
+ *
+ * Reliable tiers (success rate above `minSuccessRate`) get a more tolerant
+ * threshold; unreliable tiers fail faster but the floor is **2**, not 1, so a
+ * single transient failure can never instantly trip the circuit (which caused
+ * flapping). Returns the configured `failureThreshold` until there is
+ * sufficient history (`sampleCount < minSamples`).
+ */
+export function computeAdaptiveThreshold(
+  successRate: number,
+  failureThreshold: number,
+  minSuccessRate: number,
+  sampleCount: number,
+  minSamples = 30,
+): number {
+  if (sampleCount < minSamples) return failureThreshold;
+  if (successRate > minSuccessRate) {
+    return Math.max(failureThreshold * 1.5, 5); // more tolerant
+  }
+  // Floor at 2 (was 1) + round so a tier at a single failure never trips.
+  return Math.max(Math.round(failureThreshold * 0.5), 2);
+}
+
+/**
+ * #238 — predictive-open gate with a configurable sample floor.
+ *
+ * The predictive score is noisy on tiny samples, so opening the circuit
+ * purely on prediction requires both a score over `riskThreshold` AND at
+ * least `minSamples` observations. Returns false when prediction is disabled.
+ */
+export function shouldPredictiveOpen(
+  predictiveScore: number,
+  sampleCount: number,
+  opts: { enabled?: boolean; riskThreshold?: number; minSamples?: number } = {},
+): boolean {
+  const { enabled = true, riskThreshold = 0.7, minSamples = 20 } = opts;
+  if (!enabled) return false;
+  if (sampleCount < minSamples) return false;
+  return predictiveScore > riskThreshold;
 }
 
 export class TierCircuitBreaker {
@@ -99,7 +146,14 @@ export class TierCircuitBreaker {
     const raw = await this.store.get(storeKey(tierIndex));
     if (!raw) return defaultState();
     try {
-      return JSON.parse(raw) as PersistedCircuitState;
+      const parsed = JSON.parse(raw) as PersistedCircuitState & { failureMadre?: string[] };
+      // #232 back-compat: older builds persisted reasons under `failureMadre`.
+      if (!parsed.failureReasons && Array.isArray(parsed.failureMadre)) {
+        parsed.failureReasons = parsed.failureMadre;
+      }
+      if (!Array.isArray(parsed.failureReasons)) parsed.failureReasons = [];
+      delete parsed.failureMadre;
+      return parsed;
     } catch {
       return defaultState();
     }
@@ -215,9 +269,9 @@ export class TierCircuitBreaker {
     } else {
       s.failures++;
       if (failureReason) {
-        s.failureMadre.push(failureReason);
+        s.failureReasons.push(failureReason);
         // Keep only last 10 failures
-        s.failureMadre = s.failureMadre.slice(-10);
+        s.failureReasons = s.failureReasons.slice(-10);
       }
     }
 
@@ -293,14 +347,15 @@ export class TierCircuitBreaker {
     // Base threshold on historical success rate
     const successRate = history.filter(h => h.success).length / history.length;
 
-    // Adjust threshold based on reliability:
-    // - More reliable tiers (high success rate): more tolerant (higher threshold)
-    // - Less reliable tiers: fail faster (lower threshold)
-    if (successRate > this.config.minSuccessRate) {
-      return Math.max(this.config.failureThreshold * 1.5, 5); // More tolerant
-    } else {
-      return Math.max(this.config.failureThreshold * 0.5, 1); // Fail faster
-    }
+    // Delegate to the pure helper so the floor (now 2, not 1) + hysteresis is
+    // unit-testable in isolation (#234).
+    return computeAdaptiveThreshold(
+      successRate,
+      this.config.failureThreshold,
+      this.config.minSuccessRate,
+      history.length,
+      30,
+    );
   }
 
   private shouldOpenCircuitAdvanced(state: PersistedCircuitState, tierIndex: number): boolean {
@@ -311,7 +366,14 @@ export class TierCircuitBreaker {
     // Multiple criteria for opening circuit:
     const consecutiveFailures = state.failures >= threshold;
     const successRateTooLow = state.lastSuccessRate < this.config.minSuccessRate;
-    const predictiveRisk = this.config.predictiveAnalysis && (state.predictiveScore > 0.7);
+    // #238: predictive open requires a minimum sample count so we don't open
+    // the circuit on a noisy score derived from a handful of requests.
+    const sampleCount = this.performanceHistory.get(tierIndex)?.length ?? 0;
+    const predictiveRisk = shouldPredictiveOpen(state.predictiveScore, sampleCount, {
+      enabled: this.config.predictiveAnalysis,
+      riskThreshold: 0.7,
+      minSamples: 20,
+    });
 
     return consecutiveFailures || successRateTooLow || predictiveRisk;
   }
@@ -339,6 +401,9 @@ export class TierCircuitBreaker {
     adaptiveThreshold: number;
     recentFailureRate: number;
     latencyTrends: { avg: number; trend: 'stable' | 'increasing' | 'decreasing'; stability: number };
+    /** #232 — recent failure reasons so operators can see *why* a circuit
+     *  opened instead of guessing. Most recent last. */
+    failureReasons: string[];
     recommendation: string;
     tierHealth: 'healthy' | 'warning' | 'critical';
   } | null> {
@@ -384,6 +449,7 @@ export class TierCircuitBreaker {
         trend: latencyTrend.trend,
         stability: latencyTrend.stability
       },
+      failureReasons: [...(state.failureReasons ?? [])],
       recommendation,
       tierHealth
     };

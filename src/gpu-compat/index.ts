@@ -169,6 +169,36 @@ function detectArchitecture(imageName: string): GpuArchitecture | null {
   return null;
 }
 
+/** Recognized model size classes, largest first (order matters for matching). */
+export type ModelSizeClass = '200b' | '70b' | '32b' | '13b' | '7b' | '3b' | null;
+
+/**
+ * Detect a model size class from a haystack, anchored to model-name tokens
+ * (#194).
+ *
+ * A naive `\b(7b|8b)\b` over a string that includes the whole env JSON can
+ * match digits inside an unrelated token — most notably a version like
+ * `cuda12.7b` (the `.` creates a word boundary before `7`), mis-estimating
+ * VRAM. We require the size token to be delimited by typical model-name
+ * separators (start/space/`-`/`_`/`/`/`:` on the left; space/end/`-`/`_`/`/`
+ * on the right) and explicitly reject a token immediately preceded by `.` and
+ * a digit (a dotted version number). Returns the size class or null.
+ */
+export function detectModelSizeClass(haystack: string): ModelSizeClass {
+  const lc = haystack.toLowerCase();
+  // Left: not preceded by an alphanumeric, and not by a `.`-after-digit
+  // (version like 12.7b). Right: not followed by an alphanumeric.
+  const sized = (alts: string): RegExp =>
+    new RegExp(`(?<![0-9]\\.)(?<![a-z0-9])(?:${alts})(?![a-z0-9])`);
+  if (sized('200b|175b').test(lc)) return '200b';
+  if (sized('70b|65b|72b').test(lc)) return '70b';
+  if (sized('32b|33b|34b|35b').test(lc)) return '32b';
+  if (sized('13b|14b|15b').test(lc)) return '13b';
+  if (sized('7b|8b').test(lc)) return '7b';
+  if (sized('3b|4b').test(lc)) return '3b';
+  return null;
+}
+
 /**
  * Estimate VRAM requirement from Docker image metadata.
  *
@@ -207,43 +237,45 @@ export function estimateVramFromImage(
   const isMultiModel = /\b(multi|pipeline|stt.*llm|llm.*tts)\b/.test(haystack);
   const multiModelMultiplier = isMultiModel ? 1.5 : 1;
 
-  // Model size detection with quantization-aware base values
-  if (/\b(200b|175b)\b/.test(haystack)) {
+  // Model size detection with quantization-aware base values.
+  // Token-anchored to avoid matching digits inside versions/hashes (#194).
+  const sizeClass = detectModelSizeClass(haystack);
+  if (sizeClass === '200b') {
     const base = isQ4 ? 110 : isQ8 ? 180 : isFp16 ? 350 : isExl2 ? 90 : 400;
     return {
       vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier),
       hint: `200B-class model (quant: ${isQ4 ? 'Q4' : isQ8 ? 'Q8' : isFp16 ? 'FP16' : 'FP32'})`,
     };
   }
-  if (/\b(70b|65b|72b)\b/.test(haystack)) {
+  if (sizeClass === '70b') {
     const base = isQ4 ? 40 : isQ5 ? 50 : isQ8 ? 75 : isFp16 ? 140 : isGguf ? 42 : isExl2 ? 36 : 48;
     return {
       vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier),
       hint: `70B-class model (quant: ${isQ4 ? 'Q4' : isQ5 ? 'Q5' : isQ8 ? 'Q8' : isFp16 ? 'FP16' : 'FP16'})`,
     };
   }
-  if (/\b(32b|33b|34b|35b)\b/.test(haystack)) {
+  if (sizeClass === '32b') {
     const base = isQ4 ? 20 : isQ8 ? 36 : isFp16 ? 68 : isGguf ? 22 : isExl2 ? 18 : 24;
     return {
       vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier),
       hint: `32B-class model (quant: ${isQ4 ? 'Q4' : isQ8 ? 'Q8' : isFp16 ? 'FP16' : 'FP16'})`,
     };
   }
-  if (/\b(13b|14b|15b)\b/.test(haystack)) {
+  if (sizeClass === '13b') {
     const base = isQ4 ? 10 : isQ8 ? 16 : isFp16 ? 28 : isGguf ? 11 : isExl2 ? 9 : 16;
     return {
       vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier),
       hint: `13B-class model (quant: ${isQ4 ? 'Q4' : isQ8 ? 'Q8' : isFp16 ? 'FP16' : 'FP16'})`,
     };
   }
-  if (/\b(7b|8b)\b/.test(haystack)) {
+  if (sizeClass === '7b') {
     const base = isQ4 ? 5 : isQ8 ? 8 : isFp16 ? 16 : isGguf ? 6 : isExl2 ? 5 : 8;
     return {
       vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier),
       hint: `7B-class model (quant: ${isQ4 ? 'Q4' : isQ8 ? 'Q8' : isFp16 ? 'FP16' : 'FP16'})`,
     };
   }
-  if (/\b(3b|4b)\b/.test(haystack)) {
+  if (sizeClass === '3b') {
     const base = isQ4 ? 3 : isQ8 ? 4 : isFp16 ? 8 : isGguf ? 3 : 4;
     return {
       vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier),

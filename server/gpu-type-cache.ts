@@ -104,6 +104,23 @@ export async function refreshGpuTypeCache(): Promise<void> {
   log.log(`[gpu-cache] Cached ${totalUpserted} GPU types from ${providerQueries.length} provider(s)`);
 }
 
+/** Why `validateGpuTypesFromCache` returned without an error (#189). */
+export type CacheValidationOutcome = 'no-filter' | 'cache-empty' | 'validated';
+
+/**
+ * Classify a cache-validation run for observability (#189).
+ *
+ * Returning `null` (valid) on an empty cache silently skips GPU-name validation
+ * on the first deploy after a restart. This pure helper distinguishes the three
+ * no-error cases so callers can warn when validation was skipped due to an
+ * empty cache rather than a real pass.
+ */
+export function cacheValidationOutcome(requestedCount: number, cachedCount: number): CacheValidationOutcome {
+  if (requestedCount === 0) return 'no-filter';
+  if (cachedCount === 0) return 'cache-empty';
+  return 'validated';
+}
+
 /** Validate GPU types against the DB cache. Returns null if valid, or a descriptive error string. */
 export async function validateGpuTypesFromCache(gpuTypes: string[], provider?: string): Promise<string | null> {
   if (gpuTypes.length === 0) return null; // no filter = any GPU
@@ -111,7 +128,12 @@ export async function validateGpuTypesFromCache(gpuTypes: string[], provider?: s
   // Fetch all cached GPU types (optionally filtered by provider)
   const where = provider ? { provider } : {};
   const cached = await prisma.gpuTypeCache.findMany({ where, orderBy: { pricePerHr: 'asc' } });
-  if (cached.length === 0) return null; // no cache yet = skip validation
+  if (cacheValidationOutcome(gpuTypes.length, cached.length) === 'cache-empty') {
+    // Skip validation but make it visible — the operator should know the very
+    // first deploy after a restart got no GPU-name validation (#189).
+    log.warn(`[gpu-cache] GPU-type validation skipped: cache empty (provider=${provider ?? 'any'}). A background refresh will populate it shortly.`);
+    return null; // no cache yet = skip validation
+  }
 
   // Build lookup sets: full names and short names (case-insensitive)
   const validFullNames = new Set(cached.map((g: any) => g.gpuName.toLowerCase()));

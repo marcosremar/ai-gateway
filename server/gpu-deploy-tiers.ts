@@ -25,6 +25,25 @@ void cooldownTracker.loadFromFile(join(homedir(), '.babelcast', 'cooldowns.json'
   }
 }
 
+/** Default GPU provider cascade order when PROVIDER_CHAIN doesn't list GPU
+ *  providers explicitly: Vast.ai → RunPod → Modal. TensorDock is intentionally
+ *  omitted (balance/reliability) unless named in PROVIDER_CHAIN (#144). */
+export const DEFAULT_GPU_ORDER: readonly string[] = ['vast', 'runpod', 'modal'];
+
+/**
+ * Whether a provider's credentials are present but it is neither in the user's
+ * chain nor in the default order — i.e. configured but silently deprioritized
+ * (#144). Pure so it can be unit-tested without env/clients.
+ */
+export function isConfiguredButDeprioritized(
+  provider: string,
+  hasCredentials: boolean,
+  chain: readonly string[],
+  defaultOrder: readonly string[] = DEFAULT_GPU_ORDER,
+): boolean {
+  return hasCredentials && !chain.includes(provider) && !defaultOrder.includes(provider);
+}
+
 /** Map of provider name → client instance for tier building. */
 export const providerClients: Record<ProviderName, GpuProviderClient> = {
   runpod,
@@ -81,7 +100,13 @@ export function buildGpuTiers(
   }
 
   // Default GPU provider order: Vast.ai → RunPod → Modal (skip TensorDock unless explicitly in chain)
-  const defaultGpuOrder = ['vast', 'runpod', 'modal'];
+  const defaultGpuOrder = DEFAULT_GPU_ORDER;
+  // TensorDock is configured-but-deprioritized when its creds exist yet it's
+  // not in PROVIDER_CHAIN — log it so operators aren't surprised it's last
+  // (or absent) in the cascade (#144).
+  if (isConfiguredButDeprioritized('tensordock', available.tensordock != null, gpuInChain, defaultGpuOrder)) {
+    log.log('[gateway] TensorDock is configured (key+authId present) but not in PROVIDER_CHAIN — deprioritized in cascade. Add "tensordock" to PROVIDER_CHAIN to use it.');
+  }
   for (const name of defaultGpuOrder) {
     const tier = available[name];
     if (tier && !added.has(name)) {

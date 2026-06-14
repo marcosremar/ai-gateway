@@ -31,6 +31,19 @@ interface LatencySample {
   timestamp: number;
 }
 
+/** Cached p95-derived timeout for a key, valid while the buffer is unchanged. */
+interface TimeoutCacheEntry {
+  /** Buffer length the cached value was computed from (cache invalidation). */
+  bufferLen: number;
+  /** Computed adaptive timeout (already clamped). */
+  timeout: number;
+  /** When the value was cached (short max-age guards against window eviction). */
+  computedAt: number;
+}
+
+/** Max age of a cached p95 timeout before it is recomputed. */
+const TIMEOUT_CACHE_TTL_MS = 1_000;
+
 const DEFAULT_MARGIN_MULTIPLIER = 1.5;
 const DEFAULT_MIN_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_TIMEOUT_MS = 30_000;
@@ -72,6 +85,8 @@ export class AdaptiveTimeoutCalculator {
   private readonly windowMs: number;
 
   private buffers = new Map<string, LatencySample[]>();
+  /** Per-key memo of the last computed p95 timeout (hot-path optimization). */
+  private timeoutCache = new Map<string, TimeoutCacheEntry>();
 
   constructor(config: AdaptiveTimeoutConfig = {}) {
     this.marginMultiplier = config.marginMultiplier ?? DEFAULT_MARGIN_MULTIPLIER;
@@ -111,11 +126,22 @@ export class AdaptiveTimeoutCalculator {
 
     if (valid.length < this.minSamples) return defaultTimeoutMs;
 
+    // Serve from the memo when the buffer is unchanged and the entry is fresh.
+    // getTimeout runs once per provider per request and re-sorts the whole
+    // buffer each time; this avoids the repeated sort/allocation (#345).
+    const now2 = Date.now();
+    const cached = this.timeoutCache.get(key);
+    if (cached && cached.bufferLen === valid.length && now2 - cached.computedAt < TIMEOUT_CACHE_TTL_MS) {
+      return cached.timeout;
+    }
+
     const latencies = valid.map((s) => s.latencyMs).sort((a, b) => a - b);
     const p95 = percentile(latencies, 95);
     const adaptive = Math.round(p95 * this.marginMultiplier);
 
-    return Math.max(this.minTimeoutMs, Math.min(this.maxTimeoutMs, adaptive));
+    const timeout = Math.max(this.minTimeoutMs, Math.min(this.maxTimeoutMs, adaptive));
+    this.timeoutCache.set(key, { bufferLen: valid.length, timeout, computedAt: now2 });
+    return timeout;
   }
 
   /**
@@ -148,6 +174,10 @@ export class AdaptiveTimeoutCalculator {
     if (buffer.length > MAX_BUFFER_SIZE) {
       buffer.splice(0, buffer.length - MAX_BUFFER_SIZE);
     }
+
+    // A new sample changes the percentile — drop the memo so the next
+    // getTimeout recomputes (#345).
+    this.timeoutCache.delete(key);
   }
 
   /** Number of valid (non-expired) samples for a given provider+model. */
@@ -167,5 +197,6 @@ export class AdaptiveTimeoutCalculator {
   /** Clear all recorded samples (useful for testing). */
   clear(): void {
     this.buffers.clear();
+    this.timeoutCache.clear();
   }
 }

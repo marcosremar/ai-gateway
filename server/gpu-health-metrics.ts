@@ -9,6 +9,40 @@ const log = createLogger('gpu-deploy');
 
 export const GPU_MONITOR_INTERVAL_MS = 30_000; // health check every 30s
 
+/**
+ * #247 — load-adaptive probe interval, both directions.
+ *
+ * The monitor's base interval (30s) only ever slows *down* while idle (to
+ * 60s). It never speeds up around a known cold-start (when we want fast
+ * feedback) nor slows further for a long-stable pod (to cut probe cost). This
+ * pure helper returns the interval to use for the next probe:
+ *   - booting / just-resumed  → faster (base/2, floored at `minMs`)
+ *   - idle (no recent req)    → slower (grows toward `maxMs`)
+ *   - long stable             → coast at `maxMs`
+ *
+ * Exported separately so the cadence policy is unit-testable without a live
+ * loop; the loop can adopt it incrementally.
+ *
+ * @param baseMs    Base interval (GPU_MONITOR_INTERVAL_MS).
+ * @param idleMs    Time since last request (0 = active).
+ * @param isBooting Pod is booting / warming up (wants fast feedback).
+ * @param minMs     Lower bound (default 10s).
+ * @param maxMs     Upper bound (default 120s).
+ */
+export function adaptiveProbeInterval(
+  baseMs: number,
+  idleMs: number,
+  isBooting: boolean,
+  minMs = 10_000,
+  maxMs = 120_000,
+): number {
+  if (isBooting) return Math.max(minMs, Math.round(baseMs / 2));
+  // Stable & active → base. Idle → grow toward maxMs proportional to idle time.
+  if (idleMs <= 60_000) return baseMs;
+  if (idleMs <= 5 * 60_000) return Math.min(maxMs, baseMs * 2);
+  return maxMs; // long idle / long stable — coast at the cap to cut probe cost
+}
+
 /** Track consecutive zero-utilization probes to detect idle GPU (5+ min at 0% = warning). */
 let consecutiveZeroUtilProbes = 0;
 let zeroUtilWarned = false; // one-shot guard so the warning fires reliably even if the counter jumps

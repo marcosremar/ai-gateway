@@ -26,6 +26,22 @@ import { probeGpuHealth } from '../src/autoscaler/health';
 const log = createLogger('gpu-deploy');
 
 /**
+ * #214 — guard the resume-failure cleanup: don't delete the resumable pod
+ * until we know a fresh deploy *could* replace it.
+ *
+ * On a resume timeout the manager deletes the stopped pod and then attempts a
+ * fresh deploy. If that fresh deploy has no tiers to try (no keys / no
+ * capacity), the user is left with nothing AND has lost the disk of a pod that
+ * might have come back. This returns whether it's safe to destroy the pod
+ * before the fresh-deploy attempt: only when at least one deploy tier exists.
+ *
+ * Pure + exported for unit testing.
+ */
+export function canFreshDeployReplaceResumable(availableTierCount: number): boolean {
+  return availableTierCount > 0;
+}
+
+/**
  * Resume a stopped pod, or fall back to a fresh deploy if resume fails.
  *
  * This is the core cold-boot optimization: a stopped pod resumes in ~19s

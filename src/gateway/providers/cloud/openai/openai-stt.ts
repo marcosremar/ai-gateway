@@ -9,6 +9,17 @@ import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse } from
 import { OPENAI_STT_MODELS } from './models';
 import { prepareAudioFile } from '../openai-compat/audio-utils';
 
+/**
+ * Default OpenAI STT model when the caller doesn't specify one. The mini
+ * transcription model is materially cheaper per minute than gpt-4o-transcribe
+ * (#367). Exported as a pure helper so the default can be unit-tested without
+ * constructing the OpenAI SDK client.
+ */
+export const DEFAULT_OPENAI_STT_MODEL = 'gpt-4o-mini-transcribe';
+export function resolveOpenAISttModel(requested?: string): string {
+  return requested || DEFAULT_OPENAI_STT_MODEL;
+}
+
 export class OpenAISTTProvider implements STTProvider {
   readonly providerId: ProviderId = 'openai';
   private client: OpenAI | null = null;
@@ -38,7 +49,10 @@ export class OpenAISTTProvider implements STTProvider {
 
   async transcribe(request: STTRequest): Promise<STTResponse> {
     const client = this.getClient();
-    const model = request.model || 'gpt-4o-transcribe';
+    // Default to the cheaper mini transcription model (#367). gpt-4o-transcribe
+    // is the priciest per-minute option; callers can still opt up by passing
+    // request.model explicitly. Large per-minute STT savings for the common path.
+    const model = resolveOpenAISttModel(request.model);
     const file = await prepareAudioFile(request.audio);
 
     const params: OpenAI.Audio.TranscriptionCreateParams = {

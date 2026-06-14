@@ -62,6 +62,33 @@ const TIER_PRIORITY: Record<PoolSlotTier, number> = {
 };
 
 /**
+ * #288 — blend the static per-tier wake estimate with observed wake durations.
+ *
+ * The `WAKE_ESTIMATE_MS` constants (T2=65s, T4=205s) are fixed guesses that
+ * drive the "wait for wake vs. cold-deploy" decision. Once we've observed real
+ * wake durations for a host/image they're far more accurate. This folds an
+ * observed sample into the prior via a single EWMA step
+ * (`alpha*observed + (1-alpha)*prior`), so the estimate converges on measured
+ * latency without discarding the cold-start prior on the first sample.
+ *
+ * Pure: callers persist `priorMs` per host/image and feed it back. Returns the
+ * static default unchanged when there is no observation yet.
+ */
+export function defaultWakeEstimateFor(tier: PoolSlotTier): number {
+  return WAKE_ESTIMATE_MS[tier];
+}
+
+export function blendWakeEstimate(
+  priorMs: number,
+  observedMs: number | null | undefined,
+  alpha = 0.3,
+): number {
+  if (observedMs == null || !Number.isFinite(observedMs) || observedMs < 0) return priorMs;
+  const a = Math.min(1, Math.max(0, alpha));
+  return a * observedMs + (1 - a) * priorMs;
+}
+
+/**
  * Pick the hottest slot — coldest tier first, then least-recently-used within
  * that tier. Returns estimated wake latency in ms for the selected slot so
  * callers can decide whether to wait or fall through to a cold deploy.

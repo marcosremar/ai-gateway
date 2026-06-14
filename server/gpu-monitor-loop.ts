@@ -81,6 +81,67 @@ export function setIdleTimeoutMs(ms: number) { IDLE_TIMEOUT_MS = ms; }
 export let IDLE_DESTROY_MS = 2 * 60 * 60_000; // auto-DESTROY 2 hours after stop (configurable)
 export function setIdleDestroyMs(ms: number) { IDLE_DESTROY_MS = ms; }
 
+// ── Pure budget/cost helpers (exported for unit testing) ────────────────────
+
+/**
+ * #299 — single source of truth for end-of-day spend forecast.
+ *
+ * Previously the loop computed two different forecasts in the same tick: one
+ * using whole `getUTCHours()` and one using hours + fractional minutes; they
+ * could disagree and fire inconsistent alerts. This computes the remaining
+ * UTC hours today *with* minute precision and projects spend once.
+ *
+ * @param currentSpendUsd Spend accumulated so far today.
+ * @param costPerHr       Current GPU hourly rate.
+ * @param now             Injectable clock (Date) for tests.
+ */
+export function computeBudgetForecast(
+  currentSpendUsd: number,
+  costPerHr: number,
+  now: Date = new Date(),
+): number {
+  const hoursRemaining = Math.max(0, 24 - now.getUTCHours() - now.getUTCMinutes() / 60);
+  return currentSpendUsd + costPerHr * hoursRemaining;
+}
+
+/**
+ * #210 — derive the session-cost idle-alert threshold from the *effective*
+ * idle timeout instead of a fixed 5-min magic number.
+ *
+ * If the stop timeout is lowered below 5 min, a fixed 5-min cost-alert
+ * threshold would never fire before the pod stops. We alert at 80% of the
+ * effective idle timeout (so the user sees the running meter just before
+ * auto-stop), clamped to a sane [30s, 5min] band and never above the timeout.
+ * Non-finite (disabled) timeouts fall back to the 5-min default.
+ */
+export function sessionCostAlertThresholdMs(
+  effectiveIdleTimeoutMs: number,
+  defaultMs = 5 * 60_000,
+): number {
+  if (!Number.isFinite(effectiveIdleTimeoutMs) || effectiveIdleTimeoutMs <= 0) return defaultMs;
+  const at80 = effectiveIdleTimeoutMs * 0.8;
+  const floor = Math.min(30_000, effectiveIdleTimeoutMs);
+  const ceil = Math.min(defaultMs, effectiveIdleTimeoutMs);
+  return Math.max(floor, Math.min(at80, ceil));
+}
+
+/**
+ * #248 — terminal give-up decision for an unreachable pod.
+ *
+ * The health probe backs off to a 120s max interval but then keeps probing a
+ * dead pod forever (only logs once). This returns true once the probe has sat
+ * at the max backoff interval for at least `giveUpAfterMs`, so the caller can
+ * terminate/alert and stop paying for an unreachable pod.
+ */
+export function shouldGiveUpProbing(
+  currentDelayMs: number,
+  maxDelayMs: number,
+  msAtMaxBackoff: number,
+  giveUpAfterMs: number = 10 * 60_000,
+): boolean {
+  return currentDelayMs >= maxDelayMs && msAtMaxBackoff >= giveUpAfterMs;
+}
+
 // ── GPU Monitoring ───────────────────────────────────────────────────────────
 
 let monitorRunning = false;
@@ -411,7 +472,9 @@ export function scheduleNextMonitorProbe() {
         setDailyGpuSpendUsd(dailyGpuSpendUsd + deployState.costPerHr * (actualElapsedMs / 1000 / 3600));
         if (DAILY_BUDGET_USD > 0) {
           const pct = dailyGpuSpendUsd / DAILY_BUDGET_USD;
-          const forecast = dailyGpuSpendUsd + (deployState.costPerHr * (24 - new Date().getUTCHours()));
+          // #299: single forecast helper (minute precision) — used for both the
+          // soft-limit broadcast and the EOD forecast warning below.
+          const forecast = computeBudgetForecast(dailyGpuSpendUsd, deployState.costPerHr);
           if (pct >= 1.0) {
             // HARD BUDGET: auto-terminate to prevent overspend
             log.error(`[budget] HARD LIMIT: $${dailyGpuSpendUsd.toFixed(2)} >= $${DAILY_BUDGET_USD.toFixed(2)} — auto-terminating GPU`);
@@ -432,9 +495,9 @@ export function scheduleNextMonitorProbe() {
             emitGatewayEvent('budget.warning', { pct: 50, spend: +dailyGpuSpendUsd.toFixed(2), budget: DAILY_BUDGET_USD });
           }
 
-          // Continuous spend forecast: warn early when projected EOD spend will exceed budget
-          const hoursRemainingToday = 24 - new Date().getUTCHours() - (new Date().getUTCMinutes() / 60);
-          const forecastEod = dailyGpuSpendUsd + (deployState.costPerHr * hoursRemainingToday);
+          // Continuous spend forecast: warn early when projected EOD spend will exceed budget.
+          // #299: reuse the same forecast helper so the two paths can never disagree.
+          const forecastEod = forecast;
           const forecastPct = forecastEod / DAILY_BUDGET_USD;
           if (forecastPct > 0.8 && pct < 0.5) {
             log.warn(`[budget] Forecast: $${forecastEod.toFixed(2)} by EOD (budget: $${DAILY_BUDGET_USD.toFixed(2)}) — current spend only ${Math.round(pct * 100)}%`);
@@ -506,7 +569,18 @@ export function scheduleNextMonitorProbe() {
       if (deployState.costPerHr > 0 && deployState.startedAt > 0) {
         const lastActivity = Math.max(lastModelRequestTime, lastRequestTime);
         const idleMs = lastActivity > 0 ? Date.now() - lastActivity : 0;
-        const shouldAlert = idleMs >= SESSION_COST_ALERT_IDLE_MIN_MS
+        // #210: derive the idle-alert threshold from the *effective* idle
+        // timeout so it always fires before auto-stop, even if the stop
+        // timeout was lowered below the old fixed 5-min constant.
+        const sessionAdaptiveTimeout = computeAdaptiveIdleTimeout({
+          lastBootDurationMs: deployState.deployDurationMs || 0,
+          avgBootTimeS: (deployState.providerMeta as Record<string, unknown>)?.avgBootTimeS as number || 0,
+          dockerImage: deployState.dockerImage || '',
+          isBooting: false,
+        });
+        const sessionEffectiveTimeout = resolveEffectiveIdleTimeout(sessionAdaptiveTimeout, IDLE_TIMEOUT_MS);
+        const costAlertThresholdMs = sessionCostAlertThresholdMs(sessionEffectiveTimeout, SESSION_COST_ALERT_IDLE_MIN_MS);
+        const shouldAlert = idleMs >= costAlertThresholdMs
           && (Date.now() - lastSessionCostAlertAt) >= SESSION_COST_ALERT_INTERVAL_MS;
         if (shouldAlert) {
           const sessionHours = (Date.now() - deployState.startedAt) / 3_600_000;
@@ -536,7 +610,7 @@ export function scheduleNextMonitorProbe() {
             costPerHr: deployState.costPerHr,
           });
           lastSessionCostAlertAt = Date.now();
-        } else if (idleMs < SESSION_COST_ALERT_IDLE_MIN_MS && lastSessionCostAlertAt > 0) {
+        } else if (idleMs < costAlertThresholdMs && lastSessionCostAlertAt > 0) {
           // Activity resumed — reset so next idle period triggers a fresh alert
           lastSessionCostAlertAt = 0;
         }

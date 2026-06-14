@@ -25,6 +25,32 @@ import { autoTerminateGpu } from './gpu-terminate';
 const log = createLogger('gpu-deploy');
 
 /**
+ * #207 — decide whether a stopped/idle pod should be *terminated* (destroying
+ * its disk and forcing a future cold boot) versus *left stopped* when the
+ * provider client/credentials are unavailable.
+ *
+ * Terminating on a transient credential gap is wasteful: the disk is gone and
+ * the next session pays the full cold-boot tax. We only terminate when the
+ * credentials are *permanently* gone (the operator removed them); a transient
+ * outage should leave the pod stopped (it keeps disk, no hourly billing) and
+ * alert instead.
+ *
+ * Pure + exported for unit testing; callers thread the result into the
+ * stop/terminate branch.
+ */
+export function shouldTerminateOnMissingClient(opts: {
+  /** A client was resolved for the provider. */
+  hasClient: boolean;
+  /** Credentials are configured but the failure looks transient (network/timeout). */
+  credsTransientlyUnavailable?: boolean;
+}): { action: 'terminate' | 'leave-stopped' } {
+  if (opts.hasClient) return { action: 'terminate' }; // caller had a client; not our case
+  // No client. If creds are merely transiently unavailable, prefer leaving the
+  // pod stopped (recoverable) rather than destroying it.
+  return { action: opts.credsTransientlyUnavailable ? 'leave-stopped' : 'terminate' };
+}
+
+/**
  * Automatically stop (pause) the active GPU pod when idle or on a trigger.
  *
  * Preserves disk/data — the pod can be resumed quickly (~19s on Vast.ai)

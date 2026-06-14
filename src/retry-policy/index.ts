@@ -24,11 +24,17 @@ import { createLogger } from '../logger';
 
 const log = createLogger('retry-policy');
 
-export type BackoffStrategy = 'fixed' | 'linear' | 'exponential' | 'jittered';
+export type BackoffStrategy = 'fixed' | 'linear' | 'exponential' | 'jittered' | 'decorrelated';
 
 export interface RetryPolicyOptions {
-  /** Max retry attempts (default: 3) */
+  /**
+   * Total number of tries (default: 3). NOTE: this counts the *first* attempt,
+   * so `maxAttempts: 3` means 1 initial call + 2 retries. `maxTries` is an
+   * alias with the clearer name (#244); if both are set, `maxTries` wins.
+   */
   maxAttempts?: number;
+  /** Clearer alias for {@link maxAttempts} (total tries, incl. the first). */
+  maxTries?: number;
   /** Backoff strategy (default: 'exponential') */
   backoff?: BackoffStrategy;
   /** Base delay in ms (default: 1000) */
@@ -43,7 +49,7 @@ export interface RetryPolicyOptions {
   onRetry?: (attempt: number, error: Error, delayMs: number) => void;
 }
 
-const DEFAULT_OPTIONS: Required<RetryPolicyOptions> = {
+const DEFAULT_OPTIONS: Required<Omit<RetryPolicyOptions, 'maxTries'>> = {
   maxAttempts: 3,
   backoff: 'exponential',
   baseDelayMs: 1000,
@@ -54,14 +60,33 @@ const DEFAULT_OPTIONS: Required<RetryPolicyOptions> = {
 };
 
 /**
- * Calculate delay for next retry attempt.
+ * Resolve the total try count from the (aliased) options (#244).
+ * `maxTries` wins when both are present; falls back to `maxAttempts`, then 3.
+ * Always returns at least 1.
  */
-function calculateDelay(
+export function resolveMaxAttempts(opts: Pick<RetryPolicyOptions, 'maxAttempts' | 'maxTries'>): number {
+  const n = opts.maxTries ?? opts.maxAttempts ?? DEFAULT_OPTIONS.maxAttempts;
+  return Math.max(1, Math.floor(n));
+}
+
+/**
+ * Calculate delay for next retry attempt.
+ *
+ * `decorrelated` (#245) implements AWS-style decorrelated jitter
+ * (`min(maxDelay, random(base, prevDelay*3))`), which spreads retries widely
+ * so many clients hammering a just-recovered provider don't synchronize into
+ * a thundering herd. `jittered` keeps its prior additive-jitter behavior for
+ * back-compat. Exported for unit testing.
+ *
+ * @param prevDelayMs Previous delay (used only by `decorrelated`; defaults to baseDelayMs).
+ */
+export function calculateDelay(
   attempt: number,
   strategy: BackoffStrategy,
   baseDelayMs: number,
   maxDelayMs: number,
   jitter: number,
+  prevDelayMs: number = baseDelayMs,
 ): number {
   let delay: number;
 
@@ -82,6 +107,14 @@ function calculateDelay(
       delay = baseDelayMs * 2 ** attempt + Math.random() * jitter * baseDelayMs;
       break;
 
+    case 'decorrelated': {
+      // random in [baseDelayMs, prevDelayMs*3]
+      const lo = baseDelayMs;
+      const hi = Math.max(lo, prevDelayMs * 3);
+      delay = lo + Math.random() * (hi - lo);
+      break;
+    }
+
     default:
       delay = baseDelayMs;
   }
@@ -90,13 +123,17 @@ function calculateDelay(
 }
 
 export class RetryPolicy {
-  private options: Required<RetryPolicyOptions>;
+  private options: Required<Omit<RetryPolicyOptions, 'maxTries'>>;
   private executionCount = 0;
   private successCount = 0;
   private failureCount = 0;
 
   constructor(options: RetryPolicyOptions = {}) {
-    this.options = { ...DEFAULT_OPTIONS, ...options };
+    // Resolve the `maxTries`/`maxAttempts` alias once so the rest of the class
+    // can keep reading `this.options.maxAttempts` unchanged (#244).
+    const maxAttempts = resolveMaxAttempts(options);
+    const { maxTries: _maxTries, ...rest } = options;
+    this.options = { ...DEFAULT_OPTIONS, ...rest, maxAttempts };
   }
 
   /**
@@ -105,6 +142,8 @@ export class RetryPolicy {
   async execute<T>(fn: () => Promise<T>): Promise<T> {
     this.executionCount++;
     let lastError: Error | undefined;
+    // Tracked for the decorrelated-jitter strategy (#245).
+    let prevDelay = this.options.baseDelayMs;
 
     for (let attempt = 0; attempt < this.options.maxAttempts; attempt++) {
       try {
@@ -125,7 +164,9 @@ export class RetryPolicy {
           this.options.baseDelayMs,
           this.options.maxDelayMs,
           this.options.jitter,
+          prevDelay,
         );
+        prevDelay = delay;
 
         this.options.onRetry(attempt + 1, lastError, delay);
 

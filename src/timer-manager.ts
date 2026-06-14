@@ -15,6 +15,8 @@ export interface TimerInfo {
   type: 'timeout' | 'interval';
   createdAt: number;
   maxDuration?: number;
+  /** Map key for this timer — stored so cleanup is O(n), not O(n²) (#269). */
+  key?: string;
 }
 
 export interface TimerStats {
@@ -53,6 +55,7 @@ export class TimerManager {
       type: 'timeout',
       createdAt: Date.now(),
       maxDuration: delay,
+      key,
     });
 
     log.debug(`[${name}] Timeout created (${delay}ms)`);
@@ -83,6 +86,7 @@ export class TimerManager {
       name,
       type: 'interval',
       createdAt: Date.now(),
+      key,
     });
 
     log.debug(`[${name}] Interval created (${interval}ms)`);
@@ -199,17 +203,50 @@ export class TimerManager {
    */
   cleanupLeakedTimers(maxAgeMs: number = 300000): number {
     const leaked = this.findLeakedTimers(maxAgeMs);
-    
+
+    let cleaned = 0;
     for (const timer of leaked) {
-      for (const [key, t] of this.timers) {
-        if (t === timer) {
-          this.clear(key);
-          log.warn(`[${timer.name}] Cleaned up leaked timer (age: ${Date.now() - timer.createdAt}ms)`);
-        }
+      // #269: use the key stored on TimerInfo — O(1) per timer instead of
+      // re-scanning the whole map (was O(n²) across all leaked timers).
+      const key = timer.key;
+      // Never reap the housekeeping sweep itself — it's a long-lived interval
+      // and would otherwise look "leaked" to its own pass (#268).
+      if (key && key === this.leakSweepKey) continue;
+      if (key && this.timers.has(key)) {
+        this.clear(key);
+        cleaned++;
+        log.warn(`[${timer.name}] Cleaned up leaked timer (age: ${Date.now() - timer.createdAt}ms)`);
       }
     }
 
-    return leaked.length;
+    return cleaned;
+  }
+
+  /**
+   * #268 — start a periodic self-sweep that reaps leaked timers. The sweep
+   * timer is itself tracked (and unref'd, so it never pins the process on
+   * shutdown). Idempotent: calling it again clears the previous sweep first.
+   * Returns the sweep timer key.
+   */
+  private leakSweepKey: string | null = null;
+  startLeakSweep(intervalMs: number = 300000, maxAgeMs: number = 300000): string {
+    this.stopLeakSweep();
+    const key = this.setInterval('timer-manager:leak-sweep', () => {
+      this.cleanupLeakedTimers(maxAgeMs);
+    }, intervalMs);
+    // Don't let the housekeeping sweep keep the event loop alive.
+    const info = this.timers.get(key);
+    (info?.id as unknown as { unref?: () => void } | undefined)?.unref?.();
+    this.leakSweepKey = key;
+    return key;
+  }
+
+  /** Stop the periodic leak sweep started by {@link startLeakSweep}. */
+  stopLeakSweep(): void {
+    if (this.leakSweepKey) {
+      this.clear(this.leakSweepKey);
+      this.leakSweepKey = null;
+    }
   }
 }
 

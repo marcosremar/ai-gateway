@@ -153,6 +153,22 @@ export function getAllTierRankings(): Readonly<RankingMap> {
 }
 
 /**
+ * Whether Modal has the highest (most-deprioritizing) cost prior, so a P50 tie
+ * with any other provider keeps Modal last (#135).
+ *
+ * The cascade comment in `gpu-deploy-with-tiers.ts` says "Modal must not jump
+ * ahead"; the latency reorder is intentional, but Modal's on-demand pricing
+ * (2.50 prior) must dominate the cost tiebreaker so it never wins a near-tie.
+ * Pure — used by tests to lock the invariant.
+ */
+export function modalIsCostDeprioritized(
+  priors: Record<ProviderName, number> = PROVIDER_COST_PRIOR,
+): boolean {
+  const modal = priors.modal;
+  return Object.entries(priors).every(([name, cost]) => name === 'modal' || cost <= modal);
+}
+
+/**
  * Reorder a tier list by observed P50 cold-start latency (ascending).
  *
  * Rules:

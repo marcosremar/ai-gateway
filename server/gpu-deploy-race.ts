@@ -67,6 +67,171 @@ export function computeRaceBudget(
   return { allowedRaceN, estimatedCost: allowedRaceN * per, rejected: false };
 }
 
+/**
+ * Resolve the storage (GB) for a provider slot, honoring an explicit override
+ * (#156).
+ *
+ * The previous `DEFAULT_STORAGE_GB[name] || 50` hid two real cases: a provider
+ * whose default is 0 ("use provider default", e.g. modal/hyperstack) was
+ * silently bumped to 50 GB, and a typo'd/unknown provider also got 50 GB
+ * instead of surfacing the gap. This uses `??` so a configured 0 is preserved,
+ * and only falls back to 50 GB for a provider with no map entry at all.
+ *
+ * @param name      Provider name (keys of DEFAULT_STORAGE_GB).
+ * @param override  Caller-supplied storageGb (verbatim when > 0).
+ */
+export function storageGbForProvider(name: ProviderName, override?: number): number {
+  if (typeof override === 'number' && override > 0) return override;
+  const dflt = DEFAULT_STORAGE_GB[name];
+  return typeof dflt === 'number' ? dflt : 50;
+}
+
+/**
+ * Build the provider-interleaved (tier, gpuType) pair list for a race deploy,
+ * bounded so the loop can't over-generate (#147).
+ *
+ * Diversity-first: one slot per tier per round before repeating a tier, e.g.
+ * `[Vast×4090, TDock×4090, Vast×A6000, TDock×A6000, …]`. We only ever need
+ * `raceN` slots filled from the front, so cap generation at `raceN` pairs
+ * (plus one spare for modulo wrap) instead of the old `raceN*2+1` that always
+ * ran every round regardless of need.
+ *
+ * @param tiers     Usable provider tiers (already credential-filtered).
+ * @param gpuTypes  GPU priority list; `[]`/`[null]` means "provider default".
+ * @param raceN     Number of slots to fill.
+ */
+export function buildRacePairs(
+  tiers: GpuTier[],
+  gpuTypes: Array<string | null>,
+  raceN: number,
+): Array<{ tier: GpuTier; gpuType: string | null }> {
+  if (tiers.length === 0 || raceN <= 0) return [];
+  const gpuList = gpuTypes.length > 0 ? gpuTypes : [null];
+  const tierQueues = tiers.map((t) => gpuList.map((g) => ({ tier: t, gpuType: g })));
+  const pairs: Array<{ tier: GpuTier; gpuType: string | null }> = [];
+  // One spare beyond raceN keeps `pairs[i % pairs.length]` well-distributed
+  // when raceN exceeds the distinct (tier,gpu) combos.
+  const target = raceN + 1;
+  // Hard upper bound on rounds: every distinct combo, never an unbounded spin.
+  const maxRounds = gpuList.length + 1;
+  for (let round = 0; pairs.length < target && round < maxRounds; round++) {
+    for (const q of tierQueues) {
+      if (q.length === 0) continue;
+      pairs.push(q[round < q.length ? round : round % q.length]);
+      if (pairs.length >= target) break;
+    }
+  }
+  return pairs;
+}
+
+/**
+ * Aggregate wasted race-loser cost by provider for observability (#119).
+ *
+ * Wasted-USD per loser was logged but never summed per provider/GPU, so
+ * operators couldn't see which provider's slow boots cost the most. Pure so it
+ * can be unit-tested and fed to a metric. Excludes the winner.
+ */
+export function summarizeRaceWaste(
+  losers: Array<{ provider: string; gpuType?: string; wastedUsd: number }>,
+): { byProvider: Record<string, number>; totalUsd: number } {
+  const byProvider: Record<string, number> = {};
+  let totalUsd = 0;
+  for (const l of losers) {
+    const usd = Number.isFinite(l.wastedUsd) && l.wastedUsd > 0 ? l.wastedUsd : 0;
+    byProvider[l.provider] = (byProvider[l.provider] ?? 0) + usd;
+    totalUsd += usd;
+  }
+  return { byProvider, totalUsd };
+}
+
+/**
+ * When the caller wants a single-provider race (`noTierCascade` or a forced
+ * provider), keep all slots on one tier instead of diversifying across
+ * providers (#152).
+ *
+ * The interleaved pair builder always spreads across tiers; single-provider
+ * hedging (e.g. `race=N` on Vast) needs every slot on the chosen tier. Returns
+ * the tiers to race over: the first tier alone when single-provider, else all.
+ * Pure.
+ */
+export function tiersForRace(tiers: GpuTier[], noTierCascade?: boolean): GpuTier[] {
+  if (noTierCascade && tiers.length > 1) return [tiers[0]];
+  return tiers;
+}
+
+/**
+ * Estimate the per-instance hourly race cost from real offer prices instead of
+ * the flat $2 prior (#151).
+ *
+ * A flat estimate both over-rejects cheap 4090s and under-protects expensive
+ * A100s. Given the cheapest matching offer price, use it; fall back to the flat
+ * prior when no price is known. Pure.
+ */
+export function estimateRaceCostPerInstance(
+  cheapestOfferPricePerHr: number | undefined,
+): number {
+  return typeof cheapestOfferPricePerHr === 'number' && cheapestOfferPricePerHr > 0
+    ? cheapestOfferPricePerHr
+    : RACE_EST_PER_INSTANCE_HR;
+}
+
+/**
+ * Whether the total elapsed resolution time has exceeded its hard deadline
+ * (#149).
+ *
+ * Vast endpoint re-resolution runs every 5s for the whole timeout window with a
+ * 30s per-call timeout; a hung resolver could let a slot overrun. This pure
+ * predicate lets the loop bound the cumulative resolution budget.
+ */
+export function resolutionDeadlineExceeded(
+  startedAt: number,
+  now: number,
+  budgetMs: number,
+): boolean {
+  return now - startedAt >= budgetMs;
+}
+
+/**
+ * Combine the race-abort signal with a per-fetch timeout so a loser's hung
+ * `/health` always has its own deadline (#155).
+ *
+ * `AbortSignal.any` (Node 20.3+/Bun) merges both. When unavailable, the
+ * previous code fell back to ONLY the race signal — a hung fetch on a loser
+ * could then block until the whole race timed out. This fallback wires a
+ * standalone timeout that aborts a local controller, guaranteeing the per-fetch
+ * deadline either way.
+ *
+ * @param raceSignal  Winner-decided abort signal.
+ * @param timeoutMs   Per-fetch timeout.
+ * @param deps        Injectable AbortSignal-likes (for tests).
+ */
+export function combineHealthSignal(
+  raceSignal: AbortSignal,
+  timeoutMs: number,
+  deps: {
+    any?: (sigs: AbortSignal[]) => AbortSignal;
+    timeout?: (ms: number) => AbortSignal;
+  } = {},
+): AbortSignal {
+  const anyFn = deps.any ?? (AbortSignal as { any?: (s: AbortSignal[]) => AbortSignal }).any;
+  const timeoutFn = deps.timeout ?? ((ms: number) => AbortSignal.timeout(ms));
+  if (typeof anyFn === 'function') {
+    return anyFn([raceSignal, timeoutFn(timeoutMs)]);
+  }
+  // Manual fallback: a fresh controller aborted by either the race signal or
+  // the timeout — never just the race signal alone.
+  const ctrl = new AbortController();
+  const onAbort = () => { try { ctrl.abort(); } catch { /* already aborted */ } };
+  if (raceSignal.aborted) onAbort();
+  else raceSignal.addEventListener('abort', onAbort, { once: true });
+  const t = setTimeout(onAbort, timeoutMs);
+  if (typeof (t as unknown as { unref?: () => void }).unref === 'function') {
+    (t as unknown as { unref: () => void }).unref();
+  }
+  ctrl.signal.addEventListener('abort', () => clearTimeout(t), { once: true });
+  return ctrl.signal;
+}
+
 interface RaceCandidate {
   index: number;
   tier: GpuTier;
@@ -108,6 +273,16 @@ export async function startDeployRace(
       log.warn('[race] all providers look unconfigured (no creds detected) — racing original set as-is; check provider API keys');
     }
     tiers = r.usable;
+  }
+
+  // Single-provider hedging: when noTierCascade is set, keep every slot on the
+  // first tier instead of interleaving across providers (#152).
+  {
+    const single = tiersForRace(tiers, extra.noTierCascade);
+    if (single.length !== tiers.length) {
+      log.log(`[race] noTierCascade — racing single provider ${single[0]?.name} (${tiers.length}→${single.length} tier)`);
+      tiers = single;
+    }
   }
 
   // ── Per-deploy cost cap on race losers (#105) ───────────────────────────
@@ -181,22 +356,8 @@ export async function startDeployRace(
   // e.g. [Vast×4090, TDock×4090, Vast×A6000, TDock×A6000, Vast×4090 ...]
   // rather than [Vast×4090, Vast×A6000, TDock×4090, TDock×A6000 ...]
   const gpuList = gpuTypes.length > 0 ? gpuTypes : [null];
-  // Build per-tier queues (ordered by GPU priority)
-  const tierQueues: Array<Array<{ tier: GpuTier; gpuType: string | null }>> = tiers.map(t =>
-    gpuList.map(g => ({ tier: t, gpuType: g })),
-  );
-  const pairs: Array<{ tier: GpuTier; gpuType: string | null }> = [];
-  let round = 0;
-  while (pairs.length < raceN * 2 + 1) { // generate enough to cycle
-    let addedThisRound = 0;
-    for (const q of tierQueues) {
-      const idx = round < q.length ? round : round % q.length;
-      pairs.push(q[idx]);
-      addedThisRound++;
-    }
-    if (addedThisRound === 0) break;
-    round++;
-  }
+  // Provider-interleaved, bounded pair generation (#147).
+  const pairs = buildRacePairs(tiers, gpuList, raceN);
 
   if (pairs.length === 0) {
     setDeployState({ status: 'error', message: 'No deployment tiers available for race' });
@@ -235,14 +396,12 @@ export async function startDeployRace(
   // Phase 1: Create all instances in parallel
   const createResults = await Promise.allSettled(slots.map(async (slot) => {
     const credentials = { apiKey: slot.tier.apiKey, authId: slot.tier.authId };
-    const defaultStorage = DEFAULT_STORAGE_GB[slot.tier.name] || 50;
     // Honour explicit body.storageGb verbatim — the previous
     // Math.max(extra.storageGb||defaultStorage, defaultStorage) clamp
     // forced every Vast deploy to 100 GB and excluded most A100 PCIe
-    // offers (48-94 GB disk).
-    const storageGb = (typeof extra.storageGb === 'number' && extra.storageGb > 0)
-      ? extra.storageGb
-      : defaultStorage;
+    // offers (48-94 GB disk). storageGbForProvider preserves a configured 0
+    // ("use provider default") instead of the old `|| 50` mask (#156).
+    const storageGb = storageGbForProvider(slot.tier.name, extra.storageGb);
 
     // Progress callback: update deploy state during image pull so the UI
     // shows "pulling_image" instead of being stuck at "creating_pod".

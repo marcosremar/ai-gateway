@@ -208,7 +208,10 @@ async function runWatchdogForUser(
       ? Math.min(1 + Math.floor((activeSessions - th) / th), totalTiers)
       : 0;
 
-  const idleGraceMs = (config.idleGraceMinutes ?? 8) * 60_000;
+  // #217: default 15 min to match config-loader.ts (idleGraceMinutes default
+  // 15) and CLAUDE.md's documented 15-min idle scale-down — the prior `?? 8`
+  // silently disagreed, making idle scale-down timing unpredictable.
+  const idleGraceMs = (config.idleGraceMinutes ?? 15) * 60_000;
   const now = Date.now();
 
   for (let i = totalTiers - 1; i >= neededTiers; i--) {

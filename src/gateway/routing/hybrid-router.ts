@@ -185,7 +185,9 @@ export class HybridRouter {
       case 'gpu':
         return 'mistral-7b-instruct-v0.3';
       case 'groq':
-        return pipelineType === 'speech' ? this.deps.groqLlmModel() : 'mixtral-8x7b-32768';
+        // mixtral-8x7b-32768 was decommissioned by Groq (#390); use a current
+        // supported model as the non-speech default.
+        return pipelineType === 'speech' ? this.deps.groqLlmModel() : 'llama-3.3-70b-versatile';
       case 'openai':
         return 'gpt-4o-mini';
       case 'modal':

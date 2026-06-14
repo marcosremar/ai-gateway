@@ -36,6 +36,33 @@ export const AI_PROVIDER_IDS = new Set(['groq', 'openai', 'fireworks', 'openrout
 /** Balance threshold (USD) below which a low-balance alert is shown on the dashboard. */
 export const LOW_BALANCE_THRESHOLD_USD = parseFloat(process.env.LOW_BALANCE_THRESHOLD_USD || '1');
 
+/**
+ * All provider/chain tokens recognized in PROVIDER_CHAIN. Combines GPU
+ * infrastructure markers, the cascade-only GPU names, and AI cloud providers.
+ * `vast-vm`/`hyperstack`/`snapgpu` are valid GPU tiers even though they aren't
+ * in GPU_PROVIDER_IDS (which only lists the deploy-container providers).
+ */
+export const KNOWN_PROVIDER_CHAIN_TOKENS: ReadonlySet<string> = new Set<string>([
+  ...GPU_PROVIDER_IDS,            // runpod, tensordock, vast, modal, gpu
+  'vast-vm', 'hyperstack', 'snapgpu',
+  ...AI_PROVIDER_IDS,            // groq, openai, fireworks, openrouter, deepgram, elevenlabs, ollama
+]);
+
+/**
+ * Validate PROVIDER_CHAIN entries against known provider tokens (#145).
+ *
+ * A typo like `vastai` is otherwise silently filtered out downstream, quietly
+ * changing the cascade order with no warning. Returns the list of unknown
+ * tokens (empty when all valid) so the caller can warn the operator. Pure so
+ * it can be unit-tested without env.
+ */
+export function validateProviderChain(
+  chain: readonly string[],
+  known: ReadonlySet<string> = KNOWN_PROVIDER_CHAIN_TOKENS,
+): string[] {
+  return chain.filter((p) => p.length > 0 && !known.has(p));
+}
+
 // ── Docker Image Versioning ─────────────────────────────────────────────────
 
 /** Docker image version — update when a new set of images is built and verified.
@@ -156,5 +183,16 @@ export function validateStartupConfig() {
 
   if (RUNPOD_ENDPOINT && !process.env.RUNPOD_API_KEY) {
     log.warn('RUNPOD_ENDPOINT set but RUNPOD_API_KEY is missing');
+  }
+
+  // Warn (don't fail) on unknown PROVIDER_CHAIN tokens — a typo silently
+  // reorders the cascade otherwise (#145).
+  const unknownChain = validateProviderChain(PROVIDER_CHAIN);
+  if (unknownChain.length > 0) {
+    log.warn(
+      'PROVIDER_CHAIN has unknown token(s): %s. Known: %s',
+      unknownChain.join(', '),
+      [...KNOWN_PROVIDER_CHAIN_TOKENS].join(', '),
+    );
   }
 }

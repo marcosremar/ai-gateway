@@ -285,6 +285,41 @@ export function matchSnapshot(
   );
 }
 
+/**
+ * After a successful snapshot restore, return a copy of the entry with its
+ * `createdAt` bumped to `now` (#115).
+ *
+ * `SNAPSHOT_MAX_AGE_MS` is a flat 7-day TTL keyed off capture time, so a
+ * frequently-deployed image's snapshot expires even while it's actively reused.
+ * Touching `createdAt` on each successful reuse keeps hot snapshots alive
+ * (LRU-style) without re-capturing. Pure — the caller persists the result.
+ */
+export function refreshSnapshotOnReuse(
+  entry: SnapshotCatalogEntry,
+  now = Date.now(),
+): SnapshotCatalogEntry {
+  return { ...entry, createdAt: now };
+}
+
+/** Consecutive restore failures for one snapshot key before we stop trying it
+ *  (#177). A bad snapshot otherwise re-pays the failed-restore latency on every
+ *  cold boot forever. Override via SNAPSHOT_AUTO_DISABLE_FAILURES. */
+export const SNAPSHOT_AUTO_DISABLE_FAILURES = (() => {
+  const n = parseInt(process.env.SNAPSHOT_AUTO_DISABLE_FAILURES ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : 3;
+})();
+
+/**
+ * Whether a snapshot key should be auto-disabled given its consecutive restore
+ * failure count (#177). Pure so callers/tests don't need the metrics singleton.
+ */
+export function shouldAutoDisableSnapshot(
+  failureCount: number,
+  threshold = SNAPSHOT_AUTO_DISABLE_FAILURES,
+): boolean {
+  return failureCount >= threshold;
+}
+
 // ── Input sanitization ──────────────────────────────────────────────────────
 
 /** Allow only safe characters in values interpolated into shell commands. */
@@ -406,13 +441,25 @@ export async function snapshotPreCheck(
 
 /** Canonical install path for the cuda-checkpoint helper on the remote VM. */
 export const CUDA_CHECKPOINT_PATH = '/usr/local/bin/cuda-checkpoint';
-// Pin to a specific commit SHA rather than `main` so a tampered or moved
-// upstream tip can't silently substitute the binary we install with sudo.
-// Bump via CUDA_CHECKPOINT_COMMIT env var without a code change if needed.
-const CUDA_CHECKPOINT_COMMIT =
-  process.env.CUDA_CHECKPOINT_COMMIT?.trim() || 'main';
-const CUDA_CHECKPOINT_URL =
-  `https://raw.githubusercontent.com/NVIDIA/cuda-checkpoint/${CUDA_CHECKPOINT_COMMIT}/bin/x86_64_Linux/cuda-checkpoint`;
+// Pin to a specific commit SHA rather than the moving `main` ref so a tampered
+// or force-pushed upstream tip can't silently substitute the binary we install
+// with sudo (#176). Bump via CUDA_CHECKPOINT_COMMIT env without a code change.
+export const DEFAULT_CUDA_CHECKPOINT_COMMIT = 'd3b89dc24cd2e74c2bd99ffe60bd54ccc7c2a3a9';
+
+/** Resolve the cuda-checkpoint commit ref to install from. Pure: prefers an
+ *  explicit env override, else the pinned default SHA (never bare `main`). */
+export function getCudaCheckpointCommit(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.CUDA_CHECKPOINT_COMMIT?.trim();
+  return override && override.length > 0 ? override : DEFAULT_CUDA_CHECKPOINT_COMMIT;
+}
+
+/** Raw GitHub URL of the x86_64 cuda-checkpoint binary for a given commit. */
+export function cudaCheckpointUrlFor(commit: string): string {
+  return `https://raw.githubusercontent.com/NVIDIA/cuda-checkpoint/${commit}/bin/x86_64_Linux/cuda-checkpoint`;
+}
+
+const CUDA_CHECKPOINT_COMMIT = getCudaCheckpointCommit();
+const CUDA_CHECKPOINT_URL = cudaCheckpointUrlFor(CUDA_CHECKPOINT_COMMIT);
 // Optional integrity check: set CUDA_CHECKPOINT_SHA256 to the expected hex
 // digest of the binary. When unset we fall back to a sanity check that the
 // downloaded file is a real ELF of plausible size.
@@ -675,7 +722,13 @@ export async function maybeRestoreSnapshot(input: RestoreInput): Promise<Restore
     const durationMs = Date.now() - start;
     metrics.restoreOk++;
     metrics.lastRestoreDurationMs = durationMs;
-    return { restored: true, durationMs, entry: match };
+    // Keep hot snapshots alive: bump createdAt so frequent reuse refreshes the
+    // 7-day TTL instead of expiring a snapshot that's actively serving (#115).
+    const refreshed = refreshSnapshotOnReuse(match);
+    appendCatalogEntry(refreshed).catch((err) =>
+      log.warn(`[snapshot] failed to refresh catalog createdAt: ${err instanceof Error ? err.message : err}`),
+    );
+    return { restored: true, durationMs, entry: refreshed };
   } catch (err) {
     metrics.restoreFail++;
     metrics.coldFallback++;

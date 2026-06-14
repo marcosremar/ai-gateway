@@ -20,6 +20,10 @@ export interface TtfacSample {
   ttfacMs: number;
   totalMs: number;
   timestamp: number;
+  /** Whether the request succeeded. Failed requests are excluded from
+   *  ranking percentiles so a fast-failing provider can't rank first (#350).
+   *  Defaults to true for backward-compatible callers. */
+  success?: boolean;
 }
 
 export interface TtfacStats {
@@ -85,8 +89,12 @@ export class TtfacTracker {
     this.windowTimeMs = config?.windowTimeMs ?? DEFAULT_WINDOW_TIME_MS;
   }
 
-  /** Record a TTFAC + total latency sample for a provider:model pair. */
-  record(provider: string, model: string, ttfacMs: number, totalMs: number): void {
+  /**
+   * Record a TTFAC + total latency sample for a provider:model pair.
+   * `success` defaults to true; pass false for failed requests so they are
+   * excluded from the ranking percentiles (#350).
+   */
+  record(provider: string, model: string, ttfacMs: number, totalMs: number, success = true): void {
     const key = sampleKey(provider, model);
     let buf = this.buffers.get(key);
     if (!buf) {
@@ -94,7 +102,7 @@ export class TtfacTracker {
       this.buffers.set(key, buf);
     }
 
-    buf.push({ ttfacMs, totalMs, timestamp: Date.now() });
+    buf.push({ ttfacMs, totalMs, timestamp: Date.now(), success });
 
     // Evict overflow (circular buffer — drop oldest)
     while (buf.length > this.windowSize) {
@@ -102,10 +110,17 @@ export class TtfacTracker {
     }
   }
 
-  /** Get TTFAC/total stats for a provider:model pair. */
+  /**
+   * Get TTFAC/total stats for a provider:model pair.
+   *
+   * Percentiles and `sampleCount` are computed over SUCCESSFUL samples only —
+   * a fast failure has a meaningless TTFAC (instant reject) and must not pull
+   * the p50 down and rank a broken provider first (#350). `samples` recorded
+   * without an explicit success flag are treated as successful.
+   */
   getStats(provider: string, model: string): TtfacStats {
     const key = sampleKey(provider, model);
-    const samples = this.activeSamples(key);
+    const samples = this.activeSamples(key).filter((s) => s.success !== false);
 
     if (samples.length === 0) {
       return { ttfacP50: null, ttfacP95: null, totalP50: null, sampleCount: 0 };
@@ -126,7 +141,12 @@ export class TtfacTracker {
    * Reorder fallback entries by blended TTFAC score.
    *
    * - Only entries with >= minSamples are eligible for reordering.
-   * - Entries without enough data keep their original position.
+   * - Proven-fast (scored) entries are moved to the FRONT, sorted by blended
+   *   score (lower = better). Entries without enough data keep their relative
+   *   order behind the scored ones.
+   * - Previously, scored entries were pinned to the slots they *already*
+   *   occupied, so a proven-fast provider could never overtake a high-priority
+   *   unscored entry sitting at index 0 (#351).
    * - Returns a new array (does not mutate the input).
    */
   rankByTtfac(entries: FallbackEntry[]): FallbackEntry[] {
@@ -135,42 +155,25 @@ export class TtfacTracker {
     }
 
     // Compute scores for entries that have enough data
-    const scored: Array<{ entry: FallbackEntry; score: number; originalIndex: number }> = [];
-    const unscored: Array<{ entry: FallbackEntry; originalIndex: number }> = [];
+    const scored: Array<{ entry: FallbackEntry; score: number }> = [];
+    const unscored: FallbackEntry[] = [];
 
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
+    for (const entry of entries) {
       const stats = this.getStats(entry.provider, entry.model ?? '*');
 
       if (stats.sampleCount >= this.minSamples && stats.ttfacP50 !== null && stats.totalP50 !== null) {
         const score = stats.ttfacP50 * this.ttfacWeight + stats.totalP50 * (1 - this.ttfacWeight);
-        scored.push({ entry, score, originalIndex: i });
+        scored.push({ entry, score });
       } else {
-        unscored.push({ entry, originalIndex: i });
+        unscored.push(entry);
       }
     }
 
-    // Sort scored entries by blended score (lower = better)
+    // Sort scored entries by blended score (lower = better) and place them
+    // ahead of the unscored (cold) entries, which keep their configured order.
     scored.sort((a, b) => a.score - b.score);
 
-    // Merge: place scored entries into the positions originally held by scored entries,
-    // and keep unscored entries in their original positions.
-    const result: FallbackEntry[] = new Array(entries.length);
-
-    // Collect the original indices that were scored (these slots will be filled by ranked entries)
-    const scoredSlots = scored.map((s) => s.originalIndex).sort((a, b) => a - b);
-
-    // Fill scored slots with ranked entries
-    for (let i = 0; i < scored.length; i++) {
-      result[scoredSlots[i]] = scored[i].entry;
-    }
-
-    // Fill unscored slots with their original entries
-    for (const u of unscored) {
-      result[u.originalIndex] = u.entry;
-    }
-
-    return result;
+    return [...scored.map((s) => s.entry), ...unscored];
   }
 
   /**

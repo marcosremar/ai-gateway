@@ -228,7 +228,9 @@ export async function runCostMonitorCycle(deps: CostMonitorDeps): Promise<CostMo
     registry, loadAllAccounts, onOrphanDetected,
     autoStop, autoDelete,
     probeHealth: shouldProbe = true,
-    staleGraceMinutes = 10,
+    // #258: default 20 min (was 10) to match the documented default and avoid
+    // flagging a still-booting large model as stale and stopping it early.
+    staleGraceMinutes = 20,
   } = deps;
 
   const healthProbe = deps._probeHealth ?? probeGpuHealth;
@@ -550,7 +552,10 @@ export function _resetStaleTracking(): void {
  * Start a background ticker that runs runCostMonitorCycle periodically.
  * Returns a cleanup function.
  *
- * @param intervalMs - defaults to 10 minutes
+ * @param intervalMs - defaults to 5 minutes (#259: JSDoc previously said 10
+ *   min while the code defaulted to 5; reconciled to the code's 5-min value.
+ *   Note a full account sweep every 5 min adds provider-API load — pass a
+ *   larger value for many-account deployments).
  */
 export function startCostMonitorTicker(
   deps: CostMonitorDeps,

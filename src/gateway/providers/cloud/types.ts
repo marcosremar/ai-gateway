@@ -44,6 +44,12 @@ export interface STTRequest {
   wordTimestamps?: boolean;
   signal?: AbortSignal;
   /**
+   * Deepgram `smart_format` — rewrites numbers/dates/etc. Opt-in (#369):
+   * smart formatting can break downstream glossary/term matching, so it is no
+   * longer forced on. Omit/false to keep the raw transcript.
+   */
+  smartFormat?: boolean;
+  /**
    * Endpointing / VAD configuration. Provider-native turn detection knobs.
    * Currently honored by Deepgram; other STT providers ignore unknown
    * fields. Tune for your conversation style.

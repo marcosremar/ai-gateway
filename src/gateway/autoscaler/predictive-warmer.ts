@@ -85,6 +85,30 @@ export function forecastNext(now: number = Date.now()): number {
 }
 
 /**
+ * #279 — bidirectional capacity recommendation from a forecast.
+ *
+ * The warmer's tick only ever scales *up* (relies on the pool's idle TTL to
+ * cool off), so a transient spike over-provisions and then sits warm for the
+ * whole TTL. This pure helper lets the caller also act on a *dropped*
+ * forecast: it returns `'down'` when the forecast target (incl. its own
+ * hysteresis margin) is well below current capacity, `'up'` when above, and
+ * `'hold'` otherwise. `scaleDownMargin` (default 0.5) requires the forecast to
+ * fall to ≤50% of capacity before recommending scale-down, so we don't
+ * flap around the boundary.
+ */
+export function forecastVsCapacity(
+  forecastTarget: number,
+  capacity: number,
+  opts: { scaleDownMargin?: number } = {},
+): 'up' | 'down' | 'hold' {
+  const target = Math.ceil(forecastTarget);
+  if (target > capacity) return 'up';
+  const scaleDownMargin = opts.scaleDownMargin ?? 0.5;
+  if (capacity > 0 && target <= Math.floor(capacity * scaleDownMargin)) return 'down';
+  return 'hold';
+}
+
+/**
  * Start the predictive loop. `getCapacity` returns the current number of
  * warm slots; `ensureCapacity` is called with the forecast target whenever
  * forecast exceeds capacity. Idempotent: no effect if the target is already

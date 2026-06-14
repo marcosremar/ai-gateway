@@ -47,6 +47,37 @@ export const MAX_DEPLOY_RETRIES = 2;
 export const HEALTH_POLL_INTERVAL_MS = 10_000;
 export const DEPLOY_TIMEOUT_MS = 45 * 60_000; // 45 min — large images (52GB) + models (70B) can take 30-40 min
 
+/**
+ * Per-provider deploy-timeout floor in minutes (#200).
+ *
+ * `getDeployTimeoutMinForProvider` currently returns one global value for every
+ * provider, but slow providers (TensorDock) legitimately need longer windows
+ * while fast/reliable ones (RunPod SECURE) can fail faster. This pure helper
+ * gives a sensible per-provider default that a caller can clamp the configured
+ * timeout against. Unknown providers fall back to the supplied global default.
+ */
+const PROVIDER_TIMEOUT_MIN: Record<string, number> = {
+  runpod: 15,     // SECURE pods boot fast and pre-baked images pull quickly
+  vast: 30,       // marketplace hosts vary; mid window
+  'vast-vm': 30,
+  tensordock: 45, // historically the slowest to provision
+  modal: 20,
+  hyperstack: 30,
+  snapgpu: 30,
+};
+
+export function deployTimeoutMinForProvider(provider: string, globalDefaultMin: number): number {
+  const perProvider = PROVIDER_TIMEOUT_MIN[provider];
+  // Use the larger of the per-provider floor and the configured global so an
+  // operator who raises the global timeout is never silently lowered.
+  return Math.max(perProvider ?? globalDefaultMin, globalDefaultMin);
+}
+
+/** Convenience: the same per-provider timeout expressed in milliseconds. */
+export function deployTimeoutMsForProvider(provider: string, globalDefaultMin: number): number {
+  return deployTimeoutMinForProvider(provider, globalDefaultMin) * 60_000;
+}
+
 export interface DeployExtra {
   region?: string;
   storageGb?: number;

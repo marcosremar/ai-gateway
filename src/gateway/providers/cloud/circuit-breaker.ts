@@ -26,6 +26,14 @@ export interface CircuitBreakerOptions {
   failureThreshold?: number;
   /** Time in ms to stay open before transitioning to half-open. Default: 30s. */
   resetTimeoutMs?: number;
+  /**
+   * Max time a single HALF_OPEN probe may stay in flight before it is
+   * considered abandoned and a fresh probe is allowed. Without this, a probe
+   * call that neither succeeds nor fails (caller timed out without calling
+   * recordSuccess/recordFailure) leaves the breaker stuck HALF_OPEN, blocking
+   * all probes forever (#343). Default: 30s.
+   */
+  probeTimeoutMs?: number;
   /** Clock function for testing. */
   now?: () => number;
 }
@@ -41,6 +49,7 @@ export interface CircuitBreakerStats {
 
 const DEFAULT_FAILURE_THRESHOLD = 5;
 const DEFAULT_RESET_TIMEOUT_MS = 30_000;
+const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 
 export class CircuitBreaker {
   private state: CircuitState = 'closed';
@@ -50,14 +59,18 @@ export class CircuitBreaker {
   private lastSuccessAt: number | null = null;
   private openedAt: number | null = null;
   private probeInFlight = false;
+  /** Timestamp the current HALF_OPEN probe was allowed (for deadline reset). */
+  private probeStartedAt: number | null = null;
 
   private readonly failureThreshold: number;
   private readonly resetTimeoutMs: number;
+  private readonly probeTimeoutMs: number;
   private readonly now: () => number;
 
   constructor(opts: CircuitBreakerOptions = {}) {
     this.failureThreshold = opts.failureThreshold ?? DEFAULT_FAILURE_THRESHOLD;
     this.resetTimeoutMs = opts.resetTimeoutMs ?? DEFAULT_RESET_TIMEOUT_MS;
+    this.probeTimeoutMs = opts.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
     this.now = opts.now ?? (() => Date.now());
   }
 
@@ -75,16 +88,22 @@ export class CircuitBreaker {
       if (elapsed >= this.resetTimeoutMs) {
         this.state = 'half_open';
         this.probeInFlight = true;
+        this.probeStartedAt = this.now();
         return true; // allow one probe
       }
       return false; // still in cooldown
     }
 
-    // half_open — allow the probe request only if one isn't already in flight
+    // half_open — allow the probe request only if one isn't already in flight.
+    // If the in-flight probe has exceeded its deadline (caller never recorded a
+    // result), treat it as abandoned and allow a fresh probe (#343).
     if (this.probeInFlight) {
-      return false;
+      const probeAge = this.now() - (this.probeStartedAt ?? this.now());
+      if (probeAge < this.probeTimeoutMs) return false;
+      // else: stale probe — fall through and start a new one
     }
     this.probeInFlight = true;
+    this.probeStartedAt = this.now();
     return true;
   }
 
@@ -94,6 +113,7 @@ export class CircuitBreaker {
     this.consecutiveSuccesses++;
     this.lastSuccessAt = this.now();
     this.probeInFlight = false;
+    this.probeStartedAt = null;
 
     if (this.state === 'half_open') {
       this.state = 'closed';
@@ -108,6 +128,7 @@ export class CircuitBreaker {
     this.lastFailureAt = this.now();
     const wasProbeInFlight = this.probeInFlight;
     this.probeInFlight = false;
+    this.probeStartedAt = null;
 
     if (this.state === 'half_open') {
       // Probe failed — re-open with fresh cooldown
@@ -142,6 +163,7 @@ export class CircuitBreaker {
     this.consecutiveSuccesses = 0;
     this.openedAt = null;
     this.probeInFlight = false;
+    this.probeStartedAt = null;
   }
 }
 

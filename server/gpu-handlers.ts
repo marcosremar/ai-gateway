@@ -42,6 +42,7 @@ import {
 } from '../src/gpu-providers/deploy-settings';
 import { getBestLatencyByGpuModel, sortGpuTypesByLatency } from './latency-db';
 import { runPreFlightChecks, validateDockerImageReference } from '../src/preflight-checks';
+import { detectModelSizeClass } from '../src/gpu-compat';
 import type { DockerCapability } from '../src/gateway/providers/gpu/docker-manifest';
 import { defaultApiPathsForCapabilities } from '../src/gateway/providers/gpu/docker-manifest';
 import { categorizeDeployError } from '../src/errors/deploy-errors';
@@ -58,6 +59,33 @@ import { errorSummary } from '../src/error-summary';
  */
 export function isBalanceTooLow(balance: number, threshold: number): boolean {
   return balance < threshold;
+}
+
+/** Max total keepalive-extended session length (#167). A misbehaving client can
+ *  otherwise reset the idle timer forever and keep a GPU billing indefinitely.
+ *  Generous 24h default so normal flows are unaffected; override via
+ *  GPU_MAX_KEEPALIVE_SESSION_MS. */
+export const MAX_KEEPALIVE_SESSION_MS = (() => {
+  const n = parseInt(process.env.GPU_MAX_KEEPALIVE_SESSION_MS ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : 24 * 60 * 60_000;
+})();
+
+/**
+ * Whether a keepalive should still extend the idle timer given how long the
+ * session has been running (#167). Returns false once the session exceeds the
+ * ceiling, so a forgotten client can't keep a GPU alive forever. Pure.
+ *
+ * @param startedAt   Epoch ms the session began (deployState.startedAt).
+ * @param now         Current epoch ms.
+ * @param maxMs       Session ceiling (defaults to MAX_KEEPALIVE_SESSION_MS).
+ */
+export function keepaliveWithinSessionCap(
+  startedAt: number,
+  now: number,
+  maxMs = MAX_KEEPALIVE_SESSION_MS,
+): boolean {
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return true; // unknown start — don't penalize
+  return now - startedAt < maxMs;
 }
 
 // ── GPU management endpoints ────────────────────────────────────────────────
@@ -124,32 +152,77 @@ function estimateModelVramGb(dockerImage: string, dockerStartCmd: string, env: R
   const isMultiModel = /\b(multi|pipeline|stt.*llm|llm.*tts)\b/.test(haystack);
   const multiModelMultiplier = isMultiModel ? 1.5 : 1;
 
-  if (/\b(200b|175b)\b/.test(haystack)) {
+  // Token-anchored size detection — avoids matching digits inside a version or
+  // hash (e.g. "cuda12.7b") that would otherwise mis-estimate VRAM (#194).
+  const sizeClass = detectModelSizeClass(haystack);
+  if (sizeClass === '200b') {
     let base = isQ4 ? 110 : isQ8 ? 180 : isFp16 ? 350 : 400;
     return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '200B-class model' };
   }
-  if (/\b(70b|65b|72b)\b/.test(haystack)) {
+  if (sizeClass === '70b') {
     let base = isQ4 ? 40 : isQ5 ? 50 : isQ8 ? 75 : isFp16 ? 140 : isGguf ? 42 : 48;
     return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '70B-class model' };
   }
-  if (/\b(32b|33b|34b|35b)\b/.test(haystack)) {
+  if (sizeClass === '32b') {
     let base = isQ4 ? 20 : isQ8 ? 36 : isFp16 ? 68 : isGguf ? 22 : 24;
     return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '32B-class model' };
   }
-  if (/\b(13b|14b|15b)\b/.test(haystack)) {
+  if (sizeClass === '13b') {
     let base = isQ4 ? 10 : isQ8 ? 16 : isFp16 ? 28 : isGguf ? 11 : 16;
     return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '13B-class model' };
   }
-  if (/\b(7b|8b)\b/.test(haystack)) {
+  if (sizeClass === '7b') {
     let base = isQ4 ? 5 : isQ8 ? 8 : isFp16 ? 16 : isGguf ? 6 : 8;
     return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '7B-class model' };
   }
-  if (/\b(3b|4b)\b/.test(haystack)) {
+  if (sizeClass === '3b') {
     let base = isQ4 ? 3 : isQ8 ? 4 : isFp16 ? 8 : isGguf ? 3 : 4;
     return { vramGb: Math.ceil((base + kvCacheOverhead + cudaOverhead) * multiModelMultiplier), hint: '3-4B model' };
   }
 
   return { vramGb: 0, hint: '' };
+}
+
+/**
+ * Resolve a GPU type's VRAM (GB), falling back to a provider-reported value
+ * when the static `GPU_VRAM_GB` map has no entry (#195).
+ *
+ * Previously any GPU not in the hardcoded map failed VRAM validation, so a
+ * freshly-supported GPU was rejected until someone edited the map. When the
+ * provider's offer reports a VRAM figure, prefer the map but accept the offer
+ * value for unmapped types. Returns `null` only when neither source knows it.
+ *
+ * @param gpuType        GPU type/name string.
+ * @param offerVramGb    VRAM reported by the provider offer for this type, if any.
+ * @param vramMap        Static map (defaults to the module's GPU_VRAM_GB).
+ */
+export function resolveGpuVramGb(
+  gpuType: string,
+  offerVramGb?: number,
+  vramMap: Record<string, number> = GPU_VRAM_GB,
+): number | null {
+  const mapped = vramMap[gpuType];
+  if (typeof mapped === 'number') return mapped;
+  if (typeof offerVramGb === 'number' && offerVramGb > 0) return offerVramGb;
+  return null;
+}
+
+/**
+ * Filter GPU types by a VRAM requirement using offer-reported VRAM as a
+ * fallback for types absent from the static map (#195). Pure: takes the
+ * offer-VRAM lookup explicitly so it's testable without provider calls.
+ */
+export function gpuTypesWithSufficientVramFromOffers(
+  gpuTypes: string[],
+  requiredVramGb: number,
+  offerVramByType: Record<string, number> = {},
+  vramMap: Record<string, number> = GPU_VRAM_GB,
+): string[] {
+  return gpuTypes.filter((gpu) => {
+    const vram = resolveGpuVramGb(gpu, offerVramByType[gpu], vramMap);
+    if (vram === null) return false; // truly unknown — can't prove it fits
+    return vram >= requiredVramGb;
+  });
 }
 
 /** GPU types with enough VRAM for the given requirement.
@@ -1767,8 +1840,25 @@ export async function handleGpuKeepalive(req: IncomingMessage, res: ServerRespon
     return;
   }
 
-  const { setLastModelRequestTime } = await import('./state');
   const now = Date.now();
+  // Cap total keepalive-extended session length so a misbehaving client can't
+  // keep a GPU billing forever (#167).
+  const withinCap = keepaliveWithinSessionCap(deployState.startedAt ?? 0, now);
+  if (!withinCap) {
+    log.warn(`[req=${requestId}] keepalive ignored — session exceeded max keepalive window (${Math.round(MAX_KEEPALIVE_SESSION_MS / 60000)} min); not extending idle`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      deployId: deployState.deployId,
+      podId: deployState.podId,
+      lastActivityAt: now,
+      sessionCapped: true,
+      message: 'Max keepalive session reached — idle timer not extended',
+    }));
+    return;
+  }
+
+  const { setLastModelRequestTime } = await import('./state');
   setLastModelRequestTime(now);
   log.log(`[req=${requestId}] keepalive — idle counter reset`);
   res.writeHead(200, { 'Content-Type': 'application/json' });

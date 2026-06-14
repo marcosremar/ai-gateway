@@ -104,9 +104,16 @@ export class EWMATracker {
 
   /**
    * Pick the best (lowest latency) provider from a list of candidates.
-   * Candidates without EWMA data are treated as unknown (returned only if no known candidates).
+   * Candidates without EWMA data are treated as unknown (returned only if no
+   * known candidates).
+   *
+   * When all candidates are unknown (cold), an optional `costOf` lookup breaks
+   * the tie by cheapest provider instead of falling back to array position —
+   * otherwise a cold *expensive* provider listed first would beat a cold cheap
+   * one (#355). Providers without a cost are treated as +Infinity (least
+   * preferred); ties fall back to the original (configured-priority) order.
    */
-  pickBest(candidates: string[]): string | null {
+  pickBest(candidates: string[], costOf?: (provider: string) => number | null): string | null {
     if (candidates.length === 0) return null;
     if (candidates.length === 1) return candidates[0];
 
@@ -128,8 +135,24 @@ export class EWMATracker {
 
     // If we have a known best, use it
     if (bestProvider !== null) return bestProvider;
-    // Otherwise return the first unknown (give it a chance)
-    return unknowns[0] ?? null;
+    if (unknowns.length === 0) return null;
+
+    // All-unknown tie-break by cost when a cost lookup is supplied.
+    if (costOf) {
+      let cheapest = unknowns[0];
+      let cheapestCost = costOf(cheapest) ?? Infinity;
+      for (let i = 1; i < unknowns.length; i++) {
+        const c = costOf(unknowns[i]) ?? Infinity;
+        if (c < cheapestCost) {
+          cheapestCost = c;
+          cheapest = unknowns[i];
+        }
+      }
+      return cheapest;
+    }
+
+    // No cost signal — keep configured-priority order (first unknown).
+    return unknowns[0];
   }
 
   /** Update the decay factor (e.g., from Labs settings UI) */

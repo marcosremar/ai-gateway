@@ -39,6 +39,13 @@ export interface DegradationSignals {
   circuitStates: Map<number, CircuitState>;
   readyTiers: number;
   activeSessions: number;
+  /**
+   * #289 — number of tiers actively booting (not yet ready). Optional for
+   * back-compat. When > 0 and no tier is ready yet, the system reports
+   * `cloud` (a GPU is imminent) instead of `minimal` (text-only), so callers
+   * don't tear down audio output for a pipeline that's seconds from ready.
+   */
+  bootingTiers?: number;
 }
 
 /**
@@ -64,12 +71,16 @@ export function determineDegradation(
   //       letting the function return 'full' which advertises a GPU
   //       pipeline that doesn't exist.
   if (p.minimalWhenNoProviders && signals.readyTiers === 0) {
+    // #289: a tier is actively booting — a GPU is imminent. Degrade to
+    // `cloud` (serve via cloud APIs while the GPU finishes booting) rather
+    // than `minimal` (text-only), which would needlessly drop audio output.
+    const booting = signals.bootingTiers ?? 0;
     if (signals.circuitStates.size === 0) {
-      return 'minimal';
+      return booting > 0 ? 'cloud' : 'minimal';
     }
     const allOpen = [...signals.circuitStates.values()].every((s) => s === 'open');
     if (allOpen) {
-      return 'minimal';
+      return booting > 0 ? 'cloud' : 'minimal';
     }
   }
 

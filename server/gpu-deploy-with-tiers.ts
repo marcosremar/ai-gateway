@@ -41,6 +41,47 @@ function modalScriptFor(image: string): string {
   }
 }
 
+/**
+ * Format the cascade fallback alert in one consistent language (#146).
+ *
+ * The previous strings mixed Portuguese ("indisponível", "usando … como
+ * fallback") into an otherwise-English UI. Centralizing keeps the cascade
+ * messages consistent and makes future localization a single edit. Pure.
+ */
+export function formatFallbackAlert(failedLabel: string, nextLabel: string): string {
+  return `${failedLabel} unavailable — falling back to ${nextLabel}.`;
+}
+
+/** Status-line variant shown while the next tier is being attempted (#146). */
+export function formatFallbackStatus(failedLabel: string, nextLabel: string): string {
+  return `${failedLabel} unavailable. Trying ${nextLabel}...`;
+}
+
+/**
+ * Hours to project a deploy's cost over for the cascade budget gate (#106).
+ *
+ * The gate previously hardcoded `canAffordDeploy(2)`, assuming every deploy
+ * runs exactly 2h. Derive it from the resolved idle timeout (a short idle cap
+ * means the GPU won't bill for long) and, when set, from `maxCostUsd`. Clamped
+ * to [0.25h, 8h] so a misconfigured value can't disable or over-tighten the
+ * gate. Pure so it can be unit-tested.
+ */
+export function budgetProjectionHours(extra: {
+  idleTimeoutMin?: number;
+  maxCostUsd?: number;
+}): number {
+  const FALLBACK_H = 2;
+  const MIN_H = 0.25;
+  const MAX_H = 8;
+  let hours = FALLBACK_H;
+  if (typeof extra.idleTimeoutMin === 'number' && extra.idleTimeoutMin > 0) {
+    // A deploy that auto-stops after `idleTimeoutMin` won't bill much past it;
+    // add a 1.5x boot/run headroom so the gate isn't over-optimistic.
+    hours = (extra.idleTimeoutMin / 60) * 1.5;
+  }
+  return Math.min(MAX_H, Math.max(MIN_H, hours));
+}
+
 export async function startDeployWithTiers(tiers: GpuTier[], dockerImage: string, gpuTypes: string[], extra: DeployExtra = {}, gpuTypesByProvider?: Record<string, string[]>) {
   const deployId = `deploy-${Date.now()}`;
   const { result, profile } = await profileOperation(
@@ -110,7 +151,10 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
   // ── Budget cap enforcement (P0-1) ───────────────────────────────────────
   {
     const { canAffordDeploy } = await import('./state');
-    const decision = canAffordDeploy(2);
+    // Derive the projection window from the deploy's idle/cost hints instead of
+    // a flat 2h (#106). Defaults to 2h when no hint is present.
+    const projectionHours = budgetProjectionHours({ maxCostUsd: extra.maxCostUsd });
+    const decision = canAffordDeploy(projectionHours);
     if (!decision.allowed) {
       const msg = `[budget] Deploy refused: ${decision.reason} (spend=$${decision.currentSpend.toFixed(2)}, projected=$${decision.projected.toFixed(2)}, cap=$${decision.cap.toFixed(2)})`;
       log.error(msg);
@@ -349,14 +393,14 @@ async function _executeDeploy(tiers: GpuTier[], dockerImage: string, gpuTypes: s
     // If this tier failed and there's a next tier, clear stale instance fields and set fallback alert.
     if (i < availableTiers.length - 1 && deployState.status === 'error') {
       const next = availableTiers[i + 1];
-      const alertMsg = `${tier.label} indisponível — usando ${next.label} como fallback.`;
+      const alertMsg = formatFallbackAlert(tier.label, next.label);
       log.warn(`[gpu] ⚠️ ${alertMsg}`);
       clearPersistedDeploy();
       setDeployState({
         status: 'creating', provider: next.name, step: 'creating_pod',
         podId: '', endpoint: '', sshHost: '', sshPort: 0, gpuType: '',
         costPerHr: 0, providerMeta: {}, stepDetail: '',
-        message: `${tier.label} indisponível. Tentando ${next.label}...`,
+        message: formatFallbackStatus(tier.label, next.label),
         alert: alertMsg,
       });
     }

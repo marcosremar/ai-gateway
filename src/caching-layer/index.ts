@@ -41,6 +41,8 @@ interface CacheEntry<T> {
   expiresAt: number;
   accessCount: number;
   createdAt: number;
+  /** Timestamp of the most recent get/set — drives true LRU eviction (#336). */
+  lastAccess: number;
 }
 
 /**
@@ -49,9 +51,32 @@ interface CacheEntry<T> {
 export class Cache<K = string, V = unknown> {
   private entries = new Map<K, CacheEntry<V>>();
   private options: Required<CacheOptions>;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: CacheOptions = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
+  }
+
+  /**
+   * Start a periodic background sweep that evicts expired entries on an
+   * interval. `evictExpired()` exists but nothing called it, so expired
+   * entries lingered until a same-key get/capacity hit, inflating memory
+   * (#337). The timer is unref'd so it never keeps the process alive.
+   * Idempotent — calling twice does not start a second timer.
+   */
+  startSweep(intervalMs = 60_000): void {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => this.evictExpired(), intervalMs);
+    const t = this.sweepTimer as unknown as { unref?: () => void };
+    if (typeof t.unref === 'function') t.unref();
+  }
+
+  /** Stop the periodic sweep (if started). */
+  stopSweep(): void {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
   }
 
   /** Get a cached value — returns null if expired or missing */
@@ -67,6 +92,7 @@ export class Cache<K = string, V = unknown> {
     }
 
     entry.accessCount++;
+    entry.lastAccess = Date.now();
     return entry.value;
   }
 
@@ -77,11 +103,13 @@ export class Cache<K = string, V = unknown> {
       this.evictOne();
     }
 
+    const now = Date.now();
     this.entries.set(key, {
       value,
-      expiresAt: Date.now() + (ttlMs ?? this.options.ttlMs),
+      expiresAt: now + (ttlMs ?? this.options.ttlMs),
       accessCount: 0,
-      createdAt: Date.now(),
+      createdAt: now,
+      lastAccess: now,
     });
   }
 
@@ -152,22 +180,35 @@ export class Cache<K = string, V = unknown> {
     return this.entries.size;
   }
 
-  /** Evict least recently used entry */
+  /**
+   * Evict one entry to make room. Prefers an already-expired entry; otherwise
+   * evicts the least-recently-USED (oldest lastAccess). The previous version
+   * was LFU mislabeled as LRU — it picked the lowest accessCount, so a
+   * just-inserted entry (count 0) was evicted before older, heavily-used ones
+   * and even before it was ever read (#336).
+   */
   private evictOne(): void {
-    let oldestKey: K | undefined;
-    let oldestTime = Infinity;
+    const now = Date.now();
+    let lruKey: K | undefined;
+    let lruTime = Infinity;
 
     for (const [key, entry] of this.entries.entries()) {
-      if (entry.accessCount < oldestTime) {
-        oldestTime = entry.accessCount;
-        oldestKey = key;
+      // Fast path: drop the first expired entry we find.
+      if (now > entry.expiresAt) {
+        this.options.onEvict(key as string, entry.value);
+        this.entries.delete(key);
+        return;
+      }
+      if (entry.lastAccess < lruTime) {
+        lruTime = entry.lastAccess;
+        lruKey = key;
       }
     }
 
-    if (oldestKey !== undefined) {
-      const entry = this.entries.get(oldestKey)!;
-      this.options.onEvict(oldestKey as string, entry.value);
-      this.entries.delete(oldestKey);
+    if (lruKey !== undefined) {
+      const entry = this.entries.get(lruKey)!;
+      this.options.onEvict(lruKey as string, entry.value);
+      this.entries.delete(lruKey);
     }
   }
 }
@@ -217,7 +258,17 @@ export function memoize<TArgs extends unknown[], TResult>(
     if (cached !== null) return cached;
 
     const result = fn(...args);
-    cache.set(key as string, result);
+
+    // Negative-cache guard (#338): for async-returning fns, caching the Promise
+    // would memoize a rejection (replayed for the whole TTL) and also cache
+    // null/undefined results. Cache the Promise but evict it if it rejects, so
+    // a transient failure isn't pinned. For sync fns, skip null/undefined.
+    if (result instanceof Promise) {
+      cache.set(key as string, result);
+      result.catch(() => cache.delete(key as string));
+    } else if (result !== null && result !== undefined) {
+      cache.set(key as string, result);
+    }
     return result;
   };
 }

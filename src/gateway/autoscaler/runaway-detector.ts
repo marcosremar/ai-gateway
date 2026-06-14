@@ -185,6 +185,49 @@ export class RunawayDetector {
     this.states.clear();
   }
 
+  /**
+   * #296 — serialize the per-provider window + pause state so it can be
+   * persisted (e.g. to ~/.babelcast/runaway.json) and survive a restart.
+   *
+   * Without this, a process restart clears `states`, making a runaway
+   * provider immediately retryable post-crash — the exact scenario that
+   * burned $130 in the 2026-03-25 incident. Returns a plain JSON-safe object.
+   */
+  serialize(): Record<string, { starts: number[]; pausedUntilMs?: number; pauseReason?: string }> {
+    const out: Record<string, { starts: number[]; pausedUntilMs?: number; pauseReason?: string }> = {};
+    for (const [provider, state] of this.states) {
+      out[provider] = {
+        starts: [...state.starts],
+        ...(state.pausedUntilMs !== undefined ? { pausedUntilMs: state.pausedUntilMs } : {}),
+        ...(state.pauseReason !== undefined ? { pauseReason: state.pauseReason } : {}),
+      };
+    }
+    return out;
+  }
+
+  /**
+   * Restore state previously produced by {@link serialize}. Expired pauses
+   * (pausedUntilMs already in the past) and stale window entries (older than
+   * `windowMs`) are dropped on restore so the guard reflects "now", not the
+   * snapshot moment. Merges into existing state.
+   */
+  restore(snapshot: Record<string, { starts?: number[]; pausedUntilMs?: number; pauseReason?: string }> | null | undefined): void {
+    if (!snapshot) return;
+    const now = this.now();
+    const cutoff = now - this.windowMs;
+    for (const [provider, snap] of Object.entries(snapshot)) {
+      const state = this._getOrCreate(provider);
+      state.starts = (snap.starts ?? []).filter((t) => typeof t === 'number' && t >= cutoff);
+      if (typeof snap.pausedUntilMs === 'number' && snap.pausedUntilMs > now) {
+        state.pausedUntilMs = snap.pausedUntilMs;
+        state.pauseReason = snap.pauseReason;
+      } else {
+        delete state.pausedUntilMs;
+        delete state.pauseReason;
+      }
+    }
+  }
+
   private _getOrCreate(provider: string): ProviderState {
     let state = this.states.get(provider);
     if (!state) {

@@ -121,12 +121,20 @@ class HealthChecker {
   ): Promise<HealthCheckResult & { timestamp: string }> {
     const start = Date.now();
 
+    // #260: keep a handle to the race timeout so we can clear it on the happy
+    // path. Previously the timer was never cleared when the check resolved
+    // first, so under frequent `runAll` calls the pending timers piled up
+    // until each fired on its own — a slow timer leak.
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     try {
       const result = await Promise.race([
         check.fn(),
-        new Promise<HealthCheckResult>((_, reject) =>
-          setTimeout(() => reject(new Error(`Health check timed out after ${check.timeoutMs}ms`)), check.timeoutMs),
-        ),
+        new Promise<HealthCheckResult>((_, reject) => {
+          timeoutHandle = setTimeout(
+            () => reject(new Error(`Health check timed out after ${check.timeoutMs}ms`)),
+            check.timeoutMs,
+          );
+        }),
       ]);
 
       return {
@@ -141,6 +149,8 @@ class HealthChecker {
         latencyMs: Date.now() - start,
         timestamp: new Date().toISOString(),
       };
+    } finally {
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
     }
   }
 }

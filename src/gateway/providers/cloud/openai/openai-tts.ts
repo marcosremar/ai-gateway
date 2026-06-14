@@ -17,6 +17,23 @@ const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
   pcm: 'audio/pcm',
 };
 
+/** Fallback voice when an unknown voice id is requested. */
+export const OPENAI_DEFAULT_VOICE = 'nova';
+
+/**
+ * Resolve a requested voice id against the known OpenAI voice set.
+ * Returns the resolved voice plus a `wasRemapped` flag so callers can surface
+ * a warning instead of silently substituting a surprise voice (#375).
+ * Pure + exported for unit testing (the provider builds an OpenAI client).
+ */
+export function resolveOpenAIVoice(
+  requested: string | undefined,
+  knownVoices: Set<string>,
+): { voice: string; wasRemapped: boolean } {
+  if (requested && knownVoices.has(requested)) return { voice: requested, wasRemapped: false };
+  return { voice: OPENAI_DEFAULT_VOICE, wasRemapped: requested !== undefined };
+}
+
 export class OpenAITTSProvider implements TTSProvider {
   readonly providerId: ProviderId = 'openai';
   private client: OpenAI | null = null;
@@ -35,10 +52,14 @@ export class OpenAITTSProvider implements TTSProvider {
     return this.client;
   }
 
-  /** Validate voice against known OpenAI voices; fallback to 'coral' for unknown names. */
+  /** Validate voice against known OpenAI voices; warn + fallback to 'nova' for
+   *  unknown names so callers learn their voice id is invalid (#375). */
   private resolveVoice(requested?: string): string {
-    if (requested && this.voiceIds.has(requested)) return requested;
-    return 'nova';
+    const { voice, wasRemapped } = resolveOpenAIVoice(requested, this.voiceIds);
+    if (wasRemapped) {
+      console.warn(`[OpenAI TTS] unknown voice "${requested}" — falling back to "${voice}"`);
+    }
+    return voice;
   }
 
   withApiKey(apiKey: string): OpenAITTSProvider {

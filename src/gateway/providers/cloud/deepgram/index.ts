@@ -32,6 +32,30 @@ const DEEPGRAM_MODELS: ModelInfo[] = [
   { id: 'nova-2', name: 'Nova-2', description: 'Deepgram Nova-2 — previous generation', capability: 'stt' },
 ];
 
+/**
+ * Build the Deepgram query string from an STTRequest. Pure + exported for unit
+ * testing (the transcribe() path does live fetch). Fixes:
+ *   - #368: word timestamps come from Nova by default — do NOT toggle the
+ *     unrelated `punctuate` knob when wordTimestamps is requested.
+ *   - #369: `smart_format` is opt-in (request.smartFormat) instead of forced,
+ *     so it can't silently rewrite numbers/dates and break term matching.
+ */
+export function buildDeepgramParams(request: STTRequest): URLSearchParams {
+  const model = request.model || 'nova-3';
+  const params = new URLSearchParams({ model });
+  if (request.smartFormat) params.set('smart_format', 'true');
+  if (request.language) params.set('language', request.language);
+  if (request.vad?.endpointingMs !== undefined) {
+    params.set('endpointing', String(Math.max(0, request.vad.endpointingMs)));
+  }
+  if (request.vad?.vadEvents) params.set('vad_events', 'true');
+  if (request.vad?.utteranceEndMs !== undefined) {
+    params.set('utterance_end_ms', String(Math.max(0, request.vad.utteranceEndMs)));
+  }
+  if (request.vad?.interimResults) params.set('interim_results', 'true');
+  return params;
+}
+
 export class DeepgramSTTProvider implements STTProvider {
   readonly providerId: ProviderId = 'deepgram';
 
@@ -42,21 +66,7 @@ export class DeepgramSTTProvider implements STTProvider {
     const apiKey = process.env.DEEPGRAM_API_KEY;
     if (!apiKey) throw new Error('[deepgram] DEEPGRAM_API_KEY is not set');
 
-    const model = request.model || 'nova-3';
-    const params = new URLSearchParams({ model, smart_format: 'true' });
-    if (request.language) params.set('language', request.language);
-    if (request.wordTimestamps) params.set('punctuate', 'true');
-    // VAD / endpointing knobs — exposed via STTRequest.vad. Sensible defaults
-    // when unspecified; explicit values let callers tune for snappy vs
-    // thoughtful conversation patterns.
-    if (request.vad?.endpointingMs !== undefined) {
-      params.set('endpointing', String(Math.max(0, request.vad.endpointingMs)));
-    }
-    if (request.vad?.vadEvents) params.set('vad_events', 'true');
-    if (request.vad?.utteranceEndMs !== undefined) {
-      params.set('utterance_end_ms', String(Math.max(0, request.vad.utteranceEndMs)));
-    }
-    if (request.vad?.interimResults) params.set('interim_results', 'true');
+    const params = buildDeepgramParams(request);
 
     const audioBuffer = request.audio instanceof Blob
       ? Buffer.from(await request.audio.arrayBuffer())

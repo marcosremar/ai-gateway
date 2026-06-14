@@ -85,12 +85,76 @@ export function ewmaRaceOpts(
   return _ewmaRaceOpts(candidates, stage, flags, ewmaTracker);
 }
 
+// ── Static provider-chain indices (#66) ──────────────────────────────────────
+// PROVIDER_CHAIN and GPU_PROVIDERS are module-level constants, so these scans
+// are pure and identical on every request. `buildRouting` re-ran two
+// `findIndex` scans (plus a comparison) per pipeline run; compute them once.
+
+/**
+ * Pure resolver for the static provider-chain indices used by routing (#66).
+ * Extracted so the (otherwise module-private) hoist is unit-testable.
+ */
+export function computeChainIndices(
+  chain: readonly string[],
+  gpuProviders: ReadonlySet<string>,
+): { firstCloudIdx: number; gpuIdx: number; gpuBeforeCloud: boolean } {
+  const firstCloudIdx = chain.findIndex(p => p === 'groq' || p === 'ollama');
+  const gpuIdx = chain.findIndex(p => gpuProviders.has(p));
+  const gpuBeforeCloud = gpuIdx >= 0 && (firstCloudIdx < 0 || gpuIdx < firstCloudIdx);
+  return { firstCloudIdx, gpuIdx, gpuBeforeCloud };
+}
+
+const _chainIdx = computeChainIndices(PROVIDER_CHAIN, GPU_PROVIDERS);
+const FIRST_CLOUD_IDX = _chainIdx.firstCloudIdx;
+const GPU_BEFORE_CLOUD = _chainIdx.gpuBeforeCloud;
+
+/**
+ * Invariant (#74): the cloud TTS providers (Groq/OpenAI) CANNOT voice-clone, so
+ * a clone TTS request must never append a cloud synth leg (it would pay for an
+ * un-cloned voice that can't satisfy the request). For a clone the chain is
+ * GPU (+Modal); for non-clone it is GPU/Modal + cloud. This pure descriptor
+ * mirrors the candidate-builder branch so the contract is asserted in tests.
+ */
+export function ttsCandidateKindsForClone(isClone: boolean): { gpu: boolean; modal: boolean; cloud: boolean } {
+  return isClone
+    ? { gpu: true, modal: true, cloud: false }
+    : { gpu: true, modal: true, cloud: true };
+}
+
+// modal-babelcast STT leg deadline (#65). The cloud STT leg has an 8s deadline,
+// so a 15s Modal leg fired in parallel kept a (possibly cold-started) Modal
+// container alive ~7s past the point cloud already won. Tighten to 10s — enough
+// cold-start margin to occasionally win, without billing long after the race
+// is decided. (LLM/TTS Modal legs are unchanged — their work is heavier.)
+export const MODAL_BABELCAST_STT_TIMEOUT_MS = 10_000;
+/** Cloud STT leg deadline, for the #65 invariant test (Modal must not outlast it by much). */
+export const CLOUD_STT_TIMEOUT_MS = 8_000;
+
+/**
+ * Build the WebSocket payload broadcast when a dub fanout fails entirely (#61),
+ * so the UI dub status reflects the drop instead of failing silently.
+ */
+export function buildDubErrorEvent(source: string, err: unknown): {
+  type: 'dub:error'; source: string; message: string; at: number;
+} {
+  const message = err instanceof Error ? err.message : String(err);
+  return { type: 'dub:error', source, message, at: Date.now() };
+}
+
+/**
+ * Normalize a cloud/ensemble STT avg_logprob (#18). The cloud path doesn't
+ * surface Whisper logprobs, so a literal 0 looked like a real, very-confident
+ * measurement and defeated the metadata hallucination filter (which uses NaN as
+ * its missing-metric sentinel). Pass through a real number; otherwise NaN.
+ */
+export function cloudSttAvgLogprob(raw: number | null | undefined): number {
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : NaN;
+}
+
 // ── Wire server deps → pipeline orchestrator ─────────────────────────────────
 
 function buildRouting(opts: _PipelineOpts, referenceAudio?: string, refText?: string): PipelineRouting {
-  const firstCloudIdx = PROVIDER_CHAIN.findIndex(p => p === 'groq' || p === 'ollama');
-  const gpuIdx = PROVIDER_CHAIN.findIndex(p => GPU_PROVIDERS.has(p));
-  const gpuBeforeCloud = gpuIdx >= 0 && (firstCloudIdx < 0 || gpuIdx < firstCloudIdx);
+  const gpuBeforeCloud = GPU_BEFORE_CLOUD;
 
   const gpuEp = (gpuBeforeCloud && isGpuAvailable()) ? deployState.endpoint : undefined;
   const sttOnGpu = !!gpuEp && isStageWarm('stt') && isStageCircuitClosed('stt');
@@ -154,7 +218,13 @@ function buildSideEffects(): PipelineSideEffects {
       return getActiveTargets().filter(t => t !== excludeTarget);
     },
     runDubFanout(sttText, source, sttMs, sttProvider, opts) {
-      runMultiLangFanout(sttText, source, sttMs, sttProvider, opts).catch(err => log.warn('dub-fanout', err));
+      // Surface a totally-failed fanout (#61). Previously a rejection was only
+      // log.warn'd, so the client/UI dub status never learned the dubbed
+      // languages were dropped. Emit a dub:error event in addition to logging.
+      runMultiLangFanout(sttText, source, sttMs, sttProvider, opts).catch(err => {
+        log.warn('dub-fanout', err);
+        broadcastWs(buildDubErrorEvent(source, err));
+      });
     },
   };
 }
@@ -175,7 +245,7 @@ function buildStageExecutors(routing: PipelineRouting): PipelineStageExecutors {
       }
       if (rt.modalBabelcastUrl && !(rt.sttOnGpu && rt.deployEndpointIsModal)) {
         candidates.push({
-          name: 'modal-babelcast', timeoutMs: 15_000,
+          name: 'modal-babelcast', timeoutMs: MODAL_BABELCAST_STT_TIMEOUT_MS,
           run: (signal) => fetchGpuSTT(rt.modalBabelcastUrl!, audio, source, sttPrompt, '', false, signal),
         });
       }
@@ -185,7 +255,9 @@ function buildStageExecutors(routing: PipelineRouting): PipelineStageExecutors {
         run: async (signal) => {
           if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
           const r = await client.transcribe(audio, cloudProfile);
-          return { text: r.text, language: r.language || '', used_gpu: false, avg_logprob: 0 };
+          // NaN (not 0) signals "no avg_logprob measured" so the metadata
+          // hallucination filter handles the missing metric explicitly (#18).
+          return { text: r.text, language: r.language || '', used_gpu: false, avg_logprob: cloudSttAvgLogprob(undefined) };
         },
       });
       if (groqAvailable) {
@@ -195,7 +267,9 @@ function buildStageExecutors(routing: PipelineRouting): PipelineStageExecutors {
             if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
             const providers: STTRaceProvider[] = [{ name: 'groq', provider: groqSTT }];
             const result = await sttRace(audio, source, sttPrompt, { providers, timeoutMs: 2500 });
-            return { text: result.text, language: '', used_gpu: false, avg_logprob: result.avgLogprob ?? 0 };
+            // Preserve a real logprob when the race surfaced one; otherwise NaN
+            // (the missing-metric sentinel) rather than a misleading 0 (#18).
+            return { text: result.text, language: '', used_gpu: false, avg_logprob: cloudSttAvgLogprob(result.avgLogprob) };
           },
         });
       }
@@ -315,8 +389,7 @@ function buildStageExecutors(routing: PipelineRouting): PipelineStageExecutors {
 }
 
 function getBaseProfile(): AIProfile {
-  const firstCloudIdx = PROVIDER_CHAIN.findIndex(p => p === 'groq' || p === 'ollama');
-  return (firstCloudIdx >= 0 && PROVIDER_CHAIN[firstCloudIdx] === 'ollama' && ollamaProfile)
+  return (FIRST_CLOUD_IDX >= 0 && PROVIDER_CHAIN[FIRST_CLOUD_IDX] === 'ollama' && ollamaProfile)
     ? ollamaProfile : (groqProfile || ollamaProfile || translationProfile)!;
 }
 

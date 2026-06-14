@@ -25,9 +25,22 @@
  * doesn't call it yet. The existing POST /v1/speech route uses the
  * sequential pipeline in server/ai-handlers.ts. Wiring this in requires
  * a streaming STT provider (not all providers support partial results).
+ *
+ * @experimental NOT the live overlap path. The production LLM→TTS interleave
+ * lives in `src/gateway/pipeline/streaming-overlap.ts` (sentence-aggregator
+ * based). This module is an STT-token-based proof-of-concept that nothing wires
+ * in. Do NOT import `runStreamingOverlap` expecting the live behaviour — see
+ * `IS_EXPERIMENTAL_STREAMING_OVERLAP` (#53/#98).
  */
 
 import type { LLMProvider, ChatMessage } from '../providers/types';
+
+/**
+ * Marker that this module is the experimental (unwired) overlap coordinator,
+ * distinct from the live `gateway/pipeline/streaming-overlap.ts`. Exported so
+ * callers / tests can assert they did not accidentally import the wrong module.
+ */
+export const IS_EXPERIMENTAL_STREAMING_OVERLAP = true as const;
 
 export interface StreamingOverlapOptions {
   /** Minimum tokens from STT before starting LLM. Default: 10. */

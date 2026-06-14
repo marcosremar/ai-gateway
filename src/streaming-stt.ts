@@ -131,6 +131,13 @@ export class StreamingSTTBackend {
   private _connectTimer: ReturnType<typeof setTimeout> | undefined;
   private _closedIntentionally = false;
   private _textDecoder: TextDecoder | null = null;
+  // Small pre-connect audio buffer (#79). PCM frames arriving while the upstream
+  // socket is still CONNECTING were silently dropped, leaving a transcription
+  // gap at the very start of a session (or after a reconnect). Buffer a bounded
+  // window and flush it the instant the socket opens. Capped by _maxBufferBytes
+  // so a stuck connection can't grow memory without bound.
+  private _preConnectBuffer: ArrayBuffer[] = [];
+  private _preConnectBytes = 0;
 
   onResult?: (event: StreamingSTTEvent) => void;
   onConnected?: () => void;
@@ -180,6 +187,10 @@ export class StreamingSTTBackend {
       this._open = false;
       this._connecting = false;
       this._clearConnectTimer();
+      // Discard any buffered pre-connect audio — the socket is gone, so flushing
+      // it later would either be impossible or replay stale frames (#79).
+      this._preConnectBuffer = [];
+      this._preConnectBytes = 0;
 
       ws.onopen = null;
       ws.onmessage = null;
@@ -227,6 +238,9 @@ export class StreamingSTTBackend {
       }
       this._open = true;
       logDebug(this._logger, '[StreamingSTT] Connected');
+      // Drain any frames that arrived while we were connecting (#79) before
+      // notifying the caller, so the buffered leading audio is sent in order.
+      this._flushPreConnect();
       this.onConnected?.();
     };
 
@@ -306,12 +320,8 @@ export class StreamingSTTBackend {
     };
   }
 
-  sendAudio(pcm: ArrayBuffer | Buffer): void {
-    if (!this._open || this._aborted) return;
-
-    const ws = this.ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
+  /** Normalize a PCM payload to an ArrayBuffer, or null if invalid/oversized. */
+  private _normalizePcm(pcm: ArrayBuffer | Buffer): ArrayBuffer | null {
     let buffer: ArrayBuffer;
     if (pcm instanceof ArrayBuffer) {
       buffer = pcm;
@@ -319,18 +329,60 @@ export class StreamingSTTBackend {
       const buf = pcm.buffer;
       if (!(buf instanceof ArrayBuffer)) {
         logError(this._logger, '[StreamingSTT] Unsupported buffer type');
-        return;
+        return null;
       }
       buffer = buf;
     } else {
       logError(this._logger, '[StreamingSTT] Invalid audio type');
+      return null;
+    }
+    if (buffer.byteLength > this._maxBufferBytes) {
+      logError(this._logger, '[StreamingSTT] Audio buffer too large: %s bytes', buffer.byteLength);
+      return null;
+    }
+    return buffer;
+  }
+
+  /** Flush any frames buffered while the socket was connecting (#79). */
+  private _flushPreConnect(): void {
+    if (this._preConnectBuffer.length === 0) return;
+    const ws = this.ws;
+    const pending = this._preConnectBuffer;
+    this._preConnectBuffer = [];
+    this._preConnectBytes = 0;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    for (const buf of pending) {
+      try {
+        ws.send(buf);
+      } catch (e) {
+        logError(this._logger, '[StreamingSTT] Flush send error: %s', e);
+      }
+    }
+  }
+
+  sendAudio(pcm: ArrayBuffer | Buffer): void {
+    if (this._aborted) return;
+
+    const buffer = this._normalizePcm(pcm);
+    if (!buffer) return;
+
+    // Not open yet but connecting: buffer a bounded window so the start of the
+    // utterance isn't lost. Once the socket opens, _flushPreConnect() drains it
+    // in order. Drop the OLDEST frame when over the byte cap (newer audio is
+    // more relevant to the live transcript than stale leading frames).
+    if (!this._open) {
+      if (!this._connecting) return; // fully closed — nothing to buffer for
+      this._preConnectBuffer.push(buffer);
+      this._preConnectBytes += buffer.byteLength;
+      while (this._preConnectBytes > this._maxBufferBytes && this._preConnectBuffer.length > 1) {
+        const dropped = this._preConnectBuffer.shift();
+        if (dropped) this._preConnectBytes -= dropped.byteLength;
+      }
       return;
     }
 
-    if (buffer.byteLength > this._maxBufferBytes) {
-      logError(this._logger, '[StreamingSTT] Audio buffer too large: %s bytes', buffer.byteLength);
-      return;
-    }
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     try {
       ws.send(buffer);
@@ -368,6 +420,11 @@ export class StreamingSTTBackend {
 
   get isConnecting(): boolean {
     return this._connecting;
+  }
+
+  /** Bytes currently buffered awaiting connection (#79) — for tests/telemetry. */
+  get pendingPreConnectBytes(): number {
+    return this._preConnectBytes;
   }
 }
 

@@ -60,6 +60,7 @@ import { getLocalKokoroUrl } from '../src/gateway/pipeline/local-kokoro';
 const log = createLogger('ai-handlers');
 import {
   botState, deployState, isGpuAvailable, touchRequest, touchModelRequest, getP95Latency,
+  getPerStageP95,
   isTtsWarm, recordTtsTtfb, markTtsWarm, ttsWarmth, saveColdStartProfile,
   isStageWarm, gpuModelWarmth, gpuHealthy,
   isGpuReadyForProduction, recordGpuLatency, recordPerStageLatency, gpuReadyForProduction, gpuReadinessState,
@@ -132,27 +133,79 @@ export const getTranslationCacheStats = _getTranslationCacheStats;
 // Re-exported for backward compatibility via named import at top
 export { GPU_STT_TIMEOUT_MS, GPU_LLM_TIMEOUT_MS, GPU_TTS_TIMEOUT_MS, GPU_PIPELINE_TIMEOUT_MS };
 
-/** Adaptive GPU timeout: P95 × 2 with floor/ceiling guards. */
-function adaptiveGpuTimeout(baseMs: number): number {
-  const p95 = getP95Latency();
-  if (p95 === null) return baseMs; // no data yet, use fixed default
-  const adaptive = Math.ceil(p95 * 2);
-  // Floor: never below 500ms (healthy GPU). Ceiling: never above baseMs.
-  return Math.max(500, Math.min(adaptive, baseMs));
+/** Lower floor for any adaptive timeout — never tighter than a healthy GPU. */
+const ADAPTIVE_TIMEOUT_FLOOR_MS = 500;
+
+/**
+ * Shadow-run timeout (#70). Shadow GPU calls serve no user response — they only
+ * validate quality/latency — so a slow shadow should not bill the full
+ * production default. Cap to ~60% of the production timeout with a 2s floor so
+ * a sluggish shadow GPU is abandoned (and stops billing) much sooner.
+ */
+const SHADOW_TIMEOUT_FRACTION = 0.6;
+const SHADOW_TIMEOUT_FLOOR_MS = 2_000;
+export function shadowTimeoutMs(baseMs: number): number {
+  // Apply the floor first, then clamp to base last so the result can never
+  // exceed the production timeout (a shadow must not bill MORE than production).
+  return Math.min(baseMs, Math.max(SHADOW_TIMEOUT_FLOOR_MS, Math.round(baseMs * SHADOW_TIMEOUT_FRACTION)));
 }
 
 /**
- * Per-stage adaptive timeout using avg_latency_ms from GPU pod /health data.
- * Uses the stage-specific average (3x headroom) when available, otherwise
- * falls back to the global P95-based timeout.
+ * Pure adaptive-timeout math (#68/#100). Folds the previously-duplicated
+ * `adaptiveGpuTimeout`/`adaptiveStageTimeout` floor/ceiling logic into one
+ * place so their guards can never drift apart as defaults change.
+ *
+ * Resolution order, most-specific signal first:
+ *   1. stage avg_latency_ms × 3   (≥ MIN_STAGE_SAMPLES samples) — richest signal
+ *   2. stage P95 × 2              — per-stage, avoids a slow TTS P95 leaking into
+ *                                   a fast STT (the #68 cross-stage bleed)
+ *   3. global P95 × 2             — last-resort shared signal
+ *   4. baseMs                     — no data at all
+ * Every branch is clamped to [floor, baseMs].
+ *
+ * @param baseMs           the fixed default ceiling for the stage
+ * @param stageAvgMs       stage avg_latency_ms, or null if unknown
+ * @param stageSamples     number of stage samples backing stageAvgMs
+ * @param stageP95Ms       per-stage P95, or null if < min samples
+ * @param globalP95Ms      global P95, or null if no data
+ * @param minStageSamples  min samples before trusting stageAvgMs (default 3)
+ */
+export function computeAdaptiveTimeout(
+  baseMs: number,
+  stageAvgMs: number | null,
+  stageSamples: number,
+  stageP95Ms: number | null,
+  globalP95Ms: number | null,
+  minStageSamples = 3,
+): number {
+  const clamp = (v: number) => Math.max(ADAPTIVE_TIMEOUT_FLOOR_MS, Math.min(baseMs, v));
+  if (stageSamples >= minStageSamples && stageAvgMs !== null) {
+    return clamp(Math.ceil(stageAvgMs * 3)); // 3× average gives variance headroom
+  }
+  if (stageP95Ms !== null) return clamp(Math.ceil(stageP95Ms * 2));
+  if (globalP95Ms !== null) return clamp(Math.ceil(globalP95Ms * 2));
+  return baseMs; // no data yet — fixed default
+}
+
+/** Adaptive GPU timeout: global P95 × 2 with floor/ceiling guards. */
+function adaptiveGpuTimeout(baseMs: number): number {
+  return computeAdaptiveTimeout(baseMs, null, 0, null, getP95Latency());
+}
+
+/**
+ * Per-stage adaptive timeout. Prefers the stage's own avg_latency_ms, then the
+ * stage's own P95 (so a fast STT no longer inherits a slow TTS's global P95 —
+ * #68), then the global P95, then the fixed default.
  */
 export function adaptiveStageTimeout(stage: 'stt' | 'llm' | 'tts', baseMs: number): number {
   const entry = gpuModelWarmth[stage];
-  if (entry.requests >= 3 && entry.avgLatencyMs !== null) {
-    // 3x average gives headroom for variance; floor 500ms, ceiling baseMs
-    return Math.max(500, Math.min(baseMs, Math.ceil(entry.avgLatencyMs * 3)));
-  }
-  return adaptiveGpuTimeout(baseMs);
+  return computeAdaptiveTimeout(
+    baseMs,
+    entry.avgLatencyMs,
+    entry.requests,
+    getPerStageP95(stage),
+    getP95Latency(),
+  );
 }
 
 // ── Translation LRU cache — imported from src/gateway/pipeline/translation-cache.ts
@@ -161,10 +214,55 @@ export { getCachedTranslation, setCachedTranslation, adaptiveMaxTokens, getVoice
 
 // ── Avatar TTS forwarding ────────────────────────────────────────────────────
 
+// Avatar circuit breaker (#84). `forwardToAvatar` fires on every completed
+// pipeline with a 3s timeout; a persistently-down avatar made every request pay
+// a 3s pending fetch. Open the breaker after N consecutive failures and skip
+// the fetch entirely until a cooldown elapses, then allow one probe.
+const AVATAR_BREAKER_THRESHOLD = 3;
+const AVATAR_BREAKER_COOLDOWN_MS = 30_000;
+interface AvatarBreakerState { failures: number; openedAt: number | null; }
+const avatarBreaker: AvatarBreakerState = { failures: 0, openedAt: null };
+
+/**
+ * Pure breaker decision (#84): given the breaker state and `now`, decide
+ * whether a forward should be attempted. Returns `skip` when the breaker is
+ * open and still cooling down; otherwise `attempt` (which includes the
+ * half-open probe right after cooldown expires).
+ */
+export function avatarBreakerShouldAttempt(
+  state: AvatarBreakerState,
+  now: number,
+  cooldownMs = AVATAR_BREAKER_COOLDOWN_MS,
+): boolean {
+  if (state.openedAt === null) return true;
+  if (now - state.openedAt >= cooldownMs) return true; // cooldown elapsed → probe
+  return false;
+}
+
+function avatarBreakerOnSuccess(state: AvatarBreakerState): void {
+  state.failures = 0;
+  state.openedAt = null;
+}
+
+function avatarBreakerOnFailure(state: AvatarBreakerState, now: number): void {
+  state.failures += 1;
+  if (state.failures >= AVATAR_BREAKER_THRESHOLD) state.openedAt = now;
+}
+
+/** Test hook: reset the avatar breaker. */
+export function _resetAvatarBreaker(): void {
+  avatarBreaker.failures = 0;
+  avatarBreaker.openedAt = null;
+}
+
 /** Fire-and-forget: forward TTS audio to the avatar on the bot pod. */
 export function forwardToAvatar(audioBase64: string): void {
   const ep = botState.endpoint;
   if (!ep) return;
+
+  // Short-circuit when the breaker is open and still cooling down — don't pay
+  // the 3s timeout for a known-dead avatar (#84).
+  if (!avatarBreakerShouldAttempt(avatarBreaker, Date.now())) return;
 
   // Derive avatar endpoint from bot endpoint. RunPod proxy URLs look like
   // `https://<podid>-8080.proxy.runpod.net`. The previous regex used `[^-]+`
@@ -182,9 +280,16 @@ export function forwardToAvatar(audioBase64: string): void {
     body: JSON.stringify({ audio: audioBase64 }),
     signal: AbortSignal.timeout(3_000),
   }).then(res => {
-    if (!res.ok) log.warn(`speak failed: ${res.status}`);
+    if (!res.ok) {
+      log.warn(`speak failed: ${res.status}`);
+      avatarBreakerOnFailure(avatarBreaker, Date.now());
+    } else {
+      avatarBreakerOnSuccess(avatarBreaker);
+    }
   }).catch(err => {
-    // Silently ignore — avatar may not be running
+    // Silently ignore — avatar may not be running. Count toward the breaker so
+    // a persistently-down avatar trips it and stops costing 3s per request.
+    avatarBreakerOnFailure(avatarBreaker, Date.now());
     console.debug?.(`[avatar] forward failed: ${(err as Error).message}`);
   });
 }
@@ -243,21 +348,30 @@ export async function fetchGpuTTS(
 
 // ── Resolve cloud profile for a request ──────────────────────────────────────
 
-export function getCloudProfile(): AIProfile | null {
-  // Find the first cloud provider in PROVIDER_CHAIN
+export type CloudProviderName = 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid';
+
+/**
+ * Resolve the active cloud provider's profile AND name in ONE pass over
+ * PROVIDER_CHAIN (#72). `getCloudProfile`/`getCloudProviderName` previously each
+ * scanned the chain independently on every request; both now delegate here so
+ * the chosen profile and the reported name can never disagree.
+ */
+export function resolveCloudProvider(): { profile: AIProfile | null; name: CloudProviderName } {
   for (const p of PROVIDER_CHAIN) {
-    if (p === 'groq' && groqProfile) return groqProfile;
-    if (p === 'ollama' && ollamaProfile) return ollamaProfile;
+    if (p === 'groq' && groqProfile) return { profile: groqProfile, name: 'groq' };
+    if (p === 'ollama' && ollamaProfile) return { profile: ollamaProfile, name: 'ollama' };
   }
-  return groqProfile || ollamaProfile;
+  // No configured cloud provider found in the chain: fall back to whichever
+  // profile exists (profile) but report 'groq' as the default name (name).
+  return { profile: groqProfile || ollamaProfile, name: 'groq' };
 }
 
-export function getCloudProviderName(): 'gpu' | 'groq' | 'ollama' | 'ensemble' | 'cache' | 'hybrid' {
-  for (const p of PROVIDER_CHAIN) {
-    if (p === 'groq' && groqProfile) return 'groq';
-    if (p === 'ollama' && ollamaProfile) return 'ollama';
-  }
-  return 'groq';
+export function getCloudProfile(): AIProfile | null {
+  return resolveCloudProvider().profile;
+}
+
+export function getCloudProviderName(): CloudProviderName {
+  return resolveCloudProvider().name;
 }
 
 // ── GPU-aware STT endpoint (with request hedging) ───────────────────────────
@@ -305,7 +419,7 @@ export async function handleTranscribe(req: IncomingMessage, res: ServerResponse
     const shadowEndpoint = deployState.endpoint;
     const shadowTarget = Math.round(getSttTargetLatencyMs() * (1 - getBenchmarkMarginPct() / 100));
     runShadowStage('stt', shadowEndpoint, shadowTarget,
-      () => fetchGpuSTT(shadowEndpoint, audio, language, prompt, hotwords, wordTimestamps, AbortSignal.timeout(GPU_STT_TIMEOUT_MS), requestId),
+      () => fetchGpuSTT(shadowEndpoint, audio, language, prompt, hotwords, wordTimestamps, AbortSignal.timeout(shadowTimeoutMs(GPU_STT_TIMEOUT_MS)), requestId),
       shadowRunDeps);
   }
 
@@ -614,7 +728,7 @@ export async function handleTranslate(req: IncomingMessage, res: ServerResponse)
     const shadowEndpoint = deployState.endpoint;
     const shadowTarget = Math.round(getLlmTargetLatencyMs() * (1 - getBenchmarkMarginPct() / 100));
     runShadowStage('llm', shadowEndpoint, shadowTarget,
-      () => fetchGpuLLM(shadowEndpoint, text, sourceLang, targetLang, glossary, context, AbortSignal.timeout(GPU_LLM_TIMEOUT_MS), requestId),
+      () => fetchGpuLLM(shadowEndpoint, text, sourceLang, targetLang, glossary, context, AbortSignal.timeout(shadowTimeoutMs(GPU_LLM_TIMEOUT_MS)), requestId),
       shadowRunDeps);
   }
 

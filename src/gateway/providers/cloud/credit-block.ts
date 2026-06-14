@@ -25,6 +25,24 @@ function blockKey(provider: string, apiKeyHash: string): string {
 export class CreditBlockTracker {
   private blocks = new Map<string, number>(); // key → blockedUntil timestamp
   private lastSweep = Date.now();
+  /** Optional per-provider TTL overrides (ms). Falls back to BLOCK_TTL_MS. */
+  private readonly ttlOverrides: Record<string, number>;
+
+  /**
+   * @param ttlOverrides Optional per-provider block TTL (ms). A provider whose
+   *   402 is a transient rate-limit (not real credit exhaustion) can recover
+   *   sooner than the flat 5-minute window, avoiding over-routing to pricier
+   *   fallbacks (#311). Example: `{ groq: 30_000 }`.
+   */
+  constructor(ttlOverrides: Record<string, number> = {}) {
+    this.ttlOverrides = ttlOverrides;
+  }
+
+  /** Resolve the block TTL for a provider (override or global default). */
+  private ttlFor(provider: string): number {
+    const override = this.ttlOverrides[provider];
+    return typeof override === 'number' && override > 0 ? override : BLOCK_TTL_MS;
+  }
 
   /** Remove expired entries to prevent unbounded growth. */
   private sweep(): void {
@@ -40,11 +58,15 @@ export class CreditBlockTracker {
   recordBlock(provider: string, apiKeyHash: string): void {
     this.sweep();
     const key = blockKey(provider, apiKeyHash);
-    this.blocks.set(key, Date.now() + BLOCK_TTL_MS);
+    this.blocks.set(key, Date.now() + this.ttlFor(provider));
   }
 
   /** Check if a provider:key pair is currently blocked */
   isBlocked(provider: string, apiKeyHash: string): boolean {
+    // Sweep on reads too — under low 402 volume recordBlock may not fire for a
+    // long time, leaving expired entries (and a stale `size`) in the map until
+    // a same-key read or capacity hit (#315).
+    this.sweep();
     const key = blockKey(provider, apiKeyHash);
     const until = this.blocks.get(key);
     if (until === undefined) return false;

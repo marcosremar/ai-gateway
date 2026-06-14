@@ -19,6 +19,47 @@ export function countRecentBreaches(samples: number[], maxMs: number): number {
   return recent.filter((s) => s > maxMs).length;
 }
 
+/**
+ * #253 — P95 over a *time* window rather than a fixed sample count.
+ *
+ * `countRecentBreaches`/`computeP95` over the last 20 samples make P95 the
+ * ~19th value — unstable, and easily driven by one or two outliers. When
+ * latency samples carry timestamps, this computes P95 over only the samples
+ * within `windowMs` of `now`, so a burst of recent traffic gives a
+ * statistically meaningful P95 and old samples age out. Returns null when no
+ * sample falls in the window.
+ */
+export function computeP95TimeWindow(
+  samples: Array<{ value: number; ts: number }>,
+  windowMs: number,
+  now: number = Date.now(),
+): number | null {
+  const cutoff = now - windowMs;
+  const inWindow = samples.filter((s) => s.ts >= cutoff).map((s) => s.value);
+  return computeP95(inWindow);
+}
+
+/**
+ * #254 — sustained-breach detector over a longer tail using a ratio.
+ *
+ * `countRecentBreaches` only inspects the last 3 samples and the caller
+ * requires all 3 to breach, so a sustained-but-jittery degradation (e.g. 2 of
+ * the last 5 over threshold, repeatedly) never trips scale-up. This looks at
+ * the last `window` samples and returns true when the *fraction* over
+ * threshold is at least `minRatio`.
+ */
+export function isSustainedBreach(
+  samples: number[],
+  maxMs: number,
+  opts: { window?: number; minRatio?: number } = {},
+): boolean {
+  const { window = 10, minRatio = 0.5 } = opts;
+  const recent = samples.slice(-window);
+  if (recent.length === 0) return false;
+  const breaches = recent.filter((s) => s > maxMs).length;
+  return breaches / recent.length >= minRatio;
+}
+
 export class LatencyTracker {
   private stateStore: ListStore;
 

@@ -26,6 +26,67 @@ function sseWrite(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+/**
+ * Parse a multipart/form-data body directly on the Buffer (#82/#83).
+ *
+ * The previous implementation (a) `body.toString('latin1')` copied the entire
+ * multi-MB audio into a JS string, and (b) for each part re-scanned the whole
+ * body with `indexOf(Buffer.from(part.slice(0,40)))` — O(n²) on large audio.
+ *
+ * This walks the body once, locating `--boundary` delimiters on the raw bytes
+ * and slicing parts as zero-copy `subarray` views. Headers (small, ASCII) are
+ * decoded to find the field name / filename; binary part values are kept as
+ * Buffers. Pure and synchronous — unit-testable with a hand-built buffer.
+ */
+export function parseMultipart(body: Buffer, boundary: string): { audio: Buffer; fields: Record<string, string> } {
+  const delimiter = Buffer.from(`--${boundary}`);
+  const HEADER_SEP = Buffer.from('\r\n\r\n');
+
+  let audio: Buffer = Buffer.alloc(0);
+  const fields: Record<string, string> = {};
+
+  // Find each delimiter occurrence in one forward pass.
+  const bounds: number[] = [];
+  let from = 0;
+  for (;;) {
+    const idx = body.indexOf(delimiter, from);
+    if (idx === -1) break;
+    bounds.push(idx);
+    from = idx + delimiter.length;
+  }
+
+  // Each part lives between consecutive delimiters. Skip the final closing
+  // delimiter ("--boundary--") which has no following part.
+  for (let i = 0; i < bounds.length - 1; i++) {
+    // Part body starts after the delimiter and its trailing CRLF.
+    let partStart = bounds[i] + delimiter.length;
+    if (body[partStart] === 0x0d && body[partStart + 1] === 0x0a) partStart += 2; // skip CRLF
+    // Part ends just before the next delimiter's leading CRLF.
+    let partEnd = bounds[i + 1];
+    if (body[partEnd - 2] === 0x0d && body[partEnd - 1] === 0x0a) partEnd -= 2; // strip trailing CRLF
+
+    if (partEnd <= partStart) continue;
+
+    const headerSep = body.indexOf(HEADER_SEP, partStart);
+    if (headerSep === -1 || headerSep >= partEnd) continue;
+
+    const headers = body.toString('utf8', partStart, headerSep); // small ASCII header block
+    const dataStart = headerSep + HEADER_SEP.length;
+
+    const nameMatch = headers.match(/name="([^"]+)"/);
+    if (!nameMatch) continue;
+    const name = nameMatch[1];
+
+    if (name === 'audio' || headers.includes('filename=')) {
+      audio = body.subarray(dataStart, partEnd); // zero-copy view of the binary
+    } else {
+      fields[name] = body.toString('utf8', dataStart, partEnd);
+    }
+  }
+
+  return { audio, fields };
+}
+
 /** Parse multipart/form-data body to extract audio file and fields. */
 async function parseFormData(req: IncomingMessage): Promise<{ audio: Buffer; fields: Record<string, string> }> {
   const contentType = req.headers['content-type'] || '';
@@ -38,36 +99,7 @@ async function parseFormData(req: IncomingMessage): Promise<{ audio: Buffer; fie
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('error', reject);
     req.on('end', () => {
-      const body = Buffer.concat(chunks);
-      const bodyStr = body.toString('latin1');
-      const parts = bodyStr.split(`--${boundary}`).slice(1, -1); // skip preamble and epilogue
-
-      let audio = Buffer.alloc(0);
-      const fields: Record<string, string> = {};
-
-      for (const part of parts) {
-        const headerEnd = part.indexOf('\r\n\r\n');
-        if (headerEnd === -1) continue;
-        const headers = part.slice(0, headerEnd);
-        const value = part.slice(headerEnd + 4).replace(/\r\n$/, '');
-
-        const nameMatch = headers.match(/name="([^"]+)"/);
-        if (!nameMatch) continue;
-        const name = nameMatch[1];
-
-        if (name === 'audio' || headers.includes('filename=')) {
-          // Binary file — extract from original buffer using byte offsets
-          const partStart = body.indexOf(Buffer.from(part.slice(0, 40), 'latin1'));
-          if (partStart >= 0) {
-            const dataStart = partStart + headerEnd + 4;
-            const dataEnd = body.indexOf(Buffer.from(`\r\n--${boundary}`, 'latin1'), dataStart);
-            audio = body.subarray(dataStart, dataEnd >= 0 ? dataEnd : undefined);
-          }
-        } else {
-          fields[name] = value;
-        }
-      }
-      resolve({ audio, fields });
+      resolve(parseMultipart(Buffer.concat(chunks), boundary));
     });
   });
 }

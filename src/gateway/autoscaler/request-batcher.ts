@@ -93,7 +93,19 @@ export class RequestBatcher<T> {
     if (batch.length === 0) return;
 
     const data = batch.map((b) => b.data);
-    this.flushFn(data)
+    // #270: guard against a flushFn that throws *synchronously* (before
+    // returning a promise). Without this, the `.then/.catch` chain never runs,
+    // the synchronous throw propagates out of flush() (and out of the submit()
+    // executor for the triggering item), and every other pending item in the
+    // batch hangs forever. Normalizing to a rejected promise rejects the whole
+    // batch deterministically.
+    let flushPromise: Promise<unknown[]>;
+    try {
+      flushPromise = Promise.resolve(this.flushFn(data));
+    } catch (err) {
+      flushPromise = Promise.reject(err);
+    }
+    flushPromise
       .then((results) => {
         for (let i = 0; i < batch.length; i++) {
           if (i < results.length) {

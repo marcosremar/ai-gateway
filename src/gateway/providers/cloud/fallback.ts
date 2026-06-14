@@ -72,7 +72,8 @@ export interface FallbackOptions {
   allowedFails?: number;
   /**
    * Duration in ms to skip a provider after it exceeds allowedFails.
-   * Default: 60_000 (1 minute).
+   * Default: 15_000 (15s) — see DEFAULT_COOLDOWN_MS. Use 60_000 for
+   * system/background routes where a longer block is acceptable.
    */
   cooldownMs?: number;
   /**
@@ -132,6 +133,13 @@ interface CooldownState {
 
 const COOLDOWN_WINDOW_MS = 60_000; // rolling window for counting failures
 const DEFAULT_ALLOWED_FAILS = 3;
+/**
+ * Default cooldown applied when a provider exceeds `allowedFails`.
+ * 15s is intentionally short for real-time voice routes: a longer block would
+ * keep the (often cheaper) primary out of rotation for too long. Operators who
+ * want the documented 60s behaviour pass `cooldownMs: 60_000` explicitly.
+ * (Reconciled with the JSDoc on FallbackOptions.cooldownMs — #301.)
+ */
 const DEFAULT_COOLDOWN_MS = 15_000;
 
 function cooldownKey(entry: FallbackEntry): string {
@@ -391,10 +399,16 @@ export async function withProviderFallback<T>(
   if (workChain.length === 0) throw new Error('Empty provider fallback chain');
 
   // ── Pre-flight: skip credit-blocked providers ─────────────────────────────
+  // When a provider has no configured key hash we fall back to a provider-level
+  // block key (sentinel) so a 402 still blocks future attempts. Previously the
+  // 402 block was only honored for providers WITH a hash, so hash-less
+  // providers bypassed the block and burned a guaranteed-fail call (#305).
+  const PROVIDER_LEVEL_HASH = '__provider__';
+  const blockHashFor = (provider: string): string => apiKeyHashes[provider] ?? PROVIDER_LEVEL_HASH;
+
   const creditBlockedProviders: string[] = [];
   const availableChain = workChain.filter((entry) => {
-    const keyHash = apiKeyHashes[entry.provider];
-    if (keyHash && creditTracker.isBlocked(entry.provider, keyHash)) {
+    if (creditTracker.isBlocked(entry.provider, blockHashFor(entry.provider))) {
       creditBlockedProviders.push(entry.provider);
       log.log(
         `${logPrefix} skipping ${entry.provider}/${entry.model ?? 'default'} (credit-blocked)`,
@@ -583,10 +597,16 @@ export async function withProviderFallback<T>(
           if (!allCooledDown) tracker.recordFailure(entry, allowedFails, cooldownMs);
           if (circuitBreakers) circuitBreakers.get(entry.provider).recordFailure();
 
-          // Optionally insert a larger-context model upgrade into the chain
+          // Optionally insert a larger-context model upgrade into the chain.
+          // Skip the splice if that provider/model is already present later in
+          // the chain, otherwise the same provider/model would be attempted
+          // twice on a context overflow (#307).
           if (contextWindowFallbacks && entry.model) {
             const upgradedModel = contextWindowFallbacks[entry.model];
-            if (upgradedModel) {
+            const alreadyQueued = iterChain.some(
+              (e) => e.provider === entry.provider && e.model === upgradedModel,
+            );
+            if (upgradedModel && !alreadyQueued) {
               const upgradeEntry: FallbackEntry = {
                 provider: entry.provider,
                 model: upgradedModel,
@@ -608,15 +628,14 @@ export async function withProviderFallback<T>(
           if (circuitBreakers) circuitBreakers.get(entry.provider).recordFailure();
 
           // ── Record 402 in credit block tracker ──────────────────────────────
+          // Always record — use the provider-level sentinel when no key hash is
+          // configured so a hash-less provider is still blocked (#305).
           if (moveOnStatus === 402) {
-            const keyHash = apiKeyHashes[entry.provider];
-            if (keyHash) {
-              creditTracker.recordBlock(entry.provider, keyHash);
-              got402From.push(entry.provider);
-              log.warn(
-                `${logPrefix} ${entry.provider} credit-blocked (402) for 5min`,
-              );
-            }
+            creditTracker.recordBlock(entry.provider, blockHashFor(entry.provider));
+            got402From.push(entry.provider);
+            log.warn(
+              `${logPrefix} ${entry.provider} credit-blocked (402) for 5min`,
+            );
           }
 
           // Capture Retry-After from 429 errors for upstream propagation.
@@ -649,7 +668,12 @@ export async function withProviderFallback<T>(
         const isLastRetry = retryNum >= maxAttempts - 1;
         const hasNextProvider = iterChain.slice(i + 1).some((e) => !tracker.isCoolingDown(e));
 
-        if (!isLastRetry && is5xxError(err)) {
+        // Reuse the status already extracted above (moveOnStatus) instead of
+        // re-parsing via is5xxError — by this point 401/402/403/429 have been
+        // handled by the MOVE_ON branch, so any remaining retryable status is a
+        // 5xx (or null/network). (#304)
+        const is5xx = moveOnStatus !== null && moveOnStatus >= 500 && moveOnStatus < 600;
+        if (!isLastRetry && is5xx) {
           // Will retry this provider after backoff (handled at top of loop)
           log.warn(
             `${logPrefix} ${entry.provider}/${entry.model ?? 'default'} ` +
@@ -668,14 +692,21 @@ export async function withProviderFallback<T>(
     }
   }
 
-  // Log which providers were tried vs skipped for debugging
+  // Log which providers were tried vs skipped for debugging.
+  // Report against the credit-filtered iterChain (the set actually iterated),
+  // and surface credit-blocked entries as skipped — iterating the original
+  // `chain` mislabeled credit-blocked providers as "tried" (#309).
   const tried: string[] = [];
   const skipped: string[] = [];
+  const blockedSet = new Set(creditBlockedProviders);
   for (const entry of chain) {
-    if (tracker.isCoolingDown(entry)) {
-      skipped.push(`${entry.provider}/${entry.model ?? 'default'} (cooldown)`);
+    const label = `${entry.provider}/${entry.model ?? 'default'}`;
+    if (blockedSet.has(entry.provider)) {
+      skipped.push(`${label} (credit-blocked)`);
+    } else if (tracker.isCoolingDown(entry)) {
+      skipped.push(`${label} (cooldown)`);
     } else {
-      tried.push(`${entry.provider}/${entry.model ?? 'default'}`);
+      tried.push(label);
     }
   }
   if (skipped.length > 0) {

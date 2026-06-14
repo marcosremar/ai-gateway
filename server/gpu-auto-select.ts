@@ -10,6 +10,52 @@ import { createLogger } from '../src/logger';
 
 const log = createLogger('gpu-deploy');
 
+/** Minimal offer shape for spot/on-demand preference ranking (#114). */
+export interface SpotRankableOffer {
+  pricePerHr: number;
+  /** Whether this offer is an interruptible/spot instance. */
+  interruptible?: boolean;
+}
+
+/**
+ * Effective price for spot-vs-on-demand ranking (#114).
+ *
+ * The ranker sorts purely on `pricePerHr` and never distinguishes
+ * interruptible (spot) offers, so an on-demand host can edge out a much cheaper
+ * spot host. When the workload tolerates preemption, apply a discount factor to
+ * spot offers' effective price so they sort ahead at equal list price. Pure.
+ *
+ * @param offer            Offer with price + interruptible flag.
+ * @param toleratesSpot    Whether the caller accepts preemptible instances.
+ * @param spotPreference   Multiplier applied to spot price (0..1, default 0.8 =
+ *                         treat spot as 20% cheaper for ranking purposes).
+ */
+export function spotEffectivePrice(
+  offer: SpotRankableOffer,
+  toleratesSpot: boolean,
+  spotPreference = 0.8,
+): number {
+  if (toleratesSpot && offer.interruptible) {
+    return offer.pricePerHr * Math.max(0, Math.min(1, spotPreference));
+  }
+  return offer.pricePerHr;
+}
+
+/**
+ * Stable-sort offers by spot-aware effective price, cheapest first (#114).
+ * Returns a new array; ties keep input order.
+ */
+export function rankOffersBySpotPreference<T extends SpotRankableOffer>(
+  offers: T[],
+  toleratesSpot: boolean,
+  spotPreference = 0.8,
+): T[] {
+  return offers
+    .map((o, i) => ({ o, i, eff: spotEffectivePrice(o, toleratesSpot, spotPreference) }))
+    .sort((a, b) => (a.eff - b.eff) || (a.i - b.i))
+    .map((x) => x.o);
+}
+
 /**
  * Query available GPU offers from a tier's provider and pick the cheapest with adequate VRAM.
  * Returns an array of unique GPU type strings sorted by price (cheapest first), or empty array if none found.

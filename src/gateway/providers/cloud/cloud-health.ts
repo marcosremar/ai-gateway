@@ -13,18 +13,30 @@ export interface CloudProbeResult {
   error?: string;
 }
 
-/** Lightweight health-check endpoints per cloud provider (no credits consumed). */
+/**
+ * Lightweight health-check endpoints per cloud provider (no credits consumed).
+ *
+ * - Deepgram uses `/v1/auth/token` (token grant) instead of `/v1/projects`
+ *   (full project listing) — a cheaper liveness probe (#388).
+ * - elevenlabs/minimax/fal/modal added (#389) so configured providers without
+ *   an endpoint no longer show as permanently "unknown" on /health.
+ */
 const HEALTH_ENDPOINTS: Partial<Record<ProviderId, string>> = {
   groq: 'https://api.groq.com/openai/v1/models',
   openai: 'https://api.openai.com/v1/models',
   fireworks: 'https://api.fireworks.ai/inference/v1/models',
-  deepgram: 'https://api.deepgram.com/v1/projects',
+  deepgram: 'https://api.deepgram.com/v1/auth/token',
   openrouter: 'https://openrouter.ai/api/v1/models',
+  elevenlabs: 'https://api.elevenlabs.io/v1/models',
+  minimax: 'REDACTED_env_75d72190/v1/get_voice',
+  fal: 'https://fal.run/health',
 };
 
-/** Auth header format per provider (most use Bearer, Deepgram uses Token). */
+/** Auth header format per provider (most use Bearer, Deepgram/ElevenLabs/fal differ). */
 function authHeader(provider: ProviderId, apiKey: string): Record<string, string> {
   if (provider === 'deepgram') return { Authorization: `Token ${apiKey}` };
+  if (provider === 'elevenlabs') return { 'xi-api-key': apiKey };
+  if (provider === 'fal') return { Authorization: `Key ${apiKey}` };
   return { Authorization: `Bearer ${apiKey}` };
 }
 
