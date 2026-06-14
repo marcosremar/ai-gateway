@@ -13,6 +13,13 @@ import {
   dailyGpuSpendUsd, DAILY_BUDGET_USD,
 } from './state';
 import { getInferenceCostStats } from './cost-tracker';
+// Observability self-diagnostics counters (#525/#580/#582/#589). Each lives on a
+// global singleton in its own (in-scope) module but was never surfaced to
+// /metrics, so silent failures (unmapped cost gaps, throwing event/hook sinks,
+// cardinality drops) were invisible to scrapers. Read them here for exposition.
+import { handlerErrorCount } from './event-bus';
+import { getHookErrorCount } from '../src/events/hooks';
+import { metrics as metricsCollector } from '../src/metrics-collector';
 
 // Module-level counters for pending DB writes and consecutive failures.
 // These are read directly inside async closures (.then/.catch), so they must
@@ -985,8 +992,33 @@ function snapshotMetrics(): Record<string, unknown> {
       inferenceSpendTotalUsd: inference.cumulativeUsd,
       // #563 — cost per SUCCESSFUL request, per cloud provider.
       costPerSuccessByProvider: inference.costPerSuccessByProvider,
+      // #525 — requests whose provider:stage pair has no cost mapping (recorded
+      // as $0). Surfaced so silent spend gaps are visible, not invisible.
+      unmappedRequests: inference.unmappedRequests,
+    },
+    // Observability self-diagnostics — counters that already existed on their
+    // module singletons but were never exported. A non-zero value here means a
+    // sink/handler is silently failing or a metric is shedding cardinality.
+    observability: {
+      // #580 — total exceptions thrown by server event-bus handlers.
+      eventHandlerErrors: safeReadCounter(handlerErrorCount),
+      // #582 — total gateway-hook callback failures (sync throw or rejection).
+      hookErrors: safeReadCounter(getHookErrorCount),
+      // #589 — metric records dropped because a per-metric series cap was hit.
+      droppedCardinality: safeReadCounter(() => metricsCollector.getDroppedCardinalityCount()),
     },
   };
+}
+
+/** Read a diagnostic counter defensively — a missing/throwing source yields 0
+ *  rather than failing the whole /metrics scrape. */
+function safeReadCounter(read: () => number): number {
+  try {
+    const n = read();
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -1071,6 +1103,7 @@ function renderPrometheus(snap: Record<string, unknown>): string {
   const cost = snap.cost as {
     dailySpendUsd: number; dailyBudgetUsd: number; costPerHr: number;
     inferenceSpendTotalUsd: number; costPerSuccessByProvider: Record<string, number>;
+    unmappedRequests?: number;
   };
   lines.push(promLine('gateway_daily_spend_usd', 'Current day GPU spend in USD', 'gauge', cost.dailySpendUsd));
   lines.push(promLine('gateway_daily_budget_usd', 'Daily GPU spend cap in USD', 'gauge', cost.dailyBudgetUsd));
@@ -1090,6 +1123,21 @@ function renderPrometheus(snap: Record<string, unknown>): string {
       lines.push(`gateway_cost_per_success_usd{provider="${promLabelEscape(p)}"} ${v}\n`);
     }
   }
+
+  // #525 — requests with no cost mapping (recorded as $0). A non-zero, growing
+  // value means real spend is vanishing; surface it as a counter so a scrape /
+  // alert can catch the gap instead of it being silent.
+  lines.push(promLine('gateway_cost_unmapped_total', 'Requests whose provider:stage pair has no cost mapping (recorded as $0)', 'counter', cost.unmappedRequests ?? 0));
+
+  // Observability self-diagnostics (#580/#582/#589). These counters already
+  // existed on their module singletons but were never exported; a non-zero value
+  // means a sink/handler is silently failing or a metric is shedding cardinality.
+  const obs = (snap.observability ?? {}) as {
+    eventHandlerErrors?: number; hookErrors?: number; droppedCardinality?: number;
+  };
+  lines.push(promLine('gateway_event_handler_errors_total', 'Exceptions thrown by gateway event-bus handlers', 'counter', obs.eventHandlerErrors ?? 0));
+  lines.push(promLine('gateway_hook_errors_total', 'Gateway hook callback failures (sync throw or rejected promise)', 'counter', obs.hookErrors ?? 0));
+  lines.push(promLine('gateway_metrics_dropped_cardinality_total', 'Metric records dropped because a per-metric series cap was reached', 'counter', obs.droppedCardinality ?? 0));
 
   // #593 — GPU status. Keep the boolean-ready gauge for back-compat, but stop
   // putting the free-form status string in a label that lingers per distinct

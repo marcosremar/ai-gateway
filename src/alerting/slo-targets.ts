@@ -167,6 +167,114 @@ export function breachAction(recentBreachCount: number): 'none' | 'warn' | 'page
   return 'none';
 }
 
+// ── SLO breach window tracker (#598 follow-on) ─────────────────────────────────
+// `evaluateSlos()` finds breaches in a single snapshot and `breachAction(count)`
+// maps a COUNT to an escalation, but nothing held the breaches over time, so the
+// page (2 in 30m) / failover (5 in 60m) WINDOWS in SLO_BREACH_POLICY were dead
+// config — the count had to come from somewhere. This tracker records breaches
+// with timestamps and computes the windowed recent count, closing the loop. Pure
+// in-memory + clock-injectable for tests; per-metric so a single noisy SLO
+// doesn't escalate an unrelated one.
+
+export interface SloBreachRecord {
+  metric: SloMetricKey;
+  observed: number;
+  target: number;
+  at: number; // epoch ms
+}
+
+/** The escalation decision for a metric, derived from its windowed breach count. */
+export interface SloEscalation {
+  metric: SloMetricKey;
+  /** Breaches counted within the failover window (the widest policy window). */
+  recentCount: number;
+  action: 'none' | 'warn' | 'page' | 'failover';
+}
+
+export class SloBreachTracker {
+  /** metric → ascending-by-time breach timestamps (+ context), bounded. */
+  private breaches = new Map<SloMetricKey, SloBreachRecord[]>();
+  private readonly now: () => number;
+  /** Hard cap per metric so a sustained breach storm can't grow unbounded. */
+  private readonly maxPerMetric: number;
+
+  constructor(opts: { now?: () => number; maxPerMetric?: number } = {}) {
+    this.now = opts.now ?? (() => Date.now());
+    this.maxPerMetric =
+      Number.isFinite(opts.maxPerMetric) && (opts.maxPerMetric as number) > 0
+        ? (opts.maxPerMetric as number)
+        : 1000;
+  }
+
+  /**
+   * Record every breach in an `evaluateSlos()` result. Returns the per-metric
+   * escalation decisions AFTER recording, so a caller can route alerts in one
+   * step. The widest policy window (failoverWindowMs) bounds retention.
+   */
+  recordBreaches(breaches: SloBreach[]): SloEscalation[] {
+    const at = this.now();
+    for (const b of breaches) {
+      this.record(b.metric, b.observed, b.target, at);
+    }
+    // Decide for every metric that has any retained breach (incl. ones just
+    // recorded and ones still inside the window from earlier calls).
+    const out: SloEscalation[] = [];
+    for (const metric of this.breaches.keys()) {
+      const count = this.recentCount(metric);
+      if (count > 0) out.push({ metric, recentCount: count, action: breachAction(count) });
+    }
+    return out;
+  }
+
+  /** Record a single breach for `metric`. */
+  record(metric: SloMetricKey, observed: number, target: number, at = this.now()): void {
+    let list = this.breaches.get(metric);
+    if (!list) {
+      list = [];
+      this.breaches.set(metric, list);
+    }
+    list.push({ metric, observed, target, at });
+    this.prune(metric, at);
+  }
+
+  /**
+   * Count breaches for `metric` within the failover window (the widest policy
+   * window, so it covers both page and failover decisions). Prunes stale entries
+   * as a side effect.
+   */
+  recentCount(metric: SloMetricKey, windowMs = SLO_BREACH_POLICY.failoverWindowMs): number {
+    const list = this.breaches.get(metric);
+    if (!list || list.length === 0) return 0;
+    const cutoff = this.now() - windowMs;
+    let count = 0;
+    for (const r of list) if (r.at > cutoff) count++;
+    return count;
+  }
+
+  /** Escalation action for a single metric based on its windowed breach count. */
+  actionFor(metric: SloMetricKey): 'none' | 'warn' | 'page' | 'failover' {
+    return breachAction(this.recentCount(metric));
+  }
+
+  /** Drop entries older than the widest policy window (+ enforce the hard cap). */
+  private prune(metric: SloMetricKey, at: number): void {
+    const list = this.breaches.get(metric);
+    if (!list) return;
+    const cutoff = at - SLO_BREACH_POLICY.failoverWindowMs;
+    // Entries are appended in time order, so drop the stale prefix.
+    let drop = 0;
+    while (drop < list.length && list[drop].at <= cutoff) drop++;
+    if (drop > 0) list.splice(0, drop);
+    if (list.length > this.maxPerMetric) list.splice(0, list.length - this.maxPerMetric);
+    if (list.length === 0) this.breaches.delete(metric);
+  }
+
+  /** Reset all tracked breaches (tests / daily reset). */
+  clear(): void {
+    this.breaches.clear();
+  }
+}
+
 /** Pretty-print a target for inclusion in alert messages. */
 export function formatTarget(key: SloMetricKey): string {
   const v = SLO_TARGETS[key];
