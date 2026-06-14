@@ -43,6 +43,24 @@ export function adaptiveProbeInterval(
   return maxMs; // long idle / long stable — coast at the cap to cut probe cost
 }
 
+/**
+ * #209 — turn sustained 0% GPU utilization into an idle-stop signal.
+ *
+ * The zero-util tracker previously only logged a one-time "wasting compute"
+ * warning and took no action. This maps the consecutive-zero-util probe count
+ * to a decision the idle logic can act on: once util has been 0% for
+ * `stopThreshold` probes (longer than the warn threshold, so we don't reap a
+ * pod that's merely between requests), the caller may treat the pod as idle and
+ * stop it to reclaim cost. Uses `>=` so the action fires even if the counter
+ * jumps. Pure + exported for unit testing.
+ */
+export function shouldStopForZeroUtil(
+  consecutiveZeroUtilProbes: number,
+  stopThreshold = 20,
+): boolean {
+  return consecutiveZeroUtilProbes >= stopThreshold;
+}
+
 /** Track consecutive zero-utilization probes to detect idle GPU (5+ min at 0% = warning). */
 let consecutiveZeroUtilProbes = 0;
 let zeroUtilWarned = false; // one-shot guard so the warning fires reliably even if the counter jumps

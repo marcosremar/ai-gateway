@@ -42,6 +42,33 @@ export function canFreshDeployReplaceResumable(availableTierCount: number): bool
 }
 
 /**
+ * #213 — adaptive resume health-poll interval with exponential backoff.
+ *
+ * The resume loop polled at a flat 3s for up to 5 min (~100 probes) against a
+ * slow-to-resume pod. This keeps the tight 3s cadence for the first minute
+ * (fast pods come back in ~19s, so we want to catch them quickly), then backs
+ * off exponentially up to `maxIntervalMs` to cut probe load on a pod that's
+ * taking minutes to reload weights. Pure + exported for unit testing.
+ *
+ * @param elapsedMs        time since resume started.
+ * @param baseIntervalMs   tight poll interval used during the warm-up phase.
+ * @param fastPhaseMs      duration of the tight-poll phase (default 60s).
+ * @param maxIntervalMs    backoff ceiling (default 15s).
+ */
+export function resumePollIntervalMs(
+  elapsedMs: number,
+  baseIntervalMs = 3_000,
+  fastPhaseMs = 60_000,
+  maxIntervalMs = 15_000,
+): number {
+  if (elapsedMs < fastPhaseMs) return baseIntervalMs;
+  // Double the base interval once per fast-phase elapsed after the warm-up.
+  const steps = Math.floor((elapsedMs - fastPhaseMs) / fastPhaseMs) + 1;
+  const interval = baseIntervalMs * 2 ** steps;
+  return Math.min(maxIntervalMs, interval);
+}
+
+/**
  * Resume a stopped pod, or fall back to a fresh deploy if resume fails.
  *
  * This is the core cold-boot optimization: a stopped pod resumes in ~19s
@@ -125,7 +152,6 @@ export async function resumeOrDeploy(opts: {
     // restart and routinely take 2-5 min. Default raised to 5 min; override
     // via RESUME_TIMEOUT_MS env var if your image is even slower.
     const RESUME_TIMEOUT_MS = Number.parseInt(process.env.RESUME_TIMEOUT_MS ?? '300000', 10);
-    const RESUME_POLL_INTERVAL_MS = 3_000;
     let healthy = false;
     while (Date.now() - resumeStartedAt < RESUME_TIMEOUT_MS) {
       const probe = await probeGpuHealth(endpoint, true);
@@ -133,9 +159,11 @@ export async function resumeOrDeploy(opts: {
         healthy = true;
         break;
       }
-      const elapsedS = Math.round((Date.now() - resumeStartedAt) / 1000);
-      setDeployState({ message: `Pod resumed — waiting for health (${elapsedS}s)` });
-      await new Promise(r => setTimeout(r, RESUME_POLL_INTERVAL_MS));
+      const elapsedMs = Date.now() - resumeStartedAt;
+      setDeployState({ message: `Pod resumed — waiting for health (${Math.round(elapsedMs / 1000)}s)` });
+      // #213: tight 3s polling for the first minute, then exponential backoff
+      // (capped at 15s) so a slow-to-resume pod isn't probed ~100 times.
+      await new Promise(r => setTimeout(r, resumePollIntervalMs(elapsedMs)));
     }
 
     if (!healthy) {

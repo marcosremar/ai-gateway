@@ -21,6 +21,40 @@ export interface BootTimeoutResult {
 }
 
 /**
+ * #219/#220 — resolve the boot-timeout cap (ms) for a tier.
+ *
+ * The watchdog used `(bootTimeSecs ?? 120) * 2`, which (a) gives an aggressive
+ * 4-min cap for *unknown* providers — prematurely killing slow boots on
+ * unregistered providers — and (b) hardcodes the vast-only 3× special case in
+ * the engine but not here. This centralizes both: a configurable `multiplier`
+ * (default 2, callers can pass 3 for slow providers like vast) applied to the
+ * known per-provider `bootTimeSecs`, and a higher `unknownBootSecs` default
+ * (300s, not 120s) when the provider isn't registered, all capped at
+ * `absoluteMaxMs`. Pure + exported for unit testing.
+ */
+export function resolveBootTimeoutCap(opts: {
+  /** Registry-provided boot time for this provider, or undefined if unknown. */
+  bootTimeSecs?: number;
+  /** Per-provider/per-image multiplier (default 2). */
+  multiplier?: number;
+  /** Boot-time assumption when the provider is unregistered (default 300s). */
+  unknownBootSecs?: number;
+  /** Hard ceiling regardless of the computed value (default 30 min). */
+  absoluteMaxMs?: number;
+}): number {
+  const {
+    bootTimeSecs,
+    multiplier = 2,
+    unknownBootSecs = 300,
+    absoluteMaxMs = 30 * 60_000,
+  } = opts;
+  const mult = Math.max(1, multiplier);
+  const baseSecs = bootTimeSecs != null && bootTimeSecs > 0 ? bootTimeSecs : unknownBootSecs;
+  const cap = baseSecs * mult * 1000;
+  return Math.min(absoluteMaxMs, Math.max(1, cap));
+}
+
+/**
  * Compute the new idle state and log entry when a booting tier times out.
  * Pure function — no side effects; the caller applies the state change and cleanup.
  */

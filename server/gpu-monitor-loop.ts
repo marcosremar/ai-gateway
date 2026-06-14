@@ -69,6 +69,26 @@ async function pollGpuUtilViaSsh(host: string, port: number): Promise<number> {
   });
 }
 
+/**
+ * #202 — resolve the startup idle timeout from the documented env vars.
+ *
+ * `IDLE_TIMEOUT_MS` was a hardcoded `5*60_000` that only ever changed via the
+ * runtime `setIdleTimeoutMs()` API, so the documented `IDLE_TIMEOUT_MIN` /
+ * `IDLE_TIMEOUT_MS` knobs were silently ignored at boot. This parses them
+ * (minutes preferred, then raw ms) and returns the default when neither is set
+ * or the value is non-positive/garbage. Pure + exported for unit testing.
+ */
+export function resolveIdleTimeoutFromEnv(
+  env: { IDLE_TIMEOUT_MIN?: string; IDLE_TIMEOUT_MS?: string } = process.env,
+  defaultMs = 5 * 60_000,
+): number {
+  const min = env.IDLE_TIMEOUT_MIN != null ? Number(env.IDLE_TIMEOUT_MIN) : NaN;
+  if (Number.isFinite(min) && min > 0) return Math.round(min * 60_000);
+  const ms = env.IDLE_TIMEOUT_MS != null ? Number(env.IDLE_TIMEOUT_MS) : NaN;
+  if (Number.isFinite(ms) && ms > 0) return Math.round(ms);
+  return defaultMs;
+}
+
 // Cold-start plan A3 — 15 → 5 min idle timeout. Resume of a stopped pod is
 // ~19s on Vast.ai vs ~288s for a fresh deploy, so pausing aggressively after
 // 5 min of no activity costs a few extra resume events but saves ~$32k/yr in
@@ -76,7 +96,9 @@ async function pollGpuUtilViaSsh(host: string, port: number): Promise<number> {
 // (no hourly billing), then auto-destroys after IDLE_DESTROY_MS (2h) if not
 // resumed — preserving the option for the user to come back without waiting
 // for a cold boot.
-export let IDLE_TIMEOUT_MS = 5 * 60_000;    // auto-STOP (pause) after 5 min idle (configurable via API)
+// #202: seed from the documented env vars at module load so the operator knob
+// actually takes effect at startup (still overridable via setIdleTimeoutMs).
+export let IDLE_TIMEOUT_MS = resolveIdleTimeoutFromEnv();    // auto-STOP (pause) after idle (configurable via API)
 export function setIdleTimeoutMs(ms: number) { IDLE_TIMEOUT_MS = ms; }
 export let IDLE_DESTROY_MS = 2 * 60 * 60_000; // auto-DESTROY 2 hours after stop (configurable)
 export function setIdleDestroyMs(ms: number) { IDLE_DESTROY_MS = ms; }
@@ -202,6 +224,56 @@ export function latencyTrendAction(
   if (!Number.isFinite(slope) || slope <= 0) return 'none';
   if (slope >= rebenchSlope) return 'rebenchmark';
   if (slope >= warmSlope) return 'warm';
+  return 'none';
+}
+
+/**
+ * #246 — P95 demotion that also evaluates under *active* load.
+ *
+ * The demotion block previously fired only while idle (`idleSec > p95 window`),
+ * so a GPU degrading under traffic was never demoted/re-benchmarked until the
+ * traffic stopped. This returns whether a stage's P95 breaches the target,
+ * using a *higher* multiplier when the pod is actively serving (so we don't
+ * demote a healthy-but-busy pod on transient load) and the normal multiplier
+ * when idle. Returns false when no valid P95 or target exists.
+ *
+ * @param activeMultiplierBoost extra factor applied on top of the idle
+ *   multiplier while active (default 1.5×, so a 2× idle threshold becomes 3×).
+ */
+export function shouldDemoteOnP95(
+  p95Ms: number | null,
+  targetMs: number,
+  idleMultiplier: number,
+  isActive: boolean,
+  activeMultiplierBoost = 1.5,
+): boolean {
+  if (p95Ms === null || !Number.isFinite(p95Ms) || p95Ms <= 0) return false;
+  if (!(targetMs > 0) || !(idleMultiplier > 0)) return false;
+  const mult = isActive ? idleMultiplier * Math.max(1, activeMultiplierBoost) : idleMultiplier;
+  return p95Ms > targetMs * mult;
+}
+
+/**
+ * #298 — graded budget action: drain-then-stop instead of a hard kill at 100%.
+ *
+ * At 100% budget the loop immediately terminated the pod, killing in-flight
+ * sessions abruptly and forcing a future cold boot. This maps the spend ratio
+ * to a graded action so the caller can: `warn` at the soft limit, `drain-stop`
+ * (pause/resumable after active requests finish) at 100%, and only `terminate`
+ * once spend blows well past budget (`hardKillRatio`, default 1.25×). Pausing
+ * (not terminating) at exactly 100% keeps the disk so the user can resume.
+ */
+export function budgetActionForSpend(
+  spendUsd: number,
+  budgetUsd: number,
+  opts: { softLimit?: number; hardKillRatio?: number } = {},
+): 'none' | 'warn' | 'drain-stop' | 'terminate' {
+  if (!(budgetUsd > 0)) return 'none';
+  const ratio = spendUsd / budgetUsd;
+  const { softLimit = 0.8, hardKillRatio = 1.25 } = opts;
+  if (ratio >= hardKillRatio) return 'terminate';
+  if (ratio >= 1) return 'drain-stop';
+  if (ratio >= softLimit) return 'warn';
   return 'none';
 }
 

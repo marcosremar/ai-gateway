@@ -21,6 +21,26 @@ import { POD_NAME_PREFIX } from './gpu-orphan-cleanup';
 
 const log = createLogger('gpu-deploy');
 
+/**
+ * #241 — deprioritize the just-crashed provider when rebuilding recovery tiers.
+ *
+ * `startAutoRecoveryDeploy` rebuilt tiers from all saved keys and could redeploy
+ * straight back onto the provider that just crashed, despite the monitor logging
+ * "different provider". This stable-reorders the tiers so any tier whose `name`
+ * matches `crashedProvider` is moved to the *end* (still a fallback if it's the
+ * only option) while preserving the relative order of the rest. Pure + exported
+ * for unit testing. A null/empty `crashedProvider` returns the list unchanged.
+ */
+export function deprioritizeProvider<T extends { name: string }>(
+  tiers: T[],
+  crashedProvider: string | null | undefined,
+): T[] {
+  if (!crashedProvider) return [...tiers];
+  const keep = tiers.filter((t) => t.name !== crashedProvider);
+  const demoted = tiers.filter((t) => t.name === crashedProvider);
+  return [...keep, ...demoted];
+}
+
 export async function fetchGpuLogs(sshHost?: string, sshPort?: number, endpoint?: string): Promise<string> {
   const host = sshHost || deployState.sshHost;
   const port = sshPort || deployState.sshPort;
@@ -455,13 +475,17 @@ export async function startAutoRecoveryDeploy(): Promise<void> {
 
   // Build tiers from saved credentials
   const { buildGpuTiers, startDeployWithTiers } = await import('./gpu-deploy');
-  const tiers = buildGpuTiers(
+  const builtTiers = buildGpuTiers(
     savedKeys.runpod,
     savedKeys.vast || undefined,
     savedKeys.tensordock,
     savedKeys.modal || undefined,
     savedKeys.hyperstack || undefined,
   );
+  // #241: push the just-crashed provider to the end so recovery prefers a
+  // *different* provider (the monitor already logs that intent); it stays a
+  // last-resort fallback if it's the only one with credentials.
+  const tiers = deprioritizeProvider(builtTiers, lastProvider);
 
   if (tiers.length === 0) {
     log.error('[gpu] Auto-recovery: no provider tiers available — staying on cloud');

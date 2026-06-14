@@ -10,6 +10,7 @@ import type { Logger } from '../../deps';
 import { fileLifecycleLogger } from './file-lifecycle-logger';
 import { emitHook } from '../../hooks';
 import { cleanupProviderInstance } from './cleanup';
+import { resolveBootTimeoutCap } from './boot-timeout';
 import { defaultLogger } from '../../logger';
 
 /** Rate-limit per-user watchdog to 2 min */
@@ -277,8 +278,14 @@ async function runWatchdogForUser(
     const booting = ts as BootingTierState;
     const bootingMs = now - booting.bootTriggeredAt;
     const tierProvider = config.tiers[i]?.provider ?? '';
-    const providerBootSecs = registry.get(tierProvider)?.bootTimeSecs ?? 120;
-    const maxBootMs = providerBootSecs > 0 ? providerBootSecs * 2 * 1000 : DEFAULT_MAX_BOOT_MS;
+    // #219/#220: vast hosts boot slower (3× like the engine); unknown providers
+    // get a 300s assumption (not 120s) so a slow boot on an unregistered
+    // provider isn't killed at the old aggressive 4-min cap.
+    const maxBootMs = resolveBootTimeoutCap({
+      bootTimeSecs: registry.get(tierProvider)?.bootTimeSecs,
+      multiplier: tierProvider === 'vast' ? 3 : 2,
+      absoluteMaxMs: DEFAULT_MAX_BOOT_MS,
+    });
     if (bootingMs < maxBootMs) continue;
 
     log.warn(`[watchdog] Tier ${i} stuck booting for ${Math.round(bootingMs / 1000)}s, forcing cleanup`);

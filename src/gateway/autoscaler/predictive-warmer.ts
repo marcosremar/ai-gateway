@@ -85,6 +85,33 @@ export function forecastNext(now: number = Date.now()): number {
 }
 
 /**
+ * #280 — asymmetric safety margin instead of a flat 20% over-provision.
+ *
+ * `safetyMargin=1.2` always pads the forecast by 20%, over-provisioning even
+ * when GPUs are expensive. This makes the margin a function of the trade-off:
+ * a *lower* margin when the GPU is expensive (over-provisioning costs more) and
+ * a *higher* margin when a cold start is catastrophic (under-provisioning costs
+ * more in latency). Returns a multiplier in `[minMargin, maxMargin]`.
+ *
+ * @param gpuExpensiveness 0..1, higher = more expensive GPU (pulls margin down).
+ * @param coldStartSeverity 0..1, higher = worse to cold-start (pulls margin up).
+ */
+export function adaptiveSafetyMargin(
+  gpuExpensiveness: number,
+  coldStartSeverity: number,
+  opts: { minMargin?: number; maxMargin?: number; base?: number } = {},
+): number {
+  const { minMargin = 1.0, maxMargin = 1.5, base = 1.2 } = opts;
+  const clamp01 = (n: number) => Math.min(1, Math.max(0, Number.isFinite(n) ? n : 0));
+  const exp = clamp01(gpuExpensiveness);
+  const cold = clamp01(coldStartSeverity);
+  // Each lever moves the margin up to ±0.25 from the base; cold-start pushes up,
+  // expensiveness pushes down.
+  const margin = base + cold * 0.25 - exp * 0.25;
+  return Math.min(maxMargin, Math.max(minMargin, margin));
+}
+
+/**
  * #279 — bidirectional capacity recommendation from a forecast.
  *
  * The warmer's tick only ever scales *up* (relies on the pool's idle TTL to

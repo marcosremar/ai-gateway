@@ -222,6 +222,30 @@ function isModalIdleCandidate(status: string): boolean {
     || normalized.includes('detached');
 }
 
+/**
+ * #212 — scale the Modal idle grace by the app's observed cold-start cost.
+ *
+ * A fixed 5-min grace reaps a just-warmed Modal container that took minutes to
+ * warm, forcing the next request to pay the full cold-start again. This returns
+ * an effective grace that's at least the base grace and at least
+ * `coldStartMultiplier`× the observed cold-start, capped at `maxGraceMs` so a
+ * pathological cold-start can't keep a container alive indefinitely. A
+ * missing/zero cold-start falls back to the base grace (existing behavior).
+ * Pure + exported for unit testing.
+ */
+export function modalIdleGraceMs(
+  baseGraceMs: number,
+  coldStartMs: number | undefined,
+  opts: { coldStartMultiplier?: number; maxGraceMs?: number } = {},
+): number {
+  const { coldStartMultiplier = 2, maxGraceMs = 30 * 60_000 } = opts;
+  let grace = baseGraceMs;
+  if (typeof coldStartMs === 'number' && Number.isFinite(coldStartMs) && coldStartMs > 0) {
+    grace = Math.max(baseGraceMs, coldStartMs * Math.max(1, coldStartMultiplier));
+  }
+  return Math.min(maxGraceMs, grace);
+}
+
 function shouldStopModalIdleApp(instanceId: string, status: string, now: number): boolean {
   if (!isModalIdleCandidate(status)) {
     modalIdleSince.delete(instanceId);

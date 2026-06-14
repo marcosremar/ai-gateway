@@ -26,8 +26,41 @@ function depthKey(tierIndex: number): string {
   return `queue-depth:${tierIndex}`;
 }
 
+/**
+ * #291 — decide whether a cached total is still fresh enough to reuse.
+ *
+ * `getTotalDepth` SCANs `queue-depth:*` and GETs every key on each
+ * `shouldScaleUp` call — expensive per request on Redis. This lets the tracker
+ * cache the scanned total and only re-scan when the cache is older than
+ * `ttlMs`. Returns true when the cached value is still usable. Pure + exported.
+ */
+export function isTotalCacheFresh(
+  cachedAtMs: number | null,
+  now: number,
+  ttlMs: number,
+): boolean {
+  if (cachedAtMs === null) return false;
+  if (!(ttlMs > 0)) return false;
+  return now - cachedAtMs < ttlMs;
+}
+
 export class QueueDepthTracker {
-  constructor(private readonly store: KvStore) {}
+  /** #291 — short-lived cache of the scanned total to avoid a SCAN per call. */
+  private cachedTotal: number | null = null;
+  private cachedTotalAt: number | null = null;
+  private readonly totalCacheTtlMs: number;
+
+  constructor(private readonly store: KvStore, opts: { totalCacheTtlMs?: number } = {}) {
+    // Default 1s: long enough to collapse a burst of shouldScaleUp() calls into
+    // one SCAN, short enough that scale-up decisions stay responsive.
+    this.totalCacheTtlMs = opts.totalCacheTtlMs ?? 1_000;
+  }
+
+  /** Invalidate the cached total (called on every write). */
+  private invalidateTotalCache(): void {
+    this.cachedTotal = null;
+    this.cachedTotalAt = null;
+  }
 
   private async getCount(tierIndex: number): Promise<number> {
     const raw = await this.store.get(depthKey(tierIndex));
@@ -41,6 +74,7 @@ export class QueueDepthTracker {
     const current = await this.getCount(tierIndex);
     const next = current + 1;
     await this.store.set(depthKey(tierIndex), String(next));
+    this.invalidateTotalCache();
     return next;
   }
 
@@ -49,6 +83,7 @@ export class QueueDepthTracker {
     const current = await this.getCount(tierIndex);
     const next = Math.max(0, current - 1);
     await this.store.set(depthKey(tierIndex), String(next));
+    this.invalidateTotalCache();
     return next;
   }
 
@@ -59,6 +94,12 @@ export class QueueDepthTracker {
 
   /** Get total queue depth across all tiers. */
   async getTotalDepth(): Promise<number> {
+    // #291: reuse a recently-scanned total to avoid a SCAN + N GETs on every
+    // shouldScaleUp() call under load. Writes invalidate the cache, so the
+    // value is at most `totalCacheTtlMs` stale and never stale across a change.
+    if (this.cachedTotal !== null && isTotalCacheFresh(this.cachedTotalAt, Date.now(), this.totalCacheTtlMs)) {
+      return this.cachedTotal;
+    }
     let total = 0;
     try {
       const keys: string[] = [];
@@ -80,6 +121,9 @@ export class QueueDepthTracker {
     } catch {
       // Return partial result if scan fails
     }
+    // Cache the freshly-scanned total so a burst of reads collapses to one scan.
+    this.cachedTotal = total;
+    this.cachedTotalAt = Date.now();
     return total;
   }
 

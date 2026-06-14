@@ -35,8 +35,14 @@ import { emitGatewayEvent } from './event-bus';
 const log = createLogger('standby-pool-adapter');
 
 const DEFAULT_POOL_GLOBAL_MAX = 4;
-const DEFAULT_POOL_HEALTH_TIMEOUT_MS = 20 * 60_000;
+// #282: 20 min billed a non-healthy pod for up to 20 min before giving up.
+// Default the wait to 8 min (still enough for big-model boots) and terminate
+// faster on timeout to cap waste; overridable via env for slow images.
+const DEFAULT_POOL_HEALTH_TIMEOUT_MS = 8 * 60_000;
 const POOL_HEALTH_POLL_MS = 5_000;
+/** #281: dollars/hr cap across ALL standby pods (count cap alone can't stop a
+ *  pool of 4 expensive L40S silently burning budget). 0/unset = disabled. */
+const DEFAULT_POOL_GLOBAL_MAX_USD_PER_HR = 0;
 
 function globalMax(): number {
   const v = process.env.STANDBY_POOL_GLOBAL_MAX;
@@ -46,6 +52,31 @@ function globalMax(): number {
 function healthTimeoutMs(): number {
   const v = process.env.STANDBY_POOL_HEALTH_TIMEOUT_MS;
   return v !== undefined ? Number(v) : DEFAULT_POOL_HEALTH_TIMEOUT_MS;
+}
+
+function globalMaxUsdPerHr(): number {
+  const v = process.env.STANDBY_POOL_GLOBAL_MAX_USD_PER_HR;
+  return v !== undefined ? Number(v) : DEFAULT_POOL_GLOBAL_MAX_USD_PER_HR;
+}
+
+/**
+ * #281 — dollars/hr admission gate for a new standby pod.
+ *
+ * Returns whether deploying a pod costing `newPodUsdPerHr` would keep the pool
+ * within the configured `maxUsdPerHr` budget given what's already warm
+ * (`currentUsdPerHr`). A `maxUsdPerHr <= 0` (unset) disables the cap so the
+ * existing count-only behavior is preserved. Non-finite costs fail closed
+ * (refuse) so a missing price can't bypass the budget. Pure + exported.
+ */
+export function withinPoolCostBudget(
+  currentUsdPerHr: number,
+  newPodUsdPerHr: number,
+  maxUsdPerHr: number,
+): boolean {
+  if (!(maxUsdPerHr > 0)) return true; // cap disabled
+  if (!Number.isFinite(newPodUsdPerHr) || newPodUsdPerHr < 0) return false; // fail closed
+  const base = Number.isFinite(currentUsdPerHr) && currentUsdPerHr > 0 ? currentUsdPerHr : 0;
+  return base + newPodUsdPerHr <= maxUsdPerHr;
 }
 
 interface TierBinding {

@@ -311,7 +311,7 @@ export async function initiateHandover(): Promise<{ ok: boolean; error?: string 
 
 async function terminateOldPod(podId: string, provider: string): Promise<void> {
   if (!podId) return;
-  const { runpod, vast, tensordock, hyperstack } = await import('./providers');
+  const { runpod, vast, tensordock, modal, hyperstack } = await import('./providers');
   try {
     if (provider === 'runpod' && deployApiKey) {
       await runpod.deleteInstance(podId, { apiKey: deployApiKey });
@@ -319,6 +319,10 @@ async function terminateOldPod(podId: string, provider: string): Promise<void> {
       await vast.deleteInstance(podId, { apiKey: deployVastApiKey });
     } else if (provider === 'tensordock' && deployTensordockApiKey) {
       await tensordock.deleteInstance(podId, { apiKey: deployTensordockApiKey, authId: deployTensordockAuthId });
+    } else if (provider === 'modal' && deployModalApiKey) {
+      // #274: a Modal primary promoted from standby previously had no branch
+      // here, so the old Modal app was never terminated — a handover leak.
+      await modal.deleteInstance(podId, { apiKey: deployModalApiKey });
     } else if (provider === 'hyperstack' && deployHyperstackApiKey) {
       await hyperstack.deleteInstance(podId, { apiKey: deployHyperstackApiKey });
     }

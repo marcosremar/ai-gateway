@@ -83,6 +83,28 @@ export function warmCountForForecast(
   return Math.max(1, Math.min(maxTiers, want));
 }
 
+/**
+ * #277 — ROI gate: skip pre-warm for buckets whose past warms didn't pay off.
+ *
+ * `runPredictiveWarmupForUser` boots whenever predicted ≥ threshold with no
+ * check that the demand actually materialised after previous warms for that
+ * hour-of-week bucket. This computes the realized-demand hit-rate
+ * (`hits / warms`) and returns false when there's enough history
+ * (`warms >= minSamples`) and the hit-rate is below `minHitRate` — so a bucket
+ * that consistently warmed a GPU nobody used stops wasting money. With
+ * insufficient history we allow the warm (explore) to gather data.
+ */
+export function shouldWarmGivenRoi(
+  warms: number,
+  hits: number,
+  opts: { minSamples?: number; minHitRate?: number } = {},
+): boolean {
+  const { minSamples = 4, minHitRate = 0.3 } = opts;
+  if (warms < minSamples) return true; // not enough data — explore
+  const hitRate = warms > 0 ? hits / warms : 0;
+  return hitRate >= minHitRate;
+}
+
 // ── Prediction ────────────────────────────────────────────────────────────────
 
 /**
