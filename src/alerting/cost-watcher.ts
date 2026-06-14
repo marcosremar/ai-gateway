@@ -114,6 +114,31 @@ export class CostWatcher {
     return fired;
   }
 
+  /**
+   * #548 — report spend by pulling the current value from a getter instead of
+   * the caller passing it.
+   *
+   * The monitor loop owns the live daily-spend counter (`dailyGpuSpendUsd`) but
+   * historically emitted its OWN `budget.*` events with duplicated threshold
+   * logic, so `CostWatcher.report()` was never actually fed and its alert-router
+   * path never fired. Wiring `setDailyGpuSpendUsd` → this getter means the
+   * thresholds live in ONE place (here) and the router channels (Slack/Discord/
+   * webhook) actually deliver.
+   *
+   * Returns the thresholds that fired on this call (empty = none). Reads the
+   * getter defensively: a throwing/invalid source never breaks the spend path.
+   */
+  reportFrom(getSpendUsd: () => number): number[] {
+    let spend: number;
+    try {
+      spend = getSpendUsd();
+    } catch {
+      return [];
+    }
+    if (!Number.isFinite(spend) || spend < 0) return [];
+    return this.report(spend);
+  }
+
   /** Force-reset the fired-today set. Tests only. */
   _resetFiredToday(): void {
     this.firedToday.clear();

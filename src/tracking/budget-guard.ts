@@ -97,8 +97,13 @@ export class BudgetGuard {
       return { chain, downgraded: false };
     }
 
-    const summary = await this.spendTracker.getDailySummary(userId);
-    const currentUsd = summary.totalCostUsd;
+    // #553 — read the precomputed daily-total HASH (O(1)) instead of
+    // getDailySummary, which does `lrange(0,-1)` + JSON.parse over up to 10k
+    // records on EVERY request. The downgrade/block decision only needs the
+    // running total, not the per-provider breakdown, so the fast path is a
+    // strict win on a hot user. The hash is also untruncated (cf. #554), so the
+    // gate sees the true spend even past MAX_RECORDS_PER_DAY.
+    const currentUsd = await this.getDailySpendFast(userId);
     const pct = currentUsd / dailyLimitUsd;
 
     // ── Hard block ─────────────────────────────────────────────────────────
@@ -138,5 +143,21 @@ export class BudgetGuard {
 
     // ── Under threshold: pass through unchanged ────────────────────────────
     return { chain, downgraded: false };
+  }
+
+  /**
+   * #553 — current daily spend via the fast atomic-hash read when available,
+   * falling back to the (slower, list-scanning) summary for older/custom
+   * SpendTracker shapes that don't implement getDailyTotalFast. Keeps the guard
+   * back-compatible while preferring the O(1) path.
+   */
+  private async getDailySpendFast(userId: string): Promise<number> {
+    const fast = (this.spendTracker as Partial<SpendTracker>).getDailyTotalFast;
+    if (typeof fast === 'function') {
+      const { totalCostUsd } = await fast.call(this.spendTracker, userId);
+      return totalCostUsd;
+    }
+    const summary = await this.spendTracker.getDailySummary(userId);
+    return summary.totalCostUsd;
   }
 }

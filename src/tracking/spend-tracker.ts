@@ -227,4 +227,28 @@ export class SpendTracker {
     };
   }
 
+  /**
+   * #554 — budget check that reads the atomic daily-total HASH rather than
+   * summing the records LIST.
+   *
+   * `getDailySummary` (used by {@link checkBudget}) sums the per-record list,
+   * which `record()` caps at MAX_RECORDS_PER_DAY (10k) via `ltrim` — so a
+   * high-volume user's true daily spend is *under-reported* once the oldest
+   * records fall off the list, and the budget gate re-opens incorrectly. The
+   * `spend:daily:` hash is incremented atomically on every record and is never
+   * truncated, so it's the authoritative total. Prefer this for hot-path budget
+   * enforcement; it's also O(1) vs the list scan (cf. #553).
+   */
+  async checkBudgetFast(userId: string, budget: BudgetConfig): Promise<BudgetStatus> {
+    const { totalCostUsd } = await this.getDailyTotalFast(userId);
+    const pct = budget.dailyLimitUsd > 0 ? totalCostUsd / budget.dailyLimitUsd : 0;
+
+    return {
+      over: budget.dailyLimitUsd > 0 && totalCostUsd >= budget.dailyLimitUsd,
+      pct,
+      limitUsd: budget.dailyLimitUsd,
+      currentUsd: totalCostUsd,
+    };
+  }
+
 }

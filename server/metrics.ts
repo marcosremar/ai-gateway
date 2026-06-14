@@ -864,6 +864,42 @@ export function getSortedLatencies(): number[] {
   return _sortedLatencyCache;
 }
 
+// ── Latency histogram buckets (#591) ──────────────────────────────────────────
+// p50/p95/p99 are exposed as point-in-time GAUGES, so PromQL can't re-aggregate
+// across instances or compute windowed quantiles. Also export a real cumulative
+// histogram (`_bucket{le="..."}` = count of samples ≤ bound, `_sum`, `_count`)
+// so Grafana/`histogram_quantile()` works server-side. Buckets are in ms,
+// chosen for an STT→LLM→TTS pipeline (sub-100ms hot path through multi-second
+// cold GPU calls). Computed from the same generation-cached sorted ring.
+export const LATENCY_BUCKETS_MS = [
+  10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000,
+] as const;
+
+export interface LatencyHistogram {
+  /** Cumulative count of samples ≤ each bound, parallel to LATENCY_BUCKETS_MS. */
+  bucketCounts: number[];
+  sum: number;
+  count: number;
+}
+
+/**
+ * Build a cumulative-count histogram of the GPU latency ring over
+ * {@link LATENCY_BUCKETS_MS}. Cumulative (Prometheus `le` semantics): each
+ * bucket count includes all samples ≤ that bound. The implicit `+Inf` bucket
+ * equals `count`.
+ */
+export function computeLatencyHistogram(sortedAsc: number[] = getSortedLatencies()): LatencyHistogram {
+  const bucketCounts = new Array(LATENCY_BUCKETS_MS.length).fill(0);
+  let sum = 0;
+  for (const v of sortedAsc) {
+    sum += v;
+    for (let i = 0; i < LATENCY_BUCKETS_MS.length; i++) {
+      if (v <= LATENCY_BUCKETS_MS[i]) bucketCounts[i]++;
+    }
+  }
+  return { bucketCounts, sum, count: sortedAsc.length };
+}
+
 // ── Provider label allow-list (#592) ──────────────────────────────────────────
 // `byProvider`/`byStage` accept any string key, and RequestLogInput.provider is
 // typed open; an unexpected provider value would add a permanent Prometheus
@@ -919,6 +955,9 @@ function snapshotMetrics(): Record<string, unknown> {
     latencyP50Ms: computePercentile(sorted, 50),
     latencyP95Ms: computePercentile(sorted, 95),
     latencyP99Ms: computePercentile(sorted, 99),
+    // #591 — cumulative GPU-latency histogram (buckets/sum/count) for PromQL
+    // histogram_quantile() and cross-instance aggregation. Reuses `sorted`.
+    gpuLatencyHistogram: computeLatencyHistogram(sorted),
     gpuStatus: deployState.status,
     uptimeSec,
     tokenUsage: {
@@ -981,11 +1020,32 @@ function renderPrometheus(snap: Record<string, unknown>): string {
   lines.push(promLine('gateway_db_log_failures_total', 'Total DB log write failures', 'counter', snap.dbLogFailures as number));
   lines.push(promLine('gateway_uptime_seconds', 'Gateway process uptime in seconds', 'gauge', snap.uptimeSec as number));
 
-  // Latency percentiles (exposed as a single gauge per quantile — simpler than
-  // emitting a full histogram, and matches what Grafana queries typically want)
-  lines.push(promLine('gateway_latency_p50_ms', 'p50 latency across all stages', 'gauge', snap.latencyP50Ms as number));
-  lines.push(promLine('gateway_latency_p95_ms', 'p95 latency across all stages', 'gauge', snap.latencyP95Ms as number));
-  lines.push(promLine('gateway_latency_p99_ms', 'p99 latency across all stages', 'gauge', snap.latencyP99Ms as number));
+  // Latency percentiles as point-in-time gauges. The HELP text used to claim
+  // "across all stages", but `latencyRing` is fed ONLY by recordGpuLatency()
+  // (cloud latencies are deliberately excluded), so these are GPU-only (#504).
+  // Kept under the original names for back-compat with existing dashboards, but
+  // the HELP is corrected and GPU-scoped aliases are emitted below.
+  lines.push(promLine('gateway_latency_p50_ms', 'p50 GPU-stage latency in ms (GPU-only; see gateway_gpu_latency_p50_ms)', 'gauge', snap.latencyP50Ms as number));
+  lines.push(promLine('gateway_latency_p95_ms', 'p95 GPU-stage latency in ms (GPU-only; see gateway_gpu_latency_p95_ms)', 'gauge', snap.latencyP95Ms as number));
+  lines.push(promLine('gateway_latency_p99_ms', 'p99 GPU-stage latency in ms (GPU-only; see gateway_gpu_latency_p99_ms)', 'gauge', snap.latencyP99Ms as number));
+  // #504 — correctly-named GPU-scoped percentiles. The ring only carries GPU
+  // latencies, so `gpu` in the name now matches what the value actually is.
+  lines.push(promLine('gateway_gpu_latency_p50_ms', 'p50 GPU inference latency in ms', 'gauge', snap.latencyP50Ms as number));
+  lines.push(promLine('gateway_gpu_latency_p95_ms', 'p95 GPU inference latency in ms', 'gauge', snap.latencyP95Ms as number));
+  lines.push(promLine('gateway_gpu_latency_p99_ms', 'p99 GPU inference latency in ms', 'gauge', snap.latencyP99Ms as number));
+
+  // #591 — real cumulative histogram so PromQL histogram_quantile() and
+  // cross-instance aggregation work (gauges above can't be re-aggregated).
+  const hist = snap.gpuLatencyHistogram as LatencyHistogram | undefined;
+  if (hist) {
+    lines.push('# HELP gateway_gpu_latency_ms GPU inference latency distribution in ms\n# TYPE gateway_gpu_latency_ms histogram\n');
+    for (let i = 0; i < LATENCY_BUCKETS_MS.length; i++) {
+      lines.push(`gateway_gpu_latency_ms_bucket{le="${LATENCY_BUCKETS_MS[i]}"} ${hist.bucketCounts[i]}\n`);
+    }
+    lines.push(`gateway_gpu_latency_ms_bucket{le="+Inf"} ${hist.count}\n`);
+    lines.push(`gateway_gpu_latency_ms_sum ${hist.sum}\n`);
+    lines.push(`gateway_gpu_latency_ms_count ${hist.count}\n`);
+  }
 
   // Per-stage counters
   const byStage = snap.requestsByStage as Record<string, number>;

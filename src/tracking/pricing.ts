@@ -12,6 +12,47 @@ export interface ModelPricing {
 }
 
 /**
+ * #529 — per-unit pricing for providers that DON'T bill per token.
+ *
+ * `estimateRequestCost` multiplies the token-based {@link ModelPricing} by
+ * `inputTokens`, but OpenAI TTS bills per *character* and Whisper/STT bills per
+ * *audio-minute*. Passing characters or minutes as "tokens" silently produces a
+ * meaningless cost. This type lets callers price by the unit the provider
+ * actually invoices, so TTS/STT spend is real instead of an artifact of token
+ * counts that don't exist for audio.
+ */
+export type CostUnit = 'token' | 'character' | 'minute' | 'request';
+
+export interface UnitPricing {
+  /** What the provider actually bills for. */
+  unit: CostUnit;
+  /** USD per 1 unit (e.g. per character, per audio-minute, per request). */
+  usdPerUnit: number;
+}
+
+/**
+ * #529 — per-unit (char/minute/request) rates for audio models that don't bill
+ * per token. Keyed like {@link DEFAULT_PRICING_TABLE} ("provider/model" then
+ * "model"). Use {@link estimateUnitCost} with the matching unit count.
+ *
+ * Rates are approximations; keep them in sync with {@link PRICING_TABLE_AS_OF}.
+ */
+export const DEFAULT_UNIT_PRICING: Record<string, UnitPricing> = {
+  // OpenAI TTS — billed per character ($15 / 1M chars = $0.000015/char).
+  'openai/tts-1': { unit: 'character', usdPerUnit: 15.0 / 1_000_000 },
+  'openai/tts-1-hd': { unit: 'character', usdPerUnit: 30.0 / 1_000_000 },
+  'openai/gpt-4o-mini-tts': { unit: 'character', usdPerUnit: 0.60 / 1_000_000 },
+  // STT / transcription — billed per audio-minute.
+  'openai/whisper-large-v3-turbo': { unit: 'minute', usdPerUnit: 0.006 },
+  'openai/gpt-4o-transcribe': { unit: 'minute', usdPerUnit: 0.006 },
+  'openai/gpt-4o-mini-transcribe': { unit: 'minute', usdPerUnit: 0.003 },
+  'groq/whisper-large-v3-turbo': { unit: 'minute', usdPerUnit: 0.00067 }, // ~$0.04/hr
+  'deepgram/nova-2': { unit: 'minute', usdPerUnit: 0.0043 },
+  // ElevenLabs — per character.
+  'elevenlabs/eleven_multilingual_v2': { unit: 'character', usdPerUnit: 0.00018 },
+};
+
+/**
  * #530 — revision stamp for {@link DEFAULT_PRICING_TABLE}. Provider prices drift
  * quarterly; an undated table silently mis-bills with stale rates. Bump this
  * (YYYY-MM-DD) whenever a rate changes. {@link isPricingStale} flags a table
@@ -104,4 +145,56 @@ export function estimateRequestCost(
     return 0;
   }
   return (inputTokens * pricing.inputPer1M + outputTokens * pricing.outputPer1M) / 1_000_000;
+}
+
+/**
+ * #529 — look up the per-unit (char/minute/request) rate for a provider+model.
+ * Tries "provider/model" then "model"; returns null when there's no per-unit
+ * entry (caller should fall back to the token-based table).
+ */
+export function lookupUnitPricing(
+  provider: string,
+  model: string,
+  unitTable: Record<string, UnitPricing> = DEFAULT_UNIT_PRICING,
+): UnitPricing | null {
+  return unitTable[`${provider}/${model}`] ?? unitTable[model] ?? null;
+}
+
+/**
+ * #529 — estimate cost for a request priced by a real billing unit
+ * (characters for TTS, audio-minutes for STT, etc.) rather than tokens.
+ *
+ * @param units the count in the model's billing unit (chars, minutes, …).
+ * @returns USD cost, or null when no per-unit rate exists for the model
+ *          (so the caller can decide whether to fall back to token pricing).
+ */
+export function estimateUnitCost(
+  provider: string,
+  model: string,
+  units: number,
+  unitTable?: Record<string, UnitPricing>,
+): number | null {
+  const pricing = lookupUnitPricing(provider, model, unitTable);
+  if (!pricing) return null;
+  const safeUnits = Number.isFinite(units) && units > 0 ? units : 0;
+  return safeUnits * pricing.usdPerUnit;
+}
+
+/**
+ * #531 — amortize an hourly GPU/TensorDock rental over the wall-clock time a
+ * single request occupied the GPU.
+ *
+ * GPU and TensorDock entries are priced at $0/token ("billed per hour"), so a
+ * per-request GPU cost was previously unknowable. Attribute the rental to the
+ * requests it served: `costPerHr × (stageLatencyMs / 3_600_000)`. This is a
+ * busy-time amortization — it does NOT include idle time (that's the blended
+ * daily figure, see #532) — giving a lower-bound marginal cost per request.
+ *
+ * @param costPerHr   the deploy's hourly rental rate (USD).
+ * @param latencyMs   wall-clock ms the request spent on the GPU.
+ */
+export function amortizeHourlyCost(costPerHr: number, latencyMs: number): number {
+  const hr = Number.isFinite(costPerHr) && costPerHr > 0 ? costPerHr : 0;
+  const ms = Number.isFinite(latencyMs) && latencyMs > 0 ? latencyMs : 0;
+  return (hr * ms) / 3_600_000;
 }
