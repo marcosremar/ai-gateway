@@ -21,26 +21,26 @@
 
 | Metric | Value |
 |--------|-------|
-| Distinct audit IDs implemented + tested | **273 / 1000** |
-| Opt unit tests passing | **680** |
-| Opt test files | 22 |
+| Distinct audit IDs implemented + tested | **416 / 1000** |
+| Opt unit tests passing | **1055** |
+| Opt test files | 32 |
 | Typecheck errors | 11 (baseline 22; **0 new**, 11 fixed) |
-| Waves complete | Wave 1 (all 10 domains) · Wave 2 (all 10 domains) |
+| Waves complete | Waves 1–3 (all 10 domains) · Wave 4 in progress |
 
 ### Per-domain coverage (distinct IDs implemented & tested)
 
-| Domain | Range | Done | Tests | Waves |
-|--------|-------|-----:|------:|-------|
-| 1 Core AI Pipeline | 1–100 | 27 | 19 | 1, 2 |
-| 2 GPU Deployment | 101–200 | 26 | 28+ | 1, 2 |
-| 3 Autoscaling | 201–300 | 37 | 31+ | 1, 2 |
-| 4 Provider Routing | 301–400 | 38 | — | 1, 2 |
-| 5 WebSocket/Realtime | 401–500 | 27 | 68 | 1, 2 |
-| 6 Observability/Cost | 501–600 | 30 | 45 | 1, 2 |
-| 7 Security/Auth | 601–700 | 21 | 67 | 1, 2 |
-| 8 Storage/State | 701–800 | 28 | 49 | 1, 2 |
-| 9 CLI/SDK/DX | 801–900 | 26 | 88 | 1, 2 |
-| 10 Web/Build/Infra | 901–1000 | 13* | 68 | 1, 2 |
+| Domain | Range | Done | Waves |
+|--------|-------|-----:|-------|
+| 1 Core AI Pipeline | 1–100 | 46 | 1–3 |
+| 2 GPU Deployment | 101–200 | 42 | 1–3 |
+| 3 Autoscaling | 201–300 | 53 | 1–3 |
+| 4 Provider Routing | 301–400 | 52 | 1–3 |
+| 5 WebSocket/Realtime | 401–500 | 41 | 1–3 |
+| 6 Observability/Cost | 501–600 | 45 | 1–3 |
+| 7 Security/Auth | 601–700 | 31 | 1–3 |
+| 8 Storage/State | 701–800 | 43 | 1–3 |
+| 9 CLI/SDK/DX | 801–900 | 41 | 1–3 |
+| 10 Web/Build/Infra | 901–1000 | 22* | 1–3 |
 
 \* Domain 10's count is low because many of its items are config/Dockerfile/YAML/
 Terraform changes that are validated by inspection (no unit test = not counted by
@@ -92,4 +92,4 @@ Tracked in each per-domain `implemented/*.md` "Deferred" section:
 - **Terminal state:** every audit ID is either (a) implemented with a passing
   test, or (b) listed as deferred-by-design with a reason — reconciling to 1000.
 
-_Last updated: 2026-06-14, after Wave 2 (all 10 domains)._
+_Last updated: 2026-06-14, after Wave 3 (all 10 domains); Wave 4 in progress._
