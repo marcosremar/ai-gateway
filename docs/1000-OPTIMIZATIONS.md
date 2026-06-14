@@ -88,21 +88,211 @@ findings across all four lenses (with **Cost** emphasized, per the goal).
 
 | # | Domain | Detailed file | IDs | Status |
 |---|--------|---------------|-----|--------|
-| 1 | Core AI Pipeline (STT→LLM→TTS), streaming, racing, dub | [`01-core-ai-pipeline.md`](./optimizations/01-core-ai-pipeline.md) | 1–100 | _pending_ |
-| 2 | GPU Providers & Deployment Orchestration | [`02-gpu-deployment.md`](./optimizations/02-gpu-deployment.md) | 101–200 | _pending_ |
-| 3 | Autoscaling, Reliability & Resilience | [`03-autoscaling-reliability.md`](./optimizations/03-autoscaling-reliability.md) | 201–300 | _pending_ |
-| 4 | AI Provider Integrations, Routing & Caching | [`04-provider-routing-caching.md`](./optimizations/04-provider-routing-caching.md) | 301–400 | _pending_ |
-| 5 | WebSocket, Streaming & Real-time Transport | [`05-websocket-realtime.md`](./optimizations/05-websocket-realtime.md) | 401–500 | _pending_ |
-| 6 | Observability, Metrics & Cost Tracking | [`06-observability-cost.md`](./optimizations/06-observability-cost.md) | 501–600 | _pending_ |
-| 7 | Security, Auth & Input Validation | [`07-security-auth.md`](./optimizations/07-security-auth.md) | 601–700 | _pending_ |
-| 8 | Storage, Database, State & Config | [`08-storage-database-state.md`](./optimizations/08-storage-database-state.md) | 701–800 | _pending_ |
-| 9 | CLI, SDK & Developer Experience | [`09-cli-sdk-dx.md`](./optimizations/09-cli-sdk-dx.md) | 801–900 | _pending_ |
-| 10 | Web UI, Image Builder, Build & Infra/Cost | [`10-web-build-infra-cost.md`](./optimizations/10-web-build-infra-cost.md) | 901–1000 | _pending_ |
+| 1 | Core AI Pipeline (STT→LLM→TTS), streaming, racing, dub | [`01-core-ai-pipeline.md`](./optimizations/01-core-ai-pipeline.md) | 1–100 | ✅ 100 |
+| 2 | GPU Providers & Deployment Orchestration | [`02-gpu-deployment.md`](./optimizations/02-gpu-deployment.md) | 101–200 | ✅ 100 |
+| 3 | Autoscaling, Reliability & Resilience | [`03-autoscaling-reliability.md`](./optimizations/03-autoscaling-reliability.md) | 201–300 | ✅ 100 |
+| 4 | AI Provider Integrations, Routing & Caching | [`04-provider-routing-caching.md`](./optimizations/04-provider-routing-caching.md) | 301–400 | ✅ 100 |
+| 5 | WebSocket, Streaming & Real-time Transport | [`05-websocket-realtime.md`](./optimizations/05-websocket-realtime.md) | 401–500 | ✅ 100 |
+| 6 | Observability, Metrics & Cost Tracking | [`06-observability-cost.md`](./optimizations/06-observability-cost.md) | 501–600 | ✅ 100 |
+| 7 | Security, Auth & Input Validation | [`07-security-auth.md`](./optimizations/07-security-auth.md) | 601–700 | ✅ 100 |
+| 8 | Storage, Database, State & Config | [`08-storage-database-state.md`](./optimizations/08-storage-database-state.md) | 701–800 | ✅ 100 |
+| 9 | CLI, SDK & Developer Experience | [`09-cli-sdk-dx.md`](./optimizations/09-cli-sdk-dx.md) | 801–900 | ✅ 100 |
+| 10 | Web UI, Image Builder, Build & Infra/Cost | [`10-web-build-infra-cost.md`](./optimizations/10-web-build-infra-cost.md) | 901–1000 | ✅ 100 |
 
 ---
 
-<!-- AGGREGATE_STATS_PLACEHOLDER -->
+## 4. Aggregate statistics (all 1000 optimizations)
 
-<!-- TOP_FINDINGS_PLACEHOLDER -->
+Counted programmatically from the tagged tables across all ten domain files.
 
-<!-- CROSS_CUTTING_PLACEHOLDER -->
+**By lens** — `Reliability` + `Cost` together are **69%** of all findings, directly
+mirroring the goal of _menos erros e economia_ (fewer errors and cost savings):
+
+| Lens | Count | Share | What it buys |
+|------|------:|------:|--------------|
+| Reliability | 351 | 35.1% | Fewer bugs, races, leaks, outages |
+| **Cost** (economia) | **337** | **33.7%** | Less GPU/cloud/token spend & waste |
+| Usability | 157 | 15.7% | Easier to adopt & operate |
+| Functionality | 155 | 15.5% | More capable for AI workloads |
+
+**By impact / effort:**
+
+| Impact | Count | | Effort | Count |
+|--------|------:|---|--------|------:|
+| High | 168 | | S (<½ day) | 701 |
+| Med | 511 | | M (≤2 days) | 279 |
+| Low | 321 | | L (>2 days) | 20 |
+
+> **701 of 1000 fixes are Small-effort and 168 are High-impact.** There is a deep pool
+> of cheap, high-value wins — a single focused sprint on the High-impact + S/M-effort
+> items would capture most of the value. Every `Cost`+`High` item effectively pays for
+> itself.
+
+**Per-domain lens distribution:**
+
+| Domain | Func | Use | Rel | Cost | Lead lens |
+|--------|----:|----:|----:|----:|-----------|
+| 1 Core AI Pipeline | 14 | 17 | 27 | 42 | Cost |
+| 2 GPU Deployment | 20 | 11 | 41 | 28 | Reliability |
+| 3 Autoscaling | 21 | 4 | 41 | 34 | Reliability |
+| 4 Provider Routing | 24 | 8 | 33 | 35 | Cost |
+| 5 WebSocket/Realtime | 17 | 13 | 44 | 26 | Reliability |
+| 6 Observability/Cost | 19 | 7 | 24 | 50 | Cost |
+| 7 Security/Auth | 12 | 22 | 46 | 20 | Reliability |
+| 8 Storage/DB/State | 14 | 5 | 49 | 32 | Reliability |
+| 9 CLI/SDK/DX | 8 | 54 | 22 | 16 | Usability |
+| 10 Web/Build/Infra | 6 | 16 | 24 | 54 | Cost |
+
+---
+
+
+## 5. Cross-cutting themes (the systemic issues)
+
+These eight patterns recurred across multiple independent domain audits. Fixing the
+_pattern_ is worth far more than fixing any single instance. IDs link to the detailed
+rows in `docs/optimizations/`.
+
+### A. The duplicate `src/modules/` tree — and it has already drifted 🔴
+Confirmed independently by **8 of 10 agents**. ~80,371 LOC mirror `src/`, no longer in
+sync, with real consequences:
+- **Live security gap:** `src/modules/webhooks/index.ts` is missing the SSRF guard that
+  `src/webhooks/` has — and the published library imports the `modules` copy (#469).
+- A password-redaction fix landed in only one copy of `database/service.ts` (#779/#780).
+- Stale, buggier copies of `translation-cache.ts`, `ensemble-stt.ts`,
+  `streaming-overlap.ts`, `response-cache.ts`, `percentage-routing.ts`, `cost-state.ts`
+  (#96, #392, #522).
+- **Breaks packaging & tree-shaking:** `package.json`/`tsup` point at top-level `src/*`,
+  but `src/index.ts` re-exports `./modules/*`; `main`/`types` resolve to raw `.ts`
+  (#864, #866/#867, #901).
+- Triples typecheck/lint/build/mutation surface and CI cost (#901, #903).
+
+> **Fix first.** Collapse to one canonical tree behind the 12 published entry points.
+> This is the prerequisite that unblocks and de-risks most other fixes.
+
+### B. Cost controls that don't actually fire (economia) 🔴
+The platform's selling point is cost-efficiency, yet the guardrails are largely inert:
+- `maxCostUsd` is parsed, validated, and echoed — but **never enforced at runtime**
+  (#101, #841/#842).
+- Cloud per-token spend is **invisible to the daily budget gate**; a runaway cloud loop
+  never trips `DAILY_BUDGET_USD` (#528).
+- Adaptive idle-timeout **floor is 4 hours** vs the documented 15-min auto-stop — idle
+  GPUs bill for hours (#102, #201).
+- Snapshot fast-boot is **silently disabled** by a model-hash mismatch, so every
+  "fast boot" is actually a full cold boot (#175).
+- `flushDailySpend()` / `saveCooldownState()` are **never called on shutdown** → the
+  budget gate re-arms and all cooldowns are lost on every restart (#711, #712).
+- Predictive warmup over-provisions from one-time spikes (#276); token-cost-aware
+  routing is dead and there is no price table; TTS is never cached (#347/#348, #328).
+
+### C. Dead / unwired safety nets — a false sense of coverage 🔴
+A whole layer of protections exists as code but is **never wired into the live path**,
+while the docs describe them as active:
+- RBAC (`requireAuth`/`requireRole`), CSRF, and per-key rate limiting are dead (#611, #686/#688).
+- DLP/PII detection has no live caller (#676); `handleRecallWebhook` (auth+Zod+HMAC) isn't route-registered.
+- Routing intelligence — circuit breaker, performance ranker, adaptive timeout, TTFAC —
+  is not passed to the proxy fallback (#316/#342/#380).
+- `checkDeployWarnings` (OOM/disk validation), `getGpuFallbacks` (GPU ladder), and the
+  `noTierCascade` flag are defined but never wired (D2 #133/#142/#143).
+- `SLO_TARGETS`/`SLO_BREACH_POLICY` are never evaluated against live metrics (#598).
+
+### D. Missing limits → abuse & runaway spend
+- Chat `content`, `messages`, and `max_tokens` are **unbounded** → token/$ DoS + memory
+  blowup (#662–#664).
+- No rate limiting on the control plane at all (#688).
+- Guardrail rules/webhooks `fetch()` arbitrary URLs with no SSRF validation
+  (can reach `169.254.169.254`) (#651).
+- `/ws/bot-audio` is an unauthenticated-class global ingress; a second connection
+  clobbers the first and cross-talks all sessions (#474/#475).
+
+### E. Reliability: races, leaks, no cancellation
+- Head-start race rejects (drops fallbacks) when the primary fast-fails (#1).
+- SSE/WS client disconnect does **not** cancel the paid STT/LLM/TTS pipeline (#75/#76);
+  ensemble STT never passes an `AbortSignal`, paying full N× cost (#4).
+- `terminate` leaks billable orphans: sequential cleanup with no timeout, state reset
+  _before_ deletes, and TensorDock teardown dropping the required `authId` (#157–#159).
+- Pervasive **un-`unref()`'d background timers** pin the event loop and leak across
+  restarts (D3, D5); non-atomic profile writes and shared cached-config mutation lose
+  updates (#770/#771).
+
+### F. Streaming is silently broken
+- `/v1/chat/completions` ignores `stream:true` (#460); the documented `/v1/speech/stream`
+  is dead code (#461).
+- The Node→Bun response adapter **buffers the entire body**, so all HTTP streaming
+  (SSE, chunked audio) is fully buffered (#464).
+- No WS backpressure despite `closeOnBackpressureLimit:true` — `getBufferedAmount()` is
+  never read (#418–#420).
+
+### G. SDK/CLI drift & ergonomics
+- **Three divergent SDK clients** (TS `GatewaySDK`, `sdk/node`, Python) with incompatible
+  method names/defaults/shapes; the "mirror" comments are inaccurate (#821, #864).
+- Packaging is broken for non-Bun consumers (`@parle` vs documented `@ai-gateway`;
+  `main`/`types` resolve to raw TypeScript) (#866/#867).
+- `--json` exists on only ~8 of ~30 commands and usage vs runtime errors both exit 1,
+  hurting scriptability (#801); `gpu deploy` has no `--max-cost-usd` and shows no estimate
+  (#841/#842).
+
+### H. Observability correctness
+- **Two divergent cost models** never reconcile (flat per-request vs per-1M-token) (#522).
+- Prometheus p50/p95/p99 are emitted as fake `_bucket{le=…}` values, so
+  `histogram_quantile()` returns garbage (#590); three inconsistent percentile-math
+  conventions coexist codebase-wide (D6).
+- Fire-and-forget delivery (alerts, hooks, Langfuse, OTLP) has no retry/dead-letter and
+  fails silently — exactly during incidents (D6).
+
+### Bonus — Web/Infra hygiene (D10)
+GPU image lazy-downloads models and skips `hf_xet` (violating its own guidance, #976/#977);
+CI has no Bun install cache and the perf-budget job builds 3× (#903/#905); Helm pins
+`:latest` with `IfNotPresent`, `CORS_ORIGINS='*'` is the baked production default, and a
+bearer token is hardcoded in `load-testing/k6/config.js` (#989/#993); the shared-UI rule
+is widely violated and `web/` is invisible to CI.
+
+---
+
+
+## 6. Recommended remediation roadmap
+
+Sequenced so that each phase unblocks the next and front-loads the cheap, high-value work.
+
+| Phase | Theme(s) | Why now | Typical effort |
+|------:|----------|---------|----------------|
+| **0** | A — collapse `src/modules/` duplication | Stops drift, closes the live SSRF gap, fixes packaging/tree-shaking, halves CI surface. Prerequisite for clean fixes everywhere else. | M–L (mechanical, high payoff) |
+| **1** | C + D — wire dead safety nets, add input/rate limits | Closes the security & abuse gap that the docs already _claim_ exists. Mostly small edits to the request path. | S–M |
+| **2** | B — make cost controls fire | Direct _economia_: enforce `maxCostUsd`, fix the 4h idle floor, repair snapshot reuse, flush spend/cooldowns on shutdown, count cloud tokens in the budget. | S–M |
+| **3** | F + E — fix streaming, add cancellation, clear/`unref` timers | Restores advertised streaming, cuts wasted compute on disconnect, enables clean shutdown. | M |
+| **4** | G + H — unify SDKs/DTOs from Zod contracts, fix metrics correctness | One source of truth for the public API; trustworthy percentiles/cost/SLOs. | M |
+
+> **Quick-win shortlist (High-impact, S/M-effort, mostly Phase 1–2):**
+> #101, #102, #175, #201, #276, #316, #347, #460, #464, #469, #528, #552, #590, #611,
+> #651, #662, #686, #711, #712, #841, #866, #901, #976.
+
+## 7. Highest-impact pick per domain
+
+| Domain | Flagship finding | Lens |
+|--------|------------------|------|
+| 1 Core AI Pipeline | **#1** Head-start race drops all fallbacks when the primary fast-fails | Reliability |
+| 2 GPU Deployment | **#101** `maxCostUsd` parsed/echoed but never enforced at runtime | Cost |
+| 3 Autoscaling | **#201** Adaptive idle-timeout floor is 4h, dwarfing the 15-min auto-stop | Cost |
+| 4 Provider Routing | **#316** Circuit-breaker/ranker/timeout/TTFAC built but unwired from the proxy | Reliability |
+| 5 WebSocket/Realtime | **#464** Node→Bun adapter buffers the whole body → all HTTP streaming broken | Functionality |
+| 6 Observability/Cost | **#528** Cloud per-token spend invisible to the daily budget gate | Cost |
+| 7 Security/Auth | **#662** Unbounded chat `content`/`messages`/`max_tokens` → token/$ DoS | Cost |
+| 8 Storage/State | **#711** `flushDailySpend()` never called on shutdown → budget re-arms, overspend | Cost |
+| 9 CLI/SDK/DX | **#821** Three divergent SDK clients whose "mirror" comments are inaccurate | Usability |
+| 10 Web/Build/Infra | **#901** Eliminate the duplicate `src/modules/` tree (~80,371 LOC) | Cost |
+
+## 8. Scope & method notes
+
+- Every item is grounded in a file the auditing agent read directly and cites a real
+  `path:line`. No source code was modified by this audit — the deliverable is this report
+  plus the ten detailed tables.
+- Lens/Impact/Effort tags are the auditor's estimate; validate Effort against your own
+  context before committing to a sprint.
+- The duplicate-tree finding (Theme A) means some IDs in different domains describe the
+  same underlying file in `src/` and `src/modules/`; that overlap is intentional — it is
+  the point of the finding.
+
+---
+
+_Generated by a 10-agent fan-out audit of the AI Gateway codebase. Detailed per-domain
+optimization tables: [`docs/optimizations/`](./optimizations/)._
+
