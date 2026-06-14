@@ -10,26 +10,29 @@
  * actually shelled out to.
  */
 
-import type { LLMProvider } from './types';
+import type { LLMProvider, ChatRequest, ChatResponse } from './types';
 
 export const CODEX_MODELS: string[] = ['gpt-5.5'];
 export const CLAUDE_MODELS: string[] = ['sonnet', 'haiku', 'opus'];
 export const REASONING_LEVELS: string[] = ['low', 'medium', 'high'];
 
-interface LocalCliLLM extends Partial<LLMProvider> {
-  isConfigured(): boolean;
-}
-
-function makeUnconfiguredLocalLlm(label: string): LocalCliLLM {
+/**
+ * Stub local-CLI provider. Implements the full LLMProvider surface so it can be
+ * assigned to ProviderDescriptor.llm without a cast, but isConfigured() always
+ * reports false — server/providers.ts gates registration on that, so chat() is
+ * never reached at runtime until a real implementation lands.
+ */
+function makeUnconfiguredLocalLlm(providerId: string): LLMProvider {
   return {
+    providerId,
     isConfigured(): boolean {
       return false;
     },
-    async generate(): Promise<never> {
-      throw new Error(`[local-cli] ${label} not configured — stub implementation`);
+    async chat(_request: ChatRequest): Promise<ChatResponse> {
+      throw new Error(`[local-cli] ${providerId} not configured — stub implementation`);
     },
-  } as LocalCliLLM;
+  };
 }
 
-export const codexLocalLLM = makeUnconfiguredLocalLlm('codex');
-export const claudeLocalLLM = makeUnconfiguredLocalLlm('claude');
+export const codexLocalLLM = makeUnconfiguredLocalLlm('local-codex');
+export const claudeLocalLLM = makeUnconfiguredLocalLlm('local-claude');

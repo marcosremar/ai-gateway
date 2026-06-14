@@ -1,0 +1,20 @@
+# Keep the build context lean (#986) — never ship dev/venv cruft into the image.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.DS_Store
+*.log
+# Model weights are pre-baked from HuggingFace at build time — never copy local
+# checkpoints into the context.
+*.gguf
+*.safetensors
+*.bin
+*.pt

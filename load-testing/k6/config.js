@@ -3,7 +3,17 @@
  */
 
 export const GATEWAY_URL = __ENV.GATEWAY_URL || 'https://parle-gateway-loadtest.fly.dev';
-export const GATEWAY_API_KEY = __ENV.GATEWAY_API_KEY || 'gw_loadtest_2026';
+
+// No hardcoded default — never commit bearer tokens (#997). Provide the key at
+// runtime: `k6 run -e GATEWAY_API_KEY=... smoke.js`.
+export const GATEWAY_API_KEY = __ENV.GATEWAY_API_KEY || '';
+
+if (!GATEWAY_API_KEY) {
+  throw new Error(
+    'GATEWAY_API_KEY is required. Pass it via the environment, e.g. ' +
+      '`k6 run -e GATEWAY_API_KEY=<key> load-testing/k6/smoke.js`.',
+  );
+}
 
 export const headers = {
   'Content-Type': 'application/json',

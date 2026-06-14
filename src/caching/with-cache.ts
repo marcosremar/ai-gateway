@@ -43,6 +43,12 @@ export function withCache(
         model: request.model,
         messages: request.messages,
         temperature: request.temperature,
+        maxTokens: request.maxTokens,
+        topP: request.topP,
+        seed: request.seed,
+        tools: request.tools,
+        responseFormat: request.responseFormat,
+        stop: request.stop,
       });
 
       try {
@@ -54,11 +60,16 @@ export function withCache(
       }
 
       const response = await provider.chat(request);
-      try {
-        await cache.set(key, response, opts?.ttlMs);
-      } catch (setErr) {
-        const msg = setErr instanceof Error ? setErr.message : String(setErr);
-        log.warn?.(`[withCache] cache.set failed: ${msg}`);
+      // Never cache empty/refusal responses: a transient empty body would
+      // otherwise be memoized and replayed for the full TTL, masking the issue
+      // and starving the caller of a real answer on retry.
+      if (response && typeof response.content === 'string' && response.content.trim() !== '') {
+        try {
+          await cache.set(key, response, opts?.ttlMs);
+        } catch (setErr) {
+          const msg = setErr instanceof Error ? setErr.message : String(setErr);
+          log.warn?.(`[withCache] cache.set failed: ${msg}`);
+        }
       }
       return response;
     },

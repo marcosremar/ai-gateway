@@ -45,10 +45,13 @@ export class ResponseCache {
   }
 
   /** Build a deterministic cache key from request params */
-  buildKey(params: { provider: string; model: string; messages?: unknown[]; input?: unknown; temperature?: number; dimensions?: number }): string {
+  buildKey(params: { provider: string; model: string; messages?: unknown[]; input?: unknown; temperature?: number; dimensions?: number; maxTokens?: number; topP?: number; seed?: number; tools?: unknown; responseFormat?: unknown; stop?: unknown }): string {
     let serialized: string;
     try {
-      // Sort keys for deterministic hashing (prevents cache splits from key reordering)
+      // Include every output-affecting field. Two requests that differ only in
+      // e.g. max_tokens or response_format must NOT share a cache entry — a
+      // request capped at 50 tokens would otherwise be served a cached
+      // full-length answer (or a verbose_json hit returned to a text request).
       serialized = JSON.stringify({
         p: params.provider,
         m: params.model,
@@ -56,6 +59,12 @@ export class ResponseCache {
         inp: params.input,
         t: params.temperature,
         d: params.dimensions,
+        mt: params.maxTokens,
+        tp: params.topP,
+        s: params.seed,
+        tl: params.tools,
+        rf: params.responseFormat,
+        st: params.stop,
       });
     } catch {
       // Non-serializable input (circular refs, etc.) — use provider+model only

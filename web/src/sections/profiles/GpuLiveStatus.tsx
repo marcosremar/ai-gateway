@@ -198,14 +198,18 @@ export function GpuLiveStatus() {
   const [gpuStatus, setGpuStatus] = useState<GpuStatusResponse | null>(null);
   const [readiness, setReadiness] = useState<ReadinessStatusResponse | null>(null);
 
-  // Poll HTTP as fallback (slower, for initial load + WS reconnection gaps)
+  // Poll HTTP as fallback (slower, for initial load + WS reconnection gaps).
+  // When the WS is connected it already pushes live data, so we drop to a slow
+  // 60s keepalive (#943); we also skip ticks while the tab is hidden (#940).
   useEffect(() => {
     const poll = () => {
+      const hidden = typeof document !== 'undefined' && document.hidden === true;
+      if (hidden) return;
       getGpuStatus().then(setGpuStatus).catch(() => {});
       getReadinessStatus().then(setReadiness).catch(() => {});
     };
     poll();
-    const interval = setInterval(poll, ws.connected ? 15_000 : 5_000);
+    const interval = setInterval(poll, ws.connected ? 60_000 : 5_000);
     return () => clearInterval(interval);
   }, [ws.connected]);
 

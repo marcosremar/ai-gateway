@@ -7,6 +7,7 @@
 import OpenAI from 'openai';
 import type { ProviderId, ModelInfo, STTProvider, STTRequest, STTResponse, TTSProvider, TTSRequest, TTSResponse, TTSAudioFormat, VoiceInfo, LLMProvider, ChatRequest, ChatResponse } from '../types';
 import { prepareAudioFile } from '../openai-compat/audio-utils';
+import { buildSamplingParams } from '../openai-compat/chat-params';
 
 const FORMAT_TO_CONTENT_TYPE: Record<TTSAudioFormat, string> = {
   mp3: 'audio/mpeg',
@@ -198,23 +199,40 @@ export class SelfHostedLLMProvider implements LLMProvider {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const client = this.getClient();
 
-    const completion = await client.chat.completions.create({
-      model: request.model || '',
-      messages: request.messages as OpenAI.ChatCompletionMessageParam[],
-      ...(request.temperature !== undefined && { temperature: request.temperature }),
-      ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
-      ...(request.responseFormat && { response_format: request.responseFormat }),
-    });
+    // A hung GPU pod would otherwise block until the outer fallback timeout
+    // fires (or forever, if none is set). Bound the request with an
+    // AbortController like the openai-compat provider does.
+    const timeoutMs = request.timeoutMs || 120_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    return {
-      content: completion.choices[0]?.message?.content || '',
-      model: completion.model,
-      usage: completion.usage ? {
-        promptTokens: completion.usage.prompt_tokens,
-        completionTokens: completion.usage.completion_tokens,
-        totalTokens: completion.usage.total_tokens,
-      } : undefined,
-      raw: completion,
-    };
+    try {
+      const completion = await client.chat.completions.create({
+        model: request.model || '',
+        messages: request.messages as OpenAI.ChatCompletionMessageParam[],
+        ...(request.temperature !== undefined && { temperature: request.temperature }),
+        ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
+        ...(request.responseFormat && { response_format: request.responseFormat }),
+        ...buildSamplingParams(request),
+      } as OpenAI.ChatCompletionCreateParamsNonStreaming, { signal: controller.signal });
+
+      return {
+        content: completion.choices[0]?.message?.content || '',
+        model: completion.model,
+        usage: completion.usage ? {
+          promptTokens: completion.usage.prompt_tokens,
+          completionTokens: completion.usage.completion_tokens,
+          totalTokens: completion.usage.total_tokens,
+        } : undefined,
+        raw: completion,
+      };
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`[${this.providerId} LLM] chat() timed out after ${timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }

@@ -49,6 +49,14 @@ variable "rate_limit_rpm" {
   default = 6000
 }
 
+# Allowed CORS origins. Default is a closed (empty) list so production never
+# ships wildcard CORS by accident (#993). Set explicitly per environment, e.g.
+# `["https://app.example.com"]`. Wildcard "*" is only honored outside production.
+variable "cors_origins" {
+  type    = list(string)
+  default = []
+}
+
 locals {
   name = "ai-gateway-${var.environment}"
 
@@ -56,10 +64,16 @@ locals {
   memory = var.environment == "production" ? 2048 : 1024
   cpu    = var.environment == "production" ? 4 : 2
 
+  # CORS resolution (#993):
+  #  - if cors_origins is set, use it verbatim (comma-joined)
+  #  - else outside production fall back to "*" for local/dev convenience
+  #  - else (production, unset) fall back to "" (closed) — explicit opt-in required
+  cors_origins = length(var.cors_origins) > 0 ? join(",", var.cors_origins) : (var.environment == "production" ? "" : "*")
+
   common_env = {
     NODE_ENV        = var.environment
     PORT            = "4000"
-    CORS_ORIGINS    = "*"
+    CORS_ORIGINS    = local.cors_origins
     RATE_LIMIT_RPM  = tostring(var.rate_limit_rpm)
     CANARY_DEPLOY   = var.environment == "production" ? "1" : "0"
     LOG_LEVEL       = var.environment == "production" ? "warn" : "debug"

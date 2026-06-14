@@ -7,6 +7,7 @@
 import OpenAI from 'openai';
 import type { ProviderId, LLMProvider, ChatRequest, ChatResponse } from '../types';
 import { getOrCreateClient } from './client-cache';
+import { buildSamplingParams } from './chat-params';
 
 export interface OpenAICompatLLMConfig {
   providerId: ProviderId;
@@ -70,8 +71,9 @@ export class OpenAICompatLLMProvider implements LLMProvider {
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
       ...(request.responseFormat && { response_format: request.responseFormat }),
+      ...buildSamplingParams(request),
       ...(request.stream && { stream: request.stream }),
-    }, { signal: controller.signal }) as OpenAI.ChatCompletion;
+    } as OpenAI.ChatCompletionCreateParamsNonStreaming, { signal: controller.signal }) as OpenAI.ChatCompletion;
 
     return {
       content: completion.choices[0]?.message?.content || '',
@@ -116,9 +118,10 @@ export class OpenAICompatLLMProvider implements LLMProvider {
         ...(request.temperature !== undefined && { temperature: request.temperature }),
         ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
         ...(request.responseFormat && { response_format: request.responseFormat }),
+        ...buildSamplingParams(request),
         stream: true,
         stream_options: { include_usage: true },
-      }, { signal: controller.signal });
+      } as OpenAI.ChatCompletionCreateParamsStreaming, { signal: controller.signal });
 
       for await (const chunk of stream) {
         if (chunk.usage) {

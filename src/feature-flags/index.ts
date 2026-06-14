@@ -58,7 +58,10 @@ class FeatureFlags {
       if (typeof definition.defaultValue === 'boolean') {
         value = envVal === 'true' || envVal === '1';
       } else if (typeof definition.defaultValue === 'number') {
-        value = parseFloat(envVal ?? String(definition.defaultValue));
+        const parsed = parseFloat(envVal ?? String(definition.defaultValue));
+        // Ignore unparseable numeric env overrides (e.g. "abc") instead of
+        // silently setting the flag to NaN — fall back to the default.
+        value = Number.isFinite(parsed) ? parsed : definition.defaultValue;
       } else {
         value = envVal ?? definition.defaultValue;
       }

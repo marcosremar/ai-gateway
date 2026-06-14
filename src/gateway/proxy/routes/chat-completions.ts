@@ -100,6 +100,19 @@ export async function handleChatCompletions(
   const primaryProvider = chain[0].provider;
   const primaryModel = chain[0].model;
 
+  // Output-affecting params that the OpenAI API exposes. These were parsed for
+  // the coalescing key but never forwarded to the provider, so tool-calling,
+  // stop sequences, seeds, n, top_p and penalties silently no-op'd. Forward
+  // them now (only when present, so unset values keep provider defaults).
+  const tools = Array.isArray(body.tools) ? (body.tools as unknown[]) : undefined;
+  const toolChoice = body.tool_choice !== undefined ? body.tool_choice : undefined;
+  const top_p = typeof body.top_p === 'number' && !Number.isNaN(body.top_p) ? body.top_p : undefined;
+  const seed = typeof body.seed === 'number' && !Number.isNaN(body.seed) ? body.seed : undefined;
+  const n = typeof body.n === 'number' && !Number.isNaN(body.n) ? body.n : undefined;
+  const stop = typeof body.stop === 'string' || Array.isArray(body.stop) ? (body.stop as string | string[]) : undefined;
+  const frequency_penalty = typeof body.frequency_penalty === 'number' && !Number.isNaN(body.frequency_penalty) ? body.frequency_penalty : undefined;
+  const presence_penalty = typeof body.presence_penalty === 'number' && !Number.isNaN(body.presence_penalty) ? body.presence_penalty : undefined;
+
   const chatOpts: ChatRequest = {
     model: primaryModel,
     messages: messages as ChatMessage[],
@@ -107,6 +120,14 @@ export async function handleChatCompletions(
     maxTokens: max_tokens,
     responseFormat: response_format as { type: 'json_object' | 'text' } | undefined,
     timeoutMs: requestTimeoutMs,
+    ...(tools !== undefined && { tools }),
+    ...(toolChoice !== undefined && { toolChoice }),
+    ...(top_p !== undefined && { topP: top_p }),
+    ...(seed !== undefined && { seed }),
+    ...(n !== undefined && { n }),
+    ...(stop !== undefined && { stop }),
+    ...(frequency_penalty !== undefined && { frequencyPenalty: frequency_penalty }),
+    ...(presence_penalty !== undefined && { presencePenalty: presence_penalty }),
   };
 
   emitHook(hooks, 'onRequestStart', {
@@ -200,12 +221,12 @@ export async function handleChatCompletions(
       model: primaryModel,
       messages: messages as ChatMessage[],
       temperature,
-      tools: (body as Record<string, unknown>).tools,
+      tools,
       response_format,
       max_tokens,
-      top_p: typeof (body as Record<string, unknown>).top_p === 'number' ? (body as Record<string, unknown>).top_p as number : undefined,
-      seed: typeof (body as Record<string, unknown>).seed === 'number' ? (body as Record<string, unknown>).seed as number : undefined,
-      stop: (body as Record<string, unknown>).stop,
+      top_p,
+      seed,
+      stop,
     });
 
     // Execute with coalescing + per-provider semaphore

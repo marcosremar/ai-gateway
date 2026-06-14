@@ -165,6 +165,28 @@ export interface ChatRequest {
   responseFormat?: { type: 'json_object' | 'text' };
   stream?: boolean;
   timeoutMs?: number;
+  /**
+   * Output-affecting parameters that the OpenAI-compatible proxy parses but
+   * historically dropped before reaching the provider. Passing them through
+   * lets tool-calling, nucleus sampling, deterministic seeds, multiple
+   * choices, stop sequences, and penalties actually work.
+   */
+  /** Tool / function definitions (OpenAI tools schema). */
+  tools?: unknown[];
+  /** Tool choice directive ('auto' | 'none' | 'required' | {type,function}). */
+  toolChoice?: unknown;
+  /** Nucleus sampling cutoff. */
+  topP?: number;
+  /** Deterministic sampling seed (honored by some providers). */
+  seed?: number;
+  /** Number of completions to generate. */
+  n?: number;
+  /** Stop sequence(s). */
+  stop?: string | string[];
+  /** Frequency penalty (-2.0 to 2.0). */
+  frequencyPenalty?: number;
+  /** Presence penalty (-2.0 to 2.0). */
+  presencePenalty?: number;
 }
 
 export interface ChatResponse {

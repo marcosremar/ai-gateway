@@ -90,6 +90,60 @@ const DEFAULT_WINDOW_TIME_MS = 600_000; // 10 minutes
 const DEFAULT_MIN_SAMPLES = 5;
 const DEFAULT_DEGRADATION_THRESHOLD = 2.0;
 
+// ─── Model pricing ─────────────────────────────────────────────────────────────
+
+/** Per-token USD pricing for a model (input + output). */
+export interface ModelPrice {
+  /** USD per input token. */
+  inputPerToken: number;
+  /** USD per output token. */
+  outputPerToken: number;
+}
+
+/**
+ * Static per-model price catalog (USD per token) used to feed cost-aware
+ * routing. Prices are approximate published rates and intentionally coarse —
+ * cost ranking only needs *relative* ordering between candidate providers, so
+ * small drift is acceptable. Keys are bare model ids; lookups also try a
+ * `provider/model` composite via {@link estimateCostPerRequest}.
+ *
+ * Source values are $/1M tokens divided by 1e6.
+ */
+export const MODEL_PRICING: Record<string, ModelPrice> = {
+  // OpenAI
+  'gpt-4o': { inputPerToken: 2.5e-6, outputPerToken: 10e-6 },
+  'gpt-4o-mini': { inputPerToken: 0.15e-6, outputPerToken: 0.6e-6 },
+  'gpt-4.1': { inputPerToken: 2e-6, outputPerToken: 8e-6 },
+  'gpt-4.1-mini': { inputPerToken: 0.4e-6, outputPerToken: 1.6e-6 },
+  // Groq (open models — very cheap)
+  'llama-3.3-70b-versatile': { inputPerToken: 0.59e-6, outputPerToken: 0.79e-6 },
+  'llama-3.1-8b-instant': { inputPerToken: 0.05e-6, outputPerToken: 0.08e-6 },
+  // Fireworks
+  'accounts/fireworks/models/llama-v3p3-70b-instruct': { inputPerToken: 0.9e-6, outputPerToken: 0.9e-6 },
+  // OpenRouter (typical mid-tier open model)
+  'meta-llama/llama-3.3-70b-instruct': { inputPerToken: 0.6e-6, outputPerToken: 0.8e-6 },
+};
+
+/** Assumed average token count per request when no usage data is available. */
+const DEFAULT_TOKENS_PER_REQUEST = 1000;
+
+/**
+ * Estimate the USD cost of a single request for a model. Tries `model`, then a
+ * `provider/model` composite key. Returns null when the model is not priced
+ * (caller then ranks on latency only). `avgTokens` is split 50/50 in/out.
+ */
+export function estimateCostPerRequest(
+  model: string,
+  provider?: string,
+  avgTokens: number = DEFAULT_TOKENS_PER_REQUEST,
+): number | null {
+  const price =
+    MODEL_PRICING[model] ?? (provider ? MODEL_PRICING[`${provider}/${model}`] : undefined);
+  if (!price) return null;
+  const half = avgTokens / 2;
+  return half * price.inputPerToken + half * price.outputPerToken;
+}
+
 // ─── PerformanceRanker ───────────────────────────────────────────────────────
 
 export class PerformanceRanker {
@@ -348,6 +402,46 @@ export class PerformanceRanker {
 
     // Sort scored entries: lower score = better = comes first
     scored.sort((a, b) => a.score - b.score);
+
+    return [...scored.map((s) => s.entry), ...unscored];
+  }
+
+  /**
+   * Reorder a FallbackEntry[] chain by cost-efficiency for the given stage.
+   *
+   * Unlike {@link rankChain} (pure latency), this blends observed latency with
+   * the per-model price catalog ({@link MODEL_PRICING}) via
+   * {@link getCostEfficiencyScore} — a cheaper provider with comparable latency
+   * is preferred, so the gateway routes to the cheapest equal-quality option.
+   *
+   * Higher cost-efficiency score = better, so entries are sorted descending.
+   * Entries with no samples AND no price keep their configured order behind
+   * scored ones (preserving operator priority for cold providers).
+   *
+   * Returns a new array; does not mutate the input.
+   */
+  rankChainByCost(stage: string, chain: FallbackEntry[]): FallbackEntry[] {
+    if (chain.length <= 1) return [...chain];
+
+    const scored: Array<{ entry: FallbackEntry; score: number }> = [];
+    const unscored: FallbackEntry[] = [];
+
+    for (const entry of chain) {
+      const model = entry.model ?? '*';
+      const hasSamples = this.scoreEntry(stage, entry.provider, model) !== null;
+      const cost = estimateCostPerRequest(model, entry.provider);
+      // Only rank entries we actually have a signal for (latency samples or a
+      // known price). Pure unknowns keep their configured order at the back.
+      if (!hasSamples && cost === null) {
+        unscored.push(entry);
+        continue;
+      }
+      const score = this.getCostEfficiencyScore(stage, entry.provider, model, cost ?? undefined);
+      scored.push({ entry, score });
+    }
+
+    // Higher cost-efficiency = better = comes first
+    scored.sort((a, b) => b.score - a.score);
 
     return [...scored.map((s) => s.entry), ...unscored];
   }

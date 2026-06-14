@@ -21,7 +21,11 @@ import type {
   ChatResponse,
 } from '../types';
 import { prepareAudioFile } from '../openai-compat/audio-utils';
+import { buildSamplingParams } from '../openai-compat/chat-params';
 import { OLLAMA_STT_MODELS } from './models';
+
+/** Default request timeout — cold Ollama model loads can stall for minutes. */
+const OLLAMA_TIMEOUT_MS = parseInt(process.env.OLLAMA_TIMEOUT_MS || '120000', 10);
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_API_BASE || 'http://localhost:11434/v1';
 const WHISPER_SERVER_BASE_URL = process.env.WHISPER_SERVER_BASE_URL || 'http://localhost:8000/v1';
@@ -58,24 +62,38 @@ export class OllamaLLMProvider implements LLMProvider {
   }
 
   async chat(request: ChatRequest): Promise<ChatResponse> {
-    const completion = await this.client.chat.completions.create({
-      model: request.model || this._defaultModel,
-      messages: request.messages as Parameters<typeof this.client.chat.completions.create>[0]['messages'],
-      ...(request.temperature !== undefined && { temperature: request.temperature }),
-      ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
-      ...(request.responseFormat && { response_format: request.responseFormat }),
-    });
+    const timeoutMs = request.timeoutMs || OLLAMA_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    return {
-      content: completion.choices[0]?.message?.content || '',
-      model: completion.model,
-      usage: completion.usage ? {
-        promptTokens: completion.usage.prompt_tokens,
-        completionTokens: completion.usage.completion_tokens,
-        totalTokens: completion.usage.total_tokens,
-      } : undefined,
-      raw: completion,
-    };
+    try {
+      const completion = await this.client.chat.completions.create({
+        model: request.model || this._defaultModel,
+        messages: request.messages as OpenAI.ChatCompletionMessageParam[],
+        ...(request.temperature !== undefined && { temperature: request.temperature }),
+        ...(request.maxTokens !== undefined && { max_tokens: request.maxTokens }),
+        ...(request.responseFormat && { response_format: request.responseFormat }),
+        ...buildSamplingParams(request),
+      } as OpenAI.ChatCompletionCreateParamsNonStreaming, { signal: controller.signal }) as OpenAI.ChatCompletion;
+
+      return {
+        content: completion.choices[0]?.message?.content || '',
+        model: completion.model,
+        usage: completion.usage ? {
+          promptTokens: completion.usage.prompt_tokens,
+          completionTokens: completion.usage.completion_tokens,
+          totalTokens: completion.usage.total_tokens,
+        } : undefined,
+        raw: completion,
+      };
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`[ollama LLM] chat() timed out after ${timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -117,7 +135,24 @@ export class OllamaSTTProvider implements STTProvider {
       response_format: request.responseFormat === 'text' ? 'text' : 'verbose_json',
     };
 
-    const transcription = await this.client.audio.transcriptions.create(params);
+    // Bound the request: a cold local Whisper server can stall on first load.
+    // Respect a caller-provided signal if present, otherwise apply a default.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+    if (request.signal) {
+      if (request.signal.aborted) controller.abort();
+      else request.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+
+    const transcription = await this.client.audio.transcriptions
+      .create(params, { signal: controller.signal })
+      .catch((err: unknown) => {
+        if (err instanceof Error && err.name === 'AbortError') {
+          throw new Error(`[ollama STT] transcribe() timed out after ${OLLAMA_TIMEOUT_MS}ms`);
+        }
+        throw err;
+      })
+      .finally(() => clearTimeout(timer));
 
     if (typeof transcription === 'string') {
       return { text: transcription };

@@ -670,10 +670,13 @@ export function createProxyServer(config: ProxyConfig): Server {
 
       let proxyRes: ProxyResponse;
 
-      // Route matching
-      if (method === 'GET' && url === '/v1/models') {
+      // Route matching — match against `path` (query string stripped at line
+      // ~526), not the raw `url`. Matching the full url meant a request to
+      // `/v1/chat/completions?x=1` (valid; some SDKs append cache-buster query
+      // params) fell through to a 404 instead of the chat handler.
+      if (method === 'GET' && path === '/v1/models') {
         proxyRes = await handleModelsWithDynamic(config.providers);
-      } else if (method === 'POST' && url === '/v1/chat/completions') {
+      } else if (method === 'POST' && path === '/v1/chat/completions') {
         if (!config.providers.chat) {
           proxyRes = { status: 404, body: { error: { message: 'No chat providers configured', type: 'invalid_request_error' } } };
         } else {
@@ -687,33 +690,33 @@ export function createProxyServer(config: ProxyConfig): Server {
             config.providers.chatDynamicRoutes,
           );
         }
-      } else if (method === 'POST' && url === '/v1/embeddings') {
+      } else if (method === 'POST' && path === '/v1/embeddings') {
         if (!config.providers.embedding) {
           proxyRes = { status: 404, body: { error: { message: 'No embedding providers configured', type: 'invalid_request_error' } } };
         } else {
           proxyRes = await handleEmbeddings(proxyReq, config.providers.embedding, config.cache);
         }
-      } else if (method === 'POST' && url === '/v1/audio/speech') {
+      } else if (method === 'POST' && path === '/v1/audio/speech') {
         if (!config.providers.tts) {
           proxyRes = { status: 404, body: { error: { message: 'No TTS providers configured', type: 'invalid_request_error' } } };
         } else {
           proxyRes = await handleAudioSpeech(proxyReq, config.providers.tts);
         }
-      } else if (method === 'POST' && url === '/v1/audio/transcriptions') {
+      } else if (method === 'POST' && path === '/v1/audio/transcriptions') {
         if (!config.providers.stt) {
           proxyRes = { status: 404, body: { error: { message: 'No STT providers configured', type: 'invalid_request_error' } } };
         } else {
           proxyRes = await handleAudioTranscriptions(proxyReq, config.providers.stt);
         }
-      } else if (method === 'POST' && url === '/v1/images/generate') {
+      } else if (method === 'POST' && path === '/v1/images/generate') {
         proxyRes = await handleImageGenerate(proxyReq, config.providers.image);
-      } else if (method === 'POST' && url === '/v1/images/inpaint') {
+      } else if (method === 'POST' && path === '/v1/images/inpaint') {
         proxyRes = await handleImageInpaint(proxyReq, config.providers.image);
       // /health is handled before auth (line 345) — no need to match here
       } else if (method === 'GET' && config.staticDir && serveStaticFile(config.staticDir, path, res, requestId)) {
         return; // static file served
       } else {
-        proxyRes = { status: 404, body: { error: { message: `Route not found: ${method} ${url}`, type: 'invalid_request_error' } } };
+        proxyRes = { status: 404, body: { error: { message: `Route not found: ${method} ${path}`, type: 'invalid_request_error' } } };
       }
 
       sendResponse(res, proxyRes, requestId);

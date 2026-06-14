@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { getGpuList, type GpuInstanceItem } from '@/lib/gateway';
+import { usePolling } from './polling';
 
 export function useGpuList(active = true, intervalMs = 10000) {
   const [instances, setInstances] = useState<GpuInstanceItem[]>([]);
@@ -17,12 +18,8 @@ export function useGpuList(active = true, intervalMs = 10000) {
     }
   }, []);
 
-  useEffect(() => {
-    if (!active) return;
-    refresh();
-    const id = setInterval(refresh, intervalMs);
-    return () => clearInterval(id);
-  }, [active, refresh, intervalMs]);
+  // Visibility-aware: pauses while the tab is hidden (#940).
+  usePolling(refresh, intervalMs, active);
 
   return { instances, error, refresh };
 }

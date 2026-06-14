@@ -1,13 +1,68 @@
 /**
  * POST /v1/audio/speech — TTS
+ *
+ * Includes an in-memory LRU cache keyed by model+voice+input+speed+format.
+ * TTS is one of the priciest pipeline stages and identical phrases (UI
+ * prompts, repeated translations) recur constantly, so caching avoids paying
+ * to re-synthesize the same audio. Cache TTL: 1 hour, max 200 entries.
  */
 
+import { createHash } from 'crypto';
 import type { TTSProvider } from '../../providers/cloud/types';
 import type { ProxyRequest, ProxyResponse } from '../types';
 import { withProxyRetry } from './retry';
 import { createLogger } from '../../../logger';
 
 const log = createLogger('audio-speech');
+
+// ── TTS response cache ──────────────────────────────────────────────────
+const TTS_CACHE_TTL_MS = 60 * 60_000; // 1 hour
+const TTS_CACHE_MAX_ENTRIES = 200;
+const ttsCache = new Map<string, { audio: Buffer; contentType: string; expiresAt: number }>();
+
+/** Build a deterministic cache key from all output-affecting TTS params. */
+export function ttsCacheKey(
+  model: string,
+  voice: string,
+  input: string,
+  speed: number | undefined,
+  format: string,
+): string {
+  const hash = createHash('sha256')
+    .update(`${model}\0${voice}\0${speed ?? 1}\0${format}\0${input}`)
+    .digest('hex')
+    .slice(0, 24);
+  return hash;
+}
+
+function ttsCacheGet(key: string): { audio: Buffer; contentType: string } | null {
+  const entry = ttsCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { ttsCache.delete(key); return null; }
+  // Refresh recency (Map preserves insertion order → re-insert to mark MRU)
+  ttsCache.delete(key);
+  ttsCache.set(key, entry);
+  return { audio: entry.audio, contentType: entry.contentType };
+}
+
+function ttsCacheSet(key: string, audio: Buffer, contentType: string): void {
+  while (ttsCache.size >= TTS_CACHE_MAX_ENTRIES) {
+    const now = Date.now();
+    let removedAny = false;
+    for (const [k, v] of ttsCache) {
+      if (v.expiresAt < now) { ttsCache.delete(k); removedAny = true; break; }
+    }
+    if (!removedAny) {
+      const oldestKey = ttsCache.keys().next().value;
+      if (oldestKey !== undefined) ttsCache.delete(oldestKey);
+      else break;
+    }
+  }
+  ttsCache.set(key, { audio, contentType, expiresAt: Date.now() + TTS_CACHE_TTL_MS });
+}
+
+/** Clear the TTS cache. Exported for tests. */
+export function _resetTtsCache(): void { ttsCache.clear(); }
 
 export async function handleAudioSpeech(
   req: ProxyRequest,
@@ -43,6 +98,20 @@ export async function handleAudioSpeech(
     return { status: 404, body: { error: { message: `TTS model "${body.model}" not found`, type: 'invalid_request_error' } } };
   }
 
+  const format = ((body.response_format as string) || 'mp3') as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm';
+  const speed = body.speed as number | undefined;
+
+  // Check cache — identical synthesis params return cached audio instantly.
+  const cacheKey = ttsCacheKey(body.model, body.voice, body.input, speed, format);
+  const cachedAudio = ttsCacheGet(cacheKey);
+  if (cachedAudio) {
+    return {
+      status: 200,
+      headers: { 'Content-Type': cachedAudio.contentType, 'X-Cache': 'HIT' },
+      body: cachedAudio.audio,
+    };
+  }
+
   try {
     const result = await withProxyRetry(
       provider.providerId,
@@ -51,15 +120,18 @@ export async function handleAudioSpeech(
         model: body.model as string,
         input: body.input as string,
         voice: body.voice as string,
-        responseFormat: (body.response_format as string) as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm' | undefined || 'mp3',
-        speed: body.speed as number | undefined,
+        responseFormat: format,
+        speed,
       }),
       'TTS',
     );
 
+    // Cache the synthesized audio for future identical requests.
+    ttsCacheSet(cacheKey, result.audio, result.contentType);
+
     return {
       status: 200,
-      headers: { 'Content-Type': result.contentType },
+      headers: { 'Content-Type': result.contentType, 'X-Cache': 'MISS' },
       body: result.audio,
     };
   } catch (err) {

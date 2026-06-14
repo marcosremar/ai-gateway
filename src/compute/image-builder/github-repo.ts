@@ -127,9 +127,56 @@ export function isSensitiveBuildPath(relPath: string): boolean {
   return false;
 }
 
+/**
+ * Max total build-context size (bytes) pushed to GitHub. The Git Data API
+ * base64-encodes every file into memory, so a stray model weight (.gguf,
+ * .safetensors, etc.) silently produces a multi-GB commit. Cap it with a clear
+ * error and point operators at pre-baking models at build time instead.
+ *
+ * Fix #972. Override via AI_GATEWAY_MAX_BUILD_CONTEXT_MB.
+ */
+export const DEFAULT_MAX_BUILD_CONTEXT_BYTES = 25 * 1024 * 1024; // 25 MB
+
+export function maxBuildContextBytes(): number {
+  const raw = process.env.AI_GATEWAY_MAX_BUILD_CONTEXT_MB;
+  if (raw) {
+    const mb = Number(raw);
+    if (Number.isFinite(mb) && mb > 0) return Math.floor(mb * 1024 * 1024);
+  }
+  return DEFAULT_MAX_BUILD_CONTEXT_BYTES;
+}
+
+/**
+ * Pure: sum the byte sizes and throw if the total exceeds `limitBytes`.
+ * Returns the total byte count when within budget. Exported for tests.
+ */
+export function assertBuildContextSize(
+  fileSizes: number[],
+  limitBytes = maxBuildContextBytes(),
+): number {
+  const total = fileSizes.reduce((sum, n) => sum + (Number.isFinite(n) && n > 0 ? n : 0), 0);
+  if (total > limitBytes) {
+    const totalMb = (total / (1024 * 1024)).toFixed(1);
+    const limitMb = (limitBytes / (1024 * 1024)).toFixed(0);
+    throw new Error(
+      `Build context is ${totalMb}MB, exceeding the ${limitMb}MB limit. ` +
+        `Pre-bake large model files at build time (download in the Dockerfile) ` +
+        `rather than shipping them in the build context, or raise ` +
+        `AI_GATEWAY_MAX_BUILD_CONTEXT_MB.`,
+    );
+  }
+  return total;
+}
+
 /** Recursively collect all files in a directory, excluding secrets and rejecting symlinks. */
 export function collectFiles(dir: string, base: string = dir): TreeEntry[] {
+  const entries = collectFilesInternal(dir, base, { bytes: 0 });
+  return entries;
+}
+
+function collectFilesInternal(dir: string, base: string, acc: { bytes: number }): TreeEntry[] {
   const entries: TreeEntry[] = [];
+  const limit = maxBuildContextBytes();
   for (const name of readdirSync(dir)) {
     if (name === '.git' || name === 'node_modules' || name === '.DS_Store') continue;
     const abs = join(dir, name);
@@ -140,8 +187,11 @@ export function collectFiles(dir: string, base: string = dir): TreeEntry[] {
     }
     if (isSensitiveBuildPath(rel)) continue;
     if (st.isDirectory()) {
-      entries.push(...collectFiles(abs, base));
+      entries.push(...collectFilesInternal(abs, base, acc));
     } else if (st.isFile()) {
+      // Guard against oversized build contexts before reading the file into memory (#972).
+      acc.bytes += st.size;
+      assertBuildContextSize([acc.bytes], limit);
       const buf = readFileSync(abs);
       // Use base64 for binary files (non-UTF-8-safe)
       let content: string;
@@ -251,7 +301,7 @@ async function pushTree(
 
 // ── Workflow template ─────────────────────────────────────────────────────────
 
-function generateWorkflow(imageName: string, platforms: string): string {
+export function generateWorkflow(imageName: string, platforms: string): string {
   return `name: Build Docker Image
 
 on:
@@ -262,6 +312,12 @@ on:
       tag:
         description: 'Docker tag to build'
         default: 'latest'
+
+# Cancel an in-flight build when a newer commit lands on the same ref so rapid
+# rebuilds of the same image don't run in parallel and waste Actions minutes (#975).
+concurrency:
+  group: image-\${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
@@ -309,7 +365,11 @@ jobs:
           platforms: ${platforms}
           tags: \${{ steps.meta.outputs.tags }}
           labels: \${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
+          # Layer cache: GHA cache first, then fall back to the previously pushed
+          # :latest image so the first build after a cache eviction stays warm (#966).
+          cache-from: |
+            type=gha
+            type=registry,ref=\${{ env.REGISTRY }}/\${{ env.IMAGE_NAME }}:latest
           cache-to: type=gha,mode=max
 `;
 }

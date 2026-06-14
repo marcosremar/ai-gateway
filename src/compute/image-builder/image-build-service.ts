@@ -28,6 +28,25 @@ export interface BuildStartResult {
   message: string;
 }
 
+/**
+ * Compute the next build-status poll delay with exponential backoff (#968).
+ *
+ * A fixed 15s poll over a 45-minute build burns up to ~180 GitHub API calls.
+ * After the first few polls we back off geometrically up to a cap, cutting the
+ * call count roughly in half for long builds while staying responsive early on.
+ *
+ * Pure; exported for tests.
+ */
+export function nextBuildPollDelayMs(
+  attempt: number,
+  baseMs = 15_000,
+  maxMs = 60_000,
+): number {
+  if (attempt <= 0) return baseMs;
+  const delay = baseMs * Math.pow(1.5, attempt);
+  return Math.min(Math.round(delay), maxMs);
+}
+
 export function resolveAllowedBuildRoots(): string[] {
   const roots = new Set<string>();
   const addRoot = (input: string | undefined) => {
@@ -179,10 +198,12 @@ async function _runBuild(
     status: 'building',
   });
 
-  // 4. Poll until complete (max 45 min)
+  // 4. Poll until complete (max 45 min), with exponential backoff (#968)
   const deadline = Date.now() + 45 * 60_000;
+  let attempt = 0;
   while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 15_000)); // poll every 15s
+    await new Promise(r => setTimeout(r, nextBuildPollDelayMs(attempt)));
+    attempt++;
     const current = await getRunStatus(token, owner, repoName, run.id);
     if (!current) continue;
 

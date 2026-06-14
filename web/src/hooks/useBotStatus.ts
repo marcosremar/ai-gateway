@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { getBotStatus, type BotStatusResponse } from '@/lib/gateway';
+import { usePolling } from './polling';
 
 export function useBotStatus(active = true, intervalMs = 5000) {
   const [bot, setBot] = useState<BotStatusResponse | null>(null);
@@ -17,12 +18,8 @@ export function useBotStatus(active = true, intervalMs = 5000) {
     }
   }, []);
 
-  useEffect(() => {
-    if (!active) return;
-    refresh();
-    const id = setInterval(refresh, intervalMs);
-    return () => clearInterval(id);
-  }, [active, refresh, intervalMs]);
+  // Visibility-aware: pauses while the tab is hidden (#940).
+  usePolling(refresh, intervalMs, active);
 
   return { bot, error, refresh };
 }

@@ -88,16 +88,33 @@ export async function raceProviders<T>(
     if (headstartMs > 0 && candidates.length >= 2) {
       // Give the primary candidate a head start
       const primary = makeRacer(candidates[0], 0);
+      // Attach a no-op catch so a primary rejection that happens before the
+      // head start expires does not surface as an unhandled rejection while we
+      // wait. The original `primary` promise is still consumed by Promise.any
+      // below, so its error is preserved for the all-failed aggregation.
+      primary.catch(() => {});
+      // The head-start race must NOT reject when the primary fast-fails: a
+      // rejected primary should fall through to "launch the remaining
+      // candidates", not abort the whole race. Map both fulfilment and
+      // rejection of the primary to a discriminated sentinel so Promise.race
+      // only ever resolves.
       const headstartResult = await Promise.race([
-        primary,
-        new Promise<null>(r => setTimeout(() => r(null), headstartMs)),
+        primary.then(
+          (w) => ({ kind: 'primary' as const, winner: w }),
+          () => ({ kind: 'primary-failed' as const }),
+        ),
+        new Promise<{ kind: 'timeout' }>(r =>
+          setTimeout(() => r({ kind: 'timeout' as const }), headstartMs),
+        ),
       ]);
 
-      if (headstartResult !== null) {
+      if (headstartResult.kind === 'primary') {
         // Primary won during head start
-        winner = headstartResult;
+        winner = headstartResult.winner;
       } else {
-        // Head start expired — launch remaining candidates
+        // Head start expired OR primary fast-failed — launch remaining
+        // candidates. Promise.any over [primary, ...remaining] still observes
+        // the primary's eventual error if every candidate fails.
         const remaining = candidates.slice(1).map((c, i) => makeRacer(c, i + 1));
         winner = await Promise.any([primary, ...remaining]);
       }

@@ -1,18 +1,11 @@
 /**
- * useGatewayWs — React hook for real-time GPU status + readiness events
+ * gateway-ws-logic.ts — framework-free types + pure reducers for the gateway
+ * WebSocket. Kept free of any React import so it is unit-testable without a DOM.
  *
- * Connects to the gateway WebSocket (port 4001) and dispatches events
- * to subscribers. Auto-reconnects with exponential backoff.
- *
- * Fix #942: a single shared WebSocket is multiplexed across every calling
- * component via a module-level singleton manager. Previously each `useGatewayWs`
- * mount opened its own `new WebSocket`, so two live components (Overview +
- * GpuLiveStatus) meant two sockets and double event processing.
+ * Fix #942: a single shared WebSocket is multiplexed across components; this
+ * module holds the pure URL resolution and event-reduction logic the singleton
+ * manager (in `useGatewayWs.ts`) builds on.
  */
-
-'use client';
-
-import { useEffect, useState } from 'react';
 
 export interface GpuStatusEvent {
   type: 'gpu:status';
@@ -45,7 +38,10 @@ export interface GpuReadinessEvent {
   error?: string;
 }
 
-export type GatewayWsEvent = GpuStatusEvent | GpuReadinessEvent | { type: string; [k: string]: unknown };
+export type GatewayWsEvent =
+  | GpuStatusEvent
+  | GpuReadinessEvent
+  | { type: string;[k: string]: unknown };
 
 export interface GatewayWsState {
   connected: boolean;
@@ -60,7 +56,7 @@ export interface GatewayWsState {
   shadowProgress: { completed: number; total: number } | null;
 }
 
-const INITIAL_STATE: GatewayWsState = {
+export const INITIAL_WS_STATE: GatewayWsState = {
   connected: false,
   lastEvent: null,
   gpuStatus: null,
@@ -72,10 +68,7 @@ const INITIAL_STATE: GatewayWsState = {
 
 /**
  * Resolve the gateway WebSocket URL for the current page, or `null` when WS is
- * unavailable (HTTPS production — Fly.io only exposes one port).
- *
- * Pure + side-effect-free so it can be unit-tested without a browser. Exported
- * for tests.
+ * unavailable (HTTPS production — Fly.io only exposes one port). Pure.
  */
 export function resolveGatewayWsUrl(loc: {
   hostname: string;
@@ -92,7 +85,7 @@ export function resolveGatewayWsUrl(loc: {
 }
 
 /**
- * Reduce a single incoming event into the next state. Pure; exported for tests.
+ * Reduce a single incoming event into the next state. Pure.
  */
 export function reduceGatewayWsEvent(s: GatewayWsState, msg: GatewayWsEvent): GatewayWsState {
   const next: GatewayWsState = { ...s, lastEvent: msg };
@@ -162,106 +155,4 @@ export function reduceGatewayWsEvent(s: GatewayWsState, msg: GatewayWsEvent): Ga
   }
 
   return next;
-}
-
-/**
- * Singleton WebSocket manager — one connection shared by all subscribers.
- */
-class GatewayWsManager {
-  private ws: WebSocket | null = null;
-  private retry = 0;
-  private state: GatewayWsState = INITIAL_STATE;
-  private subscribers = new Set<(s: GatewayWsState) => void>();
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-  getState(): GatewayWsState {
-    return this.state;
-  }
-
-  subscribe(fn: (s: GatewayWsState) => void): () => void {
-    this.subscribers.add(fn);
-    // First subscriber opens the socket.
-    if (this.subscribers.size === 1) this.connect();
-    // Push current state immediately.
-    fn(this.state);
-    return () => {
-      this.subscribers.delete(fn);
-      // Last subscriber gone — tear down to free the socket.
-      if (this.subscribers.size === 0) this.teardown();
-    };
-  }
-
-  private setState(updater: (s: GatewayWsState) => GatewayWsState): void {
-    this.state = updater(this.state);
-    for (const fn of this.subscribers) fn(this.state);
-  }
-
-  private connect(): void {
-    if (typeof window === 'undefined') return;
-    if (this.ws) return;
-
-    const url = resolveGatewayWsUrl(window.location);
-    if (!url) return;
-
-    try {
-      const ws = new WebSocket(url);
-      this.ws = ws;
-
-      ws.onopen = () => {
-        this.retry = 0;
-        this.setState(s => ({ ...s, connected: true }));
-      };
-
-      ws.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data as string) as GatewayWsEvent;
-          this.setState(s => reduceGatewayWsEvent(s, msg));
-        } catch { /* ignore non-JSON */ }
-      };
-
-      ws.onclose = () => {
-        this.setState(s => ({ ...s, connected: false }));
-        this.ws = null;
-        // Only reconnect while someone is listening.
-        if (this.subscribers.size > 0) this.scheduleReconnect();
-      };
-
-      ws.onerror = () => { ws.close(); };
-    } catch {
-      this.scheduleReconnect();
-    }
-  }
-
-  private scheduleReconnect(): void {
-    const delay = Math.min(1000 * Math.pow(2, this.retry), 30000);
-    this.retry++;
-    this.reconnectTimer = setTimeout(() => this.connect(), delay);
-  }
-
-  private teardown(): void {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.ws) {
-      this.ws.onclose = null;
-      this.ws.close();
-      this.ws = null;
-    }
-    this.retry = 0;
-    this.state = INITIAL_STATE;
-  }
-}
-
-const manager = new GatewayWsManager();
-
-export function useGatewayWs(): GatewayWsState {
-  const [state, setState] = useState<GatewayWsState>(() => manager.getState());
-
-  useEffect(() => {
-    const unsubscribe = manager.subscribe(setState);
-    return unsubscribe;
-  }, []);
-
-  return state;
 }
